@@ -1,0 +1,37 @@
+name: hack-dev-proxy
+services:
+  caddy:
+    image: lucaslorentz/caddy-docker-proxy:2.10
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - caddy_data:/data
+      - ../schemas:/srv/schemas:ro
+    labels:
+      caddy: schemas.hack
+      caddy.root: /srv/schemas
+      caddy.file_server: ""
+      caddy.tls: internal
+    environment:
+      CADDY_INGRESS_NETWORKS: hack-dev
+    networks:
+      default:
+        ipv4_address: 172.30.0.2
+  coredns:
+    image: coredns/coredns:1.11.1
+    command: -conf /etc/coredns/Corefile
+    volumes:
+      - ./Corefile:/etc/coredns/Corefile:ro
+    networks:
+      default:
+        ipv4_address: 172.30.0.53
+
+networks:
+  default:
+    name: hack-dev
+    external: true
+
+volumes:
+  caddy_data:

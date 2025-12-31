@@ -1,0 +1,29 @@
+{
+  "name": "hack-cli",
+  "version": "0.1.0",
+  "module": "index.ts",
+  "type": "module",
+  "bin": {
+    "hack": "dist/hack"
+  },
+  "scripts": {
+    "dev": "bun run index.ts",
+    "build": "bun build index.ts --compile --outfile dist/hack",
+    "install:dev": "bun run scripts/install-cli.ts --mode=dev --force",
+    "install:bin": "bun run build && bun run scripts/install-cli.ts --mode=bin --force",
+    "uninstall:local": "bun run scripts/uninstall-cli.ts",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "prettier": "3.7.4",
+    "prettier-plugin-sort-imports": "^1.8.9"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@charmland/lipgloss": "2.0.0-beta.3-0e280f3",
+    "@clack/prompts": "1.0.0-alpha.9"
+  }
+}

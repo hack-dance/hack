@@ -1,0 +1,42 @@
+discovery.docker "local" {
+  host = "unix:///var/run/docker.sock"
+}
+
+loki.relabel "docker_compose" {
+  forward_to = [loki.write.local.receiver]
+
+  // Promote useful Docker/Compose metadata into stable Loki labels.
+  rule {
+    action        = "replace"
+    source_labels = ["__meta_docker_container_name"]
+    target_label  = "container"
+  }
+
+  rule {
+    action        = "replace"
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+
+  rule {
+    action        = "replace"
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    target_label  = "project"
+  }
+}
+
+loki.source.docker "default" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.docker.local.targets
+  labels     = {"app" = "docker"}
+  forward_to = [loki.relabel.docker_compose.receiver]
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+    // Lower latency for local dev tailing (default is "1s")
+    batch_wait = "200ms"
+  }
+}
+

@@ -1,0 +1,53 @@
+name: hack-logging
+services:
+  loki:
+    image: grafana/loki:2.9.4
+    command: -config.file=/etc/loki/config.yaml
+    ports:
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - loki-data:/loki
+      - ./loki.yaml:/etc/loki/config.yaml:ro
+    labels:
+      caddy: loki.hack
+      caddy.reverse_proxy: "{{upstreams 3100}}"
+      caddy.tls: internal
+    networks:
+      - hack-dev
+      - hack-logging
+
+  alloy:
+    image: grafana/alloy:v1.12.0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./alloy.alloy:/etc/alloy/config.alloy:ro
+    command: run /etc/alloy/config.alloy
+    networks:
+      - hack-logging
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning/datasources/hack-datasources.yaml:/etc/grafana/provisioning/datasources/hack-datasources.yaml:ro
+      - ./grafana/provisioning/dashboards/hack-dashboards.yaml:/etc/grafana/provisioning/dashboards/hack-dashboards.yaml:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    labels:
+      caddy: logs.hack
+      caddy.reverse_proxy: "{{upstreams 3000}}"
+      caddy.tls: internal
+    networks:
+      - hack-dev
+      - hack-logging
+
+networks:
+  hack-dev:
+    external: true
+  hack-logging:
+    external: true
+
+volumes:
+  loki-data:
+  grafana-data:

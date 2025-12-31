@@ -1,0 +1,21 @@
+name: example
+services:
+  example-basic:
+    image: imbios/bun-node:latest
+    working_dir: /app
+    volumes:
+      - ..:/app
+    command: bun run dev -- --port 3000 --host 0.0.0.0
+    environment:
+      CHOKIDAR_USEPOLLING: "true"
+      WATCHPACK_POLLING: "true"
+    labels:
+      caddy: "example.hack, example.hack.gy"
+      caddy.reverse_proxy: "{{upstreams 3000}}"
+      caddy.tls: internal
+    networks:
+      - hack-dev
+      - default
+networks:
+  hack-dev:
+    external: true

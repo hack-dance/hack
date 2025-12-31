@@ -1,0 +1,11 @@
+#
+# NOTE: Reference only.
+# `hack init` generates `.hack/docker-compose.yml` based on discovery + prompts,
+# so we don't keep a baked-in default service here.
+#
+
+services: {}
+
+networks:
+  hack-dev:
+    external: true

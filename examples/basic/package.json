@@ -1,0 +1,8 @@
+{
+  "name": "@hack/examples-basic",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch index.ts "
+  }
+}

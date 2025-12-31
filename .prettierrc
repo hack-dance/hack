@@ -1,0 +1,19 @@
+{
+  "endOfLine": "lf",
+  "semi": false,
+  "trailingComma": "none",
+  "arrowParens": "avoid",
+  "singleQuote": false,
+  "tabWidth": 2,
+  "plugins": ["prettier-plugin-sort-imports"],
+  "sortingMethod": "alphabetical",
+  "sortingOrder": "ascending",
+  "stripNewlines": false,
+  "importTypeOrder": ["NPMPackages", "localImportsValue", "localImportsType"],
+  "packageJSONFiles": ["package.json"],
+  "newlineBetweenTypes": true,
+  "printWidth": 100,
+  "proseWrap": "never",
+  "quoteProps": "consistent",
+  "experimentalTernaries": true
+}

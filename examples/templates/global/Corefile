@@ -1,0 +1,9 @@
+.:53 {
+  template IN A {
+    match (.*)\.hack(\..*)?\.?$
+    answer "{{ .Name }} 30 IN A 172.30.0.2"
+    fallthrough
+  }
+  forward . 127.0.0.11
+  cache 30
+}

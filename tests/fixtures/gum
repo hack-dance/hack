@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+sub="${1:-}"
+shift || true
+
+case "$sub" in
+  log)
+    # Record invocation for assertions.
+    if [[ -n "${GUM_FIXTURE_LOG:-}" ]]; then
+      printf "%s\n" "gum log $*" >> "${GUM_FIXTURE_LOG}"
+    fi
+    exit 0
+    ;;
+  input)
+    printf "%s\n" "${GUM_FIXTURE_INPUT_OUTPUT:-fixture-input}"
+    exit 0
+    ;;
+  write)
+    printf "%s\n" "${GUM_FIXTURE_WRITE_OUTPUT:-fixture-write}"
+    exit 0
+    ;;
+  choose)
+    printf "%s\n" "${GUM_FIXTURE_CHOOSE_OUTPUT:-}"
+    exit 0
+    ;;
+  filter)
+    printf "%s\n" "${GUM_FIXTURE_FILTER_OUTPUT:-}"
+    exit 0
+    ;;
+  file)
+    printf "%s\n" "${GUM_FIXTURE_FILE_OUTPUT:-/tmp/fixture-file}"
+    exit 0
+    ;;
+  pager)
+    exit 0
+    ;;
+  spin)
+    exit "${GUM_FIXTURE_SPIN_EXIT:-0}"
+    ;;
+  style)
+    printf "%s" "${GUM_FIXTURE_STYLE_OUTPUT:-fixture-style}"
+    exit 0
+    ;;
+  join)
+    printf "%s" "${GUM_FIXTURE_JOIN_OUTPUT:-fixture-join}"
+    exit 0
+    ;;
+  format)
+    printf "%s" "${GUM_FIXTURE_FORMAT_OUTPUT:-fixture-format}"
+    exit 0
+    ;;
+  table)
+    printf "%s\n" "${GUM_FIXTURE_TABLE_OUTPUT:-fixture-table}"
+    exit 0
+    ;;
+  confirm)
+    exit "${GUM_FIXTURE_CONFIRM_EXIT:-0}"
+    ;;
+  version-check)
+    if [[ "${1:-}" == "fail" ]]; then
+      exit 1
+    fi
+    exit 0
+    ;;
+  *)
+    echo "gum fixture: unknown command: $sub" >&2
+    exit 2
+    ;;
+esac
+

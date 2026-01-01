@@ -288,6 +288,15 @@ async function globalInstall(): Promise<number> {
     }
   }
 
+  if (isMac()) {
+    await ensureMacChafa()
+    await ensureMacMkcert()
+  } else {
+    logger.warn({
+      message: "Skipping chafa install (only automated on macOS for now)."
+    })
+  }
+
   s.start("Checking Docker…")
   await ensureDockerRunning()
   s.stop("Docker is running")
@@ -600,7 +609,11 @@ async function handleGlobalCert({
   readonly ctx: CliContext
   readonly args: GlobalCertArgs
 }): Promise<number> {
-  const mkcert = await findExecutableInPath("mkcert")
+  let mkcert = await findExecutableInPath("mkcert")
+  if (!mkcert && isMac()) {
+    await ensureMacMkcert()
+    mkcert = await findExecutableInPath("mkcert")
+  }
   if (!mkcert) {
     logger.error({
       message:
@@ -829,6 +842,68 @@ async function ensureMacDnsmasqRunning(): Promise<void> {
     logger.warn({
       message: `Failed to start dnsmasq (exit ${exit}). *.${DEFAULT_PROJECT_TLD} may not resolve.`
     })
+  }
+}
+
+async function ensureMacChafa(): Promise<void> {
+  const brew = await findExecutableInPath("brew")
+  if (!brew) {
+    logger.warn({ message: "Homebrew not found; skipping chafa install." })
+    return
+  }
+
+  const hasChafa = (await exec(["brew", "list", "chafa"], { stdin: "ignore" })).exitCode === 0
+  if (hasChafa) return
+
+  const ok = await confirm({
+    message: "Install chafa via Homebrew? (used for hack the planet)",
+    initialValue: true
+  })
+  if (isCancel(ok)) throw new Error("Canceled")
+  if (!ok) {
+    logger.warn({
+      message: "Skipping chafa install; hack the planet will use the fallback renderer."
+    })
+    return
+  }
+
+  logger.step({ message: "Installing chafa via Homebrew…" })
+  const installExit = await run(["brew", "install", "chafa"], {
+    stdin: "inherit"
+  })
+  if (installExit !== 0) {
+    throw new Error(`brew install chafa failed (exit ${installExit})`)
+  }
+}
+
+async function ensureMacMkcert(): Promise<void> {
+  const brew = await findExecutableInPath("brew")
+  if (!brew) {
+    logger.warn({ message: "Homebrew not found; skipping mkcert install." })
+    return
+  }
+
+  const hasMkcert = (await exec(["brew", "list", "mkcert"], { stdin: "ignore" })).exitCode === 0
+  if (hasMkcert) return
+
+  const ok = await confirm({
+    message: "Install mkcert via Homebrew? (used for hack global cert)",
+    initialValue: false
+  })
+  if (isCancel(ok)) throw new Error("Canceled")
+  if (!ok) {
+    logger.warn({
+      message: "Skipping mkcert install; hack global cert will be unavailable."
+    })
+    return
+  }
+
+  logger.step({ message: "Installing mkcert via Homebrew…" })
+  const installExit = await run(["brew", "install", "mkcert"], {
+    stdin: "inherit"
+  })
+  if (installExit !== 0) {
+    throw new Error(`brew install mkcert failed (exit ${installExit})`)
   }
 }
 

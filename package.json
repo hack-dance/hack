@@ -9,8 +9,10 @@
   "scripts": {
     "dev": "bun run index.ts",
     "build": "bun build index.ts --compile --outfile dist/hack",
+    "build:release": "bun run scripts/build-release.ts",
     "install:dev": "bun run scripts/install-cli.ts --mode=dev --force",
     "install:bin": "bun run build && bun run scripts/install-cli.ts --mode=bin --force",
+    "install:status": "bun run scripts/install-status.ts",
     "uninstall:local": "bun run scripts/uninstall-cli.ts",
     "test": "bun test"
   },

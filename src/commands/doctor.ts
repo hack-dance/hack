@@ -367,7 +367,7 @@ async function checkGlobalFiles(): Promise<CheckResult> {
   }
 }
 
-async function checkCoreDnsForwarding(): Promise<CheckResult> {
+export async function checkCoreDnsForwarding(): Promise<CheckResult> {
   const server = await resolveCoreDnsServer()
   if (!server) {
     return {
@@ -391,7 +391,7 @@ async function checkCoreDnsForwarding(): Promise<CheckResult> {
   }
 }
 
-async function checkCaddyLocalCa(): Promise<CheckResult> {
+export async function checkCaddyLocalCa(): Promise<CheckResult> {
   const paths = getGlobalPaths()
   const exists = await pathExists(paths.caddyCaCert)
   return {

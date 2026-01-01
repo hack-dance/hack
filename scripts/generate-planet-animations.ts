@@ -22,7 +22,7 @@ const repoRoot = resolve(import.meta.dir, "..")
 
 async function main(): Promise<void> {
   const variants: readonly VariantInput[] = [
-    { name: "cut", gifPath: resolve(repoRoot, "cut.gif"), durationSeconds: 10 },
+    { name: "cut", gifPath: resolve(repoRoot, "assets/cut.gif"), durationSeconds: 10 },
     {
       name: "mash",
       gifPath: resolve(repoRoot, "hacker-mash.gif"),

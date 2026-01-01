@@ -27,3 +27,15 @@ test("renderGlobalCaddyCompose pins caddy and coredns when requested", () => {
   expect(text).toContain(`ipv4_address: ${DEFAULT_CADDY_IP}`)
   expect(text).toContain(`ipv4_address: ${DEFAULT_COREDNS_IP}`)
 })
+
+test("renderGlobalCoreDnsConfig matches .hack aliases and forwards external DNS", () => {
+  const text = renderGlobalCoreDnsConfig({ useStaticCaddyIp: true })
+  const matchLine = text.split("\n").find(line => line.includes("match"))
+  expect(matchLine).toContain("(.*)\\.hack(\\..*)?\\.?$")
+  expect(text).toContain("forward . 127.0.0.11")
+
+  const matcher = /(.*)\.hack(\..*)?\.?$/
+  expect(matcher.test("api.myapp.hack")).toBe(true)
+  expect(matcher.test("core.sickemail.hack.gy")).toBe(true)
+  expect(matcher.test("example.com")).toBe(false)
+})

@@ -119,9 +119,3 @@ flowchart LR
 - Caddy routes by container label so there is no per-repo reverse proxy config.
 - Logs default to `docker compose logs` for speed, with Loki for history and filtering.
 - Config lives alongside each repo in `.hack/` to keep repos isolated and portable.
-
-## Extension points (future-friendly)
-
-- Log backends could be abstracted (`compose` / `loki` today).
-- A structured JSON output mode would enable UI and MCP integration.
-- A lightweight daemon could subscribe to Docker events for near-real-time UI updates.

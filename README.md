@@ -296,10 +296,6 @@ hack logs --project my-project --pretty
 hack up --project my-project
 ```
 
-
-
-
-
 ## .hack and valid tld requirements
 
 OAuth providers (notably Google) require `localhost` or a host that ends with a real public suffix.
@@ -329,6 +325,7 @@ outside of Caddy.
 - Other OS: run `hack global ca` to export the CA cert path, then add it to your OS/browser trust store.
 - If you need the PEM directly: `hack global ca --print`.
 - If you are running a local service outside of Caddy, use `hack global cert <host...>` (mkcert required) to generate a cert/key under `~/.hack/certs` and wire it into your service. This is only needed for non-Caddy services that still want trusted TLS.
+- macOS: `hack global install` can optionally install mkcert (needed for `hack global cert`).
 
 Install mkcert if you don't already have it (macOS example):
 
@@ -444,6 +441,13 @@ hack --help
 ```
 This builds `dist/hack` via `bun build --compile` and installs it to `~/.hack/bin/hack`.
 
+### Check which install is active
+
+```bash
+bun run install:status
+```
+Reports whether `hack` is a dev shim or a compiled binary (and where it points).
+
 
 ### Run in place
 
@@ -463,6 +467,13 @@ bun test
 bun run build
 ./dist/hack --help
 ```
+
+### Build a release bundle
+
+```bash
+bun run build:release
+```
+Produces `dist/release/hack-<version>/` with `install.sh`, assets, and checksums.
 
 ### Packaging note (gum)
 

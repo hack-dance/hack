@@ -6,10 +6,12 @@ on:
       - "v*"
 
 jobs:
-  release:
+  create-release:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -17,8 +19,6 @@ jobs:
         uses: oven-sh/setup-bun@v1
         with:
           bun-version: "1.3.5"
-      - name: Install dependencies
-        run: bun install
       - name: Resolve version
         id: version
         run: |
@@ -28,15 +28,59 @@ jobs:
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-      - name: Build release artifacts
-        run: bun run build:release --version="${{ steps.version.outputs.version }}"
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "v${{ steps.version.outputs.version }}"
           generate_release_notes: true
+
+  build:
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            upload_install: true
+            skip_tests: false
+          - os: macos-14
+            upload_install: false
+            skip_tests: true
+          - os: macos-13
+            upload_install: false
+            skip_tests: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: "1.3.5"
+      - name: Install dependencies
+        run: bun install
+      - name: Build release artifacts
+        if: ${{ !matrix.skip_tests }}
+        run: bun run build:release --version="${{ needs.create-release.outputs.version }}"
+      - name: Build release artifacts (skip tests)
+        if: ${{ matrix.skip_tests }}
+        run: bun run build:release --version="${{ needs.create-release.outputs.version }}" --skip-tests
+      - name: Upload tarball
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ needs.create-release.outputs.version }}"
+          fail_on_unmatched_files: true
           files: |
-            dist/release/hack-${{ steps.version.outputs.version }}-*.tar.gz
-            dist/release/hack-${{ steps.version.outputs.version }}-install.sh
+            dist/release/hack-${{ needs.create-release.outputs.version }}-*.tar.gz
+      - name: Upload install scripts
+        if: ${{ matrix.upload_install }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ needs.create-release.outputs.version }}"
+          fail_on_unmatched_files: true
+          files: |
+            dist/release/hack-${{ needs.create-release.outputs.version }}-install.sh
             dist/release/hack-install.sh
-            dist/release/hack-${{ steps.version.outputs.version }}-release/SHA256SUMS
+            dist/release/hack-${{ needs.create-release.outputs.version }}-release/SHA256SUMS

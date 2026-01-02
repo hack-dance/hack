@@ -136,7 +136,7 @@ The inner script can optionally run `hack global install` after setup.
 - Provide a one-line install snippet that downloads + runs the installer:
 
 ```bash
-curl -fsSL https://github.com/<org>/<repo>/releases/latest/download/hack-install.sh | bash
+curl -fsSL https://github.com/hack-dance/hack-cli/releases/latest/download/hack-install.sh | bash
 ```
 
 ## Verification checklist

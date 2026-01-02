@@ -58,7 +58,7 @@ Neither scales. Both slow you down in dumb, repeatable ways.
 Grab the install script
 
 ```bash
-  curl link to release/install.sh
+curl -fsSL https://github.com/hack-dance/hack-cli/releases/latest/download/hack-install.sh | bash
 ```
 
 ### Setup

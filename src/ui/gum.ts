@@ -186,6 +186,13 @@ function bundledGumTarballCandidates(filename: string): readonly string[] {
     out.push(resolve(envDir, "binaries", "gum", filename))
   }
 
+  const home = process.env.HOME
+  if (home) {
+    const defaultAssets = resolve(home, ".hack", "assets")
+    out.push(resolve(defaultAssets, filename))
+    out.push(resolve(defaultAssets, "binaries", "gum", filename))
+  }
+
   // Dev/source layout: <repo>/src/ui/gum.ts → <repo>/binaries/gum/<tarball>
   out.push(resolve(import.meta.dir, "../../binaries/gum", filename))
 

@@ -1,3 +1,8 @@
+## 1.1.0 (2026-01-02)
+
+* feat: add agent init launchers and patterns guide + exp[and agent init ux and docs + fix global ip ([0e19463](https://github.com/hack-dance/hack-cli/commit/0e19463))
+* bd sync: 2026-01-02 13:04:06 ([37c5477](https://github.com/hack-dance/hack-cli/commit/37c5477))
+
 ## <small>1.0.1 (2026-01-02)</small>
 
 * fix(install): add default asset dir path and dont ask on install ([666dd97](https://github.com/hack-dance/hack-cli/commit/666dd97))

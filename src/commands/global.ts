@@ -28,6 +28,8 @@ import {
   DEFAULT_INGRESS_SUBNET,
   DEFAULT_INGRESS_GATEWAY,
   DEFAULT_LOGGING_NETWORK,
+  DEFAULT_CADDY_IP,
+  DEFAULT_COREDNS_IP,
   DEFAULT_OAUTH_ALIAS_ROOT,
   DEFAULT_PROJECT_TLD,
   GLOBAL_ALLOY_FILENAME,
@@ -310,11 +312,10 @@ async function globalInstall(): Promise<number> {
   s.stop(`Networks ready (${DEFAULT_INGRESS_NETWORK}, ${DEFAULT_LOGGING_NETWORK})`)
   if (!ingressNetwork.hasSubnet) {
     logger.warn({
-      message:
-        "hack-dev network has no subnet; CoreDNS will run with a dynamic IP. Internal DNS will resolve at runtime."
+      message: "hack-dev network has no subnet; CoreDNS will resolve via dynamic IP."
     })
   }
-  const useStaticIps = ingressNetwork.hasSubnet
+  const useStaticIps = false
 
   if (isMac()) {
     await ensureMacHackDns()
@@ -428,7 +429,7 @@ async function writeWithPromptIfDifferent(absolutePath: string, content: string)
   await writeTextFileIfChanged(absolutePath, content)
 }
 
-async function globalUp(): Promise<number> {
+export async function globalUp(): Promise<number> {
   await ensureDockerRunning()
   if (isMac()) {
     await ensureMacDnsmasqRunning()
@@ -448,6 +449,20 @@ async function globalUp(): Promise<number> {
     return 1
   }
 
+  const reservedIps = await resolveReservedIngressIps({ composePath: paths.caddyCompose })
+  if (reservedIps.length > 0) {
+    const conflicts = await findIngressIpConflicts({ reservedIps })
+    const blockers = conflicts.filter(
+      conflict => !isGlobalProxyContainer({ name: conflict.containerName })
+    )
+    if (blockers.length > 0) {
+      logger.error({
+        message: renderIngressConflictMessage({ conflicts: blockers })
+      })
+      return 1
+    }
+  }
+
   logger.step({ message: "Starting Caddy…" })
   const caddyExit = await run(
     ["docker", "compose", "-f", paths.caddyCompose, "up", "-d", "--remove-orphans"],
@@ -464,6 +479,95 @@ async function globalUp(): Promise<number> {
 
   logger.success({ message: "Global infra is up" })
   return 0
+}
+
+type IngressIpConflict = {
+  readonly ip: string
+  readonly containerName: string
+}
+
+async function resolveReservedIngressIps(opts: {
+  readonly composePath: string
+}): Promise<string[]> {
+  const text = await readTextFile(opts.composePath)
+  if (!text) return []
+
+  const reserved: string[] = []
+  if (text.includes(`ipv4_address: ${DEFAULT_CADDY_IP}`)) reserved.push(DEFAULT_CADDY_IP)
+  if (text.includes(`ipv4_address: ${DEFAULT_COREDNS_IP}`)) reserved.push(DEFAULT_COREDNS_IP)
+  return reserved
+}
+
+async function findIngressIpConflicts(opts: {
+  readonly reservedIps: readonly string[]
+}): Promise<IngressIpConflict[]> {
+  if (opts.reservedIps.length === 0) return []
+
+  const inspect = await exec(["docker", "network", "inspect", DEFAULT_INGRESS_NETWORK], {
+    stdin: "ignore"
+  })
+  if (inspect.exitCode !== 0) return []
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(inspect.stdout)
+  } catch {
+    return []
+  }
+  if (!Array.isArray(parsed)) return []
+
+  const conflicts: IngressIpConflict[] = []
+  for (const entry of parsed) {
+    if (!entry || typeof entry !== "object") continue
+    const containers = (entry as { Containers?: Record<string, unknown> }).Containers
+    if (!containers || typeof containers !== "object") continue
+
+    for (const info of Object.values(containers)) {
+      if (!info || typeof info !== "object") continue
+      const record = info as { Name?: unknown; IPv4Address?: unknown }
+      const name = typeof record.Name === "string" ? record.Name : ""
+      const ipRaw = typeof record.IPv4Address === "string" ? record.IPv4Address : ""
+      if (!name || !ipRaw) continue
+      const ip = extractIpv4Address({ raw: ipRaw })
+      if (!opts.reservedIps.includes(ip)) continue
+      conflicts.push({ ip, containerName: name })
+    }
+  }
+
+  return conflicts
+}
+
+function extractIpv4Address(opts: { readonly raw: string }): string {
+  return opts.raw.split("/")[0] ?? ""
+}
+
+function isGlobalProxyContainer(opts: { readonly name: string }): boolean {
+  return opts.name.startsWith("hack-dev-proxy-")
+}
+
+function renderIngressConflictMessage(opts: {
+  readonly conflicts: readonly IngressIpConflict[]
+}): string {
+  const lines = [
+    `Cannot start global proxy: reserved IPs are already in use on ${DEFAULT_INGRESS_NETWORK}.`,
+    "Conflicts:"
+  ]
+
+  for (const conflict of opts.conflicts) {
+    lines.push(`- ${conflict.ip} is used by ${conflict.containerName}`)
+  }
+
+  lines.push(
+    "Fix:",
+    "- Stop the project using that IP (ex: hack down --project <name>).",
+    [
+      "- Or disconnect the container: docker network disconnect",
+      `${DEFAULT_INGRESS_NETWORK} <container>.`
+    ].join(" "),
+    "- Then run: hack global up (before hack up after reboot)."
+  )
+
+  return lines.join("\n")
 }
 
 async function globalDown(): Promise<number> {

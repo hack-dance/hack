@@ -805,7 +805,6 @@ async function runDoctorFix(): Promise<void> {
   await ensureDir(paths.caddyDir)
 
   const ingress = await inspectDockerNetwork(DEFAULT_INGRESS_NETWORK)
-  let hasIngressSubnet = ingress.hasSubnet
   if (!ingress.exists || !ingress.hasSubnet) {
     const action = ingress.exists ? "Recreate" : "Create"
     const okNetwork = await confirm({
@@ -830,7 +829,6 @@ async function runDoctorFix(): Promise<void> {
         ],
         { stdin: "inherit" }
       )
-      hasIngressSubnet = true
     }
   }
 
@@ -839,7 +837,7 @@ async function runDoctorFix(): Promise<void> {
     await run(["docker", "network", "create", DEFAULT_LOGGING_NETWORK], { stdin: "inherit" })
   }
 
-  const useStaticIps = hasIngressSubnet
+  const useStaticIps = false
   await writeWithPromptIfDifferent(
     paths.caddyCompose,
     renderGlobalCaddyCompose({

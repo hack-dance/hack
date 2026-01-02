@@ -83,4 +83,3 @@ jobs:
           files: |
             dist/release/hack-${{ needs.create-release.outputs.version }}-install.sh
             dist/release/hack-install.sh
-            dist/release/hack-${{ needs.create-release.outputs.version }}-release/SHA256SUMS

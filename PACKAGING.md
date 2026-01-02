@@ -44,7 +44,8 @@ What this does:
 
 Notes:
 - Use `bun run commit` for a Commitizen prompt (commitlint enforces Conventional Commits).
-- Use `bun run release:prepare -- --release-as 1.2.3` to force a specific version.
+- To force a release, make a Conventional Commit that bumps the right level
+  (e.g. `fix:` for patch, `feat:` for minor, `feat!:` or `BREAKING CHANGE:` for major).
 - If you want to package locally without tagging, use `bun run build:release`.
 
 ## Release build (local packaging)

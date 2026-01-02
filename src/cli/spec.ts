@@ -21,6 +21,9 @@ import { logPipeCommand } from "../commands/log-pipe.ts"
 import { helpCommand } from "../commands/help.ts"
 import { globalCommand } from "../commands/global.ts"
 import { doctorCommand } from "../commands/doctor.ts"
+import { mcpCommand } from "../commands/mcp.ts"
+import { setupCommand } from "../commands/setup.ts"
+import { agentCommand } from "../commands/agent.ts"
 
 type PackageJsonType = {
   name: string
@@ -51,6 +54,9 @@ export const CLI_SPEC = defineCli({
     theCommand,
     secretsCommand,
     configCommand,
+    mcpCommand,
+    setupCommand,
+    agentCommand,
     versionCommand,
     helpCommand
   ]

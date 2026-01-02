@@ -2,7 +2,7 @@ import { parseArgs as bunParseArgs } from "util"
 
 import { isRecord, isStringArray } from "../lib/guards.ts"
 
-export type CliGroup = "Global" | "Project" | "Diagnostics" | "Secrets" | "Fun"
+export type CliGroup = "Global" | "Project" | "Agents" | "Diagnostics" | "Secrets" | "Fun"
 
 export type OptionType = "boolean" | "string" | "number"
 

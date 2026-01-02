@@ -1,4 +1,11 @@
-import { autocompleteMultiselect, confirm, isCancel, note, select, text } from "@clack/prompts"
+import {
+  autocompleteMultiselect,
+  confirm,
+  isCancel,
+  multiselect,
+  note,
+  text
+} from "@clack/prompts"
 
 import { dirname, resolve } from "node:path"
 import { YAML } from "bun"
@@ -42,6 +49,12 @@ import {
 } from "../init/heuristics.ts"
 import { discoverRepo } from "../init/discovery.ts"
 import { renderCompose } from "../init/compose.ts"
+import { installClaudeHooks } from "../agents/claude.ts"
+import { installCodexSkill } from "../agents/codex-skill.ts"
+import { installCursorRules } from "../agents/cursor.ts"
+import { globalUp } from "../commands/global.ts"
+import { upsertAgentDocs } from "../mcp/agent-docs.ts"
+import { installMcpConfig } from "../mcp/install.ts"
 import {
   DEFAULT_GRAFANA_HOST,
   DEFAULT_INGRESS_NETWORK,
@@ -75,15 +88,70 @@ import { CliUsageError, defineCommand, defineOption, withHandler } from "../cli/
 import type { ServiceCandidate } from "../init/discovery.ts"
 import type { CliContext, CommandArgs } from "../cli/command.ts"
 import type { LogStreamContext } from "../ui/log-stream.ts"
+import type { McpTarget } from "../mcp/install.ts"
 
 const optManual = defineOption({
   name: "manual",
   type: "boolean",
   long: "--manual",
-  description: "Skip discovery and define services manually"
+  description: "Skip discovery and define services manually (or generate a minimal compose in --auto)"
 } as const)
 
-const initOptions = [optPath, optManual] as const
+const optAuto = defineOption({
+  name: "auto",
+  type: "boolean",
+  long: "--auto",
+  description: "Run non-interactive init with sensible defaults"
+} as const)
+
+const optName = defineOption({
+  name: "name",
+  type: "string",
+  long: "--name",
+  valueHint: "<slug>",
+  description: "Project slug (default: repo name)"
+} as const)
+
+const optDevHost = defineOption({
+  name: "devHost",
+  type: "string",
+  long: "--dev-host",
+  valueHint: "<host>",
+  description: "DEV_HOST override"
+} as const)
+
+const optOauth = defineOption({
+  name: "oauth",
+  type: "boolean",
+  long: "--oauth",
+  description: "Enable OAuth-safe alias host"
+} as const)
+
+const optOauthTld = defineOption({
+  name: "oauthTld",
+  type: "string",
+  long: "--oauth-tld",
+  valueHint: "<tld>",
+  description: "OAuth alias TLD override (default: gy)"
+} as const)
+
+const optNoDiscovery = defineOption({
+  name: "noDiscovery",
+  type: "boolean",
+  long: "--no-discovery",
+  description: "Skip discovery and generate a minimal compose"
+} as const)
+
+const initOptions = [
+  optPath,
+  optManual,
+  optAuto,
+  optName,
+  optDevHost,
+  optOauth,
+  optOauthTld,
+  optNoDiscovery
+] as const
 const upOptions = [optPath, optProject, optBranch, optDetach, optProfile] as const
 const downOptions = [optPath, optProject, optBranch, optProfile] as const
 const restartOptions = [optPath, optProject, optBranch, optProfile] as const
@@ -148,7 +216,7 @@ const logsOptions = [
   optUntil
 ] as const
 const logsPositionals = [{ name: "service", required: false }] as const
-const openOptions = [optPath, optProject, optBranch] as const
+const openOptions = [optPath, optProject, optBranch, optJson] as const
 const openPositionals = [{ name: "target", required: false }] as const
 
 type InitArgs = CommandArgs<typeof initOptions, readonly []>
@@ -701,13 +769,18 @@ async function handleInit({
   readonly ctx: CliContext
   readonly args: InitArgs
 }): Promise<number> {
+  if (args.options.auto) {
+    return await handleInitAuto({ ctx, args })
+  }
+
   const startDir = resolveStartDir(ctx, args.options.path)
   const repoRoot = await findRepoRootForInit(startDir)
 
   const defaultSlug = defaultProjectSlugFromPath(repoRoot)
+  const initialSlug = sanitizeProjectSlug(args.options.name ?? defaultSlug)
   const name = await text({
     message: "Project name (slug):",
-    initialValue: defaultSlug,
+    initialValue: initialSlug,
     validate: value => {
       const v = value?.trim()
       if (!v) return "Required"
@@ -739,9 +812,10 @@ async function handleInit({
   }
 
   const defaultHost = `${slug}.${DEFAULT_PROJECT_TLD}`
+  const initialHost = (args.options.devHost ?? defaultHost).trim()
   const devHost = await text({
     message: "DEV_HOST:",
-    initialValue: defaultHost,
+    initialValue: initialHost,
     validate: value => {
       const v = value?.trim()
       if (!v) return "Required"
@@ -756,14 +830,14 @@ async function handleInit({
 
   const enableOauthHost = await confirm({
     message: `Enable OAuth-safe alias host (https://<project>.${DEFAULT_PROJECT_TLD}.${DEFAULT_OAUTH_ALIAS_TLD})?`,
-    initialValue: false
+    initialValue: args.options.oauth === true || Boolean(args.options.oauthTld)
   })
   if (isCancel(enableOauthHost)) return 1
   const oauthTld =
     enableOauthHost ?
       await text({
         message: "OAuth alias TLD (optional):",
-        initialValue: DEFAULT_OAUTH_ALIAS_TLD,
+        initialValue: args.options.oauthTld ?? DEFAULT_OAUTH_ALIAS_TLD,
         validate: value => {
           const v = value?.trim().toLowerCase()
           if (!v) return "Required"
@@ -777,7 +851,9 @@ async function handleInit({
   const discovery = await discoverRepo(repoRoot)
   const canDiscover = discovery.candidates.length > 0
 
-  if (canDiscover) {
+  const forceManual = args.options.manual || args.options.noDiscovery
+
+  if (canDiscover && !forceManual) {
     note(
       [
         `Detected ${discovery.packages.length} package(s) and ${discovery.candidates.length} dev-like script(s).`,
@@ -788,7 +864,6 @@ async function handleInit({
     )
   }
 
-  const forceManual = args.options.manual
   const useDiscovery =
     forceManual ? false
     : canDiscover ?
@@ -869,6 +944,8 @@ async function handleInit({
     )
   }
 
+  await maybeSetupAgentIntegrations({ repoRoot })
+
   note(
     [
       `Wrote: ${HACK_PROJECT_DIR_PRIMARY}/${PROJECT_COMPOSE_FILENAME}`,
@@ -883,6 +960,278 @@ async function handleInit({
   )
 
   return 0
+}
+
+async function handleInitAuto({
+  ctx,
+  args
+}: {
+  readonly ctx: CliContext
+  readonly args: InitArgs
+}): Promise<number> {
+  const startDir = resolveStartDir(ctx, args.options.path)
+  const repoRoot = await findRepoRootForInit(startDir)
+
+  const slug = resolveInitSlug({
+    repoRoot,
+    nameOpt: args.options.name
+  })
+
+  await ensureUniqueProjectSlug({
+    repoRoot,
+    slug
+  })
+
+  const devHost = resolveInitDevHost({
+    slug,
+    devHostOpt: args.options.devHost
+  })
+
+  const oauthEnabled = args.options.oauth === true || Boolean(args.options.oauthTld)
+  const oauth = resolveInitOauth({
+    enabled: oauthEnabled,
+    tldOpt: args.options.oauthTld
+  })
+
+  const discovery = await discoverRepo(repoRoot)
+  const canDiscover = discovery.candidates.length > 0
+  const skipDiscovery = args.options.manual || args.options.noDiscovery
+  const useDiscovery = canDiscover && !skipDiscovery
+
+  const hackDir = resolve(repoRoot, HACK_PROJECT_DIR_PRIMARY)
+  const composeFile = resolve(hackDir, PROJECT_COMPOSE_FILENAME)
+  const configFile = resolve(hackDir, PROJECT_CONFIG_FILENAME)
+
+  if (await pathExists(hackDir)) {
+    throw new Error(
+      `${HACK_PROJECT_DIR_PRIMARY}/ already exists. Run without --auto to overwrite.`
+    )
+  }
+
+  await ensureDir(hackDir)
+
+  await writeTextFileIfChanged(
+    configFile,
+    renderProjectConfigJson({
+      name: slug,
+      devHost,
+      oauth: { enabled: oauth.enabled, tld: oauth.tld }
+    })
+  )
+
+  const compose = useDiscovery ?
+      await buildDiscoveredComposeAuto({
+        repoRoot,
+        devHost,
+        projectSlug: slug,
+        candidates: discovery.candidates,
+        oauth
+      })
+    : await buildManualComposeAuto({
+        repoRoot,
+        devHost,
+        projectSlug: slug,
+        oauth
+      })
+  await writeTextFileIfChanged(composeFile, compose)
+
+  await writeTextFileIfChanged(
+    resolve(hackDir, "README.md"),
+    renderHackFolderReadme({
+      devHost,
+      oauth: { enabled: oauth.enabled, tld: oauth.tld }
+    })
+  )
+
+  const registration = await upsertProjectRegistration({
+    project: {
+      projectRoot: repoRoot,
+      projectDirName: HACK_PROJECT_DIR_PRIMARY,
+      projectDir: hackDir,
+      composeFile,
+      envFile: resolve(hackDir, PROJECT_ENV_FILENAME),
+      configFile
+    }
+  })
+  if (registration.status === "conflict") {
+    throw new Error(
+      [
+        `Project name conflict: "${registration.conflictName}" is already registered at ${registration.existing.repoRoot}`,
+        `Incoming project dir: ${registration.incoming.projectDir}`,
+        "Tip: choose a different name in 'hack init'."
+      ].join("\n")
+    )
+  }
+
+  logger.success({
+    message: `Initialized ${HACK_PROJECT_DIR_PRIMARY}/ for ${slug}`
+  })
+  logger.info({
+    message: "Next: hack up --detach && hack open"
+  })
+
+  return 0
+}
+
+function resolveInitSlug(opts: { readonly repoRoot: string; readonly nameOpt?: string }): string {
+  const fallback = defaultProjectSlugFromPath(opts.repoRoot)
+  const raw = (opts.nameOpt ?? fallback).trim()
+  if (!raw) return fallback
+  return sanitizeProjectSlug(raw)
+}
+
+async function ensureUniqueProjectSlug(opts: {
+  readonly repoRoot: string
+  readonly slug: string
+}): Promise<void> {
+  const registry = await readProjectsRegistry()
+  const existing = registry.projects.find(p => p.name === opts.slug) ?? null
+  if (!existing) return
+
+  const expectedProjectDir = resolve(opts.repoRoot, HACK_PROJECT_DIR_PRIMARY)
+  const isSame = existing.projectDir === expectedProjectDir
+  const stillExists = await pathExists(existing.projectDir)
+  if (!isSame && stillExists) {
+    throw new Error(
+      [
+        `Project name "${opts.slug}" is already registered.`,
+        `Existing: ${existing.repoRoot}`,
+        `This repo: ${opts.repoRoot}`,
+        "Tip: choose a different name (or rename the other project)."
+      ].join("\n")
+    )
+  }
+}
+
+function resolveInitDevHost(opts: {
+  readonly slug: string
+  readonly devHostOpt?: string
+}): string {
+  const fallback = `${opts.slug}.${DEFAULT_PROJECT_TLD}`
+  const raw = (opts.devHostOpt ?? fallback).trim()
+  const error = validateDevHost({ value: raw })
+  if (error) throw new Error(`Invalid --dev-host: ${error}`)
+  return raw
+}
+
+function resolveInitOauth(opts: {
+  readonly enabled: boolean
+  readonly tldOpt?: string
+}): { readonly enabled: boolean; readonly tld: string } {
+  const raw = (opts.tldOpt ?? DEFAULT_OAUTH_ALIAS_TLD).trim().toLowerCase()
+  const error = validateOauthTld({ value: raw })
+  if (error) throw new Error(`Invalid --oauth-tld: ${error}`)
+  return { enabled: opts.enabled, tld: raw }
+}
+
+function validateDevHost(opts: { readonly value: string }): string | null {
+  if (!opts.value) return "Required"
+  if (opts.value.includes(" ")) return "No spaces"
+  if (opts.value.includes("://")) return "Host only (no scheme)"
+  if (opts.value.includes("/")) return "Host only (no path)"
+  if (opts.value.includes(":")) return "Host only (no port)"
+  return null
+}
+
+function validateOauthTld(opts: { readonly value: string }): string | null {
+  if (!opts.value) return "Required"
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(opts.value)) return "Invalid TLD label"
+  return null
+}
+
+type SetupIntegration = "cursor" | "claude" | "codex" | "agents" | "mcp"
+
+async function maybeSetupAgentIntegrations(opts: { readonly repoRoot: string }): Promise<void> {
+  const shouldSetup = await confirm({
+    message: "Set up coding agent integrations? (Cursor/Claude/Codex)",
+    initialValue: true
+  })
+  if (isCancel(shouldSetup) || !shouldSetup) return
+
+  const selected = await multiselect<SetupIntegration>({
+    message: "Select integrations to install:",
+    required: true,
+    options: [
+      { value: "cursor", label: "Cursor rules (.cursor/rules/hack.mdc)" },
+      { value: "claude", label: "Claude Code hooks (.claude/settings.local.json)" },
+      { value: "codex", label: "Codex skill (.codex/skills/hack-cli)" },
+      { value: "agents", label: "AGENTS.md / CLAUDE.md snippets" },
+      { value: "mcp", label: "MCP config (no-shell clients)" }
+    ],
+    initialValues: ["cursor", "claude", "codex"]
+  })
+  if (isCancel(selected) || selected.length === 0) return
+
+  const selection = new Set(selected)
+
+  if (selection.has("cursor")) {
+    const result = await installCursorRules({ scope: "project", projectRoot: opts.repoRoot })
+    logInstallResult({ label: "Cursor rules", status: result.status, path: result.path, message: result.message })
+  }
+
+  if (selection.has("claude")) {
+    const result = await installClaudeHooks({ scope: "project", projectRoot: opts.repoRoot })
+    logInstallResult({ label: "Claude hooks", status: result.status, path: result.path, message: result.message })
+  }
+
+  if (selection.has("codex")) {
+    const result = await installCodexSkill({ scope: "project", projectRoot: opts.repoRoot })
+    logInstallResult({ label: "Codex skill", status: result.status, path: result.path, message: result.message })
+  }
+
+  if (selection.has("agents")) {
+    const results = await upsertAgentDocs({
+      projectRoot: opts.repoRoot,
+      targets: ["agents", "claude"]
+    })
+    for (const result of results) {
+      logInstallResult({
+        label: "Agent docs",
+        status: result.status,
+        path: result.path,
+        message: result.message
+      })
+    }
+  }
+
+  if (selection.has("mcp")) {
+    const targetHints = selected.filter(value => value === "cursor" || value === "claude" || value === "codex")
+    const targets = (targetHints.length > 0 ? targetHints : ["cursor", "claude", "codex"]) as McpTarget[]
+
+    const results = await installMcpConfig({
+      targets,
+      scope: "project",
+      projectRoot: opts.repoRoot
+    })
+
+    for (const result of results) {
+      logInstallResult({
+        label: "MCP config",
+        status: result.status,
+        path: result.path ?? "unknown path",
+        message: result.message
+      })
+    }
+  }
+}
+
+function logInstallResult(opts: {
+  readonly label: string
+  readonly status: string
+  readonly path: string
+  readonly message?: string
+}): void {
+  if (opts.status === "error") {
+    logger.warn({ message: opts.message ?? `Failed to update ${opts.label}` })
+    return
+  }
+
+  if (opts.status === "noop") {
+    logger.info({ message: `No changes for ${opts.label} (${opts.path})` })
+    return
+  }
+
+  logger.success({ message: `Updated ${opts.label} at ${opts.path}` })
 }
 
 interface ComposeWizardInput {
@@ -1220,6 +1569,58 @@ async function buildDiscoveredCompose(input: ComposeWizardInput): Promise<string
   return renderCompose({ name: input.projectSlug, services })
 }
 
+type AutoComposeDraft = {
+  name: string
+  role: "http" | "internal"
+  port?: number
+  subdomain?: string
+  workingDir: string
+  command: string
+  image?: string
+}
+
+async function buildDiscoveredComposeAuto(input: ComposeWizardInput): Promise<string> {
+  const selectedCandidates = selectAutoCandidates({ candidates: input.candidates })
+  if (selectedCandidates.length === 0) {
+    throw new Error("No dev scripts discovered for auto init.")
+  }
+
+  const usedServiceNames = new Set<string>()
+  const drafts: AutoComposeDraft[] = []
+
+  for (const candidate of selectedCandidates) {
+    const name = resolveAutoServiceName({ candidate, usedServiceNames })
+    usedServiceNames.add(name)
+
+    const role = guessRole(candidate)
+    const port =
+      role === "http" ?
+        inferPortFromScript(candidate.scriptCommand) ?? guessDefaultPort(name)
+      : undefined
+    const workingDir =
+      candidate.packageRelativeDir === "." ? "/app" : `/app/${candidate.packageRelativeDir}`
+    const command = buildSuggestedCommand({ candidate, role, port })
+
+    drafts.push({
+      name,
+      role,
+      port,
+      workingDir,
+      command
+    })
+  }
+
+  assignAutoSubdomains({ drafts })
+
+  const services = buildServicesFromDrafts({
+    drafts,
+    devHost: input.devHost,
+    oauth: input.oauth
+  })
+
+  return renderCompose({ name: input.projectSlug, services })
+}
+
 interface ManualComposeWizardInput {
   readonly repoRoot: string
   readonly devHost: string
@@ -1423,6 +1824,28 @@ async function buildManualCompose(input: ManualComposeWizardInput): Promise<stri
   return renderCompose({ name: input.projectSlug, services })
 }
 
+async function buildManualComposeAuto(input: ManualComposeWizardInput): Promise<string> {
+  const port = guessDefaultPort("app")
+  const drafts: AutoComposeDraft[] = [
+    {
+      name: "app",
+      role: "http",
+      port,
+      subdomain: "",
+      workingDir: "/app",
+      command: `bun run dev -- --port ${port} --host 0.0.0.0`
+    }
+  ]
+
+  const services = buildServicesFromDrafts({
+    drafts,
+    devHost: input.devHost,
+    oauth: input.oauth
+  })
+
+  return renderCompose({ name: input.projectSlug, services })
+}
+
 function formatCandidateLabel(c: ServiceCandidate): string {
   const base = c.packageName ?? c.packageRelativeDir
   return `${base} → ${c.scriptName}`
@@ -1448,6 +1871,91 @@ function guessSubdomain(serviceName: string): string {
   if (n.includes("api")) return "api"
   if (n === "www" || n === "web") return "www"
   return serviceName
+}
+
+function selectAutoCandidates(opts: {
+  readonly candidates: readonly ServiceCandidate[]
+}): readonly ServiceCandidate[] {
+  const devCandidates = opts.candidates.filter(
+    c => c.scriptName === "dev" || c.scriptName.startsWith("dev:")
+  )
+  return devCandidates.length > 0 ? devCandidates : opts.candidates
+}
+
+function resolveAutoServiceName(opts: {
+  readonly candidate: ServiceCandidate
+  readonly usedServiceNames: ReadonlySet<string>
+}): string {
+  const base = guessServiceName(opts.candidate)
+  const normalized = base.length > 0 ? base : "app"
+  const safe = normalized === "db" || normalized === "redis" ? "app" : normalized
+  return uniqueName(safe, opts.usedServiceNames)
+}
+
+function assignAutoSubdomains(opts: { readonly drafts: AutoComposeDraft[] }): void {
+  const httpDrafts = opts.drafts.filter(d => d.role === "http")
+  if (httpDrafts.length === 0) return
+
+  const primary = httpDrafts.find(d => d.name === "www") ?? httpDrafts[0]
+  if (primary) primary.subdomain = ""
+
+  const used = new Set<string>()
+  for (const draft of httpDrafts) {
+    if (draft === primary) continue
+    const base = guessSubdomain(draft.name)
+    const subdomain = uniqueSubdomain({ base, used })
+    used.add(subdomain)
+    draft.subdomain = subdomain
+  }
+}
+
+function uniqueSubdomain(opts: { readonly base: string; readonly used: ReadonlySet<string> }): string {
+  const seed = sanitizeProjectSlug(opts.base)
+  const normalized = seed.length > 0 ? seed : "app"
+  if (!opts.used.has(normalized)) return normalized
+  for (let i = 2; i < 1000; i += 1) {
+    const next = `${normalized}-${i}`
+    if (!opts.used.has(next)) return next
+  }
+  return `${normalized}-${Date.now()}`
+}
+
+function buildServicesFromDrafts(opts: {
+  readonly drafts: readonly AutoComposeDraft[]
+  readonly devHost: string
+  readonly oauth: { readonly enabled: boolean; readonly tld: string }
+}) {
+  return opts.drafts.map(d => {
+    const env = new Map<string, string>([
+      ["CHOKIDAR_USEPOLLING", "true"],
+      ["WATCHPACK_POLLING", "true"]
+    ])
+
+    const labels = new Map<string, string>()
+    const networks = d.role === "http" ? ["hack-dev", "default"] : []
+
+    if (d.role === "http") {
+      const port = d.port ?? 3000
+      const host =
+        d.subdomain && d.subdomain.length > 0 ?
+          `${d.subdomain}.${opts.devHost}`
+        : `${opts.devHost}`
+      labels.set("caddy", buildCaddyHostLabelValue({ primaryHost: host, oauth: opts.oauth }))
+      labels.set("caddy.reverse_proxy", `{{upstreams ${port}}}`)
+      labels.set("caddy.tls", "internal")
+    }
+
+    return {
+      name: d.name,
+      role: d.role,
+      image: d.image ?? "imbios/bun-node:latest",
+      workingDir: d.workingDir,
+      command: d.command,
+      env,
+      labels,
+      networks
+    }
+  })
 }
 
 function renderHackFolderReadme(opts: {
@@ -1691,6 +2199,8 @@ async function handleUp({
   const devHost = branch ? await resolveBranchDevHost({ project }) : null
   const aliasHost =
     branch && devHost ? resolveBranchAliasHost({ devHost, cfg }) : null
+  const internalSettings = resolveInternalSettings(cfg)
+  await maybePromptToStartGlobal({ internal: internalSettings })
   const internalOverride = await resolveInternalComposeOverride({ project, cfg })
   const composeFiles =
     branch && devHost ?
@@ -1705,6 +2215,31 @@ async function handleUp({
     detach,
     cwd: dirname(project.composeFile)
   })
+}
+
+async function maybePromptToStartGlobal(opts: {
+  readonly internal: { readonly dns: boolean; readonly tls: boolean }
+}): Promise<void> {
+  if (!opts.internal.dns) return
+  if (!(process.stdin.isTTY && process.stdout.isTTY)) return
+
+  const dnsServer = await resolveCoreDnsServer()
+  if (dnsServer) return
+
+  const ok = await confirm({
+    message:
+      "Global DNS/TLS is not running. Start it now? (runs `hack global up`, may prompt for sudo)",
+    initialValue: true
+  })
+  if (isCancel(ok)) throw new Error("Canceled")
+  if (!ok) return
+
+  const exitCode = await globalUp()
+  if (exitCode !== 0) {
+    logger.warn({
+      message: "Global infra failed to start; continuing without internal DNS/TLS."
+    })
+  }
 }
 
 async function handleDown({
@@ -2237,15 +2772,20 @@ async function handleOpen({
     projectOpt: args.options.project
   })
   const branch = resolveBranchSlug(args.options.branch)
+  const json = args.options.json === true
   const derivedHost = `${defaultProjectSlugFromPath(project.projectRoot)}.${DEFAULT_PROJECT_TLD}`
   const devHost = (await readProjectDevHost(project)) ?? derivedHost
   await touchBranchUsageIfNeeded({ project, branch })
   const cfg = await readProjectConfig(project)
   if (cfg.parseError) {
     const configPath = cfg.configPath ?? project.configFile
-    logger.warn({
-      message: `Failed to parse ${configPath}: ${cfg.parseError}`
-    })
+    if (json) {
+      process.stderr.write(`Failed to parse ${configPath}: ${cfg.parseError}\n`)
+    } else {
+      logger.warn({
+        message: `Failed to parse ${configPath}: ${cfg.parseError}`
+      })
+    }
   }
   const aliasHost = resolveBranchAliasHost({ devHost, cfg })
   const baseHosts = [devHost, aliasHost].filter(
@@ -2263,6 +2803,11 @@ async function handleOpen({
     targetRaw === "logs" ? `https://${DEFAULT_GRAFANA_HOST}`
     : hasUrlScheme(targetRaw) ? targetRaw
     : `https://${resolvedHost}`
+
+  if (json) {
+    process.stdout.write(`${JSON.stringify({ url }, null, 2)}\n`)
+    return 0
+  }
 
   logger.step({ message: `Opening ${url}` })
   return await openUrl(url)

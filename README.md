@@ -66,7 +66,42 @@ curl -fsSL https://github.com/hack-dance/hack-cli/releases/latest/download/hack-
 hack global install
 ```
 
-### Initialize a repo
+### Quick start 
+Manual (CLI):
+
+```bash
+cd /path/to/your-repo
+hack init
+hack up --detach
+hack open
+```
+
+Agent-assisted (Cursor/Claude/Codex with shell access):
+
+```bash
+hack setup cursor   # or hack setup claude / hack setup codex
+hack setup agents   # optional: adds AGENTS.md + CLAUDE.md snippets
+hack agent init --client cursor   # or --client claude / --client codex
+hack agent patterns              # optional: dependency/ops checklist
+```
+
+If you omit `--client`, `hack agent init` will prompt you to choose (TTY only).
+If your agent does not auto-open, paste the output into the chat. Example:
+
+```
+I ran `hack agent init` and pasted the output below. Please follow it to set up hack for this repo,
+then run:
+- `hack init` (use --auto if dev scripts are detected)
+- `hack up --detach`
+- `hack open --json`
+If anything fails, use `hack logs --pretty` and summarize next steps.
+
+<PASTE HACK AGENT INIT OUTPUT HERE>
+```
+
+If the agent cannot run shell commands, use MCP instead: `hack setup mcp` and `hack mcp serve`.
+
+### Initialize a repo (manual)
 ```bash
 cd /path/to/your-repo
 hack init
@@ -120,6 +155,7 @@ hack config set logs.snapshot_backend "compose"
 - **Projects**: `hack projects|prune`
 - **Status**: `hack status` (shortcut for `hack projects --details`)
 - **Branch**: `hack branch add|list|remove|open`
+- **Agents**: `hack setup cursor|claude|codex|agents|mcp`, `hack agent prime|init|patterns`, `hack mcp serve|install|print`
 - **Diagnostics**: `hack doctor|log-pipe`
 - **Secrets**: `hack secrets get|set|delete`
 - **Crash override**: `hack the planet`
@@ -135,8 +171,74 @@ Use `--json` for machine-readable output:
 - `hack projects --json`
 - `hack ps --json`
 - `hack logs --json` (NDJSON stream; use `--no-follow` for snapshots)
+- `hack open --json` (returns `{ "url": "..." }`)
 
 `hack logs --json` emits event envelopes (`start`, `log`, `end`) so MCP/TUI consumers can stream safely.
+
+## Agent setup (CLI-first)
+
+Use `hack setup` to install local integrations. Default is project scope; add `--global` for user scope.
+
+```bash
+hack setup cursor
+hack setup claude
+hack setup codex
+hack setup agents
+```
+
+What each setup command does:
+- `hack setup cursor`: installs Cursor rules in `.cursor/rules/hack.mdc`
+- `hack setup claude`: installs Claude Code hooks in `.claude/settings.local.json` (or user scope)
+- `hack setup codex`: installs the Codex skill in `.codex/skills/hack-cli/SKILL.md`
+- `hack setup agents`: adds/updates hack usage snippets in `AGENTS.md` and `CLAUDE.md`
+- `hack setup mcp`: writes MCP configs for no-shell clients
+
+Primer helpers:
+- `hack agent prime`: short CLI-first primer used by Claude Code hooks
+- `hack agent init`: repo-specific setup prompt agents can follow to scaffold/verify hack config
+- `hack agent init --client cursor|claude|codex`: open the prompt directly in an agent client
+- `hack agent patterns`: dependency/ops checklist for agents
+
+Recommended flow:
+- Use `hack setup cursor|claude|codex` for your agent client
+- Use `hack setup agents` to document hack usage inside the repo
+- Use `hack setup mcp` only when the agent has no shell access
+
+## MCP (no-shell clients)
+
+Use MCP only when the CLI is not available (e.g. no shell access).
+
+Run the MCP server locally over stdio:
+
+```bash
+hack mcp serve
+```
+
+Most MCP clients spawn this on demand. Running it directly will wait for a client connection.
+
+Install MCP configs (Cursor, Claude CLI, Codex):
+
+```bash
+# Project-scoped (default via setup)
+hack setup mcp
+
+# User-scoped (default; writes to your home config directories)
+hack mcp install --all
+
+# Project-scoped (writes .cursor/.claude/.codex in the repo)
+hack mcp install --all --scope project
+```
+
+Project scope writes `.cursor/mcp.json`, `.claude/settings.json`, and `.codex/config.toml`.
+
+Print config snippets without writing:
+
+```bash
+hack mcp print --codex
+```
+
+`hack init` can prompt to install local agent integrations after scaffolding a repo.
+For agent-driven scaffolding without prompts, use `hack init --auto` and run `hack setup` manually.
 
 ## Branch builds (worktree-friendly)
 
@@ -376,6 +478,8 @@ Each project’s compose network stays isolated; only services you want “publi
 
 
 ## Common patterns (deps + ops)
+
+Agents: run `hack agent patterns` for a compact checklist based on this section.
 
 ### 1) Containerized dependency installs (recommended)
 

@@ -1,3 +1,7 @@
+## <small>1.0.1 (2026-01-02)</small>
+
+* fix(install): add default asset dir path and dont ask on install ([666dd97](https://github.com/hack-dance/hack-cli/commit/666dd97))
+
 ## 1.0.0 (2026-01-01)
 
 * fix: initial release ([1373350](https://github.com/hack-dance/hack-cli/commit/1373350))

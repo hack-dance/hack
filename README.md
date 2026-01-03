@@ -156,7 +156,7 @@ hack config set logs.snapshot_backend "compose"
 - **Status**: `hack status` (shortcut for `hack projects --details`)
 - **Branch**: `hack branch add|list|remove|open`
 - **Agents**: `hack setup cursor|claude|codex|agents|mcp`, `hack agent prime|init|patterns`, `hack mcp serve|install|print`
-- **Diagnostics**: `hack doctor|log-pipe`
+- **Diagnostics**: `hack doctor|daemon|log-pipe`
 - **Secrets**: `hack secrets get|set|delete`
 - **Crash override**: `hack the planet`
 
@@ -173,7 +173,31 @@ Use `--json` for machine-readable output:
 - `hack logs --json` (NDJSON stream; use `--no-follow` for snapshots)
 - `hack open --json` (returns `{ "url": "..." }`)
 
+When the daemon is running, `hack projects --json` and `hack ps --json` use it for faster results.
+
 `hack logs --json` emits event envelopes (`start`, `log`, `end`) so MCP/TUI consumers can stream safely.
+
+## Daemon (optional)
+
+`hackd` is a local daemon that caches Docker state for fast status/ps queries.
+
+```bash
+hack daemon start
+hack daemon status
+hack daemon metrics
+hack daemon stop
+hack daemon logs
+```
+
+Use it when:
+- You run `hack projects --json` / `hack ps --json` frequently (scripts, agent workflows, TUI).
+- You want faster status snapshots without shelling out to Docker each time.
+
+Skip it when:
+- You prefer zero background processes.
+- You rarely use JSON status/ps outputs.
+
+If it is not running (or version-mismatched), the CLI falls back to direct Docker calls.
 
 ## Agent setup (CLI-first)
 
@@ -295,6 +319,7 @@ docker compose -f .hack/docker-compose.yml exec redis redis-cli
 ## Logs (why both Compose and Loki)
 
 By default, `hack logs` uses `docker compose logs` because it’s the lowest latency tail.
+The daemon does not proxy logs yet; `hack logs` still talks directly to Docker Compose or Loki.
 
 Loki is still valuable for:
 

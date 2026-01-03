@@ -8,9 +8,9 @@ import * as z from "zod/v4"
 
 import { ensureDir, pathExists } from "../lib/fs.ts"
 import { isRecord } from "../lib/guards.ts"
+import { resolveHackInvocation } from "../lib/hack-cli.ts"
 import { findProjectContext } from "../lib/project.ts"
 import { readProjectsRegistry, resolveRegisteredProjectByName } from "../lib/projects-registry.ts"
-import { findExecutableInPath } from "../lib/shell.ts"
 import { readLinesFromStream } from "../ui/lines.ts"
 import { GLOBAL_HACK_DIR_NAME } from "../constants.ts"
 
@@ -784,31 +784,6 @@ async function runHackLogTail(opts: {
     stopReason,
     durationMs: Date.now() - start
   }
-}
-
-async function resolveHackInvocation(): Promise<{ readonly bin: string; readonly args: readonly string[] }> {
-  const override = (process.env.HACK_MCP_COMMAND ?? "").trim()
-  if (override.length > 0) return { bin: override, args: [] }
-
-  const fromPath = await findExecutableInPath("hack")
-  if (fromPath) return { bin: fromPath, args: [] }
-
-  const argv0 = process.argv[0]
-  const argv1 = process.argv[1]
-  if (argv0 && argv1) {
-    const candidate = await resolveArgvPath(argv1)
-    if (candidate) {
-      return { bin: argv0, args: [candidate] }
-    }
-  }
-
-  return { bin: "hack", args: [] }
-}
-
-async function resolveArgvPath(raw: string): Promise<string | null> {
-  if (await pathExists(raw)) return raw
-  const resolved = resolve(process.cwd(), raw)
-  return (await pathExists(resolved)) ? resolved : null
 }
 
 function formatCommand(parts: readonly string[]): string {

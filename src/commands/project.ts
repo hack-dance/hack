@@ -38,6 +38,7 @@ import { getString, isRecord } from "../lib/guards.ts"
 import { touchBranchUsage } from "../lib/branches.ts"
 import { parseTimeInput } from "../lib/time.ts"
 import { ensureDir, pathExists, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts"
+import { requestDaemonJson } from "../daemon/client.ts"
 import { parseDurationMs } from "../lib/duration.ts"
 import { buildLogSelector, resolveShouldTryLoki, resolveUseLoki } from "../lib/logs.ts"
 import {
@@ -2448,6 +2449,22 @@ async function handlePs({
   const composeProjectName = branch ? `${baseProjectName}--${branch}` : null
 
   const cwd = dirname(project.composeFile)
+
+  if (json) {
+    const daemon = await requestDaemonJson({
+      path: "/v1/ps",
+      query: {
+        compose_project: composeProjectName ?? baseProjectName,
+        project: baseProjectName,
+        branch
+      }
+    })
+    if (daemon?.ok && daemon.json) {
+      process.stdout.write(`${JSON.stringify(daemon.json, null, 2)}\n`)
+      return 0
+    }
+  }
+
   const res = await composeRuntimeBackend.psJson({
     composeFiles: [project.composeFile],
     composeProject: composeProjectName,

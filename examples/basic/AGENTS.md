@@ -40,6 +40,10 @@ Project targeting:
 - Else use `--project <name>` (registry) or `--path <repo-root>`.
 - List projects: `hack projects --json`
 
+Daemon (optional):
+- Start for faster JSON status/ps: `hack daemon start`
+- Check status: `hack daemon status`
+
 Docker compose notes:
 - Prefer `hack` commands; they include the right files/networks.
 - Use `docker compose -f .hack/docker-compose.yml exec <service> <cmd>` only if you need exec into a running container.

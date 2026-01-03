@@ -23,6 +23,10 @@ export const DEFAULT_OAUTH_ALIAS_TLD = "gy" as const
 export const DEFAULT_OAUTH_ALIAS_ROOT = `${DEFAULT_PROJECT_TLD}.${DEFAULT_OAUTH_ALIAS_TLD}` as const
 
 export const GLOBAL_HACK_DIR_NAME = ".hack" as const
+export const GLOBAL_DAEMON_DIR_NAME = "daemon" as const
+export const GLOBAL_DAEMON_SOCKET_FILENAME = "hackd.sock" as const
+export const GLOBAL_DAEMON_PID_FILENAME = "hackd.pid" as const
+export const GLOBAL_DAEMON_LOG_FILENAME = "hackd.log" as const
 export const GLOBAL_CADDY_DIR_NAME = "caddy" as const
 export const GLOBAL_LOGGING_DIR_NAME = "logging" as const
 export const GLOBAL_SCHEMAS_DIR_NAME = "schemas" as const

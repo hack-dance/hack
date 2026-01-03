@@ -9,6 +9,10 @@ import { findProjectContext, readProjectConfig, readProjectDevHost } from "../li
 import { isMac } from "../lib/os.ts"
 import { ensureDir, pathExists, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts"
 import { parseDotEnv } from "../lib/env.ts"
+import { resolveHackInvocation } from "../lib/hack-cli.ts"
+import { removeFileIfExists } from "../daemon/process.ts"
+import { resolveDaemonPaths } from "../daemon/paths.ts"
+import { readDaemonStatus } from "../daemon/status.ts"
 import {
   analyzeComposeNetworkHygiene,
   dnsmasqConfigHasDomain,
@@ -150,6 +154,7 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({ args }): Pro
 
   // Global files
   results.push(await runCheck(s, "global files", () => checkGlobalFiles()))
+  results.push(await runCheck(s, "daemon", () => checkDaemonStatus()))
 
   if (isMac()) {
     results.push(
@@ -364,6 +369,28 @@ async function checkGlobalFiles(): Promise<CheckResult> {
     name: "global files",
     status: ok ? "ok" : "warn",
     message: ok ? root : `Missing compose files under ${root} (run: hack global install)`
+  }
+}
+
+async function checkDaemonStatus(): Promise<CheckResult> {
+  const paths = resolveDaemonPaths({})
+  const status = await readDaemonStatus({ paths })
+  if (status.running) {
+    return {
+      name: "daemon",
+      status: "ok",
+      message: `hackd running (pid ${status.pid ?? "unknown"})`
+    }
+  }
+
+  const detail =
+    status.pid !== null || status.socketExists
+      ? "hackd not running (stale pid/socket)"
+      : "hackd not running (run: hack daemon start)"
+  return {
+    name: "daemon",
+    status: "warn",
+    message: detail
   }
 }
 
@@ -799,6 +826,35 @@ async function runDoctorFix(): Promise<void> {
   if (dockerOk.exitCode !== 0) {
     note("Docker is not reachable; cannot apply fixes.", "doctor")
     return
+  }
+
+  const daemonPaths = resolveDaemonPaths({})
+  const daemonStatus = await readDaemonStatus({ paths: daemonPaths })
+  if (!daemonStatus.running) {
+    if (daemonStatus.pid !== null || daemonStatus.socketExists) {
+      const okStale = await confirm({
+        message: "Remove stale hackd pid/socket files?",
+        initialValue: true
+      })
+      if (isCancel(okStale)) throw new Error("Canceled")
+      if (okStale) {
+        await removeFileIfExists({ path: daemonPaths.pidPath })
+        await removeFileIfExists({ path: daemonPaths.socketPath })
+      }
+    }
+
+    const okStart = await confirm({
+      message: "Start hackd now?",
+      initialValue: true
+    })
+    if (isCancel(okStart)) throw new Error("Canceled")
+    if (okStart) {
+      const invocation = await resolveHackInvocation()
+      await run(
+        [invocation.bin, ...invocation.args, "daemon", "start"],
+        { stdin: "inherit" }
+      )
+    }
   }
 
   const paths = getGlobalPaths()

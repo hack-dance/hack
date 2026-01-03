@@ -1,27 +1,27 @@
 import { resolve } from "node:path"
 import { confirm, isCancel } from "@clack/prompts"
-import { YAML } from "bun"
 
 import { display } from "../ui/display.ts"
-import { exec, run } from "../lib/shell.ts"
+import { run } from "../lib/shell.ts"
 import {
   readProjectsRegistry,
-  removeProjectsById,
-  upsertProjectRegistration
+  removeProjectsById
 } from "../lib/projects-registry.ts"
-import { parseJsonLines } from "../lib/json-lines.ts"
-import { getString, isRecord } from "../lib/guards.ts"
-import { pathExists, readTextFile } from "../lib/fs.ts"
+import { pathExists } from "../lib/fs.ts"
+import { PROJECT_COMPOSE_FILENAME } from "../constants.ts"
 import {
-  GLOBAL_HACK_DIR_NAME,
-  PROJECT_COMPOSE_FILENAME,
-  PROJECT_CONFIG_FILENAME,
-  PROJECT_ENV_FILENAME
-} from "../constants.ts"
+  autoRegisterRuntimeHackProjects,
+  countRunningServices,
+  readRuntimeProjects
+} from "../lib/runtime-projects.ts"
+import { buildProjectViews, serializeProjectView } from "../lib/project-views.ts"
+import { requestDaemonJson } from "../daemon/client.ts"
 import { optJson, optProject } from "../cli/options.ts"
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts"
 
 import type { RegisteredProject } from "../lib/projects-registry.ts"
+import type { ProjectView } from "../lib/project-views.ts"
+import type { RuntimeProject, RuntimeService } from "../lib/runtime-projects.ts"
 import type { CliContext, CommandArgs, CommandHandlerFor } from "../cli/command.ts"
 
 const optDetails = defineOption({
@@ -81,44 +81,6 @@ const spec = defineCommand({
   subcommands: [pruneSpec],
   expandInRootHelp: true
 } as const)
-
-type RuntimeContainer = {
-  readonly id: string
-  readonly project: string
-  readonly service: string
-  readonly state: string
-  readonly status: string
-  readonly name: string
-  readonly workingDir: string | null
-}
-
-type RuntimeService = {
-  readonly service: string
-  readonly containers: readonly RuntimeContainer[]
-}
-
-type RuntimeProject = {
-  readonly project: string
-  readonly workingDir: string | null
-  readonly services: ReadonlyMap<string, RuntimeService>
-}
-
-type BranchRuntime = {
-  readonly branch: string
-  readonly runtime: RuntimeProject
-}
-
-type ProjectView = {
-  readonly name: string
-  readonly devHost: string | null
-  readonly repoRoot: string | null
-  readonly projectDir: string | null
-  readonly definedServices: readonly string[] | null
-  readonly runtime: RuntimeProject | null
-  readonly branchRuntime: readonly BranchRuntime[]
-  readonly kind: "registered" | "unregistered"
-  readonly status: "running" | "stopped" | "missing" | "unregistered"
-}
 
 const handleProjects: CommandHandlerFor<typeof spec> = async ({ args }): Promise<number> => {
   const filter =
@@ -233,14 +195,29 @@ async function runProjects(opts: {
   readonly details: boolean
   readonly json: boolean
 }): Promise<number> {
+  if (opts.json) {
+    const daemon = await requestDaemonJson({
+      path: "/v1/projects",
+      query: {
+        filter: opts.filter ?? null,
+        include_global: opts.includeGlobal,
+        include_unregistered: opts.includeUnregistered
+      }
+    })
+    if (daemon?.ok && daemon.json) {
+      process.stdout.write(`${JSON.stringify(daemon.json, null, 2)}\n`)
+      return 0
+    }
+  }
+
   const runtime = await readRuntimeProjects({
     includeGlobal: opts.includeGlobal
   })
 
-  await autoRegisterRuntimeHackProjects(runtime)
+  await autoRegisterRuntimeHackProjects({ runtime })
   const registry = await readProjectsRegistry()
 
-  const views = await buildViews({
+  const views = await buildProjectViews({
     registryProjects: registry.projects,
     runtime,
     filter: opts.filter,
@@ -350,308 +327,8 @@ function summarizeServiceState(opts: { readonly running: number; readonly total:
   return "mixed"
 }
 
-function countRunningServices(runtime: RuntimeProject | null): number {
-  if (!runtime) return 0
-  let count = 0
-  for (const svc of runtime.services.values()) {
-    const running = svc.containers.some(c => c.state === "running")
-    if (running) count += 1
-  }
-  return count
-}
-
-function collectBranchRuntime(opts: {
-  readonly baseName: string
-  readonly runtimeProjects: readonly RuntimeProject[]
-}): readonly BranchRuntime[] {
-  const prefix = `${opts.baseName}--`
-  const out: BranchRuntime[] = []
-  for (const runtime of opts.runtimeProjects) {
-    if (!runtime.project.startsWith(prefix)) continue
-    const branch = runtime.project.slice(prefix.length)
-    if (branch.length === 0) continue
-    out.push({ branch, runtime })
-  }
-  return out
-}
-
-async function buildViews(opts: {
-  readonly registryProjects: readonly RegisteredProject[]
-  readonly runtime: readonly RuntimeProject[]
-  readonly filter: string | null
-  readonly includeUnregistered: boolean
-}): Promise<ProjectView[]> {
-  const byName = new Map(opts.registryProjects.map(p => [p.name, p] as const))
-  const runtimeByName = new Map(opts.runtime.map(p => [p.project, p] as const))
-
-  const names = new Set<string>()
-  for (const p of opts.registryProjects) names.add(p.name)
-  if (opts.includeUnregistered) {
-    for (const p of opts.runtime) names.add(p.project)
-  }
-
-  const out: ProjectView[] = []
-  for (const name of [...names].sort((a, b) => a.localeCompare(b))) {
-    if (opts.filter && name !== opts.filter) continue
-
-    const reg = byName.get(name) ?? null
-    const runtime = runtimeByName.get(name) ?? null
-
-    if (reg) {
-      const projectDirOk = await pathExists(reg.projectDir)
-      const composeFile = resolve(reg.projectDir, PROJECT_COMPOSE_FILENAME)
-      const definedServices = projectDirOk ? await readComposeServices(await composeFile) : null
-      const running = countRunningServices(runtime)
-      const status: ProjectView["status"] =
-        !projectDirOk ? "missing"
-        : running > 0 ? "running"
-        : "stopped"
-      const branchRuntime = collectBranchRuntime({
-        baseName: name,
-        runtimeProjects: opts.runtime
-      })
-
-      out.push({
-        name,
-        devHost: reg.devHost ?? null,
-        repoRoot: reg.repoRoot,
-        projectDir: reg.projectDir,
-        definedServices,
-        runtime,
-        branchRuntime,
-        kind: "registered",
-        status
-      })
-      continue
-    }
-
-    // running but not registered
-    if (opts.includeUnregistered) {
-      out.push({
-        name,
-        devHost: null,
-        repoRoot: null,
-        projectDir: null,
-        definedServices: null,
-        runtime,
-        branchRuntime: [],
-        kind: "unregistered",
-        status: "unregistered"
-      })
-    }
-  }
-
-  return out
-}
-
-async function readComposeServices(composeFile: string): Promise<readonly string[] | null> {
-  const text = await readTextFile(composeFile)
-  if (!text) return null
-
-  let parsed: unknown
-  try {
-    parsed = YAML.parse(text)
-  } catch {
-    return null
-  }
-  if (!isRecord(parsed)) return null
-
-  const servicesRaw = parsed["services"]
-  if (!isRecord(servicesRaw)) return []
-
-  return Object.keys(servicesRaw).sort((a, b) => a.localeCompare(b))
-}
-
-async function readRuntimeProjects(opts: {
-  readonly includeGlobal: boolean
-}): Promise<readonly RuntimeProject[]> {
-  const res = await exec(
-    ["docker", "ps", "-a", "--filter", "label=com.docker.compose.project", "--format", "json"],
-    { stdin: "ignore" }
-  )
-  if (res.exitCode !== 0) {
-    return []
-  }
-
-  const baseRows = parseJsonLines(res.stdout)
-  const ids = baseRows
-    .map(row => getString(row, "ID") ?? getString(row, "Id") ?? "")
-    .filter(id => id.length > 0)
-  const labelsById = await readContainerLabels(ids)
-
-  const home = process.env.HOME ?? ""
-  const globalRoot = home ? resolve(home, GLOBAL_HACK_DIR_NAME) : ""
-
-  const containers: RuntimeContainer[] = []
-  for (const row of baseRows) {
-    const id = getString(row, "ID") ?? getString(row, "Id") ?? ""
-    const state = getString(row, "State") ?? ""
-    const status = getString(row, "Status") ?? ""
-    const name = getString(row, "Names") ?? ""
-    const labelsRaw = getString(row, "Labels")
-    const labels =
-      (id.length > 0 ? labelsById.get(id) : undefined) ??
-      (labelsRaw ? parseLabelString(labelsRaw) : {})
-    const project = labels["com.docker.compose.project"] ?? null
-    const service = labels["com.docker.compose.service"] ?? null
-    const oneoff = (labels["com.docker.compose.oneoff"] ?? "").toLowerCase() === "true"
-    if (!project || !service || oneoff) continue
-
-    const workingDir = labels["com.docker.compose.project.working_dir"] ?? null
-    const isGlobal = globalRoot.length > 0 && workingDir ? workingDir.startsWith(globalRoot) : false
-    if (isGlobal && !opts.includeGlobal) continue
-
-    containers.push({ id, project, service, state, status, name, workingDir })
-  }
-
-  const byProject = new Map<
-    string,
-    { workingDir: string | null; byService: Map<string, RuntimeContainer[]> }
-  >()
-  for (const c of containers) {
-    const p = byProject.get(c.project) ?? {
-      workingDir: c.workingDir,
-      byService: new Map()
-    }
-    const arr = p.byService.get(c.service) ?? []
-    p.byService.set(c.service, [...arr, c])
-    byProject.set(c.project, p)
-  }
-
-  const out: RuntimeProject[] = []
-  for (const [project, value] of byProject.entries()) {
-    const services = new Map<string, RuntimeService>()
-    for (const [service, containers] of value.byService.entries()) {
-      services.set(service, { service, containers })
-    }
-    out.push({ project, workingDir: value.workingDir, services })
-  }
-
-  return out.sort((a, b) => a.project.localeCompare(b.project))
-}
-
-async function readContainerLabels(
-  ids: readonly string[]
-): Promise<Map<string, Record<string, string>>> {
-  if (ids.length === 0) return new Map()
-
-  const res = await exec(
-    ["docker", "inspect", "--format", "{{.Id}}|{{json .Config.Labels}}", ...ids],
-    { stdin: "ignore" }
-  )
-  if (res.exitCode !== 0) return new Map()
-
-  const out = new Map<string, Record<string, string>>()
-  for (const line of res.stdout.split("\n")) {
-    const trimmed = line.trim()
-    if (trimmed.length === 0) continue
-    const idx = trimmed.indexOf("|")
-    if (idx <= 0) continue
-    const id = trimmed.slice(0, idx).trim()
-    const json = trimmed.slice(idx + 1).trim()
-    const labels = parseLabelsJson(json)
-    if (id.length > 0) {
-      out.set(id, labels)
-      if (id.length >= 12) out.set(id.slice(0, 12), labels)
-    }
-  }
-
-  return out
-}
-
-function parseLabelsJson(raw: string): Record<string, string> {
-  if (!raw || raw === "null") return {}
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw)
-  } catch {
-    return {}
-  }
-  if (!isRecord(parsed)) return {}
-
-  const out: Record<string, string> = {}
-  for (const [k, v] of Object.entries(parsed)) {
-    if (typeof v === "string") out[k] = v
-  }
-  return out
-}
-
-function parseLabelString(raw: string): Record<string, string> {
-  const out: Record<string, string> = {}
-  for (const part of raw.split(",")) {
-    const idx = part.indexOf("=")
-    if (idx <= 0) continue
-    const key = part.slice(0, idx).trim()
-    const value = part.slice(idx + 1).trim()
-    if (key.length === 0) continue
-    out[key] = value
-  }
-  return out
-}
-
 function sanitizeName(value: string): string {
   return value.trim().toLowerCase()
-}
-
-async function autoRegisterRuntimeHackProjects(runtime: readonly RuntimeProject[]): Promise<void> {
-  for (const p of runtime) {
-    const wd = p.workingDir ?? ""
-    const dirName =
-      wd.endsWith("/.hack") ? ".hack"
-      : wd.endsWith("/.dev") ? ".dev"
-      : null
-    if (!dirName) continue
-
-    const projectDir = wd
-    const repoRoot = resolve(projectDir, "..")
-    const composeFile = resolve(projectDir, PROJECT_COMPOSE_FILENAME)
-    if (!(await pathExists(composeFile))) continue
-
-    await upsertProjectRegistration({
-      project: {
-        projectRoot: repoRoot,
-        projectDirName: dirName,
-        projectDir,
-        composeFile,
-        envFile: resolve(projectDir, PROJECT_ENV_FILENAME),
-        configFile: resolve(projectDir, PROJECT_CONFIG_FILENAME)
-      }
-    })
-  }
-}
-
-function serializeProjectView(view: ProjectView): Record<string, unknown> {
-  return {
-    name: view.name,
-    dev_host: view.devHost ?? null,
-    repo_root: view.repoRoot ?? null,
-    project_dir: view.projectDir ?? null,
-    defined_services: view.definedServices ?? null,
-    runtime: view.runtime ? serializeRuntimeProject(view.runtime) : null,
-    branch_runtime: view.branchRuntime.map(entry => ({
-      branch: entry.branch,
-      runtime: serializeRuntimeProject(entry.runtime)
-    })),
-    kind: view.kind,
-    status: view.status
-  }
-}
-
-function serializeRuntimeProject(runtime: RuntimeProject): Record<string, unknown> {
-  return {
-    project: runtime.project,
-    working_dir: runtime.workingDir ?? null,
-    services: [...runtime.services.values()].map(service => ({
-      service: service.service,
-      containers: service.containers.map(container => ({
-        id: container.id,
-        state: container.state,
-        status: container.status,
-        name: container.name,
-        working_dir: container.workingDir ?? null
-      }))
-    }))
-  }
 }
 
 type MissingRegistryEntry = {

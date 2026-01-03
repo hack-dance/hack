@@ -21,6 +21,7 @@ import { logPipeCommand } from "../commands/log-pipe.ts"
 import { helpCommand } from "../commands/help.ts"
 import { globalCommand } from "../commands/global.ts"
 import { doctorCommand } from "../commands/doctor.ts"
+import { daemonCommand } from "../commands/daemon.ts"
 import { mcpCommand } from "../commands/mcp.ts"
 import { setupCommand } from "../commands/setup.ts"
 import { agentCommand } from "../commands/agent.ts"
@@ -51,6 +52,7 @@ export const CLI_SPEC = defineCli({
     branchCommand,
     logPipeCommand,
     doctorCommand,
+    daemonCommand,
     theCommand,
     secretsCommand,
     configCommand,

@@ -19,6 +19,7 @@ proxy, DNS helpers, and logging stack under `~/.hack/`.
 - **CoreDNS** resolves `*.hack` inside containers to the Caddy IP.
 - **Alloy + Loki + Grafana** capture logs and provide history.
 - **Schemas** are served by Caddy at `https://schemas.hack`.
+- **hackd (optional daemon)** caches Docker state for fast `hack projects --json` / `hack ps --json`.
 
 ```mermaid
 graph LR
@@ -26,23 +27,27 @@ graph LR
   Browser["Browser"]
 
   subgraph Host["Developer machine"]
-    subgraph Global["Global infra (~/.hack)"]
-      Caddy["Caddy docker-proxy"]
-      CoreDNS["CoreDNS"]
-      Loki["Loki"]
-      Grafana["Grafana"]
-      Alloy["Alloy (Docker logs)"]
-    end
+  subgraph Global["Global infra (~/.hack)"]
+    Caddy["Caddy docker-proxy"]
+    CoreDNS["CoreDNS"]
+    Loki["Loki"]
+    Grafana["Grafana"]
+    Alloy["Alloy (Docker logs)"]
+  end
 
-    subgraph Project["Project repo (.hack)"]
-      Compose["docker-compose.yml"]
-      Services["Service containers"]
-    end
+  subgraph Project["Project repo (.hack)"]
+    Compose["docker-compose.yml"]
+    Services["Service containers"]
+  end
+
+  Hackd["hackd (optional daemon)"]
   end
 
   CLI -->|"hack global install/up"| Global
   CLI -->|"hack init/up"| Compose
   Compose -->|"docker compose"| Services
+  CLI -->|"projects/ps --json"| Hackd
+  Hackd -->|"docker events + ps"| Services
 
   Services -->|"Docker labels"| Caddy
   Services -->|"container logs"| Alloy
@@ -88,7 +93,7 @@ graph LR
   Service -->|"HTTPS request"| Caddy["Caddy docker-proxy"]
   Caddy -->|"Routes by labels"| Upstream["Service upstream"]
 ```
-
+ 
 ## Lifecycle (init → up → logs)
 
 ```mermaid
@@ -134,6 +139,33 @@ graph LR
   Loki -->|"Explore"| Grafana
 ```
 
+Note: the daemon does not proxy logs yet; `hack logs` still talks directly to Docker Compose or Loki.
+
+## Daemon (hackd)
+
+`hackd` is an optional local daemon that watches Docker events and maintains a cached view of running
+containers. It serves a small local API over a Unix socket at `~/.hack/daemon/hackd.sock` and powers:
+
+- `hack projects --json`
+- `hack ps --json`
+- streaming consumers (TUI/MCP)
+
+If the daemon is not running (or version-mismatched), the CLI falls back to direct Docker calls.
+
+Why optional:
+- The CLI must keep working with zero background processes.
+- Not all users need cached JSON (especially if they only use interactive commands).
+- It stays off in minimal or constrained environments, but is available when you want faster status.
+
+```mermaid
+graph LR
+  CLI["hack CLI (JSON)"] -->|GET /v1/projects| Hackd["hackd"]
+  CLI -->|GET /v1/ps| Hackd
+  Hackd -->|"docker events"| Docker["Docker Engine"]
+  Hackd -->|"docker ps"| Docker
+  Hackd -->|"cached state"| Cache["In-memory cache"]
+```
+
 ## Branch builds
 
 `--branch <name>` generates a per-branch Compose override that:
@@ -146,6 +178,9 @@ This enables parallel worktrees without port or hostname collisions.
 ## Files and directories
 
 - `~/.hack/`
+  - `daemon/hackd.sock`
+  - `daemon/hackd.pid`
+  - `daemon/hackd.log`
   - `caddy/docker-compose.yml`
   - `caddy/Corefile` (CoreDNS config)
   - `logging/docker-compose.yml`
@@ -170,5 +205,6 @@ This enables parallel worktrees without port or hostname collisions.
 - Caddy routes by container label so there is no per-repo reverse proxy config.
 - CoreDNS gives containers the same `*.hack` namespace as the host.
 - Logs default to `docker compose logs` for speed; Loki is used for history and filtering.
+- The optional daemon keeps CLI JSON queries fast without making it a hard dependency.
 - Config lives alongside each repo in `.hack/` to keep repos isolated and portable.
 - Schemas are generated from templates and served locally for editor validation.

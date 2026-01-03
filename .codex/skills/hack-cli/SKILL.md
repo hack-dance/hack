@@ -41,6 +41,11 @@ Use branch instances to run parallel environments:
 - Otherwise use `--project <name>` or `--path <repo-root>`.
 - List projects: `hack projects --json`.
 
+## Daemon (optional)
+
+- Start for faster JSON status/ps: `hack daemon start`
+- Check status: `hack daemon status`
+
 ## Agent Setup
 
 - Cursor rules: `hack setup cursor`

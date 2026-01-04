@@ -49,6 +49,7 @@
     "@charmland/lipgloss": "2.0.0-beta.3-0e280f3",
     "@clack/prompts": "1.0.0-alpha.9",
     "@modelcontextprotocol/sdk": "1.25.1",
+    "@opentui/core": "^0.1.68",
     "zod": "4.3.4"
   }
 }

@@ -25,6 +25,7 @@ import { daemonCommand } from "../commands/daemon.ts"
 import { mcpCommand } from "../commands/mcp.ts"
 import { setupCommand } from "../commands/setup.ts"
 import { agentCommand } from "../commands/agent.ts"
+import { tuiCommand } from "../commands/tui.ts"
 
 type PackageJsonType = {
   name: string
@@ -46,6 +47,7 @@ export const CLI_SPEC = defineCli({
     downCommand,
     restartCommand,
     psCommand,
+    tuiCommand,
     runCommand,
     logsCommand,
     openCommand,

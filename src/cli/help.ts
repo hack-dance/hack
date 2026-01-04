@@ -1,4 +1,5 @@
 import { builtinOptions, renderArgsFromPositionals, resolveCommand } from "./command.ts"
+import { renderHackBanner } from "../lib/hack-banner.ts"
 import { gumFormat, isGumAvailable } from "../ui/gum.ts"
 
 import type { AnyCommandSpec, CliGroup, CliSpec, OptionSpec } from "./command.ts"
@@ -23,16 +24,21 @@ export async function printHelpForPath(
   cli: CliSpec,
   positionals: readonly string[]
 ): Promise<void> {
+  const banner = await renderHackBanner({ trimEmpty: true })
   const markdown = renderHelpMarkdownForPath(cli, positionals)
+  const markdownWithBanner =
+    banner.length > 0 ? `\`\`\`text\n${banner}\n\`\`\`\n\n${markdown}` : markdown
   if (isPrettyHelpEnabled()) {
-    const res = await gumFormat({ type: "markdown", input: markdown })
+    const res = await gumFormat({ type: "markdown", input: markdownWithBanner })
     if (res.ok) {
       writeStdout(res.value)
       return
     }
   }
 
-  writeStdout(renderHelpForPath(cli, positionals))
+  const plain = renderHelpForPath(cli, positionals)
+  const plainWithBanner = banner.length > 0 ? `${banner}\n\n${plain}` : plain
+  writeStdout(plainWithBanner)
 }
 
 function isPrettyHelpEnabled(): boolean {

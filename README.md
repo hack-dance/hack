@@ -3,21 +3,24 @@
 <!-- PROJECT LOGO -->
 <br />
 <div align="center">
-  <a href="https://github.com/othneildrew/Best-README-Template">
-    <img src="assets/hacker-mash.gif" alt="Logo" width="600">
-  </a>
-
-  <h3 align="center">hack</h3>
-
+<p style="font-family:monospace;padding:0;margin:0;white-space:pre;font-size:12px">
+ █████   █████   █████████     █████████  █████   ████
+░░███   ░░███   ███░░░░░███   ███░░░░░███░░███   ███░ 
+ ░███    ░███  ░███    ░███  ███     ░░░  ░███  ███   
+ ░███████████  ░███████████ ░███          ░███████    
+ ░███░░░░░███  ░███░░░░░███ ░███          ░███░░███   
+ ░███    ░███  ░███    ░███ ░░███     ███ ░███ ░░███  
+ █████   █████ █████   █████ ░░█████████  █████ ░░████
+░░░░░   ░░░░░ ░░░░░   ░░░░░   ░░░░░░░░░  ░░░░░   ░░░░ 
+</p>
+<br/>
   <p align="center">
-    Opinionated local-dev orchestration for running <b>multiple projects</b> at the same time** without port conflicts.
+    Opinionated local-dev orchestration for running <b>multiple projects</b> at the same time without port conflicts.
     <br />
   </p>
 </div>
 
 ---
-
-
 **Network isolation per repo / branch**: every instance runs on its own Docker network (so Postgres/Redis/etc can stay on default ports *inside* the project).
 
 **Stable HTTPS hostnames**: `https://<project>.hack` (and subdomains like `https://api.<project>.hack`) routed by a global Caddy proxy.
@@ -150,7 +153,7 @@ hack config set logs.snapshot_backend "compose"
 ## Commands (high level)
 
 - **Global**: `hack global install|up|down|status|logs|logs-reset|ca|cert|trust`
-- **Project**: `hack init|up|down|restart|ps|run|logs|open`
+- **Project**: `hack init|up|down|restart|ps|run|logs|open|tui`
 - **Config**: `hack config get|set`
 - **Projects**: `hack projects|prune`
 - **Status**: `hack status` (shortcut for `hack projects --details`)

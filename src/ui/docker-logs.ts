@@ -135,34 +135,36 @@ export async function dockerComposeLogsJson({
     writeLogStreamEvent({ event: buildLogStreamStartEvent({ context: streamContext }) })
   }
 
+  const stdoutWriter = createJsonLogWriter({
+    stream: "stdout",
+    projectName,
+    streamContext
+  })
+  const stderrWriter = createJsonLogWriter({
+    stream: "stderr",
+    projectName,
+    streamContext
+  })
+
+  const stdoutGrouper = createStructuredLogGrouper({
+    write: stdoutWriter
+  })
+  const stderrGrouper = createStructuredLogGrouper({
+    write: stderrWriter
+  })
+
   const stdoutTask = (async () => {
     for await (const line of readLinesFromStream(proc.stdout)) {
-      const entry = parseComposeLogLine({
-        line,
-        stream: "stdout",
-        projectName
-      })
-      if (streamContext) {
-        writeLogStreamEvent({ event: buildLogStreamLogEvent({ context: streamContext, entry }) })
-      } else {
-        writeJsonLogLine(entry)
-      }
+      stdoutGrouper.handleLine(line)
     }
+    stdoutGrouper.flush()
   })()
 
   const stderrTask = (async () => {
     for await (const line of readLinesFromStream(proc.stderr)) {
-      const entry = parseComposeLogLine({
-        line,
-        stream: "stderr",
-        projectName
-      })
-      if (streamContext) {
-        writeLogStreamEvent({ event: buildLogStreamLogEvent({ context: streamContext, entry }) })
-      } else {
-        writeJsonLogLine(entry)
-      }
+      stderrGrouper.handleLine(line)
     }
+    stderrGrouper.flush()
   })()
 
   const exitCode = await proc.exited
@@ -176,6 +178,31 @@ export async function dockerComposeLogsJson({
     })
   }
   return exitCode
+}
+
+function createJsonLogWriter(opts: {
+  readonly stream: "stdout" | "stderr"
+  readonly projectName?: string
+  readonly streamContext?: LogStreamContext
+}): (text: string) => void {
+  return text => {
+    const lines = text.split("\n")
+    for (const line of lines) {
+      if (line.trim().length === 0) continue
+      const entry = parseComposeLogLine({
+        line,
+        stream: opts.stream,
+        projectName: opts.projectName
+      })
+      if (opts.streamContext) {
+        writeLogStreamEvent({
+          event: buildLogStreamLogEvent({ context: opts.streamContext, entry })
+        })
+      } else {
+        writeJsonLogLine(entry)
+      }
+    }
+  }
 }
 
 function rewriteComposePrefix(opts: {

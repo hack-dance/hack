@@ -356,6 +356,62 @@ export function renderProjectConfigSchemaJson(): string {
           enabled: { type: "boolean" },
           tld: { type: "string" }
         }
+      },
+      controlPlane: {
+        type: "object",
+        additionalProperties: true,
+        properties: {
+          extensions: {
+            type: "object",
+            additionalProperties: {
+              type: "object",
+              additionalProperties: true,
+              properties: {
+                enabled: { type: "boolean" },
+                cliNamespace: { type: "string" },
+                config: {
+                  type: "object",
+                  additionalProperties: true
+                }
+              }
+            }
+          },
+          tickets: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              git: {
+                type: "object",
+                additionalProperties: true,
+                properties: {
+                  enabled: { type: "boolean" },
+                  branch: { type: "string" },
+                  remote: { type: "string" },
+                  forceBareClone: { type: "boolean" }
+                }
+              }
+            }
+          },
+          supervisor: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              enabled: { type: "boolean" },
+              maxConcurrentJobs: { type: "number" },
+              logsMaxBytes: { type: "number" }
+            }
+          },
+          gateway: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              enabled: { type: "boolean" },
+              bind: { type: "string" },
+              port: { type: "number" },
+              allowWrites: { type: "boolean" }
+            }
+          }
+        }
       }
     },
     required: ["name", "dev_host"]

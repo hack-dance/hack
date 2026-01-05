@@ -21,6 +21,8 @@ export async function requestDaemonJson(opts: {
   readonly path: string
   readonly query?: Record<string, string | boolean | null>
   readonly timeoutMs?: number
+  readonly method?: "GET" | "POST"
+  readonly body?: Record<string, unknown>
 }): Promise<DaemonJsonResponse | null> {
   const paths = resolveDaemonPaths({})
   const status = await readDaemonStatus({ paths })
@@ -34,9 +36,10 @@ export async function requestDaemonJson(opts: {
 
   const raw = await requestDaemonRaw({
     socketPath: paths.socketPath,
-    method: "GET",
+    method: opts.method ?? "GET",
     path: opts.path,
     query: opts.query,
+    body: opts.body,
     timeoutMs: opts.timeoutMs ?? 1_000
   })
   if (!raw) return null
@@ -67,9 +70,10 @@ async function isDaemonCompatible(opts: {
 
 async function requestDaemonRaw(opts: {
   readonly socketPath: string
-  readonly method: "GET"
+  readonly method: "GET" | "POST"
   readonly path: string
   readonly query?: Record<string, string | boolean | null>
+  readonly body?: Record<string, unknown>
   readonly timeoutMs: number
 }): Promise<{ readonly statusCode: number; readonly body: string } | null> {
   const queryString = buildQueryString({ query: opts.query })
@@ -79,10 +83,19 @@ async function requestDaemonRaw(opts: {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), opts.timeoutMs)
 
+  const payload =
+    opts.body && opts.method !== "GET" ? JSON.stringify(opts.body) : undefined
+
   try {
     const res = await fetch(url, {
       method: opts.method,
       unix: opts.socketPath,
+      ...(payload ?
+        {
+          body: payload,
+          headers: { "content-type": "application/json" }
+        }
+      : {}),
       signal: controller.signal
     })
     const body = await res.text()

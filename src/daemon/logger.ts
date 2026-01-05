@@ -1,12 +1,9 @@
 import { appendFile } from "node:fs/promises"
 
-export type DaemonLogLevel = "info" | "warn" | "error"
+import type { LogFields, LogInput, LogLevel, Logger } from "../ui/logger.ts"
 
-export interface DaemonLogger {
-  info(opts: { readonly message: string }): void
-  warn(opts: { readonly message: string }): void
-  error(opts: { readonly message: string }): void
-}
+export type DaemonLogLevel = LogLevel
+export type DaemonLogger = Logger
 
 export function createDaemonLogger({
   logPath,
@@ -17,9 +14,16 @@ export function createDaemonLogger({
 }): DaemonLogger {
   let queue = Promise.resolve()
 
-  const writeLine = (level: DaemonLogLevel, message: string) => {
+  const writeLine = ({ level, input }: { readonly level: DaemonLogLevel; readonly input: LogInput }) => {
     const timestamp = new Date().toISOString()
-    const line = `[${timestamp}] ${level.toUpperCase()} ${message}\n`
+    const fields = input.fields
+    const suffix = fields
+      ? ` (${Object.keys(fields)
+          .sort()
+          .map(key => `${key}=${String(fields[key])}`)
+          .join(", ")})`
+      : ""
+    const line = `[${timestamp}] ${level.toUpperCase()} ${input.message}${suffix}\n`
     if (foreground) {
       process.stderr.write(line)
     }
@@ -27,8 +31,11 @@ export function createDaemonLogger({
   }
 
   return {
-    info: ({ message }) => writeLine("info", message),
-    warn: ({ message }) => writeLine("warn", message),
-    error: ({ message }) => writeLine("error", message)
+    debug: input => writeLine({ level: "debug", input }),
+    info: input => writeLine({ level: "info", input }),
+    warn: input => writeLine({ level: "warn", input }),
+    error: input => writeLine({ level: "error", input }),
+    success: input => writeLine({ level: "success", input }),
+    step: input => writeLine({ level: "step", input })
   }
 }

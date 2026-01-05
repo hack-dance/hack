@@ -76,6 +76,7 @@ graph LR
     - `.internal/compose.override.yml` (internal DNS/TLS injection)
     - `.branch/compose.<branch>.override.yml` (branch builds)
 
+
 ## Internal DNS + TLS (containers)
 
 When `internal.dns` / `internal.tls` are enabled, `hack up` writes a Compose override that:
@@ -165,6 +166,35 @@ graph LR
   Hackd -->|"docker ps"| Docker
   Hackd -->|"cached state"| Cache["In-memory cache"]
 ```
+
+## Control plane + extensions
+
+The control plane keeps the core CLI minimal while adding features as extensions. `hackd` loads
+extension manifests and exposes their APIs; the CLI dispatches extension commands via `hack x`.
+
+- **Gateway**: optional HTTP/WS access to `hackd` (localhost by default).
+- **Supervisor**: job execution + streaming for agents.
+- **Tickets**: durable, git-backed state for collaboration (planned).
+
+```mermaid
+graph LR
+  CLI["hack CLI"] --> Hackd["hackd"]
+  Hackd --> ExtMgr["ExtensionManager"]
+  ExtMgr --> Gateway["Gateway"]
+  ExtMgr --> Supervisor["Supervisor"]
+  ExtMgr --> Tickets["Tickets"]
+  Remote["Remote client"] -->|HTTP/WS| Gateway
+  Gateway --> Hackd
+```
+
+### Gateway API + remote workflows
+
+The gateway exposes:
+- `GET /v1/projects` with `project_id` for remote workflow routing
+- job execution + streaming (`/control-plane/projects/:id/jobs`)
+- PTY-backed shells (`/control-plane/projects/:id/shells`, WS stream)
+
+For full usage, security posture, and end-to-end examples, see `GATEWAY_API.md`.
 
 ## Branch builds
 

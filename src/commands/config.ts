@@ -270,10 +270,80 @@ function parseJsonObject(opts: {
 }
 
 function parseKeyPath(opts: { readonly raw: string }): readonly string[] {
-  return opts.raw
-    .split(".")
-    .map(part => part.trim())
-    .filter(part => part.length > 0)
+  const parts: string[] = []
+  let buffer = ""
+  let escape = false
+  let inBracket = false
+  let quote: "\"" | "'" | null = null
+
+  const pushBuffer = () => {
+    const trimmed = buffer.trim()
+    if (trimmed.length > 0) parts.push(trimmed)
+    buffer = ""
+  }
+
+  for (let i = 0; i < opts.raw.length; i += 1) {
+    const ch = opts.raw[i] ?? ""
+    if (inBracket) {
+      if (escape) {
+        buffer += ch
+        escape = false
+        continue
+      }
+      if (ch === "\\") {
+        escape = true
+        continue
+      }
+      if (quote) {
+        if (ch === quote) {
+          quote = null
+          continue
+        }
+        buffer += ch
+        continue
+      }
+      if (ch === "'" || ch === "\"") {
+        quote = ch
+        continue
+      }
+      if (ch === "]") {
+        inBracket = false
+        pushBuffer()
+        continue
+      }
+      buffer += ch
+      continue
+    }
+
+    if (escape) {
+      buffer += ch
+      escape = false
+      continue
+    }
+    if (ch === "\\") {
+      escape = true
+      continue
+    }
+    if (ch === ".") {
+      pushBuffer()
+      continue
+    }
+    if (ch === "[") {
+      if (buffer.trim().length > 0) {
+        pushBuffer()
+      } else {
+        buffer = ""
+      }
+      inBracket = true
+      continue
+    }
+    buffer += ch
+  }
+
+  if (escape) buffer += "\\"
+  if (buffer.length > 0) pushBuffer()
+
+  return parts
 }
 
 function getPathValue(opts: {

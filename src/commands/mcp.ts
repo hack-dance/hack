@@ -253,8 +253,7 @@ async function handleMcpPrint({
     renderMcpConfigSnippet({ target, scope, projectRoot })
   )
 
-  for (let i = 0; i < snippets.length; i += 1) {
-    const snippet = snippets[i]
+  for (const [index, snippet] of snippets.entries()) {
     if (!snippet.ok) {
       process.stderr.write(`${snippet.target}: ${snippet.message}\n`)
       exitCode = 1
@@ -266,7 +265,7 @@ async function handleMcpPrint({
     }
 
     process.stdout.write(`${snippet.content}\n`)
-    if (i < snippets.length - 1) process.stdout.write("\n")
+    if (index < snippets.length - 1) process.stdout.write("\n")
   }
 
   return exitCode

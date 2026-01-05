@@ -19,6 +19,7 @@ export type BranchRuntime = {
 }
 
 export type ProjectView = {
+  readonly projectId?: string
   readonly name: string
   readonly devHost: string | null
   readonly repoRoot: string | null
@@ -67,6 +68,7 @@ export async function buildProjectViews(opts: {
       })
 
       out.push({
+        projectId: reg.id,
         name,
         devHost: reg.devHost ?? null,
         repoRoot: reg.repoRoot,
@@ -100,6 +102,7 @@ export async function buildProjectViews(opts: {
 
 export function serializeProjectView(view: ProjectView): Record<string, unknown> {
   return {
+    project_id: view.projectId ?? null,
     name: view.name,
     dev_host: view.devHost ?? null,
     repo_root: view.repoRoot ?? null,

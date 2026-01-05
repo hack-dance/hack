@@ -135,6 +135,34 @@ export async function resolveRegisteredProjectByName(opts: {
   }
 }
 
+export async function resolveRegisteredProjectById(opts: {
+  readonly id: string
+}): Promise<{ readonly project: ProjectContext; readonly registration: RegisteredProject } | null> {
+  const registry = await readProjectsRegistry()
+  const match = registry.projects.find(p => p.id === opts.id) ?? null
+  if (!match) return null
+
+  if (!(await pathExists(match.projectDir))) return null
+
+  const composeFile = resolve(match.projectDir, PROJECT_COMPOSE_FILENAME)
+  const configFile = resolve(match.projectDir, PROJECT_CONFIG_FILENAME)
+  const envFile = resolve(match.projectDir, PROJECT_ENV_FILENAME)
+
+  if (!(await pathExists(composeFile))) return null
+
+  return {
+    registration: match,
+    project: {
+      projectRoot: match.repoRoot,
+      projectDirName: match.projectDirName,
+      projectDir: match.projectDir,
+      composeFile,
+      envFile,
+      configFile
+    }
+  }
+}
+
 export async function removeProjectsById(opts: {
   readonly ids: readonly string[]
 }): Promise<{ readonly removed: readonly RegisteredProject[] }> {

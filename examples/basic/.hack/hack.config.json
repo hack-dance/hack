@@ -14,5 +14,19 @@
   "oauth": {
     "enabled": true,
     "tld": "gy"
+  },
+  "controlPlane": {
+    "gateway": {
+      "enabled": true,
+      "allowWrites": true
+    },
+    "extensions": {
+      "dance.hack.gateway": {
+        "enabled": true
+      },
+      "dance.hack.supervisor": {
+        "enabled": true
+      }
+    }
   }
 }

@@ -110,10 +110,12 @@ test("buildProjectViews includes defined services and runtime status", async () 
   const alphaView = views.find(view => view.name === "alpha")
   expect(alphaView?.definedServices).toEqual(["api", "web"])
   expect(alphaView?.status).toBe("running")
+  expect(alphaView?.projectId).toBe("alpha-id")
 
   const betaView = views.find(view => view.name === "beta")
   expect(betaView?.status).toBe("unregistered")
 
   const serialized = alphaView ? serializeProjectView(alphaView) : null
   expect(serialized?.["defined_services"]).toEqual(["api", "web"])
+  expect(serialized?.["project_id"]).toBe("alpha-id")
 })

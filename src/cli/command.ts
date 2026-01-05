@@ -2,7 +2,14 @@ import { parseArgs as bunParseArgs } from "util"
 
 import { isRecord, isStringArray } from "../lib/guards.ts"
 
-export type CliGroup = "Global" | "Project" | "Agents" | "Diagnostics" | "Secrets" | "Fun"
+export type CliGroup =
+  | "Global"
+  | "Project"
+  | "Extensions"
+  | "Agents"
+  | "Diagnostics"
+  | "Secrets"
+  | "Fun"
 
 export type OptionType = "boolean" | "string" | "number"
 
@@ -184,7 +191,11 @@ export interface ParsedCliInvocation {
   readonly positionals: readonly string[]
 }
 
-export function parseCliArgv(cli: CliSpec, argv: readonly string[]): ParsedCliInvocation {
+export function parseCliArgv(
+  cli: CliSpec,
+  argv: readonly string[],
+  opts?: { readonly allowUnknownOptions?: boolean }
+): ParsedCliInvocation {
   const normalizedArgv = normalizeArgvForDefaults(cli, argv)
   const options = buildUnionParseOptions(cli)
 
@@ -193,7 +204,7 @@ export function parseCliArgv(cli: CliSpec, argv: readonly string[]): ParsedCliIn
     parsed = bunParseArgs({
       args: [...normalizedArgv],
       options,
-      strict: true,
+      strict: opts?.allowUnknownOptions !== true,
       allowPositionals: true
     })
   } catch (error: unknown) {

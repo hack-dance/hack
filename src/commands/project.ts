@@ -4,6 +4,7 @@ import {
   isCancel,
   multiselect,
   note,
+  select,
   text
 } from "@clack/prompts"
 

@@ -3,7 +3,7 @@
 <!-- PROJECT LOGO -->
 <br />
 <div align="center">
-<p style="font-family:monospace;padding:0;margin:0;white-space:pre;font-size:12px">
+<pre style="font-family:monospace;padding:0;margin:0;white-space:pre;font-size:12px;background:none!important;">
  █████   █████   █████████     █████████  █████   ████
 ░░███   ░░███   ███░░░░░███   ███░░░░░███░░███   ███░ 
  ░███    ░███  ░███    ░███  ███     ░░░  ░███  ███   
@@ -201,6 +201,85 @@ Skip it when:
 - You rarely use JSON status/ps outputs.
 
 If it is not running (or version-mismatched), the CLI falls back to direct Docker calls.
+
+## Control plane + extensions (optional)
+
+`hack` includes a small control-plane kernel so features like jobs, tickets, and remote access can
+ship as extensions without bloating the core CLI.
+
+- Extension commands run via `hack x <namespace> <command>`.
+- Extensions are opt-in per project via `controlPlane` in `.hack/hack.config.json`.
+- `controlPlane.gateway.enabled` implicitly enables the gateway extension.
+
+See `SPECS/control-plane/consolidated.md` and `EXTENSIONS.md` for the extension SDK surface.
+
+### Gateway (remote access)
+
+The gateway exposes `hackd` over HTTP/WS with token auth. It binds to `127.0.0.1` by default and
+should be exposed via a Zero Trust/VPN or SSH tunnel when needed. Setup prints a QR by default
+(use `--no-qr` to skip).
+
+```bash
+hack remote setup
+# or:
+hack gateway setup
+# or manually:
+hack gateway enable
+hack daemon stop && hack daemon start
+hack x gateway token-create
+```
+
+Gateway tokens default to read-only. For non-GET requests, set
+`controlPlane.gateway.allowWrites = true` and create a write-scoped token:
+
+```bash
+hack x gateway token-create --scope write
+```
+
+Current gateway API (HTTP/WS):
+- status/metrics/projects/ps (`/v1/*`)
+- supervisor jobs: list/create/show/cancel + log/event stream (`/control-plane/*`)
+- supervisor shells: create/show + PTY stream (write token + allowWrites)
+- CLI shell client: `hack x supervisor shell` (gateway + write token required)
+
+Interactive shells are available over the gateway WebSocket; the CLI can attach with
+`hack x supervisor shell` (write token + allowWrites required). Use SSH/Zero Trust for a full
+terminal UI, or run commands via supervisor jobs.
+
+See `GATEWAY_API.md` for full API usage, structured workflow patterns, and a runnable demo.
+
+Remote access options (recommended order):
+1) SSH tunnel to the gateway port for quick, ad-hoc access.
+2) Zero Trust/VPN (Tailscale, Cloudflare, etc.) for persistent access.
+3) Optional Caddy route (`https://gateway.hack`) for local convenience.
+
+Note: Cloudflare Tunnel is ideal for the gateway HTTP/WS surface. It is not a direct SSH
+replacement on iOS; use Tailscale/VPN for SSH access from mobile clients.
+If you already use Cloudflare WARP, configure a private network route to your laptop and
+use that IP/hostname for SSH in your mobile client.
+
+Remote helper:
+- `hack remote` shows status and offers to run setup when needed.
+- `hack remote status` prints gateway + exposure status.
+- `hack remote qr` prints a QR payload for SSH or gateway usage (confirm before sharing).
+- `hack remote monitor` opens a mini TUI (status + gateway audit log tail).
+
+Cloudflare tunnel helper:
+
+```bash
+hack x cloudflare tunnel-setup --hostname gateway.example.com
+hack x cloudflare tunnel-start
+```
+
+Tailscale helper:
+
+```bash
+hack x tailscale setup
+hack x tailscale status
+```
+
+DNS note: `cloudflared tunnel route dns <tunnel> <hostname>` creates the required CNAME to
+`<tunnel-id>.cfargotunnel.com` in your Cloudflare zone (proxied).
 
 ## Agent setup (CLI-first)
 

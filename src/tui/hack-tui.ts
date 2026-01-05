@@ -25,6 +25,7 @@ import { ensureDir, writeTextFile } from "../lib/fs.ts"
 import { isRecord } from "../lib/guards.ts"
 import { defaultProjectSlugFromPath, readProjectConfig, readProjectDevHost } from "../lib/project.ts"
 import { readRuntimeProjects } from "../lib/runtime-projects.ts"
+import { copyToClipboard } from "../ui/clipboard.ts"
 
 import type { ProjectContext } from "../lib/project.ts"
 import type { RuntimeProject } from "../lib/runtime-projects.ts"
@@ -49,7 +50,7 @@ type LogEntry = {
 }
 
 class WrappedTextRenderable extends TextRenderable {
-  protected onResize(width: number, height: number): void {
+  protected override onResize(width: number, height: number): void {
     super.onResize(width, height)
     if (this.wrapMode !== "none" && width > 0) {
       this.textBufferView.setWrapWidth(width)
@@ -69,6 +70,8 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
   const errorLogPath = resolve(homedir(), ".hack", "tui-error.log")
   let errorHandled = false
   let shutdown: (() => Promise<void>) | null = null
+  let logsHasSelection = false
+  let handleSelectionChange: (() => void) | null = null
 
   const logTuiError = async (opts: { readonly error: unknown; readonly source: string }) => {
     const message = formatErrorMessage({ error: opts.error })
@@ -115,174 +118,179 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     const headerLabel =
       headerBannerLine.length > 0 && !/[█░▒▓]/.test(headerBannerLine) ? headerBannerLine : "hack"
 
-    renderer = await createCliRenderer({
+    const activeRenderer = await createCliRenderer({
       targetFps: 30,
       exitOnCtrlC: false,
       useConsole: false,
-      useAlternateScreen: true
+      useAlternateScreen: true,
+      useMouse: true
+    })
+    renderer = activeRenderer
+
+    activeRenderer.setBackgroundColor("#0f111a")
+
+    const headerPaddingX = 1
+    const headerPaddingY = 0
+    const headerLineCount = headerLabel ? 2 : 1
+    const headerHeight = headerLineCount + headerPaddingY * 2
+
+    const root = new BoxRenderable(activeRenderer, {
+      id: "hack-tui-root",
+      width: "100%",
+      height: "100%",
+      flexDirection: "column",
+      backgroundColor: "#0f111a"
     })
 
-    renderer.setBackgroundColor("#0f111a")
+    const header = new BoxRenderable(activeRenderer, {
+      id: "hack-tui-header",
+      width: "100%",
+      height: headerHeight,
+      minHeight: headerHeight,
+      paddingLeft: headerPaddingX,
+      paddingRight: headerPaddingX,
+      paddingTop: headerPaddingY,
+      paddingBottom: headerPaddingY,
+      border: false,
+      backgroundColor: "#141828"
+    })
 
-  const headerPaddingX = 1
-  const headerPaddingY = 0
-  const headerLineCount = headerLabel ? 2 : 1
-  const headerHeight = headerLineCount + headerPaddingY * 2
+    const headerText = new TextRenderable(activeRenderer, {
+      id: "hack-tui-header-text",
+      content: "",
+      wrapMode: "none",
+      width: "100%",
+      height: "100%"
+    })
 
-  const root = new BoxRenderable(renderer, {
-    id: "hack-tui-root",
-    width: "100%",
-    height: "100%",
-    flexDirection: "column",
-    backgroundColor: "#0f111a"
-  })
+    header.add(headerText)
 
-  const header = new BoxRenderable(renderer, {
-    id: "hack-tui-header",
-    width: "100%",
-    height: headerHeight,
-    minHeight: headerHeight,
-    paddingLeft: headerPaddingX,
-    paddingRight: headerPaddingX,
-    paddingTop: headerPaddingY,
-    paddingBottom: headerPaddingY,
-    border: false,
-    backgroundColor: "#141828"
-  })
-
-  const headerText = new TextRenderable(renderer, {
-    id: "hack-tui-header-text",
-    content: "",
-    wrapMode: "none",
-    width: "100%",
-    height: "100%"
-  })
-
-  header.add(headerText)
-
-  const body = new BoxRenderable(renderer, {
-    id: "hack-tui-body",
-    width: "100%",
-    flexGrow: 1,
-    flexDirection: "row",
-    alignItems: "stretch",
-    padding: 1,
-    gap: 1,
-    backgroundColor: "#0f111a"
-  })
-
-  const servicesBox = new BoxRenderable(renderer, {
-    id: "hack-tui-services",
-    width: 36,
-    flexDirection: "column",
-    border: true,
-    borderColor: "#2f344a",
-    backgroundColor: "#131829",
-    title: "Services",
-    titleAlignment: "left"
-  })
-
-  const servicesSelect = new SelectRenderable(renderer, {
-    id: "hack-tui-services-select",
-    width: "100%",
-    height: "100%",
-    backgroundColor: "#131829",
-    focusedBackgroundColor: "#131829",
-    textColor: "#c7d0ff",
-    focusedTextColor: "#c7d0ff",
-    selectedBackgroundColor: "#1f2540",
-    selectedTextColor: "#9ad7ff",
-    descriptionColor: "#6b7390",
-    selectedDescriptionColor: "#7ea0d6",
-    showDescription: false,
-    showScrollIndicator: false,
-    wrapSelection: true,
-    options: [{ name: "Loading services...", description: "" }]
-  })
-
-  servicesBox.add(servicesSelect)
-
-  const logsBox = new BoxRenderable(renderer, {
-    id: "hack-tui-logs",
-    flexGrow: 1,
-    flexDirection: "column",
-    border: true,
-    borderColor: "#2f344a",
-    backgroundColor: "#0f111a",
-    title: "Logs (aggregate)",
-    titleAlignment: "left"
-  })
-
-  const logsScroll = new ScrollBoxRenderable(renderer, {
-    id: "hack-tui-logs-scroll",
-    flexGrow: 1,
-    stickyScroll: true,
-    stickyStart: "bottom",
-    rootOptions: {
+    const body = new BoxRenderable(activeRenderer, {
+      id: "hack-tui-body",
+      width: "100%",
+      flexGrow: 1,
+      flexDirection: "row",
+      alignItems: "stretch",
+      padding: 1,
+      gap: 1,
       backgroundColor: "#0f111a"
-    },
-    wrapperOptions: {
-      backgroundColor: "#0f111a"
-    },
-    viewportOptions: {
-      backgroundColor: "#0f111a"
-    },
-    contentOptions: {
+    })
+
+    const servicesBox = new BoxRenderable(activeRenderer, {
+      id: "hack-tui-services",
+      width: 36,
+      flexDirection: "column",
+      border: true,
+      borderColor: "#2f344a",
+      backgroundColor: "#131829",
+      title: "Services",
+      titleAlignment: "left"
+    })
+
+    const servicesSelect = new SelectRenderable(activeRenderer, {
+      id: "hack-tui-services-select",
+      width: "100%",
+      height: "100%",
+      backgroundColor: "#131829",
+      focusedBackgroundColor: "#131829",
+      textColor: "#c7d0ff",
+      focusedTextColor: "#c7d0ff",
+      selectedBackgroundColor: "#1f2540",
+      selectedTextColor: "#9ad7ff",
+      descriptionColor: "#6b7390",
+      selectedDescriptionColor: "#7ea0d6",
+      showDescription: false,
+      showScrollIndicator: false,
+      wrapSelection: true,
+      options: [{ name: "Loading services...", description: "" }]
+    })
+
+    servicesBox.add(servicesSelect)
+
+    const logsBox = new BoxRenderable(activeRenderer, {
+      id: "hack-tui-logs",
+      flexGrow: 1,
+      flexDirection: "column",
+      border: true,
+      borderColor: "#2f344a",
       backgroundColor: "#0f111a",
-      minHeight: "100%"
-    },
-    scrollbarOptions: {
-      trackOptions: {
-        foregroundColor: "#3b4160",
-        backgroundColor: "#151a2a"
-      }
-    }
-  })
+      title: "Logs (aggregate)",
+      titleAlignment: "left"
+    })
 
-  const logsText = new WrappedTextRenderable(renderer, {
+    const logsScroll = new ScrollBoxRenderable(activeRenderer, {
+      id: "hack-tui-logs-scroll",
+      flexGrow: 1,
+      stickyScroll: true,
+      stickyStart: "bottom",
+      rootOptions: {
+        backgroundColor: "#0f111a"
+      },
+      wrapperOptions: {
+        backgroundColor: "#0f111a"
+      },
+      viewportOptions: {
+        backgroundColor: "#0f111a"
+      },
+      contentOptions: {
+        backgroundColor: "#0f111a",
+        minHeight: "100%"
+      },
+      scrollbarOptions: {
+        trackOptions: {
+          foregroundColor: "#3b4160",
+          backgroundColor: "#151a2a"
+        }
+      }
+    })
+
+  const logsText = new WrappedTextRenderable(activeRenderer, {
     id: "hack-tui-logs-text",
     width: "100%",
     content: "Waiting for logs...",
-    wrapMode: "char"
+    wrapMode: "char",
+    selectionBg: "#2b3355",
+    selectionFg: "#e6f1ff",
+    selectable: true
   })
 
-  logsScroll.add(logsText)
-  logsBox.add(logsScroll)
+    logsScroll.add(logsText)
+    logsBox.add(logsScroll)
 
-  const footer = new BoxRenderable(renderer, {
-    id: "hack-tui-footer",
-    width: "100%",
-    paddingLeft: 1,
-    paddingRight: 1,
-    paddingTop: 1,
-    paddingBottom: 1,
-    border: false,
-    backgroundColor: "#141828"
-  })
+    const footer = new BoxRenderable(activeRenderer, {
+      id: "hack-tui-footer",
+      width: "100%",
+      paddingLeft: 1,
+      paddingRight: 1,
+      paddingTop: 1,
+      paddingBottom: 1,
+      border: false,
+      backgroundColor: "#141828"
+    })
 
-    const footerText = new TextRenderable(renderer, {
-    id: "hack-tui-footer-text",
-    content: ""
-  })
+    const footerText = new TextRenderable(activeRenderer, {
+      id: "hack-tui-footer-text",
+      content: ""
+    })
 
-  footer.add(footerText)
+    footer.add(footerText)
 
-  const searchOverlay = new BoxRenderable(renderer, {
-    id: "hack-tui-search-overlay",
-    position: "absolute",
-    top: 0,
-    left: 0,
-    width: "100%",
-    height: "100%",
-    backgroundColor: "#0b0f1a",
-    opacity: 1,
-    zIndex: 1000,
-    alignItems: "center",
-    justifyContent: "center",
-    visible: false,
-    live: true,
-    shouldFill: true
-  })
+    const searchOverlay = new BoxRenderable(activeRenderer, {
+      id: "hack-tui-search-overlay",
+      position: "absolute",
+      top: 0,
+      left: 0,
+      width: "100%",
+      height: "100%",
+      backgroundColor: "#0b0f1a",
+      opacity: 1,
+      zIndex: 1000,
+      alignItems: "center",
+      justifyContent: "center",
+      visible: false,
+      live: true,
+      shouldFill: true
+    })
 
   const searchFieldBorderColor = "#2f344a"
   const searchFieldFocusBorderColor = "#7dcfff"
@@ -292,7 +300,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     readonly child: BoxRenderable | InputRenderable | SelectRenderable
     readonly backgroundColor: string
   }) => {
-    const frame = new BoxRenderable(renderer, {
+    const frame = new BoxRenderable(activeRenderer, {
       id: opts.id,
       width: "100%",
       border: true,
@@ -319,7 +327,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     })
   }
 
-  const searchPanel = new BoxRenderable(renderer, {
+  const searchPanel = new BoxRenderable(activeRenderer, {
     id: "hack-tui-search-panel",
     width: "80%",
     maxWidth: 120,
@@ -332,22 +340,22 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     shouldFill: true
   })
 
-  const searchTitle = new TextRenderable(renderer, {
+  const searchTitle = new TextRenderable(activeRenderer, {
     id: "hack-tui-search-title",
     content: t`${fg("#9ad7ff")("Search logs")}`
   })
 
-  const searchHint = new TextRenderable(renderer, {
+  const searchHint = new TextRenderable(activeRenderer, {
     id: "hack-tui-search-hint",
     content: t`${dim("Enter to search | Esc to cancel | Tab to move")}`
   })
 
-  const searchQueryLabel = new TextRenderable(renderer, {
+  const searchQueryLabel = new TextRenderable(activeRenderer, {
     id: "hack-tui-search-query-label",
     content: t`${dim("Query")}`
   })
 
-  const searchQueryInput = new InputRenderable(renderer, {
+  const searchQueryInput = new InputRenderable(activeRenderer, {
     id: "hack-tui-search-query-input",
     width: "100%",
     height: 1,
@@ -365,26 +373,26 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     backgroundColor: "#0f111a"
   })
 
-  const searchFiltersRow = new BoxRenderable(renderer, {
+  const searchFiltersRow = new BoxRenderable(activeRenderer, {
     id: "hack-tui-search-filters",
     width: "100%",
     flexDirection: "row",
     gap: 2
   })
 
-  const searchServiceColumn = new BoxRenderable(renderer, {
+  const searchServiceColumn = new BoxRenderable(activeRenderer, {
     id: "hack-tui-search-service-column",
     flexGrow: 1,
     flexDirection: "column",
     gap: 1
   })
 
-  const searchServiceLabel = new TextRenderable(renderer, {
+  const searchServiceLabel = new TextRenderable(activeRenderer, {
     id: "hack-tui-search-service-label",
     content: t`${dim("Service")}`
   })
 
-  const searchServiceSelect = new SelectRenderable(renderer, {
+  const searchServiceSelect = new SelectRenderable(activeRenderer, {
     id: "hack-tui-search-service-select",
     width: "100%",
     height: 5,
@@ -408,19 +416,19 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     backgroundColor: "#131829"
   })
 
-  const searchLevelColumn = new BoxRenderable(renderer, {
+  const searchLevelColumn = new BoxRenderable(activeRenderer, {
     id: "hack-tui-search-level-column",
     width: 24,
     flexDirection: "column",
     gap: 1
   })
 
-  const searchLevelLabel = new TextRenderable(renderer, {
+  const searchLevelLabel = new TextRenderable(activeRenderer, {
     id: "hack-tui-search-level-label",
     content: t`${dim("Level")}`
   })
 
-  const searchLevelSelect = new SelectRenderable(renderer, {
+  const searchLevelSelect = new SelectRenderable(activeRenderer, {
     id: "hack-tui-search-level-select",
     width: "100%",
     height: 5,
@@ -450,26 +458,26 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     backgroundColor: "#131829"
   })
 
-  const searchTimeRow = new BoxRenderable(renderer, {
+  const searchTimeRow = new BoxRenderable(activeRenderer, {
     id: "hack-tui-search-time-row",
     width: "100%",
     flexDirection: "row",
     gap: 2
   })
 
-  const searchSinceColumn = new BoxRenderable(renderer, {
+  const searchSinceColumn = new BoxRenderable(activeRenderer, {
     id: "hack-tui-search-since-column",
     flexGrow: 1,
     flexDirection: "column",
     gap: 1
   })
 
-  const searchSinceLabel = new TextRenderable(renderer, {
+  const searchSinceLabel = new TextRenderable(activeRenderer, {
     id: "hack-tui-search-since-label",
     content: t`${dim("Since")}`
   })
 
-  const searchSinceInput = new InputRenderable(renderer, {
+  const searchSinceInput = new InputRenderable(activeRenderer, {
     id: "hack-tui-search-since-input",
     width: "100%",
     height: 1,
@@ -487,19 +495,19 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     backgroundColor: "#0f111a"
   })
 
-  const searchUntilColumn = new BoxRenderable(renderer, {
+  const searchUntilColumn = new BoxRenderable(activeRenderer, {
     id: "hack-tui-search-until-column",
     flexGrow: 1,
     flexDirection: "column",
     gap: 1
   })
 
-  const searchUntilLabel = new TextRenderable(renderer, {
+  const searchUntilLabel = new TextRenderable(activeRenderer, {
     id: "hack-tui-search-until-label",
     content: t`${dim("Until")}`
   })
 
-  const searchUntilInput = new InputRenderable(renderer, {
+  const searchUntilInput = new InputRenderable(activeRenderer, {
     id: "hack-tui-search-until-input",
     width: "100%",
     height: 1,
@@ -517,7 +525,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     backgroundColor: "#0f111a"
   })
 
-  const searchStatusText = new TextRenderable(renderer, {
+  const searchStatusText = new TextRenderable(activeRenderer, {
     id: "hack-tui-search-status",
     content: t`${dim("Ready")}`
   })
@@ -551,44 +559,44 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
   root.add(header)
   root.add(body)
   root.add(footer)
-  renderer.root.add(root)
-  renderer.root.add(searchOverlay)
+  activeRenderer.root.add(root)
+  activeRenderer.root.add(searchOverlay)
 
-    const logState: LogState = {
+  const logState: LogState = {
     entries: [],
     maxEntries: 2000,
     maxLines: 400
   }
 
-    const paneBorderColor = "#2f344a"
-    const paneFocusBorderColor = "#7dcfff"
+  const paneBorderColor = "#2f344a"
+  const paneFocusBorderColor = "#7dcfff"
 
-    let activePane: "services" | "logs" = "services"
-    let lastMainPane: "services" | "logs" = "services"
-    let logStartTimestamp: string | null = null
-    let logBackend: LogStreamBackend | null = null
+  let activePane: "services" | "logs" = "services"
+  let lastMainPane: "services" | "logs" = "services"
+  let logStartTimestamp: string | null = null
+  let logBackend: LogStreamBackend | null = null
 
-    const historyState = {
-      loading: false,
-      canLoadMore: true,
-      tailSize: 200,
-      tailStep: 200
-    }
+  const historyState = {
+    loading: false,
+    canLoadMore: true,
+    tailSize: 200,
+    tailStep: 200
+  }
 
-    let isActive = true
-    let running = true
-    let logProc: ReturnType<typeof Bun.spawn> | null = null
-    let searchProc: ReturnType<typeof Bun.spawn> | null = null
-    let refreshTimer: ReturnType<typeof setInterval> | null = null
-    let logUpdateTimer: ReturnType<typeof setTimeout> | null = null
-    let selectedService: string | null = null
-    let currentRuntime: RuntimeProject | null = null
-    let searchOverlayVisible = false
-    let searchMode: "live" | "results" = "live"
-    let searchResults: LogEntry[] = []
-    let searchSelectedIndex = 0
-    let searchQuery = ""
-    let searchFocusIndex = 0
+  let isActive = true
+  let running = true
+  let logProc: ReturnType<typeof Bun.spawn> | null = null
+  let searchProc: ReturnType<typeof Bun.spawn> | null = null
+  let refreshTimer: ReturnType<typeof setInterval> | null = null
+  let logUpdateTimer: ReturnType<typeof setTimeout> | null = null
+  let selectedService: string | null = null
+  let currentRuntime: RuntimeProject | null = null
+  let searchOverlayVisible = false
+  let searchMode: "live" | "results" = "live"
+  let searchResults: LogEntry[] = []
+  let searchSelectedIndex = 0
+  let searchQuery = ""
+  let searchFocusIndex = 0
 
   const setMainViewVisible = (visible: boolean) => {
     root.visible = visible
@@ -620,6 +628,11 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       : activePane === "services" ? "Services"
       : "Logs"
     const focusHint = t`${dim("focus:")} ${fg("#9ad7ff")(focusLabel)}`
+    const copyHint =
+      activePane === "logs" && logsHasSelection ? t`${dim("[")}${fg("#9ad7ff")("c")}${dim(
+        "]"
+      )} copy`
+      : null
 
     if (searchOverlayVisible) {
       const navHint = t`${dim("[")}${fg("#9ad7ff")("tab")}${dim("]")} next field  ${dim(
@@ -641,7 +654,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       const actions = t`${dim("[")}${fg("#9ad7ff")("esc")}${dim("]")} back  ${dim("[")}${fg(
         "#9ad7ff"
       )("ctrl+f")}${dim("]")} new search`
-      footerText.content = joinFooterText([navHint, actions, focusHint])
+      const parts = [navHint, actions, focusHint]
+      if (copyHint) parts.push(copyHint)
+      footerText.content = joinFooterText(parts)
       return
     }
 
@@ -659,7 +674,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     )("d")}${dim("]")} down  ${dim("[")}${fg("#9ad7ff")("r")}${dim(
       "]"
     )} restart  ${dim("[")}${fg("#9ad7ff")("q")}${dim("]")} quit`
-    footerText.content = joinFooterText([navHint, actions, focusHint])
+    const parts = [navHint, actions, focusHint]
+    if (copyHint) parts.push(copyHint)
+    footerText.content = joinFooterText(parts)
   }
 
   const setActivePane = (pane: "services" | "logs") => {
@@ -690,7 +707,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     const metaLine =
       `Project: ${projectName}  Host: ${hostLabel}  Services: ${runningCount}/${serviceCount}` +
       `  Focus: ${focusLabel}  Logs since: ${sinceLabel}  [q] quit`
-    const headerWidth = Math.max(0, Math.floor(header.width || renderer?.width || 0))
+    const headerWidth = Math.max(0, Math.floor(header.width || activeRenderer.width || 0))
     const maxLineWidth = Math.max(0, headerWidth - headerPaddingX * 2)
     const bannerLine = headerLabel.length > 0 ? truncateLine(headerLabel, maxLineWidth) : ""
     const metaLineTrim = truncateLine(metaLine, maxLineWidth)
@@ -768,6 +785,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
 
     if (visible.length === 0) {
       logsText.content = searchMode === "results" ? "No search results." : "Waiting for logs..."
+      if (handleSelectionChange) handleSelectionChange()
       return
     }
 
@@ -783,6 +801,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       selectedIndex: selectedLineIndex
     })
     logsText.syncWrapWidth()
+    if (handleSelectionChange) handleSelectionChange()
   }
 
   const scheduleLogUpdate = () => {
@@ -818,6 +837,18 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       updateLogStartTimestamp()
     }
     scheduleLogUpdate()
+  }
+
+  const copySelectedLogs = async () => {
+    const selected = logsText.getSelectedText()
+    if (!selected) return
+    const result = await copyToClipboard({ text: selected })
+    appendLogEntry(
+      formatSystemLine({
+        message: result.ok ? "[copy] selection copied" : `[copy] ${result.error}`,
+        tone: result.ok ? "muted" : "warn"
+      })
+    )
   }
 
   const mergeHistoryEntries = (snapshot: LogEntry[]) => {
@@ -880,9 +911,10 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
 
     const entries: LogEntry[] = []
 
-    if (proc.stdout) {
+    const stdout = proc.stdout
+    if (stdout && typeof stdout !== "number") {
       await consumeLogStream({
-        stream: proc.stdout,
+        stream: stdout,
         isActive: () => isActive,
         onLine: line => {
           const event = parseLogStreamEvent(line)
@@ -896,9 +928,10 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       })
     }
 
-    if (proc.stderr) {
+    const stderr = proc.stderr
+    if (stderr && typeof stderr !== "number") {
       void consumeLogStream({
-        stream: proc.stderr,
+        stream: stderr,
         isActive: () => isActive,
         onLine: line => {
           appendLogEntry(formatSystemLine({ message: `[history] ${line}`, tone: "warn" }))
@@ -1077,9 +1110,10 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     const entries: LogEntry[] = []
     const errors: string[] = []
 
-    if (searchProc.stderr) {
+    const searchStderr = searchProc.stderr
+    if (searchStderr && typeof searchStderr !== "number") {
       void consumeLogStream({
-        stream: searchProc.stderr,
+        stream: searchStderr,
         isActive: () => isActive,
         onLine: line => {
           errors.push(line)
@@ -1087,9 +1121,10 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       })
     }
 
-    if (searchProc.stdout) {
+    const searchStdout = searchProc.stdout
+    if (searchStdout && typeof searchStdout !== "number") {
       await consumeLogStream({
-        stream: searchProc.stdout,
+        stream: searchStdout,
         isActive: () => isActive,
         onLine: line => {
           const event = parseLogStreamEvent(line)
@@ -1149,9 +1184,10 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       stdin: "ignore"
     })
 
-    if (logProc.stderr) {
+    const logStderr = logProc.stderr
+    if (logStderr && typeof logStderr !== "number") {
       void consumeLogStream({
-        stream: logProc.stderr,
+        stream: logStderr,
         isActive: () => isActive,
         onLine: line => {
           appendLogEntry(formatSystemLine({ message: `[stderr] ${line}`, tone: "warn" }))
@@ -1159,9 +1195,10 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       })
     }
 
-    if (logProc.stdout) {
+    const logStdout = logProc.stdout
+    if (logStdout && typeof logStdout !== "number") {
       void consumeLogStream({
-        stream: logProc.stdout,
+        stream: logStdout,
         isActive: () => isActive,
         onLine: line => {
           const event = parseLogStreamEvent(line)
@@ -1205,10 +1242,11 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       searchProc.kill()
     }
 
-    if (renderer) {
-      renderer.stop()
-      renderer.destroy()
+    if (handleSelectionChange) {
+      activeRenderer.off("selection", handleSelectionChange)
     }
+    activeRenderer.stop()
+    activeRenderer.destroy()
 
     process.off("SIGINT", handleSignal)
     process.off("SIGTERM", handleSignal)
@@ -1219,7 +1257,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       closeSearchOverlay()
       return
     }
-    void shutdown()
+    void shutdown?.()
   }
 
   process.on("SIGINT", handleSignal)
@@ -1241,9 +1279,10 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       stdin: "ignore"
     })
 
-    if (proc.stderr) {
+    const actionStderr = proc.stderr
+    if (actionStderr && typeof actionStderr !== "number") {
       void consumeLogStream({
-        stream: proc.stderr,
+        stream: actionStderr,
         isActive: () => isActive,
         onLine: line =>
           appendLogEntry(formatSystemLine({ message: `[${opts.label}] ${line}`, tone: "warn" }))
@@ -1275,7 +1314,17 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     setActivePane("logs")
   })
 
-  renderer.keyInput.on("keypress", key => {
+  handleSelectionChange = () => {
+    const next = logsText.hasSelection()
+    if (next !== logsHasSelection) {
+      logsHasSelection = next
+      renderFooter()
+    }
+  }
+
+  activeRenderer.on("selection", handleSelectionChange)
+
+  activeRenderer.keyInput.on("keypress", key => {
     if ((key.ctrl || key.meta) && key.name === "f") {
       key.preventDefault()
       if (searchOverlayVisible) {
@@ -1319,7 +1368,13 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
 
     if (key.name === "q" || (key.ctrl && key.name === "c")) {
       key.preventDefault()
-      void shutdown()
+      void shutdown?.()
+      return
+    }
+
+    if (activePane === "logs" && logsHasSelection && key.name === "c" && !key.ctrl && !key.meta) {
+      key.preventDefault()
+      void copySelectedLogs()
       return
     }
 
@@ -1397,7 +1452,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
   setActivePane(activePane)
   logsScroll.verticalScrollBar.visible = true
   logsScroll.horizontalScrollBar.visible = false
-  renderer.start()
+  activeRenderer.start()
 
   while (running) {
     await new Promise(resolve => setTimeout(resolve, 100))
@@ -1531,17 +1586,16 @@ function buildStyledLogText(
   const chunks: TextChunk[] = []
   const highlightQuery = opts?.highlightQuery?.trim() ?? ""
   const selectedIndex = opts?.selectedIndex ?? null
-  for (let i = 0; i < entries.length; i += 1) {
-    const entry = entries[i]
+  for (const [index, entry] of entries.entries()) {
     let lineChunks = entry.styled.chunks
     if (highlightQuery.length > 0) {
       lineChunks = highlightChunks({ chunks: lineChunks, query: highlightQuery })
     }
-    if (selectedIndex !== null && i === selectedIndex) {
+    if (selectedIndex !== null && index === selectedIndex) {
       lineChunks = highlightLine({ chunks: lineChunks })
     }
     chunks.push(...lineChunks)
-    if (i < entries.length - 1) {
+    if (index < entries.length - 1) {
       chunks.push({ __isChunk: true, text: "\n" })
     }
   }
@@ -2070,25 +2124,33 @@ function xtermToRgba(code: number): RGBA {
 }
 
 async function consumeLogStream(opts: {
-  readonly stream: AsyncIterable<Uint8Array>
+  readonly stream: ReadableStream<Uint8Array>
   readonly isActive: () => boolean
   readonly onLine: (line: string) => void
 }): Promise<void> {
   const decoder = new TextDecoder()
   let buffer = ""
 
-  for await (const chunk of opts.stream) {
-    if (!opts.isActive()) break
-    buffer += decoder.decode(chunk, { stream: true })
-    let idx = buffer.indexOf("\n")
-    while (idx >= 0) {
-      const line = buffer.slice(0, idx)
-      buffer = buffer.slice(idx + 1)
-      if (line.trim().length > 0) {
-        opts.onLine(line)
+  const reader = opts.stream.getReader()
+  try {
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      if (!opts.isActive()) break
+      if (!value || value.length === 0) continue
+      buffer += decoder.decode(value, { stream: true })
+      let idx = buffer.indexOf("\n")
+      while (idx >= 0) {
+        const line = buffer.slice(0, idx)
+        buffer = buffer.slice(idx + 1)
+        if (line.trim().length > 0) {
+          opts.onLine(line)
+        }
+        idx = buffer.indexOf("\n")
       }
-      idx = buffer.indexOf("\n")
     }
+  } finally {
+    reader.releaseLock()
   }
 
   const rest = buffer.trim()

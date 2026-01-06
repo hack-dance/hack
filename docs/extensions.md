@@ -127,6 +127,228 @@ For exposure helpers, see the guides:
 - `guides/remote-tailscale.md`
 DNS note: Cloudflare Tunnel uses a CNAME (`<tunnel-id>.cfargotunnel.com`) in your Cloudflare zone.
 
+## Command reference
+
+### Gateway extension (`hack x gateway`)
+
+#### token-create
+
+Usage: `hack x gateway token-create [options] [label]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--scope <read|write>` | string | `read` | Token scope |
+| `--write` | boolean | false | Shortcut for `--scope write` |
+| `--label <label>` | string | - | Optional label |
+
+Notes:
+- The first non-flag argument is treated as the label if `--label` is not used.
+
+#### token-list
+
+Usage: `hack x gateway token-list`
+
+#### token-revoke
+
+Usage: `hack x gateway token-revoke <token-id>`
+
+### Supervisor extension (`hack x supervisor`)
+
+All supervisor commands accept `--project <name>` or `--path <dir>` (mutually exclusive).
+
+#### job-list
+
+Usage: `hack x supervisor job-list [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--project <name>` | string | - | Target a registered project |
+| `--path <dir>` | string | - | Target a repo path |
+| `--json` | boolean | false | Output JSON |
+
+#### job-create
+
+Usage: `hack x supervisor job-create [options] -- <command...>`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--project <name>` | string | - | Target a registered project |
+| `--path <dir>` | string | - | Target a repo path |
+| `--runner <name>` | string | `generic` | Runner name |
+| `--cwd <path>` | string | - | Working directory (relative to project root) |
+| `--env <KEY=VALUE>` | string | - | Environment override (repeatable) |
+| `--json` | boolean | false | Output JSON |
+
+#### job-show
+
+Usage: `hack x supervisor job-show <job-id> [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--project <name>` | string | - | Target a registered project |
+| `--path <dir>` | string | - | Target a repo path |
+| `--json` | boolean | false | Output JSON |
+
+#### job-cancel
+
+Usage: `hack x supervisor job-cancel <job-id> [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--project <name>` | string | - | Target a registered project |
+| `--path <dir>` | string | - | Target a repo path |
+
+#### job-tail
+
+Usage: `hack x supervisor job-tail <job-id> [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--project <name>` | string | - | Target a registered project |
+| `--path <dir>` | string | - | Target a repo path |
+| `--follow` | boolean | true | Follow logs (default) |
+| `--no-follow` | boolean | false | Print logs and exit |
+| `--logs-from <n>` | number | 0 | Resume from log offset |
+| `--from <n>` | number | 0 | Alias for `--logs-from` |
+| `--json` | boolean | false | Output JSON |
+
+#### job-attach
+
+Usage: `hack x supervisor job-attach <job-id> [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--project <name>` | string | - | Target a registered project |
+| `--path <dir>` | string | - | Target a repo path |
+| `--follow` | boolean | true | Follow logs (default) |
+| `--no-follow` | boolean | false | Print logs and exit |
+| `--logs-from <n>` | number | 0 | Resume from log offset |
+| `--from <n>` | number | 0 | Alias for `--logs-from` |
+| `--events-from <n>` | number | 0 | Resume from event sequence |
+| `--json` | boolean | false | Output JSON |
+
+#### shell
+
+Usage: `hack x supervisor shell [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--project <name>` | string | - | Target a registered project |
+| `--project-id <id>` | string | - | Target by project id (gateway) |
+| `--path <dir>` | string | - | Target a repo path |
+| `--gateway <url>` | string | `http://127.0.0.1:7788` | Gateway URL |
+| `--token <token>` | string | - | Gateway write token |
+| `--shell <path>` | string | - | Shell path |
+| `--cwd <path>` | string | - | Working directory |
+| `--cols <n>` | number | - | Terminal columns |
+| `--rows <n>` | number | - | Terminal rows |
+| `--env <KEY=VALUE>` | string | - | Environment override (repeatable) |
+
+Notes:
+- `--project` and `--project-id` are mutually exclusive.
+
+### Cloudflare extension (`hack x cloudflare`)
+
+#### tunnel-print
+
+Usage: `hack x cloudflare tunnel-print [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--hostname <host>` | string | - | Gateway hostname |
+| `--tunnel <name>` | string | `hack-gateway` | Tunnel name |
+| `--origin <url>` | string | `http://127.0.0.1:7788` | Gateway origin |
+| `--ssh-hostname <host>` | string | - | SSH hostname (optional) |
+| `--ssh-origin <url>` | string | `ssh://127.0.0.1:22` | SSH origin |
+| `--credentials-file <path>` | string | - | Cloudflared credentials file |
+| `--out <path>` | string | - | Write config to a file |
+
+#### tunnel-setup
+
+Usage: `hack x cloudflare tunnel-setup [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--hostname <host>` | string | - | Gateway hostname |
+| `--tunnel <name>` | string | `hack-gateway` | Tunnel name |
+| `--origin <url>` | string | `http://127.0.0.1:7788` | Gateway origin |
+| `--ssh-hostname <host>` | string | - | SSH hostname (optional) |
+| `--ssh-origin <url>` | string | `ssh://127.0.0.1:22` | SSH origin |
+| `--credentials-file <path>` | string | - | Cloudflared credentials file |
+| `--out <path>` | string | - | Write config to a file |
+| `--skip-login` | boolean | false | Skip `cloudflared tunnel login` |
+| `--skip-create` | boolean | false | Skip tunnel creation |
+| `--skip-route` | boolean | false | Skip DNS route creation |
+
+#### tunnel-start
+
+Usage: `hack x cloudflare tunnel-start [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--config <path>` | string | `~/.cloudflared/config.yml` | Config path |
+| `--out <path>` | string | - | Alias for `--config` |
+| `--tunnel <name>` | string | - | Override tunnel name |
+
+#### tunnel-stop
+
+Usage: `hack x cloudflare tunnel-stop`
+
+#### access-setup
+
+Usage: `hack x cloudflare access-setup [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--ssh-hostname <host>` | string | - | SSH hostname |
+| `--user <user>` | string | - | SSH username |
+
+### Tailscale extension (`hack x tailscale`)
+
+#### setup
+
+Usage: `hack x tailscale setup`
+
+#### status
+
+Usage: `hack x tailscale status [args...]`
+
+#### ip
+
+Usage: `hack x tailscale ip [args...]`
+
+Notes:
+- `status` and `ip` forward extra args directly to `tailscale`.
+- `ip` defaults to `-4` when no args are provided.
+
+### Tickets extension (`hack x tickets`)
+
+Commands are not yet available (scaffolding only).
+
 ## Gateway exposure (optional)
 
 The gateway binds to `127.0.0.1` by default. Expose it through one of:

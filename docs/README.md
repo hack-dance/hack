@@ -4,12 +4,17 @@ This directory contains the public documentation for hack. Specs remain in `SPEC
 
 ## Core docs
 
+- [CLI reference](cli.md)
 - [Architecture](architecture.md)
 - [Gateway overview](gateway.md)
 - [Gateway API](gateway-api.md)
 - [Supervisor](supervisor.md)
 - [Extensions](extensions.md)
 - [Control-plane SDK](sdk.md)
+
+Quick diagnostics:
+- `hack usage` (resource usage across running projects)
+- `hack usage --watch` (live resource trends)
 
 ## Guides
 

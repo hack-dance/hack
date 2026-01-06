@@ -39,7 +39,7 @@ async function main(): Promise<void> {
 
   await streamJob({
     baseUrl: config.baseUrl,
-    headers,
+    token: config.token,
     projectId: config.projectId,
     jobId: job.jobId,
     timeoutMs: config.timeoutMs
@@ -148,20 +148,21 @@ async function createJob(opts: {
 
 async function streamJob(opts: {
   readonly baseUrl: string
-  readonly headers: Record<string, string>
+  readonly token: string
   readonly projectId: string
   readonly jobId: string
   readonly timeoutMs: number
 }): Promise<void> {
   const wsUrl = toWebSocketUrl({
     baseUrl: opts.baseUrl,
-    path: `/control-plane/projects/${opts.projectId}/jobs/${opts.jobId}/stream`
+    path: `/control-plane/projects/${opts.projectId}/jobs/${opts.jobId}/stream`,
+    token: opts.token
   })
 
   process.stdout.write(`Streaming job ${opts.jobId}...\n`)
 
   await new Promise<void>((resolve, reject) => {
-    const ws = new WebSocket(wsUrl, { headers: opts.headers })
+    const ws = new WebSocket(wsUrl)
     const timer = setTimeout(() => {
       ws.close(1000, "timeout")
       reject(new Error("Job stream timed out"))
@@ -211,12 +212,19 @@ async function streamJob(opts: {
   })
 }
 
-function toWebSocketUrl(opts: { readonly baseUrl: string; readonly path: string }): string {
+function toWebSocketUrl(opts: {
+  readonly baseUrl: string
+  readonly path: string
+  readonly token?: string
+}): string {
   const url = new URL(opts.path, opts.baseUrl)
   if (url.protocol === "https:") {
     url.protocol = "wss:"
   } else {
     url.protocol = "ws:"
+  }
+  if (opts.token) {
+    url.searchParams.set("token", opts.token)
   }
   return url.toString()
 }

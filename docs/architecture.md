@@ -16,7 +16,7 @@ Running multiple local projects at the same time is messy when everything wants 
 proxy, DNS helpers, and logging stack under `~/.hack/`.
 
 - **Caddy** (docker-proxy) routes `*.hack` based on container labels.
-- **CoreDNS** resolves `*.hack` inside containers to the Caddy IP.
+- **CoreDNS** resolves `*.hack` inside containers to the Caddy IP, with `extra_hosts` mappings for resolver compatibility.
 - **Alloy + Loki + Grafana** capture logs and provide history.
 - **Schemas** are served by Caddy at `https://schemas.hack`.
 - **hackd (optional daemon)** caches Docker state for fast `hack projects --json` / `hack ps --json`.
@@ -87,8 +87,10 @@ When `internal.dns` / `internal.tls` are enabled, `hack up` writes a Compose ove
 - sets each service’s DNS to the CoreDNS container
 - mounts Caddy’s local CA cert into each service
 - sets common SSL env vars (Node, curl, git, requests)
+- injects `extra_hosts` mappings for `*.hack` → current Caddy IP (for runtimes that ignore custom DNS)
 
-This lets containers use the same `https://*.hack` hostnames as the host machine.
+This lets containers use the same `https://*.hack` hostnames as the host machine. If Caddy’s IP changes,
+`hack status`, `hack doctor`, and the TUI will warn; `hack restart` refreshes the mapping.
 
 ```mermaid
 graph LR
@@ -133,6 +135,10 @@ sequenceDiagram
 - **loki**: searchable history + LogQL filters
 
 NDJSON streaming (`hack logs --json`) emits `start`, `log`, and `end` events for MCP/TUI consumers.
+
+Retention:
+- Loki retention is set in the global Loki config (`~/.hack/logging/loki.yaml`), default `168h` in the template.
+- Per-project overrides live in `hack.config.json` under `logs.retention_period` and apply when `hack down` prunes logs.
 
 ```mermaid
 graph LR

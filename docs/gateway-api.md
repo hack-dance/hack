@@ -189,6 +189,23 @@ TypeScript client (in-repo):
 
 Base URL: `http://127.0.0.1:7788` (or your tunnel URL)
 
+### Summary
+
+| Method | Path | Write required | Description |
+| --- | --- | --- | --- |
+| GET | `/v1/status` | no | Daemon status + uptime |
+| GET | `/v1/metrics` | no | Cache + stream metrics |
+| GET | `/v1/projects` | no | Gateway-enabled projects + runtime snapshot |
+| GET | `/v1/ps` | no | Compose project container list |
+| GET | `/control-plane/projects/:projectId/jobs` | no | List jobs |
+| POST | `/control-plane/projects/:projectId/jobs` | yes | Create job |
+| GET | `/control-plane/projects/:projectId/jobs/:jobId` | no | Fetch job |
+| POST | `/control-plane/projects/:projectId/jobs/:jobId/cancel` | yes | Cancel job |
+| WS | `/control-plane/projects/:projectId/jobs/:jobId/stream` | no | Stream job logs/events |
+| POST | `/control-plane/projects/:projectId/shells` | yes | Create shell |
+| GET | `/control-plane/projects/:projectId/shells/:shellId` | no | Fetch shell |
+| WS | `/control-plane/projects/:projectId/shells/:shellId/stream` | yes | Stream shell PTY |
+
 ### GET /v1/status
 
 Returns daemon status and uptime.
@@ -198,38 +215,97 @@ curl -H "Authorization: Bearer $HACK_GATEWAY_TOKEN" \
   http://127.0.0.1:7788/v1/status
 ```
 
+Response:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `status` | string | Always `ok` on success |
+| `version` | string | hackd version |
+| `pid` | number | Process id |
+| `started_at` | string | ISO timestamp |
+| `uptime_ms` | number | Uptime in milliseconds |
+
 ### GET /v1/metrics
 
 Returns daemon cache and stream metrics.
+
+Response:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `status` | string | Always `ok` on success |
+| `started_at` | string | ISO timestamp |
+| `uptime_ms` | number | Uptime in milliseconds |
+| `cache_updated_at` | string or null | Last cache refresh time |
+| `cache_age_ms` | number or null | Cache age in milliseconds |
+| `last_refresh_at` | string or null | Last refresh attempt |
+| `refresh_count` | number | Refresh count |
+| `refresh_failures` | number | Refresh failures |
+| `last_event_at` | string or null | Last docker event timestamp |
+| `events_seen` | number | Docker events seen |
+| `streams_active` | number | Active WS streams |
 
 ### GET /v1/projects
 
 Returns gateway-enabled registered projects + runtime status. Includes `project_id`.
 
-Query:
-- `filter` (string, project name)
-- `include_global` (boolean)
-- `include_unregistered` (boolean, ignored over the gateway)
+Query parameters:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `filter` | string | no | Project name filter |
+| `include_global` | boolean | no | Include global infra entries |
+| `include_unregistered` | boolean | no | Ignored over the gateway (always false) |
 
 ```bash
 curl -H "Authorization: Bearer $HACK_GATEWAY_TOKEN" \
   "http://127.0.0.1:7788/v1/projects?include_global=true"
 ```
 
+Response:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `generated_at` | string | ISO timestamp |
+| `filter` | string or null | Applied filter |
+| `include_global` | boolean | Include global infra entries |
+| `include_unregistered` | boolean | Always `false` over the gateway |
+| `projects` | ProjectView[] | Gateway-enabled projects only |
+
 ### GET /v1/ps
 
 Fetch runtime container status for a compose project.
 
-Query:
-- `compose_project` (required)
-- `project` (optional display name)
-- `branch` (optional)
+Query parameters:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `compose_project` | string | yes | Compose project id |
+| `project` | string | no | Display name |
+| `branch` | string | no | Branch name |
+
+Response:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `project` | string | Display project name |
+| `branch` | string or null | Branch name |
+| `composeProject` | string | Compose project id |
+| `items` | PsItem[] | `docker compose ps` style rows |
 
 ### POST /control-plane/projects/:projectId/jobs
 
 Create a job (requires write token + `allowWrites`).
 
-Body:
+Request body:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `runner` | string | no | Runner name (default: `generic`) |
+| `command` | string[] | yes | Command argv |
+| `cwd` | string | no | Working directory (relative to project root) |
+| `env` | object | no | Environment overrides |
+
 ```json
 {
   "runner": "generic",
@@ -240,9 +316,9 @@ Body:
 ```
 
 Response:
-```json
-{ "job": { "jobId": "...", "status": "queued", ... } }
-```
+| Field | Type | Description |
+| --- | --- | --- |
+| `job` | JobMeta | Job metadata |
 
 ### GET /control-plane/projects/:projectId/jobs
 ### GET /control-plane/projects/:projectId/jobs/:jobId
@@ -250,14 +326,36 @@ Response:
 
 Read and manage job metadata.
 
+Responses:
+
+| Endpoint | Field | Type | Description |
+| --- | --- | --- | --- |
+| `GET /jobs` | `jobs` | JobMeta[] | Job list |
+| `GET /jobs/:jobId` | `job` | JobMeta | Job details |
+| `POST /jobs/:jobId/cancel` | `status` | string | Always `cancelled` on success |
+
 ### WS /control-plane/projects/:projectId/jobs/:jobId/stream
 
-Client → server:
+Client -> server (JSON):
+
+| Type | Fields | Description |
+| --- | --- | --- |
+| `hello` | `logsFrom?`, `eventsFrom?` | Start streaming from offsets (default 0) |
+
 ```json
 { "type": "hello", "logsFrom": 0, "eventsFrom": 0 }
 ```
 
-Server → client:
+Server -> client (JSON):
+
+| Type | Fields | Description |
+| --- | --- | --- |
+| `ready` | `logsOffset`, `eventsSeq` | Current offsets |
+| `log` | `stream`, `offset`, `data` | Log chunk (`stream` is `combined`) |
+| `event` | `seq`, `event` | Job event (see JobEvent) |
+| `heartbeat` | `ts`, `logsOffset`, `eventsSeq` | Keepalive with offsets |
+| `error` | `message` | Error string (e.g. `job_not_found`) |
+
 ```json
 { "type": "ready", "logsOffset": 0, "eventsSeq": 0 }
 { "type": "log", "stream": "combined", "offset": 128, "data": "..." }
@@ -269,23 +367,47 @@ Server → client:
 
 Create a PTY-backed shell (requires write token + `allowWrites`).
 
-Body:
+Request body:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `cols` | number | no | Terminal columns |
+| `rows` | number | no | Terminal rows |
+| `cwd` | string | no | Working directory (relative to project root) |
+| `shell` | string | no | Shell path (default: `$SHELL` or `/bin/bash`) |
+| `env` | object | no | Environment overrides |
+
 ```json
 { "cols": 120, "rows": 30, "cwd": ".", "shell": "/bin/zsh" }
 ```
 
 Response:
-```json
-{ "shell": { "shellId": "...", "status": "running", ... } }
-```
+| Field | Type | Description |
+| --- | --- | --- |
+| `shell` | ShellMeta | Shell metadata |
 
 ### GET /control-plane/projects/:projectId/shells/:shellId
 
 Fetch shell metadata.
 
+Response:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `shell` | ShellMeta | Shell metadata |
+
 ### WS /control-plane/projects/:projectId/shells/:shellId/stream
 
-Client → server:
+Client -> server (JSON):
+
+| Type | Fields | Description |
+| --- | --- | --- |
+| `hello` | `cols?`, `rows?` | Optional initial size |
+| `input` | `data` | Input text |
+| `resize` | `cols`, `rows` | Resize PTY |
+| `signal` | `signal` | Send signal (SIGINT, SIGTERM, SIGKILL, SIGHUP, SIGQUIT, SIGUSR1, SIGUSR2, SIGTSTP) |
+| `close` | - | Close the shell |
+
 ```json
 { "type": "hello", "cols": 120, "rows": 30 }
 { "type": "input", "data": "ls -la\n" }
@@ -294,7 +416,14 @@ Client → server:
 { "type": "close" }
 ```
 
-Server → client:
+Server -> client (JSON):
+
+| Type | Fields | Description |
+| --- | --- | --- |
+| `ready` | `shellId`, `cols`, `rows`, `cwd`, `shell`, `status` | Shell info |
+| `output` | `data` | Output data |
+| `exit` | `exitCode`, `signal` | Exit info |
+
 ```json
 { "type": "ready", "shellId": "...", "cols": 120, "rows": 30, "cwd": "...", "shell": "/bin/bash", "status": "running" }
 { "type": "output", "data": "..." }
@@ -302,6 +431,99 @@ Server → client:
 ```
 
 Non-JSON text frames are treated as raw input.
+
+## Schemas
+
+### JobMeta
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `jobId` | string | Job id |
+| `status` | string | `queued`, `starting`, `running`, `completed`, `failed`, `cancelled`, `awaiting_input` |
+| `runner` | string | Runner name |
+| `command` | string[] (optional) | Command argv |
+| `projectId` | string (optional) | Project id |
+| `projectName` | string (optional) | Project name |
+| `createdAt` | string | ISO timestamp |
+| `updatedAt` | string | ISO timestamp |
+| `lastEventSeq` | number | Last event sequence number |
+
+### JobEvent
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `seq` | number | Event sequence number |
+| `ts` | string | ISO timestamp |
+| `type` | string | Event type (e.g. `job.started`) |
+| `payload` | object (optional) | Optional payload |
+
+### ShellMeta
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `shellId` | string | Shell id |
+| `status` | string | `running` or `exited` |
+| `createdAt` | string | ISO timestamp |
+| `updatedAt` | string | ISO timestamp |
+| `projectId` | string (optional) | Project id |
+| `projectName` | string (optional) | Project name |
+| `cwd` | string | Working directory |
+| `shell` | string | Shell path |
+| `cols` | number | Terminal columns |
+| `rows` | number | Terminal rows |
+| `pid` | number (optional) | Process id |
+| `exitCode` | number (optional) | Exit code |
+| `signal` | string or null | Exit signal |
+
+### ProjectView
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `project_id` | string or null | Project id |
+| `name` | string | Project name |
+| `dev_host` | string or null | Dev host (without scheme) |
+| `repo_root` | string or null | Repo root path |
+| `project_dir` | string or null | Project `.hack` dir |
+| `defined_services` | string[] or null | Services defined in compose |
+| `runtime` | RuntimeProject or null | Runtime snapshot |
+| `branch_runtime` | array | Branch entries `{ branch, runtime }` |
+| `kind` | string | `registered` or `unregistered` |
+| `status` | string | `running`, `stopped`, `missing`, `unregistered` |
+
+### RuntimeProject
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `project` | string | Compose project name |
+| `working_dir` | string or null | Compose working directory |
+| `services` | RuntimeService[] | Services + containers |
+
+### RuntimeService
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `service` | string | Service name |
+| `containers` | RuntimeContainer[] | Containers |
+
+### RuntimeContainer
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | string | Container id |
+| `state` | string | Container state |
+| `status` | string | Human-readable status |
+| `name` | string | Container name |
+| `ports` | string | Port mapping string |
+| `working_dir` | string or null | Compose working directory |
+
+### PsItem
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `Service` | string | Compose service name |
+| `Name` | string | Container name |
+| `Status` | string | Container status |
+| `Ports` | string | Ports string |
 
 ## Error codes
 

@@ -401,6 +401,29 @@ export function renderProjectConfigSchemaJson(): string {
               logsMaxBytes: { type: "number" }
             }
           },
+          tui: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              logs: {
+                type: "object",
+                additionalProperties: true,
+                properties: {
+                  maxEntries: { type: "number" },
+                  maxLines: { type: "number" },
+                  historyTailStep: { type: "number" }
+                }
+              }
+            }
+          },
+          usage: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              watchIntervalMs: { type: "number" },
+              historySize: { type: "number" }
+            }
+          },
           gateway: {
             type: "object",
             additionalProperties: true,

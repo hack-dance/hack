@@ -45,6 +45,36 @@ const SupervisorConfigSchema = z.object({
   logsMaxBytes: z.number().int().positive().default(5_000_000)
 })
 
+const TuiLogsConfigInputSchema = z.object({
+  maxEntries: z.number().int().positive().optional(),
+  maxLines: z.number().int().positive().optional(),
+  historyTailStep: z.number().int().positive().optional()
+})
+
+const TuiLogsConfigSchema = z.object({
+  maxEntries: z.number().int().positive().default(2000),
+  maxLines: z.number().int().positive().default(400),
+  historyTailStep: z.number().int().positive().default(200)
+})
+
+const TuiConfigInputSchema = z.object({
+  logs: TuiLogsConfigInputSchema.optional()
+})
+
+const TuiConfigSchema = z.object({
+  logs: TuiLogsConfigSchema.default(TuiLogsConfigSchema.parse({}))
+})
+
+const UsageConfigInputSchema = z.object({
+  watchIntervalMs: z.number().int().positive().optional(),
+  historySize: z.number().int().positive().optional()
+})
+
+const UsageConfigSchema = z.object({
+  watchIntervalMs: z.number().int().positive().default(2000),
+  historySize: z.number().int().positive().default(24)
+})
+
 const GatewayConfigInputSchema = z.object({
   enabled: z.boolean().optional(),
   bind: z.string().optional(),
@@ -67,6 +97,8 @@ const ControlPlaneConfigInputSchema = z.object({
     })
     .optional(),
   supervisor: SupervisorConfigInputSchema.optional(),
+  tui: TuiConfigInputSchema.optional(),
+  usage: UsageConfigInputSchema.optional(),
   gateway: GatewayConfigInputSchema.optional()
 })
 
@@ -78,6 +110,8 @@ const ControlPlaneConfigSchema = z.object({
     })
     .default({ git: TicketsGitConfigSchema.parse({}) }),
   supervisor: SupervisorConfigSchema.default(SupervisorConfigSchema.parse({})),
+  tui: TuiConfigSchema.default(TuiConfigSchema.parse({})),
+  usage: UsageConfigSchema.default(UsageConfigSchema.parse({})),
   gateway: GatewayConfigSchema.default(GatewayConfigSchema.parse({}))
 })
 

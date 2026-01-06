@@ -29,6 +29,7 @@ import { readProjectsRegistry } from "../lib/projects-registry.ts"
 import { readRuntimeProjects } from "../lib/runtime-projects.ts"
 import { exec } from "../lib/shell.ts"
 import { parseTimeInput } from "../lib/time.ts"
+import { readControlPlaneConfig } from "../control-plane/sdk/config.ts"
 import { copyToClipboard } from "../ui/clipboard.ts"
 
 import type { ProjectContext } from "../lib/project.ts"
@@ -133,6 +134,11 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
 
   try {
     const cfg = await readProjectConfig(project)
+    const controlPlane = await readControlPlaneConfig({ projectDir: project.projectRoot })
+    const tuiLogsConfig = controlPlane.config.tui.logs
+    const logMaxEntries = Math.max(1, tuiLogsConfig.maxEntries)
+    const logMaxLines = Math.min(Math.max(1, tuiLogsConfig.maxLines), logMaxEntries)
+    const historyTailStep = Math.min(Math.max(1, tuiLogsConfig.historyTailStep), logMaxEntries)
     const projectName = (cfg.name ?? "").trim() || defaultProjectSlugFromPath(project.projectRoot)
     const devHost = await readProjectDevHost(project)
     const projectId = await resolveProjectId({ project, projectName })
@@ -673,8 +679,8 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
 
   const logState: LogState = {
     entries: [],
-    maxEntries: 2000,
-    maxLines: 400
+    maxEntries: logMaxEntries,
+    maxLines: logMaxLines
   }
 
   const paneBorderColor = "#4a5374"
@@ -688,8 +694,8 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
   const historyState = {
     loading: false,
     canLoadMore: true,
-    tailSize: 200,
-    tailStep: 200
+    tailSize: historyTailStep,
+    tailStep: historyTailStep
   }
 
   let isActive = true
@@ -715,6 +721,8 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
   let lastSearchBackend: "local" | "loki" = "local"
   let highlightQuery = ""
   let highlightEnabled = false
+  let logFollow = true
+  let pendingLogCount = 0
   let collapseMultiline = false
   const enabledLevels = new Set(["debug", "info", "warn", "error"])
   let serviceScope: "all" | "selected" = "selected"
@@ -793,20 +801,31 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
   }
 
   const renderLevelHint = (): StyledText => {
-    const tokens: Array<{ readonly level: string; readonly label: string; readonly color: string }> = [
-      { level: "info", label: "I", color: "#7dcfff" },
-      { level: "warn", label: "W", color: "#e0af68" },
-      { level: "error", label: "E", color: "#f7768e" },
-      { level: "debug", label: "D", color: "#6b7390" }
+    const tokens: Array<{
+      readonly level: string
+      readonly label: string
+      readonly key: string
+      readonly color: string
+    }> = [
+      { level: "info", label: "I", key: "1", color: "#7dcfff" },
+      { level: "warn", label: "W", key: "2", color: "#e0af68" },
+      { level: "error", label: "E", key: "3", color: "#f7768e" },
+      { level: "debug", label: "D", key: "4", color: "#6b7390" }
     ]
     const chunks: TextChunk[] = [dim("lvl: ")]
     tokens.forEach((token, idx) => {
       const enabled = enabledLevels.has(token.level)
-      chunks.push(enabled ? fg(token.color)(token.label) : dim(token.label))
+      const label = `${token.key}${token.label}`
+      chunks.push(enabled ? fg(token.color)(label) : dim(label))
       if (idx < tokens.length - 1) {
         chunks.push({ __isChunk: true, text: " " })
       }
     })
+    chunks.push({ __isChunk: true, text: " " })
+    chunks.push(dim("["))
+    chunks.push(fg("#9ad7ff")("0"))
+    chunks.push(dim("]"))
+    chunks.push(dim("all"))
     return new StyledText(chunks)
   }
 
@@ -911,7 +930,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     searchQuery = ""
     highlightQuery = ""
     highlightEnabled = false
-    logsScroll.stickyScroll = true
+    logsScroll.stickyScroll = logFollow
     updateLogsTitle()
     flushLogUpdate()
     renderFooter()
@@ -1011,7 +1030,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     const navHint =
       activePane === "services" ?
         t`${dim("[")}${fg("#9ad7ff")("↑/↓")}${dim("]")} select service`
-      : t`${dim("[")}${fg("#9ad7ff")("↑/↓")}${dim("]")} scroll logs`
+      : t`${dim("[")}${fg("#9ad7ff")("↑/↓")}${dim("]")} ${dim(
+          logFollow ? "scroll logs" : "scroll logs (paused)"
+        )}`
     const switchTarget = activePane === "services" ? "logs" : "services"
     const actions = t`${dim("[")}${fg("#9ad7ff")("tab")}${dim("]")} focus ${fg("#9ad7ff")(
       switchTarget
@@ -1027,10 +1048,13 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     const toggleHint = t`${dim("[")}${fg("#9ad7ff")("s")}${dim("]")} scope  ${dim("[")}${fg(
       "#9ad7ff"
     )("z")}${dim("]")} wrap  ${dim("[")}${fg("#9ad7ff")("h")}${dim("]")} hl`
+    const followHint =
+      !logFollow && activePane === "logs" ? t`${dim("[")}${fg("#9ad7ff")("f")}${dim("]")} follow` : null
     const parts = [navHint, actions, renderLevelHint(), scopeHint, toggleHint, focusHint]
     if (queryIndicator) parts.push(queryIndicator)
     if (clearHint) parts.push(clearHint)
     if (copyHint) parts.push(copyHint)
+    if (followHint) parts.push(followHint)
     if (toastHint) parts.push(toastHint)
     footerText.content = joinStyledText({ parts })
   }
@@ -1494,11 +1518,42 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     }
     const base =
       serviceScope === "all" || !selectedService ? "Logs (all)" : `Logs (${selectedService})`
-    const suffix = historyState.loading ? " • loading history" : ""
-    logsBox.title = base + suffix
+    const loadingSuffix = historyState.loading ? " • loading history" : ""
+    const pausedSuffix =
+      !logFollow ?
+        pendingLogCount > 0 ? ` • paused (+${pendingLogCount})` : " • paused"
+      : ""
+    logsBox.title = base + loadingSuffix + pausedSuffix
   }
 
-  const updateLogText = () => {
+  const isScrollAtBottom = () => {
+    const viewportHeight = Math.max(0, Math.floor(logsScroll.viewport.height || 0))
+    const maxScrollTop = Math.max(0, logsScroll.scrollHeight - viewportHeight)
+    if (maxScrollTop <= 1) return true
+    return logsScroll.scrollTop >= maxScrollTop - 1
+  }
+
+  const pauseLogFollow = () => {
+    if (!logFollow) return
+    logFollow = false
+    pendingLogCount = 0
+    logsScroll.stickyScroll = false
+    updateLogsTitle()
+    renderFooter()
+  }
+
+  const resumeLogFollow = () => {
+    if (logFollow) return
+    logFollow = true
+    pendingLogCount = 0
+    logsScroll.stickyScroll = true
+    flushLogUpdate({ force: true })
+    logsScroll.scrollTop = logsScroll.scrollHeight
+    updateLogsTitle()
+    renderFooter()
+  }
+
+  const updateLogText = (opts?: { readonly force?: boolean }) => {
     if (!isActive) return
     const baseEntries = searchMode === "results" ? searchResults : logState.entries
     let activeEntries = baseEntries
@@ -1513,6 +1568,11 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         return
       }
       activeEntries = activeEntries.filter(entry => enabledLevels.has(entry.level))
+    }
+
+    if (searchMode === "live" && !logFollow && !opts?.force) {
+      if (handleSelectionChange) handleSelectionChange()
+      return
     }
     const visible = activeEntries.slice(-logState.maxLines)
 
@@ -1546,19 +1606,20 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
 
   const scheduleLogUpdate = () => {
     if (!isActive || logUpdateTimer || searchOverlayVisible) return
+    if (searchMode === "live" && !logFollow) return
     logUpdateTimer = setTimeout(() => {
       logUpdateTimer = null
       updateLogText()
     }, 80)
   }
 
-  const flushLogUpdate = () => {
+  const flushLogUpdate = (opts?: { readonly force?: boolean }) => {
     if (searchOverlayVisible) return
     if (logUpdateTimer) {
       clearTimeout(logUpdateTimer)
       logUpdateTimer = null
     }
-    updateLogText()
+    updateLogText({ force: opts?.force ?? !logFollow })
   }
 
   const mergeLogEntry = (opts: { readonly target: LogEntry; readonly entry: LogEntry }) => {
@@ -1598,9 +1659,15 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
   const appendLogEntry = (entry: LogEntry) => {
     if (!isActive) return
     updateLogLastTimestamp(entry)
+    const holdUpdates = searchMode === "live" && !logFollow
     const continuationTarget = findContinuationTarget({ entries: logState.entries, entry })
     if (continuationTarget) {
       mergeLogEntry({ target: continuationTarget, entry })
+      if (holdUpdates) {
+        pendingLogCount += 1
+        updateLogsTitle()
+        return
+      }
       scheduleLogUpdate()
       return
     }
@@ -1617,6 +1684,11 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     }
     if (trimmed) {
       updateLogStartTimestamp()
+    }
+    if (holdUpdates) {
+      pendingLogCount += 1
+      updateLogsTitle()
+      return
     }
     scheduleLogUpdate()
   }
@@ -1735,25 +1807,43 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
 
   const loadMoreHistory = async () => {
     if (!isActive || historyState.loading || !historyState.canLoadMore) return
+    const remainingCapacity = logState.maxEntries - logState.entries.length
+    if (remainingCapacity <= 0) {
+      historyState.canLoadMore = false
+      setToast({
+        message: t`${fg("#9ad7ff")("Logs")} ${dim("history capped; increase controlPlane.tui.logs.maxEntries to load more")}`,
+        durationMs: 2200
+      })
+      return
+    }
     historyState.loading = true
     logsBox.title = "Logs (loading history...)"
     logsBox.requestRender()
 
     try {
       if (logBackend === "loki") {
+        const tail = Math.min(historyState.tailStep, remainingCapacity)
+        if (tail <= 0) {
+          historyState.canLoadMore = false
+          return
+        }
         const snapshot = await fetchLogSnapshot({
-          tail: historyState.tailStep,
+          tail,
           until: logStartTimestamp,
           backend: "loki"
         })
         if (snapshot.length === 0) {
           historyState.canLoadMore = false
         } else {
-          logState.maxEntries = Math.max(logState.maxEntries, logState.entries.length + snapshot.length + 500)
           mergeHistoryEntries(snapshot)
         }
       } else {
-        historyState.tailSize += historyState.tailStep
+        const nextTail = Math.min(historyState.tailSize + historyState.tailStep, logState.maxEntries)
+        if (nextTail <= historyState.tailSize) {
+          historyState.canLoadMore = false
+          return
+        }
+        historyState.tailSize = nextTail
         const snapshot = await fetchLogSnapshot({
           tail: historyState.tailSize,
           backend: logBackend ?? "compose"
@@ -1761,8 +1851,10 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         if (snapshot.length < historyState.tailSize) {
           historyState.canLoadMore = false
         }
-        logState.maxEntries = Math.max(logState.maxEntries, historyState.tailSize + 500)
         mergeHistoryEntries(snapshot)
+      }
+      if (logState.entries.length >= logState.maxEntries) {
+        historyState.canLoadMore = false
       }
     } finally {
       historyState.loading = false
@@ -1774,6 +1866,12 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
   logsScroll.verticalScrollBar.on("change", payload => {
     if (!isActive || searchOverlayVisible || searchMode === "results") return
     const position = typeof payload?.position === "number" ? payload.position : logsScroll.scrollTop
+    const atBottom = isScrollAtBottom()
+    if (!atBottom && logFollow) {
+      pauseLogFollow()
+    } else if (atBottom && !logFollow) {
+      resumeLogFollow()
+    }
     if (position <= 1) {
       void loadMoreHistory()
     }
@@ -1981,7 +2079,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         })
       )
       searchMode = "live"
-      logsScroll.stickyScroll = true
+      logsScroll.stickyScroll = logFollow
       updateLogsTitle()
       flushLogUpdate()
       renderFooter()
@@ -2248,6 +2346,11 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         resetLevelFilters()
         return
       }
+      if (key.name === "f") {
+        key.preventDefault()
+        resumeLogFollow()
+        return
+      }
       if (key.name === "s") {
         key.preventDefault()
         toggleServiceScope()
@@ -2275,7 +2378,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         key.preventDefault()
         searchMode = "live"
         searchResults = []
-        logsScroll.stickyScroll = true
+        logsScroll.stickyScroll = logFollow
         updateLogsTitle()
         flushLogUpdate()
         renderFooter()
@@ -2305,7 +2408,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         }
         searchMode = "live"
         searchResults = []
-        logsScroll.stickyScroll = true
+        logsScroll.stickyScroll = logFollow
         updateLogsTitle()
         flushLogUpdate()
         renderFooter()

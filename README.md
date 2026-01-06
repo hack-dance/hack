@@ -104,14 +104,6 @@ If anything fails, use `hack logs --pretty` and summarize next steps.
 
 If the agent cannot run shell commands, use MCP instead: `hack setup mcp` and `hack mcp serve`.
 
-### Initialize a repo (manual)
-```bash
-cd /path/to/your-repo
-hack init
-hack up --detach
-hack open
-```
-
 ### Configuration (.hack/hack.config.json)
 - `name`: project slug (also used for Docker Compose project name)
 - `dev_host`: base hostname (`<dev_host>.hack`)
@@ -152,16 +144,16 @@ hack config set logs.snapshot_backend "compose"
 
 ## Commands (high level)
 
-- **Global**: `hack global install|up|down|status|logs|logs-reset|ca|cert|trust`
-- **Project**: `hack init|up|down|restart|ps|run|logs|open|tui`
-- **Config**: `hack config get|set`
-- **Projects**: `hack projects|prune`
-- **Status**: `hack status` (shortcut for `hack projects --details`)
-- **Branch**: `hack branch add|list|remove|open`
-- **Agents**: `hack setup cursor|claude|codex|agents|mcp`, `hack agent prime|init|patterns`, `hack mcp serve|install|print`
-- **Diagnostics**: `hack doctor|daemon|log-pipe`
-- **Secrets**: `hack secrets get|set|delete`
-- **Crash override**: `hack the planet`
+Run `hack help` (or `hack help <command>`) for full usage.
+
+Common:
+- `hack global install|up|down`
+- `hack init|up|down|logs|open|tui`
+- `hack status`
+- `hack remote setup`
+- `hack gateway enable`
+
+Full command table + flags: `docs/cli.md`.
 
 Run `hack help <command>` for detailed help.
 
@@ -391,13 +383,16 @@ hack branch open feature-x
 ```
 
 
-## Service-to-service connections (DB/Redis)
+## Service-to-service connections (HTTP vs DB/Redis)
 
 If your app runs in Docker (the default in `hack`), don’t connect to `127.0.0.1` / `localhost` for Postgres/Redis.
 Inside a container, `localhost` is that container, not the other compose services.
 
-With CoreDNS enabled (`internal.dns: true`), containers can use the same `https://*.hack` URLs as your host.
-If CoreDNS isn’t running (or you disable it), use the Compose service hostname on the default network:
+For HTTP services, use the same `https://*.hack` URLs you use on the host. `hack up` injects internal DNS,
+TLS trust, and `extra_hosts` mappings so `*.hack` resolves reliably inside containers. If you see `ENOTFOUND`
+inside containers, run `hack restart` to refresh the host mappings.
+
+For non-HTTP services, use the Compose service hostname on the default network:
 
 - `Postgres: db:5432`
 - `Redis: redis:6379`
@@ -489,7 +484,8 @@ hack up --project my-project
 OAuth providers (notably Google) require `localhost` or a host that ends with a real public suffix.
 
 We keep `.hack` as the primary local dev domain, and optionally expose an alias domain for OAuth flows.
-Default: `*.hack.gy` → `127.0.0.1` (via dnsmasq + OS resolver).
+If the OAuth alias is enabled, `hack global install` configures `*.hack.gy` to resolve to `127.0.0.1`
+via dnsmasq + the OS resolver.
 
 If you use Next.js (or another dev server that cares about dev origins), configure its dev allowlist to include the proxy domains.
 Next.js supports `allowedDevOrigins` (wildcards supported) in `next.config.js`:
@@ -532,20 +528,15 @@ Use `--out <dir>` if you want certs written somewhere else.
 
 ## Internal DNS (containers)
 
-`hack global install` runs CoreDNS on the `hack-dev` network and pins Caddy + CoreDNS to stable IPs.
-CoreDNS answers `*.hack` and `*.hack.*` with Caddy’s IP so containers can use the same `https://*.hack`
-URLs as the host. All other DNS is forwarded to Docker’s resolver.
+`hack global install` runs CoreDNS on the `hack-dev` network. CoreDNS answers `*.hack` and `*.hack.*` with
+Caddy’s current IP so containers can use the same `https://*.hack` URLs as the host.
+
+Some runtimes don’t honor custom DNS for `*.hack` reliably, so `hack up` also injects `extra_hosts` mappings
+to the Caddy IP. If the Caddy IP changes, `hack status`, `hack doctor`, and the TUI show a warning; fix it
+with `hack restart` to refresh the mapping.
 
 When `internal.tls` is enabled, `hack up` mounts the Caddy Local CA into each container and sets common
 SSL env vars so HTTPS to `*.hack` is trusted inside containers.
-
-If you created the `hack-dev` network before this feature, recreate it once so the static IPs can be
-assigned (better runtime compatibility):
-
-```bash
-docker network rm hack-dev
-hack global install
-```
 
 If you update `hack`, rerun `hack global install` once to refresh the CoreDNS config.
 
@@ -705,11 +696,12 @@ See examples:
 
 - Logs missing in Grafana: ensure Alloy is running (`hack global status`) and try `{app="docker"}` in Explore.
 
-- `ENOTFOUND` for `*.hack`/`*.hack.gy` inside containers: refresh CoreDNS config with `hack global install`,
-  then restart CoreDNS: `docker compose -f ~/.hack/caddy/docker-compose.yml restart coredns`.
+- `ENOTFOUND` for `*.hack` inside containers: run `hack restart` to refresh `extra_hosts` mappings (check
+  `hack status` or the TUI for Caddy IP mismatch warnings).
 
 - `EAI_AGAIN` for external domains inside containers (e.g. `api.clerk.com`): CoreDNS isn’t forwarding.
-  Run `hack global install` and restart CoreDNS as above.
+  Run `hack global install` and restart CoreDNS:
+  `docker compose -f ~/.hack/caddy/docker-compose.yml restart coredns`.
 
 - `hack global up` warns about `hack-dev` network labels or missing subnet: remove the network and reinstall:
   `docker network rm hack-dev` then `hack global install`.

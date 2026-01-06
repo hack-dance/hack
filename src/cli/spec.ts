@@ -5,6 +5,7 @@ import { versionCommand } from "../commands/version.ts"
 import { theCommand } from "../commands/the.ts"
 import { secretsCommand } from "../commands/secrets.ts"
 import { projectsCommand, statusCommand } from "../commands/projects.ts"
+import { usageCommand } from "../commands/usage.ts"
 import {
   downCommand,
   initCommand,
@@ -44,6 +45,7 @@ export const CLI_SPEC = defineCli({
   commands: [
     globalCommand,
     statusCommand,
+    usageCommand,
     projectsCommand,
     initCommand,
     upCommand,

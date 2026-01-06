@@ -1,9 +1,6 @@
 "use client"
 
 import { useEffect, useMemo, useRef, useState } from "react"
-import { Terminal } from "xterm"
-import { FitAddon } from "xterm-addon-fit"
-import "xterm/css/xterm.css"
 
 import styles from "./gateway.module.css"
 
@@ -27,17 +24,21 @@ type GatewayCallResult<T> =
   | { ok: true; data: T }
   | { ok: false; error: string }
 
+type XTermTerminal = import("xterm").Terminal
+type XTermFitAddon = import("xterm-addon-fit").FitAddon
+
 export default function GatewayPage() {
   const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:7788")
   const [token, setToken] = useState("")
   const [projects, setProjects] = useState<GatewayProject[]>([])
   const [projectId, setProjectId] = useState("")
   const [status, setStatus] = useState("Idle")
+  const [terminalReady, setTerminalReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const terminalContainerRef = useRef<HTMLDivElement | null>(null)
-  const terminalRef = useRef<Terminal | null>(null)
-  const fitAddonRef = useRef<FitAddon | null>(null)
+  const terminalRef = useRef<XTermTerminal | null>(null)
+  const fitAddonRef = useRef<XTermFitAddon | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
 
   const selectedProject = useMemo(
@@ -46,51 +47,68 @@ export default function GatewayPage() {
   )
 
   useEffect(() => {
-    const terminal = new Terminal({
-      fontSize: 14,
-      fontFamily: "var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, monospace",
-      theme: {
-        background: "#0b0d12",
-        foreground: "#e6e8ef",
-        cursor: "#9ab7ff"
+    let active = true
+    let resizeObserver: ResizeObserver | null = null
+    let disposeInput: { dispose: () => void } | null = null
+
+    const setupTerminal = async () => {
+      const [{ Terminal }, { FitAddon }] = await Promise.all([
+        import("xterm"),
+        import("xterm-addon-fit")
+      ])
+      if (!active) return
+
+      const terminal = new Terminal({
+        fontSize: 14,
+        fontFamily: "var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, monospace",
+        theme: {
+          background: "#0b0d12",
+          foreground: "#e6e8ef",
+          cursor: "#9ab7ff"
+        }
+      })
+      const fitAddon = new FitAddon()
+      terminal.loadAddon(fitAddon)
+
+      terminalRef.current = terminal
+      fitAddonRef.current = fitAddon
+
+      if (terminalContainerRef.current) {
+        terminal.open(terminalContainerRef.current)
+        fitAddon.fit()
+        terminal.focus()
       }
-    })
-    const fitAddon = new FitAddon()
-    terminal.loadAddon(fitAddon)
 
-    terminalRef.current = terminal
-    fitAddonRef.current = fitAddon
+      disposeInput = terminal.onData(data => {
+        const ws = wsRef.current
+        if (!ws || ws.readyState !== WebSocket.OPEN) return
+        ws.send(JSON.stringify({ type: "input", data }))
+      })
 
-    if (terminalContainerRef.current) {
-      terminal.open(terminalContainerRef.current)
-      fitAddon.fit()
-      terminal.focus()
+      resizeObserver = new ResizeObserver(() => {
+        fitAddon.fit()
+        const ws = wsRef.current
+        if (!ws || ws.readyState !== WebSocket.OPEN) return
+        ws.send(JSON.stringify({ type: "resize", cols: terminal.cols, rows: terminal.rows }))
+      })
+
+      if (terminalContainerRef.current) {
+        resizeObserver.observe(terminalContainerRef.current)
+      }
+
+      setTerminalReady(true)
     }
 
-    const disposeInput = terminal.onData(data => {
-      const ws = wsRef.current
-      if (!ws || ws.readyState !== WebSocket.OPEN) return
-      ws.send(JSON.stringify({ type: "input", data }))
-    })
-
-    const resizeObserver = new ResizeObserver(() => {
-      fitAddon.fit()
-      const ws = wsRef.current
-      if (!ws || ws.readyState !== WebSocket.OPEN) return
-      ws.send(
-        JSON.stringify({ type: "resize", cols: terminal.cols, rows: terminal.rows })
-      )
-    })
-
-    if (terminalContainerRef.current) {
-      resizeObserver.observe(terminalContainerRef.current)
-    }
+    void setupTerminal()
 
     return () => {
-      resizeObserver.disconnect()
-      disposeInput.dispose()
+      active = false
+      resizeObserver?.disconnect()
+      disposeInput?.dispose()
       wsRef.current?.close()
-      terminal.dispose()
+      terminalRef.current?.dispose()
+      terminalRef.current = null
+      fitAddonRef.current = null
     }
   }, [])
 
@@ -104,7 +122,7 @@ export default function GatewayPage() {
       method: "GET"
     })
     if (!result.ok) {
-      setError(result.error)
+      setError(formatGatewayError({ error: result.error }))
       setStatus("Idle")
       return
     }
@@ -120,7 +138,10 @@ export default function GatewayPage() {
     setError(null)
     const terminal = terminalRef.current
     const fitAddon = fitAddonRef.current
-    if (!terminal || !fitAddon) return
+    if (!terminal || !fitAddon) {
+      setError("Terminal not ready yet.")
+      return
+    }
 
     if (!token.trim()) {
       setError("Missing gateway token.")
@@ -149,7 +170,7 @@ export default function GatewayPage() {
     })
 
     if (!create.ok) {
-      setError(create.error)
+      setError(formatGatewayError({ error: create.error }))
       setStatus("Idle")
       return
     }
@@ -196,6 +217,7 @@ export default function GatewayPage() {
 
   const disconnectShell = () => {
     wsRef.current?.close()
+    wsRef.current = null
     setStatus("Shell disconnected")
   }
 
@@ -253,7 +275,7 @@ export default function GatewayPage() {
             <button className={styles.button} onClick={loadProjects}>
               Load projects
             </button>
-            <button className={styles.button} onClick={connectShell}>
+            <button className={styles.button} onClick={connectShell} disabled={!terminalReady}>
               Connect shell
             </button>
             <button className={`${styles.button} ${styles.buttonSecondary}`} onClick={disconnectShell}>
@@ -366,4 +388,17 @@ function parseJson(opts: { value: string }): unknown {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
+}
+
+function formatGatewayError(opts: { error: string }): string {
+  if (opts.error === "writes_disabled") {
+    return "writes_disabled: enable allowWrites and restart hackd."
+  }
+  if (opts.error === "write_scope_required") {
+    return "write_scope_required: create a write-scoped token."
+  }
+  if (opts.error === "missing_token") {
+    return "missing_token: paste a gateway token."
+  }
+  return opts.error
 }

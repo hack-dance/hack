@@ -383,11 +383,10 @@ export function createGatewayClient(opts: GatewayClientOptions): GatewayClient {
   const openJobStream = (opts: { readonly projectId: string; readonly jobId: string }): WebSocket => {
     const url = buildWebSocketUrl({
       baseUrl,
-      path: `/control-plane/projects/${opts.projectId}/jobs/${opts.jobId}/stream`
+      path: `/control-plane/projects/${opts.projectId}/jobs/${opts.jobId}/stream`,
+      token
     })
-    return new WebSocket(url, {
-      headers: { Authorization: `Bearer ${token}` }
-    })
+    return new WebSocket(url)
   }
 
   const openShellStream = (opts: {
@@ -396,11 +395,10 @@ export function createGatewayClient(opts: GatewayClientOptions): GatewayClient {
   }): WebSocket => {
     const url = buildWebSocketUrl({
       baseUrl,
-      path: `/control-plane/projects/${opts.projectId}/shells/${opts.shellId}/stream`
+      path: `/control-plane/projects/${opts.projectId}/shells/${opts.shellId}/stream`,
+      token
     })
-    return new WebSocket(url, {
-      headers: { Authorization: `Bearer ${token}` }
-    })
+    return new WebSocket(url)
   }
 
   return {
@@ -443,9 +441,16 @@ function buildUrl(opts: {
   return url
 }
 
-function buildWebSocketUrl(opts: { readonly baseUrl: string; readonly path: string }): string {
+function buildWebSocketUrl(opts: {
+  readonly baseUrl: string
+  readonly path: string
+  readonly token?: string
+}): string {
   const url = new URL(opts.path, opts.baseUrl)
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:"
+  if (opts.token) {
+    url.searchParams.set("token", opts.token)
+  }
   return url.toString()
 }
 

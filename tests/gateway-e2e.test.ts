@@ -346,13 +346,12 @@ async function streamJobUntilExit(opts: {
 }): Promise<"completed" | "failed" | "unknown"> {
   const wsUrl = toWebSocketUrl({
     baseUrl: opts.baseUrl,
-    path: `/control-plane/projects/${opts.projectId}/jobs/${opts.jobId}/stream`
+    path: `/control-plane/projects/${opts.projectId}/jobs/${opts.jobId}/stream`,
+    token: opts.token
   })
 
   return await new Promise((resolve, reject) => {
-    const ws = new WebSocket(wsUrl, {
-      headers: buildAuthHeaders({ token: opts.token })
-    })
+    const ws = new WebSocket(wsUrl)
     const timer = setTimeout(() => {
       ws.close(1000, "timeout")
       resolve("unknown")
@@ -399,9 +398,16 @@ async function streamJobUntilExit(opts: {
   })
 }
 
-function toWebSocketUrl(opts: { readonly baseUrl: string; readonly path: string }): string {
+function toWebSocketUrl(opts: {
+  readonly baseUrl: string
+  readonly path: string
+  readonly token?: string
+}): string {
   const url = new URL(opts.path, opts.baseUrl)
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:"
+  if (opts.token) {
+    url.searchParams.set("token", opts.token)
+  }
   return url.toString()
 }
 

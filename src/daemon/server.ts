@@ -406,14 +406,13 @@ async function handleGatewayRequest(opts: {
 }): Promise<Response> {
   const url = new URL(opts.req.url)
   const isWebSocket = opts.req.headers.get("upgrade")?.toLowerCase() === "websocket"
+  const auditPath = sanitizeGatewayAuditPath({ url })
   const auth = await authenticateGatewayRequest({
     rootDir: opts.gatewayRoot,
     headers: opts.req.headers,
     url,
     allowQueryToken: isWebSocket
   })
-
-  const path = `${url.pathname}${url.search}`
   const remote = opts.server.requestIP(opts.req)
   const remoteAddress = remote?.address
   const userAgent = opts.req.headers.get("user-agent") ?? undefined
@@ -430,7 +429,7 @@ async function handleGatewayRequest(opts: {
       entry: {
         ts: new Date().toISOString(),
         method: opts.req.method,
-        path,
+        path: auditPath,
         status,
         ...(remoteAddress ? { remoteAddress } : {}),
         ...(userAgent ? { userAgent } : {})
@@ -452,7 +451,7 @@ async function handleGatewayRequest(opts: {
         ts: new Date().toISOString(),
         tokenId: auth.tokenId,
         method: opts.req.method,
-        path,
+        path: auditPath,
         status,
         ...(remoteAddress ? { remoteAddress } : {}),
         ...(userAgent ? { userAgent } : {})
@@ -470,7 +469,7 @@ async function handleGatewayRequest(opts: {
         ts: new Date().toISOString(),
         tokenId: auth.tokenId,
         method: opts.req.method,
-        path,
+        path: auditPath,
         status,
         ...(remoteAddress ? { remoteAddress } : {}),
         ...(userAgent ? { userAgent } : {})
@@ -488,7 +487,7 @@ async function handleGatewayRequest(opts: {
         ts: new Date().toISOString(),
         tokenId: auth.tokenId,
         method: opts.req.method,
-        path,
+        path: auditPath,
         status,
         ...(remoteAddress ? { remoteAddress } : {}),
         ...(userAgent ? { userAgent } : {})
@@ -506,7 +505,7 @@ async function handleGatewayRequest(opts: {
         ts: new Date().toISOString(),
         tokenId: auth.tokenId,
         method: opts.req.method,
-        path,
+        path: auditPath,
         status,
         ...(remoteAddress ? { remoteAddress } : {}),
         ...(userAgent ? { userAgent } : {})
@@ -524,7 +523,7 @@ async function handleGatewayRequest(opts: {
         ts: new Date().toISOString(),
         tokenId: auth.tokenId,
         method: opts.req.method,
-        path,
+        path: auditPath,
         status,
         ...(remoteAddress ? { remoteAddress } : {}),
         ...(userAgent ? { userAgent } : {})
@@ -570,7 +569,7 @@ async function handleGatewayRequest(opts: {
       ts: new Date().toISOString(),
       tokenId: auth.tokenId,
       method: opts.req.method,
-      path,
+      path: auditPath,
       status: response.status,
       ...(remoteAddress ? { remoteAddress } : {}),
       ...(userAgent ? { userAgent } : {})
@@ -578,6 +577,14 @@ async function handleGatewayRequest(opts: {
   })
 
   return response
+}
+
+function sanitizeGatewayAuditPath(opts: { url: URL }): string {
+  const params = new URLSearchParams(opts.url.searchParams)
+  params.delete("token")
+  params.delete("access_token")
+  const search = params.toString()
+  return `${opts.url.pathname}${search.length > 0 ? `?${search}` : ""}`
 }
 
 async function handleControlPlaneRequest(opts: {

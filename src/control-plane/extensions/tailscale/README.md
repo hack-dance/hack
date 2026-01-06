@@ -11,7 +11,7 @@ It does not call the Tailscale API directly.
 ## Quick start
 
 ```bash
-hack config set 'controlPlane.extensions["dance.hack.tailscale"].enabled' true
+hack config set --global 'controlPlane.extensions["dance.hack.tailscale"].enabled' true
 hack x tailscale setup
 ```
 

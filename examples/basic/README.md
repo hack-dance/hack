@@ -26,4 +26,4 @@ export HACK_COMMAND="echo hello from gateway"
 bun run examples/basic/gateway-demo.ts
 ```
 
-See `GATEWAY_API.md` for full API docs.
+See `/docs/gateway-api.md` for full API docs.

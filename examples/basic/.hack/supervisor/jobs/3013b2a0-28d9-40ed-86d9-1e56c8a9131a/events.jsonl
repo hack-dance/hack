@@ -1,0 +1,4 @@
+{"seq":1,"ts":"2026-01-06T02:51:08.275Z","type":"job.created","payload":{"status":"queued","runner":"generic"}}
+{"seq":2,"ts":"2026-01-06T02:51:08.276Z","type":"job.starting"}
+{"seq":3,"ts":"2026-01-06T02:51:08.276Z","type":"job.started","payload":{"pid":81458}}
+{"seq":4,"ts":"2026-01-06T02:51:08.285Z","type":"job.completed","payload":{"exitCode":0}}

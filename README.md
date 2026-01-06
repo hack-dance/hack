@@ -53,7 +53,7 @@ Neither scales. Both slow you down in dumb, repeatable ways.
 ## Installation
 
 ### Prerequisites
-- **macOS**: more support planned.
+- **macOS**: supported.
 - **Docker + Compose**: [Orbstack](https://docs.orbstack.dev/quick-start) | [Docker Desktop](https://www.docker.com/get-started/) 
 
 ### Install
@@ -208,16 +208,18 @@ If it is not running (or version-mismatched), the CLI falls back to direct Docke
 ship as extensions without bloating the core CLI.
 
 - Extension commands run via `hack x <namespace> <command>`.
-- Extensions are opt-in per project via `controlPlane` in `.hack/hack.config.json`.
-- `controlPlane.gateway.enabled` implicitly enables the gateway extension.
+- Global control-plane config lives at `~/.hack/hack.config.json` (`hack config set --global ...`).
+- Per-project overrides live in `.hack/hack.config.json` and win over global values.
+- `controlPlane.gateway.enabled` is project-scoped and implicitly enables the gateway extension.
 
-See `SPECS/control-plane/consolidated.md` and `EXTENSIONS.md` for the extension SDK surface.
+See `SPECS/control-plane/consolidated.md` and `docs/extensions.md` for the extension SDK surface.
 
 ### Gateway (remote access)
 
 The gateway exposes `hackd` over HTTP/WS with token auth. It binds to `127.0.0.1` by default and
-should be exposed via a Zero Trust/VPN or SSH tunnel when needed. Setup prints a QR by default
-(use `--no-qr` to skip).
+should be exposed via a Zero Trust/VPN or SSH tunnel when needed. `hack remote setup` is the
+one-command flow that enables the gateway, creates a token, and can configure + start exposure
+(Cloudflare/Tailscale/SSH) via prompts. It prints a QR by default (use `--no-qr` to skip).
 
 ```bash
 hack remote setup
@@ -230,7 +232,11 @@ hack x gateway token-create
 ```
 
 Gateway tokens default to read-only. For non-GET requests, set
-`controlPlane.gateway.allowWrites = true` and create a write-scoped token:
+`controlPlane.gateway.allowWrites = true` globally and create a write-scoped token:
+
+```bash
+hack config set --global 'controlPlane.gateway.allowWrites' true
+```
 
 ```bash
 hack x gateway token-create --scope write
@@ -246,7 +252,7 @@ Interactive shells are available over the gateway WebSocket; the CLI can attach 
 `hack x supervisor shell` (write token + allowWrites required). Use SSH/Zero Trust for a full
 terminal UI, or run commands via supervisor jobs.
 
-See `GATEWAY_API.md` for full API usage, structured workflow patterns, and a runnable demo.
+See `docs/gateway-api.md` for full API usage, structured workflow patterns, and a runnable demo.
 
 Remote access options (recommended order):
 1) SSH tunnel to the gateway port for quick, ad-hoc access.
@@ -280,6 +286,22 @@ hack x tailscale status
 
 DNS note: `cloudflared tunnel route dns <tunnel> <hostname>` creates the required CNAME to
 `<tunnel-id>.cfargotunnel.com` in your Cloudflare zone (proxied).
+
+### Supervisor (jobs + shells)
+
+The supervisor is the job/shell runner that powers agent workflows and remote execution. It can run
+commands, stream logs, and host PTY-backed shells. Use it locally with `hack x supervisor` or
+remotely over the gateway.
+
+Docs: `docs/supervisor.md`.
+
+## Docs
+
+Start here:
+- `docs/README.md` (index)
+- `docs/architecture.md`
+- `docs/gateway.md`
+- `docs/extensions.md`
 
 ## Agent setup (CLI-first)
 
@@ -780,7 +802,8 @@ See `PACKAGING.md` for details.
 
 See also:
 - [Examples](examples/next-app/README.md)
-- [Architecture](ARCHITECTURE.md)
+- [Docs](docs/README.md)
+- [Architecture](docs/architecture.md)
 
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>

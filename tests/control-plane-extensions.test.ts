@@ -1,4 +1,6 @@
-import { expect, test } from "bun:test"
+import { afterEach, beforeEach, expect, test } from "bun:test"
+import { join } from "node:path"
+import { tmpdir } from "node:os"
 
 import { ExtensionManager } from "../src/control-plane/extensions/manager.ts"
 import { readControlPlaneConfig } from "../src/control-plane/sdk/config.ts"
@@ -14,6 +16,23 @@ const silentLogger: Logger = {
   success: () => {},
   step: () => {}
 }
+
+const originalGlobalConfigPath = process.env.HACK_GLOBAL_CONFIG_PATH
+
+beforeEach(() => {
+  process.env.HACK_GLOBAL_CONFIG_PATH = join(
+    tmpdir(),
+    `hack-global-config-${Date.now()}-${Math.random()}.json`
+  )
+})
+
+afterEach(() => {
+  if (originalGlobalConfigPath === undefined) {
+    delete process.env.HACK_GLOBAL_CONFIG_PATH
+  } else {
+    process.env.HACK_GLOBAL_CONFIG_PATH = originalGlobalConfigPath
+  }
+})
 
 test("ExtensionManager resolves namespace overrides and enabled flag", async () => {
   const defaults = (await readControlPlaneConfig({})).config

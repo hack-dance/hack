@@ -11,6 +11,14 @@ It does not call Cloudflare APIs directly; it prints a `cloudflared` config and 
 
 ## Quick start (automated)
 
+Preferred one-command flow:
+
+```bash
+hack remote setup
+```
+
+Choose **Cloudflare** when prompted.
+
 1) Enable the gateway and start the daemon:
 
 ```bash
@@ -21,7 +29,7 @@ hack daemon stop && hack daemon start
 2) Run the setup helper:
 
 ```bash
-hack x cloudflare tunnel-setup --hostname gateway.dimitri.computer
+hack x cloudflare tunnel-setup --hostname gateway.dimitri.computer --ssh-hostname ssh.dimitri.computer
 ```
 
 3) Start the tunnel:
@@ -67,7 +75,8 @@ Then follow the printed steps.
 
 ## Config via hack.config.json
 
-You can store defaults under `controlPlane.extensions["dance.hack.cloudflare"].config`:
+Store defaults in the global config (`~/.hack/hack.config.json`) under
+`controlPlane.extensions["dance.hack.cloudflare"].config`:
 
 ```json
 {
@@ -77,8 +86,10 @@ You can store defaults under `controlPlane.extensions["dance.hack.cloudflare"].c
         "enabled": true,
         "config": {
           "hostname": "gateway.dimitri.computer",
+          "sshHostname": "ssh.dimitri.computer",
           "tunnel": "hack-gateway",
           "origin": "http://127.0.0.1:7788",
+          "sshOrigin": "ssh://127.0.0.1:22",
           "credentialsFile": "/Users/you/.cloudflared/<tunnel-id>.json"
         }
       }
@@ -96,6 +107,8 @@ If `credentialsFile` is omitted, `cloudflared` will use the default path when it
   - `--hostname <host>` (required if not set in config)
   - `--tunnel <name>` (default: `hack-gateway`)
   - `--origin <url>` (default: gateway bind/port, usually `http://127.0.0.1:7788`)
+  - `--ssh-hostname <host>` (optional, for SSH over Cloudflare Access)
+  - `--ssh-origin <url>` (default: `ssh://127.0.0.1:22`)
   - `--credentials-file <path>` (optional)
   - `--out <path>` (optional; default: `~/.cloudflared/config.yml`)
   - `--skip-login` (skip `cloudflared tunnel login`)
@@ -106,6 +119,8 @@ If `credentialsFile` is omitted, `cloudflared` will use the default path when it
   - `--hostname <host>` (required if not set in config)
   - `--tunnel <name>` (default: `hack-gateway`)
   - `--origin <url>` (default: gateway bind/port, usually `http://127.0.0.1:7788`)
+  - `--ssh-hostname <host>` (optional)
+  - `--ssh-origin <url>` (default: `ssh://127.0.0.1:22`)
   - `--credentials-file <path>` (optional)
   - `--out <path>` (optional; write config to file)
 
@@ -115,27 +130,50 @@ If `credentialsFile` is omitted, `cloudflared` will use the default path when it
   - `--out <path>` (alias for `--config`)
 
 - `hack x cloudflare tunnel-stop`
+- `hack x cloudflare access-setup`
+  - `--ssh-hostname <host>` (optional; falls back to config `sshHostname`)
+  - `--user <user>` (optional; defaults to `<user>` in output)
 
 ## Notes
 
-- Gateway tokens default to read-only; set `controlPlane.gateway.allowWrites = true` and
+- Gateway tokens default to read-only; set global `controlPlane.gateway.allowWrites = true` and
   create a write token if you need non-GET requests.
 - Cloudflare Tunnel uses an outbound connection; you do not need to expose a public IP.
 - This extension only wraps the `cloudflared` CLI and does not call Cloudflare APIs directly.
 - `hack remote status` surfaces the configured hostname and `cloudflared` PID when available.
 
+## SSH via Cloudflare Access (desktop)
+
+If you include `sshHostname` in the tunnel config, you can use Cloudflare Access for SSH
+from a desktop client with `cloudflared` installed.
+
+```bash
+cloudflared access ssh --hostname ssh.example.com
+```
+
+You can also print the Access app setup steps:
+
+```bash
+hack x cloudflare access-setup --ssh-hostname ssh.example.com --user <user>
+```
+
+Optional `~/.ssh/config` shortcut:
+
+```
+Host ssh.example.com
+  User <user>
+  ProxyCommand /opt/homebrew/bin/cloudflared access ssh --hostname %h
+```
+
 ## SSH caveat (mobile)
 
-Cloudflare Tunnel is great for HTTP/WS (the gateway), but it does **not** provide a native SSH
-endpoint that iOS SSH clients can dial directly. Cloudflare Access for SSH requires
-`cloudflared access ssh` on the client machine, which is not available on iOS.
-
-If you want SSH from a phone:
+Cloudflare Access for SSH requires `cloudflared` on the client machine, which is not
+available on iOS. If you want SSH from a phone:
 - Prefer Tailscale/WireGuard to your laptop, or
 - Use a standard VPN/LAN route to port 22.
 
-Recommendation: expose `gateway.<domain>` via Cloudflare for the gateway HTTP/WS surface, and
-use a separate SSH path for direct shell access.
+Recommendation: expose `gateway.<domain>` via Cloudflare for the gateway HTTP/WS surface,
+and use a separate SSH path for direct shell access on mobile.
 
 ## Cloudflare Access (Zero Trust) policies
 

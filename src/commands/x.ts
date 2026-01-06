@@ -3,6 +3,7 @@ import { resolve } from "node:path"
 import { CliUsageError, defineCommand, withHandler } from "../cli/command.ts"
 import { loadExtensionManagerForCli } from "../control-plane/extensions/cli.ts"
 import { resolveHackInvocation } from "../lib/hack-cli.ts"
+import { resolveGlobalConfigPath } from "../lib/config-paths.ts"
 import { PROJECT_CONFIG_FILENAME } from "../constants.ts"
 import { display } from "../ui/display.ts"
 import { gumConfirm, isGumAvailable } from "../ui/gum.ts"
@@ -168,6 +169,7 @@ type EnableInstruction = {
   readonly enableCommand?: {
     readonly argv: readonly string[]
     readonly printable: string
+    readonly prompt?: string
   }
 }
 
@@ -184,12 +186,19 @@ function buildEnableInstructions(opts: {
         "  hack gateway enable",
         ...(rerun ? ["Re-run:", `  ${rerun}`] : [])
       ],
-      enableCommand: { argv: ["gateway", "enable"], printable: "hack gateway enable" }
+      enableCommand: {
+        argv: ["gateway", "enable"],
+        printable: "hack gateway enable",
+        prompt: "Enable gateway for this project? (runs hack gateway enable)"
+      }
     }
   }
 
   const key = `controlPlane.extensions["${opts.extension.manifest.id}"].enabled`
-  const printable = `hack config set '${key}' true`
+  const enableScope = resolveExtensionEnableScope({ extension: opts.extension })
+  const printable = enableScope.isGlobal ?
+      `hack config set --global '${key}' true`
+    : `hack config set '${key}' true`
   return {
     lines: [
       `Extension: ${opts.extension.manifest.id}`,
@@ -197,7 +206,11 @@ function buildEnableInstructions(opts: {
       `  ${printable}`,
       ...(rerun ? ["Re-run:", `  ${rerun}`] : [])
     ],
-    enableCommand: { argv: ["config", "set", key, "true"], printable }
+    enableCommand: {
+      argv: enableScope.isGlobal ? ["config", "set", "--global", key, "true"] : ["config", "set", key, "true"],
+      printable,
+      prompt: enableScope.prompt
+    }
   }
 }
 
@@ -214,7 +227,7 @@ async function maybeEnableExtension(opts: {
   readonly invocation: ExtensionInvocation
   readonly projectDir?: string
 }): Promise<boolean> {
-  if (!opts.projectDir) return false
+  if (!opts.projectDir && !opts.extension.manifest.scopes.includes("global")) return false
   if (!isTty() || !isGumAvailable()) return false
 
   const instructions = buildEnableInstructions({
@@ -223,8 +236,18 @@ async function maybeEnableExtension(opts: {
   })
   if (!instructions.enableCommand) return false
 
-  const configPath = resolve(opts.projectDir, PROJECT_CONFIG_FILENAME)
-  const prompt = `Enable ${opts.extension.manifest.id}? (updates ${configPath})`
+  const configPath =
+    instructions.enableCommand.prompt ?
+      undefined
+    : resolveConfigPathForEnable({
+        extension: opts.extension,
+        projectDir: opts.projectDir
+      })
+  const prompt =
+    instructions.enableCommand.prompt ??
+    (configPath ?
+      `Enable ${opts.extension.manifest.id}? (updates ${configPath})`
+    : `Enable ${opts.extension.manifest.id}?`)
   const confirmed = await gumConfirm({ prompt, default: true })
   if (!confirmed.ok || !confirmed.value) return false
 
@@ -236,6 +259,29 @@ async function maybeEnableExtension(opts: {
   })
   const exitCode = await proc.exited
   return exitCode === 0
+}
+
+function resolveExtensionEnableScope(opts: {
+  readonly extension: ResolvedExtension
+}): { readonly isGlobal: boolean; readonly prompt?: string } {
+  const isGlobal =
+    opts.extension.manifest.scopes.includes("global") &&
+    !opts.extension.manifest.scopes.includes("project")
+  const prompt = isGlobal ?
+      `Enable ${opts.extension.manifest.id}? (updates ${resolveGlobalConfigPath()})`
+    : undefined
+  return { isGlobal, ...(prompt ? { prompt } : {}) }
+}
+
+function resolveConfigPathForEnable(opts: {
+  readonly extension: ResolvedExtension
+  readonly projectDir?: string
+}): string | null {
+  if (opts.extension.manifest.scopes.includes("global")) {
+    return resolveGlobalConfigPath()
+  }
+  if (!opts.projectDir) return null
+  return resolve(opts.projectDir, PROJECT_CONFIG_FILENAME)
 }
 
 type ExtensionInvocation = {

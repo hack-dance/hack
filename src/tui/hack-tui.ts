@@ -21,14 +21,18 @@ import { dirname, resolve } from "node:path"
 
 import { resolveHackInvocation } from "../lib/hack-cli.ts"
 import { renderHackBanner } from "../lib/hack-banner.ts"
+import { readInternalExtraHostsIp, resolveGlobalCaddyIp } from "../lib/caddy-hosts.ts"
 import { ensureDir, writeTextFile } from "../lib/fs.ts"
 import { isRecord } from "../lib/guards.ts"
 import { defaultProjectSlugFromPath, readProjectConfig, readProjectDevHost } from "../lib/project.ts"
+import { readProjectsRegistry } from "../lib/projects-registry.ts"
 import { readRuntimeProjects } from "../lib/runtime-projects.ts"
+import { exec } from "../lib/shell.ts"
+import { parseTimeInput } from "../lib/time.ts"
 import { copyToClipboard } from "../ui/clipboard.ts"
 
 import type { ProjectContext } from "../lib/project.ts"
-import type { RuntimeProject } from "../lib/runtime-projects.ts"
+import type { RuntimeProject, RuntimeService } from "../lib/runtime-projects.ts"
 import type { LogStreamBackend, LogStreamEvent } from "../ui/log-stream.ts"
 
 type HackTuiOptions = {
@@ -43,10 +47,28 @@ type LogState = {
 
 type LogEntry = {
   readonly service: string | null
-  readonly line: string
-  readonly styled: StyledText
+  line: string
+  styled: StyledText
   readonly timestamp?: string
-  readonly key: string
+  key: string
+  readonly level: string
+  messagePlain: string
+  readonly prefixWidth: number
+  readonly prefixPlain: string
+  readonly prefixChunks: TextChunk[]
+  messageChunks: TextChunk[]
+}
+
+type DockerStatsSample = {
+  readonly cpuPercent: number | null
+  readonly memUsedBytes: number | null
+  readonly memLimitBytes: number | null
+  readonly memPercent: number | null
+  readonly netInputBytes: number | null
+  readonly netOutputBytes: number | null
+  readonly blockInputBytes: number | null
+  readonly blockOutputBytes: number | null
+  readonly pids: number | null
 }
 
 class WrappedTextRenderable extends TextRenderable {
@@ -113,6 +135,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     const cfg = await readProjectConfig(project)
     const projectName = (cfg.name ?? "").trim() || defaultProjectSlugFromPath(project.projectRoot)
     const devHost = await readProjectDevHost(project)
+    const projectId = await resolveProjectId({ project, projectName })
     const headerBanner = await renderHackBanner({ trimEmpty: true, maxLines: 1 })
     const headerBannerLine = headerBanner.length > 0 ? headerBanner.trim() : ""
     const headerLabel =
@@ -129,8 +152,8 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
 
     activeRenderer.setBackgroundColor("#0f111a")
 
-    const headerPaddingX = 1
-    const headerPaddingY = 0
+    const headerPaddingX = 2
+    const headerPaddingY = 1
     const headerLineCount = headerLabel ? 2 : 1
     const headerHeight = headerLineCount + headerPaddingY * 2
 
@@ -152,7 +175,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       paddingTop: headerPaddingY,
       paddingBottom: headerPaddingY,
       border: false,
-      backgroundColor: "#141828"
+      backgroundColor: "#141b2d"
     })
 
     const headerText = new TextRenderable(activeRenderer, {
@@ -176,12 +199,88 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       backgroundColor: "#0f111a"
     })
 
-    const servicesBox = new BoxRenderable(activeRenderer, {
-      id: "hack-tui-services",
+    const sidebar = new BoxRenderable(activeRenderer, {
+      id: "hack-tui-sidebar",
       width: 36,
       flexDirection: "column",
+      gap: 1,
+      backgroundColor: "#0f111a"
+    })
+
+    const metaPaddingX = 1
+    const metaPaddingY = 1
+    const metaFullLineCount = 11
+    const metaCompactLineCount = 8
+    const metaFullHeight = metaFullLineCount + metaPaddingY * 2 + 2
+    const metaCompactHeight = metaCompactLineCount + metaPaddingY * 2 + 2
+    const metaBoxMinHeight = metaFullHeight
+
+    const metaBox = new BoxRenderable(activeRenderer, {
+      id: "hack-tui-meta",
+      width: "100%",
+      minHeight: metaBoxMinHeight,
+      height: metaBoxMinHeight,
+      flexGrow: 0,
       border: true,
-      borderColor: "#2f344a",
+      borderColor: "#4a5374",
+      backgroundColor: "#111726",
+      title: "Project",
+      titleAlignment: "left",
+      paddingLeft: metaPaddingX,
+      paddingRight: metaPaddingX,
+      paddingTop: metaPaddingY,
+      paddingBottom: metaPaddingY
+    })
+
+    const metaText = new TextRenderable(activeRenderer, {
+      id: "hack-tui-meta-text",
+      content: "",
+      width: "100%",
+      height: "100%",
+      wrapMode: "none"
+    })
+
+    metaBox.add(metaText)
+
+    const resourcesPaddingX = 1
+    const resourcesPaddingY = 1
+    const resourcesLineCount = 6
+    const resourcesBoxMinHeight = resourcesLineCount + resourcesPaddingY * 2 + 2
+
+    const resourcesBox = new BoxRenderable(activeRenderer, {
+      id: "hack-tui-resources",
+      width: "100%",
+      minHeight: resourcesBoxMinHeight,
+      height: resourcesBoxMinHeight,
+      flexGrow: 0,
+      border: true,
+      borderColor: "#4a5374",
+      backgroundColor: "#111726",
+      title: "Resources",
+      titleAlignment: "left",
+      paddingLeft: resourcesPaddingX,
+      paddingRight: resourcesPaddingX,
+      paddingTop: resourcesPaddingY,
+      paddingBottom: resourcesPaddingY
+    })
+
+    const resourcesText = new TextRenderable(activeRenderer, {
+      id: "hack-tui-resources-text",
+      content: "",
+      width: "100%",
+      height: "100%",
+      wrapMode: "none"
+    })
+
+    resourcesBox.add(resourcesText)
+
+    const servicesBox = new BoxRenderable(activeRenderer, {
+      id: "hack-tui-services",
+      width: "100%",
+      flexGrow: 1,
+      flexDirection: "column",
+      border: true,
+      borderColor: "#4a5374",
       backgroundColor: "#131829",
       title: "Services",
       titleAlignment: "left"
@@ -212,9 +311,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       flexGrow: 1,
       flexDirection: "column",
       border: true,
-      borderColor: "#2f344a",
+      borderColor: "#4a5374",
       backgroundColor: "#0f111a",
-      title: "Logs (aggregate)",
+      title: "Logs (all)",
       titleAlignment: "left"
     })
 
@@ -260,10 +359,10 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     const footer = new BoxRenderable(activeRenderer, {
       id: "hack-tui-footer",
       width: "100%",
-      paddingLeft: 1,
-      paddingRight: 1,
+      paddingLeft: 2,
+      paddingRight: 2,
       paddingTop: 1,
-      paddingBottom: 1,
+      paddingBottom: 2,
       border: false,
       backgroundColor: "#141828"
     })
@@ -348,6 +447,11 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
   const searchHint = new TextRenderable(activeRenderer, {
     id: "hack-tui-search-hint",
     content: t`${dim("Enter to search | Esc to cancel | Tab to move")}`
+  })
+
+  const searchRecentText = new TextRenderable(activeRenderer, {
+    id: "hack-tui-search-recent",
+    content: t`${dim("Recent: none")}`
   })
 
   const searchQueryLabel = new TextRenderable(activeRenderer, {
@@ -546,6 +650,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
 
   searchPanel.add(searchTitle)
   searchPanel.add(searchHint)
+  searchPanel.add(searchRecentText)
   searchPanel.add(searchQueryLabel)
   searchPanel.add(searchQueryField)
   searchPanel.add(searchFiltersRow)
@@ -553,7 +658,11 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
   searchPanel.add(searchStatusText)
   searchOverlay.add(searchPanel)
 
-  body.add(servicesBox)
+  sidebar.add(metaBox)
+  sidebar.add(resourcesBox)
+  sidebar.add(servicesBox)
+
+  body.add(sidebar)
   body.add(logsBox)
 
   root.add(header)
@@ -568,8 +677,8 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     maxLines: 400
   }
 
-  const paneBorderColor = "#2f344a"
-  const paneFocusBorderColor = "#7dcfff"
+  const paneBorderColor = "#4a5374"
+  const paneFocusBorderColor = "#8ad3ff"
 
   let activePane: "services" | "logs" = "services"
   let lastMainPane: "services" | "logs" = "services"
@@ -597,17 +706,38 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
   let searchSelectedIndex = 0
   let searchQuery = ""
   let searchFocusIndex = 0
+  let toastMessage: StyledText | null = null
+  let toastTimer: ReturnType<typeof setTimeout> | null = null
+  let statsSnapshot: DockerStatsSample | null = null
+  let statsError: string | null = null
+  let statsLoading = false
+  let logLastTimestamp: string | null = null
+  let lastSearchBackend: "local" | "loki" = "local"
+  let highlightQuery = ""
+  let highlightEnabled = false
+  let collapseMultiline = false
+  const enabledLevels = new Set(["debug", "info", "warn", "error"])
+  let serviceScope: "all" | "selected" = "selected"
+  let lastSelectedService: string | null = null
+  let metaVariant: "full" | "compact" = "full"
+  const recentSearches: string[] = []
+  let caddyIp: string | null = null
+  let caddyMappedIp: string | null = null
+  let caddyMismatch = false
+  let lastCaddyCheckAt = 0
+  const caddyCheckIntervalMs = 10_000
 
   const setMainViewVisible = (visible: boolean) => {
     root.visible = visible
     root.requestRender()
   }
 
-  const joinFooterText = (parts: StyledText[], separator = "  "): StyledText => {
+  const joinStyledText = (opts: { readonly parts: StyledText[]; readonly separator?: string }) => {
+    const separator = opts.separator ?? "  "
     const chunks: TextChunk[] = []
-    parts.forEach((part, idx) => {
+    opts.parts.forEach((part, idx) => {
       chunks.push(...part.chunks)
-      if (idx < parts.length - 1) {
+      if (idx < opts.parts.length - 1) {
         chunks.push({ __isChunk: true, text: separator })
       }
     })
@@ -621,6 +751,210 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     return `${line.slice(0, width - 3)}...`
   }
 
+  const setToast = (opts: { readonly message: StyledText; readonly durationMs?: number }) => {
+    if (!isActive) return
+    toastMessage = opts.message
+    renderFooter()
+    if (toastTimer) {
+      clearTimeout(toastTimer)
+    }
+    const duration = opts.durationMs ?? 1800
+    toastTimer = setTimeout(() => {
+      toastMessage = null
+      toastTimer = null
+      renderFooter()
+    }, duration)
+  }
+
+  const updateSearchRecent = () => {
+    if (!isActive) return
+    if (recentSearches.length === 0) {
+      searchRecentText.content = t`${dim("Recent: none")}`
+      return
+    }
+    const trimmed = recentSearches.map(item => truncateLine(item, 18))
+    searchRecentText.content = t`${dim("Recent:")} ${fg("#9ad7ff")(trimmed.join(" · "))}`
+  }
+
+  const recordSearchQuery = (opts: { readonly query: string }) => {
+    const cleaned = opts.query.trim()
+    if (cleaned.length === 0) return
+    const existingIndex = recentSearches.findIndex(
+      item => item.toLowerCase() === cleaned.toLowerCase()
+    )
+    if (existingIndex >= 0) {
+      recentSearches.splice(existingIndex, 1)
+    }
+    recentSearches.unshift(cleaned)
+    if (recentSearches.length > 5) {
+      recentSearches.length = 5
+    }
+    updateSearchRecent()
+  }
+
+  const renderLevelHint = (): StyledText => {
+    const tokens: Array<{ readonly level: string; readonly label: string; readonly color: string }> = [
+      { level: "info", label: "I", color: "#7dcfff" },
+      { level: "warn", label: "W", color: "#e0af68" },
+      { level: "error", label: "E", color: "#f7768e" },
+      { level: "debug", label: "D", color: "#6b7390" }
+    ]
+    const chunks: TextChunk[] = [dim("lvl: ")]
+    tokens.forEach((token, idx) => {
+      const enabled = enabledLevels.has(token.level)
+      chunks.push(enabled ? fg(token.color)(token.label) : dim(token.label))
+      if (idx < tokens.length - 1) {
+        chunks.push({ __isChunk: true, text: " " })
+      }
+    })
+    return new StyledText(chunks)
+  }
+
+  const describeEnabledLevels = (): string => {
+    const order = ["info", "warn", "error", "debug"] as const
+    const enabled = order.filter(level => enabledLevels.has(level))
+    if (enabled.length === 0) return "none"
+    return enabled.join(", ")
+  }
+
+  const toggleLevelFilter = (opts: { readonly level: string }) => {
+    if (enabledLevels.has(opts.level)) {
+      enabledLevels.delete(opts.level)
+    } else {
+      enabledLevels.add(opts.level)
+    }
+    setToast({
+      message: t`${fg("#9ad7ff")("Levels")} ${dim(describeEnabledLevels())}`,
+      durationMs: 1600
+    })
+    updateLogsTitle()
+    flushLogUpdate()
+    renderFooter()
+  }
+
+  const resetLevelFilters = () => {
+    enabledLevels.clear()
+    enabledLevels.add("debug")
+    enabledLevels.add("info")
+    enabledLevels.add("warn")
+    enabledLevels.add("error")
+    setToast({
+      message: t`${fg("#9ad7ff")("Levels")} ${dim("all")}`,
+      durationMs: 1400
+    })
+    updateLogsTitle()
+    flushLogUpdate()
+    renderFooter()
+  }
+
+  const toggleServiceScope = () => {
+    if (serviceScope === "all") {
+      serviceScope = "selected"
+      if (!selectedService && lastSelectedService) {
+        selectedService = lastSelectedService
+        renderServices(currentRuntime)
+      }
+    } else {
+      serviceScope = "all"
+    }
+    setToast({
+      message:
+        serviceScope === "all" ? t`${fg("#9ad7ff")("Scope")} ${dim("all services")}`
+        : t`${fg("#9ad7ff")("Scope")} ${dim("selected service")}`,
+      durationMs: 1400
+    })
+    updateLogsTitle()
+    flushLogUpdate()
+    renderFooter()
+    void refreshStats({ runtime: currentRuntime })
+  }
+
+  const toggleCollapse = () => {
+    collapseMultiline = !collapseMultiline
+    setToast({
+      message:
+        collapseMultiline ? t`${fg("#9ece6a")("Collapsed")} ${dim("multiline")}`
+        : t`${fg("#9ad7ff")("Expanded")} ${dim("multiline")}`,
+      durationMs: 1400
+    })
+    flushLogUpdate()
+    renderFooter()
+  }
+
+  const toggleHighlight = () => {
+    if (!highlightEnabled) {
+      if (highlightQuery.trim().length === 0) {
+        setToast({ message: t`${fg("#e0af68")("No highlight query")}`, durationMs: 1600 })
+        return
+      }
+      highlightEnabled = true
+      setToast({
+        message: t`${fg("#9ece6a")("Highlight on")}`,
+        durationMs: 1200
+      })
+    } else {
+      highlightEnabled = false
+      setToast({
+        message: t`${fg("#9ad7ff")("Highlight off")}`,
+        durationMs: 1200
+      })
+    }
+    flushLogUpdate()
+    renderFooter()
+  }
+
+  const clearSearchState = (opts: { readonly notify: boolean }) => {
+    const hadQuery = highlightQuery.trim().length > 0 || searchQuery.trim().length > 0
+    searchMode = "live"
+    searchResults = []
+    searchSelectedIndex = 0
+    searchQuery = ""
+    highlightQuery = ""
+    highlightEnabled = false
+    logsScroll.stickyScroll = true
+    updateLogsTitle()
+    flushLogUpdate()
+    renderFooter()
+    if (opts.notify && hadQuery) {
+      setToast({ message: t`${fg("#9ad7ff")("Search cleared")}`, durationMs: 1400 })
+    }
+  }
+
+  const filterLocalSearchEntries = (opts: {
+    readonly query: string
+    readonly level: string
+    readonly service: string | null
+    readonly since: string
+    readonly until: string
+  }): LogEntry[] => {
+    const query = normalizeSearchText(opts.query.trim())
+    const sinceTime = opts.since.trim().length > 0 ? parseTimeInput(opts.since) : null
+    const untilTime = opts.until.trim().length > 0 ? parseTimeInput(opts.until) : null
+    const sinceMs = sinceTime ? sinceTime.getTime() : null
+    const untilMs = untilTime ? untilTime.getTime() : null
+
+    return logState.entries.filter(entry => {
+      if (opts.service && entry.service !== opts.service) return false
+      if (opts.level !== "all" && entry.level !== opts.level) return false
+      if (sinceMs !== null || untilMs !== null) {
+        if (!entry.timestamp) return false
+        const tsMs = Date.parse(entry.timestamp)
+        if (!Number.isFinite(tsMs)) return false
+        if (sinceMs !== null && tsMs < sinceMs) return false
+        if (untilMs !== null && tsMs > untilMs) return false
+      }
+      if (query.length === 0) return true
+      const haystack = [
+        entry.line,
+        entry.messagePlain,
+        entry.service ?? ""
+      ]
+        .map(normalizeSearchText)
+        .join(" ")
+      return haystack.includes(query)
+    })
+  }
+
   const renderFooter = () => {
     const focusLabel =
       searchOverlayVisible ? "Search"
@@ -628,11 +962,20 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       : activePane === "services" ? "Services"
       : "Logs"
     const focusHint = t`${dim("focus:")} ${fg("#9ad7ff")(focusLabel)}`
-    const copyHint =
-      activePane === "logs" && logsHasSelection ? t`${dim("[")}${fg("#9ad7ff")("c")}${dim(
-        "]"
-      )} copy`
+    const toastHint = toastMessage
+    const copyHint = logsHasSelection ? t`${dim("[")}${fg("#9ad7ff")("c")}${dim("]")} copy` : null
+    const resultsQuery =
+      searchMode === "results" && searchQuery.trim().length > 0 ? searchQuery.trim() : null
+    const highlightActive = highlightEnabled && highlightQuery.trim().length > 0
+    const highlightValue = highlightActive ? highlightQuery.trim() : null
+    const queryIndicator =
+      resultsQuery ?
+        t`${dim("search:")} ${fg("#9ad7ff")(truncateLine(resultsQuery, 18))}`
+      : highlightValue ?
+        t`${dim("hl:")} ${fg("#9ad7ff")(truncateLine(highlightValue, 18))}`
       : null
+    const clearHint =
+      resultsQuery || highlightValue ? t`${dim("[")}${fg("#9ad7ff")("x")}${dim("]")} clear` : null
 
     if (searchOverlayVisible) {
       const navHint = t`${dim("[")}${fg("#9ad7ff")("tab")}${dim("]")} next field  ${dim(
@@ -643,7 +986,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       )("esc")}${dim("]")} close  ${dim("[")}${fg("#9ad7ff")(
         "ctrl+c"
       )}${dim("]")} close`
-      footerText.content = joinFooterText([navHint, actions, focusHint])
+      const parts = [navHint, actions, focusHint]
+      if (toastHint) parts.push(toastHint)
+      footerText.content = joinStyledText({ parts })
       return
     }
 
@@ -655,8 +1000,11 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         "#9ad7ff"
       )("ctrl+f")}${dim("]")} new search`
       const parts = [navHint, actions, focusHint]
+      if (queryIndicator) parts.push(queryIndicator)
+      if (clearHint) parts.push(clearHint)
       if (copyHint) parts.push(copyHint)
-      footerText.content = joinFooterText(parts)
+      if (toastHint) parts.push(toastHint)
+      footerText.content = joinStyledText({ parts })
       return
     }
 
@@ -674,21 +1022,31 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     )("d")}${dim("]")} down  ${dim("[")}${fg("#9ad7ff")("r")}${dim(
       "]"
     )} restart  ${dim("[")}${fg("#9ad7ff")("q")}${dim("]")} quit`
-    const parts = [navHint, actions, focusHint]
+    const scopeLabel = serviceScope === "all" ? "all" : "sel"
+    const scopeHint = t`${dim("scope:")} ${fg("#9ad7ff")(scopeLabel)}`
+    const toggleHint = t`${dim("[")}${fg("#9ad7ff")("s")}${dim("]")} scope  ${dim("[")}${fg(
+      "#9ad7ff"
+    )("z")}${dim("]")} wrap  ${dim("[")}${fg("#9ad7ff")("h")}${dim("]")} hl`
+    const parts = [navHint, actions, renderLevelHint(), scopeHint, toggleHint, focusHint]
+    if (queryIndicator) parts.push(queryIndicator)
+    if (clearHint) parts.push(clearHint)
     if (copyHint) parts.push(copyHint)
-    footerText.content = joinFooterText(parts)
+    if (toastHint) parts.push(toastHint)
+    footerText.content = joinStyledText({ parts })
   }
 
   const setActivePane = (pane: "services" | "logs") => {
     if (activePane === pane && !searchOverlayVisible) {
-      renderHeader(currentRuntime)
+      renderHeader()
+      renderMetaPanel({ runtime: currentRuntime })
       renderFooter()
       return
     }
     activePane = pane
     servicesBox.borderColor = pane === "services" ? paneFocusBorderColor : paneBorderColor
     logsBox.borderColor = pane === "logs" ? paneFocusBorderColor : paneBorderColor
-    renderHeader(currentRuntime)
+    renderHeader()
+    renderMetaPanel({ runtime: currentRuntime })
     renderFooter()
     if (pane === "services") {
       servicesSelect.focus()
@@ -697,21 +1055,308 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     }
   }
 
-  const renderHeader = (runtime: RuntimeProject | null) => {
+  const formatPanelLine = (opts: {
+    readonly label: string
+    readonly value: string
+    readonly color: string
+    readonly width: number
+  }): StyledText => {
+    const label = `${opts.label}: `
+    const valueWidth = Math.max(0, opts.width - label.length)
+    const value = truncateLine(opts.value, valueWidth)
+    return t`${dim(label)}${fg(opts.color)(value)}`
+  }
+
+  const renderHeader = () => {
     if (!isActive) return
+    const headerWidth = Math.max(0, Math.floor(header.width || activeRenderer.width || 0))
+    const maxLineWidth = Math.max(0, headerWidth - headerPaddingX * 2)
+    const bannerLine = headerLabel.length > 0 ? truncateLine(headerLabel, maxLineWidth) : ""
+    const projectLine = truncateLine(projectName, maxLineWidth)
+    headerText.content =
+      bannerLine.length > 0 ?
+        t`${fg("#9ad7ff")(bannerLine)}\n${dim("Project")} ${fg("#c0caf5")(projectLine)}`
+      : t`${fg("#c0caf5")(projectLine)}`
+  }
+
+  const renderMetaPanel = (opts: { readonly runtime: RuntimeProject | null }) => {
+    if (!isActive) return
+    const runtime = opts.runtime
     const serviceCount = runtime ? runtime.services.size : 0
     const runningCount = runtime ? countRunningServices(runtime) : 0
     const hostLabel = devHost ? devHost : "n/a"
     const focusLabel = activePane === "services" ? "Services" : "Logs"
-    const sinceLabel = logStartTimestamp ? isoToClock(logStartTimestamp) : "n/a"
-    const metaLine =
-      `Project: ${projectName}  Host: ${hostLabel}  Services: ${runningCount}/${serviceCount}` +
-      `  Focus: ${focusLabel}  Logs since: ${sinceLabel}  [q] quit`
-    const headerWidth = Math.max(0, Math.floor(header.width || activeRenderer.width || 0))
-    const maxLineWidth = Math.max(0, headerWidth - headerPaddingX * 2)
-    const bannerLine = headerLabel.length > 0 ? truncateLine(headerLabel, maxLineWidth) : ""
-    const metaLineTrim = truncateLine(metaLine, maxLineWidth)
-    headerText.content = bannerLine.length > 0 ? `${bannerLine}\n${metaLineTrim}` : metaLineTrim
+    const historyLabel = logStartTimestamp ?
+        formatDurationShort({ ms: Date.now() - Date.parse(logStartTimestamp) })
+      : "n/a"
+    const lagLabel = logLastTimestamp ?
+        formatDurationShort({ ms: Date.now() - Date.parse(logLastTimestamp) })
+      : "n/a"
+    const logsBackendLabel = logBackend ?? "unknown"
+    const searchBackendLabel = lastSearchBackend
+    const status =
+      !runtime ? { label: "Offline", color: "#6b7390" }
+      : serviceCount === 0 ? { label: "Idle", color: "#6b7390" }
+      : runningCount === 0 ? { label: "Stopped", color: "#e0af68" }
+      : runningCount < serviceCount ? { label: "Partial", color: "#e0af68" }
+      : { label: "Running", color: "#9ece6a" }
+    const metaWidth = Math.max(
+      0,
+      Math.floor(metaBox.width || sidebar.width || activeRenderer.width || 0)
+    )
+    const lineWidth = Math.max(0, metaWidth - metaPaddingX * 2 - 2)
+    const caddyValue =
+      !caddyIp ? "n/a"
+      : caddyMappedIp && caddyMismatch ? `${caddyIp} (stale ${caddyMappedIp})`
+      : !caddyMappedIp ? `${caddyIp} (unmapped)`
+      : caddyIp
+    const caddyColor =
+      !caddyIp ? "#6b7390"
+      : caddyMismatch || !caddyMappedIp ? "#e0af68"
+      : "#9ece6a"
+    const caddyLine = formatPanelLine({
+      label: "Caddy IP",
+      value: caddyValue,
+      color: caddyColor,
+      width: lineWidth
+    })
+    const baseLines = [
+      formatPanelLine({
+        label: "Status",
+        value: status.label,
+        color: status.color,
+        width: lineWidth
+      }),
+      formatPanelLine({
+        label: "Project",
+        value: projectName,
+        color: "#c0caf5",
+        width: lineWidth
+      }),
+      formatPanelLine({
+        label: "Project ID",
+        value: projectId ?? "n/a",
+        color: "#7dcfff",
+        width: lineWidth
+      }),
+      formatPanelLine({
+        label: "Host",
+        value: hostLabel,
+        color: "#c0caf5",
+        width: lineWidth
+      }),
+      caddyLine,
+      formatPanelLine({
+        label: "Services",
+        value: `${runningCount}/${serviceCount}`,
+        color: "#9ad7ff",
+        width: lineWidth
+      }),
+      formatPanelLine({
+        label: "Logs",
+        value: logsBackendLabel,
+        color: "#c0caf5",
+        width: lineWidth
+      }),
+      formatPanelLine({
+        label: "Search",
+        value: searchBackendLabel,
+        color: "#7dcfff",
+        width: lineWidth
+      })
+    ]
+    const fullLines = [
+      ...baseLines.slice(0, 3),
+      formatPanelLine({
+        label: "Host",
+        value: hostLabel,
+        color: "#c0caf5",
+        width: lineWidth
+      }),
+      caddyLine,
+      formatPanelLine({
+        label: "Services",
+        value: `${runningCount}/${serviceCount}`,
+        color: "#9ad7ff",
+        width: lineWidth
+      }),
+      formatPanelLine({
+        label: "Focus",
+        value: focusLabel,
+        color: "#9ad7ff",
+        width: lineWidth
+      }),
+      formatPanelLine({
+        label: "Logs",
+        value: logsBackendLabel,
+        color: "#c0caf5",
+        width: lineWidth
+      }),
+      formatPanelLine({
+        label: "History",
+        value: historyLabel,
+        color: "#c0caf5",
+        width: lineWidth
+      }),
+      formatPanelLine({
+        label: "Lag",
+        value: lagLabel,
+        color: "#c0caf5",
+        width: lineWidth
+      }),
+      formatPanelLine({
+        label: "Search",
+        value: searchBackendLabel,
+        color: "#7dcfff",
+        width: lineWidth
+      })
+    ]
+    const lines = metaVariant === "compact" ? baseLines : fullLines
+    metaText.content = joinStyledText({ parts: lines, separator: "\n" })
+  }
+
+  const refreshCaddyStatus = async () => {
+    if (!isActive) return
+    const now = Date.now()
+    if (now - lastCaddyCheckAt < caddyCheckIntervalMs) return
+    lastCaddyCheckAt = now
+
+    const nextCaddyIp = await resolveGlobalCaddyIp()
+    const nextMappedIp = await readInternalExtraHostsIp({ projectDir: project.projectDir })
+    const nextMismatch =
+      typeof nextCaddyIp === "string" &&
+      typeof nextMappedIp === "string" &&
+      nextCaddyIp.length > 0 &&
+      nextMappedIp.length > 0 &&
+      nextCaddyIp !== nextMappedIp
+
+    const changed =
+      nextCaddyIp !== caddyIp ||
+      nextMappedIp !== caddyMappedIp ||
+      nextMismatch !== caddyMismatch
+
+    caddyIp = nextCaddyIp
+    caddyMappedIp = nextMappedIp
+    caddyMismatch = nextMismatch
+
+    if (changed) {
+      renderMetaPanel({ runtime: currentRuntime })
+    }
+  }
+
+  const renderResourcesPanel = (opts: { readonly targetLabel: string }) => {
+    if (!isActive) return
+    const resourcesWidth = Math.max(
+      0,
+      Math.floor(resourcesBox.width || sidebar.width || activeRenderer.width || 0)
+    )
+    const lineWidth = Math.max(0, resourcesWidth - resourcesPaddingX * 2 - 2)
+    const targetLine = formatPanelLine({
+      label: "Target",
+      value: opts.targetLabel,
+      color: "#c0caf5",
+      width: lineWidth
+    })
+
+    if (statsLoading && !statsSnapshot) {
+      resourcesText.content = joinStyledText({
+        parts: [targetLine, t`${dim("Loading stats...")}`],
+        separator: "\n"
+      })
+      return
+    }
+
+    if (statsError) {
+      resourcesText.content = joinStyledText({
+        parts: [targetLine, t`${fg("#e0af68")("Stats unavailable")}`],
+        separator: "\n"
+      })
+      return
+    }
+
+    if (!statsSnapshot) {
+      resourcesText.content = joinStyledText({
+        parts: [targetLine, t`${dim("No containers")}`],
+        separator: "\n"
+      })
+      return
+    }
+
+    const cpuLabel =
+      statsSnapshot.cpuPercent !== null ? `${statsSnapshot.cpuPercent.toFixed(1)}%` : "n/a"
+    const memLabel =
+      statsSnapshot.memUsedBytes !== null && statsSnapshot.memLimitBytes !== null ?
+        `${formatBytes({ bytes: statsSnapshot.memUsedBytes })} / ${formatBytes({ bytes: statsSnapshot.memLimitBytes })} (${formatPercent({ percent: statsSnapshot.memPercent })})`
+      : "n/a"
+    const netLabel =
+      statsSnapshot.netInputBytes !== null && statsSnapshot.netOutputBytes !== null ?
+        `${formatBytes({ bytes: statsSnapshot.netInputBytes })} in / ${formatBytes({ bytes: statsSnapshot.netOutputBytes })} out`
+      : "n/a"
+    const blockLabel =
+      statsSnapshot.blockInputBytes !== null && statsSnapshot.blockOutputBytes !== null ?
+        `${formatBytes({ bytes: statsSnapshot.blockInputBytes })} in / ${formatBytes({ bytes: statsSnapshot.blockOutputBytes })} out`
+      : "n/a"
+    const pidsLabel = statsSnapshot.pids !== null ? String(statsSnapshot.pids) : "n/a"
+
+    const lines = [
+      targetLine,
+      formatPanelLine({ label: "CPU", value: cpuLabel, color: "#9ad7ff", width: lineWidth }),
+      formatPanelLine({ label: "Memory", value: memLabel, color: "#c0caf5", width: lineWidth }),
+      formatPanelLine({ label: "Net", value: netLabel, color: "#7dcfff", width: lineWidth }),
+      formatPanelLine({ label: "Block", value: blockLabel, color: "#7dcfff", width: lineWidth }),
+      formatPanelLine({ label: "PIDs", value: pidsLabel, color: "#c0caf5", width: lineWidth })
+    ]
+
+    resourcesText.content = joinStyledText({ parts: lines, separator: "\n" })
+  }
+
+  const layoutSidebar = () => {
+    if (!isActive) return
+    const sidebarHeight = Math.floor(sidebar.height || 0)
+    if (sidebarHeight <= 0) return
+    const gapSize = 1
+    let showResources = true
+    let metaHeight = metaFullHeight
+    let servicesMinHeight = 6
+
+    let gapCount = showResources ? 2 : 1
+    let needed =
+      metaHeight + (showResources ? resourcesBoxMinHeight : 0) + servicesMinHeight + gapCount * gapSize
+
+    if (sidebarHeight < needed) {
+      showResources = false
+      gapCount = 1
+      needed = metaHeight + servicesMinHeight + gapCount * gapSize
+    }
+
+    if (sidebarHeight < needed) {
+      metaHeight = metaCompactHeight
+      needed = metaHeight + servicesMinHeight + gapCount * gapSize
+    }
+
+    if (sidebarHeight < needed) {
+      servicesMinHeight = Math.max(3, sidebarHeight - metaHeight - gapCount * gapSize)
+    }
+
+    const nextVariant = metaHeight === metaCompactHeight ? "compact" : "full"
+    if (metaVariant !== nextVariant) {
+      metaVariant = nextVariant
+      renderMetaPanel({ runtime: currentRuntime })
+    }
+
+    if (resourcesBox.visible !== showResources) {
+      resourcesBox.visible = showResources
+    }
+    resourcesBox.height = showResources ? resourcesBoxMinHeight : 0
+    resourcesBox.minHeight = showResources ? resourcesBoxMinHeight : 0
+    metaBox.height = metaHeight
+    metaBox.minHeight = metaHeight
+    servicesBox.minHeight = servicesMinHeight
+    sidebar.requestRender()
+  }
+
+  sidebar.onSizeChange = () => {
+    layoutSidebar()
   }
 
   const renderServices = (runtime: RuntimeProject | null) => {
@@ -762,29 +1407,121 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     searchServiceSelect.setSelectedIndex(idx >= 0 ? idx : 0)
   }
 
+  const resolveTargetContainers = (opts: {
+    readonly runtime: RuntimeProject | null
+    readonly serviceScope: "all" | "selected"
+    readonly selectedService: string | null
+  }): readonly string[] => {
+    if (!opts.runtime) return []
+    const containers: string[] = []
+    const addContainers = (service: RuntimeService) => {
+      for (const container of service.containers) {
+        if (container.id) containers.push(container.id)
+      }
+    }
+    if (opts.serviceScope === "all" || !opts.selectedService) {
+      for (const service of opts.runtime.services.values()) {
+        addContainers(service)
+      }
+      return containers
+    }
+    const service = opts.runtime.services.get(opts.selectedService) ?? null
+    if (service) addContainers(service)
+    return containers
+  }
+
+  const refreshStats = async (opts: { readonly runtime: RuntimeProject | null }) => {
+    if (statsLoading) return
+    statsLoading = true
+    statsError = null
+
+    const targetContainers = resolveTargetContainers({
+      runtime: opts.runtime,
+      serviceScope,
+      selectedService
+    })
+    const targetLabel =
+      serviceScope === "all" || !selectedService ? "All services" : selectedService
+    renderResourcesPanel({ targetLabel })
+
+    if (targetContainers.length === 0) {
+      statsSnapshot = null
+      statsLoading = false
+      renderResourcesPanel({ targetLabel })
+      return
+    }
+
+    const result = await exec(
+      ["docker", "stats", "--no-stream", "--format", "{{json .}}", ...targetContainers],
+      { stdin: "ignore" }
+    )
+
+    if (result.exitCode !== 0) {
+      statsError = result.stderr.trim() || "stats failed"
+      statsSnapshot = null
+      statsLoading = false
+      renderResourcesPanel({ targetLabel })
+      return
+    }
+
+    const samples = parseDockerStatsOutput({ output: result.stdout })
+    if (samples.length === 0) {
+      statsError = "stats parse failed"
+      statsSnapshot = null
+      statsLoading = false
+      renderResourcesPanel({ targetLabel })
+      return
+    }
+
+    statsSnapshot = aggregateDockerStats({ samples })
+    statsLoading = false
+    renderResourcesPanel({ targetLabel })
+  }
+
+  const updateLogLastTimestamp = (entry: LogEntry) => {
+    if (!entry.timestamp) return
+    if (!logLastTimestamp || entry.timestamp > logLastTimestamp) {
+      logLastTimestamp = entry.timestamp
+      renderMetaPanel({ runtime: currentRuntime })
+    }
+  }
+
   const updateLogsTitle = () => {
     if (!isActive) return
     if (searchMode === "results") {
       logsBox.title = `Search results (${searchResults.length})`
       return
     }
-    const base = selectedService ? `Logs (${selectedService})` : "Logs (all)"
+    const base =
+      serviceScope === "all" || !selectedService ? "Logs (all)" : `Logs (${selectedService})`
     const suffix = historyState.loading ? " • loading history" : ""
     logsBox.title = base + suffix
   }
 
   const updateLogText = () => {
     if (!isActive) return
-    const activeEntries =
-      searchMode === "results" ?
-        searchResults
-      : selectedService ?
-        logState.entries.filter(entry => entry.service === selectedService)
-      : logState.entries
+    const baseEntries = searchMode === "results" ? searchResults : logState.entries
+    let activeEntries = baseEntries
+
+    if (searchMode !== "results") {
+      if (serviceScope === "selected" && selectedService) {
+        activeEntries = activeEntries.filter(entry => entry.service === selectedService)
+      }
+      if (enabledLevels.size === 0) {
+        logsText.content = "No levels selected."
+        if (handleSelectionChange) handleSelectionChange()
+        return
+      }
+      activeEntries = activeEntries.filter(entry => enabledLevels.has(entry.level))
+    }
     const visible = activeEntries.slice(-logState.maxLines)
 
     if (visible.length === 0) {
-      logsText.content = searchMode === "results" ? "No search results." : "Waiting for logs..."
+      logsText.content =
+        searchMode === "results" ? "No search results."
+        : enabledLevels.size < 4 || (serviceScope === "selected" && selectedService) ?
+          "No logs match current filters."
+        : "Waiting for logs..."
       if (handleSelectionChange) handleSelectionChange()
       return
     }
@@ -796,9 +1533,12 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       selectedIndex !== null && selectedIndex >= 0 && selectedIndex < visible.length ?
         selectedIndex
       : null
+    const highlightValue =
+      searchMode === "results" ? searchQuery : highlightEnabled ? highlightQuery : null
     logsText.content = buildStyledLogText(visible, {
-      highlightQuery: searchMode === "results" ? searchQuery : null,
-      selectedIndex: selectedLineIndex
+      highlightQuery: highlightValue,
+      selectedIndex: selectedLineIndex,
+      collapseMultiline
     })
     logsText.syncWrapWidth()
     if (handleSelectionChange) handleSelectionChange()
@@ -821,8 +1561,49 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     updateLogText()
   }
 
+  const mergeLogEntry = (opts: { readonly target: LogEntry; readonly entry: LogEntry }) => {
+    opts.target.messagePlain = `${opts.target.messagePlain}\n${opts.entry.messagePlain}`
+    const continuationChunks = buildContinuationLineChunks({ prev: opts.target, entry: opts.entry })
+    opts.target.messageChunks = [
+      ...opts.target.messageChunks,
+      { __isChunk: true, text: "\n" },
+      ...continuationChunks
+    ]
+    opts.target.styled = new StyledText([
+      ...opts.target.prefixChunks,
+      ...opts.target.messageChunks
+    ])
+    opts.target.line = `${opts.target.prefixPlain}${opts.target.messagePlain}`
+    opts.target.key = buildEntryKey({
+      service: opts.target.service ?? null,
+      timestamp: opts.target.timestamp ?? null,
+      line: opts.target.line
+    })
+  }
+
+  const findContinuationTarget = (opts: {
+    readonly entries: readonly LogEntry[]
+    readonly entry: LogEntry
+  }): LogEntry | null => {
+    if (!opts.entry.service || !opts.entry.timestamp) return null
+    for (let i = opts.entries.length - 1; i >= 0; i -= 1) {
+      const candidate = opts.entries[i]
+      if (!candidate?.service || !candidate.timestamp) continue
+      if (!shouldCollapseLogPrefix({ prev: candidate, next: opts.entry })) continue
+      return candidate
+    }
+    return null
+  }
+
   const appendLogEntry = (entry: LogEntry) => {
     if (!isActive) return
+    updateLogLastTimestamp(entry)
+    const continuationTarget = findContinuationTarget({ entries: logState.entries, entry })
+    if (continuationTarget) {
+      mergeLogEntry({ target: continuationTarget, entry })
+      scheduleLogUpdate()
+      return
+    }
     logState.entries.push(entry)
     let trimmed = false
     if (logState.entries.length > logState.maxEntries) {
@@ -831,7 +1612,8 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     }
     if (entry.timestamp && (!logStartTimestamp || entry.timestamp < logStartTimestamp)) {
       logStartTimestamp = entry.timestamp
-      renderHeader(currentRuntime)
+      renderHeader()
+      renderMetaPanel({ runtime: currentRuntime })
     }
     if (trimmed) {
       updateLogStartTimestamp()
@@ -843,6 +1625,12 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     const selected = logsText.getSelectedText()
     if (!selected) return
     const result = await copyToClipboard({ text: selected })
+    setToast({
+      message:
+        result.ok ? t`${fg("#9ece6a")("Copied")} ${dim("to clipboard")}`
+        : t`${fg("#e0af68")("Copy failed")}`,
+      durationMs: result.ok ? 1600 : 2400
+    })
     appendLogEntry(
       formatSystemLine({
         message: result.ok ? "[copy] selection copied" : `[copy] ${result.error}`,
@@ -878,7 +1666,8 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     }
     if (earliest !== logStartTimestamp) {
       logStartTimestamp = earliest
-      renderHeader(currentRuntime)
+      renderHeader()
+      renderMetaPanel({ runtime: currentRuntime })
     }
   }
 
@@ -921,6 +1710,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
           if (!event || event.type !== "log" || !event.entry) return
           if (!logBackend) {
             logBackend = event.backend ?? event.entry.source
+            renderMetaPanel({ runtime: currentRuntime })
           }
           const formatted = formatLogEntry(event)
           if (formatted) entries.push(formatted)
@@ -994,9 +1784,13 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     const runtime = await resolveRuntimeProject({ project, projectName })
     if (!isActive) return
     currentRuntime = runtime
-    renderHeader(runtime)
+    renderHeader()
+    renderMetaPanel({ runtime })
     renderServices(runtime)
     renderSearchServices({ runtime })
+    layoutSidebar()
+    void refreshStats({ runtime })
+    void refreshCaddyStatus()
   }
 
   bindSearchFieldFocus({ field: searchQueryInput, frame: searchQueryField })
@@ -1041,6 +1835,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     setMainViewVisible(false)
     renderFooter()
     setSearchStatus({ message: "Ready" })
+    updateSearchRecent()
     if (selectedService) {
       const idx = searchServiceSelect.options.findIndex(option => option.value === selectedService)
       searchServiceSelect.setSelectedIndex(idx >= 0 ? idx : 0)
@@ -1070,6 +1865,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     const since = searchSinceInput.value.trim()
     const until = searchUntilInput.value.trim()
 
+    recordSearchQuery({ query })
     cancelSearchProc()
     closeSearchOverlay()
     searchMode = "live"
@@ -1077,6 +1873,34 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     searchSelectedIndex = 0
     updateLogsTitle()
     setSearchStatus({ message: "Searching...", tone: "info" })
+
+    const searchBackend = logBackend ?? "compose"
+    if (searchBackend !== "loki") {
+      lastSearchBackend = "local"
+      highlightQuery = query
+      highlightEnabled = query.length > 0
+      renderMetaPanel({ runtime: currentRuntime })
+      const entries = filterLocalSearchEntries({
+        query,
+        level,
+        service,
+        since,
+        until
+      })
+      setSearchStatus({
+        message: `Found ${entries.length} matches (of ${logState.entries.length})`,
+        tone: "info"
+      })
+      searchResults = entries
+      searchSelectedIndex = 0
+      searchQuery = query
+      searchMode = "results"
+      logsScroll.stickyScroll = false
+      setActivePane("logs")
+      updateLogsTitle()
+      flushLogUpdate()
+      return
+    }
 
     const invocation = await resolveHackInvocation()
     const args = [
@@ -1093,8 +1917,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     if (service) {
       args.push("--services", service)
     }
-    if (since.length > 0) {
-      args.push("--since", since)
+    const sinceArg = since.length > 0 ? since : logStartTimestamp ?? ""
+    if (sinceArg.length > 0) {
+      args.push("--since", sinceArg)
     }
     if (until.length > 0) {
       args.push("--until", until)
@@ -1132,7 +1957,12 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
           const formatted = formatLogEntry(event)
           if (!formatted) return
           if (!matchesSearchQuery({ entry: event.entry, query, level })) return
-          entries.push(formatted)
+          const continuationTarget = findContinuationTarget({ entries, entry: formatted })
+          if (continuationTarget) {
+            mergeLogEntry({ target: continuationTarget, entry: formatted })
+          } else {
+            entries.push(formatted)
+          }
         }
       })
     }
@@ -1141,6 +1971,8 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     searchProc = null
 
     if (errors.length > 0) {
+      lastSearchBackend = "loki"
+      renderMetaPanel({ runtime: currentRuntime })
       setSearchStatus({ message: errors.slice(-2).join("\n"), tone: "warn" })
       appendLogEntry(
         formatSystemLine({
@@ -1156,6 +1988,10 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       return
     }
 
+    lastSearchBackend = "loki"
+    highlightQuery = query
+    highlightEnabled = query.length > 0
+    renderMetaPanel({ runtime: currentRuntime })
     setSearchStatus({ message: `Found ${entries.length} matches`, tone: "info" })
     searchResults = entries
     searchSelectedIndex = 0
@@ -1234,6 +2070,10 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       clearTimeout(logUpdateTimer)
       logUpdateTimer = null
     }
+    if (toastTimer) {
+      clearTimeout(toastTimer)
+      toastTimer = null
+    }
 
     if (logProc && logProc.exitCode === null) {
       logProc.kill()
@@ -1300,8 +2140,12 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
 
   servicesSelect.on(SelectRenderableEvents.SELECTION_CHANGED, (_index, option) => {
     selectedService = option?.value ?? null
+    if (selectedService) {
+      lastSelectedService = selectedService
+    }
     updateLogsTitle()
     flushLogUpdate()
+    void refreshStats({ runtime: currentRuntime })
   })
 
   servicesSelect.on(RenderableEvents.FOCUSED, () => {
@@ -1372,10 +2216,58 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       return
     }
 
-    if (activePane === "logs" && logsHasSelection && key.name === "c" && !key.ctrl && !key.meta) {
+    if (logsHasSelection && key.name === "c" && !key.ctrl && !key.meta) {
       key.preventDefault()
       void copySelectedLogs()
       return
+    }
+
+    if (!key.ctrl && !key.meta) {
+      if (key.name === "1") {
+        key.preventDefault()
+        toggleLevelFilter({ level: "info" })
+        return
+      }
+      if (key.name === "2") {
+        key.preventDefault()
+        toggleLevelFilter({ level: "warn" })
+        return
+      }
+      if (key.name === "3") {
+        key.preventDefault()
+        toggleLevelFilter({ level: "error" })
+        return
+      }
+      if (key.name === "4") {
+        key.preventDefault()
+        toggleLevelFilter({ level: "debug" })
+        return
+      }
+      if (key.name === "0") {
+        key.preventDefault()
+        resetLevelFilters()
+        return
+      }
+      if (key.name === "s") {
+        key.preventDefault()
+        toggleServiceScope()
+        return
+      }
+      if (key.name === "z") {
+        key.preventDefault()
+        toggleCollapse()
+        return
+      }
+      if (key.name === "h") {
+        key.preventDefault()
+        toggleHighlight()
+        return
+      }
+      if (key.name === "x") {
+        key.preventDefault()
+        clearSearchState({ notify: true })
+        return
+      }
     }
 
     if (searchMode === "results") {
@@ -1408,6 +2300,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         const selected = searchResults[searchSelectedIndex]
         if (selected?.service) {
           selectedService = selected.service
+          lastSelectedService = selected.service
           renderServices(currentRuntime)
         }
         searchMode = "live"
@@ -1481,6 +2374,23 @@ async function resolveRuntimeProject(opts: {
   return byName ?? null
 }
 
+async function resolveProjectId(opts: {
+  readonly project: ProjectContext
+  readonly projectName: string
+}): Promise<string | null> {
+  try {
+    const registry = await readProjectsRegistry()
+    const byDir = registry.projects.find(entry => entry.projectDir === opts.project.projectDir)
+    if (byDir) return byDir.id
+    const name = opts.projectName.trim().toLowerCase()
+    if (name.length === 0) return null
+    const byName = registry.projects.find(entry => entry.name === name)
+    return byName?.id ?? null
+  } catch {
+    return null
+  }
+}
+
 function countRunningServices(runtime: RuntimeProject): number {
   let total = 0
   for (const service of runtime.services.values()) {
@@ -1509,9 +2419,16 @@ function formatLogEntry(event: LogStreamEvent): LogEntry | null {
   if (!entry) return null
   const levelValue = resolveLevelValue(entry)
   const levelLabel = levelValue.toUpperCase()
-  const timeChunk = entry.timestamp ? dim(`[${isoToClock(entry.timestamp)}] `) : null
-  const levelChunk = colorLevel({ level: levelValue })(`[${levelLabel}] `)
-  const serviceChunk = entry.service ? colorService(entry.service)(`[${entry.service}] `) : null
+  const timeLabel = entry.timestamp ? `[${isoToClock(entry.timestamp)}] ` : ""
+  const levelLabelText = `[${levelLabel}] `
+  const serviceLabelText = entry.service ? `[${entry.service}] ` : ""
+  const prefixPlain = `${timeLabel}${levelLabelText}${serviceLabelText}`
+  const prefixChunks: TextChunk[] = []
+  if (timeLabel.length > 0) prefixChunks.push(dim(timeLabel))
+  prefixChunks.push(colorLevel({ level: levelValue })(levelLabelText))
+  if (serviceLabelText.length > 0 && entry.service) {
+    prefixChunks.push(colorService(entry.service)(serviceLabelText))
+  }
   const rawMessage =
     entry.message && entry.message.trim().length > 0 ? entry.message : entry.raw
   const messageParts = parseAnsiStyledText(rawMessage)
@@ -1520,16 +2437,9 @@ function formatLogEntry(event: LogStreamEvent): LogEntry | null {
     : stylePlainMessage({ message: messageParts.plain, level: levelValue })
   const fieldsPlain = entry.fields ? ` ${formatFields(entry.fields)}` : ""
   const fieldsChunks = entry.fields ? buildFieldsChunks(entry.fields) : []
-  const styled = new StyledText([
-    ...(timeChunk ? [timeChunk] : []),
-    ...(levelChunk ? [levelChunk] : []),
-    ...(serviceChunk ? [serviceChunk] : []),
-    ...messageChunks,
-    ...fieldsChunks
-  ])
-  const line = `${entry.timestamp ? `[${isoToClock(entry.timestamp)}] ` : ""}[${levelLabel}] ${
-    entry.service ? `[${entry.service}] ` : ""
-  }${messageParts.plain}${fieldsPlain}`.trim()
+  const fullMessageChunks = [...messageChunks, ...fieldsChunks]
+  const styled = new StyledText([...prefixChunks, ...fullMessageChunks])
+  const line = `${prefixPlain}${messageParts.plain}${fieldsPlain}`.trim()
   const key = buildEntryKey({
     service: entry.service ?? null,
     timestamp: entry.timestamp ?? null,
@@ -1539,9 +2449,179 @@ function formatLogEntry(event: LogStreamEvent): LogEntry | null {
     service: entry.service ?? null,
     line,
     styled,
+    level: levelValue,
+    messagePlain: `${messageParts.plain}${fieldsPlain}`,
+    prefixWidth: prefixPlain.length,
+    prefixPlain,
+    prefixChunks,
+    messageChunks: fullMessageChunks,
     timestamp: entry.timestamp ?? undefined,
     key
   }
+}
+
+function parseDockerStatsOutput(opts: { readonly output: string }): DockerStatsSample[] {
+  const lines = opts.output
+    .split("\n")
+    .map(line => line.trim())
+    .filter(line => line.length > 0)
+  const samples: DockerStatsSample[] = []
+
+  for (const line of lines) {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(line)
+    } catch {
+      continue
+    }
+    if (!isRecord(parsed)) continue
+    const cpuPercent = parsePercent({
+      value: typeof parsed["CPUPerc"] === "string" ? parsed["CPUPerc"] : null
+    })
+    const memUsageRaw = typeof parsed["MemUsage"] === "string" ? parsed["MemUsage"] : null
+    const memPercent = parsePercent({
+      value: typeof parsed["MemPerc"] === "string" ? parsed["MemPerc"] : null
+    })
+    const netIo = parseIoPair({
+      value: typeof parsed["NetIO"] === "string" ? parsed["NetIO"] : null
+    })
+    const blockIo = parseIoPair({
+      value: typeof parsed["BlockIO"] === "string" ? parsed["BlockIO"] : null
+    })
+    const pidsValue = typeof parsed["PIDs"] === "string" ? parsed["PIDs"] : null
+
+    let memUsedBytes: number | null = null
+    let memLimitBytes: number | null = null
+    if (memUsageRaw) {
+      const [usedRaw = "", limitRaw = ""] = memUsageRaw.split("/").map(part => part.trim())
+      memUsedBytes = parseBytes({ value: usedRaw.length > 0 ? usedRaw : null })
+      memLimitBytes = parseBytes({ value: limitRaw.length > 0 ? limitRaw : null })
+    }
+
+    const parsedPids = pidsValue ? Number.parseInt(pidsValue, 10) : Number.NaN
+    const pids = Number.isFinite(parsedPids) ? parsedPids : null
+
+    samples.push({
+      cpuPercent,
+      memUsedBytes,
+      memLimitBytes,
+      memPercent,
+      netInputBytes: netIo.inputBytes,
+      netOutputBytes: netIo.outputBytes,
+      blockInputBytes: blockIo.inputBytes,
+      blockOutputBytes: blockIo.outputBytes,
+      pids
+    })
+  }
+
+  return samples
+}
+
+function aggregateDockerStats(opts: {
+  readonly samples: readonly DockerStatsSample[]
+}): DockerStatsSample | null {
+  if (opts.samples.length === 0) return null
+
+  const sumNullable = (values: readonly (number | null)[]): number | null => {
+    let total = 0
+    let count = 0
+    for (const value of values) {
+      if (typeof value !== "number" || !Number.isFinite(value)) continue
+      total += value
+      count += 1
+    }
+    return count === 0 ? null : total
+  }
+
+  const cpuPercent = sumNullable(opts.samples.map(sample => sample.cpuPercent))
+  const memUsedBytes = sumNullable(opts.samples.map(sample => sample.memUsedBytes))
+  const memLimitBytes = sumNullable(opts.samples.map(sample => sample.memLimitBytes))
+  const netInputBytes = sumNullable(opts.samples.map(sample => sample.netInputBytes))
+  const netOutputBytes = sumNullable(opts.samples.map(sample => sample.netOutputBytes))
+  const blockInputBytes = sumNullable(opts.samples.map(sample => sample.blockInputBytes))
+  const blockOutputBytes = sumNullable(opts.samples.map(sample => sample.blockOutputBytes))
+  const pids = sumNullable(opts.samples.map(sample => sample.pids))
+  const memPercent =
+    memUsedBytes !== null && memLimitBytes !== null && memLimitBytes > 0 ?
+      (memUsedBytes / memLimitBytes) * 100
+    : null
+
+  return {
+    cpuPercent,
+    memUsedBytes,
+    memLimitBytes,
+    memPercent,
+    netInputBytes,
+    netOutputBytes,
+    blockInputBytes,
+    blockOutputBytes,
+    pids
+  }
+}
+
+function parsePercent(opts: { readonly value: string | null }): number | null {
+  if (!opts.value) return null
+  const match = opts.value.trim().match(/-?\d+(?:\.\d+)?/)
+  if (!match) return null
+  const parsed = Number.parseFloat(match[0])
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function parseIoPair(opts: {
+  readonly value: string | null
+}): { readonly inputBytes: number | null; readonly outputBytes: number | null } {
+  if (!opts.value) {
+    return { inputBytes: null, outputBytes: null }
+  }
+  const [inputRaw = "", outputRaw = ""] = opts.value.split("/").map(part => part.trim())
+  return {
+    inputBytes: parseBytes({ value: inputRaw.length > 0 ? inputRaw : null }),
+    outputBytes: parseBytes({ value: outputRaw.length > 0 ? outputRaw : null })
+  }
+}
+
+function parseBytes(opts: { readonly value: string | null }): number | null {
+  if (!opts.value) return null
+  const trimmed = opts.value.trim()
+  if (!trimmed) return null
+  const match = trimmed.match(/^(-?\d+(?:\.\d+)?)\s*([A-Za-z]+)?$/)
+  if (!match) return null
+  const value = Number.parseFloat(match[1] ?? "")
+  if (!Number.isFinite(value)) return null
+  const unitRaw = (match[2] ?? "B").trim()
+  const unit = unitRaw.toLowerCase()
+  const multiplier =
+    unit === "b" ? 1
+    : unit === "kb" ? 1_000
+    : unit === "kib" ? 1_024
+    : unit === "mb" ? 1_000_000
+    : unit === "mib" ? 1_048_576
+    : unit === "gb" ? 1_000_000_000
+    : unit === "gib" ? 1_073_741_824
+    : unit === "tb" ? 1_000_000_000_000
+    : unit === "tib" ? 1_099_511_627_776
+    : null
+  if (!multiplier) return null
+  return value * multiplier
+}
+
+function formatBytes(opts: { readonly bytes: number }): string {
+  if (!Number.isFinite(opts.bytes)) return "n/a"
+  const sign = opts.bytes < 0 ? "-" : ""
+  let value = Math.abs(opts.bytes)
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"] as const
+  let idx = 0
+  while (value >= 1024 && idx < units.length - 1) {
+    value /= 1024
+    idx += 1
+  }
+  const digits = value >= 10 || idx === 0 ? 0 : 1
+  return `${sign}${value.toFixed(digits)} ${units[idx] ?? "B"}`
+}
+
+function formatPercent(opts: { readonly percent: number | null }): string {
+  if (opts.percent === null || !Number.isFinite(opts.percent)) return "n/a"
+  return `${opts.percent.toFixed(1)}%`
 }
 
 function isoToClock(value: string): string {
@@ -1552,6 +2632,20 @@ function isoToClock(value: string): string {
   if (!frac) return hms
   const ms = frac.slice(0, 3).padEnd(3, "0")
   return `${hms}.${ms}`
+}
+
+function formatDurationShort(opts: { readonly ms: number }): string {
+  if (!Number.isFinite(opts.ms) || opts.ms < 0) return "n/a"
+  const totalSeconds = Math.floor(opts.ms / 1000)
+  if (totalSeconds < 60) return `${totalSeconds}s`
+  const totalMinutes = Math.floor(totalSeconds / 60)
+  if (totalMinutes < 60) return `${totalMinutes}m`
+  const totalHours = Math.floor(totalMinutes / 60)
+  if (totalHours < 24) return `${totalHours}h`
+  const totalDays = Math.floor(totalHours / 24)
+  if (totalDays < 7) return `${totalDays}d`
+  const totalWeeks = Math.floor(totalDays / 7)
+  return `${totalWeeks}w`
 }
 
 function formatFields(fields: Record<string, string>): string {
@@ -1579,15 +2673,64 @@ function buildFieldsChunks(fields: Record<string, string>): TextChunk[] {
   return chunks
 }
 
+function shouldCollapseLogPrefix(opts: { readonly prev: LogEntry; readonly next: LogEntry }): boolean {
+  if (opts.prev.service !== opts.next.service) return false
+  if (opts.prev.level !== opts.next.level) return false
+  if (!opts.prev.timestamp || !opts.next.timestamp) return false
+  if (opts.prev.timestamp.slice(0, 19) !== opts.next.timestamp.slice(0, 19)) return false
+
+  const nextTrim = opts.next.messagePlain.trimStart()
+  if (nextTrim.length === 0) return false
+  if (nextTrim.startsWith("at ")) return true
+  if (/^[\],}]/.test(nextTrim)) return true
+
+  const hasIndent = opts.next.messagePlain.length > nextTrim.length
+  if (!hasIndent) return false
+
+  const prevTrim = opts.prev.messagePlain.trimEnd()
+  return (
+    /[{\[(]$/.test(prevTrim) ||
+    /:$/.test(prevTrim) ||
+    /,\s*$/.test(prevTrim) ||
+    /=>\s*$/.test(prevTrim)
+  )
+}
+
+function buildContinuationLineChunks(opts: { readonly prev: LogEntry; readonly entry: LogEntry }): TextChunk[] {
+  const guide = dim("│ ")
+  const padWidth = Math.max(0, opts.prev.prefixWidth - 2)
+  const padding: TextChunk | null =
+    padWidth > 0 ? { __isChunk: true, text: " ".repeat(padWidth) } : null
+  return [
+    guide,
+    ...(padding ? [padding] : []),
+    ...opts.entry.messageChunks
+  ]
+}
+
 function buildStyledLogText(
   entries: readonly LogEntry[],
-  opts?: { readonly highlightQuery?: string | null; readonly selectedIndex?: number | null }
+  opts?: {
+    readonly highlightQuery?: string | null
+    readonly selectedIndex?: number | null
+    readonly collapseMultiline?: boolean
+  }
 ): StyledText {
   const chunks: TextChunk[] = []
   const highlightQuery = opts?.highlightQuery?.trim() ?? ""
   const selectedIndex = opts?.selectedIndex ?? null
+  const collapseMultiline = opts?.collapseMultiline ?? false
+  let prevEntry: LogEntry | null = null
   for (const [index, entry] of entries.entries()) {
-    let lineChunks = entry.styled.chunks
+    let lineChunks: TextChunk[]
+    if (prevEntry && shouldCollapseLogPrefix({ prev: prevEntry, next: entry })) {
+      lineChunks = buildContinuationLineChunks({ prev: prevEntry, entry })
+    } else {
+      lineChunks = [...entry.prefixChunks, ...entry.messageChunks]
+    }
+    if (collapseMultiline) {
+      lineChunks = collapseEntryChunks({ entry, chunks: lineChunks })
+    }
     if (highlightQuery.length > 0) {
       lineChunks = highlightChunks({ chunks: lineChunks, query: highlightQuery })
     }
@@ -1598,8 +2741,37 @@ function buildStyledLogText(
     if (index < entries.length - 1) {
       chunks.push({ __isChunk: true, text: "\n" })
     }
+    prevEntry = entry
   }
   return new StyledText(chunks)
+}
+
+function collapseEntryChunks(opts: { readonly entry: LogEntry; readonly chunks: TextChunk[] }): TextChunk[] {
+  const parts = opts.entry.messagePlain.split("\n")
+  if (parts.length <= 1) return opts.chunks
+  const trailingEmpty = parts[parts.length - 1]?.trim().length === 0 ? 1 : 0
+  const lineCount = Math.max(1, parts.length - trailingEmpty)
+  if (lineCount <= 1) return opts.chunks
+  const truncated = truncateChunksAtNewline({ chunks: opts.chunks })
+  const extraLines = lineCount - 1
+  const suffixText = extraLines === 1 ? " +1 line" : ` +${extraLines} lines`
+  return [...truncated, ...t`${dim(suffixText)}`.chunks]
+}
+
+function truncateChunksAtNewline(opts: { readonly chunks: TextChunk[] }): TextChunk[] {
+  const out: TextChunk[] = []
+  for (const chunk of opts.chunks) {
+    const idx = chunk.text.indexOf("\n")
+    if (idx === -1) {
+      out.push(cloneChunk({ chunk }))
+      continue
+    }
+    if (idx > 0) {
+      out.push(cloneChunk({ chunk, overrides: { text: chunk.text.slice(0, idx) } }))
+    }
+    break
+  }
+  return out
 }
 
 function highlightChunks(opts: { readonly chunks: TextChunk[]; readonly query: string }): TextChunk[] {
@@ -1607,7 +2779,9 @@ function highlightChunks(opts: { readonly chunks: TextChunk[]; readonly query: s
   if (needle.length === 0) return opts.chunks
 
   const out: TextChunk[] = []
-  const highlightBg = RGBA.fromInts(39, 48, 76, 255)
+  const highlightBg = RGBA.fromInts(92, 122, 212, 255)
+  const highlightFg = RGBA.fromInts(238, 244, 255, 255)
+  const highlightAttrs = createTextAttributes({ bold: true })
 
   for (const chunk of opts.chunks) {
     const text = chunk.text
@@ -1623,13 +2797,18 @@ function highlightChunks(opts: { readonly chunks: TextChunk[]; readonly query: s
       if (idx > cursor) {
         out.push(cloneChunk({ chunk, overrides: { text: text.slice(cursor, idx) } }))
       }
+      const highlightOverrides: Partial<TextChunk> = {
+        text: text.slice(idx, idx + needle.length),
+        bg: highlightBg,
+        attributes: (chunk.attributes ?? 0) | highlightAttrs
+      }
+      if (!chunk.fg) {
+        highlightOverrides.fg = highlightFg
+      }
       out.push(
         cloneChunk({
           chunk,
-          overrides: {
-            text: text.slice(idx, idx + needle.length),
-            bg: highlightBg
-          }
+          overrides: highlightOverrides
         })
       )
       cursor = idx + needle.length
@@ -1668,7 +2847,19 @@ function formatSystemLine(opts: { readonly message: string; readonly tone: "warn
     opts.tone === "warn" ? t`${fg("#e0af68")(`${clean}`)}`
     : t`${dim(clean)}`
   const key = buildEntryKey({ service: null, timestamp: null, line: clean })
-  return { service: null, line: clean, styled, key }
+  const level = opts.tone === "warn" ? "warn" : "info"
+  return {
+    service: null,
+    line: clean,
+    styled,
+    level,
+    messagePlain: clean,
+    prefixWidth: 0,
+    prefixPlain: "",
+    prefixChunks: [],
+    messageChunks: styled.chunks,
+    key
+  }
 }
 
 function buildEntryKey(opts: {
@@ -1686,7 +2877,7 @@ function matchesSearchQuery(opts: {
   readonly query: string
   readonly level: string
 }): boolean {
-  const query = opts.query.trim().toLowerCase()
+  const query = normalizeSearchText(opts.query).trim()
   if (opts.level !== "all") {
     const levelValue = resolveLevelValue(opts.entry)
     if (levelValue !== opts.level) return false
@@ -1710,7 +2901,8 @@ function matchesSearchQuery(opts: {
     }
   }
 
-  return parts.join(" ").toLowerCase().includes(query)
+  const haystack = parts.map(normalizeSearchText).join(" ")
+  return haystack.includes(query)
 }
 
 function resolveLevelValue(entry: NonNullable<LogStreamEvent["entry"]>): string {
@@ -1855,6 +3047,10 @@ function stripAnsi(text: string): string {
 
 function normalizePlainText(text: string): string {
   return text.replaceAll(/[\x00-\x1f\x7f]/g, " ")
+}
+
+function normalizeSearchText(text: string): string {
+  return normalizePlainText(stripAnsi(text)).toLowerCase()
 }
 
 function parseAnsiStyledText(input: string): {

@@ -19,7 +19,8 @@
     "release:prepare": "bunx semantic-release --no-ci",
     "typecheck": "bunx tsc -p tsconfig.json --noEmit",
     "uninstall:local": "bun run scripts/uninstall-cli.ts",
-    "test": "bun test"
+    "test": "bun test",
+    "test:e2e:gateway": "bun run scripts/gateway-e2e.ts"
   },
   "devDependencies": {
     "@commitlint/cli": "19.8.1",

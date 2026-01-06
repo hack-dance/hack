@@ -64,3 +64,30 @@ test("gateway auth accepts bearer and x-hack-token headers", async () => {
     expect(missingAuth.reason).toBe("missing")
   }
 })
+
+test("gateway auth accepts query token when allowed", async () => {
+  rootDir = await mkdtemp(join(tmpdir(), "hack-gateway-"))
+
+  const issued = await createGatewayToken({ rootDir, label: "web", scope: "write" })
+  const url = new URL("http://127.0.0.1:7788/control-plane/projects/abc/shells/123/stream")
+  url.searchParams.set("token", issued.token)
+
+  const auth = await authenticateGatewayRequest({
+    rootDir,
+    headers: new Headers(),
+    url,
+    allowQueryToken: true
+  })
+  expect(auth.ok).toBe(true)
+
+  const denied = await authenticateGatewayRequest({
+    rootDir,
+    headers: new Headers(),
+    url,
+    allowQueryToken: false
+  })
+  expect(denied.ok).toBe(false)
+  if (!denied.ok) {
+    expect(denied.reason).toBe("missing")
+  }
+})

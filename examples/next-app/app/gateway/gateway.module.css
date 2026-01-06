@@ -1,0 +1,148 @@
+.page {
+  min-height: 100vh;
+  background: radial-gradient(circle at top right, #1f2430, #0b0d12 55%);
+  color: #e6e8ef;
+  font-family: var(--font-geist-sans), sans-serif;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding: 32px 24px 40px;
+}
+
+.header {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.title {
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.subtitle {
+  font-size: 15px;
+  color: #a9b0c0;
+  max-width: 720px;
+  line-height: 1.5;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 360px) minmax(0, 1fr);
+  gap: 24px;
+}
+
+.panel {
+  background: rgba(18, 20, 28, 0.9);
+  border: 1px solid rgba(100, 110, 140, 0.2);
+  border-radius: 16px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.panelTitle {
+  font-size: 14px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #8f97aa;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.label {
+  font-size: 12px;
+  color: #c7cbe0;
+}
+
+.input,
+.select {
+  background: rgba(10, 12, 18, 0.9);
+  color: #eef0f5;
+  border: 1px solid rgba(104, 116, 150, 0.35);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 14px;
+}
+
+.actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.button {
+  border: none;
+  border-radius: 999px;
+  padding: 10px 14px;
+  background: #6c7cff;
+  color: #0b0d12;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.buttonSecondary {
+  background: rgba(120, 132, 170, 0.3);
+  color: #eef0f5;
+}
+
+.button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.button:not(:disabled):hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 20px rgba(108, 124, 255, 0.25);
+}
+
+.terminalShell {
+  height: 520px;
+  border-radius: 18px;
+  overflow: hidden;
+  border: 1px solid rgba(100, 110, 140, 0.25);
+  background: #0b0d12;
+}
+
+.statusRow {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: #9aa3ba;
+}
+
+.statusValue {
+  color: #f7f8fb;
+  font-weight: 600;
+}
+
+.notice {
+  font-size: 12px;
+  color: #9aa3ba;
+  line-height: 1.4;
+}
+
+.error {
+  color: #ffb4b4;
+  font-size: 13px;
+}
+
+@media (max-width: 900px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .terminalShell {
+    height: 440px;
+  }
+}

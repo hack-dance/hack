@@ -17,6 +17,7 @@ import type { ShellAttachment, ShellMeta } from "../control-plane/extensions/sup
 import { appendGatewayAuditEntry } from "../control-plane/extensions/gateway/audit.ts"
 import { authenticateGatewayRequest } from "../control-plane/extensions/gateway/auth.ts"
 import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config.ts"
+import type { GatewayProject } from "../control-plane/extensions/gateway/config.ts"
 import { resolveRegisteredProjectById } from "../lib/projects-registry.ts"
 
 import type { DaemonPaths } from "./paths.ts"
@@ -257,21 +258,19 @@ export async function runDaemon({
             req,
             server: gatewayServer,
             gatewayConfig: gatewayResolution.config,
+            enabledProjects: gatewayResolution.enabledProjects,
             gatewayRoot: paths.root,
             ...requestContext
           })
         },
         websocket: websocketHandlers
       })
-      const source = gatewayResolution.source
       logger.info({
         message: `Gateway listening on ${gatewayResolution.config.bind}:${gatewayResolution.config.port}`
       })
-      if (source) {
-        logger.info({
-          message: `Gateway config source: ${source.projectName} (${source.projectId})`
-        })
-      }
+      logger.info({
+        message: `Gateway projects enabled: ${gatewayResolution.enabledProjects.length}`
+      })
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error)
       logger.error({ message: `Failed to start gateway: ${message}` })
@@ -396,6 +395,7 @@ async function handleGatewayRequest(opts: {
   readonly req: Request
   readonly server: ReturnType<typeof Bun.serve>
   readonly gatewayConfig: ControlPlaneConfig["gateway"]
+  readonly enabledProjects: readonly GatewayProject[]
   readonly gatewayRoot: string
   readonly metrics: DaemonMetrics
   readonly version: string
@@ -404,16 +404,20 @@ async function handleGatewayRequest(opts: {
   readonly supervisor: ReturnType<typeof createSupervisorService>
   readonly shells: ReturnType<typeof createShellService>
 }): Promise<Response> {
+  const url = new URL(opts.req.url)
+  const isWebSocket = opts.req.headers.get("upgrade")?.toLowerCase() === "websocket"
   const auth = await authenticateGatewayRequest({
     rootDir: opts.gatewayRoot,
-    headers: opts.req.headers
+    headers: opts.req.headers,
+    url,
+    allowQueryToken: isWebSocket
   })
 
-  const url = new URL(opts.req.url)
   const path = `${url.pathname}${url.search}`
   const remote = opts.server.requestIP(opts.req)
   const remoteAddress = remote?.address
   const userAgent = opts.req.headers.get("user-agent") ?? undefined
+  const enabledProjectIds = new Set(opts.enabledProjects.map(project => project.projectId))
 
   if (!auth.ok) {
     const status = 401
@@ -437,6 +441,25 @@ async function handleGatewayRequest(opts: {
 
   const isReadOnly = isGatewayReadOnlyMethod({ method: opts.req.method })
   const isShellStream = isGatewayShellStreamRequest({ url })
+  const gatewayProjectId = resolveGatewayProjectId({ url })
+
+  if (gatewayProjectId && !enabledProjectIds.has(gatewayProjectId)) {
+    const status = 403
+    const response = jsonResponse({ error: "project_disabled" }, status)
+    void appendGatewayAuditEntry({
+      rootDir: opts.gatewayRoot,
+      entry: {
+        ts: new Date().toISOString(),
+        tokenId: auth.tokenId,
+        method: opts.req.method,
+        path,
+        status,
+        ...(remoteAddress ? { remoteAddress } : {}),
+        ...(userAgent ? { userAgent } : {})
+      }
+    })
+    return response
+  }
 
   if (!opts.gatewayConfig.allowWrites && !isReadOnly) {
     const status = 403
@@ -508,6 +531,26 @@ async function handleGatewayRequest(opts: {
       }
     })
     return response
+  }
+
+  if (url.pathname === "/v1/projects") {
+    const filter = normalizeQueryParam({ value: url.searchParams.get("filter") })
+    const includeGlobal = parseBoolean({ value: url.searchParams.get("include_global") })
+    const payload = await opts.cache.getProjectsPayload({
+      filter,
+      includeGlobal,
+      includeUnregistered: false
+    })
+    const filtered = payload.projects.filter(project => {
+      if (!project || typeof project !== "object") return false
+      const id = (project as Record<string, unknown>)["project_id"]
+      return typeof id === "string" && enabledProjectIds.has(id)
+    })
+    return jsonResponse({
+      ...payload,
+      include_unregistered: false,
+      projects: filtered
+    })
   }
 
   const response = await handleRequest({
@@ -1110,4 +1153,11 @@ function isGatewayShellStreamRequest(opts: { readonly url: URL }): boolean {
     segments[1] === "projects" &&
     segments[3] === "shells" &&
     segments[5] === "stream"
+}
+
+function resolveGatewayProjectId(opts: { readonly url: URL }): string | null {
+  const segments = opts.url.pathname.split("/").filter(Boolean)
+  if (segments[0] !== "control-plane" || segments[1] !== "projects") return null
+  const projectId = segments[2]
+  return projectId ? projectId : null
 }

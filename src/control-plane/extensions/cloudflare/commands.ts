@@ -7,14 +7,17 @@ import { ensureDir, pathExists, readTextFile, writeTextFile, writeTextFileIfChan
 import { getString, isRecord } from "../../../lib/guards.ts"
 import { display } from "../../../ui/display.ts"
 import { resolveGatewayConfig } from "../gateway/config.ts"
+import { readControlPlaneConfig } from "../../sdk/config.ts"
 
 import type { ExtensionCommand } from "../types.ts"
-import type { ExtensionCommandContext } from "../types.ts"
+import type { ControlPlaneConfig } from "../../sdk/config.ts"
 
 type CloudflareExtensionConfig = {
   readonly hostname?: string
   readonly tunnel?: string
   readonly origin?: string
+  readonly sshHostname?: string
+  readonly sshOrigin?: string
   readonly credentialsFile?: string
 }
 
@@ -22,6 +25,8 @@ type TunnelPrintArgs = {
   hostname?: string
   tunnel?: string
   origin?: string
+  sshHostname?: string
+  sshOrigin?: string
   credentialsFile?: string
   out?: string
 }
@@ -49,7 +54,17 @@ type StartParseResult =
   | { readonly ok: true; readonly value: TunnelStartArgs }
   | { readonly ok: false; readonly error: string }
 
+type AccessSetupArgs = {
+  sshHostname?: string
+  user?: string
+}
+
+type AccessSetupParseResult =
+  | { readonly ok: true; readonly value: AccessSetupArgs }
+  | { readonly ok: false; readonly error: string }
+
 const DEFAULT_ORIGIN = "http://127.0.0.1:7788"
+const DEFAULT_SSH_ORIGIN = "ssh://127.0.0.1:22"
 const DEFAULT_TUNNEL = "hack-gateway"
 const DEFAULT_CONFIG_PATH = "~/.cloudflared/config.yml"
 const CLOUDFLARED_PID_FILENAME = "cloudflared.pid"
@@ -67,10 +82,16 @@ export const CLOUDFLARE_COMMANDS: readonly ExtensionCommand[] = [
       }
 
       const defaultOrigin = await resolveDefaultOrigin()
-      const config = resolveTunnelConfig({ ctx, overrides: parsed.value, defaultOrigin })
+      const globalConfig = (await readControlPlaneConfig({})).config
+      const config = resolveTunnelConfig({
+        controlPlaneConfig: globalConfig,
+        overrides: parsed.value,
+        defaultOrigin
+      })
       if (!config.hostname) {
         ctx.logger.error({
-          message: "Missing hostname. Use --hostname or set controlPlane.extensions.dance.hack.cloudflare.config.hostname."
+          message:
+            "Missing hostname. Use --hostname or set global config: hack config set --global 'controlPlane.extensions[\"dance.hack.cloudflare\"].config.hostname' <host>."
         })
         return 1
       }
@@ -79,6 +100,8 @@ export const CLOUDFLARE_COMMANDS: readonly ExtensionCommand[] = [
         tunnel: config.tunnel,
         hostname: config.hostname,
         origin: config.origin,
+        ...(config.sshHostname ? { sshHostname: config.sshHostname } : {}),
+        ...(config.sshOrigin ? { sshOrigin: config.sshOrigin } : {}),
         ...(config.credentialsFile ? { credentialsFile: config.credentialsFile } : {})
       })
 
@@ -96,7 +119,8 @@ export const CLOUDFLARE_COMMANDS: readonly ExtensionCommand[] = [
         hostname: config.hostname,
         tunnel: config.tunnel,
         outPath: outPath ?? "<path-to-config.yml>",
-        credentialsFile: config.credentialsFile
+        credentialsFile: config.credentialsFile,
+        ...(config.sshHostname ? { sshHostname: config.sshHostname } : {})
       })
 
       await display.panel({
@@ -119,10 +143,16 @@ export const CLOUDFLARE_COMMANDS: readonly ExtensionCommand[] = [
       }
 
       const defaultOrigin = await resolveDefaultOrigin()
-      const config = resolveTunnelConfig({ ctx, overrides: parsed.value, defaultOrigin })
+      const globalConfig = (await readControlPlaneConfig({})).config
+      const config = resolveTunnelConfig({
+        controlPlaneConfig: globalConfig,
+        overrides: parsed.value,
+        defaultOrigin
+      })
       if (!config.hostname) {
         ctx.logger.error({
-          message: "Missing hostname. Use --hostname or set controlPlane.extensions.dance.hack.cloudflare.config.hostname."
+          message:
+            "Missing hostname. Use --hostname or set global config: hack config set --global 'controlPlane.extensions[\"dance.hack.cloudflare\"].config.hostname' <host>."
         })
         return 1
       }
@@ -168,6 +198,17 @@ export const CLOUDFLARE_COMMANDS: readonly ExtensionCommand[] = [
         if (!routed.ok) {
           ctx.logger.warn({ message: "cloudflared route dns failed (it may already exist)." })
         }
+        if (config.sshHostname) {
+          const routedSsh = await runCloudflared({
+            args: ["tunnel", "route", "dns", config.tunnel, config.sshHostname],
+            inherit: true
+          })
+          if (!routedSsh.ok) {
+            ctx.logger.warn({
+              message: "cloudflared route dns failed for SSH hostname (it may already exist)."
+            })
+          }
+        }
       }
 
       const credentialsFile = config.credentialsFile ?? await resolveCredentialsFile({ tunnelId })
@@ -175,6 +216,8 @@ export const CLOUDFLARE_COMMANDS: readonly ExtensionCommand[] = [
         tunnel: tunnelId,
         hostname: config.hostname,
         origin: config.origin,
+        ...(config.sshHostname ? { sshHostname: config.sshHostname } : {}),
+        ...(config.sshOrigin ? { sshOrigin: config.sshOrigin } : {}),
         ...(credentialsFile ? { credentialsFile } : {})
       })
 
@@ -184,7 +227,7 @@ export const CLOUDFLARE_COMMANDS: readonly ExtensionCommand[] = [
       })
 
       const nextSteps = [
-        `Run tunnel: cloudflared tunnel run --config ${outPath} ${config.tunnel}`,
+        `Run tunnel: cloudflared tunnel --config ${outPath} run ${config.tunnel}`,
         "Optional: use Cloudflare Access policies to protect the hostname."
       ]
       await display.panel({ title: "Next steps", tone: "info", lines: nextSteps })
@@ -203,8 +246,9 @@ export const CLOUDFLARE_COMMANDS: readonly ExtensionCommand[] = [
       }
 
       const defaultOrigin = await resolveDefaultOrigin()
+      const globalConfig = (await readControlPlaneConfig({})).config
       const config = resolveTunnelConfig({
-        ctx,
+        controlPlaneConfig: globalConfig,
         overrides: { tunnel: parsed.value.tunnel },
         defaultOrigin
       })
@@ -240,7 +284,7 @@ export const CLOUDFLARE_COMMANDS: readonly ExtensionCommand[] = [
       }
 
       const proc = Bun.spawn(
-        ["cloudflared", "tunnel", "run", "--config", configPath, config.tunnel],
+        ["cloudflared", "tunnel", "--config", configPath, "run", config.tunnel],
         {
           stdin: "ignore",
           stdout: "ignore",
@@ -306,6 +350,50 @@ export const CLOUDFLARE_COMMANDS: readonly ExtensionCommand[] = [
       ctx.logger.success({ message: `cloudflared stopped (pid ${pid}).` })
       return 0
     }
+  },
+  {
+    name: "access-setup",
+    summary: "Print Cloudflare Access SSH setup steps",
+    scope: "global",
+    handler: async ({ ctx, args }) => {
+      const parsed = parseAccessSetupArgs({ args })
+      if (!parsed.ok) {
+        ctx.logger.error({ message: parsed.error })
+        return 1
+      }
+
+      const globalConfig = (await readControlPlaneConfig({})).config
+      const extension = globalConfig.extensions["dance.hack.cloudflare"]
+      const configured = extension?.config ?? {}
+      const sshHostname = parsed.value.sshHostname ?? getString(configured, "sshHostname")
+      if (!sshHostname) {
+        ctx.logger.error({
+          message:
+            "Missing ssh hostname. Pass --ssh-hostname or set controlPlane.extensions[\"dance.hack.cloudflare\"].config.sshHostname in the global config."
+        })
+        return 1
+      }
+
+      const user = parsed.value.user ?? "<user>"
+      const lines = [
+        "1) Open Zero Trust: https://one.dash.cloudflare.com/",
+        "2) Access → Applications → Add an application → Self-hosted",
+        `3) Set hostname: ${sshHostname}`,
+        "4) Add an Access policy that allows your identity/device",
+        `5) Test (desktop): cloudflared access ssh --hostname ${sshHostname}`,
+        "6) Optional SSH config:",
+        `   Host ${sshHostname}`,
+        `     User ${user}`,
+        "     ProxyCommand /opt/homebrew/bin/cloudflared access ssh --hostname %h"
+      ]
+
+      await display.panel({
+        title: "Cloudflare Access (SSH)",
+        tone: "info",
+        lines
+      })
+      return 0
+    }
   }
 ]
 
@@ -358,6 +446,32 @@ export function parseTunnelPrintArgs(opts: { readonly args: readonly string[] })
       const value = takeValue(token, opts.args[i + 1])
       if (!value) return { ok: false, error: "--origin requires a value." }
       out.origin = normalizeValue(value)
+      i += 1
+      continue
+    }
+
+    if (token.startsWith("--ssh-hostname=")) {
+      out.sshHostname = normalizeValue(token.slice("--ssh-hostname=".length))
+      continue
+    }
+
+    if (token === "--ssh-hostname") {
+      const value = takeValue(token, opts.args[i + 1])
+      if (!value) return { ok: false, error: "--ssh-hostname requires a value." }
+      out.sshHostname = normalizeValue(value)
+      i += 1
+      continue
+    }
+
+    if (token.startsWith("--ssh-origin=")) {
+      out.sshOrigin = normalizeValue(token.slice("--ssh-origin=".length))
+      continue
+    }
+
+    if (token === "--ssh-origin") {
+      const value = takeValue(token, opts.args[i + 1])
+      if (!value) return { ok: false, error: "--ssh-origin requires a value." }
+      out.sshOrigin = normalizeValue(value)
       i += 1
       continue
     }
@@ -497,6 +611,58 @@ export function parseTunnelStartArgs(opts: { readonly args: readonly string[] })
   return { ok: true, value: out }
 }
 
+export function parseAccessSetupArgs(opts: {
+  readonly args: readonly string[]
+}): AccessSetupParseResult {
+  const out: AccessSetupArgs = {}
+
+  const takeValue = (token: string, value: string | undefined): string | null => {
+    if (!value || value.startsWith("-")) return null
+    return value
+  }
+
+  for (let i = 0; i < opts.args.length; i += 1) {
+    const token = opts.args[i] ?? ""
+    if (token === "--") {
+      return { ok: true, value: out }
+    }
+
+    if (token.startsWith("--ssh-hostname=")) {
+      out.sshHostname = normalizeValue(token.slice("--ssh-hostname=".length))
+      continue
+    }
+
+    if (token === "--ssh-hostname") {
+      const value = takeValue(token, opts.args[i + 1])
+      if (!value) return { ok: false, error: "--ssh-hostname requires a value." }
+      out.sshHostname = normalizeValue(value)
+      i += 1
+      continue
+    }
+
+    if (token.startsWith("--user=")) {
+      out.user = normalizeValue(token.slice("--user=".length))
+      continue
+    }
+
+    if (token === "--user") {
+      const value = takeValue(token, opts.args[i + 1])
+      if (!value) return { ok: false, error: "--user requires a value." }
+      out.user = normalizeValue(value)
+      i += 1
+      continue
+    }
+
+    if (token.startsWith("-")) {
+      return { ok: false, error: `Unknown option: ${token}` }
+    }
+
+    return { ok: false, error: `Unexpected argument: ${token}` }
+  }
+
+  return { ok: true, value: out }
+}
+
 function parseTunnelStopArgs(opts: {
   readonly args: readonly string[]
 }): { readonly ok: true } | { readonly ok: false; readonly error: string } {
@@ -509,15 +675,20 @@ function parseTunnelStopArgs(opts: {
 }
 
 function resolveTunnelConfig(opts: {
-  readonly ctx: ExtensionCommandContext
+  readonly controlPlaneConfig: ControlPlaneConfig
   readonly overrides: TunnelPrintArgs
   readonly defaultOrigin?: string
 }): Required<Pick<CloudflareExtensionConfig, "tunnel" | "origin">> &
   CloudflareExtensionConfig & { readonly out?: string } {
-  const configured = readExtensionConfig({ ctx: opts.ctx })
+  const configured = readExtensionConfig({ controlPlaneConfig: opts.controlPlaneConfig })
   const hostname = opts.overrides.hostname ?? configured.hostname
   const tunnel = opts.overrides.tunnel ?? configured.tunnel ?? DEFAULT_TUNNEL
   const origin = opts.overrides.origin ?? configured.origin ?? opts.defaultOrigin ?? DEFAULT_ORIGIN
+  const sshHostname = opts.overrides.sshHostname ?? configured.sshHostname
+  const sshOrigin =
+    opts.overrides.sshOrigin ??
+    configured.sshOrigin ??
+    (sshHostname ? DEFAULT_SSH_ORIGIN : undefined)
   const credentialsFile = opts.overrides.credentialsFile ?? configured.credentialsFile
   const out = opts.overrides.out
 
@@ -525,15 +696,17 @@ function resolveTunnelConfig(opts: {
     ...(hostname ? { hostname } : {}),
     tunnel,
     origin,
+    ...(sshHostname ? { sshHostname } : {}),
+    ...(sshOrigin ? { sshOrigin } : {}),
     ...(credentialsFile ? { credentialsFile } : {}),
     ...(out ? { out } : {})
   }
 }
 
 function readExtensionConfig(opts: {
-  readonly ctx: ExtensionCommandContext
+  readonly controlPlaneConfig: ControlPlaneConfig
 }): CloudflareExtensionConfig {
-  const raw = opts.ctx.controlPlaneConfig.extensions?.["dance.hack.cloudflare"]
+  const raw = opts.controlPlaneConfig.extensions?.["dance.hack.cloudflare"]
   if (!raw || !isRecord(raw)) return {}
   const config = raw["config"]
   if (!config || !isRecord(config)) return {}
@@ -541,6 +714,8 @@ function readExtensionConfig(opts: {
     hostname: getString(config, "hostname") ?? undefined,
     tunnel: getString(config, "tunnel") ?? undefined,
     origin: getString(config, "origin") ?? undefined,
+    sshHostname: getString(config, "sshHostname") ?? undefined,
+    sshOrigin: getString(config, "sshOrigin") ?? undefined,
     credentialsFile: getString(config, "credentialsFile") ?? undefined
   }
 }
@@ -549,14 +724,25 @@ function renderCloudflaredConfig(opts: {
   readonly tunnel: string
   readonly hostname: string
   readonly origin: string
+  readonly sshHostname?: string
+  readonly sshOrigin?: string
   readonly credentialsFile?: string
 }): string {
+  const ingress: string[] = [
+    `  - hostname: ${opts.hostname}`,
+    `    service: ${opts.origin}`
+  ]
+  if (opts.sshHostname) {
+    const sshOrigin = opts.sshOrigin ?? DEFAULT_SSH_ORIGIN
+    ingress.push(`  - hostname: ${opts.sshHostname}`)
+    ingress.push(`    service: ${sshOrigin}`)
+  }
+
   const lines = [
     `tunnel: ${opts.tunnel}`,
     ...(opts.credentialsFile ? [`credentials-file: ${opts.credentialsFile}`] : []),
     "ingress:",
-    `  - hostname: ${opts.hostname}`,
-    `    service: ${opts.origin}`,
+    ...ingress,
     "  - service: http_status:404"
   ]
   return lines.join("\n")
@@ -567,13 +753,24 @@ function buildNextSteps(opts: {
   readonly tunnel: string
   readonly outPath: string
   readonly credentialsFile?: string
+  readonly sshHostname?: string
 }): readonly string[] {
   const lines: string[] = [
     "1) Authenticate: cloudflared tunnel login",
     `2) Create tunnel: cloudflared tunnel create ${opts.tunnel}`,
-    `3) Route DNS: cloudflared tunnel route dns ${opts.tunnel} ${opts.hostname}`,
-    `4) Run tunnel: cloudflared tunnel run --config ${opts.outPath} ${opts.tunnel}`
+    `3) Route DNS: cloudflared tunnel route dns ${opts.tunnel} ${opts.hostname}`
   ]
+
+  if (opts.sshHostname) {
+    lines.push(`4) Route SSH DNS: cloudflared tunnel route dns ${opts.tunnel} ${opts.sshHostname}`)
+    lines.push("5) SSH connect (desktop): cloudflared access ssh --hostname <ssh-hostname>")
+    lines.push(
+      "   Or add to ~/.ssh/config: ProxyCommand cloudflared access ssh --hostname %h"
+    )
+    lines.push(`6) Run tunnel: cloudflared tunnel --config ${opts.outPath} run ${opts.tunnel}`)
+  } else {
+    lines.push(`4) Run tunnel: cloudflared tunnel --config ${opts.outPath} run ${opts.tunnel}`)
+  }
 
   if (!opts.credentialsFile) {
     lines.push("Note: credentials-file is optional if ~/.cloudflared/<tunnel-id>.json exists.")

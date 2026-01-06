@@ -3,6 +3,7 @@ import { confirm, isCancel } from "@clack/prompts"
 
 import { display } from "../ui/display.ts"
 import { run } from "../lib/shell.ts"
+import { readInternalExtraHostsIp, resolveGlobalCaddyIp } from "../lib/caddy-hosts.ts"
 import {
   readProjectsRegistry,
   removeProjectsById
@@ -257,22 +258,33 @@ async function runProjects(opts: {
   })
 
   if (opts.details) {
+    const caddyIp = await resolveGlobalCaddyIp()
     for (const p of views) {
-      await renderProjectDetails(p)
+      await renderProjectDetails({ project: p, caddyIp })
     }
   }
 
   return 0
 }
 
-async function renderProjectDetails(p: ProjectView): Promise<void> {
+async function renderProjectDetails(opts: {
+  readonly project: ProjectView
+  readonly caddyIp: string | null
+}): Promise<void> {
+  const p = opts.project
   await display.section(p.name)
 
   const meta: Array<readonly [string, string]> = []
   meta.push(["Status", p.status])
+  if (p.projectId) meta.push(["Project id", p.projectId])
   if (p.devHost) meta.push(["Dev host", p.devHost])
   if (p.repoRoot) meta.push(["Repo root", p.repoRoot])
   if (p.projectDir) meta.push(["Project dir", p.projectDir])
+  const mappedIp = await readInternalExtraHostsIp({ projectDir: p.projectDir })
+  const caddySummary = formatCaddySummary({ caddyIp: opts.caddyIp, mappedIp })
+  if (caddySummary) {
+    meta.push(["Caddy IP", caddySummary])
+  }
   await display.kv({ entries: meta })
 
   const defined = new Set(p.definedServices ?? [])
@@ -318,6 +330,18 @@ async function renderProjectDetails(p: ProjectView): Promise<void> {
       rows: branchRows
     })
   }
+}
+
+function formatCaddySummary(opts: {
+  readonly caddyIp: string | null
+  readonly mappedIp: string | null
+}): string | null {
+  if (!opts.caddyIp) return null
+  if (!opts.mappedIp) return `${opts.caddyIp} (hosts missing)`
+  if (opts.caddyIp !== opts.mappedIp) {
+    return `${opts.caddyIp} (hosts ${opts.mappedIp}, restart)`
+  }
+  return `${opts.caddyIp} (hosts ok)`
 }
 
 function summarizeServiceState(opts: { readonly running: number; readonly total: number }): string {

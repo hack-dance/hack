@@ -1,8 +1,9 @@
-import { resolve } from "node:path"
+import { dirname, resolve } from "node:path"
 
 import { resolveHackInvocation } from "../lib/hack-cli.ts"
-import { readTextFile, writeTextFileIfChanged } from "../lib/fs.ts"
+import { ensureDir, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts"
 import { getString, isRecord } from "../lib/guards.ts"
+import { resolveGlobalConfigPath } from "../lib/config-paths.ts"
 import {
   defaultProjectSlugFromPath,
   findProjectContext,
@@ -14,7 +15,7 @@ import { readControlPlaneConfig } from "../control-plane/sdk/config.ts"
 import { logger } from "../ui/logger.ts"
 import { display } from "../ui/display.ts"
 import { gumChooseOne, gumConfirm, gumInput, isGumAvailable } from "../ui/gum.ts"
-import { buildGatewayQrPayload, renderQrPayload } from "../ui/qr.ts"
+import { buildGatewayQrPayload, buildSshQrPayload, renderQrPayload } from "../ui/qr.ts"
 import { isTty } from "../ui/terminal.ts"
 import { CliUsageError, defineCommand, defineOption, withHandler } from "../cli/command.ts"
 import { optPath, optProject } from "../cli/options.ts"
@@ -125,9 +126,17 @@ async function handleGatewayEnable({
     return 1
   }
 
+  const enableExtension = await setExtensionEnabled({
+    scope: "global",
+    extensionId: "dance.hack.gateway",
+    enabled: true
+  })
+  if (!enableExtension.ok) {
+    logger.warn({ message: enableExtension.error })
+  }
+
   logger.success({ message: updated.changed ? "Gateway enabled." : "Gateway already enabled." })
-  const startResult = await startDaemon()
-  return startResult
+  return await startDaemon()
 }
 
 async function handleGatewaySetup({
@@ -150,12 +159,13 @@ async function handleGatewaySetup({
     tone: "info",
     lines: [
       `Project: ${identity.projectName}`,
-      "This enables remote access for this project.",
+      "One-command remote setup (gateway + token + exposure).",
       "Steps:",
-      "1) Enable gateway in hack.config.json",
+      "1) Enable gateway for this project",
       "2) Optionally enable writes for shells/jobs",
       "3) Start/restart hackd",
-      "4) Create a token + QR for remote access"
+      "4) Create a token + QR for remote access",
+      "5) Choose an exposure option (Cloudflare/Tailscale/SSH)"
     ]
   })
 
@@ -166,6 +176,15 @@ async function handleGatewaySetup({
   if (!updated.ok) {
     logger.error({ message: updated.error })
     return 1
+  }
+
+  const enableExtension = await setExtensionEnabled({
+    scope: "global",
+    extensionId: "dance.hack.gateway",
+    enabled: true
+  })
+  if (!enableExtension.ok) {
+    logger.warn({ message: enableExtension.error })
   }
 
   if (updated.changed) {
@@ -187,7 +206,7 @@ async function handleGatewaySetup({
 
   let allowWritesChanged = false
   if (allowWrites && !allowWritesCurrent) {
-    const writeUpdate = await setGatewayAllowWrites({ project, allowWrites: true })
+    const writeUpdate = await setGatewayAllowWrites({ allowWrites: true })
     if (!writeUpdate.ok) {
       logger.error({ message: writeUpdate.error })
       return 1
@@ -204,7 +223,8 @@ async function handleGatewaySetup({
     })
   }
 
-  if (updated.changed || allowWritesChanged) {
+  const extensionChanged = enableExtension.ok ? enableExtension.changed : false
+  if (updated.changed || allowWritesChanged || extensionChanged) {
     const restart = await restartDaemon()
     if (restart !== 0) return restart
   } else {
@@ -237,17 +257,38 @@ async function handleGatewaySetup({
   logger.info({ message: "Store this token securely; it cannot be recovered once lost." })
   logger.info({ message: "Export it as HACK_GATEWAY_TOKEN for future use." })
 
+  let finalConfig = await readControlPlaneConfig({ projectDir: project.projectDir })
+
+  const exposurePlan = await runExposureWizard({
+    project,
+    config: finalConfig.config
+  })
+
+  if (exposurePlan.configChanged) {
+    finalConfig = await readControlPlaneConfig({ projectDir: project.projectDir })
+  }
+
+  const gatewayUrl = resolveGatewayUrlForQr({
+    config: finalConfig.config,
+    override: exposurePlan.gatewayUrlOverride
+  })
+
   const printQr = args.options.noQr !== true
 
-  const finalConfig = await readControlPlaneConfig({ projectDir: project.projectDir })
-  const gatewayUrl = resolveGatewayUrlForQr({ config: finalConfig.config })
-
   if (printQr) {
+    if (exposurePlan.sshQrPayload) {
+      await renderQrPayload({
+        label: "SSH",
+        payload: exposurePlan.sshQrPayload,
+        sensitive: false,
+        yes: true
+      })
+    }
+
     const payload = buildGatewayQrPayload({
       baseUrl: gatewayUrl,
       token: issued.token,
-      projectId: identity.projectId,
-      projectName: identity.projectName
+      projectId: identity.projectId
     })
     await renderQrPayload({
       label: "Gateway",
@@ -264,7 +305,7 @@ async function handleGatewaySetup({
       `Gateway URL: ${gatewayUrl}`,
       "Remote status: hack remote status",
       "Remote shell: hack x supervisor shell --token <token> (write scope required)",
-      "Expose gateway using one of the options below"
+      "Expose gateway for off-network access (Cloudflare/Tailscale/SSH)"
     ]
   })
   await renderExposureHints({
@@ -295,6 +336,317 @@ async function handleGatewayDisable({
 
   logger.success({ message: updated.changed ? "Gateway disabled." : "Gateway already disabled." })
   return 0
+}
+
+type ExposureMode = "local" | "cloudflare" | "tailscale" | "ssh"
+
+type ExposurePlan = {
+  readonly mode: ExposureMode
+  readonly gatewayUrlOverride?: string
+  readonly sshQrPayload?: string
+  readonly configChanged: boolean
+}
+
+async function runExposureWizard(opts: {
+  readonly project: ProjectContext
+  readonly config: ControlPlaneConfig
+}): Promise<ExposurePlan> {
+  if (!isTty() || !isGumAvailable()) {
+    return { mode: "local", configChanged: false }
+  }
+
+  const choice = await gumChooseOne({
+    header: "How will you connect remotely?",
+    options: [
+      "Cloudflare Tunnel (HTTPS gateway, recommended for mobile)",
+      "Tailscale (tailnet access)",
+      "SSH tunnel (port forward)",
+      "Skip (local only for now)"
+    ],
+    selectIfOne: true
+  })
+
+  if (!choice.ok) return { mode: "local", configChanged: false }
+
+  const selection = choice.value
+  if (selection.startsWith("Cloudflare")) {
+    return await configureCloudflareExposure({ project: opts.project, config: opts.config })
+  }
+
+  if (selection.startsWith("Tailscale")) {
+    return await configureTailscaleExposure({ project: opts.project, config: opts.config })
+  }
+
+  if (selection.startsWith("SSH")) {
+    return await configureSshExposure({ config: opts.config })
+  }
+
+  return { mode: "local", configChanged: false }
+}
+
+async function configureCloudflareExposure(opts: {
+  readonly project: ProjectContext
+  readonly config: ControlPlaneConfig
+}): Promise<ExposurePlan> {
+  const existingHost = getString(
+    opts.config.extensions["dance.hack.cloudflare"]?.config ?? {},
+    "hostname"
+  )
+  const existingSshHost = getString(
+    opts.config.extensions["dance.hack.cloudflare"]?.config ?? {},
+    "sshHostname"
+  )
+  const existingSshOrigin = getString(
+    opts.config.extensions["dance.hack.cloudflare"]?.config ?? {},
+    "sshOrigin"
+  )
+
+  const hostname = await promptHostname({
+    label: "Cloudflare hostname",
+    placeholder: "gateway.example.com",
+    initial: existingHost
+  })
+
+  if (!hostname) {
+    logger.warn({ message: "Cloudflare selected but no hostname provided." })
+    return { mode: "cloudflare", configChanged: false }
+  }
+
+  const sshHostname = await promptHostname({
+    label: "Cloudflare SSH hostname (optional)",
+    placeholder: "ssh.example.com",
+    initial: existingSshHost
+  })
+  let sshOrigin: string | null = null
+  if (sshHostname) {
+    const defaultPort = parseSshOriginPort(existingSshOrigin) ?? 22
+    const sshPort = await promptNumber({
+      label: "SSH port for tunnel (default 22)",
+      fallback: defaultPort
+    })
+    sshOrigin = `ssh://127.0.0.1:${sshPort}`
+  }
+
+  let configChanged = false
+  const enableResult = await setExtensionEnabled({
+    scope: "global",
+    extensionId: "dance.hack.cloudflare",
+    enabled: true
+  })
+  if (!enableResult.ok) {
+    logger.warn({ message: enableResult.error })
+  } else if (enableResult.changed) {
+    configChanged = true
+  }
+
+  const hostnameResult = await setExtensionConfigValue({
+    scope: "global",
+    extensionId: "dance.hack.cloudflare",
+    path: ["hostname"],
+    value: hostname
+  })
+  if (!hostnameResult.ok) {
+    logger.warn({ message: hostnameResult.error })
+  } else if (hostnameResult.changed) {
+    configChanged = true
+  }
+
+  if (sshHostname && sshOrigin) {
+    const sshHostnameResult = await setExtensionConfigValue({
+      scope: "global",
+      extensionId: "dance.hack.cloudflare",
+      path: ["sshHostname"],
+      value: sshHostname
+    })
+    if (!sshHostnameResult.ok) {
+      logger.warn({ message: sshHostnameResult.error })
+    } else if (sshHostnameResult.changed) {
+      configChanged = true
+    }
+
+    const sshOriginResult = await setExtensionConfigValue({
+      scope: "global",
+      extensionId: "dance.hack.cloudflare",
+      path: ["sshOrigin"],
+      value: sshOrigin
+    })
+    if (!sshOriginResult.ok) {
+      logger.warn({ message: sshOriginResult.error })
+    } else if (sshOriginResult.changed) {
+      configChanged = true
+    }
+  }
+
+  const runSetup = await gumConfirm({
+    prompt: "Run Cloudflare tunnel setup now?",
+    default: true
+  })
+  if (runSetup.ok && runSetup.value) {
+    await runHackCommand({
+      cwd: opts.project.projectRoot,
+      args: [
+        "x",
+        "cloudflare",
+        "tunnel-setup",
+        "--hostname",
+        hostname,
+        ...(sshHostname ? ["--ssh-hostname", sshHostname] : []),
+        ...(sshOrigin ? ["--ssh-origin", sshOrigin] : [])
+      ]
+    })
+
+    const runStart = await gumConfirm({
+      prompt: "Start the Cloudflare tunnel now?",
+      default: true
+    })
+    if (runStart.ok && runStart.value) {
+      await runHackCommand({
+        cwd: opts.project.projectRoot,
+        args: ["x", "cloudflare", "tunnel-start"]
+      })
+    }
+  }
+
+  return {
+    mode: "cloudflare",
+    gatewayUrlOverride: `https://${hostname}`,
+    configChanged
+  }
+}
+
+async function configureTailscaleExposure(opts: {
+  readonly project: ProjectContext
+  readonly config: ControlPlaneConfig
+}): Promise<ExposurePlan> {
+  let configChanged = false
+  const enableResult = await setExtensionEnabled({
+    scope: "global",
+    extensionId: "dance.hack.tailscale",
+    enabled: true
+  })
+  if (!enableResult.ok) {
+    logger.warn({ message: enableResult.error })
+  } else if (enableResult.changed) {
+    configChanged = true
+  }
+
+  await runHackCommand({
+    cwd: opts.project.projectRoot,
+    args: ["x", "tailscale", "setup"]
+  })
+
+  const host = await promptHostname({
+    label: "Tailnet hostname (optional for QR)",
+    placeholder: "device.tailnet.ts.net"
+  })
+
+  const port = opts.config.gateway.port
+  const gatewayUrlOverride = host ? `http://${host}:${port}` : undefined
+
+  if (host) {
+    await display.panel({
+      title: "Tailscale note",
+      tone: "info",
+      lines: [
+        "Make sure the gateway is reachable on this host.",
+        "Options:",
+        `- tailscale serve tcp ${port} 127.0.0.1:${port}`,
+        `- or set controlPlane.gateway.bind = 0.0.0.0 and restart hackd`
+      ]
+    })
+  }
+
+  return {
+    mode: "tailscale",
+    gatewayUrlOverride,
+    configChanged
+  }
+}
+
+async function configureSshExposure(opts: { readonly config: ControlPlaneConfig }): Promise<ExposurePlan> {
+  const host = await promptHostname({
+    label: "SSH host",
+    placeholder: "ssh.example.com"
+  })
+  if (!host) {
+    logger.warn({ message: "SSH selected but no host provided." })
+    return { mode: "ssh", configChanged: false }
+  }
+
+  const user = await promptText({
+    label: "SSH user (optional)",
+    placeholder: process.env.USER ?? ""
+  })
+  const port = await promptNumber({
+    label: "SSH port (default 22)",
+    fallback: 22
+  })
+
+  const sshQrPayload = buildSshQrPayload({
+    host,
+    user: user || undefined,
+    port
+  })
+
+  return {
+    mode: "ssh",
+    gatewayUrlOverride: `http://127.0.0.1:${opts.config.gateway.port}`,
+    sshQrPayload,
+    configChanged: false
+  }
+}
+
+async function promptHostname(opts: {
+  readonly label: string
+  readonly placeholder?: string
+  readonly initial?: string
+}): Promise<string | null> {
+  const result = await gumInput({
+    prompt: `${opts.label}: `,
+    placeholder: opts.placeholder,
+    value: opts.initial
+  })
+  if (!result.ok) return null
+  const trimmed = result.value.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+async function promptText(opts: {
+  readonly label: string
+  readonly placeholder?: string
+}): Promise<string> {
+  const result = await gumInput({
+    prompt: `${opts.label}: `,
+    placeholder: opts.placeholder
+  })
+  if (!result.ok) return ""
+  return result.value.trim()
+}
+
+async function promptNumber(opts: {
+  readonly label: string
+  readonly fallback: number
+}): Promise<number> {
+  const result = await gumInput({
+    prompt: `${opts.label}: `,
+    placeholder: String(opts.fallback)
+  })
+  if (!result.ok) return opts.fallback
+  const trimmed = result.value.trim()
+  const parsed = Number.parseInt(trimmed, 10)
+  return Number.isFinite(parsed) ? parsed : opts.fallback
+}
+
+function parseSshOriginPort(origin: string | undefined): number | null {
+  if (!origin) return null
+  try {
+    const url = new URL(origin)
+    if (!url.port) return null
+    const parsed = Number.parseInt(url.port, 10)
+    return Number.isFinite(parsed) ? parsed : null
+  } catch {
+    return null
+  }
 }
 
 async function resolveProjectForArgs(opts: {
@@ -366,8 +718,40 @@ type ConfigReadResult =
   | { readonly ok: false; readonly error: string }
 
 async function readConfigJsonForGateway(opts: {
-  readonly project: ProjectContext
+  readonly scope: "project" | "global"
+  readonly project?: ProjectContext
+  readonly allowMissing?: boolean
 }): Promise<ConfigReadResult> {
+  if (opts.scope === "global") {
+    const jsonPath = resolveGlobalConfigPath()
+    const jsonText = await readTextFile(jsonPath)
+    if (jsonText === null) {
+      if (opts.allowMissing) return { ok: true, path: jsonPath, value: {} }
+      return {
+        ok: false,
+        error: `Missing global config at ${jsonPath}. Run: hack config set --global <key> <value>`
+      }
+    }
+
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(jsonText)
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Invalid JSON"
+      return { ok: false, error: `Failed to parse ${jsonPath}: ${message}` }
+    }
+
+    if (!isRecord(parsed)) {
+      return { ok: false, error: `Expected ${jsonPath} to be an object.` }
+    }
+
+    return { ok: true, path: jsonPath, value: parsed }
+  }
+
+  if (!opts.project) {
+    return { ok: false, error: "Missing project context to update gateway config." }
+  }
+
   const jsonPath = resolve(opts.project.projectDir, PROJECT_CONFIG_FILENAME)
   const jsonText = await readTextFile(jsonPath)
   if (jsonText === null) {
@@ -401,36 +785,31 @@ async function setGatewayEnabled(opts: {
   readonly project: ProjectContext
   readonly enabled: boolean
 }): Promise<{ readonly ok: true; readonly changed: boolean } | { readonly ok: false; readonly error: string }> {
-  const read = await readConfigJsonForGateway({ project: opts.project })
+  const read = await readConfigJsonForGateway({
+    scope: "project",
+    project: opts.project
+  })
   if (!read.ok) return read
 
-  const updates = [
-    { path: ["controlPlane", "gateway", "enabled"], value: opts.enabled },
-    {
-      path: ["controlPlane", "extensions", "dance.hack.gateway", "enabled"],
-      value: opts.enabled
-    }
-  ]
-
-  for (const update of updates) {
-    const result = setPathValue({
-      target: read.value,
-      path: update.path,
-      value: update.value
-    })
-    if (result.error) return { ok: false, error: result.error }
-  }
+  const update = setPathValue({
+    target: read.value,
+    path: ["controlPlane", "gateway", "enabled"],
+    value: opts.enabled
+  })
+  if (update.error) return { ok: false, error: update.error }
 
   const nextText = `${JSON.stringify(read.value, null, 2)}\n`
-  const result = await writeTextFileIfChanged(read.path, nextText)
-  return { ok: true, changed: result.changed }
+  const writeResult = await writeTextFileIfChanged(read.path, nextText)
+  return { ok: true, changed: writeResult.changed }
 }
 
 async function setGatewayAllowWrites(opts: {
-  readonly project: ProjectContext
   readonly allowWrites: boolean
 }): Promise<{ readonly ok: true; readonly changed: boolean } | { readonly ok: false; readonly error: string }> {
-  const read = await readConfigJsonForGateway({ project: opts.project })
+  const read = await readConfigJsonForGateway({
+    scope: "global",
+    allowMissing: true
+  })
   if (!read.ok) return read
 
   const result = setPathValue({
@@ -440,6 +819,7 @@ async function setGatewayAllowWrites(opts: {
   })
   if (result.error) return { ok: false, error: result.error }
 
+  await ensureDir(dirname(read.path))
   const nextText = `${JSON.stringify(read.value, null, 2)}\n`
   const update = await writeTextFileIfChanged(read.path, nextText)
   return { ok: true, changed: update.changed }
@@ -473,7 +853,66 @@ function setPathValue(opts: {
   return {}
 }
 
-function resolveGatewayUrlForQr(opts: { readonly config: ControlPlaneConfig }): string {
+async function setExtensionEnabled(opts: {
+  readonly scope: "project" | "global"
+  readonly project?: ProjectContext
+  readonly extensionId: string
+  readonly enabled: boolean
+}): Promise<{ readonly ok: true; readonly changed: boolean } | { readonly ok: false; readonly error: string }> {
+  const read = await readConfigJsonForGateway({
+    scope: opts.scope,
+    project: opts.project,
+    allowMissing: opts.scope === "global"
+  })
+  if (!read.ok) return read
+
+  const result = setPathValue({
+    target: read.value,
+    path: ["controlPlane", "extensions", opts.extensionId, "enabled"],
+    value: opts.enabled
+  })
+  if (result.error) return { ok: false, error: result.error }
+
+  await ensureDir(dirname(read.path))
+  const nextText = `${JSON.stringify(read.value, null, 2)}\n`
+  const update = await writeTextFileIfChanged(read.path, nextText)
+  return { ok: true, changed: update.changed }
+}
+
+async function setExtensionConfigValue(opts: {
+  readonly scope: "project" | "global"
+  readonly project?: ProjectContext
+  readonly extensionId: string
+  readonly path: readonly string[]
+  readonly value: unknown
+}): Promise<{ readonly ok: true; readonly changed: boolean } | { readonly ok: false; readonly error: string }> {
+  const read = await readConfigJsonForGateway({
+    scope: opts.scope,
+    project: opts.project,
+    allowMissing: opts.scope === "global"
+  })
+  if (!read.ok) return read
+
+  const result = setPathValue({
+    target: read.value,
+    path: ["controlPlane", "extensions", opts.extensionId, "config", ...opts.path],
+    value: opts.value
+  })
+  if (result.error) return { ok: false, error: result.error }
+
+  await ensureDir(dirname(read.path))
+  const nextText = `${JSON.stringify(read.value, null, 2)}\n`
+  const update = await writeTextFileIfChanged(read.path, nextText)
+  return { ok: true, changed: update.changed }
+}
+
+function resolveGatewayUrlForQr(opts: {
+  readonly config: ControlPlaneConfig
+  readonly override?: string
+}): string {
+  const override = (opts.override ?? "").trim()
+  if (override) return override
+
   const cloudflareExtension = opts.config.extensions["dance.hack.cloudflare"]
   const config = cloudflareExtension?.config ?? {}
   const hostname = getString(config, "hostname")
@@ -504,6 +943,10 @@ async function renderExposureHints(opts: {
     "Tailscale (VPN, good for SSH access):",
     buildTailscaleHint({ config: opts.config })
   ]
+  const cloudflareSshHint = buildCloudflareSshHint({ config: opts.config })
+  if (cloudflareSshHint) {
+    lines.splice(5, 0, cloudflareSshHint)
+  }
 
   await display.panel({
     title: "Expose gateway",
@@ -527,7 +970,7 @@ function buildCloudflareHint(opts: {
 }): string {
   const extension = opts.config.extensions["dance.hack.cloudflare"]
   if (!extension?.enabled) {
-    return "  Enable: hack config set 'controlPlane.extensions[\"dance.hack.cloudflare\"].enabled' true"
+    return "  Enable: hack config set --global 'controlPlane.extensions[\"dance.hack.cloudflare\"].enabled' true"
   }
 
   const hostname = getString(extension.config ?? {}, "hostname")
@@ -538,10 +981,18 @@ function buildCloudflareHint(opts: {
   return "  Setup: hack x cloudflare tunnel-setup --hostname gateway.example.com"
 }
 
+function buildCloudflareSshHint(opts: { readonly config: ControlPlaneConfig }): string | null {
+  const extension = opts.config.extensions["dance.hack.cloudflare"]
+  if (!extension?.enabled) return null
+  const sshHostname = getString(extension.config ?? {}, "sshHostname")
+  if (!sshHostname) return null
+  return `  SSH: cloudflared access ssh --hostname ${sshHostname}`
+}
+
 function buildTailscaleHint(opts: { readonly config: ControlPlaneConfig }): string {
   const extension = opts.config.extensions["dance.hack.tailscale"]
   if (!extension?.enabled) {
-    return "  Enable: hack config set 'controlPlane.extensions[\"dance.hack.tailscale\"].enabled' true"
+    return "  Enable: hack config set --global 'controlPlane.extensions[\"dance.hack.tailscale\"].enabled' true"
   }
 
   return "  Setup: hack x tailscale setup"
@@ -610,4 +1061,18 @@ async function restartDaemon(): Promise<number> {
     stderr: "inherit"
   })
   return await start.exited
+}
+
+async function runHackCommand(opts: {
+  readonly cwd: string
+  readonly args: readonly string[]
+}): Promise<number> {
+  const invocation = await resolveHackInvocation()
+  const proc = Bun.spawn([invocation.bin, ...invocation.args, ...opts.args], {
+    cwd: opts.cwd,
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit"
+  })
+  return await proc.exited
 }

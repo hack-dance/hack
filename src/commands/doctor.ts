@@ -10,9 +10,13 @@ import { isMac } from "../lib/os.ts"
 import { ensureDir, pathExists, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts"
 import { parseDotEnv } from "../lib/env.ts"
 import { resolveHackInvocation } from "../lib/hack-cli.ts"
+import { readInternalExtraHostsIp, resolveGlobalCaddyIp } from "../lib/caddy-hosts.ts"
 import { removeFileIfExists } from "../daemon/process.ts"
 import { resolveDaemonPaths } from "../daemon/paths.ts"
 import { readDaemonStatus } from "../daemon/status.ts"
+import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config.ts"
+import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts"
+import { resolveGlobalConfigPath } from "../lib/config-paths.ts"
 import {
   analyzeComposeNetworkHygiene,
   dnsmasqConfigHasDomain,
@@ -155,6 +159,8 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({ args }): Pro
   // Global files
   results.push(await runCheck(s, "global files", () => checkGlobalFiles()))
   results.push(await runCheck(s, "daemon", () => checkDaemonStatus()))
+  results.push(await runCheck(s, "gateway config", () => checkGatewayConfig()))
+  results.push(await runCheck(s, "gateway tokens", () => checkGatewayTokens()))
 
   if (isMac()) {
     results.push(
@@ -245,6 +251,11 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({ args }): Pro
   if (projectCtx.status === "ok") {
     results.push(await runCheck(s, "compose networks", () => checkComposeNetworkHygiene({ startDir })))
     results.push(await runCheck(s, "DEV_HOST", () => checkDevHost({ startDir })))
+    results.push(
+      await runCheck(s, "caddy hosts", () => checkCaddyHostMapping({ startDir }), {
+        timeoutMs: 2000
+      })
+    )
   } else {
     results.push({
       name: "DEV_HOST",
@@ -391,6 +402,57 @@ async function checkDaemonStatus(): Promise<CheckResult> {
     name: "daemon",
     status: "warn",
     message: detail
+  }
+}
+
+async function checkGatewayConfig(): Promise<CheckResult> {
+  const resolved = await resolveGatewayConfig()
+  const configPath = resolveGlobalConfigPath()
+  if (!resolved.config.enabled) {
+    return {
+      name: "gateway config",
+      status: "ok",
+      message: `Gateway disabled (enable per project if needed). Global config: ${configPath}`
+    }
+  }
+
+  const warningSuffix =
+    resolved.warnings.length > 0 ? ` | warnings: ${resolved.warnings.join(" | ")}` : ""
+
+  return {
+    name: "gateway config",
+    status: resolved.warnings.length > 0 ? "warn" : "ok",
+    message: [
+      `Enabled (projects: ${resolved.enabledProjects.length})`,
+      `bind=${resolved.config.bind}`,
+      `port=${resolved.config.port}`,
+      `allowWrites=${resolved.config.allowWrites}`,
+      `global=${configPath}${warningSuffix}`
+    ].join(" | ")
+  }
+}
+
+async function checkGatewayTokens(): Promise<CheckResult> {
+  const daemonPaths = resolveDaemonPaths({})
+  const tokens = await listGatewayTokens({ rootDir: daemonPaths.root })
+  const active = tokens.filter(token => !token.revokedAt)
+  const revoked = tokens.filter(token => token.revokedAt)
+  const writeTokens = active.filter(token => token.scope === "write")
+  const readTokens = active.filter(token => token.scope === "read")
+
+  const gateway = await resolveGatewayConfig()
+  if (gateway.config.enabled && active.length === 0) {
+    return {
+      name: "gateway tokens",
+      status: "warn",
+      message: "No active tokens (run: hack x gateway token-create)"
+    }
+  }
+
+  return {
+    name: "gateway tokens",
+    status: "ok",
+    message: `active=${active.length} (write=${writeTokens.length}, read=${readTokens.length}), revoked=${revoked.length}`
   }
 }
 
@@ -757,6 +819,53 @@ async function checkDevHost({ startDir }: { readonly startDir: string }): Promis
     name: "DEV_HOST",
     status: devHost ? "ok" : "warn",
     message: devHost ? devHost : `Missing dev_host in ${configPath}`
+  }
+}
+
+async function checkCaddyHostMapping({
+  startDir
+}: {
+  readonly startDir: string
+}): Promise<CheckResult> {
+  const ctx = await findProjectContext(startDir)
+  if (!ctx) {
+    return {
+      name: "caddy hosts",
+      status: "warn",
+      message: `Missing ${HACK_PROJECT_DIR_PRIMARY}/ (run 'hack init' in a repo)`
+    }
+  }
+
+  const caddyIp = await resolveGlobalCaddyIp()
+  if (!caddyIp) {
+    return {
+      name: "caddy hosts",
+      status: "warn",
+      message: "Caddy not running (run: hack global up)"
+    }
+  }
+
+  const mappedIp = await readInternalExtraHostsIp({ projectDir: ctx.projectDir })
+  if (!mappedIp) {
+    return {
+      name: "caddy hosts",
+      status: "warn",
+      message: "No internal extra_hosts mapping found (run: hack restart)"
+    }
+  }
+
+  if (mappedIp !== caddyIp) {
+    return {
+      name: "caddy hosts",
+      status: "warn",
+      message: `Caddy IP ${caddyIp} does not match hosts ${mappedIp} (run: hack restart)`
+    }
+  }
+
+  return {
+    name: "caddy hosts",
+    status: "ok",
+    message: `Caddy IP ${caddyIp} matches internal host mapping`
   }
 }
 

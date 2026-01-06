@@ -7,15 +7,17 @@ import { resolve } from "node:path"
 import { CliUsageError, defineCommand, defineOption, withHandler } from "../cli/command.ts"
 import { optPath, optProject } from "../cli/options.ts"
 import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config.ts"
+import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts"
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts"
 import { requestDaemonJson } from "../daemon/client.ts"
 import { isProcessRunning } from "../daemon/process.ts"
 import { resolveDaemonPaths } from "../daemon/paths.ts"
 import { readDaemonStatus } from "../daemon/status.ts"
 import { GLOBAL_CLOUDFLARE_DIR_NAME, GLOBAL_HACK_DIR_NAME, HACK_PROJECT_DIR_PRIMARY } from "../constants.ts"
-import { readTextFile } from "../lib/fs.ts"
+import { pathExists, readTextFile } from "../lib/fs.ts"
 import { getString, isRecord } from "../lib/guards.ts"
 import { resolveHackInvocation } from "../lib/hack-cli.ts"
+import { resolveGlobalConfigPath } from "../lib/config-paths.ts"
 import { defaultProjectSlugFromPath, findProjectContext, readProjectConfig, sanitizeProjectSlug } from "../lib/project.ts"
 import { resolveRegisteredProjectByName, upsertProjectRegistration } from "../lib/projects-registry.ts"
 import { display } from "../ui/display.ts"
@@ -26,7 +28,7 @@ import { isTty } from "../ui/terminal.ts"
 
 import type { CliContext, CommandArgs } from "../cli/command.ts"
 import type { GatewayAuditEntry } from "../control-plane/extensions/gateway/audit.ts"
-import type { GatewayConfigSource } from "../control-plane/extensions/gateway/config.ts"
+import type { GatewayProject } from "../control-plane/extensions/gateway/config.ts"
 import type { ControlPlaneConfig } from "../control-plane/sdk/config.ts"
 import type { DaemonStatus } from "../daemon/status.ts"
 import type { ProjectContext } from "../lib/project.ts"
@@ -313,11 +315,8 @@ async function handleRemoteQr({
     return 1
   }
 
-  const projectConfig = await readControlPlaneConfig({
-    projectDir: resolved.project.projectDir
-  })
   const cloudflareStatus = await resolveCloudflareStatus({
-    controlPlaneConfig: projectConfig.config
+    controlPlaneConfig: (await readControlPlaneConfig({})).config
   })
 
   const gatewayUrl = await resolveGatewayUrl({
@@ -328,8 +327,7 @@ async function handleRemoteQr({
   const payload = buildGatewayQrPayload({
     baseUrl: gatewayUrl,
     token,
-    projectId: resolved.projectId,
-    projectName: resolved.projectName
+    projectId: resolved.projectId
   })
 
   const ok = await renderQrPayload({
@@ -399,16 +397,25 @@ type RemoteStatus = {
   readonly projectGatewayEnabled: boolean
 }
 
+type TokenSummary = {
+  readonly active: number
+  readonly revoked: number
+  readonly write: number
+  readonly read: number
+}
+
 type RemoteStatusSnapshot = {
   readonly project: ResolvedProject
   readonly projectGatewayEnabled: boolean
   readonly gatewayEnabled: boolean
   readonly gatewayConfig: ControlPlaneConfig["gateway"]
-  readonly gatewaySource?: GatewayConfigSource
+  readonly gatewayProjects: readonly GatewayProject[]
   readonly gatewayUrl: string
   readonly daemonStatus: DaemonStatus
   readonly streamsActive?: number
   readonly cloudflare: CloudflareStatus
+  readonly tokens: TokenSummary
+  readonly globalConfigExists: boolean
 }
 
 async function collectRemoteStatusSnapshot(opts: {
@@ -421,14 +428,22 @@ async function collectRemoteStatusSnapshot(opts: {
 
   const gatewayResolution = await resolveGatewayConfig()
   const gatewayEnabled = gatewayResolution.config.enabled
-  const gatewaySource = gatewayResolution.source
   const gatewayUrl = buildGatewayUrl({
     bind: gatewayResolution.config.bind,
     port: gatewayResolution.config.port
   })
 
+  const globalConfigPath = resolveGlobalConfigPath()
+  const globalConfigExists = await pathExists(globalConfigPath)
+
   const daemonPaths = resolveDaemonPaths({})
   const daemonStatus = await readDaemonStatus({ paths: daemonPaths })
+
+  const tokenRecords = await listGatewayTokens({ rootDir: daemonPaths.root })
+  const activeTokens = tokenRecords.filter(token => !token.revokedAt)
+  const revokedTokens = tokenRecords.filter(token => token.revokedAt)
+  const writeTokens = activeTokens.filter(token => token.scope === "write")
+  const readTokens = activeTokens.filter(token => token.scope === "read")
 
   let streamsActive: number | undefined
   if (daemonStatus.running) {
@@ -440,7 +455,7 @@ async function collectRemoteStatusSnapshot(opts: {
   }
 
   const cloudflareStatus = await resolveCloudflareStatus({
-    controlPlaneConfig: projectConfig.config
+    controlPlaneConfig: (await readControlPlaneConfig({})).config
   })
 
   return {
@@ -448,9 +463,16 @@ async function collectRemoteStatusSnapshot(opts: {
     projectGatewayEnabled,
     gatewayEnabled,
     gatewayConfig: gatewayResolution.config,
-    gatewaySource,
+    gatewayProjects: gatewayResolution.enabledProjects,
     gatewayUrl,
     daemonStatus,
+    tokens: {
+      active: activeTokens.length,
+      revoked: revokedTokens.length,
+      write: writeTokens.length,
+      read: readTokens.length
+    },
+    globalConfigExists,
     ...(streamsActive !== undefined ? { streamsActive } : {}),
     cloudflare: cloudflareStatus
   }
@@ -468,20 +490,17 @@ function buildRemoteStatusEntries(opts: {
     ["project_dir", snapshot.project.project.projectDir],
     ["project_gateway_enabled", snapshot.projectGatewayEnabled],
     ["gateway_enabled", snapshot.gatewayEnabled],
-    [
-      "gateway_source",
-      snapshot.gatewaySource ?
-        `${snapshot.gatewaySource.projectName} (${snapshot.gatewaySource.projectId})`
-      : "none"
-    ],
-    [
-      "gateway_source_dir",
-      snapshot.gatewaySource ? snapshot.gatewaySource.projectDir : "none"
-    ],
+    ["gateway_config_path", resolveGlobalConfigPath()],
+    ["gateway_config_exists", snapshot.globalConfigExists],
+    ["gateway_projects_enabled", snapshot.gatewayProjects.length],
     ["gateway_url", snapshot.gatewayUrl],
     ["gateway_bind", snapshot.gatewayConfig.bind],
     ["gateway_port", snapshot.gatewayConfig.port],
     ["allow_writes", snapshot.gatewayConfig.allowWrites],
+    ["tokens_active", snapshot.tokens.active],
+    ["tokens_revoked", snapshot.tokens.revoked],
+    ["tokens_write", snapshot.tokens.write],
+    ["tokens_read", snapshot.tokens.read],
     [
       "hackd_running",
       snapshot.daemonStatus.running ?
@@ -489,6 +508,13 @@ function buildRemoteStatusEntries(opts: {
       : "false"
     ]
   ]
+
+  if (snapshot.gatewayProjects.length > 0) {
+    const projects = snapshot.gatewayProjects.map(
+      project => `${project.projectName} (${project.projectId})`
+    )
+    entries.push(["gateway_projects", projects.join(", ")])
+  }
 
   if (snapshot.streamsActive !== undefined) {
     entries.push(["streams_active", snapshot.streamsActive])
@@ -536,6 +562,17 @@ async function renderRemoteStatus(opts: { readonly project: ResolvedProject }): 
     entries
   })
 
+  if (!snapshot.globalConfigExists) {
+    await display.panel({
+      title: "Global config",
+      tone: "warn",
+      lines: [
+        "Global control plane config not found.",
+        `Run: hack config set --global 'controlPlane.gateway.bind' '${snapshot.gatewayConfig.bind}'`
+      ]
+    })
+  }
+
   if (!snapshot.projectGatewayEnabled) {
     await display.panel({
       title: "Next step",
@@ -558,7 +595,8 @@ async function renderRemoteStatus(opts: { readonly project: ResolvedProject }): 
       tone: "info",
       lines: [
         "Shells and job creation require allowWrites + a write token.",
-        "Run: hack gateway setup"
+        "Run: hack gateway setup",
+        "Or: hack config set --global 'controlPlane.gateway.allowWrites' true && hack daemon stop && hack daemon start"
       ]
     })
   }
@@ -571,7 +609,7 @@ async function renderRemoteStatus(opts: { readonly project: ResolvedProject }): 
       lines: [
         "Cloudflare enabled but no hostname configured.",
         "Set:",
-        "  hack config set 'controlPlane.extensions[\"dance.hack.cloudflare\"].config.hostname' gateway.example.com"
+        "  hack config set --global 'controlPlane.extensions[\"dance.hack.cloudflare\"].config.hostname' gateway.example.com"
       ]
     })
   }
@@ -603,8 +641,12 @@ async function renderRemoteStatus(opts: { readonly project: ResolvedProject }): 
     title: "Tokens",
     tone: "info",
     lines: [
+      `Active: ${snapshot.tokens.active} (write ${snapshot.tokens.write}, read ${snapshot.tokens.read})`,
+      `Revoked: ${snapshot.tokens.revoked}`,
       "Export token: HACK_GATEWAY_TOKEN=...",
-      "Create token: hack x gateway token-create --scope write"
+      "Create token: hack x gateway token-create --scope write",
+      "List tokens: hack x gateway token-list",
+      "Revoke token: hack x gateway token-revoke <token-id>"
     ]
   })
 
@@ -971,10 +1013,6 @@ function buildStatusLines(opts: {
     snapshot.project.projectId ?
       `${snapshot.project.projectName} (${snapshot.project.projectId})`
     : snapshot.project.projectName
-  const gatewaySource =
-    snapshot.gatewaySource ?
-      `${snapshot.gatewaySource.projectName} (${snapshot.gatewaySource.projectId})`
-    : "none"
   const daemonLabel = snapshot.daemonStatus.running ?
     `running (pid ${snapshot.daemonStatus.pid ?? "unknown"})`
   : "stopped"
@@ -984,11 +1022,24 @@ function buildStatusLines(opts: {
   const lines = [
     `Project: ${projectLabel}`,
     `Gateway: ${snapshot.gatewayEnabled ? "enabled" : "disabled"}  ${snapshot.gatewayUrl}`,
+    `Project gateway: ${snapshot.projectGatewayEnabled ? "enabled" : "disabled"}`,
+    `Gateway projects: ${snapshot.gatewayProjects.length}`,
     `Allow writes: ${snapshot.gatewayConfig.allowWrites ? "yes" : "no"}`,
     `hackd: ${daemonLabel}`,
-    `Config source: ${gatewaySource}`,
     `Cloudflare: ${cloudflareLabel}`
   ]
+
+  if (!snapshot.globalConfigExists) {
+    lines.push(`Gateway config missing: ${resolveGlobalConfigPath()}`)
+    lines.push("Create config: hack config set --global 'controlPlane.gateway.port' 7788")
+  }
+
+  if (snapshot.gatewayProjects.length > 0) {
+    const projects = snapshot.gatewayProjects.map(
+      project => `${project.projectName} (${project.projectId})`
+    )
+    lines.push(`Gateway routing: ${projects.join(", ")}`)
+  }
 
   if (snapshot.streamsActive !== undefined) {
     lines.push(`Streams active: ${snapshot.streamsActive}`)

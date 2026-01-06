@@ -1,0 +1,15 @@
+{
+  "jobId": "3013b2a0-28d9-40ed-86d9-1e56c8a9131a",
+  "status": "completed",
+  "runner": "generic",
+  "command": [
+    "bash",
+    "-lc",
+    "echo gateway e2e"
+  ],
+  "projectId": "205e97ea42c4",
+  "projectName": "example",
+  "createdAt": "2026-01-06T02:51:08.275Z",
+  "updatedAt": "2026-01-06T02:51:08.285Z",
+  "lastEventSeq": 4
+}

@@ -98,3 +98,27 @@ bun ops -- bun db:generate
 
 - Adjust `command` + `working_dir` to match your template.
 - Keep ops services on the default network only.
+
+## Gateway shell MVP (xterm)
+
+This example includes a minimal browser terminal at `/gateway`.
+
+1) Enable the gateway and generate a write token:
+
+```bash
+hack remote setup
+hack config set --global 'controlPlane.gateway.allowWrites' true
+hack x gateway token-create --scope write
+```
+
+2) Install deps + run the app:
+
+```bash
+cd examples/next-app
+bun install
+bun run dev
+```
+
+3) Open http://localhost:3000/gateway and paste your gateway URL + token.
+
+The UI uses the gateway HTTP API for setup and a WebSocket for the shell stream.

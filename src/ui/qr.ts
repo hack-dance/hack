@@ -92,7 +92,11 @@ async function renderQrWithQrcode(opts: {
   readonly payload: string
 }): Promise<{ readonly ok: true; readonly output: string } | { readonly ok: false }> {
   try {
-    const output = await qrcode.toString(opts.payload, { type: "terminal" })
+    const output = await qrcode.toString(opts.payload, {
+      type: "utf8",
+      margin: 0,
+      errorCorrectionLevel: "L"
+    })
     return { ok: true, output }
   } catch {
     return { ok: false }

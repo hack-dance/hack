@@ -6,6 +6,9 @@ import { logger } from "../ui/logger.ts"
 import { ensureBundledGumInstalled } from "../ui/gum.ts"
 import { dockerComposeLogsPretty } from "../ui/docker-logs.ts"
 import { display } from "../ui/display.ts"
+import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config.ts"
+import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts"
+import { resolveDaemonPaths } from "../daemon/paths.ts"
 import {
   renderGlobalCaddyCompose,
   renderGlobalCoreDnsConfig,
@@ -22,6 +25,7 @@ import { exec, execOrThrow, findExecutableInPath, run } from "../lib/shell.ts"
 import { isMac } from "../lib/os.ts"
 import { parseJsonLines } from "../lib/json-lines.ts"
 import { getString } from "../lib/guards.ts"
+import { resolveGlobalConfigPath } from "../lib/config-paths.ts"
 import { ensureDir, pathExists, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts"
 import {
   DEFAULT_INGRESS_NETWORK,
@@ -616,6 +620,9 @@ async function globalStatus(): Promise<number> {
   await display.section("Networks")
   await renderNetworksTable([DEFAULT_INGRESS_NETWORK, DEFAULT_LOGGING_NETWORK])
 
+  await display.section("Gateway")
+  await renderGatewayStatus()
+
   return 0
 }
 
@@ -670,6 +677,64 @@ async function renderNetworksTable(names: readonly string[]): Promise<void> {
     columns: ["NAME", "ID", "DRIVER", "SCOPE"],
     rows
   })
+}
+
+async function renderGatewayStatus(): Promise<void> {
+  const gatewayResolution = await resolveGatewayConfig()
+  const configPath = resolveGlobalConfigPath()
+  const gatewayUrl = buildGatewayUrl({
+    bind: gatewayResolution.config.bind,
+    port: gatewayResolution.config.port
+  })
+
+  const daemonPaths = resolveDaemonPaths({})
+  const tokens = await listGatewayTokens({ rootDir: daemonPaths.root })
+  const activeTokens = tokens.filter(token => !token.revokedAt)
+  const revokedTokens = tokens.filter(token => token.revokedAt)
+  const writeTokens = activeTokens.filter(token => token.scope === "write")
+  const readTokens = activeTokens.filter(token => token.scope === "read")
+
+  const entries: Array<readonly [string, string | number | boolean]> = [
+    ["config_path", configPath],
+    ["gateway_url", gatewayUrl],
+    ["gateway_bind", gatewayResolution.config.bind],
+    ["gateway_port", gatewayResolution.config.port],
+    ["allow_writes", gatewayResolution.config.allowWrites],
+    ["gateway_enabled", gatewayResolution.config.enabled],
+    ["gateway_projects_enabled", gatewayResolution.enabledProjects.length],
+    ["tokens_active", activeTokens.length],
+    ["tokens_revoked", revokedTokens.length],
+    ["tokens_write", writeTokens.length],
+    ["tokens_read", readTokens.length]
+  ]
+
+  if (gatewayResolution.enabledProjects.length > 0) {
+    const projects = gatewayResolution.enabledProjects.map(
+      project => `${project.projectName} (${project.projectId})`
+    )
+    entries.push(["gateway_projects", projects.join(", ")])
+  }
+
+  await display.kv({ entries })
+
+  if (gatewayResolution.warnings.length > 0) {
+    await display.panel({
+      title: "Gateway warnings",
+      tone: "warn",
+      lines: gatewayResolution.warnings
+    })
+  }
+
+  await display.panel({
+    title: "Gateway tokens",
+    tone: "info",
+    lines: ["List: hack x gateway token-list", "Revoke: hack x gateway token-revoke <token-id>"]
+  })
+}
+
+function buildGatewayUrl(opts: { readonly bind: string; readonly port: number }): string {
+  const host = opts.bind.includes(":") ? `[${opts.bind}]` : opts.bind
+  return `http://${host}:${opts.port}`
 }
 
 async function globalTrust(): Promise<number> {

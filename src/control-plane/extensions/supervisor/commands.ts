@@ -3,6 +3,7 @@ import { isAbsolute, resolve } from "node:path"
 import { requestDaemonJson } from "../../../daemon/client.ts"
 import { isRecord } from "../../../lib/guards.ts"
 import { resolveHackInvocation } from "../../../lib/hack-cli.ts"
+import { resolveGlobalConfigPath } from "../../../lib/config-paths.ts"
 import { findProjectContext, sanitizeProjectSlug } from "../../../lib/project.ts"
 import {
   readProjectsRegistry,
@@ -12,7 +13,6 @@ import {
 import { display } from "../../../ui/display.ts"
 import { gumConfirm, isGumAvailable } from "../../../ui/gum.ts"
 import { isTty } from "../../../ui/terminal.ts"
-import { PROJECT_CONFIG_FILENAME } from "../../../constants.ts"
 import { createGatewayClient } from "../../sdk/gateway-client.ts"
 import { resolveGatewayConfig } from "../gateway/config.ts"
 
@@ -1161,11 +1161,14 @@ function buildShellCreateErrorHint(opts: { readonly error: { readonly code?: str
   if (opts.error.code === "writes_disabled") {
     return [
       "Gateway writes are disabled.",
-      "Fix: hack config set 'controlPlane.gateway.allowWrites' true && hack daemon stop && hack daemon start"
+      "Fix: hack config set --global 'controlPlane.gateway.allowWrites' true && hack daemon stop && hack daemon start"
     ].join(" ")
   }
   if (opts.error.code === "write_scope_required") {
     return "Write token required. Run: hack x gateway token-create --scope write"
+  }
+  if (opts.error.code === "project_disabled") {
+    return "Project not gateway-enabled. Run: hack gateway enable (from the project directory)."
   }
   return null
 }
@@ -1176,16 +1179,7 @@ async function maybeEnableGatewayWrites(opts: {
 }): Promise<boolean> {
   if (!isTty() || !isGumAvailable()) return false
 
-  const gatewayConfig = await resolveGatewayConfig()
-  const targetProjectDir = gatewayConfig.source?.projectDir ?? opts.project?.projectDir
-  if (!targetProjectDir) {
-    opts.ctx.logger.warn({
-      message: "Unable to locate gateway config source to enable writes."
-    })
-    return false
-  }
-
-  const configPath = resolve(targetProjectDir, PROJECT_CONFIG_FILENAME)
+  const configPath = resolveGlobalConfigPath()
   const prompt = `Gateway writes disabled. Enable writes + restart hackd? (updates ${configPath})`
   const confirmed = await gumConfirm({ prompt, default: true })
   if (!confirmed.ok || !confirmed.value) return false
@@ -1193,22 +1187,22 @@ async function maybeEnableGatewayWrites(opts: {
   const invocation = await resolveHackInvocation()
   const okSet = await runHackCommand({
     invocation,
-    argv: ["config", "set", "controlPlane.gateway.allowWrites", "true"],
-    cwd: targetProjectDir
+    argv: ["config", "set", "--global", "controlPlane.gateway.allowWrites", "true"],
+    cwd: opts.project?.projectRoot ?? process.cwd()
   })
   if (!okSet) return false
 
   const stopped = await runHackCommand({
     invocation,
     argv: ["daemon", "stop"],
-    cwd: targetProjectDir
+    cwd: opts.project?.projectRoot ?? process.cwd()
   })
   if (!stopped) return false
 
   const started = await runHackCommand({
     invocation,
     argv: ["daemon", "start"],
-    cwd: targetProjectDir
+    cwd: opts.project?.projectRoot ?? process.cwd()
   })
   if (!started) return false
 
@@ -1220,14 +1214,17 @@ async function reportGatewayConfigSource(opts: {
   readonly logger: { info: (input: { message: string }) => void; warn: (input: { message: string }) => void }
 }): Promise<void> {
   const resolved = await resolveGatewayConfig()
-  if (resolved.source) {
+  if (resolved.enabledProjects.length > 0) {
+    const projects = resolved.enabledProjects.map(
+      project => `${project.projectName} (${project.projectId})`
+    )
     opts.logger.info({
-      message: `Gateway config source: ${resolved.source.projectName} (${resolved.source.projectId}) at ${resolved.source.projectDir}`
+      message: `Gateway projects enabled: ${projects.join(", ")}`
     })
     return
   }
   opts.logger.warn({
-    message: "Gateway config source not found. Run `hack gateway enable` in the project you want to use."
+    message: "No gateway-enabled projects found. Run `hack gateway enable` in the project you want to use."
   })
 }
 

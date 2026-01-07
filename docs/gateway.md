@@ -4,6 +4,8 @@ The gateway exposes a small HTTP/WS surface on top of `hackd` so you can orchest
 logs, and open shells remotely. It is disabled by default and binds to `127.0.0.1` unless you
 explicitly expose it through SSH, Cloudflare, or Tailscale.
 
+> ⚠️ Experimental: the remote exposure guides below are still being validated end-to-end.
+
 ## Concepts
 
 - **Gateway**: HTTP/WS server inside `hackd` (token-protected).

@@ -1,5 +1,7 @@
 # Expose the gateway over SSH
 
+> ⚠️ Experimental: this guide has not been validated end-to-end yet. Use with caution and report issues.
+
 Use SSH port-forwarding when you want quick, ad-hoc access without extra tooling.
 You still need a reachable SSH host (public IP, VPN, or Tailscale).
 

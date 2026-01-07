@@ -1,5 +1,7 @@
 # Expose the gateway with Cloudflare
 
+> ⚠️ Experimental: this guide has not been validated end-to-end yet. Use with caution and report issues.
+
 Cloudflare Tunnel is ideal for HTTP/WS gateway access from a phone or browser when you are off-network.
 
 ## Prereqs

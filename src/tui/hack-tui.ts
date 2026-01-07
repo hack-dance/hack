@@ -13,6 +13,7 @@ import {
   dim,
   fg,
   type TextChunk,
+  type MouseEvent,
   t
 } from "@opentui/core"
 
@@ -84,6 +85,17 @@ class WrappedTextRenderable extends TextRenderable {
     const width = Math.floor(this.width)
     if (this.wrapMode !== "none" && width > 0) {
       this.textBufferView.setWrapWidth(width)
+    }
+  }
+}
+
+class PausableScrollBoxRenderable extends ScrollBoxRenderable {
+  public onScrollChange: ((event: MouseEvent) => void) | null = null
+
+  protected override onMouseEvent(event: MouseEvent): void {
+    super.onMouseEvent(event)
+    if (event.type === "scroll") {
+      this.onScrollChange?.(event)
     }
   }
 }
@@ -323,7 +335,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       titleAlignment: "left"
     })
 
-    const logsScroll = new ScrollBoxRenderable(activeRenderer, {
+    const logsScroll = new PausableScrollBoxRenderable(activeRenderer, {
       id: "hack-tui-logs-scroll",
       flexGrow: 1,
       stickyScroll: true,
@@ -723,6 +735,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
   let highlightEnabled = false
   let logFollow = true
   let pendingLogCount = 0
+  let lastScrollTop = 0
   let collapseMultiline = false
   const enabledLevels = new Set(["debug", "info", "warn", "error"])
   let serviceScope: "all" | "selected" = "selected"
@@ -847,7 +860,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       durationMs: 1600
     })
     updateLogsTitle()
-    flushLogUpdate()
+    flushLogUpdate({ force: true })
     renderFooter()
   }
 
@@ -862,7 +875,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       durationMs: 1400
     })
     updateLogsTitle()
-    flushLogUpdate()
+    flushLogUpdate({ force: true })
     renderFooter()
   }
 
@@ -883,7 +896,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       durationMs: 1400
     })
     updateLogsTitle()
-    flushLogUpdate()
+    flushLogUpdate({ force: true })
     renderFooter()
     void refreshStats({ runtime: currentRuntime })
   }
@@ -896,7 +909,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         : t`${fg("#9ad7ff")("Expanded")} ${dim("multiline")}`,
       durationMs: 1400
     })
-    flushLogUpdate()
+    flushLogUpdate({ force: true })
     renderFooter()
   }
 
@@ -918,7 +931,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         durationMs: 1200
       })
     }
-    flushLogUpdate()
+    flushLogUpdate({ force: true })
     renderFooter()
   }
 
@@ -932,7 +945,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     highlightEnabled = false
     logsScroll.stickyScroll = logFollow
     updateLogsTitle()
-    flushLogUpdate()
+    flushLogUpdate({ force: true })
     renderFooter()
     if (opts.notify && hadQuery) {
       setToast({ message: t`${fg("#9ad7ff")("Search cleared")}`, durationMs: 1400 })
@@ -1538,6 +1551,10 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     logFollow = false
     pendingLogCount = 0
     logsScroll.stickyScroll = false
+    if (logUpdateTimer) {
+      clearTimeout(logUpdateTimer)
+      logUpdateTimer = null
+    }
     updateLogsTitle()
     renderFooter()
   }
@@ -1549,8 +1566,17 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     logsScroll.stickyScroll = true
     flushLogUpdate({ force: true })
     logsScroll.scrollTop = logsScroll.scrollHeight
+    lastScrollTop = logsScroll.scrollTop
     updateLogsTitle()
     renderFooter()
+  }
+
+  logsScroll.onScrollChange = event => {
+    if (!isActive || searchOverlayVisible || searchMode === "results") return
+    if (event.type === "scroll" && logFollow) {
+      pauseLogFollow()
+    }
+    lastScrollTop = logsScroll.scrollTop
   }
 
   const updateLogText = (opts?: { readonly force?: boolean }) => {
@@ -1619,7 +1645,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       clearTimeout(logUpdateTimer)
       logUpdateTimer = null
     }
-    updateLogText({ force: opts?.force ?? !logFollow })
+    updateLogText({ force: opts?.force === true })
   }
 
   const mergeLogEntry = (opts: { readonly target: LogEntry; readonly entry: LogEntry }) => {
@@ -1665,6 +1691,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       mergeLogEntry({ target: continuationTarget, entry })
       if (holdUpdates) {
         pendingLogCount += 1
+        if (logsScroll.scrollTop !== lastScrollTop) {
+          logsScroll.scrollTop = lastScrollTop
+        }
         updateLogsTitle()
         return
       }
@@ -1687,6 +1716,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     }
     if (holdUpdates) {
       pendingLogCount += 1
+      if (logsScroll.scrollTop !== lastScrollTop) {
+        logsScroll.scrollTop = lastScrollTop
+      }
       updateLogsTitle()
       return
     }
@@ -1859,19 +1891,21 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     } finally {
       historyState.loading = false
       updateLogsTitle()
-      flushLogUpdate()
+      flushLogUpdate({ force: true })
     }
   }
 
   logsScroll.verticalScrollBar.on("change", payload => {
     if (!isActive || searchOverlayVisible || searchMode === "results") return
     const position = typeof payload?.position === "number" ? payload.position : logsScroll.scrollTop
+    const movedUp = position < lastScrollTop - 1
     const atBottom = isScrollAtBottom()
-    if (!atBottom && logFollow) {
+    if (movedUp && logFollow) {
       pauseLogFollow()
     } else if (atBottom && !logFollow) {
       resumeLogFollow()
     }
+    lastScrollTop = position
     if (position <= 1) {
       void loadMoreHistory()
     }
@@ -1946,7 +1980,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     searchOverlay.visible = false
     setMainViewVisible(true)
     setActivePane(lastMainPane)
-    flushLogUpdate()
+    flushLogUpdate({ force: true })
   }
 
   const cancelSearchProc = () => {
@@ -1996,7 +2030,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       logsScroll.stickyScroll = false
       setActivePane("logs")
       updateLogsTitle()
-      flushLogUpdate()
+      flushLogUpdate({ force: true })
       return
     }
 
@@ -2081,7 +2115,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       searchMode = "live"
       logsScroll.stickyScroll = logFollow
       updateLogsTitle()
-      flushLogUpdate()
+      flushLogUpdate({ force: true })
       renderFooter()
       return
     }
@@ -2098,7 +2132,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     logsScroll.stickyScroll = false
     setActivePane("logs")
     updateLogsTitle()
-    flushLogUpdate()
+    flushLogUpdate({ force: true })
   }
 
   const startLogStream = async () => {
@@ -2242,7 +2276,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       lastSelectedService = selectedService
     }
     updateLogsTitle()
-    flushLogUpdate()
+    flushLogUpdate({ force: true })
     void refreshStats({ runtime: currentRuntime })
   })
 
@@ -2260,6 +2294,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     const next = logsText.hasSelection()
     if (next !== logsHasSelection) {
       logsHasSelection = next
+      if (logsHasSelection && logFollow && activePane === "logs") {
+        pauseLogFollow()
+      }
       renderFooter()
     }
   }
@@ -2380,14 +2417,14 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         searchResults = []
         logsScroll.stickyScroll = logFollow
         updateLogsTitle()
-        flushLogUpdate()
+        flushLogUpdate({ force: true })
         renderFooter()
         return
       }
       if (key.name === "up") {
         key.preventDefault()
         searchSelectedIndex = Math.max(0, searchSelectedIndex - 1)
-        flushLogUpdate()
+        flushLogUpdate({ force: true })
         return
       }
       if (key.name === "down") {
@@ -2395,7 +2432,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         if (searchResults.length > 0) {
           searchSelectedIndex = Math.min(searchResults.length - 1, searchSelectedIndex + 1)
         }
-        flushLogUpdate()
+        flushLogUpdate({ force: true })
         return
       }
       if (key.name === "enter" || key.name === "return" || key.name === "linefeed") {
@@ -2410,7 +2447,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         searchResults = []
         logsScroll.stickyScroll = logFollow
         updateLogsTitle()
-        flushLogUpdate()
+        flushLogUpdate({ force: true })
         renderFooter()
         return
       }

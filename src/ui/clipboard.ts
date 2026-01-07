@@ -50,6 +50,8 @@ export async function copyToClipboard(opts: { readonly text: string }): Promise<
 }
 
 function resolveClipboardCommand(): ClipboardCommand | null {
+  const path = (process.env.PATH ?? "").trim()
+  if (path.length === 0) return null
   const platform = process.platform
   for (const candidate of CLIPBOARD_COMMANDS) {
     if (candidate.platforms && !candidate.platforms.includes(platform)) continue

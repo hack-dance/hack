@@ -388,6 +388,12 @@ hack branch open feature-x
 If your app runs in Docker (the default in `hack`), don’t connect to `127.0.0.1` / `localhost` for Postgres/Redis.
 Inside a container, `localhost` is that container, not the other compose services.
 
+If you previously ran everything on your host and used `localhost:PORT`, update those references when you
+move into containers:
+
+- **HTTP services**: use the same `https://*.hack` hostname you open from the host (whatever you configured in Caddy labels, e.g. `https://api.myapp.hack`).
+- **Non-HTTP services** (DB/Redis/etc.): use the Compose service hostname (e.g. `db`, `redis`).
+
 For HTTP services, use the same `https://*.hack` URLs you use on the host. `hack up` injects internal DNS,
 TLS trust, and `extra_hosts` mappings so `*.hack` resolves reliably inside containers. If you see `ENOTFOUND`
 inside containers, run `hack restart` to refresh the host mappings.

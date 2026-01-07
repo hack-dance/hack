@@ -1,5 +1,7 @@
 # Expose the gateway with Tailscale
 
+> ⚠️ Experimental: this guide has not been validated end-to-end yet. Use with caution and report issues.
+
 Tailscale is the best option for SSH from mobile clients and for a private gateway URL when you are off-network.
 
 ## Setup

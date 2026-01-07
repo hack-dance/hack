@@ -4,6 +4,8 @@ The gateway exposes a small, authenticated HTTP/WS surface for remote orchestrat
 designed for structured workflows (jobs + log streaming + shells) and keeps write access
 opt-in with explicit guardrails.
 
+> ⚠️ Experimental: remote exposure steps are still being validated end-to-end.
+
 ## Security model (read this first)
 
 - The gateway binds to `127.0.0.1` by default. Expose it only through a Zero Trust tunnel,

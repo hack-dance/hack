@@ -52,3 +52,18 @@ Never use any types and always default to leveraging generics and smart types to
 2. **Run quality gates** (if code changed) - Tests, linters, builds
 3. **Update issue status** - Close finished work, update in-progress items
 4. **Hand off** - Provide context for next session
+
+<!-- hack:tickets:start -->
+## Tickets (git-backed)
+
+This project uses `hack` tickets (extension: `dance.hack.tickets`).
+
+Common commands:
+- Create: `hack x tickets create --title "..." --body-stdin` (pipe long context)
+- List: `hack x tickets list`
+- Show: `hack x tickets show T-00001`
+- Status: `hack x tickets status T-00001 in_progress`
+- Sync: `hack x tickets sync`
+
+Data lives in `.hack/tickets/` and syncs to branch `hack/tickets` by default.
+<!-- hack:tickets:end -->

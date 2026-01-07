@@ -102,7 +102,7 @@ Use `hack x <namespace> help` to list commands.
 - Supervisor: `hack x supervisor job-create|job-list|job-show|job-tail|job-attach|job-cancel|shell`
 - Cloudflare: `hack x cloudflare tunnel-print|tunnel-setup|tunnel-start|tunnel-stop|access-setup`
 - Tailscale: `hack x tailscale setup|status|ip`
-- Tickets: scaffolding only (commands pending)
+- Tickets: `hack x tickets setup|create|list|show|status|sync` (see `docs/guides/tickets.md`)
 
 Gateway tokens default to `read` scope. Use `--scope write` to permit non-GET requests (also
 requires global `controlPlane.gateway.allowWrites = true`).
@@ -347,7 +347,33 @@ Notes:
 
 ### Tickets extension (`hack x tickets`)
 
-Commands are not yet available (scaffolding only).
+A lightweight, git-backed ticket log stored in `.hack/tickets/` and syncable via a dedicated branch (`hack/tickets` by default).
+
+Guide: `docs/guides/tickets.md`
+
+#### setup
+
+Usage: `hack x tickets setup [--global] [--agents|--claude|--all] [--check|--remove] [--json]`
+
+#### create
+
+Usage: `hack x tickets create --title "..." [--body "..."] [--body-file <path>] [--body-stdin] [--actor "..."] [--json]`
+
+#### list
+
+Usage: `hack x tickets list [--json]`
+
+#### show
+
+Usage: `hack x tickets show <ticket-id> [--json]`
+
+#### status
+
+Usage: `hack x tickets status <ticket-id> <open|in_progress|blocked|done> [--actor "..."] [--json]`
+
+#### sync
+
+Usage: `hack x tickets sync [--json]`
 
 ## Gateway exposure (optional)
 

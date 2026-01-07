@@ -116,6 +116,8 @@ const ControlPlaneConfigSchema = z.object({
 })
 
 export type ControlPlaneConfig = z.infer<typeof ControlPlaneConfigSchema>
+export type TicketsGitConfig = z.infer<typeof TicketsGitConfigSchema>
+
 type ControlPlaneConfigInput = z.infer<typeof ControlPlaneConfigInputSchema>
 
 export type ControlPlaneConfigResult = {

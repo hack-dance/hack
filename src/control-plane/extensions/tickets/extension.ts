@@ -1,3 +1,5 @@
+import { TICKETS_COMMANDS } from "./commands.ts"
+
 import type { ExtensionDefinition } from "../types.ts"
 
 export const TICKETS_EXTENSION: ExtensionDefinition = {
@@ -8,5 +10,5 @@ export const TICKETS_EXTENSION: ExtensionDefinition = {
     cliNamespace: "tickets",
     summary: "Git-backed tickets and runs"
   },
-  commands: []
+  commands: TICKETS_COMMANDS
 }

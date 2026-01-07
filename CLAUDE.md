@@ -41,3 +41,18 @@ test("hello world", () => {
 TypeScript (strict). Runtimes: Bun 1.3+, Node 23. Prettier: 2 spaces, no semicolons, double quotes, width 100. Import order: @ianvs/prettier-plugin-sort-imports + Tailwind plugin. ESLint (flat): any disallowed; unused vars warned (prefix \_ to ignore). Naming: React components PascalCase; files kebab-case (e.g., user-profile.ts); packages @repo/<name>. Comments: avoid writing inline comments everywhere, unless absolutely necessary for a todo or an important thing to take note of. Instead write tsdoc style block level comments at the method/class/function/route level. Focus on comments that provide value in regards to better type inference and clarity of usage. Using things like params/returns/etc..
 
 Always default to useing named paramaters in functions eg myFunction({ ctx, other }) vs myFunction(ctx, other)
+
+<!-- hack:tickets:start -->
+## Tickets (git-backed)
+
+This project uses `hack` tickets (extension: `dance.hack.tickets`).
+
+Common commands:
+- Create: `hack x tickets create --title "..." --body-stdin` (pipe long context)
+- List: `hack x tickets list`
+- Show: `hack x tickets show T-00001`
+- Status: `hack x tickets status T-00001 in_progress`
+- Sync: `hack x tickets sync`
+
+Data lives in `.hack/tickets/` and syncs to branch `hack/tickets` by default.
+<!-- hack:tickets:end -->

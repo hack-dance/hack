@@ -226,16 +226,20 @@ function parseProject(value: unknown): RegisteredProject | null {
   }
 }
 
-function getRegistryPath(): string {
+function resolveGlobalRegistryRoot(): string {
+  const override = (process.env.HACK_GLOBAL_CONFIG_PATH ?? "").trim()
+  if (override.length > 0) return dirname(override)
   const home = process.env.HOME
   if (!home) throw new Error("HOME is not set")
-  return resolve(home, GLOBAL_HACK_DIR_NAME, GLOBAL_PROJECTS_REGISTRY_FILENAME)
+  return resolve(home, GLOBAL_HACK_DIR_NAME)
+}
+
+function getRegistryPath(): string {
+  return resolve(resolveGlobalRegistryRoot(), GLOBAL_PROJECTS_REGISTRY_FILENAME)
 }
 
 function getRegistryLockPath(): string {
-  const home = process.env.HOME
-  if (!home) throw new Error("HOME is not set")
-  return resolve(home, GLOBAL_HACK_DIR_NAME, REGISTRY_LOCK_FILENAME)
+  return resolve(resolveGlobalRegistryRoot(), REGISTRY_LOCK_FILENAME)
 }
 
 async function writeRegistryAtomic(path: string, registry: ProjectsRegistry): Promise<void> {

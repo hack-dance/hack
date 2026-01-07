@@ -1,8 +1,13 @@
-import { mkdir } from "node:fs/promises"
+import { mkdir, stat } from "node:fs/promises"
 
 export async function pathExists(absolutePath: string): Promise<boolean> {
   try {
-    await Bun.file(absolutePath).stat()
+    const file = Bun.file(absolutePath)
+    if (typeof file.stat === "function") {
+      await file.stat()
+      return true
+    }
+    await stat(absolutePath)
     return true
   } catch {
     return false

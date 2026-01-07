@@ -598,6 +598,7 @@ Subcommands:
 | `cursor` | Install Cursor rules for hack CLI usage |
 | `claude` | Install Claude Code hooks for hack CLI usage |
 | `codex` | Install Codex skill for hack CLI usage |
+| `tickets` | Install Codex skill for hack tickets usage |
 | `agents` | Install AGENTS.md / CLAUDE.md snippets |
 | `mcp` | Install MCP configs for hack CLI usage (no-shell only) |
 

@@ -346,7 +346,11 @@ export function renderProjectConfigSchemaJson(): string {
         additionalProperties: true,
         properties: {
           dns: { type: "boolean" },
-          tls: { type: "boolean" }
+          tls: { type: "boolean" },
+          extra_hosts: {
+            type: "object",
+            additionalProperties: { type: "string" }
+          }
         }
       },
       oauth: {

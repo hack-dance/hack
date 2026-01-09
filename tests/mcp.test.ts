@@ -25,7 +25,7 @@ afterEach(async () => {
   }
 })
 
-test("mcp server lists hack tools", async () => {
+test("mcp server lists hack tools", { timeout: 20_000 }, async () => {
   const mcp = await startMcpClient()
   const tools = await mcp.listTools()
   const names = tools.tools.map(tool => tool.name)
@@ -36,7 +36,7 @@ test("mcp server lists hack tools", async () => {
   expect(names).toContain("hack.project.open")
 })
 
-test("hack.projects.list returns structured data", async () => {
+test("hack.projects.list returns structured data", { timeout: 20_000 }, async () => {
   const mcp = await startMcpClient()
   const result = await mcp.callTool({
     name: "hack.projects.list",

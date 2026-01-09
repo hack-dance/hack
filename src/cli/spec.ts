@@ -29,6 +29,7 @@ import { agentCommand } from "../commands/agent.ts"
 import { tuiCommand } from "../commands/tui.ts"
 import { gatewayCommand } from "../commands/gateway.ts"
 import { remoteCommand } from "../commands/remote.ts"
+import { internalCommand } from "../commands/internal.ts"
 import { xCommand } from "../commands/x.ts"
 
 type PackageJsonType = {
@@ -68,6 +69,7 @@ export const CLI_SPEC = defineCli({
     agentCommand,
     gatewayCommand,
     remoteCommand,
+    internalCommand,
     xCommand,
     versionCommand,
     helpCommand

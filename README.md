@@ -117,6 +117,17 @@ If the agent cannot run shell commands, use MCP instead: `hack setup mcp` and `h
 *Optional `[internal]` settings (container DNS/TLS)*
 - `dns`: use CoreDNS to resolve `*.hack` inside containers (default: `true`)
 - `tls`: mount Caddy Local CA + set common SSL env vars (default: `true`)
+- `extra_hosts`: static Compose `extra_hosts` entries (hostname → IP/target), merged into the internal override
+
+If you need **dynamic** `extra_hosts` (e.g. Pulumi outputs / local tunnels that change), use:
+
+```bash
+hack internal extra-hosts set <hostname> <target>
+hack internal extra-hosts unset <hostname>
+hack internal extra-hosts list
+```
+
+This writes `.hack/.internal/extra-hosts.json` and is merged into `extra_hosts` when you run `hack up` / `hack restart`.
 
 *Optional `[oauth]` settings (OAuth-safe alias host)*
 - `enabled`: when true, `hack init` generates Caddy labels so routed services answer on both:
@@ -540,6 +551,10 @@ Caddy’s current IP so containers can use the same `https://*.hack` URLs as the
 Some runtimes don’t honor custom DNS for `*.hack` reliably, so `hack up` also injects `extra_hosts` mappings
 to the Caddy IP. If the Caddy IP changes, `hack status`, `hack doctor`, and the TUI show a warning; fix it
 with `hack restart` to refresh the mapping.
+
+If you also need `extra_hosts` for non-`*.hack` hostnames (common when you run host-local tunnels/proxies
+and want containers to reach them by their real domain), use `hack internal extra-hosts set` to write a
+repo-local `.hack/.internal/extra-hosts.json` that gets merged into the generated Compose override.
 
 When `internal.tls` is enabled, `hack up` mounts the Caddy Local CA into each container and sets common
 SSL env vars so HTTPS to `*.hack` is trusted inside containers.

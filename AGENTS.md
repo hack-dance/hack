@@ -44,14 +44,6 @@ Always default to useing named paramaters in functions eg myFunction({ ctx, othe
 Never use any types and always default to leveraging generics and smart types to sensure the best possible tpye inference across the project.
 
 
-## Landing the Plane (Session Completion)
-**When ending a work session**, you MUST complete ALL steps below.
-
-**MANDATORY WORKFLOW:**
-1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
-4. **Hand off** - Provide context for next session
 
 <!-- hack:tickets:start -->
 ## Tickets (git-backed)
@@ -67,3 +59,12 @@ Common commands:
 
 Data lives in `.hack/tickets/` and syncs to branch `hack/tickets` by default.
 <!-- hack:tickets:end -->
+
+## Landing the Plane (Session Completion)
+**When ending a work session**, you MUST complete ALL steps below.
+
+**MANDATORY WORKFLOW:**
+1. **File tickets for remaining work** - Create tickets for anything that needs follow-up
+2. **Run quality gates** (if code changed) - Tests, linters, builds
+3. **Update issue status** - Close finished work, update in-progress items
+4. **Hand off** - Provide context for next session

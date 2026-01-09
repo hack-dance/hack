@@ -54,7 +54,14 @@ test("Supervisor service cancels running jobs", async () => {
     command: [process.execPath, "-e", "setTimeout(() => {}, 5000)"]
   })
 
-  await sleep(50)
+  await waitForJobStatus({
+    service,
+    projectDir,
+    jobId: created.jobId,
+    status: "running",
+    timeoutMs: 2_000
+  })
+
   const cancel = await service.cancelJob({ projectDir, jobId: created.jobId })
   expect(cancel.ok).toBe(true)
 
@@ -65,6 +72,22 @@ test("Supervisor service cancels running jobs", async () => {
   expect(job?.status).toBe("cancelled")
 })
 
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms))
+async function sleep(ms: number): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, ms))
+}
+
+async function waitForJobStatus(opts: {
+  readonly service: ReturnType<typeof createSupervisorService>
+  readonly projectDir: string
+  readonly jobId: string
+  readonly status: "starting" | "running" | "completed" | "failed" | "cancelled"
+  readonly timeoutMs: number
+}): Promise<void> {
+  const deadline = Date.now() + opts.timeoutMs
+  while (Date.now() < deadline) {
+    const job = await opts.service.getJob({ projectDir: opts.projectDir, jobId: opts.jobId })
+    if (job?.status === opts.status) return
+    await sleep(25)
+  }
+  throw new Error(`Timed out waiting for job status: ${opts.status}`)
 }

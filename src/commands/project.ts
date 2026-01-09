@@ -545,6 +545,35 @@ function cleanupYaml(yaml: string): string {
   return yaml.replaceAll(/: \n/g, ":\n")
 }
 
+async function readInternalExtraHostsFile(opts: {
+  readonly projectDir: string
+}): Promise<Record<string, string>> {
+  const path = resolve(opts.projectDir, ".internal", "extra-hosts.json")
+  const text = await readTextFile(path)
+  if (!text) return {}
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return {}
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {}
+
+  const out: Record<string, string> = {}
+  for (const [keyRaw, valueRaw] of Object.entries(parsed as Record<string, unknown>)) {
+    const key = keyRaw.trim()
+    if (key.length === 0) continue
+    if (typeof valueRaw !== "string") continue
+    const value = valueRaw.trim()
+    if (value.length === 0) continue
+    out[key] = value
+  }
+
+  return out
+}
+
 function ensureTrailingNewline(text: string): string {
   return text.endsWith("\n") ? text : `${text}\n`
 }
@@ -576,7 +605,13 @@ async function resolveInternalComposeOverride(opts: {
   readonly aliasHost?: string | null
 }): Promise<string | null> {
   const internal = resolveInternalSettings(opts.cfg)
-  if (!internal.dns && !internal.tls) return null
+
+  const managedExtraHosts = await readInternalExtraHostsFile({ projectDir: opts.project.projectDir })
+  const hasAnyExtraHosts =
+    (internal.extraHosts && Object.keys(internal.extraHosts).length > 0) ||
+    Object.keys(managedExtraHosts).length > 0
+
+  if (!internal.dns && !internal.tls && !hasAnyExtraHosts) return null
 
   const services = await readComposeServiceNames(opts.project.composeFile)
   if (services.length === 0) return null
@@ -634,8 +669,13 @@ async function resolveInternalComposeOverride(opts: {
     if (dnsServer) {
       entry["dns"] = [dnsServer]
     }
-    if (caddyIp && caddyHosts.length > 0) {
-      entry["extra_hosts"] = buildExtraHostsMap({ hosts: caddyHosts, ip: caddyIp })
+    const extraHosts: Record<string, string> = {
+      ...(caddyIp && caddyHosts.length > 0 ? buildExtraHostsMap({ hosts: caddyHosts, ip: caddyIp }) : {}),
+      ...(internal.extraHosts ? internal.extraHosts : {}),
+      ...managedExtraHosts
+    }
+    if (Object.keys(extraHosts).length > 0) {
+      entry["extra_hosts"] = extraHosts
     }
     if (caPath) {
       entry["volumes"] = [`${caPath}:${INTERNAL_CA_CONTAINER_PATH}:ro`]
@@ -665,10 +705,12 @@ async function resolveInternalComposeOverride(opts: {
 function resolveInternalSettings(cfg: Awaited<ReturnType<typeof readProjectConfig>>): {
   readonly dns: boolean
   readonly tls: boolean
+  readonly extraHosts: Record<string, string> | null
 } {
   return {
     dns: cfg.internal?.dns ?? true,
-    tls: cfg.internal?.tls ?? true
+    tls: cfg.internal?.tls ?? true,
+    extraHosts: cfg.internal?.extraHosts ?? null
   }
 }
 

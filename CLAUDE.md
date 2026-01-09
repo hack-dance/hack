@@ -41,6 +41,9 @@ test("hello world", () => {
 TypeScript (strict). Runtimes: Bun 1.3+, Node 23. Prettier: 2 spaces, no semicolons, double quotes, width 100. Import order: @ianvs/prettier-plugin-sort-imports + Tailwind plugin. ESLint (flat): any disallowed; unused vars warned (prefix \_ to ignore). Naming: React components PascalCase; files kebab-case (e.g., user-profile.ts); packages @repo/<name>. Comments: avoid writing inline comments everywhere, unless absolutely necessary for a todo or an important thing to take note of. Instead write tsdoc style block level comments at the method/class/function/route level. Focus on comments that provide value in regards to better type inference and clarity of usage. Using things like params/returns/etc..
 
 Always default to useing named paramaters in functions eg myFunction({ ctx, other }) vs myFunction(ctx, other)
+Never use any types and always default to leveraging generics and smart types to sensure the best possible tpye inference across the project.
+
+
 
 <!-- hack:tickets:start -->
 ## Tickets (git-backed)
@@ -56,3 +59,12 @@ Common commands:
 
 Data lives in `.hack/tickets/` and syncs to branch `hack/tickets` by default.
 <!-- hack:tickets:end -->
+
+## Landing the Plane (Session Completion)
+**When ending a work session**, you MUST complete ALL steps below.
+
+**MANDATORY WORKFLOW:**
+1. **File tickets for remaining work** - Create tickets for anything that needs follow-up
+2. **Run quality gates** (if code changed) - Tests, linters, builds
+3. **Update issue status** - Close finished work, update in-progress items
+4. **Hand off** - Provide context for next session

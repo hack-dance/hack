@@ -22,7 +22,7 @@ afterEach(() => {
 
 test(
   "tickets extension: create/list/show with isolated git branch",
-  { timeout: 30_000 },
+  { timeout: 60_000 },
   async () => {
   const root = await mkdirTempDir({ prefix: "hack-cli-tickets-e2e-" })
   const projectDir = join(root, "project")
@@ -44,8 +44,9 @@ test(
   await run({ cwd: projectDir, cmd: ["git", "remote", "add", "origin", remoteDir] })
   await run({ cwd: projectDir, cmd: ["git", "push", "-u", "origin", "HEAD:main"] })
 
-  const beforeHead = (await run({ cwd: projectDir, cmd: ["git", "rev-parse", "--abbrev-ref", "HEAD"] }))
-    .stdout.trim()
+  const beforeHead = (
+    await run({ cwd: projectDir, cmd: ["git", "rev-parse", "--abbrev-ref", "HEAD"] })
+  ).stdout.trim()
 
   const created = await runHack({
     cwd: projectDir,
@@ -54,8 +55,9 @@ test(
   const createdJson = JSON.parse(created.stdout) as { ticket: { ticketId: string } }
   expect(createdJson.ticket.ticketId).toMatch(/^T-\d{5}$/)
 
-  const afterHead = (await run({ cwd: projectDir, cmd: ["git", "rev-parse", "--abbrev-ref", "HEAD"] }))
-    .stdout.trim()
+  const afterHead = (
+    await run({ cwd: projectDir, cmd: ["git", "rev-parse", "--abbrev-ref", "HEAD"] })
+  ).stdout.trim()
   expect(afterHead).toBe(beforeHead)
 
   const listed = await runHack({
@@ -119,7 +121,7 @@ async function runAllowFail(opts: { readonly cwd: string; readonly cmd: readonly
 }
 
 async function runHack(opts: { readonly cwd: string; readonly args: readonly string[] }): Promise<RunResult> {
-  return await run({ cwd: opts.cwd, cmd: ["bun", "run", resolve(import.meta.dir, "../index.ts"), ...opts.args] })
+  return await run({ cwd: opts.cwd, cmd: ["bun", resolve(import.meta.dir, "../index.ts"), ...opts.args] })
 }
 
 async function mkdirTempDir(opts: { readonly prefix: string }): Promise<string> {

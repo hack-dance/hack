@@ -76,7 +76,8 @@ graph LR
   - `hack.config.json` stores project name, dev host, log preferences, OAuth alias
   - `controlPlane.gateway.enabled` marks the project as gateway-capable
   - Optional overrides:
-    - `.internal/compose.override.yml` (internal DNS/TLS injection)
+    - `.internal/compose.override.yml` (generated internal DNS/TLS injection)
+    - `.internal/extra-hosts.json` (user-managed extra_hosts merged into the override)
     - `.branch/compose.<branch>.override.yml` (branch builds)
 
 
@@ -88,6 +89,7 @@ When `internal.dns` / `internal.tls` are enabled, `hack up` writes a Compose ove
 - mounts Caddy’s local CA cert into each service
 - sets common SSL env vars (Node, curl, git, requests)
 - injects `extra_hosts` mappings for `*.hack` → current Caddy IP (for runtimes that ignore custom DNS)
+- merges any repo-local `.hack/.internal/extra-hosts.json` entries (for host tunnels / dynamic domains)
 
 This lets containers use the same `https://*.hack` hostnames as the host machine. If Caddy’s IP changes,
 `hack status`, `hack doctor`, and the TUI will warn; `hack restart` refreshes the mapping.

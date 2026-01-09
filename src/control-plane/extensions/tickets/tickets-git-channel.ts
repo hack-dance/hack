@@ -1,4 +1,4 @@
-import { mkdir, readdir, rm } from "node:fs/promises"
+import { mkdir, readdir, rm, stat } from "node:fs/promises"
 import { dirname, resolve } from "node:path"
 
 import { isRecord } from "../../../lib/guards.ts"
@@ -65,23 +65,29 @@ export async function createGitTicketsChannel(opts: {
 
   const ensureBareRepo = async () => {
     try {
-      await Bun.file(resolve(bareDir, "HEAD")).stat()
-      return
+      const st = await stat(bareDir)
+      if (st.isDirectory()) return
     } catch {
       // missing, create
     }
 
     await mkdir(dirname(bareDir), { recursive: true })
-    const clone = await runGit({
+
+    // Important: do NOT `clone --bare` the project.
+    // This channel is intended to store *only* `.hack/tickets/**` on a dedicated branch.
+    // Cloning the full project makes the tickets repo enormous and causes commits/pushes
+    // to include unrelated workspace files.
+    const init = await runGit({
       cwd: opts.projectRoot,
-      args: ["clone", "--bare", opts.projectRoot, bareDir]
+      args: ["init", "--bare", bareDir]
     })
-    if (!clone.ok) {
-      throw new Error(`Failed to create bare clone: ${clone.stderr.trim() || clone.stdout.trim()}`)
+    if (!init.ok) {
+      throw new Error(`Failed to init bare repo: ${init.stderr.trim() || init.stdout.trim()}`)
     }
   }
 
   const ensureSparseCheckout = async (): Promise<void> => {
+    // Kept for backward compatibility if the repo ever gains extra paths.
     await mkdir(resolve(bareDir, "info"), { recursive: true })
     await Bun.write(resolve(bareDir, "info/sparse-checkout"), ".hack/tickets\n")
     await runGitDir({ args: ["config", "core.sparseCheckout", "true"] })
@@ -290,8 +296,10 @@ export async function createGitTicketsChannel(opts: {
 
     const commit = await runGitDir({ args: ["commit", "-m", message] })
     if (!commit.ok) {
-      const msg = commit.stderr.trim()
-      if (msg.includes("nothing to commit")) return { ok: true, didCommit: false }
+      const msg = `${commit.stderr}\n${commit.stdout}`.trim()
+      if (msg.includes("nothing to commit") || msg.includes("nothing added to commit")) {
+        return { ok: true, didCommit: false }
+      }
       return { ok: false, error: `git commit failed: ${msg}` }
     }
 

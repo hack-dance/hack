@@ -29,6 +29,7 @@ Run `hack help` or `hack help <command>` for interactive help.
 | `hack tui` | Open the project TUI (services + logs) | Project |
 | `hack branch` | Manage branch aliases for a project | Project |
 | `hack config` | Read/write hack.config.json values | Project |
+| `hack internal` | Manage hack-managed internal overrides | Internal |
 | `hack gateway` | Manage gateway enablement | Extensions |
 | `hack remote` | Remote workflow helpers | Extensions |
 | `hack x` | Run extension commands | Extensions |
@@ -450,6 +451,48 @@ Options:
 | `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
 | `--project <name>` | string | - | Target a registered project by name |
 | `--global` | boolean | false | Write global `~/.hack/hack.config.json` |
+
+## Internal commands
+
+### hack internal
+
+Usage: `hack internal <subcommand>`
+
+Subcommands:
+
+| Subcommand | Summary |
+| --- | --- |
+| `extra-hosts` | Manage internal Compose extra_hosts |
+
+#### hack internal extra-hosts
+
+Usage: `hack internal extra-hosts <subcommand> [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `-p`, `--path <path>` | string | - | Start directory (defaults to cwd) |
+
+Subcommands:
+
+| Subcommand | Summary |
+| --- | --- |
+| `set` | Set an internal extra_hosts entry |
+| `unset` | Remove an internal extra_hosts entry |
+| `list` | List internal extra_hosts entries |
+
+#### hack internal extra-hosts set
+
+Usage: `hack internal extra-hosts set <hostname> <target> [options]`
+
+#### hack internal extra-hosts unset
+
+Usage: `hack internal extra-hosts unset <hostname> [options]`
+
+#### hack internal extra-hosts list
+
+Usage: `hack internal extra-hosts list [options]`
 
 ## Extension commands
 

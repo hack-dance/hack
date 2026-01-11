@@ -84,15 +84,56 @@ const handleUsage: CommandHandlerFor<typeof spec> = async ({ args }): Promise<nu
     return 0
   }
 
-  const runtime = await readRuntimeProjects({
+  const runtimeResult = await readRuntimeProjects({
     includeGlobal: args.options.includeGlobal === true
   })
+  const runtime = runtimeResult.ok ? runtimeResult.runtime : []
   const filtered = filter ? runtime.filter(project => project.project === filter) : runtime
 
   const index = buildContainerIndex({ projects: filtered })
   const hostReport = includeHost ? await readHostUsage() : { rows: [], total: null }
   const stats =
-    index.containerIds.length === 0 ? { ok: true as const, samples: [] } : await readDockerStats({ containerIds: index.containerIds })
+    index.containerIds.length === 0
+      ? { ok: true as const, samples: [] }
+      : await readDockerStats({ containerIds: index.containerIds })
+  if (!runtimeResult.ok) {
+    if (args.options.json === true) {
+      process.stdout.write(
+        `${JSON.stringify(
+          {
+            projects: [],
+            total: null,
+            host: hostReport.rows,
+            host_total: hostReport.total,
+            runtime_ok: false,
+            runtime_error: runtimeResult.error
+          },
+          null,
+          2
+        )}\n`
+      )
+      return 1
+    }
+    await display.panel({
+      title: "Runtime unavailable",
+      tone: "error",
+      lines: [runtimeResult.error ?? "Docker runtime is not responding."]
+    })
+    if (hostReport.rows.length > 0) {
+      await display.table({
+        columns: ["Host", "CPU", "Memory", "PIDs", "Processes"],
+        rows: hostReport.rows.map(row => [
+          row.name,
+          formatPercent({ percent: row.cpuPercent }),
+          formatBytesMaybe({ bytes: row.memBytes }),
+          row.pids.length > 0 ? row.pids.join(",") : "n/a",
+          String(row.processes)
+        ])
+      })
+    }
+    return 1
+  }
+
   if (!stats.ok) {
     if (args.options.json === true) {
       process.stdout.write(
@@ -102,7 +143,9 @@ const handleUsage: CommandHandlerFor<typeof spec> = async ({ args }): Promise<nu
             total: null,
             host: hostReport.rows,
             host_total: hostReport.total,
-            error: stats.error
+            error: stats.error,
+            runtime_ok: runtimeResult.ok,
+            runtime_error: runtimeResult.error
           },
           null,
           2
@@ -135,7 +178,15 @@ const handleUsage: CommandHandlerFor<typeof spec> = async ({ args }): Promise<nu
     if (args.options.json === true) {
       process.stdout.write(
         `${JSON.stringify(
-          { projects: [], total: null, host: [], host_total: null, warning: "no_usage_samples" },
+          {
+            projects: [],
+            total: null,
+            host: [],
+            host_total: null,
+            warning: "no_usage_samples",
+            runtime_ok: runtimeResult.ok,
+            runtime_error: runtimeResult.error
+          },
           null,
           2
         )}\n`
@@ -157,7 +208,9 @@ const handleUsage: CommandHandlerFor<typeof spec> = async ({ args }): Promise<nu
           projects: report.projects,
           total: report.total,
           host: hostReport.rows,
-          host_total: hostReport.total
+          host_total: hostReport.total,
+          runtime_ok: runtimeResult.ok,
+          runtime_error: runtimeResult.error
         },
         null,
         2
@@ -342,13 +395,17 @@ async function resolveUsageSnapshot(opts: {
   readonly includeGlobal: boolean
   readonly includeHost: boolean
 }): Promise<UsageSnapshot> {
-  const runtime = await readRuntimeProjects({
+  const runtimeResult = await readRuntimeProjects({
     includeGlobal: opts.includeGlobal
   })
+  const runtime = runtimeResult.ok ? runtimeResult.runtime : []
   const filtered = opts.filter ? runtime.filter(project => project.project === opts.filter) : runtime
   const index = buildContainerIndex({ projects: filtered })
   const host = opts.includeHost ? await readHostUsage() : { rows: [], total: null }
   const errors: string[] = []
+  if (!runtimeResult.ok) {
+    errors.push(runtimeResult.error ?? "Docker runtime is not responding.")
+  }
 
   let report: UsageReport = { projects: [], total: null }
   if (index.containerIds.length > 0) {

@@ -28,12 +28,13 @@ export type ProjectView = {
   readonly runtime: RuntimeProject | null
   readonly branchRuntime: readonly BranchRuntime[]
   readonly kind: "registered" | "unregistered"
-  readonly status: "running" | "stopped" | "missing" | "unregistered"
+  readonly status: "running" | "stopped" | "missing" | "unregistered" | "unknown"
 }
 
 export async function buildProjectViews(opts: {
   readonly registryProjects: readonly RegisteredProject[]
   readonly runtime: readonly RuntimeProject[]
+  readonly runtimeOk: boolean
   readonly filter: string | null
   readonly includeUnregistered: boolean
 }): Promise<ProjectView[]> {
@@ -60,6 +61,7 @@ export async function buildProjectViews(opts: {
       const running = countRunningServices(runtime)
       const status: ProjectView["status"] =
         !projectDirOk ? "missing"
+        : !opts.runtimeOk ? "unknown"
         : running > 0 ? "running"
         : "stopped"
       const branchRuntime = collectBranchRuntime({

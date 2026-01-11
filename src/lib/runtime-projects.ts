@@ -36,6 +36,13 @@ export type RuntimeProject = {
   readonly isGlobal: boolean
 }
 
+export type RuntimeProjectsResult = {
+  readonly ok: boolean
+  readonly runtime: readonly RuntimeProject[]
+  readonly error: string | null
+  readonly checkedAtMs: number
+}
+
 export function countRunningServices(runtime: RuntimeProject | null): number {
   if (!runtime) return 0
   let count = 0
@@ -56,13 +63,23 @@ export function filterRuntimeProjects(opts: {
 
 export async function readRuntimeProjects(opts: {
   readonly includeGlobal: boolean
-}): Promise<readonly RuntimeProject[]> {
+}): Promise<RuntimeProjectsResult> {
+  const checkedAtMs = Date.now()
   const res = await exec(
     ["docker", "ps", "-a", "--filter", "label=com.docker.compose.project", "--format", "json"],
     { stdin: "ignore" }
   )
   if (res.exitCode !== 0) {
-    return []
+    return {
+      ok: false,
+      runtime: [],
+      error: formatDockerError({
+        exitCode: res.exitCode,
+        stdout: res.stdout,
+        stderr: res.stderr
+      }),
+      checkedAtMs
+    }
   }
 
   const baseRows = parseJsonLines(res.stdout)
@@ -128,7 +145,12 @@ export async function readRuntimeProjects(opts: {
     })
   }
 
-  return out.sort((a, b) => a.project.localeCompare(b.project))
+  return {
+    ok: true,
+    runtime: out.sort((a, b) => a.project.localeCompare(b.project)),
+    error: null,
+    checkedAtMs
+  }
 }
 
 export async function autoRegisterRuntimeHackProjects(opts: {
@@ -235,4 +257,16 @@ function parseLabelString(opts: { readonly raw: string }): Record<string, string
     out[key] = value
   }
   return out
+}
+
+function formatDockerError(opts: {
+  readonly exitCode: number
+  readonly stdout: string
+  readonly stderr: string
+}): string {
+  const stderr = opts.stderr.trim()
+  if (stderr.length > 0) return stderr
+  const stdout = opts.stdout.trim()
+  if (stdout.length > 0) return stdout
+  return `docker ps failed (exit ${opts.exitCode})`
 }

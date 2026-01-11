@@ -103,6 +103,7 @@ test("buildProjectViews includes defined services and runtime status", async () 
   const views = await buildProjectViews({
     registryProjects: [alpha],
     runtime,
+    runtimeOk: true,
     filter: null,
     includeUnregistered: true
   })
@@ -118,4 +119,18 @@ test("buildProjectViews includes defined services and runtime status", async () 
   const serialized = alphaView ? serializeProjectView(alphaView) : null
   expect(serialized?.["defined_services"]).toEqual(["api", "web"])
   expect(serialized?.["project_id"]).toBe("alpha-id")
+})
+
+test("buildProjectViews marks runtime status unknown when runtime is unavailable", async () => {
+  const alpha = await createProject({ name: "alpha", services: ["api"] })
+  const views = await buildProjectViews({
+    registryProjects: [alpha],
+    runtime: [],
+    runtimeOk: false,
+    filter: null,
+    includeUnregistered: false
+  })
+
+  const alphaView = views.find(view => view.name === "alpha")
+  expect(alphaView?.status).toBe("unknown")
 })

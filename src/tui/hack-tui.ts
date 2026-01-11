@@ -2505,7 +2505,9 @@ async function resolveRuntimeProject(opts: {
   readonly project: ProjectContext
   readonly projectName: string
 }): Promise<RuntimeProject | null> {
-  const runtime = await readRuntimeProjects({ includeGlobal: false })
+  const runtimeResult = await readRuntimeProjects({ includeGlobal: false })
+  if (!runtimeResult.ok) return null
+  const runtime = runtimeResult.runtime
   const byWorkingDir = runtime.find(
     item => item.workingDir && resolve(item.workingDir) === resolve(opts.project.projectDir)
   )

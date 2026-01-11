@@ -246,6 +246,12 @@ Response:
 | `last_event_at` | string or null | Last docker event timestamp |
 | `events_seen` | number | Docker events seen |
 | `streams_active` | number | Active WS streams |
+| `runtime_ok` | boolean | Docker runtime availability |
+| `runtime_error` | string or null | Runtime error details (when unavailable) |
+| `runtime_checked_at` | string or null | Last runtime check timestamp |
+| `runtime_last_ok_at` | string or null | Last successful runtime check |
+| `runtime_reset_at` | string or null | Last detected runtime reset |
+| `runtime_reset_count` | number | Runtime reset counter |
 
 ### GET /v1/projects
 
@@ -272,6 +278,12 @@ Response:
 | `filter` | string or null | Applied filter |
 | `include_global` | boolean | Include global infra entries |
 | `include_unregistered` | boolean | Always `false` over the gateway |
+| `runtime_ok` | boolean | Docker runtime availability |
+| `runtime_error` | string or null | Runtime error details (when unavailable) |
+| `runtime_checked_at` | string or null | Last runtime check timestamp |
+| `runtime_last_ok_at` | string or null | Last successful runtime check |
+| `runtime_reset_at` | string or null | Last detected runtime reset |
+| `runtime_reset_count` | number | Runtime reset counter |
 | `projects` | ProjectView[] | Gateway-enabled projects only |
 
 ### GET /v1/ps
@@ -293,6 +305,12 @@ Response:
 | `project` | string | Display project name |
 | `branch` | string or null | Branch name |
 | `composeProject` | string | Compose project id |
+| `runtime_ok` | boolean | Docker runtime availability |
+| `runtime_error` | string or null | Runtime error details (when unavailable) |
+| `runtime_checked_at` | string or null | Last runtime check timestamp |
+| `runtime_last_ok_at` | string or null | Last successful runtime check |
+| `runtime_reset_at` | string or null | Last detected runtime reset |
+| `runtime_reset_count` | number | Runtime reset counter |
 | `items` | PsItem[] | `docker compose ps` style rows |
 
 ### POST /control-plane/projects/:projectId/jobs
@@ -490,7 +508,7 @@ Non-JSON text frames are treated as raw input.
 | `runtime` | RuntimeProject or null | Runtime snapshot |
 | `branch_runtime` | array | Branch entries `{ branch, runtime }` |
 | `kind` | string | `registered` or `unregistered` |
-| `status` | string | `running`, `stopped`, `missing`, `unregistered` |
+| `status` | string | `running`, `stopped`, `missing`, `unregistered`, `unknown` |
 
 ### RuntimeProject
 

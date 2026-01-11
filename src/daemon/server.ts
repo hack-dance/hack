@@ -9,6 +9,7 @@ import { createDaemonLogger } from "./logger.ts"
 import { removeFileIfExists, writeDaemonPid } from "./process.ts"
 import { startDockerEventWatcher } from "./docker-events.ts"
 import { createRuntimeCache } from "./runtime-cache.ts"
+import type { RuntimeHealth } from "./runtime-cache.ts"
 import { loadExtensionManagerForDaemon } from "../control-plane/extensions/daemon.ts"
 import { createSupervisorService } from "../control-plane/extensions/supervisor/service.ts"
 import { createJobStore } from "../control-plane/extensions/supervisor/job-store.ts"
@@ -73,8 +74,11 @@ export async function runDaemon({
 
   const cache = createRuntimeCache({
     onRefresh: snapshot => {
-      metrics.lastRefreshAtMs = snapshot.updatedAtMs
+      metrics.lastRefreshAtMs = snapshot.health.checkedAtMs ?? snapshot.updatedAtMs
       metrics.refreshCount += 1
+      if (!snapshot.health.ok) {
+        metrics.refreshFailures += 1
+      }
     }
   })
 
@@ -105,8 +109,16 @@ export async function runDaemon({
       scheduleRefresh({ reason: "event" })
     },
     onError: message => logger.warn({ message: `docker events: ${message}` }),
-    onExit: exitCode => logger.warn({ message: `docker events exited (${exitCode})` })
+    onExit: exitCode => {
+      logger.warn({ message: `docker events exited (${exitCode})` })
+      scheduleRefresh({ reason: "events-exit" })
+    }
   })
+
+  const refreshIntervalMs = 30_000
+  setInterval(() => {
+    void cache.refresh({ reason: "interval" })
+  }, refreshIntervalMs)
 
   const requestContext = {
     metrics,
@@ -340,6 +352,9 @@ async function handleRequest({
   if (url.pathname === "/v1/metrics") {
     const snapshot = cache.getSnapshot()
     const cacheUpdatedAtMs = snapshot?.updatedAtMs ?? null
+    const runtimeHealth = formatRuntimeHealth({
+      health: snapshot?.health ?? null
+    })
     return jsonResponse({
       status: "ok",
       started_at: new Date(metrics.startedAtMs).toISOString(),
@@ -353,7 +368,13 @@ async function handleRequest({
       refresh_failures: metrics.refreshFailures,
       last_event_at: metrics.lastEventAtMs ? new Date(metrics.lastEventAtMs).toISOString() : null,
       events_seen: metrics.eventsSeen,
-      streams_active: metrics.streamsActive
+      streams_active: metrics.streamsActive,
+      runtime_ok: runtimeHealth.ok,
+      runtime_error: runtimeHealth.error,
+      runtime_checked_at: runtimeHealth.checkedAt,
+      runtime_last_ok_at: runtimeHealth.lastOkAt,
+      runtime_reset_at: runtimeHealth.lastResetAt,
+      runtime_reset_count: runtimeHealth.resetCount
     })
   }
 
@@ -1136,6 +1157,41 @@ function jsonResponse(body: Record<string, unknown>, status = 200): Response {
       "content-length": `${Buffer.byteLength(payload)}`
     }
   })
+}
+
+function formatRuntimeHealth(opts: {
+  readonly health: RuntimeHealth | null
+}): {
+  readonly ok: boolean
+  readonly error: string | null
+  readonly checkedAt: string | null
+  readonly lastOkAt: string | null
+  readonly lastResetAt: string | null
+  readonly resetCount: number
+} {
+  if (!opts.health) {
+    return {
+      ok: false,
+      error: "runtime_not_checked",
+      checkedAt: null,
+      lastOkAt: null,
+      lastResetAt: null,
+      resetCount: 0
+    }
+  }
+  return {
+    ok: opts.health.ok,
+    error: opts.health.error,
+    checkedAt: toIso({ ms: opts.health.checkedAtMs }),
+    lastOkAt: toIso({ ms: opts.health.lastOkAtMs }),
+    lastResetAt: toIso({ ms: opts.health.lastResetAtMs }),
+    resetCount: opts.health.resetCount
+  }
+}
+
+function toIso(opts: { readonly ms: number | null }): string | null {
+  if (typeof opts.ms !== "number") return null
+  return new Date(opts.ms).toISOString()
 }
 
 function parseBoolean(opts: { readonly value: string | null }): boolean {

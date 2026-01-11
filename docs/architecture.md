@@ -164,6 +164,12 @@ containers. It serves a small local API over a Unix socket at `~/.hack/daemon/ha
 
 If the daemon is not running (or version-mismatched), the CLI falls back to direct Docker calls.
 
+Runtime health:
+- The daemon treats the container runtime as ephemeral; it fingerprints the engine (socket + engine id)
+  and detects resets.
+- When the runtime is unavailable, cached state is retained but marked stale; API responses include
+  `runtime_*` metadata and project `status` becomes `unknown`.
+
 Why optional:
 - The CLI must keep working with zero background processes.
 - Not all users need cached JSON (especially if they only use interactive commands).

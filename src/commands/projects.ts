@@ -99,8 +99,16 @@ const handlePrune: CommandHandlerFor<typeof pruneSpec> = async ({ args }): Promi
   const includeGlobal = args.options.includeGlobal === true
   const registry = await readProjectsRegistry()
   const missing = await findMissingRegistryEntries(registry.projects)
-  const runtime = await readRuntimeProjects({ includeGlobal })
-  const orphaned = await findOrphanRuntimeProjects(runtime)
+  const runtimeResult = await readRuntimeProjects({ includeGlobal })
+  if (!runtimeResult.ok) {
+    await display.panel({
+      title: "Runtime unavailable",
+      tone: "error",
+      lines: [runtimeResult.error ?? "Docker runtime is not responding."]
+    })
+    return 1
+  }
+  const orphaned = await findOrphanRuntimeProjects(runtimeResult.runtime)
   const orphanedContainerCount = orphaned.reduce(
     (sum, entry) => sum + entry.containerIds.length,
     0
@@ -215,25 +223,43 @@ async function runProjects(opts: {
     includeGlobal: opts.includeGlobal
   })
 
-  await autoRegisterRuntimeHackProjects({ runtime })
+  if (runtime.ok) {
+    await autoRegisterRuntimeHackProjects({ runtime: runtime.runtime })
+  }
   const registry = await readProjectsRegistry()
 
   const views = await buildProjectViews({
     registryProjects: registry.projects,
-    runtime,
+    runtime: runtime.runtime,
+    runtimeOk: runtime.ok,
     filter: opts.filter,
     includeUnregistered: opts.includeUnregistered
   })
   if (opts.json) {
+    const runtimeMeta = formatRuntimeMeta({ runtime })
     const payload = {
       generated_at: new Date().toISOString(),
       filter: opts.filter,
       include_global: opts.includeGlobal,
       include_unregistered: opts.includeUnregistered,
+      runtime_ok: runtimeMeta.ok,
+      runtime_error: runtimeMeta.error,
+      runtime_checked_at: runtimeMeta.checkedAt,
+      runtime_last_ok_at: runtimeMeta.lastOkAt,
+      runtime_reset_at: runtimeMeta.lastResetAt,
+      runtime_reset_count: runtimeMeta.resetCount,
       projects: views.map(serializeProjectView)
     }
     process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`)
     return 0
+  }
+
+  if (!runtime.ok) {
+    await display.panel({
+      title: "Runtime unavailable",
+      tone: "warn",
+      lines: [runtime.error ?? "Docker runtime is not responding."]
+    })
   }
 
   if (views.length === 0) {
@@ -250,9 +276,12 @@ async function runProjects(opts: {
     columns: ["Name", "Status", "Services", "Dev Host", "Repo Root"],
     rows: views.map(p => {
       const definedCount = p.definedServices ? p.definedServices.length : null
-      const runningCount = countRunningServices(p.runtime)
+      const runningCount = runtime.ok ? countRunningServices(p.runtime) : null
       const servicesCell =
-        definedCount === null ? `${runningCount}/—` : `${runningCount}/${definedCount}`
+        definedCount === null ?
+          runtime.ok && runningCount !== null ? `${runningCount}/—` : "—/—"
+        : runtime.ok && runningCount !== null ? `${runningCount}/${definedCount}`
+        : `—/${definedCount}`
       return [p.name, p.status, servicesCell, p.devHost ?? "", p.repoRoot ?? ""]
     })
   })
@@ -260,7 +289,7 @@ async function runProjects(opts: {
   if (opts.details) {
     const caddyIp = await resolveGlobalCaddyIp()
     for (const p of views) {
-      await renderProjectDetails({ project: p, caddyIp })
+      await renderProjectDetails({ project: p, caddyIp, runtimeOk: runtime.ok })
     }
   }
 
@@ -270,6 +299,7 @@ async function runProjects(opts: {
 async function renderProjectDetails(opts: {
   readonly project: ProjectView
   readonly caddyIp: string | null
+  readonly runtimeOk: boolean
 }): Promise<void> {
   const p = opts.project
   await display.section(p.name)
@@ -288,7 +318,8 @@ async function renderProjectDetails(opts: {
   await display.kv({ entries: meta })
 
   const defined = new Set(p.definedServices ?? [])
-  const runtimeServices = p.runtime?.services ?? new Map<string, RuntimeService>()
+  const runtimeServices =
+    opts.runtimeOk ? p.runtime?.services ?? new Map<string, RuntimeService>() : new Map()
   const all = new Set<string>([...defined, ...runtimeServices.keys()])
   const names = [...all].sort((a, b) => a.localeCompare(b))
 
@@ -297,10 +328,12 @@ async function renderProjectDetails(opts: {
     const containers = runtime?.containers ?? []
     const running = containers.filter(c => c.state === "running").length
     const total = containers.length
-    const state = summarizeServiceState({ running, total })
+    const state = opts.runtimeOk ? summarizeServiceState({ running, total }) : "unknown"
     const definedCell = defined.has(svc) ? "yes" : ""
-    const statusCell = containers[0]?.status ?? state
-    return [svc, definedCell, `${running}/${total}`, state, statusCell] as const
+    const statusCell =
+      opts.runtimeOk ? containers[0]?.status ?? state : "runtime unavailable"
+    const runningCell = opts.runtimeOk ? `${running}/${total}` : "—"
+    return [svc, definedCell, runningCell, state, statusCell] as const
   })
 
   await display.table({
@@ -308,7 +341,7 @@ async function renderProjectDetails(opts: {
     rows
   })
 
-  if (p.branchRuntime.length > 0) {
+  if (opts.runtimeOk && p.branchRuntime.length > 0) {
     const branchRows = p.branchRuntime
       .slice()
       .sort((a, b) => a.branch.localeCompare(b.branch))
@@ -349,6 +382,27 @@ function summarizeServiceState(opts: { readonly running: number; readonly total:
   if (opts.running === opts.total) return "running"
   if (opts.running === 0) return "stopped"
   return "mixed"
+}
+
+function formatRuntimeMeta(opts: {
+  readonly runtime: Awaited<ReturnType<typeof readRuntimeProjects>>
+}): {
+  readonly ok: boolean
+  readonly error: string | null
+  readonly checkedAt: string | null
+  readonly lastOkAt: string | null
+  readonly lastResetAt: string | null
+  readonly resetCount: number
+} {
+  const checkedAt = new Date(opts.runtime.checkedAtMs).toISOString()
+  return {
+    ok: opts.runtime.ok,
+    error: opts.runtime.error,
+    checkedAt,
+    lastOkAt: opts.runtime.ok ? checkedAt : null,
+    lastResetAt: null,
+    resetCount: 0
+  }
 }
 
 function sanitizeName(value: string): string {

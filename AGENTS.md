@@ -67,7 +67,7 @@ Recommended body template (Markdown):
 
 Tip: use `--body-stdin` for multi-line markdown.
 
-Data lives in `.hack/tickets/` (gitignored on the main branch) and syncs to branch `hack/tickets` by default.
+Data lives in `.hack/tickets/` (gitignored on the main branch) and syncs to hidden ref `refs/hack/tickets` by default.
 <!-- hack:tickets:end -->
 
 ## Landing the Plane (Session Completion)

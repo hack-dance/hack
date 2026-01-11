@@ -19,18 +19,22 @@ const ExtensionEnablementSchema = z.object({
   config: z.record(z.string(), z.unknown()).default({})
 })
 
+const TicketsGitRefModeSchema = z.enum(["heads", "hidden"])
+
 const TicketsGitConfigInputSchema = z.object({
   enabled: z.boolean().optional(),
   branch: z.string().optional(),
   remote: z.string().optional(),
-  forceBareClone: z.boolean().optional()
+  forceBareClone: z.boolean().optional(),
+  refMode: TicketsGitRefModeSchema.optional()
 })
 
 const TicketsGitConfigSchema = z.object({
   enabled: z.boolean().default(true),
   branch: z.string().default("hack/tickets"),
   remote: z.string().default("origin"),
-  forceBareClone: z.boolean().default(false)
+  forceBareClone: z.boolean().default(false),
+  refMode: TicketsGitRefModeSchema.default("hidden")
 })
 
 const SupervisorConfigInputSchema = z.object({
@@ -117,6 +121,7 @@ const ControlPlaneConfigSchema = z.object({
 
 export type ControlPlaneConfig = z.infer<typeof ControlPlaneConfigSchema>
 export type TicketsGitConfig = z.infer<typeof TicketsGitConfigSchema>
+export type TicketsGitRefMode = z.infer<typeof TicketsGitRefModeSchema>
 
 type ControlPlaneConfigInput = z.infer<typeof ControlPlaneConfigInputSchema>
 

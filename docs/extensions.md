@@ -347,7 +347,7 @@ Notes:
 
 ### Tickets extension (`hack x tickets`)
 
-A lightweight, git-backed ticket log stored in `.hack/tickets/` and syncable via a dedicated branch (`hack/tickets` by default).
+A lightweight, git-backed ticket log stored in `.hack/tickets/` and syncable via a dedicated git ref (`refs/hack/tickets` hidden by default).
 
 Guide: `docs/guides/tickets.md`
 

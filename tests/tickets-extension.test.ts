@@ -23,7 +23,7 @@ afterEach(() => {
 })
 
 testIntegration(
-  "tickets extension: create/list/show with isolated git branch",
+  "tickets extension: create/list/show with isolated git ref",
   { timeout: 60_000 },
   async () => {
     const root = await mkdirTempDir({ prefix: "hack-cli-tickets-e2e-" })
@@ -83,7 +83,7 @@ testIntegration(
 
     const showRef = await runAllowFail({
       cwd: root,
-      cmd: ["git", `--git-dir=${remoteDir}`, "show-ref", "--verify", `refs/heads/hack/tickets`]
+      cmd: ["git", `--git-dir=${remoteDir}`, "show-ref", "--verify", `refs/hack/tickets`]
     })
     expect(showRef.exitCode).toBe(0)
 

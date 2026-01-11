@@ -141,7 +141,7 @@ export function renderTicketsAgentDocsSnippet(): string {
     "",
     "Tip: use `--body-stdin` for multi-line markdown.",
     "",
-    "Data lives in `.hack/tickets/` (gitignored on the main branch) and syncs to branch `hack/tickets` by default.",
+    "Data lives in `.hack/tickets/` (gitignored on the main branch) and syncs to hidden ref `refs/hack/tickets` by default.",
     DOC_MARKER_END,
     ""
   ]

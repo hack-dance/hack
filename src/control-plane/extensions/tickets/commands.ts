@@ -5,6 +5,7 @@ import { runTicketsTui } from "../../../tui/tickets-tui.ts"
 
 import { createTicketsStore } from "./store.ts"
 import { checkTicketsAgentDocs, removeTicketsAgentDocs, upsertTicketsAgentDocs } from "./agent-docs.ts"
+import { createGitTicketsChannel } from "./tickets-git-channel.ts"
 import {
   checkTicketsRepoState,
   ensureTicketsGitignore,
@@ -18,6 +19,8 @@ import { checkTicketsSkill, installTicketsSkill, removeTicketsSkill } from "./ti
 import { normalizeTicketRef, normalizeTicketRefs } from "./util.ts"
 
 import type { ExtensionCommand, ExtensionCommandContext } from "../types.ts"
+
+let didPromptTicketsGitHealth = false
 
 export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
   {
@@ -134,6 +137,10 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
           }`
         ]
       })
+
+      if (action === "install") {
+        await maybeEnsureTicketsGitHealth({ ctx, json: parsed.value.json })
+      }
 
       return docs.some(r => r.status === "error") || skill.status === "error" ? 1 : 0
     }
@@ -947,6 +954,101 @@ async function maybeEnsureTicketsSetup(opts: {
       lines
     })
   }
+
+  await maybeEnsureTicketsGitHealth({ ctx: opts.ctx, json: opts.json })
+}
+
+async function maybeEnsureTicketsGitHealth(opts: {
+  readonly ctx: ExtensionCommandContext
+  readonly json: boolean
+}): Promise<void> {
+  if (!opts.ctx.project) return
+  if (opts.json) return
+  if (didPromptTicketsGitHealth) return
+  didPromptTicketsGitHealth = true
+
+  const gitConfig = opts.ctx.controlPlaneConfig.tickets.git
+  if (!gitConfig.enabled) return
+
+  const projectRoot = opts.ctx.project.projectRoot
+  const channel = await createGitTicketsChannel({
+    projectRoot,
+    config: gitConfig,
+    logger: opts.ctx.logger
+  })
+
+  const inspected = await channel.inspect()
+  if (!inspected.ok) {
+    opts.ctx.logger.warn({ message: `Tickets git health check failed: ${inspected.error}` })
+    return
+  }
+
+  const health = inspected.health
+  if (!health.hasLegacyRef && !health.hasNonTicketFiles) return
+
+  const reasons: string[] = []
+  if (health.hasLegacyRef && health.legacyRef) {
+    reasons.push(`legacy ref ${health.legacyRef}`)
+  }
+  if (health.hasNonTicketFiles) {
+    reasons.push("non-ticket files in tickets ref")
+  }
+
+  if (!isTty() || !isGumAvailable()) {
+    opts.ctx.logger.warn({
+      message: `Tickets git storage needs repair (${reasons.join("; ")}). Run: hack x tickets setup`
+    })
+    return
+  }
+
+  const confirmed = await gumConfirm({
+    prompt: "Tickets git storage needs repair. Fix now?",
+    default: true
+  })
+  if (!confirmed.ok || !confirmed.value) return
+
+  let pruneLegacyRef = false
+  if (health.hasLegacyRef && health.legacyRef) {
+    const prune = await gumConfirm({
+      prompt: `Remove legacy ref ${health.legacyRef} from the remote?`,
+      default: true
+    })
+    pruneLegacyRef = prune.ok && prune.value
+  }
+
+  const repaired = await channel.repair({ pruneLegacyRef })
+  if (!repaired.ok) {
+    await display.panel({
+      title: "Tickets repair",
+      tone: "warning",
+      lines: [`error: ${repaired.error}`]
+    })
+    return
+  }
+
+  const lines: string[] = []
+  if (health.hasNonTicketFiles) {
+    const sample = health.nonTicketPaths.slice(0, 5)
+    const extra = health.nonTicketPaths.length - sample.length
+    lines.push(`non-ticket files: ${health.nonTicketPaths.length}`)
+    if (sample.length > 0) {
+      lines.push(`sample: ${sample.join(", ")}${extra > 0 ? ` (+${extra} more)` : ""}`)
+    }
+  }
+  if (health.hasLegacyRef && health.legacyRef) {
+    lines.push(`legacy ref: ${health.legacyRef} ${pruneLegacyRef ? "pruned" : "left intact"}`)
+  }
+  lines.push(`commit: ${repaired.didCommit ? "created" : "noop"}`)
+  lines.push(`push: ${repaired.didPush ? "pushed" : "skipped"}`)
+  if (repaired.pruneError) {
+    lines.push(`legacy prune error: ${repaired.pruneError}`)
+  }
+
+  await display.panel({
+    title: "Tickets repair",
+    tone: repaired.pruneError ? "warning" : "success",
+    lines
+  })
 }
 
 function parseTicketsSetupArgs(opts: { readonly args: readonly string[] }): TicketsSetupParseResult {

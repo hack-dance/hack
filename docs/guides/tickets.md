@@ -1,12 +1,12 @@
 # Tickets (git-backed)
 
 The tickets extension is a lightweight, git-backed ticket log intended for small teams and solo dev.
-It stores events in a dedicated branch (`hack/tickets` by default) so ticket history is versioned and
-syncable without requiring an external service.
+It stores events in a dedicated git ref (`refs/hack/tickets` by default, hidden from branch lists) so
+ticket history is versioned and syncable without requiring an external service.
 
 - CLI namespace: `tickets`
 - Extension id: `dance.hack.tickets`
-- Storage: `.hack/tickets/` (local working state) + a git branch for syncing
+- Storage: `.hack/tickets/` (local working state) + a git ref for syncing
 
 ## Enable
 
@@ -47,6 +47,7 @@ Options:
 Notes:
 - Most tickets commands prompt to run setup if `.hack/tickets/` is tracked, missing from `.gitignore`,
   or if agent docs/skills are missing (TTY + gum only).
+- Setup also prompts to repair legacy tickets branches or stray files in the tickets ref.
 - In non-interactive or `--json` modes, the CLI prints a warning instead of prompting.
 
 ## Basic usage
@@ -105,7 +106,7 @@ hack x tickets update T-00001 --depends-on T-00002 --blocks T-00003
 hack x tickets update T-00001 --clear-depends-on --clear-blocks
 ```
 
-Sync to git remote (normalizes logs and pushes the tickets branch when a remote exists):
+Sync to git remote (normalizes logs and pushes the tickets ref when a remote exists):
 
 ```bash
 hack x tickets sync
@@ -126,15 +127,15 @@ Tip: use `--body-stdin` for multi-line markdown.
 
 - Ticket history is an append-only event log (`ticket.created`, etc.) stored as monthly JSONL files.
 - The extension reads events, materializes tickets in-memory, and renders `list/show` outputs.
-- Ticket writes automatically commit and push to the tickets branch when git sync is enabled and a remote exists.
-- `sync` normalizes the event logs, commits, and pushes the tickets branch.
+- Ticket writes automatically commit and push to the tickets ref when git sync is enabled and a remote exists.
+- `sync` normalizes the event logs, commits, and pushes the tickets ref.
 
 ### Storage layout
 
 In your project repo:
 
 - `.hack/tickets/events/events-YYYY-MM.jsonl` — event log segments (UTC month)
-- `.hack/tickets/git/bare.git` — a bare clone used to manage the tickets branch
+- `.hack/tickets/git/bare.git` — a bare repo used to manage the tickets ref
 - `.hack/tickets/git/worktree` — a worktree used for reading/writing ticket data
 
 ## Configuration
@@ -146,13 +147,19 @@ Defaults:
 - `branch: "hack/tickets"`
 - `remote: "origin"`
 - `forceBareClone: false`
+- `refMode: "hidden"`
 
 Example override:
 
 ```bash
 hack config set --global 'controlPlane.tickets.git.branch' 'hack/tickets'
 hack config set --global 'controlPlane.tickets.git.remote' 'origin'
+hack config set --global 'controlPlane.tickets.git.refMode' 'hidden'
 ```
+
+Notes:
+- If your remote rejects hidden refs, set `refMode` to `heads` to use `refs/heads/<branch>` and
+  protect the branch in your git hosting UI.
 
 ## When to use this
 

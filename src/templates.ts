@@ -391,7 +391,8 @@ export function renderProjectConfigSchemaJson(): string {
                   enabled: { type: "boolean" },
                   branch: { type: "string" },
                   remote: { type: "string" },
-                  forceBareClone: { type: "boolean" }
+                  forceBareClone: { type: "boolean" },
+                  refMode: { type: "string" }
                 }
               }
             }

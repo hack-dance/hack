@@ -59,3 +59,10 @@ talk to hackd directly yet.
 
 The logs view is a stub placeholder for now. It can be wired to `hack logs` or
 daemon streaming later.
+
+## Project ownership (what to edit)
+
+- `project.yml`: target structure + dependencies. Regenerate Xcode project from this.
+- `Config/Base.xcconfig`: versions, bundle id, product name, deployment target.
+- `App/Info.plist`: Info.plist keys only (kept in repo as source of truth).
+- Generated `.xcodeproj`: never edit manually.

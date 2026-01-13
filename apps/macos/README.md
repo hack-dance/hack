@@ -47,8 +47,9 @@ swift test
 Open `HackDesktop.xcodeproj` in Xcode and run the app. The app uses the `hack` CLI
 (via your PATH) to fetch status and run actions.
 
-If `hack` is not in PATH for GUI apps, ensure it lives in `/opt/homebrew/bin` or
-`/usr/local/bin` (both are added to PATH by the app).
+If `hack` is not in PATH for GUI apps, ensure it lives in `~/.hack/bin`,
+`/opt/homebrew/bin`, or `/usr/local/bin` (all are added to PATH by the app). You
+can also set `HACK_CLI_PATH` to an absolute path for the binary.
 
 ## Data source
 

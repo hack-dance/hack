@@ -77,9 +77,16 @@ public actor HackCLIClient {
     allowNonZeroExit: Bool = false
   ) async throws -> CLIResult {
     let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-    process.arguments = ["hack"] + args
-    process.environment = buildEnvironment()
+    let environment = buildEnvironment()
+    process.environment = environment
+
+    if let hackPath = resolveHackExecutable(in: environment) {
+      process.executableURL = URL(fileURLWithPath: hackPath)
+      process.arguments = args
+    } else {
+      process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+      process.arguments = ["hack"] + args
+    }
 
     let stdoutPipe = Pipe()
     let stderrPipe = Pipe()
@@ -130,6 +137,15 @@ public actor HackCLIClient {
 
   private func buildEnvironment() -> [String: String] {
     var env = ProcessInfo.processInfo.environment
+    let home = (env["HOME"] ?? NSHomeDirectory()).trimmingCharacters(in: .whitespacesAndNewlines)
+    let homeBinPaths = home.isEmpty
+      ? []
+      : [
+          "\(home)/.hack/bin",
+          "\(home)/.local/bin",
+          "\(home)/.bun/bin",
+          "\(home)/.cargo/bin"
+        ]
     let defaultPaths = [
       "/opt/homebrew/bin",
       "/usr/local/bin",
@@ -139,9 +155,27 @@ public actor HackCLIClient {
       "/sbin"
     ]
     let existing = env["PATH"]?.split(separator: ":").map(String.init) ?? []
-    let merged = existing + defaultPaths.filter { !existing.contains($0) }
+    let merged = existing
+      + homeBinPaths.filter { !existing.contains($0) }
+      + defaultPaths.filter { !existing.contains($0) }
     env["PATH"] = merged.joined(separator: ":")
     return env
+  }
+
+  private func resolveHackExecutable(in env: [String: String]) -> String? {
+    let fileManager = FileManager.default
+    if let override = env["HACK_CLI_PATH"], fileManager.isExecutableFile(atPath: override) {
+      return override
+    }
+
+    guard let pathValue = env["PATH"] else { return nil }
+    for entry in pathValue.split(separator: ":") {
+      let candidate = String(entry) + "/hack"
+      if fileManager.isExecutableFile(atPath: candidate) {
+        return candidate
+      }
+    }
+    return nil
   }
 }
 

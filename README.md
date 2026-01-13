@@ -104,6 +104,9 @@ If anything fails, use `hack logs --pretty` and summarize next steps.
 
 If the agent cannot run shell commands, use MCP instead: `hack setup mcp` and `hack mcp serve`.
 
+### macOS app (experimental)
+Source lives in `apps/macos`. See `apps/macos/README.md` for XcodeGen and build/run steps.
+
 ### Configuration (.hack/hack.config.json)
 - `name`: project slug (also used for Docker Compose project name)
 - `dev_host`: base hostname (`<dev_host>.hack`)

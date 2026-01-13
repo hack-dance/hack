@@ -1,0 +1,22 @@
+name: HackDesktop
+options:
+  bundleIdPrefix: dance.hack
+  deploymentTarget:
+    macOS: "14.0"
+packages:
+  HackDesktop:
+    path: .
+targets:
+  HackDesktop:
+    type: application
+    platform: macOS
+    sources:
+      - App
+    configFiles:
+      Debug: Config/Debug.xcconfig
+      Release: Config/Release.xcconfig
+    dependencies:
+      - package: HackDesktop
+        product: DashboardFeature
+    info:
+      path: App/Info.plist

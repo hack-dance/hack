@@ -4,6 +4,20 @@ import Observation
 import HackCLIService
 import HackDesktopModels
 
+public enum SidebarItem: Hashable, Identifiable {
+  case hackd
+  case project(String)
+
+  public var id: String {
+    switch self {
+    case .hackd:
+      return "hackd"
+    case let .project(id):
+      return "project:\(id)"
+    }
+  }
+}
+
 @Observable
 @MainActor
 public final class DashboardModel {
@@ -11,8 +25,12 @@ public final class DashboardModel {
   public private(set) var daemonStatus: DaemonStatus? = nil
   public private(set) var runtimeOk: Bool? = nil
   public private(set) var runtimeError: String? = nil
+  public private(set) var runtimeCheckedAt: String? = nil
+  public private(set) var runtimeLastOkAt: String? = nil
+  public private(set) var runtimeResetAt: String? = nil
+  public private(set) var runtimeResetCount: Int? = nil
   public private(set) var lastUpdated: Date? = nil
-  public var selectedProjectId: String? = nil
+  public var selectedItem: SidebarItem? = .hackd
   public var logsProject: ProjectSummary? = nil
   public var errorMessage: String? = nil
   public var statusMessage: String? = nil
@@ -27,7 +45,8 @@ public final class DashboardModel {
   }
 
   public var selectedProject: ProjectSummary? {
-    projects.first { $0.id == selectedProjectId }
+    guard case let .project(id) = selectedItem else { return nil }
+    return projects.first { $0.id == id }
   }
 
   public func start() {
@@ -105,8 +124,15 @@ public final class DashboardModel {
       projects = response.projects.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
       runtimeOk = response.runtimeOk
       runtimeError = response.runtimeError
-      if selectedProjectId == nil {
-        selectedProjectId = projects.first?.id
+      runtimeCheckedAt = response.runtimeCheckedAt
+      runtimeLastOkAt = response.runtimeLastOkAt
+      runtimeResetAt = response.runtimeResetAt
+      runtimeResetCount = response.runtimeResetCount
+      if selectedItem == nil {
+        selectedItem = .hackd
+      }
+      if case let .project(id) = selectedItem, !projects.contains(where: { $0.id == id }) {
+        selectedItem = projects.first.map { .project($0.id) } ?? .hackd
       }
       return nil
     } catch {

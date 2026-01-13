@@ -43,11 +43,15 @@ public struct DashboardView: View {
   private var sidebar: some View {
     @Bindable var model = model
 
-    return List(selection: $model.selectedProjectId) {
+    return List(selection: $model.selectedItem) {
+      Section("System") {
+        HackdRowView(running: model.daemonStatus?.running)
+          .tag(SidebarItem.hackd)
+      }
       Section("Projects") {
         ForEach(model.projects) { project in
           ProjectRowView(project: project)
-            .tag(project.id as String?)
+            .tag(SidebarItem.project(project.id))
         }
       }
     }
@@ -59,10 +63,17 @@ public struct DashboardView: View {
 
   private var detail: some View {
     Group {
-      if let project = model.selectedProject {
-        ProjectDetailView(project: project)
-      } else {
-        ContentUnavailableView("No project selected", systemImage: "square.stack")
+      switch model.selectedItem {
+      case .hackd:
+        HackdDetailView()
+      case let .project(id):
+        if let project = model.projects.first(where: { $0.id == id }) {
+          ProjectDetailView(project: project)
+        } else {
+          ContentUnavailableView("Project missing", systemImage: "exclamationmark.triangle")
+        }
+      case .none:
+        ContentUnavailableView("Select a sidebar item", systemImage: "square.stack")
       }
     }
   }

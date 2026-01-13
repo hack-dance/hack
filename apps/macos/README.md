@@ -8,6 +8,23 @@ Native macOS app for managing local hack projects and daemon status.
 - Xcode 15.1+
 - XcodeGen (`brew install xcodegen`)
 
+## What it does
+
+- Lists local hack projects with status and details.
+- Actions: start/stop project, open URL, open logs (stub).
+- Shows hackd status with start/stop controls.
+- Menu bar item for quick status + actions.
+
+## Quick commands (repo root)
+
+```bash
+bun run macos:project-gen
+bun run macos:open
+bun run macos:dev
+bun run macos:build
+bun run macos:test
+```
+
 ## Generate the Xcode project
 
 ```bash
@@ -32,3 +49,13 @@ Open `HackDesktop.xcodeproj` in Xcode and run the app. The app uses the `hack` C
 
 If `hack` is not in PATH for GUI apps, ensure it lives in `/opt/homebrew/bin` or
 `/usr/local/bin` (both are added to PATH by the app).
+
+## Data source
+
+The app shells out to `hack` for JSON data (projects + daemon status). It does not
+talk to hackd directly yet.
+
+## Logs
+
+The logs view is a stub placeholder for now. It can be wired to `hack logs` or
+daemon streaming later.

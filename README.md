@@ -106,6 +106,15 @@ If the agent cannot run shell commands, use MCP instead: `hack setup mcp` and `h
 
 ### macOS app (experimental)
 Source lives in `apps/macos`. See `apps/macos/README.md` for XcodeGen and build/run steps.
+Quick commands (repo root):
+
+```bash
+bun run macos:project-gen
+bun run macos:open
+bun run macos:dev
+bun run macos:build
+bun run macos:test
+```
 
 ### Configuration (.hack/hack.config.json)
 - `name`: project slug (also used for Docker Compose project name)

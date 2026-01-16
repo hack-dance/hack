@@ -42,11 +42,15 @@ DerivedData
 xcuserdata
 xcshareddata
 
-# macOS Ghostty VT experiment
+# macOS app
+apps/macos/build/
 apps/macos/vendor/ghostty/
 apps/macos/.ghostty/
-apps/macos/Experiments/GhosttyVTBridge/zig-cache/
-apps/macos/Experiments/GhosttyVTBridge/zig-out/
+
+# Zig build artifacts
+.zig-cache/
+zig-cache/
+zig-out/
 
 # hack tickets
 .hack/tickets/

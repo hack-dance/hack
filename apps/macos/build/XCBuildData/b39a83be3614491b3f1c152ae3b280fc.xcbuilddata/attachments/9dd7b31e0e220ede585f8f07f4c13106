@@ -1,4 +1,0 @@
-module HackDesktopModels {
-header "HackDesktopModels-Swift.h"
-export *
-}

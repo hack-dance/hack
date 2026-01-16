@@ -1,4 +1,0 @@
-module DashboardFeature {
-header "DashboardFeature-Swift.h"
-export *
-}

@@ -1,4 +1,0 @@
-module HackCLIService {
-header "HackCLIService-Swift.h"
-export *
-}

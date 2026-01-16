@@ -1,4 +1,0 @@
-module GhosttyTerminal {
-header "GhosttyTerminal-Swift.h"
-export *
-}

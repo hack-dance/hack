@@ -70,6 +70,25 @@ Tip: use `--body-stdin` for multi-line markdown.
 Data lives in `.hack/tickets/` (gitignored on the main branch) and syncs to hidden ref `refs/hack/tickets` by default.
 <!-- hack:tickets:end -->
 
+## Project Notes (Obsidian)
+
+This project uses Obsidian for project context, specs, research, and progress tracking.
+
+**Vault**: `~/.vaults/core`
+**Project folder**: `30 Projects/Hack CLI/Notes/`
+
+**When to write notes**:
+- Project analysis and architecture reviews
+- Research findings (e.g., Ghostty VT, libraries, APIs)
+- Specs and design decisions
+- Session summaries with progress updates
+- Any context that should persist across sessions
+
+**How to write notes**:
+- Use the `obsidian` skill to interact with the vault
+- Name notes with date prefix: `YYYY-MM-DD — Title.md`
+- Include tags: `#hack-cli #substrate`
+
 ## Landing the Plane (Session Completion)
 **When ending a work session**, you MUST complete ALL steps below.
 
@@ -77,4 +96,5 @@ Data lives in `.hack/tickets/` (gitignored on the main branch) and syncs to hidd
 1. **File tickets for remaining work** - Create tickets for anything that needs follow-up
 2. **Run quality gates** (if code changed) - Tests, linters, builds
 3. **Update issue status** - Close finished work, update in-progress items
-4. **Hand off** - Provide context for next session
+4. **Write session summary to Obsidian** - Key decisions, progress, blockers
+5. **Hand off** - Provide context for next session

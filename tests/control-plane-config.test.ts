@@ -40,6 +40,7 @@ test("readControlPlaneConfig returns defaults when config is missing", async () 
   expect(result.parseError).toBeUndefined()
   expect(result.config.tickets.git.branch).toBe("hack/tickets")
   expect(result.config.supervisor.enabled).toBe(true)
+  expect(result.config.daemon.autoStart).toBe(true)
 })
 
 test("readControlPlaneConfig reads controlPlane overrides", async () => {

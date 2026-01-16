@@ -23,16 +23,19 @@ export async function requestDaemonJson(opts: {
   readonly timeoutMs?: number
   readonly method?: "GET" | "POST"
   readonly body?: Record<string, unknown>
+  readonly allowIncompatible?: boolean
 }): Promise<DaemonJsonResponse | null> {
   const paths = resolveDaemonPaths({})
   const status = await readDaemonStatus({ paths })
   if (!status.socketExists) return null
 
-  const compatible = await isDaemonCompatible({
-    socketPath: paths.socketPath,
-    timeoutMs: opts.timeoutMs
-  })
-  if (!compatible) return null
+  if (!opts.allowIncompatible) {
+    const compatible = await isDaemonCompatible({
+      socketPath: paths.socketPath,
+      timeoutMs: opts.timeoutMs
+    })
+    if (!compatible) return null
+  }
 
   const raw = await requestDaemonRaw({
     socketPath: paths.socketPath,

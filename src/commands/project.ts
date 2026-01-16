@@ -38,7 +38,13 @@ import { parseJsonLines } from "../lib/json-lines.ts"
 import { getString, isRecord } from "../lib/guards.ts"
 import { touchBranchUsage } from "../lib/branches.ts"
 import { parseTimeInput } from "../lib/time.ts"
-import { ensureDir, pathExists, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts"
+import {
+  ensureDir,
+  ensureGitignoreEntry,
+  pathExists,
+  readTextFile,
+  writeTextFileIfChanged
+} from "../lib/fs.ts"
 import { requestDaemonJson } from "../daemon/client.ts"
 import { parseDurationMs } from "../lib/duration.ts"
 import { buildLogSelector, resolveShouldTryLoki, resolveUseLoki } from "../lib/logs.ts"
@@ -1084,6 +1090,13 @@ async function handleInit({
     await ensureDir(hackDir)
   }
 
+  // Ensure .hack/.internal is gitignored (contains local paths, certs, etc)
+  await ensureGitignoreEntry({
+    gitignorePath: resolve(repoRoot, ".gitignore"),
+    entry: ".hack/.internal/",
+    comment: "# hack internal (local overrides)"
+  })
+
   await writeTextFileIfChanged(
     configFile,
     renderProjectConfigJson({
@@ -1203,6 +1216,13 @@ async function handleInitAuto({
   }
 
   await ensureDir(hackDir)
+
+  // Ensure .hack/.internal is gitignored (contains local paths, certs, etc)
+  await ensureGitignoreEntry({
+    gitignorePath: resolve(repoRoot, ".gitignore"),
+    entry: ".hack/.internal/",
+    comment: "# hack internal (local overrides)"
+  })
 
   await writeTextFileIfChanged(
     configFile,

@@ -1,0 +1,29 @@
+{
+  "" : {
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/GhosttyTerminal.build/Objects-normal/x86_64/GhosttyTerminal-primary.dia",
+    "emit-module-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/GhosttyTerminal.build/Objects-normal/x86_64/GhosttyTerminal-primary-emit-module.d",
+    "emit-module-diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/GhosttyTerminal.build/Objects-normal/x86_64/GhosttyTerminal-primary-emit-module.dia",
+    "pch" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/GhosttyTerminal.build/Objects-normal/x86_64/GhosttyTerminal-primary-Bridging-header.pch",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/GhosttyTerminal.build/Objects-normal/x86_64/GhosttyTerminal-primary.swiftdeps"
+  },
+  "/Users/hack/dev/hack-dance/hack-cli/apps/macos/Packages/Services/GhosttyTerminal/Sources/GhosttyTerminal/GhosttyTerminal.swift" : {
+    "const-values" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/GhosttyTerminal.build/Objects-normal/x86_64/GhosttyTerminal.swiftconstvalues",
+    "dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/GhosttyTerminal.build/Objects-normal/x86_64/GhosttyTerminal.d",
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/GhosttyTerminal.build/Objects-normal/x86_64/GhosttyTerminal.dia",
+    "index-unit-output-path" : "/HackDesktop.build/Debug/GhosttyTerminal.build/Objects-normal/x86_64/GhosttyTerminal.o",
+    "llvm-bc" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/GhosttyTerminal.build/Objects-normal/x86_64/GhosttyTerminal.bc",
+    "object" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/GhosttyTerminal.build/Objects-normal/x86_64/GhosttyTerminal.o",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/GhosttyTerminal.build/Objects-normal/x86_64/GhosttyTerminal.swiftdeps",
+    "swiftmodule" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/GhosttyTerminal.build/Objects-normal/x86_64/GhosttyTerminal~partial.swiftmodule"
+  },
+  "/Users/hack/dev/hack-dance/hack-cli/apps/macos/Packages/Services/GhosttyTerminal/Sources/GhosttyTerminal/PtyProcess.swift" : {
+    "const-values" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/GhosttyTerminal.build/Objects-normal/x86_64/PtyProcess.swiftconstvalues",
+    "dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/GhosttyTerminal.build/Objects-normal/x86_64/PtyProcess.d",
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/GhosttyTerminal.build/Objects-normal/x86_64/PtyProcess.dia",
+    "index-unit-output-path" : "/HackDesktop.build/Debug/GhosttyTerminal.build/Objects-normal/x86_64/PtyProcess.o",
+    "llvm-bc" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/GhosttyTerminal.build/Objects-normal/x86_64/PtyProcess.bc",
+    "object" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/GhosttyTerminal.build/Objects-normal/x86_64/PtyProcess.o",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/GhosttyTerminal.build/Objects-normal/x86_64/PtyProcess.swiftdeps",
+    "swiftmodule" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/GhosttyTerminal.build/Objects-normal/x86_64/PtyProcess~partial.swiftmodule"
+  }
+}

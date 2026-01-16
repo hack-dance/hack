@@ -5,17 +5,26 @@ import HackCLIService
 import HackDesktopModels
 
 public enum SidebarItem: Hashable, Identifiable {
-  case hackd
+  case runtime
+  case gateway
   case project(String)
 
   public var id: String {
     switch self {
-    case .hackd:
-      return "hackd"
+    case .runtime:
+      return "runtime"
+    case .gateway:
+      return "gateway"
     case let .project(id):
       return "project:\(id)"
     }
   }
+}
+
+public enum ProjectTab: String, CaseIterable {
+  case overview = "Overview"
+  case logs = "Logs"
+  case shell = "Shell"
 }
 
 @Observable
@@ -23,6 +32,7 @@ public enum SidebarItem: Hashable, Identifiable {
 public final class DashboardModel {
   public private(set) var projects: [ProjectSummary] = []
   public private(set) var daemonStatus: DaemonStatus? = nil
+  public private(set) var globalStatus: GlobalStatusResponse? = nil
   public private(set) var runtimeOk: Bool? = nil
   public private(set) var runtimeError: String? = nil
   public private(set) var runtimeCheckedAt: String? = nil
@@ -30,8 +40,8 @@ public final class DashboardModel {
   public private(set) var runtimeResetAt: String? = nil
   public private(set) var runtimeResetCount: Int? = nil
   public private(set) var lastUpdated: Date? = nil
-  public var selectedItem: SidebarItem? = .hackd
-  public var logsProject: ProjectSummary? = nil
+  public var selectedItem: SidebarItem? = .runtime
+  public var selectedProjectTab: ProjectTab = .overview
   public var errorMessage: String? = nil
   public var statusMessage: String? = nil
   public var isRefreshing = false
@@ -47,6 +57,24 @@ public final class DashboardModel {
   public var selectedProject: ProjectSummary? {
     guard case let .project(id) = selectedItem else { return nil }
     return projects.first { $0.id == id }
+  }
+
+  public var gatewayExposures: [GatewayExposure] {
+    globalStatus?.gateway?.exposures ?? []
+  }
+
+  public var runtimeOverallOk: Bool? {
+    if runtimeOk == false { return false }
+    if let summaryOk = globalStatus?.summary.ok { return summaryOk }
+    return runtimeOk
+  }
+
+  var gatewaySummaryState: GatewaySummaryState? {
+    let gatewayEnabled = globalStatus?.gateway?.gatewayEnabled ?? globalStatus?.summary.gatewayEnabled
+    if globalStatus?.gateway == nil && gatewayEnabled == nil && gatewayExposures.isEmpty {
+      return nil
+    }
+    return GatewaySummaryState.resolve(exposures: gatewayExposures, gatewayEnabled: gatewayEnabled)
   }
 
   public func start() {
@@ -71,8 +99,9 @@ public final class DashboardModel {
 
     async let projectsTask = fetchProjects()
     async let daemonTask = fetchDaemonStatus()
+    async let globalTask = fetchGlobalStatus()
 
-    let errors = await [projectsTask, daemonTask].compactMap { $0 }
+    let errors = await [projectsTask, daemonTask, globalTask].compactMap { $0 }
     if !errors.isEmpty {
       errorMessage = errors.joined(separator: "\n")
     }
@@ -87,6 +116,18 @@ public final class DashboardModel {
   public func stopDaemon() async {
     await runAction(message: "Stopping hackd…") {
       try await self.client.stopDaemon()
+    }
+  }
+
+  public func restartDaemon() async {
+    await runAction(message: "Restarting hackd…") {
+      try await self.client.restartDaemon()
+    }
+  }
+
+  public func clearDaemon() async {
+    await runAction(message: "Clearing hackd state…") {
+      try await self.client.clearDaemon()
     }
   }
 
@@ -111,7 +152,13 @@ public final class DashboardModel {
   }
 
   public func showLogs(for project: ProjectSummary) {
-    logsProject = project
+    selectedItem = .project(project.id)
+    selectedProjectTab = .logs
+  }
+
+  public func showShell(for project: ProjectSummary) {
+    selectedItem = .project(project.id)
+    selectedProjectTab = .shell
   }
 
   private func resolveProjectPath(_ project: ProjectSummary) -> String? {
@@ -129,10 +176,10 @@ public final class DashboardModel {
       runtimeResetAt = response.runtimeResetAt
       runtimeResetCount = response.runtimeResetCount
       if selectedItem == nil {
-        selectedItem = .hackd
+        selectedItem = .runtime
       }
       if case let .project(id) = selectedItem, !projects.contains(where: { $0.id == id }) {
-        selectedItem = projects.first.map { .project($0.id) } ?? .hackd
+        selectedItem = projects.first.map { .project($0.id) } ?? .runtime
       }
       return nil
     } catch {
@@ -143,6 +190,15 @@ public final class DashboardModel {
   private func fetchDaemonStatus() async -> String? {
     do {
       daemonStatus = try await client.daemonStatus()
+      return nil
+    } catch {
+      return error.localizedDescription
+    }
+  }
+
+  private func fetchGlobalStatus() async -> String? {
+    do {
+      globalStatus = try await client.fetchGlobalStatus()
       return nil
     } catch {
       return error.localizedDescription

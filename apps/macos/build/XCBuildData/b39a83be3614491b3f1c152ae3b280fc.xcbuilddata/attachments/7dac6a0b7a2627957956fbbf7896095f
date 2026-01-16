@@ -1,0 +1,19 @@
+{
+  "" : {
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/HackDesktopModels.build/Objects-normal/x86_64/HackDesktopModels-primary.dia",
+    "emit-module-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/HackDesktopModels.build/Objects-normal/x86_64/HackDesktopModels-primary-emit-module.d",
+    "emit-module-diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/HackDesktopModels.build/Objects-normal/x86_64/HackDesktopModels-primary-emit-module.dia",
+    "pch" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/HackDesktopModels.build/Objects-normal/x86_64/HackDesktopModels-primary-Bridging-header.pch",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/HackDesktopModels.build/Objects-normal/x86_64/HackDesktopModels-primary.swiftdeps"
+  },
+  "/Users/hack/dev/hack-dance/hack-cli/apps/macos/Packages/Shared/Models/Sources/HackDesktopModels/Models.swift" : {
+    "const-values" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/HackDesktopModels.build/Objects-normal/x86_64/Models.swiftconstvalues",
+    "dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/HackDesktopModels.build/Objects-normal/x86_64/Models.d",
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/HackDesktopModels.build/Objects-normal/x86_64/Models.dia",
+    "index-unit-output-path" : "/HackDesktop.build/Debug/HackDesktopModels.build/Objects-normal/x86_64/Models.o",
+    "llvm-bc" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/HackDesktopModels.build/Objects-normal/x86_64/Models.bc",
+    "object" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/HackDesktopModels.build/Objects-normal/x86_64/Models.o",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/HackDesktopModels.build/Objects-normal/x86_64/Models.swiftdeps",
+    "swiftmodule" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/HackDesktopModels.build/Objects-normal/x86_64/Models~partial.swiftmodule"
+  }
+}

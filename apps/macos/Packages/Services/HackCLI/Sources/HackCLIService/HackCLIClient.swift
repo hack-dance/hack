@@ -37,12 +37,25 @@ public actor HackCLIClient {
     return try decode(DaemonStatus.self, from: result.stdout)
   }
 
+  public func fetchGlobalStatus() async throws -> GlobalStatusResponse {
+    let result = try await run(["global", "status", "--json"], allowNonZeroExit: true)
+    return try decode(GlobalStatusResponse.self, from: result.stdout)
+  }
+
   public func startDaemon() async throws {
     _ = try await run(["daemon", "start"])
   }
 
   public func stopDaemon() async throws {
     _ = try await run(["daemon", "stop"])
+  }
+
+  public func restartDaemon() async throws {
+    _ = try await run(["daemon", "restart"])
+  }
+
+  public func clearDaemon() async throws {
+    _ = try await run(["daemon", "clear"])
   }
 
   public func startProject(path: String) async throws {
@@ -77,10 +90,10 @@ public actor HackCLIClient {
     allowNonZeroExit: Bool = false
   ) async throws -> CLIResult {
     let process = Process()
-    let environment = buildEnvironment()
+    let environment = HackCLILocator.buildEnvironment()
     process.environment = environment
 
-    if let hackPath = resolveHackExecutable(in: environment) {
+    if let hackPath = HackCLILocator.resolveHackExecutable(in: environment) {
       process.executableURL = URL(fileURLWithPath: hackPath)
       process.arguments = args
     } else {
@@ -135,48 +148,6 @@ public actor HackCLIClient {
     return CLIResult(stdout: stdout, stderr: stderr, exitCode: exitCode)
   }
 
-  private func buildEnvironment() -> [String: String] {
-    var env = ProcessInfo.processInfo.environment
-    let home = (env["HOME"] ?? NSHomeDirectory()).trimmingCharacters(in: .whitespacesAndNewlines)
-    let homeBinPaths = home.isEmpty
-      ? []
-      : [
-          "\(home)/.hack/bin",
-          "\(home)/.local/bin",
-          "\(home)/.bun/bin",
-          "\(home)/.cargo/bin"
-        ]
-    let defaultPaths = [
-      "/opt/homebrew/bin",
-      "/usr/local/bin",
-      "/usr/bin",
-      "/bin",
-      "/usr/sbin",
-      "/sbin"
-    ]
-    let existing = env["PATH"]?.split(separator: ":").map(String.init) ?? []
-    let merged = existing
-      + homeBinPaths.filter { !existing.contains($0) }
-      + defaultPaths.filter { !existing.contains($0) }
-    env["PATH"] = merged.joined(separator: ":")
-    return env
-  }
-
-  private func resolveHackExecutable(in env: [String: String]) -> String? {
-    let fileManager = FileManager.default
-    if let override = env["HACK_CLI_PATH"], fileManager.isExecutableFile(atPath: override) {
-      return override
-    }
-
-    guard let pathValue = env["PATH"] else { return nil }
-    for entry in pathValue.split(separator: ":") {
-      let candidate = String(entry) + "/hack"
-      if fileManager.isExecutableFile(atPath: candidate) {
-        return candidate
-      }
-    }
-    return nil
-  }
 }
 
 private struct CLIResult {

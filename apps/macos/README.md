@@ -11,7 +11,7 @@ Native macOS app for managing local hack projects and daemon status.
 ## What it does
 
 - Lists local hack projects with status and details.
-- Actions: start/stop project, open URL, open logs (stub).
+- Actions: start/stop project, open URL, open logs (experimental).
 - Shows hackd status with start/stop controls.
 - Menu bar item for quick status + actions.
 
@@ -23,12 +23,13 @@ bun run macos:open
 bun run macos:dev
 bun run macos:build
 bun run macos:test
+bun run macos:ghostty:setup
 ```
 
 ## Generate the Xcode project
 
 ```bash
-xcodegen -c project.yml
+xcodegen -c
 ```
 
 This generates `HackDesktop.xcodeproj`. Do not edit the generated project directly.
@@ -56,10 +57,62 @@ can also set `HACK_CLI_PATH` to an absolute path for the binary.
 The app shells out to `hack` for JSON data (projects + daemon status). It does not
 talk to hackd directly yet.
 
-## Logs
+## Ghostty VT (experimental)
 
-The logs view is a stub placeholder for now. It can be wired to `hack logs` or
-daemon streaming later.
+The logs/shell views can stream PTY output through Ghostty's VT core and render
+a snapshot of the terminal grid.
+
+### Architecture
+
+```
+PTY bytes -> Ghostty VT (zig) -> formatter (HTML/plain) -> AppKit NSTextView
+```
+
+- VT parsing + grid state live in Zig (`apps/macos/Experiments/GhosttyVTBridge`).
+- Swift feeds PTY bytes and asks for a formatted snapshot (HTML/plain).
+- Rendering is AppKit-based (no Ghostty renderer yet).
+
+### Docs
+
+- `apps/macos/docs/ghostty-vt.md` — VT sequences, cursor behavior, colors, and renderer
+  integration notes.
+
+### Setup
+
+```bash
+bun run macos:ghostty:setup
+```
+
+This script:
+
+- clones the Ghostty repo into `apps/macos/vendor/ghostty`
+- builds the VT bridge via Zig
+- installs `libhack_ghostty_vt.dylib` into:
+  `~/Library/Application Support/Hack/ghostty/lib`
+- ad-hoc signs the dylib for local loading
+
+Zig version is validated against Ghostty's `minimum_zig_version` (currently
+0.15.2.x). If you use mise: `mise install zig@0.15.2`.
+
+You can override the library path with `HACK_GHOSTTY_VT_LIB`.
+
+### Current limitations
+
+- Snapshot rendering only (HTML/plain output). No GPU renderer yet.
+- Cursor is represented by the NSTextView selection/caret, not Ghostty.
+- Styling depends on Ghostty's formatter output + our base styles.
+- External protocols (OSC 8 hyperlinks, OSC 21 Kitty colors) are only preserved
+  insofar as Ghostty's formatter outputs them.
+
+### Using the Ghostty renderer (future)
+
+To render directly with Ghostty's renderer, we would need to:
+
+- expose renderer APIs from Ghostty via the Zig bridge
+- provide a Metal-backed surface (likely MTKView)
+- feed Ghostty grid updates into the renderer each frame
+
+That work is not wired up yet.
 
 ## Project ownership (what to edit)
 

@@ -20,6 +20,10 @@ final class ProjectListResponseTests: XCTestCase {
           "repo_root": "/repo",
           "project_dir": "/repo",
           "defined_services": ["api"],
+          "extensions_enabled": ["dance.hack.tickets"],
+          "features": ["tickets"],
+          "runtime_configured": true,
+          "runtime_status": "running",
           "kind": "registered",
           "status": "running"
         }
@@ -38,5 +42,6 @@ final class ProjectListResponseTests: XCTestCase {
     XCTAssertEqual(response.projects.count, 1)
     XCTAssertEqual(response.projects.first?.name, "hack-cli")
     XCTAssertEqual(response.projects.first?.status, .running)
+    XCTAssertEqual(response.projects.first?.runtimeStatus, .running)
   }
 }

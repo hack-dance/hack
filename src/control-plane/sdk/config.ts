@@ -79,6 +79,14 @@ const UsageConfigSchema = z.object({
   historySize: z.number().int().positive().default(24)
 })
 
+const DaemonConfigInputSchema = z.object({
+  autoStart: z.boolean().optional()
+})
+
+const DaemonConfigSchema = z.object({
+  autoStart: z.boolean().default(true)
+})
+
 const GatewayConfigInputSchema = z.object({
   enabled: z.boolean().optional(),
   bind: z.string().optional(),
@@ -103,6 +111,7 @@ const ControlPlaneConfigInputSchema = z.object({
   supervisor: SupervisorConfigInputSchema.optional(),
   tui: TuiConfigInputSchema.optional(),
   usage: UsageConfigInputSchema.optional(),
+  daemon: DaemonConfigInputSchema.optional(),
   gateway: GatewayConfigInputSchema.optional()
 })
 
@@ -116,6 +125,7 @@ const ControlPlaneConfigSchema = z.object({
   supervisor: SupervisorConfigSchema.default(SupervisorConfigSchema.parse({})),
   tui: TuiConfigSchema.default(TuiConfigSchema.parse({})),
   usage: UsageConfigSchema.default(UsageConfigSchema.parse({})),
+  daemon: DaemonConfigSchema.default(DaemonConfigSchema.parse({})),
   gateway: GatewayConfigSchema.default(GatewayConfigSchema.parse({}))
 })
 

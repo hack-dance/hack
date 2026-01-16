@@ -18,5 +18,6 @@ struct HackDesktopApp: App {
       MenuBarView()
         .environment(model)
     }
+    .menuBarExtraStyle(.menu)
   }
 }

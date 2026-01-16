@@ -1,0 +1,16 @@
+services:
+  example-basic:
+    dns:
+      - 172.30.0.2
+    extra_hosts:
+      example.hack: 172.30.0.3
+      example.hack.gy: 172.30.0.3
+    volumes:
+      - /Users/hack/.hack/caddy/pki/caddy-local-authority.crt:/etc/hack/ca/caddy-local-authority.crt:ro
+    environment:
+      SSL_CERT_FILE: /etc/hack/ca/caddy-local-authority.crt
+      SSL_CERT_DIR: /etc/hack/ca
+      NODE_EXTRA_CA_CERTS: /etc/hack/ca/caddy-local-authority.crt
+      REQUESTS_CA_BUNDLE: /etc/hack/ca/caddy-local-authority.crt
+      CURL_CA_BUNDLE: /etc/hack/ca/caddy-local-authority.crt
+      GIT_SSL_CAINFO: /etc/hack/ca/caddy-local-authority.crt

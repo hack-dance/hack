@@ -1,9 +1,8 @@
-import { readTextFile } from "../lib/fs.ts"
+import { pathExists, readTextFile } from "../lib/fs.ts"
 import { resolveHackInvocation } from "../lib/hack-cli.ts"
 import { logger } from "../ui/logger.ts"
 import { CliUsageError, defineCommand, defineOption, withHandler } from "../cli/command.ts"
 import { optJson, optTail } from "../cli/options.ts"
-import { requestDaemonJson } from "../daemon/client.ts"
 import { resolveDaemonPaths } from "../daemon/paths.ts"
 import {
   isProcessRunning,
@@ -11,7 +10,8 @@ import {
   waitForProcessExit
 } from "../daemon/process.ts"
 import { runDaemon } from "../daemon/server.ts"
-import { readDaemonStatus } from "../daemon/status.ts"
+import { requestDaemonJson } from "../daemon/client.ts"
+import { buildDaemonStatusReport, readDaemonStatus } from "../daemon/status.ts"
 
 import type { CliContext, CommandArgs } from "../cli/command.ts"
 
@@ -67,11 +67,31 @@ const logsSpec = defineCommand({
   subcommands: []
 } as const)
 
+const clearSpec = defineCommand({
+  name: "clear",
+  summary: "Clear stale hackd pid/socket files",
+  group: "Diagnostics",
+  options: [],
+  positionals: [],
+  subcommands: []
+} as const)
+
+const restartSpec = defineCommand({
+  name: "restart",
+  summary: "Restart hackd",
+  group: "Diagnostics",
+  options: [],
+  positionals: [],
+  subcommands: []
+} as const)
+
 export const daemonStartCommand = withHandler(startSpec, handleDaemonStart)
 export const daemonStopCommand = withHandler(stopSpec, handleDaemonStop)
 export const daemonStatusCommand = withHandler(statusSpec, handleDaemonStatus)
 export const daemonMetricsCommand = withHandler(metricsSpec, handleDaemonMetrics)
 export const daemonLogsCommand = withHandler(logsSpec, handleDaemonLogs)
+export const daemonClearCommand = withHandler(clearSpec, handleDaemonClear)
+export const daemonRestartCommand = withHandler(restartSpec, handleDaemonRestart)
 
 const daemonSpec = defineCommand({
   name: "daemon",
@@ -82,9 +102,11 @@ const daemonSpec = defineCommand({
   subcommands: [
     daemonStartCommand,
     daemonStopCommand,
+    daemonRestartCommand,
     daemonStatusCommand,
     daemonMetricsCommand,
-    daemonLogsCommand
+    daemonLogsCommand,
+    daemonClearCommand
   ]
 } as const)
 
@@ -97,6 +119,8 @@ type DaemonStopArgs = CommandArgs<typeof stopSpec.options, readonly []>
 type DaemonStatusArgs = CommandArgs<typeof statusSpec.options, readonly []>
 type DaemonMetricsArgs = CommandArgs<typeof metricsSpec.options, readonly []>
 type DaemonLogsArgs = CommandArgs<typeof logsSpec.options, readonly []>
+type DaemonClearArgs = CommandArgs<typeof clearSpec.options, readonly []>
+type DaemonRestartArgs = CommandArgs<typeof restartSpec.options, readonly []>
 
 async function handleDaemonStart({
   args
@@ -180,34 +204,62 @@ async function handleDaemonStatus({
 }): Promise<number> {
   const paths = resolveDaemonPaths({})
   const status = await readDaemonStatus({ paths })
+  const processRunning = status.running
+  let apiOk = false
+
+  if (status.socketExists) {
+    const ping = await requestDaemonJson({
+      path: "/v1/status",
+      timeoutMs: 500,
+      allowIncompatible: true
+    })
+    apiOk = ping?.ok ?? false
+  }
+
+  const report = buildDaemonStatusReport({
+    pid: status.pid,
+    processRunning,
+    socketExists: status.socketExists,
+    logExists: status.logExists,
+    apiOk
+  })
 
   if (args.options.json) {
     process.stdout.write(
       `${JSON.stringify(
         {
-          running: status.running,
-          pid: status.pid,
+          status: report.status,
+          running: report.running,
+          api_ok: report.apiOk,
+          process_running: report.processRunning,
+          stale: report.stale,
+          stale_reason: report.staleReason,
+          pid: report.pid,
           socket_path: paths.socketPath,
-          socket_exists: status.socketExists,
+          socket_exists: report.socketExists,
           log_path: paths.logPath,
-          log_exists: status.logExists
+          log_exists: report.logExists
         },
         null,
         2
       )}\n`
     )
-    return status.running ? 0 : 1
+    return report.status == "running" ? 0 : 1
   }
 
-  if (status.running) {
-    logger.success({ message: `hackd running (pid ${status.pid ?? "unknown"})` })
+  if (report.status == "running") {
+    logger.success({ message: `hackd running (pid ${report.pid ?? "unknown"})` })
     return 0
   }
 
-  const stale = status.pid !== null && !isProcessRunning({ pid: status.pid })
-  logger.warn({
-    message: stale ? "hackd stopped (stale pid file present)" : "hackd is not running"
-  })
+  if (report.status == "starting") {
+    logger.warn({
+      message: `hackd starting (pid ${report.pid ?? "unknown"}): API not responding yet`
+    })
+    return 1
+  }
+
+  logger.warn({ message: report.stale ? "hackd stopped (stale state detected)" : "hackd is not running" })
   return 1
 }
 
@@ -245,6 +297,61 @@ async function handleDaemonLogs({
   const slice = tail > 0 ? lines.slice(-tail) : lines
   process.stdout.write(`${slice.join("\n")}\n`)
   return 0
+}
+
+async function handleDaemonClear({
+  args: _args
+}: {
+  readonly ctx: CliContext
+  readonly args: DaemonClearArgs
+}): Promise<number> {
+  const paths = resolveDaemonPaths({})
+  const status = await readDaemonStatus({ paths })
+
+  if (status.running) {
+    logger.warn({ message: "hackd is running; stop it before clearing state" })
+    return 1
+  }
+
+  const pidExists = await pathExists(paths.pidPath)
+  const socketExists = await pathExists(paths.socketPath)
+
+  if (!pidExists && !socketExists) {
+    logger.info({ message: "No stale hackd state found" })
+    return 0
+  }
+
+  if (pidExists) {
+    await removeFileIfExists({ path: paths.pidPath })
+  }
+  if (socketExists) {
+    await removeFileIfExists({ path: paths.socketPath })
+  }
+
+  logger.success({ message: "Cleared stale hackd state" })
+  return 0
+}
+
+async function handleDaemonRestart({
+  args: _args,
+  ctx
+}: {
+  readonly ctx: CliContext
+  readonly args: DaemonRestartArgs
+}): Promise<number> {
+  const stopArgs: DaemonStopArgs = {
+    options: {},
+    positionals: {},
+    raw: { argv: [], positionals: [] }
+  }
+  const startArgs: DaemonStartArgs = {
+    options: { foreground: false },
+    positionals: {},
+    raw: { argv: [], positionals: [] }
+  }
+
+  await handleDaemonStop({ ctx, args: stopArgs })
+  return await handleDaemonStart({ ctx, args: startArgs })
 }
 
 async function waitForDaemonStart({

@@ -11,9 +11,9 @@ import { ensureDir, pathExists, readTextFile, writeTextFileIfChanged } from "../
 import { parseDotEnv } from "../lib/env.ts"
 import { resolveHackInvocation } from "../lib/hack-cli.ts"
 import { readInternalExtraHostsIp, resolveGlobalCaddyIp } from "../lib/caddy-hosts.ts"
-import { removeFileIfExists } from "../daemon/process.ts"
 import { resolveDaemonPaths } from "../daemon/paths.ts"
-import { readDaemonStatus } from "../daemon/status.ts"
+import { requestDaemonJson } from "../daemon/client.ts"
+import { buildDaemonStatusReport, readDaemonStatus } from "../daemon/status.ts"
 import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config.ts"
 import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts"
 import { resolveGlobalConfigPath } from "../lib/config-paths.ts"
@@ -386,22 +386,52 @@ async function checkGlobalFiles(): Promise<CheckResult> {
 async function checkDaemonStatus(): Promise<CheckResult> {
   const paths = resolveDaemonPaths({})
   const status = await readDaemonStatus({ paths })
-  if (status.running) {
+  let apiOk = false
+  if (status.socketExists) {
+    const ping = await requestDaemonJson({
+      path: "/v1/status",
+      timeoutMs: 500,
+      allowIncompatible: true
+    })
+    apiOk = ping?.ok ?? false
+  }
+
+  const report = buildDaemonStatusReport({
+    pid: status.pid,
+    processRunning: status.running,
+    socketExists: status.socketExists,
+    logExists: status.logExists,
+    apiOk
+  })
+
+  if (report.status == "running") {
     return {
       name: "daemon",
       status: "ok",
-      message: `hackd running (pid ${status.pid ?? "unknown"})`
+      message: `hackd running (pid ${report.pid ?? "unknown"})`
     }
   }
 
-  const detail =
-    status.pid !== null || status.socketExists
-      ? "hackd not running (stale pid/socket)"
-      : "hackd not running (run: hack daemon start)"
+  if (report.status == "starting") {
+    return {
+      name: "daemon",
+      status: "warn",
+      message: `hackd starting (pid ${report.pid ?? "unknown"}): API not responding`
+    }
+  }
+
+  if (report.status == "stale") {
+    return {
+      name: "daemon",
+      status: "warn",
+      message: "hackd not running (stale pid/socket; run: hack daemon clear)"
+    }
+  }
+
   return {
     name: "daemon",
     status: "warn",
-    message: detail
+    message: "hackd not running (run: hack daemon start)"
   }
 }
 
@@ -939,16 +969,36 @@ async function runDoctorFix(): Promise<void> {
 
   const daemonPaths = resolveDaemonPaths({})
   const daemonStatus = await readDaemonStatus({ paths: daemonPaths })
-  if (!daemonStatus.running) {
-    if (daemonStatus.pid !== null || daemonStatus.socketExists) {
+  let apiOk = false
+  if (daemonStatus.socketExists) {
+    const ping = await requestDaemonJson({
+      path: "/v1/status",
+      timeoutMs: 500,
+      allowIncompatible: true
+    })
+    apiOk = ping?.ok ?? false
+  }
+
+  const daemonReport = buildDaemonStatusReport({
+    pid: daemonStatus.pid,
+    processRunning: daemonStatus.running,
+    socketExists: daemonStatus.socketExists,
+    logExists: daemonStatus.logExists,
+    apiOk
+  })
+
+  if (daemonReport.status != "running") {
+    if (daemonReport.status == "stale") {
       const okStale = await confirm({
-        message: "Remove stale hackd pid/socket files?",
+        message: "Clear stale hackd pid/socket files?",
         initialValue: true
       })
       if (isCancel(okStale)) throw new Error("Canceled")
       if (okStale) {
-        await removeFileIfExists({ path: daemonPaths.pidPath })
-        await removeFileIfExists({ path: daemonPaths.socketPath })
+        const invocation = await resolveHackInvocation()
+        await run([invocation.bin, ...invocation.args, "daemon", "clear"], {
+          stdin: "inherit"
+        })
       }
     }
 

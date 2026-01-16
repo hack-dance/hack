@@ -39,3 +39,33 @@ export async function writeTextFileIfChanged(
   await writeTextFile(absolutePath, content)
   return { changed: true }
 }
+
+/**
+ * Ensures an entry exists in .gitignore. Creates the file if it doesn't exist.
+ * @returns Whether the file was modified
+ */
+export async function ensureGitignoreEntry(opts: {
+  readonly gitignorePath: string
+  readonly entry: string
+  readonly comment?: string
+}): Promise<{ readonly changed: boolean }> {
+  const existing = await readTextFile(opts.gitignorePath)
+  const entryLine = opts.entry.trim()
+
+  if (existing !== null) {
+    const lines = existing.split("\n")
+    const hasEntry = lines.some(line => line.trim() === entryLine)
+    if (hasEntry) {
+      return { changed: false }
+    }
+
+    const newContent = existing.endsWith("\n") ? existing : existing + "\n"
+    const addition = opts.comment ? `\n${opts.comment}\n${entryLine}\n` : `\n${entryLine}\n`
+    await writeTextFile(opts.gitignorePath, newContent + addition)
+    return { changed: true }
+  }
+
+  const content = opts.comment ? `${opts.comment}\n${entryLine}\n` : `${entryLine}\n`
+  await writeTextFile(opts.gitignorePath, content)
+  return { changed: true }
+}

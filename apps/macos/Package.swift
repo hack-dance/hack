@@ -7,6 +7,7 @@ let package = Package(
   products: [
     .library(name: "HackDesktopModels", targets: ["HackDesktopModels"]),
     .library(name: "HackCLIService", targets: ["HackCLIService"]),
+    .library(name: "GhosttyTerminal", targets: ["GhosttyTerminal"]),
     .library(name: "DashboardFeature", targets: ["DashboardFeature"])
   ],
   targets: [
@@ -20,8 +21,12 @@ let package = Package(
       path: "Packages/Services/HackCLI/Sources/HackCLIService"
     ),
     .target(
+      name: "GhosttyTerminal",
+      path: "Packages/Services/GhosttyTerminal/Sources/GhosttyTerminal"
+    ),
+    .target(
       name: "DashboardFeature",
-      dependencies: ["HackCLIService", "HackDesktopModels"],
+      dependencies: ["HackCLIService", "HackDesktopModels", "GhosttyTerminal"],
       path: "Packages/Features/DashboardFeature/Sources/DashboardFeature"
     ),
     .testTarget(

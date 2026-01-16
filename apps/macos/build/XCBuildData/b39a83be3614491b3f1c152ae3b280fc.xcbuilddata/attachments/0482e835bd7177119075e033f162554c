@@ -1,0 +1,239 @@
+{
+  "" : {
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DashboardFeature-primary.dia",
+    "emit-module-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DashboardFeature-primary-emit-module.d",
+    "emit-module-diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DashboardFeature-primary-emit-module.dia",
+    "pch" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DashboardFeature-primary-Bridging-header.pch",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DashboardFeature-primary.swiftdeps"
+  },
+  "/Users/hack/dev/hack-dance/hack-cli/apps/macos/Packages/Features/DashboardFeature/Sources/DashboardFeature/DaemonStatus+Resolution.swift" : {
+    "const-values" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DaemonStatus+Resolution.swiftconstvalues",
+    "dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DaemonStatus+Resolution.d",
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DaemonStatus+Resolution.dia",
+    "index-unit-output-path" : "/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DaemonStatus+Resolution.o",
+    "llvm-bc" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DaemonStatus+Resolution.bc",
+    "object" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DaemonStatus+Resolution.o",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DaemonStatus+Resolution.swiftdeps",
+    "swiftmodule" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DaemonStatus+Resolution~partial.swiftmodule"
+  },
+  "/Users/hack/dev/hack-dance/hack-cli/apps/macos/Packages/Features/DashboardFeature/Sources/DashboardFeature/DashboardModel.swift" : {
+    "const-values" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DashboardModel.swiftconstvalues",
+    "dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DashboardModel.d",
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DashboardModel.dia",
+    "index-unit-output-path" : "/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DashboardModel.o",
+    "llvm-bc" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DashboardModel.bc",
+    "object" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DashboardModel.o",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DashboardModel.swiftdeps",
+    "swiftmodule" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DashboardModel~partial.swiftmodule"
+  },
+  "/Users/hack/dev/hack-dance/hack-cli/apps/macos/Packages/Features/DashboardFeature/Sources/DashboardFeature/DashboardView.swift" : {
+    "const-values" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DashboardView.swiftconstvalues",
+    "dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DashboardView.d",
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DashboardView.dia",
+    "index-unit-output-path" : "/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DashboardView.o",
+    "llvm-bc" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DashboardView.bc",
+    "object" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DashboardView.o",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DashboardView.swiftdeps",
+    "swiftmodule" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DashboardView~partial.swiftmodule"
+  },
+  "/Users/hack/dev/hack-dance/hack-cli/apps/macos/Packages/Features/DashboardFeature/Sources/DashboardFeature/DetailRows.swift" : {
+    "const-values" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DetailRows.swiftconstvalues",
+    "dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DetailRows.d",
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DetailRows.dia",
+    "index-unit-output-path" : "/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DetailRows.o",
+    "llvm-bc" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DetailRows.bc",
+    "object" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DetailRows.o",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DetailRows.swiftdeps",
+    "swiftmodule" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/DetailRows~partial.swiftmodule"
+  },
+  "/Users/hack/dev/hack-dance/hack-cli/apps/macos/Packages/Features/DashboardFeature/Sources/DashboardFeature/GatewayDetailView.swift" : {
+    "const-values" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GatewayDetailView.swiftconstvalues",
+    "dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GatewayDetailView.d",
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GatewayDetailView.dia",
+    "index-unit-output-path" : "/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GatewayDetailView.o",
+    "llvm-bc" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GatewayDetailView.bc",
+    "object" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GatewayDetailView.o",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GatewayDetailView.swiftdeps",
+    "swiftmodule" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GatewayDetailView~partial.swiftmodule"
+  },
+  "/Users/hack/dev/hack-dance/hack-cli/apps/macos/Packages/Features/DashboardFeature/Sources/DashboardFeature/GatewayExposure+Status.swift" : {
+    "const-values" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GatewayExposure+Status.swiftconstvalues",
+    "dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GatewayExposure+Status.d",
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GatewayExposure+Status.dia",
+    "index-unit-output-path" : "/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GatewayExposure+Status.o",
+    "llvm-bc" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GatewayExposure+Status.bc",
+    "object" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GatewayExposure+Status.o",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GatewayExposure+Status.swiftdeps",
+    "swiftmodule" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GatewayExposure+Status~partial.swiftmodule"
+  },
+  "/Users/hack/dev/hack-dance/hack-cli/apps/macos/Packages/Features/DashboardFeature/Sources/DashboardFeature/GatewayExposureDetailView.swift" : {
+    "const-values" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GatewayExposureDetailView.swiftconstvalues",
+    "dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GatewayExposureDetailView.d",
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GatewayExposureDetailView.dia",
+    "index-unit-output-path" : "/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GatewayExposureDetailView.o",
+    "llvm-bc" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GatewayExposureDetailView.bc",
+    "object" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GatewayExposureDetailView.o",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GatewayExposureDetailView.swiftdeps",
+    "swiftmodule" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GatewayExposureDetailView~partial.swiftmodule"
+  },
+  "/Users/hack/dev/hack-dance/hack-cli/apps/macos/Packages/Features/DashboardFeature/Sources/DashboardFeature/GhosttyTerminalSession.swift" : {
+    "const-values" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GhosttyTerminalSession.swiftconstvalues",
+    "dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GhosttyTerminalSession.d",
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GhosttyTerminalSession.dia",
+    "index-unit-output-path" : "/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GhosttyTerminalSession.o",
+    "llvm-bc" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GhosttyTerminalSession.bc",
+    "object" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GhosttyTerminalSession.o",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GhosttyTerminalSession.swiftdeps",
+    "swiftmodule" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GhosttyTerminalSession~partial.swiftmodule"
+  },
+  "/Users/hack/dev/hack-dance/hack-cli/apps/macos/Packages/Features/DashboardFeature/Sources/DashboardFeature/GhosttyTerminalTextView.swift" : {
+    "const-values" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GhosttyTerminalTextView.swiftconstvalues",
+    "dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GhosttyTerminalTextView.d",
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GhosttyTerminalTextView.dia",
+    "index-unit-output-path" : "/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GhosttyTerminalTextView.o",
+    "llvm-bc" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GhosttyTerminalTextView.bc",
+    "object" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GhosttyTerminalTextView.o",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GhosttyTerminalTextView.swiftdeps",
+    "swiftmodule" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GhosttyTerminalTextView~partial.swiftmodule"
+  },
+  "/Users/hack/dev/hack-dance/hack-cli/apps/macos/Packages/Features/DashboardFeature/Sources/DashboardFeature/GhosttyTerminalView.swift" : {
+    "const-values" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GhosttyTerminalView.swiftconstvalues",
+    "dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GhosttyTerminalView.d",
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GhosttyTerminalView.dia",
+    "index-unit-output-path" : "/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GhosttyTerminalView.o",
+    "llvm-bc" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GhosttyTerminalView.bc",
+    "object" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GhosttyTerminalView.o",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GhosttyTerminalView.swiftdeps",
+    "swiftmodule" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GhosttyTerminalView~partial.swiftmodule"
+  },
+  "/Users/hack/dev/hack-dance/hack-cli/apps/macos/Packages/Features/DashboardFeature/Sources/DashboardFeature/GlassCard.swift" : {
+    "const-values" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GlassCard.swiftconstvalues",
+    "dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GlassCard.d",
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GlassCard.dia",
+    "index-unit-output-path" : "/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GlassCard.o",
+    "llvm-bc" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GlassCard.bc",
+    "object" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GlassCard.o",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GlassCard.swiftdeps",
+    "swiftmodule" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/GlassCard~partial.swiftmodule"
+  },
+  "/Users/hack/dev/hack-dance/hack-cli/apps/macos/Packages/Features/DashboardFeature/Sources/DashboardFeature/LabelBadge.swift" : {
+    "const-values" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/LabelBadge.swiftconstvalues",
+    "dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/LabelBadge.d",
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/LabelBadge.dia",
+    "index-unit-output-path" : "/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/LabelBadge.o",
+    "llvm-bc" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/LabelBadge.bc",
+    "object" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/LabelBadge.o",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/LabelBadge.swiftdeps",
+    "swiftmodule" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/LabelBadge~partial.swiftmodule"
+  },
+  "/Users/hack/dev/hack-dance/hack-cli/apps/macos/Packages/Features/DashboardFeature/Sources/DashboardFeature/LogsView.swift" : {
+    "const-values" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/LogsView.swiftconstvalues",
+    "dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/LogsView.d",
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/LogsView.dia",
+    "index-unit-output-path" : "/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/LogsView.o",
+    "llvm-bc" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/LogsView.bc",
+    "object" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/LogsView.o",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/LogsView.swiftdeps",
+    "swiftmodule" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/LogsView~partial.swiftmodule"
+  },
+  "/Users/hack/dev/hack-dance/hack-cli/apps/macos/Packages/Features/DashboardFeature/Sources/DashboardFeature/MenuBarView.swift" : {
+    "const-values" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/MenuBarView.swiftconstvalues",
+    "dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/MenuBarView.d",
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/MenuBarView.dia",
+    "index-unit-output-path" : "/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/MenuBarView.o",
+    "llvm-bc" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/MenuBarView.bc",
+    "object" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/MenuBarView.o",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/MenuBarView.swiftdeps",
+    "swiftmodule" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/MenuBarView~partial.swiftmodule"
+  },
+  "/Users/hack/dev/hack-dance/hack-cli/apps/macos/Packages/Features/DashboardFeature/Sources/DashboardFeature/ProjectDetailView.swift" : {
+    "const-values" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ProjectDetailView.swiftconstvalues",
+    "dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ProjectDetailView.d",
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ProjectDetailView.dia",
+    "index-unit-output-path" : "/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ProjectDetailView.o",
+    "llvm-bc" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ProjectDetailView.bc",
+    "object" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ProjectDetailView.o",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ProjectDetailView.swiftdeps",
+    "swiftmodule" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ProjectDetailView~partial.swiftmodule"
+  },
+  "/Users/hack/dev/hack-dance/hack-cli/apps/macos/Packages/Features/DashboardFeature/Sources/DashboardFeature/ProjectRowView.swift" : {
+    "const-values" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ProjectRowView.swiftconstvalues",
+    "dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ProjectRowView.d",
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ProjectRowView.dia",
+    "index-unit-output-path" : "/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ProjectRowView.o",
+    "llvm-bc" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ProjectRowView.bc",
+    "object" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ProjectRowView.o",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ProjectRowView.swiftdeps",
+    "swiftmodule" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ProjectRowView~partial.swiftmodule"
+  },
+  "/Users/hack/dev/hack-dance/hack-cli/apps/macos/Packages/Features/DashboardFeature/Sources/DashboardFeature/ProjectSummary+Capabilities.swift" : {
+    "const-values" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ProjectSummary+Capabilities.swiftconstvalues",
+    "dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ProjectSummary+Capabilities.d",
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ProjectSummary+Capabilities.dia",
+    "index-unit-output-path" : "/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ProjectSummary+Capabilities.o",
+    "llvm-bc" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ProjectSummary+Capabilities.bc",
+    "object" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ProjectSummary+Capabilities.o",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ProjectSummary+Capabilities.swiftdeps",
+    "swiftmodule" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ProjectSummary+Capabilities~partial.swiftmodule"
+  },
+  "/Users/hack/dev/hack-dance/hack-cli/apps/macos/Packages/Features/DashboardFeature/Sources/DashboardFeature/RuntimeDetailView.swift" : {
+    "const-values" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/RuntimeDetailView.swiftconstvalues",
+    "dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/RuntimeDetailView.d",
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/RuntimeDetailView.dia",
+    "index-unit-output-path" : "/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/RuntimeDetailView.o",
+    "llvm-bc" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/RuntimeDetailView.bc",
+    "object" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/RuntimeDetailView.o",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/RuntimeDetailView.swiftdeps",
+    "swiftmodule" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/RuntimeDetailView~partial.swiftmodule"
+  },
+  "/Users/hack/dev/hack-dance/hack-cli/apps/macos/Packages/Features/DashboardFeature/Sources/DashboardFeature/ShellView.swift" : {
+    "const-values" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ShellView.swiftconstvalues",
+    "dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ShellView.d",
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ShellView.dia",
+    "index-unit-output-path" : "/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ShellView.o",
+    "llvm-bc" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ShellView.bc",
+    "object" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ShellView.o",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ShellView.swiftdeps",
+    "swiftmodule" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/ShellView~partial.swiftmodule"
+  },
+  "/Users/hack/dev/hack-dance/hack-cli/apps/macos/Packages/Features/DashboardFeature/Sources/DashboardFeature/StatusBadge.swift" : {
+    "const-values" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/StatusBadge.swiftconstvalues",
+    "dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/StatusBadge.d",
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/StatusBadge.dia",
+    "index-unit-output-path" : "/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/StatusBadge.o",
+    "llvm-bc" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/StatusBadge.bc",
+    "object" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/StatusBadge.o",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/StatusBadge.swiftdeps",
+    "swiftmodule" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/StatusBadge~partial.swiftmodule"
+  },
+  "/Users/hack/dev/hack-dance/hack-cli/apps/macos/Packages/Features/DashboardFeature/Sources/DashboardFeature/StatusPill.swift" : {
+    "const-values" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/StatusPill.swiftconstvalues",
+    "dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/StatusPill.d",
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/StatusPill.dia",
+    "index-unit-output-path" : "/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/StatusPill.o",
+    "llvm-bc" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/StatusPill.bc",
+    "object" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/StatusPill.o",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/StatusPill.swiftdeps",
+    "swiftmodule" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/StatusPill~partial.swiftmodule"
+  },
+  "/Users/hack/dev/hack-dance/hack-cli/apps/macos/Packages/Features/DashboardFeature/Sources/DashboardFeature/SystemSidebarRows.swift" : {
+    "const-values" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/SystemSidebarRows.swiftconstvalues",
+    "dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/SystemSidebarRows.d",
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/SystemSidebarRows.dia",
+    "index-unit-output-path" : "/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/SystemSidebarRows.o",
+    "llvm-bc" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/SystemSidebarRows.bc",
+    "object" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/SystemSidebarRows.o",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/SystemSidebarRows.swiftdeps",
+    "swiftmodule" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/SystemSidebarRows~partial.swiftmodule"
+  },
+  "/Users/hack/dev/hack-dance/hack-cli/apps/macos/Packages/Features/DashboardFeature/Sources/DashboardFeature/TerminalSurface.swift" : {
+    "const-values" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/TerminalSurface.swiftconstvalues",
+    "dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/TerminalSurface.d",
+    "diagnostics" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/TerminalSurface.dia",
+    "index-unit-output-path" : "/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/TerminalSurface.o",
+    "llvm-bc" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/TerminalSurface.bc",
+    "object" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/TerminalSurface.o",
+    "swift-dependencies" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/TerminalSurface.swiftdeps",
+    "swiftmodule" : "/Users/hack/dev/hack-dance/hack-cli/apps/macos/build/HackDesktop.build/Debug/DashboardFeature.build/Objects-normal/arm64/TerminalSurface~partial.swiftmodule"
+  }
+}

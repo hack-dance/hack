@@ -1,5 +1,7 @@
 # Architecture
 
+![Architecture Diagram](./architecture-diagram.svg)
+
 ## Why this exists (plain English)
 
 Running multiple local projects at the same time is messy when everything wants the same ports and

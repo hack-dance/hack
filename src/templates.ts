@@ -429,6 +429,13 @@ export function renderProjectConfigSchemaJson(): string {
               historySize: { type: "number" }
             }
           },
+          daemon: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              autoStart: { type: "boolean" }
+            }
+          },
           gateway: {
             type: "object",
             additionalProperties: true,

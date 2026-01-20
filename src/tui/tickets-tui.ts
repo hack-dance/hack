@@ -502,7 +502,7 @@ export async function runTicketsTui({
       showDescription: false,
       showScrollIndicator: false,
       wrapSelection: true,
-      options: STATUS_OPTIONS.map(value => ({ name: STATUS_LABELS[value], value }))
+      options: STATUS_OPTIONS.map(value => ({ name: STATUS_LABELS[value] ?? value, value, description: "" }))
     })
 
     const overlayState = {
@@ -584,8 +584,9 @@ export async function runTicketsTui({
       const panes: Array<"list" | "body" | "history"> = ["list", "body", "history"]
       const idx = panes.indexOf(activePane)
       const next = ((idx + direction) % panes.length + panes.length) % panes.length
-      setActivePane(panes[next])
-      focusPane(panes[next])
+      const nextPane = panes[next] ?? "list"
+      setActivePane(nextPane)
+      focusPane(nextPane)
     }
 
     const selectedTicketId = () => {
@@ -919,14 +920,14 @@ function buildHeaderLabel(opts: { readonly projectName?: string }): StyledText {
 
 function joinStyledText(opts: { readonly parts: StyledText[]; readonly separator?: string }): StyledText {
   if (opts.parts.length === 0) return new StyledText([])
-  if (opts.parts.length === 1) return opts.parts[0]
+  const first = opts.parts[0]
+  if (opts.parts.length === 1 && first) return first
 
   const chunks: TextChunk[] = []
   const separator = opts.separator ?? " "
-  for (let i = 0; i < opts.parts.length; i += 1) {
-    const part = opts.parts[i]
+  for (const part of opts.parts) {
     chunks.push(...part.chunks)
-    if (i < opts.parts.length - 1) {
+    if (part !== opts.parts[opts.parts.length - 1]) {
       chunks.push({ __isChunk: true, text: separator })
     }
   }
@@ -993,9 +994,15 @@ function normalizeTicketBody(opts: { readonly body: string }): string {
 }
 
 type TicketBodyMeta = {
-  readonly links: string[]
-  readonly acceptanceCriteria: string[]
+  readonly links: readonly string[]
+  readonly acceptanceCriteria: readonly string[]
   readonly priority?: string
+}
+
+type MutableTicketBodyMeta = {
+  links: string[]
+  acceptanceCriteria: string[]
+  priority?: string
 }
 
 function emptyTicketBodyMeta(): TicketBodyMeta {
@@ -1007,7 +1014,7 @@ function emptyTicketBodyMeta(): TicketBodyMeta {
 }
 
 function parseTicketBodyMeta(opts: { readonly body: string }): TicketBodyMeta {
-  const meta: TicketBodyMeta = {
+  const meta: MutableTicketBodyMeta = {
     links: [],
     acceptanceCriteria: [],
     priority: undefined
@@ -1054,9 +1061,11 @@ function parseTicketBodyMeta(opts: { readonly body: string }): TicketBodyMeta {
     }
   }
 
-  meta.links = uniqueNonEmpty(meta.links)
-  meta.acceptanceCriteria = uniqueNonEmpty(meta.acceptanceCriteria)
-  return meta
+  return {
+    links: uniqueNonEmpty(meta.links),
+    acceptanceCriteria: uniqueNonEmpty(meta.acceptanceCriteria),
+    priority: meta.priority
+  }
 }
 
 function renderMetaExtras(meta: TicketBodyMeta): StyledText[] {

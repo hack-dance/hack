@@ -1020,7 +1020,7 @@ async function maybeEnsureTicketsGitHealth(opts: {
   if (!repaired.ok) {
     await display.panel({
       title: "Tickets repair",
-      tone: "warning",
+      tone: "warn",
       lines: [`error: ${repaired.error}`]
     })
     return
@@ -1046,7 +1046,7 @@ async function maybeEnsureTicketsGitHealth(opts: {
 
   await display.panel({
     title: "Tickets repair",
-    tone: repaired.pruneError ? "warning" : "success",
+    tone: repaired.pruneError ? "warn" : "success",
     lines
   })
 }

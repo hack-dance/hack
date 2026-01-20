@@ -347,7 +347,8 @@ function groupLabel(group: CliGroup): string {
       Agents: "Agent integrations",
       Diagnostics: "Diagnostics",
       Secrets: "Secrets",
-      Fun: "Fun"
+      Fun: "Fun",
+      Internal: "Internal"
     } satisfies Record<CliGroup, string>
   )[group]
 }

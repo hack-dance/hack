@@ -22,7 +22,7 @@ import { defineCommand, defineOption, withHandler } from "../cli/command.ts"
 
 import type { RegisteredProject } from "../lib/projects-registry.ts"
 import type { ProjectView } from "../lib/project-views.ts"
-import type { RuntimeProject, RuntimeService } from "../lib/runtime-projects.ts"
+import type { RuntimeContainer, RuntimeProject, RuntimeService } from "../lib/runtime-projects.ts"
 import type { CliContext, CommandArgs, CommandHandlerFor } from "../cli/command.ts"
 
 const optDetails = defineOption({
@@ -326,7 +326,7 @@ async function renderProjectDetails(opts: {
   const rows = names.map(svc => {
     const runtime = runtimeServices.get(svc) ?? null
     const containers = runtime?.containers ?? []
-    const running = containers.filter(c => c.state === "running").length
+    const running = containers.filter((c: RuntimeContainer) => c.state === "running").length
     const total = containers.length
     const state = opts.runtimeOk ? summarizeServiceState({ running, total }) : "unknown"
     const definedCell = defined.has(svc) ? "yes" : ""

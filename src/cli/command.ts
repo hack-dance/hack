@@ -10,6 +10,7 @@ export type CliGroup =
   | "Diagnostics"
   | "Secrets"
   | "Fun"
+  | "Internal"
 
 export type OptionType = "boolean" | "string" | "number"
 

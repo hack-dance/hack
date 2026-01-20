@@ -56,8 +56,9 @@ export function createNodeRegistryStore(opts: {
 
   const touch = ({ id, nowIso }: { readonly id: string; readonly nowIso: string }) => {
     const index = nodes.findIndex(existing => existing.id === id)
-    if (index >= 0) {
-      nodes[index] = { ...nodes[index], lastSeenAt: nowIso }
+    const existing = nodes[index]
+    if (index >= 0 && existing) {
+      nodes[index] = { ...existing, lastSeenAt: nowIso }
     }
     return getSnapshot()
   }

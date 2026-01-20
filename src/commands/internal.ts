@@ -12,8 +12,7 @@ const optPath = defineOption({
   type: "string",
   long: "--path",
   valueHint: "<path>",
-  description: "Start directory (defaults to cwd)",
-  defaultValue: null
+  description: "Start directory (defaults to cwd)"
 } as const)
 
 const internalOptions = [optPath] as const
@@ -74,7 +73,8 @@ export const internalCommand = defineCommand({
 } as const)
 
 function resolveStartDir(ctx: CliContext, args: InternalArgs): string {
-  const fromOpt = (args.options.path ?? "").trim()
+  const pathOpt = args.options.path
+  const fromOpt = typeof pathOpt === "string" ? pathOpt.trim() : ""
   return fromOpt.length > 0 ? fromOpt : ctx.cwd
 }
 
@@ -128,7 +128,7 @@ async function handleExtraHostsSet({
   args
 }: {
   readonly ctx: CliContext
-  readonly args: CommandArgs<typeof internalOptions, readonly ["hostname", "target"]>
+  readonly args: CommandArgs<typeof internalOptions, typeof extraHostsSetSpec["positionals"]>
 }): Promise<number> {
   const startDir = resolveStartDir(ctx, args)
   const project = await requireProject(startDir)
@@ -156,7 +156,7 @@ async function handleExtraHostsUnset({
   args
 }: {
   readonly ctx: CliContext
-  readonly args: CommandArgs<typeof internalOptions, readonly ["hostname"]>
+  readonly args: CommandArgs<typeof internalOptions, typeof extraHostsUnsetSpec["positionals"]>
 }): Promise<number> {
   const startDir = resolveStartDir(ctx, args)
   const project = await requireProject(startDir)

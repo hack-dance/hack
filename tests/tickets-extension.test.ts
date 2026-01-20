@@ -108,7 +108,7 @@ async function run(opts: { readonly cwd: string; readonly cmd: readonly string[]
 }
 
 async function runAllowFail(opts: { readonly cwd: string; readonly cmd: readonly string[] }): Promise<RunResult> {
-  const proc = Bun.spawn(opts.cmd, {
+  const proc = Bun.spawn([...opts.cmd], {
     cwd: opts.cwd,
     stdout: "pipe",
     stderr: "pipe",

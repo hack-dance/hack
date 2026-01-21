@@ -104,6 +104,42 @@ If anything fails, use `hack logs --pretty` and summarize next steps.
 
 If the agent cannot run shell commands, use MCP instead: `hack setup mcp` and `hack mcp serve`.
 
+### Tickets (optional, git-backed issue tracking)
+
+`hack` includes a lightweight, git-backed ticket system for tracking work without leaving your repo. Tickets are stored in a hidden git ref (`refs/hack/tickets`) so they sync with your code but don't clutter your branch list.
+
+**Quick setup:**
+
+```bash
+# Enable tickets for this repo
+hack x tickets setup
+
+# Create a ticket
+hack x tickets create --title "Add dark mode support"
+
+# List tickets
+hack x tickets list
+
+# Interactive TUI for managing tickets
+hack x tickets tui
+
+# Update status
+hack x tickets status T-00001 in_progress
+
+# Sync to remote
+hack x tickets sync
+```
+
+**Why use it:**
+- No external service required - tickets live in git
+- Agent-friendly - Claude/Cursor/Codex can create and manage tickets
+- Syncs with `git push/pull` via hidden refs
+- Works offline
+
+Tickets are ideal for solo devs, small teams, or agent-driven workflows where you want lightweight task tracking without context-switching to Jira/Linear/GitHub Issues.
+
+Full docs: [`docs/guides/tickets.md`](docs/guides/tickets.md)
+
 ### macOS app (experimental)
 Source lives in `apps/macos`. See `apps/macos/README.md` for XcodeGen and build/run steps.
 Quick commands (repo root):

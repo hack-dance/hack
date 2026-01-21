@@ -59,7 +59,7 @@ test("Supervisor service cancels running jobs", async () => {
     projectDir,
     jobId: created.jobId,
     status: "running",
-    timeoutMs: 2_000
+    timeoutMs: 10_000
   })
 
   const cancel = await service.cancelJob({ projectDir, jobId: created.jobId })

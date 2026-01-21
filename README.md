@@ -14,11 +14,11 @@
 ░░░░░   ░░░░░ ░░░░░   ░░░░░   ░░░░░░░░░  ░░░░░   ░░░░ 
 </p>
 <br/>
+</div>
   <p align="center">
     Opinionated local-dev orchestration for running <b>multiple projects</b> at the same time without port conflicts.
     <br />
   </p>
-</div>
 
 ---
 **Network isolation per repo / branch**: every instance runs on its own Docker network (so Postgres/Redis/etc can stay on default ports *inside* the project).

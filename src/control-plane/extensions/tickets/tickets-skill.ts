@@ -8,6 +8,8 @@ import {
   writeTextFileIfChanged,
 } from "../../../lib/fs.ts";
 
+const HACK_TICKETS_NAME_PATTERN = /name:\s*hack-tickets\b/i;
+
 export type TicketsSkillScope = "project" | "user";
 
 export type TicketsSkillResult = {
@@ -45,10 +47,14 @@ export async function installTicketsSkill(opts: {
   await ensureDir(dirname(path));
   const existed = await pathExists(path);
   const result = await writeTextFileIfChanged(path, renderTicketsSkill());
+  const status = resolveSkillInstallStatus({
+    changed: result.changed,
+    existed,
+  });
 
   return {
     scope: opts.scope,
-    status: result.changed ? (existed ? "updated" : "created") : "noop",
+    status,
     path,
   };
 }
@@ -73,7 +79,7 @@ export async function checkTicketsSkill(opts: {
     return { scope: opts.scope, status: "missing", path };
   }
 
-  const hasMarker = /name:\s*hack-tickets\b/i.test(content);
+  const hasMarker = HACK_TICKETS_NAME_PATTERN.test(content);
   return { scope: opts.scope, status: hasMarker ? "noop" : "error", path };
 }
 
@@ -171,6 +177,16 @@ export function renderTicketsSkill(): string {
   ];
 
   return lines.join("\n");
+}
+
+function resolveSkillInstallStatus(opts: {
+  readonly changed: boolean;
+  readonly existed: boolean;
+}): "created" | "updated" | "noop" {
+  if (!opts.changed) {
+    return "noop";
+  }
+  return opts.existed ? "updated" : "created";
 }
 
 function resolveTicketsSkillPath(opts: {

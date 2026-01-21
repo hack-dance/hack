@@ -3,6 +3,10 @@ import { dirname, resolve } from "node:path";
 import { confirm, isCancel, note, spinner } from "@clack/prompts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
+
+/** Regex to split strings on whitespace. */
+const WHITESPACE_PATTERN = /\s+/;
+
 import {
   optFollow,
   optJson,
@@ -1097,11 +1101,11 @@ async function resolveTailscaleExposure(opts: {
           host: status.ip,
         })
       : undefined;
-  const detail = status.running
-    ? status.ip
-      ? `Tailnet IP ${status.ip}`
-      : "Tailnet connected"
-    : `Backend ${backendState}`;
+  const detail = resolveTailscaleDetail({
+    running: status.running,
+    ip: status.ip,
+    backendState,
+  });
 
   if (status.running) {
     return buildGatewayExposure({
@@ -1194,11 +1198,10 @@ async function resolveCloudflareExposure(opts: {
 
   const pid = await readCloudflaredPid();
   const running = pid !== null && isProcessRunning({ pid });
-  const detail = cloudflareHostname
-    ? `Hostname ${cloudflareHostname}`
-    : cloudflareTunnel
-      ? `Tunnel ${cloudflareTunnel}`
-      : "Configured";
+  const detail = resolveCloudflareDetail({
+    cloudflareHostname,
+    cloudflareTunnel,
+  });
   const url = cloudflareHostname ? `https://${cloudflareHostname}` : undefined;
 
   if (running) {
@@ -1218,6 +1221,33 @@ async function resolveCloudflareExposure(opts: {
     detail: `${detail} (cloudflared not running)`,
     ...(url ? { url } : {}),
   });
+}
+
+function resolveTailscaleDetail(opts: {
+  readonly running: boolean;
+  readonly ip: string | undefined;
+  readonly backendState: string;
+}): string {
+  if (!opts.running) {
+    return `Backend ${opts.backendState}`;
+  }
+  if (opts.ip) {
+    return `Tailnet IP ${opts.ip}`;
+  }
+  return "Tailnet connected";
+}
+
+function resolveCloudflareDetail(opts: {
+  readonly cloudflareHostname: string | null;
+  readonly cloudflareTunnel: string | null;
+}): string {
+  if (opts.cloudflareHostname) {
+    return `Hostname ${opts.cloudflareHostname}`;
+  }
+  if (opts.cloudflareTunnel) {
+    return `Tunnel ${opts.cloudflareTunnel}`;
+  }
+  return "Configured";
 }
 
 function resolveGatewayBlockReason(opts: {
@@ -1837,7 +1867,7 @@ async function ensureMacDnsmasqRunning(): Promise<void> {
           .find((l) => l.startsWith("dnsmasq"))
       : undefined;
 
-  const parts = line ? line.split(/\s+/) : [];
+  const parts = line ? line.split(WHITESPACE_PATTERN) : [];
   const status = parts[1] ?? "";
   const user = parts[2] ?? "";
 

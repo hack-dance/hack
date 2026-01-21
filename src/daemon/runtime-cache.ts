@@ -266,7 +266,9 @@ function buildPsItems(opts: { readonly runtime: RuntimeProject }): PsItem[] {
   }
   return out.sort((a, b) => {
     const serviceCmp = a.Service.localeCompare(b.Service);
-    if (serviceCmp !== 0) return serviceCmp;
+    if (serviceCmp !== 0) {
+      return serviceCmp;
+    }
     return a.Name.localeCompare(b.Name);
   });
 }
@@ -293,6 +295,8 @@ function serializeRuntimeHealth(opts: { readonly health: RuntimeHealth }): {
 }
 
 function toIso(opts: { readonly ms: number | null }): string | null {
-  if (typeof opts.ms !== "number") return null;
+  if (typeof opts.ms !== "number") {
+    return null;
+  }
   return new Date(opts.ms).toISOString();
 }

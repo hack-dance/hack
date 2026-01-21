@@ -2,6 +2,10 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 
 import { isCancel, select, text } from "@clack/prompts";
+
+/** Regex to remove leading newlines from text. */
+const LEADING_NEWLINES_PATTERN = /^\n+/;
+
 import {
   checkClaudeHooks,
   installClaudeHooks,
@@ -246,10 +250,9 @@ async function handleSetupTmux({
 
   // Detect tmux config locations
   const home = homedir();
-  const configCandidates = [
-    resolve(home, ".config/tmux/tmux.conf"),
-    resolve(home, ".tmux.conf"),
-  ];
+  const xdgConfig = resolve(home, ".config/tmux/tmux.conf");
+  const homeConfig = resolve(home, ".tmux.conf");
+  const configCandidates = [xdgConfig, homeConfig];
 
   const existingConfigs: string[] = [];
   for (const candidate of configCandidates) {
@@ -289,7 +292,7 @@ bind-key s display-popup -E -w 40% -h 60% "hack session"`;
             /\n?# hack session picker\nbind-key [sS] display-popup[^\n]*\n?/g,
             "\n"
           )
-          .replace(/^\n+/, "");
+          .replace(LEADING_NEWLINES_PATTERN, "");
         await writeTextFile(configPath, newContent);
         logger.success({
           message: `Removed hack session keybinding from ${configPath}`,
@@ -308,8 +311,8 @@ bind-key s display-popup -E -w 40% -h 60% "hack session"`;
 
   // Select config file
   let selectedConfig: string;
-  if (existingConfigs.length === 1) {
-    selectedConfig = existingConfigs[0]!;
+  if (existingConfigs.length === 1 && existingConfigs[0]) {
+    selectedConfig = existingConfigs[0];
     logger.info({ message: `Using ${selectedConfig}` });
   } else if (existingConfigs.length > 1) {
     const choice = await select({
@@ -342,10 +345,10 @@ bind-key s display-popup -E -w 40% -h 60% "hack session"`;
       message: "No tmux.conf found. Where should we create one?",
       options: [
         {
-          value: configCandidates[0]!,
-          label: `${configCandidates[0]} (recommended)`,
+          value: xdgConfig,
+          label: `${xdgConfig} (recommended)`,
         },
-        { value: configCandidates[1]!, label: configCandidates[1]! },
+        { value: homeConfig, label: homeConfig },
         { value: "custom", label: "Custom path..." },
       ],
     });
@@ -429,12 +432,14 @@ async function handleSetupCursor({
       ? await resolveSetupRoot({ ctx, pathOpt: args.options.path })
       : undefined;
 
-  const result =
-    action === "check"
-      ? await checkCursorRules({ scope, projectRoot })
-      : action === "remove"
-        ? await removeCursorRules({ scope, projectRoot })
-        : await installCursorRules({ scope, projectRoot });
+  let result: Awaited<ReturnType<typeof checkCursorRules>>;
+  if (action === "check") {
+    result = await checkCursorRules({ scope, projectRoot });
+  } else if (action === "remove") {
+    result = await removeCursorRules({ scope, projectRoot });
+  } else {
+    result = await installCursorRules({ scope, projectRoot });
+  }
 
   return logSingleResult({
     action,
@@ -457,12 +462,14 @@ async function handleSetupClaude({
       ? await resolveSetupRoot({ ctx, pathOpt: args.options.path })
       : undefined;
 
-  const result =
-    action === "check"
-      ? await checkClaudeHooks({ scope, projectRoot })
-      : action === "remove"
-        ? await removeClaudeHooks({ scope, projectRoot })
-        : await installClaudeHooks({ scope, projectRoot });
+  let result: Awaited<ReturnType<typeof checkClaudeHooks>>;
+  if (action === "check") {
+    result = await checkClaudeHooks({ scope, projectRoot });
+  } else if (action === "remove") {
+    result = await removeClaudeHooks({ scope, projectRoot });
+  } else {
+    result = await installClaudeHooks({ scope, projectRoot });
+  }
 
   return logSingleResult({
     action,
@@ -485,12 +492,14 @@ async function handleSetupCodex({
       ? await resolveSetupRoot({ ctx, pathOpt: args.options.path })
       : undefined;
 
-  const result =
-    action === "check"
-      ? await checkCodexSkill({ scope, projectRoot })
-      : action === "remove"
-        ? await removeCodexSkill({ scope, projectRoot })
-        : await installCodexSkill({ scope, projectRoot });
+  let result: Awaited<ReturnType<typeof checkCodexSkill>>;
+  if (action === "check") {
+    result = await checkCodexSkill({ scope, projectRoot });
+  } else if (action === "remove") {
+    result = await removeCodexSkill({ scope, projectRoot });
+  } else {
+    result = await installCodexSkill({ scope, projectRoot });
+  }
 
   return logSingleResult({
     action,
@@ -513,12 +522,14 @@ async function handleSetupTickets({
       ? await resolveSetupRoot({ ctx, pathOpt: args.options.path })
       : undefined;
 
-  const result =
-    action === "check"
-      ? await checkTicketsSkill({ scope, projectRoot })
-      : action === "remove"
-        ? await removeTicketsSkill({ scope, projectRoot })
-        : await installTicketsSkill({ scope, projectRoot });
+  let result: Awaited<ReturnType<typeof checkTicketsSkill>>;
+  if (action === "check") {
+    result = await checkTicketsSkill({ scope, projectRoot });
+  } else if (action === "remove") {
+    result = await removeTicketsSkill({ scope, projectRoot });
+  } else {
+    result = await installTicketsSkill({ scope, projectRoot });
+  }
 
   return logSingleResult({
     action,

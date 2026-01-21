@@ -995,7 +995,7 @@ async function runRemoteMonitor(opts: {
   root.add(footer);
   activeRenderer.root.add(root);
 
-  const shutdown = async () => {
+  const shutdown = () => {
     if (!isActive) {
       return;
     }

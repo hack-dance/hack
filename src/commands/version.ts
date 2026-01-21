@@ -12,14 +12,14 @@ const versionSpec = defineCommand({
   subcommands: [],
 } as const);
 
-async function handleVersion({
+function handleVersion({
   ctx,
 }: {
   readonly ctx: CliContext;
   readonly args: VersionArgs;
 }): Promise<number> {
   console.log(`${ctx.cli.name} v${ctx.cli.version}`);
-  return 0;
+  return Promise.resolve(0);
 }
 
 export const versionCommand = withHandler(versionSpec, handleVersion);

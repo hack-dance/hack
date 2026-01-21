@@ -88,22 +88,17 @@ export async function buildProjectViews(opts: {
         : null;
       const running = countRunningServices(runtime);
       const runtimeConfigured = composeExists;
-      const runtimeStatus: ProjectRuntimeStatus = projectDirOk
-        ? composeExists
-          ? opts.runtimeOk
-            ? running > 0
-              ? "running"
-              : "stopped"
-            : "unknown"
-          : "not_configured"
-        : "missing";
-      const status: ProjectView["status"] = projectDirOk
-        ? opts.runtimeOk
-          ? running > 0
-            ? "running"
-            : "stopped"
-          : "unknown"
-        : "missing";
+      const runtimeStatus: ProjectRuntimeStatus = resolveRuntimeStatus({
+        projectDirOk,
+        composeExists,
+        runtimeOk: opts.runtimeOk,
+        running,
+      });
+      const status: ProjectView["status"] = resolveProjectStatus({
+        projectDirOk,
+        runtimeOk: opts.runtimeOk,
+        running,
+      });
       const branchRuntime = collectBranchRuntime({
         baseName: name,
         runtimeProjects: opts.runtime,
@@ -133,11 +128,11 @@ export async function buildProjectViews(opts: {
 
     if (opts.includeUnregistered) {
       const running = countRunningServices(runtime);
-      const runtimeStatus: ProjectRuntimeStatus = opts.runtimeOk
-        ? running > 0
-          ? "running"
-          : "stopped"
-        : "unknown";
+      const runtimeStatus: ProjectRuntimeStatus =
+        resolveUnregisteredRuntimeStatus({
+          runtimeOk: opts.runtimeOk,
+          running,
+        });
       out.push({
         name,
         devHost: null,
@@ -259,4 +254,64 @@ function mapExtensionFeature(id: string): string | null {
     default:
       return id;
   }
+}
+
+/**
+ * Resolves the runtime status for a registered project.
+ */
+function resolveRuntimeStatus(opts: {
+  readonly projectDirOk: boolean;
+  readonly composeExists: boolean;
+  readonly runtimeOk: boolean;
+  readonly running: number;
+}): ProjectRuntimeStatus {
+  if (!opts.projectDirOk) {
+    return "missing";
+  }
+  if (!opts.composeExists) {
+    return "not_configured";
+  }
+  if (!opts.runtimeOk) {
+    return "unknown";
+  }
+  if (opts.running > 0) {
+    return "running";
+  }
+  return "stopped";
+}
+
+/**
+ * Resolves the project status for a registered project.
+ */
+function resolveProjectStatus(opts: {
+  readonly projectDirOk: boolean;
+  readonly runtimeOk: boolean;
+  readonly running: number;
+}): ProjectView["status"] {
+  if (!opts.projectDirOk) {
+    return "missing";
+  }
+  if (!opts.runtimeOk) {
+    return "unknown";
+  }
+  if (opts.running > 0) {
+    return "running";
+  }
+  return "stopped";
+}
+
+/**
+ * Resolves the runtime status for an unregistered project.
+ */
+function resolveUnregisteredRuntimeStatus(opts: {
+  readonly runtimeOk: boolean;
+  readonly running: number;
+}): ProjectRuntimeStatus {
+  if (!opts.runtimeOk) {
+    return "unknown";
+  }
+  if (opts.running > 0) {
+    return "running";
+  }
+  return "stopped";
 }

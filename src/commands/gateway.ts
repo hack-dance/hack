@@ -1073,12 +1073,14 @@ async function renderExposureHints(opts: {
 
 function resolveExposeHost(opts: { readonly bind: string }): string {
   const trimmed = opts.bind.trim();
-  const host =
-    trimmed === "0.0.0.0" || trimmed === ""
-      ? "127.0.0.1"
-      : trimmed === "::"
-        ? "127.0.0.1"
-        : trimmed;
+  let host: string;
+  if (trimmed === "0.0.0.0" || trimmed === "") {
+    host = "127.0.0.1";
+  } else if (trimmed === "::") {
+    host = "127.0.0.1";
+  } else {
+    host = trimmed;
+  }
   return host.includes(":") ? `[${host}]` : host;
 }
 

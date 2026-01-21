@@ -11,6 +11,9 @@ import { exec, run } from "../lib/shell.ts";
 import { fzfFilterOne } from "../ui/fzf.ts";
 import { logger } from "../ui/logger.ts";
 
+/** Regex to extract session/project name from picker selection line. */
+const SESSION_NAME_PATTERN = /^\s+(\S+)/;
+
 /**
  * Parsed tmux session info.
  */
@@ -214,13 +217,12 @@ async function handleSessionPicker(): Promise<number> {
   }
 
   // Format: "   name\tpath" - extract name
-  const match = line.match(/^\s+(\S+)/);
-  if (!match) {
+  const match = line.match(SESSION_NAME_PATTERN);
+  const name = match?.[1];
+  if (!name) {
     logger.error({ message: "Could not parse selection" });
     return 1;
   }
-
-  const name = match[1]!;
   const existingSession = sessions.find((s) => s.name === name);
 
   if (existingSession) {

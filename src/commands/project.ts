@@ -104,6 +104,21 @@ import type { LogStreamContext } from "../ui/log-stream.ts";
 import { logger } from "../ui/logger.ts";
 import { canReachLoki, requestLokiDelete } from "../ui/loki-logs.ts";
 
+/** Regex for valid TLD/service/subdomain labels (lowercase alphanumeric with hyphens). */
+const SLUG_LABEL_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+
+/** Regex to match YAML labels block header. */
+const LABELS_LINE_PATTERN = /^(\s*)labels:\s*$/;
+
+/** Regex to extract leading whitespace (indentation). */
+const INDENT_PATTERN = /^(\s*)/;
+
+/** Regex to match caddy label line in YAML. */
+const CADDY_LABEL_PATTERN = /^(\s*)caddy:\s*(.*)$/;
+
+/** Regex to check if a string starts with a URL scheme (e.g., "http://", "https://"). */
+const URL_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//;
+
 const optManual = defineOption({
   name: "manual",
   type: "boolean",
@@ -1260,7 +1275,7 @@ async function handleInit({
           if (!v) {
             return "Required";
           }
-          if (!/^[a-z0-9][a-z0-9-]*$/.test(v)) {
+          if (!SLUG_LABEL_PATTERN.test(v)) {
             return "Invalid TLD label";
           }
           return undefined;
@@ -1291,14 +1306,13 @@ async function handleInit({
     );
   }
 
-  const useDiscovery = forceManual
-    ? false
-    : canDiscover
-      ? await confirm({
-          message: "Auto-discover dev scripts and generate services?",
-          initialValue: true,
-        })
-      : false;
+  let useDiscovery: boolean | symbol = false;
+  if (!forceManual && canDiscover) {
+    useDiscovery = await confirm({
+      message: "Auto-discover dev scripts and generate services?",
+      initialValue: true,
+    });
+  }
 
   if (isCancel(useDiscovery)) {
     return 1;
@@ -1605,7 +1619,7 @@ function validateOauthTld(opts: { readonly value: string }): string | null {
   if (!opts.value) {
     return "Required";
   }
-  if (!/^[a-z0-9][a-z0-9-]*$/.test(opts.value)) {
+  if (!SLUG_LABEL_PATTERN.test(opts.value)) {
     return "Invalid TLD label";
   }
   return null;
@@ -1759,7 +1773,7 @@ function normalizeOauthTld(raw: string): string {
   if (t.length === 0) {
     return DEFAULT_OAUTH_ALIAS_TLD;
   }
-  if (!/^[a-z0-9][a-z0-9-]*$/.test(t)) {
+  if (!SLUG_LABEL_PATTERN.test(t)) {
     return DEFAULT_OAUTH_ALIAS_TLD;
   }
   return t;
@@ -1811,7 +1825,7 @@ function patchComposeOauthAliasesInCaddyLabels(opts: {
       continue;
     }
 
-    const labelsMatch = /^(\s*)labels:\s*$/.exec(line);
+    const labelsMatch = LABELS_LINE_PATTERN.exec(line);
     if (labelsMatch) {
       inLabels = true;
       labelsIndent = labelsMatch[1]?.length ?? 0;
@@ -1822,13 +1836,13 @@ function patchComposeOauthAliasesInCaddyLabels(opts: {
       continue;
     }
 
-    const indent = /^(\s*)/.exec(line)?.[1]?.length ?? 0;
+    const indent = INDENT_PATTERN.exec(line)?.[1]?.length ?? 0;
     if (indent <= labelsIndent) {
       inLabels = false;
       continue;
     }
 
-    const caddyMatch = /^(\s*)caddy:\s*(.*)$/.exec(line);
+    const caddyMatch = CADDY_LABEL_PATTERN.exec(line);
     if (!caddyMatch) {
       continue;
     }
@@ -1843,16 +1857,7 @@ function patchComposeOauthAliasesInCaddyLabels(opts: {
     const commentSuffix = commentIdx >= 0 ? rawAfter.slice(commentIdx) : "";
 
     const valueTrimmed = valueRaw.trim();
-    const quoted =
-      valueTrimmed.startsWith('"') &&
-      valueTrimmed.endsWith('"') &&
-      valueTrimmed.length >= 2
-        ? { quote: '"', value: valueTrimmed.slice(1, -1) }
-        : valueTrimmed.startsWith("'") &&
-            valueTrimmed.endsWith("'") &&
-            valueTrimmed.length >= 2
-          ? { quote: "'", value: valueTrimmed.slice(1, -1) }
-          : { quote: null, value: valueTrimmed };
+    const quoted = parseQuotedValue(valueTrimmed);
 
     const parts = quoted.value
       .split(",")
@@ -1999,7 +2004,7 @@ async function buildDiscoveredCompose(
         if (!v) {
           return "Required";
         }
-        if (!/^[a-z0-9][a-z0-9-]*$/.test(v)) {
+        if (!SLUG_LABEL_PATTERN.test(v)) {
           return "Use lowercase letters, numbers, and '-' only";
         }
         if (v === "db" || v === "redis") {
@@ -2113,7 +2118,7 @@ async function buildDiscoveredCompose(
           if (v.includes(".")) {
             return "Subdomain only (no dots)";
           }
-          if (!/^[a-z0-9][a-z0-9-]*$/.test(v)) {
+          if (!SLUG_LABEL_PATTERN.test(v)) {
             return "Invalid subdomain";
           }
           return undefined;
@@ -2180,9 +2185,7 @@ type AutoComposeDraft = {
   image?: string;
 };
 
-async function buildDiscoveredComposeAuto(
-  input: ComposeWizardInput
-): Promise<string> {
+function buildDiscoveredComposeAuto(input: ComposeWizardInput): string {
   const selectedCandidates = selectAutoCandidates({
     candidates: input.candidates,
   });
@@ -2284,7 +2287,7 @@ async function buildManualCompose(
         if (!v) {
           return "Required";
         }
-        if (!/^[a-z0-9][a-z0-9-]*$/.test(v)) {
+        if (!SLUG_LABEL_PATTERN.test(v)) {
           return "Use lowercase letters, numbers, and '-' only";
         }
         if (usedServiceNames.has(v) && v !== defaultName) {
@@ -2374,8 +2377,7 @@ async function buildManualCompose(
     }
 
     const relRaw = workingDirRel.trim();
-    const rel =
-      relRaw === "." ? "." : relRaw.startsWith("./") ? relRaw.slice(2) : relRaw;
+    const rel = normalizeRelativePath(relRaw);
     const workingDir = rel === "." ? "/app" : `/app/${rel}`;
 
     drafts.push({
@@ -2427,7 +2429,7 @@ async function buildManualCompose(
           if (v.includes(".")) {
             return "Subdomain only (no dots)";
           }
-          if (!/^[a-z0-9][a-z0-9-]*$/.test(v)) {
+          if (!SLUG_LABEL_PATTERN.test(v)) {
             return "Invalid subdomain";
           }
           return undefined;
@@ -2483,9 +2485,7 @@ async function buildManualCompose(
   return renderCompose({ name: input.projectSlug, services });
 }
 
-async function buildManualComposeAuto(
-  input: ManualComposeWizardInput
-): Promise<string> {
+function buildManualComposeAuto(input: ManualComposeWizardInput): string {
   const port = guessDefaultPort("app");
   const drafts: AutoComposeDraft[] = [
     {
@@ -3328,7 +3328,7 @@ async function handleLogs({
   const service = args.positionals.service;
   const profiles = parseCsvList(args.options.profile);
   const json = args.options.json === true;
-  const format = json ? "json" : args.options.pretty ? "pretty" : "plain";
+  const format = resolveLogFormat({ json, pretty: args.options.pretty });
   const timeRange = parseLogTimeRange({
     since: args.options.since,
     until: args.options.until,
@@ -3584,21 +3584,11 @@ async function handleOpen({
   );
 
   const targetRaw = (args.positionals.target ?? "").trim();
-  const rawHost =
-    targetRaw === "" || targetRaw === "www"
-      ? devHost
-      : targetRaw.includes(".")
-        ? targetRaw
-        : `${targetRaw}.${devHost}`;
+  const rawHost = resolveRawHost({ targetRaw, devHost });
   const resolvedHost = branch
     ? applyBranchToHost({ host: rawHost, branch, baseHosts })
     : rawHost;
-  const url =
-    targetRaw === "logs"
-      ? `https://${DEFAULT_GRAFANA_HOST}`
-      : hasUrlScheme(targetRaw)
-        ? targetRaw
-        : `https://${resolvedHost}`;
+  const url = resolveOpenUrl({ targetRaw, resolvedHost });
 
   if (json) {
     process.stdout.write(`${JSON.stringify({ url }, null, 2)}\n`);
@@ -3610,5 +3600,90 @@ async function handleOpen({
 }
 
 function hasUrlScheme(value: string): boolean {
-  return /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(value);
+  return URL_SCHEME_PATTERN.test(value);
+}
+
+/**
+ * Parses a potentially quoted string value and returns the quote character and inner value.
+ */
+function parseQuotedValue(valueTrimmed: string): {
+  quote: string | null;
+  value: string;
+} {
+  if (
+    valueTrimmed.startsWith('"') &&
+    valueTrimmed.endsWith('"') &&
+    valueTrimmed.length >= 2
+  ) {
+    return { quote: '"', value: valueTrimmed.slice(1, -1) };
+  }
+  if (
+    valueTrimmed.startsWith("'") &&
+    valueTrimmed.endsWith("'") &&
+    valueTrimmed.length >= 2
+  ) {
+    return { quote: "'", value: valueTrimmed.slice(1, -1) };
+  }
+  return { quote: null, value: valueTrimmed };
+}
+
+/**
+ * Normalizes a relative path by removing "./" prefix if present.
+ */
+function normalizeRelativePath(relRaw: string): string {
+  if (relRaw === ".") {
+    return ".";
+  }
+  if (relRaw.startsWith("./")) {
+    return relRaw.slice(2);
+  }
+  return relRaw;
+}
+
+/**
+ * Resolves the log output format based on options.
+ */
+function resolveLogFormat(opts: {
+  readonly json: boolean;
+  readonly pretty: boolean | undefined;
+}): "json" | "pretty" | "plain" {
+  if (opts.json) {
+    return "json";
+  }
+  if (opts.pretty) {
+    return "pretty";
+  }
+  return "plain";
+}
+
+/**
+ * Resolves the raw host from target input for the open command.
+ */
+function resolveRawHost(opts: {
+  readonly targetRaw: string;
+  readonly devHost: string;
+}): string {
+  if (opts.targetRaw === "" || opts.targetRaw === "www") {
+    return opts.devHost;
+  }
+  if (opts.targetRaw.includes(".")) {
+    return opts.targetRaw;
+  }
+  return `${opts.targetRaw}.${opts.devHost}`;
+}
+
+/**
+ * Resolves the final URL to open based on target input.
+ */
+function resolveOpenUrl(opts: {
+  readonly targetRaw: string;
+  readonly resolvedHost: string;
+}): string {
+  if (opts.targetRaw === "logs") {
+    return `https://${DEFAULT_GRAFANA_HOST}`;
+  }
+  if (hasUrlScheme(opts.targetRaw)) {
+    return opts.targetRaw;
+  }
+  return `https://${opts.resolvedHost}`;
 }

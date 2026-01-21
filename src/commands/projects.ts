@@ -312,14 +312,11 @@ async function runProjects(opts: {
     rows: views.map((p) => {
       const definedCount = p.definedServices ? p.definedServices.length : null;
       const runningCount = runtime.ok ? countRunningServices(p.runtime) : null;
-      const servicesCell =
-        definedCount === null
-          ? runtime.ok && runningCount !== null
-            ? `${runningCount}/—`
-            : "—/—"
-          : runtime.ok && runningCount !== null
-            ? `${runningCount}/${definedCount}`
-            : `—/${definedCount}`;
+      const servicesCell = formatServicesCell({
+        definedCount,
+        runningCount,
+        runtimeOk: runtime.ok,
+      });
       return [
         p.name,
         p.status,
@@ -570,6 +567,23 @@ async function removeContainerIds(ids: readonly string[]): Promise<void> {
       break;
     }
   }
+}
+
+function formatServicesCell(opts: {
+  readonly definedCount: number | null;
+  readonly runningCount: number | null;
+  readonly runtimeOk: boolean;
+}): string {
+  if (opts.definedCount === null) {
+    if (opts.runtimeOk && opts.runningCount !== null) {
+      return `${opts.runningCount}/—`;
+    }
+    return "—/—";
+  }
+  if (opts.runtimeOk && opts.runningCount !== null) {
+    return `${opts.runningCount}/${opts.definedCount}`;
+  }
+  return `—/${opts.definedCount}`;
 }
 
 function chunkArray<T>(input: readonly T[], size: number): T[][] {

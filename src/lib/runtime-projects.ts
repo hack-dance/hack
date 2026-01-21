@@ -194,11 +194,7 @@ export async function autoRegisterRuntimeHackProjects(opts: {
 }): Promise<void> {
   for (const p of opts.runtime) {
     const wd = p.workingDir ?? "";
-    const dirName = wd.endsWith("/.hack")
-      ? ".hack"
-      : wd.endsWith("/.dev")
-        ? ".dev"
-        : null;
+    const dirName = resolveProjectDirName(wd);
     if (!dirName) {
       continue;
     }
@@ -286,6 +282,16 @@ export async function readContainerLabels(opts: {
   }
 
   return out;
+}
+
+function resolveProjectDirName(workingDir: string): ".hack" | ".dev" | null {
+  if (workingDir.endsWith("/.hack")) {
+    return ".hack";
+  }
+  if (workingDir.endsWith("/.dev")) {
+    return ".dev";
+  }
+  return null;
 }
 
 function parseLabelsJson(opts: {

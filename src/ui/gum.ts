@@ -254,11 +254,7 @@ export async function gumConfirm({
     ...(showOutput ? ["--show-output"] : []),
     ...(affirmative ? ["--affirmative", affirmative] : []),
     ...(negative ? ["--negative", negative] : []),
-    ...(showHelp === undefined
-      ? []
-      : showHelp
-        ? ["--show-help"]
-        : ["--no-show-help"]),
+    ...booleanFlag({ value: showHelp, flag: "show-help" }),
     ...(timeout ? ["--timeout", timeout] : []),
   ];
 
@@ -322,17 +318,9 @@ export async function gumInput({
     ...(width === undefined ? [] : ["--width", String(width)]),
     ...(charLimit === undefined ? [] : ["--char-limit", String(charLimit)]),
     ...(password ? ["--password"] : []),
-    ...(showHelp === undefined
-      ? []
-      : showHelp
-        ? ["--show-help"]
-        : ["--no-show-help"]),
+    ...booleanFlag({ value: showHelp, flag: "show-help" }),
     ...(timeout ? ["--timeout", timeout] : []),
-    ...(stripAnsi === undefined
-      ? []
-      : stripAnsi
-        ? ["--strip-ansi"]
-        : ["--no-strip-ansi"]),
+    ...booleanFlag({ value: stripAnsi, flag: "strip-ansi" }),
   ];
 
   const proc = Bun.spawn(cmd, {
@@ -404,17 +392,9 @@ export async function gumWrite({
     ...(value ? ["--value", value] : []),
     ...(charLimit === undefined ? [] : ["--char-limit", String(charLimit)]),
     ...(maxLines === undefined ? [] : ["--max-lines", String(maxLines)]),
-    ...(showHelp === undefined
-      ? []
-      : showHelp
-        ? ["--show-help"]
-        : ["--no-show-help"]),
+    ...booleanFlag({ value: showHelp, flag: "show-help" }),
     ...(timeout ? ["--timeout", timeout] : []),
-    ...(stripAnsi === undefined
-      ? []
-      : stripAnsi
-        ? ["--strip-ansi"]
-        : ["--no-strip-ansi"]),
+    ...booleanFlag({ value: stripAnsi, flag: "strip-ansi" }),
   ];
 
   const proc = Bun.spawn(cmd, {
@@ -486,18 +466,10 @@ export async function gumChooseMany(
     ...(input.ordered ? ["--ordered"] : []),
     ...(input.height === undefined ? [] : ["--height", String(input.height)]),
     ...(input.cursor ? ["--cursor", input.cursor] : []),
-    ...(input.showHelp === undefined
-      ? []
-      : input.showHelp
-        ? ["--show-help"]
-        : ["--no-show-help"]),
+    ...booleanFlag({ value: input.showHelp, flag: "show-help" }),
     ...(input.timeout ? ["--timeout", input.timeout] : []),
     ...(input.header ? ["--header", input.header] : []),
-    ...(input.selected
-      ? input.selected === "*"
-        ? ["--selected", "*"]
-        : ["--selected", input.selected.join(",")]
-      : []),
+    ...buildSelectedArg(input.selected),
     ...(input.inputDelimiter
       ? ["--input-delimiter", input.inputDelimiter]
       : []),
@@ -507,11 +479,7 @@ export async function gumChooseMany(
     ...(input.labelDelimiter
       ? ["--label-delimiter", input.labelDelimiter]
       : []),
-    ...(input.stripAnsi === undefined
-      ? []
-      : input.stripAnsi
-        ? ["--strip-ansi"]
-        : ["--no-strip-ansi"]),
+    ...booleanFlag({ value: input.stripAnsi, flag: "strip-ansi" }),
     ...(input.noLimit ? ["--no-limit"] : []),
     ...(input.limit === undefined ? [] : ["--limit", String(input.limit)]),
     ...(input.selectIfOne ? ["--select-if-one"] : []),
@@ -590,16 +558,8 @@ export async function gumFilterMany(
     gum,
     "filter",
     ...input.options,
-    ...(input.selected
-      ? input.selected === "*"
-        ? ["--selected", "*"]
-        : ["--selected", input.selected.join(",")]
-      : []),
-    ...(input.showHelp === undefined
-      ? []
-      : input.showHelp
-        ? ["--show-help"]
-        : ["--no-show-help"]),
+    ...buildSelectedArg(input.selected),
+    ...booleanFlag({ value: input.showHelp, flag: "show-help" }),
     ...(input.header ? ["--header", input.header] : []),
     ...(input.placeholder ? ["--placeholder", input.placeholder] : []),
     ...(input.prompt ? ["--prompt", input.prompt] : []),
@@ -607,16 +567,8 @@ export async function gumFilterMany(
     ...(input.height === undefined ? [] : ["--height", String(input.height)]),
     ...(input.value ? ["--value", input.value] : []),
     ...(input.reverse ? ["--reverse"] : []),
-    ...(input.fuzzy === undefined
-      ? []
-      : input.fuzzy
-        ? ["--fuzzy"]
-        : ["--no-fuzzy"]),
-    ...(input.fuzzySort === undefined
-      ? []
-      : input.fuzzySort
-        ? ["--fuzzy-sort"]
-        : ["--no-fuzzy-sort"]),
+    ...booleanFlag({ value: input.fuzzy, flag: "fuzzy" }),
+    ...booleanFlag({ value: input.fuzzySort, flag: "fuzzy-sort" }),
     ...(input.timeout ? ["--timeout", input.timeout] : []),
     ...(input.inputDelimiter
       ? ["--input-delimiter", input.inputDelimiter]
@@ -624,19 +576,11 @@ export async function gumFilterMany(
     ...(input.outputDelimiter
       ? ["--output-delimiter", input.outputDelimiter]
       : []),
-    ...(input.stripAnsi === undefined
-      ? []
-      : input.stripAnsi
-        ? ["--strip-ansi"]
-        : ["--no-strip-ansi"]),
+    ...booleanFlag({ value: input.stripAnsi, flag: "strip-ansi" }),
     ...(input.noLimit ? ["--no-limit"] : []),
     ...(input.limit === undefined ? [] : ["--limit", String(input.limit)]),
     ...(input.selectIfOne ? ["--select-if-one"] : []),
-    ...(input.strict === undefined
-      ? []
-      : input.strict
-        ? ["--strict"]
-        : ["--no-strict"]),
+    ...booleanFlag({ value: input.strict, flag: "strict" }),
   ];
 
   const proc = Bun.spawn(cmd, {
@@ -699,19 +643,11 @@ export async function gumFile({
     ...(path ? [path] : []),
     ...(cursor ? ["--cursor", cursor] : []),
     ...(all ? ["--all"] : []),
-    ...(permissions === undefined
-      ? []
-      : permissions
-        ? ["--permissions"]
-        : ["--no-permissions"]),
-    ...(size === undefined ? [] : size ? ["--size"] : ["--no-size"]),
+    ...booleanFlag({ value: permissions, flag: "permissions" }),
+    ...booleanFlag({ value: size, flag: "size" }),
     ...(file ? ["--file"] : []),
     ...(directory ? ["--directory"] : []),
-    ...(showHelp === undefined
-      ? []
-      : showHelp
-        ? ["--show-help"]
-        : ["--no-show-help"]),
+    ...booleanFlag({ value: showHelp, flag: "show-help" }),
     ...(timeout ? ["--timeout", timeout] : []),
     ...(header ? ["--header", header] : []),
     ...(height === undefined ? [] : ["--height", String(height)]),
@@ -760,11 +696,7 @@ export async function gumPager({
     "pager",
     ...(content ? [content] : []),
     ...(showLineNumbers ? ["--show-line-numbers"] : []),
-    ...(softWrap === undefined
-      ? []
-      : softWrap
-        ? ["--soft-wrap"]
-        : ["--no-soft-wrap"]),
+    ...booleanFlag({ value: softWrap, flag: "soft-wrap" }),
     ...(timeout ? ["--timeout", timeout] : []),
   ];
 
@@ -895,11 +827,7 @@ export async function gumStyle({
     "style",
     ...text,
     ...(trim ? ["--trim"] : []),
-    ...(stripAnsi === undefined
-      ? []
-      : stripAnsi
-        ? ["--strip-ansi"]
-        : ["--no-strip-ansi"]),
+    ...booleanFlag({ value: stripAnsi, flag: "strip-ansi" }),
     ...(foreground ? ["--foreground", foreground] : []),
     ...(background ? ["--background", background] : []),
     ...(border ? ["--border", border] : []),
@@ -1006,11 +934,7 @@ export async function gumFormat({
     ...(template ?? []),
     ...(theme ? ["--theme", theme] : []),
     ...(language ? ["--language", language] : []),
-    ...(stripAnsi === undefined
-      ? []
-      : stripAnsi
-        ? ["--strip-ansi"]
-        : ["--no-strip-ansi"]),
+    ...booleanFlag({ value: stripAnsi, flag: "strip-ansi" }),
     ...(type ? ["--type", type] : []),
   ];
 
@@ -1083,16 +1007,8 @@ export async function gumTable({
     ...(print ? ["--print"] : []),
     ...(file ? ["--file", file] : []),
     ...(border ? ["--border", border] : []),
-    ...(showHelp === undefined
-      ? []
-      : showHelp
-        ? ["--show-help"]
-        : ["--no-show-help"]),
-    ...(hideCount === undefined
-      ? []
-      : hideCount
-        ? ["--hide-count"]
-        : ["--no-hide-count"]),
+    ...booleanFlag({ value: showHelp, flag: "show-help" }),
+    ...booleanFlag({ value: hideCount, flag: "hide-count" }),
     ...(lazyQuotes ? ["--lazy-quotes"] : []),
     ...(fieldsPerRecord === undefined
       ? []
@@ -1161,4 +1077,49 @@ function streamFromText(text: string): ReadableStream<Uint8Array> {
       controller.close();
     },
   });
+}
+
+/**
+ * Builds command line arguments for a boolean flag that supports three states:
+ * - undefined: no flag (returns empty array)
+ * - true: positive flag (returns ["--{flag}"])
+ * - false: negative flag (returns ["--no-{flag}"])
+ *
+ * @param value - The boolean value or undefined
+ * @param flag - The flag name (without dashes)
+ * @returns Array of command line arguments
+ */
+function booleanFlag({
+  value,
+  flag,
+}: {
+  readonly value: boolean | undefined;
+  readonly flag: string;
+}): readonly string[] {
+  if (value === undefined) {
+    return [];
+  }
+  if (value) {
+    return [`--${flag}`];
+  }
+  return [`--no-${flag}`];
+}
+
+/**
+ * Builds command line arguments for the --selected flag used by gum choose/filter.
+ * Handles "*" for all items, an array of specific items, or undefined for none.
+ *
+ * @param selected - "*" for all, array of strings, or undefined
+ * @returns Array of command line arguments
+ */
+function buildSelectedArg(
+  selected: readonly string[] | "*" | undefined
+): readonly string[] {
+  if (!selected) {
+    return [];
+  }
+  if (selected === "*") {
+    return ["--selected", "*"];
+  }
+  return ["--selected", selected.join(",")];
 }

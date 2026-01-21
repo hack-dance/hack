@@ -49,11 +49,7 @@ export async function upsertTicketsAgentDocs(opts: {
       const existing = (await readTextFile(path)) ?? "";
       const next = upsertSnippet({ existing, snippet });
       const result = await writeTextFileIfChanged(path, next);
-      const status = result.changed
-        ? existed
-          ? "updated"
-          : "created"
-        : "noop";
+      const status = resolveUpsertStatus({ changed: result.changed, existed });
       results.push({ target, status, path });
     } catch (error: unknown) {
       const message =
@@ -172,6 +168,16 @@ export function renderTicketsAgentDocsSnippet(): string {
   ];
 
   return lines.join("\n");
+}
+
+function resolveUpsertStatus(opts: {
+  readonly changed: boolean;
+  readonly existed: boolean;
+}): "created" | "updated" | "noop" {
+  if (!opts.changed) {
+    return "noop";
+  }
+  return opts.existed ? "updated" : "created";
 }
 
 function resolveTicketsAgentDocPath(opts: {

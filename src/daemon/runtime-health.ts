@@ -77,7 +77,9 @@ function resolveDockerHost(opts: {
 async function readSocketInode(opts: {
   readonly socketPath: string | null;
 }): Promise<number | null> {
-  if (!opts.socketPath) return null;
+  if (!opts.socketPath) {
+    return null;
+  }
   try {
     const stats = await Bun.file(opts.socketPath).stat();
     return typeof stats.ino === "number" ? stats.ino : null;
@@ -158,8 +160,12 @@ function formatDockerError(opts: {
   readonly exitCode: number;
 }): string {
   const stderr = opts.stderr.trim();
-  if (stderr.length > 0) return stderr;
+  if (stderr.length > 0) {
+    return stderr;
+  }
   const stdout = opts.stdout.trim();
-  if (stdout.length > 0) return stdout;
+  if (stdout.length > 0) {
+    return stdout;
+  }
   return `docker info failed (exit ${opts.exitCode})`;
 }

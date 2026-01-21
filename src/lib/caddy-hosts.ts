@@ -7,6 +7,7 @@ import { isRecord } from "./guards.ts";
 import { exec } from "./shell.ts";
 
 const GLOBAL_CADDY_PROJECT = "hack-dev-proxy";
+const IPV4_PATTERN = /^\d{1,3}(\.\d{1,3}){3}$/;
 
 export async function resolveGlobalCaddyIp(): Promise<string | null> {
   const ps = await exec(
@@ -148,7 +149,7 @@ function parseExtraHostEntry(entry: string): string | null {
 }
 
 function isIpv4(value: string): boolean {
-  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(value)) {
+  if (!IPV4_PATTERN.test(value)) {
     return false;
   }
   return value.split(".").every((part) => {

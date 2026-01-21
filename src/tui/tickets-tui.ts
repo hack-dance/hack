@@ -24,6 +24,27 @@ import type { ControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { gumFormat, isGumAvailable } from "../ui/gum.ts";
 import type { Logger } from "../ui/logger.ts";
 
+/** Matches markdown heading lines (e.g., "# Title", "## Section") */
+const MARKDOWN_HEADING_REGEX = /^#{1,6}\s+(.+)$/;
+
+/** Matches priority lines in ticket metadata (e.g., "priority: high") */
+const PRIORITY_LINE_REGEX = /^priority\s*:\s*(.+)$/i;
+
+/** Matches markdown checkbox list items (e.g., "- [x] Done", "- [ ] Todo") */
+const CHECKBOX_LIST_ITEM_REGEX = /^\s*[-*]\s*\[(?:x| )\]\s+(.+)$/i;
+
+/** Matches markdown bullet list items (e.g., "- item", "* item") */
+const BULLET_LIST_ITEM_REGEX = /^\s*[-*]\s+(.+)$/;
+
+/** Matches markdown ordered list items (e.g., "1. item") */
+const ORDERED_LIST_ITEM_REGEX = /^\s*\d+\.\s+(.+)$/;
+
+/** Matches markdown links to extract label and URL (e.g., "[label](url)") */
+const MARKDOWN_LINK_REGEX = /\[([^\]]+)\]\(([^)]+)\)/;
+
+/** Matches HTTP/HTTPS URLs */
+const URL_REGEX = /^https?:\/\//i;
+
 const STATUS_LABELS: Record<string, string> = {
   open: "open",
   in_progress: "in_progress",
@@ -92,7 +113,7 @@ export async function runTicketsTui({
 
   const markdownCache = new Map<string, MarkdownCacheEntry>();
 
-  const store = await createTicketsStore({
+  const store = createTicketsStore({
     projectRoot,
     projectId,
     projectName,
@@ -100,16 +121,18 @@ export async function runTicketsTui({
     logger,
   });
 
-  const shutdownRenderer = async () => {
-    if (!renderer) return;
+  const shutdownRenderer = () => {
+    if (!renderer) {
+      return;
+    }
     renderer.stop();
     renderer.destroy();
     renderer = null;
   };
 
-  const handleFatal = async (error: unknown) => {
+  const handleFatal = (error: unknown) => {
     const message = error instanceof Error ? error.message : "Unknown error";
-    await shutdownRenderer();
+    shutdownRenderer();
     process.stderr.write(`Tickets TUI failed: ${message}\n`);
   };
 
@@ -120,8 +143,10 @@ export async function runTicketsTui({
   process.on("SIGINT", handleSignal);
   process.on("SIGTERM", handleSignal);
 
-  const shutdown = async () => {
-    if (!running) return;
+  const shutdown = () => {
+    if (!running) {
+      return;
+    }
     running = false;
     if (toastTimer) {
       clearTimeout(toastTimer);
@@ -133,7 +158,7 @@ export async function runTicketsTui({
     }
     process.off("SIGINT", handleSignal);
     process.off("SIGTERM", handleSignal);
-    await shutdownRenderer();
+    shutdownRenderer();
   };
 
   try {
@@ -551,7 +576,9 @@ export async function runTicketsTui({
       readonly message: string;
       readonly tone?: "info" | "warn";
     }) => {
-      if (toastTimer) clearTimeout(toastTimer);
+      if (toastTimer) {
+        clearTimeout(toastTimer);
+      }
       const tone = opts.tone ?? "info";
       footerToastText.content =
         tone === "warn"
@@ -700,7 +727,9 @@ export async function runTicketsTui({
 
       const normalized = normalizeTicketBody({ body: ticket.body });
       const rendered = await renderMarkdown({ markdown: normalized });
-      if (opts.token !== detailToken) return;
+      if (opts.token !== detailToken) {
+        return;
+      }
 
       markdownCache.set(cacheKey, {
         updatedAt: ticket.updatedAt,
@@ -734,7 +763,9 @@ export async function runTicketsTui({
       const ticket = ticketsById.get(ticketId) ?? null;
       renderMeta(ticket);
       await renderBody({ ticket, token });
-      if (token !== detailToken) return;
+      if (token !== detailToken) {
+        return;
+      }
       const events = eventsByTicket.get(ticketId) ?? [];
       renderHistory(events);
     };
@@ -751,7 +782,9 @@ export async function runTicketsTui({
     };
 
     const scheduleRefreshDetails = () => {
-      if (detailTimer) clearTimeout(detailTimer);
+      if (detailTimer) {
+        clearTimeout(detailTimer);
+      }
       detailTimer = setTimeout(() => {
         detailTimer = null;
         void refreshDetails();
@@ -893,7 +926,9 @@ export async function runTicketsTui({
         if (key.name === "tab") {
           key.preventDefault();
           const total = overlayState.focusables.length;
-          if (total === 0) return;
+          if (total === 0) {
+            return;
+          }
           const next =
             (overlayState.focusIndex + (key.shift ? -1 : 1) + total) % total;
           overlayState.focusIndex = next;
@@ -974,9 +1009,13 @@ function joinStyledText(opts: {
   readonly parts: StyledText[];
   readonly separator?: string;
 }): StyledText {
-  if (opts.parts.length === 0) return new StyledText([]);
+  if (opts.parts.length === 0) {
+    return new StyledText([]);
+  }
   const first = opts.parts[0];
-  if (opts.parts.length === 1 && first) return first;
+  if (opts.parts.length === 1 && first) {
+    return first;
+  }
 
   const chunks: TextChunk[] = [];
   const separator = opts.separator ?? " ";
@@ -991,7 +1030,9 @@ function joinStyledText(opts: {
 
 function formatTimestamp(iso: string): string {
   const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso;
+  if (Number.isNaN(date.getTime())) {
+    return iso;
+  }
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
@@ -1005,9 +1046,7 @@ function formatEventLine(event: TicketEvent): string {
   const actor = event.actor ? ` ${event.actor}` : "";
   if (event.type === "ticket.status_changed") {
     const next =
-      typeof event.payload["status"] === "string"
-        ? event.payload["status"]
-        : "";
+      typeof event.payload.status === "string" ? event.payload.status : "";
     return `${timestamp} status -> ${next}${actor}`;
   }
   if (event.type === "ticket.updated") {
@@ -1023,7 +1062,9 @@ async function renderMarkdown(opts: {
   readonly markdown: string;
 }): Promise<StyledText | string> {
   const trimmed = opts.markdown.trim();
-  if (trimmed.length === 0) return "";
+  if (trimmed.length === 0) {
+    return "";
+  }
 
   if (!isGumAvailable()) {
     return trimmed;
@@ -1089,9 +1130,11 @@ function parseTicketBodyMeta(opts: { readonly body: string }): TicketBodyMeta {
       inCodeBlock = !inCodeBlock;
       continue;
     }
-    if (inCodeBlock) continue;
+    if (inCodeBlock) {
+      continue;
+    }
 
-    const headingMatch = line.match(/^#{1,6}\s+(.+)$/);
+    const headingMatch = line.match(MARKDOWN_HEADING_REGEX);
     if (headingMatch) {
       const heading = normalizeHeading(headingMatch[1] ?? "");
       section = resolveMetaSection(heading);
@@ -1099,17 +1142,21 @@ function parseTicketBodyMeta(opts: { readonly body: string }): TicketBodyMeta {
     }
 
     if (!meta.priority) {
-      const priorityMatch = line.match(/^priority\s*:\s*(.+)$/i);
+      const priorityMatch = line.match(PRIORITY_LINE_REGEX);
       if (priorityMatch?.[1]) {
         meta.priority = priorityMatch[1].trim();
         continue;
       }
     }
 
-    if (!section || line.length === 0) continue;
+    if (!section || line.length === 0) {
+      continue;
+    }
 
     const listItem = extractListItem({ line });
-    if (!listItem) continue;
+    if (!listItem) {
+      continue;
+    }
 
     if (section === "links") {
       const link = extractLinkLabel({ text: listItem }) ?? listItem;
@@ -1171,7 +1218,9 @@ function renderDependencyMeta(opts: {
 }
 
 function resolveMetaSection(heading: string): "links" | "acceptance" | null {
-  if (!heading) return null;
+  if (!heading) {
+    return null;
+  }
   if (
     heading === "links" ||
     heading === "link" ||
@@ -1193,28 +1242,40 @@ function resolveMetaSection(heading: string): "links" | "acceptance" | null {
 }
 
 function extractListItem(opts: { readonly line: string }): string | null {
-  const checkbox = opts.line.match(/^\s*[-*]\s*\[(?:x| )\]\s+(.+)$/i);
-  if (checkbox?.[1]) return checkbox[1].trim();
+  const checkbox = opts.line.match(CHECKBOX_LIST_ITEM_REGEX);
+  if (checkbox?.[1]) {
+    return checkbox[1].trim();
+  }
 
-  const bullet = opts.line.match(/^\s*[-*]\s+(.+)$/);
-  if (bullet?.[1]) return bullet[1].trim();
+  const bullet = opts.line.match(BULLET_LIST_ITEM_REGEX);
+  if (bullet?.[1]) {
+    return bullet[1].trim();
+  }
 
-  const ordered = opts.line.match(/^\s*\d+\.\s+(.+)$/);
-  if (ordered?.[1]) return ordered[1].trim();
+  const ordered = opts.line.match(ORDERED_LIST_ITEM_REGEX);
+  if (ordered?.[1]) {
+    return ordered[1].trim();
+  }
 
-  if (looksLikeUrl(opts.line)) return opts.line.trim();
+  if (looksLikeUrl(opts.line)) {
+    return opts.line.trim();
+  }
   return null;
 }
 
 function extractLinkLabel(opts: { readonly text: string }): string | null {
-  const match = opts.text.match(/\[([^\]]+)\]\(([^)]+)\)/);
-  if (match?.[1]) return match[1].trim();
-  if (match?.[2]) return match[2].trim();
+  const match = opts.text.match(MARKDOWN_LINK_REGEX);
+  if (match?.[1]) {
+    return match[1].trim();
+  }
+  if (match?.[2]) {
+    return match[2].trim();
+  }
   return null;
 }
 
 function looksLikeUrl(value: string): boolean {
-  return /^https?:\/\//i.test(value.trim());
+  return URL_REGEX.test(value.trim());
 }
 
 function normalizeHeading(value: string): string {
@@ -1226,7 +1287,9 @@ function summarizeMetaItems(opts: {
   readonly maxItems: number;
 }): string {
   const cleaned = uniqueNonEmpty(opts.items);
-  if (cleaned.length === 0) return "";
+  if (cleaned.length === 0) {
+    return "";
+  }
   const limited = cleaned.slice(0, Math.max(1, opts.maxItems));
   const suffix =
     cleaned.length > limited.length
@@ -1240,8 +1303,12 @@ function uniqueNonEmpty(items: readonly string[]): string[] {
   const seen = new Set<string>();
   for (const raw of items) {
     const value = raw.trim();
-    if (!value) continue;
-    if (seen.has(value)) continue;
+    if (!value) {
+      continue;
+    }
+    if (seen.has(value)) {
+      continue;
+    }
     seen.add(value);
     out.push(value);
   }
@@ -1475,8 +1542,12 @@ function applyAnsiCodes(opts: {
 }
 
 function clampColor(value: number): number {
-  if (value < 0) return 0;
-  if (value > 255) return 255;
+  if (value < 0) {
+    return 0;
+  }
+  if (value > 255) {
+    return 255;
+  }
   return Math.round(value);
 }
 
@@ -1505,8 +1576,12 @@ function ansiToRgba(code: number, bright: boolean): RGBA {
 }
 
 function xtermToRgba(code: number): RGBA {
-  if (code < 0) return ansiToRgba(0, false);
-  if (code < 16) return ansiToRgba(code % 8, code >= 8);
+  if (code < 0) {
+    return ansiToRgba(0, false);
+  }
+  if (code < 16) {
+    return ansiToRgba(code % 8, code >= 8);
+  }
   if (code >= 232) {
     const shade = 8 + (code - 232) * 10;
     return RGBA.fromInts(shade, shade, shade, 255);

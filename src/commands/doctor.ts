@@ -359,18 +359,23 @@ async function checkTool(opts: {
   readonly optional?: boolean;
 }): Promise<CheckResult> {
   const path = await findExecutableInPath(opts.cmd);
-  return {
-    name: opts.name,
-    status: path ? "ok" : opts.optional ? "warn" : "error",
-    message: path
-      ? path
-      : opts.optional
-        ? "Not found (optional)"
-        : "Not found in PATH",
-  };
+  let status: CheckStatus;
+  let message: string;
+  if (path) {
+    status = "ok";
+    message = path;
+  } else if (opts.optional) {
+    status = "warn";
+    message = "Not found (optional)";
+  } else {
+    status = "error";
+    message = "Not found in PATH";
+  }
+
+  return { name: opts.name, status, message };
 }
 
-async function checkOptionalGum(): Promise<CheckResult> {
+function checkOptionalGum(): CheckResult {
   const gum = getGumPath();
   if (!gum) {
     return {
@@ -382,7 +387,7 @@ async function checkOptionalGum(): Promise<CheckResult> {
   return { name: "gum (optional)", status: "ok", message: gum };
 }
 
-async function checkOptionalFzf(): Promise<CheckResult> {
+function checkOptionalFzf(): CheckResult {
   const fzf = getFzfPath();
   if (!fzf) {
     return {
@@ -1187,12 +1192,14 @@ async function checkComposeNetworkHygiene({
 
   const analysis = analyzeComposeNetworkHygiene({ yamlText });
   if ("error" in analysis) {
-    const message =
-      analysis.error === "invalid-yaml"
-        ? `Invalid YAML in ${ctx.composeFile}`
-        : analysis.error === "missing-services"
-          ? `Missing services in ${ctx.composeFile}`
-          : `Unexpected compose format in ${ctx.composeFile}`;
+    let message: string;
+    if (analysis.error === "invalid-yaml") {
+      message = `Invalid YAML in ${ctx.composeFile}`;
+    } else if (analysis.error === "missing-services") {
+      message = `Missing services in ${ctx.composeFile}`;
+    } else {
+      message = `Unexpected compose format in ${ctx.composeFile}`;
+    }
     return {
       name: "compose networks",
       status: "warn",
@@ -1672,12 +1679,14 @@ function formatTimedResult(opts: {
   const color = (code: string, text: string) =>
     enableColor ? `${code}${text}${RESET}` : text;
 
-  const icon =
-    opts.result.status === "ok"
-      ? color(GREEN, "✓")
-      : opts.result.status === "warn"
-        ? color(YELLOW, "!")
-        : color(RED, "✗");
+  let icon: string;
+  if (opts.result.status === "ok") {
+    icon = color(GREEN, "✓");
+  } else if (opts.result.status === "warn") {
+    icon = color(YELLOW, "!");
+  } else {
+    icon = color(RED, "✗");
+  }
 
   const name = enableColor
     ? `${BOLD}${opts.result.name}${RESET}`
@@ -1706,7 +1715,7 @@ function renderMacNote(): void {
 async function runCheck(
   s: ReturnType<typeof spinner>,
   name: string,
-  fn: () => Promise<CheckResult>,
+  fn: () => CheckResult | Promise<CheckResult>,
   opts?: { readonly timeoutMs?: number }
 ): Promise<TimedCheckResult> {
   const start = Date.now();

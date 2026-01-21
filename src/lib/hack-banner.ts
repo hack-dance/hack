@@ -1,5 +1,7 @@
 const hackBannerUrl = new URL("./hack.txt", import.meta.url);
 
+const LINE_BREAK_PATTERN = /\r?\n/;
+
 let cachedLines: string[] | null = null;
 
 export async function loadHackBannerLines(): Promise<string[]> {
@@ -8,7 +10,7 @@ export async function loadHackBannerLines(): Promise<string[]> {
   }
   try {
     const text = await Bun.file(hackBannerUrl).text();
-    cachedLines = text.split(/\r?\n/);
+    cachedLines = text.split(LINE_BREAK_PATTERN);
   } catch {
     cachedLines = [];
   }

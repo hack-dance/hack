@@ -183,7 +183,7 @@ const daemonSpec = defineCommand({
 
 export const daemonCommand = withHandler(
   daemonSpec,
-  async ({ ctx }): Promise<number> => {
+  ({ ctx }): Promise<number> => {
     throw new CliUsageError(`Missing subcommand for ${ctx.cli.name} daemon`);
   }
 );
@@ -504,19 +504,17 @@ async function handleDaemonInstall({
   const paths = resolveDaemonPaths({});
   const controlPlane = await readControlPlaneConfig({});
 
-  const runAtLoad =
-    args.options["run-at-load"] === true
-      ? true
-      : args.options["no-run-at-load"] === true
-        ? false
-        : controlPlane.config.daemon.launchd.runAtLoad;
+  const runAtLoad = resolveRunAtLoadOption({
+    runAtLoadOpt: args.options["run-at-load"],
+    noRunAtLoadOpt: args.options["no-run-at-load"],
+    defaultValue: controlPlane.config.daemon.launchd.runAtLoad,
+  });
 
-  const guiSessionOnly =
-    args.options["no-gui-only"] === true
-      ? false
-      : args.options["gui-only"] === true
-        ? true
-        : controlPlane.config.daemon.launchd.guiSessionOnly;
+  const guiSessionOnly = resolveGuiSessionOnlyOption({
+    guiOnlyOpt: args.options["gui-only"],
+    noGuiOnlyOpt: args.options["no-gui-only"],
+    defaultValue: controlPlane.config.daemon.launchd.guiSessionOnly,
+  });
 
   const launchdConfig: DaemonLaunchdConfig = {
     installed: true,
@@ -579,6 +577,34 @@ async function handleDaemonInstall({
   }
 
   return 0;
+}
+
+function resolveRunAtLoadOption(opts: {
+  readonly runAtLoadOpt: boolean | undefined;
+  readonly noRunAtLoadOpt: boolean | undefined;
+  readonly defaultValue: boolean;
+}): boolean {
+  if (opts.runAtLoadOpt === true) {
+    return true;
+  }
+  if (opts.noRunAtLoadOpt === true) {
+    return false;
+  }
+  return opts.defaultValue;
+}
+
+function resolveGuiSessionOnlyOption(opts: {
+  readonly guiOnlyOpt: boolean | undefined;
+  readonly noGuiOnlyOpt: boolean | undefined;
+  readonly defaultValue: boolean;
+}): boolean {
+  if (opts.noGuiOnlyOpt === true) {
+    return false;
+  }
+  if (opts.guiOnlyOpt === true) {
+    return true;
+  }
+  return opts.defaultValue;
 }
 
 async function handleDaemonUninstall({

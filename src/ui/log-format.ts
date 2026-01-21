@@ -1,6 +1,16 @@
 import { isRecord } from "../lib/guards.ts";
 import { isColorEnabled } from "./terminal.ts";
 
+/** Matches a service name with instance suffix (e.g., "myservice#1") */
+const SERVICE_INSTANCE_REGEX = /^(.*?)(#\d+)$/;
+
+/** Matches ISO 8601 timestamp prefix from log line (e.g., "2024-01-15T12:34:56.789Z") */
+const ISO_TIMESTAMP_PREFIX_REGEX =
+  /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)([\s\S]*)$/;
+
+/** Extracts time components from ISO timestamp (e.g., "12:34:56" and optional fractional seconds) */
+const ISO_TIME_COMPONENTS_REGEX = /T(\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$/;
+
 export type OutputStream = "stdout" | "stderr";
 
 export type LogInputFormat = "auto" | "docker-compose" | "plain";
@@ -30,12 +40,7 @@ export function formatPrettyLogLine(opts: {
       : (parseAnyLevel(json?.level) ??
         parseAnyLevel(json?.lvl) ??
         parseAnyLevel(json?.severity));
-  const msg =
-    typeof json?.msg === "string"
-      ? json.msg
-      : typeof json?.message === "string"
-        ? json.message
-        : payload;
+  const msg = extractLogMessage({ json, payload });
 
   const fields = json ? extractFields(json) : null;
 
@@ -193,14 +198,7 @@ function formatLevel(opts: {
   readonly level: LogLevel;
   readonly tty: boolean;
 }): string {
-  const label =
-    opts.level === "debug"
-      ? "DEBUG"
-      : opts.level === "warn"
-        ? "WARN"
-        : opts.level === "error"
-          ? "ERROR"
-          : "INFO";
+  const label = getLogLevelLabel(opts.level);
 
   if (!opts.tty) {
     return `[${label}]`;
@@ -219,14 +217,7 @@ function formatLevel(opts: {
 type AnsiColor = "dim" | "red" | "yellow" | "cyan";
 
 function color(text: string, kind: AnsiColor): string {
-  const code =
-    kind === "dim"
-      ? "\x1b[2m"
-      : kind === "red"
-        ? "\x1b[31m"
-        : kind === "yellow"
-          ? "\x1b[33m"
-          : "\x1b[36m";
+  const code = getAnsiCode(kind);
   return `${code}${text}\x1b[0m`;
 }
 
@@ -254,7 +245,7 @@ function splitServiceInstance(service: string): {
   readonly base: string;
   readonly instance: string | null;
 } {
-  const match = service.match(/^(.*?)(#\d+)$/);
+  const match = service.match(SERVICE_INSTANCE_REGEX);
   if (!match) {
     return { base: service, instance: null };
   }
@@ -267,9 +258,7 @@ function splitIsoTimestampPrefix(payload: string): {
   readonly timestampIso: string | null;
   readonly payload: string;
 } {
-  const match = payload.match(
-    /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)([\s\S]*)$/
-  );
+  const match = payload.match(ISO_TIMESTAMP_PREFIX_REGEX);
   if (!match) {
     return { timestampIso: null, payload };
   }
@@ -295,7 +284,7 @@ function formatTimePrefix(opts: {
 }
 
 function isoToClock(iso: string): string {
-  const match = iso.match(/T(\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$/);
+  const match = iso.match(ISO_TIME_COMPONENTS_REGEX);
   if (!match) {
     return iso;
   }
@@ -306,4 +295,58 @@ function isoToClock(iso: string): string {
   }
   const ms = frac.slice(0, 3).padEnd(3, "0");
   return `${hms}.${ms}`;
+}
+
+/**
+ * Extracts the log message from a parsed JSON log or falls back to the raw payload.
+ */
+function extractLogMessage(opts: {
+  readonly json: JsonLog | null;
+  readonly payload: string;
+}): string {
+  if (typeof opts.json?.msg === "string") {
+    return opts.json.msg;
+  }
+  if (typeof opts.json?.message === "string") {
+    return opts.json.message;
+  }
+  return opts.payload;
+}
+
+/**
+ * Returns the uppercase label for a log level.
+ */
+function getLogLevelLabel(
+  level: LogLevel
+): "DEBUG" | "WARN" | "ERROR" | "INFO" {
+  switch (level) {
+    case "debug":
+      return "DEBUG";
+    case "warn":
+      return "WARN";
+    case "error":
+      return "ERROR";
+    default:
+      return "INFO";
+  }
+}
+
+/**
+ * Returns the ANSI escape code for a color.
+ */
+function getAnsiCode(kind: AnsiColor): string {
+  switch (kind) {
+    case "dim":
+      return "\x1b[2m";
+    case "red":
+      return "\x1b[31m";
+    case "yellow":
+      return "\x1b[33m";
+    case "cyan":
+      return "\x1b[36m";
+    default: {
+      const _exhaustive: never = kind;
+      return _exhaustive;
+    }
+  }
 }

@@ -54,7 +54,7 @@ type SyncResult =
     }
   | { readonly ok: false; readonly error: string };
 
-export async function createTicketsStore(opts: {
+export function createTicketsStore(opts: {
   readonly projectRoot: string;
   readonly projectId?: string;
   readonly projectName?: string;
@@ -63,7 +63,7 @@ export async function createTicketsStore(opts: {
     info: (input: { message: string }) => void;
     warn: (input: { message: string }) => void;
   };
-}): Promise<{
+}): {
   readonly createTicket: (input: {
     readonly title: string;
     readonly body?: string;
@@ -100,8 +100,8 @@ export async function createTicketsStore(opts: {
     { readonly ok: true } | { readonly ok: false; readonly error: string }
   >;
   readonly sync: () => Promise<SyncResult>;
-}> {
-  const git = await createGitTicketsChannel({
+} {
+  const git = createGitTicketsChannel({
     projectRoot: opts.projectRoot,
     config: opts.controlPlaneConfig.tickets.git,
     logger: opts.logger,

@@ -48,17 +48,23 @@ export async function discoverRepo(repoRoot: string): Promise<RepoDiscovery> {
   ];
 
   const hasTurbo = await pathExists(resolve(repoRoot, "turbo.json"));
-  if (hasTurbo) signals.push("turbo.json");
+  if (hasTurbo) {
+    signals.push("turbo.json");
+  }
 
   const hasLerna = await pathExists(resolve(repoRoot, "lerna.json"));
-  if (hasLerna) signals.push("lerna.json");
+  if (hasLerna) {
+    signals.push("lerna.json");
+  }
 
   const patterns =
     workspacePatterns.length > 0
       ? dedupe(workspacePatterns)
       : await guessWorkspacePatterns(repoRoot);
 
-  if (patterns.length > 0) signals.push("workspaces");
+  if (patterns.length > 0) {
+    signals.push("workspaces");
+  }
 
   const packageJsonRelPaths = new Set<string>();
   packageJsonRelPaths.add("package.json");
@@ -71,8 +77,12 @@ export async function discoverRepo(repoRoot: string): Promise<RepoDiscovery> {
       onlyFiles: true,
       dot: false,
     })) {
-      if (relPath.includes("node_modules/")) continue;
-      if (relPath.includes("/.git/")) continue;
+      if (relPath.includes("node_modules/")) {
+        continue;
+      }
+      if (relPath.includes("/.git/")) {
+        continue;
+      }
       packageJsonRelPaths.add(relPath);
     }
   }
@@ -110,7 +120,9 @@ export async function discoverRepo(repoRoot: string): Promise<RepoDiscovery> {
 
 async function readPackageJson(absolutePath: string): Promise<PackageJsonInfo> {
   const text = await readTextFile(absolutePath);
-  if (!text) return { name: null, scripts: new Map(), workspaces: [] };
+  if (!text) {
+    return { name: null, scripts: new Map(), workspaces: [] };
+  }
 
   let data: unknown;
   try {
@@ -119,16 +131,19 @@ async function readPackageJson(absolutePath: string): Promise<PackageJsonInfo> {
     return { name: null, scripts: new Map(), workspaces: [] };
   }
 
-  if (!isRecord(data))
+  if (!isRecord(data)) {
     return { name: null, scripts: new Map(), workspaces: [] };
+  }
 
-  const name = isString(data["name"]) ? data["name"] : null;
+  const name = isString(data.name) ? data.name : null;
 
   const scriptsMap = new Map<string, string>();
-  const scriptsRaw = data["scripts"];
+  const scriptsRaw = data.scripts;
   if (isRecord(scriptsRaw)) {
     for (const [k, v] of Object.entries(scriptsRaw)) {
-      if (typeof v === "string") scriptsMap.set(k, v);
+      if (typeof v === "string") {
+        scriptsMap.set(k, v);
+      }
     }
   }
 
@@ -142,11 +157,15 @@ async function readPackageJson(absolutePath: string): Promise<PackageJsonInfo> {
 }
 
 function parseWorkspacesField(pkg: Record<string, unknown>): string[] {
-  const ws = pkg["workspaces"];
-  if (isStringArray(ws)) return ws;
+  const ws = pkg.workspaces;
+  if (isStringArray(ws)) {
+    return ws;
+  }
   if (isRecord(ws)) {
-    const pkgs = ws["packages"];
-    if (isStringArray(pkgs)) return pkgs;
+    const pkgs = ws.packages;
+    if (isStringArray(pkgs)) {
+      return pkgs;
+    }
   }
   return [];
 }
@@ -154,7 +173,9 @@ function parseWorkspacesField(pkg: Record<string, unknown>): string[] {
 async function readPnpmWorkspacePatterns(repoRoot: string): Promise<string[]> {
   const pnpmPath = resolve(repoRoot, "pnpm-workspace.yaml");
   const text = await readTextFile(pnpmPath);
-  if (!text) return [];
+  if (!text) {
+    return [];
+  }
 
   let parsed: unknown;
   try {
@@ -162,9 +183,11 @@ async function readPnpmWorkspacePatterns(repoRoot: string): Promise<string[]> {
   } catch {
     return [];
   }
-  if (!isRecord(parsed)) return [];
+  if (!isRecord(parsed)) {
+    return [];
+  }
 
-  const packages = parsed["packages"];
+  const packages = parsed.packages;
   return isStringArray(packages) ? packages : [];
 }
 
@@ -205,7 +228,9 @@ function buildServiceCandidates(
   for (const pkg of packages) {
     for (const [scriptName, scriptCommand] of pkg.scripts.entries()) {
       const score = scoreDevScript(scriptName);
-      if (score === 0) continue;
+      if (score === 0) {
+        continue;
+      }
 
       out.push({
         id: `${pkg.id}:${scriptName}`,
@@ -226,11 +251,21 @@ function buildServiceCandidates(
 
 function scoreDevScript(name: string): number {
   const n = name.toLowerCase();
-  if (n === "dev") return 100;
-  if (n.startsWith("dev:")) return 80;
-  if (n === "start") return 40;
-  if (n === "serve") return 30;
-  if (n === "watch") return 20;
+  if (n === "dev") {
+    return 100;
+  }
+  if (n.startsWith("dev:")) {
+    return 80;
+  }
+  if (n === "start") {
+    return 40;
+  }
+  if (n === "serve") {
+    return 30;
+  }
+  if (n === "watch") {
+    return 20;
+  }
   return 0;
 }
 
@@ -238,7 +273,9 @@ function dedupe(values: readonly string[]): string[] {
   const set = new Set<string>();
   for (const v of values) {
     const trimmed = v.trim();
-    if (trimmed.length === 0) continue;
+    if (trimmed.length === 0) {
+      continue;
+    }
     set.add(trimmed);
   }
   return [...set];

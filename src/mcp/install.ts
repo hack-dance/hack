@@ -3,6 +3,10 @@ import { dirname, resolve } from "node:path";
 import { ensureDir, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 
+const CODEX_SERVER_BLOCK_PATTERN =
+  /^\s*\[mcp_servers\.hack\][\s\S]*?(?=^\s*\[|\s*$)/m;
+const CODEX_SERVER_HEADER_PATTERN = /^\s*\[mcp_servers\.hack\]\s*$/m;
+
 export type McpTarget = "claude" | "codex" | "cursor";
 export type McpInstallScope = "project" | "user";
 
@@ -150,7 +154,7 @@ export async function checkMcpConfig(opts: {
       continue;
     }
 
-    const mcpServersRaw = parsed.value["mcpServers"];
+    const mcpServersRaw = parsed.value.mcpServers;
     const mcpServers = isRecord(mcpServersRaw) ? mcpServersRaw : {};
     const present = Boolean(mcpServers[SERVER_NAME]);
     results.push({
@@ -270,7 +274,7 @@ async function installJsonConfig(opts: {
   }
 
   const current = parsed.value;
-  const mcpServersRaw = current["mcpServers"];
+  const mcpServersRaw = current.mcpServers;
   const mcpServers = isRecord(mcpServersRaw) ? { ...mcpServersRaw } : {};
   mcpServers[SERVER_NAME] = opts.entry;
 
@@ -304,7 +308,9 @@ async function removeJsonConfig(opts: { readonly path: string }): Promise<{
   readonly message?: string;
 }> {
   const text = await readTextFile(opts.path);
-  if (!text) return { status: "noop" };
+  if (!text) {
+    return { status: "noop" };
+  }
 
   const parsed = parseJsonObject(text);
   if (!parsed.ok) {
@@ -312,7 +318,7 @@ async function removeJsonConfig(opts: { readonly path: string }): Promise<{
   }
 
   const current = parsed.value;
-  const mcpServersRaw = current["mcpServers"];
+  const mcpServersRaw = current.mcpServers;
   const mcpServers = isRecord(mcpServersRaw) ? { ...mcpServersRaw } : {};
   if (!Object.hasOwn(mcpServers, SERVER_NAME)) {
     return { status: "noop" };
@@ -323,7 +329,7 @@ async function removeJsonConfig(opts: { readonly path: string }): Promise<{
     Object.keys(mcpServers).length === 0
       ? (() => {
           const clone = { ...current };
-          delete clone["mcpServers"];
+          clone.mcpServers = undefined;
           return clone;
         })()
       : { ...current, mcpServers };
@@ -338,11 +344,14 @@ async function removeCodexConfig(opts: { readonly path: string }): Promise<{
   readonly message?: string;
 }> {
   const text = await readTextFile(opts.path);
-  if (!text) return { status: "noop" };
-  if (!hasCodexServerBlock(text)) return { status: "noop" };
+  if (!text) {
+    return { status: "noop" };
+  }
+  if (!hasCodexServerBlock(text)) {
+    return { status: "noop" };
+  }
 
-  const pattern = /^\s*\[mcp_servers\.hack\][\s\S]*?(?=^\s*\[|\s*$)/m;
-  const next = text.replace(pattern, "").trimEnd();
+  const next = text.replace(CODEX_SERVER_BLOCK_PATTERN, "").trimEnd();
   const normalized = next.length === 0 ? "" : `${next}\n`;
   const result = await writeTextFileIfChanged(opts.path, normalized);
   return { status: result.changed ? "removed" : "noop" };
@@ -357,7 +366,7 @@ function renderCodexTomlBlock(): string {
 }
 
 function hasCodexServerBlock(text: string): boolean {
-  return /^\s*\[mcp_servers\.hack\]\s*$/m.test(text);
+  return CODEX_SERVER_HEADER_PATTERN.test(text);
 }
 
 function resolveConfigPath(opts: {
@@ -409,6 +418,10 @@ function resolveConfigPath(opts: {
             ? resolve(home ?? "", ".codex", "config.toml")
             : resolve(projectRoot, ".codex", "config.toml"),
       };
+    default: {
+      const _exhaustive: never = opts.target;
+      return { ok: false, message: `Unknown target: ${_exhaustive}` };
+    }
   }
 }
 

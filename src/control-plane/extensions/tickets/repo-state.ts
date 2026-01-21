@@ -53,12 +53,12 @@ export async function checkTicketsRepoState(opts: {
   const gitignorePath = resolve(opts.projectRoot, ".gitignore");
   const gitignoreText = await readTextFile(gitignorePath);
 
-  const gitignoreStatus: TicketsRepoState["gitignore"] =
-    gitignoreText === null
-      ? { status: "missing", path: gitignorePath }
-      : hasGitignoreEntry({ content: gitignoreText })
-        ? { status: "present", path: gitignorePath }
-        : { status: "missing", path: gitignorePath };
+  const gitignoreStatus: TicketsRepoState["gitignore"] = resolveGitignoreStatus(
+    {
+      gitignoreText,
+      gitignorePath,
+    }
+  );
 
   const tracked = await runGit({
     cwd: opts.projectRoot,
@@ -136,6 +136,19 @@ export async function untrackTicketsRepo(opts: {
   }
 
   return { status: "removed" };
+}
+
+function resolveGitignoreStatus(opts: {
+  readonly gitignoreText: string | null;
+  readonly gitignorePath: string;
+}): TicketsRepoState["gitignore"] {
+  if (opts.gitignoreText === null) {
+    return { status: "missing", path: opts.gitignorePath };
+  }
+  if (hasGitignoreEntry({ content: opts.gitignoreText })) {
+    return { status: "present", path: opts.gitignorePath };
+  }
+  return { status: "missing", path: opts.gitignorePath };
 }
 
 function hasGitignoreEntry(opts: { readonly content: string }): boolean {

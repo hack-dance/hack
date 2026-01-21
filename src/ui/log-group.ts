@@ -1,3 +1,7 @@
+/** Matches ISO 8601 timestamp prefix with trailing content (e.g., "2024-01-15T12:34:56.789Z rest...") */
+const ISO_TIMESTAMP_PREFIX_REGEX =
+  /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\s+([\s\S]*)$/;
+
 export type LogLineFormatter = (line: string) => string;
 
 export interface StructuredLogGrouper {
@@ -108,9 +112,7 @@ function splitComposeLine(
 }
 
 function stripIsoTimestampPrefix(payload: string): string {
-  const match = payload.match(
-    /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\s+([\s\S]*)$/
-  );
+  const match = payload.match(ISO_TIMESTAMP_PREFIX_REGEX);
   if (!match) {
     return payload;
   }

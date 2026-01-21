@@ -67,7 +67,9 @@ function recordFromMap(
   map: ReadonlyMap<string, string>
 ): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const [k, v] of map.entries()) out[k] = v;
+  for (const [k, v] of map.entries()) {
+    out[k] = v;
+  }
   return out;
 }
 

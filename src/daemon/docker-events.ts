@@ -34,7 +34,9 @@ export function startDockerEventWatcher(opts: {
       const stdoutTask = (async () => {
         for await (const line of readLinesFromStream(proc.stdout)) {
           const event = parseDockerEvent({ line });
-          if (event) opts.onEvent(event);
+          if (event) {
+            opts.onEvent(event);
+          }
         }
       })();
 
@@ -42,14 +44,18 @@ export function startDockerEventWatcher(opts: {
       const stderrTask = (async () => {
         for await (const line of readLinesFromStream(proc.stderr)) {
           const trimmed = line.trim();
-          if (trimmed.length > 0) stderrLines.push(trimmed);
+          if (trimmed.length > 0) {
+            stderrLines.push(trimmed);
+          }
         }
       })();
 
       const exitCode = await proc.exited;
       await Promise.all([stdoutTask, stderrTask]);
 
-      if (stopped) return;
+      if (stopped) {
+        return;
+      }
 
       if (stderrLines.length > 0) {
         opts.onError(stderrLines.join("\n"));
@@ -77,7 +83,9 @@ export function startDockerEventWatcher(opts: {
 
 function parseDockerEvent(opts: { readonly line: string }): DockerEvent | null {
   const trimmed = opts.line.trim();
-  if (trimmed.length === 0) return null;
+  if (trimmed.length === 0) {
+    return null;
+  }
   try {
     const parsed: unknown = JSON.parse(trimmed);
     return isRecord(parsed) ? parsed : null;

@@ -1,3 +1,5 @@
+const DIGITS_ONLY_PATTERN = /^\d+$/;
+
 export function unixSeconds(): number {
   return Math.floor(Date.now() / 1000);
 }
@@ -41,7 +43,7 @@ export function normalizeTicketRef(input: string): string | null {
     const n = parseTicketNumber(upper);
     return n === null ? null : formatTicketId(n);
   }
-  if (/^\d+$/.test(raw)) {
+  if (DIGITS_ONLY_PATTERN.test(raw)) {
     return formatTicketId(Number(raw));
   }
   return null;

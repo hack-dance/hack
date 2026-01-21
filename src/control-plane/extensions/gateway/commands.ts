@@ -48,7 +48,7 @@ export const GATEWAY_COMMANDS: readonly ExtensionCommand[] = [
     name: "token-list",
     summary: "List gateway tokens",
     scope: "global",
-    handler: async ({ args }) => {
+    handler: async ({ args: _args }) => {
       const paths = resolveDaemonPaths({});
       const tokens = await listGatewayTokens({ rootDir: paths.root });
 

@@ -63,9 +63,7 @@ async function streamToText(
   return await new Response(stream).text();
 }
 
-export async function findExecutableInPath(
-  executableName: string
-): Promise<string | null> {
+export function findExecutableInPath(executableName: string): string | null {
   const resolved = Bun.which(executableName);
   return typeof resolved === "string" ? resolved : null;
 }

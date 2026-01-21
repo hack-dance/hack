@@ -2,7 +2,6 @@ import { readLinesFromStream } from "./lines.ts";
 import { formatPrettyLogLine } from "./log-format.ts";
 import { createStructuredLogGrouper } from "./log-group.ts";
 import { parseComposeLogLine, writeJsonLogLine } from "./log-json.ts";
-
 import type { LogStreamContext } from "./log-stream.ts";
 import {
   buildLogStreamEndEvent,
@@ -10,6 +9,9 @@ import {
   buildLogStreamStartEvent,
   writeLogStreamEvent,
 } from "./log-stream.ts";
+
+/** Matches a service name with a trailing instance number (e.g., "myservice-1") */
+const SERVICE_INSTANCE_REGEX = /^(.*?)-(\d+)$/;
 
 export interface DockerComposeLogsParams {
   readonly composeFile: string;
@@ -247,7 +249,7 @@ function parseComposeServiceAndInstance(opts: {
       ? trimmed.slice(`${opts.projectName}-`.length)
       : trimmed;
 
-  const match = withoutProjectPrefix.match(/^(.*?)-(\d+)$/);
+  const match = withoutProjectPrefix.match(SERVICE_INSTANCE_REGEX);
   if (!match) {
     return { service: withoutProjectPrefix, instance: null };
   }

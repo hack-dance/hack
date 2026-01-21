@@ -44,6 +44,37 @@ import { parseTimeInput } from "../lib/time.ts";
 import { copyToClipboard } from "../ui/clipboard.ts";
 import type { LogStreamBackend, LogStreamEvent } from "../ui/log-stream.ts";
 
+/** Matches block characters used in ASCII banners */
+const BLOCK_CHARS_REGEX = /[█░▒▓]/;
+
+/** Matches signed decimal numbers (e.g., "42", "-3.14", ".5") */
+const DECIMAL_NUMBER_REGEX = /-?\d+(?:\.\d+)?/;
+
+/** Matches bytes value with optional unit (e.g., "100", "1.5 GB", "-2MiB") */
+const BYTES_VALUE_REGEX = /^(-?\d+(?:\.\d+)?)\s*([A-Za-z]+)?$/;
+
+/** Extracts time components from ISO timestamp (e.g., "12:34:56" and optional fractional seconds) */
+const ISO_TIME_COMPONENTS_REGEX = /T(\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$/;
+
+/** Matches JSON closing brackets at start of line (continuation detection) */
+const JSON_CLOSING_BRACKETS_REGEX = /^[\],}]/;
+
+/** Matches open brackets at end of line (continuation detection) */
+const OPEN_BRACKETS_AT_END_REGEX = /[{[(]$/;
+
+/** Matches colon at end of line (continuation detection) */
+const COLON_AT_END_REGEX = /:$/;
+
+/** Matches trailing comma (continuation detection) */
+const TRAILING_COMMA_REGEX = /,\s*$/;
+
+/** Matches arrow function at end of line (continuation detection) */
+const ARROW_AT_END_REGEX = /=>\s*$/;
+
+/** Matches log level keywords in messages */
+const LOG_LEVEL_KEYWORD_REGEX =
+  /\b(TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL|PANIC)\b/i;
+
 type HackTuiOptions = {
   readonly project: ProjectContext;
 };
@@ -111,7 +142,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
   let renderer: Awaited<ReturnType<typeof createCliRenderer>> | null = null;
   const errorLogPath = resolve(homedir(), ".hack", "tui-error.log");
   let errorHandled = false;
-  let shutdown: (() => Promise<void>) | null = null;
+  let shutdown: (() => void) | null = null;
   let logsHasSelection = false;
   let handleSelectionChange: (() => void) | null = null;
 
@@ -133,13 +164,15 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     readonly error: unknown;
     readonly source: string;
   }) => {
-    if (errorHandled) return;
+    if (errorHandled) {
+      return;
+    }
     errorHandled = true;
     await logTuiError(opts);
     if (shutdown) {
-      await shutdown();
+      shutdown();
     } else {
-      await shutdownRenderer({ renderer });
+      shutdownRenderer({ renderer });
     }
     process.stderr.write(
       `Hack TUI failed: ${formatErrorMessage({ error: opts.error })}\nSee ${errorLogPath}\n`
@@ -183,7 +216,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     });
     const headerBannerLine = headerBanner.length > 0 ? headerBanner.trim() : "";
     const headerLabel =
-      headerBannerLine.length > 0 && !/[█░▒▓]/.test(headerBannerLine)
+      headerBannerLine.length > 0 && !BLOCK_CHARS_REGEX.test(headerBannerLine)
         ? headerBannerLine
         : "hack";
 
@@ -798,9 +831,15 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     };
 
     const truncateLine = (line: string, width: number): string => {
-      if (width <= 0) return "";
-      if (line.length <= width) return line;
-      if (width <= 3) return line.slice(0, width);
+      if (width <= 0) {
+        return "";
+      }
+      if (line.length <= width) {
+        return line;
+      }
+      if (width <= 3) {
+        return line.slice(0, width);
+      }
       return `${line.slice(0, width - 3)}...`;
     };
 
@@ -808,7 +847,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       readonly message: StyledText;
       readonly durationMs?: number;
     }) => {
-      if (!isActive) return;
+      if (!isActive) {
+        return;
+      }
       toastMessage = opts.message;
       renderFooter();
       if (toastTimer) {
@@ -823,7 +864,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     };
 
     const updateSearchRecent = () => {
-      if (!isActive) return;
+      if (!isActive) {
+        return;
+      }
       if (recentSearches.length === 0) {
         searchRecentText.content = t`${dim("Recent: none")}`;
         return;
@@ -834,7 +877,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
 
     const recordSearchQuery = (opts: { readonly query: string }) => {
       const cleaned = opts.query.trim();
-      if (cleaned.length === 0) return;
+      if (cleaned.length === 0) {
+        return;
+      }
       const existingIndex = recentSearches.findIndex(
         (item) => item.toLowerCase() === cleaned.toLowerCase()
       );
@@ -880,7 +925,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     const describeEnabledLevels = (): string => {
       const order = ["info", "warn", "error", "debug"] as const;
       const enabled = order.filter((level) => enabledLevels.has(level));
-      if (enabled.length === 0) return "none";
+      if (enabled.length === 0) {
+        return "none";
+      }
       return enabled.join(", ");
     };
 
@@ -1011,16 +1058,30 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       const untilMs = untilTime ? untilTime.getTime() : null;
 
       return logState.entries.filter((entry) => {
-        if (opts.service && entry.service !== opts.service) return false;
-        if (opts.level !== "all" && entry.level !== opts.level) return false;
-        if (sinceMs !== null || untilMs !== null) {
-          if (!entry.timestamp) return false;
-          const tsMs = Date.parse(entry.timestamp);
-          if (!Number.isFinite(tsMs)) return false;
-          if (sinceMs !== null && tsMs < sinceMs) return false;
-          if (untilMs !== null && tsMs > untilMs) return false;
+        if (opts.service && entry.service !== opts.service) {
+          return false;
         }
-        if (query.length === 0) return true;
+        if (opts.level !== "all" && entry.level !== opts.level) {
+          return false;
+        }
+        if (sinceMs !== null || untilMs !== null) {
+          if (!entry.timestamp) {
+            return false;
+          }
+          const tsMs = Date.parse(entry.timestamp);
+          if (!Number.isFinite(tsMs)) {
+            return false;
+          }
+          if (sinceMs !== null && tsMs < sinceMs) {
+            return false;
+          }
+          if (untilMs !== null && tsMs > untilMs) {
+            return false;
+          }
+        }
+        if (query.length === 0) {
+          return true;
+        }
         const haystack = [entry.line, entry.messagePlain, entry.service ?? ""]
           .map(normalizeSearchText)
           .join(" ");
@@ -1029,13 +1090,16 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     };
 
     const renderFooter = () => {
-      const focusLabel = searchOverlayVisible
-        ? "Search"
-        : searchMode === "results"
-          ? "Results"
-          : activePane === "services"
-            ? "Services"
-            : "Logs";
+      let focusLabel: string;
+      if (searchOverlayVisible) {
+        focusLabel = "Search";
+      } else if (searchMode === "results") {
+        focusLabel = "Results";
+      } else if (activePane === "services") {
+        focusLabel = "Services";
+      } else {
+        focusLabel = "Logs";
+      }
       const focusHint = t`${dim("focus:")} ${fg("#9ad7ff")(focusLabel)}`;
       const toastHint = toastMessage;
       const copyHint = logsHasSelection
@@ -1048,11 +1112,14 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       const highlightActive =
         highlightEnabled && highlightQuery.trim().length > 0;
       const highlightValue = highlightActive ? highlightQuery.trim() : null;
-      const queryIndicator = resultsQuery
-        ? t`${dim("search:")} ${fg("#9ad7ff")(truncateLine(resultsQuery, 18))}`
-        : highlightValue
-          ? t`${dim("hl:")} ${fg("#9ad7ff")(truncateLine(highlightValue, 18))}`
-          : null;
+      let queryIndicator: ReturnType<typeof t> | null;
+      if (resultsQuery) {
+        queryIndicator = t`${dim("search:")} ${fg("#9ad7ff")(truncateLine(resultsQuery, 18))}`;
+      } else if (highlightValue) {
+        queryIndicator = t`${dim("hl:")} ${fg("#9ad7ff")(truncateLine(highlightValue, 18))}`;
+      } else {
+        queryIndicator = null;
+      }
       const clearHint =
         resultsQuery || highlightValue
           ? t`${dim("[")}${fg("#9ad7ff")("x")}${dim("]")} clear`
@@ -1068,7 +1135,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
           "ctrl+c"
         )}${dim("]")} close`;
         const parts = [navHint, actions, focusHint];
-        if (toastHint) parts.push(toastHint);
+        if (toastHint) {
+          parts.push(toastHint);
+        }
         footerText.content = joinStyledText({ parts });
         return;
       }
@@ -1081,10 +1150,18 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
           "#9ad7ff"
         )("ctrl+f")}${dim("]")} new search`;
         const parts = [navHint, actions, focusHint];
-        if (queryIndicator) parts.push(queryIndicator);
-        if (clearHint) parts.push(clearHint);
-        if (copyHint) parts.push(copyHint);
-        if (toastHint) parts.push(toastHint);
+        if (queryIndicator) {
+          parts.push(queryIndicator);
+        }
+        if (clearHint) {
+          parts.push(clearHint);
+        }
+        if (copyHint) {
+          parts.push(copyHint);
+        }
+        if (toastHint) {
+          parts.push(toastHint);
+        }
         footerText.content = joinStyledText({ parts });
         return;
       }
@@ -1126,11 +1203,21 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         toggleHint,
         focusHint,
       ];
-      if (queryIndicator) parts.push(queryIndicator);
-      if (clearHint) parts.push(clearHint);
-      if (copyHint) parts.push(copyHint);
-      if (followHint) parts.push(followHint);
-      if (toastHint) parts.push(toastHint);
+      if (queryIndicator) {
+        parts.push(queryIndicator);
+      }
+      if (clearHint) {
+        parts.push(clearHint);
+      }
+      if (copyHint) {
+        parts.push(copyHint);
+      }
+      if (followHint) {
+        parts.push(followHint);
+      }
+      if (toastHint) {
+        parts.push(toastHint);
+      }
       footerText.content = joinStyledText({ parts });
     };
 
@@ -1169,7 +1256,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     };
 
     const renderHeader = () => {
-      if (!isActive) return;
+      if (!isActive) {
+        return;
+      }
       const headerWidth = Math.max(
         0,
         Math.floor(header.width || activeRenderer.width || 0)
@@ -1187,7 +1276,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     const renderMetaPanel = (opts: {
       readonly runtime: RuntimeProject | null;
     }) => {
-      if (!isActive) return;
+      if (!isActive) {
+        return;
+      }
       const runtime = opts.runtime;
       const serviceCount = runtime ? runtime.services.size : 0;
       const runningCount = runtime ? countRunningServices(runtime) : 0;
@@ -1203,32 +1294,41 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         : "n/a";
       const logsBackendLabel = logBackend ?? "unknown";
       const searchBackendLabel = lastSearchBackend;
-      const status = runtime
-        ? serviceCount === 0
-          ? { label: "Idle", color: "#6b7390" }
-          : runningCount === 0
-            ? { label: "Stopped", color: "#e0af68" }
-            : runningCount < serviceCount
-              ? { label: "Partial", color: "#e0af68" }
-              : { label: "Running", color: "#9ece6a" }
-        : { label: "Offline", color: "#6b7390" };
+      let status: { label: string; color: string };
+      if (!runtime) {
+        status = { label: "Offline", color: "#6b7390" };
+      } else if (serviceCount === 0) {
+        status = { label: "Idle", color: "#6b7390" };
+      } else if (runningCount === 0) {
+        status = { label: "Stopped", color: "#e0af68" };
+      } else if (runningCount < serviceCount) {
+        status = { label: "Partial", color: "#e0af68" };
+      } else {
+        status = { label: "Running", color: "#9ece6a" };
+      }
       const metaWidth = Math.max(
         0,
         Math.floor(metaBox.width || sidebar.width || activeRenderer.width || 0)
       );
       const lineWidth = Math.max(0, metaWidth - metaPaddingX * 2 - 2);
-      const caddyValue = caddyIp
-        ? caddyMappedIp && caddyMismatch
-          ? `${caddyIp} (stale ${caddyMappedIp})`
-          : caddyMappedIp
-            ? caddyIp
-            : `${caddyIp} (unmapped)`
-        : "n/a";
-      const caddyColor = caddyIp
-        ? caddyMismatch || !caddyMappedIp
-          ? "#e0af68"
-          : "#9ece6a"
-        : "#6b7390";
+      let caddyValue: string;
+      if (!caddyIp) {
+        caddyValue = "n/a";
+      } else if (caddyMappedIp && caddyMismatch) {
+        caddyValue = `${caddyIp} (stale ${caddyMappedIp})`;
+      } else if (caddyMappedIp) {
+        caddyValue = caddyIp;
+      } else {
+        caddyValue = `${caddyIp} (unmapped)`;
+      }
+      let caddyColor: string;
+      if (!caddyIp) {
+        caddyColor = "#6b7390";
+      } else if (caddyMismatch || !caddyMappedIp) {
+        caddyColor = "#e0af68";
+      } else {
+        caddyColor = "#9ece6a";
+      }
       const caddyLine = formatPanelLine({
         label: "Caddy IP",
         value: caddyValue,
@@ -1331,9 +1431,13 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     };
 
     const refreshCaddyStatus = async () => {
-      if (!isActive) return;
+      if (!isActive) {
+        return;
+      }
       const now = Date.now();
-      if (now - lastCaddyCheckAt < caddyCheckIntervalMs) return;
+      if (now - lastCaddyCheckAt < caddyCheckIntervalMs) {
+        return;
+      }
       lastCaddyCheckAt = now;
 
       const nextCaddyIp = await resolveGlobalCaddyIp();
@@ -1362,7 +1466,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     };
 
     const renderResourcesPanel = (opts: { readonly targetLabel: string }) => {
-      if (!isActive) return;
+      if (!isActive) {
+        return;
+      }
       const resourcesWidth = Math.max(
         0,
         Math.floor(
@@ -1461,9 +1567,13 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     };
 
     const layoutSidebar = () => {
-      if (!isActive) return;
+      if (!isActive) {
+        return;
+      }
       const sidebarHeight = Math.floor(sidebar.height || 0);
-      if (sidebarHeight <= 0) return;
+      if (sidebarHeight <= 0) {
+        return;
+      }
       const gapSize = 1;
       let showResources = true;
       let metaHeight = metaFullHeight;
@@ -1516,7 +1626,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     };
 
     const renderServices = (runtime: RuntimeProject | null) => {
-      if (!isActive) return;
+      if (!isActive) {
+        return;
+      }
       if (!runtime || runtime.services.size === 0) {
         servicesSelect.options = [
           { name: "No running services.", description: "" },
@@ -1554,7 +1666,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     const renderSearchServices = (opts: {
       readonly runtime: RuntimeProject | null;
     }) => {
-      if (!isActive) return;
+      if (!isActive) {
+        return;
+      }
       const runtime = opts.runtime;
       if (!runtime || runtime.services.size === 0) {
         searchServiceSelect.options = [
@@ -1587,11 +1701,15 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       readonly serviceScope: "all" | "selected";
       readonly selectedService: string | null;
     }): readonly string[] => {
-      if (!opts.runtime) return [];
+      if (!opts.runtime) {
+        return [];
+      }
       const containers: string[] = [];
       const addContainers = (service: RuntimeService) => {
         for (const container of service.containers) {
-          if (container.id) containers.push(container.id);
+          if (container.id) {
+            containers.push(container.id);
+          }
         }
       };
       if (opts.serviceScope === "all" || !opts.selectedService) {
@@ -1601,14 +1719,18 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         return containers;
       }
       const service = opts.runtime.services.get(opts.selectedService) ?? null;
-      if (service) addContainers(service);
+      if (service) {
+        addContainers(service);
+      }
       return containers;
     };
 
     const refreshStats = async (opts: {
       readonly runtime: RuntimeProject | null;
     }) => {
-      if (statsLoading) return;
+      if (statsLoading) {
+        return;
+      }
       statsLoading = true;
       statsError = null;
 
@@ -1665,7 +1787,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     };
 
     const updateLogLastTimestamp = (entry: LogEntry) => {
-      if (!entry.timestamp) return;
+      if (!entry.timestamp) {
+        return;
+      }
       if (!logLastTimestamp || entry.timestamp > logLastTimestamp) {
         logLastTimestamp = entry.timestamp;
         renderMetaPanel({ runtime: currentRuntime });
@@ -1673,7 +1797,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     };
 
     const updateLogsTitle = () => {
-      if (!isActive) return;
+      if (!isActive) {
+        return;
+      }
       if (searchMode === "results") {
         logsBox.title = `Search results (${searchResults.length})`;
         return;
@@ -1683,11 +1809,14 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
           ? "Logs (all)"
           : `Logs (${selectedService})`;
       const loadingSuffix = historyState.loading ? " • loading history" : "";
-      const pausedSuffix = logFollow
-        ? ""
-        : pendingLogCount > 0
-          ? ` • paused (+${pendingLogCount})`
-          : " • paused";
+      let pausedSuffix: string;
+      if (logFollow) {
+        pausedSuffix = "";
+      } else if (pendingLogCount > 0) {
+        pausedSuffix = ` • paused (+${pendingLogCount})`;
+      } else {
+        pausedSuffix = " • paused";
+      }
       logsBox.title = base + loadingSuffix + pausedSuffix;
     };
 
@@ -1700,12 +1829,16 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         0,
         logsScroll.scrollHeight - viewportHeight
       );
-      if (maxScrollTop <= 1) return true;
+      if (maxScrollTop <= 1) {
+        return true;
+      }
       return logsScroll.scrollTop >= maxScrollTop - 1;
     };
 
     const pauseLogFollow = () => {
-      if (!logFollow) return;
+      if (!logFollow) {
+        return;
+      }
       logFollow = false;
       pendingLogCount = 0;
       logsScroll.stickyScroll = false;
@@ -1718,7 +1851,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     };
 
     const resumeLogFollow = () => {
-      if (logFollow) return;
+      if (logFollow) {
+        return;
+      }
       logFollow = true;
       pendingLogCount = 0;
       logsScroll.stickyScroll = true;
@@ -1730,7 +1865,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     };
 
     logsScroll.onScrollChange = (event) => {
-      if (!isActive || searchOverlayVisible || searchMode === "results") return;
+      if (!isActive || searchOverlayVisible || searchMode === "results") {
+        return;
+      }
       if (event.type === "scroll" && logFollow) {
         pauseLogFollow();
       }
@@ -1738,7 +1875,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     };
 
     const updateLogText = (opts?: { readonly force?: boolean }) => {
-      if (!isActive) return;
+      if (!isActive) {
+        return;
+      }
       const baseEntries =
         searchMode === "results" ? searchResults : logState.entries;
       let activeEntries = baseEntries;
@@ -1751,7 +1890,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         }
         if (enabledLevels.size === 0) {
           logsText.content = "No levels selected.";
-          if (handleSelectionChange) handleSelectionChange();
+          if (handleSelectionChange) {
+            handleSelectionChange();
+          }
           return;
         }
         activeEntries = activeEntries.filter((entry) =>
@@ -1760,20 +1901,29 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       }
 
       if (searchMode === "live" && !logFollow && !opts?.force) {
-        if (handleSelectionChange) handleSelectionChange();
+        if (handleSelectionChange) {
+          handleSelectionChange();
+        }
         return;
       }
       const visible = activeEntries.slice(-logState.maxLines);
 
       if (visible.length === 0) {
-        logsText.content =
-          searchMode === "results"
-            ? "No search results."
-            : enabledLevels.size < 4 ||
-                (serviceScope === "selected" && selectedService)
-              ? "No logs match current filters."
-              : "Waiting for logs...";
-        if (handleSelectionChange) handleSelectionChange();
+        let emptyMessage: string;
+        if (searchMode === "results") {
+          emptyMessage = "No search results.";
+        } else if (
+          enabledLevels.size < 4 ||
+          (serviceScope === "selected" && selectedService)
+        ) {
+          emptyMessage = "No logs match current filters.";
+        } else {
+          emptyMessage = "Waiting for logs...";
+        }
+        logsText.content = emptyMessage;
+        if (handleSelectionChange) {
+          handleSelectionChange();
+        }
         return;
       }
 
@@ -1786,24 +1936,32 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         selectedIndex < visible.length
           ? selectedIndex
           : null;
-      const highlightValue =
-        searchMode === "results"
-          ? searchQuery
-          : highlightEnabled
-            ? highlightQuery
-            : null;
+      let highlightValue: string | null;
+      if (searchMode === "results") {
+        highlightValue = searchQuery;
+      } else if (highlightEnabled) {
+        highlightValue = highlightQuery;
+      } else {
+        highlightValue = null;
+      }
       logsText.content = buildStyledLogText(visible, {
         highlightQuery: highlightValue,
         selectedIndex: selectedLineIndex,
         collapseMultiline,
       });
       logsText.syncWrapWidth();
-      if (handleSelectionChange) handleSelectionChange();
+      if (handleSelectionChange) {
+        handleSelectionChange();
+      }
     };
 
     const scheduleLogUpdate = () => {
-      if (!isActive || logUpdateTimer || searchOverlayVisible) return;
-      if (searchMode === "live" && !logFollow) return;
+      if (!isActive || logUpdateTimer || searchOverlayVisible) {
+        return;
+      }
+      if (searchMode === "live" && !logFollow) {
+        return;
+      }
       logUpdateTimer = setTimeout(() => {
         logUpdateTimer = null;
         updateLogText();
@@ -1811,7 +1969,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     };
 
     const flushLogUpdate = (opts?: { readonly force?: boolean }) => {
-      if (searchOverlayVisible) return;
+      if (searchOverlayVisible) {
+        return;
+      }
       if (logUpdateTimer) {
         clearTimeout(logUpdateTimer);
         logUpdateTimer = null;
@@ -1849,19 +2009,26 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       readonly entries: readonly LogEntry[];
       readonly entry: LogEntry;
     }): LogEntry | null => {
-      if (!(opts.entry.service && opts.entry.timestamp)) return null;
+      if (!(opts.entry.service && opts.entry.timestamp)) {
+        return null;
+      }
       for (let i = opts.entries.length - 1; i >= 0; i -= 1) {
         const candidate = opts.entries[i];
-        if (!(candidate?.service && candidate.timestamp)) continue;
-        if (!shouldCollapseLogPrefix({ prev: candidate, next: opts.entry }))
+        if (!(candidate?.service && candidate.timestamp)) {
           continue;
+        }
+        if (!shouldCollapseLogPrefix({ prev: candidate, next: opts.entry })) {
+          continue;
+        }
         return candidate;
       }
       return null;
     };
 
     const appendLogEntry = (entry: LogEntry) => {
-      if (!isActive) return;
+      if (!isActive) {
+        return;
+      }
       updateLogLastTimestamp(entry);
       const holdUpdates = searchMode === "live" && !logFollow;
       const continuationTarget = findContinuationTarget({
@@ -1914,7 +2081,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
 
     const copySelectedLogs = async () => {
       const selected = logsText.getSelectedText();
-      if (!selected) return;
+      if (!selected) {
+        return;
+      }
       const result = await copyToClipboard({ text: selected });
       setToast({
         message: result.ok
@@ -1936,7 +2105,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       const seen = new Set<string>();
       const merged: LogEntry[] = [];
       const addEntry = (entry: LogEntry) => {
-        if (seen.has(entry.key)) return;
+        if (seen.has(entry.key)) {
+          return;
+        }
         seen.add(entry.key);
         merged.push(entry);
       };
@@ -1955,7 +2126,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     const updateLogStartTimestamp = () => {
       let earliest: string | null = null;
       for (const entry of logState.entries) {
-        if (!entry.timestamp) continue;
+        if (!entry.timestamp) {
+          continue;
+        }
         if (!earliest || entry.timestamp < earliest) {
           earliest = entry.timestamp;
         }
@@ -1983,9 +2156,15 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         "--path",
         project.projectRoot,
       ];
-      if (opts.backend === "loki") args.push("--loki");
-      if (opts.backend === "compose") args.push("--compose");
-      if (opts.until) args.push("--until", opts.until);
+      if (opts.backend === "loki") {
+        args.push("--loki");
+      }
+      if (opts.backend === "compose") {
+        args.push("--compose");
+      }
+      if (opts.until) {
+        args.push("--until", opts.until);
+      }
 
       const proc = Bun.spawn([invocation.bin, ...args], {
         cwd: resolve(project.projectRoot),
@@ -2003,13 +2182,17 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
           isActive: () => isActive,
           onLine: (line) => {
             const event = parseLogStreamEvent(line);
-            if (!event || event.type !== "log" || !event.entry) return;
+            if (!event || event.type !== "log" || !event.entry) {
+              return;
+            }
             if (!logBackend) {
               logBackend = event.backend ?? event.entry.source;
               renderMetaPanel({ runtime: currentRuntime });
             }
             const formatted = formatLogEntry(event);
-            if (formatted) entries.push(formatted);
+            if (formatted) {
+              entries.push(formatted);
+            }
           },
         });
       }
@@ -2032,8 +2215,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     };
 
     const loadMoreHistory = async () => {
-      if (!isActive || historyState.loading || !historyState.canLoadMore)
+      if (!isActive || historyState.loading || !historyState.canLoadMore) {
         return;
+      }
       const remainingCapacity = logState.maxEntries - logState.entries.length;
       if (remainingCapacity <= 0) {
         historyState.canLoadMore = false;
@@ -2094,7 +2278,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     };
 
     logsScroll.verticalScrollBar.on("change", (payload) => {
-      if (!isActive || searchOverlayVisible || searchMode === "results") return;
+      if (!isActive || searchOverlayVisible || searchMode === "results") {
+        return;
+      }
       const position =
         typeof payload?.position === "number"
           ? payload.position
@@ -2113,9 +2299,13 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     });
 
     const refreshRuntime = async () => {
-      if (!isActive) return;
+      if (!isActive) {
+        return;
+      }
       const runtime = await resolveRuntimeProject({ project, projectName });
-      if (!isActive) return;
+      if (!isActive) {
+        return;
+      }
       currentRuntime = runtime;
       renderHeader();
       renderMetaPanel({ runtime });
@@ -2148,24 +2338,31 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       readonly tone?: "muted" | "warn" | "info";
     }) => {
       const tone = opts.tone ?? "muted";
-      searchStatusText.content =
-        tone === "warn"
-          ? t`${fg("#e0af68")(`${opts.message}`)}`
-          : tone === "info"
-            ? t`${fg("#7dcfff")(`${opts.message}`)}`
-            : t`${dim(opts.message)}`;
+      let statusContent: ReturnType<typeof t>;
+      if (tone === "warn") {
+        statusContent = t`${fg("#e0af68")(`${opts.message}`)}`;
+      } else if (tone === "info") {
+        statusContent = t`${fg("#7dcfff")(`${opts.message}`)}`;
+      } else {
+        statusContent = t`${dim(opts.message)}`;
+      }
+      searchStatusText.content = statusContent;
     };
 
     const focusSearchField = (opts: { readonly index: number }) => {
       const total = searchFocusables.length;
-      if (total === 0) return;
+      if (total === 0) {
+        return;
+      }
       const wrappedIndex = ((opts.index % total) + total) % total;
       searchFocusIndex = wrappedIndex;
       searchFocusables[wrappedIndex]?.focus();
     };
 
     const openSearchOverlay = () => {
-      if (!isActive) return;
+      if (!isActive) {
+        return;
+      }
       searchOverlayVisible = true;
       searchOverlay.visible = true;
       searchOverlay.requestRender();
@@ -2293,11 +2490,16 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
           isActive: () => isActive,
           onLine: (line) => {
             const event = parseLogStreamEvent(line);
-            if (!event || event.type !== "log" || !event.entry) return;
-            const formatted = formatLogEntry(event);
-            if (!formatted) return;
-            if (!matchesSearchQuery({ entry: event.entry, query, level }))
+            if (!event || event.type !== "log" || !event.entry) {
               return;
+            }
+            const formatted = formatLogEntry(event);
+            if (!formatted) {
+              return;
+            }
+            if (!matchesSearchQuery({ entry: event.entry, query, level })) {
+              return;
+            }
             const continuationTarget = findContinuationTarget({
               entries,
               entry: formatted,
@@ -2387,18 +2589,24 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
           isActive: () => isActive,
           onLine: (line) => {
             const event = parseLogStreamEvent(line);
-            if (!event || event.type !== "log" || !event.entry) return;
+            if (!event || event.type !== "log" || !event.entry) {
+              return;
+            }
             if (!logBackend) {
               logBackend = event.backend ?? event.entry.source;
             }
             const formatted = formatLogEntry(event);
-            if (formatted) appendLogEntry(formatted);
+            if (formatted) {
+              appendLogEntry(formatted);
+            }
           },
         });
       }
 
       void logProc.exited.then((exitCode) => {
-        if (!isActive) return;
+        if (!isActive) {
+          return;
+        }
         appendLogEntry(
           formatSystemLine({
             message: `[logs] stream ended (code ${exitCode})`,
@@ -2408,8 +2616,10 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       });
     };
 
-    shutdown = async () => {
-      if (!running) return;
+    shutdown = () => {
+      if (!running) {
+        return;
+      }
       running = false;
       isActive = false;
 
@@ -2517,12 +2727,16 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     );
 
     servicesSelect.on(RenderableEvents.FOCUSED, () => {
-      if (searchOverlayVisible) return;
+      if (searchOverlayVisible) {
+        return;
+      }
       setActivePane("services");
     });
 
     logsScroll.on(RenderableEvents.FOCUSED, () => {
-      if (searchOverlayVisible) return;
+      if (searchOverlayVisible) {
+        return;
+      }
       setActivePane("logs");
     });
 
@@ -2757,14 +2971,18 @@ async function resolveRuntimeProject(opts: {
   readonly projectName: string;
 }): Promise<RuntimeProject | null> {
   const runtimeResult = await readRuntimeProjects({ includeGlobal: false });
-  if (!runtimeResult.ok) return null;
+  if (!runtimeResult.ok) {
+    return null;
+  }
   const runtime = runtimeResult.runtime;
   const byWorkingDir = runtime.find(
     (item) =>
       item.workingDir &&
       resolve(item.workingDir) === resolve(opts.project.projectDir)
   );
-  if (byWorkingDir) return byWorkingDir;
+  if (byWorkingDir) {
+    return byWorkingDir;
+  }
   const byName = runtime.find((item) => item.project === opts.projectName);
   return byName ?? null;
 }
@@ -2778,9 +2996,13 @@ async function resolveProjectId(opts: {
     const byDir = registry.projects.find(
       (entry) => entry.projectDir === opts.project.projectDir
     );
-    if (byDir) return byDir.id;
+    if (byDir) {
+      return byDir.id;
+    }
     const name = opts.projectName.trim().toLowerCase();
-    if (name.length === 0) return null;
+    if (name.length === 0) {
+      return null;
+    }
     const byName = registry.projects.find((entry) => entry.name === name);
     return byName?.id ?? null;
   } catch {
@@ -2794,28 +3016,38 @@ function countRunningServices(runtime: RuntimeProject): number {
     const running = service.containers.some(
       (container) => container.state === "running"
     );
-    if (running) total += 1;
+    if (running) {
+      total += 1;
+    }
   }
   return total;
 }
 
 function parseLogStreamEvent(line: string): LogStreamEvent | null {
   const trimmed = line.trim();
-  if (!trimmed) return null;
+  if (!trimmed) {
+    return null;
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(trimmed);
   } catch {
     return null;
   }
-  if (!isRecord(parsed)) return null;
-  if (typeof parsed["type"] !== "string") return null;
+  if (!isRecord(parsed)) {
+    return null;
+  }
+  if (typeof parsed.type !== "string") {
+    return null;
+  }
   return parsed as LogStreamEvent;
 }
 
 function formatLogEntry(event: LogStreamEvent): LogEntry | null {
   const entry = event.entry;
-  if (!entry) return null;
+  if (!entry) {
+    return null;
+  }
   const levelValue = resolveLevelValue(entry);
   const levelLabel = levelValue.toUpperCase();
   const timeLabel = entry.timestamp ? `[${isoToClock(entry.timestamp)}] ` : "";
@@ -2823,7 +3055,9 @@ function formatLogEntry(event: LogStreamEvent): LogEntry | null {
   const serviceLabelText = entry.service ? `[${entry.service}] ` : "";
   const prefixPlain = `${timeLabel}${levelLabelText}${serviceLabelText}`;
   const prefixChunks: TextChunk[] = [];
-  if (timeLabel.length > 0) prefixChunks.push(dim(timeLabel));
+  if (timeLabel.length > 0) {
+    prefixChunks.push(dim(timeLabel));
+  }
   prefixChunks.push(colorLevel({ level: levelValue })(levelLabelText));
   if (serviceLabelText.length > 0 && entry.service) {
     prefixChunks.push(colorService(entry.service)(serviceLabelText));
@@ -2877,23 +3111,24 @@ function parseDockerStatsOutput(opts: {
     } catch {
       continue;
     }
-    if (!isRecord(parsed)) continue;
+    if (!isRecord(parsed)) {
+      continue;
+    }
     const cpuPercent = parsePercent({
-      value: typeof parsed["CPUPerc"] === "string" ? parsed["CPUPerc"] : null,
+      value: typeof parsed.CPUPerc === "string" ? parsed.CPUPerc : null,
     });
     const memUsageRaw =
-      typeof parsed["MemUsage"] === "string" ? parsed["MemUsage"] : null;
+      typeof parsed.MemUsage === "string" ? parsed.MemUsage : null;
     const memPercent = parsePercent({
-      value: typeof parsed["MemPerc"] === "string" ? parsed["MemPerc"] : null,
+      value: typeof parsed.MemPerc === "string" ? parsed.MemPerc : null,
     });
     const netIo = parseIoPair({
-      value: typeof parsed["NetIO"] === "string" ? parsed["NetIO"] : null,
+      value: typeof parsed.NetIO === "string" ? parsed.NetIO : null,
     });
     const blockIo = parseIoPair({
-      value: typeof parsed["BlockIO"] === "string" ? parsed["BlockIO"] : null,
+      value: typeof parsed.BlockIO === "string" ? parsed.BlockIO : null,
     });
-    const pidsValue =
-      typeof parsed["PIDs"] === "string" ? parsed["PIDs"] : null;
+    const pidsValue = typeof parsed.PIDs === "string" ? parsed.PIDs : null;
 
     let memUsedBytes: number | null = null;
     let memLimitBytes: number | null = null;
@@ -2929,13 +3164,17 @@ function parseDockerStatsOutput(opts: {
 function aggregateDockerStats(opts: {
   readonly samples: readonly DockerStatsSample[];
 }): DockerStatsSample | null {
-  if (opts.samples.length === 0) return null;
+  if (opts.samples.length === 0) {
+    return null;
+  }
 
   const sumNullable = (values: readonly (number | null)[]): number | null => {
     let total = 0;
     let count = 0;
     for (const value of values) {
-      if (typeof value !== "number" || !Number.isFinite(value)) continue;
+      if (typeof value !== "number" || !Number.isFinite(value)) {
+        continue;
+      }
       total += value;
       count += 1;
     }
@@ -2983,9 +3222,13 @@ function aggregateDockerStats(opts: {
 }
 
 function parsePercent(opts: { readonly value: string | null }): number | null {
-  if (!opts.value) return null;
-  const match = opts.value.trim().match(/-?\d+(?:\.\d+)?/);
-  if (!match) return null;
+  if (!opts.value) {
+    return null;
+  }
+  const match = opts.value.trim().match(DECIMAL_NUMBER_REGEX);
+  if (!match) {
+    return null;
+  }
   const parsed = Number.parseFloat(match[0]);
   return Number.isFinite(parsed) ? parsed : null;
 }
@@ -3007,41 +3250,45 @@ function parseIoPair(opts: { readonly value: string | null }): {
 }
 
 function parseBytes(opts: { readonly value: string | null }): number | null {
-  if (!opts.value) return null;
+  if (!opts.value) {
+    return null;
+  }
   const trimmed = opts.value.trim();
-  if (!trimmed) return null;
-  const match = trimmed.match(/^(-?\d+(?:\.\d+)?)\s*([A-Za-z]+)?$/);
-  if (!match) return null;
+  if (!trimmed) {
+    return null;
+  }
+  const match = trimmed.match(BYTES_VALUE_REGEX);
+  if (!match) {
+    return null;
+  }
   const value = Number.parseFloat(match[1] ?? "");
-  if (!Number.isFinite(value)) return null;
+  if (!Number.isFinite(value)) {
+    return null;
+  }
   const unitRaw = (match[2] ?? "B").trim();
   const unit = unitRaw.toLowerCase();
-  const multiplier =
-    unit === "b"
-      ? 1
-      : unit === "kb"
-        ? 1000
-        : unit === "kib"
-          ? 1024
-          : unit === "mb"
-            ? 1_000_000
-            : unit === "mib"
-              ? 1_048_576
-              : unit === "gb"
-                ? 1_000_000_000
-                : unit === "gib"
-                  ? 1_073_741_824
-                  : unit === "tb"
-                    ? 1_000_000_000_000
-                    : unit === "tib"
-                      ? 1_099_511_627_776
-                      : null;
-  if (!multiplier) return null;
+  const unitMultipliers: Record<string, number> = {
+    b: 1,
+    kb: 1000,
+    kib: 1024,
+    mb: 1_000_000,
+    mib: 1_048_576,
+    gb: 1_000_000_000,
+    gib: 1_073_741_824,
+    tb: 1_000_000_000_000,
+    tib: 1_099_511_627_776,
+  };
+  const multiplier = unitMultipliers[unit] ?? null;
+  if (!multiplier) {
+    return null;
+  }
   return value * multiplier;
 }
 
 function formatBytes(opts: { readonly bytes: number }): string {
-  if (!Number.isFinite(opts.bytes)) return "n/a";
+  if (!Number.isFinite(opts.bytes)) {
+    return "n/a";
+  }
   const sign = opts.bytes < 0 ? "-" : "";
   let value = Math.abs(opts.bytes);
   const units = ["B", "KiB", "MiB", "GiB", "TiB"] as const;
@@ -3055,30 +3302,46 @@ function formatBytes(opts: { readonly bytes: number }): string {
 }
 
 function formatPercent(opts: { readonly percent: number | null }): string {
-  if (opts.percent === null || !Number.isFinite(opts.percent)) return "n/a";
+  if (opts.percent === null || !Number.isFinite(opts.percent)) {
+    return "n/a";
+  }
   return `${opts.percent.toFixed(1)}%`;
 }
 
 function isoToClock(value: string): string {
-  const match = value.match(/T(\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$/);
-  if (!match) return value;
+  const match = value.match(ISO_TIME_COMPONENTS_REGEX);
+  if (!match) {
+    return value;
+  }
   const hms = match[1] ?? value;
   const frac = match[2];
-  if (!frac) return hms;
+  if (!frac) {
+    return hms;
+  }
   const ms = frac.slice(0, 3).padEnd(3, "0");
   return `${hms}.${ms}`;
 }
 
 function formatDurationShort(opts: { readonly ms: number }): string {
-  if (!Number.isFinite(opts.ms) || opts.ms < 0) return "n/a";
+  if (!Number.isFinite(opts.ms) || opts.ms < 0) {
+    return "n/a";
+  }
   const totalSeconds = Math.floor(opts.ms / 1000);
-  if (totalSeconds < 60) return `${totalSeconds}s`;
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
+  }
   const totalMinutes = Math.floor(totalSeconds / 60);
-  if (totalMinutes < 60) return `${totalMinutes}m`;
+  if (totalMinutes < 60) {
+    return `${totalMinutes}m`;
+  }
   const totalHours = Math.floor(totalMinutes / 60);
-  if (totalHours < 24) return `${totalHours}h`;
+  if (totalHours < 24) {
+    return `${totalHours}h`;
+  }
   const totalDays = Math.floor(totalHours / 24);
-  if (totalDays < 7) return `${totalDays}d`;
+  if (totalDays < 7) {
+    return `${totalDays}d`;
+  }
   const totalWeeks = Math.floor(totalDays / 7);
   return `${totalWeeks}w`;
 }
@@ -3094,7 +3357,9 @@ function formatFields(fields: Record<string, string>): string {
 function buildFieldsChunks(fields: Record<string, string>): TextChunk[] {
   const chunks: TextChunk[] = [];
   const keys = Object.keys(fields).sort();
-  if (keys.length === 0) return chunks;
+  if (keys.length === 0) {
+    return chunks;
+  }
 
   chunks.push({ __isChunk: true, text: " " });
   keys.forEach((key, idx) => {
@@ -3112,26 +3377,41 @@ function shouldCollapseLogPrefix(opts: {
   readonly prev: LogEntry;
   readonly next: LogEntry;
 }): boolean {
-  if (opts.prev.service !== opts.next.service) return false;
-  if (opts.prev.level !== opts.next.level) return false;
-  if (!(opts.prev.timestamp && opts.next.timestamp)) return false;
-  if (opts.prev.timestamp.slice(0, 19) !== opts.next.timestamp.slice(0, 19))
+  if (opts.prev.service !== opts.next.service) {
     return false;
+  }
+  if (opts.prev.level !== opts.next.level) {
+    return false;
+  }
+  if (!(opts.prev.timestamp && opts.next.timestamp)) {
+    return false;
+  }
+  if (opts.prev.timestamp.slice(0, 19) !== opts.next.timestamp.slice(0, 19)) {
+    return false;
+  }
 
   const nextTrim = opts.next.messagePlain.trimStart();
-  if (nextTrim.length === 0) return false;
-  if (nextTrim.startsWith("at ")) return true;
-  if (/^[\],}]/.test(nextTrim)) return true;
+  if (nextTrim.length === 0) {
+    return false;
+  }
+  if (nextTrim.startsWith("at ")) {
+    return true;
+  }
+  if (JSON_CLOSING_BRACKETS_REGEX.test(nextTrim)) {
+    return true;
+  }
 
   const hasIndent = opts.next.messagePlain.length > nextTrim.length;
-  if (!hasIndent) return false;
+  if (!hasIndent) {
+    return false;
+  }
 
   const prevTrim = opts.prev.messagePlain.trimEnd();
   return (
-    /[{[(]$/.test(prevTrim) ||
-    /:$/.test(prevTrim) ||
-    /,\s*$/.test(prevTrim) ||
-    /=>\s*$/.test(prevTrim)
+    OPEN_BRACKETS_AT_END_REGEX.test(prevTrim) ||
+    COLON_AT_END_REGEX.test(prevTrim) ||
+    TRAILING_COMMA_REGEX.test(prevTrim) ||
+    ARROW_AT_END_REGEX.test(prevTrim)
   );
 }
 
@@ -3195,10 +3475,14 @@ function collapseEntryChunks(opts: {
   readonly chunks: TextChunk[];
 }): TextChunk[] {
   const parts = opts.entry.messagePlain.split("\n");
-  if (parts.length <= 1) return opts.chunks;
+  if (parts.length <= 1) {
+    return opts.chunks;
+  }
   const trailingEmpty = parts[parts.length - 1]?.trim().length === 0 ? 1 : 0;
   const lineCount = Math.max(1, parts.length - trailingEmpty);
-  if (lineCount <= 1) return opts.chunks;
+  if (lineCount <= 1) {
+    return opts.chunks;
+  }
   const truncated = truncateChunksAtNewline({ chunks: opts.chunks });
   const extraLines = lineCount - 1;
   const suffixText = extraLines === 1 ? " +1 line" : ` +${extraLines} lines`;
@@ -3230,7 +3514,9 @@ function highlightChunks(opts: {
   readonly query: string;
 }): TextChunk[] {
   const needle = opts.query.toLowerCase();
-  if (needle.length === 0) return opts.chunks;
+  if (needle.length === 0) {
+    return opts.chunks;
+  }
 
   const out: TextChunk[] = [];
   const highlightBg = RGBA.fromInts(92, 122, 212, 255);
@@ -3345,16 +3631,30 @@ function matchesSearchQuery(opts: {
   const query = normalizeSearchText(opts.query).trim();
   if (opts.level !== "all") {
     const levelValue = resolveLevelValue(opts.entry);
-    if (levelValue !== opts.level) return false;
+    if (levelValue !== opts.level) {
+      return false;
+    }
   }
-  if (query.length === 0) return true;
+  if (query.length === 0) {
+    return true;
+  }
 
   const parts: string[] = [];
-  if (opts.entry.message) parts.push(opts.entry.message);
-  if (opts.entry.raw) parts.push(opts.entry.raw);
-  if (opts.entry.service) parts.push(opts.entry.service);
-  if (opts.entry.project) parts.push(opts.entry.project);
-  if (opts.entry.instance) parts.push(opts.entry.instance);
+  if (opts.entry.message) {
+    parts.push(opts.entry.message);
+  }
+  if (opts.entry.raw) {
+    parts.push(opts.entry.raw);
+  }
+  if (opts.entry.service) {
+    parts.push(opts.entry.service);
+  }
+  if (opts.entry.project) {
+    parts.push(opts.entry.project);
+  }
+  if (opts.entry.instance) {
+    parts.push(opts.entry.instance);
+  }
   if (opts.entry.fields) {
     for (const [key, value] of Object.entries(opts.entry.fields)) {
       parts.push(`${key}=${value}`);
@@ -3373,46 +3673,59 @@ function matchesSearchQuery(opts: {
 function resolveLevelValue(
   entry: NonNullable<LogStreamEvent["entry"]>
 ): string {
-  if (entry.level) return entry.level;
-  if (entry.stream === "stderr") return "error";
+  if (entry.level) {
+    return entry.level;
+  }
+  if (entry.stream === "stderr") {
+    return "error";
+  }
   const inferred = inferLevelFromMessage(entry.message ?? entry.raw);
   return inferred ?? "info";
 }
 
 function inferLevelFromMessage(message: string): string | null {
-  const match = message.match(
-    /\b(TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL|PANIC)\b/i
-  );
-  if (!match) return null;
+  const match = message.match(LOG_LEVEL_KEYWORD_REGEX);
+  if (!match) {
+    return null;
+  }
   const token = match[1]?.toLowerCase() ?? "";
-  if (token === "warn" || token === "warning") return "warn";
-  if (token === "error" || token === "fatal" || token === "panic")
+  if (token === "warn" || token === "warning") {
+    return "warn";
+  }
+  if (token === "error" || token === "fatal" || token === "panic") {
     return "error";
-  if (token === "debug" || token === "trace") return "debug";
+  }
+  if (token === "debug" || token === "trace") {
+    return "debug";
+  }
   return "info";
 }
 
 function colorLevel(opts: { readonly level: string }) {
-  const color =
-    opts.level === "error"
-      ? "#f7768e"
-      : opts.level === "warn"
-        ? "#e0af68"
-        : opts.level === "debug"
-          ? "#6b7390"
-          : "#7dcfff";
+  let color: string;
+  if (opts.level === "error") {
+    color = "#f7768e";
+  } else if (opts.level === "warn") {
+    color = "#e0af68";
+  } else if (opts.level === "debug") {
+    color = "#6b7390";
+  } else {
+    color = "#7dcfff";
+  }
   return fg(color);
 }
 
 function colorMessage(opts: { readonly level: string }) {
-  const color =
-    opts.level === "error"
-      ? "#f7768e"
-      : opts.level === "warn"
-        ? "#e0af68"
-        : opts.level === "debug"
-          ? "#6b7390"
-          : "#c0caf5";
+  let color: string;
+  if (opts.level === "error") {
+    color = "#f7768e";
+  } else if (opts.level === "warn") {
+    color = "#e0af68";
+  } else if (opts.level === "debug") {
+    color = "#6b7390";
+  } else {
+    color = "#c0caf5";
+  }
   return fg(color);
 }
 
@@ -3501,7 +3814,9 @@ function findNextMessageToken(opts: {
   for (const pattern of MESSAGE_TOKEN_PATTERNS) {
     pattern.regex.lastIndex = opts.start;
     const match = pattern.regex.exec(opts.text);
-    if (!match) continue;
+    if (!match) {
+      continue;
+    }
     const start = match.index;
     const end = start + match[0].length;
     if (
@@ -3526,9 +3841,15 @@ function colorMessageToken(opts: {
   }
   if (opts.kind === "status") {
     const code = Number.parseInt(opts.value, 10);
-    if (code >= 500) return fg("#f7768e")(opts.value);
-    if (code >= 400) return fg("#e0af68")(opts.value);
-    if (code >= 300) return fg("#7aa2f7")(opts.value);
+    if (code >= 500) {
+      return fg("#f7768e")(opts.value);
+    }
+    if (code >= 400) {
+      return fg("#e0af68")(opts.value);
+    }
+    if (code >= 300) {
+      return fg("#7aa2f7")(opts.value);
+    }
     return fg("#9ece6a")(opts.value);
   }
   if (opts.kind === "duration") {
@@ -3785,8 +4106,12 @@ function applyAnsiCodes(opts: {
 }
 
 function clampColor(value: number): number {
-  if (value < 0) return 0;
-  if (value > 255) return 255;
+  if (value < 0) {
+    return 0;
+  }
+  if (value > 255) {
+    return 255;
+  }
   return Math.round(value);
 }
 
@@ -3815,8 +4140,12 @@ function ansiToRgba(code: number, bright: boolean): RGBA {
 }
 
 function xtermToRgba(code: number): RGBA {
-  if (code < 0) return ansiToRgba(0, false);
-  if (code < 16) return ansiToRgba(code % 8, code >= 8);
+  if (code < 0) {
+    return ansiToRgba(0, false);
+  }
+  if (code < 16) {
+    return ansiToRgba(code % 8, code >= 8);
+  }
   if (code >= 232) {
     const shade = 8 + (code - 232) * 10;
     return RGBA.fromInts(shade, shade, shade, 255);
@@ -3842,9 +4171,15 @@ async function consumeLogStream(opts: {
   try {
     while (true) {
       const { value, done } = await reader.read();
-      if (done) break;
-      if (!opts.isActive()) break;
-      if (!value || value.length === 0) continue;
+      if (done) {
+        break;
+      }
+      if (!opts.isActive()) {
+        break;
+      }
+      if (!value || value.length === 0) {
+        continue;
+      }
       buffer += decoder.decode(value, { stream: true });
       let idx = buffer.indexOf("\n");
       while (idx >= 0) {
@@ -3866,10 +4201,12 @@ async function consumeLogStream(opts: {
   }
 }
 
-async function shutdownRenderer(opts: {
+function shutdownRenderer(opts: {
   readonly renderer: Awaited<ReturnType<typeof createCliRenderer>> | null;
-}): Promise<void> {
-  if (!opts.renderer) return;
+}): void {
+  if (!opts.renderer) {
+    return;
+  }
   opts.renderer.stop();
   opts.renderer.destroy();
 }
@@ -3878,7 +4215,9 @@ function formatErrorMessage(opts: { readonly error: unknown }): string {
   if (opts.error instanceof Error) {
     return opts.error.stack ?? opts.error.message;
   }
-  if (typeof opts.error === "string") return opts.error;
+  if (typeof opts.error === "string") {
+    return opts.error;
+  }
   try {
     return JSON.stringify(opts.error, null, 2);
   } catch {

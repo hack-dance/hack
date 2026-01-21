@@ -12,6 +12,10 @@ import {
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import type { DaemonPaths } from "./paths.ts";
 
+const PID_PATTERN = /pid\s*=\s*(\d+)/i;
+const STATE_PATTERN = /state\s*=\s*(\w+)/i;
+const LAST_EXIT_CODE_PATTERN = /last exit code\s*=\s*(-?\d+)/i;
+
 export interface LaunchdPlistOptions {
   readonly hackBinPath: string;
   readonly home: string;
@@ -305,14 +309,14 @@ export async function getLaunchdServiceStatus({
 
   const stdout = await new Response(proc.stdout).text();
 
-  const pidMatch = stdout.match(/pid\s*=\s*(\d+)/i);
+  const pidMatch = stdout.match(PID_PATTERN);
   const pid = pidMatch?.[1] ? Number.parseInt(pidMatch[1], 10) : null;
 
-  const stateMatch = stdout.match(/state\s*=\s*(\w+)/i);
+  const stateMatch = stdout.match(STATE_PATTERN);
   const state = stateMatch?.[1]?.toLowerCase() ?? null;
   const running = state === "running" || (pid !== null && pid > 0);
 
-  const exitStatusMatch = stdout.match(/last exit code\s*=\s*(-?\d+)/i);
+  const exitStatusMatch = stdout.match(LAST_EXIT_CODE_PATTERN);
   const exitStatus = exitStatusMatch?.[1]
     ? Number.parseInt(exitStatusMatch[1], 10)
     : null;

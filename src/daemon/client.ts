@@ -27,14 +27,18 @@ export async function requestDaemonJson(opts: {
 }): Promise<DaemonJsonResponse | null> {
   const paths = resolveDaemonPaths({});
   const status = await readDaemonStatus({ paths });
-  if (!status.socketExists) return null;
+  if (!status.socketExists) {
+    return null;
+  }
 
   if (!opts.allowIncompatible) {
     const compatible = await isDaemonCompatible({
       socketPath: paths.socketPath,
       timeoutMs: opts.timeoutMs,
     });
-    if (!compatible) return null;
+    if (!compatible) {
+      return null;
+    }
   }
 
   const raw = await requestDaemonRaw({
@@ -45,7 +49,9 @@ export async function requestDaemonJson(opts: {
     body: opts.body,
     timeoutMs: opts.timeoutMs ?? 1000,
   });
-  if (!raw) return null;
+  if (!raw) {
+    return null;
+  }
 
   const json = safeJsonParse({ text: raw.body });
   return {
@@ -65,9 +71,11 @@ async function isDaemonCompatible(opts: {
     path: "/v1/status",
     timeoutMs: opts.timeoutMs ?? 1000,
   });
-  if (!raw) return false;
+  if (!raw) {
+    return false;
+  }
   const json = safeJsonParse({ text: raw.body });
-  const version = json ? json["version"] : null;
+  const version = json ? json.version : null;
   return typeof version === "string" && version === packageJson.version;
 }
 
@@ -113,16 +121,22 @@ async function requestDaemonRaw(opts: {
 function buildQueryString(opts: {
   readonly query: Record<string, string | boolean | null> | undefined;
 }): string {
-  if (!opts.query) return "";
+  if (!opts.query) {
+    return "";
+  }
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(opts.query)) {
-    if (value === null) continue;
+    if (value === null) {
+      continue;
+    }
     if (typeof value === "boolean") {
       params.set(key, value ? "true" : "false");
       continue;
     }
     const trimmed = value.trim();
-    if (trimmed.length === 0) continue;
+    if (trimmed.length === 0) {
+      continue;
+    }
     params.set(key, trimmed);
   }
   return params.toString();
@@ -132,7 +146,9 @@ function safeJsonParse(opts: {
   readonly text: string;
 }): Record<string, unknown> | null {
   const trimmed = opts.text.trim();
-  if (trimmed.length === 0) return null;
+  if (trimmed.length === 0) {
+    return null;
+  }
   try {
     const parsed: unknown = JSON.parse(trimmed);
     return isRecord(parsed) ? parsed : null;

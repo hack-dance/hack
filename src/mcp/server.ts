@@ -158,7 +158,9 @@ function registerTools(opts: { readonly server: McpServer }): void {
         selection: toProjectSelection(input),
         cwd: process.cwd(),
       });
-      if (!resolved.ok) return buildToolError({ message: resolved.message });
+      if (!resolved.ok) {
+        return buildToolError({ message: resolved.message });
+      }
 
       const args = [
         "ps",
@@ -197,7 +199,9 @@ function registerTools(opts: { readonly server: McpServer }): void {
         selection: toProjectSelection(input),
         cwd: process.cwd(),
       });
-      if (!resolved.ok) return buildToolError({ message: resolved.message });
+      if (!resolved.ok) {
+        return buildToolError({ message: resolved.message });
+      }
 
       const args = [
         "up",
@@ -233,7 +237,9 @@ function registerTools(opts: { readonly server: McpServer }): void {
         selection: toProjectSelection(input),
         cwd: process.cwd(),
       });
-      if (!resolved.ok) return buildToolError({ message: resolved.message });
+      if (!resolved.ok) {
+        return buildToolError({ message: resolved.message });
+      }
 
       const args = [
         "down",
@@ -268,7 +274,9 @@ function registerTools(opts: { readonly server: McpServer }): void {
         selection: toProjectSelection(input),
         cwd: process.cwd(),
       });
-      if (!resolved.ok) return buildToolError({ message: resolved.message });
+      if (!resolved.ok) {
+        return buildToolError({ message: resolved.message });
+      }
 
       const args = [
         "restart",
@@ -310,7 +318,9 @@ function registerTools(opts: { readonly server: McpServer }): void {
         selection: toProjectSelection(input),
         cwd: process.cwd(),
       });
-      if (!resolved.ok) return buildToolError({ message: resolved.message });
+      if (!resolved.ok) {
+        return buildToolError({ message: resolved.message });
+      }
 
       const args = [
         "run",
@@ -366,7 +376,9 @@ function registerTools(opts: { readonly server: McpServer }): void {
         selection: toProjectSelection(input),
         cwd: process.cwd(),
       });
-      if (!resolved.ok) return buildToolError({ message: resolved.message });
+      if (!resolved.ok) {
+        return buildToolError({ message: resolved.message });
+      }
 
       const args = [
         "logs",
@@ -438,7 +450,9 @@ function registerTools(opts: { readonly server: McpServer }): void {
         selection: toProjectSelection(input),
         cwd: process.cwd(),
       });
-      if (!resolved.ok) return buildToolError({ message: resolved.message });
+      if (!resolved.ok) {
+        return buildToolError({ message: resolved.message });
+      }
 
       const args = [
         "logs",
@@ -499,7 +513,9 @@ function registerTools(opts: { readonly server: McpServer }): void {
         selection: toProjectSelection(input),
         cwd: process.cwd(),
       });
-      if (!resolved.ok) return buildToolError({ message: resolved.message });
+      if (!resolved.ok) {
+        return buildToolError({ message: resolved.message });
+      }
 
       const args = [
         "open",
@@ -556,7 +572,9 @@ function registerTools(opts: { readonly server: McpServer }): void {
         cwd: process.cwd(),
         allowUnregistered: true,
       });
-      if (!resolved.ok) return buildToolError({ message: resolved.message });
+      if (!resolved.ok) {
+        return buildToolError({ message: resolved.message });
+      }
 
       const args = [
         "init",
@@ -630,7 +648,9 @@ function buildProfileArgs(opts: {
   readonly profiles?: readonly string[];
 }): string[] {
   const profiles = (opts.profiles ?? []).map((p) => p.trim()).filter(Boolean);
-  if (profiles.length === 0) return [];
+  if (profiles.length === 0) {
+    return [];
+  }
   return ["--profile", profiles.join(",")];
 }
 
@@ -638,7 +658,9 @@ function buildServicesArgs(opts: {
   readonly services: readonly string[];
 }): string[] {
   const services = opts.services.map((s) => s.trim()).filter(Boolean);
-  if (services.length === 0) return [];
+  if (services.length === 0) {
+    return [];
+  }
   return ["--services", services.join(",")];
 }
 
@@ -703,7 +725,9 @@ async function resolveProjectArgs(opts: {
   }
 
   const context = await findProjectContext(opts.cwd);
-  if (context) return { ok: true, args: [] };
+  if (context) {
+    return { ok: true, args: [] };
+  }
 
   if (!opts.allowUnregistered) {
     const allowed = await isPathAllowed({ absPath: opts.cwd });
@@ -722,7 +746,9 @@ async function isPathAllowed(opts: {
   readonly absPath: string;
 }): Promise<boolean> {
   const roots = await readAllowedRoots();
-  if (roots.length === 0) return false;
+  if (roots.length === 0) {
+    return false;
+  }
   return roots.some((root) =>
     isPathWithin({ parent: root, child: opts.absPath })
   );
@@ -743,7 +769,9 @@ function isPathWithin(opts: {
   readonly child: string;
 }): boolean {
   const rel = relative(opts.parent, opts.child);
-  if (rel === "") return true;
+  if (rel === "") {
+    return true;
+  }
   return !(rel.startsWith("..") || isAbsolute(rel));
 }
 
@@ -820,7 +848,9 @@ async function runHackLogTail(opts: {
   let stopReason = "eof";
 
   const stop = (reason: string) => {
-    if (stopReason !== "eof") return;
+    if (stopReason !== "eof") {
+      return;
+    }
     stopReason = reason;
     proc.kill();
   };
@@ -829,9 +859,13 @@ async function runHackLogTail(opts: {
     for await (const line of readLinesFromStream(proc.stdout)) {
       stdoutLines.push(line);
       const trimmed = line.trim();
-      if (trimmed.length === 0) continue;
+      if (trimmed.length === 0) {
+        continue;
+      }
       const parsed = parseJsonLine(trimmed);
-      if (parsed) events.push(parsed);
+      if (parsed) {
+        events.push(parsed);
+      }
       if (events.length >= maxEvents) {
         stop("max_events");
         break;
@@ -873,7 +907,9 @@ function formatCommand(parts: readonly string[]): string {
 
 function parseJson(text: string): Record<string, unknown> | null {
   const trimmed = text.trim();
-  if (trimmed.length === 0) return null;
+  if (trimmed.length === 0) {
+    return null;
+  }
   try {
     const parsed: unknown = JSON.parse(trimmed);
     return isRecord(parsed) ? parsed : null;
@@ -886,13 +922,17 @@ function parseJsonLines(text: string): Record<string, unknown>[] {
   const events: Record<string, unknown>[] = [];
   for (const line of text.split("\n")) {
     const parsed = parseJsonLine(line.trim());
-    if (parsed) events.push(parsed);
+    if (parsed) {
+      events.push(parsed);
+    }
   }
   return events;
 }
 
 function parseJsonLine(line: string): Record<string, unknown> | null {
-  if (line.length === 0) return null;
+  if (line.length === 0) {
+    return null;
+  }
   try {
     const parsed: unknown = JSON.parse(line);
     return isRecord(parsed) ? parsed : null;
@@ -904,20 +944,26 @@ function parseJsonLine(line: string): Record<string, unknown> | null {
 function countJsonLines(text: string): number {
   let count = 0;
   for (const line of text.split("\n")) {
-    if (parseJsonLine(line.trim())) count += 1;
+    if (parseJsonLine(line.trim())) {
+      count += 1;
+    }
   }
   return count;
 }
 
 function joinLines(lines: readonly string[]): string {
-  if (lines.length === 0) return "";
+  if (lines.length === 0) {
+    return "";
+  }
   return `${lines.join("\n")}\n`;
 }
 
 async function streamToText(
   stream: ReadableStream<Uint8Array> | null
 ): Promise<string> {
-  if (!stream) return "";
+  if (!stream) {
+    return "";
+  }
   return await new Response(stream).text();
 }
 
@@ -927,7 +973,9 @@ async function appendAuditLog(opts: {
   readonly exitCode: number;
 }): Promise<void> {
   const home = (process.env.HOME ?? "").trim();
-  if (home.length === 0) return;
+  if (home.length === 0) {
+    return;
+  }
   const logPath = resolve(home, GLOBAL_HACK_DIR_NAME, "mcp-audit.log");
   try {
     await ensureDir(dirname(logPath));

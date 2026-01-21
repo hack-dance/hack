@@ -5,6 +5,9 @@ import { isRecord } from "../../../lib/guards.ts";
 import type { TicketsGitConfig, TicketsGitRefMode } from "../../sdk/config.ts";
 import { stableStringify } from "./util.ts";
 
+const REFS_HEADS_PREFIX_PATTERN = /^refs\/heads\//;
+const REFS_PREFIX_PATTERN = /^refs\//;
+
 export type TicketsGitChannel = {
   readonly ensureCheckedOut: () => Promise<string>;
   readonly appendEvents: (input: {
@@ -53,14 +56,14 @@ export type TicketsGitRepairResult =
     }
   | { readonly ok: false; readonly error: string };
 
-export async function createGitTicketsChannel(opts: {
+export function createGitTicketsChannel(opts: {
   readonly projectRoot: string;
   readonly config: TicketsGitConfig;
   readonly logger: {
     info: (input: { message: string }) => void;
     warn: (input: { message: string }) => void;
   };
-}): Promise<TicketsGitChannel> {
+}): TicketsGitChannel {
   const ticketsDir = resolve(opts.projectRoot, ".hack/tickets");
   const gitDir = resolve(ticketsDir, "git");
   const bareDir = resolve(gitDir, "bare.git");
@@ -841,7 +844,9 @@ function normalizeBranchName(input: string): string {
   if (!trimmed) {
     return "hack/tickets";
   }
-  return trimmed.replace(/^refs\/heads\//, "").replace(/^refs\//, "");
+  return trimmed
+    .replace(REFS_HEADS_PREFIX_PATTERN, "")
+    .replace(REFS_PREFIX_PATTERN, "");
 }
 
 function buildRemoteRef(opts: {

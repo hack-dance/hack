@@ -98,13 +98,18 @@ function logWithConsole(level: LogLevel, { message, fields }: LogInput): void {
   process.stderr.write(line);
 }
 
+function resolveGumLogExtra(level: LogLevel): LogFields | undefined {
+  if (level === "success") {
+    return { status: "success" } satisfies LogFields;
+  }
+  if (level === "step") {
+    return { status: "step" } satisfies LogFields;
+  }
+  return undefined;
+}
+
 function logWithGum(level: LogLevel, { message, fields }: LogInput): void {
-  const extra =
-    level === "success"
-      ? ({ status: "success" } satisfies LogFields)
-      : level === "step"
-        ? ({ status: "step" } satisfies LogFields)
-        : undefined;
+  const extra = resolveGumLogExtra(level);
 
   const ok = tryGumLog({
     level: toGumLevel(level),

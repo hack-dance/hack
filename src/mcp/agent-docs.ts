@@ -45,11 +45,7 @@ export async function upsertAgentDocs(opts: {
       const existing = (await readTextFile(path)) ?? "";
       const next = upsertSnippet({ existing, snippet });
       const result = await writeTextFileIfChanged(path, next);
-      const status = result.changed
-        ? existed
-          ? "updated"
-          : "created"
-        : "noop";
+      const status = resolveUpsertStatus({ changed: result.changed, existed });
       results.push({ target, status, path });
     } catch (error: unknown) {
       const message =
@@ -77,8 +73,12 @@ export async function getExistingAgentDocs(opts: {
     target: "claude",
   });
 
-  if (await pathExists(agentsPath)) targets.push("agents");
-  if (await pathExists(claudePath)) targets.push("claude");
+  if (await pathExists(agentsPath)) {
+    targets.push("agents");
+  }
+  if (await pathExists(claudePath)) {
+    targets.push("claude");
+  }
 
   return targets;
 }
@@ -253,6 +253,16 @@ function resolveAgentDocFilename(opts: {
   return opts.target === "agents" ? "AGENTS.md" : "CLAUDE.md";
 }
 
+function resolveUpsertStatus(opts: {
+  readonly changed: boolean;
+  readonly existed: boolean;
+}): "created" | "updated" | "noop" {
+  if (!opts.changed) {
+    return "noop";
+  }
+  return opts.existed ? "updated" : "created";
+}
+
 function upsertSnippet(opts: {
   readonly existing: string;
   readonly snippet: string;
@@ -267,7 +277,9 @@ function upsertSnippet(opts: {
   }
 
   const trimmed = opts.existing.trimEnd();
-  if (trimmed.length === 0) return opts.snippet;
+  if (trimmed.length === 0) {
+    return opts.snippet;
+  }
   return ensureTrailingNewline({
     text: `${trimmed}\n\n${opts.snippet.trimEnd()}`,
   });
@@ -279,10 +291,14 @@ function removeSnippet(opts: { readonly existing: string }): string {
     "m"
   );
 
-  if (!pattern.test(opts.existing)) return opts.existing;
+  if (!pattern.test(opts.existing)) {
+    return opts.existing;
+  }
 
   const replaced = opts.existing.replace(pattern, "").trimEnd();
-  if (replaced.length === 0) return "";
+  if (replaced.length === 0) {
+    return "";
+  }
   return ensureTrailingNewline({ text: replaced.replace(/\n{3,}/g, "\n\n") });
 }
 

@@ -21,6 +21,15 @@ import { readRuntimeProjects } from "../lib/runtime-projects.ts";
 import { exec } from "../lib/shell.ts";
 import { display } from "../ui/display.ts";
 
+/** Regex to parse ps output line: pid, cpu%, rss, command. */
+const PROCESS_LINE_PATTERN = /^(\d+)\s+([\d.]+)\s+(\d+)\s+(.*)$/;
+
+/** Regex to extract numeric percent value (e.g., "12.5%"). */
+const PERCENT_PATTERN = /-?\d+(?:\.\d+)?/;
+
+/** Regex to parse byte value with optional unit (e.g., "1.5 GiB"). */
+const BYTES_PATTERN = /^(-?\d+(?:\.\d+)?)\s*([A-Za-z]+)?$/;
+
 const optIncludeGlobal = defineOption({
   name: "includeGlobal",
   type: "boolean",
@@ -685,7 +694,7 @@ async function readHostProcessSamples(opts: {
   const samples: HostProcessSample[] = [];
 
   for (const line of lines) {
-    const match = line.match(/^(\d+)\s+([\d.]+)\s+(\d+)\s+(.*)$/);
+    const match = line.match(PROCESS_LINE_PATTERN);
     if (!match) {
       continue;
     }
@@ -1042,7 +1051,7 @@ function parsePercent(opts: { readonly value: string | null }): number | null {
   if (!opts.value) {
     return null;
   }
-  const match = opts.value.trim().match(/-?\d+(?:\.\d+)?/);
+  const match = opts.value.trim().match(PERCENT_PATTERN);
   if (!match) {
     return null;
   }
@@ -1074,7 +1083,7 @@ function parseBytes(opts: { readonly value: string | null }): number | null {
   if (!trimmed) {
     return null;
   }
-  const match = trimmed.match(/^(-?\d+(?:\.\d+)?)\s*([A-Za-z]+)?$/);
+  const match = trimmed.match(BYTES_PATTERN);
   if (!match) {
     return null;
   }
@@ -1084,30 +1093,41 @@ function parseBytes(opts: { readonly value: string | null }): number | null {
   }
   const unitRaw = (match[2] ?? "B").trim();
   const unit = unitRaw.toLowerCase();
-  const multiplier =
-    unit === "b"
-      ? 1
-      : unit === "kb"
-        ? 1000
-        : unit === "kib"
-          ? 1024
-          : unit === "mb"
-            ? 1_000_000
-            : unit === "mib"
-              ? 1_048_576
-              : unit === "gb"
-                ? 1_000_000_000
-                : unit === "gib"
-                  ? 1_073_741_824
-                  : unit === "tb"
-                    ? 1_000_000_000_000
-                    : unit === "tib"
-                      ? 1_099_511_627_776
-                      : null;
-  if (!multiplier) {
+  const multiplier = getByteUnitMultiplier(unit);
+  if (multiplier === null) {
     return null;
   }
   return value * multiplier;
+}
+
+/**
+ * Returns the multiplier for a given byte unit string.
+ * @param unit - Lowercase unit string (e.g., "b", "kb", "mib", "gib")
+ * @returns The multiplier value or null if the unit is unknown
+ */
+function getByteUnitMultiplier(unit: string): number | null {
+  switch (unit) {
+    case "b":
+      return 1;
+    case "kb":
+      return 1000;
+    case "kib":
+      return 1024;
+    case "mb":
+      return 1_000_000;
+    case "mib":
+      return 1_048_576;
+    case "gb":
+      return 1_000_000_000;
+    case "gib":
+      return 1_073_741_824;
+    case "tb":
+      return 1_000_000_000_000;
+    case "tib":
+      return 1_099_511_627_776;
+    default:
+      return null;
+  }
 }
 
 function formatBytes(opts: { readonly bytes: number }): string {

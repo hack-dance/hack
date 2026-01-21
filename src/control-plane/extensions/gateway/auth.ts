@@ -1,6 +1,8 @@
 import type { GatewayTokenScope } from "./tokens.ts";
 import { verifyGatewayToken } from "./tokens.ts";
 
+const BEARER_TOKEN_PATTERN = /^Bearer\s+(.+)$/i;
+
 export type GatewayAuthResult =
   | {
       readonly ok: true;
@@ -47,7 +49,7 @@ function extractGatewayToken(opts: {
 }): string | null {
   const auth = (opts.headers.get("authorization") ?? "").trim();
   if (auth.length > 0) {
-    const match = auth.match(/^Bearer\s+(.+)$/i);
+    const match = auth.match(BEARER_TOKEN_PATTERN);
     if (match?.[1]) {
       return match[1].trim();
     }

@@ -98,7 +98,9 @@ export async function runDaemon({
 
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
   const scheduleRefresh = ({ reason }: { readonly reason: string }) => {
-    if (refreshTimer) return;
+    if (refreshTimer) {
+      return;
+    }
     refreshTimer = setTimeout(async () => {
       refreshTimer = null;
       try {
@@ -251,7 +253,9 @@ export async function runDaemon({
     },
     close: (ws: ServerWebSocket<unknown>) => {
       const state = ws.data as ControlPlaneWsState | undefined;
-      if (!state) return;
+      if (!state) {
+        return;
+      }
       if (state.kind === "job") {
         stopJobStream({ state });
       } else if (state.attachment) {
@@ -355,7 +359,9 @@ async function handleRequest({
     supervisor,
     shells,
   });
-  if (controlPlaneResponse) return controlPlaneResponse;
+  if (controlPlaneResponse) {
+    return controlPlaneResponse;
+  }
   if (url.pathname === "/v1/status") {
     return jsonResponse({
       status: "ok",
@@ -598,8 +604,10 @@ async function handleGatewayRequest(opts: {
       includeUnregistered: false,
     });
     const filtered = payload.projects.filter((project) => {
-      if (!project || typeof project !== "object") return false;
-      const id = (project as Record<string, unknown>)["project_id"];
+      if (!project || typeof project !== "object") {
+        return false;
+      }
+      const id = (project as Record<string, unknown>).project_id;
       return typeof id === "string" && enabledProjectIds.has(id);
     });
     return jsonResponse({
@@ -652,15 +660,22 @@ async function handleControlPlaneRequest(opts: {
   readonly shells: ReturnType<typeof createShellService>;
 }): Promise<Response | null> {
   const segments = opts.url.pathname.split("/").filter(Boolean);
-  if (segments[0] !== "control-plane") return null;
-  if (segments[1] !== "projects")
+  if (segments[0] !== "control-plane") {
+    return null;
+  }
+  if (segments[1] !== "projects") {
     return jsonResponse({ error: "not_found" }, 404);
+  }
 
   const projectId = segments[2];
-  if (!projectId) return jsonResponse({ error: "missing_project_id" }, 400);
+  if (!projectId) {
+    return jsonResponse({ error: "missing_project_id" }, 400);
+  }
 
   const project = await resolveRegisteredProjectById({ id: projectId });
-  if (!project) return jsonResponse({ error: "unknown_project" }, 404);
+  if (!project) {
+    return jsonResponse({ error: "unknown_project" }, 404);
+  }
 
   if (segments[3] === "jobs" && segments[4] && segments[5] === "stream") {
     if (opts.req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
@@ -690,10 +705,14 @@ async function handleControlPlaneRequest(opts: {
     }
 
     const body = await readJsonBody(opts.req);
-    if (!body) return jsonResponse({ error: "invalid_json" }, 400);
+    if (!body) {
+      return jsonResponse({ error: "invalid_json" }, 400);
+    }
 
     const payload = parseJobCreateInput(body);
-    if (!payload.ok) return jsonResponse({ error: payload.error }, 400);
+    if (!payload.ok) {
+      return jsonResponse({ error: payload.error }, 400);
+    }
 
     const created = await opts.supervisor.createJob({
       projectDir: project.project.projectDir,
@@ -734,7 +753,9 @@ async function handleControlPlaneRequest(opts: {
       projectDir: project.project.projectDir,
       jobId,
     });
-    if (!job) return jsonResponse({ error: "job_not_found" }, 404);
+    if (!job) {
+      return jsonResponse({ error: "job_not_found" }, 404);
+    }
     return jsonResponse({ job });
   }
 
@@ -770,10 +791,14 @@ async function handleControlPlaneRequest(opts: {
     }
 
     const body = await readJsonBody(opts.req);
-    if (!body) return jsonResponse({ error: "invalid_json" }, 400);
+    if (!body) {
+      return jsonResponse({ error: "invalid_json" }, 400);
+    }
 
     const payload = parseShellCreateInput(body);
-    if (!payload.ok) return jsonResponse({ error: payload.error }, 400);
+    if (!payload.ok) {
+      return jsonResponse({ error: payload.error }, 400);
+    }
 
     const cwd = resolveShellCwd({
       projectRoot: project.project.projectRoot,
@@ -851,9 +876,8 @@ type JobCreateInput = {
 function parseJobCreateInput(
   value: Record<string, unknown>
 ): JobCreateInputResult {
-  const runner =
-    typeof value["runner"] === "string" ? value["runner"] : "generic";
-  const commandRaw = value["command"];
+  const runner = typeof value.runner === "string" ? value.runner : "generic";
+  const commandRaw = value.command;
   const command = Array.isArray(commandRaw)
     ? commandRaw.filter((item) => typeof item === "string")
     : [];
@@ -861,8 +885,8 @@ function parseJobCreateInput(
     return { ok: false, error: "missing_command" };
   }
 
-  const cwd = typeof value["cwd"] === "string" ? value["cwd"] : undefined;
-  const env = parseEnv(value["env"]);
+  const cwd = typeof value.cwd === "string" ? value.cwd : undefined;
+  const env = parseEnv(value.env);
 
   return {
     ok: true,
@@ -891,22 +915,24 @@ function parseShellCreateInput(
   value: Record<string, unknown>
 ): ShellCreateInputResult {
   const shell =
-    typeof value["shell"] === "string" ? value["shell"].trim() : undefined;
-  const cwd = typeof value["cwd"] === "string" ? value["cwd"] : undefined;
+    typeof value.shell === "string" ? value.shell.trim() : undefined;
+  const cwd = typeof value.cwd === "string" ? value.cwd : undefined;
   const cols =
-    typeof value["cols"] === "number" && Number.isFinite(value["cols"])
-      ? value["cols"]
+    typeof value.cols === "number" && Number.isFinite(value.cols)
+      ? value.cols
       : undefined;
   const rows =
-    typeof value["rows"] === "number" && Number.isFinite(value["rows"])
-      ? value["rows"]
+    typeof value.rows === "number" && Number.isFinite(value.rows)
+      ? value.rows
       : undefined;
-  const env = parseEnv(value["env"]);
+  const env = parseEnv(value.env);
 
-  if (cols !== undefined && cols <= 0)
+  if (cols !== undefined && cols <= 0) {
     return { ok: false, error: "invalid_cols" };
-  if (rows !== undefined && rows <= 0)
+  }
+  if (rows !== undefined && rows <= 0) {
     return { ok: false, error: "invalid_rows" };
+  }
 
   return {
     ok: true,
@@ -921,10 +947,14 @@ function parseShellCreateInput(
 }
 
 function parseEnv(value: unknown): Record<string, string> | undefined {
-  if (typeof value !== "object" || value === null) return undefined;
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
   const out: Record<string, string> = {};
   for (const [key, val] of Object.entries(value)) {
-    if (typeof val === "string") out[key] = val;
+    if (typeof val === "string") {
+      out[key] = val;
+    }
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }
@@ -934,7 +964,9 @@ function resolveShellCwd(opts: {
   readonly cwd?: string;
 }): string | null {
   const raw = (opts.cwd ?? "").trim();
-  if (raw.length === 0) return opts.projectRoot;
+  if (raw.length === 0) {
+    return opts.projectRoot;
+  }
   const resolved = resolve(opts.projectRoot, raw);
   const relativePath = relative(opts.projectRoot, resolved);
   if (relativePath.startsWith("..")) {
@@ -986,13 +1018,17 @@ function parseWsMessage(opts: {
   } catch {
     return null;
   }
-  if (!parsed || typeof parsed !== "object") return null;
+  if (!parsed || typeof parsed !== "object") {
+    return null;
+  }
   const record = parsed as Record<string, unknown>;
-  if (record["type"] !== "hello") return null;
+  if (record.type !== "hello") {
+    return null;
+  }
   const logsFrom =
-    typeof record["logsFrom"] === "number" ? record["logsFrom"] : undefined;
+    typeof record.logsFrom === "number" ? record.logsFrom : undefined;
   const eventsFrom =
-    typeof record["eventsFrom"] === "number" ? record["eventsFrom"] : undefined;
+    typeof record.eventsFrom === "number" ? record.eventsFrom : undefined;
   return {
     type: "hello",
     ...(logsFrom !== undefined ? { logsFrom } : {}),
@@ -1030,14 +1066,14 @@ function parseShellClientMessage(opts: {
   } catch {
     return null;
   }
-  if (!parsed || typeof parsed !== "object") return null;
+  if (!parsed || typeof parsed !== "object") {
+    return null;
+  }
   const record = parsed as Record<string, unknown>;
-  const type = record["type"];
+  const type = record.type;
   if (type === "hello") {
-    const cols =
-      typeof record["cols"] === "number" ? record["cols"] : undefined;
-    const rows =
-      typeof record["rows"] === "number" ? record["rows"] : undefined;
+    const cols = typeof record.cols === "number" ? record.cols : undefined;
+    const rows = typeof record.rows === "number" ? record.rows : undefined;
     return {
       type: "hello",
       ...(cols !== undefined ? { cols } : {}),
@@ -1045,19 +1081,25 @@ function parseShellClientMessage(opts: {
     };
   }
   if (type === "input") {
-    const data = record["data"];
-    if (typeof data !== "string") return null;
+    const data = record.data;
+    if (typeof data !== "string") {
+      return null;
+    }
     return { type: "input", data };
   }
   if (type === "resize") {
-    const cols = record["cols"];
-    const rows = record["rows"];
-    if (typeof cols !== "number" || typeof rows !== "number") return null;
+    const cols = record.cols;
+    const rows = record.rows;
+    if (typeof cols !== "number" || typeof rows !== "number") {
+      return null;
+    }
     return { type: "resize", cols, rows };
   }
   if (type === "signal") {
-    const signal = record["signal"];
-    if (!isShellSignal(signal)) return null;
+    const signal = record.signal;
+    if (!isShellSignal(signal)) {
+      return null;
+    }
     return { type: "signal", signal };
   }
   if (type === "close") {
@@ -1115,7 +1157,7 @@ async function startJobStream(opts: {
     return;
   }
 
-  await sendJobReady(opts);
+  sendJobReady(opts);
   await flushLogsOnce(opts);
   await flushEventsOnce(opts);
 
@@ -1145,10 +1187,10 @@ function stopJobStream(opts: { readonly state: JobStreamState }): void {
   }
 }
 
-async function sendJobReady(opts: {
+function sendJobReady(opts: {
   readonly ws: ServerWebSocket<unknown>;
   readonly state: JobStreamState;
-}): Promise<void> {
+}): void {
   opts.ws.send(
     JSON.stringify({
       type: "ready",
@@ -1182,7 +1224,9 @@ async function flushLogsOnce(opts: {
   const paths = store.getJobPaths({ jobId: opts.state.jobId });
   const offset = opts.state.logsOffset ?? 0;
   const chunk = await readFileChunk({ path: paths.combinedPath, offset });
-  if (!chunk) return;
+  if (!chunk) {
+    return;
+  }
   opts.state.logsOffset = chunk.nextOffset;
   opts.ws.send(
     JSON.stringify({
@@ -1225,7 +1269,9 @@ async function readFileChunk(opts: {
     const file = Bun.file(opts.path);
     const stat = await file.stat();
     const size = stat.size;
-    if (size <= opts.offset) return null;
+    if (size <= opts.offset) {
+      return null;
+    }
     const slice = file.slice(opts.offset, size);
     const data = await slice.text();
     return { data, nextOffset: size };
@@ -1274,12 +1320,16 @@ function formatRuntimeHealth(opts: { readonly health: RuntimeHealth | null }): {
 }
 
 function toIso(opts: { readonly ms: number | null }): string | null {
-  if (typeof opts.ms !== "number") return null;
+  if (typeof opts.ms !== "number") {
+    return null;
+  }
   return new Date(opts.ms).toISOString();
 }
 
 function parseBoolean(opts: { readonly value: string | null }): boolean {
-  if (!opts.value) return false;
+  if (!opts.value) {
+    return false;
+  }
   const normalized = opts.value.trim().toLowerCase();
   return normalized === "1" || normalized === "true" || normalized === "yes";
 }
@@ -1308,8 +1358,9 @@ function isGatewayShellStreamRequest(opts: { readonly url: URL }): boolean {
 
 function resolveGatewayProjectId(opts: { readonly url: URL }): string | null {
   const segments = opts.url.pathname.split("/").filter(Boolean);
-  if (segments[0] !== "control-plane" || segments[1] !== "projects")
+  if (segments[0] !== "control-plane" || segments[1] !== "projects") {
     return null;
+  }
   const projectId = segments[2];
   return projectId ? projectId : null;
 }

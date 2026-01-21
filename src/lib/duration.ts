@@ -1,6 +1,8 @@
+const DURATION_PATTERN = /^(\d+)\s*([smhdw])$/i;
+
 export function parseDurationMs(input: string): number | null {
   const raw = input.trim();
-  const match = raw.match(/^(\d+)\s*([smhdw])$/i);
+  const match = raw.match(DURATION_PATTERN);
   if (!match) {
     return null;
   }
@@ -16,18 +18,20 @@ export function parseDurationMs(input: string): number | null {
     return null;
   }
 
-  const unitMs =
-    unitRaw === "s"
-      ? 1000
-      : unitRaw === "m"
-        ? 60_000
-        : unitRaw === "h"
-          ? 3_600_000
-          : unitRaw === "d"
-            ? 86_400_000
-            : unitRaw === "w"
-              ? 604_800_000
-              : null;
+  let unitMs: number | null;
+  if (unitRaw === "s") {
+    unitMs = 1000;
+  } else if (unitRaw === "m") {
+    unitMs = 60_000;
+  } else if (unitRaw === "h") {
+    unitMs = 3_600_000;
+  } else if (unitRaw === "d") {
+    unitMs = 86_400_000;
+  } else if (unitRaw === "w") {
+    unitMs = 604_800_000;
+  } else {
+    unitMs = null;
+  }
 
   if (unitMs === null) {
     return null;

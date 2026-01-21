@@ -1,5 +1,12 @@
 import { isRecord } from "../lib/guards.ts";
 
+/** Matches a service name with a trailing instance number (e.g., "myservice-1") */
+const SERVICE_INSTANCE_REGEX = /^(.*?)-(\d+)$/;
+
+/** Matches ISO 8601 timestamp prefix from log line (e.g., "2024-01-15T12:34:56.789Z") */
+const ISO_TIMESTAMP_PREFIX_REGEX =
+  /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)([\s\S]*)$/;
+
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
 export type LogJsonEntry = {
@@ -112,12 +119,7 @@ function parseLogPayload(payload: string): {
     parseAnyLevel(json.level) ??
     parseAnyLevel(json.lvl) ??
     parseAnyLevel(json.severity);
-  const message =
-    typeof json.msg === "string"
-      ? json.msg
-      : typeof json.message === "string"
-        ? json.message
-        : payload;
+  const message = extractJsonMessage({ json, fallback: payload });
   const fields = extractFields(json);
 
   return {
@@ -125,6 +127,19 @@ function parseLogPayload(payload: string): {
     ...(level ? { level } : {}),
     ...(fields ? { fields } : {}),
   };
+}
+
+function extractJsonMessage(opts: {
+  readonly json: JsonLog;
+  readonly fallback: string;
+}): string {
+  if (typeof opts.json.msg === "string") {
+    return opts.json.msg;
+  }
+  if (typeof opts.json.message === "string") {
+    return opts.json.message;
+  }
+  return opts.fallback;
 }
 
 function tryParseJson(text: string): JsonLog | null {
@@ -227,7 +242,7 @@ function parseComposeServiceAndInstance(opts: {
       ? trimmed.slice(`${opts.projectName}-`.length)
       : trimmed;
 
-  const match = withoutProjectPrefix.match(/^(.*?)-(\d+)$/);
+  const match = withoutProjectPrefix.match(SERVICE_INSTANCE_REGEX);
   if (!match) {
     return { service: withoutProjectPrefix, instance: null };
   }
@@ -241,9 +256,7 @@ function splitIsoTimestampPrefix(payload: string): {
   readonly timestampIso: string | null;
   readonly payload: string;
 } {
-  const match = payload.match(
-    /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)([\s\S]*)$/
-  );
+  const match = payload.match(ISO_TIMESTAMP_PREFIX_REGEX);
   if (!match) {
     return { timestampIso: null, payload };
   }

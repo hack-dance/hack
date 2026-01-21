@@ -26,6 +26,8 @@ import {
 } from "./tickets-skill.ts";
 import { normalizeTicketRef, normalizeTicketRefs } from "./util.ts";
 
+const TICKET_REF_SEPARATOR_PATTERN = /[,\s]+/;
+
 let didPromptTicketsGitHealth = false;
 
 export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
@@ -58,11 +60,14 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
       const scope = parsed.value.global ? "user" : "project";
       const projectRoot = ctx.project.projectRoot;
 
-      const action = parsed.value.remove
-        ? "remove"
-        : parsed.value.check
-          ? "check"
-          : "install";
+      let action: "install" | "check" | "remove";
+      if (parsed.value.remove) {
+        action = "remove";
+      } else if (parsed.value.check) {
+        action = "check";
+      } else {
+        action = "install";
+      }
       const repoState = await checkTicketsRepoState({ projectRoot });
 
       let repoGitignore: {
@@ -114,37 +119,42 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
         }
       }
 
-      const skill =
-        action === "check"
-          ? await checkTicketsSkill({
-              scope,
-              projectRoot: scope === "project" ? projectRoot : undefined,
-            })
-          : action === "remove"
-            ? await removeTicketsSkill({
-                scope,
-                projectRoot: scope === "project" ? projectRoot : undefined,
-              })
-            : await installTicketsSkill({
-                scope,
-                projectRoot: scope === "project" ? projectRoot : undefined,
-              });
+      let skill: Awaited<ReturnType<typeof checkTicketsSkill>>;
+      const skillProjectRoot = scope === "project" ? projectRoot : undefined;
+      if (action === "check") {
+        skill = await checkTicketsSkill({
+          scope,
+          projectRoot: skillProjectRoot,
+        });
+      } else if (action === "remove") {
+        skill = await removeTicketsSkill({
+          scope,
+          projectRoot: skillProjectRoot,
+        });
+      } else {
+        skill = await installTicketsSkill({
+          scope,
+          projectRoot: skillProjectRoot,
+        });
+      }
 
-      const docs =
-        action === "check"
-          ? await checkTicketsAgentDocs({
-              projectRoot,
-              targets: resolvedTargets,
-            })
-          : action === "remove"
-            ? await removeTicketsAgentDocs({
-                projectRoot,
-                targets: resolvedTargets,
-              })
-            : await upsertTicketsAgentDocs({
-                projectRoot,
-                targets: resolvedTargets,
-              });
+      let docs: Awaited<ReturnType<typeof checkTicketsAgentDocs>>;
+      if (action === "check") {
+        docs = await checkTicketsAgentDocs({
+          projectRoot,
+          targets: resolvedTargets,
+        });
+      } else if (action === "remove") {
+        docs = await removeTicketsAgentDocs({
+          projectRoot,
+          targets: resolvedTargets,
+        });
+      } else {
+        docs = await upsertTicketsAgentDocs({
+          projectRoot,
+          targets: resolvedTargets,
+        });
+      }
 
       if (parsed.value.json) {
         process.stdout.write(
@@ -201,7 +211,7 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
 
       await maybeEnsureTicketsSetup({ ctx, json: parsed.value.json });
 
-      const store = await createTicketsStore({
+      const store = createTicketsStore({
         projectRoot: ctx.project.projectRoot,
         projectId: ctx.projectId,
         projectName: ctx.projectName,
@@ -353,17 +363,23 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
         return 1;
       }
 
-      const dependsOn = parsed.value.clearDependsOn
-        ? []
-        : parsed.value.dependsOn.length > 0
-          ? dependsOnResult.refs
-          : undefined;
+      let dependsOn: string[] | undefined;
+      if (parsed.value.clearDependsOn) {
+        dependsOn = [];
+      } else if (parsed.value.dependsOn.length > 0) {
+        dependsOn = dependsOnResult.refs;
+      } else {
+        dependsOn = undefined;
+      }
 
-      const blocks = parsed.value.clearBlocks
-        ? []
-        : parsed.value.blocks.length > 0
-          ? blocksResult.refs
-          : undefined;
+      let blocks: string[] | undefined;
+      if (parsed.value.clearBlocks) {
+        blocks = [];
+      } else if (parsed.value.blocks.length > 0) {
+        blocks = blocksResult.refs;
+      } else {
+        blocks = undefined;
+      }
 
       const hasUpdates =
         title !== undefined ||
@@ -378,7 +394,7 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
 
       await maybeEnsureTicketsSetup({ ctx, json: parsed.value.json });
 
-      const store = await createTicketsStore({
+      const store = createTicketsStore({
         projectRoot: ctx.project.projectRoot,
         projectId: ctx.projectId,
         projectName: ctx.projectName,
@@ -434,7 +450,7 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
 
       await maybeEnsureTicketsSetup({ ctx, json: parsed.value.json });
 
-      const store = await createTicketsStore({
+      const store = createTicketsStore({
         projectRoot: ctx.project.projectRoot,
         projectId: ctx.projectId,
         projectName: ctx.projectName,
@@ -520,7 +536,7 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
 
       await maybeEnsureTicketsSetup({ ctx, json: parsed.value.json });
 
-      const store = await createTicketsStore({
+      const store = createTicketsStore({
         projectRoot: ctx.project.projectRoot,
         projectId: ctx.projectId,
         projectName: ctx.projectName,
@@ -610,7 +626,7 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
 
       await maybeEnsureTicketsSetup({ ctx, json: parsed.value.json });
 
-      const store = await createTicketsStore({
+      const store = createTicketsStore({
         projectRoot: ctx.project.projectRoot,
         projectId: ctx.projectId,
         projectName: ctx.projectName,
@@ -663,7 +679,7 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
 
       await maybeEnsureTicketsSetup({ ctx, json: parsed.value.json });
 
-      const store = await createTicketsStore({
+      const store = createTicketsStore({
         projectRoot: ctx.project.projectRoot,
         projectId: ctx.projectId,
         projectName: ctx.projectName,
@@ -932,7 +948,7 @@ async function resolveTicketBody(opts: {
 
 function splitTicketRefs(value: string): string[] {
   return value
-    .split(/[,\s]+/)
+    .split(TICKET_REF_SEPARATOR_PATTERN)
     .map((part) => part.trim())
     .filter((part) => part.length > 0);
 }
@@ -1090,7 +1106,7 @@ async function maybeEnsureTicketsGitHealth(opts: {
   }
 
   const projectRoot = opts.ctx.project.projectRoot;
-  const channel = await createGitTicketsChannel({
+  const channel = createGitTicketsChannel({
     projectRoot,
     config: gitConfig,
     logger: opts.ctx.logger,

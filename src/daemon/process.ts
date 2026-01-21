@@ -6,7 +6,9 @@ export async function readDaemonPid({
   readonly pidPath: string;
 }): Promise<number | null> {
   const text = await readTextFile(pidPath);
-  if (!text) return null;
+  if (!text) {
+    return null;
+  }
   const value = Number.parseInt(text.trim(), 10);
   return Number.isFinite(value) ? value : null;
 }
@@ -53,7 +55,9 @@ export async function waitForProcessExit({
 }): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (!isProcessRunning({ pid })) return true;
+    if (!isProcessRunning({ pid })) {
+      return true;
+    }
     await sleep({ ms: pollMs });
   }
   return !isProcessRunning({ pid });

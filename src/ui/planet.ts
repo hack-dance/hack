@@ -4,6 +4,12 @@ import { loadLipgloss } from "./lipgloss.ts";
 import type { PlanetAnimation } from "./planet-animations.ts";
 import { isTty } from "./terminal.ts";
 
+/** Matches ANSI escape sequences for styling (e.g., "\x1b[0m", "\x1b[1;32m") */
+const ANSI_ESCAPE_REGEX = /^\x1b\[[0-9;]*m/;
+
+/** Matches all ANSI escape sequences globally for stripping */
+const ANSI_STRIP_REGEX = /\u001b\[[0-9;]*m/g;
+
 type LipglossModule = NonNullable<Awaited<ReturnType<typeof loadLipgloss>>>;
 type PlanetStyle = {
   readonly open: string;
@@ -284,9 +290,18 @@ async function resolveChafaEntries(
   return entries;
 }
 
+function resolvePlanetGifFilename(name: string): string | null {
+  if (name === "cut") {
+    return "cut.gif";
+  }
+  if (name === "mash") {
+    return "hacker-mash.gif";
+  }
+  return null;
+}
+
 async function resolvePlanetGifPath(name: string): Promise<string | null> {
-  const file =
-    name === "cut" ? "cut.gif" : name === "mash" ? "hacker-mash.gif" : null;
+  const file = resolvePlanetGifFilename(name);
   if (!file) {
     return null;
   }
@@ -1391,7 +1406,7 @@ function sliceAnsiLine(line: string, start: number, width: number): string {
   while (i < line.length && visible < start + width) {
     const ch = line[i];
     if (ch === "\x1b") {
-      const match = /^\x1b\[[0-9;]*m/.exec(line.slice(i));
+      const match = ANSI_ESCAPE_REGEX.exec(line.slice(i));
       if (match) {
         out += match[0];
         i += match[0].length;
@@ -1424,7 +1439,7 @@ function visibleWidth(text: string): number {
 }
 
 function stripAnsi(text: string): string {
-  return text.replaceAll(/\u001b\[[0-9;]*m/g, "");
+  return text.replaceAll(ANSI_STRIP_REGEX, "");
 }
 
 function padLinesToHeight(opts: {

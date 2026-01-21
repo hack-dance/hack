@@ -33,6 +33,28 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # Finder (MacOS) folder config
 .DS_Store
 
+# Xcode
+*.xcodeproj
+*.xcworkspace
+DerivedData
+.build
+.swiftpm
+xcuserdata
+xcshareddata
+
+# macOS app
+apps/macos/build/
+apps/macos/vendor/ghostty/
+apps/macos/.ghostty/
+
+# Zig build artifacts
+.zig-cache/
+zig-cache/
+zig-out/
+
+# hack tickets
+.hack/tickets/
+
 
 SPECS/
 _DOCS

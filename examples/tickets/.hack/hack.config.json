@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schemas.hack/hack.config.schema.json",
+  "name": "tickets-example",
+  "dev_host": "tickets-example.hack",
+  "controlPlane": {
+    "extensions": {
+      "dance.hack.tickets": { "enabled": true }
+    }
+  }
+}

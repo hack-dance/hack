@@ -14,5 +14,10 @@
   "oauth": {
     "enabled": true,
     "tld": "gy"
+  },
+  "controlPlane": {
+    "gateway": {
+      "enabled": true
+    }
   }
 }

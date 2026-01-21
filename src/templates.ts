@@ -346,7 +346,11 @@ export function renderProjectConfigSchemaJson(): string {
         additionalProperties: true,
         properties: {
           dns: { type: "boolean" },
-          tls: { type: "boolean" }
+          tls: { type: "boolean" },
+          extra_hosts: {
+            type: "object",
+            additionalProperties: { type: "string" }
+          }
         }
       },
       oauth: {
@@ -355,6 +359,93 @@ export function renderProjectConfigSchemaJson(): string {
         properties: {
           enabled: { type: "boolean" },
           tld: { type: "string" }
+        }
+      },
+      controlPlane: {
+        type: "object",
+        additionalProperties: true,
+        properties: {
+          extensions: {
+            type: "object",
+            additionalProperties: {
+              type: "object",
+              additionalProperties: true,
+              properties: {
+                enabled: { type: "boolean" },
+                cliNamespace: { type: "string" },
+                config: {
+                  type: "object",
+                  additionalProperties: true
+                }
+              }
+            }
+          },
+          tickets: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              git: {
+                type: "object",
+                additionalProperties: true,
+                properties: {
+                  enabled: { type: "boolean" },
+                  branch: { type: "string" },
+                  remote: { type: "string" },
+                  forceBareClone: { type: "boolean" },
+                  refMode: { type: "string" }
+                }
+              }
+            }
+          },
+          supervisor: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              enabled: { type: "boolean" },
+              maxConcurrentJobs: { type: "number" },
+              logsMaxBytes: { type: "number" }
+            }
+          },
+          tui: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              logs: {
+                type: "object",
+                additionalProperties: true,
+                properties: {
+                  maxEntries: { type: "number" },
+                  maxLines: { type: "number" },
+                  historyTailStep: { type: "number" }
+                }
+              }
+            }
+          },
+          usage: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              watchIntervalMs: { type: "number" },
+              historySize: { type: "number" }
+            }
+          },
+          daemon: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              autoStart: { type: "boolean" }
+            }
+          },
+          gateway: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              enabled: { type: "boolean" },
+              bind: { type: "string" },
+              port: { type: "number" },
+              allowWrites: { type: "boolean" }
+            }
+          }
         }
       }
     },

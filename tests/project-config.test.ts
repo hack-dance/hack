@@ -59,7 +59,14 @@ test("readProjectConfig parses json config fields", async () => {
         dev_host: "myapp.hack",
         logs: { follow_backend: "compose", snapshot_backend: "loki", clear_on_down: true },
         oauth: { enabled: true, tld: "gy" },
-        internal: { dns: true, tls: true }
+        internal: {
+          dns: true,
+          tls: true,
+          extra_hosts: {
+            "api.example.com": "host-gateway",
+            "db.example.com": "127.0.0.1"
+          }
+        }
       },
       null,
       2
@@ -76,6 +83,10 @@ test("readProjectConfig parses json config fields", async () => {
   expect(cfg.oauth?.tld).toBe("gy")
   expect(cfg.internal?.dns).toBe(true)
   expect(cfg.internal?.tls).toBe(true)
+  expect(cfg.internal?.extraHosts).toEqual({
+    "api.example.com": "host-gateway",
+    "db.example.com": "127.0.0.1"
+  })
 })
 
 test("readProjectConfig captures parse errors", async () => {

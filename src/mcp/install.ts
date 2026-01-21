@@ -258,7 +258,7 @@ async function installJsonConfig(opts: {
   readonly entry: McpJsonEntry
 }): Promise<{ readonly status: "updated" | "noop" | "error"; readonly message?: string }> {
   const text = await readTextFile(opts.path)
-  const parsed = text ? parseJsonObject(text) : { ok: true, value: {} }
+  const parsed = text ? parseJsonObject(text) : createOkParseResult({ value: {} })
   if (!parsed.ok) {
     return { status: "error", message: parsed.message }
   }
@@ -411,6 +411,15 @@ function parseJsonObject(
     const message = error instanceof Error ? error.message : "Invalid JSON"
     return { ok: false, message: `Failed to parse config JSON: ${message}` }
   }
+}
+
+function createOkParseResult(opts: {
+  readonly value: Record<string, unknown>
+}): {
+  readonly ok: true
+  readonly value: Record<string, unknown>
+} {
+  return { ok: true, value: opts.value }
 }
 
 function resolveHomeDir(): string | null {

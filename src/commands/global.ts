@@ -1,11 +1,18 @@
 import { confirm, isCancel, note, spinner } from "@clack/prompts"
 
+import { homedir } from "node:os"
 import { dirname, resolve } from "node:path"
 
 import { logger } from "../ui/logger.ts"
 import { ensureBundledGumInstalled } from "../ui/gum.ts"
 import { dockerComposeLogsPretty } from "../ui/docker-logs.ts"
 import { display } from "../ui/display.ts"
+import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config.ts"
+import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts"
+import { readControlPlaneConfig } from "../control-plane/sdk/config.ts"
+import { isProcessRunning } from "../daemon/process.ts"
+import { resolveDaemonPaths } from "../daemon/paths.ts"
+import { readDaemonStatus } from "../daemon/status.ts"
 import {
   renderGlobalCaddyCompose,
   renderGlobalCoreDnsConfig,
@@ -21,7 +28,9 @@ import {
 import { exec, execOrThrow, findExecutableInPath, run } from "../lib/shell.ts"
 import { isMac } from "../lib/os.ts"
 import { parseJsonLines } from "../lib/json-lines.ts"
-import { getString } from "../lib/guards.ts"
+import { getString, isRecord } from "../lib/guards.ts"
+import { resolveHackInvocation } from "../lib/hack-cli.ts"
+import { resolveGlobalConfigPath } from "../lib/config-paths.ts"
 import { ensureDir, pathExists, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts"
 import {
   DEFAULT_INGRESS_NETWORK,
@@ -35,6 +44,7 @@ import {
   GLOBAL_ALLOY_FILENAME,
   GLOBAL_CADDY_COMPOSE_FILENAME,
   GLOBAL_CADDY_DIR_NAME,
+  GLOBAL_CLOUDFLARE_DIR_NAME,
   GLOBAL_CERTS_DIR_NAME,
   GLOBAL_HACK_DIR_NAME,
   GLOBAL_GRAFANA_DASHBOARDS_PROVISIONING_FILENAME,
@@ -48,10 +58,11 @@ import {
   GLOBAL_BRANCHES_SCHEMA_FILENAME,
   GLOBAL_COREDNS_FILENAME
 } from "../constants.ts"
-import { optFollow, optNoFollow, optPretty, optTail } from "../cli/options.ts"
+import { optFollow, optJson, optNoFollow, optPretty, optTail } from "../cli/options.ts"
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts"
 
 import type { CliContext, CommandArgs, CommandHandlerFor } from "../cli/command.ts"
+import type { ControlPlaneConfig } from "../control-plane/sdk/config.ts"
 
 const globalLogsOptions = [optFollow, optNoFollow, optTail, optPretty] as const
 const globalLogsPositionals = [{ name: "service", required: false }] as const
@@ -130,7 +141,7 @@ const globalStatusSpec = defineCommand({
   name: "status",
   summary: "Show status for global infra (containers + networks)",
   group: "Global",
-  options: [],
+  options: [optJson] as const,
   positionals: [],
   subcommands: []
 } as const)
@@ -164,6 +175,8 @@ const globalCertSpec = defineCommand({
   subcommands: []
 } as const)
 
+type GlobalStatusArgs = CommandArgs<typeof globalStatusSpec.options, readonly []>
+
 const globalTrustSpec = defineCommand({
   name: "trust",
   summary: "Trust Caddy Local CA (macOS) so https://*.hack is trusted",
@@ -188,7 +201,7 @@ export const globalCommand = defineCommand({
     withHandler(globalInstallSpec, async () => await globalInstall()),
     withHandler(globalUpSpec, async () => await globalUp()),
     withHandler(globalDownSpec, async () => await globalDown()),
-    withHandler(globalStatusSpec, async () => await globalStatus()),
+    withHandler(globalStatusSpec, handleGlobalStatus),
     withHandler(globalLogsSpec, handleGlobalLogs),
     withHandler(globalCaSpec, handleGlobalCa),
     withHandler(globalCertSpec, handleGlobalCert),
@@ -463,6 +476,18 @@ export async function globalUp(): Promise<number> {
     }
   }
 
+  const controlPlane = await readControlPlaneConfig({})
+  if (controlPlane.config.daemon.autoStart) {
+    logger.step({ message: "Ensuring hackd is running…" })
+    const invocation = await resolveHackInvocation()
+    const daemonExit = await run([invocation.bin, ...invocation.args, "daemon", "start"], {
+      stdin: "ignore"
+    })
+    if (daemonExit !== 0) {
+      logger.warn({ message: "Unable to start hackd (continuing)" })
+    }
+  }
+
   logger.step({ message: "Starting Caddy…" })
   const caddyExit = await run(
     ["docker", "compose", "-f", paths.caddyCompose, "up", "-d", "--remove-orphans"],
@@ -603,9 +628,44 @@ async function globalDown(): Promise<number> {
   return 0
 }
 
-async function globalStatus(): Promise<number> {
+async function handleGlobalStatus({
+  args
+}: {
+  readonly ctx: CliContext
+  readonly args: GlobalStatusArgs
+}): Promise<number> {
+  return await globalStatus({ json: args.options.json ?? false })
+}
+
+async function globalStatus(opts: { readonly json: boolean }): Promise<number> {
   await ensureDockerRunning()
   const paths = getGlobalPaths()
+
+  if (opts.json) {
+    const [caddy, logging, networks, gateway] = await Promise.all([
+      readComposeStatus(paths.caddyCompose),
+      readComposeStatus(paths.loggingCompose),
+      readNetworksStatus([DEFAULT_INGRESS_NETWORK, DEFAULT_LOGGING_NETWORK]),
+      collectGatewayStatus()
+    ])
+    const summary = {
+      caddy_ok: caddy.ok,
+      logging_ok: logging.ok,
+      networks_ok: networks.ok,
+      gateway_enabled: gateway.gateway_enabled,
+      ok: caddy.ok && logging.ok && networks.ok
+    }
+    const payload = {
+      generated_at: new Date().toISOString(),
+      caddy,
+      logging,
+      networks,
+      gateway,
+      summary
+    }
+    process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`)
+    return 0
+  }
 
   await display.section("Caddy")
   await renderComposeStatusTable(paths.caddyCompose)
@@ -616,7 +676,497 @@ async function globalStatus(): Promise<number> {
   await display.section("Networks")
   await renderNetworksTable([DEFAULT_INGRESS_NETWORK, DEFAULT_LOGGING_NETWORK])
 
+  await display.section("Gateway")
+  await renderGatewayStatus()
+
   return 0
+}
+
+type ComposeServiceStatus = {
+  readonly service: string
+  readonly name: string
+  readonly status: string
+  readonly ports: string
+}
+
+type ComposeStatusGroup = {
+  readonly ok: boolean
+  readonly error: string | null
+  readonly services: readonly ComposeServiceStatus[]
+}
+
+type NetworkStatus = {
+  readonly name: string
+  readonly id: string
+  readonly driver: string
+  readonly scope: string
+}
+
+type NetworkStatusGroup = {
+  readonly ok: boolean
+  readonly missing: readonly string[]
+  readonly networks: readonly NetworkStatus[]
+}
+
+type GatewayExposureState =
+  | "disabled"
+  | "needs_config"
+  | "configured"
+  | "running"
+  | "blocked"
+  | "unknown"
+
+type GatewayExposurePayload = {
+  readonly id: string
+  readonly label: string
+  readonly state: GatewayExposureState
+  readonly enabled: boolean
+  readonly detail?: string
+  readonly url?: string
+}
+
+type GatewayStatusPayload = {
+  readonly config_path: string
+  readonly gateway_url: string
+  readonly gateway_bind: string
+  readonly gateway_port: number
+  readonly allow_writes: boolean
+  readonly gateway_enabled: boolean
+  readonly gateway_projects_enabled: number
+  readonly tokens_active: number
+  readonly tokens_revoked: number
+  readonly tokens_write: number
+  readonly tokens_read: number
+  readonly gateway_projects?: string
+  readonly exposures: readonly GatewayExposurePayload[]
+  readonly warnings: readonly string[]
+}
+
+async function readComposeStatus(composeFile: string): Promise<ComposeStatusGroup> {
+  const res = await exec(["docker", "compose", "-f", composeFile, "ps", "--format", "json"], {
+    cwd: dirname(composeFile),
+    stdin: "ignore"
+  })
+
+  if (res.exitCode !== 0) {
+    return {
+      ok: false,
+      error: `Failed to read status for ${composeFile}`,
+      services: []
+    }
+  }
+
+  const entries = parseJsonLines(res.stdout)
+  const services = entries.map(entry => ({
+    service: getString(entry, "Service") ?? "",
+    name: getString(entry, "Name") ?? "",
+    status: getString(entry, "Status") ?? "",
+    ports: getString(entry, "Ports") ?? ""
+  }))
+  const ok = services.length > 0 && services.every(service => isServiceRunning(service.status))
+  return { ok, error: null, services }
+}
+
+async function readNetworksStatus(names: readonly string[]): Promise<NetworkStatusGroup> {
+  const res = await exec(["docker", "network", "ls", "--format", "json"], {
+    stdin: "ignore"
+  })
+  if (res.exitCode !== 0) {
+    return { ok: false, missing: [...names], networks: [] }
+  }
+
+  const entries = parseJsonLines(res.stdout)
+  const networks = entries
+    .map(entry => ({
+      name: getString(entry, "Name") ?? "",
+      id: getString(entry, "ID") ?? "",
+      driver: getString(entry, "Driver") ?? "",
+      scope: getString(entry, "Scope") ?? ""
+    }))
+    .filter(entry => entry.name.length > 0 && names.includes(entry.name))
+
+  const present = new Set(networks.map(network => network.name))
+  const missing = names.filter(name => !present.has(name))
+  return { ok: missing.length === 0, missing, networks }
+}
+
+async function collectGatewayStatus(): Promise<GatewayStatusPayload> {
+  const gatewayResolution = await resolveGatewayConfig()
+  const configPath = resolveGlobalConfigPath()
+  const gatewayUrl = buildGatewayUrl({
+    bind: gatewayResolution.config.bind,
+    port: gatewayResolution.config.port
+  })
+  const daemonPaths = resolveDaemonPaths({})
+  const daemonStatus = await readDaemonStatus({ paths: daemonPaths })
+  const controlPlane = await readControlPlaneConfig({})
+  const exposures = await resolveGatewayExposures({
+    controlPlane: controlPlane.config,
+    gatewayEnabled: gatewayResolution.config.enabled,
+    gatewayBind: gatewayResolution.config.bind,
+    gatewayUrl,
+    daemonRunning: daemonStatus.running
+  })
+
+  const tokens = await listGatewayTokens({ rootDir: daemonPaths.root })
+  const activeTokens = tokens.filter(token => !token.revokedAt)
+  const revokedTokens = tokens.filter(token => token.revokedAt)
+  const writeTokens = activeTokens.filter(token => token.scope === "write")
+  const readTokens = activeTokens.filter(token => token.scope === "read")
+
+  const payload: GatewayStatusPayload = {
+    config_path: configPath,
+    gateway_url: gatewayUrl,
+    gateway_bind: gatewayResolution.config.bind,
+    gateway_port: gatewayResolution.config.port,
+    allow_writes: gatewayResolution.config.allowWrites,
+    gateway_enabled: gatewayResolution.config.enabled,
+    gateway_projects_enabled: gatewayResolution.enabledProjects.length,
+    tokens_active: activeTokens.length,
+    tokens_revoked: revokedTokens.length,
+    tokens_write: writeTokens.length,
+    tokens_read: readTokens.length,
+    exposures,
+    warnings: gatewayResolution.warnings
+  }
+
+  if (gatewayResolution.enabledProjects.length > 0) {
+    const projects = gatewayResolution.enabledProjects.map(
+      project => `${project.projectName} (${project.projectId})`
+    )
+    return { ...payload, gateway_projects: projects.join(", ") }
+  }
+
+  return payload
+}
+
+async function resolveGatewayExposures(opts: {
+  readonly controlPlane: ControlPlaneConfig
+  readonly gatewayEnabled: boolean
+  readonly gatewayBind: string
+  readonly gatewayUrl: string
+  readonly daemonRunning: boolean
+}): Promise<GatewayExposurePayload[]> {
+  const exposures: GatewayExposurePayload[] = []
+  exposures.push(resolveLanExposure(opts))
+  exposures.push(await resolveTailscaleExposure(opts))
+  exposures.push(await resolveCloudflareExposure(opts))
+  return exposures
+}
+
+function resolveLanExposure(opts: {
+  readonly gatewayEnabled: boolean
+  readonly gatewayBind: string
+  readonly gatewayUrl: string
+  readonly daemonRunning: boolean
+}): GatewayExposurePayload {
+  const blocked = resolveGatewayBlockReason({ ...opts, requiresPublicBind: true })
+  if (blocked) {
+    return buildGatewayExposure({
+      id: "lan",
+      label: "Local network",
+      state: "blocked",
+      detail: blocked
+    })
+  }
+
+  return buildGatewayExposure({
+    id: "lan",
+    label: "Local network",
+    state: "running",
+    detail: `Bind ${opts.gatewayBind}`,
+    url: opts.gatewayUrl
+  })
+}
+
+async function resolveTailscaleExposure(opts: {
+  readonly controlPlane: ControlPlaneConfig
+  readonly gatewayEnabled: boolean
+  readonly gatewayBind: string
+  readonly gatewayUrl: string
+  readonly daemonRunning: boolean
+}): Promise<GatewayExposurePayload> {
+  const extensionEnabled = readExtensionEnabled(opts.controlPlane, "dance.hack.tailscale")
+  if (!extensionEnabled) {
+    return buildGatewayExposure({
+      id: "tailscale",
+      label: "Tailscale",
+      state: "disabled",
+      detail: "Extension disabled"
+    })
+  }
+
+  const blocked = resolveGatewayBlockReason({ ...opts, requiresPublicBind: true })
+  if (blocked) {
+    return buildGatewayExposure({
+      id: "tailscale",
+      label: "Tailscale",
+      state: "blocked",
+      detail: blocked
+    })
+  }
+
+  const tailscalePath = await findExecutableInPath("tailscale")
+  if (!tailscalePath) {
+    return buildGatewayExposure({
+      id: "tailscale",
+      label: "Tailscale",
+      state: "needs_config",
+      detail: "tailscale not installed"
+    })
+  }
+
+  const status = await readTailscaleStatus()
+  if (!status.ok) {
+    return buildGatewayExposure({
+      id: "tailscale",
+      label: "Tailscale",
+      state: "unknown",
+      detail: status.error
+    })
+  }
+
+  const backendState = status.backendState ?? "offline"
+  const isLoginRequired = backendState.toLowerCase() === "needslogin"
+  const url =
+    status.ip && status.running
+      ? resolveGatewayUrlForHost({ gatewayUrl: opts.gatewayUrl, host: status.ip })
+      : undefined
+  const detail = status.running
+    ? status.ip
+      ? `Tailnet IP ${status.ip}`
+      : "Tailnet connected"
+    : `Backend ${backendState}`
+
+  if (status.running) {
+    return buildGatewayExposure({
+      id: "tailscale",
+      label: "Tailscale",
+      state: "running",
+      detail,
+      ...(url ? { url } : {})
+    })
+  }
+
+  if (isLoginRequired) {
+    return buildGatewayExposure({
+      id: "tailscale",
+      label: "Tailscale",
+      state: "needs_config",
+      detail: "Needs login"
+    })
+  }
+
+  return buildGatewayExposure({
+    id: "tailscale",
+    label: "Tailscale",
+    state: "configured",
+    detail
+  })
+}
+
+async function resolveCloudflareExposure(opts: {
+  readonly controlPlane: ControlPlaneConfig
+  readonly gatewayEnabled: boolean
+  readonly gatewayBind: string
+  readonly daemonRunning: boolean
+}): Promise<GatewayExposurePayload> {
+  const extensionEnabled = readExtensionEnabled(opts.controlPlane, "dance.hack.cloudflare")
+  if (!extensionEnabled) {
+    return buildGatewayExposure({
+      id: "cloudflare",
+      label: "Cloudflare",
+      state: "disabled",
+      detail: "Extension disabled"
+    })
+  }
+
+  const cloudflareConfig = readExtensionConfig(opts.controlPlane, "dance.hack.cloudflare")
+  const cloudflareHostname = cloudflareConfig ? getString(cloudflareConfig, "hostname") : null
+  const cloudflareTunnel = cloudflareConfig ? getString(cloudflareConfig, "tunnel") : null
+  const cloudflareConfigured = Boolean(cloudflareHostname || cloudflareTunnel)
+  if (!cloudflareConfigured) {
+    return buildGatewayExposure({
+      id: "cloudflare",
+      label: "Cloudflare",
+      state: "needs_config",
+      detail: "Missing hostname"
+    })
+  }
+
+  const blocked = resolveGatewayBlockReason({ ...opts, requiresPublicBind: false })
+  if (blocked) {
+    return buildGatewayExposure({
+      id: "cloudflare",
+      label: "Cloudflare",
+      state: "blocked",
+      detail: blocked
+    })
+  }
+
+  const cloudflaredPath = await findExecutableInPath("cloudflared")
+  if (!cloudflaredPath) {
+    return buildGatewayExposure({
+      id: "cloudflare",
+      label: "Cloudflare",
+      state: "needs_config",
+      detail: "cloudflared not installed"
+    })
+  }
+
+  const pid = await readCloudflaredPid()
+  const running = pid !== null && isProcessRunning({ pid })
+  const detail = cloudflareHostname
+    ? `Hostname ${cloudflareHostname}`
+    : cloudflareTunnel
+      ? `Tunnel ${cloudflareTunnel}`
+      : "Configured"
+  const url = cloudflareHostname ? `https://${cloudflareHostname}` : undefined
+
+  if (running) {
+    return buildGatewayExposure({
+      id: "cloudflare",
+      label: "Cloudflare",
+      state: "running",
+      detail,
+      ...(url ? { url } : {})
+    })
+  }
+
+  return buildGatewayExposure({
+    id: "cloudflare",
+    label: "Cloudflare",
+    state: "configured",
+    detail: `${detail} (cloudflared not running)`,
+    ...(url ? { url } : {})
+  })
+}
+
+function resolveGatewayBlockReason(opts: {
+  readonly gatewayEnabled: boolean
+  readonly gatewayBind: string
+  readonly daemonRunning: boolean
+  readonly requiresPublicBind: boolean
+}): string | null {
+  if (!opts.gatewayEnabled) {
+    return "Gateway disabled"
+  }
+  if (!opts.daemonRunning) {
+    return "hackd not running"
+  }
+  if (opts.requiresPublicBind && isLoopbackAddress(opts.gatewayBind)) {
+    return "Bind is loopback"
+  }
+  return null
+}
+
+function buildGatewayExposure(payload: Omit<GatewayExposurePayload, "enabled">): GatewayExposurePayload {
+  return {
+    ...payload,
+    enabled: payload.state === "configured" || payload.state === "running"
+  }
+}
+
+async function readTailscaleStatus(): Promise<
+  | {
+      readonly ok: true
+      readonly running: boolean
+      readonly backendState?: string
+      readonly hostname?: string
+      readonly ip?: string
+    }
+  | { readonly ok: false; readonly error: string }
+> {
+  const res = await exec(["tailscale", "status", "--json"], { stdin: "ignore" })
+  if (res.exitCode !== 0) {
+    return { ok: false, error: "tailscale status failed" }
+  }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(res.stdout)
+  } catch {
+    return { ok: false, error: "tailscale status returned invalid JSON" }
+  }
+
+  if (!isRecord(parsed)) {
+    return { ok: false, error: "tailscale status returned invalid JSON" }
+  }
+
+  const backendState = getString(parsed, "BackendState") ?? undefined
+  const self = isRecord(parsed["Self"]) ? parsed["Self"] : null
+  const hostname = self ? getString(self, "HostName") ?? undefined : undefined
+  const online = self ? self["Online"] === true : false
+  let ip: string | undefined
+  if (self) {
+    const ips = self["TailscaleIPs"]
+    if (Array.isArray(ips)) {
+      for (const value of ips) {
+        if (typeof value === "string" && value.length > 0) {
+          ip = value
+          break
+        }
+      }
+    }
+  }
+
+  const running = online || backendState === "Running"
+  return { ok: true, running, backendState, hostname, ip }
+}
+
+async function readCloudflaredPid(): Promise<number | null> {
+  const baseHome = (process.env.HOME ?? homedir()).trim()
+  if (!baseHome) return null
+  const pidPath = resolve(
+    baseHome,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CLOUDFLARE_DIR_NAME,
+    "cloudflared.pid"
+  )
+  const text = await readTextFile(pidPath)
+  if (!text) return null
+  const value = Number.parseInt(text.trim(), 10)
+  return Number.isFinite(value) ? value : null
+}
+
+function resolveGatewayUrlForHost(opts: { readonly gatewayUrl: string; readonly host: string }): string | undefined {
+  try {
+    const url = new URL(opts.gatewayUrl)
+    url.hostname = opts.host
+    return url.toString()
+  } catch {
+    return undefined
+  }
+}
+
+function readExtensionEnabled(controlPlane: ControlPlaneConfig, extensionId: string): boolean {
+  const raw = controlPlane.extensions?.[extensionId]
+  if (!raw || !isRecord(raw)) return false
+  return raw["enabled"] === true
+}
+
+function readExtensionConfig(
+  controlPlane: ControlPlaneConfig,
+  extensionId: string
+): Record<string, unknown> | null {
+  const raw = controlPlane.extensions?.[extensionId]
+  if (!raw || !isRecord(raw)) return null
+  const config = raw["config"]
+  if (!config || !isRecord(config)) return null
+  return config
+}
+
+function isLoopbackAddress(bind: string): boolean {
+  const normalized = bind.trim().toLowerCase()
+  if (normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1") {
+    return true
+  }
+  return normalized.startsWith("127.")
+}
+
+function isServiceRunning(status: string): boolean {
+  const normalized = status.toLowerCase()
+  return normalized.includes("running") || normalized.includes("up")
 }
 
 async function renderComposeStatusTable(composeFile: string): Promise<void> {
@@ -670,6 +1220,49 @@ async function renderNetworksTable(names: readonly string[]): Promise<void> {
     columns: ["NAME", "ID", "DRIVER", "SCOPE"],
     rows
   })
+}
+
+async function renderGatewayStatus(): Promise<void> {
+  const payload = await collectGatewayStatus()
+
+  const entries: Array<readonly [string, string | number | boolean]> = [
+    ["config_path", payload.config_path],
+    ["gateway_url", payload.gateway_url],
+    ["gateway_bind", payload.gateway_bind],
+    ["gateway_port", payload.gateway_port],
+    ["allow_writes", payload.allow_writes],
+    ["gateway_enabled", payload.gateway_enabled],
+    ["gateway_projects_enabled", payload.gateway_projects_enabled],
+    ["tokens_active", payload.tokens_active],
+    ["tokens_revoked", payload.tokens_revoked],
+    ["tokens_write", payload.tokens_write],
+    ["tokens_read", payload.tokens_read]
+  ]
+
+  if (payload.gateway_projects) {
+    entries.push(["gateway_projects", payload.gateway_projects])
+  }
+
+  await display.kv({ entries })
+
+  if (payload.warnings.length > 0) {
+    await display.panel({
+      title: "Gateway warnings",
+      tone: "warn",
+      lines: payload.warnings
+    })
+  }
+
+  await display.panel({
+    title: "Gateway tokens",
+    tone: "info",
+    lines: ["List: hack x gateway token-list", "Revoke: hack x gateway token-revoke <token-id>"]
+  })
+}
+
+function buildGatewayUrl(opts: { readonly bind: string; readonly port: number }): string {
+  const host = opts.bind.includes(":") ? `[${opts.bind}]` : opts.bind
+  return `http://${host}:${opts.port}`
 }
 
 async function globalTrust(): Promise<number> {

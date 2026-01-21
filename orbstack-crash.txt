@@ -1,0 +1,1982 @@
+🌲 vmgr | time="01-13 19:18:32" level=info msg="using proxy: none"
+🌲 vmgr | time="01-13 19:18:32" level=info msg="forwarding SSH agent" sock="/Users/hack/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock"
+🌲 vmgr | time="01-13 19:18:32" level=info msg="starting VM"
+🌲 vmgr | time="01-13 19:18:32" level=info msg="starting host services"
+🌲 vmgr | time="01-13 19:18:32" level=info msg="reading user environment variables"
+🐧 system |  [*] Booting OrbStack  (+0ms)
+🐧 system |   -  Kernel version: 6.17.8-orbstack-00308-g8f9c941121b1
+🐧 system |  [*] Network  (+4ms)
+🐧 system |  [*] Apply system settings  (+2ms)
+🐧 system |  [*] Late tasks  (+0ms)
+🐧 system |      [*] Emulation
+🐧 system |      [*] Memory
+🐧 system |      [*] Data
+👾 kernel | [    0.372648] BTRFS: device label user-data-fs devid 1 transid 287770 /dev/vdb1 (254:17) scanned by vinit (246)
+🐧 system |   -  Using Rosetta
+👾 kernel | [    0.373075] BTRFS info (device vdb1): first mount of filesystem ed0232ec-8756-4100-9df1-6a6f9da3947a
+👾 kernel | [    0.373112] BTRFS info (device vdb1): using crc32c (crc32c-lib) checksum algorithm
+👾 kernel | [    0.375472] BTRFS info (device vdb1): start tree-log replay
+👾 kernel | [    0.388384] zram0: detected capacity change from 0 to 32829312
+👾 kernel | [    0.433860] Adding 16414652k swap on /dev/zram0.  Priority:32767 extents:1 across:16414652k SSDsc
+👾 kernel | [    0.435040] Adding 1048572k swap on /dev/vdc.  Priority:1 extents:1 across:1048572k Dsc
+🌲 vmgr | time="01-13 19:18:33" level=error msg="host-unix forward: dial failed" addr="{1 0.250.250.2 8000 }" error="connect tcp 0.250.250.2:8000: connection was refused"
+🌲 vmgr | time="01-13 19:18:33" level=error msg="host-unix forward: dial failed" addr="{1 0.250.250.2 8000 }" error="connect tcp 0.250.250.2:8000: connection was refused"
+🌲 vmgr | time="01-13 19:18:33" level=error msg="host-unix forward: dial failed" addr="{1 0.250.250.2 8000 }" error="connect tcp 0.250.250.2:8000: connection was refused"
+👾 kernel | [    0.996537] BTRFS info (device vdb1): checking UUID tree
+👾 kernel | [    0.996705] BTRFS info (device vdb1): setting nodatasum
+👾 kernel | [    0.996727] BTRFS info (device vdb1): setting nodatacow
+👾 kernel | [    0.996737] BTRFS info (device vdb1): enabling ssd optimizations
+👾 kernel | [    0.996749] BTRFS info (device vdb1): turning on sync discard
+👾 kernel | [    0.996780] BTRFS info (device vdb1): enabling free space tree
+🐧 system |  [*] Initialize data  (+625ms)
+🐧 system |  [*] Start services  (+0ms)
+🐧 system |  [*] Done!  (+1ms)
+🐧 system |   -  Total boot time: 633ms
+👾 kernel | [    1.007715] udevd[269]: starting version 3.2.14
+👾 kernel | [    1.010233] udevd[269]: starting eudev-3.2.14
+📦 scon | time="01-14 00:18:33" level=info msg=starting
+🌲 vmgr | time="01-13 19:18:33" level=error msg="host-unix forward: dial failed" addr="{1 0.250.250.2 2375 }" error="connect tcp 0.250.250.2:2375: connection was refused"
+🌲 vmgr | time="01-13 19:18:33" level=error msg="host-unix forward: dial failed" addr="{1 0.250.250.2 2375 }" error="connect tcp 0.250.250.2:2375: connection was refused"
+🌲 vmgr | time="01-13 19:18:33" level=error msg="host-unix forward: dial failed" addr="{1 0.250.250.2 2375 }" error="connect tcp 0.250.250.2:2375: connection was refused"
+🌲 vmgr | time="01-13 19:18:33" level=error msg="host-unix forward: dial failed" addr="{1 0.250.250.2 2375 }" error="connect tcp 0.250.250.2:2375: connection was refused"
+🌲 vmgr | time="01-13 19:18:33" level=error msg="host-unix forward: dial failed" addr="{1 0.250.250.2 2375 }" error="connect tcp 0.250.250.2:2375: connection was refused"
+🌲 vmgr | time="01-13 19:18:33" level=error msg="host-unix forward: dial failed" addr="{1 0.250.250.2 2375 }" error="connect tcp 0.250.250.2:2375: connection was refused"
+👾 kernel | [    1.501623] conbr0: port 1(eth1) entered blocking state
+👾 kernel | [    1.501662] conbr0: port 1(eth1) entered disabled state
+👾 kernel | [    1.501684] virtio_net virtio9 eth1: entered allmulticast mode
+👾 kernel | [    1.501739] virtio_net virtio9 eth1: entered promiscuous mode
+👾 kernel | [    1.501827] conbr0: port 1(eth1) entered blocking state
+👾 kernel | [    1.501844] conbr0: port 1(eth1) entered forwarding state
+📦 scon | time="01-14 00:18:34" level=info msg=started
+🌲 vmgr | time="01-13 19:18:34" level=info msg="service is ready" service=sconrpc
+🌲 vmgr | time="01-13 19:18:34" level=info msg="service is ready" service=krpc
+🌲 vmgr | time="01-13 19:18:34" level=info msg="service is ready" service=sconrpc-internal
+📦 scon | time="01-14 00:18:34" level=info msg="starting container" container=docker
+👾 kernel | [    1.794505] conbr0: port 2(vethsDm5Bg) entered blocking state
+👾 kernel | [    1.794536] conbr0: port 2(vethsDm5Bg) entered disabled state
+👾 kernel | [    1.794559] vethsDm5Bg: entered allmulticast mode
+👾 kernel | [    1.794601] vethsDm5Bg: entered promiscuous mode
+👾 kernel | [    1.794680] conbr0: port 2(vethsDm5Bg) entered blocking state
+👾 kernel | [    1.794701] conbr0: port 2(vethsDm5Bg) entered forwarding state
+👾 kernel | [    1.802701] conbr0: port 2(vethsDm5Bg) entered disabled state
+👾 kernel | [    1.803281] eth0: renamed from vethP0NPwy
+👾 kernel | [    1.803494] conbr0: port 2(vethsDm5Bg) entered blocking state
+👾 kernel | [    1.803514] conbr0: port 2(vethsDm5Bg) entered forwarding state
+📦 scon | time="01-14 00:18:34" level=info msg="container started" container=docker
+🌲 vmgr | time="01-13 19:18:34" level=info msg="setup done"
+👾 kernel | [    2.549406] NFSD: Using /var/lib/nfs/v4recovery as the NFSv4 state recovery directory
+👾 kernel | [    2.549447] NFSD: Using legacy client tracking operations.
+👾 kernel | [    2.549457] NFSD: starting 1-second grace period (net effffff9)
+🌲 vmgr | time="01-13 19:18:35" level=info msg="service is ready" service=nfs
+🌲 vmgr | time="01-13 19:18:35" level=info msg="Mounting NFS..."
+🌲 vmgr | time="01-13 19:18:35" level=info msg="NFS mounted"
+📦 scon | time="01-14 00:18:37" level=info msg="add forward" container=docker spec="tcp:0.0.0.0:6379"
+📦 scon | time="01-14 00:18:37" level=info msg="add forward" container=docker spec="tcp:127.0.0.1:3100"
+📦 scon | time="01-14 00:18:37" level=info msg="add forward" container=docker spec="tcp:0.0.0.0:80"
+📦 scon | time="01-14 00:18:37" level=info msg="add forward" container=docker spec="tcp:0.0.0.0:443"
+📦 scon | time="01-14 00:18:37" level=info msg="add forward" container=docker spec="tcp:[::]:6379"
+📦 scon | time="01-14 00:18:37" level=info msg="add forward" container=docker spec="tcp:[::]:80"
+📦 scon | time="01-14 00:18:37" level=info msg="add forward" container=docker spec="tcp:[::]:443"
+📦 scon | time="01-14 00:18:37" level=info msg="remove forward" key="tcp:0.0.0.0:80"
+📦 scon | time="01-14 00:18:37" level=info msg="remove forward" key="tcp:0.0.0.0:443"
+📦 scon | time="01-14 00:18:37" level=info msg="remove forward" key="tcp:[::]:80"
+📦 scon | time="01-14 00:18:37" level=info msg="remove forward" key="tcp:[::]:443"
+📦 scon | time="01-14 00:18:37" level=info msg="remove forward" key="tcp:127.0.0.1:3100"
+📦 scon | time="01-14 00:18:39" level=info msg="remove forward" key="tcp:0.0.0.0:6379"
+📦 scon | time="01-14 00:18:39" level=info msg="remove forward" key="tcp:[::]:6379"
+👾 kernel | [    8.422629] br-dd826a8a89a2: port 1(veth8044859) entered blocking state
+👾 kernel | [    8.422669] br-dd826a8a89a2: port 1(veth8044859) entered disabled state
+👾 kernel | [    8.422692] veth8044859: entered allmulticast mode
+👾 kernel | [    8.422736] veth8044859: entered promiscuous mode
+👾 kernel | [    8.855478] eth0: renamed from vethe6aa877
+👾 kernel | [    8.856166] br-dd826a8a89a2: port 1(veth8044859) entered blocking state
+👾 kernel | [    8.856192] br-dd826a8a89a2: port 1(veth8044859) entered forwarding state
+📦 scon | time="01-14 00:18:41" level=info msg="add forward" container=docker spec="tcp:0.0.0.0:6379"
+📦 scon | time="01-14 00:18:41" level=info msg="add forward" container=docker spec="tcp:[::]:6379"
+🌸 agent:docker | time="01-13 19:18:42" level=info msg="adding network" config="{192.168.117.0/24 192.168.117.1 invalid Prefix invalid IP br-dd826a8a89a2}" name=mhof_default
+📦 scon | time="01-14 00:18:45" level=info msg="remove forward" key="tcp:0.0.0.0:6379"
+📦 scon | time="01-14 00:18:45" level=info msg="remove forward" key="tcp:[::]:6379"
+👾 kernel | [   12.653205] br-dd826a8a89a2: port 1(veth8044859) entered disabled state
+👾 kernel | [   12.653310] vethe6aa877: renamed from eth0
+👾 kernel | [   12.849555] br-dd826a8a89a2: port 1(veth8044859) entered disabled state
+👾 kernel | [   12.850046] veth8044859 (unregistering): left allmulticast mode
+👾 kernel | [   12.850087] veth8044859 (unregistering): left promiscuous mode
+👾 kernel | [   12.850109] br-dd826a8a89a2: port 1(veth8044859) entered disabled state
+🌸 agent:docker | time="01-13 19:18:45" level=info msg="removing network" config="{192.168.117.0/24 192.168.117.1 invalid Prefix invalid IP br-dd826a8a89a2}" name=mhof_default
+👾 kernel | [  720.512745] br-d1f3e4394e37: port 1(vethbf00bbc) entered blocking state
+👾 kernel | [  720.512810] br-d1f3e4394e37: port 1(vethbf00bbc) entered disabled state
+👾 kernel | [  720.512836] vethbf00bbc: entered allmulticast mode
+👾 kernel | [  720.512891] vethbf00bbc: entered promiscuous mode
+👾 kernel | [  720.679561] br-d1f3e4394e37: port 2(vetha5437e0) entered blocking state
+👾 kernel | [  720.679625] br-d1f3e4394e37: port 2(vetha5437e0) entered disabled state
+👾 kernel | [  720.679648] vetha5437e0: entered allmulticast mode
+👾 kernel | [  720.679739] vetha5437e0: entered promiscuous mode
+👾 kernel | [  720.690042] eth0: renamed from veth25a009b
+👾 kernel | [  720.693550] br-d1f3e4394e37: port 1(vethbf00bbc) entered blocking state
+👾 kernel | [  720.693605] br-d1f3e4394e37: port 1(vethbf00bbc) entered forwarding state
+📦 scon | time="01-14 00:30:33" level=info msg="add forward" container=docker spec="tcp:0.0.0.0:80"
+📦 scon | time="01-14 00:30:33" level=info msg="add forward" container=docker spec="tcp:0.0.0.0:443"
+📦 scon | time="01-14 00:30:33" level=info msg="add forward" container=docker spec="tcp:[::]:80"
+📦 scon | time="01-14 00:30:33" level=info msg="add forward" container=docker spec="tcp:[::]:443"
+👾 kernel | [  720.840069] eth0: renamed from vethfbbe920
+👾 kernel | [  720.840437] br-d1f3e4394e37: port 2(vetha5437e0) entered blocking state
+👾 kernel | [  720.840469] br-d1f3e4394e37: port 2(vetha5437e0) entered forwarding state
+🌸 agent:docker | time="01-13 19:30:33" level=info msg="adding network" config="{172.30.0.0/16 172.30.0.1 invalid Prefix invalid IP br-d1f3e4394e37}" name=hack-dev
+👾 kernel | [  721.909146] br-d1f3e4394e37: port 3(vethc584c67) entered blocking state
+👾 kernel | [  721.909202] br-d1f3e4394e37: port 3(vethc584c67) entered disabled state
+👾 kernel | [  721.909245] vethc584c67: entered allmulticast mode
+👾 kernel | [  721.909301] vethc584c67: entered promiscuous mode
+👾 kernel | [  722.138685] br-19a9aee95308: port 1(vethaf05506) entered blocking state
+👾 kernel | [  722.138725] br-19a9aee95308: port 1(vethaf05506) entered disabled state
+👾 kernel | [  722.138750] vethaf05506: entered allmulticast mode
+👾 kernel | [  722.138806] vethaf05506: entered promiscuous mode
+👾 kernel | [  722.139008] br-d1f3e4394e37: port 4(vetha66c566) entered blocking state
+👾 kernel | [  722.139029] br-d1f3e4394e37: port 4(vetha66c566) entered disabled state
+👾 kernel | [  722.139049] vetha66c566: entered allmulticast mode
+👾 kernel | [  722.139089] vetha66c566: entered promiscuous mode
+👾 kernel | [  722.152152] eth0: renamed from veth28fab53
+👾 kernel | [  722.152732] br-d1f3e4394e37: port 3(vethc584c67) entered blocking state
+👾 kernel | [  722.152769] br-d1f3e4394e37: port 3(vethc584c67) entered forwarding state
+👾 kernel | [  722.354075] eth0: renamed from veth1a5cd12
+👾 kernel | [  722.354902] br-d1f3e4394e37: port 4(vetha66c566) entered blocking state
+👾 kernel | [  722.354930] br-d1f3e4394e37: port 4(vetha66c566) entered forwarding state
+📦 scon | time="01-14 00:30:34" level=info msg="add forward" container=docker spec="tcp:127.0.0.1:3100"
+👾 kernel | [  722.403849] eth0: renamed from veth8bde839
+👾 kernel | [  722.404723] br-19a9aee95308: port 1(vethaf05506) entered blocking state
+👾 kernel | [  722.404767] br-19a9aee95308: port 1(vethaf05506) entered forwarding state
+🌸 agent:docker | time="01-13 19:30:35" level=info msg="adding network" config="{192.168.164.0/24 192.168.164.1 invalid Prefix invalid IP br-19a9aee95308}" name=hack-logging
+👾 kernel | [  722.513969] br-19a9aee95308: port 2(veth5066e75) entered blocking state
+👾 kernel | [  722.514077] br-19a9aee95308: port 2(veth5066e75) entered disabled state
+👾 kernel | [  722.514113] veth5066e75: entered allmulticast mode
+👾 kernel | [  722.514386] veth5066e75: entered promiscuous mode
+👾 kernel | [  722.832602] eth1: renamed from veth3e6a9f8
+👾 kernel | [  722.833241] br-19a9aee95308: port 2(veth5066e75) entered blocking state
+👾 kernel | [  722.833261] br-19a9aee95308: port 2(veth5066e75) entered forwarding state
+👾 kernel | [  722.842651] br-19a9aee95308: port 3(veth44a937b) entered blocking state
+👾 kernel | [  722.842683] br-19a9aee95308: port 3(veth44a937b) entered disabled state
+👾 kernel | [  722.842729] veth44a937b: entered allmulticast mode
+👾 kernel | [  722.842775] veth44a937b: entered promiscuous mode
+👾 kernel | [  722.927308] eth1: renamed from vethf48efc7
+👾 kernel | [  722.928100] br-19a9aee95308: port 3(veth44a937b) entered blocking state
+👾 kernel | [  722.928138] br-19a9aee95308: port 3(veth44a937b) entered forwarding state
+👾 kernel | [  729.072933] br-2ea4b26a6c58: port 1(veth787da21) entered blocking state
+👾 kernel | [  729.073018] br-2ea4b26a6c58: port 1(veth787da21) entered disabled state
+👾 kernel | [  729.073045] veth787da21: entered allmulticast mode
+👾 kernel | [  729.073099] veth787da21: entered promiscuous mode
+👾 kernel | [  729.225722] br-2ea4b26a6c58: port 2(vethaea591a) entered blocking state
+👾 kernel | [  729.225753] br-2ea4b26a6c58: port 2(vethaea591a) entered disabled state
+👾 kernel | [  729.225781] vethaea591a: entered allmulticast mode
+👾 kernel | [  729.225835] vethaea591a: entered promiscuous mode
+👾 kernel | [  729.251289] eth0: renamed from veth8b96f21
+👾 kernel | [  729.252254] br-2ea4b26a6c58: port 1(veth787da21) entered blocking state
+👾 kernel | [  729.252316] br-2ea4b26a6c58: port 1(veth787da21) entered forwarding state
+👾 kernel | [  729.357647] eth0: renamed from veth67f88ae
+👾 kernel | [  729.358443] br-2ea4b26a6c58: port 2(vethaea591a) entered blocking state
+👾 kernel | [  729.358498] br-2ea4b26a6c58: port 2(vethaea591a) entered forwarding state
+👾 kernel | [  729.503417] br-d1f3e4394e37: port 5(veth3302acc) entered blocking state
+👾 kernel | [  729.503448] br-d1f3e4394e37: port 5(veth3302acc) entered disabled state
+👾 kernel | [  729.503469] veth3302acc: entered allmulticast mode
+🌸 agent:docker | time="01-13 19:30:42" level=info msg="adding network" config="{192.168.147.0/24 192.168.147.1 invalid Prefix invalid IP br-2ea4b26a6c58}" name=event-agent_default
+👾 kernel | [  729.504002] veth3302acc: entered promiscuous mode
+👾 kernel | [  729.544219] eth1: renamed from veth696cbd0
+👾 kernel | [  729.546531] br-d1f3e4394e37: port 5(veth3302acc) entered blocking state
+👾 kernel | [  729.546564] br-d1f3e4394e37: port 5(veth3302acc) entered forwarding state
+👾 kernel | [  730.614040] br-2ea4b26a6c58: port 3(veth4f5ab28) entered blocking state
+👾 kernel | [  730.614079] br-2ea4b26a6c58: port 3(veth4f5ab28) entered disabled state
+👾 kernel | [  730.614102] veth4f5ab28: entered allmulticast mode
+👾 kernel | [  730.614149] veth4f5ab28: entered promiscuous mode
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+👾 kernel | [  730.832869] eth0: renamed from veth8161b16
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+👾 kernel | [  730.833702] br-2ea4b26a6c58: port 3(veth4f5ab28) entered blocking state
+👾 kernel | [  730.833739] br-2ea4b26a6c58: port 3(veth4f5ab28) entered forwarding state
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection reset by peer"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection reset by peer"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection reset by peer"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.5.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.8.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.2.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 19:30:43" level=error msg="TCP forward [104.16.4.34:443] create endpoint failed: connection was refused"
+👾 kernel | [  731.143477] br-d1f3e4394e37: port 6(veth69d87b7) entered blocking state
+👾 kernel | [  731.143554] br-d1f3e4394e37: port 6(veth69d87b7) entered disabled state
+👾 kernel | [  731.143593] veth69d87b7: entered allmulticast mode
+👾 kernel | [  731.143672] veth69d87b7: entered promiscuous mode
+👾 kernel | [  731.153948] eth1: renamed from vethb7082e2
+👾 kernel | [  731.155850] br-d1f3e4394e37: port 6(veth69d87b7) entered blocking state
+👾 kernel | [  731.155883] br-d1f3e4394e37: port 6(veth69d87b7) entered forwarding state
+👾 kernel | [  746.177168] veth8161b16: renamed from eth0
+👾 kernel | [  746.177692] br-2ea4b26a6c58: port 3(veth4f5ab28) entered disabled state
+👾 kernel | [  746.295445] br-2ea4b26a6c58: port 2(vethaea591a) entered disabled state
+👾 kernel | [  746.295730] veth67f88ae: renamed from eth0
+👾 kernel | [  746.319720] br-2ea4b26a6c58: port 3(veth4f5ab28) entered disabled state
+👾 kernel | [  746.320504] veth4f5ab28 (unregistering): left allmulticast mode
+👾 kernel | [  746.320534] veth4f5ab28 (unregistering): left promiscuous mode
+👾 kernel | [  746.320552] br-2ea4b26a6c58: port 3(veth4f5ab28) entered disabled state
+👾 kernel | [  746.353015] br-2ea4b26a6c58: port 2(vethaea591a) entered disabled state
+👾 kernel | [  746.353314] vethaea591a (unregistering): left allmulticast mode
+👾 kernel | [  746.353341] vethaea591a (unregistering): left promiscuous mode
+👾 kernel | [  746.353388] br-2ea4b26a6c58: port 2(vethaea591a) entered disabled state
+👾 kernel | [  746.408774] br-d1f3e4394e37: port 6(veth69d87b7) entered disabled state
+👾 kernel | [  746.408901] vethb7082e2: renamed from eth1
+👾 kernel | [  746.442704] br-d1f3e4394e37: port 5(veth3302acc) entered disabled state
+👾 kernel | [  746.443094] veth696cbd0: renamed from eth1
+👾 kernel | [  746.466878] br-d1f3e4394e37: port 6(veth69d87b7) entered disabled state
+👾 kernel | [  746.469407] veth69d87b7 (unregistering): left allmulticast mode
+👾 kernel | [  746.469434] veth69d87b7 (unregistering): left promiscuous mode
+👾 kernel | [  746.469451] br-d1f3e4394e37: port 6(veth69d87b7) entered disabled state
+👾 kernel | [  746.525862] br-d1f3e4394e37: port 5(veth3302acc) entered disabled state
+👾 kernel | [  746.526786] veth3302acc (unregistering): left allmulticast mode
+👾 kernel | [  746.526810] veth3302acc (unregistering): left promiscuous mode
+👾 kernel | [  746.526825] br-d1f3e4394e37: port 5(veth3302acc) entered disabled state
+👾 kernel | [  747.441427] br-2ea4b26a6c58: port 2(veth332709a) entered blocking state
+👾 kernel | [  747.441470] br-2ea4b26a6c58: port 2(veth332709a) entered disabled state
+👾 kernel | [  747.441514] veth332709a: entered allmulticast mode
+👾 kernel | [  747.441577] veth332709a: entered promiscuous mode
+👾 kernel | [  747.634366] eth0: renamed from vethbb9b49e
+👾 kernel | [  747.635120] br-2ea4b26a6c58: port 2(veth332709a) entered blocking state
+👾 kernel | [  747.635146] br-2ea4b26a6c58: port 2(veth332709a) entered forwarding state
+👾 kernel | [  747.831212] br-d1f3e4394e37: port 5(veth2dc1ce7) entered blocking state
+👾 kernel | [  747.831252] br-d1f3e4394e37: port 5(veth2dc1ce7) entered disabled state
+👾 kernel | [  747.831277] veth2dc1ce7: entered allmulticast mode
+👾 kernel | [  747.831329] veth2dc1ce7: entered promiscuous mode
+👾 kernel | [  747.896241] br-d1f3e4394e37: port 6(veth24ab076) entered blocking state
+👾 kernel | [  747.896287] br-d1f3e4394e37: port 6(veth24ab076) entered disabled state
+👾 kernel | [  747.896353] veth24ab076: entered allmulticast mode
+👾 kernel | [  747.896435] veth24ab076: entered promiscuous mode
+👾 kernel | [  747.910337] eth1: renamed from veth4c79ddb
+👾 kernel | [  747.911115] br-d1f3e4394e37: port 6(veth24ab076) entered blocking state
+👾 kernel | [  747.911140] br-d1f3e4394e37: port 6(veth24ab076) entered forwarding state
+👾 kernel | [  747.911491] eth0: renamed from veth4bf36a0
+👾 kernel | [  747.912624] br-d1f3e4394e37: port 5(veth2dc1ce7) entered blocking state
+👾 kernel | [  747.912651] br-d1f3e4394e37: port 5(veth2dc1ce7) entered forwarding state
+👾 kernel | [  748.431912] br-2ea4b26a6c58: port 3(veth144a80f) entered blocking state
+👾 kernel | [  748.432017] br-2ea4b26a6c58: port 3(veth144a80f) entered disabled state
+👾 kernel | [  748.432063] veth144a80f: entered allmulticast mode
+👾 kernel | [  748.432130] veth144a80f: entered promiscuous mode
+👾 kernel | [  749.562349] br-2ea4b26a6c58: port 4(vethb3335ac) entered blocking state
+👾 kernel | [  749.562408] br-2ea4b26a6c58: port 4(vethb3335ac) entered disabled state
+👾 kernel | [  749.562469] vethb3335ac: entered allmulticast mode
+👾 kernel | [  749.562529] vethb3335ac: entered promiscuous mode
+👾 kernel | [  749.576464] eth0: renamed from vethb7b15eb
+👾 kernel | [  749.577403] br-2ea4b26a6c58: port 3(veth144a80f) entered blocking state
+👾 kernel | [  749.577433] br-2ea4b26a6c58: port 3(veth144a80f) entered forwarding state
+👾 kernel | [  749.709030] br-2ea4b26a6c58: port 5(vethb1a1722) entered blocking state
+👾 kernel | [  749.709063] br-2ea4b26a6c58: port 5(vethb1a1722) entered disabled state
+👾 kernel | [  749.709083] vethb1a1722: entered allmulticast mode
+👾 kernel | [  749.709135] vethb1a1722: entered promiscuous mode
+👾 kernel | [  749.722402] eth0: renamed from veth8e858fd
+👾 kernel | [  749.723441] br-2ea4b26a6c58: port 4(vethb3335ac) entered blocking state
+👾 kernel | [  749.723482] br-2ea4b26a6c58: port 4(vethb3335ac) entered forwarding state
+👾 kernel | [  749.899672] br-2ea4b26a6c58: port 6(veth3ffccc3) entered blocking state
+👾 kernel | [  749.899703] br-2ea4b26a6c58: port 6(veth3ffccc3) entered disabled state
+👾 kernel | [  749.899721] veth3ffccc3: entered allmulticast mode
+👾 kernel | [  749.899766] veth3ffccc3: entered promiscuous mode
+👾 kernel | [  749.906443] br-d1f3e4394e37: port 7(veth5c821ba) entered blocking state
+👾 kernel | [  749.906479] br-d1f3e4394e37: port 7(veth5c821ba) entered disabled state
+👾 kernel | [  749.906504] veth5c821ba: entered allmulticast mode
+👾 kernel | [  749.906550] veth5c821ba: entered promiscuous mode
+👾 kernel | [  750.188638] eth0: renamed from veth5ff3904
+👾 kernel | [  750.189709] br-2ea4b26a6c58: port 5(vethb1a1722) entered blocking state
+👾 kernel | [  750.189729] br-2ea4b26a6c58: port 5(vethb1a1722) entered forwarding state
+👾 kernel | [  751.156229] eth1: renamed from vethe7ad240
+👾 kernel | [  751.160119] br-d1f3e4394e37: port 7(veth5c821ba) entered blocking state
+👾 kernel | [  751.160146] br-d1f3e4394e37: port 7(veth5c821ba) entered forwarding state
+👾 kernel | [  751.161297] br-2ea4b26a6c58: port 7(veth7c49e51) entered blocking state
+👾 kernel | [  751.161321] br-2ea4b26a6c58: port 7(veth7c49e51) entered disabled state
+👾 kernel | [  751.161346] veth7c49e51: entered allmulticast mode
+👾 kernel | [  751.161422] veth7c49e51: entered promiscuous mode
+👾 kernel | [  751.163912] br-d1f3e4394e37: port 8(vetha789816) entered blocking state
+👾 kernel | [  751.163947] br-d1f3e4394e37: port 8(vetha789816) entered disabled state
+👾 kernel | [  751.163965] vetha789816: entered allmulticast mode
+👾 kernel | [  751.164020] vetha789816: entered promiscuous mode
+👾 kernel | [  751.178694] eth0: renamed from veth556c566
+👾 kernel | [  751.179784] br-2ea4b26a6c58: port 6(veth3ffccc3) entered blocking state
+👾 kernel | [  751.179815] br-2ea4b26a6c58: port 6(veth3ffccc3) entered forwarding state
+👾 kernel | [  752.113299] br-2ea4b26a6c58: port 8(vethf6498c9) entered blocking state
+👾 kernel | [  752.113329] br-2ea4b26a6c58: port 8(vethf6498c9) entered disabled state
+👾 kernel | [  752.113523] vethf6498c9: entered allmulticast mode
+👾 kernel | [  752.113689] vethf6498c9: entered promiscuous mode
+👾 kernel | [  752.113903] eth1: renamed from veth9bf89ce
+👾 kernel | [  752.145154] br-d1f3e4394e37: port 9(veth3d23ff9) entered blocking state
+👾 kernel | [  752.145197] br-d1f3e4394e37: port 9(veth3d23ff9) entered disabled state
+👾 kernel | [  752.145224] veth3d23ff9: entered allmulticast mode
+👾 kernel | [  752.145273] veth3d23ff9: entered promiscuous mode
+👾 kernel | [  752.145532] eth0: renamed from veth9038a6b
+👾 kernel | [  752.155404] br-2ea4b26a6c58: port 7(veth7c49e51) entered blocking state
+👾 kernel | [  752.155438] br-2ea4b26a6c58: port 7(veth7c49e51) entered forwarding state
+👾 kernel | [  752.157465] br-d1f3e4394e37: port 8(vetha789816) entered blocking state
+👾 kernel | [  752.157494] br-d1f3e4394e37: port 8(vetha789816) entered forwarding state
+👾 kernel | [  752.472473] eth1: renamed from vethb868284
+👾 kernel | [  752.476743] eth1: renamed from vetha9eee09
+👾 kernel | [  752.478060] br-2ea4b26a6c58: port 8(vethf6498c9) entered blocking state
+👾 kernel | [  752.478090] br-2ea4b26a6c58: port 8(vethf6498c9) entered forwarding state
+👾 kernel | [  752.478339] br-d1f3e4394e37: port 9(veth3d23ff9) entered blocking state
+👾 kernel | [  752.478379] br-d1f3e4394e37: port 9(veth3d23ff9) entered forwarding state
+🌸 agent:docker | time="01-13 19:31:05" level=error msg="unable to set all bridgeports to hairpin" error="unable to get links: results may be incomplete or inconsistent"
+👾 kernel | [  752.478985] br-d1f3e4394e37: port 10(vethb34ecde) entered blocking state
+👾 kernel | [  752.479008] br-d1f3e4394e37: port 10(vethb34ecde) entered disabled state
+👾 kernel | [  752.479028] vethb34ecde: entered allmulticast mode
+👾 kernel | [  752.479078] vethb34ecde: entered promiscuous mode
+👾 kernel | [  753.677156] eth1: renamed from veth5953be3
+👾 kernel | [  753.682578] br-d1f3e4394e37: port 11(vetha102874) entered blocking state
+👾 kernel | [  753.682614] br-d1f3e4394e37: port 11(vetha102874) entered disabled state
+👾 kernel | [  753.682644] vetha102874: entered allmulticast mode
+👾 kernel | [  753.682693] vetha102874: entered promiscuous mode
+👾 kernel | [  753.682881] br-d1f3e4394e37: port 10(vethb34ecde) entered blocking state
+👾 kernel | [  753.682900] br-d1f3e4394e37: port 10(vethb34ecde) entered forwarding state
+👾 kernel | [  754.392071] eth1: renamed from veth35dabb4
+👾 kernel | [  754.394766] br-d1f3e4394e37: port 11(vetha102874) entered blocking state
+👾 kernel | [  754.394809] br-d1f3e4394e37: port 11(vetha102874) entered forwarding state
+🌲 vmgr | time="01-13 20:23:11" level=error msg="TCP forward [100.50.83.26:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 20:23:11" level=error msg="TCP forward [34.225.196.179:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 20:23:11" level=error msg="TCP forward [35.171.115.154:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 20:23:11" level=error msg="TCP forward [34.236.95.57:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 20:23:16" level=error msg="TCP forward [162.159.140.245:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 20:23:21" level=error msg="TCP forward [172.66.0.243:443] create endpoint failed: connection was refused"
+👾 kernel | [ 5135.301055] br-2ea4b26a6c58: port 7(veth7c49e51) entered disabled state
+👾 kernel | [ 5135.301271] veth9038a6b: renamed from eth0
+👾 kernel | [ 5135.345433] vethbb9b49e: renamed from eth0
+👾 kernel | [ 5135.347550] br-2ea4b26a6c58: port 2(veth332709a) entered disabled state
+👾 kernel | [ 5135.534212] br-2ea4b26a6c58: port 3(veth144a80f) entered disabled state
+👾 kernel | [ 5135.534542] vethb7b15eb: renamed from eth0
+👾 kernel | [ 5135.760129] veth8b96f21: renamed from eth0
+👾 kernel | [ 5135.762323] br-2ea4b26a6c58: port 1(veth787da21) entered disabled state
+👾 kernel | [ 5135.780907] br-2ea4b26a6c58: port 4(vethb3335ac) entered disabled state
+👾 kernel | [ 5135.781064] veth8e858fd: renamed from eth0
+👾 kernel | [ 5135.807084] br-2ea4b26a6c58: port 7(veth7c49e51) entered disabled state
+👾 kernel | [ 5135.807557] veth7c49e51 (unregistering): left allmulticast mode
+👾 kernel | [ 5135.807575] veth7c49e51 (unregistering): left promiscuous mode
+👾 kernel | [ 5135.807593] br-2ea4b26a6c58: port 7(veth7c49e51) entered disabled state
+👾 kernel | [ 5135.844149] br-2ea4b26a6c58: port 6(veth3ffccc3) entered disabled state
+👾 kernel | [ 5135.844247] veth556c566: renamed from eth0
+👾 kernel | [ 5135.862839] br-2ea4b26a6c58: port 2(veth332709a) entered disabled state
+👾 kernel | [ 5135.863568] veth332709a (unregistering): left allmulticast mode
+👾 kernel | [ 5135.863593] veth332709a (unregistering): left promiscuous mode
+👾 kernel | [ 5135.863607] br-2ea4b26a6c58: port 2(veth332709a) entered disabled state
+👾 kernel | [ 5135.875108] br-2ea4b26a6c58: port 8(vethf6498c9) entered disabled state
+👾 kernel | [ 5135.875242] vethb868284: renamed from eth1
+👾 kernel | [ 5135.906056] br-2ea4b26a6c58: port 1(veth787da21) entered disabled state
+👾 kernel | [ 5135.906671] veth787da21 (unregistering): left allmulticast mode
+👾 kernel | [ 5135.906696] veth787da21 (unregistering): left promiscuous mode
+👾 kernel | [ 5135.906708] br-2ea4b26a6c58: port 1(veth787da21) entered disabled state
+👾 kernel | [ 5135.931083] br-2ea4b26a6c58: port 5(vethb1a1722) entered disabled state
+👾 kernel | [ 5135.931236] veth5ff3904: renamed from eth0
+👾 kernel | [ 5135.955010] br-2ea4b26a6c58: port 3(veth144a80f) entered disabled state
+👾 kernel | [ 5135.955547] veth144a80f (unregistering): left allmulticast mode
+👾 kernel | [ 5135.955566] veth144a80f (unregistering): left promiscuous mode
+👾 kernel | [ 5135.955583] br-2ea4b26a6c58: port 3(veth144a80f) entered disabled state
+👾 kernel | [ 5135.967522] br-d1f3e4394e37: port 11(vetha102874) entered disabled state
+👾 kernel | [ 5135.967760] veth35dabb4: renamed from eth1
+👾 kernel | [ 5135.988349] br-2ea4b26a6c58: port 8(vethf6498c9) entered disabled state
+👾 kernel | [ 5135.988894] vethf6498c9 (unregistering): left allmulticast mode
+👾 kernel | [ 5135.988910] vethf6498c9 (unregistering): left promiscuous mode
+👾 kernel | [ 5135.988924] br-2ea4b26a6c58: port 8(vethf6498c9) entered disabled state
+👾 kernel | [ 5136.032937] br-2ea4b26a6c58: port 4(vethb3335ac) entered disabled state
+👾 kernel | [ 5136.033460] vethb3335ac (unregistering): left allmulticast mode
+👾 kernel | [ 5136.033479] vethb3335ac (unregistering): left promiscuous mode
+👾 kernel | [ 5136.033501] br-2ea4b26a6c58: port 4(vethb3335ac) entered disabled state
+👾 kernel | [ 5136.310880] br-2ea4b26a6c58: port 6(veth3ffccc3) entered disabled state
+👾 kernel | [ 5136.311494] veth3ffccc3 (unregistering): left allmulticast mode
+👾 kernel | [ 5136.311551] veth3ffccc3 (unregistering): left promiscuous mode
+👾 kernel | [ 5136.311574] br-2ea4b26a6c58: port 6(veth3ffccc3) entered disabled state
+👾 kernel | [ 5136.493531] br-d1f3e4394e37: port 11(vetha102874) entered disabled state
+👾 kernel | [ 5136.494349] vetha102874 (unregistering): left allmulticast mode
+👾 kernel | [ 5136.494377] vetha102874 (unregistering): left promiscuous mode
+👾 kernel | [ 5136.494389] br-d1f3e4394e37: port 11(vetha102874) entered disabled state
+👾 kernel | [ 5136.519946] br-d1f3e4394e37: port 6(veth24ab076) entered disabled state
+👾 kernel | [ 5136.520128] veth4c79ddb: renamed from eth1
+👾 kernel | [ 5136.561250] vethe7ad240: renamed from eth1
+👾 kernel | [ 5136.563192] br-d1f3e4394e37: port 7(veth5c821ba) entered disabled state
+👾 kernel | [ 5136.589676] veth5953be3: renamed from eth1
+👾 kernel | [ 5136.590211] br-d1f3e4394e37: port 8(vetha789816) entered disabled state
+👾 kernel | [ 5136.590270] br-d1f3e4394e37: port 5(veth2dc1ce7) entered disabled state
+👾 kernel | [ 5136.590310] br-d1f3e4394e37: port 10(vethb34ecde) entered disabled state
+👾 kernel | [ 5136.590445] veth9bf89ce: renamed from eth1
+👾 kernel | [ 5136.618836] veth4bf36a0: renamed from eth0
+👾 kernel | [ 5136.619510] br-d1f3e4394e37: port 6(veth24ab076) entered disabled state
+👾 kernel | [ 5136.620187] veth24ab076 (unregistering): left allmulticast mode
+👾 kernel | [ 5136.620207] veth24ab076 (unregistering): left promiscuous mode
+👾 kernel | [ 5136.620222] br-d1f3e4394e37: port 6(veth24ab076) entered disabled state
+👾 kernel | [ 5136.660401] br-2ea4b26a6c58: port 5(vethb1a1722) entered disabled state
+👾 kernel | [ 5136.661000] vethb1a1722 (unregistering): left allmulticast mode
+👾 kernel | [ 5136.661029] vethb1a1722 (unregistering): left promiscuous mode
+👾 kernel | [ 5136.661053] br-2ea4b26a6c58: port 5(vethb1a1722) entered disabled state
+🌸 agent:docker | time="01-13 20:44:09" level=info msg="removing network" config="{192.168.147.0/24 192.168.147.1 invalid Prefix invalid IP br-2ea4b26a6c58}" name=event-agent_default
+👾 kernel | [ 5136.780553] br-d1f3e4394e37: port 7(veth5c821ba) entered disabled state
+👾 kernel | [ 5136.781345] veth5c821ba (unregistering): left allmulticast mode
+👾 kernel | [ 5136.781440] veth5c821ba (unregistering): left promiscuous mode
+👾 kernel | [ 5136.781462] br-d1f3e4394e37: port 7(veth5c821ba) entered disabled state
+👾 kernel | [ 5136.789099] br-d1f3e4394e37: port 9(veth3d23ff9) entered disabled state
+👾 kernel | [ 5136.789371] vetha9eee09: renamed from eth1
+👾 kernel | [ 5136.832070] br-d1f3e4394e37: port 5(veth2dc1ce7) entered disabled state
+👾 kernel | [ 5136.832953] veth2dc1ce7 (unregistering): left allmulticast mode
+👾 kernel | [ 5136.832983] veth2dc1ce7 (unregistering): left promiscuous mode
+👾 kernel | [ 5136.833005] br-d1f3e4394e37: port 5(veth2dc1ce7) entered disabled state
+👾 kernel | [ 5136.862635] br-d1f3e4394e37: port 10(vethb34ecde) entered disabled state
+👾 kernel | [ 5136.863262] vethb34ecde (unregistering): left allmulticast mode
+👾 kernel | [ 5136.863290] vethb34ecde (unregistering): left promiscuous mode
+👾 kernel | [ 5136.863310] br-d1f3e4394e37: port 10(vethb34ecde) entered disabled state
+👾 kernel | [ 5136.890276] br-d1f3e4394e37: port 8(vetha789816) entered disabled state
+👾 kernel | [ 5136.890776] vetha789816 (unregistering): left allmulticast mode
+👾 kernel | [ 5136.890824] vetha789816 (unregistering): left promiscuous mode
+👾 kernel | [ 5136.890846] br-d1f3e4394e37: port 8(vetha789816) entered disabled state
+👾 kernel | [ 5137.402348] br-d1f3e4394e37: port 9(veth3d23ff9) entered disabled state
+👾 kernel | [ 5137.403097] veth3d23ff9 (unregistering): left allmulticast mode
+👾 kernel | [ 5137.403122] veth3d23ff9 (unregistering): left promiscuous mode
+👾 kernel | [ 5137.403135] br-d1f3e4394e37: port 9(veth3d23ff9) entered disabled state
+👾 kernel | [ 7428.701489] br-3a2bb40bbcdb: port 1(vethc2182b3) entered blocking state
+👾 kernel | [ 7428.701548] br-3a2bb40bbcdb: port 1(vethc2182b3) entered disabled state
+👾 kernel | [ 7428.701571] vethc2182b3: entered allmulticast mode
+👾 kernel | [ 7428.701611] vethc2182b3: entered promiscuous mode
+👾 kernel | [ 7428.841403] eth0: renamed from veth1a8172b
+👾 kernel | [ 7428.841958] br-3a2bb40bbcdb: port 1(vethc2182b3) entered blocking state
+👾 kernel | [ 7428.842001] br-3a2bb40bbcdb: port 1(vethc2182b3) entered forwarding state
+👾 kernel | [ 7429.057682] br-d1f3e4394e37: port 5(veth2d5497b) entered blocking state
+👾 kernel | [ 7429.057724] br-d1f3e4394e37: port 5(veth2d5497b) entered disabled state
+👾 kernel | [ 7429.057741] veth2d5497b: entered allmulticast mode
+👾 kernel | [ 7429.057779] veth2d5497b: entered promiscuous mode
+👾 kernel | [ 7429.200272] br-d1f3e4394e37: port 6(vethe4ef3f3) entered blocking state
+👾 kernel | [ 7429.200354] br-d1f3e4394e37: port 6(vethe4ef3f3) entered disabled state
+👾 kernel | [ 7429.200379] vethe4ef3f3: entered allmulticast mode
+👾 kernel | [ 7429.200436] vethe4ef3f3: entered promiscuous mode
+👾 kernel | [ 7429.200773] br-3a2bb40bbcdb: port 2(veth45aca23) entered blocking state
+👾 kernel | [ 7429.200807] br-3a2bb40bbcdb: port 2(veth45aca23) entered disabled state
+👾 kernel | [ 7429.200829] veth45aca23: entered allmulticast mode
+👾 kernel | [ 7429.200865] veth45aca23: entered promiscuous mode
+🌸 agent:docker | time="01-13 21:22:21" level=info msg="adding network" config="{192.168.147.0/24 192.168.147.1 invalid Prefix invalid IP br-3a2bb40bbcdb}" name=omega_default
+👾 kernel | [ 7429.314357] eth0: renamed from vethc63a6b0
+👾 kernel | [ 7429.314855] br-d1f3e4394e37: port 5(veth2d5497b) entered blocking state
+👾 kernel | [ 7429.314882] br-d1f3e4394e37: port 5(veth2d5497b) entered forwarding state
+👾 kernel | [ 7429.728733] eth1: renamed from veth062c431
+👾 kernel | [ 7429.733529] br-d1f3e4394e37: port 6(vethe4ef3f3) entered blocking state
+👾 kernel | [ 7429.733572] br-d1f3e4394e37: port 6(vethe4ef3f3) entered forwarding state
+👾 kernel | [ 7429.733617] br-3a2bb40bbcdb: port 3(vethb05b0ee) entered blocking state
+👾 kernel | [ 7429.733667] br-3a2bb40bbcdb: port 3(vethb05b0ee) entered disabled state
+👾 kernel | [ 7429.733697] vethb05b0ee: entered allmulticast mode
+👾 kernel | [ 7429.733765] vethb05b0ee: entered promiscuous mode
+👾 kernel | [ 7429.734036] br-d1f3e4394e37: port 7(veth06b7a22) entered blocking state
+👾 kernel | [ 7429.734066] br-d1f3e4394e37: port 7(veth06b7a22) entered disabled state
+👾 kernel | [ 7429.734084] veth06b7a22: entered allmulticast mode
+👾 kernel | [ 7429.734130] veth06b7a22: entered promiscuous mode
+👾 kernel | [ 7429.858190] eth0: renamed from veth7874483
+👾 kernel | [ 7429.858827] br-3a2bb40bbcdb: port 2(veth45aca23) entered blocking state
+👾 kernel | [ 7429.858860] br-3a2bb40bbcdb: port 2(veth45aca23) entered forwarding state
+👾 kernel | [ 7429.992208] br-3a2bb40bbcdb: port 4(vethaf4387f) entered blocking state
+👾 kernel | [ 7429.992250] br-3a2bb40bbcdb: port 4(vethaf4387f) entered disabled state
+👾 kernel | [ 7429.992276] vethaf4387f: entered allmulticast mode
+👾 kernel | [ 7429.992363] vethaf4387f: entered promiscuous mode
+👾 kernel | [ 7430.015068] eth0: renamed from vethd9981cc
+👾 kernel | [ 7430.015514] br-d1f3e4394e37: port 7(veth06b7a22) entered blocking state
+👾 kernel | [ 7430.015533] br-d1f3e4394e37: port 7(veth06b7a22) entered forwarding state
+👾 kernel | [ 7430.015857] eth0: renamed from vethe0de746
+👾 kernel | [ 7430.016220] br-3a2bb40bbcdb: port 3(vethb05b0ee) entered blocking state
+👾 kernel | [ 7430.016238] br-3a2bb40bbcdb: port 3(vethb05b0ee) entered forwarding state
+👾 kernel | [ 7430.084260] br-3a2bb40bbcdb: port 5(veth800f8ba) entered blocking state
+👾 kernel | [ 7430.086345] br-3a2bb40bbcdb: port 5(veth800f8ba) entered disabled state
+👾 kernel | [ 7430.086404] veth800f8ba: entered allmulticast mode
+👾 kernel | [ 7430.086477] veth800f8ba: entered promiscuous mode
+👾 kernel | [ 7430.130589] eth0: renamed from veth4cf8545
+👾 kernel | [ 7430.130986] br-3a2bb40bbcdb: port 4(vethaf4387f) entered blocking state
+👾 kernel | [ 7430.131016] br-3a2bb40bbcdb: port 4(vethaf4387f) entered forwarding state
+👾 kernel | [ 7430.284885] br-d1f3e4394e37: port 8(veth11dfb4b) entered blocking state
+👾 kernel | [ 7430.284917] br-d1f3e4394e37: port 8(veth11dfb4b) entered disabled state
+👾 kernel | [ 7430.284941] veth11dfb4b: entered allmulticast mode
+🌸 agent:docker | time="01-13 21:22:22" level=error msg="unable to set all bridgeports to hairpin" error="unable to get links: results may be incomplete or inconsistent"
+👾 kernel | [ 7430.284993] veth11dfb4b: entered promiscuous mode
+👾 kernel | [ 7431.507476] br-3a2bb40bbcdb: port 6(vethde25cfb) entered blocking state
+👾 kernel | [ 7431.507509] br-3a2bb40bbcdb: port 6(vethde25cfb) entered disabled state
+👾 kernel | [ 7431.507526] vethde25cfb: entered allmulticast mode
+👾 kernel | [ 7431.507577] vethde25cfb: entered promiscuous mode
+👾 kernel | [ 7432.716482] eth1: renamed from veth3bc5b20
+👾 kernel | [ 7432.717384] eth1: renamed from vethfab1b55
+👾 kernel | [ 7432.719451] br-d1f3e4394e37: port 8(veth11dfb4b) entered blocking state
+👾 kernel | [ 7432.719490] br-d1f3e4394e37: port 8(veth11dfb4b) entered forwarding state
+👾 kernel | [ 7432.719638] br-3a2bb40bbcdb: port 7(veth193b2bc) entered blocking state
+👾 kernel | [ 7432.719667] br-3a2bb40bbcdb: port 7(veth193b2bc) entered disabled state
+👾 kernel | [ 7432.719693] veth193b2bc: entered allmulticast mode
+👾 kernel | [ 7432.719741] veth193b2bc: entered promiscuous mode
+👾 kernel | [ 7432.719967] br-3a2bb40bbcdb: port 6(vethde25cfb) entered blocking state
+👾 kernel | [ 7432.720007] br-3a2bb40bbcdb: port 6(vethde25cfb) entered forwarding state
+👾 kernel | [ 7433.020027] eth0: renamed from vethd811f6a
+👾 kernel | [ 7433.020519] br-3a2bb40bbcdb: port 5(veth800f8ba) entered blocking state
+👾 kernel | [ 7433.020548] br-3a2bb40bbcdb: port 5(veth800f8ba) entered forwarding state
+👾 kernel | [ 7433.233542] br-3a2bb40bbcdb: port 3(vethb05b0ee) entered disabled state
+👾 kernel | [ 7433.233646] vethe0de746: renamed from eth0
+📦 scon | time="01-14 02:22:25" level=info msg="add forward" container=docker spec="tcp:0.0.0.0:6333"
+📦 scon | time="01-14 02:22:25" level=info msg="add forward" container=docker spec="tcp:[::]:6333"
+👾 kernel | [ 7433.372111] br-3a2bb40bbcdb: port 8(vethefb740c) entered blocking state
+👾 kernel | [ 7433.372158] br-3a2bb40bbcdb: port 8(vethefb740c) entered disabled state
+👾 kernel | [ 7433.372183] vethefb740c: entered allmulticast mode
+👾 kernel | [ 7433.372227] vethefb740c: entered promiscuous mode
+👾 kernel | [ 7433.419789] br-3a2bb40bbcdb: port 3(vethb05b0ee) entered disabled state
+👾 kernel | [ 7433.420214] vethb05b0ee (unregistering): left allmulticast mode
+👾 kernel | [ 7433.420274] vethb05b0ee (unregistering): left promiscuous mode
+👾 kernel | [ 7433.420307] br-3a2bb40bbcdb: port 3(vethb05b0ee) entered disabled state
+👾 kernel | [ 7433.621775] eth0: renamed from vethcd4b5bd
+👾 kernel | [ 7433.622237] br-3a2bb40bbcdb: port 7(veth193b2bc) entered blocking state
+👾 kernel | [ 7433.622267] br-3a2bb40bbcdb: port 7(veth193b2bc) entered forwarding state
+👾 kernel | [ 7434.014684] eth1: renamed from vethcd8ca19
+👾 kernel | [ 7434.016440] br-3a2bb40bbcdb: port 8(vethefb740c) entered blocking state
+👾 kernel | [ 7434.016470] br-3a2bb40bbcdb: port 8(vethefb740c) entered forwarding state
+👾 kernel | [ 7434.016506] br-3a2bb40bbcdb: port 3(veth857bb06) entered blocking state
+👾 kernel | [ 7434.016539] br-3a2bb40bbcdb: port 3(veth857bb06) entered disabled state
+👾 kernel | [ 7434.016565] veth857bb06: entered allmulticast mode
+👾 kernel | [ 7434.016620] veth857bb06: entered promiscuous mode
+👾 kernel | [ 7435.222757] br-d1f3e4394e37: port 9(veth95da60c) entered blocking state
+👾 kernel | [ 7435.222804] br-d1f3e4394e37: port 9(veth95da60c) entered disabled state
+👾 kernel | [ 7435.222843] veth95da60c: entered allmulticast mode
+👾 kernel | [ 7435.222895] veth95da60c: entered promiscuous mode
+👾 kernel | [ 7435.239860] eth0: renamed from vethc85f645
+👾 kernel | [ 7435.240887] br-3a2bb40bbcdb: port 3(veth857bb06) entered blocking state
+👾 kernel | [ 7435.240936] br-3a2bb40bbcdb: port 3(veth857bb06) entered forwarding state
+👾 kernel | [ 7435.483964] eth1: renamed from veth5e9a10b
+👾 kernel | [ 7435.485456] br-d1f3e4394e37: port 9(veth95da60c) entered blocking state
+👾 kernel | [ 7435.485487] br-d1f3e4394e37: port 9(veth95da60c) entered forwarding state
+👾 kernel | [ 7436.617615] br-d1f3e4394e37: port 10(veth8705a00) entered blocking state
+👾 kernel | [ 7436.617650] br-d1f3e4394e37: port 10(veth8705a00) entered disabled state
+👾 kernel | [ 7436.617669] veth8705a00: entered allmulticast mode
+👾 kernel | [ 7436.617712] veth8705a00: entered promiscuous mode
+🌸 agent:docker | time="01-13 21:22:29" level=error msg="unable to set all bridgeports to hairpin" error="unable to get links: results may be incomplete or inconsistent"
+👾 kernel | [ 7436.969389] br-d1f3e4394e37: port 11(veth02f35a7) entered blocking state
+👾 kernel | [ 7436.969418] br-d1f3e4394e37: port 11(veth02f35a7) entered disabled state
+👾 kernel | [ 7436.969440] veth02f35a7: entered allmulticast mode
+👾 kernel | [ 7436.969482] veth02f35a7: entered promiscuous mode
+👾 kernel | [ 7436.993716] eth0: renamed from vethbc9eb11
+👾 kernel | [ 7436.994910] br-d1f3e4394e37: port 10(veth8705a00) entered blocking state
+👾 kernel | [ 7436.994935] br-d1f3e4394e37: port 10(veth8705a00) entered forwarding state
+👾 kernel | [ 7437.700513] br-3a2bb40bbcdb: port 9(veth35f3732) entered blocking state
+👾 kernel | [ 7437.700553] br-3a2bb40bbcdb: port 9(veth35f3732) entered disabled state
+👾 kernel | [ 7437.700579] veth35f3732: entered allmulticast mode
+👾 kernel | [ 7437.700633] veth35f3732: entered promiscuous mode
+👾 kernel | [ 7437.700739] eth1: renamed from veth2219b73
+👾 kernel | [ 7437.714086] br-d1f3e4394e37: port 11(veth02f35a7) entered blocking state
+👾 kernel | [ 7437.714122] br-d1f3e4394e37: port 11(veth02f35a7) entered forwarding state
+👾 kernel | [ 7438.469453] eth1: renamed from vethb33942d
+👾 kernel | [ 7438.470126] br-3a2bb40bbcdb: port 9(veth35f3732) entered blocking state
+👾 kernel | [ 7438.470152] br-3a2bb40bbcdb: port 9(veth35f3732) entered forwarding state
+👾 kernel | [ 7441.048873] br-d1f3e4394e37: port 12(vethd1957d6) entered blocking state
+👾 kernel | [ 7441.048908] br-d1f3e4394e37: port 12(vethd1957d6) entered disabled state
+👾 kernel | [ 7441.048932] vethd1957d6: entered allmulticast mode
+👾 kernel | [ 7441.048974] vethd1957d6: entered promiscuous mode
+👾 kernel | [ 7441.564841] br-d1f3e4394e37: port 13(vethd123fc6) entered blocking state
+👾 kernel | [ 7441.564890] br-d1f3e4394e37: port 13(vethd123fc6) entered disabled state
+👾 kernel | [ 7441.564918] vethd123fc6: entered allmulticast mode
+👾 kernel | [ 7441.564972] vethd123fc6: entered promiscuous mode
+👾 kernel | [ 7441.693910] eth0: renamed from vethb06ead6
+👾 kernel | [ 7441.697397] br-d1f3e4394e37: port 12(vethd1957d6) entered blocking state
+👾 kernel | [ 7441.697425] br-d1f3e4394e37: port 12(vethd1957d6) entered forwarding state
+👾 kernel | [ 7442.131107] br-3a2bb40bbcdb: port 10(veth4a472b7) entered blocking state
+👾 kernel | [ 7442.131147] br-3a2bb40bbcdb: port 10(veth4a472b7) entered disabled state
+👾 kernel | [ 7442.131167] veth4a472b7: entered allmulticast mode
+👾 kernel | [ 7442.131458] veth4a472b7: entered promiscuous mode
+👾 kernel | [ 7442.135915] eth0: renamed from veth8980cac
+👾 kernel | [ 7442.136546] br-d1f3e4394e37: port 13(vethd123fc6) entered blocking state
+👾 kernel | [ 7442.136569] br-d1f3e4394e37: port 13(vethd123fc6) entered forwarding state
+👾 kernel | [ 7442.140921] eth1: renamed from veth1c8b5f2
+👾 kernel | [ 7442.141874] br-3a2bb40bbcdb: port 10(veth4a472b7) entered blocking state
+👾 kernel | [ 7442.141893] br-3a2bb40bbcdb: port 10(veth4a472b7) entered forwarding state
+👾 kernel | [ 7442.272642] br-3a2bb40bbcdb: port 11(vethec9cc6d) entered blocking state
+👾 kernel | [ 7442.272678] br-3a2bb40bbcdb: port 11(vethec9cc6d) entered disabled state
+👾 kernel | [ 7442.272695] vethec9cc6d: entered allmulticast mode
+👾 kernel | [ 7442.272750] vethec9cc6d: entered promiscuous mode
+👾 kernel | [ 7442.308670] eth1: renamed from vethdec9453
+👾 kernel | [ 7442.312656] br-3a2bb40bbcdb: port 11(vethec9cc6d) entered blocking state
+👾 kernel | [ 7442.312690] br-3a2bb40bbcdb: port 11(vethec9cc6d) entered forwarding state
+👾 kernel | [ 7541.032175] hrtimer: interrupt took 6572423 ns
+📦 scon | time="01-14 02:29:25" level=info msg="remove forward" key="tcp:0.0.0.0:6333"
+📦 scon | time="01-14 02:29:25" level=info msg="remove forward" key="tcp:[::]:6333"
+👾 kernel | [ 7852.984592] br-3a2bb40bbcdb: port 5(veth800f8ba) entered disabled state
+👾 kernel | [ 7852.984805] vethd811f6a: renamed from eth0
+👾 kernel | [ 7853.537162] br-3a2bb40bbcdb: port 5(veth800f8ba) entered disabled state
+👾 kernel | [ 7853.538160] veth800f8ba (unregistering): left allmulticast mode
+👾 kernel | [ 7853.538189] veth800f8ba (unregistering): left promiscuous mode
+👾 kernel | [ 7853.538220] br-3a2bb40bbcdb: port 5(veth800f8ba) entered disabled state
+👾 kernel | [ 7853.922467] br-d1f3e4394e37: port 11(veth02f35a7) entered disabled state
+👾 kernel | [ 7853.922603] veth2219b73: renamed from eth1
+👾 kernel | [ 7854.859132] br-d1f3e4394e37: port 8(veth11dfb4b) entered disabled state
+👾 kernel | [ 7854.859406] veth3bc5b20: renamed from eth1
+👾 kernel | [ 7855.451148] br-d1f3e4394e37: port 12(vethd1957d6) entered disabled state
+👾 kernel | [ 7855.451417] vethb06ead6: renamed from eth0
+👾 kernel | [ 7856.038256] br-d1f3e4394e37: port 13(vethd123fc6) entered disabled state
+👾 kernel | [ 7856.038405] veth8980cac: renamed from eth0
+👾 kernel | [ 7856.073590] br-d1f3e4394e37: port 9(veth95da60c) entered disabled state
+👾 kernel | [ 7856.073896] veth5e9a10b: renamed from eth1
+👾 kernel | [ 7856.398053] br-d1f3e4394e37: port 11(veth02f35a7) entered disabled state
+👾 kernel | [ 7856.398800] veth02f35a7 (unregistering): left allmulticast mode
+👾 kernel | [ 7856.398833] veth02f35a7 (unregistering): left promiscuous mode
+👾 kernel | [ 7856.398855] br-d1f3e4394e37: port 11(veth02f35a7) entered disabled state
+👾 kernel | [ 7856.700441] br-d1f3e4394e37: port 12(vethd1957d6) entered disabled state
+👾 kernel | [ 7856.701000] vethd1957d6 (unregistering): left allmulticast mode
+👾 kernel | [ 7856.701016] vethd1957d6 (unregistering): left promiscuous mode
+👾 kernel | [ 7856.701027] br-d1f3e4394e37: port 12(vethd1957d6) entered disabled state
+👾 kernel | [ 7856.706258] br-3a2bb40bbcdb: port 3(veth857bb06) entered disabled state
+👾 kernel | [ 7856.706476] vethc85f645: renamed from eth0
+👾 kernel | [ 7856.753059] br-d1f3e4394e37: port 8(veth11dfb4b) entered disabled state
+👾 kernel | [ 7856.753821] veth11dfb4b (unregistering): left allmulticast mode
+👾 kernel | [ 7856.753840] veth11dfb4b (unregistering): left promiscuous mode
+👾 kernel | [ 7856.753850] br-d1f3e4394e37: port 8(veth11dfb4b) entered disabled state
+👾 kernel | [ 7858.318930] br-d1f3e4394e37: port 13(vethd123fc6) entered disabled state
+👾 kernel | [ 7858.319554] vethd123fc6 (unregistering): left allmulticast mode
+👾 kernel | [ 7858.319599] vethd123fc6 (unregistering): left promiscuous mode
+👾 kernel | [ 7858.319620] br-d1f3e4394e37: port 13(vethd123fc6) entered disabled state
+👾 kernel | [ 7858.403416] br-3a2bb40bbcdb: port 3(veth857bb06) entered disabled state
+👾 kernel | [ 7858.404046] veth857bb06 (unregistering): left allmulticast mode
+👾 kernel | [ 7858.404079] veth857bb06 (unregistering): left promiscuous mode
+👾 kernel | [ 7858.404095] br-3a2bb40bbcdb: port 3(veth857bb06) entered disabled state
+👾 kernel | [ 7858.566538] br-3a2bb40bbcdb: port 10(veth4a472b7) entered disabled state
+👾 kernel | [ 7858.566641] veth1c8b5f2: renamed from eth1
+👾 kernel | [ 7859.057312] br-3a2bb40bbcdb: port 2(veth45aca23) entered disabled state
+👾 kernel | [ 7859.057466] veth7874483: renamed from eth0
+👾 kernel | [ 7859.622825] br-d1f3e4394e37: port 9(veth95da60c) entered disabled state
+👾 kernel | [ 7859.623470] veth95da60c (unregistering): left allmulticast mode
+👾 kernel | [ 7859.623500] veth95da60c (unregistering): left promiscuous mode
+👾 kernel | [ 7859.623514] br-d1f3e4394e37: port 9(veth95da60c) entered disabled state
+👾 kernel | [ 7860.856582] br-3a2bb40bbcdb: port 10(veth4a472b7) entered disabled state
+👾 kernel | [ 7860.857375] veth4a472b7 (unregistering): left allmulticast mode
+👾 kernel | [ 7860.857416] veth4a472b7 (unregistering): left promiscuous mode
+👾 kernel | [ 7860.857429] br-3a2bb40bbcdb: port 10(veth4a472b7) entered disabled state
+👾 kernel | [ 7861.059134] br-3a2bb40bbcdb: port 2(veth45aca23) entered disabled state
+👾 kernel | [ 7861.059974] veth45aca23 (unregistering): left allmulticast mode
+👾 kernel | [ 7861.059991] veth45aca23 (unregistering): left promiscuous mode
+👾 kernel | [ 7861.060003] br-3a2bb40bbcdb: port 2(veth45aca23) entered disabled state
+👾 kernel | [ 7861.062242] br-3a2bb40bbcdb: port 11(vethec9cc6d) entered disabled state
+👾 kernel | [ 7861.062419] vethdec9453: renamed from eth1
+👾 kernel | [ 7861.887284] br-3a2bb40bbcdb: port 7(veth193b2bc) entered disabled state
+👾 kernel | [ 7861.887386] vethcd4b5bd: renamed from eth0
+👾 kernel | [ 7863.501698] br-3a2bb40bbcdb: port 7(veth193b2bc) entered disabled state
+👾 kernel | [ 7863.501977] veth193b2bc (unregistering): left allmulticast mode
+👾 kernel | [ 7863.502007] veth193b2bc (unregistering): left promiscuous mode
+👾 kernel | [ 7863.502070] br-3a2bb40bbcdb: port 7(veth193b2bc) entered disabled state
+👾 kernel | [ 7863.796322] br-3a2bb40bbcdb: port 11(vethec9cc6d) entered disabled state
+👾 kernel | [ 7863.796558] vethec9cc6d (unregistering): left allmulticast mode
+👾 kernel | [ 7863.796609] vethec9cc6d (unregistering): left promiscuous mode
+👾 kernel | [ 7863.796628] br-3a2bb40bbcdb: port 11(vethec9cc6d) entered disabled state
+👾 kernel | [ 7863.826606] br-3a2bb40bbcdb: port 4(vethaf4387f) entered disabled state
+👾 kernel | [ 7863.826900] veth4cf8545: renamed from eth0
+👾 kernel | [ 7863.979354] br-3a2bb40bbcdb: port 4(vethaf4387f) entered disabled state
+👾 kernel | [ 7863.980536] vethaf4387f (unregistering): left allmulticast mode
+👾 kernel | [ 7863.980561] vethaf4387f (unregistering): left promiscuous mode
+👾 kernel | [ 7863.980575] br-3a2bb40bbcdb: port 4(vethaf4387f) entered disabled state
+👾 kernel | [ 7864.267222] br-d1f3e4394e37: port 7(veth06b7a22) entered disabled state
+👾 kernel | [ 7864.267398] vethd9981cc: renamed from eth0
+👾 kernel | [ 7864.542444] br-d1f3e4394e37: port 5(veth2d5497b) entered disabled state
+👾 kernel | [ 7864.542765] vethc63a6b0: renamed from eth0
+👾 kernel | [ 7864.634770] veth062c431: renamed from eth1
+👾 kernel | [ 7864.635618] br-d1f3e4394e37: port 6(vethe4ef3f3) entered disabled state
+👾 kernel | [ 7865.047778] br-d1f3e4394e37: port 7(veth06b7a22) entered disabled state
+👾 kernel | [ 7865.048495] veth06b7a22 (unregistering): left allmulticast mode
+👾 kernel | [ 7865.048522] veth06b7a22 (unregistering): left promiscuous mode
+👾 kernel | [ 7865.048540] br-d1f3e4394e37: port 7(veth06b7a22) entered disabled state
+👾 kernel | [ 7865.074550] br-d1f3e4394e37: port 6(vethe4ef3f3) entered disabled state
+👾 kernel | [ 7865.075144] vethe4ef3f3 (unregistering): left allmulticast mode
+👾 kernel | [ 7865.075412] vethe4ef3f3 (unregistering): left promiscuous mode
+👾 kernel | [ 7865.075463] br-d1f3e4394e37: port 6(vethe4ef3f3) entered disabled state
+👾 kernel | [ 7865.154374] br-d1f3e4394e37: port 5(veth2d5497b) entered disabled state
+👾 kernel | [ 7865.155084] veth2d5497b (unregistering): left allmulticast mode
+👾 kernel | [ 7865.155120] veth2d5497b (unregistering): left promiscuous mode
+👾 kernel | [ 7865.155144] br-d1f3e4394e37: port 5(veth2d5497b) entered disabled state
+👾 kernel | [ 7865.196605] br-3a2bb40bbcdb: port 8(vethefb740c) entered disabled state
+👾 kernel | [ 7865.196683] vethcd8ca19: renamed from eth1
+🌸 agent:docker | time="01-13 21:29:37" level=error msg="failed to refresh networks" error="list links: results may be incomplete or inconsistent"
+👾 kernel | [ 7865.220671] br-3a2bb40bbcdb: port 1(vethc2182b3) entered disabled state
+👾 kernel | [ 7865.220782] veth1a8172b: renamed from eth0
+👾 kernel | [ 7865.263168] br-3a2bb40bbcdb: port 6(vethde25cfb) entered disabled state
+👾 kernel | [ 7865.263341] vethfab1b55: renamed from eth1
+👾 kernel | [ 7865.282588] br-3a2bb40bbcdb: port 8(vethefb740c) entered disabled state
+👾 kernel | [ 7865.282836] vethefb740c (unregistering): left allmulticast mode
+👾 kernel | [ 7865.282885] vethefb740c (unregistering): left promiscuous mode
+👾 kernel | [ 7865.282931] br-3a2bb40bbcdb: port 8(vethefb740c) entered disabled state
+👾 kernel | [ 7865.315376] br-3a2bb40bbcdb: port 1(vethc2182b3) entered disabled state
+👾 kernel | [ 7865.315767] vethc2182b3 (unregistering): left allmulticast mode
+👾 kernel | [ 7865.315803] vethc2182b3 (unregistering): left promiscuous mode
+👾 kernel | [ 7865.315845] br-3a2bb40bbcdb: port 1(vethc2182b3) entered disabled state
+👾 kernel | [ 7865.360987] br-3a2bb40bbcdb: port 6(vethde25cfb) entered disabled state
+👾 kernel | [ 7865.361271] vethde25cfb (unregistering): left allmulticast mode
+👾 kernel | [ 7865.361308] vethde25cfb (unregistering): left promiscuous mode
+👾 kernel | [ 7865.361323] br-3a2bb40bbcdb: port 6(vethde25cfb) entered disabled state
+👾 kernel | [ 7865.696766] br-d1f3e4394e37: port 10(veth8705a00) entered disabled state
+👾 kernel | [ 7865.696974] vethbc9eb11: renamed from eth0
+👾 kernel | [ 7866.063230] br-d1f3e4394e37: port 10(veth8705a00) entered disabled state
+👾 kernel | [ 7866.063838] veth8705a00 (unregistering): left allmulticast mode
+👾 kernel | [ 7866.063866] veth8705a00 (unregistering): left promiscuous mode
+👾 kernel | [ 7866.063884] br-d1f3e4394e37: port 10(veth8705a00) entered disabled state
+👾 kernel | [ 7866.168277] br-3a2bb40bbcdb: port 9(veth35f3732) entered disabled state
+👾 kernel | [ 7866.168409] vethb33942d: renamed from eth1
+👾 kernel | [ 7866.257749] br-3a2bb40bbcdb: port 9(veth35f3732) entered disabled state
+👾 kernel | [ 7866.258352] veth35f3732 (unregistering): left allmulticast mode
+👾 kernel | [ 7866.258399] veth35f3732 (unregistering): left promiscuous mode
+👾 kernel | [ 7866.258412] br-3a2bb40bbcdb: port 9(veth35f3732) entered disabled state
+🌸 agent:docker | time="01-13 21:29:38" level=info msg="removing network" config="{192.168.147.0/24 192.168.147.1 invalid Prefix invalid IP br-3a2bb40bbcdb}" name=omega_default
+👾 kernel | [ 7873.619040] br-d1f3e4394e37: port 5(vethd32149a) entered blocking state
+👾 kernel | [ 7873.619189] br-d1f3e4394e37: port 5(vethd32149a) entered disabled state
+👾 kernel | [ 7873.619218] vethd32149a: entered allmulticast mode
+👾 kernel | [ 7873.619271] vethd32149a: entered promiscuous mode
+👾 kernel | [ 7873.695438] eth0: renamed from veth5c9b989
+👾 kernel | [ 7873.695889] br-d1f3e4394e37: port 5(vethd32149a) entered blocking state
+👾 kernel | [ 7873.695928] br-d1f3e4394e37: port 5(vethd32149a) entered forwarding state
+👾 kernel | [ 7873.782294] br-805744f862c6: port 1(veth91c050f) entered blocking state
+👾 kernel | [ 7873.782346] br-805744f862c6: port 1(veth91c050f) entered disabled state
+👾 kernel | [ 7873.782374] veth91c050f: entered allmulticast mode
+👾 kernel | [ 7873.782436] veth91c050f: entered promiscuous mode
+🌸 agent:docker | time="01-13 21:29:46" level=info msg="adding network" config="{192.168.147.0/24 192.168.147.1 invalid Prefix invalid IP br-805744f862c6}" name=omega_default
+👾 kernel | [ 7874.088714] eth1: renamed from veth099792d
+👾 kernel | [ 7874.093568] br-805744f862c6: port 1(veth91c050f) entered blocking state
+👾 kernel | [ 7874.093606] br-805744f862c6: port 1(veth91c050f) entered forwarding state
+👾 kernel | [ 7874.095111] br-805744f862c6: port 2(vethf2cae25) entered blocking state
+👾 kernel | [ 7874.095171] br-805744f862c6: port 2(vethf2cae25) entered disabled state
+👾 kernel | [ 7874.095193] vethf2cae25: entered allmulticast mode
+👾 kernel | [ 7874.095241] vethf2cae25: entered promiscuous mode
+🌸 agent:docker | time="01-13 21:29:46" level=error msg="unable to set all bridgeports to hairpin" error="unable to get links: results may be incomplete or inconsistent"
+👾 kernel | [ 7874.337160] br-805744f862c6: port 3(veth1a4c2e8) entered blocking state
+👾 kernel | [ 7874.337192] br-805744f862c6: port 3(veth1a4c2e8) entered disabled state
+👾 kernel | [ 7874.337211] veth1a4c2e8: entered allmulticast mode
+👾 kernel | [ 7874.337246] veth1a4c2e8: entered promiscuous mode
+👾 kernel | [ 7874.663016] eth0: renamed from vethb3fac7b
+👾 kernel | [ 7874.663413] br-805744f862c6: port 2(vethf2cae25) entered blocking state
+👾 kernel | [ 7874.663436] br-805744f862c6: port 2(vethf2cae25) entered forwarding state
+👾 kernel | [ 7876.017910] br-805744f862c6: port 4(vethded7e18) entered blocking state
+👾 kernel | [ 7876.017947] br-805744f862c6: port 4(vethded7e18) entered disabled state
+👾 kernel | [ 7876.017969] vethded7e18: entered allmulticast mode
+👾 kernel | [ 7876.018005] vethded7e18: entered promiscuous mode
+👾 kernel | [ 7876.541231] br-d1f3e4394e37: port 6(vethfbeb5b8) entered blocking state
+👾 kernel | [ 7876.541265] br-d1f3e4394e37: port 6(vethfbeb5b8) entered disabled state
+👾 kernel | [ 7876.541285] vethfbeb5b8: entered allmulticast mode
+👾 kernel | [ 7876.541327] vethfbeb5b8: entered promiscuous mode
+👾 kernel | [ 7876.847366] eth0: renamed from vethb61731d
+👾 kernel | [ 7876.847820] br-805744f862c6: port 3(veth1a4c2e8) entered blocking state
+👾 kernel | [ 7876.847842] br-805744f862c6: port 3(veth1a4c2e8) entered forwarding state
+👾 kernel | [ 7877.158059] br-805744f862c6: port 5(veth07a6a4a) entered blocking state
+👾 kernel | [ 7877.158123] br-805744f862c6: port 5(veth07a6a4a) entered disabled state
+👾 kernel | [ 7877.158141] veth07a6a4a: entered allmulticast mode
+👾 kernel | [ 7877.158190] veth07a6a4a: entered promiscuous mode
+👾 kernel | [ 7877.173326] eth0: renamed from vethd9e79b2
+👾 kernel | [ 7877.173855] br-d1f3e4394e37: port 6(vethfbeb5b8) entered blocking state
+👾 kernel | [ 7877.173878] br-d1f3e4394e37: port 6(vethfbeb5b8) entered forwarding state
+👾 kernel | [ 7877.216280] eth0: renamed from veth21fca2f
+👾 kernel | [ 7877.216739] br-805744f862c6: port 4(vethded7e18) entered blocking state
+👾 kernel | [ 7877.216766] br-805744f862c6: port 4(vethded7e18) entered forwarding state
+👾 kernel | [ 7877.220493] br-d1f3e4394e37: port 7(vethee0e368) entered blocking state
+👾 kernel | [ 7877.220528] br-d1f3e4394e37: port 7(vethee0e368) entered disabled state
+👾 kernel | [ 7877.220547] vethee0e368: entered allmulticast mode
+👾 kernel | [ 7877.220594] vethee0e368: entered promiscuous mode
+👾 kernel | [ 7877.281159] br-805744f862c6: port 6(vethc73cb7a) entered blocking state
+👾 kernel | [ 7877.281196] br-805744f862c6: port 6(vethc73cb7a) entered disabled state
+👾 kernel | [ 7877.281216] vethc73cb7a: entered allmulticast mode
+👾 kernel | [ 7877.281262] vethc73cb7a: entered promiscuous mode
+📦 scon | time="01-14 02:29:50" level=info msg="add forward" container=docker spec="tcp:0.0.0.0:6333"
+📦 scon | time="01-14 02:29:50" level=info msg="add forward" container=docker spec="tcp:[::]:6333"
+👾 kernel | [ 7877.420124] br-d1f3e4394e37: port 8(veth62d12d5) entered blocking state
+👾 kernel | [ 7877.420160] br-d1f3e4394e37: port 8(veth62d12d5) entered disabled state
+👾 kernel | [ 7877.420181] veth62d12d5: entered allmulticast mode
+👾 kernel | [ 7877.420224] veth62d12d5: entered promiscuous mode
+👾 kernel | [ 7877.420453] br-805744f862c6: port 7(vetha2f3f6c) entered blocking state
+👾 kernel | [ 7877.420475] br-805744f862c6: port 7(vetha2f3f6c) entered disabled state
+👾 kernel | [ 7877.420494] vetha2f3f6c: entered allmulticast mode
+👾 kernel | [ 7877.420526] vetha2f3f6c: entered promiscuous mode
+👾 kernel | [ 7877.425230] eth0: renamed from veth7794f34
+👾 kernel | [ 7877.425712] br-805744f862c6: port 5(veth07a6a4a) entered blocking state
+👾 kernel | [ 7877.425753] br-805744f862c6: port 5(veth07a6a4a) entered forwarding state
+👾 kernel | [ 7877.467354] eth0: renamed from vethb73eebe
+👾 kernel | [ 7877.468699] br-d1f3e4394e37: port 7(vethee0e368) entered blocking state
+👾 kernel | [ 7877.468719] br-d1f3e4394e37: port 7(vethee0e368) entered forwarding state
+👾 kernel | [ 7877.469127] eth0: renamed from veth208559a
+👾 kernel | [ 7877.470246] br-805744f862c6: port 6(vethc73cb7a) entered blocking state
+👾 kernel | [ 7877.470298] br-805744f862c6: port 6(vethc73cb7a) entered forwarding state
+👾 kernel | [ 7877.908280] br-d1f3e4394e37: port 9(veth73864c3) entered blocking state
+👾 kernel | [ 7877.908321] br-d1f3e4394e37: port 9(veth73864c3) entered disabled state
+👾 kernel | [ 7877.908344] veth73864c3: entered allmulticast mode
+👾 kernel | [ 7877.908388] veth73864c3: entered promiscuous mode
+👾 kernel | [ 7878.008020] eth1: renamed from veth60bcb15
+👾 kernel | [ 7878.008491] eth1: renamed from vethe8931bf
+👾 kernel | [ 7878.008884] eth1: renamed from veth4168d4c
+👾 kernel | [ 7878.009710] br-d1f3e4394e37: port 8(veth62d12d5) entered blocking state
+👾 kernel | [ 7878.009737] br-d1f3e4394e37: port 8(veth62d12d5) entered forwarding state
+👾 kernel | [ 7878.009928] br-d1f3e4394e37: port 9(veth73864c3) entered blocking state
+👾 kernel | [ 7878.009959] br-d1f3e4394e37: port 9(veth73864c3) entered forwarding state
+👾 kernel | [ 7878.010270] br-805744f862c6: port 7(vetha2f3f6c) entered blocking state
+👾 kernel | [ 7878.010299] br-805744f862c6: port 7(vetha2f3f6c) entered forwarding state
+👾 kernel | [ 7878.105267] br-805744f862c6: port 8(veth81252de) entered blocking state
+👾 kernel | [ 7878.105294] br-805744f862c6: port 8(veth81252de) entered disabled state
+👾 kernel | [ 7878.105314] veth81252de: entered allmulticast mode
+👾 kernel | [ 7878.105357] veth81252de: entered promiscuous mode
+👾 kernel | [ 7878.505609] eth1: renamed from vethf8cd222
+👾 kernel | [ 7878.511060] br-805744f862c6: port 8(veth81252de) entered blocking state
+👾 kernel | [ 7878.511114] br-805744f862c6: port 8(veth81252de) entered forwarding state
+👾 kernel | [ 7879.471426] br-d1f3e4394e37: port 10(veth8587586) entered blocking state
+👾 kernel | [ 7879.471467] br-d1f3e4394e37: port 10(veth8587586) entered disabled state
+👾 kernel | [ 7879.471486] veth8587586: entered allmulticast mode
+👾 kernel | [ 7879.471538] veth8587586: entered promiscuous mode
+👾 kernel | [ 7879.537483] br-805744f862c6: port 6(vethc73cb7a) entered disabled state
+👾 kernel | [ 7879.538529] veth208559a: renamed from eth0
+👾 kernel | [ 7879.926877] br-805744f862c6: port 6(vethc73cb7a) entered disabled state
+👾 kernel | [ 7879.927622] vethc73cb7a (unregistering): left allmulticast mode
+👾 kernel | [ 7879.927647] vethc73cb7a (unregistering): left promiscuous mode
+👾 kernel | [ 7879.927661] br-805744f862c6: port 6(vethc73cb7a) entered disabled state
+👾 kernel | [ 7879.950127] eth0: renamed from veth86599c6
+👾 kernel | [ 7879.951108] br-d1f3e4394e37: port 10(veth8587586) entered blocking state
+👾 kernel | [ 7879.951133] br-d1f3e4394e37: port 10(veth8587586) entered forwarding state
+👾 kernel | [ 7880.699662] br-805744f862c6: port 6(vethff5319a) entered blocking state
+👾 kernel | [ 7880.699695] br-805744f862c6: port 6(vethff5319a) entered disabled state
+👾 kernel | [ 7880.699729] vethff5319a: entered allmulticast mode
+👾 kernel | [ 7880.699780] vethff5319a: entered promiscuous mode
+👾 kernel | [ 7881.449080] eth1: renamed from veth72f6c44
+👾 kernel | [ 7881.450022] br-805744f862c6: port 6(vethff5319a) entered blocking state
+👾 kernel | [ 7881.450062] br-805744f862c6: port 6(vethff5319a) entered forwarding state
+👾 kernel | [ 7884.206751] br-d1f3e4394e37: port 11(veth2069cd2) entered blocking state
+👾 kernel | [ 7884.206854] br-d1f3e4394e37: port 11(veth2069cd2) entered disabled state
+👾 kernel | [ 7884.206873] veth2069cd2: entered allmulticast mode
+👾 kernel | [ 7884.206915] veth2069cd2: entered promiscuous mode
+👾 kernel | [ 7884.891246] eth0: renamed from vethaecc3e5
+👾 kernel | [ 7884.891797] br-d1f3e4394e37: port 11(veth2069cd2) entered blocking state
+👾 kernel | [ 7884.891830] br-d1f3e4394e37: port 11(veth2069cd2) entered forwarding state
+👾 kernel | [ 7884.915805] br-805744f862c6: port 9(vethd38b01a) entered blocking state
+👾 kernel | [ 7884.915862] br-805744f862c6: port 9(vethd38b01a) entered disabled state
+👾 kernel | [ 7884.915885] vethd38b01a: entered allmulticast mode
+👾 kernel | [ 7884.915941] vethd38b01a: entered promiscuous mode
+👾 kernel | [ 7885.373109] eth1: renamed from veth8f3da83
+👾 kernel | [ 7885.374367] br-805744f862c6: port 9(vethd38b01a) entered blocking state
+👾 kernel | [ 7885.374389] br-805744f862c6: port 9(vethd38b01a) entered forwarding state
+👾 kernel | [ 7886.987884] br-d1f3e4394e37: port 12(veth8736fce) entered blocking state
+👾 kernel | [ 7886.987916] br-d1f3e4394e37: port 12(veth8736fce) entered disabled state
+👾 kernel | [ 7886.987939] veth8736fce: entered allmulticast mode
+👾 kernel | [ 7886.987982] veth8736fce: entered promiscuous mode
+👾 kernel | [ 7887.159208] br-805744f862c6: port 10(vethe0894ec) entered blocking state
+👾 kernel | [ 7887.159253] br-805744f862c6: port 10(vethe0894ec) entered disabled state
+👾 kernel | [ 7887.159284] vethe0894ec: entered allmulticast mode
+👾 kernel | [ 7887.159336] vethe0894ec: entered promiscuous mode
+👾 kernel | [ 7887.188151] eth0: renamed from veth3e524ab
+👾 kernel | [ 7887.189120] br-d1f3e4394e37: port 12(veth8736fce) entered blocking state
+👾 kernel | [ 7887.189175] br-d1f3e4394e37: port 12(veth8736fce) entered forwarding state
+👾 kernel | [ 7887.205522] eth0: renamed from veth076f92d
+👾 kernel | [ 7887.206266] br-805744f862c6: port 10(vethe0894ec) entered blocking state
+👾 kernel | [ 7887.206302] br-805744f862c6: port 10(vethe0894ec) entered forwarding state
+👾 kernel | [ 7887.364175] br-805744f862c6: port 11(veth5fb3f10) entered blocking state
+👾 kernel | [ 7887.364266] br-805744f862c6: port 11(veth5fb3f10) entered disabled state
+👾 kernel | [ 7887.364293] veth5fb3f10: entered allmulticast mode
+👾 kernel | [ 7887.364349] veth5fb3f10: entered promiscuous mode
+👾 kernel | [ 7887.601268] br-d1f3e4394e37: port 13(veth2b0d253) entered blocking state
+👾 kernel | [ 7887.601301] br-d1f3e4394e37: port 13(veth2b0d253) entered disabled state
+👾 kernel | [ 7887.601318] veth2b0d253: entered allmulticast mode
+👾 kernel | [ 7887.601369] veth2b0d253: entered promiscuous mode
+👾 kernel | [ 7887.854053] eth1: renamed from veth759db7f
+👾 kernel | [ 7887.858530] br-805744f862c6: port 11(veth5fb3f10) entered blocking state
+👾 kernel | [ 7887.858554] br-805744f862c6: port 11(veth5fb3f10) entered forwarding state
+👾 kernel | [ 7887.859071] eth1: renamed from veth69f0c7f
+👾 kernel | [ 7887.862906] br-d1f3e4394e37: port 13(veth2b0d253) entered blocking state
+👾 kernel | [ 7887.862928] br-d1f3e4394e37: port 13(veth2b0d253) entered forwarding state
+📦 scon | time="01-14 02:32:47" level=info msg="remove forward" key="tcp:0.0.0.0:6333"
+📦 scon | time="01-14 02:32:47" level=info msg="remove forward" key="tcp:[::]:6333"
+👾 kernel | [ 8055.592464] br-805744f862c6: port 4(vethded7e18) entered disabled state
+👾 kernel | [ 8055.592640] veth21fca2f: renamed from eth0
+👾 kernel | [ 8055.722426] br-d1f3e4394e37: port 13(veth2b0d253) entered disabled state
+👾 kernel | [ 8055.722533] veth69f0c7f: renamed from eth1
+👾 kernel | [ 8056.399963] br-805744f862c6: port 4(vethded7e18) entered disabled state
+👾 kernel | [ 8056.400502] vethded7e18 (unregistering): left allmulticast mode
+👾 kernel | [ 8056.400521] vethded7e18 (unregistering): left promiscuous mode
+👾 kernel | [ 8056.400533] br-805744f862c6: port 4(vethded7e18) entered disabled state
+👾 kernel | [ 8056.783945] br-d1f3e4394e37: port 7(vethee0e368) entered disabled state
+👾 kernel | [ 8056.784008] vethb73eebe: renamed from eth0
+👾 kernel | [ 8057.032556] br-d1f3e4394e37: port 13(veth2b0d253) entered disabled state
+👾 kernel | [ 8057.033296] veth2b0d253 (unregistering): left allmulticast mode
+👾 kernel | [ 8057.033315] veth2b0d253 (unregistering): left promiscuous mode
+👾 kernel | [ 8057.033327] br-d1f3e4394e37: port 13(veth2b0d253) entered disabled state
+👾 kernel | [ 8057.458403] br-d1f3e4394e37: port 12(veth8736fce) entered disabled state
+👾 kernel | [ 8057.458828] veth3e524ab: renamed from eth0
+👾 kernel | [ 8058.332960] br-d1f3e4394e37: port 7(vethee0e368) entered disabled state
+👾 kernel | [ 8058.333911] vethee0e368 (unregistering): left allmulticast mode
+👾 kernel | [ 8058.333938] vethee0e368 (unregistering): left promiscuous mode
+👾 kernel | [ 8058.333957] br-d1f3e4394e37: port 7(vethee0e368) entered disabled state
+👾 kernel | [ 8058.339597] br-d1f3e4394e37: port 6(vethfbeb5b8) entered disabled state
+👾 kernel | [ 8058.339672] vethd9e79b2: renamed from eth0
+👾 kernel | [ 8058.623559] br-805744f862c6: port 10(vethe0894ec) entered disabled state
+👾 kernel | [ 8058.623655] veth076f92d: renamed from eth0
+👾 kernel | [ 8058.945327] br-d1f3e4394e37: port 12(veth8736fce) entered disabled state
+👾 kernel | [ 8058.946087] veth8736fce (unregistering): left allmulticast mode
+👾 kernel | [ 8058.946112] veth8736fce (unregistering): left promiscuous mode
+👾 kernel | [ 8058.946152] br-d1f3e4394e37: port 12(veth8736fce) entered disabled state
+👾 kernel | [ 8059.190523] br-805744f862c6: port 8(veth81252de) entered disabled state
+👾 kernel | [ 8059.190925] vethf8cd222: renamed from eth1
+👾 kernel | [ 8059.585225] br-d1f3e4394e37: port 6(vethfbeb5b8) entered disabled state
+👾 kernel | [ 8059.586250] vethfbeb5b8 (unregistering): left allmulticast mode
+👾 kernel | [ 8059.586274] vethfbeb5b8 (unregistering): left promiscuous mode
+👾 kernel | [ 8059.586288] br-d1f3e4394e37: port 6(vethfbeb5b8) entered disabled state
+👾 kernel | [ 8059.740456] br-805744f862c6: port 10(vethe0894ec) entered disabled state
+👾 kernel | [ 8059.741188] vethe0894ec (unregistering): left allmulticast mode
+👾 kernel | [ 8059.741216] vethe0894ec (unregistering): left promiscuous mode
+👾 kernel | [ 8059.741230] br-805744f862c6: port 10(vethe0894ec) entered disabled state
+👾 kernel | [ 8059.858338] br-805744f862c6: port 8(veth81252de) entered disabled state
+👾 kernel | [ 8059.859277] veth81252de (unregistering): left allmulticast mode
+👾 kernel | [ 8059.859297] veth81252de (unregistering): left promiscuous mode
+👾 kernel | [ 8059.859312] br-805744f862c6: port 8(veth81252de) entered disabled state
+👾 kernel | [ 8059.941615] br-805744f862c6: port 7(vetha2f3f6c) entered disabled state
+👾 kernel | [ 8059.941801] veth4168d4c: renamed from eth1
+👾 kernel | [ 8060.193105] br-805744f862c6: port 11(veth5fb3f10) entered disabled state
+👾 kernel | [ 8060.193329] veth759db7f: renamed from eth1
+👾 kernel | [ 8060.228869] br-805744f862c6: port 7(vetha2f3f6c) entered disabled state
+👾 kernel | [ 8060.229420] vetha2f3f6c (unregistering): left allmulticast mode
+👾 kernel | [ 8060.229435] vetha2f3f6c (unregistering): left promiscuous mode
+👾 kernel | [ 8060.229445] br-805744f862c6: port 7(vetha2f3f6c) entered disabled state
+👾 kernel | [ 8060.345992] br-805744f862c6: port 11(veth5fb3f10) entered disabled state
+👾 kernel | [ 8060.346940] veth5fb3f10 (unregistering): left allmulticast mode
+👾 kernel | [ 8060.346973] veth5fb3f10 (unregistering): left promiscuous mode
+👾 kernel | [ 8060.346997] br-805744f862c6: port 11(veth5fb3f10) entered disabled state
+👾 kernel | [ 8062.164766] br-d1f3e4394e37: port 11(veth2069cd2) entered disabled state
+👾 kernel | [ 8062.164935] vethaecc3e5: renamed from eth0
+👾 kernel | [ 8062.740578] br-d1f3e4394e37: port 11(veth2069cd2) entered disabled state
+👾 kernel | [ 8062.741252] veth2069cd2 (unregistering): left allmulticast mode
+👾 kernel | [ 8062.741284] veth2069cd2 (unregistering): left promiscuous mode
+👾 kernel | [ 8062.741302] br-d1f3e4394e37: port 11(veth2069cd2) entered disabled state
+👾 kernel | [ 8063.003367] br-805744f862c6: port 9(vethd38b01a) entered disabled state
+👾 kernel | [ 8063.003469] veth8f3da83: renamed from eth1
+👾 kernel | [ 8063.917164] br-805744f862c6: port 9(vethd38b01a) entered disabled state
+👾 kernel | [ 8063.917861] vethd38b01a (unregistering): left allmulticast mode
+👾 kernel | [ 8063.917888] vethd38b01a (unregistering): left promiscuous mode
+👾 kernel | [ 8063.917906] br-805744f862c6: port 9(vethd38b01a) entered disabled state
+👾 kernel | [ 8065.318274] br-d1f3e4394e37: port 5(vethd32149a) entered disabled state
+👾 kernel | [ 8065.318371] veth5c9b989: renamed from eth0
+👾 kernel | [ 8065.344483] veth60bcb15: renamed from eth1
+👾 kernel | [ 8065.344750] br-d1f3e4394e37: port 8(veth62d12d5) entered disabled state
+👾 kernel | [ 8065.384806] vethe8931bf: renamed from eth1
+👾 kernel | [ 8065.385011] br-d1f3e4394e37: port 10(veth8587586) entered disabled state
+👾 kernel | [ 8065.385077] br-d1f3e4394e37: port 9(veth73864c3) entered disabled state
+👾 kernel | [ 8065.429805] veth86599c6: renamed from eth0
+👾 kernel | [ 8065.450533] br-d1f3e4394e37: port 5(vethd32149a) entered disabled state
+👾 kernel | [ 8065.451213] vethd32149a (unregistering): left allmulticast mode
+👾 kernel | [ 8065.451241] vethd32149a (unregistering): left promiscuous mode
+👾 kernel | [ 8065.451255] br-d1f3e4394e37: port 5(vethd32149a) entered disabled state
+👾 kernel | [ 8065.502316] br-d1f3e4394e37: port 9(veth73864c3) entered disabled state
+👾 kernel | [ 8065.502851] veth73864c3 (unregistering): left allmulticast mode
+👾 kernel | [ 8065.502882] veth73864c3 (unregistering): left promiscuous mode
+👾 kernel | [ 8065.502904] br-d1f3e4394e37: port 9(veth73864c3) entered disabled state
+👾 kernel | [ 8065.527236] br-d1f3e4394e37: port 8(veth62d12d5) entered disabled state
+👾 kernel | [ 8065.527545] veth62d12d5 (unregistering): left allmulticast mode
+👾 kernel | [ 8065.527635] veth62d12d5 (unregistering): left promiscuous mode
+👾 kernel | [ 8065.527666] br-d1f3e4394e37: port 8(veth62d12d5) entered disabled state
+👾 kernel | [ 8065.550210] br-805744f862c6: port 1(veth91c050f) entered disabled state
+👾 kernel | [ 8065.550347] veth099792d: renamed from eth1
+👾 kernel | [ 8065.573973] br-d1f3e4394e37: port 10(veth8587586) entered disabled state
+👾 kernel | [ 8065.574601] veth8587586 (unregistering): left allmulticast mode
+👾 kernel | [ 8065.574632] veth8587586 (unregistering): left promiscuous mode
+👾 kernel | [ 8065.574650] br-d1f3e4394e37: port 10(veth8587586) entered disabled state
+👾 kernel | [ 8065.574913] br-805744f862c6: port 3(veth1a4c2e8) entered disabled state
+👾 kernel | [ 8065.574968] br-805744f862c6: port 2(vethf2cae25) entered disabled state
+👾 kernel | [ 8065.575051] vethb61731d: renamed from eth0
+👾 kernel | [ 8065.575275] vethb3fac7b: renamed from eth0
+👾 kernel | [ 8065.633180] br-805744f862c6: port 6(vethff5319a) entered disabled state
+👾 kernel | [ 8065.633465] br-805744f862c6: port 1(veth91c050f) entered disabled state
+👾 kernel | [ 8065.634186] veth91c050f (unregistering): left allmulticast mode
+👾 kernel | [ 8065.634208] veth91c050f (unregistering): left promiscuous mode
+👾 kernel | [ 8065.634230] br-805744f862c6: port 1(veth91c050f) entered disabled state
+👾 kernel | [ 8065.634359] veth72f6c44: renamed from eth1
+👾 kernel | [ 8065.667126] br-805744f862c6: port 2(vethf2cae25) entered disabled state
+👾 kernel | [ 8065.667912] vethf2cae25 (unregistering): left allmulticast mode
+👾 kernel | [ 8065.667947] vethf2cae25 (unregistering): left promiscuous mode
+👾 kernel | [ 8065.667967] br-805744f862c6: port 2(vethf2cae25) entered disabled state
+👾 kernel | [ 8065.695487] br-805744f862c6: port 3(veth1a4c2e8) entered disabled state
+👾 kernel | [ 8065.696138] veth1a4c2e8 (unregistering): left allmulticast mode
+👾 kernel | [ 8065.696162] veth1a4c2e8 (unregistering): left promiscuous mode
+👾 kernel | [ 8065.696174] br-805744f862c6: port 3(veth1a4c2e8) entered disabled state
+👾 kernel | [ 8065.756269] br-805744f862c6: port 6(vethff5319a) entered disabled state
+👾 kernel | [ 8065.756652] vethff5319a (unregistering): left allmulticast mode
+👾 kernel | [ 8065.756682] vethff5319a (unregistering): left promiscuous mode
+👾 kernel | [ 8065.756698] br-805744f862c6: port 6(vethff5319a) entered disabled state
+👾 kernel | [ 8066.914642] br-805744f862c6: port 5(veth07a6a4a) entered disabled state
+👾 kernel | [ 8066.914824] veth7794f34: renamed from eth0
+👾 kernel | [ 8067.002001] br-805744f862c6: port 5(veth07a6a4a) entered disabled state
+👾 kernel | [ 8067.002586] veth07a6a4a (unregistering): left allmulticast mode
+👾 kernel | [ 8067.002622] veth07a6a4a (unregistering): left promiscuous mode
+👾 kernel | [ 8067.002634] br-805744f862c6: port 5(veth07a6a4a) entered disabled state
+🌸 agent:docker | time="01-13 21:32:59" level=info msg="removing network" config="{192.168.147.0/24 192.168.147.1 invalid Prefix invalid IP br-805744f862c6}" name=omega_default
+👾 kernel | [ 8074.323192] br-1f640fda3d7c: port 1(veth0c65c53) entered blocking state
+👾 kernel | [ 8074.323236] br-1f640fda3d7c: port 1(veth0c65c53) entered disabled state
+👾 kernel | [ 8074.323255] veth0c65c53: entered allmulticast mode
+👾 kernel | [ 8074.323302] veth0c65c53: entered promiscuous mode
+👾 kernel | [ 8074.475064] eth0: renamed from veth99a3876
+👾 kernel | [ 8074.475771] br-1f640fda3d7c: port 1(veth0c65c53) entered blocking state
+👾 kernel | [ 8074.475812] br-1f640fda3d7c: port 1(veth0c65c53) entered forwarding state
+👾 kernel | [ 8074.634146] br-d1f3e4394e37: port 5(vethb5ca815) entered blocking state
+👾 kernel | [ 8074.634177] br-d1f3e4394e37: port 5(vethb5ca815) entered disabled state
+👾 kernel | [ 8074.634199] vethb5ca815: entered allmulticast mode
+👾 kernel | [ 8074.634245] vethb5ca815: entered promiscuous mode
+🌸 agent:docker | time="01-13 21:33:07" level=info msg="adding network" config="{192.168.147.0/24 192.168.147.1 invalid Prefix invalid IP br-1f640fda3d7c}" name=omega_default
+👾 kernel | [ 8074.650571] br-d1f3e4394e37: port 6(vethe2a5ac8) entered blocking state
+👾 kernel | [ 8074.650612] br-d1f3e4394e37: port 6(vethe2a5ac8) entered disabled state
+👾 kernel | [ 8074.650655] vethe2a5ac8: entered allmulticast mode
+👾 kernel | [ 8074.650710] vethe2a5ac8: entered promiscuous mode
+👾 kernel | [ 8074.758246] eth0: renamed from vetha405749
+👾 kernel | [ 8074.758744] br-d1f3e4394e37: port 5(vethb5ca815) entered blocking state
+👾 kernel | [ 8074.758763] br-d1f3e4394e37: port 5(vethb5ca815) entered forwarding state
+👾 kernel | [ 8074.928988] br-1f640fda3d7c: port 2(veth366f8c4) entered blocking state
+👾 kernel | [ 8074.929035] br-1f640fda3d7c: port 2(veth366f8c4) entered disabled state
+👾 kernel | [ 8074.929062] veth366f8c4: entered allmulticast mode
+👾 kernel | [ 8074.929185] veth366f8c4: entered promiscuous mode
+👾 kernel | [ 8074.952849] eth1: renamed from veth3e11ba1
+👾 kernel | [ 8074.956992] br-d1f3e4394e37: port 6(vethe2a5ac8) entered blocking state
+👾 kernel | [ 8074.957031] br-d1f3e4394e37: port 6(vethe2a5ac8) entered forwarding state
+👾 kernel | [ 8075.451119] br-d1f3e4394e37: port 7(vetheba2816) entered blocking state
+👾 kernel | [ 8075.451161] br-d1f3e4394e37: port 7(vetheba2816) entered disabled state
+👾 kernel | [ 8075.451183] vetheba2816: entered allmulticast mode
+👾 kernel | [ 8075.451230] vetheba2816: entered promiscuous mode
+👾 kernel | [ 8075.451509] br-1f640fda3d7c: port 3(vethc2b9b37) entered blocking state
+👾 kernel | [ 8075.451546] br-1f640fda3d7c: port 3(vethc2b9b37) entered disabled state
+👾 kernel | [ 8075.451613] vethc2b9b37: entered allmulticast mode
+👾 kernel | [ 8075.451753] vethc2b9b37: entered promiscuous mode
+🌸 agent:docker | time="01-13 21:33:08" level=error msg="unable to set all bridgeports to hairpin" error="unable to get links: results may be incomplete or inconsistent"
+🌸 agent:docker | time="01-13 21:33:08" level=error msg="failed to refresh networks" error="list links: results may be incomplete or inconsistent"
+👾 kernel | [ 8075.463175] eth0: renamed from vethfe1dfa2
+👾 kernel | [ 8075.464053] br-1f640fda3d7c: port 2(veth366f8c4) entered blocking state
+👾 kernel | [ 8075.464092] br-1f640fda3d7c: port 2(veth366f8c4) entered forwarding state
+👾 kernel | [ 8075.473108] br-d1f3e4394e37: port 8(vethc8c3b5f) entered blocking state
+👾 kernel | [ 8075.473142] br-d1f3e4394e37: port 8(vethc8c3b5f) entered disabled state
+👾 kernel | [ 8075.473165] vethc8c3b5f: entered allmulticast mode
+👾 kernel | [ 8075.473219] vethc8c3b5f: entered promiscuous mode
+👾 kernel | [ 8075.549988] br-1f640fda3d7c: port 4(veth0040701) entered blocking state
+👾 kernel | [ 8075.550032] br-1f640fda3d7c: port 4(veth0040701) entered disabled state
+👾 kernel | [ 8075.550053] veth0040701: entered allmulticast mode
+👾 kernel | [ 8075.550175] veth0040701: entered promiscuous mode
+📦 scon | time="01-14 02:33:08" level=info msg="add forward" container=docker spec="tcp:0.0.0.0:6333"
+📦 scon | time="01-14 02:33:08" level=info msg="add forward" container=docker spec="tcp:[::]:6333"
+👾 kernel | [ 8075.583072] eth0: renamed from veth18dead0
+👾 kernel | [ 8075.583748] br-d1f3e4394e37: port 7(vetheba2816) entered blocking state
+👾 kernel | [ 8075.583787] br-d1f3e4394e37: port 7(vetheba2816) entered forwarding state
+👾 kernel | [ 8075.632012] br-1f640fda3d7c: port 5(veth9813cc5) entered blocking state
+👾 kernel | [ 8075.632086] br-1f640fda3d7c: port 5(veth9813cc5) entered disabled state
+👾 kernel | [ 8075.632117] veth9813cc5: entered allmulticast mode
+👾 kernel | [ 8075.632208] veth9813cc5: entered promiscuous mode
+👾 kernel | [ 8075.654720] eth0: renamed from veth7f18f2f
+👾 kernel | [ 8075.655072] eth0: renamed from vethe7b735c
+👾 kernel | [ 8075.655303] br-1f640fda3d7c: port 3(vethc2b9b37) entered blocking state
+👾 kernel | [ 8075.655334] br-1f640fda3d7c: port 3(vethc2b9b37) entered forwarding state
+👾 kernel | [ 8075.655776] br-1f640fda3d7c: port 4(veth0040701) entered blocking state
+👾 kernel | [ 8075.655799] br-1f640fda3d7c: port 4(veth0040701) entered forwarding state
+👾 kernel | [ 8076.017236] eth0: renamed from veth52469ec
+👾 kernel | [ 8076.017807] br-d1f3e4394e37: port 8(vethc8c3b5f) entered blocking state
+👾 kernel | [ 8076.017826] br-d1f3e4394e37: port 8(vethc8c3b5f) entered forwarding state
+👾 kernel | [ 8077.992550] br-1f640fda3d7c: port 6(veth46c47ad) entered blocking state
+👾 kernel | [ 8077.992592] br-1f640fda3d7c: port 6(veth46c47ad) entered disabled state
+👾 kernel | [ 8077.992607] veth46c47ad: entered allmulticast mode
+👾 kernel | [ 8077.992664] veth46c47ad: entered promiscuous mode
+👾 kernel | [ 8078.250180] eth1: renamed from veth559c676
+👾 kernel | [ 8078.252871] br-1f640fda3d7c: port 7(vethec23882) entered blocking state
+👾 kernel | [ 8078.252901] br-1f640fda3d7c: port 7(vethec23882) entered disabled state
+👾 kernel | [ 8078.252916] vethec23882: entered allmulticast mode
+👾 kernel | [ 8078.252953] vethec23882: entered promiscuous mode
+👾 kernel | [ 8078.255126] br-1f640fda3d7c: port 6(veth46c47ad) entered blocking state
+👾 kernel | [ 8078.255167] br-1f640fda3d7c: port 6(veth46c47ad) entered forwarding state
+👾 kernel | [ 8078.255231] br-d1f3e4394e37: port 9(vethf41651c) entered blocking state
+👾 kernel | [ 8078.255263] br-d1f3e4394e37: port 9(vethf41651c) entered disabled state
+👾 kernel | [ 8078.255278] vethf41651c: entered allmulticast mode
+👾 kernel | [ 8078.255315] vethf41651c: entered promiscuous mode
+👾 kernel | [ 8078.340126] eth0: renamed from veth0091085
+👾 kernel | [ 8078.340719] br-1f640fda3d7c: port 5(veth9813cc5) entered blocking state
+👾 kernel | [ 8078.340751] br-1f640fda3d7c: port 5(veth9813cc5) entered forwarding state
+👾 kernel | [ 8080.622567] eth1: renamed from veth4d3d5fa
+👾 kernel | [ 8080.623304] br-1f640fda3d7c: port 8(veth48282c8) entered blocking state
+👾 kernel | [ 8080.623332] br-1f640fda3d7c: port 8(veth48282c8) entered disabled state
+👾 kernel | [ 8080.623358] veth48282c8: entered allmulticast mode
+👾 kernel | [ 8080.623486] veth48282c8: entered promiscuous mode
+👾 kernel | [ 8080.623584] br-d1f3e4394e37: port 9(vethf41651c) entered blocking state
+👾 kernel | [ 8080.623613] br-d1f3e4394e37: port 9(vethf41651c) entered forwarding state
+👾 kernel | [ 8080.624707] eth1: renamed from vethce6c87c
+👾 kernel | [ 8080.631331] br-1f640fda3d7c: port 7(vethec23882) entered blocking state
+👾 kernel | [ 8080.631363] br-1f640fda3d7c: port 7(vethec23882) entered forwarding state
+👾 kernel | [ 8080.942037] br-1f640fda3d7c: port 3(vethc2b9b37) entered disabled state
+👾 kernel | [ 8080.942377] veth7f18f2f: renamed from eth0
+👾 kernel | [ 8082.614141] br-1f640fda3d7c: port 3(vethc2b9b37) entered disabled state
+👾 kernel | [ 8082.614923] vethc2b9b37 (unregistering): left allmulticast mode
+👾 kernel | [ 8082.614949] vethc2b9b37 (unregistering): left promiscuous mode
+👾 kernel | [ 8082.614976] br-1f640fda3d7c: port 3(vethc2b9b37) entered disabled state
+👾 kernel | [ 8082.617473] eth1: renamed from veth13f9615
+👾 kernel | [ 8082.618253] br-1f640fda3d7c: port 8(veth48282c8) entered blocking state
+👾 kernel | [ 8082.618276] br-1f640fda3d7c: port 8(veth48282c8) entered forwarding state
+👾 kernel | [ 8084.140747] br-d1f3e4394e37: port 10(veth9f44cd4) entered blocking state
+👾 kernel | [ 8084.140784] br-d1f3e4394e37: port 10(veth9f44cd4) entered disabled state
+👾 kernel | [ 8084.140807] veth9f44cd4: entered allmulticast mode
+👾 kernel | [ 8084.140854] veth9f44cd4: entered promiscuous mode
+👾 kernel | [ 8084.310364] eth0: renamed from vethdcb9eeb
+👾 kernel | [ 8084.314446] br-d1f3e4394e37: port 10(veth9f44cd4) entered blocking state
+👾 kernel | [ 8084.314476] br-d1f3e4394e37: port 10(veth9f44cd4) entered forwarding state
+🌸 agent:docker | time="01-13 21:33:17" level=error msg="unable to set all bridgeports to hairpin" error="unable to get links: results may be incomplete or inconsistent"
+👾 kernel | [ 8084.528925] br-1f640fda3d7c: port 3(veth696c6aa) entered blocking state
+👾 kernel | [ 8084.528963] br-1f640fda3d7c: port 3(veth696c6aa) entered disabled state
+👾 kernel | [ 8084.528994] veth696c6aa: entered allmulticast mode
+👾 kernel | [ 8084.530027] veth696c6aa: entered promiscuous mode
+👾 kernel | [ 8084.592973] eth1: renamed from vethebed719
+👾 kernel | [ 8084.671013] br-1f640fda3d7c: port 3(veth696c6aa) entered blocking state
+👾 kernel | [ 8084.671053] br-1f640fda3d7c: port 3(veth696c6aa) entered forwarding state
+👾 kernel | [ 8084.897013] br-d1f3e4394e37: port 11(veth7ce32ea) entered blocking state
+👾 kernel | [ 8084.897060] br-d1f3e4394e37: port 11(veth7ce32ea) entered disabled state
+👾 kernel | [ 8084.897084] veth7ce32ea: entered allmulticast mode
+👾 kernel | [ 8084.897131] veth7ce32ea: entered promiscuous mode
+👾 kernel | [ 8085.253118] eth0: renamed from veth4af7150
+👾 kernel | [ 8085.254051] br-d1f3e4394e37: port 11(veth7ce32ea) entered blocking state
+👾 kernel | [ 8085.254082] br-d1f3e4394e37: port 11(veth7ce32ea) entered forwarding state
+👾 kernel | [ 8085.350675] br-1f640fda3d7c: port 9(veth160e502) entered blocking state
+👾 kernel | [ 8085.350710] br-1f640fda3d7c: port 9(veth160e502) entered disabled state
+👾 kernel | [ 8085.350727] veth160e502: entered allmulticast mode
+👾 kernel | [ 8085.350776] veth160e502: entered promiscuous mode
+👾 kernel | [ 8085.426607] eth1: renamed from vetha2bea8e
+👾 kernel | [ 8085.438723] br-1f640fda3d7c: port 9(veth160e502) entered blocking state
+👾 kernel | [ 8085.438755] br-1f640fda3d7c: port 9(veth160e502) entered forwarding state
+👾 kernel | [ 8086.335706] br-1f640fda3d7c: port 10(vethafcf843) entered blocking state
+👾 kernel | [ 8086.335744] br-1f640fda3d7c: port 10(vethafcf843) entered disabled state
+👾 kernel | [ 8086.335779] vethafcf843: entered allmulticast mode
+👾 kernel | [ 8086.335836] vethafcf843: entered promiscuous mode
+👾 kernel | [ 8086.402337] br-d1f3e4394e37: port 12(veth4878f56) entered blocking state
+👾 kernel | [ 8086.402374] br-d1f3e4394e37: port 12(veth4878f56) entered disabled state
+👾 kernel | [ 8086.402397] veth4878f56: entered allmulticast mode
+👾 kernel | [ 8086.402444] veth4878f56: entered promiscuous mode
+👾 kernel | [ 8086.457899] eth0: renamed from veth9d4b5ef
+👾 kernel | [ 8086.466443] br-1f640fda3d7c: port 10(vethafcf843) entered blocking state
+👾 kernel | [ 8086.466471] br-1f640fda3d7c: port 10(vethafcf843) entered forwarding state
+👾 kernel | [ 8086.547231] br-d1f3e4394e37: port 13(veth9ac84f7) entered blocking state
+👾 kernel | [ 8086.547271] br-d1f3e4394e37: port 13(veth9ac84f7) entered disabled state
+👾 kernel | [ 8086.547290] veth9ac84f7: entered allmulticast mode
+👾 kernel | [ 8086.547340] veth9ac84f7: entered promiscuous mode
+👾 kernel | [ 8086.585109] eth1: renamed from vethc74e08e
+👾 kernel | [ 8086.591594] br-d1f3e4394e37: port 13(veth9ac84f7) entered blocking state
+👾 kernel | [ 8086.591629] br-d1f3e4394e37: port 13(veth9ac84f7) entered forwarding state
+👾 kernel | [ 8086.594541] eth0: renamed from veth44c922c
+👾 kernel | [ 8086.595724] br-d1f3e4394e37: port 12(veth4878f56) entered blocking state
+👾 kernel | [ 8086.595751] br-d1f3e4394e37: port 12(veth4878f56) entered forwarding state
+👾 kernel | [ 8087.047928] br-1f640fda3d7c: port 11(vethc70f322) entered blocking state
+👾 kernel | [ 8087.047972] br-1f640fda3d7c: port 11(vethc70f322) entered disabled state
+👾 kernel | [ 8087.048022] vethc70f322: entered allmulticast mode
+👾 kernel | [ 8087.048091] vethc70f322: entered promiscuous mode
+👾 kernel | [ 8087.169525] eth1: renamed from vethad31555
+👾 kernel | [ 8087.183931] br-1f640fda3d7c: port 11(vethc70f322) entered blocking state
+👾 kernel | [ 8087.183963] br-1f640fda3d7c: port 11(vethc70f322) entered forwarding state
+📦 scon | time="01-14 02:42:28" level=info msg="remove forward" key="tcp:0.0.0.0:6333"
+👾 kernel | [ 8636.045964] br-1f640fda3d7c: port 2(veth366f8c4) entered disabled state
+👾 kernel | [ 8636.046037] vethfe1dfa2: renamed from eth0
+📦 scon | time="01-14 02:42:28" level=info msg="remove forward" key="tcp:[::]:6333"
+👾 kernel | [ 8636.517608] br-1f640fda3d7c: port 2(veth366f8c4) entered disabled state
+👾 kernel | [ 8636.518552] veth366f8c4 (unregistering): left allmulticast mode
+👾 kernel | [ 8636.518623] veth366f8c4 (unregistering): left promiscuous mode
+👾 kernel | [ 8636.518661] br-1f640fda3d7c: port 2(veth366f8c4) entered disabled state
+👾 kernel | [ 8636.682277] br-d1f3e4394e37: port 8(vethc8c3b5f) entered disabled state
+👾 kernel | [ 8636.682688] veth52469ec: renamed from eth0
+👾 kernel | [ 8637.257714] br-d1f3e4394e37: port 8(vethc8c3b5f) entered disabled state
+👾 kernel | [ 8637.258792] vethc8c3b5f (unregistering): left allmulticast mode
+👾 kernel | [ 8637.258815] vethc8c3b5f (unregistering): left promiscuous mode
+👾 kernel | [ 8637.258825] br-d1f3e4394e37: port 8(vethc8c3b5f) entered disabled state
+👾 kernel | [ 8637.696090] br-d1f3e4394e37: port 13(veth9ac84f7) entered disabled state
+👾 kernel | [ 8637.696459] vethc74e08e: renamed from eth1
+👾 kernel | [ 8638.243259] veth13f9615: renamed from eth1
+👾 kernel | [ 8638.243665] br-1f640fda3d7c: port 8(veth48282c8) entered disabled state
+👾 kernel | [ 8638.324203] br-d1f3e4394e37: port 13(veth9ac84f7) entered disabled state
+👾 kernel | [ 8638.331318] veth9ac84f7 (unregistering): left allmulticast mode
+👾 kernel | [ 8638.331382] veth9ac84f7 (unregistering): left promiscuous mode
+👾 kernel | [ 8638.331399] br-d1f3e4394e37: port 13(veth9ac84f7) entered disabled state
+👾 kernel | [ 8638.335791] br-d1f3e4394e37: port 12(veth4878f56) entered disabled state
+👾 kernel | [ 8638.336088] veth44c922c: renamed from eth0
+👾 kernel | [ 8638.428292] veth3e11ba1: renamed from eth1
+👾 kernel | [ 8638.428740] br-d1f3e4394e37: port 6(vethe2a5ac8) entered disabled state
+👾 kernel | [ 8638.440739] br-1f640fda3d7c: port 8(veth48282c8) entered disabled state
+👾 kernel | [ 8638.444315] veth48282c8 (unregistering): left allmulticast mode
+👾 kernel | [ 8638.444397] veth48282c8 (unregistering): left promiscuous mode
+👾 kernel | [ 8638.448019] br-1f640fda3d7c: port 8(veth48282c8) entered disabled state
+👾 kernel | [ 8638.456716] br-1f640fda3d7c: port 10(vethafcf843) entered disabled state
+👾 kernel | [ 8638.456799] veth9d4b5ef: renamed from eth0
+👾 kernel | [ 8638.872020] br-d1f3e4394e37: port 12(veth4878f56) entered disabled state
+👾 kernel | [ 8638.872545] veth4878f56 (unregistering): left allmulticast mode
+👾 kernel | [ 8638.872562] veth4878f56 (unregistering): left promiscuous mode
+👾 kernel | [ 8638.872572] br-d1f3e4394e37: port 12(veth4878f56) entered disabled state
+👾 kernel | [ 8640.363674] br-d1f3e4394e37: port 6(vethe2a5ac8) entered disabled state
+👾 kernel | [ 8640.364610] vethe2a5ac8 (unregistering): left allmulticast mode
+👾 kernel | [ 8640.364647] vethe2a5ac8 (unregistering): left promiscuous mode
+👾 kernel | [ 8640.364669] br-d1f3e4394e37: port 6(vethe2a5ac8) entered disabled state
+👾 kernel | [ 8640.553365] br-1f640fda3d7c: port 10(vethafcf843) entered disabled state
+👾 kernel | [ 8640.554588] vethafcf843 (unregistering): left allmulticast mode
+👾 kernel | [ 8640.554613] vethafcf843 (unregistering): left promiscuous mode
+👾 kernel | [ 8640.554627] br-1f640fda3d7c: port 10(vethafcf843) entered disabled state
+👾 kernel | [ 8640.713688] br-1f640fda3d7c: port 11(vethc70f322) entered disabled state
+👾 kernel | [ 8640.713775] vethad31555: renamed from eth1
+👾 kernel | [ 8641.445178] br-1f640fda3d7c: port 1(veth0c65c53) entered disabled state
+👾 kernel | [ 8641.445276] veth99a3876: renamed from eth0
+👾 kernel | [ 8641.713533] br-1f640fda3d7c: port 11(vethc70f322) entered disabled state
+👾 kernel | [ 8641.714718] vethc70f322 (unregistering): left allmulticast mode
+👾 kernel | [ 8641.714733] vethc70f322 (unregistering): left promiscuous mode
+👾 kernel | [ 8641.714744] br-1f640fda3d7c: port 11(vethc70f322) entered disabled state
+👾 kernel | [ 8642.236911] br-1f640fda3d7c: port 1(veth0c65c53) entered disabled state
+👾 kernel | [ 8642.237637] veth0c65c53 (unregistering): left allmulticast mode
+👾 kernel | [ 8642.237661] veth0c65c53 (unregistering): left promiscuous mode
+👾 kernel | [ 8642.237678] br-1f640fda3d7c: port 1(veth0c65c53) entered disabled state
+👾 kernel | [ 8644.010194] br-d1f3e4394e37: port 11(veth7ce32ea) entered disabled state
+👾 kernel | [ 8644.010326] veth4af7150: renamed from eth0
+👾 kernel | [ 8645.062185] br-d1f3e4394e37: port 11(veth7ce32ea) entered disabled state
+👾 kernel | [ 8645.062917] veth7ce32ea (unregistering): left allmulticast mode
+👾 kernel | [ 8645.062951] veth7ce32ea (unregistering): left promiscuous mode
+👾 kernel | [ 8645.062973] br-d1f3e4394e37: port 11(veth7ce32ea) entered disabled state
+👾 kernel | [ 8645.569366] br-1f640fda3d7c: port 9(veth160e502) entered disabled state
+👾 kernel | [ 8645.569567] vetha2bea8e: renamed from eth1
+👾 kernel | [ 8645.985076] br-1f640fda3d7c: port 9(veth160e502) entered disabled state
+👾 kernel | [ 8645.985675] veth160e502 (unregistering): left allmulticast mode
+👾 kernel | [ 8645.985701] veth160e502 (unregistering): left promiscuous mode
+👾 kernel | [ 8645.985722] br-1f640fda3d7c: port 9(veth160e502) entered disabled state
+👾 kernel | [ 8646.323237] br-d1f3e4394e37: port 5(vethb5ca815) entered disabled state
+👾 kernel | [ 8646.323337] vetha405749: renamed from eth0
+👾 kernel | [ 8646.503602] br-d1f3e4394e37: port 9(vethf41651c) entered disabled state
+👾 kernel | [ 8646.503686] veth4d3d5fa: renamed from eth1
+👾 kernel | [ 8646.665256] br-d1f3e4394e37: port 7(vetheba2816) entered disabled state
+👾 kernel | [ 8646.665374] veth18dead0: renamed from eth0
+👾 kernel | [ 8646.812071] br-d1f3e4394e37: port 5(vethb5ca815) entered disabled state
+👾 kernel | [ 8646.813436] vethb5ca815 (unregistering): left allmulticast mode
+👾 kernel | [ 8646.813460] vethb5ca815 (unregistering): left promiscuous mode
+👾 kernel | [ 8646.813472] br-d1f3e4394e37: port 5(vethb5ca815) entered disabled state
+👾 kernel | [ 8646.828469] br-d1f3e4394e37: port 10(veth9f44cd4) entered disabled state
+👾 kernel | [ 8646.828657] vethdcb9eeb: renamed from eth0
+👾 kernel | [ 8646.851879] br-d1f3e4394e37: port 9(vethf41651c) entered disabled state
+👾 kernel | [ 8646.852659] vethf41651c (unregistering): left allmulticast mode
+👾 kernel | [ 8646.852687] vethf41651c (unregistering): left promiscuous mode
+👾 kernel | [ 8646.852708] br-d1f3e4394e37: port 9(vethf41651c) entered disabled state
+👾 kernel | [ 8646.894939] br-d1f3e4394e37: port 7(vetheba2816) entered disabled state
+👾 kernel | [ 8646.895639] vetheba2816 (unregistering): left allmulticast mode
+👾 kernel | [ 8646.895667] vetheba2816 (unregistering): left promiscuous mode
+👾 kernel | [ 8646.895692] br-d1f3e4394e37: port 7(vetheba2816) entered disabled state
+👾 kernel | [ 8646.905053] br-1f640fda3d7c: port 6(veth46c47ad) entered disabled state
+👾 kernel | [ 8646.905161] veth559c676: renamed from eth1
+👾 kernel | [ 8646.971843] br-d1f3e4394e37: port 10(veth9f44cd4) entered disabled state
+👾 kernel | [ 8646.972726] veth9f44cd4 (unregistering): left allmulticast mode
+👾 kernel | [ 8646.972753] veth9f44cd4 (unregistering): left promiscuous mode
+👾 kernel | [ 8646.972768] br-d1f3e4394e37: port 10(veth9f44cd4) entered disabled state
+👾 kernel | [ 8646.974121] br-1f640fda3d7c: port 7(vethec23882) entered disabled state
+👾 kernel | [ 8646.974184] vethce6c87c: renamed from eth1
+👾 kernel | [ 8647.007992] br-1f640fda3d7c: port 6(veth46c47ad) entered disabled state
+👾 kernel | [ 8647.008773] veth46c47ad (unregistering): left allmulticast mode
+👾 kernel | [ 8647.008820] veth46c47ad (unregistering): left promiscuous mode
+👾 kernel | [ 8647.008835] br-1f640fda3d7c: port 6(veth46c47ad) entered disabled state
+👾 kernel | [ 8647.010971] br-1f640fda3d7c: port 4(veth0040701) entered disabled state
+👾 kernel | [ 8647.011142] vethe7b735c: renamed from eth0
+👾 kernel | [ 8647.011935] br-1f640fda3d7c: port 3(veth696c6aa) entered disabled state
+👾 kernel | [ 8647.065122] br-1f640fda3d7c: port 7(vethec23882) entered disabled state
+👾 kernel | [ 8647.065879] vethec23882 (unregistering): left allmulticast mode
+👾 kernel | [ 8647.065927] vethec23882 (unregistering): left promiscuous mode
+👾 kernel | [ 8647.065944] br-1f640fda3d7c: port 7(vethec23882) entered disabled state
+👾 kernel | [ 8647.066254] vethebed719: renamed from eth1
+👾 kernel | [ 8647.121035] br-1f640fda3d7c: port 4(veth0040701) entered disabled state
+👾 kernel | [ 8647.121647] veth0040701 (unregistering): left allmulticast mode
+👾 kernel | [ 8647.121675] veth0040701 (unregistering): left promiscuous mode
+👾 kernel | [ 8647.121704] br-1f640fda3d7c: port 4(veth0040701) entered disabled state
+👾 kernel | [ 8647.370271] br-1f640fda3d7c: port 3(veth696c6aa) entered disabled state
+👾 kernel | [ 8647.371280] veth696c6aa (unregistering): left allmulticast mode
+👾 kernel | [ 8647.371316] veth696c6aa (unregistering): left promiscuous mode
+👾 kernel | [ 8647.371378] br-1f640fda3d7c: port 3(veth696c6aa) entered disabled state
+👾 kernel | [ 8648.569954] br-1f640fda3d7c: port 5(veth9813cc5) entered disabled state
+👾 kernel | [ 8648.570059] veth0091085: renamed from eth0
+👾 kernel | [ 8648.600913] br-1f640fda3d7c: port 5(veth9813cc5) entered disabled state
+👾 kernel | [ 8648.601481] veth9813cc5 (unregistering): left allmulticast mode
+👾 kernel | [ 8648.601527] veth9813cc5 (unregistering): left promiscuous mode
+👾 kernel | [ 8648.601542] br-1f640fda3d7c: port 5(veth9813cc5) entered disabled state
+🌸 agent:docker | time="01-13 21:42:41" level=info msg="removing network" config="{192.168.147.0/24 192.168.147.1 invalid Prefix invalid IP br-1f640fda3d7c}" name=omega_default
+👾 kernel | [ 8678.794727] docker0: port 1(veth0ced42e) entered blocking state
+👾 kernel | [ 8678.794765] docker0: port 1(veth0ced42e) entered disabled state
+👾 kernel | [ 8678.794783] veth0ced42e: entered allmulticast mode
+👾 kernel | [ 8678.794871] veth0ced42e: entered promiscuous mode
+👾 kernel | [ 8678.990212] eth0: renamed from veth12bd97c
+👾 kernel | [ 8678.990772] docker0: port 1(veth0ced42e) entered blocking state
+👾 kernel | [ 8678.990850] docker0: port 1(veth0ced42e) entered forwarding state
+👾 kernel | [ 8840.914248] docker0: port 1(veth0ced42e) entered disabled state
+👾 kernel | [ 8840.914414] veth12bd97c: renamed from eth0
+👾 kernel | [ 8840.986397] docker0: port 1(veth0ced42e) entered disabled state
+👾 kernel | [ 8840.987054] veth0ced42e (unregistering): left allmulticast mode
+👾 kernel | [ 8840.987087] veth0ced42e (unregistering): left promiscuous mode
+👾 kernel | [ 8840.987104] docker0: port 1(veth0ced42e) entered disabled state
+👾 kernel | [ 8841.321062] docker0: port 1(veth49abba5) entered blocking state
+👾 kernel | [ 8841.321104] docker0: port 1(veth49abba5) entered disabled state
+👾 kernel | [ 8841.321152] veth49abba5: entered allmulticast mode
+👾 kernel | [ 8841.321211] veth49abba5: entered promiscuous mode
+👾 kernel | [ 8841.424156] eth0: renamed from vethcf2233a
+👾 kernel | [ 8841.424611] docker0: port 1(veth49abba5) entered blocking state
+👾 kernel | [ 8841.424659] docker0: port 1(veth49abba5) entered forwarding state
+👾 kernel | [ 9200.275376] docker0: port 1(veth49abba5) entered disabled state
+👾 kernel | [ 9200.275505] vethcf2233a: renamed from eth0
+👾 kernel | [ 9201.137754] docker0: port 1(veth49abba5) entered disabled state
+👾 kernel | [ 9201.143546] veth49abba5 (unregistering): left allmulticast mode
+👾 kernel | [ 9201.143576] veth49abba5 (unregistering): left promiscuous mode
+👾 kernel | [ 9201.143606] docker0: port 1(veth49abba5) entered disabled state
+👾 kernel | [ 9215.360849] br-0023ddea276e: port 1(veth9088918) entered blocking state
+👾 kernel | [ 9215.360896] br-0023ddea276e: port 1(veth9088918) entered disabled state
+👾 kernel | [ 9215.360921] veth9088918: entered allmulticast mode
+👾 kernel | [ 9215.360963] veth9088918: entered promiscuous mode
+👾 kernel | [ 9215.583964] eth0: renamed from vethb3accc2
+👾 kernel | [ 9215.584408] br-0023ddea276e: port 1(veth9088918) entered blocking state
+👾 kernel | [ 9215.584432] br-0023ddea276e: port 1(veth9088918) entered forwarding state
+🌸 agent:docker | time="01-13 21:52:08" level=info msg="adding network" config="{192.168.147.0/24 192.168.147.1 invalid Prefix invalid IP br-0023ddea276e}" name=omega_default
+👾 kernel | [ 9215.629312] br-d1f3e4394e37: port 5(vethe62891d) entered blocking state
+👾 kernel | [ 9215.629350] br-d1f3e4394e37: port 5(vethe62891d) entered disabled state
+👾 kernel | [ 9215.629378] vethe62891d: entered allmulticast mode
+👾 kernel | [ 9215.630082] vethe62891d: entered promiscuous mode
+👾 kernel | [ 9215.846804] br-0023ddea276e: port 2(vethb0f4bd7) entered blocking state
+👾 kernel | [ 9215.846840] br-0023ddea276e: port 2(vethb0f4bd7) entered disabled state
+👾 kernel | [ 9215.846859] vethb0f4bd7: entered allmulticast mode
+👾 kernel | [ 9215.846913] vethb0f4bd7: entered promiscuous mode
+👾 kernel | [ 9215.849087] br-d1f3e4394e37: port 6(veth7e80829) entered blocking state
+👾 kernel | [ 9215.849118] br-d1f3e4394e37: port 6(veth7e80829) entered disabled state
+👾 kernel | [ 9215.849137] veth7e80829: entered allmulticast mode
+👾 kernel | [ 9215.849266] veth7e80829: entered promiscuous mode
+👾 kernel | [ 9215.862371] eth0: renamed from veth4e187ba
+👾 kernel | [ 9215.864905] br-d1f3e4394e37: port 5(vethe62891d) entered blocking state
+👾 kernel | [ 9215.864937] br-d1f3e4394e37: port 5(vethe62891d) entered forwarding state
+👾 kernel | [ 9216.527121] br-0023ddea276e: port 3(vetheb20425) entered blocking state
+👾 kernel | [ 9216.527158] br-0023ddea276e: port 3(vetheb20425) entered disabled state
+👾 kernel | [ 9216.527179] vetheb20425: entered allmulticast mode
+👾 kernel | [ 9216.527283] vetheb20425: entered promiscuous mode
+👾 kernel | [ 9216.545148] br-d1f3e4394e37: port 7(veth281e2a1) entered blocking state
+👾 kernel | [ 9216.545198] br-d1f3e4394e37: port 7(veth281e2a1) entered disabled state
+👾 kernel | [ 9216.545224] veth281e2a1: entered allmulticast mode
+👾 kernel | [ 9216.545286] veth281e2a1: entered promiscuous mode
+👾 kernel | [ 9216.578398] eth0: renamed from veth878d292
+👾 kernel | [ 9216.582128] br-0023ddea276e: port 2(vethb0f4bd7) entered blocking state
+👾 kernel | [ 9216.582171] br-0023ddea276e: port 2(vethb0f4bd7) entered forwarding state
+👾 kernel | [ 9216.582374] eth0: renamed from vethcf2497f
+👾 kernel | [ 9216.583105] br-d1f3e4394e37: port 6(veth7e80829) entered blocking state
+👾 kernel | [ 9216.583136] br-d1f3e4394e37: port 6(veth7e80829) entered forwarding state
+👾 kernel | [ 9216.663578] br-0023ddea276e: port 1(veth9088918) entered disabled state
+👾 kernel | [ 9216.663725] vethb3accc2: renamed from eth0
+👾 kernel | [ 9216.685148] br-0023ddea276e: port 4(vethe8f9085) entered blocking state
+👾 kernel | [ 9216.685187] br-0023ddea276e: port 4(vethe8f9085) entered disabled state
+👾 kernel | [ 9216.685212] vethe8f9085: entered allmulticast mode
+👾 kernel | [ 9216.685265] vethe8f9085: entered promiscuous mode
+👾 kernel | [ 9216.690505] br-d1f3e4394e37: port 8(veth3d9994a) entered blocking state
+👾 kernel | [ 9216.690585] br-d1f3e4394e37: port 8(veth3d9994a) entered disabled state
+👾 kernel | [ 9216.690610] veth3d9994a: entered allmulticast mode
+👾 kernel | [ 9216.690667] veth3d9994a: entered promiscuous mode
+👾 kernel | [ 9216.725801] eth0: renamed from vethc98c62e
+👾 kernel | [ 9216.726464] br-0023ddea276e: port 3(vetheb20425) entered blocking state
+👾 kernel | [ 9216.726517] br-0023ddea276e: port 3(vetheb20425) entered forwarding state
+👾 kernel | [ 9216.762257] eth0: renamed from vethe1b7f39
+👾 kernel | [ 9216.762789] br-d1f3e4394e37: port 7(veth281e2a1) entered blocking state
+👾 kernel | [ 9216.762817] br-d1f3e4394e37: port 7(veth281e2a1) entered forwarding state
+👾 kernel | [ 9216.812766] br-0023ddea276e: port 1(veth9088918) entered disabled state
+👾 kernel | [ 9216.813316] veth9088918 (unregistering): left allmulticast mode
+👾 kernel | [ 9216.813343] veth9088918 (unregistering): left promiscuous mode
+👾 kernel | [ 9216.813398] br-0023ddea276e: port 1(veth9088918) entered disabled state
+👾 kernel | [ 9216.854192] eth0: renamed from veth8f3908b
+👾 kernel | [ 9216.854785] br-0023ddea276e: port 4(vethe8f9085) entered blocking state
+👾 kernel | [ 9216.854819] br-0023ddea276e: port 4(vethe8f9085) entered forwarding state
+👾 kernel | [ 9216.873972] eth0: renamed from veth5d47b7b
+👾 kernel | [ 9216.874556] br-d1f3e4394e37: port 8(veth3d9994a) entered blocking state
+👾 kernel | [ 9216.874586] br-d1f3e4394e37: port 8(veth3d9994a) entered forwarding state
+👾 kernel | [ 9216.955822] br-0023ddea276e: port 1(veth8b5fbba) entered blocking state
+👾 kernel | [ 9216.955853] br-0023ddea276e: port 1(veth8b5fbba) entered disabled state
+👾 kernel | [ 9216.955873] veth8b5fbba: entered allmulticast mode
+👾 kernel | [ 9216.955922] veth8b5fbba: entered promiscuous mode
+📦 scon | time="01-14 02:52:09" level=info msg="add forward" container=docker spec="tcp:0.0.0.0:6333"
+📦 scon | time="01-14 02:52:09" level=info msg="add forward" container=docker spec="tcp:[::]:6333"
+👾 kernel | [ 9217.001665] br-d1f3e4394e37: port 9(vethba13d78) entered blocking state
+👾 kernel | [ 9217.001701] br-d1f3e4394e37: port 9(vethba13d78) entered disabled state
+👾 kernel | [ 9217.001734] vethba13d78: entered allmulticast mode
+👾 kernel | [ 9217.001811] vethba13d78: entered promiscuous mode
+👾 kernel | [ 9217.046649] eth1: renamed from veth37d0d7d
+👾 kernel | [ 9217.047960] br-d1f3e4394e37: port 9(vethba13d78) entered blocking state
+👾 kernel | [ 9217.047994] br-d1f3e4394e37: port 9(vethba13d78) entered forwarding state
+👾 kernel | [ 9217.114078] eth1: renamed from vethf0d0a5a
+👾 kernel | [ 9217.117328] br-0023ddea276e: port 1(veth8b5fbba) entered blocking state
+👾 kernel | [ 9217.117371] br-0023ddea276e: port 1(veth8b5fbba) entered forwarding state
+👾 kernel | [ 9217.120270] br-0023ddea276e: port 5(vethe3a5c6c) entered blocking state
+👾 kernel | [ 9217.120307] br-0023ddea276e: port 5(vethe3a5c6c) entered disabled state
+👾 kernel | [ 9217.120454] vethe3a5c6c: entered allmulticast mode
+👾 kernel | [ 9217.120609] vethe3a5c6c: entered promiscuous mode
+👾 kernel | [ 9217.463607] eth1: renamed from veth2baabe2
+👾 kernel | [ 9217.465296] br-0023ddea276e: port 5(vethe3a5c6c) entered blocking state
+👾 kernel | [ 9217.465320] br-0023ddea276e: port 5(vethe3a5c6c) entered forwarding state
+👾 kernel | [ 9217.465812] br-0023ddea276e: port 6(veth01ab908) entered blocking state
+👾 kernel | [ 9217.465860] br-0023ddea276e: port 6(veth01ab908) entered disabled state
+👾 kernel | [ 9217.465894] veth01ab908: entered allmulticast mode
+👾 kernel | [ 9217.465949] veth01ab908: entered promiscuous mode
+👾 kernel | [ 9217.466112] br-d1f3e4394e37: port 10(vethde10747) entered blocking state
+👾 kernel | [ 9217.466150] br-d1f3e4394e37: port 10(vethde10747) entered disabled state
+👾 kernel | [ 9217.466180] vethde10747: entered allmulticast mode
+👾 kernel | [ 9217.466236] vethde10747: entered promiscuous mode
+👾 kernel | [ 9218.916819] eth1: renamed from veth1d986d8
+👾 kernel | [ 9218.917201] br-0023ddea276e: port 7(veth3b74e83) entered blocking state
+👾 kernel | [ 9218.917222] br-0023ddea276e: port 7(veth3b74e83) entered disabled state
+👾 kernel | [ 9218.917240] veth3b74e83: entered allmulticast mode
+👾 kernel | [ 9218.917281] veth3b74e83: entered promiscuous mode
+👾 kernel | [ 9218.919307] br-0023ddea276e: port 6(veth01ab908) entered blocking state
+👾 kernel | [ 9218.919345] br-0023ddea276e: port 6(veth01ab908) entered forwarding state
+👾 kernel | [ 9219.117648] eth0: renamed from vethfdac852
+👾 kernel | [ 9219.118967] br-d1f3e4394e37: port 10(vethde10747) entered blocking state
+👾 kernel | [ 9219.119006] br-d1f3e4394e37: port 10(vethde10747) entered forwarding state
+👾 kernel | [ 9219.280571] eth1: renamed from vetha361ffa
+👾 kernel | [ 9219.290764] br-0023ddea276e: port 7(veth3b74e83) entered blocking state
+👾 kernel | [ 9219.290805] br-0023ddea276e: port 7(veth3b74e83) entered forwarding state
+👾 kernel | [ 9219.293653] br-0023ddea276e: port 8(veth9c2900e) entered blocking state
+👾 kernel | [ 9219.293689] br-0023ddea276e: port 8(veth9c2900e) entered disabled state
+👾 kernel | [ 9219.293723] veth9c2900e: entered allmulticast mode
+👾 kernel | [ 9219.293781] veth9c2900e: entered promiscuous mode
+👾 kernel | [ 9219.885042] br-0023ddea276e: port 9(vethe33f6da) entered blocking state
+👾 kernel | [ 9219.885072] br-0023ddea276e: port 9(vethe33f6da) entered disabled state
+👾 kernel | [ 9219.885103] vethe33f6da: entered allmulticast mode
+👾 kernel | [ 9219.885158] vethe33f6da: entered promiscuous mode
+👾 kernel | [ 9219.894972] eth0: renamed from veth5c4bc29
+👾 kernel | [ 9219.895496] br-0023ddea276e: port 8(veth9c2900e) entered blocking state
+👾 kernel | [ 9219.895521] br-0023ddea276e: port 8(veth9c2900e) entered forwarding state
+👾 kernel | [ 9220.273030] eth1: renamed from vethdc605ae
+👾 kernel | [ 9220.298539] br-0023ddea276e: port 9(vethe33f6da) entered blocking state
+👾 kernel | [ 9220.302671] br-0023ddea276e: port 9(vethe33f6da) entered forwarding state
+👾 kernel | [ 9220.463356] br-d1f3e4394e37: port 11(veth2efba04) entered blocking state
+👾 kernel | [ 9220.463392] br-d1f3e4394e37: port 11(veth2efba04) entered disabled state
+👾 kernel | [ 9220.463434] veth2efba04: entered allmulticast mode
+👾 kernel | [ 9220.463483] veth2efba04: entered promiscuous mode
+👾 kernel | [ 9220.607986] eth1: renamed from veth3c154ac
+👾 kernel | [ 9220.614010] br-d1f3e4394e37: port 11(veth2efba04) entered blocking state
+👾 kernel | [ 9220.614045] br-d1f3e4394e37: port 11(veth2efba04) entered forwarding state
+👾 kernel | [ 9221.646426] br-d1f3e4394e37: port 12(veth38580bf) entered blocking state
+👾 kernel | [ 9221.646464] br-d1f3e4394e37: port 12(veth38580bf) entered disabled state
+👾 kernel | [ 9221.646484] veth38580bf: entered allmulticast mode
+👾 kernel | [ 9221.646530] veth38580bf: entered promiscuous mode
+👾 kernel | [ 9221.733302] br-0023ddea276e: port 10(veth5b7518c) entered blocking state
+👾 kernel | [ 9221.733333] br-0023ddea276e: port 10(veth5b7518c) entered disabled state
+👾 kernel | [ 9221.733351] veth5b7518c: entered allmulticast mode
+👾 kernel | [ 9221.733420] veth5b7518c: entered promiscuous mode
+👾 kernel | [ 9221.755509] eth0: renamed from veth4e67922
+👾 kernel | [ 9221.756500] br-d1f3e4394e37: port 12(veth38580bf) entered blocking state
+👾 kernel | [ 9221.756521] br-d1f3e4394e37: port 12(veth38580bf) entered forwarding state
+👾 kernel | [ 9221.992660] br-0023ddea276e: port 11(vethb87fee6) entered blocking state
+👾 kernel | [ 9221.992700] br-0023ddea276e: port 11(vethb87fee6) entered disabled state
+👾 kernel | [ 9221.992722] vethb87fee6: entered allmulticast mode
+🌸 agent:docker | time="01-13 21:52:14" level=error msg="failed to refresh networks" error="list links: results may be incomplete or inconsistent"
+👾 kernel | [ 9221.992843] vethb87fee6: entered promiscuous mode
+🌸 agent:docker | time="01-13 21:52:14" level=error msg="unable to set all bridgeports to hairpin" error="unable to get links: results may be incomplete or inconsistent"
+👾 kernel | [ 9221.997954] eth0: renamed from vethbf32232
+👾 kernel | [ 9221.999640] br-0023ddea276e: port 10(veth5b7518c) entered blocking state
+👾 kernel | [ 9221.999666] br-0023ddea276e: port 10(veth5b7518c) entered forwarding state
+👾 kernel | [ 9222.240817] eth1: renamed from veth34037c5
+👾 kernel | [ 9222.243149] br-0023ddea276e: port 11(vethb87fee6) entered blocking state
+👾 kernel | [ 9222.243173] br-0023ddea276e: port 11(vethb87fee6) entered forwarding state
+👾 kernel | [ 9222.451000] br-d1f3e4394e37: port 13(veth301a9f1) entered blocking state
+👾 kernel | [ 9222.451036] br-d1f3e4394e37: port 13(veth301a9f1) entered disabled state
+👾 kernel | [ 9222.451058] veth301a9f1: entered allmulticast mode
+👾 kernel | [ 9222.451113] veth301a9f1: entered promiscuous mode
+🌸 agent:docker | time="01-13 21:52:15" level=error msg="unable to set all bridgeports to hairpin" error="unable to get links: results may be incomplete or inconsistent"
+👾 kernel | [ 9222.545431] eth1: renamed from veth791eda0
+👾 kernel | [ 9222.546982] br-d1f3e4394e37: port 13(veth301a9f1) entered blocking state
+👾 kernel | [ 9222.547008] br-d1f3e4394e37: port 13(veth301a9f1) entered forwarding state
+🌲 vmgr | time="01-13 21:54:28" level=error msg="TCP forward [162.159.140.245:443] create endpoint failed: connection was refused"
+👾 kernel | [12262.642467] br-d1f3e4394e37: port 14(veth741e2d3) entered blocking state
+👾 kernel | [12262.642532] br-d1f3e4394e37: port 14(veth741e2d3) entered disabled state
+👾 kernel | [12262.642557] veth741e2d3: entered allmulticast mode
+👾 kernel | [12262.642604] veth741e2d3: entered promiscuous mode
+👾 kernel | [12262.749325] eth0: renamed from vetha41a121
+👾 kernel | [12262.750210] br-d1f3e4394e37: port 14(veth741e2d3) entered blocking state
+👾 kernel | [12262.750240] br-d1f3e4394e37: port 14(veth741e2d3) entered forwarding state
+👾 kernel | [12262.975420] br-0023ddea276e: port 12(veth9cc0449) entered blocking state
+👾 kernel | [12262.975455] br-0023ddea276e: port 12(veth9cc0449) entered disabled state
+👾 kernel | [12262.975475] veth9cc0449: entered allmulticast mode
+👾 kernel | [12262.975603] veth9cc0449: entered promiscuous mode
+👾 kernel | [12262.999636] eth1: renamed from veth99b296d
+👾 kernel | [12263.000391] br-0023ddea276e: port 12(veth9cc0449) entered blocking state
+👾 kernel | [12263.000565] br-0023ddea276e: port 12(veth9cc0449) entered forwarding state
+👾 kernel | [12263.846994] br-d1f3e4394e37: port 14(veth741e2d3) entered disabled state
+👾 kernel | [12263.847076] vetha41a121: renamed from eth0
+👾 kernel | [12263.918665] br-d1f3e4394e37: port 14(veth741e2d3) entered disabled state
+👾 kernel | [12263.919751] veth741e2d3 (unregistering): left allmulticast mode
+👾 kernel | [12263.919780] veth741e2d3 (unregistering): left promiscuous mode
+👾 kernel | [12263.919805] br-d1f3e4394e37: port 14(veth741e2d3) entered disabled state
+👾 kernel | [12263.952608] br-0023ddea276e: port 12(veth9cc0449) entered disabled state
+👾 kernel | [12263.952691] veth99b296d: renamed from eth1
+👾 kernel | [12263.987927] br-0023ddea276e: port 12(veth9cc0449) entered disabled state
+👾 kernel | [12263.988773] veth9cc0449 (unregistering): left allmulticast mode
+👾 kernel | [12263.988806] veth9cc0449 (unregistering): left promiscuous mode
+👾 kernel | [12263.988820] br-0023ddea276e: port 12(veth9cc0449) entered disabled state
+👾 kernel | [12282.445077] br-d1f3e4394e37: port 14(vethf82a11b) entered blocking state
+👾 kernel | [12282.445133] br-d1f3e4394e37: port 14(vethf82a11b) entered disabled state
+👾 kernel | [12282.445182] vethf82a11b: entered allmulticast mode
+👾 kernel | [12282.445251] vethf82a11b: entered promiscuous mode
+👾 kernel | [12282.618384] eth0: renamed from veth65d769b
+👾 kernel | [12282.619051] br-d1f3e4394e37: port 14(vethf82a11b) entered blocking state
+👾 kernel | [12282.619107] br-d1f3e4394e37: port 14(vethf82a11b) entered forwarding state
+👾 kernel | [12282.701453] br-0023ddea276e: port 12(veth2b5a7b3) entered blocking state
+👾 kernel | [12282.701485] br-0023ddea276e: port 12(veth2b5a7b3) entered disabled state
+👾 kernel | [12282.701509] veth2b5a7b3: entered allmulticast mode
+👾 kernel | [12282.701561] veth2b5a7b3: entered promiscuous mode
+👾 kernel | [12282.736124] eth1: renamed from veth1e2066a
+👾 kernel | [12282.736977] br-0023ddea276e: port 12(veth2b5a7b3) entered blocking state
+👾 kernel | [12282.737040] br-0023ddea276e: port 12(veth2b5a7b3) entered forwarding state
+👾 kernel | [12296.967205] veth65d769b: renamed from eth0
+👾 kernel | [12296.967745] br-d1f3e4394e37: port 14(vethf82a11b) entered disabled state
+👾 kernel | [12297.007652] br-d1f3e4394e37: port 14(vethf82a11b) entered disabled state
+👾 kernel | [12297.008675] vethf82a11b (unregistering): left allmulticast mode
+👾 kernel | [12297.008713] vethf82a11b (unregistering): left promiscuous mode
+👾 kernel | [12297.008731] br-d1f3e4394e37: port 14(vethf82a11b) entered disabled state
+👾 kernel | [12297.045404] br-0023ddea276e: port 12(veth2b5a7b3) entered disabled state
+👾 kernel | [12297.045576] veth1e2066a: renamed from eth1
+👾 kernel | [12297.077608] br-0023ddea276e: port 12(veth2b5a7b3) entered disabled state
+👾 kernel | [12297.078112] veth2b5a7b3 (unregistering): left allmulticast mode
+👾 kernel | [12297.078138] veth2b5a7b3 (unregistering): left promiscuous mode
+👾 kernel | [12297.078152] br-0023ddea276e: port 12(veth2b5a7b3) entered disabled state
+👾 kernel | [13373.000696] br-dd78b5d9f51d: port 1(veth6735fa2) entered blocking state
+👾 kernel | [13373.000733] br-dd78b5d9f51d: port 1(veth6735fa2) entered disabled state
+👾 kernel | [13373.000762] veth6735fa2: entered allmulticast mode
+👾 kernel | [13373.000805] veth6735fa2: entered promiscuous mode
+👾 kernel | [13373.274397] br-dd78b5d9f51d: port 2(vethc7cb1bd) entered blocking state
+👾 kernel | [13373.274430] br-dd78b5d9f51d: port 2(vethc7cb1bd) entered disabled state
+👾 kernel | [13373.274452] vethc7cb1bd: entered allmulticast mode
+👾 kernel | [13373.274492] vethc7cb1bd: entered promiscuous mode
+👾 kernel | [13373.304096] eth0: renamed from veth3055819
+👾 kernel | [13373.304679] br-dd78b5d9f51d: port 1(veth6735fa2) entered blocking state
+👾 kernel | [13373.304722] br-dd78b5d9f51d: port 1(veth6735fa2) entered forwarding state
+👾 kernel | [13373.398948] eth0: renamed from vethcca96b9
+👾 kernel | [13373.399559] br-dd78b5d9f51d: port 2(vethc7cb1bd) entered blocking state
+👾 kernel | [13373.399591] br-dd78b5d9f51d: port 2(vethc7cb1bd) entered forwarding state
+👾 kernel | [13373.449695] br-d1f3e4394e37: port 14(veth3f7bb9e) entered blocking state
+👾 kernel | [13373.449735] br-d1f3e4394e37: port 14(veth3f7bb9e) entered disabled state
+👾 kernel | [13373.449757] veth3f7bb9e: entered allmulticast mode
+👾 kernel | [13373.449806] veth3f7bb9e: entered promiscuous mode
+🌸 agent:docker | time="01-13 23:01:26" level=error msg="failed to refresh networks" error="list links: results may be incomplete or inconsistent"
+👾 kernel | [13373.812887] eth1: renamed from veth0b3e32b
+👾 kernel | [13373.813813] br-d1f3e4394e37: port 14(veth3f7bb9e) entered blocking state
+👾 kernel | [13373.813843] br-d1f3e4394e37: port 14(veth3f7bb9e) entered forwarding state
+🌸 agent:docker | time="01-13 23:01:26" level=info msg="adding network" config="{192.168.148.0/24 192.168.148.1 invalid Prefix invalid IP br-dd78b5d9f51d}" name=event-agent_default
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection reset by peer"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.11.34:443] create endpoint failed: connection reset by peer"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.11.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.11.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.11.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.11.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.11.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.11.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.11.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.11.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.11.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.11.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.11.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.11.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.11.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.11.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection reset by peer"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.11.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection reset by peer"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection reset by peer"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.11.34:443] create endpoint failed: connection reset by peer"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection reset by peer"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.11.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection reset by peer"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection reset by peer"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.11.34:443] create endpoint failed: connection reset by peer"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection reset by peer"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.11.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.11.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.11.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection reset by peer"
+👾 kernel | [13374.566916] br-dd78b5d9f51d: port 3(veth6f24e75) entered blocking state
+👾 kernel | [13374.566951] br-dd78b5d9f51d: port 3(veth6f24e75) entered disabled state
+👾 kernel | [13374.567037] veth6f24e75: entered allmulticast mode
+👾 kernel | [13374.567108] veth6f24e75: entered promiscuous mode
+👾 kernel | [13374.641623] eth0: renamed from veth1f47954
+👾 kernel | [13374.642049] br-dd78b5d9f51d: port 3(veth6f24e75) entered blocking state
+👾 kernel | [13374.642072] br-dd78b5d9f51d: port 3(veth6f24e75) entered forwarding state
+👾 kernel | [13374.723557] br-d1f3e4394e37: port 15(vethefa6155) entered blocking state
+👾 kernel | [13374.723650] br-d1f3e4394e37: port 15(vethefa6155) entered disabled state
+👾 kernel | [13374.723676] vethefa6155: entered allmulticast mode
+👾 kernel | [13374.723724] vethefa6155: entered promiscuous mode
+👾 kernel | [13375.203786] eth1: renamed from veth0f4566d
+👾 kernel | [13375.204496] br-d1f3e4394e37: port 15(vethefa6155) entered blocking state
+👾 kernel | [13375.204527] br-d1f3e4394e37: port 15(vethefa6155) entered forwarding state
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.11.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:27" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:28" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:28" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:28" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:28" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:28" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:28" level=error msg="TCP forward [104.16.3.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:28" level=error msg="TCP forward [104.16.11.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:28" level=error msg="TCP forward [104.16.11.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:28" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:28" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:28" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:28" level=error msg="TCP forward [104.16.11.34:443] create endpoint failed: connection reset by peer"
+🌲 vmgr | time="01-13 23:01:28" level=error msg="TCP forward [104.16.0.34:443] create endpoint failed: connection reset by peer"
+🌲 vmgr | time="01-13 23:01:28" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:01:28" level=error msg="TCP forward [104.16.10.34:443] create endpoint failed: connection was refused"
+👾 kernel | [13385.705366] br-dd78b5d9f51d: port 3(veth6f24e75) entered disabled state
+👾 kernel | [13385.705625] veth1f47954: renamed from eth0
+👾 kernel | [13385.838570] br-dd78b5d9f51d: port 3(veth6f24e75) entered disabled state
+👾 kernel | [13385.839606] veth6f24e75 (unregistering): left allmulticast mode
+👾 kernel | [13385.839693] veth6f24e75 (unregistering): left promiscuous mode
+👾 kernel | [13385.839705] br-dd78b5d9f51d: port 3(veth6f24e75) entered disabled state
+👾 kernel | [13385.883405] br-d1f3e4394e37: port 15(vethefa6155) entered disabled state
+👾 kernel | [13385.883802] veth0f4566d: renamed from eth1
+👾 kernel | [13385.916111] br-d1f3e4394e37: port 15(vethefa6155) entered disabled state
+👾 kernel | [13385.917214] vethefa6155 (unregistering): left allmulticast mode
+👾 kernel | [13385.917248] vethefa6155 (unregistering): left promiscuous mode
+👾 kernel | [13385.917266] br-d1f3e4394e37: port 15(vethefa6155) entered disabled state
+👾 kernel | [13407.276716] br-dd78b5d9f51d: port 1(veth6735fa2) entered disabled state
+👾 kernel | [13407.277073] veth3055819: renamed from eth0
+👾 kernel | [13407.321816] br-dd78b5d9f51d: port 1(veth6735fa2) entered disabled state
+👾 kernel | [13407.322821] veth6735fa2 (unregistering): left allmulticast mode
+👾 kernel | [13407.322876] veth6735fa2 (unregistering): left promiscuous mode
+👾 kernel | [13407.322931] br-dd78b5d9f51d: port 1(veth6735fa2) entered disabled state
+👾 kernel | [13407.389098] br-d1f3e4394e37: port 14(veth3f7bb9e) entered disabled state
+👾 kernel | [13407.389539] veth0b3e32b: renamed from eth1
+👾 kernel | [13407.421174] br-d1f3e4394e37: port 14(veth3f7bb9e) entered disabled state
+👾 kernel | [13407.421443] veth3f7bb9e (unregistering): left allmulticast mode
+👾 kernel | [13407.421466] veth3f7bb9e (unregistering): left promiscuous mode
+👾 kernel | [13407.421500] br-d1f3e4394e37: port 14(veth3f7bb9e) entered disabled state
+👾 kernel | [13408.055352] br-dd78b5d9f51d: port 1(veth9e3874a) entered blocking state
+👾 kernel | [13408.055391] br-dd78b5d9f51d: port 1(veth9e3874a) entered disabled state
+👾 kernel | [13408.055423] veth9e3874a: entered allmulticast mode
+👾 kernel | [13408.055486] veth9e3874a: entered promiscuous mode
+👾 kernel | [13408.203996] eth0: renamed from vethfe10c79
+👾 kernel | [13408.204671] br-dd78b5d9f51d: port 1(veth9e3874a) entered blocking state
+👾 kernel | [13408.204701] br-dd78b5d9f51d: port 1(veth9e3874a) entered forwarding state
+👾 kernel | [13408.397379] br-dd78b5d9f51d: port 3(veth2fedc64) entered blocking state
+👾 kernel | [13408.397408] br-dd78b5d9f51d: port 3(veth2fedc64) entered disabled state
+👾 kernel | [13408.397437] veth2fedc64: entered allmulticast mode
+👾 kernel | [13408.397520] veth2fedc64: entered promiscuous mode
+👾 kernel | [13408.552178] br-d1f3e4394e37: port 14(vetha4694c1) entered blocking state
+👾 kernel | [13408.552219] br-d1f3e4394e37: port 14(vetha4694c1) entered disabled state
+👾 kernel | [13408.552243] vetha4694c1: entered allmulticast mode
+👾 kernel | [13408.552396] vetha4694c1: entered promiscuous mode
+👾 kernel | [13408.568372] eth0: renamed from veth3a3088f
+👾 kernel | [13408.568909] br-dd78b5d9f51d: port 3(veth2fedc64) entered blocking state
+👾 kernel | [13408.568937] br-dd78b5d9f51d: port 3(veth2fedc64) entered forwarding state
+👾 kernel | [13408.812422] eth0: renamed from vetha217aa3
+👾 kernel | [13408.812989] br-d1f3e4394e37: port 14(vetha4694c1) entered blocking state
+👾 kernel | [13408.813023] br-d1f3e4394e37: port 14(vetha4694c1) entered forwarding state
+👾 kernel | [13409.027340] br-d1f3e4394e37: port 15(veth60b9bce) entered blocking state
+👾 kernel | [13409.027423] br-d1f3e4394e37: port 15(veth60b9bce) entered disabled state
+👾 kernel | [13409.027461] veth60b9bce: entered allmulticast mode
+👾 kernel | [13409.027549] veth60b9bce: entered promiscuous mode
+👾 kernel | [13409.085380] br-dd78b5d9f51d: port 4(vethf6b6667) entered blocking state
+👾 kernel | [13409.085419] br-dd78b5d9f51d: port 4(vethf6b6667) entered disabled state
+👾 kernel | [13409.085452] vethf6b6667: entered allmulticast mode
+👾 kernel | [13409.085501] vethf6b6667: entered promiscuous mode
+👾 kernel | [13409.088908] eth1: renamed from vethd63c68b
+👾 kernel | [13409.090303] br-d1f3e4394e37: port 15(veth60b9bce) entered blocking state
+👾 kernel | [13409.090331] br-d1f3e4394e37: port 15(veth60b9bce) entered forwarding state
+👾 kernel | [13409.090662] br-d1f3e4394e37: port 16(veth4afe96e) entered blocking state
+👾 kernel | [13409.090705] br-d1f3e4394e37: port 16(veth4afe96e) entered disabled state
+👾 kernel | [13409.090728] veth4afe96e: entered allmulticast mode
+👾 kernel | [13409.090781] veth4afe96e: entered promiscuous mode
+👾 kernel | [13409.120313] br-dd78b5d9f51d: port 5(vethe9f386c) entered blocking state
+👾 kernel | [13409.120363] br-dd78b5d9f51d: port 5(vethe9f386c) entered disabled state
+👾 kernel | [13409.120410] vethe9f386c: entered allmulticast mode
+👾 kernel | [13409.120476] vethe9f386c: entered promiscuous mode
+👾 kernel | [13409.152907] br-d1f3e4394e37: port 17(vethed190e4) entered blocking state
+👾 kernel | [13409.152948] br-d1f3e4394e37: port 17(vethed190e4) entered disabled state
+👾 kernel | [13409.152965] vethed190e4: entered allmulticast mode
+👾 kernel | [13409.153007] vethed190e4: entered promiscuous mode
+👾 kernel | [13409.183272] br-dd78b5d9f51d: port 6(vetha4d866a) entered blocking state
+👾 kernel | [13409.183312] br-dd78b5d9f51d: port 6(vetha4d866a) entered disabled state
+👾 kernel | [13409.183368] vetha4d866a: entered allmulticast mode
+👾 kernel | [13409.183455] vetha4d866a: entered promiscuous mode
+👾 kernel | [13409.189599] eth0: renamed from veth4007c7c
+👾 kernel | [13409.190165] br-dd78b5d9f51d: port 4(vethf6b6667) entered blocking state
+👾 kernel | [13409.190198] br-dd78b5d9f51d: port 4(vethf6b6667) entered forwarding state
+👾 kernel | [13409.234442] eth0: renamed from veth2516e18
+👾 kernel | [13409.235591] br-d1f3e4394e37: port 16(veth4afe96e) entered blocking state
+👾 kernel | [13409.235610] br-d1f3e4394e37: port 16(veth4afe96e) entered forwarding state
+👾 kernel | [13409.237767] eth0: renamed from veth0e169b7
+👾 kernel | [13409.238745] br-dd78b5d9f51d: port 5(vethe9f386c) entered blocking state
+👾 kernel | [13409.238770] br-dd78b5d9f51d: port 5(vethe9f386c) entered forwarding state
+👾 kernel | [13411.641326] br-dd78b5d9f51d: port 7(vethab92897) entered blocking state
+👾 kernel | [13411.641362] br-dd78b5d9f51d: port 7(vethab92897) entered disabled state
+👾 kernel | [13411.641376] vethab92897: entered allmulticast mode
+👾 kernel | [13411.641415] vethab92897: entered promiscuous mode
+👾 kernel | [13411.649543] eth1: renamed from vethf416245
+👾 kernel | [13411.650277] br-d1f3e4394e37: port 17(vethed190e4) entered blocking state
+👾 kernel | [13411.650311] br-d1f3e4394e37: port 17(vethed190e4) entered forwarding state
+👾 kernel | [13411.811511] br-d1f3e4394e37: port 18(veth8efe72d) entered blocking state
+👾 kernel | [13411.811554] br-d1f3e4394e37: port 18(veth8efe72d) entered disabled state
+👾 kernel | [13411.811575] veth8efe72d: entered allmulticast mode
+👾 kernel | [13411.811611] veth8efe72d: entered promiscuous mode
+👾 kernel | [13411.816554] br-dd78b5d9f51d: port 8(veth266cbc8) entered blocking state
+👾 kernel | [13411.816603] br-dd78b5d9f51d: port 8(veth266cbc8) entered disabled state
+👾 kernel | [13411.816625] veth266cbc8: entered allmulticast mode
+👾 kernel | [13411.816674] veth266cbc8: entered promiscuous mode
+👾 kernel | [13411.965926] eth0: renamed from vethf24eccd
+👾 kernel | [13411.966508] br-dd78b5d9f51d: port 6(vetha4d866a) entered blocking state
+👾 kernel | [13411.966543] br-dd78b5d9f51d: port 6(vetha4d866a) entered forwarding state
+👾 kernel | [13413.401706] eth1: renamed from vethef6ea07
+👾 kernel | [13413.403482] eth1: renamed from veth443a822
+👾 kernel | [13413.404958] eth1: renamed from veth67879c9
+👾 kernel | [13413.410132] br-dd78b5d9f51d: port 8(veth266cbc8) entered blocking state
+👾 kernel | [13413.410156] br-dd78b5d9f51d: port 8(veth266cbc8) entered forwarding state
+👾 kernel | [13413.410588] br-d1f3e4394e37: port 18(veth8efe72d) entered blocking state
+👾 kernel | [13413.410608] br-d1f3e4394e37: port 18(veth8efe72d) entered forwarding state
+👾 kernel | [13413.410730] br-dd78b5d9f51d: port 7(vethab92897) entered blocking state
+👾 kernel | [13413.410745] br-dd78b5d9f51d: port 7(vethab92897) entered forwarding state
+👾 kernel | [13413.412747] br-d1f3e4394e37: port 19(veth655cbce) entered blocking state
+👾 kernel | [13413.412776] br-d1f3e4394e37: port 19(veth655cbce) entered disabled state
+👾 kernel | [13413.412803] veth655cbce: entered allmulticast mode
+👾 kernel | [13413.412854] veth655cbce: entered promiscuous mode
+👾 kernel | [13415.263896] eth1: renamed from veth70a3c96
+👾 kernel | [13415.266015] br-d1f3e4394e37: port 19(veth655cbce) entered blocking state
+👾 kernel | [13415.266038] br-d1f3e4394e37: port 19(veth655cbce) entered forwarding state
+👾 kernel | [13415.268659] br-d1f3e4394e37: port 20(vethe57e911) entered blocking state
+👾 kernel | [13415.268728] br-d1f3e4394e37: port 20(vethe57e911) entered disabled state
+👾 kernel | [13415.268812] vethe57e911: entered allmulticast mode
+👾 kernel | [13415.268891] vethe57e911: entered promiscuous mode
+👾 kernel | [13415.910988] eth1: renamed from veth81fe564
+👾 kernel | [13415.912728] br-d1f3e4394e37: port 20(vethe57e911) entered blocking state
+👾 kernel | [13415.913091] br-d1f3e4394e37: port 20(vethe57e911) entered forwarding state
+🌲 vmgr | time="01-13 23:03:27" level=error msg="TCP forward [35.171.115.154:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:03:35" level=error msg="TCP forward [16.182.98.130:443] create endpoint failed: connection reset by peer"
+🌲 vmgr | time="01-13 23:03:35" level=error msg="TCP forward [3.5.22.10:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:03:35" level=error msg="TCP forward [52.217.80.120:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:03:36" level=error msg="TCP forward [162.159.140.245:443] create endpoint failed: connection reset by peer"
+🌲 vmgr | time="01-13 23:03:53" level=error msg="TCP forward [54.231.198.194:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:03:53" level=error msg="TCP forward [3.5.22.10:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:03:53" level=error msg="TCP forward [52.217.80.120:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:06:56" level=error msg="TCP forward [16.182.108.18:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:07:41" level=error msg="TCP forward [142.250.105.95:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:07:41" level=error msg="TCP forward [172.253.124.95:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:07:41" level=error msg="TCP forward [64.233.177.95:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:08:27" level=error msg="TCP forward [172.66.0.243:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:09:25" level=error msg="TCP forward [54.231.138.58:443] create endpoint failed: connection reset by peer"
+🌲 vmgr | time="01-13 23:09:25" level=error msg="TCP forward [3.5.10.104:443] create endpoint failed: connection reset by peer"
+🌲 vmgr | time="01-13 23:09:25" level=error msg="TCP forward [16.15.178.40:443] create endpoint failed: connection reset by peer"
+🌲 vmgr | time="01-13 23:10:48" level=error msg="TCP forward [52.216.61.138:443] create endpoint failed: connection reset by peer"
+🌲 vmgr | time="01-13 23:10:48" level=error msg="TCP forward [52.216.207.142:443] create endpoint failed: connection reset by peer"
+🌲 vmgr | time="01-13 23:10:48" level=error msg="TCP forward [52.217.107.200:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:10:51" level=error msg="TCP forward [34.204.109.15:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:11:28" level=error msg="TCP forward [3.5.14.109:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:11:28" level=error msg="TCP forward [52.216.222.186:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:11:28" level=error msg="TCP forward [16.15.183.33:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:12:18" level=error msg="TCP forward [16.15.191.20:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:12:20" level=error msg="TCP forward [34.204.109.15:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:12:20" level=error msg="TCP forward [34.237.201.68:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:13:26" level=error msg="TCP forward [16.15.195.242:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:13:26" level=error msg="TCP forward [16.15.183.225:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:13:26" level=error msg="TCP forward [16.15.192.154:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:14:46" level=error msg="TCP forward [52.216.57.234:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:14:46" level=error msg="TCP forward [16.15.223.13:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:17:12" level=error msg="TCP forward [16.15.183.62:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:17:12" level=error msg="TCP forward [16.15.189.224:443] create endpoint failed: connection reset by peer"
+🌲 vmgr | time="01-13 23:17:12" level=error msg="TCP forward [16.15.186.252:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:19:52" level=error msg="TCP forward [54.231.192.58:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:20:52" level=error msg="TCP forward [34.204.109.15:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:20:52" level=error msg="TCP forward [34.237.253.141:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:22:29" level=error msg="TCP forward [52.217.170.98:443] create endpoint failed: connection reset by peer"
+🌲 vmgr | time="01-13 23:22:29" level=error msg="TCP forward [16.182.39.50:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:22:29" level=error msg="TCP forward [16.15.178.175:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:23:30" level=error msg="TCP forward [16.182.37.82:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:23:30" level=error msg="TCP forward [52.216.41.98:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:23:30" level=error msg="TCP forward [52.216.57.138:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:23:32" level=error msg="TCP forward [34.237.201.68:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:24:05" level=error msg="TCP forward [52.216.78.112:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:24:05" level=error msg="TCP forward [16.15.182.164:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:24:05" level=error msg="TCP forward [52.217.95.82:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:25:38" level=error msg="TCP forward [52.217.120.122:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:25:38" level=error msg="TCP forward [54.231.195.106:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:25:38" level=error msg="TCP forward [52.217.114.162:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:25:40" level=error msg="TCP forward [34.202.153.183:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:26:02" level=error msg="TCP forward [162.159.140.245:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:26:23" level=error msg="TCP forward [16.15.183.75:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:26:23" level=error msg="TCP forward [52.217.233.106:443] create endpoint failed: connection was refused"
+🌲 vmgr | time="01-13 23:36:29" level=error msg="TCP forward [34.202.153.183:443] create endpoint failed: connection was refused"
+
+
+Check logs for more details.

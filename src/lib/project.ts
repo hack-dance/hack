@@ -160,6 +160,21 @@ export interface ProjectInternalConfig {
    * When enabled, mount the Caddy Local CA into containers and set common SSL env vars.
    */
   readonly tls?: boolean
+
+  /**
+   * Optional extra_hosts to inject into every Compose service via the generated
+   * `.hack/.internal/compose.override.yml`.
+   *
+   * Useful when containers need to reach host-local tunnels (e.g. SSM port-forwards)
+   * while preserving the original hostname for TLS SNI/certificate validation.
+   *
+   * Example:
+   * {
+   *   "content.staging.livenationapi.com": "host-gateway",
+   *   "loyalty.staging.livenationapi.com": "host-gateway"
+   * }
+   */
+  readonly extraHosts?: Record<string, string>
 }
 
 export function resolveProjectOauthTld(cfg: ProjectOauthConfig | undefined): string | null {
@@ -274,10 +289,28 @@ function parseInternalConfig(
 
   const dns = parseOptionalBoolean(value["dns"])
   const tls = parseOptionalBoolean(value["tls"])
+  const extraHosts = parseStringMap(getRecord(value, "extra_hosts"))
 
   const out: ProjectInternalConfig = {
     ...(dns !== undefined ? { dns } : {}),
-    ...(tls !== undefined ? { tls } : {})
+    ...(tls !== undefined ? { tls } : {}),
+    ...(extraHosts ? { extraHosts } : {})
+  }
+
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
+function parseStringMap(value: Record<string, unknown> | undefined): Record<string, string> | undefined {
+  if (!value) return undefined
+
+  const out: Record<string, string> = {}
+  for (const [keyRaw, valueRaw] of Object.entries(value)) {
+    const key = keyRaw.trim()
+    if (key.length === 0) continue
+    if (typeof valueRaw !== "string") continue
+    const next = valueRaw.trim()
+    if (next.length === 0) continue
+    out[key] = next
   }
 
   return Object.keys(out).length > 0 ? out : undefined

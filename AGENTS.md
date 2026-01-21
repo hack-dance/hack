@@ -1,8 +1,3 @@
----
-description: Use Bun instead of Node.js, npm, pnpm, or vite.
-globs: "*.ts, *.tsx, *.html, *.css, *.js, *.jsx, package.json"
-alwaysApply: false
----
 
 Default to using Bun instead of Node.js.
 
@@ -43,12 +38,38 @@ TypeScript (strict). Runtimes: Bun 1.3+, Node 23. Prettier: 2 spaces, no semicol
 Always default to useing named paramaters in functions eg myFunction({ ctx, other }) vs myFunction(ctx, other)
 Never use any types and always default to leveraging generics and smart types to sensure the best possible tpye inference across the project.
 
+<!-- hack:tickets:start -->
+## Tickets (git-backed)
+
+This project uses `hack` tickets (extension: `dance.hack.tickets`).
+
+Common commands:
+- Create: `hack x tickets create --title "..." --body-stdin [--depends-on "T-00001"] [--blocks "T-00002"]`
+- List: `hack x tickets list`
+- Tui: `hack x tickets tui`
+- Show: `hack x tickets show T-00001`
+- Update: `hack x tickets update T-00001 [--title "..."] [--body "..."] [--depends-on "..."] [--blocks "..."]`
+- Status: `hack x tickets status T-00001 in_progress`
+- Sync: `hack x tickets sync`
+
+Recommended body template (Markdown):
+```md
+## Context
+## Goals
+## Notes
+## Links
+```
+
+Tip: use `--body-stdin` for multi-line markdown.
+
+Data lives in `.hack/tickets/` (gitignored on the main branch) and syncs to hidden ref `refs/hack/tickets` by default.
+<!-- hack:tickets:end -->
 
 ## Landing the Plane (Session Completion)
 **When ending a work session**, you MUST complete ALL steps below.
 
 **MANDATORY WORKFLOW:**
-1. **File issues for remaining work** - Create issues for anything that needs follow-up
+1. **File tickets for remaining work** - Create tickets for anything that needs follow-up
 2. **Run quality gates** (if code changed) - Tests, linters, builds
 3. **Update issue status** - Close finished work, update in-progress items
 4. **Hand off** - Provide context for next session

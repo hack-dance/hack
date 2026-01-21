@@ -17,7 +17,8 @@ import { logger } from "../ui/logger.ts"
 export async function runCli(argv: readonly string[]): Promise<number> {
   try {
     const cli = CLI_SPEC
-    const parsed = parseCliArgv(cli, argv)
+    const allowUnknownOptions = isExtensionDispatch({ argv })
+    const parsed = parseCliArgv(cli, argv, { allowUnknownOptions })
 
     const helpFlag = parsed.values["help"] === true
     const versionFlag = parsed.values["version"] === true
@@ -40,20 +41,25 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       return parsed.positionals.length === 0 ? 1 : 1
     }
 
-    // Unknown options (not registered anywhere in the CLI)
-    const unionOptNames = collectUnionOptionNames(cli)
-    const unknownOptions = Object.keys(parsed.values).filter(k => !unionOptNames.has(k))
-    if (unknownOptions.length > 0) {
-      throw new CliUsageError(`Unknown option(s): ${unknownOptions.map(o => `--${o}`).join(", ")}`)
-    }
+    const isExtensionDispatcher = resolved.command?.name === "x"
+    if (!isExtensionDispatcher) {
+      // Unknown options (not registered anywhere in the CLI)
+      const unionOptNames = collectUnionOptionNames(cli)
+      const unknownOptions = Object.keys(parsed.values).filter(k => !unionOptNames.has(k))
+      if (unknownOptions.length > 0) {
+        throw new CliUsageError(
+          `Unknown option(s): ${unknownOptions.map(o => `--${o}`).join(", ")}`
+        )
+      }
 
-    // Disallowed options for the resolved command
-    const allowedForCommand = collectAllowedOptionNames(cli, resolved.command)
-    const disallowed = Object.keys(parsed.values).filter(k => !allowedForCommand.has(k))
-    if (disallowed.length > 0) {
-      throw new CliUsageError(
-        `Option(s) not valid for "${resolved.command.name}": ${disallowed.map(o => `--${o}`).join(", ")}`
-      )
+      // Disallowed options for the resolved command
+      const allowedForCommand = collectAllowedOptionNames(cli, resolved.command)
+      const disallowed = Object.keys(parsed.values).filter(k => !allowedForCommand.has(k))
+      if (disallowed.length > 0) {
+        throw new CliUsageError(
+          `Option(s) not valid for "${resolved.command.name}": ${disallowed.map(o => `--${o}`).join(", ")}`
+        )
+      }
     }
 
     // If the resolved command has no handler, it acts as a namespace.
@@ -91,4 +97,13 @@ export async function runCli(argv: readonly string[]): Promise<number> {
     }
     return 1
   }
+}
+
+function isExtensionDispatch(opts: { readonly argv: readonly string[] }): boolean {
+  for (const token of opts.argv) {
+    if (token === "--") continue
+    if (token.startsWith("-")) continue
+    return token === "x"
+  }
+  return false
 }

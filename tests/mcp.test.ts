@@ -1,10 +1,12 @@
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { afterEach, expect, test } from "bun:test"
+import { afterEach, expect } from "bun:test"
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
+
+import { testIntegration } from "./helpers/ci.ts"
 
 let tempDir: string | null = null
 let client: Client | null = null
@@ -25,7 +27,7 @@ afterEach(async () => {
   }
 })
 
-test("mcp server lists hack tools", async () => {
+testIntegration("mcp server lists hack tools", { timeout: 20_000 }, async () => {
   const mcp = await startMcpClient()
   const tools = await mcp.listTools()
   const names = tools.tools.map(tool => tool.name)
@@ -36,7 +38,7 @@ test("mcp server lists hack tools", async () => {
   expect(names).toContain("hack.project.open")
 })
 
-test("hack.projects.list returns structured data", async () => {
+testIntegration("hack.projects.list returns structured data", { timeout: 20_000 }, async () => {
   const mcp = await startMcpClient()
   const result = await mcp.callTool({
     name: "hack.projects.list",

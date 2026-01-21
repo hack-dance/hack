@@ -335,7 +335,7 @@ function padRight(text: string, width: number): string {
 }
 
 function groupsInOrder(): readonly CliGroup[] {
-  return ["Global", "Project", "Agents", "Diagnostics", "Secrets", "Fun"] as const
+  return ["Global", "Project", "Extensions", "Agents", "Diagnostics", "Secrets", "Fun"] as const
 }
 
 function groupLabel(group: CliGroup): string {
@@ -343,10 +343,12 @@ function groupLabel(group: CliGroup): string {
     {
       Global: "Global commands",
       Project: "Project commands",
+      Extensions: "Extensions",
       Agents: "Agent integrations",
       Diagnostics: "Diagnostics",
       Secrets: "Secrets",
-      Fun: "Fun"
+      Fun: "Fun",
+      Internal: "Internal"
     } satisfies Record<CliGroup, string>
   )[group]
 }

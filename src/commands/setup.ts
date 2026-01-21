@@ -5,6 +5,7 @@ import { optPath } from "../cli/options.ts"
 import { installClaudeHooks, checkClaudeHooks, removeClaudeHooks } from "../agents/claude.ts"
 import { installCodexSkill, checkCodexSkill, removeCodexSkill } from "../agents/codex-skill.ts"
 import { installCursorRules, checkCursorRules, removeCursorRules } from "../agents/cursor.ts"
+import { checkTicketsSkill, installTicketsSkill, removeTicketsSkill } from "../control-plane/extensions/tickets/tickets-skill.ts"
 import { findRepoRootForInit } from "../lib/project.ts"
 import { checkAgentDocs, removeAgentDocs, upsertAgentDocs } from "../mcp/agent-docs.ts"
 import { checkMcpConfig, installMcpConfig, removeMcpConfig } from "../mcp/install.ts"
@@ -80,6 +81,7 @@ const optClaudeMd = defineOption({
 const setupCursorOptions = [optPath, optGlobal, optCheck, optRemove] as const
 const setupClaudeOptions = [optPath, optGlobal, optCheck, optRemove] as const
 const setupCodexOptions = [optPath, optGlobal, optCheck, optRemove] as const
+const setupTicketsOptions = [optPath, optGlobal, optCheck, optRemove] as const
 const setupAgentsOptions = [optPath, optAll, optAgentsMd, optClaudeMd, optCheck, optRemove] as const
 const setupMcpOptions = [
   optPath,
@@ -95,6 +97,7 @@ const setupMcpOptions = [
 type SetupCursorArgs = CommandArgs<typeof setupCursorOptions, readonly []>
 type SetupClaudeArgs = CommandArgs<typeof setupClaudeOptions, readonly []>
 type SetupCodexArgs = CommandArgs<typeof setupCodexOptions, readonly []>
+type SetupTicketsArgs = CommandArgs<typeof setupTicketsOptions, readonly []>
 type SetupAgentsArgs = CommandArgs<typeof setupAgentsOptions, readonly []>
 type SetupMcpArgs = CommandArgs<typeof setupMcpOptions, readonly []>
 
@@ -121,6 +124,15 @@ const codexSpec = defineCommand({
   summary: "Install Codex skill for hack CLI usage",
   group: "Agents",
   options: setupCodexOptions,
+  positionals: [],
+  subcommands: []
+} as const)
+
+const ticketsSpec = defineCommand({
+  name: "tickets",
+  summary: "Install Codex skill for hack tickets usage",
+  group: "Agents",
+  options: setupTicketsOptions,
   positionals: [],
   subcommands: []
 } as const)
@@ -154,6 +166,7 @@ export const setupCommand = defineCommand({
     withHandler(cursorSpec, handleSetupCursor),
     withHandler(claudeSpec, handleSetupClaude),
     withHandler(codexSpec, handleSetupCodex),
+    withHandler(ticketsSpec, handleSetupTickets),
     withHandler(agentsSpec, handleSetupAgents),
     withHandler(mcpSpec, handleSetupMcp)
   ]
@@ -230,6 +243,31 @@ async function handleSetupCodex({
   return logSingleResult({
     action,
     okMessage: "Codex integration",
+    result
+  })
+}
+
+async function handleSetupTickets({
+  ctx,
+  args
+}: {
+  readonly ctx: CliContext
+  readonly args: SetupTicketsArgs
+}): Promise<number> {
+  const action = resolveAction(args.options)
+  const scope = resolveScope({ global: args.options.global === true })
+  const projectRoot = scope === "project" ? await resolveSetupRoot({ ctx, pathOpt: args.options.path }) : undefined
+
+  const result =
+    action === "check" ?
+      await checkTicketsSkill({ scope, projectRoot })
+    : action === "remove" ?
+      await removeTicketsSkill({ scope, projectRoot })
+    : await installTicketsSkill({ scope, projectRoot })
+
+  return logSingleResult({
+    action,
+    okMessage: "Tickets skill",
     result
   })
 }

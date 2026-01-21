@@ -2,6 +2,7 @@ import { resolve } from "node:path"
 
 import { YAML } from "bun"
 
+import { readControlPlaneConfig } from "../control-plane/sdk/config.ts"
 import { pathExists, readTextFile } from "./fs.ts"
 import { isRecord } from "./guards.ts"
 import {
@@ -19,20 +20,33 @@ export type BranchRuntime = {
 }
 
 export type ProjectView = {
+  readonly projectId?: string
   readonly name: string
   readonly devHost: string | null
   readonly repoRoot: string | null
   readonly projectDir: string | null
   readonly definedServices: readonly string[] | null
+  readonly extensionsEnabled: readonly string[] | null
+  readonly features: readonly string[] | null
+  readonly runtimeConfigured: boolean | null
+  readonly runtimeStatus: ProjectRuntimeStatus
   readonly runtime: RuntimeProject | null
   readonly branchRuntime: readonly BranchRuntime[]
   readonly kind: "registered" | "unregistered"
-  readonly status: "running" | "stopped" | "missing" | "unregistered"
+  readonly status: "running" | "stopped" | "missing" | "unregistered" | "unknown"
 }
+
+export type ProjectRuntimeStatus =
+  | "running"
+  | "stopped"
+  | "missing"
+  | "unknown"
+  | "not_configured"
 
 export async function buildProjectViews(opts: {
   readonly registryProjects: readonly RegisteredProject[]
   readonly runtime: readonly RuntimeProject[]
+  readonly runtimeOk: boolean
   readonly filter: string | null
   readonly includeUnregistered: boolean
 }): Promise<ProjectView[]> {
@@ -55,23 +69,38 @@ export async function buildProjectViews(opts: {
     if (reg) {
       const projectDirOk = await pathExists(reg.projectDir)
       const composeFile = resolve(reg.projectDir, PROJECT_COMPOSE_FILENAME)
-      const definedServices = projectDirOk ? await readComposeServices({ composeFile }) : null
+      const composeExists = projectDirOk && (await pathExists(composeFile))
+      const definedServices = composeExists ? await readComposeServices({ composeFile }) : null
       const running = countRunningServices(runtime)
+      const runtimeConfigured = composeExists
+      const runtimeStatus: ProjectRuntimeStatus =
+        !projectDirOk ? "missing"
+        : !composeExists ? "not_configured"
+        : !opts.runtimeOk ? "unknown"
+        : running > 0 ? "running"
+        : "stopped"
       const status: ProjectView["status"] =
         !projectDirOk ? "missing"
+        : !opts.runtimeOk ? "unknown"
         : running > 0 ? "running"
         : "stopped"
       const branchRuntime = collectBranchRuntime({
         baseName: name,
         runtimeProjects: opts.runtime
       })
+      const extensions = projectDirOk ? await resolveProjectExtensions({ projectDir: reg.projectDir }) : null
 
       out.push({
+        projectId: reg.id,
         name,
         devHost: reg.devHost ?? null,
         repoRoot: reg.repoRoot,
         projectDir: reg.projectDir,
         definedServices,
+        extensionsEnabled: extensions?.enabled ?? null,
+        features: extensions?.features ?? null,
+        runtimeConfigured,
+        runtimeStatus,
         runtime,
         branchRuntime,
         kind: "registered",
@@ -81,12 +110,21 @@ export async function buildProjectViews(opts: {
     }
 
     if (opts.includeUnregistered) {
+      const running = countRunningServices(runtime)
+      const runtimeStatus: ProjectRuntimeStatus =
+        !opts.runtimeOk ? "unknown"
+        : running > 0 ? "running"
+        : "stopped"
       out.push({
         name,
         devHost: null,
         repoRoot: null,
         projectDir: null,
         definedServices: null,
+        extensionsEnabled: null,
+        features: null,
+        runtimeConfigured: null,
+        runtimeStatus,
         runtime,
         branchRuntime: [],
         kind: "unregistered",
@@ -100,11 +138,16 @@ export async function buildProjectViews(opts: {
 
 export function serializeProjectView(view: ProjectView): Record<string, unknown> {
   return {
+    project_id: view.projectId ?? null,
     name: view.name,
     dev_host: view.devHost ?? null,
     repo_root: view.repoRoot ?? null,
     project_dir: view.projectDir ?? null,
     defined_services: view.definedServices ?? null,
+    extensions_enabled: view.extensionsEnabled ?? null,
+    features: view.features ?? null,
+    runtime_configured: view.runtimeConfigured ?? null,
+    runtime_status: view.runtimeStatus,
     runtime: view.runtime ? serializeRuntimeProject(view.runtime) : null,
     branch_runtime: view.branchRuntime.map(entry => ({
       branch: entry.branch,
@@ -148,4 +191,32 @@ async function readComposeServices(opts: {
   if (!isRecord(servicesRaw)) return []
 
   return Object.keys(servicesRaw).sort((a, b) => a.localeCompare(b))
+}
+
+async function resolveProjectExtensions(opts: {
+  readonly projectDir: string
+}): Promise<{ readonly enabled: readonly string[]; readonly features: readonly string[] }> {
+  const { config } = await readControlPlaneConfig({ projectDir: opts.projectDir })
+  const enabled = Object.entries(config.extensions)
+    .filter(([, value]) => value.enabled)
+    .map(([key]) => key)
+    .sort((a, b) => a.localeCompare(b))
+  const features = enabled
+    .map(id => mapExtensionFeature(id))
+    .filter((value): value is string => value !== null)
+    .sort((a, b) => a.localeCompare(b))
+  return { enabled, features }
+}
+
+function mapExtensionFeature(id: string): string | null {
+  switch (id) {
+    case "dance.hack.tickets":
+      return "tickets"
+    case "dance.hack.cloudflare":
+      return "cloudflare"
+    case "dance.hack.tailscale":
+      return "tailscale"
+    default:
+      return id
+  }
 }

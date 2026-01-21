@@ -23,17 +23,28 @@ export const DEFAULT_OAUTH_ALIAS_TLD = "gy" as const
 export const DEFAULT_OAUTH_ALIAS_ROOT = `${DEFAULT_PROJECT_TLD}.${DEFAULT_OAUTH_ALIAS_TLD}` as const
 
 export const GLOBAL_HACK_DIR_NAME = ".hack" as const
+export const GLOBAL_CONFIG_FILENAME = "hack.config.json" as const
 export const GLOBAL_DAEMON_DIR_NAME = "daemon" as const
 export const GLOBAL_DAEMON_SOCKET_FILENAME = "hackd.sock" as const
 export const GLOBAL_DAEMON_PID_FILENAME = "hackd.pid" as const
 export const GLOBAL_DAEMON_LOG_FILENAME = "hackd.log" as const
+export const GLOBAL_CLOUDFLARE_DIR_NAME = "cloudflare" as const
 export const GLOBAL_CADDY_DIR_NAME = "caddy" as const
 export const GLOBAL_LOGGING_DIR_NAME = "logging" as const
 export const GLOBAL_SCHEMAS_DIR_NAME = "schemas" as const
 export const GLOBAL_CERTS_DIR_NAME = "certs" as const
 export const GLOBAL_COREDNS_FILENAME = "Corefile" as const
 
+export const GLOBAL_ONLY_EXTENSION_IDS = [
+  "dance.hack.cloudflare",
+  "dance.hack.tailscale"
+] as const
+
 export const GLOBAL_PROJECTS_REGISTRY_FILENAME = "projects.json" as const
+
+export const DAEMON_PROCESS_TITLE = "dance.hack.hackd" as const
+export const DAEMON_LAUNCHD_LABEL = "dance.hack.hackd" as const
+export const DAEMON_LAUNCHD_PLIST_FILENAME = "dance.hack.hackd.plist" as const
 
 export const GLOBAL_CADDY_COMPOSE_FILENAME = "docker-compose.yml" as const
 export const GLOBAL_LOGGING_COMPOSE_FILENAME = "docker-compose.yml" as const

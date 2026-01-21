@@ -3,7 +3,7 @@
 <!-- PROJECT LOGO -->
 <br />
 <div align="center">
-<p style="font-family:monospace;padding:0;margin:0;white-space:pre;font-size:12px">
+<pre style="font-family:monospace;padding:0;margin:0;white-space:pre;font-size:12px;background:none!important;">
  █████   █████   █████████     █████████  █████   ████
 ░░███   ░░███   ███░░░░░███   ███░░░░░███░░███   ███░ 
  ░███    ░███  ░███    ░███  ███     ░░░  ░███  ███   
@@ -53,7 +53,7 @@ Neither scales. Both slow you down in dumb, repeatable ways.
 ## Installation
 
 ### Prerequisites
-- **macOS**: more support planned.
+- **macOS**: supported.
 - **Docker + Compose**: [Orbstack](https://docs.orbstack.dev/quick-start) | [Docker Desktop](https://www.docker.com/get-started/) 
 
 ### Install
@@ -104,12 +104,16 @@ If anything fails, use `hack logs --pretty` and summarize next steps.
 
 If the agent cannot run shell commands, use MCP instead: `hack setup mcp` and `hack mcp serve`.
 
-### Initialize a repo (manual)
+### macOS app (experimental)
+Source lives in `apps/macos`. See `apps/macos/README.md` for XcodeGen and build/run steps.
+Quick commands (repo root):
+
 ```bash
-cd /path/to/your-repo
-hack init
-hack up --detach
-hack open
+bun run macos:project-gen
+bun run macos:open
+bun run macos:dev
+bun run macos:build
+bun run macos:test
 ```
 
 ### Configuration (.hack/hack.config.json)
@@ -125,6 +129,17 @@ hack open
 *Optional `[internal]` settings (container DNS/TLS)*
 - `dns`: use CoreDNS to resolve `*.hack` inside containers (default: `true`)
 - `tls`: mount Caddy Local CA + set common SSL env vars (default: `true`)
+- `extra_hosts`: static Compose `extra_hosts` entries (hostname → IP/target), merged into the internal override
+
+If you need **dynamic** `extra_hosts` (e.g. Pulumi outputs / local tunnels that change), use:
+
+```bash
+hack internal extra-hosts set <hostname> <target>
+hack internal extra-hosts unset <hostname>
+hack internal extra-hosts list
+```
+
+This writes `.hack/.internal/extra-hosts.json` and is merged into `extra_hosts` when you run `hack up` / `hack restart`.
 
 *Optional `[oauth]` settings (OAuth-safe alias host)*
 - `enabled`: when true, `hack init` generates Caddy labels so routed services answer on both:
@@ -152,16 +167,16 @@ hack config set logs.snapshot_backend "compose"
 
 ## Commands (high level)
 
-- **Global**: `hack global install|up|down|status|logs|logs-reset|ca|cert|trust`
-- **Project**: `hack init|up|down|restart|ps|run|logs|open|tui`
-- **Config**: `hack config get|set`
-- **Projects**: `hack projects|prune`
-- **Status**: `hack status` (shortcut for `hack projects --details`)
-- **Branch**: `hack branch add|list|remove|open`
-- **Agents**: `hack setup cursor|claude|codex|agents|mcp`, `hack agent prime|init|patterns`, `hack mcp serve|install|print`
-- **Diagnostics**: `hack doctor|daemon|log-pipe`
-- **Secrets**: `hack secrets get|set|delete`
-- **Crash override**: `hack the planet`
+Run `hack help` (or `hack help <command>`) for full usage.
+
+Common:
+- `hack global install|up|down`
+- `hack init|up|down|logs|open|tui`
+- `hack status`
+- `hack remote setup`
+- `hack gateway enable`
+
+Full command table + flags: `docs/cli.md`.
 
 Run `hack help <command>` for detailed help.
 
@@ -192,6 +207,27 @@ hack daemon stop
 hack daemon logs
 ```
 
+### launchd integration (macOS)
+
+On macOS, you can install `hackd` as a launchd service for automatic management:
+
+```bash
+# Install with auto-start on login
+hack daemon install --run-at-load
+
+# Install without auto-start (manual start/stop via launchd)
+hack daemon install
+
+# Uninstall the launchd service
+hack daemon uninstall
+```
+
+Options:
+- `--run-at-load` / `--no-run-at-load`: Start automatically on login
+- `--gui-only` / `--no-gui-only`: Only run in GUI sessions (default: GUI only)
+
+The service uses label `dance.hack.hackd` and writes to `~/Library/LaunchAgents/`.
+
 Use it when:
 - You run `hack projects --json` / `hack ps --json` frequently (scripts, agent workflows, TUI).
 - You want faster status snapshots without shelling out to Docker each time.
@@ -201,6 +237,107 @@ Skip it when:
 - You rarely use JSON status/ps outputs.
 
 If it is not running (or version-mismatched), the CLI falls back to direct Docker calls.
+
+## Control plane + extensions (optional)
+
+`hack` includes a small control-plane kernel so features like jobs, tickets, and remote access can
+ship as extensions without bloating the core CLI.
+
+- Extension commands run via `hack x <namespace> <command>`.
+- Global control-plane config lives at `~/.hack/hack.config.json` (`hack config set --global ...`).
+- Per-project overrides live in `.hack/hack.config.json` and win over global values.
+- `controlPlane.gateway.enabled` is project-scoped and implicitly enables the gateway extension.
+
+See `SPECS/control-plane/consolidated.md` and `docs/extensions.md` for the extension SDK surface.
+
+### Gateway (remote access)
+
+The gateway exposes `hackd` over HTTP/WS with token auth. It binds to `127.0.0.1` by default and
+should be exposed via a Zero Trust/VPN or SSH tunnel when needed. `hack remote setup` is the
+one-command flow that enables the gateway, creates a token, and can configure + start exposure
+(Cloudflare/Tailscale/SSH) via prompts. It prints a QR by default (use `--no-qr` to skip).
+
+```bash
+hack remote setup
+# or:
+hack gateway setup
+# or manually:
+hack gateway enable
+hack daemon stop && hack daemon start
+hack x gateway token-create
+```
+
+Gateway tokens default to read-only. For non-GET requests, set
+`controlPlane.gateway.allowWrites = true` globally and create a write-scoped token:
+
+```bash
+hack config set --global 'controlPlane.gateway.allowWrites' true
+```
+
+```bash
+hack x gateway token-create --scope write
+```
+
+Current gateway API (HTTP/WS):
+- status/metrics/projects/ps (`/v1/*`)
+- supervisor jobs: list/create/show/cancel + log/event stream (`/control-plane/*`)
+- supervisor shells: create/show + PTY stream (write token + allowWrites)
+- CLI shell client: `hack x supervisor shell` (gateway + write token required)
+
+Interactive shells are available over the gateway WebSocket; the CLI can attach with
+`hack x supervisor shell` (write token + allowWrites required). Use SSH/Zero Trust for a full
+terminal UI, or run commands via supervisor jobs.
+
+See `docs/gateway-api.md` for full API usage, structured workflow patterns, and a runnable demo.
+
+Remote access options (recommended order):
+1) SSH tunnel to the gateway port for quick, ad-hoc access.
+2) Zero Trust/VPN (Tailscale, Cloudflare, etc.) for persistent access.
+3) Optional Caddy route (`https://gateway.hack`) for local convenience.
+
+Note: Cloudflare Tunnel is ideal for the gateway HTTP/WS surface. It is not a direct SSH
+replacement on iOS; use Tailscale/VPN for SSH access from mobile clients.
+If you already use Cloudflare WARP, configure a private network route to your laptop and
+use that IP/hostname for SSH in your mobile client.
+
+Remote helper:
+- `hack remote` shows status and offers to run setup when needed.
+- `hack remote status` prints gateway + exposure status.
+- `hack remote qr` prints a QR payload for SSH or gateway usage (confirm before sharing).
+- `hack remote monitor` opens a mini TUI (status + gateway audit log tail).
+
+Cloudflare tunnel helper:
+
+```bash
+hack x cloudflare tunnel-setup --hostname gateway.example.com
+hack x cloudflare tunnel-start
+```
+
+Tailscale helper:
+
+```bash
+hack x tailscale setup
+hack x tailscale status
+```
+
+DNS note: `cloudflared tunnel route dns <tunnel> <hostname>` creates the required CNAME to
+`<tunnel-id>.cfargotunnel.com` in your Cloudflare zone (proxied).
+
+### Supervisor (jobs + shells)
+
+The supervisor is the job/shell runner that powers agent workflows and remote execution. It can run
+commands, stream logs, and host PTY-backed shells. Use it locally with `hack x supervisor` or
+remotely over the gateway.
+
+Docs: `docs/supervisor.md`.
+
+## Docs
+
+Start here:
+- `docs/README.md` (index)
+- `docs/architecture.md`
+- `docs/gateway.md`
+- `docs/extensions.md`
 
 ## Agent setup (CLI-first)
 
@@ -290,13 +427,22 @@ hack branch open feature-x
 ```
 
 
-## Service-to-service connections (DB/Redis)
+## Service-to-service connections (HTTP vs DB/Redis)
 
 If your app runs in Docker (the default in `hack`), don’t connect to `127.0.0.1` / `localhost` for Postgres/Redis.
 Inside a container, `localhost` is that container, not the other compose services.
 
-With CoreDNS enabled (`internal.dns: true`), containers can use the same `https://*.hack` URLs as your host.
-If CoreDNS isn’t running (or you disable it), use the Compose service hostname on the default network:
+If you previously ran everything on your host and used `localhost:PORT`, update those references when you
+move into containers:
+
+- **HTTP services**: use the same `https://*.hack` hostname you open from the host (whatever you configured in Caddy labels, e.g. `https://api.myapp.hack`).
+- **Non-HTTP services** (DB/Redis/etc.): use the Compose service hostname (e.g. `db`, `redis`).
+
+For HTTP services, use the same `https://*.hack` URLs you use on the host. `hack up` injects internal DNS,
+TLS trust, and `extra_hosts` mappings so `*.hack` resolves reliably inside containers. If you see `ENOTFOUND`
+inside containers, run `hack restart` to refresh the host mappings.
+
+For non-HTTP services, use the Compose service hostname on the default network:
 
 - `Postgres: db:5432`
 - `Redis: redis:6379`
@@ -388,7 +534,8 @@ hack up --project my-project
 OAuth providers (notably Google) require `localhost` or a host that ends with a real public suffix.
 
 We keep `.hack` as the primary local dev domain, and optionally expose an alias domain for OAuth flows.
-Default: `*.hack.gy` → `127.0.0.1` (via dnsmasq + OS resolver).
+If the OAuth alias is enabled, `hack global install` configures `*.hack.gy` to resolve to `127.0.0.1`
+via dnsmasq + the OS resolver.
 
 If you use Next.js (or another dev server that cares about dev origins), configure its dev allowlist to include the proxy domains.
 Next.js supports `allowedDevOrigins` (wildcards supported) in `next.config.js`:
@@ -431,20 +578,19 @@ Use `--out <dir>` if you want certs written somewhere else.
 
 ## Internal DNS (containers)
 
-`hack global install` runs CoreDNS on the `hack-dev` network and pins Caddy + CoreDNS to stable IPs.
-CoreDNS answers `*.hack` and `*.hack.*` with Caddy’s IP so containers can use the same `https://*.hack`
-URLs as the host. All other DNS is forwarded to Docker’s resolver.
+`hack global install` runs CoreDNS on the `hack-dev` network. CoreDNS answers `*.hack` and `*.hack.*` with
+Caddy’s current IP so containers can use the same `https://*.hack` URLs as the host.
+
+Some runtimes don’t honor custom DNS for `*.hack` reliably, so `hack up` also injects `extra_hosts` mappings
+to the Caddy IP. If the Caddy IP changes, `hack status`, `hack doctor`, and the TUI show a warning; fix it
+with `hack restart` to refresh the mapping.
+
+If you also need `extra_hosts` for non-`*.hack` hostnames (common when you run host-local tunnels/proxies
+and want containers to reach them by their real domain), use `hack internal extra-hosts set` to write a
+repo-local `.hack/.internal/extra-hosts.json` that gets merged into the generated Compose override.
 
 When `internal.tls` is enabled, `hack up` mounts the Caddy Local CA into each container and sets common
 SSL env vars so HTTPS to `*.hack` is trusted inside containers.
-
-If you created the `hack-dev` network before this feature, recreate it once so the static IPs can be
-assigned (better runtime compatibility):
-
-```bash
-docker network rm hack-dev
-hack global install
-```
 
 If you update `hack`, rerun `hack global install` once to refresh the CoreDNS config.
 
@@ -604,11 +750,12 @@ See examples:
 
 - Logs missing in Grafana: ensure Alloy is running (`hack global status`) and try `{app="docker"}` in Explore.
 
-- `ENOTFOUND` for `*.hack`/`*.hack.gy` inside containers: refresh CoreDNS config with `hack global install`,
-  then restart CoreDNS: `docker compose -f ~/.hack/caddy/docker-compose.yml restart coredns`.
+- `ENOTFOUND` for `*.hack` inside containers: run `hack restart` to refresh `extra_hosts` mappings (check
+  `hack status` or the TUI for Caddy IP mismatch warnings).
 
 - `EAI_AGAIN` for external domains inside containers (e.g. `api.clerk.com`): CoreDNS isn’t forwarding.
-  Run `hack global install` and restart CoreDNS as above.
+  Run `hack global install` and restart CoreDNS:
+  `docker compose -f ~/.hack/caddy/docker-compose.yml restart coredns`.
 
 - `hack global up` warns about `hack-dev` network labels or missing subnet: remove the network and reinstall:
   `docker network rm hack-dev` then `hack global install`.
@@ -701,7 +848,8 @@ See `PACKAGING.md` for details.
 
 See also:
 - [Examples](examples/next-app/README.md)
-- [Architecture](ARCHITECTURE.md)
+- [Docs](docs/README.md)
+- [Architecture](docs/architecture.md)
 
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>

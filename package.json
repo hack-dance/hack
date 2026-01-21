@@ -15,11 +15,19 @@
     "install:bin": "bun run build && bun run scripts/install-cli.ts --mode=bin --force",
     "install:status": "bun run scripts/install-status.ts",
     "lint": "bun run scripts/lint.ts",
+    "macos:project-gen": "cd apps/macos && xcodegen -c",
+    "macos:open": "open apps/macos/HackDesktop.xcodeproj",
+    "macos:dev": "bun run macos:project-gen && bun run macos:open",
+    "macos:build": "cd apps/macos && swift build",
+    "macos:test": "cd apps/macos && swift test",
+    "macos:release": "./scripts/build-macos-release.sh",
+    "macos:ghostty:setup": "bun run scripts/macos-ghostty-setup.ts",
     "prepare": "husky",
     "release:prepare": "bunx semantic-release --no-ci",
     "typecheck": "bunx tsc -p tsconfig.json --noEmit",
     "uninstall:local": "bun run scripts/uninstall-cli.ts",
-    "test": "bun test"
+    "test": "bun test",
+    "test:e2e:gateway": "bun run scripts/gateway-e2e.ts"
   },
   "devDependencies": {
     "@commitlint/cli": "19.8.1",
@@ -30,6 +38,7 @@
     "@semantic-release/git": "10.0.1",
     "@semantic-release/release-notes-generator": "14.1.0",
     "@types/bun": "latest",
+    "@types/qrcode": "^1.5.6",
     "commitizen": "4.3.1",
     "cz-conventional-changelog": "3.3.0",
     "husky": "9.1.7",
@@ -50,6 +59,7 @@
     "@clack/prompts": "1.0.0-alpha.9",
     "@modelcontextprotocol/sdk": "1.25.1",
     "@opentui/core": "^0.1.68",
+    "qrcode": "^1.5.4",
     "zod": "4.3.4"
   }
 }

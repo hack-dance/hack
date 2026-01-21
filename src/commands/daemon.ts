@@ -1,9 +1,8 @@
-import { readTextFile } from "../lib/fs.ts"
+import { pathExists, readTextFile } from "../lib/fs.ts"
 import { resolveHackInvocation } from "../lib/hack-cli.ts"
 import { logger } from "../ui/logger.ts"
 import { CliUsageError, defineCommand, defineOption, withHandler } from "../cli/command.ts"
 import { optJson, optTail } from "../cli/options.ts"
-import { requestDaemonJson } from "../daemon/client.ts"
 import { resolveDaemonPaths } from "../daemon/paths.ts"
 import {
   isProcessRunning,
@@ -11,9 +10,20 @@ import {
   waitForProcessExit
 } from "../daemon/process.ts"
 import { runDaemon } from "../daemon/server.ts"
-import { readDaemonStatus } from "../daemon/status.ts"
+import { requestDaemonJson } from "../daemon/client.ts"
+import { buildDaemonStatusReport, readDaemonStatus } from "../daemon/status.ts"
+import {
+  getLaunchdServiceStatus,
+  installLaunchdService,
+  kickstartLaunchdService,
+  stopLaunchdService,
+  uninstallLaunchdService
+} from "../daemon/launchd.ts"
+import { readControlPlaneConfig } from "../control-plane/sdk/config.ts"
+import { updateGlobalConfig } from "../lib/config.ts"
 
 import type { CliContext, CommandArgs } from "../cli/command.ts"
+import type { DaemonLaunchdConfig } from "../control-plane/sdk/config.ts"
 
 const optForeground = defineOption({
   name: "foreground",
@@ -67,11 +77,79 @@ const logsSpec = defineCommand({
   subcommands: []
 } as const)
 
+const clearSpec = defineCommand({
+  name: "clear",
+  summary: "Clear stale hackd pid/socket files",
+  group: "Diagnostics",
+  options: [],
+  positionals: [],
+  subcommands: []
+} as const)
+
+const restartSpec = defineCommand({
+  name: "restart",
+  summary: "Restart hackd",
+  group: "Diagnostics",
+  options: [],
+  positionals: [],
+  subcommands: []
+} as const)
+
+const optRunAtLoad = defineOption({
+  name: "run-at-load",
+  type: "boolean",
+  long: "--run-at-load",
+  description: "Start hackd automatically on login"
+} as const)
+
+const optNoRunAtLoad = defineOption({
+  name: "no-run-at-load",
+  type: "boolean",
+  long: "--no-run-at-load",
+  description: "Do not start hackd automatically on login"
+} as const)
+
+const optGuiOnly = defineOption({
+  name: "gui-only",
+  type: "boolean",
+  long: "--gui-only",
+  description: "Only run in GUI sessions (default)"
+} as const)
+
+const optNoGuiOnly = defineOption({
+  name: "no-gui-only",
+  type: "boolean",
+  long: "--no-gui-only",
+  description: "Run in all session types (including SSH)"
+} as const)
+
+const installSpec = defineCommand({
+  name: "install",
+  summary: "Install hackd as a launchd service (macOS)",
+  group: "Diagnostics",
+  options: [optRunAtLoad, optNoRunAtLoad, optGuiOnly, optNoGuiOnly] as const,
+  positionals: [],
+  subcommands: []
+} as const)
+
+const uninstallSpec = defineCommand({
+  name: "uninstall",
+  summary: "Uninstall hackd launchd service (macOS)",
+  group: "Diagnostics",
+  options: [],
+  positionals: [],
+  subcommands: []
+} as const)
+
 export const daemonStartCommand = withHandler(startSpec, handleDaemonStart)
 export const daemonStopCommand = withHandler(stopSpec, handleDaemonStop)
 export const daemonStatusCommand = withHandler(statusSpec, handleDaemonStatus)
 export const daemonMetricsCommand = withHandler(metricsSpec, handleDaemonMetrics)
 export const daemonLogsCommand = withHandler(logsSpec, handleDaemonLogs)
+export const daemonClearCommand = withHandler(clearSpec, handleDaemonClear)
+export const daemonRestartCommand = withHandler(restartSpec, handleDaemonRestart)
+export const daemonInstallCommand = withHandler(installSpec, handleDaemonInstall)
+export const daemonUninstallCommand = withHandler(uninstallSpec, handleDaemonUninstall)
 
 const daemonSpec = defineCommand({
   name: "daemon",
@@ -82,9 +160,13 @@ const daemonSpec = defineCommand({
   subcommands: [
     daemonStartCommand,
     daemonStopCommand,
+    daemonRestartCommand,
     daemonStatusCommand,
     daemonMetricsCommand,
-    daemonLogsCommand
+    daemonLogsCommand,
+    daemonClearCommand,
+    daemonInstallCommand,
+    daemonUninstallCommand
   ]
 } as const)
 
@@ -97,6 +179,10 @@ type DaemonStopArgs = CommandArgs<typeof stopSpec.options, readonly []>
 type DaemonStatusArgs = CommandArgs<typeof statusSpec.options, readonly []>
 type DaemonMetricsArgs = CommandArgs<typeof metricsSpec.options, readonly []>
 type DaemonLogsArgs = CommandArgs<typeof logsSpec.options, readonly []>
+type DaemonClearArgs = CommandArgs<typeof clearSpec.options, readonly []>
+type DaemonRestartArgs = CommandArgs<typeof restartSpec.options, readonly []>
+type DaemonInstallArgs = CommandArgs<typeof installSpec.options, readonly []>
+type DaemonUninstallArgs = CommandArgs<typeof uninstallSpec.options, readonly []>
 
 async function handleDaemonStart({
   args
@@ -180,34 +266,82 @@ async function handleDaemonStatus({
 }): Promise<number> {
   const paths = resolveDaemonPaths({})
   const status = await readDaemonStatus({ paths })
+  const processRunning = status.running
+  let apiOk = false
+
+  if (status.socketExists) {
+    const ping = await requestDaemonJson({
+      path: "/v1/status",
+      timeoutMs: 500,
+      allowIncompatible: true
+    })
+    apiOk = ping?.ok ?? false
+  }
+
+  const report = buildDaemonStatusReport({
+    pid: status.pid,
+    processRunning,
+    socketExists: status.socketExists,
+    logExists: status.logExists,
+    apiOk
+  })
+
+  const launchdStatus = process.platform === "darwin"
+    ? await getLaunchdServiceStatus({ paths })
+    : null
 
   if (args.options.json) {
     process.stdout.write(
       `${JSON.stringify(
         {
-          running: status.running,
-          pid: status.pid,
+          status: report.status,
+          running: report.running,
+          api_ok: report.apiOk,
+          process_running: report.processRunning,
+          stale: report.stale,
+          stale_reason: report.staleReason,
+          pid: report.pid,
           socket_path: paths.socketPath,
-          socket_exists: status.socketExists,
+          socket_exists: report.socketExists,
           log_path: paths.logPath,
-          log_exists: status.logExists
+          log_exists: report.logExists,
+          launchd: launchdStatus
+            ? {
+                installed: launchdStatus.installed,
+                loaded: launchdStatus.loaded,
+                running: launchdStatus.running,
+                pid: launchdStatus.pid,
+                exit_status: launchdStatus.exitStatus,
+                plist_path: paths.launchdPlistPath
+              }
+            : null
         },
         null,
         2
       )}\n`
     )
-    return status.running ? 0 : 1
+    return report.status == "running" ? 0 : 1
   }
 
-  if (status.running) {
-    logger.success({ message: `hackd running (pid ${status.pid ?? "unknown"})` })
+  if (report.status == "running") {
+    logger.success({ message: `hackd running (pid ${report.pid ?? "unknown"})` })
+    if (launchdStatus?.installed) {
+      logger.info({ message: `  launchd: ${launchdStatus.loaded ? "loaded" : "not loaded"}` })
+    }
     return 0
   }
 
-  const stale = status.pid !== null && !isProcessRunning({ pid: status.pid })
-  logger.warn({
-    message: stale ? "hackd stopped (stale pid file present)" : "hackd is not running"
-  })
+  if (report.status == "starting") {
+    logger.warn({
+      message: `hackd starting (pid ${report.pid ?? "unknown"}): API not responding yet`
+    })
+    return 1
+  }
+
+  logger.warn({ message: report.stale ? "hackd stopped (stale state detected)" : "hackd is not running" })
+  if (launchdStatus?.installed) {
+    logger.info({ message: `  launchd: ${launchdStatus.loaded ? "loaded (not running)" : "not loaded"}` })
+  }
   return 1
 }
 
@@ -247,6 +381,61 @@ async function handleDaemonLogs({
   return 0
 }
 
+async function handleDaemonClear({
+  args: _args
+}: {
+  readonly ctx: CliContext
+  readonly args: DaemonClearArgs
+}): Promise<number> {
+  const paths = resolveDaemonPaths({})
+  const status = await readDaemonStatus({ paths })
+
+  if (status.running) {
+    logger.warn({ message: "hackd is running; stop it before clearing state" })
+    return 1
+  }
+
+  const pidExists = await pathExists(paths.pidPath)
+  const socketExists = await pathExists(paths.socketPath)
+
+  if (!pidExists && !socketExists) {
+    logger.info({ message: "No stale hackd state found" })
+    return 0
+  }
+
+  if (pidExists) {
+    await removeFileIfExists({ path: paths.pidPath })
+  }
+  if (socketExists) {
+    await removeFileIfExists({ path: paths.socketPath })
+  }
+
+  logger.success({ message: "Cleared stale hackd state" })
+  return 0
+}
+
+async function handleDaemonRestart({
+  args: _args,
+  ctx
+}: {
+  readonly ctx: CliContext
+  readonly args: DaemonRestartArgs
+}): Promise<number> {
+  const stopArgs: DaemonStopArgs = {
+    options: {},
+    positionals: {},
+    raw: { argv: [], positionals: [] }
+  }
+  const startArgs: DaemonStartArgs = {
+    options: { foreground: false },
+    positionals: {},
+    raw: { argv: [], positionals: [] }
+  }
+
+  await handleDaemonStop({ ctx, args: stopArgs })
+  return await handleDaemonStart({ ctx, args: startArgs })
+}
+
 async function waitForDaemonStart({
   paths
 }: {
@@ -259,4 +448,120 @@ async function waitForDaemonStart({
     await new Promise(resolve => setTimeout(resolve, 150))
   }
   return false
+}
+
+async function handleDaemonInstall({
+  args
+}: {
+  readonly ctx: CliContext
+  readonly args: DaemonInstallArgs
+}): Promise<number> {
+  if (process.platform !== "darwin") {
+    logger.warn({ message: "launchd integration is only available on macOS" })
+    return 1
+  }
+
+  const paths = resolveDaemonPaths({})
+  const controlPlane = await readControlPlaneConfig({})
+
+  const runAtLoad = args.options["run-at-load"] === true
+    ? true
+    : args.options["no-run-at-load"] === true
+      ? false
+      : controlPlane.config.daemon.launchd.runAtLoad
+
+  const guiSessionOnly = args.options["no-gui-only"] === true
+    ? false
+    : args.options["gui-only"] === true
+      ? true
+      : controlPlane.config.daemon.launchd.guiSessionOnly
+
+  const launchdConfig: DaemonLaunchdConfig = {
+    installed: true,
+    runAtLoad,
+    guiSessionOnly
+  }
+
+  const result = await installLaunchdService({ paths, config: launchdConfig })
+  if (!result.ok) {
+    logger.error({ message: `Failed to install launchd service: ${result.error}` })
+    return 1
+  }
+
+  await updateGlobalConfig({
+    path: "controlPlane.daemon.launchd.installed",
+    value: true
+  })
+  await updateGlobalConfig({
+    path: "controlPlane.daemon.launchd.runAtLoad",
+    value: runAtLoad
+  })
+  await updateGlobalConfig({
+    path: "controlPlane.daemon.launchd.guiSessionOnly",
+    value: guiSessionOnly
+  })
+
+  if (result.alreadyInstalled) {
+    logger.info({ message: "hackd launchd service already installed (config unchanged)" })
+  } else {
+    logger.success({ message: "hackd launchd service installed" })
+  }
+
+  const runAtLoadMsg = runAtLoad ? "enabled" : "disabled"
+  const guiOnlyMsg = guiSessionOnly ? "GUI sessions only" : "all sessions"
+  logger.info({ message: `  Run at login: ${runAtLoadMsg}` })
+  logger.info({ message: `  Session type: ${guiOnlyMsg}` })
+  logger.info({ message: `  Plist: ${paths.launchdPlistPath}` })
+
+  const launchdStatus = await getLaunchdServiceStatus({ paths })
+  if (!launchdStatus.running) {
+    logger.info({ message: "Starting hackd via launchd..." })
+    const kickResult = await kickstartLaunchdService()
+    if (!kickResult.ok) {
+      logger.warn({ message: `Failed to start service: ${kickResult.error}` })
+      return 1
+    }
+
+    const started = await waitForDaemonStart({ paths })
+    if (started) {
+      logger.success({ message: "hackd started via launchd" })
+    } else {
+      logger.warn({ message: "hackd may not have started yet; check `hack daemon status`" })
+    }
+  }
+
+  return 0
+}
+
+async function handleDaemonUninstall({
+  args: _args
+}: {
+  readonly ctx: CliContext
+  readonly args: DaemonUninstallArgs
+}): Promise<number> {
+  if (process.platform !== "darwin") {
+    logger.warn({ message: "launchd integration is only available on macOS" })
+    return 1
+  }
+
+  const paths = resolveDaemonPaths({})
+  const result = await uninstallLaunchdService({ paths })
+
+  if (!result.ok) {
+    logger.error({ message: `Failed to uninstall launchd service: ${result.error}` })
+    return 1
+  }
+
+  await updateGlobalConfig({
+    path: "controlPlane.daemon.launchd.installed",
+    value: false
+  })
+
+  if (result.notInstalled) {
+    logger.info({ message: "hackd launchd service was not installed" })
+  } else {
+    logger.success({ message: "hackd launchd service uninstalled" })
+  }
+
+  return 0
 }

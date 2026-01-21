@@ -4,6 +4,7 @@ import {
   isCancel,
   multiselect,
   note,
+  select,
   text
 } from "@clack/prompts"
 
@@ -37,7 +38,13 @@ import { parseJsonLines } from "../lib/json-lines.ts"
 import { getString, isRecord } from "../lib/guards.ts"
 import { touchBranchUsage } from "../lib/branches.ts"
 import { parseTimeInput } from "../lib/time.ts"
-import { ensureDir, pathExists, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts"
+import {
+  ensureDir,
+  ensureGitignoreEntry,
+  pathExists,
+  readTextFile,
+  writeTextFileIfChanged
+} from "../lib/fs.ts"
 import { requestDaemonJson } from "../daemon/client.ts"
 import { parseDurationMs } from "../lib/duration.ts"
 import { buildLogSelector, resolveShouldTryLoki, resolveUseLoki } from "../lib/logs.ts"
@@ -544,6 +551,35 @@ function cleanupYaml(yaml: string): string {
   return yaml.replaceAll(/: \n/g, ":\n")
 }
 
+async function readInternalExtraHostsFile(opts: {
+  readonly projectDir: string
+}): Promise<Record<string, string>> {
+  const path = resolve(opts.projectDir, ".internal", "extra-hosts.json")
+  const text = await readTextFile(path)
+  if (!text) return {}
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return {}
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {}
+
+  const out: Record<string, string> = {}
+  for (const [keyRaw, valueRaw] of Object.entries(parsed as Record<string, unknown>)) {
+    const key = keyRaw.trim()
+    if (key.length === 0) continue
+    if (typeof valueRaw !== "string") continue
+    const value = valueRaw.trim()
+    if (value.length === 0) continue
+    out[key] = value
+  }
+
+  return out
+}
+
 function ensureTrailingNewline(text: string): string {
   return text.endsWith("\n") ? text : `${text}\n`
 }
@@ -570,14 +606,25 @@ const INTERNAL_CA_CONTAINER_PATH = `${INTERNAL_CA_CONTAINER_DIR}/caddy-local-aut
 async function resolveInternalComposeOverride(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>
+  readonly branch?: string | null
+  readonly devHost?: string | null
+  readonly aliasHost?: string | null
 }): Promise<string | null> {
   const internal = resolveInternalSettings(opts.cfg)
-  if (!internal.dns && !internal.tls) return null
+
+  const managedExtraHosts = await readInternalExtraHostsFile({ projectDir: opts.project.projectDir })
+  const hasAnyExtraHosts =
+    (internal.extraHosts && Object.keys(internal.extraHosts).length > 0) ||
+    Object.keys(managedExtraHosts).length > 0
+
+  if (!internal.dns && !internal.tls && !hasAnyExtraHosts) return null
 
   const services = await readComposeServiceNames(opts.project.composeFile)
   if (services.length === 0) return null
 
   let dnsServer: string | null = null
+  let caddyIp: string | null = null
+  let caddyHosts: readonly string[] = []
   if (internal.dns) {
     dnsServer = await resolveCoreDnsServer()
     if (!dnsServer) {
@@ -585,6 +632,27 @@ async function resolveInternalComposeOverride(opts: {
         message:
           "CoreDNS is not reachable; internal DNS for *.hack is disabled. Run `hack global install` (or `hack global up`)."
       })
+    }
+    caddyIp = await resolveCaddyServer()
+    if (!caddyIp) {
+      logger.warn({
+        message:
+          "Caddy is not reachable; internal *.hack host mappings are disabled. Run `hack global install` (or `hack global up`)."
+      })
+    }
+    caddyHosts = await readComposeCaddyHosts(opts.project.composeFile)
+    if (caddyHosts.length > 0 && opts.branch) {
+      const devHost = opts.devHost ?? (await resolveBranchDevHost({ project: opts.project }))
+      const baseHosts = [devHost, opts.aliasHost ?? null].filter(
+        (host): host is string => typeof host === "string" && host.length > 0
+      )
+      if (baseHosts.length > 0) {
+        caddyHosts = applyBranchToHosts({
+          hosts: caddyHosts,
+          branch: opts.branch,
+          baseHosts
+        })
+      }
     }
   }
 
@@ -599,13 +667,21 @@ async function resolveInternalComposeOverride(opts: {
     }
   }
 
-  if (!dnsServer && !caPath) return null
+  if (!dnsServer && !caPath && !caddyIp) return null
 
   const overrideServices: Record<string, Record<string, unknown>> = {}
   for (const service of services) {
     const entry: Record<string, unknown> = {}
     if (dnsServer) {
       entry["dns"] = [dnsServer]
+    }
+    const extraHosts: Record<string, string> = {
+      ...(caddyIp && caddyHosts.length > 0 ? buildExtraHostsMap({ hosts: caddyHosts, ip: caddyIp }) : {}),
+      ...(internal.extraHosts ? internal.extraHosts : {}),
+      ...managedExtraHosts
+    }
+    if (Object.keys(extraHosts).length > 0) {
+      entry["extra_hosts"] = extraHosts
     }
     if (caPath) {
       entry["volumes"] = [`${caPath}:${INTERNAL_CA_CONTAINER_PATH}:ro`]
@@ -635,10 +711,12 @@ async function resolveInternalComposeOverride(opts: {
 function resolveInternalSettings(cfg: Awaited<ReturnType<typeof readProjectConfig>>): {
   readonly dns: boolean
   readonly tls: boolean
+  readonly extraHosts: Record<string, string> | null
 } {
   return {
     dns: cfg.internal?.dns ?? true,
-    tls: cfg.internal?.tls ?? true
+    tls: cfg.internal?.tls ?? true,
+    extraHosts: cfg.internal?.extraHosts ?? null
   }
 }
 
@@ -659,6 +737,86 @@ async function readComposeServiceNames(composeFile: string): Promise<readonly st
   return Object.keys(servicesRaw).sort((a, b) => a.localeCompare(b))
 }
 
+async function readComposeCaddyHosts(composeFile: string): Promise<readonly string[]> {
+  const text = await readTextFile(composeFile)
+  if (!text) return []
+
+  let parsed: unknown
+  try {
+    parsed = YAML.parse(text)
+  } catch {
+    return []
+  }
+
+  if (!isRecord(parsed)) return []
+  const servicesRaw = parsed["services"]
+  if (!isRecord(servicesRaw)) return []
+
+  const hosts = new Set<string>()
+  for (const serviceRaw of Object.values(servicesRaw)) {
+    if (!isRecord(serviceRaw)) continue
+    const labels = normalizeLabels(serviceRaw["labels"])
+    if (!labels) continue
+    const caddyRaw = labels["caddy"]
+    if (typeof caddyRaw !== "string") continue
+    for (const host of extractCaddyHosts(caddyRaw)) {
+      hosts.add(host)
+    }
+  }
+
+  return Array.from(hosts).sort((a, b) => a.localeCompare(b))
+}
+
+function extractCaddyHosts(value: string): readonly string[] {
+  const out: string[] = []
+  for (const part of value.split(",")) {
+    let host = part.trim()
+    if (!host) continue
+
+    if (host.startsWith("http://")) host = host.slice("http://".length)
+    if (host.startsWith("https://")) host = host.slice("https://".length)
+    const slashIdx = host.indexOf("/")
+    if (slashIdx !== -1) host = host.slice(0, slashIdx)
+    if (host.length === 0) continue
+    if (host.includes("*") || host.includes("{") || host.includes("}") || host.includes("$")) continue
+    if (host.includes(":")) continue
+
+    out.push(host)
+  }
+  return out
+}
+
+function applyBranchToHosts(opts: {
+  readonly hosts: readonly string[]
+  readonly branch: string
+  readonly baseHosts: readonly string[]
+}): readonly string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const host of opts.hosts) {
+    const next = applyBranchToHost({
+      host,
+      branch: opts.branch,
+      baseHosts: opts.baseHosts
+    })
+    if (seen.has(next)) continue
+    seen.add(next)
+    out.push(next)
+  }
+  return out
+}
+
+function buildExtraHostsMap(opts: {
+  readonly hosts: readonly string[]
+  readonly ip: string
+}): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const host of opts.hosts) {
+    out[host] = opts.ip
+  }
+  return out
+}
+
 async function resolveCoreDnsServer(): Promise<string | null> {
   const env = (process.env.HACK_COREDNS_IP ?? "").trim()
   if (env.length > 0) return env
@@ -675,6 +833,47 @@ async function resolveCoreDnsServer(): Promise<string | null> {
   if (!(await pathExists(composePath))) return null
 
   const ps = await exec(["docker", "compose", "-f", composePath, "ps", "-q", "coredns"], {
+    cwd: dirname(composePath),
+    stdin: "ignore"
+  })
+  const id = ps.exitCode === 0 ? ps.stdout.trim() : ""
+  if (!id) return null
+
+  const inspect = await exec(["docker", "inspect", "--format", "{{json .NetworkSettings.Networks}}", id], {
+    stdin: "ignore"
+  })
+  if (inspect.exitCode !== 0) return null
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(inspect.stdout)
+  } catch {
+    return null
+  }
+  if (!isRecord(parsed)) return null
+
+  const network = parsed[DEFAULT_INGRESS_NETWORK]
+  if (!isRecord(network)) return null
+  const ip = network["IPAddress"]
+  return typeof ip === "string" && ip.length > 0 ? ip : null
+}
+
+async function resolveCaddyServer(): Promise<string | null> {
+  const env = (process.env.HACK_CADDY_IP ?? "").trim()
+  if (env.length > 0) return env
+
+  const home = process.env.HOME
+  if (!home) return null
+
+  const composePath = resolve(
+    home,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    GLOBAL_CADDY_COMPOSE_FILENAME
+  )
+  if (!(await pathExists(composePath))) return null
+
+  const ps = await exec(["docker", "compose", "-f", composePath, "ps", "-q", "caddy"], {
     cwd: dirname(composePath),
     stdin: "ignore"
   })
@@ -891,6 +1090,13 @@ async function handleInit({
     await ensureDir(hackDir)
   }
 
+  // Ensure .hack/.internal is gitignored (contains local paths, certs, etc)
+  await ensureGitignoreEntry({
+    gitignorePath: resolve(repoRoot, ".gitignore"),
+    entry: ".hack/.internal/",
+    comment: "# hack internal (local overrides)"
+  })
+
   await writeTextFileIfChanged(
     configFile,
     renderProjectConfigJson({
@@ -1010,6 +1216,13 @@ async function handleInitAuto({
   }
 
   await ensureDir(hackDir)
+
+  // Ensure .hack/.internal is gitignored (contains local paths, certs, etc)
+  await ensureGitignoreEntry({
+    gitignorePath: resolve(repoRoot, ".gitignore"),
+    entry: ".hack/.internal/",
+    comment: "# hack internal (local overrides)"
+  })
 
   await writeTextFileIfChanged(
     configFile,
@@ -2202,7 +2415,13 @@ async function handleUp({
     branch && devHost ? resolveBranchAliasHost({ devHost, cfg }) : null
   const internalSettings = resolveInternalSettings(cfg)
   await maybePromptToStartGlobal({ internal: internalSettings })
-  const internalOverride = await resolveInternalComposeOverride({ project, cfg })
+  const internalOverride = await resolveInternalComposeOverride({
+    project,
+    cfg,
+    branch,
+    devHost,
+    aliasHost
+  })
   const composeFiles =
     branch && devHost ?
       await resolveBranchComposeFiles({ project, branch, devHost, aliasHost })
@@ -2322,7 +2541,13 @@ async function handleRestart({
 
   const devHost = branch ? await resolveBranchDevHost({ project }) : null
   const aliasHost = branch && devHost ? resolveBranchAliasHost({ devHost, cfg }) : null
-  const internalOverride = await resolveInternalComposeOverride({ project, cfg })
+  const internalOverride = await resolveInternalComposeOverride({
+    project,
+    cfg,
+    branch,
+    devHost,
+    aliasHost
+  })
   const composeFiles =
     branch && devHost ?
       await resolveBranchComposeFiles({ project, branch, devHost, aliasHost })
@@ -2543,7 +2768,15 @@ async function handleRun({
 
   const baseProjectName = branch ? await resolveComposeProjectName({ project, cfg }) : null
   const composeProjectName = branch && baseProjectName ? `${baseProjectName}--${branch}` : null
-  const internalOverride = await resolveInternalComposeOverride({ project, cfg })
+  const devHost = branch ? await resolveBranchDevHost({ project }) : null
+  const aliasHost = branch && devHost ? resolveBranchAliasHost({ devHost, cfg }) : null
+  const internalOverride = await resolveInternalComposeOverride({
+    project,
+    cfg,
+    branch,
+    devHost,
+    aliasHost
+  })
   const composeFiles = internalOverride ? [project.composeFile, internalOverride] : [project.composeFile]
   return await composeRuntimeBackend.run({
     composeFiles,

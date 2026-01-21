@@ -40,4 +40,6 @@ hack config set --global controlPlane.gateway.bind 0.0.0.0
 hack daemon stop && hack daemon start
 ```
 
+> **Security note:** Option B exposes the gateway on all network interfaces, not just Tailscale. If your machine is connected to other networks (public Wi-Fi, corporate LAN), the gateway will be accessible from those networks. Use Option A (`tailscale serve`) for better isolation, or ensure firewall rules restrict access when using Option B.
+
 Then access via your MagicDNS name or tailnet IP.

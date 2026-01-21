@@ -58,11 +58,19 @@ Neither scales. Both slow you down in dumb, repeatable ways.
 
 ### Install
 
-Grab the install script
+**Option A: Shell script (CLI only)**
 
 ```bash
-curl -fsSL https://github.com/hack-dance/hack-cli/releases/latest/download/hack-install.sh | bash
+curl -fsSL https://github.com/hack-dance/hack/releases/latest/download/hack-install.sh | bash
 ```
+
+**Option B: macOS DMG (CLI + Desktop App)**
+
+Download the latest DMG from [GitHub Releases](https://github.com/hack-dance/hack/releases/latest).
+
+The DMG includes:
+- **Hack Desktop** - macOS menu bar app for managing projects
+- **Install Hack CLI** - double-click to install the CLI to `~/.hack/bin`
 
 ### Setup
 ```bash

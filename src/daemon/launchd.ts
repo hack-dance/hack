@@ -273,14 +273,14 @@ export async function getLaunchdServiceStatus({
   const stdout = await new Response(proc.stdout).text()
 
   const pidMatch = stdout.match(/pid\s*=\s*(\d+)/i)
-  const pid = pidMatch ? Number.parseInt(pidMatch[1], 10) : null
+  const pid = pidMatch?.[1] ? Number.parseInt(pidMatch[1], 10) : null
 
   const stateMatch = stdout.match(/state\s*=\s*(\w+)/i)
-  const state = stateMatch ? stateMatch[1].toLowerCase() : null
+  const state = stateMatch?.[1]?.toLowerCase() ?? null
   const running = state === "running" || (pid !== null && pid > 0)
 
   const exitStatusMatch = stdout.match(/last exit code\s*=\s*(-?\d+)/i)
-  const exitStatus = exitStatusMatch ? Number.parseInt(exitStatusMatch[1], 10) : null
+  const exitStatus = exitStatusMatch?.[1] ? Number.parseInt(exitStatusMatch[1], 10) : null
 
   return {
     installed: true,

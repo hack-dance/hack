@@ -220,7 +220,7 @@ export function renderAgentDocsSnippet(): string {
     "- With infra: `hack session start <project> --up`",
     "- List: `hack session list`",
     "- Stop: `hack session stop <session>`",
-    "- Exec in session: `hack session exec <session> \"<command>\"`",
+    '- Exec in session: `hack session exec <session> "<command>"`',
     "- Setup tmux: `hack setup tmux` (installs tmux if missing)",
     "",
     "Agent setup (CLI-first):",

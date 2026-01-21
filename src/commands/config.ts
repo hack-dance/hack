@@ -381,7 +381,7 @@ function parseJsonObject(opts: {
 function parseKeyPath(opts: { readonly raw: string }): readonly string[] {
   const parts: string[] = [];
   let buffer = "";
-  let escape = false;
+  let escaped = false;
   let inBracket = false;
   let quote: '"' | "'" | null = null;
 
@@ -396,13 +396,13 @@ function parseKeyPath(opts: { readonly raw: string }): readonly string[] {
   for (let i = 0; i < opts.raw.length; i += 1) {
     const ch = opts.raw[i] ?? "";
     if (inBracket) {
-      if (escape) {
+      if (escaped) {
         buffer += ch;
-        escape = false;
+        escaped = false;
         continue;
       }
       if (ch === "\\") {
-        escape = true;
+        escaped = true;
         continue;
       }
       if (quote) {
@@ -426,13 +426,13 @@ function parseKeyPath(opts: { readonly raw: string }): readonly string[] {
       continue;
     }
 
-    if (escape) {
+    if (escaped) {
       buffer += ch;
-      escape = false;
+      escaped = false;
       continue;
     }
     if (ch === "\\") {
-      escape = true;
+      escaped = true;
       continue;
     }
     if (ch === ".") {
@@ -451,7 +451,7 @@ function parseKeyPath(opts: { readonly raw: string }): readonly string[] {
     buffer += ch;
   }
 
-  if (escape) {
+  if (escaped) {
     buffer += "\\";
   }
   if (buffer.length > 0) {

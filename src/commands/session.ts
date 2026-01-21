@@ -135,7 +135,7 @@ async function handleSessionPicker(): Promise<number> {
   // Helper to shorten paths with ~/
   const shortenPath = (p: string): string => {
     if (home && p.startsWith(home)) {
-      return "~" + p.slice(home.length);
+      return `~${p.slice(home.length)}`;
     }
     return p;
   };

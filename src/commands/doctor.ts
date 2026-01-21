@@ -767,7 +767,9 @@ async function queryDnsRecord(opts: {
 
     socket.on("message", (msg: Buffer) => {
       clearTimeout(timeout);
-      finish(parseDnsResponse({ msg, expectedId: id, recordType: opts.recordType }));
+      finish(
+        parseDnsResponse({ msg, expectedId: id, recordType: opts.recordType })
+      );
     });
 
     socket.send(packet, opts.port, opts.server, (err: Error | null) => {
@@ -1014,7 +1016,7 @@ async function checkProxyPortForwarding(): Promise<CheckResult> {
   }
 
   // Both container IP and localhost fail - Caddy probably isn't running
-  if (!ipv4Port80 && !ipv4Port443) {
+  if (!(ipv4Port80 || ipv4Port443)) {
     return {
       name: "proxy ports",
       status: "warn",
@@ -1027,7 +1029,8 @@ async function checkProxyPortForwarding(): Promise<CheckResult> {
     return {
       name: "proxy ports",
       status: "warn",
-      message: `Port 443 not forwarding properly. Fix: hack global install (configures DNS to use container IP)`,
+      message:
+        "Port 443 not forwarding properly. Fix: hack global install (configures DNS to use container IP)",
     };
   }
 
@@ -1036,11 +1039,6 @@ async function checkProxyPortForwarding(): Promise<CheckResult> {
     status: "warn",
     message: `Port forwarding partial: container=${containerPort443}, localhost:443=${ipv4Port443}`,
   };
-}
-
-async function isTailscaleRunning(): Promise<boolean> {
-  const res = await exec(["pgrep", "-x", "tailscaled"], { stdin: "ignore" });
-  return res.exitCode === 0;
 }
 
 async function checkProject({
@@ -1382,7 +1380,10 @@ async function runDoctorFix(): Promise<void> {
   if (isMac()) {
     const migrationResult = await migrateDnsmasqToContainerIpIfNeeded();
     if (migrationResult === "migrated") {
-      note("dnsmasq migrated to container IP - port forwarding issues resolved", "doctor");
+      note(
+        "dnsmasq migrated to container IP - port forwarding issues resolved",
+        "doctor"
+      );
     }
   }
 }
@@ -1391,7 +1392,9 @@ async function runDoctorFix(): Promise<void> {
  * Check if dnsmasq has legacy localhost config and offer to migrate to container IP.
  * Using the container IP directly bypasses OrbStack port forwarding issues.
  */
-async function migrateDnsmasqToContainerIpIfNeeded(): Promise<"migrated" | "skipped" | "not-needed"> {
+async function migrateDnsmasqToContainerIpIfNeeded(): Promise<
+  "migrated" | "skipped" | "not-needed"
+> {
   const brew = await findExecutableInPath("brew");
   if (!brew) {
     return "skipped";
@@ -1416,7 +1419,8 @@ async function migrateDnsmasqToContainerIpIfNeeded(): Promise<"migrated" | "skip
     `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/::1`,
   ];
 
-  const hasContainerIp = text.includes(containerIpHackLine) && text.includes(containerIpOauthLine);
+  const hasContainerIp =
+    text.includes(containerIpHackLine) && text.includes(containerIpOauthLine);
   const hasLegacy = legacyLines.some((line) => text.includes(line));
 
   if (hasContainerIp || !hasLegacy) {
@@ -1446,12 +1450,18 @@ async function migrateDnsmasqToContainerIpIfNeeded(): Promise<"migrated" | "skip
 
   // Restart dnsmasq (requires sudo)
   note("Restarting dnsmasq (requires sudo)...", "doctor");
-  const restartExit = await run(["sudo", "brew", "services", "restart", "dnsmasq"], {
-    stdin: "inherit",
-  });
+  const restartExit = await run(
+    ["sudo", "brew", "services", "restart", "dnsmasq"],
+    {
+      stdin: "inherit",
+    }
+  );
 
   if (restartExit !== 0) {
-    note(`Failed to restart dnsmasq (exit ${restartExit}). Run: sudo brew services restart dnsmasq`, "doctor");
+    note(
+      `Failed to restart dnsmasq (exit ${restartExit}). Run: sudo brew services restart dnsmasq`,
+      "doctor"
+    );
     return "skipped";
   }
 

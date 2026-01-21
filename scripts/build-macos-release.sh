@@ -272,6 +272,14 @@ echo
 read -p "Press Enter to close..."
 INSTALLER_EOF
   chmod +x "$DMG_CONTENTS/Install Hack CLI.command"
+
+  # Sign the .command file with Developer ID (required for Gatekeeper)
+  log "Signing Install Hack CLI.command..."
+  codesign --force --options runtime --timestamp \
+    --sign "$SIGNING_IDENTITY" \
+    "$DMG_CONTENTS/Install Hack CLI.command"
+  codesign -vvv "$DMG_CONTENTS/Install Hack CLI.command"
+  success "Install script signed"
 fi
 
 # Create Applications symlink
@@ -328,6 +336,73 @@ ditto -c -k --keepParent \
   "$BUILD_DIR/HackDesktop-$VERSION-macOS.zip"
 success "ZIP created"
 
+# Generate hack-install.sh (download installer script)
+log "Generating hack-install.sh..."
+INSTALL_SCRIPT_PATH="$BUILD_DIR/hack-install.sh"
+INSTALL_SCRIPT_VERSIONED="$BUILD_DIR/hack-$VERSION-install.sh"
+cat > "$INSTALL_SCRIPT_PATH" << 'DOWNLOAD_INSTALLER_EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_OWNER="hack-dance"
+REPO_NAME="hack-cli"
+REPO="$REPO_OWNER/$REPO_NAME"
+API_URL="https://api.github.com/repos/$REPO/releases/latest"
+BASE_URL="${HACK_RELEASE_BASE_URL:-https://github.com/$REPO/releases/download}"
+
+if [ -n "${HACK_INSTALL_TAG:-}" ]; then
+  TAG="$HACK_INSTALL_TAG"
+elif [ -n "${HACK_INSTALL_VERSION:-}" ]; then
+  TAG="v$HACK_INSTALL_VERSION"
+else
+  TAG=$(curl -fsSL "$API_URL" | sed -n 's/.*"tag_name": "\([^"]*\)".*/\1/p' | head -n1)
+fi
+
+if [ -z "$TAG" ]; then
+  echo "Failed to resolve release tag."
+  exit 1
+fi
+
+VERSION="${TAG#v}"
+OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+ARCH="$(uname -m)"
+if [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; then
+  ARCH="x86_64"
+elif [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then
+  ARCH="arm64"
+else
+  echo "Unsupported architecture: $ARCH"
+  exit 1
+fi
+
+if [ "$OS" != "darwin" ] && [ "$OS" != "linux" ]; then
+  echo "Unsupported OS: $OS"
+  exit 1
+fi
+
+TARBALL="hack-$VERSION-$OS-$ARCH.tar.gz"
+URL="$BASE_URL/$TAG/$TARBALL"
+
+tmpdir=$(mktemp -d)
+cleanup() { rm -rf "$tmpdir"; }
+trap cleanup EXIT
+
+echo "Downloading $URL"
+curl -fsSL "$URL" -o "$tmpdir/$TARBALL"
+tar -xzf "$tmpdir/$TARBALL" -C "$tmpdir"
+
+INSTALL_DIR="$tmpdir/hack-$VERSION-release"
+if [ ! -d "$INSTALL_DIR" ]; then
+  echo "Missing release directory: $INSTALL_DIR"
+  exit 1
+fi
+
+bash "$INSTALL_DIR/install.sh"
+DOWNLOAD_INSTALLER_EOF
+chmod +x "$INSTALL_SCRIPT_PATH"
+cp "$INSTALL_SCRIPT_PATH" "$INSTALL_SCRIPT_VERSIONED"
+success "hack-install.sh created"
+
 # Summary
 echo
 echo -e "${GREEN}Release build complete!${NC}"
@@ -337,9 +412,15 @@ echo
 echo "Artifacts:"
 echo "  $DMG_PATH"
 echo "  $BUILD_DIR/HackDesktop-$VERSION-macOS.zip"
+echo "  $INSTALL_SCRIPT_PATH"
+echo "  $INSTALL_SCRIPT_VERSIONED"
 echo
 echo "To install:"
 echo "  open \"$DMG_PATH\""
 echo
 echo "To upload to GitHub release:"
-echo "  gh release upload v$VERSION \"$DMG_PATH\" \"$BUILD_DIR/HackDesktop-$VERSION-macOS.zip\""
+echo "  gh release upload v$VERSION \\"
+echo "    \"$DMG_PATH\" \\"
+echo "    \"$BUILD_DIR/HackDesktop-$VERSION-macOS.zip\" \\"
+echo "    \"$INSTALL_SCRIPT_PATH\" \\"
+echo "    \"$INSTALL_SCRIPT_VERSIONED\""

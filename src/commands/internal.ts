@@ -1,23 +1,21 @@
-import { resolve } from "node:path"
-
-import { logger } from "../ui/logger.ts"
-import { defineCommand, defineOption, withHandler } from "../cli/command.ts"
-import { ensureDir, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts"
-import { findProjectContext } from "../lib/project.ts"
-
-import type { CliContext, CommandArgs } from "../cli/command.ts"
+import { resolve } from "node:path";
+import type { CliContext, CommandArgs } from "../cli/command.ts";
+import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
+import { ensureDir, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts";
+import { findProjectContext } from "../lib/project.ts";
+import { logger } from "../ui/logger.ts";
 
 const optPath = defineOption({
   name: "path",
   type: "string",
   long: "--path",
   valueHint: "<path>",
-  description: "Start directory (defaults to cwd)"
-} as const)
+  description: "Start directory (defaults to cwd)",
+} as const);
 
-const internalOptions = [optPath] as const
+const internalOptions = [optPath] as const;
 
-type InternalArgs = CommandArgs<typeof internalOptions, readonly []>
+type InternalArgs = CommandArgs<typeof internalOptions, readonly []>;
 
 const extraHostsSetSpec = defineCommand({
   name: "set",
@@ -26,10 +24,10 @@ const extraHostsSetSpec = defineCommand({
   options: internalOptions,
   positionals: [
     { name: "hostname", required: true },
-    { name: "target", required: true }
+    { name: "target", required: true },
   ],
-  subcommands: []
-} as const)
+  subcommands: [],
+} as const);
 
 const extraHostsUnsetSpec = defineCommand({
   name: "unset",
@@ -37,8 +35,8 @@ const extraHostsUnsetSpec = defineCommand({
   group: "Internal",
   options: internalOptions,
   positionals: [{ name: "hostname", required: true }],
-  subcommands: []
-} as const)
+  subcommands: [],
+} as const);
 
 const extraHostsListSpec = defineCommand({
   name: "list",
@@ -46,8 +44,8 @@ const extraHostsListSpec = defineCommand({
   group: "Internal",
   options: internalOptions,
   positionals: [],
-  subcommands: []
-} as const)
+  subcommands: [],
+} as const);
 
 export const internalCommand = defineCommand({
   name: "internal",
@@ -66,133 +64,164 @@ export const internalCommand = defineCommand({
       subcommands: [
         withHandler(extraHostsSetSpec, handleExtraHostsSet),
         withHandler(extraHostsUnsetSpec, handleExtraHostsUnset),
-        withHandler(extraHostsListSpec, handleExtraHostsList)
-      ]
-    } as const)
-  ]
-} as const)
+        withHandler(extraHostsListSpec, handleExtraHostsList),
+      ],
+    } as const),
+  ],
+} as const);
 
 function resolveStartDir(ctx: CliContext, args: InternalArgs): string {
-  const pathOpt = args.options.path
-  const fromOpt = typeof pathOpt === "string" ? pathOpt.trim() : ""
-  return fromOpt.length > 0 ? fromOpt : ctx.cwd
+  const pathOpt = args.options.path;
+  const fromOpt = typeof pathOpt === "string" ? pathOpt.trim() : "";
+  return fromOpt.length > 0 ? fromOpt : ctx.cwd;
 }
 
 async function requireProject(startDir: string) {
-  const project = await findProjectContext(startDir)
+  const project = await findProjectContext(startDir);
   if (!project) {
-    throw new Error("No .hack/ (or legacy .dev/) found. Run: hack init")
+    throw new Error("No .hack/ (or legacy .dev/) found. Run: hack init");
   }
-  return project
+  return project;
 }
 
-const INTERNAL_EXTRA_HOSTS_FILENAME = "extra-hosts.json" as const
+const INTERNAL_EXTRA_HOSTS_FILENAME = "extra-hosts.json" as const;
 
 function resolveExtraHostsPath(projectDir: string): string {
-  return resolve(projectDir, ".internal", INTERNAL_EXTRA_HOSTS_FILENAME)
+  return resolve(projectDir, ".internal", INTERNAL_EXTRA_HOSTS_FILENAME);
 }
 
-async function readInternalExtraHosts(path: string): Promise<Record<string, string>> {
-  const text = await readTextFile(path)
-  if (!text) return {}
+async function readInternalExtraHosts(
+  path: string
+): Promise<Record<string, string>> {
+  const text = await readTextFile(path);
+  if (!text) {
+    return {};
+  }
 
-  let parsed: unknown
+  let parsed: unknown;
   try {
-    parsed = JSON.parse(text)
+    parsed = JSON.parse(text);
   } catch {
-    return {}
+    return {};
   }
 
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {}
-
-  const out: Record<string, string> = {}
-  for (const [keyRaw, valueRaw] of Object.entries(parsed as Record<string, unknown>)) {
-    const key = keyRaw.trim()
-    if (key.length === 0) continue
-    if (typeof valueRaw !== "string") continue
-    const value = valueRaw.trim()
-    if (value.length === 0) continue
-    out[key] = value
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return {};
   }
 
-  return out
+  const out: Record<string, string> = {};
+  for (const [keyRaw, valueRaw] of Object.entries(
+    parsed as Record<string, unknown>
+  )) {
+    const key = keyRaw.trim();
+    if (key.length === 0) {
+      continue;
+    }
+    if (typeof valueRaw !== "string") {
+      continue;
+    }
+    const value = valueRaw.trim();
+    if (value.length === 0) {
+      continue;
+    }
+    out[key] = value;
+  }
+
+  return out;
 }
 
-async function writeInternalExtraHosts(path: string, map: Record<string, string>): Promise<void> {
-  const text = `${JSON.stringify(map, null, 2)}\n`
-  await writeTextFileIfChanged(path, text)
+async function writeInternalExtraHosts(
+  path: string,
+  map: Record<string, string>
+): Promise<void> {
+  const text = `${JSON.stringify(map, null, 2)}\n`;
+  await writeTextFileIfChanged(path, text);
 }
 
 async function handleExtraHostsSet({
   ctx,
-  args
+  args,
 }: {
-  readonly ctx: CliContext
-  readonly args: CommandArgs<typeof internalOptions, typeof extraHostsSetSpec["positionals"]>
+  readonly ctx: CliContext;
+  readonly args: CommandArgs<
+    typeof internalOptions,
+    (typeof extraHostsSetSpec)["positionals"]
+  >;
 }): Promise<number> {
-  const startDir = resolveStartDir(ctx, args)
-  const project = await requireProject(startDir)
+  const startDir = resolveStartDir(ctx, args);
+  const project = await requireProject(startDir);
 
-  const hostname = (args.positionals.hostname ?? "").trim()
-  const target = (args.positionals.target ?? "").trim()
-  if (hostname.length === 0) throw new Error("hostname is required")
-  if (target.length === 0) throw new Error("target is required")
+  const hostname = (args.positionals.hostname ?? "").trim();
+  const target = (args.positionals.target ?? "").trim();
+  if (hostname.length === 0) {
+    throw new Error("hostname is required");
+  }
+  if (target.length === 0) {
+    throw new Error("target is required");
+  }
 
-  const dir = resolve(project.projectDir, ".internal")
-  await ensureDir(dir)
-  const path = resolveExtraHostsPath(project.projectDir)
+  const dir = resolve(project.projectDir, ".internal");
+  await ensureDir(dir);
+  const path = resolveExtraHostsPath(project.projectDir);
 
-  const existing = await readInternalExtraHosts(path)
-  existing[hostname] = target
-  await writeInternalExtraHosts(path, existing)
+  const existing = await readInternalExtraHosts(path);
+  existing[hostname] = target;
+  await writeInternalExtraHosts(path, existing);
 
-  logger.success({ message: `Set internal extra_hosts: ${hostname} -> ${target}` })
-  logger.info({ message: `Next: run \`hack restart\` (or \`hack up\`) to apply.` })
-  return 0
+  logger.success({
+    message: `Set internal extra_hosts: ${hostname} -> ${target}`,
+  });
+  logger.info({ message: "Next: run `hack restart` (or `hack up`) to apply." });
+  return 0;
 }
 
 async function handleExtraHostsUnset({
   ctx,
-  args
+  args,
 }: {
-  readonly ctx: CliContext
-  readonly args: CommandArgs<typeof internalOptions, typeof extraHostsUnsetSpec["positionals"]>
+  readonly ctx: CliContext;
+  readonly args: CommandArgs<
+    typeof internalOptions,
+    (typeof extraHostsUnsetSpec)["positionals"]
+  >;
 }): Promise<number> {
-  const startDir = resolveStartDir(ctx, args)
-  const project = await requireProject(startDir)
+  const startDir = resolveStartDir(ctx, args);
+  const project = await requireProject(startDir);
 
-  const hostname = (args.positionals.hostname ?? "").trim()
-  if (hostname.length === 0) throw new Error("hostname is required")
-
-  const path = resolveExtraHostsPath(project.projectDir)
-  const existing = await readInternalExtraHosts(path)
-  if (!(hostname in existing)) {
-    logger.warn({ message: `No internal extra_hosts entry for ${hostname}` })
-    return 1
+  const hostname = (args.positionals.hostname ?? "").trim();
+  if (hostname.length === 0) {
+    throw new Error("hostname is required");
   }
 
-  delete existing[hostname]
-  await ensureDir(resolve(project.projectDir, ".internal"))
-  await writeInternalExtraHosts(path, existing)
+  const path = resolveExtraHostsPath(project.projectDir);
+  const existing = await readInternalExtraHosts(path);
+  if (!(hostname in existing)) {
+    logger.warn({ message: `No internal extra_hosts entry for ${hostname}` });
+    return 1;
+  }
 
-  logger.success({ message: `Removed internal extra_hosts: ${hostname}` })
-  logger.info({ message: `Next: run \`hack restart\` (or \`hack up\`) to apply.` })
-  return 0
+  delete existing[hostname];
+  await ensureDir(resolve(project.projectDir, ".internal"));
+  await writeInternalExtraHosts(path, existing);
+
+  logger.success({ message: `Removed internal extra_hosts: ${hostname}` });
+  logger.info({ message: "Next: run `hack restart` (or `hack up`) to apply." });
+  return 0;
 }
 
 async function handleExtraHostsList({
   ctx,
-  args
+  args,
 }: {
-  readonly ctx: CliContext
-  readonly args: InternalArgs
+  readonly ctx: CliContext;
+  readonly args: InternalArgs;
 }): Promise<number> {
-  const startDir = resolveStartDir(ctx, args)
-  const project = await requireProject(startDir)
+  const startDir = resolveStartDir(ctx, args);
+  const project = await requireProject(startDir);
 
-  const path = resolveExtraHostsPath(project.projectDir)
-  const map = await readInternalExtraHosts(path)
+  const path = resolveExtraHostsPath(project.projectDir);
+  const map = await readInternalExtraHosts(path);
 
-  process.stdout.write(`${JSON.stringify(map, null, 2)}\n`)
-  return 0
+  process.stdout.write(`${JSON.stringify(map, null, 2)}\n`);
+  return 0;
 }

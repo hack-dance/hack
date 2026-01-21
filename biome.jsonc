@@ -1,0 +1,120 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "extends": ["ultracite/biome/core"],
+  "javascript": {
+    "globals": ["Bun"]
+  },
+  "linter": {
+    "rules": {
+      "style": {
+        // Keep type aliases over interfaces to maintain compatibility with Record<string, unknown>
+        "useConsistentTypeDefinitions": "off",
+        // Allow single-line block statements for concise early returns
+        "useBlockStatements": "warn",
+        // Allow nested ternaries when logic is clear
+        "noNestedTernary": "warn",
+        // Allow public/private modifiers (explicit is fine)
+        "useConsistentMemberAccessibility": "off",
+        // Allow non-null assertions where safe
+        "noNonNullAssertion": "warn",
+        // Allow .at(-1) style
+        "useAtIndex": "off",
+        // Allow indexed for loops for character parsing
+        "useForOf": "warn",
+        // Allow switch without default when exhaustive
+        "useDefaultSwitchClause": "warn",
+        // Allow module declaration file naming patterns
+        "useFilenamingConvention": "off"
+      },
+      "correctness": {
+        // Allow unused parameters prefixed with _ or in specific patterns
+        "noUnusedFunctionParameters": "warn"
+      },
+      "complexity": {
+        // Complex functions exist and work correctly
+        "noExcessiveCognitiveComplexity": "warn",
+        // void is useful for ignoring promises
+        "noVoid": "off",
+        // Allow ["key"] syntax for dynamic access
+        "useLiteralKeys": "warn",
+        // forEach is fine in some contexts
+        "noForEach": "off"
+      },
+      "performance": {
+        // Allow regex in functions (performance impact is minimal in CLI)
+        "useTopLevelRegex": "warn",
+        // Allow delete operator where needed
+        "noDelete": "warn",
+        // Allow zod namespace import (required pattern)
+        "noNamespaceImport": "warn"
+      },
+      "suspicious": {
+        // Bitwise operators are intentional in some code
+        "noBitwiseOperators": "off",
+        // Control characters in regex are intentional for terminal handling
+        "noControlCharactersInRegex": "off",
+        // Allow async functions without await (returns Promise)
+        "useAwait": "warn",
+        // Allow shadowing when intentional
+        "noShadowRestrictedNames": "warn",
+        // Allow regex.exec() assignment pattern
+        "noAssignInExpressions": "warn",
+        // Allow type/function with same name in declaration files
+        "noRedeclare": "warn"
+      }
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["tests/**"],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noMisplacedAssertion": "off",
+            "noEmptyBlockStatements": "off",
+            "noTemplateCurlyInString": "off"
+          },
+          "performance": {
+            "useTopLevelRegex": "off"
+          },
+          "style": {
+            "useForOf": "off"
+          },
+          "correctness": {
+            "noUnusedFunctionParameters": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["scripts/**"],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noTemplateCurlyInString": "off"
+          },
+          "style": {
+            "noNestedTernary": "off"
+          },
+          "performance": {
+            "useTopLevelRegex": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["examples/**"],
+      "linter": {
+        "rules": {
+          "complexity": {
+            "noExcessiveCognitiveComplexity": "off",
+            "noVoid": "off"
+          },
+          "style": {
+            "noNestedTernary": "off"
+          }
+        }
+      }
+    }
+  ]
+}

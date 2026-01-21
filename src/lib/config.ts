@@ -1,8 +1,7 @@
-import { dirname } from "node:path"
-
-import { ensureDir, readTextFile, writeTextFileIfChanged } from "./fs.ts"
-import { isRecord } from "./guards.ts"
-import { resolveGlobalConfigPath } from "./config-paths.ts"
+import { dirname } from "node:path";
+import { resolveGlobalConfigPath } from "./config-paths.ts";
+import { ensureDir, readTextFile, writeTextFileIfChanged } from "./fs.ts";
+import { isRecord } from "./guards.ts";
 
 /**
  * Updates a value in the global config file at ~/.hack/hack.config.json.
@@ -13,28 +12,29 @@ import { resolveGlobalConfigPath } from "./config-paths.ts"
  */
 export async function updateGlobalConfig({
   path,
-  value
+  value,
 }: {
-  readonly path: string
-  readonly value: unknown
+  readonly path: string;
+  readonly value: unknown;
 }): Promise<{ readonly changed: boolean }> {
-  const configPath = resolveGlobalConfigPath()
-  const parsedPath = parseKeyPath({ raw: path })
+  const configPath = resolveGlobalConfigPath();
+  const parsedPath = parseKeyPath({ raw: path });
 
   if (parsedPath.length === 0) {
-    throw new Error(`Invalid config path: ${path}`)
+    throw new Error(`Invalid config path: ${path}`);
   }
 
-  const jsonText = await readTextFile(configPath)
-  const config: Record<string, unknown> = jsonText !== null ? parseJsonSafe(jsonText) : {}
+  const jsonText = await readTextFile(configPath);
+  const config: Record<string, unknown> =
+    jsonText !== null ? parseJsonSafe(jsonText) : {};
 
-  setPathValue({ target: config, path: parsedPath, value })
+  setPathValue({ target: config, path: parsedPath, value });
 
-  const nextText = `${JSON.stringify(config, null, 2)}\n`
-  await ensureDir(dirname(configPath))
-  const result = await writeTextFileIfChanged(configPath, nextText)
+  const nextText = `${JSON.stringify(config, null, 2)}\n`;
+  await ensureDir(dirname(configPath));
+  const result = await writeTextFileIfChanged(configPath, nextText);
 
-  return { changed: result.changed }
+  return { changed: result.changed };
 }
 
 /**
@@ -44,149 +44,159 @@ export async function updateGlobalConfig({
  * @returns The value at the path, or undefined if not found
  */
 export async function readGlobalConfig({
-  path
+  path,
 }: {
-  readonly path: string
+  readonly path: string;
 }): Promise<unknown> {
-  const configPath = resolveGlobalConfigPath()
-  const parsedPath = parseKeyPath({ raw: path })
+  const configPath = resolveGlobalConfigPath();
+  const parsedPath = parseKeyPath({ raw: path });
 
   if (parsedPath.length === 0) {
-    return undefined
+    return undefined;
   }
 
-  const jsonText = await readTextFile(configPath)
+  const jsonText = await readTextFile(configPath);
   if (jsonText === null) {
-    return undefined
+    return undefined;
   }
 
-  const config = parseJsonSafe(jsonText)
-  return getPathValue({ target: config, path: parsedPath })
+  const config = parseJsonSafe(jsonText);
+  return getPathValue({ target: config, path: parsedPath });
 }
 
 function parseJsonSafe(text: string): Record<string, unknown> {
   try {
-    const parsed = JSON.parse(text)
-    return isRecord(parsed) ? parsed : {}
+    const parsed = JSON.parse(text);
+    return isRecord(parsed) ? parsed : {};
   } catch {
-    return {}
+    return {};
   }
 }
 
 function parseKeyPath(opts: { readonly raw: string }): readonly string[] {
-  const parts: string[] = []
-  let buffer = ""
-  let escape = false
-  let inBracket = false
-  let quote: "\"" | "'" | null = null
+  const parts: string[] = [];
+  let buffer = "";
+  let escape = false;
+  let inBracket = false;
+  let quote: '"' | "'" | null = null;
 
   const pushBuffer = () => {
-    const trimmed = buffer.trim()
-    if (trimmed.length > 0) parts.push(trimmed)
-    buffer = ""
-  }
+    const trimmed = buffer.trim();
+    if (trimmed.length > 0) {
+      parts.push(trimmed);
+    }
+    buffer = "";
+  };
 
   for (let i = 0; i < opts.raw.length; i += 1) {
-    const ch = opts.raw[i] ?? ""
+    const ch = opts.raw[i] ?? "";
     if (inBracket) {
       if (escape) {
-        buffer += ch
-        escape = false
-        continue
+        buffer += ch;
+        escape = false;
+        continue;
       }
       if (ch === "\\") {
-        escape = true
-        continue
+        escape = true;
+        continue;
       }
       if (quote) {
         if (ch === quote) {
-          quote = null
-          continue
+          quote = null;
+          continue;
         }
-        buffer += ch
-        continue
+        buffer += ch;
+        continue;
       }
-      if (ch === "'" || ch === "\"") {
-        quote = ch
-        continue
+      if (ch === "'" || ch === '"') {
+        quote = ch;
+        continue;
       }
       if (ch === "]") {
-        inBracket = false
-        pushBuffer()
-        continue
+        inBracket = false;
+        pushBuffer();
+        continue;
       }
-      buffer += ch
-      continue
+      buffer += ch;
+      continue;
     }
 
     if (escape) {
-      buffer += ch
-      escape = false
-      continue
+      buffer += ch;
+      escape = false;
+      continue;
     }
     if (ch === "\\") {
-      escape = true
-      continue
+      escape = true;
+      continue;
     }
     if (ch === ".") {
-      pushBuffer()
-      continue
+      pushBuffer();
+      continue;
     }
     if (ch === "[") {
       if (buffer.trim().length > 0) {
-        pushBuffer()
+        pushBuffer();
       } else {
-        buffer = ""
+        buffer = "";
       }
-      inBracket = true
-      continue
+      inBracket = true;
+      continue;
     }
-    buffer += ch
+    buffer += ch;
   }
 
-  if (escape) buffer += "\\"
-  if (buffer.length > 0) pushBuffer()
+  if (escape) {
+    buffer += "\\";
+  }
+  if (buffer.length > 0) {
+    pushBuffer();
+  }
 
-  return parts
+  return parts;
 }
 
 function getPathValue(opts: {
-  readonly target: Record<string, unknown>
-  readonly path: readonly string[]
+  readonly target: Record<string, unknown>;
+  readonly path: readonly string[];
 }): unknown {
-  let current: unknown = opts.target
+  let current: unknown = opts.target;
   for (const key of opts.path) {
-    if (!isRecord(current)) return undefined
-    current = current[key]
-    if (current === undefined) return undefined
+    if (!isRecord(current)) {
+      return undefined;
+    }
+    current = current[key];
+    if (current === undefined) {
+      return undefined;
+    }
   }
-  return current
+  return current;
 }
 
 function setPathValue(opts: {
-  readonly target: Record<string, unknown>
-  readonly path: readonly string[]
-  readonly value: unknown
+  readonly target: Record<string, unknown>;
+  readonly path: readonly string[];
+  readonly value: unknown;
 }): void {
-  let current: Record<string, unknown> = opts.target
+  let current: Record<string, unknown> = opts.target;
   for (let i = 0; i < opts.path.length - 1; i += 1) {
-    const key = opts.path[i] ?? ""
-    const existing = current[key]
+    const key = opts.path[i] ?? "";
+    const existing = current[key];
     if (existing === undefined) {
-      const next: Record<string, unknown> = {}
-      current[key] = next
-      current = next
-      continue
+      const next: Record<string, unknown> = {};
+      current[key] = next;
+      current = next;
+      continue;
     }
     if (!isRecord(existing)) {
-      const next: Record<string, unknown> = {}
-      current[key] = next
-      current = next
-      continue
+      const next: Record<string, unknown> = {};
+      current[key] = next;
+      current = next;
+      continue;
     }
-    current = existing
+    current = existing;
   }
 
-  const lastKey = opts.path[opts.path.length - 1] ?? ""
-  current[lastKey] = opts.value
+  const lastKey = opts.path.at(-1) ?? "";
+  current[lastKey] = opts.value;
 }

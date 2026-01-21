@@ -1,12 +1,11 @@
-import { afterEach, beforeEach, expect, test } from "bun:test"
-import { join } from "node:path"
-import { tmpdir } from "node:os"
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { ExtensionManager } from "../src/control-plane/extensions/manager.ts"
-import { readControlPlaneConfig } from "../src/control-plane/sdk/config.ts"
-
-import type { Logger } from "../src/ui/logger.ts"
-import type { ExtensionDefinition } from "../src/control-plane/extensions/types.ts"
+import { ExtensionManager } from "../src/control-plane/extensions/manager.ts";
+import type { ExtensionDefinition } from "../src/control-plane/extensions/types.ts";
+import { readControlPlaneConfig } from "../src/control-plane/sdk/config.ts";
+import type { Logger } from "../src/ui/logger.ts";
 
 const silentLogger: Logger = {
   debug: () => {},
@@ -14,152 +13,152 @@ const silentLogger: Logger = {
   warn: () => {},
   error: () => {},
   success: () => {},
-  step: () => {}
-}
+  step: () => {},
+};
 
-const originalGlobalConfigPath = process.env.HACK_GLOBAL_CONFIG_PATH
+const originalGlobalConfigPath = process.env.HACK_GLOBAL_CONFIG_PATH;
 
 beforeEach(() => {
   process.env.HACK_GLOBAL_CONFIG_PATH = join(
     tmpdir(),
     `hack-global-config-${Date.now()}-${Math.random()}.json`
-  )
-})
+  );
+});
 
 afterEach(() => {
   if (originalGlobalConfigPath === undefined) {
-    delete process.env.HACK_GLOBAL_CONFIG_PATH
+    process.env.HACK_GLOBAL_CONFIG_PATH = undefined;
   } else {
-    process.env.HACK_GLOBAL_CONFIG_PATH = originalGlobalConfigPath
+    process.env.HACK_GLOBAL_CONFIG_PATH = originalGlobalConfigPath;
   }
-})
+});
 
 test("ExtensionManager resolves namespace overrides and enabled flag", async () => {
-  const defaults = (await readControlPlaneConfig({})).config
+  const defaults = (await readControlPlaneConfig({})).config;
   const config = {
     ...defaults,
     extensions: {
       ...defaults.extensions,
-      "demo.ext": { enabled: true, cliNamespace: "alpha", config: {} }
-    }
-  }
+      "demo.ext": { enabled: true, cliNamespace: "alpha", config: {} },
+    },
+  };
 
-  const manager = new ExtensionManager({ config, logger: silentLogger })
+  const manager = new ExtensionManager({ config, logger: silentLogger });
   const ext: ExtensionDefinition = {
     manifest: {
       id: "demo.ext",
       version: "0.1.0",
       scopes: ["global"],
-      cliNamespace: "demo"
+      cliNamespace: "demo",
     },
-    commands: []
-  }
+    commands: [],
+  };
 
-  manager.registerExtension({ extension: ext })
-  const resolved = manager.listExtensions()[0]
+  manager.registerExtension({ extension: ext });
+  const resolved = manager.listExtensions()[0];
 
-  expect(resolved?.namespace).toBe("alpha")
-  expect(resolved?.enabled).toBe(true)
-})
+  expect(resolved?.namespace).toBe("alpha");
+  expect(resolved?.enabled).toBe(true);
+});
 
 test("ExtensionManager warns and falls back on namespace collisions", async () => {
-  const defaults = (await readControlPlaneConfig({})).config
+  const defaults = (await readControlPlaneConfig({})).config;
   const config = {
     ...defaults,
     extensions: {
       "ext.a": { enabled: true, config: {} },
-      "ext.b": { enabled: true, config: {} }
-    }
-  }
+      "ext.b": { enabled: true, config: {} },
+    },
+  };
 
-  const manager = new ExtensionManager({ config, logger: silentLogger })
+  const manager = new ExtensionManager({ config, logger: silentLogger });
 
   const extA: ExtensionDefinition = {
     manifest: {
       id: "ext.a",
       version: "0.1.0",
       scopes: ["global"],
-      cliNamespace: "tickets"
+      cliNamespace: "tickets",
     },
-    commands: []
-  }
+    commands: [],
+  };
 
   const extB: ExtensionDefinition = {
     manifest: {
       id: "ext.b",
       version: "0.1.0",
       scopes: ["global"],
-      cliNamespace: "tickets"
+      cliNamespace: "tickets",
     },
-    commands: []
-  }
+    commands: [],
+  };
 
-  manager.registerExtension({ extension: extA })
-  manager.registerExtension({ extension: extB })
+  manager.registerExtension({ extension: extA });
+  manager.registerExtension({ extension: extB });
 
-  const resolved = manager.listExtensions()
-  expect(resolved[0]?.namespace).toBe("tickets")
-  expect(resolved[1]?.namespace).not.toBe("tickets")
-  expect(resolved[1]?.namespace?.startsWith("tickets.")).toBe(true)
-  expect(manager.getWarnings().length).toBe(1)
-})
+  const resolved = manager.listExtensions();
+  expect(resolved[0]?.namespace).toBe("tickets");
+  expect(resolved[1]?.namespace).not.toBe("tickets");
+  expect(resolved[1]?.namespace?.startsWith("tickets.")).toBe(true);
+  expect(manager.getWarnings().length).toBe(1);
+});
 
 test("ExtensionManager resolves command ids", async () => {
-  const defaults = (await readControlPlaneConfig({})).config
+  const defaults = (await readControlPlaneConfig({})).config;
   const config = {
     ...defaults,
     extensions: {
-      "ext.jobs": { enabled: true, config: {} }
-    }
-  }
+      "ext.jobs": { enabled: true, config: {} },
+    },
+  };
 
-  const manager = new ExtensionManager({ config, logger: silentLogger })
+  const manager = new ExtensionManager({ config, logger: silentLogger });
   const ext: ExtensionDefinition = {
     manifest: {
       id: "ext.jobs",
       version: "0.1.0",
       scopes: ["global"],
-      cliNamespace: "jobs"
+      cliNamespace: "jobs",
     },
     commands: [
       {
         name: "run",
         summary: "Run a job",
         scope: "global",
-        handler: async () => 0
-      }
-    ]
-  }
+        handler: async () => 0,
+      },
+    ],
+  };
 
-  manager.registerExtension({ extension: ext })
-  const resolved = manager.resolveCommandId({ commandId: "ext.jobs:run" })
-  expect(resolved?.namespace).toBe("jobs")
-  expect(resolved?.commandName).toBe("run")
-})
+  manager.registerExtension({ extension: ext });
+  const resolved = manager.resolveCommandId({ commandId: "ext.jobs:run" });
+  expect(resolved?.namespace).toBe("jobs");
+  expect(resolved?.commandName).toBe("run");
+});
 
 test("ExtensionManager avoids reserved namespaces", async () => {
-  const defaults = (await readControlPlaneConfig({})).config
+  const defaults = (await readControlPlaneConfig({})).config;
   const config = {
     ...defaults,
     extensions: {
-      "ext.reserved": { enabled: true, config: {} }
-    }
-  }
+      "ext.reserved": { enabled: true, config: {} },
+    },
+  };
 
-  const manager = new ExtensionManager({ config, logger: silentLogger })
+  const manager = new ExtensionManager({ config, logger: silentLogger });
   manager.registerExtension({
     extension: {
       manifest: {
         id: "ext.reserved",
         version: "0.1.0",
         scopes: ["global"],
-        cliNamespace: "x"
+        cliNamespace: "x",
       },
-      commands: []
-    }
-  })
+      commands: [],
+    },
+  });
 
-  const resolved = manager.listExtensions()[0]
-  expect(resolved?.namespace).not.toBe("x")
-  expect(resolved?.namespace?.startsWith("x.")).toBe(true)
-})
+  const resolved = manager.listExtensions()[0];
+  expect(resolved?.namespace).not.toBe("x");
+  expect(resolved?.namespace?.startsWith("x.")).toBe(true);
+});

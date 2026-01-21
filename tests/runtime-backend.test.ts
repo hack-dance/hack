@@ -1,25 +1,25 @@
-import { beforeEach, expect, test, mock } from "bun:test"
+import { beforeEach, expect, mock, test } from "bun:test";
 
-const runCalls: string[][] = []
-const execCalls: string[][] = []
+const runCalls: string[][] = [];
+const execCalls: string[][] = [];
 
 mock.module("../src/lib/shell.ts", () => ({
   exec: async (cmd: readonly string[]) => {
-    execCalls.push([...cmd])
-    return { exitCode: 0, stdout: "", stderr: "" }
+    execCalls.push([...cmd]);
+    return { exitCode: 0, stdout: "", stderr: "" };
   },
   run: async (cmd: readonly string[]) => {
-    runCalls.push([...cmd])
-    return 0
-  }
-}))
+    runCalls.push([...cmd]);
+    return 0;
+  },
+}));
 
-import { composeRuntimeBackend } from "../src/backends/runtime-backend.ts"
+import { composeRuntimeBackend } from "../src/backends/runtime-backend.ts";
 
 beforeEach(() => {
-  runCalls.length = 0
-  execCalls.length = 0
-})
+  runCalls.length = 0;
+  execCalls.length = 0;
+});
 
 test("composeRuntimeBackend.up builds compose args with profiles and detach", async () => {
   await composeRuntimeBackend.up({
@@ -27,8 +27,8 @@ test("composeRuntimeBackend.up builds compose args with profiles and detach", as
     composeProject: "myproj",
     profiles: ["ops"],
     detach: true,
-    cwd: "/tmp"
-  })
+    cwd: "/tmp",
+  });
 
   expect(runCalls[0]).toEqual([
     "docker",
@@ -42,28 +42,34 @@ test("composeRuntimeBackend.up builds compose args with profiles and detach", as
     "--profile",
     "ops",
     "up",
-    "-d"
-  ])
-})
+    "-d",
+  ]);
+});
 
 test("composeRuntimeBackend.down builds compose args", async () => {
   await composeRuntimeBackend.down({
     composeFiles: ["docker-compose.yml"],
     composeProject: null,
     profiles: [],
-    cwd: "/tmp"
-  })
+    cwd: "/tmp",
+  });
 
-  expect(runCalls[0]).toEqual(["docker", "compose", "-f", "docker-compose.yml", "down"])
-})
+  expect(runCalls[0]).toEqual([
+    "docker",
+    "compose",
+    "-f",
+    "docker-compose.yml",
+    "down",
+  ]);
+});
 
 test("composeRuntimeBackend.psJson uses exec with json format", async () => {
   await composeRuntimeBackend.psJson({
     composeFiles: ["docker-compose.yml"],
     composeProject: "proj",
     profiles: ["ops"],
-    cwd: "/tmp"
-  })
+    cwd: "/tmp",
+  });
 
   expect(execCalls[0]).toEqual([
     "docker",
@@ -76,9 +82,9 @@ test("composeRuntimeBackend.psJson uses exec with json format", async () => {
     "ops",
     "ps",
     "--format",
-    "json"
-  ])
-})
+    "json",
+  ]);
+});
 
 test("composeRuntimeBackend.run supports workdir and args", async () => {
   await composeRuntimeBackend.run({
@@ -88,8 +94,8 @@ test("composeRuntimeBackend.run supports workdir and args", async () => {
     service: "api",
     workdir: "/app",
     cmdArgs: ["bun", "dev"],
-    cwd: "/tmp"
-  })
+    cwd: "/tmp",
+  });
 
   expect(runCalls[0]).toEqual([
     "docker",
@@ -104,6 +110,6 @@ test("composeRuntimeBackend.run supports workdir and args", async () => {
     "/app",
     "api",
     "bun",
-    "dev"
-  ])
-})
+    "dev",
+  ]);
+});

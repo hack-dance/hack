@@ -1,11 +1,12 @@
-import { printHelpForPath } from "../cli/help.ts"
-import { defineCommand, withHandler } from "../cli/command.ts"
+import type { CliContext, CommandArgs } from "../cli/command.ts";
+import { defineCommand, withHandler } from "../cli/command.ts";
+import { printHelpForPath } from "../cli/help.ts";
 
-import type { CliContext, CommandArgs } from "../cli/command.ts"
+const helpPositionals = [
+  { name: "path", required: false, multiple: true },
+] as const;
 
-const helpPositionals = [{ name: "path", required: false, multiple: true }] as const
-
-type HelpArgs = CommandArgs<readonly [], typeof helpPositionals>
+type HelpArgs = CommandArgs<readonly [], typeof helpPositionals>;
 
 const helpSpec = defineCommand({
   name: "help",
@@ -13,20 +14,20 @@ const helpSpec = defineCommand({
   group: "Diagnostics",
   options: [],
   positionals: helpPositionals,
-  subcommands: []
-} as const)
+  subcommands: [],
+} as const);
 
-export const helpCommand = withHandler(helpSpec, handleHelp)
+export const helpCommand = withHandler(helpSpec, handleHelp);
 
 async function handleHelp({
   ctx,
-  args
+  args,
 }: {
-  readonly ctx: CliContext
-  readonly args: HelpArgs
+  readonly ctx: CliContext;
+  readonly args: HelpArgs;
 }): Promise<number> {
-  const parts = args.positionals.path
-  const path = Array.isArray(parts) ? parts : []
-  await printHelpForPath(ctx.cli, path)
-  return 0
+  const parts = args.positionals.path;
+  const path = Array.isArray(parts) ? parts : [];
+  await printHelpForPath(ctx.cli, path);
+  return 0;
 }

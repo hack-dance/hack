@@ -34,8 +34,8 @@ export function renderAgentPrimer(): string {
     "",
     "MCP:",
     "- Use MCP only when no shell access. Install via `hack setup mcp`.",
-    ""
-  ]
+    "",
+  ];
 
-  return lines.join("\n")
+  return lines.join("\n");
 }

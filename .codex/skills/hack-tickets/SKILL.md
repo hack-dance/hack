@@ -3,7 +3,7 @@ name: hack-tickets
 description: >
   Use the hack tickets extension (git-backed JSONL event log) to create/list/show/sync lightweight tickets.
   Trigger when asked to track work items, decisions, or bugs inside a repo without external issue trackers.
-  Prefer `hack x tickets ...` commands; store lives on branch `hack/tickets` by default.
+  Prefer `hack x tickets ...` commands; store lives on hidden ref `refs/hack/tickets` by default.
 ---
 
 # hack tickets
@@ -53,7 +53,8 @@ Tip: use `--body-stdin` for multi-line markdown.
 
 - Tickets are derived from an append-only event log (JSONL).
 - Local state lives in `.hack/tickets/` (gitignored on the main branch).
-- Sync writes commits to a dedicated branch (`hack/tickets` by default) and pushes to your remote.
+- Sync writes commits to a dedicated ref (`refs/hack/tickets` hidden by default) and pushes to your remote.
+- Set `controlPlane.tickets.git.refMode` to `heads` to use a normal branch ref (and protect it if desired).
 
 ## Tips
 

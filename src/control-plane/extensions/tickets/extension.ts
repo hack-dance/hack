@@ -1,6 +1,5 @@
-import { TICKETS_COMMANDS } from "./commands.ts"
-
-import type { ExtensionDefinition } from "../types.ts"
+import type { ExtensionDefinition } from "../types.ts";
+import { TICKETS_COMMANDS } from "./commands.ts";
 
 export const TICKETS_EXTENSION: ExtensionDefinition = {
   manifest: {
@@ -8,7 +7,7 @@ export const TICKETS_EXTENSION: ExtensionDefinition = {
     version: "0.1.0",
     scopes: ["project"],
     cliNamespace: "tickets",
-    summary: "Git-backed tickets and runs"
+    summary: "Git-backed tickets and runs",
   },
-  commands: TICKETS_COMMANDS
-}
+  commands: TICKETS_COMMANDS,
+};

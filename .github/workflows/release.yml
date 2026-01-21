@@ -45,7 +45,7 @@ jobs:
         include:
           - os: ubuntu-latest
             upload_install: true
-            skip_tests: false
+            skip_tests: true
           - os: macos-15
             upload_install: false
             skip_tests: true

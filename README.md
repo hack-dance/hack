@@ -207,6 +207,27 @@ hack daemon stop
 hack daemon logs
 ```
 
+### launchd integration (macOS)
+
+On macOS, you can install `hackd` as a launchd service for automatic management:
+
+```bash
+# Install with auto-start on login
+hack daemon install --run-at-load
+
+# Install without auto-start (manual start/stop via launchd)
+hack daemon install
+
+# Uninstall the launchd service
+hack daemon uninstall
+```
+
+Options:
+- `--run-at-load` / `--no-run-at-load`: Start automatically on login
+- `--gui-only` / `--no-gui-only`: Only run in GUI sessions (default: GUI only)
+
+The service uses label `dance.hack.hackd` and writes to `~/Library/LaunchAgents/`.
+
 Use it when:
 - You run `hack projects --json` / `hack ps --json` frequently (scripts, agent workflows, TUI).
 - You want faster status snapshots without shelling out to Docker each time.

@@ -4,6 +4,7 @@ import { relative, resolve } from "node:path"
 
 import type { ServerWebSocket } from "bun"
 
+import { DAEMON_PROCESS_TITLE } from "../constants.ts"
 import { ensureDir } from "../lib/fs.ts"
 import { createDaemonLogger } from "./logger.ts"
 import { removeFileIfExists, writeDaemonPid } from "./process.ts"
@@ -48,6 +49,8 @@ export async function runDaemon({
   readonly paths: DaemonPaths
   readonly foreground: boolean
 }): Promise<void> {
+  process.title = DAEMON_PROCESS_TITLE
+
   await ensureDir(paths.root)
   await removeFileIfExists({ path: paths.socketPath })
   await writeDaemonPid({ pidPath: paths.pidPath, pid: process.pid })

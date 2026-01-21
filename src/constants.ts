@@ -42,6 +42,10 @@ export const GLOBAL_ONLY_EXTENSION_IDS = [
 
 export const GLOBAL_PROJECTS_REGISTRY_FILENAME = "projects.json" as const
 
+export const DAEMON_PROCESS_TITLE = "dance.hack.hackd" as const
+export const DAEMON_LAUNCHD_LABEL = "dance.hack.hackd" as const
+export const DAEMON_LAUNCHD_PLIST_FILENAME = "dance.hack.hackd.plist" as const
+
 export const GLOBAL_CADDY_COMPOSE_FILENAME = "docker-compose.yml" as const
 export const GLOBAL_LOGGING_COMPOSE_FILENAME = "docker-compose.yml" as const
 export const GLOBAL_ALLOY_FILENAME = "alloy.alloy" as const

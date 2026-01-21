@@ -79,12 +79,26 @@ const UsageConfigSchema = z.object({
   historySize: z.number().int().positive().default(24)
 })
 
+const DaemonLaunchdConfigInputSchema = z.object({
+  installed: z.boolean().optional(),
+  runAtLoad: z.boolean().optional(),
+  guiSessionOnly: z.boolean().optional()
+})
+
+const DaemonLaunchdConfigSchema = z.object({
+  installed: z.boolean().default(false),
+  runAtLoad: z.boolean().default(false),
+  guiSessionOnly: z.boolean().default(true)
+})
+
 const DaemonConfigInputSchema = z.object({
-  autoStart: z.boolean().optional()
+  autoStart: z.boolean().optional(),
+  launchd: DaemonLaunchdConfigInputSchema.optional()
 })
 
 const DaemonConfigSchema = z.object({
-  autoStart: z.boolean().default(true)
+  autoStart: z.boolean().default(true),
+  launchd: DaemonLaunchdConfigSchema.default(DaemonLaunchdConfigSchema.parse({}))
 })
 
 const GatewayConfigInputSchema = z.object({
@@ -130,6 +144,8 @@ const ControlPlaneConfigSchema = z.object({
 })
 
 export type ControlPlaneConfig = z.infer<typeof ControlPlaneConfigSchema>
+export type DaemonConfig = z.infer<typeof DaemonConfigSchema>
+export type DaemonLaunchdConfig = z.infer<typeof DaemonLaunchdConfigSchema>
 export type TicketsGitConfig = z.infer<typeof TicketsGitConfigSchema>
 export type TicketsGitRefMode = z.infer<typeof TicketsGitRefModeSchema>
 

@@ -1,0 +1,213 @@
+name: Release macOS App
+
+on:
+  release:
+    types: [published]
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Release tag to attach artifact to'
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to attach artifact to (e.g., v0.1.0)'
+        required: false
+
+env:
+  APP_NAME: "Hack Desktop"
+  SCHEME: HackDesktop
+  PROJECT_PATH: apps/macos
+
+jobs:
+  build-and-notarize:
+    runs-on: macos-14
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '15.4'
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ${{ env.PROJECT_PATH }}
+        run: xcodegen generate
+
+      - name: Import certificate
+        env:
+          CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          # Create temporary keychain
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Import certificate
+          echo "$CERTIFICATE_P12" | base64 --decode > $RUNNER_TEMP/certificate.p12
+          security import $RUNNER_TEMP/certificate.p12 \
+            -P "$CERTIFICATE_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+
+          # Allow codesign to access keychain
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Add to search list
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
+
+      - name: Build and archive
+        working-directory: ${{ env.PROJECT_PATH }}
+        env:
+          KEYCHAIN: ${{ env.KEYCHAIN_PATH }}
+        run: |
+          xcodebuild archive \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -archivePath "$RUNNER_TEMP/HackDesktop.xcarchive" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Developer ID Application" \
+            OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN_PATH"
+
+      - name: Export app
+        env:
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          cat > $RUNNER_TEMP/ExportOptions.plist << EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>method</key>
+              <string>developer-id</string>
+              <key>teamID</key>
+              <string>$TEAM_ID</string>
+              <key>signingStyle</key>
+              <string>manual</string>
+              <key>signingCertificate</key>
+              <string>Developer ID Application</string>
+          </dict>
+          </plist>
+          EOF
+
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/HackDesktop.xcarchive" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist"
+
+      - name: Notarize app
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          # Create ZIP for notarization
+          ditto -c -k --keepParent "$RUNNER_TEMP/export/$APP_NAME.app" "$RUNNER_TEMP/app.zip"
+
+          # Submit for notarization
+          xcrun notarytool submit "$RUNNER_TEMP/app.zip" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+
+          # Staple the notarization ticket
+          xcrun stapler staple "$RUNNER_TEMP/export/$APP_NAME.app"
+
+      - name: Create DMG
+        run: |
+          # Install create-dmg
+          brew install create-dmg
+
+          # Create DMG
+          create-dmg \
+            --volname "$APP_NAME" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "$APP_NAME.app" 150 190 \
+            --app-drop-link 450 190 \
+            --hide-extension "$APP_NAME.app" \
+            "$RUNNER_TEMP/HackDesktop.dmg" \
+            "$RUNNER_TEMP/export/$APP_NAME.app" || true
+
+          # Fallback if create-dmg fails (it returns non-zero even on success sometimes)
+          if [ ! -f "$RUNNER_TEMP/HackDesktop.dmg" ]; then
+            hdiutil create -volname "$APP_NAME" \
+              -srcfolder "$RUNNER_TEMP/export/$APP_NAME.app" \
+              -ov -format UDZO \
+              "$RUNNER_TEMP/HackDesktop.dmg"
+          fi
+
+      - name: Notarize DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          xcrun notarytool submit "$RUNNER_TEMP/HackDesktop.dmg" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+
+          xcrun stapler staple "$RUNNER_TEMP/HackDesktop.dmg"
+
+      - name: Get version
+        id: version
+        run: |
+          VERSION=$(defaults read "$RUNNER_TEMP/export/$APP_NAME.app/Contents/Info.plist" CFBundleShortVersionString)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Rename artifacts
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mv "$RUNNER_TEMP/HackDesktop.dmg" "$RUNNER_TEMP/HackDesktop-$VERSION-macOS.dmg"
+
+          # Also create a ZIP of the app
+          ditto -c -k --keepParent \
+            "$RUNNER_TEMP/export/$APP_NAME.app" \
+            "$RUNNER_TEMP/HackDesktop-$VERSION-macOS.zip"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-app
+          path: |
+            ${{ runner.temp }}/HackDesktop-*.dmg
+            ${{ runner.temp }}/HackDesktop-*.zip
+
+      - name: Upload to release
+        if: github.event_name == 'release' || github.event.inputs.tag != '' || inputs.tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || github.event.inputs.tag || inputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release upload "$RELEASE_TAG" \
+            "$RUNNER_TEMP/HackDesktop-$VERSION-macOS.dmg" \
+            "$RUNNER_TEMP/HackDesktop-$VERSION-macOS.zip" \
+            --clobber
+
+      - name: Cleanup keychain
+        if: always()
+        run: |
+          if [ -n "$KEYCHAIN_PATH" ] && [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain "$KEYCHAIN_PATH" || true
+          fi

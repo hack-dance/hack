@@ -20,6 +20,7 @@
     "macos:dev": "bun run macos:project-gen && bun run macos:open",
     "macos:build": "cd apps/macos && swift build",
     "macos:test": "cd apps/macos && swift test",
+    "macos:release": "./scripts/build-macos-release.sh",
     "macos:ghostty:setup": "bun run scripts/macos-ghostty-setup.ts",
     "prepare": "husky",
     "release:prepare": "bunx semantic-release --no-ci",

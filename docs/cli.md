@@ -810,9 +810,13 @@ Subcommands:
 | --- | --- |
 | `start` | Start hackd (local daemon) |
 | `stop` | Stop hackd |
+| `restart` | Restart hackd |
 | `status` | Show hackd status |
 | `metrics` | Show hackd metrics |
 | `logs` | Show hackd logs |
+| `clear` | Clear stale hackd pid/socket files |
+| `install` | Install hackd as a launchd service (macOS) |
+| `uninstall` | Uninstall hackd launchd service (macOS) |
 
 #### hack daemon start
 
@@ -832,7 +836,7 @@ Options:
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--json` | boolean | false | Output JSON (machine-readable) |
+| `--json` | boolean | false | Output JSON (machine-readable, includes launchd info on macOS) |
 
 #### hack daemon logs
 
@@ -843,6 +847,32 @@ Options:
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--tail <n>` | number | 200 | Tail last N log lines |
+
+#### hack daemon install
+
+Usage: `hack daemon install [options]`
+
+Installs hackd as a launchd service on macOS. The daemon will be managed by launchd
+and can optionally start automatically on login.
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--run-at-load` | boolean | false | Start hackd automatically on login |
+| `--no-run-at-load` | boolean | - | Do not start hackd automatically on login |
+| `--gui-only` | boolean | true | Only run in GUI sessions (Aqua) |
+| `--no-gui-only` | boolean | - | Run in all session types (including SSH) |
+
+The service uses the label `dance.hack.hackd` and writes its plist to
+`~/Library/LaunchAgents/dance.hack.hackd.plist`.
+
+#### hack daemon uninstall
+
+Usage: `hack daemon uninstall`
+
+Uninstalls the hackd launchd service on macOS. Removes the plist and unloads
+the service from launchd.
 
 ### hack log-pipe
 

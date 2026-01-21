@@ -76,6 +76,21 @@ if [ "$SKIP_CLI" = false ]; then
   # Build binary
   bun build index.ts --compile --outfile "$CLI_BUILD_DIR/hack"
 
+  # Sign CLI binary with hardened runtime (required for notarization)
+  # Find the Developer ID Application certificate
+  SIGNING_IDENTITY=$(security find-identity -v -p codesigning | awk '/Developer ID Application/ {print $2; exit}')
+  if [ -z "$SIGNING_IDENTITY" ]; then
+    error "No Developer ID Application certificate found"
+  fi
+  log "Signing CLI binary with certificate: $SIGNING_IDENTITY"
+  codesign --force --options runtime --timestamp \
+    --sign "$SIGNING_IDENTITY" \
+    "$CLI_BUILD_DIR/hack"
+
+  # Verify signature
+  codesign -vvv --deep --strict "$CLI_BUILD_DIR/hack"
+  success "CLI binary signed and verified"
+
   # Copy assets
   ASSETS_DIR="$CLI_BUILD_DIR/assets"
   mkdir -p "$ASSETS_DIR/gifs" "$ASSETS_DIR/schemas"
@@ -83,10 +98,19 @@ if [ "$SKIP_CLI" = false ]; then
   [ -f "$REPO_ROOT/assets/cut.gif" ] && cp "$REPO_ROOT/assets/cut.gif" "$ASSETS_DIR/gifs/"
   [ -f "$REPO_ROOT/assets/hacker-mash.gif" ] && cp "$REPO_ROOT/assets/hacker-mash.gif" "$ASSETS_DIR/gifs/"
 
-  # Copy gum binaries if present
+  # Copy and sign gum binaries if present
   if [ -d "$REPO_ROOT/binaries/gum" ]; then
     mkdir -p "$CLI_BUILD_DIR/binaries/gum"
     cp -R "$REPO_ROOT/binaries/gum/." "$CLI_BUILD_DIR/binaries/gum/"
+
+    # Sign gum binaries with hardened runtime
+    log "Signing gum binaries..."
+    find "$CLI_BUILD_DIR/binaries/gum" -type f -perm +111 | while read -r binary; do
+      codesign --force --options runtime --timestamp \
+        --sign "$SIGNING_IDENTITY" \
+        "$binary" 2>/dev/null || true
+    done
+    success "Gum binaries signed"
   fi
 
   success "CLI built"

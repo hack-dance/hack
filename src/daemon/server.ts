@@ -23,6 +23,7 @@ import { startDockerEventWatcher } from "./docker-events.ts";
 import { createDaemonLogger } from "./logger.ts";
 import type { DaemonPaths } from "./paths.ts";
 import { removeFileIfExists, writeDaemonPid } from "./process.ts";
+import { handleSessionRoutes } from "./routes/sessions.ts";
 import type { RuntimeHealth } from "./runtime-cache.ts";
 import { createRuntimeCache } from "./runtime-cache.ts";
 
@@ -362,6 +363,13 @@ async function handleRequest({
   if (controlPlaneResponse) {
     return controlPlaneResponse;
   }
+
+  // Session routes (tmux session management)
+  const sessionResponse = await handleSessionRoutes({ req, url });
+  if (sessionResponse) {
+    return sessionResponse;
+  }
+
   if (url.pathname === "/v1/status") {
     return jsonResponse({
       status: "ok",

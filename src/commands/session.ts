@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import * as p from "@clack/prompts";
 import type {
   CliContext,
   CommandArgs,
@@ -8,11 +9,7 @@ import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
 import type { RegisteredProject } from "../lib/projects-registry.ts";
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
 import { exec, run } from "../lib/shell.ts";
-import { fzfFilterOne } from "../ui/fzf.ts";
 import { logger } from "../ui/logger.ts";
-
-/** Regex to extract session/project name from picker selection line. */
-const SESSION_NAME_PATTERN = /^\s+(\S+)/;
 
 /**
  * Parsed tmux session info.
@@ -123,125 +120,160 @@ type ExecArgs = CommandArgs<
 /**
  * Interactive session picker (default when no subcommand).
  *
- * Groups active sessions separately from available projects with clear headers.
+ * Uses clack prompts with grouped options for sessions and projects.
  */
 async function handleSessionPicker(): Promise<number> {
   const sessions = await listTmuxSessions();
   const registry = await readProjectsRegistry();
   const projects = registry.projects;
 
-  // Build picker items with group headers
-  const items: string[] = [];
+  p.intro("Sessions");
+
   const sessionNames = new Set(sessions.map((s) => s.name));
   const home = process.env.HOME ?? "";
 
   // Helper to shorten paths with ~/
-  const shortenPath = (p: string): string => {
-    if (home && p.startsWith(home)) {
-      return `~${p.slice(home.length)}`;
+  const shortenPath = (path: string): string => {
+    if (home && path.startsWith(home)) {
+      return `~${path.slice(home.length)}`;
     }
-    return p;
+    return path;
   };
 
-  // Active sessions section
+  // Build options for clack select
+  type SessionOption = {
+    value: string;
+    label: string;
+    hint?: string;
+  };
+
+  const options: SessionOption[] = [];
+
+  // Active sessions
   const attachedSessions = sessions.filter((s) => s.attached);
   const detachedSessions = sessions.filter((s) => !s.attached);
 
-  if (attachedSessions.length > 0) {
-    items.push("── Attached ──");
-    for (const session of attachedSessions) {
-      const path = session.path ? shortenPath(session.path) : "";
-      items.push(`   ${session.name}\t${path}`);
-    }
+  for (const session of attachedSessions) {
+    options.push({
+      value: `session:${session.name}`,
+      label: session.name,
+      hint: `attached${session.path ? ` • ${shortenPath(session.path)}` : ""}`,
+    });
   }
 
-  if (detachedSessions.length > 0) {
-    items.push("── Detached ──");
-    for (const session of detachedSessions) {
-      const path = session.path ? shortenPath(session.path) : "";
-      items.push(`   ${session.name}\t${path}`);
-    }
+  for (const session of detachedSessions) {
+    options.push({
+      value: `session:${session.name}`,
+      label: session.name,
+      hint: session.path ? shortenPath(session.path) : "detached",
+    });
   }
 
-  // Projects without active sessions (available to start)
+  // Projects without active sessions
   const availableProjects = projects.filter(
-    (p: RegisteredProject) => !sessionNames.has(p.name)
+    (proj: RegisteredProject) => !sessionNames.has(proj.name)
   );
 
-  if (availableProjects.length > 0) {
-    items.push("── Projects ──");
-    for (const project of availableProjects) {
-      items.push(`   ${project.name}\t${shortenPath(project.repoRoot)}`);
-    }
+  for (const project of availableProjects) {
+    options.push({
+      value: `project:${project.name}`,
+      label: project.name,
+      hint: `new • ${shortenPath(project.repoRoot)}`,
+    });
   }
 
-  if (items.length === 0) {
-    logger.warn({
-      message:
-        "No sessions or projects found. Run 'hack init' in a project first.",
-    });
+  if (options.length === 0) {
+    p.log.warn(
+      "No sessions or projects found. Run 'hack init' in a project first."
+    );
+    p.outro("");
     return 1;
   }
 
-  const result = await fzfFilterOne({
-    items,
-    prompt: "session > ",
-    height: "50%",
-    reverse: true,
-    tabstop: 24,
+  const selection = await p.select({
+    message: "Select session or project",
+    options,
   });
 
-  if (!result.ok) {
-    if (result.reason === "cancelled") {
-      return 0;
-    }
-    if (result.reason === "unavailable") {
-      logger.error({
-        message: "fzf not available. Install fzf or run 'hack session list'.",
-      });
-      return 1;
-    }
-    return 1;
-  }
-
-  if (!result.value) {
+  if (p.isCancel(selection)) {
+    p.outro("Cancelled");
     return 0;
   }
 
-  // Parse selection - extract session/project name
-  const line = result.value.trim();
+  // Parse selection
+  const [type, ...rest] = selection.split(":");
+  const name = rest.join(":"); // Handle names with colons like "project:2"
 
-  // Skip header lines
-  if (line.startsWith("──")) {
-    return 0;
-  }
-
-  // Format: "   name\tpath" - extract name
-  const match = line.match(SESSION_NAME_PATTERN);
-  const name = match?.[1];
   if (!name) {
-    logger.error({ message: "Could not parse selection" });
+    p.log.error("Invalid selection");
     return 1;
   }
-  const existingSession = sessions.find((s) => s.name === name);
 
-  if (existingSession) {
-    // Attach to existing session
+  if (type === "session") {
+    const session = sessions.find((s) => s.name === name);
+
+    // If session is attached elsewhere, offer choice
+    if (session?.attached) {
+      const nextNum = getNextSessionNumber(sessions, name);
+
+      const action = await p.select({
+        message: `Session '${name}' is attached elsewhere`,
+        options: [
+          { value: "attach", label: "Attach", hint: "detaches other clients" },
+          { value: "new", label: "Create new", hint: `${name}:${nextNum}` },
+        ],
+      });
+
+      if (p.isCancel(action)) {
+        p.outro("Cancelled");
+        return 0;
+      }
+
+      if (action === "new") {
+        const project = projects.find(
+          (proj: RegisteredProject) => proj.name === name
+        );
+        const cwd = project?.repoRoot ?? session.path ?? process.cwd();
+        return await createAndAttachSession({
+          name: `${name}:${nextNum}`,
+          cwd,
+        });
+      }
+    }
+
     return await attachToSession(name);
   }
 
   // Create new session for project
-  const project = projects.find((p: RegisteredProject) => p.name === name);
+  const project = projects.find(
+    (proj: RegisteredProject) => proj.name === name
+  );
   if (!project) {
-    logger.error({ message: `Project not found: ${name}` });
+    p.log.error(`Project not found: ${name}`);
     return 1;
   }
 
-  // Use repoRoot (project root), not projectDir (.hack/)
   return await createAndAttachSession({
     name: project.name,
     cwd: project.repoRoot,
   });
+}
+
+/**
+ * Get the next available session number for a base name.
+ */
+function getNextSessionNumber(
+  sessions: TmuxSession[],
+  baseName: string
+): number {
+  const existing = sessions.filter(
+    (s) => s.name === baseName || s.name.startsWith(`${baseName}:`)
+  );
+  let n = 2;
+  while (existing.some((s) => s.name === `${baseName}:${n}`)) {
+    n++;
+  }
+  return n;
 }
 
 const handleList: CommandHandlerFor<
@@ -476,6 +508,7 @@ async function listTmuxSessions(): Promise<TmuxSession[]> {
 /**
  * Attach to or switch to an existing tmux session.
  * Uses switch-client when already inside tmux to avoid nesting.
+ * Uses -d to detach other clients (avoids size conflicts from different terminals).
  */
 async function attachToSession(name: string): Promise<number> {
   const insideTmux = Boolean(process.env.TMUX);
@@ -488,8 +521,8 @@ async function attachToSession(name: string): Promise<number> {
     return exitCode;
   }
 
-  // Outside tmux - attach normally
-  const exitCode = await run(["tmux", "attach", "-t", name], {
+  // Outside tmux - attach with -d to detach other clients
+  const exitCode = await run(["tmux", "attach", "-d", "-t", name], {
     stdin: "inherit",
   });
   return exitCode;

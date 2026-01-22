@@ -25,6 +25,7 @@ import { remoteCommand } from "../commands/remote.ts";
 import { secretsCommand } from "../commands/secrets.ts";
 import { sessionCommand } from "../commands/session.ts";
 import { setupCommand } from "../commands/setup.ts";
+import { sshCommand } from "../commands/ssh.ts";
 import { theCommand } from "../commands/the.ts";
 import { ticketsCommand } from "../commands/tickets.ts";
 import { tuiCommand } from "../commands/tui.ts";
@@ -69,6 +70,7 @@ export const CLI_SPEC = defineCli({
     mcpCommand,
     setupCommand,
     sessionCommand,
+    sshCommand,
     ticketsCommand,
     agentCommand,
     gatewayCommand,

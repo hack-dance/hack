@@ -1,4 +1,8 @@
 import { exec } from "../../lib/shell.ts";
+import {
+  buildTailscaleSshCommand,
+  getTailscaleStatus,
+} from "../../lib/tailscale.ts";
 
 /** Valid session name pattern: alphanumeric, dash, underscore, or dot */
 const SESSION_NAME_PATTERN = /^[\w.-]+$/;
@@ -34,6 +38,20 @@ export interface SessionExecInput {
  */
 export interface SessionInputPayload {
   readonly keys: string;
+}
+
+/**
+ * Connection info for SSH access to sessions.
+ */
+export interface SessionConnectionInfo {
+  /** Tailscale DNS name if available */
+  readonly tailscaleDnsName: string | null;
+  /** Tailscale SSH command if available */
+  readonly tailscaleSshCommand: string | null;
+  /** Whether Tailscale is ready for SSH */
+  readonly tailscaleReady: boolean;
+  /** Machine hostname */
+  readonly hostname: string | null;
 }
 
 type ParseResult<T> =
@@ -106,8 +124,11 @@ export async function handleSessionRoutes(opts: {
  * List all tmux sessions.
  */
 async function handleListSessions(): Promise<Response> {
-  const sessions = await listTmuxSessions();
-  return jsonResponse({ sessions });
+  const [sessions, connectionInfo] = await Promise.all([
+    listTmuxSessions(),
+    getConnectionInfo(),
+  ]);
+  return jsonResponse({ sessions, connection: connectionInfo });
 }
 
 /**
@@ -159,11 +180,14 @@ async function handleCreateSession(opts: {
 async function handleGetSession(opts: {
   readonly sessionId: string;
 }): Promise<Response> {
-  const session = await findSession({ name: opts.sessionId });
+  const [session, connectionInfo] = await Promise.all([
+    findSession({ name: opts.sessionId }),
+    getConnectionInfo({ sessionName: opts.sessionId }),
+  ]);
   if (!session) {
     return jsonResponse({ error: "session_not_found" }, 404);
   }
-  return jsonResponse({ session });
+  return jsonResponse({ session, connection: connectionInfo });
 }
 
 /**
@@ -325,6 +349,40 @@ async function findSession(opts: {
 }): Promise<TmuxSession | null> {
   const sessions = await listTmuxSessions();
   return sessions.find((s) => s.name === opts.name) ?? null;
+}
+
+/**
+ * Get connection info for SSH access.
+ *
+ * @param opts.sessionName - Optional session name for building SSH command
+ */
+async function getConnectionInfo(_opts?: {
+  readonly sessionName?: string;
+}): Promise<SessionConnectionInfo> {
+  const [tsStatus, hostnameResult] = await Promise.all([
+    getTailscaleStatus(),
+    exec(["hostname"], { stdin: "ignore" }),
+  ]);
+
+  const hostname =
+    hostnameResult.exitCode === 0 ? hostnameResult.stdout.trim() : null;
+
+  const tailscaleReady = tsStatus.installed && tsStatus.loggedIn;
+  const tailscaleDnsName = tsStatus.dnsName;
+
+  let tailscaleSshCommand: string | null = null;
+  if (tailscaleReady && tailscaleDnsName) {
+    tailscaleSshCommand = buildTailscaleSshCommand({
+      dnsName: tailscaleDnsName,
+    });
+  }
+
+  return {
+    tailscaleDnsName,
+    tailscaleSshCommand,
+    tailscaleReady,
+    hostname,
+  };
 }
 
 /**

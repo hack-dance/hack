@@ -1,6 +1,5 @@
-import { GATEWAY_COMMANDS } from "./commands.ts"
-
-import type { ExtensionDefinition } from "../types.ts"
+import type { ExtensionDefinition } from "../types.ts";
+import { GATEWAY_COMMANDS } from "./commands.ts";
 
 export const GATEWAY_EXTENSION: ExtensionDefinition = {
   manifest: {
@@ -8,7 +7,7 @@ export const GATEWAY_EXTENSION: ExtensionDefinition = {
     version: "0.1.0",
     scopes: ["global"],
     cliNamespace: "gateway",
-    summary: "Remote access gateway"
+    summary: "Remote access gateway",
   },
-  commands: GATEWAY_COMMANDS
-}
+  commands: GATEWAY_COMMANDS,
+};

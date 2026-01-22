@@ -1,94 +1,104 @@
-import { resolve } from "node:path"
+import { resolve } from "node:path";
 
-import { pathExists, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts"
+import { pathExists, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts";
 
-export type AgentDocTarget = "agents" | "claude"
+export type AgentDocTarget = "agents" | "claude";
 
 export type AgentDocUpdateResult = {
-  readonly target: AgentDocTarget
-  readonly status: "created" | "updated" | "noop" | "error"
-  readonly path: string
-  readonly message?: string
-}
+  readonly target: AgentDocTarget;
+  readonly status: "created" | "updated" | "noop" | "error";
+  readonly path: string;
+  readonly message?: string;
+};
 
 export type AgentDocCheckResult = {
-  readonly target: AgentDocTarget
-  readonly status: "present" | "missing" | "error"
-  readonly path: string
-  readonly message?: string
-}
+  readonly target: AgentDocTarget;
+  readonly status: "present" | "missing" | "error";
+  readonly path: string;
+  readonly message?: string;
+};
 
 export type AgentDocRemoveResult = {
-  readonly target: AgentDocTarget
-  readonly status: "removed" | "noop" | "error"
-  readonly path: string
-  readonly message?: string
-}
+  readonly target: AgentDocTarget;
+  readonly status: "removed" | "noop" | "error";
+  readonly path: string;
+  readonly message?: string;
+};
 
-const DOC_MARKER_START = "<!-- hack:agent-docs:start -->"
-const DOC_MARKER_END = "<!-- hack:agent-docs:end -->"
+const DOC_MARKER_START = "<!-- hack:agent-docs:start -->";
+const DOC_MARKER_END = "<!-- hack:agent-docs:end -->";
 
 /**
  * Upsert hack usage instructions into AGENTS.md / CLAUDE.md for a project.
  */
 export async function upsertAgentDocs(opts: {
-  readonly projectRoot: string
-  readonly targets: readonly AgentDocTarget[]
+  readonly projectRoot: string;
+  readonly targets: readonly AgentDocTarget[];
 }): Promise<AgentDocUpdateResult[]> {
-  const results: AgentDocUpdateResult[] = []
-  const snippet = renderAgentDocsSnippet()
+  const results: AgentDocUpdateResult[] = [];
+  const snippet = renderAgentDocsSnippet();
 
   for (const target of opts.targets) {
-    const path = resolveAgentDocPath({ projectRoot: opts.projectRoot, target })
+    const path = resolveAgentDocPath({ projectRoot: opts.projectRoot, target });
     try {
-      const existed = await pathExists(path)
-      const existing = (await readTextFile(path)) ?? ""
-      const next = upsertSnippet({ existing, snippet })
-      const result = await writeTextFileIfChanged(path, next)
-      const status =
-        result.changed ? (existed ? "updated" : "created") : "noop"
-      results.push({ target, status, path })
+      const existed = await pathExists(path);
+      const existing = (await readTextFile(path)) ?? "";
+      const next = upsertSnippet({ existing, snippet });
+      const result = await writeTextFileIfChanged(path, next);
+      const status = resolveUpsertStatus({ changed: result.changed, existed });
+      results.push({ target, status, path });
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : "Failed to update file"
-      results.push({ target, status: "error", path, message })
+      const message =
+        error instanceof Error ? error.message : "Failed to update file";
+      results.push({ target, status: "error", path, message });
     }
   }
 
-  return results
+  return results;
 }
 
 /**
  * Detect which agent doc files already exist in a project.
  */
 export async function getExistingAgentDocs(opts: {
-  readonly projectRoot: string
+  readonly projectRoot: string;
 }): Promise<AgentDocTarget[]> {
-  const targets: AgentDocTarget[] = []
-  const agentsPath = resolveAgentDocPath({ projectRoot: opts.projectRoot, target: "agents" })
-  const claudePath = resolveAgentDocPath({ projectRoot: opts.projectRoot, target: "claude" })
+  const targets: AgentDocTarget[] = [];
+  const agentsPath = resolveAgentDocPath({
+    projectRoot: opts.projectRoot,
+    target: "agents",
+  });
+  const claudePath = resolveAgentDocPath({
+    projectRoot: opts.projectRoot,
+    target: "claude",
+  });
 
-  if (await pathExists(agentsPath)) targets.push("agents")
-  if (await pathExists(claudePath)) targets.push("claude")
+  if (await pathExists(agentsPath)) {
+    targets.push("agents");
+  }
+  if (await pathExists(claudePath)) {
+    targets.push("claude");
+  }
 
-  return targets
+  return targets;
 }
 
 /**
  * Check whether agent docs include the hack snippet.
  */
 export async function checkAgentDocs(opts: {
-  readonly projectRoot: string
-  readonly targets: readonly AgentDocTarget[]
+  readonly projectRoot: string;
+  readonly targets: readonly AgentDocTarget[];
 }): Promise<AgentDocCheckResult[]> {
-  const results: AgentDocCheckResult[] = []
+  const results: AgentDocCheckResult[] = [];
 
   for (const target of opts.targets) {
-    const path = resolveAgentDocPath({ projectRoot: opts.projectRoot, target })
+    const path = resolveAgentDocPath({ projectRoot: opts.projectRoot, target });
     try {
-      const existing = await readTextFile(path)
+      const existing = await readTextFile(path);
       if (!existing) {
-        results.push({ target, status: "missing", path })
-        continue
+        results.push({ target, status: "missing", path });
+        continue;
       }
 
       if (!hasAgentDocSnippet({ content: existing })) {
@@ -96,54 +106,56 @@ export async function checkAgentDocs(opts: {
           target,
           status: "error",
           path,
-          message: "Missing hack agent-docs markers."
-        })
-        continue
+          message: "Missing hack agent-docs markers.",
+        });
+        continue;
       }
 
-      results.push({ target, status: "present", path })
+      results.push({ target, status: "present", path });
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : "Failed to read file"
-      results.push({ target, status: "error", path, message })
+      const message =
+        error instanceof Error ? error.message : "Failed to read file";
+      results.push({ target, status: "error", path, message });
     }
   }
 
-  return results
+  return results;
 }
 
 /**
  * Remove the hack snippet from agent docs.
  */
 export async function removeAgentDocs(opts: {
-  readonly projectRoot: string
-  readonly targets: readonly AgentDocTarget[]
+  readonly projectRoot: string;
+  readonly targets: readonly AgentDocTarget[];
 }): Promise<AgentDocRemoveResult[]> {
-  const results: AgentDocRemoveResult[] = []
+  const results: AgentDocRemoveResult[] = [];
 
   for (const target of opts.targets) {
-    const path = resolveAgentDocPath({ projectRoot: opts.projectRoot, target })
+    const path = resolveAgentDocPath({ projectRoot: opts.projectRoot, target });
     try {
-      const existing = await readTextFile(path)
+      const existing = await readTextFile(path);
       if (!existing) {
-        results.push({ target, status: "noop", path })
-        continue
+        results.push({ target, status: "noop", path });
+        continue;
       }
 
-      const next = removeSnippet({ existing })
+      const next = removeSnippet({ existing });
       if (next === existing) {
-        results.push({ target, status: "noop", path })
-        continue
+        results.push({ target, status: "noop", path });
+        continue;
       }
 
-      await writeTextFileIfChanged(path, next)
-      results.push({ target, status: "removed", path })
+      await writeTextFileIfChanged(path, next);
+      results.push({ target, status: "removed", path });
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : "Failed to update file"
-      results.push({ target, status: "error", path, message })
+      const message =
+        error instanceof Error ? error.message : "Failed to update file";
+      results.push({ target, status: "error", path, message });
     }
   }
 
-  return results
+  return results;
 }
 
 /**
@@ -201,6 +213,16 @@ export function renderAgentDocsSnippet(): string {
     "- Prefer `hack` commands; they include the right files/networks.",
     "- Use `docker compose -f .hack/docker-compose.yml exec <service> <cmd>` only if you need exec into a running container.",
     "",
+    "Sessions (tmux-based):",
+    "- Interactive picker: `hack session` (fzf picker, works as switcher inside tmux)",
+    "- Start/attach: `hack session start <project>` (attaches if exists, switches if in tmux)",
+    "- Force new: `hack session start <project> --new --name agent-1`",
+    "- With infra: `hack session start <project> --up`",
+    "- List: `hack session list`",
+    "- Stop: `hack session stop <session>`",
+    '- Exec in session: `hack session exec <session> "<command>"`',
+    "- Setup tmux: `hack setup tmux` (installs tmux if missing)",
+    "",
     "Agent setup (CLI-first):",
     "- Cursor rules: `hack setup cursor`",
     "- Claude hooks: `hack setup claude`",
@@ -209,61 +231,88 @@ export function renderAgentDocsSnippet(): string {
     "- Init patterns: `hack agent patterns`",
     "- MCP (no-shell only): `hack setup mcp`",
     DOC_MARKER_END,
-    ""
-  ]
+    "",
+  ];
 
-  return lines.join("\n")
+  return lines.join("\n");
 }
 
 export function resolveAgentDocPath(opts: {
-  readonly projectRoot: string
-  readonly target: AgentDocTarget
+  readonly projectRoot: string;
+  readonly target: AgentDocTarget;
 }): string {
-  return resolve(opts.projectRoot, resolveAgentDocFilename({ target: opts.target }))
+  return resolve(
+    opts.projectRoot,
+    resolveAgentDocFilename({ target: opts.target })
+  );
 }
 
-function resolveAgentDocFilename(opts: { readonly target: AgentDocTarget }): string {
-  return opts.target === "agents" ? "AGENTS.md" : "CLAUDE.md"
+function resolveAgentDocFilename(opts: {
+  readonly target: AgentDocTarget;
+}): string {
+  return opts.target === "agents" ? "AGENTS.md" : "CLAUDE.md";
 }
 
-function upsertSnippet(opts: { readonly existing: string; readonly snippet: string }): string {
+function resolveUpsertStatus(opts: {
+  readonly changed: boolean;
+  readonly existed: boolean;
+}): "created" | "updated" | "noop" {
+  if (!opts.changed) {
+    return "noop";
+  }
+  return opts.existed ? "updated" : "created";
+}
+
+function upsertSnippet(opts: {
+  readonly existing: string;
+  readonly snippet: string;
+}): string {
   const pattern = new RegExp(
     `${escapeRegex({ value: DOC_MARKER_START })}[\\s\\S]*?${escapeRegex({ value: DOC_MARKER_END })}`
-  )
+  );
 
   if (pattern.test(opts.existing)) {
-    const replaced = opts.existing.replace(pattern, opts.snippet.trimEnd())
-    return ensureTrailingNewline({ text: replaced })
+    const replaced = opts.existing.replace(pattern, opts.snippet.trimEnd());
+    return ensureTrailingNewline({ text: replaced });
   }
 
-  const trimmed = opts.existing.trimEnd()
-  if (trimmed.length === 0) return opts.snippet
-  return ensureTrailingNewline({ text: `${trimmed}\n\n${opts.snippet.trimEnd()}` })
+  const trimmed = opts.existing.trimEnd();
+  if (trimmed.length === 0) {
+    return opts.snippet;
+  }
+  return ensureTrailingNewline({
+    text: `${trimmed}\n\n${opts.snippet.trimEnd()}`,
+  });
 }
 
 function removeSnippet(opts: { readonly existing: string }): string {
   const pattern = new RegExp(
     `${escapeRegex({ value: DOC_MARKER_START })}[\\s\\S]*?${escapeRegex({ value: DOC_MARKER_END })}\\s*\\n?`,
     "m"
-  )
+  );
 
-  if (!pattern.test(opts.existing)) return opts.existing
+  if (!pattern.test(opts.existing)) {
+    return opts.existing;
+  }
 
-  const replaced = opts.existing.replace(pattern, "").trimEnd()
-  if (replaced.length === 0) return ""
-  return ensureTrailingNewline({ text: replaced.replace(/\n{3,}/g, "\n\n") })
+  const replaced = opts.existing.replace(pattern, "").trimEnd();
+  if (replaced.length === 0) {
+    return "";
+  }
+  return ensureTrailingNewline({ text: replaced.replace(/\n{3,}/g, "\n\n") });
 }
 
 function hasAgentDocSnippet(opts: { readonly content: string }): boolean {
   return (
-    opts.content.includes(DOC_MARKER_START) && opts.content.includes(DOC_MARKER_END)
-  )
+    opts.content.includes(DOC_MARKER_START) &&
+    opts.content.includes(DOC_MARKER_END)
+  );
 }
 
 function escapeRegex(opts: { readonly value: string }): string {
-  return opts.value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  return opts.value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function ensureTrailingNewline(opts: { readonly text: string }): string {
-  return opts.text.endsWith("\n") ? opts.text : `${opts.text}\n`
+  return opts.text.endsWith("\n") ? opts.text : `${opts.text}\n`;
 }

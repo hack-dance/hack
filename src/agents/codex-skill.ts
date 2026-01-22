@@ -1,103 +1,112 @@
-import { dirname, resolve } from "node:path"
-import { rm } from "node:fs/promises"
+import { rm } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 
-import { ensureDir, pathExists, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts"
+import {
+  ensureDir,
+  pathExists,
+  readTextFile,
+  writeTextFileIfChanged,
+} from "../lib/fs.ts";
 
-export type CodexSkillScope = "project" | "user"
+export type CodexSkillScope = "project" | "user";
 
 export type CodexSkillResult = {
-  readonly scope: CodexSkillScope
-  readonly status: "created" | "updated" | "noop" | "removed" | "missing" | "error"
-  readonly path: string
-  readonly message?: string
-}
+  readonly scope: CodexSkillScope;
+  readonly status:
+    | "created"
+    | "updated"
+    | "noop"
+    | "removed"
+    | "missing"
+    | "error";
+  readonly path: string;
+  readonly message?: string;
+};
 
-const SKILL_NAME = "hack-cli"
-const SKILL_FILENAME = "SKILL.md"
-const SKILL_DIR = ".codex/skills"
+const SKILL_NAME = "hack-cli";
+const SKILL_FILENAME = "SKILL.md";
+const SKILL_DIR = ".codex/skills";
+const HACK_CLI_MARKER_REGEX = /name:\s*hack-cli\b/i;
 
 /**
  * Install or update the Codex skill for hack CLI usage.
  */
 export async function installCodexSkill(opts: {
-  readonly scope: CodexSkillScope
-  readonly projectRoot?: string
+  readonly scope: CodexSkillScope;
+  readonly projectRoot?: string;
 }): Promise<CodexSkillResult> {
-  const resolved = resolveCodexSkillPath(opts)
+  const resolved = resolveCodexSkillPath(opts);
   if (!resolved.ok) {
     return {
       scope: opts.scope,
       status: "error",
       path: resolved.path ?? SKILL_FILENAME,
-      message: resolved.message
-    }
+      message: resolved.message,
+    };
   }
 
-  const path = resolved.path
-  await ensureDir(dirname(path))
-  const existed = await pathExists(path)
-  const result = await writeTextFileIfChanged(path, renderCodexSkill())
+  const path = resolved.path;
+  await ensureDir(dirname(path));
+  const existed = await pathExists(path);
+  const result = await writeTextFileIfChanged(path, renderCodexSkill());
 
-  return {
-    scope: opts.scope,
-    status: result.changed ? (existed ? "updated" : "created") : "noop",
-    path
-  }
+  const status = resolveInstallStatus({ changed: result.changed, existed });
+  return { scope: opts.scope, status, path };
 }
 
 /**
  * Check whether the Codex skill is installed.
  */
 export async function checkCodexSkill(opts: {
-  readonly scope: CodexSkillScope
-  readonly projectRoot?: string
+  readonly scope: CodexSkillScope;
+  readonly projectRoot?: string;
 }): Promise<CodexSkillResult> {
-  const resolved = resolveCodexSkillPath(opts)
+  const resolved = resolveCodexSkillPath(opts);
   if (!resolved.ok) {
     return {
       scope: opts.scope,
       status: "error",
       path: resolved.path ?? SKILL_FILENAME,
-      message: resolved.message
-    }
+      message: resolved.message,
+    };
   }
 
-  const path = resolved.path
-  const content = await readTextFile(path)
+  const path = resolved.path;
+  const content = await readTextFile(path);
   if (!content) {
-    return { scope: opts.scope, status: "missing", path }
+    return { scope: opts.scope, status: "missing", path };
   }
 
-  const hasMarker = /name:\s*hack-cli\b/i.test(content)
-  return { scope: opts.scope, status: hasMarker ? "noop" : "error", path }
+  const hasMarker = HACK_CLI_MARKER_REGEX.test(content);
+  return { scope: opts.scope, status: hasMarker ? "noop" : "error", path };
 }
 
 /**
  * Remove the Codex skill for hack CLI usage.
  */
 export async function removeCodexSkill(opts: {
-  readonly scope: CodexSkillScope
-  readonly projectRoot?: string
+  readonly scope: CodexSkillScope;
+  readonly projectRoot?: string;
 }): Promise<CodexSkillResult> {
-  const resolved = resolveCodexSkillPath(opts)
+  const resolved = resolveCodexSkillPath(opts);
   if (!resolved.ok) {
     return {
       scope: opts.scope,
       status: "error",
       path: resolved.path ?? SKILL_FILENAME,
-      message: resolved.message
-    }
+      message: resolved.message,
+    };
   }
 
-  const path = resolved.path
-  const skillDir = resolve(path, "..")
+  const path = resolved.path;
+  const skillDir = resolve(path, "..");
 
   if (!(await pathExists(path))) {
-    return { scope: opts.scope, status: "missing", path }
+    return { scope: opts.scope, status: "missing", path };
   }
 
-  await rm(skillDir, { recursive: true, force: true })
-  return { scope: opts.scope, status: "removed", path }
+  await rm(skillDir, { recursive: true, force: true });
+  return { scope: opts.scope, status: "removed", path };
 }
 
 /**
@@ -161,32 +170,50 @@ export function renderCodexSkill(): string {
     "- Init prompt: `hack agent init` (use --client cursor|claude|codex to open)",
     "- Init patterns: `hack agent patterns`",
     "- MCP (no shell only): `hack setup mcp`",
-    ""
-  ]
+    "",
+  ];
 
-  return lines.join("\n")
+  return lines.join("\n");
 }
 
 function resolveCodexSkillPath(opts: {
-  readonly scope: CodexSkillScope
-  readonly projectRoot?: string
-}): { readonly ok: true; readonly path: string } | { readonly ok: false; readonly message: string; readonly path?: string } {
+  readonly scope: CodexSkillScope;
+  readonly projectRoot?: string;
+}):
+  | { readonly ok: true; readonly path: string }
+  | { readonly ok: false; readonly message: string; readonly path?: string } {
   if (opts.scope === "project" && !opts.projectRoot) {
-    return { ok: false, message: "Missing project root for project-scoped Codex skill." }
+    return {
+      ok: false,
+      message: "Missing project root for project-scoped Codex skill.",
+    };
   }
 
-  const root = opts.scope === "user" ? resolveHomeDir() : opts.projectRoot
+  const root = opts.scope === "user" ? resolveHomeDir() : opts.projectRoot;
   if (!root) {
-    return { ok: false, message: "HOME is not set; cannot resolve Codex skill path." }
+    return {
+      ok: false,
+      message: "HOME is not set; cannot resolve Codex skill path.",
+    };
   }
 
   return {
     ok: true,
-    path: resolve(root, SKILL_DIR, SKILL_NAME, SKILL_FILENAME)
-  }
+    path: resolve(root, SKILL_DIR, SKILL_NAME, SKILL_FILENAME),
+  };
 }
 
 function resolveHomeDir(): string | null {
-  const home = (process.env.HOME ?? "").trim()
-  return home.length > 0 ? home : null
+  const home = (process.env.HOME ?? "").trim();
+  return home.length > 0 ? home : null;
+}
+
+function resolveInstallStatus(opts: {
+  readonly changed: boolean;
+  readonly existed: boolean;
+}): "created" | "updated" | "noop" {
+  if (!opts.changed) {
+    return "noop";
+  }
+  return opts.existed ? "updated" : "created";
 }

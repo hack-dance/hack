@@ -1,16 +1,18 @@
-import { appendFile } from "node:fs/promises"
+import { appendFile } from "node:fs/promises";
 
-import type { JobStatus, JobStore } from "./job-store.ts"
+import type { JobStatus, JobStore } from "./job-store.ts";
 
 export type JobRunResult = {
-  readonly jobId: string
-  readonly status: JobStatus
-  readonly exitCode: number
-}
+  readonly jobId: string;
+  readonly status: JobStatus;
+  readonly exitCode: number;
+};
 
-export type JobSpawnListener = (opts: { readonly proc: SpawnedProcess }) => void
+export type JobSpawnListener = (opts: {
+  readonly proc: SpawnedProcess;
+}) => void;
 
-type SpawnedProcess = ReturnType<typeof Bun.spawn>
+type SpawnedProcess = ReturnType<typeof Bun.spawn>;
 
 /**
  * Run a job command and stream logs into the job store.
@@ -24,115 +26,135 @@ type SpawnedProcess = ReturnType<typeof Bun.spawn>
  * @returns Final job status and exit code.
  */
 export async function runJob(opts: {
-  readonly jobStore: JobStore
-  readonly jobId: string
-  readonly command?: readonly string[]
-  readonly cwd?: string
-  readonly env?: Record<string, string>
-  readonly onSpawn?: JobSpawnListener
+  readonly jobStore: JobStore;
+  readonly jobId: string;
+  readonly command?: readonly string[];
+  readonly cwd?: string;
+  readonly env?: Record<string, string>;
+  readonly onSpawn?: JobSpawnListener;
 }): Promise<JobRunResult> {
-  const meta = await opts.jobStore.readJobMeta({ jobId: opts.jobId })
+  const meta = await opts.jobStore.readJobMeta({ jobId: opts.jobId });
   if (!meta) {
-    throw new Error(`Job not found: ${opts.jobId}`)
+    throw new Error(`Job not found: ${opts.jobId}`);
   }
 
-  const command = opts.command ?? meta.command
+  const command = opts.command ?? meta.command;
   if (!command || command.length === 0) {
-    throw new Error(`Missing command for job: ${opts.jobId}`)
+    throw new Error(`Missing command for job: ${opts.jobId}`);
   }
 
-  await opts.jobStore.updateJobStatus({ jobId: opts.jobId, status: "starting" })
+  await opts.jobStore.updateJobStatus({
+    jobId: opts.jobId,
+    status: "starting",
+  });
   await opts.jobStore.appendEvent({
     jobId: opts.jobId,
-    type: "job.starting"
-  })
+    type: "job.starting",
+  });
 
-  let proc: ReturnType<typeof Bun.spawn>
+  let proc: ReturnType<typeof Bun.spawn>;
   try {
     proc = Bun.spawn([...command], {
       cwd: opts.cwd,
       env: buildEnv(opts.env),
       stdout: "pipe",
-      stderr: "pipe"
-    })
+      stderr: "pipe",
+    });
   } catch (error: unknown) {
-    await opts.jobStore.updateJobStatus({ jobId: opts.jobId, status: "failed" })
+    await opts.jobStore.updateJobStatus({
+      jobId: opts.jobId,
+      status: "failed",
+    });
     await opts.jobStore.appendEvent({
       jobId: opts.jobId,
       type: "job.failed",
-      payload: { error: formatError(error) }
-    })
-    return { jobId: opts.jobId, status: "failed", exitCode: 1 }
+      payload: { error: formatError(error) },
+    });
+    return { jobId: opts.jobId, status: "failed", exitCode: 1 };
   }
 
-  await opts.jobStore.updateJobStatus({ jobId: opts.jobId, status: "running" })
+  await opts.jobStore.updateJobStatus({ jobId: opts.jobId, status: "running" });
   await opts.jobStore.appendEvent({
     jobId: opts.jobId,
     type: "job.started",
-    payload: { pid: proc.pid }
-  })
-  opts.onSpawn?.({ proc })
+    payload: { pid: proc.pid },
+  });
+  opts.onSpawn?.({ proc });
 
-  const paths = opts.jobStore.getJobPaths({ jobId: opts.jobId })
+  const paths = opts.jobStore.getJobPaths({ jobId: opts.jobId });
   const stdoutTask = pipeStreamToFiles({
     stream: proc.stdout,
-    files: [paths.stdoutPath, paths.combinedPath]
-  })
+    files: [paths.stdoutPath, paths.combinedPath],
+  });
   const stderrTask = pipeStreamToFiles({
     stream: proc.stderr,
-    files: [paths.stderrPath, paths.combinedPath]
-  })
+    files: [paths.stderrPath, paths.combinedPath],
+  });
 
-  const exitCode = await proc.exited
-  await Promise.all([stdoutTask, stderrTask])
+  const exitCode = await proc.exited;
+  await Promise.all([stdoutTask, stderrTask]);
 
-  const metaAfter = await opts.jobStore.readJobMeta({ jobId: opts.jobId })
+  const metaAfter = await opts.jobStore.readJobMeta({ jobId: opts.jobId });
   if (metaAfter?.status === "cancelled") {
-    return { jobId: opts.jobId, status: "cancelled", exitCode }
+    return { jobId: opts.jobId, status: "cancelled", exitCode };
   }
 
-  const status: JobStatus = exitCode === 0 ? "completed" : "failed"
-  await opts.jobStore.updateJobStatus({ jobId: opts.jobId, status })
+  const status: JobStatus = exitCode === 0 ? "completed" : "failed";
+  await opts.jobStore.updateJobStatus({ jobId: opts.jobId, status });
   await opts.jobStore.appendEvent({
     jobId: opts.jobId,
     type: status === "completed" ? "job.completed" : "job.failed",
-    payload: { exitCode }
-  })
+    payload: { exitCode },
+  });
 
-  return { jobId: opts.jobId, status, exitCode }
+  return { jobId: opts.jobId, status, exitCode };
 }
 
 async function pipeStreamToFiles(opts: {
-  readonly stream: ReadableStream<Uint8Array> | number | null | undefined
-  readonly files: readonly string[]
+  readonly stream: ReadableStream<Uint8Array> | number | null | undefined;
+  readonly files: readonly string[];
 }): Promise<void> {
-  if (!opts.stream || typeof opts.stream === "number") return
-  const reader = opts.stream.getReader()
+  if (!opts.stream || typeof opts.stream === "number") {
+    return;
+  }
+  const reader = opts.stream.getReader();
   try {
     while (true) {
-      const { value, done } = await reader.read()
-      if (done) break
-      if (!value || value.length === 0) continue
-      await Promise.all(opts.files.map(file => appendFile(file, value)))
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
+      }
+      if (!value || value.length === 0) {
+        continue;
+      }
+      await Promise.all(opts.files.map((file) => appendFile(file, value)));
     }
   } finally {
-    reader.releaseLock()
+    reader.releaseLock();
   }
 }
 
-function buildEnv(extra: Record<string, string> | undefined): Record<string, string> | undefined {
-  if (!extra) return undefined
-  const merged: Record<string, string> = {}
+function buildEnv(
+  extra: Record<string, string> | undefined
+): Record<string, string> | undefined {
+  if (!extra) {
+    return undefined;
+  }
+  const merged: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
-    if (typeof value === "string") merged[key] = value
+    if (typeof value === "string") {
+      merged[key] = value;
+    }
   }
   for (const [key, value] of Object.entries(extra)) {
-    merged[key] = value
+    merged[key] = value;
   }
-  return merged
+  return merged;
 }
 
 function formatError(error: unknown): string {
-  if (error instanceof Error) return error.message
-  return "Unknown error"
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return "Unknown error";
 }

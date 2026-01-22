@@ -1,29 +1,29 @@
 import {
+  DEFAULT_CADDY_IP,
+  DEFAULT_COREDNS_IP,
   DEFAULT_INGRESS_NETWORK,
   DEFAULT_LOGGING_NETWORK,
   DEFAULT_LOKI_HOST,
   DEFAULT_OAUTH_ALIAS_TLD,
   DEFAULT_PROJECT_TLD,
-  DEFAULT_CADDY_IP,
-  DEFAULT_COREDNS_IP,
   DEFAULT_SCHEMAS_HOST,
-  GLOBAL_CADDY_COMPOSE_FILENAME,
   GLOBAL_ALLOY_FILENAME,
+  GLOBAL_CADDY_COMPOSE_FILENAME,
+  GLOBAL_COREDNS_FILENAME,
+  GLOBAL_GRAFANA_DASHBOARD_FILENAME,
   GLOBAL_GRAFANA_DASHBOARDS_DIR,
   GLOBAL_GRAFANA_DASHBOARDS_PROVISIONING_FILENAME,
-  GLOBAL_GRAFANA_DASHBOARD_FILENAME,
   GLOBAL_GRAFANA_DATASOURCE_FILENAME,
-  GLOBAL_COREDNS_FILENAME,
   GLOBAL_LOGGING_COMPOSE_FILENAME,
-  GLOBAL_LOKI_CONFIG_FILENAME
-} from "./constants.ts"
+  GLOBAL_LOKI_CONFIG_FILENAME,
+} from "./constants.ts";
 
 export function renderGlobalCaddyCompose(opts?: {
-  readonly useStaticCoreDnsIp?: boolean
-  readonly useStaticCaddyIp?: boolean
+  readonly useStaticCoreDnsIp?: boolean;
+  readonly useStaticCaddyIp?: boolean;
 }): string {
-  const useStaticCoreDnsIp = opts?.useStaticCoreDnsIp === true
-  const useStaticCaddyIp = opts?.useStaticCaddyIp === true
+  const useStaticCoreDnsIp = opts?.useStaticCoreDnsIp === true;
+  const useStaticCaddyIp = opts?.useStaticCaddyIp === true;
   return [
     "name: hack-dev-proxy",
     "services:",
@@ -39,12 +39,16 @@ export function renderGlobalCaddyCompose(opts?: {
     "    labels:",
     `      caddy: ${DEFAULT_SCHEMAS_HOST}`,
     "      caddy.root: /srv/schemas",
-    "      caddy.file_server: \"\"",
+    '      caddy.file_server: ""',
     "      caddy.tls: internal",
     "    environment:",
     `      CADDY_INGRESS_NETWORKS: ${DEFAULT_INGRESS_NETWORK}`,
-    ...(useStaticCaddyIp ?
-        ["    networks:", "      default:", `        ipv4_address: ${DEFAULT_CADDY_IP}`]
+    ...(useStaticCaddyIp
+      ? [
+          "    networks:",
+          "      default:",
+          `        ipv4_address: ${DEFAULT_CADDY_IP}`,
+        ]
       : []),
     "",
     "  coredns:",
@@ -54,7 +58,9 @@ export function renderGlobalCaddyCompose(opts?: {
     `      - ./${GLOBAL_COREDNS_FILENAME}:/etc/coredns/${GLOBAL_COREDNS_FILENAME}:ro`,
     "    networks:",
     "      default:",
-    ...(useStaticCoreDnsIp ? [`        ipv4_address: ${DEFAULT_COREDNS_IP}`] : []),
+    ...(useStaticCoreDnsIp
+      ? [`        ipv4_address: ${DEFAULT_COREDNS_IP}`]
+      : []),
     "",
     "networks:",
     "  default:",
@@ -63,27 +69,29 @@ export function renderGlobalCaddyCompose(opts?: {
     "",
     "volumes:",
     "  caddy_data:",
-    ""
-  ].join("\n")
+    "",
+  ].join("\n");
 }
 
-export function renderGlobalCoreDnsConfig(opts?: { readonly useStaticCaddyIp?: boolean }): string {
-  const useStaticCaddyIp = opts?.useStaticCaddyIp === true
+export function renderGlobalCoreDnsConfig(opts?: {
+  readonly useStaticCaddyIp?: boolean;
+}): string {
+  const useStaticCaddyIp = opts?.useStaticCaddyIp === true;
   return [
     ".:53 {",
-    ...(useStaticCaddyIp ?
-        [
+    ...(useStaticCaddyIp
+      ? [
           "  template IN A {",
           "    match (.*)\\.hack(\\..*)?\\.?$",
-          `    answer \"{{ .Name }} 30 IN A ${DEFAULT_CADDY_IP}\"`,
+          `    answer "{{ .Name }} 30 IN A ${DEFAULT_CADDY_IP}"`,
           "    fallthrough",
-          "  }"
+          "  }",
         ]
       : ["  rewrite name regex (.*)\\.hack(\\..*)?\\.?$ caddy"]),
     "  forward . 127.0.0.11",
     "  cache 30",
-    "}"
-  ].join("\n")
+    "}",
+  ].join("\n");
 }
 
 export function renderGlobalLoggingCompose(): string {
@@ -141,13 +149,13 @@ export function renderGlobalLoggingCompose(): string {
     "volumes:",
     "  loki-data:",
     "  grafana-data:",
-    ""
-  ].join("\n")
+    "",
+  ].join("\n");
 }
 
 // Back-compat alias (internal). Promtail has been replaced by Grafana Alloy.
 export function renderGlobalPromtailYaml(): string {
-  return renderGlobalAlloyConfig()
+  return renderGlobalAlloyConfig();
 }
 
 export function renderGlobalAlloyConfig(): string {
@@ -206,8 +214,8 @@ export function renderGlobalAlloyConfig(): string {
     '    batch_wait = "200ms"',
     "  }",
     "}",
-    ""
-  ].join("\n")
+    "",
+  ].join("\n");
 }
 
 export function renderGlobalGrafanaDatasourceYaml(): string {
@@ -222,8 +230,8 @@ export function renderGlobalGrafanaDatasourceYaml(): string {
     "    url: http://loki:3100",
     "    isDefault: true",
     "    editable: false",
-    ""
-  ].join("\n")
+    "",
+  ].join("\n");
 }
 
 export function renderGlobalGrafanaDashboardsProvisioningYaml(): string {
@@ -239,8 +247,8 @@ export function renderGlobalGrafanaDashboardsProvisioningYaml(): string {
     "    editable: true",
     "    options:",
     "      path: /var/lib/grafana/dashboards",
-    ""
-  ].join("\n")
+    "",
+  ].join("\n");
 }
 
 export function renderGlobalGrafanaLogsDashboardJson(): string {
@@ -259,13 +267,13 @@ export function renderGlobalGrafanaLogsDashboardJson(): string {
           showLabels: true,
           showTime: true,
           sortOrder: "Descending",
-          wrapLogMessage: true
+          wrapLogMessage: true,
         },
         // Loki rejects empty selectors in some configs; `app="docker"` is set by Alloy on all scraped streams.
         targets: [{ expr: '{app="docker"}', refId: "A" }],
         title: "Logs",
-        type: "logs"
-      }
+        type: "logs",
+      },
     ],
     refresh: "10s",
     schemaVersion: 39,
@@ -275,10 +283,10 @@ export function renderGlobalGrafanaLogsDashboardJson(): string {
     timezone: "",
     title: "Hack Logs",
     uid: "hack-logs",
-    version: 1
-  } as const
+    version: 1,
+  } as const;
 
-  return `${JSON.stringify(dashboard, null, 2)}\n`
+  return `${JSON.stringify(dashboard, null, 2)}\n`;
 }
 
 /**
@@ -288,16 +296,19 @@ export function renderGlobalGrafanaLogsDashboardJson(): string {
  * use the discovery-driven wizard in `hack init`.
  */
 export function renderProjectConfigJson(opts: {
-  readonly name: string
-  readonly devHost: string
+  readonly name: string;
+  readonly devHost: string;
   readonly oauth?: {
-    readonly enabled?: boolean
-    readonly tld?: string
-  }
+    readonly enabled?: boolean;
+    readonly tld?: string;
+  };
 }): string {
-  const oauthEnabled = opts.oauth?.enabled === true
-  const oauthTldRaw = opts.oauth?.tld?.trim()
-  const oauthTld = oauthTldRaw && oauthTldRaw.length > 0 ? oauthTldRaw : DEFAULT_OAUTH_ALIAS_TLD
+  const oauthEnabled = opts.oauth?.enabled === true;
+  const oauthTldRaw = opts.oauth?.tld?.trim();
+  const oauthTld =
+    oauthTldRaw && oauthTldRaw.length > 0
+      ? oauthTldRaw
+      : DEFAULT_OAUTH_ALIAS_TLD;
 
   const config = {
     $schema: `https://${DEFAULT_SCHEMAS_HOST}/hack.config.schema.json`,
@@ -306,19 +317,19 @@ export function renderProjectConfigJson(opts: {
     logs: {
       follow_backend: "compose",
       snapshot_backend: "loki",
-      clear_on_down: false
+      clear_on_down: false,
     },
     internal: {
       dns: true,
-      tls: true
+      tls: true,
     },
     oauth: {
       enabled: oauthEnabled,
-      ...(oauthTld ? { tld: oauthTld } : {})
-    }
-  }
+      ...(oauthTld ? { tld: oauthTld } : {}),
+    },
+  };
 
-  return `${JSON.stringify(config, null, 2)}\n`
+  return `${JSON.stringify(config, null, 2)}\n`;
 }
 
 export function renderProjectConfigSchemaJson(): string {
@@ -338,8 +349,8 @@ export function renderProjectConfigSchemaJson(): string {
           follow_backend: { type: "string", enum: ["compose", "loki"] },
           snapshot_backend: { type: "string", enum: ["compose", "loki"] },
           clear_on_down: { type: "boolean" },
-          retention_period: { type: "string" }
-        }
+          retention_period: { type: "string" },
+        },
       },
       internal: {
         type: "object",
@@ -349,17 +360,17 @@ export function renderProjectConfigSchemaJson(): string {
           tls: { type: "boolean" },
           extra_hosts: {
             type: "object",
-            additionalProperties: { type: "string" }
-          }
-        }
+            additionalProperties: { type: "string" },
+          },
+        },
       },
       oauth: {
         type: "object",
         additionalProperties: true,
         properties: {
           enabled: { type: "boolean" },
-          tld: { type: "string" }
-        }
+          tld: { type: "string" },
+        },
       },
       controlPlane: {
         type: "object",
@@ -375,10 +386,10 @@ export function renderProjectConfigSchemaJson(): string {
                 cliNamespace: { type: "string" },
                 config: {
                   type: "object",
-                  additionalProperties: true
-                }
-              }
-            }
+                  additionalProperties: true,
+                },
+              },
+            },
           },
           tickets: {
             type: "object",
@@ -392,10 +403,10 @@ export function renderProjectConfigSchemaJson(): string {
                   branch: { type: "string" },
                   remote: { type: "string" },
                   forceBareClone: { type: "boolean" },
-                  refMode: { type: "string" }
-                }
-              }
-            }
+                  refMode: { type: "string" },
+                },
+              },
+            },
           },
           supervisor: {
             type: "object",
@@ -403,8 +414,8 @@ export function renderProjectConfigSchemaJson(): string {
             properties: {
               enabled: { type: "boolean" },
               maxConcurrentJobs: { type: "number" },
-              logsMaxBytes: { type: "number" }
-            }
+              logsMaxBytes: { type: "number" },
+            },
           },
           tui: {
             type: "object",
@@ -416,25 +427,25 @@ export function renderProjectConfigSchemaJson(): string {
                 properties: {
                   maxEntries: { type: "number" },
                   maxLines: { type: "number" },
-                  historyTailStep: { type: "number" }
-                }
-              }
-            }
+                  historyTailStep: { type: "number" },
+                },
+              },
+            },
           },
           usage: {
             type: "object",
             additionalProperties: true,
             properties: {
               watchIntervalMs: { type: "number" },
-              historySize: { type: "number" }
-            }
+              historySize: { type: "number" },
+            },
           },
           daemon: {
             type: "object",
             additionalProperties: true,
             properties: {
-              autoStart: { type: "boolean" }
-            }
+              autoStart: { type: "boolean" },
+            },
           },
           gateway: {
             type: "object",
@@ -443,16 +454,16 @@ export function renderProjectConfigSchemaJson(): string {
               enabled: { type: "boolean" },
               bind: { type: "string" },
               port: { type: "number" },
-              allowWrites: { type: "boolean" }
-            }
-          }
-        }
-      }
+              allowWrites: { type: "boolean" },
+            },
+          },
+        },
+      },
     },
-    required: ["name", "dev_host"]
-  } as const
+    required: ["name", "dev_host"],
+  } as const;
 
-  return `${JSON.stringify(schema, null, 2)}\n`
+  return `${JSON.stringify(schema, null, 2)}\n`;
 }
 
 export function renderProjectBranchesSchemaJson(): string {
@@ -476,18 +487,18 @@ export function renderProjectBranchesSchemaJson(): string {
             slug: {
               type: "string",
               pattern: "^[a-z0-9][a-z0-9-]*$",
-              minLength: 1
+              minLength: 1,
             },
             note: { type: "string" },
             created_at: { type: "string", format: "date-time" },
-            last_used_at: { type: "string", format: "date-time" }
-          }
-        }
-      }
-    }
-  } as const
+            last_used_at: { type: "string", format: "date-time" },
+          },
+        },
+      },
+    },
+  } as const;
 
-  return `${JSON.stringify(schema, null, 2)}\n`
+  return `${JSON.stringify(schema, null, 2)}\n`;
 }
 
 export function renderGlobalLokiConfigYaml(): string {
@@ -496,7 +507,7 @@ export function renderGlobalLokiConfigYaml(): string {
   // Retention docs:
   // - https://grafana.com/docs/loki/latest/operations/storage/retention/
   // Minimum retention is 24h; keep this modest for local dev. Users can edit ~/.hack/logging/loki.yaml.
-  const retentionPeriod = "168h"
+  const retentionPeriod = "168h";
 
   return [
     "auth_enabled: false",
@@ -544,8 +555,8 @@ export function renderGlobalLokiConfigYaml(): string {
     "  retention_delete_delay: 2h",
     "  retention_delete_worker_count: 50",
     "  delete_request_store: filesystem",
-    ""
-  ].join("\n")
+    "",
+  ].join("\n");
 }
 
 export function templateFilenames(): string[] {
@@ -556,6 +567,6 @@ export function templateFilenames(): string[] {
     GLOBAL_LOKI_CONFIG_FILENAME,
     GLOBAL_GRAFANA_DATASOURCE_FILENAME,
     GLOBAL_GRAFANA_DASHBOARDS_PROVISIONING_FILENAME,
-    GLOBAL_GRAFANA_DASHBOARD_FILENAME
-  ]
+    GLOBAL_GRAFANA_DASHBOARD_FILENAME,
+  ];
 }

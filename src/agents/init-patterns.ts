@@ -68,8 +68,8 @@ export function renderAgentInitPatterns(): string {
     "- What services are required for local dev?",
     "- Which command starts the app?",
     "- Any one-time setup steps (migrations, seeds, downloads)?",
-    ""
-  ]
+    "",
+  ];
 
-  return lines.join("\n")
+  return lines.join("\n");
 }

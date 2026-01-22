@@ -3,10 +3,7 @@
     "hack": {
       "type": "stdio",
       "command": "hack",
-      "args": [
-        "mcp",
-        "serve"
-      ]
+      "args": ["mcp", "serve"]
     }
   }
 }

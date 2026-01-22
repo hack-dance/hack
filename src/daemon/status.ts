@@ -1,54 +1,53 @@
-import { pathExists } from "../lib/fs.ts"
-import { isProcessRunning, readDaemonPid } from "./process.ts"
-
-import type { DaemonPaths } from "./paths.ts"
+import { pathExists } from "../lib/fs.ts";
+import type { DaemonPaths } from "./paths.ts";
+import { isProcessRunning, readDaemonPid } from "./process.ts";
 
 export interface DaemonStatus {
-  readonly running: boolean
-  readonly pid: number | null
-  readonly socketExists: boolean
-  readonly logExists: boolean
+  readonly running: boolean;
+  readonly pid: number | null;
+  readonly socketExists: boolean;
+  readonly logExists: boolean;
 }
 
-export type DaemonStatusLabel = "running" | "starting" | "stale" | "stopped"
-export type DaemonStaleReason = "pid_not_running" | "socket_only" | null
+export type DaemonStatusLabel = "running" | "starting" | "stale" | "stopped";
+export type DaemonStaleReason = "pid_not_running" | "socket_only" | null;
 
 export interface DaemonStatusReport {
-  readonly status: DaemonStatusLabel
-  readonly running: boolean
-  readonly apiOk: boolean
-  readonly processRunning: boolean
-  readonly pid: number | null
-  readonly socketExists: boolean
-  readonly logExists: boolean
-  readonly stale: boolean
-  readonly staleReason: DaemonStaleReason
+  readonly status: DaemonStatusLabel;
+  readonly running: boolean;
+  readonly apiOk: boolean;
+  readonly processRunning: boolean;
+  readonly pid: number | null;
+  readonly socketExists: boolean;
+  readonly logExists: boolean;
+  readonly stale: boolean;
+  readonly staleReason: DaemonStaleReason;
 }
 
 export async function readDaemonStatus({
-  paths
+  paths,
 }: {
-  readonly paths: DaemonPaths
+  readonly paths: DaemonPaths;
 }): Promise<DaemonStatus> {
-  const pid = await readDaemonPid({ pidPath: paths.pidPath })
-  const socketExists = await pathExists(paths.socketPath)
-  const logExists = await pathExists(paths.logPath)
-  const running = pid !== null && isProcessRunning({ pid })
+  const pid = await readDaemonPid({ pidPath: paths.pidPath });
+  const socketExists = await pathExists(paths.socketPath);
+  const logExists = await pathExists(paths.logPath);
+  const running = pid !== null && isProcessRunning({ pid });
 
   return {
     running,
     pid,
     socketExists,
-    logExists
-  }
+    logExists,
+  };
 }
 
 export function buildDaemonStatusReport(opts: {
-  readonly pid: number | null
-  readonly processRunning: boolean
-  readonly socketExists: boolean
-  readonly logExists: boolean
-  readonly apiOk: boolean
+  readonly pid: number | null;
+  readonly processRunning: boolean;
+  readonly socketExists: boolean;
+  readonly logExists: boolean;
+  readonly apiOk: boolean;
 }): DaemonStatusReport {
   if (opts.apiOk) {
     return {
@@ -60,8 +59,8 @@ export function buildDaemonStatusReport(opts: {
       socketExists: opts.socketExists,
       logExists: opts.logExists,
       stale: false,
-      staleReason: null
-    }
+      staleReason: null,
+    };
   }
 
   if (opts.processRunning) {
@@ -74,8 +73,8 @@ export function buildDaemonStatusReport(opts: {
       socketExists: opts.socketExists,
       logExists: opts.logExists,
       stale: false,
-      staleReason: null
-    }
+      staleReason: null,
+    };
   }
 
   if (opts.pid !== null) {
@@ -88,8 +87,8 @@ export function buildDaemonStatusReport(opts: {
       socketExists: opts.socketExists,
       logExists: opts.logExists,
       stale: true,
-      staleReason: "pid_not_running"
-    }
+      staleReason: "pid_not_running",
+    };
   }
 
   if (opts.socketExists) {
@@ -102,8 +101,8 @@ export function buildDaemonStatusReport(opts: {
       socketExists: true,
       logExists: opts.logExists,
       stale: true,
-      staleReason: "socket_only"
-    }
+      staleReason: "socket_only",
+    };
   }
 
   return {
@@ -115,6 +114,6 @@ export function buildDaemonStatusReport(opts: {
     socketExists: false,
     logExists: opts.logExists,
     stale: false,
-    staleReason: null
-  }
+    staleReason: null,
+  };
 }

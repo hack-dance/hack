@@ -2,11 +2,7 @@
   "jobId": "d7e43dda-1eae-465f-aab5-f530a0925582",
   "status": "completed",
   "runner": "generic",
-  "command": [
-    "bash",
-    "-lc",
-    "echo gateway e2e"
-  ],
+  "command": ["bash", "-lc", "echo gateway e2e"],
   "projectId": "205e97ea42c4",
   "projectName": "example",
   "createdAt": "2026-01-06T01:15:37.796Z",

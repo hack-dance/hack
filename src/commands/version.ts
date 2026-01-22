@@ -1,8 +1,7 @@
-import { defineCommand, withHandler } from "../cli/command.ts"
+import type { CliContext, CommandArgs } from "../cli/command.ts";
+import { defineCommand, withHandler } from "../cli/command.ts";
 
-import type { CliContext, CommandArgs } from "../cli/command.ts"
-
-type VersionArgs = CommandArgs<readonly [], readonly []>
+type VersionArgs = CommandArgs<readonly [], readonly []>;
 
 const versionSpec = defineCommand({
   name: "version",
@@ -10,17 +9,17 @@ const versionSpec = defineCommand({
   group: "Diagnostics",
   options: [],
   positionals: [],
-  subcommands: []
-} as const)
+  subcommands: [],
+} as const);
 
-async function handleVersion({
-  ctx
+function handleVersion({
+  ctx,
 }: {
-  readonly ctx: CliContext
-  readonly args: VersionArgs
+  readonly ctx: CliContext;
+  readonly args: VersionArgs;
 }): Promise<number> {
-  console.log(`${ctx.cli.name} v${ctx.cli.version}`)
-  return 0
+  console.log(`${ctx.cli.name} v${ctx.cli.version}`);
+  return Promise.resolve(0);
 }
 
-export const versionCommand = withHandler(versionSpec, handleVersion)
+export const versionCommand = withHandler(versionSpec, handleVersion);

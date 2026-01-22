@@ -1,9 +1,16 @@
 name: Release
 
+# Disabled: Running releases locally until Mac CI signing is set up
+# To re-enable: uncomment the push trigger below
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v0.1.0)'
+        required: true
+  # push:
+  #   tags:
+  #     - "v*"
 
 jobs:
   create-release:

@@ -199,6 +199,12 @@ Base URL: `http://127.0.0.1:7788` (or your tunnel URL)
 | GET | `/v1/metrics` | no | Cache + stream metrics |
 | GET | `/v1/projects` | no | Gateway-enabled projects + runtime snapshot |
 | GET | `/v1/ps` | no | Compose project container list |
+| GET | `/v1/sessions` | no | List tmux sessions |
+| POST | `/v1/sessions` | no | Create tmux session |
+| GET | `/v1/sessions/:id` | no | Get session details |
+| POST | `/v1/sessions/:id/stop` | no | Stop (kill) session |
+| POST | `/v1/sessions/:id/exec` | no | Execute command in session |
+| POST | `/v1/sessions/:id/input` | no | Send raw keystrokes |
 | GET | `/control-plane/projects/:projectId/jobs` | no | List jobs |
 | POST | `/control-plane/projects/:projectId/jobs` | yes | Create job |
 | GET | `/control-plane/projects/:projectId/jobs/:jobId` | no | Fetch job |
@@ -207,6 +213,8 @@ Base URL: `http://127.0.0.1:7788` (or your tunnel URL)
 | POST | `/control-plane/projects/:projectId/shells` | yes | Create shell |
 | GET | `/control-plane/projects/:projectId/shells/:shellId` | no | Fetch shell |
 | WS | `/control-plane/projects/:projectId/shells/:shellId/stream` | yes | Stream shell PTY |
+
+> **Sessions API**: For detailed sessions endpoint documentation, see [Sessions](sessions.md#daemon-sessions-api).
 
 ### GET /v1/status
 

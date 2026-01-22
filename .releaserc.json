@@ -3,16 +3,26 @@
   "tagFormat": "v${version}",
   "plugins": [
     ["@semantic-release/commit-analyzer", { "preset": "conventionalcommits" }],
-    ["@semantic-release/release-notes-generator", { "preset": "conventionalcommits" }],
+    [
+      "@semantic-release/release-notes-generator",
+      { "preset": "conventionalcommits" }
+    ],
     ["@semantic-release/changelog", { "changelogFile": "CHANGELOG.md" }],
     [
       "@semantic-release/exec",
-      { "prepareCmd": "bun run scripts/prepare-release.ts --version=${nextRelease.version}" }
+      {
+        "prepareCmd": "bun run scripts/prepare-release.ts --version=${nextRelease.version}"
+      }
     ],
     [
       "@semantic-release/git",
       {
-        "assets": ["CHANGELOG.md", "package.json", "bun.lock", "apps/macos/Config/Base.xcconfig"],
+        "assets": [
+          "CHANGELOG.md",
+          "package.json",
+          "bun.lock",
+          "apps/macos/Config/Base.xcconfig"
+        ],
         "message": "chore(release): ${nextRelease.version}\n\n${nextRelease.notes}"
       }
     ]

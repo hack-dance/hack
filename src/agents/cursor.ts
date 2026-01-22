@@ -1,72 +1,80 @@
-import { dirname, resolve } from "node:path"
-import { unlink } from "node:fs/promises"
+import { unlink } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 
-import { ensureDir, pathExists, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts"
+import {
+  ensureDir,
+  pathExists,
+  readTextFile,
+  writeTextFileIfChanged,
+} from "../lib/fs.ts";
 
-export type CursorScope = "project" | "user"
+export type CursorScope = "project" | "user";
 
 export type CursorRulesResult = {
-  readonly scope: CursorScope
-  readonly status: "created" | "updated" | "noop" | "removed" | "missing" | "error"
-  readonly path: string
-  readonly message?: string
-}
+  readonly scope: CursorScope;
+  readonly status:
+    | "created"
+    | "updated"
+    | "noop"
+    | "removed"
+    | "missing"
+    | "error";
+  readonly path: string;
+  readonly message?: string;
+};
 
-const RULES_FILENAME = "hack.mdc"
-const RULES_DIR = ".cursor/rules"
-const MARKER_START = "# BEGIN HACK INTEGRATION"
-const MARKER_END = "# END HACK INTEGRATION"
+const RULES_FILENAME = "hack.mdc";
+const RULES_DIR = ".cursor/rules";
+const MARKER_START = "# BEGIN HACK INTEGRATION";
+const MARKER_END = "# END HACK INTEGRATION";
 
 /**
  * Install or update Cursor rules for hack CLI usage.
  */
 export async function installCursorRules(opts: {
-  readonly scope: CursorScope
-  readonly projectRoot?: string
+  readonly scope: CursorScope;
+  readonly projectRoot?: string;
 }): Promise<CursorRulesResult> {
-  const resolved = resolveCursorRulesPath(opts)
+  const resolved = resolveCursorRulesPath(opts);
   if (!resolved.ok) {
     return {
       scope: opts.scope,
       status: "error",
       path: resolved.path ?? RULES_FILENAME,
-      message: resolved.message
-    }
+      message: resolved.message,
+    };
   }
 
-  const path = resolved.path
-  const existed = await pathExists(path)
-  await ensureDir(dirname(path))
-  const result = await writeTextFileIfChanged(path, renderCursorRules())
+  const path = resolved.path;
+  const existed = await pathExists(path);
+  await ensureDir(dirname(path));
+  const result = await writeTextFileIfChanged(path, renderCursorRules());
 
-  return {
-    scope: opts.scope,
-    status: result.changed ? (existed ? "updated" : "created") : "noop",
-    path
-  }
+  const status = resolveInstallStatus({ changed: result.changed, existed });
+  return { scope: opts.scope, status, path };
 }
 
 /**
  * Check whether Cursor rules are installed.
  */
 export async function checkCursorRules(opts: {
-  readonly scope: CursorScope
-  readonly projectRoot?: string
+  readonly scope: CursorScope;
+  readonly projectRoot?: string;
 }): Promise<CursorRulesResult> {
-  const resolved = resolveCursorRulesPath(opts)
+  const resolved = resolveCursorRulesPath(opts);
   if (!resolved.ok) {
     return {
       scope: opts.scope,
       status: "error",
       path: resolved.path ?? RULES_FILENAME,
-      message: resolved.message
-    }
+      message: resolved.message,
+    };
   }
 
-  const path = resolved.path
-  const content = await readTextFile(path)
+  const path = resolved.path;
+  const content = await readTextFile(path);
   if (!content) {
-    return { scope: opts.scope, status: "missing", path }
+    return { scope: opts.scope, status: "missing", path };
   }
 
   if (!content.includes(MARKER_START)) {
@@ -74,37 +82,37 @@ export async function checkCursorRules(opts: {
       scope: opts.scope,
       status: "error",
       path,
-      message: "Rules file exists but is missing hack integration markers."
-    }
+      message: "Rules file exists but is missing hack integration markers.",
+    };
   }
 
-  return { scope: opts.scope, status: "noop", path }
+  return { scope: opts.scope, status: "noop", path };
 }
 
 /**
  * Remove Cursor rules for hack CLI usage.
  */
 export async function removeCursorRules(opts: {
-  readonly scope: CursorScope
-  readonly projectRoot?: string
+  readonly scope: CursorScope;
+  readonly projectRoot?: string;
 }): Promise<CursorRulesResult> {
-  const resolved = resolveCursorRulesPath(opts)
+  const resolved = resolveCursorRulesPath(opts);
   if (!resolved.ok) {
     return {
       scope: opts.scope,
       status: "error",
       path: resolved.path ?? RULES_FILENAME,
-      message: resolved.message
-    }
+      message: resolved.message,
+    };
   }
 
-  const path = resolved.path
+  const path = resolved.path;
   if (!(await pathExists(path))) {
-    return { scope: opts.scope, status: "missing", path }
+    return { scope: opts.scope, status: "missing", path };
   }
 
-  await unlink(path)
-  return { scope: opts.scope, status: "removed", path }
+  await unlink(path);
+  return { scope: opts.scope, status: "removed", path };
 }
 
 /**
@@ -142,29 +150,47 @@ export function renderCursorRules(): string {
     "- Install only if no shell access: `hack setup mcp`",
     "",
     MARKER_END,
-    ""
-  ]
+    "",
+  ];
 
-  return lines.join("\n")
+  return lines.join("\n");
 }
 
 function resolveCursorRulesPath(opts: {
-  readonly scope: CursorScope
-  readonly projectRoot?: string
-}): { readonly ok: true; readonly path: string } | { readonly ok: false; readonly message: string; readonly path?: string } {
+  readonly scope: CursorScope;
+  readonly projectRoot?: string;
+}):
+  | { readonly ok: true; readonly path: string }
+  | { readonly ok: false; readonly message: string; readonly path?: string } {
   if (opts.scope === "project" && !opts.projectRoot) {
-    return { ok: false, message: "Missing project root for project-scoped Cursor rules." }
+    return {
+      ok: false,
+      message: "Missing project root for project-scoped Cursor rules.",
+    };
   }
 
-  const root = opts.scope === "user" ? resolveHomeDir() : opts.projectRoot
+  const root = opts.scope === "user" ? resolveHomeDir() : opts.projectRoot;
   if (!root) {
-    return { ok: false, message: "HOME is not set; cannot resolve user rules path." }
+    return {
+      ok: false,
+      message: "HOME is not set; cannot resolve user rules path.",
+    };
   }
 
-  return { ok: true, path: resolve(root, RULES_DIR, RULES_FILENAME) }
+  return { ok: true, path: resolve(root, RULES_DIR, RULES_FILENAME) };
 }
 
 function resolveHomeDir(): string | null {
-  const home = (process.env.HOME ?? "").trim()
-  return home.length > 0 ? home : null
+  const home = (process.env.HOME ?? "").trim();
+  return home.length > 0 ? home : null;
+}
+
+function resolveInstallStatus(opts: {
+  readonly changed: boolean;
+  readonly existed: boolean;
+}): "created" | "updated" | "noop" {
+  if (!opts.changed) {
+    return "noop";
+  }
+  return opts.existed ? "updated" : "created";
 }

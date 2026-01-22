@@ -1,0 +1,96 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "extends": ["ultracite/biome/core"],
+  "files": {
+    "includes": [
+      "src/**/*.ts",
+      "tests/**/*.ts",
+      "scripts/**/*.ts",
+      "!examples",
+      "!apps/macos/vendor",
+      "!src/ui/planet-animations.data.ts"
+    ]
+  },
+  "javascript": {
+    "globals": ["Bun"]
+  },
+  "linter": {
+    "rules": {
+      "style": {
+        // Type aliases preferred for Record<string, unknown> compatibility
+        "useConsistentTypeDefinitions": "off",
+        // Explicit member accessibility is fine
+        "useConsistentMemberAccessibility": "off",
+        // .at(-1) style is clear
+        "useAtIndex": "off",
+        // Module declaration file naming patterns
+        "useFilenamingConvention": "off",
+        // Indexed for loops needed for character parsing
+        "useForOf": "off"
+      },
+      "complexity": {
+        // void useful for ignoring promises
+        "noVoid": "off",
+        // forEach is fine in some contexts
+        "noForEach": "off",
+        // Complex functions are acceptable for CLI commands and parsers
+        "noExcessiveCognitiveComplexity": "warn"
+      },
+      "performance": {
+        // Zod requires namespace import
+        "noNamespaceImport": "off"
+      },
+      "suspicious": {
+        // Bitwise operators are intentional
+        "noBitwiseOperators": "off",
+        // Control characters in regex are intentional for terminal handling
+        "noControlCharactersInRegex": "off",
+        // while ((match = regex.exec(str))) is idiomatic
+        "noAssignInExpressions": "off",
+        // Declaration files can have type/function with same name
+        "noRedeclare": "off"
+      }
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["tests/**"],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noMisplacedAssertion": "off",
+            "noEmptyBlockStatements": "off",
+            "noTemplateCurlyInString": "off",
+            "useAwait": "off"
+          },
+          "style": {
+            "noNonNullAssertion": "off",
+            "noNestedTernary": "off"
+          },
+          "performance": {
+            "useTopLevelRegex": "off"
+          },
+          "correctness": {
+            "noUnusedFunctionParameters": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["scripts/**"],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noTemplateCurlyInString": "off"
+          },
+          "style": {
+            "noNestedTernary": "off"
+          },
+          "performance": {
+            "useTopLevelRegex": "off"
+          }
+        }
+      }
+    }
+  ]
+}

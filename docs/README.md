@@ -6,6 +6,7 @@ This directory contains the public documentation for hack. Specs remain in `SPEC
 
 - [CLI reference](cli.md)
 - [Architecture](architecture.md)
+- [Sessions](sessions.md) - tmux session management + API
 - [Gateway overview](gateway.md)
 - [Gateway API](gateway-api.md)
 - [Supervisor](supervisor.md)

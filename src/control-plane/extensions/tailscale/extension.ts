@@ -1,6 +1,5 @@
-import { TAILSCALE_COMMANDS } from "./commands.ts"
-
-import type { ExtensionDefinition } from "../types.ts"
+import type { ExtensionDefinition } from "../types.ts";
+import { TAILSCALE_COMMANDS } from "./commands.ts";
 
 export const TAILSCALE_EXTENSION: ExtensionDefinition = {
   manifest: {
@@ -8,7 +7,7 @@ export const TAILSCALE_EXTENSION: ExtensionDefinition = {
     version: "0.1.0",
     scopes: ["global"],
     cliNamespace: "tailscale",
-    summary: "Tailscale helper for gateway exposure"
+    summary: "Tailscale helper for gateway exposure",
   },
-  commands: TAILSCALE_COMMANDS
-}
+  commands: TAILSCALE_COMMANDS,
+};

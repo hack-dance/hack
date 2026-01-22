@@ -1,6 +1,21 @@
 import { describe, expect, test } from "bun:test";
+import { execSync } from "node:child_process";
 
 import { handleSessionRoutes } from "../src/daemon/routes/sessions.ts";
+
+/**
+ * Check if tmux is available (required for session tests).
+ */
+function isTmuxAvailable(): boolean {
+  try {
+    execSync("which tmux", { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const hasTmux = isTmuxAvailable();
 
 /**
  * Helper to create a mock Request.
@@ -35,7 +50,7 @@ async function parseResponse(
   }
 }
 
-describe("handleSessionRoutes", () => {
+describe.skipIf(!hasTmux)("handleSessionRoutes", () => {
   describe("route matching", () => {
     test("returns null for non-session routes", async () => {
       const req = mockRequest({ method: "GET", path: "/v1/status" });

@@ -6,6 +6,9 @@ import type { ExtensionCommand, ExtensionCommandContext } from "../types.ts";
 import {
   checkTicketsAgentDocs,
   removeTicketsAgentDocs,
+  type TicketsAgentDocCheckResult,
+  type TicketsAgentDocRemoveResult,
+  type TicketsAgentDocUpdateResult,
   upsertTicketsAgentDocs,
 } from "./agent-docs.ts";
 import {
@@ -138,7 +141,10 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
         });
       }
 
-      let docs: Awaited<ReturnType<typeof checkTicketsAgentDocs>>;
+      let docs:
+        | TicketsAgentDocCheckResult[]
+        | TicketsAgentDocRemoveResult[]
+        | TicketsAgentDocUpdateResult[];
       if (action === "check") {
         docs = await checkTicketsAgentDocs({
           projectRoot,

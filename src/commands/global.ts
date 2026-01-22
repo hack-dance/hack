@@ -1199,8 +1199,8 @@ async function resolveCloudflareExposure(opts: {
   const pid = await readCloudflaredPid();
   const running = pid !== null && isProcessRunning({ pid });
   const detail = resolveCloudflareDetail({
-    cloudflareHostname,
-    cloudflareTunnel,
+    cloudflareHostname: cloudflareHostname ?? null,
+    cloudflareTunnel: cloudflareTunnel ?? null,
   });
   const url = cloudflareHostname ? `https://${cloudflareHostname}` : undefined;
 

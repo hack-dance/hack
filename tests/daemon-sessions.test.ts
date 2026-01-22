@@ -202,7 +202,7 @@ describe("handleSessionRoutes", () => {
       expect(result).not.toBeNull();
       // Will be 404 (session not found) or 400 (missing command)
       // Since tmux session doesn't exist, we get 404 first
-      expect([400, 404]).toContain(result?.status);
+      expect([400, 404]).toContain(result!.status);
     });
 
     test("rejects empty command", async () => {
@@ -214,7 +214,7 @@ describe("handleSessionRoutes", () => {
       const url = new URL(req.url);
       const result = await handleSessionRoutes({ req, url });
       expect(result).not.toBeNull();
-      expect([400, 404]).toContain(result?.status);
+      expect([400, 404]).toContain(result!.status);
     });
   });
 
@@ -228,7 +228,7 @@ describe("handleSessionRoutes", () => {
       const url = new URL(req.url);
       const result = await handleSessionRoutes({ req, url });
       expect(result).not.toBeNull();
-      expect([400, 404]).toContain(result?.status);
+      expect([400, 404]).toContain(result!.status);
     });
 
     test("rejects empty keys", async () => {
@@ -240,7 +240,7 @@ describe("handleSessionRoutes", () => {
       const url = new URL(req.url);
       const result = await handleSessionRoutes({ req, url });
       expect(result).not.toBeNull();
-      expect([400, 404]).toContain(result?.status);
+      expect([400, 404]).toContain(result!.status);
     });
   });
 
@@ -295,7 +295,7 @@ describe("handleSessionRoutes", () => {
       const result = await handleSessionRoutes({ req, url: new URL(url) });
       expect(result).not.toBeNull();
       // Will be 404 (session not found) or 400 (invalid json)
-      expect([400, 404]).toContain(result?.status);
+      expect([400, 404]).toContain(result!.status);
     });
   });
 });

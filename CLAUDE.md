@@ -152,8 +152,9 @@ Sessions (tmux-based):
 - List: `hack session list`
 - Stop: `hack session stop <session>`
 - Exec in session: `hack session exec <session> "<command>"`
-- Capture pane output (NDJSON): `hack session capture <session> [--pretty]`
-- Tail pane output (short window): `hack session tail <session> [--pretty]`
+- List panes: `hack session panes <session> [--pretty]`
+- Capture pane output (NDJSON, defaults to active pane): `hack session capture <session> [--pretty]`
+- Tail pane output (short window, defaults to active pane): `hack session tail <session> [--pretty]`
 - Setup tmux: `hack setup tmux` (installs tmux if missing)
 
 Supervisor (remote jobs):

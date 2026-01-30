@@ -6,6 +6,7 @@ import {
   buildSessionStreamLogEvent,
   buildSessionStreamStartEvent,
   diffNewLines,
+  parseTmuxPanesOutput,
   splitLines,
 } from "../src/commands/session-utils.ts";
 
@@ -90,4 +91,31 @@ test("buildSessionStreamEndEvent includes reason when provided", () => {
   expect(event.type).toBe("end");
   expect(event.reason).toBe("timeout");
   expect(event.intervalMs).toBe(500);
+});
+
+test("parseTmuxPanesOutput parses tab-delimited pane fields", () => {
+  const output = [
+    "demo:1.0\t1\t1\teditor\t0\tnvim\t/Users/demo/project",
+    "demo:1.1\t0\t1\teditor\t1\tbash\t/Users/demo/project",
+  ].join("\n");
+
+  const panes = parseTmuxPanesOutput(output);
+  expect(panes).toHaveLength(2);
+  const firstPane = panes.at(0);
+  const secondPane = panes.at(1);
+  expect(firstPane).toBeDefined();
+  expect(secondPane).toBeDefined();
+  if (!firstPane || !secondPane) {
+    throw new Error("Missing pane data");
+  }
+  expect(firstPane).toEqual({
+    target: "demo:1.0",
+    active: true,
+    windowIndex: 1,
+    windowName: "editor",
+    paneIndex: 0,
+    command: "nvim",
+    path: "/Users/demo/project",
+  });
+  expect(secondPane.active).toBe(false);
 });

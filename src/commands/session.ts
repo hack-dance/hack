@@ -10,11 +10,16 @@ import type { RegisteredProject } from "../lib/projects-registry.ts";
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
 import { exec, run } from "../lib/shell.ts";
 import {
+  buildSessionPanesEndEvent,
+  buildSessionPanesErrorEvent,
+  buildSessionPanesLogEvent,
+  buildSessionPanesStartEvent,
   buildSessionStreamEndEvent,
   buildSessionStreamErrorEvent,
   buildSessionStreamLogEvent,
   buildSessionStreamStartEvent,
   diffNewLines,
+  parseTmuxPanesOutput,
   splitLines,
   writeSessionStreamEvent,
 } from "./session-utils.ts";
@@ -56,7 +61,7 @@ const optTarget = defineOption({
   type: "string",
   long: "--target",
   valueHint: "<target>",
-  description: "Tmux pane target (default: <session>:0.0)",
+  description: "Tmux pane target (default: active pane)",
 } as const);
 
 const optLines = defineOption({
@@ -145,6 +150,17 @@ const execSpec = defineCommand({
   subcommands: [],
 } as const);
 
+const panesSpec = defineCommand({
+  name: "panes",
+  summary: "List panes in a tmux session",
+  group: "Project",
+  options: [optJson, optPretty],
+  positionals: [
+    { name: "session", description: "Session name", required: true },
+  ],
+  subcommands: [],
+} as const);
+
 const captureSpec = defineCommand({
   name: "capture",
   summary: "Capture recent output from a tmux session",
@@ -182,6 +198,10 @@ type AttachArgs = CommandArgs<
 type ExecArgs = CommandArgs<
   typeof execSpec.options,
   typeof execSpec.positionals
+>;
+type PanesArgs = CommandArgs<
+  typeof panesSpec.options,
+  typeof panesSpec.positionals
 >;
 type CaptureArgs = CommandArgs<
   typeof captureSpec.options,
@@ -528,6 +548,65 @@ const handleExec = async ({
   return 0;
 };
 
+const handlePanes = async ({
+  args,
+}: {
+  readonly ctx: CliContext;
+  readonly args: PanesArgs;
+}): Promise<number> => {
+  const sessionName = args.positionals.session;
+  const pretty = args.options.pretty === true;
+  const json = args.options.json === true || !pretty;
+
+  if (json && pretty) {
+    process.stderr.write("Cannot combine --json with --pretty.\n");
+    return 1;
+  }
+
+  const context = { session: sessionName };
+
+  if (json) {
+    writeSessionStreamEvent({
+      event: buildSessionPanesStartEvent({ context }),
+    });
+  }
+
+  const result = await listTmuxPanes(sessionName);
+  if (result.exitCode !== 0) {
+    const message = result.stderr || `Failed to list panes for ${sessionName}`;
+    if (json) {
+      writeSessionStreamEvent({
+        event: buildSessionPanesErrorEvent({ context, message }),
+      });
+      writeSessionStreamEvent({
+        event: buildSessionPanesEndEvent({ context, reason: "error" }),
+      });
+    } else {
+      console.error(message);
+    }
+    return 1;
+  }
+
+  const panes = parseTmuxPanesOutput(result.stdout);
+
+  if (json) {
+    for (const pane of panes) {
+      writeSessionStreamEvent({
+        event: buildSessionPanesLogEvent({ context, pane }),
+      });
+    }
+    writeSessionStreamEvent({
+      event: buildSessionPanesEndEvent({ context, reason: "snapshot" }),
+    });
+    return 0;
+  }
+
+  process.stdout.write(
+    `${JSON.stringify({ session: sessionName, panes }, null, 2)}\n`
+  );
+  return 0;
+};
+
 const handleCapture = async ({
   args,
 }: {
@@ -535,7 +614,7 @@ const handleCapture = async ({
   readonly args: CaptureArgs;
 }): Promise<number> => {
   const sessionName = args.positionals.session;
-  const target = args.options.target ?? `${sessionName}:0.0`;
+  const target = args.options.target ?? (await resolveActiveTarget(sessionName));
   const lines = args.options.lines ?? 200;
   const pretty = args.options.pretty === true;
   const json = args.options.json === true || !pretty;
@@ -597,7 +676,7 @@ const handleTail = async ({
   readonly args: TailArgs;
 }): Promise<number> => {
   const sessionName = args.positionals.session;
-  const target = args.options.target ?? `${sessionName}:0.0`;
+  const target = args.options.target ?? (await resolveActiveTarget(sessionName));
   const lines = args.options.lines ?? 200;
   const intervalMs = args.options.intervalMs ?? 500;
   const maxMs = args.options.maxMs ?? 5000;
@@ -701,6 +780,7 @@ export const sessionCommand = defineCommand({
     withHandler(stopSpec, handleStop),
     withHandler(attachSpec, handleAttach),
     withHandler(execSpec, handleExec),
+    withHandler(panesSpec, handlePanes),
     withHandler(captureSpec, handleCapture),
     withHandler(tailSpec, handleTail),
   ],
@@ -727,6 +807,52 @@ async function capturePane(opts: {
     ],
     { stdin: "ignore" }
   );
+}
+
+async function listTmuxPanes(sessionName: string) {
+  const format = [
+    "#{session_name}:#{window_index}.#{pane_index}",
+    "#{pane_active}",
+    "#{window_index}",
+    "#{window_name}",
+    "#{pane_index}",
+    "#{pane_current_command}",
+    "#{pane_current_path}",
+  ].join("\t");
+
+  return await exec(["tmux", "list-panes", "-t", sessionName, "-F", format], {
+    stdin: "ignore",
+  });
+}
+
+async function resolveActiveTarget(sessionName: string): Promise<string> {
+  const result = await exec(
+    [
+      "tmux",
+      "display-message",
+      "-p",
+      "-t",
+      sessionName,
+      "#{session_name}:#{window_index}.#{pane_index}",
+    ],
+    { stdin: "ignore" }
+  );
+
+  const activeTarget = result.exitCode === 0 ? result.stdout.trim() : "";
+  if (activeTarget) {
+    return activeTarget;
+  }
+
+  const panesResult = await listTmuxPanes(sessionName);
+  if (panesResult.exitCode === 0) {
+    const panes = parseTmuxPanesOutput(panesResult.stdout);
+    const [firstPane] = panes;
+    if (firstPane) {
+      return firstPane.target;
+    }
+  }
+
+  return `${sessionName}:0.0`;
 }
 
 function delay(ms: number): Promise<void> {

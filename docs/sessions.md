@@ -26,11 +26,14 @@ hack session exec <session> "npm test"
 # Stop a session
 hack session stop <session>
 
-# Capture recent output
+# Capture recent output (defaults to active pane)
 hack session capture <session>
 
-# Tail session output for a short window
+# Tail session output for a short window (defaults to active pane)
 hack session tail <session>
+
+# List panes in a session
+hack session panes <session>
 ```
 
 ## Session management
@@ -84,9 +87,21 @@ hack session exec my-project "npm run dev"
 # This sends the command + Enter to the session's active pane
 ```
 
+### Listing panes
+
+Use `hack session panes` to list panes with useful metadata (target, active flag, window/pane indices, command, path).
+
+```bash
+# List panes (NDJSON start/log/end)
+hack session panes my-project
+
+# Single JSON object output
+hack session panes my-project --pretty
+```
+
 ### Capturing output
 
-`hack session capture` emits NDJSON events by default for machine parsing (start/log/end). Use `--pretty` for raw pane output.
+`hack session capture` emits NDJSON events by default for machine parsing (start/log/end). By default it targets the active pane; use `--target` to select a specific pane. Use `--pretty` for raw pane output.
 
 ```bash
 # Capture last 200 lines (default) as NDJSON
@@ -101,7 +116,7 @@ hack session capture my-project --pretty
 
 ### Tailing output
 
-`hack session tail` also emits NDJSON events by default and stops after `--max-ms` (default 5000).
+`hack session tail` also emits NDJSON events by default and stops after `--max-ms` (default 5000). By default it tails the active pane; use `--target` to select a specific pane.
 
 ```bash
 # Poll capture-pane and emit only new lines for 5s (default)

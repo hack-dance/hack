@@ -152,7 +152,13 @@ Sessions (tmux-based):
 - List: `hack session list`
 - Stop: `hack session stop <session>`
 - Exec in session: `hack session exec <session> "<command>"`
+- Capture pane output (NDJSON): `hack session capture <session> [--pretty]`
+- Tail pane output (short window): `hack session tail <session> [--pretty]`
 - Setup tmux: `hack setup tmux` (installs tmux if missing)
+
+Supervisor (remote jobs):
+- Use `hack supervisor` when you need long-running tasks on remote hosts, scheduled jobs, or jobs that must outlive your local machine.
+- Prefer sessions for interactive tmux work; prefer supervisor for detached/background jobs.
 
 Agent setup (CLI-first):
 - Cursor rules: `hack setup cursor`

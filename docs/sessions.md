@@ -25,6 +25,12 @@ hack session exec <session> "npm test"
 
 # Stop a session
 hack session stop <session>
+
+# Capture recent output
+hack session capture <session>
+
+# Tail session output for a short window
+hack session tail <session>
 ```
 
 ## Session management
@@ -76,6 +82,36 @@ When attaching, the `-d` flag detaches other clients to avoid terminal size conf
 hack session exec my-project "npm run dev"
 
 # This sends the command + Enter to the session's active pane
+```
+
+### Capturing output
+
+`hack session capture` emits NDJSON events by default for machine parsing (start/log/end). Use `--pretty` for raw pane output.
+
+```bash
+# Capture last 200 lines (default) as NDJSON
+hack session capture my-project
+
+# Capture a specific pane target and line count
+hack session capture my-project --target my-project:0.1 --lines 500
+
+# Human-friendly raw output
+hack session capture my-project --pretty
+```
+
+### Tailing output
+
+`hack session tail` also emits NDJSON events by default and stops after `--max-ms` (default 5000).
+
+```bash
+# Poll capture-pane and emit only new lines for 5s (default)
+hack session tail my-project
+
+# Customize polling interval and max duration
+hack session tail my-project --interval-ms 250 --max-ms 10000
+
+# Human-friendly raw output
+hack session tail my-project --pretty
 ```
 
 ## Remote access with SSH

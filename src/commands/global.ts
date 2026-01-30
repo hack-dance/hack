@@ -275,9 +275,97 @@ function getGlobalPaths() {
 
 async function ensureDockerRunning(): Promise<void> {
   const res = await exec(["docker", "info"], { stdin: "ignore" });
-  if (res.exitCode !== 0) {
-    throw new Error("Docker does not seem to be running (docker info failed)");
+  if (res.exitCode === 0) {
+    return;
   }
+
+  const backend = await detectDockerBackend();
+  if (!backend) {
+    throw new Error(
+      "Docker does not seem to be running and no Docker backend was detected.\nInstall Docker Desktop or OrbStack, then retry."
+    );
+  }
+
+  const ok = await confirm({
+    message: `Docker is not running. Start ${backend.name}?`,
+    initialValue: true,
+  });
+  if (isCancel(ok)) {
+    throw new Error("Canceled");
+  }
+  if (!ok) {
+    throw new Error("Docker is not running (user declined to start)");
+  }
+
+  logger.step({ message: `Starting ${backend.name}…` });
+  await run(backend.startCommand, { stdin: "ignore" });
+
+  const ready = await waitForDocker({ timeoutMs: 30_000, intervalMs: 1000 });
+  if (!ready) {
+    throw new Error(
+      `Docker did not become ready after starting ${backend.name}. Check that ${backend.name} is running and retry.`
+    );
+  }
+
+  logger.success({ message: `${backend.name} is running` });
+}
+
+type DockerBackend = {
+  readonly name: string;
+  readonly startCommand: readonly string[];
+};
+
+/**
+ * Detects the installed Docker backend on macOS (OrbStack, Docker Desktop)
+ * or checks for the docker socket on Linux.
+ */
+async function detectDockerBackend(): Promise<DockerBackend | null> {
+  if (isMac()) {
+    if (await pathExists("/Applications/OrbStack.app")) {
+      const hasOrbctl = await findExecutableInPath("orbctl");
+      return {
+        name: "OrbStack",
+        startCommand: hasOrbctl
+          ? ["orbctl", "start"]
+          : ["open", "-a", "OrbStack"],
+      };
+    }
+    if (await pathExists("/Applications/Docker.app")) {
+      return {
+        name: "Docker Desktop",
+        startCommand: ["open", "-a", "Docker"],
+      };
+    }
+    return null;
+  }
+
+  const hasDocker = await findExecutableInPath("docker");
+  if (hasDocker) {
+    const hasSystemctl = await findExecutableInPath("systemctl");
+    if (hasSystemctl) {
+      return {
+        name: "Docker (systemd)",
+        startCommand: ["sudo", "systemctl", "start", "docker"],
+      };
+    }
+  }
+
+  return null;
+}
+
+async function waitForDocker(opts: {
+  readonly timeoutMs: number;
+  readonly intervalMs: number;
+}): Promise<boolean> {
+  const deadline = Date.now() + opts.timeoutMs;
+  while (Date.now() < deadline) {
+    const check = await exec(["docker", "info"], { stdin: "ignore" });
+    if (check.exitCode === 0) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, opts.intervalMs));
+  }
+  return false;
 }
 
 async function ensureNetwork(

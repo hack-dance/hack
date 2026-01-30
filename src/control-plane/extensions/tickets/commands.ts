@@ -44,6 +44,12 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
         return 1;
       }
 
+      // Enable the extension in project config if not already enabled
+      await ensureTicketsExtensionEnabled({
+        projectDir: ctx.project.projectDir,
+        logger: ctx.logger,
+      });
+
       const parsed = parseTicketsSetupArgs({ args });
       if (!parsed.ok) {
         ctx.logger.error({ message: parsed.error });
@@ -1268,4 +1274,63 @@ function parseTicketsSetupArgs(opts: {
     ok: true,
     value: { agents, claude, all, global, check, remove, json },
   };
+}
+
+/**
+ * Ensures the tickets extension is enabled in the project config.
+ * Reads the project's hack.config.json and adds the extension enabled flag if missing.
+ */
+async function ensureTicketsExtensionEnabled(opts: {
+  readonly projectDir: string;
+  readonly logger: ExtensionCommandContext["logger"];
+}): Promise<void> {
+  const { resolve } = await import("node:path");
+  const { readTextFile, writeTextFileIfChanged } = await import(
+    "../../../lib/fs.ts"
+  );
+  const { isRecord } = await import("../../../lib/guards.ts");
+
+  const configPath = resolve(opts.projectDir, "hack.config.json");
+  const text = await readTextFile(configPath);
+  if (text === null) {
+    return;
+  }
+
+  let config: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(text);
+    if (!isRecord(parsed)) {
+      return;
+    }
+    config = parsed;
+  } catch {
+    return;
+  }
+
+  const controlPlane = isRecord(config.controlPlane)
+    ? config.controlPlane
+    : ({} as Record<string, unknown>);
+  const extensions = isRecord(controlPlane.extensions)
+    ? controlPlane.extensions
+    : ({} as Record<string, unknown>);
+  const ticketsConfig = isRecord(extensions["dance.hack.tickets"])
+    ? extensions["dance.hack.tickets"]
+    : ({} as Record<string, unknown>);
+
+  if (ticketsConfig.enabled === true) {
+    return;
+  }
+
+  ticketsConfig.enabled = true;
+  extensions["dance.hack.tickets"] = ticketsConfig;
+  controlPlane.extensions = extensions;
+  config.controlPlane = controlPlane;
+
+  const nextText = `${JSON.stringify(config, null, 2)}\n`;
+  const result = await writeTextFileIfChanged(configPath, nextText);
+  if (result.changed) {
+    opts.logger.success({
+      message: `Enabled dance.hack.tickets in ${configPath}`,
+    });
+  }
 }

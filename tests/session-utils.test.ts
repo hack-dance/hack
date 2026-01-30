@@ -105,7 +105,7 @@ test("parseTmuxPanesOutput parses tab-delimited pane fields", () => {
   const secondPane = panes.at(1);
   expect(firstPane).toBeDefined();
   expect(secondPane).toBeDefined();
-  if (!firstPane || !secondPane) {
+  if (!(firstPane && secondPane)) {
     throw new Error("Missing pane data");
   }
   expect(firstPane).toEqual({

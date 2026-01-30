@@ -6,9 +6,11 @@ import type {
   CommandHandlerFor,
 } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
+import { optJson, optPretty } from "../cli/options.ts";
 import type { RegisteredProject } from "../lib/projects-registry.ts";
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
 import { exec, run } from "../lib/shell.ts";
+import { logger } from "../ui/logger.ts";
 import {
   buildSessionPanesEndEvent,
   buildSessionPanesErrorEvent,
@@ -23,8 +25,6 @@ import {
   splitLines,
   writeSessionStreamEvent,
 } from "./session-utils.ts";
-import { optJson, optPretty } from "../cli/options.ts";
-import { logger } from "../ui/logger.ts";
 
 /**
  * Parsed tmux session info.
@@ -614,7 +614,8 @@ const handleCapture = async ({
   readonly args: CaptureArgs;
 }): Promise<number> => {
   const sessionName = args.positionals.session;
-  const target = args.options.target ?? (await resolveActiveTarget(sessionName));
+  const target =
+    args.options.target ?? (await resolveActiveTarget(sessionName));
   const lines = args.options.lines ?? 200;
   const pretty = args.options.pretty === true;
   const json = args.options.json === true || !pretty;
@@ -676,7 +677,8 @@ const handleTail = async ({
   readonly args: TailArgs;
 }): Promise<number> => {
   const sessionName = args.positionals.session;
-  const target = args.options.target ?? (await resolveActiveTarget(sessionName));
+  const target =
+    args.options.target ?? (await resolveActiveTarget(sessionName));
   const lines = args.options.lines ?? 200;
   const intervalMs = args.options.intervalMs ?? 500;
   const maxMs = args.options.maxMs ?? 5000;
@@ -793,18 +795,10 @@ async function capturePane(opts: {
   readonly target: string;
   readonly lines: number;
 }) {
-  const lines = Number.isFinite(opts.lines) && opts.lines > 0 ? opts.lines : 200;
+  const lines =
+    Number.isFinite(opts.lines) && opts.lines > 0 ? opts.lines : 200;
   return await exec(
-    [
-      "tmux",
-      "capture-pane",
-      "-p",
-      "-J",
-      "-t",
-      opts.target,
-      "-S",
-      `-${lines}`,
-    ],
+    ["tmux", "capture-pane", "-p", "-J", "-t", opts.target, "-S", `-${lines}`],
     { stdin: "ignore" }
   );
 }

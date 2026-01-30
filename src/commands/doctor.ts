@@ -1339,7 +1339,9 @@ async function runDoctorFix(): Promise<void> {
     });
   }
 
-  const useStaticIps = false;
+  // Re-check ingress network after potential recreation
+  const ingressAfterFix = await inspectDockerNetwork(DEFAULT_INGRESS_NETWORK);
+  const useStaticIps = ingressAfterFix.hasSubnet;
   await writeWithPromptIfDifferent(
     paths.caddyCompose,
     renderGlobalCaddyCompose({

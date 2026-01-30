@@ -369,13 +369,13 @@ async function globalInstall(): Promise<number> {
   s.stop(
     `Networks ready (${DEFAULT_INGRESS_NETWORK}, ${DEFAULT_LOGGING_NETWORK})`
   );
-  if (!ingressNetwork.hasSubnet) {
+  const useStaticIps = ingressNetwork.hasSubnet;
+  if (!useStaticIps) {
     logger.warn({
       message:
         "hack-dev network has no subnet; CoreDNS will resolve via dynamic IP.",
     });
   }
-  const useStaticIps = false;
 
   if (isMac()) {
     await ensureMacHackDns();

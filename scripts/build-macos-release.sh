@@ -84,6 +84,7 @@ if [ "$SKIP_CLI" = false ]; then
   fi
   log "Signing CLI binary with certificate: $SIGNING_IDENTITY"
   codesign --force --options runtime --timestamp \
+    --entitlements "$SCRIPT_DIR/cli.entitlements" \
     --sign "$SIGNING_IDENTITY" \
     "$CLI_BUILD_DIR/hack"
 

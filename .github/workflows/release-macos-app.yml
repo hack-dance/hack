@@ -18,6 +18,17 @@ on:
         description: 'Release tag to attach artifact to'
         required: true
         type: string
+    secrets:
+      APPLE_CERTIFICATE_P12:
+        required: true
+      APPLE_CERTIFICATE_PASSWORD:
+        required: true
+      APPLE_ID:
+        required: true
+      APPLE_ID_PASSWORD:
+        required: true
+      APPLE_TEAM_ID:
+        required: true
 
 env:
   APP_NAME: "Hack Desktop"
@@ -26,12 +37,14 @@ env:
 
 jobs:
   build-and-notarize:
-    runs-on: macos-14
+    runs-on: macos-15
     permissions:
       contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
 
       - name: Setup Xcode
         uses: maxim-lobanov/setup-xcode@v1
@@ -199,10 +212,10 @@ jobs:
             ${{ runner.temp }}/HackDesktop-*.zip
 
       - name: Upload to release
-        if: github.event_name == 'release' || github.event.inputs.tag != '' || inputs.tag != ''
+        if: github.event_name == 'release' || inputs.tag != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.event.release.tag_name || github.event.inputs.tag || inputs.tag }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           gh release upload "$RELEASE_TAG" \

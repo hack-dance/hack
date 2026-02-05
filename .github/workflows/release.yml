@@ -103,6 +103,8 @@ jobs:
 
   macos-app:
     needs: create-release
+    permissions:
+      contents: write
     uses: ./.github/workflows/release-macos-app.yml
     with:
       tag: ${{ needs.create-release.outputs.tag }}

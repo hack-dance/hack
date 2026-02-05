@@ -1,3 +1,7 @@
+## <small>1.4.2 (2026-02-05)</small>
+
+* fix(ci): pass development team to xcodebuild archive ([0c4bf2c](https://github.com/hack-dance/hack/commit/0c4bf2c))
+
 ## <small>1.4.1 (2026-02-05)</small>
 
 * fix(ci): use current Xcode for macOS release build ([e13ee97](https://github.com/hack-dance/hack/commit/e13ee97))

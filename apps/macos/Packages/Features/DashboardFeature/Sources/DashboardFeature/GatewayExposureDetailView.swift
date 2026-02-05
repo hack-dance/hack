@@ -23,19 +23,19 @@ struct GatewayExposureDetailView: View {
     VStack(alignment: .leading, spacing: 8) {
       HStack(alignment: .center, spacing: 12) {
         Label(exposure.label, systemImage: iconName)
-          .font(.title2.weight(.semibold))
+          .font(.mono(.title2, weight: .semibold))
         StatusPill(text: exposure.statusLabel, tone: exposure.statusTone)
         Spacer()
         if let url = exposureUrl {
           Button("Open URL") {
             openURL(url)
           }
-          .buttonStyle(.bordered)
+          .adaptiveToolbarButton()
         }
       }
       if let detail = exposure.detail, !detail.isEmpty {
         Text(detail)
-          .font(.subheadline)
+          .font(.mono(.subheadline))
           .foregroundStyle(.secondary)
       }
     }

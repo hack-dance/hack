@@ -16,7 +16,7 @@ struct GatewayDetailView: View {
           tokensCard
           warningsCard
         }
-        .padding(24)
+        .padding(16)
       }
       .navigationDestination(for: GatewayExposure.self) { exposure in
         GatewayExposureDetailView(exposure: exposure)
@@ -25,23 +25,27 @@ struct GatewayDetailView: View {
   }
 
   private var header: some View {
-    VStack(alignment: .leading, spacing: 8) {
-      HStack(alignment: .center, spacing: 12) {
-        Label("Gateway", systemImage: "arrow.triangle.branch")
-          .font(.title2.weight(.semibold))
-        StatusPill(text: gatewayStatusText, tone: gatewayStatusTone)
-        Spacer()
-        if let configUrl {
-          Button("Open Config") {
-            openURL(configUrl)
+    SectionHeader(
+      breadcrumb: "System / Gateway",
+      title: "Gateway",
+      subtitle: "Remote gateway configuration and exposures",
+      status: { StatusPill(text: gatewayStatusText, tone: gatewayStatusTone) },
+      actions: {
+        Menu {
+          Button("Refresh") {
+            Task { await model.refresh() }
           }
-          .adaptiveToolbarButton()
+          if let configUrl {
+            Button("Open Config") {
+              openURL(configUrl)
+            }
+          }
+        } label: {
+          Image(systemName: "ellipsis.circle")
         }
+        .buttonStyle(.plain)
       }
-      Text("Remote gateway configuration and exposures")
-        .font(.subheadline)
-        .foregroundStyle(.secondary)
-    }
+    )
   }
 
   private var overviewCard: some View {
@@ -54,7 +58,7 @@ struct GatewayDetailView: View {
     GlassCard(title: "Exposures", systemImage: "point.3.filled.connected.trianglepath.dotted") {
       if exposures.isEmpty {
         Text("No gateway exposures configured")
-          .font(.caption)
+          .font(.mono(.caption))
           .foregroundStyle(.secondary)
       } else {
         VStack(alignment: .leading, spacing: 12) {
@@ -95,7 +99,7 @@ struct GatewayDetailView: View {
           VStack(alignment: .leading, spacing: 4) {
             ForEach(warnings, id: \.self) { warning in
               Text("• \(warning)")
-                .font(.caption)
+                .font(.mono(.caption))
                 .foregroundStyle(.secondary)
             }
           }
@@ -187,7 +191,7 @@ struct GatewayDetailView: View {
     VStack(alignment: .leading, spacing: 4) {
       HStack(spacing: 8) {
         Label(exposure.label, systemImage: exposureIcon(exposure))
-          .font(.subheadline.weight(.medium))
+          .font(.mono(.subheadline, weight: .medium))
         Spacer()
         if let dependencyLabel = exposure.dependencyStatusLabel,
            let dependencyColor = exposure.dependencyStatusColor {
@@ -195,17 +199,17 @@ struct GatewayDetailView: View {
         }
         StatusPill(text: exposure.statusLabel, tone: exposure.statusTone)
         Image(systemName: "chevron.right")
-          .font(.caption)
+          .font(.mono(.caption))
           .foregroundStyle(.tertiary)
       }
       if let detail = exposure.detail, !detail.isEmpty {
         Text(detail)
-          .font(.caption)
+          .font(.mono(.caption))
           .foregroundStyle(.secondary)
       }
       if let url = exposure.url, !url.isEmpty {
         Text(url)
-          .font(.caption2)
+          .font(.mono(.caption2))
           .foregroundStyle(.secondary)
       }
     }

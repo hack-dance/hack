@@ -52,10 +52,10 @@ struct ShellView: View {
         Image(systemName: "exclamationmark.triangle.fill")
           .foregroundStyle(.orange)
         Text("Terminal unavailable")
-          .font(.subheadline.weight(.medium))
+          .font(.mono(.subheadline, weight: .medium))
       }
       Text("Run `bun run macos:ghostty:setup` to build the Ghostty VT library.")
-        .font(.caption)
+        .font(.mono(.caption))
         .foregroundStyle(.secondary)
     }
     .padding(16)
@@ -70,7 +70,7 @@ struct ShellView: View {
   private func embeddedHeader(session: GhosttyTerminalSession) -> some View {
     HStack {
       Text(session.statusMessage)
-        .font(.caption)
+        .font(.mono(.caption))
         .foregroundStyle(.secondary)
       Spacer()
     }
@@ -81,12 +81,12 @@ struct ShellView: View {
     HStack(alignment: .center) {
       VStack(alignment: .leading, spacing: 6) {
         Text("Shell")
-          .font(.title2)
+          .font(.mono(.title2))
           .bold()
         Text(project.name)
-          .font(.headline)
+          .font(.mono(.headline))
         Text(session.statusMessage)
-          .font(.subheadline)
+          .font(.mono(.subheadline))
           .foregroundStyle(.secondary)
       }
       Spacer()

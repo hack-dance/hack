@@ -31,6 +31,7 @@ afterEach(async () => {
 async function createProject(opts: {
   readonly name: string;
   readonly services: readonly string[];
+  readonly serviceHosts?: Record<string, readonly string[]>;
 }): Promise<RegisteredProject> {
   if (!tempDir) {
     throw new Error("tempDir not set");
@@ -41,7 +42,14 @@ async function createProject(opts: {
 
   const composeLines = ["services:"];
   for (const svc of opts.services) {
-    composeLines.push(`  ${svc}: {}`);
+    const hosts = opts.serviceHosts?.[svc] ?? null;
+    if (!hosts) {
+      composeLines.push(`  ${svc}: {}`);
+      continue;
+    }
+    composeLines.push(`  ${svc}:`);
+    composeLines.push("    labels:");
+    composeLines.push(`      caddy: "${hosts.join(", ")}"`);
   }
   await writeFile(
     join(projectDir, PROJECT_COMPOSE_FILENAME),
@@ -100,6 +108,9 @@ test("buildProjectViews includes defined services and runtime status", async () 
   const alpha = await createProject({
     name: "alpha",
     services: ["api", "web"],
+    serviceHosts: {
+      api: ["api.alpha.hack", "api.alpha.hack.gy"],
+    },
   });
   const runtime = [
     makeRuntimeProject({
@@ -142,6 +153,10 @@ test("buildProjectViews includes defined services and runtime status", async () 
   expect(alphaView?.definedServices).toEqual(["api", "web"]);
   expect(alphaView?.status).toBe("running");
   expect(alphaView?.projectId).toBe("alpha-id");
+  expect(alphaView?.serviceHosts?.api).toEqual([
+    "api.alpha.hack",
+    "api.alpha.hack.gy",
+  ]);
 
   const betaView = views.find((view) => view.name === "beta");
   expect(betaView?.status).toBe("unregistered");
@@ -149,6 +164,9 @@ test("buildProjectViews includes defined services and runtime status", async () 
   const serialized = alphaView ? serializeProjectView(alphaView) : null;
   expect(serialized?.defined_services).toEqual(["api", "web"]);
   expect(serialized?.project_id).toBe("alpha-id");
+  expect(serialized?.service_hosts).toEqual({
+    api: ["api.alpha.hack", "api.alpha.hack.gy"],
+  });
 });
 
 test("buildProjectViews marks runtime status unknown when runtime is unavailable", async () => {

@@ -30,8 +30,10 @@ public struct ProjectSummary: Decodable, Identifiable, Hashable {
   public let definedServices: [String]?
   public let extensionsEnabled: [String]?
   public let features: [String]?
+  public let serviceHosts: [String: [String]]?
   public let runtimeConfigured: Bool?
   public let runtimeStatus: ProjectRuntimeStatus?
+  public let runtime: RuntimeProject?
   public let kind: ProjectKind
   public let status: ProjectStatus
 
@@ -46,8 +48,10 @@ public struct ProjectSummary: Decodable, Identifiable, Hashable {
     definedServices: [String]?,
     extensionsEnabled: [String]?,
     features: [String]?,
+    serviceHosts: [String: [String]]?,
     runtimeConfigured: Bool?,
     runtimeStatus: ProjectRuntimeStatus?,
+    runtime: RuntimeProject?,
     kind: ProjectKind,
     status: ProjectStatus
   ) {
@@ -59,10 +63,74 @@ public struct ProjectSummary: Decodable, Identifiable, Hashable {
     self.definedServices = definedServices
     self.extensionsEnabled = extensionsEnabled
     self.features = features
+    self.serviceHosts = serviceHosts
     self.runtimeConfigured = runtimeConfigured
     self.runtimeStatus = runtimeStatus
+    self.runtime = runtime
     self.kind = kind
     self.status = status
+  }
+}
+
+public struct RuntimeProject: Decodable, Hashable {
+  public let project: String
+  public let workingDir: String?
+  public let services: [RuntimeService]
+
+  public init(project: String, workingDir: String?, services: [RuntimeService]) {
+    self.project = project
+    self.workingDir = workingDir
+    self.services = services
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case project
+    case workingDir = "working_dir"
+    case services
+  }
+}
+
+public struct RuntimeService: Decodable, Hashable {
+  public let service: String
+  public let containers: [RuntimeContainer]
+
+  public init(service: String, containers: [RuntimeContainer]) {
+    self.service = service
+    self.containers = containers
+  }
+}
+
+public struct RuntimeContainer: Decodable, Hashable {
+  public let id: String
+  public let state: String
+  public let status: String
+  public let name: String
+  public let ports: String
+  public let workingDir: String?
+
+  public init(
+    id: String,
+    state: String,
+    status: String,
+    name: String,
+    ports: String,
+    workingDir: String?
+  ) {
+    self.id = id
+    self.state = state
+    self.status = status
+    self.name = name
+    self.ports = ports
+    self.workingDir = workingDir
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case id
+    case state
+    case status
+    case name
+    case ports
+    case workingDir = "working_dir"
   }
 }
 
@@ -337,5 +405,166 @@ public struct GatewayExposure: Decodable, Identifiable, Hashable {
     self.state = state
     self.detail = detail
     self.url = url
+  }
+}
+
+public enum TicketStatus: String, Decodable {
+  case open
+  case inProgress = "in_progress"
+  case blocked
+  case done
+}
+extension TicketStatus: Encodable {}
+
+public struct TicketSummary: Decodable, Encodable, Identifiable, Hashable {
+  public let ticketId: String
+  public let title: String
+  public let body: String?
+  public let status: TicketStatus
+  public let createdAt: String
+  public let updatedAt: String
+  public let dependsOn: [String]
+  public let blocks: [String]
+  public let projectId: String?
+  public let projectName: String?
+
+  public var id: String { ticketId }
+
+  public init(
+    ticketId: String,
+    title: String,
+    body: String?,
+    status: TicketStatus,
+    createdAt: String,
+    updatedAt: String,
+    dependsOn: [String],
+    blocks: [String],
+    projectId: String?,
+    projectName: String?
+  ) {
+    self.ticketId = ticketId
+    self.title = title
+    self.body = body
+    self.status = status
+    self.createdAt = createdAt
+    self.updatedAt = updatedAt
+    self.dependsOn = dependsOn
+    self.blocks = blocks
+    self.projectId = projectId
+    self.projectName = projectName
+  }
+}
+
+public struct TicketEvent: Decodable, Identifiable, Hashable {
+  public let eventId: String
+  public let ts: Int
+  public let tsIso: String
+  public let actor: String
+  public let projectId: String?
+  public let projectName: String?
+  public let ticketId: String
+  public let type: String
+
+  public var id: String { eventId }
+
+  public init(
+    eventId: String,
+    ts: Int,
+    tsIso: String,
+    actor: String,
+    projectId: String?,
+    projectName: String?,
+    ticketId: String,
+    type: String
+  ) {
+    self.eventId = eventId
+    self.ts = ts
+    self.tsIso = tsIso
+    self.actor = actor
+    self.projectId = projectId
+    self.projectName = projectName
+    self.ticketId = ticketId
+    self.type = type
+  }
+}
+
+public struct TicketsListResponse: Decodable {
+  public let tickets: [TicketSummary]
+
+  public init(tickets: [TicketSummary]) {
+    self.tickets = tickets
+  }
+}
+
+public struct TicketDetailResponse: Decodable {
+  public let ticket: TicketSummary
+  public let events: [TicketEvent]
+
+  public init(ticket: TicketSummary, events: [TicketEvent]) {
+    self.ticket = ticket
+    self.events = events
+  }
+}
+
+public struct TicketCreateResponse: Decodable {
+  public let ticket: TicketSummary
+
+  public init(ticket: TicketSummary) {
+    self.ticket = ticket
+  }
+}
+
+public struct TicketUpdateResponse: Decodable {
+  public let ok: Bool
+  public let ticketId: String
+
+  public init(ok: Bool, ticketId: String) {
+    self.ok = ok
+    self.ticketId = ticketId
+  }
+}
+
+public struct TicketStatusResponse: Decodable {
+  public let ok: Bool
+  public let ticketId: String
+  public let status: TicketStatus
+
+  public init(ok: Bool, ticketId: String, status: TicketStatus) {
+    self.ok = ok
+    self.ticketId = ticketId
+    self.status = status
+  }
+}
+
+public struct TicketsSyncResponse: Decodable {
+  public let sync: TicketsSyncResult
+
+  public init(sync: TicketsSyncResult) {
+    self.sync = sync
+  }
+}
+
+public struct TicketsSyncResult: Decodable {
+  public let ok: Bool
+  public let branch: String?
+  public let remote: String?
+  public let didCommit: Bool?
+  public let didPush: Bool?
+  public let error: String?
+
+  public init(
+    ok: Bool,
+    branch: String?,
+    remote: String?,
+    didCommit: Bool?,
+    didPush: Bool?,
+    error: String?
+  ) {
+    self.ok = ok
+    self.branch = branch
+    self.remote = remote
+    self.didCommit = didCommit
+    self.didPush = didPush
+    self.error = error
   }
 }

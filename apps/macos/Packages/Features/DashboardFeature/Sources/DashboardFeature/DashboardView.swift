@@ -6,6 +6,7 @@ import HackDesktopModels
 
 public struct DashboardView: View {
   @Environment(DashboardModel.self) private var model
+  @State private var showCommandPalette = false
 
   public init() {}
 
@@ -21,29 +22,27 @@ public struct DashboardView: View {
     }
     .navigationSplitViewStyle(.balanced)
     .navigationSplitViewColumnWidth(min: 240, ideal: 320, max: 460)
-    .navigationTitle("Hack Desktop")
+    .toolbar {
+      ToolbarItem(placement: .principal) {
+        GlobalStatusStrip(placement: .titlebar)
+          .frame(maxWidth: .infinity, alignment: .leading)
+      }
+    }
+    .navigationTitle("")
+    .toolbarTitleDisplayMode(.inline)
     .adaptiveWindowBackground()
     .task {
       model.start()
     }
-    .toolbar {
-      ToolbarItemGroup(placement: .primaryAction) {
-        Button("Refresh") {
-          Task { await model.refresh() }
-        }
-        .adaptiveToolbarButton()
-        if canStopDaemon {
-          Button("Stop hackd") {
-            Task { await model.stopDaemon() }
-          }
-          .adaptiveToolbarButton()
-        } else if canStartDaemon {
-          Button("Start hackd") {
-            Task { await model.startDaemon() }
-          }
-          .adaptiveToolbarButtonProminent()
-        }
-      }
+    .onReceive(NotificationCenter.default.publisher(for: .hackCommandPaletteRequested)) { _ in
+      showCommandPalette = true
+    }
+    .onReceive(NotificationCenter.default.publisher(for: .hackRefreshRequested)) { _ in
+      Task { await model.refresh() }
+    }
+    .sheet(isPresented: $showCommandPalette) {
+      CommandPaletteView()
+        .environment(model)
     }
   }
 
@@ -65,10 +64,10 @@ public struct DashboardView: View {
         if runtimeProjects.isEmpty {
           VStack(alignment: .leading, spacing: 4) {
             Text("No projects registered")
-              .font(.subheadline)
+              .font(.mono(.subheadline))
               .foregroundStyle(.secondary)
             Text("Run `hack init` in a project directory to register it.")
-              .font(.caption)
+              .font(.mono(.caption))
               .foregroundStyle(.tertiary)
           }
           .padding(.vertical, 4)
@@ -121,12 +120,12 @@ public struct DashboardView: View {
     VStack(alignment: .leading, spacing: 8) {
       if let errorMessage = model.errorMessage {
         Text(errorMessage)
-          .font(.caption)
+          .font(.mono(.caption))
           .foregroundStyle(.red)
       }
       HStack {
         Text(runtimeLabel)
-          .font(.caption)
+          .font(.mono(.caption))
           .foregroundStyle(.secondary)
         Spacer()
         if let statusMessage = model.statusMessage {
@@ -255,6 +254,14 @@ public struct DashboardView: View {
       model.showShell(for: project)
     } label: {
       Label("Open Shell", systemImage: "terminal")
+    }
+
+    if project.supportsTickets {
+      Button {
+        model.showTickets(for: project)
+      } label: {
+        Label("Open Tickets", systemImage: "ticket")
+      }
     }
 
     if let devHost = project.devHost, let url = URL(string: "https://\(devHost)") {

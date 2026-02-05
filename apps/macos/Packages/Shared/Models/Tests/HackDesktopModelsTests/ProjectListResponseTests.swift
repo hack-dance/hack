@@ -22,6 +22,9 @@ final class ProjectListResponseTests: XCTestCase {
           "defined_services": ["api"],
           "extensions_enabled": ["dance.hack.tickets"],
           "features": ["tickets"],
+          "service_hosts": {
+            "api": ["api.hack-cli.test", "api.hack-cli.test.gy"]
+          },
           "runtime_configured": true,
           "runtime_status": "running",
           "kind": "registered",
@@ -43,5 +46,6 @@ final class ProjectListResponseTests: XCTestCase {
     XCTAssertEqual(response.projects.first?.name, "hack-cli")
     XCTAssertEqual(response.projects.first?.status, .running)
     XCTAssertEqual(response.projects.first?.runtimeStatus, .running)
+    XCTAssertEqual(response.projects.first?.serviceHosts?["api"], ["api.hack-cli.test", "api.hack-cli.test.gy"])
   }
 }

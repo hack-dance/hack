@@ -26,6 +26,7 @@ export type ProjectView = {
   readonly definedServices: readonly string[] | null;
   readonly extensionsEnabled: readonly string[] | null;
   readonly features: readonly string[] | null;
+  readonly serviceHosts: Readonly<Record<string, readonly string[]>> | null;
   readonly runtimeConfigured: boolean | null;
   readonly runtimeStatus: ProjectRuntimeStatus;
   readonly runtime: RuntimeProject | null;
@@ -86,6 +87,9 @@ export async function buildProjectViews(opts: {
       const definedServices = composeExists
         ? await readComposeServices({ composeFile })
         : null;
+      const serviceHosts = composeExists
+        ? await readComposeServiceHosts({ composeFile })
+        : null;
       const running = countRunningServices(runtime);
       const runtimeConfigured = composeExists;
       const runtimeStatus: ProjectRuntimeStatus = resolveRuntimeStatus({
@@ -116,6 +120,7 @@ export async function buildProjectViews(opts: {
         definedServices,
         extensionsEnabled: extensions?.enabled ?? null,
         features: extensions?.features ?? null,
+        serviceHosts,
         runtimeConfigured,
         runtimeStatus,
         runtime,
@@ -141,6 +146,7 @@ export async function buildProjectViews(opts: {
         definedServices: null,
         extensionsEnabled: null,
         features: null,
+        serviceHosts: null,
         runtimeConfigured: null,
         runtimeStatus,
         runtime,
@@ -166,6 +172,7 @@ export function serializeProjectView(
     defined_services: view.definedServices ?? null,
     extensions_enabled: view.extensionsEnabled ?? null,
     features: view.features ?? null,
+    service_hosts: view.serviceHosts ?? null,
     runtime_configured: view.runtimeConfigured ?? null,
     runtime_status: view.runtimeStatus,
     runtime: view.runtime ? serializeRuntimeProject(view.runtime) : null,
@@ -221,6 +228,76 @@ async function readComposeServices(opts: {
   }
 
   return Object.keys(servicesRaw).sort((a, b) => a.localeCompare(b));
+}
+
+async function readComposeServiceHosts(opts: {
+  readonly composeFile: string;
+}): Promise<Readonly<Record<string, readonly string[]>> | null> {
+  const text = await readTextFile(opts.composeFile);
+  if (!text) {
+    return null;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = YAML.parse(text);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) {
+    return null;
+  }
+
+  const servicesRaw = parsed.services;
+  if (!isRecord(servicesRaw)) {
+    return null;
+  }
+
+  const out: Record<string, readonly string[]> = {};
+  for (const [serviceName, serviceRaw] of Object.entries(servicesRaw)) {
+    if (!isRecord(serviceRaw)) {
+      continue;
+    }
+    const labels = serviceRaw.labels;
+    const caddyLabel = extractLabelValue(labels, "caddy");
+    if (!caddyLabel) {
+      continue;
+    }
+    const hosts = caddyLabel
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    if (hosts.length > 0) {
+      out[serviceName] = hosts;
+    }
+  }
+
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+function extractLabelValue(labels: unknown, key: string): string | null {
+  if (isRecord(labels)) {
+    const value = labels[key];
+    return typeof value === "string" ? value : null;
+  }
+  if (Array.isArray(labels)) {
+    for (const entry of labels) {
+      if (typeof entry !== "string") {
+        continue;
+      }
+      const [k, ...rest] = entry.split("=");
+      if (!k) {
+        continue;
+      }
+      if (k.trim() === key) {
+        const value = rest.join("=").trim();
+        if (value.length > 0) {
+          return value;
+        }
+      }
+    }
+  }
+  return null;
 }
 
 async function resolveProjectExtensions(opts: {

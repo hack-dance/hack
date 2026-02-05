@@ -20,7 +20,7 @@ struct GlassCard<Content: View>: View {
               .foregroundStyle(.secondary)
           }
           Text(title)
-            .font(.headline)
+            .font(.mono(.subheadline, weight: .semibold))
         }
       }
       content
@@ -37,10 +37,10 @@ private extension View {
       self
         .background(
           RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .fill(.regularMaterial)
+            .fill(.thinMaterial)
         )
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .glassEffect(.regular)
+        .shadow(color: .black.opacity(0.04), radius: 8, y: 2)
     } else {
       self
         .background(

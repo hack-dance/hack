@@ -25,6 +25,7 @@ public enum ProjectTab: String, CaseIterable {
   case overview = "Overview"
   case logs = "Logs"
   case shell = "Shell"
+  case tickets = "Tickets"
 }
 
 @Observable
@@ -161,6 +162,86 @@ public final class DashboardModel {
     selectedProjectTab = .shell
   }
 
+  public func showTickets(for project: ProjectSummary) {
+    selectedItem = .project(project.id)
+    selectedProjectTab = .tickets
+  }
+
+  public func listTickets(for project: ProjectSummary) async throws -> [TicketSummary] {
+    guard let path = resolveProjectPath(project) else {
+      throw HackCLIError.commandFailed(exitCode: 1, stderr: "Missing project path for \(project.name)")
+    }
+    let response = try await client.listTickets(path: path)
+    return response.tickets
+  }
+
+  public func showTicket(for project: ProjectSummary, ticketId: String) async throws -> TicketDetailResponse {
+    guard let path = resolveProjectPath(project) else {
+      throw HackCLIError.commandFailed(exitCode: 1, stderr: "Missing project path for \(project.name)")
+    }
+    return try await client.showTicket(path: path, ticketId: ticketId)
+  }
+
+  public func createTicket(
+    for project: ProjectSummary,
+    title: String,
+    body: String?,
+    dependsOn: [String],
+    blocks: [String]
+  ) async -> TicketSummary? {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return nil
+    }
+    let response = await runActionResult(message: "Creating ticket…") {
+      try await self.client.createTicket(
+        path: path,
+        title: title,
+        body: body,
+        dependsOn: dependsOn,
+        blocks: blocks
+      )
+    }
+    return response?.ticket
+  }
+
+  public func setTicketStatus(
+    for project: ProjectSummary,
+    ticketId: String,
+    status: TicketStatus
+  ) async -> TicketStatusResponse? {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return nil
+    }
+    return await runActionResult(message: "Updating ticket status…") {
+      try await self.client.setTicketStatus(path: path, ticketId: ticketId, status: status)
+    }
+  }
+
+  public func syncTickets(for project: ProjectSummary) async -> TicketsSyncResult? {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return nil
+    }
+    let response = await runActionResult(message: "Syncing tickets…") {
+      try await self.client.syncTickets(path: path)
+    }
+    return response?.sync
+  }
+
+  public func setupTickets(for project: ProjectSummary) async -> Bool {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return false
+    }
+    let result = await runActionResult(message: "Setting up tickets…") {
+      try await self.client.setupTickets(path: path)
+      return true
+    }
+    return result ?? false
+  }
+
   private func resolveProjectPath(_ project: ProjectSummary) -> String? {
     project.repoRoot ?? project.projectDir
   }
@@ -223,6 +304,29 @@ public final class DashboardModel {
     statusClearTask = Task { [weak self] in
       try? await Task.sleep(for: .seconds(2))
       self?.statusMessage = nil
+    }
+  }
+
+  private func runActionResult<T>(
+    message: String,
+    action: @escaping () async throws -> T
+  ) async -> T? {
+    statusMessage = message
+    statusClearTask?.cancel()
+
+    do {
+      let result = try await action()
+      statusMessage = "Done"
+      await refresh()
+      statusClearTask = Task { [weak self] in
+        try? await Task.sleep(for: .seconds(2))
+        self?.statusMessage = nil
+      }
+      return result
+    } catch {
+      statusMessage = nil
+      errorMessage = error.localizedDescription
+      return nil
     }
   }
 }

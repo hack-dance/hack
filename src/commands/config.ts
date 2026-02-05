@@ -381,9 +381,11 @@ function parseJsonObject(opts: {
 function parseKeyPath(opts: { readonly raw: string }): readonly string[] {
   const parts: string[] = [];
   let buffer = "";
-  let escaped = false;
-  let inBracket = false;
-  let quote: '"' | "'" | null = null;
+  let state: ParseKeyState = {
+    escaped: false,
+    inBracket: false,
+    quote: null,
+  };
 
   const pushBuffer = () => {
     const trimmed = buffer.trim();
@@ -395,63 +397,17 @@ function parseKeyPath(opts: { readonly raw: string }): readonly string[] {
 
   for (let i = 0; i < opts.raw.length; i += 1) {
     const ch = opts.raw[i] ?? "";
-    if (inBracket) {
-      if (escaped) {
-        buffer += ch;
-        escaped = false;
-        continue;
-      }
-      if (ch === "\\") {
-        escaped = true;
-        continue;
-      }
-      if (quote) {
-        if (ch === quote) {
-          quote = null;
-          continue;
-        }
-        buffer += ch;
-        continue;
-      }
-      if (ch === "'" || ch === '"') {
-        quote = ch;
-        continue;
-      }
-      if (ch === "]") {
-        inBracket = false;
-        pushBuffer();
-        continue;
-      }
-      buffer += ch;
-      continue;
-    }
-
-    if (escaped) {
-      buffer += ch;
-      escaped = false;
-      continue;
-    }
-    if (ch === "\\") {
-      escaped = true;
-      continue;
-    }
-    if (ch === ".") {
+    const result = state.inBracket
+      ? handleBracketChar({ ch, buffer, state })
+      : handleRootChar({ ch, buffer, state });
+    buffer = result.buffer;
+    state = result.state;
+    if (result.push) {
       pushBuffer();
-      continue;
     }
-    if (ch === "[") {
-      if (buffer.trim().length > 0) {
-        pushBuffer();
-      } else {
-        buffer = "";
-      }
-      inBracket = true;
-      continue;
-    }
-    buffer += ch;
   }
 
-  if (escaped) {
+  if (state.escaped) {
     buffer += "\\";
   }
   if (buffer.length > 0) {
@@ -459,6 +415,81 @@ function parseKeyPath(opts: { readonly raw: string }): readonly string[] {
   }
 
   return parts;
+}
+
+type ParseKeyState = {
+  readonly escaped: boolean;
+  readonly inBracket: boolean;
+  readonly quote: '"' | "'" | null;
+};
+
+type ParseKeyStep = {
+  readonly buffer: string;
+  readonly state: ParseKeyState;
+  readonly push: boolean;
+};
+
+function handleBracketChar(opts: {
+  readonly ch: string;
+  readonly buffer: string;
+  readonly state: ParseKeyState;
+}): ParseKeyStep {
+  const { ch } = opts;
+  const { buffer, state } = opts;
+  if (state.escaped) {
+    return {
+      buffer: buffer + ch,
+      state: { ...state, escaped: false },
+      push: false,
+    };
+  }
+  if (ch === "\\") {
+    return { buffer, state: { ...state, escaped: true }, push: false };
+  }
+  if (state.quote) {
+    if (ch === state.quote) {
+      return { buffer, state: { ...state, quote: null }, push: false };
+    }
+    return { buffer: buffer + ch, state, push: false };
+  }
+  if (ch === "'" || ch === '"') {
+    return { buffer, state: { ...state, quote: ch }, push: false };
+  }
+  if (ch === "]") {
+    return { buffer, state: { ...state, inBracket: false }, push: true };
+  }
+  return { buffer: buffer + ch, state, push: false };
+}
+
+function handleRootChar(opts: {
+  readonly ch: string;
+  readonly buffer: string;
+  readonly state: ParseKeyState;
+}): ParseKeyStep {
+  const { ch } = opts;
+  const { buffer, state } = opts;
+  if (state.escaped) {
+    return {
+      buffer: buffer + ch,
+      state: { ...state, escaped: false },
+      push: false,
+    };
+  }
+  if (ch === "\\") {
+    return { buffer, state: { ...state, escaped: true }, push: false };
+  }
+  if (ch === ".") {
+    return { buffer, state, push: true };
+  }
+  if (ch === "[") {
+    const hasBuffer = buffer.trim().length > 0;
+    return {
+      buffer: "",
+      state: { ...state, inBracket: true },
+      push: hasBuffer,
+    };
+  }
+  return { buffer: buffer + ch, state, push: false };
 }
 
 function resolveGlobalOnlyKey(opts: {

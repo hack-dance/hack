@@ -66,6 +66,88 @@ public actor HackCLIClient {
     _ = try await run(["down", "--path", path])
   }
 
+  public func listTickets(path: String) async throws -> TicketsListResponse {
+    let result = try await run(["x", "tickets", "list", "--json"], cwd: path)
+    return try decodeLenient(TicketsListResponse.self, from: result.stdout)
+  }
+
+  public func showTicket(path: String, ticketId: String) async throws -> TicketDetailResponse {
+    let result = try await run(["x", "tickets", "show", ticketId, "--json"], cwd: path)
+    return try decodeLenient(TicketDetailResponse.self, from: result.stdout)
+  }
+
+  public func createTicket(
+    path: String,
+    title: String,
+    body: String?,
+    dependsOn: [String],
+    blocks: [String]
+  ) async throws -> TicketCreateResponse {
+    var args = ["x", "tickets", "create", "--title", title, "--json"]
+    if let body, !body.isEmpty {
+      args.append(contentsOf: ["--body", body])
+    }
+    if !dependsOn.isEmpty {
+      args.append(contentsOf: ["--depends-on", dependsOn.joined(separator: ",")])
+    }
+    if !blocks.isEmpty {
+      args.append(contentsOf: ["--blocks", blocks.joined(separator: ",")])
+    }
+    let result = try await run(args, cwd: path)
+    return try decodeLenient(TicketCreateResponse.self, from: result.stdout)
+  }
+
+  public func updateTicket(
+    path: String,
+    ticketId: String,
+    title: String?,
+    body: String?,
+    dependsOn: [String]?,
+    blocks: [String]?,
+    clearDependsOn: Bool,
+    clearBlocks: Bool
+  ) async throws -> TicketUpdateResponse {
+    var args = ["x", "tickets", "update", ticketId, "--json"]
+    if let title {
+      args.append(contentsOf: ["--title", title])
+    }
+    if let body {
+      args.append(contentsOf: ["--body", body])
+    }
+    if let dependsOn, !dependsOn.isEmpty {
+      args.append(contentsOf: ["--depends-on", dependsOn.joined(separator: ",")])
+    }
+    if let blocks, !blocks.isEmpty {
+      args.append(contentsOf: ["--blocks", blocks.joined(separator: ",")])
+    }
+    if clearDependsOn {
+      args.append("--clear-depends-on")
+    }
+    if clearBlocks {
+      args.append("--clear-blocks")
+    }
+    let result = try await run(args, cwd: path)
+    return try decodeLenient(TicketUpdateResponse.self, from: result.stdout)
+  }
+
+  public func setTicketStatus(
+    path: String,
+    ticketId: String,
+    status: TicketStatus
+  ) async throws -> TicketStatusResponse {
+    let result = try await run(["x", "tickets", "status", ticketId, status.rawValue, "--json"], cwd: path)
+    return try decodeLenient(TicketStatusResponse.self, from: result.stdout)
+  }
+
+  public func syncTickets(path: String) async throws -> TicketsSyncResponse {
+    let result = try await run(["x", "tickets", "sync", "--json"], cwd: path)
+    return try decodeLenient(TicketsSyncResponse.self, from: result.stdout)
+  }
+
+  public func setupTickets(path: String) async throws {
+    _ = try await run(["x", "tickets", "setup"], allowNonZeroExit: true, cwd: path)
+  }
+
   private func decode<T: Decodable>(_ type: T.Type, from text: String) throws -> T {
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
     if trimmed.isEmpty {
@@ -85,13 +167,51 @@ public actor HackCLIClient {
     }
   }
 
+  private func decodeLenient<T: Decodable>(_ type: T.Type, from text: String) throws -> T {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.isEmpty {
+      throw HackCLIError.emptyOutput
+    }
+
+    let decoder = JSONDecoder()
+    decoder.keyDecodingStrategy = .convertFromSnakeCase
+
+    if let data = trimmed.data(using: .utf8), let decoded = try? decoder.decode(T.self, from: data) {
+      return decoded
+    }
+
+    if let snippet = extractJsonSnippet(from: trimmed),
+       let data = snippet.data(using: .utf8),
+       let decoded = try? decoder.decode(T.self, from: data) {
+      return decoded
+    }
+
+    throw HackCLIError.invalidJson
+  }
+
+  private func extractJsonSnippet(from text: String) -> String? {
+    guard let startIndex = text.firstIndex(where: { $0 == "{" || $0 == "[" }) else {
+      return nil
+    }
+    let startChar = text[startIndex]
+    let endChar: Character = startChar == "{" ? "}" : "]"
+    guard let endIndex = text.lastIndex(of: endChar), endIndex >= startIndex else {
+      return nil
+    }
+    return String(text[startIndex...endIndex])
+  }
+
   private func run(
     _ args: [String],
-    allowNonZeroExit: Bool = false
+    allowNonZeroExit: Bool = false,
+    cwd: String? = nil
   ) async throws -> CLIResult {
     let process = Process()
     let environment = HackCLILocator.buildEnvironment()
     process.environment = environment
+    if let cwd, !cwd.isEmpty {
+      process.currentDirectoryURL = URL(fileURLWithPath: cwd)
+    }
 
     if let hackPath = HackCLILocator.resolveHackExecutable(in: environment) {
       process.executableURL = URL(fileURLWithPath: hackPath)

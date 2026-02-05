@@ -17,7 +17,7 @@ struct RuntimeDetailView: View {
         runtimeCard
         globalServicesSection
       }
-      .padding(24)
+      .padding(16)
     }
   }
 
@@ -47,44 +47,57 @@ struct RuntimeDetailView: View {
     HStack(spacing: 4) {
       Image(systemName: icon)
         .foregroundStyle(isOk ? .green : .orange)
-        .font(.caption)
+        .font(.mono(.caption))
       Text(label)
-        .font(.caption)
+        .font(.mono(.caption))
         .foregroundStyle(.secondary)
     }
     .padding(.horizontal, 8)
     .padding(.vertical, 4)
     .background(
-      RoundedRectangle(cornerRadius: 8, style: .continuous)
-        .fill(isOk ? Color.green.opacity(0.1) : Color.orange.opacity(0.1))
+      RoundedRectangle(cornerRadius: 10, style: .continuous)
+        .fill(isOk ? Color.green.opacity(0.12) : Color.orange.opacity(0.12))
     )
   }
 
   private var header: some View {
     VStack(alignment: .leading, spacing: 8) {
-      HStack(alignment: .center, spacing: 12) {
-        Label("Runtime", systemImage: "gauge")
-          .font(.title2.weight(.semibold))
-        StatusPill(text: runtimeStatusText, tone: runtimeStatusTone)
-        Spacer()
-        if canStopDaemon {
-          Button(daemonActionTitle) {
-            Task { await model.stopDaemon() }
+      SectionHeader(
+        breadcrumb: "System / Runtime",
+        title: "Runtime",
+        subtitle: "Local daemon, runtime health, and global services",
+        status: { StatusPill(text: runtimeStatusText, tone: runtimeStatusTone) },
+        actions: {
+          Menu {
+            Button("Refresh") {
+              Task { await model.refresh() }
+            }
+            if canStopDaemon {
+              Button(daemonActionTitle) {
+                Task { await model.stopDaemon() }
+              }
+            } else if canStartDaemon {
+              Button(daemonActionTitle) {
+                Task { await model.startDaemon() }
+              }
+            }
+            Button("Restart hackd") {
+              Task { await model.restartDaemon() }
+            }
+            if canClearDaemon {
+              Button("Clear state") {
+                Task { await model.clearDaemon() }
+              }
+            }
+          } label: {
+            Image(systemName: "ellipsis.circle")
           }
-          .adaptiveToolbarButton()
-        } else if canStartDaemon {
-          Button(daemonActionTitle) {
-            Task { await model.startDaemon() }
-          }
-          .adaptiveToolbarButtonProminent()
+          .buttonStyle(.plain)
         }
-      }
-      Text("Local daemon, runtime health, and global services")
-        .font(.subheadline)
-        .foregroundStyle(.secondary)
+      )
       if let generatedAt = model.globalStatus?.generatedAt, !generatedAt.isEmpty {
         Text("Last updated: \(generatedAt)")
-          .font(.caption)
+          .font(.mono(.caption))
           .foregroundStyle(.secondary)
       }
     }
@@ -124,7 +137,7 @@ struct RuntimeDetailView: View {
           .padding(.top, 8)
       } label: {
         Text("Details")
-          .font(.caption)
+          .font(.mono(.caption))
           .foregroundStyle(.secondary)
       }
       .padding(.top, 8)
@@ -137,10 +150,10 @@ struct RuntimeDetailView: View {
         Image(systemName: "info.circle.fill")
           .foregroundStyle(.blue)
         Text("Daemon not running")
-          .font(.subheadline.weight(.medium))
+          .font(.mono(.subheadline, weight: .medium))
       }
       Text("The hack daemon manages your local development environment. Start it to enable project monitoring, logs, and gateway access.")
-        .font(.caption)
+        .font(.mono(.caption))
         .foregroundStyle(.secondary)
       Button {
         Task { await model.startDaemon() }
@@ -161,7 +174,7 @@ struct RuntimeDetailView: View {
       }
       if let error = model.runtimeError, !error.isEmpty, model.runtimeOk != true {
         Text(error)
-          .font(.caption)
+          .font(.mono(.caption))
           .foregroundStyle(.red)
       }
       DetailRows(rows: runtimeRows)
@@ -188,10 +201,10 @@ struct RuntimeDetailView: View {
             Image(systemName: "exclamationmark.triangle.fill")
               .foregroundStyle(.orange)
             Text("Status unavailable")
-              .font(.subheadline.weight(.medium))
+              .font(.mono(.subheadline, weight: .medium))
           }
           Text("Global services status requires the daemon to be running. These services include Caddy (reverse proxy), logging infrastructure, and Docker networks.")
-            .font(.caption)
+            .font(.mono(.caption))
             .foregroundStyle(.secondary)
           if canStartDaemon {
             Button {
@@ -225,7 +238,7 @@ struct RuntimeDetailView: View {
       ])
       if let generatedAt, !generatedAt.isEmpty {
         Text("Generated at \(generatedAt)")
-          .font(.caption)
+          .font(.mono(.caption))
           .foregroundStyle(.secondary)
       }
     }
@@ -239,7 +252,7 @@ struct RuntimeDetailView: View {
       }
       if let error = group.error, !error.isEmpty, !group.ok {
         Text(error)
-          .font(.caption)
+          .font(.mono(.caption))
           .foregroundStyle(.red)
       }
       if !group.services.isEmpty {
@@ -248,15 +261,15 @@ struct RuntimeDetailView: View {
             VStack(alignment: .leading, spacing: 2) {
               HStack {
                 Text(service.name)
-                  .font(.subheadline.weight(.medium))
+                  .font(.mono(.subheadline, weight: .medium))
                 Spacer()
                 Text(service.status)
-                  .font(.caption)
+                  .font(.mono(.caption))
                   .foregroundStyle(.secondary)
               }
               if !service.ports.isEmpty {
                 Text(service.ports)
-                  .font(.caption2)
+                  .font(.mono(.caption2))
                   .foregroundStyle(.secondary)
               }
             }
@@ -264,7 +277,7 @@ struct RuntimeDetailView: View {
         }
       } else {
         Text("No services reported")
-          .font(.caption)
+          .font(.mono(.caption))
           .foregroundStyle(.secondary)
       }
     }
@@ -282,10 +295,10 @@ struct RuntimeDetailView: View {
           ForEach(group.networks, id: \.id) { network in
             HStack {
               Text(network.name)
-                .font(.subheadline.weight(.medium))
+                .font(.mono(.subheadline, weight: .medium))
               Spacer()
               Text(network.driver)
-                .font(.caption)
+                .font(.mono(.caption))
                 .foregroundStyle(.secondary)
             }
           }

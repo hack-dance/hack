@@ -1,3 +1,8 @@
+## <small>1.4.3 (2026-02-05)</small>
+
+* fix(release): correct installer repo + app version ([9aa0556](https://github.com/hack-dance/hack/commit/9aa0556))
+* chore(ci): fix reusable workflow permissions and tag checkout ([655c09a](https://github.com/hack-dance/hack/commit/655c09a))
+
 ## <small>1.4.2 (2026-02-05)</small>
 
 * fix(ci): pass development team to xcodebuild archive ([0c4bf2c](https://github.com/hack-dance/hack/commit/0c4bf2c))

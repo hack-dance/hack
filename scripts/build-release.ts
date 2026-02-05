@@ -426,7 +426,7 @@ function renderDownloadInstallScript(): string {
     "set -euo pipefail",
     "",
     'REPO_OWNER="hack-dance"',
-    'REPO_NAME="hack-cli"',
+    'REPO_NAME="hack"',
     'REPO="$REPO_OWNER/$REPO_NAME"',
     'API_URL="https://api.github.com/repos/$REPO/releases/latest"',
     'BASE_URL="${HACK_RELEASE_BASE_URL:-https://github.com/$REPO/releases/download}"',

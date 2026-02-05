@@ -78,7 +78,7 @@ jobs:
       - name: Build and archive
         working-directory: ${{ env.PROJECT_PATH }}
         env:
-          KEYCHAIN: ${{ env.KEYCHAIN_PATH }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           xcodebuild archive \
             -scheme "$SCHEME" \
@@ -86,6 +86,7 @@ jobs:
             -archivePath "$RUNNER_TEMP/HackDesktop.xcarchive" \
             CODE_SIGN_STYLE=Manual \
             CODE_SIGN_IDENTITY="Developer ID Application" \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
             OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN_PATH"
 
       - name: Export app

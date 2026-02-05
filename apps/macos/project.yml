@@ -18,8 +18,9 @@ targets:
     settings:
       base:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Avoid XcodeGen rewriting App/Info.plist (it hardcodes the version to 1.0/1).
+        # Instead, let Xcode read the plist directly and expand $(MARKETING_VERSION).
+        INFOPLIST_FILE: App/Info.plist
     dependencies:
       - package: HackDesktop
         product: DashboardFeature
-    info:
-      path: App/Info.plist

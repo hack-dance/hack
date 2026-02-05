@@ -13,12 +13,17 @@ import {
   getLaunchdServiceStatus,
   installLaunchdService,
   kickstartLaunchdService,
+  type LaunchdServiceStatus,
   uninstallLaunchdService,
 } from "../daemon/launchd.ts";
-import { resolveDaemonPaths } from "../daemon/paths.ts";
+import { type DaemonPaths, resolveDaemonPaths } from "../daemon/paths.ts";
 import { removeFileIfExists, waitForProcessExit } from "../daemon/process.ts";
 import { runDaemon } from "../daemon/server.ts";
-import { buildDaemonStatusReport, readDaemonStatus } from "../daemon/status.ts";
+import {
+  buildDaemonStatusReport,
+  type DaemonStatusReport,
+  readDaemonStatus,
+} from "../daemon/status.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
 import { pathExists, readTextFile } from "../lib/fs.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";

@@ -1,28 +1,3 @@
-## <small>1.4.3 (2026-02-05)</small>
-
-* fix(release): correct installer repo + app version ([9aa0556](https://github.com/hack-dance/hack/commit/9aa0556))
-* chore(ci): fix reusable workflow permissions and tag checkout ([655c09a](https://github.com/hack-dance/hack/commit/655c09a))
-
-## <small>1.4.2 (2026-02-05)</small>
-
-* fix(ci): pass development team to xcodebuild archive ([0c4bf2c](https://github.com/hack-dance/hack/commit/0c4bf2c))
-
-## <small>1.4.1 (2026-02-05)</small>
-
-* fix(ci): use current Xcode for macOS release build ([e13ee97](https://github.com/hack-dance/hack/commit/e13ee97))
-* fix(ci): use release PAT for semantic-release pushes ([b35b87b](https://github.com/hack-dance/hack/commit/b35b87b))
-* chore(ci): automate release pipeline from main and tags ([0fa5fc5](https://github.com/hack-dance/hack/commit/0fa5fc5))
-
-## 1.4.0 (2026-02-05)
-
-* fix(daemon): restore missing status type imports ([eeea27c](https://github.com/hack-dance/hack/commit/eeea27c))
-* fix(release): add CLI entitlements + refresh ingress subnet ([a0788f9](https://github.com/hack-dance/hack/commit/a0788f9))
-* Add session panes command and default to active pane ([19925d0](https://github.com/hack-dance/hack/commit/19925d0))
-* app updates ([fe3097e](https://github.com/hack-dance/hack/commit/fe3097e))
-* feat: auto-start Docker backend and auto-enable tickets on setup ([7802df1](https://github.com/hack-dance/hack/commit/7802df1))
-* feat(session): add capture/tail streaming output ([6814a5c](https://github.com/hack-dance/hack/commit/6814a5c))
-* refactor(extensions): centralize enable prompts ([6c5118f](https://github.com/hack-dance/hack/commit/6c5118f))
-
 ## 1.3.0 (2026-01-22)
 
 * Clarify local-dev orchestration features in README ([bb4a030](https://github.com/hack-dance/hack/commit/bb4a030))

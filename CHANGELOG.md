@@ -1,3 +1,13 @@
+## 1.4.0 (2026-02-05)
+
+* fix(daemon): restore missing status type imports ([eeea27c](https://github.com/hack-dance/hack/commit/eeea27c))
+* fix(release): add CLI entitlements + refresh ingress subnet ([a0788f9](https://github.com/hack-dance/hack/commit/a0788f9))
+* Add session panes command and default to active pane ([19925d0](https://github.com/hack-dance/hack/commit/19925d0))
+* app updates ([fe3097e](https://github.com/hack-dance/hack/commit/fe3097e))
+* feat: auto-start Docker backend and auto-enable tickets on setup ([7802df1](https://github.com/hack-dance/hack/commit/7802df1))
+* feat(session): add capture/tail streaming output ([6814a5c](https://github.com/hack-dance/hack/commit/6814a5c))
+* refactor(extensions): centralize enable prompts ([6c5118f](https://github.com/hack-dance/hack/commit/6c5118f))
+
 ## 1.3.0 (2026-01-22)
 
 * Clarify local-dev orchestration features in README ([bb4a030](https://github.com/hack-dance/hack/commit/bb4a030))

@@ -1,3 +1,9 @@
+## <small>1.4.1 (2026-02-05)</small>
+
+* fix(ci): use current Xcode for macOS release build ([e13ee97](https://github.com/hack-dance/hack/commit/e13ee97))
+* fix(ci): use release PAT for semantic-release pushes ([b35b87b](https://github.com/hack-dance/hack/commit/b35b87b))
+* chore(ci): automate release pipeline from main and tags ([0fa5fc5](https://github.com/hack-dance/hack/commit/0fa5fc5))
+
 ## 1.4.0 (2026-02-05)
 
 * fix(daemon): restore missing status type imports ([eeea27c](https://github.com/hack-dance/hack/commit/eeea27c))

@@ -1,3 +1,7 @@
+## <small>1.5.2 (2026-02-06)</small>
+
+* fix(ci): parse codesign identity reliably ([83f6c8e](https://github.com/hack-dance/hack/commit/83f6c8e))
+
 ## <small>1.5.1 (2026-02-06)</small>
 
 * fix(ci): avoid ambiguous codesign identity ([a7e750d](https://github.com/hack-dance/hack/commit/a7e750d))

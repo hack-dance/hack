@@ -1,3 +1,7 @@
+## 1.6.0 (2026-02-06)
+
+* feat(macos): add first-run setup guidance + stabilize XcodeGen ([d624bd1](https://github.com/hack-dance/hack/commit/d624bd1))
+
 ## <small>1.5.9 (2026-02-06)</small>
 
 * fix(macos): codesign bundled CLI with JIT entitlements ([5e6326f](https://github.com/hack-dance/hack/commit/5e6326f))

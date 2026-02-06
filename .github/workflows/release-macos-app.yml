@@ -110,6 +110,27 @@ jobs:
 
           echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
 
+      - name: Resolve codesign identity
+        run: |
+          set -euo pipefail
+          LINE="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep 'Developer ID Application' | head -n 1 || true)"
+          if [ -z "$LINE" ]; then
+            echo "No Developer ID Application identity found in keychain: $KEYCHAIN_PATH"
+            security find-identity -v -p codesigning "$KEYCHAIN_PATH" || true
+            exit 1
+          fi
+
+          IDENTITY_HASH="$(echo "$LINE" | awk '{print $2}')"
+          IDENTITY_NAME="$(echo "$LINE" | sed -n 's/.*\"\\(Developer ID Application:.*\\)\".*/\\1/p')"
+
+          if [ -z "$IDENTITY_HASH" ] || [ -z "$IDENTITY_NAME" ]; then
+            echo "Failed to parse identity from line: $LINE"
+            exit 1
+          fi
+
+          echo "CODESIGN_IDENTITY_HASH=$IDENTITY_HASH" >> "$GITHUB_ENV"
+          echo "CODESIGN_IDENTITY_NAME=$IDENTITY_NAME" >> "$GITHUB_ENV"
+
       - name: Bundle CLI into app resources
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -155,7 +176,7 @@ jobs:
           fi
 
           codesign --force --options runtime --timestamp \
-            --sign "Developer ID Application" \
+            --sign "$CODESIGN_IDENTITY_HASH" \
             --keychain "$KEYCHAIN_PATH" \
             "$BUNDLED_HACK"
 
@@ -171,7 +192,7 @@ jobs:
             -configuration Release \
             -archivePath "$RUNNER_TEMP/HackDesktop.xcarchive" \
             CODE_SIGN_STYLE=Manual \
-            CODE_SIGN_IDENTITY="Developer ID Application" \
+            CODE_SIGN_IDENTITY="$CODESIGN_IDENTITY_NAME" \
             DEVELOPMENT_TEAM="$TEAM_ID" \
             OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN_PATH"
 
@@ -191,7 +212,7 @@ jobs:
               <key>signingStyle</key>
               <string>manual</string>
               <key>signingCertificate</key>
-              <string>Developer ID Application</string>
+              <string>$CODESIGN_IDENTITY_NAME</string>
           </dict>
           </plist>
           EOF

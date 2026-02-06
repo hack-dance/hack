@@ -178,6 +178,7 @@ jobs:
           fi
 
           codesign --force --options runtime --timestamp \
+            --entitlements "apps/macos/App/HackCLIBundled.entitlements" \
             --sign "$CODESIGN_IDENTITY_HASH" \
             --keychain "$KEYCHAIN_PATH" \
             "$BUNDLED_HACK"

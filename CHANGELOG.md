@@ -1,3 +1,8 @@
+## <small>1.5.8 (2026-02-06)</small>
+
+* fix(tickets): allow passthrough flags on hack tickets ([e7a3562](https://github.com/hack-dance/hack/commit/e7a3562))
+* chore(dev): make pre-commit formatter safe ([2d89ebd](https://github.com/hack-dance/hack/commit/2d89ebd))
+
 ## <small>1.5.5 (2026-02-06)</small>
 
 * fix(macos): copy BundledCLI into app bundle ([d0353f9](https://github.com/hack-dance/hack/commit/d0353f9))

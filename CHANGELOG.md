@@ -1,3 +1,7 @@
+## <small>1.5.4 (2026-02-06)</small>
+
+* fix(ci): bundle CLI before xcodegen ([ef1f0a0](https://github.com/hack-dance/hack/commit/ef1f0a0))
+
 ## <small>1.5.3 (2026-02-06)</small>
 
 * fix(ci): parse Sparkle signature output ([14b45b6](https://github.com/hack-dance/hack/commit/14b45b6))

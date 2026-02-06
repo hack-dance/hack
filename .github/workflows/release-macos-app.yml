@@ -53,13 +53,6 @@ jobs:
         with:
           xcode-version: "latest-stable"
 
-      - name: Install xcodegen
-        run: brew install xcodegen
-
-      - name: Generate Xcode project
-        working-directory: ${{ env.PROJECT_PATH }}
-        run: xcodegen generate
-
       - name: Resolve release metadata
         id: meta
         run: |
@@ -79,6 +72,49 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "arch=$ARCH" >> "$GITHUB_OUTPUT"
+
+      # Important: do this before `xcodegen generate`. XcodeGen snapshots resources at generation time,
+      # and we populate BundledCLI dynamically from the release tarball.
+      - name: Bundle CLI into app resources
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          ARCH: ${{ steps.meta.outputs.arch }}
+        run: |
+          set -euo pipefail
+          TARBALL="hack-$VERSION-darwin-$ARCH.tar.gz"
+
+          mkdir -p "$RUNNER_TEMP/cli"
+          gh release download "$RELEASE_TAG" -p "$TARBALL" --dir "$RUNNER_TEMP/cli"
+
+          mkdir -p "$RUNNER_TEMP/cli/extract"
+          tar -xzf "$RUNNER_TEMP/cli/$TARBALL" -C "$RUNNER_TEMP/cli/extract"
+
+          RELEASE_DIR="$RUNNER_TEMP/cli/extract/hack-$VERSION-release"
+          if [ ! -d "$RELEASE_DIR" ]; then
+            echo "Missing release dir: $RELEASE_DIR"
+            exit 1
+          fi
+
+          BUNDLE_DIR="apps/macos/App/BundledCLI"
+          mkdir -p "$BUNDLE_DIR"
+          rm -rf "$BUNDLE_DIR/hack" "$BUNDLE_DIR/assets" "$BUNDLE_DIR/binaries"
+
+          cp "$RELEASE_DIR/hack" "$BUNDLE_DIR/hack"
+          if [ -d "$RELEASE_DIR/assets" ]; then
+            cp -R "$RELEASE_DIR/assets" "$BUNDLE_DIR/assets"
+          fi
+          if [ -d "$RELEASE_DIR/binaries" ]; then
+            cp -R "$RELEASE_DIR/binaries" "$BUNDLE_DIR/binaries"
+          fi
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ${{ env.PROJECT_PATH }}
+        run: xcodegen generate
 
       - name: Import certificate
         env:
@@ -130,40 +166,6 @@ jobs:
 
           echo "CODESIGN_IDENTITY_HASH=$IDENTITY_HASH" >> "$GITHUB_ENV"
           echo "CODESIGN_IDENTITY_NAME=$IDENTITY_NAME" >> "$GITHUB_ENV"
-
-      - name: Bundle CLI into app resources
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
-          VERSION: ${{ steps.meta.outputs.version }}
-          ARCH: ${{ steps.meta.outputs.arch }}
-        run: |
-          set -euo pipefail
-          TARBALL="hack-$VERSION-darwin-$ARCH.tar.gz"
-
-          mkdir -p "$RUNNER_TEMP/cli"
-          gh release download "$RELEASE_TAG" -p "$TARBALL" --dir "$RUNNER_TEMP/cli"
-
-          mkdir -p "$RUNNER_TEMP/cli/extract"
-          tar -xzf "$RUNNER_TEMP/cli/$TARBALL" -C "$RUNNER_TEMP/cli/extract"
-
-          RELEASE_DIR="$RUNNER_TEMP/cli/extract/hack-$VERSION-release"
-          if [ ! -d "$RELEASE_DIR" ]; then
-            echo "Missing release dir: $RELEASE_DIR"
-            exit 1
-          fi
-
-          BUNDLE_DIR="apps/macos/App/BundledCLI"
-          mkdir -p "$BUNDLE_DIR"
-          rm -rf "$BUNDLE_DIR/hack" "$BUNDLE_DIR/assets" "$BUNDLE_DIR/binaries"
-
-          cp "$RELEASE_DIR/hack" "$BUNDLE_DIR/hack"
-          if [ -d "$RELEASE_DIR/assets" ]; then
-            cp -R "$RELEASE_DIR/assets" "$BUNDLE_DIR/assets"
-          fi
-          if [ -d "$RELEASE_DIR/binaries" ]; then
-            cp -R "$RELEASE_DIR/binaries" "$BUNDLE_DIR/binaries"
-          fi
 
       - name: Codesign bundled CLI
         env:

@@ -317,8 +317,8 @@ jobs:
           fi
 
           SIGN_LINE="$(printf '%s' "$SPARKLE_EDDSA_PRIVATE_KEY" | "$RUNNER_TEMP/sparkle/bin/sign_update" --ed-key-file - "$ZIP_PATH")"
-          ED_SIGNATURE="$(echo "$SIGN_LINE" | sed -n 's/.*sparkle:edSignature=\"\\([^\"]*\\)\".*/\\1/p')"
-          LENGTH="$(echo "$SIGN_LINE" | sed -n 's/.*length=\"\\([0-9]*\\)\".*/\\1/p')"
+          ED_SIGNATURE="$(echo "$SIGN_LINE" | sed -n 's/.*sparkle:edSignature=\"\([^\"]*\)\".*/\1/p')"
+          LENGTH="$(echo "$SIGN_LINE" | sed -n 's/.*length=\"\([0-9]*\)\".*/\1/p')"
 
           if [ -z "$ED_SIGNATURE" ] || [ -z "$LENGTH" ]; then
             echo "Failed to parse signature output: $SIGN_LINE"

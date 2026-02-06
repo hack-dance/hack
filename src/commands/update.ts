@@ -9,8 +9,8 @@ import { ensureDir } from "../lib/fs.ts";
 import {
   compareVersions,
   downloadAndExtractRelease,
-  isDevWrapperShimBytes,
   installExtractedRelease,
+  isDevWrapperShimBytes,
   resolveGithubRelease,
   resolveUpdateTarget,
   selectCliTarballAsset,
@@ -306,7 +306,10 @@ async function resolveSelfUpdateBinaryPath(): Promise<
   // Detect local dev shim installs (a bash wrapper script), but avoid false positives for compiled
   // binaries (which embed the marker string in their own data segment).
   const file = Bun.file(candidate);
-  const prefixBuf = await file.slice(0, 2).arrayBuffer().catch(() => null);
+  const prefixBuf = await file
+    .slice(0, 2)
+    .arrayBuffer()
+    .catch(() => null);
   if (prefixBuf) {
     const prefix = new Uint8Array(prefixBuf);
     const isShebang =

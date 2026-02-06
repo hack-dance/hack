@@ -1,4 +1,4 @@
-import { access, lstat, readFile, rm } from "node:fs/promises";
+import { access, lstat, rm } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 
 import { confirm, isCancel } from "@clack/prompts";
@@ -9,13 +9,12 @@ import { ensureDir } from "../lib/fs.ts";
 import {
   compareVersions,
   downloadAndExtractRelease,
+  isDevWrapperShimBytes,
   installExtractedRelease,
   resolveGithubRelease,
   resolveUpdateTarget,
   selectCliTarballAsset,
 } from "../lib/self-update.ts";
-
-const DEV_WRAPPER_MARKER = "hack-cli local-dev shim";
 
 const optCheck = defineOption({
   name: "check",
@@ -304,16 +303,30 @@ async function resolveSelfUpdateBinaryPath(): Promise<
     };
   }
 
-  const content = await readFile(candidate, "utf8").catch(() => null);
-  if (typeof content === "string" && content.includes(DEV_WRAPPER_MARKER)) {
-    return {
-      ok: false,
-      error: [
-        "Refusing to self-update because hack is a local-dev wrapper install.",
-        "",
-        "Install the release build into ~/.hack/bin, then re-run `hack update`.",
-      ].join("\n"),
-    };
+  // Detect local dev shim installs (a bash wrapper script), but avoid false positives for compiled
+  // binaries (which embed the marker string in their own data segment).
+  const file = Bun.file(candidate);
+  const prefixBuf = await file.slice(0, 2).arrayBuffer().catch(() => null);
+  if (prefixBuf) {
+    const prefix = new Uint8Array(prefixBuf);
+    const isShebang =
+      prefix.length === 2 && prefix[0] === 0x23 && prefix[1] === 0x21; // #!
+    if (isShebang) {
+      const headBuf = await file
+        .slice(0, 64 * 1024)
+        .arrayBuffer()
+        .catch(() => null);
+      if (headBuf && isDevWrapperShimBytes(new Uint8Array(headBuf))) {
+        return {
+          ok: false,
+          error: [
+            "Refusing to self-update because hack is a local-dev wrapper install.",
+            "",
+            "Install the release build into ~/.hack/bin, then re-run `hack update`.",
+          ].join("\n"),
+        };
+      }
+    }
   }
 
   const writable = await access(candidate, 2).then(

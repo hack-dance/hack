@@ -10,6 +10,9 @@ import { execOrThrow } from "./shell.ts";
 const DEFAULT_REPO_OWNER = "hack-dance" as const;
 const DEFAULT_REPO_NAME = "hack" as const;
 
+export const DEV_WRAPPER_MARKER = "hack-cli local-dev shim" as const;
+const DEV_WRAPPER_SHEBANG_PREFIX = "#!" as const;
+
 export type UpdatePlatform = "darwin" | "linux";
 export type UpdateArch = "arm64" | "x86_64";
 
@@ -61,6 +64,29 @@ export function resolveUpdateTarget(): UpdateTarget | null {
   }
 
   return { platform, arch };
+}
+
+/**
+ * Local dev installs write a bash wrapper script into ~/.hack/bin/hack that executes `bun index.ts`.
+ * We refuse to self-update those shims, but must not mis-detect compiled binaries (which embed the
+ * marker string as part of their program text/data).
+ */
+export function isDevWrapperShimBytes(bytes: Uint8Array): boolean {
+  if (bytes.length < DEV_WRAPPER_SHEBANG_PREFIX.length) {
+    return false;
+  }
+
+  // Only treat shebang files as possible wrappers.
+  const prefix = String.fromCharCode(
+    ...bytes.slice(0, DEV_WRAPPER_SHEBANG_PREFIX.length)
+  );
+  if (prefix !== DEV_WRAPPER_SHEBANG_PREFIX) {
+    return false;
+  }
+
+  const head = bytes.slice(0, Math.min(bytes.length, 64 * 1024));
+  const text = new TextDecoder("utf-8", { fatal: false }).decode(head);
+  return text.includes(DEV_WRAPPER_MARKER);
 }
 
 export function normalizeTag(tagRaw: string): string {

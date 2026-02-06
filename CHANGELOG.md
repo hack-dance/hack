@@ -1,3 +1,7 @@
+## <small>1.5.1 (2026-02-06)</small>
+
+* fix(ci): avoid ambiguous codesign identity ([a7e750d](https://github.com/hack-dance/hack/commit/a7e750d))
+
 ## 1.5.0 (2026-02-06)
 
 * feat(update): add CLI + macOS updaters ([39f7334](https://github.com/hack-dance/hack/commit/39f7334))

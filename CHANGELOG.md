@@ -1,3 +1,7 @@
+## <small>1.5.3 (2026-02-06)</small>
+
+* fix(ci): parse Sparkle signature output ([14b45b6](https://github.com/hack-dance/hack/commit/14b45b6))
+
 ## <small>1.5.2 (2026-02-06)</small>
 
 * fix(ci): parse codesign identity reliably ([83f6c8e](https://github.com/hack-dance/hack/commit/83f6c8e))

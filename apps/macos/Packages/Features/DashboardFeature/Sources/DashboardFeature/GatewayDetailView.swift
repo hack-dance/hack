@@ -28,6 +28,8 @@ struct GatewayDetailView: View {
   }
 
   private var shouldShowSetupGuidance: Bool {
+    if ProcessInfo.processInfo.environment["HACK_DESKTOP_FORCE_SETUP_GUIDANCE"] == "1" { return true }
+
     // If gateway/global status isn't available yet (fresh machine), show quick-start guidance here too.
     if model.globalStatus == nil { return true }
     if model.gatewaySummaryState == nil { return true }
@@ -260,3 +262,13 @@ struct GatewayDetailView: View {
     .padding(.vertical, 4)
   }
 }
+
+#if DEBUG
+import HackCLIService
+
+#Preview("Gateway (Setup Guidance)") {
+  let model = DashboardModel(client: HackCLIClient())
+  return GatewayDetailView()
+    .environment(model)
+}
+#endif

@@ -25,6 +25,8 @@ struct RuntimeDetailView: View {
   }
 
   private var shouldShowSetupGuidance: Bool {
+    if ProcessInfo.processInfo.environment["HACK_DESKTOP_FORCE_SETUP_GUIDANCE"] == "1" { return true }
+
     // Fresh machines commonly need global install + CA trust. If we can't fetch global status, guide them.
     if model.globalStatus == nil { return true }
     if daemonIsRunning == false { return true }
@@ -485,3 +487,13 @@ struct RuntimeDetailView: View {
     return value ? "Yes" : "No"
   }
 }
+
+#if DEBUG
+import HackCLIService
+
+#Preview("Runtime (Setup Guidance)") {
+  let model = DashboardModel(client: HackCLIClient())
+  return RuntimeDetailView()
+    .environment(model)
+}
+#endif

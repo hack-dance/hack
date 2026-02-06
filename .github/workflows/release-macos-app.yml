@@ -121,7 +121,7 @@ jobs:
           fi
 
           IDENTITY_HASH="$(echo "$LINE" | awk '{print $2}')"
-          IDENTITY_NAME="$(echo "$LINE" | sed -n 's/.*\"\\(Developer ID Application:.*\\)\".*/\\1/p')"
+          IDENTITY_NAME="$(echo "$LINE" | awk -F '\"' '{print $2}')"
 
           if [ -z "$IDENTITY_HASH" ] || [ -z "$IDENTITY_NAME" ]; then
             echo "Failed to parse identity from line: $LINE"

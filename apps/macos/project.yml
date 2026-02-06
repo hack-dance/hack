@@ -15,11 +15,23 @@ targets:
     platform: macOS
     sources:
       - App
-    resources:
-      - path: App/BundledCLI
     configFiles:
       Debug: Config/Debug.xcconfig
       Release: Config/Release.xcconfig
+    postBuildScripts:
+      - name: Copy BundledCLI Resources
+        script: |
+          set -euo pipefail
+          SRC="${PROJECT_DIR}/App/BundledCLI"
+          DEST="${TARGET_BUILD_DIR}/${FULL_PRODUCT_NAME}/Contents/Resources/BundledCLI"
+
+          if [ ! -d "$SRC" ]; then
+            echo "Missing BundledCLI dir: $SRC"
+            exit 1
+          fi
+
+          mkdir -p "$DEST"
+          ditto "$SRC" "$DEST"
     settings:
       base:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

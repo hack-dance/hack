@@ -1,3 +1,7 @@
+## <small>1.5.5 (2026-02-06)</small>
+
+* fix(macos): copy BundledCLI into app bundle ([d0353f9](https://github.com/hack-dance/hack/commit/d0353f9))
+
 ## <small>1.5.4 (2026-02-06)</small>
 
 * fix(ci): bundle CLI before xcodegen ([ef1f0a0](https://github.com/hack-dance/hack/commit/ef1f0a0))

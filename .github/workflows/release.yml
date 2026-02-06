@@ -102,7 +102,7 @@ jobs:
             dist/release/hack-install.sh
 
   macos-app:
-    needs: create-release
+    needs: [create-release, build]
     permissions:
       contents: write
     uses: ./.github/workflows/release-macos-app.yml

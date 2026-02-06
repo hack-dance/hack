@@ -6,12 +6,17 @@ options:
 packages:
   HackDesktop:
     path: .
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle.git
+    from: 2.8.1
 targets:
   HackDesktop:
     type: application
     platform: macOS
     sources:
       - App
+    resources:
+      - path: App/BundledCLI
     configFiles:
       Debug: Config/Debug.xcconfig
       Release: Config/Release.xcconfig
@@ -24,3 +29,5 @@ targets:
     dependencies:
       - package: HackDesktop
         product: DashboardFeature
+      - package: Sparkle
+        product: Sparkle

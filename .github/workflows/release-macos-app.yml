@@ -29,6 +29,8 @@ on:
         required: true
       APPLE_TEAM_ID:
         required: true
+      SPARKLE_EDDSA_PRIVATE_KEY:
+        required: true
 
 env:
   APP_NAME: "Hack Desktop"
@@ -57,6 +59,26 @@ jobs:
       - name: Generate Xcode project
         working-directory: ${{ env.PROJECT_PATH }}
         run: xcodegen generate
+
+      - name: Resolve release metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag }}"
+          VERSION="${TAG#v}"
+          ARCH="$(uname -m)"
+          if [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; then
+            ARCH="x86_64"
+          elif [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then
+            ARCH="arm64"
+          else
+            echo "Unsupported architecture: $ARCH"
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "arch=$ARCH" >> "$GITHUB_OUTPUT"
 
       - name: Import certificate
         env:
@@ -87,6 +109,57 @@ jobs:
           security list-keychain -d user -s "$KEYCHAIN_PATH"
 
           echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
+
+      - name: Bundle CLI into app resources
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          ARCH: ${{ steps.meta.outputs.arch }}
+        run: |
+          set -euo pipefail
+          TARBALL="hack-$VERSION-darwin-$ARCH.tar.gz"
+
+          mkdir -p "$RUNNER_TEMP/cli"
+          gh release download "$RELEASE_TAG" -p "$TARBALL" --dir "$RUNNER_TEMP/cli"
+
+          mkdir -p "$RUNNER_TEMP/cli/extract"
+          tar -xzf "$RUNNER_TEMP/cli/$TARBALL" -C "$RUNNER_TEMP/cli/extract"
+
+          RELEASE_DIR="$RUNNER_TEMP/cli/extract/hack-$VERSION-release"
+          if [ ! -d "$RELEASE_DIR" ]; then
+            echo "Missing release dir: $RELEASE_DIR"
+            exit 1
+          fi
+
+          BUNDLE_DIR="apps/macos/App/BundledCLI"
+          mkdir -p "$BUNDLE_DIR"
+          rm -rf "$BUNDLE_DIR/hack" "$BUNDLE_DIR/assets" "$BUNDLE_DIR/binaries"
+
+          cp "$RELEASE_DIR/hack" "$BUNDLE_DIR/hack"
+          if [ -d "$RELEASE_DIR/assets" ]; then
+            cp -R "$RELEASE_DIR/assets" "$BUNDLE_DIR/assets"
+          fi
+          if [ -d "$RELEASE_DIR/binaries" ]; then
+            cp -R "$RELEASE_DIR/binaries" "$BUNDLE_DIR/binaries"
+          fi
+
+      - name: Codesign bundled CLI
+        env:
+          BUNDLED_HACK: apps/macos/App/BundledCLI/hack
+        run: |
+          set -euo pipefail
+          if [ ! -f "$BUNDLED_HACK" ]; then
+            echo "Missing bundled hack binary: $BUNDLED_HACK"
+            exit 1
+          fi
+
+          codesign --force --options runtime --timestamp \
+            --sign "Developer ID Application" \
+            --keychain "$KEYCHAIN_PATH" \
+            "$BUNDLED_HACK"
+
+          codesign -vvv "$BUNDLED_HACK"
 
       - name: Build and archive
         working-directory: ${{ env.PROJECT_PATH }}
@@ -203,6 +276,64 @@ jobs:
             "$RUNNER_TEMP/export/$APP_NAME.app" \
             "$RUNNER_TEMP/HackDesktop-$VERSION-macOS.zip"
 
+      - name: Generate Sparkle appcast
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/sparkle"
+          gh release download 2.8.1 -R sparkle-project/Sparkle -p "Sparkle-2.8.1.tar.xz" --dir "$RUNNER_TEMP/sparkle"
+          tar -xf "$RUNNER_TEMP/sparkle/Sparkle-2.8.1.tar.xz" -C "$RUNNER_TEMP/sparkle"
+
+          ZIP_PATH="$RUNNER_TEMP/HackDesktop-$VERSION-macOS.zip"
+          if [ ! -f "$ZIP_PATH" ]; then
+            echo "Missing ZIP: $ZIP_PATH"
+            exit 1
+          fi
+
+          SIGN_LINE="$(printf '%s' "$SPARKLE_EDDSA_PRIVATE_KEY" | "$RUNNER_TEMP/sparkle/bin/sign_update" --ed-key-file - "$ZIP_PATH")"
+          ED_SIGNATURE="$(echo "$SIGN_LINE" | sed -n 's/.*sparkle:edSignature=\"\\([^\"]*\\)\".*/\\1/p')"
+          LENGTH="$(echo "$SIGN_LINE" | sed -n 's/.*length=\"\\([0-9]*\\)\".*/\\1/p')"
+
+          if [ -z "$ED_SIGNATURE" ] || [ -z "$LENGTH" ]; then
+            echo "Failed to parse signature output: $SIGN_LINE"
+            exit 1
+          fi
+
+          PUB_DATE="$(date -u +"%a, %d %b %Y %H:%M:%S %z")"
+          DOWNLOAD_URL="https://github.com/hack-dance/hack/releases/download/$RELEASE_TAG/HackDesktop-$VERSION-macOS.zip"
+          NOTES_URL="https://github.com/hack-dance/hack/releases/tag/$RELEASE_TAG"
+
+          cat > "$RUNNER_TEMP/appcast.xml" << EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <rss version="2.0"
+            xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"
+            xmlns:dc="http://purl.org/dc/elements/1.1/">
+            <channel>
+              <title>Hack Desktop</title>
+              <link>https://github.com/hack-dance/hack</link>
+              <description>Hack Desktop updates</description>
+              <language>en</language>
+              <item>
+                <title>Version $VERSION</title>
+                <sparkle:releaseNotesLink>$NOTES_URL</sparkle:releaseNotesLink>
+                <pubDate>$PUB_DATE</pubDate>
+                <enclosure
+                  url="$DOWNLOAD_URL"
+                  length="$LENGTH"
+                  type="application/octet-stream"
+                  sparkle:version="$VERSION"
+                  sparkle:shortVersionString="$VERSION"
+                  sparkle:edSignature="$ED_SIGNATURE" />
+              </item>
+            </channel>
+          </rss>
+          EOF
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -210,6 +341,7 @@ jobs:
           path: |
             ${{ runner.temp }}/HackDesktop-*.dmg
             ${{ runner.temp }}/HackDesktop-*.zip
+            ${{ runner.temp }}/appcast.xml
 
       - name: Upload to release
         if: github.event_name == 'release' || inputs.tag != ''
@@ -221,6 +353,7 @@ jobs:
           gh release upload "$RELEASE_TAG" \
             "$RUNNER_TEMP/HackDesktop-$VERSION-macOS.dmg" \
             "$RUNNER_TEMP/HackDesktop-$VERSION-macOS.zip" \
+            "$RUNNER_TEMP/appcast.xml" \
             --clobber
 
       - name: Cleanup keychain

@@ -29,6 +29,7 @@ import { sshCommand } from "../commands/ssh.ts";
 import { theCommand } from "../commands/the.ts";
 import { ticketsCommand } from "../commands/tickets.ts";
 import { tuiCommand } from "../commands/tui.ts";
+import { updateCommand } from "../commands/update.ts";
 import { usageCommand } from "../commands/usage.ts";
 import { versionCommand } from "../commands/version.ts";
 import { xCommand } from "../commands/x.ts";
@@ -77,6 +78,7 @@ export const CLI_SPEC = defineCli({
     remoteCommand,
     internalCommand,
     xCommand,
+    updateCommand,
     versionCommand,
     helpCommand,
   ],

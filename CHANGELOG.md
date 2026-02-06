@@ -1,3 +1,7 @@
+## 1.5.0 (2026-02-06)
+
+* feat(update): add CLI + macOS updaters ([39f7334](https://github.com/hack-dance/hack/commit/39f7334))
+
 ## 1.4.0 (2026-02-05)
 
 * chore(changelog): reset 1.4.x entries ([f45a0b7](https://github.com/hack-dance/hack/commit/f45a0b7))

@@ -1,3 +1,7 @@
+## <small>1.5.9 (2026-02-06)</small>
+
+* fix(macos): codesign bundled CLI with JIT entitlements ([5e6326f](https://github.com/hack-dance/hack/commit/5e6326f))
+
 ## <small>1.5.8 (2026-02-06)</small>
 
 * fix(tickets): allow passthrough flags on hack tickets ([e7a3562](https://github.com/hack-dance/hack/commit/e7a3562))

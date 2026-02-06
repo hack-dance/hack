@@ -1,6 +1,6 @@
 {
   "name": "hack-cli",
-  "version": "1.5.8",
+  "version": "1.5.9",
   "module": "index.ts",
   "type": "module",
   "bin": {

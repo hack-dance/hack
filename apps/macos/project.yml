@@ -14,7 +14,13 @@ targets:
     type: application
     platform: macOS
     sources:
-      - App
+      - path: App
+        # BundledCLI is populated dynamically by CI (and sometimes locally), and we copy it in a
+        # post-build script. Excluding it prevents stale file references in the generated xcodeproj
+        # (e.g. lstat failures when a previously-generated project referenced a file that no longer exists).
+        excludes:
+          - BundledCLI
+          - BundledCLI/**
     configFiles:
       Debug: Config/Debug.xcconfig
       Release: Config/Release.xcconfig

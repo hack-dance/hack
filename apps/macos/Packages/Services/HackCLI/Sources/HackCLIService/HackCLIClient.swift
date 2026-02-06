@@ -34,12 +34,12 @@ public actor HackCLIClient {
 
   public func daemonStatus() async throws -> DaemonStatus {
     let result = try await run(["daemon", "status", "--json"], allowNonZeroExit: true)
-    return try decode(DaemonStatus.self, from: result.stdout)
+    return try decodeJsonOrThrow(DaemonStatus.self, result: result)
   }
 
   public func fetchGlobalStatus() async throws -> GlobalStatusResponse {
     let result = try await run(["global", "status", "--json"], allowNonZeroExit: true)
-    return try decode(GlobalStatusResponse.self, from: result.stdout)
+    return try decodeJsonOrThrow(GlobalStatusResponse.self, result: result)
   }
 
   public func startDaemon() async throws {
@@ -268,6 +268,25 @@ public actor HackCLIClient {
     return CLIResult(stdout: stdout, stderr: stderr, exitCode: exitCode)
   }
 
+  private func decodeJsonOrThrow<T: Decodable>(_ type: T.Type, result: CLIResult) throws -> T {
+    let trimmedStdout = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+    let trimmedStderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    // When callers allow non-zero exit, we still want a useful error (stderr) instead of "empty output".
+    if trimmedStdout.isEmpty {
+      throw HackCLIError.commandFailed(exitCode: result.exitCode, stderr: trimmedStderr)
+    }
+
+    do {
+      return try decode(type, from: trimmedStdout)
+    } catch {
+      // If hack printed logs or other output, surface stderr as the actionable hint.
+      if !trimmedStderr.isEmpty {
+        throw HackCLIError.commandFailed(exitCode: result.exitCode, stderr: trimmedStderr)
+      }
+      throw error
+    }
+  }
 }
 
 private struct CLIResult {

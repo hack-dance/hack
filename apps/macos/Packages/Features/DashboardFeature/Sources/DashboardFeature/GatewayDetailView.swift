@@ -11,6 +11,9 @@ struct GatewayDetailView: View {
       ScrollView {
         VStack(alignment: .leading, spacing: 20) {
           header
+          if shouldShowSetupGuidance {
+            setupGuidance
+          }
           overviewCard
           exposuresCard
           tokensCard
@@ -22,6 +25,47 @@ struct GatewayDetailView: View {
         GatewayExposureDetailView(exposure: exposure)
       }
     }
+  }
+
+  private var shouldShowSetupGuidance: Bool {
+    // If gateway/global status isn't available yet (fresh machine), show quick-start guidance here too.
+    if model.globalStatus == nil { return true }
+    if model.gatewaySummaryState == nil { return true }
+
+    // If LAN is blocked due to loopback bind, it's the most common "why is this blocked" confusion.
+    if let lan = model.gatewayExposures.first(where: { $0.id == "lan" }),
+       lan.resolvedState == .blocked,
+       (lan.detail ?? "").lowercased().contains("loopback") {
+      return true
+    }
+
+    return false
+  }
+
+  private var setupGuidance: some View {
+    SetupGuidanceCard(
+      title: "Gateway setup",
+      subtitle: "Gateway is optional. If you want LAN access or remote gateway features, run these once.",
+      steps: [
+        SetupStep(
+          id: "global-install",
+          label: "Install global services",
+          command: "hack global install",
+          detail: "Sets up the global runtime (Caddy, logging, networks)."
+        ),
+        SetupStep(
+          id: "daemon-start",
+          label: "Start the daemon",
+          command: "hack daemon start"
+        ),
+        SetupStep(
+          id: "gateway-setup",
+          label: "Guided gateway setup",
+          command: "hack gateway setup",
+          detail: "Enables gateway and helps you generate a token. For LAN exposure, make sure the gateway bind isn't 127.0.0.1."
+        )
+      ]
+    )
   }
 
   private var header: some View {

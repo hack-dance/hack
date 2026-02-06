@@ -12,6 +12,9 @@ struct RuntimeDetailView: View {
     ScrollView {
       VStack(alignment: .leading, spacing: 20) {
         header
+        if shouldShowSetupGuidance {
+          setupGuidance
+        }
         statusSummaryBar
         daemonCard
         runtimeCard
@@ -19,6 +22,40 @@ struct RuntimeDetailView: View {
       }
       .padding(16)
     }
+  }
+
+  private var shouldShowSetupGuidance: Bool {
+    // Fresh machines commonly need global install + CA trust. If we can't fetch global status, guide them.
+    if model.globalStatus == nil { return true }
+    if daemonIsRunning == false { return true }
+    return false
+  }
+
+  private var setupGuidance: some View {
+    SetupGuidanceCard(
+      title: "First-time setup",
+      subtitle: "If this is a fresh machine, run these once. Some steps will prompt for sudo in Terminal.",
+      steps: [
+        SetupStep(
+          id: "global-install",
+          label: "Install global services",
+          command: "hack global install",
+          detail: "Bootstraps ~/.hack, starts Caddy + logging, and prepares Docker networks."
+        ),
+        SetupStep(
+          id: "global-trust",
+          label: "Trust local HTTPS certs (macOS)",
+          command: "hack global trust",
+          detail: "Adds the local CA to Keychain so https://*.hack is trusted."
+        ),
+        SetupStep(
+          id: "daemon-start",
+          label: "Start the daemon",
+          command: "hack daemon start",
+          detail: "Required for the app to show runtime + global status."
+        )
+      ]
+    )
   }
 
   private var statusSummaryBar: some View {
@@ -203,26 +240,32 @@ struct RuntimeDetailView: View {
             Text("Status unavailable")
               .font(.mono(.subheadline, weight: .medium))
           }
-          Text("Global services status requires the daemon to be running. These services include Caddy (reverse proxy), logging infrastructure, and Docker networks.")
+          Text("Global services status is provided by `hack global status`. If you haven't set up this machine yet, run `hack global install` (and then `hack global trust` on macOS).")
             .font(.mono(.caption))
             .foregroundStyle(.secondary)
-          if canStartDaemon {
+          HStack(spacing: 10) {
             Button {
-              Task { await model.startDaemon() }
+              TerminalIntegration.copyToClipboard("hack global install")
             } label: {
-              Label("Start hackd", systemImage: "play.fill")
+              Label("Copy install", systemImage: "doc.on.doc")
+            }
+            .adaptiveToolbarButton()
+
+            Button {
+              TerminalIntegration.openTerminalWithCommand("hack global install")
+            } label: {
+              Label("Open Terminal", systemImage: "terminal")
             }
             .adaptiveToolbarButtonProminent()
-            .padding(.top, 4)
-          } else {
+
             Button {
               Task { await model.refresh() }
             } label: {
               Label("Refresh", systemImage: "arrow.clockwise")
             }
             .adaptiveToolbarButton()
-            .padding(.top, 4)
           }
+          .padding(.top, 4)
         }
       }
     }

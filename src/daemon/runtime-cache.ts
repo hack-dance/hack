@@ -1,3 +1,6 @@
+import { resolve } from "node:path";
+import { PROJECT_COMPOSE_FILENAME } from "../constants.ts";
+import { resolveProjectMeta } from "../lib/project-meta.ts";
 import {
   buildProjectViews,
   serializeProjectView,
@@ -35,6 +38,7 @@ export type ProjectsPayload = {
   readonly filter: string | null;
   readonly include_global: boolean;
   readonly include_unregistered: boolean;
+  readonly include_meta: boolean;
   readonly runtime_ok: boolean;
   readonly runtime_error: string | null;
   readonly runtime_checked_at: string | null;
@@ -70,6 +74,7 @@ export interface RuntimeCache {
     readonly filter: string | null;
     readonly includeGlobal: boolean;
     readonly includeUnregistered: boolean;
+    readonly includeMeta: boolean;
   }): Promise<ProjectsPayload>;
   getPsPayload(opts: {
     readonly composeProject: string;
@@ -180,10 +185,12 @@ export function createRuntimeCache(opts: {
     filter,
     includeGlobal,
     includeUnregistered,
+    includeMeta,
   }: {
     readonly filter: string | null;
     readonly includeGlobal: boolean;
     readonly includeUnregistered: boolean;
+    readonly includeMeta: boolean;
   }): Promise<ProjectsPayload> => {
     if (!snapshot) {
       await refresh({ reason: "projects" });
@@ -202,18 +209,45 @@ export function createRuntimeCache(opts: {
     });
 
     const runtimeMeta = serializeRuntimeHealth({ health });
+
+    const registryByName = new Map(
+      registry.projects.map((p) => [p.name, p] as const)
+    );
+    const metas = includeMeta
+      ? await Promise.all(
+          views.map(async (view) => {
+            if (view.kind !== "registered") {
+              return null;
+            }
+            const reg = registryByName.get(view.name) ?? null;
+            if (!reg) {
+              return null;
+            }
+            return await resolveProjectMeta({
+              projectName: reg.name,
+              repoRoot: reg.repoRoot,
+              projectDir: reg.projectDir,
+              composeFile: resolve(reg.projectDir, PROJECT_COMPOSE_FILENAME),
+            });
+          })
+        )
+      : [];
     return {
       generated_at: new Date().toISOString(),
       filter,
       include_global: includeGlobal,
       include_unregistered: includeUnregistered,
+      include_meta: includeMeta,
       runtime_ok: runtimeMeta.ok,
       runtime_error: runtimeMeta.error,
       runtime_checked_at: runtimeMeta.checkedAt,
       runtime_last_ok_at: runtimeMeta.lastOkAt,
       runtime_reset_at: runtimeMeta.lastResetAt,
       runtime_reset_count: runtimeMeta.resetCount,
-      projects: views.map(serializeProjectView),
+      projects: views.map((view, i) => ({
+        ...serializeProjectView(view),
+        ...(includeMeta ? { meta: metas[i] ?? null } : {}),
+      })),
     };
   };
 

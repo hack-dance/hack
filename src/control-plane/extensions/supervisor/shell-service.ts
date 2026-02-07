@@ -91,89 +91,54 @@ export function createShellService(opts?: {
 
   const createShell = (input: ShellCreateInput): ShellCreateResult => {
     const shellId = randomUUID();
-    const shellRaw = (input.shell ?? process.env.SHELL ?? "/bin/bash").trim();
-    const shell = shellRaw.length > 0 ? shellRaw : "/bin/bash";
-    const cwd =
-      input.cwd && input.cwd.trim().length > 0 ? input.cwd : input.projectRoot;
+    const shell = resolveShellCommand({ input });
+    const cwd = resolveShellCwd({ input });
     const cols = normalizeDimension(input.cols, DEFAULT_COLS);
     const rows = normalizeDimension(input.rows, DEFAULT_ROWS);
     const createdAt = new Date().toISOString();
     const listeners = new Set<ShellListener>();
 
-    let terminal: Bun.Terminal;
-    try {
-      terminal = new Bun.Terminal({
-        cols,
-        rows,
-        data: (_term, data) => {
-          for (const listener of listeners) {
-            listener.onData(data);
-          }
-        },
-        exit: (_term, exitCode) => {
-          if (exitCode !== 0) {
-            logger.warn({ message: `Shell PTY closed with code ${exitCode}` });
-          }
-        },
-      });
-      terminal.setRawMode(true);
-    } catch (error: unknown) {
-      const message =
-        error instanceof Error ? error.message : "Failed to create PTY";
-      return { ok: false, error: message };
+    const terminalResult = createShellTerminal({
+      cols,
+      rows,
+      listeners,
+      logger,
+    });
+    if (!terminalResult.ok) {
+      return { ok: false, error: terminalResult.error };
     }
 
-    let proc: ReturnType<typeof Bun.spawn>;
-    try {
-      proc = Bun.spawn([shell], {
-        cwd,
-        env: buildShellEnv({ env: input.env }),
-        terminal,
-      });
-    } catch (error: unknown) {
-      const message =
-        error instanceof Error ? error.message : "Failed to start shell";
-      terminal.close();
-      return { ok: false, error: message };
+    const procResult = spawnShellProcess({
+      shell,
+      cwd,
+      env: input.env,
+      terminal: terminalResult.terminal,
+    });
+    if (!procResult.ok) {
+      terminalResult.terminal.close();
+      return { ok: false, error: procResult.error };
     }
 
-    const meta: ShellMeta = {
+    const meta = buildShellMeta({
+      input,
       shellId,
-      status: "running",
       createdAt,
-      updatedAt: createdAt,
-      ...(input.projectId ? { projectId: input.projectId } : {}),
-      ...(input.projectName ? { projectName: input.projectName } : {}),
       cwd,
       shell,
       cols,
       rows,
-      ...(Number.isFinite(proc.pid) ? { pid: proc.pid } : {}),
-    };
+      pid: procResult.proc.pid,
+    });
 
     const session: ShellSession = {
       meta,
-      terminal,
-      proc,
+      terminal: terminalResult.terminal,
+      proc: procResult.proc,
       listeners,
     };
     shells.set(shellId, session);
 
-    proc.exited
-      .then((exitCode) => {
-        handleShellExit({
-          shells,
-          session,
-          exitCode,
-        });
-      })
-      .catch(() => {
-        handleShellExit({
-          shells,
-          session,
-          exitCode: 1,
-        });
-      });
+    attachShellExitHandlers({ shells, session });
 
     return { ok: true, shell: meta };
   };
@@ -254,6 +219,128 @@ export function createShellService(opts?: {
     attachShell,
     closeShell,
   };
+}
+
+function resolveShellCommand(opts: {
+  readonly input: ShellCreateInput;
+}): string {
+  const shellRaw = (
+    opts.input.shell ??
+    process.env.SHELL ??
+    "/bin/bash"
+  ).trim();
+  return shellRaw.length > 0 ? shellRaw : "/bin/bash";
+}
+
+function resolveShellCwd(opts: { readonly input: ShellCreateInput }): string {
+  const raw = (opts.input.cwd ?? "").trim();
+  return raw.length > 0 ? raw : opts.input.projectRoot;
+}
+
+type TerminalCreateResult =
+  | { readonly ok: true; readonly terminal: Bun.Terminal }
+  | { readonly ok: false; readonly error: string };
+
+function createShellTerminal(opts: {
+  readonly cols: number;
+  readonly rows: number;
+  readonly listeners: Set<ShellListener>;
+  readonly logger: Logger;
+}): TerminalCreateResult {
+  try {
+    const terminal = new Bun.Terminal({
+      cols: opts.cols,
+      rows: opts.rows,
+      data: (_term, data) => {
+        for (const listener of opts.listeners) {
+          listener.onData(data);
+        }
+      },
+      exit: (_term, exitCode) => {
+        if (exitCode !== 0) {
+          opts.logger.warn({
+            message: `Shell PTY closed with code ${exitCode}`,
+          });
+        }
+      },
+    });
+    terminal.setRawMode(true);
+    return { ok: true, terminal };
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error ? error.message : "Failed to create PTY";
+    return { ok: false, error: message };
+  }
+}
+
+type SpawnShellResult =
+  | { readonly ok: true; readonly proc: ReturnType<typeof Bun.spawn> }
+  | { readonly ok: false; readonly error: string };
+
+function spawnShellProcess(opts: {
+  readonly shell: string;
+  readonly cwd: string;
+  readonly env: Record<string, string> | undefined;
+  readonly terminal: Bun.Terminal;
+}): SpawnShellResult {
+  try {
+    const proc = Bun.spawn([opts.shell], {
+      cwd: opts.cwd,
+      env: buildShellEnv({ env: opts.env }),
+      terminal: opts.terminal,
+    });
+    return { ok: true, proc };
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error ? error.message : "Failed to start shell";
+    return { ok: false, error: message };
+  }
+}
+
+function buildShellMeta(opts: {
+  readonly input: ShellCreateInput;
+  readonly shellId: string;
+  readonly createdAt: string;
+  readonly cwd: string;
+  readonly shell: string;
+  readonly cols: number;
+  readonly rows: number;
+  readonly pid: number;
+}): ShellMeta {
+  return {
+    shellId: opts.shellId,
+    status: "running",
+    createdAt: opts.createdAt,
+    updatedAt: opts.createdAt,
+    ...(opts.input.projectId ? { projectId: opts.input.projectId } : {}),
+    ...(opts.input.projectName ? { projectName: opts.input.projectName } : {}),
+    cwd: opts.cwd,
+    shell: opts.shell,
+    cols: opts.cols,
+    rows: opts.rows,
+    ...(Number.isFinite(opts.pid) ? { pid: opts.pid } : {}),
+  };
+}
+
+function attachShellExitHandlers(opts: {
+  readonly shells: Map<string, ShellSession>;
+  readonly session: ShellSession;
+}): void {
+  opts.session.proc.exited
+    .then((exitCode) => {
+      handleShellExit({
+        shells: opts.shells,
+        session: opts.session,
+        exitCode,
+      });
+    })
+    .catch(() => {
+      handleShellExit({
+        shells: opts.shells,
+        session: opts.session,
+        exitCode: 1,
+      });
+    });
 }
 
 function normalizeDimension(

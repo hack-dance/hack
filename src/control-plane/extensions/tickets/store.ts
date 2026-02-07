@@ -186,88 +186,7 @@ export function createTicketsStore(opts: {
     const tickets = new Map<string, TicketSummary>();
 
     for (const event of opts.events) {
-      if (event.type === "ticket.created") {
-        const title =
-          typeof event.payload.title === "string" ? event.payload.title : "";
-        const body =
-          typeof event.payload.body === "string"
-            ? event.payload.body
-            : undefined;
-        const dependsOn = parseDependencyList({
-          value: event.payload.dependsOn,
-        });
-        const blocks = parseDependencyList({ value: event.payload.blocks });
-
-        tickets.set(event.ticketId, {
-          ticketId: event.ticketId,
-          title,
-          body,
-          status: "open",
-          createdAt: event.tsIso,
-          updatedAt: event.tsIso,
-          dependsOn,
-          blocks,
-          ...(event.projectId ? { projectId: event.projectId } : {}),
-          ...(event.projectName ? { projectName: event.projectName } : {}),
-        });
-        continue;
-      }
-
-      if (event.type === "ticket.status_changed") {
-        const current = tickets.get(event.ticketId);
-        if (!current) {
-          continue;
-        }
-
-        const next =
-          typeof event.payload.status === "string" ? event.payload.status : "";
-        if (
-          next === "open" ||
-          next === "in_progress" ||
-          next === "blocked" ||
-          next === "done"
-        ) {
-          tickets.set(event.ticketId, {
-            ...current,
-            status: next,
-            updatedAt: event.tsIso,
-          });
-        }
-        continue;
-      }
-
-      if (event.type === "ticket.updated") {
-        const current = tickets.get(event.ticketId);
-        if (!current) {
-          continue;
-        }
-
-        const title =
-          typeof event.payload.title === "string"
-            ? event.payload.title
-            : undefined;
-        const body =
-          typeof event.payload.body === "string"
-            ? event.payload.body
-            : undefined;
-        const dependsOn = readDependencyUpdate({
-          payload: event.payload,
-          key: "dependsOn",
-        });
-        const blocks = readDependencyUpdate({
-          payload: event.payload,
-          key: "blocks",
-        });
-
-        tickets.set(event.ticketId, {
-          ...current,
-          ...(title ? { title } : {}),
-          ...(body !== undefined ? { body } : {}),
-          ...(dependsOn !== null ? { dependsOn } : {}),
-          ...(blocks !== null ? { blocks } : {}),
-          updatedAt: event.tsIso,
-        });
-      }
+      applyTicketEvent({ tickets, event });
     }
 
     return applyDerivedBlocks(tickets);
@@ -445,6 +364,142 @@ export function createTicketsStore(opts: {
 
     setStatus,
   };
+}
+
+function applyTicketEvent(opts: {
+  readonly tickets: Map<string, TicketSummary>;
+  readonly event: TicketEvent;
+}): void {
+  switch (opts.event.type) {
+    case "ticket.created": {
+      applyTicketCreatedEvent({
+        tickets: opts.tickets,
+        event: opts.event,
+      });
+      break;
+    }
+    case "ticket.status_changed": {
+      applyTicketStatusChangedEvent({
+        tickets: opts.tickets,
+        event: opts.event,
+      });
+      break;
+    }
+    case "ticket.updated": {
+      applyTicketUpdatedEvent({
+        tickets: opts.tickets,
+        event: opts.event,
+      });
+      break;
+    }
+    default: {
+      break;
+    }
+  }
+}
+
+function applyTicketCreatedEvent(opts: {
+  readonly tickets: Map<string, TicketSummary>;
+  readonly event: TicketEvent;
+}): void {
+  const title =
+    typeof opts.event.payload.title === "string"
+      ? opts.event.payload.title
+      : "";
+  const body =
+    typeof opts.event.payload.body === "string"
+      ? opts.event.payload.body
+      : undefined;
+  const dependsOn = parseDependencyList({
+    value: opts.event.payload.dependsOn,
+  });
+  const blocks = parseDependencyList({
+    value: opts.event.payload.blocks,
+  });
+
+  opts.tickets.set(opts.event.ticketId, {
+    ticketId: opts.event.ticketId,
+    title,
+    body,
+    status: "open",
+    createdAt: opts.event.tsIso,
+    updatedAt: opts.event.tsIso,
+    dependsOn,
+    blocks,
+    ...(opts.event.projectId ? { projectId: opts.event.projectId } : {}),
+    ...(opts.event.projectName ? { projectName: opts.event.projectName } : {}),
+  });
+}
+
+function applyTicketStatusChangedEvent(opts: {
+  readonly tickets: Map<string, TicketSummary>;
+  readonly event: TicketEvent;
+}): void {
+  const current = opts.tickets.get(opts.event.ticketId);
+  if (!current) {
+    return;
+  }
+
+  const status = parseTicketStatus({ value: opts.event.payload.status });
+  if (!status) {
+    return;
+  }
+
+  opts.tickets.set(opts.event.ticketId, {
+    ...current,
+    status,
+    updatedAt: opts.event.tsIso,
+  });
+}
+
+function applyTicketUpdatedEvent(opts: {
+  readonly tickets: Map<string, TicketSummary>;
+  readonly event: TicketEvent;
+}): void {
+  const current = opts.tickets.get(opts.event.ticketId);
+  if (!current) {
+    return;
+  }
+
+  const title =
+    typeof opts.event.payload.title === "string"
+      ? opts.event.payload.title
+      : undefined;
+  const body =
+    typeof opts.event.payload.body === "string"
+      ? opts.event.payload.body
+      : undefined;
+  const dependsOn = readDependencyUpdate({
+    payload: opts.event.payload,
+    key: "dependsOn",
+  });
+  const blocks = readDependencyUpdate({
+    payload: opts.event.payload,
+    key: "blocks",
+  });
+
+  opts.tickets.set(opts.event.ticketId, {
+    ...current,
+    ...(title ? { title } : {}),
+    ...(body !== undefined ? { body } : {}),
+    ...(dependsOn !== null ? { dependsOn } : {}),
+    ...(blocks !== null ? { blocks } : {}),
+    updatedAt: opts.event.tsIso,
+  });
+}
+
+function parseTicketStatus(opts: {
+  readonly value: unknown;
+}): TicketStatus | null {
+  if (
+    opts.value === "open" ||
+    opts.value === "in_progress" ||
+    opts.value === "blocked" ||
+    opts.value === "done"
+  ) {
+    return opts.value;
+  }
+  return null;
 }
 
 function parseDependencyList(opts: { readonly value: unknown }): string[] {

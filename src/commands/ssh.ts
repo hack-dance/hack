@@ -94,91 +94,19 @@ async function handleSsh(opts: {
 
   p.intro("Remote Access");
 
-  // Step 1: Determine connection method
-  let method: ConnectionMethod;
-  let hostname: string;
-
-  if (args.options.direct || hostOverride) {
-    method = "direct";
-    hostname = hostOverride ?? "";
-
-    if (!hostname) {
-      const hostInput = await p.text({
-        message: "SSH host (hostname or IP)",
-        placeholder: "example.com or 192.168.1.100",
-        validate: (value) => {
-          if (!value?.trim()) {
-            return "Host is required";
-          }
-          return undefined;
-        },
-      });
-
-      if (p.isCancel(hostInput)) {
-        p.outro("Cancelled");
-        return 0;
-      }
-
-      hostname = hostInput;
-    }
-  } else if (args.options.tailscale) {
-    method = "tailscale";
-    const result = await setupTailscale();
-    if (!result.ok) {
-      return 1;
-    }
-    hostname = hostOverride ?? result.hostname;
-  } else {
-    // Interactive: ask which method
-    const selected = await p.select({
-      message: "Connection method",
-      options: [
-        {
-          value: "tailscale" as const,
-          label: "Tailscale",
-          hint: "secure, no port forwarding",
-        },
-        {
-          value: "direct" as const,
-          label: "Direct SSH",
-          hint: "traditional SSH",
-        },
-      ],
-    });
-
-    if (p.isCancel(selected)) {
+  const connection = await resolveConnection({
+    direct: args.options.direct === true,
+    tailscale: args.options.tailscale === true,
+    hostOverride,
+  });
+  if (!connection.ok) {
+    if (connection.reason === "cancelled") {
       p.outro("Cancelled");
       return 0;
     }
-
-    method = selected;
-
-    if (method === "tailscale") {
-      const result = await setupTailscale();
-      if (!result.ok) {
-        return 1;
-      }
-      hostname = result.hostname;
-    } else {
-      const hostInput = await p.text({
-        message: "SSH host (hostname or IP)",
-        placeholder: "example.com or 192.168.1.100",
-        validate: (value) => {
-          if (!value?.trim()) {
-            return "Host is required";
-          }
-          return undefined;
-        },
-      });
-
-      if (p.isCancel(hostInput)) {
-        p.outro("Cancelled");
-        return 0;
-      }
-
-      hostname = hostInput;
-    }
+    return 1;
   }
+  const { method, hostname } = connection;
 
   // Step 2: Build and show SSH command
   const sshCommand =
@@ -228,6 +156,120 @@ async function handleSsh(opts: {
     });
   }
 
+  const sessionName = await resolveSessionNameToConnect({ sessions });
+  if (!sessionName) {
+    p.outro("Copy the SSH command above to connect from other devices");
+    return 0;
+  }
+
+  return await connectToSession({ hostname, user, port, sessionName });
+}
+
+async function resolveConnection(opts: {
+  readonly direct: boolean;
+  readonly tailscale: boolean;
+  readonly hostOverride: string | undefined;
+}): Promise<
+  | {
+      readonly ok: true;
+      readonly method: ConnectionMethod;
+      readonly hostname: string;
+    }
+  | { readonly ok: false; readonly reason: "cancelled" | "error" }
+> {
+  if (opts.direct || opts.hostOverride) {
+    const hostname = await resolveDirectHost({
+      hostOverride: opts.hostOverride,
+    });
+    if (!hostname) {
+      return { ok: false, reason: "cancelled" };
+    }
+    return { ok: true, method: "direct", hostname };
+  }
+
+  if (opts.tailscale) {
+    const result = await setupTailscale();
+    if (!result.ok) {
+      return { ok: false, reason: "error" };
+    }
+    return {
+      ok: true,
+      method: "tailscale",
+      hostname: opts.hostOverride ?? result.hostname,
+    };
+  }
+
+  const method = await selectConnectionMethod();
+  if (!method) {
+    return { ok: false, reason: "cancelled" };
+  }
+
+  if (method === "tailscale") {
+    const result = await setupTailscale();
+    if (!result.ok) {
+      return { ok: false, reason: "error" };
+    }
+    return { ok: true, method, hostname: result.hostname };
+  }
+
+  const hostname = await resolveDirectHost({ hostOverride: opts.hostOverride });
+  if (!hostname) {
+    return { ok: false, reason: "cancelled" };
+  }
+  return { ok: true, method, hostname };
+}
+
+async function selectConnectionMethod(): Promise<ConnectionMethod | null> {
+  const selected = await p.select({
+    message: "Connection method",
+    options: [
+      {
+        value: "tailscale" as const,
+        label: "Tailscale",
+        hint: "secure, no port forwarding",
+      },
+      {
+        value: "direct" as const,
+        label: "Direct SSH",
+        hint: "traditional SSH",
+      },
+    ],
+  });
+  if (p.isCancel(selected)) {
+    return null;
+  }
+  return selected;
+}
+
+async function resolveDirectHost(opts: {
+  readonly hostOverride: string | undefined;
+}): Promise<string | null> {
+  const hostname = (opts.hostOverride ?? "").trim();
+  if (hostname.length > 0) {
+    return hostname;
+  }
+
+  const hostInput = await p.text({
+    message: "SSH host (hostname or IP)",
+    placeholder: "example.com or 192.168.1.100",
+    validate: (value) => {
+      if (!value?.trim()) {
+        return "Host is required";
+      }
+      return undefined;
+    },
+  });
+
+  if (p.isCancel(hostInput)) {
+    return null;
+  }
+
+  return hostInput.trim();
+}
+
+async function resolveSessionNameToConnect(opts: {
+  readonly sessions: readonly TmuxSession[];
+}): Promise<string | null> {
   const action = await p.select({
     message: "What would you like to do?",
     options: [
@@ -245,13 +287,11 @@ async function handleSsh(opts: {
   });
 
   if (p.isCancel(action) || action === "done") {
-    p.outro("Copy the SSH command above to connect from other devices");
-    return 0;
+    return null;
   }
 
-  // Pick or create session
   const sessionOptions = [
-    ...sessions.map((s) => ({
+    ...opts.sessions.map((s) => ({
       value: s.name,
       label: s.name,
       hint: s.attached ? "attached" : undefined,
@@ -265,34 +305,30 @@ async function handleSsh(opts: {
   });
 
   if (p.isCancel(selectedSession)) {
-    p.outro("Cancelled");
-    return 0;
+    return null;
   }
 
-  let sessionName = selectedSession;
-
-  if (selectedSession === "__new__") {
-    const name = await p.text({
-      message: "Session name",
-      placeholder: "main",
-      defaultValue: "main",
-      validate: (value) => {
-        if (value && !SESSION_NAME_PATTERN.test(value)) {
-          return "Only letters, numbers, dashes, underscores, or dots";
-        }
-        return undefined;
-      },
-    });
-
-    if (p.isCancel(name)) {
-      p.outro("Cancelled");
-      return 0;
-    }
-
-    sessionName = name || "main";
+  if (selectedSession !== "__new__") {
+    return selectedSession;
   }
 
-  return await connectToSession({ hostname, user, port, sessionName });
+  const name = await p.text({
+    message: "Session name",
+    placeholder: "main",
+    defaultValue: "main",
+    validate: (value) => {
+      if (value && !SESSION_NAME_PATTERN.test(value)) {
+        return "Only letters, numbers, dashes, underscores, or dots";
+      }
+      return undefined;
+    },
+  });
+
+  if (p.isCancel(name)) {
+    return null;
+  }
+
+  return (name || "main").trim();
 }
 
 /**

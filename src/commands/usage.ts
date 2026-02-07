@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import type { CommandHandlerFor } from "../cli/command.ts";
+import type { CommandArgs, CommandHandlerFor } from "../cli/command.ts";
 import {
   CliUsageError,
   defineCommand,
@@ -79,6 +79,8 @@ const spec = defineCommand({
   expandInRootHelp: true,
 } as const);
 
+type UsageArgs = CommandArgs<typeof options, typeof positionals>;
+
 const handleUsage: CommandHandlerFor<typeof spec> = async ({
   args,
 }): Promise<number> => {
@@ -86,22 +88,20 @@ const handleUsage: CommandHandlerFor<typeof spec> = async ({
     throw new CliUsageError("--json is not supported with --watch.");
   }
 
-  const filter =
-    typeof args.options.project === "string"
-      ? sanitizeProjectSlug(args.options.project)
-      : null;
+  const filter = resolveUsageFilter({ projectOpt: args.options.project });
+  const includeGlobal = args.options.includeGlobal === true;
+  const includeHost = args.options.noHost !== true;
   const controlPlane = await readControlPlaneConfig({});
   const usageConfig = controlPlane.config.usage;
   const watchIntervalMs = resolveIntervalMs({
     cliValue: args.options.interval,
     configValue: usageConfig.watchIntervalMs,
   });
-  const includeHost = args.options.noHost !== true;
 
   if (args.options.watch) {
     await runUsageWatch({
       filter,
-      includeGlobal: args.options.includeGlobal === true,
+      includeGlobal,
       includeHost,
       intervalMs: watchIntervalMs,
       historySize: usageConfig.historySize,
@@ -109,209 +109,12 @@ const handleUsage: CommandHandlerFor<typeof spec> = async ({
     return 0;
   }
 
-  const runtimeResult = await readRuntimeProjects({
-    includeGlobal: args.options.includeGlobal === true,
+  return await runUsageOnce({
+    args,
+    filter,
+    includeGlobal,
+    includeHost,
   });
-  const runtime = runtimeResult.ok ? runtimeResult.runtime : [];
-  const filtered = filter
-    ? runtime.filter((project) => project.project === filter)
-    : runtime;
-
-  const index = buildContainerIndex({ projects: filtered });
-  const hostReport = includeHost
-    ? await readHostUsage()
-    : { rows: [], total: null };
-  const stats =
-    index.containerIds.length === 0
-      ? { ok: true as const, samples: [] }
-      : await readDockerStats({ containerIds: index.containerIds });
-  if (!runtimeResult.ok) {
-    if (args.options.json === true) {
-      process.stdout.write(
-        `${JSON.stringify(
-          {
-            projects: [],
-            total: null,
-            host: hostReport.rows,
-            host_total: hostReport.total,
-            runtime_ok: false,
-            runtime_error: runtimeResult.error,
-          },
-          null,
-          2
-        )}\n`
-      );
-      return 1;
-    }
-    await display.panel({
-      title: "Runtime unavailable",
-      tone: "error",
-      lines: [runtimeResult.error ?? "Docker runtime is not responding."],
-    });
-    if (hostReport.rows.length > 0) {
-      await display.table({
-        columns: ["Host", "CPU", "Memory", "PIDs", "Processes"],
-        rows: hostReport.rows.map((row) => [
-          row.name,
-          formatPercent({ percent: row.cpuPercent }),
-          formatBytesMaybe({ bytes: row.memBytes }),
-          row.pids.length > 0 ? row.pids.join(",") : "n/a",
-          String(row.processes),
-        ]),
-      });
-    }
-    return 1;
-  }
-
-  if (!stats.ok) {
-    if (args.options.json === true) {
-      process.stdout.write(
-        `${JSON.stringify(
-          {
-            projects: [],
-            total: null,
-            host: hostReport.rows,
-            host_total: hostReport.total,
-            error: stats.error,
-            runtime_ok: runtimeResult.ok,
-            runtime_error: runtimeResult.error,
-          },
-          null,
-          2
-        )}\n`
-      );
-      return 1;
-    }
-    await display.panel({
-      title: "Usage",
-      tone: "error",
-      lines: [stats.error],
-    });
-    if (hostReport.rows.length > 0) {
-      await display.table({
-        columns: ["Host", "CPU", "Memory", "PIDs", "Processes"],
-        rows: hostReport.rows.map((row) => [
-          row.name,
-          formatPercent({ percent: row.cpuPercent }),
-          formatBytesMaybe({ bytes: row.memBytes }),
-          row.pids.length > 0 ? row.pids.join(",") : "n/a",
-          String(row.processes),
-        ]),
-      });
-    }
-    return 1;
-  }
-
-  const report = buildUsageReport({
-    projects: filtered,
-    samples: stats.samples,
-    index,
-  });
-  if (report.projects.length === 0 && hostReport.rows.length === 0) {
-    if (args.options.json === true) {
-      process.stdout.write(
-        `${JSON.stringify(
-          {
-            projects: [],
-            total: null,
-            host: [],
-            host_total: null,
-            warning: "no_usage_samples",
-            runtime_ok: runtimeResult.ok,
-            runtime_error: runtimeResult.error,
-          },
-          null,
-          2
-        )}\n`
-      );
-      return 0;
-    }
-    await display.panel({
-      title: "Usage",
-      tone: "info",
-      lines: ["No running containers or host processes found."],
-    });
-    return 0;
-  }
-
-  if (args.options.json === true) {
-    process.stdout.write(
-      `${JSON.stringify(
-        {
-          projects: report.projects,
-          total: report.total,
-          host: hostReport.rows,
-          host_total: hostReport.total,
-          runtime_ok: runtimeResult.ok,
-          runtime_error: runtimeResult.error,
-        },
-        null,
-        2
-      )}\n`
-    );
-    return 0;
-  }
-
-  if (report.projects.length > 0) {
-    await display.table({
-      columns: ["Project", "CPU", "Memory", "PIDs", "Containers"],
-      rows: report.projects.map((project) => [
-        project.project,
-        formatPercent({ percent: project.cpuPercent }),
-        formatMemoryLabel({
-          used: project.memUsedBytes,
-          limit: project.memLimitBytes,
-          percent: project.memPercent,
-        }),
-        project.pids !== null ? String(project.pids) : "n/a",
-        String(project.containers),
-      ]),
-    });
-  }
-
-  if (hostReport.rows.length > 0) {
-    await display.table({
-      columns: ["Host", "CPU", "Memory", "PIDs", "Processes"],
-      rows: hostReport.rows.map((row) => [
-        row.name,
-        formatPercent({ percent: row.cpuPercent }),
-        formatBytesMaybe({ bytes: row.memBytes }),
-        row.pids.length > 0 ? row.pids.join(",") : "n/a",
-        String(row.processes),
-      ]),
-    });
-  }
-
-  if (report.total) {
-    await display.panel({
-      title: "Total",
-      tone: "info",
-      lines: [
-        `CPU: ${formatPercent({ percent: report.total.cpuPercent })}`,
-        `Memory: ${formatMemoryLabel({
-          used: report.total.memUsedBytes,
-          limit: report.total.memLimitBytes,
-          percent: report.total.memPercent,
-        })}`,
-        `PIDs: ${report.total.pids ?? "n/a"}`,
-        `Containers: ${report.total.containers}`,
-      ],
-    });
-  }
-
-  if (hostReport.total) {
-    await display.panel({
-      title: "Host total",
-      tone: "info",
-      lines: [
-        `CPU: ${formatPercent({ percent: hostReport.total.cpuPercent })}`,
-        `Memory: ${formatBytesMaybe({ bytes: hostReport.total.memBytes })}`,
-        `Processes: ${hostReport.total.processes}`,
-      ],
-    });
-  }
-
-  return 0;
 };
 
 export const usageCommand = withHandler(spec, handleUsage);
@@ -883,71 +686,371 @@ async function readDockerStats(opts: {
 function parseDockerStatsOutput(opts: {
   readonly output: string;
 }): DockerStatsSample[] {
-  const lines = opts.output
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
   const samples: DockerStatsSample[] = [];
 
-  for (const line of lines) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
+  for (const line of splitDockerStatsLines({ output: opts.output })) {
+    const sample = parseDockerStatsSampleLine({ line });
+    if (!sample) {
       continue;
     }
-    if (!isRecord(parsed)) {
-      continue;
-    }
-
-    const containerId =
-      getString(parsed, "ID") ?? getString(parsed, "Container");
-    const cpuPercent = parsePercent({
-      value: typeof parsed.CPUPerc === "string" ? parsed.CPUPerc : null,
-    });
-    const memUsageRaw =
-      typeof parsed.MemUsage === "string" ? parsed.MemUsage : null;
-    const memPercent = parsePercent({
-      value: typeof parsed.MemPerc === "string" ? parsed.MemPerc : null,
-    });
-    const netIo = parseIoPair({
-      value: typeof parsed.NetIO === "string" ? parsed.NetIO : null,
-    });
-    const blockIo = parseIoPair({
-      value: typeof parsed.BlockIO === "string" ? parsed.BlockIO : null,
-    });
-    const pidsValue = typeof parsed.PIDs === "string" ? parsed.PIDs : null;
-
-    let memUsedBytes: number | null = null;
-    let memLimitBytes: number | null = null;
-    if (memUsageRaw) {
-      const [usedRaw = "", limitRaw = ""] = memUsageRaw
-        .split("/")
-        .map((part) => part.trim());
-      memUsedBytes = parseBytes({ value: usedRaw.length > 0 ? usedRaw : null });
-      memLimitBytes = parseBytes({
-        value: limitRaw.length > 0 ? limitRaw : null,
-      });
-    }
-
-    const parsedPids = pidsValue ? Number.parseInt(pidsValue, 10) : Number.NaN;
-    const pids = Number.isFinite(parsedPids) ? parsedPids : null;
-
-    samples.push({
-      containerId,
-      cpuPercent,
-      memUsedBytes,
-      memLimitBytes,
-      memPercent,
-      netInputBytes: netIo.inputBytes,
-      netOutputBytes: netIo.outputBytes,
-      blockInputBytes: blockIo.inputBytes,
-      blockOutputBytes: blockIo.outputBytes,
-      pids,
-    });
+    samples.push(sample);
   }
 
   return samples;
+}
+
+function splitDockerStatsLines(opts: { readonly output: string }): string[] {
+  return opts.output
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+function parseDockerStatsSampleLine(opts: {
+  readonly line: string;
+}): DockerStatsSample | null {
+  const parsed = tryParseDockerStatsJson({ line: opts.line });
+  if (!parsed) {
+    return null;
+  }
+
+  const containerId = getString(parsed, "ID") ?? getString(parsed, "Container");
+  const cpuPercent = parsePercent({
+    value: typeof parsed.CPUPerc === "string" ? parsed.CPUPerc : null,
+  });
+  const memPercent = parsePercent({
+    value: typeof parsed.MemPerc === "string" ? parsed.MemPerc : null,
+  });
+  const netIo = parseIoPair({
+    value: typeof parsed.NetIO === "string" ? parsed.NetIO : null,
+  });
+  const blockIo = parseIoPair({
+    value: typeof parsed.BlockIO === "string" ? parsed.BlockIO : null,
+  });
+  const memUsageRaw =
+    typeof parsed.MemUsage === "string" ? parsed.MemUsage : null;
+  const memUsage = parseMemUsage({ raw: memUsageRaw });
+
+  const pids = parseDockerStatsPids({
+    value: typeof parsed.PIDs === "string" ? parsed.PIDs : null,
+  });
+
+  return {
+    containerId,
+    cpuPercent,
+    memUsedBytes: memUsage.usedBytes,
+    memLimitBytes: memUsage.limitBytes,
+    memPercent,
+    netInputBytes: netIo.inputBytes,
+    netOutputBytes: netIo.outputBytes,
+    blockInputBytes: blockIo.inputBytes,
+    blockOutputBytes: blockIo.outputBytes,
+    pids,
+  };
+}
+
+function tryParseDockerStatsJson(opts: {
+  readonly line: string;
+}): Record<string, unknown> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(opts.line);
+  } catch {
+    return null;
+  }
+  return isRecord(parsed) ? parsed : null;
+}
+
+function parseMemUsage(opts: { readonly raw: string | null }): {
+  readonly usedBytes: number | null;
+  readonly limitBytes: number | null;
+} {
+  if (!opts.raw) {
+    return { usedBytes: null, limitBytes: null };
+  }
+
+  const [usedRaw = "", limitRaw = ""] = opts.raw
+    .split("/")
+    .map((part) => part.trim());
+  return {
+    usedBytes: parseBytes({ value: usedRaw.length > 0 ? usedRaw : null }),
+    limitBytes: parseBytes({ value: limitRaw.length > 0 ? limitRaw : null }),
+  };
+}
+
+function parseDockerStatsPids(opts: {
+  readonly value: string | null;
+}): number | null {
+  const parsed = opts.value ? Number.parseInt(opts.value, 10) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function resolveUsageFilter(opts: {
+  readonly projectOpt: unknown;
+}): string | null {
+  return typeof opts.projectOpt === "string"
+    ? sanitizeProjectSlug(opts.projectOpt)
+    : null;
+}
+
+async function runUsageOnce(opts: {
+  readonly args: UsageArgs;
+  readonly filter: string | null;
+  readonly includeGlobal: boolean;
+  readonly includeHost: boolean;
+}): Promise<number> {
+  const runtimeResult = await readRuntimeProjects({
+    includeGlobal: opts.includeGlobal,
+  });
+  const runtime = runtimeResult.ok ? runtimeResult.runtime : [];
+  const filtered = opts.filter
+    ? runtime.filter((project) => project.project === opts.filter)
+    : runtime;
+  const index = buildContainerIndex({ projects: filtered });
+  const hostReport = opts.includeHost
+    ? await readHostUsage()
+    : { rows: [], total: null };
+  const stats =
+    index.containerIds.length === 0
+      ? { ok: true as const, samples: [] }
+      : await readDockerStats({ containerIds: index.containerIds });
+
+  if (!runtimeResult.ok) {
+    return await renderRuntimeUnavailable({
+      args: opts.args,
+      runtimeError: runtimeResult.error ?? "Docker runtime is not responding.",
+      hostReport,
+    });
+  }
+
+  if (!stats.ok) {
+    return await renderStatsError({
+      args: opts.args,
+      error: stats.error,
+      runtimeOk: runtimeResult.ok,
+      runtimeError: runtimeResult.error,
+      hostReport,
+    });
+  }
+
+  const report = buildUsageReport({
+    projects: filtered,
+    samples: stats.samples,
+    index,
+  });
+
+  if (report.projects.length === 0 && hostReport.rows.length === 0) {
+    return await renderNoSamples({
+      args: opts.args,
+      runtimeOk: runtimeResult.ok,
+      runtimeError: runtimeResult.error,
+    });
+  }
+
+  return await renderUsageSuccess({
+    args: opts.args,
+    report,
+    hostReport,
+    runtimeOk: runtimeResult.ok,
+    runtimeError: runtimeResult.error,
+  });
+}
+
+async function renderRuntimeUnavailable(opts: {
+  readonly args: UsageArgs;
+  readonly runtimeError: string;
+  readonly hostReport: HostUsageReport;
+}): Promise<number> {
+  if (opts.args.options.json === true) {
+    writeJson({
+      payload: {
+        projects: [],
+        total: null,
+        host: opts.hostReport.rows,
+        host_total: opts.hostReport.total,
+        runtime_ok: false,
+        runtime_error: opts.runtimeError,
+      },
+    });
+    return 1;
+  }
+
+  await display.panel({
+    title: "Runtime unavailable",
+    tone: "error",
+    lines: [opts.runtimeError],
+  });
+  await renderHostUsageTable({ hostReport: opts.hostReport });
+  return 1;
+}
+
+async function renderStatsError(opts: {
+  readonly args: UsageArgs;
+  readonly error: string;
+  readonly runtimeOk: boolean;
+  readonly runtimeError: string | null;
+  readonly hostReport: HostUsageReport;
+}): Promise<number> {
+  if (opts.args.options.json === true) {
+    writeJson({
+      payload: {
+        projects: [],
+        total: null,
+        host: opts.hostReport.rows,
+        host_total: opts.hostReport.total,
+        error: opts.error,
+        runtime_ok: opts.runtimeOk,
+        runtime_error: opts.runtimeError,
+      },
+    });
+    return 1;
+  }
+
+  await display.panel({
+    title: "Usage",
+    tone: "error",
+    lines: [opts.error],
+  });
+  await renderHostUsageTable({ hostReport: opts.hostReport });
+  return 1;
+}
+
+async function renderNoSamples(opts: {
+  readonly args: UsageArgs;
+  readonly runtimeOk: boolean;
+  readonly runtimeError: string | null;
+}): Promise<number> {
+  if (opts.args.options.json === true) {
+    writeJson({
+      payload: {
+        projects: [],
+        total: null,
+        host: [],
+        host_total: null,
+        warning: "no_usage_samples",
+        runtime_ok: opts.runtimeOk,
+        runtime_error: opts.runtimeError,
+      },
+    });
+    return 0;
+  }
+
+  await display.panel({
+    title: "Usage",
+    tone: "info",
+    lines: ["No running containers or host processes found."],
+  });
+  return 0;
+}
+
+async function renderUsageSuccess(opts: {
+  readonly args: UsageArgs;
+  readonly report: UsageReport;
+  readonly hostReport: HostUsageReport;
+  readonly runtimeOk: boolean;
+  readonly runtimeError: string | null;
+}): Promise<number> {
+  if (opts.args.options.json === true) {
+    writeJson({
+      payload: {
+        projects: opts.report.projects,
+        total: opts.report.total,
+        host: opts.hostReport.rows,
+        host_total: opts.hostReport.total,
+        runtime_ok: opts.runtimeOk,
+        runtime_error: opts.runtimeError,
+      },
+    });
+    return 0;
+  }
+
+  await renderProjectUsageTable({ report: opts.report });
+  await renderHostUsageTable({ hostReport: opts.hostReport });
+  await renderTotalUsagePanels({
+    report: opts.report,
+    hostReport: opts.hostReport,
+  });
+  return 0;
+}
+
+function writeJson(opts: { readonly payload: unknown }): void {
+  process.stdout.write(`${JSON.stringify(opts.payload, null, 2)}\n`);
+}
+
+async function renderProjectUsageTable(opts: {
+  readonly report: UsageReport;
+}): Promise<void> {
+  if (opts.report.projects.length === 0) {
+    return;
+  }
+
+  await display.table({
+    columns: ["Project", "CPU", "Memory", "PIDs", "Containers"],
+    rows: opts.report.projects.map((project) => [
+      project.project,
+      formatPercent({ percent: project.cpuPercent }),
+      formatMemoryLabel({
+        used: project.memUsedBytes,
+        limit: project.memLimitBytes,
+        percent: project.memPercent,
+      }),
+      project.pids !== null ? String(project.pids) : "n/a",
+      String(project.containers),
+    ]),
+  });
+}
+
+async function renderHostUsageTable(opts: {
+  readonly hostReport: HostUsageReport;
+}): Promise<void> {
+  if (opts.hostReport.rows.length === 0) {
+    return;
+  }
+
+  await display.table({
+    columns: ["Host", "CPU", "Memory", "PIDs", "Processes"],
+    rows: opts.hostReport.rows.map((row) => [
+      row.name,
+      formatPercent({ percent: row.cpuPercent }),
+      formatBytesMaybe({ bytes: row.memBytes }),
+      row.pids.length > 0 ? row.pids.join(",") : "n/a",
+      String(row.processes),
+    ]),
+  });
+}
+
+async function renderTotalUsagePanels(opts: {
+  readonly report: UsageReport;
+  readonly hostReport: HostUsageReport;
+}): Promise<void> {
+  if (opts.report.total) {
+    await display.panel({
+      title: "Total",
+      tone: "info",
+      lines: [
+        `CPU: ${formatPercent({ percent: opts.report.total.cpuPercent })}`,
+        `Memory: ${formatMemoryLabel({
+          used: opts.report.total.memUsedBytes,
+          limit: opts.report.total.memLimitBytes,
+          percent: opts.report.total.memPercent,
+        })}`,
+        `PIDs: ${opts.report.total.pids ?? "n/a"}`,
+        `Containers: ${opts.report.total.containers}`,
+      ],
+    });
+  }
+
+  if (opts.hostReport.total) {
+    await display.panel({
+      title: "Host total",
+      tone: "info",
+      lines: [
+        `CPU: ${formatPercent({ percent: opts.hostReport.total.cpuPercent })}`,
+        `Memory: ${formatBytesMaybe({ bytes: opts.hostReport.total.memBytes })}`,
+        `Processes: ${opts.hostReport.total.processes}`,
+      ],
+    });
+  }
 }
 
 function buildUsageReport(opts: {

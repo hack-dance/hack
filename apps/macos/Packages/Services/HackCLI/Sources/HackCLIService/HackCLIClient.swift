@@ -32,6 +32,15 @@ public actor HackCLIClient {
     return try decode(ProjectListResponse.self, from: result.stdout)
   }
 
+  public func fetchProjectMeta(projectName: String) async throws -> ProjectMeta? {
+    let trimmed = projectName.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+
+    let result = try await run(["projects", "--json", "--include-global", "--project", trimmed, "--meta"])
+    let response = try decode(ProjectListResponse.self, from: result.stdout)
+    return response.projects.first?.meta
+  }
+
   public func daemonStatus() async throws -> DaemonStatus {
     let result = try await run(["daemon", "status", "--json"], allowNonZeroExit: true)
     return try decodeJsonOrThrow(DaemonStatus.self, result: result)
@@ -64,6 +73,14 @@ public actor HackCLIClient {
 
   public func stopProject(path: String) async throws {
     _ = try await run(["down", "--path", path])
+  }
+
+  public func stopSession(sessionName: String) async throws {
+    let trimmed = sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      throw HackCLIError.commandFailed(exitCode: 1, stderr: "Missing session name")
+    }
+    _ = try await run(["session", "stop", trimmed])
   }
 
   public func listTickets(path: String) async throws -> TicketsListResponse {

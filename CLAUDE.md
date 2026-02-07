@@ -112,7 +112,7 @@ When to use a branch instance:
 Standard workflow:
 - If `.hack/` is missing: `hack init`
 - Start services: `hack up --detach`
-- Check status: `hack ps` or `hack projects status`
+- Check status: `hack ps` or `hack status`
 - Open app: `hack open` (use `--json` for machine parsing)
 - Stop services: `hack down`
 
@@ -144,22 +144,15 @@ Docker compose notes:
 - Prefer `hack` commands; they include the right files/networks.
 - Use `docker compose -f .hack/docker-compose.yml exec <service> <cmd>` only if you need exec into a running container.
 
-Sessions (tmux-based):
-- Interactive picker: `hack session` (requires fzf)
-- Start/attach: `hack session start <project>` (attaches if exists)
+Sessions (mux-based):
+- Interactive picker: `hack session` (clack picker; switches inside tmux, attaches outside)
+- Start/attach: `hack session start <project>` (attaches if exists, switches if in tmux)
 - Force new: `hack session start <project> --new --name agent-1`
 - With infra: `hack session start <project> --up`
 - List: `hack session list`
 - Stop: `hack session stop <session>`
 - Exec in session: `hack session exec <session> "<command>"`
-- List panes: `hack session panes <session> [--pretty]`
-- Capture pane output (NDJSON, defaults to active pane): `hack session capture <session> [--pretty]`
-- Tail pane output (short window, defaults to active pane): `hack session tail <session> [--pretty]`
-- Setup tmux: `hack setup tmux` (installs tmux if missing)
-
-Supervisor (remote jobs):
-- Use `hack supervisor` when you need long-running tasks on remote hosts, scheduled jobs, or jobs that must outlive your local machine.
-- Prefer sessions for interactive tmux work; prefer supervisor for detached/background jobs.
+- Setup tmux: `hack setup tmux` (adds a keybinding; requires tmux installed)
 
 Agent setup (CLI-first):
 - Cursor rules: `hack setup cursor`

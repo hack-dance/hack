@@ -74,86 +74,121 @@ function parseJsonSafe(text: string): Record<string, unknown> {
 }
 
 function parseKeyPath(opts: { readonly raw: string }): readonly string[] {
-  const parts: string[] = [];
-  let buffer = "";
-  let escaped = false;
-  let inBracket = false;
-  let quote: '"' | "'" | null = null;
-
-  const pushBuffer = () => {
-    const trimmed = buffer.trim();
-    if (trimmed.length > 0) {
-      parts.push(trimmed);
-    }
-    buffer = "";
-  };
+  const state = createKeyPathParserState();
 
   for (let i = 0; i < opts.raw.length; i += 1) {
     const ch = opts.raw[i] ?? "";
-    if (inBracket) {
-      if (escaped) {
-        buffer += ch;
-        escaped = false;
-        continue;
-      }
-      if (ch === "\\") {
-        escaped = true;
-        continue;
-      }
-      if (quote) {
-        if (ch === quote) {
-          quote = null;
-          continue;
-        }
-        buffer += ch;
-        continue;
-      }
-      if (ch === "'" || ch === '"') {
-        quote = ch;
-        continue;
-      }
-      if (ch === "]") {
-        inBracket = false;
-        pushBuffer();
-        continue;
-      }
-      buffer += ch;
+    if (state.inBracket) {
+      handleBracketChar(state, ch);
       continue;
     }
-
-    if (escaped) {
-      buffer += ch;
-      escaped = false;
-      continue;
-    }
-    if (ch === "\\") {
-      escaped = true;
-      continue;
-    }
-    if (ch === ".") {
-      pushBuffer();
-      continue;
-    }
-    if (ch === "[") {
-      if (buffer.trim().length > 0) {
-        pushBuffer();
-      } else {
-        buffer = "";
-      }
-      inBracket = true;
-      continue;
-    }
-    buffer += ch;
+    handlePathChar(state, ch);
   }
 
-  if (escaped) {
-    buffer += "\\";
-  }
-  if (buffer.length > 0) {
-    pushBuffer();
+  finalizeKeyPath(state);
+  return state.parts;
+}
+
+type KeyPathParserState = {
+  parts: string[];
+  buffer: string;
+  escaped: boolean;
+  inBracket: boolean;
+  quote: '"' | "'" | null;
+};
+
+function createKeyPathParserState(): KeyPathParserState {
+  return {
+    parts: [],
+    buffer: "",
+    escaped: false,
+    inBracket: false,
+    quote: null,
+  };
+}
+
+function handleBracketChar(state: KeyPathParserState, ch: string): void {
+  if (state.escaped) {
+    state.buffer += ch;
+    state.escaped = false;
+    return;
   }
 
-  return parts;
+  if (ch === "\\") {
+    state.escaped = true;
+    return;
+  }
+
+  if (state.quote) {
+    if (ch === state.quote) {
+      state.quote = null;
+      return;
+    }
+    state.buffer += ch;
+    return;
+  }
+
+  if (ch === "'" || ch === '"') {
+    state.quote = ch;
+    return;
+  }
+
+  if (ch === "]") {
+    state.inBracket = false;
+    pushKeyPathBuffer(state);
+    return;
+  }
+
+  state.buffer += ch;
+}
+
+function handlePathChar(state: KeyPathParserState, ch: string): void {
+  if (state.escaped) {
+    state.buffer += ch;
+    state.escaped = false;
+    return;
+  }
+
+  if (ch === "\\") {
+    state.escaped = true;
+    return;
+  }
+
+  if (ch === ".") {
+    pushKeyPathBuffer(state);
+    return;
+  }
+
+  if (ch === "[") {
+    if (state.buffer.trim().length > 0) {
+      pushKeyPathBuffer(state);
+    } else {
+      state.buffer = "";
+    }
+    state.inBracket = true;
+    return;
+  }
+
+  state.buffer += ch;
+}
+
+function pushKeyPathBuffer(state: KeyPathParserState): void {
+  const trimmed = state.buffer.trim();
+  if (trimmed.length > 0) {
+    state.parts.push(trimmed);
+  }
+  state.buffer = "";
+}
+
+function finalizeKeyPath(state: KeyPathParserState): void {
+  if (state.escaped) {
+    state.buffer += "\\";
+    state.escaped = false;
+  }
+
+  if (state.buffer.length > 0) {
+    pushKeyPathBuffer(state);
+  }
 }
 
 function getPathValue(opts: {

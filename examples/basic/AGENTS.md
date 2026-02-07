@@ -16,7 +16,7 @@ When to use a branch instance:
 Standard workflow:
 - If `.hack/` is missing: `hack init`
 - Start services: `hack up --detach`
-- Check status: `hack ps` or `hack projects status`
+- Check status: `hack ps` or `hack status`
 - Open app: `hack open` (use `--json` for machine parsing)
 - Stop services: `hack down`
 
@@ -47,6 +47,16 @@ Daemon (optional):
 Docker compose notes:
 - Prefer `hack` commands; they include the right files/networks.
 - Use `docker compose -f .hack/docker-compose.yml exec <service> <cmd>` only if you need exec into a running container.
+
+Sessions (mux-based):
+- Interactive picker: `hack session` (clack picker; switches inside tmux, attaches outside)
+- Start/attach: `hack session start <project>` (attaches if exists, switches if in tmux)
+- Force new: `hack session start <project> --new --name agent-1`
+- With infra: `hack session start <project> --up`
+- List: `hack session list`
+- Stop: `hack session stop <session>`
+- Exec in session: `hack session exec <session> "<command>"`
+- Setup tmux: `hack setup tmux` (adds a keybinding; requires tmux installed)
 
 Agent setup (CLI-first):
 - Cursor rules: `hack setup cursor`

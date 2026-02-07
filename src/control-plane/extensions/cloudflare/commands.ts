@@ -21,7 +21,7 @@ import { display } from "../../../ui/display.ts";
 import type { ControlPlaneConfig } from "../../sdk/config.ts";
 import { readControlPlaneConfig } from "../../sdk/config.ts";
 import { resolveGatewayConfig } from "../gateway/config.ts";
-import type { ExtensionCommand } from "../types.ts";
+import type { ExtensionCommand, ExtensionCommandContext } from "../types.ts";
 
 type CloudflareExtensionConfig = {
   readonly hostname?: string;
@@ -150,120 +150,7 @@ export const CLOUDFLARE_COMMANDS: readonly ExtensionCommand[] = [
     name: "tunnel-setup",
     summary: "Create a Cloudflare tunnel and write config",
     scope: "global",
-    handler: async ({ ctx, args }) => {
-      const parsed = parseTunnelSetupArgs({ args });
-      if (!parsed.ok) {
-        ctx.logger.error({ message: parsed.error });
-        return 1;
-      }
-
-      const defaultOrigin = await resolveDefaultOrigin();
-      const globalConfig = (await readControlPlaneConfig({})).config;
-      const config = resolveTunnelConfig({
-        controlPlaneConfig: globalConfig,
-        overrides: parsed.value,
-        defaultOrigin,
-      });
-      if (!config.hostname) {
-        ctx.logger.error({
-          message:
-            "Missing hostname. Use --hostname or set global config: hack config set --global 'controlPlane.extensions[\"dance.hack.cloudflare\"].config.hostname' <host>.",
-        });
-        return 1;
-      }
-
-      const outPath = resolveOutPath({
-        cwd: ctx.cwd,
-        raw: config.out ?? DEFAULT_CONFIG_PATH,
-      });
-      const check = await ensureCloudflared();
-      if (!check.ok) {
-        ctx.logger.error({ message: check.error });
-        return 1;
-      }
-
-      if (!parsed.value.skipLogin) {
-        const login = await runCloudflared({
-          args: ["tunnel", "login"],
-          inherit: true,
-        });
-        if (!login.ok) {
-          ctx.logger.error({ message: "cloudflared login failed." });
-          return 1;
-        }
-      }
-
-      let tunnelId = await findTunnelId({ name: config.tunnel });
-      if (!(tunnelId || parsed.value.skipCreate)) {
-        const created = await runCloudflared({
-          args: ["tunnel", "create", config.tunnel],
-          inherit: true,
-        });
-        if (!created.ok) {
-          ctx.logger.error({ message: "cloudflared tunnel create failed." });
-          return 1;
-        }
-        tunnelId = await findTunnelId({ name: config.tunnel });
-      }
-
-      if (!tunnelId) {
-        ctx.logger.error({ message: `Tunnel "${config.tunnel}" not found.` });
-        return 1;
-      }
-
-      if (!parsed.value.skipRoute) {
-        const routed = await runCloudflared({
-          args: ["tunnel", "route", "dns", config.tunnel, config.hostname],
-          inherit: true,
-        });
-        if (!routed.ok) {
-          ctx.logger.warn({
-            message: "cloudflared route dns failed (it may already exist).",
-          });
-        }
-        if (config.sshHostname) {
-          const routedSsh = await runCloudflared({
-            args: ["tunnel", "route", "dns", config.tunnel, config.sshHostname],
-            inherit: true,
-          });
-          if (!routedSsh.ok) {
-            ctx.logger.warn({
-              message:
-                "cloudflared route dns failed for SSH hostname (it may already exist).",
-            });
-          }
-        }
-      }
-
-      const credentialsFile =
-        config.credentialsFile ?? (await resolveCredentialsFile({ tunnelId }));
-      const yaml = renderCloudflaredConfig({
-        tunnel: tunnelId,
-        hostname: config.hostname,
-        origin: config.origin,
-        ...(config.sshHostname ? { sshHostname: config.sshHostname } : {}),
-        ...(config.sshOrigin ? { sshOrigin: config.sshOrigin } : {}),
-        ...(credentialsFile ? { credentialsFile } : {}),
-      });
-
-      const result = await writeTextFileIfChanged(outPath, `${yaml}\n`);
-      ctx.logger.success({
-        message: result.changed
-          ? `Wrote ${outPath}`
-          : `No changes needed: ${outPath}`,
-      });
-
-      const nextSteps = [
-        `Run tunnel: cloudflared tunnel --config ${outPath} run ${config.tunnel}`,
-        "Optional: use Cloudflare Access policies to protect the hostname.",
-      ];
-      await display.panel({
-        title: "Next steps",
-        tone: "info",
-        lines: nextSteps,
-      });
-      return 0;
-    },
+    handler: handleTunnelSetup,
   },
   {
     name: "tunnel-start",
@@ -444,126 +331,23 @@ export function parseTunnelPrintArgs(opts: {
 }): ParseResult {
   const out: TunnelPrintArgs = {};
 
-  const takeValue = (
-    _token: string,
-    value: string | undefined
-  ): string | null => {
-    if (!value || value.startsWith("-")) {
-      return null;
-    }
-    return value;
-  };
-
   for (let i = 0; i < opts.args.length; i += 1) {
     const token = opts.args[i] ?? "";
     if (token === "--") {
       return { ok: true, value: out };
     }
 
-    if (token.startsWith("--hostname=")) {
-      out.hostname = normalizeValue(token.slice("--hostname=".length));
-      continue;
+    const parsed = parseTunnelPrintValueFlag({
+      token,
+      next: opts.args[i + 1],
+    });
+    if (!parsed.ok) {
+      return parsed;
     }
 
-    if (token === "--hostname") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--hostname requires a value." };
-      }
-      out.hostname = normalizeValue(value);
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("--tunnel=")) {
-      out.tunnel = normalizeValue(token.slice("--tunnel=".length));
-      continue;
-    }
-
-    if (token === "--tunnel") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--tunnel requires a value." };
-      }
-      out.tunnel = normalizeValue(value);
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("--origin=")) {
-      out.origin = normalizeValue(token.slice("--origin=".length));
-      continue;
-    }
-
-    if (token === "--origin") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--origin requires a value." };
-      }
-      out.origin = normalizeValue(value);
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("--ssh-hostname=")) {
-      out.sshHostname = normalizeValue(token.slice("--ssh-hostname=".length));
-      continue;
-    }
-
-    if (token === "--ssh-hostname") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--ssh-hostname requires a value." };
-      }
-      out.sshHostname = normalizeValue(value);
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("--ssh-origin=")) {
-      out.sshOrigin = normalizeValue(token.slice("--ssh-origin=".length));
-      continue;
-    }
-
-    if (token === "--ssh-origin") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--ssh-origin requires a value." };
-      }
-      out.sshOrigin = normalizeValue(value);
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("--credentials-file=")) {
-      out.credentialsFile = normalizeValue(
-        token.slice("--credentials-file=".length)
-      );
-      continue;
-    }
-
-    if (token === "--credentials-file") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--credentials-file requires a value." };
-      }
-      out.credentialsFile = normalizeValue(value);
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("--out=")) {
-      out.out = normalizeValue(token.slice("--out=".length));
-      continue;
-    }
-
-    if (token === "--out") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--out requires a value." };
-      }
-      out.out = normalizeValue(value);
-      i += 1;
+    if (parsed.value) {
+      out[parsed.value.key] = normalizeValue(parsed.value.rawValue);
+      i += parsed.value.consume;
       continue;
     }
 
@@ -575,6 +359,298 @@ export function parseTunnelPrintArgs(opts: {
   }
 
   return { ok: true, value: out };
+}
+
+type TunnelPrintValueFlag = {
+  readonly key: keyof TunnelPrintArgs;
+  readonly rawValue: string;
+  readonly consume: number;
+};
+
+type TunnelPrintValueFlagResult =
+  | { readonly ok: true; readonly value: TunnelPrintValueFlag | null }
+  | { readonly ok: false; readonly error: string };
+
+const TUNNEL_PRINT_VALUE_FLAGS: Record<string, keyof TunnelPrintArgs> = {
+  "--hostname": "hostname",
+  "--tunnel": "tunnel",
+  "--origin": "origin",
+  "--ssh-hostname": "sshHostname",
+  "--ssh-origin": "sshOrigin",
+  "--credentials-file": "credentialsFile",
+  "--out": "out",
+};
+
+function parseTunnelPrintValueFlag(opts: {
+  readonly token: string;
+  readonly next: string | undefined;
+}): TunnelPrintValueFlagResult {
+  const split = splitFlagToken({ token: opts.token });
+  const key = TUNNEL_PRINT_VALUE_FLAGS[split.name];
+  if (!key) {
+    return { ok: true, value: null };
+  }
+
+  if (split.inlineValue !== null) {
+    return {
+      ok: true,
+      value: { key, rawValue: split.inlineValue, consume: 0 },
+    };
+  }
+
+  const value = takeValueFromNextToken({ value: opts.next });
+  if (value === null) {
+    return { ok: false, error: `${split.name} requires a value.` };
+  }
+  return { ok: true, value: { key, rawValue: value, consume: 1 } };
+}
+
+function splitFlagToken(opts: { readonly token: string }): {
+  readonly name: string;
+  readonly inlineValue: string | null;
+} {
+  const idx = opts.token.indexOf("=");
+  if (idx === -1) {
+    return { name: opts.token, inlineValue: null };
+  }
+  return {
+    name: opts.token.slice(0, idx),
+    inlineValue: opts.token.slice(idx + 1),
+  };
+}
+
+function takeValueFromNextToken(opts: {
+  readonly value: string | undefined;
+}): string | null {
+  if (!opts.value || opts.value.startsWith("-")) {
+    return null;
+  }
+  return opts.value;
+}
+
+async function handleTunnelSetup({
+  ctx,
+  args,
+}: {
+  readonly ctx: ExtensionCommandContext;
+  readonly args: readonly string[];
+}): Promise<number> {
+  const parsed = parseTunnelSetupArgs({ args });
+  if (!parsed.ok) {
+    ctx.logger.error({ message: parsed.error });
+    return 1;
+  }
+
+  const configResult = await resolveTunnelSetupConfig({
+    ctx,
+    overrides: parsed.value,
+  });
+  if (!configResult.ok) {
+    ctx.logger.error({ message: configResult.error });
+    return 1;
+  }
+
+  const check = await ensureCloudflared();
+  if (!check.ok) {
+    ctx.logger.error({ message: check.error });
+    return 1;
+  }
+
+  const login = await maybeCloudflaredLogin({
+    skipLogin: parsed.value.skipLogin,
+  });
+  if (!login.ok) {
+    ctx.logger.error({ message: login.error });
+    return 1;
+  }
+
+  const tunnelIdResult = await resolveOrCreateTunnelId({
+    tunnel: configResult.value.config.tunnel,
+    skipCreate: parsed.value.skipCreate,
+  });
+  if (!tunnelIdResult.ok) {
+    ctx.logger.error({ message: tunnelIdResult.error });
+    return 1;
+  }
+
+  await maybeRouteDns({
+    skipRoute: parsed.value.skipRoute,
+    tunnel: configResult.value.config.tunnel,
+    hostname: configResult.value.config.hostname,
+    sshHostname: configResult.value.config.sshHostname,
+    logger: ctx.logger,
+  });
+
+  const credentialsFile =
+    configResult.value.config.credentialsFile ??
+    (await resolveCredentialsFile({ tunnelId: tunnelIdResult.value.tunnelId }));
+  const yaml = renderCloudflaredConfig({
+    tunnel: tunnelIdResult.value.tunnelId,
+    hostname: configResult.value.config.hostname,
+    origin: configResult.value.config.origin,
+    ...(configResult.value.config.sshHostname
+      ? { sshHostname: configResult.value.config.sshHostname }
+      : {}),
+    ...(configResult.value.config.sshOrigin
+      ? { sshOrigin: configResult.value.config.sshOrigin }
+      : {}),
+    ...(credentialsFile ? { credentialsFile } : {}),
+  });
+
+  const result = await writeTextFileIfChanged(
+    configResult.value.outPath,
+    `${yaml}\n`
+  );
+  ctx.logger.success({
+    message: result.changed
+      ? `Wrote ${configResult.value.outPath}`
+      : `No changes needed: ${configResult.value.outPath}`,
+  });
+
+  await display.panel({
+    title: "Next steps",
+    tone: "info",
+    lines: [
+      `Run tunnel: cloudflared tunnel --config ${configResult.value.outPath} run ${configResult.value.config.tunnel}`,
+      "Optional: use Cloudflare Access policies to protect the hostname.",
+    ],
+  });
+  return 0;
+}
+
+type TunnelSetupConfigResult =
+  | {
+      readonly ok: true;
+      readonly value: {
+        readonly config: Required<Pick<CloudflareExtensionConfig, "hostname">> &
+          Required<Pick<CloudflareExtensionConfig, "tunnel" | "origin">> &
+          CloudflareExtensionConfig & { readonly out?: string };
+        readonly outPath: string;
+      };
+    }
+  | { readonly ok: false; readonly error: string };
+
+async function resolveTunnelSetupConfig(opts: {
+  readonly ctx: ExtensionCommandContext;
+  readonly overrides: TunnelPrintArgs;
+}): Promise<TunnelSetupConfigResult> {
+  const defaultOrigin = await resolveDefaultOrigin();
+  const config = resolveTunnelConfig({
+    controlPlaneConfig: opts.ctx.controlPlaneConfig,
+    overrides: opts.overrides,
+    defaultOrigin,
+  });
+  if (!config.hostname) {
+    return {
+      ok: false,
+      error:
+        "Missing hostname. Use --hostname or set global config: hack config set --global 'controlPlane.extensions[\"dance.hack.cloudflare\"].config.hostname' <host>.",
+    };
+  }
+
+  const outPath = resolveOutPath({
+    cwd: opts.ctx.cwd,
+    raw: config.out ?? DEFAULT_CONFIG_PATH,
+  });
+
+  return {
+    ok: true,
+    value: {
+      config: {
+        ...config,
+        hostname: config.hostname,
+      },
+      outPath,
+    },
+  };
+}
+
+async function maybeCloudflaredLogin(opts: {
+  readonly skipLogin: boolean;
+}): Promise<
+  { readonly ok: true } | { readonly ok: false; readonly error: string }
+> {
+  if (opts.skipLogin) {
+    return { ok: true };
+  }
+
+  const login = await runCloudflared({
+    args: ["tunnel", "login"],
+    inherit: true,
+  });
+  if (!login.ok) {
+    return { ok: false, error: "cloudflared login failed." };
+  }
+  return { ok: true };
+}
+
+async function resolveOrCreateTunnelId(opts: {
+  readonly tunnel: string;
+  readonly skipCreate: boolean;
+}): Promise<
+  | { readonly ok: true; readonly value: { readonly tunnelId: string } }
+  | { readonly ok: false; readonly error: string }
+> {
+  let tunnelId = await findTunnelId({ name: opts.tunnel });
+  if (!(tunnelId || opts.skipCreate)) {
+    const created = await runCloudflared({
+      args: ["tunnel", "create", opts.tunnel],
+      inherit: true,
+    });
+    if (!created.ok) {
+      return { ok: false, error: "cloudflared tunnel create failed." };
+    }
+    tunnelId = await findTunnelId({ name: opts.tunnel });
+  }
+
+  if (!tunnelId) {
+    return { ok: false, error: `Tunnel "${opts.tunnel}" not found.` };
+  }
+
+  return { ok: true, value: { tunnelId } };
+}
+
+async function maybeRouteDns(opts: {
+  readonly skipRoute: boolean;
+  readonly tunnel: string;
+  readonly hostname: string;
+  readonly sshHostname: string | undefined;
+  readonly logger: ExtensionCommandContext["logger"];
+}): Promise<void> {
+  if (opts.skipRoute) {
+    return;
+  }
+
+  await routeDnsForHostname({
+    tunnel: opts.tunnel,
+    hostname: opts.hostname,
+    logger: opts.logger,
+  });
+
+  if (!opts.sshHostname) {
+    return;
+  }
+  await routeDnsForHostname({
+    tunnel: opts.tunnel,
+    hostname: opts.sshHostname,
+    logger: opts.logger,
+  });
+}
+
+async function routeDnsForHostname(opts: {
+  readonly tunnel: string;
+  readonly hostname: string;
+  readonly logger: ExtensionCommandContext["logger"];
+}): Promise<void> {
+  const routed = await runCloudflared({
+    args: ["tunnel", "route", "dns", opts.tunnel, opts.hostname],
+    inherit: true,
+  });
+  if (!routed.ok) {
+    opts.logger.warn({
+      message: `cloudflared route dns failed for ${opts.hostname} (it may already exist).`,
+    });
+  }
 }
 
 function parseTunnelSetupArgs(opts: {
@@ -622,64 +698,23 @@ export function parseTunnelStartArgs(opts: {
 }): StartParseResult {
   const out: TunnelStartArgs = {};
 
-  const takeValue = (
-    _token: string,
-    value: string | undefined
-  ): string | null => {
-    if (!value || value.startsWith("-")) {
-      return null;
-    }
-    return value;
-  };
-
   for (let i = 0; i < opts.args.length; i += 1) {
     const token = opts.args[i] ?? "";
     if (token === "--") {
       return { ok: true, value: out };
     }
 
-    if (token.startsWith("--config=")) {
-      out.config = normalizeValue(token.slice("--config=".length));
-      continue;
+    const parsed = parseTunnelStartValueFlag({
+      token,
+      next: opts.args[i + 1],
+    });
+    if (!parsed.ok) {
+      return parsed;
     }
 
-    if (token === "--config") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--config requires a value." };
-      }
-      out.config = normalizeValue(value);
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("--out=")) {
-      out.config = normalizeValue(token.slice("--out=".length));
-      continue;
-    }
-
-    if (token === "--out") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--out requires a value." };
-      }
-      out.config = normalizeValue(value);
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("--tunnel=")) {
-      out.tunnel = normalizeValue(token.slice("--tunnel=".length));
-      continue;
-    }
-
-    if (token === "--tunnel") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--tunnel requires a value." };
-      }
-      out.tunnel = normalizeValue(value);
-      i += 1;
+    if (parsed.value) {
+      out[parsed.value.key] = normalizeValue(parsed.value.rawValue);
+      i += parsed.value.consume;
       continue;
     }
 
@@ -691,6 +726,46 @@ export function parseTunnelStartArgs(opts: {
   }
 
   return { ok: true, value: out };
+}
+
+type TunnelStartValueFlag = {
+  readonly key: keyof TunnelStartArgs;
+  readonly rawValue: string;
+  readonly consume: number;
+};
+
+type TunnelStartValueFlagResult =
+  | { readonly ok: true; readonly value: TunnelStartValueFlag | null }
+  | { readonly ok: false; readonly error: string };
+
+const TUNNEL_START_VALUE_FLAGS: Record<string, keyof TunnelStartArgs> = {
+  "--config": "config",
+  "--out": "config",
+  "--tunnel": "tunnel",
+};
+
+function parseTunnelStartValueFlag(opts: {
+  readonly token: string;
+  readonly next: string | undefined;
+}): TunnelStartValueFlagResult {
+  const split = splitFlagToken({ token: opts.token });
+  const key = TUNNEL_START_VALUE_FLAGS[split.name];
+  if (!key) {
+    return { ok: true, value: null };
+  }
+
+  if (split.inlineValue !== null) {
+    return {
+      ok: true,
+      value: { key, rawValue: split.inlineValue, consume: 0 },
+    };
+  }
+
+  const value = takeValueFromNextToken({ value: opts.next });
+  if (value === null) {
+    return { ok: false, error: `${split.name} requires a value.` };
+  }
+  return { ok: true, value: { key, rawValue: value, consume: 1 } };
 }
 
 export function parseAccessSetupArgs(opts: {

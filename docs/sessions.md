@@ -1,8 +1,8 @@
 # Sessions
 
-Sessions provide a way to manage persistent terminal workspaces using tmux. They're designed for:
+Sessions provide a way to manage persistent terminal workspaces using **tmux** or **zellij**. They're designed for:
 - **Remote access**: SSH into your machine and attach to an existing workspace
-- **Agent execution**: Run long-running agents in isolated tmux sessions
+- **Agent execution**: Run long-running agents in isolated sessions
 - **Multi-terminal workflows**: Keep multiple project contexts alive across sessions
 
 ## Quick start
@@ -21,7 +21,7 @@ hack session list
 hack session attach <session>
 
 # Run a command in a session
-hack session exec <session> "npm test"
+hack session exec <session> "bun test"
 
 # Stop a session
 hack session stop <session>
@@ -41,12 +41,12 @@ hack session panes <session>
 ### Interactive picker
 
 Running `hack session` without arguments opens an interactive picker showing:
-- **Active sessions**: Attached and detached tmux sessions
+- **Active sessions**: tmux and zellij sessions (tmux shows attached/detached; zellij attach state is unknown)
 - **Available projects**: Registered projects without active sessions
 
 When selecting an attached session, you can choose to:
 - **Attach**: Detach other clients and take over the session
-- **Create new**: Start a new numbered session (e.g., `project:2`)
+- **Create new**: Start a new numbered session (e.g., `project--2`)
 
 ### Creating sessions
 
@@ -59,7 +59,7 @@ hack session start my-project --new
 
 # Create with custom name suffix
 hack session start my-project --name agent-1
-# Creates: my-project:agent-1
+# Creates: my-project--agent-1
 
 # Run `hack up -d` before attaching
 hack session start my-project --up
@@ -82,12 +82,13 @@ When attaching, the `-d` flag detaches other clients to avoid terminal size conf
 
 ```bash
 # Send a command to a running session
-hack session exec my-project "npm run dev"
+hack session exec my-project "bun test"
 
-# This sends the command + Enter to the session's active pane
+# tmux: sends the command + Enter to the session's active pane
+# zellij: opens a new pane and runs the command (no "active pane" concept)
 ```
 
-### Listing panes
+### Listing panes (tmux only)
 
 Use `hack session panes` to list panes with useful metadata (target, active flag, window/pane indices, command, path).
 
@@ -99,7 +100,7 @@ hack session panes my-project
 hack session panes my-project --pretty
 ```
 
-### Capturing output
+### Capturing output (tmux only)
 
 `hack session capture` emits NDJSON events by default for machine parsing (start/log/end). By default it targets the active pane; use `--target` to select a specific pane. Use `--pretty` for raw pane output.
 
@@ -107,14 +108,14 @@ hack session panes my-project --pretty
 # Capture last 200 lines (default) as NDJSON
 hack session capture my-project
 
-# Capture a specific pane target and line count
+# Capture a specific pane target and line count (tmux pane targets use `:` and `.`)
 hack session capture my-project --target my-project:0.1 --lines 500
 
 # Human-friendly raw output
 hack session capture my-project --pretty
 ```
 
-### Tailing output
+### Tailing output (tmux only)
 
 `hack session tail` also emits NDJSON events by default and stops after `--max-ms` (default 5000). By default it tails the active pane; use `--target` to select a specific pane.
 
@@ -154,7 +155,7 @@ hack ssh my-session
 
 1. **SSH command**: Copy-paste command to connect
 2. **QR code**: Scan with mobile SSH apps (Blink, Termius)
-3. **Active sessions**: List of tmux sessions on this machine
+3. **Active sessions**: List of active tmux sessions on this machine (currently tmux-only)
 4. **Action picker**: Done or connect to a session
 
 ### Tailscale setup
@@ -180,12 +181,41 @@ If you're already in tmux and want to switch sessions without detaching:
 tmux switch-client -t <session>
 ```
 
+## Configuration
+
+Project config: `.hack/hack.config.json`
+
+```json
+{
+  "sessions": {
+    "mux": "auto"
+  }
+}
+```
+
+Values:
+- `auto` (default): prefer tmux, fall back to zellij
+- `tmux`: require tmux
+- `zellij`: require zellij
+- `none`: disable sessions
+
+Env override: `HACK_SESSIONS_MUX=auto|tmux|zellij|none`
+
+Global default:
+
+```bash
+hack config set --global sessions.mux zellij
+```
+
 ## Daemon sessions API
 
-The hack daemon exposes a REST API for managing tmux sessions programmatically. This is useful for:
+The hack daemon exposes a REST API for managing mux sessions programmatically (tmux and zellij). This is useful for:
 - Remote session control via the gateway
 - Building automation tools
 - Agent orchestration
+
+When accessed over HTTP, this API is served by the **gateway** and requires authentication.
+See `docs/gateway-api.md` for token creation and the full security model.
 
 See the [Gateway API](gateway-api.md) for authentication and endpoint details.
 
@@ -193,7 +223,7 @@ See the [Gateway API](gateway-api.md) for authentication and endpoint details.
 
 | Method | Path | Description |
 | --- | --- | --- |
-| GET | `/v1/sessions` | List all tmux sessions |
+| GET | `/v1/sessions` | List all sessions |
 | POST | `/v1/sessions` | Create a new session |
 | GET | `/v1/sessions/:id` | Get session details |
 | POST | `/v1/sessions/:id/stop` | Stop (kill) a session |
@@ -203,7 +233,8 @@ See the [Gateway API](gateway-api.md) for authentication and endpoint details.
 ### List sessions
 
 ```bash
-curl http://127.0.0.1:7788/v1/sessions
+curl -H "Authorization: Bearer $HACK_GATEWAY_TOKEN" \
+  http://127.0.0.1:7788/v1/sessions
 ```
 
 Response:
@@ -211,6 +242,7 @@ Response:
 {
   "sessions": [
     {
+      "backend": "tmux",
       "name": "my-project",
       "attached": false,
       "path": "/Users/dev/my-project",
@@ -231,6 +263,7 @@ Response:
 
 ```bash
 curl -X POST http://127.0.0.1:7788/v1/sessions \
+  -H "Authorization: Bearer $HACK_GATEWAY_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name": "agent-1", "cwd": "/path/to/project"}'
 ```
@@ -238,13 +271,15 @@ curl -X POST http://127.0.0.1:7788/v1/sessions \
 Request body:
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `name` | string | yes | Session name (alphanumeric, dash, underscore, dot) |
+| `name` | string | yes | Session name (alphanumeric, dash, underscore) |
 | `cwd` | string | no | Working directory |
+| `backend` | string | no | Override backend (`tmux` or `zellij`) |
 
 Response (201):
 ```json
 {
   "session": {
+    "backend": "tmux",
     "name": "agent-1",
     "attached": false,
     "path": "/path/to/project",
@@ -257,7 +292,8 @@ Response (201):
 ### Get session
 
 ```bash
-curl http://127.0.0.1:7788/v1/sessions/agent-1
+curl -H "Authorization: Bearer $HACK_GATEWAY_TOKEN" \
+  http://127.0.0.1:7788/v1/sessions/agent-1
 ```
 
 Response includes connection info for SSH access:
@@ -277,8 +313,9 @@ Response includes connection info for SSH access:
 
 ```bash
 curl -X POST http://127.0.0.1:7788/v1/sessions/agent-1/exec \
+  -H "Authorization: Bearer $HACK_GATEWAY_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"command": "npm test"}'
+  -d '{"command": "bun test"}'
 ```
 
 This sends the command followed by Enter to the session.
@@ -295,6 +332,7 @@ Response:
 
 ```bash
 curl -X POST http://127.0.0.1:7788/v1/sessions/agent-1/input \
+  -H "Authorization: Bearer $HACK_GATEWAY_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"keys": "C-c"}'
 ```
@@ -305,6 +343,10 @@ Send raw keystrokes without Enter. Useful for:
 - `Escape`
 - Arrow keys: `Up`, `Down`, `Left`, `Right`
 - `Tab`
+
+Note:
+- tmux: `keys` are passed to `tmux send-keys`
+- zellij: `keys` are best-effort character injection (not full key chord support)
 
 Response:
 ```json
@@ -317,7 +359,8 @@ Response:
 ### Stop session
 
 ```bash
-curl -X POST http://127.0.0.1:7788/v1/sessions/agent-1/stop
+curl -X POST -H "Authorization: Bearer $HACK_GATEWAY_TOKEN" \
+  http://127.0.0.1:7788/v1/sessions/agent-1/stop
 ```
 
 Response:
@@ -340,10 +383,10 @@ Response:
 | 400 | `missing_session_id` | Session ID not in URL |
 | 404 | `session_not_found` | Session doesn't exist |
 | 409 | `session_exists` | Session already exists (on create) |
-| 500 | `create_failed` | tmux create failed |
-| 500 | `stop_failed` | tmux kill failed |
-| 500 | `exec_failed` | tmux send-keys failed |
-| 500 | `input_failed` | tmux send-keys failed |
+| 500 | `create_failed` | Session create failed |
+| 500 | `stop_failed` | Session kill failed |
+| 500 | `exec_failed` | Session exec failed |
+| 500 | `input_failed` | Session input failed |
 
 ## Example: Remote agent workflow
 
@@ -358,12 +401,12 @@ Response:
    ```bash
    curl -X POST http://gateway.example.com/v1/sessions/agent-task-1/exec \
      -H "Authorization: Bearer $TOKEN" \
-     -d '{"command": "git pull && npm install && npm test"}'
+     -d '{"command": "git pull && bun install && bun test"}'
    ```
 
 3. **SSH in to check progress**:
    ```bash
-   ssh laptop.tail1234.ts.net -t "tmux attach -t agent-task-1"
+   ssh laptop.tail1234.ts.net -t "hack session attach agent-task-1"
    ```
 
 4. **Clean up when done**:

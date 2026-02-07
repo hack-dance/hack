@@ -60,16 +60,11 @@ export async function buildProjectViews(opts: {
   const runtimeByName = new Map(
     opts.runtime.map((p) => [p.project, p] as const)
   );
-
-  const names = new Set<string>();
-  for (const p of opts.registryProjects) {
-    names.add(p.name);
-  }
-  if (opts.includeUnregistered) {
-    for (const p of opts.runtime) {
-      names.add(p.project);
-    }
-  }
+  const names = collectProjectNames({
+    registryProjects: opts.registryProjects,
+    runtime: opts.runtime,
+    includeUnregistered: opts.includeUnregistered,
+  });
 
   const out: ProjectView[] = [];
   for (const name of [...names].sort((a, b) => a.localeCompare(b))) {
@@ -81,83 +76,161 @@ export async function buildProjectViews(opts: {
     const runtime = runtimeByName.get(name) ?? null;
 
     if (reg) {
-      const projectDirOk = await pathExists(reg.projectDir);
-      const composeFile = resolve(reg.projectDir, PROJECT_COMPOSE_FILENAME);
-      const composeExists = projectDirOk && (await pathExists(composeFile));
-      const definedServices = composeExists
-        ? await readComposeServices({ composeFile })
-        : null;
-      const serviceHosts = composeExists
-        ? await readComposeServiceHosts({ composeFile })
-        : null;
-      const running = countRunningServices(runtime);
-      const runtimeConfigured = composeExists;
-      const runtimeStatus: ProjectRuntimeStatus = resolveRuntimeStatus({
-        projectDirOk,
-        composeExists,
-        runtimeOk: opts.runtimeOk,
-        running,
-      });
-      const status: ProjectView["status"] = resolveProjectStatus({
-        projectDirOk,
-        runtimeOk: opts.runtimeOk,
-        running,
-      });
-      const branchRuntime = collectBranchRuntime({
-        baseName: name,
-        runtimeProjects: opts.runtime,
-      });
-      const extensions = projectDirOk
-        ? await resolveProjectExtensions({ projectDir: reg.projectDir })
-        : null;
-
-      out.push({
-        projectId: reg.id,
-        name,
-        devHost: reg.devHost ?? null,
-        repoRoot: reg.repoRoot,
-        projectDir: reg.projectDir,
-        definedServices,
-        extensionsEnabled: extensions?.enabled ?? null,
-        features: extensions?.features ?? null,
-        serviceHosts,
-        runtimeConfigured,
-        runtimeStatus,
-        runtime,
-        branchRuntime,
-        kind: "registered",
-        status,
-      });
+      out.push(
+        await buildRegisteredProjectView({
+          name,
+          reg,
+          runtime,
+          runtimeOk: opts.runtimeOk,
+          runtimeProjects: opts.runtime,
+        })
+      );
       continue;
     }
 
     if (opts.includeUnregistered) {
-      const running = countRunningServices(runtime);
-      const runtimeStatus: ProjectRuntimeStatus =
-        resolveUnregisteredRuntimeStatus({
+      out.push(
+        buildUnregisteredProjectView({
+          name,
+          runtime,
           runtimeOk: opts.runtimeOk,
-          running,
-        });
-      out.push({
-        name,
-        devHost: null,
-        repoRoot: null,
-        projectDir: null,
-        definedServices: null,
-        extensionsEnabled: null,
-        features: null,
-        serviceHosts: null,
-        runtimeConfigured: null,
-        runtimeStatus,
-        runtime,
-        branchRuntime: [],
-        kind: "unregistered",
-        status: "unregistered",
-      });
+        })
+      );
     }
   }
 
   return out;
+}
+
+function collectProjectNames(opts: {
+  readonly registryProjects: readonly RegisteredProject[];
+  readonly runtime: readonly RuntimeProject[];
+  readonly includeUnregistered: boolean;
+}): ReadonlySet<string> {
+  const names = new Set<string>();
+  for (const p of opts.registryProjects) {
+    names.add(p.name);
+  }
+  if (!opts.includeUnregistered) {
+    return names;
+  }
+  for (const p of opts.runtime) {
+    names.add(p.project);
+  }
+  return names;
+}
+
+async function buildRegisteredProjectView(opts: {
+  readonly name: string;
+  readonly reg: RegisteredProject;
+  readonly runtime: RuntimeProject | null;
+  readonly runtimeOk: boolean;
+  readonly runtimeProjects: readonly RuntimeProject[];
+}): Promise<ProjectView> {
+  const composeMeta = await resolveComposeMeta({
+    projectDir: opts.reg.projectDir,
+  });
+  const running = countRunningServices(opts.runtime);
+  const runtimeStatus = resolveRuntimeStatus({
+    projectDirOk: composeMeta.projectDirOk,
+    composeExists: composeMeta.composeExists,
+    runtimeOk: opts.runtimeOk,
+    running,
+  });
+  const status = resolveProjectStatus({
+    projectDirOk: composeMeta.projectDirOk,
+    runtimeOk: opts.runtimeOk,
+    running,
+  });
+  const branchRuntime = collectBranchRuntime({
+    baseName: opts.name,
+    runtimeProjects: opts.runtimeProjects,
+  });
+  const extensions = composeMeta.projectDirOk
+    ? await resolveProjectExtensions({ projectDir: opts.reg.projectDir })
+    : null;
+
+  return {
+    projectId: opts.reg.id,
+    name: opts.name,
+    devHost: opts.reg.devHost ?? null,
+    repoRoot: opts.reg.repoRoot,
+    projectDir: opts.reg.projectDir,
+    definedServices: composeMeta.definedServices,
+    extensionsEnabled: extensions?.enabled ?? null,
+    features: extensions?.features ?? null,
+    serviceHosts: composeMeta.serviceHosts,
+    runtimeConfigured: composeMeta.composeExists,
+    runtimeStatus,
+    runtime: opts.runtime,
+    branchRuntime,
+    kind: "registered",
+    status,
+  };
+}
+
+function buildUnregisteredProjectView(opts: {
+  readonly name: string;
+  readonly runtime: RuntimeProject | null;
+  readonly runtimeOk: boolean;
+}): ProjectView {
+  const running = countRunningServices(opts.runtime);
+  const runtimeStatus = resolveUnregisteredRuntimeStatus({
+    runtimeOk: opts.runtimeOk,
+    running,
+  });
+
+  return {
+    name: opts.name,
+    devHost: null,
+    repoRoot: null,
+    projectDir: null,
+    definedServices: null,
+    extensionsEnabled: null,
+    features: null,
+    serviceHosts: null,
+    runtimeConfigured: null,
+    runtimeStatus,
+    runtime: opts.runtime,
+    branchRuntime: [],
+    kind: "unregistered",
+    status: "unregistered",
+  };
+}
+
+type ComposeMeta = {
+  readonly projectDirOk: boolean;
+  readonly composeExists: boolean;
+  readonly definedServices: readonly string[] | null;
+  readonly serviceHosts: Readonly<Record<string, readonly string[]>> | null;
+};
+
+async function resolveComposeMeta(opts: {
+  readonly projectDir: string;
+}): Promise<ComposeMeta> {
+  const projectDirOk = await pathExists(opts.projectDir);
+  const composeFile = resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME);
+  const composeExists = projectDirOk && (await pathExists(composeFile));
+  if (!composeExists) {
+    return {
+      projectDirOk,
+      composeExists,
+      definedServices: null,
+      serviceHosts: null,
+    };
+  }
+
+  const [definedServices, serviceHosts] = await Promise.all([
+    readComposeServices({ composeFile }),
+    readComposeServiceHosts({ composeFile }),
+  ]);
+
+  return {
+    projectDirOk,
+    composeExists,
+    definedServices,
+    serviceHosts,
+  };
 }
 
 export function serializeProjectView(

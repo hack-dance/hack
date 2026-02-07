@@ -32,6 +32,7 @@ public enum ProjectTab: String, CaseIterable {
 @MainActor
 public final class DashboardModel {
   public private(set) var projects: [ProjectSummary] = []
+  public private(set) var projectMetaById: [String: ProjectMeta] = [:]
   public private(set) var daemonStatus: DaemonStatus? = nil
   public private(set) var globalStatus: GlobalStatusResponse? = nil
   public private(set) var runtimeOk: Bool? = nil
@@ -98,11 +99,13 @@ public final class DashboardModel {
       lastUpdated = Date()
     }
 
+    let selectedProjectForMeta = selectedProject
     async let projectsTask = fetchProjects()
+    async let metaTask = fetchProjectMeta(for: selectedProjectForMeta)
     async let daemonTask = fetchDaemonStatus()
     async let globalTask = fetchGlobalStatus()
 
-    let errors = await [projectsTask, daemonTask, globalTask].compactMap { $0 }
+    let errors = await [projectsTask, metaTask, daemonTask, globalTask].compactMap { $0 }
     if !errors.isEmpty {
       errorMessage = errors.joined(separator: "\n")
     }
@@ -149,6 +152,18 @@ public final class DashboardModel {
     }
     await runAction(message: "Stopping \(project.name)…") {
       try await self.client.stopProject(path: path)
+    }
+  }
+
+  public func stopSession(sessionName: String) async {
+    let trimmed = sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      errorMessage = "Missing session name"
+      return
+    }
+
+    await runAction(message: "Stopping session…") {
+      try await self.client.stopSession(sessionName: trimmed)
     }
   }
 
@@ -261,6 +276,19 @@ public final class DashboardModel {
       }
       if case let .project(id) = selectedItem, !projects.contains(where: { $0.id == id }) {
         selectedItem = projects.first.map { .project($0.id) } ?? .runtime
+      }
+      return nil
+    } catch {
+      return error.localizedDescription
+    }
+  }
+
+  private func fetchProjectMeta(for project: ProjectSummary?) async -> String? {
+    guard let project else { return nil }
+
+    do {
+      if let meta = try await client.fetchProjectMeta(projectName: project.name) {
+        projectMetaById[project.id] = meta
       }
       return nil
     } catch {

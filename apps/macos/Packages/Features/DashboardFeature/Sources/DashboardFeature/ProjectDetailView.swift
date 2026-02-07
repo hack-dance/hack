@@ -7,14 +7,15 @@ struct ProjectDetailView: View {
   @Environment(\.openURL) private var openURL
 
   let project: ProjectSummary
-  @State private var showOverviewSidebar = true
+  @State private var showInspectorSidebar = true
   @State private var selectedService: String? = nil
   @State private var hoveredService: String? = nil
   @State private var isControlBarHovered = false
   @State private var hoveredControl: ProjectTab? = nil
   @State private var isStartHovered = false
   @State private var isStopHovered = false
-  @State private var showInfoPanel = false
+  @State private var activeSession: MuxSessionSummary? = nil
+  @State private var pendingStopSession: MuxSessionSummary? = nil
 
   var body: some View {
     @Bindable var model = model
@@ -46,58 +47,119 @@ struct ProjectDetailView: View {
     .onChange(of: model.selectedProjectTab) { _, _ in
       ensureSelectedTab()
     }
+    .sheet(item: $activeSession) { session in
+      SessionAttachView(project: project, session: session)
+    }
+    .confirmationDialog(
+      "Stop session?",
+      isPresented: Binding(
+        get: { pendingStopSession != nil },
+        set: { value in
+          if value == false { pendingStopSession = nil }
+        }
+      )
+    ) {
+      Button("Stop", role: .destructive) {
+        guard let session = pendingStopSession else { return }
+        pendingStopSession = nil
+        Task {
+          await model.stopSession(sessionName: session.name)
+          await model.refresh()
+        }
+      }
+      Button("Cancel", role: .cancel) {
+        pendingStopSession = nil
+      }
+    } message: {
+      if let session = pendingStopSession {
+        Text("This will kill \(session.name).")
+      }
+    }
   }
 
   @ViewBuilder
   private var tabContent: some View {
     switch effectiveTab {
     case .overview:
-      overviewContent
+      projectTabContainer {
+        overviewContent
+      }
     case .logs:
-      LogsView(project: project, embedded: true)
+      projectTabContainer {
+        LogsView(project: project, embedded: true)
+      }
     case .shell:
-      ShellView(project: project, embedded: true)
+      projectTabContainer {
+        ShellView(project: project, embedded: true)
+      }
     case .tickets:
-      TicketsView(project: project)
+      projectTabContainer {
+        TicketsView(project: project)
+      }
     }
+  }
+
+  private func projectTabContainer(@ViewBuilder content: () -> some View) -> some View {
+    HStack(alignment: .top, spacing: 0) {
+      content()
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+      if showInspectorSidebar {
+        Divider()
+          .opacity(0.2)
+          .transition(.opacity)
+
+        ProjectInspectorColumn(
+          project: project,
+          meta: projectMeta,
+          selectedService: $selectedService,
+          onAttachSession: { session in
+            activeSession = session
+          },
+          onStopSession: { session in
+            pendingStopSession = session
+          },
+          onShowLogs: {
+            model.showLogs(for: project)
+          },
+          onShowShell: {
+            model.showShell(for: project)
+          }
+        )
+        .frame(
+          minWidth: 260,
+          idealWidth: 320,
+          maxWidth: 380,
+          maxHeight: .infinity,
+          alignment: .topLeading
+        )
+        .transition(.move(edge: .trailing).combined(with: .opacity))
+      }
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    .background(
+      RoundedRectangle(cornerRadius: 18, style: .continuous)
+        .fill(.ultraThinMaterial)
+        .overlay(
+          RoundedRectangle(cornerRadius: 18, style: .continuous)
+            .stroke(Color.white.opacity(0.06), lineWidth: 1)
+        )
+    )
+    .padding(.horizontal, 24)
+    .padding(.bottom, 32)
+    .animation(.easeInOut(duration: 0.2), value: showInspectorSidebar)
   }
 
   private var overviewContent: some View {
     ScrollView {
-      HStack(alignment: .top, spacing: 24) {
-        VStack(alignment: .leading, spacing: 20) {
-          if !project.isRuntimeConfigured {
-            runtimeNotConfiguredCard
-          }
-          servicesSection
-          if showInfoPanel {
-            infoSection
-              .transition(.move(edge: .bottom).combined(with: .opacity))
-          }
+      VStack(alignment: .leading, spacing: 20) {
+        if !project.isRuntimeConfigured {
+          runtimeNotConfiguredCard
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-
-        if showOverviewSidebar, selectedService != nil {
-          Divider()
-            .opacity(0.2)
-            .transition(.opacity)
-          serviceDetailPanel
-            .frame(minWidth: 260, idealWidth: 300, maxWidth: 360, maxHeight: .infinity, alignment: .topLeading)
-            .transition(.move(edge: .trailing).combined(with: .opacity))
-        }
+        servicesSection
       }
       .padding(24)
       .frame(maxWidth: .infinity, alignment: .topLeading)
-      .background(
-        RoundedRectangle(cornerRadius: 18, style: .continuous)
-          .fill(.ultraThinMaterial)
-          .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-              .stroke(Color.white.opacity(0.06), lineWidth: 1)
-          )
-      )
-      .padding(.horizontal, 24)
-      .padding(.bottom, 32)
     }
   }
 
@@ -120,30 +182,16 @@ struct ProjectDetailView: View {
       }
       Spacer()
       primaryActionsBar
-      if effectiveTab == .overview {
-        Button {
-          withAnimation(.easeInOut(duration: 0.2)) {
-            showInfoPanel.toggle()
-          }
-        } label: {
-          Image(systemName: showInfoPanel ? "info.circle.fill" : "info.circle")
-            .font(.mono(.title3))
+      Button {
+        withAnimation(.easeInOut(duration: 0.2)) {
+          showInspectorSidebar.toggle()
         }
-        .buttonStyle(PressableCircleButtonStyle())
-        .accessibilityLabel(showInfoPanel ? "Hide project info" : "Show project info")
+      } label: {
+        Image(systemName: "sidebar.trailing")
+          .font(.mono(.title3))
       }
-      if effectiveTab == .overview {
-        Button {
-          withAnimation(.easeInOut(duration: 0.2)) {
-            showOverviewSidebar.toggle()
-          }
-        } label: {
-          Image(systemName: "sidebar.trailing")
-            .font(.mono(.title3))
-        }
-        .buttonStyle(PressableCircleButtonStyle())
-        .accessibilityLabel(showOverviewSidebar ? "Hide details sidebar" : "Show details sidebar")
-      }
+      .buttonStyle(PressableCircleButtonStyle())
+      .accessibilityLabel(showInspectorSidebar ? "Hide details sidebar" : "Show details sidebar")
     }
   }
 
@@ -299,7 +347,7 @@ struct ProjectDetailView: View {
             .onTapGesture {
               withAnimation(.easeInOut(duration: 0.2)) {
                 selectedService = service
-                showOverviewSidebar = true
+                showInspectorSidebar = true
               }
             }
             .onHover { hovering in
@@ -319,65 +367,6 @@ struct ProjectDetailView: View {
     }
   }
 
-  private var featuresList: [String] {
-    project.features ?? project.extensionsEnabled ?? []
-  }
-
-  private var infoSection: some View {
-    VStack(alignment: .leading, spacing: 16) {
-      if !overviewRows.isEmpty {
-        sectionHeader("Meta")
-        DetailRows(rows: overviewRows)
-      }
-      if !pathRows.isEmpty {
-        sectionHeader("Paths")
-        DetailRows(rows: pathRows)
-      }
-      if !featuresList.isEmpty {
-        sectionHeader("Features")
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 8)], alignment: .leading, spacing: 8) {
-          ForEach(featuresList, id: \.self) { feature in
-            BadgePill(label: feature, tint: .secondary)
-          }
-        }
-      }
-    }
-  }
-
-  private func sectionHeader(_ title: String) -> some View {
-    Text(title)
-      .instrumentLabel()
-  }
-
-  private var serviceDetailPanel: some View {
-    VStack(alignment: .leading, spacing: 12) {
-      HStack {
-        Text("Details")
-          .font(.mono(.headline, weight: .semibold))
-        Spacer()
-        Button("All") {
-          withAnimation(.easeInOut(duration: 0.2)) {
-            self.selectedService = nil
-          }
-        }
-        .font(.mono(.caption))
-        .buttonStyle(PressableIconButtonStyle())
-      }
-      if let selectedService {
-        serviceDetailCard(for: selectedService)
-      }
-    }
-    .padding(16)
-    .background(
-      RoundedRectangle(cornerRadius: 16, style: .continuous)
-        .fill(Color.white.opacity(0.04))
-        .overlay(
-          RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .stroke(Color.white.opacity(0.08), lineWidth: 1)
-        )
-    )
-  }
-
   private var headerHeight: CGFloat {
     56
   }
@@ -394,36 +383,6 @@ struct ProjectDetailView: View {
         )
       )
       .allowsHitTesting(false)
-  }
-
-  private var overviewRows: [DetailRowItem] {
-    var rows: [DetailRowItem] = []
-    if let devHost = project.devHost {
-      rows.append(DetailRowItem(label: "Dev host", value: devHost))
-    }
-    if let featureSummary = project.featureSummary {
-      rows.append(DetailRowItem(label: "Features", value: featureSummary))
-    }
-    if project.isRuntimeConfigured {
-      rows.append(DetailRowItem(label: "Runtime", value: runtimeStatusValue))
-      rows.append(DetailRowItem(label: "Kind", value: project.kind.rawValue))
-      rows.append(DetailRowItem(label: "Status", value: project.status.rawValue))
-    } else {
-      rows.append(DetailRowItem(label: "Runtime", value: "Not configured"))
-      rows.append(DetailRowItem(label: "Kind", value: project.kind.rawValue))
-    }
-    return rows
-  }
-
-  private var pathRows: [DetailRowItem] {
-    var rows: [DetailRowItem] = []
-    if let repoRoot = project.repoRoot {
-      rows.append(DetailRowItem(label: "Repo root", value: repoRoot))
-    }
-    if let projectDir = project.projectDir, projectDir != project.repoRoot {
-      rows.append(DetailRowItem(label: "Project dir", value: projectDir))
-    }
-    return rows
   }
 
   private var devUrl: URL? {
@@ -446,16 +405,12 @@ struct ProjectDetailView: View {
     project.runtimeStatus ?? fallbackRuntimeStatus
   }
 
-  private var runtimeHealthy: Bool? {
-    model.runtimeOverallOk
+  private var projectMeta: ProjectMeta? {
+    project.meta ?? model.projectMetaById[project.id]
   }
 
-  private var runtimeStatusValue: String {
-    let base = project.runtimeStatusLabel
-    if runtimeHealthy == false, runtimeStatus == .running {
-      return "\(base) (degraded)"
-    }
-    return base
+  private var runtimeHealthy: Bool? {
+    model.runtimeOverallOk
   }
 
   private struct ServiceStatus {
@@ -510,66 +465,6 @@ struct ProjectDetailView: View {
     }
     guard let host = project.devHost, !host.isEmpty else { return nil }
     return "\(service).\(host)"
-  }
-
-  private func serviceDetailCard(for service: String) -> some View {
-    let runtime = runtimeServicesByName[service]
-    let containers = runtime?.containers ?? []
-    return VStack(alignment: .leading, spacing: 10) {
-      Text(service)
-        .font(.mono(.subheadline, weight: .semibold))
-      if let hostLabel = serviceHostLabel(for: service) {
-        Button {
-          openServiceHost(hostLabel)
-        } label: {
-          Text(hostLabel)
-            .font(.mono(.caption))
-        }
-        .buttonStyle(.plain)
-        .linkHover()
-      }
-      if let hosts = serviceHostsByName[service], hosts.count > 1 {
-        VStack(alignment: .leading, spacing: 4) {
-          ForEach(hosts, id: \.self) { host in
-            Button {
-              openServiceHost(host)
-            } label: {
-              Text(host)
-                .font(.mono(.caption2))
-            }
-            .buttonStyle(.plain)
-            .linkHover()
-          }
-        }
-      }
-      if let runtime {
-        let runningCount = containers.filter { $0.state.lowercased() == "running" }.count
-          DetailRows(rows: [
-            DetailRowItem(label: "Containers", value: "\(containers.count)"),
-            DetailRowItem(label: "Running", value: "\(runningCount)")
-          ])
-        ForEach(containers, id: \.id) { container in
-          VStack(alignment: .leading, spacing: 6) {
-            Text(container.name)
-              .font(.mono(.caption, weight: .semibold))
-            Text(container.status)
-              .font(.mono(.caption2))
-              .foregroundStyle(.secondary)
-            if !container.ports.isEmpty {
-              Text(container.ports)
-                .font(.mono(.caption2))
-                .foregroundStyle(.tertiary)
-            }
-          }
-          Divider()
-            .opacity(0.2)
-        }
-      } else {
-        Text("No running containers.")
-          .font(.mono(.caption))
-          .foregroundStyle(.secondary)
-      }
-    }
   }
 
   private func openServiceHost(_ host: String) {

@@ -23,6 +23,7 @@ import { startDockerEventWatcher } from "./docker-events.ts";
 import { createDaemonLogger } from "./logger.ts";
 import type { DaemonPaths } from "./paths.ts";
 import { removeFileIfExists, writeDaemonPid } from "./process.ts";
+import { handleEnvRoutes } from "./routes/env.ts";
 import { handleSessionRoutes } from "./routes/sessions.ts";
 import type { RuntimeHealth } from "./runtime-cache.ts";
 import { createRuntimeCache } from "./runtime-cache.ts";
@@ -185,72 +186,7 @@ export async function runDaemon({
       ws: ServerWebSocket<unknown>,
       message: string | Uint8Array
     ) => {
-      const state = ws.data as ControlPlaneWsState | undefined;
-      if (!state) {
-        ws.close(1008, "missing_state");
-        return;
-      }
-      if (state.kind === "job") {
-        const parsed = parseWsMessage({ message });
-        if (!parsed) {
-          ws.send(
-            JSON.stringify({ type: "error", message: "invalid_message" })
-          );
-          return;
-        }
-        if (parsed.type !== "hello") {
-          ws.send(JSON.stringify({ type: "error", message: "expected_hello" }));
-          return;
-        }
-        await startJobStream({
-          ws,
-          state,
-          logsFrom: parsed.logsFrom,
-          eventsFrom: parsed.eventsFrom,
-        });
-        return;
-      }
-
-      const attachment = state.attachment;
-      if (!attachment) {
-        ws.close(1008, "shell_detached");
-        return;
-      }
-
-      const parsed = parseShellClientMessage({ message });
-      if (!parsed) {
-        if (typeof message === "string" && message.length > 0) {
-          attachment.write(message);
-        } else if (message instanceof Uint8Array) {
-          attachment.write(message);
-        }
-        return;
-      }
-
-      if (parsed.type === "hello" || parsed.type === "resize") {
-        if (
-          typeof parsed.cols === "number" &&
-          typeof parsed.rows === "number"
-        ) {
-          attachment.resize(parsed.cols, parsed.rows);
-        }
-        return;
-      }
-
-      if (parsed.type === "input") {
-        attachment.write(parsed.data);
-        return;
-      }
-
-      if (parsed.type === "signal") {
-        attachment.signal(parsed.signal);
-        return;
-      }
-
-      if (parsed.type === "close") {
-        attachment.close();
-        return;
-      }
+      await handleWebSocketMessage({ ws, message });
     },
     close: (ws: ServerWebSocket<unknown>) => {
       const state = ws.data as ControlPlaneWsState | undefined;
@@ -364,10 +300,16 @@ async function handleRequest({
     return controlPlaneResponse;
   }
 
-  // Session routes (tmux session management)
+  // Session routes (mux session management)
   const sessionResponse = await handleSessionRoutes({ req, url });
   if (sessionResponse) {
     return sessionResponse;
+  }
+
+  // Env routes (contract + secrets state)
+  const envResponse = await handleEnvRoutes({ req, url });
+  if (envResponse) {
+    return envResponse;
   }
 
   if (url.pathname === "/v1/status") {
@@ -423,10 +365,14 @@ async function handleRequest({
     const includeUnregistered = parseBoolean({
       value: url.searchParams.get("include_unregistered"),
     });
+    const includeMeta = parseBoolean({
+      value: url.searchParams.get("include_meta"),
+    });
     const payload = await cache.getProjectsPayload({
       filter,
       includeGlobal,
       includeUnregistered,
+      includeMeta,
     });
     return jsonResponse(payload);
   }
@@ -606,10 +552,14 @@ async function handleGatewayRequest(opts: {
     const includeGlobal = parseBoolean({
       value: url.searchParams.get("include_global"),
     });
+    const includeMeta = parseBoolean({
+      value: url.searchParams.get("include_meta"),
+    });
     const payload = await opts.cache.getProjectsPayload({
       filter,
       includeGlobal,
       includeUnregistered: false,
+      includeMeta,
     });
     const filtered = payload.projects.filter((project) => {
       if (!project || typeof project !== "object") {
@@ -1042,6 +992,96 @@ function parseWsMessage(opts: {
     ...(logsFrom !== undefined ? { logsFrom } : {}),
     ...(eventsFrom !== undefined ? { eventsFrom } : {}),
   };
+}
+
+async function handleWebSocketMessage(opts: {
+  readonly ws: ServerWebSocket<unknown>;
+  readonly message: string | Uint8Array;
+}): Promise<void> {
+  const state = opts.ws.data as ControlPlaneWsState | undefined;
+  if (!state) {
+    opts.ws.close(1008, "missing_state");
+    return;
+  }
+
+  if (state.kind === "job") {
+    await handleJobStreamWsMessage({
+      ws: opts.ws,
+      state,
+      message: opts.message,
+    });
+    return;
+  }
+
+  const attachment = state.attachment;
+  if (!attachment) {
+    opts.ws.close(1008, "shell_detached");
+    return;
+  }
+
+  handleShellStreamWsMessage({
+    attachment,
+    message: opts.message,
+  });
+}
+
+async function handleJobStreamWsMessage(opts: {
+  readonly ws: ServerWebSocket<unknown>;
+  readonly state: JobStreamState;
+  readonly message: string | Uint8Array;
+}): Promise<void> {
+  const parsed = parseWsMessage({ message: opts.message });
+  if (!parsed) {
+    opts.ws.send(JSON.stringify({ type: "error", message: "invalid_message" }));
+    return;
+  }
+
+  await startJobStream({
+    ws: opts.ws,
+    state: opts.state,
+    logsFrom: parsed.logsFrom,
+    eventsFrom: parsed.eventsFrom,
+  });
+}
+
+function handleShellStreamWsMessage(opts: {
+  readonly attachment: ShellAttachment;
+  readonly message: string | Uint8Array;
+}): void {
+  const parsed = parseShellClientMessage({ message: opts.message });
+  if (!parsed) {
+    if (typeof opts.message === "string" && opts.message.length > 0) {
+      opts.attachment.write(opts.message);
+    } else if (opts.message instanceof Uint8Array) {
+      opts.attachment.write(opts.message);
+    }
+    return;
+  }
+
+  switch (parsed.type) {
+    case "hello":
+    case "resize": {
+      if (typeof parsed.cols === "number" && typeof parsed.rows === "number") {
+        opts.attachment.resize(parsed.cols, parsed.rows);
+      }
+      return;
+    }
+    case "input": {
+      opts.attachment.write(parsed.data);
+      return;
+    }
+    case "signal": {
+      opts.attachment.signal(parsed.signal);
+      return;
+    }
+    case "close": {
+      opts.attachment.close();
+      return;
+    }
+    default: {
+      return;
+    }
+  }
 }
 
 type ShellClientMessage =

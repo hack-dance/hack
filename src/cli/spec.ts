@@ -4,6 +4,7 @@ import { branchCommand } from "../commands/branch.ts";
 import { configCommand } from "../commands/config.ts";
 import { daemonCommand } from "../commands/daemon.ts";
 import { doctorCommand } from "../commands/doctor.ts";
+import { envCommand } from "../commands/env.ts";
 import { gatewayCommand } from "../commands/gateway.ts";
 import { globalCommand } from "../commands/global.ts";
 import { helpCommand } from "../commands/help.ts";
@@ -67,6 +68,7 @@ export const CLI_SPEC = defineCli({
     daemonCommand,
     theCommand,
     secretsCommand,
+    envCommand,
     configCommand,
     mcpCommand,
     setupCommand,

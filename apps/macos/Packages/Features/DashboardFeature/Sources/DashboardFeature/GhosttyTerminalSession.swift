@@ -12,6 +12,7 @@ final class GhosttyTerminalSession {
   enum Mode {
     case logs(path: String)
     case shell(workingDirectory: URL)
+    case sessionAttach(sessionName: String, workingDirectory: URL?)
   }
 
   let project: ProjectSummary
@@ -33,10 +34,14 @@ final class GhosttyTerminalSession {
   private var lastRows = 32
 
   var allowsInput: Bool {
-    if case .shell = mode {
+    switch mode {
+    case .shell:
       return true
+    case .sessionAttach:
+      return true
+    case .logs:
+      return false
     }
-    return false
   }
 
   init(project: ProjectSummary) {
@@ -107,7 +112,14 @@ final class GhosttyTerminalSession {
         }
       }
       self.pty = pty
-      statusMessage = allowsInput ? "Shell ready" : "Streaming logs…"
+      switch mode {
+      case .shell:
+        statusMessage = "Shell ready"
+      case .logs:
+        statusMessage = "Streaming logs…"
+      case let .sessionAttach(sessionName, _):
+        statusMessage = "Attached: \(sessionName)"
+      }
       startRefreshLoop()
     } catch {
       statusMessage = "Failed to start session: \(error.localizedDescription)"
@@ -279,6 +291,31 @@ final class GhosttyTerminalSession {
       return (
         executableURL: URL(fileURLWithPath: "/usr/bin/env"),
         arguments: ["zsh", "-l"],
+        environment: environment,
+        workingDirectory: workingDirectory
+      )
+    case let .sessionAttach(sessionName, workingDirectory):
+      if sessionName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        return (
+          executableURL: URL(fileURLWithPath: "/usr/bin/env"),
+          arguments: ["echo", "Missing session name"],
+          environment: environment,
+          workingDirectory: workingDirectory
+        )
+      }
+
+      if let hackPath = HackCLILocator.resolveHackExecutable(in: environment) {
+        return (
+          executableURL: URL(fileURLWithPath: hackPath),
+          arguments: ["session", "attach", sessionName],
+          environment: environment,
+          workingDirectory: workingDirectory
+        )
+      }
+
+      return (
+        executableURL: URL(fileURLWithPath: "/usr/bin/env"),
+        arguments: ["hack", "session", "attach", sessionName],
         environment: environment,
         workingDirectory: workingDirectory
       )

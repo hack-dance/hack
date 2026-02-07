@@ -24,3 +24,4 @@
 {"actor":"hack@mac.lan","eventId":"89406786-913a-4b28-86a8-703e34c3a634","payload":{"status":"done"},"projectName":"hack-cli","ticketId":"T-00089","ts":1770432858,"tsIso":"2026-02-07T02:54:18.000Z","type":"ticket.status_changed"}
 {"actor":"hack@mac.lan","eventId":"ba5c393e-4ec5-4089-8081-34e0f59a2f6b","payload":{"status":"done"},"projectName":"hack-cli","ticketId":"T-00090","ts":1770432861,"tsIso":"2026-02-07T02:54:21.000Z","type":"ticket.status_changed"}
 {"actor":"hack@mac.lan","eventId":"2930a29a-b10b-4354-8ced-85ef03ffe759","payload":{"status":"done"},"projectName":"hack-cli","ticketId":"T-00091","ts":1770432864,"tsIso":"2026-02-07T02:54:24.000Z","type":"ticket.status_changed"}
+{"actor":"hack@mac.lan","eventId":"2faac822-ee32-44b6-b3ea-e95e51ea5e03","payload":{"status":"done"},"projectName":"hack-cli","ticketId":"T-00092","ts":1770432868,"tsIso":"2026-02-07T02:54:28.000Z","type":"ticket.status_changed"}

@@ -3,16 +3,103 @@ import SwiftUI
 
 import HackDesktopModels
 
-
 public struct DashboardView: View {
   @Environment(DashboardModel.self) private var model
   @State private var showCommandPalette = false
+  @State private var showTerminalDrawer = false
+  @State private var terminalDrawerHeight: CGFloat = 360
+  @State private var terminalDrawerInitialHeight: CGFloat? = nil
+  @State private var terminalDrawerModel = TerminalDrawerModel(globalShellProject: Self.makeGlobalShellProject())
 
   public init() {}
 
   public var body: some View {
     @Bindable var model = model
 
+    GeometryReader { proxy in
+      VSplitView {
+        mainSplitView
+          .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+        if showTerminalDrawer {
+          terminalDrawer
+            .frame(maxHeight: proxy.size.height * 0.92)
+            .onPreferenceChange(TerminalDrawerView.heightPreferenceKey) { newHeight in
+              // Let users drag the split divider all the way down to close.
+              let closeThreshold: CGFloat = 84
+              if newHeight > 0, newHeight < closeThreshold, showTerminalDrawer {
+                showTerminalDrawer = false
+                return
+              }
+              if newHeight > closeThreshold {
+                terminalDrawerHeight = newHeight
+              }
+            }
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
+      }
+      // Attach toolbar at the window root. Nested toolbars inside split views can disappear
+      // when additional container views are introduced (e.g. a bottom terminal panel).
+      .toolbar {
+        ToolbarItem(placement: .principal) {
+          GlobalStatusStrip(placement: .titlebar)
+            .frame(maxWidth: .infinity, alignment: .center)
+        }
+        ToolbarItem(placement: .primaryAction) {
+          ToolbarIconButton(
+            systemImage: "terminal",
+            help: "Toggle terminal",
+            accessibilityLabel: "Toggle terminal",
+            action: {
+              if showTerminalDrawer {
+                showTerminalDrawer = false
+              } else {
+                terminalDrawerInitialHeight = terminalDrawerHeight
+                showTerminalDrawer = true
+              }
+            }
+          )
+        }
+      }
+      .navigationTitle("")
+      .toolbarTitleDisplayMode(.inline)
+      .adaptiveWindowBackground()
+      .tuneWindowToolbar()
+      .task {
+        model.start()
+      }
+      .onReceive(NotificationCenter.default.publisher(for: .hackCommandPaletteRequested)) { _ in
+        showCommandPalette = true
+      }
+      .onReceive(NotificationCenter.default.publisher(for: .hackRefreshRequested)) { _ in
+        Task { await model.refresh() }
+      }
+      .onReceive(NotificationCenter.default.publisher(for: .hackTerminalOpenRequested)) { notification in
+        guard
+          let userInfo = notification.userInfo,
+          let projectId = userInfo[TerminalOpenRequest.projectIdKey] as? String,
+          let kindRaw = userInfo[TerminalOpenRequest.kindKey] as? String,
+          let kind = TerminalDrawerModel.Kind(rawValue: kindRaw)
+        else {
+          return
+        }
+        guard let project = model.projects.first(where: { $0.id == projectId }) else { return }
+
+        if !showTerminalDrawer {
+          terminalDrawerInitialHeight = terminalDrawerHeight
+          showTerminalDrawer = true
+        }
+        terminalDrawerModel.openOrSelect(project: project, kind: kind)
+      }
+      .sheet(isPresented: $showCommandPalette) {
+        CommandPaletteView()
+          .environment(model)
+      }
+      .animation(.easeInOut(duration: 0.18), value: showTerminalDrawer)
+    }
+  }
+
+  private var mainSplitView: some View {
     NavigationSplitView {
       sidebar
     } detail: {
@@ -22,28 +109,49 @@ public struct DashboardView: View {
     }
     .navigationSplitViewStyle(.balanced)
     .navigationSplitViewColumnWidth(min: 240, ideal: 320, max: 460)
-    .toolbar {
-      ToolbarItem(placement: .principal) {
-        GlobalStatusStrip(placement: .titlebar)
-          .frame(maxWidth: .infinity, alignment: .leading)
+    .controlSize(.small)
+  }
+
+  @ViewBuilder
+  private var terminalDrawer: some View {
+    let drawer = TerminalDrawerView(
+      title: "Terminal",
+      model: terminalDrawerModel,
+      onClose: { showTerminalDrawer = false }
+    )
+    .frame(minHeight: 0)
+    .onAppear {
+      // Only apply an initial idealHeight once to avoid fighting the native split-view drag.
+      DispatchQueue.main.async {
+        terminalDrawerInitialHeight = nil
       }
     }
-    .navigationTitle("")
-    .toolbarTitleDisplayMode(.inline)
-    .adaptiveWindowBackground()
-    .task {
-      model.start()
+
+    if let initialHeight = terminalDrawerInitialHeight {
+      drawer.frame(idealHeight: initialHeight)
+    } else {
+      drawer
     }
-    .onReceive(NotificationCenter.default.publisher(for: .hackCommandPaletteRequested)) { _ in
-      showCommandPalette = true
-    }
-    .onReceive(NotificationCenter.default.publisher(for: .hackRefreshRequested)) { _ in
-      Task { await model.refresh() }
-    }
-    .sheet(isPresented: $showCommandPalette) {
-      CommandPaletteView()
-        .environment(model)
-    }
+  }
+
+  private static func makeGlobalShellProject() -> ProjectSummary {
+    ProjectSummary(
+      projectId: "global-shell",
+      name: "Global Shell",
+      devHost: nil,
+      repoRoot: FileManager.default.homeDirectoryForCurrentUser.path,
+      projectDir: nil,
+      definedServices: nil,
+      extensionsEnabled: nil,
+      features: nil,
+      serviceHosts: nil,
+      runtimeConfigured: nil,
+      runtimeStatus: nil,
+      runtime: nil,
+      meta: nil,
+      kind: .unregistered,
+      status: .unknown
+    )
   }
 
   private var sidebar: some View {
@@ -299,3 +407,4 @@ public struct DashboardView: View {
     }
   }
 }
+

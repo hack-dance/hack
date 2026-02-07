@@ -92,12 +92,12 @@ struct CommandPaletteView: View {
       if project.isRuntimeConfigured {
         actions.append(
           CommandPaletteAction(title: "Project: Logs", subtitle: project.name) {
-            model.selectedProjectTab = .logs
+            model.showLogs(for: project)
           }
         )
         actions.append(
           CommandPaletteAction(title: "Project: Shell", subtitle: project.name) {
-            model.selectedProjectTab = .shell
+            model.showShell(for: project)
           }
         )
       }

@@ -122,7 +122,7 @@ struct GhosttyTerminalTextView: NSViewRepresentable {
   }
 
   func updateNSView(_ nsView: TerminalRenderView, context: Context) {
-    context.coordinator.session = session
+    context.coordinator.setSession(session)
     context.coordinator.ensureFocus(in: nsView)
     context.coordinator.updateSize(in: nsView)
 
@@ -141,6 +141,19 @@ struct GhosttyTerminalTextView: NSViewRepresentable {
     private var lastRows: Int = 0
     private let fontConfig = TerminalFontConfig.loadFromGhosttyConfig()
     private lazy var baseFont: NSFont = fontConfig.resolveFont()
+
+    func setSession(_ newSession: GhosttyTerminalSession) {
+      if let existing = session, existing === newSession {
+        session = newSession
+        return
+      }
+
+      session = newSession
+      lastRenderVersion = -1
+      lastCols = 0
+      lastRows = 0
+      renderView?.snapshot = nil
+    }
 
     func handleKey(_ event: NSEvent) {
       guard let session else { return }

@@ -169,12 +169,32 @@ public final class DashboardModel {
 
   public func showLogs(for project: ProjectSummary) {
     selectedItem = .project(project.id)
-    selectedProjectTab = .logs
+    if selectedProjectTab == .logs {
+      selectedProjectTab = .overview
+    }
+    NotificationCenter.default.post(
+      name: .hackTerminalOpenRequested,
+      object: nil,
+      userInfo: [
+        TerminalOpenRequest.projectIdKey: project.id,
+        TerminalOpenRequest.kindKey: TerminalDrawerModel.Kind.logs.rawValue
+      ]
+    )
   }
 
   public func showShell(for project: ProjectSummary) {
     selectedItem = .project(project.id)
-    selectedProjectTab = .shell
+    if selectedProjectTab == .shell {
+      selectedProjectTab = .overview
+    }
+    NotificationCenter.default.post(
+      name: .hackTerminalOpenRequested,
+      object: nil,
+      userInfo: [
+        TerminalOpenRequest.projectIdKey: project.id,
+        TerminalOpenRequest.kindKey: TerminalDrawerModel.Kind.shell.rawValue
+      ]
+    )
   }
 
   public func showTickets(for project: ProjectSummary) {

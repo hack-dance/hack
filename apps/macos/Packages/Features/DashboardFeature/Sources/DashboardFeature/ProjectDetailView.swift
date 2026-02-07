@@ -86,16 +86,40 @@ struct ProjectDetailView: View {
       }
     case .logs:
       projectTabContainer {
-        LogsView(project: project, embedded: true)
+        terminalMovedCard(kind: .logs)
       }
     case .shell:
       projectTabContainer {
-        ShellView(project: project, embedded: true)
+        terminalMovedCard(kind: .shell)
       }
     case .tickets:
       projectTabContainer {
         TicketsView(project: project)
       }
+    }
+  }
+
+  private func terminalMovedCard(kind: TerminalDrawerModel.Kind) -> some View {
+    VStack(alignment: .leading, spacing: 12) {
+      ContentUnavailableView(
+        kind == .logs ? "Logs moved to Terminal Drawer" : "Shell moved to Terminal Drawer",
+        systemImage: kind == .logs ? "text.alignleft" : "terminal"
+      )
+      Button(kind == .logs ? "Open Logs" : "Open Shell") {
+        openTerminal(kind: kind)
+      }
+      .adaptiveToolbarButton()
+    }
+    .padding(24)
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+  }
+
+  private func openTerminal(kind: TerminalDrawerModel.Kind) {
+    switch kind {
+    case .logs:
+      model.showLogs(for: project)
+    case .shell:
+      model.showShell(for: project)
     }
   }
 
@@ -494,7 +518,8 @@ struct ProjectDetailView: View {
   private var availableTabs: [ProjectTab] {
     var tabs: [ProjectTab] = [.overview]
     if project.isRuntimeConfigured {
-      tabs.append(contentsOf: [.logs, .shell])
+      tabs.append(.logs)
+      tabs.append(.shell)
     }
     if project.supportsTickets {
       tabs.append(.tickets)
@@ -520,7 +545,14 @@ struct ProjectDetailView: View {
       HStack(spacing: 6) {
         ForEach(availableTabs, id: \.self) { tab in
           Button {
-            model.selectedProjectTab = tab
+            switch tab {
+            case .logs:
+              openTerminal(kind: .logs)
+            case .shell:
+              openTerminal(kind: .shell)
+            case .overview, .tickets:
+              model.selectedProjectTab = tab
+            }
           } label: {
             Image(systemName: tabIcon(tab))
               .font(.mono(.caption, weight: .semibold))

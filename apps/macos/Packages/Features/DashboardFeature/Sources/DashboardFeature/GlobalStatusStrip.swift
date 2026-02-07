@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 import HackDesktopModels
@@ -9,6 +10,7 @@ enum GlobalStatusPlacement {
 
 struct GlobalStatusStrip: View {
   @Environment(DashboardModel.self) private var model
+  @Environment(\.colorScheme) private var colorScheme
   let placement: GlobalStatusPlacement
 
   init(placement: GlobalStatusPlacement = .content) {
@@ -16,43 +18,102 @@ struct GlobalStatusStrip: View {
   }
 
   var body: some View {
-    HStack(spacing: placement == .titlebar ? 8 : 10) {
+    HStack(spacing: placement == .titlebar ? 10 : 10) {
       selectorPill
-      Spacer()
+      if placement != .titlebar {
+        Spacer()
+      }
       statusCluster
       if let lastUpdatedText, placement == .titlebar {
         Text(lastUpdatedText)
           .font(.mono(.caption2))
           .foregroundStyle(.secondary)
       }
-      Divider()
-        .frame(height: 14)
-        .opacity(0.3)
+      if placement == .titlebar {
+        Divider()
+          .frame(height: 14)
+          .opacity(0.25)
+      }
       Menu {
         Button("Refresh") {
           Task { await model.refresh() }
         }
-        Divider()
-        if canStopDaemon {
-          Button("Stop hackd") {
-            Task { await model.stopDaemon() }
+
+        if let project = selectedProject {
+          Divider()
+
+          Menu("Project") {
+            if canStopProject(project) {
+              Button("Stop") {
+                Task { await model.stopProject(project) }
+              }
+            } else if canStartProject(project) {
+              Button("Start") {
+                Task { await model.startProject(project) }
+              }
+            }
+
+            if let url = devUrl(for: project) {
+              Button("Open in Browser") {
+                NSWorkspace.shared.open(url)
+              }
+            }
+
+            Divider()
+
+            Button("View Logs") {
+              openTerminal(project: project, kind: .logs)
+            }
+            Button("Open Shell") {
+              openTerminal(project: project, kind: .shell)
+            }
+
+            if project.supportsTickets {
+              Divider()
+              Button("Open Tickets") {
+                model.selectedItem = .project(project.id)
+                model.selectedProjectTab = .tickets
+              }
+            }
           }
-        } else if canStartDaemon {
-          Button("Start hackd") {
-            Task { await model.startDaemon() }
+        }
+
+        Divider()
+
+        Menu("Daemon") {
+          if canStopDaemon {
+            Button("Stop hackd") {
+              Task { await model.stopDaemon() }
+            }
+          } else if canStartDaemon {
+            Button("Start hackd") {
+              Task { await model.startDaemon() }
+            }
           }
         }
       } label: {
         Image(systemName: "ellipsis")
-          .font(.mono(.title3))
+          .font(.system(size: 12, weight: .semibold))
+          .foregroundStyle(.primary.opacity(0.85))
+          .frame(width: 22, height: 22)
+          .background(
+            Circle()
+              .strokeBorder(
+                colorScheme == .dark ? Color.white.opacity(0.14) : Color.black.opacity(0.10),
+                lineWidth: 1
+              )
+              .background(Circle().fill(Color.clear))
+          )
+          .contentShape(Circle())
       }
       .menuStyle(.borderlessButton)
-      .buttonStyle(PressableCircleButtonStyle())
-      .padding(.leading, 2)
+      .menuIndicator(.hidden)
+      .buttonStyle(.plain)
     }
-    .padding(.vertical, placement == .titlebar ? 2 : 6)
-    .padding(.leading, placement == .titlebar ? 10 : 0)
-    .padding(.trailing, placement == .titlebar ? 8 : 0)
+    .frame(minHeight: placement == .titlebar ? 30 : 0)
+    .padding(.horizontal, placement == .titlebar ? 10 : 0)
+    .padding(.vertical, placement == .titlebar ? 4 : 6)
+    .background(titlebarPillBackground)
   }
 
   private var selectorPill: some View {
@@ -75,22 +136,72 @@ struct GlobalStatusStrip: View {
           .font(.mono(.caption, weight: .semibold))
         Text(selectorLabel)
           .font(.mono(.caption, weight: .semibold))
+          .lineLimit(1)
         Image(systemName: "chevron.down")
-          .font(.mono(.caption2, weight: .semibold))
+          .font(.system(size: 10, weight: .semibold))
           .foregroundStyle(.secondary)
+          .offset(y: 0.5)
       }
-      .padding(.horizontal, 12)
-      .padding(.vertical, 6)
-      .background(
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
-          .fill(.ultraThinMaterial)
-          .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-              .stroke(Color.white.opacity(0.08), lineWidth: 1)
-          )
-      )
+      .frame(minWidth: placement == .titlebar ? 160 : 0, alignment: .leading)
+      .padding(.horizontal, placement == .titlebar ? 4 : 12)
+      .padding(.vertical, placement == .titlebar ? 2 : 6)
+      .background(selectorBackground)
     }
     .menuStyle(.borderlessButton)
+    .menuIndicator(.hidden)
+  }
+
+  @ViewBuilder
+  private var selectorBackground: some View {
+    if placement == .titlebar {
+      EmptyView()
+    } else {
+      selectorPillBackground
+    }
+  }
+
+  @ViewBuilder
+  private var titlebarPillBackground: some View {
+    if placement == .titlebar {
+      RoundedRectangle(cornerRadius: 999, style: .continuous)
+        .fill(colorScheme == .dark ? AnyShapeStyle(.regularMaterial) : AnyShapeStyle(Color.white.opacity(0.78)))
+        .overlay(
+          RoundedRectangle(cornerRadius: 999, style: .continuous)
+            .strokeBorder(
+              colorScheme == .dark ? Color.white.opacity(0.10) : Color.black.opacity(0.08),
+              lineWidth: 1
+            )
+        )
+        .shadow(color: Color.black.opacity(0.10), radius: 18, x: 0, y: 10)
+    } else {
+      EmptyView()
+    }
+  }
+
+  @ViewBuilder
+  private var selectorPillBackground: some View {
+    if colorScheme == .dark {
+      RoundedRectangle(cornerRadius: 12, style: .continuous)
+        .fill(.regularMaterial)
+        .overlay(
+          RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .strokeBorder(Color.white.opacity(0.10), lineWidth: 1)
+        )
+    } else if #available(macOS 26, *) {
+      RoundedRectangle(cornerRadius: 12, style: .continuous)
+        .fill(Color.white.opacity(0.90))
+        .overlay(
+          RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .strokeBorder(Color.black.opacity(0.10), lineWidth: 1)
+        )
+    } else {
+      RoundedRectangle(cornerRadius: 12, style: .continuous)
+        .fill(.ultraThinMaterial)
+        .overlay(
+          RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+        )
+    }
   }
 
   @ViewBuilder
@@ -197,6 +308,41 @@ struct GlobalStatusStrip: View {
     daemonIsRunning || daemonIsStarting
   }
 
+  private var selectedProject: ProjectSummary? {
+    guard case let .project(id) = model.selectedItem else { return nil }
+    return model.projects.first(where: { $0.id == id })
+  }
+
+  private func canStartProject(_ project: ProjectSummary) -> Bool {
+    project.isRuntimeConfigured
+      && (project.status == .stopped || project.status == .unknown || project.status == .unregistered)
+  }
+
+  private func canStopProject(_ project: ProjectSummary) -> Bool {
+    project.isRuntimeConfigured && project.status == .running
+  }
+
+  private func devUrl(for project: ProjectSummary) -> URL? {
+    guard let host = project.devHost?.trimmingCharacters(in: .whitespacesAndNewlines), !host.isEmpty else {
+      return nil
+    }
+    if host.contains("://") {
+      return URL(string: host)
+    }
+    return URL(string: "https://\(host)")
+  }
+
+  private func openTerminal(project: ProjectSummary, kind: TerminalDrawerModel.Kind) {
+    NotificationCenter.default.post(
+      name: .hackTerminalOpenRequested,
+      object: nil,
+      userInfo: [
+        TerminalOpenRequest.projectIdKey: project.id,
+        TerminalOpenRequest.kindKey: kind.rawValue
+      ]
+    )
+  }
+
   private var selectorLabel: String {
     if case let .project(id) = model.selectedItem,
        let project = model.projects.first(where: { $0.id == id }) {
@@ -236,3 +382,4 @@ struct GlobalStatusStrip: View {
     }
   }
 }
+

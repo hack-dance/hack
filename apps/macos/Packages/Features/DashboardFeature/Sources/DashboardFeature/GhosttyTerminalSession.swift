@@ -17,6 +17,7 @@ final class GhosttyTerminalSession {
 
   let project: ProjectSummary
   let mode: Mode
+  private let initialCommand: String?
 
   var snapshot: GhosttyRenderSnapshot? = nil
   var renderVersion: Int = 0
@@ -30,6 +31,7 @@ final class GhosttyTerminalSession {
   private var isStarted = false
   private var hasReceivedInitialSize = false
   private var pendingStart = false
+  private var hasSentInitialCommand = false
   private var lastCols = 120
   private var lastRows = 32
 
@@ -51,12 +53,14 @@ final class GhosttyTerminalSession {
     } else {
       self.mode = .logs(path: "")
     }
+    self.initialCommand = nil
     configureTerminal()
   }
 
-  init(project: ProjectSummary, mode: Mode) {
+  init(project: ProjectSummary, mode: Mode, initialCommand: String? = nil) {
     self.project = project
     self.mode = mode
+    self.initialCommand = initialCommand
     configureTerminal()
   }
 
@@ -82,6 +86,7 @@ final class GhosttyTerminalSession {
     }
 
     isStarted = true
+    hasSentInitialCommand = false
     guard isAvailable else { return }
 
     var environment = buildEnvironment()
@@ -112,6 +117,7 @@ final class GhosttyTerminalSession {
         }
       }
       self.pty = pty
+      sendInitialCommandIfNeeded()
       switch mode {
       case .shell:
         statusMessage = "Shell ready"
@@ -132,6 +138,7 @@ final class GhosttyTerminalSession {
     pty?.terminate()
     pty = nil
     isStarted = false
+    hasSentInitialCommand = false
   }
 
   func resize(cols: Int, rows: Int) {
@@ -169,6 +176,16 @@ final class GhosttyTerminalSession {
   private func feed(_ data: Data) {
     terminal?.feed(data)
     hasPendingRefresh = true
+  }
+
+  private func sendInitialCommandIfNeeded() {
+    guard let pty else { return }
+    guard !hasSentInitialCommand else { return }
+    hasSentInitialCommand = true
+
+    let trimmed = initialCommand?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    guard !trimmed.isEmpty else { return }
+    pty.send(Data("\(trimmed)\n".utf8))
   }
 
   private func startRefreshLoop() {

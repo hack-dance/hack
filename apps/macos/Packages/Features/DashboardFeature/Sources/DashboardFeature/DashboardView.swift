@@ -3,6 +3,7 @@ import SwiftUI
 
 import HackDesktopModels
 
+
 public struct DashboardView: View {
   @Environment(DashboardModel.self) private var model
   @State private var showCommandPalette = false
@@ -23,19 +24,19 @@ public struct DashboardView: View {
 
         if showTerminalDrawer {
           terminalDrawer
-            .frame(maxHeight: proxy.size.height * 0.92)
-            .onPreferenceChange(TerminalDrawerView.heightPreferenceKey) { newHeight in
-              // Let users drag the split divider all the way down to close.
-              let closeThreshold: CGFloat = 84
-              if newHeight > 0, newHeight < closeThreshold, showTerminalDrawer {
-                showTerminalDrawer = false
-                return
-              }
-              if newHeight > closeThreshold {
-                terminalDrawerHeight = newHeight
-              }
+          .frame(maxHeight: proxy.size.height * 0.92)
+          .onPreferenceChange(TerminalDrawerView.heightPreferenceKey) { newHeight in
+            // Let users drag the split divider all the way down to close.
+            let closeThreshold: CGFloat = 84
+            if newHeight > 0, newHeight < closeThreshold, showTerminalDrawer {
+              showTerminalDrawer = false
+              return
             }
-            .transition(.move(edge: .bottom).combined(with: .opacity))
+            if newHeight > closeThreshold {
+              terminalDrawerHeight = newHeight
+            }
+          }
+          .transition(.move(edge: .bottom).combined(with: .opacity))
         }
       }
       // Attach toolbar at the window root. Nested toolbars inside split views can disappear
@@ -132,6 +133,10 @@ public struct DashboardView: View {
     } else {
       drawer
     }
+  }
+
+  private var globalShellProject: ProjectSummary {
+    Self.makeGlobalShellProject()
   }
 
   private static func makeGlobalShellProject() -> ProjectSummary {
@@ -407,4 +412,3 @@ public struct DashboardView: View {
     }
   }
 }
-

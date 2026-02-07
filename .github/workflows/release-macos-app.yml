@@ -109,6 +109,87 @@ jobs:
             cp -R "$RELEASE_DIR/binaries" "$BUNDLE_DIR/binaries"
           fi
 
+      - name: Install Zig (0.15.2)
+        run: |
+          set -euo pipefail
+          ZIG_VERSION="0.15.2"
+
+          HOST_ARCH="$(uname -m)"
+          if [ "$HOST_ARCH" = "arm64" ] || [ "$HOST_ARCH" = "aarch64" ]; then
+            ZIG_ARCH="aarch64"
+          elif [ "$HOST_ARCH" = "x86_64" ] || [ "$HOST_ARCH" = "amd64" ]; then
+            ZIG_ARCH="x86_64"
+          else
+            echo "Unsupported host arch: $HOST_ARCH"
+            exit 1
+          fi
+
+          URL="https://ziglang.org/download/${ZIG_VERSION}/zig-macos-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz"
+          curl -fsSL "$URL" -o "$RUNNER_TEMP/zig.tar.xz"
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP/zig"
+
+          ZIG_BIN="$(find "$RUNNER_TEMP/zig" -maxdepth 2 -type f -name zig | head -n 1)"
+          if [ -z "$ZIG_BIN" ]; then
+            echo "Failed to locate zig binary after extracting."
+            exit 1
+          fi
+
+          echo "$(dirname "$ZIG_BIN")" >> "$GITHUB_PATH"
+          zig version
+
+      - name: Build Ghostty VT dylib (universal)
+        run: |
+          set -euo pipefail
+
+          VENDOR_DIR="apps/macos/vendor/ghostty"
+          BRIDGE_DIR="apps/macos/Experiments/GhosttyVTBridge"
+          OUT_DIR="apps/macos/App/GhosttyVT/ghostty/lib"
+          OUT_LIB="$OUT_DIR/libhack_ghostty_vt.dylib"
+
+          if [ ! -d "$VENDOR_DIR" ]; then
+            echo "Missing vendor ghostty dir: $VENDOR_DIR"
+            exit 1
+          fi
+
+          mkdir -p "$OUT_DIR"
+
+          # Patch Ghostty's lib_vt.zig for our C ABI bridge.
+          python3 - <<'PY'
+          import pathlib
+
+          lib_vt = pathlib.Path("apps/macos/vendor/ghostty/src/lib_vt.zig")
+          text = lib_vt.read_text(encoding="utf-8")
+          guard = 'if (@import("root") == lib) {'
+          patched = 'if (@import("root") == lib and terminal.options.c_abi) {'
+          if guard in text and patched not in text:
+            text = text.replace(guard, patched)
+          if "@export(&" in text:
+            text = text.replace("@export(&", "@export(")
+          lib_vt.write_text(text, encoding="utf-8")
+          PY
+
+          mkdir -p "$RUNNER_TEMP/ghosttyvt/arm64" "$RUNNER_TEMP/ghosttyvt/x86_64"
+
+          pushd "$BRIDGE_DIR" >/dev/null
+          GHOSTTY_DIR="$GITHUB_WORKSPACE/$VENDOR_DIR"
+
+          zig build -Dghostty="$GHOSTTY_DIR" -Doptimize=ReleaseSafe -Dtarget=aarch64-macos --prefix "$RUNNER_TEMP/ghosttyvt/arm64"
+          zig build -Dghostty="$GHOSTTY_DIR" -Doptimize=ReleaseSafe -Dtarget=x86_64-macos --prefix "$RUNNER_TEMP/ghosttyvt/x86_64"
+          popd >/dev/null
+
+          ARM_LIB="$RUNNER_TEMP/ghosttyvt/arm64/lib/libhack_ghostty_vt.dylib"
+          X64_LIB="$RUNNER_TEMP/ghosttyvt/x86_64/lib/libhack_ghostty_vt.dylib"
+
+          if [ ! -f "$ARM_LIB" ] || [ ! -f "$X64_LIB" ]; then
+            echo "Missing built libs: $ARM_LIB / $X64_LIB"
+            ls -la "$RUNNER_TEMP/ghosttyvt/arm64/lib" || true
+            ls -la "$RUNNER_TEMP/ghosttyvt/x86_64/lib" || true
+            exit 1
+          fi
+
+          lipo -create "$ARM_LIB" "$X64_LIB" -output "$OUT_LIB"
+
       - name: Install xcodegen
         run: brew install xcodegen
 
@@ -184,6 +265,23 @@ jobs:
             "$BUNDLED_HACK"
 
           codesign -vvv "$BUNDLED_HACK"
+
+      - name: Codesign Ghostty VT dylib
+        env:
+          GHOSTTY_VT: apps/macos/App/GhosttyVT/ghostty/lib/libhack_ghostty_vt.dylib
+        run: |
+          set -euo pipefail
+          if [ ! -f "$GHOSTTY_VT" ]; then
+            echo "Missing Ghostty VT dylib: $GHOSTTY_VT"
+            exit 1
+          fi
+
+          codesign --force --options runtime --timestamp \
+            --sign "$CODESIGN_IDENTITY_HASH" \
+            --keychain "$KEYCHAIN_PATH" \
+            "$GHOSTTY_VT"
+
+          codesign -vvv "$GHOSTTY_VT"
 
       - name: Build and archive
         working-directory: ${{ env.PROJECT_PATH }}

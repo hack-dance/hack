@@ -119,8 +119,10 @@ extension View {
     if #available(macOS 26, *) {
       self
         .background(.clear)
+        // Keep the toolbar visible, but visually clear. We tune the underlying NSToolbar to avoid
+        // per-item "pill" backplates (see WindowToolbarTuner).
         .toolbarBackground(.clear, for: .windowToolbar)
-        .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
+        .toolbarBackgroundVisibility(.visible, for: .windowToolbar)
     } else {
       self
         .background(.ultraThinMaterial)

@@ -3,6 +3,10 @@ import SwiftUI
 import DashboardFeature
 import HackCLIService
 
+#if os(macOS)
+import AppKit
+#endif
+
 #if RELEASE
 import Sparkle
 #endif
@@ -101,6 +105,13 @@ private struct DashboardCommands: Commands {
         NotificationCenter.default.post(name: .hackCommandPaletteRequested, object: nil)
       }
       .keyboardShortcut("k", modifiers: .command)
+
+      Button("Toggle Sidebar") {
+#if os(macOS)
+        NSApp.sendAction(#selector(NSSplitViewController.toggleSidebar(_:)), to: nil, from: nil)
+#endif
+      }
+      .keyboardShortcut("b", modifiers: .command)
     }
   }
 }

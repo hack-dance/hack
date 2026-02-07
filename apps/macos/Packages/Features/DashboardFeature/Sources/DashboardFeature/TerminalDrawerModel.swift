@@ -37,7 +37,7 @@ final class TerminalDrawerModel {
   init(globalShellProject: ProjectSummary) {
     self.globalShellProject = globalShellProject
 
-    let session = Self.makeShellSession(project: globalShellProject)
+    let session = Self.makeShellSession(project: globalShellProject, initialCommand: nil)
     let tab = Tab(
       id: UUID(),
       key: TabKey(projectId: globalShellProject.id, kind: .shell),
@@ -81,7 +81,7 @@ final class TerminalDrawerModel {
     case .logs:
       session = GhosttyTerminalSession(project: project)
     case .shell:
-      session = Self.makeShellSession(project: project)
+      session = Self.makeShellSession(project: project, initialCommand: nil)
     }
 
     let tab = Tab(
@@ -104,7 +104,7 @@ final class TerminalDrawerModel {
       return
     }
 
-    let session = Self.makeShellSession(project: baseProject)
+    let session = Self.makeShellSession(project: baseProject, initialCommand: nil)
     let ordinal = nextShellOrdinal(for: baseProject)
     let title = Self.makeShellTitle(project: baseProject, ordinal: ordinal)
     let tab = Tab(id: UUID(), key: nil, title: title, session: session)
@@ -140,11 +140,12 @@ final class TerminalDrawerModel {
     return maxOrdinal + 1
   }
 
-  private static func makeShellSession(project: ProjectSummary) -> GhosttyTerminalSession {
+  private static func makeShellSession(project: ProjectSummary, initialCommand: String?) -> GhosttyTerminalSession {
     let workingDirectory = project.repoRoot ?? project.projectDir ?? FileManager.default.homeDirectoryForCurrentUser.path
     return GhosttyTerminalSession(
       project: project,
-      mode: .shell(workingDirectory: URL(fileURLWithPath: workingDirectory))
+      mode: .shell(workingDirectory: URL(fileURLWithPath: workingDirectory)),
+      initialCommand: initialCommand
     )
   }
 

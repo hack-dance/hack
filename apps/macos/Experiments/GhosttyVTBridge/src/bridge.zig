@@ -55,7 +55,13 @@ export fn hack_ghostty_vt_create(cols: u32, rows: u32) ?*TerminalHandle {
     const alloc = std.heap.c_allocator;
     var handle = alloc.create(TerminalHandle) catch return null;
     handle.alloc = alloc;
-    handle.terminal = ghostty_vt.Terminal.init(alloc, .{ .cols = cols_u16, .rows = rows_u16 }) catch {
+    // Keep a generous scrollback buffer so app tabs feel like a real terminal.
+    // (Ghostty's default is 10k lines; that's too shallow for logs-heavy workflows.)
+    handle.terminal = ghostty_vt.Terminal.init(alloc, .{
+        .cols = cols_u16,
+        .rows = rows_u16,
+        .max_scrollback = 200_000,
+    }) catch {
         alloc.destroy(handle);
         return null;
     };
@@ -83,6 +89,24 @@ export fn hack_ghostty_vt_feed(handle: ?*TerminalHandle, bytes: [*]const u8, len
     if (handle == null) return;
     if (len == 0) return;
     _ = handle.?.stream.nextSlice(bytes[0..len]) catch {};
+}
+
+/// Scroll the viewport within the terminal scrollback buffer.
+///
+/// Positive values scroll down, negative values scroll up.
+export fn hack_ghostty_vt_scroll_viewport_delta(handle: ?*TerminalHandle, delta_rows: i32) void {
+    if (handle == null) return;
+    handle.?.terminal.scrollViewport(.{ .delta = @as(isize, delta_rows) }) catch {};
+}
+
+export fn hack_ghostty_vt_scroll_viewport_top(handle: ?*TerminalHandle) void {
+    if (handle == null) return;
+    handle.?.terminal.scrollViewport(.top) catch {};
+}
+
+export fn hack_ghostty_vt_scroll_viewport_bottom(handle: ?*TerminalHandle) void {
+    if (handle == null) return;
+    handle.?.terminal.scrollViewport(.bottom) catch {};
 }
 
 export fn hack_ghostty_vt_plain_string(handle: ?*TerminalHandle, out_len: ?*usize) ?[*]u8 {

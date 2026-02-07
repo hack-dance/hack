@@ -118,4 +118,3 @@ struct ToolbarIconButton: NSViewRepresentable {
     nsView.contentTintColor = NSColor.labelColor.withAlphaComponent(0.85)
   }
 }
-

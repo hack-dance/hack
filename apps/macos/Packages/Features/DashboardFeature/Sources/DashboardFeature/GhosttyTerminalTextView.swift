@@ -114,6 +114,9 @@ struct GhosttyTerminalTextView: NSViewRepresentable {
     view.onKeyDown = { event in
       context.coordinator.handleKey(event)
     }
+    view.onPaste = { text in
+      context.coordinator.handlePaste(text)
+    }
     view.onLayout = { _ in
       context.coordinator.updateSize(in: view)
     }
@@ -122,7 +125,14 @@ struct GhosttyTerminalTextView: NSViewRepresentable {
   }
 
   func updateNSView(_ nsView: TerminalRenderView, context: Context) {
-    context.coordinator.setSession(session)
+    if context.coordinator.session !== session {
+      context.coordinator.session = session
+      context.coordinator.resetForNewSession()
+      nsView.snapshot = nil
+    }
+    nsView.onScrollWheel = { event in
+      context.coordinator.handleScroll(event)
+    }
     context.coordinator.ensureFocus(in: nsView)
     context.coordinator.updateSize(in: nsView)
 
@@ -139,20 +149,51 @@ struct GhosttyTerminalTextView: NSViewRepresentable {
     var lastRenderVersion: Int = -1
     private var lastCols: Int = 0
     private var lastRows: Int = 0
+    private var pendingScrollPixels: Double = 0
     private let fontConfig = TerminalFontConfig.loadFromGhosttyConfig()
     private lazy var baseFont: NSFont = fontConfig.resolveFont()
 
-    func setSession(_ newSession: GhosttyTerminalSession) {
-      if let existing = session, existing === newSession {
-        session = newSession
-        return
-      }
-
-      session = newSession
+    func resetForNewSession() {
+      // Force a size update for the new session even if the view dimensions haven't changed
+      // since the last tab. Without this, the new session may never receive its first resize
+      // event, and `GhosttyTerminalSession.start()` will stay pending.
       lastRenderVersion = -1
       lastCols = 0
       lastRows = 0
-      renderView?.snapshot = nil
+      pendingScrollPixels = 0
+    }
+
+    func handleScroll(_ event: NSEvent) {
+      guard let session, let view = renderView else { return }
+      let deltaY = event.scrollingDeltaY
+      guard deltaY != 0 else { return }
+
+      // Translate scrolling into row deltas.
+      //
+      // - Trackpads emit small "pixel" deltas (hasPreciseScrollingDeltas == true),
+      //   so we accumulate until we've crossed at least one row.
+      // - Mouse wheels emit line-ish deltas (hasPreciseScrollingDeltas == false),
+      //   and treating them as pixels makes scrolling feel "stuck".
+      //
+      // Ghostty's API uses: up is negative, down is positive.
+      if event.hasPreciseScrollingDeltas {
+        let cellHeight = max(1, Double(view.cellSize.height))
+        let speed: Double = 2.4
+        pendingScrollPixels += Double(deltaY) * speed
+
+        let rowsFloat = pendingScrollPixels / cellHeight
+        let rows = Int(rowsFloat.rounded(.towardZero))
+        guard rows != 0 else { return }
+
+        pendingScrollPixels -= Double(rows) * cellHeight
+        session.scrollViewport(deltaRows: -rows)
+        return
+      }
+
+      pendingScrollPixels = 0
+      let rows = Int(Double(deltaY).rounded(.toNearestOrAwayFromZero))
+      guard rows != 0 else { return }
+      session.scrollViewport(deltaRows: -rows)
     }
 
     func handleKey(_ event: NSEvent) {
@@ -172,6 +213,13 @@ struct GhosttyTerminalTextView: NSViewRepresentable {
       if session.allowsInput {
         session.send(data)
       }
+    }
+
+    func handlePaste(_ text: String) {
+      guard let session else { return }
+      guard session.allowsInput else { return }
+      guard let data = text.data(using: .utf8), !data.isEmpty else { return }
+      session.send(data)
     }
 
     private func encode(event: NSEvent) -> Data? {
@@ -284,6 +332,13 @@ struct GhosttyTerminalTextView: NSViewRepresentable {
 final class TerminalRenderView: NSView {
   private static let cornerRadius: CGFloat = 16
 
+  private struct GridPoint: Equatable {
+    let row: Int
+    let col: Int
+  }
+
+  var onScrollWheel: ((NSEvent) -> Void)?
+
   var snapshot: GhosttyRenderSnapshot? {
     didSet {
       needsDisplay = true
@@ -317,9 +372,13 @@ final class TerminalRenderView: NSView {
   }
   var contentInsets: NSEdgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
   var onKeyDown: ((NSEvent) -> Void)?
+  var onPaste: ((String) -> Void)?
   var onLayout: ((NSSize) -> Void)?
 
   private var fontCache: [UInt8: NSFont] = [:]
+  private var selectionAnchor: GridPoint? = nil
+  private var selectionHead: GridPoint? = nil
+  private var didDragSelection = false
 
   override init(frame frameRect: NSRect) {
     super.init(frame: frameRect)
@@ -338,9 +397,52 @@ final class TerminalRenderView: NSView {
     onKeyDown?(event)
   }
 
+  override func performKeyEquivalent(with event: NSEvent) -> Bool {
+    let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+    guard flags.contains(.command) else {
+      return super.performKeyEquivalent(with: event)
+    }
+
+    let key = event.charactersIgnoringModifiers?.lowercased()
+    switch key {
+    case "c":
+      copy(nil)
+      return true
+    case "v":
+      paste(nil)
+      return true
+    default:
+      return super.performKeyEquivalent(with: event)
+    }
+  }
+
   override func mouseDown(with event: NSEvent) {
     window?.makeFirstResponder(self)
-    super.mouseDown(with: event)
+
+    didDragSelection = false
+    guard let point = gridPoint(for: event) else {
+      clearSelection()
+      return
+    }
+    selectionAnchor = point
+    selectionHead = point
+    needsDisplay = true
+  }
+
+  override func mouseDragged(with event: NSEvent) {
+    guard selectionAnchor != nil else { return }
+    didDragSelection = true
+    guard let point = gridPoint(for: event) else { return }
+    selectionHead = point
+    needsDisplay = true
+  }
+
+  override func mouseUp(with event: NSEvent) {
+    if !didDragSelection {
+      clearSelection()
+      return
+    }
+    needsDisplay = true
   }
 
   override func viewDidMoveToWindow() {
@@ -353,11 +455,52 @@ final class TerminalRenderView: NSView {
     onLayout?(bounds.size)
   }
 
-  override func draw(_ dirtyRect: NSRect) {
+  override func scrollWheel(with event: NSEvent) {
+    if let onScrollWheel {
+      onScrollWheel(event)
+      return
+    }
+    super.scrollWheel(with: event)
+  }
+
+  @objc func copy(_ sender: Any?) {
     guard let snapshot else { return }
+    guard let selection = normalizedSelection(maxCols: snapshot.cols, maxRows: snapshot.rows) else { return }
+    guard cellSize.width > 0, cellSize.height > 0 else { return }
+
+    let maxVisibleCols = min(snapshot.cols, Int((bounds.width - contentInsets.left - contentInsets.right) / cellSize.width))
+    let maxVisibleRows = min(snapshot.rows, Int((bounds.height - contentInsets.top - contentInsets.bottom) / cellSize.height))
+    guard maxVisibleCols > 0, maxVisibleRows > 0 else { return }
+
+    let clampedSelection = clampSelection(selection, maxCols: maxVisibleCols, maxRows: maxVisibleRows)
+    let text = selectedText(snapshot: snapshot, selection: clampedSelection, maxCols: maxVisibleCols)
+    guard !text.isEmpty else { return }
+
+    let pb = NSPasteboard.general
+    pb.clearContents()
+    pb.setString(text, forType: .string)
+  }
+
+  @objc func paste(_ sender: Any?) {
+    guard let text = NSPasteboard.general.string(forType: .string) else { return }
+    guard !text.isEmpty else { return }
+    onPaste?(text)
+  }
+
+  override func draw(_ dirtyRect: NSRect) {
     let context = NSGraphicsContext.current?.cgContext
     context?.saveGState()
     defer { context?.restoreGState() }
+
+    guard let snapshot else {
+      // New sessions can render a frame or two later; draw a stable background so the view
+      // doesn't look "dead" while the first snapshot arrives.
+      let base = overrideBackgroundColor ?? NSColor.black.withAlphaComponent(0.96)
+      let bg = base.withAlphaComponent(min(base.alphaComponent, backgroundAlpha))
+      bg.setFill()
+      bounds.fill()
+      return
+    }
 
     let baseBackground = nsColor(snapshot.defaultBackground)
     let baseForeground = nsColor(snapshot.defaultForeground)
@@ -374,6 +517,9 @@ final class TerminalRenderView: NSView {
     let maxCols = min(snapshot.cols, Int((bounds.width - contentInsets.left - contentInsets.right) / cellSize.width))
     let maxRows = min(snapshot.rows, Int((bounds.height - contentInsets.top - contentInsets.bottom) / cellSize.height))
     guard maxCols > 0, maxRows > 0 else { return }
+
+    let selectionColor = NSColor.selectedTextBackgroundColor.withAlphaComponent(0.35)
+    let selection = normalizedSelection(maxCols: maxCols, maxRows: maxRows)
 
     for row in 0..<maxRows {
       for col in 0..<maxCols {
@@ -403,6 +549,11 @@ final class TerminalRenderView: NSView {
 
         if !bgIsDefault || inverse {
           bg.setFill()
+          cellRect.fill()
+        }
+
+        if let selection, isCellSelected(row: row, col: col, cell: cell, selection: selection, maxCols: maxCols) {
+          selectionColor.setFill()
           cellRect.fill()
         }
 
@@ -514,6 +665,150 @@ final class TerminalRenderView: NSView {
     layer?.cornerRadius = Self.cornerRadius
     layer?.cornerCurve = .continuous
     layer?.masksToBounds = true
+  }
+
+  private func clearSelection() {
+    selectionAnchor = nil
+    selectionHead = nil
+    didDragSelection = false
+    needsDisplay = true
+  }
+
+  private func gridPoint(for event: NSEvent) -> GridPoint? {
+    guard let snapshot else { return nil }
+    guard cellSize.width > 0, cellSize.height > 0 else { return nil }
+
+    let location = convert(event.locationInWindow, from: nil)
+
+    let maxCols = min(snapshot.cols, Int((bounds.width - contentInsets.left - contentInsets.right) / cellSize.width))
+    let maxRows = min(snapshot.rows, Int((bounds.height - contentInsets.top - contentInsets.bottom) / cellSize.height))
+    guard maxCols > 0, maxRows > 0 else { return nil }
+
+    let rawCol = Int(floor((location.x - contentInsets.left) / cellSize.width))
+    let rawRow = Int(floor((location.y - contentInsets.top) / cellSize.height))
+
+    let clampedCol = min(max(rawCol, 0), maxCols - 1)
+    let clampedRow = min(max(rawRow, 0), maxRows - 1)
+
+    let index = clampedRow * snapshot.cols + clampedCol
+    guard index < snapshot.cells.count else { return GridPoint(row: clampedRow, col: clampedCol) }
+
+    let cell = snapshot.cells[index]
+    // Snap selection to the head cell of wide glyphs so copy/highlight doesn't "miss" characters.
+    if cell.wide >= 2 {
+      return GridPoint(row: clampedRow, col: max(0, clampedCol - 1))
+    }
+
+    return GridPoint(row: clampedRow, col: clampedCol)
+  }
+
+  private typealias GridSelection = (start: GridPoint, end: GridPoint)
+
+  private func normalizedSelection(maxCols: Int, maxRows: Int) -> GridSelection? {
+    guard let anchor = selectionAnchor, let head = selectionHead else { return nil }
+    guard anchor != head else { return nil }
+
+    let a = GridPoint(row: min(max(anchor.row, 0), maxRows - 1), col: min(max(anchor.col, 0), maxCols - 1))
+    let b = GridPoint(row: min(max(head.row, 0), maxRows - 1), col: min(max(head.col, 0), maxCols - 1))
+
+    if a.row < b.row || (a.row == b.row && a.col <= b.col) {
+      return (start: a, end: b)
+    }
+    return (start: b, end: a)
+  }
+
+  private func clampSelection(_ selection: GridSelection, maxCols: Int, maxRows: Int) -> GridSelection {
+    let start = GridPoint(row: min(max(selection.start.row, 0), maxRows - 1), col: min(max(selection.start.col, 0), maxCols - 1))
+    let end = GridPoint(row: min(max(selection.end.row, 0), maxRows - 1), col: min(max(selection.end.col, 0), maxCols - 1))
+    return (start: start, end: end)
+  }
+
+  private func isCellSelected(
+    row: Int,
+    col: Int,
+    cell: GhosttyRenderCell,
+    selection: GridSelection,
+    maxCols: Int
+  ) -> Bool {
+    if cell.wide >= 2 {
+      return false
+    }
+
+    if row < selection.start.row || row > selection.end.row {
+      return false
+    }
+
+    if selection.start.row == selection.end.row {
+      let inRange = col >= selection.start.col && col <= selection.end.col
+      if cell.wide == 1 {
+        let secondCol = min(maxCols - 1, col + 1)
+        return inRange || (secondCol >= selection.start.col && secondCol <= selection.end.col)
+      }
+      return inRange
+    }
+
+    if row == selection.start.row {
+      let inRange = col >= selection.start.col
+      if cell.wide == 1 {
+        return inRange || (col + 1 >= selection.start.col && col + 1 <= maxCols - 1)
+      }
+      return inRange
+    }
+
+    if row == selection.end.row {
+      let inRange = col <= selection.end.col
+      if cell.wide == 1 {
+        let secondCol = min(maxCols - 1, col + 1)
+        return inRange || secondCol <= selection.end.col
+      }
+      return inRange
+    }
+
+    return true
+  }
+
+  private func selectedText(
+    snapshot: GhosttyRenderSnapshot,
+    selection: GridSelection,
+    maxCols: Int
+  ) -> String {
+    var lines: [String] = []
+    lines.reserveCapacity(max(1, selection.end.row - selection.start.row + 1))
+
+    for row in selection.start.row...selection.end.row {
+      let startCol = row == selection.start.row ? selection.start.col : 0
+      let endCol = row == selection.end.row ? selection.end.col : maxCols - 1
+      if startCol > endCol { continue }
+
+      var line = ""
+      line.reserveCapacity(max(0, endCol - startCol + 1))
+
+      var col = startCol
+      while col <= endCol {
+        let index = row * snapshot.cols + col
+        if index >= snapshot.cells.count {
+          break
+        }
+
+        let cell = snapshot.cells[index]
+        if cell.wide >= 2 {
+          col += 1
+          continue
+        }
+
+        if cell.codepoint == 0 || (cell.flags & 0x80) != 0 {
+          line.append(" ")
+        } else if let scalar = UnicodeScalar(cell.codepoint) {
+          line.append(Character(scalar))
+        }
+
+        col += cell.wide == 1 ? 2 : 1
+      }
+
+      lines.append(line)
+    }
+
+    return lines.joined(separator: "\n").trimmingCharacters(in: .newlines)
   }
 
   private func nsColor(_ color: GhosttyRenderColor) -> NSColor {

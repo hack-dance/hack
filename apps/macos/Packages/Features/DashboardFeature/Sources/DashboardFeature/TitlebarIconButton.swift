@@ -74,4 +74,3 @@ private extension View {
     modifier(PressEventsModifier(onChange: onChange))
   }
 }
-

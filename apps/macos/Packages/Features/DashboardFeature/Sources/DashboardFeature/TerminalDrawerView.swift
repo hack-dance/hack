@@ -65,9 +65,9 @@ struct TerminalDrawerView: View {
 
         if let selectedSession {
           GhosttyTerminalView(session: selectedSession)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .frame(minHeight: 0)
-            .background(Color.black.opacity(0.97))
+          .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+          .frame(minHeight: 0)
+          .background(Color.black.opacity(0.97))
         }
       }
     } else {
@@ -213,4 +213,3 @@ private struct TerminalTabButton: View {
     }
   }
 }
-

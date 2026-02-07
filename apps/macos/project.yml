@@ -21,6 +21,8 @@ targets:
         excludes:
           - BundledCLI
           - BundledCLI/**
+          - GhosttyVT
+          - GhosttyVT/**
     configFiles:
       Debug: Config/Debug.xcconfig
       Release: Config/Release.xcconfig
@@ -33,6 +35,24 @@ targets:
 
           if [ ! -d "$SRC" ]; then
             echo "Missing BundledCLI dir: $SRC"
+            exit 1
+          fi
+
+          mkdir -p "$DEST"
+          ditto "$SRC" "$DEST"
+      - name: Copy Ghostty VT Resources
+        script: |
+          set -euo pipefail
+          SRC="${PROJECT_DIR}/App/GhosttyVT/ghostty"
+          DEST="${TARGET_BUILD_DIR}/${FULL_PRODUCT_NAME}/Contents/Resources/ghostty"
+
+          if [ ! -d "$SRC" ]; then
+            echo "No Ghostty VT resources to copy: $SRC"
+            exit 0
+          fi
+
+          if [ "$CONFIGURATION" = "Release" ] && [ ! -f "$SRC/lib/libhack_ghostty_vt.dylib" ]; then
+            echo "Missing Ghostty VT dylib for Release build: $SRC/lib/libhack_ghostty_vt.dylib"
             exit 1
           fi
 

@@ -416,13 +416,24 @@ struct TicketsView: View {
           .font(.mono(.caption))
           .foregroundStyle(.secondary)
       }
-      Button("Run setup") {
-        Task {
-          _ = await model.setupTickets(for: project)
-          await refreshTickets()
+      HStack(spacing: 10) {
+        Button("Retry") {
+          Task { await refreshTickets() }
+        }
+        .adaptiveToolbarButton()
+
+        if message.localizedCaseInsensitiveContains("invalid json")
+          || message.localizedCaseInsensitiveContains("extension")
+        {
+          Button("Run setup") {
+            Task {
+              _ = await model.setupTickets(for: project)
+              await refreshTickets()
+            }
+          }
+          .adaptiveToolbarButton()
         }
       }
-      .adaptiveToolbarButton()
     }
     .padding(12)
     .frame(maxWidth: .infinity, alignment: .leading)
@@ -473,7 +484,11 @@ struct TicketsView: View {
         hasLoadedOnce = true
         persistCachedTickets()
       case .timedOut:
-        loadNotice = "Showing cached tickets. Refresh timed out."
+        if hasLoadedOnce {
+          loadNotice = "Showing cached tickets. Refresh timed out."
+        } else {
+          errorMessage = "Timed out loading tickets. Try Sync, or open a shell and run `hack x tickets list --json` (note the `x`)."
+        }
       case let .failure(message):
         errorMessage = message
       }

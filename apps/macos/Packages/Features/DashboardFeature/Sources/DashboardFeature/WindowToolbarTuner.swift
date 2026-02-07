@@ -74,4 +74,3 @@ private func tuneToolbarViewTree(_ view: NSView) {
     tuneToolbarViewTree(subview)
   }
 }
-

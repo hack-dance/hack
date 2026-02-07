@@ -5,6 +5,8 @@ import HackDesktopModels
 struct GatewayDetailView: View {
   @Environment(DashboardModel.self) private var model
   @Environment(\.openURL) private var openURL
+  @AppStorage("hackDesktop.setupGuidance.gateway.dismissed") private var setupDismissed = false
+  @State private var showSetupAssistant = false
 
   var body: some View {
     NavigationStack {
@@ -12,7 +14,7 @@ struct GatewayDetailView: View {
         VStack(alignment: .leading, spacing: 20) {
           header
           if shouldShowSetupGuidance {
-            setupGuidance
+            setupNudge
           }
           overviewCard
           exposuresCard
@@ -24,50 +26,34 @@ struct GatewayDetailView: View {
       .navigationDestination(for: GatewayExposure.self) { exposure in
         GatewayExposureDetailView(exposure: exposure)
       }
+      .sheet(isPresented: $showSetupAssistant) {
+        SetupAssistantView(initialSection: .gateway)
+          .environment(model)
+      }
     }
   }
 
   private var shouldShowSetupGuidance: Bool {
     if ProcessInfo.processInfo.environment["HACK_DESKTOP_FORCE_SETUP_GUIDANCE"] == "1" { return true }
+    if setupDismissed { return false }
 
     // If gateway/global status isn't available yet (fresh machine), show quick-start guidance here too.
     if model.globalStatus == nil { return true }
     if model.gatewaySummaryState == nil { return true }
-
-    // If LAN is blocked due to loopback bind, it's the most common "why is this blocked" confusion.
-    if let lan = model.gatewayExposures.first(where: { $0.id == "lan" }),
-       lan.resolvedState == .blocked,
-       (lan.detail ?? "").lowercased().contains("loopback") {
-      return true
-    }
-
     return false
   }
 
-  private var setupGuidance: some View {
-    SetupGuidanceCard(
+  private var setupNudge: some View {
+    SetupNudgeCard(
       title: "Gateway setup",
-      subtitle: "Gateway is optional. If you want LAN access or remote gateway features, run these once.",
-      steps: [
-        SetupStep(
-          id: "global-install",
-          label: "Install global services",
-          command: "hack global install",
-          detail: "Sets up the global runtime (Caddy, logging, networks)."
-        ),
-        SetupStep(
-          id: "daemon-start",
-          label: "Start the daemon",
-          command: "hack daemon start"
-        ),
-        SetupStep(
-          id: "gateway-setup",
-          label: "Guided gateway setup",
-          command: "hack gateway setup",
-          detail: "Enables gateway and helps you generate a token. For LAN exposure, make sure the gateway bind isn't 127.0.0.1."
-        )
-      ]
+      subtitle: "On a fresh machine, install global services and run the gateway setup once.",
+      primaryActionLabel: "Setup…",
+      onPrimaryAction: { showSetupAssistant = true },
+      onDismiss: { setupDismissed = true }
     )
+    .opacity(setupDismissed ? 0 : 1)
+    .animation(.easeInOut(duration: 0.15), value: setupDismissed)
+    .allowsHitTesting(!setupDismissed)
   }
 
   private var header: some View {
@@ -80,6 +66,9 @@ struct GatewayDetailView: View {
         Menu {
           Button("Refresh") {
             Task { await model.refresh() }
+          }
+          Button("Setup…") {
+            showSetupAssistant = true
           }
           if let configUrl {
             Button("Open Config") {
@@ -102,6 +91,7 @@ struct GatewayDetailView: View {
 
   private var exposuresCard: some View {
     GlassCard(title: "Exposures", systemImage: "point.3.filled.connected.trianglepath.dotted") {
+      lanCalloutSection
       if exposures.isEmpty {
         Text("No gateway exposures configured")
           .font(.mono(.caption))
@@ -119,6 +109,35 @@ struct GatewayDetailView: View {
           }
         }
       }
+    }
+  }
+
+  @ViewBuilder
+  private var lanCalloutSection: some View {
+    if let lan = exposures.first(where: { $0.id == "lan" }),
+       lan.resolvedState == .blocked,
+       (lan.detail ?? "").lowercased().contains("loopback") {
+      InlineCallout(
+        tone: .neutral,
+        title: "LAN access is local-only (127.0.0.1)",
+        message: "This is the default. The gateway is reachable from this machine only. If you want other devices on your LAN to reach it, bind to 0.0.0.0 and restart hackd.",
+        actions: [
+          InlineCalloutAction(label: "Copy command", systemImage: "doc.on.doc") {
+            TerminalIntegration.copyToClipboard("""
+            hack config set --global controlPlane.gateway.bind 0.0.0.0
+            hack daemon restart
+            """)
+          },
+          InlineCalloutAction(label: "Enable LAN access", systemImage: "terminal") {
+            TerminalIntegration.openTerminalWithCommand("""
+            hack config set --global controlPlane.gateway.bind 0.0.0.0
+            hack daemon restart
+            """)
+          }
+        ]
+      )
+      Divider()
+        .opacity(0.35)
     }
   }
 

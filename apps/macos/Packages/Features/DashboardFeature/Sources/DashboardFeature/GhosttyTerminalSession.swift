@@ -9,6 +9,13 @@ import HackDesktopModels
 @MainActor
 @Observable
 final class GhosttyTerminalSession {
+  struct TerminalCommand {
+    let executableURL: URL
+    let arguments: [String]
+    let environment: [String: String]
+    let workingDirectory: URL?
+  }
+
   enum Mode {
     case logs(path: String)
     case shell(workingDirectory: URL)
@@ -31,6 +38,8 @@ final class GhosttyTerminalSession {
   private var pendingStart = false
   private var lastCols = 120
   private var lastRows = 32
+  private var pendingWrites: [Data] = []
+  private var initialCommand: String?
 
   var allowsInput: Bool {
     if case .shell = mode {
@@ -52,6 +61,16 @@ final class GhosttyTerminalSession {
   init(project: ProjectSummary, mode: Mode) {
     self.project = project
     self.mode = mode
+    configureTerminal()
+  }
+
+  init(project: ProjectSummary, mode: Mode, initialCommand: String?) {
+    self.project = project
+    self.mode = mode
+    self.initialCommand = initialCommand
+    if let initialCommand, !initialCommand.isEmpty {
+      pendingWrites.append(Data((initialCommand + "\n").utf8))
+    }
     configureTerminal()
   }
 
@@ -95,19 +114,14 @@ final class GhosttyTerminalSession {
         workingDirectory: command.workingDirectory
       )
       pty.process.terminationHandler = { [weak self] proc in
-        DispatchQueue.main.async {
-          self?.statusMessage = "Session exited (\(proc.terminationStatus))"
-        }
+        self?.handleTermination(proc.terminationStatus)
       }
       pty.masterFileHandle.readabilityHandler = { [weak self] handle in
-        let data = handle.availableData
-        guard !data.isEmpty else { return }
-        Task { @MainActor in
-          self?.feed(data)
-        }
+        self?.handleReadableData(handle)
       }
       self.pty = pty
       statusMessage = allowsInput ? "Shell ready" : "Streaming logs…"
+      flushPendingWrites()
       startRefreshLoop()
     } catch {
       statusMessage = "Failed to start session: \(error.localizedDescription)"
@@ -141,7 +155,11 @@ final class GhosttyTerminalSession {
 
   func send(_ data: Data) {
     guard allowsInput else { return }
-    pty?.send(data)
+    if let pty {
+      pty.send(data)
+    } else {
+      pendingWrites.append(data)
+    }
   }
 
   func sendControl(_ data: Data) {
@@ -151,11 +169,44 @@ final class GhosttyTerminalSession {
     if data == Data([0x03]) {
       pty?.interrupt()
     }
-    pty?.send(data)
+    if let pty {
+      pty.send(data)
+    } else {
+      pendingWrites.append(data)
+    }
+  }
+
+  private func flushPendingWrites() {
+    guard allowsInput else { return }
+    guard let pty else { return }
+    guard !pendingWrites.isEmpty else { return }
+    for write in pendingWrites {
+      pty.send(write)
+    }
+    pendingWrites.removeAll(keepingCapacity: true)
+  }
+
+  nonisolated private func handleTermination(_ status: Int32) {
+    Task { @MainActor [weak self] in
+      self?.statusMessage = "Session exited (\(status))"
+    }
+  }
+
+  nonisolated private func handleReadableData(_ handle: FileHandle) {
+    let data = handle.availableData
+    guard !data.isEmpty else { return }
+    Task { @MainActor [weak self] in
+      self?.feed(data)
+    }
   }
 
   private func feed(_ data: Data) {
     terminal?.feed(data)
+    hasPendingRefresh = true
+  }
+
+  func scrollViewport(deltaRows: Int) {
+    terminal?.scrollViewport(deltaRows: deltaRows)
     hasPendingRefresh = true
   }
 
@@ -198,27 +249,20 @@ final class GhosttyTerminalSession {
     // This is needed for proper log output formatting
     terminal.feed(Data("\u{1B}[20h".utf8))
 
-    let foreground = "#E6E6E6"
-    let background = "#0B0C0F"
-    let cursor = "#F5C2E7"
-    let palette = [
-      "#0B0C0F",
-      "#E06C75",
-      "#98C379",
-      "#E5C07B",
-      "#61AFEF",
-      "#C678DD",
-      "#56B6C2",
-      "#C8CCD4",
-      "#5C6370",
-      "#E06C75",
-      "#98C379",
-      "#E5C07B",
-      "#61AFEF",
-      "#C678DD",
-      "#56B6C2",
-      "#FFFFFF"
-    ]
+    let foreground: String = "#E6E6E6"
+    let background: String = "#0B0C0F"
+    let cursor: String = "#F5C2E7"
+
+    // Build palette from a single literal string to keep previews' design-time
+    // instrumentation simple and avoid type-checker blowups.
+    let palette: [String] = """
+#0B0C0F #E06C75 #98C379 #E5C07B
+#61AFEF #C678DD #56B6C2 #C8CCD4
+#5C6370 #E06C75 #98C379 #E5C07B
+#61AFEF #C678DD #56B6C2 #FFFFFF
+"""
+      .split(whereSeparator: \.isWhitespace)
+      .map(String.init)
 
     var sequences: [String] = [
       osc("10", foreground),
@@ -230,7 +274,7 @@ final class GhosttyTerminalSession {
       sequences.append(osc("4", "\(index);\(color)"))
     }
 
-    let payload = sequences.joined()
+    let payload: String = sequences.joined()
     terminal.feed(Data(payload.utf8))
   }
 
@@ -238,11 +282,11 @@ final class GhosttyTerminalSession {
     "\u{1B}]\(ps);\(pt)\u{07}"
   }
 
-  private func resolveCommand(in environment: [String: String]) -> (executableURL: URL, arguments: [String], environment: [String: String], workingDirectory: URL?) {
+  private func resolveCommand(in environment: [String: String]) -> TerminalCommand {
     switch mode {
     case let .logs(path):
       if path.isEmpty {
-        return (
+        return TerminalCommand(
           executableURL: URL(fileURLWithPath: "/usr/bin/env"),
           arguments: ["echo", "Missing project path"],
           environment: environment,
@@ -251,7 +295,7 @@ final class GhosttyTerminalSession {
       }
 
       if let hackPath = HackCLILocator.resolveHackExecutable(in: environment) {
-        return (
+        return TerminalCommand(
           executableURL: URL(fileURLWithPath: hackPath),
           arguments: ["logs", "--pretty", "--path", path],
           environment: environment,
@@ -259,7 +303,7 @@ final class GhosttyTerminalSession {
         )
       }
 
-      return (
+      return TerminalCommand(
         executableURL: URL(fileURLWithPath: "/usr/bin/env"),
         arguments: ["hack", "logs", "--pretty", "--path", path],
         environment: environment,
@@ -268,7 +312,7 @@ final class GhosttyTerminalSession {
     case let .shell(workingDirectory):
       let zshPath = "/bin/zsh"
       if FileManager.default.isExecutableFile(atPath: zshPath) {
-        return (
+        return TerminalCommand(
           executableURL: URL(fileURLWithPath: zshPath),
           arguments: ["-l"],
           environment: environment,
@@ -276,7 +320,7 @@ final class GhosttyTerminalSession {
         )
       }
 
-      return (
+      return TerminalCommand(
         executableURL: URL(fileURLWithPath: "/usr/bin/env"),
         arguments: ["zsh", "-l"],
         environment: environment,

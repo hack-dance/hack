@@ -160,6 +160,19 @@ public final class GhosttyVTRuntime {
       }
     }
 
+    // Prefer an app-bundled dylib when available (release builds).
+    // We keep the lookup permissive because the exact resource subdirectory can evolve.
+    if let resourceURL = Bundle.main.resourceURL {
+      let candidates = [
+        resourceURL.appendingPathComponent("ghostty/lib/libhack_ghostty_vt.dylib"),
+        resourceURL.appendingPathComponent("Ghostty/lib/libhack_ghostty_vt.dylib"),
+        resourceURL.appendingPathComponent("libhack_ghostty_vt.dylib")
+      ]
+      for url in candidates where FileManager.default.fileExists(atPath: url.path) {
+        return url
+      }
+    }
+
     let home = FileManager.default.homeDirectoryForCurrentUser
     let defaultPath = home
       .appendingPathComponent("Library/Application Support/Hack/ghostty/lib")
@@ -176,6 +189,8 @@ public final class GhosttyVTRuntime {
     typealias Destroy = @convention(c) (UnsafeMutableRawPointer?) -> Void
     typealias Resize = @convention(c) (UnsafeMutableRawPointer?, UInt32, UInt32) -> Void
     typealias Feed = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<UInt8>?, Int) -> Void
+    typealias ScrollViewportDelta = @convention(c) (UnsafeMutableRawPointer?, Int32) -> Void
+    typealias ScrollViewportSimple = @convention(c) (UnsafeMutableRawPointer?) -> Void
     typealias PlainString = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutablePointer<Int>?) -> UnsafeMutablePointer<UInt8>?
     typealias HtmlString = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutablePointer<Int>?) -> UnsafeMutablePointer<UInt8>?
     typealias FreeString = @convention(c) (UnsafeMutablePointer<UInt8>?, Int) -> Void
@@ -186,6 +201,9 @@ public final class GhosttyVTRuntime {
     let destroy: Destroy
     let resize: Resize
     let feed: Feed
+    let scrollViewportDelta: ScrollViewportDelta?
+    let scrollViewportTop: ScrollViewportSimple?
+    let scrollViewportBottom: ScrollViewportSimple?
     let plainString: PlainString
     let htmlString: HtmlString?
     let freeString: FreeString
@@ -206,12 +224,18 @@ public final class GhosttyVTRuntime {
         return nil
       }
 
+      let scrollViewportDelta = dlsym(handle, "hack_ghostty_vt_scroll_viewport_delta")
+      let scrollViewportTop = dlsym(handle, "hack_ghostty_vt_scroll_viewport_top")
+      let scrollViewportBottom = dlsym(handle, "hack_ghostty_vt_scroll_viewport_bottom")
       let htmlString = dlsym(handle, "hack_ghostty_vt_html_string")
 
       self.create = unsafeBitCast(create, to: Create.self)
       self.destroy = unsafeBitCast(destroy, to: Destroy.self)
       self.resize = unsafeBitCast(resize, to: Resize.self)
       self.feed = unsafeBitCast(feed, to: Feed.self)
+      self.scrollViewportDelta = scrollViewportDelta.map { unsafeBitCast($0, to: ScrollViewportDelta.self) }
+      self.scrollViewportTop = scrollViewportTop.map { unsafeBitCast($0, to: ScrollViewportSimple.self) }
+      self.scrollViewportBottom = scrollViewportBottom.map { unsafeBitCast($0, to: ScrollViewportSimple.self) }
       self.plainString = unsafeBitCast(plainString, to: PlainString.self)
       self.htmlString = htmlString.map { unsafeBitCast($0, to: HtmlString.self) }
       self.freeString = unsafeBitCast(freeString, to: FreeString.self)
@@ -247,6 +271,19 @@ public final class GhosttyTerminal {
     }
   }
 
+  public func scrollViewport(deltaRows: Int) {
+    guard let fn = functions.scrollViewportDelta else { return }
+    fn(handle, Int32(clamping: deltaRows))
+  }
+
+  public func scrollViewportTop() {
+    functions.scrollViewportTop?(handle)
+  }
+
+  public func scrollViewportBottom() {
+    functions.scrollViewportBottom?(handle)
+  }
+
   public func plainString() -> String {
     var length = 0
     guard let ptr = functions.plainString(handle, &length), length > 0 else {
@@ -276,9 +313,6 @@ public final class GhosttyTerminal {
 
     let raw = snapshotPtr.bindMemory(to: GhosttyRenderSnapshotRaw.self, capacity: 1).pointee
     let cellCount = Int(raw.cell_count)
-    guard cellCount > 0 else { return nil }
-    let cellBuffer = UnsafeBufferPointer<GhosttyRenderCellRaw>(start: raw.cells, count: cellCount)
-    let cells = cellBuffer.map { GhosttyRenderCell(raw: $0) }
 
     let cursorStyle = GhosttyCursorStyle(rawValue: raw.cursor_style) ?? .block
     let cursor = GhosttyCursor(
@@ -288,6 +322,16 @@ public final class GhosttyTerminal {
       style: cursorStyle,
       wideTail: raw.cursor_wide_tail != 0
     )
+
+    let cells: [GhosttyRenderCell]
+    if cellCount > 0 {
+      let cellBuffer = UnsafeBufferPointer<GhosttyRenderCellRaw>(start: raw.cells, count: cellCount)
+      cells = cellBuffer.map { GhosttyRenderCell(raw: $0) }
+    } else {
+      // Some VT states return 0 cells before the first full render, but we still want the UI
+      // to show background + cursor immediately (so newly-created tabs don't look "dead").
+      cells = []
+    }
 
     return GhosttyRenderSnapshot(
       rows: Int(raw.rows),

@@ -6,17 +6,25 @@ struct ShellView: View {
   let project: ProjectSummary
   let embedded: Bool
   let onClose: (() -> Void)?
+  let initialCommand: String?
   @State private var session: GhosttyTerminalSession
 
-  init(project: ProjectSummary, embedded: Bool = false, onClose: (() -> Void)? = nil) {
+  init(
+    project: ProjectSummary,
+    embedded: Bool = false,
+    onClose: (() -> Void)? = nil,
+    initialCommand: String? = nil
+  ) {
     self.project = project
     self.embedded = embedded
     self.onClose = onClose
+    self.initialCommand = initialCommand
     let workingDirectory = project.repoRoot ?? project.projectDir ?? FileManager.default.homeDirectoryForCurrentUser.path
     _session = State(
       initialValue: GhosttyTerminalSession(
         project: project,
-        mode: .shell(workingDirectory: URL(fileURLWithPath: workingDirectory))
+        mode: .shell(workingDirectory: URL(fileURLWithPath: workingDirectory)),
+        initialCommand: initialCommand
       )
     )
   }
@@ -54,7 +62,7 @@ struct ShellView: View {
         Text("Terminal unavailable")
           .font(.mono(.subheadline, weight: .medium))
       }
-      Text("Run `bun run macos:ghostty:setup` to build the Ghostty VT library.")
+      Text("Embedded terminal support requires the Ghostty VT library. In release builds it should be bundled; in local dev you may need to run `bun run macos:ghostty:setup`.")
         .font(.mono(.caption))
         .foregroundStyle(.secondary)
     }
@@ -91,7 +99,7 @@ struct ShellView: View {
       }
       Spacer()
       if let onClose {
-        Button("Back") {
+        Button("Close") {
           onClose()
         }
         .adaptiveToolbarButton()

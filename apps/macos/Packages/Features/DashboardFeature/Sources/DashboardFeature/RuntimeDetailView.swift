@@ -7,13 +7,15 @@ struct RuntimeDetailView: View {
   @Environment(\.openURL) private var openURL
   @State private var showDaemonDetails = false
   @State private var showRuntimeDetails = false
+  @AppStorage("hackDesktop.setupGuidance.runtime.dismissed") private var setupDismissed = false
+  @State private var showSetupAssistant = false
 
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 20) {
         header
         if shouldShowSetupGuidance {
-          setupGuidance
+          setupNudge
         }
         statusSummaryBar
         daemonCard
@@ -22,41 +24,29 @@ struct RuntimeDetailView: View {
       }
       .padding(16)
     }
+    .sheet(isPresented: $showSetupAssistant) {
+      SetupAssistantView(initialSection: .runtime)
+        .environment(model)
+    }
   }
 
   private var shouldShowSetupGuidance: Bool {
     if ProcessInfo.processInfo.environment["HACK_DESKTOP_FORCE_SETUP_GUIDANCE"] == "1" { return true }
 
+    if setupDismissed { return false }
+
     // Fresh machines commonly need global install + CA trust. If we can't fetch global status, guide them.
     if model.globalStatus == nil { return true }
-    if daemonIsRunning == false { return true }
     return false
   }
 
-  private var setupGuidance: some View {
-    SetupGuidanceCard(
+  private var setupNudge: some View {
+    SetupNudgeCard(
       title: "First-time setup",
-      subtitle: "If this is a fresh machine, run these once. Some steps will prompt for sudo in Terminal.",
-      steps: [
-        SetupStep(
-          id: "global-install",
-          label: "Install global services",
-          command: "hack global install",
-          detail: "Bootstraps ~/.hack, starts Caddy + logging, and prepares Docker networks."
-        ),
-        SetupStep(
-          id: "global-trust",
-          label: "Trust local HTTPS certs (macOS)",
-          command: "hack global trust",
-          detail: "Adds the local CA to Keychain so https://*.hack is trusted."
-        ),
-        SetupStep(
-          id: "daemon-start",
-          label: "Start the daemon",
-          command: "hack daemon start",
-          detail: "Required for the app to show runtime + global status."
-        )
-      ]
+      subtitle: "Looks like this machine isn't set up yet. Run the setup steps once (some will prompt for sudo).",
+      primaryActionLabel: "Setup…",
+      onPrimaryAction: { showSetupAssistant = true },
+      onDismiss: { setupDismissed = true }
     )
   }
 
@@ -110,6 +100,9 @@ struct RuntimeDetailView: View {
           Menu {
             Button("Refresh") {
               Task { await model.refresh() }
+            }
+            Button("Setup…") {
+              showSetupAssistant = true
             }
             if canStopDaemon {
               Button(daemonActionTitle) {

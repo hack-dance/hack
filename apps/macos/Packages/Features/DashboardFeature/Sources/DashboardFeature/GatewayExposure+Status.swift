@@ -8,6 +8,9 @@ extension GatewayExposure {
   }
 
   var statusLabel: String {
+    if isLanLoopbackLocalOnly {
+      return "Local only"
+    }
     switch resolvedState {
     case .running:
       return "Running"
@@ -25,6 +28,9 @@ extension GatewayExposure {
   }
 
   var statusTone: StatusTone {
+    if isLanLoopbackLocalOnly {
+      return .neutral
+    }
     switch resolvedState {
     case .running:
       return .good
@@ -36,6 +42,9 @@ extension GatewayExposure {
   }
 
   var statusColor: Color {
+    if isLanLoopbackLocalOnly {
+      return .secondary
+    }
     switch resolvedState {
     case .running:
       return .green
@@ -141,6 +150,12 @@ extension GatewayExposure {
     default:
       return nil
     }
+  }
+
+  private var isLanLoopbackLocalOnly: Bool {
+    id == "lan"
+      && resolvedState == .blocked
+      && (detail ?? "").lowercased().contains("loopback")
   }
 }
 

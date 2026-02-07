@@ -92,12 +92,26 @@ struct CommandPaletteView: View {
       if project.isRuntimeConfigured {
         actions.append(
           CommandPaletteAction(title: "Project: Logs", subtitle: project.name) {
-            model.selectedProjectTab = .logs
+            NotificationCenter.default.post(
+              name: .hackTerminalOpenRequested,
+              object: nil,
+              userInfo: [
+                TerminalOpenRequest.projectIdKey: project.id,
+                TerminalOpenRequest.kindKey: TerminalDrawerModel.Kind.logs.rawValue
+              ]
+            )
           }
         )
         actions.append(
           CommandPaletteAction(title: "Project: Shell", subtitle: project.name) {
-            model.selectedProjectTab = .shell
+            NotificationCenter.default.post(
+              name: .hackTerminalOpenRequested,
+              object: nil,
+              userInfo: [
+                TerminalOpenRequest.projectIdKey: project.id,
+                TerminalOpenRequest.kindKey: TerminalDrawerModel.Kind.shell.rawValue
+              ]
+            )
           }
         )
       }

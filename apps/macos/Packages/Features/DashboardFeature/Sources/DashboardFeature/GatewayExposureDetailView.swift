@@ -12,10 +12,38 @@ struct GatewayExposureDetailView: View {
     ScrollView {
       VStack(alignment: .leading, spacing: 20) {
         header
+        lanLoopbackCallout
         overviewCard
         gatewayCard
       }
       .padding(24)
+    }
+  }
+
+  @ViewBuilder
+  private var lanLoopbackCallout: some View {
+    if exposure.id == "lan",
+       exposure.resolvedState == .blocked,
+       (exposure.detail ?? "").lowercased().contains("loopback") {
+      InlineCallout(
+        tone: .neutral,
+        title: "LAN access is local-only (127.0.0.1)",
+        message: "This is the default. The gateway can still be running locally. If you want other devices on your LAN to reach the gateway, bind to 0.0.0.0 and restart hackd.",
+        actions: [
+          InlineCalloutAction(label: "Copy command", systemImage: "doc.on.doc") {
+            TerminalIntegration.copyToClipboard("""
+            hack config set --global controlPlane.gateway.bind 0.0.0.0
+            hack daemon restart
+            """)
+          },
+          InlineCalloutAction(label: "Enable LAN access", systemImage: "terminal") {
+            TerminalIntegration.openTerminalWithCommand("""
+            hack config set --global controlPlane.gateway.bind 0.0.0.0
+            hack daemon restart
+            """)
+          }
+        ]
+      )
     }
   }
 

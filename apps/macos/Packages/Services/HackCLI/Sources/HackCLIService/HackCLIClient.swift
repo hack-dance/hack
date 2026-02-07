@@ -206,6 +206,8 @@ public actor HackCLIClient {
     allowNonZeroExit: Bool = false,
     cwd: String? = nil
   ) async throws -> CLIResult {
+    try Task.checkCancellation()
+
     let process = Process()
     let environment = HackCLILocator.buildEnvironment()
     process.environment = environment
@@ -226,46 +228,59 @@ public actor HackCLIClient {
     process.standardOutput = stdoutPipe
     process.standardError = stderrPipe
 
-    let exitCode = await withCheckedContinuation { continuation in
-      process.terminationHandler = { proc in
-        continuation.resume(returning: Int(proc.terminationStatus))
+    return try await withTaskCancellationHandler(operation: {
+      let exitCode = await withCheckedContinuation { continuation in
+        process.terminationHandler = { proc in
+          continuation.resume(returning: Int(proc.terminationStatus))
+        }
+
+        do {
+          try process.run()
+        } catch {
+          stdoutPipe.fileHandleForReading.closeFile()
+          stderrPipe.fileHandleForReading.closeFile()
+          continuation.resume(returning: 127)
+        }
+      }
+
+      async let stdoutData = stdoutPipe.fileHandleForReading.readToEnd()
+      async let stderrData = stderrPipe.fileHandleForReading.readToEnd()
+
+      let stdoutBytes: Data?
+      let stderrBytes: Data?
+
+      do {
+        stdoutBytes = try await stdoutData
+      } catch {
+        stdoutBytes = nil
       }
 
       do {
-        try process.run()
+        stderrBytes = try await stderrData
       } catch {
-        stdoutPipe.fileHandleForReading.closeFile()
-        stderrPipe.fileHandleForReading.closeFile()
-        continuation.resume(returning: 127)
+        stderrBytes = nil
       }
-    }
 
-    async let stdoutData = stdoutPipe.fileHandleForReading.readToEnd()
-    async let stderrData = stderrPipe.fileHandleForReading.readToEnd()
+      try Task.checkCancellation()
 
-    let stdoutBytes: Data?
-    let stderrBytes: Data?
+      let stdout = String(decoding: stdoutBytes ?? Data(), as: UTF8.self)
+      let stderr = String(decoding: stderrBytes ?? Data(), as: UTF8.self)
 
-    do {
-      stdoutBytes = try await stdoutData
-    } catch {
-      stdoutBytes = nil
-    }
+      if exitCode != 0 && !allowNonZeroExit {
+        throw HackCLIError.commandFailed(
+          exitCode: exitCode,
+          stderr: stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+      }
 
-    do {
-      stderrBytes = try await stderrData
-    } catch {
-      stderrBytes = nil
-    }
-
-    let stdout = String(decoding: stdoutBytes ?? Data(), as: UTF8.self)
-    let stderr = String(decoding: stderrBytes ?? Data(), as: UTF8.self)
-
-    if exitCode != 0 && !allowNonZeroExit {
-      throw HackCLIError.commandFailed(exitCode: exitCode, stderr: stderr.trimmingCharacters(in: .whitespacesAndNewlines))
-    }
-
-    return CLIResult(stdout: stdout, stderr: stderr, exitCode: exitCode)
+      return CLIResult(stdout: stdout, stderr: stderr, exitCode: exitCode)
+    }, onCancel: {
+      if process.isRunning {
+        process.terminate()
+      }
+      stdoutPipe.fileHandleForReading.closeFile()
+      stderrPipe.fileHandleForReading.closeFile()
+    })
   }
 
   private func decodeJsonOrThrow<T: Decodable>(_ type: T.Type, result: CLIResult) throws -> T {

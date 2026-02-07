@@ -5,6 +5,7 @@ import HackDesktopModels
 struct ProjectDetailView: View {
   @Environment(DashboardModel.self) private var model
   @Environment(\.openURL) private var openURL
+  @Environment(\.colorScheme) private var colorScheme
 
   let project: ProjectSummary
   @State private var showOverviewSidebar = true
@@ -18,27 +19,15 @@ struct ProjectDetailView: View {
 
   var body: some View {
     @Bindable var model = model
-    ZStack(alignment: .top) {
-      VStack(alignment: .leading, spacing: 0) {
-        tabContent
-          .id(effectiveTab)
-          .transition(.opacity.combined(with: .move(edge: .trailing)))
-          .animation(.easeInOut(duration: 0.2), value: effectiveTab)
-          .padding(.top, headerHeight + 8)
-          .padding(.bottom, 72)
+    tabContent
+      .id(effectiveTab)
+      .transition(.opacity.combined(with: .move(edge: .trailing)))
+      .animation(.easeInOut(duration: 0.2), value: effectiveTab)
+      .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+      .overlay(alignment: .bottom) {
+        bottomControlBar
+          .padding(.bottom, 18)
       }
-
-      header
-        .padding(.horizontal, 24)
-        .padding(.top, 10)
-        .padding(.bottom, 8)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(topFadeOverlay)
-    }
-    .overlay(alignment: .bottom) {
-      bottomControlBar
-        .padding(.bottom, 18)
-    }
     .onAppear { ensureSelectedTab() }
     .onChange(of: project.id) { _, _ in
       ensureSelectedTab()
@@ -54,12 +43,27 @@ struct ProjectDetailView: View {
     case .overview:
       overviewContent
     case .logs:
-      LogsView(project: project, embedded: true)
+      terminalMovedCard(kind: .logs)
     case .shell:
-      ShellView(project: project, embedded: true)
+      terminalMovedCard(kind: .shell)
     case .tickets:
       TicketsView(project: project)
     }
+  }
+
+  private func terminalMovedCard(kind: TerminalDrawerModel.Kind) -> some View {
+    VStack(alignment: .leading, spacing: 12) {
+      ContentUnavailableView(
+        kind == .logs ? "Logs moved to Terminal Drawer" : "Shell moved to Terminal Drawer",
+        systemImage: kind == .logs ? "text.alignleft" : "terminal"
+      )
+      Button(kind == .logs ? "Open Logs" : "Open Shell") {
+        openTerminal(kind: kind)
+      }
+      .adaptiveToolbarButton()
+    }
+    .padding(24)
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
   }
 
   private var overviewContent: some View {
@@ -99,113 +103,6 @@ struct ProjectDetailView: View {
       .padding(.horizontal, 24)
       .padding(.bottom, 32)
     }
-  }
-
-  private var header: some View {
-    HStack(alignment: .center, spacing: 12) {
-      Image(systemName: project.isRuntimeConfigured ? "cube.transparent.fill" : "puzzlepiece.extension.fill")
-        .font(.mono(.title2))
-        .foregroundStyle(project.isRuntimeConfigured ? .blue : .purple)
-      VStack(alignment: .leading, spacing: 4) {
-        HStack(alignment: .center, spacing: 8) {
-          Text(project.name)
-            .font(.mono(.headline, weight: .semibold))
-          headerStatus
-        }
-        if let headerSubtitle {
-          Text(headerSubtitle)
-            .font(.mono(.caption2))
-            .foregroundStyle(.secondary)
-        }
-      }
-      Spacer()
-      primaryActionsBar
-      if effectiveTab == .overview {
-        Button {
-          withAnimation(.easeInOut(duration: 0.2)) {
-            showInfoPanel.toggle()
-          }
-        } label: {
-          Image(systemName: showInfoPanel ? "info.circle.fill" : "info.circle")
-            .font(.mono(.title3))
-        }
-        .buttonStyle(PressableCircleButtonStyle())
-        .accessibilityLabel(showInfoPanel ? "Hide project info" : "Show project info")
-      }
-      if effectiveTab == .overview {
-        Button {
-          withAnimation(.easeInOut(duration: 0.2)) {
-            showOverviewSidebar.toggle()
-          }
-        } label: {
-          Image(systemName: "sidebar.trailing")
-            .font(.mono(.title3))
-        }
-        .buttonStyle(PressableCircleButtonStyle())
-        .accessibilityLabel(showOverviewSidebar ? "Hide details sidebar" : "Show details sidebar")
-      }
-    }
-  }
-
-  @ViewBuilder
-  private var headerStatus: some View {
-    if project.isRuntimeConfigured {
-      RuntimeStatusBadge(status: runtimeStatus, runtimeHealthy: runtimeHealthy)
-    } else {
-      if let label = project.featureLabel {
-        LabelBadge(label: label, color: .purple)
-      } else {
-        LabelBadge(label: "Extensions", color: .purple)
-      }
-    }
-  }
-
-  private var headerSubtitle: String? {
-    if let devHost = project.devHost {
-      return devHost
-    }
-    if let featureSummary = project.featureSummary {
-      return featureSummary
-    }
-    return nil
-  }
-
-  private var primaryActionsBar: some View {
-    Menu {
-      Button("Refresh") {
-        Task { await model.refresh() }
-      }
-      if canStart {
-        Button("Start") {
-          Task { await model.startProject(project) }
-        }
-      }
-      if canStop {
-        Button("Stop") {
-          Task { await model.stopProject(project) }
-        }
-      }
-      if let url = devUrl {
-        Button("Open in Browser") {
-          openURL(url)
-        }
-      }
-      Divider()
-      Button("View Logs") {
-        model.showLogs(for: project)
-      }
-      Button("Open Shell") {
-        model.showShell(for: project)
-      }
-      if project.supportsTickets {
-        Button("Open Tickets") {
-          model.showTickets(for: project)
-        }
-      }
-    } label: {
-      Image(systemName: "ellipsis.circle")
-    }
-    .buttonStyle(PressableIconButtonStyle())
   }
 
   private var runtimeNotConfiguredCard: some View {
@@ -378,24 +275,6 @@ struct ProjectDetailView: View {
     )
   }
 
-  private var headerHeight: CGFloat {
-    56
-  }
-
-  private var topFadeOverlay: some View {
-    Rectangle()
-      .fill(.ultraThinMaterial)
-      .frame(height: headerHeight + 20)
-      .mask(
-        LinearGradient(
-          colors: [Color.white, Color.white.opacity(0)],
-          startPoint: .top,
-          endPoint: .bottom
-        )
-      )
-      .allowsHitTesting(false)
-  }
-
   private var overviewRows: [DetailRowItem] {
     var rows: [DetailRowItem] = []
     if let devHost = project.devHost {
@@ -424,14 +303,6 @@ struct ProjectDetailView: View {
       rows.append(DetailRowItem(label: "Project dir", value: projectDir))
     }
     return rows
-  }
-
-  private var devUrl: URL? {
-    guard let host = project.devHost, !host.isEmpty else { return nil }
-    if host.contains("://") {
-      return URL(string: host)
-    }
-    return URL(string: "https://\(host)")
   }
 
   private var canStart: Bool {
@@ -625,6 +496,14 @@ struct ProjectDetailView: View {
       HStack(spacing: 6) {
         ForEach(availableTabs, id: \.self) { tab in
           Button {
+            if tab == .logs {
+              openTerminal(kind: .logs)
+              return
+            }
+            if tab == .shell {
+              openTerminal(kind: .shell)
+              return
+            }
             model.selectedProjectTab = tab
           } label: {
             Image(systemName: tabIcon(tab))
@@ -690,21 +569,32 @@ struct ProjectDetailView: View {
     .padding(.horizontal, 14)
     .padding(.vertical, 8)
     .background(
-      Capsule(style: .continuous)
-        .fill(.ultraThinMaterial)
-        .overlay(
-          Capsule(style: .continuous)
-            .fill(isControlBarHovered ? Color.white.opacity(0.06) : .clear)
-        )
-        .overlay(
-          Capsule(style: .continuous)
-            .stroke(Color.white.opacity(0.12), lineWidth: 1)
-        )
+      controlBarBackground
     )
     .onHover { hovering in
       isControlBarHovered = hovering
     }
     .animation(.easeInOut(duration: 0.12), value: isControlBarHovered)
+  }
+
+  @ViewBuilder
+  private var controlBarBackground: some View {
+    let shape = Capsule(style: .continuous)
+    if colorScheme == .dark {
+      shape
+        .fill(.regularMaterial)
+        .overlay(
+          shape.stroke(Color.white.opacity(0.10), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.22), radius: 18, x: 0, y: 10)
+    } else {
+      shape
+        .fill(Color.white.opacity(0.78))
+        .overlay(
+          shape.stroke(Color.black.opacity(0.08), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.10), radius: 18, x: 0, y: 10)
+    }
   }
 
   private func tabIcon(_ tab: ProjectTab) -> String {
@@ -718,6 +608,17 @@ struct ProjectDetailView: View {
     case .tickets:
       return "ticket"
     }
+  }
+
+  private func openTerminal(kind: TerminalDrawerModel.Kind) {
+    NotificationCenter.default.post(
+      name: .hackTerminalOpenRequested,
+      object: nil,
+      userInfo: [
+        TerminalOpenRequest.projectIdKey: project.id,
+        TerminalOpenRequest.kindKey: kind.rawValue
+      ]
+    )
   }
 
 }

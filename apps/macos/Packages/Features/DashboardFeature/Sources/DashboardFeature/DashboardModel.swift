@@ -48,11 +48,14 @@ public final class DashboardModel {
   public var isRefreshing = false
 
   private let client: HackCLIClient
+  // Tickets should not be blocked by global refresh/status calls.
+  private let ticketsClient: HackCLIClient
   private var refreshTask: Task<Void, Never>? = nil
   private var statusClearTask: Task<Void, Never>? = nil
 
-  public init(client: HackCLIClient) {
+  public init(client: HackCLIClient, ticketsClient: HackCLIClient = HackCLIClient()) {
     self.client = client
+    self.ticketsClient = ticketsClient
   }
 
   public var selectedProject: ProjectSummary? {
@@ -154,12 +157,32 @@ public final class DashboardModel {
 
   public func showLogs(for project: ProjectSummary) {
     selectedItem = .project(project.id)
-    selectedProjectTab = .logs
+    if selectedProjectTab == .logs {
+      selectedProjectTab = .overview
+    }
+    NotificationCenter.default.post(
+      name: .hackTerminalOpenRequested,
+      object: nil,
+      userInfo: [
+        TerminalOpenRequest.projectIdKey: project.id,
+        TerminalOpenRequest.kindKey: TerminalDrawerModel.Kind.logs.rawValue
+      ]
+    )
   }
 
   public func showShell(for project: ProjectSummary) {
     selectedItem = .project(project.id)
-    selectedProjectTab = .shell
+    if selectedProjectTab == .shell {
+      selectedProjectTab = .overview
+    }
+    NotificationCenter.default.post(
+      name: .hackTerminalOpenRequested,
+      object: nil,
+      userInfo: [
+        TerminalOpenRequest.projectIdKey: project.id,
+        TerminalOpenRequest.kindKey: TerminalDrawerModel.Kind.shell.rawValue
+      ]
+    )
   }
 
   public func showTickets(for project: ProjectSummary) {
@@ -171,7 +194,7 @@ public final class DashboardModel {
     guard let path = resolveProjectPath(project) else {
       throw HackCLIError.commandFailed(exitCode: 1, stderr: "Missing project path for \(project.name)")
     }
-    let response = try await client.listTickets(path: path)
+    let response = try await ticketsClient.listTickets(path: path)
     return response.tickets
   }
 
@@ -179,7 +202,7 @@ public final class DashboardModel {
     guard let path = resolveProjectPath(project) else {
       throw HackCLIError.commandFailed(exitCode: 1, stderr: "Missing project path for \(project.name)")
     }
-    return try await client.showTicket(path: path, ticketId: ticketId)
+    return try await ticketsClient.showTicket(path: path, ticketId: ticketId)
   }
 
   public func createTicket(
@@ -194,7 +217,7 @@ public final class DashboardModel {
       return nil
     }
     let response = await runActionResult(message: "Creating ticket…") {
-      try await self.client.createTicket(
+      try await self.ticketsClient.createTicket(
         path: path,
         title: title,
         body: body,
@@ -215,7 +238,7 @@ public final class DashboardModel {
       return nil
     }
     return await runActionResult(message: "Updating ticket status…") {
-      try await self.client.setTicketStatus(path: path, ticketId: ticketId, status: status)
+      try await self.ticketsClient.setTicketStatus(path: path, ticketId: ticketId, status: status)
     }
   }
 
@@ -225,7 +248,7 @@ public final class DashboardModel {
       return nil
     }
     let response = await runActionResult(message: "Syncing tickets…") {
-      try await self.client.syncTickets(path: path)
+      try await self.ticketsClient.syncTickets(path: path)
     }
     return response?.sync
   }
@@ -236,7 +259,7 @@ public final class DashboardModel {
       return false
     }
     let result = await runActionResult(message: "Setting up tickets…") {
-      try await self.client.setupTickets(path: path)
+      try await self.ticketsClient.setupTickets(path: path)
       return true
     }
     return result ?? false

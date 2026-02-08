@@ -86,7 +86,22 @@ export interface RuntimeCache {
 
 export function createRuntimeCache(opts: {
   readonly onRefresh?: (snapshot: RuntimeSnapshot) => void;
+  readonly deps?: {
+    readonly readProjectsRegistry?: typeof readProjectsRegistry;
+    readonly buildProjectViews?: typeof buildProjectViews;
+    readonly serializeProjectView?: typeof serializeProjectView;
+    readonly resolveProjectMeta?: typeof resolveProjectMeta;
+  };
 }): RuntimeCache {
+  const deps = {
+    readProjectsRegistry:
+      opts.deps?.readProjectsRegistry ?? readProjectsRegistry,
+    buildProjectViews: opts.deps?.buildProjectViews ?? buildProjectViews,
+    serializeProjectView:
+      opts.deps?.serializeProjectView ?? serializeProjectView,
+    resolveProjectMeta: opts.deps?.resolveProjectMeta ?? resolveProjectMeta,
+  } as const;
+
   let snapshot: RuntimeSnapshot | null = null;
   let refreshTask: Promise<void> | null = null;
   let pending = false;
@@ -195,12 +210,12 @@ export function createRuntimeCache(opts: {
     if (!snapshot) {
       await refresh({ reason: "projects" });
     }
-    const registry = await readProjectsRegistry();
+    const registry = await deps.readProjectsRegistry();
     const runtime = filterRuntimeProjects({
       runtime: snapshot?.runtime ?? [],
       includeGlobal,
     });
-    const views = await buildProjectViews({
+    const views = await deps.buildProjectViews({
       registryProjects: registry.projects,
       runtime,
       runtimeOk: health.ok,
@@ -224,7 +239,7 @@ export function createRuntimeCache(opts: {
               return null;
             }
             try {
-              return await resolveProjectMeta({
+              return await deps.resolveProjectMeta({
                 projectName: reg.name,
                 repoRoot: reg.repoRoot,
                 projectDir: reg.projectDir,
@@ -249,7 +264,7 @@ export function createRuntimeCache(opts: {
       runtime_reset_at: runtimeMeta.lastResetAt,
       runtime_reset_count: runtimeMeta.resetCount,
       projects: views.map((view, i) => ({
-        ...serializeProjectView(view),
+        ...deps.serializeProjectView(view),
         ...(includeMeta ? { meta: metas[i] ?? null } : {}),
       })),
     };

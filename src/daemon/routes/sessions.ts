@@ -389,7 +389,7 @@ function parseSessionCreateInput(
     return { ok: false, error: "missing_name" };
   }
 
-  // Validate session name (tmux restrictions)
+  // Validate session name (alphanumeric, dash, underscore, dot)
   const trimmedName = name.trim();
   if (!SESSION_NAME_PATTERN.test(trimmedName)) {
     return {

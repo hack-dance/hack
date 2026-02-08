@@ -223,12 +223,16 @@ export function createRuntimeCache(opts: {
             if (!reg) {
               return null;
             }
-            return await resolveProjectMeta({
-              projectName: reg.name,
-              repoRoot: reg.repoRoot,
-              projectDir: reg.projectDir,
-              composeFile: resolve(reg.projectDir, PROJECT_COMPOSE_FILENAME),
-            });
+            try {
+              return await resolveProjectMeta({
+                projectName: reg.name,
+                repoRoot: reg.repoRoot,
+                projectDir: reg.projectDir,
+                composeFile: resolve(reg.projectDir, PROJECT_COMPOSE_FILENAME),
+              });
+            } catch {
+              return null;
+            }
           })
         )
       : [];

@@ -446,7 +446,10 @@ struct ProjectDetailView: View {
 
   private var runtimeServicesByName: [String: RuntimeService] {
     guard let runtime = project.runtime else { return [:] }
-    return Dictionary(uniqueKeysWithValues: runtime.services.map { ($0.service, $0) })
+    return Dictionary(
+      runtime.services.map { ($0.service, $0) },
+      uniquingKeysWith: { first, _ in first }
+    )
   }
 
   private var serviceHostsByName: [String: [String]] {

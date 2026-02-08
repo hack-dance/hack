@@ -1956,7 +1956,7 @@ function removeLegacyDnsmasqLines(opts: {
     if (!updated.includes(legacyLine)) {
       continue;
     }
-    updated = updated.replace(legacyLine, "");
+    updated = updated.replaceAll(legacyLine, "");
     changed = true;
   }
 

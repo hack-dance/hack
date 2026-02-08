@@ -368,7 +368,7 @@ function buildShellEnv(opts: {
       env[key] = value;
     }
   }
-  env.TERM = process.env.TERM ?? DEFAULT_TERM;
+  env.TERM = env.TERM || process.env.TERM || DEFAULT_TERM;
   return env;
 }
 

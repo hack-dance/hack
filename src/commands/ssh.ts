@@ -147,6 +147,12 @@ async function handleSsh(opts: {
   const sessionArg = args.positionals.session;
 
   if (sessionArg) {
+    if (!SESSION_NAME_PATTERN.test(sessionArg)) {
+      p.log.error(
+        "Invalid session name (only letters, numbers, dashes, underscores, or dots)"
+      );
+      return 1;
+    }
     // Direct connect to specified session
     return await connectToSession({
       hostname,

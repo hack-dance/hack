@@ -540,7 +540,7 @@ function resolveHostProcessKind(opts: {
     return "hack tui";
   }
   if (normalized.includes(" hack remote")) {
-    return "hack tui";
+    return "hack remote";
   }
   if (normalized.includes(" hack logs")) {
     return "log-stream";

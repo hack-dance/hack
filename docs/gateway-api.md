@@ -548,6 +548,10 @@ Non-JSON text frames are treated as raw input.
 | `status` | string | Human-readable status |
 | `name` | string | Container name |
 | `ports` | string | Port mapping string |
+| `image` | string or null | Container image |
+| `ip` | string or null | Container IP address |
+| `mounts` | RuntimeMount[] | Volume/bind mounts |
+| `labels` | object | Container labels |
 | `working_dir` | string or null | Compose working directory |
 
 ### PsItem

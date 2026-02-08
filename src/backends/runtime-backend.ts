@@ -18,6 +18,7 @@ export interface RuntimeBaseOptions {
   readonly composeProject?: string | null;
   readonly profiles?: readonly string[];
   readonly cwd: string;
+  readonly env?: Record<string, string>;
 }
 
 export interface RuntimeUpOptions extends RuntimeBaseOptions {
@@ -55,11 +56,13 @@ export const composeRuntimeBackend: RuntimeBackend = {
       ...(opts.detach ? ["-d"] : []),
     ];
     if (opts.detach) {
-      return await run(cmd, { cwd: opts.cwd });
+      return await run(cmd, { cwd: opts.cwd, env: opts.env });
     }
 
+    const env = mergeSpawnEnv(opts.env);
     const proc = Bun.spawn(cmd, {
       cwd: opts.cwd,
+      env,
       stdin: "inherit",
       stdout: "pipe",
       stderr: "pipe",
@@ -92,15 +95,15 @@ export const composeRuntimeBackend: RuntimeBackend = {
   },
   async down(opts) {
     const cmd = [...buildComposeArgs(opts), "down"];
-    return await run(cmd, { cwd: opts.cwd });
+    return await run(cmd, { cwd: opts.cwd, env: opts.env });
   },
   async psJson(opts) {
     const cmd = [...buildComposeArgs(opts), "ps", "--format", "json"];
-    return await exec(cmd, { cwd: opts.cwd, stdin: "ignore" });
+    return await exec(cmd, { cwd: opts.cwd, stdin: "ignore", env: opts.env });
   },
   async ps(opts) {
     const cmd = [...buildComposeArgs(opts), "ps"];
-    return await run(cmd, { cwd: opts.cwd });
+    return await run(cmd, { cwd: opts.cwd, env: opts.env });
   },
   async run(opts) {
     const cmd = [
@@ -111,6 +114,22 @@ export const composeRuntimeBackend: RuntimeBackend = {
       opts.service,
       ...(opts.cmdArgs.length > 0 ? opts.cmdArgs : []),
     ];
-    return await run(cmd, { cwd: opts.cwd, stdin: "inherit" });
+    return await run(cmd, { cwd: opts.cwd, stdin: "inherit", env: opts.env });
   },
 };
+
+function mergeSpawnEnv(
+  override: Record<string, string> | undefined
+): Record<string, string> | undefined {
+  if (!override) {
+    return undefined;
+  }
+
+  const base: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value === "string") {
+      base[key] = value;
+    }
+  }
+  return { ...base, ...override };
+}

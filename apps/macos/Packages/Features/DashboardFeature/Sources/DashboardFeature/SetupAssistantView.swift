@@ -208,6 +208,7 @@ struct SetupAssistantView: View {
       runtimeConfigured: nil,
       runtimeStatus: nil,
       runtime: nil,
+      meta: nil,
       kind: .unregistered,
       status: .unknown
     )

@@ -10,6 +10,7 @@ import {
   resolveGlobalCaddyIp,
 } from "../lib/caddy-hosts.ts";
 import { pathExists } from "../lib/fs.ts";
+import { type ProjectMeta, resolveProjectMeta } from "../lib/project-meta.ts";
 import type { ProjectView } from "../lib/project-views.ts";
 import {
   buildProjectViews,
@@ -55,16 +56,30 @@ const optAll = defineOption({
   description: "Include unregistered docker compose projects (best-effort)",
 } as const);
 
+const optMeta = defineOption({
+  name: "meta",
+  type: "boolean",
+  long: "--meta",
+  description: "Include git/worktree/session/env metadata (implies --details)",
+} as const);
+
 const options = [
   optProject,
   optDetails,
+  optMeta,
   optIncludeGlobal,
   optAll,
   optJson,
 ] as const;
 const positionals = [] as const;
 
-const statusOptions = [optProject, optIncludeGlobal, optAll, optJson] as const;
+const statusOptions = [
+  optProject,
+  optIncludeGlobal,
+  optAll,
+  optMeta,
+  optJson,
+] as const;
 
 const statusSpec = defineCommand({
   name: "status",
@@ -107,7 +122,8 @@ const handleProjects: CommandHandlerFor<typeof spec> = async ({
     filter,
     includeGlobal: args.options.includeGlobal === true,
     includeUnregistered: args.options.all === true,
-    details: args.options.details === true,
+    details: args.options.details === true || args.options.meta === true,
+    meta: args.options.meta === true,
     json: args.options.json === true,
   });
 };
@@ -222,6 +238,7 @@ const handleStatus: CommandHandlerFor<typeof statusSpec> = async ({
     includeGlobal: args.options.includeGlobal === true,
     includeUnregistered: args.options.all === true,
     details: true,
+    meta: args.options.meta === true,
     json: args.options.json === true,
   });
 };
@@ -233,6 +250,7 @@ async function runProjects(opts: {
   readonly includeGlobal: boolean;
   readonly includeUnregistered: boolean;
   readonly details: boolean;
+  readonly meta: boolean;
   readonly json: boolean;
 }): Promise<number> {
   if (opts.json) {
@@ -242,6 +260,7 @@ async function runProjects(opts: {
         filter: opts.filter ?? null,
         include_global: opts.includeGlobal,
         include_unregistered: opts.includeUnregistered,
+        include_meta: opts.meta,
       },
     });
     if (daemon?.ok && daemon.json) {
@@ -266,6 +285,9 @@ async function runProjects(opts: {
     filter: opts.filter,
     includeUnregistered: opts.includeUnregistered,
   });
+  const metaByName = opts.meta
+    ? await buildMetaByProjectName({ views })
+    : new Map<string, ProjectMeta>();
   if (opts.json) {
     const runtimeMeta = formatRuntimeMeta({ runtime });
     const payload = {
@@ -273,13 +295,17 @@ async function runProjects(opts: {
       filter: opts.filter,
       include_global: opts.includeGlobal,
       include_unregistered: opts.includeUnregistered,
+      include_meta: opts.meta,
       runtime_ok: runtimeMeta.ok,
       runtime_error: runtimeMeta.error,
       runtime_checked_at: runtimeMeta.checkedAt,
       runtime_last_ok_at: runtimeMeta.lastOkAt,
       runtime_reset_at: runtimeMeta.lastResetAt,
       runtime_reset_count: runtimeMeta.resetCount,
-      projects: views.map(serializeProjectView),
+      projects: views.map((view) => ({
+        ...serializeProjectView(view),
+        ...(opts.meta ? { meta: metaByName.get(view.name) ?? null } : {}),
+      })),
     };
     process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
     return 0;
@@ -334,6 +360,7 @@ async function runProjects(opts: {
         project: p,
         caddyIp,
         runtimeOk: runtime.ok,
+        meta: opts.meta ? (metaByName.get(p.name) ?? null) : null,
       });
     }
   }
@@ -345,6 +372,7 @@ async function renderProjectDetails(opts: {
   readonly project: ProjectView;
   readonly caddyIp: string | null;
   readonly runtimeOk: boolean;
+  readonly meta: ProjectMeta | null;
 }): Promise<void> {
   const p = opts.project;
   await display.section(p.name);
@@ -400,6 +428,10 @@ async function renderProjectDetails(opts: {
     rows,
   });
 
+  if (opts.meta && p.kind === "registered") {
+    await renderProjectMeta({ meta: opts.meta });
+  }
+
   if (opts.runtimeOk && p.branchRuntime.length > 0) {
     const branchRows = p.branchRuntime
       .slice()
@@ -422,6 +454,184 @@ async function renderProjectDetails(opts: {
       rows: branchRows,
     });
   }
+}
+
+async function buildMetaByProjectName(opts: {
+  readonly views: readonly ProjectView[];
+}): Promise<Map<string, ProjectMeta>> {
+  const out = new Map<string, ProjectMeta>();
+  const tasks = opts.views
+    .filter((p) => p.kind === "registered" && p.repoRoot && p.projectDir)
+    .map(async (p) => {
+      if (!(p.repoRoot && p.projectDir)) {
+        return;
+      }
+      const meta = await resolveProjectMeta({
+        projectName: p.name,
+        repoRoot: p.repoRoot,
+        projectDir: p.projectDir,
+        composeFile: resolve(p.projectDir, PROJECT_COMPOSE_FILENAME),
+      });
+      out.set(p.name, meta);
+    });
+
+  await Promise.all(tasks);
+  return out;
+}
+
+async function renderProjectMeta(opts: {
+  readonly meta: ProjectMeta;
+}): Promise<void> {
+  await display.section("Meta");
+
+  await renderGitMeta({ git: opts.meta.git });
+  await renderGitWorktrees({ worktrees: opts.meta.git.worktrees });
+  await renderSessionsMeta({ sessions: opts.meta.sessions.sessions });
+  await renderEnvMeta({ env: opts.meta.env });
+  await renderHackBranchesMeta({ branches: opts.meta.hackBranches.branches });
+  await renderComposeBuildMeta({ services: opts.meta.composeBuild.services });
+}
+
+function formatYesNoUnknown(value: boolean | null): string {
+  if (value === true) {
+    return "yes";
+  }
+  if (value === false) {
+    return "no";
+  }
+  return "";
+}
+
+async function renderGitMeta(opts: {
+  readonly git: ProjectMeta["git"];
+}): Promise<void> {
+  const git = opts.git;
+  const entries: Array<readonly [string, string]> = [
+    ["Git repo", git.isRepo ? "yes" : "no"],
+  ];
+
+  if (!git.isRepo) {
+    if (git.error) {
+      entries.push(["Git error", git.error]);
+    }
+    await display.kv({ entries });
+    return;
+  }
+
+  if (git.branch) {
+    entries.push(["Branch", git.branch]);
+  }
+  if (git.head) {
+    entries.push(["HEAD", git.head.slice(0, 12)]);
+  }
+  if (git.dirty !== null) {
+    entries.push(["Dirty", formatYesNoUnknown(git.dirty)]);
+  }
+  if (git.localBranchCount !== null) {
+    entries.push(["Local branches", String(git.localBranchCount)]);
+  }
+  if (git.worktrees) {
+    entries.push(["Worktrees", String(git.worktrees.length)]);
+  }
+  if (git.error) {
+    entries.push(["Git error", git.error]);
+  }
+
+  await display.kv({ entries });
+}
+
+async function renderGitWorktrees(opts: {
+  readonly worktrees: ProjectMeta["git"]["worktrees"];
+}): Promise<void> {
+  const worktrees = opts.worktrees ?? [];
+  if (worktrees.length === 0) {
+    return;
+  }
+
+  await display.section("Git worktrees");
+  await display.table({
+    columns: ["Path", "Branch", "Detached"],
+    rows: worktrees.map((w) => [
+      w.path,
+      w.branch ?? "",
+      w.detached ? "yes" : "",
+    ]),
+  });
+}
+
+async function renderSessionsMeta(opts: {
+  readonly sessions: ProjectMeta["sessions"]["sessions"];
+}): Promise<void> {
+  const sessions = opts.sessions ?? [];
+  if (sessions.length === 0) {
+    return;
+  }
+
+  await display.section("Sessions");
+  await display.table({
+    columns: ["Name", "Backend", "Attached"],
+    rows: sessions.map((s) => [
+      s.name,
+      s.backend,
+      formatYesNoUnknown(s.attached),
+    ]),
+  });
+}
+
+async function renderEnvMeta(opts: {
+  readonly env: ProjectMeta["env"];
+}): Promise<void> {
+  if (opts.env.vars.length === 0) {
+    return;
+  }
+
+  await display.section("Env");
+  const missing = opts.env.missingRequired;
+  await display.kv({
+    entries: [
+      ["Contract", opts.env.contractExists ? "yes" : "no"],
+      ["Missing required", missing.length > 0 ? missing.join(", ") : ""],
+    ],
+  });
+}
+
+async function renderHackBranchesMeta(opts: {
+  readonly branches: ProjectMeta["hackBranches"]["branches"];
+}): Promise<void> {
+  if (opts.branches.length === 0) {
+    return;
+  }
+
+  await display.section("Hack branches");
+  await display.table({
+    columns: ["Slug", "Name", "Note", "Last used"],
+    rows: opts.branches.map((b) => [
+      b.slug,
+      b.name,
+      b.note ?? "",
+      b.last_used_at ?? "",
+    ]),
+  });
+}
+
+async function renderComposeBuildMeta(opts: {
+  readonly services: ProjectMeta["composeBuild"]["services"];
+}): Promise<void> {
+  if (opts.services.length === 0) {
+    return;
+  }
+
+  await display.section("Service build");
+  await display.table({
+    columns: ["Service", "Build", "Context", "Dockerfile", "Exists"],
+    rows: opts.services.map((s) => [
+      s.service,
+      s.build ? "yes" : "no",
+      s.context ?? "",
+      s.dockerfile ?? "",
+      formatYesNoUnknown(s.dockerfileExists),
+    ]),
+  });
 }
 
 function formatCaddySummary(opts: {

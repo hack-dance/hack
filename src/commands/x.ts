@@ -46,7 +46,35 @@ async function handleX({
     throw new CliUsageError("Unable to parse extension command.");
   }
 
-  const loaded = await loadExtensionManagerForCli({ cwd: ctx.cwd });
+  const loaded = await loadAndLogExtensionManager({ cwd: ctx.cwd });
+
+  const dispatcherResult = await handleDispatcherInvocation({
+    loaded,
+    invocation,
+  });
+  if (dispatcherResult !== null) {
+    return dispatcherResult;
+  }
+
+  const namespace = invocation.namespace ?? "";
+  const extension = loaded.manager.getExtensionByNamespace({ namespace });
+  if (!extension) {
+    logger.error({ message: `Unknown extension namespace: ${namespace}` });
+    return 1;
+  }
+
+  return await dispatchExtensionCommand({
+    ctx,
+    loaded,
+    extension,
+    invocation,
+  });
+}
+
+async function loadAndLogExtensionManager(opts: {
+  readonly cwd: string;
+}): Promise<Awaited<ReturnType<typeof loadExtensionManagerForCli>>> {
+  const loaded = await loadExtensionManagerForCli({ cwd: opts.cwd });
   if (loaded.configError) {
     logger.warn({
       message: `Control plane config error: ${loaded.configError}`,
@@ -55,130 +83,162 @@ async function handleX({
   for (const warning of loaded.warnings) {
     logger.warn({ message: warning });
   }
+  return loaded;
+}
 
-  if (!invocation.namespace) {
-    await renderDispatcherHelp({ extensions: loaded.manager.listExtensions() });
+async function handleDispatcherInvocation(opts: {
+  readonly loaded: Awaited<ReturnType<typeof loadExtensionManagerForCli>>;
+  readonly invocation: ExtensionInvocation;
+}): Promise<number | null> {
+  if (!opts.invocation.namespace) {
+    await renderDispatcherHelp({
+      extensions: opts.loaded.manager.listExtensions(),
+    });
     return 1;
   }
 
-  if (invocation.namespace === "list") {
-    await renderExtensionList({ extensions: loaded.manager.listExtensions() });
+  if (opts.invocation.namespace === "list") {
+    await renderExtensionList({
+      extensions: opts.loaded.manager.listExtensions(),
+    });
     return 0;
   }
 
-  if (invocation.namespace === "resolve") {
-    const commandId = invocation.command ?? "";
-    if (!commandId) {
-      throw new CliUsageError(
-        "Missing commandId for `hack x resolve <commandId>`"
-      );
-    }
-    const resolved = loaded.manager.resolveCommandId({ commandId });
-    if (!resolved) {
-      logger.error({ message: `Unknown commandId: ${commandId}` });
-      return 1;
-    }
-    process.stdout.write(
-      `hack x ${resolved.namespace} ${resolved.commandName}\n`
+  if (opts.invocation.namespace === "resolve") {
+    return handleResolveCommandId({
+      loaded: opts.loaded,
+      invocation: opts.invocation,
+    });
+  }
+
+  return null;
+}
+
+function handleResolveCommandId(opts: {
+  readonly loaded: Awaited<ReturnType<typeof loadExtensionManagerForCli>>;
+  readonly invocation: ExtensionInvocation;
+}): number {
+  const commandId = opts.invocation.command ?? "";
+  if (!commandId) {
+    throw new CliUsageError(
+      "Missing commandId for `hack x resolve <commandId>`"
     );
-    return 0;
   }
 
-  const extension = loaded.manager.getExtensionByNamespace({
-    namespace: invocation.namespace,
+  const resolved = opts.loaded.manager.resolveCommandId({ commandId });
+  if (!resolved) {
+    logger.error({ message: `Unknown commandId: ${commandId}` });
+    return 1;
+  }
+
+  process.stdout.write(
+    `hack x ${resolved.namespace} ${resolved.commandName}\n`
+  );
+  return 0;
+}
+
+async function dispatchExtensionCommand(opts: {
+  readonly ctx: CliContext;
+  readonly loaded: Awaited<ReturnType<typeof loadExtensionManagerForCli>>;
+  readonly extension: ResolvedExtension;
+  readonly invocation: ExtensionInvocation;
+}): Promise<number> {
+  if (opts.extension.enabled) {
+    return await dispatchEnabledExtensionCommand({
+      loaded: opts.loaded,
+      extension: opts.extension,
+      invocation: opts.invocation,
+    });
+  }
+
+  const didEnable = await promptEnableExtension({
+    loaded: opts.loaded,
+    extension: opts.extension,
+    invocation: opts.invocation,
   });
-  if (!extension) {
-    logger.error({
-      message: `Unknown extension namespace: ${invocation.namespace}`,
+  if (!didEnable) {
+    return 1;
+  }
+
+  const reloaded = await loadAndLogExtensionManager({ cwd: opts.ctx.cwd });
+  const nextExtension = reloaded.manager.getExtensionByNamespace({
+    namespace: opts.extension.namespace,
+  });
+  if (!nextExtension?.enabled) {
+    logger.warn({
+      message: "Extension still disabled after enable attempt.",
     });
     return 1;
   }
 
-  if (!extension.enabled) {
-    const instructions = buildEnableInstructions({
-      extension,
-      namespace: invocation.namespace ?? "",
-      command: invocation.command,
-      args: invocation.args,
-    });
-    await display.panel({
-      title: "Extension disabled",
-      tone: "warn",
-      lines: instructions.lines,
-    });
+  return await dispatchEnabledExtensionCommand({
+    loaded: reloaded,
+    extension: nextExtension,
+    invocation: opts.invocation,
+  });
+}
 
-    const didEnable = await maybeEnableExtension({
-      extension,
-      namespace: invocation.namespace ?? "",
-      command: invocation.command,
-      args: invocation.args,
-      projectDir: loaded.context.project?.projectDir,
-    });
+async function promptEnableExtension(opts: {
+  readonly loaded: Awaited<ReturnType<typeof loadExtensionManagerForCli>>;
+  readonly extension: ResolvedExtension;
+  readonly invocation: ExtensionInvocation;
+}): Promise<boolean> {
+  const instructions = buildEnableInstructions({
+    extension: opts.extension,
+    namespace: opts.invocation.namespace ?? "",
+    command: opts.invocation.command,
+    args: opts.invocation.args,
+  });
+  await display.panel({
+    title: "Extension disabled",
+    tone: "warn",
+    lines: instructions.lines,
+  });
 
-    if (didEnable) {
-      const reloaded = await loadExtensionManagerForCli({ cwd: ctx.cwd });
-      const nextExtension = reloaded.manager.getExtensionByNamespace({
-        namespace: invocation.namespace,
-      });
-      if (!nextExtension?.enabled) {
-        logger.warn({
-          message: "Extension still disabled after enable attempt.",
-        });
-        return 1;
-      }
+  return await maybeEnableExtension({
+    extension: opts.extension,
+    namespace: opts.invocation.namespace ?? "",
+    command: opts.invocation.command,
+    args: opts.invocation.args,
+    projectDir: opts.loaded.context.project?.projectDir,
+  });
+}
 
-      if (!invocation.command || invocation.command === "help") {
-        await renderExtensionHelp({
-          extension: nextExtension,
-          commands: reloaded.manager.listCommands({
-            namespace: nextExtension.namespace,
-          }),
-        });
-        return 0;
-      }
-
-      const resolved = reloaded.manager.resolveCommand({
-        namespace: nextExtension.namespace,
-        commandName: invocation.command,
-      });
-      if (!resolved) {
-        logger.error({
-          message: `Unknown command "${invocation.command}" for ${nextExtension.namespace}`,
-        });
-        return 1;
-      }
-
-      return await resolved.command.handler({
-        ctx: reloaded.context,
-        args: invocation.args,
-      });
-    }
-
-    return 1;
-  }
-
-  if (!invocation.command || invocation.command === "help") {
+async function dispatchEnabledExtensionCommand(opts: {
+  readonly loaded: Awaited<ReturnType<typeof loadExtensionManagerForCli>>;
+  readonly extension: ResolvedExtension;
+  readonly invocation: ExtensionInvocation;
+}): Promise<number> {
+  if (!opts.invocation.command || opts.invocation.command === "help") {
     await renderExtensionHelp({
-      extension,
-      commands: loaded.manager.listCommands({ namespace: extension.namespace }),
+      extension: opts.extension,
+      commands: opts.loaded.manager.listCommands({
+        namespace: opts.extension.namespace,
+      }),
     });
     return 0;
   }
 
-  const resolved = loaded.manager.resolveCommand({
-    namespace: extension.namespace,
-    commandName: invocation.command,
+  const resolved = opts.loaded.manager.resolveCommand({
+    namespace: opts.extension.namespace,
+    commandName: opts.invocation.command,
   });
   if (!resolved) {
     logger.error({
-      message: `Unknown command "${invocation.command}" for ${extension.namespace}`,
+      message: `Unknown command "${opts.invocation.command}" for ${opts.extension.namespace}`,
+    });
+    await renderExtensionHelp({
+      extension: opts.extension,
+      commands: opts.loaded.manager.listCommands({
+        namespace: opts.extension.namespace,
+      }),
     });
     return 1;
   }
 
   return await resolved.command.handler({
-    ctx: loaded.context,
-    args: invocation.args,
+    ctx: opts.loaded.context,
+    args: opts.invocation.args,
   });
 }
 

@@ -382,3 +382,4 @@ struct GlobalStatusStrip: View {
     }
   }
 }
+

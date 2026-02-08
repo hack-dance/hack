@@ -26,6 +26,10 @@ function makeContainer(opts: {
     status: opts.status,
     name: opts.name,
     ports: opts.ports ?? "",
+    image: null,
+    ip: null,
+    mounts: [],
+    labels: {},
     workingDir: `/tmp/${opts.project}/.hack`,
   };
 }

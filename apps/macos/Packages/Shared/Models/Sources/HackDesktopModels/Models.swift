@@ -34,6 +34,7 @@ public struct ProjectSummary: Decodable, Identifiable, Hashable {
   public let runtimeConfigured: Bool?
   public let runtimeStatus: ProjectRuntimeStatus?
   public let runtime: RuntimeProject?
+  public let meta: ProjectMeta?
   public let kind: ProjectKind
   public let status: ProjectStatus
 
@@ -52,6 +53,7 @@ public struct ProjectSummary: Decodable, Identifiable, Hashable {
     runtimeConfigured: Bool?,
     runtimeStatus: ProjectRuntimeStatus?,
     runtime: RuntimeProject?,
+    meta: ProjectMeta?,
     kind: ProjectKind,
     status: ProjectStatus
   ) {
@@ -67,9 +69,113 @@ public struct ProjectSummary: Decodable, Identifiable, Hashable {
     self.runtimeConfigured = runtimeConfigured
     self.runtimeStatus = runtimeStatus
     self.runtime = runtime
+    self.meta = meta
     self.kind = kind
     self.status = status
   }
+}
+
+public enum HackEnvSource: String, Decodable, Hashable {
+  case plainEnv = "plain_env"
+  case keychain
+}
+
+public enum EnvResolvedFrom: String, Decodable, Hashable {
+  case dotenv
+  case process
+  case keychain
+}
+
+public struct ProjectMeta: Decodable, Hashable {
+  public let git: GitMeta
+  public let hackBranches: HackBranchesMeta
+  public let env: EnvMeta
+  public let sessions: SessionsMeta
+  public let composeBuild: ComposeBuildMeta
+}
+
+public struct GitMeta: Decodable, Hashable {
+  public let isRepo: Bool
+  public let head: String?
+  public let branch: String?
+  public let detached: Bool?
+  public let dirty: Bool?
+  public let localBranchCount: Int?
+  public let worktrees: [GitWorktreeMeta]?
+  public let error: String?
+}
+
+public struct GitWorktreeMeta: Decodable, Hashable {
+  public let path: String
+  public let head: String?
+  public let branch: String?
+  public let detached: Bool
+}
+
+public struct HackBranchesMeta: Decodable, Hashable {
+  public let path: String
+  public let parseError: String?
+  public let branches: [HackBranchEntry]
+}
+
+public struct HackBranchEntry: Decodable, Hashable, Identifiable {
+  public let name: String
+  public let slug: String
+  public let note: String?
+  public let createdAt: String?
+  public let lastUsedAt: String?
+
+  public var id: String { slug }
+}
+
+public struct EnvMeta: Decodable, Hashable {
+  public let contractPath: String
+  public let contractExists: Bool
+  public let contractParseError: String?
+  public let vars: [EnvVarMeta]
+  public let missingRequired: [String]
+}
+
+public struct EnvVarMeta: Decodable, Hashable, Identifiable {
+  public let key: String
+  public let required: Bool
+  public let source: HackEnvSource
+  public let services: [String]?
+  public let description: String?
+  public let resolvedFrom: EnvResolvedFrom?
+  public let hasValue: Bool
+
+  public var id: String { key }
+}
+
+public struct SessionsMeta: Decodable, Hashable {
+  public let sessions: [MuxSessionSummary]
+}
+
+public struct MuxSessionSummary: Decodable, Hashable, Identifiable {
+  public let backend: String
+  public let name: String
+  public let attached: Bool?
+  public let path: String?
+  public let windows: Int?
+  public let createdAt: String?
+
+  public var id: String { "\(backend):\(name)" }
+}
+
+public struct ComposeBuildMeta: Decodable, Hashable {
+  public let services: [ComposeBuildServiceMeta]
+}
+
+public struct ComposeBuildServiceMeta: Decodable, Hashable, Identifiable {
+  public let service: String
+  public let build: Bool
+  public let context: String?
+  public let dockerfile: String?
+  public let dockerfilePath: String?
+  public let dockerfileExists: Bool?
+
+  public var id: String { service }
 }
 
 public struct RuntimeProject: Decodable, Hashable {
@@ -106,6 +212,10 @@ public struct RuntimeContainer: Decodable, Hashable {
   public let status: String
   public let name: String
   public let ports: String
+  public let image: String?
+  public let ip: String?
+  public let mounts: [RuntimeMount]?
+  public let labels: [String: String]?
   public let workingDir: String?
 
   public init(
@@ -114,6 +224,10 @@ public struct RuntimeContainer: Decodable, Hashable {
     status: String,
     name: String,
     ports: String,
+    image: String?,
+    ip: String?,
+    mounts: [RuntimeMount]?,
+    labels: [String: String]?,
     workingDir: String?
   ) {
     self.id = id
@@ -121,6 +235,10 @@ public struct RuntimeContainer: Decodable, Hashable {
     self.status = status
     self.name = name
     self.ports = ports
+    self.image = image
+    self.ip = ip
+    self.mounts = mounts
+    self.labels = labels
     self.workingDir = workingDir
   }
 
@@ -130,7 +248,21 @@ public struct RuntimeContainer: Decodable, Hashable {
     case status
     case name
     case ports
+    case image
+    case ip
+    case mounts
+    case labels
     case workingDir = "working_dir"
+  }
+}
+
+public struct RuntimeMount: Decodable, Hashable {
+  public let source: String?
+  public let destination: String?
+
+  public init(source: String?, destination: String?) {
+    self.source = source
+    self.destination = destination
   }
 }
 

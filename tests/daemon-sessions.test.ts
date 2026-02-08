@@ -149,7 +149,7 @@ describe.skipIf(!hasTmux)("handleSessionRoutes", () => {
       expect(result?.status).not.toBe(400);
     });
 
-    test("accepts names with dots", async () => {
+    test("rejects names with dots", async () => {
       const req = mockRequest({
         method: "POST",
         path: "/v1/sessions",
@@ -157,7 +157,7 @@ describe.skipIf(!hasTmux)("handleSessionRoutes", () => {
       });
       const url = new URL(req.url);
       const result = await handleSessionRoutes({ req, url });
-      expect(result?.status).not.toBe(400);
+      expect(result?.status).toBe(400);
     });
 
     test("rejects names with spaces", async () => {

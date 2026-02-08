@@ -1,5 +1,9 @@
 import { beforeEach, expect, mock, test } from "bun:test";
 
+import { HACK_PROJECT_DIR_PRIMARY } from "../src/constants.ts";
+import type { ProjectMeta } from "../src/lib/project-meta.ts";
+import type { ProjectView } from "../src/lib/project-views.ts";
+import type { RegisteredProject } from "../src/lib/projects-registry.ts";
 import type { RuntimeProject } from "../src/lib/runtime-projects.ts";
 
 const runtimeQueue: Array<{
@@ -107,6 +111,122 @@ test("runtime cache refresh records healthy snapshot", async () => {
   expect(snapshot?.health.ok).toBe(true);
   expect(snapshot?.health.error).toBe(null);
   expect(autoRegisterCalls.length).toBe(1);
+});
+
+test("getProjectsPayload keeps working when resolveProjectMeta fails for one project", async () => {
+  const createdAt = new Date().toISOString();
+
+  const projects: RegisteredProject[] = [
+    {
+      id: "ok",
+      name: "ok",
+      repoRoot: "/tmp/ok",
+      projectDirName: HACK_PROJECT_DIR_PRIMARY,
+      projectDir: "/tmp/ok/.hack",
+      createdAt,
+    },
+    {
+      id: "bad",
+      name: "bad",
+      repoRoot: "/tmp/bad",
+      projectDirName: HACK_PROJECT_DIR_PRIMARY,
+      projectDir: "/tmp/bad/.hack",
+      createdAt,
+    },
+  ];
+
+  const makeView = (name: string): ProjectView => ({
+    name,
+    devHost: null,
+    repoRoot: null,
+    projectDir: null,
+    definedServices: null,
+    extensionsEnabled: null,
+    features: null,
+    serviceHosts: null,
+    runtimeConfigured: null,
+    runtimeStatus: "unknown",
+    runtime: null,
+    branchRuntime: [],
+    kind: "registered",
+    status: "unknown",
+  });
+
+  const cache = createRuntimeCache({
+    deps: {
+      readProjectsRegistry: async () => ({ version: 1, projects }),
+      buildProjectViews: async () => [makeView("ok"), makeView("bad")],
+      serializeProjectView: (view) => ({ name: view.name, kind: view.kind }),
+      resolveProjectMeta: async (opts) => {
+        if (opts.projectName === "bad") {
+          throw new Error("boom");
+        }
+        const meta: ProjectMeta = {
+          git: {
+            isRepo: false,
+            head: null,
+            branch: null,
+            detached: null,
+            dirty: null,
+            localBranchCount: null,
+            worktrees: null,
+            error: null,
+          },
+          hackBranches: { path: "", parseError: null, branches: [] },
+          env: {
+            contractPath: "",
+            contractExists: false,
+            contractParseError: null,
+            vars: [],
+            missingRequired: [],
+          },
+          sessions: { sessions: [] },
+          composeBuild: { services: [] },
+        };
+        return meta;
+      },
+    },
+  });
+
+  await cache.refresh({ reason: "test" });
+
+  const payload = await cache.getProjectsPayload({
+    filter: null,
+    includeGlobal: true,
+    includeUnregistered: true,
+    includeMeta: true,
+  });
+
+  expect(payload.projects.length).toBe(2);
+  expect(payload.projects[0]).toMatchObject({
+    name: "ok",
+    meta: {
+      git: {
+        isRepo: false,
+        head: null,
+        branch: null,
+        detached: null,
+        dirty: null,
+        localBranchCount: null,
+        worktrees: null,
+        error: null,
+      },
+      hackBranches: { path: "", parseError: null, branches: [] },
+      env: {
+        contractPath: "",
+        contractExists: false,
+        contractParseError: null,
+        vars: [],
+        missingRequired: [],
+      },
+      sessions: { sessions: [] },
+      composeBuild: { services: [] },
+    },
+  });
+  expect(payload.projects[1]).toMatchObject({
+    name: "bad",
+    meta: null,
+  });
 });
 
 test("runtime cache retains last runtime on failure", async () => {

@@ -199,12 +199,15 @@ Base URL: `http://127.0.0.1:7788` (or your tunnel URL)
 | GET | `/v1/metrics` | no | Cache + stream metrics |
 | GET | `/v1/projects` | no | Gateway-enabled projects + runtime snapshot |
 | GET | `/v1/ps` | no | Compose project container list |
-| GET | `/v1/sessions` | no | List tmux sessions |
-| POST | `/v1/sessions` | no | Create tmux session |
+| GET | `/v1/sessions` | no | List mux sessions (tmux/zellij) |
+| POST | `/v1/sessions` | yes | Create mux session |
 | GET | `/v1/sessions/:id` | no | Get session details |
-| POST | `/v1/sessions/:id/stop` | no | Stop (kill) session |
-| POST | `/v1/sessions/:id/exec` | no | Execute command in session |
-| POST | `/v1/sessions/:id/input` | no | Send raw keystrokes |
+| POST | `/v1/sessions/:id/stop` | yes | Stop (kill) session |
+| POST | `/v1/sessions/:id/exec` | yes | Execute command in session |
+| POST | `/v1/sessions/:id/input` | yes | Send raw keystrokes |
+| GET | `/v1/env` | no | Env contract + resolution state (values redacted) |
+| POST | `/v1/env/set` | yes | Set env (.hack/.env) or secret (keychain) |
+| POST | `/v1/env/unset` | yes | Unset env + keychain entry |
 | GET | `/control-plane/projects/:projectId/jobs` | no | List jobs |
 | POST | `/control-plane/projects/:projectId/jobs` | yes | Create job |
 | GET | `/control-plane/projects/:projectId/jobs/:jobId` | no | Fetch job |
@@ -215,6 +218,8 @@ Base URL: `http://127.0.0.1:7788` (or your tunnel URL)
 | WS | `/control-plane/projects/:projectId/shells/:shellId/stream` | yes | Stream shell PTY |
 
 > **Sessions API**: For detailed sessions endpoint documentation, see [Sessions](sessions.md#daemon-sessions-api).
+>
+> **Env API**: For contract format and env endpoints, see [Env & secrets](env.md#daemongateway-api-ui-integration).
 
 ### GET /v1/status
 
@@ -272,6 +277,7 @@ Query parameters:
 | `filter` | string | no | Project name filter |
 | `include_global` | boolean | no | Include global infra entries |
 | `include_unregistered` | boolean | no | Ignored over the gateway (always false) |
+| `include_meta` | boolean | no | Include git/worktree/session/env metadata (opt-in; only returned for enabled projects) |
 
 ```bash
 curl -H "Authorization: Bearer $HACK_GATEWAY_TOKEN" \
@@ -542,6 +548,10 @@ Non-JSON text frames are treated as raw input.
 | `status` | string | Human-readable status |
 | `name` | string | Container name |
 | `ports` | string | Port mapping string |
+| `image` | string or null | Container image |
+| `ip` | string or null | Container IP address |
+| `mounts` | RuntimeMount[] | Volume/bind mounts |
+| `labels` | object | Container labels |
 | `working_dir` | string or null | Compose working directory |
 
 ### PsItem

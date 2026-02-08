@@ -1,6 +1,7 @@
 import { beforeEach, expect, mock, test } from "bun:test";
 
 import { HACK_PROJECT_DIR_PRIMARY } from "../src/constants.ts";
+import type { ProjectMeta } from "../src/lib/project-meta.ts";
 import type { ProjectView } from "../src/lib/project-views.ts";
 import type { RegisteredProject } from "../src/lib/projects-registry.ts";
 import type { RuntimeProject } from "../src/lib/runtime-projects.ts";
@@ -160,7 +161,29 @@ test("getProjectsPayload keeps working when resolveProjectMeta fails for one pro
         if (opts.projectName === "bad") {
           throw new Error("boom");
         }
-        return { projectName: opts.projectName };
+        const meta: ProjectMeta = {
+          git: {
+            isRepo: false,
+            head: null,
+            branch: null,
+            detached: null,
+            dirty: null,
+            localBranchCount: null,
+            worktrees: null,
+            error: null,
+          },
+          hackBranches: { path: "", parseError: null, branches: [] },
+          env: {
+            contractPath: "",
+            contractExists: false,
+            contractParseError: null,
+            vars: [],
+            missingRequired: [],
+          },
+          sessions: { sessions: [] },
+          composeBuild: { services: [] },
+        };
+        return meta;
       },
     },
   });
@@ -177,7 +200,28 @@ test("getProjectsPayload keeps working when resolveProjectMeta fails for one pro
   expect(payload.projects.length).toBe(2);
   expect(payload.projects[0]).toMatchObject({
     name: "ok",
-    meta: { projectName: "ok" },
+    meta: {
+      git: {
+        isRepo: false,
+        head: null,
+        branch: null,
+        detached: null,
+        dirty: null,
+        localBranchCount: null,
+        worktrees: null,
+        error: null,
+      },
+      hackBranches: { path: "", parseError: null, branches: [] },
+      env: {
+        contractPath: "",
+        contractExists: false,
+        contractParseError: null,
+        vars: [],
+        missingRequired: [],
+      },
+      sessions: { sessions: [] },
+      composeBuild: { services: [] },
+    },
   });
   expect(payload.projects[1]).toMatchObject({
     name: "bad",

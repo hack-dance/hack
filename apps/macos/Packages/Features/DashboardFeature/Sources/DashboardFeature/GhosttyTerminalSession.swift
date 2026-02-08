@@ -222,6 +222,16 @@ final class GhosttyTerminalSession {
     hasPendingRefresh = true
   }
 
+  func scrollViewportTop() {
+    terminal?.scrollViewportTop()
+    hasPendingRefresh = true
+  }
+
+  func scrollViewportBottom() {
+    terminal?.scrollViewportBottom()
+    hasPendingRefresh = true
+  }
+
   private func startRefreshLoop() {
     refreshTask?.cancel()
     refreshTask = Task { [weak self] in

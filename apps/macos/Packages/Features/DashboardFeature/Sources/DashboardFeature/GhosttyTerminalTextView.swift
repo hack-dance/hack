@@ -178,7 +178,8 @@ struct GhosttyTerminalTextView: NSViewRepresentable {
       // Ghostty's API uses: up is negative, down is positive.
       if event.hasPreciseScrollingDeltas {
         let cellHeight = max(1, Double(view.cellSize.height))
-        let speed: Double = 2.4
+        // Tuned for trackpads: higher values feel closer to native terminal scrollback.
+        let speed: Double = 3.2
         pendingScrollPixels += Double(deltaY) * speed
 
         let rowsFloat = pendingScrollPixels / cellHeight
@@ -200,6 +201,22 @@ struct GhosttyTerminalTextView: NSViewRepresentable {
       guard let session else { return }
 
       let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+      // For non-interactive terminals (logs), we still want native scrollback navigation
+      // via PageUp/PageDown/Home/End. (These would otherwise be sent to the child process,
+      // which isn't listening for input.)
+      if !session.allowsInput {
+        if handleScrollbackKey(event, flags: flags) {
+          return
+        }
+      } else if flags.contains(.command) {
+        // For interactive shells, keep program key handling intact, but allow cmd+Up/Down
+        // to jump to top/bottom of the scrollback buffer.
+        if handleScrollbackKey(event, flags: flags) {
+          return
+        }
+      }
+
       if event.modifierFlags.contains(.command) {
         return
       }
@@ -212,6 +229,48 @@ struct GhosttyTerminalTextView: NSViewRepresentable {
       }
       if session.allowsInput {
         session.send(data)
+      }
+    }
+
+    private func handleScrollbackKey(
+      _ event: NSEvent,
+      flags: NSEvent.ModifierFlags
+    ) -> Bool {
+      guard let session else { return false }
+
+      // Only handle cmd+Up/Down for interactive sessions.
+      if session.allowsInput, !flags.contains(.command) {
+        switch event.keyCode {
+        case 115, 119, 116, 121:
+          return false
+        default:
+          break
+        }
+      }
+
+      let page = max(1, lastRows - 2)
+
+      switch event.keyCode {
+      case 116: // PageUp
+        session.scrollViewport(deltaRows: -page)
+        return true
+      case 121: // PageDown
+        session.scrollViewport(deltaRows: page)
+        return true
+      case 115: // Home
+        session.scrollViewportTop()
+        return true
+      case 119: // End
+        session.scrollViewportBottom()
+        return true
+      case 126 where flags.contains(.command): // Cmd+Up
+        session.scrollViewportTop()
+        return true
+      case 125 where flags.contains(.command): // Cmd+Down
+        session.scrollViewportBottom()
+        return true
+      default:
+        return false
       }
     }
 

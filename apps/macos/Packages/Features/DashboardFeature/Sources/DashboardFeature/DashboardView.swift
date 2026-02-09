@@ -21,10 +21,14 @@ public struct DashboardView: View {
       VSplitView {
         mainSplitView
           .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+          // Allow the content area to fully collapse so the bottom terminal drawer
+          // can be resized much larger (up to nearly the full window height).
+          .frame(minHeight: 0)
 
         if showTerminalDrawer {
           terminalDrawer
-          .frame(maxHeight: proxy.size.height * 0.92)
+          // Allow the drawer to grow to (almost) the full window height.
+          .frame(maxHeight: proxy.size.height)
           .onPreferenceChange(TerminalDrawerView.heightPreferenceKey) { newHeight in
             // Let users drag the split divider all the way down to close.
             let closeThreshold: CGFloat = 84

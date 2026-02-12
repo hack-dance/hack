@@ -649,14 +649,36 @@ export async function globalUp(): Promise<number> {
   });
   if (reservedIps.length > 0) {
     const conflicts = await findIngressIpConflicts({ reservedIps });
-    const blockers = conflicts.filter(
+    let blockers = conflicts.filter(
       (conflict) => !isGlobalProxyContainer({ name: conflict.containerName })
     );
     if (blockers.length > 0) {
-      logger.error({
-        message: renderIngressConflictMessage({ conflicts: blockers }),
+      logger.warn({
+        message: [
+          `Reserved ingress IPs are currently occupied on ${DEFAULT_INGRESS_NETWORK}.`,
+          "Attempting to reassign conflicting containers and retry global startup…",
+        ].join("\n"),
       });
-      return 1;
+
+      await reassignIngressIpConflicts({ conflicts: blockers });
+
+      const remainingConflicts = await findIngressIpConflicts({
+        reservedIps,
+      });
+      blockers = remainingConflicts.filter(
+        (conflict) => !isGlobalProxyContainer({ name: conflict.containerName })
+      );
+
+      if (blockers.length > 0) {
+        logger.error({
+          message: renderIngressConflictMessage({ conflicts: blockers }),
+        });
+        return 1;
+      }
+
+      logger.success({
+        message: "Recovered reserved ingress IP conflicts; continuing startup.",
+      });
     }
   }
 
@@ -796,6 +818,58 @@ async function findIngressIpConflicts(opts: {
   return conflicts;
 }
 
+async function reassignIngressIpConflicts(opts: {
+  readonly conflicts: readonly IngressIpConflict[];
+}): Promise<void> {
+  const containerNames = [
+    ...new Set(opts.conflicts.map((conflict) => conflict.containerName)),
+  ];
+
+  for (const containerName of containerNames) {
+    logger.step({
+      message: `Reassigning ${containerName} on ${DEFAULT_INGRESS_NETWORK}…`,
+    });
+
+    const disconnect = await exec(
+      [
+        "docker",
+        "network",
+        "disconnect",
+        "-f",
+        DEFAULT_INGRESS_NETWORK,
+        containerName,
+      ],
+      {
+        stdin: "ignore",
+      }
+    );
+    if (disconnect.exitCode !== 0) {
+      logger.warn({
+        message: [
+          `Failed to disconnect ${containerName} from ${DEFAULT_INGRESS_NETWORK} (exit ${disconnect.exitCode}).`,
+          trimShellError({ text: disconnect.stderr }),
+        ].join("\n"),
+      });
+      continue;
+    }
+
+    const connect = await exec(
+      ["docker", "network", "connect", DEFAULT_INGRESS_NETWORK, containerName],
+      {
+        stdin: "ignore",
+      }
+    );
+    if (connect.exitCode !== 0) {
+      logger.warn({
+        message: [
+          `Failed to reconnect ${containerName} to ${DEFAULT_INGRESS_NETWORK} (exit ${connect.exitCode}).`,
+          trimShellError({ text: connect.stderr }),
+        ].join("\n"),
+      });
+    }
+  }
+}
+
 function extractIpv4Address(opts: { readonly raw: string }): string {
   return opts.raw.split("/")[0] ?? "";
 }
@@ -827,6 +901,11 @@ function renderIngressConflictMessage(opts: {
   );
 
   return lines.join("\n");
+}
+
+function trimShellError(opts: { readonly text: string }): string {
+  const trimmed = opts.text.trim();
+  return trimmed.length > 0 ? trimmed : "(no stderr output)";
 }
 
 async function globalDown(): Promise<number> {
@@ -973,9 +1052,19 @@ type GatewayStatusPayload = {
   readonly tokens_revoked: number;
   readonly tokens_write: number;
   readonly tokens_read: number;
+  readonly tokens: readonly GatewayTokenPayload[];
   readonly gateway_projects?: string;
   readonly exposures: readonly GatewayExposurePayload[];
   readonly warnings: readonly string[];
+};
+
+type GatewayTokenPayload = {
+  readonly id: string;
+  readonly scope: "read" | "write";
+  readonly label?: string;
+  readonly created_at: string;
+  readonly last_used_at?: string;
+  readonly revoked_at?: string;
 };
 
 async function readComposeStatus(
@@ -1058,6 +1147,14 @@ async function collectGatewayStatus(): Promise<GatewayStatusPayload> {
   const revokedTokens = tokens.filter((token) => token.revokedAt);
   const writeTokens = activeTokens.filter((token) => token.scope === "write");
   const readTokens = activeTokens.filter((token) => token.scope === "read");
+  const serializedTokens: GatewayTokenPayload[] = tokens.map((token) => ({
+    id: token.id,
+    scope: token.scope,
+    ...(token.label ? { label: token.label } : {}),
+    created_at: token.createdAt,
+    ...(token.lastUsedAt ? { last_used_at: token.lastUsedAt } : {}),
+    ...(token.revokedAt ? { revoked_at: token.revokedAt } : {}),
+  }));
 
   const payload: GatewayStatusPayload = {
     config_path: configPath,
@@ -1071,6 +1168,7 @@ async function collectGatewayStatus(): Promise<GatewayStatusPayload> {
     tokens_revoked: revokedTokens.length,
     tokens_write: writeTokens.length,
     tokens_read: readTokens.length,
+    tokens: serializedTokens,
     exposures,
     warnings: gatewayResolution.warnings,
   };
@@ -1970,12 +2068,21 @@ async function ensureMacDnsmasqRunning(): Promise<void> {
         : "dnsmasq is not started; starting it as root so it can bind :53",
   });
 
-  const exit = await run(["sudo", "brew", "services", "restart", "dnsmasq"], {
-    stdin: "inherit",
+  const interactive = process.stdin.isTTY && process.stdout.isTTY;
+  const sudoCommand = interactive
+    ? ["sudo", "brew", "services", "restart", "dnsmasq"]
+    : ["sudo", "-n", "brew", "services", "restart", "dnsmasq"];
+  const exit = await run(sudoCommand, {
+    stdin: interactive ? "inherit" : "ignore",
   });
   if (exit !== 0) {
     logger.warn({
-      message: `Failed to start dnsmasq (exit ${exit}). *.${DEFAULT_PROJECT_TLD} may not resolve.`,
+      message: interactive
+        ? `Failed to start dnsmasq (exit ${exit}). *.${DEFAULT_PROJECT_TLD} may not resolve.`
+        : [
+            `Failed to start dnsmasq without interactive sudo (exit ${exit}).`,
+            "Open a terminal and run: hack global up",
+          ].join("\n"),
     });
   }
 }

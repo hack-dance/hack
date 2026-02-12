@@ -14,6 +14,7 @@ final class TerminalDrawerModel {
   struct TabKey: Hashable {
     let projectId: String
     let kind: Kind
+    let branch: String?
   }
 
   struct Tab: Identifiable, Equatable {
@@ -40,7 +41,7 @@ final class TerminalDrawerModel {
     let session = Self.makeShellSession(project: globalShellProject, initialCommand: nil)
     let tab = Tab(
       id: UUID(),
-      key: TabKey(projectId: globalShellProject.id, kind: .shell),
+      key: TabKey(projectId: globalShellProject.id, kind: .shell, branch: nil),
       title: Self.makeTabTitle(project: globalShellProject, kind: .shell),
       session: session
     )
@@ -69,8 +70,31 @@ final class TerminalDrawerModel {
     tabs.first(where: { $0.id == selectedTabId })?.session
   }
 
-  func openOrSelect(project: ProjectSummary, kind: Kind) {
-    let key = TabKey(projectId: project.id, kind: kind)
+  func openOrSelect(
+    project: ProjectSummary,
+    kind: Kind,
+    branch: String? = nil,
+    initialCommand: String? = nil,
+    titleOverride: String? = nil
+  ) {
+    let normalizedBranch = branch?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let tabBranch = (normalizedBranch?.isEmpty == false) ? normalizedBranch : nil
+    let normalizedCommand = initialCommand?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let resolvedCommand = (normalizedCommand?.isEmpty == false) ? normalizedCommand : nil
+
+    if kind == .shell, let resolvedCommand {
+      let session = Self.makeShellSession(project: project, initialCommand: resolvedCommand)
+      let title = titleOverride ?? "\(Self.tabBaseTitle(for: project)) command"
+      let tab = Tab(id: UUID(), key: nil, title: title, session: session)
+      tabs.append(tab)
+      selectedTabId = tab.id
+      if isActive {
+        session.start()
+      }
+      return
+    }
+
+    let key = TabKey(projectId: project.id, kind: kind, branch: tabBranch)
     if let existing = tabs.first(where: { $0.key == key }) {
       selectedTabId = existing.id
       return
@@ -79,7 +103,7 @@ final class TerminalDrawerModel {
     let session: GhosttyTerminalSession
     switch kind {
     case .logs:
-      session = GhosttyTerminalSession(project: project)
+      session = GhosttyTerminalSession(project: project, branch: tabBranch)
     case .shell:
       session = Self.makeShellSession(project: project, initialCommand: nil)
     }
@@ -87,7 +111,7 @@ final class TerminalDrawerModel {
     let tab = Tab(
       id: UUID(),
       key: key,
-      title: Self.makeTabTitle(project: project, kind: kind),
+      title: Self.makeTabTitle(project: project, kind: kind, branch: tabBranch),
       session: session
     )
     tabs.append(tab)
@@ -149,13 +173,22 @@ final class TerminalDrawerModel {
     )
   }
 
-  private static func makeTabTitle(project: ProjectSummary, kind: Kind) -> String {
+  private static func makeTabTitle(
+    project: ProjectSummary,
+    kind: Kind,
+    branch: String? = nil
+  ) -> String {
+    let branchSuffix = {
+      guard let branch, !branch.isEmpty else { return "" }
+      return " [\(branch)]"
+    }()
+
     switch kind {
     case .shell:
       return makeShellTitle(project: project, ordinal: 1)
     case .logs:
       let base = tabBaseTitle(for: project)
-      return "\(base) logs"
+      return "\(base)\(branchSuffix) logs"
     }
   }
 
@@ -204,4 +237,3 @@ final class TerminalDrawerModel {
     return (trimmed, 1)
   }
 }
-

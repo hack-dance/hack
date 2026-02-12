@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import {
+  DEFAULT_CADDY_IP,
+  DEFAULT_COREDNS_IP,
   DEFAULT_INGRESS_NETWORK,
   DEFAULT_LOGGING_NETWORK,
   GLOBAL_CADDY_COMPOSE_FILENAME,
@@ -75,6 +77,25 @@ async function writeComposeFile(path: string): Promise<void> {
   await writeFile(path, "services: {}\n");
 }
 
+async function writeStaticCaddyCompose(path: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(
+    path,
+    [
+      "services:",
+      "  caddy:",
+      "    networks:",
+      "      default:",
+      `        ipv4_address: ${DEFAULT_CADDY_IP}`,
+      "  coredns:",
+      "    networks:",
+      "      default:",
+      `        ipv4_address: ${DEFAULT_COREDNS_IP}`,
+      "",
+    ].join("\n")
+  );
+}
+
 test("global up runs docker compose up for caddy and logging", async () => {
   const caddyCompose = join(
     tempDir!,
@@ -104,6 +125,80 @@ test("global up runs docker compose up for caddy and logging", async () => {
     runCalls.some(
       (call) => call.includes(loggingCompose) && call.includes("up")
     )
+  ).toBe(true);
+});
+
+test("global up reassigns containers when reserved ingress IPs are occupied", async () => {
+  const caddyCompose = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    GLOBAL_CADDY_COMPOSE_FILENAME
+  );
+  const loggingCompose = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_LOGGING_DIR_NAME,
+    GLOBAL_LOGGING_COMPOSE_FILENAME
+  );
+  await writeStaticCaddyCompose(caddyCompose);
+  await writeComposeFile(loggingCompose);
+
+  let inspectCallCount = 0;
+  execMockResponder = (cmd) => {
+    if (
+      cmd[0] === "docker" &&
+      cmd[1] === "network" &&
+      cmd[2] === "inspect" &&
+      cmd[3] === DEFAULT_INGRESS_NETWORK
+    ) {
+      inspectCallCount += 1;
+      if (inspectCallCount === 1) {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            {
+              Containers: {
+                abc123: {
+                  Name: "omega-temporal-server-1",
+                  IPv4Address: `${DEFAULT_CADDY_IP}/16`,
+                },
+              },
+            },
+          ]),
+          stderr: "",
+        };
+      }
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify([{ Containers: {} }]),
+        stderr: "",
+      };
+    }
+
+    return null;
+  };
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "up"]);
+  expect(code).toBe(0);
+
+  expect(
+    execCalls.some(
+      (call) =>
+        call.join(" ") ===
+        `docker network disconnect -f ${DEFAULT_INGRESS_NETWORK} omega-temporal-server-1`
+    )
+  ).toBe(true);
+  expect(
+    execCalls.some(
+      (call) =>
+        call.join(" ") ===
+        `docker network connect ${DEFAULT_INGRESS_NETWORK} omega-temporal-server-1`
+    )
+  ).toBe(true);
+  expect(
+    runCalls.some((call) => call.includes(caddyCompose) && call.includes("up"))
   ).toBe(true);
 });
 

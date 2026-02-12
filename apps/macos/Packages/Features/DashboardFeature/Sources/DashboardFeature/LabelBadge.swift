@@ -8,6 +8,8 @@ struct BadgePill: View {
     if #available(macOS 26, *) {
       Text(label)
         .font(.mono(.caption2, weight: .semibold))
+        .lineLimit(1)
+        .truncationMode(.tail)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .foregroundStyle(tint)
@@ -19,6 +21,8 @@ struct BadgePill: View {
     } else {
       Text(label)
         .font(.mono(.caption2, weight: .semibold))
+        .lineLimit(1)
+        .truncationMode(.tail)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .foregroundStyle(tint)

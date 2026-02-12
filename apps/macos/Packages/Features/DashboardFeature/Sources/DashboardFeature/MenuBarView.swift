@@ -183,8 +183,10 @@ public struct MenuBarView: View {
   private var gatewayStatusIcon: String {
     guard let state = model.gatewaySummaryState else { return "questionmark.circle" }
     switch state {
-    case .running: return "checkmark.circle.fill"
-    case .configured: return "gear.circle"
+    case .localOnly, .lan, .tailscale, .cloudflare, .mixed:
+      return "checkmark.circle.fill"
+    case .needsSetup:
+      return "exclamationmark.triangle.fill"
     case .disabled: return "minus.circle"
     case .unknown: return "questionmark.circle"
     }

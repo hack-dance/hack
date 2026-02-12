@@ -17,7 +17,7 @@ final class GhosttyTerminalSession {
   }
 
   enum Mode {
-    case logs(path: String)
+    case logs(path: String, branch: String?)
     case shell(workingDirectory: URL)
   }
 
@@ -51,9 +51,21 @@ final class GhosttyTerminalSession {
   init(project: ProjectSummary) {
     self.project = project
     if let path = project.projectDir ?? project.repoRoot {
-      self.mode = .logs(path: path)
+      self.mode = .logs(path: path, branch: nil)
     } else {
-      self.mode = .logs(path: "")
+      self.mode = .logs(path: "", branch: nil)
+    }
+    configureTerminal()
+  }
+
+  init(project: ProjectSummary, branch: String?) {
+    self.project = project
+    let normalizedBranch = branch?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let resolvedBranch = (normalizedBranch?.isEmpty == false) ? normalizedBranch : nil
+    if let path = project.projectDir ?? project.repoRoot {
+      self.mode = .logs(path: path, branch: resolvedBranch)
+    } else {
+      self.mode = .logs(path: "", branch: resolvedBranch)
     }
     configureTerminal()
   }
@@ -284,7 +296,7 @@ final class GhosttyTerminalSession {
 
   private func resolveCommand(in environment: [String: String]) -> TerminalCommand {
     switch mode {
-    case let .logs(path):
+    case let .logs(path, branch):
       if path.isEmpty {
         return TerminalCommand(
           executableURL: URL(fileURLWithPath: "/usr/bin/env"),
@@ -295,17 +307,25 @@ final class GhosttyTerminalSession {
       }
 
       if let hackPath = HackCLILocator.resolveHackExecutable(in: environment) {
+        var args = ["logs", "--pretty", "--path", path]
+        if let branch, !branch.isEmpty {
+          args.append(contentsOf: ["--branch", branch])
+        }
         return TerminalCommand(
           executableURL: URL(fileURLWithPath: hackPath),
-          arguments: ["logs", "--pretty", "--path", path],
+          arguments: args,
           environment: environment,
           workingDirectory: URL(fileURLWithPath: path)
         )
       }
 
+      var args = ["hack", "logs", "--pretty", "--path", path]
+      if let branch, !branch.isEmpty {
+        args.append(contentsOf: ["--branch", branch])
+      }
       return TerminalCommand(
         executableURL: URL(fileURLWithPath: "/usr/bin/env"),
-        arguments: ["hack", "logs", "--pretty", "--path", path],
+        arguments: args,
         environment: environment,
         workingDirectory: URL(fileURLWithPath: path)
       )

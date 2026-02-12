@@ -1,6 +1,8 @@
 import AppKit
 import SwiftUI
 
+import HackDesktopModels
+
 extension Notification.Name {
   public static let hackCommandPaletteRequested = Notification.Name("hack.commandPalette.requested")
   public static let hackRefreshRequested = Notification.Name("hack.refresh.requested")
@@ -16,6 +18,8 @@ struct CommandPaletteAction: Identifiable {
 struct CommandPaletteView: View {
   @Environment(DashboardModel.self) private var model
   @Environment(\.dismiss) private var dismiss
+  @AppStorage("hackDesktop.preferences.defaultCodingAgent") private var preferredCodingAgentRaw = CodingAgentIntegration.AgentApp.codex.rawValue
+  @AppStorage("hackDesktop.preferences.defaultCodingAgentBinaryPath") private var preferredCodingAgentBinaryPathRaw = ""
   @State private var query = ""
 
   var body: some View {
@@ -65,13 +69,44 @@ struct CommandPaletteView: View {
     )
 
     actions.append(
-      CommandPaletteAction(title: "Go to Runtime", subtitle: "System status") {
-        model.selectedItem = .runtime
+      CommandPaletteAction(title: "Go to Dashboard", subtitle: "Home overview") {
+        model.selectedItem = .home
+      }
+    )
+
+    actions.append(
+      CommandPaletteAction(title: "Go to Runtime Settings", subtitle: "System status + daemon") {
+        NotificationCenter.default.post(
+          name: .hackSettingsRequested,
+          object: nil,
+          userInfo: [SettingsNavigationRequest.paneKey: SettingsSidebarItem.runtime.rawValue]
+        )
       }
     )
     actions.append(
-      CommandPaletteAction(title: "Go to Gateway", subtitle: "Gateway configuration") {
-        model.selectedItem = .gateway
+      CommandPaletteAction(title: "Go to Gateway Settings", subtitle: "Gateway configuration") {
+        NotificationCenter.default.post(
+          name: .hackSettingsRequested,
+          object: nil,
+          userInfo: [SettingsNavigationRequest.paneKey: SettingsSidebarItem.gateway.rawValue]
+        )
+      }
+    )
+    actions.append(
+      CommandPaletteAction(title: "Go to Permissions Settings", subtitle: "Automation + local network access") {
+        NotificationCenter.default.post(
+          name: .hackSettingsRequested,
+          object: nil,
+          userInfo: [SettingsNavigationRequest.paneKey: SettingsSidebarItem.permissions.rawValue]
+        )
+      }
+    )
+    actions.append(
+      CommandPaletteAction(
+        title: model.globalInfraRunning ? "Global: Stop services" : "Global: Start services",
+        subtitle: model.globalInfraRunning ? "Runs `hack global down`" : "Runs `hack global up`"
+      ) {
+        Task { await model.toggleGlobalInfrastructure() }
       }
     )
 
@@ -84,6 +119,16 @@ struct CommandPaletteView: View {
     }
 
     if let project = model.selectedProject {
+      if let projectPath = projectAgentPath(project) {
+        actions.append(
+          CommandPaletteAction(
+            title: "Project: Open in \(preferredCodingAgent.displayName)",
+            subtitle: "Starts your preferred coding agent"
+          ) {
+            openPreferredCodingAgent(for: project, path: projectPath)
+          }
+        )
+      }
       actions.append(
         CommandPaletteAction(title: "Project: Overview", subtitle: project.name) {
           model.selectedProjectTab = .overview
@@ -162,5 +207,40 @@ struct CommandPaletteView: View {
     }
 
     return actions
+  }
+
+  private var preferredCodingAgent: CodingAgentIntegration.AgentApp {
+    if let explicit = CodingAgentIntegration.AgentApp(rawValue: preferredCodingAgentRaw) {
+      return explicit
+    }
+    return .codex
+  }
+
+  private func projectAgentPath(_ project: ProjectSummary) -> String? {
+    if let repoRoot = project.repoRoot, !repoRoot.isEmpty {
+      return repoRoot
+    }
+    if let projectDir = project.projectDir, !projectDir.isEmpty {
+      return projectDir
+    }
+    return nil
+  }
+
+  private func openPreferredCodingAgent(for project: ProjectSummary, path: String) {
+    let command = CodingAgentIntegration.launchCommand(
+      projectPath: path,
+      agent: preferredCodingAgent,
+      binaryOverridePath: preferredCodingAgentBinaryPathRaw
+    )
+    NotificationCenter.default.post(
+      name: .hackTerminalOpenRequested,
+      object: nil,
+      userInfo: [
+        TerminalOpenRequest.projectIdKey: project.id,
+        TerminalOpenRequest.kindKey: TerminalDrawerModel.Kind.shell.rawValue,
+        TerminalOpenRequest.commandKey: command,
+        TerminalOpenRequest.titleKey: "\(preferredCodingAgent.displayName) - \(project.name)"
+      ]
+    )
   }
 }

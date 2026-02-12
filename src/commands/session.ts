@@ -56,6 +56,14 @@ const optName = defineOption({
   description: "Custom suffix for new session (e.g., agent-1)",
 } as const);
 
+const optDetach = defineOption({
+  name: "detach",
+  type: "boolean",
+  long: "--detach",
+  short: "-d",
+  description: "Create/switch session without attaching (for GUI/non-TTY use)",
+} as const);
+
 const optTarget = defineOption({
   name: "target",
   type: "string",
@@ -105,7 +113,7 @@ const startSpec = defineCommand({
   name: "start",
   summary: "Start or attach to a session for a project",
   group: "Project",
-  options: [optUp, optNew, optName],
+  options: [optUp, optNew, optName, optDetach],
   positionals: [
     { name: "project", description: "Project name or path", required: false },
   ],
@@ -415,6 +423,7 @@ const handleStart = async ({
   const forceNew = args.options.new === true;
   const runUp = args.options.up === true;
   const customName = args.options.name;
+  const detach = args.options.detach === true;
 
   // Find project
   const registry = await readProjectsRegistry();
@@ -471,9 +480,16 @@ const handleStart = async ({
     const sessions = await listTmuxSessions();
     const existing = sessions.find((s) => s.name === baseName);
     if (existing) {
-      logger.info({ message: `Attaching to existing session: ${baseName}` });
+      if (detach) {
+        logger.info({ message: `Session ready: ${baseName}` });
+      } else {
+        logger.info({ message: `Attaching to existing session: ${baseName}` });
+      }
       if (runUp) {
         await runHackUp(project.projectDir);
+      }
+      if (detach) {
+        return 0;
       }
       return await attachToSession(baseName);
     }
@@ -485,6 +501,12 @@ const handleStart = async ({
   }
 
   // Use repoRoot (project root), not projectDir (.hack/)
+  if (detach) {
+    return await createSessionDetached({
+      name: sessionName,
+      cwd: project.repoRoot,
+    });
+  }
   return await createAndAttachSession({
     name: sessionName,
     cwd: project.repoRoot,
@@ -859,26 +881,30 @@ function delay(ms: number): Promise<void> {
  * List all tmux sessions.
  */
 async function listTmuxSessions(): Promise<TmuxSession[]> {
-  const result = await exec(
-    [
-      "tmux",
-      "list-sessions",
-      "-F",
-      "#{session_name}:#{session_attached}:#{session_path}",
-    ],
-    { stdin: "ignore" }
-  );
+  const separator = "|||HACK_SESSION_FIELD|||";
+  const format = [
+    "#{session_name}",
+    "#{session_attached}",
+    "#{session_path}",
+  ].join(separator);
+  const result = await exec(["tmux", "list-sessions", "-F", format], {
+    stdin: "ignore",
+  });
 
   if (result.exitCode !== 0) {
     return [];
   }
 
   const sessions: TmuxSession[] = [];
-  for (const line of result.stdout.trim().split("\n")) {
-    if (!line) {
+  for (const line of result.stdout.split("\n")) {
+    if (!line.trim()) {
       continue;
     }
-    const [name, attached, path] = line.split(":");
+    const fields = parseTmuxSessionFields(line, separator, 3);
+    if (!fields) {
+      continue;
+    }
+    const [name, attached, path] = fields;
     if (name) {
       sessions.push({
         name,
@@ -889,6 +915,22 @@ async function listTmuxSessions(): Promise<TmuxSession[]> {
   }
 
   return sessions;
+}
+
+function parseTmuxSessionFields(
+  line: string,
+  separator: string,
+  expectedCount: number
+): readonly string[] | null {
+  const bySeparator = line.split(separator);
+  if (bySeparator.length === expectedCount) {
+    return bySeparator;
+  }
+  const byTab = line.split("\t");
+  if (byTab.length === expectedCount) {
+    return byTab;
+  }
+  return null;
 }
 
 /**
@@ -921,7 +963,23 @@ async function createAndAttachSession(opts: {
   readonly name: string;
   readonly cwd: string;
 }): Promise<number> {
-  // Create detached session first
+  const createExitCode = await createSessionDetached({
+    name: opts.name,
+    cwd: opts.cwd,
+  });
+
+  if (createExitCode !== 0) {
+    return createExitCode;
+  }
+
+  // Switch or attach depending on context (attachToSession handles this)
+  return await attachToSession(opts.name);
+}
+
+async function createSessionDetached(opts: {
+  readonly name: string;
+  readonly cwd: string;
+}): Promise<number> {
   const createResult = await exec(
     ["tmux", "new-session", "-d", "-s", opts.name, "-c", opts.cwd],
     { stdin: "ignore" }
@@ -933,9 +991,7 @@ async function createAndAttachSession(opts: {
   }
 
   logger.info({ message: `Created session: ${opts.name}` });
-
-  // Switch or attach depending on context (attachToSession handles this)
-  return await attachToSession(opts.name);
+  return 0;
 }
 
 /**

@@ -21,6 +21,16 @@ public enum ProjectKind: String, Decodable {
   case unregistered
 }
 
+public enum ProjectSessionBackend: String, Decodable {
+  case tmux
+  case zellij
+}
+
+public enum ProjectSessionSource: String, Decodable {
+  case hack
+  case external
+}
+
 public struct ProjectSummary: Decodable, Identifiable, Hashable {
   public let projectId: String?
   public let name: String
@@ -34,6 +44,8 @@ public struct ProjectSummary: Decodable, Identifiable, Hashable {
   public let runtimeConfigured: Bool?
   public let runtimeStatus: ProjectRuntimeStatus?
   public let runtime: RuntimeProject?
+  public let branchRuntime: [BranchRuntime]?
+  public let sessions: [ProjectSessionSummary]?
   public let kind: ProjectKind
   public let status: ProjectStatus
 
@@ -52,6 +64,8 @@ public struct ProjectSummary: Decodable, Identifiable, Hashable {
     runtimeConfigured: Bool?,
     runtimeStatus: ProjectRuntimeStatus?,
     runtime: RuntimeProject?,
+    branchRuntime: [BranchRuntime]? = nil,
+    sessions: [ProjectSessionSummary]? = nil,
     kind: ProjectKind,
     status: ProjectStatus
   ) {
@@ -67,8 +81,52 @@ public struct ProjectSummary: Decodable, Identifiable, Hashable {
     self.runtimeConfigured = runtimeConfigured
     self.runtimeStatus = runtimeStatus
     self.runtime = runtime
+    self.branchRuntime = branchRuntime
+    self.sessions = sessions
     self.kind = kind
     self.status = status
+  }
+}
+
+public struct BranchRuntime: Decodable, Hashable, Identifiable {
+  public let branch: String
+  public let runtime: RuntimeProject
+
+  public var id: String { branch }
+
+  public init(branch: String, runtime: RuntimeProject) {
+    self.branch = branch
+    self.runtime = runtime
+  }
+}
+
+public struct ProjectSessionSummary: Decodable, Hashable, Identifiable {
+  public let name: String
+  public let backend: ProjectSessionBackend
+  public let source: ProjectSessionSource
+  public let attached: Bool
+  public let path: String?
+  public let windows: Int?
+  public let createdAt: Int?
+
+  public var id: String { "\(backend.rawValue):\(name)" }
+
+  public init(
+    name: String,
+    backend: ProjectSessionBackend,
+    source: ProjectSessionSource,
+    attached: Bool,
+    path: String?,
+    windows: Int?,
+    createdAt: Int?
+  ) {
+    self.name = name
+    self.backend = backend
+    self.source = source
+    self.attached = attached
+    self.path = path
+    self.windows = windows
+    self.createdAt = createdAt
   }
 }
 
@@ -107,6 +165,10 @@ public struct RuntimeContainer: Decodable, Hashable {
   public let name: String
   public let ports: String
   public let workingDir: String?
+  public let image: String?
+  public let labels: [String: String]?
+  public let mounts: [RuntimeContainerMount]?
+  public let networks: [RuntimeContainerNetwork]?
 
   public init(
     id: String,
@@ -114,7 +176,11 @@ public struct RuntimeContainer: Decodable, Hashable {
     status: String,
     name: String,
     ports: String,
-    workingDir: String?
+    workingDir: String?,
+    image: String?,
+    labels: [String: String]?,
+    mounts: [RuntimeContainerMount]?,
+    networks: [RuntimeContainerNetwork]?
   ) {
     self.id = id
     self.state = state
@@ -122,6 +188,10 @@ public struct RuntimeContainer: Decodable, Hashable {
     self.name = name
     self.ports = ports
     self.workingDir = workingDir
+    self.image = image
+    self.labels = labels
+    self.mounts = mounts
+    self.networks = networks
   }
 
   private enum CodingKeys: String, CodingKey {
@@ -131,6 +201,42 @@ public struct RuntimeContainer: Decodable, Hashable {
     case name
     case ports
     case workingDir = "working_dir"
+    case image
+    case labels
+    case mounts
+    case networks
+  }
+}
+
+public struct RuntimeContainerMount: Decodable, Hashable {
+  public let type: String
+  public let source: String
+  public let destination: String
+  public let mode: String
+  public let rw: Bool?
+
+  public init(type: String, source: String, destination: String, mode: String, rw: Bool?) {
+    self.type = type
+    self.source = source
+    self.destination = destination
+    self.mode = mode
+    self.rw = rw
+  }
+}
+
+public struct RuntimeContainerNetwork: Decodable, Hashable, Identifiable {
+  public let name: String
+  public let ipAddress: String?
+  public let gateway: String?
+  public let aliases: [String]?
+
+  public var id: String { name }
+
+  public init(name: String, ipAddress: String?, gateway: String?, aliases: [String]?) {
+    self.name = name
+    self.ipAddress = ipAddress
+    self.gateway = gateway
+    self.aliases = aliases
   }
 }
 
@@ -337,6 +443,7 @@ public struct GatewayStatus: Decodable {
   public let tokensRevoked: Int?
   public let tokensWrite: Int?
   public let tokensRead: Int?
+  public let tokens: [GatewayTokenRecord]?
   public let gatewayProjects: String?
   public let exposures: [GatewayExposure]?
   public let warnings: [String]?
@@ -353,6 +460,7 @@ public struct GatewayStatus: Decodable {
     tokensRevoked: Int?,
     tokensWrite: Int?,
     tokensRead: Int?,
+    tokens: [GatewayTokenRecord]?,
     gatewayProjects: String?,
     exposures: [GatewayExposure]?,
     warnings: [String]?
@@ -368,9 +476,68 @@ public struct GatewayStatus: Decodable {
     self.tokensRevoked = tokensRevoked
     self.tokensWrite = tokensWrite
     self.tokensRead = tokensRead
+    self.tokens = tokens
     self.gatewayProjects = gatewayProjects
     self.exposures = exposures
     self.warnings = warnings
+  }
+}
+
+public enum GatewayTokenScope: String, Decodable {
+  case read
+  case write
+}
+
+public struct GatewayTokenRecord: Decodable, Identifiable, Hashable {
+  public let id: String
+  public let scope: GatewayTokenScope
+  public let label: String?
+  public let createdAt: String
+  public let lastUsedAt: String?
+  public let revokedAt: String?
+
+  public init(
+    id: String,
+    scope: GatewayTokenScope,
+    label: String?,
+    createdAt: String,
+    lastUsedAt: String?,
+    revokedAt: String?
+  ) {
+    self.id = id
+    self.scope = scope
+    self.label = label
+    self.createdAt = createdAt
+    self.lastUsedAt = lastUsedAt
+    self.revokedAt = revokedAt
+  }
+}
+
+public struct GatewayTokenListResponse: Decodable {
+  public let tokens: [GatewayTokenRecord]
+
+  public init(tokens: [GatewayTokenRecord]) {
+    self.tokens = tokens
+  }
+}
+
+public struct GatewayTokenCreateResponse: Decodable {
+  public let token: String
+  public let record: GatewayTokenRecord
+
+  public init(token: String, record: GatewayTokenRecord) {
+    self.token = token
+    self.record = record
+  }
+}
+
+public struct GatewayTokenRevokeResponse: Decodable {
+  public let id: String
+  public let revoked: Bool
+
+  public init(id: String, revoked: Bool) {
+    self.id = id
+    self.revoked = revoked
   }
 }
 

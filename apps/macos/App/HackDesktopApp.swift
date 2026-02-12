@@ -15,6 +15,7 @@ import Sparkle
 struct HackDesktopApp: App {
   @State private var model = DashboardModel(client: HackCLIClient())
   @State private var didSyncBundledCLI = false
+  @AppStorage("hackDesktop.preferences.theme") private var appearanceThemeRaw = "system"
 
 #if RELEASE
   private let updaterController = SPUStandardUpdaterController(
@@ -27,6 +28,7 @@ struct HackDesktopApp: App {
   var body: some Scene {
     WindowGroup {
       DashboardView()
+        .preferredColorScheme(preferredColorScheme)
         .environment(model)
 #if RELEASE
         .task {
@@ -52,6 +54,17 @@ struct HackDesktopApp: App {
 #else
     return nil
 #endif
+  }
+
+  private var preferredColorScheme: ColorScheme? {
+    switch appearanceThemeRaw {
+    case "light":
+      return .light
+    case "dark":
+      return .dark
+    default:
+      return nil
+    }
   }
 
   @MainActor

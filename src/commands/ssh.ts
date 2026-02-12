@@ -52,7 +52,6 @@ const optDirect = defineOption({
   name: "direct",
   type: "boolean",
   long: "--direct",
-  short: "-d",
   description: "Use direct SSH (requires --host)",
 } as const);
 
@@ -435,26 +434,30 @@ async function connectToSession(opts: {
  * List all tmux sessions.
  */
 async function listTmuxSessions(): Promise<TmuxSession[]> {
-  const result = await exec(
-    [
-      "tmux",
-      "list-sessions",
-      "-F",
-      "#{session_name}:#{session_attached}:#{session_path}",
-    ],
-    { stdin: "ignore" }
-  );
+  const separator = "|||HACK_SESSION_FIELD|||";
+  const format = [
+    "#{session_name}",
+    "#{session_attached}",
+    "#{session_path}",
+  ].join(separator);
+  const result = await exec(["tmux", "list-sessions", "-F", format], {
+    stdin: "ignore",
+  });
 
   if (result.exitCode !== 0) {
     return [];
   }
 
   const sessions: TmuxSession[] = [];
-  for (const line of result.stdout.trim().split("\n")) {
-    if (!line) {
+  for (const line of result.stdout.split("\n")) {
+    if (!line.trim()) {
       continue;
     }
-    const [name, attached, path] = line.split(":");
+    const fields = parseTmuxSessionFields(line, separator, 3);
+    if (!fields) {
+      continue;
+    }
+    const [name, attached, path] = fields;
     if (name) {
       sessions.push({
         name,
@@ -465,6 +468,22 @@ async function listTmuxSessions(): Promise<TmuxSession[]> {
   }
 
   return sessions;
+}
+
+function parseTmuxSessionFields(
+  line: string,
+  separator: string,
+  expectedCount: number
+): readonly string[] | null {
+  const bySeparator = line.split(separator);
+  if (bySeparator.length === expectedCount) {
+    return bySeparator;
+  }
+  const byTab = line.split("\t");
+  if (byTab.length === expectedCount) {
+    return byTab;
+  }
+  return null;
 }
 
 export const sshCommand = withHandler(sshSpec, handleSsh);

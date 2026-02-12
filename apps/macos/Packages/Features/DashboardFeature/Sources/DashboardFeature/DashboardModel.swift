@@ -5,12 +5,15 @@ import HackCLIService
 import HackDesktopModels
 
 public enum SidebarItem: Hashable, Identifiable {
+  case home
   case runtime
   case gateway
   case project(String)
 
   public var id: String {
     switch self {
+    case .home:
+      return "home"
     case .runtime:
       return "runtime"
     case .gateway:
@@ -23,16 +26,27 @@ public enum SidebarItem: Hashable, Identifiable {
 
 public enum ProjectTab: String, CaseIterable {
   case overview = "Overview"
+  case branches = "Branches"
+  case sessions = "Sessions"
   case logs = "Logs"
   case shell = "Shell"
   case tickets = "Tickets"
+}
+
+public enum ProjectLifecycleAction {
+  case starting
+  case stopping
+}
+
+public enum GlobalLifecycleAction {
+  case starting
+  case stopping
 }
 
 @Observable
 @MainActor
 public final class DashboardModel {
   public private(set) var projects: [ProjectSummary] = []
-  public private(set) var projectMetaById: [String: ProjectMeta] = [:]
   public private(set) var daemonStatus: DaemonStatus? = nil
   public private(set) var globalStatus: GlobalStatusResponse? = nil
   public private(set) var runtimeOk: Bool? = nil
@@ -42,15 +56,22 @@ public final class DashboardModel {
   public private(set) var runtimeResetAt: String? = nil
   public private(set) var runtimeResetCount: Int? = nil
   public private(set) var lastUpdated: Date? = nil
-  public var selectedItem: SidebarItem? = .runtime
+  public var selectedItem: SidebarItem? = .home {
+    didSet {
+      handleSelectedItemChange(previous: oldValue, current: selectedItem)
+    }
+  }
   public var selectedProjectTab: ProjectTab = .overview
   public var errorMessage: String? = nil
   public var statusMessage: String? = nil
   public var isRefreshing = false
+  public private(set) var projectLifecycleActions: [String: ProjectLifecycleAction] = [:]
+  public private(set) var globalLifecycleAction: GlobalLifecycleAction? = nil
 
   private let client: HackCLIClient
   // Tickets should not be blocked by global refresh/status calls.
   private let ticketsClient: HackCLIClient
+  private var lastSelectedProjectId: String? = nil
   private var refreshTask: Task<Void, Never>? = nil
   private var statusClearTask: Task<Void, Never>? = nil
 
@@ -72,6 +93,13 @@ public final class DashboardModel {
     if runtimeOk == false { return false }
     if let summaryOk = globalStatus?.summary.ok { return summaryOk }
     return runtimeOk
+  }
+
+  public var globalInfraRunning: Bool {
+    guard let status = globalStatus else { return false }
+    let caddyOk = status.caddy?.ok ?? status.summary.caddyOk
+    let loggingOk = status.logging?.ok ?? status.summary.loggingOk
+    return caddyOk && loggingOk
   }
 
   var gatewaySummaryState: GatewaySummaryState? {
@@ -102,13 +130,11 @@ public final class DashboardModel {
       lastUpdated = Date()
     }
 
-    let selectedProjectForMeta = selectedProject
     async let projectsTask = fetchProjects()
-    async let metaTask = fetchProjectMeta(for: selectedProjectForMeta)
     async let daemonTask = fetchDaemonStatus()
     async let globalTask = fetchGlobalStatus()
 
-    let errors = await [projectsTask, metaTask, daemonTask, globalTask].compactMap { $0 }
+    let errors = await [projectsTask, daemonTask, globalTask].compactMap { $0 }
     if !errors.isEmpty {
       errorMessage = errors.joined(separator: "\n")
     }
@@ -143,6 +169,8 @@ public final class DashboardModel {
       errorMessage = "Missing project path for \(project.name)"
       return
     }
+    projectLifecycleActions[project.id] = .starting
+    defer { projectLifecycleActions.removeValue(forKey: project.id) }
     await runAction(message: "Starting \(project.name)…") {
       try await self.client.startProject(path: path)
     }
@@ -153,35 +181,31 @@ public final class DashboardModel {
       errorMessage = "Missing project path for \(project.name)"
       return
     }
+    projectLifecycleActions[project.id] = .stopping
+    defer { projectLifecycleActions.removeValue(forKey: project.id) }
     await runAction(message: "Stopping \(project.name)…") {
       try await self.client.stopProject(path: path)
     }
   }
 
-  public func stopSession(sessionName: String) async {
-    let trimmed = sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty else {
-      errorMessage = "Missing session name"
-      return
-    }
-
-    await runAction(message: "Stopping session…") {
-      try await self.client.stopSession(sessionName: trimmed)
-    }
-  }
-
-  public func showLogs(for project: ProjectSummary) {
+  public func showLogs(for project: ProjectSummary, branch: String? = nil) {
     selectedItem = .project(project.id)
     if selectedProjectTab == .logs {
       selectedProjectTab = .overview
     }
+    let normalizedBranch = branch?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let resolvedBranch = (normalizedBranch?.isEmpty == false) ? normalizedBranch : nil
+    var userInfo: [String: String] = [
+      TerminalOpenRequest.projectIdKey: project.id,
+      TerminalOpenRequest.kindKey: TerminalDrawerModel.Kind.logs.rawValue
+    ]
+    if let resolvedBranch {
+      userInfo[TerminalOpenRequest.branchKey] = resolvedBranch
+    }
     NotificationCenter.default.post(
       name: .hackTerminalOpenRequested,
       object: nil,
-      userInfo: [
-        TerminalOpenRequest.projectIdKey: project.id,
-        TerminalOpenRequest.kindKey: TerminalDrawerModel.Kind.logs.rawValue
-      ]
+      userInfo: userInfo
     )
   }
 
@@ -280,8 +304,159 @@ public final class DashboardModel {
     return result ?? false
   }
 
+  public func startBranch(for project: ProjectSummary, branch: String) async {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return
+    }
+    await runAction(message: "Starting \(project.name) [\(branch)]…") {
+      try await self.client.startBranch(path: path, branch: branch)
+    }
+  }
+
+  public func stopBranch(for project: ProjectSummary, branch: String) async {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return
+    }
+    await runAction(message: "Stopping \(project.name) [\(branch)]…") {
+      try await self.client.stopBranch(path: path, branch: branch)
+    }
+  }
+
+  public func addBranch(for project: ProjectSummary, name: String, note: String?) async {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return
+    }
+    await runAction(message: "Adding branch \(name)…") {
+      try await self.client.addBranch(path: path, name: name, note: note)
+    }
+  }
+
+  public func removeBranch(for project: ProjectSummary, name: String) async {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return
+    }
+    await runAction(message: "Removing branch \(name)…") {
+      try await self.client.removeBranch(path: path, name: name)
+    }
+  }
+
+  public func stopSession(name: String) async {
+    await runAction(message: "Stopping session \(name)…") {
+      try await self.client.stopSession(name: name)
+    }
+  }
+
+  public func startSession(for project: ProjectSummary) async {
+    await runAction(message: "Starting session for \(project.name)…") {
+      try await self.client.startSession(projectName: project.name, detached: true)
+    }
+  }
+
+  public func setGlobalConfig(key: String, value: String) async {
+    await runAction(message: "Updating \(key)…") {
+      try await self.client.setGlobalConfig(key: key, value: value)
+    }
+  }
+
+  public func fetchGatewayTokens() async -> [GatewayTokenRecord] {
+    do {
+      return try await client.listGatewayTokens().tokens
+    } catch {
+      errorMessage = error.localizedDescription
+      return []
+    }
+  }
+
+  public func createGatewayToken(
+    scope: GatewayTokenScope,
+    label: String?
+  ) async -> GatewayTokenCreateResponse? {
+    await runActionResult(message: "Creating gateway token…") {
+      try await self.client.createGatewayToken(scope: scope, label: label)
+    }
+  }
+
+  public func revokeGatewayToken(id: String) async -> Bool {
+    let response: GatewayTokenRevokeResponse? = await runActionResult(message: "Revoking gateway token…") {
+      try await self.client.revokeGatewayToken(id: id)
+    }
+    guard let response else {
+      return false
+    }
+    return response.revoked
+  }
+
+  public func startCloudflareTunnel() async -> Bool {
+    let result: Bool? = await runActionResult(message: "Starting cloudflared tunnel…") {
+      try await self.client.startCloudflareTunnel()
+      return true
+    }
+    return result ?? false
+  }
+
+  public func stopCloudflareTunnel() async -> Bool {
+    let result: Bool? = await runActionResult(message: "Stopping cloudflared tunnel…") {
+      try await self.client.stopCloudflareTunnel()
+      return true
+    }
+    return result ?? false
+  }
+
+  public func toggleGlobalInfrastructure() async {
+    if globalInfraRunning {
+      await globalDown()
+    } else {
+      await globalUp()
+    }
+  }
+
+  public func globalUp() async {
+    globalLifecycleAction = .starting
+    defer { globalLifecycleAction = nil }
+    await runGlobalCommand(
+      message: "Starting global services…",
+      fallbackCommand: "hack global up"
+    ) {
+      try await self.client.globalUp()
+    }
+  }
+
+  public func globalDown() async {
+    globalLifecycleAction = .stopping
+    defer { globalLifecycleAction = nil }
+    await runGlobalCommand(
+      message: "Stopping global services…",
+      fallbackCommand: "hack global down"
+    ) {
+      try await self.client.globalDown()
+    }
+  }
+
   private func resolveProjectPath(_ project: ProjectSummary) -> String? {
     project.repoRoot ?? project.projectDir
+  }
+
+  private func handleSelectedItemChange(previous: SidebarItem?, current: SidebarItem?) {
+    guard let currentProjectId = projectId(from: current) else {
+      return
+    }
+
+    let previousProjectId = projectId(from: previous) ?? lastSelectedProjectId
+    if previousProjectId != currentProjectId {
+      selectedProjectTab = .overview
+    }
+    lastSelectedProjectId = currentProjectId
+  }
+
+  private func projectId(from item: SidebarItem?) -> String? {
+    guard case let .project(id) = item else {
+      return nil
+    }
+    return id
   }
 
   private func fetchProjects() async -> String? {
@@ -295,23 +470,10 @@ public final class DashboardModel {
       runtimeResetAt = response.runtimeResetAt
       runtimeResetCount = response.runtimeResetCount
       if selectedItem == nil {
-        selectedItem = .runtime
+        selectedItem = .home
       }
       if case let .project(id) = selectedItem, !projects.contains(where: { $0.id == id }) {
-        selectedItem = projects.first.map { .project($0.id) } ?? .runtime
-      }
-      return nil
-    } catch {
-      return error.localizedDescription
-    }
-  }
-
-  private func fetchProjectMeta(for project: ProjectSummary?) async -> String? {
-    guard let project else { return nil }
-
-    do {
-      if let meta = try await client.fetchProjectMeta(projectName: project.name) {
-        projectMetaById[project.id] = meta
+        selectedItem = .home
       }
       return nil
     } catch {
@@ -378,6 +540,49 @@ public final class DashboardModel {
       statusMessage = nil
       errorMessage = error.localizedDescription
       return nil
+    }
+  }
+
+  private func runGlobalCommand(
+    message: String,
+    fallbackCommand: String,
+    action: @escaping () async throws -> Void
+  ) async {
+    statusMessage = message
+    statusClearTask?.cancel()
+
+    do {
+      try await action()
+      statusMessage = "Done"
+      await refresh()
+      scheduleStatusClear()
+    } catch let error {
+      await refresh()
+      if shouldFallbackToTerminal(for: error) {
+        TerminalIntegration.openTerminalWithCommand(fallbackCommand)
+        statusMessage = "Opened Terminal for \(fallbackCommand)"
+        scheduleStatusClear()
+        return
+      }
+      statusMessage = nil
+      errorMessage = error.localizedDescription
+    }
+  }
+
+  private func shouldFallbackToTerminal(for error: Error) -> Bool {
+    let message = error.localizedDescription.lowercased()
+    return message.contains("sudo")
+      || message.contains("permission denied")
+      || message.contains("operation not permitted")
+      || message.contains("not permitted")
+      || message.contains("no tty")
+      || message.contains("password")
+  }
+
+  private func scheduleStatusClear() {
+    statusClearTask = Task { [weak self] in
+      try? await Task.sleep(for: .seconds(2))
+      self?.statusMessage = nil
     }
   }
 }

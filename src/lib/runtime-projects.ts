@@ -19,16 +19,26 @@ export type RuntimeContainer = {
   readonly status: string;
   readonly name: string;
   readonly ports: string;
-  readonly image: string | null;
-  readonly ip: string | null;
-  readonly mounts: readonly RuntimeMount[];
-  readonly labels: Readonly<Record<string, string>>;
   readonly workingDir: string | null;
+  readonly image: string | null;
+  readonly labels: Readonly<Record<string, string>> | null;
+  readonly mounts: readonly RuntimeContainerMount[];
+  readonly networks: readonly RuntimeContainerNetwork[];
 };
 
-export type RuntimeMount = {
-  readonly source: string | null;
-  readonly destination: string | null;
+export type RuntimeContainerMount = {
+  readonly type: string;
+  readonly source: string;
+  readonly destination: string;
+  readonly mode: string;
+  readonly rw: boolean | null;
+};
+
+export type RuntimeContainerNetwork = {
+  readonly name: string;
+  readonly ipAddress: string | null;
+  readonly gateway: string | null;
+  readonly aliases: readonly string[];
 };
 
 export type RuntimeService = {
@@ -48,6 +58,13 @@ export type RuntimeProjectsResult = {
   readonly runtime: readonly RuntimeProject[];
   readonly error: string | null;
   readonly checkedAtMs: number;
+};
+
+type ContainerInspectData = {
+  readonly labels: Record<string, string>;
+  readonly image: string | null;
+  readonly mounts: readonly RuntimeContainerMount[];
+  readonly networks: readonly RuntimeContainerNetwork[];
 };
 
 export function countRunningServices(runtime: RuntimeProject | null): number {
@@ -78,40 +95,6 @@ export async function readRuntimeProjects(opts: {
   readonly includeGlobal: boolean;
 }): Promise<RuntimeProjectsResult> {
   const checkedAtMs = Date.now();
-  const psResult = await readDockerComposePs();
-  if (!psResult.ok) {
-    return { ok: false, runtime: [], error: psResult.error, checkedAtMs };
-  }
-
-  const globalRoot = resolveGlobalHackRoot();
-  const containers = buildRuntimeContainers({
-    rows: psResult.rows,
-    inspectById: psResult.inspectById,
-    globalRoot,
-    includeGlobal: opts.includeGlobal,
-  });
-  const out = buildRuntimeProjects({
-    containers,
-    globalRoot,
-  });
-
-  return {
-    ok: true,
-    runtime: out.sort((a, b) => a.project.localeCompare(b.project)),
-    error: null,
-    checkedAtMs,
-  };
-}
-
-type DockerComposePsResult =
-  | {
-      readonly ok: true;
-      readonly rows: readonly unknown[];
-      readonly inspectById: Map<string, ContainerInspectMeta>;
-    }
-  | { readonly ok: false; readonly error: string };
-
-async function readDockerComposePs(): Promise<DockerComposePsResult> {
   const res = await exec(
     [
       "docker",
@@ -127,116 +110,70 @@ async function readDockerComposePs(): Promise<DockerComposePsResult> {
   if (res.exitCode !== 0) {
     return {
       ok: false,
+      runtime: [],
       error: formatDockerError({
         exitCode: res.exitCode,
         stdout: res.stdout,
         stderr: res.stderr,
       }),
+      checkedAtMs,
     };
   }
 
-  const rows = parseJsonLines(res.stdout);
-  const ids = rows
+  const baseRows = parseJsonLines(res.stdout);
+  const ids = baseRows
     .map((row) => getString(row, "ID") ?? getString(row, "Id") ?? "")
     .filter((id) => id.length > 0);
-  const inspectById = await readContainerInspectMeta({ ids });
-  return { ok: true, rows, inspectById };
-}
+  const inspectById = await readContainerInspectData({ ids });
 
-function resolveGlobalHackRoot(): string {
   const home = process.env.HOME ?? "";
-  return home ? resolve(home, GLOBAL_HACK_DIR_NAME) : "";
-}
+  const globalRoot = home ? resolve(home, GLOBAL_HACK_DIR_NAME) : "";
 
-function buildRuntimeContainers(opts: {
-  readonly rows: readonly unknown[];
-  readonly inspectById: Map<string, ContainerInspectMeta>;
-  readonly globalRoot: string;
-  readonly includeGlobal: boolean;
-}): RuntimeContainer[] {
   const containers: RuntimeContainer[] = [];
+  for (const row of baseRows) {
+    const id = getString(row, "ID") ?? getString(row, "Id") ?? "";
+    const state = getString(row, "State") ?? "";
+    const status = getString(row, "Status") ?? "";
+    const name = getString(row, "Names") ?? "";
+    const ports = getString(row, "Ports") ?? "";
+    const inspect = id.length > 0 ? inspectById.get(id) : undefined;
+    const labelsRaw = getString(row, "Labels");
+    const labels =
+      inspect?.labels ??
+      (labelsRaw ? parseLabelString({ raw: labelsRaw }) : {});
+    const project = labels["com.docker.compose.project"] ?? null;
+    const service = labels["com.docker.compose.service"] ?? null;
+    const oneoff =
+      (labels["com.docker.compose.oneoff"] ?? "").toLowerCase() === "true";
+    if (!(project && service) || oneoff) {
+      continue;
+    }
 
-  for (const row of opts.rows) {
-    const container = parseRuntimeContainerRow({
-      row,
-      inspectById: opts.inspectById,
-      globalRoot: opts.globalRoot,
+    const workingDir = labels["com.docker.compose.project.working_dir"] ?? null;
+    const isGlobal =
+      globalRoot.length > 0 && workingDir
+        ? workingDir.startsWith(globalRoot)
+        : false;
+    if (isGlobal && !opts.includeGlobal) {
+      continue;
+    }
+
+    containers.push({
+      id,
+      project,
+      service,
+      state,
+      status,
+      name,
+      ports,
+      workingDir,
+      image: inspect?.image ?? null,
+      labels: Object.keys(labels).length > 0 ? labels : null,
+      mounts: inspect?.mounts ?? [],
+      networks: inspect?.networks ?? [],
     });
-    if (!container) {
-      continue;
-    }
-
-    if (
-      !opts.includeGlobal &&
-      isGlobalWorkingDir({
-        globalRoot: opts.globalRoot,
-        workingDir: container.workingDir,
-      })
-    ) {
-      continue;
-    }
-
-    containers.push(container);
   }
 
-  return containers;
-}
-
-function parseRuntimeContainerRow(opts: {
-  readonly row: unknown;
-  readonly inspectById: Map<string, ContainerInspectMeta>;
-  readonly globalRoot: string;
-}): RuntimeContainer | null {
-  if (!isRecord(opts.row)) {
-    return null;
-  }
-  const row = opts.row;
-
-  const id = getString(row, "ID") ?? getString(row, "Id") ?? "";
-  const imageFromPs = getString(row, "Image") ?? null;
-  const labelsRaw = getString(row, "Labels");
-  const inspect = id.length > 0 ? opts.inspectById.get(id) : undefined;
-  const labels =
-    inspect?.labels ?? (labelsRaw ? parseLabelString({ raw: labelsRaw }) : {});
-  const project = labels["com.docker.compose.project"] ?? null;
-  const service = labels["com.docker.compose.service"] ?? null;
-  const oneoff =
-    (labels["com.docker.compose.oneoff"] ?? "").toLowerCase() === "true";
-  if (!(project && service) || oneoff) {
-    return null;
-  }
-
-  const workingDir = labels["com.docker.compose.project.working_dir"] ?? null;
-
-  return {
-    id,
-    project,
-    service,
-    state: getString(row, "State") ?? "",
-    status: getString(row, "Status") ?? "",
-    name: getString(row, "Names") ?? "",
-    ports: getString(row, "Ports") ?? "",
-    image: inspect?.image ?? imageFromPs,
-    ip: inspect?.ip ?? null,
-    mounts: inspect?.mounts ?? [],
-    labels,
-    workingDir,
-  };
-}
-
-function isGlobalWorkingDir(opts: {
-  readonly globalRoot: string;
-  readonly workingDir: string | null;
-}): boolean {
-  return opts.globalRoot.length > 0 && opts.workingDir !== null
-    ? opts.workingDir.startsWith(opts.globalRoot)
-    : false;
-}
-
-function buildRuntimeProjects(opts: {
-  readonly containers: readonly RuntimeContainer[];
-  readonly globalRoot: string;
-}): RuntimeProject[] {
   const byProject = new Map<
     string,
     {
@@ -245,29 +182,20 @@ function buildRuntimeProjects(opts: {
       isGlobal: boolean;
     }
   >();
-
-  for (const container of opts.containers) {
-    const existing = byProject.get(container.project);
-    if (!existing) {
-      const byService = new Map<string, RuntimeContainer[]>();
-      byService.set(container.service, [container]);
-      byProject.set(container.project, {
-        workingDir: container.workingDir,
-        byService,
-        isGlobal: isGlobalWorkingDir({
-          globalRoot: opts.globalRoot,
-          workingDir: container.workingDir,
-        }),
-      });
-      continue;
-    }
-
-    const list = existing.byService.get(container.service);
-    if (list) {
-      list.push(container);
-    } else {
-      existing.byService.set(container.service, [container]);
-    }
+  for (const c of containers) {
+    const workingDir = c.workingDir;
+    const isGlobal =
+      globalRoot.length > 0 && workingDir
+        ? workingDir.startsWith(globalRoot)
+        : false;
+    const p = byProject.get(c.project) ?? {
+      workingDir,
+      byService: new Map(),
+      isGlobal,
+    };
+    const arr = p.byService.get(c.service) ?? [];
+    p.byService.set(c.service, [...arr, c]);
+    byProject.set(c.project, p);
   }
 
   const out: RuntimeProject[] = [];
@@ -284,7 +212,12 @@ function buildRuntimeProjects(opts: {
     });
   }
 
-  return out;
+  return {
+    ok: true,
+    runtime: out.sort((a, b) => a.project.localeCompare(b.project)),
+    error: null,
+    checkedAtMs,
+  };
 }
 
 export async function autoRegisterRuntimeHackProjects(opts: {
@@ -331,72 +264,88 @@ export function serializeRuntimeProject(
         status: container.status,
         name: container.name,
         ports: container.ports,
+        working_dir: container.workingDir ?? null,
         image: container.image,
-        ip: container.ip,
+        labels: container.labels,
         mounts: container.mounts.map((mount) => ({
+          type: mount.type,
           source: mount.source,
           destination: mount.destination,
+          mode: mount.mode,
+          rw: mount.rw,
         })),
-        labels: container.labels,
-        working_dir: container.workingDir ?? null,
+        networks: container.networks.map((network) => ({
+          name: network.name,
+          ip_address: network.ipAddress,
+          gateway: network.gateway,
+          aliases: network.aliases,
+        })),
       })),
     })),
   };
 }
 
-type ContainerInspectMeta = {
-  readonly labels: Readonly<Record<string, string>>;
-  readonly image: string | null;
-  readonly ip: string | null;
-  readonly mounts: readonly RuntimeMount[];
-};
-
-export async function readContainerInspectMeta(opts: {
+export async function readContainerLabels(opts: {
   readonly ids: readonly string[];
-}): Promise<Map<string, ContainerInspectMeta>> {
+}): Promise<Map<string, Record<string, string>>> {
+  const inspectById = await readContainerInspectData({ ids: opts.ids });
+  const labelsById = new Map<string, Record<string, string>>();
+  for (const [id, detail] of inspectById.entries()) {
+    labelsById.set(id, detail.labels);
+  }
+  return labelsById;
+}
+
+async function readContainerInspectData(opts: {
+  readonly ids: readonly string[];
+}): Promise<Map<string, ContainerInspectData>> {
   if (opts.ids.length === 0) {
     return new Map();
   }
 
-  const res = await exec(
-    [
-      "docker",
-      "inspect",
-      "--format",
-      "{{.Id}}\t{{.Config.Image}}\t{{json .Config.Labels}}\t{{json .Mounts}}\t{{json .NetworkSettings.Networks}}",
-      ...opts.ids,
-    ],
-    { stdin: "ignore" }
-  );
+  const res = await exec(["docker", "inspect", ...opts.ids], {
+    stdin: "ignore",
+  });
   if (res.exitCode !== 0) {
     return new Map();
   }
 
-  const out = new Map<string, ContainerInspectMeta>();
-  for (const line of res.stdout.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0) {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(res.stdout);
+  } catch {
+    return new Map();
+  }
+  if (!Array.isArray(parsed)) {
+    return new Map();
+  }
+
+  const out = new Map<string, ContainerInspectData>();
+  for (const item of parsed) {
+    if (!isRecord(item)) {
       continue;
     }
 
-    const [idRaw, imageRaw, labelsRaw, mountsRaw, networksRaw] =
-      trimmed.split("\t");
-    const id = (idRaw ?? "").trim();
+    const id = getString(item, "Id") ?? "";
     if (id.length === 0) {
       continue;
     }
 
-    const image = (imageRaw ?? "").trim();
-    const meta: ContainerInspectMeta = {
-      labels: filterLabelsForUi(parseLabelsJson({ raw: labelsRaw ?? "" })),
-      image: image.length > 0 ? image : null,
-      ip: parseIpFromNetworksJson({ raw: networksRaw ?? "" }),
-      mounts: parseMountsJson({ raw: mountsRaw ?? "" }),
-    };
+    const config = item.Config;
+    const labels = parseInspectLabels(config);
+    const image = parseInspectImage(config);
+    const mounts = parseInspectMounts(item.Mounts);
+    const networks = parseInspectNetworks(item.NetworkSettings);
 
-    out.set(id, meta);
+    const detail: ContainerInspectData = {
+      labels,
+      image,
+      mounts,
+      networks,
+    };
+    out.set(id, detail);
     if (id.length >= 12) {
-      out.set(id.slice(0, 12), meta);
+      out.set(id.slice(0, 12), detail);
     }
   }
 
@@ -413,110 +362,84 @@ function resolveProjectDirName(workingDir: string): ".hack" | ".dev" | null {
   return null;
 }
 
-function parseLabelsJson(opts: {
-  readonly raw: string;
-}): Record<string, string> {
-  if (!opts.raw || opts.raw === "null") {
+function parseInspectLabels(config: unknown): Record<string, string> {
+  if (!isRecord(config)) {
     return {};
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(opts.raw);
-  } catch {
-    return {};
-  }
-  if (!isRecord(parsed)) {
+  const labels = config.Labels;
+  if (!isRecord(labels)) {
     return {};
   }
 
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(parsed)) {
-    if (typeof v === "string") {
-      out[k] = v;
-    }
-  }
-  return out;
-}
-
-function filterLabelsForUi(
-  labels: Record<string, string>
-): Readonly<Record<string, string>> {
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(labels)) {
-    if (key.startsWith("caddy")) {
-      out[key] = value;
-      continue;
-    }
-    if (key.startsWith("com.docker.compose.")) {
+    if (typeof value === "string") {
       out[key] = value;
     }
   }
   return out;
 }
 
-function parseMountsJson(opts: {
-  readonly raw: string;
-}): readonly RuntimeMount[] {
-  const raw = opts.raw.trim();
-  if (raw.length === 0 || raw === "null") {
-    return [];
+function parseInspectImage(config: unknown): string | null {
+  if (!isRecord(config)) {
+    return null;
   }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return [];
-  }
-  if (!Array.isArray(parsed)) {
-    return [];
-  }
-
-  const out: RuntimeMount[] = [];
-  for (const entry of parsed) {
-    if (!isRecord(entry)) {
-      continue;
-    }
-    const source =
-      getString(entry, "Source") ?? getString(entry, "Name") ?? null;
-    const destination = getString(entry, "Destination") ?? null;
-    if (!(source || destination)) {
-      continue;
-    }
-    out.push({ source, destination });
-  }
-  return out;
+  return getString(config, "Image") ?? null;
 }
 
-function parseIpFromNetworksJson(opts: {
-  readonly raw: string;
-}): string | null {
-  const raw = opts.raw.trim();
-  if (raw.length === 0 || raw === "null") {
-    return null;
+function parseInspectMounts(raw: unknown): RuntimeContainerMount[] {
+  if (!Array.isArray(raw)) {
+    return [];
   }
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-  if (!isRecord(parsed)) {
-    return null;
-  }
-
-  for (const value of Object.values(parsed)) {
+  const mounts: RuntimeContainerMount[] = [];
+  for (const value of raw) {
     if (!isRecord(value)) {
       continue;
     }
-    const ip = getString(value, "IPAddress");
-    if (ip && ip.length > 0) {
-      return ip;
+    const source = getString(value, "Source") ?? "";
+    const destination = getString(value, "Destination") ?? "";
+    if (!(source && destination)) {
+      continue;
     }
+    const rwValue = value.RW;
+    mounts.push({
+      type: getString(value, "Type") ?? "",
+      source,
+      destination,
+      mode: getString(value, "Mode") ?? "",
+      rw: typeof rwValue === "boolean" ? rwValue : null,
+    });
+  }
+  return mounts;
+}
+
+function parseInspectNetworks(raw: unknown): RuntimeContainerNetwork[] {
+  if (!isRecord(raw)) {
+    return [];
+  }
+  const networks = raw.Networks;
+  if (!isRecord(networks)) {
+    return [];
   }
 
-  return null;
+  const out: RuntimeContainerNetwork[] = [];
+  for (const [name, value] of Object.entries(networks)) {
+    if (!isRecord(value)) {
+      continue;
+    }
+    const aliasesRaw = value.Aliases;
+    const aliases = Array.isArray(aliasesRaw)
+      ? aliasesRaw.filter((alias): alias is string => typeof alias === "string")
+      : [];
+    out.push({
+      name,
+      ipAddress: getString(value, "IPAddress") ?? null,
+      gateway: getString(value, "Gateway") ?? null,
+      aliases,
+    });
+  }
+  return out;
 }
 
 function parseLabelString(opts: {

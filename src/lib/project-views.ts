@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { YAML } from "bun";
@@ -11,10 +12,30 @@ import {
   type RuntimeProject,
   serializeRuntimeProject,
 } from "./runtime-projects.ts";
+import { exec } from "./shell.ts";
 
 export type BranchRuntime = {
   readonly branch: string;
   readonly runtime: RuntimeProject;
+};
+
+export type MuxSession = {
+  readonly name: string;
+  readonly backend: "tmux" | "zellij";
+  readonly attached: boolean;
+  readonly path: string | null;
+  readonly windows: number | null;
+  readonly createdAt: number | null;
+};
+
+export type ProjectSession = {
+  readonly name: string;
+  readonly backend: "tmux" | "zellij";
+  readonly source: "hack" | "external";
+  readonly attached: boolean;
+  readonly path: string | null;
+  readonly windows: number | null;
+  readonly createdAt: number | null;
 };
 
 export type ProjectView = {
@@ -31,6 +52,7 @@ export type ProjectView = {
   readonly runtimeStatus: ProjectRuntimeStatus;
   readonly runtime: RuntimeProject | null;
   readonly branchRuntime: readonly BranchRuntime[];
+  readonly sessions: readonly ProjectSession[];
   readonly kind: "registered" | "unregistered";
   readonly status:
     | "running"
@@ -47,24 +69,35 @@ export type ProjectRuntimeStatus =
   | "unknown"
   | "not_configured";
 
-export async function buildProjectViews(opts: {
+type BuildProjectViewsOptions = {
   readonly registryProjects: readonly RegisteredProject[];
   readonly runtime: readonly RuntimeProject[];
   readonly runtimeOk: boolean;
   readonly filter: string | null;
   readonly includeUnregistered: boolean;
-}): Promise<ProjectView[]> {
+  readonly muxSessions?: readonly MuxSession[];
+};
+
+export async function buildProjectViews(
+  opts: BuildProjectViewsOptions
+): Promise<ProjectView[]> {
   const byName = new Map(
     opts.registryProjects.map((p) => [p.name, p] as const)
   );
   const runtimeByName = new Map(
     opts.runtime.map((p) => [p.project, p] as const)
   );
-  const names = collectProjectNames({
-    registryProjects: opts.registryProjects,
-    runtime: opts.runtime,
-    includeUnregistered: opts.includeUnregistered,
-  });
+
+  const names = new Set<string>();
+  for (const p of opts.registryProjects) {
+    names.add(p.name);
+  }
+  if (opts.includeUnregistered) {
+    for (const p of opts.runtime) {
+      names.add(p.project);
+    }
+  }
+  const muxSessions = opts.muxSessions ?? (await listMuxSessions());
 
   const out: ProjectView[] = [];
   for (const name of [...names].sort((a, b) => a.localeCompare(b))) {
@@ -79,10 +112,11 @@ export async function buildProjectViews(opts: {
       out.push(
         await buildRegisteredProjectView({
           name,
-          reg,
+          registration: reg,
           runtime,
+          allRuntime: opts.runtime,
           runtimeOk: opts.runtimeOk,
-          runtimeProjects: opts.runtime,
+          muxSessions,
         })
       );
       continue;
@@ -102,68 +136,69 @@ export async function buildProjectViews(opts: {
   return out;
 }
 
-function collectProjectNames(opts: {
-  readonly registryProjects: readonly RegisteredProject[];
-  readonly runtime: readonly RuntimeProject[];
-  readonly includeUnregistered: boolean;
-}): ReadonlySet<string> {
-  const names = new Set<string>();
-  for (const p of opts.registryProjects) {
-    names.add(p.name);
-  }
-  if (!opts.includeUnregistered) {
-    return names;
-  }
-  for (const p of opts.runtime) {
-    names.add(p.project);
-  }
-  return names;
-}
-
 async function buildRegisteredProjectView(opts: {
   readonly name: string;
-  readonly reg: RegisteredProject;
+  readonly registration: RegisteredProject;
   readonly runtime: RuntimeProject | null;
+  readonly allRuntime: readonly RuntimeProject[];
   readonly runtimeOk: boolean;
-  readonly runtimeProjects: readonly RuntimeProject[];
+  readonly muxSessions: readonly MuxSession[];
 }): Promise<ProjectView> {
-  const composeMeta = await resolveComposeMeta({
-    projectDir: opts.reg.projectDir,
-  });
+  const projectDirOk = await pathExists(opts.registration.projectDir);
+  const composeFile = resolve(
+    opts.registration.projectDir,
+    PROJECT_COMPOSE_FILENAME
+  );
+  const composeExists = projectDirOk && (await pathExists(composeFile));
+  const definedServices = composeExists
+    ? await readComposeServices({ composeFile })
+    : null;
+  const serviceHosts = composeExists
+    ? await readComposeServiceHosts({ composeFile })
+    : null;
   const running = countRunningServices(opts.runtime);
-  const runtimeStatus = resolveRuntimeStatus({
-    projectDirOk: composeMeta.projectDirOk,
-    composeExists: composeMeta.composeExists,
+  const runtimeConfigured = composeExists;
+  const runtimeStatus: ProjectRuntimeStatus = resolveRuntimeStatus({
+    projectDirOk,
+    composeExists,
     runtimeOk: opts.runtimeOk,
     running,
   });
-  const status = resolveProjectStatus({
-    projectDirOk: composeMeta.projectDirOk,
+  const status: ProjectView["status"] = resolveProjectStatus({
+    projectDirOk,
     runtimeOk: opts.runtimeOk,
     running,
   });
   const branchRuntime = collectBranchRuntime({
     baseName: opts.name,
-    runtimeProjects: opts.runtimeProjects,
+    runtimeProjects: opts.allRuntime,
   });
-  const extensions = composeMeta.projectDirOk
-    ? await resolveProjectExtensions({ projectDir: opts.reg.projectDir })
+  const sessions = collectProjectSessions({
+    projectName: opts.name,
+    repoRoot: opts.registration.repoRoot,
+    muxSessions: opts.muxSessions,
+  });
+  const extensions = projectDirOk
+    ? await resolveProjectExtensions({
+        projectDir: opts.registration.projectDir,
+      })
     : null;
 
   return {
-    projectId: opts.reg.id,
+    projectId: opts.registration.id,
     name: opts.name,
-    devHost: opts.reg.devHost ?? null,
-    repoRoot: opts.reg.repoRoot,
-    projectDir: opts.reg.projectDir,
-    definedServices: composeMeta.definedServices,
+    devHost: opts.registration.devHost ?? null,
+    repoRoot: opts.registration.repoRoot,
+    projectDir: opts.registration.projectDir,
+    definedServices,
     extensionsEnabled: extensions?.enabled ?? null,
     features: extensions?.features ?? null,
-    serviceHosts: composeMeta.serviceHosts,
-    runtimeConfigured: composeMeta.composeExists,
+    serviceHosts,
+    runtimeConfigured,
     runtimeStatus,
     runtime: opts.runtime,
     branchRuntime,
+    sessions,
     kind: "registered",
     status,
   };
@@ -175,11 +210,10 @@ function buildUnregisteredProjectView(opts: {
   readonly runtimeOk: boolean;
 }): ProjectView {
   const running = countRunningServices(opts.runtime);
-  const runtimeStatus = resolveUnregisteredRuntimeStatus({
+  const runtimeStatus: ProjectRuntimeStatus = resolveUnregisteredRuntimeStatus({
     runtimeOk: opts.runtimeOk,
     running,
   });
-
   return {
     name: opts.name,
     devHost: null,
@@ -193,43 +227,9 @@ function buildUnregisteredProjectView(opts: {
     runtimeStatus,
     runtime: opts.runtime,
     branchRuntime: [],
+    sessions: [],
     kind: "unregistered",
     status: "unregistered",
-  };
-}
-
-type ComposeMeta = {
-  readonly projectDirOk: boolean;
-  readonly composeExists: boolean;
-  readonly definedServices: readonly string[] | null;
-  readonly serviceHosts: Readonly<Record<string, readonly string[]>> | null;
-};
-
-async function resolveComposeMeta(opts: {
-  readonly projectDir: string;
-}): Promise<ComposeMeta> {
-  const projectDirOk = await pathExists(opts.projectDir);
-  const composeFile = resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME);
-  const composeExists = projectDirOk && (await pathExists(composeFile));
-  if (!composeExists) {
-    return {
-      projectDirOk,
-      composeExists,
-      definedServices: null,
-      serviceHosts: null,
-    };
-  }
-
-  const [definedServices, serviceHosts] = await Promise.all([
-    readComposeServices({ composeFile }),
-    readComposeServiceHosts({ composeFile }),
-  ]);
-
-  return {
-    projectDirOk,
-    composeExists,
-    definedServices,
-    serviceHosts,
   };
 }
 
@@ -253,6 +253,15 @@ export function serializeProjectView(
       branch: entry.branch,
       runtime: serializeRuntimeProject(entry.runtime),
     })),
+    sessions: view.sessions.map((entry) => ({
+      name: entry.name,
+      backend: entry.backend,
+      source: entry.source,
+      attached: entry.attached,
+      path: entry.path,
+      windows: entry.windows,
+      created_at: entry.createdAt,
+    })),
     kind: view.kind,
     status: view.status,
   };
@@ -275,6 +284,229 @@ function collectBranchRuntime(opts: {
     out.push({ branch, runtime });
   }
   return out;
+}
+
+function collectProjectSessions(opts: {
+  readonly projectName: string;
+  readonly repoRoot: string;
+  readonly muxSessions: readonly MuxSession[];
+}): readonly ProjectSession[] {
+  const projectRoot = canonicalPath(opts.repoRoot);
+  const out: ProjectSession[] = [];
+
+  for (const session of opts.muxSessions) {
+    if (
+      !isSessionForProject({
+        sessionName: session.name,
+        sessionPath: session.path,
+        projectName: opts.projectName,
+        projectRoot,
+      })
+    ) {
+      continue;
+    }
+
+    out.push({
+      name: session.name,
+      backend: session.backend,
+      source: classifySessionSource({
+        sessionName: session.name,
+        projectName: opts.projectName,
+      }),
+      attached: session.attached,
+      path: session.path,
+      windows: session.windows,
+      createdAt: session.createdAt,
+    });
+  }
+
+  return out.sort((a, b) => {
+    if (a.source !== b.source) {
+      return a.source === "hack" ? -1 : 1;
+    }
+    return a.name.localeCompare(b.name);
+  });
+}
+
+function classifySessionSource(opts: {
+  readonly sessionName: string;
+  readonly projectName: string;
+}): "hack" | "external" {
+  if (matchesHackSessionName(opts)) {
+    return "hack";
+  }
+  return "external";
+}
+
+function isSessionForProject(opts: {
+  readonly sessionName: string;
+  readonly sessionPath: string | null;
+  readonly projectName: string;
+  readonly projectRoot: string;
+}): boolean {
+  if (
+    matchesHackSessionName({
+      sessionName: opts.sessionName,
+      projectName: opts.projectName,
+    })
+  ) {
+    return true;
+  }
+
+  if (!opts.sessionPath) {
+    return false;
+  }
+  const sessionPath = canonicalPath(opts.sessionPath);
+  return (
+    sessionPath === opts.projectRoot ||
+    sessionPath.startsWith(`${opts.projectRoot}/`)
+  );
+}
+
+function matchesHackSessionName(opts: {
+  readonly sessionName: string;
+  readonly projectName: string;
+}): boolean {
+  const [sessionBase] = opts.sessionName.split(":");
+  const normalizedProject = normalizeSessionToken(opts.projectName);
+  const normalizedSessionBase = normalizeSessionToken(sessionBase ?? "");
+  if (normalizedProject.length === 0 || normalizedSessionBase.length === 0) {
+    return false;
+  }
+  return (
+    opts.sessionName === opts.projectName ||
+    opts.sessionName.startsWith(`${opts.projectName}:`) ||
+    normalizedSessionBase === normalizedProject
+  );
+}
+
+function normalizeSessionToken(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-");
+}
+
+function canonicalPath(path: string): string {
+  const resolved = resolve(path);
+  try {
+    return realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+async function listMuxSessions(): Promise<readonly MuxSession[]> {
+  const [tmux, zellij] = await Promise.all([
+    listTmuxSessions(),
+    listZellijSessions(),
+  ]);
+  return [...tmux, ...zellij];
+}
+
+async function listTmuxSessions(): Promise<readonly MuxSession[]> {
+  const separator = "|||HACK_SESSION_FIELD|||";
+  const format = [
+    "#{session_name}",
+    "#{session_attached}",
+    "#{session_path}",
+    "#{session_windows}",
+    "#{session_created}",
+  ].join(separator);
+  const result = await exec(["tmux", "list-sessions", "-F", format], {
+    stdin: "ignore",
+  });
+  if (result.exitCode !== 0) {
+    return [];
+  }
+
+  const out: MuxSession[] = [];
+  const lines = result.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  for (const line of lines) {
+    const fields = parseTmuxSessionFields(line, separator, 5);
+    if (!fields) {
+      continue;
+    }
+    const [name, attachedRaw, pathRaw, windowsRaw, createdAtRaw] = fields;
+    if (!name) {
+      continue;
+    }
+    const windows = windowsRaw ? Number.parseInt(windowsRaw, 10) : Number.NaN;
+    const createdAt = createdAtRaw
+      ? Number.parseInt(createdAtRaw, 10)
+      : Number.NaN;
+    out.push({
+      name,
+      backend: "tmux",
+      attached: attachedRaw === "1",
+      path: pathRaw && pathRaw.length > 0 ? pathRaw : null,
+      windows: Number.isFinite(windows) ? windows : null,
+      createdAt: Number.isFinite(createdAt) ? createdAt : null,
+    });
+  }
+  return out;
+}
+
+function parseTmuxSessionFields(
+  line: string,
+  separator: string,
+  expectedCount: number
+): readonly string[] | null {
+  const bySeparator = line.split(separator);
+  if (bySeparator.length === expectedCount) {
+    return bySeparator;
+  }
+  const byTab = line.split("\t");
+  if (byTab.length === expectedCount) {
+    return byTab;
+  }
+  return null;
+}
+
+async function listZellijSessions(): Promise<readonly MuxSession[]> {
+  const result = await exec(["zellij", "list-sessions", "--no-formatting"], {
+    stdin: "ignore",
+  });
+  if (result.exitCode !== 0) {
+    return [];
+  }
+
+  const out: MuxSession[] = [];
+  const lines = result.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  for (const line of lines) {
+    if (line.includes("(EXITED")) {
+      continue;
+    }
+    const name = parseZellijSessionName(line);
+    if (!name) {
+      continue;
+    }
+    out.push({
+      name,
+      backend: "zellij",
+      attached: false,
+      path: null,
+      windows: null,
+      createdAt: null,
+    });
+  }
+
+  return out;
+}
+
+function parseZellijSessionName(line: string): string | null {
+  const boundaries = [line.indexOf(" ["), line.indexOf(" (")].filter(
+    (index) => index > 0
+  );
+  const end = boundaries.length > 0 ? Math.min(...boundaries) : line.length;
+  const name = line.slice(0, end).trim();
+  return name.length > 0 ? name : null;
 }
 
 async function readComposeServices(opts: {

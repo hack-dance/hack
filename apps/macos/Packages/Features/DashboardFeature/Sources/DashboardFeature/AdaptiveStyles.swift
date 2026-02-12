@@ -113,32 +113,14 @@ extension View {
     }
   }
 
-  /// Adaptive window background - transparent on macOS 26+
-  @ViewBuilder
+  /// Adaptive window background with transparent toolbar chrome on macOS 26+
   func adaptiveWindowBackground() -> some View {
-    if #available(macOS 26, *) {
-      self
-        .background(.clear)
-        // Keep the toolbar visible, but visually clear. We tune the underlying NSToolbar to avoid
-        // per-item "pill" backplates (see WindowToolbarTuner).
-        .toolbarBackground(.clear, for: .windowToolbar)
-        .toolbarBackgroundVisibility(.visible, for: .windowToolbar)
-    } else {
-      self
-        .background(.ultraThinMaterial)
-        .toolbarBackground(.ultraThinMaterial, for: .windowToolbar)
-        .toolbarBackground(.visible, for: .windowToolbar)
-    }
+    modifier(AdaptiveWindowBackgroundModifier())
   }
 
   /// Adaptive detail view background
-  @ViewBuilder
   func adaptiveDetailBackground() -> some View {
-    if #available(macOS 26, *) {
-      self.background(.regularMaterial)
-    } else {
-      self.background(.ultraThinMaterial)
-    }
+    modifier(AdaptiveDetailBackgroundModifier())
   }
 
   /// Adaptive sidebar background
@@ -147,11 +129,19 @@ extension View {
     if #available(macOS 26, *) {
       self
         .scrollContentBackground(.hidden)
-        .background(.regularMaterial)
+        .background(
+          Rectangle()
+            .fill(.regularMaterial)
+            .ignoresSafeArea(edges: .top)
+        )
     } else {
       self
         .scrollContentBackground(.hidden)
-        .background(.ultraThinMaterial)
+        .background(
+          Rectangle()
+            .fill(.ultraThinMaterial)
+            .ignoresSafeArea(edges: .top)
+        )
     }
   }
 
@@ -184,6 +174,76 @@ extension View {
     } else {
       self.background(.ultraThinMaterial)
     }
+  }
+}
+
+private struct AdaptiveWindowBackgroundModifier: ViewModifier {
+  @Environment(\.colorScheme) private var colorScheme
+
+  func body(content: Content) -> some View {
+    if #available(macOS 26, *) {
+      content
+        .background(
+          ZStack {
+            Rectangle()
+              .fill(baseColor)
+            Rectangle()
+              .fill(.ultraThinMaterial)
+              .opacity(materialOpacity)
+          }
+        )
+        // Keep the toolbar visible, but visually clear. We tune the underlying NSToolbar to avoid
+        // per-item "pill" backplates (see WindowToolbarTuner).
+        .toolbarBackground(.clear, for: .windowToolbar)
+        .toolbarBackgroundVisibility(.visible, for: .windowToolbar)
+    } else {
+      content
+        .background(baseColor)
+        .toolbarBackground(.ultraThinMaterial, for: .windowToolbar)
+        .toolbarBackground(.visible, for: .windowToolbar)
+    }
+  }
+
+  private var baseColor: Color {
+    colorScheme == .dark ? .black : .white
+  }
+
+  private var materialOpacity: Double {
+    colorScheme == .dark ? 0.24 : 0.4
+  }
+}
+
+private struct AdaptiveDetailBackgroundModifier: ViewModifier {
+  @Environment(\.colorScheme) private var colorScheme
+
+  func body(content: Content) -> some View {
+    if #available(macOS 26, *) {
+      content.background(
+        ZStack {
+          Rectangle()
+            .fill(baseColor)
+          Rectangle()
+            .fill(.regularMaterial)
+            .opacity(materialOpacity)
+          Rectangle()
+            .fill(edgeTint)
+        }
+      )
+    } else {
+      content.background(baseColor)
+    }
+  }
+
+  private var baseColor: Color {
+    colorScheme == .dark ? .black : .white
+  }
+
+  private var materialOpacity: Double {
+    colorScheme == .dark ? 0.2 : 0.3
+  }
+
+  private var edgeTint: Color {
+    colorScheme == .dark ? Color.white.opacity(0.03) : Color.black.opacity(0.02)
   }
 }
 

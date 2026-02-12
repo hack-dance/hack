@@ -21,6 +21,16 @@ public enum ProjectKind: String, Decodable {
   case unregistered
 }
 
+public enum ProjectSessionBackend: String, Decodable {
+  case tmux
+  case zellij
+}
+
+public enum ProjectSessionSource: String, Decodable {
+  case hack
+  case external
+}
+
 public struct ProjectSummary: Decodable, Identifiable, Hashable {
   public let projectId: String?
   public let name: String
@@ -34,7 +44,8 @@ public struct ProjectSummary: Decodable, Identifiable, Hashable {
   public let runtimeConfigured: Bool?
   public let runtimeStatus: ProjectRuntimeStatus?
   public let runtime: RuntimeProject?
-  public let meta: ProjectMeta?
+  public let branchRuntime: [BranchRuntime]?
+  public let sessions: [ProjectSessionSummary]?
   public let kind: ProjectKind
   public let status: ProjectStatus
 
@@ -53,7 +64,8 @@ public struct ProjectSummary: Decodable, Identifiable, Hashable {
     runtimeConfigured: Bool?,
     runtimeStatus: ProjectRuntimeStatus?,
     runtime: RuntimeProject?,
-    meta: ProjectMeta?,
+    branchRuntime: [BranchRuntime]? = nil,
+    sessions: [ProjectSessionSummary]? = nil,
     kind: ProjectKind,
     status: ProjectStatus
   ) {
@@ -69,113 +81,53 @@ public struct ProjectSummary: Decodable, Identifiable, Hashable {
     self.runtimeConfigured = runtimeConfigured
     self.runtimeStatus = runtimeStatus
     self.runtime = runtime
-    self.meta = meta
+    self.branchRuntime = branchRuntime
+    self.sessions = sessions
     self.kind = kind
     self.status = status
   }
 }
 
-public enum HackEnvSource: String, Decodable, Hashable {
-  case plainEnv = "plain_env"
-  case keychain
+public struct BranchRuntime: Decodable, Hashable, Identifiable {
+  public let branch: String
+  public let runtime: RuntimeProject
+
+  public var id: String { branch }
+
+  public init(branch: String, runtime: RuntimeProject) {
+    self.branch = branch
+    self.runtime = runtime
+  }
 }
 
-public enum EnvResolvedFrom: String, Decodable, Hashable {
-  case dotenv
-  case process
-  case keychain
-}
-
-public struct ProjectMeta: Decodable, Hashable {
-  public let git: GitMeta
-  public let hackBranches: HackBranchesMeta
-  public let env: EnvMeta
-  public let sessions: SessionsMeta
-  public let composeBuild: ComposeBuildMeta
-}
-
-public struct GitMeta: Decodable, Hashable {
-  public let isRepo: Bool
-  public let head: String?
-  public let branch: String?
-  public let detached: Bool?
-  public let dirty: Bool?
-  public let localBranchCount: Int?
-  public let worktrees: [GitWorktreeMeta]?
-  public let error: String?
-}
-
-public struct GitWorktreeMeta: Decodable, Hashable {
-  public let path: String
-  public let head: String?
-  public let branch: String?
-  public let detached: Bool
-}
-
-public struct HackBranchesMeta: Decodable, Hashable {
-  public let path: String
-  public let parseError: String?
-  public let branches: [HackBranchEntry]
-}
-
-public struct HackBranchEntry: Decodable, Hashable, Identifiable {
+public struct ProjectSessionSummary: Decodable, Hashable, Identifiable {
   public let name: String
-  public let slug: String
-  public let note: String?
-  public let createdAt: String?
-  public let lastUsedAt: String?
-
-  public var id: String { slug }
-}
-
-public struct EnvMeta: Decodable, Hashable {
-  public let contractPath: String
-  public let contractExists: Bool
-  public let contractParseError: String?
-  public let vars: [EnvVarMeta]
-  public let missingRequired: [String]
-}
-
-public struct EnvVarMeta: Decodable, Hashable, Identifiable {
-  public let key: String
-  public let required: Bool
-  public let source: HackEnvSource
-  public let services: [String]?
-  public let description: String?
-  public let resolvedFrom: EnvResolvedFrom?
-  public let hasValue: Bool
-
-  public var id: String { key }
-}
-
-public struct SessionsMeta: Decodable, Hashable {
-  public let sessions: [MuxSessionSummary]
-}
-
-public struct MuxSessionSummary: Decodable, Hashable, Identifiable {
-  public let backend: String
-  public let name: String
-  public let attached: Bool?
+  public let backend: ProjectSessionBackend
+  public let source: ProjectSessionSource
+  public let attached: Bool
   public let path: String?
   public let windows: Int?
-  public let createdAt: String?
+  public let createdAt: Int?
 
-  public var id: String { "\(backend):\(name)" }
-}
+  public var id: String { "\(backend.rawValue):\(name)" }
 
-public struct ComposeBuildMeta: Decodable, Hashable {
-  public let services: [ComposeBuildServiceMeta]
-}
-
-public struct ComposeBuildServiceMeta: Decodable, Hashable, Identifiable {
-  public let service: String
-  public let build: Bool
-  public let context: String?
-  public let dockerfile: String?
-  public let dockerfilePath: String?
-  public let dockerfileExists: Bool?
-
-  public var id: String { service }
+  public init(
+    name: String,
+    backend: ProjectSessionBackend,
+    source: ProjectSessionSource,
+    attached: Bool,
+    path: String?,
+    windows: Int?,
+    createdAt: Int?
+  ) {
+    self.name = name
+    self.backend = backend
+    self.source = source
+    self.attached = attached
+    self.path = path
+    self.windows = windows
+    self.createdAt = createdAt
+  }
 }
 
 public struct RuntimeProject: Decodable, Hashable {
@@ -212,11 +164,11 @@ public struct RuntimeContainer: Decodable, Hashable {
   public let status: String
   public let name: String
   public let ports: String
-  public let image: String?
-  public let ip: String?
-  public let mounts: [RuntimeMount]?
-  public let labels: [String: String]?
   public let workingDir: String?
+  public let image: String?
+  public let labels: [String: String]?
+  public let mounts: [RuntimeContainerMount]?
+  public let networks: [RuntimeContainerNetwork]?
 
   public init(
     id: String,
@@ -224,22 +176,22 @@ public struct RuntimeContainer: Decodable, Hashable {
     status: String,
     name: String,
     ports: String,
+    workingDir: String?,
     image: String?,
-    ip: String?,
-    mounts: [RuntimeMount]?,
     labels: [String: String]?,
-    workingDir: String?
+    mounts: [RuntimeContainerMount]?,
+    networks: [RuntimeContainerNetwork]?
   ) {
     self.id = id
     self.state = state
     self.status = status
     self.name = name
     self.ports = ports
-    self.image = image
-    self.ip = ip
-    self.mounts = mounts
-    self.labels = labels
     self.workingDir = workingDir
+    self.image = image
+    self.labels = labels
+    self.mounts = mounts
+    self.networks = networks
   }
 
   private enum CodingKeys: String, CodingKey {
@@ -248,21 +200,43 @@ public struct RuntimeContainer: Decodable, Hashable {
     case status
     case name
     case ports
-    case image
-    case ip
-    case mounts
-    case labels
     case workingDir = "working_dir"
+    case image
+    case labels
+    case mounts
+    case networks
   }
 }
 
-public struct RuntimeMount: Decodable, Hashable {
-  public let source: String?
-  public let destination: String?
+public struct RuntimeContainerMount: Decodable, Hashable {
+  public let type: String
+  public let source: String
+  public let destination: String
+  public let mode: String
+  public let rw: Bool?
 
-  public init(source: String?, destination: String?) {
+  public init(type: String, source: String, destination: String, mode: String, rw: Bool?) {
+    self.type = type
     self.source = source
     self.destination = destination
+    self.mode = mode
+    self.rw = rw
+  }
+}
+
+public struct RuntimeContainerNetwork: Decodable, Hashable, Identifiable {
+  public let name: String
+  public let ipAddress: String?
+  public let gateway: String?
+  public let aliases: [String]?
+
+  public var id: String { name }
+
+  public init(name: String, ipAddress: String?, gateway: String?, aliases: [String]?) {
+    self.name = name
+    self.ipAddress = ipAddress
+    self.gateway = gateway
+    self.aliases = aliases
   }
 }
 
@@ -469,6 +443,7 @@ public struct GatewayStatus: Decodable {
   public let tokensRevoked: Int?
   public let tokensWrite: Int?
   public let tokensRead: Int?
+  public let tokens: [GatewayTokenRecord]?
   public let gatewayProjects: String?
   public let exposures: [GatewayExposure]?
   public let warnings: [String]?
@@ -485,6 +460,7 @@ public struct GatewayStatus: Decodable {
     tokensRevoked: Int?,
     tokensWrite: Int?,
     tokensRead: Int?,
+    tokens: [GatewayTokenRecord]?,
     gatewayProjects: String?,
     exposures: [GatewayExposure]?,
     warnings: [String]?
@@ -500,9 +476,68 @@ public struct GatewayStatus: Decodable {
     self.tokensRevoked = tokensRevoked
     self.tokensWrite = tokensWrite
     self.tokensRead = tokensRead
+    self.tokens = tokens
     self.gatewayProjects = gatewayProjects
     self.exposures = exposures
     self.warnings = warnings
+  }
+}
+
+public enum GatewayTokenScope: String, Decodable {
+  case read
+  case write
+}
+
+public struct GatewayTokenRecord: Decodable, Identifiable, Hashable {
+  public let id: String
+  public let scope: GatewayTokenScope
+  public let label: String?
+  public let createdAt: String
+  public let lastUsedAt: String?
+  public let revokedAt: String?
+
+  public init(
+    id: String,
+    scope: GatewayTokenScope,
+    label: String?,
+    createdAt: String,
+    lastUsedAt: String?,
+    revokedAt: String?
+  ) {
+    self.id = id
+    self.scope = scope
+    self.label = label
+    self.createdAt = createdAt
+    self.lastUsedAt = lastUsedAt
+    self.revokedAt = revokedAt
+  }
+}
+
+public struct GatewayTokenListResponse: Decodable {
+  public let tokens: [GatewayTokenRecord]
+
+  public init(tokens: [GatewayTokenRecord]) {
+    self.tokens = tokens
+  }
+}
+
+public struct GatewayTokenCreateResponse: Decodable {
+  public let token: String
+  public let record: GatewayTokenRecord
+
+  public init(token: String, record: GatewayTokenRecord) {
+    self.token = token
+    self.record = record
+  }
+}
+
+public struct GatewayTokenRevokeResponse: Decodable {
+  public let id: String
+  public let revoked: Bool
+
+  public init(id: String, revoked: Bool) {
+    self.id = id
+    self.revoked = revoked
   }
 }
 

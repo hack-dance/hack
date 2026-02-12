@@ -10,6 +10,10 @@ let package = Package(
     .library(name: "GhosttyTerminal", targets: ["GhosttyTerminal"]),
     .library(name: "DashboardFeature", targets: ["DashboardFeature"])
   ],
+  dependencies: [
+    .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.4.1"),
+    .package(url: "https://github.com/raspu/Highlightr.git", from: "2.3.0")
+  ],
   targets: [
     .target(
       name: "HackDesktopModels",
@@ -26,7 +30,13 @@ let package = Package(
     ),
     .target(
       name: "DashboardFeature",
-      dependencies: ["HackCLIService", "HackDesktopModels", "GhosttyTerminal"],
+      dependencies: [
+        "HackCLIService",
+        "HackDesktopModels",
+        "GhosttyTerminal",
+        .product(name: "MarkdownUI", package: "swift-markdown-ui"),
+        .product(name: "Highlightr", package: "Highlightr")
+      ],
       path: "Packages/Features/DashboardFeature/Sources/DashboardFeature"
     ),
     .testTarget(

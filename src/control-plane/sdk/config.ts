@@ -119,6 +119,86 @@ const GatewayConfigSchema = z.object({
   allowWrites: z.boolean().default(false),
 });
 
+const PreferencesAppearanceInputSchema = z.object({
+  theme: z.string().optional(),
+});
+
+const PreferencesAppearanceSchema = z.object({
+  theme: z.string().default("system"),
+});
+
+const PreferencesTerminalInputSchema = z.object({
+  defaultApp: z.string().optional(),
+});
+
+const PreferencesTerminalSchema = z.object({
+  defaultApp: z.string().default("terminal"),
+});
+
+const PreferencesEditorInputSchema = z.object({
+  defaultApp: z.string().optional(),
+});
+
+const PreferencesEditorSchema = z.object({
+  defaultApp: z.string().default("cursor"),
+});
+
+const PreferencesAgentsInputSchema = z.object({
+  defaultApp: z.string().optional(),
+  binaryPath: z.string().optional(),
+});
+
+const PreferencesAgentsSchema = z.object({
+  defaultApp: z.string().default("codex"),
+  binaryPath: z.string().default(""),
+});
+
+const PreferencesSessionInputSchema = z.object({
+  provider: z.string().optional(),
+  binaryPath: z.string().optional(),
+});
+
+const PreferencesSessionSchema = z.object({
+  provider: z.string().default("tmux"),
+  binaryPath: z.string().default(""),
+});
+
+const PreferencesContainerInputSchema = z.object({
+  provider: z.string().optional(),
+  binaryPath: z.string().optional(),
+});
+
+const PreferencesContainerSchema = z.object({
+  provider: z.string().default("docker"),
+  binaryPath: z.string().default(""),
+});
+
+const PreferencesConfigInputSchema = z.object({
+  appearance: PreferencesAppearanceInputSchema.optional(),
+  terminal: PreferencesTerminalInputSchema.optional(),
+  editor: PreferencesEditorInputSchema.optional(),
+  agents: PreferencesAgentsInputSchema.optional(),
+  sessions: PreferencesSessionInputSchema.optional(),
+  containers: PreferencesContainerInputSchema.optional(),
+});
+
+const PreferencesConfigSchema = z.object({
+  appearance: PreferencesAppearanceSchema.default(
+    PreferencesAppearanceSchema.parse({})
+  ),
+  terminal: PreferencesTerminalSchema.default(
+    PreferencesTerminalSchema.parse({})
+  ),
+  editor: PreferencesEditorSchema.default(PreferencesEditorSchema.parse({})),
+  agents: PreferencesAgentsSchema.default(PreferencesAgentsSchema.parse({})),
+  sessions: PreferencesSessionSchema.default(
+    PreferencesSessionSchema.parse({})
+  ),
+  containers: PreferencesContainerSchema.default(
+    PreferencesContainerSchema.parse({})
+  ),
+});
+
 const ControlPlaneConfigInputSchema = z.object({
   extensions: z.record(z.string(), ExtensionEnablementInputSchema).optional(),
   tickets: z
@@ -131,6 +211,7 @@ const ControlPlaneConfigInputSchema = z.object({
   usage: UsageConfigInputSchema.optional(),
   daemon: DaemonConfigInputSchema.optional(),
   gateway: GatewayConfigInputSchema.optional(),
+  preferences: PreferencesConfigInputSchema.optional(),
 });
 
 const ControlPlaneConfigSchema = z.object({
@@ -145,6 +226,9 @@ const ControlPlaneConfigSchema = z.object({
   usage: UsageConfigSchema.default(UsageConfigSchema.parse({})),
   daemon: DaemonConfigSchema.default(DaemonConfigSchema.parse({})),
   gateway: GatewayConfigSchema.default(GatewayConfigSchema.parse({})),
+  preferences: PreferencesConfigSchema.default(
+    PreferencesConfigSchema.parse({})
+  ),
 });
 
 export type ControlPlaneConfig = z.infer<typeof ControlPlaneConfigSchema>;

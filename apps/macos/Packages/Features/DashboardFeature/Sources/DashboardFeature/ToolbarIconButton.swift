@@ -5,7 +5,17 @@ import SwiftUI
 /// while still providing a subtle hover/pressed affordance.
 struct ToolbarIconButton: NSViewRepresentable {
   final class HoverButton: NSButton {
+    static let hitTargetSize = NSSize(width: 32, height: 32)
+    static let hitTargetCornerRadius: CGFloat = 9
+
     var onPress: (() -> Void)?
+    var normalSystemImage = ""
+    var hoverSystemImage: String?
+    var normalSymbolTint: NSColor?
+    var hoverSymbolTint: NSColor?
+    var symbolPointSize: CGFloat = 12
+    var symbolWeight: NSFont.Weight = .regular
+    var accessibilityText = ""
 
     private var isHovered = false {
       didSet { updateAppearance() }
@@ -16,6 +26,10 @@ struct ToolbarIconButton: NSViewRepresentable {
     }
 
     private var trackingArea: NSTrackingArea?
+
+    override var intrinsicContentSize: NSSize {
+      Self.hitTargetSize
+    }
 
     override init(frame frameRect: NSRect) {
       super.init(frame: frameRect)
@@ -29,17 +43,30 @@ struct ToolbarIconButton: NSViewRepresentable {
 
     private func commonInit() {
       wantsLayer = true
-      layer?.cornerRadius = 7
+      layer?.cornerRadius = Self.hitTargetCornerRadius
+      layer?.cornerCurve = .continuous
       layer?.masksToBounds = true
 
       isBordered = false
       bezelStyle = .regularSquare
       imagePosition = .imageOnly
+      imageScaling = .scaleProportionallyDown
       setButtonType(.momentaryChange)
+      focusRingType = .none
+      setFrameSize(Self.hitTargetSize)
+      frame.size = Self.hitTargetSize
+      setContentHuggingPriority(.required, for: .horizontal)
+      setContentHuggingPriority(.required, for: .vertical)
+      setContentCompressionResistancePriority(.required, for: .horizontal)
+      setContentCompressionResistancePriority(.required, for: .vertical)
 
       target = self
       action = #selector(handlePress)
 
+      updateAppearance()
+    }
+
+    func refreshAppearance() {
       updateAppearance()
     }
 
@@ -76,9 +103,16 @@ struct ToolbarIconButton: NSViewRepresentable {
     }
 
     private func updateAppearance() {
-      let base = NSColor.labelColor
-      let hover = base.withAlphaComponent(0.06)
-      let pressed = base.withAlphaComponent(0.10)
+      let isDarkAppearance = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+      let hover = isDarkAppearance
+        ? NSColor.white.withAlphaComponent(0.14)
+        : NSColor.black.withAlphaComponent(0.08)
+      let pressed = isDarkAppearance
+        ? NSColor.white.withAlphaComponent(0.22)
+        : NSColor.black.withAlphaComponent(0.14)
+      let stroke = isDarkAppearance
+        ? NSColor.white.withAlphaComponent(0.18)
+        : NSColor.black.withAlphaComponent(0.12)
 
       if isPressed {
         layer?.backgroundColor = pressed.cgColor
@@ -86,6 +120,24 @@ struct ToolbarIconButton: NSViewRepresentable {
         layer?.backgroundColor = hover.cgColor
       } else {
         layer?.backgroundColor = NSColor.clear.cgColor
+      }
+      layer?.borderWidth = (isHovered || isPressed) ? 1 : 0
+      layer?.borderColor = stroke.cgColor
+
+      updateSymbolAppearance()
+    }
+
+    private func updateSymbolAppearance() {
+      let symbolName = (isHovered ? hoverSystemImage : nil) ?? normalSystemImage
+      let config = NSImage.SymbolConfiguration(pointSize: symbolPointSize, weight: symbolWeight)
+      image = NSImage(systemSymbolName: symbolName, accessibilityDescription: accessibilityText)?
+        .withSymbolConfiguration(config)
+      if isHovered, let hoverSymbolTint {
+        contentTintColor = hoverSymbolTint
+      } else if let normalSymbolTint {
+        contentTintColor = normalSymbolTint
+      } else {
+        contentTintColor = NSColor.labelColor.withAlphaComponent(isHovered ? 0.98 : 0.88)
       }
     }
 
@@ -95,26 +147,36 @@ struct ToolbarIconButton: NSViewRepresentable {
   }
 
   let systemImage: String
+  var hoverSystemImage: String? = nil
   let help: String
   let accessibilityLabel: String
+  var symbolTint: NSColor? = nil
+  var hoverSymbolTint: NSColor? = nil
   let action: () -> Void
 
   func makeNSView(context: Context) -> HoverButton {
-    let button = HoverButton(frame: .init(x: 0, y: 0, width: 26, height: 26))
+    let button = HoverButton(frame: .init(origin: .zero, size: HoverButton.hitTargetSize))
     button.onPress = action
+    button.normalSystemImage = systemImage
+    button.hoverSystemImage = hoverSystemImage
+    button.normalSymbolTint = symbolTint
+    button.hoverSymbolTint = hoverSymbolTint
+    button.accessibilityText = accessibilityLabel
     button.toolTip = help
     button.setAccessibilityLabel(accessibilityLabel)
+    button.refreshAppearance()
     return button
   }
 
   func updateNSView(_ nsView: HoverButton, context: Context) {
     nsView.onPress = action
+    nsView.normalSystemImage = systemImage
+    nsView.hoverSystemImage = hoverSystemImage
+    nsView.normalSymbolTint = symbolTint
+    nsView.hoverSymbolTint = hoverSymbolTint
+    nsView.accessibilityText = accessibilityLabel
     nsView.toolTip = help
     nsView.setAccessibilityLabel(accessibilityLabel)
-
-    let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .regular)
-    nsView.image = NSImage(systemSymbolName: systemImage, accessibilityDescription: accessibilityLabel)?
-      .withSymbolConfiguration(config)
-    nsView.contentTintColor = NSColor.labelColor.withAlphaComponent(0.85)
+    nsView.refreshAppearance()
   }
 }

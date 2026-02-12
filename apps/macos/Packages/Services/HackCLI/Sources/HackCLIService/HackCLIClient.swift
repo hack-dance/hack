@@ -29,16 +29,7 @@ public actor HackCLIClient {
     }
 
     let result = try await run(args)
-    return try decode(ProjectListResponse.self, from: result.stdout)
-  }
-
-  public func fetchProjectMeta(projectName: String) async throws -> ProjectMeta? {
-    let trimmed = projectName.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty else { return nil }
-
-    let result = try await run(["projects", "--json", "--include-global", "--project", trimmed, "--meta"])
-    let response = try decode(ProjectListResponse.self, from: result.stdout)
-    return response.projects.first?.meta
+    return try decodeLenient(ProjectListResponse.self, from: result.stdout)
   }
 
   public func daemonStatus() async throws -> DaemonStatus {
@@ -49,6 +40,14 @@ public actor HackCLIClient {
   public func fetchGlobalStatus() async throws -> GlobalStatusResponse {
     let result = try await run(["global", "status", "--json"], allowNonZeroExit: true)
     return try decodeJsonOrThrow(GlobalStatusResponse.self, result: result)
+  }
+
+  public func globalUp() async throws {
+    _ = try await run(["global", "up"])
+  }
+
+  public func globalDown() async throws {
+    _ = try await run(["global", "down"])
   }
 
   public func startDaemon() async throws {
@@ -75,12 +74,70 @@ public actor HackCLIClient {
     _ = try await run(["down", "--path", path])
   }
 
-  public func stopSession(sessionName: String) async throws {
-    let trimmed = sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty else {
-      throw HackCLIError.commandFailed(exitCode: 1, stderr: "Missing session name")
+  public func startBranch(path: String, branch: String) async throws {
+    _ = try await run(["up", "--path", path, "--branch", branch, "--detach"])
+  }
+
+  public func stopBranch(path: String, branch: String) async throws {
+    _ = try await run(["down", "--path", path, "--branch", branch])
+  }
+
+  public func addBranch(path: String, name: String, note: String?) async throws {
+    var args = ["branch", "add", name, "--path", path]
+    if let note, !note.isEmpty {
+      args.append(contentsOf: ["--note", note])
     }
-    _ = try await run(["session", "stop", trimmed])
+    _ = try await run(args)
+  }
+
+  public func removeBranch(path: String, name: String) async throws {
+    _ = try await run(["branch", "remove", name, "--path", path])
+  }
+
+  public func stopSession(name: String) async throws {
+    _ = try await run(["session", "stop", name])
+  }
+
+  public func startSession(projectName: String, detached: Bool = true) async throws {
+    var args = ["session", "start", projectName]
+    if detached {
+      args.append("--detach")
+    }
+    _ = try await run(args)
+  }
+
+  public func setGlobalConfig(key: String, value: String) async throws {
+    _ = try await run(["config", "set", key, value, "--global"])
+  }
+
+  public func listGatewayTokens() async throws -> GatewayTokenListResponse {
+    let result = try await run(["x", "gateway", "token-list", "--json"], allowNonZeroExit: true)
+    return try decodeJsonOrThrow(GatewayTokenListResponse.self, result: result)
+  }
+
+  public func createGatewayToken(
+    scope: GatewayTokenScope,
+    label: String?
+  ) async throws -> GatewayTokenCreateResponse {
+    var args = ["x", "gateway", "token-create", "--scope", scope.rawValue, "--json"]
+    if let label, !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--label", label])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(GatewayTokenCreateResponse.self, result: result)
+  }
+
+  public func revokeGatewayToken(id: String) async throws -> GatewayTokenRevokeResponse {
+    let result = try await run(["x", "gateway", "token-revoke", id, "--json"], allowNonZeroExit: true)
+    return try decodeJsonOrThrow(GatewayTokenRevokeResponse.self, result: result)
+  }
+
+  public func startCloudflareTunnel() async throws {
+    _ = try await run(["x", "cloudflare", "tunnel-start"])
+  }
+
+  public func stopCloudflareTunnel() async throws {
+    _ = try await run(["x", "cloudflare", "tunnel-stop"])
   }
 
   public func listTickets(path: String) async throws -> TicketsListResponse {
@@ -197,25 +254,81 @@ public actor HackCLIClient {
       return decoded
     }
 
-    if let snippet = extractJsonSnippet(from: trimmed),
-       let data = snippet.data(using: .utf8),
-       let decoded = try? decoder.decode(T.self, from: data) {
-      return decoded
+    for snippet in extractJsonSnippets(from: trimmed) {
+      if let data = snippet.data(using: .utf8),
+         let decoded = try? decoder.decode(T.self, from: data) {
+        return decoded
+      }
     }
 
     throw HackCLIError.invalidJson
   }
 
-  private func extractJsonSnippet(from text: String) -> String? {
-    guard let startIndex = text.firstIndex(where: { $0 == "{" || $0 == "[" }) else {
-      return nil
+  private func extractJsonSnippets(from text: String) -> [String] {
+    var snippets: [String] = []
+    var seen: Set<String> = []
+    for index in text.indices {
+      let char = text[index]
+      guard char == "{" || char == "[" else {
+        continue
+      }
+      guard let snippet = extractBalancedJson(from: text, startAt: index) else {
+        continue
+      }
+      if seen.insert(snippet).inserted {
+        snippets.append(snippet)
+      }
     }
+    return snippets
+  }
+
+  private func extractBalancedJson(from text: String, startAt startIndex: String.Index) -> String? {
     let startChar = text[startIndex]
-    let endChar: Character = startChar == "{" ? "}" : "]"
-    guard let endIndex = text.lastIndex(of: endChar), endIndex >= startIndex else {
+    guard startChar == "{" || startChar == "[" else {
       return nil
     }
-    return String(text[startIndex...endIndex])
+
+    var stack: [Character] = [startChar == "{" ? "}" : "]"]
+    var insideString = false
+    var escaped = false
+    var index = text.index(after: startIndex)
+
+    while index < text.endIndex {
+      let char = text[index]
+
+      if insideString {
+        if escaped {
+          escaped = false
+        } else if char == "\\" {
+          escaped = true
+        } else if char == "\"" {
+          insideString = false
+        }
+      } else {
+        switch char {
+        case "\"":
+          insideString = true
+        case "{":
+          stack.append("}")
+        case "[":
+          stack.append("]")
+        case "}", "]":
+          guard let expected = stack.last, char == expected else {
+            return nil
+          }
+          _ = stack.removeLast()
+          if stack.isEmpty {
+            return String(text[startIndex...index])
+          }
+        default:
+          break
+        }
+      }
+
+      index = text.index(after: index)
+    }
+
+    return nil
   }
 
   private func run(
@@ -246,22 +359,20 @@ public actor HackCLIClient {
     process.standardError = stderrPipe
 
     return try await withTaskCancellationHandler(operation: {
-      let exitCode = await withCheckedContinuation { continuation in
-        process.terminationHandler = { proc in
-          continuation.resume(returning: Int(proc.terminationStatus))
-        }
-
-        do {
-          try process.run()
-        } catch {
-          stdoutPipe.fileHandleForReading.closeFile()
-          stderrPipe.fileHandleForReading.closeFile()
-          continuation.resume(returning: 127)
-        }
+      do {
+        try process.run()
+      } catch {
+        stdoutPipe.fileHandleForReading.closeFile()
+        stderrPipe.fileHandleForReading.closeFile()
+        throw HackCLIError.commandFailed(exitCode: 127, stderr: error.localizedDescription)
       }
 
       async let stdoutData = stdoutPipe.fileHandleForReading.readToEnd()
       async let stderrData = stderrPipe.fileHandleForReading.readToEnd()
+      let exitCode = await Task.detached(priority: nil) {
+        process.waitUntilExit()
+        return Int(process.terminationStatus)
+      }.value
 
       let stdoutBytes: Data?
       let stderrBytes: Data?

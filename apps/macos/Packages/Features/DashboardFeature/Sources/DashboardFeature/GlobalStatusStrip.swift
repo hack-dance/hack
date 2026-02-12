@@ -28,7 +28,10 @@ struct GlobalStatusStrip: View {
         Text(lastUpdatedText)
           .font(.mono(.caption2))
           .foregroundStyle(.secondary)
+          .lineLimit(1)
+          .truncationMode(.tail)
       }
+      titlebarProjectActionControl
       if placement == .titlebar {
         Divider()
           .frame(height: 14)
@@ -114,15 +117,29 @@ struct GlobalStatusStrip: View {
     .padding(.horizontal, placement == .titlebar ? 10 : 0)
     .padding(.vertical, placement == .titlebar ? 4 : 6)
     .background(titlebarPillBackground)
+    .fixedSize(horizontal: placement == .titlebar, vertical: false)
+    .animation(.easeInOut(duration: 0.18), value: stripLayoutSignature)
   }
 
   private var selectorPill: some View {
     Menu {
-      Button("System: Runtime") {
-        model.selectedItem = .runtime
+      Button("Home") {
+        model.selectedItem = .home
       }
-      Button("System: Gateway") {
-        model.selectedItem = .gateway
+      Divider()
+      Button("Settings: Runtime") {
+        NotificationCenter.default.post(
+          name: .hackSettingsRequested,
+          object: nil,
+          userInfo: [SettingsNavigationRequest.paneKey: SettingsSidebarItem.runtime.rawValue]
+        )
+      }
+      Button("Settings: Gateway") {
+        NotificationCenter.default.post(
+          name: .hackSettingsRequested,
+          object: nil,
+          userInfo: [SettingsNavigationRequest.paneKey: SettingsSidebarItem.gateway.rawValue]
+        )
       }
       Divider()
       ForEach(model.projects) { project in
@@ -137,12 +154,13 @@ struct GlobalStatusStrip: View {
         Text(selectorLabel)
           .font(.mono(.caption, weight: .semibold))
           .lineLimit(1)
+          .truncationMode(.tail)
+          .frame(maxWidth: placement == .titlebar ? 220 : .infinity, alignment: .leading)
         Image(systemName: "chevron.down")
           .font(.system(size: 10, weight: .semibold))
           .foregroundStyle(.secondary)
           .offset(y: 0.5)
       }
-      .frame(minWidth: placement == .titlebar ? 160 : 0, alignment: .leading)
       .padding(.horizontal, placement == .titlebar ? 4 : 12)
       .padding(.vertical, placement == .titlebar ? 2 : 6)
       .background(selectorBackground)
@@ -207,6 +225,11 @@ struct GlobalStatusStrip: View {
   @ViewBuilder
   private var statusCluster: some View {
     switch model.selectedItem {
+    case .home:
+      HStack(spacing: 8) {
+        StatusPill(text: runtimeLabel, tone: runtimeTone)
+        StatusPill(text: gatewayLabel, tone: gatewayTone)
+      }
     case .runtime:
       HStack(spacing: 8) {
         StatusPill(text: runtimeLabel, tone: runtimeTone)
@@ -217,23 +240,81 @@ struct GlobalStatusStrip: View {
     case let .project(id):
       if let project = model.projects.first(where: { $0.id == id }) {
         if project.isRuntimeConfigured {
-          HStack(spacing: 6) {
-            Text(project.runtimeStatusLabel)
-              .font(.mono(.caption))
-              .foregroundStyle(.secondary)
-            RuntimeStatusDot(
-              status: project.runtimeStatus ?? fallbackRuntimeStatus(for: project),
-              runtimeHealthy: model.runtimeOverallOk
-            )
-          }
-        } else {
+          projectRuntimeCluster(for: project)
+        } else if project.status == .missing {
+          StatusPill(text: "Project missing", tone: .warn)
+        } else if project.isExtensionOnly {
           LabelBadge(label: project.featureLabel ?? "Extensions", color: .purple)
+        } else {
+          StatusPill(text: "Runtime not configured", tone: .neutral)
         }
       } else {
         StatusPill(text: "Project: unknown", tone: .neutral)
       }
     case .none:
       StatusPill(text: runtimeLabel, tone: runtimeTone)
+    }
+  }
+
+  private func projectRuntimeCluster(for project: ProjectSummary) -> some View {
+    HStack(spacing: 8) {
+      Text(project.runtimeStatusLabel)
+        .font(.mono(.caption))
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+        .truncationMode(.tail)
+      RuntimeStatusDot(
+        status: project.runtimeStatus ?? fallbackRuntimeStatus(for: project),
+        runtimeHealthy: model.runtimeOverallOk
+      )
+    }
+  }
+
+  @ViewBuilder
+  private var titlebarProjectActionControl: some View {
+    if placement == .titlebar,
+       let project = selectedProject,
+       project.isRuntimeConfigured {
+      projectActionControl(for: project)
+    }
+  }
+
+  @ViewBuilder
+  private func projectActionControl(for project: ProjectSummary) -> some View {
+    if let action = model.projectLifecycleActions[project.id] {
+      HStack(spacing: 4) {
+        ProgressView()
+          .controlSize(.small)
+        Text(action == .starting ? "Starting…" : "Stopping…")
+          .font(.mono(.caption2))
+          .foregroundStyle(.secondary)
+      }
+      .padding(.horizontal, 6)
+      .padding(.vertical, 3)
+      .background(
+        Capsule(style: .continuous)
+          .fill(colorScheme == .dark ? Color.white.opacity(0.07) : Color.black.opacity(0.04))
+      )
+    } else if canStopProject(project) {
+      Button {
+        Task { await model.stopProject(project) }
+      } label: {
+        Image(systemName: "stop.fill")
+          .font(.system(size: 10, weight: .semibold))
+          .frame(width: 18, height: 18)
+      }
+      .buttonStyle(PressableCircleButtonStyle())
+      .help("Stop project")
+    } else if canStartProject(project) {
+      Button {
+        Task { await model.startProject(project) }
+      } label: {
+        Image(systemName: "play.fill")
+          .font(.system(size: 10, weight: .semibold))
+          .frame(width: 18, height: 18)
+      }
+      .buttonStyle(PressableCircleButtonStyle())
+      .help("Start project")
     }
   }
 
@@ -313,6 +394,33 @@ struct GlobalStatusStrip: View {
     return model.projects.first(where: { $0.id == id })
   }
 
+  private var stripLayoutSignature: String {
+    let selectedKey: String = switch model.selectedItem {
+    case .home:
+      "home"
+    case .runtime:
+      "runtime"
+    case .gateway:
+      "gateway"
+    case let .project(id):
+      "project:\(id)"
+    case .none:
+      "none"
+    }
+    let projectAction = selectedProject.flatMap { project in
+      model.projectLifecycleActions[project.id]
+    }
+    let actionKey: String = switch projectAction {
+    case .starting:
+      "starting"
+    case .stopping:
+      "stopping"
+    case .none:
+      "idle"
+    }
+    return "\(selectedKey)|\(selectorLabel)|\(actionKey)|\(lastUpdatedText ?? "")"
+  }
+
   private func canStartProject(_ project: ProjectSummary) -> Bool {
     project.isRuntimeConfigured
       && (project.status == .stopped || project.status == .unknown || project.status == .unregistered)
@@ -348,6 +456,9 @@ struct GlobalStatusStrip: View {
        let project = model.projects.first(where: { $0.id == id }) {
       return project.name
     }
+    if model.selectedItem == .home {
+      return "Dashboard"
+    }
     if model.selectedItem == .gateway {
       return "Gateway"
     }
@@ -356,6 +467,8 @@ struct GlobalStatusStrip: View {
 
   private var selectorIcon: String {
     switch model.selectedItem {
+    case .home:
+      return "square.grid.2x2"
     case .gateway:
       return "dot.radiowaves.left.and.right"
     case .runtime:

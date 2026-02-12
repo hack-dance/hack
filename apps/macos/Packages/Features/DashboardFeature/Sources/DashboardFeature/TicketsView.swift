@@ -1,9 +1,11 @@
+import MarkdownUI
 import SwiftUI
 
 import HackDesktopModels
 
 struct TicketsView: View {
   @Environment(DashboardModel.self) private var model
+  @Environment(\.colorScheme) private var colorScheme
 
   let project: ProjectSummary
 
@@ -17,11 +19,12 @@ struct TicketsView: View {
   @State private var showCreateSheet = false
   @State private var selectedFilter: TicketFilter = .all
   @State private var hasLoadedOnce = false
-  @State private var expandedSections: Set<TicketStatus> = Set(TicketStatus.allCases)
+  @State private var isPropertiesExpanded = false
+  @State private var isHistoryExpanded = false
   @State private var searchText = ""
   @State private var loadNotice: String? = nil
   @State private var hoveredTicketId: String? = nil
-  @State private var hoveredSection: TicketStatus? = nil
+  @FocusState private var ticketsListFocused: Bool
 
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
@@ -33,12 +36,15 @@ struct TicketsView: View {
         content
       }
     }
+    .fontDesign(.monospaced)
     .padding(.horizontal, 24)
+    .padding(.top, 12)
     .padding(.bottom, 24)
     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     .task {
       loadCachedTickets()
       await refreshTickets()
+      ticketsListFocused = true
     }
     .task(id: selectedTicketId) {
       await loadTicketDetail()
@@ -59,35 +65,29 @@ struct TicketsView: View {
   }
 
   private var header: some View {
-    VStack(alignment: .leading, spacing: 10) {
-      HStack(alignment: .center, spacing: 12) {
-        Text("Tickets")
-          .font(.mono(.headline, weight: .semibold))
-        BadgePill(label: "\(filteredTickets.count)", tint: .secondary)
-        filterRow
-        Spacer()
-        if let loadNotice {
-          Text(loadNotice)
-            .font(.mono(.caption2))
-            .foregroundStyle(.secondary)
-        }
-        Button("New") {
-          showCreateSheet = true
-        }
-        .adaptiveToolbarButtonProminent()
-        Menu {
-          Button("Refresh") {
-            Task { await refreshTickets() }
-          }
-          Button("Sync") {
-            Task { await syncTickets() }
-          }
-        } label: {
-          Image(systemName: "ellipsis")
-            .font(.mono(.title3))
-        }
-        .buttonStyle(.plain)
+    HStack(alignment: .center, spacing: 12) {
+      statusFilterMenu
+      searchField
+      Spacer(minLength: 12)
+      if let loadNotice {
+        Text(loadNotice)
+          .font(.mono(.caption))
+          .foregroundStyle(.secondary)
       }
+      newTicketButton
+      Menu {
+        Button("Refresh") {
+          Task { await refreshTickets() }
+        }
+        Button("Sync") {
+          Task { await syncTickets() }
+        }
+      } label: {
+        Image(systemName: "ellipsis.circle")
+          .font(.system(size: 16, weight: .semibold))
+          .foregroundStyle(.primary.opacity(0.7))
+      }
+      .buttonStyle(PressableIconButtonStyle())
     }
   }
 
@@ -95,55 +95,62 @@ struct TicketsView: View {
     selectedTicketId != nil
   }
 
-  private var filterRow: some View {
-    ViewThatFits(in: .horizontal) {
-      HStack(spacing: 6) {
-        ForEach(TicketFilter.allCases, id: \.self) { filter in
-          filterPill(filter)
-        }
-        TextField("Search", text: $searchText)
-          .textFieldStyle(.roundedBorder)
-          .controlSize(.small)
-          .frame(maxWidth: 200)
-      }
-      HStack(spacing: 8) {
-        Menu {
-          ForEach(TicketFilter.allCases, id: \.self) { filter in
-            Button {
-              selectedFilter = filter
-            } label: {
-              if selectedFilter == filter {
-                Label("\(filter.label) (\(filter.count(in: tickets)))", systemImage: "checkmark")
-              } else {
-                Text("\(filter.label) (\(filter.count(in: tickets)))")
-              }
-            }
-          }
+  private var statusFilterMenu: some View {
+    Menu {
+      ForEach(TicketFilter.allCases, id: \.self) { filter in
+        Button {
+          selectedFilter = filter
         } label: {
-          HStack(spacing: 6) {
-            Text("Filter")
-              .font(.mono(.caption, weight: .semibold))
-            Text(selectedFilter.label)
-              .font(.mono(.caption2))
-              .foregroundStyle(.secondary)
-            Image(systemName: "chevron.down")
-              .font(.mono(.caption2))
-              .foregroundStyle(.secondary)
+          if selectedFilter == filter {
+            Label("\(filter.label) (\(filter.count(in: tickets)))", systemImage: "checkmark")
+          } else {
+            Text("\(filter.label) (\(filter.count(in: tickets)))")
           }
-          .padding(.horizontal, 10)
-          .padding(.vertical, 6)
-          .background(
-            Capsule(style: .continuous)
-              .fill(Color.secondary.opacity(0.1))
-          )
         }
-        .menuStyle(.borderlessButton)
-
-        TextField("Search", text: $searchText)
-          .textFieldStyle(.roundedBorder)
-          .controlSize(.small)
-          .frame(maxWidth: 180)
       }
+    } label: {
+      HStack(spacing: 8) {
+        Image(systemName: "line.3.horizontal.decrease.circle")
+          .font(.system(size: 13, weight: .semibold))
+        Text(selectedFilter.label)
+          .font(.system(size: 13, weight: .semibold))
+        Text("\(selectedFilter.count(in: tickets))")
+          .font(.system(size: 12, weight: .semibold))
+          .foregroundStyle(.secondary)
+      }
+      .padding(.horizontal, 12)
+      .padding(.vertical, 8)
+      .background {
+        headerControlCapsuleBackground
+      }
+    }
+    .menuStyle(.borderlessButton)
+  }
+
+  private var searchField: some View {
+    HStack(spacing: 8) {
+      Image(systemName: "magnifyingglass")
+        .font(.system(size: 12, weight: .semibold))
+        .foregroundStyle(.secondary)
+      TextField("Search title or ID", text: $searchText)
+        .textFieldStyle(.plain)
+        .font(.system(size: 14, weight: .medium))
+        .frame(minWidth: 180, maxWidth: 320)
+      if !searchText.isEmpty {
+        Button {
+          searchText = ""
+        } label: {
+          Image(systemName: "xmark.circle.fill")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+      }
+    }
+    .padding(.horizontal, 10)
+    .padding(.vertical, 8)
+    .background {
+      headerControlFieldBackground
     }
   }
 
@@ -151,163 +158,163 @@ struct TicketsView: View {
     HStack(alignment: .top, spacing: 16) {
       ticketsListCard
         .frame(
-          minWidth: 280,
-          maxWidth: hasSelection ? 360 : .infinity,
+          minWidth: 320,
+          maxWidth: hasSelection ? 430 : .infinity,
           maxHeight: .infinity,
           alignment: .topLeading
         )
       if hasSelection {
         ticketDetailCard
           .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        ticketInspectorColumn
-          .frame(minWidth: 220, idealWidth: 260, maxWidth: 320, maxHeight: .infinity, alignment: .topLeading)
       }
     }
     .frame(maxHeight: .infinity, alignment: .top)
+    .onMoveCommand(perform: moveSelection)
     .animation(.easeInOut(duration: 0.2), value: hasSelection)
   }
 
   private var ticketsListCard: some View {
-    GlassCard(title: "Tickets", systemImage: "tray") {
-      ScrollView {
-        if isLoading && !hasLoadedOnce {
-          skeletonList
-        } else if filteredTickets.isEmpty {
-          emptyTicketsView
-        } else if selectedFilter == .all {
-          LazyVStack(alignment: .leading, spacing: 10) {
-            ForEach(TicketStatus.allCases, id: \.self) { status in
-              ticketSection(status: status)
-            }
+    ticketPanel(contentPadding: 0) {
+      VStack(alignment: .leading, spacing: 0) {
+        HStack(spacing: 8) {
+          Text("\(filteredTickets.count) issue\(filteredTickets.count == 1 ? "" : "s")")
+            .font(.system(size: 14, weight: .semibold))
+          Spacer()
+          if !filteredTickets.isEmpty {
+            Text("Use ↑ ↓ to navigate")
+              .font(.system(size: 12, weight: .medium))
+              .foregroundStyle(.secondary)
           }
-        } else {
-          LazyVStack(alignment: .leading, spacing: 8) {
-            ForEach(filteredTickets) { ticket in
-              ticketRow(ticket)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        Divider()
+          .opacity(0.22)
+        ScrollView {
+          if isLoading && !hasLoadedOnce {
+            skeletonList
+          } else if filteredTickets.isEmpty {
+            emptyTicketsView
+          } else if selectedFilter == .all {
+            LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+              ForEach(TicketStatus.allCases, id: \.self) { status in
+                ticketSection(status: status)
+              }
+            }
+          } else {
+            LazyVStack(alignment: .leading, spacing: 0) {
+              ForEach(filteredTickets) { ticket in
+                ticketRow(ticket)
+              }
             }
           }
         }
+        .frame(maxHeight: .infinity, alignment: .topLeading)
       }
-      .frame(maxHeight: .infinity, alignment: .topLeading)
     }
+    .focusable()
+    .focused($ticketsListFocused)
+    .focusEffectDisabled()
   }
 
   private var ticketDetailCard: some View {
-    GlassCard(title: "Detail", systemImage: "doc.text") {
-      ScrollView {
-        if let detailErrorMessage {
-          ticketsErrorCard(message: detailErrorMessage)
-        } else if isDetailLoading {
-          ProgressView()
-            .frame(maxWidth: .infinity, alignment: .leading)
-        } else if let detail = ticketDetail {
-          ticketDetailView(detail)
-        } else {
-          Text("Select a ticket to see details.")
-            .font(.mono(.subheadline))
-            .foregroundStyle(.secondary)
-        }
-      }
-      .frame(maxHeight: .infinity, alignment: .topLeading)
-    }
-  }
-
-  private var ticketInspectorCard: some View {
-    GlassCard(title: "Properties", systemImage: "slider.horizontal.3") {
-      if let detail = ticketDetail {
+    ticketDetailPanel {
+      if let detailErrorMessage {
         ScrollView {
-          VStack(alignment: .leading, spacing: 14) {
-            statusMenu(ticket: detail.ticket)
-            inspectorGroup(title: "Dates", rows: inspectorDateRows(for: detail.ticket))
-            inspectorGroup(title: "Links", rows: inspectorLinkRows(for: detail.ticket))
-            inspectorGroup(title: "Dependencies", rows: inspectorDependencyRows(for: detail.ticket))
+          ticketsErrorCard(message: detailErrorMessage)
+            .padding(16)
+        }
+      } else if isDetailLoading {
+        ProgressView()
+          .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+          .padding(16)
+      } else if let detail = ticketDetail {
+        VStack(spacing: 0) {
+          ScrollView {
+            ticketDetailView(detail)
+              .padding(.horizontal, 16)
+              .padding(.top, 16)
+              .padding(.bottom, 20)
           }
+          .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+          Divider()
+            .opacity(0.22)
+
+          ticketDetailFooter(detail)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(ticketDetailFooterFillColor)
         }
       } else {
-        Text("Select a ticket.")
-          .font(.mono(.caption))
+        Text("Select a ticket to see details.")
+          .font(.mono(.subheadline))
           .foregroundStyle(.secondary)
+          .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+          .padding(16)
       }
     }
-  }
-
-  private var ticketInspectorColumn: some View {
-    VStack(spacing: 0) {
-      ticketInspectorCard
-    }
-    .padding(.top, 2)
-    .padding(.horizontal, 2)
-    .background(
-      RoundedRectangle(cornerRadius: 18, style: .continuous)
-        .fill(.ultraThinMaterial)
-    )
-    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
   }
 
   private var emptyTicketsView: some View {
     VStack(alignment: .leading, spacing: 8) {
       Text("No tickets found.")
-        .font(.mono(.subheadline, weight: .medium))
+        .font(.system(size: 15, weight: .semibold))
       Text("Try another filter or create a new ticket.")
-        .font(.mono(.caption))
+        .font(.system(size: 13, weight: .medium))
         .foregroundStyle(.secondary)
       Button("New ticket") {
         showCreateSheet = true
       }
       .adaptiveToolbarButton()
     }
+    .padding(.horizontal, 14)
+    .padding(.top, 8)
   }
 
   private func ticketRow(_ ticket: TicketSummary) -> some View {
     Button {
-      selectedTicketId = ticket.ticketId
-    } label: {
-      VStack(alignment: .leading, spacing: 6) {
-        HStack(spacing: 8) {
-          Circle()
-            .fill(ticket.status.color)
-            .frame(width: 8, height: 8)
-          Text(ticket.title)
-            .font(.mono(.subheadline, weight: .semibold))
-            .lineLimit(1)
-          Spacer()
-          Menu {
-            Button("Open details") {
-              selectedTicketId = ticket.ticketId
-            }
-            Divider()
-            ForEach(TicketStatus.allCases, id: \.self) { status in
-              Button(status.label) {
-                Task {
-                  await updateStatus(ticketId: ticket.ticketId, status: status)
-                }
-              }
-            }
-          } label: {
-            HStack(spacing: 6) {
-              Text(ticket.status.label)
-                .font(.mono(.caption))
-              Image(systemName: "chevron.down")
-                .font(.mono(.caption2))
-            }
-            .foregroundStyle(.secondary)
-          }
-          .menuStyle(.borderlessButton)
-        }
-        HStack(spacing: 8) {
-          Text(ticket.ticketId)
-            .font(.mono(.caption2))
-            .foregroundStyle(.secondary)
-          Spacer()
-          Text(ticket.updatedAt)
-            .font(.mono(.caption2))
-            .foregroundStyle(.secondary)
-        }
+      if selectedTicketId == ticket.ticketId {
+        selectedTicketId = nil
+        ticketDetail = nil
+        detailErrorMessage = nil
+      } else {
+        selectedTicketId = ticket.ticketId
       }
-      .padding(.horizontal, 10)
-      .padding(.vertical, 6)
+      ticketsListFocused = true
+    } label: {
+      HStack(alignment: .top, spacing: 10) {
+        Circle()
+          .fill(ticket.status.color)
+          .frame(width: 8, height: 8)
+          .padding(.top, 8)
+        VStack(alignment: .leading, spacing: 6) {
+          HStack(spacing: 8) {
+            Text(ticket.ticketId)
+              .font(.system(size: 12, weight: .medium, design: .monospaced))
+              .foregroundStyle(.secondary)
+            ticketStatusBadge(ticket.status)
+            Spacer()
+            Text(humanReadableListDate(ticket.updatedAt))
+              .font(.system(size: 12, weight: .medium))
+              .foregroundStyle(.secondary)
+          }
+          Text(ticket.title)
+            .font(.system(size: 15, weight: .semibold))
+            .lineLimit(2)
+            .multilineTextAlignment(.leading)
+        }
+        Spacer(minLength: 0)
+      }
+      .padding(.horizontal, 12)
+      .padding(.vertical, 10)
+      .frame(maxWidth: .infinity, alignment: .leading)
       .background(selectionBackground(for: ticket.ticketId))
-      .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+      .overlay(alignment: .bottom) {
+        Rectangle()
+          .fill(selectionBorder(for: ticket.ticketId))
+          .frame(height: 1)
+      }
     }
     .buttonStyle(.plain)
     .contentShape(Rectangle())
@@ -318,47 +325,99 @@ struct TicketsView: View {
   }
 
   private func ticketDetailView(_ detail: TicketDetailResponse) -> some View {
-    VStack(alignment: .leading, spacing: 16) {
+    VStack(alignment: .leading, spacing: 20) {
       HStack(alignment: .top, spacing: 12) {
         VStack(alignment: .leading, spacing: 6) {
           Text(detail.ticket.title)
-            .font(.mono(.headline))
-          Text(detail.ticket.ticketId)
-            .font(.mono(.caption))
-            .foregroundStyle(.secondary)
+            .font(.system(size: 29, weight: .bold, design: .rounded))
+          HStack(spacing: 10) {
+            Text(detail.ticket.ticketId)
+              .font(.system(size: 13, weight: .medium, design: .monospaced))
+              .foregroundStyle(.secondary)
+            Text("Updated \(humanReadableDetailDate(detail.ticket.updatedAt))")
+              .font(.system(size: 13, weight: .medium))
+              .foregroundStyle(.secondary)
+          }
         }
         Spacer()
+        statusMenu(ticket: detail.ticket)
       }
 
       if let body = detail.ticket.body, !body.isEmpty {
         VStack(alignment: .leading, spacing: 6) {
           Text("Body")
-            .font(.mono(.caption, weight: .semibold))
+            .font(.system(size: 12, weight: .semibold))
             .foregroundStyle(.secondary)
-          Text(body)
-            .font(.mono(.subheadline))
-            .textSelection(.enabled)
-        }
-      }
-
-      if !detail.events.isEmpty {
-        VStack(alignment: .leading, spacing: 8) {
-          Text("History")
-            .font(.mono(.caption, weight: .semibold))
-            .foregroundStyle(.secondary)
-          ForEach(detail.events) { event in
-            HStack(spacing: 8) {
-              Text(event.type)
-                .font(.mono(.caption))
-              Spacer()
-              Text(event.tsIso)
-                .font(.mono(.caption2))
-                .foregroundStyle(.secondary)
-            }
-          }
+          markdownBody(body)
         }
       }
     }
+  }
+
+  private func ticketDetailFooter(_ detail: TicketDetailResponse) -> some View {
+    VStack(alignment: .leading, spacing: 12) {
+      DisclosureGroup(isExpanded: $isHistoryExpanded) {
+        if detail.events.isEmpty {
+          Text("No history events for this ticket.")
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(.secondary)
+            .padding(.top, 6)
+        } else {
+          VStack(alignment: .leading, spacing: 8) {
+            ForEach(detail.events) { event in
+              HStack(spacing: 8) {
+                Text(event.type.replacingOccurrences(of: ".", with: " "))
+                  .textCase(nil)
+                  .multilineTextAlignment(.leading)
+                  .lineLimit(1)
+                  .truncationMode(.tail)
+                  .font(.system(size: 13, weight: .medium))
+                  .foregroundStyle(.primary)
+                Spacer()
+                Text(humanReadableDetailDate(event.tsIso))
+                  .font(.system(size: 12, weight: .medium))
+                  .foregroundStyle(.secondary)
+              }
+            }
+          }
+          .padding(.top, 6)
+        }
+      } label: {
+        Text("History")
+          .font(.system(size: 13, weight: .semibold))
+          .foregroundStyle(.secondary)
+      }
+
+      Divider()
+        .opacity(0.25)
+
+      DisclosureGroup(isExpanded: $isPropertiesExpanded) {
+        VStack(alignment: .leading, spacing: 14) {
+          inspectorGroup(title: "Dates", rows: inspectorDateRows(for: detail.ticket))
+          inspectorGroup(title: "Links", rows: inspectorLinkRows(for: detail.ticket))
+          inspectorGroup(title: "Dependencies", rows: inspectorDependencyRows(for: detail.ticket))
+        }
+        .padding(.top, 6)
+      } label: {
+        Text("Properties")
+          .font(.system(size: 13, weight: .semibold))
+          .foregroundStyle(.secondary)
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+  }
+
+  private func markdownBody(_ markdown: String) -> some View {
+    Markdown(markdown)
+      .markdownTheme(.gitHub)
+      .markdownTextStyle {
+        FontFamilyVariant(.monospaced)
+        FontSize(.em(0.95))
+      }
+      .markdownCodeSyntaxHighlighter(TicketMarkdownCodeSyntaxHighlighter(colorScheme: colorScheme))
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .padding(.vertical, 2)
+      .textSelection(.enabled)
   }
 
   private func statusMenu(ticket: TicketSummary) -> some View {
@@ -376,23 +435,21 @@ struct TicketsView: View {
           .fill(ticket.status.color)
           .frame(width: 8, height: 8)
         Text(ticket.status.label)
-          .font(.mono(.caption, weight: .semibold))
-        Image(systemName: "chevron.down")
-          .font(.mono(.caption2))
+          .font(.system(size: 12, weight: .semibold))
       }
+      .padding(.horizontal, 10)
+      .padding(.vertical, 6)
+      .background(
+        Capsule(style: .continuous)
+          .fill(ticketBadgeFill(for: ticket.status))
+      )
+      .overlay(
+        Capsule(style: .continuous)
+          .stroke(ticketBadgeStroke(for: ticket.status), lineWidth: 1)
+      )
     }
     .menuStyle(.borderlessButton)
     .help("Change status")
-  }
-
-  private func inspectorRows(for ticket: TicketSummary) -> [DetailRowItem] {
-    [
-      DetailRowItem(label: "Status", value: ticket.status.label),
-      DetailRowItem(label: "Created", value: ticket.createdAt),
-      DetailRowItem(label: "Updated", value: ticket.updatedAt),
-      DetailRowItem(label: "Depends on", value: ticket.dependsOn.joined(separator: ", ").nilIfEmpty ?? "—"),
-      DetailRowItem(label: "Blocks", value: ticket.blocks.joined(separator: ", ").nilIfEmpty ?? "—")
-    ]
   }
 
   private func ticketsErrorCard(message: String) -> some View {
@@ -463,37 +520,43 @@ struct TicketsView: View {
 
   private func selectionBackground(for ticketId: String) -> Color {
     if ticketId == selectedTicketId {
-      return Color.accentColor.opacity(0.15)
+      return Color.accentColor.opacity(0.2)
     }
     if ticketId == hoveredTicketId {
-      return Color.white.opacity(0.06)
+      return colorScheme == .dark ? Color.white.opacity(0.06) : Color.black.opacity(0.04)
     }
-    return Color.clear
+    return .clear
+  }
+
+  private func selectionBorder(for ticketId: String) -> Color {
+    if ticketId == selectedTicketId {
+      return Color.accentColor.opacity(0.35)
+    }
+    if ticketId == hoveredTicketId {
+      return Color.primary.opacity(0.16)
+    }
+    return Color.primary.opacity(0.08)
   }
 
   private func refreshTickets() async {
     isLoading = true
     errorMessage = nil
     loadNotice = nil
-    do {
-      let result = await loadTicketsWithTimeout(seconds: 4)
-      switch result {
-      case let .success(fetched):
-        tickets = fetched
-        updateSelectionAfterRefresh()
-        hasLoadedOnce = true
-        persistCachedTickets()
-      case .timedOut:
-        if hasLoadedOnce {
-          loadNotice = "Showing cached tickets. Refresh timed out."
-        } else {
-          errorMessage = "Timed out loading tickets. Try Sync, or open a shell and run `hack x tickets list --json` (note the `x`)."
-        }
-      case let .failure(message):
-        errorMessage = message
+    let result = await loadTicketsWithTimeout(seconds: 4)
+    switch result {
+    case let .success(fetched):
+      tickets = fetched
+      updateSelectionAfterRefresh()
+      hasLoadedOnce = true
+      persistCachedTickets()
+    case .timedOut:
+      if hasLoadedOnce {
+        loadNotice = "Showing cached tickets. Refresh timed out."
+      } else {
+        errorMessage = "Timed out loading tickets. Try Sync, or open a shell and run `hack x tickets list --json` (note the `x`)."
       }
-    } catch {
-      errorMessage = error.localizedDescription
+    case let .failure(message):
+      errorMessage = message
     }
     isLoading = false
   }
@@ -501,10 +564,14 @@ struct TicketsView: View {
   private func loadTicketDetail() async {
     guard let selectedTicketId else {
       ticketDetail = nil
+      detailErrorMessage = nil
+      isDetailLoading = false
       return
     }
     isDetailLoading = true
     detailErrorMessage = nil
+    isHistoryExpanded = false
+    isPropertiesExpanded = false
     do {
       ticketDetail = try await model.showTicket(for: project, ticketId: selectedTicketId)
     } catch {
@@ -517,9 +584,9 @@ struct TicketsView: View {
     let filtered = filteredTickets
     if let selectedTicketId,
        !filtered.contains(where: { $0.ticketId == selectedTicketId }) {
-      self.selectedTicketId = filtered.first?.ticketId
-    } else if selectedTicketId == nil {
-      selectedTicketId = filtered.first?.ticketId
+      self.selectedTicketId = nil
+      ticketDetail = nil
+      detailErrorMessage = nil
     }
   }
 
@@ -584,66 +651,58 @@ struct TicketsView: View {
   private func ticketSection(status: TicketStatus) -> some View {
     let items = filteredTickets.filter { $0.status == status }
     if !items.isEmpty {
-      let isHovered = hoveredSection == status
-      DisclosureGroup(
-        isExpanded: Binding(
-          get: { expandedSections.contains(status) },
-          set: { isExpanded in
-            if isExpanded {
-              expandedSections.insert(status)
-            } else {
-              expandedSections.remove(status)
-            }
-          }
-        )
-      ) {
-        VStack(alignment: .leading, spacing: 8) {
+      Section(content: {
+        VStack(alignment: .leading, spacing: 0) {
           ForEach(items) { ticket in
             ticketRow(ticket)
           }
         }
-        .padding(.top, 6)
-      } label: {
+      }, header: {
         HStack(spacing: 8) {
           Circle()
             .fill(status.color)
             .frame(width: 8, height: 8)
           Text(status.label)
-            .font(.mono(.caption, weight: .semibold))
+            .font(.system(size: 13, weight: .semibold))
           Text("\(items.count)")
-            .font(.mono(.caption2))
+            .font(.system(size: 12, weight: .semibold))
             .foregroundStyle(.secondary)
         }
-        .padding(.vertical, 4)
-        .padding(.horizontal, 6)
+        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-          RoundedRectangle(cornerRadius: 8, style: .continuous)
-            .fill(isHovered ? Color.white.opacity(0.06) : .clear)
+          ZStack {
+            Rectangle()
+              .fill(.ultraThinMaterial)
+            Rectangle()
+              .fill(status.color.opacity(colorScheme == .dark ? 0.18 : 0.08))
+          }
         )
-        .contentShape(Rectangle())
-        .onHover { hovering in
-          hoveredSection = hovering ? status : nil
+        .overlay(alignment: .bottom) {
+          Rectangle()
+            .fill(Color.primary.opacity(0.12))
+            .frame(height: 1)
         }
-        .animation(.easeInOut(duration: 0.12), value: isHovered)
-      }
-      .disclosureGroupStyle(.automatic)
+        .zIndex(1)
+      })
+      .textCase(nil)
     }
   }
 
   private func inspectorGroup(title: String, rows: [DetailRowItem]) -> some View {
     VStack(alignment: .leading, spacing: 6) {
       Text(title)
-        .font(.mono(.caption, weight: .semibold))
+        .font(.system(size: 12, weight: .semibold))
         .foregroundStyle(.secondary)
-      DetailRows(rows: rows, labelWidth: 70)
+      DetailRows(rows: rows, labelWidth: 88)
     }
   }
 
   private func inspectorDateRows(for ticket: TicketSummary) -> [DetailRowItem] {
     [
-      DetailRowItem(label: "Created", value: ticket.createdAt),
-      DetailRowItem(label: "Updated", value: ticket.updatedAt)
+      DetailRowItem(label: "Created", value: humanReadableDetailDate(ticket.createdAt)),
+      DetailRowItem(label: "Updated", value: humanReadableDetailDate(ticket.updatedAt))
     ]
   }
 
@@ -659,6 +718,31 @@ struct TicketsView: View {
       DetailRowItem(label: "Depends", value: ticket.dependsOn.joined(separator: ", ").nilIfEmpty ?? "—"),
       DetailRowItem(label: "Blocks", value: ticket.blocks.joined(separator: ", ").nilIfEmpty ?? "—")
     ]
+  }
+
+  private func moveSelection(_ direction: MoveCommandDirection) {
+    let visibleTickets = filteredTickets
+    guard !visibleTickets.isEmpty else { return }
+    let nextTicket: TicketSummary?
+    switch direction {
+    case .up:
+      if let selectedTicketId,
+         let index = visibleTickets.firstIndex(where: { $0.ticketId == selectedTicketId }) {
+        nextTicket = visibleTickets[max(0, index - 1)]
+      } else {
+        nextTicket = visibleTickets.last
+      }
+    case .down:
+      if let selectedTicketId,
+         let index = visibleTickets.firstIndex(where: { $0.ticketId == selectedTicketId }) {
+        nextTicket = visibleTickets[min(visibleTickets.count - 1, index + 1)]
+      } else {
+        nextTicket = visibleTickets.first
+      }
+    default:
+      return
+    }
+    selectedTicketId = nextTicket?.ticketId
   }
 
   private func cacheKey() -> String {
@@ -712,48 +796,196 @@ struct TicketsView: View {
     }
   }
 
-  private func filterPill(_ filter: TicketFilter) -> some View {
-    let isSelected = selectedFilter == filter
-    return FilterPillButton(
-      label: filter.label,
-      count: filter.count(in: tickets),
-      isSelected: isSelected,
-      onTap: { selectedFilter = filter }
-    )
-  }
-}
-
-private struct FilterPillButton: View {
-  let label: String
-  let count: Int
-  let isSelected: Bool
-  let onTap: () -> Void
-
-  @State private var isHovered = false
-
-  var body: some View {
-    Button {
-      onTap()
-    } label: {
-      HStack(spacing: 6) {
-        Text(label)
-          .font(.mono(.caption, weight: .semibold))
-        Text("\(count)")
-          .font(.mono(.caption2))
-          .foregroundStyle(.secondary)
-      }
-      .padding(.horizontal, 10)
-      .padding(.vertical, 6)
+  private func ticketStatusBadge(_ status: TicketStatus) -> some View {
+    Text(status.label)
+      .font(.system(size: 11, weight: .semibold))
+      .foregroundStyle(status.color)
+      .padding(.horizontal, 8)
+      .padding(.vertical, 4)
       .background(
         Capsule(style: .continuous)
-          .fill(isSelected ? Color.accentColor.opacity(0.15) : isHovered ? Color.white.opacity(0.06) : Color.secondary.opacity(0.1))
+          .fill(ticketBadgeFill(for: status))
       )
+      .overlay(
+        Capsule(style: .continuous)
+          .stroke(ticketBadgeStroke(for: status), lineWidth: 1)
+      )
+  }
+
+  private func ticketPanel<Content: View>(
+    contentPadding: CGFloat = 14,
+    @ViewBuilder content: () -> Content
+  ) -> some View {
+    VStack(alignment: .leading, spacing: 0) {
+      content()
+    }
+    .padding(contentPadding)
+    .background(
+      ZStack {
+        RoundedRectangle(cornerRadius: 16, style: .continuous)
+          .fill(panelBaseFillColor)
+        RoundedRectangle(cornerRadius: 16, style: .continuous)
+          .fill(.thinMaterial)
+          .opacity(colorScheme == .dark ? 0.42 : 0.64)
+      }
+    )
+    .overlay(
+      RoundedRectangle(cornerRadius: 16, style: .continuous)
+        .stroke(panelStrokeColor, lineWidth: 1)
+    )
+    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+  }
+
+  private func ticketDetailPanel<Content: View>(
+    @ViewBuilder content: () -> Content
+  ) -> some View {
+    VStack(alignment: .leading, spacing: 0) {
+      content()
+    }
+    .background(
+      RoundedRectangle(cornerRadius: 16, style: .continuous)
+        .fill(ticketDetailPanelFillColor)
+    )
+    .overlay(
+      RoundedRectangle(cornerRadius: 16, style: .continuous)
+        .stroke(ticketDetailPanelStrokeColor, lineWidth: 1)
+    )
+    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+  }
+
+  private var newTicketButton: some View {
+    Button {
+      showCreateSheet = true
+    } label: {
+      HStack(spacing: 6) {
+        Image(systemName: "plus")
+          .font(.system(size: 12, weight: .bold))
+        Text("New")
+          .font(.system(size: 13, weight: .semibold))
+      }
+      .padding(.horizontal, 14)
+      .padding(.vertical, 7)
+      .foregroundStyle(.white)
+      .background(
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+          .fill(newButtonFillColor)
+      )
+      .overlay(
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+          .stroke(newButtonStrokeColor, lineWidth: 1)
+      )
+      .shadow(color: .black.opacity(colorScheme == .dark ? 0.35 : 0.14), radius: 6, y: 2)
     }
     .buttonStyle(.plain)
-    .onHover { hovering in
-      isHovered = hovering
+  }
+
+  private var headerControlFillColor: Color {
+    colorScheme == .dark ? Color.white.opacity(0.08) : Color.white.opacity(0.76)
+  }
+
+  private var headerControlStrokeColor: Color {
+    colorScheme == .dark ? Color.white.opacity(0.14) : Color.black.opacity(0.08)
+  }
+
+  @ViewBuilder
+  private var headerControlCapsuleBackground: some View {
+    if colorScheme == .dark {
+      Capsule(style: .continuous)
+        .fill(.regularMaterial)
+        .overlay(
+          Capsule(style: .continuous)
+            .stroke(headerControlStrokeColor, lineWidth: 1)
+        )
+    } else {
+      Capsule(style: .continuous)
+        .fill(headerControlFillColor)
+        .overlay(
+          Capsule(style: .continuous)
+            .stroke(headerControlStrokeColor, lineWidth: 1)
+        )
     }
-    .animation(.easeInOut(duration: 0.12), value: isHovered)
+  }
+
+  @ViewBuilder
+  private var headerControlFieldBackground: some View {
+    if colorScheme == .dark {
+      RoundedRectangle(cornerRadius: 10, style: .continuous)
+        .fill(.regularMaterial)
+        .overlay(
+          RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .stroke(headerControlStrokeColor, lineWidth: 1)
+        )
+    } else {
+      RoundedRectangle(cornerRadius: 10, style: .continuous)
+        .fill(headerControlFillColor)
+        .overlay(
+          RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .stroke(headerControlStrokeColor, lineWidth: 1)
+        )
+    }
+  }
+
+  private var panelBaseFillColor: Color {
+    colorScheme == .dark ? Color.black.opacity(0.46) : Color.white.opacity(0.72)
+  }
+
+  private var panelStrokeColor: Color {
+    colorScheme == .dark ? Color.white.opacity(0.14) : Color.white.opacity(0.82)
+  }
+
+  private var ticketDetailPanelFillColor: Color {
+    colorScheme == .dark ? Color.black.opacity(0.66) : Color.white
+  }
+
+  private var ticketDetailPanelStrokeColor: Color {
+    colorScheme == .dark ? Color.white.opacity(0.12) : Color.black.opacity(0.08)
+  }
+
+  private var ticketDetailFooterFillColor: Color {
+    colorScheme == .dark ? Color.black.opacity(0.18) : Color.white
+  }
+
+  private var newButtonFillColor: Color {
+    colorScheme == .dark ? Color.accentColor.opacity(0.94) : Color.accentColor
+  }
+
+  private var newButtonStrokeColor: Color {
+    colorScheme == .dark ? Color.white.opacity(0.16) : Color.black.opacity(0.08)
+  }
+
+  private func ticketBadgeFill(for status: TicketStatus) -> Color {
+    if colorScheme == .dark {
+      return status.color.opacity(0.28)
+    }
+    return status.color.opacity(0.14)
+  }
+
+  private func ticketBadgeStroke(for status: TicketStatus) -> Color {
+    if colorScheme == .dark {
+      return status.color.opacity(0.42)
+    }
+    return status.color.opacity(0.24)
+  }
+
+  private func humanReadableListDate(_ isoString: String) -> String {
+    guard let date = parseDate(isoString) else {
+      return isoString
+    }
+    return TicketDateFormatter.listFormatter.string(from: date)
+  }
+
+  private func humanReadableDetailDate(_ isoString: String) -> String {
+    guard let date = parseDate(isoString) else {
+      return isoString
+    }
+    return TicketDateFormatter.detailFormatter.string(from: date)
+  }
+
+  private func parseDate(_ value: String) -> Date? {
+    if let date = TicketDateFormatter.isoWithFractional.date(from: value) {
+      return date
+    }
+    return TicketDateFormatter.isoBasic.date(from: value)
   }
 }
 
@@ -798,6 +1030,36 @@ private enum TicketFilter: String, CaseIterable {
       return tickets.filter { $0.status == .done }.count
     }
   }
+}
+
+private enum TicketDateFormatter {
+  static let isoWithFractional: ISO8601DateFormatter = {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter
+  }()
+
+  static let isoBasic: ISO8601DateFormatter = {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime]
+    return formatter
+  }()
+
+  static let listFormatter: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.dateStyle = .medium
+    formatter.timeStyle = .none
+    formatter.doesRelativeDateFormatting = true
+    return formatter
+  }()
+
+  static let detailFormatter: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.dateStyle = .medium
+    formatter.timeStyle = .short
+    formatter.doesRelativeDateFormatting = true
+    return formatter
+  }()
 }
 
 private struct TicketCreateInput {
@@ -898,9 +1160,9 @@ private extension TicketStatus {
   var color: Color {
     switch self {
     case .open:
-      return .secondary
-    case .inProgress:
       return .blue
+    case .inProgress:
+      return .indigo
     case .blocked:
       return .orange
     case .done:

@@ -1,3 +1,26 @@
+## <small>1.6.1 (2026-02-13)</small>
+
+* Audit large repo changes ([a2d2788](https://github.com/hack-dance/hack/commit/a2d2788))
+* Find Xcode simulator skill ([60d9ef9](https://github.com/hack-dance/hack/commit/60d9ef9))
+* Find Xcode simulator skill ([8bc37b2](https://github.com/hack-dance/hack/commit/8bc37b2))
+* Fix project pill layout and tabs ([750682c](https://github.com/hack-dance/hack/commit/750682c))
+* Fix review-agent findings ([8cad0ee](https://github.com/hack-dance/hack/commit/8cad0ee))
+* Fix ticket card layout and startup ([9b16700](https://github.com/hack-dance/hack/commit/9b16700))
+* Fix ticket card layout and startup ([ffb1958](https://github.com/hack-dance/hack/commit/ffb1958))
+* Merge main into review-session-management-workflow ([17636d9](https://github.com/hack-dance/hack/commit/17636d9))
+* Merge pull request #8 from hack-dance/review-session-management-workflow ([6760c72](https://github.com/hack-dance/hack/commit/6760c72)), closes [#8](https://github.com/hack-dance/hack/issues/8)
+* Merge pull request #9 from hack-dance/app-updates ([c30a589](https://github.com/hack-dance/hack/commit/c30a589)), closes [#9](https://github.com/hack-dance/hack/issues/9)
+* Merge remote-tracking branch 'origin/app-updates' into app-updates ([031a226](https://github.com/hack-dance/hack/commit/031a226))
+* Restore global terminal panel ([d7bf346](https://github.com/hack-dance/hack/commit/d7bf346))
+* Update CLI docs and commands ([faeb629](https://github.com/hack-dance/hack/commit/faeb629))
+* fix: address PR review findings and stabilize builds ([07c21ea](https://github.com/hack-dance/hack/commit/07c21ea))
+* fix: resolve rebase integration regressions ([e1c5cce](https://github.com/hack-dance/hack/commit/e1c5cce))
+* fix(macos): resolve dashboard model mismatch build break ([f229ffa](https://github.com/hack-dance/hack/commit/f229ffa))
+* fix(macos): stabilize status strip identity and labels ([8d2ab8c](https://github.com/hack-dance/hack/commit/8d2ab8c))
+* test: cover runtime meta failures ([c2b56f6](https://github.com/hack-dance/hack/commit/c2b56f6))
+* test: satisfy ProjectMeta type ([5ae817a](https://github.com/hack-dance/hack/commit/5ae817a))
+* chore(macos): add SwiftUI previews + force setup flag ([56d4386](https://github.com/hack-dance/hack/commit/56d4386))
+
 ## 1.6.0 (2026-02-06)
 
 * feat(macos): add first-run setup guidance + stabilize XcodeGen ([d624bd1](https://github.com/hack-dance/hack/commit/d624bd1))

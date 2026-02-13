@@ -135,8 +135,10 @@ jobs:
             exit 1
           fi
 
-          echo "$(dirname "$ZIG_BIN")" >> "$GITHUB_PATH"
-          zig version
+          ZIG_DIR="$(dirname "$ZIG_BIN")"
+          export PATH="$ZIG_DIR:$PATH"
+          echo "$ZIG_DIR" >> "$GITHUB_PATH"
+          "$ZIG_BIN" version
 
       - name: Build Ghostty VT dylib (universal)
         run: |

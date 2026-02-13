@@ -14,6 +14,7 @@ public struct DashboardView: View {
   @State private var terminalDrawerHeight: CGFloat = 360
   @State private var terminalDrawerInitialHeight: CGFloat? = nil
   @State private var terminalDrawerModel = TerminalDrawerModel(globalShellProject: Self.makeGlobalShellProject())
+  @State private var dismissedGlobalRecoveryOverlay = false
 
   public init() {}
 
@@ -56,6 +57,12 @@ public struct DashboardView: View {
           .transition(.opacity.combined(with: .scale(scale: 0.995)))
           .zIndex(20)
         }
+
+        if shouldShowGlobalRecoveryOverlay {
+          globalRecoveryOverlay
+            .transition(.opacity)
+            .zIndex(30)
+        }
       }
       // Attach toolbar at the window root. Nested toolbars inside split views can disappear
       // when additional container views are introduced (e.g. a bottom terminal panel).
@@ -65,6 +72,8 @@ public struct DashboardView: View {
             systemImage: "square.grid.2x2",
             help: "Go to dashboard",
             accessibilityLabel: "Go to dashboard",
+            symbolTint: titlebarNeutralIconTint,
+            hoverSymbolTint: titlebarNeutralIconHoverTint,
             action: {
               showSettingsOverlay = false
               model.selectedItem = .home
@@ -80,6 +89,8 @@ public struct DashboardView: View {
             systemImage: "gearshape",
             help: "Open settings",
             accessibilityLabel: "Open settings",
+            symbolTint: titlebarNeutralIconTint,
+            hoverSymbolTint: titlebarNeutralIconHoverTint,
             action: {
               openSettings(.runtime)
             }
@@ -100,6 +111,8 @@ public struct DashboardView: View {
             systemImage: "terminal",
             help: "Toggle terminal",
             accessibilityLabel: "Toggle terminal",
+            symbolTint: titlebarNeutralIconTint,
+            hoverSymbolTint: titlebarNeutralIconHoverTint,
             action: {
               if showTerminalDrawer {
                 showTerminalDrawer = false
@@ -165,6 +178,11 @@ public struct DashboardView: View {
       .sheet(isPresented: $showCommandPalette) {
         CommandPaletteView()
           .environment(model)
+      }
+      .onChange(of: model.globalInfraDown) { _, isDown in
+        if !isDown {
+          dismissedGlobalRecoveryOverlay = false
+        }
       }
       .animation(.easeInOut(duration: 0.18), value: showTerminalDrawer)
     }
@@ -258,6 +276,144 @@ public struct DashboardView: View {
 
   private var globalToggleIsBusy: Bool {
     model.globalLifecycleAction != nil
+  }
+
+  private var titlebarNeutralIconTint: NSColor {
+    titlebarIconTint(lightOpacity: 0.72, darkOpacity: 0.90)
+  }
+
+  private var titlebarNeutralIconHoverTint: NSColor {
+    titlebarIconTint(lightOpacity: 0.86, darkOpacity: 1.0)
+  }
+
+  private func titlebarIconTint(lightOpacity: CGFloat, darkOpacity: CGFloat) -> NSColor {
+    NSColor(name: nil) { appearance in
+      let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+      if isDark {
+        return NSColor.white.withAlphaComponent(darkOpacity)
+      }
+      return NSColor.black.withAlphaComponent(lightOpacity)
+    }
+  }
+
+  private var shouldShowGlobalRecoveryOverlay: Bool {
+    if dismissedGlobalRecoveryOverlay {
+      return false
+    }
+    if model.globalLifecycleAction == .starting {
+      return true
+    }
+    return model.globalInfraDown
+      && (model.daemonStatus?.resolvedLabel == .running || model.daemonStatus?.resolvedLabel == .starting)
+  }
+
+  private var globalRecoveryOverlay: some View {
+    ZStack {
+      Rectangle()
+        .fill(Color.black.opacity(colorScheme == .dark ? 0.35 : 0.22))
+        .ignoresSafeArea()
+
+      VStack(alignment: .leading, spacing: 14) {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+          Label("Global services are down", systemImage: "bolt.slash.fill")
+            .font(.mono(.headline, weight: .semibold))
+          Spacer()
+          Button {
+            dismissedGlobalRecoveryOverlay = true
+          } label: {
+            Image(systemName: "xmark")
+              .font(.system(size: 10, weight: .bold))
+              .frame(width: 20, height: 20)
+          }
+          .buttonStyle(PressableCircleButtonStyle())
+          .help("Dismiss")
+        }
+
+        Text("Hackd is running, but Caddy/logging/gateway are not fully healthy. Restart global infra to recover local DNS/TLS routing.")
+          .font(.mono(.caption))
+          .foregroundStyle(.secondary)
+
+        VStack(alignment: .leading, spacing: 8) {
+          statusRow(
+            title: "Daemon",
+            healthy: model.daemonStatus?.resolvedLabel == .running,
+            value: model.daemonStatus?.resolvedLabel.rawValue.capitalized ?? "Unknown"
+          )
+          statusRow(
+            title: "Caddy",
+            healthy: (model.globalStatus?.caddy?.ok ?? model.globalStatus?.summary.caddyOk) == true,
+            value: (model.globalStatus?.caddy?.ok ?? model.globalStatus?.summary.caddyOk) == true ? "Running" : "Down"
+          )
+          statusRow(
+            title: "Logging",
+            healthy: (model.globalStatus?.logging?.ok ?? model.globalStatus?.summary.loggingOk) == true,
+            value: (model.globalStatus?.logging?.ok ?? model.globalStatus?.summary.loggingOk) == true ? "Running" : "Down"
+          )
+          statusRow(
+            title: "Networks",
+            healthy: (model.globalStatus?.networks?.ok ?? model.globalStatus?.summary.networksOk) == true,
+            value: (model.globalStatus?.networks?.ok ?? model.globalStatus?.summary.networksOk) == true ? "Healthy" : "Missing"
+          )
+        }
+        .padding(10)
+        .background(
+          RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .fill(colorScheme == .dark ? Color.white.opacity(0.05) : Color.black.opacity(0.03))
+        )
+
+        HStack(spacing: 8) {
+          Button {
+            Task { await model.globalUp() }
+          } label: {
+            HStack(spacing: 6) {
+              if model.globalLifecycleAction == .starting {
+                ProgressView()
+                  .controlSize(.small)
+              } else {
+                Image(systemName: "arrow.triangle.2.circlepath")
+              }
+              Text(model.globalLifecycleAction == .starting ? "Restarting…" : "Restart global services")
+                .lineLimit(1)
+            }
+          }
+          .adaptiveToolbarButtonProminent()
+          .disabled(model.globalLifecycleAction != nil)
+
+          Button("Runtime details") {
+            openSettings(.runtime)
+            dismissedGlobalRecoveryOverlay = true
+          }
+          .adaptiveToolbarButton()
+        }
+      }
+      .padding(16)
+      .frame(maxWidth: 680)
+      .background(
+        RoundedRectangle(cornerRadius: 14, style: .continuous)
+          .fill(.thinMaterial)
+      )
+      .overlay(
+        RoundedRectangle(cornerRadius: 14, style: .continuous)
+          .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+      )
+      .shadow(color: Color.black.opacity(0.18), radius: 24, x: 0, y: 14)
+      .padding(20)
+    }
+  }
+
+  @ViewBuilder
+  private func statusRow(title: String, healthy: Bool, value: String) -> some View {
+    HStack(spacing: 8) {
+      Circle()
+        .fill(healthy ? Color.green : Color.orange)
+        .frame(width: 7, height: 7)
+      Text(title)
+        .font(.mono(.caption, weight: .semibold))
+      Spacer()
+      Text(value)
+        .font(.mono(.caption))
+        .foregroundStyle(.secondary)
+    }
   }
 
   @ViewBuilder
@@ -454,16 +610,19 @@ public struct DashboardView: View {
   }
 
   private var runtimeLabel: String {
-    if model.runtimeOverallOk == true {
+    switch model.runtimeHealthState {
+    case .healthy:
       return "Runtime: ok"
-    }
-    if model.runtimeOk == false, let error = model.runtimeError, !error.isEmpty {
-      return "Runtime: \(error)"
-    }
-    if model.runtimeOverallOk == false {
+    case .down:
+      return "Runtime: down"
+    case .degraded:
+      if model.runtimeOk == false, let error = model.runtimeError, !error.isEmpty {
+        return "Runtime: \(error)"
+      }
       return "Runtime: degraded"
+    case .unknown:
+      return "Runtime: unknown"
     }
-    return "Runtime: unknown"
   }
 
   private var daemonIsRunning: Bool {

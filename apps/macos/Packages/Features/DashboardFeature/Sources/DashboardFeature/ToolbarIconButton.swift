@@ -105,13 +105,13 @@ struct ToolbarIconButton: NSViewRepresentable {
     private func updateAppearance() {
       let isDarkAppearance = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
       let hover = isDarkAppearance
-        ? NSColor.white.withAlphaComponent(0.14)
+        ? NSColor.white.withAlphaComponent(0.16)
         : NSColor.black.withAlphaComponent(0.08)
       let pressed = isDarkAppearance
-        ? NSColor.white.withAlphaComponent(0.22)
+        ? NSColor.white.withAlphaComponent(0.24)
         : NSColor.black.withAlphaComponent(0.14)
       let stroke = isDarkAppearance
-        ? NSColor.white.withAlphaComponent(0.18)
+        ? NSColor.white.withAlphaComponent(0.22)
         : NSColor.black.withAlphaComponent(0.12)
 
       if isPressed {
@@ -128,6 +128,7 @@ struct ToolbarIconButton: NSViewRepresentable {
     }
 
     private func updateSymbolAppearance() {
+      let isDarkAppearance = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
       let symbolName = (isHovered ? hoverSystemImage : nil) ?? normalSystemImage
       let config = NSImage.SymbolConfiguration(pointSize: symbolPointSize, weight: symbolWeight)
       image = NSImage(systemSymbolName: symbolName, accessibilityDescription: accessibilityText)?
@@ -137,8 +138,15 @@ struct ToolbarIconButton: NSViewRepresentable {
       } else if let normalSymbolTint {
         contentTintColor = normalSymbolTint
       } else {
-        contentTintColor = NSColor.labelColor.withAlphaComponent(isHovered ? 0.98 : 0.88)
+        contentTintColor = defaultSymbolTint(isDarkAppearance: isDarkAppearance, isHovered: isHovered)
       }
+    }
+
+    private func defaultSymbolTint(isDarkAppearance: Bool, isHovered: Bool) -> NSColor {
+      if isDarkAppearance {
+        return NSColor.white.withAlphaComponent(isHovered ? 1.0 : 0.90)
+      }
+      return NSColor.black.withAlphaComponent(isHovered ? 0.86 : 0.72)
     }
 
     @objc private func handlePress() {

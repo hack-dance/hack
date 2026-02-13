@@ -96,7 +96,7 @@ public enum HackCLILocator {
     return String(indexPath.dropLast("/index.ts".count)) + "/dist/hack"
   }
 
-  private static func resolveExecutable(named name: String, in env: [String: String]) -> String? {
+  public static func resolveExecutable(named name: String, in env: [String: String]) -> String? {
     guard let pathValue = env["PATH"] else { return nil }
     let fileManager = FileManager.default
     for entry in pathValue.split(separator: ":") {

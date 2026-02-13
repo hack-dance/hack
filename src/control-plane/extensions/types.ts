@@ -26,6 +26,7 @@ export type ExtensionCommand = {
   readonly summary: string;
   readonly description?: string;
   readonly scope: ExtensionScope;
+  readonly allowWhenDisabled?: boolean;
   readonly handler: (input: {
     readonly ctx: ExtensionCommandContext;
     readonly args: readonly string[];

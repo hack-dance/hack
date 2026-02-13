@@ -447,15 +447,27 @@ struct RuntimeDetailView: View {
   }
 
   private var runtimeStatusText: String {
-    if model.runtimeOverallOk == true { return "Healthy" }
-    if model.runtimeOverallOk == false { return "Degraded" }
-    return "Unknown"
+    switch model.runtimeHealthState {
+    case .healthy:
+      return "Healthy"
+    case .down:
+      return "Down"
+    case .degraded:
+      return "Degraded"
+    case .unknown:
+      return "Unknown"
+    }
   }
 
   private var runtimeStatusTone: StatusTone {
-    if model.runtimeOverallOk == true { return .good }
-    if model.runtimeOverallOk == false { return .warn }
-    return .neutral
+    switch model.runtimeHealthState {
+    case .healthy:
+      return .good
+    case .down, .degraded:
+      return .warn
+    case .unknown:
+      return .neutral
+    }
   }
 
   private var lastUpdatedText: String {

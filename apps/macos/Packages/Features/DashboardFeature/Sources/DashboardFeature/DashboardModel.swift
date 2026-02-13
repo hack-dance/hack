@@ -43,6 +43,13 @@ public enum GlobalLifecycleAction {
   case stopping
 }
 
+public enum RuntimeHealthState {
+  case healthy
+  case degraded
+  case down
+  case unknown
+}
+
 @Observable
 @MainActor
 public final class DashboardModel {
@@ -95,11 +102,19 @@ public final class DashboardModel {
     return runtimeOk
   }
 
+  public var runtimeHealthState: RuntimeHealthState {
+    if runtimeOverallOk == true { return .healthy }
+    if globalInfraDown { return .down }
+    if runtimeOverallOk == false { return .degraded }
+    return .unknown
+  }
+
   public var globalInfraRunning: Bool {
-    guard let status = globalStatus else { return false }
-    let caddyOk = status.caddy?.ok ?? status.summary.caddyOk
-    let loggingOk = status.logging?.ok ?? status.summary.loggingOk
-    return caddyOk && loggingOk
+    globalInfraRunningState == true
+  }
+
+  public var globalInfraDown: Bool {
+    globalInfraRunningState == false
   }
 
   var gatewaySummaryState: GatewaySummaryState? {
@@ -107,7 +122,11 @@ public final class DashboardModel {
     if globalStatus?.gateway == nil && gatewayEnabled == nil && gatewayExposures.isEmpty {
       return nil
     }
-    return GatewaySummaryState.resolve(exposures: gatewayExposures, gatewayEnabled: gatewayEnabled)
+    return GatewaySummaryState.resolve(
+      exposures: gatewayExposures,
+      gatewayEnabled: gatewayEnabled,
+      globalInfraRunning: globalInfraRunningState
+    )
   }
 
   public func start() {
@@ -356,10 +375,13 @@ public final class DashboardModel {
     }
   }
 
-  public func setGlobalConfig(key: String, value: String) async {
-    await runAction(message: "Updating \(key)…") {
+  @discardableResult
+  public func setGlobalConfig(key: String, value: String) async -> Bool {
+    let result: Bool? = await runActionResult(message: "Updating \(key)…") {
       try await self.client.setGlobalConfig(key: key, value: value)
+      return true
     }
+    return result ?? false
   }
 
   public func fetchGatewayTokens() async -> [GatewayTokenRecord] {
@@ -404,6 +426,32 @@ public final class DashboardModel {
       return true
     }
     return result ?? false
+  }
+
+  public func inspectTailscale() async -> TailscaleInspectResponse? {
+    do {
+      return try await client.inspectTailscale()
+    } catch {
+      let message = error.localizedDescription
+      errorMessage = message
+      return TailscaleInspectResponse(
+        installed: false,
+        binaryPath: nil,
+        connected: false,
+        backendState: nil,
+        tailnetName: nil,
+        magicDnsSuffix: nil,
+        authUrl: nil,
+        currentExitNodeId: nil,
+        currentExitNodeName: nil,
+        selfDevice: nil,
+        peers: [],
+        onlinePeerCount: 0,
+        exitNodes: [],
+        health: [],
+        error: message
+      )
+    }
   }
 
   public func toggleGlobalInfrastructure() async {
@@ -486,6 +534,7 @@ public final class DashboardModel {
       daemonStatus = try await client.daemonStatus()
       return nil
     } catch {
+      daemonStatus = nil
       return error.localizedDescription
     }
   }
@@ -495,8 +544,17 @@ public final class DashboardModel {
       globalStatus = try await client.fetchGlobalStatus()
       return nil
     } catch {
+      globalStatus = nil
       return error.localizedDescription
     }
+  }
+
+  private var globalInfraRunningState: Bool? {
+    guard let status = globalStatus else { return nil }
+    let caddyOk = status.caddy?.ok ?? status.summary.caddyOk
+    let loggingOk = status.logging?.ok ?? status.summary.loggingOk
+    let networksOk = status.networks?.ok ?? status.summary.networksOk
+    return caddyOk && loggingOk && networksOk
   }
 
   private func runAction(message: String, action: @escaping () async throws -> Void) async {

@@ -150,9 +150,11 @@ jobs:
           OUT_LIB="$OUT_DIR/libhack_ghostty_vt.dylib"
 
           if [ ! -d "$VENDOR_DIR" ]; then
-            echo "Missing vendor ghostty dir: $VENDOR_DIR"
-            exit 1
+            mkdir -p "$(dirname "$VENDOR_DIR")"
+            git clone --depth 1 https://github.com/ghostty-org/ghostty "$VENDOR_DIR"
           fi
+
+          git -C "$VENDOR_DIR" rev-parse --short HEAD
 
           mkdir -p "$OUT_DIR"
 

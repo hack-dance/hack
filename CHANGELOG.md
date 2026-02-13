@@ -1,3 +1,9 @@
+## 1.7.0 (2026-02-13)
+
+* Add startup script logging support ([97cddad](https://github.com/hack-dance/hack/commit/97cddad))
+* feat(lifecycle): add startup scripts and runtime log visibility ([a28e4e9](https://github.com/hack-dance/hack/commit/a28e4e9))
+* feat(lifecycle): surface startup flows and enforce config schema ([3dab4a9](https://github.com/hack-dance/hack/commit/3dab4a9))
+
 ## <small>1.6.2 (2026-02-13)</small>
 
 * Fix mac app layout and logs ([7670b8c](https://github.com/hack-dance/hack/commit/7670b8c))

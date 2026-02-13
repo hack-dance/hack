@@ -1,3 +1,7 @@
+## <small>1.7.1 (2026-02-13)</small>
+
+* fix(ci): clone ghostty vendor in macOS release workflow ([7c414d5](https://github.com/hack-dance/hack/commit/7c414d5))
+
 ## 1.7.0 (2026-02-13)
 
 * Add startup script logging support ([97cddad](https://github.com/hack-dance/hack/commit/97cddad))

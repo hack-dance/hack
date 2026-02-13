@@ -18,7 +18,7 @@ struct GlobalStatusStrip: View {
   }
 
   var body: some View {
-    HStack(spacing: placement == .titlebar ? 10 : 10) {
+    HStack(spacing: 10) {
       selectorPill
       if placement != .titlebar {
         Spacer()
@@ -123,7 +123,7 @@ struct GlobalStatusStrip: View {
 
   private var selectorPill: some View {
     Menu {
-      Button("Home") {
+      Button("Dashboard") {
         model.selectedItem = .home
       }
       Divider()
@@ -434,7 +434,7 @@ struct GlobalStatusStrip: View {
     case .none:
       "idle"
     }
-    return "\(selectedKey)|\(selectorLabel)|\(actionKey)|\(lastUpdatedText ?? "")"
+    return "\(selectedKey)|\(selectorLabel)|\(actionKey)"
   }
 
   private func canStartProject(_ project: ProjectSummary) -> Bool {
@@ -560,4 +560,3 @@ struct GlobalStatusStrip: View {
     })
   }
 }
-

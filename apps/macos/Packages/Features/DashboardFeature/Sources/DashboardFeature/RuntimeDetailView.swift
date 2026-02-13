@@ -4,7 +4,6 @@ import HackDesktopModels
 
 struct RuntimeDetailView: View {
   @Environment(DashboardModel.self) private var model
-  @Environment(\.openURL) private var openURL
   @State private var showDaemonDetails = false
   @State private var showRuntimeDetails = false
   @AppStorage("hackDesktop.setupGuidance.runtime.dismissed") private var setupDismissed = false
@@ -142,24 +141,36 @@ struct RuntimeDetailView: View {
         Divider()
       }
       HStack(spacing: 12) {
-        Button("Open Logs") {
-          if let logUrl = logUrl {
-            openURL(logUrl)
-          }
+        Button {
+          openDaemonLogsInTerminalPanel()
+        } label: {
+          Label("Open logs", systemImage: "text.alignleft")
         }
-        .disabled(logUrl == nil)
-        Button("Refresh Status") {
+        .adaptiveToolbarButtonProminent()
+        .disabled(daemonLogTailCommand == nil)
+
+        Button {
           Task { await model.refresh() }
+        } label: {
+          Label("Refresh status", systemImage: "arrow.clockwise")
         }
+        .adaptiveToolbarButton()
+
         if canRestartDaemon {
-          Button("Restart") {
+          Button {
             Task { await model.restartDaemon() }
+          } label: {
+            Label("Restart", systemImage: "arrow.triangle.2.circlepath")
           }
+          .adaptiveToolbarButton()
         }
         if canClearDaemon {
-          Button("Clear State") {
+          Button {
             Task { await model.clearDaemon() }
+          } label: {
+            Label("Clear state", systemImage: "trash")
           }
+          .adaptiveToolbarButton()
         }
       }
       Divider()
@@ -399,9 +410,14 @@ struct RuntimeDetailView: View {
     ]
   }
 
-  private var logUrl: URL? {
+  private var daemonLogTailCommand: String? {
     guard let logPath = model.daemonStatus?.logPath, !logPath.isEmpty else { return nil }
-    return URL(fileURLWithPath: logPath)
+    return "tail -f \(shellQuote(logPath))"
+  }
+
+  private func openDaemonLogsInTerminalPanel() {
+    guard let command = daemonLogTailCommand else { return }
+    openGlobalCommandInTerminalPanel(command: command, title: "daemon logs")
   }
 
   private var daemonActionTitle: String {
@@ -490,6 +506,11 @@ struct RuntimeDetailView: View {
   private func yesNo(_ value: Bool?) -> String {
     guard let value else { return "—" }
     return value ? "Yes" : "No"
+  }
+
+  private func shellQuote(_ value: String) -> String {
+    let escaped = value.replacingOccurrences(of: "'", with: "'\\''")
+    return "'\(escaped)'"
   }
 }
 

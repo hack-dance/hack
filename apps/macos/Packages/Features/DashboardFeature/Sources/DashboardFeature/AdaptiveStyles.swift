@@ -2,49 +2,72 @@ import SwiftUI
 
 /// Adaptive button style that uses Liquid Glass on macOS 26+
 struct AdaptiveProminentButtonStyle: ButtonStyle {
+  @Environment(\.colorScheme) private var colorScheme
+
   func makeBody(configuration: Configuration) -> some View {
-    if #available(macOS 26, *) {
-      configuration.label
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(Color.accentColor)
-        .foregroundStyle(.white)
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .glassEffect(.regular.tint(Color.accentColor.opacity(0.2)))
-        .opacity(configuration.isPressed ? 0.8 : 1.0)
-    } else {
-      configuration.label
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(Color.accentColor)
-        .foregroundStyle(.white)
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .opacity(configuration.isPressed ? 0.8 : 1.0)
-    }
+    let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+    let topColor = Color.accentColor.opacity(colorScheme == .dark ? 0.98 : 1.0)
+    let bottomColor = Color.accentColor.opacity(colorScheme == .dark ? 0.82 : 0.9)
+
+    return configuration.label
+      .font(.mono(.caption, weight: .semibold))
+      .padding(.horizontal, 13)
+      .padding(.vertical, 7)
+      .foregroundStyle(.white)
+      .background(
+        shape.fill(
+          LinearGradient(
+            colors: [topColor, bottomColor],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+          )
+        )
+      )
+      .overlay(
+        shape.stroke(
+          colorScheme == .dark ? Color.white.opacity(0.18) : Color.black.opacity(0.10),
+          lineWidth: 1
+        )
+      )
+      .shadow(
+        color: Color.black.opacity(colorScheme == .dark ? 0.28 : 0.14),
+        radius: 8,
+        x: 0,
+        y: configuration.isPressed ? 1 : 3
+      )
+      .scaleEffect(configuration.isPressed ? 0.98 : 1.0)
+      .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
   }
 }
 
 /// Adaptive secondary button style
 struct AdaptiveSecondaryButtonStyle: ButtonStyle {
+  @Environment(\.colorScheme) private var colorScheme
+
   func makeBody(configuration: Configuration) -> some View {
-    if #available(macOS 26, *) {
-      configuration.label
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .foregroundStyle(.primary)
-        .glassEffect(.regular)
-        .opacity(configuration.isPressed ? 0.8 : 1.0)
-    } else {
-      configuration.label
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .foregroundStyle(.primary)
-        .background(
-          RoundedRectangle(cornerRadius: 8, style: .continuous)
-            .fill(.quaternary)
-        )
-        .opacity(configuration.isPressed ? 0.8 : 1.0)
-    }
+    let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+    let fillColor = colorScheme == .dark ? Color.white.opacity(0.08) : Color.white.opacity(0.86)
+    let strokeColor = colorScheme == .dark ? Color.white.opacity(0.16) : Color.black.opacity(0.10)
+
+    return configuration.label
+      .font(.mono(.caption, weight: .semibold))
+      .padding(.horizontal, 12)
+      .padding(.vertical, 7)
+      .foregroundStyle(.primary)
+      .background(
+        shape.fill(fillColor)
+      )
+      .overlay(
+        shape.stroke(strokeColor, lineWidth: 1)
+      )
+      .shadow(
+        color: Color.black.opacity(colorScheme == .dark ? 0.22 : 0.08),
+        radius: 6,
+        x: 0,
+        y: configuration.isPressed ? 0.5 : 2
+      )
+      .scaleEffect(configuration.isPressed ? 0.985 : 1.0)
+      .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
   }
 }
 
@@ -148,21 +171,13 @@ extension View {
   /// Adaptive toolbar button (secondary style)
   @ViewBuilder
   func adaptiveToolbarButton() -> some View {
-    if #available(macOS 26, *) {
-      self.buttonStyle(.glass)
-    } else {
-      self.buttonStyle(.bordered)
-    }
+    self.buttonStyle(.adaptiveSecondary)
   }
 
   /// Adaptive toolbar button (prominent style)
   @ViewBuilder
   func adaptiveToolbarButtonProminent() -> some View {
-    if #available(macOS 26, *) {
-      self.buttonStyle(.glassProminent)
-    } else {
-      self.buttonStyle(.borderedProminent)
-    }
+    self.buttonStyle(.adaptiveProminent)
   }
 
   /// Adaptive footer background

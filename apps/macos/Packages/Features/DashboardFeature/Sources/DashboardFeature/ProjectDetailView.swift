@@ -37,7 +37,7 @@ struct ProjectDetailView: View {
         .animation(.easeInOut(duration: 0.2), value: effectiveTab)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
-    .overlay(alignment: .bottom) {
+    .safeAreaInset(edge: .bottom, spacing: 0) {
       bottomControlBar
         .padding(.bottom, 18)
     }

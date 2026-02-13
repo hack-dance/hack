@@ -236,6 +236,7 @@ struct TicketsView: View {
               .padding(.top, 16)
               .padding(.bottom, 20)
           }
+          .layoutPriority(1)
           .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
           Divider()
@@ -356,12 +357,11 @@ struct TicketsView: View {
 
   private func ticketDetailFooter(_ detail: TicketDetailResponse) -> some View {
     VStack(alignment: .leading, spacing: 12) {
-      DisclosureGroup(isExpanded: $isHistoryExpanded) {
+      bottomPinnedDisclosure(title: "History", isExpanded: $isHistoryExpanded) {
         if detail.events.isEmpty {
           Text("No history events for this ticket.")
             .font(.system(size: 12, weight: .medium))
             .foregroundStyle(.secondary)
-            .padding(.top, 6)
         } else {
           VStack(alignment: .leading, spacing: 8) {
             ForEach(detail.events) { event in
@@ -380,31 +380,52 @@ struct TicketsView: View {
               }
             }
           }
-          .padding(.top, 6)
         }
-      } label: {
-        Text("History")
-          .font(.system(size: 13, weight: .semibold))
-          .foregroundStyle(.secondary)
       }
 
       Divider()
         .opacity(0.25)
 
-      DisclosureGroup(isExpanded: $isPropertiesExpanded) {
+      bottomPinnedDisclosure(title: "Properties", isExpanded: $isPropertiesExpanded) {
         VStack(alignment: .leading, spacing: 14) {
           inspectorGroup(title: "Dates", rows: inspectorDateRows(for: detail.ticket))
           inspectorGroup(title: "Links", rows: inspectorLinkRows(for: detail.ticket))
           inspectorGroup(title: "Dependencies", rows: inspectorDependencyRows(for: detail.ticket))
         }
-        .padding(.top, 6)
-      } label: {
-        Text("Properties")
-          .font(.system(size: 13, weight: .semibold))
-          .foregroundStyle(.secondary)
       }
     }
     .frame(maxWidth: .infinity, alignment: .leading)
+  }
+
+  @ViewBuilder
+  private func bottomPinnedDisclosure<Content: View>(
+    title: String,
+    isExpanded: Binding<Bool>,
+    @ViewBuilder content: () -> Content
+  ) -> some View {
+    VStack(alignment: .leading, spacing: 8) {
+      if isExpanded.wrappedValue {
+        content()
+          .transition(.opacity.combined(with: .move(edge: .bottom)))
+      }
+      Button {
+        withAnimation(.easeInOut(duration: 0.16)) {
+          isExpanded.wrappedValue.toggle()
+        }
+      } label: {
+        HStack(spacing: 6) {
+          Image(systemName: isExpanded.wrappedValue ? "chevron.down" : "chevron.right")
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(.secondary)
+          Text(title)
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(.secondary)
+          Spacer(minLength: 0)
+        }
+        .contentShape(Rectangle())
+      }
+      .buttonStyle(.plain)
+    }
   }
 
   private func markdownBody(_ markdown: String) -> some View {
@@ -842,6 +863,7 @@ struct TicketsView: View {
     VStack(alignment: .leading, spacing: 0) {
       content()
     }
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     .background(
       RoundedRectangle(cornerRadius: 16, style: .continuous)
         .fill(ticketDetailPanelFillColor)

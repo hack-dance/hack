@@ -2736,7 +2736,7 @@ private struct GlobalConfigSnapshot {
   }
 }
 
-private func openGlobalCommandInTerminalPanel(command: String, title: String) {
+func openGlobalCommandInTerminalPanel(command: String, title: String) {
   NotificationCenter.default.post(
     name: .hackTerminalOpenRequested,
     object: nil,

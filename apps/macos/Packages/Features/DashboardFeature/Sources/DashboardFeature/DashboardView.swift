@@ -24,8 +24,26 @@ public struct DashboardView: View {
     GeometryReader { proxy in
       ZStack {
         VSplitView {
-          mainSplitView
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+          ZStack {
+            mainSplitView
+              .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+            if showSettingsOverlay {
+              SettingsOverlayView(
+                selection: $selectedSettingsItem,
+                onClose: { showSettingsOverlay = false }
+              )
+              .environment(model)
+              .transition(.opacity.combined(with: .scale(scale: 0.995)))
+              .zIndex(20)
+            }
+
+            if shouldShowGlobalRecoveryOverlay {
+              globalRecoveryOverlay
+                .transition(.opacity)
+                .zIndex(30)
+            }
+          }
 
           if showTerminalDrawer {
             terminalDrawer
@@ -46,22 +64,6 @@ public struct DashboardView: View {
         }
         .background(alignment: .top) {
           topHeaderChrome
-        }
-
-        if showSettingsOverlay {
-          SettingsOverlayView(
-            selection: $selectedSettingsItem,
-            onClose: { showSettingsOverlay = false }
-          )
-          .environment(model)
-          .transition(.opacity.combined(with: .scale(scale: 0.995)))
-          .zIndex(20)
-        }
-
-        if shouldShowGlobalRecoveryOverlay {
-          globalRecoveryOverlay
-            .transition(.opacity)
-            .zIndex(30)
         }
       }
       // Attach toolbar at the window root. Nested toolbars inside split views can disappear
@@ -152,7 +154,14 @@ public struct DashboardView: View {
           .trimmingCharacters(in: .whitespacesAndNewlines)
         let titleOverride = (userInfo[TerminalOpenRequest.titleKey] as? String)?
           .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let project = model.projects.first(where: { $0.id == projectId }) else { return }
+        let project: ProjectSummary
+        if let matchedProject = model.projects.first(where: { $0.id == projectId }) {
+          project = matchedProject
+        } else if projectId == globalShellProject.id {
+          project = globalShellProject
+        } else {
+          return
+        }
 
         if !showTerminalDrawer {
           terminalDrawerInitialHeight = terminalDrawerHeight

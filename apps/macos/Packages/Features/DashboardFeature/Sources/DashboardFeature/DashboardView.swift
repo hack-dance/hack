@@ -7,6 +7,8 @@ import HackDesktopModels
 public struct DashboardView: View {
   @Environment(DashboardModel.self) private var model
   @Environment(\.colorScheme) private var colorScheme
+  @AppStorage("hackDesktop.update.available") private var updateAvailable = false
+  @AppStorage("hackDesktop.update.latestVersion") private var latestKnownReleaseVersion = ""
   @State private var showCommandPalette = false
   @State private var showTerminalDrawer = false
   @State private var showSettingsOverlay = false
@@ -70,17 +72,32 @@ public struct DashboardView: View {
       // when additional container views are introduced (e.g. a bottom terminal panel).
       .toolbar {
         ToolbarItem(placement: .navigation) {
-          ToolbarIconButton(
-            systemImage: "square.grid.2x2",
-            help: "Go to dashboard",
-            accessibilityLabel: "Go to dashboard",
-            symbolTint: titlebarNeutralIconTint,
-            hoverSymbolTint: titlebarNeutralIconHoverTint,
-            action: {
-              showSettingsOverlay = false
-              model.selectedItem = .home
+          HStack(spacing: 8) {
+            ToolbarIconButton(
+              systemImage: "square.grid.2x2",
+              help: "Go to dashboard",
+              accessibilityLabel: "Go to dashboard",
+              symbolTint: titlebarNeutralIconTint,
+              hoverSymbolTint: titlebarNeutralIconHoverTint,
+              action: {
+                showSettingsOverlay = false
+                model.selectedItem = .home
+              }
+            )
+
+            if updateAvailable {
+              Button {
+                NotificationCenter.default.post(name: .hackCheckForUpdatesRequested, object: nil)
+              } label: {
+                Text("Update available")
+                  .font(.mono(.caption2, weight: .semibold))
+              }
+              .buttonStyle(.borderedProminent)
+              .controlSize(.small)
+              .help(updateBadgeHelpText)
+              .accessibilityLabel("Update available")
             }
-          )
+          }
         }
         ToolbarItem(placement: .principal) {
           GlobalStatusStrip(placement: .titlebar)
@@ -250,6 +267,13 @@ public struct DashboardView: View {
       return nil
     }
     return model.globalInfraRunning ? "power.circle.fill" : "bolt.fill"
+  }
+
+  private var updateBadgeHelpText: String {
+    if latestKnownReleaseVersion.isEmpty {
+      return "A new version is available. Click to update."
+    }
+    return "Version \(latestKnownReleaseVersion) is available. Click to update."
   }
 
   private var globalToggleTint: NSColor {

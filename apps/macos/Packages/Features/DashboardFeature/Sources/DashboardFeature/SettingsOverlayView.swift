@@ -266,6 +266,9 @@ struct SettingsOverlayView: View {
 
 private struct UpdatesSettingsView: View {
   @AppStorage("SUEnableAutomaticChecks") private var automaticallyCheckForUpdates = true
+  @AppStorage("hackDesktop.update.available") private var updateAvailable = false
+  @AppStorage("hackDesktop.update.latestVersion") private var latestKnownReleaseVersion = ""
+  @AppStorage("hackDesktop.update.lastCheckedAt") private var updateLastCheckedAt = ""
 
   var body: some View {
     ScrollView {
@@ -280,6 +283,13 @@ private struct UpdatesSettingsView: View {
           VStack(alignment: .leading, spacing: 10) {
             metadataRow(title: "Version", value: appVersion)
             metadataRow(title: "Build", value: appBuild)
+            metadataRow(title: "Status", value: updateAvailable ? "Update available" : "Up to date")
+            if !latestKnownReleaseVersion.isEmpty {
+              metadataRow(title: "Latest release", value: latestKnownReleaseVersion)
+            }
+            if !updateLastCheckedAt.isEmpty {
+              metadataRow(title: "Last checked", value: formattedTimestamp(updateLastCheckedAt))
+            }
             metadataRow(title: "Bundle ID", value: bundleIdentifier)
             if let appcast = appcastURL {
               metadataRow(title: "Appcast", value: appcast)
@@ -348,6 +358,14 @@ private struct UpdatesSettingsView: View {
         .font(.mono(.caption, weight: .semibold))
         .textSelection(.enabled)
     }
+  }
+
+  private func formattedTimestamp(_ value: String) -> String {
+    let formatter = ISO8601DateFormatter()
+    guard let date = formatter.date(from: value) else {
+      return value
+    }
+    return date.formatted(date: .abbreviated, time: .shortened)
   }
 }
 

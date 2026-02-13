@@ -1040,7 +1040,7 @@ private struct SupervisorSettingsView: View {
           actions: [
             InlineCalloutAction(label: "Open daemon logs", systemImage: "terminal") {
               openGlobalCommandInTerminalPanel(
-                command: "tail -f \"$HOME/.hack/daemon/hackd.log\"",
+                command: "tail -n 200 -F \"$HOME/.hack/daemon/hackd.log\"",
                 title: "daemon log tail"
               )
             },
@@ -1269,7 +1269,7 @@ private struct CloudflareExtensionSettingsView: View {
           actions: [
             InlineCalloutAction(label: "Open tunnel logs", systemImage: "terminal") {
               openGlobalCommandInTerminalPanel(
-                command: "hack gateway status --json && hack global logs caddy --follow",
+                command: "hack global status --json && hack global logs caddy --tail 200 --follow",
                 title: "cloudflare diagnostics"
               )
             }
@@ -2430,14 +2430,14 @@ private struct LoggingSettingsView: View {
             }
             Button("Open Grafana logs") {
               openGlobalCommandInTerminalPanel(
-                command: "hack global logs grafana --follow",
+                command: "hack global logs grafana --tail 200 --follow",
                 title: "grafana logs"
               )
             }
             .adaptiveToolbarButton()
             Button("Open Loki logs") {
               openGlobalCommandInTerminalPanel(
-                command: "hack global logs loki --follow",
+                command: "hack global logs loki --tail 200 --follow",
                 title: "loki logs"
               )
             }
@@ -2487,14 +2487,14 @@ private struct LoggingSettingsView: View {
           HStack(spacing: 10) {
             Button("Open Caddy logs") {
               openGlobalCommandInTerminalPanel(
-                command: "hack global logs caddy --follow",
+                command: "hack global logs caddy --tail 200 --follow",
                 title: "caddy logs"
               )
             }
             .adaptiveToolbarButton()
             Button("Open CoreDNS logs") {
               openGlobalCommandInTerminalPanel(
-                command: "docker compose -f \"$HOME/.hack/caddy/docker-compose.yml\" logs -f coredns",
+                command: "docker compose -f \"$HOME/.hack/caddy/docker-compose.yml\" logs --tail 200 -f coredns",
                 title: "coredns logs"
               )
             }

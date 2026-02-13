@@ -147,7 +147,6 @@ struct RuntimeDetailView: View {
           Label("Open logs", systemImage: "text.alignleft")
         }
         .adaptiveToolbarButtonProminent()
-        .disabled(daemonLogTailCommand == nil)
 
         Button {
           Task { await model.refresh() }
@@ -228,6 +227,7 @@ struct RuntimeDetailView: View {
   private var globalServicesSection: some View {
     if let status = model.globalStatus {
       globalSummaryCard(summary: status.summary, generatedAt: status.generatedAt)
+      runtimeDiagnosticsCard
       if let caddy = status.caddy {
         composeCard(title: "Caddy", systemImage: "globe", group: caddy)
       }
@@ -289,6 +289,53 @@ struct RuntimeDetailView: View {
         Text("Generated at \(generatedAt)")
           .font(.mono(.caption))
           .foregroundStyle(.secondary)
+      }
+    }
+  }
+
+  private var runtimeDiagnosticsCard: some View {
+    GlassCard(title: "Diagnostics", systemImage: "text.alignleft") {
+      Text("Open live tails for daemon, ingress (Caddy/CoreDNS), and Docker network state.")
+        .font(.mono(.caption))
+        .foregroundStyle(.secondary)
+      HStack(spacing: 10) {
+        Button {
+          openDaemonLogsInTerminalPanel()
+        } label: {
+          Label("Daemon logs", systemImage: "waveform.path.ecg")
+        }
+        .adaptiveToolbarButtonProminent()
+
+        Button {
+          openGlobalCommandInTerminalPanel(
+            command: "hack global logs caddy --tail 200 --follow",
+            title: "caddy logs"
+          )
+        } label: {
+          Label("Caddy logs", systemImage: "globe")
+        }
+        .adaptiveToolbarButton()
+
+        Button {
+          openGlobalCommandInTerminalPanel(
+            command: "docker compose -f \"$HOME/.hack/caddy/docker-compose.yml\" logs --tail 200 -f coredns",
+            title: "coredns logs"
+          )
+        } label: {
+          Label("CoreDNS logs", systemImage: "network")
+        }
+        .adaptiveToolbarButton()
+
+        Button {
+          openGlobalCommandInTerminalPanel(
+            command: "docker network inspect hack-dev hack-logging 2>/dev/null || docker network ls",
+            title: "network diagnostics"
+          )
+        } label: {
+          Label("Network diagnostics", systemImage: "point.3.filled.connected.trianglepath.dotted")
+        }
+        .adaptiveToolbarButton()
+        Spacer()
       }
     }
   }
@@ -410,14 +457,26 @@ struct RuntimeDetailView: View {
     ]
   }
 
-  private var daemonLogTailCommand: String? {
-    guard let logPath = model.daemonStatus?.logPath, !logPath.isEmpty else { return nil }
-    return "tail -f \(shellQuote(logPath))"
+  private var daemonLogTailCommand: String {
+    let configuredPath = model.daemonStatus?.logPath?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let resolvedPath = (configuredPath?.isEmpty == false ? configuredPath : nil) ?? defaultDaemonLogPath
+    let quotedPath = shellQuote(resolvedPath)
+    return """
+    LOG_PATH=\(quotedPath)
+    if [ -f "$LOG_PATH" ]; then
+      echo "Tailing $LOG_PATH (last 200 lines)"
+      tail -n 200 -F "$LOG_PATH"
+    else
+      echo "Daemon log not found at $LOG_PATH"
+      echo
+      echo "Current daemon status:"
+      hack daemon status
+    fi
+    """
   }
 
   private func openDaemonLogsInTerminalPanel() {
-    guard let command = daemonLogTailCommand else { return }
-    openGlobalCommandInTerminalPanel(command: command, title: "daemon logs")
+    openGlobalCommandInTerminalPanel(command: daemonLogTailCommand, title: "daemon logs")
   }
 
   private var daemonActionTitle: String {
@@ -511,6 +570,12 @@ struct RuntimeDetailView: View {
   private func shellQuote(_ value: String) -> String {
     let escaped = value.replacingOccurrences(of: "'", with: "'\\''")
     return "'\(escaped)'"
+  }
+
+  private var defaultDaemonLogPath: String {
+    FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent(".hack/daemon/hackd.log")
+      .path
   }
 }
 

@@ -18,15 +18,16 @@ struct GatewayDetailView: View {
       ScrollView {
         VStack(alignment: .leading, spacing: 20) {
           header
-          if shouldShowSetupGuidance {
-            setupNudge
-          }
-          overviewCard
-          exposuresCard
-          tokensCard
-          warningsCard
+        if shouldShowSetupGuidance {
+          setupNudge
         }
-        .padding(16)
+        overviewCard
+        exposuresCard
+        gatewayDiagnosticsCard
+        tokensCard
+        warningsCard
+      }
+      .padding(16)
       }
       .navigationDestination(for: GatewayExposure.self) { exposure in
         GatewayExposureDetailView(exposure: exposure)
@@ -130,6 +131,57 @@ struct GatewayDetailView: View {
             }
           }
         }
+      }
+    }
+  }
+
+  private var gatewayDiagnosticsCard: some View {
+    GlassCard(title: "Gateway diagnostics", systemImage: "text.alignleft") {
+      Text("Tail ingress flow and supporting gateway logs in terminal tabs.")
+        .font(.mono(.caption))
+        .foregroundStyle(.secondary)
+      HStack(spacing: 10) {
+        Button {
+          openGlobalCommandInTerminalPanel(
+            command: "hack global logs caddy --tail 200 --follow",
+            title: "gateway ingress logs"
+          )
+        } label: {
+          Label("Ingress logs", systemImage: "arrow.left.arrow.right")
+        }
+        .adaptiveToolbarButtonProminent()
+
+        Button {
+          openGlobalCommandInTerminalPanel(
+            command: "docker compose -f \"$HOME/.hack/caddy/docker-compose.yml\" logs --tail 200 -f coredns",
+            title: "gateway dns logs"
+          )
+        } label: {
+          Label("DNS logs", systemImage: "network")
+        }
+        .adaptiveToolbarButton()
+
+        Button {
+          openGlobalCommandInTerminalPanel(
+            command: "tail -n 200 -F \"$HOME/.hack/daemon/hackd.log\" | grep --line-buffered -Ei \"gateway|token|remote|request|write|exposure\"",
+            title: "gateway daemon events"
+          )
+        } label: {
+          Label("Daemon gateway events", systemImage: "waveform.path.ecg")
+        }
+        .adaptiveToolbarButton()
+
+        Button {
+          openGlobalCommandInTerminalPanel(
+            command: "docker network inspect hack-dev hack-logging 2>/dev/null || docker network ls",
+            title: "gateway network diagnostics"
+          )
+        } label: {
+          Label("Network diagnostics", systemImage: "point.3.filled.connected.trianglepath.dotted")
+        }
+        .adaptiveToolbarButton()
+
+        Spacer()
       }
     }
   }

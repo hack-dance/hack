@@ -100,10 +100,6 @@ function makeContainer(opts: {
     status: opts.state === "running" ? "Up 5s" : "Exited (0)",
     name: opts.name,
     ports: "",
-    image: null,
-    ip: null,
-    mounts: [],
-    labels: {},
     workingDir: `/tmp/${opts.project}/.hack`,
     image: "imbios/bun-node:latest",
     labels: {

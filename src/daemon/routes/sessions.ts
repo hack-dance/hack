@@ -4,8 +4,8 @@ import {
   getTailscaleStatus,
 } from "../../lib/tailscale.ts";
 
-/** Valid session name pattern: alphanumeric, dash, underscore, or dot */
-const SESSION_NAME_PATTERN = /^[\w.-]+$/;
+/** Valid session name pattern: alphanumeric, dash, or underscore */
+const SESSION_NAME_PATTERN = /^[\w-]+$/;
 
 /**
  * Parsed tmux session info.
@@ -423,7 +423,7 @@ function parseSessionCreateInput(
     return {
       ok: false,
       error:
-        "invalid_name: must contain only alphanumeric, dash, underscore, or dot",
+        "invalid_name: must contain only alphanumeric, dash, or underscore",
     };
   }
 

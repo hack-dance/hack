@@ -148,6 +148,7 @@ test("getProjectsPayload keeps working when resolveProjectMeta fails for one pro
     runtimeStatus: "unknown",
     runtime: null,
     branchRuntime: [],
+    sessions: [],
     kind: "registered",
     status: "unknown",
   });

@@ -151,11 +151,13 @@ async function dispatchExtensionCommand(opts: {
     });
   }
 
-  const disabledCommandResult = await dispatchDisabledExtensionCommandIfAllowed({
-    loaded: opts.loaded,
-    extension: opts.extension,
-    invocation: opts.invocation,
-  });
+  const disabledCommandResult = await dispatchDisabledExtensionCommandIfAllowed(
+    {
+      loaded: opts.loaded,
+      extension: opts.extension,
+      invocation: opts.invocation,
+    }
+  );
   if (disabledCommandResult !== null) {
     return disabledCommandResult;
   }

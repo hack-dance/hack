@@ -1,3 +1,7 @@
+## 1.8.0 (2026-02-13)
+
+* feat(macos): add update controls and version info in settings ([ab5de6f](https://github.com/hack-dance/hack/commit/ab5de6f))
+
 ## <small>1.7.1 (2026-02-13)</small>
 
 * fix(ci): clone ghostty vendor in macOS release workflow ([7c414d5](https://github.com/hack-dance/hack/commit/7c414d5))

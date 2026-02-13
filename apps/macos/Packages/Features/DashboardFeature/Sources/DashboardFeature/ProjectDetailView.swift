@@ -498,8 +498,14 @@ struct ProjectDetailView: View {
           guard !branch.isEmpty else { return }
           let note = newBranchNote.trimmingCharacters(in: .whitespacesAndNewlines)
           Task {
-            await model.addBranch(for: project, name: branch, note: note.isEmpty ? nil : note)
-            await model.startBranch(for: project, branch: branch)
+            let didAdd = await model.addBranch(
+              for: project,
+              name: branch,
+              note: note.isEmpty ? nil : note
+            )
+            if didAdd {
+              await model.startBranch(for: project, branch: branch)
+            }
           }
           resetBranchDraft()
           showAddBranchSheet = false

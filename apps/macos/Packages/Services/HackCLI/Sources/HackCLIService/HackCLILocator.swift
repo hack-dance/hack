@@ -38,9 +38,7 @@ public enum HackCLILocator {
   public static func resolveHackExecutable(in env: [String: String]) -> String? {
     let fileManager = FileManager.default
     if let override = env["HACK_CLI_PATH"], fileManager.isExecutableFile(atPath: override) {
-      if let resolvedOverride = normalizeHackCandidate(override, env: env) {
-        return resolvedOverride
-      }
+      return normalizeHackCandidate(override, env: env) ?? override
     }
 
     guard let pathValue = env["PATH"] else { return nil }

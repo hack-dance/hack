@@ -96,6 +96,15 @@ export async function handleSessionRoutes(opts: {
   if (!sessionId) {
     return jsonResponse({ error: "missing_session_id" }, 400);
   }
+  if (!SESSION_NAME_PATTERN.test(sessionId)) {
+    return jsonResponse(
+      {
+        error:
+          "invalid_name: must contain only alphanumeric, dash, or underscore",
+      },
+      400
+    );
+  }
 
   // GET /v1/sessions/:id - get session details
   if (segments.length === 3 && opts.req.method === "GET") {

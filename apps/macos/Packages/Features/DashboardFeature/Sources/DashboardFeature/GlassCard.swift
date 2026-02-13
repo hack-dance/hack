@@ -48,10 +48,6 @@ private struct AdaptiveCardBackgroundModifier: ViewModifier {
     } else {
       content
         .background(cardBackground)
-        .overlay(
-          RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .stroke(borderColor, lineWidth: 1)
-        )
     }
   }
 

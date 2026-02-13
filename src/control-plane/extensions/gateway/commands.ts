@@ -112,6 +112,7 @@ export const GATEWAY_COMMANDS: readonly ExtensionCommand[] = [
         process.stdout.write(
           `${JSON.stringify({ id: parsed.value.tokenId, revoked }, null, 2)}\n`
         );
+        return revoked ? 0 : 1;
       }
       if (!revoked) {
         ctx.logger.warn({

@@ -680,42 +680,56 @@ private struct PreferencesSettingsView: View {
     legacyPreferredTerminalRaw = preferredTerminalRaw
     preferredCodingAgentBinaryPathRaw = normalizedPath(codingAgentBinaryPath) ?? ""
 
-    await model.setGlobalConfig(
+    let didSaveTheme = await model.setGlobalConfig(
       key: "controlPlane.preferences.appearance.theme",
       value: appearanceThemeRaw
     )
-    await model.setGlobalConfig(
+    let didSaveTerminal = await model.setGlobalConfig(
       key: "controlPlane.preferences.terminal.defaultApp",
       value: preferredTerminalRaw
     )
-    await model.setGlobalConfig(
+    let didSaveEditor = await model.setGlobalConfig(
       key: "controlPlane.preferences.editor.defaultApp",
       value: preferredEditorRaw
     )
-    await model.setGlobalConfig(
+    let didSaveAgent = await model.setGlobalConfig(
       key: "controlPlane.preferences.agents.defaultApp",
       value: preferredCodingAgentRaw
     )
-    await model.setGlobalConfig(
+    let didSaveSessionProvider = await model.setGlobalConfig(
       key: "controlPlane.preferences.sessions.provider",
       value: sessionProvider.rawValue
     )
-    await model.setGlobalConfig(
+    let didSaveSessionBinaryPath = await model.setGlobalConfig(
       key: "controlPlane.preferences.sessions.binaryPath",
       value: normalizedPath(sessionBinaryPath) ?? ""
     )
-    await model.setGlobalConfig(
+    let didSaveContainerProvider = await model.setGlobalConfig(
       key: "controlPlane.preferences.containers.provider",
       value: containerRuntime.rawValue
     )
-    await model.setGlobalConfig(
+    let didSaveContainerBinaryPath = await model.setGlobalConfig(
       key: "controlPlane.preferences.containers.binaryPath",
       value: normalizedPath(containerBinaryPath) ?? ""
     )
-    await model.setGlobalConfig(
+    let didSaveAgentBinaryPath = await model.setGlobalConfig(
       key: "controlPlane.preferences.agents.binaryPath",
       value: preferredCodingAgentBinaryPathRaw
     )
+
+    guard [
+      didSaveTheme,
+      didSaveTerminal,
+      didSaveEditor,
+      didSaveAgent,
+      didSaveSessionProvider,
+      didSaveSessionBinaryPath,
+      didSaveContainerProvider,
+      didSaveContainerBinaryPath,
+      didSaveAgentBinaryPath
+    ].allSatisfy({ $0 }) else {
+      return
+    }
 
     await model.refresh()
     await loadConfigFromDisk()

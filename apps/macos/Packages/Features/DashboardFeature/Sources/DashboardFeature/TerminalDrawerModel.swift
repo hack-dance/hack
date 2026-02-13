@@ -81,10 +81,12 @@ final class TerminalDrawerModel {
     let tabBranch = (normalizedBranch?.isEmpty == false) ? normalizedBranch : nil
     let normalizedCommand = initialCommand?.trimmingCharacters(in: .whitespacesAndNewlines)
     let resolvedCommand = (normalizedCommand?.isEmpty == false) ? normalizedCommand : nil
+    let normalizedTitle = titleOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let resolvedTitle = (normalizedTitle?.isEmpty == false) ? normalizedTitle : nil
 
     if kind == .shell, let resolvedCommand {
       let session = Self.makeShellSession(project: project, initialCommand: resolvedCommand)
-      let title = titleOverride ?? "\(Self.tabBaseTitle(for: project)) command"
+      let title = resolvedTitle ?? "\(Self.tabBaseTitle(for: project)) command"
       let tab = Tab(id: UUID(), key: nil, title: title, session: session)
       tabs.append(tab)
       selectedTabId = tab.id

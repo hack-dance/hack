@@ -411,12 +411,22 @@ async function connectToSession(opts: {
   readonly port?: number;
   readonly sessionName: string;
 }): Promise<number> {
-  p.log.step(`Connecting to ${opts.sessionName}...`);
+  const sessionName = opts.sessionName.trim();
+  if (!SESSION_NAME_PATTERN.test(sessionName)) {
+    p.log.error(
+      "Invalid session name (only letters, numbers, dashes, underscores, or dots)"
+    );
+    return 1;
+  }
+
+  p.log.step(`Connecting to ${sessionName}...`);
   console.log("");
 
   // Use login shell to ensure PATH includes homebrew etc.
   // -d detaches other clients to avoid size conflicts from different terminals
-  const tmuxCmd = `$SHELL -l -c 'tmux attach -d -t ${opts.sessionName} 2>/dev/null || tmux new -s ${opts.sessionName}'`;
+  const quotedSessionName = shellQuote({ value: sessionName });
+  const tmuxInnerCommand = `tmux attach -d -t ${quotedSessionName} 2>/dev/null || tmux new -s ${quotedSessionName}`;
+  const tmuxCmd = `$SHELL -l -c ${shellQuote({ value: tmuxInnerCommand })}`;
 
   const sshArgs = [
     "ssh",
@@ -428,6 +438,10 @@ async function connectToSession(opts: {
   ];
 
   return await run(sshArgs, { stdin: "inherit" });
+}
+
+function shellQuote(opts: { readonly value: string }): string {
+  return `'${opts.value.split("'").join(`'"'"'`)}'`;
 }
 
 /**

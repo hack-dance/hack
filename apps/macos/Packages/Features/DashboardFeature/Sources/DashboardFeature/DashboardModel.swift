@@ -343,14 +343,16 @@ public final class DashboardModel {
     }
   }
 
-  public func addBranch(for project: ProjectSummary, name: String, note: String?) async {
+  public func addBranch(for project: ProjectSummary, name: String, note: String?) async -> Bool {
     guard let path = resolveProjectPath(project) else {
       errorMessage = "Missing project path for \(project.name)"
-      return
+      return false
     }
-    await runAction(message: "Adding branch \(name)…") {
+    let result: Bool? = await runActionResult(message: "Adding branch \(name)…") {
       try await self.client.addBranch(path: path, name: name, note: note)
+      return true
     }
+    return result ?? false
   }
 
   public func removeBranch(for project: ProjectSummary, name: String) async {

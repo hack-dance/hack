@@ -144,6 +144,8 @@ public actor HackCLIClient {
     do {
       let result = try await run(["x", "tailscale", "inspect", "--json"], allowNonZeroExit: true)
       return try decodeJsonOrThrow(TailscaleInspectResponse.self, result: result)
+    } catch is CancellationError {
+      throw CancellationError()
     } catch {
       // If hack inspect cannot return machine JSON (stale CLI, disabled extension gate, etc),
       // fall back to direct `tailscale status --json` so settings still reflect host reality.

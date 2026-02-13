@@ -124,7 +124,7 @@ jobs:
             exit 1
           fi
 
-          URL="https://ziglang.org/download/${ZIG_VERSION}/zig-macos-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz"
+          URL="https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-macos-${ZIG_VERSION}.tar.xz"
           curl -fsSL "$URL" -o "$RUNNER_TEMP/zig.tar.xz"
           mkdir -p "$RUNNER_TEMP/zig"
           tar -xf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP/zig"

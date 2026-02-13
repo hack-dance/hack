@@ -3,19 +3,20 @@ import {
   buildTailscaleSshCommand,
   getTailscaleStatus,
 } from "../../lib/tailscale.ts";
-import type { MuxBackendName, MuxSession } from "../../mux/mux-backend.ts";
-import {
-  resolveDefaultBackendName,
-  resolveMux,
-} from "../../mux/mux-resolver.ts";
 
-/** Valid session name pattern: alphanumeric, dash, underscore */
+/** Valid session name pattern: alphanumeric, dash, or underscore */
 const SESSION_NAME_PATTERN = /^[\w-]+$/;
 
 /**
- * Parsed mux session info.
+ * Parsed tmux session info.
  */
-export type DaemonSession = MuxSession;
+export interface TmuxSession {
+  readonly name: string;
+  readonly attached: boolean;
+  readonly path: string | null;
+  readonly windows: number;
+  readonly createdAt: string | null;
+}
 
 /**
  * Session create input.
@@ -23,7 +24,6 @@ export type DaemonSession = MuxSession;
 export interface SessionCreateInput {
   readonly name: string;
   readonly cwd?: string;
-  readonly backend?: MuxBackendName;
 }
 
 /**
@@ -62,7 +62,7 @@ type ParseResult<T> =
  * Handles session API routes.
  *
  * Routes:
- * - GET /v1/sessions - List all sessions
+ * - GET /v1/sessions - List all tmux sessions
  * - POST /v1/sessions - Create a new session
  * - GET /v1/sessions/:id - Get session details
  * - POST /v1/sessions/:id/stop - Stop (kill) session
@@ -96,6 +96,15 @@ export async function handleSessionRoutes(opts: {
   if (!sessionId) {
     return jsonResponse({ error: "missing_session_id" }, 400);
   }
+  if (!SESSION_NAME_PATTERN.test(sessionId)) {
+    return jsonResponse(
+      {
+        error:
+          "invalid_name: must contain only alphanumeric, dash, or underscore",
+      },
+      400
+    );
+  }
 
   // GET /v1/sessions/:id - get session details
   if (segments.length === 3 && opts.req.method === "GET") {
@@ -121,28 +130,22 @@ export async function handleSessionRoutes(opts: {
 }
 
 /**
- * List all sessions.
+ * List all tmux sessions.
  */
 async function handleListSessions(): Promise<Response> {
-  const mux = await resolveMux({ project: null });
   const [sessions, connectionInfo] = await Promise.all([
-    mux.mode === "none" ? Promise.resolve([] as const) : listSessions({ mux }),
+    listTmuxSessions(),
     getConnectionInfo(),
   ]);
   return jsonResponse({ sessions, connection: connectionInfo });
 }
 
 /**
- * Create a new session.
+ * Create a new tmux session.
  */
 async function handleCreateSession(opts: {
   readonly req: Request;
 }): Promise<Response> {
-  const mux = await resolveMux({ project: null });
-  if (mux.mode === "none") {
-    return jsonResponse({ error: "sessions_disabled" }, 503);
-  }
-
   const body = await readJsonBody(opts.req);
   if (!body) {
     return jsonResponse({ error: "invalid_json" }, 400);
@@ -153,33 +156,30 @@ async function handleCreateSession(opts: {
     return jsonResponse({ error: parsed.error }, 400);
   }
 
-  const { name, cwd, backend: backendRequested } = parsed.value;
-  const backendName =
-    backendRequested ??
-    resolveDefaultBackendName({ mode: mux.mode, backends: mux.backends });
-  if (!backendName) {
-    return jsonResponse({ error: "no_backend_available" }, 503);
-  }
-  const backend = mux.backends.get(backendName);
-  if (!backend?.available) {
-    return jsonResponse({ error: "backend_unavailable" }, 503);
-  }
+  const { name, cwd } = parsed.value;
 
   // Check if session already exists
-  const existing = await findSession({ mux, name });
+  const existing = await findSession({ name });
   if (existing) {
     return jsonResponse({ error: "session_exists", session: existing }, 409);
   }
 
-  const create = await backend.createSession({ name, cwd });
-  if (!create.ok) {
+  // Create session - uses array form for safety (no shell interpolation)
+  const args = ["tmux", "new-session", "-d", "-s", name];
+  if (cwd) {
+    args.push("-c", cwd);
+  }
+
+  const result = await exec(args, { stdin: "ignore" });
+  if (result.exitCode !== 0) {
     return jsonResponse(
-      { error: create.error, message: create.stderr ?? "" },
+      { error: "create_failed", message: result.stderr.trim() },
       500
     );
   }
 
-  const session = create.session ?? (await findSession({ mux, name }));
+  // Return created session
+  const session = await findSession({ name });
   return jsonResponse({ session }, 201);
 }
 
@@ -189,9 +189,8 @@ async function handleCreateSession(opts: {
 async function handleGetSession(opts: {
   readonly sessionId: string;
 }): Promise<Response> {
-  const mux = await resolveMux({ project: null });
   const [session, connectionInfo] = await Promise.all([
-    findSession({ mux, name: opts.sessionId }),
+    findSession({ name: opts.sessionId }),
     getConnectionInfo({ sessionName: opts.sessionId }),
   ]);
   if (!session) {
@@ -201,22 +200,19 @@ async function handleGetSession(opts: {
 }
 
 /**
- * Stop (kill) a session.
+ * Stop (kill) a tmux session.
  */
 async function handleStopSession(opts: {
   readonly sessionId: string;
 }): Promise<Response> {
-  const mux = await resolveMux({ project: null });
-  const session = await findSession({ mux, name: opts.sessionId });
+  const session = await findSession({ name: opts.sessionId });
   if (!session) {
     return jsonResponse({ error: "session_not_found" }, 404);
   }
 
-  const backend = mux.backends.get(session.backend);
-  if (!backend?.available) {
-    return jsonResponse({ error: "backend_unavailable" }, 503);
-  }
-  const result = await backend.killSession({ name: opts.sessionId });
+  const result = await exec(["tmux", "kill-session", "-t", opts.sessionId], {
+    stdin: "ignore",
+  });
 
   if (result.exitCode !== 0) {
     return jsonResponse(
@@ -229,15 +225,14 @@ async function handleStopSession(opts: {
 }
 
 /**
- * Execute a command in a session.
+ * Execute a command in a tmux session.
  * Sends the command followed by Enter.
  */
 async function handleExecSession(opts: {
   readonly req: Request;
   readonly sessionId: string;
 }): Promise<Response> {
-  const mux = await resolveMux({ project: null });
-  const session = await findSession({ mux, name: opts.sessionId });
+  const session = await findSession({ name: opts.sessionId });
   if (!session) {
     return jsonResponse({ error: "session_not_found" }, 404);
   }
@@ -252,14 +247,11 @@ async function handleExecSession(opts: {
     return jsonResponse({ error: parsed.error }, 400);
   }
 
-  const backend = mux.backends.get(session.backend);
-  if (!backend?.available) {
-    return jsonResponse({ error: "backend_unavailable" }, 503);
-  }
-  const result = await backend.execInSession({
-    name: opts.sessionId,
-    command: parsed.value.command,
-  });
+  // Uses array form - command is a separate argument, not interpolated
+  const result = await exec(
+    ["tmux", "send-keys", "-t", opts.sessionId, parsed.value.command, "Enter"],
+    { stdin: "ignore" }
+  );
 
   if (result.exitCode !== 0) {
     return jsonResponse(
@@ -272,7 +264,7 @@ async function handleExecSession(opts: {
 }
 
 /**
- * Send raw input/keystrokes to a session.
+ * Send raw input/keystrokes to a tmux session.
  * Does NOT automatically append Enter - allows sending key sequences like:
  * - "C-c" (Ctrl+C)
  * - "C-d" (Ctrl+D)
@@ -285,8 +277,7 @@ async function handleInputSession(opts: {
   readonly req: Request;
   readonly sessionId: string;
 }): Promise<Response> {
-  const mux = await resolveMux({ project: null });
-  const session = await findSession({ mux, name: opts.sessionId });
+  const session = await findSession({ name: opts.sessionId });
   if (!session) {
     return jsonResponse({ error: "session_not_found" }, 404);
   }
@@ -301,14 +292,11 @@ async function handleInputSession(opts: {
     return jsonResponse({ error: parsed.error }, 400);
   }
 
-  const backend = mux.backends.get(session.backend);
-  if (!backend?.available) {
-    return jsonResponse({ error: "backend_unavailable" }, 503);
-  }
-  const result = await backend.sendInput({
-    name: opts.sessionId,
-    keys: parsed.value.keys,
-  });
+  // send-keys without trailing Enter - uses array form for safety
+  const result = await exec(
+    ["tmux", "send-keys", "-t", opts.sessionId, parsed.value.keys],
+    { stdin: "ignore" }
+  );
 
   if (result.exitCode !== 0) {
     return jsonResponse(
@@ -321,27 +309,76 @@ async function handleInputSession(opts: {
 }
 
 /**
+ * List all tmux sessions with detailed info.
+ */
+async function listTmuxSessions(): Promise<TmuxSession[]> {
+  const separator = "|||HACK_SESSION_FIELD|||";
+  const format = [
+    "#{session_name}",
+    "#{session_attached}",
+    "#{session_path}",
+    "#{session_windows}",
+    "#{session_created}",
+  ].join(separator);
+
+  const result = await exec(["tmux", "list-sessions", "-F", format], {
+    stdin: "ignore",
+  });
+
+  if (result.exitCode !== 0) {
+    return [];
+  }
+
+  const sessions: TmuxSession[] = [];
+  for (const line of result.stdout.split("\n")) {
+    if (!line.trim()) {
+      continue;
+    }
+    const fields = parseTmuxSessionFields(line, separator, 5);
+    if (!fields) {
+      continue;
+    }
+    const [name, attached, path, windows, created] = fields;
+    if (name) {
+      sessions.push({
+        name,
+        attached: attached === "1",
+        path: path || null,
+        windows: Number.parseInt(windows ?? "1", 10),
+        createdAt: created
+          ? new Date(Number.parseInt(created, 10) * 1000).toISOString()
+          : null,
+      });
+    }
+  }
+
+  return sessions;
+}
+
+function parseTmuxSessionFields(
+  line: string,
+  separator: string,
+  expectedCount: number
+): readonly string[] | null {
+  const bySeparator = line.split(separator);
+  if (bySeparator.length === expectedCount) {
+    return bySeparator;
+  }
+  const byTab = line.split("\t");
+  if (byTab.length === expectedCount) {
+    return byTab;
+  }
+  return null;
+}
+
+/**
  * Find a session by name.
  */
 async function findSession(opts: {
-  readonly mux: Awaited<ReturnType<typeof resolveMux>>;
   readonly name: string;
-}): Promise<DaemonSession | null> {
-  const sessions = await listSessions({ mux: opts.mux });
+}): Promise<TmuxSession | null> {
+  const sessions = await listTmuxSessions();
   return sessions.find((s) => s.name === opts.name) ?? null;
-}
-
-async function listSessions(opts: {
-  readonly mux: Awaited<ReturnType<typeof resolveMux>>;
-}): Promise<readonly DaemonSession[]> {
-  const sessions: DaemonSession[] = [];
-  for (const backend of opts.mux.backends.values()) {
-    if (!backend?.available) {
-      continue;
-    }
-    sessions.push(...(await backend.listSessions()));
-  }
-  return sessions;
 }
 
 /**
@@ -389,7 +426,7 @@ function parseSessionCreateInput(
     return { ok: false, error: "missing_name" };
   }
 
-  // Validate session name (alphanumeric, dash, underscore, dot)
+  // Validate session name (tmux restrictions)
   const trimmedName = name.trim();
   if (!SESSION_NAME_PATTERN.test(trimmedName)) {
     return {
@@ -400,17 +437,12 @@ function parseSessionCreateInput(
   }
 
   const cwd = typeof body.cwd === "string" ? body.cwd.trim() : undefined;
-  const backend =
-    body.backend === "tmux" || body.backend === "zellij"
-      ? (body.backend as MuxBackendName)
-      : undefined;
 
   return {
     ok: true,
     value: {
       name: trimmedName,
       ...(cwd && cwd.length > 0 ? { cwd } : {}),
-      ...(backend ? { backend } : {}),
     },
   };
 }

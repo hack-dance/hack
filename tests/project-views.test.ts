@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PROJECT_COMPOSE_FILENAME } from "../src/constants.ts";
@@ -100,11 +100,14 @@ function makeContainer(opts: {
     status: opts.state === "running" ? "Up 5s" : "Exited (0)",
     name: opts.name,
     ports: "",
-    image: null,
-    ip: null,
-    mounts: [],
-    labels: {},
     workingDir: `/tmp/${opts.project}/.hack`,
+    image: "imbios/bun-node:latest",
+    labels: {
+      "com.docker.compose.project": opts.project,
+      "com.docker.compose.service": opts.service,
+    },
+    mounts: [],
+    networks: [],
   };
 }
 
@@ -151,6 +154,7 @@ test("buildProjectViews includes defined services and runtime status", async () 
     runtimeOk: true,
     filter: null,
     includeUnregistered: true,
+    muxSessions: [],
   });
 
   const alphaView = views.find((view) => view.name === "alpha");
@@ -181,8 +185,138 @@ test("buildProjectViews marks runtime status unknown when runtime is unavailable
     runtimeOk: false,
     filter: null,
     includeUnregistered: false,
+    muxSessions: [],
   });
 
   const alphaView = views.find((view) => view.name === "alpha");
   expect(alphaView?.status).toBe("unknown");
+});
+
+test("buildProjectViews includes matching project sessions from tmux", async () => {
+  const alpha = await createProject({ name: "alpha", services: ["api"] });
+  const views = await buildProjectViews({
+    registryProjects: [alpha],
+    runtime: [],
+    runtimeOk: true,
+    filter: null,
+    includeUnregistered: false,
+    muxSessions: [
+      {
+        name: "alpha",
+        backend: "tmux",
+        attached: true,
+        path: alpha.repoRoot,
+        windows: 2,
+        createdAt: 1_735_000_000,
+      },
+      {
+        name: "alpha:agent-1",
+        backend: "tmux",
+        attached: false,
+        path: join(alpha.repoRoot, "apps"),
+        windows: 1,
+        createdAt: 1_735_000_123,
+      },
+      {
+        name: "manual-scratch",
+        backend: "tmux",
+        attached: false,
+        path: alpha.repoRoot,
+        windows: 1,
+        createdAt: 1_735_000_456,
+      },
+      {
+        name: "other",
+        backend: "tmux",
+        attached: false,
+        path: "/tmp/other",
+        windows: 1,
+        createdAt: 1_735_000_789,
+      },
+    ],
+  });
+
+  const alphaView = views.find((view) => view.name === "alpha");
+  expect(alphaView?.sessions.map((session) => session.name)).toEqual([
+    "alpha",
+    "alpha:agent-1",
+    "manual-scratch",
+  ]);
+  expect(alphaView?.sessions.map((session) => session.source)).toEqual([
+    "hack",
+    "hack",
+    "external",
+  ]);
+
+  const serialized = alphaView ? serializeProjectView(alphaView) : null;
+  const serializedSessions = serialized?.sessions as
+    | Record<string, unknown>[]
+    | undefined;
+  expect(serializedSessions?.length).toBe(3);
+  expect(serializedSessions?.[0]?.name).toBe("alpha");
+  expect(serializedSessions?.[0]?.backend).toBe("tmux");
+  expect(serializedSessions?.[0]?.source).toBe("hack");
+});
+
+test("buildProjectViews matches tmux sessions when path is a symlink to repo root", async () => {
+  const alpha = await createProject({ name: "alpha", services: ["api"] });
+  if (!tempDir) {
+    throw new Error("tempDir not set");
+  }
+
+  const aliasPath = join(tempDir, "alpha-alias");
+  await symlink(alpha.repoRoot, aliasPath);
+
+  const views = await buildProjectViews({
+    registryProjects: [alpha],
+    runtime: [],
+    runtimeOk: true,
+    filter: null,
+    includeUnregistered: false,
+    muxSessions: [
+      {
+        name: "manual-alpha-shell",
+        backend: "tmux",
+        attached: false,
+        path: aliasPath,
+        windows: 1,
+        createdAt: 1_735_111_000,
+      },
+    ],
+  });
+
+  const alphaView = views.find((view) => view.name === "alpha");
+  expect(alphaView?.sessions.map((session) => session.name)).toEqual([
+    "manual-alpha-shell",
+  ]);
+});
+
+test("buildProjectViews includes zellij sessions when session name matches project name", async () => {
+  const alpha = await createProject({ name: "alpha", services: ["api"] });
+
+  const views = await buildProjectViews({
+    registryProjects: [alpha],
+    runtime: [],
+    runtimeOk: true,
+    filter: null,
+    includeUnregistered: false,
+    muxSessions: [
+      {
+        name: "alpha:research",
+        backend: "zellij",
+        attached: false,
+        path: null,
+        windows: null,
+        createdAt: null,
+      },
+    ],
+  });
+
+  const alphaView = views.find((view) => view.name === "alpha");
+  expect(alphaView?.sessions.map((session) => session.name)).toEqual([
+    "alpha:research",
+  ]);
+  expect(alphaView?.sessions.map((session) => session.backend)).toEqual([
+    "zellij",
+  ]);
 });

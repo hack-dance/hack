@@ -165,15 +165,27 @@ public struct MenuBarView: View {
   // MARK: - Status Helpers
 
   private var runtimeStatusText: String {
-    if model.runtimeOverallOk == true { return "Healthy" }
-    if model.runtimeOverallOk == false { return "Degraded" }
-    return "Unknown"
+    switch model.runtimeHealthState {
+    case .healthy:
+      return "Healthy"
+    case .down:
+      return "Down"
+    case .degraded:
+      return "Degraded"
+    case .unknown:
+      return "Unknown"
+    }
   }
 
   private var runtimeStatusIcon: String {
-    if model.runtimeOverallOk == true { return "checkmark.circle.fill" }
-    if model.runtimeOverallOk == false { return "exclamationmark.triangle.fill" }
-    return "questionmark.circle"
+    switch model.runtimeHealthState {
+    case .healthy:
+      return "checkmark.circle.fill"
+    case .down, .degraded:
+      return "exclamationmark.triangle.fill"
+    case .unknown:
+      return "questionmark.circle"
+    }
   }
 
   private var gatewayStatusText: String {
@@ -183,10 +195,16 @@ public struct MenuBarView: View {
   private var gatewayStatusIcon: String {
     guard let state = model.gatewaySummaryState else { return "questionmark.circle" }
     switch state {
-    case .running: return "checkmark.circle.fill"
-    case .configured: return "gear.circle"
-    case .disabled: return "minus.circle"
-    case .unknown: return "questionmark.circle"
+    case .localOnly, .lan, .tailscale, .cloudflare, .mixed:
+      return "checkmark.circle.fill"
+    case .needsSetup:
+      return "exclamationmark.triangle.fill"
+    case .disabled:
+      return "minus.circle"
+    case .down:
+      return "xmark.circle.fill"
+    case .unknown:
+      return "questionmark.circle"
     }
   }
 

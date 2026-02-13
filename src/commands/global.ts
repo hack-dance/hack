@@ -649,14 +649,39 @@ export async function globalUp(): Promise<number> {
   });
   if (reservedIps.length > 0) {
     const conflicts = await findIngressIpConflicts({ reservedIps });
-    const blockers = conflicts.filter(
+    let blockers = conflicts.filter(
       (conflict) => !isGlobalProxyContainer({ name: conflict.containerName })
     );
     if (blockers.length > 0) {
-      logger.error({
-        message: renderIngressConflictMessage({ conflicts: blockers }),
+      logger.warn({
+        message: [
+          `Reserved ingress IPs are currently occupied on ${DEFAULT_INGRESS_NETWORK}.`,
+          "Attempting to reassign conflicting containers and retry global startup…",
+        ].join("\n"),
       });
-      return 1;
+
+      await reassignIngressIpConflicts({
+        conflicts: blockers,
+        reservedIps,
+      });
+
+      const remainingConflicts = await findIngressIpConflicts({
+        reservedIps,
+      });
+      blockers = remainingConflicts.filter(
+        (conflict) => !isGlobalProxyContainer({ name: conflict.containerName })
+      );
+
+      if (blockers.length > 0) {
+        logger.error({
+          message: renderIngressConflictMessage({ conflicts: blockers }),
+        });
+        return 1;
+      }
+
+      logger.success({
+        message: "Recovered reserved ingress IP conflicts; continuing startup.",
+      });
     }
   }
 
@@ -718,6 +743,13 @@ type IngressIpConflict = {
   readonly containerName: string;
 };
 
+type IngressNetworkSnapshot = {
+  readonly subnet: string | null;
+  readonly gateway: string | null;
+  readonly usedIps: ReadonlySet<string>;
+  readonly containerIpByName: ReadonlyMap<string, string>;
+};
+
 async function resolveReservedIngressIps(opts: {
   readonly composePath: string;
 }): Promise<string[]> {
@@ -743,6 +775,24 @@ async function findIngressIpConflicts(opts: {
     return [];
   }
 
+  const snapshot = await inspectIngressNetworkSnapshot();
+  if (!snapshot) {
+    return [];
+  }
+
+  const reservedIps = new Set(opts.reservedIps);
+  const conflicts: IngressIpConflict[] = [];
+  for (const [containerName, ip] of snapshot.containerIpByName.entries()) {
+    if (!reservedIps.has(ip)) {
+      continue;
+    }
+    conflicts.push({ ip, containerName });
+  }
+
+  return conflicts;
+}
+
+async function inspectIngressNetworkSnapshot(): Promise<IngressNetworkSnapshot | null> {
   const inspect = await exec(
     ["docker", "network", "inspect", DEFAULT_INGRESS_NETWORK],
     {
@@ -750,98 +800,282 @@ async function findIngressIpConflicts(opts: {
     }
   );
   if (inspect.exitCode !== 0) {
-    return [];
+    return null;
   }
 
-  const parsed = parseDockerNetworkInspect({ stdout: inspect.stdout });
-  if (!parsed) {
-    return [];
-  }
-
-  const records = extractIngressContainerRecords({ inspect: parsed });
-  return records
-    .map((record) => ({
-      ip: extractIpv4Address({ raw: record.ipv4AddressRaw }),
-      containerName: record.name,
-    }))
-    .filter((conflict) => opts.reservedIps.includes(conflict.ip));
-}
-
-function extractIpv4Address(opts: { readonly raw: string }): string {
-  return opts.raw.split("/")[0] ?? "";
-}
-
-type IngressContainerRecord = {
-  readonly name: string;
-  readonly ipv4AddressRaw: string;
-};
-
-function parseDockerNetworkInspect(opts: {
-  readonly stdout: string;
-}): readonly unknown[] | null {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(opts.stdout);
+    parsed = JSON.parse(inspect.stdout);
   } catch {
     return null;
   }
-  return Array.isArray(parsed) ? parsed : null;
-}
+  if (!Array.isArray(parsed)) {
+    return null;
+  }
 
-function extractIngressContainerRecords(opts: {
-  readonly inspect: readonly unknown[];
-}): IngressContainerRecord[] {
-  const records: IngressContainerRecord[] = [];
+  let subnet: string | null = null;
+  let gateway: string | null = null;
+  const usedIps = new Set<string>();
+  const containerIpByName = new Map<string, string>();
+  for (const entry of parsed) {
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+    if (subnet === null) {
+      const ipamConfig = (
+        entry as {
+          IPAM?: {
+            Config?: Array<{ Subnet?: unknown; Gateway?: unknown }>;
+          };
+        }
+      ).IPAM?.Config;
+      if (Array.isArray(ipamConfig)) {
+        for (const config of ipamConfig) {
+          if (subnet === null && typeof config?.Subnet === "string") {
+            subnet = config.Subnet;
+          }
+          if (gateway === null && typeof config?.Gateway === "string") {
+            gateway = config.Gateway;
+          }
+          if (subnet !== null && gateway !== null) {
+            break;
+          }
+        }
+      }
+    }
 
-  for (const entry of opts.inspect) {
-    const containers = readInspectContainers({ entry });
-    if (!containers) {
+    const containers = (entry as { Containers?: Record<string, unknown> })
+      .Containers;
+    if (!containers || typeof containers !== "object") {
       continue;
     }
 
     for (const info of Object.values(containers)) {
-      const record = readInspectContainerRecord({ info });
-      if (!record) {
+      if (!info || typeof info !== "object") {
         continue;
       }
-      records.push(record);
+      const record = info as { Name?: unknown; IPv4Address?: unknown };
+      const name = typeof record.Name === "string" ? record.Name : "";
+      const ipRaw =
+        typeof record.IPv4Address === "string" ? record.IPv4Address : "";
+      if (!(name && ipRaw)) {
+        continue;
+      }
+      const ip = extractIpv4Address({ raw: ipRaw });
+      if (ip.length === 0) {
+        continue;
+      }
+      usedIps.add(ip);
+      containerIpByName.set(name, ip);
     }
   }
 
-  return records;
+  return {
+    subnet,
+    gateway,
+    usedIps,
+    containerIpByName,
+  };
 }
 
-function readInspectContainers(opts: {
-  readonly entry: unknown;
-}): Record<string, unknown> | null {
-  if (!opts.entry || typeof opts.entry !== "object") {
-    return null;
-  }
+async function reassignIngressIpConflicts(opts: {
+  readonly conflicts: readonly IngressIpConflict[];
+  readonly reservedIps: readonly string[];
+}): Promise<void> {
+  const snapshot = await inspectIngressNetworkSnapshot();
+  const usedIps = new Set(snapshot?.usedIps ?? []);
+  const reservedIps = new Set(opts.reservedIps);
+  const containerIpByName = new Map(snapshot?.containerIpByName ?? []);
+  const conflictIpsByContainer = new Map(
+    opts.conflicts.map((conflict) => [conflict.containerName, conflict.ip])
+  );
+  const containerNames = [
+    ...new Set(opts.conflicts.map((conflict) => conflict.containerName)),
+  ];
 
-  const containers = (opts.entry as { Containers?: unknown }).Containers;
-  if (!containers || typeof containers !== "object") {
-    return null;
-  }
+  for (const containerName of containerNames) {
+    logger.step({
+      message: `Reassigning ${containerName} on ${DEFAULT_INGRESS_NETWORK}…`,
+    });
 
-  return containers as Record<string, unknown>;
+    const disconnect = await exec(
+      [
+        "docker",
+        "network",
+        "disconnect",
+        "-f",
+        DEFAULT_INGRESS_NETWORK,
+        containerName,
+      ],
+      {
+        stdin: "ignore",
+      }
+    );
+    if (disconnect.exitCode !== 0) {
+      logger.warn({
+        message: [
+          `Failed to disconnect ${containerName} from ${DEFAULT_INGRESS_NETWORK} (exit ${disconnect.exitCode}).`,
+          trimShellError({ text: disconnect.stderr }),
+        ].join("\n"),
+      });
+      continue;
+    }
+
+    const previousIp =
+      conflictIpsByContainer.get(containerName) ??
+      containerIpByName.get(containerName) ??
+      null;
+    if (previousIp !== null) {
+      usedIps.delete(previousIp);
+      containerIpByName.delete(containerName);
+    }
+
+    const desiredIp = pickAvailableIngressIp({
+      subnet: snapshot?.subnet ?? null,
+      gateway: snapshot?.gateway ?? null,
+      usedIps,
+      reservedIps,
+    });
+
+    const connectCommand = desiredIp
+      ? [
+          "docker",
+          "network",
+          "connect",
+          "--ip",
+          desiredIp,
+          DEFAULT_INGRESS_NETWORK,
+          containerName,
+        ]
+      : [
+          "docker",
+          "network",
+          "connect",
+          DEFAULT_INGRESS_NETWORK,
+          containerName,
+        ];
+    const connect = await exec(connectCommand, {
+      stdin: "ignore",
+    });
+    if (connect.exitCode !== 0) {
+      logger.warn({
+        message: [
+          `Failed to reconnect ${containerName} to ${DEFAULT_INGRESS_NETWORK} (exit ${connect.exitCode}).`,
+          trimShellError({ text: connect.stderr }),
+        ].join("\n"),
+      });
+      continue;
+    }
+
+    if (desiredIp) {
+      usedIps.add(desiredIp);
+      containerIpByName.set(containerName, desiredIp);
+    }
+  }
 }
 
-function readInspectContainerRecord(opts: {
-  readonly info: unknown;
-}): IngressContainerRecord | null {
-  if (!opts.info || typeof opts.info !== "object") {
+function pickAvailableIngressIp(opts: {
+  readonly subnet: string | null;
+  readonly gateway: string | null;
+  readonly usedIps: ReadonlySet<string>;
+  readonly reservedIps: ReadonlySet<string>;
+}): string | null {
+  if (!opts.subnet) {
+    return null;
+  }
+  const cidr = parseIpv4Cidr(opts.subnet);
+  if (!cidr) {
+    return null;
+  }
+  if (cidr.prefix >= 31) {
     return null;
   }
 
-  const record = opts.info as { Name?: unknown; IPv4Address?: unknown };
-  const name = typeof record.Name === "string" ? record.Name : "";
-  const ipv4AddressRaw =
-    typeof record.IPv4Address === "string" ? record.IPv4Address : "";
-  if (!(name.length > 0 && ipv4AddressRaw.length > 0)) {
+  const hostCapacity = 2 ** (32 - cidr.prefix);
+  const firstHost = cidr.network + 1;
+  const lastHost = cidr.network + hostCapacity - 2;
+  const maxCandidates = Math.min(4096, Math.max(0, lastHost - firstHost + 1));
+
+  for (let offset = 0; offset < maxCandidates; offset += 1) {
+    const candidate = intToIpv4(firstHost + offset);
+    if (candidate === opts.gateway) {
+      continue;
+    }
+    if (opts.reservedIps.has(candidate)) {
+      continue;
+    }
+    if (opts.usedIps.has(candidate)) {
+      continue;
+    }
+    return candidate;
+  }
+  return null;
+}
+
+function parseIpv4Cidr(
+  cidr: string
+): { readonly network: number; readonly prefix: number } | null {
+  const [ipText, prefixText] = cidr.split("/");
+  if (!(ipText && prefixText)) {
     return null;
   }
 
-  return { name, ipv4AddressRaw };
+  const prefix = Number.parseInt(prefixText, 10);
+  if (!Number.isFinite(prefix) || prefix < 0 || prefix > 32) {
+    return null;
+  }
+
+  const ip = ipv4ToInt(ipText);
+  if (ip === null) {
+    return null;
+  }
+
+  let mask = 0;
+  if (prefix === 0) {
+    mask = 0;
+  } else if (prefix === 32) {
+    mask = 0xff_ff_ff_ff;
+  } else {
+    mask = (0xff_ff_ff_ff << (32 - prefix)) >>> 0;
+  }
+
+  return {
+    network: (ip & mask) >>> 0,
+    prefix,
+  };
+}
+
+function ipv4ToInt(ip: string): number | null {
+  const octets = ip.split(".");
+  if (octets.length !== 4) {
+    return null;
+  }
+
+  const numbers = octets.map((octet) => Number.parseInt(octet, 10));
+  if (
+    numbers.some((octet) => !Number.isFinite(octet) || octet < 0 || octet > 255)
+  ) {
+    return null;
+  }
+
+  const a = numbers[0] ?? 0;
+  const b = numbers[1] ?? 0;
+  const c = numbers[2] ?? 0;
+  const d = numbers[3] ?? 0;
+  return (((a << 24) >>> 0) | (b << 16) | (c << 8) | d) >>> 0;
+}
+
+function intToIpv4(value: number): string {
+  return [
+    (value >>> 24) & 255,
+    (value >>> 16) & 255,
+    (value >>> 8) & 255,
+    value & 255,
+  ].join(".");
+}
+
+function extractIpv4Address(opts: { readonly raw: string }): string {
+  return opts.raw.split("/")[0] ?? "";
 }
 
 function isGlobalProxyContainer(opts: { readonly name: string }): boolean {
@@ -871,6 +1105,11 @@ function renderIngressConflictMessage(opts: {
   );
 
   return lines.join("\n");
+}
+
+function trimShellError(opts: { readonly text: string }): string {
+  const trimmed = opts.text.trim();
+  return trimmed.length > 0 ? trimmed : "(no stderr output)";
 }
 
 async function globalDown(): Promise<number> {
@@ -1017,9 +1256,19 @@ type GatewayStatusPayload = {
   readonly tokens_revoked: number;
   readonly tokens_write: number;
   readonly tokens_read: number;
+  readonly tokens: readonly GatewayTokenPayload[];
   readonly gateway_projects?: string;
   readonly exposures: readonly GatewayExposurePayload[];
   readonly warnings: readonly string[];
+};
+
+type GatewayTokenPayload = {
+  readonly id: string;
+  readonly scope: "read" | "write";
+  readonly label?: string;
+  readonly created_at: string;
+  readonly last_used_at?: string;
+  readonly revoked_at?: string;
 };
 
 async function readComposeStatus(
@@ -1102,6 +1351,14 @@ async function collectGatewayStatus(): Promise<GatewayStatusPayload> {
   const revokedTokens = tokens.filter((token) => token.revokedAt);
   const writeTokens = activeTokens.filter((token) => token.scope === "write");
   const readTokens = activeTokens.filter((token) => token.scope === "read");
+  const serializedTokens: GatewayTokenPayload[] = tokens.map((token) => ({
+    id: token.id,
+    scope: token.scope,
+    ...(token.label ? { label: token.label } : {}),
+    created_at: token.createdAt,
+    ...(token.lastUsedAt ? { last_used_at: token.lastUsedAt } : {}),
+    ...(token.revokedAt ? { revoked_at: token.revokedAt } : {}),
+  }));
 
   const payload: GatewayStatusPayload = {
     config_path: configPath,
@@ -1115,6 +1372,7 @@ async function collectGatewayStatus(): Promise<GatewayStatusPayload> {
     tokens_revoked: revokedTokens.length,
     tokens_write: writeTokens.length,
     tokens_read: readTokens.length,
+    tokens: serializedTokens,
     exposures,
     warnings: gatewayResolution.warnings,
   };
@@ -2087,12 +2345,21 @@ async function ensureMacDnsmasqRunning(): Promise<void> {
         : "dnsmasq is not started; starting it as root so it can bind :53",
   });
 
-  const exit = await run(["sudo", "brew", "services", "restart", "dnsmasq"], {
-    stdin: "inherit",
+  const interactive = process.stdin.isTTY && process.stdout.isTTY;
+  const sudoCommand = interactive
+    ? ["sudo", "brew", "services", "restart", "dnsmasq"]
+    : ["sudo", "-n", "brew", "services", "restart", "dnsmasq"];
+  const exit = await run(sudoCommand, {
+    stdin: interactive ? "inherit" : "ignore",
   });
   if (exit !== 0) {
     logger.warn({
-      message: `Failed to start dnsmasq (exit ${exit}). *.${DEFAULT_PROJECT_TLD} may not resolve.`,
+      message: interactive
+        ? `Failed to start dnsmasq (exit ${exit}). *.${DEFAULT_PROJECT_TLD} may not resolve.`
+        : [
+            `Failed to start dnsmasq without interactive sudo (exit ${exit}).`,
+            "Open a terminal and run: hack global up",
+          ].join("\n"),
     });
   }
 }

@@ -7,5 +7,7 @@ extension Notification.Name {
 enum TerminalOpenRequest {
   static let projectIdKey = "projectId"
   static let kindKey = "kind"
+  static let branchKey = "branch"
+  static let commandKey = "command"
+  static let titleKey = "title"
 }
-

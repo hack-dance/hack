@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 import GhosttyTerminal
@@ -19,6 +20,7 @@ struct SetupAssistantView: View {
 
   @State private var showEmbeddedTerminal = false
   @State private var embeddedCommand: String? = nil
+  @State private var terminalAutomationGranted: Bool? = nil
 
   init(initialSection: SetupAssistantSection) {
     self.initialSection = initialSection
@@ -73,6 +75,8 @@ struct SetupAssistantView: View {
 
   @ViewBuilder
   private var runtimeSteps: some View {
+    permissionsCallout
+
     SetupAssistantStepCard(
       tone: model.globalStatus == nil ? .warn : .good,
       title: "Install global services",
@@ -114,6 +118,8 @@ struct SetupAssistantView: View {
 
   @ViewBuilder
   private var gatewaySteps: some View {
+    permissionsCallout
+
     SetupAssistantStepCard(
       tone: model.globalStatus == nil ? .warn : .neutral,
       title: "Install global services",
@@ -179,6 +185,30 @@ struct SetupAssistantView: View {
     model.daemonStatus?.resolvedLabel == .running
   }
 
+  private var permissionsCallout: some View {
+    InlineCallout(
+      tone: terminalAutomationTone,
+      title: "Permissions",
+      message: "Grant Terminal automation once so Hack Desktop can open Terminal to run setup commands that may require sudo.",
+      actions: [
+        InlineCalloutAction(label: "Request Terminal automation", systemImage: "terminal") {
+          terminalAutomationGranted = TerminalIntegration.requestTerminalAutomationPermission()
+        },
+        InlineCalloutAction(label: "Open Automation privacy", systemImage: "gearshape") {
+          guard
+            let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")
+          else { return }
+          NSWorkspace.shared.open(url)
+        }
+      ]
+    )
+  }
+
+  private var terminalAutomationTone: StatusTone {
+    guard let granted = terminalAutomationGranted else { return .neutral }
+    return granted ? .good : .warn
+  }
+
   private var gatewayIsConfigured: Bool {
     model.globalStatus?.summary.gatewayEnabled == true || model.gatewaySummaryState != nil
   }
@@ -208,7 +238,6 @@ struct SetupAssistantView: View {
       runtimeConfigured: nil,
       runtimeStatus: nil,
       runtime: nil,
-      meta: nil,
       kind: .unregistered,
       status: .unknown
     )

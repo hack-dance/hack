@@ -7,31 +7,9 @@ import type {
 } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
 import { optJson, optPretty } from "../cli/options.ts";
-import {
-  PROJECT_COMPOSE_FILENAME,
-  PROJECT_CONFIG_FILENAME,
-  PROJECT_ENV_FILENAME,
-} from "../constants.ts";
-import { type ProjectContext, sanitizeBranchSlug } from "../lib/project.ts";
 import type { RegisteredProject } from "../lib/projects-registry.ts";
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
 import { exec, run } from "../lib/shell.ts";
-import type { MuxBackendName, MuxSession } from "../mux/mux-backend.ts";
-import {
-  listMuxSessions,
-  resolveDefaultBackendName,
-  resolveMux,
-} from "../mux/mux-resolver.ts";
-import {
-  buildSessionName,
-  getNextNumericSessionSuffix,
-  parseSessionBase,
-} from "../mux/session-names.ts";
-import { attachTmuxSession, createTmuxBackend } from "../mux/tmux-backend.ts";
-import {
-  attachZellijSession,
-  createZellijBackend,
-} from "../mux/zellij-backend.ts";
 import { logger } from "../ui/logger.ts";
 import {
   buildSessionPanesEndEvent,
@@ -44,13 +22,18 @@ import {
   buildSessionStreamStartEvent,
   diffNewLines,
   parseTmuxPanesOutput,
-  type SessionStreamContext,
   splitLines,
   writeSessionStreamEvent,
 } from "./session-utils.ts";
 
-const tmuxBackend = createTmuxBackend();
-const zellijBackend = createZellijBackend();
+/**
+ * Parsed tmux session info.
+ */
+interface TmuxSession {
+  readonly name: string;
+  readonly attached: boolean;
+  readonly path: string | null;
+}
 
 const optUp = defineOption({
   name: "up",
@@ -71,6 +54,14 @@ const optName = defineOption({
   type: "string",
   long: "--name",
   description: "Custom suffix for new session (e.g., agent-1)",
+} as const);
+
+const optDetach = defineOption({
+  name: "detach",
+  type: "boolean",
+  long: "--detach",
+  short: "-d",
+  description: "Create/switch session without attaching (for GUI/non-TTY use)",
 } as const);
 
 const optTarget = defineOption({
@@ -111,7 +102,7 @@ const optMaxMs = defineOption({
 // Subcommand specs
 const listSpec = defineCommand({
   name: "list",
-  summary: "List active sessions",
+  summary: "List active tmux sessions",
   group: "Project",
   options: [],
   positionals: [],
@@ -122,7 +113,7 @@ const startSpec = defineCommand({
   name: "start",
   summary: "Start or attach to a session for a project",
   group: "Project",
-  options: [optUp, optNew, optName],
+  options: [optUp, optNew, optName, optDetach],
   positionals: [
     { name: "project", description: "Project name or path", required: false },
   ],
@@ -131,7 +122,7 @@ const startSpec = defineCommand({
 
 const stopSpec = defineCommand({
   name: "stop",
-  summary: "Stop (kill) a session",
+  summary: "Stop (kill) a tmux session",
   group: "Project",
   options: [],
   positionals: [
@@ -142,7 +133,7 @@ const stopSpec = defineCommand({
 
 const attachSpec = defineCommand({
   name: "attach",
-  summary: "Attach to an existing session",
+  summary: "Attach to an existing tmux session",
   group: "Project",
   options: [],
   positionals: [
@@ -153,7 +144,7 @@ const attachSpec = defineCommand({
 
 const execSpec = defineCommand({
   name: "exec",
-  summary: "Execute a command in a session",
+  summary: "Execute a command in a tmux session",
   group: "Project",
   options: [],
   positionals: [
@@ -235,21 +226,64 @@ type TailArgs = CommandArgs<
  * Uses clack prompts with grouped options for sessions and projects.
  */
 async function handleSessionPicker(): Promise<number> {
-  const mux = await resolveMux({ project: null });
-  const sessions = await listMuxSessions({
-    mode: mux.mode,
-    backends: mux.backends,
-  });
+  const sessions = await listTmuxSessions();
   const registry = await readProjectsRegistry();
   const projects = registry.projects;
 
   p.intro("Sessions");
 
-  const options = buildSessionPickerOptions({
-    sessions,
-    projects,
-    home: process.env.HOME ?? "",
-  });
+  const sessionNames = new Set(sessions.map((s) => s.name));
+  const home = process.env.HOME ?? "";
+
+  // Helper to shorten paths with ~/
+  const shortenPath = (path: string): string => {
+    if (home && path.startsWith(home)) {
+      return `~${path.slice(home.length)}`;
+    }
+    return path;
+  };
+
+  // Build options for clack select
+  type SessionOption = {
+    value: string;
+    label: string;
+    hint?: string;
+  };
+
+  const options: SessionOption[] = [];
+
+  // Active sessions
+  const attachedSessions = sessions.filter((s) => s.attached);
+  const detachedSessions = sessions.filter((s) => !s.attached);
+
+  for (const session of attachedSessions) {
+    options.push({
+      value: `session:${session.name}`,
+      label: session.name,
+      hint: `attached${session.path ? ` • ${shortenPath(session.path)}` : ""}`,
+    });
+  }
+
+  for (const session of detachedSessions) {
+    options.push({
+      value: `session:${session.name}`,
+      label: session.name,
+      hint: session.path ? shortenPath(session.path) : "detached",
+    });
+  }
+
+  // Projects without active sessions
+  const availableProjects = projects.filter(
+    (proj: RegisteredProject) => !sessionNames.has(proj.name)
+  );
+
+  for (const project of availableProjects) {
+    options.push({
+      value: `project:${project.name}`,
+      label: project.name,
+      hint: `new • ${shortenPath(project.repoRoot)}`,
+    });
+  }
 
   if (options.length === 0) {
     p.log.warn(
@@ -269,261 +303,109 @@ async function handleSessionPicker(): Promise<number> {
     return 0;
   }
 
-  const parsed = parseSessionPickerSelection({ selection });
-  if (!parsed) {
+  // Parse selection
+  const [type, ...rest] = selection.split(":");
+  const name = rest.join(":"); // Handle names with colons like "project:2"
+
+  if (!name) {
     p.log.error("Invalid selection");
     return 1;
   }
 
-  if (parsed.kind === "session") {
-    return await handlePickedSession({
-      selection: parsed,
-      sessions,
-      projects,
-    });
+  if (type === "session") {
+    const session = sessions.find((s) => s.name === name);
+
+    // If session is attached elsewhere, offer choice
+    if (session?.attached) {
+      const nextNum = getNextSessionNumber(sessions, name);
+
+      const action = await p.select({
+        message: `Session '${name}' is attached elsewhere`,
+        options: [
+          { value: "attach", label: "Attach", hint: "detaches other clients" },
+          { value: "new", label: "Create new", hint: `${name}:${nextNum}` },
+        ],
+      });
+
+      if (p.isCancel(action)) {
+        p.outro("Cancelled");
+        return 0;
+      }
+
+      if (action === "new") {
+        const project = projects.find(
+          (proj: RegisteredProject) => proj.name === name
+        );
+        const cwd = project?.repoRoot ?? session.path ?? process.cwd();
+        return await createAndAttachSession({
+          name: `${name}:${nextNum}`,
+          cwd,
+        });
+      }
+    }
+
+    return await attachToSession(name);
   }
 
+  // Create new session for project
   const project = projects.find(
-    (proj: RegisteredProject) => proj.name === parsed.name
+    (proj: RegisteredProject) => proj.name === name
   );
   if (!project) {
-    p.log.error(`Project not found: ${parsed.name}`);
+    p.log.error(`Project not found: ${name}`);
     return 1;
   }
-
-  return await startProjectSession({
-    project,
-    forceNew: false,
-    runUp: false,
-    customSuffix: null,
-  });
-}
-
-type SessionPickerOption = {
-  readonly value: string;
-  readonly label: string;
-  readonly hint?: string;
-};
-
-type SessionPickerSelection =
-  | {
-      readonly kind: "session";
-      readonly backend: MuxBackendName;
-      readonly name: string;
-    }
-  | { readonly kind: "project"; readonly name: string };
-
-function buildSessionPickerOptions(opts: {
-  readonly sessions: readonly MuxSession[];
-  readonly projects: readonly RegisteredProject[];
-  readonly home: string;
-}): SessionPickerOption[] {
-  const sessionNames = new Set(opts.sessions.map((s) => s.name));
-  const shortenPath = (path: string): string => {
-    if (opts.home && path.startsWith(opts.home)) {
-      return `~${path.slice(opts.home.length)}`;
-    }
-    return path;
-  };
-
-  const options: SessionPickerOption[] = [];
-
-  const attachedSessions = opts.sessions.filter((s) => s.attached === true);
-  const detachedSessions = opts.sessions.filter((s) => s.attached !== true);
-
-  for (const session of attachedSessions) {
-    options.push({
-      value: `session:${session.backend}:${session.name}`,
-      label: session.name,
-      hint: formatSessionHint({
-        backend: session.backend,
-        status: "attached",
-        path: session.path ? shortenPath(session.path) : null,
-      }),
-    });
-  }
-
-  for (const session of detachedSessions) {
-    const status = session.attached === false ? "detached" : "unknown";
-    options.push({
-      value: `session:${session.backend}:${session.name}`,
-      label: session.name,
-      hint: formatSessionHint({
-        backend: session.backend,
-        status,
-        path: session.path ? shortenPath(session.path) : null,
-      }),
-    });
-  }
-
-  for (const project of opts.projects) {
-    const base = project.name;
-    const hasSessions = [...sessionNames].some(
-      (name) => name === base || name.startsWith(`${base}--`)
-    );
-    options.push({
-      value: `project:${project.name}`,
-      label: project.name,
-      hint: `${hasSessions ? "sessions" : "new"} • ${shortenPath(project.repoRoot)}`,
-    });
-  }
-
-  return options;
-}
-
-function formatSessionHint(opts: {
-  readonly backend: MuxBackendName;
-  readonly status: "attached" | "detached" | "unknown";
-  readonly path: string | null;
-}): string | undefined {
-  const parts = [opts.backend, opts.status, opts.path].filter(
-    (part): part is string => typeof part === "string" && part.length > 0
-  );
-  return parts.length > 0 ? parts.join(" • ") : undefined;
-}
-
-function parseSessionPickerSelection(opts: {
-  readonly selection: string;
-}): SessionPickerSelection | null {
-  const [kind, a, ...rest] = opts.selection.split(":");
-
-  if (kind === "project") {
-    const name = [a, ...rest].join(":");
-    return name.length > 0 ? { kind: "project", name } : null;
-  }
-
-  if (kind === "session") {
-    const backend =
-      a === "tmux" || a === "zellij" ? (a as MuxBackendName) : null;
-    const name = rest.join(":");
-    if (!backend || name.length === 0) {
-      return null;
-    }
-    return { kind: "session", backend, name };
-  }
-
-  return null;
-}
-
-async function handlePickedSession(opts: {
-  readonly selection: Extract<SessionPickerSelection, { kind: "session" }>;
-  readonly sessions: readonly MuxSession[];
-  readonly projects: readonly RegisteredProject[];
-}): Promise<number> {
-  const session =
-    opts.sessions.find(
-      (s) =>
-        s.name === opts.selection.name && s.backend === opts.selection.backend
-    ) ?? null;
-  if (!session) {
-    p.log.error(`Session not found: ${opts.selection.name}`);
-    return 1;
-  }
-
-  const handled = await maybeHandleAttachedTmuxSession({
-    session,
-    sessions: opts.sessions,
-    projects: opts.projects,
-  });
-  if (handled !== null) {
-    return handled;
-  }
-
-  return await attachToSession({
-    backend: opts.selection.backend,
-    name: opts.selection.name,
-  });
-}
-
-async function maybeHandleAttachedTmuxSession(opts: {
-  readonly session: MuxSession;
-  readonly sessions: readonly MuxSession[];
-  readonly projects: readonly RegisteredProject[];
-}): Promise<number | null> {
-  if (!(opts.session.backend === "tmux" && opts.session.attached === true)) {
-    return null;
-  }
-
-  const base = parseSessionBase({ name: opts.session.name });
-  const nextNum = getNextNumericSessionSuffix({
-    sessions: opts.sessions,
-    base,
-  });
-  const newName = buildSessionName({ base, suffix: String(nextNum) });
-
-  const action = await p.select({
-    message: `Session '${opts.session.name}' is attached elsewhere`,
-    options: [
-      { value: "attach", label: "Attach", hint: "detaches other clients" },
-      { value: "new", label: "Create new", hint: newName },
-    ],
-  });
-  if (p.isCancel(action)) {
-    p.outro("Cancelled");
-    return 0;
-  }
-  if (action !== "new") {
-    return null;
-  }
-
-  const project = opts.projects.find(
-    (proj: RegisteredProject) => proj.name === base
-  );
-  const cwd = project?.repoRoot ?? opts.session.path ?? process.cwd();
 
   return await createAndAttachSession({
-    backend: opts.session.backend,
-    name: newName,
-    cwd,
+    name: project.name,
+    cwd: project.repoRoot,
   });
 }
 
-function buildProjectContext(project: RegisteredProject): ProjectContext {
-  return {
-    projectRoot: project.repoRoot,
-    projectDirName: project.projectDirName,
-    projectDir: project.projectDir,
-    composeFile: resolve(project.projectDir, PROJECT_COMPOSE_FILENAME),
-    envFile: resolve(project.projectDir, PROJECT_ENV_FILENAME),
-    configFile: resolve(project.projectDir, PROJECT_CONFIG_FILENAME),
-  };
+/**
+ * Get the next available session number for a base name.
+ */
+function getNextSessionNumber(
+  sessions: TmuxSession[],
+  baseName: string
+): number {
+  const existing = sessions.filter(
+    (s) => s.name === baseName || s.name.startsWith(`${baseName}:`)
+  );
+  let n = 2;
+  while (existing.some((s) => s.name === `${baseName}:${n}`)) {
+    n++;
+  }
+  return n;
 }
 
 const handleList: CommandHandlerFor<
   typeof listSpec
 > = async (): Promise<number> => {
-  const mux = await resolveMux({ project: null });
-  const sessions = await listMuxSessions({
-    mode: mux.mode,
-    backends: mux.backends,
-  });
+  const sessions = await listTmuxSessions();
   const registry = await readProjectsRegistry();
   const projects = registry.projects;
 
   if (sessions.length === 0) {
-    logger.info({ message: "No active sessions" });
+    logger.info({ message: "No active tmux sessions" });
     return 0;
   }
 
   console.log(
-    `${"Session".padEnd(26) + "Backend".padEnd(10) + "Project".padEnd(20)}Status`
+    `${"Session".padEnd(20) + "Project".padEnd(20) + "Node".padEnd(10)}Status`
   );
   console.log("-".repeat(60));
 
   for (const session of sessions) {
-    const base = parseSessionBase({ name: session.name });
-    const project = projects.find((p: RegisteredProject) => p.name === base);
+    const project = projects.find(
+      (p: RegisteredProject) => p.name === session.name
+    );
     const projectName = project?.name ?? "-";
-    let status = "unknown";
-    if (session.attached === true) {
-      status = "attached";
-    } else if (session.attached === false) {
-      status = "detached";
-    }
+    const status = session.attached ? "attached" : "detached";
     console.log(
-      session.name.padEnd(26) +
-        session.backend.padEnd(10) +
+      session.name.padEnd(20) +
         projectName.padEnd(20) +
+        "local".padEnd(10) +
         status
     );
   }
@@ -541,6 +423,7 @@ const handleStart = async ({
   const forceNew = args.options.new === true;
   const runUp = args.options.up === true;
   const customName = args.options.name;
+  const detach = args.options.detach === true;
 
   // Find project
   const registry = await readProjectsRegistry();
@@ -572,11 +455,61 @@ const handleStart = async ({
     return 1;
   }
 
-  return await startProjectSession({
-    project,
-    forceNew,
-    runUp,
-    customSuffix: typeof customName === "string" ? customName : null,
+  const baseName = project.name;
+  let sessionName = baseName;
+
+  if (forceNew || customName) {
+    if (customName) {
+      sessionName = `${baseName}:${customName}`;
+    } else {
+      // Find next available number
+      const sessions = await listTmuxSessions();
+      const existing = sessions.filter(
+        (s) => s.name === baseName || s.name.startsWith(`${baseName}:`)
+      );
+      if (existing.length > 0) {
+        let n = 2;
+        while (existing.some((s) => s.name === `${baseName}:${n}`)) {
+          n++;
+        }
+        sessionName = `${baseName}:${n}`;
+      }
+    }
+  } else {
+    // Check if session exists
+    const sessions = await listTmuxSessions();
+    const existing = sessions.find((s) => s.name === baseName);
+    if (existing) {
+      if (detach) {
+        logger.info({ message: `Session ready: ${baseName}` });
+      } else {
+        logger.info({ message: `Attaching to existing session: ${baseName}` });
+      }
+      if (runUp) {
+        await runHackUp(project.projectDir);
+      }
+      if (detach) {
+        return 0;
+      }
+      return await attachToSession(baseName);
+    }
+  }
+
+  // Run hack up if requested
+  if (runUp) {
+    await runHackUp(project.repoRoot);
+  }
+
+  // Use repoRoot (project root), not projectDir (.hack/)
+  if (detach) {
+    return await createSessionDetached({
+      name: sessionName,
+      cwd: project.repoRoot,
+    });
+  }
+  return await createAndAttachSession({
+    name: sessionName,
+    cwd: project.repoRoot,
   });
 };
 
@@ -588,14 +521,9 @@ const handleStop = async ({
 }): Promise<number> => {
   const sessionName = args.positionals.session;
 
-  const session = await findSession({ name: sessionName });
-  if (!session) {
-    logger.error({ message: `Session not found: ${sessionName}` });
-    return 1;
-  }
-
-  const backend = session.backend === "tmux" ? tmuxBackend : zellijBackend;
-  const result = await backend.killSession({ name: sessionName });
+  const result = await exec(["tmux", "kill-session", "-t", sessionName], {
+    stdin: "ignore",
+  });
   if (result.exitCode !== 0) {
     logger.error({ message: `Failed to stop session: ${sessionName}` });
     return 1;
@@ -612,12 +540,7 @@ const handleAttach = async ({
   readonly args: AttachArgs;
 }): Promise<number> => {
   const sessionName = args.positionals.session;
-  const session = await findSession({ name: sessionName });
-  if (!session) {
-    logger.error({ message: `Session not found: ${sessionName}` });
-    return 1;
-  }
-  return await attachToSession({ backend: session.backend, name: sessionName });
+  return await attachToSession(sessionName);
 };
 
 const handleExec = async ({
@@ -629,20 +552,21 @@ const handleExec = async ({
   const sessionName = args.positionals.session;
   const command = args.positionals.command;
 
-  const session = await findSession({ name: sessionName });
-  if (!session) {
-    logger.error({ message: `Session not found: ${sessionName}` });
-    return 1;
-  }
+  const result = await exec(
+    ["tmux", "send-keys", "-t", sessionName, command, "Enter"],
+    {
+      stdin: "ignore",
+    }
+  );
 
-  const backend = session.backend === "tmux" ? tmuxBackend : zellijBackend;
-  const result = await backend.execInSession({ name: sessionName, command });
   if (result.exitCode !== 0) {
-    logger.error({ message: `Failed to execute in session: ${sessionName}` });
+    logger.error({
+      message: `Failed to send command to session: ${sessionName}`,
+    });
     return 1;
   }
 
-  logger.success({ message: `Executed in ${sessionName}: ${command}` });
+  logger.success({ message: `Sent command to ${sessionName}: ${command}` });
   return 0;
 };
 
@@ -653,17 +577,6 @@ const handlePanes = async ({
   readonly args: PanesArgs;
 }): Promise<number> => {
   const sessionName = args.positionals.session;
-  const session = await findSession({ name: sessionName });
-  if (!session) {
-    process.stderr.write(`Session not found: ${sessionName}\n`);
-    return 1;
-  }
-  if (session.backend !== "tmux") {
-    process.stderr.write(
-      `Session panes are only supported for tmux sessions (got ${session.backend}).\n`
-    );
-    return 1;
-  }
   const pretty = args.options.pretty === true;
   const json = args.options.json === true || !pretty;
 
@@ -723,17 +636,6 @@ const handleCapture = async ({
   readonly args: CaptureArgs;
 }): Promise<number> => {
   const sessionName = args.positionals.session;
-  const session = await findSession({ name: sessionName });
-  if (!session) {
-    process.stderr.write(`Session not found: ${sessionName}\n`);
-    return 1;
-  }
-  if (session.backend !== "tmux") {
-    process.stderr.write(
-      `Session capture is only supported for tmux sessions (got ${session.backend}).\n`
-    );
-    return 1;
-  }
   const target =
     args.options.target ?? (await resolveActiveTarget(sessionName));
   const lines = args.options.lines ?? 200;
@@ -797,207 +699,101 @@ const handleTail = async ({
   readonly args: TailArgs;
 }): Promise<number> => {
   const sessionName = args.positionals.session;
-  const resolved = await resolveTailSession({ sessionName });
-  if (!resolved.ok) {
-    process.stderr.write(`${resolved.error}\n`);
-    return 1;
-  }
-
-  const outputMode = resolveTailOutputMode({
-    json: args.options.json === true,
-    pretty: args.options.pretty === true,
-  });
-  if (!outputMode.ok) {
-    process.stderr.write(`${outputMode.error}\n`);
-    return 1;
-  }
-
   const target =
     args.options.target ?? (await resolveActiveTarget(sessionName));
   const lines = args.options.lines ?? 200;
   const intervalMs = args.options.intervalMs ?? 500;
   const maxMs = args.options.maxMs ?? 5000;
+  const pretty = args.options.pretty === true;
+  const json = args.options.json === true || !pretty;
 
-  return await runTailStream({
-    sessionName,
+  if (json && pretty) {
+    process.stderr.write("Cannot combine --json with --pretty.\n");
+    return 1;
+  }
+
+  const context = {
+    session: sessionName,
     target,
     lines,
+    follow: true,
     intervalMs,
     maxMs,
-    json: outputMode.json,
-  });
-};
-
-async function resolveTailSession(opts: {
-  readonly sessionName: string;
-}): Promise<
-  { readonly ok: true } | { readonly ok: false; readonly error: string }
-> {
-  const session = await findSession({ name: opts.sessionName });
-  if (!session) {
-    return { ok: false, error: `Session not found: ${opts.sessionName}` };
-  }
-
-  if (session.backend !== "tmux") {
-    return {
-      ok: false,
-      error: `Session tail is only supported for tmux sessions (got ${session.backend}).`,
-    };
-  }
-
-  return { ok: true };
-}
-
-function resolveTailOutputMode(opts: {
-  readonly json: boolean;
-  readonly pretty: boolean;
-}):
-  | { readonly ok: true; readonly json: boolean }
-  | { readonly ok: false; readonly error: string } {
-  const json = opts.json || !opts.pretty;
-  if (json && opts.pretty) {
-    return { ok: false, error: "Cannot combine --json with --pretty." };
-  }
-
-  return { ok: true, json };
-}
-
-async function runTailStream(opts: {
-  readonly sessionName: string;
-  readonly target: string;
-  readonly lines: number;
-  readonly intervalMs: number;
-  readonly maxMs: number;
-  readonly json: boolean;
-}): Promise<number> {
-  const context = {
-    session: opts.sessionName,
-    target: opts.target,
-    lines: opts.lines,
-    follow: true,
-    intervalMs: opts.intervalMs,
-    maxMs: opts.maxMs,
   };
 
-  if (opts.json) {
+  if (json) {
     writeSessionStreamEvent({
       event: buildSessionStreamStartEvent({ context }),
     });
   }
 
-  const initial = await capturePaneOrError({
-    sessionName: opts.sessionName,
-    target: opts.target,
-    lines: opts.lines,
-  });
-  if (!initial.ok) {
-    return renderTailCaptureError({
-      context,
-      json: opts.json,
-      message: initial.error,
-    });
+  const initial = await capturePane({ target, lines });
+  if (initial.exitCode !== 0) {
+    const message = initial.stderr || `Failed to capture ${sessionName}`;
+    if (json) {
+      writeSessionStreamEvent({
+        event: buildSessionStreamErrorEvent({ context, message }),
+      });
+      writeSessionStreamEvent({
+        event: buildSessionStreamEndEvent({ context, reason: "error" }),
+      });
+    } else {
+      console.error(message);
+    }
+    return 1;
   }
 
   let lastOutput = initial.stdout;
   const start = Date.now();
 
-  while (Date.now() - start < opts.maxMs) {
-    await delay(opts.intervalMs);
+  while (Date.now() - start < maxMs) {
+    await delay(intervalMs);
 
-    const result = await capturePaneOrError({
-      sessionName: opts.sessionName,
-      target: opts.target,
-      lines: opts.lines,
-    });
-    if (!result.ok) {
-      return renderTailCaptureError({
-        context,
-        json: opts.json,
-        message: result.error,
-      });
+    const result = await capturePane({ target, lines });
+    if (result.exitCode !== 0) {
+      const message = result.stderr || `Failed to capture ${sessionName}`;
+      if (json) {
+        writeSessionStreamEvent({
+          event: buildSessionStreamErrorEvent({ context, message }),
+        });
+        writeSessionStreamEvent({
+          event: buildSessionStreamEndEvent({ context, reason: "error" }),
+        });
+      } else {
+        console.error(message);
+      }
+      return 1;
     }
 
-    const suffix = diffNewLines({ previous: lastOutput, next: result.stdout });
+    const nextOutput = result.stdout;
+    const suffix = diffNewLines({ previous: lastOutput, next: nextOutput });
     if (suffix) {
-      writeTailOutput({
-        json: opts.json,
-        context,
-        output: suffix,
-      });
+      if (json) {
+        for (const line of splitLines(suffix)) {
+          writeSessionStreamEvent({
+            event: buildSessionStreamLogEvent({ context, line }),
+          });
+        }
+      } else {
+        process.stdout.write(suffix);
+      }
     }
 
-    lastOutput = result.stdout;
+    lastOutput = nextOutput;
   }
 
-  if (opts.json) {
+  if (json) {
     writeSessionStreamEvent({
       event: buildSessionStreamEndEvent({ context, reason: "timeout" }),
     });
   }
 
   return 0;
-}
-
-async function capturePaneOrError(opts: {
-  readonly sessionName: string;
-  readonly target: string;
-  readonly lines: number;
-}): Promise<
-  | { readonly ok: true; readonly stdout: string }
-  | { readonly ok: false; readonly error: string }
-> {
-  const result = await capturePane({ target: opts.target, lines: opts.lines });
-  if (result.exitCode !== 0) {
-    const message = result.stderr || `Failed to capture ${opts.sessionName}`;
-    return { ok: false, error: message };
-  }
-  return { ok: true, stdout: result.stdout };
-}
-
-function renderTailCaptureError(opts: {
-  readonly context: SessionStreamContext;
-  readonly json: boolean;
-  readonly message: string;
-}): number {
-  if (opts.json) {
-    writeSessionStreamEvent({
-      event: buildSessionStreamErrorEvent({
-        context: opts.context,
-        message: opts.message,
-      }),
-    });
-    writeSessionStreamEvent({
-      event: buildSessionStreamEndEvent({
-        context: opts.context,
-        reason: "error",
-      }),
-    });
-  } else {
-    console.error(opts.message);
-  }
-  return 1;
-}
-
-function writeTailOutput(opts: {
-  readonly json: boolean;
-  readonly context: SessionStreamContext;
-  readonly output: string;
-}): void {
-  if (opts.json) {
-    for (const line of splitLines(opts.output)) {
-      writeSessionStreamEvent({
-        event: buildSessionStreamLogEvent({ context: opts.context, line }),
-      });
-    }
-    return;
-  }
-
-  process.stdout.write(opts.output);
-}
+};
 
 export const sessionCommand = defineCommand({
   name: "session",
-  summary: "Manage terminal sessions for hack projects",
+  summary: "Manage tmux sessions for hack projects",
   group: "Project",
   options: [],
   positionals: [],
@@ -1081,239 +877,121 @@ function delay(ms: number): Promise<void> {
   });
 }
 
-function resolveBackend(backend: MuxBackendName) {
-  return backend === "tmux" ? tmuxBackend : zellijBackend;
-}
-
-async function listAllSessions(): Promise<readonly MuxSession[]> {
-  const out: MuxSession[] = [];
-  if (tmuxBackend.available) {
-    out.push(...(await tmuxBackend.listSessions()));
-  }
-  if (zellijBackend.available) {
-    out.push(...(await zellijBackend.listSessions()));
-  }
-  return out;
-}
-
-async function findSession(opts: {
-  readonly name: string;
-}): Promise<MuxSession | null> {
-  const sessions = await listAllSessions();
-  return sessions.find((s) => s.name === opts.name) ?? null;
-}
-
-async function attachToSession(opts: {
-  readonly backend: MuxBackendName;
-  readonly name: string;
-}): Promise<number> {
-  if (opts.backend === "tmux") {
-    return await attachTmuxSession({ name: opts.name, run });
-  }
-  return await attachZellijSession({
-    name: opts.name,
-    createIfMissing: false,
-    run,
+/**
+ * List all tmux sessions.
+ */
+async function listTmuxSessions(): Promise<TmuxSession[]> {
+  const separator = "|||HACK_SESSION_FIELD|||";
+  const format = [
+    "#{session_name}",
+    "#{session_attached}",
+    "#{session_path}",
+  ].join(separator);
+  const result = await exec(["tmux", "list-sessions", "-F", format], {
+    stdin: "ignore",
   });
+
+  if (result.exitCode !== 0) {
+    return [];
+  }
+
+  const sessions: TmuxSession[] = [];
+  for (const line of result.stdout.split("\n")) {
+    if (!line.trim()) {
+      continue;
+    }
+    const fields = parseTmuxSessionFields(line, separator, 3);
+    if (!fields) {
+      continue;
+    }
+    const [name, attached, path] = fields;
+    if (name) {
+      sessions.push({
+        name,
+        attached: attached === "1",
+        path: path || null,
+      });
+    }
+  }
+
+  return sessions;
 }
 
+function parseTmuxSessionFields(
+  line: string,
+  separator: string,
+  expectedCount: number
+): readonly string[] | null {
+  const bySeparator = line.split(separator);
+  if (bySeparator.length === expectedCount) {
+    return bySeparator;
+  }
+  const byTab = line.split("\t");
+  if (byTab.length === expectedCount) {
+    return byTab;
+  }
+  return null;
+}
+
+/**
+ * Attach to or switch to an existing tmux session.
+ * Uses switch-client when already inside tmux to avoid nesting.
+ * Uses -d to detach other clients (avoids size conflicts from different terminals).
+ */
+async function attachToSession(name: string): Promise<number> {
+  const insideTmux = Boolean(process.env.TMUX);
+
+  if (insideTmux) {
+    // Already in tmux - switch to the session instead of nesting
+    const exitCode = await run(["tmux", "switch-client", "-t", name], {
+      stdin: "inherit",
+    });
+    return exitCode;
+  }
+
+  // Outside tmux - attach with -d to detach other clients
+  const exitCode = await run(["tmux", "attach", "-d", "-t", name], {
+    stdin: "inherit",
+  });
+  return exitCode;
+}
+
+/**
+ * Create a new tmux session and attach/switch to it.
+ */
 async function createAndAttachSession(opts: {
-  readonly backend: MuxBackendName;
   readonly name: string;
   readonly cwd: string;
 }): Promise<number> {
-  const backend = resolveBackend(opts.backend);
-  if (!backend.available) {
-    logger.error({ message: `${opts.backend} is not available` });
-    return 1;
-  }
-
-  const create = await backend.createSession({
+  const createExitCode = await createSessionDetached({
     name: opts.name,
     cwd: opts.cwd,
   });
-  if (!create.ok) {
-    logger.error({
-      message: `Failed to create session: ${opts.name}`,
-      fields: { error: create.error },
-    });
-    if (create.stderr) {
-      logger.error({ message: create.stderr });
-    }
+
+  if (createExitCode !== 0) {
+    return createExitCode;
+  }
+
+  // Switch or attach depending on context (attachToSession handles this)
+  return await attachToSession(opts.name);
+}
+
+async function createSessionDetached(opts: {
+  readonly name: string;
+  readonly cwd: string;
+}): Promise<number> {
+  const createResult = await exec(
+    ["tmux", "new-session", "-d", "-s", opts.name, "-c", opts.cwd],
+    { stdin: "ignore" }
+  );
+
+  if (createResult.exitCode !== 0) {
+    logger.error({ message: `Failed to create session: ${opts.name}` });
     return 1;
   }
 
   logger.info({ message: `Created session: ${opts.name}` });
-  return await attachToSession({ backend: opts.backend, name: opts.name });
-}
-
-async function startProjectSession(opts: {
-  readonly project: RegisteredProject;
-  readonly forceNew: boolean;
-  readonly runUp: boolean;
-  readonly customSuffix: string | null;
-}): Promise<number> {
-  const ctx = buildProjectContext(opts.project);
-  const mux = await resolveMux({ project: ctx });
-
-  if (mux.mode === "none") {
-    logger.error({
-      message:
-        "Sessions are disabled (sessions.mux=none). Set sessions.mux to auto|tmux|zellij to enable.",
-    });
-    return 1;
-  }
-
-  const sessions = await listMuxSessions({
-    mode: mux.mode,
-    backends: mux.backends,
-  });
-  const baseName = opts.project.name;
-
-  const baseSession = sessions.find((s) => s.name === baseName) ?? null;
-
-  const desiredName = resolveDesiredSessionName({
-    baseName,
-    sessions,
-    baseSession,
-    forceNew: opts.forceNew,
-    customSuffix: opts.customSuffix,
-  });
-  if (!desiredName.ok) {
-    logger.error({ message: desiredName.error });
-    return 1;
-  }
-
-  const defaultBackend = resolveDefaultBackendName({
-    mode: mux.mode,
-    backends: mux.backends,
-  });
-  const backend = resolveProjectSessionBackend({
-    mode: mux.mode,
-    backends: mux.backends,
-    baseSession,
-    defaultBackend,
-  });
-  if (!backend.ok) {
-    logger.error({ message: backend.error });
-    return 1;
-  }
-
-  if (opts.runUp) {
-    await runHackUp(opts.project.repoRoot);
-  }
-
-  const existing =
-    sessions.find(
-      (s) => s.backend === backend.value && s.name === desiredName.value
-    ) ?? null;
-  if (
-    existing &&
-    shouldAttachToExistingProjectSession({
-      baseName,
-      desiredName: desiredName.value,
-      forceNew: opts.forceNew,
-      customSuffix: opts.customSuffix,
-    })
-  ) {
-    logger.info({
-      message: `Attaching to existing session: ${desiredName.value}`,
-    });
-    return await attachToSession({
-      backend: backend.value,
-      name: desiredName.value,
-    });
-  }
-
-  return await createAndAttachSession({
-    backend: backend.value,
-    name: desiredName.value,
-    cwd: opts.project.repoRoot,
-  });
-}
-
-type ParseResult<T> =
-  | { readonly ok: true; readonly value: T }
-  | { readonly ok: false; readonly error: string };
-
-function resolveDesiredSessionName(opts: {
-  readonly baseName: string;
-  readonly sessions: readonly MuxSession[];
-  readonly baseSession: MuxSession | null;
-  readonly forceNew: boolean;
-  readonly customSuffix: string | null;
-}): ParseResult<string> {
-  if (opts.customSuffix) {
-    const suffix = sanitizeBranchSlug(opts.customSuffix);
-    if (suffix.length === 0) {
-      return { ok: false, error: "Invalid --name (empty after sanitization)." };
-    }
-    return {
-      ok: true,
-      value: buildSessionName({ base: opts.baseName, suffix }),
-    };
-  }
-
-  if (!opts.forceNew) {
-    return { ok: true, value: opts.baseName };
-  }
-
-  if (!opts.baseSession) {
-    return { ok: true, value: opts.baseName };
-  }
-
-  const n = getNextNumericSessionSuffix({
-    sessions: opts.sessions,
-    base: opts.baseName,
-  });
-  return {
-    ok: true,
-    value: buildSessionName({ base: opts.baseName, suffix: String(n) }),
-  };
-}
-
-function resolveProjectSessionBackend(opts: {
-  readonly mode: Awaited<ReturnType<typeof resolveMux>>["mode"];
-  readonly backends: Awaited<ReturnType<typeof resolveMux>>["backends"];
-  readonly baseSession: MuxSession | null;
-  readonly defaultBackend: MuxBackendName | null;
-}): ParseResult<MuxBackendName> {
-  const backend: MuxBackendName | null =
-    opts.baseSession?.backend ?? opts.defaultBackend;
-  if (backend) {
-    return { ok: true, value: backend };
-  }
-
-  const available = [
-    opts.backends.get("tmux")?.available ? "tmux" : null,
-    opts.backends.get("zellij")?.available ? "zellij" : null,
-  ]
-    .filter((v): v is string => typeof v === "string")
-    .join(", ");
-
-  if (available.length > 0) {
-    return {
-      ok: false,
-      error: `No session backend available for sessions.mux=${opts.mode}. Available: ${available}`,
-    };
-  }
-
-  return {
-    ok: false,
-    error:
-      "No session backend available (install tmux or zellij, or set sessions.mux=none).",
-  };
-}
-
-function shouldAttachToExistingProjectSession(opts: {
-  readonly baseName: string;
-  readonly desiredName: string;
-  readonly forceNew: boolean;
-  readonly customSuffix: string | null;
-}): boolean {
-  return (
-    !(opts.forceNew || opts.customSuffix) && opts.desiredName === opts.baseName
-  );
+  return 0;
 }
 
 /**

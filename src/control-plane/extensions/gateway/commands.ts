@@ -27,6 +27,13 @@ export const GATEWAY_COMMANDS: readonly ExtensionCommand[] = [
         scope,
       });
 
+      if (parsed.value.json) {
+        process.stdout.write(
+          `${JSON.stringify({ token: issued.token, record: issued.record }, null, 2)}\n`
+        );
+        return 0;
+      }
+
       await display.kv({
         title: "Gateway token",
         entries: [
@@ -48,9 +55,19 @@ export const GATEWAY_COMMANDS: readonly ExtensionCommand[] = [
     name: "token-list",
     summary: "List gateway tokens",
     scope: "global",
-    handler: async ({ args: _args }) => {
+    handler: async ({ ctx, args }) => {
+      const parsed = parseTokenListArgs({ args });
+      if (!parsed.ok) {
+        ctx.logger.error({ message: parsed.error });
+        return 1;
+      }
       const paths = resolveDaemonPaths({});
       const tokens = await listGatewayTokens({ rootDir: paths.root });
+
+      if (parsed.value.json) {
+        process.stdout.write(`${JSON.stringify({ tokens }, null, 2)}\n`);
+        return 0;
+      }
 
       if (tokens.length === 0) {
         await display.panel({
@@ -80,27 +97,31 @@ export const GATEWAY_COMMANDS: readonly ExtensionCommand[] = [
     summary: "Revoke a gateway token by id",
     scope: "global",
     handler: async ({ ctx, args }) => {
-      const tokenId = (args[0] ?? "").trim();
-      if (!tokenId) {
-        ctx.logger.error({
-          message: "Usage: hack x gateway token-revoke <token-id>",
-        });
+      const parsed = parseTokenRevokeArgs({ args });
+      if (!parsed.ok) {
+        ctx.logger.error({ message: parsed.error });
         return 1;
       }
 
       const paths = resolveDaemonPaths({});
       const revoked = await revokeGatewayToken({
         rootDir: paths.root,
-        tokenId,
+        tokenId: parsed.value.tokenId,
       });
+      if (parsed.value.json) {
+        process.stdout.write(
+          `${JSON.stringify({ id: parsed.value.tokenId, revoked }, null, 2)}\n`
+        );
+        return revoked ? 0 : 1;
+      }
       if (!revoked) {
         ctx.logger.warn({
-          message: `Token not found or already revoked: ${tokenId}`,
+          message: `Token not found or already revoked: ${parsed.value.tokenId}`,
         });
         return 1;
       }
 
-      ctx.logger.success({ message: `Revoked token ${tokenId}` });
+      ctx.logger.success({ message: `Revoked token ${parsed.value.tokenId}` });
       return 0;
     },
   },
@@ -109,157 +130,177 @@ export const GATEWAY_COMMANDS: readonly ExtensionCommand[] = [
 type TokenCreateArgs = {
   readonly label?: string;
   readonly scope: GatewayTokenScope;
+  readonly json: boolean;
 };
+
+type TokenListArgs = {
+  readonly json: boolean;
+};
+
+type TokenListParseResult =
+  | { readonly ok: true; readonly value: TokenListArgs }
+  | { readonly ok: false; readonly error: string };
+
+type TokenRevokeArgs = {
+  readonly tokenId: string;
+  readonly json: boolean;
+};
+
+type TokenRevokeParseResult =
+  | { readonly ok: true; readonly value: TokenRevokeArgs }
+  | { readonly ok: false; readonly error: string };
 
 type TokenCreateParseResult =
   | { readonly ok: true; readonly value: TokenCreateArgs }
   | { readonly ok: false; readonly error: string };
 
-type ParseResult<T> =
-  | { readonly ok: true; readonly value: T }
-  | { readonly ok: false; readonly error: string };
-
 function parseTokenCreateArgs(opts: {
   readonly args: readonly string[];
 }): TokenCreateParseResult {
-  const state: { label?: string; scope: GatewayTokenScope } = { scope: "read" };
+  let label: string | undefined;
+  let scope: GatewayTokenScope = "read";
+  let json = false;
+
+  const takeValue = (
+    _token: string,
+    value: string | undefined
+  ): string | null => {
+    if (!value || value.startsWith("-")) {
+      return null;
+    }
+    return value;
+  };
 
   for (let i = 0; i < opts.args.length; i += 1) {
     const token = opts.args[i] ?? "";
-
     if (token === "--") {
       const rest = opts.args.slice(i + 1);
-      if (rest.length > 0 && !state.label) {
-        state.label = normalizeLabel(rest[0] ?? "");
+      if (rest.length > 0 && !label) {
+        label = normalizeLabel(rest[0] ?? "");
       }
       break;
     }
 
-    const parsed = parseTokenCreateToken({
-      token,
-      next: opts.args[i + 1],
-      state,
-    });
-    if (!parsed.ok) {
-      return { ok: false, error: parsed.error };
+    if (token === "--write") {
+      scope = "write";
+      continue;
     }
 
-    state.label = parsed.value.state.label;
-    state.scope = parsed.value.state.scope;
-    i += parsed.value.consume;
+    if (token === "--json") {
+      json = true;
+      continue;
+    }
+
+    if (token.startsWith("--scope=")) {
+      const value = token.slice("--scope=".length).trim();
+      const parsed = parseScope(value);
+      if (!parsed) {
+        return { ok: false, error: "Invalid --scope (use read|write)." };
+      }
+      scope = parsed;
+      continue;
+    }
+
+    if (token === "--scope") {
+      const value = takeValue(token, opts.args[i + 1]);
+      if (!value) {
+        return { ok: false, error: "--scope requires a value." };
+      }
+      const parsed = parseScope(value);
+      if (!parsed) {
+        return { ok: false, error: "Invalid --scope (use read|write)." };
+      }
+      scope = parsed;
+      i += 1;
+      continue;
+    }
+
+    if (token.startsWith("--label=")) {
+      label = normalizeLabel(token.slice("--label=".length));
+      continue;
+    }
+
+    if (token === "--label") {
+      const value = takeValue(token, opts.args[i + 1]);
+      if (!value) {
+        return { ok: false, error: "--label requires a value." };
+      }
+      label = normalizeLabel(value);
+      i += 1;
+      continue;
+    }
+
+    if (token.startsWith("-")) {
+      return { ok: false, error: `Unknown option: ${token}` };
+    }
+
+    if (!label) {
+      label = normalizeLabel(token);
+      continue;
+    }
+
+    return { ok: false, error: `Unexpected argument: ${token}` };
   }
 
   return {
     ok: true,
     value: {
-      ...(state.label ? { label: state.label } : {}),
-      scope: state.scope,
+      ...(label ? { label } : {}),
+      scope,
+      json,
     },
   };
 }
 
-type TokenCreateState = {
-  readonly label?: string;
-  readonly scope: GatewayTokenScope;
-};
-
-function parseTokenCreateToken(opts: {
-  readonly token: string;
-  readonly next: string | undefined;
-  readonly state: TokenCreateState;
-}): ParseResult<{
-  readonly state: TokenCreateState;
-  readonly consume: number;
-}> {
-  if (opts.token === "--write") {
-    return {
-      ok: true,
-      value: { state: { ...opts.state, scope: "write" }, consume: 0 },
-    };
-  }
-
-  const scopeInline = parseInlineFlag({ token: opts.token, name: "--scope" });
-  if (scopeInline) {
-    const scope = parseScope(scopeInline);
-    if (!scope) {
-      return { ok: false, error: "Invalid --scope (use read|write)." };
+function parseTokenListArgs(opts: {
+  readonly args: readonly string[];
+}): TokenListParseResult {
+  let json = false;
+  for (const token of opts.args) {
+    if (token === "--json") {
+      json = true;
+      continue;
     }
-    return { ok: true, value: { state: { ...opts.state, scope }, consume: 0 } };
+    return { ok: false, error: `Unknown option: ${token}` };
   }
-
-  if (opts.token === "--scope") {
-    const scopeValue = takeFlagValue({ token: opts.token, value: opts.next });
-    if (!scopeValue) {
-      return { ok: false, error: "--scope requires a value." };
-    }
-    const scope = parseScope(scopeValue);
-    if (!scope) {
-      return { ok: false, error: "Invalid --scope (use read|write)." };
-    }
-    return { ok: true, value: { state: { ...opts.state, scope }, consume: 1 } };
-  }
-
-  const labelInline = parseInlineFlag({ token: opts.token, name: "--label" });
-  if (labelInline !== null) {
-    return {
-      ok: true,
-      value: {
-        state: { ...opts.state, label: normalizeLabel(labelInline) },
-        consume: 0,
-      },
-    };
-  }
-
-  if (opts.token === "--label") {
-    const labelValue = takeFlagValue({ token: opts.token, value: opts.next });
-    if (!labelValue) {
-      return { ok: false, error: "--label requires a value." };
-    }
-    return {
-      ok: true,
-      value: {
-        state: { ...opts.state, label: normalizeLabel(labelValue) },
-        consume: 1,
-      },
-    };
-  }
-
-  if (opts.token.startsWith("-")) {
-    return { ok: false, error: `Unknown option: ${opts.token}` };
-  }
-
-  if (!opts.state.label) {
-    return {
-      ok: true,
-      value: {
-        state: { ...opts.state, label: normalizeLabel(opts.token) },
-        consume: 0,
-      },
-    };
-  }
-
-  return { ok: false, error: `Unexpected argument: ${opts.token}` };
+  return { ok: true, value: { json } };
 }
 
-function parseInlineFlag(opts: {
-  readonly token: string;
-  readonly name: string;
-}): string | null {
-  const prefix = `${opts.name}=`;
-  if (!opts.token.startsWith(prefix)) {
-    return null;
-  }
-  return opts.token.slice(prefix.length).trim();
-}
+function parseTokenRevokeArgs(opts: {
+  readonly args: readonly string[];
+}): TokenRevokeParseResult {
+  let tokenId: string | null = null;
+  let json = false;
 
-function takeFlagValue(opts: {
-  readonly token: string;
-  readonly value: string | undefined;
-}): string | null {
-  if (!opts.value || opts.value.startsWith("-")) {
-    return null;
+  for (const token of opts.args) {
+    if (token === "--json") {
+      json = true;
+      continue;
+    }
+    if (token.startsWith("-")) {
+      return { ok: false, error: `Unknown option: ${token}` };
+    }
+    if (!tokenId) {
+      tokenId = token.trim();
+      continue;
+    }
+    return { ok: false, error: `Unexpected argument: ${token}` };
   }
-  return opts.value;
+
+  if (!tokenId) {
+    return {
+      ok: false,
+      error: "Usage: hack x gateway token-revoke <token-id> [--json]",
+    };
+  }
+
+  return {
+    ok: true,
+    value: {
+      tokenId,
+      json,
+    },
+  };
 }
 
 function parseScope(value: string): GatewayTokenScope | null {

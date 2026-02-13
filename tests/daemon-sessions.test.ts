@@ -112,6 +112,19 @@ describe.skipIf(!hasTmux)("handleSessionRoutes", () => {
       expect(result).not.toBeNull();
       expect(result?.status).toBe(404);
     });
+
+    test("returns 400 for invalid session id in path", async () => {
+      const req = mockRequest({
+        method: "GET",
+        path: "/v1/sessions/invalid%20name",
+      });
+      const url = new URL(req.url);
+      const result = await handleSessionRoutes({ req, url });
+      expect(result).not.toBeNull();
+      expect(result?.status).toBe(400);
+      const body = await parseResponse(result!);
+      expect(body?.error).toContain("invalid_name");
+    });
   });
 
   describe("session name validation", () => {

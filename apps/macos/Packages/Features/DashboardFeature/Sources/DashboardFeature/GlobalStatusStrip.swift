@@ -18,7 +18,7 @@ struct GlobalStatusStrip: View {
   }
 
   var body: some View {
-    HStack(spacing: placement == .titlebar ? 10 : 10) {
+    HStack(spacing: 10) {
       selectorPill
       if placement != .titlebar {
         Spacer()
@@ -28,7 +28,10 @@ struct GlobalStatusStrip: View {
         Text(lastUpdatedText)
           .font(.mono(.caption2))
           .foregroundStyle(.secondary)
+          .lineLimit(1)
+          .truncationMode(.tail)
       }
+      titlebarProjectActionControl
       if placement == .titlebar {
         Divider()
           .frame(height: 14)
@@ -94,12 +97,12 @@ struct GlobalStatusStrip: View {
       } label: {
         Image(systemName: "ellipsis")
           .font(.system(size: 12, weight: .semibold))
-          .foregroundStyle(.primary.opacity(0.85))
+          .foregroundStyle(titlebarIconForeground)
           .frame(width: 22, height: 22)
           .background(
             Circle()
               .strokeBorder(
-                colorScheme == .dark ? Color.white.opacity(0.14) : Color.black.opacity(0.10),
+                titlebarIconStroke,
                 lineWidth: 1
               )
               .background(Circle().fill(Color.clear))
@@ -114,15 +117,29 @@ struct GlobalStatusStrip: View {
     .padding(.horizontal, placement == .titlebar ? 10 : 0)
     .padding(.vertical, placement == .titlebar ? 4 : 6)
     .background(titlebarPillBackground)
+    .fixedSize(horizontal: placement == .titlebar, vertical: false)
+    .animation(.easeInOut(duration: 0.18), value: stripLayoutSignature)
   }
 
   private var selectorPill: some View {
     Menu {
-      Button("System: Runtime") {
-        model.selectedItem = .runtime
+      Button("Dashboard") {
+        model.selectedItem = .home
       }
-      Button("System: Gateway") {
-        model.selectedItem = .gateway
+      Divider()
+      Button("Settings: Runtime") {
+        NotificationCenter.default.post(
+          name: .hackSettingsRequested,
+          object: nil,
+          userInfo: [SettingsNavigationRequest.paneKey: SettingsSidebarItem.runtime.rawValue]
+        )
+      }
+      Button("Settings: Gateway") {
+        NotificationCenter.default.post(
+          name: .hackSettingsRequested,
+          object: nil,
+          userInfo: [SettingsNavigationRequest.paneKey: SettingsSidebarItem.gateway.rawValue]
+        )
       }
       Divider()
       ForEach(model.projects) { project in
@@ -137,12 +154,13 @@ struct GlobalStatusStrip: View {
         Text(selectorLabel)
           .font(.mono(.caption, weight: .semibold))
           .lineLimit(1)
+          .truncationMode(.tail)
+          .frame(maxWidth: placement == .titlebar ? 220 : .infinity, alignment: .leading)
         Image(systemName: "chevron.down")
           .font(.system(size: 10, weight: .semibold))
           .foregroundStyle(.secondary)
           .offset(y: 0.5)
       }
-      .frame(minWidth: placement == .titlebar ? 160 : 0, alignment: .leading)
       .padding(.horizontal, placement == .titlebar ? 4 : 12)
       .padding(.vertical, placement == .titlebar ? 2 : 6)
       .background(selectorBackground)
@@ -164,15 +182,19 @@ struct GlobalStatusStrip: View {
   private var titlebarPillBackground: some View {
     if placement == .titlebar {
       RoundedRectangle(cornerRadius: 999, style: .continuous)
-        .fill(colorScheme == .dark ? AnyShapeStyle(.regularMaterial) : AnyShapeStyle(Color.white.opacity(0.78)))
+        .fill(.regularMaterial)
+        .overlay(
+          RoundedRectangle(cornerRadius: 999, style: .continuous)
+            .fill(titlebarPillTint)
+        )
         .overlay(
           RoundedRectangle(cornerRadius: 999, style: .continuous)
             .strokeBorder(
-              colorScheme == .dark ? Color.white.opacity(0.10) : Color.black.opacity(0.08),
+              titlebarPillStroke,
               lineWidth: 1
             )
         )
-        .shadow(color: Color.black.opacity(0.10), radius: 18, x: 0, y: 10)
+        .shadow(color: titlebarPillShadow, radius: 18, x: 0, y: 10)
     } else {
       EmptyView()
     }
@@ -207,6 +229,11 @@ struct GlobalStatusStrip: View {
   @ViewBuilder
   private var statusCluster: some View {
     switch model.selectedItem {
+    case .home:
+      HStack(spacing: 8) {
+        StatusPill(text: runtimeLabel, tone: runtimeTone)
+        StatusPill(text: gatewayLabel, tone: gatewayTone)
+      }
     case .runtime:
       HStack(spacing: 8) {
         StatusPill(text: runtimeLabel, tone: runtimeTone)
@@ -217,17 +244,13 @@ struct GlobalStatusStrip: View {
     case let .project(id):
       if let project = model.projects.first(where: { $0.id == id }) {
         if project.isRuntimeConfigured {
-          HStack(spacing: 6) {
-            Text(project.runtimeStatusLabel)
-              .font(.mono(.caption))
-              .foregroundStyle(.secondary)
-            RuntimeStatusDot(
-              status: project.runtimeStatus ?? fallbackRuntimeStatus(for: project),
-              runtimeHealthy: model.runtimeOverallOk
-            )
-          }
-        } else {
+          projectRuntimeCluster(for: project)
+        } else if project.status == .missing {
+          StatusPill(text: "Project missing", tone: .warn)
+        } else if project.isExtensionOnly {
           LabelBadge(label: project.featureLabel ?? "Extensions", color: .purple)
+        } else {
+          StatusPill(text: "Runtime not configured", tone: .neutral)
         }
       } else {
         StatusPill(text: "Project: unknown", tone: .neutral)
@@ -237,16 +260,90 @@ struct GlobalStatusStrip: View {
     }
   }
 
+  private func projectRuntimeCluster(for project: ProjectSummary) -> some View {
+    HStack(spacing: 8) {
+      Text(project.runtimeStatusLabel)
+        .font(.mono(.caption))
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+        .truncationMode(.tail)
+      RuntimeStatusDot(
+        status: project.runtimeStatus ?? fallbackRuntimeStatus(for: project),
+        runtimeHealthy: model.runtimeOverallOk
+      )
+    }
+  }
+
+  @ViewBuilder
+  private var titlebarProjectActionControl: some View {
+    if placement == .titlebar,
+       let project = selectedProject,
+       project.isRuntimeConfigured {
+      projectActionControl(for: project)
+    }
+  }
+
+  @ViewBuilder
+  private func projectActionControl(for project: ProjectSummary) -> some View {
+    if let action = model.projectLifecycleActions[project.id] {
+      HStack(spacing: 4) {
+        ProgressView()
+          .controlSize(.small)
+        Text(action == .starting ? "Starting…" : "Stopping…")
+          .font(.mono(.caption2))
+          .foregroundStyle(.secondary)
+      }
+      .padding(.horizontal, 6)
+      .padding(.vertical, 3)
+      .background(
+        Capsule(style: .continuous)
+          .fill(titlebarActionChipFill)
+      )
+    } else if canStopProject(project) {
+      Button {
+        Task { await model.stopProject(project) }
+      } label: {
+        Image(systemName: "stop.fill")
+          .font(.system(size: 10, weight: .semibold))
+          .frame(width: 18, height: 18)
+      }
+      .buttonStyle(PressableCircleButtonStyle())
+      .help("Stop project")
+    } else if canStartProject(project) {
+      Button {
+        Task { await model.startProject(project) }
+      } label: {
+        Image(systemName: "play.fill")
+          .font(.system(size: 10, weight: .semibold))
+          .frame(width: 18, height: 18)
+      }
+      .buttonStyle(PressableCircleButtonStyle())
+      .help("Start project")
+    }
+  }
+
   private var runtimeLabel: String {
-    if model.runtimeOverallOk == true { return "Runtime: healthy" }
-    if model.runtimeOverallOk == false { return "Runtime: degraded" }
-    return "Runtime: unknown"
+    switch model.runtimeHealthState {
+    case .healthy:
+      return "Runtime: healthy"
+    case .down:
+      return "Runtime: down"
+    case .degraded:
+      return "Runtime: degraded"
+    case .unknown:
+      return "Runtime: unknown"
+    }
   }
 
   private var runtimeTone: StatusTone {
-    if model.runtimeOverallOk == true { return .good }
-    if model.runtimeOverallOk == false { return .warn }
-    return .neutral
+    switch model.runtimeHealthState {
+    case .healthy:
+      return .good
+    case .down, .degraded:
+      return .warn
+    case .unknown:
+      return .neutral
+    }
   }
 
   private var daemonLabel: String {
@@ -313,6 +410,33 @@ struct GlobalStatusStrip: View {
     return model.projects.first(where: { $0.id == id })
   }
 
+  private var stripLayoutSignature: String {
+    let selectedKey: String = switch model.selectedItem {
+    case .home:
+      "home"
+    case .runtime:
+      "runtime"
+    case .gateway:
+      "gateway"
+    case let .project(id):
+      "project:\(id)"
+    case .none:
+      "none"
+    }
+    let projectAction = selectedProject.flatMap { project in
+      model.projectLifecycleActions[project.id]
+    }
+    let actionKey: String = switch projectAction {
+    case .starting:
+      "starting"
+    case .stopping:
+      "stopping"
+    case .none:
+      "idle"
+    }
+    return "\(selectedKey)|\(selectorLabel)|\(actionKey)"
+  }
+
   private func canStartProject(_ project: ProjectSummary) -> Bool {
     project.isRuntimeConfigured
       && (project.status == .stopped || project.status == .unknown || project.status == .unregistered)
@@ -348,6 +472,9 @@ struct GlobalStatusStrip: View {
        let project = model.projects.first(where: { $0.id == id }) {
       return project.name
     }
+    if model.selectedItem == .home {
+      return "Dashboard"
+    }
     if model.selectedItem == .gateway {
       return "Gateway"
     }
@@ -356,6 +483,8 @@ struct GlobalStatusStrip: View {
 
   private var selectorIcon: String {
     switch model.selectedItem {
+    case .home:
+      return "square.grid.2x2"
     case .gateway:
       return "dot.radiowaves.left.and.right"
     case .runtime:
@@ -381,5 +510,53 @@ struct GlobalStatusStrip: View {
       return .unknown
     }
   }
-}
 
+  private var titlebarIconForeground: Color {
+    dynamicColor(
+      light: NSColor.black.withAlphaComponent(0.74),
+      dark: NSColor.white.withAlphaComponent(0.92)
+    )
+  }
+
+  private var titlebarIconStroke: Color {
+    dynamicColor(
+      light: NSColor.black.withAlphaComponent(0.12),
+      dark: NSColor.white.withAlphaComponent(0.20)
+    )
+  }
+
+  private var titlebarPillTint: Color {
+    dynamicColor(
+      light: NSColor.white.withAlphaComponent(0.56),
+      dark: NSColor.black.withAlphaComponent(0.40)
+    )
+  }
+
+  private var titlebarPillStroke: Color {
+    dynamicColor(
+      light: NSColor.black.withAlphaComponent(0.10),
+      dark: NSColor.white.withAlphaComponent(0.14)
+    )
+  }
+
+  private var titlebarPillShadow: Color {
+    dynamicColor(
+      light: NSColor.black.withAlphaComponent(0.12),
+      dark: NSColor.black.withAlphaComponent(0.28)
+    )
+  }
+
+  private var titlebarActionChipFill: Color {
+    dynamicColor(
+      light: NSColor.black.withAlphaComponent(0.05),
+      dark: NSColor.white.withAlphaComponent(0.09)
+    )
+  }
+
+  private func dynamicColor(light: NSColor, dark: NSColor) -> Color {
+    Color(nsColor: NSColor(name: nil) { appearance in
+      let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+      return isDark ? dark : light
+    })
+  }
+}

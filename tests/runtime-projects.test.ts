@@ -26,11 +26,29 @@ function makeContainer(opts: {
     status: opts.status,
     name: opts.name,
     ports: opts.ports ?? "",
-    image: null,
-    ip: null,
-    mounts: [],
-    labels: {},
     workingDir: `/tmp/${opts.project}/.hack`,
+    image: "imbios/bun-node:latest",
+    labels: {
+      "com.docker.compose.project": opts.project,
+      "com.docker.compose.service": opts.service,
+    },
+    mounts: [
+      {
+        type: "bind",
+        source: `/tmp/${opts.project}`,
+        destination: "/app",
+        mode: "",
+        rw: true,
+      },
+    ],
+    networks: [
+      {
+        name: "default",
+        ipAddress: "172.30.0.10",
+        gateway: "172.30.0.1",
+        aliases: [opts.service],
+      },
+    ],
   };
 }
 
@@ -123,4 +141,26 @@ test("serializeRuntimeProject includes container ports", () => {
   expect(services[0]?.service).toBe("api");
   const containers = services[0]?.containers as Record<string, unknown>[];
   expect(containers[0]?.ports).toBe("8080/tcp");
+  expect(containers[0]?.image).toBe("imbios/bun-node:latest");
+  expect(containers[0]?.labels).toEqual({
+    "com.docker.compose.project": "alpha",
+    "com.docker.compose.service": "api",
+  });
+  expect(containers[0]?.mounts).toEqual([
+    {
+      type: "bind",
+      source: "/tmp/alpha",
+      destination: "/app",
+      mode: "",
+      rw: true,
+    },
+  ]);
+  expect(containers[0]?.networks).toEqual([
+    {
+      name: "default",
+      ip_address: "172.30.0.10",
+      gateway: "172.30.0.1",
+      aliases: ["api"],
+    },
+  ]);
 });

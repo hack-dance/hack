@@ -151,6 +151,17 @@ async function dispatchExtensionCommand(opts: {
     });
   }
 
+  const disabledCommandResult = await dispatchDisabledExtensionCommandIfAllowed(
+    {
+      loaded: opts.loaded,
+      extension: opts.extension,
+      invocation: opts.invocation,
+    }
+  );
+  if (disabledCommandResult !== null) {
+    return disabledCommandResult;
+  }
+
   const didEnable = await promptEnableExtension({
     loaded: opts.loaded,
     extension: opts.extension,
@@ -175,6 +186,29 @@ async function dispatchExtensionCommand(opts: {
     loaded: reloaded,
     extension: nextExtension,
     invocation: opts.invocation,
+  });
+}
+
+async function dispatchDisabledExtensionCommandIfAllowed(opts: {
+  readonly loaded: Awaited<ReturnType<typeof loadExtensionManagerForCli>>;
+  readonly extension: ResolvedExtension;
+  readonly invocation: ExtensionInvocation;
+}): Promise<number | null> {
+  if (!opts.invocation.command || opts.invocation.command === "help") {
+    return null;
+  }
+
+  const command = opts.extension.commands.find(
+    (entry) =>
+      entry.name === opts.invocation.command && entry.allowWhenDisabled === true
+  );
+  if (!command) {
+    return null;
+  }
+
+  return await command.handler({
+    ctx: opts.loaded.context,
+    args: opts.invocation.args,
   });
 }
 

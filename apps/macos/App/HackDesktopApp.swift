@@ -30,6 +30,9 @@ struct HackDesktopApp: App {
       DashboardView()
         .preferredColorScheme(preferredColorScheme)
         .environment(model)
+        .onReceive(NotificationCenter.default.publisher(for: .hackCheckForUpdatesRequested)) { _ in
+          checkForUpdatesAction()
+        }
 #if RELEASE
         .task {
           await syncBundledCLIIfNeeded()
@@ -42,17 +45,22 @@ struct HackDesktopApp: App {
     }
 
     MenuBarExtra("Hack", systemImage: "square.stack.3d.up") {
-      MenuBarView()
+      MenuBarView(checkForUpdates: checkForUpdatesAction)
         .environment(model)
     }
     .menuBarExtraStyle(.menu)
   }
 
-  private var checkForUpdatesAction: (() -> Void)? {
+  private var checkForUpdatesAction: () -> Void {
 #if RELEASE
     return { updaterController.checkForUpdates(nil) }
 #else
-    return nil
+    return {
+      guard let url = URL(string: "https://github.com/hack-dance/hack/releases/latest") else {
+        return
+      }
+      NSWorkspace.shared.open(url)
+    }
 #endif
   }
 
@@ -99,14 +107,12 @@ struct HackDesktopApp: App {
 }
 
 private struct DashboardCommands: Commands {
-  let checkForUpdates: (() -> Void)?
+  let checkForUpdates: () -> Void
 
   var body: some Commands {
     CommandGroup(after: .appInfo) {
-      if let checkForUpdates {
-        Button("Check for Updates…") {
-          checkForUpdates()
-        }
+      Button("Check for Updates…") {
+        checkForUpdates()
       }
 
       Button("Refresh") {

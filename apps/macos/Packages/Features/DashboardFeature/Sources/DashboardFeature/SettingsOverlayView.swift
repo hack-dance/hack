@@ -7,6 +7,7 @@ import HackDesktopModels
 
 enum SettingsSidebarItem: String, Hashable, Identifiable {
   case preferences
+  case updates
   case runtime
   case gateway
   case global
@@ -24,6 +25,8 @@ enum SettingsSidebarItem: String, Hashable, Identifiable {
     switch self {
     case .preferences:
       return "Preferences"
+    case .updates:
+      return "Updates"
     case .runtime:
       return "Runtime"
     case .gateway:
@@ -51,6 +54,8 @@ enum SettingsSidebarItem: String, Hashable, Identifiable {
     switch self {
     case .preferences:
       return "slider.horizontal.3"
+    case .updates:
+      return "arrow.triangle.2.circlepath"
     case .runtime:
       return "gauge.with.dots.needle.50percent"
     case .gateway:
@@ -77,6 +82,7 @@ enum SettingsSidebarItem: String, Hashable, Identifiable {
 
 extension Notification.Name {
   public static let hackSettingsRequested = Notification.Name("hack.settings.requested")
+  public static let hackCheckForUpdatesRequested = Notification.Name("hack.checkForUpdates.requested")
 }
 
 enum SettingsNavigationRequest {
@@ -154,6 +160,7 @@ struct SettingsOverlayView: View {
     List(selection: $selection) {
       Section("Preferences") {
         settingsRow(.preferences)
+        settingsRow(.updates)
       }
       Section("System") {
         settingsRow(.runtime)
@@ -191,6 +198,8 @@ struct SettingsOverlayView: View {
       switch selection {
       case .preferences:
         PreferencesSettingsView()
+      case .updates:
+        UpdatesSettingsView()
       case .runtime:
         RuntimeDetailView()
       case .gateway:
@@ -252,6 +261,93 @@ struct SettingsOverlayView: View {
 
   private var detailTintColor: Color {
     colorScheme == .dark ? Color.white.opacity(0.03) : Color.white.opacity(0.28)
+  }
+}
+
+private struct UpdatesSettingsView: View {
+  @AppStorage("SUEnableAutomaticChecks") private var automaticallyCheckForUpdates = true
+
+  var body: some View {
+    ScrollView {
+      VStack(alignment: .leading, spacing: 20) {
+        SettingsSectionHeader(
+          breadcrumb: "Settings / Updates",
+          title: "Updates",
+          subtitle: "View app version details and manage software update checks"
+        )
+
+        GlassCard(title: "Current build", systemImage: "shippingbox") {
+          VStack(alignment: .leading, spacing: 10) {
+            metadataRow(title: "Version", value: appVersion)
+            metadataRow(title: "Build", value: appBuild)
+            metadataRow(title: "Bundle ID", value: bundleIdentifier)
+            if let appcast = appcastURL {
+              metadataRow(title: "Appcast", value: appcast)
+            }
+          }
+        }
+
+        GlassCard(title: "Update behavior", systemImage: "arrow.clockwise.circle") {
+          VStack(alignment: .leading, spacing: 12) {
+            Toggle("Automatically check for updates", isOn: $automaticallyCheckForUpdates)
+              .font(.mono(.subheadline))
+
+            Text("Automatic checks apply to signed release builds that include Sparkle.")
+              .font(.mono(.caption2))
+              .foregroundStyle(.tertiary)
+
+            HStack(spacing: 10) {
+              Button {
+                NotificationCenter.default.post(name: .hackCheckForUpdatesRequested, object: nil)
+              } label: {
+                Label("Check for updates now", systemImage: "arrow.triangle.2.circlepath")
+              }
+              .adaptiveToolbarButtonProminent()
+
+              if let appcast = appcastURL, let url = URL(string: appcast) {
+                Button {
+                  NSWorkspace.shared.open(url)
+                } label: {
+                  Label("Open appcast", systemImage: "link")
+                }
+                .adaptiveToolbarButton()
+              }
+
+              Spacer()
+            }
+          }
+        }
+      }
+      .padding(16)
+    }
+  }
+
+  private var appVersion: String {
+    Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+      ?? "Unknown"
+  }
+
+  private var appBuild: String {
+    Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "Unknown"
+  }
+
+  private var bundleIdentifier: String {
+    Bundle.main.bundleIdentifier ?? "Unknown"
+  }
+
+  private var appcastURL: String? {
+    Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String
+  }
+
+  private func metadataRow(title: String, value: String) -> some View {
+    VStack(alignment: .leading, spacing: 4) {
+      Text(title)
+        .font(.mono(.caption))
+        .foregroundStyle(.secondary)
+      Text(value)
+        .font(.mono(.caption, weight: .semibold))
+        .textSelection(.enabled)
+    }
   }
 }
 

@@ -6,8 +6,11 @@ import HackDesktopModels
 public struct MenuBarView: View {
   @Environment(DashboardModel.self) private var model
   @Environment(\.openURL) private var openURL
+  let checkForUpdates: (() -> Void)?
 
-  public init() {}
+  public init(checkForUpdates: (() -> Void)? = nil) {
+    self.checkForUpdates = checkForUpdates
+  }
 
   public var body: some View {
     // System Status
@@ -25,6 +28,11 @@ public struct MenuBarView: View {
       Task { await model.refresh() }
     }
     .keyboardShortcut("r", modifiers: .command)
+
+    Button("Check for Updates…") {
+      checkForUpdates?()
+    }
+    .disabled(checkForUpdates == nil)
 
     Button("Open Hack Desktop") {
       activateApp()

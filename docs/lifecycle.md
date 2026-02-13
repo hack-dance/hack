@@ -10,6 +10,7 @@ You can also use a shorthand `startup` array for common `hack up` startup flows.
 
 ```json
 {
+  "$schema": "https://schemas.hack/hack.config.schema.json",
   "lifecycle": {
     "up": {
       "before": [
@@ -41,6 +42,7 @@ You can also use a shorthand `startup` array for common `hack up` startup flows.
 
 ```json
 {
+  "$schema": "https://schemas.hack/hack.config.schema.json",
   "startup": [
     {
       "name": "aws sso",
@@ -60,10 +62,12 @@ Each startup item can be:
 
 - a string command (one-shot startup hook), or
 - an object with:
-  - `run` (or `command`) required
-  - `name` optional
-  - `cwd` optional
-  - `persistent` optional boolean (default `false`)
+- `run` (or `command`) required
+- `name` optional
+- `cwd` optional
+- `persistent` optional boolean (default `false`)
+
+`cwd` is always resolved from the repo root (not from `.hack/`).
 
 ### Hooks
 
@@ -90,6 +94,16 @@ Long-running processes live under `lifecycle.processes` and are objects with:
 - `cwd` (optional): working directory (defaults to repo root)
 
 Processes receive the resolved env contract (see `env.md`) as their environment.
+
+## Visibility
+
+Lifecycle output is now surfaced across CLI/runtime views:
+
+- `hack logs` includes lifecycle hook/process output alongside compose logs.
+- `hack logs <service>` supports lifecycle service names, including persistent process names.
+- `hack projects --details` includes a `Startup & lifecycle` section with hooks + persistent processes.
+- Runtime inventories include persistent lifecycle processes as synthetic services.
+- The macOS project detail view includes a `Startup & Lifecycle` section in the main project overview.
 
 ## Runtime behavior
 

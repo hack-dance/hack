@@ -2,7 +2,10 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PROJECT_COMPOSE_FILENAME } from "../src/constants.ts";
+import {
+  PROJECT_COMPOSE_FILENAME,
+  PROJECT_CONFIG_FILENAME,
+} from "../src/constants.ts";
 import {
   buildProjectViews,
   serializeProjectView,
@@ -32,6 +35,7 @@ async function createProject(opts: {
   readonly name: string;
   readonly services: readonly string[];
   readonly serviceHosts?: Record<string, readonly string[]>;
+  readonly configJson?: string;
 }): Promise<RegisteredProject> {
   if (!tempDir) {
     throw new Error("tempDir not set");
@@ -55,6 +59,9 @@ async function createProject(opts: {
     join(projectDir, PROJECT_COMPOSE_FILENAME),
     `${composeLines.join("\n")}\n`
   );
+  if (opts.configJson) {
+    await writeFile(join(projectDir, PROJECT_CONFIG_FILENAME), opts.configJson);
+  }
 
   return {
     id: `${opts.name}-id`,
@@ -175,6 +182,56 @@ test("buildProjectViews includes defined services and runtime status", async () 
   expect(serialized?.service_hosts).toEqual({
     api: ["api.alpha.hack", "api.alpha.hack.gy"],
   });
+});
+
+test("buildProjectViews includes lifecycle and startup summaries", async () => {
+  const lifecycleConfig = JSON.stringify(
+    {
+      startup: [
+        { name: "aws sso", run: "aws sso login" },
+        {
+          name: "ssm proxy",
+          run: "cd packages/infra && bun run proxy",
+          persistent: true,
+        },
+      ],
+      lifecycle: {
+        down: {
+          before: [{ name: "cleanup", command: "bun run cleanup" }],
+        },
+      },
+    },
+    null,
+    2
+  );
+
+  const alpha = await createProject({
+    name: "alpha",
+    services: ["api"],
+    configJson: lifecycleConfig,
+  });
+  const views = await buildProjectViews({
+    registryProjects: [alpha],
+    runtime: [],
+    runtimeOk: true,
+    filter: null,
+    includeUnregistered: false,
+    muxSessions: [],
+  });
+
+  const alphaView = views.find((view) => view.name === "alpha");
+  expect(alphaView?.lifecycle?.upBefore.length).toBe(1);
+  expect(alphaView?.lifecycle?.upBefore[0]?.service).toBe("aws sso");
+  expect(alphaView?.lifecycle?.processes.length).toBe(1);
+  expect(alphaView?.lifecycle?.processes[0]?.service).toBe("ssm proxy");
+  expect(alphaView?.lifecycle?.downBefore.length).toBe(1);
+
+  const serialized = alphaView ? serializeProjectView(alphaView) : null;
+  const lifecycle = serialized?.lifecycle as
+    | Record<string, unknown>
+    | undefined;
+  expect(Array.isArray(lifecycle?.up_before)).toBe(true);
+  expect(Array.isArray(lifecycle?.processes)).toBe(true);
 });
 
 test("buildProjectViews marks runtime status unknown when runtime is unavailable", async () => {

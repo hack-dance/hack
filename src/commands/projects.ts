@@ -428,6 +428,10 @@ async function renderProjectDetails(opts: {
     rows,
   });
 
+  if (p.lifecycle) {
+    await renderProjectLifecycle({ lifecycle: p.lifecycle });
+  }
+
   if (opts.meta && p.kind === "registered") {
     await renderProjectMeta({ meta: opts.meta });
   }
@@ -452,6 +456,77 @@ async function renderProjectDetails(opts: {
     await display.table({
       columns: ["Branch", "State", "Services", "Working Dir"],
       rows: branchRows,
+    });
+  }
+}
+
+async function renderProjectLifecycle(opts: {
+  readonly lifecycle: NonNullable<ProjectView["lifecycle"]>;
+}): Promise<void> {
+  const hooks = [
+    ...opts.lifecycle.upBefore,
+    ...opts.lifecycle.upAfter,
+    ...opts.lifecycle.downBefore,
+    ...opts.lifecycle.downAfter,
+  ];
+  const summary: Array<readonly [string, string]> = [
+    [
+      "Startup hooks",
+      String(opts.lifecycle.upBefore.length + opts.lifecycle.upAfter.length),
+    ],
+    [
+      "Shutdown hooks",
+      String(
+        opts.lifecycle.downBefore.length + opts.lifecycle.downAfter.length
+      ),
+    ],
+    ["Persistent processes", String(opts.lifecycle.processes.length)],
+  ];
+
+  await display.section("Startup & lifecycle");
+  await display.kv({ entries: summary });
+
+  if (hooks.length > 0) {
+    const hookRows = [
+      ...opts.lifecycle.upBefore.map((entry) => ({
+        phase: "up.before",
+        ...entry,
+      })),
+      ...opts.lifecycle.upAfter.map((entry) => ({
+        phase: "up.after",
+        ...entry,
+      })),
+      ...opts.lifecycle.downBefore.map((entry) => ({
+        phase: "down.before",
+        ...entry,
+      })),
+      ...opts.lifecycle.downAfter.map((entry) => ({
+        phase: "down.after",
+        ...entry,
+      })),
+    ];
+
+    await display.table({
+      columns: ["Phase", "Service", "Name", "Cwd", "Command"],
+      rows: hookRows.map((entry) => [
+        entry.phase,
+        entry.service,
+        entry.name ?? "",
+        entry.cwd ?? "",
+        entry.command,
+      ]),
+    });
+  }
+
+  if (opts.lifecycle.processes.length > 0) {
+    await display.table({
+      columns: ["Process", "Service", "Cwd", "Command"],
+      rows: opts.lifecycle.processes.map((entry) => [
+        entry.name,
+        entry.service,
+        entry.cwd ?? "",
+        entry.command,
+      ]),
     });
   }
 }

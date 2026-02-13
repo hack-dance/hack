@@ -134,6 +134,12 @@ struct ProjectDetailView: View {
           headerMetricPill("Services", value: "\(runningServiceCount)/\(serviceNames.count) running")
           headerMetricPill("Branches", value: "\(branchEntries.count)")
           headerMetricPill("Sessions", value: "\(sessionEntries.count)")
+          if lifecycleSummary.hasEntries {
+            headerMetricPill(
+              "Startup",
+              value: "\(lifecycleSummary.startupHookCount) hooks / \(lifecycleSummary.processCount) persistent"
+            )
+          }
           if project.supportsTickets {
             headerMetricPill("Tickets", value: "Enabled")
           }
@@ -211,6 +217,9 @@ struct ProjectDetailView: View {
             runtimeNotConfiguredCard
           }
           servicesSection
+          if lifecycleSummary.hasEntries {
+            lifecycleSection
+          }
           if showInfoPanel {
             infoSection
               .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -741,6 +750,140 @@ struct ProjectDetailView: View {
     project.features ?? project.extensionsEnabled ?? []
   }
 
+  private struct LifecycleSummaryCounts {
+    let startupHookCount: Int
+    let shutdownHookCount: Int
+    let processCount: Int
+
+    var hasEntries: Bool {
+      startupHookCount > 0 || shutdownHookCount > 0 || processCount > 0
+    }
+  }
+
+  private var lifecycleSummary: LifecycleSummaryCounts {
+    let lifecycle = project.lifecycle
+    return LifecycleSummaryCounts(
+      startupHookCount: (lifecycle?.upBefore.count ?? 0) + (lifecycle?.upAfter.count ?? 0),
+      shutdownHookCount: (lifecycle?.downBefore.count ?? 0) + (lifecycle?.downAfter.count ?? 0),
+      processCount: lifecycle?.processes.count ?? 0
+    )
+  }
+
+  private var lifecycleHooks: [(phase: String, command: ProjectLifecycleCommandSummary)] {
+    guard let lifecycle = project.lifecycle else { return [] }
+    return [
+      lifecycle.upBefore.map { (phase: "up.before", command: $0) },
+      lifecycle.upAfter.map { (phase: "up.after", command: $0) },
+      lifecycle.downBefore.map { (phase: "down.before", command: $0) },
+      lifecycle.downAfter.map { (phase: "down.after", command: $0) }
+    ].flatMap { $0 }
+  }
+
+  private var lifecycleSection: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      HStack(spacing: 10) {
+        Image(systemName: "bolt.horizontal")
+          .foregroundStyle(.secondary)
+        Text("Startup & Lifecycle")
+          .font(.mono(.headline, weight: .semibold))
+        Spacer()
+        Button("All lifecycle logs") {
+          openLifecycleLogs(service: nil, title: "lifecycle logs")
+        }
+        .buttonStyle(PressableIconButtonStyle())
+      }
+      .overlay(alignment: .bottom) {
+        Rectangle()
+          .fill(Color.white.opacity(0.08))
+          .frame(height: 1)
+          .offset(y: 8)
+      }
+
+      HStack(spacing: 8) {
+        BadgePill(label: "\(lifecycleSummary.startupHookCount) startup hooks", tint: .secondary)
+        BadgePill(label: "\(lifecycleSummary.shutdownHookCount) shutdown hooks", tint: .secondary)
+        BadgePill(label: "\(lifecycleSummary.processCount) persistent", tint: .secondary)
+      }
+
+      if let lifecycle = project.lifecycle, !lifecycle.processes.isEmpty {
+        VStack(alignment: .leading, spacing: 8) {
+          sectionHeader("Persistent processes")
+          ForEach(Array(lifecycle.processes.enumerated()), id: \.offset) { _, process in
+            lifecycleProcessRow(process)
+            Divider()
+              .opacity(0.2)
+          }
+        }
+      }
+
+      if !lifecycleHooks.isEmpty {
+        VStack(alignment: .leading, spacing: 8) {
+          sectionHeader("Hooks")
+          ForEach(Array(lifecycleHooks.enumerated()), id: \.offset) { _, entry in
+            lifecycleHookRow(phase: entry.phase, command: entry.command)
+            Divider()
+              .opacity(0.2)
+          }
+        }
+      }
+    }
+  }
+
+  private func lifecycleProcessRow(_ process: ProjectLifecycleProcessSummary) -> some View {
+    VStack(alignment: .leading, spacing: 6) {
+      HStack(spacing: 8) {
+        Text(process.name)
+          .font(.mono(.caption, weight: .semibold))
+        BadgePill(label: process.service, tint: .secondary)
+        Spacer()
+        Button("Tail logs") {
+          openLifecycleLogs(service: process.service, title: "\(process.name) logs")
+        }
+        .buttonStyle(PressableIconButtonStyle())
+      }
+      Text(process.command)
+        .font(.mono(.caption2))
+        .foregroundStyle(.secondary)
+        .textSelection(.enabled)
+      if let cwd = process.cwd, !cwd.isEmpty {
+        Text("cwd: \(cwd)")
+          .font(.mono(.caption2))
+          .foregroundStyle(.tertiary)
+          .textSelection(.enabled)
+      }
+    }
+    .padding(.vertical, 4)
+  }
+
+  private func lifecycleHookRow(
+    phase: String,
+    command: ProjectLifecycleCommandSummary
+  ) -> some View {
+    VStack(alignment: .leading, spacing: 6) {
+      HStack(spacing: 8) {
+        Text(command.name ?? command.service)
+          .font(.mono(.caption, weight: .semibold))
+        BadgePill(label: phase, tint: .secondary)
+        Spacer()
+        Button("Show output") {
+          openLifecycleLogs(service: command.service, title: "\(command.service) output")
+        }
+        .buttonStyle(PressableIconButtonStyle())
+      }
+      Text(command.command)
+        .font(.mono(.caption2))
+        .foregroundStyle(.secondary)
+        .textSelection(.enabled)
+      if let cwd = command.cwd, !cwd.isEmpty {
+        Text("cwd: \(cwd)")
+          .font(.mono(.caption2))
+          .foregroundStyle(.tertiary)
+          .textSelection(.enabled)
+      }
+    }
+    .padding(.vertical, 4)
+  }
+
   private var infoSection: some View {
     VStack(alignment: .leading, spacing: 16) {
       if !overviewRows.isEmpty {
@@ -989,8 +1132,15 @@ struct ProjectDetailView: View {
     let runtime = runtimeServicesByName[service]
     let containers = runtime?.containers ?? []
     return VStack(alignment: .leading, spacing: 10) {
-      Text(service)
-        .font(.mono(.subheadline, weight: .semibold))
+      HStack(spacing: 8) {
+        Text(service)
+          .font(.mono(.subheadline, weight: .semibold))
+        Spacer()
+        Button("Tail logs") {
+          openLifecycleLogs(service: service, title: "\(service) logs")
+        }
+        .buttonStyle(PressableIconButtonStyle())
+      }
       if let hostLabel = serviceHostLabel(for: service) {
         Button {
           openServiceHost(hostLabel)
@@ -1697,6 +1847,16 @@ struct ProjectDetailView: View {
       return projectDir
     }
     return nil
+  }
+
+  private func openLifecycleLogs(service: String?, title: String) {
+    guard let projectPath = projectOpenPath else { return }
+    var command = "hack logs --pretty --path \(shellQuote(projectPath))"
+    let normalizedService = service?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    if !normalizedService.isEmpty {
+      command += " \(shellQuote(normalizedService))"
+    }
+    openTerminal(kind: .shell, command: command, title: title)
   }
 
   private func openProjectInEditor(_ editor: EditorIntegration.EditorApp) {

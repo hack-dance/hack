@@ -2,10 +2,19 @@ import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { YAML } from "bun";
-import { PROJECT_COMPOSE_FILENAME } from "../constants.ts";
+import {
+  PROJECT_COMPOSE_FILENAME,
+  PROJECT_CONFIG_FILENAME,
+  PROJECT_ENV_FILENAME,
+} from "../constants.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { pathExists, readTextFile } from "./fs.ts";
 import { isRecord } from "./guards.ts";
+import {
+  type ProjectLifecycleCommand,
+  type ProjectLifecycleProcess,
+  readProjectConfig,
+} from "./project.ts";
 import type { RegisteredProject } from "./projects-registry.ts";
 import {
   countRunningServices,
@@ -38,6 +47,28 @@ export type ProjectSession = {
   readonly createdAt: number | null;
 };
 
+export type ProjectLifecycleCommandView = {
+  readonly name: string | null;
+  readonly command: string;
+  readonly cwd: string | null;
+  readonly service: string;
+};
+
+export type ProjectLifecycleProcessView = {
+  readonly name: string;
+  readonly command: string;
+  readonly cwd: string | null;
+  readonly service: string;
+};
+
+export type ProjectLifecycleView = {
+  readonly upBefore: readonly ProjectLifecycleCommandView[];
+  readonly upAfter: readonly ProjectLifecycleCommandView[];
+  readonly downBefore: readonly ProjectLifecycleCommandView[];
+  readonly downAfter: readonly ProjectLifecycleCommandView[];
+  readonly processes: readonly ProjectLifecycleProcessView[];
+};
+
 export type ProjectView = {
   readonly projectId?: string;
   readonly name: string;
@@ -53,6 +84,7 @@ export type ProjectView = {
   readonly runtime: RuntimeProject | null;
   readonly branchRuntime: readonly BranchRuntime[];
   readonly sessions: readonly ProjectSession[];
+  readonly lifecycle: ProjectLifecycleView | null;
   readonly kind: "registered" | "unregistered";
   readonly status:
     | "running"
@@ -183,6 +215,11 @@ async function buildRegisteredProjectView(opts: {
         projectDir: opts.registration.projectDir,
       })
     : null;
+  const lifecycle = projectDirOk
+    ? await resolveProjectLifecycleView({
+        registration: opts.registration,
+      })
+    : null;
 
   return {
     projectId: opts.registration.id,
@@ -199,6 +236,7 @@ async function buildRegisteredProjectView(opts: {
     runtime: opts.runtime,
     branchRuntime,
     sessions,
+    lifecycle,
     kind: "registered",
     status,
   };
@@ -228,6 +266,7 @@ function buildUnregisteredProjectView(opts: {
     runtime: opts.runtime,
     branchRuntime: [],
     sessions: [],
+    lifecycle: null,
     kind: "unregistered",
     status: "unregistered",
   };
@@ -262,9 +301,135 @@ export function serializeProjectView(
       windows: entry.windows,
       created_at: entry.createdAt,
     })),
+    lifecycle: view.lifecycle
+      ? {
+          up_before: view.lifecycle.upBefore.map((entry) => ({
+            name: entry.name,
+            command: entry.command,
+            cwd: entry.cwd,
+            service: entry.service,
+          })),
+          up_after: view.lifecycle.upAfter.map((entry) => ({
+            name: entry.name,
+            command: entry.command,
+            cwd: entry.cwd,
+            service: entry.service,
+          })),
+          down_before: view.lifecycle.downBefore.map((entry) => ({
+            name: entry.name,
+            command: entry.command,
+            cwd: entry.cwd,
+            service: entry.service,
+          })),
+          down_after: view.lifecycle.downAfter.map((entry) => ({
+            name: entry.name,
+            command: entry.command,
+            cwd: entry.cwd,
+            service: entry.service,
+          })),
+          processes: view.lifecycle.processes.map((entry) => ({
+            name: entry.name,
+            command: entry.command,
+            cwd: entry.cwd,
+            service: entry.service,
+          })),
+        }
+      : null,
     kind: view.kind,
     status: view.status,
   };
+}
+
+async function resolveProjectLifecycleView(opts: {
+  readonly registration: RegisteredProject;
+}): Promise<ProjectLifecycleView | null> {
+  const config = await readProjectConfig({
+    projectRoot: opts.registration.repoRoot,
+    projectDirName: opts.registration.projectDirName,
+    projectDir: opts.registration.projectDir,
+    composeFile: resolve(
+      opts.registration.projectDir,
+      PROJECT_COMPOSE_FILENAME
+    ),
+    envFile: resolve(opts.registration.projectDir, PROJECT_ENV_FILENAME),
+    configFile: resolve(opts.registration.projectDir, PROJECT_CONFIG_FILENAME),
+  });
+  const lifecycle = config.lifecycle;
+  if (!lifecycle) {
+    return null;
+  }
+
+  const upBefore = mapLifecycleCommandView({
+    commands: lifecycle.up?.before,
+  });
+  const upAfter = mapLifecycleCommandView({
+    commands: lifecycle.up?.after,
+  });
+  const downBefore = mapLifecycleCommandView({
+    commands: lifecycle.down?.before,
+  });
+  const downAfter = mapLifecycleCommandView({
+    commands: lifecycle.down?.after,
+  });
+  const processes = mapLifecycleProcessView({
+    processes: lifecycle.processes,
+  });
+
+  const hasEntries =
+    upBefore.length > 0 ||
+    upAfter.length > 0 ||
+    downBefore.length > 0 ||
+    downAfter.length > 0 ||
+    processes.length > 0;
+  if (!hasEntries) {
+    return null;
+  }
+
+  return {
+    upBefore,
+    upAfter,
+    downBefore,
+    downAfter,
+    processes,
+  };
+}
+
+function mapLifecycleCommandView(opts: {
+  readonly commands: readonly ProjectLifecycleCommand[] | undefined;
+}): readonly ProjectLifecycleCommandView[] {
+  const commands = opts.commands ?? [];
+  return commands.map((command, index) => ({
+    name: command.name ?? null,
+    command: command.command,
+    cwd: command.cwd ?? null,
+    service: resolveLifecycleCommandService({
+      command,
+      index,
+    }),
+  }));
+}
+
+function mapLifecycleProcessView(opts: {
+  readonly processes: readonly ProjectLifecycleProcess[] | undefined;
+}): readonly ProjectLifecycleProcessView[] {
+  const processes = opts.processes ?? [];
+  return processes.map((process) => ({
+    name: process.name,
+    command: process.command,
+    cwd: process.cwd ?? null,
+    service: process.name,
+  }));
+}
+
+function resolveLifecycleCommandService(opts: {
+  readonly command: ProjectLifecycleCommand;
+  readonly index: number;
+}): string {
+  const fromName = (opts.command.name ?? "").trim();
+  if (fromName.length > 0) {
+    return fromName;
+  }
+  return `hook-${opts.index + 1}`;
 }
 
 function collectBranchRuntime(opts: {

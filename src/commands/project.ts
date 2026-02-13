@@ -4687,11 +4687,35 @@ async function resolveLifecycleLogCompanion(opts: {
     (entry?.processes ?? []).map((process) => process.name)
   );
   const requested = (opts.service ?? "").trim();
+  const hasLogFile = await pathExists(logPath);
 
   if (requested.length > 0) {
-    if (!persistentServices.has(requested)) {
+    if (persistentServices.has(requested)) {
+      return {
+        logPath,
+        service: requested,
+        composeDisabled: true,
+      };
+    }
+    const composeServices = await readComposeServiceNames(
+      resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME)
+    );
+    const composeHasService = composeServices.includes(requested);
+
+    if (composeHasService) {
+      if (!(entry || hasLogFile || opts.follow)) {
+        return undefined;
+      }
+      return {
+        logPath,
+        service: requested,
+      };
+    }
+
+    if (!(entry || hasLogFile || opts.follow)) {
       return undefined;
     }
+
     return {
       logPath,
       service: requested,
@@ -4703,7 +4727,6 @@ async function resolveLifecycleLogCompanion(opts: {
     return { logPath };
   }
 
-  const hasLogFile = await pathExists(logPath);
   if (!(hasLogFile || opts.follow)) {
     return undefined;
   }

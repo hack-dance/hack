@@ -395,7 +395,7 @@ export function renderProjectConfigSchemaJson(): string {
             { type: "string" },
             {
               type: "object",
-              additionalProperties: true,
+              additionalProperties: false,
               properties: {
                 name: { type: "string" },
                 run: { type: "string" },
@@ -410,11 +410,11 @@ export function renderProjectConfigSchemaJson(): string {
       },
       lifecycle: {
         type: "object",
-        additionalProperties: true,
+        additionalProperties: false,
         properties: {
           up: {
             type: "object",
-            additionalProperties: true,
+            additionalProperties: false,
             properties: {
               before: {
                 type: "array",
@@ -423,7 +423,7 @@ export function renderProjectConfigSchemaJson(): string {
                     { type: "string" },
                     {
                       type: "object",
-                      additionalProperties: true,
+                      additionalProperties: false,
                       required: ["command"],
                       properties: {
                         name: { type: "string" },
@@ -441,7 +441,7 @@ export function renderProjectConfigSchemaJson(): string {
                     { type: "string" },
                     {
                       type: "object",
-                      additionalProperties: true,
+                      additionalProperties: false,
                       required: ["command"],
                       properties: {
                         name: { type: "string" },
@@ -456,7 +456,7 @@ export function renderProjectConfigSchemaJson(): string {
           },
           down: {
             type: "object",
-            additionalProperties: true,
+            additionalProperties: false,
             properties: {
               before: {
                 type: "array",
@@ -465,7 +465,7 @@ export function renderProjectConfigSchemaJson(): string {
                     { type: "string" },
                     {
                       type: "object",
-                      additionalProperties: true,
+                      additionalProperties: false,
                       required: ["command"],
                       properties: {
                         name: { type: "string" },
@@ -483,7 +483,7 @@ export function renderProjectConfigSchemaJson(): string {
                     { type: "string" },
                     {
                       type: "object",
-                      additionalProperties: true,
+                      additionalProperties: false,
                       required: ["command"],
                       properties: {
                         name: { type: "string" },
@@ -500,7 +500,7 @@ export function renderProjectConfigSchemaJson(): string {
             type: "array",
             items: {
               type: "object",
-              additionalProperties: true,
+              additionalProperties: false,
               required: ["name", "command"],
               properties: {
                 name: { type: "string" },

@@ -70,5 +70,6 @@ export const PROJECT_CONFIG_LEGACY_FILENAME = "hack.toml" as const;
 export const PROJECT_BRANCHES_FILENAME = "hack.branches.json" as const;
 
 export const GLOBAL_CONFIG_SCHEMA_FILENAME = "hack.config.schema.json" as const;
+export const GLOBAL_ENV_SCHEMA_FILENAME = "hack.env.schema.json" as const;
 export const GLOBAL_BRANCHES_SCHEMA_FILENAME =
   "hack.branches.schema.json" as const;

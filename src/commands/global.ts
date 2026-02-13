@@ -31,6 +31,7 @@ import {
   GLOBAL_CLOUDFLARE_DIR_NAME,
   GLOBAL_CONFIG_SCHEMA_FILENAME,
   GLOBAL_COREDNS_FILENAME,
+  GLOBAL_ENV_SCHEMA_FILENAME,
   GLOBAL_GRAFANA_DASHBOARD_FILENAME,
   GLOBAL_GRAFANA_DASHBOARDS_PROVISIONING_FILENAME,
   GLOBAL_GRAFANA_DATASOURCE_FILENAME,
@@ -70,6 +71,7 @@ import {
   renderGlobalLokiConfigYaml,
   renderProjectBranchesSchemaJson,
   renderProjectConfigSchemaJson,
+  renderProjectEnvSchemaJson,
 } from "../templates.ts";
 import { display } from "../ui/display.ts";
 import { dockerComposeLogsPretty } from "../ui/docker-logs.ts";
@@ -269,6 +271,7 @@ function getGlobalPaths() {
     ),
     grafanaDashboard: resolve(loggingDir, GLOBAL_GRAFANA_DASHBOARD_FILENAME),
     configSchema: resolve(schemasDir, GLOBAL_CONFIG_SCHEMA_FILENAME),
+    envSchema: resolve(schemasDir, GLOBAL_ENV_SCHEMA_FILENAME),
     branchesSchema: resolve(schemasDir, GLOBAL_BRANCHES_SCHEMA_FILENAME),
   };
 }
@@ -528,6 +531,10 @@ async function globalInstall(): Promise<number> {
   await writeWithPromptIfDifferent(
     paths.configSchema,
     renderProjectConfigSchemaJson()
+  );
+  await writeWithPromptIfDifferent(
+    paths.envSchema,
+    renderProjectEnvSchemaJson()
   );
   await writeWithPromptIfDifferent(
     paths.branchesSchema,

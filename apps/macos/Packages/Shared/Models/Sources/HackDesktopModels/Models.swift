@@ -46,6 +46,7 @@ public struct ProjectSummary: Decodable, Identifiable, Hashable {
   public let runtime: RuntimeProject?
   public let branchRuntime: [BranchRuntime]?
   public let sessions: [ProjectSessionSummary]?
+  public let lifecycle: ProjectLifecycleSummary?
   public let kind: ProjectKind
   public let status: ProjectStatus
 
@@ -66,6 +67,7 @@ public struct ProjectSummary: Decodable, Identifiable, Hashable {
     runtime: RuntimeProject?,
     branchRuntime: [BranchRuntime]? = nil,
     sessions: [ProjectSessionSummary]? = nil,
+    lifecycle: ProjectLifecycleSummary? = nil,
     kind: ProjectKind,
     status: ProjectStatus
   ) {
@@ -83,8 +85,67 @@ public struct ProjectSummary: Decodable, Identifiable, Hashable {
     self.runtime = runtime
     self.branchRuntime = branchRuntime
     self.sessions = sessions
+    self.lifecycle = lifecycle
     self.kind = kind
     self.status = status
+  }
+}
+
+public struct ProjectLifecycleSummary: Decodable, Hashable {
+  public let upBefore: [ProjectLifecycleCommandSummary]
+  public let upAfter: [ProjectLifecycleCommandSummary]
+  public let downBefore: [ProjectLifecycleCommandSummary]
+  public let downAfter: [ProjectLifecycleCommandSummary]
+  public let processes: [ProjectLifecycleProcessSummary]
+
+  public init(
+    upBefore: [ProjectLifecycleCommandSummary],
+    upAfter: [ProjectLifecycleCommandSummary],
+    downBefore: [ProjectLifecycleCommandSummary],
+    downAfter: [ProjectLifecycleCommandSummary],
+    processes: [ProjectLifecycleProcessSummary]
+  ) {
+    self.upBefore = upBefore
+    self.upAfter = upAfter
+    self.downBefore = downBefore
+    self.downAfter = downAfter
+    self.processes = processes
+  }
+}
+
+public struct ProjectLifecycleCommandSummary: Decodable, Hashable, Identifiable {
+  public let name: String?
+  public let command: String
+  public let cwd: String?
+  public let service: String
+
+  public var id: String {
+    "\(service)::\(command)::\(cwd ?? "")"
+  }
+
+  public init(name: String?, command: String, cwd: String?, service: String) {
+    self.name = name
+    self.command = command
+    self.cwd = cwd
+    self.service = service
+  }
+}
+
+public struct ProjectLifecycleProcessSummary: Decodable, Hashable, Identifiable {
+  public let name: String
+  public let command: String
+  public let cwd: String?
+  public let service: String
+
+  public var id: String {
+    "\(service)::\(command)::\(cwd ?? "")"
+  }
+
+  public init(name: String, command: String, cwd: String?, service: String) {
+    self.name = name
+    self.command = command
+    self.cwd = cwd
+    self.service = service
   }
 }
 

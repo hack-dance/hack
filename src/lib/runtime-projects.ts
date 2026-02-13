@@ -8,6 +8,7 @@ import {
 import { pathExists } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
 import { parseJsonLines } from "./json-lines.ts";
+import { readLifecycleState } from "./lifecycle-runtime.ts";
 import { upsertProjectRegistration } from "./projects-registry.ts";
 import { exec } from "./shell.ts";
 
@@ -212,9 +213,15 @@ export async function readRuntimeProjects(opts: {
     });
   }
 
+  const runtimeWithLifecycle = await addLifecycleProcessServices({
+    runtime: out,
+  });
+
   return {
     ok: true,
-    runtime: out.sort((a, b) => a.project.localeCompare(b.project)),
+    runtime: runtimeWithLifecycle.sort((a, b) =>
+      a.project.localeCompare(b.project)
+    ),
     error: null,
     checkedAtMs,
   };
@@ -248,6 +255,193 @@ export async function autoRegisterRuntimeHackProjects(opts: {
       },
     });
   }
+}
+
+type LifecycleActivity = {
+  readonly sessionActive: boolean;
+  readonly runningWindows: ReadonlySet<string> | null;
+};
+
+async function addLifecycleProcessServices(opts: {
+  readonly runtime: readonly RuntimeProject[];
+}): Promise<RuntimeProject[]> {
+  if (opts.runtime.length === 0) {
+    return [];
+  }
+
+  const stateByWorkingDir = new Map<
+    string,
+    Awaited<ReturnType<typeof readLifecycleState>>
+  >();
+  for (const runtime of opts.runtime) {
+    const workingDir = runtime.workingDir;
+    if (!workingDir || stateByWorkingDir.has(workingDir)) {
+      continue;
+    }
+    const state = await readLifecycleState({ projectDir: workingDir });
+    stateByWorkingDir.set(workingDir, state);
+  }
+
+  const tmuxWindowsBySession = new Map<string, ReadonlySet<string> | null>();
+  let zellijSessions: ReadonlySet<string> | null = null;
+
+  const out: RuntimeProject[] = [];
+  for (const runtime of opts.runtime) {
+    const workingDir = runtime.workingDir;
+    if (!workingDir) {
+      out.push(runtime);
+      continue;
+    }
+    const state = stateByWorkingDir.get(workingDir) ?? [];
+    const entry = state.find((item) => item.composeProject === runtime.project);
+    if (!entry) {
+      out.push(runtime);
+      continue;
+    }
+
+    const activity = await resolveLifecycleActivity({
+      backend: entry.backend,
+      sessionName: entry.sessionName,
+      tmuxWindowsBySession,
+      getZellijSessions: async () => {
+        if (zellijSessions) {
+          return zellijSessions;
+        }
+        zellijSessions = await readZellijSessionNames();
+        return zellijSessions;
+      },
+    });
+
+    const services = new Map(runtime.services);
+    for (const process of entry.processes) {
+      const running =
+        activity.runningWindows !== null
+          ? activity.runningWindows.has(process.windowName)
+          : activity.sessionActive;
+      const stateValue = running ? "running" : "exited";
+      const status = running ? "Up (lifecycle)" : "Exited (lifecycle)";
+      const id = `lifecycle-${runtime.project}-${sanitizeLifecycleToken(process.name)}`;
+      const syntheticContainer: RuntimeContainer = {
+        id,
+        project: runtime.project,
+        service: process.name,
+        state: stateValue,
+        status,
+        name: `${runtime.project}-lifecycle-${process.windowName}`,
+        ports: "",
+        workingDir,
+        image: null,
+        labels: {
+          "hack.lifecycle.process": "true",
+          "hack.lifecycle.session": entry.sessionName,
+          "hack.lifecycle.backend": entry.backend,
+          "hack.lifecycle.log_path": process.logPath,
+        },
+        mounts: [],
+        networks: [],
+      };
+      const existing = services.get(process.name);
+      if (existing) {
+        services.set(process.name, {
+          service: process.name,
+          containers: [...existing.containers, syntheticContainer],
+        });
+      } else {
+        services.set(process.name, {
+          service: process.name,
+          containers: [syntheticContainer],
+        });
+      }
+    }
+
+    out.push({
+      ...runtime,
+      services,
+    });
+  }
+
+  return out;
+}
+
+async function resolveLifecycleActivity(opts: {
+  readonly backend: "tmux" | "zellij";
+  readonly sessionName: string;
+  readonly tmuxWindowsBySession: Map<string, ReadonlySet<string> | null>;
+  readonly getZellijSessions: () => Promise<ReadonlySet<string>>;
+}): Promise<LifecycleActivity> {
+  if (opts.backend === "tmux") {
+    let windows = opts.tmuxWindowsBySession.get(opts.sessionName);
+    if (windows === undefined) {
+      windows = await readTmuxWindowNames({ sessionName: opts.sessionName });
+      opts.tmuxWindowsBySession.set(opts.sessionName, windows);
+    }
+    return {
+      sessionActive: windows !== null,
+      runningWindows: windows,
+    };
+  }
+
+  const sessions = await opts.getZellijSessions();
+  const active = sessions.has(opts.sessionName);
+  return {
+    sessionActive: active,
+    runningWindows: null,
+  };
+}
+
+async function readTmuxWindowNames(opts: {
+  readonly sessionName: string;
+}): Promise<ReadonlySet<string> | null> {
+  const result = await exec(
+    ["tmux", "list-windows", "-t", opts.sessionName, "-F", "#{window_name}"],
+    {
+      stdin: "ignore",
+    }
+  );
+  if (result.exitCode !== 0) {
+    return null;
+  }
+  const names = new Set(
+    result.stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+  );
+  return names;
+}
+
+async function readZellijSessionNames(): Promise<ReadonlySet<string>> {
+  const result = await exec(["zellij", "list-sessions", "--no-formatting"], {
+    stdin: "ignore",
+  });
+  if (result.exitCode !== 0) {
+    return new Set<string>();
+  }
+  const names = new Set<string>();
+  const lines = result.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  for (const line of lines) {
+    if (line.includes("(EXITED")) {
+      continue;
+    }
+    const boundaries = [line.indexOf(" ["), line.indexOf(" (")].filter(
+      (index) => index > 0
+    );
+    const end = boundaries.length > 0 ? Math.min(...boundaries) : line.length;
+    const name = line.slice(0, end).trim();
+    if (name.length > 0) {
+      names.add(name);
+    }
+  }
+  return names;
+}
+
+function sanitizeLifecycleToken(value: string): string {
+  const trimmed = value.trim().toLowerCase();
+  const cleaned = trimmed.replaceAll(/[^a-z0-9_.-]+/g, "-");
+  return cleaned.length > 0 ? cleaned : "process";
 }
 
 export function serializeRuntimeProject(

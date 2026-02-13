@@ -388,6 +388,26 @@ export function renderProjectConfigSchemaJson(): string {
           mux: { type: "string", enum: ["auto", "tmux", "zellij", "none"] },
         },
       },
+      startup: {
+        type: "array",
+        items: {
+          anyOf: [
+            { type: "string" },
+            {
+              type: "object",
+              additionalProperties: true,
+              properties: {
+                name: { type: "string" },
+                run: { type: "string" },
+                command: { type: "string" },
+                cwd: { type: "string" },
+                persistent: { type: "boolean" },
+              },
+              anyOf: [{ required: ["run"] }, { required: ["command"] }],
+            },
+          ],
+        },
+      },
       lifecycle: {
         type: "object",
         additionalProperties: true,

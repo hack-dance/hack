@@ -4,6 +4,8 @@ Many projects need host-side setup around `hack up` (auth, local proxies, tunnel
 
 Lifecycle is configured in `.hack/hack.config.json` under `lifecycle`.
 
+You can also use a shorthand `startup` array for common `hack up` startup flows.
+
 ## Config
 
 ```json
@@ -30,6 +32,39 @@ Lifecycle is configured in `.hack/hack.config.json` under `lifecycle`.
 }
 ```
 
+## Startup shorthand
+
+`startup` is a concise alias for startup hooks/processes:
+
+- `persistent: false` (default) maps to `lifecycle.up.before`
+- `persistent: true` maps to `lifecycle.processes`
+
+```json
+{
+  "startup": [
+    {
+      "name": "aws sso",
+      "run": "aws sso login",
+      "persistent": false
+    },
+    {
+      "name": "aws-ssm-proxy",
+      "run": "cd packages/infra && bun run proxy",
+      "persistent": true
+    }
+  ]
+}
+```
+
+Each startup item can be:
+
+- a string command (one-shot startup hook), or
+- an object with:
+  - `run` (or `command`) required
+  - `name` optional
+  - `cwd` optional
+  - `persistent` optional boolean (default `false`)
+
 ### Hooks
 
 Hook lists live under:
@@ -41,9 +76,9 @@ Hook lists live under:
 Each entry can be either:
 - a string (shell command), or
 - an object:
-  - `name` (optional): label for logs
-  - `command` (required): shell command
-  - `cwd` (optional): working directory; relative paths are resolved from repo root
+- `name` (optional): label for logs
+- `command` (required): shell command
+- `cwd` (optional): working directory; relative paths are resolved from repo root
 
 Hooks run on the host as `sh -lc <command>`. Failures stop the operation.
 
@@ -98,4 +133,3 @@ Notes:
 - Keep `up.before` hooks short and deterministic; prefer long-running things as `processes`.
 - Use `source: "keychain"` in the env contract for secrets and keep `.hack/.env` non-sensitive.
 - If a hook requires interactive auth (e.g. browser-based SSO), it will still work; it runs with `stdin: inherit`.
-

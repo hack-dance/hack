@@ -167,6 +167,13 @@ export interface ProjectLifecycleProcess {
   readonly cwd?: string;
 }
 
+interface ProjectStartupEntry {
+  readonly name?: string;
+  readonly run: string;
+  readonly cwd?: string;
+  readonly persistent?: boolean;
+}
+
 export type LogsBackend = "compose" | "loki";
 
 export interface ProjectLogsConfig {
@@ -302,7 +309,12 @@ function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
   const oauth = parseOauthConfig(getRecord(value, "oauth"));
   const internal = parseInternalConfig(getRecord(value, "internal"));
   const sessions = parseSessionsConfig(getRecord(value, "sessions"));
-  const lifecycle = parseLifecycleConfig(getRecord(value, "lifecycle"));
+  const lifecycleBase = parseLifecycleConfig(getRecord(value, "lifecycle"));
+  const startup = parseStartupEntries(value.startup);
+  const lifecycle = mergeLifecycleWithStartup({
+    lifecycle: lifecycleBase,
+    startup,
+  });
 
   return {
     ...(name ? { name } : {}),
@@ -314,6 +326,143 @@ function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
     ...(lifecycle ? { lifecycle } : {}),
     configPath: path,
   };
+}
+
+function parseStartupEntries(
+  value: unknown
+): readonly ProjectStartupEntry[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const out: ProjectStartupEntry[] = [];
+  for (const entry of value) {
+    const parsed = parseStartupEntry(entry);
+    if (parsed) {
+      out.push(parsed);
+    }
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+function parseStartupEntry(value: unknown): ProjectStartupEntry | null {
+  if (typeof value === "string") {
+    const run = value.trim();
+    return run.length > 0 ? { run } : null;
+  }
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const run =
+    getString(value, "run")?.trim() ?? getString(value, "command")?.trim();
+  if (!run) {
+    return null;
+  }
+  const name = getString(value, "name")?.trim();
+  const cwd = getString(value, "cwd")?.trim();
+  const persistent = value.persistent === true ? true : undefined;
+
+  return {
+    ...(name && name.length > 0 ? { name } : {}),
+    run,
+    ...(cwd && cwd.length > 0 ? { cwd } : {}),
+    ...(persistent ? { persistent } : {}),
+  };
+}
+
+function mergeLifecycleWithStartup(opts: {
+  readonly lifecycle: ProjectLifecycleConfig | undefined;
+  readonly startup: readonly ProjectStartupEntry[] | undefined;
+}): ProjectLifecycleConfig | undefined {
+  const startup = mapStartupEntriesToLifecycle({
+    entries: opts.startup ?? [],
+  });
+  if (
+    !opts.lifecycle &&
+    startup.before.length === 0 &&
+    startup.processes.length === 0
+  ) {
+    return undefined;
+  }
+
+  const lifecycleUpBefore = opts.lifecycle?.up?.before ?? [];
+  const lifecycleUpAfter = opts.lifecycle?.up?.after;
+  const lifecycleDownBefore = opts.lifecycle?.down?.before;
+  const lifecycleDownAfter = opts.lifecycle?.down?.after;
+  const lifecycleProcesses = opts.lifecycle?.processes ?? [];
+
+  const upBefore = [...lifecycleUpBefore, ...startup.before];
+  const processes = [...lifecycleProcesses, ...startup.processes];
+
+  return buildLifecycleConfig({
+    upBefore,
+    upAfter: lifecycleUpAfter,
+    downBefore: lifecycleDownBefore,
+    downAfter: lifecycleDownAfter,
+    processes,
+  });
+}
+
+function mapStartupEntriesToLifecycle(opts: {
+  readonly entries: readonly ProjectStartupEntry[];
+}): {
+  readonly before: readonly ProjectLifecycleCommand[];
+  readonly processes: readonly ProjectLifecycleProcess[];
+} {
+  const before: ProjectLifecycleCommand[] = [];
+  const processes: ProjectLifecycleProcess[] = [];
+  let generatedProcessIndex = 0;
+
+  for (const entry of opts.entries) {
+    if (entry.persistent) {
+      generatedProcessIndex += 1;
+      processes.push({
+        name: entry.name ?? `startup-${generatedProcessIndex}`,
+        command: entry.run,
+        ...(entry.cwd ? { cwd: entry.cwd } : {}),
+      });
+      continue;
+    }
+
+    before.push({
+      ...(entry.name ? { name: entry.name } : {}),
+      command: entry.run,
+      ...(entry.cwd ? { cwd: entry.cwd } : {}),
+    });
+  }
+
+  return { before, processes };
+}
+
+function buildLifecycleConfig(opts: {
+  readonly upBefore: readonly ProjectLifecycleCommand[];
+  readonly upAfter: readonly ProjectLifecycleCommand[] | undefined;
+  readonly downBefore: readonly ProjectLifecycleCommand[] | undefined;
+  readonly downAfter: readonly ProjectLifecycleCommand[] | undefined;
+  readonly processes: readonly ProjectLifecycleProcess[];
+}): ProjectLifecycleConfig | undefined {
+  const lifecycle: ProjectLifecycleConfig = {
+    ...(opts.upBefore.length > 0 || opts.upAfter
+      ? {
+          up: {
+            ...(opts.upBefore.length > 0 ? { before: opts.upBefore } : {}),
+            ...(opts.upAfter ? { after: opts.upAfter } : {}),
+          },
+        }
+      : {}),
+    ...(opts.downBefore || opts.downAfter
+      ? {
+          down: {
+            ...(opts.downBefore ? { before: opts.downBefore } : {}),
+            ...(opts.downAfter ? { after: opts.downAfter } : {}),
+          },
+        }
+      : {}),
+    ...(opts.processes.length > 0 ? { processes: opts.processes } : {}),
+  };
+
+  return Object.keys(lifecycle).length > 0 ? lifecycle : undefined;
 }
 
 function parseLifecycleConfig(

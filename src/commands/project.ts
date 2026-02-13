@@ -80,6 +80,14 @@ import {
 } from "../lib/hack-env.ts";
 import { parseJsonLines } from "../lib/json-lines.ts";
 import {
+  appendLifecycleLogRecord,
+  readLifecycleState,
+  removeLifecycleStateEntry,
+  resolveLifecycleComposeProjectName,
+  resolveLifecycleLogPath,
+  upsertLifecycleStateEntry,
+} from "../lib/lifecycle-runtime.ts";
+import {
   buildLogSelector,
   resolveShouldTryLoki,
   resolveUseLoki,
@@ -102,7 +110,7 @@ import {
   resolveRegisteredProjectByName,
   upsertProjectRegistration,
 } from "../lib/projects-registry.ts";
-import { exec, run } from "../lib/shell.ts";
+import { exec } from "../lib/shell.ts";
 import { parseTimeInput } from "../lib/time.ts";
 import { upsertAgentDocs } from "../mcp/agent-docs.ts";
 import type { McpTarget } from "../mcp/install.ts";
@@ -119,6 +127,7 @@ import {
   renderProjectEnvContractJson,
 } from "../templates.ts";
 import { display } from "../ui/display.ts";
+import { readLinesFromStream } from "../ui/lines.ts";
 import type { LogStreamContext } from "../ui/log-stream.ts";
 import { logger } from "../ui/logger.ts";
 import { canReachLoki, requestLokiDelete } from "../ui/loki-logs.ts";
@@ -927,22 +936,71 @@ async function runLifecycleCommands(opts: {
   readonly commands: readonly ProjectLifecycleCommand[] | undefined;
   readonly projectRoot: string;
   readonly env: Readonly<Record<string, string>>;
+  readonly projectDir: string;
+  readonly composeProject: string;
 }): Promise<number> {
   const commands = opts.commands ?? [];
-  for (const cmd of commands) {
+  for (const [index, cmd] of commands.entries()) {
     const label = cmd.name ? `${cmd.name}: ${cmd.command}` : cmd.command;
     logger.step({ message: `${opts.title}: ${label}` });
+    const serviceName = resolveLifecycleCommandServiceName({
+      command: cmd,
+      index,
+    });
 
     const cwd = resolveLifecycleCwd({
       projectRoot: opts.projectRoot,
       cwd: cmd.cwd,
     });
 
-    const exitCode = await run(["sh", "-lc", cmd.command], {
+    await appendLifecycleLogRecord({
+      projectDir: opts.projectDir,
+      composeProject: opts.composeProject,
+      record: {
+        timestamp: new Date().toISOString(),
+        service: serviceName,
+        stream: "meta",
+        message: `[start] ${opts.title}: ${label}`,
+      },
+    });
+
+    const proc = Bun.spawn(["sh", "-lc", cmd.command], {
       cwd,
       env: opts.env,
       stdin: "inherit",
+      stdout: "pipe",
+      stderr: "pipe",
     });
+
+    const stdoutTask = streamLifecycleCommandOutput({
+      stream: proc.stdout,
+      output: "stdout",
+      projectDir: opts.projectDir,
+      composeProject: opts.composeProject,
+      service: serviceName,
+    });
+    const stderrTask = streamLifecycleCommandOutput({
+      stream: proc.stderr,
+      output: "stderr",
+      projectDir: opts.projectDir,
+      composeProject: opts.composeProject,
+      service: serviceName,
+    });
+
+    const exitCode = await proc.exited;
+    await Promise.all([stdoutTask, stderrTask]);
+
+    await appendLifecycleLogRecord({
+      projectDir: opts.projectDir,
+      composeProject: opts.composeProject,
+      record: {
+        timestamp: new Date().toISOString(),
+        service: serviceName,
+        stream: "meta",
+        message: `[end] ${opts.title}: exit ${exitCode}`,
+      },
+    });
+
     if (exitCode !== 0) {
       logger.error({
         message: `${opts.title} failed (exit ${exitCode}): ${label}`,
@@ -959,9 +1017,14 @@ async function startLifecycleProcesses(opts: {
   readonly projectName: string;
   readonly branch: string | null;
   readonly env: Readonly<Record<string, string>>;
+  readonly composeProject: string;
 }): Promise<void> {
   const processes = opts.cfg.lifecycle?.processes ?? [];
   if (processes.length === 0) {
+    await removeLifecycleStateEntry({
+      projectDir: opts.project.projectDir,
+      composeProject: opts.composeProject,
+    });
     return;
   }
 
@@ -1018,14 +1081,65 @@ async function startLifecycleProcesses(opts: {
     }
   }
 
+  const startedProcesses: Array<{
+    readonly name: string;
+    readonly windowName: string;
+    readonly logPath: string;
+  }> = [];
+
   for (const [index, proc] of processes.entries()) {
-    await startLifecycleProcess({
+    const started = await startLifecycleProcess({
       backend: backendName,
       sessionName,
       projectRoot: opts.project.projectRoot,
       env: opts.env,
       index,
       process: proc,
+      projectDir: opts.project.projectDir,
+      composeProject: opts.composeProject,
+    });
+    startedProcesses.push(started);
+  }
+
+  await upsertLifecycleStateEntry({
+    projectDir: opts.project.projectDir,
+    entry: {
+      composeProject: opts.composeProject,
+      projectName: opts.projectName,
+      branch: opts.branch,
+      sessionName,
+      backend: backendName,
+      processes: startedProcesses,
+      updatedAt: new Date().toISOString(),
+    },
+  });
+}
+
+async function streamLifecycleCommandOutput(opts: {
+  readonly stream: ReadableStream<Uint8Array> | number | null;
+  readonly output: "stdout" | "stderr";
+  readonly projectDir: string;
+  readonly composeProject: string;
+  readonly service: string;
+}): Promise<void> {
+  if (!opts.stream || typeof opts.stream === "number") {
+    return;
+  }
+  for await (const line of readLinesFromStream(opts.stream)) {
+    if (opts.output === "stderr") {
+      process.stderr.write(`${line}\n`);
+    } else {
+      process.stdout.write(`${line}\n`);
+    }
+    await appendLifecycleLogRecord({
+      projectDir: opts.projectDir,
+      composeProject: opts.composeProject,
+      record: {
+        timestamp: new Date().toISOString(),
+        service: opts.service,
+        stream: opts.output,
+        message: line,
+      },
     });
   }
 }
@@ -1037,13 +1151,28 @@ async function startLifecycleProcess(opts: {
   readonly env: Readonly<Record<string, string>>;
   readonly index: number;
   readonly process: ProjectLifecycleProcess;
-}): Promise<void> {
+  readonly projectDir: string;
+  readonly composeProject: string;
+}): Promise<{
+  readonly name: string;
+  readonly windowName: string;
+  readonly logPath: string;
+}> {
   const windowNameRaw = sanitizeBranchSlug(opts.process.name);
   const windowName =
     windowNameRaw.length > 0 ? windowNameRaw : `proc-${opts.index + 1}`;
   const cwd = resolveLifecycleCwd({
     projectRoot: opts.projectRoot,
     cwd: opts.process.cwd,
+  });
+  const logPath = resolveLifecycleLogPath({
+    projectDir: opts.projectDir,
+    composeProject: opts.composeProject,
+  });
+  const wrappedCommand = wrapLifecyclePersistentCommand({
+    command: opts.process.command,
+    logPath,
+    serviceName: opts.process.name,
   });
 
   if (opts.backend === "tmux") {
@@ -1059,7 +1188,7 @@ async function startLifecycleProcess(opts: {
         cwd,
         "sh",
         "-lc",
-        opts.process.command,
+        wrappedCommand,
       ],
       { stdin: "ignore" }
     );
@@ -1068,11 +1197,25 @@ async function startLifecycleProcess(opts: {
         `Failed to start lifecycle process "${opts.process.name}": ${result.stderr.trim()}`
       );
     }
-    return;
+    await appendLifecycleLogRecord({
+      projectDir: opts.projectDir,
+      composeProject: opts.composeProject,
+      record: {
+        timestamp: new Date().toISOString(),
+        service: opts.process.name,
+        stream: "meta",
+        message: `[start] process launched in tmux:${opts.sessionName}:${windowName}`,
+      },
+    });
+    return {
+      name: opts.process.name,
+      windowName,
+      logPath,
+    };
   }
 
   const result = await exec(
-    ["zellij", "run", "--", "sh", "-lc", opts.process.command],
+    ["zellij", "run", "--", "sh", "-lc", wrappedCommand],
     {
       stdin: "ignore",
       cwd,
@@ -1084,6 +1227,21 @@ async function startLifecycleProcess(opts: {
       `Failed to start lifecycle process "${opts.process.name}": ${result.stderr.trim()}`
     );
   }
+  await appendLifecycleLogRecord({
+    projectDir: opts.projectDir,
+    composeProject: opts.composeProject,
+    record: {
+      timestamp: new Date().toISOString(),
+      service: opts.process.name,
+      stream: "meta",
+      message: `[start] process launched in zellij:${opts.sessionName}:${windowName}`,
+    },
+  });
+  return {
+    name: opts.process.name,
+    windowName,
+    logPath,
+  };
 }
 
 async function stopLifecycleProcesses(opts: {
@@ -1091,9 +1249,14 @@ async function stopLifecycleProcesses(opts: {
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly projectName: string;
   readonly branch: string | null;
+  readonly composeProject: string;
 }): Promise<void> {
   const lifecycle = opts.cfg.lifecycle;
   if (!lifecycle) {
+    await removeLifecycleStateEntry({
+      projectDir: opts.project.projectDir,
+      composeProject: opts.composeProject,
+    });
     return;
   }
 
@@ -1113,6 +1276,43 @@ async function stopLifecycleProcesses(opts: {
     }
     await backend.killSession({ name: sessionName });
   }
+
+  await removeLifecycleStateEntry({
+    projectDir: opts.project.projectDir,
+    composeProject: opts.composeProject,
+  });
+}
+
+function resolveLifecycleCommandServiceName(opts: {
+  readonly command: ProjectLifecycleCommand;
+  readonly index: number;
+}): string {
+  const fromName = (opts.command.name ?? "").trim();
+  if (fromName.length > 0) {
+    return fromName;
+  }
+  return `hook-${opts.index + 1}`;
+}
+
+function wrapLifecyclePersistentCommand(opts: {
+  readonly command: string;
+  readonly logPath: string;
+  readonly serviceName: string;
+}): string {
+  const logPath = shellSingleQuote(opts.logPath);
+  const service = shellSingleQuote(opts.serviceName);
+  return [
+    `HACK_LIFECYCLE_LOG=${logPath}`,
+    `HACK_LIFECYCLE_SERVICE=${service}`,
+    `${opts.command} 2>&1 | while IFS= read -r line; do`,
+    "  printf '%s\\n' \"$line\"",
+    '  printf \'%s\\t%s\\tstdout\\t%s\\n\' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$HACK_LIFECYCLE_SERVICE" "$line" >> "$HACK_LIFECYCLE_LOG"',
+    "done",
+  ].join("\n");
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 async function resolveBranchComposeFiles(opts: {
@@ -3524,6 +3724,10 @@ async function handleUp({
   const baseProjectName = await resolveComposeProjectName({ project, cfg });
   const composeProjectName = branch ? `${baseProjectName}--${branch}` : null;
   const projectName = sanitizeProjectSlug(baseProjectName);
+  const lifecycleComposeProject = resolveLifecycleComposeProjectName({
+    projectName,
+    branch,
+  });
   const devHost = branch ? await resolveBranchDevHost({ project }) : null;
   const aliasHost =
     branch && devHost ? resolveBranchAliasHost({ devHost, cfg }) : null;
@@ -3560,6 +3764,8 @@ async function handleUp({
     commands: cfg.lifecycle?.up?.before,
     projectRoot: project.projectRoot,
     env: envOverrides.env,
+    projectDir: project.projectDir,
+    composeProject: lifecycleComposeProject,
   });
   if (beforeCode !== 0) {
     return beforeCode;
@@ -3572,6 +3778,7 @@ async function handleUp({
       projectName,
       branch,
       env: envOverrides.env,
+      composeProject: lifecycleComposeProject,
     });
     if ((cfg.lifecycle?.processes ?? []).length > 0) {
       const sessionName = resolveLifecycleSessionName({ projectName, branch });
@@ -3605,6 +3812,8 @@ async function handleUp({
     commands: cfg.lifecycle?.up?.after,
     projectRoot: project.projectRoot,
     env: envOverrides.env,
+    projectDir: project.projectDir,
+    composeProject: lifecycleComposeProject,
   });
   return afterCode;
 }
@@ -3673,6 +3882,10 @@ async function handleDown({
   const composeProjectName = branch ? `${baseProjectName}--${branch}` : null;
 
   const projectName = sanitizeProjectSlug(baseProjectName);
+  const lifecycleComposeProject = resolveLifecycleComposeProjectName({
+    projectName,
+    branch,
+  });
   const envResolved = await resolveHackEnv({
     projectDir: project.projectDir,
     projectName,
@@ -3688,6 +3901,8 @@ async function handleDown({
     commands: cfg.lifecycle?.down?.before,
     projectRoot: project.projectRoot,
     env: envResolved.envForCompose,
+    projectDir: project.projectDir,
+    composeProject: lifecycleComposeProject,
   });
   if (beforeCode !== 0) {
     return beforeCode;
@@ -3701,7 +3916,13 @@ async function handleDown({
   });
 
   try {
-    await stopLifecycleProcesses({ project, cfg, projectName, branch });
+    await stopLifecycleProcesses({
+      project,
+      cfg,
+      projectName,
+      branch,
+      composeProject: lifecycleComposeProject,
+    });
   } catch (error: unknown) {
     const message =
       error instanceof Error
@@ -3720,6 +3941,8 @@ async function handleDown({
     commands: cfg.lifecycle?.down?.after,
     projectRoot: project.projectRoot,
     env: envResolved.envForCompose,
+    projectDir: project.projectDir,
+    composeProject: lifecycleComposeProject,
   });
   return afterCode;
 }
@@ -3729,6 +3952,7 @@ async function runRestartDownPhase(opts: {
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly projectName: string;
   readonly composeProjectName: string | null;
+  readonly lifecycleComposeProject: string;
   readonly profiles: readonly string[];
   readonly branch: string | null;
   readonly envForCompose: Readonly<Record<string, string>>;
@@ -3738,6 +3962,8 @@ async function runRestartDownPhase(opts: {
     commands: opts.cfg.lifecycle?.down?.before,
     projectRoot: opts.project.projectRoot,
     env: opts.envForCompose,
+    projectDir: opts.project.projectDir,
+    composeProject: opts.lifecycleComposeProject,
   });
   if (downBefore !== 0) {
     return downBefore;
@@ -3755,6 +3981,7 @@ async function runRestartDownPhase(opts: {
       cfg: opts.cfg,
       projectName: opts.projectName,
       branch: opts.branch,
+      composeProject: opts.lifecycleComposeProject,
     });
   } catch (error: unknown) {
     const message =
@@ -3777,6 +4004,8 @@ async function runRestartDownPhase(opts: {
     commands: opts.cfg.lifecycle?.down?.after,
     projectRoot: opts.project.projectRoot,
     env: opts.envForCompose,
+    projectDir: opts.project.projectDir,
+    composeProject: opts.lifecycleComposeProject,
   });
   return downAfter;
 }
@@ -3786,6 +4015,7 @@ async function runRestartUpPhase(opts: {
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly projectName: string;
   readonly composeProjectName: string | null;
+  readonly lifecycleComposeProject: string;
   readonly profiles: readonly string[];
   readonly branch: string | null;
 }): Promise<number> {
@@ -3836,6 +4066,8 @@ async function runRestartUpPhase(opts: {
     commands: opts.cfg.lifecycle?.up?.before,
     projectRoot: opts.project.projectRoot,
     env: envOverrides.env,
+    projectDir: opts.project.projectDir,
+    composeProject: opts.lifecycleComposeProject,
   });
   if (upBefore !== 0) {
     return upBefore;
@@ -3848,6 +4080,7 @@ async function runRestartUpPhase(opts: {
       projectName: opts.projectName,
       branch: opts.branch,
       env: envOverrides.env,
+      composeProject: opts.lifecycleComposeProject,
     });
     if ((opts.cfg.lifecycle?.processes ?? []).length > 0) {
       const sessionName = resolveLifecycleSessionName({
@@ -3884,6 +4117,8 @@ async function runRestartUpPhase(opts: {
     commands: opts.cfg.lifecycle?.up?.after,
     projectRoot: opts.project.projectRoot,
     env: envOverrides.env,
+    projectDir: opts.project.projectDir,
+    composeProject: opts.lifecycleComposeProject,
   });
   return upAfter;
 }
@@ -3916,6 +4151,10 @@ async function handleRestart({
   const composeProjectName = branch ? `${baseProjectName}--${branch}` : null;
 
   const projectName = sanitizeProjectSlug(baseProjectName);
+  const lifecycleComposeProject = resolveLifecycleComposeProjectName({
+    projectName,
+    branch,
+  });
   const envResolved = await resolveHackEnv({
     projectDir: project.projectDir,
     projectName,
@@ -3931,6 +4170,7 @@ async function handleRestart({
     cfg,
     projectName,
     composeProjectName,
+    lifecycleComposeProject,
     profiles,
     branch,
     envForCompose: envResolved.envForCompose,
@@ -3944,6 +4184,7 @@ async function handleRestart({
     cfg,
     projectName,
     composeProjectName,
+    lifecycleComposeProject,
     profiles,
     branch,
   });
@@ -4385,6 +4626,14 @@ async function runLogsWithCompose(opts: {
   const serviceTrimmed = (opts.service ?? "").trim();
   const servicesForContext =
     serviceTrimmed.length > 0 ? [serviceTrimmed] : undefined;
+  const lifecycleComposeProject =
+    opts.composeProject ?? opts.projectNameForPrefix;
+  const lifecycle = await resolveLifecycleLogCompanion({
+    projectDir: opts.project.projectDir,
+    composeProject: lifecycleComposeProject,
+    service: serviceTrimmed.length > 0 ? serviceTrimmed : undefined,
+    follow: opts.follow,
+  });
   const streamContext = buildLogStreamContext({
     json: opts.json,
     backend: "compose",
@@ -4410,7 +4659,56 @@ async function runLogsWithCompose(opts: {
     profiles: opts.profiles,
     format: opts.format,
     streamContext,
+    lifecycle,
   });
+}
+
+async function resolveLifecycleLogCompanion(opts: {
+  readonly projectDir: string;
+  readonly composeProject: string;
+  readonly service: string | undefined;
+  readonly follow: boolean;
+}): Promise<
+  | {
+      readonly logPath: string;
+      readonly service?: string;
+      readonly composeDisabled?: boolean;
+    }
+  | undefined
+> {
+  const logPath = resolveLifecycleLogPath({
+    projectDir: opts.projectDir,
+    composeProject: opts.composeProject,
+  });
+  const state = await readLifecycleState({ projectDir: opts.projectDir });
+  const entry =
+    state.find((item) => item.composeProject === opts.composeProject) ?? null;
+  const persistentServices = new Set(
+    (entry?.processes ?? []).map((process) => process.name)
+  );
+  const requested = (opts.service ?? "").trim();
+
+  if (requested.length > 0) {
+    if (!persistentServices.has(requested)) {
+      return undefined;
+    }
+    return {
+      logPath,
+      service: requested,
+      composeDisabled: true,
+    };
+  }
+
+  if (entry) {
+    return { logPath };
+  }
+
+  const hasLogFile = await pathExists(logPath);
+  if (!(hasLogFile || opts.follow)) {
+    return undefined;
+  }
+
+  return { logPath };
 }
 
 async function handleLogs({

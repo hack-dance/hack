@@ -458,21 +458,7 @@ struct RuntimeDetailView: View {
   }
 
   private var daemonLogTailCommand: String {
-    let configuredPath = model.daemonStatus?.logPath?.trimmingCharacters(in: .whitespacesAndNewlines)
-    let resolvedPath = (configuredPath?.isEmpty == false ? configuredPath : nil) ?? defaultDaemonLogPath
-    let quotedPath = shellQuote(resolvedPath)
-    return """
-    LOG_PATH=\(quotedPath)
-    if [ -f "$LOG_PATH" ]; then
-      echo "Tailing $LOG_PATH (last 200 lines)"
-      tail -n 200 -F "$LOG_PATH"
-    else
-      echo "Daemon log not found at $LOG_PATH"
-      echo
-      echo "Current daemon status:"
-      hack daemon status
-    fi
-    """
+    "tail -n 200 -F \"$HOME/.hack/daemon/hackd.log\""
   }
 
   private func openDaemonLogsInTerminalPanel() {
@@ -567,16 +553,6 @@ struct RuntimeDetailView: View {
     return value ? "Yes" : "No"
   }
 
-  private func shellQuote(_ value: String) -> String {
-    let escaped = value.replacingOccurrences(of: "'", with: "'\\''")
-    return "'\(escaped)'"
-  }
-
-  private var defaultDaemonLogPath: String {
-    FileManager.default.homeDirectoryForCurrentUser
-      .appendingPathComponent(".hack/daemon/hackd.log")
-      .path
-  }
 }
 
 #if DEBUG

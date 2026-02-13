@@ -1,3 +1,7 @@
+## 1.9.0 (2026-02-13)
+
+* feat(macos): add update-available header badge and background checks ([88bfc01](https://github.com/hack-dance/hack/commit/88bfc01))
+
 ## 1.8.0 (2026-02-13)
 
 * feat(macos): add update controls and version info in settings ([ab5de6f](https://github.com/hack-dance/hack/commit/ab5de6f))

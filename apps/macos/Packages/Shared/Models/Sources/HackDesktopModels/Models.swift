@@ -541,6 +541,141 @@ public struct GatewayTokenRevokeResponse: Decodable {
   }
 }
 
+public struct TailscaleInspectResponse: Decodable {
+  public let installed: Bool
+  public let binaryPath: String?
+  public let connected: Bool
+  public let backendState: String?
+  public let tailnetName: String?
+  public let magicDnsSuffix: String?
+  public let authUrl: String?
+  public let currentExitNodeId: String?
+  public let currentExitNodeName: String?
+  public let selfDevice: TailscaleInspectSelf?
+  public let peers: [TailscaleInspectPeer]
+  public let onlinePeerCount: Int
+  public let exitNodes: [TailscaleInspectPeer]
+  public let health: [String]
+  public let error: String?
+
+  public init(
+    installed: Bool,
+    binaryPath: String?,
+    connected: Bool,
+    backendState: String?,
+    tailnetName: String?,
+    magicDnsSuffix: String?,
+    authUrl: String?,
+    currentExitNodeId: String?,
+    currentExitNodeName: String?,
+    selfDevice: TailscaleInspectSelf?,
+    peers: [TailscaleInspectPeer],
+    onlinePeerCount: Int,
+    exitNodes: [TailscaleInspectPeer],
+    health: [String],
+    error: String?
+  ) {
+    self.installed = installed
+    self.binaryPath = binaryPath
+    self.connected = connected
+    self.backendState = backendState
+    self.tailnetName = tailnetName
+    self.magicDnsSuffix = magicDnsSuffix
+    self.authUrl = authUrl
+    self.currentExitNodeId = currentExitNodeId
+    self.currentExitNodeName = currentExitNodeName
+    self.selfDevice = selfDevice
+    self.peers = peers
+    self.onlinePeerCount = onlinePeerCount
+    self.exitNodes = exitNodes
+    self.health = health
+    self.error = error
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case installed
+    case binaryPath
+    case connected
+    case backendState
+    case tailnetName
+    case magicDnsSuffix
+    case authUrl
+    case currentExitNodeId
+    case currentExitNodeName
+    case selfDevice = "self"
+    case peers
+    case onlinePeerCount
+    case exitNodes
+    case health
+    case error
+  }
+}
+
+public struct TailscaleInspectSelf: Decodable, Hashable, Identifiable {
+  public let id: String
+  public let hostname: String
+  public let dnsName: String?
+  public let tailscaleIp: String?
+  public let online: Bool
+  public let os: String?
+  public let tags: [String]
+  public let isExitNode: Bool
+
+  public init(
+    id: String,
+    hostname: String,
+    dnsName: String?,
+    tailscaleIp: String?,
+    online: Bool,
+    os: String?,
+    tags: [String],
+    isExitNode: Bool
+  ) {
+    self.id = id
+    self.hostname = hostname
+    self.dnsName = dnsName
+    self.tailscaleIp = tailscaleIp
+    self.online = online
+    self.os = os
+    self.tags = tags
+    self.isExitNode = isExitNode
+  }
+}
+
+public struct TailscaleInspectPeer: Decodable, Hashable, Identifiable {
+  public let id: String
+  public let hostname: String
+  public let dnsName: String?
+  public let tailscaleIp: String?
+  public let online: Bool
+  public let os: String?
+  public let tags: [String]
+  public let isExitNode: Bool
+  public let isExitNodeOption: Bool
+
+  public init(
+    id: String,
+    hostname: String,
+    dnsName: String?,
+    tailscaleIp: String?,
+    online: Bool,
+    os: String?,
+    tags: [String],
+    isExitNode: Bool,
+    isExitNodeOption: Bool
+  ) {
+    self.id = id
+    self.hostname = hostname
+    self.dnsName = dnsName
+    self.tailscaleIp = tailscaleIp
+    self.online = online
+    self.os = os
+    self.tags = tags
+    self.isExitNode = isExitNode
+    self.isExitNodeOption = isExitNodeOption
+  }
+}
+
 public struct GatewayExposure: Decodable, Identifiable, Hashable {
   public enum State: String, Decodable {
     case disabled

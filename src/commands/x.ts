@@ -95,6 +95,19 @@ async function handleX({
   }
 
   if (!extension.enabled) {
+    if (invocation.command && invocation.command !== "help") {
+      const command = extension.commands.find(
+        (entry) =>
+          entry.name === invocation.command && entry.allowWhenDisabled === true
+      );
+      if (command) {
+        return await command.handler({
+          ctx: loaded.context,
+          args: invocation.args,
+        });
+      }
+    }
+
     const instructions = buildEnableInstructions({
       extension,
       namespace: invocation.namespace ?? "",

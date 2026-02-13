@@ -660,7 +660,10 @@ export async function globalUp(): Promise<number> {
         ].join("\n"),
       });
 
-      await reassignIngressIpConflicts({ conflicts: blockers });
+      await reassignIngressIpConflicts({
+        conflicts: blockers,
+        reservedIps,
+      });
 
       const remainingConflicts = await findIngressIpConflicts({
         reservedIps,
@@ -740,6 +743,13 @@ type IngressIpConflict = {
   readonly containerName: string;
 };
 
+type IngressNetworkSnapshot = {
+  readonly subnet: string | null;
+  readonly gateway: string | null;
+  readonly usedIps: ReadonlySet<string>;
+  readonly containerIpByName: ReadonlyMap<string, string>;
+};
+
 async function resolveReservedIngressIps(opts: {
   readonly composePath: string;
 }): Promise<string[]> {
@@ -765,6 +775,24 @@ async function findIngressIpConflicts(opts: {
     return [];
   }
 
+  const snapshot = await inspectIngressNetworkSnapshot();
+  if (!snapshot) {
+    return [];
+  }
+
+  const reservedIps = new Set(opts.reservedIps);
+  const conflicts: IngressIpConflict[] = [];
+  for (const [containerName, ip] of snapshot.containerIpByName.entries()) {
+    if (!reservedIps.has(ip)) {
+      continue;
+    }
+    conflicts.push({ ip, containerName });
+  }
+
+  return conflicts;
+}
+
+async function inspectIngressNetworkSnapshot(): Promise<IngressNetworkSnapshot | null> {
   const inspect = await exec(
     ["docker", "network", "inspect", DEFAULT_INGRESS_NETWORK],
     {
@@ -772,24 +800,50 @@ async function findIngressIpConflicts(opts: {
     }
   );
   if (inspect.exitCode !== 0) {
-    return [];
+    return null;
   }
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(inspect.stdout);
   } catch {
-    return [];
+    return null;
   }
   if (!Array.isArray(parsed)) {
-    return [];
+    return null;
   }
 
-  const conflicts: IngressIpConflict[] = [];
+  let subnet: string | null = null;
+  let gateway: string | null = null;
+  const usedIps = new Set<string>();
+  const containerIpByName = new Map<string, string>();
   for (const entry of parsed) {
     if (!entry || typeof entry !== "object") {
       continue;
     }
+    if (subnet === null) {
+      const ipamConfig = (
+        entry as {
+          IPAM?: {
+            Config?: Array<{ Subnet?: unknown; Gateway?: unknown }>;
+          };
+        }
+      ).IPAM?.Config;
+      if (Array.isArray(ipamConfig)) {
+        for (const config of ipamConfig) {
+          if (subnet === null && typeof config?.Subnet === "string") {
+            subnet = config.Subnet;
+          }
+          if (gateway === null && typeof config?.Gateway === "string") {
+            gateway = config.Gateway;
+          }
+          if (subnet !== null && gateway !== null) {
+            break;
+          }
+        }
+      }
+    }
+
     const containers = (entry as { Containers?: Record<string, unknown> })
       .Containers;
     if (!containers || typeof containers !== "object") {
@@ -808,19 +862,33 @@ async function findIngressIpConflicts(opts: {
         continue;
       }
       const ip = extractIpv4Address({ raw: ipRaw });
-      if (!opts.reservedIps.includes(ip)) {
+      if (ip.length === 0) {
         continue;
       }
-      conflicts.push({ ip, containerName: name });
+      usedIps.add(ip);
+      containerIpByName.set(name, ip);
     }
   }
 
-  return conflicts;
+  return {
+    subnet,
+    gateway,
+    usedIps,
+    containerIpByName,
+  };
 }
 
 async function reassignIngressIpConflicts(opts: {
   readonly conflicts: readonly IngressIpConflict[];
+  readonly reservedIps: readonly string[];
 }): Promise<void> {
+  const snapshot = await inspectIngressNetworkSnapshot();
+  const usedIps = new Set(snapshot?.usedIps ?? []);
+  const reservedIps = new Set(opts.reservedIps);
+  const containerIpByName = new Map(snapshot?.containerIpByName ?? []);
+  const conflictIpsByContainer = new Map(
+    opts.conflicts.map((conflict) => [conflict.containerName, conflict.ip])
+  );
   const containerNames = [
     ...new Set(opts.conflicts.map((conflict) => conflict.containerName)),
   ];
@@ -853,12 +921,42 @@ async function reassignIngressIpConflicts(opts: {
       continue;
     }
 
-    const connect = await exec(
-      ["docker", "network", "connect", DEFAULT_INGRESS_NETWORK, containerName],
-      {
-        stdin: "ignore",
-      }
-    );
+    const previousIp =
+      conflictIpsByContainer.get(containerName) ??
+      containerIpByName.get(containerName) ??
+      null;
+    if (previousIp !== null) {
+      usedIps.delete(previousIp);
+      containerIpByName.delete(containerName);
+    }
+
+    const desiredIp = pickAvailableIngressIp({
+      subnet: snapshot?.subnet ?? null,
+      gateway: snapshot?.gateway ?? null,
+      usedIps,
+      reservedIps,
+    });
+
+    const connectCommand = desiredIp
+      ? [
+          "docker",
+          "network",
+          "connect",
+          "--ip",
+          desiredIp,
+          DEFAULT_INGRESS_NETWORK,
+          containerName,
+        ]
+      : [
+          "docker",
+          "network",
+          "connect",
+          DEFAULT_INGRESS_NETWORK,
+          containerName,
+        ];
+    const connect = await exec(connectCommand, {
+      stdin: "ignore",
+    });
     if (connect.exitCode !== 0) {
       logger.warn({
         message: [
@@ -866,8 +964,114 @@ async function reassignIngressIpConflicts(opts: {
           trimShellError({ text: connect.stderr }),
         ].join("\n"),
       });
+      continue;
+    }
+
+    if (desiredIp) {
+      usedIps.add(desiredIp);
+      containerIpByName.set(containerName, desiredIp);
     }
   }
+}
+
+function pickAvailableIngressIp(opts: {
+  readonly subnet: string | null;
+  readonly gateway: string | null;
+  readonly usedIps: ReadonlySet<string>;
+  readonly reservedIps: ReadonlySet<string>;
+}): string | null {
+  if (!opts.subnet) {
+    return null;
+  }
+  const cidr = parseIpv4Cidr(opts.subnet);
+  if (!cidr) {
+    return null;
+  }
+  if (cidr.prefix >= 31) {
+    return null;
+  }
+
+  const hostCapacity = 2 ** (32 - cidr.prefix);
+  const firstHost = cidr.network + 1;
+  const lastHost = cidr.network + hostCapacity - 2;
+  const maxCandidates = Math.min(4096, Math.max(0, lastHost - firstHost + 1));
+
+  for (let offset = 0; offset < maxCandidates; offset += 1) {
+    const candidate = intToIpv4(firstHost + offset);
+    if (candidate === opts.gateway) {
+      continue;
+    }
+    if (opts.reservedIps.has(candidate)) {
+      continue;
+    }
+    if (opts.usedIps.has(candidate)) {
+      continue;
+    }
+    return candidate;
+  }
+  return null;
+}
+
+function parseIpv4Cidr(
+  cidr: string
+): { readonly network: number; readonly prefix: number } | null {
+  const [ipText, prefixText] = cidr.split("/");
+  if (!(ipText && prefixText)) {
+    return null;
+  }
+
+  const prefix = Number.parseInt(prefixText, 10);
+  if (!Number.isFinite(prefix) || prefix < 0 || prefix > 32) {
+    return null;
+  }
+
+  const ip = ipv4ToInt(ipText);
+  if (ip === null) {
+    return null;
+  }
+
+  let mask = 0;
+  if (prefix === 0) {
+    mask = 0;
+  } else if (prefix === 32) {
+    mask = 0xff_ff_ff_ff;
+  } else {
+    mask = (0xff_ff_ff_ff << (32 - prefix)) >>> 0;
+  }
+
+  return {
+    network: (ip & mask) >>> 0,
+    prefix,
+  };
+}
+
+function ipv4ToInt(ip: string): number | null {
+  const octets = ip.split(".");
+  if (octets.length !== 4) {
+    return null;
+  }
+
+  const numbers = octets.map((octet) => Number.parseInt(octet, 10));
+  if (
+    numbers.some((octet) => !Number.isFinite(octet) || octet < 0 || octet > 255)
+  ) {
+    return null;
+  }
+
+  const a = numbers[0] ?? 0;
+  const b = numbers[1] ?? 0;
+  const c = numbers[2] ?? 0;
+  const d = numbers[3] ?? 0;
+  return (((a << 24) >>> 0) | (b << 16) | (c << 8) | d) >>> 0;
+}
+
+function intToIpv4(value: number): string {
+  return [
+    (value >>> 24) & 255,
+    (value >>> 16) & 255,
+    (value >>> 8) & 255,
+    value & 255,
+  ].join(".");
 }
 
 function extractIpv4Address(opts: { readonly raw: string }): string {

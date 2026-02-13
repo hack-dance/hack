@@ -91,7 +91,9 @@ const handleConfigGet: CommandHandlerFor<typeof configGetSpec> = async ({
     throw new CliUsageError("Missing required argument: key");
   }
 
-  const parsedKey = parseKeyPath({ raw: key });
+  const parsedKey = normalizeControlPlaneExtensionPath({
+    path: parseKeyPath({ raw: key }),
+  });
   if (parsedKey.length === 0) {
     throw new CliUsageError("Invalid config key.");
   }
@@ -132,7 +134,9 @@ const handleConfigSet: CommandHandlerFor<typeof configSetSpec> = async ({
   if (key.length === 0) {
     throw new CliUsageError("Missing required argument: key");
   }
-  const parsedKey = parseKeyPath({ raw: key });
+  const parsedKey = normalizeControlPlaneExtensionPath({
+    path: parseKeyPath({ raw: key }),
+  });
   if (parsedKey.length === 0) {
     throw new CliUsageError("Invalid config key.");
   }
@@ -162,6 +166,10 @@ const handleConfigSet: CommandHandlerFor<typeof configSetSpec> = async ({
     logger.error({ message: update.error });
     return 1;
   }
+  pruneLegacyControlPlaneExtensionEntry({
+    target: read.value,
+    path: parsedKey,
+  });
 
   const nextText = `${JSON.stringify(read.value, null, 2)}\n`;
   if (project.scope === "global") {
@@ -484,7 +492,7 @@ function handleRootChar(opts: {
   if (ch === "[") {
     const hasBuffer = buffer.trim().length > 0;
     return {
-      buffer: "",
+      buffer,
       state: { ...state, inBracket: true },
       push: hasBuffer,
     };
@@ -578,4 +586,41 @@ function parseValue(opts: { readonly raw: string }): unknown {
   } catch {
     return opts.raw;
   }
+}
+
+function normalizeControlPlaneExtensionPath(opts: {
+  readonly path: readonly string[];
+}): readonly string[] {
+  const [root, second, ...rest] = opts.path;
+  if (root !== "controlPlane") {
+    return opts.path;
+  }
+  if (second === "extensions") {
+    return opts.path;
+  }
+  if (!second?.startsWith("dance.hack.") || rest.length === 0) {
+    return opts.path;
+  }
+  return ["controlPlane", "extensions", second, ...rest];
+}
+
+function pruneLegacyControlPlaneExtensionEntry(opts: {
+  readonly target: Record<string, unknown>;
+  readonly path: readonly string[];
+}): void {
+  const [root, section, extensionId] = opts.path;
+  if (root !== "controlPlane" || section !== "extensions") {
+    return;
+  }
+  if (!extensionId?.startsWith("dance.hack.")) {
+    return;
+  }
+  const controlPlane = opts.target.controlPlane;
+  if (!isRecord(controlPlane)) {
+    return;
+  }
+  if (!(extensionId in controlPlane)) {
+    return;
+  }
+  delete controlPlane[extensionId];
 }

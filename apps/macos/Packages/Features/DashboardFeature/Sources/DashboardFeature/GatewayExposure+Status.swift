@@ -167,11 +167,20 @@ enum GatewaySummaryState {
   case mixed
   case needsSetup
   case disabled
+  case down
   case unknown
 
-  static func resolve(exposures: [GatewayExposure], gatewayEnabled: Bool?) -> GatewaySummaryState {
+  static func resolve(
+    exposures: [GatewayExposure],
+    gatewayEnabled: Bool?,
+    globalInfraRunning: Bool?
+  ) -> GatewaySummaryState {
     if gatewayEnabled == false {
       return .disabled
+    }
+
+    if globalInfraRunning == false {
+      return .down
     }
 
     if exposures.isEmpty {
@@ -228,6 +237,8 @@ enum GatewaySummaryState {
       return "Needs setup"
     case .disabled:
       return "Disabled"
+    case .down:
+      return "Down"
     case .unknown:
       return "Unknown"
     }
@@ -237,7 +248,7 @@ enum GatewaySummaryState {
     switch self {
     case .localOnly, .lan, .tailscale, .cloudflare, .mixed:
       return .good
-    case .needsSetup, .disabled:
+    case .needsSetup, .disabled, .down:
       return .warn
     case .unknown:
       return .neutral
@@ -248,7 +259,7 @@ enum GatewaySummaryState {
     switch self {
     case .localOnly, .lan, .tailscale, .cloudflare, .mixed:
       return .green
-    case .needsSetup, .disabled:
+    case .needsSetup, .disabled, .down:
       return .orange
     case .unknown:
       return nil

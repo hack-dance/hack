@@ -104,9 +104,16 @@ struct HomeDashboardView: View {
   }
 
   private var runtimeState: (label: String, tone: HealthMetricChip.Tone) {
-    if model.runtimeOverallOk == true { return ("Healthy", .good) }
-    if model.runtimeOverallOk == false { return ("Degraded", .warn) }
-    return ("Unknown", .neutral)
+    switch model.runtimeHealthState {
+    case .healthy:
+      return ("Healthy", .good)
+    case .down:
+      return ("Down", .warn)
+    case .degraded:
+      return ("Degraded", .warn)
+    case .unknown:
+      return ("Unknown", .neutral)
+    }
   }
 
   private var daemonState: (label: String, tone: HealthMetricChip.Tone) {
@@ -142,8 +149,8 @@ struct HomeDashboardView: View {
     if model.globalInfraRunning {
       return ("Running", .good)
     }
-    if model.globalStatus != nil {
-      return ("Stopped", .warn)
+    if model.globalInfraDown {
+      return ("Down", .warn)
     }
     return ("Unknown", .neutral)
   }

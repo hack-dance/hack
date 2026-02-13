@@ -97,12 +97,12 @@ struct GlobalStatusStrip: View {
       } label: {
         Image(systemName: "ellipsis")
           .font(.system(size: 12, weight: .semibold))
-          .foregroundStyle(.primary.opacity(0.85))
+          .foregroundStyle(titlebarIconForeground)
           .frame(width: 22, height: 22)
           .background(
             Circle()
               .strokeBorder(
-                colorScheme == .dark ? Color.white.opacity(0.14) : Color.black.opacity(0.10),
+                titlebarIconStroke,
                 lineWidth: 1
               )
               .background(Circle().fill(Color.clear))
@@ -182,15 +182,19 @@ struct GlobalStatusStrip: View {
   private var titlebarPillBackground: some View {
     if placement == .titlebar {
       RoundedRectangle(cornerRadius: 999, style: .continuous)
-        .fill(colorScheme == .dark ? AnyShapeStyle(.regularMaterial) : AnyShapeStyle(Color.white.opacity(0.78)))
+        .fill(.regularMaterial)
+        .overlay(
+          RoundedRectangle(cornerRadius: 999, style: .continuous)
+            .fill(titlebarPillTint)
+        )
         .overlay(
           RoundedRectangle(cornerRadius: 999, style: .continuous)
             .strokeBorder(
-              colorScheme == .dark ? Color.white.opacity(0.10) : Color.black.opacity(0.08),
+              titlebarPillStroke,
               lineWidth: 1
             )
         )
-        .shadow(color: Color.black.opacity(0.10), radius: 18, x: 0, y: 10)
+        .shadow(color: titlebarPillShadow, radius: 18, x: 0, y: 10)
     } else {
       EmptyView()
     }
@@ -293,7 +297,7 @@ struct GlobalStatusStrip: View {
       .padding(.vertical, 3)
       .background(
         Capsule(style: .continuous)
-          .fill(colorScheme == .dark ? Color.white.opacity(0.07) : Color.black.opacity(0.04))
+          .fill(titlebarActionChipFill)
       )
     } else if canStopProject(project) {
       Button {
@@ -319,15 +323,27 @@ struct GlobalStatusStrip: View {
   }
 
   private var runtimeLabel: String {
-    if model.runtimeOverallOk == true { return "Runtime: healthy" }
-    if model.runtimeOverallOk == false { return "Runtime: degraded" }
-    return "Runtime: unknown"
+    switch model.runtimeHealthState {
+    case .healthy:
+      return "Runtime: healthy"
+    case .down:
+      return "Runtime: down"
+    case .degraded:
+      return "Runtime: degraded"
+    case .unknown:
+      return "Runtime: unknown"
+    }
   }
 
   private var runtimeTone: StatusTone {
-    if model.runtimeOverallOk == true { return .good }
-    if model.runtimeOverallOk == false { return .warn }
-    return .neutral
+    switch model.runtimeHealthState {
+    case .healthy:
+      return .good
+    case .down, .degraded:
+      return .warn
+    case .unknown:
+      return .neutral
+    }
   }
 
   private var daemonLabel: String {
@@ -493,5 +509,54 @@ struct GlobalStatusStrip: View {
     case .unregistered:
       return .unknown
     }
+  }
+
+  private var titlebarIconForeground: Color {
+    dynamicColor(
+      light: NSColor.black.withAlphaComponent(0.74),
+      dark: NSColor.white.withAlphaComponent(0.92)
+    )
+  }
+
+  private var titlebarIconStroke: Color {
+    dynamicColor(
+      light: NSColor.black.withAlphaComponent(0.12),
+      dark: NSColor.white.withAlphaComponent(0.20)
+    )
+  }
+
+  private var titlebarPillTint: Color {
+    dynamicColor(
+      light: NSColor.white.withAlphaComponent(0.56),
+      dark: NSColor.black.withAlphaComponent(0.40)
+    )
+  }
+
+  private var titlebarPillStroke: Color {
+    dynamicColor(
+      light: NSColor.black.withAlphaComponent(0.10),
+      dark: NSColor.white.withAlphaComponent(0.14)
+    )
+  }
+
+  private var titlebarPillShadow: Color {
+    dynamicColor(
+      light: NSColor.black.withAlphaComponent(0.12),
+      dark: NSColor.black.withAlphaComponent(0.28)
+    )
+  }
+
+  private var titlebarActionChipFill: Color {
+    dynamicColor(
+      light: NSColor.black.withAlphaComponent(0.05),
+      dark: NSColor.white.withAlphaComponent(0.09)
+    )
+  }
+
+  private func dynamicColor(light: NSColor, dark: NSColor) -> Color {
+    Color(nsColor: NSColor(name: nil) { appearance in
+      let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+      return isDark ? dark : light
+    })
   }
 }

@@ -1088,15 +1088,25 @@ private struct SupervisorSettingsView: View {
 }
 
 private struct CloudflareExtensionSettingsView: View {
+  private enum FocusedField: Hashable {
+    case hostname
+    case sshHostname
+  }
+
   @Environment(DashboardModel.self) private var model
   @State private var isLoadingConfig = false
   @State private var isSavingToggle = false
   @State private var isTunnelActionInFlight = false
+  @State private var suppressEnabledToggleChange = false
   @State private var enabled = false
   @State private var hostname = ""
   @State private var sshHostname = ""
   @State private var tunnelIsRunning = false
   @State private var tunnelPid: Int? = nil
+  @State private var loadedEnabled = false
+  @State private var loadedHostname = ""
+  @State private var loadedSSHHostname = ""
+  @FocusState private var focusedField: FocusedField?
 
   var body: some View {
     ScrollView {
@@ -1118,6 +1128,7 @@ private struct CloudflareExtensionSettingsView: View {
               .labelsHidden()
               .toggleStyle(.switch)
               .onChange(of: enabled) { _, newValue in
+                guard !suppressEnabledToggleChange else { return }
                 Task {
                   await applyCloudflareEnabledToggle(newValue)
                 }
@@ -1183,6 +1194,7 @@ private struct CloudflareExtensionSettingsView: View {
               TextField("gateway.example.com", text: $hostname)
                 .textFieldStyle(.roundedBorder)
                 .font(.mono(.subheadline))
+                .focused($focusedField, equals: .hostname)
               Text("Used for gateway HTTPS routes.")
                 .font(.mono(.caption2))
                 .foregroundStyle(.tertiary)
@@ -1195,6 +1207,7 @@ private struct CloudflareExtensionSettingsView: View {
               TextField("ssh.example.com", text: $sshHostname)
                 .textFieldStyle(.roundedBorder)
                 .font(.mono(.subheadline))
+                .focused($focusedField, equals: .sshHostname)
               Text("Used for SSH routing when remote workflows are enabled.")
                 .font(.mono(.caption2))
                 .foregroundStyle(.tertiary)
@@ -1255,6 +1268,7 @@ private struct CloudflareExtensionSettingsView: View {
       await loadConfigFromDisk()
     }
     .onChange(of: model.lastUpdated) { _, _ in
+      guard shouldReloadFromRefresh else { return }
       Task { await loadConfigFromDisk() }
     }
   }
@@ -1290,9 +1304,17 @@ private struct CloudflareExtensionSettingsView: View {
     defer { isLoadingConfig = false }
 
     let snapshot = GlobalConfigSnapshot.load()
-    enabled = snapshot.cloudflareExtensionEnabled ?? false
-    hostname = snapshot.cloudflareHostname ?? ""
-    sshHostname = snapshot.cloudflareSSHHostname ?? ""
+    let nextEnabled = snapshot.cloudflareExtensionEnabled ?? false
+    let nextHostname = snapshot.cloudflareHostname ?? ""
+    let nextSSHHostname = snapshot.cloudflareSSHHostname ?? ""
+    suppressEnabledToggleChange = true
+    enabled = nextEnabled
+    hostname = nextHostname
+    sshHostname = nextSSHHostname
+    suppressEnabledToggleChange = false
+    loadedEnabled = nextEnabled
+    loadedHostname = nextHostname
+    loadedSSHHostname = nextSSHHostname
     refreshCloudflareTunnelState()
   }
 
@@ -1300,16 +1322,19 @@ private struct CloudflareExtensionSettingsView: View {
     isSavingToggle = true
     defer { isSavingToggle = false }
 
-    await model.setGlobalConfig(
+    let didUpdate = await model.setGlobalConfig(
       key: "controlPlane.extensions[\"dance.hack.cloudflare\"].enabled",
       value: isEnabled ? "true" : "false"
     )
+    guard didUpdate else {
+      await loadConfigFromDisk()
+      return
+    }
     if !isEnabled, tunnelIsRunning {
       isTunnelActionInFlight = true
       _ = await model.stopCloudflareTunnel()
       isTunnelActionInFlight = false
     }
-    await model.refresh()
     await loadConfigFromDisk()
   }
 
@@ -1317,20 +1342,31 @@ private struct CloudflareExtensionSettingsView: View {
     isLoadingConfig = true
     defer { isLoadingConfig = false }
 
-    await model.setGlobalConfig(
+    let didSaveEnabled = await model.setGlobalConfig(
       key: "controlPlane.extensions[\"dance.hack.cloudflare\"].enabled",
       value: enabled ? "true" : "false"
     )
-    await model.setGlobalConfig(
+    guard didSaveEnabled else {
+      await loadConfigFromDisk()
+      return
+    }
+    let didSaveHostname = await model.setGlobalConfig(
       key: "controlPlane.extensions[\"dance.hack.cloudflare\"].config.hostname",
       value: hostname.trimmingCharacters(in: .whitespacesAndNewlines)
     )
-    await model.setGlobalConfig(
+    guard didSaveHostname else {
+      await loadConfigFromDisk()
+      return
+    }
+    let didSaveSSHHostname = await model.setGlobalConfig(
       key: "controlPlane.extensions[\"dance.hack.cloudflare\"].config.sshHostname",
       value: sshHostname.trimmingCharacters(in: .whitespacesAndNewlines)
     )
+    guard didSaveSSHHostname else {
+      await loadConfigFromDisk()
+      return
+    }
 
-    await model.refresh()
     await loadConfigFromDisk()
   }
 
@@ -1397,13 +1433,45 @@ private struct CloudflareExtensionSettingsView: View {
     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
     return trimmed.isEmpty ? nil : trimmed
   }
+
+  private var shouldReloadFromRefresh: Bool {
+    if isLoadingConfig || isSavingToggle || isTunnelActionInFlight {
+      return false
+    }
+    if focusedField != nil {
+      return false
+    }
+    return !hasUnsavedChanges
+  }
+
+  private var hasUnsavedChanges: Bool {
+    if enabled != loadedEnabled {
+      return true
+    }
+    if normalizedValue(hostname) != normalizedValue(loadedHostname) {
+      return true
+    }
+    if normalizedValue(sshHostname) != normalizedValue(loadedSSHHostname) {
+      return true
+    }
+    return false
+  }
+
+  private func normalizedValue(_ value: String) -> String {
+    value.trimmingCharacters(in: .whitespacesAndNewlines)
+  }
 }
 
 private struct TailscaleExtensionSettingsView: View {
   @Environment(DashboardModel.self) private var model
   @State private var isLoadingConfig = false
   @State private var isSavingToggle = false
+  @State private var isLoadingDiagnostics = false
+  @State private var suppressEnabledToggleChange = false
   @State private var enabled = false
+  @State private var diagnostics: TailscaleInspectResponse? = nil
+  @State private var selectedExitNodeId = ""
+  @State private var lastDiagnosticsRefreshAt: Date? = nil
 
   var body: some View {
     ScrollView {
@@ -1415,21 +1483,36 @@ private struct TailscaleExtensionSettingsView: View {
         )
         GlassCard(title: "Extension status", systemImage: "network") {
           HStack(alignment: .center, spacing: 8) {
-            StatusPill(text: tailscaleStatusText, tone: tailscaleStatusTone)
-            StatusPill(text: tailscaleInstalled ? "tailscale installed" : "tailscale missing", tone: tailscaleInstalled ? .good : .warn)
-            if let dependency = tailscaleDependencyLabel {
-              StatusPill(text: dependency, tone: tailscaleDependencyTone ?? .neutral)
+            StatusPill(text: enabled ? "Enabled" : "Disabled", tone: enabled ? .good : .neutral)
+            StatusPill(
+              text: tailscaleInstalled ? "tailscale installed" : "tailscale missing",
+              tone: tailscaleInstalled ? .good : .warn
+            )
+            StatusPill(
+              text: tailscaleConnected ? "Tailnet connected" : "Tailnet disconnected",
+              tone: tailscaleConnected ? .good : .warn
+            )
+            if let backendState = diagnostics?.backendState, !backendState.isEmpty {
+              StatusPill(
+                text: "Backend \(backendState)",
+                tone: tailscaleConnected ? .good : .neutral
+              )
             }
+            StatusPill(
+              text: selfDeviceOnline ? "Host online" : "Host offline",
+              tone: selfDeviceOnline ? .good : .warn
+            )
             Spacer()
             Toggle("Enabled", isOn: $enabled)
               .labelsHidden()
               .toggleStyle(.switch)
               .onChange(of: enabled) { _, newValue in
+                guard !suppressEnabledToggleChange else { return }
                 Task {
                   await applyTailscaleEnabledToggle(newValue)
                 }
               }
-            if isLoadingConfig {
+            if isLoadingConfig || isLoadingDiagnostics {
               ProgressView()
                 .controlSize(.small)
             }
@@ -1438,56 +1521,74 @@ private struct TailscaleExtensionSettingsView: View {
                 .controlSize(.small)
             }
           }
-          if let detail = tailscaleExposure?.detail, !detail.isEmpty {
+          Text("tailscale path: \(tailscalePathLabel)")
+            .font(.mono(.caption2))
+            .foregroundStyle(tailscaleInstalled ? .secondary : Color.orange)
+            .textSelection(.enabled)
+          if let tailnetLabel {
+            Text("Tailnet: \(tailnetLabel)")
+              .font(.mono(.caption))
+              .foregroundStyle(.secondary)
+          }
+          if let selfDevice = diagnostics?.selfDevice {
+            Text("This device: \(selfDevice.hostname)\(selfDevice.tailscaleIp.map { " (\($0))" } ?? "")")
+              .font(.mono(.caption))
+              .foregroundStyle(.secondary)
+          }
+          if let lastDiagnosticsRefreshAt {
+            Text("Last checked \(lastDiagnosticsRefreshAt.formatted(date: .abbreviated, time: .shortened))")
+              .font(.mono(.caption2))
+              .foregroundStyle(.tertiary)
+          }
+          if let authUrl = diagnostics?.authUrl, !authUrl.isEmpty {
+            Text("Login required: \(authUrl)")
+              .font(.mono(.caption2))
+              .foregroundStyle(.secondary)
+              .textSelection(.enabled)
+          }
+          if let error = diagnostics?.error, !error.isEmpty {
+            Text(error)
+              .font(.mono(.caption))
+              .foregroundStyle(Color.orange)
+          } else if let detail = tailscaleExposure?.detail, !detail.isEmpty {
             Text(detail)
               .font(.mono(.caption))
               .foregroundStyle(.secondary)
           }
-          Text(tailscalePathLabel)
-            .font(.mono(.caption2))
-            .foregroundStyle(tailscaleInstalled ? .secondary : Color.orange)
-            .textSelection(.enabled)
         }
-        GlassCard(title: "Configuration", systemImage: "slider.horizontal.3") {
+        GlassCard(title: "Tailnet controls", systemImage: "slider.horizontal.3") {
           VStack(alignment: .leading, spacing: 12) {
-            Text("When enabled, gateway can advertise services over your tailnet if Tailscale is installed and authenticated.")
+            Text("The extension controls gateway exposure behavior, while Tailscale runtime state is shown here regardless of extension enablement.")
               .font(.mono(.caption))
               .foregroundStyle(.secondary)
             HStack(spacing: 10) {
               Button {
-                Task { await saveTailscaleSettings() }
+                Task { await refreshTailscaleDiagnostics() }
               } label: {
-                Label("Save Tailscale settings", systemImage: "checkmark")
+                Label("Refresh state", systemImage: "arrow.clockwise")
               }
               .adaptiveToolbarButtonProminent()
 
               Button {
-                Task { await loadConfigFromDisk() }
+                if tailscaleConnected {
+                  openGlobalCommandInTerminalPanel(
+                    command: "tailscale down",
+                    title: "tailscale down"
+                  )
+                } else {
+                  openGlobalCommandInTerminalPanel(
+                    command: "tailscale up",
+                    title: "tailscale up"
+                  )
+                }
               } label: {
-                Label("Reload", systemImage: "arrow.clockwise")
-              }
-              .adaptiveToolbarButton()
-
-              Button {
-                openGlobalCommandInTerminalPanel(
-                  command: "tailscale up",
-                  title: "tailscale up"
+                Label(
+                  tailscaleConnected ? "Disconnect tailnet" : "Connect tailnet",
+                  systemImage: tailscaleConnected ? "stop.fill" : "play.fill"
                 )
-              } label: {
-                Label("Bring online", systemImage: "play.fill")
               }
               .adaptiveToolbarButton()
               .disabled(!tailscaleInstalled)
-
-              Button {
-                openGlobalCommandInTerminalPanel(
-                  command: "tailscale down",
-                  title: "tailscale down"
-                )
-              } label: {
-                Label("Bring offline", systemImage: "stop.fill")
-              }
-              .adaptiveToolbarButton()
 
               Button {
                 openGlobalCommandInTerminalPanel(
@@ -1495,26 +1596,64 @@ private struct TailscaleExtensionSettingsView: View {
                   title: "tailscale status"
                 )
               } label: {
-                Label("Open status", systemImage: "terminal")
+                Label("Open CLI status", systemImage: "terminal")
+              }
+              .adaptiveToolbarButton()
+
+              Button {
+                openGlobalCommandInTerminalPanel(
+                  command: "tailscale status --json",
+                  title: "tailscale status --json"
+                )
+              } label: {
+                Label("Open status JSON", systemImage: "doc.plaintext")
               }
               .adaptiveToolbarButton()
               Spacer()
             }
+
+            if !exitNodes.isEmpty {
+              Divider()
+                .opacity(0.2)
+
+              HStack(alignment: .center, spacing: 10) {
+                Picker("Exit node", selection: $selectedExitNodeId) {
+                  Text("No exit node").tag("")
+                  ForEach(exitNodes, id: \.id) { peer in
+                    Text(peer.hostname).tag(peer.id)
+                  }
+                }
+                .pickerStyle(.menu)
+                .frame(minWidth: 220, alignment: .leading)
+
+                Button {
+                  applySelectedExitNode()
+                } label: {
+                  Label("Use selected node", systemImage: "location.north.line.fill")
+                }
+                .adaptiveToolbarButton()
+                .disabled(!tailscaleInstalled || selectedExitNodeId.isEmpty)
+
+                Button {
+                  clearSelectedExitNode()
+                } label: {
+                  Label("Clear exit node", systemImage: "location.slash")
+                }
+                .adaptiveToolbarButton()
+                .disabled(!tailscaleInstalled || !hasCurrentExitNode)
+
+                Spacer()
+              }
+
+              if let currentExitNodeName = diagnostics?.currentExitNodeName, !currentExitNodeName.isEmpty {
+                Text("Current exit node: \(currentExitNodeName)")
+                  .font(.mono(.caption2))
+                  .foregroundStyle(.secondary)
+              }
+            }
           }
         }
-        InlineCallout(
-          tone: .neutral,
-          title: "Tailscale prerequisites",
-          message: "Install Tailscale, run `tailscale up`, and keep the daemon logged in. The extension reports Missing when the binary is not available.",
-          actions: [
-            InlineCalloutAction(label: "Open tailscale status", systemImage: "terminal") {
-              openGlobalCommandInTerminalPanel(
-                command: "tailscale status",
-                title: "tailscale status"
-              )
-            }
-          ]
-        )
+        tailscaleNetworkCard
       }
       .padding(16)
     }
@@ -1530,26 +1669,174 @@ private struct TailscaleExtensionSettingsView: View {
     model.globalStatus?.gateway?.exposures?.first(where: { $0.id == "tailscale" })
   }
 
-  private var tailscaleStatusText: String {
-    if let tailscaleExposure {
-      return tailscaleExposure.statusLabel
+  @ViewBuilder
+  private var tailscaleNetworkCard: some View {
+    GlassCard(title: "Tailnet state", systemImage: "point.3.connected.trianglepath.dotted") {
+      if !tailscaleInstalled {
+        Text("Install Tailscale to populate nodes, tags, and exit-node controls.")
+          .font(.mono(.caption))
+          .foregroundStyle(.secondary)
+      } else {
+        if let diagnostics, let error = diagnostics.error, !error.isEmpty {
+          Text(error)
+            .font(.mono(.caption))
+            .foregroundStyle(Color.orange)
+        }
+
+        if let selfDevice = diagnostics?.selfDevice {
+          VStack(alignment: .leading, spacing: 4) {
+            Text("This device")
+              .font(.mono(.caption, weight: .semibold))
+              .foregroundStyle(.secondary)
+            Text(selfDevice.hostname)
+              .font(.mono(.subheadline, weight: .semibold))
+            if let ip = selfDevice.tailscaleIp {
+              Text(ip)
+                .font(.mono(.caption))
+                .foregroundStyle(.secondary)
+            }
+            if let dnsName = selfDevice.dnsName, !dnsName.isEmpty {
+              Text(dnsName)
+                .font(.mono(.caption2))
+                .foregroundStyle(.tertiary)
+            }
+            if !selfDevice.tags.isEmpty {
+              Text("Tags: \(selfDevice.tags.joined(separator: ", "))")
+                .font(.mono(.caption2))
+                .foregroundStyle(.secondary)
+            }
+            if let os = selfDevice.os, !os.isEmpty {
+              Text("OS: \(os)")
+                .font(.mono(.caption2))
+                .foregroundStyle(.tertiary)
+            }
+          }
+        }
+
+        if !healthMessages.isEmpty {
+          Divider()
+            .opacity(0.2)
+
+          VStack(alignment: .leading, spacing: 6) {
+            Text("Health checks")
+              .font(.mono(.caption, weight: .semibold))
+              .foregroundStyle(.secondary)
+            ForEach(Array(healthMessages.enumerated()), id: \.offset) { _, message in
+              Text("• \(message)")
+                .font(.mono(.caption2))
+                .foregroundStyle(Color.orange)
+            }
+          }
+        }
+
+        Divider()
+          .opacity(0.2)
+
+        VStack(alignment: .leading, spacing: 6) {
+          Text("Exit nodes")
+            .font(.mono(.caption, weight: .semibold))
+            .foregroundStyle(.secondary)
+          if let currentExitNodeName = diagnostics?.currentExitNodeName, !currentExitNodeName.isEmpty {
+            Text("Current: \(currentExitNodeName)")
+              .font(.mono(.caption))
+              .foregroundStyle(.secondary)
+          } else {
+            Text("Current: none")
+              .font(.mono(.caption))
+              .foregroundStyle(.secondary)
+          }
+
+          let exitNodes = diagnostics?.exitNodes ?? []
+          if exitNodes.isEmpty {
+            Text("No exit-node capable peers detected.")
+              .font(.mono(.caption2))
+              .foregroundStyle(.tertiary)
+          } else {
+            ForEach(Array(exitNodes.prefix(6)), id: \.id) { peer in
+              tailscalePeerRow(peer)
+            }
+          }
+        }
+
+        if !taggedPeers.isEmpty {
+          Divider()
+            .opacity(0.2)
+
+          VStack(alignment: .leading, spacing: 6) {
+            Text("Tagged devices (\(taggedPeers.filter(\.online).count)/\(taggedPeers.count) online)")
+              .font(.mono(.caption, weight: .semibold))
+              .foregroundStyle(.secondary)
+            ForEach(Array(taggedPeers.prefix(12)), id: \.id) { peer in
+              tailscalePeerRow(peer)
+            }
+          }
+        }
+
+        Divider()
+          .opacity(0.2)
+
+        VStack(alignment: .leading, spacing: 6) {
+          Text("Devices (\(diagnostics?.onlinePeerCount ?? 0)/\(diagnostics?.peers.count ?? 0) online)")
+            .font(.mono(.caption, weight: .semibold))
+            .foregroundStyle(.secondary)
+          if personalPeers.isEmpty {
+            Text("No untagged devices reported by tailscale status.")
+              .font(.mono(.caption2))
+              .foregroundStyle(.tertiary)
+          } else {
+            ForEach(Array(personalPeers.prefix(12)), id: \.id) { peer in
+              tailscalePeerRow(peer)
+            }
+          }
+        }
+      }
     }
-    return enabled ? "Configured" : "Disabled"
   }
 
-  private var tailscaleStatusTone: StatusTone {
-    if let tailscaleExposure {
-      return tailscaleExposure.statusTone
+  private func tailscalePeerRow(_ peer: TailscaleInspectPeer) -> some View {
+    HStack(alignment: .center, spacing: 8) {
+      Circle()
+        .fill(peer.online ? Color.green : Color.secondary.opacity(0.7))
+        .frame(width: 6, height: 6)
+      Text(peer.hostname)
+        .font(.mono(.caption))
+        .lineLimit(1)
+        .truncationMode(.tail)
+      if peer.isExitNodeOption || peer.isExitNode {
+        StatusPill(text: "Exit node", tone: .neutral)
+      }
+      if !peer.tags.isEmpty {
+        Text(peer.tags.joined(separator: ", "))
+          .font(.mono(.caption2))
+          .foregroundStyle(.tertiary)
+          .lineLimit(1)
+          .truncationMode(.tail)
+      }
+      Spacer(minLength: 0)
+      if let ip = peer.tailscaleIp {
+        Text(ip)
+          .font(.mono(.caption2))
+          .foregroundStyle(.secondary)
+      }
     }
-    return enabled ? .warn : .neutral
   }
 
-  private var tailscaleDependencyLabel: String? {
-    tailscaleExposure?.dependencyStatusLabel
+  private var tailscaleConnected: Bool {
+    diagnostics?.connected == true
   }
 
-  private var tailscaleDependencyTone: StatusTone? {
-    tailscaleExposure?.dependencyStatusTone
+  private var selfDeviceOnline: Bool {
+    diagnostics?.selfDevice?.online == true
+  }
+
+  private var tailnetLabel: String? {
+    guard let tailnetName = diagnostics?.tailnetName, !tailnetName.isEmpty else {
+      return nil
+    }
+    guard let suffix = diagnostics?.magicDnsSuffix, !suffix.isEmpty else {
+      return tailnetName
+    }
+    return "\(tailnetName) (\(suffix))"
   }
 
   private var tailscalePath: String? {
@@ -1557,43 +1844,98 @@ private struct TailscaleExtensionSettingsView: View {
   }
 
   private var tailscaleInstalled: Bool {
-    tailscalePath != nil
+    diagnostics?.installed ?? (tailscalePath != nil)
   }
 
   private var tailscalePathLabel: String {
-    "tailscale path: \(tailscalePath ?? "Not found in PATH")"
+    diagnostics?.binaryPath ?? tailscalePath ?? "Not found in PATH"
+  }
+
+  private var exitNodes: [TailscaleInspectPeer] {
+    diagnostics?.exitNodes ?? []
+  }
+
+  private var taggedPeers: [TailscaleInspectPeer] {
+    let peers = diagnostics?.peers ?? []
+    return peers.filter { !$0.tags.isEmpty }
+  }
+
+  private var personalPeers: [TailscaleInspectPeer] {
+    let peers = diagnostics?.peers ?? []
+    return peers.filter(\.tags.isEmpty)
+  }
+
+  private var healthMessages: [String] {
+    diagnostics?.health ?? []
+  }
+
+  private var hasCurrentExitNode: Bool {
+    guard let currentExitNodeId = diagnostics?.currentExitNodeId else { return false }
+    return !currentExitNodeId.isEmpty
   }
 
   private func loadConfigFromDisk() async {
     isLoadingConfig = true
-    defer { isLoadingConfig = false }
-
     let snapshot = GlobalConfigSnapshot.load()
+    suppressEnabledToggleChange = true
     enabled = snapshot.tailscaleExtensionEnabled ?? false
+    suppressEnabledToggleChange = false
+    isLoadingConfig = false
+    await refreshTailscaleDiagnostics()
+  }
+
+  private func refreshTailscaleDiagnostics() async {
+    isLoadingDiagnostics = true
+    defer { isLoadingDiagnostics = false }
+    diagnostics = await model.inspectTailscale()
+    lastDiagnosticsRefreshAt = Date()
+    syncExitNodeSelection()
   }
 
   private func applyTailscaleEnabledToggle(_ isEnabled: Bool) async {
     isSavingToggle = true
     defer { isSavingToggle = false }
 
-    await model.setGlobalConfig(
+    let didUpdate = await model.setGlobalConfig(
       key: "controlPlane.extensions[\"dance.hack.tailscale\"].enabled",
       value: isEnabled ? "true" : "false"
     )
-    await model.refresh()
+    guard didUpdate else {
+      await loadConfigFromDisk()
+      return
+    }
     await loadConfigFromDisk()
   }
 
-  private func saveTailscaleSettings() async {
-    isLoadingConfig = true
-    defer { isLoadingConfig = false }
+  private func syncExitNodeSelection() {
+    guard let diagnostics else {
+      selectedExitNodeId = ""
+      return
+    }
+    if diagnostics.exitNodes.contains(where: { $0.id == selectedExitNodeId }) {
+      return
+    }
+    selectedExitNodeId = diagnostics.currentExitNodeId ?? ""
+  }
 
-    await model.setGlobalConfig(
-      key: "controlPlane.extensions[\"dance.hack.tailscale\"].enabled",
-      value: enabled ? "true" : "false"
+  private func applySelectedExitNode() {
+    guard !selectedExitNodeId.isEmpty else { return }
+    openGlobalCommandInTerminalPanel(
+      command: "tailscale set --exit-node=\(shellQuote(selectedExitNodeId))",
+      title: "tailscale set --exit-node"
     )
-    await model.refresh()
-    await loadConfigFromDisk()
+  }
+
+  private func clearSelectedExitNode() {
+    openGlobalCommandInTerminalPanel(
+      command: "tailscale set --exit-node=",
+      title: "tailscale clear exit node"
+    )
+  }
+
+  private func shellQuote(_ value: String) -> String {
+    let escaped = value.replacingOccurrences(of: "'", with: "'\\''")
+    return "'\(escaped)'"
   }
 }
 
@@ -1811,6 +2153,7 @@ private struct ExtensionsSettingsView: View {
   @Environment(DashboardModel.self) private var model
   @Binding var selection: SettingsSidebarItem
   @State private var isLoading = false
+  @State private var suppressToggleChange = false
   @State private var cloudflareEnabled = false
   @State private var tailscaleEnabled = false
 
@@ -1890,6 +2233,7 @@ private struct ExtensionsSettingsView: View {
             // Prevent row navigation tap when toggling inline.
           }
           .onChange(of: isOn.wrappedValue) { _, newValue in
+            guard !suppressToggleChange else { return }
             Task {
               await setExtensionEnabled(item: item, enabled: newValue)
             }
@@ -1949,8 +2293,10 @@ private struct ExtensionsSettingsView: View {
 
   private func loadConfigFromDisk() async {
     let snapshot = GlobalConfigSnapshot.load()
+    suppressToggleChange = true
     cloudflareEnabled = snapshot.cloudflareExtensionEnabled ?? false
     tailscaleEnabled = snapshot.tailscaleExtensionEnabled ?? false
+    suppressToggleChange = false
   }
 
   private func setExtensionEnabled(
@@ -1970,11 +2316,14 @@ private struct ExtensionsSettingsView: View {
       return
     }
 
-    await model.setGlobalConfig(
+    let didUpdate = await model.setGlobalConfig(
       key: key,
       value: enabled ? "true" : "false"
     )
-    await model.refresh()
+    guard didUpdate else {
+      await loadConfigFromDisk()
+      return
+    }
     await loadConfigFromDisk()
   }
 }
@@ -2289,7 +2638,15 @@ private struct GlobalConfigSnapshot {
 
   static func load() -> Self {
     let home = FileManager.default.homeDirectoryForCurrentUser
-    let configPath = home.appendingPathComponent(".hack/hack.config.json").path
+    let environment = ProcessInfo.processInfo.environment
+    let overridePath = (environment["HACK_GLOBAL_CONFIG_PATH"] ?? "")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    let configPath: String
+    if overridePath.isEmpty {
+      configPath = home.appendingPathComponent(".hack/hack.config.json").path
+    } else {
+      configPath = NSString(string: overridePath).expandingTildeInPath
+    }
     guard
       let data = FileManager.default.contents(atPath: configPath),
       let object = try? JSONSerialization.jsonObject(with: data),

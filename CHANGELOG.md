@@ -1,3 +1,9 @@
+## <small>1.6.2 (2026-02-13)</small>
+
+* Fix mac app layout and logs ([7670b8c](https://github.com/hack-dance/hack/commit/7670b8c))
+* Investigate Zig download failure ([3198da1](https://github.com/hack-dance/hack/commit/3198da1))
+* fix(macos): fix dashboard overlays and settings terminal actions ([b77f3f4](https://github.com/hack-dance/hack/commit/b77f3f4))
+
 ## <small>1.6.1 (2026-02-13)</small>
 
 * Audit large repo changes ([a2d2788](https://github.com/hack-dance/hack/commit/a2d2788))

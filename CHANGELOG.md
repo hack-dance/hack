@@ -1,3 +1,7 @@
+## <small>1.9.1 (2026-02-14)</small>
+
+* fix(lifecycle): preserve PATH and cwd behavior for hooks ([05e2a2d](https://github.com/hack-dance/hack/commit/05e2a2d))
+
 ## 1.9.0 (2026-02-13)
 
 * feat(macos): add update-available header badge and background checks ([88bfc01](https://github.com/hack-dance/hack/commit/88bfc01))

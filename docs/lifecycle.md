@@ -14,7 +14,13 @@ You can also use a shorthand `startup` array for common `hack up` startup flows.
   "lifecycle": {
     "up": {
       "before": [
-        { "name": "aws sso login", "command": "aws sso login", "cwd": "." }
+        { "name": "aws sso login", "command": "aws sso login", "cwd": "." },
+        {
+          "name": "aws-ssm-proxy",
+          "command": "bun run proxy",
+          "cwd": "packages/infra",
+          "persistent": true
+        }
       ],
       "after": []
     },
@@ -83,15 +89,21 @@ Each entry can be either:
 - `name` (optional): label for logs
 - `command` (required): shell command
 - `cwd` (optional): working directory; relative paths are resolved from repo root
+- `persistent` (optional): `true` means "start this as a managed lifecycle process"
 
 Hooks run on the host as `sh -c <command>`. Failures stop the operation.
 Commands inherit the CLI process environment (including PATH), plus resolved project env vars.
+
+`persistent` behavior:
+- In `lifecycle.up.before`, `persistent: true` starts the command in the lifecycle mux session and immediately continues to the next hook.
+- Ordering is preserved: each persistent hook is started in sequence before moving to later hooks.
+- In other hook lists (`up.after`, `down.before`, `down.after`), `persistent` is ignored and the hook runs as a normal blocking command.
 
 ### Processes
 
 Long-running processes live under `lifecycle.processes` and are objects with:
 - `name` (required): stable identifier (used for window naming)
-- `command` (required): shell command (run via `sh -lc`)
+- `command` (required): shell command (run in a mux session shell)
 - `cwd` (optional): working directory (defaults to repo root)
 
 Processes receive the resolved env contract (see `env.md`) as their environment.
@@ -111,10 +123,11 @@ Lifecycle output is now surfaced across CLI/runtime views:
 ### `hack up`
 
 1. Resolve env contract (and optionally prompt for missing required env in interactive shells).
-2. Run `lifecycle.up.before` hooks.
-3. Start lifecycle processes (if any) inside a dedicated session.
-4. Run `docker compose up` (or `up -d` when `--detach`).
-5. Run `lifecycle.up.after` hooks.
+2. Run `lifecycle.up.before` hooks in order.
+3. For `up.before` hooks with `persistent: true`, start each as a managed lifecycle process and continue immediately.
+4. Start lifecycle processes (if any) inside the same dedicated lifecycle session.
+5. Run `docker compose up` (or `up -d` when `--detach`).
+6. Run `lifecycle.up.after` hooks.
 
 ### `hack down`
 
@@ -145,6 +158,7 @@ Notes:
 
 ## Tips
 
-- Keep `up.before` hooks short and deterministic; prefer long-running things as `processes`.
+- For long-running setup commands, use either `lifecycle.processes` or `lifecycle.up.before` with `persistent: true`.
+- Keep non-persistent hooks short and deterministic.
 - Use `source: "keychain"` in the env contract for secrets and keep `.hack/.env` non-sensitive.
 - If a hook requires interactive auth (e.g. browser-based SSO), it will still work; it runs with `stdin: inherit`.

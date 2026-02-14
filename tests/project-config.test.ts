@@ -145,3 +145,46 @@ test("readProjectConfig maps startup shorthand into lifecycle", async () => {
     },
   ]);
 });
+
+test("readProjectConfig parses persistent lifecycle up.before hooks", async () => {
+  const ctx = await createProjectDir();
+  await writeFile(
+    ctx.configFile,
+    JSON.stringify(
+      {
+        lifecycle: {
+          up: {
+            before: [
+              {
+                name: "proxy",
+                cwd: "packages/infra",
+                command: "bun run proxy",
+                persistent: true,
+              },
+              {
+                name: "auth",
+                command: "bun run aws:qa",
+              },
+            ],
+          },
+        },
+      },
+      null,
+      2
+    )
+  );
+
+  const cfg = await readProjectConfig(ctx);
+  expect(cfg.lifecycle?.up?.before).toEqual([
+    {
+      name: "proxy",
+      cwd: "packages/infra",
+      command: "bun run proxy",
+      persistent: true,
+    },
+    {
+      name: "auth",
+      command: "bun run aws:qa",
+    },
+  ]);
+});

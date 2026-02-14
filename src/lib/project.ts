@@ -159,6 +159,7 @@ export interface ProjectLifecycleCommand {
   readonly name?: string;
   readonly command: string;
   readonly cwd?: string;
+  readonly persistent?: boolean;
 }
 
 export interface ProjectLifecycleProcess {
@@ -533,11 +534,13 @@ function parseLifecycleCommand(value: unknown): ProjectLifecycleCommand | null {
   }
   const name = getString(value, "name")?.trim();
   const cwd = getString(value, "cwd")?.trim();
+  const persistent = value.persistent === true ? true : undefined;
 
   return {
     ...(name && name.length > 0 ? { name } : {}),
     command,
     ...(cwd && cwd.length > 0 ? { cwd } : {}),
+    ...(persistent ? { persistent } : {}),
   };
 }
 

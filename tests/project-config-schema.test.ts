@@ -41,6 +41,8 @@ test("project config schema includes strict lifecycle hooks and processes", () =
   const hookObject = beforeAnyOf.find((entry) => entry.type === "object");
   expect(hookObject?.additionalProperties).toBe(false);
   expect(hookObject?.required).toEqual(["command"]);
+  const hookProps = hookObject?.properties as Record<string, unknown>;
+  expect(hookProps.persistent).toEqual({ type: "boolean" });
 
   const processes = lifecycleProps.processes as Record<string, unknown>;
   const processItems = processes.items as Record<string, unknown>;

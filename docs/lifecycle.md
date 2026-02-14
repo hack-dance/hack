@@ -84,7 +84,8 @@ Each entry can be either:
 - `command` (required): shell command
 - `cwd` (optional): working directory; relative paths are resolved from repo root
 
-Hooks run on the host as `sh -lc <command>`. Failures stop the operation.
+Hooks run on the host as `sh -c <command>`. Failures stop the operation.
+Commands inherit the CLI process environment (including PATH), plus resolved project env vars.
 
 ### Processes
 

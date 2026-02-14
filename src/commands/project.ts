@@ -964,9 +964,9 @@ async function runLifecycleCommands(opts: {
       },
     });
 
-    const proc = Bun.spawn(["sh", "-lc", cmd.command], {
+    const proc = Bun.spawn(["sh", "-c", cmd.command], {
       cwd,
-      env: opts.env,
+      env: mergeLifecycleCommandEnv(opts.env),
       stdin: "inherit",
       stdout: "pipe",
       stderr: "pipe",
@@ -1187,7 +1187,7 @@ async function startLifecycleProcess(opts: {
         "-c",
         cwd,
         "sh",
-        "-lc",
+        "-c",
         wrappedCommand,
       ],
       { stdin: "ignore" }
@@ -1215,7 +1215,7 @@ async function startLifecycleProcess(opts: {
   }
 
   const result = await exec(
-    ["zellij", "run", "--", "sh", "-lc", wrappedCommand],
+    ["zellij", "run", "--", "sh", "-c", wrappedCommand],
     {
       stdin: "ignore",
       cwd,
@@ -1313,6 +1313,18 @@ function wrapLifecyclePersistentCommand(opts: {
 
 function shellSingleQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function mergeLifecycleCommandEnv(
+  override: Readonly<Record<string, string>>
+): Record<string, string> {
+  const base: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value === "string") {
+      base[key] = value;
+    }
+  }
+  return { ...base, ...override };
 }
 
 async function resolveBranchComposeFiles(opts: {

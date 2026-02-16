@@ -1,3 +1,8 @@
+## 1.10.0 (2026-02-16)
+
+* feat(lifecycle): support persistent up.before hooks ([f38e024](https://github.com/hack-dance/hack/commit/f38e024))
+* feat(tui): add interactive attach hints for lifecycle services ([90b2de4](https://github.com/hack-dance/hack/commit/90b2de4))
+
 ## <small>1.9.1 (2026-02-14)</small>
 
 * fix(lifecycle): preserve PATH and cwd behavior for hooks ([05e2a2d](https://github.com/hack-dance/hack/commit/05e2a2d))

@@ -39,7 +39,7 @@ import type {
   RuntimeService,
 } from "../lib/runtime-projects.ts";
 import { readRuntimeProjects } from "../lib/runtime-projects.ts";
-import { exec } from "../lib/shell.ts";
+import { exec, run } from "../lib/shell.ts";
 import { parseTimeInput } from "../lib/time.ts";
 import { copyToClipboard } from "../ui/clipboard.ts";
 import type { LogStreamBackend, LogStreamEvent } from "../ui/log-stream.ts";
@@ -75,6 +75,11 @@ const ARROW_AT_END_REGEX = /=>\s*$/;
 const LOG_LEVEL_KEYWORD_REGEX =
   /\b(TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL|PANIC)\b/i;
 
+const LIFECYCLE_LABEL_PROCESS = "hack.lifecycle.process";
+const LIFECYCLE_LABEL_SESSION = "hack.lifecycle.session";
+const LIFECYCLE_LABEL_BACKEND = "hack.lifecycle.backend";
+const LIFECYCLE_LABEL_WINDOW = "hack.lifecycle.window";
+
 type HackTuiOptions = {
   readonly project: ProjectContext;
 };
@@ -109,6 +114,12 @@ type DockerStatsSample = {
   readonly blockInputBytes: number | null;
   readonly blockOutputBytes: number | null;
   readonly pids: number | null;
+};
+
+type LifecycleInteractionTarget = {
+  readonly backend: "tmux" | "zellij";
+  readonly sessionName: string;
+  readonly windowName: string | null;
 };
 
 class WrappedTextRenderable extends TextRenderable {
@@ -809,6 +820,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
     let caddyMismatch = false;
     let lastCaddyCheckAt = 0;
     const caddyCheckIntervalMs = 10_000;
+    let interactiveSessionOpen = false;
 
     const setMainViewVisible = (visible: boolean) => {
       root.visible = visible;
@@ -1172,6 +1184,10 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
           : t`${dim("[")}${fg("#9ad7ff")("↑/↓")}${dim("]")} ${dim(
               logFollow ? "scroll logs" : "scroll logs (paused)"
             )}`;
+      const interactionTarget = resolveLifecycleInteractionTarget({
+        runtime: currentRuntime,
+        selectedService,
+      });
       const switchTarget = activePane === "services" ? "logs" : "services";
       const actions = t`${dim("[")}${fg("#9ad7ff")("tab")}${dim("]")} focus ${fg(
         "#9ad7ff"
@@ -1179,9 +1195,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         switchTarget
       )}  ${dim("[")}${fg("#9ad7ff")("ctrl+f")}${dim("]")} find  ${dim("[")}${fg(
         "#9ad7ff"
-      )(
-        "o"
-      )}${dim("]")} open  ${dim("[")}${fg("#9ad7ff")("u")}${dim("]")} up  ${dim("[")}${fg(
+      )("o")}${dim("]")} open  ${dim("[")}${fg("#9ad7ff")("i")}${dim(
+        "]"
+      )} interact  ${dim("[")}${fg("#9ad7ff")("u")}${dim("]")} up  ${dim("[")}${fg(
         "#9ad7ff"
       )("d")}${dim("]")} down  ${dim("[")}${fg("#9ad7ff")("r")}${dim(
         "]"
@@ -1191,6 +1207,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       const toggleHint = t`${dim("[")}${fg("#9ad7ff")("s")}${dim("]")} scope  ${dim("[")}${fg(
         "#9ad7ff"
       )("z")}${dim("]")} wrap  ${dim("[")}${fg("#9ad7ff")("h")}${dim("]")} hl`;
+      const interactHint = interactionTarget
+        ? t`${dim("tty:")} ${fg("#9ece6a")("press i to interact")}`
+        : null;
       const followHint =
         !logFollow && activePane === "logs"
           ? t`${dim("[")}${fg("#9ad7ff")("f")}${dim("]")} follow`
@@ -1214,6 +1233,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       }
       if (followHint) {
         parts.push(followHint);
+      }
+      if (interactHint) {
+        parts.push(interactHint);
       }
       if (toastHint) {
         parts.push(toastHint);
@@ -1482,10 +1504,24 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         color: "#c0caf5",
         width: lineWidth,
       });
+      const interactionTarget = resolveLifecycleInteractionTarget({
+        runtime: currentRuntime,
+        selectedService,
+      });
+      const interactiveLine = interactionTarget
+        ? formatPanelLine({
+            label: "TTY",
+            value: "press i to interact",
+            color: "#9ece6a",
+            width: lineWidth,
+          })
+        : null;
 
       if (statsLoading && !statsSnapshot) {
         resourcesText.content = joinStyledText({
-          parts: [targetLine, t`${dim("Loading stats...")}`],
+          parts: interactiveLine
+            ? [targetLine, interactiveLine, t`${dim("Loading stats...")}`]
+            : [targetLine, t`${dim("Loading stats...")}`],
           separator: "\n",
         });
         return;
@@ -1493,7 +1529,13 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
 
       if (statsError) {
         resourcesText.content = joinStyledText({
-          parts: [targetLine, t`${fg("#e0af68")("Stats unavailable")}`],
+          parts: interactiveLine
+            ? [
+                targetLine,
+                interactiveLine,
+                t`${fg("#e0af68")("Stats unavailable")}`,
+              ]
+            : [targetLine, t`${fg("#e0af68")("Stats unavailable")}`],
           separator: "\n",
         });
         return;
@@ -1501,7 +1543,9 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
 
       if (!statsSnapshot) {
         resourcesText.content = joinStyledText({
-          parts: [targetLine, t`${dim("No containers")}`],
+          parts: interactiveLine
+            ? [targetLine, interactiveLine, t`${dim("No containers")}`]
+            : [targetLine, t`${dim("No containers")}`],
           separator: "\n",
         });
         return;
@@ -1531,6 +1575,7 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
 
       const lines = [
         targetLine,
+        ...(interactiveLine ? [interactiveLine] : []),
         formatPanelLine({
           label: "CPU",
           value: cpuLabel,
@@ -2713,6 +2758,107 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       );
     };
 
+    const runInteractiveCommand = async (opts: {
+      readonly command: readonly string[];
+    }): Promise<number> => {
+      if (!isActive) {
+        return 1;
+      }
+
+      let exitCode = 1;
+      activeRenderer.stop();
+      try {
+        exitCode = await run(opts.command, {
+          cwd: resolve(project.projectRoot),
+          stdin: "inherit",
+        });
+      } finally {
+        if (isActive) {
+          activeRenderer.start();
+          renderHeader();
+          renderMetaPanel({ runtime: currentRuntime });
+          updateLogsTitle();
+          flushLogUpdate({ force: true });
+          renderFooter();
+          layoutSidebar();
+          setActivePane(activePane);
+        }
+      }
+      return exitCode;
+    };
+
+    const interactWithSelectedService = async () => {
+      if (interactiveSessionOpen) {
+        return;
+      }
+      if (!selectedService) {
+        setToast({
+          message: t`${fg("#e0af68")("Select a service first")}`,
+          durationMs: 1600,
+        });
+        return;
+      }
+
+      const target = resolveLifecycleInteractionTarget({
+        runtime: currentRuntime,
+        selectedService,
+      });
+      if (!target) {
+        setToast({
+          message: t`${fg("#e0af68")("Interact is currently available for lifecycle host processes")}`,
+          durationMs: 2400,
+        });
+        return;
+      }
+
+      interactiveSessionOpen = true;
+      const muxTarget = target.windowName
+        ? `${target.sessionName}:${target.windowName}`
+        : target.sessionName;
+      appendLogEntry(
+        formatSystemLine({
+          message: `[interact] attaching to ${selectedService} (${target.backend}:${muxTarget})`,
+          tone: "muted",
+        })
+      );
+
+      try {
+        let command: readonly string[];
+        if (target.backend === "tmux") {
+          command = process.env.TMUX
+            ? ["tmux", "switch-client", "-t", muxTarget]
+            : ["tmux", "attach", "-d", "-t", muxTarget];
+        } else {
+          command = ["zellij", "attach", target.sessionName];
+        }
+
+        const exitCode = await runInteractiveCommand({
+          command,
+        });
+
+        if (exitCode !== 0) {
+          setToast({
+            message: t`${fg("#e0af68")("Interactive attach failed")} ${dim(`(code ${exitCode})`)}`,
+            durationMs: 2400,
+          });
+          appendLogEntry(
+            formatSystemLine({
+              message: `[interact] attach failed (code ${exitCode})`,
+              tone: "warn",
+            })
+          );
+          return;
+        }
+
+        setToast({
+          message: t`${fg("#9ad7ff")("Returned from interactive session")}`,
+          durationMs: 1400,
+        });
+      } finally {
+        interactiveSessionOpen = false;
+      }
+    };
+
     servicesSelect.on(
       SelectRenderableEvents.SELECTION_CHANGED,
       (_index, option) => {
@@ -2930,6 +3076,12 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
         return;
       }
 
+      if (key.name === "i") {
+        key.preventDefault();
+        void interactWithSelectedService();
+        return;
+      }
+
       if (key.name === "u") {
         key.preventDefault();
         void runAction({ label: "up", args: ["up"] });
@@ -3008,6 +3160,49 @@ async function resolveProjectId(opts: {
   } catch {
     return null;
   }
+}
+
+function resolveLifecycleInteractionTarget(opts: {
+  readonly runtime: RuntimeProject | null;
+  readonly selectedService: string | null;
+}): LifecycleInteractionTarget | null {
+  if (!(opts.runtime && opts.selectedService)) {
+    return null;
+  }
+  const service = opts.runtime.services.get(opts.selectedService) ?? null;
+  if (!service) {
+    return null;
+  }
+
+  for (const container of service.containers) {
+    const labels = container.labels;
+    if (!labels) {
+      continue;
+    }
+    if (labels[LIFECYCLE_LABEL_PROCESS] !== "true") {
+      continue;
+    }
+
+    const sessionName = (labels[LIFECYCLE_LABEL_SESSION] ?? "").trim();
+    if (sessionName.length === 0) {
+      continue;
+    }
+
+    const backendRaw = (labels[LIFECYCLE_LABEL_BACKEND] ?? "").trim();
+    if (!(backendRaw === "tmux" || backendRaw === "zellij")) {
+      continue;
+    }
+
+    const windowNameRaw = (labels[LIFECYCLE_LABEL_WINDOW] ?? "").trim();
+    const windowName = windowNameRaw.length > 0 ? windowNameRaw : null;
+    return {
+      backend: backendRaw,
+      sessionName,
+      windowName,
+    };
+  }
+
+  return null;
 }
 
 function countRunningServices(runtime: RuntimeProject): number {

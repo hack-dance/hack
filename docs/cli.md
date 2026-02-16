@@ -337,6 +337,10 @@ Options:
 | `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
 | `--project <name>` | string | - | Target a registered project by name |
 
+Notes:
+
+- In the TUI, press `i` on a selected lifecycle host process to jump into its interactive mux session (useful for sudo/auth prompts during startup scripts).
+
 ### hack branch
 
 Usage: `hack branch <subcommand>`

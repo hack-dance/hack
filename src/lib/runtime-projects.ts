@@ -335,6 +335,7 @@ async function addLifecycleProcessServices(opts: {
           "hack.lifecycle.process": "true",
           "hack.lifecycle.session": entry.sessionName,
           "hack.lifecycle.backend": entry.backend,
+          "hack.lifecycle.window": process.windowName,
           "hack.lifecycle.log_path": process.logPath,
         },
         mounts: [],

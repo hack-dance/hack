@@ -469,6 +469,9 @@ async function renderProjectLifecycle(opts: {
     ...opts.lifecycle.downBefore,
     ...opts.lifecycle.downAfter,
   ];
+  const persistentHookCount = hooks.filter(
+    (entry) => entry.persistent === true
+  ).length;
   const summary: Array<readonly [string, string]> = [
     [
       "Startup hooks",
@@ -480,6 +483,7 @@ async function renderProjectLifecycle(opts: {
         opts.lifecycle.downBefore.length + opts.lifecycle.downAfter.length
       ),
     ],
+    ["Persistent hooks", String(persistentHookCount)],
     ["Persistent processes", String(opts.lifecycle.processes.length)],
   ];
 
@@ -507,9 +511,10 @@ async function renderProjectLifecycle(opts: {
     ];
 
     await display.table({
-      columns: ["Phase", "Service", "Name", "Cwd", "Command"],
+      columns: ["Phase", "Persistent", "Service", "Name", "Cwd", "Command"],
       rows: hookRows.map((entry) => [
         entry.phase,
+        entry.persistent === true ? "yes" : "",
         entry.service,
         entry.name ?? "",
         entry.cwd ?? "",

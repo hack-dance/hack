@@ -52,6 +52,7 @@ export type ProjectLifecycleCommandView = {
   readonly command: string;
   readonly cwd: string | null;
   readonly service: string;
+  readonly persistent?: boolean;
 };
 
 export type ProjectLifecycleProcessView = {
@@ -308,24 +309,28 @@ export function serializeProjectView(
             command: entry.command,
             cwd: entry.cwd,
             service: entry.service,
+            ...(entry.persistent === true ? { persistent: true } : {}),
           })),
           up_after: view.lifecycle.upAfter.map((entry) => ({
             name: entry.name,
             command: entry.command,
             cwd: entry.cwd,
             service: entry.service,
+            ...(entry.persistent === true ? { persistent: true } : {}),
           })),
           down_before: view.lifecycle.downBefore.map((entry) => ({
             name: entry.name,
             command: entry.command,
             cwd: entry.cwd,
             service: entry.service,
+            ...(entry.persistent === true ? { persistent: true } : {}),
           })),
           down_after: view.lifecycle.downAfter.map((entry) => ({
             name: entry.name,
             command: entry.command,
             cwd: entry.cwd,
             service: entry.service,
+            ...(entry.persistent === true ? { persistent: true } : {}),
           })),
           processes: view.lifecycle.processes.map((entry) => ({
             name: entry.name,
@@ -406,6 +411,7 @@ function mapLifecycleCommandView(opts: {
       command,
       index,
     }),
+    ...(command.persistent === true ? { persistent: true } : {}),
   }));
 }
 

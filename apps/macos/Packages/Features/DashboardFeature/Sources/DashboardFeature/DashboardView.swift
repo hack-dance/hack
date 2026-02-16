@@ -312,21 +312,11 @@ public struct DashboardView: View {
   }
 
   private var titlebarNeutralIconTint: NSColor {
-    titlebarIconTint(lightOpacity: 0.72, darkOpacity: 0.90)
+    NSColor.labelColor.withAlphaComponent(0.84)
   }
 
   private var titlebarNeutralIconHoverTint: NSColor {
-    titlebarIconTint(lightOpacity: 0.86, darkOpacity: 1.0)
-  }
-
-  private func titlebarIconTint(lightOpacity: CGFloat, darkOpacity: CGFloat) -> NSColor {
-    NSColor(name: nil) { appearance in
-      let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-      if isDark {
-        return NSColor.white.withAlphaComponent(darkOpacity)
-      }
-      return NSColor.black.withAlphaComponent(lightOpacity)
-    }
+    NSColor.labelColor
   }
 
   private var shouldShowGlobalRecoveryOverlay: Bool {

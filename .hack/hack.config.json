@@ -4,7 +4,9 @@
   "dev_host": "hack-cli.hack",
   "controlPlane": {
     "extensions": {
-      "dance.hack.tickets": { "enabled": true }
+      "dance.hack.tickets": {
+        "enabled": true
+      }
     }
   }
 }

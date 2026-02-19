@@ -1,3 +1,12 @@
+## <small>1.10.1 (2026-02-19)</small>
+
+* Fix gateway 502 for livenation ([a1bb858](https://github.com/hack-dance/hack/commit/a1bb858))
+* Improve dashboard header and groups ([1e58826](https://github.com/hack-dance/hack/commit/1e58826))
+* Merge branch 'main' into squircle ([f06f84c](https://github.com/hack-dance/hack/commit/f06f84c))
+* Merge pull request #10 from hack-dance/squircle ([4539e92](https://github.com/hack-dance/hack/commit/4539e92)), closes [#10](https://github.com/hack-dance/hack/issues/10)
+* fix(runtime): improve local ingress self-healing ([d305e2d](https://github.com/hack-dance/hack/commit/d305e2d))
+* fix(tests): stabilize shell mocks across bun test suite ([402ebe2](https://github.com/hack-dance/hack/commit/402ebe2))
+
 ## 1.10.0 (2026-02-16)
 
 * feat(lifecycle): support persistent up.before hooks ([f38e024](https://github.com/hack-dance/hack/commit/f38e024))

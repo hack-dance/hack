@@ -91,22 +91,31 @@ export fn hack_ghostty_vt_feed(handle: ?*TerminalHandle, bytes: [*]const u8, len
     _ = handle.?.stream.nextSlice(bytes[0..len]) catch {};
 }
 
+fn scrollViewportCompat(handle: *TerminalHandle, behavior: ghostty_vt.Terminal.ScrollViewport) void {
+    const return_type = @typeInfo(@TypeOf(ghostty_vt.Terminal.scrollViewport)).@"fn".return_type.?;
+    if (comptime return_type == void) {
+        handle.terminal.scrollViewport(behavior);
+    } else {
+        handle.terminal.scrollViewport(behavior) catch {};
+    }
+}
+
 /// Scroll the viewport within the terminal scrollback buffer.
 ///
 /// Positive values scroll down, negative values scroll up.
 export fn hack_ghostty_vt_scroll_viewport_delta(handle: ?*TerminalHandle, delta_rows: i32) void {
     if (handle == null) return;
-    handle.?.terminal.scrollViewport(.{ .delta = @as(isize, delta_rows) }) catch {};
+    scrollViewportCompat(handle.?, .{ .delta = @as(isize, delta_rows) });
 }
 
 export fn hack_ghostty_vt_scroll_viewport_top(handle: ?*TerminalHandle) void {
     if (handle == null) return;
-    handle.?.terminal.scrollViewport(.top) catch {};
+    scrollViewportCompat(handle.?, .top);
 }
 
 export fn hack_ghostty_vt_scroll_viewport_bottom(handle: ?*TerminalHandle) void {
     if (handle == null) return;
-    handle.?.terminal.scrollViewport(.bottom) catch {};
+    scrollViewportCompat(handle.?, .bottom);
 }
 
 export fn hack_ghostty_vt_plain_string(handle: ?*TerminalHandle, out_len: ?*usize) ?[*]u8 {

@@ -1010,7 +1010,7 @@ Options:
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--run-at-load` | boolean | false | Start hackd automatically on login |
+| `--run-at-load` | boolean | true | Start hackd automatically on login |
 | `--no-run-at-load` | boolean | - | Do not start hackd automatically on login |
 | `--gui-only` | boolean | true | Only run in GUI sessions (Aqua) |
 | `--no-gui-only` | boolean | - | Run in all session types (including SSH) |

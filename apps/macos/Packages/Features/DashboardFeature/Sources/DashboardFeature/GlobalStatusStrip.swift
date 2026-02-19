@@ -12,6 +12,17 @@ struct GlobalStatusStrip: View {
   @Environment(DashboardModel.self) private var model
   @Environment(\.colorScheme) private var colorScheme
   let placement: GlobalStatusPlacement
+  @State private var isSelectorHeaderHovered = false
+  @State private var isSelectorPanelHovered = false
+  @State private var isSelectorExpanded = false
+  @State private var isSelectorListVisible = false
+  @State private var selectorUsesExpandedCorners = false
+  @State private var hoveredSelectorProjectId: String? = nil
+  @State private var selectorExpandTask: Task<Void, Never>? = nil
+  @State private var selectorCollapseTask: Task<Void, Never>? = nil
+  @State private var selectorListRevealTask: Task<Void, Never>? = nil
+  @State private var selectorCornerResetTask: Task<Void, Never>? = nil
+  @State private var stripContentWidth: CGFloat = 0
 
   init(placement: GlobalStatusPlacement = .content) {
     self.placement = placement
@@ -113,15 +124,69 @@ struct GlobalStatusStrip: View {
       .menuIndicator(.hidden)
       .buttonStyle(.plain)
     }
-    .frame(minHeight: placement == .titlebar ? 30 : 0)
+    .frame(
+      minHeight: placement == .titlebar ? selectorContainerHeight : 0,
+      maxHeight: placement == .titlebar ? selectorContainerHeight : nil,
+      alignment: selectorContainerAlignment
+    )
     .padding(.horizontal, placement == .titlebar ? 10 : 0)
-    .padding(.vertical, placement == .titlebar ? 4 : 6)
-    .background(titlebarPillBackground)
+    .padding(.vertical, placement == .titlebar ? 0 : 6)
+    .contentShape(Rectangle())
+    .background(alignment: .topLeading) {
+      titlebarPillBackground
+    }
+    .overlay(alignment: .topLeading) {
+      if placement == .titlebar, isSelectorExpanded {
+        selectorExpandedPanel
+          .offset(y: selectorHeaderHeight)
+          .transition(
+            .asymmetric(
+              insertion: .move(edge: .top).combined(with: .opacity),
+              removal: .opacity
+            )
+          )
+      }
+    }
+    .background {
+      GeometryReader { proxy in
+        Color.clear
+          .onAppear {
+            updateStripContentWidth(proxy.size.width)
+          }
+          .onChange(of: proxy.size.width) { _, width in
+            updateStripContentWidth(width)
+          }
+      }
+    }
     .fixedSize(horizontal: placement == .titlebar, vertical: false)
     .animation(.easeInOut(duration: 0.18), value: stripLayoutSignature)
+    .onHover { hovering in
+      guard placement == .titlebar else { return }
+      isSelectorHeaderHovered = hovering
+      updateSelectorExpansionFromHover()
+    }
+    .onDisappear {
+      selectorExpandTask?.cancel()
+      selectorCollapseTask?.cancel()
+      selectorListRevealTask?.cancel()
+      selectorCornerResetTask?.cancel()
+      selectorExpandTask = nil
+      selectorCollapseTask = nil
+      selectorListRevealTask = nil
+      selectorCornerResetTask = nil
+    }
   }
 
+  @ViewBuilder
   private var selectorPill: some View {
+    if placement == .titlebar {
+      titlebarSelectorPill
+    } else {
+      selectorMenu
+    }
+  }
+
+  private var selectorMenu: some View {
     Menu {
       Button("Dashboard") {
         model.selectedItem = .home
@@ -163,38 +228,167 @@ struct GlobalStatusStrip: View {
       }
       .padding(.horizontal, placement == .titlebar ? 4 : 12)
       .padding(.vertical, placement == .titlebar ? 2 : 6)
-      .background(selectorBackground)
+      .background(selectorPillBackground)
     }
     .menuStyle(.borderlessButton)
     .menuIndicator(.hidden)
   }
 
+  private var titlebarSelectorPill: some View {
+    selectorHeader
+      .onTapGesture {
+        toggleSelectorExpanded()
+      }
+  }
+
+  private var selectorHeader: some View {
+    HStack(spacing: 8) {
+      Image(systemName: selectorIcon)
+        .font(.mono(.caption, weight: .semibold))
+      Text(selectorLabel)
+        .font(.mono(.caption, weight: .semibold))
+        .lineLimit(1)
+        .truncationMode(.tail)
+        .frame(maxWidth: placement == .titlebar ? 220 : .infinity, alignment: .leading)
+      Image(systemName: "chevron.down")
+        .font(.system(size: 10, weight: .semibold))
+        .foregroundStyle(.secondary)
+        .rotationEffect(.degrees(isSelectorExpanded ? 180 : 0))
+        .offset(y: 0.5)
+    }
+    .padding(.horizontal, placement == .titlebar ? 8 : 12)
+    .padding(.vertical, placement == .titlebar ? 4 : 6)
+    .background(selectorHeaderBackground)
+    .contentShape(RoundedRectangle(cornerRadius: selectorCornerRadius, style: .continuous))
+    .animation(.easeInOut(duration: 0.2), value: isSelectorExpanded)
+  }
+
   @ViewBuilder
-  private var selectorBackground: some View {
+  private var selectorHeaderBackground: some View {
     if placement == .titlebar {
-      EmptyView()
+      Color.clear
     } else {
       selectorPillBackground
+    }
+  }
+
+  private var selectorExpandedPanel: some View {
+    VStack(spacing: 0) {
+      Divider()
+        .opacity(0.22)
+        .padding(.horizontal, 8)
+
+      ScrollView {
+        LazyVStack(spacing: 0) {
+          ForEach(Array(selectorProjects.enumerated()), id: \.element.id) { index, project in
+            titlebarSelectorProjectRow(project: project)
+              .opacity(isSelectorListVisible ? 1 : 0)
+              .offset(y: isSelectorListVisible ? 0 : 6)
+              .animation(
+                .spring(response: 0.34, dampingFraction: 0.85)
+                  .delay(Double(index) * 0.025),
+                value: isSelectorListVisible
+              )
+
+            if index != selectorProjects.count - 1 {
+              Divider()
+                .opacity(0.20)
+                .padding(.horizontal, 8)
+            }
+          }
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 8)
+      }
+      .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+    .frame(width: selectorExpandedWidth, height: selectorPanelHeight, alignment: .topLeading)
+    .onHover { hovering in
+      isSelectorPanelHovered = hovering
+      updateSelectorExpansionFromHover()
+    }
+  }
+
+  private func titlebarSelectorProjectRow(project: ProjectSummary) -> some View {
+    Button {
+      withAnimation(.easeInOut(duration: 0.18)) {
+        model.selectedItem = .project(project.id)
+        isSelectorExpanded = false
+      }
+      selectorExpandTask?.cancel()
+      selectorExpandTask = nil
+    } label: {
+      HStack(spacing: 10) {
+        Circle()
+          .fill(selectorStatusColor(for: project))
+          .frame(width: 7, height: 7)
+
+        VStack(alignment: .leading, spacing: 3) {
+          Text(project.name)
+            .font(.mono(.caption, weight: .semibold))
+            .foregroundStyle(.primary)
+            .lineLimit(1)
+            .truncationMode(.tail)
+          if let host = project.devHost, !host.isEmpty {
+            Text(host)
+              .font(.mono(.caption2))
+              .foregroundStyle(.secondary)
+              .lineLimit(1)
+              .truncationMode(.tail)
+          }
+        }
+
+        Spacer(minLength: 8)
+
+        Text(selectorStatusLabel(for: project))
+          .font(.mono(.caption2))
+          .foregroundStyle(.secondary)
+      }
+      .padding(.horizontal, 8)
+      .padding(.vertical, 8)
+      .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+      .background(
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+          .fill(selectorRowBackground(for: project))
+      )
+    }
+    .buttonStyle(.plain)
+    .onHover { hovering in
+      if hovering {
+        hoveredSelectorProjectId = project.id
+      } else if hoveredSelectorProjectId == project.id {
+        hoveredSelectorProjectId = nil
+      }
     }
   }
 
   @ViewBuilder
   private var titlebarPillBackground: some View {
     if placement == .titlebar {
-      RoundedRectangle(cornerRadius: 999, style: .continuous)
+      RoundedRectangle(cornerRadius: selectorCornerRadius, style: .continuous)
         .fill(.regularMaterial)
         .overlay(
-          RoundedRectangle(cornerRadius: 999, style: .continuous)
+          RoundedRectangle(cornerRadius: selectorCornerRadius, style: .continuous)
             .fill(titlebarPillTint)
         )
         .overlay(
-          RoundedRectangle(cornerRadius: 999, style: .continuous)
+          RoundedRectangle(cornerRadius: selectorCornerRadius, style: .continuous)
             .strokeBorder(
               titlebarPillStroke,
               lineWidth: 1
             )
         )
-        .shadow(color: titlebarPillShadow, radius: 18, x: 0, y: 10)
+        .shadow(
+          color: titlebarPillShadow.opacity(isSelectorExpanded ? 1 : 0),
+          radius: isSelectorExpanded ? 20 : 0,
+          x: 0,
+          y: isSelectorExpanded ? 12 : 0
+        )
+        .frame(
+          width: isSelectorExpanded ? selectorExpandedWidth : nil,
+          height: selectorContainerHeight,
+          alignment: .topLeading
+        )
     } else {
       EmptyView()
     }
@@ -509,6 +703,232 @@ struct GlobalStatusStrip: View {
     case .unregistered:
       return .unknown
     }
+  }
+
+  private var selectorProjects: [ProjectSummary] {
+    model.projects.sorted { lhs, rhs in
+      let lhsActive = isProjectActive(lhs)
+      let rhsActive = isProjectActive(rhs)
+      if lhsActive != rhsActive {
+        return lhsActive && !rhsActive
+      }
+      return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+    }
+  }
+
+  private var selectorExpandedWidth: CGFloat {
+    max(stripContentWidth, 420)
+  }
+
+  private var selectorProjectListMaxHeight: CGFloat {
+    320
+  }
+
+  private var selectorHeaderHeight: CGFloat {
+    34
+  }
+
+  private var selectorProjectRowHeight: CGFloat {
+    56
+  }
+
+  private var selectorPanelHeight: CGFloat {
+    guard isSelectorExpanded else { return 0 }
+    let rowsHeight = CGFloat(selectorProjects.count) * selectorProjectRowHeight
+    let listPadding: CGFloat = 16
+    let dividersHeight = CGFloat(max(0, selectorProjects.count - 1))
+    let desired = rowsHeight + listPadding + dividersHeight + 1
+    return min(selectorProjectListMaxHeight + 1, max(72, desired))
+  }
+
+  private var selectorContainerHeight: CGFloat {
+    selectorHeaderHeight + selectorPanelHeight
+  }
+
+  private var selectorContainerAlignment: Alignment {
+    if placement == .titlebar, isSelectorExpanded {
+      return .topLeading
+    }
+    return .center
+  }
+
+  private var selectorExpandedCornerRadius: CGFloat {
+    16
+  }
+
+  private var selectorCornerRadius: CGFloat {
+    selectorUsesExpandedCorners ? selectorExpandedCornerRadius : 999
+  }
+
+  private var selectorOpenDelayNanoseconds: UInt64 {
+    500_000_000
+  }
+
+  private var selectorCloseDelayNanoseconds: UInt64 {
+    180_000_000
+  }
+
+  private var selectorListRevealDelayNanoseconds: UInt64 {
+    170_000_000
+  }
+
+  private func toggleSelectorExpanded() {
+    if isSelectorExpanded {
+      collapseSelectorPanel()
+      return
+    }
+    expandSelectorPanel()
+  }
+
+  private func updateSelectorExpansionFromHover() {
+    guard placement == .titlebar else { return }
+    let hoveringSelector = isSelectorHeaderHovered || isSelectorPanelHovered
+    if hoveringSelector {
+      selectorCollapseTask?.cancel()
+      selectorCollapseTask = nil
+      scheduleSelectorExpansion()
+    } else {
+      selectorExpandTask?.cancel()
+      selectorExpandTask = nil
+      scheduleSelectorCollapse()
+    }
+  }
+
+  private func scheduleSelectorExpansion() {
+    if isSelectorExpanded || selectorExpandTask != nil {
+      return
+    }
+    selectorExpandTask = Task {
+      try? await Task.sleep(nanoseconds: selectorOpenDelayNanoseconds)
+      guard !Task.isCancelled else { return }
+      await MainActor.run {
+        selectorExpandTask = nil
+        guard isSelectorHeaderHovered || isSelectorPanelHovered else { return }
+        expandSelectorPanel()
+      }
+    }
+  }
+
+  private func expandSelectorPanel() {
+    selectorExpandTask?.cancel()
+    selectorExpandTask = nil
+    selectorCollapseTask?.cancel()
+    selectorCollapseTask = nil
+    selectorListRevealTask?.cancel()
+    selectorListRevealTask = nil
+    selectorCornerResetTask?.cancel()
+    selectorCornerResetTask = nil
+    isSelectorListVisible = false
+
+    withAnimation(.easeOut(duration: 0.08)) {
+      selectorUsesExpandedCorners = true
+    }
+    withAnimation(.spring(response: 0.34, dampingFraction: 0.90)) {
+      isSelectorExpanded = true
+    }
+
+    selectorListRevealTask = Task {
+      try? await Task.sleep(nanoseconds: selectorListRevealDelayNanoseconds)
+      guard !Task.isCancelled else { return }
+      await MainActor.run {
+        guard isSelectorExpanded else { return }
+        withAnimation(.easeInOut(duration: 0.12)) {
+          isSelectorListVisible = true
+        }
+        selectorListRevealTask = nil
+      }
+    }
+  }
+
+  private func scheduleSelectorCollapse() {
+    if selectorCollapseTask != nil {
+      return
+    }
+    selectorCollapseTask = Task {
+      try? await Task.sleep(nanoseconds: selectorCloseDelayNanoseconds)
+      guard !Task.isCancelled else { return }
+      await MainActor.run {
+        selectorCollapseTask = nil
+        guard !(isSelectorHeaderHovered || isSelectorPanelHovered) else { return }
+        collapseSelectorPanel()
+      }
+    }
+  }
+
+  private func collapseSelectorPanel() {
+    selectorExpandTask?.cancel()
+    selectorExpandTask = nil
+    selectorCollapseTask?.cancel()
+    selectorCollapseTask = nil
+    selectorListRevealTask?.cancel()
+    selectorListRevealTask = nil
+    guard isSelectorExpanded else { return }
+    hoveredSelectorProjectId = nil
+    isSelectorListVisible = false
+    withAnimation(.easeInOut(duration: 0.16)) {
+      isSelectorExpanded = false
+    }
+    selectorCornerResetTask?.cancel()
+    selectorCornerResetTask = Task {
+      try? await Task.sleep(nanoseconds: 140_000_000)
+      guard !Task.isCancelled else { return }
+      await MainActor.run {
+        guard !isSelectorExpanded else { return }
+        withAnimation(.easeOut(duration: 0.08)) {
+          selectorUsesExpandedCorners = false
+        }
+        selectorCornerResetTask = nil
+      }
+    }
+  }
+
+  private func updateStripContentWidth(_ width: CGFloat) {
+    guard width.isFinite, width > 0 else { return }
+    if abs(stripContentWidth - width) > 0.5 {
+      stripContentWidth = width
+    }
+  }
+
+  private func isProjectActive(_ project: ProjectSummary) -> Bool {
+    project.status == .running || project.runtimeStatus == .running
+  }
+
+  private func selectorStatusLabel(for project: ProjectSummary) -> String {
+    if isProjectActive(project) {
+      return "Running"
+    }
+    if project.status == .missing {
+      return "Missing"
+    }
+    if project.isRuntimeConfigured {
+      return "Stopped"
+    }
+    return "Unknown"
+  }
+
+  private func selectorStatusColor(for project: ProjectSummary) -> Color {
+    if isProjectActive(project) {
+      return .green
+    }
+    if project.status == .missing {
+      return .orange
+    }
+    return .secondary
+  }
+
+  private func selectorRowBackground(for project: ProjectSummary) -> Color {
+    let isSelected: Bool = {
+      guard case let .project(id) = model.selectedItem else { return false }
+      return id == project.id
+    }()
+    let isHovered = hoveredSelectorProjectId == project.id
+    if isSelected {
+      return Color.primary.opacity(colorScheme == .dark ? 0.15 : 0.08)
+    }
+    if isHovered {
+      return Color.primary.opacity(colorScheme == .dark ? 0.10 : 0.06)
+    }
+    return .clear
   }
 
   private var titlebarIconForeground: Color {

@@ -89,7 +89,7 @@ const DaemonLaunchdConfigInputSchema = z.object({
 
 const DaemonLaunchdConfigSchema = z.object({
   installed: z.boolean().default(false),
-  runAtLoad: z.boolean().default(false),
+  runAtLoad: z.boolean().default(true),
   guiSessionOnly: z.boolean().default(true),
 });
 

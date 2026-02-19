@@ -256,11 +256,11 @@ hack daemon logs
 On macOS, you can install `hackd` as a launchd service for automatic management:
 
 ```bash
-# Install with auto-start on login
-hack daemon install --run-at-load
+# Install (auto-start on login by default)
+hack daemon install
 
 # Install without auto-start (manual start/stop via launchd)
-hack daemon install
+hack daemon install --no-run-at-load
 
 # Uninstall the launchd service
 hack daemon uninstall

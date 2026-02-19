@@ -24,7 +24,7 @@ public struct DashboardView: View {
     @Bindable var model = model
 
     GeometryReader { proxy in
-      ZStack {
+      ZStack(alignment: .top) {
         VSplitView {
           ZStack {
             mainSplitView
@@ -67,6 +67,11 @@ public struct DashboardView: View {
         .background(alignment: .top) {
           topHeaderChrome
         }
+        GlobalStatusStrip(placement: .titlebar)
+          .frame(maxWidth: .infinity, alignment: .center)
+          .padding(.top, 8)
+          .offset(y: -48)
+          .zIndex(16)
       }
       // Attach toolbar at the window root. Nested toolbars inside split views can disappear
       // when additional container views are introduced (e.g. a bottom terminal panel).
@@ -98,10 +103,6 @@ public struct DashboardView: View {
               .accessibilityLabel("Update available")
             }
           }
-        }
-        ToolbarItem(placement: .principal) {
-          GlobalStatusStrip(placement: .titlebar)
-            .frame(maxWidth: .infinity, alignment: .center)
         }
         ToolbarItemGroup(placement: .primaryAction) {
           ToolbarIconButton(
@@ -312,21 +313,11 @@ public struct DashboardView: View {
   }
 
   private var titlebarNeutralIconTint: NSColor {
-    titlebarIconTint(lightOpacity: 0.72, darkOpacity: 0.90)
+    NSColor.labelColor.withAlphaComponent(0.84)
   }
 
   private var titlebarNeutralIconHoverTint: NSColor {
-    titlebarIconTint(lightOpacity: 0.86, darkOpacity: 1.0)
-  }
-
-  private func titlebarIconTint(lightOpacity: CGFloat, darkOpacity: CGFloat) -> NSColor {
-    NSColor(name: nil) { appearance in
-      let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-      if isDark {
-        return NSColor.white.withAlphaComponent(darkOpacity)
-      }
-      return NSColor.black.withAlphaComponent(lightOpacity)
-    }
+    NSColor.labelColor
   }
 
   private var shouldShowGlobalRecoveryOverlay: Bool {

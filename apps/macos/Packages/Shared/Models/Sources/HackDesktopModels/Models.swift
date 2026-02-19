@@ -118,16 +118,24 @@ public struct ProjectLifecycleCommandSummary: Decodable, Hashable, Identifiable 
   public let command: String
   public let cwd: String?
   public let service: String
+  public let persistent: Bool?
 
   public var id: String {
     "\(service)::\(command)::\(cwd ?? "")"
   }
 
-  public init(name: String?, command: String, cwd: String?, service: String) {
+  public init(
+    name: String?,
+    command: String,
+    cwd: String?,
+    service: String,
+    persistent: Bool? = nil
+  ) {
     self.name = name
     self.command = command
     self.cwd = cwd
     self.service = service
+    self.persistent = persistent
   }
 }
 

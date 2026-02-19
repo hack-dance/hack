@@ -234,6 +234,46 @@ test("buildProjectViews includes lifecycle and startup summaries", async () => {
   expect(Array.isArray(lifecycle?.processes)).toBe(true);
 });
 
+test("buildProjectViews preserves persistent lifecycle hook flags", async () => {
+  const lifecycleConfig = JSON.stringify(
+    {
+      lifecycle: {
+        up: {
+          before: [
+            { name: "proxy", command: "bun run proxy", persistent: true },
+          ],
+        },
+      },
+    },
+    null,
+    2
+  );
+
+  const alpha = await createProject({
+    name: "alpha",
+    services: ["api"],
+    configJson: lifecycleConfig,
+  });
+  const views = await buildProjectViews({
+    registryProjects: [alpha],
+    runtime: [],
+    runtimeOk: true,
+    filter: null,
+    includeUnregistered: false,
+    muxSessions: [],
+  });
+
+  const alphaView = views.find((view) => view.name === "alpha");
+  expect(alphaView?.lifecycle?.upBefore[0]?.persistent).toBe(true);
+
+  const serialized = alphaView ? serializeProjectView(alphaView) : null;
+  const lifecycle = serialized?.lifecycle as
+    | Record<string, unknown>
+    | undefined;
+  const upBefore = (lifecycle?.up_before ?? []) as Record<string, unknown>[];
+  expect(upBefore[0]?.persistent).toBe(true);
+});
+
 test("buildProjectViews marks runtime status unknown when runtime is unavailable", async () => {
   const alpha = await createProject({ name: "alpha", services: ["api"] });
   const views = await buildProjectViews({

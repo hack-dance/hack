@@ -29,6 +29,10 @@ test("renderGlobalCaddyCompose pins caddy and coredns when requested", () => {
     useStaticCaddyIp: true,
     useStaticCoreDnsIp: true,
   });
+  expect(text).toContain("command:");
+  expect(text).toContain("- docker-proxy");
+  expect(text).toContain("- --polling-interval");
+  expect(text).toContain("- 5s");
   expect(text).toContain(`name: ${DEFAULT_INGRESS_NETWORK}`);
   expect(text).toContain(`ipv4_address: ${DEFAULT_CADDY_IP}`);
   expect(text).toContain(`ipv4_address: ${DEFAULT_COREDNS_IP}`);

@@ -754,6 +754,11 @@ struct ProjectDetailView: View {
     let startupHookCount: Int
     let shutdownHookCount: Int
     let processCount: Int
+    let persistentHookCount: Int
+
+    var persistentCount: Int {
+      persistentHookCount + processCount
+    }
 
     var hasEntries: Bool {
       startupHookCount > 0 || shutdownHookCount > 0 || processCount > 0
@@ -762,10 +767,12 @@ struct ProjectDetailView: View {
 
   private var lifecycleSummary: LifecycleSummaryCounts {
     let lifecycle = project.lifecycle
+    let persistentHooks = lifecycleHooks.filter { $0.command.persistent == true }
     return LifecycleSummaryCounts(
       startupHookCount: (lifecycle?.upBefore.count ?? 0) + (lifecycle?.upAfter.count ?? 0),
       shutdownHookCount: (lifecycle?.downBefore.count ?? 0) + (lifecycle?.downAfter.count ?? 0),
-      processCount: lifecycle?.processes.count ?? 0
+      processCount: lifecycle?.processes.count ?? 0,
+      persistentHookCount: persistentHooks.count
     )
   }
 
@@ -802,7 +809,7 @@ struct ProjectDetailView: View {
       HStack(spacing: 8) {
         BadgePill(label: "\(lifecycleSummary.startupHookCount) startup hooks", tint: .secondary)
         BadgePill(label: "\(lifecycleSummary.shutdownHookCount) shutdown hooks", tint: .secondary)
-        BadgePill(label: "\(lifecycleSummary.processCount) persistent", tint: .secondary)
+        BadgePill(label: "\(lifecycleSummary.persistentCount) persistent", tint: .secondary)
       }
 
       if let lifecycle = project.lifecycle, !lifecycle.processes.isEmpty {
@@ -834,6 +841,7 @@ struct ProjectDetailView: View {
       HStack(spacing: 8) {
         Text(process.name)
           .font(.mono(.caption, weight: .semibold))
+        BadgePill(label: "persistent", tint: .green)
         BadgePill(label: process.service, tint: .secondary)
         Spacer()
         Button("Tail logs") {
@@ -864,6 +872,9 @@ struct ProjectDetailView: View {
         Text(command.name ?? command.service)
           .font(.mono(.caption, weight: .semibold))
         BadgePill(label: phase, tint: .secondary)
+        if command.persistent == true {
+          BadgePill(label: "persistent", tint: .green)
+        }
         Spacer()
         Button("Show output") {
           openLifecycleLogs(service: command.service, title: "\(command.service) output")

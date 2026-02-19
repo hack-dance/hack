@@ -1,3 +1,7 @@
+## <small>1.10.2 (2026-02-19)</small>
+
+* fix(macos): handle ghostty scrollViewport return type changes ([b78f73d](https://github.com/hack-dance/hack/commit/b78f73d))
+
 ## <small>1.10.1 (2026-02-19)</small>
 
 * Fix gateway 502 for livenation ([a1bb858](https://github.com/hack-dance/hack/commit/a1bb858))

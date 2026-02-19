@@ -43,8 +43,9 @@ mock.module("../src/lib/shell.ts", () => ({
     runCalls.push([...cmd]);
     return 0;
   },
-  findExecutableInPath: async (name?: string) =>
+  findExecutableInPath: (name?: string) =>
     name === "hack" ? "/usr/local/bin/hack" : "/usr/bin/mkcert",
+  CommandError: class CommandError extends Error {},
 }));
 
 mock.module("../src/lib/os.ts", () => ({

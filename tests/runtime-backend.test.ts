@@ -8,10 +8,16 @@ mock.module("../src/lib/shell.ts", () => ({
     execCalls.push([...cmd]);
     return { exitCode: 0, stdout: "", stderr: "" };
   },
+  execOrThrow: async (cmd: readonly string[]) => {
+    execCalls.push([...cmd]);
+    return { exitCode: 0, stdout: "", stderr: "" };
+  },
   run: async (cmd: readonly string[]) => {
     runCalls.push([...cmd]);
     return 0;
   },
+  findExecutableInPath: () => "/usr/bin/docker",
+  CommandError: class CommandError extends Error {},
 }));
 
 import { composeRuntimeBackend } from "../src/backends/runtime-backend.ts";

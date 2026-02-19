@@ -24,7 +24,7 @@ public struct DashboardView: View {
     @Bindable var model = model
 
     GeometryReader { proxy in
-      ZStack {
+      ZStack(alignment: .top) {
         VSplitView {
           ZStack {
             mainSplitView
@@ -67,6 +67,11 @@ public struct DashboardView: View {
         .background(alignment: .top) {
           topHeaderChrome
         }
+        GlobalStatusStrip(placement: .titlebar)
+          .frame(maxWidth: .infinity, alignment: .center)
+          .padding(.top, 8)
+          .offset(y: -48)
+          .zIndex(16)
       }
       // Attach toolbar at the window root. Nested toolbars inside split views can disappear
       // when additional container views are introduced (e.g. a bottom terminal panel).
@@ -98,10 +103,6 @@ public struct DashboardView: View {
               .accessibilityLabel("Update available")
             }
           }
-        }
-        ToolbarItem(placement: .principal) {
-          GlobalStatusStrip(placement: .titlebar)
-            .frame(maxWidth: .infinity, alignment: .center)
         }
         ToolbarItemGroup(placement: .primaryAction) {
           ToolbarIconButton(

@@ -586,6 +586,13 @@ We keep `.hack` as the primary local dev domain, and optionally expose an alias 
 If the OAuth alias is enabled, `hack global install` configures `*.hack.gy` to resolve to the Caddy
 container IP via dnsmasq + the OS resolver (bypasses port forwarding issues with Tailscale/VPNs).
 
+Routing rules:
+
+- `https://*.hack` is the default local-dev hostname space.
+- `https://*.hack.gy` is an OAuth-safe alias host space (public-suffix-style domain).
+- Only services with Caddy labels and attached to `hack-dev` are exposed via these hostnames.
+- These domains are local routes by default; use tunnels/remote ingress separately for internet-reachable webhooks.
+
 If you use Next.js (or another dev server that cares about dev origins), configure its dev allowlist to include the proxy domains.
 Next.js supports `allowedDevOrigins` (wildcards supported) in `next.config.js`:
 
@@ -629,6 +636,10 @@ Use `--out <dir>` if you want certs written somewhere else.
 
 `hack global install` runs CoreDNS on the `hack-dev` network. CoreDNS answers `*.hack` and `*.hack.*` with
 Caddy’s current IP so containers can use the same `https://*.hack` URLs as the host.
+
+This is the core isolation model: each repo keeps its own compose network, while routed HTTP services get stable hostnames
+through shared Caddy ingress. That means you can call local services by hostname from host or container without relying on
+host-published `localhost:<port>` patterns.
 
 Some runtimes don’t honor custom DNS for `*.hack` reliably, so `hack up` also injects `extra_hosts` mappings
 to the Caddy IP. If the Caddy IP changes, `hack status`, `hack doctor`, and the TUI show a warning; fix it

@@ -102,6 +102,7 @@ Use `hack` as the single interface for local runtime orchestration (compose, DNS
 Operating rules:
 - Prefer `hack` over raw `docker` / `docker compose` for project workflows.
 - Do not start/stop services from Docker Desktop UI for `hack`-managed projects.
+- Treat `.hack/.internal` and `.hack/.branch` as hack-managed artifacts; do not hand-edit generated files there.
 - Use MCP only when shell access is unavailable.
 - If runtime state looks wrong, run `hack doctor`, then `hack doctor --fix` before manual repair.
 
@@ -115,6 +116,33 @@ Config + schema:
 - Global config: `~/.hack/hack.config.json`
 - Schema URL: `https://schemas.hack/hack.config.schema.json`
 - Prefer CLI writes: `hack config get <path>`, `hack config set <path> <value>`, `hack config set --global <path> <value>`
+
+Hostname routing + Caddy labels:
+- Primary host comes from `dev_host` (default: `<project>.hack`).
+- Subdomain pattern is `<sub>.<dev_host>` (for example: `api.myapp.hack`).
+- OAuth alias (when enabled) also routes `<dev_host>.<tld>` and `<sub>.<dev_host>.<tld>` (default tld: `gy`).
+- Not every compose service is routable: only services with Caddy labels and on `hack-dev` are exposed.
+- Required labels for HTTP services: `caddy`, `caddy.reverse_proxy`, `caddy.tls=internal`.
+- Quick checks: `hack open`, `hack open <sub>`, `hack open --json`.
+
+TLS + valid-hostname constraints:
+- `hack` uses Caddy internal PKI for HTTPS on routed hosts; trust CA with `hack global trust`.
+- `.hack` is local-first and great for dev, but it is not a public suffix.
+- Use OAuth alias hosts (for example `*.hack.gy`) when providers require public-suffix-style callback domains.
+- Alias hosts are still local-dev routes unless you add an external tunnel/remote ingress path.
+
+Project files (managed vs generated):
+- Source-of-truth files: `.hack/docker-compose.yml`, `.hack/hack.config.json`, `.hack/hack.env.json` (if env contract is used).
+- Local-only files: `.hack/.env` and `.hack/.internal/` (runtime/local machine state; keep gitignored).
+- Generated (do not hand-edit): `.hack/.internal/compose.override.yml`, `.hack/.internal/compose.env.override.yml`, `.hack/.branch/compose.<branch>.override.yml`.
+- Managed via CLI: `.hack/.internal/extra-hosts.json` (use `hack internal extra-hosts ...` commands).
+- Lifecycle runtime files: `.hack/.internal/lifecycle/state.json`, `.hack/.internal/lifecycle/*.log`.
+
+Advanced networking (extra_hosts + local proxies/tunnels):
+- Static host mappings: set `internal.extra_hosts` in `.hack/hack.config.json`.
+- Dynamic host mappings: `hack internal extra-hosts set <hostname> <target>` / `unset` / `list`.
+- For host-local proxies/tunnels, prefer `host-gateway` as target when possible.
+- After mapping changes or proxy IP churn: `hack restart` and then `hack doctor`.
 
 Standard workflow:
 - If `.hack/` is missing: `hack init`

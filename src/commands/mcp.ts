@@ -185,6 +185,7 @@ async function handleMcpInstall({
   let exitCode = logMcpInstallResults({ results });
 
   const docTargets = resolveDocTargets({
+    scope,
     docs: args.options.docs === true,
     agentsMd: args.options.agentsMd === true,
     claudeMd: args.options.claudeMd === true,
@@ -401,10 +402,15 @@ function dedupeTargets(opts: {
 }
 
 function resolveDocTargets(opts: {
+  readonly scope: McpInstallScope;
   readonly docs: boolean;
   readonly agentsMd: boolean;
   readonly claudeMd: boolean;
 }): AgentDocTarget[] {
+  if (opts.scope === "user") {
+    return [];
+  }
+
   const targets: AgentDocTarget[] = [];
   if (opts.docs || opts.agentsMd) {
     targets.push("agents");
@@ -412,6 +418,11 @@ function resolveDocTargets(opts: {
   if (opts.docs || opts.claudeMd) {
     targets.push("claude");
   }
+
+  if (targets.length === 0) {
+    return ["agents", "claude"];
+  }
+
   return dedupeDocTargets({ targets });
 }
 

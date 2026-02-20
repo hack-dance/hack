@@ -92,6 +92,7 @@ Agent-assisted (Cursor/Claude/Codex with shell access):
 ```bash
 hack setup cursor   # or hack setup claude / hack setup codex
 hack setup agents   # optional: adds AGENTS.md + CLAUDE.md snippets
+hack setup sync --all-scopes   # optional: refresh project + user integrations
 hack agent init --client cursor   # or --client claude / --client codex
 hack agent patterns              # optional: dependency/ops checklist
 ```
@@ -392,6 +393,7 @@ hack setup cursor
 hack setup claude
 hack setup codex
 hack setup agents
+hack setup sync --all-scopes
 ```
 
 What each setup command does:
@@ -400,6 +402,7 @@ What each setup command does:
 - `hack setup codex`: installs the Codex skill in `.codex/skills/hack-cli/SKILL.md`
 - `hack setup agents`: adds/updates hack usage snippets in `AGENTS.md` and `CLAUDE.md`
 - `hack setup mcp`: writes MCP configs for no-shell clients
+- `hack setup sync --all-scopes`: refreshes docs, skills, and MCP config at project + user scope
 
 Primer helpers:
 - `hack agent prime`: short CLI-first primer used by Claude Code hooks
@@ -410,6 +413,7 @@ Primer helpers:
 Recommended flow:
 - Use `hack setup cursor|claude|codex` for your agent client
 - Use `hack setup agents` to document hack usage inside the repo
+- Use `hack setup sync --all-scopes` after `hack update` to refresh generated integrations
 - Use `hack setup mcp` only when the agent has no shell access
 
 ## MCP (no-shell clients)
@@ -438,6 +442,7 @@ hack mcp install --all --scope project
 ```
 
 Project scope writes `.cursor/mcp.json`, `.claude/settings.json`, and `.codex/config.toml`.
+For `--scope project`, `hack mcp install` also updates `AGENTS.md` and `CLAUDE.md` by default.
 
 Print config snippets without writing:
 

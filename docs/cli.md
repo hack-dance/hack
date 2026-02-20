@@ -797,6 +797,7 @@ Subcommands:
 | `codex` | Install Codex skill for hack CLI usage |
 | `tickets` | Install Codex skill for hack tickets usage |
 | `agents` | Install AGENTS.md / CLAUDE.md snippets |
+| `sync` | Refresh agent docs, skills, and MCP configs |
 | `mcp` | Install MCP configs for hack CLI usage (no-shell only) |
 
 #### hack setup cursor
@@ -852,6 +853,20 @@ Options:
 | `--claude-md` | boolean | false | Target CLAUDE.md |
 | `--check` | boolean | false | Check whether integration is installed |
 | `--remove` | boolean | false | Remove integration files/config |
+
+#### hack setup sync
+
+Usage: `hack setup sync [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
+| `--global` | boolean | false | Target global (user) scope only |
+| `--all-scopes` | boolean | false | Target both project and global (user) scopes |
+| `--check` | boolean | false | Check whether integrations are installed |
+| `--remove` | boolean | false | Remove generated integration files/config |
 
 #### hack setup mcp
 
@@ -922,6 +937,11 @@ Options:
 | `--docs` | boolean | false | Update AGENTS.md and CLAUDE.md with hack usage |
 | `--agents-md` | boolean | false | Update AGENTS.md with hack usage |
 | `--claude-md` | boolean | false | Update CLAUDE.md with hack usage |
+
+Notes:
+
+- For `--scope project`, `hack mcp install` updates `AGENTS.md` + `CLAUDE.md` by default when no docs flags are provided.
+- Use `--scope user` to skip project-doc updates and write only user-level MCP configs.
 
 #### hack mcp print
 

@@ -1,3 +1,8 @@
+## 1.11.0 (2026-02-20)
+
+* feat(setup): add sync command for agent integrations ([5c1279a](https://github.com/hack-dance/hack/commit/5c1279a))
+* chore(release): trigger rerun after ghostty bridge fix ([b3e120f](https://github.com/hack-dance/hack/commit/b3e120f))
+
 ## <small>1.10.2 (2026-02-19)</small>
 
 * fix(macos): handle ghostty scrollViewport return type changes ([b78f73d](https://github.com/hack-dance/hack/commit/b78f73d))

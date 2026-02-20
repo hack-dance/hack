@@ -1,3 +1,8 @@
+## 1.12.0 (2026-02-20)
+
+* feat(cli): auto-sync agent integrations on project commands ([a83a121](https://github.com/hack-dance/hack/commit/a83a121))
+* docs(agents): clarify hostname routing and oauth alias guidance ([c89f26f](https://github.com/hack-dance/hack/commit/c89f26f))
+
 ## 1.11.0 (2026-02-20)
 
 * feat(setup): add sync command for agent integrations ([5c1279a](https://github.com/hack-dance/hack/commit/5c1279a))

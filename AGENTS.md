@@ -312,6 +312,8 @@ Docker compose notes:
 - Use `docker compose -f .hack/docker-compose.yml exec <service> <cmd>` only if you need exec into a running container.
 
 Agent integration maintenance:
+- Project-level hack commands auto-check integration drift and attempt auto-sync (docs/skills/MCP).
+- Set `HACK_SETUP_SYNC_MODE=warn` to only warn, or `HACK_SETUP_SYNC_MODE=off` to disable.
 - Refresh project + user integrations: `hack setup sync --all-scopes`
 - Audit integration state only: `hack setup sync --all-scopes --check`
 - Remove generated integration artifacts: `hack setup sync --all-scopes --remove`

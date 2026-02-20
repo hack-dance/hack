@@ -75,6 +75,8 @@ export function renderAgentPrimer(): string {
     "- Patterns checklist: `hack agent patterns`",
     "",
     "Agent integration maintenance:",
+    "- Project-level hack commands auto-check drift and attempt auto-sync for docs/skills/MCP.",
+    "- Set `HACK_SETUP_SYNC_MODE=warn` to warn-only, or `HACK_SETUP_SYNC_MODE=off` to disable.",
     "- Refresh project + global integrations: `hack setup sync --all-scopes`",
     "- Audit only: `hack setup sync --all-scopes --check`",
     "- Remove generated integrations: `hack setup sync --all-scopes --remove`",

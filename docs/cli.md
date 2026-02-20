@@ -868,6 +868,11 @@ Options:
 | `--check` | boolean | false | Check whether integrations are installed |
 | `--remove` | boolean | false | Remove generated integration files/config |
 
+Automatic guardrail:
+
+- In interactive project sessions, `hack` auto-checks docs/skills/MCP drift and attempts auto-sync.
+- Override mode with `HACK_SETUP_SYNC_MODE=warn` (warn-only) or `HACK_SETUP_SYNC_MODE=off` (disable).
+
 #### hack setup mcp
 
 Usage: `hack setup mcp [options]`

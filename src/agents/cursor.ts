@@ -171,6 +171,8 @@ export function renderCursorRules(): string {
     "",
     "## MCP (optional)",
     "- Install only for no-shell clients: `hack setup mcp`",
+    "- Project-level hack commands auto-check integration drift and attempt auto-sync by default.",
+    "- Use `HACK_SETUP_SYNC_MODE=warn` (warn only) or `HACK_SETUP_SYNC_MODE=off` (disable).",
     "- Refresh generated MCP/docs/instructions: `hack setup sync --all-scopes`",
     "",
     MARKER_END,

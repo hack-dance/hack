@@ -404,6 +404,11 @@ What each setup command does:
 - `hack setup mcp`: writes MCP configs for no-shell clients
 - `hack setup sync --all-scopes`: refreshes docs, skills, and MCP config at project + user scope
 
+Automatic guardrail:
+- Project-level `hack` commands (interactive sessions) auto-check docs/skills/MCP drift and attempt auto-sync.
+- To warn-only: `HACK_SETUP_SYNC_MODE=warn`
+- To disable: `HACK_SETUP_SYNC_MODE=off`
+
 Primer helpers:
 - `hack agent prime`: short CLI-first primer used by Claude Code hooks
 - `hack agent init`: repo-specific setup prompt agents can follow to scaffold/verify hack config

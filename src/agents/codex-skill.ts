@@ -230,6 +230,8 @@ export function renderCodexSkill(): string {
     "",
     "## Agent Maintenance",
     "",
+    "- Project-level hack commands auto-check integration drift and attempt auto-sync.",
+    "- Set `HACK_SETUP_SYNC_MODE=warn` to warn-only, or `HACK_SETUP_SYNC_MODE=off` to disable.",
     "- Refresh project + global integrations: `hack setup sync --all-scopes`",
     "- Check generated integrations: `hack setup sync --all-scopes --check`",
     "- Remove generated integrations: `hack setup sync --all-scopes --remove`",

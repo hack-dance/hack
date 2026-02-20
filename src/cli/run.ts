@@ -11,6 +11,7 @@ import {
   resolveCommand,
 } from "./command.ts";
 import { printHelpForPath } from "./help.ts";
+import { maybeEnsureAgentIntegrations } from "./integration-sync.ts";
 import { CLI_SPEC } from "./spec.ts";
 
 export async function runCli(argv: readonly string[]): Promise<number> {
@@ -84,6 +85,11 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       resolved.command.positionals,
       resolved.remainingPositionals
     );
+
+    await maybeEnsureAgentIntegrations({
+      cwd: process.cwd(),
+      commandPath: resolved.path.map((command) => command.name),
+    });
 
     return await resolved.command.handler({
       ctx: { cwd: process.cwd(), cli },

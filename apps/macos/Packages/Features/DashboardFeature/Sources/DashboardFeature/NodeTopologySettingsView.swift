@@ -244,27 +244,23 @@ struct NodeTopologySettingsView: View {
           onSizeChanged: handleCompactTopologyCanvasSizeChanged
         )
         .overlay(alignment: .topTrailing) {
-          ZStack {
-            if isControllerHost {
-              Button {
-                openRailwaySettings()
-              } label: {
-                Image(systemName: "plus")
-                  .font(.system(size: 12, weight: .semibold))
-                  .frame(width: 26, height: 26)
-              }
-              .buttonStyle(.plain)
-              .background(
-                Circle()
-                  .fill(Color.blue.opacity(0.92))
-              )
-              .foregroundStyle(Color.white)
-              .allowsHitTesting(true)
-              .padding(8)
-              .help("Add a new remote node")
+          if isControllerHost {
+            Button {
+              openRailwaySettings()
+            } label: {
+              Image(systemName: "plus")
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: 26, height: 26)
             }
+            .buttonStyle(.plain)
+            .background(
+              Circle()
+                .fill(Color.blue.opacity(0.92))
+            )
+            .foregroundStyle(Color.white)
+            .padding(8)
+            .help("Add a new remote node")
           }
-          .allowsHitTesting(false)
         }
 
         topologyLegend
@@ -1416,16 +1412,20 @@ private struct TopologyGraphCanvas: View {
   @Binding var selectedNodeId: String
   @State private var dragStartPositions: [String: CGPoint] = [:]
   @State private var draggingNodeId: String? = nil
+  @State private var dragLivePositions: [String: CGPoint] = [:]
   let minHeight: CGFloat
   let onNodeMoved: (_ nodeId: String, _ position: CGPoint, _ commit: Bool) -> Void
   let onSizeChanged: (_ size: CGSize) -> Void
 
   var body: some View {
     GeometryReader { geometry in
+      let effectiveOverrides = layoutOverrides.merging(dragLivePositions) { _, live in
+        live
+      }
       let layout = TopologyGraphLayout.compute(
         nodes: nodes,
         size: geometry.size,
-        layoutOverrides: layoutOverrides
+        layoutOverrides: effectiveOverrides
       )
 
       ZStack {
@@ -1485,49 +1485,76 @@ private struct TopologyGraphCanvas: View {
     position: CGPoint,
     canvasSize: CGSize
   ) -> some View {
-    TopologyGraphNodeBubble(node: node, isSelected: selectedNodeId == node.id)
-      .frame(width: 208, height: 98, alignment: .center)
-      .position(position)
-      .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-      .allowsHitTesting(true)
-      .zIndex(nodeZIndex(nodeId: node.id))
-      .onTapGesture {
-        selectedNodeId = node.id
-      }
-      .highPriorityGesture(
-        DragGesture(minimumDistance: 2)
-          .onChanged { value in
-            selectedNodeId = node.id
-            draggingNodeId = node.id
-            let dragStart = dragStartPositions[node.id] ?? position
-            if dragStartPositions[node.id] == nil {
-              dragStartPositions[node.id] = position
+    ZStack {
+      TopologyGraphNodeBubble(node: node, isSelected: selectedNodeId == node.id)
+        .allowsHitTesting(false)
+
+      Rectangle()
+        .fill(Color.clear)
+        .contentShape(Rectangle())
+        .onTapGesture {
+          selectedNodeId = node.id
+        }
+        .highPriorityGesture(
+          DragGesture(minimumDistance: 2)
+            .onChanged { value in
+              if selectedNodeId != node.id {
+                selectedNodeId = node.id
+              }
+              if draggingNodeId != node.id {
+                draggingNodeId = node.id
+              }
+              let dragStart = dragStartPositions[node.id] ?? position
+              if dragStartPositions[node.id] == nil {
+                dragStartPositions[node.id] = position
+              }
+              let next = CGPoint(
+                x: dragStart.x + value.translation.width,
+                y: dragStart.y + value.translation.height
+              )
+              let clamped = clampPosition(next, canvasSize: canvasSize)
+              setDragLivePosition(nodeId: node.id, position: clamped)
             }
-            let next = CGPoint(
-              x: dragStart.x + value.translation.width,
-              y: dragStart.y + value.translation.height
-            )
-            onNodeMoved(
-              node.id,
-              clampPosition(next, canvasSize: canvasSize),
-              false
-            )
-          }
-          .onEnded { value in
-            let dragStart = dragStartPositions[node.id] ?? position
-            let next = CGPoint(
-              x: dragStart.x + value.translation.width,
-              y: dragStart.y + value.translation.height
-            )
-            onNodeMoved(
-              node.id,
-              clampPosition(next, canvasSize: canvasSize),
-              true
-            )
-            dragStartPositions[node.id] = nil
-            draggingNodeId = nil
-          }
-      )
+            .onEnded { value in
+              let dragStart = dragStartPositions[node.id] ?? position
+              let next = CGPoint(
+                x: dragStart.x + value.translation.width,
+                y: dragStart.y + value.translation.height
+              )
+              let clamped = dragLivePositions[node.id]
+                ?? clampPosition(next, canvasSize: canvasSize)
+              onNodeMoved(
+                node.id,
+                clamped,
+                true
+              )
+              dragStartPositions[node.id] = nil
+              draggingNodeId = nil
+              dragLivePositions.removeValue(forKey: node.id)
+            }
+        )
+    }
+    .frame(width: 208, height: 98, alignment: .center)
+    .position(position)
+    .allowsHitTesting(true)
+    .zIndex(nodeZIndex(nodeId: node.id))
+  }
+
+  /**
+   Applies transient drag positions without animation to avoid visual stutter.
+   */
+  private func setDragLivePosition(nodeId: String, position: CGPoint) {
+    if let current = dragLivePositions[nodeId],
+      abs(current.x - position.x) < 0.25,
+      abs(current.y - position.y) < 0.25
+    {
+      return
+    }
+    var transaction = Transaction()
+    transaction.disablesAnimations = true
+    withTransaction(transaction) {
+      dragLivePositions[nodeId] = position
+    }
   }
 
   private func nodeZIndex(nodeId: String) -> Double {

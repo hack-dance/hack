@@ -1,5 +1,4 @@
 import { resolve } from "node:path";
-import { secrets } from "bun";
 
 import {
   PROJECT_ENV_CONTRACT_FILENAME,
@@ -8,6 +7,7 @@ import {
 import { parseDotEnv } from "./env.ts";
 import { readTextFile, writeTextFileIfChanged } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
+import { resolveSecretStore } from "./secret-store.ts";
 
 export const HACK_ENV_VERSION = 1 as const;
 
@@ -94,6 +94,10 @@ export async function resolveHackEnv(opts: {
 }): Promise<HackEnvResolveResult> {
   const read = await readHackEnvContract({ projectDir: opts.projectDir });
   const contract = read.contract;
+  const secretStore = await resolveSecretStore({
+    projectName: opts.projectName,
+    projectDir: opts.projectDir,
+  });
 
   const envPath = resolve(opts.projectDir, PROJECT_ENV_FILENAME);
   const envText = await readTextFile(envPath);
@@ -105,9 +109,8 @@ export async function resolveHackEnv(opts: {
     const key = v.key;
 
     if (v.source === "keychain") {
-      const value = await secrets.get({
-        service: resolveKeychainServiceName({ projectName: opts.projectName }),
-        name: key,
+      const value = await secretStore.get({
+        key,
       });
       const resolvedFrom = value === null ? null : "keychain";
       values.push({

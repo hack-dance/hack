@@ -386,6 +386,48 @@ public final class DashboardModel {
     return result ?? false
   }
 
+  @discardableResult
+  public func setProjectConfig(
+    for project: ProjectSummary,
+    key: String,
+    value: String
+  ) async -> Bool {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return false
+    }
+    let result: Bool? = await runActionResult(message: "Updating \(key)…") {
+      try await self.client.setProjectConfig(key: key, value: value, projectPath: path)
+      return true
+    }
+    return result ?? false
+  }
+
+  public func getProjectConfig(
+    for project: ProjectSummary,
+    key: String
+  ) async -> String? {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return nil
+    }
+    do {
+      return try await client.getProjectConfigValue(key: key, projectPath: path)
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func getGlobalConfig(key: String) async -> String? {
+    do {
+      return try await client.getGlobalConfigValue(key: key)
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
   public func fetchGatewayTokens() async -> [GatewayTokenRecord] {
     do {
       return try await client.listGatewayTokens().tokens
@@ -452,6 +494,134 @@ public final class DashboardModel {
         exitNodes: [],
         health: [],
         error: message
+      )
+    }
+  }
+
+  public func inspectTailscaleOAuthStatus(
+    validate: Bool = false
+  ) async -> TailscaleOAuthStatusResponse? {
+    do {
+      return try await client.inspectTailscaleOAuthStatus(validate: validate)
+    } catch {
+      let message = error.localizedDescription
+      errorMessage = message
+      return TailscaleOAuthStatusResponse(
+        configured: false,
+        clientId: nil,
+        authRef: nil,
+        tailnet: nil,
+        keyExpirySeconds: nil,
+        validated: nil,
+        checkedAt: nil,
+        tokenExpiresAt: nil,
+        deleted: nil,
+        error: message
+      )
+    }
+  }
+
+  public func connectTailscaleOAuth(
+    request: TailscaleOAuthConnectRequest
+  ) async -> TailscaleOAuthStatusResponse? {
+    await runActionResult(message: "Saving Tailscale OAuth credentials…") {
+      try await self.client.connectTailscaleOAuth(request: request)
+    }
+  }
+
+  public func disconnectTailscaleOAuth(
+    authRef: String? = nil
+  ) async -> TailscaleOAuthStatusResponse? {
+    await runActionResult(message: "Clearing Tailscale OAuth credentials…") {
+      try await self.client.disconnectTailscaleOAuth(authRef: authRef)
+    }
+  }
+
+  public func inspectRailway() async -> RailwayInspectResponse? {
+    do {
+      return try await client.inspectRailway()
+    } catch {
+      let message = error.localizedDescription
+      errorMessage = message
+      return RailwayInspectResponse(
+        installed: false,
+        binaryPath: nil,
+        version: nil,
+        authenticated: false,
+        whoami: nil,
+        error: message
+      )
+    }
+  }
+
+  public func bootstrapRailwayNode(
+    request: RailwayBootstrapRequest
+  ) async -> RailwayBootstrapResponse? {
+    await runActionResult(message: "Bootstrapping Railway node…") {
+      try await self.client.bootstrapRailwayNode(request: request)
+    }
+  }
+
+  public func listNodes() async -> NodeRegistryListResponse? {
+    do {
+      return try await client.listNodes()
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func probeNodes(nodeId: String? = nil) async -> NodeStatusResponse? {
+    do {
+      return try await client.probeNodes(nodeId: nodeId)
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func useNode(id: String) async -> Bool {
+    let response: NodeUseResponse? = await runActionResult(message: "Setting default node…") {
+      try await self.client.useNode(id: id)
+    }
+    return response?.defaultNodeId == id
+  }
+
+  public func removeNode(id: String) async -> Bool {
+    let response: NodeRemoveResponse? = await runActionResult(message: "Removing node…") {
+      try await self.client.removeNode(id: id)
+    }
+    return response?.removed == true
+  }
+
+  public func cancelNodePairSession(sessionId: String) async -> Bool {
+    let response: NodePairCancelResponse? = await runActionResult(message: "Cancelling pairing session…") {
+      try await self.client.cancelNodePairSession(sessionId: sessionId)
+    }
+    return response?.cancelled == true
+  }
+
+  public func listNodePairSessions(status: String = "pending") async -> [NodePairingSession] {
+    do {
+      return try await client.listNodePairSessions(status: status).sessions
+    } catch {
+      errorMessage = error.localizedDescription
+      return []
+    }
+  }
+
+  public func fulfillNodePairSession(
+    sessionId: String,
+    code: String,
+    defaultNode: Bool,
+    sshPort: Int?
+  ) async -> NodePairFulfillResponse? {
+    await runActionResult(message: "Approving pairing request…") {
+      try await self.client.fulfillNodePairSession(
+        sessionId: sessionId,
+        code: code,
+        defaultNode: defaultNode,
+        sshPort: sshPort
       )
     }
   }

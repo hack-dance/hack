@@ -37,13 +37,24 @@ import {
 import { pathExists, readTextFile, writeTextFile } from "../lib/fs.ts";
 import { findRepoRootForInit } from "../lib/project.ts";
 import { findExecutableInPath } from "../lib/shell.ts";
-import type { AgentDocTarget } from "../mcp/agent-docs.ts";
+import type {
+  AgentDocCheckResult,
+  AgentDocRemoveResult,
+  AgentDocTarget,
+  AgentDocUpdateResult,
+} from "../mcp/agent-docs.ts";
 import {
   checkAgentDocs,
   removeAgentDocs,
   upsertAgentDocs,
 } from "../mcp/agent-docs.ts";
-import type { McpInstallScope, McpTarget } from "../mcp/install.ts";
+import type {
+  McpCheckResult,
+  McpInstallResult,
+  McpInstallScope,
+  McpRemoveResult,
+  McpTarget,
+} from "../mcp/install.ts";
 import {
   checkMcpConfig,
   installMcpConfig,
@@ -695,8 +706,11 @@ async function handleSetupSync({
     let claudeResult: Awaited<ReturnType<typeof checkClaudeHooks>>;
     let codexResult: Awaited<ReturnType<typeof checkCodexSkill>>;
     let ticketsResult: Awaited<ReturnType<typeof checkTicketsSkill>>;
-    let mcpResults: Awaited<ReturnType<typeof checkMcpConfig>>;
-    let docsResults: Awaited<ReturnType<typeof checkAgentDocs>>;
+    let mcpResults: McpCheckResult[] | McpRemoveResult[] | McpInstallResult[];
+    let docsResults:
+      | AgentDocCheckResult[]
+      | AgentDocRemoveResult[]
+      | AgentDocUpdateResult[];
 
     if (action === "check") {
       cursorResult = await checkCursorRules({ scope: "project", projectRoot });
@@ -794,7 +808,7 @@ async function handleSetupSync({
     let claudeResult: Awaited<ReturnType<typeof checkClaudeHooks>>;
     let codexResult: Awaited<ReturnType<typeof checkCodexSkill>>;
     let ticketsResult: Awaited<ReturnType<typeof checkTicketsSkill>>;
-    let mcpResults: Awaited<ReturnType<typeof checkMcpConfig>>;
+    let mcpResults: McpCheckResult[] | McpRemoveResult[] | McpInstallResult[];
 
     if (action === "check") {
       cursorResult = await checkCursorRules({ scope: "user" });

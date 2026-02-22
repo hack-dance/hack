@@ -604,6 +604,16 @@ export function renderProjectConfigSchemaJson(): string {
               allowWrites: { type: "boolean" },
             },
           },
+          cluster: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              defaultNodeId: { type: "string" },
+              staleAfterMs: { type: "number" },
+              offlineAfterMs: { type: "number" },
+            },
+          },
+          nodeId: { type: "string" },
         },
       },
     },

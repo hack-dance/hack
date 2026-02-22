@@ -14,6 +14,7 @@ This directory contains the public documentation for hack. Specs remain in `SPEC
 - [Supervisor](supervisor.md)
 - [Extensions](extensions.md)
 - [Control-plane SDK](sdk.md)
+- [Provider composition + project overrides spec](provider-composition-and-project-overrides.md)
 
 Quick diagnostics:
 - `hack usage` (resource usage across running projects)
@@ -29,4 +30,7 @@ Quick diagnostics:
 - [Expose the gateway with Cloudflare](guides/remote-cloudflare.md)
 - [Expose the gateway with Tailscale](guides/remote-tailscale.md)
 - [Run remote supervisor jobs](guides/remote-supervisor.md)
+- [Run a remote node via container image](guides/remote-node-container.md)
+- [Bootstrap a remote node on Railway](guides/remote-node-railway.md)
+- [Run laptop-to-laptop node pairing e2e](guides/remote-node-laptop-e2e.md)
 - [Create a new extension](guides/create-extension.md)

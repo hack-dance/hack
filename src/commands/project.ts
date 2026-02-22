@@ -9,7 +9,7 @@ import {
   select,
   text,
 } from "@clack/prompts";
-import { secrets, YAML } from "bun";
+import { YAML } from "bun";
 import { installClaudeHooks } from "../agents/claude.ts";
 import { installCodexSkill } from "../agents/codex-skill.ts";
 import { installCursorRules } from "../agents/cursor.ts";
@@ -73,11 +73,7 @@ import {
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
 import { getString, isRecord } from "../lib/guards.ts";
-import {
-  resolveHackEnv,
-  resolveKeychainServiceName,
-  upsertDotEnvValue,
-} from "../lib/hack-env.ts";
+import { resolveHackEnv, upsertDotEnvValue } from "../lib/hack-env.ts";
 import { parseJsonLines } from "../lib/json-lines.ts";
 import {
   appendLifecycleLogRecord,
@@ -110,6 +106,10 @@ import {
   resolveRegisteredProjectByName,
   upsertProjectRegistration,
 } from "../lib/projects-registry.ts";
+import {
+  formatSecretStoreDescriptor,
+  resolveSecretStore,
+} from "../lib/secret-store.ts";
 import { exec } from "../lib/shell.ts";
 import { parseTimeInput } from "../lib/time.ts";
 import { upsertAgentDocs } from "../mcp/agent-docs.ts";
@@ -792,9 +792,8 @@ async function resolveComposeEnvOverrides(opts: {
     const fixed = await maybePromptToFixMissingEnv({
       missing: missingRelevant,
       envFile: resolve(opts.project.projectDir, PROJECT_ENV_FILENAME),
-      keychainService: resolveKeychainServiceName({
-        projectName: opts.projectName,
-      }),
+      projectName: opts.projectName,
+      projectDir: opts.project.projectDir,
     });
     if (fixed) {
       return await resolveComposeEnvOverrides(opts);
@@ -854,7 +853,8 @@ async function maybePromptToFixMissingEnv(opts: {
     readonly source: "plain_env" | "keychain";
   }[];
   readonly envFile: string;
-  readonly keychainService: string;
+  readonly projectName: string;
+  readonly projectDir: string;
 }): Promise<boolean> {
   if (!(process.stdin.isTTY && process.stdout.isTTY)) {
     return false;
@@ -881,11 +881,19 @@ async function maybePromptToFixMissingEnv(opts: {
     return false;
   }
 
+  const secretStore = await resolveSecretStore({
+    projectName: opts.projectName,
+    projectDir: opts.projectDir,
+  });
+  const secretLabel = formatSecretStoreDescriptor({
+    descriptor: secretStore.descriptor,
+  });
+
   for (const v of opts.missing) {
     const value =
       v.source === "keychain"
         ? await password({
-            message: `Value for secret "${v.key}" (${opts.keychainService}):`,
+            message: `Value for secret "${v.key}" (${secretLabel}):`,
             validate: (input) =>
               !input || input.length === 0 ? "Required" : undefined,
           })
@@ -900,7 +908,7 @@ async function maybePromptToFixMissingEnv(opts: {
     }
 
     if (v.source === "keychain") {
-      await secrets.set({ service: opts.keychainService, name: v.key, value });
+      await secretStore.set({ key: v.key, value });
     } else {
       await upsertDotEnvValue({ envFile: opts.envFile, key: v.key, value });
     }

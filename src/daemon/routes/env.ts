@@ -1,12 +1,10 @@
 import { resolve } from "node:path";
-import { secrets } from "bun";
 
 import { PROJECT_ENV_FILENAME } from "../../constants.ts";
 import { isRecord } from "../../lib/guards.ts";
 import {
   removeDotEnvKey,
   resolveHackEnv,
-  resolveKeychainServiceName,
   upsertDotEnvValue,
 } from "../../lib/hack-env.ts";
 import type { RegisteredProject } from "../../lib/projects-registry.ts";
@@ -15,6 +13,7 @@ import {
   resolveRegisteredProjectById,
   resolveRegisteredProjectByName,
 } from "../../lib/projects-registry.ts";
+import { resolveSecretStore } from "../../lib/secret-store.ts";
 
 const ENV_KEY_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
 
@@ -75,8 +74,8 @@ type EnvUnsetBody = {
  *
  * Routes:
  * - GET /v1/env?project=<name>&project_id=<id> - Get env contract + resolution state (redacted values).
- * - POST /v1/env/set - Set env (.hack/.env) or secret (keychain)
- * - POST /v1/env/unset - Unset env + keychain entry
+ * - POST /v1/env/set - Set env (.hack/.env) or secret (configured secret backend)
+ * - POST /v1/env/unset - Unset env + secret backend entry
  *
  * @returns Response if route matched, null otherwise
  */
@@ -194,26 +193,39 @@ async function handleSetEnv(opts: {
   }
 
   const { project, registration } = resolvedProject.value;
-  const keychainService = resolveKeychainServiceName({
+  const secretStore = await resolveSecretStore({
     projectName: registration.name,
+    projectDir: project.projectDir,
   });
 
   const secret = parsed.value.secret === true;
   if (secret) {
     try {
-      await secrets.set({
-        service: keychainService,
-        name: parsed.value.key,
+      await secretStore.set({
+        key: parsed.value.key,
         value: parsed.value.value,
       });
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : "Keychain error";
+      const message =
+        error instanceof Error ? error.message : "Secret backend error";
       return jsonResponse(
-        { error: "keychain_error", message, service: keychainService },
+        {
+          error: "secret_store_error",
+          message,
+          backend: secretStore.descriptor.backend,
+          location: secretStore.descriptor.location,
+        },
         500
       );
     }
-    return jsonResponse({ status: "ok", stored: "keychain" }, 200);
+    return jsonResponse(
+      {
+        status: "ok",
+        stored: secretStore.descriptor.backend,
+        location: secretStore.descriptor.location,
+      },
+      200
+    );
   }
 
   const envFile = resolve(project.projectDir, PROJECT_ENV_FILENAME);
@@ -247,8 +259,9 @@ async function handleUnsetEnv(opts: {
   }
 
   const { project, registration } = resolvedProject.value;
-  const keychainService = resolveKeychainServiceName({
+  const secretStore = await resolveSecretStore({
     projectName: registration.name,
+    projectDir: project.projectDir,
   });
 
   const envFile = resolve(project.projectDir, PROJECT_ENV_FILENAME);
@@ -256,21 +269,22 @@ async function handleUnsetEnv(opts: {
     envFile,
     key: parsed.value.key,
   });
-  let keychainDeleted: boolean | null = null;
+  let secretDeleted: boolean | null = null;
   try {
-    keychainDeleted = await secrets.delete({
-      service: keychainService,
-      name: parsed.value.key,
+    secretDeleted = await secretStore.delete({
+      key: parsed.value.key,
     });
   } catch {
-    keychainDeleted = null;
+    secretDeleted = null;
   }
 
   return jsonResponse(
     {
       status: "ok",
       dotenvChanged: dotenvResult.changed,
-      keychainDeleted,
+      secretDeleted,
+      backend: secretStore.descriptor.backend,
+      location: secretStore.descriptor.location,
     },
     200
   );

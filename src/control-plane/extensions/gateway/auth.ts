@@ -2,6 +2,8 @@ import type { GatewayTokenScope } from "./tokens.ts";
 import { verifyGatewayToken } from "./tokens.ts";
 
 const BEARER_TOKEN_PATTERN = /^Bearer\s+(.+)$/i;
+const STATIC_GATEWAY_TOKEN_ENV = "HACK_GATEWAY_STATIC_TOKEN";
+const STATIC_GATEWAY_SCOPE_ENV = "HACK_GATEWAY_STATIC_TOKEN_SCOPE";
 
 export type GatewayAuthResult =
   | {
@@ -36,10 +38,19 @@ export async function authenticateGatewayRequest(opts: {
   }
 
   const verified = await verifyGatewayToken({ rootDir: opts.rootDir, token });
-  if (!verified) {
-    return { ok: false, reason: "invalid" };
+  if (verified) {
+    return { ok: true, tokenId: verified.id, scope: verified.scope };
   }
-  return { ok: true, tokenId: verified.id, scope: verified.scope };
+
+  const staticToken = resolveStaticGatewayToken();
+  if (staticToken && token === staticToken) {
+    return {
+      ok: true,
+      tokenId: "env-static-token",
+      scope: resolveStaticGatewayScope(),
+    };
+  }
+  return { ok: false, reason: "invalid" };
 }
 
 function extractGatewayToken(opts: {
@@ -72,4 +83,16 @@ function extractGatewayToken(opts: {
   }
 
   return null;
+}
+
+function resolveStaticGatewayToken(): string | null {
+  const value = (process.env[STATIC_GATEWAY_TOKEN_ENV] ?? "").trim();
+  return value.length > 0 ? value : null;
+}
+
+function resolveStaticGatewayScope(): GatewayTokenScope {
+  const raw = (process.env[STATIC_GATEWAY_SCOPE_ENV] ?? "write")
+    .trim()
+    .toLowerCase();
+  return raw === "read" ? "read" : "write";
 }

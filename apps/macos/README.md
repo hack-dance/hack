@@ -13,6 +13,11 @@ Native macOS app for managing local hack projects and daemon status.
 - Lists local hack projects with status and details.
 - Actions: start/stop project, open URL, open logs (experimental).
 - Shows hackd status with start/stop controls.
+- Includes a fullscreen Settings overlay with sidebar navigation for runtime, gateway, Railway, Tailscale, and node topology.
+- Node topology pane includes a controller-host mode toggle, interactive network graph canvas (node selection, typed edge labels, draggable node layout persisted per controller profile, auto-tidy reflow, expandable full map), primary/default node view, authorized node management, connectivity probes, and pairing request inbox approval actions.
+- Tailscale settings now include a dedicated bootstrap auth-key panel; saving there writes the shared key used by private Railway bootstrap (`controlPlane.extensions["dance.hack.tailscale"].config.authKey`, mirrored to Railway compatibility key) with optional `HACK_TAILSCALE_AUTH_KEY` fallback.
+- Project detail and topology screens use lazy stacked section rendering plus cancellable async refresh tasks to reduce unnecessary recomputation while navigating quickly.
+- Project detail now includes an "Execution target" section for per-project routing: inherited default, fixed node, or provider profile.
 - Menu bar item for quick status + actions.
 
 ## Quick commands (repo root)

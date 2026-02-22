@@ -35,6 +35,8 @@ Run `hack help` or `hack help <command>` for interactive help.
 | `hack tickets` | Git-backed ticket management | Project |
 | `hack internal` | Manage hack-managed internal overrides | Internal |
 | `hack gateway` | Manage gateway enablement | Extensions |
+| `hack node` | Manage remote execution nodes | Extensions |
+| `hack dispatch` | Dispatch branch-scoped jobs to remote nodes | Extensions |
 | `hack remote` | Remote workflow helpers | Extensions |
 | `hack x` | Run extension commands | Extensions |
 | `hack setup` | Install integrations for coding agents | Agents |
@@ -474,8 +476,9 @@ Subcommands:
 | Subcommand | Summary |
 | --- | --- |
 | `list` | List env contract vars and resolution state |
-| `set` | Set an env value (.hack/.env or keychain) |
-| `unset` | Unset an env value (.hack/.env and keychain) |
+| `set` | Set an env value (.hack/.env or secret backend) |
+| `unset` | Unset an env value (.hack/.env and secret backend) |
+| `backend` | Manage env/secret backend strategy |
 
 #### hack env list
 
@@ -488,7 +491,7 @@ Options:
 | `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
 | `--project <name>` | string | - | Target a registered project by name |
 | `--json` | boolean | false | Output JSON (machine-readable) |
-| `--show-secrets` | boolean | false | Print secret values (keychain) in plaintext |
+| `--show-secrets` | boolean | false | Print secret values (secret backend) in plaintext |
 
 #### hack env set
 
@@ -502,7 +505,7 @@ Options:
 | --- | --- | --- | --- |
 | `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
 | `--project <name>` | string | - | Target a registered project by name |
-| `--secret` | boolean | false | Store value in OS keychain (Bun.secrets) instead of .hack/.env |
+| `--secret` | boolean | false | Store value in configured secret backend instead of .hack/.env |
 
 #### hack env unset
 
@@ -514,6 +517,41 @@ Options:
 | --- | --- | --- | --- |
 | `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
 | `--project <name>` | string | - | Target a registered project by name |
+
+#### hack env backend
+
+Usage: `hack env backend <subcommand>`
+
+Subcommands:
+
+| Subcommand | Summary |
+| --- | --- |
+| `status` | Show configured env/secret backend strategy |
+| `use` | Select env/secret backend strategy |
+
+#### hack env backend status
+
+Usage: `hack env backend status [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | boolean | false | Output JSON (machine-readable) |
+
+#### hack env backend use
+
+Usage: `hack env backend use <keychain|encrypted_file|cloud> [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--provider <aws|gcp|azure|vault>` | string | - | Cloud provider when backend is `cloud` |
+| `--store-path <path>` | string | - | Encrypted file path when backend is `encrypted_file` |
+| `--secret-project <id>` | string | - | Optional cloud account/project identifier |
+| `--secret-prefix <prefix>` | string | - | Optional cloud secret name prefix |
+| `--json` | boolean | false | Output JSON (machine-readable) |
 
 ### hack session
 
@@ -697,6 +735,157 @@ Options:
 | --- | --- | --- | --- |
 | `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
 | `--project <name>` | string | - | Target a registered project by name |
+
+### hack node
+
+Usage: `hack node <subcommand>`
+
+Subcommands:
+
+| Subcommand | Summary |
+| --- | --- |
+| `init` | Initialize this host as a node and emit enrollment bundle |
+| `pair` | Pair node with one-command or expiring verification-code flow |
+| `add` | Add a node from an enrollment bundle |
+| `list` | List registered nodes |
+| `status` | Probe node health and report live status |
+| `use` | Set default node |
+| `remove` | Remove node registration |
+| `provider` | Manage provider-specific node bootstrap workflows |
+| `devcontainer` | Manage remote node devcontainer lifecycle and attach hints |
+
+Examples:
+
+```bash
+# on a node host
+hack node init --name "aws-dev-1" --endpoint "https://gateway.example.com"
+
+# one-command pairing from controller (works with Tailscale DNS/IP too)
+hack node pair --source "ubuntu@helsinki.tail8fedfd.ts.net" --endpoint "http://127.0.0.1:7788" --name "aws-dev-1" --default
+
+# node-initiated publish of pairing request to controller (creates inbox entry)
+hack node pair request --controller "you@controller-mac.local" --source "ubuntu@helsinki.tail8fedfd.ts.net" --endpoint "http://127.0.0.1:7788" --default
+
+# interactive pairing walkthrough (guided prompts + remote approve/complete)
+hack node pair walkthrough --source "ubuntu@helsinki.tail8fedfd.ts.net" --endpoint "http://127.0.0.1:7788" --default
+
+# secure pairing ceremony (expiring code)
+hack node pair start --source "ubuntu@helsinki.tail8fedfd.ts.net" --endpoint "http://127.0.0.1:7788" --name "aws-dev-1"
+# review pending requests (controller inbox)
+hack node pair list --status pending
+# on node (or over ssh), using session + code from start output
+hack node pair approve --session <pair-session-id> --code <one-time-code> --endpoint "http://127.0.0.1:7788" --json > approved-bundle.json
+# back on controller
+hack node pair complete --session <pair-session-id> --bundle approved-bundle.json --default
+# controller one-shot approve + complete for existing pending request
+hack node pair fulfill --session <pair-session-id> --code <one-time-code> --default
+
+# on controller
+hack node add --bundle ./node-bundle.json
+hack node list
+hack node status --watch
+hack node use <node-id>
+
+# Railway provider bootstrap (existing service + auto domain endpoint)
+hack node provider railway bootstrap \
+  --railway-project "<project-id-or-name>" \
+  --railway-service "<service-name>" \
+  --railway-environment production \
+  --default
+
+# Railway provider bootstrap (create service from node runtime image first)
+hack node provider railway bootstrap \
+  --railway-project "<project-id-or-name>" \
+  --create-service \
+  --railway-service hack-node-runtime \
+  --railway-image hackdance/hack:latest \
+  --name "railway-node-1" \
+  --labels railway,linux,container \
+  --default
+
+# Railway provider bootstrap (private tailnet endpoint, no public domain)
+hack node provider railway bootstrap \
+  --railway-project "<project-id-or-name>" \
+  --railway-service "<service-name>" \
+  --railway-private \
+  --tailscale-auth-key "tskey-auth-..." \
+  --default
+
+# Railway provider bootstrap (private auth key from global config)
+hack config set --global 'controlPlane.extensions["dance.hack.tailscale"].config.authKey' "tskey-auth-..."
+hack node provider railway bootstrap \
+  --railway-project "<project-id-or-name>" \
+  --railway-service "<service-name>" \
+  --railway-private \
+  --default
+
+hack node devcontainer up --node <node-id> --project my-project --branch feature/foo
+hack node devcontainer attach --node <node-id> --id <session-id> --ide vscode --ssh-host node.example.com --ssh-alias hack-node-dev
+```
+
+`hack node status --watch` uses a short-lived auth lookup cache (60s) to avoid repeated macOS keychain prompts while polling.
+
+`hack node devcontainer attach` supports SSH-specific guidance flags:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--ssh-host <host>` | string | node endpoint host | Override SSH host used in attach commands |
+| `--ssh-port <port>` | number | `22` | SSH port for attach commands |
+| `--ssh-user <user>` | string | - | Optional SSH user |
+| `--ssh-alias <alias>` | string | `hack-node-<id-prefix>` | Alias used for Remote-SSH commands |
+
+### hack dispatch
+
+Usage: `hack dispatch <subcommand>`
+
+Subcommands:
+
+| Subcommand | Summary |
+| --- | --- |
+| `run` | Dispatch a command to a node workspace |
+| `status` | Show dispatched run status |
+| `logs` | Show or follow persisted/remote run logs |
+
+#### hack dispatch run
+
+Usage: `hack dispatch run --project <name|id> [options] -- <command...>`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--project <name|id>` | string | - | Project name or id |
+| `--node <id|default|auto>` | string | auto | Target node id, or use default/auto |
+| `--provider <provider>` | string | - | Provider route override used when resolving profile/bootstrap intent |
+| `--profile <profile-id>` | string | - | Provider profile route override |
+| `--bootstrap-if-needed` | boolean | false | Allow guarded provider bootstrap handoff when no reachable node is found |
+| `--branch <branch>` | string | current | Target branch on selected node |
+| `--ticket <ticket-id>` | string | - | Ticket id to associate with run metadata |
+| `--runner <generic|codex|claude|cursor>` | string | `generic` | Runner identity for policy and audit |
+| `--approve` | boolean | false | Approve high/critical risk commands non-interactively |
+| `--pr` | boolean | false | Push branch + create/update GitHub PR on successful run |
+| `--pr-base <branch>` | string | `main` | Base branch used with `--pr` |
+| `--pr-title <title>` | string | auto | Override PR title |
+| `--pr-body <markdown>` | string | auto | Override PR body |
+| `--json` | boolean | false | Output machine-readable run payload |
+
+Note: when the target node does not already have the project workspace, dispatch sends bootstrap metadata (git origin + project name) to `/v1/node/workspaces/ensure` so the node can clone/register the repo automatically.
+
+Route precedence for dispatch:
+
+1. Command flags (`--node`, `--provider`, `--profile`).
+2. Project `controlPlane.nodeId`.
+3. Project `controlPlane.routing.provider/profile`.
+4. Global `controlPlane.providers.defaultProvider/defaultProfile`.
+5. Provider hard defaults.
+
+#### hack dispatch status
+
+Usage: `hack dispatch status <run-id> [--json]`
+
+#### hack dispatch logs
+
+Usage: `hack dispatch logs <run-id> [--follow] [--tail <n>] [--json]`
 
 ### hack remote
 

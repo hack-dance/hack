@@ -3,6 +3,14 @@ import SwiftUI
 
 import HackDesktopModels
 
+private enum ExecutionTargetMode: String, CaseIterable, Identifiable {
+  case inherited = "Inherited"
+  case fixedNode = "Fixed node"
+  case providerProfile = "Provider profile"
+
+  var id: String { rawValue }
+}
+
 struct ProjectDetailView: View {
   @Environment(DashboardModel.self) private var model
   @Environment(\.openURL) private var openURL
@@ -26,6 +34,19 @@ struct ProjectDetailView: View {
   @State private var showAddBranchSheet = false
   @State private var newBranchName = ""
   @State private var newBranchNote = ""
+  @State private var executionTargetMode: ExecutionTargetMode = .inherited
+  @State private var executionTargetNodeId = ""
+  @State private var executionTargetProvider = ""
+  @State private var executionTargetProfileId = ""
+  @State private var executionTargetProfiles: [String] = []
+  @State private var executionTargetProfileProviderById: [String: String] = [:]
+  @State private var executionTargetNodes: [NodeRegistryRecord] = []
+  @State private var executionTargetLoading = false
+  @State private var executionTargetSaving = false
+  @State private var executionTargetMessage = ""
+  @State private var globalDefaultProvider = ""
+  @State private var globalDefaultProfile = ""
+  @State private var executionTargetReloadTask: Task<Void, Never>? = nil
 
   var body: some View {
     @Bindable var model = model
@@ -41,12 +62,20 @@ struct ProjectDetailView: View {
       bottomControlBar
         .padding(.bottom, 18)
     }
-    .onAppear { ensureSelectedTab() }
+    .onAppear {
+      ensureSelectedTab()
+      queueExecutionTargetReload()
+    }
     .onChange(of: project.id) { _, _ in
       ensureSelectedTab()
+      queueExecutionTargetReload()
     }
     .onChange(of: model.selectedProjectTab) { _, _ in
       ensureSelectedTab()
+    }
+    .onDisappear {
+      executionTargetReloadTask?.cancel()
+      executionTargetReloadTask = nil
     }
     .sheet(isPresented: $showAddBranchSheet) {
       addBranchSheet
@@ -212,10 +241,11 @@ struct ProjectDetailView: View {
   private var overviewContent: some View {
     ScrollView {
       HStack(alignment: .top, spacing: 24) {
-        VStack(alignment: .leading, spacing: 20) {
+        LazyVStack(alignment: .leading, spacing: 20) {
           if !project.isRuntimeConfigured {
             runtimeNotConfiguredCard
           }
+          executionTargetSection
           servicesSection
           if lifecycleSummary.hasEntries {
             lifecycleSection
@@ -276,6 +306,102 @@ struct ProjectDetailView: View {
           }
           .padding(.top, 4)
         }
+      }
+    }
+  }
+
+  private var executionTargetSection: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      HStack(spacing: 10) {
+        Image(systemName: "point.3.connected.trianglepath.dotted")
+          .foregroundStyle(.secondary)
+        Text("Execution target")
+          .font(.mono(.headline, weight: .semibold))
+        Spacer()
+        if executionTargetLoading || executionTargetSaving {
+          ProgressView()
+            .controlSize(.small)
+        }
+      }
+      .overlay(alignment: .bottom) {
+        Rectangle()
+          .fill(Color.white.opacity(0.08))
+          .frame(height: 1)
+          .offset(y: 8)
+      }
+
+      HStack(spacing: 8) {
+        StatusPill(text: executionTargetSourceLabel, tone: .neutral)
+        if !globalDefaultProfile.isEmpty {
+          StatusPill(text: "Global profile: \(globalDefaultProfile)", tone: .neutral)
+        } else if !globalDefaultProvider.isEmpty {
+          StatusPill(text: "Global provider: \(globalDefaultProvider)", tone: .neutral)
+        }
+      }
+
+      Picker("Target mode", selection: $executionTargetMode) {
+        ForEach(ExecutionTargetMode.allCases) { mode in
+          Text(mode.rawValue).tag(mode)
+        }
+      }
+      .pickerStyle(.segmented)
+
+      if executionTargetMode == .fixedNode {
+        Picker("Node", selection: $executionTargetNodeId) {
+          Text("Select node").tag("")
+          ForEach(executionTargetNodes, id: \.id) { node in
+            Text(node.name).tag(node.id)
+          }
+        }
+        .pickerStyle(.menu)
+      }
+
+      if executionTargetMode == .providerProfile {
+        TextField("Provider", text: $executionTargetProvider)
+          .textFieldStyle(.roundedBorder)
+        Picker("Profile", selection: $executionTargetProfileId) {
+          Text("No profile").tag("")
+          ForEach(executionTargetProfiles, id: \.self) { profile in
+            Text(profile).tag(profile)
+          }
+        }
+        .pickerStyle(.menu)
+        .onChange(of: executionTargetProfileId) { _, profileId in
+          guard let provider = executionTargetProfileProviderById[profileId] else {
+            return
+          }
+          executionTargetProvider = provider
+        }
+      }
+
+      if !executionTargetMessage.isEmpty {
+        Text(executionTargetMessage)
+          .font(.mono(.caption2))
+          .foregroundStyle(Color.orange)
+      }
+
+      HStack(spacing: 8) {
+        Button {
+          Task { await persistExecutionTarget() }
+        } label: {
+          Label("Save target", systemImage: "square.and.arrow.down")
+        }
+        .buttonStyle(PressableIconButtonStyle())
+        .disabled(executionTargetLoading || executionTargetSaving)
+
+        Button {
+          executionTargetMode = .inherited
+          executionTargetNodeId = ""
+          executionTargetProvider = ""
+          executionTargetProfileId = ""
+          Task { await persistExecutionTarget() }
+        } label: {
+          Label("Reset to inherited", systemImage: "arrow.uturn.backward")
+        }
+        .buttonStyle(PressableIconButtonStyle())
+        .disabled(executionTargetLoading || executionTargetSaving)
+
+        Spacer()
       }
     }
   }
@@ -364,7 +490,7 @@ struct ProjectDetailView: View {
 
   private var branchesContent: some View {
     ScrollView {
-      VStack(alignment: .leading, spacing: 20) {
+      LazyVStack(alignment: .leading, spacing: 20) {
         branchesSection
       }
       .padding(24)
@@ -384,7 +510,7 @@ struct ProjectDetailView: View {
 
   private var sessionsContent: some View {
     ScrollView {
-      VStack(alignment: .leading, spacing: 20) {
+      LazyVStack(alignment: .leading, spacing: 20) {
         sessionsSection
       }
       .padding(24)
@@ -430,7 +556,7 @@ struct ProjectDetailView: View {
           .font(.mono(.subheadline))
           .foregroundStyle(.secondary)
       } else {
-        VStack(alignment: .leading, spacing: 10) {
+        LazyVStack(alignment: .leading, spacing: 10) {
           ForEach(branchEntries, id: \.branch) { entry in
             branchRow(entry)
             Divider()
@@ -474,7 +600,7 @@ struct ProjectDetailView: View {
             .foregroundStyle(.tertiary)
         }
       } else {
-        VStack(alignment: .leading, spacing: 10) {
+        LazyVStack(alignment: .leading, spacing: 10) {
           ForEach(sessionEntries, id: \.id) { session in
             sessionRow(session)
             Divider()
@@ -748,6 +874,199 @@ struct ProjectDetailView: View {
 
   private var featuresList: [String] {
     project.features ?? project.extensionsEnabled ?? []
+  }
+
+  private var executionTargetSourceLabel: String {
+    switch executionTargetMode {
+    case .inherited:
+      return "Inherited from global defaults"
+    case .fixedNode:
+      return "Project fixed node"
+    case .providerProfile:
+      return "Project provider profile"
+    }
+  }
+
+  /**
+   Reload project execution target state and provider profile options.
+   */
+  private func reloadExecutionTargetState() async {
+    if Task.isCancelled {
+      return
+    }
+    executionTargetLoading = true
+    defer { executionTargetLoading = false }
+
+    async let nodeList = model.listNodes()
+    async let projectNodeId = model.getProjectConfig(
+      for: project,
+      key: "controlPlane.nodeId"
+    )
+    async let routingProvider = model.getProjectConfig(
+      for: project,
+      key: "controlPlane.routing.provider"
+    )
+    async let routingProfile = model.getProjectConfig(
+      for: project,
+      key: "controlPlane.routing.profile"
+    )
+    async let defaultProvider = model.getGlobalConfig(
+      key: "controlPlane.providers.defaultProvider"
+    )
+    async let defaultProfile = model.getGlobalConfig(
+      key: "controlPlane.providers.defaultProfile"
+    )
+    async let profilesRaw = model.getGlobalConfig(
+      key: "controlPlane.providers.profiles"
+    )
+
+    let resolvedNodeList = await nodeList
+    let resolvedProjectNodeId = await projectNodeId
+    let resolvedRoutingProvider = await routingProvider
+    let resolvedRoutingProfile = await routingProfile
+    let resolvedDefaultProvider = await defaultProvider
+    let resolvedDefaultProfile = await defaultProfile
+    let resolvedProfilesRaw = await profilesRaw
+
+    if Task.isCancelled {
+      return
+    }
+
+    executionTargetNodes = resolvedNodeList?.nodes ?? []
+    let projectNodeIdValue = (resolvedProjectNodeId ?? "")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    executionTargetNodeId = projectNodeIdValue
+    executionTargetProvider = (resolvedRoutingProvider ?? "")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    executionTargetProfileId = (resolvedRoutingProfile ?? "")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    globalDefaultProvider = (resolvedDefaultProvider ?? "")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    globalDefaultProfile = (resolvedDefaultProfile ?? "")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+
+    let profileParse = parseProviderProfiles(raw: resolvedProfilesRaw)
+    executionTargetProfiles = profileParse.ids
+    executionTargetProfileProviderById = profileParse.providerById
+
+    if executionTargetNodeId.isEmpty {
+      if !executionTargetProfileId.isEmpty || !executionTargetProvider.isEmpty {
+        executionTargetMode = .providerProfile
+      } else {
+        executionTargetMode = .inherited
+      }
+    } else {
+      executionTargetMode = .fixedNode
+    }
+
+    if executionTargetProvider.isEmpty,
+      let fromProfile = executionTargetProfileProviderById[executionTargetProfileId]
+    {
+      executionTargetProvider = fromProfile
+    }
+    executionTargetMessage = ""
+  }
+
+  private func queueExecutionTargetReload() {
+    executionTargetReloadTask?.cancel()
+    executionTargetReloadTask = Task {
+      await reloadExecutionTargetState()
+    }
+  }
+
+  /**
+   Persist execution-target settings into the project-scoped controlPlane config.
+   */
+  private func persistExecutionTarget() async {
+    executionTargetSaving = true
+    defer { executionTargetSaving = false }
+
+    let providerFromProfile = executionTargetProfileProviderById[
+      executionTargetProfileId
+    ]
+    let effectiveProvider = executionTargetProvider
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .isEmpty
+      ? (providerFromProfile ?? "")
+      : executionTargetProvider.trimmingCharacters(in: .whitespacesAndNewlines)
+    let effectiveProfile = executionTargetProfileId
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    let effectiveNodeId = executionTargetNodeId
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+
+    let writes: [(String, String)]
+    switch executionTargetMode {
+    case .inherited:
+      writes = [
+        ("controlPlane.nodeId", ""),
+        ("controlPlane.routing.provider", ""),
+        ("controlPlane.routing.profile", ""),
+      ]
+    case .fixedNode:
+      guard !effectiveNodeId.isEmpty else {
+        executionTargetMessage = "Select a node before saving fixed-node mode."
+        return
+      }
+      writes = [
+        ("controlPlane.nodeId", effectiveNodeId),
+        ("controlPlane.routing.provider", ""),
+        ("controlPlane.routing.profile", ""),
+      ]
+    case .providerProfile:
+      guard !effectiveProvider.isEmpty else {
+        executionTargetMessage = "Provider is required for provider-profile mode."
+        return
+      }
+      writes = [
+        ("controlPlane.nodeId", ""),
+        ("controlPlane.routing.provider", effectiveProvider),
+        ("controlPlane.routing.profile", effectiveProfile),
+      ]
+    }
+
+    for (key, value) in writes {
+      let didSave = await model.setProjectConfig(
+        for: project,
+        key: key,
+        value: value
+      )
+      if !didSave {
+        executionTargetMessage = "Failed to save \(key)."
+        return
+      }
+    }
+
+    executionTargetMessage = "Execution target saved."
+    await model.refresh()
+    queueExecutionTargetReload()
+  }
+
+  private func parseProviderProfiles(raw: String?) -> (
+    ids: [String],
+    providerById: [String: String]
+  ) {
+    guard
+      let raw,
+      let data = raw.data(using: .utf8),
+      let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else {
+      return ([], [:])
+    }
+
+    let ids = parsed.keys.sorted { lhs, rhs in
+      lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
+    }
+    var providerById: [String: String] = [:]
+    for id in ids {
+      guard
+        let profile = parsed[id] as? [String: Any],
+        let provider = profile["provider"] as? String
+      else {
+        continue
+      }
+      providerById[id] = provider
+    }
+    return (ids, providerById)
   }
 
   private struct LifecycleSummaryCounts {

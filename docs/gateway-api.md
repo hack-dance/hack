@@ -196,6 +196,11 @@ Base URL: `http://127.0.0.1:7788` (or your tunnel URL)
 | Method | Path | Write required | Description |
 | --- | --- | --- | --- |
 | GET | `/v1/status` | no | Daemon status + uptime |
+| GET | `/v1/node/status` | no | Node runtime/gateway/supervisor capability status |
+| POST | `/v1/node/workspaces/ensure` | yes | Resolve project workspace + ensure branch checkout |
+| POST | `/v1/node/devcontainers/up` | yes | Start devcontainer for resolved workspace |
+| POST | `/v1/node/devcontainers/down` | yes | Stop tracked devcontainer session |
+| GET | `/v1/node/devcontainers/:id` | no | Fetch devcontainer session metadata |
 | GET | `/v1/metrics` | no | Cache + stream metrics |
 | GET | `/v1/projects` | no | Gateway-enabled projects + runtime snapshot |
 | GET | `/v1/ps` | no | Compose project container list |
@@ -239,6 +244,61 @@ Response:
 | `pid` | number | Process id |
 | `started_at` | string | ISO timestamp |
 | `uptime_ms` | number | Uptime in milliseconds |
+
+### GET /v1/node/status
+
+Returns node capability metadata for controller routing:
+
+- host identity (`node.name`, `node.platform`, `node.arch`, Bun version)
+- gateway settings and enabled projects
+- supervisor settings
+- active devcontainer sessions
+
+This endpoint is used by `hack node status` and `hack dispatch run` during node selection.
+
+### POST /v1/node/workspaces/ensure
+
+Ensures a target workspace exists on the node and optionally checks out/creates a branch.
+
+Request body selectors:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `project` | string | no | Project name selector |
+| `project_id` | string | no | Node-local project id selector |
+| `path` | string | no | Absolute path selector |
+| `branch` | string | no | Branch to ensure/check out |
+| `bootstrap` | object | no | Optional clone/register hints when workspace is missing |
+
+`bootstrap` fields:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `repo_url` | string | yes | Git clone URL used for fresh-node bootstrap |
+| `project_name` | string | no | Preferred project name when registering clone |
+| `project_root` | string | no | Absolute destination path override on node |
+
+Response:
+
+```json
+{
+  "workspace": {
+    "projectId": "4132b9154775",
+    "projectName": "hack-cli",
+    "projectRoot": "/Users/hack/dev/hack-dance/hack-cli",
+    "projectDir": "/Users/hack/dev/hack-dance/hack-cli/.hack",
+    "branch": "feature/my-branch"
+  }
+}
+```
+
+### Node devcontainer endpoints
+
+- `POST /v1/node/devcontainers/up`
+- `POST /v1/node/devcontainers/down`
+- `GET /v1/node/devcontainers/:id`
+
+These endpoints manage tracked devcontainer sessions and are consumed by node/devcontainer bridge workflows.
 
 ### GET /v1/metrics
 

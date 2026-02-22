@@ -1,0 +1,3 @@
+[mcp_servers.hack]
+command = "hack"
+args = ["mcp", "serve"]

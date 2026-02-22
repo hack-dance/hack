@@ -113,6 +113,16 @@ If anything fails, use `hack logs --pretty` and summarize next steps.
 
 If the agent cannot run shell commands, use MCP instead: `hack setup mcp` and `hack mcp serve`.
 
+### Remote node runtime image (multi-node)
+
+Use the prebuilt node-runtime container to bootstrap remote nodes quickly (Linux/macOS hosts with Docker):
+
+```bash
+bun run build:node-runtime-image --tag hack-node-runtime:dev
+```
+
+Full operator guide: [`docs/guides/remote-node-container.md`](docs/guides/remote-node-container.md)
+
 ### Tickets (optional, git-backed issue tracking)
 
 `hack` includes a lightweight, git-backed ticket system for tracking work without leaving your repo. Tickets are stored in a hidden git ref (`refs/hack/tickets`) so they sync with your code but don't clutter your branch list.

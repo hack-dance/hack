@@ -82,6 +82,76 @@ export type GatewayShellResponse = {
   readonly shell: ShellMeta;
 };
 
+export type GatewayNodeStatus = {
+  readonly status: string;
+  readonly version: string;
+  readonly pid: number;
+  readonly started_at: string;
+  readonly uptime_ms: number;
+  readonly node: {
+    readonly name: string;
+    readonly platform: string;
+    readonly arch: string;
+    readonly bun: string;
+  };
+  readonly gateway: {
+    readonly enabled: boolean;
+    readonly bind: string;
+    readonly port: number;
+    readonly allowWrites: boolean;
+    readonly projects: readonly {
+      readonly project_id: string;
+      readonly project_name: string;
+    }[];
+  };
+  readonly supervisor: {
+    readonly enabled: boolean;
+    readonly maxConcurrentJobs: number;
+  };
+  readonly devcontainers: {
+    readonly running: number;
+    readonly sessions: readonly {
+      readonly id: string;
+      readonly project_id: string;
+      readonly project_name: string;
+      readonly branch: string | null;
+      readonly created_at: string;
+    }[];
+  };
+};
+
+export type GatewayNodeWorkspace = {
+  readonly projectId: string;
+  readonly projectName: string;
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly branch: string | null;
+};
+
+export type GatewayNodeWorkspaceBootstrap = {
+  readonly repoUrl: string;
+  readonly projectName?: string;
+  readonly projectRoot?: string;
+};
+
+export type GatewayNodeWorkspaceResponse = {
+  readonly workspace: GatewayNodeWorkspace;
+};
+
+export type GatewayNodeDevcontainerSession = {
+  readonly id: string;
+  readonly workspace: GatewayNodeWorkspace;
+  readonly createdAt: string;
+  readonly containerId: string | null;
+  readonly output: string;
+  readonly status: "running" | "stopped" | "failed";
+  readonly updatedAt: string;
+};
+
+export type GatewayNodeDevcontainerResponse = {
+  readonly session: GatewayNodeDevcontainerSession;
+};
+
 /**
  * Gateway client helpers for HTTP + WS endpoints.
  */
@@ -90,6 +160,8 @@ export type GatewayClient = {
   getStatus: () => Promise<GatewayResponse<GatewayStatus>>;
   /** Fetch gateway metrics snapshot. */
   getMetrics: () => Promise<GatewayResponse<GatewayMetrics>>;
+  /** Fetch node status metadata from a node gateway. */
+  getNodeStatus: () => Promise<GatewayResponse<GatewayNodeStatus>>;
   /**
    * List projects known to the gateway cache.
    *
@@ -186,6 +258,42 @@ export type GatewayClient = {
     readonly projectId: string;
     readonly shellId: string;
   }) => Promise<GatewayResponse<GatewayShellResponse>>;
+  /**
+   * Ensure a node workspace exists and branch is ready.
+   *
+   * @param opts.project - Optional project name selector.
+   * @param opts.projectId - Optional node-local project id selector.
+   * @param opts.path - Optional absolute path selector.
+   * @param opts.branch - Optional target branch to checkout/create.
+   */
+  ensureNodeWorkspace: (opts: {
+    readonly project?: string;
+    readonly projectId?: string;
+    readonly path?: string;
+    readonly branch?: string;
+    readonly bootstrap?: GatewayNodeWorkspaceBootstrap;
+  }) => Promise<GatewayResponse<GatewayNodeWorkspaceResponse>>;
+  /**
+   * Start devcontainer for a node workspace.
+   */
+  devcontainerUp: (opts: {
+    readonly project?: string;
+    readonly projectId?: string;
+    readonly path?: string;
+    readonly branch?: string;
+  }) => Promise<GatewayResponse<GatewayNodeDevcontainerResponse>>;
+  /**
+   * Stop devcontainer by session id.
+   */
+  devcontainerDown: (opts: {
+    readonly id: string;
+  }) => Promise<GatewayResponse<GatewayNodeDevcontainerResponse>>;
+  /**
+   * Fetch devcontainer session state by id.
+   */
+  getDevcontainer: (opts: {
+    readonly id: string;
+  }) => Promise<GatewayResponse<GatewayNodeDevcontainerResponse>>;
   /**
    * Open a WebSocket stream for job logs/events.
    *
@@ -296,6 +404,13 @@ export function createGatewayClient(opts: GatewayClientOptions): GatewayClient {
       method: "GET",
       path: "/v1/metrics",
       parse: parseMetrics,
+    });
+
+  const getNodeStatus = async (): Promise<GatewayResponse<GatewayNodeStatus>> =>
+    await requestJson({
+      method: "GET",
+      path: "/v1/node/status",
+      parse: parseNodeStatus,
     });
 
   const getProjects = async (opts?: {
@@ -413,6 +528,75 @@ export function createGatewayClient(opts: GatewayClientOptions): GatewayClient {
       parse: parseShell,
     });
 
+  const ensureNodeWorkspace = async (opts: {
+    readonly project?: string;
+    readonly projectId?: string;
+    readonly path?: string;
+    readonly branch?: string;
+    readonly bootstrap?: GatewayNodeWorkspaceBootstrap;
+  }): Promise<GatewayResponse<GatewayNodeWorkspaceResponse>> =>
+    await requestJson({
+      method: "POST",
+      path: "/v1/node/workspaces/ensure",
+      body: {
+        ...(opts.project ? { project: opts.project } : {}),
+        ...(opts.projectId ? { project_id: opts.projectId } : {}),
+        ...(opts.path ? { path: opts.path } : {}),
+        ...(opts.branch ? { branch: opts.branch } : {}),
+        ...(opts.bootstrap
+          ? {
+              bootstrap: {
+                repo_url: opts.bootstrap.repoUrl,
+                ...(opts.bootstrap.projectName
+                  ? { project_name: opts.bootstrap.projectName }
+                  : {}),
+                ...(opts.bootstrap.projectRoot
+                  ? { project_root: opts.bootstrap.projectRoot }
+                  : {}),
+              },
+            }
+          : {}),
+      },
+      parse: parseWorkspaceEnsure,
+    });
+
+  const devcontainerUp = async (opts: {
+    readonly project?: string;
+    readonly projectId?: string;
+    readonly path?: string;
+    readonly branch?: string;
+  }): Promise<GatewayResponse<GatewayNodeDevcontainerResponse>> =>
+    await requestJson({
+      method: "POST",
+      path: "/v1/node/devcontainers/up",
+      body: {
+        ...(opts.project ? { project: opts.project } : {}),
+        ...(opts.projectId ? { project_id: opts.projectId } : {}),
+        ...(opts.path ? { path: opts.path } : {}),
+        ...(opts.branch ? { branch: opts.branch } : {}),
+      },
+      parse: parseNodeDevcontainer,
+    });
+
+  const devcontainerDown = async (opts: {
+    readonly id: string;
+  }): Promise<GatewayResponse<GatewayNodeDevcontainerResponse>> =>
+    await requestJson({
+      method: "POST",
+      path: "/v1/node/devcontainers/down",
+      body: { id: opts.id },
+      parse: parseNodeDevcontainer,
+    });
+
+  const getDevcontainer = async (opts: {
+    readonly id: string;
+  }): Promise<GatewayResponse<GatewayNodeDevcontainerResponse>> =>
+    await requestJson({
+      method: "GET",
+      path: `/v1/node/devcontainers/${opts.id}`,
+      parse: parseNodeDevcontainer,
+    });
+
   const openJobStream = (opts: {
     readonly projectId: string;
     readonly jobId: string;
@@ -440,6 +624,7 @@ export function createGatewayClient(opts: GatewayClientOptions): GatewayClient {
   return {
     getStatus,
     getMetrics,
+    getNodeStatus,
     getProjects,
     getPs,
     listJobs,
@@ -448,6 +633,10 @@ export function createGatewayClient(opts: GatewayClientOptions): GatewayClient {
     cancelJob,
     createShell,
     getShell,
+    ensureNodeWorkspace,
+    devcontainerUp,
+    devcontainerDown,
+    getDevcontainer,
     openJobStream,
     openShellStream,
   };
@@ -596,4 +785,54 @@ function parseShell(value: unknown): GatewayShellResponse | null {
     return null;
   }
   return value as GatewayShellResponse;
+}
+
+function parseNodeStatus(value: unknown): GatewayNodeStatus | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  if (
+    typeof value.status !== "string" ||
+    typeof value.version !== "string" ||
+    !isRecord(value.node) ||
+    !isRecord(value.gateway) ||
+    !isRecord(value.supervisor) ||
+    !isRecord(value.devcontainers)
+  ) {
+    return null;
+  }
+  return value as GatewayNodeStatus;
+}
+
+function parseWorkspaceEnsure(
+  value: unknown
+): GatewayNodeWorkspaceResponse | null {
+  if (!(isRecord(value) && isRecord(value.workspace))) {
+    return null;
+  }
+  if (
+    typeof value.workspace.projectId !== "string" ||
+    typeof value.workspace.projectName !== "string" ||
+    typeof value.workspace.projectRoot !== "string" ||
+    typeof value.workspace.projectDir !== "string"
+  ) {
+    return null;
+  }
+  return value as GatewayNodeWorkspaceResponse;
+}
+
+function parseNodeDevcontainer(
+  value: unknown
+): GatewayNodeDevcontainerResponse | null {
+  if (!(isRecord(value) && isRecord(value.session))) {
+    return null;
+  }
+  if (
+    typeof value.session.id !== "string" ||
+    !isRecord(value.session.workspace) ||
+    typeof value.session.output !== "string"
+  ) {
+    return null;
+  }
+  return value as GatewayNodeDevcontainerResponse;
 }

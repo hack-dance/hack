@@ -802,6 +802,8 @@ function mapExtensionFeature(id: string): string | null {
       return "tickets";
     case "dance.hack.cloudflare":
       return "cloudflare";
+    case "dance.hack.railway":
+      return "railway";
     case "dance.hack.tailscale":
       return "tailscale";
     default:

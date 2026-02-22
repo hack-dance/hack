@@ -610,6 +610,477 @@ public struct GatewayTokenRevokeResponse: Decodable {
   }
 }
 
+public enum NodeRegistryStatus: String, Decodable {
+  case healthy
+  case stale
+  case offline
+  case unknown
+}
+
+public struct NodeRegistryRecord: Decodable, Identifiable, Hashable {
+  public let id: String
+  public let name: String
+  public let labels: [String]
+  public let capabilities: [String]
+  public let endpoint: String
+  public let authRef: String
+  public let lastSeenAt: String?
+  public let status: NodeRegistryStatus?
+  public let version: String?
+  public let platform: String?
+  public let arch: String?
+  public let createdAt: String?
+  public let updatedAt: String?
+  public let isDefault: Bool?
+
+  public init(
+    id: String,
+    name: String,
+    labels: [String],
+    capabilities: [String],
+    endpoint: String,
+    authRef: String,
+    lastSeenAt: String?,
+    status: NodeRegistryStatus?,
+    version: String?,
+    platform: String?,
+    arch: String?,
+    createdAt: String?,
+    updatedAt: String?,
+    isDefault: Bool?
+  ) {
+    self.id = id
+    self.name = name
+    self.labels = labels
+    self.capabilities = capabilities
+    self.endpoint = endpoint
+    self.authRef = authRef
+    self.lastSeenAt = lastSeenAt
+    self.status = status
+    self.version = version
+    self.platform = platform
+    self.arch = arch
+    self.createdAt = createdAt
+    self.updatedAt = updatedAt
+    self.isDefault = isDefault
+  }
+}
+
+public struct NodeRegistryListResponse: Decodable {
+  public let defaultNodeId: String?
+  public let nodes: [NodeRegistryRecord]
+
+  public init(defaultNodeId: String?, nodes: [NodeRegistryRecord]) {
+    self.defaultNodeId = defaultNodeId
+    self.nodes = nodes
+  }
+}
+
+public struct NodeRuntimeGatewayProject: Decodable, Identifiable, Hashable {
+  public let projectId: String
+  public let projectName: String
+
+  public var id: String { projectId }
+
+  public init(projectId: String, projectName: String) {
+    self.projectId = projectId
+    self.projectName = projectName
+  }
+}
+
+public struct NodeRuntimeGateway: Decodable, Hashable {
+  public let enabled: Bool?
+  public let bind: String?
+  public let port: Int?
+  public let allowWrites: Bool?
+  public let projects: [NodeRuntimeGatewayProject]?
+
+  public init(
+    enabled: Bool?,
+    bind: String?,
+    port: Int?,
+    allowWrites: Bool?,
+    projects: [NodeRuntimeGatewayProject]?
+  ) {
+    self.enabled = enabled
+    self.bind = bind
+    self.port = port
+    self.allowWrites = allowWrites
+    self.projects = projects
+  }
+}
+
+public struct NodeRuntimeNodeInfo: Decodable, Hashable {
+  public let name: String?
+  public let platform: String?
+  public let arch: String?
+  public let bun: String?
+
+  public init(name: String?, platform: String?, arch: String?, bun: String?) {
+    self.name = name
+    self.platform = platform
+    self.arch = arch
+    self.bun = bun
+  }
+}
+
+public struct NodeRuntimeSupervisor: Decodable, Hashable {
+  public let enabled: Bool?
+  public let maxConcurrentJobs: Int?
+
+  public init(enabled: Bool?, maxConcurrentJobs: Int?) {
+    self.enabled = enabled
+    self.maxConcurrentJobs = maxConcurrentJobs
+  }
+}
+
+public struct NodeRuntimeDevcontainers: Decodable, Hashable {
+  public let running: Int?
+
+  public init(running: Int?) {
+    self.running = running
+  }
+}
+
+public struct NodeRuntimeStatusPayload: Decodable, Hashable {
+  public let status: String?
+  public let version: String?
+  public let pid: Int?
+  public let startedAt: String?
+  public let uptimeMs: Int?
+  public let node: NodeRuntimeNodeInfo?
+  public let gateway: NodeRuntimeGateway?
+  public let supervisor: NodeRuntimeSupervisor?
+  public let devcontainers: NodeRuntimeDevcontainers?
+
+  public init(
+    status: String?,
+    version: String?,
+    pid: Int?,
+    startedAt: String?,
+    uptimeMs: Int?,
+    node: NodeRuntimeNodeInfo?,
+    gateway: NodeRuntimeGateway?,
+    supervisor: NodeRuntimeSupervisor?,
+    devcontainers: NodeRuntimeDevcontainers?
+  ) {
+    self.status = status
+    self.version = version
+    self.pid = pid
+    self.startedAt = startedAt
+    self.uptimeMs = uptimeMs
+    self.node = node
+    self.gateway = gateway
+    self.supervisor = supervisor
+    self.devcontainers = devcontainers
+  }
+}
+
+public struct NodeStatusProbe: Decodable, Identifiable, Hashable {
+  public let ok: Bool
+  public let input: NodeRegistryRecord
+  public let status: NodeRegistryStatus?
+  public let node: NodeRegistryRecord?
+  public let payload: NodeRuntimeStatusPayload?
+  public let error: String?
+
+  public var id: String { input.id }
+
+  public init(
+    ok: Bool,
+    input: NodeRegistryRecord,
+    status: NodeRegistryStatus?,
+    node: NodeRegistryRecord?,
+    payload: NodeRuntimeStatusPayload?,
+    error: String?
+  ) {
+    self.ok = ok
+    self.input = input
+    self.status = status
+    self.node = node
+    self.payload = payload
+    self.error = error
+  }
+}
+
+public struct NodeStatusResponse: Decodable {
+  public let nodes: [NodeStatusProbe]
+
+  public init(nodes: [NodeStatusProbe]) {
+    self.nodes = nodes
+  }
+}
+
+public struct NodeUseResponse: Decodable {
+  public let defaultNodeId: String?
+
+  public init(defaultNodeId: String?) {
+    self.defaultNodeId = defaultNodeId
+  }
+}
+
+public struct NodeRemoveResponse: Decodable {
+  public let removed: Bool
+  public let nodeId: String
+
+  public init(removed: Bool, nodeId: String) {
+    self.removed = removed
+    self.nodeId = nodeId
+  }
+}
+
+public struct NodePairingSession: Decodable, Hashable {
+  public let id: String
+  public let source: String
+  public let endpoint: String
+  public let codeHash: String
+  public let createdAt: String
+  public let expiresAt: String
+  public let status: String
+  public let updatedAt: String
+  public let approvedAt: String?
+  public let consumedAt: String?
+
+  public init(
+    id: String,
+    source: String,
+    endpoint: String,
+    codeHash: String,
+    createdAt: String,
+    expiresAt: String,
+    status: String,
+    updatedAt: String,
+    approvedAt: String?,
+    consumedAt: String?
+  ) {
+    self.id = id
+    self.source = source
+    self.endpoint = endpoint
+    self.codeHash = codeHash
+    self.createdAt = createdAt
+    self.expiresAt = expiresAt
+    self.status = status
+    self.updatedAt = updatedAt
+    self.approvedAt = approvedAt
+    self.consumedAt = consumedAt
+  }
+}
+
+public struct NodePairCancelResponse: Decodable, Hashable {
+  public let cancelled: Bool
+  public let sessionId: String
+
+  public init(cancelled: Bool, sessionId: String) {
+    self.cancelled = cancelled
+    self.sessionId = sessionId
+  }
+}
+
+public struct NodePairListResponse: Decodable, Hashable {
+  public let sessions: [NodePairingSession]
+  public let status: String?
+
+  public init(sessions: [NodePairingSession], status: String?) {
+    self.sessions = sessions
+    self.status = status
+  }
+}
+
+public struct NodePairFulfillPairing: Decodable, Hashable {
+  public let sessionId: String
+  public let consumedAt: String?
+
+  public init(sessionId: String, consumedAt: String?) {
+    self.sessionId = sessionId
+    self.consumedAt = consumedAt
+  }
+}
+
+public struct NodePairFulfillProbe: Decodable, Hashable {
+  public let ok: Bool
+  public let status: NodeRegistryStatus?
+  public let error: String?
+
+  public init(ok: Bool, status: NodeRegistryStatus?, error: String?) {
+    self.ok = ok
+    self.status = status
+    self.error = error
+  }
+}
+
+public struct NodePairFulfillResponse: Decodable, Hashable {
+  public let node: NodeRegistryRecord
+  public let created: Bool
+  public let pairing: NodePairFulfillPairing
+  public let probe: NodePairFulfillProbe
+
+  public init(
+    node: NodeRegistryRecord,
+    created: Bool,
+    pairing: NodePairFulfillPairing,
+    probe: NodePairFulfillProbe
+  ) {
+    self.node = node
+    self.created = created
+    self.pairing = pairing
+    self.probe = probe
+  }
+}
+
+public struct RailwayInspectResponse: Decodable, Hashable {
+  public let installed: Bool
+  public let binaryPath: String?
+  public let version: String?
+  public let authenticated: Bool
+  public let whoami: String?
+  public let error: String?
+
+  public init(
+    installed: Bool,
+    binaryPath: String?,
+    version: String?,
+    authenticated: Bool,
+    whoami: String?,
+    error: String?
+  ) {
+    self.installed = installed
+    self.binaryPath = binaryPath
+    self.version = version
+    self.authenticated = authenticated
+    self.whoami = whoami
+    self.error = error
+  }
+}
+
+public struct RailwayBootstrapRequest: Hashable {
+  public let railwayProject: String
+  public let railwayService: String?
+  public let railwayEnvironment: String?
+  public let railwayWorkspace: String?
+  public let createService: Bool
+  public let railwayImage: String?
+  public let railwayBin: String?
+  public let nodeName: String?
+  public let endpoint: String?
+  public let labels: [String]
+  public let defaultNode: Bool
+  public let domainPort: Int?
+  public let initRetries: Int?
+  public let privateNetworking: Bool
+  public let tailscaleAuthKey: String?
+  public let tailscaleHostname: String?
+  public let tailscaleTags: [String]
+
+  public init(
+    railwayProject: String,
+    railwayService: String?,
+    railwayEnvironment: String?,
+    railwayWorkspace: String?,
+    createService: Bool,
+    railwayImage: String?,
+    railwayBin: String?,
+    nodeName: String?,
+    endpoint: String?,
+    labels: [String],
+    defaultNode: Bool,
+    domainPort: Int?,
+    initRetries: Int?,
+    privateNetworking: Bool,
+    tailscaleAuthKey: String?,
+    tailscaleHostname: String?,
+    tailscaleTags: [String]
+  ) {
+    self.railwayProject = railwayProject
+    self.railwayService = railwayService
+    self.railwayEnvironment = railwayEnvironment
+    self.railwayWorkspace = railwayWorkspace
+    self.createService = createService
+    self.railwayImage = railwayImage
+    self.railwayBin = railwayBin
+    self.nodeName = nodeName
+    self.endpoint = endpoint
+    self.labels = labels
+    self.defaultNode = defaultNode
+    self.domainPort = domainPort
+    self.initRetries = initRetries
+    self.privateNetworking = privateNetworking
+    self.tailscaleAuthKey = tailscaleAuthKey
+    self.tailscaleHostname = tailscaleHostname
+    self.tailscaleTags = tailscaleTags
+  }
+}
+
+public struct RailwayBootstrapProviderMetadata: Decodable, Hashable {
+  public let project: String?
+  public let service: String?
+  public let environment: String?
+  public let network: String?
+  public let tailscaleAuth: String?
+  public let workspace: String?
+  public let createService: Bool?
+  public let domainPort: Int?
+  public let initAttempts: Int?
+
+  public init(
+    project: String?,
+    service: String?,
+    environment: String?,
+    network: String?,
+    tailscaleAuth: String?,
+    workspace: String?,
+    createService: Bool?,
+    domainPort: Int?,
+    initAttempts: Int?
+  ) {
+    self.project = project
+    self.service = service
+    self.environment = environment
+    self.network = network
+    self.tailscaleAuth = tailscaleAuth
+    self.workspace = workspace
+    self.createService = createService
+    self.domainPort = domainPort
+    self.initAttempts = initAttempts
+  }
+}
+
+public struct RailwayBootstrapProbe: Decodable, Hashable {
+  public let ok: Bool
+  public let status: NodeRegistryStatus?
+  public let error: String?
+
+  public init(ok: Bool, status: NodeRegistryStatus?, error: String?) {
+    self.ok = ok
+    self.status = status
+    self.error = error
+  }
+}
+
+public struct RailwayBootstrapResponse: Decodable, Hashable {
+  public let provider: String
+  public let railway: RailwayBootstrapProviderMetadata
+  public let node: NodeRegistryRecord
+  public let endpoint: String
+  public let created: Bool
+  public let probe: RailwayBootstrapProbe
+
+  public init(
+    provider: String,
+    railway: RailwayBootstrapProviderMetadata,
+    node: NodeRegistryRecord,
+    endpoint: String,
+    created: Bool,
+    probe: RailwayBootstrapProbe
+  ) {
+    self.provider = provider
+    self.railway = railway
+    self.node = node
+    self.endpoint = endpoint
+    self.created = created
+    self.probe = probe
+  }
+}
+
 public struct TailscaleInspectResponse: Decodable {
   public let installed: Bool
   public let binaryPath: String?
@@ -742,6 +1213,65 @@ public struct TailscaleInspectPeer: Decodable, Hashable, Identifiable {
     self.tags = tags
     self.isExitNode = isExitNode
     self.isExitNodeOption = isExitNodeOption
+  }
+}
+
+public struct TailscaleOAuthStatusResponse: Decodable, Hashable {
+  public let configured: Bool
+  public let clientId: String?
+  public let authRef: String?
+  public let tailnet: String?
+  public let keyExpirySeconds: Int?
+  public let validated: Bool?
+  public let checkedAt: String?
+  public let tokenExpiresAt: String?
+  public let deleted: Bool?
+  public let error: String?
+
+  public init(
+    configured: Bool,
+    clientId: String?,
+    authRef: String?,
+    tailnet: String?,
+    keyExpirySeconds: Int?,
+    validated: Bool?,
+    checkedAt: String?,
+    tokenExpiresAt: String?,
+    deleted: Bool?,
+    error: String?
+  ) {
+    self.configured = configured
+    self.clientId = clientId
+    self.authRef = authRef
+    self.tailnet = tailnet
+    self.keyExpirySeconds = keyExpirySeconds
+    self.validated = validated
+    self.checkedAt = checkedAt
+    self.tokenExpiresAt = tokenExpiresAt
+    self.deleted = deleted
+    self.error = error
+  }
+}
+
+public struct TailscaleOAuthConnectRequest: Hashable {
+  public let clientId: String
+  public let clientSecret: String
+  public let authRef: String?
+  public let tailnet: String?
+  public let keyExpirySeconds: Int?
+
+  public init(
+    clientId: String,
+    clientSecret: String,
+    authRef: String?,
+    tailnet: String?,
+    keyExpirySeconds: Int?
+  ) {
+    self.clientId = clientId
+    self.clientSecret = clientSecret
+    self.authRef = authRef
+    self.tailnet = tailnet
+    self.keyExpirySeconds = keyExpirySeconds
   }
 }
 

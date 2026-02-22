@@ -8,6 +8,7 @@ import HackDesktopModels
 enum SettingsSidebarItem: String, Hashable, Identifiable {
   case preferences
   case updates
+  case topology
   case runtime
   case gateway
   case global
@@ -15,6 +16,7 @@ enum SettingsSidebarItem: String, Hashable, Identifiable {
   case permissions
   case extensions
   case cloudflare
+  case railway
   case tailscale
   case certificates
   case logging
@@ -27,6 +29,8 @@ enum SettingsSidebarItem: String, Hashable, Identifiable {
       return "Preferences"
     case .updates:
       return "Updates"
+    case .topology:
+      return "Topology"
     case .runtime:
       return "Runtime"
     case .gateway:
@@ -41,6 +45,8 @@ enum SettingsSidebarItem: String, Hashable, Identifiable {
       return "Extensions"
     case .cloudflare:
       return "Cloudflare"
+    case .railway:
+      return "Railway"
     case .tailscale:
       return "Tailscale"
     case .certificates:
@@ -56,6 +62,8 @@ enum SettingsSidebarItem: String, Hashable, Identifiable {
       return "slider.horizontal.3"
     case .updates:
       return "arrow.triangle.2.circlepath"
+    case .topology:
+      return "point.3.connected.trianglepath.dotted"
     case .runtime:
       return "gauge.with.dots.needle.50percent"
     case .gateway:
@@ -70,6 +78,8 @@ enum SettingsSidebarItem: String, Hashable, Identifiable {
       return "puzzlepiece.extension"
     case .cloudflare:
       return "cloud"
+    case .railway:
+      return "tram.fill.tunnel"
     case .tailscale:
       return "network"
     case .certificates:
@@ -163,6 +173,7 @@ struct SettingsOverlayView: View {
         settingsRow(.updates)
       }
       Section("System") {
+        settingsRow(.topology)
         settingsRow(.runtime)
         settingsRow(.gateway)
       }
@@ -176,6 +187,7 @@ struct SettingsOverlayView: View {
       Section("Extensions") {
         settingsRow(.extensions)
         settingsRow(.cloudflare)
+        settingsRow(.railway)
         settingsRow(.tailscale)
       }
     }
@@ -200,6 +212,8 @@ struct SettingsOverlayView: View {
         PreferencesSettingsView()
       case .updates:
         UpdatesSettingsView()
+      case .topology:
+        NodeTopologySettingsView()
       case .runtime:
         RuntimeDetailView()
       case .gateway:
@@ -214,6 +228,8 @@ struct SettingsOverlayView: View {
         ExtensionsSettingsView(selection: $selection)
       case .cloudflare:
         CloudflareExtensionSettingsView()
+      case .railway:
+        RailwayExtensionSettingsView()
       case .tailscale:
         TailscaleExtensionSettingsView()
       case .certificates:
@@ -369,7 +385,7 @@ private struct UpdatesSettingsView: View {
   }
 }
 
-private struct SettingsSectionHeader: View {
+struct SettingsSectionHeader: View {
   let breadcrumb: String
   let title: String
   let subtitle: String
@@ -937,7 +953,7 @@ private struct GlobalSettingsView: View {
         InlineCallout(
           tone: .neutral,
           title: "Extension settings moved",
-          message: "Cloudflare, Tailscale, and Supervisor settings now live on their dedicated pages so each extension has focused setup and diagnostics.",
+          message: "Cloudflare, Railway, and Tailscale settings now live on dedicated pages so each integration has focused setup and diagnostics.",
           actions: []
         )
         quickActionsCard
@@ -1590,20 +1606,1054 @@ private struct CloudflareExtensionSettingsView: View {
   }
 }
 
+/// Railway provider diagnostics and bootstrap workflow for remote node onboarding.
+private struct RailwayExtensionSettingsView: View {
+  @Environment(DashboardModel.self) private var model
+  @State private var isLoadingConfig = false
+  @State private var isSavingConfig = false
+  @State private var isBootstrapping = false
+  @State private var isLoadingDiagnostics = false
+  @State private var suppressEnabledToggleChange = false
+  @State private var showAdvancedOptions = false
+  @State private var enabled = false
+  @State private var tailscaleExtensionEnabled = false
+  @State private var diagnostics: RailwayInspectResponse? = nil
+  @State private var tailscaleDiagnostics: TailscaleInspectResponse? = nil
+  @State private var lastDiagnosticsRefreshAt: Date? = nil
+  @State private var bootstrapResult: RailwayBootstrapResponse? = nil
+  @State private var railwayProject = ""
+  @State private var railwayService = ""
+  @State private var railwayEnvironment = "production"
+  @State private var railwayWorkspace = ""
+  @State private var nodeName = ""
+  @State private var labelsCsv = "railway,linux,container"
+  @State private var endpoint = ""
+  @State private var createService = true
+  @State private var railwayImage = "hackdance/hack:latest"
+  @State private var railwayPrivate = true
+  @State private var defaultNode = false
+  @State private var privateAuthSourceLabel = "Missing auth source"
+  @State private var privateBootstrapReady = false
+  @State private var tailscaleHostname = ""
+  @State private var tailscaleTagsCsv = ""
+
+  var body: some View {
+    ScrollView {
+      LazyVStack(alignment: .leading, spacing: 20) {
+        SettingsSectionHeader(
+          breadcrumb: "Settings / Extensions / Railway",
+          title: "Railway Provider",
+          subtitle: "Bootstrap remote nodes with minimal input; advanced options stay optional"
+        )
+
+        GlassCard(title: "Provider status", systemImage: "tram.fill.tunnel") {
+          HStack(alignment: .center, spacing: 8) {
+            StatusPill(text: enabled ? "Enabled" : "Disabled", tone: enabled ? .good : .neutral)
+            StatusPill(
+              text: railwayInstalled ? "Railway CLI installed" : "Railway CLI missing",
+              tone: railwayInstalled ? .good : .warn
+            )
+            StatusPill(
+              text: railwayAuthenticated ? "CLI authenticated" : "CLI not authenticated",
+              tone: railwayAuthenticated ? .good : .warn
+            )
+            if railwayPrivate {
+              StatusPill(
+                text: tailscaleExtensionEnabled ? "Tailscale extension enabled" : "Tailscale extension disabled",
+                tone: tailscaleExtensionEnabled ? .good : .warn
+              )
+              StatusPill(
+                text: tailscaleControllerReady ? "Controller tailscale ready" : "Controller tailscale not ready",
+                tone: tailscaleControllerReady ? .good : .warn
+              )
+              StatusPill(
+                text: privateCredentialSourceLabel,
+                tone: privateBootstrapReady ? .good : .warn
+              )
+            } else {
+              StatusPill(text: "Public endpoint mode", tone: .neutral)
+            }
+            Spacer()
+            Toggle("Enabled", isOn: $enabled)
+              .labelsHidden()
+              .toggleStyle(.switch)
+              .onChange(of: enabled) { _, newValue in
+                guard !suppressEnabledToggleChange else { return }
+                Task { await applyRailwayEnabledToggle(newValue) }
+              }
+            if isLoadingConfig || isLoadingDiagnostics || isSavingConfig || isBootstrapping {
+              ProgressView()
+                .controlSize(.small)
+            }
+          }
+
+          Text("railway path: \(railwayPathLabel)")
+            .font(.mono(.caption2))
+            .foregroundStyle(railwayInstalled ? .secondary : Color.orange)
+            .textSelection(.enabled)
+          if let version = diagnostics?.version, !version.isEmpty {
+            Text("version: \(version)")
+              .font(.mono(.caption2))
+              .foregroundStyle(.secondary)
+          }
+          if let whoami = diagnostics?.whoami, !whoami.isEmpty {
+            Text("whoami: \(whoami)")
+              .font(.mono(.caption))
+              .foregroundStyle(.secondary)
+          }
+          if let lastDiagnosticsRefreshAt {
+            Text("Last checked \(lastDiagnosticsRefreshAt.formatted(date: .abbreviated, time: .shortened))")
+              .font(.mono(.caption2))
+              .foregroundStyle(.tertiary)
+          }
+          if let error = diagnostics?.error, !error.isEmpty {
+            Text(error)
+              .font(.mono(.caption))
+              .foregroundStyle(Color.orange)
+          }
+
+          HStack(spacing: 10) {
+            Button {
+              Task { await refreshRailwayDiagnostics() }
+            } label: {
+              Label("Refresh status", systemImage: "arrow.clockwise")
+            }
+            .adaptiveToolbarButtonProminent()
+
+            Button {
+              openTailscaleSettings()
+            } label: {
+              Label("Open Tailscale", systemImage: "network")
+            }
+            .adaptiveToolbarButton()
+
+            Button {
+              openGlobalCommandInTerminalPanel(
+                command: "railway whoami",
+                title: "railway whoami"
+              )
+            } label: {
+              Label("Open whoami", systemImage: "person.crop.circle")
+            }
+            .adaptiveToolbarButton()
+            .disabled(!railwayInstalled)
+
+            Button {
+              openGlobalCommandInTerminalPanel(
+                command: "railway login",
+                title: "railway login"
+              )
+            } label: {
+              Label("Run login", systemImage: "person.badge.key")
+            }
+            .adaptiveToolbarButton()
+            .disabled(!railwayInstalled)
+
+            Spacer()
+          }
+        }
+
+        GlassCard(title: "Bootstrap configuration", systemImage: "gearshape.2") {
+          VStack(alignment: .leading, spacing: 12) {
+            Text("Project is required. Service is optional and can be auto-created from node name.")
+            .font(.mono(.caption))
+            .foregroundStyle(.secondary)
+
+            TextField("Railway project (required)", text: $railwayProject)
+              .textFieldStyle(.roundedBorder)
+
+            HStack(spacing: 10) {
+              TextField("Node display name", text: $nodeName)
+                .textFieldStyle(.roundedBorder)
+            }
+
+            Text(serviceModeSummary)
+              .font(.mono(.caption2))
+              .foregroundStyle(.secondary)
+
+            HStack(spacing: 10) {
+              Toggle("Private tailscale mode", isOn: $railwayPrivate)
+                .font(.mono(.caption))
+              Toggle("Set as default after bootstrap", isOn: $defaultNode)
+                .font(.mono(.caption))
+              Spacer()
+            }
+
+            if railwayPrivate {
+              Text("Private mode uses embedded tailscale on the remote node and reads auth from Tailscale settings.")
+                .font(.mono(.caption2))
+                .foregroundStyle(.secondary)
+
+              if !privateBootstrapReady {
+                Text("Private mode needs a TS auth key. Set it in Tailscale settings or pass --tailscale-auth-key.")
+                  .font(.mono(.caption2))
+                  .foregroundStyle(Color.orange)
+              }
+            }
+
+            HStack(spacing: 10) {
+              Button {
+                Task { await saveRailwayDefaults() }
+              } label: {
+                Label("Save defaults", systemImage: "square.and.arrow.down")
+              }
+              .adaptiveToolbarButtonProminent()
+              .disabled(isSavingConfig || isBootstrapping)
+
+              Button {
+                Task { await bootstrapRailwayNode() }
+              } label: {
+                Label("Bootstrap node now", systemImage: "play.fill")
+              }
+              .adaptiveToolbarButton()
+              .disabled(!canBootstrapRailwayNode || isBootstrapping)
+
+              Button {
+                openGlobalCommandInTerminalPanel(
+                  command: "hack node provider railway bootstrap --help",
+                  title: "hack railway bootstrap help"
+                )
+              } label: {
+                Label("Open CLI help", systemImage: "questionmark.circle")
+              }
+              .adaptiveToolbarButton()
+
+              Button {
+                openTopologySettings()
+              } label: {
+                Label("Open topology", systemImage: "point.3.connected.trianglepath.dotted")
+              }
+              .adaptiveToolbarButton()
+
+              Spacer()
+            }
+
+            DisclosureGroup("Advanced options", isExpanded: $showAdvancedOptions) {
+              VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                  TextField("Existing service (optional)", text: $railwayService)
+                    .textFieldStyle(.roundedBorder)
+                  TextField("Environment", text: $railwayEnvironment)
+                    .textFieldStyle(.roundedBorder)
+                  TextField("Workspace", text: $railwayWorkspace)
+                    .textFieldStyle(.roundedBorder)
+                  TextField("Labels (comma-separated)", text: $labelsCsv)
+                    .textFieldStyle(.roundedBorder)
+                }
+
+                HStack(spacing: 10) {
+                  Toggle("Auto-create service when missing", isOn: $createService)
+                    .font(.mono(.caption))
+                  TextField("Endpoint override", text: $endpoint)
+                    .textFieldStyle(.roundedBorder)
+                  TextField("Runtime image", text: $railwayImage)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(!effectiveCreateService)
+                }
+
+                if railwayPrivate {
+                  Divider()
+                    .opacity(0.2)
+                  Text("Tailscale runtime overrides")
+                    .font(.mono(.caption2))
+                    .foregroundStyle(.secondary)
+
+                  HStack(spacing: 10) {
+                    TextField("Tailscale tags", text: $tailscaleTagsCsv)
+                      .textFieldStyle(.roundedBorder)
+                    TextField("Hostname override", text: $tailscaleHostname)
+                      .textFieldStyle(.roundedBorder)
+                  }
+
+                  Text("Auth key is managed in Settings → Extensions → Tailscale. CLI one-offs can still pass --tailscale-auth-key.")
+                    .font(.mono(.caption2))
+                    .foregroundStyle(.tertiary)
+                }
+              }
+              .padding(.top, 8)
+            }
+          }
+        }
+
+        if let bootstrapResult {
+          GlassCard(title: "Latest bootstrap result", systemImage: "checkmark.seal") {
+            HStack(alignment: .center, spacing: 8) {
+              StatusPill(
+                text: bootstrapResult.created ? "Node registered" : "Node updated",
+                tone: .good
+              )
+              StatusPill(
+                text: bootstrapResult.probe.ok ? "Probe healthy" : "Probe failed",
+                tone: bootstrapResult.probe.ok ? .good : .warn
+              )
+              if let network = bootstrapResult.railway.network, !network.isEmpty {
+                StatusPill(text: network, tone: .neutral)
+              }
+              Spacer()
+            }
+            Text("Node: \(bootstrapResult.node.name) (\(bootstrapResult.node.id))")
+              .font(.mono(.caption))
+              .foregroundStyle(.secondary)
+              .textSelection(.enabled)
+            Text("Endpoint: \(bootstrapResult.endpoint)")
+              .font(.mono(.caption))
+              .foregroundStyle(.secondary)
+              .textSelection(.enabled)
+            if let error = bootstrapResult.probe.error, !error.isEmpty {
+              Text(error)
+                .font(.mono(.caption2))
+                .foregroundStyle(Color.orange)
+            }
+          }
+        }
+      }
+      .padding(16)
+    }
+    .task {
+      await loadRailwayConfigFromDisk()
+    }
+  }
+
+  private var railwayPath: String? {
+    diagnostics?.binaryPath ?? resolveExecutablePath(candidates: ["railway"])
+  }
+
+  private var railwayPathLabel: String {
+    railwayPath ?? "Not found in PATH"
+  }
+
+  private var railwayInstalled: Bool {
+    diagnostics?.installed ?? (railwayPath != nil)
+  }
+
+  private var railwayAuthenticated: Bool {
+    diagnostics?.authenticated == true
+  }
+
+  private var tailscaleControllerReady: Bool {
+    tailscaleDiagnostics?.installed == true && tailscaleDiagnostics?.connected == true
+  }
+
+  private var effectiveCreateService: Bool {
+    createService || normalizedOrNil(railwayService) == nil
+  }
+
+  private var serviceModeSummary: String {
+    if let service = normalizedOrNil(railwayService), !effectiveCreateService {
+      return "Service mode: use existing service '\(service)'."
+    }
+    if let service = normalizedOrNil(railwayService), effectiveCreateService {
+      return "Service mode: ensure service '\(service)' exists (create if needed)."
+    }
+    return "Service mode: auto-create service name from node name."
+  }
+
+  private var privateCredentialSourceLabel: String {
+    privateAuthSourceLabel
+  }
+
+  private var canBootstrapRailwayNode: Bool {
+    if railwayProject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      return false
+    }
+    if railwayPrivate, !privateBootstrapReady {
+      return false
+    }
+    return true
+  }
+
+  private func loadRailwayConfigFromDisk() async {
+    isLoadingConfig = true
+    defer { isLoadingConfig = false }
+
+    let snapshot = GlobalConfigSnapshot.load()
+    suppressEnabledToggleChange = true
+    enabled = snapshot.railwayExtensionEnabled ?? false
+    suppressEnabledToggleChange = false
+    tailscaleExtensionEnabled = snapshot.tailscaleExtensionEnabled ?? false
+    railwayProject = snapshot.railwayProject ?? ""
+    railwayService = snapshot.railwayService ?? ""
+    railwayEnvironment = snapshot.railwayEnvironment ?? "production"
+    railwayWorkspace = snapshot.railwayWorkspace ?? ""
+    nodeName = snapshot.railwayNodeName ?? ""
+    labelsCsv = snapshot.railwayLabelsCsv ?? "railway,linux,container"
+    endpoint = snapshot.railwayEndpoint ?? ""
+    createService = snapshot.railwayCreateService ?? true
+    railwayImage = snapshot.railwayImage ?? "hackdance/hack:latest"
+    railwayPrivate = snapshot.railwayPrivate ?? true
+    tailscaleTagsCsv = snapshot.railwayTailscaleTagsCsv ?? ""
+    applyPrivateAuthState(snapshot: snapshot)
+    await refreshRailwayDiagnostics()
+  }
+
+  private func refreshRailwayDiagnostics() async {
+    isLoadingDiagnostics = true
+    defer { isLoadingDiagnostics = false }
+    async let railwayStatus = model.inspectRailway()
+    async let tailscaleStatus = model.inspectTailscale()
+    diagnostics = await railwayStatus
+    tailscaleDiagnostics = await tailscaleStatus
+    lastDiagnosticsRefreshAt = Date()
+  }
+
+  private func applyRailwayEnabledToggle(_ isEnabled: Bool) async {
+    isSavingConfig = true
+    defer { isSavingConfig = false }
+
+    let didUpdate = await model.setGlobalConfig(
+      key: "controlPlane.extensions[\"dance.hack.railway\"].enabled",
+      value: isEnabled ? "true" : "false"
+    )
+    guard didUpdate else {
+      await loadRailwayConfigFromDisk()
+      return
+    }
+    await loadRailwayConfigFromDisk()
+  }
+
+  private func saveRailwayDefaults() async {
+    isSavingConfig = true
+    defer { isSavingConfig = false }
+
+    let writes: [(String, String)] = [
+      ("controlPlane.extensions[\"dance.hack.railway\"].enabled", enabled ? "true" : "false"),
+      ("controlPlane.extensions[\"dance.hack.railway\"].config.project", railwayProject),
+      ("controlPlane.extensions[\"dance.hack.railway\"].config.service", railwayService),
+      ("controlPlane.extensions[\"dance.hack.railway\"].config.environment", railwayEnvironment),
+      ("controlPlane.extensions[\"dance.hack.railway\"].config.workspace", railwayWorkspace),
+      ("controlPlane.extensions[\"dance.hack.railway\"].config.nodeName", nodeName),
+      ("controlPlane.extensions[\"dance.hack.railway\"].config.labelsCsv", labelsCsv),
+      ("controlPlane.extensions[\"dance.hack.railway\"].config.endpoint", endpoint),
+      ("controlPlane.extensions[\"dance.hack.railway\"].config.createService", createService ? "true" : "false"),
+      ("controlPlane.extensions[\"dance.hack.railway\"].config.image", railwayImage),
+      ("controlPlane.extensions[\"dance.hack.railway\"].config.private", railwayPrivate ? "true" : "false"),
+      ("controlPlane.extensions[\"dance.hack.railway\"].config.tailscaleTagsCsv", tailscaleTagsCsv),
+    ]
+
+    for (key, value) in writes {
+      _ = await model.setGlobalConfig(key: key, value: value)
+    }
+
+    await loadRailwayConfigFromDisk()
+  }
+
+  /// Executes non-interactive Railway bootstrap and records the latest run output in-view.
+  private func bootstrapRailwayNode() async {
+    guard canBootstrapRailwayNode else {
+      return
+    }
+    isBootstrapping = true
+    defer { isBootstrapping = false }
+
+    let request = RailwayBootstrapRequest(
+      railwayProject: railwayProject.trimmingCharacters(in: .whitespacesAndNewlines),
+      railwayService: normalizedOrNil(railwayService),
+      railwayEnvironment: normalizedOrNil(railwayEnvironment),
+      railwayWorkspace: normalizedOrNil(railwayWorkspace),
+      createService: effectiveCreateService,
+      railwayImage: normalizedOrNil(railwayImage),
+      railwayBin: nil,
+      nodeName: normalizedOrNil(nodeName),
+      endpoint: normalizedOrNil(endpoint),
+      labels: parseCSV(labelsCsv),
+      defaultNode: defaultNode,
+      domainPort: nil,
+      initRetries: nil,
+      privateNetworking: railwayPrivate,
+      tailscaleAuthKey: nil,
+      tailscaleHostname: normalizedOrNil(tailscaleHostname),
+      tailscaleTags: parseCSV(tailscaleTagsCsv)
+    )
+    bootstrapResult = await model.bootstrapRailwayNode(request: request)
+    await refreshRailwayDiagnostics()
+  }
+
+  private func normalizedOrNil(_ value: String) -> String? {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
+  }
+
+  private func parseCSV(_ value: String) -> [String] {
+    value
+      .split(separator: ",")
+      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .filter { !$0.isEmpty }
+  }
+
+  /**
+   Derives private bootstrap auth readiness from shared config with compatibility fallback.
+   */
+  private func applyPrivateAuthState(snapshot: GlobalConfigSnapshot) {
+    let tailscaleConfigAuth = normalizedOrNil(snapshot.tailscaleAuthKey ?? "")
+    let railwayCompatAuth = normalizedOrNil(snapshot.railwayTailscaleAuthKey ?? "")
+    let envAuth = normalizedOrNil(
+      ProcessInfo.processInfo.environment["HACK_TAILSCALE_AUTH_KEY"] ?? ""
+    )
+    if tailscaleConfigAuth != nil {
+      privateBootstrapReady = true
+      privateAuthSourceLabel = "Auth key configured"
+      return
+    }
+    if railwayCompatAuth != nil {
+      privateBootstrapReady = true
+      privateAuthSourceLabel = "Auth key configured (compat)"
+      return
+    }
+    if envAuth != nil {
+      privateBootstrapReady = true
+      privateAuthSourceLabel = "Auth key from env"
+      return
+    }
+    privateBootstrapReady = false
+    privateAuthSourceLabel = "Missing auth source"
+  }
+
+  private func openTailscaleSettings() {
+    NotificationCenter.default.post(
+      name: .hackSettingsRequested,
+      object: nil,
+      userInfo: [SettingsNavigationRequest.paneKey: SettingsSidebarItem.tailscale.rawValue]
+    )
+  }
+
+  private func openTopologySettings() {
+    NotificationCenter.default.post(
+      name: .hackSettingsRequested,
+      object: nil,
+      userInfo: [SettingsNavigationRequest.paneKey: SettingsSidebarItem.topology.rawValue]
+    )
+  }
+}
+
+private struct TailscaleOAuthCredentialControl: View {
+  enum Mode: Equatable {
+    case compact
+    case standard
+  }
+
+  private static let oauthCredentialsURL = "https://login.tailscale.com/admin/settings/oauth"
+  private static let oauthDocsURL = "https://tailscale.com/kb/1215/oauth-clients"
+  private static let defaultAuthRef = "tailscale.oauth.default"
+  private static let defaultTailnet = "-"
+  private static let defaultKeyExpirySeconds = 3600
+  private static let clipboardPollTimeoutSeconds: TimeInterval = 120
+  private static let clipboardPollIntervalNanoseconds: UInt64 = 750_000_000
+
+  @Environment(DashboardModel.self) private var model
+  let mode: Mode
+  let onStatusChanged: ((TailscaleOAuthStatusResponse?) -> Void)?
+
+  @State private var status: TailscaleOAuthStatusResponse? = nil
+  @State private var isLoadingStatus = false
+  @State private var isAuthenticating = false
+  @State private var isDisconnecting = false
+  @State private var authMessage = ""
+  @State private var authMessageTone: StatusTone = .neutral
+  @State private var authPollingTask: Task<Void, Never>? = nil
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      HStack(alignment: .center, spacing: 8) {
+        StatusPill(text: oauthStatusLabel, tone: oauthStatusTone)
+        if let tokenExpires = tokenExpiresLabel {
+          StatusPill(text: "token expires \(tokenExpires)", tone: .neutral)
+        }
+        Spacer()
+        if isLoadingStatus || isAuthenticating || isDisconnecting {
+          ProgressView()
+            .controlSize(.small)
+        }
+
+        if mode == .standard {
+          Button {
+            Task { await refreshStatus(validate: true) }
+          } label: {
+            Label("Validate", systemImage: "checkmark.shield")
+          }
+          .adaptiveToolbarButton()
+          .disabled(isLoadingStatus || isAuthenticating || isDisconnecting)
+        }
+
+        Button {
+          toggleAuthenticationFlow()
+        } label: {
+          Label(
+            isAuthenticating
+              ? "Cancel auth"
+              : (status?.configured == true ? "Renew in browser" : "Authenticate in browser"),
+            systemImage: isAuthenticating ? "xmark.circle" : "safari"
+          )
+        }
+        .adaptiveToolbarButtonProminent()
+        .disabled(isLoadingStatus || isDisconnecting)
+
+        if mode == .standard {
+          Button {
+            openOAuthCredentialsPage()
+          } label: {
+            Label("Open OAuth page", systemImage: "link")
+          }
+          .adaptiveToolbarButton()
+          .disabled(isAuthenticating || isDisconnecting)
+        }
+
+        if status?.configured == true {
+          Button(role: .destructive) {
+            Task { await disconnect() }
+          } label: {
+            Label("Disconnect", systemImage: "trash")
+          }
+          .adaptiveToolbarButton()
+          .disabled(isLoadingStatus || isAuthenticating || isDisconnecting)
+        }
+      }
+
+      Text(
+        "Authentication opens Tailscale in your browser. After creating an OAuth client, click copy in Tailscale and this control imports credentials from clipboard automatically."
+      )
+      .font(.mono(.caption2))
+      .foregroundStyle(.secondary)
+
+      if !authMessage.isEmpty {
+        Text(authMessage)
+          .font(.mono(.caption2))
+          .foregroundStyle(colorForStatusTone(authMessageTone))
+      }
+
+      if let checkedAt = checkedAtLabel {
+        Text("Last checked \(checkedAt)")
+          .font(.mono(.caption2))
+          .foregroundStyle(.secondary)
+      }
+      if let authRef = status?.authRef, !authRef.isEmpty {
+        Text("Auth ref: \(authRef)")
+          .font(.mono(.caption2))
+          .foregroundStyle(.tertiary)
+          .textSelection(.enabled)
+      }
+      if let error = status?.error, !error.isEmpty {
+        Text(error)
+          .font(.mono(.caption2))
+          .foregroundStyle(Color.orange)
+      }
+
+      if mode == .standard {
+        Button {
+          openOAuthDocsPage()
+        } label: {
+          Label("Open OAuth docs", systemImage: "book")
+        }
+        .adaptiveToolbarButton()
+        .disabled(isAuthenticating)
+      }
+    }
+    .task {
+      await refreshStatus(validate: false)
+    }
+    .onDisappear {
+      cancelAuthenticationFlow(userInitiated: false)
+    }
+  }
+
+  private var oauthStatusLabel: String {
+    guard let status else {
+      return "Checking OAuth state"
+    }
+    if status.configured {
+      if status.validated == false {
+        return "OAuth configured (validation failed)"
+      }
+      if status.validated == true {
+        return "Tailscale authenticated"
+      }
+      return "OAuth configured"
+    }
+    return "OAuth not configured"
+  }
+
+  private var oauthStatusTone: StatusTone {
+    guard let status else {
+      return .neutral
+    }
+    if status.configured {
+      return status.validated == false ? .warn : .good
+    }
+    return .warn
+  }
+
+  private var checkedAtLabel: String? {
+    formatTimestamp(status?.checkedAt)
+  }
+
+  private var tokenExpiresLabel: String? {
+    formatTimestamp(status?.tokenExpiresAt)
+  }
+
+  private func toggleAuthenticationFlow() {
+    if isAuthenticating {
+      cancelAuthenticationFlow(userInitiated: true)
+      return
+    }
+    authPollingTask = Task {
+      await authenticateViaBrowserFlow()
+    }
+  }
+
+  private func cancelAuthenticationFlow(userInitiated: Bool) {
+    authPollingTask?.cancel()
+    authPollingTask = nil
+    if userInitiated {
+      authMessage = "Authentication canceled."
+      authMessageTone = .neutral
+    }
+    isAuthenticating = false
+  }
+
+  private func refreshStatus(validate: Bool) async {
+    isLoadingStatus = true
+    defer { isLoadingStatus = false }
+    let latest = await model.inspectTailscaleOAuthStatus(validate: validate)
+    status = latest
+    onStatusChanged?(latest)
+  }
+
+  /// Browser-first OAuth setup:
+  /// 1) opens Tailscale credentials page
+  /// 2) waits for copied credentials on clipboard
+  /// 3) stores credentials through hack CLI keychain flow
+  private func authenticateViaBrowserFlow() async {
+    defer {
+      authPollingTask = nil
+      isAuthenticating = false
+    }
+
+    if let existingError = status?.error, existingError.contains("does not support tailscale OAuth") {
+      authMessage = existingError
+      authMessageTone = .warn
+      return
+    }
+
+    isAuthenticating = true
+
+    authMessage = "Opened Tailscale OAuth page. Create a credential and click copy in the browser."
+    authMessageTone = .neutral
+    let baselineClipboard = NSPasteboard.general.string(forType: .string)
+    openOAuthCredentialsPage()
+
+    guard let credentials = await waitForClipboardCredentials(previousClipboard: baselineClipboard)
+    else {
+      if Task.isCancelled {
+        return
+      }
+      authMessage =
+        "Could not detect OAuth credentials on clipboard. Copy client id + secret from Tailscale, then authenticate again."
+      authMessageTone = .warn
+      return
+    }
+
+    let request = TailscaleOAuthConnectRequest(
+      clientId: credentials.clientId,
+      clientSecret: credentials.clientSecret,
+      authRef: resolvedAuthRef,
+      tailnet: resolvedTailnet,
+      keyExpirySeconds: resolvedKeyExpirySeconds
+    )
+    let response = await model.connectTailscaleOAuth(request: request)
+    status = response
+    onStatusChanged?(response)
+    if let responseError = response?.error, !responseError.isEmpty {
+      authMessage = responseError
+      authMessageTone = .warn
+      return
+    }
+
+    authMessage = "Tailscale OAuth credentials imported successfully."
+    authMessageTone = .good
+    await refreshStatus(validate: true)
+  }
+
+  private func disconnect() async {
+    isDisconnecting = true
+    defer { isDisconnecting = false }
+    let response = await model.disconnectTailscaleOAuth(authRef: status?.authRef)
+    status = response
+    onStatusChanged?(response)
+    if response?.configured == false {
+      authMessage = "Tailscale OAuth credentials were cleared."
+      authMessageTone = .neutral
+    }
+  }
+
+  private var resolvedAuthRef: String {
+    let candidate = status?.authRef?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return candidate.isEmpty ? Self.defaultAuthRef : candidate
+  }
+
+  private var resolvedTailnet: String {
+    let candidate = status?.tailnet?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return candidate.isEmpty ? Self.defaultTailnet : candidate
+  }
+
+  private var resolvedKeyExpirySeconds: Int {
+    if let keyExpiry = status?.keyExpirySeconds, keyExpiry > 0 {
+      return keyExpiry
+    }
+    return Self.defaultKeyExpirySeconds
+  }
+
+  private func waitForClipboardCredentials(
+    previousClipboard: String?
+  ) async -> OAuthClipboardCredentials? {
+    let deadline = Date().addingTimeInterval(Self.clipboardPollTimeoutSeconds)
+    while Date() < deadline {
+      try? await Task.sleep(nanoseconds: Self.clipboardPollIntervalNanoseconds)
+      if Task.isCancelled {
+        return nil
+      }
+      if let detected = parseOAuthCredentialsFromClipboard(
+        previousClipboard: previousClipboard
+      ) {
+        return detected
+      }
+    }
+
+    return nil
+  }
+
+  private func parseOAuthCredentialsFromClipboard(
+    previousClipboard: String?
+  ) -> OAuthClipboardCredentials? {
+    guard let clipboard = NSPasteboard.general.string(forType: .string) else {
+      return nil
+    }
+    if let previousClipboard, clipboard == previousClipboard {
+      return nil
+    }
+    return parseOAuthCredentials(text: clipboard)
+  }
+
+  private func parseOAuthCredentials(text: String) -> OAuthClipboardCredentials? {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      return nil
+    }
+
+    if let object = tryParseJsonObject(from: trimmed),
+      let credentials = findOAuthCredentials(in: object)
+    {
+      return credentials
+    }
+
+    return parseOAuthCredentialsFromKeyValueText(trimmed)
+  }
+
+  private func tryParseJsonObject(from text: String) -> Any? {
+    guard let data = text.data(using: .utf8) else {
+      return nil
+    }
+    return try? JSONSerialization.jsonObject(with: data)
+  }
+
+  private func findOAuthCredentials(in object: Any) -> OAuthClipboardCredentials? {
+    if let dictionary = object as? [String: Any] {
+      var clientId: String?
+      var clientSecret: String?
+      for (rawKey, rawValue) in dictionary {
+        if let nested = findOAuthCredentials(in: rawValue) {
+          return nested
+        }
+        guard let value = rawValue as? String else {
+          continue
+        }
+        let key = normalizeCredentialKey(rawKey)
+        if isClientIdKey(key) {
+          clientId = normalizeCredentialValue(value)
+          continue
+        }
+        if isClientSecretKey(key) {
+          clientSecret = normalizeCredentialValue(value)
+        }
+      }
+      if let clientId, let clientSecret {
+        return OAuthClipboardCredentials(clientId: clientId, clientSecret: clientSecret)
+      }
+      return nil
+    }
+
+    if let array = object as? [Any] {
+      for value in array {
+        if let nested = findOAuthCredentials(in: value) {
+          return nested
+        }
+      }
+    }
+
+    return nil
+  }
+
+  private func parseOAuthCredentialsFromKeyValueText(_ text: String) -> OAuthClipboardCredentials?
+  {
+    var clientId: String?
+    var clientSecret: String?
+    let lines = text.split(whereSeparator: \.isNewline).map(String.init)
+    for line in lines {
+      if let (rawKey, rawValue) = parseKeyValuePair(line: line) {
+        let key = normalizeCredentialKey(rawKey)
+        if isClientIdKey(key) {
+          clientId = normalizeCredentialValue(rawValue)
+          continue
+        }
+        if isClientSecretKey(key) {
+          clientSecret = normalizeCredentialValue(rawValue)
+        }
+      }
+    }
+    if let clientId, let clientSecret {
+      return OAuthClipboardCredentials(clientId: clientId, clientSecret: clientSecret)
+    }
+
+    let regexClientId = captureRegexValue(
+      pattern: #"(?im)(?:oauth\s+)?client\s*id\s*[:=]\s*([^\s"']+)"#,
+      text: text
+    )
+    let regexClientSecret = captureRegexValue(
+      pattern: #"(?im)(?:oauth\s+)?client\s*secret\s*[:=]\s*([^\s"']+)"#,
+      text: text
+    )
+    guard let regexClientId, let regexClientSecret else {
+      return nil
+    }
+    return OAuthClipboardCredentials(clientId: regexClientId, clientSecret: regexClientSecret)
+  }
+
+  private func captureRegexValue(pattern: String, text: String) -> String? {
+    guard let expression = try? NSRegularExpression(pattern: pattern) else {
+      return nil
+    }
+    let range = NSRange(text.startIndex..<text.endIndex, in: text)
+    guard
+      let match = expression.firstMatch(in: text, options: [], range: range),
+      match.numberOfRanges > 1,
+      let valueRange = Range(match.range(at: 1), in: text)
+    else {
+      return nil
+    }
+    return normalizeCredentialValue(String(text[valueRange]))
+  }
+
+  private func parseKeyValuePair(line: String) -> (String, String)? {
+    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      return nil
+    }
+    for separator in ["=", ":"] {
+      if let index = trimmed.firstIndex(of: Character(separator)) {
+        let key = String(trimmed[..<index]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = String(trimmed[trimmed.index(after: index)...])
+          .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty, !value.isEmpty else {
+          return nil
+        }
+        return (key, value)
+      }
+    }
+    return nil
+  }
+
+  private func normalizeCredentialKey(_ key: String) -> String {
+    key
+      .lowercased()
+      .filter { $0.isLetter || $0.isNumber }
+  }
+
+  private func normalizeCredentialValue(_ value: String) -> String {
+    value
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+  }
+
+  private func isClientIdKey(_ key: String) -> Bool {
+    [
+      "clientid",
+      "oauthclientid",
+      "tailscaleoauthclientid",
+      "tsapiclientid",
+      "clientidentifier",
+    ].contains(key)
+  }
+
+  private func isClientSecretKey(_ key: String) -> Bool {
+    [
+      "clientsecret",
+      "oauthclientsecret",
+      "tailscaleoauthclientsecret",
+      "tsapiclientsecret",
+      "secret",
+    ].contains(key)
+  }
+
+  private func openOAuthCredentialsPage() {
+    guard let url = URL(string: Self.oauthCredentialsURL) else {
+      return
+    }
+    NSWorkspace.shared.open(url)
+  }
+
+  private func openOAuthDocsPage() {
+    guard let url = URL(string: Self.oauthDocsURL) else {
+      return
+    }
+    NSWorkspace.shared.open(url)
+  }
+
+  private func colorForStatusTone(_ tone: StatusTone) -> Color {
+    switch tone {
+    case .good:
+      return .green
+    case .warn:
+      return .orange
+    case .neutral:
+      return .secondary
+    }
+  }
+
+  private func formatTimestamp(_ value: String?) -> String? {
+    guard let value, !value.isEmpty else {
+      return nil
+    }
+    let formatter = ISO8601DateFormatter()
+    guard let date = formatter.date(from: value) else {
+      return value
+    }
+    return date.formatted(date: .abbreviated, time: .shortened)
+  }
+
+  private struct OAuthClipboardCredentials {
+    let clientId: String
+    let clientSecret: String
+  }
+}
+
 private struct TailscaleExtensionSettingsView: View {
   @Environment(DashboardModel.self) private var model
   @State private var isLoadingConfig = false
   @State private var isSavingToggle = false
+  @State private var isSavingAuthKey = false
   @State private var isLoadingDiagnostics = false
   @State private var suppressEnabledToggleChange = false
   @State private var enabled = false
   @State private var diagnostics: TailscaleInspectResponse? = nil
+  @State private var bootstrapAuthKey = ""
+  @State private var showBootstrapAuthKey = false
   @State private var selectedExitNodeId = ""
+  @State private var showTailnetExitNodes = true
+  @State private var showTailnetTaggedDevices = true
+  @State private var showTailnetAllDevices = false
   @State private var lastDiagnosticsRefreshAt: Date? = nil
 
   var body: some View {
     ScrollView {
-      VStack(alignment: .leading, spacing: 20) {
+      LazyVStack(alignment: .leading, spacing: 20) {
         SettingsSectionHeader(
           breadcrumb: "Settings / Extensions / Tailscale",
           title: "Tailscale Extension",
@@ -1684,67 +2734,156 @@ private struct TailscaleExtensionSettingsView: View {
               .foregroundStyle(.secondary)
           }
         }
+        GlassCard(title: "Bootstrap auth key", systemImage: "key.fill") {
+          VStack(alignment: .leading, spacing: 12) {
+            Text("Use one reusable Tailscale auth key for private remote-node bootstrap flows (Railway and future providers).")
+              .font(.mono(.caption))
+              .foregroundStyle(.secondary)
+
+            HStack(spacing: 8) {
+              StatusPill(
+                text: bootstrapAuthKeyConfigured ? "Auth key configured" : "Auth key missing",
+                tone: bootstrapAuthKeyConfigured ? .good : .warn
+              )
+              if bootstrapAuthKeyConfigured {
+                StatusPill(text: "Shared with Railway bootstrap", tone: .neutral)
+              }
+              Spacer()
+            }
+
+            HStack(spacing: 10) {
+              Group {
+                if showBootstrapAuthKey {
+                  TextField("tskey-auth-...", text: $bootstrapAuthKey)
+                } else {
+                  SecureField("TS_AUTHKEY", text: $bootstrapAuthKey)
+                }
+              }
+              .textFieldStyle(.roundedBorder)
+              .font(.mono(.subheadline))
+
+              Button {
+                showBootstrapAuthKey.toggle()
+              } label: {
+                Label(showBootstrapAuthKey ? "Hide" : "Show", systemImage: showBootstrapAuthKey ? "eye.slash" : "eye")
+              }
+              .adaptiveToolbarButton()
+            }
+
+            Text(
+              "Stored in global config at controlPlane.extensions[\"dance.hack.tailscale\"].config.authKey (mirrored to Railway compatibility key)."
+            )
+            .font(.mono(.caption2))
+            .foregroundStyle(.tertiary)
+
+            HStack(spacing: 10) {
+              Button {
+                Task { await saveBootstrapAuthKey() }
+              } label: {
+                Label("Save auth key", systemImage: "square.and.arrow.down")
+              }
+              .adaptiveToolbarButtonProminent()
+              .disabled(isSavingAuthKey)
+
+              Button {
+                Task { await clearBootstrapAuthKey() }
+              } label: {
+                Label("Clear", systemImage: "trash")
+              }
+              .adaptiveToolbarButton()
+              .disabled(isSavingAuthKey || !bootstrapAuthKeyConfigured)
+
+              Button {
+                openTailscaleAuthKeysPage()
+              } label: {
+                Label("Open auth key admin", systemImage: "link")
+              }
+              .adaptiveToolbarButton()
+
+              Spacer()
+
+              if isSavingAuthKey {
+                ProgressView()
+                  .controlSize(.small)
+              }
+            }
+          }
+        }
         GlassCard(title: "Tailnet controls", systemImage: "slider.horizontal.3") {
           VStack(alignment: .leading, spacing: 12) {
             Text("The extension controls gateway exposure behavior, while Tailscale runtime state is shown here regardless of extension enablement.")
               .font(.mono(.caption))
               .foregroundStyle(.secondary)
-            HStack(spacing: 10) {
-              Button {
-                Task { await refreshTailscaleDiagnostics() }
-              } label: {
-                Label("Refresh state", systemImage: "arrow.clockwise")
-              }
-              .adaptiveToolbarButtonProminent()
+            VStack(alignment: .leading, spacing: 10) {
+              Text("Quick actions")
+                .font(.mono(.caption2))
+                .foregroundStyle(.secondary)
 
-              Button {
-                if tailscaleConnected {
-                  openGlobalCommandInTerminalPanel(
-                    command: "tailscale down",
-                    title: "tailscale down"
-                  )
-                } else {
-                  openGlobalCommandInTerminalPanel(
-                    command: "tailscale up",
-                    title: "tailscale up"
+              HStack(spacing: 10) {
+                Button {
+                  Task { await refreshTailscaleDiagnostics() }
+                } label: {
+                  Label("Refresh state", systemImage: "arrow.clockwise")
+                }
+                .adaptiveToolbarButtonProminent()
+
+                Button {
+                  if tailscaleConnected {
+                    openGlobalCommandInTerminalPanel(
+                      command: "tailscale down",
+                      title: "tailscale down"
+                    )
+                  } else {
+                    openGlobalCommandInTerminalPanel(
+                      command: "tailscale up",
+                      title: "tailscale up"
+                    )
+                  }
+                } label: {
+                  Label(
+                    tailscaleConnected ? "Disconnect tailnet" : "Connect tailnet",
+                    systemImage: tailscaleConnected ? "stop.fill" : "play.fill"
                   )
                 }
-              } label: {
-                Label(
-                  tailscaleConnected ? "Disconnect tailnet" : "Connect tailnet",
-                  systemImage: tailscaleConnected ? "stop.fill" : "play.fill"
-                )
-              }
-              .adaptiveToolbarButton()
-              .disabled(!tailscaleInstalled)
+                .adaptiveToolbarButton()
+                .disabled(!tailscaleInstalled)
 
-              Button {
-                openGlobalCommandInTerminalPanel(
-                  command: "tailscale status",
-                  title: "tailscale status"
-                )
-              } label: {
-                Label("Open CLI status", systemImage: "terminal")
-              }
-              .adaptiveToolbarButton()
+                Button {
+                  openGlobalCommandInTerminalPanel(
+                    command: "tailscale status",
+                    title: "tailscale status"
+                  )
+                } label: {
+                  Label("Open CLI status", systemImage: "terminal")
+                }
+                .adaptiveToolbarButton()
 
-              Button {
-                openGlobalCommandInTerminalPanel(
-                  command: "tailscale status --json",
-                  title: "tailscale status --json"
-                )
-              } label: {
-                Label("Open status JSON", systemImage: "doc.plaintext")
+                Spacer()
               }
-              .adaptiveToolbarButton()
-              Spacer()
+
+              HStack(spacing: 10) {
+                Button {
+                  openGlobalCommandInTerminalPanel(
+                    command: "tailscale status --json",
+                    title: "tailscale status --json"
+                  )
+                } label: {
+                  Label("Open status JSON", systemImage: "doc.plaintext")
+                }
+                .adaptiveToolbarButton()
+                Spacer()
+              }
             }
 
             if !exitNodes.isEmpty {
               Divider()
                 .opacity(0.2)
 
-              HStack(alignment: .center, spacing: 10) {
+              VStack(alignment: .leading, spacing: 10) {
+                Text("Exit-node routing")
+                  .font(.mono(.caption2))
+                  .foregroundStyle(.secondary)
+
                 Picker("Exit node", selection: $selectedExitNodeId) {
                   Text("No exit node").tag("")
                   ForEach(exitNodes, id: \.id) { peer in
@@ -1752,25 +2891,26 @@ private struct TailscaleExtensionSettingsView: View {
                   }
                 }
                 .pickerStyle(.menu)
-                .frame(minWidth: 220, alignment: .leading)
+                .frame(minWidth: 260, maxWidth: 360, alignment: .leading)
 
-                Button {
-                  applySelectedExitNode()
-                } label: {
-                  Label("Use selected node", systemImage: "location.north.line.fill")
+                HStack(spacing: 10) {
+                  Button {
+                    applySelectedExitNode()
+                  } label: {
+                    Label("Use selected node", systemImage: "location.north.line.fill")
+                  }
+                  .adaptiveToolbarButton()
+                  .disabled(!tailscaleInstalled || selectedExitNodeId.isEmpty)
+
+                  Button {
+                    clearSelectedExitNode()
+                  } label: {
+                    Label("Clear exit node", systemImage: "location.slash")
+                  }
+                  .adaptiveToolbarButton()
+                  .disabled(!tailscaleInstalled || !hasCurrentExitNode)
+                  Spacer()
                 }
-                .adaptiveToolbarButton()
-                .disabled(!tailscaleInstalled || selectedExitNodeId.isEmpty)
-
-                Button {
-                  clearSelectedExitNode()
-                } label: {
-                  Label("Clear exit node", systemImage: "location.slash")
-                }
-                .adaptiveToolbarButton()
-                .disabled(!tailscaleInstalled || !hasCurrentExitNode)
-
-                Spacer()
               }
 
               if let currentExitNodeName = diagnostics?.currentExitNodeName, !currentExitNodeName.isEmpty {
@@ -1860,63 +3000,72 @@ private struct TailscaleExtensionSettingsView: View {
         Divider()
           .opacity(0.2)
 
-        VStack(alignment: .leading, spacing: 6) {
-          Text("Exit nodes")
-            .font(.mono(.caption, weight: .semibold))
-            .foregroundStyle(.secondary)
-          if let currentExitNodeName = diagnostics?.currentExitNodeName, !currentExitNodeName.isEmpty {
-            Text("Current: \(currentExitNodeName)")
-              .font(.mono(.caption))
-              .foregroundStyle(.secondary)
-          } else {
-            Text("Current: none")
-              .font(.mono(.caption))
-              .foregroundStyle(.secondary)
-          }
+        DisclosureGroup("Exit nodes", isExpanded: $showTailnetExitNodes) {
+          VStack(alignment: .leading, spacing: 6) {
+            if let currentExitNodeName = diagnostics?.currentExitNodeName, !currentExitNodeName.isEmpty {
+              Text("Current: \(currentExitNodeName)")
+                .font(.mono(.caption))
+                .foregroundStyle(.secondary)
+            } else {
+              Text("Current: none")
+                .font(.mono(.caption))
+                .foregroundStyle(.secondary)
+            }
 
-          let exitNodes = diagnostics?.exitNodes ?? []
-          if exitNodes.isEmpty {
-            Text("No exit-node capable peers detected.")
-              .font(.mono(.caption2))
-              .foregroundStyle(.tertiary)
-          } else {
-            ForEach(Array(exitNodes.prefix(6)), id: \.id) { peer in
-              tailscalePeerRow(peer)
+            let exitNodes = diagnostics?.exitNodes ?? []
+            if exitNodes.isEmpty {
+              Text("No exit-node capable peers detected.")
+                .font(.mono(.caption2))
+                .foregroundStyle(.tertiary)
+            } else {
+              ForEach(Array(exitNodes.prefix(6)), id: \.id) { peer in
+                tailscalePeerRow(peer)
+              }
             }
           }
+          .padding(.top, 6)
         }
+        .font(.mono(.caption, weight: .semibold))
 
         if !taggedPeers.isEmpty {
           Divider()
             .opacity(0.2)
 
-          VStack(alignment: .leading, spacing: 6) {
-            Text("Tagged devices (\(taggedPeers.filter(\.online).count)/\(taggedPeers.count) online)")
-              .font(.mono(.caption, weight: .semibold))
-              .foregroundStyle(.secondary)
-            ForEach(Array(taggedPeers.prefix(12)), id: \.id) { peer in
-              tailscalePeerRow(peer)
+          DisclosureGroup(
+            "Tagged devices (\(taggedPeers.filter(\.online).count)/\(taggedPeers.count) online)",
+            isExpanded: $showTailnetTaggedDevices
+          ) {
+            VStack(alignment: .leading, spacing: 6) {
+              ForEach(Array(taggedPeers.prefix(12)), id: \.id) { peer in
+                tailscalePeerRow(peer)
+              }
             }
+            .padding(.top, 6)
           }
+          .font(.mono(.caption, weight: .semibold))
         }
 
         Divider()
           .opacity(0.2)
 
-        VStack(alignment: .leading, spacing: 6) {
-          Text("Devices (\(diagnostics?.onlinePeerCount ?? 0)/\(diagnostics?.peers.count ?? 0) online)")
-            .font(.mono(.caption, weight: .semibold))
-            .foregroundStyle(.secondary)
-          if personalPeers.isEmpty {
-            Text("No untagged devices reported by tailscale status.")
-              .font(.mono(.caption2))
-              .foregroundStyle(.tertiary)
-          } else {
-            ForEach(Array(personalPeers.prefix(12)), id: \.id) { peer in
-              tailscalePeerRow(peer)
+        DisclosureGroup(
+          "Devices (\(diagnostics?.onlinePeerCount ?? 0)/\(diagnostics?.peers.count ?? 0) online)",
+          isExpanded: $showTailnetAllDevices
+        ) {
+          VStack(alignment: .leading, spacing: 6) {
+            if personalPeers.isEmpty {
+              Text("No untagged devices reported by tailscale status.")
+                .font(.mono(.caption2))
+                .foregroundStyle(.tertiary)
+            } else {
+              ForEach(Array(personalPeers.prefix(12)), id: \.id) { peer in
+                tailscalePeerRow(peer)
+              }
             }
           }
+          .padding(.top, 6)
         }
+        .font(.mono(.caption, weight: .semibold))
       }
     }
   }
@@ -2002,12 +3151,17 @@ private struct TailscaleExtensionSettingsView: View {
     return !currentExitNodeId.isEmpty
   }
 
+  private var bootstrapAuthKeyConfigured: Bool {
+    !bootstrapAuthKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+
   private func loadConfigFromDisk() async {
     isLoadingConfig = true
     let snapshot = GlobalConfigSnapshot.load()
     suppressEnabledToggleChange = true
     enabled = snapshot.tailscaleExtensionEnabled ?? false
     suppressEnabledToggleChange = false
+    bootstrapAuthKey = snapshot.tailscaleAuthKey ?? snapshot.railwayTailscaleAuthKey ?? ""
     isLoadingConfig = false
     await refreshTailscaleDiagnostics()
   }
@@ -2033,6 +3187,38 @@ private struct TailscaleExtensionSettingsView: View {
       return
     }
     await loadConfigFromDisk()
+  }
+
+  private func saveBootstrapAuthKey() async {
+    isSavingAuthKey = true
+    defer { isSavingAuthKey = false }
+
+    let trimmed = bootstrapAuthKey.trimmingCharacters(in: .whitespacesAndNewlines)
+    let didSaveTailscale = await model.setGlobalConfig(
+      key: "controlPlane.extensions[\"dance.hack.tailscale\"].config.authKey",
+      value: trimmed
+    )
+    guard didSaveTailscale else {
+      await loadConfigFromDisk()
+      return
+    }
+
+    // Keep Railway bootstrap compatibility while routing continues to read this key.
+    let didSaveRailway = await model.setGlobalConfig(
+      key: "controlPlane.extensions[\"dance.hack.railway\"].config.tailscaleAuthKey",
+      value: trimmed
+    )
+    guard didSaveRailway else {
+      await loadConfigFromDisk()
+      return
+    }
+
+    await loadConfigFromDisk()
+  }
+
+  private func clearBootstrapAuthKey() async {
+    bootstrapAuthKey = ""
+    await saveBootstrapAuthKey()
   }
 
   private func syncExitNodeSelection() {
@@ -2064,6 +3250,13 @@ private struct TailscaleExtensionSettingsView: View {
   private func shellQuote(_ value: String) -> String {
     let escaped = value.replacingOccurrences(of: "'", with: "'\\''")
     return "'\(escaped)'"
+  }
+
+  private func openTailscaleAuthKeysPage() {
+    guard let url = URL(string: "https://login.tailscale.com/admin/settings/keys") else {
+      return
+    }
+    NSWorkspace.shared.open(url)
   }
 }
 
@@ -2283,6 +3476,7 @@ private struct ExtensionsSettingsView: View {
   @State private var isLoading = false
   @State private var suppressToggleChange = false
   @State private var cloudflareEnabled = false
+  @State private var railwayEnabled = false
   @State private var tailscaleEnabled = false
 
   var body: some View {
@@ -2308,6 +3502,16 @@ private struct ExtensionsSettingsView: View {
               projectCount: projectCount(for: "dance.hack.cloudflare"),
               exposure: extensionExposure(id: "cloudflare"),
               isOn: $cloudflareEnabled
+            )
+            Divider()
+              .opacity(0.2)
+            extensionSummaryRow(
+              item: .railway,
+              name: "Railway",
+              description: "Remote node provider bootstrap, auth checks, and private tailscale bring-up.",
+              projectCount: projectCount(for: "dance.hack.railway"),
+              exposure: extensionExposure(id: "railway"),
+              isOn: $railwayEnabled
             )
             Divider()
               .opacity(0.2)
@@ -2406,6 +3610,8 @@ private struct ExtensionsSettingsView: View {
       switch normalized {
       case "cloudflare", "dance.hack.cloudflare":
         ids.insert("dance.hack.cloudflare")
+      case "railway", "dance.hack.railway":
+        ids.insert("dance.hack.railway")
       case "tailscale", "dance.hack.tailscale":
         ids.insert("dance.hack.tailscale")
       default:
@@ -2423,6 +3629,7 @@ private struct ExtensionsSettingsView: View {
     let snapshot = GlobalConfigSnapshot.load()
     suppressToggleChange = true
     cloudflareEnabled = snapshot.cloudflareExtensionEnabled ?? false
+    railwayEnabled = snapshot.railwayExtensionEnabled ?? false
     tailscaleEnabled = snapshot.tailscaleExtensionEnabled ?? false
     suppressToggleChange = false
   }
@@ -2438,6 +3645,8 @@ private struct ExtensionsSettingsView: View {
     switch item {
     case .cloudflare:
       key = "controlPlane.extensions[\"dance.hack.cloudflare\"].enabled"
+    case .railway:
+      key = "controlPlane.extensions[\"dance.hack.railway\"].enabled"
     case .tailscale:
       key = "controlPlane.extensions[\"dance.hack.tailscale\"].enabled"
     default:
@@ -2747,7 +3956,21 @@ private struct LoggingSettingsView: View {
 private struct GlobalConfigSnapshot {
   let daemonLaunchdRunAtLoad: Bool?
   let cloudflareExtensionEnabled: Bool?
+  let railwayExtensionEnabled: Bool?
   let tailscaleExtensionEnabled: Bool?
+  let railwayProject: String?
+  let railwayService: String?
+  let railwayEnvironment: String?
+  let railwayWorkspace: String?
+  let railwayNodeName: String?
+  let railwayLabelsCsv: String?
+  let railwayEndpoint: String?
+  let railwayCreateService: Bool?
+  let railwayImage: String?
+  let railwayPrivate: Bool?
+  let railwayTailscaleAuthKey: String?
+  let railwayTailscaleTagsCsv: String?
+  let tailscaleAuthKey: String?
   let gatewayBind: String?
   let cloudflareHostname: String?
   let cloudflareSSHHostname: String?
@@ -2797,13 +4020,30 @@ private struct GlobalConfigSnapshot {
     let containerPreferences = dictionary(preferences, key: "containers")
     let extensions = dictionary(controlPlane, key: "extensions")
     let cloudflareExt = dictionary(extensions, key: "dance.hack.cloudflare")
+    let railwayExt = dictionary(extensions, key: "dance.hack.railway")
     let tailscaleExt = dictionary(extensions, key: "dance.hack.tailscale")
     let cloudflareConfig = dictionary(cloudflareExt, key: "config")
+    let railwayConfig = dictionary(railwayExt, key: "config")
+    let tailscaleConfig = dictionary(tailscaleExt, key: "config")
 
     return Self(
       daemonLaunchdRunAtLoad: launchd["runAtLoad"] as? Bool,
       cloudflareExtensionEnabled: cloudflareExt["enabled"] as? Bool,
+      railwayExtensionEnabled: railwayExt["enabled"] as? Bool,
       tailscaleExtensionEnabled: tailscaleExt["enabled"] as? Bool,
+      railwayProject: railwayConfig["project"] as? String,
+      railwayService: railwayConfig["service"] as? String,
+      railwayEnvironment: railwayConfig["environment"] as? String,
+      railwayWorkspace: railwayConfig["workspace"] as? String,
+      railwayNodeName: railwayConfig["nodeName"] as? String,
+      railwayLabelsCsv: railwayConfig["labelsCsv"] as? String,
+      railwayEndpoint: railwayConfig["endpoint"] as? String,
+      railwayCreateService: railwayConfig["createService"] as? Bool,
+      railwayImage: railwayConfig["image"] as? String,
+      railwayPrivate: railwayConfig["private"] as? Bool,
+      railwayTailscaleAuthKey: railwayConfig["tailscaleAuthKey"] as? String,
+      railwayTailscaleTagsCsv: railwayConfig["tailscaleTagsCsv"] as? String,
+      tailscaleAuthKey: tailscaleConfig["authKey"] as? String,
       gatewayBind: gateway["bind"] as? String,
       cloudflareHostname: cloudflareConfig["hostname"] as? String,
       cloudflareSSHHostname: cloudflareConfig["sshHostname"] as? String,
@@ -2826,7 +4066,21 @@ private struct GlobalConfigSnapshot {
     Self(
       daemonLaunchdRunAtLoad: nil,
       cloudflareExtensionEnabled: nil,
+      railwayExtensionEnabled: nil,
       tailscaleExtensionEnabled: nil,
+      railwayProject: nil,
+      railwayService: nil,
+      railwayEnvironment: nil,
+      railwayWorkspace: nil,
+      railwayNodeName: nil,
+      railwayLabelsCsv: nil,
+      railwayEndpoint: nil,
+      railwayCreateService: nil,
+      railwayImage: nil,
+      railwayPrivate: nil,
+      railwayTailscaleAuthKey: nil,
+      railwayTailscaleTagsCsv: nil,
+      tailscaleAuthKey: nil,
       gatewayBind: nil,
       cloudflareHostname: nil,
       cloudflareSSHHostname: nil,

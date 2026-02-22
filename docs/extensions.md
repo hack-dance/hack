@@ -21,7 +21,7 @@ Cloudflare/Tailscale/SSH exposure in one flow.
 - The CLI dispatches extension commands via `hack x <namespace> <command>`.
 - Global enablement lives in `~/.hack/hack.config.json` (`hack config set --global ...`).
 - Per-project overrides live in `.hack/hack.config.json` and typically win over global values
-  (except global-only extensions like Cloudflare/Tailscale, which ignore project overrides).
+  (except global-only extensions like Cloudflare/Tailscale/GitHub, which ignore project overrides).
 - Built-in Gateway enablement is project-scoped: `controlPlane.gateway.enabled` opts a project into routing.
 
 ## Extension definition (API surface)
@@ -78,7 +78,7 @@ Shortcut for gateway (project-scoped):
 }
 ```
 
-Global-only extensions (e.g. Cloudflare, Tailscale) must be configured in the global config.
+Global-only extensions (e.g. Cloudflare, Tailscale, GitHub) must be configured in the global config.
 Project overrides for these are ignored.
 
 CLI helpers:
@@ -101,8 +101,9 @@ Use `hack x <namespace> help` to list commands.
 - Gateway: `hack x gateway token-create|token-list|token-revoke`
 - Supervisor: `hack x supervisor job-create|job-list|job-show|job-tail|job-attach|job-cancel|shell`
 - Cloudflare: `hack x cloudflare tunnel-print|tunnel-setup|tunnel-start|tunnel-stop|access-setup`
-- Tailscale: `hack x tailscale setup|status|ip`
+- Tailscale: `hack x tailscale setup|status|inspect|oauth-status|oauth-connect|oauth-disconnect|ip`
 - Tickets: `hack x tickets setup|create|update|list|show|status|sync|tui` (see `docs/guides/tickets.md`)
+- GitHub: `hack x github connect|disconnect|status|pr-upsert`
 
 Gateway tokens default to `read` scope. Use `--scope write` to permit non-GET requests (also
 requires global `controlPlane.gateway.allowWrites = true`).
@@ -184,6 +185,45 @@ Options:
 | `--cwd <path>` | string | - | Working directory (relative to project root) |
 | `--env <KEY=VALUE>` | string | - | Environment override (repeatable) |
 | `--json` | boolean | false | Output JSON |
+
+### GitHub extension (`hack x github`)
+
+Store installation token directly:
+
+```bash
+hack x github connect --token-env HACK_GITHUB_APP_TOKEN
+# or:
+printf "%s" "$HACK_GITHUB_APP_TOKEN" | hack x github connect --stdin
+```
+
+Exchange GitHub App credentials for an installation token (recommended):
+
+```bash
+hack x github connect \
+  --app-id 12345 \
+  --installation-id 67890 \
+  --private-key-env HACK_GITHUB_APP_PRIVATE_KEY
+
+# or pass key material directly and persist it in keychain:
+printf "%s" "$GITHUB_APP_PRIVATE_KEY" | hack x github connect \
+  --app-id 12345 \
+  --installation-id 67890 \
+  --private-key-stdin \
+  --private-key-auth-ref github.app.private_key.default
+```
+
+Status + PR operations:
+
+```bash
+hack x github status
+hack x github pr-upsert --repo owner/repo --head my-branch --base main --title "My PR" --body "Details"
+```
+
+Notes:
+- Keychain storage uses `authRef` + `service` configured at:
+  `controlPlane.extensions["dance.hack.github"].config`.
+- Token resolution order is keychain first, then environment fallback (`tokenEnv`).
+- If token metadata includes `expiresAt`, auth resolution attempts automatic GitHub App refresh using configured `appId`, `installationId`, and private key source.
 
 #### job-show
 
@@ -336,6 +376,22 @@ Usage: `hack x tailscale setup`
 #### status
 
 Usage: `hack x tailscale status [args...]`
+
+#### inspect
+
+Usage: `hack x tailscale inspect [--json]`
+
+#### oauth-status
+
+Usage: `hack x tailscale oauth-status [--json] [--validate]`
+
+#### oauth-connect
+
+Usage: `hack x tailscale oauth-connect --client-id <id> [--client-secret <secret>|--client-secret-stdin] [--auth-ref <ref>] [--tailnet <tailnet>] [--key-expiry-seconds <seconds>] [--json]`
+
+#### oauth-disconnect
+
+Usage: `hack x tailscale oauth-disconnect [--auth-ref <ref>] [--json]`
 
 #### ip
 

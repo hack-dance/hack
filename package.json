@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "bun run index.ts",
     "build": "bun build index.ts --compile --outfile dist/hack",
+    "build:node-runtime-image": "bun run scripts/build-node-runtime-image.ts",
     "build:release": "bun run scripts/build-release.ts",
     "commit": "cz",
     "install:dev": "bun run scripts/install-cli.ts --mode=dev --force",
@@ -28,7 +29,9 @@
     "typecheck": "bunx tsc -p tsconfig.json --noEmit",
     "uninstall:local": "bun run scripts/uninstall-cli.ts",
     "test": "bun test",
-    "test:e2e:gateway": "bun run scripts/gateway-e2e.ts"
+    "test:e2e:gateway": "bun run scripts/gateway-e2e.ts",
+    "test:e2e:dispatch": "bun run scripts/dispatch-e2e.ts",
+    "test:e2e:railway": "bun run scripts/railway-node-e2e.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "2.3.11",

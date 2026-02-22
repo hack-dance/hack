@@ -110,6 +110,42 @@ public actor HackCLIClient {
     _ = try await run(["config", "set", key, value, "--global"])
   }
 
+  public func getGlobalConfigValue(key: String) async throws -> String? {
+    let result = try await run(
+      ["config", "get", key, "--global"],
+      allowNonZeroExit: true
+    )
+    guard result.exitCode == 0 else {
+      return nil
+    }
+    let value = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+    return value.isEmpty ? nil : value
+  }
+
+  public func setProjectConfig(
+    key: String,
+    value: String,
+    projectPath: String
+  ) async throws {
+    _ = try await run(["config", "set", key, value], cwd: projectPath)
+  }
+
+  public func getProjectConfigValue(
+    key: String,
+    projectPath: String
+  ) async throws -> String? {
+    let result = try await run(
+      ["config", "get", key],
+      allowNonZeroExit: true,
+      cwd: projectPath
+    )
+    guard result.exitCode == 0 else {
+      return nil
+    }
+    let value = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+    return value.isEmpty ? nil : value
+  }
+
   public func listGatewayTokens() async throws -> GatewayTokenListResponse {
     let result = try await run(["x", "gateway", "token-list", "--json"], allowNonZeroExit: true)
     return try decodeJsonOrThrow(GatewayTokenListResponse.self, result: result)
@@ -151,6 +187,247 @@ public actor HackCLIClient {
       // fall back to direct `tailscale status --json` so settings still reflect host reality.
       return try await inspectTailscaleDirect()
     }
+  }
+
+  public func inspectTailscaleOAuthStatus(
+    validate: Bool = false
+  ) async throws -> TailscaleOAuthStatusResponse {
+    var args = ["x", "tailscale", "oauth-status", "--json"]
+    if validate {
+      args.append("--validate")
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    if let fallback = unsupportedTailscaleOAuthStatusResponse(result: result) {
+      return fallback
+    }
+    return try decodeJsonOrThrow(TailscaleOAuthStatusResponse.self, result: result)
+  }
+
+  public func connectTailscaleOAuth(
+    request: TailscaleOAuthConnectRequest
+  ) async throws -> TailscaleOAuthStatusResponse {
+    var args = [
+      "x",
+      "tailscale",
+      "oauth-connect",
+      "--json",
+      "--client-id",
+      request.clientId,
+      "--client-secret-stdin",
+    ]
+    if let value = normalized(request.authRef) {
+      args.append(contentsOf: ["--auth-ref", value])
+    }
+    if let value = normalized(request.tailnet) {
+      args.append(contentsOf: ["--tailnet", value])
+    }
+    if let value = request.keyExpirySeconds {
+      args.append(contentsOf: ["--key-expiry-seconds", String(value)])
+    }
+
+    let result = try await run(
+      args,
+      allowNonZeroExit: true,
+      stdin: "\(request.clientSecret)\n"
+    )
+    return try decodeJsonOrThrow(TailscaleOAuthStatusResponse.self, result: result)
+  }
+
+  public func disconnectTailscaleOAuth(
+    authRef: String? = nil
+  ) async throws -> TailscaleOAuthStatusResponse {
+    var args = ["x", "tailscale", "oauth-disconnect", "--json"]
+    if let value = normalized(authRef) {
+      args.append(contentsOf: ["--auth-ref", value])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(TailscaleOAuthStatusResponse.self, result: result)
+  }
+
+  public func inspectRailway() async throws -> RailwayInspectResponse {
+    let environment = HackCLILocator.buildEnvironment()
+    guard let binaryPath = HackCLILocator.resolveExecutable(named: "railway", in: environment) else {
+      return RailwayInspectResponse(
+        installed: false,
+        binaryPath: nil,
+        version: nil,
+        authenticated: false,
+        whoami: nil,
+        error: "railway not found in PATH"
+      )
+    }
+
+    let versionResult = try await runExecutable(
+      executablePath: binaryPath,
+      args: ["--version"],
+      allowNonZeroExit: true,
+      cwd: nil
+    )
+    let version = firstNonEmptyLine(versionResult.stdout)
+      ?? firstNonEmptyLine(versionResult.stderr)
+
+    let whoamiResult = try await runExecutable(
+      executablePath: binaryPath,
+      args: ["whoami"],
+      allowNonZeroExit: true,
+      cwd: nil
+    )
+    if whoamiResult.exitCode == 0 {
+      return RailwayInspectResponse(
+        installed: true,
+        binaryPath: binaryPath,
+        version: version,
+        authenticated: true,
+        whoami: firstNonEmptyLine(whoamiResult.stdout),
+        error: nil
+      )
+    }
+
+    let whoamiError = firstNonEmptyLine(whoamiResult.stderr)
+      ?? firstNonEmptyLine(whoamiResult.stdout)
+      ?? "railway whoami failed"
+    return RailwayInspectResponse(
+      installed: true,
+      binaryPath: binaryPath,
+      version: version,
+      authenticated: false,
+      whoami: nil,
+      error: whoamiError
+    )
+  }
+
+  public func bootstrapRailwayNode(
+    request: RailwayBootstrapRequest
+  ) async throws -> RailwayBootstrapResponse {
+    var args = [
+      "node",
+      "provider",
+      "railway",
+      "bootstrap",
+      "--json",
+      "--railway-project",
+      request.railwayProject,
+    ]
+
+    if let value = normalized(request.railwayService) {
+      args.append(contentsOf: ["--railway-service", value])
+    }
+    if let value = normalized(request.railwayEnvironment) {
+      args.append(contentsOf: ["--railway-environment", value])
+    }
+    if let value = normalized(request.railwayWorkspace) {
+      args.append(contentsOf: ["--railway-workspace", value])
+    }
+    if request.createService {
+      args.append("--create-service")
+    }
+    if let value = normalized(request.railwayImage) {
+      args.append(contentsOf: ["--railway-image", value])
+    }
+    if let value = normalized(request.railwayBin) {
+      args.append(contentsOf: ["--railway-bin", value])
+    }
+    if let value = normalized(request.nodeName) {
+      args.append(contentsOf: ["--name", value])
+    }
+    if let value = normalized(request.endpoint) {
+      args.append(contentsOf: ["--endpoint", value])
+    }
+    if !request.labels.isEmpty {
+      args.append(contentsOf: ["--labels", request.labels.joined(separator: ",")])
+    }
+    if request.defaultNode {
+      args.append("--default")
+    }
+    if let value = request.domainPort {
+      args.append(contentsOf: ["--domain-port", String(value)])
+    }
+    if let value = request.initRetries {
+      args.append(contentsOf: ["--init-retries", String(value)])
+    }
+    if request.privateNetworking {
+      args.append("--railway-private")
+    }
+    if let value = normalized(request.tailscaleAuthKey) {
+      args.append(contentsOf: ["--tailscale-auth-key", value])
+    }
+    if let value = normalized(request.tailscaleHostname) {
+      args.append(contentsOf: ["--tailscale-hostname", value])
+    }
+    if !request.tailscaleTags.isEmpty {
+      args.append(contentsOf: ["--tailscale-tags", request.tailscaleTags.joined(separator: ",")])
+    }
+
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(RailwayBootstrapResponse.self, result: result)
+  }
+
+  public func listNodes() async throws -> NodeRegistryListResponse {
+    let result = try await run(["node", "list", "--json"], allowNonZeroExit: true)
+    return try decodeJsonOrThrow(NodeRegistryListResponse.self, result: result)
+  }
+
+  public func probeNodes(nodeId: String? = nil) async throws -> NodeStatusResponse {
+    var args = ["node", "status", "--json"]
+    if let nodeId, !nodeId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--node", nodeId])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(NodeStatusResponse.self, result: result)
+  }
+
+  public func useNode(id: String) async throws -> NodeUseResponse {
+    let result = try await run(["node", "use", id, "--json"], allowNonZeroExit: true)
+    return try decodeJsonOrThrow(NodeUseResponse.self, result: result)
+  }
+
+  public func removeNode(id: String) async throws -> NodeRemoveResponse {
+    let result = try await run(["node", "remove", id, "--json"], allowNonZeroExit: true)
+    return try decodeJsonOrThrow(NodeRemoveResponse.self, result: result)
+  }
+
+  public func cancelNodePairSession(sessionId: String) async throws -> NodePairCancelResponse {
+    let result = try await run(
+      ["node", "pair", "cancel", "--session", sessionId, "--json"],
+      allowNonZeroExit: true
+    )
+    return try decodeJsonOrThrow(NodePairCancelResponse.self, result: result)
+  }
+
+  public func listNodePairSessions(status: String = "pending") async throws -> NodePairListResponse {
+    let trimmed = status.trimmingCharacters(in: .whitespacesAndNewlines)
+    var args = ["node", "pair", "list", "--json"]
+    if !trimmed.isEmpty {
+      args.append(contentsOf: ["--status", trimmed])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(NodePairListResponse.self, result: result)
+  }
+
+  public func fulfillNodePairSession(
+    sessionId: String,
+    code: String,
+    defaultNode: Bool,
+    sshPort: Int?
+  ) async throws -> NodePairFulfillResponse {
+    var args = [
+      "node",
+      "pair",
+      "fulfill",
+      "--session",
+      sessionId,
+      "--code",
+      code,
+      "--json",
+    ]
+    if defaultNode {
+      args.append("--default")
+    }
+    if let sshPort {
+      args.append(contentsOf: ["--ssh-port", String(sshPort)])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(NodePairFulfillResponse.self, result: result)
   }
 
   public func listTickets(path: String) async throws -> TicketsListResponse {
@@ -347,7 +624,8 @@ public actor HackCLIClient {
   private func run(
     _ args: [String],
     allowNonZeroExit: Bool = false,
-    cwd: String? = nil
+    cwd: String? = nil,
+    stdin: String? = nil
   ) async throws -> CLIResult {
     try Task.checkCancellation()
 
@@ -368,8 +646,12 @@ public actor HackCLIClient {
 
     let stdoutPipe = Pipe()
     let stderrPipe = Pipe()
+    let stdinPipe = stdin == nil ? nil : Pipe()
     process.standardOutput = stdoutPipe
     process.standardError = stderrPipe
+    if let stdinPipe {
+      process.standardInput = stdinPipe
+    }
 
     return try await withTaskCancellationHandler(operation: {
       do {
@@ -377,7 +659,16 @@ public actor HackCLIClient {
       } catch {
         stdoutPipe.fileHandleForReading.closeFile()
         stderrPipe.fileHandleForReading.closeFile()
+        stdinPipe?.fileHandleForReading.closeFile()
+        stdinPipe?.fileHandleForWriting.closeFile()
         throw HackCLIError.commandFailed(exitCode: 127, stderr: error.localizedDescription)
+      }
+
+      if let stdin, let stdinPipe {
+        if let stdinData = stdin.data(using: .utf8) {
+          stdinPipe.fileHandleForWriting.write(stdinData)
+        }
+        stdinPipe.fileHandleForWriting.closeFile()
       }
 
       async let stdoutData = stdoutPipe.fileHandleForReading.readToEnd()
@@ -421,6 +712,8 @@ public actor HackCLIClient {
       }
       stdoutPipe.fileHandleForReading.closeFile()
       stderrPipe.fileHandleForReading.closeFile()
+      stdinPipe?.fileHandleForReading.closeFile()
+      stdinPipe?.fileHandleForWriting.closeFile()
     })
   }
 
@@ -442,6 +735,39 @@ public actor HackCLIClient {
       }
       throw error
     }
+  }
+
+  private func unsupportedTailscaleOAuthStatusResponse(
+    result: CLIResult
+  ) -> TailscaleOAuthStatusResponse? {
+    guard result.exitCode != 0 else {
+      return nil
+    }
+    let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !stderr.isEmpty else {
+      return nil
+    }
+    let normalized = stderr.lowercased()
+    guard
+      normalized.contains("unknown command"),
+      normalized.contains("oauth-status"),
+      normalized.contains("tailscale")
+    else {
+      return nil
+    }
+    return TailscaleOAuthStatusResponse(
+      configured: false,
+      clientId: nil,
+      authRef: nil,
+      tailnet: nil,
+      keyExpirySeconds: nil,
+      validated: nil,
+      checkedAt: nil,
+      tokenExpiresAt: nil,
+      deleted: nil,
+      error:
+        "Installed hack CLI does not support tailscale OAuth commands yet. Run `hack update` (or reinstall from this repo) and reopen the desktop app."
+    )
   }
 
   private func inspectTailscaleDirect() async throws -> TailscaleInspectResponse {
@@ -572,6 +898,22 @@ public actor HackCLIClient {
       return String(value.dropLast())
     }
     return value
+  }
+
+  private func firstNonEmptyLine(_ value: String) -> String? {
+    for line in value.components(separatedBy: .newlines) {
+      let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+      if !trimmed.isEmpty {
+        return trimmed
+      }
+    }
+    return nil
+  }
+
+  private func normalized(_ value: String?) -> String? {
+    guard let value else { return nil }
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
   }
 
   private func runExecutable(

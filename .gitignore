@@ -54,6 +54,8 @@ zig-out/
 
 # hack tickets
 .hack/tickets/
+.hack/.internal/
+.hack/supervisor/
 
 
 SPECS/

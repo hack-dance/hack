@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 
 import {
+  DEFAULT_AUTH_ALIAS_HOST,
+  DEFAULT_AUTH_HOST,
+  DEFAULT_AUTH_SERVER_PORT,
   DEFAULT_CADDY_IP,
   DEFAULT_COREDNS_IP,
   DEFAULT_INGRESS_NETWORK,
@@ -36,6 +39,13 @@ test("renderGlobalCaddyCompose pins caddy and coredns when requested", () => {
   expect(text).toContain(`name: ${DEFAULT_INGRESS_NETWORK}`);
   expect(text).toContain(`ipv4_address: ${DEFAULT_CADDY_IP}`);
   expect(text).toContain(`ipv4_address: ${DEFAULT_COREDNS_IP}`);
+  expect(text).toContain(
+    `caddy_1: ${DEFAULT_AUTH_HOST}, ${DEFAULT_AUTH_ALIAS_HOST}`
+  );
+  expect(text).toContain(
+    `caddy_1.reverse_proxy: host.docker.internal:${DEFAULT_AUTH_SERVER_PORT}`
+  );
+  expect(text).toContain('"host.docker.internal:host-gateway"');
 });
 
 test("renderGlobalCoreDnsConfig matches .hack aliases and forwards external DNS", () => {

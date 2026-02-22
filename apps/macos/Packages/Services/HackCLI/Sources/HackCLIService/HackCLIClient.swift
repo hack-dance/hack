@@ -6,6 +6,7 @@ public enum HackCLIError: LocalizedError, Equatable {
   case commandFailed(exitCode: Int, stderr: String)
   case emptyOutput
   case invalidJson
+  case network(String)
 
   public var errorDescription: String? {
     switch self {
@@ -15,11 +16,21 @@ public enum HackCLIError: LocalizedError, Equatable {
       return "hack returned empty output"
     case .invalidJson:
       return "hack returned invalid JSON"
+    case let .network(message):
+      return message
     }
   }
 }
 
 public actor HackCLIClient {
+  private static let authServerCandidates = [
+    "https://auth.hack.gy",
+    "https://auth.hack",
+    "http://127.0.0.1:7790",
+  ]
+
+  private static let authRequestTimeoutSeconds: TimeInterval = 10
+
   public init() {}
 
   public func fetchProjects(includeGlobal: Bool) async throws -> ProjectListResponse {
@@ -311,6 +322,46 @@ public actor HackCLIClient {
     }
     let result = try await run(args, allowNonZeroExit: true)
     return try decodeJsonOrThrow(GitHubStatusResponse.self, result: result)
+  }
+
+  public func startGitHubOAuthFlow(
+    profileId: String,
+    setDefault: Bool
+  ) async throws -> GitHubOAuthFlowStartResponse {
+    var lastError: String? = nil
+    for candidate in Self.authServerCandidates {
+      guard
+        let startURL = buildAuthURL(
+          base: candidate,
+          path: "/v1/auth/github/start",
+          queryItems: [
+            URLQueryItem(name: "profile", value: profileId),
+            URLQueryItem(name: "set_default", value: setDefault ? "1" : "0"),
+          ]
+        )
+      else {
+        continue
+      }
+      do {
+        return try await fetchAuthJSON(GitHubOAuthFlowStartResponse.self, url: startURL)
+      } catch {
+        lastError = error.localizedDescription
+      }
+    }
+
+    throw HackCLIError.network(
+      lastError
+        ?? "Unable to reach local auth server. Start hack daemon and global infra, then retry."
+    )
+  }
+
+  public func fetchGitHubOAuthFlowStatus(
+    statusURL: String
+  ) async throws -> GitHubOAuthFlowStatusResponse {
+    guard let url = URL(string: statusURL) else {
+      throw HackCLIError.network("Invalid auth flow status URL.")
+    }
+    return try await fetchAuthJSON(GitHubOAuthFlowStatusResponse.self, url: url)
   }
 
   public func bootstrapRailwayNode(
@@ -754,6 +805,55 @@ public actor HackCLIClient {
     }
   }
 
+  private func buildAuthURL(
+    base: String,
+    path: String,
+    queryItems: [URLQueryItem]
+  ) -> URL? {
+    guard var components = URLComponents(string: base) else {
+      return nil
+    }
+    components.path = path
+    components.queryItems = queryItems
+    return components.url
+  }
+
+  private func fetchAuthJSON<T: Decodable>(_ type: T.Type, url: URL) async throws -> T {
+    var request = URLRequest(url: url)
+    request.timeoutInterval = Self.authRequestTimeoutSeconds
+    request.httpMethod = "GET"
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+    let data: Data
+    let response: URLResponse
+    do {
+      (data, response) = try await URLSession.shared.data(for: request)
+    } catch {
+      throw HackCLIError.network(error.localizedDescription)
+    }
+
+    guard let httpResponse = response as? HTTPURLResponse else {
+      throw HackCLIError.network("Auth server returned an unexpected response.")
+    }
+
+    let body = String(decoding: data, as: UTF8.self)
+    if !(200...299).contains(httpResponse.statusCode) {
+      if let decodedError = try? decode(AuthServerErrorPayload.self, from: body),
+        let message = normalized(decodedError.error)
+      {
+        throw HackCLIError.network(message)
+      }
+      let fallback = firstNonEmptyLine(body) ?? HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode)
+      throw HackCLIError.network(fallback)
+    }
+
+    do {
+      return try decode(type, from: body)
+    } catch {
+      throw HackCLIError.network("Auth server returned invalid JSON.")
+    }
+  }
+
   private func unsupportedTailscaleOAuthStatusResponse(
     result: CLIResult
   ) -> TailscaleOAuthStatusResponse? {
@@ -1089,4 +1189,8 @@ private struct CLIResult {
   let stdout: String
   let stderr: String
   let exitCode: Int
+}
+
+private struct AuthServerErrorPayload: Decodable {
+  let error: String?
 }

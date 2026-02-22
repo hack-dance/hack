@@ -11,6 +11,11 @@
       "sourceType": "github",
       "computedHash": "0e93caff870fb9998c4bff62e8623457325d7fbf4014fc06829d2a015821ab61"
     },
+    "neon-postgres": {
+      "source": "neondatabase/agent-skills",
+      "sourceType": "github",
+      "computedHash": "13624b09c8dde98402647ffa13158f0e66a3fe6c440e74b2110e8b455a11153a"
+    },
     "swiftui-animation": {
       "source": "jamesrochabrun/skills",
       "sourceType": "github",

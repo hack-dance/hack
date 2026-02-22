@@ -1,0 +1,2 @@
+$ cd ../.. && bunx ultracite check packages/db/src packages/db/drizzle.config.ts
+Checked 4 files in 11ms. No fixes applied.

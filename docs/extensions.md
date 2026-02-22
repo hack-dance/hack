@@ -118,6 +118,15 @@ Current gateway API surface (HTTP/WS):
 - `GET /control-plane/projects/:id/shells/:shellId`
 - `WS /control-plane/projects/:id/shells/:shellId/stream` (requires write token + allowWrites)
 
+Local auth service surface (daemon + global Caddy route):
+- `GET /health`
+- `GET /v1/auth/providers`
+- `GET /gh/start` (GitHub browser OAuth entrypoint)
+- `GET /gh/callback`
+- `GET /v1/auth/github/config`
+- `GET /v1/auth/github/start`
+- `GET /v1/auth/github/flows/:id`
+
 Interactive shell/TTY is available via the shell stream endpoints; use
 `hack x supervisor shell` or see protocol below.
 
@@ -254,7 +263,12 @@ Notes:
 - Keychain storage uses profile-specific `authRef` + `service`.
 - Token resolution order is keychain first, then environment fallback (`tokenEnv`).
 - If token metadata includes `expiresAt`, auth resolution attempts automatic GitHub App refresh using profile `appId`, `installationId`, and private key source.
-- macOS desktop includes a dedicated panel at `Settings / Extensions / GitHub` with a connected-account list and a `Connect in browser` action that runs `hack x github oauth-connect ...` in Terminal to launch browser auth.
+- Browser OAuth flow requires GitHub OAuth app config:
+  - `controlPlane.extensions["dance.hack.github"].config.oauthClientId`
+  - `controlPlane.extensions["dance.hack.github"].config.oauthClientSecretAuthRef` (default: `github.oauth.client_secret`)
+  - keychain secret at service `hack-github-auth`, name `<oauthClientSecretAuthRef>`
+- macOS desktop includes a dedicated panel at `Settings / Extensions / GitHub` with connected-account management and direct browser auth. It starts a local auth flow (via `auth.hack.gy` with localhost fallback), opens GitHub in your browser, then polls callback status and refreshes profiles automatically.
+- `auth.hack` and `auth.hack.gy` are routed by global Caddy to the daemon auth listener (`127.0.0.1:7790` by default), so this endpoint can also host future provider callbacks/hooks.
 
 #### job-show
 

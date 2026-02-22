@@ -572,6 +572,32 @@ public final class DashboardModel {
     }
   }
 
+  public func startGitHubOAuthFlow(
+    profileId: String,
+    setDefault: Bool
+  ) async -> GitHubOAuthFlowStartResponse? {
+    do {
+      return try await client.startGitHubOAuthFlow(
+        profileId: profileId,
+        setDefault: setDefault
+      )
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func fetchGitHubOAuthFlowStatus(
+    statusURL: String
+  ) async -> GitHubOAuthFlowStatusResponse? {
+    do {
+      return try await client.fetchGitHubOAuthFlowStatus(statusURL: statusURL)
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
   public func bootstrapRailwayNode(
     request: RailwayBootstrapRequest
   ) async -> RailwayBootstrapResponse? {

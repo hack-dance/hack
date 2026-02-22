@@ -2653,6 +2653,9 @@ private struct GitHubExtensionSettingsView: View {
   @State private var defaultProfile = ""
   @State private var newAccountProfileId = "default"
   @State private var connectSetsDefault = true
+  @State private var isAuthenticating = false
+  @State private var authPollingTask: Task<Void, Never>? = nil
+  @State private var authFlowStatus: GitHubOAuthFlowStatusResponse? = nil
   @State private var message = ""
   @State private var lastDiagnosticsRefreshAt: Date? = nil
 
@@ -2710,7 +2713,7 @@ private struct GitHubExtensionSettingsView: View {
         GlassCard(title: "Connect account", systemImage: "person.badge.plus") {
           VStack(alignment: .leading, spacing: 12) {
             Text(
-              "Connect a GitHub account in your browser using gh CLI. Use profile ids like default, personal, or work."
+              "Launch browser OAuth directly from Hack. Callback lands on your local auth server and profile tokens are saved to keychain."
             )
               .font(.mono(.caption))
               .foregroundStyle(.secondary)
@@ -2722,11 +2725,27 @@ private struct GitHubExtensionSettingsView: View {
             Toggle("Set as default after connect", isOn: $connectSetsDefault)
               .toggleStyle(.switch)
 
+            if isAuthenticating {
+              StatusPill(text: "Waiting for browser callback", tone: .good)
+            } else if let authFlowStatus {
+              switch authFlowStatus.status {
+              case "complete":
+                StatusPill(text: "Connected", tone: .good)
+              case "error", "expired":
+                StatusPill(text: "Connect failed", tone: .warn)
+              default:
+                StatusPill(text: "Connect pending", tone: .neutral)
+              }
+            }
+
             HStack(spacing: 10) {
               Button {
-                connectGitHubAccount()
+                toggleGitHubAuthFlow()
               } label: {
-                Label("Connect in browser", systemImage: "safari")
+                Label(
+                  isAuthenticating ? "Cancel connect" : "Connect in browser",
+                  systemImage: isAuthenticating ? "xmark.circle" : "safari"
+                )
               }
               .adaptiveToolbarButtonProminent()
 
@@ -2814,6 +2833,9 @@ private struct GitHubExtensionSettingsView: View {
     .onChange(of: model.lastUpdated) { _, _ in
       Task { await loadConfigFromDisk() }
     }
+    .onDisappear {
+      cancelGitHubAuthFlow(userInitiated: false)
+    }
   }
 
   private var resolvedDefaultProfile: String {
@@ -2895,25 +2917,107 @@ private struct GitHubExtensionSettingsView: View {
     await refreshGitHubDiagnostics()
   }
 
-  private func connectGitHubAccount() {
-    let trimmed = newAccountProfileId.trimmingCharacters(in: .whitespacesAndNewlines)
-    let profile = trimmed.isEmpty ? "default" : trimmed
-    var command = "hack x github oauth-connect --profile \(shellQuote(profile))"
-    if connectSetsDefault {
-      command += " --set-default"
-      defaultProfile = profile
+  private func toggleGitHubAuthFlow() {
+    if isAuthenticating {
+      cancelGitHubAuthFlow(userInitiated: true)
+      return
     }
-    TerminalIntegration.openTerminalWithCommand(command)
-    message =
-      "Opened Terminal for browser auth. Complete login, then click Refresh accounts."
+    authPollingTask = Task {
+      await connectGitHubAccountViaBrowser()
+    }
   }
 
-  private func shellQuote(_ value: String) -> String {
-    if value.isEmpty {
-      return "''"
+  private func cancelGitHubAuthFlow(userInitiated: Bool) {
+    authPollingTask?.cancel()
+    authPollingTask = nil
+    isAuthenticating = false
+    if userInitiated {
+      message = "GitHub authentication canceled."
     }
-    let escaped = value.replacingOccurrences(of: "'", with: "'\"'\"'")
-    return "'\(escaped)'"
+  }
+
+  private func connectGitHubAccountViaBrowser() async {
+    defer {
+      authPollingTask = nil
+      isAuthenticating = false
+    }
+
+    let trimmed = newAccountProfileId.trimmingCharacters(in: .whitespacesAndNewlines)
+    let profile = trimmed.isEmpty ? "default" : trimmed
+    isAuthenticating = true
+    authFlowStatus = nil
+    message = "Starting GitHub browser auth for profile \(profile)…"
+
+    guard
+      let started = await model.startGitHubOAuthFlow(
+        profileId: profile,
+        setDefault: connectSetsDefault
+      )
+    else {
+      let detail = model.errorMessage?.trimmingCharacters(
+        in: .whitespacesAndNewlines
+      )
+      if let detail, !detail.isEmpty {
+        message = detail
+      } else {
+        message =
+          "Unable to start GitHub auth. Confirm daemon is running and auth routing is available."
+      }
+      return
+    }
+
+    if connectSetsDefault {
+      defaultProfile = profile
+    }
+
+    guard let authorizeURL = URL(string: started.authorizeUrl) else {
+      message = "Auth start returned an invalid authorize URL."
+      return
+    }
+
+    NSWorkspace.shared.open(authorizeURL)
+    message = "Browser opened. Approve access to finish connecting \(profile)."
+
+    let formatter = ISO8601DateFormatter()
+    let expiresAtDate = formatter.date(from: started.expiresAt)
+
+    while !Task.isCancelled {
+      if let expiresAtDate, Date() >= expiresAtDate {
+        message = "Authentication flow expired. Start a new connection."
+        return
+      }
+
+      try? await Task.sleep(nanoseconds: 1_000_000_000)
+      guard !Task.isCancelled else {
+        return
+      }
+
+      guard
+        let flowStatus = await model.fetchGitHubOAuthFlowStatus(
+          statusURL: started.statusUrl
+        )
+      else {
+        continue
+      }
+
+      authFlowStatus = flowStatus
+      switch flowStatus.status {
+      case "complete":
+        let account = flowStatus.accountLogin ?? "GitHub account"
+        message = "Connected \(account) to profile \(flowStatus.profileId)."
+        await model.refresh()
+        await refreshGitHubDiagnostics()
+        return
+      case "error":
+        message = flowStatus.error ?? "GitHub authentication failed."
+        return
+      case "expired":
+        message = "Authentication flow expired. Start a new connection."
+        return
+      default:
+        continue
+      }
+    }
   }
 }
 

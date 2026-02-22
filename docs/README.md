@@ -15,6 +15,11 @@ This directory contains the public documentation for hack. Specs remain in `SPEC
 - [Extensions](extensions.md)
 - [Control-plane SDK](sdk.md)
 - [Provider composition + project overrides spec](provider-composition-and-project-overrides.md)
+- [Monorepo layout plan](monorepo-layout-plan.md)
+
+Monorepo note:
+- Root scripts orchestrate workspace tasks through Turbo.
+- Package-local commands remain available via `bun run --cwd <workspace> <script>`.
 
 Quick diagnostics:
 - `hack usage` (resource usage across running projects)
@@ -32,5 +37,6 @@ Quick diagnostics:
 - [Run remote supervisor jobs](guides/remote-supervisor.md)
 - [Run a remote node via container image](guides/remote-node-container.md)
 - [Bootstrap a remote node on Railway](guides/remote-node-railway.md)
+- [Bootstrap auth-broker with Neon + Railway](guides/auth-broker-neon-bootstrap.md)
 - [Run laptop-to-laptop node pairing e2e](guides/remote-node-laptop-e2e.md)
 - [Create a new extension](guides/create-extension.md)

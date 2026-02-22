@@ -1084,6 +1084,77 @@ public struct GitHubStatusResponse: Decodable, Hashable {
   }
 }
 
+public struct GitHubOAuthFlowStartResponse: Decodable, Hashable {
+  public let ok: Bool
+  public let flowId: String
+  public let profileId: String
+  public let setDefault: Bool
+  public let authorizeUrl: String
+  public let statusUrl: String
+  public let expiresAt: String
+
+  public init(
+    ok: Bool,
+    flowId: String,
+    profileId: String,
+    setDefault: Bool,
+    authorizeUrl: String,
+    statusUrl: String,
+    expiresAt: String
+  ) {
+    self.ok = ok
+    self.flowId = flowId
+    self.profileId = profileId
+    self.setDefault = setDefault
+    self.authorizeUrl = authorizeUrl
+    self.statusUrl = statusUrl
+    self.expiresAt = expiresAt
+  }
+}
+
+public struct GitHubOAuthFlowStatusResponse: Decodable, Hashable {
+  public let id: String
+  public let status: String
+  public let profileId: String
+  public let setDefault: Bool
+  public let createdAt: String
+  public let expiresAt: String
+  public let completedAt: String?
+  public let accountLogin: String?
+  public let accountName: String?
+  public let accountId: String?
+  public let installationId: String?
+  public let error: String?
+
+  public init(
+    id: String,
+    status: String,
+    profileId: String,
+    setDefault: Bool,
+    createdAt: String,
+    expiresAt: String,
+    completedAt: String?,
+    accountLogin: String?,
+    accountName: String?,
+    accountId: String?,
+    installationId: String?,
+    error: String?
+  ) {
+    self.id = id
+    self.status = status
+    self.profileId = profileId
+    self.setDefault = setDefault
+    self.createdAt = createdAt
+    self.expiresAt = expiresAt
+    self.completedAt = completedAt
+    self.accountLogin = accountLogin
+    self.accountName = accountName
+    self.accountId = accountId
+    self.installationId = installationId
+    self.error = error
+  }
+}
+
 public struct RailwayBootstrapRequest: Hashable {
   public let railwayProject: String
   public let railwayService: String?

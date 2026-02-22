@@ -1,0 +1,16 @@
+$ bun test
+bun test v1.3.9 (cf6cdbbb)
+
+tests/index.test.ts:
+(pass) auth broker github flow routes > better auth status endpoint is exposed [13.67ms]
+(pass) auth broker github flow routes > shared middleware accepts optional inbound request id header [6.56ms]
+(pass) auth broker github flow routes > shared middleware enforces get-only access on read routes [9.30ms]
+(pass) auth broker github flow routes > shared middleware does not block better-auth write methods [1.72ms]
+(pass) auth broker github flow routes > start route issues flow payload and polling reads pending state [5.43ms]
+(pass) auth broker github flow routes > poll route rejects invalid device code [11.46ms]
+(pass) auth broker github flow routes > callback error path marks flow status as error [6.17ms]
+
+ 7 pass
+ 0 fail
+ 33 expect() calls
+Ran 7 tests across 1 file. [311.00ms]

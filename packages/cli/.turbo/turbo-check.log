@@ -1,0 +1,2 @@
+$ cd ../.. && bunx ultracite check packages/cli/index.ts index.ts scripts/build-release.ts scripts/build-node-runtime-image.ts scripts/install-cli.ts scripts/install-status.ts scripts/uninstall-cli.ts scripts/macos-ghostty-bundle.ts scripts/macos-ghostty-setup.ts
+Checked 9 files in 24ms. No fixes applied.

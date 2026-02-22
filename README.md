@@ -393,6 +393,7 @@ Start here:
 - `docs/architecture.md`
 - `docs/gateway.md`
 - `docs/extensions.md`
+- `docs/monorepo-layout-plan.md`
 
 ## Agent setup (CLI-first)
 
@@ -882,7 +883,20 @@ bun dev --help
 ### Tests
 
 ```bash
-bun test
+bun run test
+```
+
+Runs workspace tests via Turbo (`@hack/cli`, `@hack/auth-broker`, `@hack/db`).
+
+### Workspace command model
+
+Root commands are orchestration wrappers. For package-local work, run commands directly:
+
+```bash
+bun run --cwd packages/cli build
+bun run --cwd packages/cli macos:ghostty:bundle
+bun run --cwd services/auth-broker test
+bun run --cwd packages/db db:migrate
 ```
 
 ### Conventional commits
@@ -915,8 +929,7 @@ bun run release:prepare
 git push --follow-tags
 ```
 
-Updates `CHANGELOG.md` + `package.json`, creates the release commit and tag, and triggers the
-GitHub Release workflow on push.
+Updates `CHANGELOG.md` plus root/workspace `package.json` versions, creates the release commit and tag, and triggers the GitHub Release workflow on push.
 
 See `PACKAGING.md` for details.
 

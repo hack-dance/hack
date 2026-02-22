@@ -4,7 +4,10 @@ import { basename, resolve } from "node:path";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
 import { optFollow, optJson, optTail } from "../cli/options.ts";
-import { resolveGitHubAppToken } from "../control-plane/extensions/github/auth.ts";
+import {
+  resolveGitHubAppToken,
+  resolveGitHubAuthSettings,
+} from "../control-plane/extensions/github/auth.ts";
 import {
   createGitHubAppClient,
   parseGitHubRepoRef,
@@ -163,6 +166,14 @@ const optPrBody = defineOption({
   description: "Optional explicit PR body for --pr mode",
 } as const);
 
+const optGitHubProfile = defineOption({
+  name: "githubProfile",
+  type: "string",
+  long: "--github-profile",
+  valueHint: "<profile-id>",
+  description: "GitHub profile override for --pr automation",
+} as const);
+
 const runOptions = [
   optNode,
   optProvider,
@@ -177,6 +188,7 @@ const runOptions = [
   optPrBase,
   optPrTitle,
   optPrBody,
+  optGitHubProfile,
   optJson,
 ] as const;
 
@@ -247,7 +259,7 @@ export const dispatchCommand = withHandler(
       title: "Dispatch commands",
       tone: "info",
       lines: [
-        "hack dispatch run --project <name|id> [--node <id|default|auto>] [--provider <name>] [--profile <id>] [--bootstrap-if-needed] [--branch <name>] [--runner <runner>] -- <command...>",
+        "hack dispatch run --project <name|id> [--node <id|default|auto>] [--provider <name>] [--profile <id>] [--bootstrap-if-needed] [--branch <name>] [--runner <runner>] [--pr --github-profile <id>] -- <command...>",
         "hack dispatch status <run-id>",
         "hack dispatch logs <run-id> [--follow]",
       ],
@@ -559,6 +571,7 @@ async function handleDispatchRun({
         prBase: (args.options.prBase ?? "main").trim() || "main",
         prTitle: args.options.prTitle?.trim(),
         prBody: args.options.prBody,
+        githubProfile: normalizeOptionalString(args.options.githubProfile),
       });
       if (prOutcome.ok) {
         await appendDispatchRunEvent({
@@ -569,6 +582,8 @@ async function handleDispatchRun({
             url: prOutcome.pull.htmlUrl,
             base: prOutcome.pull.baseRef,
             head: prOutcome.pull.headRef,
+            profileId: prOutcome.profileId,
+            profileSource: prOutcome.profileSource,
           },
         });
       } else {
@@ -627,6 +642,8 @@ async function handleDispatchRun({
               pr: prOutcome.ok
                 ? {
                     status: "ok",
+                    profileId: prOutcome.profileId,
+                    profileSource: prOutcome.profileSource,
                     number: prOutcome.pull.number,
                     url: prOutcome.pull.htmlUrl,
                     base: prOutcome.pull.baseRef,
@@ -634,6 +651,8 @@ async function handleDispatchRun({
                   }
                 : {
                     status: "error",
+                    profileId: prOutcome.profileId,
+                    profileSource: prOutcome.profileSource,
                     error: prOutcome.error,
                   },
             }
@@ -686,6 +705,9 @@ async function handleDispatchRun({
         ["route_source", routeMetadata.nodeSource],
         ["provider", routeMetadata.provider],
         ["profile", routeMetadata.profileId ?? ""],
+        ...(prOutcome
+          ? ([["github_profile", prOutcome.profileId]] as const)
+          : []),
         ["logs", run.artifacts.logPath],
         ["summary", run.artifacts.summaryPath],
         ...(prOutcome?.ok ? ([["pr", prOutcome.pull.htmlUrl]] as const) : []),
@@ -1786,6 +1808,8 @@ function runStatusToExitCode(input: {
 type DispatchPrOutcome =
   | {
       readonly ok: true;
+      readonly profileId: string;
+      readonly profileSource: string;
       readonly pull: {
         readonly number: number;
         readonly htmlUrl: string;
@@ -1796,6 +1820,8 @@ type DispatchPrOutcome =
     }
   | {
       readonly ok: false;
+      readonly profileId: string;
+      readonly profileSource: string;
       readonly error: string;
     };
 
@@ -1850,11 +1876,24 @@ async function runDispatchPrAutomation(input: {
   readonly prBase: string;
   readonly prTitle?: string;
   readonly prBody?: string;
+  readonly githubProfile?: string;
 }): Promise<DispatchPrOutcome> {
+  const requestedGitHubProfile = normalizeOptionalString(input.githubProfile);
+  const selectedGitHubProfile =
+    requestedGitHubProfile ??
+    resolveGitHubAuthSettings({
+      controlPlaneConfig: input.controlPlaneConfig,
+    }).profileId;
+  const selectedGitHubProfileSource = requestedGitHubProfile
+    ? "command_flags"
+    : "project_or_global";
+
   const branch = (input.workspace.branch ?? input.run.branch ?? "").trim();
   if (!branch) {
     return {
       ok: false,
+      profileId: selectedGitHubProfile,
+      profileSource: selectedGitHubProfileSource,
       error: "Cannot open PR without a resolved workspace branch.",
     };
   }
@@ -1897,7 +1936,12 @@ async function runDispatchPrAutomation(input: {
     ...(pushPolicy.approved ? {} : { error: pushPolicy.error }),
   });
   if (!pushPolicy.approved) {
-    return { ok: false, error: pushPolicy.error };
+    return {
+      ok: false,
+      profileId: selectedGitHubProfile,
+      profileSource: selectedGitHubProfileSource,
+      error: pushPolicy.error,
+    };
   }
 
   const createdPush = await input.selectedNode.client.createJob({
@@ -1908,6 +1952,8 @@ async function runDispatchPrAutomation(input: {
   if (!createdPush.ok) {
     return {
       ok: false,
+      profileId: selectedGitHubProfile,
+      profileSource: selectedGitHubProfileSource,
       error: `Failed to create push job (${createdPush.status}): ${createdPush.error.message}`,
     };
   }
@@ -1924,12 +1970,16 @@ async function runDispatchPrAutomation(input: {
   if (!pushOutcome.job) {
     return {
       ok: false,
+      profileId: selectedGitHubProfile,
+      profileSource: selectedGitHubProfileSource,
       error: "Push job ended without terminal state.",
     };
   }
   if (pushOutcome.job.status !== "completed") {
     return {
       ok: false,
+      profileId: selectedGitHubProfile,
+      profileSource: selectedGitHubProfileSource,
       error: `Push job failed with status ${pushOutcome.job.status}`,
     };
   }
@@ -1940,6 +1990,8 @@ async function runDispatchPrAutomation(input: {
   if (!repo) {
     return {
       ok: false,
+      profileId: selectedGitHubProfile,
+      profileSource: selectedGitHubProfileSource,
       error:
         "Unable to resolve GitHub repo from origin remote. Pass a project registered to a GitHub-backed repo.",
     };
@@ -1947,10 +1999,14 @@ async function runDispatchPrAutomation(input: {
 
   const token = await resolveGitHubAppToken({
     controlPlaneConfig: input.controlPlaneConfig,
+    ...(requestedGitHubProfile ? { profileId: requestedGitHubProfile } : {}),
+    allowProjectOverride: !requestedGitHubProfile,
   });
   if (!token.ok) {
     return {
       ok: false,
+      profileId: token.profileId,
+      profileSource: token.profileSource,
       error: token.error,
     };
   }
@@ -1966,6 +2022,8 @@ async function runDispatchPrAutomation(input: {
   if (!found.ok) {
     return {
       ok: false,
+      profileId: token.profileId,
+      profileSource: token.profileSource,
       error: `GitHub lookup failed (${found.status}): ${found.error}`,
     };
   }
@@ -1994,6 +2052,8 @@ async function runDispatchPrAutomation(input: {
   if (!upserted.ok) {
     return {
       ok: false,
+      profileId: token.profileId,
+      profileSource: token.profileSource,
       error: `GitHub PR upsert failed (${upserted.status}): ${upserted.error}`,
     };
   }
@@ -2011,6 +2071,8 @@ async function runDispatchPrAutomation(input: {
 
   return {
     ok: true,
+    profileId: token.profileId,
+    profileSource: token.profileSource,
     pull: {
       number: upserted.data.number,
       htmlUrl: upserted.data.htmlUrl,
@@ -2399,13 +2461,20 @@ function buildSummaryMarkdown(input: {
   if (input.prOutcome?.ok) {
     prLines = [
       "- status: upserted",
+      `- profile: ${input.prOutcome.profileId}`,
+      `- profile_source: ${input.prOutcome.profileSource}`,
       `- number: ${input.prOutcome.pull.number}`,
       `- url: ${input.prOutcome.pull.htmlUrl}`,
       `- base: ${input.prOutcome.pull.baseRef}`,
       `- head: ${input.prOutcome.pull.headRef}`,
     ];
   } else if (input.prOutcome && !input.prOutcome.ok) {
-    prLines = ["- status: failed", `- error: ${input.prOutcome.error}`];
+    prLines = [
+      "- status: failed",
+      `- profile: ${input.prOutcome.profileId}`,
+      `- profile_source: ${input.prOutcome.profileSource}`,
+      `- error: ${input.prOutcome.error}`,
+    ];
   }
 
   return [

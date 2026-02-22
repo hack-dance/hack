@@ -59,6 +59,9 @@ Active tickets:
 12. `T-00118` Published node-runtime container image + bootstrap docs.
 13. `T-00116` GitHub App JWT -> installation token exchange in connect flow.
 14. `T-00117` Env/secret backend strategy contract + CLI.
+15. `T-00141` GitHub extension multi-account profiles + routing selection.
+16. `T-00142` GitHub one-click OAuth/device flow + installation picker.
+17. `T-00143` Dispatch/macOS GitHub profile selection + PR-run linkage.
 
 ## M1-M3 Acceptance Summary
 M1:
@@ -112,6 +115,15 @@ M3:
    - keychain-first token resolution in both extension commands and dispatch `--pr` flow.
    - GitHub App mode in `hack x github connect` (`--app-id`, `--installation-id`, private key sources).
    - automatic token refresh on expiry using configured App credentials.
+
+### M6.1: GitHub Account UX + Profiles (`T-00141`, `T-00142`, `T-00143`)
+1. Add profile-aware GitHub extension config for multiple accounts/installations.
+2. Add one-click OAuth/device-flow connect and installation selection UX.
+3. Make dispatch/macOS PR flows profile-aware with deterministic precedence:
+   - command flag
+   - project override
+   - global default profile
+4. Persist selected GitHub profile/account metadata in run/ticket artifacts.
 
 ### M7: Controller Devcontainer Bridge (`T-00111`)
 1. Add node CLI devcontainer commands:

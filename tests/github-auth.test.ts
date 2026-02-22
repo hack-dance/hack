@@ -4,8 +4,10 @@ import {
   deleteGitHubAppToken,
   exchangeGitHubAppInstallationToken,
   type FetchLike,
+  listGitHubAuthProfiles,
   resolveGitHubAppToken,
   resolveGitHubAuthSettings,
+  resolveGitHubAuthSettingsResult,
   type SecretStore,
   saveGitHubAppToken,
 } from "../src/control-plane/extensions/github/auth.ts";
@@ -20,6 +22,9 @@ function createControlPlaneConfig(overrides?: {
   readonly privateKeyEnv?: string;
   readonly privateKeyAuthRef?: string;
   readonly apiBaseUrl?: string;
+  readonly defaultProfile?: string;
+  readonly profiles?: Record<string, Record<string, string>>;
+  readonly projectGitHubProfile?: string;
 }): ControlPlaneConfig {
   return {
     extensions: {
@@ -42,6 +47,10 @@ function createControlPlaneConfig(overrides?: {
           ...(overrides?.apiBaseUrl
             ? { apiBaseUrl: overrides.apiBaseUrl }
             : {}),
+          ...(overrides?.defaultProfile
+            ? { defaultProfile: overrides.defaultProfile }
+            : {}),
+          ...(overrides?.profiles ? { profiles: overrides.profiles } : {}),
         },
       },
     },
@@ -91,6 +100,22 @@ function createControlPlaneConfig(overrides?: {
     providers: {
       profiles: {},
     },
+    ...(overrides?.projectGitHubProfile
+      ? {
+          routing: {
+            mode: "existing_only",
+            bootstrap: {
+              enabled: false,
+              setAsProjectNode: false,
+            },
+            overrides: {
+              github: {
+                profile: overrides.projectGitHubProfile,
+              },
+            },
+          },
+        }
+      : {}),
     secrets: {
       backend: "keychain",
       allowEnvAuthRefs: true,
@@ -177,6 +202,87 @@ test("resolveGitHubAuthSettings reads extension overrides", () => {
   expect(settings.tokenEnv).toBe("GH_TOKEN");
   expect(settings.authRef).toBe("github.app.team");
   expect(settings.service).toBe("hack-github-team");
+});
+
+test("listGitHubAuthProfiles exposes configured default and summaries", () => {
+  const config = createControlPlaneConfig({
+    defaultProfile: "work",
+    profiles: {
+      default: {
+        authRef: "github.app.default",
+        service: "hack-github-default",
+      },
+      work: {
+        authRef: "github.app.work",
+        service: "hack-github-work",
+        appId: "123",
+        installationId: "456",
+      },
+    },
+  });
+
+  const catalog = listGitHubAuthProfiles({ controlPlaneConfig: config });
+  expect(catalog.defaultProfileId).toBe("work");
+  expect(catalog.selectedProfileId).toBe("work");
+  expect(catalog.profiles.length).toBe(2);
+  expect(catalog.profiles.some((profile) => profile.id === "work")).toBe(true);
+});
+
+test("resolveGitHubAuthSettings selection precedence is command then project then global default", () => {
+  const config = createControlPlaneConfig({
+    defaultProfile: "default",
+    profiles: {
+      default: {
+        authRef: "github.app.default",
+        service: "hack-github-default",
+      },
+      project: {
+        authRef: "github.app.project",
+        service: "hack-github-project",
+      },
+      command: {
+        authRef: "github.app.command",
+        service: "hack-github-command",
+      },
+    },
+    projectGitHubProfile: "project",
+  });
+
+  const projectSelected = resolveGitHubAuthSettings({
+    controlPlaneConfig: config,
+  });
+  expect(projectSelected.profileId).toBe("project");
+  expect(projectSelected.profileSource).toBe("project_routing");
+
+  const commandSelected = resolveGitHubAuthSettings({
+    controlPlaneConfig: config,
+    profileId: "command",
+  });
+  expect(commandSelected.profileId).toBe("command");
+  expect(commandSelected.profileSource).toBe("command_flags");
+});
+
+test("resolveGitHubAuthSettingsResult returns error for missing selected profile", () => {
+  const config = createControlPlaneConfig({
+    defaultProfile: "default",
+    profiles: {
+      default: {
+        authRef: "github.app.default",
+        service: "hack-github-default",
+      },
+    },
+    projectGitHubProfile: "missing",
+  });
+
+  const result = resolveGitHubAuthSettingsResult({
+    controlPlaneConfig: config,
+  });
+  expect(result.ok).toBe(false);
+  if (result.ok) {
+    return;
+  }
+  expect(result.error).toContain("missing");
+  expect(result.availableProfileIds).toEqual(["default"]);
 });
 
 test("resolveGitHubAppToken prefers keychain token", async () => {
@@ -430,7 +536,5 @@ test("resolveGitHubAppToken returns refresh error when token is expired and no f
   if (resolved.ok) {
     return;
   }
-  expect(resolved.error).toContain(
-    "Stored GitHub token is expired and refresh failed"
-  );
+  expect(resolved.error).toContain("is expired and refresh failed");
 });

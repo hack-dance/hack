@@ -952,6 +952,138 @@ public struct RailwayInspectResponse: Decodable, Hashable {
   }
 }
 
+public struct GitHubProfileSummary: Decodable, Hashable {
+  public let id: String
+  public let isDefault: Bool
+  public let mode: String
+  public let authRef: String
+  public let service: String
+  public let appId: String?
+  public let installationId: String?
+  public let accountLogin: String?
+  public let accountName: String?
+  public let accountId: String?
+
+  public init(
+    id: String,
+    isDefault: Bool,
+    mode: String,
+    authRef: String,
+    service: String,
+    appId: String?,
+    installationId: String?,
+    accountLogin: String?,
+    accountName: String?,
+    accountId: String?
+  ) {
+    self.id = id
+    self.isDefault = isDefault
+    self.mode = mode
+    self.authRef = authRef
+    self.service = service
+    self.appId = appId
+    self.installationId = installationId
+    self.accountLogin = accountLogin
+    self.accountName = accountName
+    self.accountId = accountId
+  }
+}
+
+public struct GitHubProfilesResponse: Decodable, Hashable {
+  public let selectedProfile: String
+  public let selectedSource: String
+  public let defaultProfile: String
+  public let projectOverride: String?
+  public let selectedMissing: Bool
+  public let profiles: [GitHubProfileSummary]
+
+  public init(
+    selectedProfile: String,
+    selectedSource: String,
+    defaultProfile: String,
+    projectOverride: String?,
+    selectedMissing: Bool,
+    profiles: [GitHubProfileSummary]
+  ) {
+    self.selectedProfile = selectedProfile
+    self.selectedSource = selectedSource
+    self.defaultProfile = defaultProfile
+    self.projectOverride = projectOverride
+    self.selectedMissing = selectedMissing
+    self.profiles = profiles
+  }
+}
+
+public struct GitHubStatusResponse: Decodable, Hashable {
+  public let extensionId: String
+  public let selectedProfile: String
+  public let selectedSource: String
+  public let defaultProfile: String
+  public let authRef: String
+  public let service: String
+  public let tokenEnvFallback: String
+  public let mode: String
+  public let appId: String?
+  public let installationId: String?
+  public let privateKeyEnv: String
+  public let privateKeyAuthRef: String?
+  public let apiBaseUrl: String
+  public let accountLogin: String?
+  public let accountName: String?
+  public let accountId: String?
+  public let tokenResolved: Bool
+  public let tokenSource: String?
+  public let tokenExpiresAt: String?
+  public let profileError: String?
+  public let error: String?
+
+  public init(
+    extensionId: String,
+    selectedProfile: String,
+    selectedSource: String,
+    defaultProfile: String,
+    authRef: String,
+    service: String,
+    tokenEnvFallback: String,
+    mode: String,
+    appId: String?,
+    installationId: String?,
+    privateKeyEnv: String,
+    privateKeyAuthRef: String?,
+    apiBaseUrl: String,
+    accountLogin: String?,
+    accountName: String?,
+    accountId: String?,
+    tokenResolved: Bool,
+    tokenSource: String?,
+    tokenExpiresAt: String?,
+    profileError: String?,
+    error: String?
+  ) {
+    self.extensionId = extensionId
+    self.selectedProfile = selectedProfile
+    self.selectedSource = selectedSource
+    self.defaultProfile = defaultProfile
+    self.authRef = authRef
+    self.service = service
+    self.tokenEnvFallback = tokenEnvFallback
+    self.mode = mode
+    self.appId = appId
+    self.installationId = installationId
+    self.privateKeyEnv = privateKeyEnv
+    self.privateKeyAuthRef = privateKeyAuthRef
+    self.apiBaseUrl = apiBaseUrl
+    self.accountLogin = accountLogin
+    self.accountName = accountName
+    self.accountId = accountId
+    self.tokenResolved = tokenResolved
+    self.tokenSource = tokenSource
+    self.tokenExpiresAt = tokenExpiresAt
+    self.profileError = profileError
+    self.error = error
+  }
+}
+
 public struct RailwayBootstrapRequest: Hashable {
   public let railwayProject: String
   public let railwayService: String?

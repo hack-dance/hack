@@ -103,7 +103,7 @@ Use `hack x <namespace> help` to list commands.
 - Cloudflare: `hack x cloudflare tunnel-print|tunnel-setup|tunnel-start|tunnel-stop|access-setup`
 - Tailscale: `hack x tailscale setup|status|inspect|oauth-status|oauth-connect|oauth-disconnect|ip`
 - Tickets: `hack x tickets setup|create|update|list|show|status|sync|tui` (see `docs/guides/tickets.md`)
-- GitHub: `hack x github connect|disconnect|status|pr-upsert`
+- GitHub: `hack x github connect|oauth-connect|disconnect|profiles|use|status|pr-upsert`
 
 Gateway tokens default to `read` scope. Use `--scope write` to permit non-GET requests (also
 requires global `controlPlane.gateway.allowWrites = true`).
@@ -188,42 +188,73 @@ Options:
 
 ### GitHub extension (`hack x github`)
 
-Store installation token directly:
+Connect or update a profile directly from token input:
 
 ```bash
-hack x github connect --token-env HACK_GITHUB_APP_TOKEN
+hack x github connect --profile default --token-env HACK_GITHUB_APP_TOKEN
 # or:
-printf "%s" "$HACK_GITHUB_APP_TOKEN" | hack x github connect --stdin
+printf "%s" "$HACK_GITHUB_APP_TOKEN" | hack x github connect --profile default --stdin
 ```
 
-Exchange GitHub App credentials for an installation token (recommended):
+Exchange GitHub App credentials for an installation token (recommended for least privilege):
 
 ```bash
 hack x github connect \
+  --profile work \
+  --set-default \
   --app-id 12345 \
   --installation-id 67890 \
   --private-key-env HACK_GITHUB_APP_PRIVATE_KEY
 
 # or pass key material directly and persist it in keychain:
 printf "%s" "$GITHUB_APP_PRIVATE_KEY" | hack x github connect \
+  --profile work \
   --app-id 12345 \
   --installation-id 67890 \
   --private-key-stdin \
   --private-key-auth-ref github.app.private_key.default
 ```
 
-Status + PR operations:
+One-click browser OAuth bootstrap (via `gh`) + installation picker:
 
 ```bash
-hack x github status
-hack x github pr-upsert --repo owner/repo --head my-branch --base main --title "My PR" --body "Details"
+hack x github oauth-connect --profile personal --set-default
+# optional non-interactive installation bind:
+hack x github oauth-connect --profile personal --installation-id 12345678
+```
+
+Profile management + status:
+
+```bash
+hack x github profiles
+hack x github profiles --json
+hack x github use --profile work
+hack x github status --profile work
+hack x github status --profile work --json
+hack x github disconnect --profile work
+```
+
+PR operations:
+
+```bash
+hack x github pr-upsert \
+  --profile work \
+  --repo owner/repo \
+  --head my-branch \
+  --base main \
+  --title "My PR" \
+  --body "Details"
 ```
 
 Notes:
-- Keychain storage uses `authRef` + `service` configured at:
-  `controlPlane.extensions["dance.hack.github"].config`.
+- Profile config lives at:
+  `controlPlane.extensions["dance.hack.github"].config.profiles`.
+- Profile selection precedence is:
+  `--profile` -> `controlPlane.routing.overrides.github.profile` -> `config.defaultProfile`.
+- Keychain storage uses profile-specific `authRef` + `service`.
 - Token resolution order is keychain first, then environment fallback (`tokenEnv`).
-- If token metadata includes `expiresAt`, auth resolution attempts automatic GitHub App refresh using configured `appId`, `installationId`, and private key source.
+- If token metadata includes `expiresAt`, auth resolution attempts automatic GitHub App refresh using profile `appId`, `installationId`, and private key source.
+- macOS desktop includes a dedicated panel at `Settings / Extensions / GitHub` with a connected-account list and a `Connect in browser` action that runs `hack x github oauth-connect ...` in Terminal to launch browser auth.
 
 #### job-show
 

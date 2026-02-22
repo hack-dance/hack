@@ -46,6 +46,13 @@ struct ProjectDetailView: View {
   @State private var executionTargetMessage = ""
   @State private var globalDefaultProvider = ""
   @State private var globalDefaultProfile = ""
+  @State private var githubProjectProfile = ""
+  @State private var githubDefaultProfile = ""
+  @State private var githubProfileOptions: [String] = []
+  @State private var githubProfilesById: [String: GitHubProfileSummary] = [:]
+  @State private var githubResolvedProfile = ""
+  @State private var githubResolvedStatus: GitHubStatusResponse? = nil
+  @State private var githubProfileMessage = ""
   @State private var executionTargetReloadTask: Task<Void, Never>? = nil
 
   var body: some View {
@@ -246,6 +253,7 @@ struct ProjectDetailView: View {
             runtimeNotConfiguredCard
           }
           executionTargetSection
+          githubProfileSection
           servicesSection
           if lifecycleSummary.hasEntries {
             lifecycleSection
@@ -484,6 +492,119 @@ struct ProjectDetailView: View {
         Text("No services registered.")
           .font(.mono(.subheadline))
           .foregroundStyle(.secondary)
+      }
+    }
+  }
+
+  private var githubProfileSection: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      HStack(spacing: 10) {
+        Image(systemName: "person.2.badge.gearshape")
+          .foregroundStyle(.secondary)
+        Text("GitHub profile")
+          .font(.mono(.headline, weight: .semibold))
+        Spacer()
+      }
+      .overlay(alignment: .bottom) {
+        Rectangle()
+          .fill(Color.white.opacity(0.08))
+          .frame(height: 1)
+          .offset(y: 8)
+      }
+
+      HStack(spacing: 8) {
+        StatusPill(
+          text: githubProjectProfile.isEmpty ? "Inherited profile" : "Project override",
+          tone: githubProjectProfile.isEmpty ? .neutral : .good
+        )
+        if !githubDefaultProfile.isEmpty {
+          StatusPill(text: "Global default: \(githubDefaultProfile)", tone: .neutral)
+        }
+        if !githubResolvedProfile.isEmpty {
+          StatusPill(text: "Effective: \(githubResolvedProfile)", tone: .good)
+        }
+        if let status = githubResolvedStatus {
+          StatusPill(
+            text: status.tokenResolved ? "Token resolved" : "Token missing",
+            tone: status.tokenResolved ? .good : .warn
+          )
+        }
+      }
+
+      if let resolvedSummary = resolvedGitHubProfileSummary {
+        VStack(alignment: .leading, spacing: 4) {
+          if let account = resolvedSummary.accountLogin, !account.isEmpty {
+            Text("Account: \(account)\(resolvedSummary.accountName.map { " (\($0))" } ?? "")")
+              .font(.mono(.caption2))
+              .foregroundStyle(.secondary)
+          }
+          if let installation = resolvedSummary.installationId, !installation.isEmpty {
+            Text("Installation: \(installation)")
+              .font(.mono(.caption2))
+              .foregroundStyle(.secondary)
+          }
+        }
+      }
+
+      if let status = githubResolvedStatus {
+        VStack(alignment: .leading, spacing: 4) {
+          if let source = status.tokenSource, !source.isEmpty {
+            Text("Token source: \(source)")
+              .font(.mono(.caption2))
+              .foregroundStyle(.tertiary)
+          }
+          if let expiresAt = status.tokenExpiresAt, !expiresAt.isEmpty {
+            Text("Token expires: \(expiresAt)")
+              .font(.mono(.caption2))
+              .foregroundStyle(.tertiary)
+          }
+          if let error = status.error, !error.isEmpty {
+            Text(error)
+              .font(.mono(.caption2))
+              .foregroundStyle(Color.orange)
+          }
+        }
+      }
+
+      Picker("Profile", selection: $githubProjectProfile) {
+        Text("Inherited").tag("")
+        ForEach(githubProfileOptions, id: \.self) { profile in
+          Text(profile).tag(profile)
+        }
+      }
+      .pickerStyle(.menu)
+
+      Text(
+        "This maps to `controlPlane.routing.overrides.github.profile`. Dispatch `--pr` uses this when no `--github-profile` flag is provided."
+      )
+      .font(.mono(.caption2))
+      .foregroundStyle(.secondary)
+
+      if !githubProfileMessage.isEmpty {
+        Text(githubProfileMessage)
+          .font(.mono(.caption2))
+          .foregroundStyle(Color.orange)
+      }
+
+      HStack(spacing: 8) {
+        Button {
+          Task { await persistGitHubProfileOverride() }
+        } label: {
+          Label("Save GitHub profile", systemImage: "square.and.arrow.down")
+        }
+        .buttonStyle(PressableIconButtonStyle())
+        .disabled(executionTargetLoading || executionTargetSaving)
+
+        Button {
+          githubProjectProfile = ""
+          Task { await persistGitHubProfileOverride() }
+        } label: {
+          Label("Use inherited", systemImage: "arrow.uturn.backward")
+        }
+        .buttonStyle(PressableIconButtonStyle())
+        .disabled(executionTargetLoading || executionTargetSaving)
+
+        Spacer()
       }
     }
   }
@@ -887,6 +1008,14 @@ struct ProjectDetailView: View {
     }
   }
 
+  private var resolvedGitHubProfileSummary: GitHubProfileSummary? {
+    let resolved = githubResolvedProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+    if resolved.isEmpty {
+      return nil
+    }
+    return githubProfilesById[resolved]
+  }
+
   /**
    Reload project execution target state and provider profile options.
    */
@@ -910,6 +1039,10 @@ struct ProjectDetailView: View {
       for: project,
       key: "controlPlane.routing.profile"
     )
+    async let projectGitHubProfile = model.getProjectConfig(
+      for: project,
+      key: "controlPlane.routing.overrides.github.profile"
+    )
     async let defaultProvider = model.getGlobalConfig(
       key: "controlPlane.providers.defaultProvider"
     )
@@ -919,14 +1052,21 @@ struct ProjectDetailView: View {
     async let profilesRaw = model.getGlobalConfig(
       key: "controlPlane.providers.profiles"
     )
+    async let defaultGitHubProfile = model.getGlobalConfig(
+      key: "controlPlane.extensions[\"dance.hack.github\"].config.defaultProfile"
+    )
+    async let githubProfiles = model.inspectGitHubProfiles()
 
     let resolvedNodeList = await nodeList
     let resolvedProjectNodeId = await projectNodeId
     let resolvedRoutingProvider = await routingProvider
     let resolvedRoutingProfile = await routingProfile
+    let resolvedProjectGitHubProfile = await projectGitHubProfile
     let resolvedDefaultProvider = await defaultProvider
     let resolvedDefaultProfile = await defaultProfile
     let resolvedProfilesRaw = await profilesRaw
+    let resolvedDefaultGitHubProfile = await defaultGitHubProfile
+    let resolvedGitHubProfiles = await githubProfiles
 
     if Task.isCancelled {
       return
@@ -944,6 +1084,24 @@ struct ProjectDetailView: View {
       .trimmingCharacters(in: .whitespacesAndNewlines)
     globalDefaultProfile = (resolvedDefaultProfile ?? "")
       .trimmingCharacters(in: .whitespacesAndNewlines)
+    githubProjectProfile = (resolvedProjectGitHubProfile ?? "")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    let fallbackDefaultGitHubProfile = (resolvedDefaultGitHubProfile ?? "")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    githubDefaultProfile = resolvedGitHubProfiles?.defaultProfile ?? fallbackDefaultGitHubProfile
+    githubProfilesById = mapGitHubProfilesById(response: resolvedGitHubProfiles)
+    githubProfileOptions = (resolvedGitHubProfiles?.profiles ?? [])
+      .map(\.id)
+      .sorted { lhs, rhs in
+        lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
+      }
+    let resolvedGitHubProfile = githubProjectProfile.isEmpty
+      ? githubDefaultProfile
+      : githubProjectProfile
+    githubResolvedProfile = resolvedGitHubProfile
+    githubResolvedStatus = await model.inspectGitHubStatus(
+      profileId: resolvedGitHubProfile.isEmpty ? nil : resolvedGitHubProfile
+    )
 
     let profileParse = parseProviderProfiles(raw: resolvedProfilesRaw)
     executionTargetProfiles = profileParse.ids
@@ -965,6 +1123,7 @@ struct ProjectDetailView: View {
       executionTargetProvider = fromProfile
     }
     executionTargetMessage = ""
+    githubProfileMessage = ""
   }
 
   private func queueExecutionTargetReload() {
@@ -1067,6 +1226,37 @@ struct ProjectDetailView: View {
       providerById[id] = provider
     }
     return (ids, providerById)
+  }
+
+  private func mapGitHubProfilesById(response: GitHubProfilesResponse?) -> [String: GitHubProfileSummary] {
+    guard let response else {
+      return [:]
+    }
+    return response.profiles.reduce(into: [:]) { partialResult, profile in
+      partialResult[profile.id] = profile
+    }
+  }
+
+  private func persistGitHubProfileOverride() async {
+    executionTargetSaving = true
+    defer { executionTargetSaving = false }
+
+    let trimmed = githubProjectProfile
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    let didSave = await model.setProjectConfig(
+      for: project,
+      key: "controlPlane.routing.overrides.github.profile",
+      value: trimmed
+    )
+    if !didSave {
+      githubProfileMessage = "Failed to save GitHub profile override."
+      return
+    }
+    githubProfileMessage = trimmed.isEmpty
+      ? "GitHub profile override cleared (inherited)."
+      : "GitHub profile override saved."
+    await model.refresh()
+    queueExecutionTargetReload()
   }
 
   private struct LifecycleSummaryCounts {

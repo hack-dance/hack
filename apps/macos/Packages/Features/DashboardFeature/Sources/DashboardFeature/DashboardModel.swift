@@ -554,6 +554,24 @@ public final class DashboardModel {
     }
   }
 
+  public func inspectGitHubProfiles() async -> GitHubProfilesResponse? {
+    do {
+      return try await client.inspectGitHubProfiles()
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func inspectGitHubStatus(profileId: String? = nil) async -> GitHubStatusResponse? {
+    do {
+      return try await client.inspectGitHubStatus(profileId: profileId)
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
   public func bootstrapRailwayNode(
     request: RailwayBootstrapRequest
   ) async -> RailwayBootstrapResponse? {

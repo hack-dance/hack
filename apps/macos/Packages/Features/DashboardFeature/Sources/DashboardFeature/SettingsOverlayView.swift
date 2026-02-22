@@ -15,6 +15,7 @@ enum SettingsSidebarItem: String, Hashable, Identifiable {
   case supervisor
   case permissions
   case extensions
+  case github
   case cloudflare
   case railway
   case tailscale
@@ -43,6 +44,8 @@ enum SettingsSidebarItem: String, Hashable, Identifiable {
       return "Permissions"
     case .extensions:
       return "Extensions"
+    case .github:
+      return "GitHub"
     case .cloudflare:
       return "Cloudflare"
     case .railway:
@@ -76,6 +79,8 @@ enum SettingsSidebarItem: String, Hashable, Identifiable {
       return "hand.raised.fill"
     case .extensions:
       return "puzzlepiece.extension"
+    case .github:
+      return "chevron.left.forwardslash.chevron.right"
     case .cloudflare:
       return "cloud"
     case .railway:
@@ -186,6 +191,7 @@ struct SettingsOverlayView: View {
       }
       Section("Extensions") {
         settingsRow(.extensions)
+        settingsRow(.github)
         settingsRow(.cloudflare)
         settingsRow(.railway)
         settingsRow(.tailscale)
@@ -226,6 +232,8 @@ struct SettingsOverlayView: View {
         PermissionsSettingsView()
       case .extensions:
         ExtensionsSettingsView(selection: $selection)
+      case .github:
+        GitHubExtensionSettingsView()
       case .cloudflare:
         CloudflareExtensionSettingsView()
       case .railway:
@@ -2634,6 +2642,281 @@ private struct TailscaleOAuthCredentialControl: View {
   }
 }
 
+private struct GitHubExtensionSettingsView: View {
+  @Environment(DashboardModel.self) private var model
+  @State private var isLoadingConfig = false
+  @State private var isSavingConfig = false
+  @State private var isLoadingDiagnostics = false
+  @State private var suppressEnabledToggleChange = false
+  @State private var enabled = false
+  @State private var diagnostics: GitHubProfilesResponse? = nil
+  @State private var defaultProfile = ""
+  @State private var newAccountProfileId = "default"
+  @State private var connectSetsDefault = true
+  @State private var message = ""
+  @State private var lastDiagnosticsRefreshAt: Date? = nil
+
+  var body: some View {
+    ScrollView {
+      LazyVStack(alignment: .leading, spacing: 20) {
+        SettingsSectionHeader(
+          breadcrumb: "Settings / Extensions / GitHub",
+          title: "GitHub Extension",
+          subtitle: "Connect accounts and select which profile PR automation should use by default"
+        )
+        GlassCard(title: "Extension status", systemImage: "chevron.left.forwardslash.chevron.right") {
+          HStack(alignment: .center, spacing: 8) {
+            StatusPill(text: enabled ? "Enabled" : "Disabled", tone: enabled ? .good : .neutral)
+            StatusPill(
+              text: "\(githubProfiles.count) account\(githubProfiles.count == 1 ? "" : "s")",
+              tone: (diagnostics?.profiles.isEmpty == false) ? .good : .neutral
+            )
+            if !resolvedDefaultProfile.isEmpty {
+              StatusPill(text: "Default: \(resolvedDefaultProfile)", tone: .neutral)
+            }
+            Spacer()
+            Toggle("Enabled", isOn: $enabled)
+              .labelsHidden()
+              .toggleStyle(.switch)
+              .onChange(of: enabled) { _, newValue in
+                guard !suppressEnabledToggleChange else { return }
+                Task {
+                  await applyGitHubEnabledToggle(newValue)
+                }
+              }
+            if isLoadingConfig || isSavingConfig || isLoadingDiagnostics {
+              ProgressView()
+                .controlSize(.small)
+            }
+          }
+
+          if let lastDiagnosticsRefreshAt {
+            Text("Last checked \(lastDiagnosticsRefreshAt.formatted(date: .abbreviated, time: .shortened))")
+              .font(.mono(.caption2))
+              .foregroundStyle(.tertiary)
+          }
+
+          HStack(spacing: 10) {
+            Button {
+              Task { await refreshGitHubDiagnostics() }
+            } label: {
+              Label("Refresh status", systemImage: "arrow.clockwise")
+            }
+            .adaptiveToolbarButtonProminent()
+            Spacer()
+          }
+        }
+
+        GlassCard(title: "Connect account", systemImage: "person.badge.plus") {
+          VStack(alignment: .leading, spacing: 12) {
+            Text(
+              "Connect a GitHub account in your browser using gh CLI. Use profile ids like default, personal, or work."
+            )
+              .font(.mono(.caption))
+              .foregroundStyle(.secondary)
+
+            TextField("Profile id", text: $newAccountProfileId)
+              .textFieldStyle(.roundedBorder)
+              .font(.mono(.body))
+
+            Toggle("Set as default after connect", isOn: $connectSetsDefault)
+              .toggleStyle(.switch)
+
+            HStack(spacing: 10) {
+              Button {
+                connectGitHubAccount()
+              } label: {
+                Label("Connect in browser", systemImage: "safari")
+              }
+              .adaptiveToolbarButtonProminent()
+
+              Button {
+                Task { await refreshGitHubDiagnostics() }
+              } label: {
+                Label("Refresh accounts", systemImage: "arrow.clockwise")
+              }
+              .adaptiveToolbarButton()
+
+              Spacer()
+            }
+          }
+        }
+
+        GlassCard(title: "Connected accounts", systemImage: "person.2.badge.gearshape") {
+          if githubProfiles.isEmpty {
+            Text("No accounts connected yet.")
+              .font(.mono(.caption))
+              .foregroundStyle(.secondary)
+          } else {
+            VStack(alignment: .leading, spacing: 10) {
+              ForEach(githubProfiles, id: \.id) { profile in
+                VStack(alignment: .leading, spacing: 6) {
+                  HStack(spacing: 8) {
+                    Text(profile.id)
+                      .font(.mono(.subheadline, weight: .semibold))
+                    if profile.isDefault {
+                      StatusPill(text: "Default", tone: .good)
+                    }
+                    StatusPill(text: profile.mode, tone: .neutral)
+                    if let account = profile.accountLogin, !account.isEmpty {
+                      StatusPill(text: account, tone: .neutral)
+                    }
+                    Spacer()
+                    if !profile.isDefault {
+                      Button {
+                        Task { await saveGitHubDefaultProfile(profile.id) }
+                      } label: {
+                        Label("Set default", systemImage: "star")
+                      }
+                      .adaptiveToolbarButton()
+                    }
+                  }
+                  Text("profile: \(profile.id)")
+                    .font(.mono(.caption2))
+                    .foregroundStyle(.secondary)
+                  Text("auth: \(profile.authRef) • service: \(profile.service)")
+                    .font(.mono(.caption2))
+                    .foregroundStyle(.secondary)
+                  if let account = profile.accountLogin, !account.isEmpty {
+                    Text("account: \(account)\(profile.accountName.map { " (\($0))" } ?? "")")
+                      .font(.mono(.caption2))
+                      .foregroundStyle(.secondary)
+                  }
+                  if let installation = profile.installationId, !installation.isEmpty {
+                    Text("installation: \(installation)")
+                      .font(.mono(.caption2))
+                      .foregroundStyle(.tertiary)
+                  }
+                }
+                if profile.id != githubProfiles.last?.id {
+                  Divider()
+                    .opacity(0.2)
+                }
+              }
+            }
+          }
+        }
+
+        if !message.isEmpty {
+          InlineCallout(
+            tone: .neutral,
+            title: "GitHub settings",
+            message: message,
+            actions: []
+          )
+        }
+      }
+      .padding(16)
+    }
+    .task {
+      await loadConfigFromDisk()
+    }
+    .onChange(of: model.lastUpdated) { _, _ in
+      Task { await loadConfigFromDisk() }
+    }
+  }
+
+  private var resolvedDefaultProfile: String {
+    let trimmed = defaultProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !trimmed.isEmpty {
+      return trimmed
+    }
+    return diagnostics?.defaultProfile ?? ""
+  }
+
+  private var githubProfiles: [GitHubProfileSummary] {
+    (diagnostics?.profiles ?? []).sorted { lhs, rhs in
+      lhs.id.localizedCaseInsensitiveCompare(rhs.id) == .orderedAscending
+    }
+  }
+
+  private func loadConfigFromDisk() async {
+    isLoadingConfig = true
+    defer { isLoadingConfig = false }
+
+    let snapshot = GlobalConfigSnapshot.load()
+    suppressEnabledToggleChange = true
+    enabled = snapshot.githubExtensionEnabled ?? false
+    defaultProfile = snapshot.githubDefaultProfile ?? ""
+    suppressEnabledToggleChange = false
+    if newAccountProfileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      newAccountProfileId = defaultProfile.isEmpty ? "default" : defaultProfile
+    }
+    message = ""
+    await refreshGitHubDiagnostics()
+  }
+
+  private func refreshGitHubDiagnostics() async {
+    isLoadingDiagnostics = true
+    defer { isLoadingDiagnostics = false }
+    diagnostics = await model.inspectGitHubProfiles()
+    if let diagnostics {
+      defaultProfile = diagnostics.defaultProfile
+    }
+    lastDiagnosticsRefreshAt = Date()
+  }
+
+  private func applyGitHubEnabledToggle(_ newValue: Bool) async {
+    isSavingConfig = true
+    defer { isSavingConfig = false }
+    let didUpdate = await model.setGlobalConfig(
+      key: "controlPlane.extensions[\"dance.hack.github\"].enabled",
+      value: newValue ? "true" : "false"
+    )
+    if !didUpdate {
+      await loadConfigFromDisk()
+      message = "Failed to update extension enabled state."
+      return
+    }
+    message = newValue ? "GitHub extension enabled." : "GitHub extension disabled."
+    await model.refresh()
+    await refreshGitHubDiagnostics()
+  }
+
+  private func saveGitHubDefaultProfile(_ profileId: String) async {
+    isSavingConfig = true
+    defer { isSavingConfig = false }
+
+    let trimmedDefault = profileId.trimmingCharacters(in: .whitespacesAndNewlines)
+    let didSaveDefault = await model.setGlobalConfig(
+      key: "controlPlane.extensions[\"dance.hack.github\"].config.defaultProfile",
+      value: trimmedDefault
+    )
+    if !didSaveDefault {
+      message = "Failed to save GitHub default profile."
+      return
+    }
+
+    message = trimmedDefault.isEmpty
+      ? "GitHub default profile cleared."
+      : "GitHub default profile saved."
+    defaultProfile = trimmedDefault
+    await model.refresh()
+    await refreshGitHubDiagnostics()
+  }
+
+  private func connectGitHubAccount() {
+    let trimmed = newAccountProfileId.trimmingCharacters(in: .whitespacesAndNewlines)
+    let profile = trimmed.isEmpty ? "default" : trimmed
+    var command = "hack x github oauth-connect --profile \(shellQuote(profile))"
+    if connectSetsDefault {
+      command += " --set-default"
+      defaultProfile = profile
+    }
+    TerminalIntegration.openTerminalWithCommand(command)
+    message =
+      "Opened Terminal for browser auth. Complete login, then click Refresh accounts."
+  }
+
+  private func shellQuote(_ value: String) -> String {
+    if value.isEmpty {
+      return "''"
+    }
+    let escaped = value.replacingOccurrences(of: "'", with: "'\"'\"'")
+    return "'\(escaped)'"
+  }
+}
+
 private struct TailscaleExtensionSettingsView: View {
   @Environment(DashboardModel.self) private var model
   @State private var isLoadingConfig = false
@@ -3475,6 +3758,7 @@ private struct ExtensionsSettingsView: View {
   @Binding var selection: SettingsSidebarItem
   @State private var isLoading = false
   @State private var suppressToggleChange = false
+  @State private var githubEnabled = false
   @State private var cloudflareEnabled = false
   @State private var railwayEnabled = false
   @State private var tailscaleEnabled = false
@@ -3495,6 +3779,16 @@ private struct ExtensionsSettingsView: View {
         )
         GlassCard(title: "Managed extensions", systemImage: "puzzlepiece.extension") {
           VStack(alignment: .leading, spacing: 12) {
+            extensionSummaryRow(
+              item: .github,
+              name: "GitHub",
+              description: "PR automation auth profiles, account routing, and install metadata.",
+              projectCount: projectCount(for: "dance.hack.github"),
+              exposure: extensionExposure(id: "github"),
+              isOn: $githubEnabled
+            )
+            Divider()
+              .opacity(0.2)
             extensionSummaryRow(
               item: .cloudflare,
               name: "Cloudflare",
@@ -3610,6 +3904,8 @@ private struct ExtensionsSettingsView: View {
       switch normalized {
       case "cloudflare", "dance.hack.cloudflare":
         ids.insert("dance.hack.cloudflare")
+      case "github", "dance.hack.github":
+        ids.insert("dance.hack.github")
       case "railway", "dance.hack.railway":
         ids.insert("dance.hack.railway")
       case "tailscale", "dance.hack.tailscale":
@@ -3628,6 +3924,7 @@ private struct ExtensionsSettingsView: View {
   private func loadConfigFromDisk() async {
     let snapshot = GlobalConfigSnapshot.load()
     suppressToggleChange = true
+    githubEnabled = snapshot.githubExtensionEnabled ?? false
     cloudflareEnabled = snapshot.cloudflareExtensionEnabled ?? false
     railwayEnabled = snapshot.railwayExtensionEnabled ?? false
     tailscaleEnabled = snapshot.tailscaleExtensionEnabled ?? false
@@ -3643,6 +3940,8 @@ private struct ExtensionsSettingsView: View {
 
     let key: String
     switch item {
+    case .github:
+      key = "controlPlane.extensions[\"dance.hack.github\"].enabled"
     case .cloudflare:
       key = "controlPlane.extensions[\"dance.hack.cloudflare\"].enabled"
     case .railway:
@@ -3955,9 +4254,11 @@ private struct LoggingSettingsView: View {
 
 private struct GlobalConfigSnapshot {
   let daemonLaunchdRunAtLoad: Bool?
+  let githubExtensionEnabled: Bool?
   let cloudflareExtensionEnabled: Bool?
   let railwayExtensionEnabled: Bool?
   let tailscaleExtensionEnabled: Bool?
+  let githubDefaultProfile: String?
   let railwayProject: String?
   let railwayService: String?
   let railwayEnvironment: String?
@@ -4019,18 +4320,22 @@ private struct GlobalConfigSnapshot {
     let sessionPreferences = dictionary(preferences, key: "sessions")
     let containerPreferences = dictionary(preferences, key: "containers")
     let extensions = dictionary(controlPlane, key: "extensions")
+    let githubExt = dictionary(extensions, key: "dance.hack.github")
     let cloudflareExt = dictionary(extensions, key: "dance.hack.cloudflare")
     let railwayExt = dictionary(extensions, key: "dance.hack.railway")
     let tailscaleExt = dictionary(extensions, key: "dance.hack.tailscale")
+    let githubConfig = dictionary(githubExt, key: "config")
     let cloudflareConfig = dictionary(cloudflareExt, key: "config")
     let railwayConfig = dictionary(railwayExt, key: "config")
     let tailscaleConfig = dictionary(tailscaleExt, key: "config")
 
     return Self(
       daemonLaunchdRunAtLoad: launchd["runAtLoad"] as? Bool,
+      githubExtensionEnabled: githubExt["enabled"] as? Bool,
       cloudflareExtensionEnabled: cloudflareExt["enabled"] as? Bool,
       railwayExtensionEnabled: railwayExt["enabled"] as? Bool,
       tailscaleExtensionEnabled: tailscaleExt["enabled"] as? Bool,
+      githubDefaultProfile: githubConfig["defaultProfile"] as? String,
       railwayProject: railwayConfig["project"] as? String,
       railwayService: railwayConfig["service"] as? String,
       railwayEnvironment: railwayConfig["environment"] as? String,
@@ -4065,9 +4370,11 @@ private struct GlobalConfigSnapshot {
   static var empty: Self {
     Self(
       daemonLaunchdRunAtLoad: nil,
+      githubExtensionEnabled: nil,
       cloudflareExtensionEnabled: nil,
       railwayExtensionEnabled: nil,
       tailscaleExtensionEnabled: nil,
+      githubDefaultProfile: nil,
       railwayProject: nil,
       railwayService: nil,
       railwayEnvironment: nil,

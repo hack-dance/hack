@@ -1,9 +1,12 @@
 import { createPrivateKey, createSign } from "node:crypto";
+
 import { secrets } from "bun";
+
 import { isRecord } from "../../../lib/guards.ts";
 import type { ControlPlaneConfig } from "../../sdk/config.ts";
 
 const GITHUB_EXTENSION_ID = "dance.hack.github";
+const DEFAULT_GITHUB_PROFILE_ID = "default";
 const DEFAULT_GITHUB_TOKEN_ENV = "HACK_GITHUB_APP_TOKEN";
 const DEFAULT_GITHUB_PRIVATE_KEY_ENV = "HACK_GITHUB_APP_PRIVATE_KEY";
 const DEFAULT_GITHUB_AUTH_REF = "github.app.default";
@@ -11,7 +14,17 @@ const GITHUB_SECRET_SERVICE = "hack-github-auth";
 const DEFAULT_GITHUB_API_BASE = "https://api.github.com";
 const TOKEN_REFRESH_SKEW_MS = 60_000;
 
+export type GitHubProfileSelectionSource =
+  | "command_flags"
+  | "project_routing"
+  | "global_default"
+  | "implicit_default";
+
+export type GitHubAuthMode = "app" | "token";
+
 export type GitHubAuthSettings = {
+  readonly profileId: string;
+  readonly profileSource: GitHubProfileSelectionSource;
   readonly tokenEnv: string;
   readonly authRef: string;
   readonly service: string;
@@ -20,6 +33,62 @@ export type GitHubAuthSettings = {
   readonly privateKeyEnv: string;
   readonly privateKeyAuthRef?: string;
   readonly apiBaseUrl: string;
+  readonly mode: GitHubAuthMode;
+  readonly accountLogin?: string;
+  readonly accountName?: string;
+  readonly accountId?: string;
+};
+
+export type GitHubAuthProfileSummary = {
+  readonly id: string;
+  readonly isDefault: boolean;
+  readonly mode: GitHubAuthMode;
+  readonly authRef: string;
+  readonly service: string;
+  readonly appId?: string;
+  readonly installationId?: string;
+  readonly accountLogin?: string;
+  readonly accountName?: string;
+  readonly accountId?: string;
+};
+
+export type GitHubAuthProfileCatalog = {
+  readonly defaultProfileId: string;
+  readonly selectedProfileId: string;
+  readonly selectedProfileSource: GitHubProfileSelectionSource;
+  readonly selectedProfileMissing: boolean;
+  readonly projectProfileOverride?: string;
+  readonly profiles: readonly GitHubAuthProfileSummary[];
+};
+
+export type GitHubAuthSettingsResult =
+  | {
+      readonly ok: true;
+      readonly settings: GitHubAuthSettings;
+      readonly availableProfileIds: readonly string[];
+    }
+  | {
+      readonly ok: false;
+      readonly selectedProfileId: string;
+      readonly selectedProfileSource: GitHubProfileSelectionSource;
+      readonly availableProfileIds: readonly string[];
+      readonly error: string;
+    };
+
+type GitHubProfileSettings = {
+  readonly profileId: string;
+  readonly tokenEnv: string;
+  readonly authRef: string;
+  readonly service: string;
+  readonly appId?: string;
+  readonly installationId?: string;
+  readonly privateKeyEnv: string;
+  readonly privateKeyAuthRef?: string;
+  readonly apiBaseUrl: string;
+  readonly mode: GitHubAuthMode;
+  readonly accountLogin?: string;
+  readonly accountName?: string;
+  readonly accountId?: string;
 };
 
 export type GitHubTokenResolution =
@@ -30,6 +99,8 @@ export type GitHubTokenResolution =
       readonly tokenEnv: string;
       readonly authRef: string;
       readonly service: string;
+      readonly profileId: string;
+      readonly profileSource: GitHubProfileSelectionSource;
       readonly expiresAt?: string;
     }
   | {
@@ -38,6 +109,8 @@ export type GitHubTokenResolution =
       readonly tokenEnv: string;
       readonly authRef: string;
       readonly service: string;
+      readonly profileId: string;
+      readonly profileSource: GitHubProfileSelectionSource;
     };
 
 export type SecretStore = {
@@ -78,6 +151,16 @@ type GitHubInstallationTokenResult =
       readonly error: string;
     };
 
+type GitHubProfileSelection = {
+  readonly selectedProfileId: string;
+  readonly selectedProfileSource: GitHubProfileSelectionSource;
+  readonly selectedProfileExists: boolean;
+  readonly defaultProfileId: string;
+  readonly sortedProfileIds: readonly string[];
+  readonly profilesById: Readonly<Record<string, GitHubProfileSettings>>;
+  readonly projectProfileOverride?: string;
+};
+
 const DEFAULT_SECRET_STORE: SecretStore = {
   get: async (input) => await secrets.get(input),
   set: async (input) => {
@@ -87,59 +170,183 @@ const DEFAULT_SECRET_STORE: SecretStore = {
 };
 
 /**
- * Resolve GitHub auth settings from control-plane extension config.
+ * Resolve profile catalog for GitHub auth settings.
  *
- * The extension supports:
- * - `controlPlane.extensions["dance.hack.github"].config.tokenEnv`
- * - `controlPlane.extensions["dance.hack.github"].config.authRef`
- * - `controlPlane.extensions["dance.hack.github"].config.service`
- * - `controlPlane.extensions["dance.hack.github"].config.appId`
- * - `controlPlane.extensions["dance.hack.github"].config.installationId`
- * - `controlPlane.extensions["dance.hack.github"].config.privateKeyEnv`
- * - `controlPlane.extensions["dance.hack.github"].config.privateKeyAuthRef`
- * - `controlPlane.extensions["dance.hack.github"].config.apiBaseUrl`
+ * Profile selection precedence:
+ * 1) explicit command profile
+ * 2) project routing override (`controlPlane.routing.overrides.github.profile`)
+ * 3) extension global default profile
+ * 4) implicit default profile
  */
-export function resolveGitHubAuthSettings(input: {
+export function listGitHubAuthProfiles(input: {
   readonly controlPlaneConfig: ControlPlaneConfig;
-}): GitHubAuthSettings {
-  const extension = input.controlPlaneConfig.extensions?.[GITHUB_EXTENSION_ID];
-  const config =
-    isRecord(extension) && isRecord(extension.config) ? extension.config : null;
-
-  const tokenEnv = normalizeConfigString(config?.tokenEnv);
-  const authRef = normalizeConfigString(config?.authRef);
-  const service = normalizeConfigString(config?.service);
-  const appId = normalizeConfigString(config?.appId);
-  const installationId = normalizeConfigString(config?.installationId);
-  const privateKeyEnv = normalizeConfigString(config?.privateKeyEnv);
-  const privateKeyAuthRef = normalizeConfigString(config?.privateKeyAuthRef);
-  const apiBaseUrl = normalizeConfigString(config?.apiBaseUrl);
+  readonly explicitProfileId?: string;
+  readonly allowProjectOverride?: boolean;
+}): GitHubAuthProfileCatalog {
+  const selected = resolveGitHubProfileSelection({
+    controlPlaneConfig: input.controlPlaneConfig,
+    explicitProfileId: input.explicitProfileId,
+    allowProjectOverride: input.allowProjectOverride,
+  });
+  const summaries: GitHubAuthProfileSummary[] = [];
+  for (const id of selected.sortedProfileIds) {
+    const profile = selected.profilesById[id];
+    if (!profile) {
+      continue;
+    }
+    summaries.push(
+      toGitHubProfileSummary({
+        profile,
+        isDefault: id === selected.defaultProfileId,
+      })
+    );
+  }
 
   return {
-    tokenEnv: tokenEnv ?? DEFAULT_GITHUB_TOKEN_ENV,
-    authRef: authRef ?? DEFAULT_GITHUB_AUTH_REF,
-    service: service ?? GITHUB_SECRET_SERVICE,
-    ...(appId ? { appId } : {}),
-    ...(installationId ? { installationId } : {}),
-    privateKeyEnv: privateKeyEnv ?? DEFAULT_GITHUB_PRIVATE_KEY_ENV,
-    ...(privateKeyAuthRef ? { privateKeyAuthRef } : {}),
-    apiBaseUrl: apiBaseUrl ?? DEFAULT_GITHUB_API_BASE,
+    defaultProfileId: selected.defaultProfileId,
+    selectedProfileId: selected.selectedProfileId,
+    selectedProfileSource: selected.selectedProfileSource,
+    selectedProfileMissing: !selected.selectedProfileExists,
+    ...(selected.projectProfileOverride
+      ? { projectProfileOverride: selected.projectProfileOverride }
+      : {}),
+    profiles: summaries,
   };
 }
 
 /**
- * Resolve a GitHub App token using keychain first, then environment fallback.
+ * Resolve GitHub auth settings from control-plane extension config.
+ *
+ * The extension supports:
+ * - Profile-based config at:
+ *   `controlPlane.extensions["dance.hack.github"].config.profiles.<id>.*`
+ * - Default profile:
+ *   `controlPlane.extensions["dance.hack.github"].config.defaultProfile`
+ * - Project override:
+ *   `controlPlane.routing.overrides.github.profile`
+ * - Legacy top-level keys (backward compatibility):
+ *   `controlPlane.extensions["dance.hack.github"].config.*`
+ */
+export function resolveGitHubAuthSettings(input: {
+  readonly controlPlaneConfig: ControlPlaneConfig;
+  readonly profileId?: string;
+  readonly allowProjectOverride?: boolean;
+}): GitHubAuthSettings {
+  const selected = resolveGitHubProfileSelection({
+    controlPlaneConfig: input.controlPlaneConfig,
+    explicitProfileId: input.profileId,
+    allowProjectOverride: input.allowProjectOverride,
+  });
+  const selectedProfile = selected.profilesById[selected.selectedProfileId];
+  if (selectedProfile) {
+    return {
+      ...selectedProfile,
+      profileSource: selected.selectedProfileSource,
+    };
+  }
+
+  const extensionConfig = getGitHubExtensionConfig({
+    controlPlaneConfig: input.controlPlaneConfig,
+  });
+  const fallbackProfile = buildGitHubProfileSettings({
+    profileId: selected.selectedProfileId,
+    profileConfig: null,
+    legacyConfig: extensionConfig,
+    includeLegacyFallback: true,
+  });
+  return {
+    ...fallbackProfile,
+    profileSource: selected.selectedProfileSource,
+  };
+}
+
+/**
+ * Resolve GitHub auth settings and fail when selected profile does not exist.
+ */
+export function resolveGitHubAuthSettingsResult(input: {
+  readonly controlPlaneConfig: ControlPlaneConfig;
+  readonly profileId?: string;
+  readonly allowProjectOverride?: boolean;
+}): GitHubAuthSettingsResult {
+  const selected = resolveGitHubProfileSelection({
+    controlPlaneConfig: input.controlPlaneConfig,
+    explicitProfileId: input.profileId,
+    allowProjectOverride: input.allowProjectOverride,
+  });
+  const availableProfileIds = selected.sortedProfileIds;
+  const selectedProfile = selected.profilesById[selected.selectedProfileId];
+  if (!selectedProfile) {
+    const sourceLabel = (() => {
+      if (selected.selectedProfileSource === "command_flags") {
+        return "--profile";
+      }
+      if (selected.selectedProfileSource === "project_routing") {
+        return "controlPlane.routing.overrides.github.profile";
+      }
+      if (selected.selectedProfileSource === "global_default") {
+        return `controlPlane.extensions["${GITHUB_EXTENSION_ID}"].config.defaultProfile`;
+      }
+      return "implicit default";
+    })();
+    const availableLabel =
+      availableProfileIds.length > 0
+        ? availableProfileIds.join(", ")
+        : "(none configured)";
+    return {
+      ok: false,
+      selectedProfileId: selected.selectedProfileId,
+      selectedProfileSource: selected.selectedProfileSource,
+      availableProfileIds,
+      error: `GitHub profile "${selected.selectedProfileId}" (${sourceLabel}) was not found. Available profiles: ${availableLabel}.`,
+    };
+  }
+  return {
+    ok: true,
+    settings: {
+      ...selectedProfile,
+      profileSource: selected.selectedProfileSource,
+    },
+    availableProfileIds,
+  };
+}
+
+/**
+ * Resolve a GitHub token using keychain first, then environment fallback.
  */
 export async function resolveGitHubAppToken(input: {
   readonly controlPlaneConfig: ControlPlaneConfig;
+  readonly profileId?: string;
+  readonly allowProjectOverride?: boolean;
   readonly env?: Record<string, string | undefined>;
   readonly store?: SecretStore;
   readonly fetcher?: FetchLike;
   readonly nowMs?: number;
 }): Promise<GitHubTokenResolution> {
-  const settings = resolveGitHubAuthSettings({
+  const resolved = resolveGitHubAuthSettingsResult({
     controlPlaneConfig: input.controlPlaneConfig,
+    ...(input.profileId ? { profileId: input.profileId } : {}),
+    allowProjectOverride: input.allowProjectOverride,
   });
+  if (!resolved.ok) {
+    const fallback = resolveGitHubAuthSettings({
+      controlPlaneConfig: input.controlPlaneConfig,
+      ...(input.profileId ? { profileId: input.profileId } : {}),
+      allowProjectOverride: input.allowProjectOverride,
+    });
+    return {
+      ok: false,
+      error: resolved.error,
+      tokenEnv: fallback.tokenEnv,
+      authRef: fallback.authRef,
+      service: fallback.service,
+      profileId: fallback.profileId,
+      profileSource: fallback.profileSource,
+    };
+  }
+
+  const settings = resolved.settings;
+  const allowProjectOverride = input.allowProjectOverride ?? true;
+  const profileId = settings.profileId;
   const env = input.env ?? process.env;
   const store = input.store ?? DEFAULT_SECRET_STORE;
   const nowMs = input.nowMs ?? Date.now();
@@ -161,6 +368,8 @@ export async function resolveGitHubAppToken(input: {
         tokenEnv: settings.tokenEnv,
         authRef: settings.authRef,
         service: settings.service,
+        profileId,
+        profileSource: settings.profileSource,
         ...(storedEnvelope.expiresAt
           ? { expiresAt: storedEnvelope.expiresAt }
           : {}),
@@ -168,6 +377,8 @@ export async function resolveGitHubAppToken(input: {
     }
     const refreshed = await refreshGitHubInstallationToken({
       controlPlaneConfig: input.controlPlaneConfig,
+      profileId,
+      allowProjectOverride,
       env,
       store,
       fetcher: input.fetcher,
@@ -181,6 +392,8 @@ export async function resolveGitHubAppToken(input: {
         tokenEnv: settings.tokenEnv,
         authRef: settings.authRef,
         service: settings.service,
+        profileId,
+        profileSource: settings.profileSource,
         ...(refreshed.expiresAt ? { expiresAt: refreshed.expiresAt } : {}),
       };
     }
@@ -193,14 +406,18 @@ export async function resolveGitHubAppToken(input: {
         tokenEnv: settings.tokenEnv,
         authRef: settings.authRef,
         service: settings.service,
+        profileId,
+        profileSource: settings.profileSource,
       };
     }
     return {
       ok: false,
-      error: `Stored GitHub token is expired and refresh failed: ${refreshed.error}`,
+      error: `Stored GitHub token for profile "${profileId}" is expired and refresh failed: ${refreshed.error}`,
       tokenEnv: settings.tokenEnv,
       authRef: settings.authRef,
       service: settings.service,
+      profileId,
+      profileSource: settings.profileSource,
     };
   }
 
@@ -213,15 +430,19 @@ export async function resolveGitHubAppToken(input: {
       tokenEnv: settings.tokenEnv,
       authRef: settings.authRef,
       service: settings.service,
+      profileId,
+      profileSource: settings.profileSource,
     };
   }
 
   return {
     ok: false,
-    error: `Missing GitHub token. Store one with \`hack x github connect\`, or set ${settings.tokenEnv}.`,
+    error: `Missing GitHub token for profile "${profileId}". Store one with \`hack x github connect --profile ${profileId}\`, or set ${settings.tokenEnv}.`,
     tokenEnv: settings.tokenEnv,
     authRef: settings.authRef,
     service: settings.service,
+    profileId,
+    profileSource: settings.profileSource,
   };
 }
 
@@ -311,6 +532,8 @@ export async function exchangeGitHubAppInstallationToken(input: {
  */
 export async function refreshGitHubInstallationToken(input: {
   readonly controlPlaneConfig: ControlPlaneConfig;
+  readonly profileId?: string;
+  readonly allowProjectOverride?: boolean;
   readonly env?: Record<string, string | undefined>;
   readonly store?: SecretStore;
   readonly fetcher?: FetchLike;
@@ -319,14 +542,24 @@ export async function refreshGitHubInstallationToken(input: {
   | { readonly ok: true; readonly token: string; readonly expiresAt?: string }
   | { readonly ok: false; readonly error: string }
 > {
-  const settings = resolveGitHubAuthSettings({
+  const resolved = resolveGitHubAuthSettingsResult({
     controlPlaneConfig: input.controlPlaneConfig,
+    ...(input.profileId ? { profileId: input.profileId } : {}),
+    allowProjectOverride: input.allowProjectOverride,
   });
+  if (!resolved.ok) {
+    return {
+      ok: false,
+      error: resolved.error,
+    };
+  }
+
+  const settings = resolved.settings;
+  const allowProjectOverride = input.allowProjectOverride ?? true;
   if (!(settings.appId && settings.installationId)) {
     return {
       ok: false,
-      error:
-        "GitHub App refresh is not configured. Set appId and installationId with `hack x github connect --app-id ... --installation-id ...`.",
+      error: `GitHub App refresh is not configured for profile "${settings.profileId}". Set appId and installationId with \`hack x github connect --profile ${settings.profileId} --app-id ... --installation-id ...\`.`,
     };
   }
 
@@ -355,6 +588,8 @@ export async function refreshGitHubInstallationToken(input: {
 
   await saveGitHubAppToken({
     controlPlaneConfig: input.controlPlaneConfig,
+    profileId: settings.profileId,
+    allowProjectOverride,
     token: exchanged.token,
     ...(exchanged.expiresAt ? { expiresAt: exchanged.expiresAt } : {}),
     store,
@@ -367,18 +602,26 @@ export async function refreshGitHubInstallationToken(input: {
 }
 
 /**
- * Persist GitHub App token into secret storage under the configured `authRef`.
+ * Persist GitHub token into secret storage under the configured `authRef`.
  */
 export async function saveGitHubAppToken(input: {
   readonly controlPlaneConfig: ControlPlaneConfig;
+  readonly profileId?: string;
+  readonly allowProjectOverride?: boolean;
   readonly token: string;
   readonly expiresAt?: string;
   readonly authRef?: string;
   readonly service?: string;
   readonly store?: SecretStore;
-}): Promise<{ readonly authRef: string; readonly service: string }> {
+}): Promise<{
+  readonly profileId: string;
+  readonly authRef: string;
+  readonly service: string;
+}> {
   const settings = resolveGitHubAuthSettings({
     controlPlaneConfig: input.controlPlaneConfig,
+    ...(input.profileId ? { profileId: input.profileId } : {}),
+    allowProjectOverride: input.allowProjectOverride,
   });
   const authRef = (input.authRef ?? settings.authRef).trim();
   const service = (input.service ?? settings.service).trim();
@@ -405,24 +648,29 @@ export async function saveGitHubAppToken(input: {
     name: authRef,
     value: serialized,
   });
-  return { authRef, service };
+  return { profileId: settings.profileId, authRef, service };
 }
 
 /**
- * Remove a stored GitHub App token by auth reference.
+ * Remove a stored GitHub token by auth reference.
  */
 export async function deleteGitHubAppToken(input: {
   readonly controlPlaneConfig: ControlPlaneConfig;
+  readonly profileId?: string;
+  readonly allowProjectOverride?: boolean;
   readonly authRef?: string;
   readonly service?: string;
   readonly store?: SecretStore;
 }): Promise<{
+  readonly profileId: string;
   readonly deleted: boolean;
   readonly authRef: string;
   readonly service: string;
 }> {
   const settings = resolveGitHubAuthSettings({
     controlPlaneConfig: input.controlPlaneConfig,
+    ...(input.profileId ? { profileId: input.profileId } : {}),
+    allowProjectOverride: input.allowProjectOverride,
   });
   const authRef = (input.authRef ?? settings.authRef).trim();
   const service = (input.service ?? settings.service).trim();
@@ -436,13 +684,252 @@ export async function deleteGitHubAppToken(input: {
   }
 
   const deleted = await store.delete({ service, name: authRef });
-  return { deleted, authRef, service };
+  return { profileId: settings.profileId, deleted, authRef, service };
 }
 
 function normalizeConfigString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0
     ? value.trim()
     : null;
+}
+
+function normalizeConfigNumberishString(value: unknown): string | null {
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value.trim();
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  return null;
+}
+
+function normalizeGitHubAuthMode(value: unknown): GitHubAuthMode | null {
+  const normalized = normalizeConfigString(value)?.toLowerCase();
+  if (normalized === "app" || normalized === "token") {
+    return normalized;
+  }
+  return null;
+}
+
+function resolveDefaultAuthRefForProfile(input: {
+  readonly profileId: string;
+}): string {
+  if (input.profileId === DEFAULT_GITHUB_PROFILE_ID) {
+    return DEFAULT_GITHUB_AUTH_REF;
+  }
+  return `github.app.${input.profileId}`;
+}
+
+function getGitHubExtensionConfig(input: {
+  readonly controlPlaneConfig: ControlPlaneConfig;
+}): Record<string, unknown> | null {
+  const extension = input.controlPlaneConfig.extensions?.[GITHUB_EXTENSION_ID];
+  if (!(isRecord(extension) && isRecord(extension.config))) {
+    return null;
+  }
+  return extension.config;
+}
+
+function buildGitHubProfileSettings(input: {
+  readonly profileId: string;
+  readonly profileConfig: Record<string, unknown> | null;
+  readonly legacyConfig: Record<string, unknown> | null;
+  readonly includeLegacyFallback: boolean;
+}): GitHubProfileSettings {
+  const fallback = input.includeLegacyFallback ? input.legacyConfig : null;
+  const tokenEnv =
+    normalizeConfigString(input.profileConfig?.tokenEnv) ??
+    normalizeConfigString(fallback?.tokenEnv) ??
+    DEFAULT_GITHUB_TOKEN_ENV;
+  const authRef =
+    normalizeConfigString(input.profileConfig?.authRef) ??
+    normalizeConfigString(fallback?.authRef) ??
+    resolveDefaultAuthRefForProfile({ profileId: input.profileId });
+  const service =
+    normalizeConfigString(input.profileConfig?.service) ??
+    normalizeConfigString(fallback?.service) ??
+    GITHUB_SECRET_SERVICE;
+  const appId =
+    normalizeConfigString(input.profileConfig?.appId) ??
+    normalizeConfigString(fallback?.appId);
+  const installationId =
+    normalizeConfigString(input.profileConfig?.installationId) ??
+    normalizeConfigString(fallback?.installationId);
+  const privateKeyEnv =
+    normalizeConfigString(input.profileConfig?.privateKeyEnv) ??
+    normalizeConfigString(fallback?.privateKeyEnv) ??
+    DEFAULT_GITHUB_PRIVATE_KEY_ENV;
+  const privateKeyAuthRef =
+    normalizeConfigString(input.profileConfig?.privateKeyAuthRef) ??
+    normalizeConfigString(fallback?.privateKeyAuthRef);
+  const apiBaseUrl = normalizeApiBaseUrl({
+    value:
+      normalizeConfigString(input.profileConfig?.apiBaseUrl) ??
+      normalizeConfigString(fallback?.apiBaseUrl) ??
+      DEFAULT_GITHUB_API_BASE,
+  });
+  const accountLogin =
+    normalizeConfigString(input.profileConfig?.accountLogin) ??
+    normalizeConfigString(fallback?.accountLogin);
+  const accountName =
+    normalizeConfigString(input.profileConfig?.accountName) ??
+    normalizeConfigString(fallback?.accountName);
+  const accountId =
+    normalizeConfigNumberishString(input.profileConfig?.accountId) ??
+    normalizeConfigNumberishString(fallback?.accountId);
+
+  const mode =
+    normalizeGitHubAuthMode(input.profileConfig?.mode) ??
+    normalizeGitHubAuthMode(fallback?.mode) ??
+    (appId && installationId ? "app" : "token");
+
+  return {
+    profileId: input.profileId,
+    tokenEnv,
+    authRef,
+    service,
+    ...(appId ? { appId } : {}),
+    ...(installationId ? { installationId } : {}),
+    privateKeyEnv,
+    ...(privateKeyAuthRef ? { privateKeyAuthRef } : {}),
+    apiBaseUrl,
+    mode,
+    ...(accountLogin ? { accountLogin } : {}),
+    ...(accountName ? { accountName } : {}),
+    ...(accountId ? { accountId } : {}),
+  };
+}
+
+function resolveProjectGitHubProfileOverride(input: {
+  readonly controlPlaneConfig: ControlPlaneConfig;
+}): string | null {
+  const routingOverrides = input.controlPlaneConfig.routing?.overrides;
+  if (!isRecord(routingOverrides)) {
+    return null;
+  }
+  const nestedGitHub = routingOverrides.github;
+  if (isRecord(nestedGitHub)) {
+    const nestedProfile = normalizeConfigString(nestedGitHub.profile);
+    if (nestedProfile) {
+      return nestedProfile;
+    }
+  }
+  return normalizeConfigString(routingOverrides.githubProfile);
+}
+
+function resolveGitHubProfileSelection(input: {
+  readonly controlPlaneConfig: ControlPlaneConfig;
+  readonly explicitProfileId?: string;
+  readonly allowProjectOverride?: boolean;
+}): GitHubProfileSelection {
+  const extensionConfig = getGitHubExtensionConfig({
+    controlPlaneConfig: input.controlPlaneConfig,
+  });
+
+  const profilesById: Record<string, GitHubProfileSettings> = {};
+  const profilesValue = extensionConfig?.profiles;
+  if (isRecord(profilesValue)) {
+    for (const [profileIdRaw, profileRaw] of Object.entries(profilesValue)) {
+      const profileId = profileIdRaw.trim();
+      if (!profileId) {
+        continue;
+      }
+      if (!isRecord(profileRaw)) {
+        continue;
+      }
+      profilesById[profileId] = buildGitHubProfileSettings({
+        profileId,
+        profileConfig: profileRaw,
+        legacyConfig: extensionConfig,
+        includeLegacyFallback: profileId === DEFAULT_GITHUB_PROFILE_ID,
+      });
+    }
+  }
+
+  if (Object.keys(profilesById).length === 0) {
+    profilesById[DEFAULT_GITHUB_PROFILE_ID] = buildGitHubProfileSettings({
+      profileId: DEFAULT_GITHUB_PROFILE_ID,
+      profileConfig: null,
+      legacyConfig: extensionConfig,
+      includeLegacyFallback: true,
+    });
+  }
+
+  const sortedProfileIds = Object.keys(profilesById).sort((left, right) =>
+    left.localeCompare(right)
+  );
+  const defaultProfileFromConfig = normalizeConfigString(
+    extensionConfig?.defaultProfile
+  );
+  const defaultProfileId =
+    (defaultProfileFromConfig &&
+    Object.hasOwn(profilesById, defaultProfileFromConfig)
+      ? defaultProfileFromConfig
+      : null) ??
+    (Object.hasOwn(profilesById, DEFAULT_GITHUB_PROFILE_ID)
+      ? DEFAULT_GITHUB_PROFILE_ID
+      : null) ??
+    sortedProfileIds[0] ??
+    DEFAULT_GITHUB_PROFILE_ID;
+
+  const explicitProfileId = normalizeConfigString(input.explicitProfileId);
+  const projectProfileOverride =
+    input.allowProjectOverride === false
+      ? null
+      : resolveProjectGitHubProfileOverride({
+          controlPlaneConfig: input.controlPlaneConfig,
+        });
+
+  const selectedProfile = explicitProfileId ?? projectProfileOverride;
+  let selectedProfileId: string;
+  let selectedProfileSource: GitHubProfileSelectionSource;
+  if (selectedProfile) {
+    selectedProfileId = selectedProfile;
+    selectedProfileSource = explicitProfileId
+      ? "command_flags"
+      : "project_routing";
+  } else if (defaultProfileFromConfig) {
+    selectedProfileId = defaultProfileId;
+    selectedProfileSource = "global_default";
+  } else {
+    selectedProfileId = defaultProfileId;
+    selectedProfileSource = "implicit_default";
+  }
+
+  const selectedProfileExists = Object.hasOwn(profilesById, selectedProfileId);
+  return {
+    selectedProfileId,
+    selectedProfileSource,
+    selectedProfileExists,
+    defaultProfileId,
+    sortedProfileIds,
+    profilesById,
+    ...(projectProfileOverride ? { projectProfileOverride } : {}),
+  };
+}
+
+function toGitHubProfileSummary(input: {
+  readonly profile: GitHubProfileSettings;
+  readonly isDefault: boolean;
+}): GitHubAuthProfileSummary {
+  return {
+    id: input.profile.profileId,
+    isDefault: input.isDefault,
+    mode: input.profile.mode,
+    authRef: input.profile.authRef,
+    service: input.profile.service,
+    ...(input.profile.appId ? { appId: input.profile.appId } : {}),
+    ...(input.profile.installationId
+      ? { installationId: input.profile.installationId }
+      : {}),
+    ...(input.profile.accountLogin
+      ? { accountLogin: input.profile.accountLogin }
+      : {}),
+    ...(input.profile.accountName
+      ? { accountName: input.profile.accountName }
+      : {}),
+    ...(input.profile.accountId ? { accountId: input.profile.accountId } : {}),
+  };
 }
 
 function serializeStoredToken(input: GitHubTokenEnvelope): string {
@@ -517,8 +1004,8 @@ async function resolveGitHubPrivateKey(input: {
   return {
     ok: false,
     error: input.settings.privateKeyAuthRef
-      ? `Missing GitHub App private key in keychain ref ${input.settings.privateKeyAuthRef} and env ${input.settings.privateKeyEnv}.`
-      : `Missing GitHub App private key in ${input.settings.privateKeyEnv}.`,
+      ? `Missing GitHub App private key for profile "${input.settings.profileId}" in keychain ref ${input.settings.privateKeyAuthRef} and env ${input.settings.privateKeyEnv}.`
+      : `Missing GitHub App private key for profile "${input.settings.profileId}" in ${input.settings.privateKeyEnv}.`,
   };
 }
 

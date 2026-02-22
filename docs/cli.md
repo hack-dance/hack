@@ -867,6 +867,7 @@ Options:
 | `--pr-base <branch>` | string | `main` | Base branch used with `--pr` |
 | `--pr-title <title>` | string | auto | Override PR title |
 | `--pr-body <markdown>` | string | auto | Override PR body |
+| `--github-profile <profile-id>` | string | inherited | GitHub profile override for `--pr` mode |
 | `--json` | boolean | false | Output machine-readable run payload |
 
 Note: when the target node does not already have the project workspace, dispatch sends bootstrap metadata (git origin + project name) to `/v1/node/workspaces/ensure` so the node can clone/register the repo automatically.
@@ -878,6 +879,12 @@ Route precedence for dispatch:
 3. Project `controlPlane.routing.provider/profile`.
 4. Global `controlPlane.providers.defaultProvider/defaultProfile`.
 5. Provider hard defaults.
+
+GitHub profile precedence for `--pr`:
+
+1. Command `--github-profile`.
+2. Project `controlPlane.routing.overrides.github.profile`.
+3. Global `controlPlane.extensions["dance.hack.github"].config.defaultProfile`.
 
 #### hack dispatch status
 

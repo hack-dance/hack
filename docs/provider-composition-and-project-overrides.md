@@ -4,6 +4,13 @@ Date: 2026-02-22
 Status: Phase 1 implemented, Phase 2 in progress
 Owners: multi-node / desktop / provider integrations
 
+Follow-on:
+1. GitHub SCM profile composition and project-level profile selection tracked in:
+   - `T-00141`
+   - `T-00142`
+   - `T-00143`
+   - Status update (2026-02-22): profile composition and project override wiring landed in CLI + dispatch + desktop project settings.
+
 ## Implemented in this repo
 
 1. `controlPlane.providers` and `controlPlane.routing` schema support in config parsing/merging.
@@ -21,6 +28,11 @@ Owners: multi-node / desktop / provider integrations
    - fixed node
    - provider profile
    - reset-to-inherited action
+5. GitHub profile composition + precedence:
+   - extension profile catalog under `controlPlane.extensions["dance.hack.github"].config.profiles`
+   - global default profile via `controlPlane.extensions["dance.hack.github"].config.defaultProfile`
+   - project override via `controlPlane.routing.overrides.github.profile`
+   - command override via `--profile` (`hack x github ...`) and `--github-profile` (`hack dispatch run --pr`)
 
 ## Problem Statement
 

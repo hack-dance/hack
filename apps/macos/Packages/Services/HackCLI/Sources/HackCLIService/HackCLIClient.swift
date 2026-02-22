@@ -296,6 +296,23 @@ public actor HackCLIClient {
     )
   }
 
+  public func inspectGitHubProfiles() async throws -> GitHubProfilesResponse {
+    let result = try await run(
+      ["x", "github", "profiles", "--json"],
+      allowNonZeroExit: true
+    )
+    return try decodeJsonOrThrow(GitHubProfilesResponse.self, result: result)
+  }
+
+  public func inspectGitHubStatus(profileId: String? = nil) async throws -> GitHubStatusResponse {
+    var args = ["x", "github", "status", "--json"]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(GitHubStatusResponse.self, result: result)
+  }
+
   public func bootstrapRailwayNode(
     request: RailwayBootstrapRequest
   ) async throws -> RailwayBootstrapResponse {

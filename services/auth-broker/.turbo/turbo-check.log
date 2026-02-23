@@ -1,2 +1,0 @@
-$ cd ../.. && bunx ultracite check services/auth-broker/src services/auth-broker/tests
-Checked 22 files in 47ms. No fixes applied.

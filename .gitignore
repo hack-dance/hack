@@ -32,6 +32,8 @@ hackdance.*.private-key.pem
 # caches
 .eslintcache
 .cache
+.turbo/
+**/.turbo/
 *.tsbuildinfo
 
 # IntelliJ based IDEs

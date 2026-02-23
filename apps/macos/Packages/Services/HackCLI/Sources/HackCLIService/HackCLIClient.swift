@@ -22,6 +22,36 @@ public enum HackCLIError: LocalizedError, Equatable {
   }
 }
 
+public enum GitSystemIdentityScope: String, Hashable {
+  case global
+  case project
+}
+
+public struct GitSystemIdentity: Hashable {
+  public let scope: GitSystemIdentityScope
+  public let gitName: String?
+  public let gitEmail: String?
+  public let githubLogin: String?
+  public let githubName: String?
+  public let githubId: String?
+
+  public init(
+    scope: GitSystemIdentityScope,
+    gitName: String?,
+    gitEmail: String?,
+    githubLogin: String?,
+    githubName: String?,
+    githubId: String?
+  ) {
+    self.scope = scope
+    self.gitName = gitName
+    self.gitEmail = gitEmail
+    self.githubLogin = githubLogin
+    self.githubName = githubName
+    self.githubId = githubId
+  }
+}
+
 public actor HackCLIClient {
   private static let authServerCandidates = [
     "https://auth.hack.broker",
@@ -369,6 +399,33 @@ public actor HackCLIClient {
     }
     let result = try await run(args, allowNonZeroExit: true)
     return try decodeJsonOrThrow(GitHubStatusResponse.self, result: result)
+  }
+
+  /// Resolves the effective system Git identity (global or repo-effective) and optional GitHub CLI account.
+  ///
+  /// This is read-only host identity state and is intentionally separate from remote OAuth/App profile routing.
+  public func inspectSystemGitIdentity(projectPath: String? = nil) async throws -> GitSystemIdentity {
+    let normalizedPath = normalized(projectPath)
+    let scope: GitSystemIdentityScope = normalizedPath == nil ? .global : .project
+    let gitName = try await readGitConfigValue(
+      key: "user.name",
+      scope: scope,
+      projectPath: normalizedPath
+    )
+    let gitEmail = try await readGitConfigValue(
+      key: "user.email",
+      scope: scope,
+      projectPath: normalizedPath
+    )
+    let githubIdentity = try await inspectGitHubCLIIdentity()
+    return GitSystemIdentity(
+      scope: scope,
+      gitName: gitName,
+      gitEmail: gitEmail,
+      githubLogin: githubIdentity?.login,
+      githubName: githubIdentity?.name,
+      githubId: githubIdentity?.id
+    )
   }
 
   /// Starts cloud GitHub OAuth with the dedicated auth broker surface.
@@ -912,9 +969,18 @@ public actor HackCLIClient {
     do {
       return try decode(type, from: trimmedStdout)
     } catch {
+      if let decoded = try? decodeLenient(type, from: trimmedStdout) {
+        return decoded
+      }
       // If hack printed logs or other output, surface stderr as the actionable hint.
       if !trimmedStderr.isEmpty {
         throw HackCLIError.commandFailed(exitCode: result.exitCode, stderr: trimmedStderr)
+      }
+      if result.exitCode != 0 {
+        throw HackCLIError.commandFailed(
+          exitCode: result.exitCode,
+          stderr: "command failed without JSON payload"
+        )
       }
       throw error
     }
@@ -1280,6 +1346,58 @@ public actor HackCLIClient {
     return candidates
   }
 
+  private func readGitConfigValue(
+    key: String,
+    scope: GitSystemIdentityScope,
+    projectPath: String?
+  ) async throws -> String? {
+    var args = ["git", "config"]
+    if scope == .global {
+      args.append("--global")
+    }
+    args.append(contentsOf: ["--get", key])
+    let result = try await runExecutable(
+      executablePath: "/usr/bin/env",
+      args: args,
+      allowNonZeroExit: true,
+      cwd: projectPath
+    )
+    guard result.exitCode == 0 else {
+      return nil
+    }
+    return normalized(firstNonEmptyLine(result.stdout))
+  }
+
+  private func inspectGitHubCLIIdentity() async throws -> GitHubCLIIdentity? {
+    let result = try await runExecutable(
+      executablePath: "/usr/bin/env",
+      args: ["gh", "api", "user"],
+      allowNonZeroExit: true,
+      cwd: nil
+    )
+    guard result.exitCode == 0 else {
+      return nil
+    }
+    let trimmed = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      return nil
+    }
+    let jsonText = extractJsonSnippets(from: trimmed).first ?? trimmed
+    guard let data = jsonText.data(using: String.Encoding.utf8) else {
+      return nil
+    }
+    let decoded = try? JSONDecoder().decode(GitHubCLIIdentity.self, from: data)
+    let login = normalized(decoded?.login)
+    guard let login else {
+      return nil
+    }
+    return GitHubCLIIdentity(
+      login: login,
+      name: normalized(decoded?.name),
+      id: normalized(decoded?.id)
+    )
+  }
+
   private func runExecutable(
     executablePath: String,
     args: [String],
@@ -1352,6 +1470,12 @@ public actor HackCLIClient {
       stderrPipe.fileHandleForReading.closeFile()
     })
   }
+}
+
+private struct GitHubCLIIdentity: Decodable {
+  let login: String?
+  let name: String?
+  let id: String?
 }
 
 private struct RawTailscaleStatus: Decodable {

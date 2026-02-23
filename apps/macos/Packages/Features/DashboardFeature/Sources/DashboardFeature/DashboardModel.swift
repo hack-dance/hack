@@ -592,6 +592,15 @@ public final class DashboardModel {
     }
   }
 
+  public func inspectSystemGitIdentity(projectPath: String? = nil) async -> GitSystemIdentity? {
+    do {
+      return try await client.inspectSystemGitIdentity(projectPath: projectPath)
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
   public func startGitHubOAuthFlow(
     profileId: String,
     setDefault: Bool

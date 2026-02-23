@@ -977,11 +977,36 @@ struct NodeTopologySettingsView: View {
       return
     }
 
-    registry = list
-    tailscale = tailscaleResult
+    let previousRegistry = registry
+    var resolvedList = list
+    if let list,
+       list.nodes.isEmpty,
+       let previousRegistry,
+       !previousRegistry.nodes.isEmpty {
+      // Guard against transient empty snapshots by confirming once before replacing
+      // a known non-empty registry in memory.
+      let confirmation = await model.listNodes()
+      if let confirmation {
+        resolvedList = confirmation
+      } else {
+        resolvedList = previousRegistry
+      }
+    }
+    if Task.isCancelled {
+      return
+    }
+    if let resolvedList {
+      registry = resolvedList
+    }
+    let effectiveTailscale = tailscaleResult ?? tailscale
+    if let tailscaleResult {
+      if tailscaleResult.error == nil || tailscale == nil {
+        tailscale = tailscaleResult
+      }
+    }
     let nextLayoutProfile = resolveControllerLayoutProfile(
       sourceProjectId: controllerSourceProjectId,
-      tailscale: tailscaleResult
+      tailscale: effectiveTailscale
     )
     if nextLayoutProfile != controllerLayoutProfile {
       controllerLayoutProfile = nextLayoutProfile
@@ -991,10 +1016,12 @@ struct NodeTopologySettingsView: View {
     pairingCodeBySessionId = pairingCodeBySessionId.filter { key, _ in
       pendingSessions.contains(where: { $0.id == key })
     }
-    probeByNodeId = Dictionary(
-      uniqueKeysWithValues: (status?.nodes ?? []).map { ($0.input.id, $0) }
-    )
-    let knownNodeIds = Set((list?.nodes ?? []).map(\.id))
+    if let status {
+      probeByNodeId = Dictionary(
+        uniqueKeysWithValues: status.nodes.map { ($0.input.id, $0) }
+      )
+    }
+    let knownNodeIds = Set((registry?.nodes ?? []).map(\.id))
     topologyLayoutOverrides = topologyLayoutOverrides.filter { key, _ in
       key == Self.localTopologyNodeId || knownNodeIds.contains(key)
     }

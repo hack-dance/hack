@@ -1,7 +1,6 @@
 import SwiftUI
 
-struct DetailRowItem: Identifiable {
-  let id = UUID()
+struct DetailRowItem {
   let label: String
   let value: String
 }
@@ -17,7 +16,7 @@ struct DetailRows: View {
 
   var body: some View {
     Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
-      ForEach(rows) { row in
+      ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
         GridRow {
           Text(row.label)
             .font(.mono(.caption))

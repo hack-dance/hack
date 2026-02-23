@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 
+import HackCLIService
 import HackDesktopModels
 
 private enum ExecutionTargetMode: String, CaseIterable, Identifiable {
@@ -9,6 +10,51 @@ private enum ExecutionTargetMode: String, CaseIterable, Identifiable {
   case providerProfile = "Provider profile"
 
   var id: String { rawValue }
+}
+
+private enum ProjectSidebarItem: String, CaseIterable, Identifiable {
+  case remoteExecution
+  case services
+  case lifecycle
+  case branches
+  case sessions
+  case tickets
+
+  var id: String { rawValue }
+
+  var title: String {
+    switch self {
+    case .remoteExecution:
+      return "Remote execution"
+    case .services:
+      return "Services"
+    case .lifecycle:
+      return "Lifecycle"
+    case .branches:
+      return "Branches"
+    case .sessions:
+      return "Sessions"
+    case .tickets:
+      return "Tickets"
+    }
+  }
+
+  var icon: String {
+    switch self {
+    case .remoteExecution:
+      return "point.3.connected.trianglepath.dotted"
+    case .services:
+      return "shippingbox"
+    case .lifecycle:
+      return "bolt.horizontal"
+    case .branches:
+      return "arrow.triangle.branch"
+    case .sessions:
+      return "rectangle.3.group.bubble.left"
+    case .tickets:
+      return "ticket"
+    }
+  }
 }
 
 struct ProjectDetailView: View {
@@ -23,12 +69,10 @@ struct ProjectDetailView: View {
 
   let project: ProjectSummary
   @State private var showOverviewSidebar = true
+  @State private var selectedSidebarItem: ProjectSidebarItem = .services
   @State private var selectedService: String? = nil
   @State private var hoveredService: String? = nil
-  @State private var isControlBarHovered = false
-  @State private var hoveredControl: ProjectTab? = nil
-  @State private var isStartHovered = false
-  @State private var isStopHovered = false
+  @State private var hoveredSidebarItem: ProjectSidebarItem? = nil
   @State private var showInfoPanel = false
   @State private var expandedBranches: Set<String> = []
   @State private var showAddBranchSheet = false
@@ -54,32 +98,41 @@ struct ProjectDetailView: View {
   @State private var githubResolvedProfile = ""
   @State private var githubResolvedStatus: GitHubStatusResponse? = nil
   @State private var githubProfileMessage = ""
+  @State private var projectSystemGitIdentity: GitSystemIdentity? = nil
   @State private var executionTargetReloadTask: Task<Void, Never>? = nil
 
   var body: some View {
     @Bindable var model = model
     VStack(alignment: .leading, spacing: 0) {
       projectPageHeader
-      tabContent
-        .id(effectiveTab)
-        .transition(.opacity.combined(with: .move(edge: .trailing)))
-        .animation(.easeInOut(duration: 0.2), value: effectiveTab)
+      projectSplitLayout
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-    .safeAreaInset(edge: .bottom, spacing: 0) {
-      bottomControlBar
-        .padding(.bottom, 18)
     }
     .onAppear {
       ensureSelectedTab()
+      syncSidebarSelectionFromTab()
+      ensureSidebarSelection()
       queueExecutionTargetReload()
     }
     .onChange(of: project.id) { _, _ in
       ensureSelectedTab()
+      syncSidebarSelectionFromTab()
+      ensureSidebarSelection()
       queueExecutionTargetReload()
     }
     .onChange(of: model.selectedProjectTab) { _, _ in
       ensureSelectedTab()
+      syncSidebarSelectionFromTab()
+      ensureSidebarSelection()
+    }
+    .onChange(of: lifecycleSummary.hasEntries) { _, _ in
+      ensureSidebarSelection()
+    }
+    .onChange(of: project.supportsTickets) { _, _ in
+      ensureSidebarSelection()
+    }
+    .onChange(of: project.kind) { _, _ in
+      ensureSidebarSelection()
     }
     .onDisappear {
       executionTargetReloadTask?.cancel()
@@ -120,67 +173,7 @@ struct ProjectDetailView: View {
           }
         }
         Spacer(minLength: 8)
-        HStack(spacing: 8) {
-          if isProjectLifecycleBusy {
-            HStack(spacing: 6) {
-              ProgressView()
-                .controlSize(.small)
-              Text(projectLifecycleLabel)
-                .font(.mono(.caption))
-                .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(
-              Capsule(style: .continuous)
-                .fill(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.04))
-            )
-          } else {
-            if canStart {
-              Button {
-                Task { await model.startProject(project) }
-              } label: {
-                Label("Start", systemImage: "play.fill")
-              }
-              .buttonStyle(PressableIconButtonStyle())
-            }
-
-            if canStop {
-              Button {
-                Task { await model.stopProject(project) }
-              } label: {
-                Label("Stop", systemImage: "stop.fill")
-              }
-              .buttonStyle(PressableIconButtonStyle())
-            }
-          }
-
-          if projectOpenPath != nil {
-            openInProjectButton
-            codingAgentQuickAccessButton
-          }
-
-          if !sessionEntries.isEmpty {
-            sessionQuickAccessButton
-          }
-        }
-      }
-
-      ScrollView(.horizontal, showsIndicators: false) {
-        HStack(spacing: 8) {
-          headerMetricPill("Services", value: "\(runningServiceCount)/\(serviceNames.count) running")
-          headerMetricPill("Branches", value: "\(branchEntries.count)")
-          headerMetricPill("Sessions", value: "\(sessionEntries.count)")
-          if lifecycleSummary.hasEntries {
-            headerMetricPill(
-              "Startup",
-              value: "\(lifecycleSummary.startupHookCount) hooks / \(lifecycleSummary.processCount) persistent"
-            )
-          }
-          if project.supportsTickets {
-            headerMetricPill("Tickets", value: "Enabled")
-          }
-        }
+        projectHeaderActionsMenu
       }
     }
     .padding(.horizontal, 24)
@@ -194,7 +187,6 @@ struct ProjectDetailView: View {
         .frame(height: 1)
     }
     .clipShape(projectHeaderShape)
-    .padding(.bottom, 8)
   }
 
   private var headerBreadcrumb: some View {
@@ -205,7 +197,7 @@ struct ProjectDetailView: View {
       Image(systemName: "chevron.right")
         .font(.mono(.caption2, weight: .semibold))
         .foregroundStyle(.secondary)
-      Text(breadcrumbLabel(for: effectiveTab))
+      Text(sidebarBreadcrumbLabel)
         .font(.mono(.caption, weight: .medium))
         .foregroundStyle(.secondary)
     }
@@ -213,11 +205,313 @@ struct ProjectDetailView: View {
     .truncationMode(.tail)
   }
 
+  private var projectHeaderActionsMenu: some View {
+    Menu {
+      if isProjectLifecycleBusy {
+        Label(projectLifecycleLabel, systemImage: "hourglass")
+          .foregroundStyle(.secondary)
+      } else {
+        if canStart {
+          Button {
+            Task { await model.startProject(project) }
+          } label: {
+            Label("Start", systemImage: "play.fill")
+          }
+        }
+        if canStop {
+          Button {
+            Task { await model.stopProject(project) }
+          } label: {
+            Label("Stop", systemImage: "stop.fill")
+          }
+        }
+      }
+
+      if let path = projectOpenPath {
+        Divider()
+
+        Menu("Open in IDE") {
+          Button {
+            openProjectInEditor(preferredEditor)
+          } label: {
+            Label("Open in \(preferredEditor.displayName)", systemImage: "checkmark.circle.fill")
+          }
+
+          Divider()
+
+          ForEach(availableEditors, id: \.rawValue) { editor in
+            Button {
+              preferredEditorRaw = editor.rawValue
+              openProjectInEditor(editor)
+            } label: {
+              Label(
+                editor.displayName,
+                systemImage: editor == preferredEditor ? "checkmark.circle.fill" : "circle"
+              )
+            }
+          }
+        }
+
+        Menu("Open in Agent") {
+          Button {
+            openProjectInCodingAgent(preferredCodingAgent, projectPath: path)
+          } label: {
+            Label(
+              "Open in \(preferredCodingAgent.displayName)",
+              systemImage: "checkmark.circle.fill"
+            )
+          }
+
+          Divider()
+
+          ForEach(availableCodingAgents, id: \.rawValue) { agent in
+            Button {
+              preferredCodingAgentRaw = agent.rawValue
+              openProjectInCodingAgent(agent, projectPath: path)
+            } label: {
+              Label(
+                agent.displayName,
+                systemImage: agent == preferredCodingAgent ? "checkmark.circle.fill" : "circle"
+              )
+            }
+          }
+
+          Divider()
+
+          Button("Print init prompt") {
+            openTerminal(
+              kind: .shell,
+              command: "hack agent init --path \(shellQuote(path)) --client print",
+              title: "\(project.name) init prompt"
+            )
+          }
+        }
+
+        Button("Reveal in Finder") {
+          NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
+        }
+      }
+
+      if !sessionEntries.isEmpty {
+        Divider()
+
+        Menu("Open session") {
+          if sessionEntries.count == 1, let session = sessionEntries.first {
+            sessionOpenMenuItems(for: session)
+          } else {
+            ForEach(sessionEntries, id: \.id) { session in
+              Menu(session.name) {
+                sessionOpenMenuItems(for: session)
+              }
+            }
+          }
+        }
+
+        Button("Open sessions view") {
+          selectSidebarItem(.sessions)
+        }
+      }
+    } label: {
+      Image(systemName: overflowActionsSymbolName)
+        .font(.mono(.subheadline, weight: .semibold))
+        .frame(width: 24, height: 24)
+    }
+    .buttonStyle(PressableCircleButtonStyle())
+    .help("Project actions")
+    .accessibilityLabel("Project actions")
+  }
+
+  /// Returns a conservative overflow glyph available across supported macOS symbol sets.
+  private var overflowActionsSymbolName: String {
+    return "ellipsis"
+  }
+
+  private var projectSplitLayout: some View {
+    HStack(spacing: 0) {
+      projectNavigationSidebar
+      Divider()
+        .opacity(0.2)
+      tabContent
+        .id(effectiveTab)
+        .transition(.opacity.combined(with: .move(edge: .trailing)))
+        .animation(.easeInOut(duration: 0.2), value: effectiveTab)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(
+          Rectangle()
+            .fill(projectDetailFillColor)
+            .overlay(
+              Rectangle()
+                .fill(projectDetailTintColor)
+            )
+        )
+    }
+  }
+
+  private var projectNavigationSidebar: some View {
+    ScrollView {
+      VStack(alignment: .leading, spacing: 16) {
+        sectionedSidebarNavigation
+        Divider()
+          .opacity(0.2)
+        sidebarTerminalActions
+        Divider()
+          .opacity(0.2)
+        sidebarProjectActions
+      }
+      .padding(.vertical, 12)
+      .padding(.horizontal, 10)
+    }
+    .frame(minWidth: 220, idealWidth: 240, maxWidth: 260, maxHeight: .infinity, alignment: .topLeading)
+    .background(
+      Rectangle()
+        .fill(projectSidebarFillColor)
+        .overlay(
+          Rectangle()
+            .fill(projectSidebarTintColor)
+        )
+    )
+  }
+
+  private var sectionedSidebarNavigation: some View {
+    VStack(alignment: .leading, spacing: 16) {
+      sidebarSectionHeader("Project")
+      VStack(alignment: .leading, spacing: 6) {
+        ForEach(overviewSidebarItems, id: \.id) { item in
+          sidebarNavigationButton(item)
+        }
+      }
+
+      if !workflowSidebarItems.isEmpty {
+        sidebarSectionHeader("Workflows")
+        VStack(alignment: .leading, spacing: 6) {
+          ForEach(workflowSidebarItems, id: \.id) { item in
+            sidebarNavigationButton(item)
+          }
+        }
+      }
+    }
+  }
+
+  private var sidebarTerminalActions: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      sidebarSectionHeader("Terminal")
+      sidebarActionButton(
+        title: "Logs drawer",
+        icon: "text.alignleft"
+      ) {
+        openTerminal(kind: .logs)
+      }
+      sidebarActionButton(
+        title: "Shell drawer",
+        icon: "terminal"
+      ) {
+        openTerminal(kind: .shell)
+      }
+    }
+  }
+
+  @ViewBuilder
+  private var sidebarProjectActions: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      sidebarSectionHeader("Lifecycle")
+      if isProjectLifecycleBusy {
+        HStack(spacing: 8) {
+          ProgressView()
+            .controlSize(.small)
+          Text(projectLifecycleLabel)
+            .font(.mono(.caption, weight: .semibold))
+            .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+      } else {
+        if canStart {
+          sidebarActionButton(title: "Start project", icon: "play.fill") {
+            Task { await model.startProject(project) }
+          }
+        }
+        if canStop {
+          sidebarActionButton(title: "Stop project", icon: "stop.fill") {
+            Task { await model.stopProject(project) }
+          }
+        }
+      }
+    }
+  }
+
+  private func sidebarSectionHeader(_ title: String) -> some View {
+    Text(title)
+      .font(.mono(.caption, weight: .semibold))
+      .foregroundStyle(.secondary)
+      .textCase(.uppercase)
+  }
+
+  private func sidebarNavigationButton(_ item: ProjectSidebarItem) -> some View {
+    let selected = item == selectedSidebarItem
+    return Button {
+      selectSidebarItem(item)
+    } label: {
+      HStack(spacing: 8) {
+        Image(systemName: item.icon)
+          .font(.mono(.caption, weight: .semibold))
+          .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+          .frame(width: 14, alignment: .center)
+        Text(item.title)
+          .font(.mono(.subheadline, weight: .medium))
+          .foregroundStyle(selected ? .primary : .secondary)
+        Spacer(minLength: 6)
+        if let count = sidebarItemCountLabel(item) {
+          Text(count)
+            .font(.mono(.caption2, weight: .semibold))
+            .foregroundStyle(selected ? .primary : .tertiary)
+        }
+      }
+      .padding(.horizontal, 10)
+      .padding(.vertical, 8)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .background(
+        RoundedRectangle(cornerRadius: 9, style: .continuous)
+          .fill(selected ? Color.accentColor.opacity(0.18) : hoveredSidebarItem == item ? Color.white.opacity(0.06) : .clear)
+      )
+    }
+    .buttonStyle(.plain)
+    .onHover { hovering in
+      hoveredSidebarItem = hovering ? item : nil
+    }
+  }
+
+  private func sidebarActionButton(
+    title: String,
+    icon: String,
+    action: @escaping () -> Void
+  ) -> some View {
+    Button(action: action) {
+      HStack(spacing: 8) {
+        Image(systemName: icon)
+          .font(.mono(.caption, weight: .semibold))
+          .foregroundStyle(.secondary)
+          .frame(width: 14, alignment: .center)
+        Text(title)
+          .font(.mono(.subheadline, weight: .medium))
+          .foregroundStyle(.secondary)
+        Spacer(minLength: 6)
+      }
+      .padding(.horizontal, 10)
+      .padding(.vertical, 8)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .background(
+        RoundedRectangle(cornerRadius: 9, style: .continuous)
+          .fill(Color.white.opacity(0.04))
+      )
+    }
+    .buttonStyle(.plain)
+  }
+
   @ViewBuilder
   private var tabContent: some View {
     switch effectiveTab {
     case .overview:
-      overviewContent
+      projectOverviewContent
     case .branches:
       branchesContent
     case .sessions:
@@ -228,6 +522,20 @@ struct ProjectDetailView: View {
       terminalMovedCard(kind: .shell)
     case .tickets:
       TicketsView(project: project)
+    }
+  }
+
+  @ViewBuilder
+  private var projectOverviewContent: some View {
+    switch selectedSidebarItem {
+    case .remoteExecution:
+      remoteExecutionContent
+    case .services:
+      servicesContent
+    case .lifecycle:
+      lifecycleContent
+    case .branches, .sessions, .tickets:
+      remoteExecutionContent
     }
   }
 
@@ -246,47 +554,33 @@ struct ProjectDetailView: View {
     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
   }
 
-  private var overviewContent: some View {
-    ScrollView {
-      HStack(alignment: .top, spacing: 24) {
-        LazyVStack(alignment: .leading, spacing: 20) {
-          if !project.isRuntimeConfigured {
-            runtimeNotConfiguredCard
-          }
-          executionTargetSection
-          githubProfileSection
-          servicesSection
-          if lifecycleSummary.hasEntries {
-            lifecycleSection
-          }
-          if showInfoPanel {
-            infoSection
-              .transition(.move(edge: .bottom).combined(with: .opacity))
-          }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+  private var remoteExecutionContent: some View {
+    ProjectRemoteExecutionView(
+      showsRuntimeNotConfigured: !project.isRuntimeConfigured,
+      showsInfoPanel: showInfoPanel
+    ) {
+      runtimeNotConfiguredCard
+    } sectionContent: {
+      remoteExecutionSection
+    } infoPanel: {
+      infoSection
+    }
+  }
 
-        if showOverviewSidebar, selectedService != nil {
-          Divider()
-            .opacity(0.2)
-            .transition(.opacity)
-          serviceDetailPanel
-            .frame(minWidth: 260, idealWidth: 300, maxWidth: 360, maxHeight: .infinity, alignment: .topLeading)
-            .transition(.move(edge: .trailing).combined(with: .opacity))
-        }
-      }
-      .padding(24)
-      .frame(maxWidth: .infinity, alignment: .topLeading)
-      .background(
-        RoundedRectangle(cornerRadius: 18, style: .continuous)
-          .fill(.ultraThinMaterial)
-          .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-              .stroke(Color.white.opacity(0.06), lineWidth: 1)
-          )
-      )
-      .padding(.horizontal, 24)
-      .padding(.bottom, 32)
+  private var servicesContent: some View {
+    ProjectServicesView(
+      showOverviewSidebar: showOverviewSidebar,
+      hasSelection: selectedService != nil
+    ) {
+      servicesSection
+    } detailPanel: {
+      serviceDetailPanel
+    }
+  }
+
+  private var lifecycleContent: some View {
+    ProjectLifecycleView(hasEntries: lifecycleSummary.hasEntries) {
+      lifecycleSection
     }
   }
 
@@ -319,191 +613,15 @@ struct ProjectDetailView: View {
     }
   }
 
-  private var executionTargetSection: some View {
-    VStack(alignment: .leading, spacing: 10) {
+  private var remoteExecutionSection: some View {
+    VStack(alignment: .leading, spacing: 14) {
       HStack(spacing: 10) {
         Image(systemName: "point.3.connected.trianglepath.dotted")
           .foregroundStyle(.secondary)
-        Text("Execution target")
+        Text("Remote execution")
           .font(.mono(.headline, weight: .semibold))
         Spacer()
         if executionTargetLoading || executionTargetSaving {
-          ProgressView()
-            .controlSize(.small)
-        }
-      }
-
-      HStack(spacing: 8) {
-        StatusPill(text: executionTargetSourceLabel, tone: .neutral)
-        if !globalDefaultProfile.isEmpty {
-          StatusPill(text: "Global profile: \(globalDefaultProfile)", tone: .neutral)
-        } else if !globalDefaultProvider.isEmpty {
-          StatusPill(text: "Global provider: \(globalDefaultProvider)", tone: .neutral)
-        }
-      }
-      Text(executionTargetSummary)
-        .font(.mono(.caption))
-        .foregroundStyle(.secondary)
-
-      HStack(alignment: .center, spacing: 10) {
-        Picker("Target mode", selection: $executionTargetMode) {
-          ForEach(ExecutionTargetMode.allCases) { mode in
-            Text(mode.rawValue).tag(mode)
-          }
-        }
-        .pickerStyle(.segmented)
-        .frame(maxWidth: 420)
-
-        Spacer()
-
-        Button {
-          Task { await persistExecutionTarget() }
-        } label: {
-          Label("Apply", systemImage: "checkmark")
-        }
-        .buttonStyle(PressableIconButtonStyle())
-        .disabled(executionTargetLoading || executionTargetSaving)
-
-        Button {
-          executionTargetMode = .inherited
-          executionTargetNodeId = ""
-          executionTargetProvider = ""
-          executionTargetProfileId = ""
-          Task { await persistExecutionTarget() }
-        } label: {
-          Label("Clear override", systemImage: "arrow.uturn.backward")
-        }
-        .buttonStyle(PressableIconButtonStyle())
-        .disabled(executionTargetLoading || executionTargetSaving)
-      }
-
-      if executionTargetMode == .fixedNode {
-        Picker("Node", selection: $executionTargetNodeId) {
-          Text("Select node").tag("")
-          ForEach(executionTargetNodes, id: \.id) { node in
-            Text(node.name).tag(node.id)
-          }
-        }
-        .pickerStyle(.menu)
-      }
-
-      if executionTargetMode == .providerProfile {
-        TextField("Provider", text: $executionTargetProvider)
-          .textFieldStyle(.roundedBorder)
-        Picker("Profile", selection: $executionTargetProfileId) {
-          Text("No profile").tag("")
-          ForEach(executionTargetProfiles, id: \.self) { profile in
-            Text(profile).tag(profile)
-          }
-        }
-        .pickerStyle(.menu)
-        .onChange(of: executionTargetProfileId) { _, profileId in
-          guard let provider = executionTargetProfileProviderById[profileId] else {
-            return
-          }
-          executionTargetProvider = provider
-        }
-      }
-
-      if !executionTargetMessage.isEmpty {
-        Text(executionTargetMessage)
-          .font(.mono(.caption2))
-          .foregroundStyle(executionTargetMessage.hasPrefix("Failed") ? Color.orange : Color.green)
-      }
-    }
-  }
-
-  private var servicesSection: some View {
-    VStack(alignment: .leading, spacing: 12) {
-      HStack(spacing: 10) {
-        Image(systemName: "shippingbox")
-          .foregroundStyle(.secondary)
-        Text("Services")
-          .font(.mono(.headline, weight: .semibold))
-        Spacer()
-      }
-      .overlay(alignment: .bottom) {
-        Rectangle()
-          .fill(Color.white.opacity(0.08))
-          .frame(height: 1)
-          .offset(y: 8)
-      }
-      let services = serviceNames
-      if !services.isEmpty {
-        VStack(alignment: .leading, spacing: 10) {
-          ForEach(services, id: \.self) { service in
-            let status = serviceStatus(for: service)
-            let isHovered = hoveredService == service
-            let isSelected = selectedService == service
-            VStack(alignment: .leading, spacing: 6) {
-              HStack(spacing: 10) {
-                Circle()
-                  .fill(status.color)
-                  .frame(width: 8, height: 8)
-                Text(service)
-                  .font(.mono(.subheadline, weight: .semibold))
-                Spacer()
-                if let urlLabel = status.urlLabel {
-                  Button {
-                    openServiceHost(urlLabel)
-                  } label: {
-                    Text(urlLabel)
-                      .font(.mono(.caption2))
-                  }
-                  .buttonStyle(.plain)
-                  .linkHover()
-                }
-                Text(status.label)
-                  .font(.mono(.caption))
-                  .foregroundStyle(.secondary)
-              }
-              if let detail = status.detail {
-                Text(detail)
-                  .font(.mono(.caption2))
-                  .foregroundStyle(.tertiary)
-              }
-            }
-            .padding(.vertical, 10)
-            .padding(.horizontal, 16)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background {
-              RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(isSelected ? Color.accentColor.opacity(0.18) : isHovered ? Color.white.opacity(0.06) : .clear)
-                .padding(.horizontal, -20)
-            }
-            .contentShape(Rectangle())
-            .onTapGesture {
-              withAnimation(.easeInOut(duration: 0.2)) {
-                selectedService = service
-                showOverviewSidebar = true
-              }
-            }
-            .onHover { hovering in
-              hoveredService = hovering ? service : nil
-            }
-            .animation(.easeInOut(duration: 0.12), value: isHovered)
-            Divider()
-              .opacity(isSelected || isHovered ? 0.1 : 0.2)
-              .padding(.top, -6)
-          }
-        }
-      } else {
-        Text("No services registered.")
-          .font(.mono(.subheadline))
-          .foregroundStyle(.secondary)
-      }
-    }
-  }
-
-  private var githubProfileSection: some View {
-    VStack(alignment: .leading, spacing: 10) {
-      HStack(spacing: 10) {
-        Image(systemName: "person.2.badge.gearshape")
-          .foregroundStyle(.secondary)
-        Text("GitHub profile")
-          .font(.mono(.headline, weight: .semibold))
-        Spacer()
-        if executionTargetSaving {
           ProgressView()
             .controlSize(.small)
         }
@@ -514,118 +632,190 @@ struct ProjectDetailView: View {
             userInfo: ["pane": "github"]
           )
         } label: {
-          Label("Open GitHub settings", systemImage: "gearshape")
+          Label("Manage accounts", systemImage: "gearshape")
         }
         .buttonStyle(PressableIconButtonStyle())
       }
 
-      HStack(spacing: 8) {
-        StatusPill(
-          text: githubProjectProfile.isEmpty ? "Inherited profile" : "Project override",
-          tone: githubProjectProfile.isEmpty ? .neutral : .good
-        )
-        if !githubDefaultProfile.isEmpty {
-          StatusPill(text: "Global default: \(githubDefaultProfile)", tone: .neutral)
+      Text("Select the default node and Git credentials for remote runs. Local uses this machine's inherited Git setup.")
+        .font(.mono(.caption))
+        .foregroundStyle(.secondary)
+
+      VStack(alignment: .leading, spacing: 12) {
+        HStack(alignment: .center, spacing: 12) {
+          Text("Default node")
+            .font(.mono(.subheadline, weight: .semibold))
+            .frame(width: 120, alignment: .leading)
+
+          Picker("Default node", selection: $executionTargetNodeId) {
+            Text("Local").tag("")
+            ForEach(executionTargetNodes, id: \.id) { node in
+              Text(node.name).tag(node.id)
+            }
+          }
+          .pickerStyle(.menu)
+          .frame(maxWidth: 360, alignment: .leading)
+          .onChange(of: executionTargetNodeId) { _, _ in
+            guard !executionTargetLoading else {
+              return
+            }
+            Task { await persistSimpleDefaultNodeSelection() }
+          }
+
+          Spacer()
+          Text(selectedNodeSummary)
+            .font(.mono(.caption2))
+            .foregroundStyle(.tertiary)
         }
-        if !githubResolvedProfile.isEmpty {
-          StatusPill(text: "Effective: \(githubResolvedProfile)", tone: .good)
-        }
-        if let status = githubResolvedStatus {
-          StatusPill(
-            text: status.tokenResolved ? "Token resolved" : "Token missing",
-            tone: status.tokenResolved ? .good : .warn
-          )
+
+        HStack(alignment: .center, spacing: 12) {
+          Text("Git creds")
+            .font(.mono(.subheadline, weight: .semibold))
+            .frame(width: 120, alignment: .leading)
+
+          Picker("Git creds", selection: $githubProjectProfile) {
+            Text("Local").tag("")
+            ForEach(githubProfileOptions, id: \.self) { profile in
+              Text(githubProfileLabel(profileId: profile)).tag(profile)
+            }
+          }
+          .pickerStyle(.menu)
+          .frame(maxWidth: 360, alignment: .leading)
+          .onChange(of: githubProjectProfile) { _, _ in
+            guard !executionTargetLoading else {
+              return
+            }
+            Task { await persistGitCredentialsSelection() }
+          }
+
+          Spacer()
+          Text(selectedGitSummary)
+            .font(.mono(.caption2))
+            .foregroundStyle(.tertiary)
         }
       }
 
-      if let resolvedSummary = resolvedGitHubProfileSummary {
-        VStack(alignment: .leading, spacing: 2) {
-          if let account = resolvedSummary.accountLogin, !account.isEmpty {
-            Text("Account: \(account)\(resolvedSummary.accountName.map { " (\($0))" } ?? "")")
-              .font(.mono(.caption2))
-              .foregroundStyle(.secondary)
-          }
-          if let installation = resolvedSummary.installationId, !installation.isEmpty {
-            Text("Installation: \(installation)")
-              .font(.mono(.caption2))
-              .foregroundStyle(.secondary)
-          }
-        }
+      if let projectSystemGitIdentity {
+        let systemAccountLabel = projectSystemGitIdentity.githubLogin.map { "@\($0)" } ?? "unavailable"
+        Text("Local system Git: \(systemAccountLabel)\(projectSystemGitIdentity.gitEmail.map { " • \($0)" } ?? "")")
+          .font(.mono(.caption2))
+          .foregroundStyle(.secondary)
       }
 
-      if let status = githubResolvedStatus, status.tokenResolved {
-        VStack(alignment: .leading, spacing: 4) {
-          if let source = status.tokenSource, !source.isEmpty {
-            Text("Token source: \(source)")
-              .font(.mono(.caption2))
-              .foregroundStyle(.tertiary)
-          }
-          if let expiresAt = status.tokenExpiresAt, !expiresAt.isEmpty {
-            Text("Token expires: \(expiresAt)")
-              .font(.mono(.caption2))
-              .foregroundStyle(.tertiary)
-          }
-        }
-      }
-
-      if let connectionIssue = githubConnectionIssueMessage {
+      if !executionTargetProvider.isEmpty || !executionTargetProfileId.isEmpty {
         InlineCallout(
-          tone: .warn,
-          title: "GitHub token unavailable",
-          message: connectionIssue,
+          tone: .neutral,
+          title: "Legacy provider routing detected",
+          message: "This project still has provider-profile routing saved. Choosing Local or a node here replaces that with node routing.",
           actions: []
         )
       }
 
-      if let suggestedProfile = suggestedGitHubTokenReadyProfile {
-        HStack(spacing: 8) {
-          Text("Token is available on profile \(suggestedProfile).")
-            .font(.mono(.caption2))
-            .foregroundStyle(.secondary)
-          Button {
-            githubProjectProfile = suggestedProfile
-            Task { await persistGitHubProfileOverride() }
-          } label: {
-            Label("Use \(suggestedProfile)", systemImage: "arrow.triangle.branch")
-          }
-          .buttonStyle(PressableIconButtonStyle())
-        }
-      }
-
-      if !githubProfileMessage.isEmpty {
-        Text(githubProfileMessage)
+      if !remoteConfigMessage.isEmpty {
+        Text(remoteConfigMessage)
           .font(.mono(.caption2))
-          .foregroundStyle(githubProfileMessage.hasPrefix("Failed") ? Color.orange : Color.green)
+          .foregroundStyle(remoteConfigMessage.hasPrefix("Failed") ? Color.orange : Color.green)
       }
+    }
+  }
 
-      HStack(spacing: 8) {
-        Picker("Profile", selection: $githubProjectProfile) {
-          Text("Inherited").tag("")
-          ForEach(githubProfileOptions, id: \.self) { profile in
-            Text(profile).tag(profile)
-          }
-        }
-        .pickerStyle(.menu)
-
-        Button {
-          Task { await persistGitHubProfileOverride() }
-        } label: {
-          Label("Apply", systemImage: "checkmark")
-        }
-        .buttonStyle(PressableIconButtonStyle())
-        .disabled(executionTargetLoading || executionTargetSaving)
-
-        Button {
-          githubProjectProfile = ""
-          Task { await persistGitHubProfileOverride() }
-        } label: {
-          Label("Use inherited", systemImage: "arrow.uturn.backward")
-        }
-        .buttonStyle(PressableIconButtonStyle())
-        .disabled(executionTargetLoading || executionTargetSaving)
-
+  private var servicesSection: some View {
+    VStack(alignment: .leading, spacing: 0) {
+      HStack(spacing: 10) {
+        Image(systemName: "shippingbox")
+          .foregroundStyle(.secondary)
+        Text("Services")
+          .font(.mono(.headline, weight: .semibold))
         Spacer()
       }
+      .padding(.horizontal, 24)
+      .padding(.top, 18)
+      .padding(.bottom, 14)
+      .overlay(alignment: .bottom) {
+        Rectangle()
+          .fill(Color.white.opacity(0.08))
+          .frame(height: 1)
+      }
+      let services = serviceEntries
+      if !services.isEmpty {
+        LazyVStack(alignment: .leading, spacing: 0) {
+          ForEach(services) { service in
+            serviceRow(service)
+          }
+        }
+      } else {
+        Text("No services registered.")
+          .font(.mono(.subheadline))
+          .foregroundStyle(.secondary)
+          .padding(.horizontal, 24)
+          .padding(.vertical, 18)
+      }
+    }
+  }
+
+  /// Renders one service row with contiguous list styling and subtle selected/hover states.
+  private func serviceRow(_ entry: ServiceListEntry) -> some View {
+    let service = entry.name
+    let status = entry.status
+    let isHovered = hoveredService == service
+    let isSelected = selectedService == service
+
+    return VStack(alignment: .leading, spacing: 6) {
+      HStack(spacing: 10) {
+        Circle()
+          .fill(status.color)
+          .frame(width: 9, height: 9)
+
+        Text(service)
+          .font(.mono(.subheadline, weight: .semibold))
+          .foregroundStyle(.primary)
+
+        Spacer(minLength: 12)
+
+        if let urlLabel = status.urlLabel {
+          Button {
+            openServiceHost(urlLabel)
+          } label: {
+            Text(urlLabel)
+              .font(.mono(.caption))
+          }
+          .buttonStyle(.plain)
+          .linkHover()
+        }
+
+        Text(status.label)
+          .font(.mono(.caption))
+          .foregroundStyle(.secondary)
+      }
+
+      if let detail = status.detail {
+        Text(detail)
+          .font(.mono(.caption))
+          .foregroundStyle(.tertiary)
+          .lineLimit(2)
+      }
+    }
+    .padding(.horizontal, 24)
+    .padding(.vertical, 11)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(
+      Rectangle()
+        .fill(isSelected ? Color.accentColor.opacity(0.16) : isHovered ? Color.white.opacity(0.045) : .clear)
+    )
+    .overlay(alignment: .bottom) {
+      Rectangle()
+        .fill(Color.white.opacity(0.07))
+        .frame(height: 1)
+    }
+    .contentShape(Rectangle())
+    .onTapGesture {
+      withAnimation(.easeInOut(duration: 0.16)) {
+        selectedService = service
+        showOverviewSidebar = true
+      }
+    }
+    .onHover { hovering in
+      hoveredService = hovering ? service : nil
     }
   }
 
@@ -634,18 +824,8 @@ struct ProjectDetailView: View {
       LazyVStack(alignment: .leading, spacing: 20) {
         branchesSection
       }
-      .padding(24)
+      .padding(20)
       .frame(maxWidth: .infinity, alignment: .topLeading)
-      .background(
-        RoundedRectangle(cornerRadius: 18, style: .continuous)
-          .fill(.ultraThinMaterial)
-          .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-              .stroke(Color.white.opacity(0.06), lineWidth: 1)
-          )
-      )
-      .padding(.horizontal, 24)
-      .padding(.bottom, 32)
     }
   }
 
@@ -654,18 +834,8 @@ struct ProjectDetailView: View {
       LazyVStack(alignment: .leading, spacing: 20) {
         sessionsSection
       }
-      .padding(24)
+      .padding(20)
       .frame(maxWidth: .infinity, alignment: .topLeading)
-      .background(
-        RoundedRectangle(cornerRadius: 18, style: .continuous)
-          .fill(.ultraThinMaterial)
-          .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-              .stroke(Color.white.opacity(0.06), lineWidth: 1)
-          )
-      )
-      .padding(.horizontal, 24)
-      .padding(.bottom, 32)
     }
   }
 
@@ -813,8 +983,8 @@ struct ProjectDetailView: View {
   }
 
   private var runningServiceCount: Int {
-    serviceNames.reduce(into: 0) { count, name in
-      let state = serviceStatus(for: name).runState
+    serviceEntries.reduce(into: 0) { count, entry in
+      let state = entry.status.runState
       if state == .running || state == .partial {
         count += 1
       }
@@ -1017,84 +1187,80 @@ struct ProjectDetailView: View {
     project.features ?? project.extensionsEnabled ?? []
   }
 
-  private var executionTargetSourceLabel: String {
-    switch executionTargetMode {
-    case .inherited:
-      return "Inherited from global defaults"
-    case .fixedNode:
-      return "Project fixed node"
-    case .providerProfile:
-      return "Project provider profile"
+  private var selectedNodeSummary: String {
+    let selectedNodeId = executionTargetNodeId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !selectedNodeId.isEmpty else {
+      return "Local"
     }
+    if let node = executionTargetNodes.first(where: { $0.id == selectedNodeId }) {
+      return node.name
+    }
+    return selectedNodeId
   }
 
-  private var executionTargetSummary: String {
-    switch executionTargetMode {
-    case .inherited:
-      if !globalDefaultProfile.isEmpty {
-        return "Using inherited provider profile: \(globalDefaultProfile)"
-      }
-      if !globalDefaultProvider.isEmpty {
-        return "Using inherited provider: \(globalDefaultProvider)"
-      }
-      return "Using inherited runtime defaults."
-    case .fixedNode:
-      guard
-        let node = executionTargetNodes.first(where: { $0.id == executionTargetNodeId }),
-        !executionTargetNodeId.isEmpty
-      else {
-        return "Fixed node mode selected."
-      }
-      return "Pinned to node \(node.name)."
-    case .providerProfile:
-      let profile = executionTargetProfileId.trimmingCharacters(in: .whitespacesAndNewlines)
-      let provider = executionTargetProvider.trimmingCharacters(in: .whitespacesAndNewlines)
-      if !profile.isEmpty, !provider.isEmpty {
-        return "Routing through provider \(provider) profile \(profile)."
-      }
-      if !provider.isEmpty {
-        return "Routing through provider \(provider)."
-      }
-      return "Provider profile mode selected."
+  private var selectedGitSummary: String {
+    let selectedProfileId = githubProjectProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !selectedProfileId.isEmpty else {
+      return "Local"
     }
+    return githubProfileLabel(profileId: selectedProfileId)
   }
 
-  private var resolvedGitHubProfileSummary: GitHubProfileSummary? {
-    let resolved = githubResolvedProfile.trimmingCharacters(in: .whitespacesAndNewlines)
-    if resolved.isEmpty {
+  private var remoteConfigMessage: String {
+    if !executionTargetMessage.isEmpty {
+      return executionTargetMessage
+    }
+    if !githubProfileMessage.isEmpty {
+      return githubProfileMessage
+    }
+    return ""
+  }
+
+  private func githubAccountLogin(profileId: String) -> String? {
+    let trimmed = profileId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
       return nil
     }
-    return githubProfilesById[resolved]
+    let summaryLogin = githubProfilesById[trimmed]?.accountLogin?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    if let summaryLogin, !summaryLogin.isEmpty {
+      return summaryLogin
+    }
+    let statusLogin = githubProfileStatusById[trimmed]?.accountLogin?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    if let statusLogin, !statusLogin.isEmpty {
+      return statusLogin
+    }
+    return nil
   }
 
-  private var suggestedGitHubTokenReadyProfile: String? {
-    guard let status = githubResolvedStatus, !status.tokenResolved else {
+  private func githubAccountName(profileId: String) -> String? {
+    let trimmed = profileId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
       return nil
     }
-    let resolvedProfile = githubResolvedProfile.trimmingCharacters(in: .whitespacesAndNewlines)
-    return githubProfileStatusById
-      .filter { profileId, profileStatus in
-        profileStatus.tokenResolved && profileId != resolvedProfile
-      }
-      .map(\.key)
-      .sorted { lhs, rhs in
-        lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
-      }
-      .first
+    let summaryName = githubProfilesById[trimmed]?.accountName?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    if let summaryName, !summaryName.isEmpty {
+      return summaryName
+    }
+    let statusName = githubProfileStatusById[trimmed]?.accountName?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    if let statusName, !statusName.isEmpty {
+      return statusName
+    }
+    return nil
   }
 
-  private var githubConnectionIssueMessage: String? {
-    guard let status = githubResolvedStatus, !status.tokenResolved else {
-      return nil
+  private func githubProfileLabel(profileId: String) -> String {
+    let trimmed = profileId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      return "Inherited"
     }
-    let profileId = githubResolvedProfile.trimmingCharacters(in: .whitespacesAndNewlines)
-    let fallback =
-      "Token for profile \(profileId.isEmpty ? "default" : profileId) is not available locally. Reconnect in GitHub settings."
-    let detail = status.error?.trimmingCharacters(in: .whitespacesAndNewlines)
-    if let detail, !detail.isEmpty {
-      return detail
+    guard let account = githubAccountLogin(profileId: trimmed) else {
+      return trimmed
     }
-    return fallback
+    return "@\(account) (\(trimmed))"
   }
 
   /**
@@ -1106,6 +1272,7 @@ struct ProjectDetailView: View {
     }
     executionTargetLoading = true
     defer { executionTargetLoading = false }
+    let identityProjectPath = project.repoRoot ?? project.projectDir
 
     async let nodeList = model.listNodes()
     async let projectNodeId = model.getProjectConfig(
@@ -1137,6 +1304,9 @@ struct ProjectDetailView: View {
       key: "controlPlane.extensions[\"dance.hack.github\"].config.defaultProfile"
     )
     async let githubProfiles = model.inspectGitHubProfiles()
+    async let systemGitIdentity = model.inspectSystemGitIdentity(
+      projectPath: identityProjectPath
+    )
 
     let resolvedNodeList = await nodeList
     let resolvedProjectNodeId = await projectNodeId
@@ -1148,6 +1318,7 @@ struct ProjectDetailView: View {
     let resolvedProfilesRaw = await profilesRaw
     let resolvedDefaultGitHubProfile = await defaultGitHubProfile
     let resolvedGitHubProfiles = await githubProfiles
+    let resolvedSystemGitIdentity = await systemGitIdentity
 
     if Task.isCancelled {
       return
@@ -1187,6 +1358,7 @@ struct ProjectDetailView: View {
       ? githubDefaultProfile
       : githubProjectProfile
     githubResolvedProfile = resolvedGitHubProfile
+    projectSystemGitIdentity = resolvedSystemGitIdentity
     if let preloadedStatus = profileStatusById[resolvedGitHubProfile] {
       githubResolvedStatus = preloadedStatus
     } else {
@@ -1226,54 +1398,20 @@ struct ProjectDetailView: View {
   }
 
   /**
-   Persist execution-target settings into the project-scoped controlPlane config.
+   Save simplified default-node selection.
+   *
+   Selecting "Local" clears node/provider overrides; selecting a node pins project node routing.
    */
-  private func persistExecutionTarget() async {
+  private func persistSimpleDefaultNodeSelection() async {
     executionTargetSaving = true
     defer { executionTargetSaving = false }
 
-    let providerFromProfile = executionTargetProfileProviderById[
-      executionTargetProfileId
+    let selectedNodeId = executionTargetNodeId.trimmingCharacters(in: .whitespacesAndNewlines)
+    let writes: [(String, String)] = [
+      ("controlPlane.nodeId", selectedNodeId),
+      ("controlPlane.routing.provider", ""),
+      ("controlPlane.routing.profile", ""),
     ]
-    let effectiveProvider = executionTargetProvider
-      .trimmingCharacters(in: .whitespacesAndNewlines)
-      .isEmpty
-      ? (providerFromProfile ?? "")
-      : executionTargetProvider.trimmingCharacters(in: .whitespacesAndNewlines)
-    let effectiveProfile = executionTargetProfileId
-      .trimmingCharacters(in: .whitespacesAndNewlines)
-    let effectiveNodeId = executionTargetNodeId
-      .trimmingCharacters(in: .whitespacesAndNewlines)
-
-    let writes: [(String, String)]
-    switch executionTargetMode {
-    case .inherited:
-      writes = [
-        ("controlPlane.nodeId", ""),
-        ("controlPlane.routing.provider", ""),
-        ("controlPlane.routing.profile", ""),
-      ]
-    case .fixedNode:
-      guard !effectiveNodeId.isEmpty else {
-        executionTargetMessage = "Select a node before saving fixed-node mode."
-        return
-      }
-      writes = [
-        ("controlPlane.nodeId", effectiveNodeId),
-        ("controlPlane.routing.provider", ""),
-        ("controlPlane.routing.profile", ""),
-      ]
-    case .providerProfile:
-      guard !effectiveProvider.isEmpty else {
-        executionTargetMessage = "Provider is required for provider-profile mode."
-        return
-      }
-      writes = [
-        ("controlPlane.nodeId", ""),
-        ("controlPlane.routing.provider", effectiveProvider),
-        ("controlPlane.routing.profile", effectiveProfile),
-      ]
-    }
 
     for (key, value) in writes {
       let didSave = await model.setProjectConfig(
@@ -1282,14 +1420,28 @@ struct ProjectDetailView: View {
         value: value
       )
       if !didSave {
-        executionTargetMessage = "Failed to save \(key)."
+        executionTargetMessage = "Failed to save default node."
         return
       }
     }
 
-    executionTargetMessage = "Execution target saved."
+    executionTargetMode = selectedNodeId.isEmpty ? .inherited : .fixedNode
+    executionTargetProvider = ""
+    executionTargetProfileId = ""
+    if selectedNodeId.isEmpty {
+      executionTargetMessage = "Default node set to Local."
+    } else if let node = executionTargetNodes.first(where: { $0.id == selectedNodeId }) {
+      executionTargetMessage = "Default node set to \(node.name)."
+    } else {
+      executionTargetMessage = "Default node updated."
+    }
+    githubProfileMessage = ""
     await model.refresh()
     queueExecutionTargetReload()
+  }
+
+  private func persistGitCredentialsSelection() async {
+    await persistGitHubProfileOverride()
   }
 
   private func parseProviderProfiles(raw: String?) -> (
@@ -1341,12 +1493,13 @@ struct ProjectDetailView: View {
       value: trimmed
     )
     if !didSave {
-      githubProfileMessage = "Failed to save GitHub profile override."
+      githubProfileMessage = "Failed to save Git creds."
       return
     }
     githubProfileMessage = trimmed.isEmpty
-      ? "GitHub profile override cleared (inherited)."
-      : "GitHub profile override saved."
+      ? "Git creds set to Local."
+      : "Git creds set to \(githubProfileLabel(profileId: trimmed))."
+    executionTargetMessage = ""
     await model.refresh()
     queueExecutionTargetReload()
   }
@@ -1523,12 +1676,12 @@ struct ProjectDetailView: View {
   }
 
   private var serviceDetailPanel: some View {
-    VStack(alignment: .leading, spacing: 12) {
+    VStack(alignment: .leading, spacing: 18) {
       HStack {
-        Text("Details")
-          .font(.mono(.headline, weight: .semibold))
+        Text("Service details")
+          .font(.mono(.title3, weight: .semibold))
         Spacer()
-        Button("All") {
+        Button("Show all") {
           withAnimation(.easeInOut(duration: 0.2)) {
             self.selectedService = nil
           }
@@ -1540,15 +1693,8 @@ struct ProjectDetailView: View {
         serviceDetailCard(for: selectedService)
       }
     }
-    .padding(16)
-    .background(
-      RoundedRectangle(cornerRadius: 16, style: .continuous)
-        .fill(Color.white.opacity(0.04))
-        .overlay(
-          RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .stroke(Color.white.opacity(0.08), lineWidth: 1)
-        )
-    )
+    .padding(.horizontal, 20)
+    .padding(.vertical, 18)
   }
 
   private var overviewRows: [DetailRowItem] {
@@ -1641,6 +1787,18 @@ struct ProjectDetailView: View {
     let urlLabel: String?
   }
 
+  private struct ServiceListEntry: Identifiable {
+    let id: String
+    let name: String
+    let status: ServiceStatus
+
+    init(name: String, status: ServiceStatus) {
+      self.id = name
+      self.name = name
+      self.status = status
+    }
+  }
+
   private var runtimeServicesByName: [String: RuntimeService] {
     guard let runtime = project.runtime else { return [:] }
     return Dictionary(uniqueKeysWithValues: runtime.services.map { ($0.service, $0) })
@@ -1650,19 +1808,35 @@ struct ProjectDetailView: View {
     project.serviceHosts ?? [:]
   }
 
-  private var serviceNames: [String] {
-    let defined = project.definedServices ?? []
-    let runtime = runtimeServicesByName.keys
-    let hosts = serviceHostsByName.keys
-    return Array(Set(defined).union(runtime).union(hosts)).sorted { lhs, rhs in
-      let lhsStatus = serviceStatus(for: lhs)
-      let rhsStatus = serviceStatus(for: rhs)
-      let lhsRank = serviceSortRank(lhsStatus.runState)
-      let rhsRank = serviceSortRank(rhsStatus.runState)
-      if lhsRank == rhsRank {
-        return lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
+  private var serviceEntries: [ServiceListEntry] {
+    PerformanceTrace.measure("ProjectDetailView.serviceEntries", thresholdMs: 4) {
+      let defined = project.definedServices ?? []
+      let runtime = runtimeServicesByName.keys
+      let hosts = serviceHostsByName.keys
+      let names = Array(Set(defined).union(runtime).union(hosts))
+
+      var statusByName: [String: ServiceStatus] = [:]
+      statusByName.reserveCapacity(names.count)
+      for name in names {
+        statusByName[name] = serviceStatus(for: name)
       }
-      return lhsRank < rhsRank
+
+      let sortedNames = names.sorted { lhs, rhs in
+        guard let lhsStatus = statusByName[lhs], let rhsStatus = statusByName[rhs] else {
+          return lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
+        }
+        let lhsRank = serviceSortRank(lhsStatus.runState)
+        let rhsRank = serviceSortRank(rhsStatus.runState)
+        if lhsRank == rhsRank {
+          return lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
+        }
+        return lhsRank < rhsRank
+      }
+
+      return sortedNames.compactMap { name in
+        guard let status = statusByName[name] else { return nil }
+        return ServiceListEntry(name: name, status: status)
+      }
     }
   }
 
@@ -1743,21 +1917,38 @@ struct ProjectDetailView: View {
   private func serviceDetailCard(for service: String) -> some View {
     let runtime = runtimeServicesByName[service]
     let containers = runtime?.containers ?? []
-    return VStack(alignment: .leading, spacing: 10) {
-      HStack(spacing: 8) {
+    let status = serviceStatus(for: service)
+
+    return VStack(alignment: .leading, spacing: 14) {
+      VStack(alignment: .leading, spacing: 8) {
         Text(service)
-          .font(.mono(.subheadline, weight: .semibold))
+          .font(.mono(.headline, weight: .semibold))
+
+        HStack(spacing: 8) {
+          BadgePill(label: status.label, tint: status.color)
+          BadgePill(
+            label: "\(containers.count) container\(containers.count == 1 ? "" : "s")",
+            tint: .secondary
+          )
+          Spacer()
+        }
+      }
+
+      HStack(spacing: 8) {
         Spacer()
-        Button("Tail logs") {
+        Button {
           openLifecycleLogs(service: service, title: "\(service) logs")
+        } label: {
+          Label("Tail logs", systemImage: "text.alignleft")
         }
         .buttonStyle(PressableIconButtonStyle())
       }
+
       if let hostLabel = serviceHostLabel(for: service) {
         Button {
           openServiceHost(hostLabel)
         } label: {
-          Text(hostLabel)
+          Label(hostLabel, systemImage: "link")
             .font(.mono(.caption))
         }
         .buttonStyle(.plain)
@@ -1769,8 +1960,8 @@ struct ProjectDetailView: View {
             Button {
               openServiceHost(host)
             } label: {
-              Text(host)
-                .font(.mono(.caption2))
+              Label(host, systemImage: "link")
+                .font(.mono(.caption))
             }
             .buttonStyle(.plain)
             .linkHover()
@@ -1778,65 +1969,74 @@ struct ProjectDetailView: View {
         }
       }
       if runtime != nil {
+        Divider()
+          .opacity(0.12)
+
+        Text("Overview")
+          .instrumentLabel()
+
         let runningCount = containers.filter { $0.state.lowercased() == "running" }.count
         DetailRows(rows: [
           DetailRowItem(label: "Containers", value: "\(containers.count)"),
           DetailRowItem(label: "Running", value: "\(runningCount)")
         ])
-        ForEach(containers, id: \.id) { container in
-          VStack(alignment: .leading, spacing: 6) {
-            Text(container.name)
-              .font(.mono(.caption, weight: .semibold))
 
-            DetailRows(
-              rows: containerOverviewRows(container),
-              labelWidth: 96
+        Divider()
+          .opacity(0.12)
+
+        Text("Containers")
+          .instrumentLabel()
+
+        LazyVStack(alignment: .leading, spacing: 12) {
+          ForEach(containers, id: \.id) { container in
+            VStack(alignment: .leading, spacing: 10) {
+              HStack(spacing: 8) {
+                Text(container.name)
+                  .font(.mono(.subheadline, weight: .semibold))
+                Spacer()
+                BadgePill(
+                  label: container.state.lowercased() == "running" ? "Running" : container.state.capitalized,
+                  tint: container.state.lowercased() == "running" ? .green : .orange
+                )
+              }
+
+              DetailRows(
+                rows: containerOverviewRows(container),
+                labelWidth: 88
+              )
+
+              if let networks = container.networks, !networks.isEmpty {
+                metadataDisclosureSection(
+                  title: "Networks",
+                  rows: networks.map(networkSummary)
+                )
+              }
+
+              if let mounts = container.mounts, !mounts.isEmpty {
+                metadataDisclosureSection(
+                  title: "Mounts",
+                  rows: mounts.map(mountSummary)
+                )
+              }
+
+              if let labels = container.labels, !labels.isEmpty {
+                metadataDisclosureSection(
+                  title: "Labels",
+                  rows: sortedLabels(labels).map { "\($0.key)=\($0.value)" }
+                )
+              }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(
+              RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.white.opacity(0.03))
+                .overlay(
+                  RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color.white.opacity(0.07), lineWidth: 1)
+                )
             )
-
-            if let networks = container.networks, !networks.isEmpty {
-              VStack(alignment: .leading, spacing: 4) {
-                Text("Networks")
-                  .font(.mono(.caption2, weight: .semibold))
-                  .foregroundStyle(.secondary)
-                ForEach(networks, id: \.name) { network in
-                  Text(networkSummary(network))
-                    .font(.mono(.caption2))
-                    .foregroundStyle(.tertiary)
-                    .textSelection(.enabled)
-                }
-              }
-            }
-
-            if let mounts = container.mounts, !mounts.isEmpty {
-              VStack(alignment: .leading, spacing: 4) {
-                Text("Mounts")
-                  .font(.mono(.caption2, weight: .semibold))
-                  .foregroundStyle(.secondary)
-                ForEach(Array(mounts.enumerated()), id: \.offset) { _, mount in
-                  Text(mountSummary(mount))
-                    .font(.mono(.caption2))
-                    .foregroundStyle(.tertiary)
-                    .textSelection(.enabled)
-                }
-              }
-            }
-
-            if let labels = container.labels, !labels.isEmpty {
-              VStack(alignment: .leading, spacing: 4) {
-                Text("Labels")
-                  .font(.mono(.caption2, weight: .semibold))
-                  .foregroundStyle(.secondary)
-                ForEach(sortedLabels(labels), id: \.key) { entry in
-                  Text("\(entry.key)=\(entry.value)")
-                    .font(.mono(.caption2))
-                    .foregroundStyle(.tertiary)
-                    .textSelection(.enabled)
-                }
-              }
-            }
           }
-          Divider()
-            .opacity(0.2)
         }
       } else {
         Text("No running containers.")
@@ -1844,6 +2044,35 @@ struct ProjectDetailView: View {
           .foregroundStyle(.secondary)
       }
     }
+  }
+
+  /// Renders dense container metadata (labels, mounts, networks) as collapsible sections
+  /// to improve scanability in the details sidebar.
+  private func metadataDisclosureSection(
+    title: String,
+    rows: [String]
+  ) -> some View {
+    DisclosureGroup {
+      VStack(alignment: .leading, spacing: 6) {
+        ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+          Text(row)
+            .font(.mono(.caption))
+            .foregroundStyle(.secondary)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+      }
+      .padding(.top, 6)
+    } label: {
+      HStack(spacing: 8) {
+        Text(title)
+          .font(.mono(.caption, weight: .semibold))
+          .foregroundStyle(.secondary)
+        BadgePill(label: "\(rows.count)", tint: .secondary)
+        Spacer()
+      }
+    }
+    .tint(.secondary)
   }
 
   private func containerOverviewRows(_ container: RuntimeContainer) -> [DetailRowItem] {
@@ -1928,9 +2157,6 @@ struct ProjectDetailView: View {
       tabs.append(.branches)
       tabs.append(.sessions)
     }
-    if project.isRuntimeConfigured {
-      tabs.append(contentsOf: [.logs, .shell])
-    }
     if project.supportsTickets {
       tabs.append(.tickets)
     }
@@ -1944,9 +2170,98 @@ struct ProjectDetailView: View {
     return .overview
   }
 
+  private var overviewSidebarItems: [ProjectSidebarItem] {
+    var items: [ProjectSidebarItem] = [.services, .remoteExecution]
+    if lifecycleSummary.hasEntries {
+      items.append(.lifecycle)
+    }
+    return items
+  }
+
+  private var workflowSidebarItems: [ProjectSidebarItem] {
+    var items: [ProjectSidebarItem] = []
+    if project.kind == .registered {
+      items.append(.branches)
+      items.append(.sessions)
+    }
+    if project.supportsTickets {
+      items.append(.tickets)
+    }
+    return items
+  }
+
+  private var availableSidebarItems: [ProjectSidebarItem] {
+    overviewSidebarItems + workflowSidebarItems
+  }
+
+  private var sidebarBreadcrumbLabel: String {
+    selectedSidebarItem.title
+  }
+
+  private func sidebarItemCountLabel(_ item: ProjectSidebarItem) -> String? {
+    switch item {
+    case .remoteExecution:
+      return nil
+    case .services:
+      return "\(serviceEntries.count)"
+    case .lifecycle:
+      return lifecycleSummary.hasEntries ? "\(lifecycleSummary.persistentCount)" : nil
+    case .branches:
+      return "\(branchEntries.count)"
+    case .sessions:
+      return "\(sessionEntries.count)"
+    case .tickets:
+      return project.supportsTickets ? "On" : nil
+    }
+  }
+
   private func ensureSelectedTab() {
     if !availableTabs.contains(model.selectedProjectTab) {
       model.selectedProjectTab = .overview
+    }
+  }
+
+  private func ensureSidebarSelection() {
+    if !availableSidebarItems.contains(selectedSidebarItem) {
+      selectedSidebarItem = .services
+    }
+  }
+
+  private func syncSidebarSelectionFromTab() {
+    switch model.selectedProjectTab {
+    case .overview:
+      if !overviewSidebarItems.contains(selectedSidebarItem) {
+        selectedSidebarItem = .services
+      }
+    case .branches:
+      selectedSidebarItem = .branches
+    case .sessions:
+      selectedSidebarItem = .sessions
+    case .tickets:
+      selectedSidebarItem = .tickets
+    case .logs, .shell:
+      if !overviewSidebarItems.contains(selectedSidebarItem) {
+        selectedSidebarItem = .services
+      }
+    }
+  }
+
+  private func selectSidebarItem(_ item: ProjectSidebarItem) {
+    selectedSidebarItem = item
+    switch item {
+    case .remoteExecution:
+      model.selectedProjectTab = .overview
+    case .services:
+      model.selectedProjectTab = .overview
+      selectedService = selectedService ?? serviceEntries.first?.name
+    case .lifecycle:
+      model.selectedProjectTab = .overview
+    case .branches:
+      model.selectedProjectTab = .branches
+    case .sessions:
+      model.selectedProjectTab = .sessions
+    case .tickets:
+      model.selectedProjectTab = .tickets
     }
   }
 
@@ -1973,109 +2288,20 @@ struct ProjectDetailView: View {
     colorScheme == .dark ? Color.white.opacity(0.14) : Color.black.opacity(0.08)
   }
 
-  private var sessionQuickAccessButton: some View {
-    Menu {
-      if sessionEntries.count == 1, let session = sessionEntries.first {
-        sessionOpenMenuItems(for: session)
-      } else {
-        ForEach(sessionEntries, id: \.id) { session in
-          Menu(session.name) {
-            sessionOpenMenuItems(for: session)
-          }
-        }
-      }
-      Divider()
-      Button("Manage sessions") {
-        activateTab(.sessions)
-      }
-    } label: {
-      Label(
-        sessionEntries.count == 1 ? "Open session" : "\(sessionEntries.count) sessions",
-        systemImage: sessionEntries.count == 1 ? "terminal" : "rectangle.3.group.bubble.left"
-      )
-    }
-    .buttonStyle(PressableIconButtonStyle())
+  private var projectSidebarFillColor: Color {
+    colorScheme == .dark ? Color.black.opacity(0.46) : Color.white.opacity(0.82)
   }
 
-  private var openInProjectButton: some View {
-    Menu {
-      if let path = projectOpenPath {
-        Button {
-          openProjectInEditor(preferredEditor)
-        } label: {
-          Label("Open in \(preferredEditor.displayName)", systemImage: "checkmark.circle.fill")
-        }
-
-        Divider()
-
-        ForEach(availableEditors, id: \.rawValue) { editor in
-          Button {
-            preferredEditorRaw = editor.rawValue
-            openProjectInEditor(editor)
-          } label: {
-            Label(
-              editor.displayName,
-              systemImage: editor == preferredEditor ? "checkmark.circle.fill" : "circle"
-            )
-          }
-        }
-
-        Divider()
-
-        Button("Reveal in Finder") {
-          NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
-        }
-      } else {
-        Text("Project path unavailable")
-      }
-    } label: {
-      Label("Open in", systemImage: "arrow.up.right.square")
-    }
-    .buttonStyle(PressableIconButtonStyle())
+  private var projectSidebarTintColor: Color {
+    colorScheme == .dark ? Color.white.opacity(0.025) : Color.white.opacity(0.24)
   }
 
-  private var codingAgentQuickAccessButton: some View {
-    Menu {
-      if let path = projectOpenPath {
-        Button {
-          openProjectInCodingAgent(preferredCodingAgent, projectPath: path)
-        } label: {
-          Label(
-            "Open in \(preferredCodingAgent.displayName)",
-            systemImage: "checkmark.circle.fill"
-          )
-        }
+  private var projectDetailFillColor: Color {
+    colorScheme == .dark ? Color.black.opacity(0.34) : Color.white.opacity(0.74)
+  }
 
-        Divider()
-
-        ForEach(availableCodingAgents, id: \.rawValue) { agent in
-          Button {
-            preferredCodingAgentRaw = agent.rawValue
-            openProjectInCodingAgent(agent, projectPath: path)
-          } label: {
-            Label(
-              agent.displayName,
-              systemImage: agent == preferredCodingAgent ? "checkmark.circle.fill" : "circle"
-            )
-          }
-        }
-
-        Divider()
-
-        Button("Print init prompt") {
-          openTerminal(
-            kind: .shell,
-            command: "hack agent init --path \(shellQuote(path)) --client print",
-            title: "\(project.name) init prompt"
-          )
-        }
-      } else {
-        Text("Project path unavailable")
-      }
-    } label: {
-      Label("Agent", systemImage: "sparkles")
-    }
-    .buttonStyle(PressableIconButtonStyle())
+  private var projectDetailTintColor: Color {
+    colorScheme == .dark ? Color.white.opacity(0.025) : Color.white.opacity(0.22)
   }
 
   @ViewBuilder
@@ -2091,274 +2317,6 @@ struct ProjectDetailView: View {
           systemImage: terminalApp == preferredExternalTerminal ? "checkmark.circle.fill" : "circle"
         )
       }
-    }
-  }
-
-  private func headerMetricPill(_ title: String, value: String) -> some View {
-    HStack(spacing: 6) {
-      Text(title)
-        .font(.mono(.caption2))
-        .foregroundStyle(.secondary)
-      Text(value)
-        .font(.mono(.caption, weight: .semibold))
-        .lineLimit(1)
-        .truncationMode(.tail)
-    }
-    .padding(.horizontal, 10)
-    .padding(.vertical, 6)
-    .background(
-      Capsule(style: .continuous)
-        .fill(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.03))
-    )
-    .overlay(
-      Capsule(style: .continuous)
-        .stroke(colorScheme == .dark ? Color.white.opacity(0.12) : Color.black.opacity(0.08), lineWidth: 1)
-    )
-  }
-
-  private func activateTab(_ tab: ProjectTab) {
-    if tab == .logs {
-      openTerminal(kind: .logs)
-      return
-    }
-    if tab == .shell {
-      openTerminal(kind: .shell)
-      return
-    }
-    model.selectedProjectTab = tab
-  }
-
-  private var bottomControlBar: some View {
-    HStack(spacing: 12) {
-      HStack(spacing: 6) {
-        ForEach(availableTabs, id: \.self) { tab in
-          Button {
-            activateTab(tab)
-          } label: {
-            Image(systemName: tabIcon(tab))
-              .font(.mono(.caption, weight: .semibold))
-              .foregroundStyle(tab == effectiveTab ? Color.white : Color.secondary)
-              .padding(8)
-              .background(
-                Circle()
-                  .fill(tab == effectiveTab ? Color.accentColor : hoveredControl == tab ? Color.white.opacity(0.08) : .clear)
-              )
-              .accessibilityLabel(tabLabel(tab))
-              .overlay(alignment: .top) {
-                if hoveredControl == tab {
-                  iconTooltip(tabLabel(tab))
-                    .fixedSize(horizontal: true, vertical: true)
-                    .offset(y: -30)
-                    .transition(
-                      .asymmetric(
-                        insertion: .opacity.combined(with: .scale(scale: 0.92, anchor: .bottom)),
-                        removal: .opacity
-                      )
-                    )
-                }
-              }
-          }
-          .buttonStyle(PressableCircleButtonStyle())
-          .onHover { hovering in
-            withAnimation(.easeOut(duration: 0.16)) {
-              hoveredControl = hovering ? tab : nil
-            }
-          }
-          .zIndex(hoveredControl == tab ? 20 : 0)
-        }
-      }
-
-      Divider()
-        .frame(height: 18)
-
-      if isProjectLifecycleBusy {
-        HStack(spacing: 6) {
-          ProgressView()
-            .controlSize(.small)
-          Text(projectLifecycleLabel)
-            .font(.mono(.caption2, weight: .semibold))
-            .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(
-          Capsule(style: .continuous)
-            .fill(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.04))
-        )
-      } else {
-        if canStart {
-          Button {
-            Task { await model.startProject(project) }
-          } label: {
-            Image(systemName: "play.fill")
-              .font(.mono(.caption, weight: .semibold))
-              .padding(8)
-              .background(
-                Circle()
-                  .fill(isStartHovered ? Color.white.opacity(0.08) : .clear)
-              )
-              .overlay(alignment: .top) {
-                if isStartHovered {
-                  iconTooltip("Start project")
-                    .fixedSize(horizontal: true, vertical: true)
-                    .offset(y: -30)
-                    .transition(
-                      .asymmetric(
-                        insertion: .opacity.combined(with: .scale(scale: 0.92, anchor: .bottom)),
-                        removal: .opacity
-                      )
-                    )
-                }
-              }
-          }
-          .buttonStyle(PressableCircleButtonStyle())
-          .contentShape(Circle())
-          .onHover { hovering in
-            withAnimation(.easeOut(duration: 0.16)) {
-              isStartHovered = hovering
-            }
-          }
-          .accessibilityLabel("Start project")
-        }
-
-        if canStop {
-          Button {
-            Task { await model.stopProject(project) }
-          } label: {
-            Image(systemName: "stop.fill")
-              .font(.mono(.caption, weight: .semibold))
-              .padding(8)
-              .background(
-                Circle()
-                  .fill(isStopHovered ? Color.white.opacity(0.08) : .clear)
-              )
-              .overlay(alignment: .top) {
-                if isStopHovered {
-                  iconTooltip("Stop project")
-                    .fixedSize(horizontal: true, vertical: true)
-                    .offset(y: -30)
-                    .transition(
-                      .asymmetric(
-                        insertion: .opacity.combined(with: .scale(scale: 0.92, anchor: .bottom)),
-                        removal: .opacity
-                      )
-                    )
-                }
-              }
-          }
-          .buttonStyle(PressableCircleButtonStyle())
-          .contentShape(Circle())
-          .onHover { hovering in
-            withAnimation(.easeOut(duration: 0.16)) {
-              isStopHovered = hovering
-            }
-          }
-          .accessibilityLabel("Stop project")
-        }
-      }
-    }
-    .padding(.horizontal, 14)
-    .padding(.vertical, 8)
-    .background(
-      controlBarBackground
-    )
-    .onHover { hovering in
-      isControlBarHovered = hovering
-    }
-    .animation(.easeInOut(duration: 0.12), value: isControlBarHovered)
-    .animation(.easeOut(duration: 0.16), value: hoveredControl)
-    .animation(.easeOut(duration: 0.16), value: isStartHovered)
-    .animation(.easeOut(duration: 0.16), value: isStopHovered)
-  }
-
-  @ViewBuilder
-  private var controlBarBackground: some View {
-    let shape = Capsule(style: .continuous)
-    if colorScheme == .dark {
-      shape
-        .fill(.regularMaterial)
-        .overlay(
-          shape.stroke(Color.white.opacity(0.10), lineWidth: 1)
-        )
-        .shadow(color: Color.black.opacity(0.22), radius: 18, x: 0, y: 10)
-    } else {
-      shape
-        .fill(Color.white.opacity(0.78))
-        .overlay(
-          shape.stroke(Color.black.opacity(0.08), lineWidth: 1)
-        )
-        .shadow(color: Color.black.opacity(0.10), radius: 18, x: 0, y: 10)
-    }
-  }
-
-  private func tabIcon(_ tab: ProjectTab) -> String {
-    switch tab {
-    case .overview:
-      return "square.grid.2x2"
-    case .branches:
-      return "arrow.triangle.branch"
-    case .sessions:
-      return "rectangle.3.group.bubble.left"
-    case .logs:
-      return "text.alignleft"
-    case .shell:
-      return "terminal"
-    case .tickets:
-      return "ticket"
-    }
-  }
-
-  private func tabLabel(_ tab: ProjectTab) -> String {
-    switch tab {
-    case .overview:
-      return "Overview"
-    case .branches:
-      return "Branches"
-    case .sessions:
-      return "Sessions"
-    case .logs:
-      return "Logs"
-    case .shell:
-      return "Shell"
-    case .tickets:
-      return "Tickets"
-    }
-  }
-
-  private func iconTooltip(_ title: String) -> some View {
-    Text(title)
-      .font(.mono(.caption2, weight: .semibold))
-      .lineLimit(1)
-      .fixedSize(horizontal: true, vertical: false)
-      .foregroundStyle(.primary)
-      .padding(.horizontal, 8)
-      .padding(.vertical, 4)
-      .background(
-        RoundedRectangle(cornerRadius: 8, style: .continuous)
-          .fill(.ultraThinMaterial)
-          .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-              .stroke(colorScheme == .dark ? Color.white.opacity(0.18) : Color.black.opacity(0.14), lineWidth: 1)
-          )
-      )
-      .allowsHitTesting(false)
-      .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.25 : 0.12), radius: 6, y: 2)
-  }
-
-  private func breadcrumbLabel(for tab: ProjectTab) -> String {
-    switch tab {
-    case .overview:
-      return "Dashboard"
-    case .branches:
-      return "Branches"
-    case .sessions:
-      return "Sessions"
-    case .logs:
-      return "Logs"
-    case .shell:
-      return "Shell"
-    case .tickets:
-      return "Tickets"
     }
   }
 

@@ -3,6 +3,7 @@ import Darwin
 import SwiftUI
 
 import GhosttyTerminal
+import HackCLIService
 import HackDesktopModels
 
 enum SettingsSidebarItem: String, Hashable, Identifiable {
@@ -2661,6 +2662,7 @@ private struct GitHubExtensionSettingsView: View {
   @State private var didAutoOpenInstallURL = false
   @State private var message = ""
   @State private var lastDiagnosticsRefreshAt: Date? = nil
+  @State private var systemIdentity: GitSystemIdentity? = nil
 
   var body: some View {
     ScrollView {
@@ -2678,7 +2680,10 @@ private struct GitHubExtensionSettingsView: View {
               tone: (diagnostics?.profiles.isEmpty == false) ? .good : .neutral
             )
             if !resolvedDefaultProfile.isEmpty {
-              StatusPill(text: "Default: \(resolvedDefaultProfile)", tone: .neutral)
+              StatusPill(
+                text: "Default remote: \(displayNameForRemoteProfileId(resolvedDefaultProfile))",
+                tone: .neutral
+              )
             }
             Spacer()
             Toggle("Enabled", isOn: $enabled)
@@ -2703,9 +2708,49 @@ private struct GitHubExtensionSettingsView: View {
           }
         }
 
+        GlassCard(title: "System Git identity", systemImage: "person.crop.circle.badge.checkmark") {
+          HStack(spacing: 8) {
+            StatusPill(text: "Read-only", tone: .neutral)
+            StatusPill(text: "Inherited local Git", tone: .neutral)
+            if let login = systemIdentity?.githubLogin, !login.isEmpty {
+              StatusPill(text: "@\(login)", tone: .good)
+            } else {
+              StatusPill(text: "GitHub CLI account unknown", tone: .warn)
+            }
+          }
+
+          if let systemIdentity {
+            if let gitName = systemIdentity.gitName, !gitName.isEmpty {
+              Text("git name: \(gitName)")
+                .font(.mono(.caption2))
+                .foregroundStyle(.secondary)
+            }
+            if let gitEmail = systemIdentity.gitEmail, !gitEmail.isEmpty {
+              Text("git email: \(gitEmail)")
+                .font(.mono(.caption2))
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+            }
+            if let login = systemIdentity.githubLogin, !login.isEmpty {
+              let accountNameSuffix = systemIdentity.githubName.map { " (\($0))" } ?? ""
+              Text("github cli: @\(login)\(accountNameSuffix)")
+                .font(.mono(.caption2))
+                .foregroundStyle(.secondary)
+            } else {
+              Text("No GitHub CLI account detected for this machine.")
+                .font(.mono(.caption2))
+                .foregroundStyle(.secondary)
+            }
+          } else {
+            Text("Unable to read local Git identity yet.")
+              .font(.mono(.caption2))
+              .foregroundStyle(.secondary)
+          }
+        }
+
         GlassCard(title: "Connected accounts", systemImage: "person.2.badge.gearshape") {
           HStack(alignment: .center, spacing: 10) {
-            Text("Add another account from browser OAuth and manage default routing per account.")
+            Text("Remote OAuth/App accounts used for remote node Git operations.")
               .font(.mono(.caption))
               .foregroundStyle(.secondary)
             Spacer()
@@ -2745,14 +2790,29 @@ private struct GitHubExtensionSettingsView: View {
             VStack(alignment: .leading, spacing: 10) {
               ForEach(githubProfiles, id: \.id) { profile in
                 let profileStatus = profileStatusById[profile.id]
+                let accountHandle = remoteAccountHandle(
+                  profile: profile,
+                  status: profileStatus
+                )
+                let accountName = remoteAccountName(
+                  profile: profile,
+                  status: profileStatus
+                )
+                let accountId = remoteAccountId(
+                  profile: profile,
+                  status: profileStatus
+                )
                 VStack(alignment: .leading, spacing: 6) {
                   HStack(spacing: 8) {
-                    Text(profile.accountLogin.map { "@\($0)" } ?? profile.id)
+                    Text(accountHandle.map { "@\($0)" } ?? profile.id)
                       .font(.mono(.subheadline, weight: .semibold))
                     if profile.isDefault {
-                      StatusPill(text: "Default", tone: .good)
+                      StatusPill(text: "Default remote", tone: .good)
                     }
-                    StatusPill(text: profile.mode.uppercased(), tone: .neutral)
+                    StatusPill(
+                      text: profile.mode.lowercased() == "app" ? "Remote app" : "Remote OAuth",
+                      tone: .neutral
+                    )
                     if profile.installationId?.isEmpty == false {
                       StatusPill(text: "App installed", tone: .good)
                     } else if profile.mode.lowercased() == "app" {
@@ -2778,9 +2838,9 @@ private struct GitHubExtensionSettingsView: View {
                   Text("profile: \(profile.id)")
                     .font(.mono(.caption2))
                     .foregroundStyle(.secondary)
-                  if let account = profile.accountLogin, !account.isEmpty {
-                    let accountNameSuffix = profile.accountName.map { " (\($0))" } ?? ""
-                    Text("account: \(account)\(accountNameSuffix)")
+                  if let accountHandle, !accountHandle.isEmpty {
+                    let accountNameSuffix = accountName.map { " (\($0))" } ?? ""
+                    Text("account: @\(accountHandle)\(accountNameSuffix)")
                       .font(.mono(.caption2))
                       .foregroundStyle(.secondary)
                   }
@@ -2800,6 +2860,11 @@ private struct GitHubExtensionSettingsView: View {
                   Text("auth: \(profile.authRef) • service: \(profile.service)")
                     .font(.mono(.caption2))
                     .foregroundStyle(.secondary)
+                  if let accountId, !accountId.isEmpty {
+                    Text("account id: \(accountId)")
+                      .font(.mono(.caption2))
+                      .foregroundStyle(.tertiary)
+                  }
                   if let profileStatus,
                     let tokenExpiresAt = profileStatus.tokenExpiresAt,
                     !tokenExpiresAt.isEmpty
@@ -2911,6 +2976,7 @@ private struct GitHubExtensionSettingsView: View {
     if let diagnostics {
       defaultProfile = diagnostics.defaultProfile
     }
+    systemIdentity = await model.inspectSystemGitIdentity()
     await refreshGitHubProfileStatuses()
     lastDiagnosticsRefreshAt = Date()
   }
@@ -2944,6 +3010,66 @@ private struct GitHubExtensionSettingsView: View {
     message = newValue ? "GitHub extension enabled." : "GitHub extension disabled."
     await model.refresh()
     await refreshGitHubDiagnostics()
+  }
+
+  private func remoteAccountHandle(
+    profile: GitHubProfileSummary,
+    status: GitHubStatusResponse?
+  ) -> String? {
+    let profileHandle = profile.accountLogin?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let profileHandle, !profileHandle.isEmpty {
+      return profileHandle
+    }
+    let statusHandle = status?.accountLogin?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let statusHandle, !statusHandle.isEmpty {
+      return statusHandle
+    }
+    return nil
+  }
+
+  private func remoteAccountName(
+    profile: GitHubProfileSummary,
+    status: GitHubStatusResponse?
+  ) -> String? {
+    let profileName = profile.accountName?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let profileName, !profileName.isEmpty {
+      return profileName
+    }
+    let statusName = status?.accountName?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let statusName, !statusName.isEmpty {
+      return statusName
+    }
+    return nil
+  }
+
+  private func remoteAccountId(
+    profile: GitHubProfileSummary,
+    status: GitHubStatusResponse?
+  ) -> String? {
+    let profileId = profile.accountId?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let profileId, !profileId.isEmpty {
+      return profileId
+    }
+    let statusId = status?.accountId?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let statusId, !statusId.isEmpty {
+      return statusId
+    }
+    return nil
+  }
+
+  private func displayNameForRemoteProfileId(_ profileId: String) -> String {
+    let trimmed = profileId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      return "none"
+    }
+    guard let profile = githubProfiles.first(where: { $0.id == trimmed }) else {
+      return trimmed
+    }
+    let status = profileStatusById[trimmed]
+    guard let handle = remoteAccountHandle(profile: profile, status: status) else {
+      return trimmed
+    }
+    return "@\(handle) (\(trimmed))"
   }
 
   private func saveGitHubDefaultProfile(_ profileId: String) async {

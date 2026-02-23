@@ -48,6 +48,12 @@ type GitHubIdentityResult =
       readonly error: string;
     };
 
+type GitHubAccountSnapshot = {
+  readonly accountLogin?: string;
+  readonly accountName?: string;
+  readonly accountId?: string;
+};
+
 type GitHubStatusPayload = {
   readonly extensionId: string;
   readonly selectedProfile: string;
@@ -122,6 +128,10 @@ export const GITHUB_COMMANDS: readonly ExtensionCommand[] = [
         ctx.logger.error({ message: tokenResult.error });
         return 1;
       }
+      const accountSnapshot = await resolveGitHubAccountSnapshotFromToken({
+        token: tokenResult.token,
+        apiBaseUrl: resolved.apiBaseUrl,
+      });
 
       await saveGitHubAppToken({
         controlPlaneConfig: ctx.controlPlaneConfig,
@@ -150,6 +160,9 @@ export const GITHUB_COMMANDS: readonly ExtensionCommand[] = [
           tokenResult.privateKeyAuthRef ?? resolved.privateKeyAuthRef,
         apiBaseUrl: resolved.apiBaseUrl,
         mode: resolved.appModeRequested ? "app" : "token",
+        accountLogin: accountSnapshot.accountLogin,
+        accountName: accountSnapshot.accountName,
+        accountId: accountSnapshot.accountId,
         setAsDefault,
       });
 
@@ -158,6 +171,7 @@ export const GITHUB_COMMANDS: readonly ExtensionCommand[] = [
         entries: buildConnectSummaryEntries({
           resolved,
           tokenResult,
+          accountSnapshot,
           setAsDefault,
         }),
       });
@@ -828,6 +842,7 @@ function getGitHubProfileConfigPath(input: {
 function buildConnectSummaryEntries(input: {
   readonly resolved: ConnectResolvedDefaults;
   readonly tokenResult: ConnectTokenResult;
+  readonly accountSnapshot: GitHubAccountSnapshot;
   readonly setAsDefault: boolean;
 }): readonly (readonly [string, string])[] {
   const entries: (readonly [string, string])[] = [
@@ -847,6 +862,15 @@ function buildConnectSummaryEntries(input: {
   }
   if (input.tokenResult.ok && input.tokenResult.expiresAt) {
     entries.push(["token_expires_at", input.tokenResult.expiresAt]);
+  }
+  if (input.accountSnapshot.accountLogin) {
+    entries.push(["account_login", input.accountSnapshot.accountLogin]);
+  }
+  if (input.accountSnapshot.accountName) {
+    entries.push(["account_name", input.accountSnapshot.accountName]);
+  }
+  if (input.accountSnapshot.accountId) {
+    entries.push(["account_id", input.accountSnapshot.accountId]);
   }
   return entries;
 }
@@ -1183,6 +1207,55 @@ async function resolveOAuthTokenFromGh(input: {
   return { ok: true, token };
 }
 
+async function resolveGitHubAccountSnapshot(input: {
+  readonly token: Awaited<ReturnType<typeof resolveGitHubAppToken>>;
+  readonly settings: ReturnType<typeof resolveGitHubAuthSettings>;
+}): Promise<GitHubAccountSnapshot> {
+  const fallback = {
+    ...(input.settings.accountLogin
+      ? { accountLogin: input.settings.accountLogin }
+      : {}),
+    ...(input.settings.accountName
+      ? { accountName: input.settings.accountName }
+      : {}),
+    ...(input.settings.accountId
+      ? { accountId: input.settings.accountId }
+      : {}),
+  };
+  if (input.settings.accountLogin) {
+    return fallback;
+  }
+  if (!input.token.ok) {
+    return fallback;
+  }
+  const resolved = await resolveGitHubAccountSnapshotFromToken({
+    token: input.token.token,
+    apiBaseUrl: input.settings.apiBaseUrl,
+  });
+  if (resolved.accountLogin) {
+    return resolved;
+  }
+  return fallback;
+}
+
+async function resolveGitHubAccountSnapshotFromToken(input: {
+  readonly token: string;
+  readonly apiBaseUrl: string;
+}): Promise<GitHubAccountSnapshot> {
+  const identity = await inspectGitHubIdentity({
+    token: input.token,
+    apiBaseUrl: input.apiBaseUrl,
+  });
+  if (!identity.ok) {
+    return {};
+  }
+  return {
+    accountLogin: identity.login,
+    ...(identity.accountName ? { accountName: identity.accountName } : {}),
+    ...(identity.accountId ? { accountId: identity.accountId } : {}),
+  };
+}
+
 async function handleGitHubStatusCommand(input: {
   readonly controlPlaneConfig: Parameters<
     typeof resolveGitHubAuthSettings
@@ -1214,6 +1287,10 @@ async function handleGitHubStatusCommand(input: {
     ...profileFlags,
     allowProjectOverride,
   });
+  const resolvedAccountSnapshot = await resolveGitHubAccountSnapshot({
+    token,
+    settings,
+  });
   const catalog = listGitHubAuthProfiles({
     controlPlaneConfig: input.controlPlaneConfig,
     ...(parsed.value.profileId
@@ -1226,6 +1303,7 @@ async function handleGitHubStatusCommand(input: {
     settingsResult,
     token,
     defaultProfileId: catalog.defaultProfileId,
+    accountSnapshot: resolvedAccountSnapshot,
   });
   if (parsed.value.json) {
     process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
@@ -1614,7 +1692,13 @@ function buildGitHubStatusPayload(input: {
   readonly settingsResult: ReturnType<typeof resolveGitHubAuthSettingsResult>;
   readonly token: Awaited<ReturnType<typeof resolveGitHubAppToken>>;
   readonly defaultProfileId: string;
+  readonly accountSnapshot: GitHubAccountSnapshot;
 }): GitHubStatusPayload {
+  const accountLogin =
+    input.accountSnapshot.accountLogin ?? input.settings.accountLogin;
+  const accountName =
+    input.accountSnapshot.accountName ?? input.settings.accountName;
+  const accountId = input.accountSnapshot.accountId ?? input.settings.accountId;
   return {
     extensionId: EXTENSION_ID,
     selectedProfile: input.settings.profileId,
@@ -1633,15 +1717,9 @@ function buildGitHubStatusPayload(input: {
       ? { privateKeyAuthRef: input.settings.privateKeyAuthRef }
       : {}),
     apiBaseUrl: input.settings.apiBaseUrl,
-    ...(input.settings.accountLogin
-      ? { accountLogin: input.settings.accountLogin }
-      : {}),
-    ...(input.settings.accountName
-      ? { accountName: input.settings.accountName }
-      : {}),
-    ...(input.settings.accountId
-      ? { accountId: input.settings.accountId }
-      : {}),
+    ...(accountLogin ? { accountLogin } : {}),
+    ...(accountName ? { accountName } : {}),
+    ...(accountId ? { accountId } : {}),
     tokenResolved: input.token.ok,
     ...(input.token.ok ? { tokenSource: input.token.source } : {}),
     ...(input.token.ok && input.token.expiresAt

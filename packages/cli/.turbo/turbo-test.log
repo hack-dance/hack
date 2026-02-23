@@ -2,63 +2,63 @@ $ cd ../.. && bun test tests
 bun test v1.3.9 (cf6cdbbb)
 
 tests/control-plane-config.test.ts:
-(pass) readControlPlaneConfig returns defaults when config is missing [11.03ms]
-(pass) readControlPlaneConfig reads controlPlane overrides [10.13ms]
-(pass) readControlPlaneConfig keeps gateway enable project-scoped and uses global-only settings [8.56ms]
-(pass) readControlPlaneConfig reports parse errors and falls back to defaults [9.24ms]
-(pass) readControlPlaneConfig keeps nodeId project-scoped and merges cluster defaults [5.93ms]
-(pass) readControlPlaneConfig supports provider defaults and project-scoped routing [14.72ms]
-(pass) readControlPlaneConfig does not inherit global routing into project scope [9.42ms]
-(pass) readControlPlaneConfig merges secrets backend strategy config [6.12ms]
+(pass) readControlPlaneConfig returns defaults when config is missing [3.52ms]
+(pass) readControlPlaneConfig reads controlPlane overrides [1.84ms]
+(pass) readControlPlaneConfig keeps gateway enable project-scoped and uses global-only settings [1.96ms]
+(pass) readControlPlaneConfig reports parse errors and falls back to defaults [0.83ms]
+(pass) readControlPlaneConfig keeps nodeId project-scoped and merges cluster defaults [1.56ms]
+(pass) readControlPlaneConfig supports provider defaults and project-scoped routing [1.75ms]
+(pass) readControlPlaneConfig does not inherit global routing into project scope [1.13ms]
+(pass) readControlPlaneConfig merges secrets backend strategy config [2.67ms]
 
 tests/log-backend.test.ts:
-(pass) composeLogBackend routes json output to dockerComposeLogsJson [0.17ms]
-(pass) composeLogBackend routes pretty output to dockerComposeLogsPretty [0.04ms]
-(pass) composeLogBackend routes plain output to docker compose logs [0.06ms]
-(pass) lokiLogBackend.isAvailable proxies canReachLoki [0.05ms]
-(pass) lokiLogBackend.run maps format flags [0.09ms]
+(pass) composeLogBackend routes json output to dockerComposeLogsJson [0.14ms]
+(pass) composeLogBackend routes pretty output to dockerComposeLogsPretty [0.19ms]
+(pass) composeLogBackend routes plain output to docker compose logs [0.16ms]
+(pass) lokiLogBackend.isAvailable proxies canReachLoki [0.22ms]
+(pass) lokiLogBackend.run maps format flags [0.18ms]
 
 tests/supervisor-job-store.test.ts:
-(pass) job store writes meta and events with incrementing seq [13.30ms]
+(pass) job store writes meta and events with incrementing seq [4.25ms]
 
 tests/log-group.test.ts:
-(pass) structured log grouper keeps multiline JSON together [0.61ms]
+(pass) structured log grouper keeps multiline JSON together [0.87ms]
 
 tests/log-stream.test.ts:
-(pass) buildLogStreamStartEvent includes context [0.43ms]
-(pass) buildLogStreamLogEvent uses entry timestamp [0.25ms]
-(pass) writeLogStreamEvent emits NDJSON [4.49ms]
+(pass) buildLogStreamStartEvent includes context [0.17ms]
+(pass) buildLogStreamLogEvent uses entry timestamp [0.09ms]
+(pass) writeLogStreamEvent emits NDJSON [4.80ms]
 
 tests/cloudflare-commands.test.ts:
-(pass) parseTunnelPrintArgs parses hostname and out [2.10ms]
-(pass) parseTunnelPrintArgs parses ssh hostname and origin [0.05ms]
-(pass) parseTunnelPrintArgs rejects unknown flags [0.02ms]
-(pass) parseTunnelPrintArgs rejects setup-only flags [0.02ms]
-(pass) parseTunnelStartArgs parses config and tunnel [0.13ms]
-(pass) parseTunnelStartArgs rejects unknown flags [0.03ms]
-(pass) parseAccessSetupArgs parses ssh hostname and user [0.13ms]
-(pass) parseAccessSetupArgs rejects unknown flags [0.02ms]
+(pass) parseTunnelPrintArgs parses hostname and out [0.11ms]
+(pass) parseTunnelPrintArgs parses ssh hostname and origin [0.02ms]
+(pass) parseTunnelPrintArgs rejects unknown flags
+(pass) parseTunnelPrintArgs rejects setup-only flags [0.01ms]
+(pass) parseTunnelStartArgs parses config and tunnel [0.05ms]
+(pass) parseTunnelStartArgs rejects unknown flags [0.01ms]
+(pass) parseAccessSetupArgs parses ssh hostname and user [0.06ms]
+(pass) parseAccessSetupArgs rejects unknown flags
 
 tests/node-provider-railway.test.ts:
-(pass) deriveRailwayServiceName normalizes user-facing names [0.22ms]
-(pass) parseRailwayJsonOutput extracts payload from noisy CLI output [0.21ms]
-(pass) parseRailwayDomainEndpoint supports nested service domain payloads [0.75ms]
-(pass) buildRailwaySshNodeInitArgs includes project/service/env and init flags [0.12ms]
-(pass) buildRailwaySshTailscaleStatusArgs uses userspace tailscaled socket [0.08ms]
-(pass) buildRailwayVariablePairs provisions stable gateway auth vars [0.13ms]
-(pass) buildRailwayVariableDeletes clears stale tailscale vars when not needed [0.18ms]
-(pass) parseRailwayTailscaleEndpoint resolves Self.DNSName into https endpoint [0.12ms]
-(pass) ensurePrivateTailscaleTags only applies explicit tags and normalizes [0.08ms]
-(pass) redaction helpers cover sensitive values [0.04ms]
+(pass) deriveRailwayServiceName normalizes user-facing names [0.69ms]
+(pass) parseRailwayJsonOutput extracts payload from noisy CLI output [0.22ms]
+(pass) parseRailwayDomainEndpoint supports nested service domain payloads [0.16ms]
+(pass) buildRailwaySshNodeInitArgs includes project/service/env and init flags [0.05ms]
+(pass) buildRailwaySshTailscaleStatusArgs uses userspace tailscaled socket [0.02ms]
+(pass) buildRailwayVariablePairs provisions stable gateway auth vars [0.05ms]
+(pass) buildRailwayVariableDeletes clears stale tailscale vars when not needed [0.06ms]
+(pass) parseRailwayTailscaleEndpoint resolves Self.DNSName into https endpoint [0.05ms]
+(pass) ensurePrivateTailscaleTags only applies explicit tags and normalizes [0.06ms]
+(pass) redaction helpers cover sensitive values [0.03ms]
 
 tests/mcp.test.ts:
-(pass) mcp server lists hack tools [308.49ms]
-(pass) hack.projects.list returns structured data [527.54ms]
+(pass) mcp server lists hack tools [321.55ms]
+(pass) hack.projects.list returns structured data [418.54ms]
 
 tests/node-status-auth-cache.test.ts:
-(pass) resolveNodeAuthLookup caches successful token reads within ttl [0.39ms]
-(pass) resolveNodeAuthLookup refreshes cached token after ttl [0.11ms]
-(pass) resolveNodeAuthLookup caches auth lookup errors to avoid repeat prompts [0.15ms]
+(pass) resolveNodeAuthLookup caches successful token reads within ttl [0.28ms]
+(pass) resolveNodeAuthLookup refreshes cached token after ttl [0.15ms]
+(pass) resolveNodeAuthLookup caches auth lookup errors to avoid repeat prompts [0.17ms]
 
 tests/logs-utils.test.ts:
 (pass) buildLogSelector renders project-only selector [0.11ms]
@@ -66,44 +66,44 @@ tests/logs-utils.test.ts:
 (pass) buildLogSelector renders regex selector for multiple services [0.03ms]
 (pass) buildLogSelector escapes regex characters in service names [0.02ms]
 (pass) resolveShouldTryLoki respects explicit compose override [0.02ms]
-(pass) resolveShouldTryLoki prefers explicit Loki request [0.01ms]
+(pass) resolveShouldTryLoki prefers explicit Loki request
 (pass) resolveShouldTryLoki follows backend preferences [0.01ms]
 (pass) resolveUseLoki honors explicit Loki request and reachability [0.02ms]
 
 tests/runtime-cache.test.ts:
-(pass) runtime cache refresh records healthy snapshot [0.65ms]
-(pass) getProjectsPayload keeps working when resolveProjectMeta fails for one project [0.58ms]
+(pass) runtime cache refresh records healthy snapshot [0.35ms]
+(pass) getProjectsPayload keeps working when resolveProjectMeta fails for one project [0.45ms]
 (pass) runtime cache retains last runtime on failure [0.08ms]
 (pass) runtime cache detects runtime resets via fingerprint [0.07ms]
 
 tests/control-plane-extensions.test.ts:
-(pass) ExtensionManager resolves namespace overrides and enabled flag [1.21ms]
-(pass) ExtensionManager warns and falls back on namespace collisions [0.44ms]
-(pass) ExtensionManager resolves command ids [0.44ms]
-(pass) ExtensionManager avoids reserved namespaces [0.31ms]
+(pass) ExtensionManager resolves namespace overrides and enabled flag [0.46ms]
+(pass) ExtensionManager warns and falls back on namespace collisions [0.41ms]
+(pass) ExtensionManager resolves command ids [0.21ms]
+(pass) ExtensionManager avoids reserved namespaces [0.27ms]
 
 tests/fzf.test.ts:
-(pass) fzf > getFzfPath > respects HACK_FZF_PATH environment override [0.05ms]
-(pass) fzf > getFzfPath > ignores empty HACK_FZF_PATH [0.98ms]
-(pass) fzf > getFzfPath > caches the result on subsequent calls [0.04ms]
+(pass) fzf > getFzfPath > respects HACK_FZF_PATH environment override [0.06ms]
+(pass) fzf > getFzfPath > ignores empty HACK_FZF_PATH [3.49ms]
+(pass) fzf > getFzfPath > caches the result on subsequent calls [0.06ms]
 (pass) fzf > resetFzfPathCacheForTests > clears the cached path [0.02ms]
 (pass) fzf > isFzfAvailable > returns true when HACK_FZF_PATH is set [0.02ms]
-(pass) fzf > isFzfAvailable > returns false when no fzf is found [0.19ms]
-(pass) fzf > ensureBundledFzfInstalled > returns home-not-set when HOME is not defined [0.18ms]
-(pass) fzf > ensureBundledFzfInstalled > returns already installed when fzf exists at bundled path [1.13ms]
-(pass) fzf > ensureBundledFzfInstalled > returns unsupported-platform on non-darwin [0.08ms]
+(pass) fzf > isFzfAvailable > returns false when no fzf is found [0.15ms]
+(pass) fzf > ensureBundledFzfInstalled > returns home-not-set when HOME is not defined [0.23ms]
+(pass) fzf > ensureBundledFzfInstalled > returns already installed when fzf exists at bundled path [1.01ms]
+(pass) fzf > ensureBundledFzfInstalled > returns unsupported-platform on non-darwin [0.09ms]
 
 tests/self-update.test.ts:
-(pass) parseSemver accepts v-prefix and ignores prerelease/build metadata [0.58ms]
-(pass) compareSemver orders versions correctly [0.07ms]
+(pass) parseSemver accepts v-prefix and ignores prerelease/build metadata [0.76ms]
+(pass) compareSemver orders versions correctly [0.05ms]
 (pass) selectCliTarballAsset chooses matching darwin/arm64 tarball [0.08ms]
 
 tests/policy-audit.test.ts:
-(pass) appendPolicyAuditEvent persists JSONL event [1.51ms]
+(pass) appendPolicyAuditEvent persists JSONL event [1.16ms]
 
 tests/node-pair-command.test.ts:
-(pass) derivePairingName prefers explicit name [0.07ms]
-(pass) derivePairingName falls back to source host [0.02ms]
+(pass) derivePairingName prefers explicit name [0.08ms]
+(pass) derivePairingName falls back to source host [0.05ms]
 (pass) parseEnrollmentBundleFromRemoteOutput extracts JSON from noisy ssh output [0.21ms]
 (pass) renderShellCommand quotes args safely [0.04ms]
 
@@ -111,173 +111,174 @@ tests/dispatch-e2e.test.ts:
 (skip) dispatch run executes against remote node and persists artifacts
 
 tests/provider-route-resolver.test.ts:
-(pass) route resolver prefers explicit command node over project node affinity [0.74ms]
-(pass) route resolver falls back to project node affinity when command node is unset [0.04ms]
-(pass) route resolver applies command profile precedence and warns on provider mismatch [0.11ms]
-(pass) route resolver uses global default provider when no project/command route exists [0.11ms]
-(pass) route resolver uses provider hard default when no provider selection is configured [0.07ms]
-(pass) route resolver returns typed diagnostic for missing provider profile [0.07ms]
-(pass) route resolver returns typed diagnostic when provider extension is disabled [0.05ms]
-(pass) route resolver validates railway private mode auth source [0.07ms]
-(pass) route resolver enables guarded bootstrap only for bootstrap-capable modes [0.05ms]
+(pass) route resolver prefers explicit command node over project node affinity [0.36ms]
+(pass) route resolver falls back to project node affinity when command node is unset [0.03ms]
+(pass) route resolver applies command profile precedence and warns on provider mismatch [0.05ms]
+(pass) route resolver uses global default provider when no project/command route exists [0.03ms]
+(pass) route resolver uses provider hard default when no provider selection is configured [0.02ms]
+(pass) route resolver returns typed diagnostic for missing provider profile [0.04ms]
+(pass) route resolver returns typed diagnostic when provider extension is disabled [0.07ms]
+(pass) route resolver validates railway private mode auth source [0.09ms]
+(pass) route resolver enables guarded bootstrap only for bootstrap-capable modes [0.06ms]
 
 tests/coredns-config.test.ts:
-(pass) renderGlobalCoreDnsConfig uses template + fallthrough for static caddy ip [0.09ms]
-(pass) renderGlobalCoreDnsConfig uses rewrite for dynamic caddy ip [0.02ms]
-(pass) renderGlobalCaddyCompose pins caddy and coredns when requested [0.08ms]
-(pass) renderGlobalCoreDnsConfig matches .hack aliases and forwards external DNS [0.10ms]
+(pass) renderGlobalCoreDnsConfig uses template + fallthrough for static caddy ip [0.07ms]
+(pass) renderGlobalCoreDnsConfig uses rewrite for dynamic caddy ip [0.01ms]
+(pass) renderGlobalCaddyCompose pins caddy and coredns when requested [0.07ms]
+(pass) renderGlobalCoreDnsConfig matches .hack aliases and forwards external DNS [0.08ms]
 
 tests/daemon-auth-routes.test.ts:
-(pass) daemon auth routes > health route returns service status [10.88ms]
-(pass) daemon auth routes > providers route returns registered provider list [0.29ms]
-(pass) daemon auth routes > unsupported method returns method_not_allowed [0.19ms]
-(pass) daemon auth routes > unknown path returns not_found payload [0.22ms]
+(pass) daemon auth routes > health route returns service status [10.13ms]
+(pass) daemon auth routes > providers route returns registered provider list [0.19ms]
+(pass) daemon auth routes > unsupported method returns method_not_allowed [0.15ms]
+(pass) daemon auth routes > unknown path returns not_found payload [0.19ms]
 
 tests/config-command.test.ts:
-SUCCESS: Updated /tmp/hack-config-command-ThEM1L/hack.config.json
-(pass) config set --global updates extension enabled using bracket path [204.03ms]
-SUCCESS: Updated /tmp/hack-config-command-j9HCRD/hack.config.json
-(pass) config set --global updates extension config hostname using bracket path [4.39ms]
-SUCCESS: Updated /tmp/hack-config-command-tNWcWL/hack.config.json
-(pass) config set --global migrates legacy controlPlane extension path to extensions map [12.98ms]
-SUCCESS: Updated /tmp/hack-config-command-ruNgfs/hack.config.json
-(pass) config set --global cleans stale legacy cloudflare mirror on canonical updates [5.87ms]
+SUCCESS: Updated /tmp/hack-config-command-qWq7Up/hack.config.json
+(pass) config set --global updates extension enabled using bracket path [120.67ms]
+SUCCESS: Updated /tmp/hack-config-command-GLK4R3/hack.config.json
+(pass) config set --global updates extension config hostname using bracket path [7.23ms]
+SUCCESS: Updated /tmp/hack-config-command-M6ijFc/hack.config.json
+(pass) config set --global migrates legacy controlPlane extension path to extensions map [2.03ms]
+SUCCESS: Updated /tmp/hack-config-command-CHbRp9/hack.config.json
+(pass) config set --global cleans stale legacy cloudflare mirror on canonical updates [2.04ms]
 
 tests/daemon-sessions.test.ts:
-(pass) handleSessionRoutes > route matching > returns null for non-session routes [0.22ms]
-(pass) handleSessionRoutes > route matching > returns null for non-v1 routes [0.04ms]
-(pass) handleSessionRoutes > route matching > handles GET /v1/sessions [196.67ms]
+(pass) handleSessionRoutes > route matching > returns null for non-session routes [0.28ms]
+(pass) handleSessionRoutes > route matching > returns null for non-v1 routes [0.09ms]
+(pass) handleSessionRoutes > route matching > handles GET /v1/sessions [55.52ms]
 (pass) handleSessionRoutes > route matching > handles POST /v1/sessions with missing name [0.32ms]
-(pass) handleSessionRoutes > route matching > handles POST /v1/sessions with invalid name [0.09ms]
+(pass) handleSessionRoutes > route matching > handles POST /v1/sessions with invalid name [0.11ms]
 (pass) handleSessionRoutes > route matching > returns 404 for unknown session action [0.04ms]
 (pass) handleSessionRoutes > route matching > returns 400 for invalid session id in path [0.05ms]
-(pass) handleSessionRoutes > session name validation > accepts alphanumeric names [9.79ms]
-(pass) handleSessionRoutes > session name validation > accepts names with dashes [6.87ms]
-(pass) handleSessionRoutes > session name validation > accepts names with underscores [8.87ms]
-(pass) handleSessionRoutes > session name validation > rejects names with dots [0.54ms]
-(pass) handleSessionRoutes > session name validation > rejects names with spaces [0.13ms]
-(pass) handleSessionRoutes > session name validation > rejects names with special characters [0.05ms]
+(pass) handleSessionRoutes > session name validation > accepts alphanumeric names [18.88ms]
+(pass) handleSessionRoutes > session name validation > accepts names with dashes [18.50ms]
+(pass) handleSessionRoutes > session name validation > accepts names with underscores [16.41ms]
+(pass) handleSessionRoutes > session name validation > rejects names with dots [0.18ms]
+(pass) handleSessionRoutes > session name validation > rejects names with spaces [0.06ms]
+(pass) handleSessionRoutes > session name validation > rejects names with special characters [0.04ms]
 (pass) handleSessionRoutes > session name validation > rejects empty names [0.04ms]
 (pass) handleSessionRoutes > session name validation > rejects whitespace-only names [0.04ms]
-(pass) handleSessionRoutes > exec endpoint > requires command parameter [12.54ms]
-(pass) handleSessionRoutes > exec endpoint > rejects empty command [8.84ms]
-(pass) handleSessionRoutes > input endpoint > requires keys parameter [8.58ms]
-(pass) handleSessionRoutes > input endpoint > rejects empty keys [7.07ms]
-(pass) handleSessionRoutes > stop endpoint > returns 404 for non-existent session [6.89ms]
-(pass) handleSessionRoutes > get session endpoint > returns 404 for non-existent session [78.40ms]
-(pass) handleSessionRoutes > invalid JSON handling > returns 400 for invalid JSON body on create [0.21ms]
-(pass) handleSessionRoutes > invalid JSON handling > returns 400 for invalid JSON body on exec [12.93ms]
+(pass) handleSessionRoutes > exec endpoint > requires command parameter [5.98ms]
+(pass) handleSessionRoutes > exec endpoint > rejects empty command [5.32ms]
+(pass) handleSessionRoutes > input endpoint > requires keys parameter [4.90ms]
+(pass) handleSessionRoutes > input endpoint > rejects empty keys [5.49ms]
+(pass) handleSessionRoutes > stop endpoint > returns 404 for non-existent session [6.11ms]
+(pass) handleSessionRoutes > get session endpoint > returns 404 for non-existent session [50.59ms]
+(pass) handleSessionRoutes > invalid JSON handling > returns 400 for invalid JSON body on create [0.28ms]
+(pass) handleSessionRoutes > invalid JSON handling > returns 400 for invalid JSON body on exec [5.23ms]
 
 tests/project-views.test.ts:
-(pass) buildProjectViews includes defined services and runtime status [11.93ms]
-(pass) buildProjectViews includes lifecycle and startup summaries [5.93ms]
-(pass) buildProjectViews preserves persistent lifecycle hook flags [7.39ms]
-(pass) buildProjectViews marks runtime status unknown when runtime is unavailable [3.05ms]
-(pass) buildProjectViews includes matching project sessions from tmux [5.77ms]
-(pass) buildProjectViews matches tmux sessions when path is a symlink to repo root [3.99ms]
-(pass) buildProjectViews includes zellij sessions when session name matches project name [5.21ms]
+(pass) buildProjectViews includes defined services and runtime status [5.89ms]
+(pass) buildProjectViews includes lifecycle and startup summaries [2.93ms]
+(pass) buildProjectViews preserves persistent lifecycle hook flags [2.94ms]
+(pass) buildProjectViews marks runtime status unknown when runtime is unavailable [1.83ms]
+(pass) buildProjectViews includes matching project sessions from tmux [1.90ms]
+(pass) buildProjectViews matches tmux sessions when path is a symlink to repo root [2.56ms]
+(pass) buildProjectViews includes zellij sessions when session name matches project name [2.23ms]
+(pass) buildProjectViews matches runtime by working directory when compose project slug differs [2.19ms]
 
 tests/project-config.test.ts:
-(pass) readProjectConfig parses json config fields [1.93ms]
-(pass) readProjectConfig captures parse errors [5.07ms]
-(pass) resolveProjectOauthTld falls back to default when enabled [0.11ms]
-(pass) readProjectConfig maps startup shorthand into lifecycle [2.25ms]
-(pass) readProjectConfig parses persistent lifecycle up.before hooks [5.93ms]
+(pass) readProjectConfig parses json config fields [2.84ms]
+(pass) readProjectConfig captures parse errors [1.22ms]
+(pass) resolveProjectOauthTld falls back to default when enabled [0.10ms]
+(pass) readProjectConfig maps startup shorthand into lifecycle [1.85ms]
+(pass) readProjectConfig parses persistent lifecycle up.before hooks [1.41ms]
 
 tests/policy-risk.test.ts:
-(pass) assessCommandRisk classifies low read command [0.32ms]
-(pass) assessCommandRisk classifies medium build/test command [0.04ms]
+(pass) assessCommandRisk classifies low read command [0.22ms]
+(pass) assessCommandRisk classifies medium build/test command [0.03ms]
 (pass) assessCommandRisk classifies high git push command [0.03ms]
 (pass) assessCommandRisk classifies critical destructive command [0.02ms]
 (pass) assessCommandRisk treats agent runners as at least medium [0.02ms]
 
 tests/nodes-registry.test.ts:
-(pass) node registry supports upsert/default/touch/remove [14.21ms]
-(pass) deriveNodeHealth classifies healthy/stale/offline [2.41ms]
-(pass) upsert clears stale registry lock [4.73ms]
-(pass) node auth refs can resolve from environment variables [0.89ms]
+(pass) node registry supports upsert/default/touch/remove [6.08ms]
+(pass) deriveNodeHealth classifies healthy/stale/offline [0.49ms]
+(pass) upsert clears stale registry lock [3.03ms]
+(pass) node auth refs can resolve from environment variables [0.91ms]
 
 tests/project-config-schema.test.ts:
-(pass) project config schema includes startup validation [0.29ms]
-(pass) project config schema includes strict lifecycle hooks and processes [0.08ms]
+(pass) project config schema includes startup validation [0.46ms]
+(pass) project config schema includes strict lifecycle hooks and processes [0.84ms]
 
 tests/node-pairings-registry.test.ts:
-(pass) pairing session can be created and consumed once [8.49ms]
-(pass) pairing session rejects invalid code and can be cancelled [5.45ms]
-(pass) pairing session expires after ttl [3.78ms]
-(pass) pairing sessions can be listed and fetched by id [10.59ms]
+(pass) pairing session can be created and consumed once [6.86ms]
+(pass) pairing session rejects invalid code and can be cancelled [4.83ms]
+(pass) pairing session expires after ttl [3.98ms]
+(pass) pairing sessions can be listed and fetched by id [9.63ms]
 
 tests/clipboard.test.ts:
-(pass) copyToClipboard returns error when no helper is available [0.19ms]
+(pass) copyToClipboard returns error when no helper is available [0.18ms]
 
 tests/node-attach-instructions.test.ts:
-(pass) buildAttachInstructions emits vscode remote command and ssh metadata [0.20ms]
+(pass) buildAttachInstructions emits vscode remote command and ssh metadata [0.18ms]
 (pass) buildAttachInstructions emits shell-first codex instructions [0.04ms]
 (pass) resolveNodeEndpoint parses host and port [0.05ms]
 
 tests/discovery.test.ts:
-(pass) discoverRepo uses package.json workspaces and orders dev candidates [5.88ms]
-(pass) discoverRepo reads pnpm-workspace.yaml when no workspaces defined [4.79ms]
+(pass) discoverRepo uses package.json workspaces and orders dev candidates [3.35ms]
+(pass) discoverRepo reads pnpm-workspace.yaml when no workspaces defined [2.21ms]
 
 tests/multi-node-harness.test.ts:
-(pass) deriveNodeHealth classifies healthy/stale/offline [0.19ms]
-(pass) node registry store supports upsert and default selection [0.09ms]
-(pass) selectNode returns explicit node when healthy [0.09ms]
-(pass) selectNode reports stale when desired node is stale [0.03ms]
+(pass) deriveNodeHealth classifies healthy/stale/offline [0.08ms]
+(pass) node registry store supports upsert and default selection [0.08ms]
+(pass) selectNode returns explicit node when healthy [0.08ms]
+(pass) selectNode reports stale when desired node is stale [0.02ms]
 (pass) selectNode falls back to first healthy node [0.03ms]
-(pass) fake transport reports offline nodes [0.11ms]
+(pass) fake transport reports offline nodes [0.17ms]
 
 tests/github-client.test.ts:
-(pass) parseGitHubRepoRef parses SSH remote [2.26ms]
-(pass) parseGitHubRepoRef parses HTTPS remote [0.20ms]
-(pass) parseGitHubRepoRef returns null for non-GitHub remote [0.04ms]
+(pass) parseGitHubRepoRef parses SSH remote [0.11ms]
+(pass) parseGitHubRepoRef parses HTTPS remote [0.05ms]
+(pass) parseGitHubRepoRef returns null for non-GitHub remote [0.01ms]
 
 tests/branches.test.ts:
-(pass) sanitizeBranchSlug normalizes separators and strips invalid chars [0.12ms]
-(pass) touchBranchUsage updates last_used_at when branch entry exists [2.25ms]
-(pass) touchBranchUsage does not create file when missing [0.99ms]
+(pass) sanitizeBranchSlug normalizes separators and strips invalid chars [0.09ms]
+(pass) touchBranchUsage updates last_used_at when branch entry exists [1.55ms]
+(pass) touchBranchUsage does not create file when missing [0.61ms]
 
 tests/daemon-env.test.ts:
-(pass) handleEnvRoutes > returns null for non-env routes [5.90ms]
-(pass) handleEnvRoutes > GET /v1/env without project returns 400 [4.52ms]
-(pass) handleEnvRoutes > GET /v1/env returns contract and resolution state [6.29ms]
-(pass) handleEnvRoutes > POST /v1/env/set writes to .hack/.env and shows as resolved [7.92ms]
-(pass) handleEnvRoutes > POST /v1/env/unset clears .hack/.env and shows as missing [22.13ms]
-(pass) handleEnvRoutes > secret set/unset uses configured encrypted_file backend [11.44ms]
+(pass) handleEnvRoutes > returns null for non-env routes [4.20ms]
+(pass) handleEnvRoutes > GET /v1/env without project returns 400 [2.59ms]
+(pass) handleEnvRoutes > GET /v1/env returns contract and resolution state [3.43ms]
+(pass) handleEnvRoutes > POST /v1/env/set writes to .hack/.env and shows as resolved [4.27ms]
+(pass) handleEnvRoutes > POST /v1/env/unset clears .hack/.env and shows as missing [20.29ms]
+(pass) handleEnvRoutes > secret set/unset uses configured encrypted_file backend [7.57ms]
 
 tests/node-workspace-bootstrap.test.ts:
-(pass) workspace ensure bootstraps a missing project by cloning repo [176.27ms]
-(pass) workspace ensure still returns unknown project when bootstrap is absent [0.95ms]
+(pass) workspace ensure bootstraps a missing project by cloning repo [182.38ms]
+(pass) workspace ensure still returns unknown project when bootstrap is absent [0.63ms]
 
 tests/log-pipe.test.ts:
-(pass) log-pipe formats docker-compose prefixed lines from stdin [253.66ms]
-(pass) log-pipe --stream stderr forces ERROR level [264.05ms]
+(pass) log-pipe formats docker-compose prefixed lines from stdin [228.53ms]
+(pass) log-pipe --stream stderr forces ERROR level [214.99ms]
 
 tests/supervisor-commands.test.ts:
-(pass) parseSupervisorArgs handles project + json [0.22ms]
-(pass) parseSupervisorArgs handles log/event offsets [0.08ms]
+(pass) parseSupervisorArgs handles project + json [0.21ms]
+(pass) parseSupervisorArgs handles log/event offsets [0.06ms]
 (pass) parseSupervisorArgs rejects unsupported options [0.02ms]
 (pass) parseSupervisorArgs rejects unknown flags [0.01ms]
-(pass) parseJobCreateArgs handles runner, env, and command [0.24ms]
-(pass) parseJobCreateArgs rejects missing command [0.01ms]
-(pass) parseShellArgs handles gateway, dims, and env [0.46ms]
+(pass) parseJobCreateArgs handles runner, env, and command [0.40ms]
+(pass) parseJobCreateArgs rejects missing command [0.03ms]
+(pass) parseShellArgs handles gateway, dims, and env [0.41ms]
 (pass) parseShellArgs rejects project conflict [0.02ms]
 
 tests/launchd.test.ts:
-(pass) launchd plist generation > renders plist with RunAtLoad false [0.10ms]
+(pass) launchd plist generation > renders plist with RunAtLoad false [0.09ms]
 (pass) launchd plist generation > renders plist with RunAtLoad true [0.02ms]
-(pass) launchd plist generation > renders plist without GUI session restriction [0.02ms]
-(pass) launchd plist generation > includes KeepAlive with SuccessfulExit false [0.02ms]
+(pass) launchd plist generation > renders plist without GUI session restriction [0.01ms]
+(pass) launchd plist generation > includes KeepAlive with SuccessfulExit false [0.01ms]
 (pass) launchd plist generation > includes PATH with common binary locations [0.02ms]
-(pass) launchd plist generation > plist is valid XML structure [0.06ms]
+(pass) launchd plist generation > plist is valid XML structure [0.05ms]
 (pass) daemon constants > launchd label follows reverse-DNS convention [0.02ms]
 
 tests/secret-store.test.ts:
-(pass) encrypted_file backend stores and retrieves encrypted secret values [3.92ms]
-(pass) cloud backend shim is provider-scoped and persists through encrypted store [3.00ms]
+(pass) encrypted_file backend stores and retrieves encrypted secret values [1.75ms]
+(pass) cloud backend shim is provider-scoped and persists through encrypted store [1.51ms]
 
 tests/qr.test.ts:
-(pass) qr payloads > buildGatewayQrPayload normalizes url and includes metadata [0.12ms]
+(pass) qr payloads > buildGatewayQrPayload normalizes url and includes metadata [0.07ms]
 (pass) qr payloads > buildGatewayQrPayload omits optional fields [0.02ms]
 (pass) qr payloads > buildSshQrPayload includes user and port [0.03ms]
 (pass) qr payloads > buildSshQrPayload omits optional segments
@@ -287,7 +288,7 @@ STEP: Ensuring hackd is running…
 STEP: Starting Caddy…
 STEP: Starting logging stack…
 SUCCESS: Global infra is up
-(pass) global up runs docker compose up for caddy and logging [6.11ms]
+(pass) global up runs docker compose up for caddy and logging [2.97ms]
 WARN: Reserved ingress IPs are currently occupied on hack-dev.
 Attempting to reassign conflicting containers and retry global startup…
 STEP: Reassigning omega-temporal-server-1 on hack-dev…
@@ -296,11 +297,11 @@ STEP: Ensuring hackd is running…
 STEP: Starting Caddy…
 STEP: Starting logging stack…
 SUCCESS: Global infra is up
-(pass) global up reassigns containers when reserved ingress IPs are occupied [4.63ms]
+(pass) global up reassigns containers when reserved ingress IPs are occupied [3.74ms]
 SUCCESS: Global infra is down
-(pass) global down runs docker compose down when files exist [2.43ms]
-ERROR: Missing /tmp/hack-global-7oy2rT/.hack/caddy/docker-compose.yml. Run: hack global install
-(pass) global up fails when compose files are missing [2.09ms]
+(pass) global down runs docker compose down when files exist [2.32ms]
+ERROR: Missing /tmp/hack-global-hpNKVO/.hack/caddy/docker-compose.yml. Run: hack global install
+(pass) global up fails when compose files are missing [1.02ms]
 [?25l│
 ◇  gum already installed
 WARN: Skipping chafa install (only automated on macOS for now).
@@ -330,147 +331,147 @@ SUCCESS: Global infra is up
 │  - Start a repo with: hack init && hack up  │
 │                                             │
 ├─────────────────────────────────────────────╯
-(pass) global install writes compose files and starts stacks [22.57ms]
-(pass) global status --json returns summary payload [7.90ms]
+(pass) global install writes compose files and starts stacks [9.88ms]
+(pass) global status --json returns summary payload [3.48ms]
 
 tests/runtime-backend.test.ts:
-(pass) composeRuntimeBackend.up builds compose args with profiles and detach [0.39ms]
-(pass) composeRuntimeBackend.down builds compose args [0.08ms]
-(pass) composeRuntimeBackend.psJson uses exec with json format [0.07ms]
-(pass) composeRuntimeBackend.run supports workdir and args [0.07ms]
+(pass) composeRuntimeBackend.up builds compose args with profiles and detach [0.29ms]
+(pass) composeRuntimeBackend.down builds compose args [0.12ms]
+(pass) composeRuntimeBackend.psJson uses exec with json format [0.31ms]
+(pass) composeRuntimeBackend.run supports workdir and args [0.14ms]
 
 tests/tailscale-oauth-commands.test.ts:
-(pass) parseTailscaleOauthStatusArgs supports json + validate [0.13ms]
+(pass) parseTailscaleOauthStatusArgs supports json + validate [0.85ms]
 (pass) parseTailscaleOauthStatusArgs rejects unknown flags [0.02ms]
-(pass) parseTailscaleOauthConnectArgs parses explicit values [0.12ms]
-(pass) parseTailscaleOauthConnectArgs supports stdin secret mode [0.02ms]
-(pass) parseTailscaleOauthConnectArgs rejects invalid expiry [0.01ms]
-(pass) parseTailscaleOauthDisconnectArgs parses auth ref [0.04ms]
+(pass) parseTailscaleOauthConnectArgs parses explicit values [0.10ms]
+(pass) parseTailscaleOauthConnectArgs supports stdin secret mode [0.07ms]
+(pass) parseTailscaleOauthConnectArgs rejects invalid expiry [0.02ms]
+(pass) parseTailscaleOauthDisconnectArgs parses auth ref [0.05ms]
 
 tests/daemon-command.test.ts:
 SUCCESS: Cleared stale hackd state
-(pass) daemon clear removes stale pid and socket files [4.99ms]
+(pass) daemon clear removes stale pid and socket files [1.89ms]
 
 tests/supervisor-service.test.ts:
-(pass) Supervisor service creates and lists jobs [27.04ms]
-(pass) Supervisor service cancels running jobs [35.46ms]
+(pass) Supervisor service creates and lists jobs [46.48ms]
+(pass) Supervisor service cancels running jobs [29.47ms]
 
 tests/github-auth.test.ts:
-(pass) resolveGitHubAuthSettings reads extension overrides [0.38ms]
-(pass) listGitHubAuthProfiles exposes configured default and summaries [0.14ms]
-(pass) resolveGitHubAuthSettings selection precedence is command then project then global default [0.06ms]
+(pass) resolveGitHubAuthSettings reads extension overrides [0.34ms]
+(pass) listGitHubAuthProfiles exposes configured default and summaries [0.13ms]
+(pass) resolveGitHubAuthSettings selection precedence is command then project then global default [0.08ms]
 (pass) resolveGitHubAuthSettingsResult returns error for missing selected profile [0.09ms]
-(pass) resolveGitHubAppToken prefers keychain token [0.30ms]
-(pass) resolveGitHubAppToken falls back to env token [0.06ms]
+(pass) resolveGitHubAppToken prefers keychain token [0.28ms]
+(pass) resolveGitHubAppToken falls back to env token [0.05ms]
 (pass) resolveGitHubAppToken returns a clear error when token is missing [0.04ms]
 (pass) save/delete GitHub token uses configured service+authRef [0.20ms]
-(pass) exchangeGitHubAppInstallationToken signs JWT and parses response [36.79ms]
-(pass) resolveGitHubAppToken refreshes expired keychain token with App credentials [42.81ms]
-(pass) resolveGitHubAppToken falls back to env token when refresh fails [0.09ms]
+(pass) exchangeGitHubAppInstallationToken signs JWT and parses response [29.54ms]
+(pass) resolveGitHubAppToken refreshes expired keychain token with App credentials [37.19ms]
+(pass) resolveGitHubAppToken falls back to env token when refresh fails [0.10ms]
 (pass) resolveGitHubAppToken returns refresh error when token is expired and no fallback exists [0.07ms]
 
 tests/compose.test.ts:
-(pass) renderCompose emits ingress network and service fields [1.27ms]
+(pass) renderCompose emits ingress network and service fields [0.75ms]
 
 tests/docker-logs.test.ts:
-(pass) pretty log formats JSON payload with service prefix [0.42ms]
+(pass) pretty log formats JSON payload with service prefix [0.41ms]
 (pass) pretty log formats non-JSON payload [0.02ms]
-(pass) stderr stream forces ERROR level [0.02ms]
-(pass) pretty log supports pino numeric levels [0.04ms]
+(pass) stderr stream forces ERROR level [0.01ms]
+(pass) pretty log supports pino numeric levels [0.03ms]
 
 tests/daemon-paths.test.ts:
-(pass) resolveDaemonPaths uses ~/.hack/daemon defaults [0.93ms]
+(pass) resolveDaemonPaths uses ~/.hack/daemon defaults [0.48ms]
 
 tests/tickets-extension.test.ts:
-(pass) tickets extension: create/list/show with isolated git ref [1876.76ms]
+(pass) tickets extension: create/list/show with isolated git ref [1705.30ms]
 
 tests/env-backend-command.test.ts:
-(pass) env backend status defaults to keychain [242.32ms]
-(pass) env backend use encrypted_file persists selection [245.06ms]
-(pass) env backend use cloud requires provider and stores cloud settings [509.78ms]
-(pass) env set --secret stores value using encrypted backend [520.61ms]
+(pass) env backend status defaults to keychain [222.46ms]
+(pass) env backend use encrypted_file persists selection [222.61ms]
+(pass) env backend use cloud requires provider and stores cloud settings [462.88ms]
+(pass) env set --secret stores value using encrypted backend [452.63ms]
 
 tests/log-json.test.ts:
-(pass) parseComposeLogLine extracts fields from JSON payload [0.35ms]
-(pass) parseLokiLogLine includes labels and timestamp [0.13ms]
+(pass) parseComposeLogLine extracts fields from JSON payload [0.41ms]
+(pass) parseLokiLogLine includes labels and timestamp [0.14ms]
 
 tests/time.test.ts:
-(pass) parseTimeInput supports durations and now [0.10ms]
+(pass) parseTimeInput supports durations and now [0.11ms]
 (pass) parseTimeInput supports RFC3339 timestamps [0.01ms]
 (pass) parseTimeInput rejects invalid inputs [0.01ms]
 
 tests/mcp-install.test.ts:
-(pass) installMcpConfig writes cursor + claude configs [2.37ms]
-(pass) installMcpConfig is idempotent for codex [1.40ms]
+(pass) installMcpConfig writes cursor + claude configs [2.02ms]
+(pass) installMcpConfig is idempotent for codex [1.03ms]
 
 tests/config.test.ts:
-(pass) global config utilities > updateGlobalConfig creates config file if missing [1.00ms]
-(pass) global config utilities > updateGlobalConfig updates existing config [1.19ms]
-(pass) global config utilities > readGlobalConfig returns undefined for missing config [0.48ms]
-(pass) global config utilities > readGlobalConfig reads nested value [1.64ms]
-(pass) global config utilities > updateGlobalConfig handles bracket notation [0.87ms]
-(pass) global config utilities > updateGlobalConfig returns changed=false when value unchanged [0.69ms]
+(pass) global config utilities > updateGlobalConfig creates config file if missing [0.90ms]
+(pass) global config utilities > updateGlobalConfig updates existing config [0.60ms]
+(pass) global config utilities > readGlobalConfig returns undefined for missing config [0.25ms]
+(pass) global config utilities > readGlobalConfig reads nested value [0.52ms]
+(pass) global config utilities > updateGlobalConfig handles bracket notation [0.45ms]
+(pass) global config utilities > updateGlobalConfig returns changed=false when value unchanged [0.53ms]
 
 tests/gum.test.ts:
 (pass) getGumPath prefers HACK_GUM_PATH (fixture) [0.07ms]
-(pass) gumInput returns stdout [6.49ms]
-(pass) gumConfirm maps exit codes to boolean [11.37ms]
-(pass) gumConfirm detects cancel [6.35ms]
-(pass) gumChooseMany parses output delimiter [6.22ms]
-(pass) gumFilterMany parses output delimiter [6.25ms]
-(pass) gumVersionCheck maps exit code to boolean [11.73ms]
-(pass) tryGumLog returns true and writes structured args (fixture) [7.29ms]
+(pass) gumInput returns stdout [8.34ms]
+(pass) gumConfirm maps exit codes to boolean [10.19ms]
+(pass) gumConfirm detects cancel [5.10ms]
+(pass) gumChooseMany parses output delimiter [5.41ms]
+(pass) gumFilterMany parses output delimiter [5.11ms]
+(pass) gumVersionCheck maps exit code to boolean [9.02ms]
+(pass) tryGumLog returns true and writes structured args (fixture) [5.21ms]
 
 tests/gateway-tokens.test.ts:
-(pass) gateway tokens can be created, verified, and revoked [2.19ms]
-(pass) gateway auth accepts bearer and x-hack-token headers [1.32ms]
-(pass) gateway auth accepts query token when allowed [0.94ms]
+(pass) gateway tokens can be created, verified, and revoked [2.16ms]
+(pass) gateway auth accepts bearer and x-hack-token headers [1.01ms]
+(pass) gateway auth accepts query token when allowed [0.81ms]
 
 tests/github-commands.test.ts:
-(pass) github command parsing > parseStatusArgs accepts --json and --profile in either order [0.09ms]
+(pass) github command parsing > parseStatusArgs accepts --json and --profile in either order [0.08ms]
 (pass) github command parsing > parseProfilesArgs accepts optional --json [0.03ms]
-(pass) github profile payload rendering > buildGitHubProfilesPayload emits deterministic profile payload [0.08ms]
+(pass) github profile payload rendering > buildGitHubProfilesPayload emits deterministic profile payload [0.09ms]
 
 tests/cli-command.test.ts:
 (pass) resolveCommand finds nested subcommand and remaining positionals [0.05ms]
 (pass) built-in options are always allowed for a command [0.03ms]
-(pass) parsePositionalsForCommand throws on extra args [0.07ms]
+(pass) parsePositionalsForCommand throws on extra args [0.08ms]
 (pass) parseOptionsForCommand converts number options [0.03ms]
 
 tests/daemon-status.test.ts:
-(pass) buildDaemonStatusReport marks running when API is reachable [0.08ms]
-(pass) buildDaemonStatusReport marks starting when process is running but API is not ready [0.08ms]
-(pass) buildDaemonStatusReport marks stale when pid is present but not running [0.02ms]
+(pass) buildDaemonStatusReport marks running when API is reachable [0.05ms]
+(pass) buildDaemonStatusReport marks starting when process is running but API is not ready [0.01ms]
+(pass) buildDaemonStatusReport marks stale when pid is present but not running [0.01ms]
 (pass) buildDaemonStatusReport marks stale when socket exists without pid [0.01ms]
-(pass) buildDaemonStatusReport marks stopped when no pid or socket [0.01ms]
+(pass) buildDaemonStatusReport marks stopped when no pid or socket
 
 tests/gateway-e2e.test.ts:
 (skip) gateway status responds
 (skip) gateway job create + stream
 
 tests/runtime-projects.test.ts:
-(pass) countRunningServices counts services with running containers [0.15ms]
+(pass) countRunningServices counts services with running containers [0.11ms]
 (pass) filterRuntimeProjects excludes global projects when disabled [0.03ms]
-(pass) serializeRuntimeProject includes container ports [0.11ms]
+(pass) serializeRuntimeProject includes container ports [0.07ms]
 
 tests/supervisor-runner.test.ts:
-(pass) runJob writes logs and completes successfully [13.74ms]
-(pass) runJob records failed status for non-zero exit [13.40ms]
+(pass) runJob writes logs and completes successfully [12.74ms]
+(pass) runJob records failed status for non-zero exit [11.82ms]
 
 tests/setup.test.ts:
-(pass) installCursorRules writes hack.mdc with markers [1.49ms]
-(pass) installClaudeHooks writes settings.local.json hooks [0.98ms]
-(pass) installCodexSkill writes SKILL.md with hack-cli frontmatter [1.14ms]
-(pass) renderAgentPrimer is CLI-first and mentions MCP [0.06ms]
+(pass) installCursorRules writes hack.mdc with markers [1.04ms]
+(pass) installClaudeHooks writes settings.local.json hooks [1.00ms]
+(pass) installCodexSkill writes SKILL.md with hack-cli frontmatter [0.95ms]
+(pass) renderAgentPrimer is CLI-first and mentions MCP [0.07ms]
 (pass) renderAgentInitPatterns includes dependency signals [0.05ms]
-(pass) buildInitAssistantReport captures repo signals [5.19ms]
+(pass) buildInitAssistantReport captures repo signals [3.30ms]
 
 tests/dev-wrapper.test.ts:
-(pass) isDevWrapperShimBytes detects local-dev wrapper scripts [0.09ms]
+(pass) isDevWrapperShimBytes detects local-dev wrapper scripts [0.57ms]
 (pass) isDevWrapperShimBytes does not mis-detect compiled binaries [0.02ms]
 
 tests/doctor-utils.test.ts:
-(pass) analyzeComposeNetworkHygiene flags internal services without caddy labels [0.12ms]
+(pass) analyzeComposeNetworkHygiene flags internal services without caddy labels [0.11ms]
 (pass) analyzeComposeNetworkHygiene accepts caddy labels in array form [0.03ms]
 (pass) analyzeComposeNetworkHygiene reports invalid yaml [0.07ms]
 (pass) analyzeComposeNetworkHygiene reports missing services [0.01ms]
@@ -478,28 +479,28 @@ tests/doctor-utils.test.ts:
 (pass) dnsmasqConfigHasDomain detects expected address line [0.03ms]
 
 tests/session-utils.test.ts:
-(pass) diffNewLines returns suffix when output grows [0.07ms]
+(pass) diffNewLines returns suffix when output grows [0.05ms]
 (pass) diffNewLines falls back to line diff when prefix mismatches [0.02ms]
-(pass) splitLines trims trailing newline [0.03ms]
-(pass) buildSessionStreamStartEvent includes context [0.05ms]
+(pass) splitLines trims trailing newline [0.02ms]
+(pass) buildSessionStreamStartEvent includes context [0.04ms]
 (pass) buildSessionStreamLogEvent carries line + timing options [0.05ms]
-(pass) buildSessionStreamErrorEvent includes message [0.03ms]
+(pass) buildSessionStreamErrorEvent includes message [0.02ms]
 (pass) buildSessionStreamEndEvent includes reason when provided [0.03ms]
-(pass) parseTmuxPanesOutput parses tab-delimited pane fields [0.08ms]
+(pass) parseTmuxPanesOutput parses tab-delimited pane fields [0.09ms]
 
 tests/projects-registry.test.ts:
-(pass) upsertProjectRegistration creates a new entry [3.05ms]
-(pass) upsertProjectRegistration returns conflict when name is taken [3.18ms]
-(pass) upsertProjectRegistration moves entry when old path missing [2.86ms]
-(pass) upsertProjectRegistration clears stale registry lock [2.80ms]
+(pass) upsertProjectRegistration creates a new entry [1.90ms]
+(pass) upsertProjectRegistration returns conflict when name is taken [1.93ms]
+(pass) upsertProjectRegistration moves entry when old path missing [1.87ms]
+(pass) upsertProjectRegistration clears stale registry lock [2.13ms]
 
 3 tests skipped:
 (skip) dispatch run executes against remote node and persists artifacts
 (skip) gateway status responds
 (skip) gateway job create + stream
 
- 303 pass
+ 304 pass
  3 skip
  0 fail
- 905 expect() calls
-Ran 306 tests across 69 files. [6.47s]
+ 908 expect() calls
+Ran 307 tests across 69 files. [5.48s]

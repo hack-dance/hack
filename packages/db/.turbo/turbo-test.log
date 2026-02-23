@@ -2,9 +2,9 @@ $ bun test
 bun test v1.3.9 (cf6cdbbb)
 
 tests/smoke.test.ts:
-(pass) db package exports createDbClient [0.57ms]
+(pass) db package exports createDbClient [0.90ms]
 
  1 pass
  0 fail
  1 expect() calls
-Ran 1 test across 1 file. [76.00ms]
+Ran 1 test across 1 file. [52.00ms]

@@ -267,7 +267,9 @@ Notes:
   - `controlPlane.extensions["dance.hack.github"].config.oauthClientId`
   - `controlPlane.extensions["dance.hack.github"].config.oauthClientSecretAuthRef` (default: `github.oauth.client_secret`)
   - keychain secret at service `hack-github-auth`, name `<oauthClientSecretAuthRef>`
+- `hack x github connect` now auto-resolves account identity (`/user`) from the connected token when available and persists `accountLogin/accountName/accountId` on the selected profile for downstream UI routing labels.
 - macOS desktop includes a dedicated panel at `Settings / Extensions / GitHub` with connected-account management and direct browser auth. It starts a local auth flow (via `auth.hack.gy` with localhost fallback), opens GitHub in your browser, then polls callback status and refreshes profiles automatically.
+- macOS desktop shows read-only system Git identity (host-level inherited Git/gh context) separately from remote OAuth/App accounts to keep local gateway identity and remote auth routing boundaries explicit.
 - `auth.hack` and `auth.hack.gy` are routed by global Caddy to the daemon auth listener (`127.0.0.1:7790` by default), so this endpoint can also host future provider callbacks/hooks.
 
 #### job-show

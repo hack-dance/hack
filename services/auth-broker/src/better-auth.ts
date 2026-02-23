@@ -1,15 +1,18 @@
-import { createDbClient } from "@hack/db";
+import { neon } from "@neondatabase/serverless";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { organization } from "better-auth/plugins";
+import { drizzle } from "drizzle-orm/neon-http";
 import { z } from "zod";
 
 type BetterAuthInstance = ReturnType<typeof betterAuth>;
+type AuthBrokerDbClient = ReturnType<typeof createAuthBrokerDbClient>;
 
 type BetterAuthRuntime = {
   readonly enabled: boolean;
   readonly reason?: string;
   readonly auth?: BetterAuthInstance;
+  readonly db?: AuthBrokerDbClient;
 };
 
 const betterAuthEnvSchema = z.object({
@@ -55,14 +58,12 @@ export function createBetterAuthRuntimeFromEnv(): BetterAuthRuntime {
   const githubEnabled = Boolean(
     env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET
   );
+  const db = createAuthBrokerDbClient({ databaseUrl: env.DATABASE_URL });
 
   const auth = betterAuth({
-    database: drizzleAdapter(
-      createDbClient({ databaseUrl: env.DATABASE_URL }),
-      {
-        provider: "pg",
-      }
-    ),
+    database: drizzleAdapter(db, {
+      provider: "pg",
+    }),
     secret: env.BETTER_AUTH_SECRET,
     ...(env.BETTER_AUTH_URL ? { baseURL: env.BETTER_AUTH_URL } : {}),
     ...(trustedOrigins.length > 0 ? { trustedOrigins } : {}),
@@ -97,6 +98,7 @@ export function createBetterAuthRuntimeFromEnv(): BetterAuthRuntime {
   return {
     enabled: true,
     auth,
+    db,
   };
 }
 
@@ -110,4 +112,13 @@ function parseCsv(value: string | undefined): string[] {
     .split(",")
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
+}
+
+/**
+ * Create a local Drizzle client for auth-broker without relying on workspace-only packages.
+ *
+ * This keeps Railway path-based deploys self-contained under `services/auth-broker`.
+ */
+function createAuthBrokerDbClient(input: { readonly databaseUrl: string }) {
+  return drizzle(neon(input.databaseUrl));
 }

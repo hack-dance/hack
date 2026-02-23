@@ -1091,6 +1091,9 @@ public struct GitHubOAuthFlowStartResponse: Decodable, Hashable {
   public let setDefault: Bool
   public let authorizeUrl: String
   public let statusUrl: String
+  public let appInstallUrl: String?
+  public let appId: String?
+  public let appSlug: String?
   public let expiresAt: String
 
   public init(
@@ -1100,6 +1103,9 @@ public struct GitHubOAuthFlowStartResponse: Decodable, Hashable {
     setDefault: Bool,
     authorizeUrl: String,
     statusUrl: String,
+    appInstallUrl: String?,
+    appId: String?,
+    appSlug: String?,
     expiresAt: String
   ) {
     self.ok = ok
@@ -1108,6 +1114,9 @@ public struct GitHubOAuthFlowStartResponse: Decodable, Hashable {
     self.setDefault = setDefault
     self.authorizeUrl = authorizeUrl
     self.statusUrl = statusUrl
+    self.appInstallUrl = appInstallUrl
+    self.appId = appId
+    self.appSlug = appSlug
     self.expiresAt = expiresAt
   }
 }
@@ -1124,6 +1133,10 @@ public struct GitHubOAuthFlowStatusResponse: Decodable, Hashable {
   public let accountName: String?
   public let accountId: String?
   public let installationId: String?
+  public let installationIds: [String]?
+  public let appInstallUrl: String?
+  public let appId: String?
+  public let appSlug: String?
   public let error: String?
 
   public init(
@@ -1138,6 +1151,10 @@ public struct GitHubOAuthFlowStatusResponse: Decodable, Hashable {
     accountName: String?,
     accountId: String?,
     installationId: String?,
+    installationIds: [String]?,
+    appInstallUrl: String?,
+    appId: String?,
+    appSlug: String?,
     error: String?
   ) {
     self.id = id
@@ -1151,6 +1168,10 @@ public struct GitHubOAuthFlowStatusResponse: Decodable, Hashable {
     self.accountName = accountName
     self.accountId = accountId
     self.installationId = installationId
+    self.installationIds = installationIds
+    self.appInstallUrl = appInstallUrl
+    self.appId = appId
+    self.appSlug = appSlug
     self.error = error
   }
 }

@@ -22,6 +22,13 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .env.production.local
 .env.local
 
+# private key material (never commit)
+*.private-key.pem
+*.github-app.pem
+*.app-key.pem
+*.p8
+hackdance.*.private-key.pem
+
 # caches
 .eslintcache
 .cache

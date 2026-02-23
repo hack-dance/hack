@@ -24,12 +24,59 @@ public enum HackCLIError: LocalizedError, Equatable {
 
 public actor HackCLIClient {
   private static let authServerCandidates = [
+    "https://auth.hack.broker",
     "https://auth.hack.gy",
     "https://auth.hack",
     "http://127.0.0.1:7790",
   ]
 
   private static let authRequestTimeoutSeconds: TimeInterval = 10
+
+  private struct GitHubOAuthStartEnvelope: Decodable {
+    let ok: Bool
+    let flow: GitHubOAuthStartEnvelopeFlow
+  }
+
+  private struct GitHubOAuthStartEnvelopeFlow: Decodable {
+    let flowId: String
+    let profileId: String
+    let setDefault: Bool
+    let requireInstallation: Bool?
+    let authorizeUrl: String
+    let deviceCode: String
+    let pollUrl: String
+    let appInstallUrl: String?
+    let appId: String?
+    let appSlug: String?
+    let expiresAt: String
+  }
+
+  private struct GitHubOAuthStatusEnvelope: Decodable {
+    let ok: Bool
+    let status: GitHubOAuthStatusEnvelopeStatus
+  }
+
+  private struct GitHubOAuthStatusEnvelopeStatus: Decodable {
+    let id: String
+    let status: String
+    let profileId: String
+    let setDefault: Bool
+    let createdAt: String
+    let expiresAt: String
+    let completedAt: String?
+    let claimedAt: String?
+    let accountLogin: String?
+    let accountName: String?
+    let accountId: String?
+    let installationId: String?
+    let installationIds: [String]?
+    let appInstallUrl: String?
+    let appId: String?
+    let appSlug: String?
+    let token: String?
+    let tokenExpiresAt: String?
+    let error: String?
+  }
 
   public init() {}
 
@@ -324,26 +371,61 @@ public actor HackCLIClient {
     return try decodeJsonOrThrow(GitHubStatusResponse.self, result: result)
   }
 
+  /// Starts cloud GitHub OAuth with the dedicated auth broker surface.
+  ///
+  /// This flow is intentionally separate from local gateway/daemon bearer-token auth.
   public func startGitHubOAuthFlow(
     profileId: String,
     setDefault: Bool
   ) async throws -> GitHubOAuthFlowStartResponse {
     var lastError: String? = nil
-    for candidate in Self.authServerCandidates {
+    for candidate in resolveAuthServerCandidates() {
       guard
         let startURL = buildAuthURL(
           base: candidate,
           path: "/v1/auth/github/start",
           queryItems: [
             URLQueryItem(name: "profile", value: profileId),
+            URLQueryItem(name: "setDefault", value: setDefault ? "1" : "0"),
             URLQueryItem(name: "set_default", value: setDefault ? "1" : "0"),
+            URLQueryItem(name: "requireInstallation", value: "1"),
           ]
         )
       else {
         continue
       }
       do {
-        return try await fetchAuthJSON(GitHubOAuthFlowStartResponse.self, url: startURL)
+        let body = try await fetchAuthBody(url: startURL)
+        if let direct = tryDecodeLenient(GitHubOAuthFlowStartResponse.self, from: body) {
+          return direct
+        }
+        if let wrapped = tryDecodeLenient(GitHubOAuthStartEnvelope.self, from: body), wrapped.ok {
+          guard
+            let statusURL = buildAuthURLWithQuery(
+              urlString: wrapped.flow.pollUrl,
+              queryItems: [
+                URLQueryItem(name: "deviceCode", value: wrapped.flow.deviceCode),
+                URLQueryItem(name: "claim", value: "1"),
+                URLQueryItem(name: "requireInstallation", value: "1"),
+              ]
+            )?.absoluteString
+          else {
+            throw HackCLIError.network("Auth flow returned an invalid status URL.")
+          }
+          return GitHubOAuthFlowStartResponse(
+            ok: true,
+            flowId: wrapped.flow.flowId,
+            profileId: wrapped.flow.profileId,
+            setDefault: wrapped.flow.setDefault,
+            authorizeUrl: wrapped.flow.authorizeUrl,
+            statusUrl: statusURL,
+            appInstallUrl: wrapped.flow.appInstallUrl,
+            appId: wrapped.flow.appId,
+            appSlug: wrapped.flow.appSlug,
+            expiresAt: wrapped.flow.expiresAt
+          )
+        }
+        throw HackCLIError.network("Auth server returned invalid JSON.")
       } catch {
         lastError = error.localizedDescription
       }
@@ -351,17 +433,50 @@ public actor HackCLIClient {
 
     throw HackCLIError.network(
       lastError
-        ?? "Unable to reach local auth server. Start hack daemon and global infra, then retry."
+        ?? "Unable to reach any configured auth broker endpoint. Check network/broker status and retry."
     )
   }
 
+  /// Polls cloud OAuth flow state and imports claimed tokens into local keychain-backed profiles.
+  ///
+  /// This does not read or mutate gateway token auth used for daemon/gateway transport.
   public func fetchGitHubOAuthFlowStatus(
     statusURL: String
   ) async throws -> GitHubOAuthFlowStatusResponse {
     guard let url = URL(string: statusURL) else {
       throw HackCLIError.network("Invalid auth flow status URL.")
     }
-    return try await fetchAuthJSON(GitHubOAuthFlowStatusResponse.self, url: url)
+    let body = try await fetchAuthBody(url: url)
+    if let direct = tryDecodeLenient(GitHubOAuthFlowStatusResponse.self, from: body) {
+      return direct
+    }
+    if let wrapped = tryDecodeLenient(GitHubOAuthStatusEnvelope.self, from: body), wrapped.ok {
+      if let token = normalized(wrapped.status.token) {
+        let installationId = normalized(wrapped.status.installationId)
+          ?? wrapped.status.installationIds?.first
+        do {
+          try await persistGitHubTokenFromBrokerFlow(
+            profileId: wrapped.status.profileId,
+            token: token,
+            setDefault: wrapped.status.setDefault,
+            appId: normalized(wrapped.status.appId),
+            installationId: installationId
+          )
+        } catch {
+          throw HackCLIError.network(
+            "GitHub OAuth callback succeeded, but Hack could not save the token locally (\(error.localizedDescription)). Retry Add account and allow keychain access."
+          )
+        }
+      } else if wrapped.status.status == "claimed" {
+        let profileId = wrapped.status.profileId
+        let localStatus = try await inspectGitHubStatus(profileId: profileId)
+        if !localStatus.tokenResolved {
+          return brokerClaimedWithoutLocalTokenStatus(wrapped.status)
+        }
+      }
+      return normalizeBrokerFlowStatus(wrapped.status)
+    }
+    throw HackCLIError.network("Auth server returned invalid JSON.")
   }
 
   public func bootstrapRailwayNode(
@@ -818,7 +933,123 @@ public actor HackCLIClient {
     return components.url
   }
 
-  private func fetchAuthJSON<T: Decodable>(_ type: T.Type, url: URL) async throws -> T {
+  private func buildAuthURLWithQuery(
+    urlString: String,
+    queryItems: [URLQueryItem]
+  ) -> URL? {
+    guard var components = URLComponents(string: urlString) else {
+      return nil
+    }
+    var merged = components.queryItems ?? []
+    merged.append(contentsOf: queryItems)
+    components.queryItems = merged
+    return components.url
+  }
+
+  private func tryDecodeLenient<T: Decodable>(
+    _ type: T.Type,
+    from text: String
+  ) -> T? {
+    try? decodeLenient(type, from: text)
+  }
+
+  private func normalizeBrokerFlowStatus(
+    _ wrapped: GitHubOAuthStatusEnvelopeStatus
+  ) -> GitHubOAuthFlowStatusResponse {
+    let installationId = normalized(wrapped.installationId)
+      ?? wrapped.installationIds?.first
+    let normalizedStatus: String
+    switch wrapped.status {
+    case "claimed":
+      normalizedStatus = "complete"
+    default:
+      normalizedStatus = wrapped.status
+    }
+    return GitHubOAuthFlowStatusResponse(
+      id: wrapped.id,
+      status: normalizedStatus,
+      profileId: wrapped.profileId,
+      setDefault: wrapped.setDefault,
+      createdAt: wrapped.createdAt,
+      expiresAt: wrapped.expiresAt,
+      completedAt: wrapped.completedAt ?? wrapped.claimedAt,
+      accountLogin: wrapped.accountLogin,
+      accountName: wrapped.accountName,
+      accountId: wrapped.accountId,
+      installationId: installationId,
+      installationIds: wrapped.installationIds,
+      appInstallUrl: wrapped.appInstallUrl,
+      appId: wrapped.appId,
+      appSlug: wrapped.appSlug,
+      error: wrapped.error
+    )
+  }
+
+  private func brokerClaimedWithoutLocalTokenStatus(
+    _ wrapped: GitHubOAuthStatusEnvelopeStatus
+  ) -> GitHubOAuthFlowStatusResponse {
+    let installationId = normalized(wrapped.installationId)
+      ?? wrapped.installationIds?.first
+    return GitHubOAuthFlowStatusResponse(
+      id: wrapped.id,
+      status: "error",
+      profileId: wrapped.profileId,
+      setDefault: wrapped.setDefault,
+      createdAt: wrapped.createdAt,
+      expiresAt: wrapped.expiresAt,
+      completedAt: wrapped.completedAt ?? wrapped.claimedAt,
+      accountLogin: wrapped.accountLogin,
+      accountName: wrapped.accountName,
+      accountId: wrapped.accountId,
+      installationId: installationId,
+      installationIds: wrapped.installationIds,
+      appInstallUrl: wrapped.appInstallUrl,
+      appId: wrapped.appId,
+      appSlug: wrapped.appSlug,
+      error:
+        "OAuth token was claimed remotely but is not available in local profile \(wrapped.profileId). Re-run Add account and allow keychain access."
+    )
+  }
+
+  /// Persist a broker-issued GitHub token into local keychain-backed profile storage.
+  private func persistGitHubTokenFromBrokerFlow(
+    profileId: String,
+    token: String,
+    setDefault: Bool,
+    appId: String?,
+    installationId: String?
+  ) async throws {
+    if let appId, let installationId {
+      var appArgs = [
+        "x",
+        "github",
+        "connect",
+        "--profile",
+        profileId,
+        "--app-id",
+        appId,
+        "--installation-id",
+        installationId,
+      ]
+      if setDefault {
+        appArgs.append("--set-default")
+      }
+      do {
+        _ = try await run(appArgs)
+        return
+      } catch {
+        // Fall back to direct token import when app private-key refresh is not available.
+      }
+    }
+
+    var args = ["x", "github", "connect", "--profile", profileId, "--stdin"]
+    if setDefault {
+      args.append("--set-default")
+    }
+    _ = try await run(args, stdin: "\(token)\n")
+  }
+
+  private func fetchAuthBody(url: URL) async throws -> String {
     var request = URLRequest(url: url)
     request.timeoutInterval = Self.authRequestTimeoutSeconds
     request.httpMethod = "GET"
@@ -846,12 +1077,7 @@ public actor HackCLIClient {
       let fallback = firstNonEmptyLine(body) ?? HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode)
       throw HackCLIError.network(fallback)
     }
-
-    do {
-      return try decode(type, from: body)
-    } catch {
-      throw HackCLIError.network("Auth server returned invalid JSON.")
-    }
+    return body
   }
 
   private func unsupportedTailscaleOAuthStatusResponse(
@@ -1031,6 +1257,27 @@ public actor HackCLIClient {
     guard let value else { return nil }
     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
     return trimmed.isEmpty ? nil : trimmed
+  }
+
+  private func resolveAuthServerCandidates() -> [String] {
+    var candidates: [String] = []
+    var seen = Set<String>()
+
+    let envOverride = normalized(ProcessInfo.processInfo.environment["HACK_AUTH_BROKER_URL"])
+    if let envOverride {
+      let lowercased = envOverride.lowercased()
+      if seen.insert(lowercased).inserted {
+        candidates.append(envOverride)
+      }
+    }
+
+    for candidate in Self.authServerCandidates {
+      let lowercased = candidate.lowercased()
+      if seen.insert(lowercased).inserted {
+        candidates.append(candidate)
+      }
+    }
+    return candidates
   }
 
   private func runExecutable(

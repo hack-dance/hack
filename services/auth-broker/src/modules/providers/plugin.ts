@@ -29,7 +29,11 @@ export function createProvidersPlugin({
         id: "github",
         enabled: true,
         mode: "oauth",
+        requestedScopes: config.githubScopes,
         redirectUri: config.githubRedirectUri,
+        appId: config.githubAppId,
+        appSlug: config.githubAppSlug,
+        appInstallUrl: config.githubAppInstallUrl,
       },
     ] as const,
   }));

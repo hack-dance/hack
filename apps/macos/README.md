@@ -14,6 +14,10 @@ Native macOS app for managing local hack projects and daemon status.
 - Actions: start/stop project, open URL, open logs (experimental).
 - Shows hackd status with start/stop controls.
 - Includes a fullscreen Settings overlay with sidebar navigation for runtime, gateway, Railway, Tailscale, and node topology.
+- GitHub account connect now runs browser OAuth through the auth-broker endpoint surface and imports tokens into local profile keychain storage.
+- GitHub connect now supports authorize+install flow hints from the broker and can keep polling in "install required" state until a GitHub App installation is selected.
+- Browser callback pages can deep-link back to the app (`hack://auth/github/callback?...`) to immediately refocus and finalize active connect flows.
+- Cloud OAuth remains separate from local gateway/daemon bearer-token auth (transport auth boundary).
 - Node topology pane includes a controller-host mode toggle, interactive network graph canvas (node selection, typed edge labels, draggable node layout persisted per controller profile, auto-tidy reflow, expandable full map), primary/default node view, authorized node management, connectivity probes, and pairing request inbox approval actions.
 - Tailscale settings now include a dedicated bootstrap auth-key panel; saving there writes the shared key used by private Railway bootstrap (`controlPlane.extensions["dance.hack.tailscale"].config.authKey`, mirrored to Railway compatibility key) with optional `HACK_TAILSCALE_AUTH_KEY` fallback.
 - Project detail and topology screens use lazy stacked section rendering plus cancellable async refresh tasks to reduce unnecessary recomputation while navigating quickly.
@@ -56,6 +60,18 @@ Open `HackDesktop.xcodeproj` in Xcode and run the app. The app uses the `hack` C
 If `hack` is not in PATH for GUI apps, ensure it lives in `~/.hack/bin`,
 `/opt/homebrew/bin`, or `/usr/local/bin` (all are added to PATH by the app). You
 can also set `HACK_CLI_PATH` to an absolute path for the binary.
+
+For GitHub browser OAuth, the app defaults to:
+
+1. `https://auth.hack.broker`
+2. `https://auth.hack.gy`
+3. `https://auth.hack`
+4. `http://127.0.0.1:7790`
+
+Set `HACK_AUTH_BROKER_URL` to override and pin a custom broker endpoint.
+
+The app registers URL scheme `hack` and handles `hack://auth/github/callback`
+deep links for GitHub OAuth return-to-app UX.
 
 ## Data source
 

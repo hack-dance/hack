@@ -28,6 +28,7 @@ function createTestConfig() {
     githubTokenUrl: "https://github.com/login/oauth/access_token",
     githubApiBaseUrl: "https://api.github.com",
     githubRedirectUri: "http://127.0.0.1:8080/gh/callback",
+    betterAuthGitHubAutoProvisionUsers: false,
     flowTtlMs: 60_000,
     flowSweepIntervalMs: 60_000,
   } as const;
@@ -141,6 +142,7 @@ describe("auth broker github flow routes", () => {
     expect(startPayload.flow.authorizeUrl).toContain(
       "github.com/login/oauth/authorize"
     );
+    expect(startPayload.flow.authorizeUrl).toContain("scope=repo%2Cread%3Aorg");
 
     const flow = flowStore.getById(startPayload.flow.flowId);
     expect(flow).not.toBeNull();
@@ -191,6 +193,71 @@ describe("auth broker github flow routes", () => {
     };
     expect(pollPayload.ok).toBe(false);
     expect(pollPayload.error).toBe("invalid_device_code");
+  });
+
+  test("requireInstallation defers token claim until installation is present", async () => {
+    const flowStore = new FlowStore();
+    const app = createAuthBrokerApp({
+      config: {
+        ...createTestConfig(),
+        githubAppInstallUrl:
+          "https://github.com/apps/hack-dance/installations/new",
+      },
+      flowStore,
+    });
+
+    const startResponse = await app.handle(
+      new Request(
+        "http://localhost/v1/auth/github/start?profile=default&setDefault=true&requireInstallation=1"
+      )
+    );
+    expect(startResponse.status).toBe(200);
+    const startPayload = (await startResponse.json()) as StartFlowResponse;
+
+    flowStore.markComplete({
+      flowId: startPayload.flow.flowId,
+      account: {
+        login: "roodboi",
+        installationIds: [],
+      },
+      token: "gho_test_token",
+    });
+
+    const deferredClaimResponse = await app.handle(
+      new Request(
+        `http://localhost/v1/auth/github/flows/${startPayload.flow.flowId}?deviceCode=${encodeURIComponent(startPayload.flow.deviceCode)}&claim=1&requireInstallation=1`
+      )
+    );
+    expect(deferredClaimResponse.status).toBe(200);
+    const deferredPayload = (await deferredClaimResponse.json()) as {
+      readonly ok: true;
+      readonly status: {
+        readonly status: string;
+        readonly installationId?: string;
+        readonly token?: string;
+      };
+    };
+    expect(deferredPayload.ok).toBe(true);
+    expect(deferredPayload.status.status).toBe("complete");
+    expect(deferredPayload.status.installationId).toBeUndefined();
+    expect(deferredPayload.status.token).toBeUndefined();
+
+    const immediateClaimResponse = await app.handle(
+      new Request(
+        `http://localhost/v1/auth/github/flows/${startPayload.flow.flowId}?deviceCode=${encodeURIComponent(startPayload.flow.deviceCode)}&claim=1`
+      )
+    );
+    expect(immediateClaimResponse.status).toBe(200);
+    const claimedPayload = (await immediateClaimResponse.json()) as {
+      readonly ok: true;
+      readonly status: {
+        readonly status: string;
+        readonly token?: string;
+      };
+    };
+    expect(claimedPayload.ok).toBe(true);
+    expect(claimedPayload.status.status).toBe("claimed");
+    expect(claimedPayload.status.token).toBe("gho_test_token");
   });
 
   test("callback error path marks flow status as error", async () => {

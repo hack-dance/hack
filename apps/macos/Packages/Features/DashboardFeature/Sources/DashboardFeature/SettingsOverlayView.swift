@@ -2650,12 +2650,15 @@ private struct GitHubExtensionSettingsView: View {
   @State private var suppressEnabledToggleChange = false
   @State private var enabled = false
   @State private var diagnostics: GitHubProfilesResponse? = nil
+  @State private var profileStatusById: [String: GitHubStatusResponse] = [:]
   @State private var defaultProfile = ""
-  @State private var newAccountProfileId = "default"
-  @State private var connectSetsDefault = true
   @State private var isAuthenticating = false
   @State private var authPollingTask: Task<Void, Never>? = nil
   @State private var authFlowStatus: GitHubOAuthFlowStatusResponse? = nil
+  @State private var activeAuthFlowId: String? = nil
+  @State private var activeAuthStatusURL: String? = nil
+  @State private var authInstallURL: String? = nil
+  @State private var didAutoOpenInstallURL = false
   @State private var message = ""
   @State private var lastDiagnosticsRefreshAt: Date? = nil
 
@@ -2665,7 +2668,7 @@ private struct GitHubExtensionSettingsView: View {
         SettingsSectionHeader(
           breadcrumb: "Settings / Extensions / GitHub",
           title: "GitHub Extension",
-          subtitle: "Connect accounts and select which profile PR automation should use by default"
+          subtitle: "Manage connected GitHub accounts and default PR automation routing"
         )
         GlassCard(title: "Extension status", systemImage: "chevron.left.forwardslash.chevron.right") {
           HStack(alignment: .center, spacing: 8) {
@@ -2687,7 +2690,7 @@ private struct GitHubExtensionSettingsView: View {
                   await applyGitHubEnabledToggle(newValue)
                 }
               }
-            if isLoadingConfig || isSavingConfig || isLoadingDiagnostics {
+            if isLoadingConfig || isSavingConfig || isLoadingDiagnostics || isAuthenticating {
               ProgressView()
                 .controlSize(.small)
             }
@@ -2698,70 +2701,42 @@ private struct GitHubExtensionSettingsView: View {
               .font(.mono(.caption2))
               .foregroundStyle(.tertiary)
           }
-
-          HStack(spacing: 10) {
-            Button {
-              Task { await refreshGitHubDiagnostics() }
-            } label: {
-              Label("Refresh status", systemImage: "arrow.clockwise")
-            }
-            .adaptiveToolbarButtonProminent()
-            Spacer()
-          }
-        }
-
-        GlassCard(title: "Connect account", systemImage: "person.badge.plus") {
-          VStack(alignment: .leading, spacing: 12) {
-            Text(
-              "Launch browser OAuth directly from Hack. Callback lands on your local auth server and profile tokens are saved to keychain."
-            )
-              .font(.mono(.caption))
-              .foregroundStyle(.secondary)
-
-            TextField("Profile id", text: $newAccountProfileId)
-              .textFieldStyle(.roundedBorder)
-              .font(.mono(.body))
-
-            Toggle("Set as default after connect", isOn: $connectSetsDefault)
-              .toggleStyle(.switch)
-
-            if isAuthenticating {
-              StatusPill(text: "Waiting for browser callback", tone: .good)
-            } else if let authFlowStatus {
-              switch authFlowStatus.status {
-              case "complete":
-                StatusPill(text: "Connected", tone: .good)
-              case "error", "expired":
-                StatusPill(text: "Connect failed", tone: .warn)
-              default:
-                StatusPill(text: "Connect pending", tone: .neutral)
-              }
-            }
-
-            HStack(spacing: 10) {
-              Button {
-                toggleGitHubAuthFlow()
-              } label: {
-                Label(
-                  isAuthenticating ? "Cancel connect" : "Connect in browser",
-                  systemImage: isAuthenticating ? "xmark.circle" : "safari"
-                )
-              }
-              .adaptiveToolbarButtonProminent()
-
-              Button {
-                Task { await refreshGitHubDiagnostics() }
-              } label: {
-                Label("Refresh accounts", systemImage: "arrow.clockwise")
-              }
-              .adaptiveToolbarButton()
-
-              Spacer()
-            }
-          }
         }
 
         GlassCard(title: "Connected accounts", systemImage: "person.2.badge.gearshape") {
+          HStack(alignment: .center, spacing: 10) {
+            Text("Add another account from browser OAuth and manage default routing per account.")
+              .font(.mono(.caption))
+              .foregroundStyle(.secondary)
+            Spacer()
+            Button {
+              toggleGitHubAuthFlow()
+            } label: {
+              Label(
+                isAuthenticating ? "Cancel add account" : "Add account",
+                systemImage: isAuthenticating ? "xmark.circle" : "plus.circle"
+              )
+            }
+            .adaptiveToolbarButtonProminent()
+          }
+
+          if isAuthenticating {
+            StatusPill(text: "Waiting for browser callback", tone: .good)
+          } else if let authFlowStatus {
+            switch authFlowStatus.status {
+            case "complete", "claimed":
+              if requiresGitHubAppInstall(authFlowStatus) {
+                StatusPill(text: "Install required", tone: .warn)
+              } else {
+                StatusPill(text: "Connected", tone: .good)
+              }
+            case "error", "expired":
+              StatusPill(text: "Connect failed", tone: .warn)
+            default:
+              StatusPill(text: "Connect pending", tone: .neutral)
+            }
+          }
+
           if githubProfiles.isEmpty {
             Text("No accounts connected yet.")
               .font(.mono(.caption))
@@ -2769,16 +2744,25 @@ private struct GitHubExtensionSettingsView: View {
           } else {
             VStack(alignment: .leading, spacing: 10) {
               ForEach(githubProfiles, id: \.id) { profile in
+                let profileStatus = profileStatusById[profile.id]
                 VStack(alignment: .leading, spacing: 6) {
                   HStack(spacing: 8) {
-                    Text(profile.id)
+                    Text(profile.accountLogin.map { "@\($0)" } ?? profile.id)
                       .font(.mono(.subheadline, weight: .semibold))
                     if profile.isDefault {
                       StatusPill(text: "Default", tone: .good)
                     }
-                    StatusPill(text: profile.mode, tone: .neutral)
-                    if let account = profile.accountLogin, !account.isEmpty {
-                      StatusPill(text: account, tone: .neutral)
+                    StatusPill(text: profile.mode.uppercased(), tone: .neutral)
+                    if profile.installationId?.isEmpty == false {
+                      StatusPill(text: "App installed", tone: .good)
+                    } else if profile.mode.lowercased() == "app" {
+                      StatusPill(text: "Install missing", tone: .warn)
+                    }
+                    if let profileStatus {
+                      StatusPill(
+                        text: profileStatus.tokenResolved ? "Token ready" : "Token missing",
+                        tone: profileStatus.tokenResolved ? .good : .warn
+                      )
                     }
                     Spacer()
                     if !profile.isDefault {
@@ -2790,16 +2774,39 @@ private struct GitHubExtensionSettingsView: View {
                       .adaptiveToolbarButton()
                     }
                   }
+
                   Text("profile: \(profile.id)")
                     .font(.mono(.caption2))
                     .foregroundStyle(.secondary)
+                  if let account = profile.accountLogin, !account.isEmpty {
+                    let accountNameSuffix = profile.accountName.map { " (\($0))" } ?? ""
+                    Text("account: \(account)\(accountNameSuffix)")
+                      .font(.mono(.caption2))
+                      .foregroundStyle(.secondary)
+                  }
+                  if profile.mode.lowercased() == "app" {
+                    Text(
+                      profile.installationId?.isEmpty == false
+                        ? "permissions: GitHub App installation scoped to selected repos/org"
+                        : "permissions: install the GitHub App to enable repo-scoped access"
+                    )
+                    .font(.mono(.caption2))
+                    .foregroundStyle(.secondary)
+                  } else {
+                    Text("permissions: OAuth token scopes from connected account")
+                      .font(.mono(.caption2))
+                      .foregroundStyle(.secondary)
+                  }
                   Text("auth: \(profile.authRef) • service: \(profile.service)")
                     .font(.mono(.caption2))
                     .foregroundStyle(.secondary)
-                  if let account = profile.accountLogin, !account.isEmpty {
-                    Text("account: \(account)\(profile.accountName.map { " (\($0))" } ?? "")")
+                  if let profileStatus,
+                    let tokenExpiresAt = profileStatus.tokenExpiresAt,
+                    !tokenExpiresAt.isEmpty
+                  {
+                    Text("token expires: \(tokenExpiresAt)")
                       .font(.mono(.caption2))
-                      .foregroundStyle(.secondary)
+                      .foregroundStyle(.tertiary)
                   }
                   if let installation = profile.installationId, !installation.isEmpty {
                     Text("installation: \(installation)")
@@ -2833,6 +2840,12 @@ private struct GitHubExtensionSettingsView: View {
     .onChange(of: model.lastUpdated) { _, _ in
       Task { await loadConfigFromDisk() }
     }
+    .onChange(of: model.githubOAuthDeepLinkContext) { _, deepLink in
+      guard let deepLink else { return }
+      Task {
+        await handleGitHubOAuthDeepLink(deepLink)
+      }
+    }
     .onDisappear {
       cancelGitHubAuthFlow(userInitiated: false)
     }
@@ -2852,6 +2865,32 @@ private struct GitHubExtensionSettingsView: View {
     }
   }
 
+  private func nextGitHubProfileId() -> String {
+    let existing = Set(githubProfiles.map { $0.id.lowercased() })
+    if !existing.contains("default") {
+      return "default"
+    }
+    var index = 2
+    while existing.contains("account-\(index)") {
+      index += 1
+    }
+    return "account-\(index)"
+  }
+
+  private var defaultGitHubProfileNeedsRepair: Bool {
+    let defaultProfileId = resolvedDefaultProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !defaultProfileId.isEmpty else {
+      return false
+    }
+    guard githubProfiles.contains(where: { $0.id == defaultProfileId }) else {
+      return false
+    }
+    guard let status = profileStatusById[defaultProfileId] else {
+      return false
+    }
+    return !status.tokenResolved
+  }
+
   private func loadConfigFromDisk() async {
     isLoadingConfig = true
     defer { isLoadingConfig = false }
@@ -2861,9 +2900,6 @@ private struct GitHubExtensionSettingsView: View {
     enabled = snapshot.githubExtensionEnabled ?? false
     defaultProfile = snapshot.githubDefaultProfile ?? ""
     suppressEnabledToggleChange = false
-    if newAccountProfileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-      newAccountProfileId = defaultProfile.isEmpty ? "default" : defaultProfile
-    }
     message = ""
     await refreshGitHubDiagnostics()
   }
@@ -2875,7 +2911,22 @@ private struct GitHubExtensionSettingsView: View {
     if let diagnostics {
       defaultProfile = diagnostics.defaultProfile
     }
+    await refreshGitHubProfileStatuses()
     lastDiagnosticsRefreshAt = Date()
+  }
+
+  private func refreshGitHubProfileStatuses() async {
+    guard let diagnostics else {
+      profileStatusById = [:]
+      return
+    }
+    var statuses: [String: GitHubStatusResponse] = [:]
+    for profile in diagnostics.profiles {
+      if let status = await model.inspectGitHubStatus(profileId: profile.id) {
+        statuses[profile.id] = status
+      }
+    }
+    profileStatusById = statuses
   }
 
   private func applyGitHubEnabledToggle(_ newValue: Bool) async {
@@ -2922,8 +2973,16 @@ private struct GitHubExtensionSettingsView: View {
       cancelGitHubAuthFlow(userInitiated: true)
       return
     }
+    let repairDefaultProfileId = resolvedDefaultProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+    let generatedProfileId = defaultGitHubProfileNeedsRepair && !repairDefaultProfileId.isEmpty
+      ? repairDefaultProfileId
+      : nextGitHubProfileId()
+    let setAsDefault = githubProfiles.isEmpty || defaultGitHubProfileNeedsRepair
     authPollingTask = Task {
-      await connectGitHubAccountViaBrowser()
+      await connectGitHubAccountViaBrowser(
+        profileId: generatedProfileId,
+        setDefault: setAsDefault
+      )
     }
   }
 
@@ -2931,27 +2990,36 @@ private struct GitHubExtensionSettingsView: View {
     authPollingTask?.cancel()
     authPollingTask = nil
     isAuthenticating = false
+    activeAuthFlowId = nil
+    activeAuthStatusURL = nil
     if userInitiated {
       message = "GitHub authentication canceled."
     }
   }
 
-  private func connectGitHubAccountViaBrowser() async {
+  private func connectGitHubAccountViaBrowser(
+    profileId: String,
+    setDefault: Bool
+  ) async {
     defer {
       authPollingTask = nil
       isAuthenticating = false
+      activeAuthFlowId = nil
+      activeAuthStatusURL = nil
     }
 
-    let trimmed = newAccountProfileId.trimmingCharacters(in: .whitespacesAndNewlines)
+    let trimmed = profileId.trimmingCharacters(in: .whitespacesAndNewlines)
     let profile = trimmed.isEmpty ? "default" : trimmed
     isAuthenticating = true
     authFlowStatus = nil
+    authInstallURL = nil
+    didAutoOpenInstallURL = false
     message = "Starting GitHub browser auth for profile \(profile)…"
 
     guard
       let started = await model.startGitHubOAuthFlow(
         profileId: profile,
-        setDefault: connectSetsDefault
+        setDefault: setDefault
       )
     else {
       let detail = model.errorMessage?.trimmingCharacters(
@@ -2966,9 +3034,12 @@ private struct GitHubExtensionSettingsView: View {
       return
     }
 
-    if connectSetsDefault {
+    if setDefault {
       defaultProfile = profile
     }
+    activeAuthFlowId = started.flowId
+    activeAuthStatusURL = started.statusUrl
+    authInstallURL = started.appInstallUrl
 
     guard let authorizeURL = URL(string: started.authorizeUrl) else {
       message = "Auth start returned an invalid authorize URL."
@@ -2997,27 +3068,87 @@ private struct GitHubExtensionSettingsView: View {
           statusURL: started.statusUrl
         )
       else {
+        let detail = model.errorMessage?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let detail, !detail.isEmpty {
+          message = detail
+          return
+        }
         continue
       }
 
       authFlowStatus = flowStatus
-      switch flowStatus.status {
-      case "complete":
-        let account = flowStatus.accountLogin ?? "GitHub account"
-        message = "Connected \(account) to profile \(flowStatus.profileId)."
-        await model.refresh()
-        await refreshGitHubDiagnostics()
+      if await handleGitHubOAuthFlowStatus(flowStatus) {
         return
-      case "error":
-        message = flowStatus.error ?? "GitHub authentication failed."
-        return
-      case "expired":
-        message = "Authentication flow expired. Start a new connection."
-        return
-      default:
-        continue
       }
     }
+  }
+
+  private func handleGitHubOAuthDeepLink(_ deepLink: GitHubOAuthDeepLinkContext) async {
+    defer {
+      model.clearGitHubOAuthDeepLink(flowId: deepLink.flowId)
+    }
+
+    guard
+      let activeAuthFlowId,
+      let activeAuthStatusURL
+    else {
+      message = "GitHub callback received. Use Add account to finish setup."
+      return
+    }
+
+    guard activeAuthFlowId == deepLink.flowId else {
+      return
+    }
+
+    message = "Browser callback received. Finalizing GitHub connection…"
+    guard let flowStatus = await model.fetchGitHubOAuthFlowStatus(statusURL: activeAuthStatusURL) else {
+      let detail = model.errorMessage?.trimmingCharacters(in: .whitespacesAndNewlines)
+      if let detail, !detail.isEmpty {
+        message = detail
+      }
+      return
+    }
+    authFlowStatus = flowStatus
+    _ = await handleGitHubOAuthFlowStatus(flowStatus)
+  }
+
+  private func handleGitHubOAuthFlowStatus(_ flowStatus: GitHubOAuthFlowStatusResponse) async -> Bool {
+    switch flowStatus.status {
+    case "complete", "claimed":
+      if requiresGitHubAppInstall(flowStatus) {
+        let installURL = flowStatus.appInstallUrl ?? authInstallURL
+        if !didAutoOpenInstallURL, let installURL, let parsedURL = URL(string: installURL) {
+          didAutoOpenInstallURL = true
+          NSWorkspace.shared.open(parsedURL)
+          message = "GitHub authorized. Finish app install/repo selection in browser, then return."
+        } else {
+          message = "GitHub authorized. Finish app install/repo selection, then Hack will complete connection."
+        }
+        return false
+      }
+      let account = flowStatus.accountLogin ?? "GitHub account"
+      message = "Connected \(account) to profile \(flowStatus.profileId)."
+      await model.refresh()
+      await refreshGitHubDiagnostics()
+      return true
+    case "error":
+      message = flowStatus.error ?? "GitHub authentication failed."
+      return true
+    case "expired":
+      message = "Authentication flow expired. Start a new connection."
+      return true
+    default:
+      return false
+    }
+  }
+
+  private func requiresGitHubAppInstall(_ status: GitHubOAuthFlowStatusResponse) -> Bool {
+    let installationId = status.installationId?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let installationIds = status.installationIds ?? []
+    let hasInstallation = (installationId?.isEmpty == false) || !installationIds.isEmpty
+    let appInstallURL = (status.appInstallUrl ?? authInstallURL)?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    return !hasInstallation && appInstallURL?.isEmpty == false
   }
 }
 

@@ -50,6 +50,25 @@ public enum RuntimeHealthState {
   case unknown
 }
 
+public struct GitHubOAuthDeepLinkContext: Hashable {
+  public let flowId: String
+  public let profileId: String?
+  public let status: String?
+  public let installationId: String?
+
+  public init(
+    flowId: String,
+    profileId: String?,
+    status: String?,
+    installationId: String?
+  ) {
+    self.flowId = flowId
+    self.profileId = profileId
+    self.status = status
+    self.installationId = installationId
+  }
+}
+
 @Observable
 @MainActor
 public final class DashboardModel {
@@ -71,6 +90,7 @@ public final class DashboardModel {
   public var selectedProjectTab: ProjectTab = .overview
   public var errorMessage: String? = nil
   public var statusMessage: String? = nil
+  public private(set) var githubOAuthDeepLinkContext: GitHubOAuthDeepLinkContext? = nil
   public var isRefreshing = false
   public private(set) var projectLifecycleActions: [String: ProjectLifecycleAction] = [:]
   public private(set) var globalLifecycleAction: GlobalLifecycleAction? = nil
@@ -676,6 +696,91 @@ public final class DashboardModel {
     } else {
       await globalUp()
     }
+  }
+
+  @discardableResult
+  public func ingestGitHubOAuthDeepLink(url: URL) -> Bool {
+    guard let context = parseGitHubOAuthDeepLink(url: url) else {
+      return false
+    }
+    githubOAuthDeepLinkContext = context
+    if let profileId = context.profileId {
+      statusMessage = "GitHub callback received for profile \(profileId). Finalizing…"
+    } else {
+      statusMessage = "GitHub callback received. Finalizing…"
+    }
+    return true
+  }
+
+  public func clearGitHubOAuthDeepLink(flowId: String? = nil) {
+    guard let current = githubOAuthDeepLinkContext else {
+      return
+    }
+    if let flowId, current.flowId != flowId {
+      return
+    }
+    githubOAuthDeepLinkContext = nil
+  }
+
+  private func parseGitHubOAuthDeepLink(url: URL) -> GitHubOAuthDeepLinkContext? {
+    guard url.scheme?.lowercased() == "hack" else {
+      return nil
+    }
+
+    let host = url.host?.lowercased() ?? ""
+    let path = normalizedPath(url.path)
+    let isGitHubCallbackRoute =
+      (host == "auth" && path == "/github/callback")
+      || (host == "github" && path == "/callback")
+      || (host == "auth" && path == "/callback")
+    guard isGitHubCallbackRoute else {
+      return nil
+    }
+
+    guard
+      let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+      let items = components.queryItems
+    else {
+      return nil
+    }
+
+    let flowId =
+      normalizedQueryValue(named: "flowId", items: items)
+      ?? normalizedQueryValue(named: "flow_id", items: items)
+    guard let flowId else {
+      return nil
+    }
+
+    return GitHubOAuthDeepLinkContext(
+      flowId: flowId,
+      profileId: normalizedQueryValue(named: "profileId", items: items)
+        ?? normalizedQueryValue(named: "profile", items: items),
+      status: normalizedQueryValue(named: "status", items: items),
+      installationId: normalizedQueryValue(named: "installationId", items: items)
+        ?? normalizedQueryValue(named: "installation_id", items: items)
+    )
+  }
+
+  private func normalizedPath(_ path: String) -> String {
+    let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.hasSuffix("/") && trimmed.count > 1 {
+      return String(trimmed.dropLast())
+    }
+    return trimmed
+  }
+
+  private func normalizedQueryValue(
+    named name: String,
+    items: [URLQueryItem]
+  ) -> String? {
+    guard
+      let raw = items.first(where: { $0.name == name })?.value?
+        .trimmingCharacters(in: .whitespacesAndNewlines),
+      !raw.isEmpty
+    else {
+      return nil
+    }
+    return raw
   }
 
   public func globalUp() async {

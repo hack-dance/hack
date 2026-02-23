@@ -68,6 +68,7 @@ export function createAuthBrokerApp({
       createGitHubOAuthPlugin({
         config,
         flowStore,
+        betterAuthRuntime,
       })
     )
     .onStart(() => {

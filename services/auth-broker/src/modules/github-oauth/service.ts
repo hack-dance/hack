@@ -1,5 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 
+import type { BetterAuthRuntime } from "../../better-auth.ts";
+import { resolveBetterAuthUserFromGitHubAccount } from "../../better-auth-link.ts";
 import type { BrokerConfig } from "../../config.ts";
 import { type FlowStore, hashDeviceCode } from "../../flow-store.ts";
 import {
@@ -13,10 +15,21 @@ export type StartFlowPayload = {
   readonly flowId: string;
   readonly profileId: string;
   readonly setDefault: boolean;
+  readonly requireInstallation: boolean;
   readonly authorizeUrl: string;
+  readonly requestedScopes: string;
   readonly deviceCode: string;
   readonly pollUrl: string;
+  readonly appInstallUrl?: string;
+  readonly appId?: string;
+  readonly appSlug?: string;
   readonly expiresAt: string;
+};
+
+type CallbackPageAction = {
+  readonly label: string;
+  readonly url: string;
+  readonly openInNewTab?: boolean;
 };
 
 /**
@@ -27,7 +40,7 @@ export function createFlow(input: {
   readonly flowStore: FlowStore;
   readonly query: Pick<
     GitHubOAuthModel["startQuery"],
-    "profile" | "setDefault"
+    "profile" | "setDefault" | "requireInstallation"
   >;
 }): StartFlowPayload {
   const nowMs = Date.now();
@@ -36,6 +49,7 @@ export function createFlow(input: {
   const deviceCode = makeToken();
   const profileId = normalizeText(input.query.profile) ?? "default";
   const setDefault = isTruthy(input.query.setDefault);
+  const requireInstallation = isTruthy(input.query.requireInstallation);
   const expiresAtMs = nowMs + input.config.flowTtlMs;
   const authorizeUrl = buildAuthorizeUrl({
     authorizeUrl: input.config.githubAuthorizeUrl,
@@ -52,6 +66,13 @@ export function createFlow(input: {
     setDefault,
     deviceCodeHash: hashDeviceCode(deviceCode),
     authorizeUrl,
+    ...(input.config.githubAppId ? { appId: input.config.githubAppId } : {}),
+    ...(input.config.githubAppSlug
+      ? { appSlug: input.config.githubAppSlug }
+      : {}),
+    ...(input.config.githubAppInstallUrl
+      ? { appInstallUrl: input.config.githubAppInstallUrl }
+      : {}),
     createdAtMs: nowMs,
     expiresAtMs,
     redirectUri: input.config.githubRedirectUri,
@@ -62,11 +83,56 @@ export function createFlow(input: {
     flowId,
     profileId,
     setDefault,
+    requireInstallation,
     authorizeUrl,
+    requestedScopes: input.config.githubScopes,
     deviceCode,
     pollUrl: `${input.config.publicBaseUrl}/v1/auth/github/flows/${flowId}`,
+    ...(input.config.githubAppInstallUrl
+      ? { appInstallUrl: input.config.githubAppInstallUrl }
+      : {}),
+    ...(input.config.githubAppId ? { appId: input.config.githubAppId } : {}),
+    ...(input.config.githubAppSlug
+      ? { appSlug: input.config.githubAppSlug }
+      : {}),
     expiresAt: new Date(expiresAtMs).toISOString(),
   };
+}
+
+/**
+ * Refresh a completed flow's installation visibility while token is still claimable.
+ */
+export async function refreshFlowInstallationsIfNeeded(input: {
+  readonly config: BrokerConfig;
+  readonly flowStore: FlowStore;
+  readonly flowId: string;
+}): Promise<void> {
+  const flow = input.flowStore.getById(input.flowId);
+  if (!flow) {
+    return;
+  }
+  if (!(flow.status === "complete" && flow.token && flow.account)) {
+    return;
+  }
+  if (flow.installationId) {
+    return;
+  }
+  const identity = await fetchIdentity({
+    apiBaseUrl: input.config.githubApiBaseUrl,
+    token: flow.token,
+  });
+  if (!identity.ok) {
+    return;
+  }
+  const installationId =
+    identity.account.installationIds.length === 1
+      ? (identity.account.installationIds[0] ?? undefined)
+      : undefined;
+  input.flowStore.updateInstallationState({
+    flowId: flow.id,
+    installationIds: identity.account.installationIds,
+    ...(installationId ? { installationId } : {}),
+  });
 }
 
 /**
@@ -75,6 +141,7 @@ export function createFlow(input: {
 export async function handleGitHubCallback(input: {
   readonly config: BrokerConfig;
   readonly flowStore: FlowStore;
+  readonly betterAuthRuntime: BetterAuthRuntime;
   readonly query: GitHubOAuthModel["callbackQuery"];
 }): Promise<Response> {
   const state = normalizeText(input.query.state);
@@ -129,6 +196,7 @@ export async function handleGitHubCallback(input: {
   }
 
   const code = normalizeText(input.query.code);
+  const installationIdFromCallback = normalizeText(input.query.installation_id);
   if (!code) {
     input.flowStore.markError({
       flowId: flow.id,
@@ -180,15 +248,74 @@ export async function handleGitHubCallback(input: {
     });
   }
 
+  const installationId =
+    installationIdFromCallback ??
+    (identity.account.installationIds.length === 1
+      ? (identity.account.installationIds[0] ?? undefined)
+      : undefined);
+
+  const betterAuthLink = await resolveBetterAuthUserFromGitHubAccount({
+    runtime: input.betterAuthRuntime,
+    account: identity.account,
+    autoProvision: input.config.betterAuthGitHubAutoProvisionUsers,
+  });
+  const linkedAccount = {
+    ...identity.account,
+    ...(betterAuthLink.userId
+      ? { betterAuthUserId: betterAuthLink.userId }
+      : {}),
+    ...(betterAuthLink.state
+      ? { betterAuthLinkState: betterAuthLink.state }
+      : {}),
+  } as const;
+
   input.flowStore.markComplete({
     flowId: flow.id,
-    account: identity.account,
+    account: linkedAccount,
     token: exchange.token,
     tokenExpiresAt: exchange.tokenExpiresAt,
+    ...(installationId ? { installationId } : {}),
   });
+  const openHackAppAction: CallbackPageAction = {
+    label: "Open Hack app",
+    url: buildHackDesktopDeepLink({
+      flowId: flow.id,
+      profileId: flow.profileId,
+      status: installationId ? "complete" : "install_required",
+      ...(installationId ? { installationId } : {}),
+    }),
+  };
+
+  if (installationId) {
+    return renderCallbackPage({
+      title: "GitHub connected",
+      body: "Authorization and app installation are complete. Return to Hack.",
+      actions: [openHackAppAction],
+      success: true,
+      statusCode: 200,
+    });
+  }
+  if (input.config.githubAppInstallUrl) {
+    return renderCallbackPage({
+      title: "Authorize complete, install required",
+      body: "Authorization succeeded, but no GitHub App installation is selected yet. Install the app for your target org/repositories, then return to Hack.",
+      actions: [
+        {
+          label: "Open GitHub App install",
+          url: input.config.githubAppInstallUrl,
+          openInNewTab: true,
+        },
+        openHackAppAction,
+      ],
+      success: true,
+      statusCode: 200,
+    });
+  }
+
   return renderCallbackPage({
     title: "GitHub connected",
     body: "Authorization is complete. Return to Hack to finish account setup.",
+    actions: [openHackAppAction],
     success: true,
     statusCode: 200,
   });
@@ -225,13 +352,43 @@ function makeToken(): string {
   return randomBytes(24).toString("base64url");
 }
 
+/**
+ * Build desktop deep link used by auth callback pages to return focus to Hack.
+ */
+export function buildHackDesktopDeepLink(input: {
+  readonly flowId: string;
+  readonly profileId: string;
+  readonly status: string;
+  readonly installationId?: string;
+}): string {
+  const url = new URL("hack://auth/github/callback");
+  url.searchParams.set("flowId", input.flowId);
+  url.searchParams.set("profileId", input.profileId);
+  url.searchParams.set("status", input.status);
+  if (input.installationId) {
+    url.searchParams.set("installationId", input.installationId);
+  }
+  return url.toString();
+}
+
 function renderCallbackPage(input: {
   readonly title: string;
   readonly body: string;
+  readonly actions?: readonly CallbackPageAction[];
   readonly success?: boolean;
   readonly statusCode: number;
 }): Response {
   const statusColor = input.success ? "#16a34a" : "#ef4444";
+  const actions = input.actions ?? [];
+  const actionsHtml =
+    actions.length > 0
+      ? `<div class="actions">${actions
+          .map(
+            (action) =>
+              `<a class="button" href="${escapeHtml(action.url)}"${action.openInNewTab ? ' rel="noopener noreferrer" target="_blank"' : ""}>${escapeHtml(action.label)}</a>`
+          )
+          .join("")}</div>`
+      : "";
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -268,12 +425,35 @@ function renderCallbackPage(input: {
       color: #9ca3af;
       line-height: 1.55;
     }
+    .actions {
+      margin-top: 16px;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .button {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 10px;
+      border: 1px solid #334155;
+      background: #111827;
+      color: #e5e7eb;
+      text-decoration: none;
+      padding: 8px 12px;
+      font-size: 13px;
+      line-height: 1.2;
+    }
+    .button:hover {
+      border-color: #475569;
+      background: #1f2937;
+    }
   </style>
 </head>
 <body>
   <main>
     <h1>${escapeHtml(input.title)}</h1>
     <p>${escapeHtml(input.body)}</p>
+    ${actionsHtml}
   </main>
 </body>
 </html>`;

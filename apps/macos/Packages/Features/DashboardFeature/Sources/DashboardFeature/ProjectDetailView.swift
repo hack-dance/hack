@@ -50,6 +50,7 @@ struct ProjectDetailView: View {
   @State private var githubDefaultProfile = ""
   @State private var githubProfileOptions: [String] = []
   @State private var githubProfilesById: [String: GitHubProfileSummary] = [:]
+  @State private var githubProfileStatusById: [String: GitHubStatusResponse] = [:]
   @State private var githubResolvedProfile = ""
   @State private var githubResolvedStatus: GitHubStatusResponse? = nil
   @State private var githubProfileMessage = ""
@@ -319,7 +320,7 @@ struct ProjectDetailView: View {
   }
 
   private var executionTargetSection: some View {
-    VStack(alignment: .leading, spacing: 12) {
+    VStack(alignment: .leading, spacing: 10) {
       HStack(spacing: 10) {
         Image(systemName: "point.3.connected.trianglepath.dotted")
           .foregroundStyle(.secondary)
@@ -331,12 +332,6 @@ struct ProjectDetailView: View {
             .controlSize(.small)
         }
       }
-      .overlay(alignment: .bottom) {
-        Rectangle()
-          .fill(Color.white.opacity(0.08))
-          .frame(height: 1)
-          .offset(y: 8)
-      }
 
       HStack(spacing: 8) {
         StatusPill(text: executionTargetSourceLabel, tone: .neutral)
@@ -346,13 +341,41 @@ struct ProjectDetailView: View {
           StatusPill(text: "Global provider: \(globalDefaultProvider)", tone: .neutral)
         }
       }
+      Text(executionTargetSummary)
+        .font(.mono(.caption))
+        .foregroundStyle(.secondary)
 
-      Picker("Target mode", selection: $executionTargetMode) {
-        ForEach(ExecutionTargetMode.allCases) { mode in
-          Text(mode.rawValue).tag(mode)
+      HStack(alignment: .center, spacing: 10) {
+        Picker("Target mode", selection: $executionTargetMode) {
+          ForEach(ExecutionTargetMode.allCases) { mode in
+            Text(mode.rawValue).tag(mode)
+          }
         }
+        .pickerStyle(.segmented)
+        .frame(maxWidth: 420)
+
+        Spacer()
+
+        Button {
+          Task { await persistExecutionTarget() }
+        } label: {
+          Label("Apply", systemImage: "checkmark")
+        }
+        .buttonStyle(PressableIconButtonStyle())
+        .disabled(executionTargetLoading || executionTargetSaving)
+
+        Button {
+          executionTargetMode = .inherited
+          executionTargetNodeId = ""
+          executionTargetProvider = ""
+          executionTargetProfileId = ""
+          Task { await persistExecutionTarget() }
+        } label: {
+          Label("Clear override", systemImage: "arrow.uturn.backward")
+        }
+        .buttonStyle(PressableIconButtonStyle())
+        .disabled(executionTargetLoading || executionTargetSaving)
       }
-      .pickerStyle(.segmented)
 
       if executionTargetMode == .fixedNode {
         Picker("Node", selection: $executionTargetNodeId) {
@@ -385,31 +408,7 @@ struct ProjectDetailView: View {
       if !executionTargetMessage.isEmpty {
         Text(executionTargetMessage)
           .font(.mono(.caption2))
-          .foregroundStyle(Color.orange)
-      }
-
-      HStack(spacing: 8) {
-        Button {
-          Task { await persistExecutionTarget() }
-        } label: {
-          Label("Save target", systemImage: "square.and.arrow.down")
-        }
-        .buttonStyle(PressableIconButtonStyle())
-        .disabled(executionTargetLoading || executionTargetSaving)
-
-        Button {
-          executionTargetMode = .inherited
-          executionTargetNodeId = ""
-          executionTargetProvider = ""
-          executionTargetProfileId = ""
-          Task { await persistExecutionTarget() }
-        } label: {
-          Label("Reset to inherited", systemImage: "arrow.uturn.backward")
-        }
-        .buttonStyle(PressableIconButtonStyle())
-        .disabled(executionTargetLoading || executionTargetSaving)
-
-        Spacer()
+          .foregroundStyle(executionTargetMessage.hasPrefix("Failed") ? Color.orange : Color.green)
       }
     }
   }
@@ -497,19 +496,27 @@ struct ProjectDetailView: View {
   }
 
   private var githubProfileSection: some View {
-    VStack(alignment: .leading, spacing: 12) {
+    VStack(alignment: .leading, spacing: 10) {
       HStack(spacing: 10) {
         Image(systemName: "person.2.badge.gearshape")
           .foregroundStyle(.secondary)
         Text("GitHub profile")
           .font(.mono(.headline, weight: .semibold))
         Spacer()
-      }
-      .overlay(alignment: .bottom) {
-        Rectangle()
-          .fill(Color.white.opacity(0.08))
-          .frame(height: 1)
-          .offset(y: 8)
+        if executionTargetSaving {
+          ProgressView()
+            .controlSize(.small)
+        }
+        Button {
+          NotificationCenter.default.post(
+            name: .hackSettingsRequested,
+            object: nil,
+            userInfo: ["pane": "github"]
+          )
+        } label: {
+          Label("Open GitHub settings", systemImage: "gearshape")
+        }
+        .buttonStyle(PressableIconButtonStyle())
       }
 
       HStack(spacing: 8) {
@@ -532,7 +539,7 @@ struct ProjectDetailView: View {
       }
 
       if let resolvedSummary = resolvedGitHubProfileSummary {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 2) {
           if let account = resolvedSummary.accountLogin, !account.isEmpty {
             Text("Account: \(account)\(resolvedSummary.accountName.map { " (\($0))" } ?? "")")
               .font(.mono(.caption2))
@@ -546,7 +553,7 @@ struct ProjectDetailView: View {
         }
       }
 
-      if let status = githubResolvedStatus {
+      if let status = githubResolvedStatus, status.tokenResolved {
         VStack(alignment: .leading, spacing: 4) {
           if let source = status.tokenSource, !source.isEmpty {
             Text("Token source: \(source)")
@@ -558,39 +565,52 @@ struct ProjectDetailView: View {
               .font(.mono(.caption2))
               .foregroundStyle(.tertiary)
           }
-          if let error = status.error, !error.isEmpty {
-            Text(error)
-              .font(.mono(.caption2))
-              .foregroundStyle(Color.orange)
+        }
+      }
+
+      if let connectionIssue = githubConnectionIssueMessage {
+        InlineCallout(
+          tone: .warn,
+          title: "GitHub token unavailable",
+          message: connectionIssue,
+          actions: []
+        )
+      }
+
+      if let suggestedProfile = suggestedGitHubTokenReadyProfile {
+        HStack(spacing: 8) {
+          Text("Token is available on profile \(suggestedProfile).")
+            .font(.mono(.caption2))
+            .foregroundStyle(.secondary)
+          Button {
+            githubProjectProfile = suggestedProfile
+            Task { await persistGitHubProfileOverride() }
+          } label: {
+            Label("Use \(suggestedProfile)", systemImage: "arrow.triangle.branch")
           }
+          .buttonStyle(PressableIconButtonStyle())
         }
       }
-
-      Picker("Profile", selection: $githubProjectProfile) {
-        Text("Inherited").tag("")
-        ForEach(githubProfileOptions, id: \.self) { profile in
-          Text(profile).tag(profile)
-        }
-      }
-      .pickerStyle(.menu)
-
-      Text(
-        "This maps to `controlPlane.routing.overrides.github.profile`. Dispatch `--pr` uses this when no `--github-profile` flag is provided."
-      )
-      .font(.mono(.caption2))
-      .foregroundStyle(.secondary)
 
       if !githubProfileMessage.isEmpty {
         Text(githubProfileMessage)
           .font(.mono(.caption2))
-          .foregroundStyle(Color.orange)
+          .foregroundStyle(githubProfileMessage.hasPrefix("Failed") ? Color.orange : Color.green)
       }
 
       HStack(spacing: 8) {
+        Picker("Profile", selection: $githubProjectProfile) {
+          Text("Inherited").tag("")
+          ForEach(githubProfileOptions, id: \.self) { profile in
+            Text(profile).tag(profile)
+          }
+        }
+        .pickerStyle(.menu)
+
         Button {
           Task { await persistGitHubProfileOverride() }
         } label: {
-          Label("Save GitHub profile", systemImage: "square.and.arrow.down")
+          Label("Apply", systemImage: "checkmark")
         }
         .buttonStyle(PressableIconButtonStyle())
         .disabled(executionTargetLoading || executionTargetSaving)
@@ -1008,12 +1028,73 @@ struct ProjectDetailView: View {
     }
   }
 
+  private var executionTargetSummary: String {
+    switch executionTargetMode {
+    case .inherited:
+      if !globalDefaultProfile.isEmpty {
+        return "Using inherited provider profile: \(globalDefaultProfile)"
+      }
+      if !globalDefaultProvider.isEmpty {
+        return "Using inherited provider: \(globalDefaultProvider)"
+      }
+      return "Using inherited runtime defaults."
+    case .fixedNode:
+      guard
+        let node = executionTargetNodes.first(where: { $0.id == executionTargetNodeId }),
+        !executionTargetNodeId.isEmpty
+      else {
+        return "Fixed node mode selected."
+      }
+      return "Pinned to node \(node.name)."
+    case .providerProfile:
+      let profile = executionTargetProfileId.trimmingCharacters(in: .whitespacesAndNewlines)
+      let provider = executionTargetProvider.trimmingCharacters(in: .whitespacesAndNewlines)
+      if !profile.isEmpty, !provider.isEmpty {
+        return "Routing through provider \(provider) profile \(profile)."
+      }
+      if !provider.isEmpty {
+        return "Routing through provider \(provider)."
+      }
+      return "Provider profile mode selected."
+    }
+  }
+
   private var resolvedGitHubProfileSummary: GitHubProfileSummary? {
     let resolved = githubResolvedProfile.trimmingCharacters(in: .whitespacesAndNewlines)
     if resolved.isEmpty {
       return nil
     }
     return githubProfilesById[resolved]
+  }
+
+  private var suggestedGitHubTokenReadyProfile: String? {
+    guard let status = githubResolvedStatus, !status.tokenResolved else {
+      return nil
+    }
+    let resolvedProfile = githubResolvedProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+    return githubProfileStatusById
+      .filter { profileId, profileStatus in
+        profileStatus.tokenResolved && profileId != resolvedProfile
+      }
+      .map(\.key)
+      .sorted { lhs, rhs in
+        lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
+      }
+      .first
+  }
+
+  private var githubConnectionIssueMessage: String? {
+    guard let status = githubResolvedStatus, !status.tokenResolved else {
+      return nil
+    }
+    let profileId = githubResolvedProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+    let fallback =
+      "Token for profile \(profileId.isEmpty ? "default" : profileId) is not available locally. Reconnect in GitHub settings."
+    let detail = status.error?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let detail, !detail.isEmpty {
+      return detail
+    }
+    return fallback
   }
 
   /**
@@ -1095,13 +1176,24 @@ struct ProjectDetailView: View {
       .sorted { lhs, rhs in
         lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
       }
+    var profileStatusById: [String: GitHubStatusResponse] = [:]
+    for profileId in githubProfileOptions {
+      if let status = await model.inspectGitHubStatus(profileId: profileId) {
+        profileStatusById[profileId] = status
+      }
+    }
+    githubProfileStatusById = profileStatusById
     let resolvedGitHubProfile = githubProjectProfile.isEmpty
       ? githubDefaultProfile
       : githubProjectProfile
     githubResolvedProfile = resolvedGitHubProfile
-    githubResolvedStatus = await model.inspectGitHubStatus(
-      profileId: resolvedGitHubProfile.isEmpty ? nil : resolvedGitHubProfile
-    )
+    if let preloadedStatus = profileStatusById[resolvedGitHubProfile] {
+      githubResolvedStatus = preloadedStatus
+    } else {
+      githubResolvedStatus = await model.inspectGitHubStatus(
+        profileId: resolvedGitHubProfile.isEmpty ? nil : resolvedGitHubProfile
+      )
+    }
 
     let profileParse = parseProviderProfiles(raw: resolvedProfilesRaw)
     executionTargetProfiles = profileParse.ids

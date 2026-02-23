@@ -7,17 +7,21 @@ export const GitHubOAuthModel = {
   flowStatusQuery: t.Object({
     deviceCode: t.String(),
     claim: t.Optional(t.String()),
+    requireInstallation: t.Optional(t.String()),
   }),
   startQuery: t.Object({
     profile: t.Optional(t.String()),
     setDefault: t.Optional(t.String()),
     redirect: t.Optional(t.String()),
+    requireInstallation: t.Optional(t.String()),
   }),
   callbackQuery: t.Object({
     code: t.Optional(t.String()),
     state: t.Optional(t.String()),
     error: t.Optional(t.String()),
     error_description: t.Optional(t.String()),
+    installation_id: t.Optional(t.String()),
+    setup_action: t.Optional(t.String()),
   }),
   flowStatusParams: t.Object({
     flowId: t.String(),

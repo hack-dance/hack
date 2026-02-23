@@ -40,7 +40,10 @@ export function buildAuthorizeUrl(opts: {
   const url = new URL(opts.authorizeUrl);
   url.searchParams.set("client_id", opts.clientId);
   url.searchParams.set("redirect_uri", opts.redirectUri);
-  url.searchParams.set("scope", opts.scopes);
+  const scopes = opts.scopes.trim();
+  if (scopes.length > 0) {
+    url.searchParams.set("scope", scopes);
+  }
   url.searchParams.set("state", opts.state);
   url.searchParams.set("allow_signup", "false");
   return url.toString();
@@ -149,6 +152,12 @@ export async function fetchIdentity(opts: {
 
   const accountName = pickString(userPayload, "name") ?? undefined;
   const accountId = pickString(userPayload, "id") ?? undefined;
+  const accountEmail =
+    (await fetchPrimaryEmail({
+      baseUrl,
+      headers,
+      fallbackEmail: pickString(userPayload, "email") ?? undefined,
+    })) ?? undefined;
   const installationIds = await fetchInstallationIds({ baseUrl, headers });
   return {
     ok: true,
@@ -156,6 +165,7 @@ export async function fetchIdentity(opts: {
       login,
       ...(accountName ? { accountName } : {}),
       ...(accountId ? { accountId } : {}),
+      ...(accountEmail ? { accountEmail } : {}),
       installationIds,
     },
   };
@@ -197,6 +207,89 @@ async function fetchInstallationIds(opts: {
     installationIds.push(id);
   }
   return installationIds;
+}
+
+async function fetchPrimaryEmail(opts: {
+  readonly baseUrl: string;
+  readonly headers: Record<string, string>;
+  readonly fallbackEmail?: string;
+}): Promise<string | null> {
+  const response = await fetch(`${opts.baseUrl}/user/emails`, {
+    method: "GET",
+    headers: opts.headers,
+  });
+  const payload = await decodeJson(response);
+  if (!response.ok) {
+    return normalizeEmail(opts.fallbackEmail) ?? null;
+  }
+  if (!Array.isArray(payload)) {
+    return normalizeEmail(opts.fallbackEmail) ?? null;
+  }
+
+  const primaryVerified = findEmailEntry({
+    entries: payload,
+    requirePrimary: true,
+    requireVerified: true,
+  });
+  if (primaryVerified) {
+    return primaryVerified;
+  }
+
+  const verified = findEmailEntry({
+    entries: payload,
+    requirePrimary: false,
+    requireVerified: true,
+  });
+  if (verified) {
+    return verified;
+  }
+
+  const anyEmail = findEmailEntry({
+    entries: payload,
+    requirePrimary: false,
+    requireVerified: false,
+  });
+  if (anyEmail) {
+    return anyEmail;
+  }
+
+  return normalizeEmail(opts.fallbackEmail) ?? null;
+}
+
+function findEmailEntry(opts: {
+  readonly entries: readonly unknown[];
+  readonly requirePrimary: boolean;
+  readonly requireVerified: boolean;
+}): string | null {
+  for (const entry of opts.entries) {
+    if (!isRecord(entry)) {
+      continue;
+    }
+    const email = normalizeEmail(
+      typeof entry.email === "string" ? entry.email : undefined
+    );
+    if (!email) {
+      continue;
+    }
+    const isPrimary = entry.primary === true;
+    const isVerified = entry.verified === true;
+    if (opts.requirePrimary && !isPrimary) {
+      continue;
+    }
+    if (opts.requireVerified && !isVerified) {
+      continue;
+    }
+    return email;
+  }
+  return null;
+}
+
+function normalizeEmail(value: string | undefined): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.trim().toLowerCase();
+  return normalized.length > 0 ? normalized : null;
 }
 
 async function decodeJson(response: Response): Promise<unknown> {

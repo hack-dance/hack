@@ -51,6 +51,7 @@ export class FlowStore {
     readonly account: GitHubOAuthFlow["account"];
     readonly token: string;
     readonly tokenExpiresAt?: string;
+    readonly installationId?: string;
   }): GitHubOAuthFlow | null {
     const flow = this.getById(opts.flowId);
     if (!flow) {
@@ -59,8 +60,28 @@ export class FlowStore {
     flow.account = opts.account;
     flow.token = opts.token;
     flow.tokenExpiresAt = opts.tokenExpiresAt;
+    flow.installationId = opts.installationId;
     flow.status = "complete";
     flow.completedAt = new Date().toISOString();
+    return flow;
+  }
+
+  updateInstallationState(opts: {
+    readonly flowId: string;
+    readonly installationIds: readonly string[];
+    readonly installationId?: string;
+  }): GitHubOAuthFlow | null {
+    const flow = this.getById(opts.flowId);
+    if (!flow?.account) {
+      return null;
+    }
+    flow.account = {
+      ...flow.account,
+      installationIds: opts.installationIds,
+    };
+    if (opts.installationId) {
+      flow.installationId = opts.installationId;
+    }
     return flow;
   }
 
@@ -68,6 +89,7 @@ export class FlowStore {
     readonly flowId: string;
     readonly deviceCode: string;
     readonly claimToken: boolean;
+    readonly requireInstallation: boolean;
     readonly nowMs?: number;
   }):
     | { readonly ok: true; readonly status: GitHubFlowPublicStatus }
@@ -95,6 +117,14 @@ export class FlowStore {
 
     const base = toPublicStatus(flow);
     if (!opts.claimToken || flow.status !== "complete" || !flow.token) {
+      return { ok: true, status: base };
+    }
+
+    if (
+      opts.requireInstallation &&
+      flow.appInstallUrl &&
+      !flow.installationId
+    ) {
       return { ok: true, status: base };
     }
 
@@ -144,9 +174,22 @@ function toPublicStatus(flow: GitHubOAuthFlow): GitHubFlowPublicStatus {
       ? { accountName: flow.account.accountName }
       : {}),
     ...(flow.account?.accountId ? { accountId: flow.account.accountId } : {}),
+    ...(flow.account?.accountEmail
+      ? { accountEmail: flow.account.accountEmail }
+      : {}),
+    ...(flow.account?.betterAuthUserId
+      ? { betterAuthUserId: flow.account.betterAuthUserId }
+      : {}),
+    ...(flow.account?.betterAuthLinkState
+      ? { betterAuthLinkState: flow.account.betterAuthLinkState }
+      : {}),
+    ...(flow.installationId ? { installationId: flow.installationId } : {}),
     ...(flow.account?.installationIds
       ? { installationIds: flow.account.installationIds }
       : {}),
+    ...(flow.appId ? { appId: flow.appId } : {}),
+    ...(flow.appSlug ? { appSlug: flow.appSlug } : {}),
+    ...(flow.appInstallUrl ? { appInstallUrl: flow.appInstallUrl } : {}),
     ...(flow.error ? { error: flow.error } : {}),
   };
 }

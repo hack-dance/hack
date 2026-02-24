@@ -48,6 +48,11 @@ struct ProjectServicesView<
         }
         .scrollIndicators(.visible)
         .background(detailPanelFillColor)
+        .overlay(alignment: .leading) {
+          Rectangle()
+            .fill(detailPanelBorderColor.opacity(0.72))
+            .frame(width: 1)
+        }
         .frame(width: detailPanelWidth)
         .frame(maxHeight: .infinity, alignment: .topLeading)
       }
@@ -60,11 +65,13 @@ struct ProjectServicesView<
   private var detailResizeHandle: some View {
     Rectangle()
       .fill(Color.clear)
-      .frame(width: 12)
+      .frame(width: 10)
       .background(alignment: .center) {
-        Rectangle()
-          .fill(detailResizeLineColor)
-          .frame(width: 1.2)
+        if isResizeHandleHovered || isResizingDetailPanel {
+          Rectangle()
+            .fill(detailResizeLineColor)
+            .frame(width: 1)
+        }
       }
       .contentShape(Rectangle())
       .onHover { hovering in

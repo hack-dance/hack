@@ -155,6 +155,14 @@ hack node status --node <node-id>
 hack dispatch run --node <node-id> --project <project> --branch <branch> --runner generic -- "pwd"
 ```
 
+Pin a project to remote execution mode:
+
+```bash
+hack config set "controlPlane.execution.mode" "local_edit_remote_run"
+hack config set "controlPlane.execution.nodeId" "<node-id>"
+hack up --target auto
+```
+
 ## E2E Test Matrix (Railway + Tailscale Auth Key)
 
 Run this matrix before marking Railway bootstrap stable:

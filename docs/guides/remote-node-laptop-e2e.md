@@ -84,6 +84,21 @@ hack node status --watch
 hack dispatch run --project <name|id> --node default --branch <branch> --runner codex -- echo hello
 ```
 
+### Project execution mode setup (optional)
+
+To make normal lifecycle commands (`hack up/down/restart`) route to remote automatically:
+
+```bash
+hack config set "controlPlane.execution.mode" "local_edit_remote_run"
+hack config set "controlPlane.execution.nodeId" "<node-id>"
+```
+
+Then run:
+
+```bash
+hack up --target auto
+```
+
 Expected results:
 
 - Node is registered and probe status is healthy/stale (not unknown).

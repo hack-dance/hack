@@ -4,12 +4,41 @@ import SwiftUI
 import HackCLIService
 import HackDesktopModels
 
-private enum ExecutionTargetMode: String, CaseIterable, Identifiable {
-  case inherited = "Inherited"
-  case fixedNode = "Fixed node"
-  case providerProfile = "Provider profile"
+private enum RemoteExecutionMode: String, CaseIterable, Identifiable {
+  case local = "local"
+  case localEditRemoteRun = "local_edit_remote_run"
+  case remoteDevcontainer = "remote_devcontainer"
 
   var id: String { rawValue }
+
+  var title: String {
+    switch self {
+    case .local:
+      return "Local"
+    case .localEditRemoteRun:
+      return "Local edit + remote run"
+    case .remoteDevcontainer:
+      return "Remote devcontainer"
+    }
+  }
+
+  var summary: String {
+    switch self {
+    case .local:
+      return "Run and edit on this Mac."
+    case .localEditRemoteRun:
+      return "Edit locally, run lifecycle on remote node."
+    case .remoteDevcontainer:
+      return "Use a remote devcontainer workspace."
+    }
+  }
+
+  static func fromConfig(_ raw: String?) -> RemoteExecutionMode? {
+    guard let raw else {
+      return nil
+    }
+    return RemoteExecutionMode(rawValue: raw.trimmingCharacters(in: .whitespacesAndNewlines))
+  }
 }
 
 private enum ProjectSidebarItem: String, CaseIterable, Identifiable {
@@ -78,18 +107,13 @@ struct ProjectDetailView: View {
   @State private var showAddBranchSheet = false
   @State private var newBranchName = ""
   @State private var newBranchNote = ""
-  @State private var executionTargetMode: ExecutionTargetMode = .inherited
+  @State private var executionMode: RemoteExecutionMode = .local
   @State private var executionTargetNodeId = ""
-  @State private var executionTargetProvider = ""
-  @State private var executionTargetProfileId = ""
-  @State private var executionTargetProfiles: [String] = []
-  @State private var executionTargetProfileProviderById: [String: String] = [:]
+  @State private var executionDefaultNodeId = ""
   @State private var executionTargetNodes: [NodeRegistryRecord] = []
   @State private var executionTargetLoading = false
   @State private var executionTargetSaving = false
   @State private var executionTargetMessage = ""
-  @State private var globalDefaultProvider = ""
-  @State private var globalDefaultProfile = ""
   @State private var githubProjectProfile = ""
   @State private var githubDefaultProfile = ""
   @State private var githubProfileOptions: [String] = []
@@ -112,12 +136,14 @@ struct ProjectDetailView: View {
       ensureSelectedTab()
       syncSidebarSelectionFromTab()
       ensureSidebarSelection()
+      selectedService = nil
       queueExecutionTargetReload()
     }
     .onChange(of: project.id) { _, _ in
       ensureSelectedTab()
       syncSidebarSelectionFromTab()
       ensureSidebarSelection()
+      selectedService = nil
       queueExecutionTargetReload()
     }
     .onChange(of: model.selectedProjectTab) { _, _ in
@@ -643,6 +669,31 @@ struct ProjectDetailView: View {
 
       VStack(alignment: .leading, spacing: 12) {
         HStack(alignment: .center, spacing: 12) {
+          Text("Execution mode")
+            .font(.mono(.subheadline, weight: .semibold))
+            .frame(width: 120, alignment: .leading)
+
+          Picker("Execution mode", selection: $executionMode) {
+            ForEach(RemoteExecutionMode.allCases) { mode in
+              Text(mode.title).tag(mode)
+            }
+          }
+          .pickerStyle(.menu)
+          .frame(maxWidth: 360, alignment: .leading)
+          .onChange(of: executionMode) { _, _ in
+            guard !executionTargetLoading else {
+              return
+            }
+            Task { await persistExecutionModeSelection() }
+          }
+
+          Spacer()
+          Text(executionMode.summary)
+            .font(.mono(.caption2))
+            .foregroundStyle(.tertiary)
+        }
+
+        HStack(alignment: .center, spacing: 12) {
           Text("Default node")
             .font(.mono(.subheadline, weight: .semibold))
             .frame(width: 120, alignment: .leading)
@@ -661,6 +712,7 @@ struct ProjectDetailView: View {
             }
             Task { await persistSimpleDefaultNodeSelection() }
           }
+          .disabled(executionMode == .local)
 
           Spacer()
           Text(selectedNodeSummary)
@@ -700,15 +752,6 @@ struct ProjectDetailView: View {
         Text("Local system Git: \(systemAccountLabel)\(projectSystemGitIdentity.gitEmail.map { " • \($0)" } ?? "")")
           .font(.mono(.caption2))
           .foregroundStyle(.secondary)
-      }
-
-      if !executionTargetProvider.isEmpty || !executionTargetProfileId.isEmpty {
-        InlineCallout(
-          tone: .neutral,
-          title: "Legacy provider routing detected",
-          message: "This project still has provider-profile routing saved. Choosing Local or a node here replaces that with node routing.",
-          actions: []
-        )
       }
 
       if !remoteConfigMessage.isEmpty {
@@ -1188,14 +1231,25 @@ struct ProjectDetailView: View {
   }
 
   private var selectedNodeSummary: String {
-    let selectedNodeId = executionTargetNodeId.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !selectedNodeId.isEmpty else {
+    if executionMode == .local {
       return "Local"
     }
-    if let node = executionTargetNodes.first(where: { $0.id == selectedNodeId }) {
-      return node.name
+    let selectedNodeId = executionTargetNodeId.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !selectedNodeId.isEmpty {
+      if let node = executionTargetNodes.first(where: { $0.id == selectedNodeId }) {
+        return node.name
+      }
+      return selectedNodeId
     }
-    return selectedNodeId
+
+    let inheritedDefaultNodeId = executionDefaultNodeId.trimmingCharacters(in: .whitespacesAndNewlines)
+    if inheritedDefaultNodeId.isEmpty {
+      return "Inherited (no global default)"
+    }
+    if let defaultNode = executionTargetNodes.first(where: { $0.id == inheritedDefaultNodeId }) {
+      return "Inherited (\(defaultNode.name))"
+    }
+    return "Inherited (\(inheritedDefaultNodeId))"
   }
 
   private var selectedGitSummary: String {
@@ -1264,7 +1318,7 @@ struct ProjectDetailView: View {
   }
 
   /**
-   Reload project execution target state and provider profile options.
+   Reload project-level remote execution defaults and Git credential routing.
    */
   private func reloadExecutionTargetState() async {
     if Task.isCancelled {
@@ -1275,30 +1329,21 @@ struct ProjectDetailView: View {
     let identityProjectPath = project.repoRoot ?? project.projectDir
 
     async let nodeList = model.listNodes()
+    async let executionModeRaw = model.getProjectConfig(
+      for: project,
+      key: "controlPlane.execution.mode"
+    )
+    async let executionNodeId = model.getProjectConfig(
+      for: project,
+      key: "controlPlane.execution.nodeId"
+    )
     async let projectNodeId = model.getProjectConfig(
       for: project,
       key: "controlPlane.nodeId"
     )
-    async let routingProvider = model.getProjectConfig(
-      for: project,
-      key: "controlPlane.routing.provider"
-    )
-    async let routingProfile = model.getProjectConfig(
-      for: project,
-      key: "controlPlane.routing.profile"
-    )
     async let projectGitHubProfile = model.getProjectConfig(
       for: project,
       key: "controlPlane.routing.overrides.github.profile"
-    )
-    async let defaultProvider = model.getGlobalConfig(
-      key: "controlPlane.providers.defaultProvider"
-    )
-    async let defaultProfile = model.getGlobalConfig(
-      key: "controlPlane.providers.defaultProfile"
-    )
-    async let profilesRaw = model.getGlobalConfig(
-      key: "controlPlane.providers.profiles"
     )
     async let defaultGitHubProfile = model.getGlobalConfig(
       key: "controlPlane.extensions[\"dance.hack.github\"].config.defaultProfile"
@@ -1309,13 +1354,10 @@ struct ProjectDetailView: View {
     )
 
     let resolvedNodeList = await nodeList
+    let resolvedExecutionModeRaw = await executionModeRaw
+    let resolvedExecutionNodeId = await executionNodeId
     let resolvedProjectNodeId = await projectNodeId
-    let resolvedRoutingProvider = await routingProvider
-    let resolvedRoutingProfile = await routingProfile
     let resolvedProjectGitHubProfile = await projectGitHubProfile
-    let resolvedDefaultProvider = await defaultProvider
-    let resolvedDefaultProfile = await defaultProfile
-    let resolvedProfilesRaw = await profilesRaw
     let resolvedDefaultGitHubProfile = await defaultGitHubProfile
     let resolvedGitHubProfiles = await githubProfiles
     let resolvedSystemGitIdentity = await systemGitIdentity
@@ -1325,17 +1367,15 @@ struct ProjectDetailView: View {
     }
 
     executionTargetNodes = resolvedNodeList?.nodes ?? []
+    executionDefaultNodeId = (resolvedNodeList?.defaultNodeId ?? "")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    let executionNodeIdValue = (resolvedExecutionNodeId ?? "")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
     let projectNodeIdValue = (resolvedProjectNodeId ?? "")
       .trimmingCharacters(in: .whitespacesAndNewlines)
-    executionTargetNodeId = projectNodeIdValue
-    executionTargetProvider = (resolvedRoutingProvider ?? "")
-      .trimmingCharacters(in: .whitespacesAndNewlines)
-    executionTargetProfileId = (resolvedRoutingProfile ?? "")
-      .trimmingCharacters(in: .whitespacesAndNewlines)
-    globalDefaultProvider = (resolvedDefaultProvider ?? "")
-      .trimmingCharacters(in: .whitespacesAndNewlines)
-    globalDefaultProfile = (resolvedDefaultProfile ?? "")
-      .trimmingCharacters(in: .whitespacesAndNewlines)
+    executionTargetNodeId = !executionNodeIdValue.isEmpty
+      ? executionNodeIdValue
+      : projectNodeIdValue
     githubProjectProfile = (resolvedProjectGitHubProfile ?? "")
       .trimmingCharacters(in: .whitespacesAndNewlines)
     let fallbackDefaultGitHubProfile = (resolvedDefaultGitHubProfile ?? "")
@@ -1366,26 +1406,8 @@ struct ProjectDetailView: View {
         profileId: resolvedGitHubProfile.isEmpty ? nil : resolvedGitHubProfile
       )
     }
-
-    let profileParse = parseProviderProfiles(raw: resolvedProfilesRaw)
-    executionTargetProfiles = profileParse.ids
-    executionTargetProfileProviderById = profileParse.providerById
-
-    if executionTargetNodeId.isEmpty {
-      if !executionTargetProfileId.isEmpty || !executionTargetProvider.isEmpty {
-        executionTargetMode = .providerProfile
-      } else {
-        executionTargetMode = .inherited
-      }
-    } else {
-      executionTargetMode = .fixedNode
-    }
-
-    if executionTargetProvider.isEmpty,
-      let fromProfile = executionTargetProfileProviderById[executionTargetProfileId]
-    {
-      executionTargetProvider = fromProfile
-    }
+    executionMode = RemoteExecutionMode.fromConfig(resolvedExecutionModeRaw)
+      ?? (executionTargetNodeId.isEmpty ? .local : .localEditRemoteRun)
     executionTargetMessage = ""
     githubProfileMessage = ""
   }
@@ -1398,9 +1420,52 @@ struct ProjectDetailView: View {
   }
 
   /**
+   Persist project execution mode, including local-mode safety resets.
+   */
+  private func persistExecutionModeSelection() async {
+    executionTargetSaving = true
+    defer { executionTargetSaving = false }
+
+    let modeValue = executionMode.rawValue
+    let didSaveMode = await model.setProjectConfig(
+      for: project,
+      key: "controlPlane.execution.mode",
+      value: modeValue
+    )
+    if !didSaveMode {
+      executionTargetMessage = "Failed to save execution mode."
+      return
+    }
+
+    if executionMode == .local {
+      let clearWrites: [(String, String)] = [
+        ("controlPlane.execution.nodeId", ""),
+        ("controlPlane.nodeId", ""),
+      ]
+      for (key, value) in clearWrites {
+        let didSave = await model.setProjectConfig(
+          for: project,
+          key: key,
+          value: value
+        )
+        if !didSave {
+          executionTargetMessage = "Failed to reset project node for local mode."
+          return
+        }
+      }
+      executionTargetNodeId = ""
+    }
+
+    executionTargetMessage = "Execution mode set to \(executionMode.title)."
+    githubProfileMessage = ""
+    await model.refresh()
+    queueExecutionTargetReload()
+  }
+
+  /**
    Save simplified default-node selection.
    *
-   Selecting "Local" clears node/provider overrides; selecting a node pins project node routing.
+   Selecting "Local" clears project node affinity and falls back to global node selection.
    */
   private func persistSimpleDefaultNodeSelection() async {
     executionTargetSaving = true
@@ -1408,6 +1473,7 @@ struct ProjectDetailView: View {
 
     let selectedNodeId = executionTargetNodeId.trimmingCharacters(in: .whitespacesAndNewlines)
     let writes: [(String, String)] = [
+      ("controlPlane.execution.nodeId", selectedNodeId),
       ("controlPlane.nodeId", selectedNodeId),
       ("controlPlane.routing.provider", ""),
       ("controlPlane.routing.profile", ""),
@@ -1425,11 +1491,17 @@ struct ProjectDetailView: View {
       }
     }
 
-    executionTargetMode = selectedNodeId.isEmpty ? .inherited : .fixedNode
-    executionTargetProvider = ""
-    executionTargetProfileId = ""
+    if executionMode == .localEditRemoteRun || executionMode == .remoteDevcontainer,
+      selectedNodeId.isEmpty,
+      executionDefaultNodeId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    {
+      executionTargetMessage = "No global default node found. Choose a node or run `hack node use <id>`."
+      githubProfileMessage = ""
+      return
+    }
+
     if selectedNodeId.isEmpty {
-      executionTargetMessage = "Default node set to Local."
+      executionTargetMessage = "Default node set to inherited."
     } else if let node = executionTargetNodes.first(where: { $0.id == selectedNodeId }) {
       executionTargetMessage = "Default node set to \(node.name)."
     } else {
@@ -1442,34 +1514,6 @@ struct ProjectDetailView: View {
 
   private func persistGitCredentialsSelection() async {
     await persistGitHubProfileOverride()
-  }
-
-  private func parseProviderProfiles(raw: String?) -> (
-    ids: [String],
-    providerById: [String: String]
-  ) {
-    guard
-      let raw,
-      let data = raw.data(using: .utf8),
-      let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-    else {
-      return ([], [:])
-    }
-
-    let ids = parsed.keys.sorted { lhs, rhs in
-      lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
-    }
-    var providerById: [String: String] = [:]
-    for id in ids {
-      guard
-        let profile = parsed[id] as? [String: Any],
-        let provider = profile["provider"] as? String
-      else {
-        continue
-      }
-      providerById[id] = provider
-    }
-    return (ids, providerById)
   }
 
   private func mapGitHubProfilesById(response: GitHubProfilesResponse?) -> [String: GitHubProfileSummary] {
@@ -2253,7 +2297,6 @@ struct ProjectDetailView: View {
       model.selectedProjectTab = .overview
     case .services:
       model.selectedProjectTab = .overview
-      selectedService = selectedService ?? serviceEntries.first?.name
     case .lifecycle:
       model.selectedProjectTab = .overview
     case .branches:

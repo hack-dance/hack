@@ -25,7 +25,7 @@ Related:
 Implemented:
 1. Node registry + node CLI commands (`init/add/list/status/use/remove`).
 2. Node health/status routing (`GET /v1/node/status`) and node workspace/devcontainer route spine.
-3. Project-level `controlPlane.nodeId` and global cluster defaults (`defaultNodeId`, stale/offline thresholds).
+3. Project-level execution routing (`controlPlane.execution.mode`, `controlPlane.execution.nodeId`) with legacy `controlPlane.nodeId` fallback and global cluster defaults (`defaultNodeId`, stale/offline thresholds).
 4. Dispatch command spine (`run/status/logs`) with node selection (explicit/project/default/auto).
 5. Risk classification module and approval gating in dispatch.
 6. Local run spool with run record/events/logs/artifact files under `~/.hack/registry/runs/<runId>/`.

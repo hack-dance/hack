@@ -131,6 +131,41 @@ const ClusterConfigSchema = z.object({
   offlineAfterMs: z.number().int().positive().default(120_000),
 });
 
+const ProjectExecutionModeSchema = z.enum([
+  "local",
+  "local_edit_remote_run",
+  "remote_devcontainer",
+]);
+
+const ExecutionSyncEngineSchema = z.enum(["mutagen", "rsync"]);
+const ExecutionSyncDirectionSchema = z.enum(["local_to_remote"]);
+
+const ExecutionSyncConfigInputSchema = z.object({
+  engine: ExecutionSyncEngineSchema.optional(),
+  direction: ExecutionSyncDirectionSchema.optional(),
+  exclude: z.array(z.string()).optional(),
+});
+
+const ExecutionSyncConfigSchema = z.object({
+  engine: ExecutionSyncEngineSchema.default("mutagen"),
+  direction: ExecutionSyncDirectionSchema.default("local_to_remote"),
+  exclude: z.array(z.string()).default([]),
+});
+
+const ExecutionConfigInputSchema = z.object({
+  mode: ProjectExecutionModeSchema.optional(),
+  nodeId: z.string().optional(),
+  singleActive: z.boolean().optional(),
+  sync: ExecutionSyncConfigInputSchema.optional(),
+});
+
+const ExecutionConfigSchema = z.object({
+  mode: ProjectExecutionModeSchema.default("local"),
+  nodeId: z.string().optional(),
+  singleActive: z.boolean().default(true),
+  sync: ExecutionSyncConfigSchema.default(ExecutionSyncConfigSchema.parse({})),
+});
+
 const ProviderRoutingModeSchema = z.enum([
   "existing_only",
   "prefer_existing_then_bootstrap",
@@ -321,6 +356,7 @@ const ControlPlaneConfigInputSchema = z.object({
   daemon: DaemonConfigInputSchema.optional(),
   gateway: GatewayConfigInputSchema.optional(),
   cluster: ClusterConfigInputSchema.optional(),
+  execution: ExecutionConfigInputSchema.optional(),
   providers: ProvidersConfigInputSchema.optional(),
   routing: RoutingConfigInputSchema.optional(),
   secrets: SecretsConfigInputSchema.optional(),
@@ -341,6 +377,7 @@ const ControlPlaneConfigSchema = z.object({
   daemon: DaemonConfigSchema.default(DaemonConfigSchema.parse({})),
   gateway: GatewayConfigSchema.default(GatewayConfigSchema.parse({})),
   cluster: ClusterConfigSchema.default(ClusterConfigSchema.parse({})),
+  execution: ExecutionConfigSchema.default(ExecutionConfigSchema.parse({})),
   providers: ProvidersConfigSchema.default(ProvidersConfigSchema.parse({})),
   routing: RoutingConfigSchema.optional(),
   secrets: SecretsConfigSchema.default(SecretsConfigSchema.parse({})),
@@ -356,6 +393,13 @@ export type DaemonLaunchdConfig = z.infer<typeof DaemonLaunchdConfigSchema>;
 export type TicketsGitConfig = z.infer<typeof TicketsGitConfigSchema>;
 export type TicketsGitRefMode = z.infer<typeof TicketsGitRefModeSchema>;
 export type ClusterConfig = z.infer<typeof ClusterConfigSchema>;
+export type ProjectExecutionMode = z.infer<typeof ProjectExecutionModeSchema>;
+export type ExecutionSyncEngine = z.infer<typeof ExecutionSyncEngineSchema>;
+export type ExecutionSyncDirection = z.infer<
+  typeof ExecutionSyncDirectionSchema
+>;
+export type ExecutionSyncConfig = z.infer<typeof ExecutionSyncConfigSchema>;
+export type ExecutionConfig = z.infer<typeof ExecutionConfigSchema>;
 export type ProvidersConfig = z.infer<typeof ProvidersConfigSchema>;
 export type ProviderProfileConfig = z.infer<typeof ProviderProfileSchema>;
 export type RoutingConfig = z.infer<typeof RoutingConfigSchema>;
@@ -484,8 +528,12 @@ function mergeControlPlaneLayers(opts: {
     typeof projectEnabled === "boolean" ? projectEnabled : false;
   merged.gateway = { ...globalGateway, enabled: gatewayEnabled };
 
-  const projectNodeId =
-    typeof opts.project.nodeId === "string" ? opts.project.nodeId : undefined;
+  let projectNodeId: string | undefined;
+  if (typeof opts.project.nodeId === "string") {
+    projectNodeId = opts.project.nodeId;
+  } else if (typeof opts.project.execution?.nodeId === "string") {
+    projectNodeId = opts.project.execution.nodeId;
+  }
   merged.nodeId = projectNodeId;
   merged.routing = isRecord(opts.project.routing)
     ? opts.project.routing

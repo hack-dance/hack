@@ -200,7 +200,27 @@ test("readControlPlaneConfig keeps nodeId project-scoped and merges cluster defa
 
   await writeFile(
     join(projectDir, PROJECT_CONFIG_FILENAME),
-    `${JSON.stringify({ controlPlane: { nodeId: "project-node" } }, null, 2)}\n`
+    `${JSON.stringify(
+      { controlPlane: { execution: { nodeId: "project-execution-node" } } },
+      null,
+      2
+    )}\n`
+  );
+  const executionScoped = await readControlPlaneConfig({ projectDir });
+  expect(executionScoped.config.nodeId).toBe("project-execution-node");
+
+  await writeFile(
+    join(projectDir, PROJECT_CONFIG_FILENAME),
+    `${JSON.stringify(
+      {
+        controlPlane: {
+          nodeId: "project-node",
+          execution: { nodeId: "project-execution-node" },
+        },
+      },
+      null,
+      2
+    )}\n`
   );
   const scoped = await readControlPlaneConfig({ projectDir });
   expect(scoped.config.nodeId).toBe("project-node");

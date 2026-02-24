@@ -553,8 +553,8 @@ struct NodeTopologySettingsView: View {
           .opacity(0.2)
 
         StatusPill(
-          text: tailscale?.connected == true ? "Tailnet connected" : "Tailnet not connected",
-          tone: tailscale?.connected == true ? .good : .warn
+          text: tailnetStatusLabel.text,
+          tone: tailnetStatusLabel.tone
         )
 
         Text("Nodes are trusted only after explicit pairing/session verification and valid gateway token checks.")
@@ -588,6 +588,19 @@ struct NodeTopologySettingsView: View {
       return false
     }
     return endpointMatchesLocalDevice(defaultNode.endpoint)
+  }
+
+  private var tailnetStatusLabel: (text: String, tone: StatusTone) {
+    guard let tailscale else {
+      return ("Tailnet status unavailable", .neutral)
+    }
+    if tailscale.connected {
+      return ("Tailnet connected", .good)
+    }
+    if let error = tailscale.error, !error.isEmpty {
+      return ("Tailnet status unavailable", .neutral)
+    }
+    return ("Tailnet not connected", .warn)
   }
 
   private var topologyGraphNodes: [TopologyGraphNodeModel] {
@@ -979,18 +992,27 @@ struct NodeTopologySettingsView: View {
 
     let previousRegistry = registry
     var resolvedList = list
-    if let list,
-       list.nodes.isEmpty,
+    if resolvedList == nil || resolvedList?.nodes.isEmpty == true {
+      for attempt in 1...2 {
+        try? await Task.sleep(nanoseconds: UInt64(200_000_000 * attempt))
+        if Task.isCancelled {
+          return
+        }
+        if let retry = await model.listNodes() {
+          resolvedList = retry
+          if !retry.nodes.isEmpty {
+            break
+          }
+        }
+      }
+    }
+    if let currentList = resolvedList,
+       currentList.nodes.isEmpty,
        let previousRegistry,
        !previousRegistry.nodes.isEmpty {
-      // Guard against transient empty snapshots by confirming once before replacing
-      // a known non-empty registry in memory.
-      let confirmation = await model.listNodes()
-      if let confirmation {
-        resolvedList = confirmation
-      } else {
-        resolvedList = previousRegistry
-      }
+      // Preserve known-good registry state when the latest probe is empty.
+      // This avoids transient flicker to an empty topology canvas.
+      resolvedList = previousRegistry
     }
     if Task.isCancelled {
       return
@@ -998,10 +1020,22 @@ struct NodeTopologySettingsView: View {
     if let resolvedList {
       registry = resolvedList
     }
-    let effectiveTailscale = tailscaleResult ?? tailscale
-    if let tailscaleResult {
-      if tailscaleResult.error == nil || tailscale == nil {
-        tailscale = tailscaleResult
+    var resolvedTailscale = tailscaleResult
+    if resolvedTailscale == nil || resolvedTailscale?.error != nil {
+      if let retry = await model.inspectTailscale() {
+        resolvedTailscale = retry
+      }
+    } else if let currentTailscale = resolvedTailscale,
+      tailscale?.connected == true,
+      !currentTailscale.connected {
+      if let retry = await model.inspectTailscale(), retry.connected {
+        resolvedTailscale = retry
+      }
+    }
+    let effectiveTailscale = resolvedTailscale ?? tailscale
+    if let resolvedTailscale {
+      if resolvedTailscale.error == nil || tailscale == nil {
+        tailscale = resolvedTailscale
       }
     }
     let nextLayoutProfile = resolveControllerLayoutProfile(

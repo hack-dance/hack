@@ -40,7 +40,8 @@ const DEFAULT_NODE_CAPABILITIES = ["runtime", "gateway", "supervisor"] as const;
 const TRAILING_SLASH_PATTERN = /\/+$/;
 const PROJECT_ID_LIKE_PATTERN = /^[a-f0-9]{12}$/i;
 const DEFAULT_RAILWAY_IMAGE = "hackdance/hack:latest";
-const DEFAULT_RAILWAY_GATEWAY_PORT = 7788;
+const DEFAULT_NODE_GATEWAY_PORT = 7788;
+const DEFAULT_RAILWAY_GATEWAY_PORT = DEFAULT_NODE_GATEWAY_PORT;
 const DEFAULT_RAILWAY_BOOTSTRAP_RETRIES = 6;
 const DEFAULT_RAILWAY_BOOTSTRAP_DELAY_MS = 5000;
 const DEFAULT_RAILWAY_TAILSCALE_SOCKET = "/tmp/tailscaled.sock";
@@ -102,6 +103,15 @@ const optSource = defineOption({
   long: "--source",
   valueHint: "<user@host>",
   description: "Remote SSH source host (hostname, IP, or Tailscale DNS name)",
+} as const);
+
+const optHost = defineOption({
+  name: "host",
+  type: "string",
+  long: "--host",
+  valueHint: "<host>",
+  description:
+    "Remote host used to infer --source and --endpoint (MagicDNS/IP)",
 } as const);
 
 const optDefault = defineOption({
@@ -385,6 +395,7 @@ const pairSpec = defineCommand({
   summary: "Pair node with one-command or expiring verification-code flow",
   group: "Extensions",
   options: [
+    optHost,
     optSource,
     optEndpoint,
     optName,
@@ -403,6 +414,7 @@ const pairStartSpec = defineCommand({
   summary: "Start expiring verification-code pairing session",
   group: "Extensions",
   options: [
+    optHost,
     optSource,
     optEndpoint,
     optName,
@@ -829,6 +841,7 @@ export const nodeCommand = withHandler(
       tone: "info",
       lines: [
         "hack node init --name <name> --endpoint <url>",
+        "hack node pair --host <host> [--name <name>] [--labels a,b] [--default]",
         "hack node pair --source <user@host> --endpoint <url> [--name <name>] [--labels a,b] [--default]",
         "hack node pair request --controller <user@host> --source <user@host> [--endpoint <url>]",
         "hack node pair walkthrough [--source <user@host>] [--endpoint <url>] [--default]",
@@ -997,24 +1010,20 @@ async function handleNodePair({
   readonly ctx: CliContext;
   readonly args: PairArgs;
 }): Promise<number> {
-  const source = (args.options.source ?? "").trim();
-  if (!source) {
-    logger.error({ message: "Missing --source <user@host>." });
+  const target = await resolvePairTarget({
+    source: args.options.source,
+    host: args.options.host,
+    endpoint: args.options.endpoint,
+  });
+  if (!target.ok) {
+    logger.error({ message: target.error });
     return 1;
   }
-  const endpoint = (args.options.endpoint ?? "").trim();
-  if (!(endpoint && isHttpUrl(endpoint))) {
-    logger.error({ message: "Missing or invalid --endpoint <url>." });
-    return 1;
-  }
+  const source = target.source;
+  const endpoint = target.endpoint;
   const remoteHack = (args.options.remoteHack ?? "hack").trim();
   if (!remoteHack) {
     logger.error({ message: "Invalid --remote-hack command." });
-    return 1;
-  }
-  const preflight = await preflightNodeEndpoint({ endpoint });
-  if (!preflight.ok) {
-    logger.error({ message: `Endpoint preflight failed: ${preflight.error}` });
     return 1;
   }
 
@@ -1101,21 +1110,17 @@ async function handleNodePairStart({
   readonly ctx: CliContext;
   readonly args: PairStartArgs;
 }): Promise<number> {
-  const source = (args.options.source ?? "").trim();
-  if (!source) {
-    logger.error({ message: "Missing --source <user@host>." });
+  const target = await resolvePairTarget({
+    source: args.options.source,
+    host: args.options.host,
+    endpoint: args.options.endpoint,
+  });
+  if (!target.ok) {
+    logger.error({ message: target.error });
     return 1;
   }
-  const endpoint = (args.options.endpoint ?? "").trim();
-  if (!(endpoint && isHttpUrl(endpoint))) {
-    logger.error({ message: "Missing or invalid --endpoint <url>." });
-    return 1;
-  }
-  const preflight = await preflightNodeEndpoint({ endpoint });
-  if (!preflight.ok) {
-    logger.error({ message: `Endpoint preflight failed: ${preflight.error}` });
-    return 1;
-  }
+  const source = target.source;
+  const endpoint = target.endpoint;
   const name = derivePairingName({
     explicitName: args.options.name,
     source,
@@ -3831,6 +3836,9 @@ export const __testOnlyNodeAttach = {
 
 export const __testOnlyNodePair = {
   derivePairingName,
+  extractSshHost,
+  buildAutoEndpointCandidates,
+  normalizeHostHint,
   parseEnrollmentBundleFromRemoteOutput,
   renderShellCommand,
 };
@@ -4185,6 +4193,147 @@ async function preflightNodeEndpoint(input: {
   }
 }
 
+type PairTargetResolution =
+  | { readonly ok: true; readonly source: string; readonly endpoint: string }
+  | { readonly ok: false; readonly error: string };
+
+/**
+ * Resolve pairing source + endpoint from explicit flags or a single host hint.
+ * This keeps the common tailnet flow to one input (`--host`) while preserving
+ * explicit overrides for advanced setups.
+ */
+async function resolvePairTarget(input: {
+  readonly source: string | undefined;
+  readonly host: string | undefined;
+  readonly endpoint: string | undefined;
+}): Promise<PairTargetResolution> {
+  const normalizedHost = normalizeHostHint(input.host);
+  const sourceRaw = (input.source ?? "").trim();
+  const source =
+    sourceRaw ||
+    (normalizedHost
+      ? `${resolveCurrentUsername()}@${normalizedHost}`
+      : sourceRaw);
+  if (!source) {
+    return {
+      ok: false,
+      error: "Missing --source <user@host> (or pass --host <host>).",
+    };
+  }
+
+  const sourceHost = extractSshHost(source);
+  const host = normalizedHost || sourceHost;
+  const endpointRaw = (input.endpoint ?? "")
+    .trim()
+    .replace(TRAILING_SLASH_PATTERN, "");
+
+  if (endpointRaw) {
+    if (!isHttpUrl(endpointRaw)) {
+      return { ok: false, error: "Missing or invalid --endpoint <url>." };
+    }
+    const preflight = await preflightNodeEndpoint({ endpoint: endpointRaw });
+    if (!preflight.ok) {
+      return {
+        ok: false,
+        error: `Endpoint preflight failed: ${preflight.error}`,
+      };
+    }
+    return { ok: true, source, endpoint: endpointRaw };
+  }
+
+  if (!host) {
+    return {
+      ok: false,
+      error: "Missing --endpoint <url> (or pass --host <host>).",
+    };
+  }
+
+  const candidates = buildAutoEndpointCandidates({ host });
+  const errors: string[] = [];
+  for (const endpoint of candidates) {
+    const preflight = await preflightNodeEndpoint({ endpoint });
+    if (preflight.ok) {
+      return { ok: true, source, endpoint };
+    }
+    errors.push(`${endpoint}: ${preflight.error}`);
+  }
+
+  return {
+    ok: false,
+    error: [
+      `Could not auto-detect --endpoint for host "${host}".`,
+      `Tried: ${candidates.join(", ")}`,
+      `Details: ${errors.join(" | ")}`,
+      "Pass --endpoint <url> to continue.",
+    ].join("\n"),
+  };
+}
+
+function resolveCurrentUsername(): string {
+  return (
+    (process.env.USER ?? "").trim() ||
+    (process.env.LOGNAME ?? "").trim() ||
+    "root"
+  );
+}
+
+function normalizeHostHint(value: string | undefined): string {
+  const raw = (value ?? "").trim();
+  if (!raw) {
+    return "";
+  }
+  if (raw.includes("://")) {
+    try {
+      return new URL(raw).hostname;
+    } catch {
+      return raw;
+    }
+  }
+  return extractSshHost(raw);
+}
+
+function extractSshHost(source: string): string {
+  const trimmed = source.trim();
+  if (!trimmed) {
+    return "";
+  }
+  const value = trimmed.includes("@")
+    ? trimmed.slice(trimmed.indexOf("@") + 1)
+    : trimmed;
+  if (!value) {
+    return "";
+  }
+  if (value.startsWith("[") && value.includes("]")) {
+    const closing = value.indexOf("]");
+    if (closing > 1) {
+      return value.slice(1, closing);
+    }
+  }
+  const firstColon = value.indexOf(":");
+  const lastColon = value.lastIndexOf(":");
+  if (firstColon > 0 && firstColon === lastColon) {
+    return value.slice(0, lastColon);
+  }
+  return value;
+}
+
+function buildAutoEndpointCandidates(input: {
+  readonly host: string;
+}): readonly string[] {
+  const host = input.host.trim().replace(TRAILING_DOT_PATTERN, "");
+  if (!host) {
+    return [];
+  }
+  const formattedHost =
+    host.includes(":") && !(host.startsWith("[") && host.endsWith("]"))
+      ? `[${host}]`
+      : host;
+  const https = `https://${formattedHost}`;
+  const httpDefault = `http://${formattedHost}:${DEFAULT_NODE_GATEWAY_PORT}`;
+  const tsNet = host.endsWith(".ts.net");
+  return tsNet ? [https, httpDefault] : [httpDefault, https];
+}
+
 function derivePairingName(input: {
   readonly explicitName: string | undefined;
   readonly source: string;
@@ -4197,13 +4346,8 @@ function derivePairingName(input: {
   if (!source) {
     return hostname();
   }
-  const hostPart = source.includes("@")
-    ? source.slice(source.indexOf("@") + 1)
-    : source;
-  const withoutPort = hostPart.includes(":")
-    ? hostPart.slice(0, hostPart.lastIndexOf(":"))
-    : hostPart;
-  return withoutPort || source;
+  const hostPart = extractSshHost(source);
+  return hostPart || source;
 }
 
 async function runRemoteNodeInit(input: {

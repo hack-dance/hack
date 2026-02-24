@@ -36,7 +36,7 @@ Follow-on:
 
 ## Problem Statement
 
-We currently have provider-level bootstrap flows (for example Railway) and node-level routing (`controlPlane.nodeId`), but we do not yet have a clean composition model for:
+We currently have provider-level bootstrap flows (for example Railway) and node-level routing (`controlPlane.execution.nodeId`, with legacy `controlPlane.nodeId` fallback), but we do not yet have a clean composition model for:
 
 1. Global provider defaults and profiles.
 2. Project-level provider/account/profile overrides.
@@ -49,7 +49,7 @@ This makes advanced scenarios harder than necessary (for example: one project pi
 
 1. Keep simple flows simple: global defaults + one-click bootstrap.
 2. Support project-specific provider/account/profile requirements without copying large configs.
-3. Preserve backward compatibility with existing `controlPlane.nodeId` behavior.
+3. Preserve backward compatibility with existing `controlPlane.nodeId` behavior while moving project pinning to `controlPlane.execution.nodeId`.
 4. Ensure all sensitive values are auth refs or env refs, not plaintext config.
 5. Make precedence explicit and testable.
 
@@ -118,6 +118,10 @@ Notes:
 ```json
 {
   "controlPlane": {
+    "execution": {
+      "mode": "local_edit_remote_run",
+      "nodeId": ""
+    },
     "nodeId": "",
     "routing": {
       "provider": "aws",
@@ -137,8 +141,8 @@ Notes:
 ```
 
 Notes:
-1. `controlPlane.nodeId` remains highest-priority project pin for compatibility.
-2. `routing.*` is used when `nodeId` is unset or invalid.
+1. `controlPlane.execution.nodeId` is the canonical project node pin (`controlPlane.nodeId` remains a compatibility fallback).
+2. `routing.*` is used when no project node pin resolves.
 3. `overrides` is a shallow provider-field overlay on top of selected profile.
 
 ## Resolution Precedence (Authoritative)
@@ -146,7 +150,7 @@ Notes:
 For both dispatch and provider-driven bootstrap:
 
 1. Command flags (`--node`, `--provider`, `--profile`, explicit provider flags).
-2. Project `controlPlane.nodeId` (if valid and reachable).
+2. Project `controlPlane.execution.nodeId` (fallback: `controlPlane.nodeId`) if valid and reachable.
 3. Project `controlPlane.routing` (`provider` + `profile` + overrides).
 4. Global `controlPlane.providers.defaultProvider/defaultProfile`.
 5. Provider adapter hard defaults.
@@ -220,7 +224,7 @@ This keeps dispatch/bootstrap flow generic while provider internals stay isolate
 
 1. Add `controlPlane.providers` + `controlPlane.routing` schema.
 2. Implement precedence resolver used by `hack dispatch run` and provider bootstrap entrypoints.
-3. Keep legacy `controlPlane.nodeId` unchanged.
+3. Keep legacy `controlPlane.nodeId` mirrored/compatible during migration.
 
 ### Phase 2
 
@@ -267,7 +271,7 @@ This keeps dispatch/bootstrap flow generic while provider internals stay isolate
 
 1. Should project routing override live in `controlPlane.routing` or under `controlPlane.cluster.projects[projectId]` for multi-project global control?
 2. Should provider profiles support inheritance (for example `aws/base` + project deltas) or remain flat for simplicity?
-3. Should successful auto-bootstrap always pin `controlPlane.nodeId`, or only when explicitly requested?
+3. Should successful auto-bootstrap always pin `controlPlane.execution.nodeId` (and mirror `controlPlane.nodeId` for compatibility), or only when explicitly requested?
 
 ## Immediate Implementation Slice
 

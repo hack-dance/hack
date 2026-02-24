@@ -204,6 +204,7 @@ Options:
 | `--branch <name>` | string | - | Run against a branch-specific instance |
 | `-d`, `--detach` | boolean | false | Run in background (docker compose up -d) |
 | `--profile <name[,name...]>` | string | - | Enable one or more compose profiles |
+| `--target <auto|local|remote>` | string | `auto` | Execution routing target (`auto` follows project execution mode and node affinity) |
 
 ### hack down
 
@@ -217,6 +218,7 @@ Options:
 | `--project <name>` | string | - | Target a registered project by name |
 | `--branch <name>` | string | - | Run against a branch-specific instance |
 | `--profile <name[,name...]>` | string | - | Enable one or more compose profiles |
+| `--target <auto|local|remote>` | string | `auto` | Execution routing target (`auto` follows project execution mode and node affinity) |
 
 ### hack restart
 
@@ -230,6 +232,7 @@ Options:
 | `--project <name>` | string | - | Target a registered project by name |
 | `--branch <name>` | string | - | Run against a branch-specific instance |
 | `--profile <name[,name...]>` | string | - | Enable one or more compose profiles |
+| `--target <auto|local|remote>` | string | `auto` | Execution routing target (`auto` follows project execution mode and node affinity) |
 
 ### hack ps
 
@@ -760,6 +763,9 @@ Examples:
 # on a node host
 hack node init --name "aws-dev-1" --endpoint "https://gateway.example.com"
 
+# one-command pairing from controller with host-only inference (source + endpoint auto-detected)
+hack node pair --host "helsinki.tail8fedfd.ts.net" --name "aws-dev-1" --default
+
 # one-command pairing from controller (works with Tailscale DNS/IP too)
 hack node pair --source "ubuntu@helsinki.tail8fedfd.ts.net" --endpoint "http://127.0.0.1:7788" --name "aws-dev-1" --default
 
@@ -875,7 +881,7 @@ Note: when the target node does not already have the project workspace, dispatch
 Route precedence for dispatch:
 
 1. Command flags (`--node`, `--provider`, `--profile`).
-2. Project `controlPlane.nodeId`.
+2. Project `controlPlane.execution.nodeId` (fallback: legacy `controlPlane.nodeId`).
 3. Project `controlPlane.routing.provider/profile`.
 4. Global `controlPlane.providers.defaultProvider/defaultProfile`.
 5. Provider hard defaults.

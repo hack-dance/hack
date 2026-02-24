@@ -154,12 +154,12 @@ public actor HackCLIClient {
     _ = try await run(["daemon", "clear"])
   }
 
-  public func startProject(path: String) async throws {
-    _ = try await run(["up", "--path", path, "--detach"])
+  public func startProject(path: String, target: String = "auto") async throws {
+    _ = try await run(["up", "--path", path, "--detach", "--target", target])
   }
 
-  public func stopProject(path: String) async throws {
-    _ = try await run(["down", "--path", path])
+  public func stopProject(path: String, target: String = "auto") async throws {
+    _ = try await run(["down", "--path", path, "--target", target])
   }
 
   public func startBranch(path: String, branch: String) async throws {

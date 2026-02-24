@@ -17,6 +17,32 @@ test("derivePairingName falls back to source host", () => {
   expect(result).toBe("helsinki.tail8fedfd.ts.net");
 });
 
+test("extractSshHost removes username and optional port", () => {
+  expect(
+    __testOnlyNodePair.extractSshHost("ubuntu@helsinki.tail8fedfd.ts.net:22")
+  ).toBe("helsinki.tail8fedfd.ts.net");
+  expect(__testOnlyNodePair.extractSshHost("helsinki.tail8fedfd.ts.net")).toBe(
+    "helsinki.tail8fedfd.ts.net"
+  );
+});
+
+test("normalizeHostHint extracts host from URL", () => {
+  const result = __testOnlyNodePair.normalizeHostHint(
+    "https://helsinki.tail8fedfd.ts.net"
+  );
+  expect(result).toBe("helsinki.tail8fedfd.ts.net");
+});
+
+test("buildAutoEndpointCandidates prefers HTTPS for tailscale DNS", () => {
+  const result = __testOnlyNodePair.buildAutoEndpointCandidates({
+    host: "helsinki.tail8fedfd.ts.net",
+  });
+  expect(result).toEqual([
+    "https://helsinki.tail8fedfd.ts.net",
+    "http://helsinki.tail8fedfd.ts.net:7788",
+  ]);
+});
+
 test("parseEnrollmentBundleFromRemoteOutput extracts JSON from noisy ssh output", () => {
   const noisyOutput = [
     "Ubuntu 24.04 LTS",

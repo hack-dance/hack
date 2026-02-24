@@ -21,7 +21,7 @@ import {
   type RuntimeProject,
   serializeRuntimeProject,
 } from "./runtime-projects.ts";
-import { exec } from "./shell.ts";
+import { exec, findExecutableInPath } from "./shell.ts";
 
 export type BranchRuntime = {
   readonly branch: string;
@@ -576,6 +576,10 @@ async function listMuxSessions(): Promise<readonly MuxSession[]> {
 }
 
 async function listTmuxSessions(): Promise<readonly MuxSession[]> {
+  if (!findExecutableInPath("tmux")) {
+    return [];
+  }
+
   const separator = "|||HACK_SESSION_FIELD|||";
   const format = [
     "#{session_name}",
@@ -584,9 +588,14 @@ async function listTmuxSessions(): Promise<readonly MuxSession[]> {
     "#{session_windows}",
     "#{session_created}",
   ].join(separator);
-  const result = await exec(["tmux", "list-sessions", "-F", format], {
-    stdin: "ignore",
-  });
+  let result: Awaited<ReturnType<typeof exec>>;
+  try {
+    result = await exec(["tmux", "list-sessions", "-F", format], {
+      stdin: "ignore",
+    });
+  } catch {
+    return [];
+  }
   if (result.exitCode !== 0) {
     return [];
   }
@@ -638,9 +647,18 @@ function parseTmuxSessionFields(
 }
 
 async function listZellijSessions(): Promise<readonly MuxSession[]> {
-  const result = await exec(["zellij", "list-sessions", "--no-formatting"], {
-    stdin: "ignore",
-  });
+  if (!findExecutableInPath("zellij")) {
+    return [];
+  }
+
+  let result: Awaited<ReturnType<typeof exec>>;
+  try {
+    result = await exec(["zellij", "list-sessions", "--no-formatting"], {
+      stdin: "ignore",
+    });
+  } catch {
+    return [];
+  }
   if (result.exitCode !== 0) {
     return [];
   }

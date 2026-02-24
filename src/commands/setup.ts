@@ -161,6 +161,12 @@ type SetupAgentsArgs = CommandArgs<typeof setupAgentsOptions, readonly []>;
 type SetupSyncArgs = CommandArgs<typeof setupSyncOptions, readonly []>;
 type SetupMcpArgs = CommandArgs<typeof setupMcpOptions, readonly []>;
 
+type SetupMultiLogResult = {
+  readonly status: string;
+  readonly path?: string;
+  readonly message?: string;
+};
+
 const tmuxSpec = defineCommand({
   name: "tmux",
   summary: "Configure tmux keybinding for hack session picker",
@@ -695,8 +701,8 @@ async function handleSetupSync({
     let claudeResult: Awaited<ReturnType<typeof checkClaudeHooks>>;
     let codexResult: Awaited<ReturnType<typeof checkCodexSkill>>;
     let ticketsResult: Awaited<ReturnType<typeof checkTicketsSkill>>;
-    let mcpResults: Awaited<ReturnType<typeof checkMcpConfig>>;
-    let docsResults: Awaited<ReturnType<typeof checkAgentDocs>>;
+    let mcpResults: SetupMultiLogResult[];
+    let docsResults: SetupMultiLogResult[];
 
     if (action === "check") {
       cursorResult = await checkCursorRules({ scope: "project", projectRoot });
@@ -794,7 +800,7 @@ async function handleSetupSync({
     let claudeResult: Awaited<ReturnType<typeof checkClaudeHooks>>;
     let codexResult: Awaited<ReturnType<typeof checkCodexSkill>>;
     let ticketsResult: Awaited<ReturnType<typeof checkTicketsSkill>>;
-    let mcpResults: Awaited<ReturnType<typeof checkMcpConfig>>;
+    let mcpResults: SetupMultiLogResult[];
 
     if (action === "check") {
       cursorResult = await checkCursorRules({ scope: "user" });

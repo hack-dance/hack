@@ -60,6 +60,7 @@ import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { parseJsonLines } from "../lib/json-lines.ts";
 import { isMac } from "../lib/os.ts";
 import { exec, execOrThrow, findExecutableInPath, run } from "../lib/shell.ts";
+import { resolveSessionsMuxMode } from "../mux/mux-config.ts";
 import {
   renderGlobalAlloyConfig,
   renderGlobalCaddyCompose,
@@ -371,6 +372,54 @@ async function waitForDocker(opts: {
   return false;
 }
 
+function muxInstallCommand(opts: {
+  readonly provider: "tmux" | "zellij";
+}): string {
+  if (isMac()) {
+    return `brew install ${opts.provider}`;
+  }
+  return `install ${opts.provider} with your package manager`;
+}
+
+async function warnIfSessionsMuxUnavailable(): Promise<void> {
+  const mode = await resolveSessionsMuxMode({ project: null });
+  const tmuxPath = findExecutableInPath("tmux");
+  const zellijPath = findExecutableInPath("zellij");
+
+  if (mode === "none") {
+    return;
+  }
+
+  if (mode === "tmux" && !tmuxPath) {
+    logger.warn({
+      message: [
+        "sessions.mux is set to tmux but tmux is not on PATH.",
+        `Install hint: ${muxInstallCommand({ provider: "tmux" })}`,
+      ].join("\n"),
+    });
+    return;
+  }
+
+  if (mode === "zellij" && !zellijPath) {
+    logger.warn({
+      message: [
+        "sessions.mux is set to zellij but zellij is not on PATH.",
+        `Install hint: ${muxInstallCommand({ provider: "zellij" })}`,
+      ].join("\n"),
+    });
+    return;
+  }
+
+  if (mode === "auto" && !tmuxPath && !zellijPath) {
+    logger.warn({
+      message: [
+        "sessions.mux is auto, but neither tmux nor zellij is available on PATH.",
+        `Install hint: ${muxInstallCommand({ provider: "tmux" })}`,
+      ].join("\n"),
+    });
+  }
+}
+
 async function ensureNetwork(
   name: string,
   opts?: { readonly subnet?: string; readonly gateway?: string }
@@ -446,6 +495,8 @@ async function globalInstall(): Promise<number> {
       message: "Skipping chafa install (only automated on macOS for now).",
     });
   }
+
+  await warnIfSessionsMuxUnavailable();
 
   s.start("Checking Docker…");
   await ensureDockerRunning();

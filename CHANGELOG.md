@@ -1,3 +1,18 @@
+## <small>1.12.1 (2026-02-24)</small>
+
+* fix: trigger patch release ([d0b2d42](https://github.com/hack-dance/hack/commit/d0b2d42))
+* Debug hack projects mux detection ([67720dc](https://github.com/hack-dance/hack/commit/67720dc))
+* Investigate hack projects mux issue ([6a862b0](https://github.com/hack-dance/hack/commit/6a862b0))
+* Investigate hack projects mux lookup ([b579038](https://github.com/hack-dance/hack/commit/b579038))
+* Merge branch 'main' into dependabot/npm_and_yarn/examples/next-app/next-16.1.5 ([9fe8b94](https://github.com/hack-dance/hack/commit/9fe8b94))
+* Merge branch 'main' into hack-projects-mux-issue ([c4cd388](https://github.com/hack-dance/hack/commit/c4cd388))
+* Merge pull request #12 from hack-dance/hack-projects-mux-issue ([b34e802](https://github.com/hack-dance/hack/commit/b34e802)), closes [#12](https://github.com/hack-dance/hack/issues/12)
+* Merge pull request #6 from hack-dance/dependabot/npm_and_yarn/examples/next-app/next-16.1.5 ([b671a64](https://github.com/hack-dance/hack/commit/b671a64)), closes [#6](https://github.com/hack-dance/hack/issues/6)
+* Merge pull request #7 from hack-dance/dependabot/npm_and_yarn/modelcontextprotocol/sdk-1.26.0 ([ab4d64c](https://github.com/hack-dance/hack/commit/ab4d64c)), closes [#7](https://github.com/hack-dance/hack/issues/7)
+* chore(release): trigger release ([e3bb438](https://github.com/hack-dance/hack/commit/e3bb438))
+* build(deps): bump @modelcontextprotocol/sdk from 1.25.3 to 1.26.0 ([ef1278c](https://github.com/hack-dance/hack/commit/ef1278c))
+* build(deps): bump next from 16.1.1 to 16.1.5 in /examples/next-app ([ea1460d](https://github.com/hack-dance/hack/commit/ea1460d))
+
 ## 1.12.0 (2026-02-20)
 
 * feat(cli): auto-sync agent integrations on project commands ([a83a121](https://github.com/hack-dance/hack/commit/a83a121))

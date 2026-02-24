@@ -1,0 +1,6 @@
+Placeholder file.
+
+This directory is overwritten during release builds when the macOS app is populated with the
+bundled CLI assets. Keeping a real file here avoids stale Xcode project references failing local
+builds if a previously-generated project pointed at a file under `BundledCLI/assets/`.
+

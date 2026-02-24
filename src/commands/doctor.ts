@@ -391,12 +391,12 @@ function checkOptionalFzf(): CheckResult {
   const fzf = getFzfPath();
   if (!fzf) {
     return {
-      name: "fzf (sessions)",
+      name: "fzf (optional)",
       status: "warn",
-      message: "fzf not found (needed for hack session picker)",
+      message: "fzf not found (optional)",
     };
   }
-  return { name: "fzf (sessions)", status: "ok", message: fzf };
+  return { name: "fzf (optional)", status: "ok", message: fzf };
 }
 
 async function checkDockerRunning(): Promise<CheckResult> {
@@ -805,69 +805,152 @@ function parseDnsResponse(opts: {
   readonly expectedId: number;
   readonly recordType: "A" | "AAAA";
 }): string | null {
-  if (opts.msg.length < 12) {
+  const header = parseDnsHeader(opts.msg);
+  if (!header) {
     return null;
   }
-  const id = opts.msg.readUInt16BE(0);
-  if (id !== opts.expectedId) {
+  if (header.id !== opts.expectedId) {
     return null;
   }
 
-  const qd = opts.msg.readUInt16BE(4);
-  const an = opts.msg.readUInt16BE(6);
+  const answersOffset = skipDnsQuestions({
+    msg: opts.msg,
+    offset: header.offsetAfterHeader,
+    qd: header.qd,
+  });
+  if (answersOffset === null) {
+    return null;
+  }
 
-  let offset = 12;
+  return parseDnsAnswers({
+    msg: opts.msg,
+    offset: answersOffset,
+    an: header.an,
+    recordType: opts.recordType,
+  });
+}
 
-  for (let i = 0; i < qd; i += 1) {
+type DnsHeader = {
+  readonly id: number;
+  readonly qd: number;
+  readonly an: number;
+  readonly offsetAfterHeader: number;
+};
+
+function parseDnsHeader(msg: Buffer): DnsHeader | null {
+  if (msg.length < 12) {
+    return null;
+  }
+  return {
+    id: msg.readUInt16BE(0),
+    qd: msg.readUInt16BE(4),
+    an: msg.readUInt16BE(6),
+    offsetAfterHeader: 12,
+  };
+}
+
+function skipDnsQuestions(opts: {
+  readonly msg: Buffer;
+  readonly offset: number;
+  readonly qd: number;
+}): number | null {
+  let offset = opts.offset;
+  for (let i = 0; i < opts.qd; i += 1) {
     offset = skipDnsName(opts.msg, offset);
     offset += 4; // QTYPE + QCLASS
     if (offset > opts.msg.length) {
       return null;
     }
   }
+  return offset;
+}
 
+type DnsAnswerHeader = {
+  readonly type: number;
+  readonly klass: number;
+  readonly rdlength: number;
+  readonly rdataOffset: number;
+  readonly nextOffset: number;
+};
+
+function readDnsAnswerHeader(opts: {
+  readonly msg: Buffer;
+  readonly offset: number;
+}): DnsAnswerHeader | null {
+  if (opts.offset + 10 > opts.msg.length) {
+    return null;
+  }
+  const type = opts.msg.readUInt16BE(opts.offset);
+  const klass = opts.msg.readUInt16BE(opts.offset + 2);
+  const rdlength = opts.msg.readUInt16BE(opts.offset + 8);
+  const rdataOffset = opts.offset + 10;
+  const nextOffset = rdataOffset + rdlength;
+  if (nextOffset > opts.msg.length) {
+    return null;
+  }
+  return { type, klass, rdlength, rdataOffset, nextOffset };
+}
+
+function parseDnsAnswers(opts: {
+  readonly msg: Buffer;
+  readonly offset: number;
+  readonly an: number;
+  readonly recordType: "A" | "AAAA";
+}): string | null {
   const expectedType = opts.recordType === "AAAA" ? 28 : 1;
   const expectedRdlength = opts.recordType === "AAAA" ? 16 : 4;
 
-  for (let i = 0; i < an; i += 1) {
+  let offset = opts.offset;
+  for (let i = 0; i < opts.an; i += 1) {
     offset = skipDnsName(opts.msg, offset);
-    if (offset + 10 > opts.msg.length) {
-      return null;
-    }
-    const type = opts.msg.readUInt16BE(offset);
-    const klass = opts.msg.readUInt16BE(offset + 2);
-    const rdlength = opts.msg.readUInt16BE(offset + 8);
-    offset += 10;
-    if (offset + rdlength > opts.msg.length) {
+
+    const header = readDnsAnswerHeader({ msg: opts.msg, offset });
+    if (!header) {
       return null;
     }
 
-    if (type === expectedType && klass === 1 && rdlength === expectedRdlength) {
-      if (opts.recordType === "A") {
-        const a = opts.msg[offset];
-        const b = opts.msg[offset + 1];
-        const c = opts.msg[offset + 2];
-        const d = opts.msg[offset + 3];
-        return `${a}.${b}.${c}.${d}`;
-      }
-      // AAAA record - parse IPv6 address
-      const parts: string[] = [];
-      for (let j = 0; j < 16; j += 2) {
-        const word = opts.msg.readUInt16BE(offset + j);
-        parts.push(word.toString(16));
-      }
-      // Simplify ::1 representation
-      const ipv6 = parts.join(":");
-      if (ipv6 === "0:0:0:0:0:0:0:1") {
-        return "::1";
-      }
-      return ipv6;
+    if (
+      header.type === expectedType &&
+      header.klass === 1 &&
+      header.rdlength === expectedRdlength
+    ) {
+      return opts.recordType === "A"
+        ? parseDnsARecord({ msg: opts.msg, rdataOffset: header.rdataOffset })
+        : parseDnsAAAARecord({
+            msg: opts.msg,
+            rdataOffset: header.rdataOffset,
+          });
     }
 
-    offset += rdlength;
+    offset = header.nextOffset;
   }
 
   return null;
+}
+
+function parseDnsARecord(opts: {
+  readonly msg: Buffer;
+  readonly rdataOffset: number;
+}): string {
+  const a = opts.msg[opts.rdataOffset];
+  const b = opts.msg[opts.rdataOffset + 1];
+  const c = opts.msg[opts.rdataOffset + 2];
+  const d = opts.msg[opts.rdataOffset + 3];
+  return `${a}.${b}.${c}.${d}`;
+}
+
+function parseDnsAAAARecord(opts: {
+  readonly msg: Buffer;
+  readonly rdataOffset: number;
+}): string {
+  const parts: string[] = [];
+  for (let j = 0; j < 16; j += 2) {
+    const word = opts.msg.readUInt16BE(opts.rdataOffset + j);
+    parts.push(word.toString(16));
+  }
+
+  const ipv6 = parts.join(":");
+  return ipv6 === "0:0:0:0:0:0:0:1" ? "::1" : ipv6;
 }
 
 function skipDnsName(buf: Buffer, startOffset: number): number {
@@ -1228,118 +1311,29 @@ async function readLegacyEnvDevHost(envFile: string): Promise<string | null> {
 }
 
 async function runDoctorFix(): Promise<void> {
-  const ok = await confirm({
+  const ok = await confirmOrThrow({
     message: "Attempt safe auto-remediations now? (network + CoreDNS + CA)",
     initialValue: true,
   });
-  if (isCancel(ok)) {
-    throw new Error("Canceled");
-  }
   if (!ok) {
     return;
   }
 
-  const dockerOk = await exec(["docker", "info"], { stdin: "ignore" });
-  if (dockerOk.exitCode !== 0) {
+  const dockerOk = await dockerInfoOk();
+  if (!dockerOk) {
     note("Docker is not reachable; cannot apply fixes.", "doctor");
     return;
   }
 
-  const daemonPaths = resolveDaemonPaths({});
-  const daemonStatus = await readDaemonStatus({ paths: daemonPaths });
-  let apiOk = false;
-  if (daemonStatus.socketExists) {
-    const ping = await requestDaemonJson({
-      path: "/v1/status",
-      timeoutMs: 500,
-      allowIncompatible: true,
-    });
-    apiOk = ping?.ok ?? false;
-  }
-
-  const daemonReport = buildDaemonStatusReport({
-    pid: daemonStatus.pid,
-    processRunning: daemonStatus.running,
-    socketExists: daemonStatus.socketExists,
-    logExists: daemonStatus.logExists,
-    apiOk,
-  });
-
-  if (daemonReport.status !== "running") {
-    if (daemonReport.status === "stale") {
-      const okStale = await confirm({
-        message: "Clear stale hackd pid/socket files?",
-        initialValue: true,
-      });
-      if (isCancel(okStale)) {
-        throw new Error("Canceled");
-      }
-      if (okStale) {
-        const invocation = await resolveHackInvocation();
-        await run([invocation.bin, ...invocation.args, "daemon", "clear"], {
-          stdin: "inherit",
-        });
-      }
-    }
-
-    const okStart = await confirm({
-      message: "Start hackd now?",
-      initialValue: true,
-    });
-    if (isCancel(okStart)) {
-      throw new Error("Canceled");
-    }
-    if (okStart) {
-      const invocation = await resolveHackInvocation();
-      await run([invocation.bin, ...invocation.args, "daemon", "start"], {
-        stdin: "inherit",
-      });
-    }
-  }
+  await maybeRepairHackd();
 
   const paths = getGlobalPaths();
   await ensureDir(paths.caddyDir);
 
-  const ingress = await inspectDockerNetwork(DEFAULT_INGRESS_NETWORK);
-  if (!(ingress.exists && ingress.hasSubnet)) {
-    const action = ingress.exists ? "Recreate" : "Create";
-    const okNetwork = await confirm({
-      message: `${action} ${DEFAULT_INGRESS_NETWORK} with subnet ${DEFAULT_INGRESS_SUBNET}?`,
-      initialValue: true,
-    });
-    if (isCancel(okNetwork)) {
-      throw new Error("Canceled");
-    }
-    if (okNetwork) {
-      if (ingress.exists) {
-        await run(["docker", "network", "rm", DEFAULT_INGRESS_NETWORK], {
-          stdin: "inherit",
-        });
-      }
-      await run(
-        [
-          "docker",
-          "network",
-          "create",
-          DEFAULT_INGRESS_NETWORK,
-          "--subnet",
-          DEFAULT_INGRESS_SUBNET,
-          "--gateway",
-          DEFAULT_INGRESS_GATEWAY,
-        ],
-        { stdin: "inherit" }
-      );
-    }
-  }
+  const ingressAfterFix = await ensureIngressNetwork();
+  await ensureLoggingNetwork();
 
-  const logging = await inspectDockerNetwork(DEFAULT_LOGGING_NETWORK);
-  if (!logging.exists) {
-    await run(["docker", "network", "create", DEFAULT_LOGGING_NETWORK], {
-      stdin: "inherit",
-    });
-  }
-
-  const useStaticIps = false;
+  const useStaticIps = ingressAfterFix.hasSubnet;
   await writeWithPromptIfDifferent(
     paths.caddyCompose,
     renderGlobalCaddyCompose({
@@ -1352,47 +1346,196 @@ async function runDoctorFix(): Promise<void> {
     renderGlobalCoreDnsConfig({ useStaticCaddyIp: useStaticIps })
   );
 
-  if (await pathExists(paths.caddyCompose)) {
-    await run(
-      [
-        "docker",
-        "compose",
-        "-f",
-        paths.caddyCompose,
-        "up",
-        "-d",
-        "--remove-orphans",
-      ],
-      {
-        cwd: dirname(paths.caddyCompose),
-        stdin: "inherit",
-      }
-    );
+  await maybeStartGlobalCaddyCompose({ paths });
+  await maybeExportCaddyCaCert({ paths });
+  await maybeMigrateDnsmasq();
+}
+
+async function confirmOrThrow(opts: {
+  readonly message: string;
+  readonly initialValue: boolean;
+}): Promise<boolean> {
+  const ok = await confirm({
+    message: opts.message,
+    initialValue: opts.initialValue,
+  });
+  if (isCancel(ok)) {
+    throw new Error("Canceled");
+  }
+  return ok;
+}
+
+async function dockerInfoOk(): Promise<boolean> {
+  const dockerOk = await exec(["docker", "info"], { stdin: "ignore" });
+  return dockerOk.exitCode === 0;
+}
+
+async function maybeRepairHackd(): Promise<void> {
+  const report = await resolveDaemonReportForDoctorFix();
+  if (report.status === "running") {
+    return;
   }
 
-  if (!(await pathExists(paths.caddyCaCert))) {
-    const okCa = await confirm({
-      message: "Export Caddy Local CA cert for container trust?",
+  if (report.status === "stale") {
+    const okClear = await confirmOrThrow({
+      message: "Clear stale hackd pid/socket files?",
       initialValue: true,
     });
-    if (isCancel(okCa)) {
-      throw new Error("Canceled");
-    }
-    if (okCa) {
-      await exportCaddyLocalCaCert({ paths });
+    if (okClear) {
+      await runHackSubcommand({ args: ["daemon", "clear"] });
     }
   }
 
-  // Check for legacy localhost dnsmasq config and offer to migrate to container IP
-  if (isMac()) {
-    const migrationResult = await migrateDnsmasqToContainerIpIfNeeded();
-    if (migrationResult === "migrated") {
-      note(
-        "dnsmasq migrated to container IP - port forwarding issues resolved",
-        "doctor"
-      );
-    }
+  const okStart = await confirmOrThrow({
+    message: "Start hackd now?",
+    initialValue: true,
+  });
+  if (okStart) {
+    await runHackSubcommand({ args: ["daemon", "start"] });
   }
+}
+
+async function resolveDaemonReportForDoctorFix(): Promise<
+  ReturnType<typeof buildDaemonStatusReport>
+> {
+  const daemonPaths = resolveDaemonPaths({});
+  const daemonStatus = await readDaemonStatus({ paths: daemonPaths });
+
+  let apiOk = false;
+  if (daemonStatus.socketExists) {
+    const ping = await requestDaemonJson({
+      path: "/v1/status",
+      timeoutMs: 500,
+      allowIncompatible: true,
+    });
+    apiOk = ping?.ok ?? false;
+  }
+
+  return buildDaemonStatusReport({
+    pid: daemonStatus.pid,
+    processRunning: daemonStatus.running,
+    socketExists: daemonStatus.socketExists,
+    logExists: daemonStatus.logExists,
+    apiOk,
+  });
+}
+
+async function runHackSubcommand(opts: {
+  readonly args: readonly string[];
+}): Promise<void> {
+  const invocation = await resolveHackInvocation();
+  await run([invocation.bin, ...invocation.args, ...opts.args], {
+    stdin: "inherit",
+  });
+}
+
+async function ensureIngressNetwork(): Promise<{
+  exists: boolean;
+  hasSubnet: boolean;
+}> {
+  const ingress = await inspectDockerNetwork(DEFAULT_INGRESS_NETWORK);
+  if (ingress.exists && ingress.hasSubnet) {
+    return ingress;
+  }
+
+  const action = ingress.exists ? "Recreate" : "Create";
+  const okNetwork = await confirmOrThrow({
+    message: `${action} ${DEFAULT_INGRESS_NETWORK} with subnet ${DEFAULT_INGRESS_SUBNET}?`,
+    initialValue: true,
+  });
+  if (!okNetwork) {
+    return ingress;
+  }
+
+  if (ingress.exists) {
+    await run(["docker", "network", "rm", DEFAULT_INGRESS_NETWORK], {
+      stdin: "inherit",
+    });
+  }
+  await run(
+    [
+      "docker",
+      "network",
+      "create",
+      DEFAULT_INGRESS_NETWORK,
+      "--subnet",
+      DEFAULT_INGRESS_SUBNET,
+      "--gateway",
+      DEFAULT_INGRESS_GATEWAY,
+    ],
+    { stdin: "inherit" }
+  );
+
+  return await inspectDockerNetwork(DEFAULT_INGRESS_NETWORK);
+}
+
+async function ensureLoggingNetwork(): Promise<void> {
+  const logging = await inspectDockerNetwork(DEFAULT_LOGGING_NETWORK);
+  if (logging.exists) {
+    return;
+  }
+
+  await run(["docker", "network", "create", DEFAULT_LOGGING_NETWORK], {
+    stdin: "inherit",
+  });
+}
+
+async function maybeStartGlobalCaddyCompose(opts: {
+  readonly paths: ReturnType<typeof getGlobalPaths>;
+}): Promise<void> {
+  if (!(await pathExists(opts.paths.caddyCompose))) {
+    return;
+  }
+
+  await run(
+    [
+      "docker",
+      "compose",
+      "-f",
+      opts.paths.caddyCompose,
+      "up",
+      "-d",
+      "--remove-orphans",
+    ],
+    {
+      cwd: dirname(opts.paths.caddyCompose),
+      stdin: "inherit",
+    }
+  );
+}
+
+async function maybeExportCaddyCaCert(opts: {
+  readonly paths: ReturnType<typeof getGlobalPaths>;
+}): Promise<void> {
+  if (await pathExists(opts.paths.caddyCaCert)) {
+    return;
+  }
+
+  const okCa = await confirmOrThrow({
+    message: "Export Caddy Local CA cert for container trust?",
+    initialValue: true,
+  });
+  if (!okCa) {
+    return;
+  }
+
+  await exportCaddyLocalCaCert({ paths: opts.paths });
+}
+
+async function maybeMigrateDnsmasq(): Promise<void> {
+  if (!isMac()) {
+    return;
+  }
+
+  const migrationResult = await migrateDnsmasqToContainerIpIfNeeded();
+  if (migrationResult !== "migrated") {
+    return;
+  }
+
+  note(
+    "dnsmasq migrated to container IP - port forwarding issues resolved",
+    "doctor"
+  );
 }
 
 /**

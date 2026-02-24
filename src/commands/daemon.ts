@@ -13,12 +13,17 @@ import {
   getLaunchdServiceStatus,
   installLaunchdService,
   kickstartLaunchdService,
+  type LaunchdServiceStatus,
   uninstallLaunchdService,
 } from "../daemon/launchd.ts";
-import { resolveDaemonPaths } from "../daemon/paths.ts";
+import { type DaemonPaths, resolveDaemonPaths } from "../daemon/paths.ts";
 import { removeFileIfExists, waitForProcessExit } from "../daemon/process.ts";
 import { runDaemon } from "../daemon/server.ts";
-import { buildDaemonStatusReport, readDaemonStatus } from "../daemon/status.ts";
+import {
+  buildDaemonStatusReport,
+  type DaemonStatusReport,
+  readDaemonStatus,
+} from "../daemon/status.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
 import { pathExists, readTextFile } from "../lib/fs.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
@@ -291,73 +296,95 @@ async function handleDaemonStatus({
 }): Promise<number> {
   const paths = resolveDaemonPaths({});
   const status = await readDaemonStatus({ paths });
-  const processRunning = status.running;
-  let apiOk = false;
-
-  if (status.socketExists) {
-    const ping = await requestDaemonJson({
-      path: "/v1/status",
-      timeoutMs: 500,
-      allowIncompatible: true,
-    });
-    apiOk = ping?.ok ?? false;
-  }
-
+  const apiOk = await checkDaemonApi({ socketExists: status.socketExists });
   const report = buildDaemonStatusReport({
     pid: status.pid,
-    processRunning,
+    processRunning: status.running,
     socketExists: status.socketExists,
     logExists: status.logExists,
     apiOk,
   });
-
-  const launchdStatus =
-    process.platform === "darwin"
-      ? await getLaunchdServiceStatus({ paths })
-      : null;
+  const launchdStatus = await resolveLaunchdStatus({ paths });
 
   if (args.options.json) {
-    process.stdout.write(
-      `${JSON.stringify(
-        {
-          status: report.status,
-          running: report.running,
-          api_ok: report.apiOk,
-          process_running: report.processRunning,
-          stale: report.stale,
-          stale_reason: report.staleReason,
-          pid: report.pid,
-          socket_path: paths.socketPath,
-          socket_exists: report.socketExists,
-          log_path: paths.logPath,
-          log_exists: report.logExists,
-          launchd: launchdStatus
-            ? {
-                installed: launchdStatus.installed,
-                loaded: launchdStatus.loaded,
-                running: launchdStatus.running,
-                pid: launchdStatus.pid,
-                exit_status: launchdStatus.exitStatus,
-                plist_path: paths.launchdPlistPath,
-              }
-            : null,
-        },
-        null,
-        2
-      )}\n`
-    );
+    outputDaemonStatusJson({
+      report,
+      paths,
+      launchdStatus,
+    });
     return report.status === "running" ? 0 : 1;
   }
 
+  return reportDaemonStatus({
+    report,
+    launchdStatus,
+  });
+}
+
+async function checkDaemonApi(opts: {
+  readonly socketExists: boolean;
+}): Promise<boolean> {
+  if (!opts.socketExists) {
+    return false;
+  }
+  const ping = await requestDaemonJson({
+    path: "/v1/status",
+    timeoutMs: 500,
+    allowIncompatible: true,
+  });
+  return ping?.ok ?? false;
+}
+
+async function resolveLaunchdStatus(opts: {
+  readonly paths: DaemonPaths;
+}): Promise<LaunchdServiceStatus | null> {
+  if (process.platform !== "darwin") {
+    return null;
+  }
+  return await getLaunchdServiceStatus({ paths: opts.paths });
+}
+
+function outputDaemonStatusJson(opts: {
+  readonly report: DaemonStatusReport;
+  readonly paths: DaemonPaths;
+  readonly launchdStatus: LaunchdServiceStatus | null;
+}): void {
+  const payload = {
+    status: opts.report.status,
+    running: opts.report.running,
+    api_ok: opts.report.apiOk,
+    process_running: opts.report.processRunning,
+    stale: opts.report.stale,
+    stale_reason: opts.report.staleReason,
+    pid: opts.report.pid,
+    socket_path: opts.paths.socketPath,
+    socket_exists: opts.report.socketExists,
+    log_path: opts.paths.logPath,
+    log_exists: opts.report.logExists,
+    launchd: opts.launchdStatus
+      ? {
+          installed: opts.launchdStatus.installed,
+          loaded: opts.launchdStatus.loaded,
+          running: opts.launchdStatus.running,
+          pid: opts.launchdStatus.pid,
+          exit_status: opts.launchdStatus.exitStatus,
+          plist_path: opts.paths.launchdPlistPath,
+        }
+      : null,
+  };
+  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+}
+
+function reportDaemonStatus(opts: {
+  readonly report: DaemonStatusReport;
+  readonly launchdStatus: LaunchdServiceStatus | null;
+}): number {
+  const { report, launchdStatus } = opts;
   if (report.status === "running") {
     logger.success({
       message: `hackd running (pid ${report.pid ?? "unknown"})`,
     });
-    if (launchdStatus?.installed) {
-      logger.info({
-        message: `  launchd: ${launchdStatus.loaded ? "loaded" : "not loaded"}`,
-      });
-    }
+    logLaunchdStatus({ launchdStatus, running: true });
     return 0;
   }
 
@@ -373,12 +400,28 @@ async function handleDaemonStatus({
       ? "hackd stopped (stale state detected)"
       : "hackd is not running",
   });
-  if (launchdStatus?.installed) {
-    logger.info({
-      message: `  launchd: ${launchdStatus.loaded ? "loaded (not running)" : "not loaded"}`,
-    });
-  }
+  logLaunchdStatus({ launchdStatus, running: false });
   return 1;
+}
+
+function logLaunchdStatus(opts: {
+  readonly launchdStatus: LaunchdServiceStatus | null;
+  readonly running: boolean;
+}): void {
+  if (!opts.launchdStatus?.installed) {
+    return;
+  }
+  if (opts.running) {
+    logger.info({
+      message: `  launchd: ${opts.launchdStatus.loaded ? "loaded" : "not loaded"}`,
+    });
+    return;
+  }
+  logger.info({
+    message: `  launchd: ${
+      opts.launchdStatus.loaded ? "loaded (not running)" : "not loaded"
+    }`,
+  });
 }
 
 async function handleDaemonMetrics({

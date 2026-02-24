@@ -84,6 +84,7 @@ pub fn build(b: *std.Build) !void {
     const uucode = b.dependency("uucode", .{
         .build_config_path = std.Build.LazyPath{ .cwd_relative = uucode_config_path },
     });
+    ghostty_vt_impl.addImport("uucode", uucode.module("uucode"));
     const unicode_tables = try UnicodeTables.init(b, ghostty_path, uucode);
     unicode_tables.addModuleImport(ghostty_vt_impl);
 

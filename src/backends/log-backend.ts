@@ -1,6 +1,6 @@
-import { run } from "../lib/shell.ts";
 import {
   dockerComposeLogsJson,
+  dockerComposeLogsPlain,
   dockerComposeLogsPretty,
 } from "../ui/docker-logs.ts";
 import type { LogStreamContext } from "../ui/log-stream.ts";
@@ -20,6 +20,11 @@ export interface ComposeLogOptions {
   readonly profiles?: readonly string[];
   readonly format: LogOutputFormat;
   readonly streamContext?: LogStreamContext;
+  readonly lifecycle?: {
+    readonly logPath: string;
+    readonly service?: string;
+    readonly composeDisabled?: boolean;
+  };
 }
 
 export interface LokiLogOptions {
@@ -61,6 +66,7 @@ export const composeLogBackend: ComposeLogBackend = {
         composeProject: opts.composeProject,
         profiles: opts.profiles,
         streamContext: opts.streamContext,
+        lifecycle: opts.lifecycle,
       });
     }
 
@@ -74,26 +80,21 @@ export const composeLogBackend: ComposeLogBackend = {
         projectName: opts.projectName,
         composeProject: opts.composeProject,
         profiles: opts.profiles,
+        lifecycle: opts.lifecycle,
       });
     }
 
-    const cmd = [
-      "docker",
-      "compose",
-      ...(opts.composeProject ? ["-p", opts.composeProject] : []),
-      "-f",
-      opts.composeFile,
-      ...(opts.profiles
-        ? opts.profiles.flatMap((profile) => ["--profile", profile] as const)
-        : []),
-      "logs",
-      ...(opts.follow ? ["-f"] : []),
-      "--tail",
-      String(opts.tail),
-      ...(opts.service ? [opts.service] : []),
-    ];
-
-    return await run(cmd, { cwd: opts.cwd });
+    return await dockerComposeLogsPlain({
+      composeFile: opts.composeFile,
+      cwd: opts.cwd,
+      follow: opts.follow,
+      tail: opts.tail,
+      service: opts.service,
+      projectName: opts.projectName,
+      composeProject: opts.composeProject,
+      profiles: opts.profiles,
+      lifecycle: opts.lifecycle,
+    });
   },
 };
 

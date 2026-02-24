@@ -9,12 +9,14 @@ description: >
 # hack tickets
 
 This repo uses the hack tickets extension (`dance.hack.tickets`).
+Prefer `hack tickets ...` (alias) or `hack x tickets ...` over manual edits in `.hack/tickets/`.
 
 ## Enable
 
 Enable globally:
 
 - `hack config set --global 'controlPlane.extensions["dance.hack.tickets"].enabled' true`
+- `hack setup sync --all-scopes` (refresh generated agent instructions + skills + MCP config)
 
 Or per-project by adding `.hack/hack.config.json`:
 
@@ -61,3 +63,5 @@ Tip: use `--body-stdin` for multi-line markdown.
 - Keep ticket titles short; put detail in `--body`.
 - Use `--json` for agent workflows and piping.
 - Run `hack x tickets sync` before opening PRs if you want tickets to travel with the repo.
+- Update status continuously (`open` -> `in_progress` -> `blocked`/`done`) so handoffs are explicit.
+- Use `--depends-on` / `--blocks` links to model execution order for parallel agent work.

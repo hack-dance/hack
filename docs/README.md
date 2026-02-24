@@ -6,7 +6,9 @@ This directory contains the public documentation for hack. Specs remain in `SPEC
 
 - [CLI reference](cli.md)
 - [Architecture](architecture.md)
-- [Sessions](sessions.md) - tmux session management + API
+- [Sessions](sessions.md) - mux session management (tmux or zellij) + API
+- [Env & secrets](env.md) - env contract + `.hack/.env` + OS keychain secrets
+- [Lifecycle](lifecycle.md) - project startup hooks + managed host processes
 - [Gateway overview](gateway.md)
 - [Gateway API](gateway-api.md)
 - [Supervisor](supervisor.md)

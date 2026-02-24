@@ -92,6 +92,7 @@ Agent-assisted (Cursor/Claude/Codex with shell access):
 ```bash
 hack setup cursor   # or hack setup claude / hack setup codex
 hack setup agents   # optional: adds AGENTS.md + CLAUDE.md snippets
+hack setup sync --all-scopes   # optional: refresh project + user integrations
 hack agent init --client cursor   # or --client claude / --client codex
 hack agent patterns              # optional: dependency/ops checklist
 ```
@@ -256,11 +257,11 @@ hack daemon logs
 On macOS, you can install `hackd` as a launchd service for automatic management:
 
 ```bash
-# Install with auto-start on login
-hack daemon install --run-at-load
+# Install (auto-start on login by default)
+hack daemon install
 
 # Install without auto-start (manual start/stop via launchd)
-hack daemon install
+hack daemon install --no-run-at-load
 
 # Uninstall the launchd service
 hack daemon uninstall
@@ -392,6 +393,7 @@ hack setup cursor
 hack setup claude
 hack setup codex
 hack setup agents
+hack setup sync --all-scopes
 ```
 
 What each setup command does:
@@ -400,6 +402,12 @@ What each setup command does:
 - `hack setup codex`: installs the Codex skill in `.codex/skills/hack-cli/SKILL.md`
 - `hack setup agents`: adds/updates hack usage snippets in `AGENTS.md` and `CLAUDE.md`
 - `hack setup mcp`: writes MCP configs for no-shell clients
+- `hack setup sync --all-scopes`: refreshes docs, skills, and MCP config at project + user scope
+
+Automatic guardrail:
+- Project-level `hack` commands (interactive sessions) auto-check docs/skills/MCP drift and attempt auto-sync.
+- To warn-only: `HACK_SETUP_SYNC_MODE=warn`
+- To disable: `HACK_SETUP_SYNC_MODE=off`
 
 Primer helpers:
 - `hack agent prime`: short CLI-first primer used by Claude Code hooks
@@ -410,6 +418,7 @@ Primer helpers:
 Recommended flow:
 - Use `hack setup cursor|claude|codex` for your agent client
 - Use `hack setup agents` to document hack usage inside the repo
+- Use `hack setup sync --all-scopes` after `hack update` to refresh generated integrations
 - Use `hack setup mcp` only when the agent has no shell access
 
 ## MCP (no-shell clients)
@@ -438,6 +447,7 @@ hack mcp install --all --scope project
 ```
 
 Project scope writes `.cursor/mcp.json`, `.claude/settings.json`, and `.codex/config.toml`.
+For `--scope project`, `hack mcp install` also updates `AGENTS.md` and `CLAUDE.md` by default.
 
 Print config snippets without writing:
 
@@ -581,6 +591,13 @@ We keep `.hack` as the primary local dev domain, and optionally expose an alias 
 If the OAuth alias is enabled, `hack global install` configures `*.hack.gy` to resolve to the Caddy
 container IP via dnsmasq + the OS resolver (bypasses port forwarding issues with Tailscale/VPNs).
 
+Routing rules:
+
+- `https://*.hack` is the default local-dev hostname space.
+- `https://*.hack.gy` is an OAuth-safe alias host space (public-suffix-style domain).
+- Only services with Caddy labels and attached to `hack-dev` are exposed via these hostnames.
+- These domains are local routes by default; use tunnels/remote ingress separately for internet-reachable webhooks.
+
 If you use Next.js (or another dev server that cares about dev origins), configure its dev allowlist to include the proxy domains.
 Next.js supports `allowedDevOrigins` (wildcards supported) in `next.config.js`:
 
@@ -624,6 +641,10 @@ Use `--out <dir>` if you want certs written somewhere else.
 
 `hack global install` runs CoreDNS on the `hack-dev` network. CoreDNS answers `*.hack` and `*.hack.*` with
 Caddy’s current IP so containers can use the same `https://*.hack` URLs as the host.
+
+This is the core isolation model: each repo keeps its own compose network, while routed HTTP services get stable hostnames
+through shared Caddy ingress. That means you can call local services by hostname from host or container without relying on
+host-published `localhost:<port>` patterns.
 
 Some runtimes don’t honor custom DNS for `*.hack` reliably, so `hack up` also injects `extra_hosts` mappings
 to the Caddy IP. If the Caddy IP changes, `hack status`, `hack doctor`, and the TUI show a warning; fix it

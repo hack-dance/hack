@@ -29,6 +29,10 @@ Run `hack help` or `hack help <command>` for interactive help.
 | `hack tui` | Open the project TUI (services + logs) | Project |
 | `hack branch` | Manage branch aliases for a project | Project |
 | `hack config` | Read/write hack.config.json values | Project |
+| `hack env` | Manage project environment variables and secrets | Project |
+| `hack session` | Manage terminal sessions for hack projects | Project |
+| `hack ssh` | Show SSH connection info for remote access | Project |
+| `hack tickets` | Git-backed ticket management | Project |
 | `hack internal` | Manage hack-managed internal overrides | Internal |
 | `hack gateway` | Manage gateway enablement | Extensions |
 | `hack remote` | Remote workflow helpers | Extensions |
@@ -40,6 +44,7 @@ Run `hack help` or `hack help <command>` for interactive help.
 | `hack daemon` | Manage the local hack daemon (hackd) | Diagnostics |
 | `hack log-pipe` | Read log lines from stdin and pretty-print them | Diagnostics |
 | `hack help` | Show help for a command | Diagnostics |
+| `hack update` | Update hack to the latest release | Diagnostics |
 | `hack version` | Print version | Diagnostics |
 | `hack secrets` | Manage secrets in OS keychain (Bun.secrets) | Secrets |
 | `hack the` | Fun commands | Fun |
@@ -120,6 +125,7 @@ Options:
 | --- | --- | --- | --- |
 | `--project <name>` | string | - | Filter to a registered project name |
 | `--details` | boolean | false | Show per-project service tables |
+| `--meta` | boolean | false | Include git/worktree/session/env metadata (implies --details) |
 | `--include-global` | boolean | false | Include global infra projects under `~/.hack` |
 | `--all` | boolean | false | Include unregistered docker compose projects |
 | `--json` | boolean | false | Output JSON (machine-readable) |
@@ -331,6 +337,10 @@ Options:
 | `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
 | `--project <name>` | string | - | Target a registered project by name |
 
+Notes:
+
+- In the TUI, press `i` on a selected lifecycle host process to jump into its interactive mux session (useful for sudo/auth prompts during startup scripts).
+
 ### hack branch
 
 Usage: `hack branch <subcommand>`
@@ -454,6 +464,147 @@ Options:
 | `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
 | `--project <name>` | string | - | Target a registered project by name |
 | `--global` | boolean | false | Write global `~/.hack/hack.config.json` |
+
+### hack env
+
+Usage: `hack env <subcommand>`
+
+Subcommands:
+
+| Subcommand | Summary |
+| --- | --- |
+| `list` | List env contract vars and resolution state |
+| `set` | Set an env value (.hack/.env or keychain) |
+| `unset` | Unset an env value (.hack/.env and keychain) |
+
+#### hack env list
+
+Usage: `hack env list [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
+| `--project <name>` | string | - | Target a registered project by name |
+| `--json` | boolean | false | Output JSON (machine-readable) |
+| `--show-secrets` | boolean | false | Print secret values (keychain) in plaintext |
+
+#### hack env set
+
+Usage: `hack env set [spec] [options]`
+
+`spec` can be `KEY` or `KEY=VALUE`. If omitted, hack will prompt interactively.
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
+| `--project <name>` | string | - | Target a registered project by name |
+| `--secret` | boolean | false | Store value in OS keychain (Bun.secrets) instead of .hack/.env |
+
+#### hack env unset
+
+Usage: `hack env unset [key] [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
+| `--project <name>` | string | - | Target a registered project by name |
+
+### hack session
+
+Usage: `hack session [subcommand]`
+
+With no subcommand, opens an interactive picker of active sessions and available projects.
+
+Subcommands:
+
+| Subcommand | Summary |
+| --- | --- |
+| `list` | List active sessions |
+| `start` | Start or attach to a session for a project |
+| `stop` | Stop (kill) a session |
+| `attach` | Attach to an existing session |
+| `exec` | Execute a command in a session |
+| `panes` | List panes in a tmux session |
+| `capture` | Capture recent output from a tmux session |
+| `tail` | Tail output from a tmux session |
+
+#### hack session start
+
+Usage: `hack session start [project] [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--up` | boolean | false | Run hack up -d before attaching |
+| `--new` | boolean | false | Force create new session even if one exists |
+| `--name <suffix>` | string | - | Custom suffix for new session (e.g., agent-1) |
+
+#### hack session panes
+
+Usage: `hack session panes <session> [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | boolean | false | Output NDJSON stream (start/log/end) |
+| `--pretty` | boolean | false | Output human-friendly text |
+
+#### hack session capture
+
+Usage: `hack session capture <session> [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--target <target>` | string | - | Tmux pane target (default: active pane) |
+| `--lines <n>` | number | 200 | Number of lines to capture |
+| `--json` | boolean | false | Output NDJSON stream (start/log/end) |
+| `--pretty` | boolean | false | Output human-friendly text |
+
+#### hack session tail
+
+Usage: `hack session tail <session> [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--target <target>` | string | - | Tmux pane target (default: active pane) |
+| `--lines <n>` | number | 200 | Number of lines to capture |
+| `--interval-ms <ms>` | number | 500 | Polling interval in milliseconds |
+| `--max-ms <ms>` | number | 5000 | Stop tailing after N milliseconds |
+| `--json` | boolean | false | Output NDJSON stream (start/log/end) |
+| `--pretty` | boolean | false | Output human-friendly text |
+
+### hack ssh
+
+Usage: `hack ssh [session] [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `-H`, `--host <host>` | string | - | SSH host (hostname or IP) |
+| `-u`, `--user <user>` | string | - | SSH username |
+| `-t`, `--tailscale` | boolean | false | Use Tailscale SSH |
+| `-d`, `--direct` | boolean | false | Use direct SSH (requires --host) |
+| `-p`, `--port <port>` | string | - | SSH port for direct connection (default: 22) |
+
+### hack tickets
+
+Usage: `hack tickets <args...>`
+
+`hack tickets` is a convenience alias for the tickets extension (`hack x tickets ...`).
+Run `hack tickets` with no args to see available subcommands.
 
 ## Internal commands
 
@@ -646,6 +797,7 @@ Subcommands:
 | `codex` | Install Codex skill for hack CLI usage |
 | `tickets` | Install Codex skill for hack tickets usage |
 | `agents` | Install AGENTS.md / CLAUDE.md snippets |
+| `sync` | Refresh agent docs, skills, and MCP configs |
 | `mcp` | Install MCP configs for hack CLI usage (no-shell only) |
 
 #### hack setup cursor
@@ -701,6 +853,25 @@ Options:
 | `--claude-md` | boolean | false | Target CLAUDE.md |
 | `--check` | boolean | false | Check whether integration is installed |
 | `--remove` | boolean | false | Remove integration files/config |
+
+#### hack setup sync
+
+Usage: `hack setup sync [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
+| `--global` | boolean | false | Target global (user) scope only |
+| `--all-scopes` | boolean | false | Target both project and global (user) scopes |
+| `--check` | boolean | false | Check whether integrations are installed |
+| `--remove` | boolean | false | Remove generated integration files/config |
+
+Automatic guardrail:
+
+- In interactive project sessions, `hack` auto-checks docs/skills/MCP drift and attempts auto-sync.
+- Override mode with `HACK_SETUP_SYNC_MODE=warn` (warn-only) or `HACK_SETUP_SYNC_MODE=off` (disable).
 
 #### hack setup mcp
 
@@ -771,6 +942,11 @@ Options:
 | `--docs` | boolean | false | Update AGENTS.md and CLAUDE.md with hack usage |
 | `--agents-md` | boolean | false | Update AGENTS.md with hack usage |
 | `--claude-md` | boolean | false | Update CLAUDE.md with hack usage |
+
+Notes:
+
+- For `--scope project`, `hack mcp install` updates `AGENTS.md` + `CLAUDE.md` by default when no docs flags are provided.
+- Use `--scope user` to skip project-doc updates and write only user-level MCP configs.
 
 #### hack mcp print
 
@@ -859,7 +1035,7 @@ Options:
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--run-at-load` | boolean | false | Start hackd automatically on login |
+| `--run-at-load` | boolean | true | Start hackd automatically on login |
 | `--no-run-at-load` | boolean | - | Do not start hackd automatically on login |
 | `--gui-only` | boolean | true | Only run in GUI sessions (Aqua) |
 | `--no-gui-only` | boolean | - | Run in all session types (including SSH) |
@@ -894,6 +1070,19 @@ Arguments:
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `path` | string[] | no | Command path to show help for (e.g. `global logs`) |
+
+### hack update
+
+Usage: `hack update [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--check` | boolean | false | Check for updates (do not install) |
+| `--yes` | boolean | false | Apply update without prompting |
+| `--tag <tag>` | string | - | Update to a specific release tag (e.g. v1.4.0) |
+| `--json` | boolean | false | Output JSON (machine-readable) |
 
 ### hack version
 

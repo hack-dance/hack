@@ -4,21 +4,49 @@ import HackDesktopModels
 
 struct RuntimeDetailView: View {
   @Environment(DashboardModel.self) private var model
-  @Environment(\.openURL) private var openURL
   @State private var showDaemonDetails = false
   @State private var showRuntimeDetails = false
+  @AppStorage("hackDesktop.setupGuidance.runtime.dismissed") private var setupDismissed = false
+  @State private var showSetupAssistant = false
 
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 20) {
         header
+        if shouldShowSetupGuidance {
+          setupNudge
+        }
         statusSummaryBar
         daemonCard
         runtimeCard
         globalServicesSection
       }
-      .padding(24)
+      .padding(16)
     }
+    .sheet(isPresented: $showSetupAssistant) {
+      SetupAssistantView(initialSection: .runtime)
+        .environment(model)
+    }
+  }
+
+  private var shouldShowSetupGuidance: Bool {
+    if ProcessInfo.processInfo.environment["HACK_DESKTOP_FORCE_SETUP_GUIDANCE"] == "1" { return true }
+
+    if setupDismissed { return false }
+
+    // Fresh machines commonly need global install + CA trust. If we can't fetch global status, guide them.
+    if model.globalStatus == nil { return true }
+    return false
+  }
+
+  private var setupNudge: some View {
+    SetupNudgeCard(
+      title: "First-time setup",
+      subtitle: "Looks like this machine isn't set up yet. Run the setup steps once (some will prompt for sudo).",
+      primaryActionLabel: "Setup…",
+      onPrimaryAction: { showSetupAssistant = true },
+      onDismiss: { setupDismissed = true }
+    )
   }
 
   private var statusSummaryBar: some View {
@@ -47,44 +75,60 @@ struct RuntimeDetailView: View {
     HStack(spacing: 4) {
       Image(systemName: icon)
         .foregroundStyle(isOk ? .green : .orange)
-        .font(.caption)
+        .font(.mono(.caption))
       Text(label)
-        .font(.caption)
+        .font(.mono(.caption))
         .foregroundStyle(.secondary)
     }
     .padding(.horizontal, 8)
     .padding(.vertical, 4)
     .background(
-      RoundedRectangle(cornerRadius: 8, style: .continuous)
-        .fill(isOk ? Color.green.opacity(0.1) : Color.orange.opacity(0.1))
+      RoundedRectangle(cornerRadius: 10, style: .continuous)
+        .fill(isOk ? Color.green.opacity(0.12) : Color.orange.opacity(0.12))
     )
   }
 
   private var header: some View {
     VStack(alignment: .leading, spacing: 8) {
-      HStack(alignment: .center, spacing: 12) {
-        Label("Runtime", systemImage: "gauge")
-          .font(.title2.weight(.semibold))
-        StatusPill(text: runtimeStatusText, tone: runtimeStatusTone)
-        Spacer()
-        if canStopDaemon {
-          Button(daemonActionTitle) {
-            Task { await model.stopDaemon() }
+      SectionHeader(
+        breadcrumb: "System / Runtime",
+        title: "Runtime",
+        subtitle: "Local daemon, runtime health, and global services",
+        status: { StatusPill(text: runtimeStatusText, tone: runtimeStatusTone) },
+        actions: {
+          Menu {
+            Button("Refresh") {
+              Task { await model.refresh() }
+            }
+            Button("Setup…") {
+              showSetupAssistant = true
+            }
+            if canStopDaemon {
+              Button(daemonActionTitle) {
+                Task { await model.stopDaemon() }
+              }
+            } else if canStartDaemon {
+              Button(daemonActionTitle) {
+                Task { await model.startDaemon() }
+              }
+            }
+            Button("Restart hackd") {
+              Task { await model.restartDaemon() }
+            }
+            if canClearDaemon {
+              Button("Clear state") {
+                Task { await model.clearDaemon() }
+              }
+            }
+          } label: {
+            Image(systemName: "ellipsis.circle")
           }
-          .adaptiveToolbarButton()
-        } else if canStartDaemon {
-          Button(daemonActionTitle) {
-            Task { await model.startDaemon() }
-          }
-          .adaptiveToolbarButtonProminent()
+          .buttonStyle(.plain)
         }
-      }
-      Text("Local daemon, runtime health, and global services")
-        .font(.subheadline)
-        .foregroundStyle(.secondary)
+      )
       if let generatedAt = model.globalStatus?.generatedAt, !generatedAt.isEmpty {
         Text("Last updated: \(generatedAt)")
-          .font(.caption)
+          .font(.mono(.caption))
           .foregroundStyle(.secondary)
       }
     }
@@ -97,24 +141,35 @@ struct RuntimeDetailView: View {
         Divider()
       }
       HStack(spacing: 12) {
-        Button("Open Logs") {
-          if let logUrl = logUrl {
-            openURL(logUrl)
-          }
+        Button {
+          openDaemonLogsInTerminalPanel()
+        } label: {
+          Label("Open logs", systemImage: "text.alignleft")
         }
-        .disabled(logUrl == nil)
-        Button("Refresh Status") {
+        .adaptiveToolbarButtonProminent()
+
+        Button {
           Task { await model.refresh() }
+        } label: {
+          Label("Refresh status", systemImage: "arrow.clockwise")
         }
+        .adaptiveToolbarButton()
+
         if canRestartDaemon {
-          Button("Restart") {
+          Button {
             Task { await model.restartDaemon() }
+          } label: {
+            Label("Restart", systemImage: "arrow.triangle.2.circlepath")
           }
+          .adaptiveToolbarButton()
         }
         if canClearDaemon {
-          Button("Clear State") {
+          Button {
             Task { await model.clearDaemon() }
+          } label: {
+            Label("Clear state", systemImage: "trash")
           }
+          .adaptiveToolbarButton()
         }
       }
       Divider()
@@ -124,7 +179,7 @@ struct RuntimeDetailView: View {
           .padding(.top, 8)
       } label: {
         Text("Details")
-          .font(.caption)
+          .font(.mono(.caption))
           .foregroundStyle(.secondary)
       }
       .padding(.top, 8)
@@ -137,10 +192,10 @@ struct RuntimeDetailView: View {
         Image(systemName: "info.circle.fill")
           .foregroundStyle(.blue)
         Text("Daemon not running")
-          .font(.subheadline.weight(.medium))
+          .font(.mono(.subheadline, weight: .medium))
       }
       Text("The hack daemon manages your local development environment. Start it to enable project monitoring, logs, and gateway access.")
-        .font(.caption)
+        .font(.mono(.caption))
         .foregroundStyle(.secondary)
       Button {
         Task { await model.startDaemon() }
@@ -161,7 +216,7 @@ struct RuntimeDetailView: View {
       }
       if let error = model.runtimeError, !error.isEmpty, model.runtimeOk != true {
         Text(error)
-          .font(.caption)
+          .font(.mono(.caption))
           .foregroundStyle(.red)
       }
       DetailRows(rows: runtimeRows)
@@ -172,6 +227,7 @@ struct RuntimeDetailView: View {
   private var globalServicesSection: some View {
     if let status = model.globalStatus {
       globalSummaryCard(summary: status.summary, generatedAt: status.generatedAt)
+      runtimeDiagnosticsCard
       if let caddy = status.caddy {
         composeCard(title: "Caddy", systemImage: "globe", group: caddy)
       }
@@ -188,28 +244,34 @@ struct RuntimeDetailView: View {
             Image(systemName: "exclamationmark.triangle.fill")
               .foregroundStyle(.orange)
             Text("Status unavailable")
-              .font(.subheadline.weight(.medium))
+              .font(.mono(.subheadline, weight: .medium))
           }
-          Text("Global services status requires the daemon to be running. These services include Caddy (reverse proxy), logging infrastructure, and Docker networks.")
-            .font(.caption)
+          Text("Global services status is provided by `hack global status`. If you haven't set up this machine yet, run `hack global install` (and then `hack global trust` on macOS).")
+            .font(.mono(.caption))
             .foregroundStyle(.secondary)
-          if canStartDaemon {
+          HStack(spacing: 10) {
             Button {
-              Task { await model.startDaemon() }
+              TerminalIntegration.copyToClipboard("hack global install")
             } label: {
-              Label("Start hackd", systemImage: "play.fill")
+              Label("Copy install", systemImage: "doc.on.doc")
+            }
+            .adaptiveToolbarButton()
+
+            Button {
+              TerminalIntegration.openTerminalWithCommand("hack global install")
+            } label: {
+              Label("Open Terminal", systemImage: "terminal")
             }
             .adaptiveToolbarButtonProminent()
-            .padding(.top, 4)
-          } else {
+
             Button {
               Task { await model.refresh() }
             } label: {
               Label("Refresh", systemImage: "arrow.clockwise")
             }
             .adaptiveToolbarButton()
-            .padding(.top, 4)
           }
+          .padding(.top, 4)
         }
       }
     }
@@ -225,8 +287,55 @@ struct RuntimeDetailView: View {
       ])
       if let generatedAt, !generatedAt.isEmpty {
         Text("Generated at \(generatedAt)")
-          .font(.caption)
+          .font(.mono(.caption))
           .foregroundStyle(.secondary)
+      }
+    }
+  }
+
+  private var runtimeDiagnosticsCard: some View {
+    GlassCard(title: "Diagnostics", systemImage: "text.alignleft") {
+      Text("Open live tails for daemon, ingress (Caddy/CoreDNS), and Docker network state.")
+        .font(.mono(.caption))
+        .foregroundStyle(.secondary)
+      HStack(spacing: 10) {
+        Button {
+          openDaemonLogsInTerminalPanel()
+        } label: {
+          Label("Daemon logs", systemImage: "waveform.path.ecg")
+        }
+        .adaptiveToolbarButtonProminent()
+
+        Button {
+          openGlobalCommandInTerminalPanel(
+            command: "hack global logs caddy --tail 200 --follow",
+            title: "caddy logs"
+          )
+        } label: {
+          Label("Caddy logs", systemImage: "globe")
+        }
+        .adaptiveToolbarButton()
+
+        Button {
+          openGlobalCommandInTerminalPanel(
+            command: "docker compose -f \"$HOME/.hack/caddy/docker-compose.yml\" logs --tail 200 -f coredns",
+            title: "coredns logs"
+          )
+        } label: {
+          Label("CoreDNS logs", systemImage: "network")
+        }
+        .adaptiveToolbarButton()
+
+        Button {
+          openGlobalCommandInTerminalPanel(
+            command: "docker network inspect hack-dev hack-logging 2>/dev/null || docker network ls",
+            title: "network diagnostics"
+          )
+        } label: {
+          Label("Network diagnostics", systemImage: "point.3.filled.connected.trianglepath.dotted")
+        }
+        .adaptiveToolbarButton()
+        Spacer()
       }
     }
   }
@@ -239,7 +348,7 @@ struct RuntimeDetailView: View {
       }
       if let error = group.error, !error.isEmpty, !group.ok {
         Text(error)
-          .font(.caption)
+          .font(.mono(.caption))
           .foregroundStyle(.red)
       }
       if !group.services.isEmpty {
@@ -248,15 +357,15 @@ struct RuntimeDetailView: View {
             VStack(alignment: .leading, spacing: 2) {
               HStack {
                 Text(service.name)
-                  .font(.subheadline.weight(.medium))
+                  .font(.mono(.subheadline, weight: .medium))
                 Spacer()
                 Text(service.status)
-                  .font(.caption)
+                  .font(.mono(.caption))
                   .foregroundStyle(.secondary)
               }
               if !service.ports.isEmpty {
                 Text(service.ports)
-                  .font(.caption2)
+                  .font(.mono(.caption2))
                   .foregroundStyle(.secondary)
               }
             }
@@ -264,7 +373,7 @@ struct RuntimeDetailView: View {
         }
       } else {
         Text("No services reported")
-          .font(.caption)
+          .font(.mono(.caption))
           .foregroundStyle(.secondary)
       }
     }
@@ -282,10 +391,10 @@ struct RuntimeDetailView: View {
           ForEach(group.networks, id: \.id) { network in
             HStack {
               Text(network.name)
-                .font(.subheadline.weight(.medium))
+                .font(.mono(.subheadline, weight: .medium))
               Spacer()
               Text(network.driver)
-                .font(.caption)
+                .font(.mono(.caption))
                 .foregroundStyle(.secondary)
             }
           }
@@ -348,9 +457,12 @@ struct RuntimeDetailView: View {
     ]
   }
 
-  private var logUrl: URL? {
-    guard let logPath = model.daemonStatus?.logPath, !logPath.isEmpty else { return nil }
-    return URL(fileURLWithPath: logPath)
+  private var daemonLogTailCommand: String {
+    "tail -n 200 -F \"$HOME/.hack/daemon/hackd.log\""
+  }
+
+  private func openDaemonLogsInTerminalPanel() {
+    openGlobalCommandInTerminalPanel(command: daemonLogTailCommand, title: "daemon logs")
   }
 
   private var daemonActionTitle: String {
@@ -396,15 +508,27 @@ struct RuntimeDetailView: View {
   }
 
   private var runtimeStatusText: String {
-    if model.runtimeOverallOk == true { return "Healthy" }
-    if model.runtimeOverallOk == false { return "Degraded" }
-    return "Unknown"
+    switch model.runtimeHealthState {
+    case .healthy:
+      return "Healthy"
+    case .down:
+      return "Down"
+    case .degraded:
+      return "Degraded"
+    case .unknown:
+      return "Unknown"
+    }
   }
 
   private var runtimeStatusTone: StatusTone {
-    if model.runtimeOverallOk == true { return .good }
-    if model.runtimeOverallOk == false { return .warn }
-    return .neutral
+    switch model.runtimeHealthState {
+    case .healthy:
+      return .good
+    case .down, .degraded:
+      return .warn
+    case .unknown:
+      return .neutral
+    }
   }
 
   private var lastUpdatedText: String {
@@ -428,4 +552,15 @@ struct RuntimeDetailView: View {
     guard let value else { return "—" }
     return value ? "Yes" : "No"
   }
+
 }
+
+#if DEBUG
+import HackCLIService
+
+#Preview("Runtime (Setup Guidance)") {
+  let model = DashboardModel(client: HackCLIClient())
+  return RuntimeDetailView()
+    .environment(model)
+}
+#endif

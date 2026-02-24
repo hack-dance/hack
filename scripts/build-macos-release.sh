@@ -17,12 +17,14 @@ SCHEME="HackDesktop"
 # Parse args
 SKIP_CLI=false
 SKIP_NOTARIZE=false
+SKIP_GHOSTTY=false
 for arg in "$@"; do
   case $arg in
     --skip-cli) SKIP_CLI=true ;;
     --skip-notarize) SKIP_NOTARIZE=true ;;
+    --skip-ghostty) SKIP_GHOSTTY=true ;;
     --help|-h)
-      echo "Usage: $0 [--skip-cli] [--skip-notarize]"
+      echo "Usage: $0 [--skip-cli] [--skip-notarize] [--skip-ghostty]"
       exit 0
       ;;
   esac
@@ -51,6 +53,12 @@ error() { echo -e "${RED}✗${NC} $1" >&2; exit 1; }
 command -v bun >/dev/null || error "bun not found"
 command -v xcodebuild >/dev/null || error "xcodebuild not found"
 
+# Find the Developer ID Application certificate (used for signing CLI + embedded Ghostty dylib)
+SIGNING_IDENTITY=$(security find-identity -v -p codesigning | awk '/Developer ID Application/ {print $2; exit}')
+if [ -z "$SIGNING_IDENTITY" ]; then
+  error "No Developer ID Application certificate found"
+fi
+
 # Get version from package.json
 VERSION=$(bun -e "const pkg = await Bun.file('$REPO_ROOT/package.json').json(); console.log(pkg.version)")
 log "Version: $VERSION"
@@ -77,13 +85,9 @@ if [ "$SKIP_CLI" = false ]; then
   bun build index.ts --compile --outfile "$CLI_BUILD_DIR/hack"
 
   # Sign CLI binary with hardened runtime (required for notarization)
-  # Find the Developer ID Application certificate
-  SIGNING_IDENTITY=$(security find-identity -v -p codesigning | awk '/Developer ID Application/ {print $2; exit}')
-  if [ -z "$SIGNING_IDENTITY" ]; then
-    error "No Developer ID Application certificate found"
-  fi
   log "Signing CLI binary with certificate: $SIGNING_IDENTITY"
   codesign --force --options runtime --timestamp \
+    --entitlements "$SCRIPT_DIR/cli.entitlements" \
     --sign "$SIGNING_IDENTITY" \
     "$CLI_BUILD_DIR/hack"
 
@@ -116,6 +120,28 @@ if [ "$SKIP_CLI" = false ]; then
   success "CLI built"
 else
   warn "Skipping CLI build"
+fi
+
+# Stage Ghostty VT dylib into the app bundle (embedded terminal)
+if [ "$SKIP_GHOSTTY" = false ]; then
+  command -v zig >/dev/null || error "zig not found (required for embedded terminal). Install Zig 0.15.2 (mise: \"mise install zig@0.15.2\") or re-run with --skip-ghostty"
+
+  log "Staging Ghostty VT dylib for the macOS app..."
+  bun run macos:ghostty:bundle
+
+  GHOSTTY_VT_LIB="$MACOS_APP_DIR/App/GhosttyVT/ghostty/lib/libhack_ghostty_vt.dylib"
+  if [ ! -f "$GHOSTTY_VT_LIB" ]; then
+    error "Missing staged Ghostty VT dylib: $GHOSTTY_VT_LIB"
+  fi
+
+  log "Signing Ghostty VT dylib with certificate: $SIGNING_IDENTITY"
+  codesign --force --options runtime --timestamp \
+    --sign "$SIGNING_IDENTITY" \
+    "$GHOSTTY_VT_LIB"
+  codesign -vvv "$GHOSTTY_VT_LIB"
+  success "Ghostty VT dylib staged and signed"
+else
+  warn "Skipping Ghostty VT dylib (embedded terminal will be unavailable)"
 fi
 
 # Generate Xcode project
@@ -345,7 +371,7 @@ cat > "$INSTALL_SCRIPT_PATH" << 'DOWNLOAD_INSTALLER_EOF'
 set -euo pipefail
 
 REPO_OWNER="hack-dance"
-REPO_NAME="hack-cli"
+REPO_NAME="hack"
 REPO="$REPO_OWNER/$REPO_NAME"
 API_URL="https://api.github.com/repos/$REPO/releases/latest"
 BASE_URL="${HACK_RELEASE_BASE_URL:-https://github.com/$REPO/releases/download}"

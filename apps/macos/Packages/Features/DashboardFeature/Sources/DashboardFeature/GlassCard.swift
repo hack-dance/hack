@@ -20,7 +20,7 @@ struct GlassCard<Content: View>: View {
               .foregroundStyle(.secondary)
           }
           Text(title)
-            .font(.headline)
+            .font(.mono(.subheadline, weight: .semibold))
         }
       }
       content
@@ -31,26 +31,53 @@ struct GlassCard<Content: View>: View {
 }
 
 private extension View {
-  @ViewBuilder
   func cardBackground() -> some View {
+    modifier(AdaptiveCardBackgroundModifier())
+  }
+}
+
+private struct AdaptiveCardBackgroundModifier: ViewModifier {
+  @Environment(\.colorScheme) private var colorScheme
+
+  func body(content: Content) -> some View {
     if #available(macOS 26, *) {
-      self
-        .background(
-          RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .fill(.regularMaterial)
-        )
+      content
+        .background(cardBackground)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .glassEffect(.regular)
+        .shadow(color: .black.opacity(colorScheme == .dark ? 0.22 : 0.05), radius: 10, y: 3)
     } else {
-      self
-        .background(
-          RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .fill(.thinMaterial)
-        )
-        .overlay(
-          RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .stroke(.primary.opacity(0.08), lineWidth: 1)
-        )
+      content
+        .background(cardBackground)
     }
+  }
+
+  private var cardBackground: some View {
+    RoundedRectangle(cornerRadius: 16, style: .continuous)
+      .fill(baseFill)
+      .overlay(
+        RoundedRectangle(cornerRadius: 16, style: .continuous)
+          .fill(materialFill)
+          .opacity(materialOpacity)
+      )
+      .overlay(
+        RoundedRectangle(cornerRadius: 16, style: .continuous)
+          .stroke(borderColor, lineWidth: 1)
+      )
+  }
+
+  private var baseFill: Color {
+    colorScheme == .dark ? Color.black.opacity(0.44) : Color.white.opacity(0.86)
+  }
+
+  private var materialFill: Material {
+    colorScheme == .dark ? .ultraThinMaterial : .thinMaterial
+  }
+
+  private var materialOpacity: Double {
+    colorScheme == .dark ? 0.42 : 0.62
+  }
+
+  private var borderColor: Color {
+    colorScheme == .dark ? Color.white.opacity(0.16) : Color.black.opacity(0.08)
   }
 }

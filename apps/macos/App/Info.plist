@@ -15,8 +15,16 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
+	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>SUFeedURL</key>
+	<string>https://github.com/hack-dance/hack/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>D7TI0ZgzvmamG6nc48Qiurf82oJEhz88vP5Pu28B+eo=</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Hack Desktop can open Terminal to run hack setup commands (some require sudo) so your local dev environment works.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Hack Desktop can access your local network to show LAN gateway status and open local development URLs.</string>
 </dict>
 </plist>

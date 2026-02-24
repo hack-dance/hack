@@ -1,3 +1,141 @@
+## 1.12.0 (2026-02-20)
+
+* feat(cli): auto-sync agent integrations on project commands ([a83a121](https://github.com/hack-dance/hack/commit/a83a121))
+* docs(agents): clarify hostname routing and oauth alias guidance ([c89f26f](https://github.com/hack-dance/hack/commit/c89f26f))
+
+## 1.11.0 (2026-02-20)
+
+* feat(setup): add sync command for agent integrations ([5c1279a](https://github.com/hack-dance/hack/commit/5c1279a))
+* chore(release): trigger rerun after ghostty bridge fix ([b3e120f](https://github.com/hack-dance/hack/commit/b3e120f))
+
+## <small>1.10.2 (2026-02-19)</small>
+
+* fix(macos): handle ghostty scrollViewport return type changes ([b78f73d](https://github.com/hack-dance/hack/commit/b78f73d))
+
+## <small>1.10.1 (2026-02-19)</small>
+
+* Fix gateway 502 for livenation ([a1bb858](https://github.com/hack-dance/hack/commit/a1bb858))
+* Improve dashboard header and groups ([1e58826](https://github.com/hack-dance/hack/commit/1e58826))
+* Merge branch 'main' into squircle ([f06f84c](https://github.com/hack-dance/hack/commit/f06f84c))
+* Merge pull request #10 from hack-dance/squircle ([4539e92](https://github.com/hack-dance/hack/commit/4539e92)), closes [#10](https://github.com/hack-dance/hack/issues/10)
+* fix(runtime): improve local ingress self-healing ([d305e2d](https://github.com/hack-dance/hack/commit/d305e2d))
+* fix(tests): stabilize shell mocks across bun test suite ([402ebe2](https://github.com/hack-dance/hack/commit/402ebe2))
+
+## 1.10.0 (2026-02-16)
+
+* feat(lifecycle): support persistent up.before hooks ([f38e024](https://github.com/hack-dance/hack/commit/f38e024))
+* feat(tui): add interactive attach hints for lifecycle services ([90b2de4](https://github.com/hack-dance/hack/commit/90b2de4))
+
+## <small>1.9.1 (2026-02-14)</small>
+
+* fix(lifecycle): preserve PATH and cwd behavior for hooks ([05e2a2d](https://github.com/hack-dance/hack/commit/05e2a2d))
+
+## 1.9.0 (2026-02-13)
+
+* feat(macos): add update-available header badge and background checks ([88bfc01](https://github.com/hack-dance/hack/commit/88bfc01))
+
+## 1.8.0 (2026-02-13)
+
+* feat(macos): add update controls and version info in settings ([ab5de6f](https://github.com/hack-dance/hack/commit/ab5de6f))
+
+## <small>1.7.1 (2026-02-13)</small>
+
+* fix(ci): clone ghostty vendor in macOS release workflow ([7c414d5](https://github.com/hack-dance/hack/commit/7c414d5))
+
+## 1.7.0 (2026-02-13)
+
+* Add startup script logging support ([97cddad](https://github.com/hack-dance/hack/commit/97cddad))
+* feat(lifecycle): add startup scripts and runtime log visibility ([a28e4e9](https://github.com/hack-dance/hack/commit/a28e4e9))
+* feat(lifecycle): surface startup flows and enforce config schema ([3dab4a9](https://github.com/hack-dance/hack/commit/3dab4a9))
+
+## <small>1.6.2 (2026-02-13)</small>
+
+* Fix mac app layout and logs ([7670b8c](https://github.com/hack-dance/hack/commit/7670b8c))
+* Investigate Zig download failure ([3198da1](https://github.com/hack-dance/hack/commit/3198da1))
+* fix(macos): fix dashboard overlays and settings terminal actions ([b77f3f4](https://github.com/hack-dance/hack/commit/b77f3f4))
+
+## <small>1.6.1 (2026-02-13)</small>
+
+* Audit large repo changes ([a2d2788](https://github.com/hack-dance/hack/commit/a2d2788))
+* Find Xcode simulator skill ([60d9ef9](https://github.com/hack-dance/hack/commit/60d9ef9))
+* Find Xcode simulator skill ([8bc37b2](https://github.com/hack-dance/hack/commit/8bc37b2))
+* Fix project pill layout and tabs ([750682c](https://github.com/hack-dance/hack/commit/750682c))
+* Fix review-agent findings ([8cad0ee](https://github.com/hack-dance/hack/commit/8cad0ee))
+* Fix ticket card layout and startup ([9b16700](https://github.com/hack-dance/hack/commit/9b16700))
+* Fix ticket card layout and startup ([ffb1958](https://github.com/hack-dance/hack/commit/ffb1958))
+* Merge main into review-session-management-workflow ([17636d9](https://github.com/hack-dance/hack/commit/17636d9))
+* Merge pull request #8 from hack-dance/review-session-management-workflow ([6760c72](https://github.com/hack-dance/hack/commit/6760c72)), closes [#8](https://github.com/hack-dance/hack/issues/8)
+* Merge pull request #9 from hack-dance/app-updates ([c30a589](https://github.com/hack-dance/hack/commit/c30a589)), closes [#9](https://github.com/hack-dance/hack/issues/9)
+* Merge remote-tracking branch 'origin/app-updates' into app-updates ([031a226](https://github.com/hack-dance/hack/commit/031a226))
+* Restore global terminal panel ([d7bf346](https://github.com/hack-dance/hack/commit/d7bf346))
+* Update CLI docs and commands ([faeb629](https://github.com/hack-dance/hack/commit/faeb629))
+* fix: address PR review findings and stabilize builds ([07c21ea](https://github.com/hack-dance/hack/commit/07c21ea))
+* fix: resolve rebase integration regressions ([e1c5cce](https://github.com/hack-dance/hack/commit/e1c5cce))
+* fix(macos): resolve dashboard model mismatch build break ([f229ffa](https://github.com/hack-dance/hack/commit/f229ffa))
+* fix(macos): stabilize status strip identity and labels ([8d2ab8c](https://github.com/hack-dance/hack/commit/8d2ab8c))
+* test: cover runtime meta failures ([c2b56f6](https://github.com/hack-dance/hack/commit/c2b56f6))
+* test: satisfy ProjectMeta type ([5ae817a](https://github.com/hack-dance/hack/commit/5ae817a))
+* chore(macos): add SwiftUI previews + force setup flag ([56d4386](https://github.com/hack-dance/hack/commit/56d4386))
+
+## 1.6.0 (2026-02-06)
+
+* feat(macos): add first-run setup guidance + stabilize XcodeGen ([d624bd1](https://github.com/hack-dance/hack/commit/d624bd1))
+
+## <small>1.5.9 (2026-02-06)</small>
+
+* fix(macos): codesign bundled CLI with JIT entitlements ([5e6326f](https://github.com/hack-dance/hack/commit/5e6326f))
+
+## <small>1.5.8 (2026-02-06)</small>
+
+* fix(tickets): allow passthrough flags on hack tickets ([e7a3562](https://github.com/hack-dance/hack/commit/e7a3562))
+* chore(dev): make pre-commit formatter safe ([2d89ebd](https://github.com/hack-dance/hack/commit/2d89ebd))
+
+## <small>1.5.5 (2026-02-06)</small>
+
+* fix(macos): copy BundledCLI into app bundle ([d0353f9](https://github.com/hack-dance/hack/commit/d0353f9))
+
+## <small>1.5.4 (2026-02-06)</small>
+
+* fix(ci): bundle CLI before xcodegen ([ef1f0a0](https://github.com/hack-dance/hack/commit/ef1f0a0))
+
+## <small>1.5.3 (2026-02-06)</small>
+
+* fix(ci): parse Sparkle signature output ([14b45b6](https://github.com/hack-dance/hack/commit/14b45b6))
+
+## <small>1.5.2 (2026-02-06)</small>
+
+* fix(ci): parse codesign identity reliably ([83f6c8e](https://github.com/hack-dance/hack/commit/83f6c8e))
+
+## <small>1.5.1 (2026-02-06)</small>
+
+* fix(ci): avoid ambiguous codesign identity ([a7e750d](https://github.com/hack-dance/hack/commit/a7e750d))
+
+## 1.5.0 (2026-02-06)
+
+* feat(update): add CLI + macOS updaters ([39f7334](https://github.com/hack-dance/hack/commit/39f7334))
+
+## 1.4.0 (2026-02-05)
+
+* chore(changelog): reset 1.4.x entries ([f45a0b7](https://github.com/hack-dance/hack/commit/f45a0b7))
+* chore(ci): automate release pipeline from main and tags ([0fa5fc5](https://github.com/hack-dance/hack/commit/0fa5fc5))
+* chore(ci): fix reusable workflow permissions and tag checkout ([655c09a](https://github.com/hack-dance/hack/commit/655c09a))
+* chore(release): 1.4.0 ([28808d0](https://github.com/hack-dance/hack/commit/28808d0))
+* chore(release): 1.4.1 ([274fd9f](https://github.com/hack-dance/hack/commit/274fd9f))
+* chore(release): 1.4.2 ([ad5b992](https://github.com/hack-dance/hack/commit/ad5b992))
+* chore(release): 1.4.3 ([0a5ad23](https://github.com/hack-dance/hack/commit/0a5ad23))
+* fix(ci): pass development team to xcodebuild archive ([0c4bf2c](https://github.com/hack-dance/hack/commit/0c4bf2c))
+* fix(ci): use current Xcode for macOS release build ([e13ee97](https://github.com/hack-dance/hack/commit/e13ee97))
+* fix(ci): use release PAT for semantic-release pushes ([b35b87b](https://github.com/hack-dance/hack/commit/b35b87b))
+* fix(daemon): restore missing status type imports ([eeea27c](https://github.com/hack-dance/hack/commit/eeea27c))
+* fix(macos): stop xcodegen from overwriting Info.plist version ([d43a46b](https://github.com/hack-dance/hack/commit/d43a46b))
+* fix(release): add CLI entitlements + refresh ingress subnet ([a0788f9](https://github.com/hack-dance/hack/commit/a0788f9))
+* fix(release): correct installer repo + app version ([9aa0556](https://github.com/hack-dance/hack/commit/9aa0556))
+* Add session panes command and default to active pane ([19925d0](https://github.com/hack-dance/hack/commit/19925d0))
+* app updates ([fe3097e](https://github.com/hack-dance/hack/commit/fe3097e))
+* feat: auto-start Docker backend and auto-enable tickets on setup ([7802df1](https://github.com/hack-dance/hack/commit/7802df1))
+* feat(session): add capture/tail streaming output ([6814a5c](https://github.com/hack-dance/hack/commit/6814a5c))
+* refactor(extensions): centralize enable prompts ([6c5118f](https://github.com/hack-dance/hack/commit/6c5118f))
+
 ## 1.3.0 (2026-01-22)
 
 * Clarify local-dev orchestration features in README ([bb4a030](https://github.com/hack-dance/hack/commit/bb4a030))

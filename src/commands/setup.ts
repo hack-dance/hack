@@ -72,6 +72,13 @@ const optGlobal = defineOption({
   description: "Use global (user) scope instead of project scope",
 } as const);
 
+const optAllScopes = defineOption({
+  name: "allScopes",
+  type: "boolean",
+  long: "--all-scopes",
+  description: "Target both project and global (user) scopes",
+} as const);
+
 const optAll = defineOption({
   name: "all",
   type: "boolean",
@@ -127,6 +134,13 @@ const setupAgentsOptions = [
   optCheck,
   optRemove,
 ] as const;
+const setupSyncOptions = [
+  optPath,
+  optGlobal,
+  optAllScopes,
+  optCheck,
+  optRemove,
+] as const;
 const setupMcpOptions = [
   optPath,
   optGlobal,
@@ -144,6 +158,7 @@ type SetupClaudeArgs = CommandArgs<typeof setupClaudeOptions, readonly []>;
 type SetupCodexArgs = CommandArgs<typeof setupCodexOptions, readonly []>;
 type SetupTicketsArgs = CommandArgs<typeof setupTicketsOptions, readonly []>;
 type SetupAgentsArgs = CommandArgs<typeof setupAgentsOptions, readonly []>;
+type SetupSyncArgs = CommandArgs<typeof setupSyncOptions, readonly []>;
 type SetupMcpArgs = CommandArgs<typeof setupMcpOptions, readonly []>;
 
 const tmuxSpec = defineCommand({
@@ -200,6 +215,15 @@ const agentsSpec = defineCommand({
   subcommands: [],
 } as const);
 
+const syncSpec = defineCommand({
+  name: "sync",
+  summary: "Refresh agent docs, skills, and MCP configs",
+  group: "Agents",
+  options: setupSyncOptions,
+  positionals: [],
+  subcommands: [],
+} as const);
+
 const mcpSpec = defineCommand({
   name: "mcp",
   summary: "Install MCP configs for hack CLI usage (no-shell only)",
@@ -223,9 +247,14 @@ export const setupCommand = defineCommand({
     withHandler(codexSpec, handleSetupCodex),
     withHandler(ticketsSpec, handleSetupTickets),
     withHandler(agentsSpec, handleSetupAgents),
+    withHandler(syncSpec, handleSetupSync),
     withHandler(mcpSpec, handleSetupMcp),
   ],
 } as const);
+
+const HACK_SESSION_BINDING_COMMENT = "# hack session picker";
+const HACK_SESSION_BINDING_COMMAND =
+  'display-popup -E -w 40% -h 60% "hack session"';
 
 async function handleSetupTmux({
   args,
@@ -238,7 +267,6 @@ async function handleSetupTmux({
     remove: args.options.remove === true,
   });
 
-  // Check if tmux is installed
   const tmuxPath = await findExecutableInPath("tmux");
   if (!tmuxPath) {
     logger.error({
@@ -248,127 +276,107 @@ async function handleSetupTmux({
     return 1;
   }
 
-  // Detect tmux config locations
+  if (action === "check") {
+    return await checkTmuxIntegration();
+  }
+
+  if (action === "remove") {
+    return await removeTmuxIntegration();
+  }
+
+  return await installTmuxIntegration();
+}
+
+async function resolveTmuxConfigPaths(): Promise<{
+  readonly home: string;
+  readonly xdgConfig: string;
+  readonly homeConfig: string;
+  readonly existingConfigs: readonly string[];
+}> {
   const home = homedir();
   const xdgConfig = resolve(home, ".config/tmux/tmux.conf");
   const homeConfig = resolve(home, ".tmux.conf");
-  const configCandidates = [xdgConfig, homeConfig];
+  const candidates = [xdgConfig, homeConfig];
 
   const existingConfigs: string[] = [];
-  for (const candidate of configCandidates) {
+  for (const candidate of candidates) {
     if (await pathExists(candidate)) {
       existingConfigs.push(candidate);
     }
   }
 
-  const HACK_SESSION_BINDING = `# hack session picker
-bind-key s display-popup -E -w 40% -h 60% "hack session"`;
+  return { home, xdgConfig, homeConfig, existingConfigs };
+}
 
-  if (action === "check") {
-    if (existingConfigs.length === 0) {
-      logger.warn({ message: "No tmux.conf found" });
-      return 1;
-    }
-    for (const configPath of existingConfigs) {
-      const content = await readTextFile(configPath);
-      if (content?.includes("hack session")) {
-        logger.success({
-          message: `tmux integration installed at ${configPath}`,
-        });
-        return 0;
-      }
-    }
-    logger.warn({ message: "hack session keybinding not found in tmux.conf" });
+function buildHackSessionBinding(key: "s" | "S"): string {
+  return [
+    HACK_SESSION_BINDING_COMMENT,
+    `bind-key ${key} ${HACK_SESSION_BINDING_COMMAND}`,
+  ].join("\n");
+}
+
+async function checkTmuxIntegration(): Promise<number> {
+  const paths = await resolveTmuxConfigPaths();
+  if (paths.existingConfigs.length === 0) {
+    logger.warn({ message: "No tmux.conf found" });
     return 1;
   }
 
-  if (action === "remove") {
-    let removed = false;
-    for (const configPath of existingConfigs) {
-      const content = await readTextFile(configPath);
-      if (content?.includes("hack session")) {
-        const newContent = content
-          .replace(
-            /\n?# hack session picker\nbind-key [sS] display-popup[^\n]*\n?/g,
-            "\n"
-          )
-          .replace(LEADING_NEWLINES_PATTERN, "");
-        await writeTextFile(configPath, newContent);
-        logger.success({
-          message: `Removed hack session keybinding from ${configPath}`,
-        });
-        removed = true;
-      }
+  for (const configPath of paths.existingConfigs) {
+    const content = await readTextFile(configPath);
+    if (content?.includes("hack session")) {
+      logger.success({
+        message: `tmux integration installed at ${configPath}`,
+      });
+      return 0;
     }
-    if (!removed) {
-      logger.info({ message: "No hack session keybinding found to remove" });
-    }
-    return 0;
   }
 
-  // Interactive install
+  logger.warn({ message: "hack session keybinding not found in tmux.conf" });
+  return 1;
+}
+
+async function removeTmuxIntegration(): Promise<number> {
+  const paths = await resolveTmuxConfigPaths();
+  let removed = false;
+
+  for (const configPath of paths.existingConfigs) {
+    const content = await readTextFile(configPath);
+    if (!content?.includes("hack session")) {
+      continue;
+    }
+
+    const newContent = content
+      .replace(
+        /\n?# hack session picker\nbind-key [sS] display-popup[^\n]*\n?/g,
+        "\n"
+      )
+      .replace(LEADING_NEWLINES_PATTERN, "");
+    await writeTextFile(configPath, newContent);
+    logger.success({
+      message: `Removed hack session keybinding from ${configPath}`,
+    });
+    removed = true;
+  }
+
+  if (!removed) {
+    logger.info({ message: "No hack session keybinding found to remove" });
+  }
+  return 0;
+}
+
+async function installTmuxIntegration(): Promise<number> {
   logger.info({ message: "Setting up tmux integration for hack sessions..." });
 
-  // Select config file
-  let selectedConfig: string;
-  if (existingConfigs.length === 1 && existingConfigs[0]) {
-    selectedConfig = existingConfigs[0];
-    logger.info({ message: `Using ${selectedConfig}` });
-  } else if (existingConfigs.length > 1) {
-    const choice = await select({
-      message: "Where is your tmux.conf?",
-      options: [
-        ...existingConfigs.map((p) => ({ value: p, label: p })),
-        { value: "custom", label: "Custom path..." },
-      ],
-    });
-    if (isCancel(choice)) {
-      return 1;
-    }
-    if (choice === "custom") {
-      const customPath = await text({
-        message: "Enter path to tmux.conf:",
-        placeholder: "~/.config/tmux/tmux.conf",
-      });
-      if (isCancel(customPath) || !customPath) {
-        return 1;
-      }
-      selectedConfig = customPath.startsWith("~")
-        ? resolve(home, customPath.slice(2))
-        : customPath;
-    } else {
-      selectedConfig = choice as string;
-    }
-  } else {
-    // No existing config, ask where to create
-    const choice = await select({
-      message: "No tmux.conf found. Where should we create one?",
-      options: [
-        {
-          value: xdgConfig,
-          label: `${xdgConfig} (recommended)`,
-        },
-        { value: homeConfig, label: homeConfig },
-        { value: "custom", label: "Custom path..." },
-      ],
-    });
-    if (isCancel(choice)) {
-      return 1;
-    }
-    if (choice === "custom") {
-      const customPath = await text({
-        message: "Enter path to tmux.conf:",
-        placeholder: "~/.config/tmux/tmux.conf",
-      });
-      if (isCancel(customPath) || !customPath) {
-        return 1;
-      }
-      selectedConfig = customPath.startsWith("~")
-        ? resolve(home, customPath.slice(2))
-        : customPath;
-    } else {
-      selectedConfig = choice as string;
-    }
+  const paths = await resolveTmuxConfigPaths();
+  const selectedConfig = await resolveTmuxConfigToEdit({
+    home: paths.home,
+    existingConfigs: paths.existingConfigs,
+    xdgConfig: paths.xdgConfig,
+    homeConfig: paths.homeConfig,
+  });
+  if (!selectedConfig) {
+    return 1;
   }
 
   // Check if already installed
@@ -396,13 +404,12 @@ bind-key s display-popup -E -w 40% -h 60% "hack session"`;
   if (keyChoice === "none") {
     logger.info({ message: "Skipping keybinding configuration" });
     logger.info({
-      message: `Add this to your tmux.conf manually:\n\n${HACK_SESSION_BINDING}`,
+      message: `Add this to your tmux.conf manually:\n\n${buildHackSessionBinding("s")}`,
     });
     return 0;
   }
 
-  const binding = `# hack session picker
-bind-key ${keyChoice} display-popup -E -w 40% -h 60% "hack session"`;
+  const binding = buildHackSessionBinding(keyChoice);
 
   // Append to config
   const newContent =
@@ -416,6 +423,57 @@ bind-key ${keyChoice} display-popup -E -w 40% -h 60% "hack session"`;
   logger.info({ message: `\nReload with: tmux source-file ${selectedConfig}` });
 
   return 0;
+}
+
+async function resolveTmuxConfigToEdit(opts: {
+  readonly home: string;
+  readonly existingConfigs: readonly string[];
+  readonly xdgConfig: string;
+  readonly homeConfig: string;
+}): Promise<string | null> {
+  if (opts.existingConfigs.length === 1 && opts.existingConfigs[0]) {
+    const selected = opts.existingConfigs[0];
+    logger.info({ message: `Using ${selected}` });
+    return selected;
+  }
+
+  const options =
+    opts.existingConfigs.length > 0
+      ? [
+          ...opts.existingConfigs.map((p) => ({ value: p, label: p })),
+          { value: "custom", label: "Custom path..." },
+        ]
+      : [
+          { value: opts.xdgConfig, label: `${opts.xdgConfig} (recommended)` },
+          { value: opts.homeConfig, label: opts.homeConfig },
+          { value: "custom", label: "Custom path..." },
+        ];
+
+  const message =
+    opts.existingConfigs.length > 0
+      ? "Where is your tmux.conf?"
+      : "No tmux.conf found. Where should we create one?";
+
+  const choice = await select({ message, options });
+  if (isCancel(choice)) {
+    return null;
+  }
+
+  if (choice !== "custom") {
+    return choice as string;
+  }
+
+  const customPath = await text({
+    message: "Enter path to tmux.conf:",
+    placeholder: "~/.config/tmux/tmux.conf",
+  });
+  if (isCancel(customPath) || !customPath) {
+    return null;
+  }
+
+  return customPath.startsWith("~")
+    ? resolve(opts.home, customPath.slice(2))
+    : customPath;
 }
 
 async function handleSetupCursor({
@@ -594,6 +652,197 @@ async function handleSetupAgents({
   });
 }
 
+async function handleSetupSync({
+  ctx,
+  args,
+}: {
+  readonly ctx: CliContext;
+  readonly args: SetupSyncArgs;
+}): Promise<number> {
+  const action = resolveAction(args.options);
+  const scopes = resolveSyncScopes({
+    global: args.options.global === true,
+    allScopes: args.options.allScopes === true,
+  });
+  const includesProject = scopes.includes("project");
+  const includesUser = scopes.includes("user");
+  const projectRoot = includesProject
+    ? await resolveSetupRoot({ ctx, pathOpt: args.options.path })
+    : undefined;
+
+  let exitCode = 0;
+
+  const runSingle = (
+    result: {
+      readonly status: string;
+      readonly path: string;
+      readonly message?: string;
+    },
+    okMessage: string
+  ) => {
+    exitCode = Math.max(
+      exitCode,
+      logSingleResult({
+        action,
+        okMessage,
+        result,
+      })
+    );
+  };
+
+  if (includesProject && projectRoot) {
+    let cursorResult: Awaited<ReturnType<typeof checkCursorRules>>;
+    let claudeResult: Awaited<ReturnType<typeof checkClaudeHooks>>;
+    let codexResult: Awaited<ReturnType<typeof checkCodexSkill>>;
+    let ticketsResult: Awaited<ReturnType<typeof checkTicketsSkill>>;
+    let mcpResults: Awaited<ReturnType<typeof checkMcpConfig>>;
+    let docsResults: Awaited<ReturnType<typeof checkAgentDocs>>;
+
+    if (action === "check") {
+      cursorResult = await checkCursorRules({ scope: "project", projectRoot });
+      claudeResult = await checkClaudeHooks({ scope: "project", projectRoot });
+      codexResult = await checkCodexSkill({ scope: "project", projectRoot });
+      ticketsResult = await checkTicketsSkill({
+        scope: "project",
+        projectRoot,
+      });
+      mcpResults = await checkMcpConfig({
+        scope: "project",
+        targets: ["cursor", "claude", "codex"],
+        projectRoot,
+      });
+      docsResults = await checkAgentDocs({
+        projectRoot,
+        targets: ["agents", "claude"],
+      });
+    } else if (action === "remove") {
+      cursorResult = await removeCursorRules({
+        scope: "project",
+        projectRoot,
+      });
+      claudeResult = await removeClaudeHooks({
+        scope: "project",
+        projectRoot,
+      });
+      codexResult = await removeCodexSkill({ scope: "project", projectRoot });
+      ticketsResult = await removeTicketsSkill({
+        scope: "project",
+        projectRoot,
+      });
+      mcpResults = await removeMcpConfig({
+        scope: "project",
+        targets: ["cursor", "claude", "codex"],
+        projectRoot,
+      });
+      docsResults = await removeAgentDocs({
+        projectRoot,
+        targets: ["agents", "claude"],
+      });
+    } else {
+      cursorResult = await installCursorRules({
+        scope: "project",
+        projectRoot,
+      });
+      claudeResult = await installClaudeHooks({
+        scope: "project",
+        projectRoot,
+      });
+      codexResult = await installCodexSkill({
+        scope: "project",
+        projectRoot,
+      });
+      ticketsResult = await installTicketsSkill({
+        scope: "project",
+        projectRoot,
+      });
+      mcpResults = await installMcpConfig({
+        scope: "project",
+        targets: ["cursor", "claude", "codex"],
+        projectRoot,
+      });
+      docsResults = await upsertAgentDocs({
+        projectRoot,
+        targets: ["agents", "claude"],
+      });
+    }
+
+    runSingle(cursorResult, "Cursor integration (project)");
+    runSingle(claudeResult, "Claude integration (project)");
+    runSingle(codexResult, "Codex integration (project)");
+    runSingle(ticketsResult, "Tickets skill (project)");
+
+    exitCode = Math.max(
+      exitCode,
+      logMultiResults({
+        action,
+        okMessage: "MCP config (project)",
+        results: mcpResults,
+      })
+    );
+    exitCode = Math.max(
+      exitCode,
+      logMultiResults({
+        action,
+        okMessage: "Agent docs",
+        results: docsResults,
+      })
+    );
+  }
+
+  if (includesUser) {
+    let cursorResult: Awaited<ReturnType<typeof checkCursorRules>>;
+    let claudeResult: Awaited<ReturnType<typeof checkClaudeHooks>>;
+    let codexResult: Awaited<ReturnType<typeof checkCodexSkill>>;
+    let ticketsResult: Awaited<ReturnType<typeof checkTicketsSkill>>;
+    let mcpResults: Awaited<ReturnType<typeof checkMcpConfig>>;
+
+    if (action === "check") {
+      cursorResult = await checkCursorRules({ scope: "user" });
+      claudeResult = await checkClaudeHooks({ scope: "user" });
+      codexResult = await checkCodexSkill({ scope: "user" });
+      ticketsResult = await checkTicketsSkill({ scope: "user" });
+      mcpResults = await checkMcpConfig({
+        scope: "user",
+        targets: ["cursor", "claude", "codex"],
+      });
+    } else if (action === "remove") {
+      cursorResult = await removeCursorRules({ scope: "user" });
+      claudeResult = await removeClaudeHooks({ scope: "user" });
+      codexResult = await removeCodexSkill({ scope: "user" });
+      ticketsResult = await removeTicketsSkill({ scope: "user" });
+      mcpResults = await removeMcpConfig({
+        scope: "user",
+        targets: ["cursor", "claude", "codex"],
+      });
+    } else {
+      cursorResult = await installCursorRules({ scope: "user" });
+      claudeResult = await installClaudeHooks({ scope: "user" });
+      codexResult = await installCodexSkill({ scope: "user" });
+      ticketsResult = await installTicketsSkill({ scope: "user" });
+      mcpResults = await installMcpConfig({
+        scope: "user",
+        targets: ["cursor", "claude", "codex"],
+      });
+    }
+
+    runSingle(cursorResult, "Cursor integration (global)");
+    runSingle(claudeResult, "Claude integration (global)");
+    runSingle(codexResult, "Codex integration (global)");
+    runSingle(ticketsResult, "Tickets skill (global)");
+
+    exitCode = Math.max(
+      exitCode,
+      logMultiResults({
+        action,
+        okMessage: "MCP config (global)",
+        results: mcpResults,
+      })
+    );
+  }
+
+  return exitCode;
+}
+
 async function handleSetupMcp({
   ctx,
   args,
@@ -679,6 +928,19 @@ function resolveAction(opts: {
 
 function resolveScope(opts: { readonly global: boolean }): "project" | "user" {
   return opts.global ? "user" : "project";
+}
+
+function resolveSyncScopes(opts: {
+  readonly global: boolean;
+  readonly allScopes: boolean;
+}): readonly ("project" | "user")[] {
+  if (opts.allScopes) {
+    return ["project", "user"];
+  }
+  if (opts.global) {
+    return ["user"];
+  }
+  return ["project"];
 }
 
 function resolveMcpScope(opts: { readonly global: boolean }): McpInstallScope {

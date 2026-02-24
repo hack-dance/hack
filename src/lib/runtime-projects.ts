@@ -8,6 +8,7 @@ import {
 import { pathExists } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
 import { parseJsonLines } from "./json-lines.ts";
+import { readLifecycleState } from "./lifecycle-runtime.ts";
 import { upsertProjectRegistration } from "./projects-registry.ts";
 import { exec } from "./shell.ts";
 
@@ -20,6 +21,25 @@ export type RuntimeContainer = {
   readonly name: string;
   readonly ports: string;
   readonly workingDir: string | null;
+  readonly image: string | null;
+  readonly labels: Readonly<Record<string, string>> | null;
+  readonly mounts: readonly RuntimeContainerMount[];
+  readonly networks: readonly RuntimeContainerNetwork[];
+};
+
+export type RuntimeContainerMount = {
+  readonly type: string;
+  readonly source: string;
+  readonly destination: string;
+  readonly mode: string;
+  readonly rw: boolean | null;
+};
+
+export type RuntimeContainerNetwork = {
+  readonly name: string;
+  readonly ipAddress: string | null;
+  readonly gateway: string | null;
+  readonly aliases: readonly string[];
 };
 
 export type RuntimeService = {
@@ -39,6 +59,13 @@ export type RuntimeProjectsResult = {
   readonly runtime: readonly RuntimeProject[];
   readonly error: string | null;
   readonly checkedAtMs: number;
+};
+
+type ContainerInspectData = {
+  readonly labels: Record<string, string>;
+  readonly image: string | null;
+  readonly mounts: readonly RuntimeContainerMount[];
+  readonly networks: readonly RuntimeContainerNetwork[];
 };
 
 export function countRunningServices(runtime: RuntimeProject | null): number {
@@ -98,7 +125,7 @@ export async function readRuntimeProjects(opts: {
   const ids = baseRows
     .map((row) => getString(row, "ID") ?? getString(row, "Id") ?? "")
     .filter((id) => id.length > 0);
-  const labelsById = await readContainerLabels({ ids });
+  const inspectById = await readContainerInspectData({ ids });
 
   const home = process.env.HOME ?? "";
   const globalRoot = home ? resolve(home, GLOBAL_HACK_DIR_NAME) : "";
@@ -110,9 +137,10 @@ export async function readRuntimeProjects(opts: {
     const status = getString(row, "Status") ?? "";
     const name = getString(row, "Names") ?? "";
     const ports = getString(row, "Ports") ?? "";
+    const inspect = id.length > 0 ? inspectById.get(id) : undefined;
     const labelsRaw = getString(row, "Labels");
     const labels =
-      (id.length > 0 ? labelsById.get(id) : undefined) ??
+      inspect?.labels ??
       (labelsRaw ? parseLabelString({ raw: labelsRaw }) : {});
     const project = labels["com.docker.compose.project"] ?? null;
     const service = labels["com.docker.compose.service"] ?? null;
@@ -140,6 +168,10 @@ export async function readRuntimeProjects(opts: {
       name,
       ports,
       workingDir,
+      image: inspect?.image ?? null,
+      labels: Object.keys(labels).length > 0 ? labels : null,
+      mounts: inspect?.mounts ?? [],
+      networks: inspect?.networks ?? [],
     });
   }
 
@@ -181,9 +213,15 @@ export async function readRuntimeProjects(opts: {
     });
   }
 
+  const runtimeWithLifecycle = await addLifecycleProcessServices({
+    runtime: out,
+  });
+
   return {
     ok: true,
-    runtime: out.sort((a, b) => a.project.localeCompare(b.project)),
+    runtime: runtimeWithLifecycle.sort((a, b) =>
+      a.project.localeCompare(b.project)
+    ),
     error: null,
     checkedAtMs,
   };
@@ -219,6 +257,194 @@ export async function autoRegisterRuntimeHackProjects(opts: {
   }
 }
 
+type LifecycleActivity = {
+  readonly sessionActive: boolean;
+  readonly runningWindows: ReadonlySet<string> | null;
+};
+
+async function addLifecycleProcessServices(opts: {
+  readonly runtime: readonly RuntimeProject[];
+}): Promise<RuntimeProject[]> {
+  if (opts.runtime.length === 0) {
+    return [];
+  }
+
+  const stateByWorkingDir = new Map<
+    string,
+    Awaited<ReturnType<typeof readLifecycleState>>
+  >();
+  for (const runtime of opts.runtime) {
+    const workingDir = runtime.workingDir;
+    if (!workingDir || stateByWorkingDir.has(workingDir)) {
+      continue;
+    }
+    const state = await readLifecycleState({ projectDir: workingDir });
+    stateByWorkingDir.set(workingDir, state);
+  }
+
+  const tmuxWindowsBySession = new Map<string, ReadonlySet<string> | null>();
+  let zellijSessions: ReadonlySet<string> | null = null;
+
+  const out: RuntimeProject[] = [];
+  for (const runtime of opts.runtime) {
+    const workingDir = runtime.workingDir;
+    if (!workingDir) {
+      out.push(runtime);
+      continue;
+    }
+    const state = stateByWorkingDir.get(workingDir) ?? [];
+    const entry = state.find((item) => item.composeProject === runtime.project);
+    if (!entry) {
+      out.push(runtime);
+      continue;
+    }
+
+    const activity = await resolveLifecycleActivity({
+      backend: entry.backend,
+      sessionName: entry.sessionName,
+      tmuxWindowsBySession,
+      getZellijSessions: async () => {
+        if (zellijSessions) {
+          return zellijSessions;
+        }
+        zellijSessions = await readZellijSessionNames();
+        return zellijSessions;
+      },
+    });
+
+    const services = new Map(runtime.services);
+    for (const process of entry.processes) {
+      const running =
+        activity.runningWindows !== null
+          ? activity.runningWindows.has(process.windowName)
+          : activity.sessionActive;
+      const stateValue = running ? "running" : "exited";
+      const status = running ? "Up (lifecycle)" : "Exited (lifecycle)";
+      const id = `lifecycle-${runtime.project}-${sanitizeLifecycleToken(process.name)}`;
+      const syntheticContainer: RuntimeContainer = {
+        id,
+        project: runtime.project,
+        service: process.name,
+        state: stateValue,
+        status,
+        name: `${runtime.project}-lifecycle-${process.windowName}`,
+        ports: "",
+        workingDir,
+        image: null,
+        labels: {
+          "hack.lifecycle.process": "true",
+          "hack.lifecycle.session": entry.sessionName,
+          "hack.lifecycle.backend": entry.backend,
+          "hack.lifecycle.window": process.windowName,
+          "hack.lifecycle.log_path": process.logPath,
+        },
+        mounts: [],
+        networks: [],
+      };
+      const existing = services.get(process.name);
+      if (existing) {
+        services.set(process.name, {
+          service: process.name,
+          containers: [...existing.containers, syntheticContainer],
+        });
+      } else {
+        services.set(process.name, {
+          service: process.name,
+          containers: [syntheticContainer],
+        });
+      }
+    }
+
+    out.push({
+      ...runtime,
+      services,
+    });
+  }
+
+  return out;
+}
+
+async function resolveLifecycleActivity(opts: {
+  readonly backend: "tmux" | "zellij";
+  readonly sessionName: string;
+  readonly tmuxWindowsBySession: Map<string, ReadonlySet<string> | null>;
+  readonly getZellijSessions: () => Promise<ReadonlySet<string>>;
+}): Promise<LifecycleActivity> {
+  if (opts.backend === "tmux") {
+    let windows = opts.tmuxWindowsBySession.get(opts.sessionName);
+    if (windows === undefined) {
+      windows = await readTmuxWindowNames({ sessionName: opts.sessionName });
+      opts.tmuxWindowsBySession.set(opts.sessionName, windows);
+    }
+    return {
+      sessionActive: windows !== null,
+      runningWindows: windows,
+    };
+  }
+
+  const sessions = await opts.getZellijSessions();
+  const active = sessions.has(opts.sessionName);
+  return {
+    sessionActive: active,
+    runningWindows: null,
+  };
+}
+
+async function readTmuxWindowNames(opts: {
+  readonly sessionName: string;
+}): Promise<ReadonlySet<string> | null> {
+  const result = await exec(
+    ["tmux", "list-windows", "-t", opts.sessionName, "-F", "#{window_name}"],
+    {
+      stdin: "ignore",
+    }
+  );
+  if (result.exitCode !== 0) {
+    return null;
+  }
+  const names = new Set(
+    result.stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+  );
+  return names;
+}
+
+async function readZellijSessionNames(): Promise<ReadonlySet<string>> {
+  const result = await exec(["zellij", "list-sessions", "--no-formatting"], {
+    stdin: "ignore",
+  });
+  if (result.exitCode !== 0) {
+    return new Set<string>();
+  }
+  const names = new Set<string>();
+  const lines = result.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  for (const line of lines) {
+    if (line.includes("(EXITED")) {
+      continue;
+    }
+    const boundaries = [line.indexOf(" ["), line.indexOf(" (")].filter(
+      (index) => index > 0
+    );
+    const end = boundaries.length > 0 ? Math.min(...boundaries) : line.length;
+    const name = line.slice(0, end).trim();
+    if (name.length > 0) {
+      names.add(name);
+    }
+  }
+  return names;
+}
+
+function sanitizeLifecycleToken(value: string): string {
+  const trimmed = value.trim().toLowerCase();
+  const cleaned = trimmed.replaceAll(/[^a-z0-9_.-]+/g, "-");
+  return cleaned.length > 0 ? cleaned : "process";
+}
+
 export function serializeRuntimeProject(
   runtime: RuntimeProject
 ): Record<string, unknown> {
@@ -234,6 +460,21 @@ export function serializeRuntimeProject(
         name: container.name,
         ports: container.ports,
         working_dir: container.workingDir ?? null,
+        image: container.image,
+        labels: container.labels,
+        mounts: container.mounts.map((mount) => ({
+          type: mount.type,
+          source: mount.source,
+          destination: mount.destination,
+          mode: mount.mode,
+          rw: mount.rw,
+        })),
+        networks: container.networks.map((network) => ({
+          name: network.name,
+          ip_address: network.ipAddress,
+          gateway: network.gateway,
+          aliases: network.aliases,
+        })),
       })),
     })),
   };
@@ -242,42 +483,64 @@ export function serializeRuntimeProject(
 export async function readContainerLabels(opts: {
   readonly ids: readonly string[];
 }): Promise<Map<string, Record<string, string>>> {
+  const inspectById = await readContainerInspectData({ ids: opts.ids });
+  const labelsById = new Map<string, Record<string, string>>();
+  for (const [id, detail] of inspectById.entries()) {
+    labelsById.set(id, detail.labels);
+  }
+  return labelsById;
+}
+
+async function readContainerInspectData(opts: {
+  readonly ids: readonly string[];
+}): Promise<Map<string, ContainerInspectData>> {
   if (opts.ids.length === 0) {
     return new Map();
   }
 
-  const res = await exec(
-    [
-      "docker",
-      "inspect",
-      "--format",
-      "{{.Id}}|{{json .Config.Labels}}",
-      ...opts.ids,
-    ],
-    { stdin: "ignore" }
-  );
+  const res = await exec(["docker", "inspect", ...opts.ids], {
+    stdin: "ignore",
+  });
   if (res.exitCode !== 0) {
     return new Map();
   }
 
-  const out = new Map<string, Record<string, string>>();
-  for (const line of res.stdout.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0) {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(res.stdout);
+  } catch {
+    return new Map();
+  }
+  if (!Array.isArray(parsed)) {
+    return new Map();
+  }
+
+  const out = new Map<string, ContainerInspectData>();
+  for (const item of parsed) {
+    if (!isRecord(item)) {
       continue;
     }
-    const idx = trimmed.indexOf("|");
-    if (idx <= 0) {
+
+    const id = getString(item, "Id") ?? "";
+    if (id.length === 0) {
       continue;
     }
-    const id = trimmed.slice(0, idx).trim();
-    const json = trimmed.slice(idx + 1).trim();
-    const labels = parseLabelsJson({ raw: json });
-    if (id.length > 0) {
-      out.set(id, labels);
-      if (id.length >= 12) {
-        out.set(id.slice(0, 12), labels);
-      }
+
+    const config = item.Config;
+    const labels = parseInspectLabels(config);
+    const image = parseInspectImage(config);
+    const mounts = parseInspectMounts(item.Mounts);
+    const networks = parseInspectNetworks(item.NetworkSettings);
+
+    const detail: ContainerInspectData = {
+      labels,
+      image,
+      mounts,
+      networks,
+    };
+    out.set(id, detail);
+    if (id.length >= 12) {
+      out.set(id.slice(0, 12), detail);
     }
   }
 
@@ -294,27 +557,82 @@ function resolveProjectDirName(workingDir: string): ".hack" | ".dev" | null {
   return null;
 }
 
-function parseLabelsJson(opts: {
-  readonly raw: string;
-}): Record<string, string> {
-  if (!opts.raw || opts.raw === "null") {
+function parseInspectLabels(config: unknown): Record<string, string> {
+  if (!isRecord(config)) {
     return {};
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(opts.raw);
-  } catch {
-    return {};
-  }
-  if (!isRecord(parsed)) {
+  const labels = config.Labels;
+  if (!isRecord(labels)) {
     return {};
   }
 
   const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(parsed)) {
-    if (typeof v === "string") {
-      out[k] = v;
+  for (const [key, value] of Object.entries(labels)) {
+    if (typeof value === "string") {
+      out[key] = value;
     }
+  }
+  return out;
+}
+
+function parseInspectImage(config: unknown): string | null {
+  if (!isRecord(config)) {
+    return null;
+  }
+  return getString(config, "Image") ?? null;
+}
+
+function parseInspectMounts(raw: unknown): RuntimeContainerMount[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  const mounts: RuntimeContainerMount[] = [];
+  for (const value of raw) {
+    if (!isRecord(value)) {
+      continue;
+    }
+    const source = getString(value, "Source") ?? "";
+    const destination = getString(value, "Destination") ?? "";
+    if (!(source && destination)) {
+      continue;
+    }
+    const rwValue = value.RW;
+    mounts.push({
+      type: getString(value, "Type") ?? "",
+      source,
+      destination,
+      mode: getString(value, "Mode") ?? "",
+      rw: typeof rwValue === "boolean" ? rwValue : null,
+    });
+  }
+  return mounts;
+}
+
+function parseInspectNetworks(raw: unknown): RuntimeContainerNetwork[] {
+  if (!isRecord(raw)) {
+    return [];
+  }
+  const networks = raw.Networks;
+  if (!isRecord(networks)) {
+    return [];
+  }
+
+  const out: RuntimeContainerNetwork[] = [];
+  for (const [name, value] of Object.entries(networks)) {
+    if (!isRecord(value)) {
+      continue;
+    }
+    const aliasesRaw = value.Aliases;
+    const aliases = Array.isArray(aliasesRaw)
+      ? aliasesRaw.filter((alias): alias is string => typeof alias === "string")
+      : [];
+    out.push({
+      name,
+      ipAddress: getString(value, "IPAddress") ?? null,
+      gateway: getString(value, "Gateway") ?? null,
+      aliases,
+    });
   }
   return out;
 }

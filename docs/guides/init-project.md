@@ -11,6 +11,7 @@ hack open
 
 Notes:
 - `hack init` writes `.hack/` files (Compose + config).
+- `hack init` also scaffolds a `.hack/hack.env.json` env contract (no values). See `docs/env.md`.
 - `hack up` starts the stack on an isolated network.
 - `hack open` resolves the routed URL via the global proxy.
 
@@ -18,6 +19,7 @@ Optional:
 - `hack logs --pretty` for log tailing.
 - `hack tui` for the interactive dashboard.
 - Configure log retention in `hack.config.json` via `logs.retention_period` (e.g. `7d`) and `logs.clear_on_down`.
+- Add startup hooks/host processes in `.hack/hack.config.json` under `lifecycle` (or `startup` shorthand). See `docs/lifecycle.md`.
 
 Note:
 - Inside containers, `localhost` points at the container itself. Update any `localhost:PORT` references to:

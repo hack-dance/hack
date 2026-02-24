@@ -4,8 +4,8 @@ import {
   getTailscaleStatus,
 } from "../../lib/tailscale.ts";
 
-/** Valid session name pattern: alphanumeric, dash, underscore, or dot */
-const SESSION_NAME_PATTERN = /^[\w.-]+$/;
+/** Valid session name pattern: alphanumeric, dash, or underscore */
+const SESSION_NAME_PATTERN = /^[\w-]+$/;
 
 /**
  * Parsed tmux session info.
@@ -95,6 +95,15 @@ export async function handleSessionRoutes(opts: {
   const sessionId = segments[2];
   if (!sessionId) {
     return jsonResponse({ error: "missing_session_id" }, 400);
+  }
+  if (!SESSION_NAME_PATTERN.test(sessionId)) {
+    return jsonResponse(
+      {
+        error:
+          "invalid_name: must contain only alphanumeric, dash, or underscore",
+      },
+      400
+    );
   }
 
   // GET /v1/sessions/:id - get session details
@@ -303,13 +312,14 @@ async function handleInputSession(opts: {
  * List all tmux sessions with detailed info.
  */
 async function listTmuxSessions(): Promise<TmuxSession[]> {
+  const separator = "|||HACK_SESSION_FIELD|||";
   const format = [
     "#{session_name}",
     "#{session_attached}",
     "#{session_path}",
     "#{session_windows}",
     "#{session_created}",
-  ].join(":");
+  ].join(separator);
 
   const result = await exec(["tmux", "list-sessions", "-F", format], {
     stdin: "ignore",
@@ -320,11 +330,15 @@ async function listTmuxSessions(): Promise<TmuxSession[]> {
   }
 
   const sessions: TmuxSession[] = [];
-  for (const line of result.stdout.trim().split("\n")) {
-    if (!line) {
+  for (const line of result.stdout.split("\n")) {
+    if (!line.trim()) {
       continue;
     }
-    const [name, attached, path, windows, created] = line.split(":");
+    const fields = parseTmuxSessionFields(line, separator, 5);
+    if (!fields) {
+      continue;
+    }
+    const [name, attached, path, windows, created] = fields;
     if (name) {
       sessions.push({
         name,
@@ -339,6 +353,22 @@ async function listTmuxSessions(): Promise<TmuxSession[]> {
   }
 
   return sessions;
+}
+
+function parseTmuxSessionFields(
+  line: string,
+  separator: string,
+  expectedCount: number
+): readonly string[] | null {
+  const bySeparator = line.split(separator);
+  if (bySeparator.length === expectedCount) {
+    return bySeparator;
+  }
+  const byTab = line.split("\t");
+  if (byTab.length === expectedCount) {
+    return byTab;
+  }
+  return null;
 }
 
 /**
@@ -402,7 +432,7 @@ function parseSessionCreateInput(
     return {
       ok: false,
       error:
-        "invalid_name: must contain only alphanumeric, dash, underscore, or dot",
+        "invalid_name: must contain only alphanumeric, dash, or underscore",
     };
   }
 

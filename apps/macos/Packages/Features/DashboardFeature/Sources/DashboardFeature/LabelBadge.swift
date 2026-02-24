@@ -7,14 +7,22 @@ struct BadgePill: View {
   var body: some View {
     if #available(macOS 26, *) {
       Text(label)
-        .font(.caption2.weight(.semibold))
+        .font(.mono(.caption2, weight: .semibold))
+        .lineLimit(1)
+        .truncationMode(.tail)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .foregroundStyle(tint)
+        .background(
+          Capsule(style: .continuous)
+            .fill(.regularMaterial)
+        )
         .glassEffect(.regular.tint(tint.opacity(0.15)))
     } else {
       Text(label)
-        .font(.caption2.weight(.semibold))
+        .font(.mono(.caption2, weight: .semibold))
+        .lineLimit(1)
+        .truncationMode(.tail)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .foregroundStyle(tint)

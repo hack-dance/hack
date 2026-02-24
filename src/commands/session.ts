@@ -6,10 +6,25 @@ import type {
   CommandHandlerFor,
 } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
+import { optJson, optPretty } from "../cli/options.ts";
 import type { RegisteredProject } from "../lib/projects-registry.ts";
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
 import { exec, run } from "../lib/shell.ts";
 import { logger } from "../ui/logger.ts";
+import {
+  buildSessionPanesEndEvent,
+  buildSessionPanesErrorEvent,
+  buildSessionPanesLogEvent,
+  buildSessionPanesStartEvent,
+  buildSessionStreamEndEvent,
+  buildSessionStreamErrorEvent,
+  buildSessionStreamLogEvent,
+  buildSessionStreamStartEvent,
+  diffNewLines,
+  parseTmuxPanesOutput,
+  splitLines,
+  writeSessionStreamEvent,
+} from "./session-utils.ts";
 
 /**
  * Parsed tmux session info.
@@ -41,6 +56,49 @@ const optName = defineOption({
   description: "Custom suffix for new session (e.g., agent-1)",
 } as const);
 
+const optDetach = defineOption({
+  name: "detach",
+  type: "boolean",
+  long: "--detach",
+  short: "-d",
+  description: "Create/switch session without attaching (for GUI/non-TTY use)",
+} as const);
+
+const optTarget = defineOption({
+  name: "target",
+  type: "string",
+  long: "--target",
+  valueHint: "<target>",
+  description: "Tmux pane target (default: active pane)",
+} as const);
+
+const optLines = defineOption({
+  name: "lines",
+  type: "number",
+  long: "--lines",
+  valueHint: "<n>",
+  description: "Number of lines to capture",
+  defaultValue: "200",
+} as const);
+
+const optIntervalMs = defineOption({
+  name: "intervalMs",
+  type: "number",
+  long: "--interval-ms",
+  valueHint: "<ms>",
+  description: "Polling interval in milliseconds",
+  defaultValue: "500",
+} as const);
+
+const optMaxMs = defineOption({
+  name: "maxMs",
+  type: "number",
+  long: "--max-ms",
+  valueHint: "<ms>",
+  description: "Stop tailing after N milliseconds",
+  defaultValue: "5000",
+} as const);
+
 // Subcommand specs
 const listSpec = defineCommand({
   name: "list",
@@ -55,7 +113,7 @@ const startSpec = defineCommand({
   name: "start",
   summary: "Start or attach to a session for a project",
   group: "Project",
-  options: [optUp, optNew, optName],
+  options: [optUp, optNew, optName, optDetach],
   positionals: [
     { name: "project", description: "Project name or path", required: false },
   ],
@@ -100,6 +158,39 @@ const execSpec = defineCommand({
   subcommands: [],
 } as const);
 
+const panesSpec = defineCommand({
+  name: "panes",
+  summary: "List panes in a tmux session",
+  group: "Project",
+  options: [optJson, optPretty],
+  positionals: [
+    { name: "session", description: "Session name", required: true },
+  ],
+  subcommands: [],
+} as const);
+
+const captureSpec = defineCommand({
+  name: "capture",
+  summary: "Capture recent output from a tmux session",
+  group: "Project",
+  options: [optTarget, optLines, optJson, optPretty],
+  positionals: [
+    { name: "session", description: "Session name", required: true },
+  ],
+  subcommands: [],
+} as const);
+
+const tailSpec = defineCommand({
+  name: "tail",
+  summary: "Tail output from a tmux session",
+  group: "Project",
+  options: [optTarget, optLines, optIntervalMs, optMaxMs, optJson, optPretty],
+  positionals: [
+    { name: "session", description: "Session name", required: true },
+  ],
+  subcommands: [],
+} as const);
+
 type StartArgs = CommandArgs<
   typeof startSpec.options,
   typeof startSpec.positionals
@@ -115,6 +206,18 @@ type AttachArgs = CommandArgs<
 type ExecArgs = CommandArgs<
   typeof execSpec.options,
   typeof execSpec.positionals
+>;
+type PanesArgs = CommandArgs<
+  typeof panesSpec.options,
+  typeof panesSpec.positionals
+>;
+type CaptureArgs = CommandArgs<
+  typeof captureSpec.options,
+  typeof captureSpec.positionals
+>;
+type TailArgs = CommandArgs<
+  typeof tailSpec.options,
+  typeof tailSpec.positionals
 >;
 
 /**
@@ -320,6 +423,7 @@ const handleStart = async ({
   const forceNew = args.options.new === true;
   const runUp = args.options.up === true;
   const customName = args.options.name;
+  const detach = args.options.detach === true;
 
   // Find project
   const registry = await readProjectsRegistry();
@@ -376,9 +480,16 @@ const handleStart = async ({
     const sessions = await listTmuxSessions();
     const existing = sessions.find((s) => s.name === baseName);
     if (existing) {
-      logger.info({ message: `Attaching to existing session: ${baseName}` });
+      if (detach) {
+        logger.info({ message: `Session ready: ${baseName}` });
+      } else {
+        logger.info({ message: `Attaching to existing session: ${baseName}` });
+      }
       if (runUp) {
         await runHackUp(project.projectDir);
+      }
+      if (detach) {
+        return 0;
       }
       return await attachToSession(baseName);
     }
@@ -390,6 +501,12 @@ const handleStart = async ({
   }
 
   // Use repoRoot (project root), not projectDir (.hack/)
+  if (detach) {
+    return await createSessionDetached({
+      name: sessionName,
+      cwd: project.repoRoot,
+    });
+  }
   return await createAndAttachSession({
     name: sessionName,
     cwd: project.repoRoot,
@@ -453,6 +570,227 @@ const handleExec = async ({
   return 0;
 };
 
+const handlePanes = async ({
+  args,
+}: {
+  readonly ctx: CliContext;
+  readonly args: PanesArgs;
+}): Promise<number> => {
+  const sessionName = args.positionals.session;
+  const pretty = args.options.pretty === true;
+  const json = args.options.json === true || !pretty;
+
+  if (json && pretty) {
+    process.stderr.write("Cannot combine --json with --pretty.\n");
+    return 1;
+  }
+
+  const context = { session: sessionName };
+
+  if (json) {
+    writeSessionStreamEvent({
+      event: buildSessionPanesStartEvent({ context }),
+    });
+  }
+
+  const result = await listTmuxPanes(sessionName);
+  if (result.exitCode !== 0) {
+    const message = result.stderr || `Failed to list panes for ${sessionName}`;
+    if (json) {
+      writeSessionStreamEvent({
+        event: buildSessionPanesErrorEvent({ context, message }),
+      });
+      writeSessionStreamEvent({
+        event: buildSessionPanesEndEvent({ context, reason: "error" }),
+      });
+    } else {
+      console.error(message);
+    }
+    return 1;
+  }
+
+  const panes = parseTmuxPanesOutput(result.stdout);
+
+  if (json) {
+    for (const pane of panes) {
+      writeSessionStreamEvent({
+        event: buildSessionPanesLogEvent({ context, pane }),
+      });
+    }
+    writeSessionStreamEvent({
+      event: buildSessionPanesEndEvent({ context, reason: "snapshot" }),
+    });
+    return 0;
+  }
+
+  process.stdout.write(
+    `${JSON.stringify({ session: sessionName, panes }, null, 2)}\n`
+  );
+  return 0;
+};
+
+const handleCapture = async ({
+  args,
+}: {
+  readonly ctx: CliContext;
+  readonly args: CaptureArgs;
+}): Promise<number> => {
+  const sessionName = args.positionals.session;
+  const target =
+    args.options.target ?? (await resolveActiveTarget(sessionName));
+  const lines = args.options.lines ?? 200;
+  const pretty = args.options.pretty === true;
+  const json = args.options.json === true || !pretty;
+
+  if (json && pretty) {
+    process.stderr.write("Cannot combine --json with --pretty.\n");
+    return 1;
+  }
+
+  const context = {
+    session: sessionName,
+    target,
+    lines,
+    follow: false,
+  };
+
+  if (json) {
+    writeSessionStreamEvent({
+      event: buildSessionStreamStartEvent({ context }),
+    });
+  }
+
+  const result = await capturePane({ target, lines });
+  if (result.exitCode !== 0) {
+    const message = result.stderr || `Failed to capture ${sessionName}`;
+    if (json) {
+      writeSessionStreamEvent({
+        event: buildSessionStreamErrorEvent({ context, message }),
+      });
+      writeSessionStreamEvent({
+        event: buildSessionStreamEndEvent({ context, reason: "error" }),
+      });
+    } else {
+      console.error(message);
+    }
+    return 1;
+  }
+
+  if (json) {
+    for (const line of splitLines(result.stdout)) {
+      writeSessionStreamEvent({
+        event: buildSessionStreamLogEvent({ context, line }),
+      });
+    }
+    writeSessionStreamEvent({
+      event: buildSessionStreamEndEvent({ context, reason: "snapshot" }),
+    });
+    return 0;
+  }
+
+  process.stdout.write(result.stdout);
+  return 0;
+};
+
+const handleTail = async ({
+  args,
+}: {
+  readonly ctx: CliContext;
+  readonly args: TailArgs;
+}): Promise<number> => {
+  const sessionName = args.positionals.session;
+  const target =
+    args.options.target ?? (await resolveActiveTarget(sessionName));
+  const lines = args.options.lines ?? 200;
+  const intervalMs = args.options.intervalMs ?? 500;
+  const maxMs = args.options.maxMs ?? 5000;
+  const pretty = args.options.pretty === true;
+  const json = args.options.json === true || !pretty;
+
+  if (json && pretty) {
+    process.stderr.write("Cannot combine --json with --pretty.\n");
+    return 1;
+  }
+
+  const context = {
+    session: sessionName,
+    target,
+    lines,
+    follow: true,
+    intervalMs,
+    maxMs,
+  };
+
+  if (json) {
+    writeSessionStreamEvent({
+      event: buildSessionStreamStartEvent({ context }),
+    });
+  }
+
+  const initial = await capturePane({ target, lines });
+  if (initial.exitCode !== 0) {
+    const message = initial.stderr || `Failed to capture ${sessionName}`;
+    if (json) {
+      writeSessionStreamEvent({
+        event: buildSessionStreamErrorEvent({ context, message }),
+      });
+      writeSessionStreamEvent({
+        event: buildSessionStreamEndEvent({ context, reason: "error" }),
+      });
+    } else {
+      console.error(message);
+    }
+    return 1;
+  }
+
+  let lastOutput = initial.stdout;
+  const start = Date.now();
+
+  while (Date.now() - start < maxMs) {
+    await delay(intervalMs);
+
+    const result = await capturePane({ target, lines });
+    if (result.exitCode !== 0) {
+      const message = result.stderr || `Failed to capture ${sessionName}`;
+      if (json) {
+        writeSessionStreamEvent({
+          event: buildSessionStreamErrorEvent({ context, message }),
+        });
+        writeSessionStreamEvent({
+          event: buildSessionStreamEndEvent({ context, reason: "error" }),
+        });
+      } else {
+        console.error(message);
+      }
+      return 1;
+    }
+
+    const nextOutput = result.stdout;
+    const suffix = diffNewLines({ previous: lastOutput, next: nextOutput });
+    if (suffix) {
+      if (json) {
+        for (const line of splitLines(suffix)) {
+          writeSessionStreamEvent({
+            event: buildSessionStreamLogEvent({ context, line }),
+          });
+        }
+      } else {
+        process.stdout.write(suffix);
+      }
+    }
+
+    lastOutput = nextOutput;
+  }
+
+  if (json) {
+    writeSessionStreamEvent({
+      event: buildSessionStreamEndEvent({ context, reason: "timeout" }),
+    });
+  }
+
+  return 0;
+};
+
 export const sessionCommand = defineCommand({
   name: "session",
   summary: "Manage tmux sessions for hack projects",
@@ -466,33 +804,107 @@ export const sessionCommand = defineCommand({
     withHandler(stopSpec, handleStop),
     withHandler(attachSpec, handleAttach),
     withHandler(execSpec, handleExec),
+    withHandler(panesSpec, handlePanes),
+    withHandler(captureSpec, handleCapture),
+    withHandler(tailSpec, handleTail),
   ],
 } as const);
+
+/**
+ * Capture tmux pane output.
+ */
+async function capturePane(opts: {
+  readonly target: string;
+  readonly lines: number;
+}) {
+  const lines =
+    Number.isFinite(opts.lines) && opts.lines > 0 ? opts.lines : 200;
+  return await exec(
+    ["tmux", "capture-pane", "-p", "-J", "-t", opts.target, "-S", `-${lines}`],
+    { stdin: "ignore" }
+  );
+}
+
+async function listTmuxPanes(sessionName: string) {
+  const format = [
+    "#{session_name}:#{window_index}.#{pane_index}",
+    "#{pane_active}",
+    "#{window_index}",
+    "#{window_name}",
+    "#{pane_index}",
+    "#{pane_current_command}",
+    "#{pane_current_path}",
+  ].join("\t");
+
+  return await exec(["tmux", "list-panes", "-t", sessionName, "-F", format], {
+    stdin: "ignore",
+  });
+}
+
+async function resolveActiveTarget(sessionName: string): Promise<string> {
+  const result = await exec(
+    [
+      "tmux",
+      "display-message",
+      "-p",
+      "-t",
+      sessionName,
+      "#{session_name}:#{window_index}.#{pane_index}",
+    ],
+    { stdin: "ignore" }
+  );
+
+  const activeTarget = result.exitCode === 0 ? result.stdout.trim() : "";
+  if (activeTarget) {
+    return activeTarget;
+  }
+
+  const panesResult = await listTmuxPanes(sessionName);
+  if (panesResult.exitCode === 0) {
+    const panes = parseTmuxPanesOutput(panesResult.stdout);
+    const [firstPane] = panes;
+    if (firstPane) {
+      return firstPane.target;
+    }
+  }
+
+  return `${sessionName}:0.0`;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
 
 /**
  * List all tmux sessions.
  */
 async function listTmuxSessions(): Promise<TmuxSession[]> {
-  const result = await exec(
-    [
-      "tmux",
-      "list-sessions",
-      "-F",
-      "#{session_name}:#{session_attached}:#{session_path}",
-    ],
-    { stdin: "ignore" }
-  );
+  const separator = "|||HACK_SESSION_FIELD|||";
+  const format = [
+    "#{session_name}",
+    "#{session_attached}",
+    "#{session_path}",
+  ].join(separator);
+  const result = await exec(["tmux", "list-sessions", "-F", format], {
+    stdin: "ignore",
+  });
 
   if (result.exitCode !== 0) {
     return [];
   }
 
   const sessions: TmuxSession[] = [];
-  for (const line of result.stdout.trim().split("\n")) {
-    if (!line) {
+  for (const line of result.stdout.split("\n")) {
+    if (!line.trim()) {
       continue;
     }
-    const [name, attached, path] = line.split(":");
+    const fields = parseTmuxSessionFields(line, separator, 3);
+    if (!fields) {
+      continue;
+    }
+    const [name, attached, path] = fields;
     if (name) {
       sessions.push({
         name,
@@ -503,6 +915,22 @@ async function listTmuxSessions(): Promise<TmuxSession[]> {
   }
 
   return sessions;
+}
+
+function parseTmuxSessionFields(
+  line: string,
+  separator: string,
+  expectedCount: number
+): readonly string[] | null {
+  const bySeparator = line.split(separator);
+  if (bySeparator.length === expectedCount) {
+    return bySeparator;
+  }
+  const byTab = line.split("\t");
+  if (byTab.length === expectedCount) {
+    return byTab;
+  }
+  return null;
 }
 
 /**
@@ -535,7 +963,23 @@ async function createAndAttachSession(opts: {
   readonly name: string;
   readonly cwd: string;
 }): Promise<number> {
-  // Create detached session first
+  const createExitCode = await createSessionDetached({
+    name: opts.name,
+    cwd: opts.cwd,
+  });
+
+  if (createExitCode !== 0) {
+    return createExitCode;
+  }
+
+  // Switch or attach depending on context (attachToSession handles this)
+  return await attachToSession(opts.name);
+}
+
+async function createSessionDetached(opts: {
+  readonly name: string;
+  readonly cwd: string;
+}): Promise<number> {
   const createResult = await exec(
     ["tmux", "new-session", "-d", "-s", opts.name, "-c", opts.cwd],
     { stdin: "ignore" }
@@ -547,9 +991,7 @@ async function createAndAttachSession(opts: {
   }
 
   logger.info({ message: `Created session: ${opts.name}` });
-
-  // Switch or attach depending on context (attachToSession handles this)
-  return await attachToSession(opts.name);
+  return 0;
 }
 
 /**

@@ -104,7 +104,29 @@ graph LR
   Caddy -->|"Routes by labels"| Upstream["Service upstream"]
 ```
  
-## Lifecycle (init → up → logs)
+## Project env + secrets
+
+Projects can declare a shareable env contract (no values) and safely inject secrets into compose:
+
+- Contract: `.hack/hack.env.json` (committed)
+- Plain values: `.hack/.env` (gitignored, per-project)
+- Secrets: OS keychain via `Bun.secrets` (namespaced per project)
+
+At runtime, hack generates `.hack/.internal/compose.env.override.yml` containing `${KEY}` placeholders
+for the contract variables and invokes `docker compose` with a process environment that includes the
+resolved values (including keychain secrets).
+
+See `docs/env.md` for the full contract format and CLI/API surface.
+
+## Project lifecycle hooks + host processes
+
+Projects can run host-side hooks around `hack up/down` and start managed host processes (auth steps,
+local proxies/tunnels). Processes are started inside a mux session (tmux or zellij) so they have a
+stable home and can be torn down on `hack down`.
+
+See `docs/lifecycle.md` for config and behavior.
+
+## Workflow (init → up → logs)
 
 ```mermaid
 sequenceDiagram

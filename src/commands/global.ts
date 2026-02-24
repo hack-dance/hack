@@ -31,6 +31,7 @@ import {
   GLOBAL_CLOUDFLARE_DIR_NAME,
   GLOBAL_CONFIG_SCHEMA_FILENAME,
   GLOBAL_COREDNS_FILENAME,
+  GLOBAL_ENV_SCHEMA_FILENAME,
   GLOBAL_GRAFANA_DASHBOARD_FILENAME,
   GLOBAL_GRAFANA_DASHBOARDS_PROVISIONING_FILENAME,
   GLOBAL_GRAFANA_DATASOURCE_FILENAME,
@@ -70,6 +71,7 @@ import {
   renderGlobalLokiConfigYaml,
   renderProjectBranchesSchemaJson,
   renderProjectConfigSchemaJson,
+  renderProjectEnvSchemaJson,
 } from "../templates.ts";
 import { display } from "../ui/display.ts";
 import { dockerComposeLogsPretty } from "../ui/docker-logs.ts";
@@ -269,15 +271,104 @@ function getGlobalPaths() {
     ),
     grafanaDashboard: resolve(loggingDir, GLOBAL_GRAFANA_DASHBOARD_FILENAME),
     configSchema: resolve(schemasDir, GLOBAL_CONFIG_SCHEMA_FILENAME),
+    envSchema: resolve(schemasDir, GLOBAL_ENV_SCHEMA_FILENAME),
     branchesSchema: resolve(schemasDir, GLOBAL_BRANCHES_SCHEMA_FILENAME),
   };
 }
 
 async function ensureDockerRunning(): Promise<void> {
   const res = await exec(["docker", "info"], { stdin: "ignore" });
-  if (res.exitCode !== 0) {
-    throw new Error("Docker does not seem to be running (docker info failed)");
+  if (res.exitCode === 0) {
+    return;
   }
+
+  const backend = await detectDockerBackend();
+  if (!backend) {
+    throw new Error(
+      "Docker does not seem to be running and no Docker backend was detected.\nInstall Docker Desktop or OrbStack, then retry."
+    );
+  }
+
+  const ok = await confirm({
+    message: `Docker is not running. Start ${backend.name}?`,
+    initialValue: true,
+  });
+  if (isCancel(ok)) {
+    throw new Error("Canceled");
+  }
+  if (!ok) {
+    throw new Error("Docker is not running (user declined to start)");
+  }
+
+  logger.step({ message: `Starting ${backend.name}…` });
+  await run(backend.startCommand, { stdin: "ignore" });
+
+  const ready = await waitForDocker({ timeoutMs: 30_000, intervalMs: 1000 });
+  if (!ready) {
+    throw new Error(
+      `Docker did not become ready after starting ${backend.name}. Check that ${backend.name} is running and retry.`
+    );
+  }
+
+  logger.success({ message: `${backend.name} is running` });
+}
+
+type DockerBackend = {
+  readonly name: string;
+  readonly startCommand: readonly string[];
+};
+
+/**
+ * Detects the installed Docker backend on macOS (OrbStack, Docker Desktop)
+ * or checks for the docker socket on Linux.
+ */
+async function detectDockerBackend(): Promise<DockerBackend | null> {
+  if (isMac()) {
+    if (await pathExists("/Applications/OrbStack.app")) {
+      const hasOrbctl = await findExecutableInPath("orbctl");
+      return {
+        name: "OrbStack",
+        startCommand: hasOrbctl
+          ? ["orbctl", "start"]
+          : ["open", "-a", "OrbStack"],
+      };
+    }
+    if (await pathExists("/Applications/Docker.app")) {
+      return {
+        name: "Docker Desktop",
+        startCommand: ["open", "-a", "Docker"],
+      };
+    }
+    return null;
+  }
+
+  const hasDocker = await findExecutableInPath("docker");
+  if (hasDocker) {
+    const hasSystemctl = await findExecutableInPath("systemctl");
+    if (hasSystemctl) {
+      return {
+        name: "Docker (systemd)",
+        startCommand: ["sudo", "systemctl", "start", "docker"],
+      };
+    }
+  }
+
+  return null;
+}
+
+async function waitForDocker(opts: {
+  readonly timeoutMs: number;
+  readonly intervalMs: number;
+}): Promise<boolean> {
+  const deadline = Date.now() + opts.timeoutMs;
+  while (Date.now() < deadline) {
+    const check = await exec(["docker", "info"], { stdin: "ignore" });
+    if (check.exitCode === 0) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, opts.intervalMs));
+  }
+  return false;
 }
 
 async function ensureNetwork(
@@ -369,13 +460,13 @@ async function globalInstall(): Promise<number> {
   s.stop(
     `Networks ready (${DEFAULT_INGRESS_NETWORK}, ${DEFAULT_LOGGING_NETWORK})`
   );
-  if (!ingressNetwork.hasSubnet) {
+  const useStaticIps = ingressNetwork.hasSubnet;
+  if (!useStaticIps) {
     logger.warn({
       message:
         "hack-dev network has no subnet; CoreDNS will resolve via dynamic IP.",
     });
   }
-  const useStaticIps = false;
 
   if (isMac()) {
     await ensureMacHackDns();
@@ -440,6 +531,10 @@ async function globalInstall(): Promise<number> {
   await writeWithPromptIfDifferent(
     paths.configSchema,
     renderProjectConfigSchemaJson()
+  );
+  await writeWithPromptIfDifferent(
+    paths.envSchema,
+    renderProjectEnvSchemaJson()
   );
   await writeWithPromptIfDifferent(
     paths.branchesSchema,
@@ -561,14 +656,39 @@ export async function globalUp(): Promise<number> {
   });
   if (reservedIps.length > 0) {
     const conflicts = await findIngressIpConflicts({ reservedIps });
-    const blockers = conflicts.filter(
+    let blockers = conflicts.filter(
       (conflict) => !isGlobalProxyContainer({ name: conflict.containerName })
     );
     if (blockers.length > 0) {
-      logger.error({
-        message: renderIngressConflictMessage({ conflicts: blockers }),
+      logger.warn({
+        message: [
+          `Reserved ingress IPs are currently occupied on ${DEFAULT_INGRESS_NETWORK}.`,
+          "Attempting to reassign conflicting containers and retry global startup…",
+        ].join("\n"),
       });
-      return 1;
+
+      await reassignIngressIpConflicts({
+        conflicts: blockers,
+        reservedIps,
+      });
+
+      const remainingConflicts = await findIngressIpConflicts({
+        reservedIps,
+      });
+      blockers = remainingConflicts.filter(
+        (conflict) => !isGlobalProxyContainer({ name: conflict.containerName })
+      );
+
+      if (blockers.length > 0) {
+        logger.error({
+          message: renderIngressConflictMessage({ conflicts: blockers }),
+        });
+        return 1;
+      }
+
+      logger.success({
+        message: "Recovered reserved ingress IP conflicts; continuing startup.",
+      });
     }
   }
 
@@ -630,6 +750,13 @@ type IngressIpConflict = {
   readonly containerName: string;
 };
 
+type IngressNetworkSnapshot = {
+  readonly subnet: string | null;
+  readonly gateway: string | null;
+  readonly usedIps: ReadonlySet<string>;
+  readonly containerIpByName: ReadonlyMap<string, string>;
+};
+
 async function resolveReservedIngressIps(opts: {
   readonly composePath: string;
 }): Promise<string[]> {
@@ -655,6 +782,24 @@ async function findIngressIpConflicts(opts: {
     return [];
   }
 
+  const snapshot = await inspectIngressNetworkSnapshot();
+  if (!snapshot) {
+    return [];
+  }
+
+  const reservedIps = new Set(opts.reservedIps);
+  const conflicts: IngressIpConflict[] = [];
+  for (const [containerName, ip] of snapshot.containerIpByName.entries()) {
+    if (!reservedIps.has(ip)) {
+      continue;
+    }
+    conflicts.push({ ip, containerName });
+  }
+
+  return conflicts;
+}
+
+async function inspectIngressNetworkSnapshot(): Promise<IngressNetworkSnapshot | null> {
   const inspect = await exec(
     ["docker", "network", "inspect", DEFAULT_INGRESS_NETWORK],
     {
@@ -662,24 +807,50 @@ async function findIngressIpConflicts(opts: {
     }
   );
   if (inspect.exitCode !== 0) {
-    return [];
+    return null;
   }
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(inspect.stdout);
   } catch {
-    return [];
+    return null;
   }
   if (!Array.isArray(parsed)) {
-    return [];
+    return null;
   }
 
-  const conflicts: IngressIpConflict[] = [];
+  let subnet: string | null = null;
+  let gateway: string | null = null;
+  const usedIps = new Set<string>();
+  const containerIpByName = new Map<string, string>();
   for (const entry of parsed) {
     if (!entry || typeof entry !== "object") {
       continue;
     }
+    if (subnet === null) {
+      const ipamConfig = (
+        entry as {
+          IPAM?: {
+            Config?: Array<{ Subnet?: unknown; Gateway?: unknown }>;
+          };
+        }
+      ).IPAM?.Config;
+      if (Array.isArray(ipamConfig)) {
+        for (const config of ipamConfig) {
+          if (subnet === null && typeof config?.Subnet === "string") {
+            subnet = config.Subnet;
+          }
+          if (gateway === null && typeof config?.Gateway === "string") {
+            gateway = config.Gateway;
+          }
+          if (subnet !== null && gateway !== null) {
+            break;
+          }
+        }
+      }
+    }
+
     const containers = (entry as { Containers?: Record<string, unknown> })
       .Containers;
     if (!containers || typeof containers !== "object") {
@@ -698,14 +869,216 @@ async function findIngressIpConflicts(opts: {
         continue;
       }
       const ip = extractIpv4Address({ raw: ipRaw });
-      if (!opts.reservedIps.includes(ip)) {
+      if (ip.length === 0) {
         continue;
       }
-      conflicts.push({ ip, containerName: name });
+      usedIps.add(ip);
+      containerIpByName.set(name, ip);
     }
   }
 
-  return conflicts;
+  return {
+    subnet,
+    gateway,
+    usedIps,
+    containerIpByName,
+  };
+}
+
+async function reassignIngressIpConflicts(opts: {
+  readonly conflicts: readonly IngressIpConflict[];
+  readonly reservedIps: readonly string[];
+}): Promise<void> {
+  const snapshot = await inspectIngressNetworkSnapshot();
+  const usedIps = new Set(snapshot?.usedIps ?? []);
+  const reservedIps = new Set(opts.reservedIps);
+  const containerIpByName = new Map(snapshot?.containerIpByName ?? []);
+  const conflictIpsByContainer = new Map(
+    opts.conflicts.map((conflict) => [conflict.containerName, conflict.ip])
+  );
+  const containerNames = [
+    ...new Set(opts.conflicts.map((conflict) => conflict.containerName)),
+  ];
+
+  for (const containerName of containerNames) {
+    logger.step({
+      message: `Reassigning ${containerName} on ${DEFAULT_INGRESS_NETWORK}…`,
+    });
+
+    const disconnect = await exec(
+      [
+        "docker",
+        "network",
+        "disconnect",
+        "-f",
+        DEFAULT_INGRESS_NETWORK,
+        containerName,
+      ],
+      {
+        stdin: "ignore",
+      }
+    );
+    if (disconnect.exitCode !== 0) {
+      logger.warn({
+        message: [
+          `Failed to disconnect ${containerName} from ${DEFAULT_INGRESS_NETWORK} (exit ${disconnect.exitCode}).`,
+          trimShellError({ text: disconnect.stderr }),
+        ].join("\n"),
+      });
+      continue;
+    }
+
+    const previousIp =
+      conflictIpsByContainer.get(containerName) ??
+      containerIpByName.get(containerName) ??
+      null;
+    if (previousIp !== null) {
+      usedIps.delete(previousIp);
+      containerIpByName.delete(containerName);
+    }
+
+    const desiredIp = pickAvailableIngressIp({
+      subnet: snapshot?.subnet ?? null,
+      gateway: snapshot?.gateway ?? null,
+      usedIps,
+      reservedIps,
+    });
+
+    const connectCommand = desiredIp
+      ? [
+          "docker",
+          "network",
+          "connect",
+          "--ip",
+          desiredIp,
+          DEFAULT_INGRESS_NETWORK,
+          containerName,
+        ]
+      : [
+          "docker",
+          "network",
+          "connect",
+          DEFAULT_INGRESS_NETWORK,
+          containerName,
+        ];
+    const connect = await exec(connectCommand, {
+      stdin: "ignore",
+    });
+    if (connect.exitCode !== 0) {
+      logger.warn({
+        message: [
+          `Failed to reconnect ${containerName} to ${DEFAULT_INGRESS_NETWORK} (exit ${connect.exitCode}).`,
+          trimShellError({ text: connect.stderr }),
+        ].join("\n"),
+      });
+      continue;
+    }
+
+    if (desiredIp) {
+      usedIps.add(desiredIp);
+      containerIpByName.set(containerName, desiredIp);
+    }
+  }
+}
+
+function pickAvailableIngressIp(opts: {
+  readonly subnet: string | null;
+  readonly gateway: string | null;
+  readonly usedIps: ReadonlySet<string>;
+  readonly reservedIps: ReadonlySet<string>;
+}): string | null {
+  if (!opts.subnet) {
+    return null;
+  }
+  const cidr = parseIpv4Cidr(opts.subnet);
+  if (!cidr) {
+    return null;
+  }
+  if (cidr.prefix >= 31) {
+    return null;
+  }
+
+  const hostCapacity = 2 ** (32 - cidr.prefix);
+  const firstHost = cidr.network + 1;
+  const lastHost = cidr.network + hostCapacity - 2;
+  const maxCandidates = Math.min(4096, Math.max(0, lastHost - firstHost + 1));
+
+  for (let offset = 0; offset < maxCandidates; offset += 1) {
+    const candidate = intToIpv4(firstHost + offset);
+    if (candidate === opts.gateway) {
+      continue;
+    }
+    if (opts.reservedIps.has(candidate)) {
+      continue;
+    }
+    if (opts.usedIps.has(candidate)) {
+      continue;
+    }
+    return candidate;
+  }
+  return null;
+}
+
+function parseIpv4Cidr(
+  cidr: string
+): { readonly network: number; readonly prefix: number } | null {
+  const [ipText, prefixText] = cidr.split("/");
+  if (!(ipText && prefixText)) {
+    return null;
+  }
+
+  const prefix = Number.parseInt(prefixText, 10);
+  if (!Number.isFinite(prefix) || prefix < 0 || prefix > 32) {
+    return null;
+  }
+
+  const ip = ipv4ToInt(ipText);
+  if (ip === null) {
+    return null;
+  }
+
+  let mask = 0;
+  if (prefix === 0) {
+    mask = 0;
+  } else if (prefix === 32) {
+    mask = 0xff_ff_ff_ff;
+  } else {
+    mask = (0xff_ff_ff_ff << (32 - prefix)) >>> 0;
+  }
+
+  return {
+    network: (ip & mask) >>> 0,
+    prefix,
+  };
+}
+
+function ipv4ToInt(ip: string): number | null {
+  const octets = ip.split(".");
+  if (octets.length !== 4) {
+    return null;
+  }
+
+  const numbers = octets.map((octet) => Number.parseInt(octet, 10));
+  if (
+    numbers.some((octet) => !Number.isFinite(octet) || octet < 0 || octet > 255)
+  ) {
+    return null;
+  }
+
+  const a = numbers[0] ?? 0;
+  const b = numbers[1] ?? 0;
+  const c = numbers[2] ?? 0;
+  const d = numbers[3] ?? 0;
+  return (((a << 24) >>> 0) | (b << 16) | (c << 8) | d) >>> 0;
+}
+
+function intToIpv4(value: number): string {
+  return [
+    (value >>> 24) & 255,
+    (value >>> 16) & 255,
+    (value >>> 8) & 255,
+    value & 255,
+  ].join(".");
 }
 
 function extractIpv4Address(opts: { readonly raw: string }): string {
@@ -739,6 +1112,11 @@ function renderIngressConflictMessage(opts: {
   );
 
   return lines.join("\n");
+}
+
+function trimShellError(opts: { readonly text: string }): string {
+  const trimmed = opts.text.trim();
+  return trimmed.length > 0 ? trimmed : "(no stderr output)";
 }
 
 async function globalDown(): Promise<number> {
@@ -885,9 +1263,19 @@ type GatewayStatusPayload = {
   readonly tokens_revoked: number;
   readonly tokens_write: number;
   readonly tokens_read: number;
+  readonly tokens: readonly GatewayTokenPayload[];
   readonly gateway_projects?: string;
   readonly exposures: readonly GatewayExposurePayload[];
   readonly warnings: readonly string[];
+};
+
+type GatewayTokenPayload = {
+  readonly id: string;
+  readonly scope: "read" | "write";
+  readonly label?: string;
+  readonly created_at: string;
+  readonly last_used_at?: string;
+  readonly revoked_at?: string;
 };
 
 async function readComposeStatus(
@@ -970,6 +1358,14 @@ async function collectGatewayStatus(): Promise<GatewayStatusPayload> {
   const revokedTokens = tokens.filter((token) => token.revokedAt);
   const writeTokens = activeTokens.filter((token) => token.scope === "write");
   const readTokens = activeTokens.filter((token) => token.scope === "read");
+  const serializedTokens: GatewayTokenPayload[] = tokens.map((token) => ({
+    id: token.id,
+    scope: token.scope,
+    ...(token.label ? { label: token.label } : {}),
+    created_at: token.createdAt,
+    ...(token.lastUsedAt ? { last_used_at: token.lastUsedAt } : {}),
+    ...(token.revokedAt ? { revoked_at: token.revokedAt } : {}),
+  }));
 
   const payload: GatewayStatusPayload = {
     config_path: configPath,
@@ -983,6 +1379,7 @@ async function collectGatewayStatus(): Promise<GatewayStatusPayload> {
     tokens_revoked: revokedTokens.length,
     tokens_write: writeTokens.length,
     tokens_read: readTokens.length,
+    tokens: serializedTokens,
     exposures,
     warnings: gatewayResolution.warnings,
   };
@@ -1700,46 +2097,83 @@ async function hasMkcertLocalCa({
 }
 
 async function ensureMacHackDns(): Promise<void> {
-  const brew = await findExecutableInPath("brew");
-  if (!brew) {
-    logger.warn({ message: "Homebrew not found; skipping dnsmasq bootstrap." });
+  const brewOk = await ensureBrewForDnsmasq();
+  if (!brewOk) {
     return;
   }
 
-  const hasDnsmasq =
-    (await exec(["brew", "list", "dnsmasq"], { stdin: "ignore" })).exitCode ===
-    0;
-
-  if (!hasDnsmasq) {
-    const ok = await confirm({
-      message: "Install dnsmasq via Homebrew? (required for *.hack DNS)",
-      initialValue: true,
-    });
-    if (isCancel(ok)) {
-      throw new Error("Canceled");
-    }
-    if (!ok) {
-      logger.warn({
-        message: "Skipping dnsmasq install; *.hack hostnames may not resolve.",
-      });
-      return;
-    }
-    logger.step({ message: "Installing dnsmasq via Homebrew…" });
-    const installExit = await run(["brew", "install", "dnsmasq"], {
-      stdin: "inherit",
-    });
-    if (installExit !== 0) {
-      throw new Error(`brew install dnsmasq failed (exit ${installExit})`);
-    }
+  const dnsmasqOk = await ensureDnsmasqInstalled();
+  if (!dnsmasqOk) {
+    return;
   }
 
-  // Configure dnsmasq: map local dev domains → Caddy container IP
-  // (bypasses OrbStack port forwarding issues with port 443)
-  const prefixRes = await exec(["brew", "--prefix"], { stdin: "ignore" });
-  const brewPrefix =
-    prefixRes.exitCode === 0 ? prefixRes.stdout.trim() : "/opt/homebrew";
+  const brewPrefix = await resolveBrewPrefix();
   const dnsmasqConf = resolve(brewPrefix, "etc", "dnsmasq.conf");
+  await ensureDnsmasqHackAliases({ dnsmasqConf });
+  await ensureMacResolverFiles();
+  await restartDnsmasq();
+  await flushMacDnsCache();
+  noteDnsConfigured({ dnsmasqConf });
+}
 
+async function ensureBrewForDnsmasq(): Promise<boolean> {
+  const brew = await findExecutableInPath("brew");
+  if (!brew) {
+    logger.warn({ message: "Homebrew not found; skipping dnsmasq bootstrap." });
+    return false;
+  }
+  return true;
+}
+
+async function ensureDnsmasqInstalled(): Promise<boolean> {
+  const hasDnsmasq = await isBrewFormulaInstalled({ formula: "dnsmasq" });
+  if (hasDnsmasq) {
+    return true;
+  }
+
+  const ok = await confirm({
+    message: "Install dnsmasq via Homebrew? (required for *.hack DNS)",
+    initialValue: true,
+  });
+  if (isCancel(ok)) {
+    throw new Error("Canceled");
+  }
+  if (!ok) {
+    logger.warn({
+      message: "Skipping dnsmasq install; *.hack hostnames may not resolve.",
+    });
+    return false;
+  }
+
+  logger.step({ message: "Installing dnsmasq via Homebrew…" });
+  const installExit = await run(["brew", "install", "dnsmasq"], {
+    stdin: "inherit",
+  });
+  if (installExit !== 0) {
+    throw new Error(`brew install dnsmasq failed (exit ${installExit})`);
+  }
+
+  return true;
+}
+
+async function isBrewFormulaInstalled(opts: {
+  readonly formula: string;
+}): Promise<boolean> {
+  const result = await exec(["brew", "list", opts.formula], {
+    stdin: "ignore",
+  });
+  return result.exitCode === 0;
+}
+
+async function resolveBrewPrefix(): Promise<string> {
+  const prefixRes = await exec(["brew", "--prefix"], { stdin: "ignore" });
+  const prefix = prefixRes.exitCode === 0 ? prefixRes.stdout.trim() : "";
+  return prefix.length > 0 ? prefix : "/opt/homebrew";
+}
+
+async function ensureDnsmasqHackAliases(opts: {
+  readonly dnsmasqConf: string;
+}): Promise<void> {
   const containerIpLines = [
     `address=/.${DEFAULT_PROJECT_TLD}/${DEFAULT_CADDY_IP}`,
     `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/${DEFAULT_CADDY_IP}`,
@@ -1751,67 +2185,100 @@ async function ensureMacHackDns(): Promise<void> {
     `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/::1`,
   ] as const;
 
-  let existing = (await readTextFile(dnsmasqConf)) ?? "";
-
-  // Migrate: replace legacy localhost lines with container IP
-  let migrated = false;
-  for (const legacyLine of legacyLines) {
-    if (existing.includes(legacyLine)) {
-      existing = existing.replace(legacyLine, "");
-      migrated = true;
-    }
-  }
-  if (migrated) {
-    // Clean up any double newlines left from removal
-    existing = existing.replace(/\n{3,}/g, "\n\n").trim();
-    logger.info({ message: "Migrating dnsmasq to use container IP..." });
-  }
-
-  const missing = containerIpLines.filter((line) => !existing.includes(line));
-  if (missing.length > 0 || migrated) {
-    const next =
-      existing.length === 0
-        ? `${missing.join("\n")}\n`
-        : `${existing.trimEnd()}\n${missing.join("\n")}\n`;
-    await ensureDir(dirname(dnsmasqConf));
-    await Bun.write(dnsmasqConf, next);
-    logger.success({ message: `Updated ${dnsmasqConf}` });
-  } else {
+  const existing = (await readTextFile(opts.dnsmasqConf)) ?? "";
+  const migrated = removeLegacyDnsmasqLines({
+    content: existing,
+    legacyLines,
+  });
+  const missing = containerIpLines.filter(
+    (line) => !migrated.content.includes(line)
+  );
+  const shouldWrite = migrated.changed || missing.length > 0;
+  if (!shouldWrite) {
     logger.info({
       message: `dnsmasq already configured for .${DEFAULT_PROJECT_TLD} and .${DEFAULT_OAUTH_ALIAS_ROOT}`,
     });
+    return;
   }
 
-  // Configure macOS resolver(s) → 127.0.0.1 (dnsmasq)
-  for (const domain of [
-    DEFAULT_PROJECT_TLD,
-    DEFAULT_OAUTH_ALIAS_ROOT,
-  ] as const) {
-    const resolverPath = `/etc/resolver/${domain}`;
-    const resolverOk = await confirm({
-      message: `Write ${resolverPath} (requires sudo)?`,
-      initialValue: true,
+  const next = buildDnsmasqConf({
+    existing: migrated.content,
+    lines: missing,
+  });
+  await ensureDir(dirname(opts.dnsmasqConf));
+  await Bun.write(opts.dnsmasqConf, next);
+  logger.success({ message: `Updated ${opts.dnsmasqConf}` });
+}
+
+function removeLegacyDnsmasqLines(opts: {
+  readonly content: string;
+  readonly legacyLines: readonly string[];
+}): { readonly content: string; readonly changed: boolean } {
+  let updated = opts.content;
+  let changed = false;
+
+  for (const legacyLine of opts.legacyLines) {
+    if (!updated.includes(legacyLine)) {
+      continue;
+    }
+    updated = updated.replaceAll(legacyLine, "");
+    changed = true;
+  }
+
+  if (!changed) {
+    return { content: updated, changed: false };
+  }
+
+  // Clean up any double newlines left from removal.
+  const cleaned = updated.replace(/\n{3,}/g, "\n\n").trim();
+  logger.info({ message: "Migrating dnsmasq to use container IP..." });
+  return { content: cleaned, changed: true };
+}
+
+function buildDnsmasqConf(opts: {
+  readonly existing: string;
+  readonly lines: readonly string[];
+}): string {
+  const existing = opts.existing.trimEnd();
+  if (existing.length === 0) {
+    return `${opts.lines.join("\n")}\n`;
+  }
+  return `${existing}\n${opts.lines.join("\n")}\n`;
+}
+
+async function ensureMacResolverFiles(): Promise<void> {
+  await maybeWriteResolver({ domain: DEFAULT_PROJECT_TLD });
+  await maybeWriteResolver({ domain: DEFAULT_OAUTH_ALIAS_ROOT });
+}
+
+async function maybeWriteResolver(opts: {
+  readonly domain: string;
+}): Promise<void> {
+  const resolverPath = `/etc/resolver/${opts.domain}`;
+  const resolverOk = await confirm({
+    message: `Write ${resolverPath} (requires sudo)?`,
+    initialValue: true,
+  });
+  if (isCancel(resolverOk)) {
+    throw new Error("Canceled");
+  }
+  if (!resolverOk) {
+    logger.warn({
+      message: `Skipping /etc/resolver setup for ${opts.domain}; *.${opts.domain} may not resolve.`,
     });
-    if (isCancel(resolverOk)) {
-      throw new Error("Canceled");
-    }
-    if (resolverOk) {
-      await run([
-        "sudo",
-        "sh",
-        "-c",
-        `mkdir -p /etc/resolver && printf '%s\\n' 'nameserver 127.0.0.1' > ${resolverPath}`,
-      ]);
-      logger.success({ message: `Wrote ${resolverPath}` });
-    } else {
-      logger.warn({
-        message: `Skipping /etc/resolver setup for ${domain}; *.${domain} may not resolve.`,
-      });
-    }
+    return;
   }
 
-  // Start/restart dnsmasq.
-  //
+  await run([
+    "sudo",
+    "sh",
+    "-c",
+    `mkdir -p /etc/resolver && printf '%s\\n' 'nameserver 127.0.0.1' > ${resolverPath}`,
+  ]);
+  logger.success({ message: `Wrote ${resolverPath}` });
+}
+
+async function restartDnsmasq(): Promise<void> {
   // We run via sudo so dnsmasq can bind :53 (required for /etc/resolver/<tld>).
   logger.step({ message: "Restarting dnsmasq (requires sudo)…" });
   const restartExit = await run(
@@ -1825,17 +2292,20 @@ async function ensureMacHackDns(): Promise<void> {
       `sudo brew services restart dnsmasq failed (exit ${restartExit})`
     );
   }
+}
 
-  // Flush macOS DNS cache to clear stale entries
+async function flushMacDnsCache(): Promise<void> {
   logger.step({ message: "Flushing DNS cache…" });
   await run(["sudo", "dscacheutil", "-flushcache"], { stdin: "inherit" });
   await run(["sudo", "killall", "-HUP", "mDNSResponder"], { stdin: "inherit" });
+}
 
+function noteDnsConfigured(opts: { readonly dnsmasqConf: string }): void {
   note(
     [
       `DNS configured: *.${DEFAULT_PROJECT_TLD} → ${DEFAULT_CADDY_IP} (container)`,
       `DNS configured: *.${DEFAULT_OAUTH_ALIAS_ROOT} → ${DEFAULT_CADDY_IP} (container)`,
-      `- dnsmasq: ${dnsmasqConf}`,
+      `- dnsmasq: ${opts.dnsmasqConf}`,
       `- resolver: /etc/resolver/${DEFAULT_PROJECT_TLD}`,
       `- resolver: /etc/resolver/${DEFAULT_OAUTH_ALIAS_ROOT}`,
     ].join("\n"),
@@ -1882,12 +2352,21 @@ async function ensureMacDnsmasqRunning(): Promise<void> {
         : "dnsmasq is not started; starting it as root so it can bind :53",
   });
 
-  const exit = await run(["sudo", "brew", "services", "restart", "dnsmasq"], {
-    stdin: "inherit",
+  const interactive = process.stdin.isTTY && process.stdout.isTTY;
+  const sudoCommand = interactive
+    ? ["sudo", "brew", "services", "restart", "dnsmasq"]
+    : ["sudo", "-n", "brew", "services", "restart", "dnsmasq"];
+  const exit = await run(sudoCommand, {
+    stdin: interactive ? "inherit" : "ignore",
   });
   if (exit !== 0) {
     logger.warn({
-      message: `Failed to start dnsmasq (exit ${exit}). *.${DEFAULT_PROJECT_TLD} may not resolve.`,
+      message: interactive
+        ? `Failed to start dnsmasq (exit ${exit}). *.${DEFAULT_PROJECT_TLD} may not resolve.`
+        : [
+            `Failed to start dnsmasq without interactive sudo (exit ${exit}).`,
+            "Open a terminal and run: hack global up",
+          ].join("\n"),
     });
   }
 }

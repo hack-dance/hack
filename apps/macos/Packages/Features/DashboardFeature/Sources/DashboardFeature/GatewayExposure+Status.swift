@@ -8,6 +8,9 @@ extension GatewayExposure {
   }
 
   var statusLabel: String {
+    if isLanLoopbackLocalOnly {
+      return "Local only"
+    }
     switch resolvedState {
     case .running:
       return "Running"
@@ -25,6 +28,9 @@ extension GatewayExposure {
   }
 
   var statusTone: StatusTone {
+    if isLanLoopbackLocalOnly {
+      return .good
+    }
     switch resolvedState {
     case .running:
       return .good
@@ -36,6 +42,9 @@ extension GatewayExposure {
   }
 
   var statusColor: Color {
+    if isLanLoopbackLocalOnly {
+      return .green
+    }
     switch resolvedState {
     case .running:
       return .green
@@ -142,30 +151,71 @@ extension GatewayExposure {
       return nil
     }
   }
+
+  fileprivate var isLanLoopbackLocalOnly: Bool {
+    id == "lan"
+      && resolvedState == .blocked
+      && (detail ?? "").lowercased().contains("loopback")
+  }
 }
 
 enum GatewaySummaryState {
-  case running
-  case configured
+  case localOnly
+  case lan
+  case tailscale
+  case cloudflare
+  case mixed
+  case needsSetup
   case disabled
+  case down
   case unknown
 
-  static func resolve(exposures: [GatewayExposure], gatewayEnabled: Bool?) -> GatewaySummaryState {
+  static func resolve(
+    exposures: [GatewayExposure],
+    gatewayEnabled: Bool?,
+    globalInfraRunning: Bool?
+  ) -> GatewaySummaryState {
+    if gatewayEnabled == false {
+      return .disabled
+    }
+
+    if globalInfraRunning == false {
+      return .down
+    }
+
     if exposures.isEmpty {
-      if gatewayEnabled == true { return .configured }
-      if gatewayEnabled == false { return .disabled }
+      if gatewayEnabled == true { return .needsSetup }
       return .unknown
     }
 
-    if exposures.contains(where: { $0.resolvedState == .running }) {
-      return .running
+    let runningExposureIds = Set(
+      exposures
+        .filter { $0.resolvedState == .running }
+        .map(\.id)
+    )
+    if runningExposureIds.contains("cloudflare") {
+      return .cloudflare
     }
+    if runningExposureIds.contains("tailscale") {
+      return .tailscale
+    }
+    if runningExposureIds.contains("lan") {
+      return .lan
+    }
+    if !runningExposureIds.isEmpty {
+      return .mixed
+    }
+
+    if exposures.contains(where: \.isLanLoopbackLocalOnly) {
+      return .localOnly
+    }
+
     if exposures.contains(where: { [.configured, .needsConfig, .blocked].contains($0.resolvedState) }) {
-      return .configured
+      return .needsSetup
     }
+
     if exposures.allSatisfy({ $0.resolvedState == .disabled }) {
-      if gatewayEnabled == true { return .configured }
-      if gatewayEnabled == false { return .disabled }
+      return .disabled
     }
 
     return .unknown
@@ -173,12 +223,22 @@ enum GatewaySummaryState {
 
   var label: String {
     switch self {
-    case .running:
-      return "Enabled"
-    case .configured:
-      return "Configured"
+    case .localOnly:
+      return "Local-only"
+    case .lan:
+      return "LAN"
+    case .tailscale:
+      return "Tailscale"
+    case .cloudflare:
+      return "Cloudflare"
+    case .mixed:
+      return "Multi"
+    case .needsSetup:
+      return "Needs setup"
     case .disabled:
       return "Disabled"
+    case .down:
+      return "Down"
     case .unknown:
       return "Unknown"
     }
@@ -186,22 +246,22 @@ enum GatewaySummaryState {
 
   var tone: StatusTone {
     switch self {
-    case .running:
+    case .localOnly, .lan, .tailscale, .cloudflare, .mixed:
       return .good
-    case .configured:
+    case .needsSetup, .disabled, .down:
       return .warn
-    case .disabled, .unknown:
+    case .unknown:
       return .neutral
     }
   }
 
   var statusDotColor: Color? {
     switch self {
-    case .running:
+    case .localOnly, .lan, .tailscale, .cloudflare, .mixed:
       return .green
-    case .configured:
+    case .needsSetup, .disabled, .down:
       return .orange
-    case .disabled, .unknown:
+    case .unknown:
       return nil
     }
   }

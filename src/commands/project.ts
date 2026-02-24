@@ -5,10 +5,11 @@ import {
   isCancel,
   multiselect,
   note,
+  password,
   select,
   text,
 } from "@clack/prompts";
-import { YAML } from "bun";
+import { secrets, YAML } from "bun";
 import { installClaudeHooks } from "../agents/claude.ts";
 import { installCodexSkill } from "../agents/codex-skill.ts";
 import { installCursorRules } from "../agents/cursor.ts";
@@ -48,6 +49,7 @@ import {
   PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
   PROJECT_CONFIG_LEGACY_FILENAME,
+  PROJECT_ENV_CONTRACT_FILENAME,
   PROJECT_ENV_FILENAME,
 } from "../constants.ts";
 import { requestDaemonJson } from "../daemon/client.ts";
@@ -71,7 +73,20 @@ import {
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
 import { getString, isRecord } from "../lib/guards.ts";
+import {
+  resolveHackEnv,
+  resolveKeychainServiceName,
+  upsertDotEnvValue,
+} from "../lib/hack-env.ts";
 import { parseJsonLines } from "../lib/json-lines.ts";
+import {
+  appendLifecycleLogRecord,
+  readLifecycleState,
+  removeLifecycleStateEntry,
+  resolveLifecycleComposeProjectName,
+  resolveLifecycleLogPath,
+  upsertLifecycleStateEntry,
+} from "../lib/lifecycle-runtime.ts";
 import {
   buildLogSelector,
   resolveShouldTryLoki,
@@ -82,6 +97,8 @@ import {
   defaultProjectSlugFromPath,
   findProjectContext,
   findRepoRootForInit,
+  type ProjectLifecycleCommand,
+  type ProjectLifecycleProcess,
   readProjectConfig,
   readProjectDevHost,
   resolveProjectOauthTld,
@@ -98,8 +115,19 @@ import { parseTimeInput } from "../lib/time.ts";
 import { upsertAgentDocs } from "../mcp/agent-docs.ts";
 import type { McpTarget } from "../mcp/install.ts";
 import { installMcpConfig } from "../mcp/install.ts";
-import { renderProjectConfigJson } from "../templates.ts";
+import type { MuxBackendName } from "../mux/mux-backend.ts";
+import {
+  getMuxBackends,
+  resolveDefaultBackendName,
+  resolveMux,
+} from "../mux/mux-resolver.ts";
+import { buildSessionName } from "../mux/session-names.ts";
+import {
+  renderProjectConfigJson,
+  renderProjectEnvContractJson,
+} from "../templates.ts";
 import { display } from "../ui/display.ts";
+import { readLinesFromStream } from "../ui/lines.ts";
 import type { LogStreamContext } from "../ui/log-stream.ts";
 import { logger } from "../ui/logger.ts";
 import { canReachLoki, requestLokiDelete } from "../ui/loki-logs.ts";
@@ -521,40 +549,62 @@ async function buildBranchComposeOverride(opts: {
 
 function normalizeLabels(raw: unknown): Record<string, string> | null {
   if (isRecord(raw)) {
-    const out: Record<string, string> = {};
-    for (const [k, v] of Object.entries(raw)) {
-      if (
-        typeof v === "string" ||
-        typeof v === "number" ||
-        typeof v === "boolean"
-      ) {
-        out[k] = String(v);
-      }
-    }
-    return Object.keys(out).length > 0 ? out : null;
+    return normalizeLabelRecord(raw);
   }
 
   if (Array.isArray(raw)) {
-    const out: Record<string, string> = {};
-    for (const item of raw) {
-      if (typeof item !== "string") {
-        continue;
-      }
-      const idx = item.indexOf("=");
-      if (idx <= 0) {
-        continue;
-      }
-      const key = item.slice(0, idx).trim();
-      const value = item.slice(idx + 1).trim();
-      if (key.length === 0) {
-        continue;
-      }
-      out[key] = value;
-    }
-    return Object.keys(out).length > 0 ? out : null;
+    return normalizeLabelList(raw);
   }
 
   return null;
+}
+
+function normalizeLabelRecord(
+  raw: Record<string, unknown>
+): Record<string, string> | null {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (
+      typeof v === "string" ||
+      typeof v === "number" ||
+      typeof v === "boolean"
+    ) {
+      out[k] = String(v);
+    }
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+function normalizeLabelList(
+  raw: readonly unknown[]
+): Record<string, string> | null {
+  const out: Record<string, string> = {};
+  for (const item of raw) {
+    const parsed = parseLabelEntry({ item });
+    if (!parsed) {
+      continue;
+    }
+    out[parsed.key] = parsed.value;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+function parseLabelEntry(opts: {
+  readonly item: unknown;
+}): { readonly key: string; readonly value: string } | null {
+  if (typeof opts.item !== "string") {
+    return null;
+  }
+  const idx = opts.item.indexOf("=");
+  if (idx <= 0) {
+    return null;
+  }
+  const key = opts.item.slice(0, idx).trim();
+  if (key.length === 0) {
+    return null;
+  }
+  const value = opts.item.slice(idx + 1).trim();
+  return { key, value };
 }
 
 function rewriteCaddyLabelForBranch(opts: {
@@ -690,6 +740,855 @@ function ensureTrailingNewline(text: string): string {
   return text.endsWith("\n") ? text : `${text}\n`;
 }
 
+function buildComposeEnvInterpolation(key: string): string {
+  return `\${${key}}`;
+}
+
+function isEnvVarRelevantToServices(opts: {
+  readonly services: readonly string[];
+  readonly varServices: readonly string[] | null;
+}): boolean {
+  if (!opts.varServices) {
+    return true;
+  }
+  if (opts.services.length === 0) {
+    return true;
+  }
+  const serviceSet = new Set(opts.services);
+  return opts.varServices.some((svc) => serviceSet.has(svc));
+}
+
+async function resolveComposeEnvOverrides(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly projectName: string;
+  readonly targetServices: readonly string[];
+}): Promise<{
+  readonly composeFiles: readonly string[];
+  readonly env: Readonly<Record<string, string>>;
+}> {
+  const resolved = await resolveHackEnv({
+    projectDir: opts.project.projectDir,
+    projectName: opts.projectName,
+  });
+
+  if (resolved.contractParseError) {
+    logger.warn({
+      message: `Failed to parse ${resolved.contractPath}: ${resolved.contractParseError}`,
+    });
+  }
+
+  if (resolved.contract.vars.length === 0) {
+    return { composeFiles: [], env: {} };
+  }
+
+  const missingRelevant = resolved.missingRequired.filter((v) =>
+    isEnvVarRelevantToServices({
+      services: opts.targetServices,
+      varServices: v.services,
+    })
+  );
+
+  if (missingRelevant.length > 0) {
+    const fixed = await maybePromptToFixMissingEnv({
+      missing: missingRelevant,
+      envFile: resolve(opts.project.projectDir, PROJECT_ENV_FILENAME),
+      keychainService: resolveKeychainServiceName({
+        projectName: opts.projectName,
+      }),
+    });
+    if (fixed) {
+      return await resolveComposeEnvOverrides(opts);
+    }
+
+    const keys = missingRelevant.map((v) => v.key).join(", ");
+    logger.error({
+      message: `Missing required env: ${keys}`,
+    });
+    logger.info({
+      message:
+        "Run: hack env set KEY=VALUE (or: hack env set --secret KEY=VALUE)",
+    });
+    throw new Error("Missing required env");
+  }
+
+  const overrideServices: Record<string, Record<string, unknown>> = {};
+  for (const service of opts.targetServices) {
+    const env: Record<string, string> = {};
+    for (const v of resolved.values) {
+      if (v.value === null) {
+        continue;
+      }
+      if (
+        !isEnvVarRelevantToServices({
+          services: [service],
+          varServices: v.services,
+        })
+      ) {
+        continue;
+      }
+      env[v.key] = buildComposeEnvInterpolation(v.key);
+    }
+    if (Object.keys(env).length > 0) {
+      overrideServices[service] = { environment: env };
+    }
+  }
+
+  if (Object.keys(overrideServices).length === 0) {
+    return { composeFiles: [], env: resolved.envForCompose };
+  }
+
+  const override = { services: overrideServices };
+  const yaml = YAML.stringify(override, null, 2);
+  const text = ensureTrailingNewline(cleanupYaml(yaml));
+  const overrideDir = resolve(opts.project.projectDir, ".internal");
+  await ensureDir(overrideDir);
+  const overridePath = resolve(overrideDir, "compose.env.override.yml");
+  await writeTextFileIfChanged(overridePath, text);
+
+  return { composeFiles: [overridePath], env: resolved.envForCompose };
+}
+
+async function maybePromptToFixMissingEnv(opts: {
+  readonly missing: readonly {
+    readonly key: string;
+    readonly source: "plain_env" | "keychain";
+  }[];
+  readonly envFile: string;
+  readonly keychainService: string;
+}): Promise<boolean> {
+  if (!(process.stdin.isTTY && process.stdout.isTTY)) {
+    return false;
+  }
+
+  await display.panel({
+    title: "Missing required env",
+    tone: "warn",
+    lines: [
+      ...opts.missing.map((v) => `- ${v.key} (${v.source})`),
+      "",
+      "Fill them in now?",
+    ],
+  });
+
+  const ok = await confirm({
+    message: "Set missing env now?",
+    initialValue: true,
+  });
+  if (isCancel(ok)) {
+    throw new Error("Canceled");
+  }
+  if (!ok) {
+    return false;
+  }
+
+  for (const v of opts.missing) {
+    const value =
+      v.source === "keychain"
+        ? await password({
+            message: `Value for secret "${v.key}" (${opts.keychainService}):`,
+            validate: (input) =>
+              !input || input.length === 0 ? "Required" : undefined,
+          })
+        : await text({
+            message: `Value for "${v.key}" (${opts.envFile}):`,
+            validate: (input) =>
+              !input || input.length === 0 ? "Required" : undefined,
+          });
+
+    if (isCancel(value)) {
+      throw new Error("Canceled");
+    }
+
+    if (v.source === "keychain") {
+      await secrets.set({ service: opts.keychainService, name: v.key, value });
+    } else {
+      await upsertDotEnvValue({ envFile: opts.envFile, key: v.key, value });
+    }
+  }
+
+  return true;
+}
+
+function resolveLifecycleSessionName(opts: {
+  readonly projectName: string;
+  readonly branch: string | null;
+}): string {
+  const suffix = opts.branch ? `lifecycle-${opts.branch}` : "lifecycle";
+  return buildSessionName({ base: opts.projectName, suffix });
+}
+
+function resolveLifecycleCwd(opts: {
+  readonly projectRoot: string;
+  readonly cwd: string | undefined;
+}): string {
+  const raw = (opts.cwd ?? "").trim();
+  if (raw.length === 0) {
+    return opts.projectRoot;
+  }
+  if (raw.startsWith("/")) {
+    return raw;
+  }
+  return resolve(opts.projectRoot, raw);
+}
+
+async function runLifecycleCommands(opts: {
+  readonly title: string;
+  readonly commands: readonly ProjectLifecycleCommand[] | undefined;
+  readonly projectRoot: string;
+  readonly env: Readonly<Record<string, string>>;
+  readonly projectDir: string;
+  readonly composeProject: string;
+  readonly onPersistentCommand?: (opts: {
+    readonly command: ProjectLifecycleCommand;
+    readonly index: number;
+    readonly serviceName: string;
+  }) => Promise<void>;
+}): Promise<number> {
+  const commands = opts.commands ?? [];
+  for (const [index, cmd] of commands.entries()) {
+    const label = cmd.name ? `${cmd.name}: ${cmd.command}` : cmd.command;
+    logger.step({ message: `${opts.title}: ${label}` });
+    const serviceName = resolveLifecycleCommandServiceName({
+      command: cmd,
+      index,
+    });
+    if (cmd.persistent === true && opts.onPersistentCommand) {
+      try {
+        await opts.onPersistentCommand({
+          command: cmd,
+          index,
+          serviceName,
+        });
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : `Failed to start persistent lifecycle command: ${serviceName}`;
+        logger.error({ message });
+        return 1;
+      }
+      continue;
+    }
+    if (cmd.persistent === true) {
+      logger.warn({
+        message:
+          `Ignoring persistent mode for "${serviceName}" in ${opts.title};` +
+          " persistent lifecycle commands are only non-blocking in up.before.",
+      });
+    }
+
+    const cwd = resolveLifecycleCwd({
+      projectRoot: opts.projectRoot,
+      cwd: cmd.cwd,
+    });
+
+    await appendLifecycleLogRecord({
+      projectDir: opts.projectDir,
+      composeProject: opts.composeProject,
+      record: {
+        timestamp: new Date().toISOString(),
+        service: serviceName,
+        stream: "meta",
+        message: `[start] ${opts.title}: ${label}`,
+      },
+    });
+
+    const proc = Bun.spawn(["sh", "-c", cmd.command], {
+      cwd,
+      env: mergeLifecycleCommandEnv(opts.env),
+      stdin: "inherit",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    const stdoutTask = streamLifecycleCommandOutput({
+      stream: proc.stdout,
+      output: "stdout",
+      projectDir: opts.projectDir,
+      composeProject: opts.composeProject,
+      service: serviceName,
+    });
+    const stderrTask = streamLifecycleCommandOutput({
+      stream: proc.stderr,
+      output: "stderr",
+      projectDir: opts.projectDir,
+      composeProject: opts.composeProject,
+      service: serviceName,
+    });
+
+    const exitCode = await proc.exited;
+    await Promise.all([stdoutTask, stderrTask]);
+
+    await appendLifecycleLogRecord({
+      projectDir: opts.projectDir,
+      composeProject: opts.composeProject,
+      record: {
+        timestamp: new Date().toISOString(),
+        service: serviceName,
+        stream: "meta",
+        message: `[end] ${opts.title}: exit ${exitCode}`,
+      },
+    });
+
+    if (exitCode !== 0) {
+      logger.error({
+        message: `${opts.title} failed (exit ${exitCode}): ${label}`,
+      });
+      return exitCode;
+    }
+  }
+  return 0;
+}
+
+type StartedLifecycleProcess = {
+  readonly name: string;
+  readonly windowName: string;
+  readonly logPath: string;
+};
+
+function hasPersistentLifecycleCommands(
+  commands: readonly ProjectLifecycleCommand[] | undefined
+): boolean {
+  return (commands ?? []).some((command) => command.persistent === true);
+}
+
+async function runLifecycleUpBeforeAndProcesses(opts: {
+  readonly title: string;
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly projectName: string;
+  readonly branch: string | null;
+  readonly env: Readonly<Record<string, string>>;
+  readonly composeProject: string;
+}): Promise<{ readonly code: number; readonly sessionName: string | null }> {
+  const beforeCommands = opts.cfg.lifecycle?.up?.before;
+  if (!hasPersistentLifecycleCommands(beforeCommands)) {
+    const beforeCode = await runLifecycleCommands({
+      title: opts.title,
+      commands: beforeCommands,
+      projectRoot: opts.project.projectRoot,
+      env: opts.env,
+      projectDir: opts.project.projectDir,
+      composeProject: opts.composeProject,
+    });
+    if (beforeCode !== 0) {
+      return { code: beforeCode, sessionName: null };
+    }
+    await startLifecycleProcesses({
+      project: opts.project,
+      cfg: opts.cfg,
+      projectName: opts.projectName,
+      branch: opts.branch,
+      env: opts.env,
+      composeProject: opts.composeProject,
+    });
+    const hasProcesses = (opts.cfg.lifecycle?.processes ?? []).length > 0;
+    return {
+      code: 0,
+      sessionName: hasProcesses
+        ? resolveLifecycleSessionName({
+            projectName: opts.projectName,
+            branch: opts.branch,
+          })
+        : null,
+    };
+  }
+
+  const starter = createLifecycleProcessStarter({
+    project: opts.project,
+    projectName: opts.projectName,
+    branch: opts.branch,
+    env: opts.env,
+    composeProject: opts.composeProject,
+  });
+  const beforeCode = await runLifecycleCommands({
+    title: opts.title,
+    commands: beforeCommands,
+    projectRoot: opts.project.projectRoot,
+    env: opts.env,
+    projectDir: opts.project.projectDir,
+    composeProject: opts.composeProject,
+    onPersistentCommand: async ({ command, serviceName }) => {
+      await starter.startFromCommand({
+        command,
+        serviceName,
+      });
+    },
+  });
+  if (beforeCode !== 0) {
+    await starter.abort();
+    return { code: beforeCode, sessionName: null };
+  }
+
+  try {
+    await starter.startMany({
+      processes: opts.cfg.lifecycle?.processes ?? [],
+    });
+    await starter.finalize();
+  } catch (error: unknown) {
+    await starter.abort();
+    if (error instanceof Error) {
+      throw error;
+    }
+    throw new Error("Failed to start lifecycle processes");
+  }
+
+  return {
+    code: 0,
+    sessionName: starter.hasStarted() ? starter.sessionName : null,
+  };
+}
+
+function createLifecycleProcessStarter(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly projectName: string;
+  readonly branch: string | null;
+  readonly env: Readonly<Record<string, string>>;
+  readonly composeProject: string;
+}): {
+  readonly sessionName: string;
+  startFromCommand: (opts: {
+    readonly command: ProjectLifecycleCommand;
+    readonly serviceName: string;
+  }) => Promise<void>;
+  startMany: (opts: {
+    readonly processes: readonly ProjectLifecycleProcess[];
+  }) => Promise<void>;
+  finalize: () => Promise<void>;
+  abort: () => Promise<void>;
+  hasStarted: () => boolean;
+} {
+  const sessionName = resolveLifecycleSessionName({
+    projectName: opts.projectName,
+    branch: opts.branch,
+  });
+  const startedProcesses: StartedLifecycleProcess[] = [];
+  let backendName: MuxBackendName | null = null;
+  let sessionReady = false;
+  let nextIndex = 0;
+
+  const ensureSession = async (): Promise<void> => {
+    if (sessionReady) {
+      return;
+    }
+    const mux = await resolveMux({ project: opts.project });
+    const resolvedBackend = resolveDefaultBackendName({
+      mode: mux.mode,
+      backends: mux.backends,
+    });
+    if (!resolvedBackend) {
+      throw new Error(
+        [
+          "No session mux backend available for lifecycle processes.",
+          "Install tmux or zellij, or set sessions.mux to auto|tmux|zellij.",
+        ].join("\n")
+      );
+    }
+    const backend = mux.backends.get(resolvedBackend);
+    if (!backend?.available) {
+      throw new Error(`${resolvedBackend} is not available`);
+    }
+    await killLifecycleSessionByName({ sessionName });
+    const created = await backend.createSession({
+      name: sessionName,
+      cwd: opts.project.projectRoot,
+    });
+    if (!created.ok) {
+      throw new Error(`Failed to create lifecycle session: ${sessionName}`);
+    }
+    if (resolvedBackend === "tmux") {
+      for (const [key, value] of Object.entries(opts.env)) {
+        await exec(["tmux", "set-environment", "-t", sessionName, key, value], {
+          stdin: "ignore",
+        });
+      }
+    }
+    backendName = resolvedBackend;
+    sessionReady = true;
+  };
+
+  const startProcess = async (
+    process: ProjectLifecycleProcess
+  ): Promise<void> => {
+    await ensureSession();
+    const started = await startLifecycleProcess({
+      backend: backendName as MuxBackendName,
+      sessionName,
+      projectRoot: opts.project.projectRoot,
+      env: opts.env,
+      index: nextIndex,
+      process,
+      projectDir: opts.project.projectDir,
+      composeProject: opts.composeProject,
+    });
+    nextIndex += 1;
+    startedProcesses.push(started);
+  };
+
+  return {
+    sessionName,
+    startFromCommand: async ({ command, serviceName }) => {
+      await startProcess({
+        name: serviceName,
+        command: command.command,
+        ...(command.cwd ? { cwd: command.cwd } : {}),
+      });
+    },
+    startMany: async ({ processes }) => {
+      for (const process of processes) {
+        await startProcess(process);
+      }
+    },
+    finalize: async () => {
+      if (startedProcesses.length === 0 || !backendName) {
+        await removeLifecycleStateEntry({
+          projectDir: opts.project.projectDir,
+          composeProject: opts.composeProject,
+        });
+        return;
+      }
+      await upsertLifecycleStateEntry({
+        projectDir: opts.project.projectDir,
+        entry: {
+          composeProject: opts.composeProject,
+          projectName: opts.projectName,
+          branch: opts.branch,
+          sessionName,
+          backend: backendName,
+          processes: startedProcesses,
+          updatedAt: new Date().toISOString(),
+        },
+      });
+    },
+    abort: async () => {
+      if (sessionReady) {
+        await killLifecycleSessionByName({ sessionName });
+      }
+      await removeLifecycleStateEntry({
+        projectDir: opts.project.projectDir,
+        composeProject: opts.composeProject,
+      });
+    },
+    hasStarted: () => startedProcesses.length > 0,
+  };
+}
+
+async function killLifecycleSessionByName(opts: {
+  readonly sessionName: string;
+}): Promise<void> {
+  const backends = getMuxBackends();
+  for (const backend of backends.values()) {
+    if (!backend.available) {
+      continue;
+    }
+    const sessions = await backend.listSessions();
+    if (!sessions.some((session) => session.name === opts.sessionName)) {
+      continue;
+    }
+    await backend.killSession({ name: opts.sessionName });
+  }
+}
+
+async function startLifecycleProcesses(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly projectName: string;
+  readonly branch: string | null;
+  readonly env: Readonly<Record<string, string>>;
+  readonly composeProject: string;
+}): Promise<void> {
+  const processes = opts.cfg.lifecycle?.processes ?? [];
+  if (processes.length === 0) {
+    await removeLifecycleStateEntry({
+      projectDir: opts.project.projectDir,
+      composeProject: opts.composeProject,
+    });
+    return;
+  }
+
+  const mux = await resolveMux({ project: opts.project });
+  const backendName = resolveDefaultBackendName({
+    mode: mux.mode,
+    backends: mux.backends,
+  });
+  if (!backendName) {
+    throw new Error(
+      [
+        "No session mux backend available for lifecycle processes.",
+        "Install tmux or zellij, or set sessions.mux to auto|tmux|zellij.",
+      ].join("\n")
+    );
+  }
+
+  const sessionName = resolveLifecycleSessionName({
+    projectName: opts.projectName,
+    branch: opts.branch,
+  });
+  await killLifecycleSessionByName({ sessionName });
+
+  const backend = mux.backends.get(backendName);
+  if (!backend?.available) {
+    throw new Error(`${backendName} is not available`);
+  }
+
+  const created = await backend.createSession({
+    name: sessionName,
+    cwd: opts.project.projectRoot,
+  });
+  if (!created.ok) {
+    throw new Error(`Failed to create lifecycle session: ${sessionName}`);
+  }
+
+  if (backendName === "tmux") {
+    for (const [key, value] of Object.entries(opts.env)) {
+      await exec(["tmux", "set-environment", "-t", sessionName, key, value], {
+        stdin: "ignore",
+      });
+    }
+  }
+
+  const startedProcesses: StartedLifecycleProcess[] = [];
+
+  for (const [index, proc] of processes.entries()) {
+    const started = await startLifecycleProcess({
+      backend: backendName,
+      sessionName,
+      projectRoot: opts.project.projectRoot,
+      env: opts.env,
+      index,
+      process: proc,
+      projectDir: opts.project.projectDir,
+      composeProject: opts.composeProject,
+    });
+    startedProcesses.push(started);
+  }
+
+  await upsertLifecycleStateEntry({
+    projectDir: opts.project.projectDir,
+    entry: {
+      composeProject: opts.composeProject,
+      projectName: opts.projectName,
+      branch: opts.branch,
+      sessionName,
+      backend: backendName,
+      processes: startedProcesses,
+      updatedAt: new Date().toISOString(),
+    },
+  });
+}
+
+async function streamLifecycleCommandOutput(opts: {
+  readonly stream: ReadableStream<Uint8Array> | number | null;
+  readonly output: "stdout" | "stderr";
+  readonly projectDir: string;
+  readonly composeProject: string;
+  readonly service: string;
+}): Promise<void> {
+  if (!opts.stream || typeof opts.stream === "number") {
+    return;
+  }
+  for await (const line of readLinesFromStream(opts.stream)) {
+    if (opts.output === "stderr") {
+      process.stderr.write(`${line}\n`);
+    } else {
+      process.stdout.write(`${line}\n`);
+    }
+    await appendLifecycleLogRecord({
+      projectDir: opts.projectDir,
+      composeProject: opts.composeProject,
+      record: {
+        timestamp: new Date().toISOString(),
+        service: opts.service,
+        stream: opts.output,
+        message: line,
+      },
+    });
+  }
+}
+
+async function startLifecycleProcess(opts: {
+  readonly backend: MuxBackendName;
+  readonly sessionName: string;
+  readonly projectRoot: string;
+  readonly env: Readonly<Record<string, string>>;
+  readonly index: number;
+  readonly process: ProjectLifecycleProcess;
+  readonly projectDir: string;
+  readonly composeProject: string;
+}): Promise<{
+  readonly name: string;
+  readonly windowName: string;
+  readonly logPath: string;
+}> {
+  const windowNameRaw = sanitizeBranchSlug(opts.process.name);
+  const windowName =
+    windowNameRaw.length > 0 ? windowNameRaw : `proc-${opts.index + 1}`;
+  const cwd = resolveLifecycleCwd({
+    projectRoot: opts.projectRoot,
+    cwd: opts.process.cwd,
+  });
+  const logPath = resolveLifecycleLogPath({
+    projectDir: opts.projectDir,
+    composeProject: opts.composeProject,
+  });
+  const wrappedCommand = wrapLifecyclePersistentCommand({
+    command: opts.process.command,
+    logPath,
+    serviceName: opts.process.name,
+  });
+
+  if (opts.backend === "tmux") {
+    const result = await exec(
+      [
+        "tmux",
+        "new-window",
+        "-t",
+        opts.sessionName,
+        "-n",
+        windowName,
+        "-c",
+        cwd,
+        "sh",
+        "-c",
+        wrappedCommand,
+      ],
+      { stdin: "ignore" }
+    );
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `Failed to start lifecycle process "${opts.process.name}": ${result.stderr.trim()}`
+      );
+    }
+    await appendLifecycleLogRecord({
+      projectDir: opts.projectDir,
+      composeProject: opts.composeProject,
+      record: {
+        timestamp: new Date().toISOString(),
+        service: opts.process.name,
+        stream: "meta",
+        message: `[start] process launched in tmux:${opts.sessionName}:${windowName}`,
+      },
+    });
+    return {
+      name: opts.process.name,
+      windowName,
+      logPath,
+    };
+  }
+
+  const result = await exec(
+    ["zellij", "run", "--", "sh", "-c", wrappedCommand],
+    {
+      stdin: "ignore",
+      cwd,
+      env: { ...opts.env, ZELLIJ_SESSION_NAME: opts.sessionName },
+    }
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `Failed to start lifecycle process "${opts.process.name}": ${result.stderr.trim()}`
+    );
+  }
+  await appendLifecycleLogRecord({
+    projectDir: opts.projectDir,
+    composeProject: opts.composeProject,
+    record: {
+      timestamp: new Date().toISOString(),
+      service: opts.process.name,
+      stream: "meta",
+      message: `[start] process launched in zellij:${opts.sessionName}:${windowName}`,
+    },
+  });
+  return {
+    name: opts.process.name,
+    windowName,
+    logPath,
+  };
+}
+
+async function stopLifecycleProcesses(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly projectName: string;
+  readonly branch: string | null;
+  readonly composeProject: string;
+}): Promise<void> {
+  const lifecycle = opts.cfg.lifecycle;
+  if (!lifecycle) {
+    await removeLifecycleStateEntry({
+      projectDir: opts.project.projectDir,
+      composeProject: opts.composeProject,
+    });
+    return;
+  }
+
+  const sessionName = resolveLifecycleSessionName({
+    projectName: opts.projectName,
+    branch: opts.branch,
+  });
+
+  const backends = getMuxBackends();
+  for (const backend of backends.values()) {
+    if (!backend.available) {
+      continue;
+    }
+    const sessions = await backend.listSessions();
+    if (!sessions.some((s) => s.name === sessionName)) {
+      continue;
+    }
+    await backend.killSession({ name: sessionName });
+  }
+
+  await removeLifecycleStateEntry({
+    projectDir: opts.project.projectDir,
+    composeProject: opts.composeProject,
+  });
+}
+
+function resolveLifecycleCommandServiceName(opts: {
+  readonly command: ProjectLifecycleCommand;
+  readonly index: number;
+}): string {
+  const fromName = (opts.command.name ?? "").trim();
+  if (fromName.length > 0) {
+    return fromName;
+  }
+  return `hook-${opts.index + 1}`;
+}
+
+function wrapLifecyclePersistentCommand(opts: {
+  readonly command: string;
+  readonly logPath: string;
+  readonly serviceName: string;
+}): string {
+  const logPath = shellSingleQuote(opts.logPath);
+  const service = shellSingleQuote(opts.serviceName);
+  return [
+    `HACK_LIFECYCLE_LOG=${logPath}`,
+    `HACK_LIFECYCLE_SERVICE=${service}`,
+    `${opts.command} 2>&1 | while IFS= read -r line; do`,
+    "  printf '%s\\n' \"$line\"",
+    '  printf \'%s\\t%s\\tstdout\\t%s\\n\' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$HACK_LIFECYCLE_SERVICE" "$line" >> "$HACK_LIFECYCLE_LOG"',
+    "done",
+  ].join("\n");
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function mergeLifecycleCommandEnv(
+  override: Readonly<Record<string, string>>
+): Record<string, string> {
+  const base: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value === "string") {
+      base[key] = value;
+    }
+  }
+  return { ...base, ...override };
+}
+
 async function resolveBranchComposeFiles(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly branch: string;
@@ -726,11 +1625,7 @@ async function resolveInternalComposeOverride(opts: {
   const managedExtraHosts = await readInternalExtraHostsFile({
     projectDir: opts.project.projectDir,
   });
-  const hasAnyExtraHosts =
-    (internal.extraHosts && Object.keys(internal.extraHosts).length > 0) ||
-    Object.keys(managedExtraHosts).length > 0;
-
-  if (!(internal.dns || internal.tls || hasAnyExtraHosts)) {
+  if (!shouldBuildInternalOverride({ internal, managedExtraHosts })) {
     return null;
   }
 
@@ -739,94 +1634,225 @@ async function resolveInternalComposeOverride(opts: {
     return null;
   }
 
-  let dnsServer: string | null = null;
-  let caddyIp: string | null = null;
-  let caddyHosts: readonly string[] = [];
-  if (internal.dns) {
-    dnsServer = await resolveCoreDnsServer();
-    if (!dnsServer) {
-      logger.warn({
-        message:
-          "CoreDNS is not reachable; internal DNS for *.hack is disabled. Run `hack global install` (or `hack global up`).",
-      });
-    }
-    caddyIp = await resolveCaddyServer();
-    if (!caddyIp) {
-      logger.warn({
-        message:
-          "Caddy is not reachable; internal *.hack host mappings are disabled. Run `hack global install` (or `hack global up`).",
-      });
-    }
-    caddyHosts = await readComposeCaddyHosts(opts.project.composeFile);
-    if (caddyHosts.length > 0 && opts.branch) {
-      const devHost =
-        opts.devHost ?? (await resolveBranchDevHost({ project: opts.project }));
-      const baseHosts = [devHost, opts.aliasHost ?? null].filter(
-        (host): host is string => typeof host === "string" && host.length > 0
-      );
-      if (baseHosts.length > 0) {
-        caddyHosts = applyBranchToHosts({
-          hosts: caddyHosts,
-          branch: opts.branch,
-          baseHosts,
-        });
-      }
-    }
-  }
-
-  let caPath: string | null = null;
-  if (internal.tls) {
-    caPath = await resolveCaddyLocalCaPath();
-    if (!caPath) {
-      logger.warn({
-        message:
-          "Caddy Local CA cert not found; internal TLS trust is disabled. Run `hack global trust` (or `hack global ca`).",
-      });
-    }
-  }
-
-  if (!(dnsServer || caPath || caddyIp)) {
+  const dns = await resolveInternalDnsSettings({
+    project: opts.project,
+    composeFile: opts.project.composeFile,
+    enabled: internal.dns,
+    branch: opts.branch ?? null,
+    devHost: opts.devHost ?? null,
+    aliasHost: opts.aliasHost ?? null,
+  });
+  const caPath = await resolveInternalTlsCaPath({ enabled: internal.tls });
+  if (!(dns.dnsServer || caPath || dns.caddyIp)) {
     return null;
   }
 
+  const extraHosts = buildInternalExtraHosts({
+    caddyIp: dns.caddyIp,
+    caddyHosts: dns.caddyHosts,
+    internalExtraHosts: internal.extraHosts,
+    managedExtraHosts,
+  });
+  const text = renderInternalOverride({
+    services,
+    dnsServer: dns.dnsServer,
+    extraHosts,
+    caPath,
+  });
+
+  return await writeInternalComposeOverride({
+    projectDir: opts.project.projectDir,
+    text,
+  });
+}
+
+function shouldBuildInternalOverride(opts: {
+  readonly internal: ReturnType<typeof resolveInternalSettings>;
+  readonly managedExtraHosts: Record<string, string>;
+}): boolean {
+  const internalExtraHosts = opts.internal.extraHosts;
+  const hasInternalExtraHosts =
+    internalExtraHosts && Object.keys(internalExtraHosts).length > 0;
+  const hasManagedExtraHosts = Object.keys(opts.managedExtraHosts).length > 0;
+  const hasExtraHosts = hasInternalExtraHosts || hasManagedExtraHosts;
+  return opts.internal.dns || opts.internal.tls || hasExtraHosts;
+}
+
+type InternalDnsSettings = {
+  readonly dnsServer: string | null;
+  readonly caddyIp: string | null;
+  readonly caddyHosts: readonly string[];
+};
+
+async function resolveInternalDnsSettings(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly composeFile: string;
+  readonly enabled: boolean;
+  readonly branch: string | null;
+  readonly devHost: string | null;
+  readonly aliasHost: string | null;
+}): Promise<InternalDnsSettings> {
+  if (!opts.enabled) {
+    return { dnsServer: null, caddyIp: null, caddyHosts: [] };
+  }
+
+  const dnsServer = await resolveCoreDnsServerWithWarning();
+  const caddyIp = await resolveCaddyServerWithWarning();
+  const caddyHosts = await resolveCaddyHostsForBranch({
+    project: opts.project,
+    composeFile: opts.composeFile,
+    branch: opts.branch,
+    devHost: opts.devHost,
+    aliasHost: opts.aliasHost,
+  });
+
+  return { dnsServer, caddyIp, caddyHosts };
+}
+
+async function resolveCoreDnsServerWithWarning(): Promise<string | null> {
+  const dnsServer = await resolveCoreDnsServer();
+  if (!dnsServer) {
+    logger.warn({
+      message:
+        "CoreDNS is not reachable; internal DNS for *.hack is disabled. Run `hack global install` (or `hack global up`).",
+    });
+  }
+  return dnsServer;
+}
+
+async function resolveCaddyServerWithWarning(): Promise<string | null> {
+  const caddyIp = await resolveCaddyServer();
+  if (!caddyIp) {
+    logger.warn({
+      message:
+        "Caddy is not reachable; internal *.hack host mappings are disabled. Run `hack global install` (or `hack global up`).",
+    });
+  }
+  return caddyIp;
+}
+
+async function resolveCaddyHostsForBranch(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly composeFile: string;
+  readonly branch: string | null;
+  readonly devHost: string | null;
+  readonly aliasHost: string | null;
+}): Promise<readonly string[]> {
+  const caddyHosts = await readComposeCaddyHosts(opts.composeFile);
+  if (!(caddyHosts.length > 0 && opts.branch)) {
+    return caddyHosts;
+  }
+
+  const devHost =
+    opts.devHost ?? (await resolveBranchDevHost({ project: opts.project }));
+  const baseHosts = [devHost, opts.aliasHost ?? null].filter(
+    (host): host is string => typeof host === "string" && host.length > 0
+  );
+  if (baseHosts.length === 0) {
+    return caddyHosts;
+  }
+
+  return applyBranchToHosts({
+    hosts: caddyHosts,
+    branch: opts.branch,
+    baseHosts,
+  });
+}
+
+async function resolveInternalTlsCaPath(opts: {
+  readonly enabled: boolean;
+}): Promise<string | null> {
+  if (!opts.enabled) {
+    return null;
+  }
+
+  const caPath = await resolveCaddyLocalCaPath();
+  if (!caPath) {
+    logger.warn({
+      message:
+        "Caddy Local CA cert not found; internal TLS trust is disabled. Run `hack global trust` (or `hack global ca`).",
+    });
+  }
+  return caPath;
+}
+
+function buildInternalExtraHosts(opts: {
+  readonly caddyIp: string | null;
+  readonly caddyHosts: readonly string[];
+  readonly internalExtraHosts: Record<string, string> | null;
+  readonly managedExtraHosts: Record<string, string>;
+}): Record<string, string> {
+  return {
+    ...(opts.caddyIp && opts.caddyHosts.length > 0
+      ? buildExtraHostsMap({ hosts: opts.caddyHosts, ip: opts.caddyIp })
+      : {}),
+    ...(opts.internalExtraHosts ? opts.internalExtraHosts : {}),
+    ...opts.managedExtraHosts,
+  };
+}
+
+function renderInternalOverride(opts: {
+  readonly services: readonly string[];
+  readonly dnsServer: string | null;
+  readonly extraHosts: Record<string, string>;
+  readonly caPath: string | null;
+}): string {
+  const overrideServices = buildInternalOverrideServices({
+    services: opts.services,
+    dnsServer: opts.dnsServer,
+    extraHosts: opts.extraHosts,
+    caPath: opts.caPath,
+  });
+  const override = { services: overrideServices };
+  const yaml = YAML.stringify(override, null, 2);
+  return ensureTrailingNewline(cleanupYaml(yaml));
+}
+
+function buildInternalOverrideServices(opts: {
+  readonly services: readonly string[];
+  readonly dnsServer: string | null;
+  readonly extraHosts: Record<string, string>;
+  readonly caPath: string | null;
+}): Record<string, Record<string, unknown>> {
   const overrideServices: Record<string, Record<string, unknown>> = {};
-  for (const service of services) {
+
+  for (const service of opts.services) {
     const entry: Record<string, unknown> = {};
-    if (dnsServer) {
-      entry.dns = [dnsServer];
+    if (opts.dnsServer) {
+      entry.dns = [opts.dnsServer];
     }
-    const extraHosts: Record<string, string> = {
-      ...(caddyIp && caddyHosts.length > 0
-        ? buildExtraHostsMap({ hosts: caddyHosts, ip: caddyIp })
-        : {}),
-      ...(internal.extraHosts ? internal.extraHosts : {}),
-      ...managedExtraHosts,
-    };
-    if (Object.keys(extraHosts).length > 0) {
-      entry.extra_hosts = extraHosts;
+    if (Object.keys(opts.extraHosts).length > 0) {
+      entry.extra_hosts = opts.extraHosts;
     }
-    if (caPath) {
-      entry.volumes = [`${caPath}:${INTERNAL_CA_CONTAINER_PATH}:ro`];
-      entry.environment = {
-        SSL_CERT_FILE: INTERNAL_CA_CONTAINER_PATH,
-        SSL_CERT_DIR: INTERNAL_CA_CONTAINER_DIR,
-        NODE_EXTRA_CA_CERTS: INTERNAL_CA_CONTAINER_PATH,
-        REQUESTS_CA_BUNDLE: INTERNAL_CA_CONTAINER_PATH,
-        CURL_CA_BUNDLE: INTERNAL_CA_CONTAINER_PATH,
-        GIT_SSL_CAINFO: INTERNAL_CA_CONTAINER_PATH,
-      };
+    if (opts.caPath) {
+      entry.volumes = [`${opts.caPath}:${INTERNAL_CA_CONTAINER_PATH}:ro`];
+      entry.environment = buildInternalTlsEnvironment();
     }
     overrideServices[service] = entry;
   }
 
-  const override = { services: overrideServices };
-  const yaml = YAML.stringify(override, null, 2);
-  const text = ensureTrailingNewline(cleanupYaml(yaml));
+  return overrideServices;
+}
 
-  const overrideDir = resolve(opts.project.projectDir, ".internal");
+function buildInternalTlsEnvironment(): Record<string, string> {
+  return {
+    SSL_CERT_FILE: INTERNAL_CA_CONTAINER_PATH,
+    SSL_CERT_DIR: INTERNAL_CA_CONTAINER_DIR,
+    NODE_EXTRA_CA_CERTS: INTERNAL_CA_CONTAINER_PATH,
+    REQUESTS_CA_BUNDLE: INTERNAL_CA_CONTAINER_PATH,
+    CURL_CA_BUNDLE: INTERNAL_CA_CONTAINER_PATH,
+    GIT_SSL_CAINFO: INTERNAL_CA_CONTAINER_PATH,
+  };
+}
+
+async function writeInternalComposeOverride(opts: {
+  readonly projectDir: string;
+  readonly text: string;
+}): Promise<string> {
+  const overrideDir = resolve(opts.projectDir, ".internal");
   await ensureDir(overrideDir);
   const overridePath = resolve(overrideDir, "compose.override.yml");
-  await writeTextFileIfChanged(overridePath, text);
+  await writeTextFileIfChanged(overridePath, opts.text);
   return overridePath;
 }
 
@@ -1175,6 +2201,201 @@ async function touchProjectRegistration(
   }
 }
 
+function validateInitProjectSlug(
+  value: string | undefined
+): string | undefined {
+  const v = value?.trim();
+  if (!v) {
+    return "Required";
+  }
+  const s = sanitizeProjectSlug(v);
+  if (s.length === 0) {
+    return "Invalid";
+  }
+  return undefined;
+}
+
+async function promptInitProjectSlug(opts: {
+  readonly repoRoot: string;
+  readonly nameOption: string | undefined;
+}): Promise<string | null> {
+  const defaultSlug = defaultProjectSlugFromPath(opts.repoRoot);
+  const initialSlug = sanitizeProjectSlug(opts.nameOption ?? defaultSlug);
+  const name = await text({
+    message: "Project name (slug):",
+    initialValue: initialSlug,
+    validate: validateInitProjectSlug,
+  });
+  if (isCancel(name)) {
+    return null;
+  }
+  return sanitizeProjectSlug(name);
+}
+
+async function ensureInitProjectSlugUnique(opts: {
+  readonly repoRoot: string;
+  readonly slug: string;
+}): Promise<void> {
+  const registry = await readProjectsRegistry();
+  const existing = registry.projects.find((p) => p.name === opts.slug) ?? null;
+  if (!existing) {
+    return;
+  }
+
+  const expectedProjectDir = resolve(opts.repoRoot, HACK_PROJECT_DIR_PRIMARY);
+  const isSame = existing.projectDir === expectedProjectDir;
+  if (isSame) {
+    return;
+  }
+
+  const stillExists = await pathExists(existing.projectDir);
+  if (!stillExists) {
+    return;
+  }
+
+  throw new Error(
+    [
+      `Project name "${opts.slug}" is already registered.`,
+      `Existing: ${existing.repoRoot}`,
+      `This repo: ${opts.repoRoot}`,
+      "Tip: choose a different name (or rename the other project).",
+    ].join("\n")
+  );
+}
+
+function validateInitDevHost(value: string | undefined): string | undefined {
+  const v = value?.trim();
+  if (!v) {
+    return "Required";
+  }
+  if (v.includes(" ")) {
+    return "No spaces";
+  }
+  if (v.includes("://")) {
+    return "Host only (no scheme)";
+  }
+  if (v.includes("/")) {
+    return "Host only (no path)";
+  }
+  if (v.includes(":")) {
+    return "Host only (no port)";
+  }
+  return undefined;
+}
+
+async function promptInitDevHost(opts: {
+  readonly slug: string;
+  readonly devHostOption: string | undefined;
+}): Promise<string | null> {
+  const defaultHost = `${opts.slug}.${DEFAULT_PROJECT_TLD}`;
+  const initialHost = (opts.devHostOption ?? defaultHost).trim();
+  const devHost = await text({
+    message: "DEV_HOST:",
+    initialValue: initialHost,
+    validate: validateInitDevHost,
+  });
+  if (isCancel(devHost)) {
+    return null;
+  }
+  return devHost.trim();
+}
+
+function validateInitOauthTld(value: string | undefined): string | undefined {
+  const v = value?.trim().toLowerCase();
+  if (!v) {
+    return "Required";
+  }
+  if (!SLUG_LABEL_PATTERN.test(v)) {
+    return "Invalid TLD label";
+  }
+  return undefined;
+}
+
+async function promptInitOauthSettings(opts: {
+  readonly oauthEnabledDefault: boolean;
+  readonly oauthTldOption: string | undefined;
+}): Promise<{ readonly enabled: boolean; readonly tld: string } | null> {
+  const enableOauthHost = await confirm({
+    message: `Enable OAuth-safe alias host (https://<project>.${DEFAULT_PROJECT_TLD}.${DEFAULT_OAUTH_ALIAS_TLD})?`,
+    initialValue: opts.oauthEnabledDefault,
+  });
+  if (isCancel(enableOauthHost)) {
+    return null;
+  }
+
+  if (!enableOauthHost) {
+    return { enabled: false, tld: DEFAULT_OAUTH_ALIAS_TLD };
+  }
+
+  const oauthTld = await text({
+    message: "OAuth alias TLD (optional):",
+    initialValue: opts.oauthTldOption ?? DEFAULT_OAUTH_ALIAS_TLD,
+    validate: validateInitOauthTld,
+  });
+  if (isCancel(oauthTld)) {
+    return null;
+  }
+
+  return { enabled: true, tld: String(oauthTld) };
+}
+
+function renderInitDiscoveryNote(opts: {
+  readonly discovery: Awaited<ReturnType<typeof discoverRepo>>;
+}): string {
+  const monorepoLine = opts.discovery.isMonorepo
+    ? "Monorepo detected."
+    : "Single-package repo detected.";
+  const signalsLine =
+    opts.discovery.signals.length > 0
+      ? `Signals: ${opts.discovery.signals.join(", ")}`
+      : "Signals: none";
+
+  return [
+    `Detected ${opts.discovery.packages.length} package(s) and ${opts.discovery.candidates.length} dev-like script(s).`,
+    monorepoLine,
+    signalsLine,
+  ].join("\n");
+}
+
+async function promptInitUseDiscovery(opts: {
+  readonly canDiscover: boolean;
+  readonly forceManual: boolean;
+}): Promise<boolean | null> {
+  if (opts.forceManual || !opts.canDiscover) {
+    return false;
+  }
+
+  const useDiscovery = await confirm({
+    message: "Auto-discover dev scripts and generate services?",
+    initialValue: true,
+  });
+  if (isCancel(useDiscovery)) {
+    return null;
+  }
+  return useDiscovery;
+}
+
+async function ensureInitHackDir(opts: {
+  readonly hackDir: string;
+}): Promise<"proceed" | "skip" | null> {
+  if (await pathExists(opts.hackDir)) {
+    const ok = await confirm({
+      message: `${HACK_PROJECT_DIR_PRIMARY}/ already exists. Overwrite scaffold files?`,
+      initialValue: false,
+    });
+    if (isCancel(ok)) {
+      return null;
+    }
+    if (!ok) {
+      return "skip";
+    }
+    return "proceed";
+  }
+
+  await ensureDir(opts.hackDir);
+  return "proceed";
+}
+
 async function handleInit({
   ctx,
   args,
@@ -1189,100 +2410,30 @@ async function handleInit({
   const startDir = resolveStartDir(ctx, args.options.path);
   const repoRoot = await findRepoRootForInit(startDir);
 
-  const defaultSlug = defaultProjectSlugFromPath(repoRoot);
-  const initialSlug = sanitizeProjectSlug(args.options.name ?? defaultSlug);
-  const name = await text({
-    message: "Project name (slug):",
-    initialValue: initialSlug,
-    validate: (value) => {
-      const v = value?.trim();
-      if (!v) {
-        return "Required";
-      }
-      const s = sanitizeProjectSlug(v);
-      if (s.length === 0) {
-        return "Invalid";
-      }
-      return undefined;
-    },
+  const slug = await promptInitProjectSlug({
+    repoRoot,
+    nameOption: args.options.name,
   });
-  if (isCancel(name)) {
-    return 1;
-  }
-  const slug = sanitizeProjectSlug(name);
-
-  // Enforce uniqueness of compose project name across registered projects.
-  const registry = await readProjectsRegistry();
-  const existing = registry.projects.find((p) => p.name === slug) ?? null;
-  if (existing) {
-    const expectedProjectDir = resolve(repoRoot, HACK_PROJECT_DIR_PRIMARY);
-    const isSame = existing.projectDir === expectedProjectDir;
-    const stillExists = await pathExists(existing.projectDir);
-    if (!isSame && stillExists) {
-      throw new Error(
-        [
-          `Project name "${slug}" is already registered.`,
-          `Existing: ${existing.repoRoot}`,
-          `This repo: ${repoRoot}`,
-          "Tip: choose a different name (or rename the other project).",
-        ].join("\n")
-      );
-    }
-  }
-
-  const defaultHost = `${slug}.${DEFAULT_PROJECT_TLD}`;
-  const initialHost = (args.options.devHost ?? defaultHost).trim();
-  const devHost = await text({
-    message: "DEV_HOST:",
-    initialValue: initialHost,
-    validate: (value) => {
-      const v = value?.trim();
-      if (!v) {
-        return "Required";
-      }
-      if (v.includes(" ")) {
-        return "No spaces";
-      }
-      if (v.includes("://")) {
-        return "Host only (no scheme)";
-      }
-      if (v.includes("/")) {
-        return "Host only (no path)";
-      }
-      if (v.includes(":")) {
-        return "Host only (no port)";
-      }
-      return undefined;
-    },
-  });
-  if (isCancel(devHost)) {
+  if (!slug) {
     return 1;
   }
 
-  const enableOauthHost = await confirm({
-    message: `Enable OAuth-safe alias host (https://<project>.${DEFAULT_PROJECT_TLD}.${DEFAULT_OAUTH_ALIAS_TLD})?`,
-    initialValue: args.options.oauth === true || Boolean(args.options.oauthTld),
+  await ensureInitProjectSlugUnique({ repoRoot, slug });
+
+  const devHost = await promptInitDevHost({
+    slug,
+    devHostOption: args.options.devHost,
   });
-  if (isCancel(enableOauthHost)) {
+  if (!devHost) {
     return 1;
   }
-  const oauthTld = enableOauthHost
-    ? await text({
-        message: "OAuth alias TLD (optional):",
-        initialValue: args.options.oauthTld ?? DEFAULT_OAUTH_ALIAS_TLD,
-        validate: (value) => {
-          const v = value?.trim().toLowerCase();
-          if (!v) {
-            return "Required";
-          }
-          if (!SLUG_LABEL_PATTERN.test(v)) {
-            return "Invalid TLD label";
-          }
-          return undefined;
-        },
-      })
-    : DEFAULT_OAUTH_ALIAS_TLD;
-  if (isCancel(oauthTld)) {
+
+  const oauth = await promptInitOauthSettings({
+    oauthEnabledDefault:
+      args.options.oauth === true || Boolean(args.options.oauthTld),
+    oauthTldOption: args.options.oauthTld,
+  });
+  if (!oauth) {
     return 1;
   }
 
@@ -1292,29 +2443,14 @@ async function handleInit({
   const forceManual = args.options.manual || args.options.noDiscovery;
 
   if (canDiscover && !forceManual) {
-    note(
-      [
-        `Detected ${discovery.packages.length} package(s) and ${discovery.candidates.length} dev-like script(s).`,
-        discovery.isMonorepo
-          ? "Monorepo detected."
-          : "Single-package repo detected.",
-        discovery.signals.length > 0
-          ? `Signals: ${discovery.signals.join(", ")}`
-          : "Signals: none",
-      ].join("\n"),
-      "Discovery"
-    );
+    note(renderInitDiscoveryNote({ discovery }), "Discovery");
   }
 
-  let useDiscovery: boolean | symbol = false;
-  if (!forceManual && canDiscover) {
-    useDiscovery = await confirm({
-      message: "Auto-discover dev scripts and generate services?",
-      initialValue: true,
-    });
-  }
-
-  if (isCancel(useDiscovery)) {
+  const useDiscovery = await promptInitUseDiscovery({
+    canDiscover,
+    forceManual,
+  });
+  if (useDiscovery === null) {
     return 1;
   }
 
@@ -1322,19 +2458,12 @@ async function handleInit({
   const composeFile = resolve(hackDir, PROJECT_COMPOSE_FILENAME);
   const configFile = resolve(hackDir, PROJECT_CONFIG_FILENAME);
 
-  if (await pathExists(hackDir)) {
-    const ok = await confirm({
-      message: `${HACK_PROJECT_DIR_PRIMARY}/ already exists. Overwrite scaffold files?`,
-      initialValue: false,
-    });
-    if (isCancel(ok)) {
-      return 1;
-    }
-    if (!ok) {
-      return 0;
-    }
-  } else {
-    await ensureDir(hackDir);
+  const hackDirAction = await ensureInitHackDir({ hackDir });
+  if (!hackDirAction) {
+    return 1;
+  }
+  if (hackDirAction === "skip") {
+    return 0;
   }
 
   // Ensure .hack/.internal is gitignored (contains local paths, certs, etc)
@@ -1349,7 +2478,7 @@ async function handleInit({
     renderProjectConfigJson({
       name: slug,
       devHost,
-      oauth: { enabled: enableOauthHost, tld: String(oauthTld) },
+      oauth: { enabled: oauth.enabled, tld: oauth.tld },
     })
   );
 
@@ -1359,13 +2488,13 @@ async function handleInit({
         devHost,
         projectSlug: slug,
         candidates: discovery.candidates,
-        oauth: { enabled: enableOauthHost, tld: String(oauthTld) },
+        oauth: { enabled: oauth.enabled, tld: oauth.tld },
       })
     : await buildManualCompose({
         repoRoot,
         devHost,
         projectSlug: slug,
-        oauth: { enabled: enableOauthHost, tld: String(oauthTld) },
+        oauth: { enabled: oauth.enabled, tld: oauth.tld },
       });
   await writeTextFileIfChanged(composeFile, compose);
 
@@ -1373,8 +2502,13 @@ async function handleInit({
     resolve(hackDir, "README.md"),
     renderHackFolderReadme({
       devHost,
-      oauth: { enabled: enableOauthHost, tld: String(oauthTld) },
+      oauth: { enabled: oauth.enabled, tld: oauth.tld },
     })
+  );
+
+  await writeTextFileIfChanged(
+    resolve(hackDir, PROJECT_ENV_CONTRACT_FILENAME),
+    renderProjectEnvContractJson()
   );
 
   const registration = await upsertProjectRegistration({
@@ -1502,6 +2636,11 @@ async function handleInitAuto({
       devHost,
       oauth: { enabled: oauth.enabled, tld: oauth.tld },
     })
+  );
+
+  await writeTextFileIfChanged(
+    resolve(hackDir, PROJECT_ENV_CONTRACT_FILENAME),
+    renderProjectEnvContractJson()
   );
 
   const registration = await upsertProjectRegistration({
@@ -1805,6 +2944,95 @@ function buildCaddyHostLabelValue(opts: {
   return out.join(", ");
 }
 
+function splitYamlInlineComment(rawAfter: string): {
+  readonly valueRaw: string;
+  readonly commentSuffix: string;
+} {
+  const commentIdx = rawAfter.indexOf(" #");
+  if (commentIdx < 0) {
+    return { valueRaw: rawAfter.trimEnd(), commentSuffix: "" };
+  }
+
+  return {
+    valueRaw: rawAfter.slice(0, commentIdx).trimEnd(),
+    commentSuffix: rawAfter.slice(commentIdx),
+  };
+}
+
+function splitCaddyHosts(value: string): string[] {
+  return value
+    .split(",")
+    .map((h) => h.trim())
+    .filter((h) => h.length > 0);
+}
+
+function expandCaddyHostsWithOauthAliases(opts: {
+  readonly hosts: readonly string[];
+  readonly tld: string;
+}): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+
+  for (const host of opts.hosts) {
+    if (seen.has(host)) {
+      continue;
+    }
+    seen.add(host);
+    out.push(host);
+  }
+
+  for (const host of opts.hosts) {
+    if (!host.endsWith(`.${DEFAULT_PROJECT_TLD}`)) {
+      continue;
+    }
+    const alias = `${host}.${opts.tld}`;
+    if (seen.has(alias)) {
+      continue;
+    }
+    seen.add(alias);
+    out.push(alias);
+  }
+
+  return out;
+}
+
+function maybePatchCaddyLabelLine(opts: {
+  readonly line: string;
+  readonly tld: string;
+}): { readonly line: string; readonly changed: boolean } | null {
+  const caddyMatch = CADDY_LABEL_PATTERN.exec(opts.line);
+  if (!caddyMatch) {
+    return null;
+  }
+
+  const indentStr = caddyMatch[1] ?? "";
+  const rawAfter = caddyMatch[2] ?? "";
+
+  const { valueRaw, commentSuffix } = splitYamlInlineComment(rawAfter);
+  const valueTrimmed = valueRaw.trim();
+  const quoted = parseQuotedValue(valueTrimmed);
+  const parts = splitCaddyHosts(quoted.value);
+  if (parts.length === 0) {
+    return null;
+  }
+
+  const nextValue = expandCaddyHostsWithOauthAliases({
+    hosts: parts,
+    tld: opts.tld,
+  }).join(", ");
+  if (nextValue === quoted.value) {
+    return null;
+  }
+
+  const formatted = quoted.quote
+    ? `${quoted.quote}${nextValue}${quoted.quote}`
+    : nextValue;
+  return {
+    line: `${indentStr}caddy: ${formatted}${commentSuffix}`,
+    changed: true,
+  };
+}
+
 function patchComposeOauthAliasesInCaddyLabels(opts: {
   readonly yamlText: string;
   readonly tld: string;
@@ -1842,64 +3070,11 @@ function patchComposeOauthAliasesInCaddyLabels(opts: {
       continue;
     }
 
-    const caddyMatch = CADDY_LABEL_PATTERN.exec(line);
-    if (!caddyMatch) {
-      continue;
+    const patched = maybePatchCaddyLabelLine({ line, tld });
+    if (patched) {
+      changed = true;
+      lines[i] = patched.line;
     }
-
-    const indentStr = caddyMatch[1] ?? "";
-    const rawAfter = caddyMatch[2] ?? "";
-
-    const commentIdx = rawAfter.indexOf(" #");
-    const valueRaw = (
-      commentIdx >= 0 ? rawAfter.slice(0, commentIdx) : rawAfter
-    ).trimEnd();
-    const commentSuffix = commentIdx >= 0 ? rawAfter.slice(commentIdx) : "";
-
-    const valueTrimmed = valueRaw.trim();
-    const quoted = parseQuotedValue(valueTrimmed);
-
-    const parts = quoted.value
-      .split(",")
-      .map((h) => h.trim())
-      .filter((h) => h.length > 0);
-    if (parts.length === 0) {
-      continue;
-    }
-
-    const out: string[] = [];
-    const seen = new Set<string>();
-
-    for (const host of parts) {
-      if (seen.has(host)) {
-        continue;
-      }
-      seen.add(host);
-      out.push(host);
-    }
-
-    for (const host of parts) {
-      if (!host.endsWith(`.${DEFAULT_PROJECT_TLD}`)) {
-        continue;
-      }
-      const alias = `${host}.${tld}`;
-      if (seen.has(alias)) {
-        continue;
-      }
-      seen.add(alias);
-      out.push(alias);
-    }
-
-    const nextValue = out.join(", ");
-    if (nextValue === quoted.value) {
-      continue;
-    }
-
-    changed = true;
-    const formatted = quoted.quote
-      ? `${quoted.quote}${nextValue}${quoted.quote}`
-      : nextValue;
-    lines[i] = `${indentStr}caddy: ${formatted}${commentSuffix}`;
   }
 
   return { text: lines.join("\n"), changed };
@@ -1931,24 +3106,87 @@ async function maybeSyncOauthAliasesInCompose(opts: {
   await writeTextFileIfChanged(opts.project.composeFile, patched.text);
 }
 
-async function buildDiscoveredCompose(
-  input: ComposeWizardInput
-): Promise<string> {
-  const byId = new Map(input.candidates.map((c) => [c.id, c] as const));
-
-  const selectedIds = await autocompleteMultiselect<string>({
-    message: "Select dev scripts to include as services:",
-    required: true,
-    options: input.candidates.map((c) => ({
-      value: c.id,
-      label: formatCandidateLabel(c),
-      hint: formatCandidateHint(c),
-    })),
-  });
-
-  if (isCancel(selectedIds)) {
+function unwrapPromptValue<T>(value: T | symbol): T {
+  if (isCancel(value)) {
     throw new Error("Canceled");
   }
+  return value;
+}
+
+const RESERVED_COMPOSE_SERVICE_NAMES = new Set(["db", "redis"]);
+
+function validateComposeServiceName(opts: {
+  readonly value: string | undefined;
+  readonly defaultName: string;
+  readonly usedServiceNames: ReadonlySet<string>;
+  readonly reserved?: ReadonlySet<string>;
+}): string | undefined {
+  const v = opts.value?.trim();
+  if (!v) {
+    return "Required";
+  }
+  if (!SLUG_LABEL_PATTERN.test(v)) {
+    return "Use lowercase letters, numbers, and '-' only";
+  }
+  if (opts.reserved?.has(v) === true) {
+    return "Reserved name";
+  }
+  if (opts.usedServiceNames.has(v) && v !== opts.defaultName) {
+    return "Duplicate";
+  }
+  return undefined;
+}
+
+function validatePort(value: string | undefined): string | undefined {
+  const v = value?.trim();
+  if (!v) {
+    return "Required";
+  }
+  const n = Number.parseInt(v, 10);
+  if (!Number.isFinite(n) || n <= 0 || n >= 65_536) {
+    return "Invalid port";
+  }
+  return undefined;
+}
+
+function validateRequiredText(value: string | undefined): string | undefined {
+  const v = value?.trim();
+  if (!v) {
+    return "Required";
+  }
+  return undefined;
+}
+
+function validateSubdomain(value: string | undefined): string | undefined {
+  const v = value?.trim();
+  if (!v) {
+    return "Required";
+  }
+  if (v.includes(".")) {
+    return "Subdomain only (no dots)";
+  }
+  if (!SLUG_LABEL_PATTERN.test(v)) {
+    return "Invalid subdomain";
+  }
+  return undefined;
+}
+
+async function selectCandidatesForDiscoveredCompose(opts: {
+  readonly candidates: readonly ServiceCandidate[];
+}): Promise<ServiceCandidate[]> {
+  const byId = new Map(opts.candidates.map((c) => [c.id, c] as const));
+
+  const selectedIds = unwrapPromptValue(
+    await autocompleteMultiselect<string>({
+      message: "Select dev scripts to include as services:",
+      required: true,
+      options: opts.candidates.map((c) => ({
+        value: c.id,
+        label: formatCandidateLabel(c),
+        hint: formatCandidateHint(c),
+      })),
+    })
+  );
 
   const selectedCandidates: ServiceCandidate[] = [];
   for (const id of selectedIds) {
@@ -1962,214 +3200,169 @@ async function buildDiscoveredCompose(
     throw new Error("No services selected");
   }
 
-  const usedServiceNames = new Set<string>();
-  const drafts: Array<{
-    name: string;
-    role: "http" | "internal";
-    port?: number;
-    subdomain?: string;
-    workingDir: string;
-    command: string;
-  }> = [];
+  return selectedCandidates;
+}
 
-  for (const candidate of selectedCandidates) {
-    note(
-      candidate.scriptCommand,
-      `${candidate.packageRelativeDir} (${candidate.scriptName})`
-    );
+async function promptDraftForDiscoveredCandidate(opts: {
+  readonly candidate: ServiceCandidate;
+  readonly usedServiceNames: Set<string>;
+}): Promise<AutoComposeDraft> {
+  note(
+    opts.candidate.scriptCommand,
+    `${opts.candidate.packageRelativeDir} (${opts.candidate.scriptName})`
+  );
 
-    const defaultName = uniqueName(
-      guessServiceName(candidate),
-      usedServiceNames
-    );
-    const defaultRole = guessRole(candidate);
+  const defaultName = uniqueName(
+    guessServiceName(opts.candidate),
+    opts.usedServiceNames
+  );
+  const defaultRole = guessRole(opts.candidate);
 
-    const role = await select<"http" | "internal">({
+  const role = unwrapPromptValue(
+    await select<"http" | "internal">({
       message: `Service role for "${defaultName}":`,
       initialValue: defaultRole,
       options: [
         { value: "http", label: "HTTP (routed via Caddy)" },
         { value: "internal", label: "Internal (not routed via Caddy)" },
       ],
-    });
-    if (isCancel(role)) {
-      throw new Error("Canceled");
-    }
+    })
+  );
 
-    const name = await text({
+  const name = unwrapPromptValue(
+    await text({
       message: "docker compose service name:",
       initialValue: defaultName,
-      validate: (value) => {
-        const v = value?.trim();
-        if (!v) {
-          return "Required";
-        }
-        if (!SLUG_LABEL_PATTERN.test(v)) {
-          return "Use lowercase letters, numbers, and '-' only";
-        }
-        if (v === "db" || v === "redis") {
-          return "Reserved name";
-        }
-        if (usedServiceNames.has(v) && v !== defaultName) {
-          return "Duplicate";
-        }
-        return undefined;
-      },
-    });
-    if (isCancel(name)) {
-      throw new Error("Canceled");
-    }
+      validate: (value) =>
+        validateComposeServiceName({
+          value,
+          defaultName,
+          usedServiceNames: opts.usedServiceNames,
+          reserved: RESERVED_COMPOSE_SERVICE_NAMES,
+        }),
+    })
+  );
+  opts.usedServiceNames.add(name);
 
-    usedServiceNames.add(name);
+  const inferredPort = inferPortFromScript(opts.candidate.scriptCommand);
+  const defaultPort = inferredPort ?? guessDefaultPort(name);
 
-    const inferredPort = inferPortFromScript(candidate.scriptCommand);
-    const defaultPort = inferredPort ?? guessDefaultPort(name);
+  const portNum =
+    role === "http"
+      ? Number.parseInt(
+          unwrapPromptValue(
+            await text({
+              message: "Internal HTTP port:",
+              initialValue: String(defaultPort),
+              validate: validatePort,
+            })
+          ),
+          10
+        )
+      : undefined;
 
-    const port =
-      role === "http"
-        ? await text({
-            message: "Internal HTTP port:",
-            initialValue: String(defaultPort),
-            validate: (value) => {
-              const v = value?.trim();
-              if (!v) {
-                return "Required";
-              }
-              const n = Number.parseInt(v, 10);
-              if (!Number.isFinite(n) || n <= 0 || n >= 65_536) {
-                return "Invalid port";
-              }
-              return undefined;
-            },
-          })
-        : "0";
-    if (isCancel(port)) {
-      throw new Error("Canceled");
-    }
+  const workingDir =
+    opts.candidate.packageRelativeDir === "."
+      ? "/app"
+      : `/app/${opts.candidate.packageRelativeDir}`;
 
-    const portNum = role === "http" ? Number.parseInt(port, 10) : undefined;
+  const suggestedCommand = buildSuggestedCommand({
+    candidate: opts.candidate,
+    role,
+    port: portNum,
+  });
 
-    const workingDir =
-      candidate.packageRelativeDir === "."
-        ? "/app"
-        : `/app/${candidate.packageRelativeDir}`;
-
-    const suggestedCommand = buildSuggestedCommand({
-      candidate,
-      role,
-      port: portNum,
-    });
-
-    const command = await text({
+  const command = unwrapPromptValue(
+    await text({
       message: "Container command:",
       initialValue: suggestedCommand,
-      validate: (value) => {
-        const v = value?.trim();
-        if (!v) {
-          return "Required";
-        }
-        return undefined;
-      },
-    });
-    if (isCancel(command)) {
-      throw new Error("Canceled");
-    }
+      validate: validateRequiredText,
+    })
+  );
 
-    drafts.push({
-      name,
-      role,
-      port: portNum,
-      workingDir,
-      command,
-    });
+  return {
+    name,
+    role,
+    port: portNum,
+    workingDir,
+    command,
+  };
+}
+
+async function promptHttpSubdomainsForDrafts(opts: {
+  readonly drafts: AutoComposeDraft[];
+  readonly devHost: string;
+  readonly primaryDefaultStrategy?: "prefer-www" | "first";
+}): Promise<void> {
+  const httpDrafts = opts.drafts.filter((d) => d.role === "http");
+  if (httpDrafts.length === 0) {
+    return;
   }
 
-  const httpDrafts = drafts.filter((d) => d.role === "http");
-  if (httpDrafts.length > 0) {
-    const primaryDefault =
-      httpDrafts.find((d) => d.name === "www")?.name ?? httpDrafts[0]?.name;
-
-    const primary = await select<string>({
-      message: `Which service should be routed at https://${input.devHost}?`,
+  const primaryDefault =
+    opts.primaryDefaultStrategy === "first"
+      ? httpDrafts[0]?.name
+      : (httpDrafts.find((d) => d.name === "www")?.name ?? httpDrafts[0]?.name);
+  const primary = unwrapPromptValue(
+    await select<string>({
+      message: `Which service should be routed at https://${opts.devHost}?`,
       initialValue: primaryDefault,
       options: httpDrafts.map((d) => ({
         value: d.name,
         label: d.name,
       })),
-    });
-    if (isCancel(primary)) {
-      throw new Error("Canceled");
+    })
+  );
+
+  for (const d of httpDrafts) {
+    if (d.name === primary) {
+      continue;
     }
 
-    for (const d of httpDrafts) {
-      if (d.name === primary) {
-        continue;
-      }
-
-      const defaultSub = guessSubdomain(d.name);
-      const sub = await text({
-        message: `Subdomain for "${d.name}" (https://<sub>.${input.devHost}):`,
+    const defaultSub = guessSubdomain(d.name);
+    const sub = unwrapPromptValue(
+      await text({
+        message: `Subdomain for "${d.name}" (https://<sub>.${opts.devHost}):`,
         initialValue: defaultSub,
-        validate: (value) => {
-          const v = value?.trim();
-          if (!v) {
-            return "Required";
-          }
-          if (v.includes(".")) {
-            return "Subdomain only (no dots)";
-          }
-          if (!SLUG_LABEL_PATTERN.test(v)) {
-            return "Invalid subdomain";
-          }
-          return undefined;
-        },
-      });
-      if (isCancel(sub)) {
-        throw new Error("Canceled");
-      }
-      d.subdomain = sub;
-    }
-
-    // Assign primary as root host
-    const primaryDraft = httpDrafts.find((d) => d.name === primary);
-    if (primaryDraft) {
-      primaryDraft.subdomain = "";
-    }
+        validate: validateSubdomain,
+      })
+    );
+    d.subdomain = sub;
   }
 
-  const services = drafts.map((d) => {
-    const env = new Map<string, string>([
-      ["CHOKIDAR_USEPOLLING", "true"],
-      ["WATCHPACK_POLLING", "true"],
-    ]);
+  const primaryDraft = httpDrafts.find((d) => d.name === primary);
+  if (primaryDraft) {
+    primaryDraft.subdomain = "";
+  }
+}
 
-    const labels = new Map<string, string>();
-    const networks = d.role === "http" ? ["hack-dev", "default"] : [];
+async function buildDiscoveredCompose(
+  input: ComposeWizardInput
+): Promise<string> {
+  const selectedCandidates = await selectCandidatesForDiscoveredCompose({
+    candidates: input.candidates,
+  });
+  const usedServiceNames = new Set<string>();
+  const drafts: AutoComposeDraft[] = [];
 
-    if (d.role === "http") {
-      const port = d.port ?? 3000;
-      const host =
-        d.subdomain && d.subdomain.length > 0
-          ? `${d.subdomain}.${input.devHost}`
-          : `${input.devHost}`;
-      labels.set(
-        "caddy",
-        buildCaddyHostLabelValue({ primaryHost: host, oauth: input.oauth })
-      );
-      labels.set("caddy.reverse_proxy", `{{upstreams ${port}}}`);
-      labels.set("caddy.tls", "internal");
-    }
+  for (const candidate of selectedCandidates) {
+    drafts.push(
+      await promptDraftForDiscoveredCandidate({
+        candidate,
+        usedServiceNames,
+      })
+    );
+  }
 
-    return {
-      name: d.name,
-      role: d.role,
-      image: "imbios/bun-node:latest",
-      workingDir: d.workingDir,
-      command: d.command,
-      env,
-      labels,
-      networks,
-    };
+  await promptHttpSubdomainsForDrafts({
+    drafts,
+    devHost: input.devHost,
+  });
+
+  const services = buildServicesFromDrafts({
+    drafts,
+    devHost: input.devHost,
+    oauth: input.oauth,
   });
 
   return renderCompose({ name: input.projectSlug, services });
@@ -2242,6 +3435,111 @@ interface ManualComposeWizardInput {
   };
 }
 
+function validateRepoRelativeWorkingDir(
+  value: string | undefined
+): string | undefined {
+  const v = value?.trim();
+  if (!v) {
+    return "Required";
+  }
+  if (v.startsWith("/")) {
+    return "Use a repo-relative path (e.g. ., apps/web)";
+  }
+  return undefined;
+}
+
+function buildManualSuggestedCommand(opts: {
+  readonly role: "http" | "internal";
+  readonly port: number | undefined;
+}): string {
+  if (opts.role !== "http") {
+    return "bun run dev";
+  }
+  const port = opts.port ?? 3000;
+  return `bun run dev -- --port ${port} --host 0.0.0.0`;
+}
+
+async function promptManualServiceDraft(opts: {
+  readonly defaultName: string;
+  readonly usedServiceNames: Set<string>;
+}): Promise<AutoComposeDraft> {
+  const role = unwrapPromptValue(
+    await select<"http" | "internal">({
+      message: `Service role for "${opts.defaultName}":`,
+      initialValue: "http",
+      options: [
+        { value: "http", label: "HTTP (routed via Caddy)" },
+        { value: "internal", label: "Internal (not routed via Caddy)" },
+      ],
+    })
+  );
+
+  const name = unwrapPromptValue(
+    await text({
+      message: "docker compose service name:",
+      initialValue: opts.defaultName,
+      validate: (value) =>
+        validateComposeServiceName({
+          value,
+          defaultName: opts.defaultName,
+          usedServiceNames: opts.usedServiceNames,
+        }),
+    })
+  );
+  opts.usedServiceNames.add(name);
+
+  const image = unwrapPromptValue(
+    await text({
+      message: `Image for "${name}":`,
+      initialValue: "imbios/bun-node:latest",
+      validate: validateRequiredText,
+    })
+  );
+
+  const workingDirRel = unwrapPromptValue(
+    await text({
+      message: `Working dir (relative to repo root) for "${name}":`,
+      initialValue: ".",
+      validate: validateRepoRelativeWorkingDir,
+    })
+  );
+
+  const portNum =
+    role === "http"
+      ? Number.parseInt(
+          unwrapPromptValue(
+            await text({
+              message: `Internal HTTP port for "${name}":`,
+              initialValue: String(guessDefaultPort(name)),
+              validate: validatePort,
+            })
+          ),
+          10
+        )
+      : undefined;
+
+  const command = unwrapPromptValue(
+    await text({
+      message: `Container command for "${name}":`,
+      initialValue: buildManualSuggestedCommand({ role, port: portNum }),
+      validate: validateRequiredText,
+    })
+  );
+
+  const relRaw = workingDirRel.trim();
+  const rel = normalizeRelativePath(relRaw);
+  const workingDir = rel === "." ? "/app" : `/app/${rel}`;
+
+  return {
+    name,
+    role,
+    image: image.trim(),
+    port: portNum,
+    workingDir,
+    command,
+  };
+}
+
 async function buildManualCompose(
   input: ManualComposeWizardInput
 ): Promise<string> {
@@ -2254,232 +3552,39 @@ async function buildManualCompose(
   );
 
   const usedServiceNames = new Set<string>();
-  const drafts: Array<{
-    name: string;
-    role: "http" | "internal";
-    image: string;
-    port?: number;
-    subdomain?: string;
-    workingDir: string;
-    command: string;
-  }> = [];
+  const drafts: AutoComposeDraft[] = [];
 
   while (true) {
     const defaultName = uniqueName("app", usedServiceNames);
 
-    const role = await select<"http" | "internal">({
-      message: `Service role for "${defaultName}":`,
-      initialValue: "http",
-      options: [
-        { value: "http", label: "HTTP (routed via Caddy)" },
-        { value: "internal", label: "Internal (not routed via Caddy)" },
-      ],
-    });
-    if (isCancel(role)) {
-      throw new Error("Canceled");
-    }
+    drafts.push(
+      await promptManualServiceDraft({
+        defaultName,
+        usedServiceNames,
+      })
+    );
 
-    const name = await text({
-      message: "docker compose service name:",
-      initialValue: defaultName,
-      validate: (value) => {
-        const v = value?.trim();
-        if (!v) {
-          return "Required";
-        }
-        if (!SLUG_LABEL_PATTERN.test(v)) {
-          return "Use lowercase letters, numbers, and '-' only";
-        }
-        if (usedServiceNames.has(v) && v !== defaultName) {
-          return "Duplicate";
-        }
-        return undefined;
-      },
-    });
-    if (isCancel(name)) {
-      throw new Error("Canceled");
-    }
-    usedServiceNames.add(name);
-
-    const image = await text({
-      message: `Image for "${name}":`,
-      initialValue: "imbios/bun-node:latest",
-      validate: (value) => {
-        const v = value?.trim();
-        if (!v) {
-          return "Required";
-        }
-        return undefined;
-      },
-    });
-    if (isCancel(image)) {
-      throw new Error("Canceled");
-    }
-
-    const workingDirRel = await text({
-      message: `Working dir (relative to repo root) for "${name}":`,
-      initialValue: ".",
-      validate: (value) => {
-        const v = value?.trim();
-        if (!v) {
-          return "Required";
-        }
-        if (v.startsWith("/")) {
-          return "Use a repo-relative path (e.g. ., apps/web)";
-        }
-        return undefined;
-      },
-    });
-    if (isCancel(workingDirRel)) {
-      throw new Error("Canceled");
-    }
-
-    const port =
-      role === "http"
-        ? await text({
-            message: `Internal HTTP port for "${name}":`,
-            initialValue: String(guessDefaultPort(name)),
-            validate: (value) => {
-              const v = value?.trim();
-              if (!v) {
-                return "Required";
-              }
-              const n = Number.parseInt(v, 10);
-              if (!Number.isFinite(n) || n <= 0 || n >= 65_536) {
-                return "Invalid port";
-              }
-              return undefined;
-            },
-          })
-        : "0";
-    if (isCancel(port)) {
-      throw new Error("Canceled");
-    }
-
-    const portNum = role === "http" ? Number.parseInt(port, 10) : undefined;
-
-    const command = await text({
-      message: `Container command for "${name}":`,
-      initialValue:
-        role === "http"
-          ? `bun run dev -- --port ${portNum ?? 3000} --host 0.0.0.0`
-          : "bun run dev",
-      validate: (value) => {
-        const v = value?.trim();
-        if (!v) {
-          return "Required";
-        }
-        return undefined;
-      },
-    });
-    if (isCancel(command)) {
-      throw new Error("Canceled");
-    }
-
-    const relRaw = workingDirRel.trim();
-    const rel = normalizeRelativePath(relRaw);
-    const workingDir = rel === "." ? "/app" : `/app/${rel}`;
-
-    drafts.push({
-      name,
-      role,
-      image: image.trim(),
-      port: portNum,
-      workingDir,
-      command,
-    });
-
-    const more = await confirm({
-      message: "Add another service?",
-      initialValue: false,
-    });
-    if (isCancel(more)) {
-      throw new Error("Canceled");
-    }
+    const more = unwrapPromptValue(
+      await confirm({
+        message: "Add another service?",
+        initialValue: false,
+      })
+    );
     if (!more) {
       break;
     }
   }
 
-  const httpDrafts = drafts.filter((d) => d.role === "http");
-  if (httpDrafts.length > 0) {
-    const primaryDefault = httpDrafts[0]?.name;
-    const primary = await select<string>({
-      message: `Which service should be routed at https://${input.devHost}?`,
-      initialValue: primaryDefault,
-      options: httpDrafts.map((d) => ({ value: d.name, label: d.name })),
-    });
-    if (isCancel(primary)) {
-      throw new Error("Canceled");
-    }
+  await promptHttpSubdomainsForDrafts({
+    drafts,
+    devHost: input.devHost,
+    primaryDefaultStrategy: "first",
+  });
 
-    for (const d of httpDrafts) {
-      if (d.name === primary) {
-        continue;
-      }
-      const defaultSub = guessSubdomain(d.name);
-      const sub = await text({
-        message: `Subdomain for "${d.name}" (https://<sub>.${input.devHost}):`,
-        initialValue: defaultSub,
-        validate: (value) => {
-          const v = value?.trim();
-          if (!v) {
-            return "Required";
-          }
-          if (v.includes(".")) {
-            return "Subdomain only (no dots)";
-          }
-          if (!SLUG_LABEL_PATTERN.test(v)) {
-            return "Invalid subdomain";
-          }
-          return undefined;
-        },
-      });
-      if (isCancel(sub)) {
-        throw new Error("Canceled");
-      }
-      d.subdomain = sub;
-    }
-
-    const primaryDraft = httpDrafts.find((d) => d.name === primary);
-    if (primaryDraft) {
-      primaryDraft.subdomain = "";
-    }
-  }
-
-  const services = drafts.map((d) => {
-    const env = new Map<string, string>([
-      ["CHOKIDAR_USEPOLLING", "true"],
-      ["WATCHPACK_POLLING", "true"],
-    ]);
-
-    const labels = new Map<string, string>();
-    const networks = d.role === "http" ? ["hack-dev", "default"] : [];
-
-    if (d.role === "http") {
-      const port = d.port ?? 3000;
-      const host =
-        d.subdomain && d.subdomain.length > 0
-          ? `${d.subdomain}.${input.devHost}`
-          : `${input.devHost}`;
-      labels.set(
-        "caddy",
-        buildCaddyHostLabelValue({ primaryHost: host, oauth: input.oauth })
-      );
-      labels.set("caddy.reverse_proxy", `{{upstreams ${port}}}`);
-      labels.set("caddy.tls", "internal");
-    }
-
-    return {
-      name: d.name,
-      role: d.role,
-      image: d.image,
-      workingDir: d.workingDir,
-      command: d.command,
-      env,
-      labels,
-      networks,
-    };
+  const services = buildServicesFromDrafts({
+    drafts,
+    devHost: input.devHost,
+    oauth: input.oauth,
   });
 
   return renderCompose({ name: input.projectSlug, services });
@@ -2892,6 +3997,11 @@ async function handleUp({
 
   const baseProjectName = await resolveComposeProjectName({ project, cfg });
   const composeProjectName = branch ? `${baseProjectName}--${branch}` : null;
+  const projectName = sanitizeProjectSlug(baseProjectName);
+  const lifecycleComposeProject = resolveLifecycleComposeProjectName({
+    projectName,
+    branch,
+  });
   const devHost = branch ? await resolveBranchDevHost({ project }) : null;
   const aliasHost =
     branch && devHost ? resolveBranchAliasHost({ devHost, cfg }) : null;
@@ -2911,13 +4021,66 @@ async function handleUp({
   const composeFilesWithInternal = internalOverride
     ? [...composeFiles, internalOverride]
     : composeFiles;
-  return await composeRuntimeBackend.up({
-    composeFiles: composeFilesWithInternal,
+
+  const targetServices = await readComposeServiceNames(project.composeFile);
+  const envOverrides = await resolveComposeEnvOverrides({
+    project,
+    projectName,
+    targetServices,
+  });
+  const composeFilesWithEnv = [
+    ...composeFilesWithInternal,
+    ...envOverrides.composeFiles,
+  ];
+
+  try {
+    const lifecycleUp = await runLifecycleUpBeforeAndProcesses({
+      title: "Lifecycle (up before)",
+      project,
+      cfg,
+      projectName,
+      branch,
+      env: envOverrides.env,
+      composeProject: lifecycleComposeProject,
+    });
+    if (lifecycleUp.code !== 0) {
+      return lifecycleUp.code;
+    }
+    if (lifecycleUp.sessionName) {
+      logger.info({
+        message: `Lifecycle processes running in session: ${lifecycleUp.sessionName}`,
+      });
+    }
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Failed to start lifecycle setup";
+    logger.error({ message });
+    return 1;
+  }
+
+  const upCode = await composeRuntimeBackend.up({
+    composeFiles: composeFilesWithEnv,
     composeProject: composeProjectName,
     profiles,
     detach,
     cwd: dirname(project.composeFile),
+    env: envOverrides.env,
   });
+  if (upCode !== 0) {
+    return upCode;
+  }
+
+  const afterCode = await runLifecycleCommands({
+    title: "Lifecycle (up after)",
+    commands: cfg.lifecycle?.up?.after,
+    projectRoot: project.projectRoot,
+    env: envOverrides.env,
+    projectDir: project.projectDir,
+    composeProject: lifecycleComposeProject,
+  });
+  return afterCode;
 }
 
 async function maybePromptToStartGlobal(opts: {
@@ -2983,17 +4146,234 @@ async function handleDown({
   const baseProjectName = await resolveComposeProjectName({ project, cfg });
   const composeProjectName = branch ? `${baseProjectName}--${branch}` : null;
 
+  const projectName = sanitizeProjectSlug(baseProjectName);
+  const lifecycleComposeProject = resolveLifecycleComposeProjectName({
+    projectName,
+    branch,
+  });
+  const envResolved = await resolveHackEnv({
+    projectDir: project.projectDir,
+    projectName,
+  });
+  if (envResolved.contractParseError) {
+    logger.warn({
+      message: `Failed to parse ${envResolved.contractPath}: ${envResolved.contractParseError}`,
+    });
+  }
+
+  const beforeCode = await runLifecycleCommands({
+    title: "Lifecycle (down before)",
+    commands: cfg.lifecycle?.down?.before,
+    projectRoot: project.projectRoot,
+    env: envResolved.envForCompose,
+    projectDir: project.projectDir,
+    composeProject: lifecycleComposeProject,
+  });
+  if (beforeCode !== 0) {
+    return beforeCode;
+  }
+
   const code = await composeRuntimeBackend.down({
     composeFiles: [project.composeFile],
     composeProject: composeProjectName,
     profiles,
     cwd: dirname(project.composeFile),
   });
+
+  try {
+    await stopLifecycleProcesses({
+      project,
+      cfg,
+      projectName,
+      branch,
+      composeProject: lifecycleComposeProject,
+    });
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Failed to stop lifecycle processes";
+    logger.warn({ message });
+  }
+
   if (code !== 0) {
     return code;
   }
   await maybeManageProjectLogsAfterDown({ project, branch });
-  return 0;
+
+  const afterCode = await runLifecycleCommands({
+    title: "Lifecycle (down after)",
+    commands: cfg.lifecycle?.down?.after,
+    projectRoot: project.projectRoot,
+    env: envResolved.envForCompose,
+    projectDir: project.projectDir,
+    composeProject: lifecycleComposeProject,
+  });
+  return afterCode;
+}
+
+async function runRestartDownPhase(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly projectName: string;
+  readonly composeProjectName: string | null;
+  readonly lifecycleComposeProject: string;
+  readonly profiles: readonly string[];
+  readonly branch: string | null;
+  readonly envForCompose: Readonly<Record<string, string>>;
+}): Promise<number> {
+  const downBefore = await runLifecycleCommands({
+    title: "Lifecycle (restart down before)",
+    commands: opts.cfg.lifecycle?.down?.before,
+    projectRoot: opts.project.projectRoot,
+    env: opts.envForCompose,
+    projectDir: opts.project.projectDir,
+    composeProject: opts.lifecycleComposeProject,
+  });
+  if (downBefore !== 0) {
+    return downBefore;
+  }
+
+  const downCode = await composeRuntimeBackend.down({
+    composeFiles: [opts.project.composeFile],
+    composeProject: opts.composeProjectName,
+    profiles: opts.profiles,
+    cwd: dirname(opts.project.composeFile),
+  });
+  try {
+    await stopLifecycleProcesses({
+      project: opts.project,
+      cfg: opts.cfg,
+      projectName: opts.projectName,
+      branch: opts.branch,
+      composeProject: opts.lifecycleComposeProject,
+    });
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Failed to stop lifecycle processes";
+    logger.warn({ message });
+  }
+  if (downCode !== 0) {
+    return downCode;
+  }
+
+  await maybeManageProjectLogsAfterDown({
+    project: opts.project,
+    branch: opts.branch,
+  });
+
+  const downAfter = await runLifecycleCommands({
+    title: "Lifecycle (restart down after)",
+    commands: opts.cfg.lifecycle?.down?.after,
+    projectRoot: opts.project.projectRoot,
+    env: opts.envForCompose,
+    projectDir: opts.project.projectDir,
+    composeProject: opts.lifecycleComposeProject,
+  });
+  return downAfter;
+}
+
+async function runRestartUpPhase(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly projectName: string;
+  readonly composeProjectName: string | null;
+  readonly lifecycleComposeProject: string;
+  readonly profiles: readonly string[];
+  readonly branch: string | null;
+}): Promise<number> {
+  await maybeSyncOauthAliasesInCompose({ project: opts.project });
+
+  const devHost = opts.branch
+    ? await resolveBranchDevHost({ project: opts.project })
+    : null;
+  const aliasHost =
+    opts.branch && devHost
+      ? resolveBranchAliasHost({ devHost, cfg: opts.cfg })
+      : null;
+  const internalOverride = await resolveInternalComposeOverride({
+    project: opts.project,
+    cfg: opts.cfg,
+    branch: opts.branch,
+    devHost,
+    aliasHost,
+  });
+  const composeFiles =
+    opts.branch && devHost
+      ? await resolveBranchComposeFiles({
+          project: opts.project,
+          branch: opts.branch,
+          devHost,
+          aliasHost,
+        })
+      : [opts.project.composeFile];
+  const composeFilesWithInternal = internalOverride
+    ? [...composeFiles, internalOverride]
+    : composeFiles;
+
+  const targetServices = await readComposeServiceNames(
+    opts.project.composeFile
+  );
+  const envOverrides = await resolveComposeEnvOverrides({
+    project: opts.project,
+    projectName: opts.projectName,
+    targetServices,
+  });
+  const composeFilesWithEnv = [
+    ...composeFilesWithInternal,
+    ...envOverrides.composeFiles,
+  ];
+
+  try {
+    const lifecycleUp = await runLifecycleUpBeforeAndProcesses({
+      title: "Lifecycle (restart up before)",
+      project: opts.project,
+      cfg: opts.cfg,
+      projectName: opts.projectName,
+      branch: opts.branch,
+      env: envOverrides.env,
+      composeProject: opts.lifecycleComposeProject,
+    });
+    if (lifecycleUp.code !== 0) {
+      return lifecycleUp.code;
+    }
+    if (lifecycleUp.sessionName) {
+      logger.info({
+        message: `Lifecycle processes running in session: ${lifecycleUp.sessionName}`,
+      });
+    }
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Failed to start lifecycle setup";
+    logger.error({ message });
+    return 1;
+  }
+
+  const upCode = await composeRuntimeBackend.up({
+    composeFiles: composeFilesWithEnv,
+    composeProject: opts.composeProjectName,
+    profiles: opts.profiles,
+    detach: false,
+    cwd: dirname(opts.project.composeFile),
+    env: envOverrides.env,
+  });
+  if (upCode !== 0) {
+    return upCode;
+  }
+
+  const upAfter = await runLifecycleCommands({
+    title: "Lifecycle (restart up after)",
+    commands: opts.cfg.lifecycle?.up?.after,
+    projectRoot: opts.project.projectRoot,
+    env: envOverrides.env,
+    projectDir: opts.project.projectDir,
+    composeProject: opts.lifecycleComposeProject,
+  });
+  return upAfter;
 }
 
 async function handleRestart({
@@ -3023,44 +4403,43 @@ async function handleRestart({
   const baseProjectName = await resolveComposeProjectName({ project, cfg });
   const composeProjectName = branch ? `${baseProjectName}--${branch}` : null;
 
-  const downCode = await composeRuntimeBackend.down({
-    composeFiles: [project.composeFile],
-    composeProject: composeProjectName,
+  const projectName = sanitizeProjectSlug(baseProjectName);
+  const lifecycleComposeProject = resolveLifecycleComposeProjectName({
+    projectName,
+    branch,
+  });
+  const envResolved = await resolveHackEnv({
+    projectDir: project.projectDir,
+    projectName,
+  });
+  if (envResolved.contractParseError) {
+    logger.warn({
+      message: `Failed to parse ${envResolved.contractPath}: ${envResolved.contractParseError}`,
+    });
+  }
+
+  const downCode = await runRestartDownPhase({
+    project,
+    cfg,
+    projectName,
+    composeProjectName,
+    lifecycleComposeProject,
     profiles,
-    cwd: dirname(project.composeFile),
+    branch,
+    envForCompose: envResolved.envForCompose,
   });
   if (downCode !== 0) {
     return downCode;
   }
 
-  await maybeManageProjectLogsAfterDown({ project, branch });
-
-  await maybeSyncOauthAliasesInCompose({ project });
-
-  const devHost = branch ? await resolveBranchDevHost({ project }) : null;
-  const aliasHost =
-    branch && devHost ? resolveBranchAliasHost({ devHost, cfg }) : null;
-  const internalOverride = await resolveInternalComposeOverride({
+  return await runRestartUpPhase({
     project,
     cfg,
-    branch,
-    devHost,
-    aliasHost,
-  });
-  const composeFiles =
-    branch && devHost
-      ? await resolveBranchComposeFiles({ project, branch, devHost, aliasHost })
-      : [project.composeFile];
-  const composeFilesWithInternal = internalOverride
-    ? [...composeFiles, internalOverride]
-    : composeFiles;
-
-  return await composeRuntimeBackend.up({
-    composeFiles: composeFilesWithInternal,
-    composeProject: composeProjectName,
+    projectName,
+    composeProjectName,
+    lifecycleComposeProject,
     profiles,
-    detach: false,
-    cwd: dirname(project.composeFile),
+    branch,
   });
 }
 
@@ -3281,11 +4660,8 @@ async function handleRun({
     });
   }
 
-  const baseProjectName = branch
-    ? await resolveComposeProjectName({ project, cfg })
-    : null;
-  const composeProjectName =
-    branch && baseProjectName ? `${baseProjectName}--${branch}` : null;
+  const baseProjectName = await resolveComposeProjectName({ project, cfg });
+  const composeProjectName = branch ? `${baseProjectName}--${branch}` : null;
   const devHost = branch ? await resolveBranchDevHost({ project }) : null;
   const aliasHost =
     branch && devHost ? resolveBranchAliasHost({ devHost, cfg }) : null;
@@ -3299,15 +4675,316 @@ async function handleRun({
   const composeFiles = internalOverride
     ? [project.composeFile, internalOverride]
     : [project.composeFile];
+
+  const projectName = sanitizeProjectSlug(baseProjectName);
+  const envOverrides = await resolveComposeEnvOverrides({
+    project,
+    projectName,
+    targetServices: [service],
+  });
+  const composeFilesWithEnv = [...composeFiles, ...envOverrides.composeFiles];
   return await composeRuntimeBackend.run({
-    composeFiles,
+    composeFiles: composeFilesWithEnv,
     composeProject: composeProjectName,
     profiles,
     service,
     workdir: workdir.length > 0 ? workdir : undefined,
     cmdArgs,
     cwd: dirname(project.composeFile),
+    env: envOverrides.env,
   });
+}
+
+function computeWantsLokiExplicit(opts: {
+  readonly options: {
+    readonly loki: boolean | undefined;
+    readonly services: string | undefined;
+    readonly query: string | undefined;
+    readonly since: string | undefined;
+    readonly until: string | undefined;
+  };
+}): boolean {
+  return (
+    opts.options.loki === true ||
+    opts.options.services !== undefined ||
+    opts.options.query !== undefined ||
+    opts.options.since !== undefined ||
+    opts.options.until !== undefined
+  );
+}
+
+function validateLogsArgs(opts: {
+  readonly forceCompose: boolean;
+  readonly wantsLokiExplicit: boolean;
+  readonly json: boolean;
+  readonly pretty: boolean | undefined;
+  readonly follow: boolean;
+  readonly timeRange: ReturnType<typeof parseLogTimeRange>;
+}): { readonly ok: true } | { readonly ok: false; readonly message: string } {
+  if (opts.forceCompose && opts.wantsLokiExplicit) {
+    return {
+      ok: false,
+      message:
+        "Cannot combine --compose with --loki/--services/--query/--since/--until.",
+    };
+  }
+  if (opts.json && opts.pretty) {
+    return { ok: false, message: "Cannot combine --json with --pretty." };
+  }
+  if (opts.timeRange.error) {
+    return { ok: false, message: opts.timeRange.error };
+  }
+  if (opts.follow && opts.timeRange.end) {
+    return { ok: false, message: "Cannot combine --until with --follow." };
+  }
+
+  return { ok: true };
+}
+
+function resolveLokiServices(opts: {
+  readonly servicesOpt: readonly string[];
+  readonly positionalService: string | undefined;
+}): string[] {
+  const serviceFromPositional = (opts.positionalService ?? "").trim();
+  if (serviceFromPositional.length === 0) {
+    return [...opts.servicesOpt];
+  }
+  if (opts.servicesOpt.includes(serviceFromPositional)) {
+    return [...opts.servicesOpt];
+  }
+  return [...opts.servicesOpt, serviceFromPositional];
+}
+
+function buildLogStreamContext(opts: {
+  readonly json: boolean;
+  readonly backend: "loki" | "compose";
+  readonly projectNameForPrefix: string;
+  readonly branch: string | null;
+  readonly services: readonly string[] | undefined;
+  readonly follow: boolean;
+  readonly since: string | undefined;
+  readonly until: string | undefined;
+}): LogStreamContext | undefined {
+  if (!opts.json) {
+    return undefined;
+  }
+
+  return {
+    backend: opts.backend,
+    project:
+      opts.projectNameForPrefix.length > 0
+        ? opts.projectNameForPrefix
+        : undefined,
+    branch: opts.branch ?? undefined,
+    services:
+      opts.services && opts.services.length > 0
+        ? [...opts.services]
+        : undefined,
+    follow: opts.follow,
+    since: opts.since,
+    until: opts.until,
+  };
+}
+
+function resolveLokiQuery(opts: {
+  readonly queryOpt: string | undefined;
+  readonly projectNameForPrefix: string;
+  readonly services: readonly string[];
+}): string {
+  const queryRaw = (opts.queryOpt ?? "").trim();
+  if (queryRaw.length > 0) {
+    return queryRaw;
+  }
+
+  return buildLogSelector({
+    project:
+      opts.projectNameForPrefix.length > 0 ? opts.projectNameForPrefix : null,
+    services: [...opts.services],
+  });
+}
+
+async function runLogsWithLoki(opts: {
+  readonly baseUrl: string;
+  readonly lokiReachable: boolean;
+  readonly projectNameForPrefix: string;
+  readonly branch: string | null;
+  readonly json: boolean;
+  readonly follow: boolean;
+  readonly tail: number;
+  readonly format: ReturnType<typeof resolveLogFormat>;
+  readonly timeRange: ReturnType<typeof parseLogTimeRange>;
+  readonly servicesOpt: string | undefined;
+  readonly positionalService: string | undefined;
+  readonly queryOpt: string | undefined;
+  readonly since: string | undefined;
+  readonly until: string | undefined;
+}): Promise<number> {
+  if (!opts.lokiReachable) {
+    process.stderr.write(`Loki is not reachable at ${opts.baseUrl}.\n`);
+    process.stderr.write(
+      "Tip: run `hack global install` (or `hack global up`) and ensure Loki is reachable.\n"
+    );
+    return 1;
+  }
+
+  const services = resolveLokiServices({
+    servicesOpt: parseCsvList(opts.servicesOpt),
+    positionalService: opts.positionalService,
+  });
+
+  const streamContext = buildLogStreamContext({
+    json: opts.json,
+    backend: "loki",
+    projectNameForPrefix: opts.projectNameForPrefix,
+    branch: opts.branch,
+    services,
+    follow: opts.follow,
+    since: opts.since,
+    until: opts.until,
+  });
+
+  const query = resolveLokiQuery({
+    queryOpt: opts.queryOpt,
+    projectNameForPrefix: opts.projectNameForPrefix,
+    services,
+  });
+
+  return await lokiLogBackend.run({
+    baseUrl: opts.baseUrl,
+    query,
+    follow: opts.follow,
+    tail: opts.tail,
+    format: opts.format,
+    showProjectPrefix: true,
+    streamContext,
+    start: opts.timeRange.start ?? undefined,
+    end: opts.timeRange.end ?? undefined,
+  });
+}
+
+async function runLogsWithCompose(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly projectNameForPrefix: string;
+  readonly composeProject: string | undefined;
+  readonly branch: string | null;
+  readonly json: boolean;
+  readonly follow: boolean;
+  readonly tail: number;
+  readonly service: string | undefined;
+  readonly profiles: readonly string[];
+  readonly format: ReturnType<typeof resolveLogFormat>;
+  readonly since: string | undefined;
+  readonly until: string | undefined;
+}): Promise<number> {
+  const serviceTrimmed = (opts.service ?? "").trim();
+  const servicesForContext =
+    serviceTrimmed.length > 0 ? [serviceTrimmed] : undefined;
+  const lifecycleComposeProject =
+    opts.composeProject ?? opts.projectNameForPrefix;
+  const lifecycle = await resolveLifecycleLogCompanion({
+    projectDir: opts.project.projectDir,
+    composeProject: lifecycleComposeProject,
+    service: serviceTrimmed.length > 0 ? serviceTrimmed : undefined,
+    follow: opts.follow,
+  });
+  const streamContext = buildLogStreamContext({
+    json: opts.json,
+    backend: "compose",
+    projectNameForPrefix: opts.projectNameForPrefix,
+    branch: opts.branch,
+    services: servicesForContext,
+    follow: opts.follow,
+    since: opts.since,
+    until: opts.until,
+  });
+
+  return await composeLogBackend.run({
+    composeFile: opts.project.composeFile,
+    cwd: dirname(opts.project.composeFile),
+    follow: opts.follow,
+    tail: opts.tail,
+    service: opts.service,
+    projectName:
+      opts.projectNameForPrefix.length > 0
+        ? opts.projectNameForPrefix
+        : undefined,
+    composeProject: opts.composeProject,
+    profiles: opts.profiles,
+    format: opts.format,
+    streamContext,
+    lifecycle,
+  });
+}
+
+async function resolveLifecycleLogCompanion(opts: {
+  readonly projectDir: string;
+  readonly composeProject: string;
+  readonly service: string | undefined;
+  readonly follow: boolean;
+}): Promise<
+  | {
+      readonly logPath: string;
+      readonly service?: string;
+      readonly composeDisabled?: boolean;
+    }
+  | undefined
+> {
+  const logPath = resolveLifecycleLogPath({
+    projectDir: opts.projectDir,
+    composeProject: opts.composeProject,
+  });
+  const state = await readLifecycleState({ projectDir: opts.projectDir });
+  const entry =
+    state.find((item) => item.composeProject === opts.composeProject) ?? null;
+  const persistentServices = new Set(
+    (entry?.processes ?? []).map((process) => process.name)
+  );
+  const requested = (opts.service ?? "").trim();
+  const hasLogFile = await pathExists(logPath);
+
+  if (requested.length > 0) {
+    if (persistentServices.has(requested)) {
+      return {
+        logPath,
+        service: requested,
+        composeDisabled: true,
+      };
+    }
+    const composeServices = await readComposeServiceNames(
+      resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME)
+    );
+    const composeHasService = composeServices.includes(requested);
+
+    if (composeHasService) {
+      if (!(entry || hasLogFile || opts.follow)) {
+        return undefined;
+      }
+      return {
+        logPath,
+        service: requested,
+      };
+    }
+
+    if (!(entry || hasLogFile || opts.follow)) {
+      return undefined;
+    }
+
+    return {
+      logPath,
+      service: requested,
+      composeDisabled: true,
+    };
+  }
+
+  if (entry) {
+    return { logPath };
+  }
+
+  if (!(hasLogFile || opts.follow)) {
+    return undefined;
+  }
+
+  return { logPath };
 }
 
 async function handleLogs({
@@ -3335,29 +5012,17 @@ async function handleLogs({
   });
 
   await touchBranchUsageIfNeeded({ project, branch });
-  const wantsLokiExplicit =
-    args.options.loki ||
-    args.options.services !== undefined ||
-    args.options.query !== undefined ||
-    args.options.since !== undefined ||
-    args.options.until !== undefined;
-
-  if (args.options.compose && wantsLokiExplicit) {
-    process.stderr.write(
-      "Cannot combine --compose with --loki/--services/--query/--since/--until.\n"
-    );
-    return 1;
-  }
-  if (json && args.options.pretty) {
-    process.stderr.write("Cannot combine --json with --pretty.\n");
-    return 1;
-  }
-  if (timeRange.error) {
-    process.stderr.write(`${timeRange.error}\n`);
-    return 1;
-  }
-  if (follow && timeRange.end) {
-    process.stderr.write("Cannot combine --until with --follow.\n");
+  const wantsLokiExplicit = computeWantsLokiExplicit({ options: args.options });
+  const validation = validateLogsArgs({
+    forceCompose: args.options.compose === true,
+    wantsLokiExplicit,
+    json,
+    pretty: args.options.pretty,
+    follow,
+    timeRange,
+  });
+  if (!validation.ok) {
+    process.stderr.write(`${validation.message}\n`);
     return 1;
   }
   const baseUrl = (process.env.HACK_LOKI_URL ?? "http://127.0.0.1:3100").trim();
@@ -3395,90 +5060,38 @@ async function handleLogs({
   });
 
   if (useLoki) {
-    if (!lokiReachable) {
-      process.stderr.write(`Loki is not reachable at ${baseUrl}.\n`);
-      process.stderr.write(
-        "Tip: run `hack global install` (or `hack global up`) and ensure Loki is reachable.\n"
-      );
-      return 1;
-    }
-
-    const projectName = projectNameForPrefix;
-
-    const services = parseCsvList(args.options.services);
-    const serviceFromPositional =
-      typeof service === "string" ? service.trim() : "";
-    const allServices =
-      serviceFromPositional.length > 0 &&
-      !services.includes(serviceFromPositional)
-        ? [...services, serviceFromPositional]
-        : services;
-    const streamContext: LogStreamContext | undefined = json
-      ? {
-          backend: "loki",
-          project:
-            projectNameForPrefix.length > 0 ? projectNameForPrefix : undefined,
-          branch: branch ?? undefined,
-          services: allServices.length > 0 ? allServices : undefined,
-          follow,
-          since: args.options.since,
-          until: args.options.until,
-        }
-      : undefined;
-
-    const query =
-      typeof args.options.query === "string" &&
-      args.options.query.trim().length > 0
-        ? args.options.query.trim()
-        : buildLogSelector({
-            project: projectName.length > 0 ? projectName : null,
-            services: allServices,
-          });
-
-    const showProjectPrefix = true;
-
-    return await lokiLogBackend.run({
+    return await runLogsWithLoki({
       baseUrl,
-      query,
+      lokiReachable,
+      projectNameForPrefix,
+      branch,
+      json,
       follow,
       tail,
       format,
-      showProjectPrefix,
-      streamContext,
-      start: timeRange.start ?? undefined,
-      end: timeRange.end ?? undefined,
+      timeRange,
+      servicesOpt: args.options.services,
+      positionalService: typeof service === "string" ? service : undefined,
+      queryOpt: args.options.query,
+      since: args.options.since,
+      until: args.options.until,
     });
   }
 
   // Fallback to docker compose logs when Loki isn't available.
-  const streamContext: LogStreamContext | undefined = json
-    ? {
-        backend: "compose",
-        project:
-          projectNameForPrefix.length > 0 ? projectNameForPrefix : undefined,
-        branch: branch ?? undefined,
-        services:
-          typeof service === "string" && service.trim().length > 0
-            ? [service.trim()]
-            : undefined,
-        follow,
-        since: args.options.since,
-        until: args.options.until,
-      }
-    : undefined;
-
-  return await composeLogBackend.run({
-    composeFile: project.composeFile,
-    cwd: dirname(project.composeFile),
+  return await runLogsWithCompose({
+    project,
+    projectNameForPrefix,
+    composeProject: branch ? projectNameForPrefix : undefined,
+    branch,
+    json,
     follow,
     tail,
-    service,
-    projectName:
-      projectNameForPrefix.length > 0 ? projectNameForPrefix : undefined,
-    composeProject: branch ? projectNameForPrefix : undefined,
+    service: typeof service === "string" ? service : undefined,
     profiles,
     format,
-    streamContext,
+    since: args.options.since,
+    until: args.options.until,
   });
 }
 

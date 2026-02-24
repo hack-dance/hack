@@ -29,6 +29,10 @@ export function renderGlobalCaddyCompose(opts?: {
     "services:",
     "  caddy:",
     "    image: lucaslorentz/caddy-docker-proxy:2.10",
+    "    command:",
+    "      - docker-proxy",
+    "      - --polling-interval",
+    "      - 5s",
     "    ports:",
     '      - "80:80"',
     '      - "443:443"',
@@ -332,6 +336,15 @@ export function renderProjectConfigJson(opts: {
   return `${JSON.stringify(config, null, 2)}\n`;
 }
 
+export function renderProjectEnvContractJson(): string {
+  const contract = {
+    $schema: `https://${DEFAULT_SCHEMAS_HOST}/hack.env.schema.json`,
+    version: 1,
+    vars: [],
+  };
+  return `${JSON.stringify(contract, null, 2)}\n`;
+}
+
 export function renderProjectConfigSchemaJson(): string {
   const schema = {
     $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -370,6 +383,140 @@ export function renderProjectConfigSchemaJson(): string {
         properties: {
           enabled: { type: "boolean" },
           tld: { type: "string" },
+        },
+      },
+      sessions: {
+        type: "object",
+        additionalProperties: true,
+        properties: {
+          mux: { type: "string", enum: ["auto", "tmux", "zellij", "none"] },
+        },
+      },
+      startup: {
+        type: "array",
+        items: {
+          anyOf: [
+            { type: "string" },
+            {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                name: { type: "string" },
+                run: { type: "string" },
+                command: { type: "string" },
+                cwd: { type: "string" },
+                persistent: { type: "boolean" },
+              },
+              anyOf: [{ required: ["run"] }, { required: ["command"] }],
+            },
+          ],
+        },
+      },
+      lifecycle: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          up: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              before: {
+                type: "array",
+                items: {
+                  anyOf: [
+                    { type: "string" },
+                    {
+                      type: "object",
+                      additionalProperties: false,
+                      required: ["command"],
+                      properties: {
+                        name: { type: "string" },
+                        command: { type: "string" },
+                        cwd: { type: "string" },
+                        persistent: { type: "boolean" },
+                      },
+                    },
+                  ],
+                },
+              },
+              after: {
+                type: "array",
+                items: {
+                  anyOf: [
+                    { type: "string" },
+                    {
+                      type: "object",
+                      additionalProperties: false,
+                      required: ["command"],
+                      properties: {
+                        name: { type: "string" },
+                        command: { type: "string" },
+                        cwd: { type: "string" },
+                        persistent: { type: "boolean" },
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+          down: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              before: {
+                type: "array",
+                items: {
+                  anyOf: [
+                    { type: "string" },
+                    {
+                      type: "object",
+                      additionalProperties: false,
+                      required: ["command"],
+                      properties: {
+                        name: { type: "string" },
+                        command: { type: "string" },
+                        cwd: { type: "string" },
+                        persistent: { type: "boolean" },
+                      },
+                    },
+                  ],
+                },
+              },
+              after: {
+                type: "array",
+                items: {
+                  anyOf: [
+                    { type: "string" },
+                    {
+                      type: "object",
+                      additionalProperties: false,
+                      required: ["command"],
+                      properties: {
+                        name: { type: "string" },
+                        command: { type: "string" },
+                        cwd: { type: "string" },
+                        persistent: { type: "boolean" },
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+          processes: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["name", "command"],
+              properties: {
+                name: { type: "string" },
+                command: { type: "string" },
+                cwd: { type: "string" },
+              },
+            },
+          },
         },
       },
       controlPlane: {
@@ -461,6 +608,44 @@ export function renderProjectConfigSchemaJson(): string {
       },
     },
     required: ["name", "dev_host"],
+  } as const;
+
+  return `${JSON.stringify(schema, null, 2)}\n`;
+}
+
+export function renderProjectEnvSchemaJson(): string {
+  const schema = {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    title: "hack.env.json",
+    type: "object",
+    additionalProperties: true,
+    required: ["version", "vars"],
+    properties: {
+      $schema: { type: "string" },
+      version: { type: "integer", const: 1 },
+      vars: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: true,
+          required: ["key"],
+          properties: {
+            key: {
+              type: "string",
+              pattern: "^[A-Z_][A-Z0-9_]*$",
+              minLength: 1,
+            },
+            required: { type: "boolean" },
+            source: { type: "string", enum: ["plain_env", "keychain"] },
+            services: {
+              type: "array",
+              items: { type: "string" },
+            },
+            description: { type: "string" },
+          },
+        },
+      },
+    },
   } as const;
 
   return `${JSON.stringify(schema, null, 2)}\n`;

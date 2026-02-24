@@ -67,7 +67,7 @@ testIntegration(
 
     const created = await runHack({
       cwd: projectDir,
-      args: ["x", "tickets", "create", "--title", "First ticket", "--json"],
+      args: ["tickets", "create", "--title", "First ticket", "--json"],
     });
     const createdJson = JSON.parse(created.stdout) as {
       ticket: { ticketId: string };
@@ -84,7 +84,7 @@ testIntegration(
 
     const listed = await runHack({
       cwd: projectDir,
-      args: ["x", "tickets", "list", "--json"],
+      args: ["tickets", "list", "--json"],
     });
     const listJson = JSON.parse(listed.stdout) as {
       tickets: { ticketId: string; title: string }[];
@@ -94,7 +94,7 @@ testIntegration(
 
     const shown = await runHack({
       cwd: projectDir,
-      args: ["x", "tickets", "show", createdJson.ticket.ticketId, "--json"],
+      args: ["tickets", "show", createdJson.ticket.ticketId, "--json"],
     });
     const showJson = JSON.parse(shown.stdout) as {
       ticket: { ticketId: string; title: string };

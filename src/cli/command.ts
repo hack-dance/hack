@@ -256,13 +256,9 @@ function normalizeArgvForDefaults(
 ): string[] {
   const defaultable = new Map<string, OptionSpec>();
   for (const opt of [...builtinOptions(), ...collectAllOptions(cli)]) {
-    if (opt.type === "boolean") {
-      continue;
+    if (isDefaultableOption(opt)) {
+      defaultable.set(opt.long, opt);
     }
-    if (!opt.defaultValue) {
-      continue;
-    }
-    defaultable.set(opt.long, opt);
   }
 
   const out: string[] = [];
@@ -285,24 +281,33 @@ function normalizeArgvForDefaults(
       continue;
     }
 
-    const next = argv[i + 1];
-    if (next === undefined || next.startsWith("-")) {
+    if (shouldApplyDefault({ opt, nextToken: argv[i + 1] })) {
       out.push(`${token}=${opt.defaultValue}`);
       continue;
-    }
-
-    if (opt.type === "number") {
-      const n = Number(next);
-      if (!Number.isFinite(n)) {
-        out.push(`${token}=${opt.defaultValue}`);
-        continue;
-      }
     }
 
     out.push(token);
   }
 
   return out;
+}
+
+function isDefaultableOption(opt: OptionSpec): boolean {
+  return opt.type !== "boolean" && Boolean(opt.defaultValue);
+}
+
+function shouldApplyDefault(opts: {
+  readonly opt: OptionSpec;
+  readonly nextToken: string | undefined;
+}): boolean {
+  const next = opts.nextToken;
+  if (next === undefined || next.startsWith("-")) {
+    return true;
+  }
+  if (opts.opt.type === "number") {
+    return !Number.isFinite(Number(next));
+  }
+  return false;
 }
 
 function buildUnionParseOptions(

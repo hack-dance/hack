@@ -2,49 +2,72 @@ import SwiftUI
 
 /// Adaptive button style that uses Liquid Glass on macOS 26+
 struct AdaptiveProminentButtonStyle: ButtonStyle {
+  @Environment(\.colorScheme) private var colorScheme
+
   func makeBody(configuration: Configuration) -> some View {
-    if #available(macOS 26, *) {
-      configuration.label
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(Color.accentColor)
-        .foregroundStyle(.white)
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .glassEffect(.regular.tint(Color.accentColor.opacity(0.2)))
-        .opacity(configuration.isPressed ? 0.8 : 1.0)
-    } else {
-      configuration.label
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(Color.accentColor)
-        .foregroundStyle(.white)
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .opacity(configuration.isPressed ? 0.8 : 1.0)
-    }
+    let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+    let topColor = Color.accentColor.opacity(colorScheme == .dark ? 0.98 : 1.0)
+    let bottomColor = Color.accentColor.opacity(colorScheme == .dark ? 0.82 : 0.9)
+
+    return configuration.label
+      .font(.mono(.caption, weight: .semibold))
+      .padding(.horizontal, 13)
+      .padding(.vertical, 7)
+      .foregroundStyle(.white)
+      .background(
+        shape.fill(
+          LinearGradient(
+            colors: [topColor, bottomColor],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+          )
+        )
+      )
+      .overlay(
+        shape.stroke(
+          colorScheme == .dark ? Color.white.opacity(0.18) : Color.black.opacity(0.10),
+          lineWidth: 1
+        )
+      )
+      .shadow(
+        color: Color.black.opacity(colorScheme == .dark ? 0.28 : 0.14),
+        radius: 8,
+        x: 0,
+        y: configuration.isPressed ? 1 : 3
+      )
+      .scaleEffect(configuration.isPressed ? 0.98 : 1.0)
+      .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
   }
 }
 
 /// Adaptive secondary button style
 struct AdaptiveSecondaryButtonStyle: ButtonStyle {
+  @Environment(\.colorScheme) private var colorScheme
+
   func makeBody(configuration: Configuration) -> some View {
-    if #available(macOS 26, *) {
-      configuration.label
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .foregroundStyle(.primary)
-        .glassEffect(.regular)
-        .opacity(configuration.isPressed ? 0.8 : 1.0)
-    } else {
-      configuration.label
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .foregroundStyle(.primary)
-        .background(
-          RoundedRectangle(cornerRadius: 8, style: .continuous)
-            .fill(.quaternary)
-        )
-        .opacity(configuration.isPressed ? 0.8 : 1.0)
-    }
+    let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+    let fillColor = colorScheme == .dark ? Color.white.opacity(0.08) : Color.white.opacity(0.86)
+    let strokeColor = colorScheme == .dark ? Color.white.opacity(0.16) : Color.black.opacity(0.10)
+
+    return configuration.label
+      .font(.mono(.caption, weight: .semibold))
+      .padding(.horizontal, 12)
+      .padding(.vertical, 7)
+      .foregroundStyle(.primary)
+      .background(
+        shape.fill(fillColor)
+      )
+      .overlay(
+        shape.stroke(strokeColor, lineWidth: 1)
+      )
+      .shadow(
+        color: Color.black.opacity(colorScheme == .dark ? 0.22 : 0.08),
+        radius: 6,
+        x: 0,
+        y: configuration.isPressed ? 0.5 : 2
+      )
+      .scaleEffect(configuration.isPressed ? 0.985 : 1.0)
+      .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
   }
 }
 
@@ -113,29 +136,14 @@ extension View {
     }
   }
 
-  /// Adaptive window background - transparent on macOS 26+
-  @ViewBuilder
+  /// Adaptive window background with transparent toolbar chrome on macOS 26+
   func adaptiveWindowBackground() -> some View {
-    if #available(macOS 26, *) {
-      self
-        .background(.clear)
-        .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
-    } else {
-      self
-        .background(.ultraThinMaterial)
-        .toolbarBackground(.ultraThinMaterial, for: .windowToolbar)
-        .toolbarBackground(.visible, for: .windowToolbar)
-    }
+    modifier(AdaptiveWindowBackgroundModifier())
   }
 
   /// Adaptive detail view background
-  @ViewBuilder
   func adaptiveDetailBackground() -> some View {
-    if #available(macOS 26, *) {
-      self.background(.regularMaterial)
-    } else {
-      self.background(.ultraThinMaterial)
-    }
+    modifier(AdaptiveDetailBackgroundModifier())
   }
 
   /// Adaptive sidebar background
@@ -144,32 +152,32 @@ extension View {
     if #available(macOS 26, *) {
       self
         .scrollContentBackground(.hidden)
-        .background(.clear)
+        .background(
+          Rectangle()
+            .fill(.regularMaterial)
+            .ignoresSafeArea(edges: .top)
+        )
     } else {
       self
         .scrollContentBackground(.hidden)
-        .background(.ultraThinMaterial)
+        .background(
+          Rectangle()
+            .fill(.ultraThinMaterial)
+            .ignoresSafeArea(edges: .top)
+        )
     }
   }
 
   /// Adaptive toolbar button (secondary style)
   @ViewBuilder
   func adaptiveToolbarButton() -> some View {
-    if #available(macOS 26, *) {
-      self.buttonStyle(.glass)
-    } else {
-      self.buttonStyle(.bordered)
-    }
+    self.buttonStyle(.adaptiveSecondary)
   }
 
   /// Adaptive toolbar button (prominent style)
   @ViewBuilder
   func adaptiveToolbarButtonProminent() -> some View {
-    if #available(macOS 26, *) {
-      self.buttonStyle(.glassProminent)
-    } else {
-      self.buttonStyle(.borderedProminent)
-    }
+    self.buttonStyle(.adaptiveProminent)
   }
 
   /// Adaptive footer background
@@ -177,8 +185,203 @@ extension View {
   func adaptiveFooterBackground() -> some View {
     if #available(macOS 26, *) {
       self.background(.regularMaterial)
+        .glassEffect(.regular)
     } else {
       self.background(.ultraThinMaterial)
     }
+  }
+}
+
+private struct AdaptiveWindowBackgroundModifier: ViewModifier {
+  @Environment(\.colorScheme) private var colorScheme
+
+  func body(content: Content) -> some View {
+    if #available(macOS 26, *) {
+      content
+        .background(
+          ZStack {
+            Rectangle()
+              .fill(baseColor)
+            Rectangle()
+              .fill(.ultraThinMaterial)
+              .opacity(materialOpacity)
+          }
+        )
+        // Keep the toolbar visible, but visually clear. We tune the underlying NSToolbar to avoid
+        // per-item "pill" backplates (see WindowToolbarTuner).
+        .toolbarBackground(.clear, for: .windowToolbar)
+        .toolbarBackgroundVisibility(.visible, for: .windowToolbar)
+    } else {
+      content
+        .background(baseColor)
+        .toolbarBackground(.ultraThinMaterial, for: .windowToolbar)
+        .toolbarBackground(.visible, for: .windowToolbar)
+    }
+  }
+
+  private var baseColor: Color {
+    colorScheme == .dark ? .black : .white
+  }
+
+  private var materialOpacity: Double {
+    colorScheme == .dark ? 0.24 : 0.4
+  }
+}
+
+private struct AdaptiveDetailBackgroundModifier: ViewModifier {
+  @Environment(\.colorScheme) private var colorScheme
+
+  func body(content: Content) -> some View {
+    if #available(macOS 26, *) {
+      content.background(
+        ZStack {
+          Rectangle()
+            .fill(baseColor)
+          Rectangle()
+            .fill(.regularMaterial)
+            .opacity(materialOpacity)
+          Rectangle()
+            .fill(edgeTint)
+        }
+      )
+    } else {
+      content.background(baseColor)
+    }
+  }
+
+  private var baseColor: Color {
+    colorScheme == .dark ? .black : .white
+  }
+
+  private var materialOpacity: Double {
+    colorScheme == .dark ? 0.2 : 0.3
+  }
+
+  private var edgeTint: Color {
+    colorScheme == .dark ? Color.white.opacity(0.03) : Color.black.opacity(0.02)
+  }
+}
+
+struct PressableIconButtonStyle: ButtonStyle {
+  func makeBody(configuration: Configuration) -> some View {
+    configuration.label
+      .padding(6)
+      .background(
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
+          .fill(configuration.isPressed ? Color.white.opacity(0.12) : .clear)
+      )
+      .scaleEffect(configuration.isPressed ? 0.96 : 1)
+      .animation(.easeInOut(duration: 0.12), value: configuration.isPressed)
+  }
+}
+
+struct PressableCircleButtonStyle: ButtonStyle {
+  func makeBody(configuration: Configuration) -> some View {
+    configuration.label
+      .padding(6)
+      .background(
+        Circle()
+          .fill(configuration.isPressed ? Color.white.opacity(0.12) : .clear)
+      )
+      .scaleEffect(configuration.isPressed ? 0.96 : 1)
+      .animation(.easeInOut(duration: 0.12), value: configuration.isPressed)
+  }
+}
+
+struct LinkHoverStyle: ViewModifier {
+  @State private var isHovered = false
+
+  func body(content: Content) -> some View {
+    content
+      .foregroundStyle(isHovered ? Color.white.opacity(0.9) : Color.secondary)
+      .underline(isHovered, color: Color.white.opacity(0.5))
+      .contentShape(Rectangle())
+      .onHover { hovering in
+        isHovered = hovering
+      }
+      .animation(.easeInOut(duration: 0.12), value: isHovered)
+  }
+}
+
+extension View {
+  func linkHover() -> some View {
+    modifier(LinkHoverStyle())
+  }
+}
+
+extension Font {
+  static func mono(_ style: Font.TextStyle, weight: Font.Weight = .regular) -> Font {
+    Font.system(style, design: .monospaced).weight(weight)
+  }
+}
+
+struct InstrumentGrid: View {
+  let minorStep: CGFloat
+  let majorStep: CGFloat
+  let minorOpacity: Double
+  let majorOpacity: Double
+
+  init(
+    minorStep: CGFloat = 24,
+    majorStep: CGFloat = 120,
+    minorOpacity: Double = 0.06,
+    majorOpacity: Double = 0.12
+  ) {
+    self.minorStep = minorStep
+    self.majorStep = majorStep
+    self.minorOpacity = minorOpacity
+    self.majorOpacity = majorOpacity
+  }
+
+  var body: some View {
+    GeometryReader { proxy in
+      let size = proxy.size
+      Canvas { context, _ in
+        var minorPath = Path()
+        var majorPath = Path()
+
+        var x: CGFloat = 0
+        while x <= size.width {
+          minorPath.move(to: CGPoint(x: x, y: 0))
+          minorPath.addLine(to: CGPoint(x: x, y: size.height))
+          x += minorStep
+        }
+
+        var y: CGFloat = 0
+        while y <= size.height {
+          minorPath.move(to: CGPoint(x: 0, y: y))
+          minorPath.addLine(to: CGPoint(x: size.width, y: y))
+          y += minorStep
+        }
+
+        x = 0
+        while x <= size.width {
+          majorPath.move(to: CGPoint(x: x, y: 0))
+          majorPath.addLine(to: CGPoint(x: x, y: size.height))
+          x += majorStep
+        }
+
+        y = 0
+        while y <= size.height {
+          majorPath.move(to: CGPoint(x: 0, y: y))
+          majorPath.addLine(to: CGPoint(x: size.width, y: y))
+          y += majorStep
+        }
+
+        context.stroke(minorPath, with: .color(Color.white.opacity(minorOpacity)), lineWidth: 0.5)
+        context.stroke(majorPath, with: .color(Color.white.opacity(majorOpacity)), lineWidth: 0.8)
+      }
+    }
+    .allowsHitTesting(false)
+  }
+}
+
+extension View {
+  func instrumentLabel() -> some View {
+    self
+      .font(.system(.caption2, design: .monospaced).weight(.semibold))
+      .textCase(.uppercase)
+      .tracking(1.2)
+      .foregroundStyle(.secondary)
   }
 }

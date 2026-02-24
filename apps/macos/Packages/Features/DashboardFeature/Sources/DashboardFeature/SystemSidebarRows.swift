@@ -4,17 +4,29 @@ import HackDesktopModels
 
 struct RuntimeRowView: View {
   let isHealthy: Bool?
+  @State private var isHovered = false
 
   var body: some View {
     HStack(spacing: 8) {
       Label("Runtime", systemImage: "gauge")
-        .font(.subheadline.weight(.medium))
+        .font(.mono(.subheadline, weight: .medium))
       Spacer()
       if let statusColor {
         StatusDotView(color: statusColor)
       }
     }
     .padding(.vertical, 4)
+    .padding(.horizontal, 6)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(
+      RoundedRectangle(cornerRadius: 8, style: .continuous)
+        .fill(isHovered ? Color.white.opacity(0.06) : .clear)
+    )
+    .contentShape(Rectangle())
+    .onHover { hovering in
+      isHovered = hovering
+    }
+    .animation(.easeInOut(duration: 0.12), value: isHovered)
   }
 
   private var statusColor: Color? {
@@ -25,17 +37,29 @@ struct RuntimeRowView: View {
 
 struct GatewayRowView: View {
   let state: GatewaySummaryState?
+  @State private var isHovered = false
 
   var body: some View {
     HStack(spacing: 8) {
       Label("Gateway", systemImage: "arrow.triangle.branch")
-        .font(.subheadline.weight(.medium))
+        .font(.mono(.subheadline, weight: .medium))
       Spacer()
       if let statusColor {
         StatusDotView(color: statusColor)
       }
     }
     .padding(.vertical, 4)
+    .padding(.horizontal, 6)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(
+      RoundedRectangle(cornerRadius: 8, style: .continuous)
+        .fill(isHovered ? Color.white.opacity(0.06) : .clear)
+    )
+    .contentShape(Rectangle())
+    .onHover { hovering in
+      isHovered = hovering
+    }
+    .animation(.easeInOut(duration: 0.12), value: isHovered)
   }
 
   private var statusColor: Color? {
@@ -45,15 +69,27 @@ struct GatewayRowView: View {
 
 struct GatewayExposureRowView: View {
   let exposure: GatewayExposure
+  @State private var isHovered = false
 
   var body: some View {
     HStack(spacing: 8) {
       Label(exposure.label, systemImage: iconName)
-        .font(.subheadline)
+        .font(.mono(.subheadline))
       Spacer()
       StatusDotView(color: exposure.statusColor)
     }
     .padding(.vertical, 2)
+    .padding(.horizontal, 6)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(
+      RoundedRectangle(cornerRadius: 8, style: .continuous)
+        .fill(isHovered ? Color.white.opacity(0.06) : .clear)
+    )
+    .contentShape(Rectangle())
+    .onHover { hovering in
+      isHovered = hovering
+    }
+    .animation(.easeInOut(duration: 0.12), value: isHovered)
   }
 
   private var iconName: String {

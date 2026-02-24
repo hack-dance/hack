@@ -1,6 +1,6 @@
 {
   "name": "hack-cli",
-  "version": "1.3.0",
+  "version": "1.12.0",
   "module": "index.ts",
   "type": "module",
   "bin": {
@@ -22,6 +22,7 @@
     "macos:test": "cd apps/macos && swift test",
     "macos:release": "./scripts/build-macos-release.sh",
     "macos:ghostty:setup": "bun run scripts/macos-ghostty-setup.ts",
+    "macos:ghostty:bundle": "bun run scripts/macos-ghostty-bundle.ts",
     "prepare": "husky",
     "release:prepare": "bunx semantic-release --no-ci",
     "typecheck": "bunx tsc -p tsconfig.json --noEmit",

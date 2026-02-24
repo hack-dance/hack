@@ -64,10 +64,12 @@ export const GLOBAL_GRAFANA_DASHBOARD_FILENAME =
 
 export const PROJECT_COMPOSE_FILENAME = "docker-compose.yml" as const;
 export const PROJECT_ENV_FILENAME = ".env" as const;
+export const PROJECT_ENV_CONTRACT_FILENAME = "hack.env.json" as const;
 export const PROJECT_CONFIG_FILENAME = "hack.config.json" as const;
 export const PROJECT_CONFIG_LEGACY_FILENAME = "hack.toml" as const;
 export const PROJECT_BRANCHES_FILENAME = "hack.branches.json" as const;
 
 export const GLOBAL_CONFIG_SCHEMA_FILENAME = "hack.config.schema.json" as const;
+export const GLOBAL_ENV_SCHEMA_FILENAME = "hack.env.schema.json" as const;
 export const GLOBAL_BRANCHES_SCHEMA_FILENAME =
   "hack.branches.schema.json" as const;

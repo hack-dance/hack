@@ -1,20 +1,17 @@
 import { beforeEach, expect, mock, test } from "bun:test";
 
-const runCalls: string[][] = [];
 const dockerJsonCalls: Record<string, unknown>[] = [];
+const dockerPlainCalls: Record<string, unknown>[] = [];
 const dockerPrettyCalls: Record<string, unknown>[] = [];
 const lokiCalls: Record<string, unknown>[] = [];
-
-mock.module("../src/lib/shell.ts", () => ({
-  run: async (cmd: readonly string[]) => {
-    runCalls.push([...cmd]);
-    return 0;
-  },
-}));
 
 mock.module("../src/ui/docker-logs.ts", () => ({
   dockerComposeLogsJson: async (opts: Record<string, unknown>) => {
     dockerJsonCalls.push(opts);
+    return 0;
+  },
+  dockerComposeLogsPlain: async (opts: Record<string, unknown>) => {
+    dockerPlainCalls.push(opts);
     return 0;
   },
   dockerComposeLogsPretty: async (opts: Record<string, unknown>) => {
@@ -37,8 +34,8 @@ import {
 } from "../src/backends/log-backend.ts";
 
 beforeEach(() => {
-  runCalls.length = 0;
   dockerJsonCalls.length = 0;
+  dockerPlainCalls.length = 0;
   dockerPrettyCalls.length = 0;
   lokiCalls.length = 0;
 });
@@ -81,21 +78,15 @@ test("composeLogBackend routes plain output to docker compose logs", async () =>
     profiles: ["ops"],
   });
 
-  expect(runCalls[0]).toEqual([
-    "docker",
-    "compose",
-    "-p",
-    "proj",
-    "-f",
-    "docker-compose.yml",
-    "--profile",
-    "ops",
-    "logs",
-    "-f",
-    "--tail",
-    "10",
-    "api",
-  ]);
+  expect(dockerPlainCalls.length).toBe(1);
+  expect(dockerPlainCalls[0]).toMatchObject({
+    composeFile: "docker-compose.yml",
+    follow: true,
+    tail: 10,
+    service: "api",
+    composeProject: "proj",
+    profiles: ["ops"],
+  });
 });
 
 test("lokiLogBackend.isAvailable proxies canReachLoki", async () => {

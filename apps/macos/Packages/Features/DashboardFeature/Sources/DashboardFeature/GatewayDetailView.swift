@@ -5,43 +5,96 @@ import HackDesktopModels
 struct GatewayDetailView: View {
   @Environment(DashboardModel.self) private var model
   @Environment(\.openURL) private var openURL
+  @AppStorage("hackDesktop.setupGuidance.gateway.dismissed") private var setupDismissed = false
+  @State private var showSetupAssistant = false
+  @State private var gatewayTokens: [GatewayTokenRecord] = []
+  @State private var isLoadingTokens = false
+  @State private var latestIssuedToken: String? = nil
+  @State private var issuingTokenScope: GatewayTokenScope = .read
+  @State private var newTokenLabel = ""
 
   var body: some View {
     NavigationStack {
       ScrollView {
         VStack(alignment: .leading, spacing: 20) {
           header
-          overviewCard
-          exposuresCard
-          tokensCard
-          warningsCard
+        if shouldShowSetupGuidance {
+          setupNudge
         }
-        .padding(24)
+        overviewCard
+        exposuresCard
+        gatewayDiagnosticsCard
+        tokensCard
+        warningsCard
+      }
+      .padding(16)
       }
       .navigationDestination(for: GatewayExposure.self) { exposure in
         GatewayExposureDetailView(exposure: exposure)
       }
+      .sheet(isPresented: $showSetupAssistant) {
+        SetupAssistantView(initialSection: .gateway)
+          .environment(model)
+      }
+      .task {
+        await refreshGatewayTokens()
+      }
+      .onChange(of: model.lastUpdated) { _, _ in
+        Task {
+          await refreshGatewayTokens()
+        }
+      }
     }
   }
 
+  private var shouldShowSetupGuidance: Bool {
+    if ProcessInfo.processInfo.environment["HACK_DESKTOP_FORCE_SETUP_GUIDANCE"] == "1" { return true }
+    if setupDismissed { return false }
+
+    // If gateway/global status isn't available yet (fresh machine), show quick-start guidance here too.
+    if model.globalStatus == nil { return true }
+    if model.gatewaySummaryState == nil { return true }
+    return false
+  }
+
+  private var setupNudge: some View {
+    SetupNudgeCard(
+      title: "Gateway setup",
+      subtitle: "On a fresh machine, install global services and run the gateway setup once.",
+      primaryActionLabel: "Setup…",
+      onPrimaryAction: { showSetupAssistant = true },
+      onDismiss: { setupDismissed = true }
+    )
+    .opacity(setupDismissed ? 0 : 1)
+    .animation(.easeInOut(duration: 0.15), value: setupDismissed)
+    .allowsHitTesting(!setupDismissed)
+  }
+
   private var header: some View {
-    VStack(alignment: .leading, spacing: 8) {
-      HStack(alignment: .center, spacing: 12) {
-        Label("Gateway", systemImage: "arrow.triangle.branch")
-          .font(.title2.weight(.semibold))
-        StatusPill(text: gatewayStatusText, tone: gatewayStatusTone)
-        Spacer()
-        if let configUrl {
-          Button("Open Config") {
-            openURL(configUrl)
+    SectionHeader(
+      breadcrumb: "System / Gateway",
+      title: "Gateway",
+      subtitle: "Remote gateway configuration and exposures",
+      status: { StatusPill(text: gatewayStatusText, tone: gatewayStatusTone) },
+      actions: {
+        Menu {
+          Button("Refresh") {
+            Task { await model.refresh() }
           }
-          .adaptiveToolbarButton()
+          Button("Setup…") {
+            showSetupAssistant = true
+          }
+          if let configUrl {
+            Button("Open Config") {
+              openURL(configUrl)
+            }
+          }
+        } label: {
+          Image(systemName: "ellipsis.circle")
         }
+        .buttonStyle(.plain)
       }
-      Text("Remote gateway configuration and exposures")
-        .font(.subheadline)
-        .foregroundStyle(.secondary)
-    }
+    )
   }
 
   private var overviewCard: some View {
@@ -52,17 +105,27 @@ struct GatewayDetailView: View {
 
   private var exposuresCard: some View {
     GlassCard(title: "Exposures", systemImage: "point.3.filled.connected.trianglepath.dotted") {
+      lanCalloutSection
       if exposures.isEmpty {
         Text("No gateway exposures configured")
-          .font(.caption)
+          .font(.mono(.caption))
           .foregroundStyle(.secondary)
       } else {
         VStack(alignment: .leading, spacing: 12) {
           ForEach(Array(exposures.enumerated()), id: \.element.id) { index, exposure in
-            NavigationLink(value: exposure) {
-              exposureRow(exposure)
+            if let destination = settingsItem(for: exposure) {
+              Button {
+                openSettings(destination)
+              } label: {
+                exposureRow(exposure: exposure, showChevron: true)
+              }
+              .buttonStyle(.plain)
+            } else {
+              NavigationLink(value: exposure) {
+                exposureRow(exposure: exposure, showChevron: true)
+              }
+              .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
             if index < exposures.count - 1 {
               Divider()
             }
@@ -72,14 +135,154 @@ struct GatewayDetailView: View {
     }
   }
 
+  private var gatewayDiagnosticsCard: some View {
+    GlassCard(title: "Gateway diagnostics", systemImage: "text.alignleft") {
+      Text("Tail ingress flow and supporting gateway logs in terminal tabs.")
+        .font(.mono(.caption))
+        .foregroundStyle(.secondary)
+      HStack(spacing: 10) {
+        Button {
+          openGlobalCommandInTerminalPanel(
+            command: "hack global logs caddy --tail 200 --follow",
+            title: "gateway ingress logs"
+          )
+        } label: {
+          Label("Ingress logs", systemImage: "arrow.left.arrow.right")
+        }
+        .adaptiveToolbarButtonProminent()
+
+        Button {
+          openGlobalCommandInTerminalPanel(
+            command: "docker compose -f \"$HOME/.hack/caddy/docker-compose.yml\" logs --tail 200 -f coredns",
+            title: "gateway dns logs"
+          )
+        } label: {
+          Label("DNS logs", systemImage: "network")
+        }
+        .adaptiveToolbarButton()
+
+        Button {
+          openGlobalCommandInTerminalPanel(
+            command: "tail -n 200 -F \"$HOME/.hack/daemon/hackd.log\" | grep --line-buffered -Ei \"gateway|token|remote|request|write|exposure\"",
+            title: "gateway daemon events"
+          )
+        } label: {
+          Label("Daemon gateway events", systemImage: "waveform.path.ecg")
+        }
+        .adaptiveToolbarButton()
+
+        Button {
+          openGlobalCommandInTerminalPanel(
+            command: "docker network inspect hack-dev hack-logging 2>/dev/null || docker network ls",
+            title: "gateway network diagnostics"
+          )
+        } label: {
+          Label("Network diagnostics", systemImage: "point.3.filled.connected.trianglepath.dotted")
+        }
+        .adaptiveToolbarButton()
+
+        Spacer()
+      }
+    }
+  }
+
+  @ViewBuilder
+  private var lanCalloutSection: some View {
+    if let lan = exposures.first(where: { $0.id == "lan" }),
+       lan.resolvedState == .blocked,
+       (lan.detail ?? "").lowercased().contains("loopback") {
+      InlineCallout(
+        tone: .neutral,
+        title: "LAN access is local-only (127.0.0.1)",
+        message: "This is the default. The gateway is reachable from this machine only. If you want other devices on your LAN to reach it, bind to 0.0.0.0 and restart hackd.",
+        actions: [
+          InlineCalloutAction(label: "Copy command", systemImage: "doc.on.doc") {
+            TerminalIntegration.copyToClipboard("""
+            hack config set --global controlPlane.gateway.bind 0.0.0.0
+            hack daemon restart
+            """)
+          },
+          InlineCalloutAction(label: "Enable LAN access", systemImage: "terminal") {
+            TerminalIntegration.openTerminalWithCommand("""
+            hack config set --global controlPlane.gateway.bind 0.0.0.0
+            hack daemon restart
+            """)
+          }
+        ]
+      )
+      Divider()
+        .opacity(0.35)
+    }
+  }
+
   private var tokensCard: some View {
-    let rows = tokenRows
-    return Group {
-      if rows.isEmpty {
-        EmptyView()
-      } else {
-        GlassCard(title: "Tokens", systemImage: "key") {
-          DetailRows(rows: rows)
+    GlassCard(title: "Tokens", systemImage: "key") {
+      VStack(alignment: .leading, spacing: 12) {
+        if let latestIssuedToken {
+          InlineCallout(
+            tone: .good,
+            title: "New token issued",
+            message: "Store this token now. It will not be shown again.",
+            actions: [
+              InlineCalloutAction(label: "Copy token", systemImage: "doc.on.doc") {
+                TerminalIntegration.copyToClipboard(latestIssuedToken)
+              }
+            ]
+          )
+        }
+
+        HStack(spacing: 10) {
+          Picker("Scope", selection: $issuingTokenScope) {
+            Text("Read").tag(GatewayTokenScope.read)
+            Text("Write").tag(GatewayTokenScope.write)
+          }
+          .pickerStyle(.segmented)
+          .frame(width: 180)
+
+          TextField("Optional label", text: $newTokenLabel)
+            .textFieldStyle(.roundedBorder)
+            .font(.mono(.caption))
+
+          Button {
+            Task { await createGatewayToken() }
+          } label: {
+            Label("Create token", systemImage: "plus")
+          }
+          .adaptiveToolbarButtonProminent()
+
+          Button {
+            Task { await refreshGatewayTokens() }
+          } label: {
+            Label("Reload", systemImage: "arrow.clockwise")
+          }
+          .adaptiveToolbarButton()
+
+          Spacer()
+        }
+
+        if isLoadingTokens {
+          HStack(spacing: 8) {
+            ProgressView()
+              .controlSize(.small)
+            Text("Loading tokens…")
+              .font(.mono(.caption))
+              .foregroundStyle(.secondary)
+          }
+        }
+
+        tokenSummaryRow
+
+        if sortedTokens.isEmpty {
+          Text("No tokens found.")
+            .font(.mono(.caption))
+            .foregroundStyle(.secondary)
+        } else {
+          tokenTableHeader
+          ForEach(sortedTokens) { token in
+            tokenTableRow(token)
+            Divider()
+              .opacity(0.18)
+          }
         }
       }
     }
@@ -95,7 +298,7 @@ struct GatewayDetailView: View {
           VStack(alignment: .leading, spacing: 4) {
             ForEach(warnings, id: \.self) { warning in
               Text("• \(warning)")
-                .font(.caption)
+                .font(.mono(.caption))
                 .foregroundStyle(.secondary)
             }
           }
@@ -139,21 +342,16 @@ struct GatewayDetailView: View {
     ]
   }
 
-  private var tokenRows: [DetailRowItem] {
-    var rows: [DetailRowItem] = []
-    if let tokensActive = gateway?.tokensActive {
-      rows.append(DetailRowItem(label: "Active", value: String(tokensActive)))
+  private var sortedTokens: [GatewayTokenRecord] {
+    gatewayTokens.sorted { lhs, rhs in
+      if lhs.revokedAt == nil, rhs.revokedAt != nil {
+        return true
+      }
+      if lhs.revokedAt != nil, rhs.revokedAt == nil {
+        return false
+      }
+      return lhs.createdAt > rhs.createdAt
     }
-    if let tokensRead = gateway?.tokensRead {
-      rows.append(DetailRowItem(label: "Read", value: String(tokensRead)))
-    }
-    if let tokensWrite = gateway?.tokensWrite {
-      rows.append(DetailRowItem(label: "Write", value: String(tokensWrite)))
-    }
-    if let tokensRevoked = gateway?.tokensRevoked {
-      rows.append(DetailRowItem(label: "Revoked", value: String(tokensRevoked)))
-    }
-    return rows
   }
 
   private var gatewayWarnings: [String] {
@@ -183,32 +381,217 @@ struct GatewayDetailView: View {
     }
   }
 
-  private func exposureRow(_ exposure: GatewayExposure) -> some View {
+  private func exposureRow(exposure: GatewayExposure, showChevron: Bool) -> some View {
     VStack(alignment: .leading, spacing: 4) {
       HStack(spacing: 8) {
         Label(exposure.label, systemImage: exposureIcon(exposure))
-          .font(.subheadline.weight(.medium))
+          .font(.mono(.subheadline, weight: .medium))
         Spacer()
         if let dependencyLabel = exposure.dependencyStatusLabel,
            let dependencyColor = exposure.dependencyStatusColor {
           BadgePill(label: dependencyLabel, tint: dependencyColor)
         }
         StatusPill(text: exposure.statusLabel, tone: exposure.statusTone)
-        Image(systemName: "chevron.right")
-          .font(.caption)
-          .foregroundStyle(.tertiary)
+        if showChevron {
+          Image(systemName: "chevron.right")
+            .font(.mono(.caption))
+            .foregroundStyle(.tertiary)
+        }
       }
       if let detail = exposure.detail, !detail.isEmpty {
         Text(detail)
-          .font(.caption)
+          .font(.mono(.caption))
           .foregroundStyle(.secondary)
       }
       if let url = exposure.url, !url.isEmpty {
         Text(url)
-          .font(.caption2)
+          .font(.mono(.caption2))
           .foregroundStyle(.secondary)
       }
     }
     .padding(.vertical, 4)
   }
+
+  @ViewBuilder
+  private var tokenSummaryRow: some View {
+    HStack(spacing: 8) {
+      tokenSummaryBadge(label: "Active", value: gateway?.tokensActive ?? activeTokenCount)
+      tokenSummaryBadge(label: "Read", value: gateway?.tokensRead ?? readTokenCount)
+      tokenSummaryBadge(label: "Write", value: gateway?.tokensWrite ?? writeTokenCount)
+      tokenSummaryBadge(label: "Revoked", value: gateway?.tokensRevoked ?? revokedTokenCount)
+      Spacer()
+    }
+  }
+
+  private var tokenTableHeader: some View {
+    HStack(spacing: 10) {
+      Text("ID")
+        .frame(minWidth: 160, alignment: .leading)
+      Text("Scope")
+        .frame(width: 54, alignment: .leading)
+      Text("Label")
+        .frame(minWidth: 120, alignment: .leading)
+      Text("Created")
+        .frame(width: 160, alignment: .leading)
+      Text("Last used")
+        .frame(width: 120, alignment: .leading)
+      Text("State")
+        .frame(width: 76, alignment: .leading)
+      Spacer(minLength: 0)
+      Text("Actions")
+        .frame(width: 128, alignment: .trailing)
+    }
+    .font(.mono(.caption2, weight: .semibold))
+    .foregroundStyle(.secondary)
+  }
+
+  private func tokenTableRow(_ token: GatewayTokenRecord) -> some View {
+    HStack(spacing: 10) {
+      Text(token.id)
+        .font(.mono(.caption2))
+        .lineLimit(1)
+        .truncationMode(.middle)
+        .frame(minWidth: 160, alignment: .leading)
+      Text(token.scope.rawValue)
+        .font(.mono(.caption2))
+        .frame(width: 54, alignment: .leading)
+      Text(token.label ?? "—")
+        .font(.mono(.caption2))
+        .lineLimit(1)
+        .truncationMode(.tail)
+        .frame(minWidth: 120, alignment: .leading)
+      Text(formatTimestamp(token.createdAt))
+        .font(.mono(.caption2))
+        .frame(width: 160, alignment: .leading)
+      Text(formatRelativeTimestamp(token.lastUsedAt))
+        .font(.mono(.caption2))
+        .frame(width: 120, alignment: .leading)
+      Text(token.revokedAt == nil ? "Active" : "Revoked")
+        .font(.mono(.caption2))
+        .foregroundStyle(token.revokedAt == nil ? Color.green : Color.orange)
+        .frame(width: 76, alignment: .leading)
+      Spacer(minLength: 0)
+      HStack(spacing: 8) {
+        Button("Copy ID") {
+          TerminalIntegration.copyToClipboard(token.id)
+        }
+        .adaptiveToolbarButton()
+        if token.revokedAt == nil {
+          Button("Revoke") {
+            Task { await revokeToken(token) }
+          }
+          .adaptiveToolbarButton()
+        }
+      }
+      .frame(width: 128, alignment: .trailing)
+    }
+  }
+
+  private func tokenSummaryBadge(label: String, value: Int) -> some View {
+    HStack(spacing: 6) {
+      Text(label)
+        .font(.mono(.caption2))
+      Text(String(value))
+        .font(.mono(.caption2, weight: .semibold))
+    }
+    .padding(.horizontal, 10)
+    .padding(.vertical, 5)
+    .background(
+      Capsule(style: .continuous)
+        .fill(.thinMaterial)
+    )
+    .overlay(
+      Capsule(style: .continuous)
+        .stroke(Color.primary.opacity(0.14), lineWidth: 1)
+    )
+  }
+
+  private var activeTokenCount: Int {
+    gatewayTokens.filter { $0.revokedAt == nil }.count
+  }
+
+  private var revokedTokenCount: Int {
+    gatewayTokens.filter { $0.revokedAt != nil }.count
+  }
+
+  private var readTokenCount: Int {
+    gatewayTokens.filter { $0.revokedAt == nil && $0.scope == .read }.count
+  }
+
+  private var writeTokenCount: Int {
+    gatewayTokens.filter { $0.revokedAt == nil && $0.scope == .write }.count
+  }
+
+  private func refreshGatewayTokens() async {
+    isLoadingTokens = true
+    defer { isLoadingTokens = false }
+    gatewayTokens = await model.fetchGatewayTokens()
+  }
+
+  private func createGatewayToken() async {
+    let trimmedLabel = newTokenLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let issued = await model.createGatewayToken(
+      scope: issuingTokenScope,
+      label: trimmedLabel.isEmpty ? nil : trimmedLabel
+    ) else {
+      return
+    }
+    newTokenLabel = ""
+    latestIssuedToken = issued.token
+    await refreshGatewayTokens()
+  }
+
+  private func revokeToken(_ token: GatewayTokenRecord) async {
+    let revoked = await model.revokeGatewayToken(id: token.id)
+    guard revoked else { return }
+    await refreshGatewayTokens()
+  }
+
+  private func formatTimestamp(_ value: String?) -> String {
+    guard let value, let date = ISO8601DateFormatter().date(from: value) else {
+      return value ?? "—"
+    }
+    let formatter = DateFormatter()
+    formatter.dateStyle = .medium
+    formatter.timeStyle = .short
+    return formatter.string(from: date)
+  }
+
+  private func formatRelativeTimestamp(_ value: String?) -> String {
+    guard let value, let date = ISO8601DateFormatter().date(from: value) else {
+      return "—"
+    }
+    let formatter = RelativeDateTimeFormatter()
+    formatter.unitsStyle = .short
+    return formatter.localizedString(for: date, relativeTo: Date())
+  }
+
+  private func settingsItem(for exposure: GatewayExposure) -> SettingsSidebarItem? {
+    switch exposure.id {
+    case "cloudflare":
+      return .cloudflare
+    case "tailscale":
+      return .tailscale
+    default:
+      return nil
+    }
+  }
+
+  private func openSettings(_ item: SettingsSidebarItem) {
+    NotificationCenter.default.post(
+      name: .hackSettingsRequested,
+      object: nil,
+      userInfo: [SettingsNavigationRequest.paneKey: item.rawValue]
+    )
+  }
 }
+
+#if DEBUG
+import HackCLIService
+
+#Preview("Gateway (Setup Guidance)") {
+  let model = DashboardModel(client: HackCLIClient())
+  return GatewayDetailView()
+    .environment(model)
+}
+#endif

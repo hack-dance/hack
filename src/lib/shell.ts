@@ -10,13 +10,29 @@ export interface ExecOptions {
   readonly stdin?: "inherit" | "pipe" | "ignore";
 }
 
+function buildSpawnEnv(
+  override: Record<string, string> | undefined
+): Record<string, string> | undefined {
+  if (!override) {
+    return undefined;
+  }
+
+  const base: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value === "string") {
+      base[key] = value;
+    }
+  }
+  return { ...base, ...override };
+}
+
 export async function exec(
   cmd: readonly string[],
   opts: ExecOptions = {}
 ): Promise<ExecResult> {
   const proc = Bun.spawn([...cmd], {
     cwd: opts.cwd,
-    env: opts.env,
+    env: buildSpawnEnv(opts.env),
     stdin: opts.stdin ?? "inherit",
     stdout: "pipe",
     stderr: "pipe",
@@ -45,7 +61,7 @@ export async function run(
 ): Promise<number> {
   const proc = Bun.spawn([...cmd], {
     cwd: opts.cwd,
-    env: opts.env,
+    env: buildSpawnEnv(opts.env),
     stdin: opts.stdin ?? "inherit",
     stdout: "inherit",
     stderr: "inherit",

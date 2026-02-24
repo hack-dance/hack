@@ -182,8 +182,33 @@ async function handleMcpInstall({
     projectRoot,
   });
 
+  let exitCode = logMcpInstallResults({ results });
+
+  const docTargets = resolveDocTargets({
+    scope,
+    docs: args.options.docs === true,
+    agentsMd: args.options.agentsMd === true,
+    claudeMd: args.options.claudeMd === true,
+  });
+  if (docTargets.length > 0) {
+    exitCode = Math.max(
+      exitCode,
+      await upsertAgentDocsForMcpInstall({
+        ctx,
+        pathOpt: args.options.path,
+        targets: docTargets,
+      })
+    );
+  }
+
+  return exitCode;
+}
+
+function logMcpInstallResults(opts: {
+  readonly results: Awaited<ReturnType<typeof installMcpConfig>>;
+}): number {
   let exitCode = 0;
-  for (const result of results) {
+  for (const result of opts.results) {
     if (result.status === "error") {
       logger.error({
         message: result.message ?? `Failed to update ${result.target} config`,
@@ -203,40 +228,41 @@ async function handleMcpInstall({
       message: `Updated ${result.target} MCP config at ${result.path ?? "unknown path"}`,
     });
   }
+  return exitCode;
+}
 
-  const docTargets = resolveDocTargets({
-    docs: args.options.docs === true,
-    agentsMd: args.options.agentsMd === true,
-    claudeMd: args.options.claudeMd === true,
+async function upsertAgentDocsForMcpInstall(opts: {
+  readonly ctx: CliContext;
+  readonly pathOpt: string | undefined;
+  readonly targets: readonly AgentDocTarget[];
+}): Promise<number> {
+  const docsRoot = resolveDocsRoot({
+    ctx: opts.ctx,
+    pathOpt: opts.pathOpt,
   });
-  if (docTargets.length > 0) {
-    const docsRoot = resolveDocsRoot({
-      ctx,
-      pathOpt: args.options.path,
-    });
-    const docResults = await upsertAgentDocs({
-      projectRoot: docsRoot,
-      targets: docTargets,
-    });
+  const results = await upsertAgentDocs({
+    projectRoot: docsRoot,
+    targets: opts.targets,
+  });
 
-    for (const result of docResults) {
-      if (result.status === "error") {
-        logger.error({
-          message: result.message ?? `Failed to update ${result.path}`,
-        });
-        exitCode = 1;
-        continue;
-      }
-
-      if (result.status === "noop") {
-        logger.info({ message: `No changes for ${result.path}` });
-        continue;
-      }
-
-      logger.success({
-        message: `${result.status === "created" ? "Created" : "Updated"} ${result.path}`,
+  let exitCode = 0;
+  for (const result of results) {
+    if (result.status === "error") {
+      logger.error({
+        message: result.message ?? `Failed to update ${result.path}`,
       });
+      exitCode = 1;
+      continue;
     }
+
+    if (result.status === "noop") {
+      logger.info({ message: `No changes for ${result.path}` });
+      continue;
+    }
+
+    logger.success({
+      message: `${result.status === "created" ? "Created" : "Updated"} ${result.path}`,
+    });
   }
 
   return exitCode;
@@ -376,10 +402,15 @@ function dedupeTargets(opts: {
 }
 
 function resolveDocTargets(opts: {
+  readonly scope: McpInstallScope;
   readonly docs: boolean;
   readonly agentsMd: boolean;
   readonly claudeMd: boolean;
 }): AgentDocTarget[] {
+  if (opts.scope === "user") {
+    return [];
+  }
+
   const targets: AgentDocTarget[] = [];
   if (opts.docs || opts.agentsMd) {
     targets.push("agents");
@@ -387,6 +418,11 @@ function resolveDocTargets(opts: {
   if (opts.docs || opts.claudeMd) {
     targets.push("claude");
   }
+
+  if (targets.length === 0) {
+    return ["agents", "claude"];
+  }
+
   return dedupeDocTargets({ targets });
 }
 

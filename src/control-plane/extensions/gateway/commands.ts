@@ -27,6 +27,13 @@ export const GATEWAY_COMMANDS: readonly ExtensionCommand[] = [
         scope,
       });
 
+      if (parsed.value.json) {
+        process.stdout.write(
+          `${JSON.stringify({ token: issued.token, record: issued.record }, null, 2)}\n`
+        );
+        return 0;
+      }
+
       await display.kv({
         title: "Gateway token",
         entries: [
@@ -48,9 +55,19 @@ export const GATEWAY_COMMANDS: readonly ExtensionCommand[] = [
     name: "token-list",
     summary: "List gateway tokens",
     scope: "global",
-    handler: async ({ args: _args }) => {
+    handler: async ({ ctx, args }) => {
+      const parsed = parseTokenListArgs({ args });
+      if (!parsed.ok) {
+        ctx.logger.error({ message: parsed.error });
+        return 1;
+      }
       const paths = resolveDaemonPaths({});
       const tokens = await listGatewayTokens({ rootDir: paths.root });
+
+      if (parsed.value.json) {
+        process.stdout.write(`${JSON.stringify({ tokens }, null, 2)}\n`);
+        return 0;
+      }
 
       if (tokens.length === 0) {
         await display.panel({
@@ -80,27 +97,31 @@ export const GATEWAY_COMMANDS: readonly ExtensionCommand[] = [
     summary: "Revoke a gateway token by id",
     scope: "global",
     handler: async ({ ctx, args }) => {
-      const tokenId = (args[0] ?? "").trim();
-      if (!tokenId) {
-        ctx.logger.error({
-          message: "Usage: hack x gateway token-revoke <token-id>",
-        });
+      const parsed = parseTokenRevokeArgs({ args });
+      if (!parsed.ok) {
+        ctx.logger.error({ message: parsed.error });
         return 1;
       }
 
       const paths = resolveDaemonPaths({});
       const revoked = await revokeGatewayToken({
         rootDir: paths.root,
-        tokenId,
+        tokenId: parsed.value.tokenId,
       });
+      if (parsed.value.json) {
+        process.stdout.write(
+          `${JSON.stringify({ id: parsed.value.tokenId, revoked }, null, 2)}\n`
+        );
+        return revoked ? 0 : 1;
+      }
       if (!revoked) {
         ctx.logger.warn({
-          message: `Token not found or already revoked: ${tokenId}`,
+          message: `Token not found or already revoked: ${parsed.value.tokenId}`,
         });
         return 1;
       }
 
-      ctx.logger.success({ message: `Revoked token ${tokenId}` });
+      ctx.logger.success({ message: `Revoked token ${parsed.value.tokenId}` });
       return 0;
     },
   },
@@ -109,7 +130,25 @@ export const GATEWAY_COMMANDS: readonly ExtensionCommand[] = [
 type TokenCreateArgs = {
   readonly label?: string;
   readonly scope: GatewayTokenScope;
+  readonly json: boolean;
 };
+
+type TokenListArgs = {
+  readonly json: boolean;
+};
+
+type TokenListParseResult =
+  | { readonly ok: true; readonly value: TokenListArgs }
+  | { readonly ok: false; readonly error: string };
+
+type TokenRevokeArgs = {
+  readonly tokenId: string;
+  readonly json: boolean;
+};
+
+type TokenRevokeParseResult =
+  | { readonly ok: true; readonly value: TokenRevokeArgs }
+  | { readonly ok: false; readonly error: string };
 
 type TokenCreateParseResult =
   | { readonly ok: true; readonly value: TokenCreateArgs }
@@ -120,6 +159,7 @@ function parseTokenCreateArgs(opts: {
 }): TokenCreateParseResult {
   let label: string | undefined;
   let scope: GatewayTokenScope = "read";
+  let json = false;
 
   const takeValue = (
     _token: string,
@@ -143,6 +183,11 @@ function parseTokenCreateArgs(opts: {
 
     if (token === "--write") {
       scope = "write";
+      continue;
+    }
+
+    if (token === "--json") {
+      json = true;
       continue;
     }
 
@@ -202,6 +247,58 @@ function parseTokenCreateArgs(opts: {
     value: {
       ...(label ? { label } : {}),
       scope,
+      json,
+    },
+  };
+}
+
+function parseTokenListArgs(opts: {
+  readonly args: readonly string[];
+}): TokenListParseResult {
+  let json = false;
+  for (const token of opts.args) {
+    if (token === "--json") {
+      json = true;
+      continue;
+    }
+    return { ok: false, error: `Unknown option: ${token}` };
+  }
+  return { ok: true, value: { json } };
+}
+
+function parseTokenRevokeArgs(opts: {
+  readonly args: readonly string[];
+}): TokenRevokeParseResult {
+  let tokenId: string | null = null;
+  let json = false;
+
+  for (const token of opts.args) {
+    if (token === "--json") {
+      json = true;
+      continue;
+    }
+    if (token.startsWith("-")) {
+      return { ok: false, error: `Unknown option: ${token}` };
+    }
+    if (!tokenId) {
+      tokenId = token.trim();
+      continue;
+    }
+    return { ok: false, error: `Unexpected argument: ${token}` };
+  }
+
+  if (!tokenId) {
+    return {
+      ok: false,
+      error: "Usage: hack x gateway token-revoke <token-id> [--json]",
+    };
+  }
+
+  return {
+    ok: true,
+    value: {
+      tokenId,
+      json,
     },
   };
 }

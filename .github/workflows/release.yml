@@ -1,16 +1,14 @@
 name: Release
 
-# Disabled: Running releases locally until Mac CI signing is set up
-# To re-enable: uncomment the push trigger below
 on:
   workflow_dispatch:
     inputs:
       tag:
         description: 'Release tag (e.g., v0.1.0)'
-        required: true
-  # push:
-  #   tags:
-  #     - "v*"
+        required: false
+  push:
+    tags:
+      - "v*"
 
 jobs:
   create-release:
@@ -19,9 +17,12 @@ jobs:
       contents: write
     outputs:
       version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
@@ -29,16 +30,25 @@ jobs:
       - name: Resolve version
         id: version
         run: |
-          VERSION="$(bun -e "const pkg = await Bun.file('package.json').json(); console.log(pkg.version)")"
-          if [ "v$VERSION" != "$GITHUB_REF_NAME" ]; then
-            echo "Tag $GITHUB_REF_NAME does not match package.json version $VERSION."
+          TARGET_TAG="${{ github.event.inputs.tag }}"
+          if [ -z "$TARGET_TAG" ]; then
+            TARGET_TAG="$GITHUB_REF_NAME"
+          fi
+          if [ -z "$TARGET_TAG" ]; then
+            echo "Missing tag. Provide workflow input 'tag' or run on a tag ref."
             exit 1
           fi
+          VERSION="$(bun -e "const pkg = await Bun.file('package.json').json(); console.log(pkg.version)")"
+          if [ "v$VERSION" != "$TARGET_TAG" ]; then
+            echo "Tag $TARGET_TAG does not match package.json version $VERSION."
+            exit 1
+          fi
+          echo "tag=$TARGET_TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "v${{ steps.version.outputs.version }}"
+          tag_name: "${{ steps.version.outputs.tag }}"
           generate_release_notes: true
 
   build:
@@ -77,7 +87,7 @@ jobs:
       - name: Upload tarball
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "v${{ needs.create-release.outputs.version }}"
+          tag_name: "${{ needs.create-release.outputs.tag }}"
           fail_on_unmatched_files: true
           files: |
             dist/release/hack-${{ needs.create-release.outputs.version }}-*.tar.gz
@@ -85,8 +95,17 @@ jobs:
         if: ${{ matrix.upload_install }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "v${{ needs.create-release.outputs.version }}"
+          tag_name: "${{ needs.create-release.outputs.tag }}"
           fail_on_unmatched_files: true
           files: |
             dist/release/hack-${{ needs.create-release.outputs.version }}-install.sh
             dist/release/hack-install.sh
+
+  macos-app:
+    needs: [create-release, build]
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-macos-app.yml
+    with:
+      tag: ${{ needs.create-release.outputs.tag }}
+    secrets: inherit

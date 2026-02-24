@@ -11,6 +11,7 @@ import {
   resolveCommand,
 } from "./command.ts";
 import { printHelpForPath } from "./help.ts";
+import { maybeEnsureAgentIntegrations } from "./integration-sync.ts";
 import { CLI_SPEC } from "./spec.ts";
 
 export async function runCli(argv: readonly string[]): Promise<number> {
@@ -40,7 +41,8 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       return parsed.positionals.length === 0 ? 1 : 1;
     }
 
-    const isExtensionDispatcher = resolved.command?.name === "x";
+    const isExtensionDispatcher =
+      resolved.command?.name === "x" || resolved.command?.name === "tickets";
     if (!isExtensionDispatcher) {
       // Unknown options (not registered anywhere in the CLI)
       const unionOptNames = collectUnionOptionNames(cli);
@@ -84,6 +86,11 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       resolved.remainingPositionals
     );
 
+    await maybeEnsureAgentIntegrations({
+      cwd: process.cwd(),
+      commandPath: resolved.path.map((command) => command.name),
+    });
+
     return await resolved.command.handler({
       ctx: { cwd: process.cwd(), cli },
       args: {
@@ -118,7 +125,7 @@ function isExtensionDispatch(opts: {
     if (token.startsWith("-")) {
       continue;
     }
-    return token === "x";
+    return token === "x" || token === "tickets";
   }
   return false;
 }

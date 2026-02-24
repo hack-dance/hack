@@ -1,6 +1,10 @@
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import { defineCommand, withHandler } from "../cli/command.ts";
 import { loadExtensionManagerForCli } from "../control-plane/extensions/cli.ts";
+import {
+  buildEnableInstructions,
+  maybeEnableExtension,
+} from "../control-plane/extensions/enable.ts";
 import { display } from "../ui/display.ts";
 import { logger } from "../ui/logger.ts";
 
@@ -41,6 +45,10 @@ async function handleTickets({
   readonly ctx: CliContext;
   readonly args: TicketsArgs;
 }): Promise<number> {
+  // Parse command early to check if it's setup (which bypasses enable check)
+  const invocation = parseTicketsInvocation({ argv: args.raw.argv });
+  const isSetupCommand = invocation.command === "setup";
+
   const loaded = await loadExtensionManagerForCli({ cwd: ctx.cwd });
 
   if (loaded.configError) {
@@ -60,21 +68,69 @@ async function handleTickets({
     return 1;
   }
 
-  if (!extension.enabled) {
+  // Allow setup command to run even when extension is disabled
+  if (!(extension.enabled || isSetupCommand)) {
+    const instructions = buildEnableInstructions({
+      extension,
+      namespace: "tickets",
+      command: invocation.command,
+      args: invocation.args,
+    });
+
     await display.panel({
       title: "Extension disabled",
       tone: "warn",
-      lines: [
-        `Extension: ${extension.manifest.id}`,
-        "Enable with:",
-        "  hack config set 'controlPlane.extensions[\"dance.hack.tickets\"].enabled' true",
-      ],
+      lines: instructions.lines,
     });
+
+    // Offer interactive enable prompt
+    const didEnable = await maybeEnableExtension({
+      extension,
+      namespace: "tickets",
+      command: invocation.command,
+      args: invocation.args,
+      projectDir: loaded.context.project?.projectDir,
+    });
+
+    if (didEnable) {
+      // Reload and continue with the original command
+      const reloaded = await loadExtensionManagerForCli({ cwd: ctx.cwd });
+      const nextExtension = reloaded.manager.getExtensionByNamespace({
+        namespace: "tickets",
+      });
+      if (!nextExtension?.enabled) {
+        logger.warn({
+          message: "Extension still disabled after enable attempt.",
+        });
+        return 1;
+      }
+
+      if (!invocation.command || invocation.command === "help") {
+        await renderTicketsHelp({
+          commands: reloaded.manager.listCommands({ namespace: "tickets" }),
+        });
+        return 0;
+      }
+
+      const resolved = reloaded.manager.resolveCommand({
+        namespace: "tickets",
+        commandName: invocation.command,
+      });
+      if (!resolved) {
+        logger.error({
+          message: `Unknown tickets command: ${invocation.command}`,
+        });
+        return 1;
+      }
+
+      return await resolved.command.handler({
+        ctx: reloaded.context,
+        args: invocation.args,
+      });
+    }
+
     return 1;
   }
-
-  // Parse command from raw argv
-  const invocation = parseTicketsInvocation({ argv: args.raw.argv });
 
   if (!invocation.command || invocation.command === "help") {
     await renderTicketsHelp({

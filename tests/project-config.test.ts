@@ -106,3 +106,85 @@ test("resolveProjectOauthTld falls back to default when enabled", () => {
   expect(resolveProjectOauthTld({ enabled: true, tld: "" })).toBe("gy");
   expect(resolveProjectOauthTld({ enabled: false })).toBeNull();
 });
+
+test("readProjectConfig maps startup shorthand into lifecycle", async () => {
+  const ctx = await createProjectDir();
+  await writeFile(
+    ctx.configFile,
+    JSON.stringify(
+      {
+        startup: [
+          {
+            name: "aws sso",
+            run: "aws sso login",
+          },
+          {
+            name: "ssm proxy",
+            run: "cd packages/infra && bun run proxy",
+            persistent: true,
+            cwd: ".",
+          },
+          "echo warmup",
+        ],
+      },
+      null,
+      2
+    )
+  );
+
+  const cfg = await readProjectConfig(ctx);
+  expect(cfg.lifecycle?.up?.before).toEqual([
+    { name: "aws sso", command: "aws sso login" },
+    { command: "echo warmup" },
+  ]);
+  expect(cfg.lifecycle?.processes).toEqual([
+    {
+      name: "ssm proxy",
+      command: "cd packages/infra && bun run proxy",
+      cwd: ".",
+    },
+  ]);
+});
+
+test("readProjectConfig parses persistent lifecycle up.before hooks", async () => {
+  const ctx = await createProjectDir();
+  await writeFile(
+    ctx.configFile,
+    JSON.stringify(
+      {
+        lifecycle: {
+          up: {
+            before: [
+              {
+                name: "proxy",
+                cwd: "packages/infra",
+                command: "bun run proxy",
+                persistent: true,
+              },
+              {
+                name: "auth",
+                command: "bun run aws:qa",
+              },
+            ],
+          },
+        },
+      },
+      null,
+      2
+    )
+  );
+
+  const cfg = await readProjectConfig(ctx);
+  expect(cfg.lifecycle?.up?.before).toEqual([
+    {
+      name: "proxy",
+      cwd: "packages/infra",
+      command: "bun run proxy",
+      persistent: true,
+    },
+    {
+      name: "auth",
+      command: "bun run aws:qa",
+    },
+  ]);
+});

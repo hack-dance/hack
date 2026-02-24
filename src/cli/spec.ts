@@ -4,6 +4,7 @@ import { branchCommand } from "../commands/branch.ts";
 import { configCommand } from "../commands/config.ts";
 import { daemonCommand } from "../commands/daemon.ts";
 import { doctorCommand } from "../commands/doctor.ts";
+import { envCommand } from "../commands/env.ts";
 import { gatewayCommand } from "../commands/gateway.ts";
 import { globalCommand } from "../commands/global.ts";
 import { helpCommand } from "../commands/help.ts";
@@ -29,6 +30,7 @@ import { sshCommand } from "../commands/ssh.ts";
 import { theCommand } from "../commands/the.ts";
 import { ticketsCommand } from "../commands/tickets.ts";
 import { tuiCommand } from "../commands/tui.ts";
+import { updateCommand } from "../commands/update.ts";
 import { usageCommand } from "../commands/usage.ts";
 import { versionCommand } from "../commands/version.ts";
 import { xCommand } from "../commands/x.ts";
@@ -66,6 +68,7 @@ export const CLI_SPEC = defineCli({
     daemonCommand,
     theCommand,
     secretsCommand,
+    envCommand,
     configCommand,
     mcpCommand,
     setupCommand,
@@ -77,6 +80,7 @@ export const CLI_SPEC = defineCli({
     remoteCommand,
     internalCommand,
     xCommand,
+    updateCommand,
     versionCommand,
     helpCommand,
   ],

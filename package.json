@@ -60,7 +60,7 @@
   "dependencies": {
     "@charmland/lipgloss": "2.0.0-beta.3-0e280f3",
     "@clack/prompts": "1.0.0-alpha.9",
-    "@modelcontextprotocol/sdk": "1.25.3",
+    "@modelcontextprotocol/sdk": "1.26.0",
     "@opentui/core": "^0.1.74",
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",

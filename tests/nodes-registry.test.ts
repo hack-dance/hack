@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -18,10 +25,12 @@ import {
 let tempDir: string | null = null;
 let originalHome: string | undefined;
 let originalGlobalConfigPath: string | undefined;
+let originalSecretsFileKey: string | undefined;
 
 beforeEach(async () => {
   originalHome = process.env.HOME;
   originalGlobalConfigPath = process.env.HACK_GLOBAL_CONFIG_PATH;
+  originalSecretsFileKey = process.env.HACK_SECRETS_FILE_KEY;
   tempDir = await mkdtemp(join(tmpdir(), "hack-nodes-registry-"));
   process.env.HOME = tempDir;
   process.env.HACK_GLOBAL_CONFIG_PATH = undefined;
@@ -37,6 +46,11 @@ afterEach(async () => {
     process.env.HACK_GLOBAL_CONFIG_PATH = originalGlobalConfigPath;
   } else {
     process.env.HACK_GLOBAL_CONFIG_PATH = undefined;
+  }
+  if (originalSecretsFileKey !== undefined) {
+    process.env.HACK_SECRETS_FILE_KEY = originalSecretsFileKey;
+  } else {
+    process.env.HACK_SECRETS_FILE_KEY = undefined;
   }
 });
 
@@ -122,8 +136,12 @@ test("upsert clears stale registry lock", async () => {
   expect(created.created).toBe(true);
 });
 
-test("node auth refs can resolve from environment variables", async () => {
-  const authRef = "env:HACK_NODE_AUTH_TOKEN_TEST";
+test("node env auth refs resolve when allowEnvAuthRefs is enabled", async () => {
+  await writeGlobalSecretsConfig({
+    allowEnvAuthRefs: true,
+  });
+  const envName = "HACK_NODE_AUTH_TOKEN_TEST";
+  const authRef = `env:${envName}`;
 
   await saveNodeAuthToken({
     authRef,
@@ -131,9 +149,104 @@ test("node auth refs can resolve from environment variables", async () => {
   });
   const resolved = await readNodeAuthToken({ authRef });
   expect(resolved).toBe("env-token");
+  expect(process.env[envName]).toBe("env-token");
 
   const deleted = await deleteNodeAuthToken({ authRef });
   expect(deleted).toBe(true);
   const afterDelete = await readNodeAuthToken({ authRef });
   expect(afterDelete).toBeNull();
 });
+
+test("node env auth refs are rejected when allowEnvAuthRefs is disabled", async () => {
+  await writeGlobalSecretsConfig({
+    allowEnvAuthRefs: false,
+  });
+  const envName = "HACK_NODE_AUTH_TOKEN_BLOCKED";
+  const authRef = `env:${envName}`;
+  process.env[envName] = "blocked-token";
+
+  await expect(
+    saveNodeAuthToken({
+      authRef,
+      token: "blocked-token",
+    })
+  ).rejects.toThrow("allowEnvAuthRefs=false");
+  await expect(readNodeAuthToken({ authRef })).rejects.toThrow(
+    "allowEnvAuthRefs=false"
+  );
+  await expect(deleteNodeAuthToken({ authRef })).rejects.toThrow(
+    "allowEnvAuthRefs=false"
+  );
+  expect(process.env[envName]).toBe("blocked-token");
+  delete process.env[envName];
+});
+
+test("node auth refs use encrypted_file backend for non-env refs", async () => {
+  if (!tempDir) {
+    throw new Error("Missing temp dir");
+  }
+
+  const storePath = join(tempDir, "node-secrets.enc.json");
+  process.env.HACK_SECRETS_FILE_KEY = "nodes-registry-test-secret-key";
+  await writeGlobalSecretsConfig({
+    backend: "encrypted_file",
+    encryptedFilePath: storePath,
+  });
+
+  const authRef = "node.auth.encrypted";
+  await saveNodeAuthToken({
+    authRef,
+    token: "encrypted-backend-token",
+  });
+  const resolved = await readNodeAuthToken({ authRef });
+  expect(resolved).toBe("encrypted-backend-token");
+
+  const storeText = await readFile(storePath, "utf8");
+  expect(storeText).toContain('"ciphertext"');
+
+  const deleted = await deleteNodeAuthToken({ authRef });
+  expect(deleted).toBe(true);
+  const afterDelete = await readNodeAuthToken({ authRef });
+  expect(afterDelete).toBeNull();
+});
+
+async function writeGlobalSecretsConfig(input: {
+  readonly allowEnvAuthRefs?: boolean;
+  readonly backend?: "keychain" | "encrypted_file" | "cloud";
+  readonly encryptedFilePath?: string;
+  readonly cloudProvider?: "aws" | "gcp" | "azure" | "vault";
+  readonly cloudProject?: string;
+  readonly cloudSecretPrefix?: string;
+}): Promise<void> {
+  if (!tempDir) {
+    throw new Error("Missing temp dir");
+  }
+
+  const configPath = join(tempDir, "global-config.json");
+  process.env.HACK_GLOBAL_CONFIG_PATH = configPath;
+  const payload = {
+    controlPlane: {
+      secrets: {
+        ...(input.backend ? { backend: input.backend } : {}),
+        ...(input.allowEnvAuthRefs !== undefined
+          ? { allowEnvAuthRefs: input.allowEnvAuthRefs }
+          : {}),
+        ...(input.encryptedFilePath
+          ? { encryptedFile: { path: input.encryptedFilePath } }
+          : {}),
+        ...(input.cloudProvider
+          ? {
+              cloud: {
+                provider: input.cloudProvider,
+                ...(input.cloudProject ? { project: input.cloudProject } : {}),
+                ...(input.cloudSecretPrefix
+                  ? { secretPrefix: input.cloudSecretPrefix }
+                  : {}),
+              },
+            }
+          : {}),
+      },
+    },
+  };
+  await writeFile(configPath, `${JSON.stringify(payload, null, 2)}\n`);
+}

@@ -45,14 +45,14 @@ test("buildMutagenSessionName is deterministic and normalized", () => {
     projectName: "Live Nation App",
     nodeId: "db5d885f-1647-4229-add9-2a5e5833e7a4",
     branch: "feat/remote-sync",
-    localProjectRoot: "/Users/hack/dev/hack",
+    localProjectRoot: "/Users/local-user/dev/hack",
     remoteProjectRoot: "/Users/remote-user/.hack/projects/hack",
   });
   const second = __testOnlyMutagenSync.buildMutagenSessionName({
     projectName: "Live Nation App",
     nodeId: "db5d885f-1647-4229-add9-2a5e5833e7a4",
     branch: "feat/remote-sync",
-    localProjectRoot: "/Users/hack/dev/hack",
+    localProjectRoot: "/Users/local-user/dev/hack",
     remoteProjectRoot: "/Users/remote-user/.hack/projects/hack",
   });
 

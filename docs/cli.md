@@ -754,6 +754,7 @@ Subcommands:
 | `status` | Probe node health and report live status |
 | `use` | Set default node |
 | `remove` | Remove node registration |
+| `workspace` | Inspect and repair node workspace map entries |
 | `provider` | Manage provider-specific node bootstrap workflows |
 | `devcontainer` | Manage remote node devcontainer lifecycle and attach hints |
 
@@ -791,6 +792,12 @@ hack node add --bundle ./node-bundle.json
 hack node list
 hack node status --watch
 hack node use <node-id>
+
+# inspect/repair node workspace mappings on a remote node host
+ssh <user@node-host> 'hack node workspace list --json'
+ssh <user@node-host> 'hack node workspace resolve --project <name|id> --json'
+ssh <user@node-host> 'hack node workspace attach --project <name|id> --path <absolute-path> --json'
+ssh <user@node-host> 'hack node workspace remove --project <name|id> --json'
 
 # Railway provider bootstrap (existing service + auto domain endpoint)
 hack node provider railway bootstrap \
@@ -839,6 +846,28 @@ hack node devcontainer attach --node <node-id> --id <session-id> --ide vscode --
 | `--ssh-port <port>` | number | `22` | SSH port for attach commands |
 | `--ssh-user <user>` | string | - | Optional SSH user |
 | `--ssh-alias <alias>` | string | `hack-node-<id-prefix>` | Alias used for Remote-SSH commands |
+
+### hack node workspace
+
+Usage: `hack node workspace <subcommand>`
+
+Subcommands:
+
+| Subcommand | Summary |
+| --- | --- |
+| `list` | List node-local workspace map entries |
+| `resolve` | Resolve a map entry by controller project selector |
+| `attach` | Attach an existing local workspace to project selector |
+| `remove` | Remove a map entry by project selector |
+
+Examples:
+
+```bash
+hack node workspace list --json
+hack node workspace resolve --project my-project --json
+hack node workspace attach --project my-project --path "$HOME/.hack/projects/my-project" --json
+hack node workspace remove --project my-project --json
+```
 
 ### hack dispatch
 

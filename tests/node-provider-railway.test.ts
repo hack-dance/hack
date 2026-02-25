@@ -164,3 +164,69 @@ test("redaction helpers cover sensitive values", () => {
     })
   ).toBe("TS_AUTHKEY=***");
 });
+
+test("config helpers prefer provider-route values over extension defaults", () => {
+  const routeConfig: Record<string, unknown> = {
+    project: "route-project",
+    createService: "true",
+    domainPort: "9000",
+  };
+  const extensionConfig: Record<string, unknown> = {
+    project: "extension-project",
+    createService: false,
+    domainPort: 7788,
+  };
+
+  expect(
+    __testOnlyNodeRailway.resolveRailwayConfigString({
+      routeConfig,
+      extensionConfig,
+      key: "project",
+    })
+  ).toBe("route-project");
+  expect(
+    __testOnlyNodeRailway.resolveRailwayConfigBoolean({
+      routeConfig,
+      extensionConfig,
+      key: "createService",
+    })
+  ).toBe(true);
+  expect(
+    __testOnlyNodeRailway.resolveRailwayConfigInteger({
+      routeConfig,
+      extensionConfig,
+      key: "domainPort",
+    })
+  ).toBe(9000);
+});
+
+test("config helpers fallback to extension defaults when route value is absent", () => {
+  const routeConfig: Record<string, unknown> = {};
+  const extensionConfig: Record<string, unknown> = {
+    service: "railway-svc",
+    private: "false",
+    initRetries: "8",
+  };
+
+  expect(
+    __testOnlyNodeRailway.resolveRailwayConfigString({
+      routeConfig,
+      extensionConfig,
+      key: "service",
+    })
+  ).toBe("railway-svc");
+  expect(
+    __testOnlyNodeRailway.resolveRailwayConfigBoolean({
+      routeConfig,
+      extensionConfig,
+      key: "private",
+    })
+  ).toBe(false);
+  expect(
+    __testOnlyNodeRailway.resolveRailwayConfigInteger({
+      routeConfig,
+      extensionConfig,
+      key: "initRetries",
+    })
+  ).toBe(8);
+});

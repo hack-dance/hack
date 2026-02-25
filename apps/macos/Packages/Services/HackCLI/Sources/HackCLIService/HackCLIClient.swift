@@ -545,9 +545,11 @@ public actor HackCLIClient {
       "railway",
       "bootstrap",
       "--json",
-      "--railway-project",
-      request.railwayProject,
     ]
+
+    if let value = normalized(request.railwayProject) {
+      args.append(contentsOf: ["--railway-project", value])
+    }
 
     if let value = normalized(request.railwayService) {
       args.append(contentsOf: ["--railway-service", value])

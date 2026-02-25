@@ -2,19 +2,20 @@ import { randomUUID } from "node:crypto";
 import { open, rename, stat, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
-import { secrets } from "bun";
 import {
   GLOBAL_HACK_DIR_NAME,
   GLOBAL_NODES_REGISTRY_FILENAME,
   GLOBAL_REGISTRY_DIR_NAME,
 } from "../constants.ts";
+import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { ensureDir, readTextFile } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
+import { resolveSecretStore } from "./secret-store.ts";
 
 const NODES_REGISTRY_VERSION = 1 as const;
 const DEFAULT_STALE_AFTER_MS = 30_000;
 const DEFAULT_OFFLINE_AFTER_MS = 120_000;
-const NODE_SECRET_SERVICE = "hack-node-registry";
+const NODE_SECRET_STORE_PROJECT_NAME = "node-registry";
 const REGISTRY_LOCK_FILENAME = `${GLOBAL_NODES_REGISTRY_FILENAME}.lock`;
 const REGISTRY_LOCK_TIMEOUT_MS = 2000;
 const REGISTRY_LOCK_STALE_MS = 30_000;
@@ -409,45 +410,38 @@ export async function saveNodeAuthToken(input: {
   readonly authRef: string;
   readonly token: string;
 }): Promise<void> {
-  const envAuthRef = resolveEnvAuthRef(input.authRef);
+  const envAuthRef = await resolveAllowedEnvAuthRef(input.authRef);
   if (envAuthRef) {
     process.env[envAuthRef] = input.token;
     return;
   }
-  await secrets.set({
-    service: NODE_SECRET_SERVICE,
-    name: input.authRef,
-    value: input.token,
-  });
+  const store = await resolveNodeAuthSecretStore();
+  await store.set({ key: input.authRef, value: input.token });
 }
 
 export async function readNodeAuthToken(input: {
   readonly authRef: string;
 }): Promise<string | null> {
-  const envAuthRef = resolveEnvAuthRef(input.authRef);
+  const envAuthRef = await resolveAllowedEnvAuthRef(input.authRef);
   if (envAuthRef) {
     const token = (process.env[envAuthRef] ?? "").trim();
     return token.length > 0 ? token : null;
   }
-  return await secrets.get({
-    service: NODE_SECRET_SERVICE,
-    name: input.authRef,
-  });
+  const store = await resolveNodeAuthSecretStore();
+  return await store.get({ key: input.authRef });
 }
 
 export async function deleteNodeAuthToken(input: {
   readonly authRef: string;
 }): Promise<boolean> {
-  const envAuthRef = resolveEnvAuthRef(input.authRef);
+  const envAuthRef = await resolveAllowedEnvAuthRef(input.authRef);
   if (envAuthRef) {
     const existed = Object.hasOwn(process.env, envAuthRef);
     delete process.env[envAuthRef];
     return existed;
   }
-  return await secrets.delete({
-    service: NODE_SECRET_SERVICE,
-    name: input.authRef,
-  });
+  const store = await resolveNodeAuthSecretStore();
+  return await store.delete({ key: input.authRef });
 }
 
 function resolveEnvAuthRef(authRef: string): string | null {
@@ -457,6 +451,28 @@ function resolveEnvAuthRef(authRef: string): string | null {
   }
   const envName = trimmed.slice(ENV_AUTH_REF_PREFIX.length).trim();
   return envName.length > 0 ? envName : null;
+}
+
+async function resolveAllowedEnvAuthRef(
+  authRef: string
+): Promise<string | null> {
+  const envAuthRef = resolveEnvAuthRef(authRef);
+  if (!envAuthRef) {
+    return null;
+  }
+  const controlPlane = await readControlPlaneConfig({});
+  if (controlPlane.config.secrets.allowEnvAuthRefs) {
+    return envAuthRef;
+  }
+  throw new Error(
+    "Environment auth refs are disabled by controlPlane.secrets.allowEnvAuthRefs=false."
+  );
+}
+
+async function resolveNodeAuthSecretStore() {
+  return await resolveSecretStore({
+    projectName: NODE_SECRET_STORE_PROJECT_NAME,
+  });
 }
 
 async function withRegistryLock<T>(fn: () => Promise<T>): Promise<T> {

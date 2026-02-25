@@ -107,6 +107,21 @@ Security posture:
 - Secret values are never written into `.hack/` YAML files.
 - Plain env values live in `.hack/.env` (expected to be gitignored in most repos).
 
+## Remote node secret behavior
+
+Current behavior (today):
+- Node auth tokens and extension auth refs are stored through the configured secret backend.
+- `env:VAR_NAME` auth refs are allowed only when `controlPlane.secrets.allowEnvAuthRefs=true`.
+- Remote dispatch/workspace bootstrap does **not** automatically copy all host env values to remote nodes.
+
+Recommended setup:
+- Keep controller secrets in `keychain` or `encrypted_file` backend (not shell env).
+- Configure each remote node to use the same secret backend strategy where possible.
+- Use project env contract (`.hack/hack.env.json`) to make required keys explicit before runs.
+
+Planned direction:
+- Add an explicit host-to-node secret sync command with least-privilege scoping, encrypted payload delivery, and audit events per run.
+
 ## Daemon/gateway API (UI integration)
 
 `hackd` exposes env endpoints for UIs. When accessed through the gateway, all requests require an auth token:

@@ -2,6 +2,9 @@
 
 Use the published node-runtime container to spin up a remote node with minimal host setup.
 
+Recommended public image:
+- `hackdance/hack:latest`
+
 The container bundles:
 - `hack` CLI binary
 - `docker` CLI + `docker compose` plugin
@@ -23,7 +26,7 @@ docker run -d \
   -e HACK_NODE_GIT_REPO="git@github.com:<org>/<repo>.git" \
   -e HACK_NODE_LABELS="aws,ec2,linux" \
   -e HACK_NODE_ENROLL_PATH="/var/lib/hack/enrollment/node.bundle.json" \
-  ghcr.io/hack-dance/hack-node-runtime:latest
+  hackdance/hack:latest
 ```
 
 2. Fetch enrollment bundle from the remote host:
@@ -115,7 +118,7 @@ Publish multi-arch image:
 bun run build:node-runtime-image \
   --push \
   --platform linux/amd64,linux/arm64 \
-  --tag ghcr.io/<org>/hack-node-runtime:latest
+  --tag hackdance/hack:latest
 ```
 
 GitHub Actions workflow:

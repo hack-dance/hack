@@ -1,13 +1,31 @@
 # Run laptop-to-laptop node pairing e2e
 
-This guide validates controller + node pairing between two laptops on the same tailnet or network.
+This guide is the full validation run for two Macs:
+1. Controller Mac (host mode)
+2. Remote MacBook node
+
+It validates pairing, remote routing, workspace mapping, mutagen sync, and dispatch execution.
+
+If you only need initial setup, use [Remote node quickstart](remote-node-quickstart.md) first.
+
+## E2E matrix
+
+| Id | Scenario | Command surface | Pass criteria |
+| --- | --- | --- | --- |
+| MB-1 | Pair remote MacBook node from controller | `hack node pair ...` or app topology pairing | Node appears in `hack node list` and topology |
+| MB-2 | Set project to remote run mode | `hack config set controlPlane.execution.*` | `hack up --target auto` routes remotely |
+| MB-3 | Managed workspace bootstrap on remote | `hack up --target auto` + remote `hack node workspace list` | Workspace auto-created under `~/.hack/projects/<slug>` |
+| MB-4 | Dispatch job on remote | `hack dispatch run ...` | Command succeeds and artifacts are persisted |
+| MB-5 | Mutagen sync path (local edit -> remote run) | remote mode + dispatch/up | No sync bootstrap failures; run events/manifest include sync metadata |
+| MB-6 | Topology + host/node controls | macOS app topology/settings | Controller host and default node state are consistent |
 
 ## Prerequisites
 
-- Controller laptop and node laptop both have `hack` available.
-- Node laptop can be reached by SSH from controller (`user@host`).
-- Node laptop has gateway enabled (`hack gateway setup`).
-- Optional but recommended: both laptops joined to Tailscale.
+1. Both laptops have `hack` installed.
+2. Remote laptop is reachable via SSH from controller (`user@host`).
+3. Remote laptop has gateway enabled (`hack gateway setup`).
+4. `mutagen` is installed on controller (`mutagen version`).
+5. Optional but recommended: both laptops are on Tailscale.
 
 ## Build artifacts on controller
 
@@ -18,14 +36,11 @@ bun run build
 bun run macos:build
 ```
 
-This produces:
+This validates local build health before cross-machine testing.
 
-- CLI binary: `dist/hack`
-- Verified macOS package build (Swift package target compile)
+## Install on remote MacBook
 
-## Install options on node laptop
-
-### Option A: clone private repo and install locally
+### Option A: clone + local install
 
 ```bash
 git clone <private-repo-url>
@@ -34,76 +49,154 @@ bun install
 bun run install:bin
 ```
 
-### Option B: copy prebuilt CLI binary
+### Option B: copy prebuilt binary
 
 ```bash
 scp dist/hack <user@node-host>:~/.hack/bin/hack
 ssh <user@node-host> 'chmod +x ~/.hack/bin/hack'
 ```
 
-Ensure `~/.hack/bin` is in PATH on node laptop.
-
-## Node laptop prep
+Verify remote binary resolution:
 
 ```bash
-hack gateway setup
-hack node status --json
+ssh <user@node-host> 'which hack || test -x ~/.hack/bin/hack && echo "~/.hack/bin/hack present"'
 ```
 
-## Node-initiated pairing request publish
+## Pairing flow (controller-led, one command)
 
-Run this on the node laptop to create a pending request on the controller:
+Run on controller:
 
 ```bash
-hack node pair request --controller "<user@controller-host>" --source "<user@node-host>" --endpoint "http://127.0.0.1:7788" --default
+hack node pair \
+  --source "<user@node-host>" \
+  --endpoint "http://<node-host>:7788" \
+  --name "<display-name>" \
+  --labels macbook,remote \
+  --default
 ```
 
-This command returns `session_id` and one-time `code`.
+Notes:
+1. `hack node pair` auto-detects remote `hack` command in this order:
+   - `$HOME/.hack/bin/hack`
+   - `/opt/homebrew/bin/hack`
+   - `/usr/local/bin/hack`
+   - `/usr/bin/hack`
+   - `PATH` fallback (`which hack`)
+2. If endpoint inference fails, pass `--endpoint` explicitly.
+3. If SSH username was wrong, retry with the correct user.
 
-## Controller approve flow (macOS app)
-
-1. Open **Settings → System → Topology**.
-2. Keep **This Mac is the controller host** enabled.
-3. In **Pairing requests**, find the pending session row.
-4. Enter the one-time code from node request output.
-5. Click **Approve + register**.
-5. Refresh topology and verify node appears as authorized/connected.
-
-## Controller approve flow (CLI fallback)
-
-```bash
-hack node pair list --status pending
-hack node pair fulfill --session <pair-session-id> --code <one-time-code> --default
-```
-
-## Validation checks
+Validate:
 
 ```bash
 hack node list
-hack node status --watch
-hack dispatch run --project <name|id> --node default --branch <branch> --runner codex -- echo hello
+hack node status --node <node-id>
 ```
 
-### Project execution mode setup (optional)
+## Project routing + workspace mapping flow
 
-To make normal lifecycle commands (`hack up/down/restart`) route to remote automatically:
+From controller project root:
 
 ```bash
 hack config set "controlPlane.execution.mode" "local_edit_remote_run"
 hack config set "controlPlane.execution.nodeId" "<node-id>"
 ```
 
-Then run:
+Optional: inspect remote mapping store before first run:
+
+```bash
+ssh <user@node-host> 'hack node workspace list --json'
+```
+
+Run lifecycle with remote routing:
 
 ```bash
 hack up --target auto
 ```
 
-Expected results:
+Then verify map + managed root on remote:
 
-- Node is registered and probe status is healthy/stale (not unknown).
-- On macOS host, `hack node status --watch` should not trigger repeated keychain prompts within each 60s poll window.
-- Dispatch run completes and writes artifacts to run channel.
-- If using host toggle in app:
-  - Host enabled: pairing + primary/remove controls are visible.
-  - Host disabled: node-mode guidance is shown and controller mutating controls are hidden.
+```bash
+ssh <user@node-host> 'hack node workspace list --json'
+```
+
+Expected:
+1. Mapping entry exists for controller project id/name.
+2. Workspace root resolves under `~/.hack/projects/<project-slug>/` unless explicitly attached elsewhere.
+
+Repair commands when mapping is missing or incorrect:
+
+```bash
+ssh <user@node-host> 'hack node workspace resolve --project <name|id> --json'
+ssh <user@node-host> 'hack node workspace attach --project <name|id> --path <absolute-path> --json'
+ssh <user@node-host> 'hack node workspace remove --project <name|id> --json'
+```
+
+## Dispatch validation
+
+```bash
+hack dispatch run \
+  --project <name|id> \
+  --node default \
+  --branch <branch> \
+  --runner generic \
+  -- "pwd"
+```
+
+Expected:
+1. Dispatch succeeds on the remote node.
+2. Run artifacts are written to local run channel.
+3. If `local_edit_remote_run` is enabled, sync metadata is included in run artifacts/events.
+
+Mutagen sync proof (recommended):
+
+```bash
+MARKER="sync-smoke-$(date +%s)"
+printf '%s\n' "$MARKER" > .hack-sync-smoke.txt
+hack dispatch run --project <name|id> --node default --branch <branch> --runner generic --json -- "cat .hack-sync-smoke.txt"
+hack dispatch status <run-id> --json
+mutagen sync list
+```
+
+Check status output for sync metadata paths and confirm the marker output appears in remote command logs.
+
+## macOS app validation
+
+1. Open **Settings → System → Topology**.
+2. Confirm controller-host mode is enabled on the controller device.
+3. Confirm paired node appears as connected/authorized.
+4. Confirm default node reflects CLI state (`hack node list`).
+
+## Known failure signatures and fixes
+
+1. `Could not auto-detect --endpoint ...`
+   - Fix: set explicit `--endpoint`, verify remote gateway bind/port.
+2. `SSH pairing command failed: zsh: command not found: hack`
+   - Fix: install `hack` on remote or pass `--remote-hack` explicitly.
+3. `Connection closed by <host> port 22`
+   - Fix: validate SSH user/shell; test with `ssh <user@host> "echo ok"`.
+4. `Missing token` on `/v1/node/status` curl
+   - Expected for unauthenticated direct status calls. Pairing/dispatch uses scoped node auth.
+5. `requested tags [...] are invalid or not permitted` (Railway private)
+   - Fix: omit tags unless tailnet policy explicitly allows them.
+6. Topology shows empty node list unexpectedly
+   - Fix: refresh topology, verify controller-host mode and local node registry (`hack node list`).
+
+## Evidence capture
+
+Record these outputs in your run notes:
+
+```bash
+hack node list
+hack node status --json
+hack config get "controlPlane.execution.mode"
+hack config get "controlPlane.execution.nodeId"
+hack dispatch status <run-id>
+hack dispatch logs <run-id>
+```
+
+Remote evidence:
+
+```bash
+ssh <user@node-host> 'hack node workspace list --json'
+ssh <user@node-host> 'hack node status --json'
+```

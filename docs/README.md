@@ -15,6 +15,7 @@ This directory contains the public documentation for hack. Specs remain in `SPEC
 - [Extensions](extensions.md)
 - [Control-plane SDK](sdk.md)
 - [Provider composition + project overrides spec](provider-composition-and-project-overrides.md)
+- [Remote node DX + onboarding simplification plan](remote-node-dx-and-onboarding-simplification.md)
 - [Monorepo layout plan](monorepo-layout-plan.md)
 
 Monorepo note:
@@ -27,6 +28,10 @@ Quick diagnostics:
 
 ## Guides
 
+- Start here (first remote node in ~10 minutes):
+  - [Remote node quickstart](guides/remote-node-quickstart.md)
+  - [Run laptop-to-laptop node pairing e2e](guides/remote-node-laptop-e2e.md)
+  - [Bootstrap a remote node on Railway](guides/remote-node-railway.md)
 - Remote setup (one command): `hack remote setup`
 - [Initialize a project](guides/init-project.md)
 - [Global settings](guides/global-settings.md)
@@ -38,5 +43,4 @@ Quick diagnostics:
 - [Run a remote node via container image](guides/remote-node-container.md)
 - [Bootstrap a remote node on Railway](guides/remote-node-railway.md)
 - [Bootstrap auth-broker with Neon + Railway](guides/auth-broker-neon-bootstrap.md)
-- [Run laptop-to-laptop node pairing e2e](guides/remote-node-laptop-e2e.md)
 - [Create a new extension](guides/create-extension.md)

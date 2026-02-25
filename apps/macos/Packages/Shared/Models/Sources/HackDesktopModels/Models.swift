@@ -1177,7 +1177,7 @@ public struct GitHubOAuthFlowStatusResponse: Decodable, Hashable {
 }
 
 public struct RailwayBootstrapRequest: Hashable {
-  public let railwayProject: String
+  public let railwayProject: String?
   public let railwayService: String?
   public let railwayEnvironment: String?
   public let railwayWorkspace: String?
@@ -1196,7 +1196,7 @@ public struct RailwayBootstrapRequest: Hashable {
   public let tailscaleTags: [String]
 
   public init(
-    railwayProject: String,
+    railwayProject: String?,
     railwayService: String?,
     railwayEnvironment: String?,
     railwayWorkspace: String?,

@@ -26,17 +26,19 @@ test("buildAttachInstructions emits vscode remote command and ssh metadata", () 
 test("buildAttachInstructions emits shell-first codex instructions", () => {
   const attach = __testOnlyNodeAttach.buildAttachInstructions({
     ide: "codex",
-    sshHost: "192.168.1.9",
+    sshHost: "198.51.100.42",
     sshPort: 2202,
     sshAlias: "hack-node-remote",
-    sshUser: "hack",
+    sshUser: "remote-user",
     workspaceFolder: "/workspace/app",
     containerId: "container-42",
     endpointPort: null,
   });
 
-  expect(attach.ssh.target).toBe("hack@192.168.1.9");
-  expect(attach.commands.includes("ssh -p 2202 hack@192.168.1.9")).toBe(true);
+  expect(attach.ssh.target).toBe("remote-user@198.51.100.42");
+  expect(
+    attach.commands.includes("ssh -p 2202 remote-user@198.51.100.42")
+  ).toBe(true);
   expect(attach.commands.includes("docker exec -it container-42 /bin/sh")).toBe(
     true
   );

@@ -50,6 +50,25 @@ const boolFromEnv = ({
   return ["1", "true", "yes", "on"].includes(normalized);
 };
 
+const optionalBoolFromEnv = (
+  value: string | undefined
+): boolean | undefined => {
+  if (!value) {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return undefined;
+  }
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+  return undefined;
+};
+
 const parseCsv = (value: string | undefined): string[] => {
   if (!value) {
     return [];
@@ -123,28 +142,11 @@ const extractJsonObject = <T>({
   }
 };
 
-const required = ({
-  name,
-  value,
-}: {
-  readonly name: string;
-  readonly value: string | undefined;
-}): string => {
-  const trimmed = value?.trim() ?? "";
-  if (!trimmed) {
-    throw new Error(`Missing required env var: ${name}`);
-  }
-  return trimmed;
-};
-
-const railwayProject = required({
-  name: "HACK_RAILWAY_E2E_PROJECT",
-  value: process.env.HACK_RAILWAY_E2E_PROJECT,
-});
+const railwayProject = (process.env.HACK_RAILWAY_E2E_PROJECT ?? "").trim();
 const railwayService = (process.env.HACK_RAILWAY_E2E_SERVICE ?? "").trim();
-const railwayEnvironment =
-  (process.env.HACK_RAILWAY_E2E_ENVIRONMENT ?? "production").trim() ||
-  "production";
+const railwayEnvironment = (
+  process.env.HACK_RAILWAY_E2E_ENVIRONMENT ?? ""
+).trim();
 const railwayWorkspace = (process.env.HACK_RAILWAY_E2E_WORKSPACE ?? "").trim();
 const railwayImage = (process.env.HACK_RAILWAY_E2E_IMAGE ?? "").trim();
 const nodeName = (process.env.HACK_RAILWAY_E2E_NODE_NAME ?? "").trim();
@@ -157,30 +159,18 @@ const tailscaleAuthKey = (
 const tailscaleHostname = (
   process.env.HACK_RAILWAY_E2E_TAILSCALE_HOSTNAME ?? ""
 ).trim();
-const createService = boolFromEnv({
-  value: process.env.HACK_RAILWAY_E2E_CREATE_SERVICE,
-  defaultValue: false,
-});
+const createService = optionalBoolFromEnv(
+  process.env.HACK_RAILWAY_E2E_CREATE_SERVICE
+);
 const defaultNode = boolFromEnv({
   value: process.env.HACK_RAILWAY_E2E_DEFAULT_NODE,
   defaultValue: false,
 });
-const privateNetworking = boolFromEnv({
-  value: process.env.HACK_RAILWAY_E2E_PRIVATE,
-  defaultValue: true,
-});
+const privateNetworking = optionalBoolFromEnv(
+  process.env.HACK_RAILWAY_E2E_PRIVATE
+);
 const initRetries = parsePositiveInt(process.env.HACK_RAILWAY_E2E_INIT_RETRIES);
 const domainPort = parsePositiveInt(process.env.HACK_RAILWAY_E2E_DOMAIN_PORT);
-
-if (!(createService || railwayService)) {
-  throw new Error(
-    "Set HACK_RAILWAY_E2E_SERVICE when HACK_RAILWAY_E2E_CREATE_SERVICE is not true."
-  );
-}
-
-if (privateNetworking && tailscaleAuthKey.length === 0) {
-  throw new Error("Private mode requires HACK_RAILWAY_E2E_TAILSCALE_AUTH_KEY.");
-}
 
 const bootstrapArgs: string[] = [
   "node",
@@ -188,19 +178,21 @@ const bootstrapArgs: string[] = [
   "railway",
   "bootstrap",
   "--json",
-  "--railway-project",
-  railwayProject,
-  "--railway-environment",
-  railwayEnvironment,
 ];
 
+if (railwayProject) {
+  bootstrapArgs.push("--railway-project", railwayProject);
+}
 if (railwayService) {
   bootstrapArgs.push("--railway-service", railwayService);
+}
+if (railwayEnvironment) {
+  bootstrapArgs.push("--railway-environment", railwayEnvironment);
 }
 if (railwayWorkspace) {
   bootstrapArgs.push("--railway-workspace", railwayWorkspace);
 }
-if (createService) {
+if (createService === true) {
   bootstrapArgs.push("--create-service");
 }
 if (railwayImage) {
@@ -218,16 +210,16 @@ if (labels.length > 0) {
 if (defaultNode) {
   bootstrapArgs.push("--default");
 }
-if (privateNetworking) {
+if (privateNetworking === true) {
   bootstrapArgs.push("--railway-private");
 }
 if (tailscaleAuthKey) {
   bootstrapArgs.push("--tailscale-auth-key", tailscaleAuthKey);
 }
-if (privateNetworking && tailscaleHostname) {
+if (tailscaleHostname) {
   bootstrapArgs.push("--tailscale-hostname", tailscaleHostname);
 }
-if (privateNetworking && tailscaleTags.length > 0) {
+if (tailscaleTags.length > 0) {
   bootstrapArgs.push("--tailscale-tags", tailscaleTags.join(","));
 }
 if (initRetries) {

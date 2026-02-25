@@ -8,6 +8,7 @@ import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
 import { optJson } from "../cli/options.ts";
 import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config.ts";
 import { createGatewayToken } from "../control-plane/extensions/gateway/tokens.ts";
+import { resolveDispatchRoute } from "../control-plane/routing/resolver.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { createGatewayClient } from "../control-plane/sdk/gateway-client.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
@@ -2834,16 +2835,178 @@ function formatWorkspaceMapSelectorLabel(input: {
   return input.entry.projectName ?? input.entry.projectId ?? "<unknown>";
 }
 
+type RailwayBootstrapConfigDefaults = {
+  readonly project?: string;
+  readonly service?: string;
+  readonly environment?: string;
+  readonly workspace?: string;
+  readonly createService?: boolean;
+  readonly image?: string;
+  readonly nodeName?: string;
+  readonly endpoint?: string;
+  readonly labelsCsv?: string;
+  readonly privateNetworking?: boolean;
+  readonly tailscaleHostname?: string;
+  readonly tailscaleTagsCsv?: string;
+  readonly domainPort?: number;
+  readonly initRetries?: number;
+};
+
+async function resolveRailwayBootstrapConfigDefaults(input: {
+  readonly cwd: string;
+}): Promise<RailwayBootstrapConfigDefaults> {
+  const project = await findProjectContext(input.cwd);
+  const controlPlane = await readControlPlaneConfig({
+    ...(project ? { projectDir: project.projectDir } : {}),
+  });
+  const route = resolveDispatchRoute({
+    config: controlPlane.config,
+    commandProvider: "railway",
+    commandBootstrapIfNeeded: true,
+  });
+  const routeConfig =
+    route.providerRoute.provider === "railway"
+      ? route.providerRoute.effectiveConfig
+      : {};
+  const routeAuthConfig = isRecord(routeConfig.auth) ? routeConfig.auth : {};
+
+  const extensions = controlPlane.config.extensions;
+  const railwayExtension = extensions["dance.hack.railway"];
+  let extensionConfig: Record<string, unknown> = {};
+  if (isRecord(railwayExtension) && isRecord(railwayExtension.config)) {
+    extensionConfig = railwayExtension.config;
+  }
+
+  return {
+    project: resolveRailwayConfigString({
+      routeConfig,
+      extensionConfig,
+      key: "project",
+    }),
+    service: resolveRailwayConfigString({
+      routeConfig,
+      extensionConfig,
+      key: "service",
+    }),
+    environment: resolveRailwayConfigString({
+      routeConfig,
+      extensionConfig,
+      key: "environment",
+    }),
+    workspace: resolveRailwayConfigString({
+      routeConfig,
+      extensionConfig,
+      key: "workspace",
+    }),
+    createService: resolveRailwayConfigBoolean({
+      routeConfig,
+      extensionConfig,
+      key: "createService",
+    }),
+    image: resolveRailwayConfigString({
+      routeConfig,
+      extensionConfig,
+      key: "image",
+    }),
+    nodeName: resolveRailwayConfigString({
+      routeConfig,
+      extensionConfig,
+      key: "nodeName",
+    }),
+    endpoint: resolveRailwayConfigString({
+      routeConfig,
+      extensionConfig,
+      key: "endpoint",
+    }),
+    labelsCsv: resolveRailwayConfigString({
+      routeConfig,
+      extensionConfig,
+      key: "labelsCsv",
+    }),
+    privateNetworking:
+      resolveRailwayConfigBoolean({
+        routeConfig,
+        extensionConfig,
+        key: "privateNetworking",
+      }) ??
+      resolveRailwayConfigBoolean({
+        routeConfig,
+        extensionConfig,
+        key: "private",
+      }),
+    tailscaleHostname:
+      getOptionalString(routeConfig.tailscaleHostname) ??
+      getOptionalString(routeAuthConfig.tailscaleHostname) ??
+      getOptionalString(extensionConfig.tailscaleHostname),
+    tailscaleTagsCsv:
+      getOptionalString(routeConfig.tailscaleTagsCsv) ??
+      getOptionalString(routeAuthConfig.tailscaleTagsCsv) ??
+      getOptionalString(extensionConfig.tailscaleTagsCsv),
+    domainPort: resolveRailwayConfigInteger({
+      routeConfig,
+      extensionConfig,
+      key: "domainPort",
+    }),
+    initRetries: resolveRailwayConfigInteger({
+      routeConfig,
+      extensionConfig,
+      key: "initRetries",
+    }),
+  };
+}
+
+function resolveRailwayConfigString(input: {
+  readonly routeConfig: Record<string, unknown>;
+  readonly extensionConfig: Record<string, unknown>;
+  readonly key: string;
+}): string | undefined {
+  return (
+    getOptionalString(input.routeConfig[input.key]) ??
+    getOptionalString(input.extensionConfig[input.key])
+  );
+}
+
+function resolveRailwayConfigBoolean(input: {
+  readonly routeConfig: Record<string, unknown>;
+  readonly extensionConfig: Record<string, unknown>;
+  readonly key: string;
+}): boolean | undefined {
+  return (
+    parseOptionalBoolean(input.routeConfig[input.key]) ??
+    parseOptionalBoolean(input.extensionConfig[input.key])
+  );
+}
+
+function resolveRailwayConfigInteger(input: {
+  readonly routeConfig: Record<string, unknown>;
+  readonly extensionConfig: Record<string, unknown>;
+  readonly key: string;
+}): number | undefined {
+  return (
+    parseOptionalPositiveInteger(input.routeConfig[input.key]) ??
+    parseOptionalPositiveInteger(input.extensionConfig[input.key])
+  );
+}
+
 async function handleNodeProviderRailwayBootstrap({
+  ctx,
   args,
 }: {
   readonly ctx: CliContext;
   readonly args: ProviderRailwayBootstrapArgs;
 }): Promise<number> {
-  const railwayProject = (args.options.railwayProject ?? "").trim();
+  const defaults = await resolveRailwayBootstrapConfigDefaults({
+    cwd: ctx.cwd,
+  });
+  const railwayProject = (
+    args.options.railwayProject ??
+    defaults.project ??
+    ""
+  ).trim();
   if (!railwayProject) {
     logger.error({
-      message: "Missing --railway-project <id|name>.",
+      message:
+        'Missing Railway project. Pass --railway-project <id|name> or set controlPlane.providers profile config / controlPlane.extensions["dance.hack.railway"].config.project.',
     });
     return 1;
   }
@@ -2853,19 +3016,37 @@ async function handleNodeProviderRailwayBootstrap({
     return 1;
   }
   const railwayEnvironment =
-    (args.options.railwayEnvironment ?? "production").trim() || "production";
-  const railwayWorkspace = (args.options.railwayWorkspace ?? "").trim();
-  const createService = args.options.railwayCreateService === true;
-  const image = (args.options.railwayImage ?? DEFAULT_RAILWAY_IMAGE).trim();
+    (
+      args.options.railwayEnvironment ??
+      defaults.environment ??
+      "production"
+    ).trim() || "production";
+  const railwayWorkspace = (
+    args.options.railwayWorkspace ??
+    defaults.workspace ??
+    ""
+  ).trim();
+  const createService =
+    args.options.railwayCreateService === true ||
+    defaults.createService === true;
+  const image = (
+    args.options.railwayImage ??
+    defaults.image ??
+    DEFAULT_RAILWAY_IMAGE
+  ).trim();
   if (createService && !image) {
     logger.error({
       message: "Missing --railway-image when --create-service is enabled.",
     });
     return 1;
   }
-  const labels = parseCsv(args.options.labels);
-  const fallbackName = (args.options.name ?? "").trim();
-  const requestedService = (args.options.railwayService ?? "").trim();
+  const labels = parseCsv(args.options.labels ?? defaults.labelsCsv);
+  const fallbackName = (args.options.name ?? defaults.nodeName ?? "").trim();
+  const requestedService = (
+    args.options.railwayService ??
+    defaults.service ??
+    ""
+  ).trim();
   const name = fallbackName || requestedService || hostname();
   if (!name) {
     logger.error({ message: "Missing node name. Pass --name." });
@@ -2880,25 +3061,35 @@ async function handleNodeProviderRailwayBootstrap({
   if (!service) {
     logger.error({
       message:
-        "Missing --railway-service <id|name>. Pass it explicitly or use --create-service.",
+        "Missing Railway service. Pass --railway-service <id|name>, use --create-service, or configure a default service.",
     });
     return 1;
   }
 
-  const domainPort =
-    typeof args.options.domainPort === "number"
-      ? normalizePositiveInteger({
-          value: args.options.domainPort,
-          fallback: DEFAULT_RAILWAY_GATEWAY_PORT,
-        })
-      : null;
+  let domainPort: number | null = null;
+  if (typeof args.options.domainPort === "number") {
+    domainPort = normalizePositiveInteger({
+      value: args.options.domainPort,
+      fallback: DEFAULT_RAILWAY_GATEWAY_PORT,
+    });
+  } else if (typeof defaults.domainPort === "number") {
+    domainPort = normalizePositiveInteger({
+      value: defaults.domainPort,
+      fallback: DEFAULT_RAILWAY_GATEWAY_PORT,
+    });
+  }
   const initRetries = normalizePositiveInteger({
-    value: args.options.initRetries,
+    value:
+      typeof args.options.initRetries === "number"
+        ? args.options.initRetries
+        : defaults.initRetries,
     fallback: DEFAULT_RAILWAY_BOOTSTRAP_RETRIES,
   });
   const tailscaleAuthKeyOption = (args.options.tailscaleAuthKey ?? "").trim();
   const privateNetworking =
-    args.options.railwayPrivate === true || tailscaleAuthKeyOption.length > 0;
+    args.options.railwayPrivate === true ||
+    tailscaleAuthKeyOption.length > 0 ||
+    defaults.privateNetworking === true;
   const resolvedAuthKey = privateNetworking
     ? await resolveRailwayPrivateTailscaleAuthKey()
     : { authKey: "", source: null as "config" | "env" | null };
@@ -2911,18 +3102,24 @@ async function handleNodeProviderRailwayBootstrap({
   } else if (tailscaleAuthKey.length > 0) {
     tailscaleAuthSource = resolvedAuthKey.source;
   }
-  const tailscaleHostname = (args.options.tailscaleHostname ?? "").trim();
+  const tailscaleHostname = (
+    args.options.tailscaleHostname ??
+    defaults.tailscaleHostname ??
+    ""
+  ).trim();
+  const tailscaleTagsRaw =
+    args.options.tailscaleTags ?? defaults.tailscaleTagsCsv;
   const tailscaleTags = privateNetworking
-    ? ensurePrivateTailscaleTags({ tags: parseCsv(args.options.tailscaleTags) })
-    : normalizeTailscaleTags({ tags: parseCsv(args.options.tailscaleTags) });
+    ? ensurePrivateTailscaleTags({ tags: parseCsv(tailscaleTagsRaw) })
+    : normalizeTailscaleTags({ tags: parseCsv(tailscaleTagsRaw) });
   if (privateNetworking && tailscaleAuthKey.length === 0) {
     logger.error({
-      message: `Private mode requires a Tailscale auth key. Pass --tailscale-auth-key, set ${TAILSCALE_AUTH_KEY_ENV}, or set controlPlane.extensions["dance.hack.tailscale"].config.authKey.`,
+      message: `Private mode requires a Tailscale auth key. Configure controlPlane.extensions["dance.hack.tailscale"].config.authKey, or pass --tailscale-auth-key for one-off runs (shell fallback: ${TAILSCALE_AUTH_KEY_ENV}).`,
     });
     return 1;
   }
   const staticGatewayToken = createRailwayStaticGatewayToken();
-  let endpoint = (args.options.endpoint ?? "").trim();
+  let endpoint = (args.options.endpoint ?? defaults.endpoint ?? "").trim();
   if (endpoint && !isHttpUrl(endpoint)) {
     logger.error({
       message: "Invalid --endpoint. Expected http(s) URL.",
@@ -4403,6 +4600,9 @@ export const __testOnlyNodeRailway = {
   parseRailwayDomainEndpoint,
   parseRailwayTailscaleEndpoint,
   deriveRailwayServiceName,
+  resolveRailwayConfigString,
+  resolveRailwayConfigBoolean,
+  resolveRailwayConfigInteger,
 };
 
 export const __testOnlyNodeStatus = {
@@ -4648,6 +4848,44 @@ function getOptionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0
     ? value.trim()
     : undefined;
+}
+
+function parseOptionalBoolean(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return undefined;
+  }
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+  return undefined;
+}
+
+function parseOptionalPositiveInteger(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(1, Math.trunc(value));
+  }
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(parsed)) {
+    return undefined;
+  }
+  return Math.max(1, parsed);
 }
 
 function parseCsv(input: string | undefined): string[] {

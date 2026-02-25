@@ -285,8 +285,8 @@ Response:
   "workspace": {
     "projectId": "4132b9154775",
     "projectName": "hack-cli",
-    "projectRoot": "/Users/hack/dev/hack-dance/hack-cli",
-    "projectDir": "/Users/hack/dev/hack-dance/hack-cli/.hack",
+    "projectRoot": "/Users/local-user/dev/hack-dance/hack-cli",
+    "projectDir": "/Users/local-user/dev/hack-dance/hack-cli/.hack",
     "branch": "feature/my-branch"
   }
 }

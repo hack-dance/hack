@@ -83,27 +83,27 @@ hack x tickets list
 Show a ticket:
 
 ```bash
-hack x tickets show T-00001
+hack x tickets show <ticket-id>
 ```
 
 Update a ticket:
 
 ```bash
-hack x tickets update T-00001 --title "Investigate flaky test in CI" --body-file ./notes.md
+hack x tickets update <ticket-id> --title "Investigate flaky test in CI" --body-file ./notes.md
 ```
 
 Change status:
 
 ```bash
-hack x tickets status T-00001 in_progress
+hack x tickets status <ticket-id> in_progress
 ```
 
 Dependencies:
 
 ```bash
-hack x tickets create --title "Ship API" --depends-on T-00001 --blocks T-00002
-hack x tickets update T-00001 --depends-on T-00002 --blocks T-00003
-hack x tickets update T-00001 --clear-depends-on --clear-blocks
+hack x tickets create --title "Ship API" --depends-on <ticket-id-a> --blocks <ticket-id-b>
+hack x tickets update <ticket-id-a> --depends-on <ticket-id-b> --blocks <ticket-id-c>
+hack x tickets update <ticket-id-a> --clear-depends-on --clear-blocks
 ```
 
 Sync to git remote (normalizes logs and pushes the tickets ref when a remote exists):

@@ -8,6 +8,8 @@ This document is the durable source of truth for M1-M9 progress, remaining gaps,
 Related:
 1. Provider composition and project-level override model:
    - `docs/provider-composition-and-project-overrides.md`
+2. DX simplification and onboarding execution plan:
+   - `docs/remote-node-dx-and-onboarding-simplification.md`
 
 ## Decision-Locked Architecture
 1. Single controller owns node registry and dispatch routing.
@@ -64,6 +66,13 @@ Active tickets:
 16. `T-00142` GitHub one-click OAuth/device flow + installation picker.
 17. `T-00143` Dispatch/macOS GitHub profile selection + PR-run linkage.
 18. `T-00162` Node-local workspace map + managed remote project roots.
+19. `T-00163` Global host/node/hybrid role model + UI gating.
+20. `T-00164` Topology add-node quick actions + tailnet candidate discovery.
+21. `T-00165` Pairing walkthrough DX pass (auto-prefill + actionable errors).
+22. `T-00166` Project remote-execution settings IA simplification.
+23. `T-00167` Topology-driven one-click provider bootstrap (Railway first).
+24. `T-00168` Node runtime image hardening + filesystem contract docs.
+25. `T-00169` Remote node onboarding docs: host vs node quickstart.
 
 ## M1-M3 Acceptance Summary
 M1:
@@ -233,11 +242,16 @@ Targeted scenarios:
 7. Containerized node bootstrap on clean host with enrollment bundle import.
 
 ## Immediate Next Steps
-1. Run full remote-node e2e matrix on second MacBook + Railway private (`T-00158`) with runbook capture.
+1. Run full remote-node e2e matrix on second MacBook + Railway private (`T-00158`) with runbook capture (`docs/guides/remote-node-laptop-e2e.md`).
 2. Fix topology refresh reliability regression where node list can appear empty on first load (`T-00160`).
-3. Run full quality gates and reduce complexity hotspots tracked in `T-00161`.
-4. Expand GitHub App coverage with connect/command integration tests for CLI UX edge cases.
-5. Add controller command bridge for provider bootstrap (`T-00112`) starting with AWS SSM path.
-6. Implement `hack flow feedback-pr` end-to-end ticket workflow (`T-00113`).
-7. Replace cloud shim adapters with provider-native integrations (AWS/GCP/Azure/Vault).
-8. Publish and validate GHCR `hack-node-runtime` image across amd64/arm64 (`T-00118`).
+3. Execute DX simplification tracks from the dedicated plan:
+   - role model + UI gating (`T-00163`)
+   - topology add-node quick actions (`T-00164`)
+   - pairing walkthrough polish (`T-00165`)
+   - project IA simplification (`T-00166`)
+   - provider one-click bootstrap UX (`T-00167`)
+4. Harden node runtime image + filesystem contract and docs (`T-00168`, `T-00169`, `T-00118`).
+5. Run full quality gates and reduce complexity hotspots tracked in `T-00161`.
+6. Expand GitHub App coverage with connect/command integration tests for CLI UX edge cases.
+7. Add controller command bridge for provider bootstrap (`T-00112`) starting with AWS SSM path.
+8. Implement `hack flow feedback-pr` end-to-end ticket workflow (`T-00113`).

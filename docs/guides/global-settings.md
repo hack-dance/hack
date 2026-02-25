@@ -12,6 +12,10 @@ Common settings:
 - `controlPlane.gateway.bind` (default `127.0.0.1`)
 - `controlPlane.gateway.port` (default `7788`)
 - `controlPlane.gateway.allowWrites` (default `false`)
+- `controlPlane.cluster.defaultNodeId` (default remote execution node)
+- `controlPlane.cluster.staleAfterMs` (health threshold)
+- `controlPlane.cluster.offlineAfterMs` (health threshold)
+- `controlPlane.extensions["dance.hack.tailscale"].config.authKey` (reusable private bootstrap key)
 - `sessions.mux` (default `auto`; `auto|tmux|zellij|none`)
 - `controlPlane.extensions["dance.hack.cloudflare"].config.hostname`
 - `controlPlane.tui.logs.maxEntries` (TUI log buffer cap, default `2000`)

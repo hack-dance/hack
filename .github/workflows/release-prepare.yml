@@ -39,6 +39,9 @@ jobs:
       - name: Typecheck (Turbo)
         run: bun run turbo:typecheck
 
+      - name: Privacy check
+        run: bun run privacy:check
+
       - name: Quality checks (Turbo)
         run: bun run turbo:check
 

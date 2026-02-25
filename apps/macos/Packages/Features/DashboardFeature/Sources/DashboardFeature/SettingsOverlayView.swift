@@ -1764,11 +1764,11 @@ private struct RailwayExtensionSettingsView: View {
 
         GlassCard(title: "Bootstrap configuration", systemImage: "gearshape.2") {
           VStack(alignment: .leading, spacing: 12) {
-            Text("Project is required. Service is optional and can be auto-created from node name.")
-            .font(.mono(.caption))
-            .foregroundStyle(.secondary)
+            Text("Project is optional. Leave it blank to use saved provider/global defaults.")
+              .font(.mono(.caption))
+              .foregroundStyle(.secondary)
 
-            TextField("Railway project (required)", text: $railwayProject)
+            TextField("Railway project (optional)", text: $railwayProject)
               .textFieldStyle(.roundedBorder)
 
             HStack(spacing: 10) {
@@ -1962,9 +1962,6 @@ private struct RailwayExtensionSettingsView: View {
   }
 
   private var canBootstrapRailwayNode: Bool {
-    if railwayProject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-      return false
-    }
     if railwayPrivate, !privateBootstrapReady {
       return false
     }
@@ -2055,7 +2052,7 @@ private struct RailwayExtensionSettingsView: View {
     defer { isBootstrapping = false }
 
     let request = RailwayBootstrapRequest(
-      railwayProject: railwayProject.trimmingCharacters(in: .whitespacesAndNewlines),
+      railwayProject: normalizedOrNil(railwayProject),
       railwayService: normalizedOrNil(railwayService),
       railwayEnvironment: normalizedOrNil(railwayEnvironment),
       railwayWorkspace: normalizedOrNil(railwayWorkspace),

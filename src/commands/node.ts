@@ -39,6 +39,7 @@ import { isTty } from "../ui/terminal.ts";
 const DEFAULT_NODE_CAPABILITIES = ["runtime", "gateway", "supervisor"] as const;
 const TRAILING_SLASH_PATTERN = /\/+$/;
 const PROJECT_ID_LIKE_PATTERN = /^[a-f0-9]{12}$/i;
+const DEFAULT_REMOTE_HACK_PATH = "$HOME/.hack/bin/hack";
 const DEFAULT_RAILWAY_IMAGE = "hackdance/hack:latest";
 const DEFAULT_NODE_GATEWAY_PORT = 7788;
 const DEFAULT_RAILWAY_GATEWAY_PORT = DEFAULT_NODE_GATEWAY_PORT;
@@ -48,6 +49,8 @@ const DEFAULT_RAILWAY_TAILSCALE_SOCKET = "/tmp/tailscaled.sock";
 const RAILWAY_SERVICE_NAME_PATTERN = /[^a-z0-9-]+/g;
 const TRAILING_DOT_PATTERN = /\.$/;
 const NODE_AUTH_LOOKUP_TTL_MS = 60_000;
+const NODE_STATUS_HTTP_TIMEOUT_MS = 8000;
+const NODE_PREFLIGHT_HTTP_TIMEOUT_MS = 3000;
 const TAILSCALE_AUTH_KEY_ENV = "HACK_TAILSCALE_AUTH_KEY";
 
 type NodeAuthLookupCacheEntry = {
@@ -126,7 +129,8 @@ const optRemoteHack = defineOption({
   type: "string",
   long: "--remote-hack",
   valueHint: "<cmd>",
-  description: "Remote hack command (default: hack)",
+  description:
+    "Remote hack command override (default: auto-detect: $HOME/.hack/bin/hack, /opt/homebrew/bin/hack, /usr/local/bin/hack, /usr/bin/hack, then PATH)",
 } as const);
 
 const optController = defineOption({
@@ -1021,11 +1025,9 @@ async function handleNodePair({
   }
   const source = target.source;
   const endpoint = target.endpoint;
-  const remoteHack = (args.options.remoteHack ?? "hack").trim();
-  if (!remoteHack) {
-    logger.error({ message: "Invalid --remote-hack command." });
-    return 1;
-  }
+  const remoteHack = normalizeRemoteHackOverride({
+    value: args.options.remoteHack,
+  });
 
   const pairingName = derivePairingName({
     explicitName: args.options.name,
@@ -1193,11 +1195,9 @@ async function handleNodePairRequest({
     logger.error({ message: "Missing --source <user@host>." });
     return 1;
   }
-  const remoteHack = (args.options.remoteHack ?? "hack").trim();
-  if (!remoteHack) {
-    logger.error({ message: "Invalid --remote-hack command." });
-    return 1;
-  }
+  const remoteHack = normalizeRemoteHackOverride({
+    value: args.options.remoteHack,
+  });
 
   let endpoint = (args.options.endpoint ?? "").trim();
   if (!endpoint) {
@@ -1526,11 +1526,9 @@ async function handleNodePairFulfill({
     logger.error({ message: "Missing --code <code>." });
     return 1;
   }
-  const remoteHack = (args.options.remoteHack ?? "hack").trim();
-  if (!remoteHack) {
-    logger.error({ message: "Invalid --remote-hack command." });
-    return 1;
-  }
+  const remoteHack = normalizeRemoteHackOverride({
+    value: args.options.remoteHack,
+  });
 
   const session = await getNodePairingSession({ sessionId });
   if (!session) {
@@ -1794,7 +1792,7 @@ type PairWalkthroughResolvedInput = {
   readonly defaultNode: boolean;
   readonly ttlMinutes: number;
   readonly sshPort: number | undefined;
-  readonly remoteHack: string;
+  readonly remoteHack: string | undefined;
 };
 
 type PairWalkthroughError = {
@@ -1882,13 +1880,9 @@ async function resolvePairWalkthroughInput(input: {
     return ttlMinutes;
   }
 
-  const remoteHack = (input.args.options.remoteHack ?? "hack").trim();
-  if (!remoteHack) {
-    return buildPairWalkthroughError({
-      cancelled: false,
-      error: "Invalid --remote-hack command.",
-    });
-  }
+  const remoteHack = normalizeRemoteHackOverride({
+    value: input.args.options.remoteHack,
+  });
 
   return {
     ok: true,
@@ -3638,10 +3632,14 @@ async function wakeRailwayNodeEndpoint(input: {
   const endpoint = input.endpoint.replace(TRAILING_SLASH_PATTERN, "");
   const wakeUrl = `${endpoint}/v1/node/status`;
   try {
-    await fetch(wakeUrl, {
-      method: "GET",
-      headers: {
-        accept: "application/json",
+    await fetchWithTimeout({
+      url: wakeUrl,
+      timeoutMs: NODE_PREFLIGHT_HTTP_TIMEOUT_MS,
+      init: {
+        method: "GET",
+        headers: {
+          accept: "application/json",
+        },
       },
     });
   } catch {
@@ -3839,8 +3837,10 @@ export const __testOnlyNodePair = {
   extractSshHost,
   buildAutoEndpointCandidates,
   normalizeHostHint,
+  normalizeRemoteHackOverride,
   parseEnrollmentBundleFromRemoteOutput,
   renderShellCommand,
+  renderRemoteHackCommand,
 };
 
 export const __testOnlyNodeRailway = {
@@ -4003,10 +4003,14 @@ async function probeNode(input: { readonly node: NodeRecord }): Promise<{
   }
 
   try {
-    const res = await fetch(`${input.node.endpoint}/v1/node/status`, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${token}`,
+    const res = await fetchWithTimeout({
+      url: `${input.node.endpoint}/v1/node/status`,
+      timeoutMs: NODE_STATUS_HTTP_TIMEOUT_MS,
+      init: {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
       },
     });
     if (!res.ok) {
@@ -4083,7 +4087,10 @@ async function probeNode(input: { readonly node: NodeRecord }): Promise<{
       platform: input.node.platform,
       arch: input.node.arch,
     });
-    const message = error instanceof Error ? error.message : "request failed";
+    const message = describeRequestError({
+      error,
+      timeoutMs: NODE_STATUS_HTTP_TIMEOUT_MS,
+    });
     return {
       ok: false,
       input: input.node,
@@ -4172,9 +4179,13 @@ async function preflightNodeEndpoint(input: {
   const endpoint = input.endpoint.replace(TRAILING_SLASH_PATTERN, "");
   const url = `${endpoint}/v1/node/status`;
   try {
-    const response = await fetch(url, {
-      method: "GET",
-      headers: { accept: "application/json" },
+    const response = await fetchWithTimeout({
+      url,
+      timeoutMs: NODE_PREFLIGHT_HTTP_TIMEOUT_MS,
+      init: {
+        method: "GET",
+        headers: { accept: "application/json" },
+      },
     });
     if (
       response.status === 200 ||
@@ -4188,8 +4199,51 @@ async function preflightNodeEndpoint(input: {
       error: `Unexpected HTTP ${response.status} from ${url}.`,
     };
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "request failed";
+    const message = describeRequestError({
+      error,
+      timeoutMs: NODE_PREFLIGHT_HTTP_TIMEOUT_MS,
+    });
     return { ok: false, error: `${url} unreachable: ${message}` };
+  }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+function describeRequestError(input: {
+  readonly error: unknown;
+  readonly timeoutMs: number;
+}): string {
+  if (isAbortError(input.error)) {
+    return `request timed out after ${input.timeoutMs}ms`;
+  }
+  if (input.error instanceof Error) {
+    return input.error.message;
+  }
+  return "request failed";
+}
+
+/**
+ * Enforce finite HTTP probes so one unhealthy endpoint cannot stall the
+ * controller health/status loop.
+ */
+async function fetchWithTimeout(input: {
+  readonly url: string;
+  readonly timeoutMs: number;
+  readonly init?: RequestInit;
+}): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort();
+  }, input.timeoutMs);
+  try {
+    return await fetch(input.url, {
+      ...input.init,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -4350,19 +4404,57 @@ function derivePairingName(input: {
   return hostPart || source;
 }
 
+/**
+ * Normalize optional --remote-hack override.
+ */
+function normalizeRemoteHackOverride(input: {
+  readonly value: string | undefined;
+}): string | undefined {
+  const trimmed = (input.value ?? "").trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Build the remote shell command used over SSH to invoke hack.
+ *
+ * When no explicit override is supplied, this resolves the binary dynamically
+ * on the remote host and prefers the standard install location first.
+ */
+function renderRemoteHackCommand(input: {
+  readonly remoteHack: string | undefined;
+  readonly args: readonly string[];
+}): string {
+  if (input.remoteHack) {
+    return renderShellCommand({
+      args: [input.remoteHack, ...input.args],
+    });
+  }
+  const commandTail = input.args.map(shellQuote).join(" ");
+  const lines = [
+    `if [ -x "${DEFAULT_REMOTE_HACK_PATH}" ]; then __hack_bin="${DEFAULT_REMOTE_HACK_PATH}";`,
+    'elif [ -x "/opt/homebrew/bin/hack" ]; then __hack_bin="/opt/homebrew/bin/hack";',
+    'elif [ -x "/usr/local/bin/hack" ]; then __hack_bin="/usr/local/bin/hack";',
+    'elif [ -x "/usr/bin/hack" ]; then __hack_bin="/usr/bin/hack";',
+    'elif command -v hack >/dev/null 2>&1; then __hack_bin="$(command -v hack)";',
+    `else echo "hack not found. Install to ${DEFAULT_REMOTE_HACK_PATH} or add hack to PATH." >&2; exit 127;`,
+    "fi;",
+    `exec "$__hack_bin" ${commandTail}`,
+  ];
+  return lines.join(" ");
+}
+
 async function runRemoteNodeInit(input: {
   readonly source: string;
   readonly endpoint: string;
   readonly name: string;
   readonly labels: readonly string[];
   readonly sshPort: number | undefined;
-  readonly remoteHack: string;
+  readonly remoteHack: string | undefined;
 }): Promise<
   | { readonly ok: true; readonly stdout: string }
   | { readonly ok: false; readonly error: string }
 > {
   const remoteArgs = [
-    input.remoteHack,
     "node",
     "init",
     "--name",
@@ -4378,7 +4470,10 @@ async function runRemoteNodeInit(input: {
       ? ["-p", String(Math.max(1, Math.trunc(input.sshPort)))]
       : []),
     input.source,
-    renderShellCommand({ args: remoteArgs }),
+    renderRemoteHackCommand({
+      remoteHack: input.remoteHack,
+      args: remoteArgs,
+    }),
   ];
   const result = await exec(sshArgs, { stdin: "ignore" });
   if (result.exitCode !== 0) {
@@ -4397,7 +4492,7 @@ async function runRemoteNodeInit(input: {
 async function runControllerPairStart(input: {
   readonly controller: string;
   readonly controllerSshPort: number | undefined;
-  readonly remoteHack: string;
+  readonly remoteHack: string | undefined;
   readonly source: string;
   readonly endpoint: string;
   readonly name: string;
@@ -4409,7 +4504,6 @@ async function runControllerPairStart(input: {
   | { readonly ok: false; readonly error: string }
 > {
   const remoteArgs = [
-    input.remoteHack,
     "node",
     "pair",
     "start",
@@ -4431,7 +4525,10 @@ async function runControllerPairStart(input: {
       ? ["-p", String(Math.max(1, Math.trunc(input.controllerSshPort)))]
       : []),
     input.controller,
-    renderShellCommand({ args: remoteArgs }),
+    renderRemoteHackCommand({
+      remoteHack: input.remoteHack,
+      args: remoteArgs,
+    }),
   ];
   const result = await exec(sshArgs, { stdin: "ignore" });
   if (result.exitCode !== 0) {
@@ -4462,7 +4559,6 @@ function buildPairingCommandSet(input: {
   readonly endToEnd: string;
 } {
   const approveArgs = [
-    "hack",
     "node",
     "pair",
     "approve",
@@ -4488,7 +4584,10 @@ function buildPairingCommandSet(input: {
     "-",
     ...(input.defaultNode ? ["--default"] : []),
   ];
-  const approveRemote = renderShellCommand({ args: approveArgs });
+  const approveRemote = renderRemoteHackCommand({
+    remoteHack: undefined,
+    args: approveArgs,
+  });
   const completeController = renderShellCommand({ args: completeArgs });
   const sshPrefix =
     typeof input.sshPort === "number"
@@ -4510,13 +4609,12 @@ async function runRemotePairApprove(input: {
   readonly sessionId: string;
   readonly code: string;
   readonly sshPort: number | undefined;
-  readonly remoteHack: string;
+  readonly remoteHack: string | undefined;
 }): Promise<
   | { readonly ok: true; readonly stdout: string }
   | { readonly ok: false; readonly error: string }
 > {
   const remoteArgs = [
-    input.remoteHack,
     "node",
     "pair",
     "approve",
@@ -4537,7 +4635,10 @@ async function runRemotePairApprove(input: {
       ? ["-p", String(Math.max(1, Math.trunc(input.sshPort)))]
       : []),
     input.source,
-    renderShellCommand({ args: remoteArgs }),
+    renderRemoteHackCommand({
+      remoteHack: input.remoteHack,
+      args: remoteArgs,
+    }),
   ];
   const result = await exec(sshArgs, { stdin: "ignore" });
   if (result.exitCode !== 0) {

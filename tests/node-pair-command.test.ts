@@ -74,3 +74,39 @@ test("renderShellCommand quotes args safely", () => {
   expect(command).toContain("'--name'");
   expect(command).toContain("'old macbook'\\''s node'");
 });
+
+test("normalizeRemoteHackOverride trims empty overrides", () => {
+  expect(__testOnlyNodePair.normalizeRemoteHackOverride({ value: "   " })).toBe(
+    undefined
+  );
+  expect(
+    __testOnlyNodePair.normalizeRemoteHackOverride({
+      value: "/Users/beast/.hack/bin/hack",
+    })
+  ).toBe("/Users/beast/.hack/bin/hack");
+});
+
+test("renderRemoteHackCommand prefers default install path when override is absent", () => {
+  const command = __testOnlyNodePair.renderRemoteHackCommand({
+    remoteHack: undefined,
+    args: ["node", "init", "--json"],
+  });
+
+  expect(command).toContain('if [ -x "$HOME/.hack/bin/hack" ]');
+  expect(command).toContain("elif command -v hack >/dev/null 2>&1;");
+  expect(command).toContain('exec "$__hack_bin"');
+  expect(command).toContain("'node'");
+  expect(command).toContain("'init'");
+});
+
+test("renderRemoteHackCommand uses explicit override when provided", () => {
+  const command = __testOnlyNodePair.renderRemoteHackCommand({
+    remoteHack: "/Users/beast/.hack/bin/hack",
+    args: ["node", "init", "--json"],
+  });
+
+  expect(command).toContain("'/Users/beast/.hack/bin/hack'");
+  expect(command).toContain("'node'");
+  expect(command).toContain("'init'");
+  expect(command).not.toContain("__hack_bin");
+});

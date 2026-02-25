@@ -76,9 +76,10 @@ public enum HackCLILocator {
 
   /// Ensure desktop subprocesses resolve global state from a stable config path.
   ///
-  /// We prefer an explicit override only when it expands to a real, readable path.
-  /// Otherwise we fall back to `~/.hack/hack.config.json` so node registry reads do
-  /// not intermittently drift to an empty or containerized profile.
+  /// The desktop app should always use the user's canonical global profile under
+  /// `~/.hack`, even when a shell-exported `HACK_GLOBAL_CONFIG_PATH` points at a
+  /// project-local `.hack` file. Allowing arbitrary overrides here causes topology
+  /// and pairing views to read/write the wrong node registry.
   private static func resolveCanonicalGlobalConfigPath(
     currentValue: String?,
     home: String
@@ -93,10 +94,15 @@ public enum HackCLILocator {
     guard !expanded.isEmpty, !isContainerizedHome(expanded) else {
       return fallback
     }
-    if FileManager.default.fileExists(atPath: expanded) {
-      return expanded
+    let normalizedExpanded = NSString(string: expanded).standardizingPath
+    let normalizedHomeHackPrefix = NSString(string: "\(home)/.hack/").standardizingPath
+    guard normalizedExpanded.hasPrefix(normalizedHomeHackPrefix) else {
+      return fallback
     }
-    return fallback
+    guard FileManager.default.fileExists(atPath: normalizedExpanded) else {
+      return fallback
+    }
+    return normalizedExpanded
   }
 
   public static func resolveHackExecutable(in env: [String: String]) -> String? {

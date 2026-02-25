@@ -35,6 +35,8 @@ struct NodeTopologySettingsView: View {
   private var topologyLayoutByControllerRaw = ""
 
   private let topologyRefreshThrottleSeconds: TimeInterval = 30
+  private let nodeStatusProbeTimeoutSeconds: TimeInterval = 10
+  private let tailscaleInspectTimeoutSeconds: TimeInterval = 6
 
   var body: some View {
     ScrollView {
@@ -967,29 +969,11 @@ struct NodeTopologySettingsView: View {
     }
 
     async let nodeList = model.listNodes()
-    async let nodeStatus = model.probeNodes()
-    async let tailscaleStatus = model.inspectTailscale()
     async let controllerSourceProject = model.getGlobalConfig(
       key: "controlPlane.gateway.sourceProjectId"
     )
 
     let list = await nodeList
-    let status = await nodeStatus
-    let tailscaleResult = await tailscaleStatus
-    let controllerSourceProjectId = await controllerSourceProject
-    if Task.isCancelled {
-      return
-    }
-    let pendingSessions: [NodePairingSession]
-    if isControllerHost {
-      pendingSessions = await model.listNodePairSessions(status: "pending")
-    } else {
-      pendingSessions = []
-    }
-    if Task.isCancelled {
-      return
-    }
-
     let previousRegistry = registry
     var resolvedList = list
     if resolvedList == nil || resolvedList?.nodes.isEmpty == true {
@@ -1020,6 +1004,23 @@ struct NodeTopologySettingsView: View {
     if let resolvedList {
       registry = resolvedList
     }
+
+    let status = await probeNodesWithTimeout()
+    let tailscaleResult = await inspectTailscaleWithTimeout()
+    let controllerSourceProjectId = await controllerSourceProject
+    if Task.isCancelled {
+      return
+    }
+    let pendingSessions: [NodePairingSession]
+    if isControllerHost {
+      pendingSessions = await model.listNodePairSessions(status: "pending")
+    } else {
+      pendingSessions = []
+    }
+    if Task.isCancelled {
+      return
+    }
+
     var resolvedTailscale = tailscaleResult
     if resolvedTailscale == nil || resolvedTailscale?.error != nil {
       if let retry = await model.inspectTailscale() {
@@ -1063,6 +1064,43 @@ struct NodeTopologySettingsView: View {
     if selectedTopologyNodeId != Self.localTopologyNodeId, !knownNodeIds.contains(selectedTopologyNodeId) {
       selectedTopologyNodeId = Self.localTopologyNodeId
     }
+  }
+
+  /**
+   * Probe node health with a timeout so topology rendering is never blocked by
+   * a stuck `hack node status` subprocess.
+   */
+  private func probeNodesWithTimeout() async -> NodeStatusResponse? {
+    let task = Task {
+      await model.probeNodes()
+    }
+    let timeoutTask = Task {
+      try? await Task.sleep(
+        nanoseconds: UInt64(nodeStatusProbeTimeoutSeconds * 1_000_000_000)
+      )
+      task.cancel()
+    }
+    let result = await task.value
+    timeoutTask.cancel()
+    return result
+  }
+
+  /**
+   * Tailnet inspection should remain best-effort and never block topology UI.
+   */
+  private func inspectTailscaleWithTimeout() async -> TailscaleInspectResponse? {
+    let task = Task {
+      await model.inspectTailscale()
+    }
+    let timeoutTask = Task {
+      try? await Task.sleep(
+        nanoseconds: UInt64(tailscaleInspectTimeoutSeconds * 1_000_000_000)
+      )
+      task.cancel()
+    }
+    let result = await task.value
+    timeoutTask.cancel()
+    return result
   }
 
   private func queueTopologyRefresh(force: Bool) {

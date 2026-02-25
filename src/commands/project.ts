@@ -4021,7 +4021,7 @@ async function resolveProjectLifecycleTarget(opts: {
   return resolveProjectExecutionTarget({
     requestedTarget: opts.requestedTarget,
     controlPlane: controlPlane.config,
-    defaultNodeId: registry.defaultNodeId,
+    defaultNodeId: registry.defaultNodeId ?? undefined,
   });
 }
 

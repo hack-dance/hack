@@ -4,7 +4,7 @@ import { __testOnlyNodePair } from "../src/commands/node.ts";
 test("derivePairingName prefers explicit name", () => {
   const result = __testOnlyNodePair.derivePairingName({
     explicitName: "remote-1",
-    source: "ubuntu@helsinki.tail8fedfd.ts.net",
+    source: "remote-user@node-a.tailnet.ts.net",
   });
   expect(result).toBe("remote-1");
 });
@@ -12,34 +12,34 @@ test("derivePairingName prefers explicit name", () => {
 test("derivePairingName falls back to source host", () => {
   const result = __testOnlyNodePair.derivePairingName({
     explicitName: undefined,
-    source: "ubuntu@helsinki.tail8fedfd.ts.net:22",
+    source: "remote-user@node-a.tailnet.ts.net:22",
   });
-  expect(result).toBe("helsinki.tail8fedfd.ts.net");
+  expect(result).toBe("node-a.tailnet.ts.net");
 });
 
 test("extractSshHost removes username and optional port", () => {
   expect(
-    __testOnlyNodePair.extractSshHost("ubuntu@helsinki.tail8fedfd.ts.net:22")
-  ).toBe("helsinki.tail8fedfd.ts.net");
-  expect(__testOnlyNodePair.extractSshHost("helsinki.tail8fedfd.ts.net")).toBe(
-    "helsinki.tail8fedfd.ts.net"
+    __testOnlyNodePair.extractSshHost("remote-user@node-a.tailnet.ts.net:22")
+  ).toBe("node-a.tailnet.ts.net");
+  expect(__testOnlyNodePair.extractSshHost("node-a.tailnet.ts.net")).toBe(
+    "node-a.tailnet.ts.net"
   );
 });
 
 test("normalizeHostHint extracts host from URL", () => {
   const result = __testOnlyNodePair.normalizeHostHint(
-    "https://helsinki.tail8fedfd.ts.net"
+    "https://node-a.tailnet.ts.net"
   );
-  expect(result).toBe("helsinki.tail8fedfd.ts.net");
+  expect(result).toBe("node-a.tailnet.ts.net");
 });
 
 test("buildAutoEndpointCandidates prefers HTTPS for tailscale DNS", () => {
   const result = __testOnlyNodePair.buildAutoEndpointCandidates({
-    host: "helsinki.tail8fedfd.ts.net",
+    host: "node-a.tailnet.ts.net",
   });
   expect(result).toEqual([
-    "https://helsinki.tail8fedfd.ts.net",
-    "http://helsinki.tail8fedfd.ts.net:7788",
+    "https://node-a.tailnet.ts.net",
+    "http://node-a.tailnet.ts.net:7788",
   ]);
 });
 
@@ -81,9 +81,9 @@ test("normalizeRemoteHackOverride trims empty overrides", () => {
   );
   expect(
     __testOnlyNodePair.normalizeRemoteHackOverride({
-      value: "/Users/beast/.hack/bin/hack",
+      value: "/Users/remote-user/.hack/bin/hack",
     })
-  ).toBe("/Users/beast/.hack/bin/hack");
+  ).toBe("/Users/remote-user/.hack/bin/hack");
 });
 
 test("renderRemoteHackCommand prefers default install path when override is absent", () => {
@@ -101,11 +101,11 @@ test("renderRemoteHackCommand prefers default install path when override is abse
 
 test("renderRemoteHackCommand uses explicit override when provided", () => {
   const command = __testOnlyNodePair.renderRemoteHackCommand({
-    remoteHack: "/Users/beast/.hack/bin/hack",
+    remoteHack: "/Users/remote-user/.hack/bin/hack",
     args: ["node", "init", "--json"],
   });
 
-  expect(command).toContain("'/Users/beast/.hack/bin/hack'");
+  expect(command).toContain("'/Users/remote-user/.hack/bin/hack'");
   expect(command).toContain("'node'");
   expect(command).toContain("'init'");
   expect(command).not.toContain("__hack_bin");

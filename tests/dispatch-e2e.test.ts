@@ -159,6 +159,11 @@ runTest(
         throw new Error("Missing workspace ensure payload");
       }
       expect(ensurePayload.branch).toBe("feat/e2e-branch");
+      expect(typeof ensurePayload.controller_project_id).toBe("string");
+      expect(
+        (ensurePayload.controller_project_id as string).trim().length
+      ).toBeGreaterThan(0);
+      expect(ensurePayload.controller_project_name).toBe("dispatch-e2e");
       const bootstrap = ensurePayload.bootstrap as
         | Record<string, unknown>
         | undefined;
@@ -186,12 +191,147 @@ runTest(
   }
 );
 
+runTest(
+  "dispatch run flushes mutagen sync for local_edit_remote_run mode",
+  async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "hack-dispatch-e2e-sync-"));
+    previousHome = process.env.HOME;
+    previousGlobalConfigPath = process.env.HACK_GLOBAL_CONFIG_PATH;
+    process.env.HOME = tempHome;
+    process.env.HACK_GLOBAL_CONFIG_PATH = "";
+
+    const workspace = join(tempHome, "workspace");
+    await mkdir(workspace, { recursive: true });
+    const projectRoot = join(workspace, "dispatch-sync-project");
+    await createMinimalProject({
+      projectRoot,
+      projectName: "dispatch-sync",
+      controlPlane: {
+        execution: {
+          mode: "local_edit_remote_run",
+          sync: {
+            engine: "mutagen",
+            exclude: ["node_modules", "dist"],
+          },
+        },
+      },
+    });
+    await initializeGitRepo({ projectRoot });
+    await runGit({
+      cwd: projectRoot,
+      args: ["remote", "add", "origin", "https://github.com/example/repo.git"],
+    });
+
+    const project = await findProjectContext(projectRoot);
+    if (!project) {
+      throw new Error("Failed to resolve project context");
+    }
+    const registered = await upsertProjectRegistration({ project });
+    if (registered.status === "conflict") {
+      throw new Error(
+        "Unexpected project registration conflict in sync e2e test"
+      );
+    }
+
+    const nodeToken = "dispatch-sync-node-token";
+    const nodeTokenEnv = "HACK_DISPATCH_SYNC_NODE_TOKEN";
+    const nodeId = "dispatch-sync-node";
+    const authRef = `env:${nodeTokenEnv}`;
+    trackedAuthRefs.push(authRef);
+    process.env[nodeTokenEnv] = nodeToken;
+    const gateway = await startFakeNodeGateway({
+      token: nodeToken,
+      projectName: "dispatch-sync",
+      projectId: "dispatch-sync-project-id",
+      branch: "feat/sync-branch",
+      projectRoot: "/Users/remote-user/.hack/projects/dispatch-sync",
+    });
+    const mutagenLogPath = join(tempHome, "mutagen.log");
+    const mutagenBinDir = join(tempHome, "bin");
+    const mutagenBinPath = await createMockMutagenBinary({
+      binDir: mutagenBinDir,
+    });
+
+    try {
+      await upsertNodeRecord({
+        id: nodeId,
+        name: "Dispatch Sync Node",
+        source: "remote-user@198.51.100.42",
+        labels: ["e2e", "sync"],
+        capabilities: ["runtime", "gateway", "supervisor"],
+        endpoint: gateway.baseUrl,
+        authRef,
+        lastSeenAt: new Date().toISOString(),
+        status: "healthy",
+        platform: "macos",
+        arch: "arm64",
+        version: "test",
+      });
+
+      const command = [
+        "bun",
+        resolve(import.meta.dir, "../index.ts"),
+        "dispatch",
+        "run",
+        "--project",
+        "dispatch-sync",
+        "--node",
+        nodeId,
+        "--branch",
+        "feat/sync-branch",
+        "--json",
+        "--",
+        "echo",
+        "dispatch-sync",
+      ] as const;
+
+      const result = await runCommand({
+        cmd: command,
+        cwd: resolve(import.meta.dir, ".."),
+        env: {
+          ...process.env,
+          HOME: tempHome,
+          HACK_GLOBAL_CONFIG_PATH: "",
+          [nodeTokenEnv]: nodeToken,
+          PATH: `${mutagenBinDir}:${process.env.PATH ?? ""}`,
+          HACK_TEST_MUTAGEN_LOG_PATH: mutagenLogPath,
+          NO_COLOR: "1",
+        },
+      });
+      if (result.exitCode !== 0) {
+        throw new Error(
+          `dispatch sync command failed\nstdout:\n${result.stdout}\n\nstderr:\n${result.stderr}`
+        );
+      }
+      const output = parseDispatchJson({ text: result.stdout });
+      expect(output.status).toBe("completed");
+
+      const mutagenLog = await readFile(mutagenLogPath, "utf8");
+      expect(mutagenLog).toContain("sync create");
+      expect(mutagenLog).toContain("sync flush");
+      expect(mutagenLog).toContain(projectRoot);
+      expect(mutagenLog).toContain(
+        "/Users/remote-user/.hack/projects/dispatch-sync"
+      );
+
+      const events = await readFile(output.artifacts.eventsPath, "utf8");
+      const manifest = await readFile(output.artifacts.manifestPath, "utf8");
+      expect(events).toContain('"type":"run.sync.prepared"');
+      expect(manifest).toContain('"sync"');
+    } finally {
+      gateway.stop();
+      await rm(mutagenBinPath, { force: true }).catch(() => undefined);
+    }
+  }
+);
+
 /**
  * Create a minimal project fixture with `.hack` metadata required by project discovery.
  */
 async function createMinimalProject(input: {
   readonly projectRoot: string;
   readonly projectName: string;
+  readonly controlPlane?: Record<string, unknown>;
 }): Promise<void> {
   await mkdir(resolve(input.projectRoot, ".hack"), { recursive: true });
   await writeFile(
@@ -200,9 +340,34 @@ async function createMinimalProject(input: {
   );
   await writeFile(
     resolve(input.projectRoot, ".hack", "hack.config.json"),
-    `${JSON.stringify({ name: input.projectName }, null, 2)}\n`
+    `${JSON.stringify(
+      {
+        name: input.projectName,
+        ...(input.controlPlane ? { controlPlane: input.controlPlane } : {}),
+      },
+      null,
+      2
+    )}\n`
   );
   await writeFile(resolve(input.projectRoot, "README.md"), "# dispatch-e2e\n");
+}
+
+/**
+ * Create a lightweight fake mutagen binary that records argv for test assertions.
+ */
+async function createMockMutagenBinary(input: {
+  readonly binDir: string;
+}): Promise<string> {
+  await mkdir(input.binDir, { recursive: true });
+  const binaryPath = join(input.binDir, "mutagen");
+  const script = [
+    "#!/usr/bin/env sh",
+    'echo "$@" >> "$HACK_TEST_MUTAGEN_LOG_PATH"',
+    "exit 0",
+    "",
+  ].join("\n");
+  await writeFile(binaryPath, script, { mode: 0o755 });
+  return binaryPath;
 }
 
 /**

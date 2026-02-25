@@ -27,6 +27,7 @@ export type NodeStatus = "healthy" | "stale" | "offline" | "unknown";
 export interface NodeRecord {
   readonly id: string;
   readonly name: string;
+  readonly source?: string;
   readonly labels: readonly string[];
   readonly capabilities: readonly string[];
   readonly endpoint: string;
@@ -136,6 +137,7 @@ function parseNodeRecord(value: unknown): NodeRecord | null {
   }
   const id = getString(value, "id");
   const name = getString(value, "name");
+  const source = getString(value, "source");
   const endpoint = getString(value, "endpoint");
   const authRef = getString(value, "authRef");
   const createdAt = getString(value, "createdAt");
@@ -159,6 +161,7 @@ function parseNodeRecord(value: unknown): NodeRecord | null {
   return {
     id,
     name,
+    ...(source ? { source: source.trim() } : {}),
     labels: normalizeLabels(labels),
     capabilities: normalizeCapabilities(capabilities),
     endpoint: endpoint.trim().replace(TRAILING_SLASH_PATTERN, ""),
@@ -250,6 +253,7 @@ export async function readNodesRegistry(): Promise<NodesRegistry> {
 export async function upsertNodeRecord(input: {
   readonly id?: string;
   readonly name: string;
+  readonly source?: string;
   readonly labels?: readonly string[];
   readonly capabilities?: readonly string[];
   readonly endpoint: string;
@@ -268,9 +272,11 @@ export async function upsertNodeRecord(input: {
       (node) => node.id === nodeId
     );
     const existing = existingIndex >= 0 ? registry.nodes[existingIndex] : null;
+    const source = input.source?.trim() || existing?.source;
     const node: NodeRecord = {
       id: nodeId,
       name: input.name.trim(),
+      ...(source ? { source } : {}),
       labels: normalizeLabels([...(input.labels ?? [])]),
       capabilities: normalizeCapabilities([
         ...(input.capabilities ?? ["runtime", "gateway", "supervisor"]),

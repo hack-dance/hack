@@ -44,6 +44,7 @@ import {
   writeDispatchRunArtifacts,
 } from "../lib/dispatch-runs.ts";
 import { getString, isRecord } from "../lib/guards.ts";
+import { ensureMutagenLocalToRemoteSync } from "../lib/mutagen-sync.ts";
 import {
   deriveNodeHealth,
   type NodeRecord,
@@ -464,6 +465,41 @@ async function handleDispatchRun({
     return 1;
   }
 
+  let syncMetadata: DispatchSyncMetadata | null = null;
+  const preparedSync = await prepareDispatchSync({
+    config: controlPlane.config,
+    project,
+    node: selectedNode.node,
+    workspace: workspace.data.workspace,
+  });
+  if (!preparedSync.ok) {
+    await finalizeFailedRun({
+      run,
+      errorMessage: preparedSync.error,
+      status: "error",
+      reason: preparedSync.reason,
+      controlPlaneConfig: controlPlane.config,
+      actor,
+    });
+    logger.error({ message: preparedSync.error });
+    return 1;
+  }
+  if (preparedSync.sync) {
+    syncMetadata = preparedSync.sync;
+    await appendDispatchRunEvent({
+      runId,
+      event: {
+        type: "run.sync.prepared",
+        engine: syncMetadata.engine,
+        sessionName: syncMetadata.sessionName,
+        created: syncMetadata.created,
+        localPath: syncMetadata.localPath,
+        remotePath: syncMetadata.remotePath,
+        excludes: syncMetadata.excludes,
+      },
+    });
+  }
+
   const created = await selectedNode.client.createJob({
     projectId: workspace.data.workspace.projectId,
     runner,
@@ -609,6 +645,7 @@ async function handleDispatchRun({
       riskReasons: policy.reasons,
       prOutcome,
       route: routeMetadata,
+      sync: syncMetadata,
     });
     await writeDispatchRunArtifacts({
       runId,
@@ -636,6 +673,7 @@ async function handleDispatchRun({
         riskLevel: policy.level,
         riskReasons: policy.reasons,
         route: routeMetadata,
+        ...(syncMetadata ? { sync: syncMetadata } : {}),
         ...(ticketId ? { ticketId } : {}),
         ...(prOutcome
           ? {
@@ -683,6 +721,7 @@ async function handleDispatchRun({
             workspace: workspace.data.workspace,
             artifacts: run.artifacts,
             route: routeMetadata,
+            ...(syncMetadata ? { sync: syncMetadata } : {}),
             ...(prOutcome ? { pr: prOutcome } : {}),
             ...(outcome.exitCode !== undefined
               ? { exitCode: outcome.exitCode }
@@ -705,6 +744,11 @@ async function handleDispatchRun({
         ["route_source", routeMetadata.nodeSource],
         ["provider", routeMetadata.provider],
         ["profile", routeMetadata.profileId ?? ""],
+        ...(syncMetadata
+          ? ([
+              ["sync", `${syncMetadata.engine}:${syncMetadata.sessionName}`],
+            ] as const)
+          : []),
         ...(prOutcome
           ? ([["github_profile", prOutcome.profileId]] as const)
           : []),
@@ -859,6 +903,7 @@ async function handleDispatchLogs({
 type DispatchProjectResolution = {
   readonly selector: string;
   readonly selectorType: "name" | "id" | "raw";
+  readonly controllerProjectId?: string;
   readonly projectName?: string;
   readonly projectNodeId?: string;
   readonly projectDir?: string;
@@ -877,6 +922,7 @@ async function resolveDispatchProject(input: {
     return {
       selector,
       selectorType: "id",
+      controllerProjectId: byId.registration.id,
       projectName: byId.registration.name,
       ...(controlPlane.config.nodeId
         ? { projectNodeId: controlPlane.config.nodeId }
@@ -896,6 +942,10 @@ async function resolveDispatchProject(input: {
     return {
       selector,
       selectorType: "name",
+      controllerProjectId:
+        registration.status === "conflict"
+          ? registration.existing.id
+          : registration.project.id,
       projectName:
         registration.status === "conflict"
           ? (projectConfig.name ?? selector)
@@ -921,6 +971,8 @@ async function resolveWorkspaceEnsureRequest(input: {
 }): Promise<{
   readonly project?: string;
   readonly projectId?: string;
+  readonly controllerProjectId?: string;
+  readonly controllerProjectName?: string;
   readonly branch?: string;
   readonly bootstrap?: GatewayNodeWorkspaceBootstrap;
 }> {
@@ -937,6 +989,12 @@ async function resolveWorkspaceEnsureRequest(input: {
   });
   return {
     ...base,
+    ...(input.project.controllerProjectId
+      ? { controllerProjectId: input.project.controllerProjectId }
+      : {}),
+    ...(input.project.projectName
+      ? { controllerProjectName: input.project.projectName }
+      : {}),
     ...(input.branch ? { branch: input.branch } : {}),
     ...(bootstrap ? { bootstrap } : {}),
   };
@@ -1236,6 +1294,93 @@ type ResolveDispatchNodeWithRouteResult =
       readonly bootstrap: DispatchBootstrapResult | null;
     }
   | { readonly ok: false; readonly error: string };
+
+type DispatchSyncMetadata = {
+  readonly engine: "mutagen";
+  readonly sessionName: string;
+  readonly created: boolean;
+  readonly localPath: string;
+  readonly remotePath: string;
+  readonly remoteUri: string;
+  readonly excludes: readonly string[];
+};
+
+type PrepareDispatchSyncResult =
+  | { readonly ok: true; readonly sync: DispatchSyncMetadata | null }
+  | { readonly ok: false; readonly reason: string; readonly error: string };
+
+/**
+ * Prepare local->remote source sync when execution mode requires local edits to
+ * be reflected on a remote workspace before the dispatched job starts.
+ */
+async function prepareDispatchSync(input: {
+  readonly config: ControlPlaneConfig;
+  readonly project: DispatchProjectResolution;
+  readonly node: NodeRecord;
+  readonly workspace: GatewayNodeWorkspace;
+}): Promise<PrepareDispatchSyncResult> {
+  if (input.config.execution.mode !== "local_edit_remote_run") {
+    return { ok: true, sync: null };
+  }
+
+  if (input.config.execution.sync.engine !== "mutagen") {
+    return {
+      ok: false,
+      reason: "sync_engine_unsupported",
+      error: `Execution sync engine "${input.config.execution.sync.engine}" is not implemented yet.`,
+    };
+  }
+
+  const localProjectRoot = input.project.projectRoot?.trim();
+  if (!localProjectRoot) {
+    return {
+      ok: false,
+      reason: "sync_local_path_missing",
+      error:
+        "local_edit_remote_run requires a local project root. Dispatch with a registered local project name.",
+    };
+  }
+
+  const nodeSource = input.node.source?.trim();
+  if (!nodeSource) {
+    return {
+      ok: false,
+      reason: "sync_source_missing",
+      error:
+        "Selected node is missing SSH source metadata. Re-pair with `hack node pair --source <user@host> ...`.",
+    };
+  }
+
+  const synced = await ensureMutagenLocalToRemoteSync({
+    projectName: input.workspace.projectName,
+    nodeId: input.node.id,
+    branch: input.workspace.branch ?? undefined,
+    nodeSource,
+    localProjectRoot,
+    remoteProjectRoot: input.workspace.projectRoot,
+    exclude: input.config.execution.sync.exclude,
+  });
+  if (!synced.ok) {
+    return {
+      ok: false,
+      reason: `sync_${synced.code}`,
+      error: synced.error,
+    };
+  }
+
+  return {
+    ok: true,
+    sync: {
+      engine: "mutagen",
+      sessionName: synced.sessionName,
+      created: synced.created,
+      localPath: synced.localPath,
+      remotePath: synced.remotePath,
+      remoteUri: synced.remoteUri,
+      excludes: synced.excludes,
+    },
+  };
+}
 
 function emitRouteDiagnostics(input: {
   readonly diagnostics: readonly DispatchRouteDiagnostic[];
@@ -2456,6 +2601,7 @@ function buildSummaryMarkdown(input: {
   readonly riskReasons: readonly string[];
   readonly prOutcome: DispatchPrOutcome | null;
   readonly route: DispatchRouteMetadata;
+  readonly sync: DispatchSyncMetadata | null;
 }): string {
   let prLines: string[] = ["- status: not requested"];
   if (input.prOutcome?.ok) {
@@ -2524,6 +2670,20 @@ function buildSummaryMarkdown(input: {
             `- diagnostic_${entry.severity}: [${entry.code}] ${entry.message}`
         )
       : ["- diagnostics: none"]),
+    "",
+    "## Sync",
+    ...(input.sync
+      ? [
+          `- engine: ${input.sync.engine}`,
+          `- session: ${input.sync.sessionName}`,
+          `- created: ${input.sync.created ? "yes" : "no"}`,
+          `- local_path: ${input.sync.localPath}`,
+          `- remote_path: ${input.sync.remotePath}`,
+          ...(input.sync.excludes.length > 0
+            ? input.sync.excludes.map((entry) => `- exclude: ${entry}`)
+            : ["- exclude: none"]),
+        ]
+      : ["- status: not enabled"]),
     "",
     "## Pull Request",
     ...prLines,

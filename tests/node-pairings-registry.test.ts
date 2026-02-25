@@ -38,7 +38,7 @@ afterEach(async () => {
 
 test("pairing session can be created and consumed once", async () => {
   const created = await createNodePairingSession({
-    source: "ubuntu@helsinki.tail8fedfd.ts.net",
+    source: "remote-user@node-a.tailnet.ts.net",
     endpoint: "http://127.0.0.1:7788",
     nowIso: "2026-02-21T00:00:00.000Z",
     ttlMs: 5 * 60 * 1000,
@@ -72,7 +72,7 @@ test("pairing session can be created and consumed once", async () => {
 test("pairing session rejects invalid code and can be cancelled", async () => {
   const created = await createNodePairingSession({
     source: "hack@old-macbook.local",
-    endpoint: "http://100.80.128.37:7788",
+    endpoint: "http://198.51.100.37:7788",
   });
   const rejected = await consumeNodePairingSession({
     sessionId: created.session.id,

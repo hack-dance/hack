@@ -96,14 +96,14 @@ hack remote monitor
 
 Recommended for exposing the gateway to mobile/web clients:
 
-1) Pick a hostname under a Cloudflare-managed zone (e.g. `gateway.dimitri.computer`).
-2) Run `hack x cloudflare tunnel-setup --hostname gateway.dimitri.computer`.
+1) Pick a hostname under a Cloudflare-managed zone (e.g. `gateway.dev.example.com`).
+2) Run `hack x cloudflare tunnel-setup --hostname gateway.dev.example.com`.
 3) Start the tunnel: `hack x cloudflare tunnel-start`.
 
 Cloudflare creates a CNAME to `<tunnel-id>.cfargotunnel.com` under your zone. The gateway URL is:
 
 ```
-https://gateway.dimitri.computer
+https://gateway.dev.example.com
 ```
 
 ### Tailscale (VPN / SSH)
@@ -120,7 +120,7 @@ For gateway access over the tailnet, either:
 
 ### SSH domain (custom)
 
-If you want a stable `ssh.dimitri.computer` style hostname:
+If you want a stable `ssh.dev.example.com` style hostname:
 
 - Point the DNS record at your home IP **and** forward port 22 (not recommended), or
 - Use Tailscale MagicDNS and treat `ssh.<tailnet>.ts.net` as your stable host.

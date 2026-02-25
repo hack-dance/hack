@@ -764,19 +764,19 @@ Examples:
 hack node init --name "aws-dev-1" --endpoint "https://gateway.example.com"
 
 # one-command pairing from controller with host-only inference (source + endpoint auto-detected)
-hack node pair --host "helsinki.tail8fedfd.ts.net" --name "aws-dev-1" --default
+hack node pair --host "node-a.tailnet.ts.net" --name "aws-dev-1" --default
 
 # one-command pairing from controller (works with Tailscale DNS/IP too)
-hack node pair --source "ubuntu@helsinki.tail8fedfd.ts.net" --endpoint "http://127.0.0.1:7788" --name "aws-dev-1" --default
+hack node pair --source "remote-user@node-a.tailnet.ts.net" --endpoint "http://127.0.0.1:7788" --name "aws-dev-1" --default
 
 # node-initiated publish of pairing request to controller (creates inbox entry)
-hack node pair request --controller "you@controller-mac.local" --source "ubuntu@helsinki.tail8fedfd.ts.net" --endpoint "http://127.0.0.1:7788" --default
+hack node pair request --controller "you@controller-mac.local" --source "remote-user@node-a.tailnet.ts.net" --endpoint "http://127.0.0.1:7788" --default
 
 # interactive pairing walkthrough (guided prompts + remote approve/complete)
-hack node pair walkthrough --source "ubuntu@helsinki.tail8fedfd.ts.net" --endpoint "http://127.0.0.1:7788" --default
+hack node pair walkthrough --source "remote-user@node-a.tailnet.ts.net" --endpoint "http://127.0.0.1:7788" --default
 
 # secure pairing ceremony (expiring code)
-hack node pair start --source "ubuntu@helsinki.tail8fedfd.ts.net" --endpoint "http://127.0.0.1:7788" --name "aws-dev-1"
+hack node pair start --source "remote-user@node-a.tailnet.ts.net" --endpoint "http://127.0.0.1:7788" --name "aws-dev-1"
 # review pending requests (controller inbox)
 hack node pair list --status pending
 # on node (or over ssh), using session + code from start output

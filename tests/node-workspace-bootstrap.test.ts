@@ -76,10 +76,18 @@ test("workspace ensure bootstraps a missing project by cloning repo", async () =
   expect(body.workspace?.projectName).toBe("bootstrap-target");
   expect(body.workspace?.branch).toBe("main");
   expect(body.workspace?.projectRoot).toBe(
-    resolve(tempDir, "dev", "hack-nodes", "bootstrap-target")
+    resolve(tempDir, ".hack", "projects", "bootstrap-target")
   );
   expect(body.workspace?.projectDir).toBe(
-    resolve(tempDir, "dev", "hack-nodes", "bootstrap-target", ".hack")
+    resolve(tempDir, ".hack", "projects", "bootstrap-target", ".hack")
+  );
+
+  const map = await readNodeWorkspaceMap({ homeDir: tempDir });
+  expect(map.entries).toHaveLength(1);
+  expect(map.entries[0]?.projectName).toBe("bootstrap-target");
+  expect(map.entries[0]?.source).toBe("managed");
+  expect(map.entries[0]?.workspaceRoot).toBe(
+    resolve(tempDir, ".hack", "projects", "bootstrap-target")
   );
 });
 
@@ -110,6 +118,171 @@ test("workspace ensure still returns unknown project when bootstrap is absent", 
   const body = (await response.json()) as { readonly error?: string };
   expect(body.error).toBe("unknown_project_name");
 });
+
+test("workspace ensure can recover from node map when registry is missing", async () => {
+  if (!tempDir) {
+    throw new Error("Missing tempDir");
+  }
+  const sourceRepo = join(tempDir, "source-repo");
+  await createMinimalHackRepo({ root: sourceRepo });
+
+  const bootstrapRequest = new Request(
+    "http://127.0.0.1:7788/v1/node/workspaces/ensure",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        project: "bootstrap-target",
+        bootstrap: {
+          repo_url: sourceRepo,
+          project_name: "bootstrap-target",
+        },
+      }),
+    }
+  );
+  const bootstrapResponse = await handleNodeRoutes({
+    req: bootstrapRequest,
+    url: new URL(bootstrapRequest.url),
+    version: "test",
+    pid: 123,
+    startedAtMs: Date.now(),
+  });
+  expect(bootstrapResponse?.status).toBe(200);
+
+  await rm(resolve(tempDir, ".hack", "projects.json"), { force: true });
+
+  const mappedRequest = new Request(
+    "http://127.0.0.1:7788/v1/node/workspaces/ensure",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        project: "bootstrap-target",
+        branch: "main",
+      }),
+    }
+  );
+  const mappedResponse = await handleNodeRoutes({
+    req: mappedRequest,
+    url: new URL(mappedRequest.url),
+    version: "test",
+    pid: 123,
+    startedAtMs: Date.now(),
+  });
+  expect(mappedResponse?.status).toBe(200);
+  if (!mappedResponse) {
+    return;
+  }
+  const body = (await mappedResponse.json()) as {
+    readonly workspace?: {
+      readonly projectRoot?: string;
+      readonly branch?: string | null;
+    };
+  };
+  expect(body.workspace?.branch).toBe("main");
+  expect(body.workspace?.projectRoot).toBe(
+    resolve(tempDir, ".hack", "projects", "bootstrap-target")
+  );
+});
+
+test("workspace ensure resolves by controller project id when node project id differs", async () => {
+  if (!tempDir) {
+    throw new Error("Missing tempDir");
+  }
+  const sourceRepo = join(tempDir, "source-repo");
+  await createMinimalHackRepo({ root: sourceRepo });
+
+  const bootstrapRequest = new Request(
+    "http://127.0.0.1:7788/v1/node/workspaces/ensure",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        project: "bootstrap-target",
+        controller_project_id: "controller-project-id",
+        controller_project_name: "event-agent",
+        bootstrap: {
+          repo_url: sourceRepo,
+          project_name: "bootstrap-target",
+        },
+      }),
+    }
+  );
+  const bootstrapResponse = await handleNodeRoutes({
+    req: bootstrapRequest,
+    url: new URL(bootstrapRequest.url),
+    version: "test",
+    pid: 123,
+    startedAtMs: Date.now(),
+  });
+  expect(bootstrapResponse?.status).toBe(200);
+
+  const map = await readNodeWorkspaceMap({ homeDir: tempDir });
+  expect(map.entries).toHaveLength(1);
+  expect(map.entries[0]?.projectId).toBe("controller-project-id");
+  expect(map.entries[0]?.projectName).toBe("event-agent");
+
+  await rm(resolve(tempDir, ".hack", "projects.json"), { force: true });
+
+  const mappedRequest = new Request(
+    "http://127.0.0.1:7788/v1/node/workspaces/ensure",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        project: "completely-different-name",
+        controller_project_id: "controller-project-id",
+        branch: "main",
+      }),
+    }
+  );
+  const mappedResponse = await handleNodeRoutes({
+    req: mappedRequest,
+    url: new URL(mappedRequest.url),
+    version: "test",
+    pid: 123,
+    startedAtMs: Date.now(),
+  });
+  expect(mappedResponse?.status).toBe(200);
+  if (!mappedResponse) {
+    return;
+  }
+  const mappedBody = (await mappedResponse.json()) as {
+    readonly workspace?: {
+      readonly projectRoot?: string;
+      readonly branch?: string | null;
+    };
+  };
+  expect(mappedBody.workspace?.branch).toBe("main");
+  expect(mappedBody.workspace?.projectRoot).toBe(
+    resolve(tempDir, ".hack", "projects", "bootstrap-target")
+  );
+});
+
+async function readNodeWorkspaceMap(opts: {
+  readonly homeDir: string;
+}): Promise<{
+  readonly entries: readonly {
+    readonly projectName?: string;
+    readonly projectId?: string;
+    readonly source?: string;
+    readonly workspaceRoot?: string;
+  }[];
+}> {
+  const file = Bun.file(resolve(opts.homeDir, ".hack", "projects.config.json"));
+  const text = await file.text();
+  const parsed = JSON.parse(text) as {
+    readonly entries?: readonly {
+      readonly projectName?: string;
+      readonly projectId?: string;
+      readonly source?: string;
+      readonly workspaceRoot?: string;
+    }[];
+  };
+  return {
+    entries: parsed.entries ?? [],
+  };
+}
 
 async function createMinimalHackRepo(opts: {
   readonly root: string;

@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { confirm, isCancel, text } from "@clack/prompts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
@@ -11,6 +11,7 @@ import { createGatewayToken } from "../control-plane/extensions/gateway/tokens.t
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { createGatewayClient } from "../control-plane/sdk/gateway-client.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
+import { pathExists } from "../lib/fs.ts";
 import {
   cancelNodePairingSession,
   consumeNodePairingSession,
@@ -19,6 +20,16 @@ import {
   listNodePairingSessions,
   type NodePairingStatus,
 } from "../lib/node-pairings-registry.ts";
+import {
+  findNodeWorkspaceMapEntry,
+  type NodeWorkspaceMapEntry,
+  type NodeWorkspaceSource,
+  readNodeWorkspaceMap,
+  removeNodeWorkspaceMapEntry,
+  resolveManagedNodeProjectsRoot,
+  resolveNodeWorkspaceMapPath,
+  upsertNodeWorkspaceMapEntry,
+} from "../lib/node-workspace-map.ts";
 import {
   deleteNodeAuthToken,
   deriveNodeHealth,
@@ -31,6 +42,8 @@ import {
   setDefaultNode,
   upsertNodeRecord,
 } from "../lib/nodes-registry.ts";
+import { findProjectContext, readProjectConfig } from "../lib/project.ts";
+import { upsertProjectRegistration } from "../lib/projects-registry.ts";
 import { exec } from "../lib/shell.ts";
 import { display } from "../ui/display.ts";
 import { logger } from "../ui/logger.ts";
@@ -202,6 +215,14 @@ const optProject = defineOption({
   long: "--project",
   valueHint: "<name|id>",
   description: "Project name or id on the target node",
+} as const);
+
+const optPath = defineOption({
+  name: "path",
+  type: "string",
+  long: "--path",
+  valueHint: "<path>",
+  description: "Workspace root path",
 } as const);
 
 const optBranch = defineOption({
@@ -565,6 +586,51 @@ const removeSpec = defineCommand({
   subcommands: [],
 } as const);
 
+const workspaceSpec = defineCommand({
+  name: "workspace",
+  summary: "Inspect and repair node workspace map entries",
+  group: "Extensions",
+  options: [],
+  positionals: [],
+  subcommands: [],
+} as const);
+
+const workspaceListSpec = defineCommand({
+  name: "list",
+  summary: "List node-local workspace map entries",
+  group: "Extensions",
+  options: [optJson],
+  positionals: [],
+  subcommands: [],
+} as const);
+
+const workspaceResolveSpec = defineCommand({
+  name: "resolve",
+  summary: "Resolve a workspace map entry by controller project selector",
+  group: "Extensions",
+  options: [optProject, optJson],
+  positionals: [],
+  subcommands: [],
+} as const);
+
+const workspaceRemoveSpec = defineCommand({
+  name: "remove",
+  summary: "Remove a workspace map entry by controller project selector",
+  group: "Extensions",
+  options: [optProject, optJson],
+  positionals: [],
+  subcommands: [],
+} as const);
+
+const workspaceAttachSpec = defineCommand({
+  name: "attach",
+  summary: "Attach an existing local workspace to controller project identity",
+  group: "Extensions",
+  options: [optProject, optPath, optJson],
+  positionals: [],
+  subcommands: [],
+} as const);
+
 const devcontainerSpec = defineCommand({
   name: "devcontainer",
   summary: "Manage remote node devcontainers",
@@ -710,6 +776,22 @@ type RemoveArgs = CommandArgs<
   typeof removeSpec.options,
   typeof removeSpec.positionals
 >;
+type WorkspaceListArgs = CommandArgs<
+  typeof workspaceListSpec.options,
+  typeof workspaceListSpec.positionals
+>;
+type WorkspaceResolveArgs = CommandArgs<
+  typeof workspaceResolveSpec.options,
+  typeof workspaceResolveSpec.positionals
+>;
+type WorkspaceRemoveArgs = CommandArgs<
+  typeof workspaceRemoveSpec.options,
+  typeof workspaceRemoveSpec.positionals
+>;
+type WorkspaceAttachArgs = CommandArgs<
+  typeof workspaceAttachSpec.options,
+  typeof workspaceAttachSpec.positionals
+>;
 type DevcontainerUpArgs = CommandArgs<
   typeof devcontainerUpSpec.options,
   typeof devcontainerUpSpec.positionals
@@ -774,6 +856,30 @@ export const nodeCommand = withHandler(
       withHandler(statusSpec, handleNodeStatus),
       withHandler(useSpec, handleNodeUse),
       withHandler(removeSpec, handleNodeRemove),
+      withHandler(
+        defineCommand({
+          ...workspaceSpec,
+          subcommands: [
+            withHandler(workspaceListSpec, handleNodeWorkspaceList),
+            withHandler(workspaceResolveSpec, handleNodeWorkspaceResolve),
+            withHandler(workspaceRemoveSpec, handleNodeWorkspaceRemove),
+            withHandler(workspaceAttachSpec, handleNodeWorkspaceAttach),
+          ],
+        } as const),
+        async () => {
+          await display.panel({
+            title: "Node workspace commands",
+            tone: "info",
+            lines: [
+              "hack node workspace list",
+              "hack node workspace resolve --project <name|id>",
+              "hack node workspace attach --project <name|id> --path <workspace-root>",
+              "hack node workspace remove --project <name|id>",
+            ],
+          });
+          return 0;
+        }
+      ),
       withHandler(
         defineCommand({
           ...providerSpec,
@@ -856,6 +962,8 @@ export const nodeCommand = withHandler(
         "hack node status [--node <id>] [--watch]",
         "hack node use <id>",
         "hack node remove <id>",
+        "hack node workspace list",
+        "hack node workspace attach --project <name|id> --path <workspace-root>",
         "hack node provider railway bootstrap --railway-project <id|name> [--railway-service <service>|--create-service] [--railway-environment production] [--railway-private --tailscale-auth-key <key>]",
         "hack node devcontainer up --node <id> --project <name|id> [--branch <branch>]",
       ],
@@ -1059,6 +1167,7 @@ async function handleNodePair({
   const registered = await registerBundleOnController({
     bundle: parsed.bundle,
     makeDefault: args.options.defaultNode === true,
+    source,
   });
   if (!registered.ok) {
     logger.error({ message: registered.error });
@@ -1824,7 +1933,7 @@ async function resolvePairWalkthroughInput(input: {
     interactive,
     missingError: "Missing --source <user@host> in non-interactive mode.",
     message: "Remote SSH source (user@host):",
-    placeholder: "ubuntu@helsinki.tail8fedfd.ts.net",
+    placeholder: "remote-user@node-a.tailnet.ts.net",
     validate: (value) =>
       value.trim().length ? undefined : "Source is required",
   });
@@ -2295,6 +2404,434 @@ async function handleNodeRemove({
   }
   logger.success({ message: `Removed node ${nodeId}` });
   return 0;
+}
+
+type WorkspaceMapSelector = {
+  readonly projectId?: string;
+  readonly projectName?: string;
+};
+
+type WorkspaceMapEntryStatus = "ready" | "missing_path" | "not_hack_project";
+
+type WorkspaceMapEntryInspection = {
+  readonly entry: NodeWorkspaceMapEntry;
+  readonly status: WorkspaceMapEntryStatus;
+  readonly workspaceExists: boolean;
+  readonly isHackProject: boolean;
+};
+
+/**
+ * List node-local workspace mappings and their local filesystem health.
+ */
+async function handleNodeWorkspaceList({
+  args,
+}: {
+  readonly ctx: CliContext;
+  readonly args: WorkspaceListArgs;
+}): Promise<number> {
+  const map = await readNodeWorkspaceMap();
+  const inspections = await Promise.all(
+    map.entries.map((entry) => inspectWorkspaceMapEntry({ entry }))
+  );
+  if (args.options.json) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          mapPath: resolveNodeWorkspaceMapPath(),
+          managedRoot: resolveManagedNodeProjectsRoot(),
+          entries: inspections.map((inspection) => ({
+            ...inspection.entry,
+            status: inspection.status,
+            workspaceExists: inspection.workspaceExists,
+            isHackProject: inspection.isHackProject,
+          })),
+        },
+        null,
+        2
+      )}\n`
+    );
+    return 0;
+  }
+
+  if (inspections.length === 0) {
+    await display.panel({
+      title: "Node workspace map",
+      tone: "info",
+      lines: [
+        `Map path: ${resolveNodeWorkspaceMapPath()}`,
+        "No mapped workspaces found.",
+        "Attach one: hack node workspace attach --project <name|id> --path <workspace-root>",
+      ],
+    });
+    return 0;
+  }
+
+  await display.table({
+    columns: [
+      "Project",
+      "Source",
+      "Status",
+      "Workspace Root",
+      "Node Project",
+      "Updated At",
+    ],
+    rows: inspections.map((inspection) => [
+      formatWorkspaceMapSelectorLabel({ entry: inspection.entry }),
+      inspection.entry.source,
+      inspection.status,
+      inspection.entry.workspaceRoot,
+      inspection.entry.workspaceProjectName,
+      inspection.entry.updatedAt,
+    ]),
+  });
+  return 0;
+}
+
+/**
+ * Resolve a single node-local workspace map entry by controller project selector.
+ */
+async function handleNodeWorkspaceResolve({
+  args,
+}: {
+  readonly ctx: CliContext;
+  readonly args: WorkspaceResolveArgs;
+}): Promise<number> {
+  const selectorRaw = (args.options.project ?? "").trim();
+  if (!selectorRaw) {
+    logger.error({
+      message: "Missing --project <name|id>.",
+    });
+    return 1;
+  }
+  const map = await readNodeWorkspaceMap();
+  const match = resolveWorkspaceMapEntryBySelector({
+    mapEntries: map.entries,
+    selector: selectorRaw,
+  });
+  if (!match) {
+    logger.error({
+      message: `No workspace map entry found for selector "${selectorRaw}".`,
+    });
+    return 1;
+  }
+  const inspection = await inspectWorkspaceMapEntry({ entry: match });
+
+  if (args.options.json) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          selector: selectorRaw,
+          entry: inspection.entry,
+          status: inspection.status,
+          workspaceExists: inspection.workspaceExists,
+          isHackProject: inspection.isHackProject,
+          mapPath: resolveNodeWorkspaceMapPath(),
+        },
+        null,
+        2
+      )}\n`
+    );
+    return 0;
+  }
+
+  await display.kv({
+    title: "Workspace map entry",
+    entries: [
+      ["selector", selectorRaw],
+      ["project", formatWorkspaceMapSelectorLabel({ entry: inspection.entry })],
+      ["source", inspection.entry.source],
+      ["status", inspection.status],
+      ["workspace_root", inspection.entry.workspaceRoot],
+      ["workspace_project_name", inspection.entry.workspaceProjectName],
+      ["workspace_project_id", inspection.entry.workspaceProjectId ?? ""],
+      ["repo_url", inspection.entry.repoUrl ?? ""],
+      ["updated_at", inspection.entry.updatedAt],
+    ],
+  });
+  return 0;
+}
+
+/**
+ * Remove a node-local workspace map entry by controller project selector.
+ */
+async function handleNodeWorkspaceRemove({
+  args,
+}: {
+  readonly ctx: CliContext;
+  readonly args: WorkspaceRemoveArgs;
+}): Promise<number> {
+  const selectorRaw = (args.options.project ?? "").trim();
+  if (!selectorRaw) {
+    logger.error({
+      message: "Missing --project <name|id>.",
+    });
+    return 1;
+  }
+  const map = await readNodeWorkspaceMap();
+  const match = resolveWorkspaceMapEntryBySelector({
+    mapEntries: map.entries,
+    selector: selectorRaw,
+  });
+  if (!match) {
+    logger.error({
+      message: `No workspace map entry found for selector "${selectorRaw}".`,
+    });
+    return 1;
+  }
+
+  const removed = await removeNodeWorkspaceMapEntry({
+    ...(match.projectId ? { projectId: match.projectId } : {}),
+    ...(match.projectName ? { projectName: match.projectName } : {}),
+  });
+  if (!removed) {
+    logger.error({
+      message: `Failed to remove workspace map entry for "${selectorRaw}".`,
+    });
+    return 1;
+  }
+
+  if (args.options.json) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          removed: true,
+          selector: selectorRaw,
+          entry: match,
+          mapPath: resolveNodeWorkspaceMapPath(),
+        },
+        null,
+        2
+      )}\n`
+    );
+    return 0;
+  }
+  logger.success({
+    message: `Removed workspace map entry ${formatWorkspaceMapSelectorLabel({
+      entry: match,
+    })}`,
+  });
+  return 0;
+}
+
+/**
+ * Attach an existing local hack project to controller project identity so
+ * dispatch can reuse manual node workspaces without path parity.
+ */
+async function handleNodeWorkspaceAttach({
+  args,
+}: {
+  readonly ctx: CliContext;
+  readonly args: WorkspaceAttachArgs;
+}): Promise<number> {
+  const selectorRaw = (args.options.project ?? "").trim();
+  if (!selectorRaw) {
+    logger.error({
+      message: "Missing --project <name|id>.",
+    });
+    return 1;
+  }
+  const workspacePath = (args.options.path ?? "").trim();
+  if (!workspacePath) {
+    logger.error({
+      message: "Missing --path <workspace-root>.",
+    });
+    return 1;
+  }
+
+  const workspaceRoot = resolve(workspacePath);
+  const project = await findProjectContext(workspaceRoot);
+  if (!project) {
+    logger.error({
+      message: `Path is not a hack project root: ${workspaceRoot}`,
+    });
+    return 1;
+  }
+
+  const registration = await upsertProjectRegistration({ project });
+  if (registration.status === "conflict") {
+    logger.error({
+      message: `Project registration conflict for "${registration.conflictName}" at ${project.projectRoot}.`,
+    });
+    return 1;
+  }
+
+  const config = await readProjectConfig(project);
+  const selector = parseWorkspaceMapSelector({ selector: selectorRaw });
+  const source = deriveWorkspaceSource({ workspaceRoot: project.projectRoot });
+  const repoUrl = await resolveWorkspaceRepoUrl({
+    workspaceRoot: project.projectRoot,
+  });
+  const upserted = await upsertNodeWorkspaceMapEntry({
+    ...(selector.projectId ? { projectId: selector.projectId } : {}),
+    ...(selector.projectName ? { projectName: selector.projectName } : {}),
+    workspaceRoot: project.projectRoot,
+    workspaceProjectName: config.name ?? registration.project.name,
+    workspaceProjectId: registration.project.id,
+    source,
+    ...(repoUrl ? { repoUrl } : {}),
+  });
+  if (!upserted) {
+    logger.error({
+      message: "Failed to upsert workspace map entry.",
+    });
+    return 1;
+  }
+
+  if (args.options.json) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          attached: true,
+          selector: selectorRaw,
+          entry: upserted,
+          mapPath: resolveNodeWorkspaceMapPath(),
+        },
+        null,
+        2
+      )}\n`
+    );
+    return 0;
+  }
+
+  await display.kv({
+    title: "Workspace attached",
+    entries: [
+      ["selector", selectorRaw],
+      ["project", formatWorkspaceMapSelectorLabel({ entry: upserted })],
+      ["workspace_root", upserted.workspaceRoot],
+      ["source", upserted.source],
+      ["repo_url", upserted.repoUrl ?? ""],
+    ],
+  });
+  return 0;
+}
+
+/**
+ * Parse controller project selector into workspace-map lookup keys.
+ */
+function parseWorkspaceMapSelector(input: {
+  readonly selector: string;
+}): WorkspaceMapSelector {
+  const selector = input.selector.trim();
+  if (PROJECT_ID_LIKE_PATTERN.test(selector)) {
+    return { projectId: selector };
+  }
+  return { projectName: selector };
+}
+
+/**
+ * Build map lookup candidates for ambiguous id-like selectors.
+ */
+function workspaceMapSelectorCandidates(input: {
+  readonly selector: string;
+}): readonly WorkspaceMapSelector[] {
+  const parsed = parseWorkspaceMapSelector(input);
+  if (parsed.projectId) {
+    return [parsed, { projectName: input.selector.trim() }];
+  }
+  return [parsed];
+}
+
+/**
+ * Resolve one workspace-map entry from selector candidates.
+ */
+function resolveWorkspaceMapEntryBySelector(input: {
+  readonly mapEntries: readonly NodeWorkspaceMapEntry[];
+  readonly selector: string;
+}): NodeWorkspaceMapEntry | null {
+  const map = {
+    version: 1 as const,
+    entries: input.mapEntries,
+  };
+  for (const selector of workspaceMapSelectorCandidates(input)) {
+    const found = findNodeWorkspaceMapEntry({
+      map,
+      ...(selector.projectId ? { projectId: selector.projectId } : {}),
+      ...(selector.projectName ? { projectName: selector.projectName } : {}),
+    });
+    if (found) {
+      return found;
+    }
+  }
+  return null;
+}
+
+/**
+ * Inspect filesystem health for a node workspace-map entry.
+ */
+async function inspectWorkspaceMapEntry(input: {
+  readonly entry: NodeWorkspaceMapEntry;
+}): Promise<WorkspaceMapEntryInspection> {
+  const workspaceExists = await pathExists(input.entry.workspaceRoot);
+  if (!workspaceExists) {
+    return {
+      entry: input.entry,
+      status: "missing_path",
+      workspaceExists: false,
+      isHackProject: false,
+    };
+  }
+  const project = await findProjectContext(input.entry.workspaceRoot);
+  if (!project) {
+    return {
+      entry: input.entry,
+      status: "not_hack_project",
+      workspaceExists: true,
+      isHackProject: false,
+    };
+  }
+  return {
+    entry: input.entry,
+    status: "ready",
+    workspaceExists: true,
+    isHackProject: true,
+  };
+}
+
+/**
+ * Derive workspace source based on managed-root ancestry.
+ */
+function deriveWorkspaceSource(input: {
+  readonly workspaceRoot: string;
+}): NodeWorkspaceSource {
+  const workspaceRoot = resolve(input.workspaceRoot);
+  const managedRoot = resolveManagedNodeProjectsRoot();
+  if (
+    workspaceRoot === managedRoot ||
+    workspaceRoot.startsWith(`${managedRoot}/`)
+  ) {
+    return "managed";
+  }
+  return "external";
+}
+
+/**
+ * Resolve git origin URL for a workspace when available.
+ */
+async function resolveWorkspaceRepoUrl(input: {
+  readonly workspaceRoot: string;
+}): Promise<string | undefined> {
+  const origin = await exec(
+    ["git", "-C", input.workspaceRoot, "remote", "get-url", "origin"],
+    { stdin: "ignore" }
+  );
+  const value = origin.stdout.trim();
+  if (origin.exitCode !== 0 || value.length === 0) {
+    return undefined;
+  }
+  return value;
+}
+
+/**
+ * Render controller project selector display label.
+ */
+function formatWorkspaceMapSelectorLabel(input: {
+  readonly entry: NodeWorkspaceMapEntry;
+}): string {
+  if (input.entry.projectId && input.entry.projectName) {
+    return `${input.entry.projectName} (${input.entry.projectId})`;
+  }
+  return input.entry.projectName ?? input.entry.projectId ?? "<unknown>";
 }
 
 async function handleNodeProviderRailwayBootstrap({
@@ -3832,6 +4369,13 @@ export const __testOnlyNodeAttach = {
   resolveNodeEndpoint,
 };
 
+export const __testOnlyNodeWorkspace = {
+  parseWorkspaceMapSelector,
+  workspaceMapSelectorCandidates,
+  resolveWorkspaceMapEntryBySelector,
+  deriveWorkspaceSource,
+};
+
 export const __testOnlyNodePair = {
   derivePairingName,
   extractSshHost,
@@ -4657,6 +5201,7 @@ async function runRemotePairApprove(input: {
 async function registerBundleOnController(input: {
   readonly bundle: NodeEnrollmentBundle;
   readonly makeDefault: boolean;
+  readonly source?: string;
 }): Promise<
   | {
       readonly ok: true;
@@ -4680,6 +5225,7 @@ async function registerBundleOnController(input: {
   const upserted = await upsertNodeRecord({
     id: input.bundle.node.id,
     name: input.bundle.node.name,
+    source: input.source,
     labels: input.bundle.node.labels,
     capabilities: input.bundle.node.capabilities,
     endpoint: input.bundle.node.endpoint,
@@ -4739,6 +5285,7 @@ async function completePairingWithBundle(input: {
   const registered = await registerBundleOnController({
     bundle: input.bundle,
     makeDefault: input.makeDefault,
+    source: consumed.session.source,
   });
   if (!registered.ok) {
     return registered;

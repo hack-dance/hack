@@ -97,6 +97,15 @@ function createControlPlaneConfig(overrides?: {
       staleAfterMs: 30_000,
       offlineAfterMs: 120_000,
     },
+    execution: {
+      mode: "local",
+      singleActive: true,
+      sync: {
+        engine: "mutagen",
+        direction: "local_to_remote",
+        exclude: [],
+      },
+    },
     providers: {
       profiles: {},
     },

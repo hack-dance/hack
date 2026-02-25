@@ -269,6 +269,8 @@ export type GatewayClient = {
   ensureNodeWorkspace: (opts: {
     readonly project?: string;
     readonly projectId?: string;
+    readonly controllerProjectId?: string;
+    readonly controllerProjectName?: string;
     readonly path?: string;
     readonly branch?: string;
     readonly bootstrap?: GatewayNodeWorkspaceBootstrap;
@@ -531,6 +533,8 @@ export function createGatewayClient(opts: GatewayClientOptions): GatewayClient {
   const ensureNodeWorkspace = async (opts: {
     readonly project?: string;
     readonly projectId?: string;
+    readonly controllerProjectId?: string;
+    readonly controllerProjectName?: string;
     readonly path?: string;
     readonly branch?: string;
     readonly bootstrap?: GatewayNodeWorkspaceBootstrap;
@@ -541,6 +545,12 @@ export function createGatewayClient(opts: GatewayClientOptions): GatewayClient {
       body: {
         ...(opts.project ? { project: opts.project } : {}),
         ...(opts.projectId ? { project_id: opts.projectId } : {}),
+        ...(opts.controllerProjectId
+          ? { controller_project_id: opts.controllerProjectId }
+          : {}),
+        ...(opts.controllerProjectName
+          ? { controller_project_name: opts.controllerProjectName }
+          : {}),
         ...(opts.path ? { path: opts.path } : {}),
         ...(opts.branch ? { branch: opts.branch } : {}),
         ...(opts.bootstrap

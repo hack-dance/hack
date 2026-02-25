@@ -43,6 +43,7 @@ afterEach(async () => {
 test("node registry supports upsert/default/touch/remove", async () => {
   const created = await upsertNodeRecord({
     name: "alpha",
+    source: "remote-user@198.51.100.42",
     endpoint: "http://127.0.0.1:7788/",
     authRef: "node.auth.alpha",
   });
@@ -50,6 +51,16 @@ test("node registry supports upsert/default/touch/remove", async () => {
   expect(created.created).toBe(true);
   expect(created.node.endpoint).toBe("http://127.0.0.1:7788");
   expect(created.node.name).toBe("alpha");
+  expect(created.node.source).toBe("remote-user@198.51.100.42");
+
+  const updated = await upsertNodeRecord({
+    id: created.node.id,
+    name: "alpha",
+    endpoint: "http://127.0.0.1:7788",
+    authRef: "node.auth.alpha",
+  });
+  expect(updated.created).toBe(false);
+  expect(updated.node.source).toBe("remote-user@198.51.100.42");
 
   const selected = await setDefaultNode({ id: created.node.id });
   expect(selected.defaultNodeId).toBe(created.node.id);

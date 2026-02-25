@@ -1,9 +1,17 @@
 import { randomUUID } from "node:crypto";
-import { homedir, hostname } from "node:os";
+import { hostname } from "node:os";
 import { dirname, resolve } from "node:path";
 import { resolveGatewayConfig } from "../../control-plane/extensions/gateway/config.ts";
 import { readControlPlaneConfig } from "../../control-plane/sdk/config.ts";
 import { ensureDir, pathExists } from "../../lib/fs.ts";
+import {
+  findNodeWorkspaceMapEntry,
+  type NodeWorkspaceSource,
+  readNodeWorkspaceMap,
+  removeNodeWorkspaceMapEntry,
+  resolveManagedNodeProjectsRoot,
+  upsertNodeWorkspaceMapEntry,
+} from "../../lib/node-workspace-map.ts";
 import {
   findProjectContext,
   readProjectConfig,
@@ -52,6 +60,8 @@ type WorkspaceSeed = {
   readonly projectDir: string;
   readonly projectName: string;
   readonly projectId: string;
+  readonly source: NodeWorkspaceSource;
+  readonly repoUrl?: string;
 };
 
 type NodeRoute =
@@ -340,15 +350,28 @@ async function ensureWorkspaceFromInput(opts: {
 > {
   const projectName = getString(opts.body.project);
   const projectId = getString(opts.body.project_id);
+  const controllerProjectId = getString(opts.body.controller_project_id);
+  const controllerProjectName = getString(opts.body.controller_project_name);
   const path = getString(opts.body.path);
   const branch = getString(opts.body.branch);
   const bootstrap = parseWorkspaceBootstrap(opts.body.bootstrap);
 
   let workspace: WorkspaceSeed | null = null;
   const resolvers = [
-    () => resolveWorkspaceByProjectId({ projectId }),
-    () => resolveWorkspaceByProjectName({ projectName, bootstrap }),
     () => resolveWorkspaceByPath({ path }),
+    () =>
+      resolveWorkspaceByProjectMap({
+        controllerProjectId,
+        controllerProjectName,
+        projectId,
+        projectName,
+      }),
+    () =>
+      resolveWorkspaceByProjectId({
+        projectId,
+        bootstrap,
+      }),
+    () => resolveWorkspaceByProjectName({ projectName, bootstrap }),
     () =>
       resolveWorkspaceByBootstrap({
         bootstrap,
@@ -387,6 +410,16 @@ async function ensureWorkspaceFromInput(opts: {
     return { ok: false, error: ensuredBranch.error, statusCode: 400 };
   }
 
+  await upsertNodeWorkspaceMapEntry({
+    projectId: controllerProjectId ?? projectId ?? workspace.projectId,
+    projectName: controllerProjectName ?? projectName ?? workspace.projectName,
+    workspaceRoot: workspace.projectRoot,
+    workspaceProjectName: workspace.projectName,
+    workspaceProjectId: workspace.projectId,
+    source: workspace.source,
+    repoUrl: workspace.repoUrl,
+  });
+
   return {
     ok: true,
     workspace: {
@@ -399,15 +432,79 @@ async function ensureWorkspaceFromInput(opts: {
   };
 }
 
+async function resolveWorkspaceByProjectMap(opts: {
+  readonly controllerProjectId: string | null;
+  readonly controllerProjectName: string | null;
+  readonly projectId: string | null;
+  readonly projectName: string | null;
+}): Promise<WorkspaceLookupResult> {
+  const mapLookupProjectId = opts.controllerProjectId ?? opts.projectId;
+  const mapLookupProjectName = opts.controllerProjectName ?? opts.projectName;
+  if (!(mapLookupProjectId || mapLookupProjectName)) {
+    return { kind: "skip" };
+  }
+
+  const map = await readNodeWorkspaceMap();
+  const mapped = findNodeWorkspaceMapEntry({
+    map,
+    ...(mapLookupProjectId ? { projectId: mapLookupProjectId } : {}),
+    ...(mapLookupProjectName ? { projectName: mapLookupProjectName } : {}),
+  });
+  if (!mapped) {
+    return { kind: "skip" };
+  }
+
+  if (!(await pathExists(mapped.workspaceRoot))) {
+    await removeNodeWorkspaceMapEntry({
+      projectId: mapped.projectId,
+      projectName: mapped.projectName,
+    });
+    return { kind: "skip" };
+  }
+
+  const project = await findProjectContext(mapped.workspaceRoot);
+  if (!project) {
+    await removeNodeWorkspaceMapEntry({
+      projectId: mapped.projectId,
+      projectName: mapped.projectName,
+    });
+    return {
+      kind: "error",
+      error: "mapped_workspace_not_hack_project",
+      statusCode: 409,
+    };
+  }
+
+  const registered = await upsertProjectRegistration({ project });
+  if (registered.status === "conflict") {
+    return { kind: "error", error: "project_name_conflict", statusCode: 409 };
+  }
+  const config = await readProjectConfig(project);
+  return {
+    kind: "resolved",
+    workspace: {
+      projectRoot: project.projectRoot,
+      projectDir: project.projectDir,
+      projectName: config.name ?? registered.project.name,
+      projectId: registered.project.id,
+      source: mapped.source,
+      ...(mapped.repoUrl ? { repoUrl: mapped.repoUrl } : {}),
+    },
+  };
+}
+
 async function resolveWorkspaceByProjectId(opts: {
   readonly projectId: string | null;
+  readonly bootstrap: WorkspaceBootstrap | null;
 }): Promise<WorkspaceLookupResult> {
   if (!opts.projectId) {
     return { kind: "skip" };
   }
   const byId = await resolveRegisteredProjectById({ id: opts.projectId });
   if (!byId) {
-    return { kind: "error", error: "unknown_project_id", statusCode: 404 };
+    return opts.bootstrap
+      ? { kind: "skip" }
+      : { kind: "error", error: "unknown_project_id", statusCode: 404 };
   }
   return {
     kind: "resolved",
@@ -416,6 +513,7 @@ async function resolveWorkspaceByProjectId(opts: {
       projectDir: byId.project.projectDir,
       projectName: byId.registration.name,
       projectId: byId.registration.id,
+      source: "external",
     },
   };
 }
@@ -446,6 +544,7 @@ async function resolveWorkspaceByProjectName(opts: {
       projectDir: byName.projectDir,
       projectName: registered.project.name,
       projectId: registered.project.id,
+      source: "external",
     },
   };
 }
@@ -473,6 +572,7 @@ async function resolveWorkspaceByPath(opts: {
       projectDir: project.projectDir,
       projectName: config.name ?? registered.project.name,
       projectId: registered.project.id,
+      source: "external",
     },
   };
 }
@@ -535,6 +635,8 @@ async function bootstrapWorkspace(opts: {
         readonly projectDir: string;
         readonly projectName: string;
         readonly projectId: string;
+        readonly source: NodeWorkspaceSource;
+        readonly repoUrl?: string;
       };
     }
   | { readonly ok: false; readonly error: string; readonly statusCode: number }
@@ -613,6 +715,12 @@ async function bootstrapWorkspace(opts: {
   const config = await readProjectConfig(project);
   const preferredName =
     opts.requestedProjectName ?? opts.bootstrap.projectName ?? undefined;
+  const source: NodeWorkspaceSource = isPathInside({
+    path: project.projectRoot,
+    parent: resolveManagedNodeProjectsRoot(),
+  })
+    ? "managed"
+    : "external";
 
   return {
     ok: true,
@@ -621,6 +729,8 @@ async function bootstrapWorkspace(opts: {
       projectDir: project.projectDir,
       projectName: preferredName ?? config.name ?? registered.project.name,
       projectId: registered.project.id,
+      source,
+      repoUrl,
     },
   };
 }
@@ -652,7 +762,7 @@ function resolveBootstrapRoot(input: {
     input.bootstrapProjectName ??
     deriveRepoName(input.repoUrl);
   const slug = sanitizeProjectSlug(seed);
-  return resolve(resolveUserHomeDir(), "dev", "hack-nodes", slug);
+  return resolve(resolveManagedNodeProjectsRoot(), slug);
 }
 
 function deriveRepoName(repoUrl: string): string {
@@ -673,9 +783,16 @@ function normalizeCommandError(stderr: string, stdout: string): string {
   return out || "command_failed";
 }
 
-function resolveUserHomeDir(): string {
-  const envHome = (process.env.HOME ?? "").trim();
-  return envHome || homedir();
+function isPathInside(opts: {
+  readonly path: string;
+  readonly parent: string;
+}): boolean {
+  const normalizedPath = resolve(opts.path);
+  const normalizedParent = resolve(opts.parent);
+  return (
+    normalizedPath === normalizedParent ||
+    normalizedPath.startsWith(`${normalizedParent}/`)
+  );
 }
 
 async function ensureBranch(opts: {

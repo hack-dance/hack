@@ -421,27 +421,27 @@ test("buildProjectViews includes zellij sessions when session name matches proje
 
 test("buildProjectViews matches runtime by working directory when compose project slug differs", async () => {
   const dottedProject = await createProject({
-    name: "dimitri.substrate",
+    name: "sample.substrate",
     services: ["app", "qdrant"],
   });
   const runtime = [
     makeRuntimeProject({
-      name: "dimitrisubstrate",
+      name: "samplesubstrate",
       workingDir: dottedProject.projectDir,
       containersByService: {
         app: [
           makeContainer({
-            project: "dimitrisubstrate",
+            project: "samplesubstrate",
             service: "app",
-            name: "dimitrisubstrate-app-1",
+            name: "samplesubstrate-app-1",
             state: "running",
           }),
         ],
         qdrant: [
           makeContainer({
-            project: "dimitrisubstrate",
+            project: "samplesubstrate",
             service: "qdrant",
-            name: "dimitrisubstrate-qdrant-1",
+            name: "samplesubstrate-qdrant-1",
             state: "running",
           }),
         ],
@@ -459,7 +459,7 @@ test("buildProjectViews matches runtime by working directory when compose projec
   });
 
   const view = views.find((entry) => entry.name === dottedProject.name);
-  expect(view?.runtime?.project).toBe("dimitrisubstrate");
+  expect(view?.runtime?.project).toBe("samplesubstrate");
   expect(view?.runtimeStatus).toBe("running");
   expect(view?.status).toBe("running");
 });

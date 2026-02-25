@@ -7,7 +7,7 @@ Cloudflare Tunnel is ideal for HTTP/WS gateway access from a phone or browser wh
 ## Prereqs
 
 - `cloudflared` installed
-- A Cloudflare-managed zone (e.g. `dimitri.computer`)
+- A Cloudflare-managed zone (e.g. `dev.example.com`)
 
 ## Setup (one command)
 

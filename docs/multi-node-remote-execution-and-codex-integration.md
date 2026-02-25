@@ -39,6 +39,7 @@ Known open gaps:
 2. Additional e2e coverage for manual clean-machine onboarding + provider bootstrap paths.
 3. Encrypted-file backend and cloud-provider shim adapters are implemented; provider-native cloud transports are still pending.
 4. Published node-runtime container channel + clean-host onboarding validation.
+5. Private-repo bootstrap auth still needs first-class distribution flow for fresh-node clone paths.
 
 Recent provider addition:
 1. Railway bootstrap path is now available via `hack node provider railway bootstrap` for quick external node bring-up using Railway CLI + node runtime image.
@@ -62,6 +63,7 @@ Active tickets:
 15. `T-00141` GitHub extension multi-account profiles + routing selection.
 16. `T-00142` GitHub one-click OAuth/device flow + installation picker.
 17. `T-00143` Dispatch/macOS GitHub profile selection + PR-run linkage.
+18. `T-00162` Node-local workspace map + managed remote project roots.
 
 ## M1-M3 Acceptance Summary
 M1:
@@ -78,7 +80,7 @@ M3:
 1. `hack dispatch run` resolves node via explicit/project/default/auto.
 2. Calls workspace ensure and then creates remote supervisor job.
 3. Streams logs/events and persists local run artifacts.
-4. Remaining gap: bootstrap path when target node lacks project workspace.
+4. Remaining gaps: private-repo bootstrap auth handoff and clean-host e2e hardening.
 
 ## M4-M7 Implementation Plan
 ### M4: Policy Engine + Durable Audit (`T-00108`)
@@ -142,6 +144,47 @@ M3:
 4. Added endpoint-level test coverage for bootstrap clone + legacy no-bootstrap behavior.
 5. Added gated dispatch e2e coverage to validate controller->node workspace ensure, job stream, and artifact persistence.
 
+## M3.6: Node-Local Workspace Mapping + Managed Roots (`T-00162`)
+1. Add node-managed workspace root default:
+   - `$HOME/.hack/projects/<project-slug>/`
+2. Add node-local mapping store:
+   - `$HOME/.hack/projects.config.json`
+3. Map controller-side project identity to node-side workspace identity and root path so controller/remote paths can differ safely.
+4. Update workspace ensure resolution order:
+   - explicit mapped workspace
+   - existing registered node project
+   - managed-root clone/bootstrap
+   - actionable failure
+5. Support pre-existing manual workspaces on node as external attachments (no forced relocation).
+6. Treat this as a prerequisite for seamless local-edit/remote-run sync work (`T-00159`).
+7. Dispatch workspace ensure payload should include controller identity metadata:
+   - `controller_project_id`
+   - `controller_project_name`
+   so node mappings stay stable even when node-local project ids differ.
+8. Added node-local workspace map CLI repair surface:
+   - `hack node workspace list`
+   - `hack node workspace resolve --project <name|id>`
+   - `hack node workspace attach --project <name|id> --path <workspace-root>`
+   - `hack node workspace remove --project <name|id>`
+9. Added tests for map selection helpers and bootstrap/map recovery paths:
+   - `tests/node-workspace-command.test.ts`
+   - `tests/node-workspace-bootstrap.test.ts`
+
+## M3.7: Local Edit -> Remote Run Sync Spine (`T-00159`)
+1. Gate sync to `controlPlane.execution.mode = local_edit_remote_run` only.
+2. Implement first production sync engine as Mutagen (`one-way-safe`) before remote job create.
+3. Persist node SSH source (`NodeRecord.source`) from pairing flow so controller can derive SSH transport for sync sessions.
+4. Session model:
+   - deterministic per project/node/branch
+   - create-if-missing + flush-before-run
+   - default excludes: `.git`, `.hack/.internal`, `.DS_Store`, plus config excludes.
+5. Explicit failure handling:
+   - missing local project root
+   - missing node SSH source metadata
+   - missing Mutagen binary
+   - sync create/flush command failures
+6. Persist sync metadata in run events + run artifacts manifest/summary for audit/debug.
+
 ## M2.5: Containerized Node Runtime (`T-00118`)
 1. Add `docker/node-runtime` image with entrypoint-driven bootstrap:
    - optional repo clone
@@ -190,9 +233,11 @@ Targeted scenarios:
 7. Containerized node bootstrap on clean host with enrollment bundle import.
 
 ## Immediate Next Steps
-1. Run full quality gates and fix any residual lint/complexity issues.
-2. Expand GitHub App coverage with connect/command integration tests for CLI UX edge cases.
-3. Add controller command bridge for provider bootstrap (`T-00112`) starting with AWS SSM path.
-4. Implement `hack flow feedback-pr` end-to-end ticket workflow (`T-00113`).
-5. Replace cloud shim adapters with provider-native integrations (AWS/GCP/Azure/Vault).
-6. Publish and validate GHCR `hack-node-runtime` image across amd64/arm64 (`T-00118`).
+1. Run full remote-node e2e matrix on second MacBook + Railway private (`T-00158`) with runbook capture.
+2. Fix topology refresh reliability regression where node list can appear empty on first load (`T-00160`).
+3. Run full quality gates and reduce complexity hotspots tracked in `T-00161`.
+4. Expand GitHub App coverage with connect/command integration tests for CLI UX edge cases.
+5. Add controller command bridge for provider bootstrap (`T-00112`) starting with AWS SSM path.
+6. Implement `hack flow feedback-pr` end-to-end ticket workflow (`T-00113`).
+7. Replace cloud shim adapters with provider-native integrations (AWS/GCP/Azure/Vault).
+8. Publish and validate GHCR `hack-node-runtime` image across amd64/arm64 (`T-00118`).

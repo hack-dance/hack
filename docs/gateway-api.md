@@ -96,14 +96,14 @@ hack remote monitor
 
 Recommended for exposing the gateway to mobile/web clients:
 
-1) Pick a hostname under a Cloudflare-managed zone (e.g. `gateway.dimitri.computer`).
-2) Run `hack x cloudflare tunnel-setup --hostname gateway.dimitri.computer`.
+1) Pick a hostname under a Cloudflare-managed zone (e.g. `gateway.dev.example.com`).
+2) Run `hack x cloudflare tunnel-setup --hostname gateway.dev.example.com`.
 3) Start the tunnel: `hack x cloudflare tunnel-start`.
 
 Cloudflare creates a CNAME to `<tunnel-id>.cfargotunnel.com` under your zone. The gateway URL is:
 
 ```
-https://gateway.dimitri.computer
+https://gateway.dev.example.com
 ```
 
 ### Tailscale (VPN / SSH)
@@ -120,7 +120,7 @@ For gateway access over the tailnet, either:
 
 ### SSH domain (custom)
 
-If you want a stable `ssh.dimitri.computer` style hostname:
+If you want a stable `ssh.dev.example.com` style hostname:
 
 - Point the DNS record at your home IP **and** forward port 22 (not recommended), or
 - Use Tailscale MagicDNS and treat `ssh.<tailnet>.ts.net` as your stable host.
@@ -196,6 +196,11 @@ Base URL: `http://127.0.0.1:7788` (or your tunnel URL)
 | Method | Path | Write required | Description |
 | --- | --- | --- | --- |
 | GET | `/v1/status` | no | Daemon status + uptime |
+| GET | `/v1/node/status` | no | Node runtime/gateway/supervisor capability status |
+| POST | `/v1/node/workspaces/ensure` | yes | Resolve project workspace + ensure branch checkout |
+| POST | `/v1/node/devcontainers/up` | yes | Start devcontainer for resolved workspace |
+| POST | `/v1/node/devcontainers/down` | yes | Stop tracked devcontainer session |
+| GET | `/v1/node/devcontainers/:id` | no | Fetch devcontainer session metadata |
 | GET | `/v1/metrics` | no | Cache + stream metrics |
 | GET | `/v1/projects` | no | Gateway-enabled projects + runtime snapshot |
 | GET | `/v1/ps` | no | Compose project container list |
@@ -239,6 +244,61 @@ Response:
 | `pid` | number | Process id |
 | `started_at` | string | ISO timestamp |
 | `uptime_ms` | number | Uptime in milliseconds |
+
+### GET /v1/node/status
+
+Returns node capability metadata for controller routing:
+
+- host identity (`node.name`, `node.platform`, `node.arch`, Bun version)
+- gateway settings and enabled projects
+- supervisor settings
+- active devcontainer sessions
+
+This endpoint is used by `hack node status` and `hack dispatch run` during node selection.
+
+### POST /v1/node/workspaces/ensure
+
+Ensures a target workspace exists on the node and optionally checks out/creates a branch.
+
+Request body selectors:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `project` | string | no | Project name selector |
+| `project_id` | string | no | Node-local project id selector |
+| `path` | string | no | Absolute path selector |
+| `branch` | string | no | Branch to ensure/check out |
+| `bootstrap` | object | no | Optional clone/register hints when workspace is missing |
+
+`bootstrap` fields:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `repo_url` | string | yes | Git clone URL used for fresh-node bootstrap |
+| `project_name` | string | no | Preferred project name when registering clone |
+| `project_root` | string | no | Absolute destination path override on node |
+
+Response:
+
+```json
+{
+  "workspace": {
+    "projectId": "4132b9154775",
+    "projectName": "hack-cli",
+    "projectRoot": "/Users/local-user/dev/hack-dance/hack-cli",
+    "projectDir": "/Users/local-user/dev/hack-dance/hack-cli/.hack",
+    "branch": "feature/my-branch"
+  }
+}
+```
+
+### Node devcontainer endpoints
+
+- `POST /v1/node/devcontainers/up`
+- `POST /v1/node/devcontainers/down`
+- `GET /v1/node/devcontainers/:id`
+
+These endpoints manage tracked devcontainer sessions and are consumed by node/devcontainer bridge workflows.
 
 ### GET /v1/metrics
 

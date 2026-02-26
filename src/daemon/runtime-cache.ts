@@ -280,7 +280,10 @@ export function createRuntimeCache(opts: {
     readonly branch: string | null;
   }): PsPayload => {
     const runtime = snapshot?.runtime ?? [];
-    const match = runtime.find((p) => p.project === composeProject);
+    const match = resolveRuntimeProjectForComposeProject({
+      runtime,
+      composeProject,
+    });
     const items = match ? buildPsItems({ runtime: match }) : [];
     const runtimeMeta = serializeRuntimeHealth({ health });
     return {
@@ -324,6 +327,44 @@ function buildPsItems(opts: { readonly runtime: RuntimeProject }): PsItem[] {
     }
     return a.Name.localeCompare(b.Name);
   });
+}
+
+/**
+ * Docker compose project names can be normalized by the engine (for example,
+ * stripping unsupported punctuation) before labels are applied on containers.
+ * Resolve runtime projects with exact match first, then a normalized fallback
+ * to keep `hack ps --json` stable across historical compose naming variants.
+ */
+function resolveRuntimeProjectForComposeProject(opts: {
+  readonly runtime: readonly RuntimeProject[];
+  readonly composeProject: string;
+}): RuntimeProject | null {
+  const exact = opts.runtime.find(
+    (project) => project.project === opts.composeProject
+  );
+  if (exact) {
+    return exact;
+  }
+
+  const targetKey = normalizeComposeProjectLookupKey(opts.composeProject);
+  if (targetKey.length === 0) {
+    return null;
+  }
+
+  const matches = opts.runtime.filter(
+    (project) => normalizeComposeProjectLookupKey(project.project) === targetKey
+  );
+  if (matches.length === 1) {
+    return matches[0] ?? null;
+  }
+  return null;
+}
+
+function normalizeComposeProjectLookupKey(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, "");
 }
 
 function serializeRuntimeHealth(opts: { readonly health: RuntimeHealth }): {

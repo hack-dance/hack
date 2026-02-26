@@ -21,7 +21,7 @@ Cloudflare/Tailscale/SSH exposure in one flow.
 - The CLI dispatches extension commands via `hack x <namespace> <command>`.
 - Global enablement lives in `~/.hack/hack.config.json` (`hack config set --global ...`).
 - Per-project overrides live in `.hack/hack.config.json` and typically win over global values
-  (except global-only extensions like Cloudflare/Tailscale, which ignore project overrides).
+  (except global-only extensions like Cloudflare/Tailscale/GitHub, which ignore project overrides).
 - Built-in Gateway enablement is project-scoped: `controlPlane.gateway.enabled` opts a project into routing.
 
 ## Extension definition (API surface)
@@ -78,7 +78,7 @@ Shortcut for gateway (project-scoped):
 }
 ```
 
-Global-only extensions (e.g. Cloudflare, Tailscale) must be configured in the global config.
+Global-only extensions (e.g. Cloudflare, Tailscale, GitHub) must be configured in the global config.
 Project overrides for these are ignored.
 
 CLI helpers:
@@ -101,8 +101,9 @@ Use `hack x <namespace> help` to list commands.
 - Gateway: `hack x gateway token-create|token-list|token-revoke`
 - Supervisor: `hack x supervisor job-create|job-list|job-show|job-tail|job-attach|job-cancel|shell`
 - Cloudflare: `hack x cloudflare tunnel-print|tunnel-setup|tunnel-start|tunnel-stop|access-setup`
-- Tailscale: `hack x tailscale setup|status|ip`
+- Tailscale: `hack x tailscale setup|status|inspect|oauth-status|oauth-connect|oauth-disconnect|ip`
 - Tickets: `hack x tickets setup|create|update|list|show|status|sync|tui` (see `docs/guides/tickets.md`)
+- GitHub: `hack x github connect|oauth-connect|disconnect|profiles|use|status|pr-upsert`
 
 Gateway tokens default to `read` scope. Use `--scope write` to permit non-GET requests (also
 requires global `controlPlane.gateway.allowWrites = true`).
@@ -116,6 +117,15 @@ Current gateway API surface (HTTP/WS):
 - `POST /control-plane/projects/:id/shells`
 - `GET /control-plane/projects/:id/shells/:shellId`
 - `WS /control-plane/projects/:id/shells/:shellId/stream` (requires write token + allowWrites)
+
+Local auth service surface (daemon + global Caddy route):
+- `GET /health`
+- `GET /v1/auth/providers`
+- `GET /gh/start` (GitHub browser OAuth entrypoint)
+- `GET /gh/callback`
+- `GET /v1/auth/github/config`
+- `GET /v1/auth/github/start`
+- `GET /v1/auth/github/flows/:id`
 
 Interactive shell/TTY is available via the shell stream endpoints; use
 `hack x supervisor shell` or see protocol below.
@@ -184,6 +194,83 @@ Options:
 | `--cwd <path>` | string | - | Working directory (relative to project root) |
 | `--env <KEY=VALUE>` | string | - | Environment override (repeatable) |
 | `--json` | boolean | false | Output JSON |
+
+### GitHub extension (`hack x github`)
+
+Connect or update a profile directly from token input:
+
+```bash
+hack x github connect --profile default --token-env HACK_GITHUB_APP_TOKEN
+# or:
+printf "%s" "$HACK_GITHUB_APP_TOKEN" | hack x github connect --profile default --stdin
+```
+
+Exchange GitHub App credentials for an installation token (recommended for least privilege):
+
+```bash
+hack x github connect \
+  --profile work \
+  --set-default \
+  --app-id 12345 \
+  --installation-id 67890 \
+  --private-key-env HACK_GITHUB_APP_PRIVATE_KEY
+
+# or pass key material directly and persist it in keychain:
+printf "%s" "$GITHUB_APP_PRIVATE_KEY" | hack x github connect \
+  --profile work \
+  --app-id 12345 \
+  --installation-id 67890 \
+  --private-key-stdin \
+  --private-key-auth-ref github.app.private_key.default
+```
+
+One-click browser OAuth bootstrap (via `gh`) + installation picker:
+
+```bash
+hack x github oauth-connect --profile personal --set-default
+# optional non-interactive installation bind:
+hack x github oauth-connect --profile personal --installation-id 12345678
+```
+
+Profile management + status:
+
+```bash
+hack x github profiles
+hack x github profiles --json
+hack x github use --profile work
+hack x github status --profile work
+hack x github status --profile work --json
+hack x github disconnect --profile work
+```
+
+PR operations:
+
+```bash
+hack x github pr-upsert \
+  --profile work \
+  --repo owner/repo \
+  --head my-branch \
+  --base main \
+  --title "My PR" \
+  --body "Details"
+```
+
+Notes:
+- Profile config lives at:
+  `controlPlane.extensions["dance.hack.github"].config.profiles`.
+- Profile selection precedence is:
+  `--profile` -> `controlPlane.routing.overrides.github.profile` -> `config.defaultProfile`.
+- Keychain storage uses profile-specific `authRef` + `service`.
+- Token resolution order is keychain first, then environment fallback (`tokenEnv`).
+- If token metadata includes `expiresAt`, auth resolution attempts automatic GitHub App refresh using profile `appId`, `installationId`, and private key source.
+- Browser OAuth flow requires GitHub OAuth app config:
+  - `controlPlane.extensions["dance.hack.github"].config.oauthClientId`
+  - `controlPlane.extensions["dance.hack.github"].config.oauthClientSecretAuthRef` (default: `github.oauth.client_secret`)
+  - keychain secret at service `hack-github-auth`, name `<oauthClientSecretAuthRef>`
+- `hack x github connect` now auto-resolves account identity (`/user`) from the connected token when available and persists `accountLogin/accountName/accountId` on the selected profile for downstream UI routing labels.
+- macOS desktop includes a dedicated panel at `Settings / Extensions / GitHub` with connected-account management and direct browser auth. It starts a local auth flow (via `auth.hack.gy` with localhost fallback), opens GitHub in your browser, then polls callback status and refreshes profiles automatically.
+- macOS desktop shows read-only system Git identity (host-level inherited Git/gh context) separately from remote OAuth/App accounts to keep local gateway identity and remote auth routing boundaries explicit.
+- `auth.hack` and `auth.hack.gy` are routed by global Caddy to the daemon auth listener (`127.0.0.1:7790` by default), so this endpoint can also host future provider callbacks/hooks.
 
 #### job-show
 
@@ -336,6 +423,22 @@ Usage: `hack x tailscale setup`
 #### status
 
 Usage: `hack x tailscale status [args...]`
+
+#### inspect
+
+Usage: `hack x tailscale inspect [--json]`
+
+#### oauth-status
+
+Usage: `hack x tailscale oauth-status [--json] [--validate]`
+
+#### oauth-connect
+
+Usage: `hack x tailscale oauth-connect --client-id <id> [--client-secret <secret>|--client-secret-stdin] [--auth-ref <ref>] [--tailnet <tailnet>] [--key-expiry-seconds <seconds>] [--json]`
+
+#### oauth-disconnect
+
+Usage: `hack x tailscale oauth-disconnect [--auth-ref <ref>] [--json]`
 
 #### ip
 

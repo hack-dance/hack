@@ -1,7 +1,6 @@
 import { resolve } from "node:path";
 import { confirm, isCancel, password, text } from "@clack/prompts";
 
-import { secrets } from "bun";
 import type { CliContext, CommandHandlerFor } from "../cli/command.ts";
 import {
   CliUsageError,
@@ -11,10 +10,11 @@ import {
 } from "../cli/command.ts";
 import { optJson, optPath, optProject } from "../cli/options.ts";
 import { PROJECT_ENV_FILENAME } from "../constants.ts";
+import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
+import { updateGlobalConfig } from "../lib/config.ts";
 import {
   removeDotEnvKey,
   resolveHackEnv,
-  resolveKeychainServiceName,
   upsertDotEnvValue,
 } from "../lib/hack-env.ts";
 import type { ProjectContext } from "../lib/project.ts";
@@ -25,6 +25,11 @@ import {
   sanitizeProjectSlug,
 } from "../lib/project.ts";
 import { resolveRegisteredProjectByName } from "../lib/projects-registry.ts";
+import {
+  formatSecretStoreDescriptor,
+  resolveSecretStore,
+} from "../lib/secret-store.ts";
+import { display } from "../ui/display.ts";
 import { logger } from "../ui/logger.ts";
 
 const optShowSecrets = defineOption({
@@ -38,7 +43,7 @@ const optSecret = defineOption({
   name: "secret",
   type: "boolean",
   long: "--secret",
-  description: "Store value in OS keychain (Bun.secrets) instead of .hack/.env",
+  description: "Store value in configured secret backend instead of .hack/.env",
 } as const);
 
 const listSpec = defineCommand({
@@ -68,7 +73,74 @@ const unsetSpec = defineCommand({
   subcommands: [],
 } as const);
 
+const optProvider = defineOption({
+  name: "provider",
+  type: "string",
+  long: "--provider",
+  valueHint: "<aws|gcp|azure|vault>",
+  description: "Cloud secret provider when backend is cloud",
+} as const);
+
+const optStorePath = defineOption({
+  name: "storePath",
+  type: "string",
+  long: "--store-path",
+  valueHint: "<path>",
+  description: "Encrypted file path when backend is encrypted_file",
+} as const);
+
+const optSecretProject = defineOption({
+  name: "secretProject",
+  type: "string",
+  long: "--secret-project",
+  valueHint: "<id>",
+  description: "Optional cloud project/account identifier",
+} as const);
+
+const optSecretPrefix = defineOption({
+  name: "secretPrefix",
+  type: "string",
+  long: "--secret-prefix",
+  valueHint: "<prefix>",
+  description: "Optional cloud secret name prefix",
+} as const);
+
+const backendSpec = defineCommand({
+  name: "backend",
+  summary: "Manage env/secret storage backend strategy",
+  group: "Project",
+  options: [],
+  positionals: [],
+  subcommands: [],
+} as const);
+
+const backendStatusSpec = defineCommand({
+  name: "status",
+  summary: "Show configured env/secret backend strategy",
+  group: "Project",
+  options: [optJson],
+  positionals: [],
+  subcommands: [],
+} as const);
+
+const backendUseSpec = defineCommand({
+  name: "use",
+  summary: "Select env/secret backend strategy",
+  group: "Project",
+  options: [
+    optProvider,
+    optStorePath,
+    optSecretProject,
+    optSecretPrefix,
+    optJson,
+  ],
+  positionals: [{ name: "backend", required: true }],
+  subcommands: [],
+} as const);
+
 const ENV_KEY_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
+const SECRET_BACKEND_VALUES = ["keychain", "encrypted_file", "cloud"] as const;
+const CLOUD_PROVIDER_VALUES = ["aws", "gcp", "azure", "vault"] as const;
 
 async function resolveProjectForEnv(opts: {
   readonly ctx: CliContext;
@@ -108,6 +180,24 @@ async function resolveProjectName(project: ProjectContext): Promise<string> {
   const derived = defaultProjectSlugFromPath(project.projectRoot);
   const raw = (cfg.name ?? derived).trim();
   return sanitizeProjectSlug(raw.length > 0 ? raw : derived);
+}
+
+async function resolveConfiguredSecretStore(input: {
+  readonly project: ProjectContext;
+  readonly projectName: string;
+}) {
+  try {
+    return await resolveSecretStore({
+      projectName: input.projectName,
+      projectDir: input.project.projectDir,
+    });
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Unable to resolve secret store.";
+    throw new CliUsageError(message);
+  }
 }
 
 const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
@@ -193,8 +283,7 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
     projectOpt: args.options.project,
   });
   const projectName = await resolveProjectName(project);
-  const service = resolveKeychainServiceName({ projectName });
-  const storeInKeychain = args.options.secret === true;
+  const storeSecret = args.options.secret === true;
 
   const spec = (args.positionals.spec ?? "").trim();
   const [keyFromSpec, valueFromSpec] = parseKeyValueSpec(spec);
@@ -203,13 +292,14 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
   const value = await resolveEnvValue({
     key,
     value: valueFromSpec,
-    secret: storeInKeychain,
+    secret: storeSecret,
   });
 
-  if (storeInKeychain) {
-    await secrets.set({ service, name: key, value });
+  if (storeSecret) {
+    const store = await resolveConfiguredSecretStore({ project, projectName });
+    await store.set({ key, value });
     logger.success({
-      message: `Stored secret "${key}" in keychain (${service})`,
+      message: `Stored secret "${key}" in ${formatSecretStoreDescriptor({ descriptor: store.descriptor })}`,
     });
     return 0;
   }
@@ -232,12 +322,12 @@ const handleEnvUnset: CommandHandlerFor<typeof unsetSpec> = async ({
     projectOpt: args.options.project,
   });
   const projectName = await resolveProjectName(project);
-  const service = resolveKeychainServiceName({ projectName });
+  const store = await resolveConfiguredSecretStore({ project, projectName });
 
   const key = await resolveEnvKey({ key: (args.positionals.key ?? "").trim() });
 
   const ok = await confirm({
-    message: `Unset "${key}" from ${project.projectDir}/.env and keychain (${service})?`,
+    message: `Unset "${key}" from ${project.projectDir}/.env and ${formatSecretStoreDescriptor({ descriptor: store.descriptor })}?`,
     initialValue: true,
   });
   if (isCancel(ok)) {
@@ -248,18 +338,153 @@ const handleEnvUnset: CommandHandlerFor<typeof unsetSpec> = async ({
   }
 
   const envFile = resolve(project.projectDir, PROJECT_ENV_FILENAME);
-  const [dotenvResult, keychainDeleted] = await Promise.all([
+  const [dotenvResult, secretDeleted] = await Promise.all([
     removeDotEnvKey({ envFile, key }),
-    secrets.delete({ service, name: key }),
+    store.delete({ key }),
   ]);
 
   logger.success({
     message: [
       dotenvResult.changed ? `Updated ${envFile}` : `No ${key} in ${envFile}`,
-      keychainDeleted
-        ? `Deleted from keychain (${service})`
-        : "No keychain entry",
+      secretDeleted
+        ? `Deleted from ${formatSecretStoreDescriptor({ descriptor: store.descriptor })}`
+        : "No secret entry",
     ].join(" • "),
+  });
+  return 0;
+};
+
+const handleEnvBackendStatus: CommandHandlerFor<
+  typeof backendStatusSpec
+> = async ({ args }): Promise<number> => {
+  const controlPlane = await readControlPlaneConfig({});
+  const secretsConfig = controlPlane.config.secrets;
+  if (args.options.json) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          backend: secretsConfig.backend,
+          allow_env_auth_refs: secretsConfig.allowEnvAuthRefs,
+          encrypted_file: secretsConfig.encryptedFile,
+          cloud: secretsConfig.cloud,
+        },
+        null,
+        2
+      )}\n`
+    );
+    return 0;
+  }
+
+  await display.kv({
+    title: "Env/secret backend strategy",
+    entries: [
+      ["backend", secretsConfig.backend],
+      [
+        "allow_env_auth_refs",
+        secretsConfig.allowEnvAuthRefs ? "true" : "false",
+      ],
+      ["encrypted_file_path", secretsConfig.encryptedFile.path],
+      ["cloud_provider", secretsConfig.cloud.provider ?? ""],
+      ["cloud_project", secretsConfig.cloud.project ?? ""],
+      ["cloud_secret_prefix", secretsConfig.cloud.secretPrefix],
+    ],
+  });
+  return 0;
+};
+
+const handleEnvBackendUse: CommandHandlerFor<typeof backendUseSpec> = async ({
+  args,
+}): Promise<number> => {
+  const backend = args.positionals.backend.trim();
+  if (
+    !SECRET_BACKEND_VALUES.includes(
+      backend as (typeof SECRET_BACKEND_VALUES)[number]
+    )
+  ) {
+    throw new CliUsageError(
+      `Invalid backend "${backend}". Expected one of: ${SECRET_BACKEND_VALUES.join(", ")}`
+    );
+  }
+
+  const providerRaw = args.options.provider?.trim();
+  if (
+    providerRaw &&
+    !CLOUD_PROVIDER_VALUES.includes(
+      providerRaw as (typeof CLOUD_PROVIDER_VALUES)[number]
+    )
+  ) {
+    throw new CliUsageError(
+      `Invalid --provider "${providerRaw}". Expected one of: ${CLOUD_PROVIDER_VALUES.join(", ")}`
+    );
+  }
+
+  await updateGlobalConfig({
+    path: "controlPlane.secrets.backend",
+    value: backend,
+  });
+
+  if (backend === "encrypted_file" && args.options.storePath?.trim()) {
+    await updateGlobalConfig({
+      path: "controlPlane.secrets.encryptedFile.path",
+      value: args.options.storePath.trim(),
+    });
+  }
+
+  if (backend === "cloud") {
+    if (!providerRaw) {
+      throw new CliUsageError(
+        "Cloud backend requires --provider <aws|gcp|azure|vault>."
+      );
+    }
+    await updateGlobalConfig({
+      path: "controlPlane.secrets.cloud.provider",
+      value: providerRaw,
+    });
+    if (args.options.secretProject?.trim()) {
+      await updateGlobalConfig({
+        path: "controlPlane.secrets.cloud.project",
+        value: args.options.secretProject.trim(),
+      });
+    }
+    if (args.options.secretPrefix?.trim()) {
+      await updateGlobalConfig({
+        path: "controlPlane.secrets.cloud.secretPrefix",
+        value: args.options.secretPrefix.trim(),
+      });
+    }
+  }
+
+  const controlPlane = await readControlPlaneConfig({});
+  const secretsConfig = controlPlane.config.secrets;
+  if (args.options.json) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          backend: secretsConfig.backend,
+          allow_env_auth_refs: secretsConfig.allowEnvAuthRefs,
+          encrypted_file: secretsConfig.encryptedFile,
+          cloud: secretsConfig.cloud,
+        },
+        null,
+        2
+      )}\n`
+    );
+    return 0;
+  }
+
+  await display.kv({
+    title: "Env/secret backend updated",
+    entries: [
+      ["backend", secretsConfig.backend],
+      ["encrypted_file_path", secretsConfig.encryptedFile.path],
+      ["cloud_provider", secretsConfig.cloud.provider ?? ""],
+      ["cloud_project", secretsConfig.cloud.project ?? ""],
+      ["cloud_secret_prefix", secretsConfig.cloud.secretPrefix],
+    ],
+  });
+  logger.info({
+    message:
+      "Secret writes now use the configured backend for keychain-sourced env values.",
   });
   return 0;
 };
@@ -352,5 +577,25 @@ export const envCommand = defineCommand({
     withHandler(listSpec, handleEnvList),
     withHandler(setSpec, handleEnvSet),
     withHandler(unsetSpec, handleEnvUnset),
+    withHandler(
+      defineCommand({
+        ...backendSpec,
+        subcommands: [
+          withHandler(backendStatusSpec, handleEnvBackendStatus),
+          withHandler(backendUseSpec, handleEnvBackendUse),
+        ],
+      } as const),
+      async () => {
+        await display.panel({
+          title: "Env backend commands",
+          tone: "info",
+          lines: [
+            "hack env backend status [--json]",
+            "hack env backend use <keychain|encrypted_file|cloud> [--store-path <path>] [--provider <aws|gcp|azure|vault>] [--secret-project <id>] [--secret-prefix <prefix>]",
+          ],
+        });
+        return 0;
+      }
+    ),
   ],
 } as const);

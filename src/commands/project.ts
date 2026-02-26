@@ -9,7 +9,7 @@ import {
   select,
   text,
 } from "@clack/prompts";
-import { secrets, YAML } from "bun";
+import { YAML } from "bun";
 import { installClaudeHooks } from "../agents/claude.ts";
 import { installCodexSkill } from "../agents/codex-skill.ts";
 import { installCursorRules } from "../agents/cursor.ts";
@@ -52,6 +52,7 @@ import {
   PROJECT_ENV_CONTRACT_FILENAME,
   PROJECT_ENV_FILENAME,
 } from "../constants.ts";
+import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { requestDaemonJson } from "../daemon/client.ts";
 import { renderCompose } from "../init/compose.ts";
 import type { ServiceCandidate } from "../init/discovery.ts";
@@ -73,11 +74,8 @@ import {
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
 import { getString, isRecord } from "../lib/guards.ts";
-import {
-  resolveHackEnv,
-  resolveKeychainServiceName,
-  upsertDotEnvValue,
-} from "../lib/hack-env.ts";
+import { resolveHackInvocation } from "../lib/hack-cli.ts";
+import { resolveHackEnv, upsertDotEnvValue } from "../lib/hack-env.ts";
 import { parseJsonLines } from "../lib/json-lines.ts";
 import {
   appendLifecycleLogRecord,
@@ -92,6 +90,7 @@ import {
   resolveShouldTryLoki,
   resolveUseLoki,
 } from "../lib/logs.ts";
+import { readNodesRegistry } from "../lib/nodes-registry.ts";
 import { openUrl } from "../lib/os.ts";
 import {
   defaultProjectSlugFromPath,
@@ -105,12 +104,17 @@ import {
   sanitizeBranchSlug,
   sanitizeProjectSlug,
 } from "../lib/project.ts";
+import { resolveProjectExecutionTarget } from "../lib/project-execution.ts";
 import {
   readProjectsRegistry,
   resolveRegisteredProjectByName,
   upsertProjectRegistration,
 } from "../lib/projects-registry.ts";
-import { exec } from "../lib/shell.ts";
+import {
+  formatSecretStoreDescriptor,
+  resolveSecretStore,
+} from "../lib/secret-store.ts";
+import { exec, run as runShell } from "../lib/shell.ts";
 import { parseTimeInput } from "../lib/time.ts";
 import { upsertAgentDocs } from "../mcp/agent-docs.ts";
 import type { McpTarget } from "../mcp/install.ts";
@@ -200,6 +204,15 @@ const optNoDiscovery = defineOption({
   description: "Skip discovery and generate a minimal compose",
 } as const);
 
+const optTarget = defineOption({
+  name: "target",
+  type: "string",
+  long: "--target",
+  valueHint: "<auto|local|remote>",
+  description:
+    "Execution target routing (auto routes to remote when project execution mode requires it)",
+} as const);
+
 const initOptions = [
   optPath,
   optManual,
@@ -216,9 +229,22 @@ const upOptions = [
   optBranch,
   optDetach,
   optProfile,
+  optTarget,
 ] as const;
-const downOptions = [optPath, optProject, optBranch, optProfile] as const;
-const restartOptions = [optPath, optProject, optBranch, optProfile] as const;
+const downOptions = [
+  optPath,
+  optProject,
+  optBranch,
+  optProfile,
+  optTarget,
+] as const;
+const restartOptions = [
+  optPath,
+  optProject,
+  optBranch,
+  optProfile,
+  optTarget,
+] as const;
 const psOptions = [
   optPath,
   optProject,
@@ -792,9 +818,8 @@ async function resolveComposeEnvOverrides(opts: {
     const fixed = await maybePromptToFixMissingEnv({
       missing: missingRelevant,
       envFile: resolve(opts.project.projectDir, PROJECT_ENV_FILENAME),
-      keychainService: resolveKeychainServiceName({
-        projectName: opts.projectName,
-      }),
+      projectName: opts.projectName,
+      projectDir: opts.project.projectDir,
     });
     if (fixed) {
       return await resolveComposeEnvOverrides(opts);
@@ -854,7 +879,8 @@ async function maybePromptToFixMissingEnv(opts: {
     readonly source: "plain_env" | "keychain";
   }[];
   readonly envFile: string;
-  readonly keychainService: string;
+  readonly projectName: string;
+  readonly projectDir: string;
 }): Promise<boolean> {
   if (!(process.stdin.isTTY && process.stdout.isTTY)) {
     return false;
@@ -881,11 +907,19 @@ async function maybePromptToFixMissingEnv(opts: {
     return false;
   }
 
+  const secretStore = await resolveSecretStore({
+    projectName: opts.projectName,
+    projectDir: opts.projectDir,
+  });
+  const secretLabel = formatSecretStoreDescriptor({
+    descriptor: secretStore.descriptor,
+  });
+
   for (const v of opts.missing) {
     const value =
       v.source === "keychain"
         ? await password({
-            message: `Value for secret "${v.key}" (${opts.keychainService}):`,
+            message: `Value for secret "${v.key}" (${secretLabel}):`,
             validate: (input) =>
               !input || input.length === 0 ? "Required" : undefined,
           })
@@ -900,7 +934,7 @@ async function maybePromptToFixMissingEnv(opts: {
     }
 
     if (v.source === "keychain") {
-      await secrets.set({ service: opts.keychainService, name: v.key, value });
+      await secretStore.set({ key: v.key, value });
     } else {
       await upsertDotEnvValue({ envFile: opts.envFile, key: v.key, value });
     }
@@ -3968,6 +4002,113 @@ async function requireProjectContext(startDir: string) {
   return ctx;
 }
 
+type RemoteLifecycleAction = "up" | "down" | "restart";
+
+/**
+ * Resolve whether project lifecycle commands should run locally or dispatch remotely.
+ */
+async function resolveProjectLifecycleTarget(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly requestedTarget: string | undefined;
+}): Promise<ReturnType<typeof resolveProjectExecutionTarget>> {
+  const controlPlane = await readControlPlaneConfig({
+    projectDir: opts.project.projectDir,
+  });
+  if (controlPlane.parseError) {
+    logger.warn({ message: controlPlane.parseError });
+  }
+  const registry = await readNodesRegistry();
+  return resolveProjectExecutionTarget({
+    requestedTarget: opts.requestedTarget,
+    controlPlane: controlPlane.config,
+    defaultNodeId: registry.defaultNodeId ?? undefined,
+  });
+}
+
+/**
+ * Ensure dispatch can select this project by resolving/refreshing registration id.
+ */
+async function resolveDispatchProjectSelector(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+}): Promise<string> {
+  const registration = await upsertProjectRegistration({
+    project: opts.project,
+  });
+  if (registration.status === "conflict") {
+    return registration.existing.id;
+  }
+  return registration.project.id;
+}
+
+/**
+ * Build remote lifecycle command args that always force local execution on target node.
+ */
+function buildRemoteLifecycleCommand(opts: {
+  readonly action: RemoteLifecycleAction;
+  readonly branch: string | null;
+  readonly profiles: readonly string[];
+  readonly detach?: boolean;
+}): readonly string[] {
+  const args = [opts.action, "--target", "local"] as string[];
+  if (opts.branch) {
+    args.push("--branch", opts.branch);
+  }
+  if (opts.profiles.length > 0) {
+    args.push("--profile", opts.profiles.join(","));
+  }
+  if (opts.action === "up" && opts.detach === true) {
+    args.push("--detach");
+  }
+  return args;
+}
+
+/**
+ * Dispatch lifecycle command to remote node when project execution target resolves to remote.
+ */
+async function runRemoteLifecycleCommand(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly action: RemoteLifecycleAction;
+  readonly branch: string | null;
+  readonly profiles: readonly string[];
+  readonly requestedTarget: string | undefined;
+  readonly detach?: boolean;
+}): Promise<number | null> {
+  const target = await resolveProjectLifecycleTarget({
+    project: opts.project,
+    requestedTarget: opts.requestedTarget,
+  });
+  if (target.resolvedTarget === "local") {
+    return null;
+  }
+
+  const projectSelector = await resolveDispatchProjectSelector({
+    project: opts.project,
+  });
+  const dispatchNode = target.nodeSelector ?? "default";
+  const remoteCommand = buildRemoteLifecycleCommand({
+    action: opts.action,
+    branch: opts.branch,
+    profiles: opts.profiles,
+    detach: opts.detach,
+  });
+  const invocation = await resolveHackInvocation();
+  const dispatchArgs = [...invocation.args, "dispatch", "run"] as string[];
+  dispatchArgs.push("--project", projectSelector);
+  dispatchArgs.push("--node", dispatchNode);
+  dispatchArgs.push("--runner", "generic");
+  if (opts.branch) {
+    dispatchArgs.push("--branch", opts.branch);
+  }
+  dispatchArgs.push("--", "hack", ...remoteCommand);
+
+  logger.step({
+    message: `Dispatching remote ${opts.action} on node ${dispatchNode} (${target.reason})`,
+  });
+  return await runShell([invocation.bin, ...dispatchArgs], {
+    cwd: opts.project.projectRoot,
+  });
+}
+
 async function handleUp({
   ctx,
   args,
@@ -3985,6 +4126,17 @@ async function handleUp({
   const profiles = parseCsvList(args.options.profile);
 
   await touchBranchUsageIfNeeded({ project, branch });
+  const remoteUpCode = await runRemoteLifecycleCommand({
+    project,
+    action: "up",
+    branch,
+    profiles,
+    requestedTarget: args.options.target,
+    detach,
+  });
+  if (remoteUpCode !== null) {
+    return remoteUpCode;
+  }
   await maybeSyncOauthAliasesInCompose({ project });
 
   const cfg = await readProjectConfig(project);
@@ -4135,6 +4287,16 @@ async function handleDown({
   const profiles = parseCsvList(args.options.profile);
 
   await touchBranchUsageIfNeeded({ project, branch });
+  const remoteDownCode = await runRemoteLifecycleCommand({
+    project,
+    action: "down",
+    branch,
+    profiles,
+    requestedTarget: args.options.target,
+  });
+  if (remoteDownCode !== null) {
+    return remoteDownCode;
+  }
   const cfg = await readProjectConfig(project);
   if (cfg.parseError) {
     const configPath = cfg.configPath ?? project.configFile;
@@ -4392,6 +4554,16 @@ async function handleRestart({
   const profiles = parseCsvList(args.options.profile);
 
   await touchBranchUsageIfNeeded({ project, branch });
+  const remoteRestartCode = await runRemoteLifecycleCommand({
+    project,
+    action: "restart",
+    branch,
+    profiles,
+    requestedTarget: args.options.target,
+  });
+  if (remoteRestartCode !== null) {
+    return remoteRestartCode;
+  }
   const cfg = await readProjectConfig(project);
   if (cfg.parseError) {
     const configPath = cfg.configPath ?? project.configFile;

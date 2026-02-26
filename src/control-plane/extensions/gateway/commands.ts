@@ -154,100 +154,113 @@ type TokenCreateParseResult =
   | { readonly ok: true; readonly value: TokenCreateArgs }
   | { readonly ok: false; readonly error: string };
 
+type TokenCreateParseState = {
+  label?: string;
+  scope: GatewayTokenScope;
+  json: boolean;
+};
+
+function takeArgValue(input: {
+  readonly value: string | undefined;
+}): string | null {
+  if (!input.value || input.value.startsWith("-")) {
+    return null;
+  }
+  return input.value;
+}
+
+function applyTokenCreateOption(input: {
+  readonly token: string;
+  readonly nextValue: string | undefined;
+  readonly state: TokenCreateParseState;
+}):
+  | { readonly ok: true; readonly consumed: 0 | 1 }
+  | { readonly ok: false; readonly error: string } {
+  if (input.token === "--write") {
+    input.state.scope = "write";
+    return { ok: true, consumed: 0 };
+  }
+  if (input.token === "--json") {
+    input.state.json = true;
+    return { ok: true, consumed: 0 };
+  }
+  if (input.token.startsWith("--scope=")) {
+    const parsedScope = parseScope(input.token.slice("--scope=".length).trim());
+    if (!parsedScope) {
+      return { ok: false, error: "Invalid --scope (use read|write)." };
+    }
+    input.state.scope = parsedScope;
+    return { ok: true, consumed: 0 };
+  }
+  if (input.token === "--scope") {
+    const value = takeArgValue({ value: input.nextValue });
+    if (!value) {
+      return { ok: false, error: "--scope requires a value." };
+    }
+    const parsedScope = parseScope(value);
+    if (!parsedScope) {
+      return { ok: false, error: "Invalid --scope (use read|write)." };
+    }
+    input.state.scope = parsedScope;
+    return { ok: true, consumed: 1 };
+  }
+  if (input.token.startsWith("--label=")) {
+    input.state.label = normalizeLabel(input.token.slice("--label=".length));
+    return { ok: true, consumed: 0 };
+  }
+  if (input.token === "--label") {
+    const value = takeArgValue({ value: input.nextValue });
+    if (!value) {
+      return { ok: false, error: "--label requires a value." };
+    }
+    input.state.label = normalizeLabel(value);
+    return { ok: true, consumed: 1 };
+  }
+  return { ok: false, error: `Unknown option: ${input.token}` };
+}
+
 function parseTokenCreateArgs(opts: {
   readonly args: readonly string[];
 }): TokenCreateParseResult {
-  let label: string | undefined;
-  let scope: GatewayTokenScope = "read";
-  let json = false;
-
-  const takeValue = (
-    _token: string,
-    value: string | undefined
-  ): string | null => {
-    if (!value || value.startsWith("-")) {
-      return null;
-    }
-    return value;
+  const state: TokenCreateParseState = {
+    scope: "read",
+    json: false,
   };
 
   for (let i = 0; i < opts.args.length; i += 1) {
     const token = opts.args[i] ?? "";
     if (token === "--") {
       const rest = opts.args.slice(i + 1);
-      if (rest.length > 0 && !label) {
-        label = normalizeLabel(rest[0] ?? "");
+      if (rest.length > 0 && !state.label) {
+        state.label = normalizeLabel(rest[0] ?? "");
       }
       break;
     }
-
-    if (token === "--write") {
-      scope = "write";
-      continue;
-    }
-
-    if (token === "--json") {
-      json = true;
-      continue;
-    }
-
-    if (token.startsWith("--scope=")) {
-      const value = token.slice("--scope=".length).trim();
-      const parsed = parseScope(value);
-      if (!parsed) {
-        return { ok: false, error: "Invalid --scope (use read|write)." };
-      }
-      scope = parsed;
-      continue;
-    }
-
-    if (token === "--scope") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--scope requires a value." };
-      }
-      const parsed = parseScope(value);
-      if (!parsed) {
-        return { ok: false, error: "Invalid --scope (use read|write)." };
-      }
-      scope = parsed;
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("--label=")) {
-      label = normalizeLabel(token.slice("--label=".length));
-      continue;
-    }
-
-    if (token === "--label") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--label requires a value." };
-      }
-      label = normalizeLabel(value);
-      i += 1;
-      continue;
-    }
-
     if (token.startsWith("-")) {
-      return { ok: false, error: `Unknown option: ${token}` };
-    }
-
-    if (!label) {
-      label = normalizeLabel(token);
+      const parsedOption = applyTokenCreateOption({
+        token,
+        nextValue: opts.args[i + 1],
+        state,
+      });
+      if (!parsedOption.ok) {
+        return { ok: false, error: parsedOption.error };
+      }
+      i += parsedOption.consumed;
       continue;
     }
-
+    if (!state.label) {
+      state.label = normalizeLabel(token);
+      continue;
+    }
     return { ok: false, error: `Unexpected argument: ${token}` };
   }
 
   return {
     ok: true,
     value: {
-      ...(label ? { label } : {}),
-      scope,
-      json,
+      ...(state.label ? { label: state.label } : {}),
+      scope: state.scope,
+      json: state.json,
     },
   };
 }

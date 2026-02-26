@@ -64,14 +64,14 @@ test("parseTunnelStartArgs rejects unknown flags", () => {
 
 test("parseAccessSetupArgs parses ssh hostname and user", () => {
   const result = parseAccessSetupArgs({
-    args: ["--ssh-hostname", "ssh.example.com", "--user", "dimitri"],
+    args: ["--ssh-hostname", "ssh.example.com", "--user", "test-user"],
   });
   expect(result.ok).toBe(true);
   if (!result.ok) {
     return;
   }
   expect(result.value.sshHostname).toBe("ssh.example.com");
-  expect(result.value.user).toBe("dimitri");
+  expect(result.value.user).toBe("test-user");
 });
 
 test("parseAccessSetupArgs rejects unknown flags", () => {

@@ -35,6 +35,9 @@ struct HackDesktopApp: App {
       DashboardView()
         .preferredColorScheme(preferredColorScheme)
         .environment(model)
+        .onOpenURL { url in
+          handleIncomingDeepLink(url: url)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .hackCheckForUpdatesRequested)) { _ in
           performCheckForUpdates()
         }
@@ -101,6 +104,24 @@ struct HackDesktopApp: App {
     Task {
       await refreshUpdateAvailability()
     }
+  }
+
+  @MainActor
+  private func handleIncomingDeepLink(url: URL) {
+    guard model.ingestGitHubOAuthDeepLink(url: url) else {
+      return
+    }
+
+#if os(macOS)
+    NSApp.activate(ignoringOtherApps: true)
+#endif
+    NotificationCenter.default.post(
+      name: .hackSettingsRequested,
+      object: nil,
+      userInfo: [
+        "pane": "github",
+      ]
+    )
   }
 
   private func refreshUpdateAvailability() async {

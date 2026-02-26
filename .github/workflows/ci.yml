@@ -7,6 +7,18 @@ on:
   pull_request:
 
 jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Gitleaks scan
+        uses: gacts/gitleaks@v1
+
   test:
     runs-on: macos-14
     steps:
@@ -15,12 +27,18 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.3.5"
+          bun-version: "1.3.9"
       - name: Install dependencies
         run: bun install
-      - name: Lint
-        run: bun run lint
-      - name: Typecheck
-        run: bun run typecheck
-      - name: Tests
-        run: bun test
+      - name: Typecheck (Turbo)
+        run: bun run turbo:typecheck
+      - name: Privacy check
+        run: bun run privacy:check
+      - name: Quality checks (Turbo)
+        run: bun run turbo:check
+      - name: Tests (Turbo)
+        run: bun run turbo:test
+      - name: Build CLI
+        run: bun run build
+      - name: Build release smoke (no tests)
+        run: bun run build:release --skip-tests --no-clean --out=dist/release-ci

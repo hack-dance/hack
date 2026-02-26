@@ -38,11 +38,11 @@ describe("qr payloads", () => {
   test("buildSshQrPayload includes user and port", () => {
     const payload = buildSshQrPayload({
       host: "example.com",
-      user: "dimitri",
+      user: "test-user",
       port: 2222,
     });
 
-    expect(payload).toBe("ssh://dimitri@example.com:2222");
+    expect(payload).toBe("ssh://test-user@example.com:2222");
   });
 
   test("buildSshQrPayload omits optional segments", () => {

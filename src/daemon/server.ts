@@ -3,7 +3,10 @@ import { relative, resolve } from "node:path";
 import type { ServerWebSocket } from "bun";
 import pkg from "../../package.json";
 
-import { DAEMON_PROCESS_TITLE } from "../constants.ts";
+import {
+  DAEMON_PROCESS_TITLE,
+  DEFAULT_AUTH_SERVER_PORT,
+} from "../constants.ts";
 import { loadExtensionManagerForDaemon } from "../control-plane/extensions/daemon.ts";
 import { appendGatewayAuditEntry } from "../control-plane/extensions/gateway/audit.ts";
 import { authenticateGatewayRequest } from "../control-plane/extensions/gateway/auth.ts";
@@ -19,11 +22,16 @@ import { createShellService } from "../control-plane/extensions/supervisor/shell
 import type { ControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { ensureDir } from "../lib/fs.ts";
 import { resolveRegisteredProjectById } from "../lib/projects-registry.ts";
-import { startDockerEventWatcher } from "./docker-events.ts";
+import {
+  type DockerEventWatcher,
+  startDockerEventWatcher,
+} from "./docker-events.ts";
 import { createDaemonLogger } from "./logger.ts";
 import type { DaemonPaths } from "./paths.ts";
 import { removeFileIfExists, writeDaemonPid } from "./process.ts";
+import { handleAuthRoutes } from "./routes/auth.ts";
 import { handleEnvRoutes } from "./routes/env.ts";
+import { handleNodeRoutes } from "./routes/node.ts";
 import { handleSessionRoutes } from "./routes/sessions.ts";
 import type { RuntimeHealth } from "./runtime-cache.ts";
 import { createRuntimeCache } from "./runtime-cache.ts";
@@ -113,18 +121,30 @@ export async function runDaemon({
     }, 250);
   };
 
-  const watcher = startDockerEventWatcher({
-    onEvent: () => {
-      metrics.eventsSeen += 1;
-      metrics.lastEventAtMs = Date.now();
-      scheduleRefresh({ reason: "event" });
-    },
-    onError: (message) => logger.warn({ message: `docker events: ${message}` }),
-    onExit: (exitCode) => {
-      logger.warn({ message: `docker events exited (${exitCode})` });
-      scheduleRefresh({ reason: "events-exit" });
-    },
+  const dockerEventsDisabled = parseBoolean({
+    value: process.env.HACK_DAEMON_DISABLE_DOCKER_EVENTS ?? null,
   });
+  const watcher: DockerEventWatcher = dockerEventsDisabled
+    ? createNoopDockerEventWatcher()
+    : startDockerEventWatcher({
+        onEvent: () => {
+          metrics.eventsSeen += 1;
+          metrics.lastEventAtMs = Date.now();
+          scheduleRefresh({ reason: "event" });
+        },
+        onError: (message) =>
+          logger.warn({ message: `docker events: ${message}` }),
+        onExit: (exitCode) => {
+          logger.warn({ message: `docker events exited (${exitCode})` });
+          scheduleRefresh({ reason: "events-exit" });
+        },
+      });
+  if (dockerEventsDisabled) {
+    logger.info({
+      message:
+        "Docker event watcher disabled by HACK_DAEMON_DISABLE_DOCKER_EVENTS.",
+    });
+  }
 
   const refreshIntervalMs = 30_000;
   setInterval(() => {
@@ -247,11 +267,46 @@ export async function runDaemon({
     }
   }
 
+  const authPort = resolveAuthServerPort({
+    value: process.env.HACK_AUTH_SERVER_PORT,
+  });
+  const authBind = resolveAuthServerBind({
+    value: process.env.HACK_AUTH_SERVER_BIND,
+  });
+  let authServer: ReturnType<typeof Bun.serve> | null = null;
+  try {
+    authServer = Bun.serve({
+      hostname: authBind,
+      port: authPort,
+      fetch: async (req) => {
+        const baseProtocol =
+          req.headers.get("x-forwarded-proto")?.trim() ||
+          (req.url.startsWith("https://") ? "https" : "http");
+        const hostHeader =
+          req.headers.get("x-forwarded-host")?.trim() ||
+          req.headers.get("host")?.trim() ||
+          `127.0.0.1:${authPort}`;
+        const baseUrl = `${baseProtocol}://${hostHeader}`;
+        return await handleAuthRoutes({
+          req,
+          baseUrl,
+        });
+      },
+    });
+    logger.info({
+      message: `Auth server listening on ${authBind}:${authPort}`,
+    });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error({ message: `Failed to start auth server: ${message}` });
+  }
+
   const shutdown = async ({ reason }: { readonly reason: string }) => {
     logger.warn({ message: `Shutting down hackd (${reason})` });
     watcher.stop();
     server.stop();
     gatewayServer?.stop();
+    authServer?.stop();
     await removeFileIfExists({ path: paths.socketPath });
     await removeFileIfExists({ path: paths.pidPath });
     process.exit(0);
@@ -263,6 +318,30 @@ export async function runDaemon({
   logger.info({
     message: `hackd started (pid ${process.pid}, version ${packageJson.version})`,
   });
+}
+
+function resolveAuthServerPort(opts: {
+  readonly value: string | undefined;
+}): number {
+  const raw = opts.value?.trim();
+  if (!raw) {
+    return DEFAULT_AUTH_SERVER_PORT;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 65_535) {
+    return DEFAULT_AUTH_SERVER_PORT;
+  }
+  return parsed;
+}
+
+function resolveAuthServerBind(opts: {
+  readonly value: string | undefined;
+}): string {
+  const raw = opts.value?.trim();
+  if (!raw) {
+    return "127.0.0.1";
+  }
+  return raw;
 }
 
 async function handleRequest({
@@ -284,32 +363,24 @@ async function handleRequest({
   readonly supervisor: ReturnType<typeof createSupervisorService>;
   readonly shells: ReturnType<typeof createShellService>;
 }): Promise<Response> {
-  if (req.method !== "GET" && req.method !== "POST") {
+  const allowedMethods = new Set(["GET", "POST"]);
+  if (!allowedMethods.has(req.method)) {
     return jsonResponse({ error: "method_not_allowed" }, 405);
   }
 
   const url = new URL(req.url);
-  const controlPlaneResponse = await handleControlPlaneRequest({
+  const extensionResponse = await routeExtensionRequest({
     req,
     url,
     server,
     supervisor,
     shells,
+    version,
+    pid,
+    startedAtMs: metrics.startedAtMs,
   });
-  if (controlPlaneResponse) {
-    return controlPlaneResponse;
-  }
-
-  // Session routes (mux session management)
-  const sessionResponse = await handleSessionRoutes({ req, url });
-  if (sessionResponse) {
-    return sessionResponse;
-  }
-
-  // Env routes (contract + secrets state)
-  const envResponse = await handleEnvRoutes({ req, url });
-  if (envResponse) {
-    return envResponse;
+  if (extensionResponse) {
+    return extensionResponse;
   }
 
   if (url.pathname === "/v1/status") {
@@ -399,6 +470,48 @@ async function handleRequest({
   }
 
   return jsonResponse({ error: "not_found" }, 404);
+}
+
+async function routeExtensionRequest(input: {
+  readonly req: Request;
+  readonly url: URL;
+  readonly server: ReturnType<typeof Bun.serve>;
+  readonly supervisor: ReturnType<typeof createSupervisorService>;
+  readonly shells: ReturnType<typeof createShellService>;
+  readonly version: string;
+  readonly pid: number;
+  readonly startedAtMs: number;
+}): Promise<Response | null> {
+  const controlPlaneResponse = await handleControlPlaneRequest({
+    req: input.req,
+    url: input.url,
+    server: input.server,
+    supervisor: input.supervisor,
+    shells: input.shells,
+  });
+  if (controlPlaneResponse) {
+    return controlPlaneResponse;
+  }
+
+  const nodeResponse = await handleNodeRoutes({
+    req: input.req,
+    url: input.url,
+    version: input.version,
+    pid: input.pid,
+    startedAtMs: input.startedAtMs,
+  });
+  if (nodeResponse) {
+    return nodeResponse;
+  }
+
+  const sessionResponse = await handleSessionRoutes({
+    req: input.req,
+    url: input.url,
+  });
+  if (sessionResponse) {
+    return sessionResponse;
+  }
+  return await handleEnvRoutes({ req: input.req, url: input.url });
 }
 
 async function handleGatewayRequest(opts: {
@@ -1117,11 +1230,20 @@ function parseShellClientMessage(opts: {
   if (!parsed || typeof parsed !== "object") {
     return null;
   }
-  const record = parsed as Record<string, unknown>;
-  const type = record.type;
+  return parseShellClientRecord({
+    record: parsed as Record<string, unknown>,
+  });
+}
+
+function parseShellClientRecord(input: {
+  readonly record: Record<string, unknown>;
+}): ShellClientMessage | null {
+  const type = input.record.type;
   if (type === "hello") {
-    const cols = typeof record.cols === "number" ? record.cols : undefined;
-    const rows = typeof record.rows === "number" ? record.rows : undefined;
+    const cols =
+      typeof input.record.cols === "number" ? input.record.cols : undefined;
+    const rows =
+      typeof input.record.rows === "number" ? input.record.rows : undefined;
     return {
       type: "hello",
       ...(cols !== undefined ? { cols } : {}),
@@ -1129,31 +1251,49 @@ function parseShellClientMessage(opts: {
     };
   }
   if (type === "input") {
-    const data = record.data;
-    if (typeof data !== "string") {
-      return null;
-    }
-    return { type: "input", data };
+    return parseShellInputMessage({ record: input.record });
   }
   if (type === "resize") {
-    const cols = record.cols;
-    const rows = record.rows;
-    if (typeof cols !== "number" || typeof rows !== "number") {
-      return null;
-    }
-    return { type: "resize", cols, rows };
+    return parseShellResizeMessage({ record: input.record });
   }
   if (type === "signal") {
-    const signal = record.signal;
-    if (!isShellSignal(signal)) {
-      return null;
-    }
-    return { type: "signal", signal };
+    return parseShellSignalMessage({ record: input.record });
   }
   if (type === "close") {
     return { type: "close" };
   }
   return null;
+}
+
+function parseShellInputMessage(input: {
+  readonly record: Record<string, unknown>;
+}): ShellClientMessage | null {
+  const data = input.record.data;
+  if (typeof data !== "string") {
+    return null;
+  }
+  return { type: "input", data };
+}
+
+function parseShellResizeMessage(input: {
+  readonly record: Record<string, unknown>;
+}): ShellClientMessage | null {
+  const cols = input.record.cols;
+  const rows = input.record.rows;
+  if (typeof cols !== "number" || typeof rows !== "number") {
+    return null;
+  }
+  return { type: "resize", cols, rows };
+}
+
+function parseShellSignalMessage(input: {
+  readonly record: Record<string, unknown>;
+}): ShellClientMessage | null {
+  const signal = input.record.signal;
+  if (!isShellSignal(signal)) {
+    return null;
+  }
+  return { type: "signal", signal };
 }
 
 const SHELL_SIGNALS: readonly NodeJS.Signals[] = [
@@ -1380,6 +1520,14 @@ function parseBoolean(opts: { readonly value: string | null }): boolean {
   }
   const normalized = opts.value.trim().toLowerCase();
   return normalized === "1" || normalized === "true" || normalized === "yes";
+}
+
+function createNoopDockerEventWatcher(): DockerEventWatcher {
+  return {
+    stop() {
+      // no-op
+    },
+  };
 }
 
 function normalizeQueryParam(opts: {

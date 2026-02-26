@@ -1,9 +1,17 @@
 import Foundation
+import Darwin
 
 public enum HackCLILocator {
   public static func buildEnvironment() -> [String: String] {
     var env = ProcessInfo.processInfo.environment
-    let home = (env["HOME"] ?? NSHomeDirectory()).trimmingCharacters(in: .whitespacesAndNewlines)
+    let home = resolveCanonicalHome(env: env)
+    env["HOME"] = home
+    if !home.isEmpty {
+      env["HACK_GLOBAL_CONFIG_PATH"] = resolveCanonicalGlobalConfigPath(
+        currentValue: env["HACK_GLOBAL_CONFIG_PATH"],
+        home: home
+      )
+    }
     var homeBinPaths: [String] = []
     if !home.isEmpty {
       homeBinPaths = [
@@ -33,6 +41,68 @@ public enum HackCLILocator {
       + defaultPaths.filter { !existing.contains($0) }
     env["PATH"] = merged.joined(separator: ":")
     return env
+  }
+
+  /// Resolve a stable user home path for CLI subprocesses.
+  ///
+  /// GUI app launches can sometimes inherit a containerized HOME value; when that happens,
+  /// commands that read global hack state (`~/.hack/registry/*`) appear empty.
+  /// We prefer the real account home from passwd, then Foundation as fallback.
+  private static func resolveCanonicalHome(env: [String: String]) -> String {
+    let envHome = env["HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    if !envHome.isEmpty, !isContainerizedHome(envHome) {
+      return envHome
+    }
+
+    if let passwdEntry = getpwuid(getuid()), let pwDir = passwdEntry.pointee.pw_dir {
+      let passwdHome = String(cString: pwDir).trimmingCharacters(in: .whitespacesAndNewlines)
+      if !passwdHome.isEmpty {
+        return passwdHome
+      }
+    }
+
+    let foundationHome = FileManager.default.homeDirectoryForCurrentUser.path
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    if !foundationHome.isEmpty {
+      return foundationHome
+    }
+
+    return envHome
+  }
+
+  private static func isContainerizedHome(_ path: String) -> Bool {
+    path.contains("/Library/Containers/")
+  }
+
+  /// Ensure desktop subprocesses resolve global state from a stable config path.
+  ///
+  /// The desktop app should always use the user's canonical global profile under
+  /// `~/.hack`, even when a shell-exported `HACK_GLOBAL_CONFIG_PATH` points at a
+  /// project-local `.hack` file. Allowing arbitrary overrides here causes topology
+  /// and pairing views to read/write the wrong node registry.
+  private static func resolveCanonicalGlobalConfigPath(
+    currentValue: String?,
+    home: String
+  ) -> String {
+    let fallback = "\(home)/.hack/hack.config.json"
+    let trimmed = currentValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    guard !trimmed.isEmpty else {
+      return fallback
+    }
+    let expanded = NSString(string: trimmed).expandingTildeInPath
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !expanded.isEmpty, !isContainerizedHome(expanded) else {
+      return fallback
+    }
+    let normalizedExpanded = NSString(string: expanded).standardizingPath
+    let normalizedHomeHackPrefix = NSString(string: "\(home)/.hack/").standardizingPath
+    guard normalizedExpanded.hasPrefix(normalizedHomeHackPrefix) else {
+      return fallback
+    }
+    guard FileManager.default.fileExists(atPath: normalizedExpanded) else {
+      return fallback
+    }
+    return normalizedExpanded
   }
 
   public static func resolveHackExecutable(in env: [String: String]) -> String? {

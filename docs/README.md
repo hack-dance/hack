@@ -15,12 +15,20 @@ This directory contains the public documentation for hack. Specs remain in `SPEC
 - [Extensions](extensions.md)
 - [Control-plane SDK](sdk.md)
 
+Monorepo note:
+- Root scripts orchestrate workspace tasks through Turbo.
+- Package-local commands remain available via `bun run --cwd <workspace> <script>`.
+
 Quick diagnostics:
 - `hack usage` (resource usage across running projects)
 - `hack usage --watch` (live resource trends)
 
 ## Guides
 
+- Start here (first remote node in ~10 minutes):
+  - [Remote node quickstart](guides/remote-node-quickstart.md)
+  - [Run laptop-to-laptop node pairing e2e](guides/remote-node-laptop-e2e.md)
+  - [Bootstrap a remote node on Railway](guides/remote-node-railway.md)
 - Remote setup (one command): `hack remote setup`
 - [Initialize a project](guides/init-project.md)
 - [Global settings](guides/global-settings.md)
@@ -29,4 +37,7 @@ Quick diagnostics:
 - [Expose the gateway with Cloudflare](guides/remote-cloudflare.md)
 - [Expose the gateway with Tailscale](guides/remote-tailscale.md)
 - [Run remote supervisor jobs](guides/remote-supervisor.md)
+- [Run a remote node via container image](guides/remote-node-container.md)
+- [Bootstrap a remote node on Railway](guides/remote-node-railway.md)
+- [Bootstrap auth-broker with Neon + Railway](guides/auth-broker-neon-bootstrap.md)
 - [Create a new extension](guides/create-extension.md)

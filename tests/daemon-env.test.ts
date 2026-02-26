@@ -42,12 +42,14 @@ describe("handleEnvRoutes", () => {
   let tempDir: string;
   let repoRoot: string;
   let originalConfigPath: string | undefined;
+  let originalSecretsKey: string | undefined;
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "hack-test-env-"));
 
     // Isolate ~/.hack state by pointing the global config path to a temp dir.
     originalConfigPath = process.env.HACK_GLOBAL_CONFIG_PATH;
+    originalSecretsKey = process.env.HACK_SECRETS_FILE_KEY;
     process.env.HACK_GLOBAL_CONFIG_PATH = join(tempDir, "hack.config.json");
 
     repoRoot = join(tempDir, "repo");
@@ -93,6 +95,11 @@ describe("handleEnvRoutes", () => {
       process.env.HACK_GLOBAL_CONFIG_PATH = originalConfigPath;
     } else {
       Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
+    }
+    if (originalSecretsKey !== undefined) {
+      process.env.HACK_SECRETS_FILE_KEY = originalSecretsKey;
+    } else {
+      Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
     }
     await rm(tempDir, { recursive: true, force: true });
   });
@@ -198,5 +205,91 @@ describe("handleEnvRoutes", () => {
         (v as Record<string, unknown>).key === "FOO"
     ) as Record<string, unknown> | undefined;
     expect(foo?.hasValue).toBe(false);
+  });
+
+  test("secret set/unset uses configured encrypted_file backend", async () => {
+    process.env.HACK_SECRETS_FILE_KEY = "daemon-env-secret-key";
+    await writeTextFileIfChanged(
+      resolve(repoRoot, ".hack", PROJECT_CONFIG_FILENAME),
+      `${JSON.stringify(
+        {
+          name: "env-test",
+          controlPlane: {
+            secrets: {
+              backend: "encrypted_file",
+              encryptedFile: {
+                path: resolve(tempDir, "secrets.enc.json"),
+              },
+            },
+          },
+        },
+        null,
+        2
+      )}\n`
+    );
+    await writeTextFileIfChanged(
+      resolve(repoRoot, ".hack", PROJECT_ENV_CONTRACT_FILENAME),
+      `${JSON.stringify(
+        {
+          version: 1,
+          vars: [{ key: "SECRET_TOKEN", required: false, source: "keychain" }],
+        },
+        null,
+        2
+      )}\n`
+    );
+
+    const setReq = mockRequest({
+      method: "POST",
+      path: "/v1/env/set",
+      body: {
+        project: "env-test",
+        key: "SECRET_TOKEN",
+        value: "secret-value",
+        secret: true,
+      },
+    });
+    const setRes = await handleEnvRoutes({
+      req: setReq,
+      url: new URL(setReq.url),
+    });
+    expect(setRes).not.toBeNull();
+    expect(setRes?.status).toBe(200);
+    const setBody = await parseResponse(setRes!);
+    expect(setBody?.stored).toBe("encrypted_file");
+
+    const getReq = mockRequest({
+      method: "GET",
+      path: "/v1/env?project=env-test",
+    });
+    const getRes = await handleEnvRoutes({
+      req: getReq,
+      url: new URL(getReq.url),
+    });
+    const getBody = await parseResponse(getRes!);
+    const values = Array.isArray(getBody?.values)
+      ? (getBody.values as unknown[])
+      : [];
+    const secret = values.find(
+      (value) =>
+        value &&
+        typeof value === "object" &&
+        (value as Record<string, unknown>).key === "SECRET_TOKEN"
+    ) as Record<string, unknown> | undefined;
+    expect(secret?.hasValue).toBe(true);
+    expect(secret?.resolvedFrom).toBe("keychain");
+
+    const unsetReq = mockRequest({
+      method: "POST",
+      path: "/v1/env/unset",
+      body: { project: "env-test", key: "SECRET_TOKEN" },
+    });
+    const unsetRes = await handleEnvRoutes({
+      req: unsetReq,
+      url: new URL(unsetReq.url),
+    });
+    const unsetBody = await parseResponse(unsetRes!);
+    expect(unsetBody?.backend).toBe("encrypted_file");
+    expect(unsetBody?.secretDeleted).toBe(true);
   });
 });

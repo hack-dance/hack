@@ -93,6 +93,13 @@ test("readControlPlaneConfig keeps gateway enable project-scoped and uses global
           enabled: true,
           config: { hostname: "gateway.example.com" },
         },
+        "dance.hack.github": {
+          enabled: true,
+          config: {
+            authRef: "github.app.default",
+            tokenEnv: "HACK_GITHUB_APP_TOKEN",
+          },
+        },
       },
     },
   };
@@ -113,6 +120,12 @@ test("readControlPlaneConfig keeps gateway enable project-scoped and uses global
         "dance.hack.cloudflare": {
           enabled: false,
         },
+        "dance.hack.github": {
+          enabled: false,
+          config: {
+            authRef: "project-override",
+          },
+        },
       },
     },
   };
@@ -131,6 +144,10 @@ test("readControlPlaneConfig keeps gateway enable project-scoped and uses global
   expect(
     result.config.extensions["dance.hack.cloudflare"]?.config?.hostname
   ).toBe("gateway.example.com");
+  expect(result.config.extensions["dance.hack.github"]?.enabled).toBe(true);
+  expect(result.config.extensions["dance.hack.github"]?.config?.authRef).toBe(
+    "github.app.default"
+  );
 });
 
 test("readControlPlaneConfig reports parse errors and falls back to defaults", async () => {
@@ -143,4 +160,238 @@ test("readControlPlaneConfig reports parse errors and falls back to defaults", a
   const result = await readControlPlaneConfig({ projectDir });
   expect(result.parseError).toBeTruthy();
   expect(result.config.gateway.enabled).toBe(false);
+});
+
+test("readControlPlaneConfig keeps nodeId project-scoped and merges cluster defaults", async () => {
+  if (!tempGlobalConfig) {
+    throw new Error("Missing global config path");
+  }
+  await writeFile(
+    tempGlobalConfig,
+    `${JSON.stringify(
+      {
+        controlPlane: {
+          nodeId: "global-node",
+          cluster: {
+            defaultNodeId: "global-default",
+            staleAfterMs: 45_000,
+            offlineAfterMs: 180_000,
+          },
+        },
+      },
+      null,
+      2
+    )}\n`
+  );
+
+  tempDir = await mkdtemp(join(tmpdir(), "hack-control-plane-config-"));
+  const projectDir = join(tempDir, ".hack");
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(
+    join(projectDir, PROJECT_CONFIG_FILENAME),
+    `${JSON.stringify({ controlPlane: { supervisor: { enabled: true } } }, null, 2)}\n`
+  );
+
+  const inherited = await readControlPlaneConfig({ projectDir });
+  expect(inherited.config.nodeId).toBeUndefined();
+  expect(inherited.config.cluster.defaultNodeId).toBe("global-default");
+  expect(inherited.config.cluster.staleAfterMs).toBe(45_000);
+  expect(inherited.config.cluster.offlineAfterMs).toBe(180_000);
+
+  await writeFile(
+    join(projectDir, PROJECT_CONFIG_FILENAME),
+    `${JSON.stringify(
+      { controlPlane: { execution: { nodeId: "project-execution-node" } } },
+      null,
+      2
+    )}\n`
+  );
+  const executionScoped = await readControlPlaneConfig({ projectDir });
+  expect(executionScoped.config.nodeId).toBe("project-execution-node");
+
+  await writeFile(
+    join(projectDir, PROJECT_CONFIG_FILENAME),
+    `${JSON.stringify(
+      {
+        controlPlane: {
+          nodeId: "project-node",
+          execution: { nodeId: "project-execution-node" },
+        },
+      },
+      null,
+      2
+    )}\n`
+  );
+  const scoped = await readControlPlaneConfig({ projectDir });
+  expect(scoped.config.nodeId).toBe("project-node");
+});
+
+test("readControlPlaneConfig supports provider defaults and project-scoped routing", async () => {
+  if (!tempGlobalConfig) {
+    throw new Error("Missing global config path");
+  }
+  await writeFile(
+    tempGlobalConfig,
+    `${JSON.stringify(
+      {
+        controlPlane: {
+          providers: {
+            defaultProvider: "railway",
+            defaultProfile: "railway/default",
+            profiles: {
+              "railway/default": {
+                provider: "railway",
+                enabled: true,
+                config: {
+                  project: "runtime",
+                  privateNetworking: true,
+                },
+              },
+            },
+          },
+          routing: {
+            provider: "aws",
+            profile: "aws/prod",
+          },
+        },
+      },
+      null,
+      2
+    )}\n`
+  );
+
+  tempDir = await mkdtemp(join(tmpdir(), "hack-control-plane-config-"));
+  const projectDir = join(tempDir, ".hack");
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(
+    join(projectDir, PROJECT_CONFIG_FILENAME),
+    `${JSON.stringify(
+      {
+        controlPlane: {
+          routing: {
+            provider: "railway",
+            profile: "railway/default",
+            mode: "prefer_existing_then_bootstrap",
+            bootstrap: {
+              enabled: true,
+              setAsProjectNode: true,
+            },
+            overrides: {
+              labelsCsv: "railway,project-a",
+            },
+          },
+        },
+      },
+      null,
+      2
+    )}\n`
+  );
+
+  const resolved = await readControlPlaneConfig({ projectDir });
+  expect(resolved.config.providers.defaultProvider).toBe("railway");
+  expect(resolved.config.providers.defaultProfile).toBe("railway/default");
+  expect(resolved.config.providers.profiles["railway/default"]?.provider).toBe(
+    "railway"
+  );
+  expect(resolved.config.routing?.provider).toBe("railway");
+  expect(resolved.config.routing?.profile).toBe("railway/default");
+  expect(resolved.config.routing?.mode).toBe("prefer_existing_then_bootstrap");
+  expect(resolved.config.routing?.bootstrap.enabled).toBe(true);
+  expect(resolved.config.routing?.bootstrap.setAsProjectNode).toBe(true);
+  expect(resolved.config.routing?.overrides.labelsCsv).toBe(
+    "railway,project-a"
+  );
+});
+
+test("readControlPlaneConfig does not inherit global routing into project scope", async () => {
+  if (!tempGlobalConfig) {
+    throw new Error("Missing global config path");
+  }
+  await writeFile(
+    tempGlobalConfig,
+    `${JSON.stringify(
+      {
+        controlPlane: {
+          routing: {
+            provider: "aws",
+            profile: "aws/prod",
+            mode: "bootstrap_only",
+          },
+        },
+      },
+      null,
+      2
+    )}\n`
+  );
+
+  tempDir = await mkdtemp(join(tmpdir(), "hack-control-plane-config-"));
+  const projectDir = join(tempDir, ".hack");
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(
+    join(projectDir, PROJECT_CONFIG_FILENAME),
+    `${JSON.stringify({ controlPlane: { supervisor: { enabled: true } } }, null, 2)}\n`
+  );
+
+  const resolved = await readControlPlaneConfig({ projectDir });
+  expect(resolved.config.routing).toBeUndefined();
+});
+
+test("readControlPlaneConfig merges secrets backend strategy config", async () => {
+  if (!tempGlobalConfig) {
+    throw new Error("Missing global config path");
+  }
+  await writeFile(
+    tempGlobalConfig,
+    `${JSON.stringify(
+      {
+        controlPlane: {
+          secrets: {
+            backend: "encrypted_file",
+            allowEnvAuthRefs: true,
+            encryptedFile: {
+              path: "~/.hack/custom-secrets.enc.json",
+            },
+          },
+        },
+      },
+      null,
+      2
+    )}\n`
+  );
+
+  tempDir = await mkdtemp(join(tmpdir(), "hack-control-plane-config-"));
+  const projectDir = join(tempDir, ".hack");
+  await mkdir(projectDir, { recursive: true });
+
+  const inherited = await readControlPlaneConfig({ projectDir });
+  expect(inherited.config.secrets.backend).toBe("encrypted_file");
+  expect(inherited.config.secrets.allowEnvAuthRefs).toBe(true);
+  expect(inherited.config.secrets.encryptedFile.path).toBe(
+    "~/.hack/custom-secrets.enc.json"
+  );
+
+  await writeFile(
+    join(projectDir, PROJECT_CONFIG_FILENAME),
+    `${JSON.stringify(
+      {
+        controlPlane: {
+          secrets: {
+            backend: "cloud",
+            cloud: {
+              provider: "aws",
+              project: "dev-account",
+            },
+          },
+        },
+      },
+      null,
+      2
+    )}\n`
+  );
+
+  const projectOverride = await readControlPlaneConfig({ projectDir });
+  expect(projectOverride.config.secrets.backend).toBe("cloud");
+  expect(projectOverride.config.secrets.cloud.provider).toBe("aws");
+  expect(projectOverride.config.secrets.cloud.project).toBe("dev-account");
+  expect(projectOverride.config.secrets.cloud.secretPrefix).toBe("hack");
 });

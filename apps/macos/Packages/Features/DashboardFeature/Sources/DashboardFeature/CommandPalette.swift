@@ -84,11 +84,29 @@ struct CommandPaletteView: View {
       }
     )
     actions.append(
+      CommandPaletteAction(title: "Go to Topology Settings", subtitle: "Node + gateway network topology") {
+        NotificationCenter.default.post(
+          name: .hackSettingsRequested,
+          object: nil,
+          userInfo: [SettingsNavigationRequest.paneKey: SettingsSidebarItem.topology.rawValue]
+        )
+      }
+    )
+    actions.append(
       CommandPaletteAction(title: "Go to Gateway Settings", subtitle: "Gateway configuration") {
         NotificationCenter.default.post(
           name: .hackSettingsRequested,
           object: nil,
           userInfo: [SettingsNavigationRequest.paneKey: SettingsSidebarItem.gateway.rawValue]
+        )
+      }
+    )
+    actions.append(
+      CommandPaletteAction(title: "Go to Railway Settings", subtitle: "Railway provider + bootstrap controls") {
+        NotificationCenter.default.post(
+          name: .hackSettingsRequested,
+          object: nil,
+          userInfo: [SettingsNavigationRequest.paneKey: SettingsSidebarItem.railway.rawValue]
         )
       }
     )

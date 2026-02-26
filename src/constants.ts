@@ -12,6 +12,7 @@ export const DEFAULT_PROJECT_TLD = "hack" as const;
 export const DEFAULT_GRAFANA_HOST = `logs.${DEFAULT_PROJECT_TLD}` as const;
 export const DEFAULT_LOKI_HOST = `loki.${DEFAULT_PROJECT_TLD}` as const;
 export const DEFAULT_SCHEMAS_HOST = `schemas.${DEFAULT_PROJECT_TLD}` as const;
+export const DEFAULT_AUTH_HOST = `auth.${DEFAULT_PROJECT_TLD}` as const;
 
 /**
  * OAuth providers (notably Google) require `localhost` or a host that ends with a real public suffix.
@@ -22,6 +23,9 @@ export const DEFAULT_SCHEMAS_HOST = `schemas.${DEFAULT_PROJECT_TLD}` as const;
 export const DEFAULT_OAUTH_ALIAS_TLD = "gy" as const;
 export const DEFAULT_OAUTH_ALIAS_ROOT =
   `${DEFAULT_PROJECT_TLD}.${DEFAULT_OAUTH_ALIAS_TLD}` as const;
+export const DEFAULT_AUTH_ALIAS_HOST =
+  `auth.${DEFAULT_OAUTH_ALIAS_ROOT}` as const;
+export const DEFAULT_AUTH_SERVER_PORT = 7790 as const;
 
 export const GLOBAL_HACK_DIR_NAME = ".hack" as const;
 export const GLOBAL_CONFIG_FILENAME = "hack.config.json" as const;
@@ -38,10 +42,16 @@ export const GLOBAL_COREDNS_FILENAME = "Corefile" as const;
 
 export const GLOBAL_ONLY_EXTENSION_IDS = [
   "dance.hack.cloudflare",
+  "dance.hack.github",
+  "dance.hack.railway",
   "dance.hack.tailscale",
 ] as const;
 
 export const GLOBAL_PROJECTS_REGISTRY_FILENAME = "projects.json" as const;
+export const GLOBAL_REGISTRY_DIR_NAME = "registry" as const;
+export const GLOBAL_NODES_REGISTRY_FILENAME = "nodes.json" as const;
+export const GLOBAL_NODE_PAIRINGS_REGISTRY_FILENAME =
+  "node-pairings.json" as const;
 
 export const DAEMON_PROCESS_TITLE = "dance.hack.hackd" as const;
 export const DAEMON_LAUNCHD_LABEL = "dance.hack.hackd" as const;

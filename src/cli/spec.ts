@@ -3,6 +3,7 @@ import { agentCommand } from "../commands/agent.ts";
 import { branchCommand } from "../commands/branch.ts";
 import { configCommand } from "../commands/config.ts";
 import { daemonCommand } from "../commands/daemon.ts";
+import { dispatchCommand } from "../commands/dispatch.ts";
 import { doctorCommand } from "../commands/doctor.ts";
 import { envCommand } from "../commands/env.ts";
 import { gatewayCommand } from "../commands/gateway.ts";
@@ -11,6 +12,7 @@ import { helpCommand } from "../commands/help.ts";
 import { internalCommand } from "../commands/internal.ts";
 import { logPipeCommand } from "../commands/log-pipe.ts";
 import { mcpCommand } from "../commands/mcp.ts";
+import { nodeCommand } from "../commands/node.ts";
 import {
   downCommand,
   initCommand,
@@ -66,6 +68,7 @@ export const CLI_SPEC = defineCli({
     logPipeCommand,
     doctorCommand,
     daemonCommand,
+    dispatchCommand,
     theCommand,
     secretsCommand,
     envCommand,
@@ -77,6 +80,7 @@ export const CLI_SPEC = defineCli({
     ticketsCommand,
     agentCommand,
     gatewayCommand,
+    nodeCommand,
     remoteCommand,
     internalCommand,
     xCommand,

@@ -113,6 +113,16 @@ If anything fails, use `hack logs --pretty` and summarize next steps.
 
 If the agent cannot run shell commands, use MCP instead: `hack setup mcp` and `hack mcp serve`.
 
+### Remote node runtime image (multi-node)
+
+Use the prebuilt node-runtime container to bootstrap remote nodes quickly (Linux/macOS hosts with Docker):
+
+```bash
+bun run build:node-runtime-image --tag hack-node-runtime:dev
+```
+
+Full operator guide: [`docs/guides/remote-node-container.md`](docs/guides/remote-node-container.md)
+
 ### Tickets (optional, git-backed issue tracking)
 
 `hack` includes a lightweight, git-backed ticket system for tracking work without leaving your repo. Tickets are stored in a hidden git ref (`refs/hack/tickets`) so they sync with your code but don't clutter your branch list.
@@ -872,7 +882,20 @@ bun dev --help
 ### Tests
 
 ```bash
-bun test
+bun run test
+```
+
+Runs workspace tests via Turbo (`@hack/cli`, `@hack/auth-broker`, `@hack/db`).
+
+### Workspace command model
+
+Root commands are orchestration wrappers. For package-local work, run commands directly:
+
+```bash
+bun run --cwd packages/cli build
+bun run --cwd packages/cli macos:ghostty:bundle
+bun run --cwd services/auth-broker test
+bun run --cwd packages/db db:migrate
 ```
 
 ### Conventional commits
@@ -905,8 +928,7 @@ bun run release:prepare
 git push --follow-tags
 ```
 
-Updates `CHANGELOG.md` + `package.json`, creates the release commit and tag, and triggers the
-GitHub Release workflow on push.
+Updates `CHANGELOG.md` plus root/workspace `package.json` versions, creates the release commit and tag, and triggers the GitHub Release workflow on push.
 
 See `PACKAGING.md` for details.
 

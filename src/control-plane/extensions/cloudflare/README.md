@@ -29,7 +29,7 @@ hack daemon stop && hack daemon start
 2) Run the setup helper:
 
 ```bash
-hack x cloudflare tunnel-setup --hostname gateway.dimitri.computer --ssh-hostname ssh.dimitri.computer
+hack x cloudflare tunnel-setup --hostname gateway.dev.example.com --ssh-hostname ssh.dev.example.com
 ```
 
 3) Start the tunnel:
@@ -46,7 +46,7 @@ hack x cloudflare tunnel-stop
 
 ## DNS requirements (Cloudflare)
 
-You must have the hostname under a Cloudflare-managed zone (e.g. `dimitri.computer`).
+You must have the hostname under a Cloudflare-managed zone (e.g. `dev.example.com`).
 The setup helper runs:
 
 ```bash
@@ -68,7 +68,7 @@ If you prefer to do it manually, create:
 If you prefer to run the `cloudflared` steps yourself:
 
 ```bash
-hack x cloudflare tunnel-print --hostname gateway.dimitri.computer --out ~/.cloudflared/config.yml
+hack x cloudflare tunnel-print --hostname gateway.dev.example.com --out ~/.cloudflared/config.yml
 ```
 
 Then follow the printed steps.
@@ -85,8 +85,8 @@ Store defaults in the global config (`~/.hack/hack.config.json`) under
       "dance.hack.cloudflare": {
         "enabled": true,
         "config": {
-          "hostname": "gateway.dimitri.computer",
-          "sshHostname": "ssh.dimitri.computer",
+          "hostname": "gateway.dev.example.com",
+          "sshHostname": "ssh.dev.example.com",
           "tunnel": "hack-gateway",
           "origin": "http://127.0.0.1:7788",
           "sshOrigin": "ssh://127.0.0.1:22",
@@ -180,7 +180,7 @@ and use a separate SSH path for direct shell access on mobile.
 To add an extra layer of auth in front of the gateway:
 
 1) In Cloudflare Zero Trust: **Access → Applications → Add an application → Self-hosted**.
-2) Set the hostname (e.g. `gateway.dimitri.computer`) and save the app.
+2) Set the hostname (e.g. `gateway.dev.example.com`) and save the app.
 3) Add an Access policy (e.g. allow by email domain, WARP device posture, or IdP group).
 4) For headless clients, create a **Service Token** and use these headers:
 

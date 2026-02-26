@@ -82,6 +82,93 @@ export type GatewayShellResponse = {
   readonly shell: ShellMeta;
 };
 
+export type GatewayNodeStatus = {
+  readonly status: string;
+  readonly version: string;
+  readonly pid: number;
+  readonly started_at: string;
+  readonly uptime_ms: number;
+  readonly node: {
+    readonly name: string;
+    readonly platform: string;
+    readonly arch: string;
+    readonly bun: string;
+  };
+  readonly gateway: {
+    readonly enabled: boolean;
+    readonly bind: string;
+    readonly port: number;
+    readonly allowWrites: boolean;
+    readonly projects: readonly {
+      readonly project_id: string;
+      readonly project_name: string;
+    }[];
+  };
+  readonly supervisor: {
+    readonly enabled: boolean;
+    readonly maxConcurrentJobs: number;
+  };
+  readonly devcontainers: {
+    readonly running: number;
+    readonly sessions: readonly {
+      readonly id: string;
+      readonly project_id: string;
+      readonly project_name: string;
+      readonly branch: string | null;
+      readonly created_at: string;
+    }[];
+  };
+};
+
+export type GatewayNodeWorkspace = {
+  readonly projectId: string;
+  readonly projectName: string;
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly branch: string | null;
+};
+
+export type GatewayNodeBootstrapAuthSource =
+  | "native_git"
+  | "controller_github_token";
+
+export type GatewayNodeWorkspaceBootstrap = {
+  readonly repoUrl: string;
+  readonly projectName?: string;
+  readonly projectRoot?: string;
+  readonly githubAuth?: {
+    readonly token: string;
+    readonly owner?: string;
+    readonly repo?: string;
+  };
+};
+
+export type GatewayNodeWorkspaceResponse = {
+  readonly workspace: GatewayNodeWorkspace;
+  readonly bootstrapAuthSource?: GatewayNodeBootstrapAuthSource;
+};
+
+export type GatewayNodeGitProbeResponse = {
+  readonly repoUrl: string;
+  readonly ok: boolean;
+  readonly authSource: GatewayNodeBootstrapAuthSource | "none";
+  readonly error?: string;
+};
+
+export type GatewayNodeDevcontainerSession = {
+  readonly id: string;
+  readonly workspace: GatewayNodeWorkspace;
+  readonly createdAt: string;
+  readonly containerId: string | null;
+  readonly output: string;
+  readonly status: "running" | "stopped" | "failed";
+  readonly updatedAt: string;
+};
+
+export type GatewayNodeDevcontainerResponse = {
+  readonly session: GatewayNodeDevcontainerSession;
+};
+
 /**
  * Gateway client helpers for HTTP + WS endpoints.
  */
@@ -90,6 +177,8 @@ export type GatewayClient = {
   getStatus: () => Promise<GatewayResponse<GatewayStatus>>;
   /** Fetch gateway metrics snapshot. */
   getMetrics: () => Promise<GatewayResponse<GatewayMetrics>>;
+  /** Fetch node status metadata from a node gateway. */
+  getNodeStatus: () => Promise<GatewayResponse<GatewayNodeStatus>>;
   /**
    * List projects known to the gateway cache.
    *
@@ -186,6 +275,51 @@ export type GatewayClient = {
     readonly projectId: string;
     readonly shellId: string;
   }) => Promise<GatewayResponse<GatewayShellResponse>>;
+  /**
+   * Ensure a node workspace exists and branch is ready.
+   *
+   * @param opts.project - Optional project name selector.
+   * @param opts.projectId - Optional node-local project id selector.
+   * @param opts.path - Optional absolute path selector.
+   * @param opts.branch - Optional target branch to checkout/create.
+   */
+  ensureNodeWorkspace: (opts: {
+    readonly project?: string;
+    readonly projectId?: string;
+    readonly controllerProjectId?: string;
+    readonly controllerProjectName?: string;
+    readonly path?: string;
+    readonly branch?: string;
+    readonly bootstrap?: GatewayNodeWorkspaceBootstrap;
+  }) => Promise<GatewayResponse<GatewayNodeWorkspaceResponse>>;
+  /**
+   * Probe node-side Git credential reachability for a repo without mutating workspace state.
+   */
+  probeNodeGitAccess: (opts: {
+    readonly repoUrl: string;
+    readonly githubAuth?: GatewayNodeWorkspaceBootstrap["githubAuth"];
+  }) => Promise<GatewayResponse<GatewayNodeGitProbeResponse>>;
+  /**
+   * Start devcontainer for a node workspace.
+   */
+  devcontainerUp: (opts: {
+    readonly project?: string;
+    readonly projectId?: string;
+    readonly path?: string;
+    readonly branch?: string;
+  }) => Promise<GatewayResponse<GatewayNodeDevcontainerResponse>>;
+  /**
+   * Stop devcontainer by session id.
+   */
+  devcontainerDown: (opts: {
+    readonly id: string;
+  }) => Promise<GatewayResponse<GatewayNodeDevcontainerResponse>>;
+  /**
+   * Fetch devcontainer session state by id.
+   */
+  getDevcontainer: (opts: {
+    readonly id: string;
+  }) => Promise<GatewayResponse<GatewayNodeDevcontainerResponse>>;
   /**
    * Open a WebSocket stream for job logs/events.
    *
@@ -296,6 +430,13 @@ export function createGatewayClient(opts: GatewayClientOptions): GatewayClient {
       method: "GET",
       path: "/v1/metrics",
       parse: parseMetrics,
+    });
+
+  const getNodeStatus = async (): Promise<GatewayResponse<GatewayNodeStatus>> =>
+    await requestJson({
+      method: "GET",
+      path: "/v1/node/status",
+      parse: parseNodeStatus,
     });
 
   const getProjects = async (opts?: {
@@ -413,6 +554,120 @@ export function createGatewayClient(opts: GatewayClientOptions): GatewayClient {
       parse: parseShell,
     });
 
+  const ensureNodeWorkspace = async (opts: {
+    readonly project?: string;
+    readonly projectId?: string;
+    readonly controllerProjectId?: string;
+    readonly controllerProjectName?: string;
+    readonly path?: string;
+    readonly branch?: string;
+    readonly bootstrap?: GatewayNodeWorkspaceBootstrap;
+  }): Promise<GatewayResponse<GatewayNodeWorkspaceResponse>> =>
+    await requestJson({
+      method: "POST",
+      path: "/v1/node/workspaces/ensure",
+      body: {
+        ...(opts.project ? { project: opts.project } : {}),
+        ...(opts.projectId ? { project_id: opts.projectId } : {}),
+        ...(opts.controllerProjectId
+          ? { controller_project_id: opts.controllerProjectId }
+          : {}),
+        ...(opts.controllerProjectName
+          ? { controller_project_name: opts.controllerProjectName }
+          : {}),
+        ...(opts.path ? { path: opts.path } : {}),
+        ...(opts.branch ? { branch: opts.branch } : {}),
+        ...(opts.bootstrap
+          ? {
+              bootstrap: {
+                repo_url: opts.bootstrap.repoUrl,
+                ...(opts.bootstrap.projectName
+                  ? { project_name: opts.bootstrap.projectName }
+                  : {}),
+                ...(opts.bootstrap.projectRoot
+                  ? { project_root: opts.bootstrap.projectRoot }
+                  : {}),
+                ...(opts.bootstrap.githubAuth
+                  ? {
+                      github_auth: {
+                        token: opts.bootstrap.githubAuth.token,
+                        ...(opts.bootstrap.githubAuth.owner
+                          ? { owner: opts.bootstrap.githubAuth.owner }
+                          : {}),
+                        ...(opts.bootstrap.githubAuth.repo
+                          ? { repo: opts.bootstrap.githubAuth.repo }
+                          : {}),
+                      },
+                    }
+                  : {}),
+              },
+            }
+          : {}),
+      },
+      parse: parseWorkspaceEnsure,
+    });
+
+  const probeNodeGitAccess = async (opts: {
+    readonly repoUrl: string;
+    readonly githubAuth?: GatewayNodeWorkspaceBootstrap["githubAuth"];
+  }): Promise<GatewayResponse<GatewayNodeGitProbeResponse>> =>
+    await requestJson({
+      method: "POST",
+      path: "/v1/node/git/probe",
+      body: {
+        repo_url: opts.repoUrl,
+        ...(opts.githubAuth
+          ? {
+              github_auth: {
+                token: opts.githubAuth.token,
+                ...(opts.githubAuth.owner
+                  ? { owner: opts.githubAuth.owner }
+                  : {}),
+                ...(opts.githubAuth.repo ? { repo: opts.githubAuth.repo } : {}),
+              },
+            }
+          : {}),
+      },
+      parse: parseNodeGitProbe,
+    });
+
+  const devcontainerUp = async (opts: {
+    readonly project?: string;
+    readonly projectId?: string;
+    readonly path?: string;
+    readonly branch?: string;
+  }): Promise<GatewayResponse<GatewayNodeDevcontainerResponse>> =>
+    await requestJson({
+      method: "POST",
+      path: "/v1/node/devcontainers/up",
+      body: {
+        ...(opts.project ? { project: opts.project } : {}),
+        ...(opts.projectId ? { project_id: opts.projectId } : {}),
+        ...(opts.path ? { path: opts.path } : {}),
+        ...(opts.branch ? { branch: opts.branch } : {}),
+      },
+      parse: parseNodeDevcontainer,
+    });
+
+  const devcontainerDown = async (opts: {
+    readonly id: string;
+  }): Promise<GatewayResponse<GatewayNodeDevcontainerResponse>> =>
+    await requestJson({
+      method: "POST",
+      path: "/v1/node/devcontainers/down",
+      body: { id: opts.id },
+      parse: parseNodeDevcontainer,
+    });
+
+  const getDevcontainer = async (opts: {
+    readonly id: string;
+  }): Promise<GatewayResponse<GatewayNodeDevcontainerResponse>> =>
+    await requestJson({
+      method: "GET",
+      path: `/v1/node/devcontainers/${opts.id}`,
+      parse: parseNodeDevcontainer,
+    });
+
   const openJobStream = (opts: {
     readonly projectId: string;
     readonly jobId: string;
@@ -440,6 +695,7 @@ export function createGatewayClient(opts: GatewayClientOptions): GatewayClient {
   return {
     getStatus,
     getMetrics,
+    getNodeStatus,
     getProjects,
     getPs,
     listJobs,
@@ -448,6 +704,11 @@ export function createGatewayClient(opts: GatewayClientOptions): GatewayClient {
     cancelJob,
     createShell,
     getShell,
+    ensureNodeWorkspace,
+    probeNodeGitAccess,
+    devcontainerUp,
+    devcontainerDown,
+    getDevcontainer,
     openJobStream,
     openShellStream,
   };
@@ -513,8 +774,12 @@ function parseGatewayError(opts: {
   }
   const code =
     typeof opts.body.error === "string" ? opts.body.error : undefined;
+  const errorMessage =
+    typeof opts.body.error === "string" ? opts.body.error : undefined;
   const message =
-    typeof opts.body.message === "string" ? opts.body.message : opts.fallback;
+    typeof opts.body.message === "string"
+      ? opts.body.message
+      : (errorMessage ?? opts.fallback);
   return { message, ...(code ? { code } : {}), raw: opts.body };
 }
 
@@ -596,4 +861,86 @@ function parseShell(value: unknown): GatewayShellResponse | null {
     return null;
   }
   return value as GatewayShellResponse;
+}
+
+function parseNodeStatus(value: unknown): GatewayNodeStatus | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  if (
+    typeof value.status !== "string" ||
+    typeof value.version !== "string" ||
+    !isRecord(value.node) ||
+    !isRecord(value.gateway) ||
+    !isRecord(value.supervisor) ||
+    !isRecord(value.devcontainers)
+  ) {
+    return null;
+  }
+  return value as GatewayNodeStatus;
+}
+
+function parseWorkspaceEnsure(
+  value: unknown
+): GatewayNodeWorkspaceResponse | null {
+  if (!(isRecord(value) && isRecord(value.workspace))) {
+    return null;
+  }
+  if (
+    typeof value.workspace.projectId !== "string" ||
+    typeof value.workspace.projectName !== "string" ||
+    typeof value.workspace.projectRoot !== "string" ||
+    typeof value.workspace.projectDir !== "string"
+  ) {
+    return null;
+  }
+  const bootstrapAuthSource =
+    value.bootstrap_auth_source === "native_git" ||
+    value.bootstrap_auth_source === "controller_github_token"
+      ? value.bootstrap_auth_source
+      : undefined;
+  return {
+    workspace: value.workspace as GatewayNodeWorkspace,
+    ...(bootstrapAuthSource ? { bootstrapAuthSource } : {}),
+  };
+}
+
+function parseNodeGitProbe(value: unknown): GatewayNodeGitProbeResponse | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  if (
+    typeof value.repo_url !== "string" ||
+    typeof value.ok !== "boolean" ||
+    !(
+      value.auth_source === "native_git" ||
+      value.auth_source === "controller_github_token" ||
+      value.auth_source === "none"
+    )
+  ) {
+    return null;
+  }
+  const error = typeof value.error === "string" ? value.error : undefined;
+  return {
+    repoUrl: value.repo_url,
+    ok: value.ok,
+    authSource: value.auth_source,
+    ...(error ? { error } : {}),
+  };
+}
+
+function parseNodeDevcontainer(
+  value: unknown
+): GatewayNodeDevcontainerResponse | null {
+  if (!(isRecord(value) && isRecord(value.session))) {
+    return null;
+  }
+  if (
+    typeof value.session.id !== "string" ||
+    !isRecord(value.session.workspace) ||
+    typeof value.session.output !== "string"
+  ) {
+    return null;
+  }
+  return value as GatewayNodeDevcontainerResponse;
 }

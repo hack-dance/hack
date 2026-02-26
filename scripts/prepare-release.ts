@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import { readdir } from "node:fs/promises";
 import { resolve } from "node:path";
 
 interface Args {
@@ -32,7 +33,7 @@ async function main({ args }: { readonly args: Args }): Promise<number> {
 
   const repoRoot = resolve(import.meta.dir, "..");
 
-  // Update package.json
+  // Update root package.json
   const packageJsonPath = resolve(repoRoot, "package.json");
   const pkg = await Bun.file(packageJsonPath).json();
 
@@ -55,6 +56,12 @@ async function main({ args }: { readonly args: Args }): Promise<number> {
     );
   }
 
+  await syncWorkspacePackageVersions({
+    repoRoot,
+    nextVersion,
+    rootPackageJson: pkg,
+  });
+
   // Update macOS app version in Base.xcconfig
   const xconfigPath = resolve(repoRoot, "apps/macos/Config/Base.xcconfig");
   try {
@@ -74,6 +81,109 @@ async function main({ args }: { readonly args: Args }): Promise<number> {
   }
 
   return 0;
+}
+
+/**
+ * Keep workspace package versions aligned with the release version so monorepo
+ * metadata remains coherent for CI/release tooling and downstream consumers.
+ */
+async function syncWorkspacePackageVersions(input: {
+  readonly repoRoot: string;
+  readonly nextVersion: string;
+  readonly rootPackageJson: unknown;
+}): Promise<void> {
+  const workspacePackageJsonPaths = await collectWorkspacePackageJsonPaths({
+    repoRoot: input.repoRoot,
+    rootPackageJson: input.rootPackageJson,
+  });
+
+  for (const workspacePackageJsonPath of workspacePackageJsonPaths) {
+    const packageJson = await Bun.file(workspacePackageJsonPath).json();
+    if (!isRecord(packageJson)) {
+      continue;
+    }
+
+    const currentVersion =
+      typeof packageJson.version === "string" ? packageJson.version : null;
+    if (currentVersion === input.nextVersion) {
+      continue;
+    }
+
+    packageJson.version = input.nextVersion;
+    await Bun.write(
+      workspacePackageJsonPath,
+      `${JSON.stringify(packageJson, null, 2)}\n`
+    );
+
+    const displayPath = workspacePackageJsonPath.replace(
+      `${input.repoRoot}/`,
+      ""
+    );
+    process.stdout.write(
+      `Updated ${displayPath}: ${currentVersion ?? "(unset)"} → ${input.nextVersion}\n`
+    );
+  }
+}
+
+/**
+ * Expand root workspace globs and return discovered package.json paths.
+ */
+async function collectWorkspacePackageJsonPaths(input: {
+  readonly repoRoot: string;
+  readonly rootPackageJson: unknown;
+}): Promise<string[]> {
+  if (!isRecord(input.rootPackageJson)) {
+    return [];
+  }
+
+  const workspaces = input.rootPackageJson.workspaces;
+  if (!Array.isArray(workspaces)) {
+    return [];
+  }
+
+  const packageJsonPaths = new Set<string>();
+
+  for (const entry of workspaces) {
+    if (typeof entry !== "string" || !entry.endsWith("/*")) {
+      continue;
+    }
+    const workspaceRoot = resolve(
+      input.repoRoot,
+      entry.slice(0, Math.max(entry.length - 2, 0))
+    );
+
+    let children: string[] = [];
+    try {
+      children = await readdir(workspaceRoot, {
+        withFileTypes: false,
+      });
+    } catch {
+      continue;
+    }
+
+    for (const child of children) {
+      const packageJsonPath = resolve(workspaceRoot, child, "package.json");
+      if (!(await fileExists(packageJsonPath))) {
+        continue;
+      }
+      packageJsonPaths.add(packageJsonPath);
+    }
+  }
+
+  return [...packageJsonPaths].sort();
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await Bun.file(path).stat();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function parseArgs({

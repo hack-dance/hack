@@ -51,8 +51,13 @@ ws.addEventListener("open", () => {
 | --- | --- | --- | --- | --- |
 | `getStatus()` | GET `/v1/status` | - | `GatewayResponse<GatewayStatus>` | - |
 | `getMetrics()` | GET `/v1/metrics` | - | `GatewayResponse<GatewayMetrics>` | - |
+| `getNodeStatus()` | GET `/v1/node/status` | - | `GatewayResponse<GatewayNodeStatus>` | Node metadata/capabilities |
 | `getProjects(opts?)` | GET `/v1/projects` | `{ filter?, includeGlobal?, includeUnregistered? }` | `GatewayResponse<GatewayProjectsPayload>` | Gateway ignores `includeUnregistered` |
 | `getPs(opts)` | GET `/v1/ps` | `{ composeProject, project?, branch? }` | `GatewayResponse<GatewayPsPayload>` | - |
+| `ensureNodeWorkspace(opts)` | POST `/v1/node/workspaces/ensure` | `{ project?, projectId?, path?, branch?, bootstrap? }` | `GatewayResponse<GatewayNodeWorkspaceResponse>` | `bootstrap` accepts `{ repoUrl, projectName?, projectRoot? }` for fresh-node clone/register |
+| `devcontainerUp(opts)` | POST `/v1/node/devcontainers/up` | `{ project?, projectId?, path?, branch? }` | `GatewayResponse<GatewayNodeDevcontainerResponse>` | Start tracked devcontainer session |
+| `devcontainerDown(opts)` | POST `/v1/node/devcontainers/down` | `{ id }` | `GatewayResponse<GatewayNodeDevcontainerResponse>` | Stop tracked session |
+| `getDevcontainer(opts)` | GET `/v1/node/devcontainers/:id` | `{ id }` | `GatewayResponse<GatewayNodeDevcontainerResponse>` | Fetch tracked session state |
 | `listJobs(opts)` | GET `/control-plane/projects/:id/jobs` | `{ projectId }` | `GatewayResponse<GatewayJobListResponse>` | - |
 | `getJob(opts)` | GET `/control-plane/projects/:id/jobs/:jobId` | `{ projectId, jobId }` | `GatewayResponse<GatewayJobResponse>` | - |
 | `createJob(opts)` | POST `/control-plane/projects/:id/jobs` | `{ projectId, runner?, command, cwd?, env? }` | `GatewayResponse<GatewayJobResponse>` | Write token + allowWrites |

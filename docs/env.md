@@ -6,7 +6,7 @@ hack supports a project-scoped env contract (shareable, no values) plus safe sec
 
 - `.hack/hack.env.json` (committed): declares env vars, required vs optional, per-service scope, and where values should come from.
 - `.hack/.env` (gitignored): stores non-secret values (`source: "plain_env"`).
-- OS keychain (via `Bun.secrets`): stores secret values (`source: "keychain"`), namespaced as `hack-<projectName>`.
+- Configured secret backend (`controlPlane.secrets.backend`): stores secret values for `source: "keychain"` contract vars.
 
 ## Contract format (`.hack/hack.env.json`)
 
@@ -50,26 +50,77 @@ Fields:
 - `hack env set KEY=VALUE`
   - writes to `.hack/.env`
 - `hack env set --secret KEY=VALUE`
-  - stores in OS keychain (`Bun.secrets`)
+  - stores in the configured secret backend (`keychain` | `encrypted_file` | `cloud`)
 - `hack env unset KEY`
-  - removes from `.hack/.env` and deletes the keychain entry (best-effort)
+  - removes from `.hack/.env` and deletes the secret backend entry (best-effort)
+- `hack env backend status [--json]`
+  - shows configured global backend strategy (`controlPlane.secrets`)
+- `hack env backend use <keychain|encrypted_file|cloud> [--store-path <path>] [--provider <aws|gcp|azure|vault>] [--secret-project <id>] [--secret-prefix <prefix>]`
+  - sets global backend strategy for multi-node/env secret storage
 
 Notes:
 - `hack env set` also supports interactive prompting when `KEY` or `VALUE` is omitted.
-- Keychain service name is `hack-<projectName>` (project name from `.hack/hack.config.json`).
+- Keychain mode uses service name `hack-<projectName>` (project name from `.hack/hack.config.json`).
+- `cloud` mode currently uses provider-scoped shim storage to validate adapter contracts before provider-native transports land.
+
+## Backend Strategy Contract (`controlPlane.secrets`)
+
+Global config supports backend selection for secret portability:
+
+```json
+{
+  "controlPlane": {
+    "secrets": {
+      "backend": "keychain",
+      "allowEnvAuthRefs": true,
+      "encryptedFile": {
+        "path": "~/.hack/secrets.enc.json"
+      },
+      "cloud": {
+        "provider": "aws",
+        "project": "dev-account",
+        "secretPrefix": "hack"
+      }
+    }
+  }
+}
+```
+
+Fields:
+- `backend`: `keychain` | `encrypted_file` | `cloud`.
+- `allowEnvAuthRefs`: allow `env:VAR_NAME` auth/secret references for node/controller workflows.
+- `encryptedFile.path`: target path for encrypted local store mode.
+- `cloud.provider`: `aws` | `gcp` | `azure` | `vault`.
+- `cloud.project`: account/project/workspace identifier.
+- `cloud.secretPrefix`: namespacing prefix for secret keys.
 
 ## Runtime injection (compose)
 
 When you run `hack up`, `hack restart`, or `hack run`, hack:
 
 1. Resolves `.hack/hack.env.json` for the target services.
-2. In interactive shells, offers to prompt for missing required vars (and writes to `.hack/.env` and/or keychain).
+2. In interactive shells, offers to prompt for missing required vars (and writes to `.hack/.env` and/or configured secret backend).
 3. Generates `.hack/.internal/compose.env.override.yml` that injects `${KEY}` placeholders into `services.<svc>.environment` based on the contract.
-4. Invokes `docker compose` with an environment that includes resolved values (including keychain secrets).
+4. Invokes `docker compose` with an environment that includes resolved values (including secret backend values).
 
 Security posture:
 - Secret values are never written into `.hack/` YAML files.
 - Plain env values live in `.hack/.env` (expected to be gitignored in most repos).
+
+## Remote node secret behavior
+
+Current behavior (today):
+- Node auth tokens and extension auth refs are stored through the configured secret backend.
+- `env:VAR_NAME` auth refs are allowed only when `controlPlane.secrets.allowEnvAuthRefs=true`.
+- Remote dispatch/workspace bootstrap does **not** automatically copy all host env values to remote nodes.
+
+Recommended setup:
+- Keep controller secrets in `keychain` or `encrypted_file` backend (not shell env).
+- Configure each remote node to use the same secret backend strategy where possible.
+- Use project env contract (`.hack/hack.env.json`) to make required keys explicit before runs.
+
+Planned direction:
+- Add an explicit host-to-node secret sync command with least-privilege scoping, encrypted payload delivery, and audit events per run.
 
 ## Daemon/gateway API (UI integration)
 
@@ -117,4 +168,3 @@ curl -X POST -H "Authorization: Bearer $HACK_GATEWAY_TOKEN" \
   http://127.0.0.1:7788/v1/env/unset \
   -d '{"project":"my-project","key":"AWS_PROFILE"}'
 ```
-

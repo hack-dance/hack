@@ -6,6 +6,7 @@ public enum HackCLIError: LocalizedError, Equatable {
   case commandFailed(exitCode: Int, stderr: String)
   case emptyOutput
   case invalidJson
+  case network(String)
 
   public var errorDescription: String? {
     switch self {
@@ -15,11 +16,98 @@ public enum HackCLIError: LocalizedError, Equatable {
       return "hack returned empty output"
     case .invalidJson:
       return "hack returned invalid JSON"
+    case let .network(message):
+      return message
     }
   }
 }
 
+public enum GitSystemIdentityScope: String, Hashable {
+  case global
+  case project
+}
+
+public struct GitSystemIdentity: Hashable {
+  public let scope: GitSystemIdentityScope
+  public let gitName: String?
+  public let gitEmail: String?
+  public let githubLogin: String?
+  public let githubName: String?
+  public let githubId: String?
+
+  public init(
+    scope: GitSystemIdentityScope,
+    gitName: String?,
+    gitEmail: String?,
+    githubLogin: String?,
+    githubName: String?,
+    githubId: String?
+  ) {
+    self.scope = scope
+    self.gitName = gitName
+    self.gitEmail = gitEmail
+    self.githubLogin = githubLogin
+    self.githubName = githubName
+    self.githubId = githubId
+  }
+}
+
 public actor HackCLIClient {
+  private static let authServerCandidates = [
+    "https://auth.hack.broker",
+    "https://auth.hack.gy",
+    "https://auth.hack",
+    "http://127.0.0.1:7790",
+  ]
+
+  private static let authRequestTimeoutSeconds: TimeInterval = 10
+
+  private struct GitHubOAuthStartEnvelope: Decodable {
+    let ok: Bool
+    let flow: GitHubOAuthStartEnvelopeFlow
+  }
+
+  private struct GitHubOAuthStartEnvelopeFlow: Decodable {
+    let flowId: String
+    let profileId: String
+    let setDefault: Bool
+    let requireInstallation: Bool?
+    let authorizeUrl: String
+    let deviceCode: String
+    let pollUrl: String
+    let appInstallUrl: String?
+    let appId: String?
+    let appSlug: String?
+    let expiresAt: String
+  }
+
+  private struct GitHubOAuthStatusEnvelope: Decodable {
+    let ok: Bool
+    let status: GitHubOAuthStatusEnvelopeStatus
+  }
+
+  private struct GitHubOAuthStatusEnvelopeStatus: Decodable {
+    let id: String
+    let status: String
+    let profileId: String
+    let setDefault: Bool
+    let createdAt: String
+    let expiresAt: String
+    let completedAt: String?
+    let claimedAt: String?
+    let accountLogin: String?
+    let accountName: String?
+    let accountId: String?
+    let installationId: String?
+    let installationIds: [String]?
+    let appInstallUrl: String?
+    let appId: String?
+    let appSlug: String?
+    let token: String?
+    let tokenExpiresAt: String?
+    let error: String?
+  }
+
   public init() {}
 
   public func fetchProjects(includeGlobal: Bool) async throws -> ProjectListResponse {
@@ -66,12 +154,12 @@ public actor HackCLIClient {
     _ = try await run(["daemon", "clear"])
   }
 
-  public func startProject(path: String) async throws {
-    _ = try await run(["up", "--path", path, "--detach"])
+  public func startProject(path: String, target: String = "auto") async throws {
+    _ = try await run(["up", "--path", path, "--detach", "--target", target])
   }
 
-  public func stopProject(path: String) async throws {
-    _ = try await run(["down", "--path", path])
+  public func stopProject(path: String, target: String = "auto") async throws {
+    _ = try await run(["down", "--path", path, "--target", target])
   }
 
   public func startBranch(path: String, branch: String) async throws {
@@ -108,6 +196,42 @@ public actor HackCLIClient {
 
   public func setGlobalConfig(key: String, value: String) async throws {
     _ = try await run(["config", "set", key, value, "--global"])
+  }
+
+  public func getGlobalConfigValue(key: String) async throws -> String? {
+    let result = try await run(
+      ["config", "get", key, "--global"],
+      allowNonZeroExit: true
+    )
+    guard result.exitCode == 0 else {
+      return nil
+    }
+    let value = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+    return value.isEmpty ? nil : value
+  }
+
+  public func setProjectConfig(
+    key: String,
+    value: String,
+    projectPath: String
+  ) async throws {
+    _ = try await run(["config", "set", key, value], cwd: projectPath)
+  }
+
+  public func getProjectConfigValue(
+    key: String,
+    projectPath: String
+  ) async throws -> String? {
+    let result = try await run(
+      ["config", "get", key],
+      allowNonZeroExit: true,
+      cwd: projectPath
+    )
+    guard result.exitCode == 0 else {
+      return nil
+    }
+    let value = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+    return value.isEmpty ? nil : value
   }
 
   public func listGatewayTokens() async throws -> GatewayTokenListResponse {
@@ -151,6 +275,409 @@ public actor HackCLIClient {
       // fall back to direct `tailscale status --json` so settings still reflect host reality.
       return try await inspectTailscaleDirect()
     }
+  }
+
+  public func inspectTailscaleOAuthStatus(
+    validate: Bool = false
+  ) async throws -> TailscaleOAuthStatusResponse {
+    var args = ["x", "tailscale", "oauth-status", "--json"]
+    if validate {
+      args.append("--validate")
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    if let fallback = unsupportedTailscaleOAuthStatusResponse(result: result) {
+      return fallback
+    }
+    return try decodeJsonOrThrow(TailscaleOAuthStatusResponse.self, result: result)
+  }
+
+  public func connectTailscaleOAuth(
+    request: TailscaleOAuthConnectRequest
+  ) async throws -> TailscaleOAuthStatusResponse {
+    var args = [
+      "x",
+      "tailscale",
+      "oauth-connect",
+      "--json",
+      "--client-id",
+      request.clientId,
+      "--client-secret-stdin",
+    ]
+    if let value = normalized(request.authRef) {
+      args.append(contentsOf: ["--auth-ref", value])
+    }
+    if let value = normalized(request.tailnet) {
+      args.append(contentsOf: ["--tailnet", value])
+    }
+    if let value = request.keyExpirySeconds {
+      args.append(contentsOf: ["--key-expiry-seconds", String(value)])
+    }
+
+    let result = try await run(
+      args,
+      allowNonZeroExit: true,
+      stdin: "\(request.clientSecret)\n"
+    )
+    return try decodeJsonOrThrow(TailscaleOAuthStatusResponse.self, result: result)
+  }
+
+  public func disconnectTailscaleOAuth(
+    authRef: String? = nil
+  ) async throws -> TailscaleOAuthStatusResponse {
+    var args = ["x", "tailscale", "oauth-disconnect", "--json"]
+    if let value = normalized(authRef) {
+      args.append(contentsOf: ["--auth-ref", value])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(TailscaleOAuthStatusResponse.self, result: result)
+  }
+
+  public func inspectRailway() async throws -> RailwayInspectResponse {
+    let environment = HackCLILocator.buildEnvironment()
+    guard let binaryPath = HackCLILocator.resolveExecutable(named: "railway", in: environment) else {
+      return RailwayInspectResponse(
+        installed: false,
+        binaryPath: nil,
+        version: nil,
+        authenticated: false,
+        whoami: nil,
+        error: "railway not found in PATH"
+      )
+    }
+
+    let versionResult = try await runExecutable(
+      executablePath: binaryPath,
+      args: ["--version"],
+      allowNonZeroExit: true,
+      cwd: nil
+    )
+    let version = firstNonEmptyLine(versionResult.stdout)
+      ?? firstNonEmptyLine(versionResult.stderr)
+
+    let whoamiResult = try await runExecutable(
+      executablePath: binaryPath,
+      args: ["whoami"],
+      allowNonZeroExit: true,
+      cwd: nil
+    )
+    if whoamiResult.exitCode == 0 {
+      return RailwayInspectResponse(
+        installed: true,
+        binaryPath: binaryPath,
+        version: version,
+        authenticated: true,
+        whoami: firstNonEmptyLine(whoamiResult.stdout),
+        error: nil
+      )
+    }
+
+    let whoamiError = firstNonEmptyLine(whoamiResult.stderr)
+      ?? firstNonEmptyLine(whoamiResult.stdout)
+      ?? "railway whoami failed"
+    return RailwayInspectResponse(
+      installed: true,
+      binaryPath: binaryPath,
+      version: version,
+      authenticated: false,
+      whoami: nil,
+      error: whoamiError
+    )
+  }
+
+  public func inspectGitHubProfiles() async throws -> GitHubProfilesResponse {
+    let result = try await run(
+      ["x", "github", "profiles", "--json"],
+      allowNonZeroExit: true
+    )
+    return try decodeJsonOrThrow(GitHubProfilesResponse.self, result: result)
+  }
+
+  public func inspectGitHubStatus(profileId: String? = nil) async throws -> GitHubStatusResponse {
+    var args = ["x", "github", "status", "--json"]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(GitHubStatusResponse.self, result: result)
+  }
+
+  /// Resolves the effective system Git identity (global or repo-effective) and optional GitHub CLI account.
+  ///
+  /// This is read-only host identity state and is intentionally separate from remote OAuth/App profile routing.
+  public func inspectSystemGitIdentity(projectPath: String? = nil) async throws -> GitSystemIdentity {
+    let normalizedPath = normalized(projectPath)
+    let scope: GitSystemIdentityScope = normalizedPath == nil ? .global : .project
+    let gitName = try await readGitConfigValue(
+      key: "user.name",
+      scope: scope,
+      projectPath: normalizedPath
+    )
+    let gitEmail = try await readGitConfigValue(
+      key: "user.email",
+      scope: scope,
+      projectPath: normalizedPath
+    )
+    let githubIdentity = try await inspectGitHubCLIIdentity()
+    return GitSystemIdentity(
+      scope: scope,
+      gitName: gitName,
+      gitEmail: gitEmail,
+      githubLogin: githubIdentity?.login,
+      githubName: githubIdentity?.name,
+      githubId: githubIdentity?.id
+    )
+  }
+
+  /// Starts cloud GitHub OAuth with the dedicated auth broker surface.
+  ///
+  /// This flow is intentionally separate from local gateway/daemon bearer-token auth.
+  public func startGitHubOAuthFlow(
+    profileId: String,
+    setDefault: Bool
+  ) async throws -> GitHubOAuthFlowStartResponse {
+    var lastError: String? = nil
+    for candidate in resolveAuthServerCandidates() {
+      guard
+        let startURL = buildAuthURL(
+          base: candidate,
+          path: "/v1/auth/github/start",
+          queryItems: [
+            URLQueryItem(name: "profile", value: profileId),
+            URLQueryItem(name: "setDefault", value: setDefault ? "1" : "0"),
+            URLQueryItem(name: "set_default", value: setDefault ? "1" : "0"),
+            URLQueryItem(name: "requireInstallation", value: "1"),
+          ]
+        )
+      else {
+        continue
+      }
+      do {
+        let body = try await fetchAuthBody(url: startURL)
+        if let direct = tryDecodeLenient(GitHubOAuthFlowStartResponse.self, from: body) {
+          return direct
+        }
+        if let wrapped = tryDecodeLenient(GitHubOAuthStartEnvelope.self, from: body), wrapped.ok {
+          guard
+            let statusURL = buildAuthURLWithQuery(
+              urlString: wrapped.flow.pollUrl,
+              queryItems: [
+                URLQueryItem(name: "deviceCode", value: wrapped.flow.deviceCode),
+                URLQueryItem(name: "claim", value: "1"),
+                URLQueryItem(name: "requireInstallation", value: "1"),
+              ]
+            )?.absoluteString
+          else {
+            throw HackCLIError.network("Auth flow returned an invalid status URL.")
+          }
+          return GitHubOAuthFlowStartResponse(
+            ok: true,
+            flowId: wrapped.flow.flowId,
+            profileId: wrapped.flow.profileId,
+            setDefault: wrapped.flow.setDefault,
+            authorizeUrl: wrapped.flow.authorizeUrl,
+            statusUrl: statusURL,
+            appInstallUrl: wrapped.flow.appInstallUrl,
+            appId: wrapped.flow.appId,
+            appSlug: wrapped.flow.appSlug,
+            expiresAt: wrapped.flow.expiresAt
+          )
+        }
+        throw HackCLIError.network("Auth server returned invalid JSON.")
+      } catch {
+        lastError = error.localizedDescription
+      }
+    }
+
+    throw HackCLIError.network(
+      lastError
+        ?? "Unable to reach any configured auth broker endpoint. Check network/broker status and retry."
+    )
+  }
+
+  /// Polls cloud OAuth flow state and imports claimed tokens into local keychain-backed profiles.
+  ///
+  /// This does not read or mutate gateway token auth used for daemon/gateway transport.
+  public func fetchGitHubOAuthFlowStatus(
+    statusURL: String
+  ) async throws -> GitHubOAuthFlowStatusResponse {
+    guard let url = URL(string: statusURL) else {
+      throw HackCLIError.network("Invalid auth flow status URL.")
+    }
+    let body = try await fetchAuthBody(url: url)
+    if let direct = tryDecodeLenient(GitHubOAuthFlowStatusResponse.self, from: body) {
+      return direct
+    }
+    if let wrapped = tryDecodeLenient(GitHubOAuthStatusEnvelope.self, from: body), wrapped.ok {
+      if let token = normalized(wrapped.status.token) {
+        let installationId = normalized(wrapped.status.installationId)
+          ?? wrapped.status.installationIds?.first
+        do {
+          try await persistGitHubTokenFromBrokerFlow(
+            profileId: wrapped.status.profileId,
+            token: token,
+            setDefault: wrapped.status.setDefault,
+            appId: normalized(wrapped.status.appId),
+            installationId: installationId
+          )
+        } catch {
+          throw HackCLIError.network(
+            "GitHub OAuth callback succeeded, but Hack could not save the token locally (\(error.localizedDescription)). Retry Add account and allow keychain access."
+          )
+        }
+      } else if wrapped.status.status == "claimed" {
+        let profileId = wrapped.status.profileId
+        let localStatus = try await inspectGitHubStatus(profileId: profileId)
+        if !localStatus.tokenResolved {
+          return brokerClaimedWithoutLocalTokenStatus(wrapped.status)
+        }
+      }
+      return normalizeBrokerFlowStatus(wrapped.status)
+    }
+    throw HackCLIError.network("Auth server returned invalid JSON.")
+  }
+
+  public func bootstrapRailwayNode(
+    request: RailwayBootstrapRequest
+  ) async throws -> RailwayBootstrapResponse {
+    var args = [
+      "node",
+      "provider",
+      "railway",
+      "bootstrap",
+      "--json",
+    ]
+
+    if let value = normalized(request.railwayProject) {
+      args.append(contentsOf: ["--railway-project", value])
+    }
+
+    if let value = normalized(request.railwayService) {
+      args.append(contentsOf: ["--railway-service", value])
+    }
+    if let value = normalized(request.railwayEnvironment) {
+      args.append(contentsOf: ["--railway-environment", value])
+    }
+    if let value = normalized(request.railwayWorkspace) {
+      args.append(contentsOf: ["--railway-workspace", value])
+    }
+    if request.createService {
+      args.append("--create-service")
+    }
+    if let value = normalized(request.railwayImage) {
+      args.append(contentsOf: ["--railway-image", value])
+    }
+    if let value = normalized(request.railwayBin) {
+      args.append(contentsOf: ["--railway-bin", value])
+    }
+    if let value = normalized(request.nodeName) {
+      args.append(contentsOf: ["--name", value])
+    }
+    if let value = normalized(request.endpoint) {
+      args.append(contentsOf: ["--endpoint", value])
+    }
+    if !request.labels.isEmpty {
+      args.append(contentsOf: ["--labels", request.labels.joined(separator: ",")])
+    }
+    if request.defaultNode {
+      args.append("--default")
+    }
+    if let value = request.domainPort {
+      args.append(contentsOf: ["--domain-port", String(value)])
+    }
+    if let value = request.initRetries {
+      args.append(contentsOf: ["--init-retries", String(value)])
+    }
+    if request.privateNetworking {
+      args.append("--railway-private")
+    }
+    if let value = normalized(request.tailscaleAuthKey) {
+      args.append(contentsOf: ["--tailscale-auth-key", value])
+    }
+    if let value = normalized(request.tailscaleHostname) {
+      args.append(contentsOf: ["--tailscale-hostname", value])
+    }
+    if !request.tailscaleTags.isEmpty {
+      args.append(contentsOf: ["--tailscale-tags", request.tailscaleTags.joined(separator: ",")])
+    }
+
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(RailwayBootstrapResponse.self, result: result)
+  }
+
+  public func listNodes() async throws -> NodeRegistryListResponse {
+    let result = try await run(["node", "list", "--json"], allowNonZeroExit: true)
+    do {
+      return try decodeJsonOrThrow(NodeRegistryListResponse.self, result: result)
+    } catch {
+      let statusResult = try await run(["node", "status", "--json"], allowNonZeroExit: true)
+      let status = try decodeJsonOrThrow(NodeStatusResponse.self, result: statusResult)
+      let inferredNodes = deduplicateNodeRegistryRecords(status.nodes.map(\.input))
+      let inferredDefaultNodeId = inferredNodes.first(where: { $0.isDefault == true })?.id
+      return NodeRegistryListResponse(defaultNodeId: inferredDefaultNodeId, nodes: inferredNodes)
+    }
+  }
+
+  public func probeNodes(nodeId: String? = nil) async throws -> NodeStatusResponse {
+    var args = ["node", "status", "--json"]
+    if let nodeId, !nodeId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--node", nodeId])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(NodeStatusResponse.self, result: result)
+  }
+
+  public func useNode(id: String) async throws -> NodeUseResponse {
+    let result = try await run(["node", "use", id, "--json"], allowNonZeroExit: true)
+    return try decodeJsonOrThrow(NodeUseResponse.self, result: result)
+  }
+
+  public func removeNode(id: String) async throws -> NodeRemoveResponse {
+    let result = try await run(["node", "remove", id, "--json"], allowNonZeroExit: true)
+    return try decodeJsonOrThrow(NodeRemoveResponse.self, result: result)
+  }
+
+  public func cancelNodePairSession(sessionId: String) async throws -> NodePairCancelResponse {
+    let result = try await run(
+      ["node", "pair", "cancel", "--session", sessionId, "--json"],
+      allowNonZeroExit: true
+    )
+    return try decodeJsonOrThrow(NodePairCancelResponse.self, result: result)
+  }
+
+  public func listNodePairSessions(status: String = "pending") async throws -> NodePairListResponse {
+    let trimmed = status.trimmingCharacters(in: .whitespacesAndNewlines)
+    var args = ["node", "pair", "list", "--json"]
+    if !trimmed.isEmpty {
+      args.append(contentsOf: ["--status", trimmed])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(NodePairListResponse.self, result: result)
+  }
+
+  public func fulfillNodePairSession(
+    sessionId: String,
+    code: String,
+    defaultNode: Bool,
+    sshPort: Int?
+  ) async throws -> NodePairFulfillResponse {
+    var args = [
+      "node",
+      "pair",
+      "fulfill",
+      "--session",
+      sessionId,
+      "--code",
+      code,
+      "--json",
+    ]
+    if defaultNode {
+      args.append("--default")
+    }
+    if let sshPort {
+      args.append(contentsOf: ["--ssh-port", String(sshPort)])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(NodePairFulfillResponse.self, result: result)
   }
 
   public func listTickets(path: String) async throws -> TicketsListResponse {
@@ -347,7 +874,8 @@ public actor HackCLIClient {
   private func run(
     _ args: [String],
     allowNonZeroExit: Bool = false,
-    cwd: String? = nil
+    cwd: String? = nil,
+    stdin: String? = nil
   ) async throws -> CLIResult {
     try Task.checkCancellation()
 
@@ -368,8 +896,12 @@ public actor HackCLIClient {
 
     let stdoutPipe = Pipe()
     let stderrPipe = Pipe()
+    let stdinPipe = stdin == nil ? nil : Pipe()
     process.standardOutput = stdoutPipe
     process.standardError = stderrPipe
+    if let stdinPipe {
+      process.standardInput = stdinPipe
+    }
 
     return try await withTaskCancellationHandler(operation: {
       do {
@@ -377,7 +909,16 @@ public actor HackCLIClient {
       } catch {
         stdoutPipe.fileHandleForReading.closeFile()
         stderrPipe.fileHandleForReading.closeFile()
+        stdinPipe?.fileHandleForReading.closeFile()
+        stdinPipe?.fileHandleForWriting.closeFile()
         throw HackCLIError.commandFailed(exitCode: 127, stderr: error.localizedDescription)
+      }
+
+      if let stdin, let stdinPipe {
+        if let stdinData = stdin.data(using: .utf8) {
+          stdinPipe.fileHandleForWriting.write(stdinData)
+        }
+        stdinPipe.fileHandleForWriting.closeFile()
       }
 
       async let stdoutData = stdoutPipe.fileHandleForReading.readToEnd()
@@ -421,6 +962,8 @@ public actor HackCLIClient {
       }
       stdoutPipe.fileHandleForReading.closeFile()
       stderrPipe.fileHandleForReading.closeFile()
+      stdinPipe?.fileHandleForReading.closeFile()
+      stdinPipe?.fileHandleForWriting.closeFile()
     })
   }
 
@@ -436,12 +979,214 @@ public actor HackCLIClient {
     do {
       return try decode(type, from: trimmedStdout)
     } catch {
+      if let decoded = try? decodeLenient(type, from: trimmedStdout) {
+        return decoded
+      }
       // If hack printed logs or other output, surface stderr as the actionable hint.
       if !trimmedStderr.isEmpty {
         throw HackCLIError.commandFailed(exitCode: result.exitCode, stderr: trimmedStderr)
       }
+      if result.exitCode != 0 {
+        throw HackCLIError.commandFailed(
+          exitCode: result.exitCode,
+          stderr: "command failed without JSON payload"
+        )
+      }
       throw error
     }
+  }
+
+  private func buildAuthURL(
+    base: String,
+    path: String,
+    queryItems: [URLQueryItem]
+  ) -> URL? {
+    guard var components = URLComponents(string: base) else {
+      return nil
+    }
+    components.path = path
+    components.queryItems = queryItems
+    return components.url
+  }
+
+  private func buildAuthURLWithQuery(
+    urlString: String,
+    queryItems: [URLQueryItem]
+  ) -> URL? {
+    guard var components = URLComponents(string: urlString) else {
+      return nil
+    }
+    var merged = components.queryItems ?? []
+    merged.append(contentsOf: queryItems)
+    components.queryItems = merged
+    return components.url
+  }
+
+  private func tryDecodeLenient<T: Decodable>(
+    _ type: T.Type,
+    from text: String
+  ) -> T? {
+    try? decodeLenient(type, from: text)
+  }
+
+  private func normalizeBrokerFlowStatus(
+    _ wrapped: GitHubOAuthStatusEnvelopeStatus
+  ) -> GitHubOAuthFlowStatusResponse {
+    let installationId = normalized(wrapped.installationId)
+      ?? wrapped.installationIds?.first
+    let normalizedStatus: String
+    switch wrapped.status {
+    case "claimed":
+      normalizedStatus = "complete"
+    default:
+      normalizedStatus = wrapped.status
+    }
+    return GitHubOAuthFlowStatusResponse(
+      id: wrapped.id,
+      status: normalizedStatus,
+      profileId: wrapped.profileId,
+      setDefault: wrapped.setDefault,
+      createdAt: wrapped.createdAt,
+      expiresAt: wrapped.expiresAt,
+      completedAt: wrapped.completedAt ?? wrapped.claimedAt,
+      accountLogin: wrapped.accountLogin,
+      accountName: wrapped.accountName,
+      accountId: wrapped.accountId,
+      installationId: installationId,
+      installationIds: wrapped.installationIds,
+      appInstallUrl: wrapped.appInstallUrl,
+      appId: wrapped.appId,
+      appSlug: wrapped.appSlug,
+      error: wrapped.error
+    )
+  }
+
+  private func brokerClaimedWithoutLocalTokenStatus(
+    _ wrapped: GitHubOAuthStatusEnvelopeStatus
+  ) -> GitHubOAuthFlowStatusResponse {
+    let installationId = normalized(wrapped.installationId)
+      ?? wrapped.installationIds?.first
+    return GitHubOAuthFlowStatusResponse(
+      id: wrapped.id,
+      status: "error",
+      profileId: wrapped.profileId,
+      setDefault: wrapped.setDefault,
+      createdAt: wrapped.createdAt,
+      expiresAt: wrapped.expiresAt,
+      completedAt: wrapped.completedAt ?? wrapped.claimedAt,
+      accountLogin: wrapped.accountLogin,
+      accountName: wrapped.accountName,
+      accountId: wrapped.accountId,
+      installationId: installationId,
+      installationIds: wrapped.installationIds,
+      appInstallUrl: wrapped.appInstallUrl,
+      appId: wrapped.appId,
+      appSlug: wrapped.appSlug,
+      error:
+        "OAuth token was claimed remotely but is not available in local profile \(wrapped.profileId). Re-run Add account and allow keychain access."
+    )
+  }
+
+  /// Persist a broker-issued GitHub token into local keychain-backed profile storage.
+  private func persistGitHubTokenFromBrokerFlow(
+    profileId: String,
+    token: String,
+    setDefault: Bool,
+    appId: String?,
+    installationId: String?
+  ) async throws {
+    if let appId, let installationId {
+      var appArgs = [
+        "x",
+        "github",
+        "connect",
+        "--profile",
+        profileId,
+        "--app-id",
+        appId,
+        "--installation-id",
+        installationId,
+      ]
+      if setDefault {
+        appArgs.append("--set-default")
+      }
+      do {
+        _ = try await run(appArgs)
+        return
+      } catch {
+        // Fall back to direct token import when app private-key refresh is not available.
+      }
+    }
+
+    var args = ["x", "github", "connect", "--profile", profileId, "--stdin"]
+    if setDefault {
+      args.append("--set-default")
+    }
+    _ = try await run(args, stdin: "\(token)\n")
+  }
+
+  private func fetchAuthBody(url: URL) async throws -> String {
+    var request = URLRequest(url: url)
+    request.timeoutInterval = Self.authRequestTimeoutSeconds
+    request.httpMethod = "GET"
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+    let data: Data
+    let response: URLResponse
+    do {
+      (data, response) = try await URLSession.shared.data(for: request)
+    } catch {
+      throw HackCLIError.network(error.localizedDescription)
+    }
+
+    guard let httpResponse = response as? HTTPURLResponse else {
+      throw HackCLIError.network("Auth server returned an unexpected response.")
+    }
+
+    let body = String(decoding: data, as: UTF8.self)
+    if !(200...299).contains(httpResponse.statusCode) {
+      if let decodedError = try? decode(AuthServerErrorPayload.self, from: body),
+        let message = normalized(decodedError.error)
+      {
+        throw HackCLIError.network(message)
+      }
+      let fallback = firstNonEmptyLine(body) ?? HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode)
+      throw HackCLIError.network(fallback)
+    }
+    return body
+  }
+
+  private func unsupportedTailscaleOAuthStatusResponse(
+    result: CLIResult
+  ) -> TailscaleOAuthStatusResponse? {
+    guard result.exitCode != 0 else {
+      return nil
+    }
+    let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !stderr.isEmpty else {
+      return nil
+    }
+    let normalized = stderr.lowercased()
+    guard
+      normalized.contains("unknown command"),
+      normalized.contains("oauth-status"),
+      normalized.contains("tailscale")
+    else {
+      return nil
+    }
+    return TailscaleOAuthStatusResponse(
+      configured: false,
+      clientId: nil,
+      authRef: nil,
+      tailnet: nil,
+      keyExpirySeconds: nil,
+      validated: nil,
+      checkedAt: nil,
+      tokenExpiresAt: nil,
+      deleted: nil,
+      error:
+        "Installed hack CLI does not support tailscale OAuth commands yet. Run `hack update` (or reinstall from this repo) and reopen the desktop app."
+    )
   }
 
   private func inspectTailscaleDirect() async throws -> TailscaleInspectResponse {
@@ -574,6 +1319,111 @@ public actor HackCLIClient {
     return value
   }
 
+  private func firstNonEmptyLine(_ value: String) -> String? {
+    for line in value.components(separatedBy: .newlines) {
+      let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+      if !trimmed.isEmpty {
+        return trimmed
+      }
+    }
+    return nil
+  }
+
+  private func deduplicateNodeRegistryRecords(
+    _ records: [NodeRegistryRecord]
+  ) -> [NodeRegistryRecord] {
+    var seenIds = Set<String>()
+    var deduplicated: [NodeRegistryRecord] = []
+    deduplicated.reserveCapacity(records.count)
+    for record in records {
+      if seenIds.contains(record.id) {
+        continue
+      }
+      seenIds.insert(record.id)
+      deduplicated.append(record)
+    }
+    return deduplicated
+  }
+
+  private func normalized(_ value: String?) -> String? {
+    guard let value else { return nil }
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
+  }
+
+  private func resolveAuthServerCandidates() -> [String] {
+    var candidates: [String] = []
+    var seen = Set<String>()
+
+    let envOverride = normalized(ProcessInfo.processInfo.environment["HACK_AUTH_BROKER_URL"])
+    if let envOverride {
+      let lowercased = envOverride.lowercased()
+      if seen.insert(lowercased).inserted {
+        candidates.append(envOverride)
+      }
+    }
+
+    for candidate in Self.authServerCandidates {
+      let lowercased = candidate.lowercased()
+      if seen.insert(lowercased).inserted {
+        candidates.append(candidate)
+      }
+    }
+    return candidates
+  }
+
+  private func readGitConfigValue(
+    key: String,
+    scope: GitSystemIdentityScope,
+    projectPath: String?
+  ) async throws -> String? {
+    var args = ["git", "config"]
+    if scope == .global {
+      args.append("--global")
+    }
+    args.append(contentsOf: ["--get", key])
+    let result = try await runExecutable(
+      executablePath: "/usr/bin/env",
+      args: args,
+      allowNonZeroExit: true,
+      cwd: projectPath
+    )
+    guard result.exitCode == 0 else {
+      return nil
+    }
+    return normalized(firstNonEmptyLine(result.stdout))
+  }
+
+  private func inspectGitHubCLIIdentity() async throws -> GitHubCLIIdentity? {
+    let result = try await runExecutable(
+      executablePath: "/usr/bin/env",
+      args: ["gh", "api", "user"],
+      allowNonZeroExit: true,
+      cwd: nil
+    )
+    guard result.exitCode == 0 else {
+      return nil
+    }
+    let trimmed = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      return nil
+    }
+    let jsonText = extractJsonSnippets(from: trimmed).first ?? trimmed
+    guard let data = jsonText.data(using: String.Encoding.utf8) else {
+      return nil
+    }
+    let decoded = try? JSONDecoder().decode(GitHubCLIIdentity.self, from: data)
+    let login = normalized(decoded?.login)
+    guard let login else {
+      return nil
+    }
+    return GitHubCLIIdentity(
+      login: login,
+      name: normalized(decoded?.name),
+      id: normalized(decoded?.id)
+    )
+  }
+
   private func runExecutable(
     executablePath: String,
     args: [String],
@@ -646,6 +1496,12 @@ public actor HackCLIClient {
       stderrPipe.fileHandleForReading.closeFile()
     })
   }
+}
+
+private struct GitHubCLIIdentity: Decodable {
+  let login: String?
+  let name: String?
+  let id: String?
 }
 
 private struct RawTailscaleStatus: Decodable {
@@ -730,4 +1586,8 @@ private struct CLIResult {
   let stdout: String
   let stderr: String
   let exitCode: Int
+}
+
+private struct AuthServerErrorPayload: Decodable {
+  let error: String?
 }

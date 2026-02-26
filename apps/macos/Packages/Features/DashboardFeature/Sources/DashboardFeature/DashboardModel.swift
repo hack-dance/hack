@@ -50,6 +50,25 @@ public enum RuntimeHealthState {
   case unknown
 }
 
+public struct GitHubOAuthDeepLinkContext: Hashable {
+  public let flowId: String
+  public let profileId: String?
+  public let status: String?
+  public let installationId: String?
+
+  public init(
+    flowId: String,
+    profileId: String?,
+    status: String?,
+    installationId: String?
+  ) {
+    self.flowId = flowId
+    self.profileId = profileId
+    self.status = status
+    self.installationId = installationId
+  }
+}
+
 @Observable
 @MainActor
 public final class DashboardModel {
@@ -71,6 +90,7 @@ public final class DashboardModel {
   public var selectedProjectTab: ProjectTab = .overview
   public var errorMessage: String? = nil
   public var statusMessage: String? = nil
+  public private(set) var githubOAuthDeepLinkContext: GitHubOAuthDeepLinkContext? = nil
   public var isRefreshing = false
   public private(set) var projectLifecycleActions: [String: ProjectLifecycleAction] = [:]
   public private(set) var globalLifecycleAction: GlobalLifecycleAction? = nil
@@ -386,6 +406,48 @@ public final class DashboardModel {
     return result ?? false
   }
 
+  @discardableResult
+  public func setProjectConfig(
+    for project: ProjectSummary,
+    key: String,
+    value: String
+  ) async -> Bool {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return false
+    }
+    let result: Bool? = await runActionResult(message: "Updating \(key)…") {
+      try await self.client.setProjectConfig(key: key, value: value, projectPath: path)
+      return true
+    }
+    return result ?? false
+  }
+
+  public func getProjectConfig(
+    for project: ProjectSummary,
+    key: String
+  ) async -> String? {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return nil
+    }
+    do {
+      return try await client.getProjectConfigValue(key: key, projectPath: path)
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func getGlobalConfig(key: String) async -> String? {
+    do {
+      return try await client.getGlobalConfigValue(key: key)
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
   public func fetchGatewayTokens() async -> [GatewayTokenRecord] {
     do {
       return try await client.listGatewayTokens().tokens
@@ -456,12 +518,278 @@ public final class DashboardModel {
     }
   }
 
+  public func inspectTailscaleOAuthStatus(
+    validate: Bool = false
+  ) async -> TailscaleOAuthStatusResponse? {
+    do {
+      return try await client.inspectTailscaleOAuthStatus(validate: validate)
+    } catch {
+      let message = error.localizedDescription
+      errorMessage = message
+      return TailscaleOAuthStatusResponse(
+        configured: false,
+        clientId: nil,
+        authRef: nil,
+        tailnet: nil,
+        keyExpirySeconds: nil,
+        validated: nil,
+        checkedAt: nil,
+        tokenExpiresAt: nil,
+        deleted: nil,
+        error: message
+      )
+    }
+  }
+
+  public func connectTailscaleOAuth(
+    request: TailscaleOAuthConnectRequest
+  ) async -> TailscaleOAuthStatusResponse? {
+    await runActionResult(message: "Saving Tailscale OAuth credentials…") {
+      try await self.client.connectTailscaleOAuth(request: request)
+    }
+  }
+
+  public func disconnectTailscaleOAuth(
+    authRef: String? = nil
+  ) async -> TailscaleOAuthStatusResponse? {
+    await runActionResult(message: "Clearing Tailscale OAuth credentials…") {
+      try await self.client.disconnectTailscaleOAuth(authRef: authRef)
+    }
+  }
+
+  public func inspectRailway() async -> RailwayInspectResponse? {
+    do {
+      return try await client.inspectRailway()
+    } catch {
+      let message = error.localizedDescription
+      errorMessage = message
+      return RailwayInspectResponse(
+        installed: false,
+        binaryPath: nil,
+        version: nil,
+        authenticated: false,
+        whoami: nil,
+        error: message
+      )
+    }
+  }
+
+  public func inspectGitHubProfiles() async -> GitHubProfilesResponse? {
+    do {
+      return try await client.inspectGitHubProfiles()
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func inspectGitHubStatus(profileId: String? = nil) async -> GitHubStatusResponse? {
+    do {
+      return try await client.inspectGitHubStatus(profileId: profileId)
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func inspectSystemGitIdentity(projectPath: String? = nil) async -> GitSystemIdentity? {
+    do {
+      return try await client.inspectSystemGitIdentity(projectPath: projectPath)
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func startGitHubOAuthFlow(
+    profileId: String,
+    setDefault: Bool
+  ) async -> GitHubOAuthFlowStartResponse? {
+    do {
+      return try await client.startGitHubOAuthFlow(
+        profileId: profileId,
+        setDefault: setDefault
+      )
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func fetchGitHubOAuthFlowStatus(
+    statusURL: String
+  ) async -> GitHubOAuthFlowStatusResponse? {
+    do {
+      return try await client.fetchGitHubOAuthFlowStatus(statusURL: statusURL)
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func bootstrapRailwayNode(
+    request: RailwayBootstrapRequest
+  ) async -> RailwayBootstrapResponse? {
+    await runActionResult(message: "Bootstrapping Railway node…") {
+      try await self.client.bootstrapRailwayNode(request: request)
+    }
+  }
+
+  public func listNodes() async -> NodeRegistryListResponse? {
+    do {
+      return try await client.listNodes()
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func probeNodes(nodeId: String? = nil) async -> NodeStatusResponse? {
+    do {
+      return try await client.probeNodes(nodeId: nodeId)
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func useNode(id: String) async -> Bool {
+    let response: NodeUseResponse? = await runActionResult(message: "Setting default node…") {
+      try await self.client.useNode(id: id)
+    }
+    return response?.defaultNodeId == id
+  }
+
+  public func removeNode(id: String) async -> Bool {
+    let response: NodeRemoveResponse? = await runActionResult(message: "Removing node…") {
+      try await self.client.removeNode(id: id)
+    }
+    return response?.removed == true
+  }
+
+  public func cancelNodePairSession(sessionId: String) async -> Bool {
+    let response: NodePairCancelResponse? = await runActionResult(message: "Cancelling pairing session…") {
+      try await self.client.cancelNodePairSession(sessionId: sessionId)
+    }
+    return response?.cancelled == true
+  }
+
+  public func listNodePairSessions(status: String = "pending") async -> [NodePairingSession] {
+    do {
+      return try await client.listNodePairSessions(status: status).sessions
+    } catch {
+      errorMessage = error.localizedDescription
+      return []
+    }
+  }
+
+  public func fulfillNodePairSession(
+    sessionId: String,
+    code: String,
+    defaultNode: Bool,
+    sshPort: Int?
+  ) async -> NodePairFulfillResponse? {
+    await runActionResult(message: "Approving pairing request…") {
+      try await self.client.fulfillNodePairSession(
+        sessionId: sessionId,
+        code: code,
+        defaultNode: defaultNode,
+        sshPort: sshPort
+      )
+    }
+  }
+
   public func toggleGlobalInfrastructure() async {
     if globalInfraRunning {
       await globalDown()
     } else {
       await globalUp()
     }
+  }
+
+  @discardableResult
+  public func ingestGitHubOAuthDeepLink(url: URL) -> Bool {
+    guard let context = parseGitHubOAuthDeepLink(url: url) else {
+      return false
+    }
+    githubOAuthDeepLinkContext = context
+    if let profileId = context.profileId {
+      statusMessage = "GitHub callback received for profile \(profileId). Finalizing…"
+    } else {
+      statusMessage = "GitHub callback received. Finalizing…"
+    }
+    return true
+  }
+
+  public func clearGitHubOAuthDeepLink(flowId: String? = nil) {
+    guard let current = githubOAuthDeepLinkContext else {
+      return
+    }
+    if let flowId, current.flowId != flowId {
+      return
+    }
+    githubOAuthDeepLinkContext = nil
+  }
+
+  private func parseGitHubOAuthDeepLink(url: URL) -> GitHubOAuthDeepLinkContext? {
+    guard url.scheme?.lowercased() == "hack" else {
+      return nil
+    }
+
+    let host = url.host?.lowercased() ?? ""
+    let path = normalizedPath(url.path)
+    let isGitHubCallbackRoute =
+      (host == "auth" && path == "/github/callback")
+      || (host == "github" && path == "/callback")
+      || (host == "auth" && path == "/callback")
+    guard isGitHubCallbackRoute else {
+      return nil
+    }
+
+    guard
+      let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+      let items = components.queryItems
+    else {
+      return nil
+    }
+
+    let flowId =
+      normalizedQueryValue(named: "flowId", items: items)
+      ?? normalizedQueryValue(named: "flow_id", items: items)
+    guard let flowId else {
+      return nil
+    }
+
+    return GitHubOAuthDeepLinkContext(
+      flowId: flowId,
+      profileId: normalizedQueryValue(named: "profileId", items: items)
+        ?? normalizedQueryValue(named: "profile", items: items),
+      status: normalizedQueryValue(named: "status", items: items),
+      installationId: normalizedQueryValue(named: "installationId", items: items)
+        ?? normalizedQueryValue(named: "installation_id", items: items)
+    )
+  }
+
+  private func normalizedPath(_ path: String) -> String {
+    let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.hasSuffix("/") && trimmed.count > 1 {
+      return String(trimmed.dropLast())
+    }
+    return trimmed
+  }
+
+  private func normalizedQueryValue(
+    named name: String,
+    items: [URLQueryItem]
+  ) -> String? {
+    guard
+      let raw = items.first(where: { $0.name == name })?.value?
+        .trimmingCharacters(in: .whitespacesAndNewlines),
+      !raw.isEmpty
+    else {
+      return nil
+    }
+    return raw
   }
 
   public func globalUp() async {

@@ -1,17 +1,3 @@
-# Architecture
-
-![Architecture Diagram](./architecture-diagram.svg)
-
-## Why this exists (plain English)
-
-Running multiple local projects at the same time is messy when everything wants the same ports and
-"localhost". This CLI gives each repo its own isolated network and stable HTTPS hostnames so you can:
-
-- run many apps concurrently without port juggling
-- keep service defaults (Postgres on 5432, Redis on 6379) inside each project
-- access every app via predictable `https://<project>.hack`
-- get fast local logs plus searchable history
-
 ## System overview
  
 `hack` is a Bun CLI that writes per-project Compose files under `.hack/` and manages a machine-wide

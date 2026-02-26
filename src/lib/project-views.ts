@@ -120,14 +120,37 @@ export async function buildProjectViews(
   const runtimeByName = new Map(
     opts.runtime.map((p) => [p.project, p] as const)
   );
+  const runtimeByProjectDir = new Map<string, RuntimeProject>();
+  for (const runtimeProject of opts.runtime) {
+    if (!runtimeProject.workingDir) {
+      continue;
+    }
+    runtimeByProjectDir.set(
+      canonicalPath(runtimeProject.workingDir),
+      runtimeProject
+    );
+  }
+  const registeredProjectDirs = new Set(
+    opts.registryProjects.map((project) => canonicalPath(project.projectDir))
+  );
 
   const names = new Set<string>();
   for (const p of opts.registryProjects) {
     names.add(p.name);
   }
   if (opts.includeUnregistered) {
-    for (const p of opts.runtime) {
-      names.add(p.project);
+    for (const runtimeProject of opts.runtime) {
+      const hasRegisteredName = byName.has(runtimeProject.project);
+      const runtimeProjectDir = runtimeProject.workingDir
+        ? canonicalPath(runtimeProject.workingDir)
+        : null;
+      const hasRegisteredProjectDir = runtimeProjectDir
+        ? registeredProjectDirs.has(runtimeProjectDir)
+        : false;
+      if (hasRegisteredName || hasRegisteredProjectDir) {
+        continue;
+      }
+      names.add(runtimeProject.project);
     }
   }
   const muxSessions = opts.muxSessions ?? (await listMuxSessions());
@@ -139,7 +162,13 @@ export async function buildProjectViews(
     }
 
     const reg = byName.get(name) ?? null;
-    const runtime = runtimeByName.get(name) ?? null;
+    const runtime = reg
+      ? resolveRegisteredRuntime({
+          registration: reg,
+          runtimeByProjectDir,
+          runtimeByName,
+        })
+      : (runtimeByName.get(name) ?? null);
 
     if (reg) {
       out.push(
@@ -167,6 +196,20 @@ export async function buildProjectViews(
   }
 
   return out;
+}
+
+function resolveRegisteredRuntime(opts: {
+  readonly registration: RegisteredProject;
+  readonly runtimeByProjectDir: ReadonlyMap<string, RuntimeProject>;
+  readonly runtimeByName: ReadonlyMap<string, RuntimeProject>;
+}): RuntimeProject | null {
+  const runtimeByDir = opts.runtimeByProjectDir.get(
+    canonicalPath(opts.registration.projectDir)
+  );
+  if (runtimeByDir) {
+    return runtimeByDir;
+  }
+  return opts.runtimeByName.get(opts.registration.name) ?? null;
 }
 
 async function buildRegisteredProjectView(opts: {
@@ -820,6 +863,8 @@ function mapExtensionFeature(id: string): string | null {
       return "tickets";
     case "dance.hack.cloudflare":
       return "cloudflare";
+    case "dance.hack.railway":
+      return "railway";
     case "dance.hack.tailscale":
       return "tailscale";
     default:

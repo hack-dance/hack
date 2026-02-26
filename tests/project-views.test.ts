@@ -78,6 +78,7 @@ function makeRuntimeProject(opts: {
   readonly name: string;
   readonly containersByService: Record<string, RuntimeContainer[]>;
   readonly isGlobal?: boolean;
+  readonly workingDir?: string | null;
 }): RuntimeProject {
   const services = new Map<string, RuntimeService>();
   for (const [service, containers] of Object.entries(
@@ -87,7 +88,7 @@ function makeRuntimeProject(opts: {
   }
   return {
     project: opts.name,
-    workingDir: `/tmp/${opts.name}/.hack`,
+    workingDir: opts.workingDir ?? `/tmp/${opts.name}/.hack`,
     services,
     isGlobal: opts.isGlobal ?? false,
   };
@@ -416,6 +417,51 @@ test("buildProjectViews includes zellij sessions when session name matches proje
   expect(alphaView?.sessions.map((session) => session.backend)).toEqual([
     "zellij",
   ]);
+});
+
+test("buildProjectViews matches runtime by working directory when compose project slug differs", async () => {
+  const dottedProject = await createProject({
+    name: "sample.substrate",
+    services: ["app", "qdrant"],
+  });
+  const runtime = [
+    makeRuntimeProject({
+      name: "samplesubstrate",
+      workingDir: dottedProject.projectDir,
+      containersByService: {
+        app: [
+          makeContainer({
+            project: "samplesubstrate",
+            service: "app",
+            name: "samplesubstrate-app-1",
+            state: "running",
+          }),
+        ],
+        qdrant: [
+          makeContainer({
+            project: "samplesubstrate",
+            service: "qdrant",
+            name: "samplesubstrate-qdrant-1",
+            state: "running",
+          }),
+        ],
+      },
+    }),
+  ];
+
+  const views = await buildProjectViews({
+    registryProjects: [dottedProject],
+    runtime,
+    runtimeOk: true,
+    filter: null,
+    includeUnregistered: false,
+    muxSessions: [],
+  });
+
+  const view = views.find((entry) => entry.name === dottedProject.name);
+  expect(view?.runtime?.project).toBe("samplesubstrate");
+  expect(view?.runtimeStatus).toBe("running");
+  expect(view?.status).toBe("running");
 });
 
 test("buildProjectViews tolerates missing optional mux binaries", async () => {

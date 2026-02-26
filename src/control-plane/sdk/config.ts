@@ -119,6 +119,150 @@ const GatewayConfigSchema = z.object({
   allowWrites: z.boolean().default(false),
 });
 
+const ClusterConfigInputSchema = z.object({
+  defaultNodeId: z.string().optional(),
+  staleAfterMs: z.number().int().positive().optional(),
+  offlineAfterMs: z.number().int().positive().optional(),
+});
+
+const ClusterConfigSchema = z.object({
+  defaultNodeId: z.string().optional(),
+  staleAfterMs: z.number().int().positive().default(30_000),
+  offlineAfterMs: z.number().int().positive().default(120_000),
+});
+
+const ProjectExecutionModeSchema = z.enum([
+  "local",
+  "local_edit_remote_run",
+  "remote_devcontainer",
+]);
+
+const ExecutionSyncEngineSchema = z.enum(["mutagen", "rsync"]);
+const ExecutionSyncDirectionSchema = z.enum(["local_to_remote"]);
+
+const ExecutionSyncConfigInputSchema = z.object({
+  engine: ExecutionSyncEngineSchema.optional(),
+  direction: ExecutionSyncDirectionSchema.optional(),
+  exclude: z.array(z.string()).optional(),
+});
+
+const ExecutionSyncConfigSchema = z.object({
+  engine: ExecutionSyncEngineSchema.default("mutagen"),
+  direction: ExecutionSyncDirectionSchema.default("local_to_remote"),
+  exclude: z.array(z.string()).default([]),
+});
+
+const ExecutionConfigInputSchema = z.object({
+  mode: ProjectExecutionModeSchema.optional(),
+  nodeId: z.string().optional(),
+  singleActive: z.boolean().optional(),
+  sync: ExecutionSyncConfigInputSchema.optional(),
+});
+
+const ExecutionConfigSchema = z.object({
+  mode: ProjectExecutionModeSchema.default("local"),
+  nodeId: z.string().optional(),
+  singleActive: z.boolean().default(true),
+  sync: ExecutionSyncConfigSchema.default(ExecutionSyncConfigSchema.parse({})),
+});
+
+const ProviderRoutingModeSchema = z.enum([
+  "existing_only",
+  "prefer_existing_then_bootstrap",
+  "bootstrap_only",
+]);
+
+const ProviderProfileInputSchema = z.object({
+  provider: z.string().min(1),
+  enabled: z.boolean().optional(),
+  config: z.record(z.string(), z.unknown()).optional(),
+});
+
+const ProviderProfileSchema = z.object({
+  provider: z.string().min(1),
+  enabled: z.boolean().default(true),
+  config: z.record(z.string(), z.unknown()).default({}),
+});
+
+const ProvidersConfigInputSchema = z.object({
+  defaultProvider: z.string().optional(),
+  defaultProfile: z.string().optional(),
+  profiles: z.record(z.string(), ProviderProfileInputSchema).optional(),
+});
+
+const ProvidersConfigSchema = z.object({
+  defaultProvider: z.string().optional(),
+  defaultProfile: z.string().optional(),
+  profiles: z.record(z.string(), ProviderProfileSchema).default({}),
+});
+
+const RoutingBootstrapConfigInputSchema = z.object({
+  enabled: z.boolean().optional(),
+  setAsProjectNode: z.boolean().optional(),
+});
+
+const RoutingBootstrapConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  setAsProjectNode: z.boolean().default(false),
+});
+
+const RoutingConfigInputSchema = z.object({
+  provider: z.string().optional(),
+  profile: z.string().optional(),
+  mode: ProviderRoutingModeSchema.optional(),
+  bootstrap: RoutingBootstrapConfigInputSchema.optional(),
+  overrides: z.record(z.string(), z.unknown()).optional(),
+});
+
+const RoutingConfigSchema = z.object({
+  provider: z.string().optional(),
+  profile: z.string().optional(),
+  mode: ProviderRoutingModeSchema.default("existing_only"),
+  bootstrap: RoutingBootstrapConfigSchema.default(
+    RoutingBootstrapConfigSchema.parse({})
+  ),
+  overrides: z.record(z.string(), z.unknown()).default({}),
+});
+
+const SecretsBackendSchema = z.enum(["keychain", "encrypted_file", "cloud"]);
+const CloudSecretProviderSchema = z.enum(["aws", "gcp", "azure", "vault"]);
+
+const SecretsEncryptedFileConfigInputSchema = z.object({
+  path: z.string().optional(),
+});
+
+const SecretsEncryptedFileConfigSchema = z.object({
+  path: z.string().default("~/.hack/secrets.enc.json"),
+});
+
+const SecretsCloudConfigInputSchema = z.object({
+  provider: CloudSecretProviderSchema.optional(),
+  project: z.string().optional(),
+  secretPrefix: z.string().optional(),
+});
+
+const SecretsCloudConfigSchema = z.object({
+  provider: CloudSecretProviderSchema.optional(),
+  project: z.string().optional(),
+  secretPrefix: z.string().default("hack"),
+});
+
+const SecretsConfigInputSchema = z.object({
+  backend: SecretsBackendSchema.optional(),
+  allowEnvAuthRefs: z.boolean().optional(),
+  encryptedFile: SecretsEncryptedFileConfigInputSchema.optional(),
+  cloud: SecretsCloudConfigInputSchema.optional(),
+});
+
+const SecretsConfigSchema = z.object({
+  backend: SecretsBackendSchema.default("keychain"),
+  allowEnvAuthRefs: z.boolean().default(true),
+  encryptedFile: SecretsEncryptedFileConfigSchema.default(
+    SecretsEncryptedFileConfigSchema.parse({})
+  ),
+  cloud: SecretsCloudConfigSchema.default(SecretsCloudConfigSchema.parse({})),
+});
+
 const PreferencesAppearanceInputSchema = z.object({
   theme: z.string().optional(),
 });
@@ -211,6 +355,12 @@ const ControlPlaneConfigInputSchema = z.object({
   usage: UsageConfigInputSchema.optional(),
   daemon: DaemonConfigInputSchema.optional(),
   gateway: GatewayConfigInputSchema.optional(),
+  cluster: ClusterConfigInputSchema.optional(),
+  execution: ExecutionConfigInputSchema.optional(),
+  providers: ProvidersConfigInputSchema.optional(),
+  routing: RoutingConfigInputSchema.optional(),
+  secrets: SecretsConfigInputSchema.optional(),
+  nodeId: z.string().optional(),
   preferences: PreferencesConfigInputSchema.optional(),
 });
 
@@ -226,6 +376,12 @@ const ControlPlaneConfigSchema = z.object({
   usage: UsageConfigSchema.default(UsageConfigSchema.parse({})),
   daemon: DaemonConfigSchema.default(DaemonConfigSchema.parse({})),
   gateway: GatewayConfigSchema.default(GatewayConfigSchema.parse({})),
+  cluster: ClusterConfigSchema.default(ClusterConfigSchema.parse({})),
+  execution: ExecutionConfigSchema.default(ExecutionConfigSchema.parse({})),
+  providers: ProvidersConfigSchema.default(ProvidersConfigSchema.parse({})),
+  routing: RoutingConfigSchema.optional(),
+  secrets: SecretsConfigSchema.default(SecretsConfigSchema.parse({})),
+  nodeId: z.string().optional(),
   preferences: PreferencesConfigSchema.default(
     PreferencesConfigSchema.parse({})
   ),
@@ -236,6 +392,24 @@ export type DaemonConfig = z.infer<typeof DaemonConfigSchema>;
 export type DaemonLaunchdConfig = z.infer<typeof DaemonLaunchdConfigSchema>;
 export type TicketsGitConfig = z.infer<typeof TicketsGitConfigSchema>;
 export type TicketsGitRefMode = z.infer<typeof TicketsGitRefModeSchema>;
+export type ClusterConfig = z.infer<typeof ClusterConfigSchema>;
+export type ProjectExecutionMode = z.infer<typeof ProjectExecutionModeSchema>;
+export type ExecutionSyncEngine = z.infer<typeof ExecutionSyncEngineSchema>;
+export type ExecutionSyncDirection = z.infer<
+  typeof ExecutionSyncDirectionSchema
+>;
+export type ExecutionSyncConfig = z.infer<typeof ExecutionSyncConfigSchema>;
+export type ExecutionConfig = z.infer<typeof ExecutionConfigSchema>;
+export type ProvidersConfig = z.infer<typeof ProvidersConfigSchema>;
+export type ProviderProfileConfig = z.infer<typeof ProviderProfileSchema>;
+export type RoutingConfig = z.infer<typeof RoutingConfigSchema>;
+export type RoutingBootstrapConfig = z.infer<
+  typeof RoutingBootstrapConfigSchema
+>;
+export type ProviderRoutingMode = z.infer<typeof ProviderRoutingModeSchema>;
+export type SecretsConfig = z.infer<typeof SecretsConfigSchema>;
+export type SecretsBackend = z.infer<typeof SecretsBackendSchema>;
+export type CloudSecretProvider = z.infer<typeof CloudSecretProviderSchema>;
 
 type ControlPlaneConfigInput = z.infer<typeof ControlPlaneConfigInputSchema>;
 
@@ -243,6 +417,13 @@ export type ControlPlaneConfigResult = {
   readonly config: ControlPlaneConfig;
   readonly parseError?: string;
 };
+
+/**
+ * Create a fully-defaulted control-plane config object.
+ */
+export function createDefaultControlPlaneConfig(): ControlPlaneConfig {
+  return ControlPlaneConfigSchema.parse({});
+}
 
 /**
  * Load control-plane configuration from global config plus optional project overrides.
@@ -346,6 +527,17 @@ function mergeControlPlaneLayers(opts: {
   const gatewayEnabled =
     typeof projectEnabled === "boolean" ? projectEnabled : false;
   merged.gateway = { ...globalGateway, enabled: gatewayEnabled };
+
+  let projectNodeId: string | undefined;
+  if (typeof opts.project.nodeId === "string") {
+    projectNodeId = opts.project.nodeId;
+  } else if (typeof opts.project.execution?.nodeId === "string") {
+    projectNodeId = opts.project.execution.nodeId;
+  }
+  merged.nodeId = projectNodeId;
+  merged.routing = isRecord(opts.project.routing)
+    ? opts.project.routing
+    : undefined;
 
   return ControlPlaneConfigSchema.parse(merged);
 }

@@ -39,6 +39,10 @@ import {
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
+import {
+  ensureBundledMutagenInstalled,
+  getMutagenPath,
+} from "../lib/mutagen.ts";
 import { isMac } from "../lib/os.ts";
 import {
   findProjectContext,
@@ -139,6 +143,7 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
       checkTool({ name: "zellij (sessions)", cmd: "zellij", optional: true })
     )
   );
+  results.push(await runCheck(s, "mutagen", () => checkMutagenBinary()));
   results.push(
     await runCheck(s, "go", () =>
       checkTool({ name: "go (optional)", cmd: "go", optional: true })
@@ -486,6 +491,33 @@ function checkOptionalFzf(): CheckResult {
     };
   }
   return { name: "fzf (optional)", status: "ok", message: fzf };
+}
+
+async function checkMutagenBinary(): Promise<CheckResult> {
+  const mutagen = getMutagenPath();
+  if (!mutagen) {
+    return {
+      name: "mutagen",
+      status: "warn",
+      message: "Not found (run: hack doctor --fix)",
+    };
+  }
+
+  const version = await exec([mutagen, "version"], { stdin: "ignore" });
+  if (version.exitCode !== 0) {
+    return {
+      name: "mutagen",
+      status: "warn",
+      message: `${mutagen} (version probe failed)`,
+    };
+  }
+
+  const firstLine = version.stdout.trim().split("\n")[0]?.trim();
+  return {
+    name: "mutagen",
+    status: "ok",
+    message: firstLine && firstLine.length > 0 ? firstLine : mutagen,
+  };
 }
 
 async function checkDockerRunning(): Promise<CheckResult> {
@@ -1408,6 +1440,8 @@ async function runDoctorFix(): Promise<void> {
     return;
   }
 
+  await maybeInstallMutagenForDoctorFix();
+
   const dockerOk = await dockerInfoOk();
   if (!dockerOk) {
     note("Docker is not reachable; cannot apply fixes.", "doctor");
@@ -1438,6 +1472,34 @@ async function runDoctorFix(): Promise<void> {
   await maybeStartGlobalCaddyCompose({ paths });
   await maybeExportCaddyCaCert({ paths });
   await maybeMigrateDnsmasq();
+}
+
+async function maybeInstallMutagenForDoctorFix(): Promise<void> {
+  if (getMutagenPath()) {
+    return;
+  }
+
+  const okMutagen = await confirmOrThrow({
+    message: "Install managed mutagen at ~/.hack/bin/mutagen?",
+    initialValue: true,
+  });
+  if (!okMutagen) {
+    return;
+  }
+
+  const installed = await ensureBundledMutagenInstalled();
+  if (installed.ok) {
+    note(
+      installed.installed
+        ? `Installed mutagen at ${installed.mutagenPath}`
+        : `Mutagen already installed at ${installed.mutagenPath}`,
+      "doctor"
+    );
+    return;
+  }
+
+  const detail = installed.message ? `: ${installed.message}` : "";
+  note(`Mutagen install failed (${installed.reason}${detail})`, "doctor");
 }
 
 async function confirmOrThrow(opts: {

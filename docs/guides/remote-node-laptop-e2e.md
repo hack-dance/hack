@@ -24,7 +24,7 @@ If you only need initial setup, use [Remote node quickstart](remote-node-quickst
 1. Both laptops have `hack` installed.
 2. Remote laptop is reachable via SSH from controller (`user@host`).
 3. Remote laptop has gateway enabled (`hack gateway setup`).
-4. `mutagen` is installed on controller (`mutagen version`).
+4. Controller can write to `~/.hack/bin` (Mutagen is auto-managed by `hack`).
 5. Optional but recommended: both laptops are on Tailscale.
 
 ## Build artifacts on controller
@@ -203,6 +203,9 @@ cat ~/.hack/registry/runs/<run-id>/summary.md
 8. `probe_failed (404): not_found` before workspace ensure
    - Cause: remote node is running an older daemon build that does not expose `/v1/node/git/probe`.
    - Fix: update `hack` on the remote node to the same build as controller, restart daemon, then retry.
+9. `Mutagen binary was not found on this machine`
+   - Cause: controller is missing mutagen and auto-install failed (permissions/network/tooling).
+   - Fix: run `hack doctor --fix` (or `hack global install`) and retry.
 
 ## Evidence capture
 

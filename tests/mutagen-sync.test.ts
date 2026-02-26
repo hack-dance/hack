@@ -38,6 +38,39 @@ test("parseSshSource parses user, host, and port", () => {
   ).toEqual({
     host: "node-a.tailnet.ts.net",
   });
+  expect(
+    __testOnlyMutagenSync.parseSshSource({
+      source: "ssh://remote-user@198.51.100.42:2222",
+    })
+  ).toEqual({
+    user: "remote-user",
+    host: "198.51.100.42",
+    port: 2222,
+  });
+});
+
+test("buildMutagenSshUri renders Mutagen-compatible SSH endpoints", () => {
+  expect(
+    __testOnlyMutagenSync.buildMutagenSshUri({
+      source: {
+        user: "remote-user",
+        host: "198.51.100.42",
+        port: 2222,
+      },
+      remotePath: "/Users/remote-user/.hack/projects/event-agent",
+    })
+  ).toBe(
+    "remote-user@198.51.100.42:2222:/Users/remote-user/.hack/projects/event-agent"
+  );
+
+  expect(
+    __testOnlyMutagenSync.buildMutagenSshUri({
+      source: {
+        host: "node-a.tailnet.ts.net",
+      },
+      remotePath: "/srv/node/workspace",
+    })
+  ).toBe("node-a.tailnet.ts.net:/srv/node/workspace");
 });
 
 test("buildMutagenSessionName is deterministic and normalized", () => {

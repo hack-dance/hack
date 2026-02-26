@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -80,6 +80,12 @@ afterAll(() => {
 async function writeComposeFile(path: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, "services: {}\n");
+}
+
+async function writeExecutable(path: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, "#!/usr/bin/env sh\nexit 0\n");
+  await chmod(path, 0o755);
 }
 
 async function writeStaticCaddyCompose(path: string): Promise<void> {
@@ -246,7 +252,9 @@ test("global up fails when compose files are missing", async () => {
 
 test("global install writes compose files and starts stacks", async () => {
   const gumPath = join(tempDir!, GLOBAL_HACK_DIR_NAME, "bin", "gum");
-  await writeComposeFile(gumPath);
+  const mutagenPath = join(tempDir!, GLOBAL_HACK_DIR_NAME, "bin", "mutagen");
+  await writeExecutable(gumPath);
+  await writeExecutable(mutagenPath);
   const { runCli } = await import("../src/cli/run.ts");
   const code = await runCli(["global", "install"]);
   expect(code).toBe(0);

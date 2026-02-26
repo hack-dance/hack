@@ -58,6 +58,10 @@ import {
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { parseJsonLines } from "../lib/json-lines.ts";
+import {
+  ensureBundledMutagenInstalled,
+  getMutagenPath,
+} from "../lib/mutagen.ts";
 import { isMac } from "../lib/os.ts";
 import { exec, execOrThrow, findExecutableInPath, run } from "../lib/shell.ts";
 import { resolveSessionsMuxMode } from "../mux/mux-config.ts";
@@ -483,6 +487,31 @@ async function globalInstall(): Promise<number> {
     if (gum.reason === "failed") {
       logger.warn({
         message: `gum install failed: ${gum.message ?? "unknown error"}`,
+      });
+    }
+  }
+
+  s.start("Ensuring mutagen…");
+  const mutagen = await ensureBundledMutagenInstalled();
+  if (mutagen.ok) {
+    s.stop(
+      mutagen.installed
+        ? "Installed managed mutagen"
+        : "mutagen already installed"
+    );
+  } else {
+    const systemMutagen = getMutagenPath();
+    s.stop(
+      systemMutagen ? "mutagen available on PATH" : "mutagen not installed"
+    );
+    if (!systemMutagen) {
+      const detail = mutagen.message ? `: ${mutagen.message}` : "";
+      logger.warn({
+        message: `mutagen install skipped (${mutagen.reason}${detail})`,
+      });
+      logger.warn({
+        message:
+          "Remote sync may fail without mutagen. Repair with: hack doctor --fix",
       });
     }
   }

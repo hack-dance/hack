@@ -7,6 +7,10 @@ import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
 import { optJson } from "../cli/options.ts";
 import { ensureDir } from "../lib/fs.ts";
 import {
+  ensureBundledMutagenInstalled,
+  getMutagenPath,
+} from "../lib/mutagen.ts";
+import {
   compareVersions,
   downloadAndExtractRelease,
   installExtractedRelease,
@@ -222,6 +226,8 @@ const handleUpdate: CommandHandlerFor<Spec> = async ({
     );
   }
 
+  const mutagenProvision = await ensureMutagenAfterUpdate();
+
   return writeResult({
     json: args.options.json === true,
     result: {
@@ -233,6 +239,7 @@ const handleUpdate: CommandHandlerFor<Spec> = async ({
       target,
       binaryPath: bin.path,
       assetsDir,
+      mutagen: mutagenProvision,
     },
     human: `Updated to v${latestVersion}.`,
   });
@@ -275,6 +282,43 @@ function resolveAssetsDir(): string {
   }
 
   return resolve(".hack", "assets");
+}
+
+type MutagenProvisionResult = {
+  readonly available: boolean;
+  readonly installed: boolean;
+  readonly path: string | null;
+  readonly warning?: string;
+};
+
+async function ensureMutagenAfterUpdate(): Promise<MutagenProvisionResult> {
+  const existing = getMutagenPath();
+  if (existing) {
+    return {
+      available: true,
+      installed: false,
+      path: existing,
+    };
+  }
+
+  const installed = await ensureBundledMutagenInstalled();
+  if (installed.ok) {
+    return {
+      available: true,
+      installed: installed.installed,
+      path: installed.mutagenPath,
+    };
+  }
+
+  const fallback = getMutagenPath();
+  return {
+    available: Boolean(fallback),
+    installed: false,
+    path: fallback,
+    warning: installed.message
+      ? `${installed.reason}: ${installed.message}`
+      : installed.reason,
+  };
 }
 
 async function resolveSelfUpdateBinaryPath(): Promise<
@@ -382,6 +426,7 @@ type UpdateOutput =
       };
       readonly binaryPath: string;
       readonly assetsDir: string;
+      readonly mutagen?: MutagenProvisionResult;
     }
   | {
       readonly ok: false;

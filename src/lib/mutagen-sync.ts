@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { basename } from "node:path";
 
 import { pathExists } from "./fs.ts";
-import { type ExecResult, exec, findExecutableInPath } from "./shell.ts";
+import { ensureBundledMutagenInstalled, getMutagenPath } from "./mutagen.ts";
+import { type ExecResult, exec } from "./shell.ts";
 
 const DEFAULT_MUTAGEN_EXCLUDES = [
   ".git",
@@ -97,16 +98,17 @@ export async function ensureMutagenLocalToRemoteSync(input: {
     };
   }
 
-  const resolveBinary = input.resolveBinary ?? defaultMutagenBinaryResolver;
-  const mutagenBin = normalizeBinaryPath({
-    value: resolveBinary({ name: "mutagen" }),
-  });
+  const mutagenResolution = input.resolveBinary
+    ? resolveMutagenBinaryFromResolver({
+        resolveBinary: input.resolveBinary,
+      })
+    : await resolveManagedMutagenBinary();
+  const mutagenBin = mutagenResolution.path;
   if (!mutagenBin) {
     return {
       ok: false,
       code: "missing_binary",
-      error:
-        "Mutagen binary was not found on this machine. Install Mutagen or switch execution mode.",
+      error: mutagenResolution.error,
     };
   }
 
@@ -186,6 +188,13 @@ export function parseSshSource(input: {
     return null;
   }
 
+  if (raw.startsWith("ssh://")) {
+    const parsedFromUri = parseSshSourceFromUri({ source: raw });
+    if (parsedFromUri) {
+      return parsedFromUri;
+    }
+  }
+
   const atIndex = raw.lastIndexOf("@");
   const user =
     atIndex > 0
@@ -255,11 +264,9 @@ export function buildMutagenSshUri(input: {
   const host = input.source.host.includes(":")
     ? `[${input.source.host}]`
     : input.source.host;
-  const user = input.source.user
-    ? `${encodeURIComponent(input.source.user)}@`
-    : "";
+  const user = input.source.user ? `${input.source.user}@` : "";
   const port = input.source.port ? `:${input.source.port}` : "";
-  return `ssh://${user}${host}${port}${encodeURI(input.remotePath)}`;
+  return `${user}${host}${port}:${input.remotePath}`;
 }
 
 function normalizeRemotePath(input: { readonly value: string }): string | null {
@@ -270,16 +277,10 @@ function normalizeRemotePath(input: { readonly value: string }): string | null {
   return trimmed;
 }
 
-function defaultMutagenBinaryResolver(input: {
-  readonly name: string;
-}): string | null {
-  return findExecutableInPath(input.name);
-}
-
 async function defaultMutagenExec(input: {
   readonly cmd: readonly string[];
 }): Promise<ExecResult> {
-  return await exec(input.cmd, { stdin: "ignore" });
+  return await exec(input.cmd, { stdin: "inherit" });
 }
 
 function normalizeBinaryPath(input: {
@@ -287,6 +288,47 @@ function normalizeBinaryPath(input: {
 }): string | null {
   const trimmed = input.value?.trim() ?? "";
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function resolveMutagenBinaryFromResolver(input: {
+  readonly resolveBinary: MutagenBinaryResolver;
+}): { readonly path: string | null; readonly error: string } {
+  const path = normalizeBinaryPath({
+    value: input.resolveBinary({ name: "mutagen" }),
+  });
+  return {
+    path,
+    error:
+      "Mutagen binary was not found on this machine. Install Mutagen, run `hack doctor --fix`, or switch execution mode.",
+  };
+}
+
+async function resolveManagedMutagenBinary(): Promise<{
+  readonly path: string | null;
+  readonly error: string;
+}> {
+  const existing = normalizeBinaryPath({ value: getMutagenPath() });
+  if (existing) {
+    return { path: existing, error: "" };
+  }
+
+  const installed = await ensureBundledMutagenInstalled();
+  const resolved = normalizeBinaryPath({ value: getMutagenPath() });
+  if (resolved) {
+    return { path: resolved, error: "" };
+  }
+
+  let detail = "";
+  if (!installed.ok) {
+    detail = installed.message
+      ? `${installed.reason}: ${installed.message}`
+      : installed.reason;
+  }
+  const suffix = detail ? ` Auto-install failed (${detail}).` : "";
+  return {
+    path: null,
+    error: `Mutagen binary was not found on this machine.${suffix} Run \`hack doctor --fix\` to repair or set \`HACK_MUTAGEN_PATH\`.`,
+  };
 }
 
 function normalizeExcludePatterns(input: {
@@ -321,6 +363,34 @@ function normalizeSshUser(input: {
 }): string | undefined {
   const trimmed = input.value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function parseSshSourceFromUri(input: {
+  readonly source: string;
+}): ParsedSshSource | null {
+  try {
+    const url = new URL(input.source);
+    if (!(url.protocol === "ssh:")) {
+      return null;
+    }
+    const host = url.hostname.trim();
+    if (!host) {
+      return null;
+    }
+    const user = normalizeSshUser({ value: decodeURIComponent(url.username) });
+    const parsedPort = Number.parseInt(url.port, 10);
+    const port =
+      Number.isFinite(parsedPort) && parsedPort >= 1 && parsedPort <= 65_535
+        ? parsedPort
+        : undefined;
+    return {
+      ...(user ? { user } : {}),
+      host,
+      ...(port !== undefined ? { port } : {}),
+    };
+  } catch {
+    return null;
+  }
 }
 
 function parseSshHostPort(input: {

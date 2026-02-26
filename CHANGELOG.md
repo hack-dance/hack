@@ -1,3 +1,7 @@
+## <small>1.13.1 (2026-02-26)</small>
+
+* fix(release): include workspace manifests in node-runtime image build ([2745c6b](https://github.com/hack-dance/hack/commit/2745c6b))
+
 ## 1.13.0 (2026-02-26)
 
 * fix(ci): ignore known historical gitleaks fingerprint ([7032af9](https://github.com/hack-dance/hack/commit/7032af9))

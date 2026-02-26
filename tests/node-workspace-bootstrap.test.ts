@@ -71,7 +71,11 @@ test("workspace ensure bootstraps a missing project by cloning repo", async () =
   if (!response) {
     return;
   }
-  expect(response.status).toBe(200);
+  await expectResponseStatus({
+    response,
+    status: 200,
+    context: "workspace ensure bootstraps clone",
+  });
   const body = (await response.json()) as {
     readonly workspace?: {
       readonly projectName?: string;
@@ -155,7 +159,11 @@ test("workspace ensure can recover from node map when registry is missing", asyn
     pid: 123,
     startedAtMs: Date.now(),
   });
-  expect(bootstrapResponse?.status).toBe(200);
+  await expectResponseStatus({
+    response: bootstrapResponse,
+    status: 200,
+    context: "workspace ensure bootstrap before map recovery",
+  });
 
   await rm(resolve(tempDir, ".hack", "projects.json"), { force: true });
 
@@ -228,7 +236,11 @@ test("workspace ensure resolves by controller project id when node project id di
     pid: 123,
     startedAtMs: Date.now(),
   });
-  expect(bootstrapResponse?.status).toBe(200);
+  await expectResponseStatus({
+    response: bootstrapResponse,
+    status: 200,
+    context: "workspace ensure bootstrap before controller-id recovery",
+  });
 
   const map = await readNodeWorkspaceMap({ homeDir: tempDir });
   expect(map.entries).toHaveLength(1);
@@ -348,4 +360,25 @@ async function runGit(opts: {
       `git ${opts.args.join(" ")} failed: ${result.stderr || result.stdout}`
     );
   }
+}
+
+/**
+ * Assert route status with a readable payload when CI diverges.
+ */
+async function expectResponseStatus(opts: {
+  readonly response: Response | null;
+  readonly status: number;
+  readonly context: string;
+}): Promise<void> {
+  const response = opts.response;
+  if (!response) {
+    throw new Error(`${opts.context}: response was null`);
+  }
+  if (response.status === opts.status) {
+    return;
+  }
+  const payload = await response.clone().text();
+  throw new Error(
+    `${opts.context}: expected ${opts.status}, received ${response.status}, payload=${payload}`
+  );
 }

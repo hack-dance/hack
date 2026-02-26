@@ -317,6 +317,11 @@ export async function resolveGitHubAppToken(input: {
   readonly controlPlaneConfig: ControlPlaneConfig;
   readonly profileId?: string;
   readonly allowProjectOverride?: boolean;
+  /**
+   * When enabled, skip keychain/secret-store reads and resolve from env fallback only.
+   * This avoids interactive keychain prompts in unattended bootstrap/probe paths.
+   */
+  readonly preferEnvTokenOnly?: boolean;
   readonly env?: Record<string, string | undefined>;
   readonly store?: SecretStore;
   readonly fetcher?: FetchLike;
@@ -350,6 +355,31 @@ export async function resolveGitHubAppToken(input: {
   const env = input.env ?? process.env;
   const store = input.store ?? DEFAULT_SECRET_STORE;
   const nowMs = input.nowMs ?? Date.now();
+  const envToken = (env[settings.tokenEnv] ?? "").trim();
+
+  if (input.preferEnvTokenOnly) {
+    if (envToken.length > 0) {
+      return {
+        ok: true,
+        token: envToken,
+        source: "env",
+        tokenEnv: settings.tokenEnv,
+        authRef: settings.authRef,
+        service: settings.service,
+        profileId,
+        profileSource: settings.profileSource,
+      };
+    }
+    return {
+      ok: false,
+      error: `Missing GitHub token for profile "${profileId}". Store one with \`hack x github connect --profile ${profileId}\`, or set ${settings.tokenEnv}.`,
+      tokenEnv: settings.tokenEnv,
+      authRef: settings.authRef,
+      service: settings.service,
+      profileId,
+      profileSource: settings.profileSource,
+    };
+  }
 
   const stored = await store.get({
     service: settings.service,
@@ -397,7 +427,6 @@ export async function resolveGitHubAppToken(input: {
         ...(refreshed.expiresAt ? { expiresAt: refreshed.expiresAt } : {}),
       };
     }
-    const envToken = (env[settings.tokenEnv] ?? "").trim();
     if (envToken.length > 0) {
       return {
         ok: true,
@@ -421,7 +450,6 @@ export async function resolveGitHubAppToken(input: {
     };
   }
 
-  const envToken = (env[settings.tokenEnv] ?? "").trim();
   if (envToken.length > 0) {
     return {
       ok: true,

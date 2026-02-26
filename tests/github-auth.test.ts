@@ -337,6 +337,39 @@ test("resolveGitHubAppToken falls back to env token", async () => {
   expect(resolved.token).toBe("env-token");
 });
 
+test("resolveGitHubAppToken can skip keychain lookup in env-only mode", async () => {
+  const config = createControlPlaneConfig({
+    tokenEnv: "GH_TOKEN",
+    authRef: "github.app.default",
+    service: "hack-github-test",
+  });
+
+  let keychainReadCount = 0;
+  const store: SecretStore = {
+    get: async () => {
+      keychainReadCount += 1;
+      throw new Error("store.get should not be called in env-only mode");
+    },
+    set: async () => {},
+    delete: async () => false,
+  };
+
+  const resolved = await resolveGitHubAppToken({
+    controlPlaneConfig: config,
+    env: { GH_TOKEN: "env-token" },
+    store,
+    preferEnvTokenOnly: true,
+  });
+
+  expect(keychainReadCount).toBe(0);
+  expect(resolved.ok).toBe(true);
+  if (!resolved.ok) {
+    return;
+  }
+  expect(resolved.source).toBe("env");
+  expect(resolved.token).toBe("env-token");
+});
+
 test("resolveGitHubAppToken returns a clear error when token is missing", async () => {
   const config = createControlPlaneConfig({
     tokenEnv: "GH_TOKEN",

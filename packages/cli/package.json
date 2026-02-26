@@ -23,7 +23,7 @@
     "macos:ghostty:bundle": "cd ../.. && bun run scripts/macos-ghostty-bundle.ts",
     "typecheck": "bunx tsc -p tsconfig.json --noEmit",
     "test": "cd ../.. && bun test tests",
-    "check": "cd ../.. && bunx ultracite check packages/cli/index.ts index.ts scripts/build-release.ts scripts/build-node-runtime-image.ts scripts/install-cli.ts scripts/install-status.ts scripts/uninstall-cli.ts scripts/macos-ghostty-bundle.ts scripts/macos-ghostty-setup.ts",
+    "check": "cd ../.. && bunx ultracite check src packages/cli/index.ts index.ts scripts/build-release.ts scripts/build-node-runtime-image.ts scripts/install-cli.ts scripts/install-status.ts scripts/uninstall-cli.ts scripts/macos-ghostty-bundle.ts scripts/macos-ghostty-setup.ts",
     "lint": "bun run check"
   }
 }

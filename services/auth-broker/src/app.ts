@@ -26,7 +26,8 @@ export function createAuthBrokerApp({
   flowStore: externalStore,
   betterAuthRuntime: externalBetterAuthRuntime,
 }: CreateAuthBrokerAppOptions) {
-  const flowStore = externalStore ?? new FlowStore();
+  const flowStore =
+    externalStore ?? new FlowStore({ filePath: config.flowStorePath });
   const betterAuthRuntime =
     externalBetterAuthRuntime ?? createBetterAuthRuntimeFromEnv();
   let flowSweepTimer: ReturnType<typeof setInterval> | null = null;

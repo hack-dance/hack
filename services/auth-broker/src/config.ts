@@ -2,6 +2,7 @@ export type BrokerConfig = {
   readonly port: number;
   readonly host: string;
   readonly publicBaseUrl: string;
+  readonly flowStorePath: string;
   readonly githubClientId: string;
   readonly githubClientSecret: string;
   readonly githubAppId?: string;
@@ -20,6 +21,7 @@ export type BrokerConfig = {
 const DEFAULT_PORT = 8080;
 const DEFAULT_HOST = "0.0.0.0";
 const DEFAULT_PUBLIC_BASE_URL = "http://127.0.0.1:8080";
+const DEFAULT_FLOW_STORE_PATH = ".data/oauth-flows.json";
 const DEFAULT_GITHUB_SCOPES = "read:user,user:email,read:org";
 const DEFAULT_GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize";
 const DEFAULT_GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token";
@@ -53,6 +55,8 @@ export function resolveConfig(): BrokerConfig {
     port: parsePort(process.env.PORT) ?? DEFAULT_PORT,
     host: normalizeString(process.env.HOST) ?? DEFAULT_HOST,
     publicBaseUrl,
+    flowStorePath:
+      normalizeString(process.env.FLOW_STORE_PATH) ?? DEFAULT_FLOW_STORE_PATH,
     githubClientId,
     githubClientSecret,
     githubAppId: normalizeString(process.env.GITHUB_APP_ID) ?? undefined,

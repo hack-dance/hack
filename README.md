@@ -393,7 +393,6 @@ Start here:
 - `docs/architecture.md`
 - `docs/gateway.md`
 - `docs/extensions.md`
-- `docs/monorepo-layout-plan.md`
 
 ## Agent setup (CLI-first)
 

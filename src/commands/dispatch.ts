@@ -1088,6 +1088,7 @@ async function resolveWorkspaceBootstrap(input: {
 
   const token = await resolveGitHubAppToken({
     controlPlaneConfig: input.controlPlaneConfig,
+    preferEnvTokenOnly: true,
   });
   if (!token.ok) {
     return {

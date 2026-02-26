@@ -87,11 +87,12 @@ so desktop users can return focus to the app immediately after browser auth.
 10. `HOST` (default: `0.0.0.0`)
 11. `FLOW_TTL_MS` (default: `600000`)
 12. `FLOW_SWEEP_INTERVAL_MS` (default: `30000`)
-13. `DATABASE_URL` (required to enable Better Auth runtime)
-14. `BETTER_AUTH_SECRET` (required to enable Better Auth runtime)
-15. `BETTER_AUTH_URL` (optional base URL override)
-16. `BETTER_AUTH_TRUSTED_ORIGINS` (optional comma-separated origins)
-17. `BETTER_AUTH_GITHUB_AUTO_PROVISION_USERS` (optional boolean; when true, callback can create a Better Auth user from GitHub email if no match exists)
+13. `FLOW_STORE_PATH` (default: `.data/oauth-flows.json`)
+14. `DATABASE_URL` (required to enable Better Auth runtime)
+15. `BETTER_AUTH_SECRET` (required to enable Better Auth runtime)
+16. `BETTER_AUTH_URL` (optional base URL override)
+17. `BETTER_AUTH_TRUSTED_ORIGINS` (optional comma-separated origins)
+18. `BETTER_AUTH_GITHUB_AUTO_PROVISION_USERS` (optional boolean; when true, callback can create a Better Auth user from GitHub email if no match exists)
 
 ## GitHub App setup (permissions + private key)
 

@@ -21,6 +21,7 @@ function createTestConfig() {
     port: 0,
     host: "127.0.0.1",
     publicBaseUrl: "http://127.0.0.1:8080",
+    flowStorePath: ".data/test-oauth-flows.json",
     githubClientId: "test-client-id",
     githubClientSecret: "test-client-secret",
     githubScopes: "repo,read:org",

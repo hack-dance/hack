@@ -14,9 +14,6 @@ This directory contains the public documentation for hack. Specs remain in `SPEC
 - [Supervisor](supervisor.md)
 - [Extensions](extensions.md)
 - [Control-plane SDK](sdk.md)
-- [Provider composition + project overrides spec](provider-composition-and-project-overrides.md)
-- [Remote node DX + onboarding simplification plan](remote-node-dx-and-onboarding-simplification.md)
-- [Monorepo layout plan](monorepo-layout-plan.md)
 
 Monorepo note:
 - Root scripts orchestrate workspace tasks through Turbo.

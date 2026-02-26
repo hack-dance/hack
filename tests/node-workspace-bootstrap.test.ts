@@ -311,12 +311,22 @@ async function createMinimalHackRepo(opts: {
   readonly root: string;
 }): Promise<void> {
   await mkdir(join(opts.root, ".hack"), { recursive: true });
+  await mkdir(join(opts.root, ".dev"), { recursive: true });
   await writeFile(
     join(opts.root, ".hack", "docker-compose.yml"),
     "services: {}\n"
   );
   await writeFile(
     join(opts.root, ".hack", "hack.config.json"),
+    '{ "name": "bootstrap-target" }\n'
+  );
+  // Keep a legacy .dev scaffold so bootstrap stays valid even if .hack is stripped by host git excludes.
+  await writeFile(
+    join(opts.root, ".dev", "docker-compose.yml"),
+    "services: {}\n"
+  );
+  await writeFile(
+    join(opts.root, ".dev", "hack.config.json"),
     '{ "name": "bootstrap-target" }\n'
   );
   await writeFile(join(opts.root, "README.md"), "# bootstrap\n");
@@ -330,6 +340,8 @@ async function createMinimalHackRepo(opts: {
       "-f",
       ".hack/docker-compose.yml",
       ".hack/hack.config.json",
+      ".dev/docker-compose.yml",
+      ".dev/hack.config.json",
       "README.md",
     ],
   });

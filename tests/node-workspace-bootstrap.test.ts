@@ -336,6 +336,10 @@ async function createMinimalHackRepo(opts: {
   await runGit({
     cwd: opts.root,
     args: [
+      "-c",
+      "core.excludesfile=/dev/null",
+      "-c",
+      "add.ignoreErrors=false",
       "add",
       "-f",
       ".hack/docker-compose.yml",
@@ -357,6 +361,15 @@ async function createMinimalHackRepo(opts: {
       "init",
     ],
   });
+  await assertTrackedPaths({
+    cwd: opts.root,
+    paths: [
+      ".hack/docker-compose.yml",
+      ".hack/hack.config.json",
+      ".dev/docker-compose.yml",
+      ".dev/hack.config.json",
+    ],
+  });
 }
 
 async function runGit(opts: {
@@ -371,6 +384,30 @@ async function runGit(opts: {
     throw new Error(
       `git ${opts.args.join(" ")} failed: ${result.stderr || result.stdout}`
     );
+  }
+}
+
+/**
+ * Verify fixture files were committed so bootstrap clone assertions are deterministic.
+ */
+async function assertTrackedPaths(opts: {
+  readonly cwd: string;
+  readonly paths: readonly string[];
+}): Promise<void> {
+  for (const filePath of opts.paths) {
+    const result = await exec(
+      ["git", "ls-tree", "--name-only", "HEAD", "--", filePath],
+      {
+        cwd: opts.cwd,
+        stdin: "ignore",
+      }
+    );
+    const tracked = result.stdout.trim();
+    if (result.exitCode !== 0 || tracked !== filePath) {
+      throw new Error(
+        `fixture file not committed: ${filePath} (stdout=${result.stdout.trim()} stderr=${result.stderr.trim()})`
+      );
+    }
   }
 }
 

@@ -18,8 +18,6 @@ struct SetupAssistantView: View {
   let initialSection: SetupAssistantSection
   @State private var section: SetupAssistantSection
 
-  @State private var showEmbeddedTerminal = false
-  @State private var embeddedCommand: String? = nil
   @State private var terminalAutomationGranted: Bool? = nil
 
   init(initialSection: SetupAssistantSection) {
@@ -49,9 +47,6 @@ struct SetupAssistantView: View {
     }
     .padding(18)
     .frame(minWidth: 560, idealWidth: 720, minHeight: 460, idealHeight: 560, alignment: .topLeading)
-    .sheet(isPresented: $showEmbeddedTerminal) {
-      embeddedTerminalSheet
-    }
   }
 
   private var header: some View {
@@ -220,31 +215,9 @@ struct SetupAssistantView: View {
   }
 
   private func runInEmbeddedTerminalIfAvailable(_ command: String) {
-    embeddedCommand = command
-    showEmbeddedTerminal = true
-  }
-
-  private var embeddedTerminalSheet: some View {
-    let project = ProjectSummary(
-      projectId: "setup",
-      name: "Setup",
-      devHost: nil,
-      repoRoot: FileManager.default.homeDirectoryForCurrentUser.path,
-      projectDir: nil,
-      definedServices: nil,
-      extensionsEnabled: nil,
-      features: nil,
-      serviceHosts: nil,
-      runtimeConfigured: nil,
-      runtimeStatus: nil,
-      runtime: nil,
-      kind: .unregistered,
-      status: .unknown
-    )
-    return VStack(alignment: .leading, spacing: 0) {
-      ShellView(project: project, embedded: true, initialCommand: embeddedCommand)
-    }
-    .frame(minWidth: 760, minHeight: 480)
+    let normalizedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !normalizedCommand.isEmpty else { return }
+    openGlobalCommandInTerminalPanel(command: normalizedCommand, title: "Setup")
   }
 }
 

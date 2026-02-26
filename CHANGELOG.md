@@ -1,3 +1,7 @@
+## 1.14.0 (2026-02-26)
+
+* feat(remote): auto-manage mutagen for remote sync ([26624fd](https://github.com/hack-dance/hack/commit/26624fd))
+
 ## <small>1.13.3 (2026-02-26)</small>
 
 * fix(macos): replace setup terminal modal with terminal drawer (#16) ([7116db7](https://github.com/hack-dance/hack/commit/7116db7)), closes [#16](https://github.com/hack-dance/hack/issues/16) [#15](https://github.com/hack-dance/hack/issues/15)

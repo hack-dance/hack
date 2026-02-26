@@ -1,4 +1,4 @@
-import { beforeEach, expect, mock, test } from "bun:test";
+import { afterAll, beforeEach, expect, mock, test } from "bun:test";
 
 import { HACK_PROJECT_DIR_PRIMARY } from "../src/constants.ts";
 import type { ProjectMeta } from "../src/lib/project-meta.ts";
@@ -74,6 +74,10 @@ beforeEach(() => {
   runtimeQueue.length = 0;
   identityQueue.length = 0;
   autoRegisterCalls.length = 0;
+});
+
+afterAll(() => {
+  mock.restore();
 });
 
 test("runtime cache refresh records healthy snapshot", async () => {

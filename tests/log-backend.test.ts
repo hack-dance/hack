@@ -1,4 +1,4 @@
-import { beforeEach, expect, mock, test } from "bun:test";
+import { afterAll, beforeEach, expect, mock, test } from "bun:test";
 
 const dockerJsonCalls: Record<string, unknown>[] = [];
 const dockerPlainCalls: Record<string, unknown>[] = [];
@@ -38,6 +38,10 @@ beforeEach(() => {
   dockerPlainCalls.length = 0;
   dockerPrettyCalls.length = 0;
   lokiCalls.length = 0;
+});
+
+afterAll(() => {
+  mock.restore();
 });
 
 test("composeLogBackend routes json output to dockerComposeLogsJson", async () => {

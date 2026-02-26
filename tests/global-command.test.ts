@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -71,6 +71,10 @@ afterEach(async () => {
   }
   process.env.HOME = originalHome;
   process.env.HACK_LOGGER = originalLogger;
+});
+
+afterAll(() => {
+  mock.restore();
 });
 
 async function writeComposeFile(path: string): Promise<void> {

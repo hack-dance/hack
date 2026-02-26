@@ -1,4 +1,4 @@
-import { beforeEach, expect, mock, test } from "bun:test";
+import { afterAll, beforeEach, expect, mock, test } from "bun:test";
 
 const runCalls: string[][] = [];
 const execCalls: string[][] = [];
@@ -25,6 +25,10 @@ import { composeRuntimeBackend } from "../src/backends/runtime-backend.ts";
 beforeEach(() => {
   runCalls.length = 0;
   execCalls.length = 0;
+});
+
+afterAll(() => {
+  mock.restore();
 });
 
 test("composeRuntimeBackend.up builds compose args with profiles and detach", async () => {

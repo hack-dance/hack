@@ -4,6 +4,8 @@ FROM oven/bun:1.3.9 AS hack-build
 
 WORKDIR /src
 COPY package.json bun.lock bunfig.toml tsconfig.json index.ts ./
+COPY packages ./packages
+COPY services ./services
 COPY src ./src
 RUN bun install --frozen-lockfile
 RUN bun build index.ts --compile --outfile /out/hack

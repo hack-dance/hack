@@ -3995,11 +3995,18 @@ function renderHackFolderReadme(opts: {
 async function requireProjectContext(startDir: string) {
   const ctx = await findProjectContext(startDir);
   if (!ctx) {
-    throw new Error(
-      `No ${HACK_PROJECT_DIR_PRIMARY}/ (or legacy .dev/) found. Run: hack init`
-    );
+    throw new MissingProjectContextError();
   }
   return ctx;
+}
+
+class MissingProjectContextError extends Error {
+  constructor() {
+    super(
+      `No ${HACK_PROJECT_DIR_PRIMARY}/ (or legacy .dev/) found. Run: hack init`
+    );
+    this.name = "MissingProjectContextError";
+  }
 }
 
 type RemoteLifecycleAction = "up" | "down" | "restart";
@@ -4116,11 +4123,20 @@ async function handleUp({
   readonly ctx: CliContext;
   readonly args: UpArgs;
 }): Promise<number> {
-  const project = await resolveProjectForArgs({
-    ctx,
-    pathOpt: args.options.path,
-    projectOpt: args.options.project,
-  });
+  let project: Awaited<ReturnType<typeof requireProjectContext>>;
+  try {
+    project = await resolveProjectForArgs({
+      ctx,
+      pathOpt: args.options.path,
+      projectOpt: args.options.project,
+    });
+  } catch (error: unknown) {
+    if (error instanceof MissingProjectContextError) {
+      logger.error({ message: error.message });
+      return 1;
+    }
+    throw error;
+  }
   const detach = args.options.detach;
   const branch = resolveBranchSlug(args.options.branch);
   const profiles = parseCsvList(args.options.profile);

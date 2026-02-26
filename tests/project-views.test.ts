@@ -463,3 +463,23 @@ test("buildProjectViews matches runtime by working directory when compose projec
   expect(view?.runtimeStatus).toBe("running");
   expect(view?.status).toBe("running");
 });
+
+test("buildProjectViews tolerates missing optional mux binaries", async () => {
+  const emptyPathDir = await mkdtemp(join(tmpdir(), "hack-empty-path-"));
+  const previousPath = process.env.PATH;
+  process.env.PATH = emptyPathDir;
+
+  try {
+    const views = await buildProjectViews({
+      registryProjects: [],
+      runtime: [],
+      runtimeOk: true,
+      filter: null,
+      includeUnregistered: false,
+    });
+    expect(views).toEqual([]);
+  } finally {
+    process.env.PATH = previousPath;
+    await rm(emptyPathDir, { recursive: true, force: true });
+  }
+});

@@ -37,24 +37,13 @@ import {
 import { pathExists, readTextFile, writeTextFile } from "../lib/fs.ts";
 import { findRepoRootForInit } from "../lib/project.ts";
 import { findExecutableInPath } from "../lib/shell.ts";
-import type {
-  AgentDocCheckResult,
-  AgentDocRemoveResult,
-  AgentDocTarget,
-  AgentDocUpdateResult,
-} from "../mcp/agent-docs.ts";
+import type { AgentDocTarget } from "../mcp/agent-docs.ts";
 import {
   checkAgentDocs,
   removeAgentDocs,
   upsertAgentDocs,
 } from "../mcp/agent-docs.ts";
-import type {
-  McpCheckResult,
-  McpInstallResult,
-  McpInstallScope,
-  McpRemoveResult,
-  McpTarget,
-} from "../mcp/install.ts";
+import type { McpInstallScope, McpTarget } from "../mcp/install.ts";
 import {
   checkMcpConfig,
   installMcpConfig,
@@ -171,6 +160,12 @@ type SetupTicketsArgs = CommandArgs<typeof setupTicketsOptions, readonly []>;
 type SetupAgentsArgs = CommandArgs<typeof setupAgentsOptions, readonly []>;
 type SetupSyncArgs = CommandArgs<typeof setupSyncOptions, readonly []>;
 type SetupMcpArgs = CommandArgs<typeof setupMcpOptions, readonly []>;
+
+type SetupMultiLogResult = {
+  readonly status: string;
+  readonly path?: string;
+  readonly message?: string;
+};
 
 const tmuxSpec = defineCommand({
   name: "tmux",
@@ -706,11 +701,8 @@ async function handleSetupSync({
     let claudeResult: Awaited<ReturnType<typeof checkClaudeHooks>>;
     let codexResult: Awaited<ReturnType<typeof checkCodexSkill>>;
     let ticketsResult: Awaited<ReturnType<typeof checkTicketsSkill>>;
-    let mcpResults: McpCheckResult[] | McpRemoveResult[] | McpInstallResult[];
-    let docsResults:
-      | AgentDocCheckResult[]
-      | AgentDocRemoveResult[]
-      | AgentDocUpdateResult[];
+    let mcpResults: SetupMultiLogResult[];
+    let docsResults: SetupMultiLogResult[];
 
     if (action === "check") {
       cursorResult = await checkCursorRules({ scope: "project", projectRoot });
@@ -808,7 +800,7 @@ async function handleSetupSync({
     let claudeResult: Awaited<ReturnType<typeof checkClaudeHooks>>;
     let codexResult: Awaited<ReturnType<typeof checkCodexSkill>>;
     let ticketsResult: Awaited<ReturnType<typeof checkTicketsSkill>>;
-    let mcpResults: McpCheckResult[] | McpRemoveResult[] | McpInstallResult[];
+    let mcpResults: SetupMultiLogResult[];
 
     if (action === "check") {
       cursorResult = await checkCursorRules({ scope: "user" });

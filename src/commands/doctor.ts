@@ -46,6 +46,7 @@ import {
   readProjectDevHost,
 } from "../lib/project.ts";
 import { exec, findExecutableInPath, run } from "../lib/shell.ts";
+import { resolveSessionsMuxMode } from "../mux/mux-config.ts";
 import {
   renderGlobalCaddyCompose,
   renderGlobalCoreDnsConfig,
@@ -131,6 +132,11 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   results.push(
     await runCheck(s, "tmux", () =>
       checkTool({ name: "tmux (sessions)", cmd: "tmux", optional: true })
+    )
+  );
+  results.push(
+    await runCheck(s, "zellij", () =>
+      checkTool({ name: "zellij (sessions)", cmd: "zellij", optional: true })
     )
   );
   results.push(
@@ -305,6 +311,11 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     checkProject({ startDir })
   );
   results.push(projectCtx);
+  results.push(
+    await runCheck(s, "sessions mux", () =>
+      checkSessionsMuxConfig({ startDir })
+    )
+  );
 
   if (projectCtx.status === "ok") {
     results.push(
@@ -373,6 +384,84 @@ async function checkTool(opts: {
   }
 
   return { name: opts.name, status, message };
+}
+
+function muxInstallCommand(opts: {
+  readonly provider: "tmux" | "zellij";
+}): string {
+  if (isMac()) {
+    return `brew install ${opts.provider}`;
+  }
+  return `install ${opts.provider} with your package manager`;
+}
+
+async function checkSessionsMuxConfig(opts: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const project = await findProjectContext(opts.startDir);
+  const mode = await resolveSessionsMuxMode({ project });
+  const tmuxPath = findExecutableInPath("tmux");
+  const zellijPath = findExecutableInPath("zellij");
+
+  if (mode === "none") {
+    return {
+      name: "sessions mux",
+      status: "ok",
+      message: "sessions.mux=none (session management disabled)",
+    };
+  }
+
+  if (mode === "tmux") {
+    if (!tmuxPath) {
+      return {
+        name: "sessions mux",
+        status: "warn",
+        message: `sessions.mux=tmux, but tmux is missing (run: ${muxInstallCommand({ provider: "tmux" })})`,
+      };
+    }
+    return {
+      name: "sessions mux",
+      status: "ok",
+      message: `sessions.mux=tmux (${tmuxPath})`,
+    };
+  }
+
+  if (mode === "zellij") {
+    if (!zellijPath) {
+      return {
+        name: "sessions mux",
+        status: "warn",
+        message: `sessions.mux=zellij, but zellij is missing (run: ${muxInstallCommand({ provider: "zellij" })})`,
+      };
+    }
+    return {
+      name: "sessions mux",
+      status: "ok",
+      message: `sessions.mux=zellij (${zellijPath})`,
+    };
+  }
+
+  if (tmuxPath) {
+    return {
+      name: "sessions mux",
+      status: "ok",
+      message: `sessions.mux=auto (using tmux: ${tmuxPath})`,
+    };
+  }
+
+  if (zellijPath) {
+    return {
+      name: "sessions mux",
+      status: "ok",
+      message: `sessions.mux=auto (using zellij: ${zellijPath})`,
+    };
+  }
+
+  return {
+    name: "sessions mux",
+    status: "warn",
+    message: `sessions.mux=auto, but neither tmux nor zellij is available (run: ${muxInstallCommand({ provider: "tmux" })})`,
+  };
 }
 
 function checkOptionalGum(): CheckResult {

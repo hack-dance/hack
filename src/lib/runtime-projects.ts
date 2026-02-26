@@ -10,7 +10,7 @@ import { getString, isRecord } from "./guards.ts";
 import { parseJsonLines } from "./json-lines.ts";
 import { readLifecycleState } from "./lifecycle-runtime.ts";
 import { upsertProjectRegistration } from "./projects-registry.ts";
-import { exec } from "./shell.ts";
+import { exec, findExecutableInPath } from "./shell.ts";
 
 export type RuntimeContainer = {
   readonly id: string;
@@ -393,12 +393,21 @@ async function resolveLifecycleActivity(opts: {
 async function readTmuxWindowNames(opts: {
   readonly sessionName: string;
 }): Promise<ReadonlySet<string> | null> {
-  const result = await exec(
-    ["tmux", "list-windows", "-t", opts.sessionName, "-F", "#{window_name}"],
-    {
-      stdin: "ignore",
-    }
-  );
+  if (!findExecutableInPath("tmux")) {
+    return null;
+  }
+
+  let result: Awaited<ReturnType<typeof exec>>;
+  try {
+    result = await exec(
+      ["tmux", "list-windows", "-t", opts.sessionName, "-F", "#{window_name}"],
+      {
+        stdin: "ignore",
+      }
+    );
+  } catch {
+    return null;
+  }
   if (result.exitCode !== 0) {
     return null;
   }
@@ -412,9 +421,18 @@ async function readTmuxWindowNames(opts: {
 }
 
 async function readZellijSessionNames(): Promise<ReadonlySet<string>> {
-  const result = await exec(["zellij", "list-sessions", "--no-formatting"], {
-    stdin: "ignore",
-  });
+  if (!findExecutableInPath("zellij")) {
+    return new Set<string>();
+  }
+
+  let result: Awaited<ReturnType<typeof exec>>;
+  try {
+    result = await exec(["zellij", "list-sessions", "--no-formatting"], {
+      stdin: "ignore",
+    });
+  } catch {
+    return new Set<string>();
+  }
   if (result.exitCode !== 0) {
     return new Set<string>();
   }

@@ -300,7 +300,16 @@ async function createMinimalHackRepo(opts: {
 
   await runGit({ cwd: opts.root, args: ["init"] });
   await runGit({ cwd: opts.root, args: ["branch", "-M", "main"] });
-  await runGit({ cwd: opts.root, args: ["add", "."] });
+  await runGit({
+    cwd: opts.root,
+    args: [
+      "add",
+      "-f",
+      ".hack/docker-compose.yml",
+      ".hack/hack.config.json",
+      "README.md",
+    ],
+  });
   await runGit({
     cwd: opts.root,
     args: [

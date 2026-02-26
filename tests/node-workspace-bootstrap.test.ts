@@ -35,6 +35,12 @@ test("workspace ensure bootstraps a missing project by cloning repo", async () =
     throw new Error("Missing tempDir");
   }
   const sourceRepo = join(tempDir, "source-repo");
+  const bootstrapRoot = resolve(
+    tempDir,
+    ".hack",
+    "projects",
+    "bootstrap-target"
+  );
   await createMinimalHackRepo({ root: sourceRepo });
 
   const request = new Request(
@@ -48,6 +54,7 @@ test("workspace ensure bootstraps a missing project by cloning repo", async () =
         bootstrap: {
           repo_url: sourceRepo,
           project_name: "bootstrap-target",
+          project_root: bootstrapRoot,
         },
       }),
     }
@@ -75,20 +82,14 @@ test("workspace ensure bootstraps a missing project by cloning repo", async () =
   };
   expect(body.workspace?.projectName).toBe("bootstrap-target");
   expect(body.workspace?.branch).toBe("main");
-  expect(body.workspace?.projectRoot).toBe(
-    resolve(tempDir, ".hack", "projects", "bootstrap-target")
-  );
-  expect(body.workspace?.projectDir).toBe(
-    resolve(tempDir, ".hack", "projects", "bootstrap-target", ".hack")
-  );
+  expect(body.workspace?.projectRoot).toBe(bootstrapRoot);
+  expect(body.workspace?.projectDir).toBe(resolve(bootstrapRoot, ".hack"));
 
   const map = await readNodeWorkspaceMap({ homeDir: tempDir });
   expect(map.entries).toHaveLength(1);
   expect(map.entries[0]?.projectName).toBe("bootstrap-target");
   expect(map.entries[0]?.source).toBe("managed");
-  expect(map.entries[0]?.workspaceRoot).toBe(
-    resolve(tempDir, ".hack", "projects", "bootstrap-target")
-  );
+  expect(map.entries[0]?.workspaceRoot).toBe(bootstrapRoot);
 });
 
 test("workspace ensure still returns unknown project when bootstrap is absent", async () => {
@@ -124,6 +125,12 @@ test("workspace ensure can recover from node map when registry is missing", asyn
     throw new Error("Missing tempDir");
   }
   const sourceRepo = join(tempDir, "source-repo");
+  const bootstrapRoot = resolve(
+    tempDir,
+    ".hack",
+    "projects",
+    "bootstrap-target"
+  );
   await createMinimalHackRepo({ root: sourceRepo });
 
   const bootstrapRequest = new Request(
@@ -136,6 +143,7 @@ test("workspace ensure can recover from node map when registry is missing", asyn
         bootstrap: {
           repo_url: sourceRepo,
           project_name: "bootstrap-target",
+          project_root: bootstrapRoot,
         },
       }),
     }
@@ -180,9 +188,7 @@ test("workspace ensure can recover from node map when registry is missing", asyn
     };
   };
   expect(body.workspace?.branch).toBe("main");
-  expect(body.workspace?.projectRoot).toBe(
-    resolve(tempDir, ".hack", "projects", "bootstrap-target")
-  );
+  expect(body.workspace?.projectRoot).toBe(bootstrapRoot);
 });
 
 test("workspace ensure resolves by controller project id when node project id differs", async () => {
@@ -190,6 +196,12 @@ test("workspace ensure resolves by controller project id when node project id di
     throw new Error("Missing tempDir");
   }
   const sourceRepo = join(tempDir, "source-repo");
+  const bootstrapRoot = resolve(
+    tempDir,
+    ".hack",
+    "projects",
+    "bootstrap-target"
+  );
   await createMinimalHackRepo({ root: sourceRepo });
 
   const bootstrapRequest = new Request(
@@ -204,6 +216,7 @@ test("workspace ensure resolves by controller project id when node project id di
         bootstrap: {
           repo_url: sourceRepo,
           project_name: "bootstrap-target",
+          project_root: bootstrapRoot,
         },
       }),
     }
@@ -254,9 +267,7 @@ test("workspace ensure resolves by controller project id when node project id di
     };
   };
   expect(mappedBody.workspace?.branch).toBe("main");
-  expect(mappedBody.workspace?.projectRoot).toBe(
-    resolve(tempDir, ".hack", "projects", "bootstrap-target")
-  );
+  expect(mappedBody.workspace?.projectRoot).toBe(bootstrapRoot);
 });
 
 async function readNodeWorkspaceMap(opts: {

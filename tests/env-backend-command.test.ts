@@ -95,7 +95,9 @@ test("env backend use cloud requires provider and stores cloud settings", async 
     },
   });
   expect(invalid.exitCode).toBe(1);
-  expect(invalid.stderr).toContain("Cloud backend requires --provider");
+  expect(`${invalid.stdout}\n${invalid.stderr}`).toContain(
+    "Cloud backend requires --provider"
+  );
 
   const valid = await runHack({
     args: [

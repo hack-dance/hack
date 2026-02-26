@@ -1,3 +1,9 @@
+## <small>1.13.2 (2026-02-26)</small>
+
+* Merge pull request #1 from rhymiz/codex/fix-up-missing-hack-stack ([081f358](https://github.com/hack-dance/hack/commit/081f358)), closes [#1](https://github.com/hack-dance/hack/issues/1)
+* Merge pull request #14 from rhymiz/main ([7e2d37f](https://github.com/hack-dance/hack/commit/7e2d37f)), closes [#14](https://github.com/hack-dance/hack/issues/14)
+* fix(project): suppress missing .hack stack trace for hack up ([ced1f59](https://github.com/hack-dance/hack/commit/ced1f59))
+
 ## <small>1.13.1 (2026-02-26)</small>
 
 * fix(release): include workspace manifests in node-runtime image build ([2745c6b](https://github.com/hack-dance/hack/commit/2745c6b))

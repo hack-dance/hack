@@ -128,14 +128,31 @@ export type GatewayNodeWorkspace = {
   readonly branch: string | null;
 };
 
+export type GatewayNodeBootstrapAuthSource =
+  | "native_git"
+  | "controller_github_token";
+
 export type GatewayNodeWorkspaceBootstrap = {
   readonly repoUrl: string;
   readonly projectName?: string;
   readonly projectRoot?: string;
+  readonly githubAuth?: {
+    readonly token: string;
+    readonly owner?: string;
+    readonly repo?: string;
+  };
 };
 
 export type GatewayNodeWorkspaceResponse = {
   readonly workspace: GatewayNodeWorkspace;
+  readonly bootstrapAuthSource?: GatewayNodeBootstrapAuthSource;
+};
+
+export type GatewayNodeGitProbeResponse = {
+  readonly repoUrl: string;
+  readonly ok: boolean;
+  readonly authSource: GatewayNodeBootstrapAuthSource | "none";
+  readonly error?: string;
 };
 
 export type GatewayNodeDevcontainerSession = {
@@ -275,6 +292,13 @@ export type GatewayClient = {
     readonly branch?: string;
     readonly bootstrap?: GatewayNodeWorkspaceBootstrap;
   }) => Promise<GatewayResponse<GatewayNodeWorkspaceResponse>>;
+  /**
+   * Probe node-side Git credential reachability for a repo without mutating workspace state.
+   */
+  probeNodeGitAccess: (opts: {
+    readonly repoUrl: string;
+    readonly githubAuth?: GatewayNodeWorkspaceBootstrap["githubAuth"];
+  }) => Promise<GatewayResponse<GatewayNodeGitProbeResponse>>;
   /**
    * Start devcontainer for a node workspace.
    */
@@ -563,11 +587,48 @@ export function createGatewayClient(opts: GatewayClientOptions): GatewayClient {
                 ...(opts.bootstrap.projectRoot
                   ? { project_root: opts.bootstrap.projectRoot }
                   : {}),
+                ...(opts.bootstrap.githubAuth
+                  ? {
+                      github_auth: {
+                        token: opts.bootstrap.githubAuth.token,
+                        ...(opts.bootstrap.githubAuth.owner
+                          ? { owner: opts.bootstrap.githubAuth.owner }
+                          : {}),
+                        ...(opts.bootstrap.githubAuth.repo
+                          ? { repo: opts.bootstrap.githubAuth.repo }
+                          : {}),
+                      },
+                    }
+                  : {}),
               },
             }
           : {}),
       },
       parse: parseWorkspaceEnsure,
+    });
+
+  const probeNodeGitAccess = async (opts: {
+    readonly repoUrl: string;
+    readonly githubAuth?: GatewayNodeWorkspaceBootstrap["githubAuth"];
+  }): Promise<GatewayResponse<GatewayNodeGitProbeResponse>> =>
+    await requestJson({
+      method: "POST",
+      path: "/v1/node/git/probe",
+      body: {
+        repo_url: opts.repoUrl,
+        ...(opts.githubAuth
+          ? {
+              github_auth: {
+                token: opts.githubAuth.token,
+                ...(opts.githubAuth.owner
+                  ? { owner: opts.githubAuth.owner }
+                  : {}),
+                ...(opts.githubAuth.repo ? { repo: opts.githubAuth.repo } : {}),
+              },
+            }
+          : {}),
+      },
+      parse: parseNodeGitProbe,
     });
 
   const devcontainerUp = async (opts: {
@@ -644,6 +705,7 @@ export function createGatewayClient(opts: GatewayClientOptions): GatewayClient {
     createShell,
     getShell,
     ensureNodeWorkspace,
+    probeNodeGitAccess,
     devcontainerUp,
     devcontainerDown,
     getDevcontainer,
@@ -712,8 +774,12 @@ function parseGatewayError(opts: {
   }
   const code =
     typeof opts.body.error === "string" ? opts.body.error : undefined;
+  const errorMessage =
+    typeof opts.body.error === "string" ? opts.body.error : undefined;
   const message =
-    typeof opts.body.message === "string" ? opts.body.message : opts.fallback;
+    typeof opts.body.message === "string"
+      ? opts.body.message
+      : (errorMessage ?? opts.fallback);
   return { message, ...(code ? { code } : {}), raw: opts.body };
 }
 
@@ -828,7 +894,39 @@ function parseWorkspaceEnsure(
   ) {
     return null;
   }
-  return value as GatewayNodeWorkspaceResponse;
+  const bootstrapAuthSource =
+    value.bootstrap_auth_source === "native_git" ||
+    value.bootstrap_auth_source === "controller_github_token"
+      ? value.bootstrap_auth_source
+      : undefined;
+  return {
+    workspace: value.workspace as GatewayNodeWorkspace,
+    ...(bootstrapAuthSource ? { bootstrapAuthSource } : {}),
+  };
+}
+
+function parseNodeGitProbe(value: unknown): GatewayNodeGitProbeResponse | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  if (
+    typeof value.repo_url !== "string" ||
+    typeof value.ok !== "boolean" ||
+    !(
+      value.auth_source === "native_git" ||
+      value.auth_source === "controller_github_token" ||
+      value.auth_source === "none"
+    )
+  ) {
+    return null;
+  }
+  const error = typeof value.error === "string" ? value.error : undefined;
+  return {
+    repoUrl: value.repo_url,
+    ok: value.ok,
+    authSource: value.auth_source,
+    ...(error ? { error } : {}),
+  };
 }
 
 function parseNodeDevcontainer(

@@ -326,3 +326,71 @@ test("runtime cache detects runtime resets via fingerprint", async () => {
   expect(snapshot?.health.resetCount).toBe(1);
   expect(snapshot?.health.lastResetAtMs).not.toBeNull();
 });
+
+test("getPsPayload matches normalized compose project names", async () => {
+  const runtime: RuntimeProject[] = [
+    {
+      project: "dimitrisubstrate",
+      workingDir: "/tmp/personal-substrate/.hack",
+      services: new Map([
+        [
+          "app",
+          {
+            service: "app",
+            containers: [
+              {
+                id: "container-app",
+                project: "dimitrisubstrate",
+                service: "app",
+                state: "running",
+                status: "Up 3 minutes",
+                name: "dimitrisubstrate-app-1",
+                ports: "3000/tcp",
+                workingDir: "/tmp/personal-substrate/.hack",
+                image: "imbios/bun-node:latest",
+                labels: null,
+                mounts: [],
+                networks: [],
+              },
+            ],
+          },
+        ],
+      ]),
+      isGlobal: false,
+    },
+  ];
+  runtimeQueue.push({
+    ok: true,
+    runtime,
+    error: null,
+    checkedAtMs: Date.now(),
+  });
+  identityQueue.push({
+    ok: true,
+    identity: {
+      dockerHost: null,
+      socketPath: null,
+      socketInode: null,
+      engineId: "engine-a",
+      engineName: null,
+      engineVersion: null,
+    },
+  });
+
+  const cache = createRuntimeCache({});
+  await cache.refresh({ reason: "ps" });
+
+  const payload = cache.getPsPayload({
+    composeProject: "dimitri.substrate",
+    project: "dimitri.substrate",
+    branch: null,
+  });
+  expect(payload.items).toEqual([
+    {
+      Service: "app",
+      Name: "dimitrisubstrate-app-1",
+      Status: "Up 3 minutes",
+      Ports: "3000/tcp",
+    },
+  ]);
+});

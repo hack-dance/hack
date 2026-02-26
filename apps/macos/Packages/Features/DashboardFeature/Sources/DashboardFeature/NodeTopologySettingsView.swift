@@ -593,16 +593,28 @@ struct NodeTopologySettingsView: View {
   }
 
   private var tailnetStatusLabel: (text: String, tone: StatusTone) {
-    guard let tailscale else {
-      return ("Tailnet status unavailable", .neutral)
-    }
-    if tailscale.connected {
+    if tailscale?.connected == true {
       return ("Tailnet connected", .good)
     }
-    if let error = tailscale.error, !error.isEmpty {
-      return ("Tailnet status unavailable", .neutral)
+    if hasHealthyTailnetRoute {
+      return ("Tailnet route active", .good)
     }
-    return ("Tailnet not connected", .warn)
+    if let tailscale, tailscale.error == nil {
+      return ("Tailnet not connected", .warn)
+    }
+    return ("Tailnet status unavailable", .neutral)
+  }
+
+  private var hasHealthyTailnetRoute: Bool {
+    for node in sortedNodes {
+      if connectionType(for: node.endpoint) != .tailscale {
+        continue
+      }
+      if probeByNodeId[node.id]?.ok == true {
+        return true
+      }
+    }
+    return false
   }
 
   private var topologyGraphNodes: [TopologyGraphNodeModel] {
@@ -1001,9 +1013,7 @@ struct NodeTopologySettingsView: View {
     if Task.isCancelled {
       return
     }
-    if let resolvedList {
-      registry = resolvedList
-    }
+    var nextRegistry = resolvedList
 
     let status = await probeNodesWithTimeout()
     let tailscaleResult = await inspectTailscaleWithTimeout()
@@ -1055,6 +1065,22 @@ struct NodeTopologySettingsView: View {
       probeByNodeId = Dictionary(
         uniqueKeysWithValues: status.nodes.map { ($0.input.id, $0) }
       )
+      if nextRegistry == nil || nextRegistry?.nodes.isEmpty == true {
+        let inferredNodes = deduplicatedNodeRecords(status.nodes.map(\.input))
+        if !inferredNodes.isEmpty {
+          let inferredDefaultNodeId =
+            nextRegistry?.defaultNodeId
+            ?? previousRegistry?.defaultNodeId
+            ?? inferredNodes.first(where: { $0.isDefault == true })?.id
+          nextRegistry = NodeRegistryListResponse(
+            defaultNodeId: inferredDefaultNodeId,
+            nodes: inferredNodes
+          )
+        }
+      }
+    }
+    if let nextRegistry {
+      registry = nextRegistry
     }
     let knownNodeIds = Set((registry?.nodes ?? []).map(\.id))
     topologyLayoutOverrides = topologyLayoutOverrides.filter { key, _ in
@@ -1248,6 +1274,20 @@ struct NodeTopologySettingsView: View {
       value.removeLast()
     }
     return value
+  }
+
+  private func deduplicatedNodeRecords(_ records: [NodeRegistryRecord]) -> [NodeRegistryRecord] {
+    var seenIds = Set<String>()
+    var deduplicated: [NodeRegistryRecord] = []
+    deduplicated.reserveCapacity(records.count)
+    for record in records {
+      if seenIds.contains(record.id) {
+        continue
+      }
+      seenIds.insert(record.id)
+      deduplicated.append(record)
+    }
+    return deduplicated
   }
 
   private func connectionTone(for connection: String) -> StatusTone {

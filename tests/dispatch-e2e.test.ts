@@ -32,6 +32,7 @@ type DispatchJsonOutput = {
 };
 
 type FakeGatewayState = {
+  gitProbePayload: Record<string, unknown> | null;
   ensurePayload: Record<string, unknown> | null;
   jobCreatePayload: Record<string, unknown> | null;
   jobStatus: "running" | "completed";
@@ -89,6 +90,7 @@ runTest(
 
     const nodeToken = "dispatch-e2e-node-token";
     const nodeTokenEnv = "HACK_DISPATCH_E2E_NODE_TOKEN";
+    const githubToken = "dispatch-e2e-github-token";
     const nodeId = "dispatch-e2e-node";
     const authRef = `env:${nodeTokenEnv}`;
     trackedAuthRefs.push(authRef);
@@ -141,6 +143,7 @@ runTest(
           HOME: tempHome,
           HACK_GLOBAL_CONFIG_PATH: "",
           [nodeTokenEnv]: nodeToken,
+          HACK_GITHUB_APP_TOKEN: githubToken,
           NO_COLOR: "1",
         },
       });
@@ -158,6 +161,10 @@ runTest(
       if (!ensurePayload) {
         throw new Error("Missing workspace ensure payload");
       }
+      const gitProbePayload = gateway.state.gitProbePayload;
+      if (!gitProbePayload) {
+        throw new Error("Missing git probe payload");
+      }
       expect(ensurePayload.branch).toBe("feat/e2e-branch");
       expect(typeof ensurePayload.controller_project_id).toBe("string");
       expect(
@@ -169,6 +176,20 @@ runTest(
         | undefined;
       expect(bootstrap?.repo_url).toBe("https://github.com/example/repo.git");
       expect(bootstrap?.project_name).toBe("dispatch-e2e");
+      const githubAuth = bootstrap?.github_auth as
+        | Record<string, unknown>
+        | undefined;
+      expect(githubAuth?.token).toBe(githubToken);
+      expect(githubAuth?.owner).toBe("example");
+      expect(githubAuth?.repo).toBe("repo");
+      expect(gitProbePayload).toEqual({
+        repo_url: "https://github.com/example/repo.git",
+        github_auth: {
+          token: githubToken,
+          owner: "example",
+          repo: "repo",
+        },
+      });
       const jobCreatePayload = gateway.state.jobCreatePayload;
       if (!jobCreatePayload) {
         throw new Error("Missing job create payload");
@@ -182,9 +203,13 @@ runTest(
 
       expect(summary).toContain(`# Dispatch Run ${output.runId}`);
       expect(summary).toContain("status: completed");
+      expect(summary).toContain("## Bootstrap auth");
+      expect(summary).toContain("preflight_source: native_git");
       expect(logs).toContain("remote: dispatch run log line");
       expect(manifest).toContain('"jobStatus": "completed"');
+      expect(manifest).toContain('"bootstrapAuth"');
       expect(events).toContain('"type":"job.event"');
+      expect(events).toContain('"type":"run.bootstrap.probe"');
     } finally {
       gateway.stop();
     }
@@ -325,6 +350,109 @@ runTest(
   }
 );
 
+runTest(
+  "dispatch run prints remote-upgrade hint when node lacks git probe endpoint",
+  async () => {
+    tempHome = await mkdtemp(join(tmpdir(), "hack-dispatch-e2e-upgrade-"));
+    previousHome = process.env.HOME;
+    previousGlobalConfigPath = process.env.HACK_GLOBAL_CONFIG_PATH;
+    process.env.HOME = tempHome;
+    process.env.HACK_GLOBAL_CONFIG_PATH = "";
+
+    const workspace = join(tempHome, "workspace");
+    await mkdir(workspace, { recursive: true });
+    const projectRoot = join(workspace, "dispatch-upgrade-project");
+    await createMinimalProject({
+      projectRoot,
+      projectName: "dispatch-upgrade",
+    });
+    await initializeGitRepo({ projectRoot });
+    await runGit({
+      cwd: projectRoot,
+      args: ["remote", "add", "origin", "git@github.com:example/repo.git"],
+    });
+
+    const project = await findProjectContext(projectRoot);
+    if (!project) {
+      throw new Error("Failed to resolve project context");
+    }
+    const registered = await upsertProjectRegistration({ project });
+    if (registered.status === "conflict") {
+      throw new Error(
+        "Unexpected project registration conflict in upgrade e2e test"
+      );
+    }
+
+    const nodeToken = "dispatch-upgrade-node-token";
+    const nodeTokenEnv = "HACK_DISPATCH_UPGRADE_NODE_TOKEN";
+    const githubToken = "dispatch-upgrade-github-token";
+    const nodeId = "dispatch-upgrade-node";
+    const authRef = `env:${nodeTokenEnv}`;
+    trackedAuthRefs.push(authRef);
+    process.env[nodeTokenEnv] = nodeToken;
+    const gateway = await startFakeNodeGateway({
+      token: nodeToken,
+      projectName: "dispatch-upgrade",
+      projectId: "dispatch-upgrade-project-id",
+      branch: "feat/upgrade-branch",
+      projectRoot: "/remote/workspaces/dispatch-upgrade",
+      gitProbeMode: "unsupported",
+      workspaceEnsureMode: "bootstrap_clone_failed",
+    });
+
+    try {
+      await upsertNodeRecord({
+        id: nodeId,
+        name: "Dispatch Upgrade Node",
+        labels: ["e2e", "upgrade"],
+        capabilities: ["runtime", "gateway", "supervisor"],
+        endpoint: gateway.baseUrl,
+        authRef,
+        lastSeenAt: new Date().toISOString(),
+        status: "healthy",
+        platform: "darwin",
+        arch: "arm64",
+        version: "old-node",
+      });
+
+      const command = [
+        "bun",
+        resolve(import.meta.dir, "../index.ts"),
+        "dispatch",
+        "run",
+        "--project",
+        "dispatch-upgrade",
+        "--node",
+        nodeId,
+        "--branch",
+        "feat/upgrade-branch",
+        "--",
+        "echo",
+        "dispatch-upgrade",
+      ] as const;
+
+      const result = await runCommand({
+        cmd: command,
+        cwd: resolve(import.meta.dir, ".."),
+        env: {
+          ...process.env,
+          HOME: tempHome,
+          HACK_GLOBAL_CONFIG_PATH: "",
+          [nodeTokenEnv]: nodeToken,
+          HACK_GITHUB_APP_TOKEN: githubToken,
+          NO_COLOR: "1",
+        },
+      });
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Workspace ensure failed (500)");
+      expect(result.stderr).toContain("missing /v1/node/git/probe");
+      expect(result.stderr).toContain("Update hack on the remote node");
+    } finally {
+      gateway.stop();
+    }
+  }
+);
+
 /**
  * Create a minimal project fixture with `.hack` metadata required by project discovery.
  */
@@ -452,12 +580,15 @@ async function startFakeNodeGateway(input: {
   readonly projectId: string;
   readonly branch: string;
   readonly projectRoot: string;
+  readonly gitProbeMode?: "supported" | "unsupported";
+  readonly workspaceEnsureMode?: "success" | "bootstrap_clone_failed";
 }): Promise<{
   readonly baseUrl: string;
   readonly state: FakeGatewayState;
   readonly stop: () => void;
 }> {
   const state: FakeGatewayState = {
+    gitProbePayload: null,
     ensurePayload: null,
     jobCreatePayload: null,
     jobStatus: "running",
@@ -509,11 +640,34 @@ async function startFakeNodeGateway(input: {
           },
         });
       }
+      if (url.pathname === "/v1/node/git/probe" && req.method === "POST") {
+        state.gitProbePayload = (await req.json()) as Record<string, unknown>;
+        if (input.gitProbeMode === "unsupported") {
+          return jsonResponse(
+            { error: "not_found", message: "not found" },
+            404
+          );
+        }
+        return jsonResponse({
+          repo_url: "https://github.com/example/repo.git",
+          ok: true,
+          auth_source: "native_git",
+        });
+      }
       if (
         url.pathname === "/v1/node/workspaces/ensure" &&
         req.method === "POST"
       ) {
         state.ensurePayload = (await req.json()) as Record<string, unknown>;
+        if (input.workspaceEnsureMode === "bootstrap_clone_failed") {
+          return jsonResponse(
+            {
+              error:
+                "bootstrap_clone_failed: Cloning into '/Users/remote-user/dev/hack-nodes/sickemail'...git@github.com: Permission denied (publickey).fatal: Could not read from remote repository.",
+            },
+            500
+          );
+        }
         return jsonResponse({
           workspace: {
             projectId: input.projectId,

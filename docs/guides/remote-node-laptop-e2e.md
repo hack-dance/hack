@@ -123,6 +123,15 @@ Expected:
 1. Mapping entry exists for controller project id/name.
 2. Workspace root resolves under `~/.hack/projects/<project-slug>/` unless explicitly attached elsewhere.
 
+### Private repo bootstrap behavior (default, no manual copy)
+
+Workspace bootstrap now uses this order automatically:
+1. Attempt clone with the remote machine's existing Git credentials.
+2. If clone fails and origin is GitHub, retry with controller GitHub token auth (from `hack x github connect` or `HACK_GITHUB_APP_TOKEN`).
+3. Dispatch records a preflight probe (`native_git`, `controller_github_token`, or `none`) before workspace ensure so failures are diagnosable.
+
+No manual `rsync`/attach steps are required for normal private GitHub repo flows.
+
 Repair commands when mapping is missing or incorrect:
 
 ```bash
@@ -159,6 +168,14 @@ mutagen sync list
 
 Check status output for sync metadata paths and confirm the marker output appears in remote command logs.
 
+Inspect bootstrap auth evidence:
+
+```bash
+hack dispatch logs <run-id> | tail -n 50
+cat ~/.hack/registry/runs/<run-id>/manifest.json
+cat ~/.hack/registry/runs/<run-id>/summary.md
+```
+
 ## macOS app validation
 
 1. Open **Settings → System → Topology**.
@@ -180,6 +197,12 @@ Check status output for sync metadata paths and confirm the marker output appear
    - Fix: omit tags unless tailnet policy explicitly allows them.
 6. Topology shows empty node list unexpectedly
    - Fix: refresh topology, verify controller-host mode and local node registry (`hack node list`).
+7. `bootstrap_clone_failed: ... Permission denied (publickey)`
+   - Cause: remote node clone failed and no usable GitHub token fallback was available.
+   - Fix: connect a GitHub account on controller (`hack x github connect --profile <id>`), or set `HACK_GITHUB_APP_TOKEN`, then rerun.
+8. `probe_failed (404): not_found` before workspace ensure
+   - Cause: remote node is running an older daemon build that does not expose `/v1/node/git/probe`.
+   - Fix: update `hack` on the remote node to the same build as controller, restart daemon, then retry.
 
 ## Evidence capture
 

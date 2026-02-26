@@ -28,6 +28,8 @@ import {
 import {
   createGatewayClient,
   type GatewayClient,
+  type GatewayNodeBootstrapAuthSource,
+  type GatewayNodeGitProbeResponse,
   type GatewayNodeStatus,
   type GatewayNodeWorkspace,
   type GatewayNodeWorkspaceBootstrap,
@@ -447,12 +449,39 @@ async function handleDispatchRun({
 
   const workspaceRequest = await resolveWorkspaceEnsureRequest({
     project,
+    controlPlaneConfig: controlPlane.config,
     branch,
   });
+  const bootstrapProbe = await probeWorkspaceBootstrapAccess({
+    client: selectedNode.client,
+    request: workspaceRequest,
+  });
+  if (bootstrapProbe) {
+    await appendDispatchRunEvent({
+      runId,
+      event: {
+        type: "run.bootstrap.probe",
+        repoUrl: bootstrapProbe.repoUrl,
+        ok: bootstrapProbe.ok,
+        authSource: bootstrapProbe.authSource,
+        ...(bootstrapProbe.unsupported ? { unsupported: true } : {}),
+        ...(bootstrapProbe.error ? { error: bootstrapProbe.error } : {}),
+      },
+    });
+    if (!(bootstrapProbe.ok || bootstrapProbe.unsupported)) {
+      logger.warn({
+        message: `Git credential probe failed before workspace bootstrap: ${bootstrapProbe.error ?? "unknown_error"}`,
+      });
+    }
+  }
   const workspace =
     await selectedNode.client.ensureNodeWorkspace(workspaceRequest);
   if (!workspace.ok) {
-    const errorMessage = `Workspace ensure failed (${workspace.status}): ${workspace.error.message}`;
+    const errorMessage = formatWorkspaceEnsureError({
+      workspace,
+      workspaceRequest,
+      bootstrapProbe,
+    });
     await finalizeFailedRun({
       run,
       errorMessage,
@@ -464,6 +493,20 @@ async function handleDispatchRun({
     logger.error({ message: errorMessage });
     return 1;
   }
+  const bootstrapAuthEnsured = workspace.data.bootstrapAuthSource;
+  if (bootstrapAuthEnsured) {
+    await appendDispatchRunEvent({
+      runId,
+      event: {
+        type: "run.bootstrap.auth_source",
+        authSource: bootstrapAuthEnsured,
+      },
+    });
+  }
+  const bootstrapAuth: DispatchWorkspaceBootstrapAuth = {
+    ...(bootstrapProbe ? { probe: bootstrapProbe } : {}),
+    ...(bootstrapAuthEnsured ? { ensured: bootstrapAuthEnsured } : {}),
+  };
 
   let syncMetadata: DispatchSyncMetadata | null = null;
   const preparedSync = await prepareDispatchSync({
@@ -646,6 +689,7 @@ async function handleDispatchRun({
       prOutcome,
       route: routeMetadata,
       sync: syncMetadata,
+      bootstrapAuth,
     });
     await writeDispatchRunArtifacts({
       runId,
@@ -673,6 +717,7 @@ async function handleDispatchRun({
         riskLevel: policy.level,
         riskReasons: policy.reasons,
         route: routeMetadata,
+        ...(Object.keys(bootstrapAuth).length > 0 ? { bootstrapAuth } : {}),
         ...(syncMetadata ? { sync: syncMetadata } : {}),
         ...(ticketId ? { ticketId } : {}),
         ...(prOutcome
@@ -721,6 +766,7 @@ async function handleDispatchRun({
             workspace: workspace.data.workspace,
             artifacts: run.artifacts,
             route: routeMetadata,
+            ...(Object.keys(bootstrapAuth).length > 0 ? { bootstrapAuth } : {}),
             ...(syncMetadata ? { sync: syncMetadata } : {}),
             ...(prOutcome ? { pr: prOutcome } : {}),
             ...(outcome.exitCode !== undefined
@@ -910,6 +956,19 @@ type DispatchProjectResolution = {
   readonly projectRoot?: string;
 };
 
+type WorkspaceEnsureRequest = {
+  readonly project?: string;
+  readonly projectId?: string;
+  readonly controllerProjectId?: string;
+  readonly controllerProjectName?: string;
+  readonly branch?: string;
+  readonly bootstrap?: GatewayNodeWorkspaceBootstrap;
+};
+
+type WorkspaceBootstrapProbeResult = GatewayNodeGitProbeResponse & {
+  readonly unsupported?: boolean;
+};
+
 async function resolveDispatchProject(input: {
   readonly selector: string;
 }): Promise<DispatchProjectResolution> {
@@ -967,15 +1026,9 @@ async function resolveDispatchProject(input: {
 
 async function resolveWorkspaceEnsureRequest(input: {
   readonly project: DispatchProjectResolution;
+  readonly controlPlaneConfig: ControlPlaneConfig;
   readonly branch?: string;
-}): Promise<{
-  readonly project?: string;
-  readonly projectId?: string;
-  readonly controllerProjectId?: string;
-  readonly controllerProjectName?: string;
-  readonly branch?: string;
-  readonly bootstrap?: GatewayNodeWorkspaceBootstrap;
-}> {
+}): Promise<WorkspaceEnsureRequest> {
   let base: { readonly project?: string; readonly projectId?: string };
   if (input.project.projectName && input.project.projectName.length > 0) {
     base = { project: input.project.projectName };
@@ -986,6 +1039,7 @@ async function resolveWorkspaceEnsureRequest(input: {
   }
   const bootstrap = await resolveWorkspaceBootstrap({
     project: input.project,
+    controlPlaneConfig: input.controlPlaneConfig,
   });
   return {
     ...base,
@@ -1002,6 +1056,7 @@ async function resolveWorkspaceEnsureRequest(input: {
 
 async function resolveWorkspaceBootstrap(input: {
   readonly project: DispatchProjectResolution;
+  readonly controlPlaneConfig: ControlPlaneConfig;
 }): Promise<GatewayNodeWorkspaceBootstrap | null> {
   const projectRoot = input.project.projectRoot;
   if (!projectRoot) {
@@ -1022,9 +1077,68 @@ async function resolveWorkspaceBootstrap(input: {
   if (!repoUrl) {
     return null;
   }
+
+  const repoRef = parseGitHubRepoRef({ remoteUrl: repoUrl });
+  if (!repoRef) {
+    return {
+      repoUrl,
+      projectName: input.project.projectName ?? basename(projectRoot).trim(),
+    };
+  }
+
+  const token = await resolveGitHubAppToken({
+    controlPlaneConfig: input.controlPlaneConfig,
+  });
+  if (!token.ok) {
+    return {
+      repoUrl,
+      projectName: input.project.projectName ?? basename(projectRoot).trim(),
+    };
+  }
+
   return {
     repoUrl,
     projectName: input.project.projectName ?? basename(projectRoot).trim(),
+    githubAuth: {
+      token: token.token,
+      owner: repoRef.owner,
+      repo: repoRef.repo,
+    },
+  };
+}
+
+/**
+ * Probe bootstrap auth path before workspace ensure so UX can explain why bootstrap will fail or succeed.
+ */
+async function probeWorkspaceBootstrapAccess(input: {
+  readonly client: GatewayClient;
+  readonly request: WorkspaceEnsureRequest;
+}): Promise<WorkspaceBootstrapProbeResult | null> {
+  const bootstrap = input.request.bootstrap;
+  if (!bootstrap) {
+    return null;
+  }
+  const probe = await input.client.probeNodeGitAccess({
+    repoUrl: bootstrap.repoUrl,
+    ...(bootstrap.githubAuth ? { githubAuth: bootstrap.githubAuth } : {}),
+  });
+  if (probe.ok) {
+    return probe.data;
+  }
+  if (probe.status === 404 && probe.error.code === "not_found") {
+    return {
+      repoUrl: bootstrap.repoUrl,
+      ok: false,
+      authSource: "none",
+      error: "probe_unsupported",
+      unsupported: true,
+    };
+  }
+  return {
+    repoUrl: bootstrap.repoUrl,
+    ok: false,
+    authSource: "none",
+    error: `probe_failed (${probe.status}): ${probe.error.message}`,
   };
 }
 
@@ -1294,6 +1408,40 @@ type ResolveDispatchNodeWithRouteResult =
       readonly bootstrap: DispatchBootstrapResult | null;
     }
   | { readonly ok: false; readonly error: string };
+
+type DispatchWorkspaceBootstrapAuth = {
+  readonly probe?: WorkspaceBootstrapProbeResult;
+  readonly ensured?: GatewayNodeBootstrapAuthSource;
+};
+
+function formatWorkspaceEnsureError(input: {
+  readonly workspace: {
+    readonly status: number;
+    readonly error: { readonly message: string; readonly code?: string };
+  };
+  readonly workspaceRequest: WorkspaceEnsureRequest;
+  readonly bootstrapProbe: WorkspaceBootstrapProbeResult | null;
+}): string {
+  const base = `Workspace ensure failed (${input.workspace.status}): ${input.workspace.error.message}`;
+  const hasGithubBootstrap = Boolean(
+    input.workspaceRequest.bootstrap?.githubAuth
+  );
+  const isCloneFailure =
+    input.workspace.error.code === "bootstrap_clone_failed" ||
+    input.workspace.error.message.startsWith("bootstrap_clone_failed");
+  const isPublicKeyFailure = input.workspace.error.message.includes(
+    "Permission denied (publickey)"
+  );
+  if (
+    hasGithubBootstrap &&
+    isCloneFailure &&
+    input.bootstrapProbe?.unsupported === true &&
+    isPublicKeyFailure
+  ) {
+    return `${base}\nNode gateway does not support Git bootstrap probe/fallback endpoints yet (missing /v1/node/git/probe). Update hack on the remote node to match controller build, restart daemon, and retry.`;
+  }
+  return base;
+}
 
 type DispatchSyncMetadata = {
   readonly engine: "mutagen";
@@ -2602,6 +2750,7 @@ function buildSummaryMarkdown(input: {
   readonly prOutcome: DispatchPrOutcome | null;
   readonly route: DispatchRouteMetadata;
   readonly sync: DispatchSyncMetadata | null;
+  readonly bootstrapAuth: DispatchWorkspaceBootstrapAuth;
 }): string {
   let prLines: string[] = ["- status: not requested"];
   if (input.prOutcome?.ok) {
@@ -2670,6 +2819,21 @@ function buildSummaryMarkdown(input: {
             `- diagnostic_${entry.severity}: [${entry.code}] ${entry.message}`
         )
       : ["- diagnostics: none"]),
+    "",
+    "## Bootstrap auth",
+    ...(input.bootstrapAuth.probe
+      ? [
+          `- preflight_ok: ${input.bootstrapAuth.probe.ok ? "yes" : "no"}`,
+          `- preflight_source: ${input.bootstrapAuth.probe.authSource}`,
+          `- preflight_repo: ${input.bootstrapAuth.probe.repoUrl}`,
+          ...(input.bootstrapAuth.probe.error
+            ? [`- preflight_error: ${input.bootstrapAuth.probe.error}`]
+            : []),
+        ]
+      : ["- preflight: not requested"]),
+    ...(input.bootstrapAuth.ensured
+      ? [`- workspace_ensure_source: ${input.bootstrapAuth.ensured}`]
+      : ["- workspace_ensure_source: unknown_or_not_bootstrapped"]),
     "",
     "## Sync",
     ...(input.sync

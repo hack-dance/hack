@@ -606,7 +606,15 @@ public actor HackCLIClient {
 
   public func listNodes() async throws -> NodeRegistryListResponse {
     let result = try await run(["node", "list", "--json"], allowNonZeroExit: true)
-    return try decodeJsonOrThrow(NodeRegistryListResponse.self, result: result)
+    do {
+      return try decodeJsonOrThrow(NodeRegistryListResponse.self, result: result)
+    } catch {
+      let statusResult = try await run(["node", "status", "--json"], allowNonZeroExit: true)
+      let status = try decodeJsonOrThrow(NodeStatusResponse.self, result: statusResult)
+      let inferredNodes = deduplicateNodeRegistryRecords(status.nodes.map(\.input))
+      let inferredDefaultNodeId = inferredNodes.first(where: { $0.isDefault == true })?.id
+      return NodeRegistryListResponse(defaultNodeId: inferredDefaultNodeId, nodes: inferredNodes)
+    }
   }
 
   public func probeNodes(nodeId: String? = nil) async throws -> NodeStatusResponse {
@@ -1319,6 +1327,22 @@ public actor HackCLIClient {
       }
     }
     return nil
+  }
+
+  private func deduplicateNodeRegistryRecords(
+    _ records: [NodeRegistryRecord]
+  ) -> [NodeRegistryRecord] {
+    var seenIds = Set<String>()
+    var deduplicated: [NodeRegistryRecord] = []
+    deduplicated.reserveCapacity(records.count)
+    for record in records {
+      if seenIds.contains(record.id) {
+        continue
+      }
+      seenIds.insert(record.id)
+      deduplicated.append(record)
+    }
+    return deduplicated
   }
 
   private func normalized(_ value: String?) -> String? {

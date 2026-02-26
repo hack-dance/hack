@@ -87,7 +87,7 @@ test("workspace ensure bootstraps a missing project by cloning repo", async () =
   expect(body.workspace?.projectName).toBe("bootstrap-target");
   expect(body.workspace?.branch).toBe("main");
   expect(body.workspace?.projectRoot).toBe(bootstrapRoot);
-  expect(body.workspace?.projectDir).toBe(resolve(bootstrapRoot, ".hack"));
+  expect(body.workspace?.projectDir).toBe(resolve(bootstrapRoot, ".dev"));
 
   const map = await readNodeWorkspaceMap({ homeDir: tempDir });
   expect(map.entries).toHaveLength(1);
@@ -310,17 +310,8 @@ async function readNodeWorkspaceMap(opts: {
 async function createMinimalHackRepo(opts: {
   readonly root: string;
 }): Promise<void> {
-  await mkdir(join(opts.root, ".hack"), { recursive: true });
   await mkdir(join(opts.root, ".dev"), { recursive: true });
-  await writeFile(
-    join(opts.root, ".hack", "docker-compose.yml"),
-    "services: {}\n"
-  );
-  await writeFile(
-    join(opts.root, ".hack", "hack.config.json"),
-    '{ "name": "bootstrap-target" }\n'
-  );
-  // Keep a legacy .dev scaffold so bootstrap stays valid even if .hack is stripped by host git excludes.
+  // Use legacy .dev fixture layout because some CI git configs silently drop .hack paths.
   await writeFile(
     join(opts.root, ".dev", "docker-compose.yml"),
     "services: {}\n"
@@ -342,8 +333,6 @@ async function createMinimalHackRepo(opts: {
       "add.ignoreErrors=false",
       "add",
       "-f",
-      ".hack/docker-compose.yml",
-      ".hack/hack.config.json",
       ".dev/docker-compose.yml",
       ".dev/hack.config.json",
       "README.md",
@@ -363,12 +352,7 @@ async function createMinimalHackRepo(opts: {
   });
   await assertTrackedPaths({
     cwd: opts.root,
-    paths: [
-      ".hack/docker-compose.yml",
-      ".hack/hack.config.json",
-      ".dev/docker-compose.yml",
-      ".dev/hack.config.json",
-    ],
+    paths: [".dev/docker-compose.yml", ".dev/hack.config.json"],
   });
 }
 

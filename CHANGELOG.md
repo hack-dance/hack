@@ -1,3 +1,7 @@
+## 1.16.0 (2026-02-27)
+
+* feat(remote): auto-bootstrap node workspaces and harden daemon startup ([f66334b](https://github.com/hack-dance/hack/commit/f66334b))
+
 ## <small>1.15.3 (2026-02-27)</small>
 
 * fix(sync): install mutagen agents and stabilize node keychain access ([f856beb](https://github.com/hack-dance/hack/commit/f856beb))

@@ -1,3 +1,7 @@
+## <small>1.15.3 (2026-02-27)</small>
+
+* fix(sync): install mutagen agents and stabilize node keychain access ([f856beb](https://github.com/hack-dance/hack/commit/f856beb))
+
 ## <small>1.15.2 (2026-02-27)</small>
 
 * fix(dispatch): use keychain token for interactive workspace bootstrap ([49c5b91](https://github.com/hack-dance/hack/commit/49c5b91))

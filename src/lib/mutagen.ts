@@ -10,6 +10,7 @@ const DEFAULT_MUTAGEN_VERSION = "0.18.1";
 const MUTAGEN_RELEASE_BASE_URL =
   "https://github.com/mutagen-io/mutagen/releases/download";
 const SEMVER_PATTERN = /^\d+\.\d+\.\d+$/;
+const MUTAGEN_AGENT_BUNDLE_FILENAME = "mutagen-agents.tar.gz";
 
 type MutagenPlatform = "darwin" | "linux";
 type MutagenArch = "amd64" | "arm64";
@@ -70,15 +71,27 @@ export function resetMutagenPathCacheForTests(): void {
 }
 
 /**
+ * Resolve the managed Mutagen agent bundle path used for remote platform sync.
+ */
+export function getManagedMutagenAgentBundlePath(): string | null {
+  const home = process.env.HOME;
+  if (!home) {
+    return null;
+  }
+  return `${home}/.hack/libexec/${MUTAGEN_AGENT_BUNDLE_FILENAME}`;
+}
+
+/**
  * Ensure managed mutagen exists at ~/.hack/bin/mutagen.
  */
 export async function ensureBundledMutagenInstalled(): Promise<BundledMutagenInstallOutcome> {
   const installPath = getManagedMutagenInstallPath();
-  if (!installPath) {
+  const agentBundlePath = getManagedMutagenAgentBundlePath();
+  if (!(installPath && agentBundlePath)) {
     return { ok: false, reason: "home-not-set" };
   }
 
-  if (existsSync(installPath)) {
+  if (existsSync(installPath) && existsSync(agentBundlePath)) {
     mutagenPathCached = installPath;
     return { ok: true, installed: false, mutagenPath: installPath };
   }
@@ -106,6 +119,7 @@ export async function ensureBundledMutagenInstalled(): Promise<BundledMutagenIns
 
   try {
     await ensureDir(dirname(installPath));
+    await ensureDir(dirname(agentBundlePath));
     if (!localTarballPath) {
       const downloaded = await downloadMutagenTarball({
         url: artifact.downloadUrl,
@@ -120,6 +134,17 @@ export async function ensureBundledMutagenInstalled(): Promise<BundledMutagenIns
       [tar, "-xzf", tarballPath, "-C", dirname(installPath), "mutagen"],
       { stdin: "ignore" }
     );
+    await execOrThrow(
+      [
+        tar,
+        "-xzf",
+        tarballPath,
+        "-C",
+        dirname(agentBundlePath),
+        MUTAGEN_AGENT_BUNDLE_FILENAME,
+      ],
+      { stdin: "ignore" }
+    );
     await execOrThrow(["chmod", "+x", installPath], { stdin: "ignore" });
     mutagenPathCached = installPath;
     return { ok: true, installed: true, mutagenPath: installPath };
@@ -131,7 +156,7 @@ export async function ensureBundledMutagenInstalled(): Promise<BundledMutagenIns
   }
 }
 
-function getManagedMutagenInstallPath(): string | null {
+export function getManagedMutagenInstallPath(): string | null {
   const home = process.env.HOME;
   if (!home) {
     return null;

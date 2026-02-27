@@ -41,6 +41,8 @@ import {
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import {
   ensureBundledMutagenInstalled,
+  getManagedMutagenAgentBundlePath,
+  getManagedMutagenInstallPath,
   getMutagenPath,
 } from "../lib/mutagen.ts";
 import { isMac } from "../lib/os.ts";
@@ -500,6 +502,21 @@ async function checkMutagenBinary(): Promise<CheckResult> {
       name: "mutagen",
       status: "warn",
       message: "Not found (run: hack doctor --fix)",
+    };
+  }
+
+  const managedMutagenPath = getManagedMutagenInstallPath();
+  const managedAgentBundlePath = getManagedMutagenAgentBundlePath();
+  if (
+    managedMutagenPath &&
+    managedAgentBundlePath &&
+    mutagen === managedMutagenPath &&
+    !(await pathExists(managedAgentBundlePath))
+  ) {
+    return {
+      name: "mutagen",
+      status: "warn",
+      message: "Managed mutagen agent bundle missing (run: hack doctor --fix)",
     };
   }
 

@@ -10,12 +10,14 @@ import {
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { ensureDir, readTextFile } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
-import { resolveSecretStore } from "./secret-store.ts";
+import { resolveSecretStore, type SecretStore } from "./secret-store.ts";
+import { exec } from "./shell.ts";
 
 const NODES_REGISTRY_VERSION = 1 as const;
 const DEFAULT_STALE_AFTER_MS = 30_000;
 const DEFAULT_OFFLINE_AFTER_MS = 120_000;
 const NODE_SECRET_STORE_PROJECT_NAME = "node-registry";
+const NODE_KEYCHAIN_SERVICE = "hack-node-registry";
 const REGISTRY_LOCK_FILENAME = `${GLOBAL_NODES_REGISTRY_FILENAME}.lock`;
 const REGISTRY_LOCK_TIMEOUT_MS = 2000;
 const REGISTRY_LOCK_STALE_MS = 30_000;
@@ -470,9 +472,122 @@ async function resolveAllowedEnvAuthRef(
 }
 
 async function resolveNodeAuthSecretStore() {
+  const securityStore = resolveMacOsNodeAuthSecretStore();
+  if (securityStore) {
+    return securityStore;
+  }
   return await resolveSecretStore({
     projectName: NODE_SECRET_STORE_PROJECT_NAME,
   });
+}
+
+function resolveMacOsNodeAuthSecretStore(): SecretStore | null {
+  if (!(process.platform === "darwin" && Bun.which("security"))) {
+    return null;
+  }
+  return {
+    descriptor: {
+      backend: "keychain",
+      location: NODE_KEYCHAIN_SERVICE,
+      mode: "native",
+    },
+    get: async ({ key }) => {
+      const found = await exec(
+        [
+          "security",
+          "find-generic-password",
+          "-s",
+          NODE_KEYCHAIN_SERVICE,
+          "-a",
+          key,
+          "-w",
+        ],
+        { stdin: "ignore" }
+      );
+      if (found.exitCode === 0) {
+        const token = found.stdout.trim();
+        return token.length > 0 ? token : null;
+      }
+      const errorText = `${found.stderr}\n${found.stdout}`.toLowerCase();
+      if (
+        errorText.includes("could not be found") ||
+        errorText.includes("item could not be found")
+      ) {
+        return null;
+      }
+      throw new Error(
+        normalizeSecurityErrorMessage({
+          action: "read",
+          detail: found.stderr || found.stdout,
+        })
+      );
+    },
+    set: async ({ key, value }) => {
+      const saved = await exec(
+        [
+          "security",
+          "add-generic-password",
+          "-U",
+          "-s",
+          NODE_KEYCHAIN_SERVICE,
+          "-a",
+          key,
+          "-w",
+          value,
+        ],
+        { stdin: "ignore" }
+      );
+      if (saved.exitCode === 0) {
+        return;
+      }
+      throw new Error(
+        normalizeSecurityErrorMessage({
+          action: "write",
+          detail: saved.stderr || saved.stdout,
+        })
+      );
+    },
+    delete: async ({ key }) => {
+      const deleted = await exec(
+        [
+          "security",
+          "delete-generic-password",
+          "-s",
+          NODE_KEYCHAIN_SERVICE,
+          "-a",
+          key,
+        ],
+        { stdin: "ignore" }
+      );
+      if (deleted.exitCode === 0) {
+        return true;
+      }
+      const errorText = `${deleted.stderr}\n${deleted.stdout}`.toLowerCase();
+      if (
+        errorText.includes("could not be found") ||
+        errorText.includes("item could not be found")
+      ) {
+        return false;
+      }
+      throw new Error(
+        normalizeSecurityErrorMessage({
+          action: "delete",
+          detail: deleted.stderr || deleted.stdout,
+        })
+      );
+    },
+  };
+}
+
+function normalizeSecurityErrorMessage(input: {
+  readonly action: "read" | "write" | "delete";
+  readonly detail: string;
+}): string {
+  const detail = input.detail.trim();
+  if (detail.length > 0) {
+    return `Node auth keychain ${input.action} failed: ${detail}`;
+  }
+  return `Node auth keychain ${input.action} failed.`;
 }
 
 async function withRegistryLock<T>(fn: () => Promise<T>): Promise<T> {

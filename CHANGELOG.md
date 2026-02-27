@@ -1,3 +1,7 @@
+## <small>1.15.1 (2026-02-27)</small>
+
+* fix(ci): retry release asset uploads on transient network failures ([9a9eada](https://github.com/hack-dance/hack/commit/9a9eada))
+
 ## 1.15.0 (2026-02-27)
 
 * feat(node): auto-bootstrap ssh during pair and add ssh setup command ([f3c6698](https://github.com/hack-dance/hack/commit/f3c6698))

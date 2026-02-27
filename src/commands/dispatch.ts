@@ -1088,7 +1088,7 @@ async function resolveWorkspaceBootstrap(input: {
 
   const token = await resolveGitHubAppToken({
     controlPlaneConfig: input.controlPlaneConfig,
-    preferEnvTokenOnly: true,
+    preferEnvTokenOnly: shouldPreferEnvTokenOnlyForBootstrap(),
   });
   if (!token.ok) {
     return {
@@ -1106,6 +1106,14 @@ async function resolveWorkspaceBootstrap(input: {
       repo: repoRef.repo,
     },
   };
+}
+
+/**
+ * Uses env-only token lookup for unattended invocations to avoid interactive
+ * keychain prompts; interactive terminals can leverage keychain-backed tokens.
+ */
+function shouldPreferEnvTokenOnlyForBootstrap(): boolean {
+  return !(process.stdin.isTTY && process.stdout.isTTY);
 }
 
 /**

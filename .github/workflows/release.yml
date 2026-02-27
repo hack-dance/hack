@@ -85,21 +85,60 @@ jobs:
         if: ${{ matrix.skip_tests }}
         run: bun run build:release --version="${{ needs.create-release.outputs.version }}" --skip-tests
       - name: Upload tarball
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: "${{ needs.create-release.outputs.tag }}"
-          fail_on_unmatched_files: true
-          files: |
-            dist/release/hack-${{ needs.create-release.outputs.version }}-*.tar.gz
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.create-release.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.create-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(dist/release/hack-"${RELEASE_VERSION}"-*.tar.gz)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No tarballs matched dist/release/hack-${RELEASE_VERSION}-*.tar.gz"
+            exit 1
+          fi
+          for file in "${files[@]}"; do
+            for attempt in 1 2 3; do
+              if gh release upload "${RELEASE_TAG}" "${file}" --clobber; then
+                echo "Uploaded ${file}"
+                break
+              fi
+              if [ "${attempt}" -eq 3 ]; then
+                echo "Failed uploading ${file} after ${attempt} attempts"
+                exit 1
+              fi
+              sleep $((attempt * 5))
+            done
+          done
       - name: Upload install scripts
         if: ${{ matrix.upload_install }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: "${{ needs.create-release.outputs.tag }}"
-          fail_on_unmatched_files: true
-          files: |
-            dist/release/hack-${{ needs.create-release.outputs.version }}-install.sh
-            dist/release/hack-install.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.create-release.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.create-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          files=(
+            "dist/release/hack-${RELEASE_VERSION}-install.sh"
+            "dist/release/hack-install.sh"
+          )
+          for file in "${files[@]}"; do
+            if [ ! -f "${file}" ]; then
+              echo "Missing expected install script: ${file}"
+              exit 1
+            fi
+            for attempt in 1 2 3; do
+              if gh release upload "${RELEASE_TAG}" "${file}" --clobber; then
+                echo "Uploaded ${file}"
+                break
+              fi
+              if [ "${attempt}" -eq 3 ]; then
+                echo "Failed uploading ${file} after ${attempt} attempts"
+                exit 1
+              fi
+              sleep $((attempt * 5))
+            done
+          done
 
   macos-app:
     needs: [create-release, build]

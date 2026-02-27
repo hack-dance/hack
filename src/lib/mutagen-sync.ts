@@ -149,6 +149,7 @@ export async function ensureMutagenLocalToRemoteSync(input: {
       error: formatMutagenFailure({
         action: "Mutagen sync create failed",
         result: create,
+        ...(source ? { source } : {}),
       }),
     };
   }
@@ -470,12 +471,83 @@ function isMutagenSessionAlreadyExists(input: {
 function formatMutagenFailure(input: {
   readonly action: string;
   readonly result: ExecResult;
+  readonly source?: ParsedSshSource;
 }): string {
   const detail = input.result.stderr.trim() || input.result.stdout.trim();
+  const authHint = deriveMutagenSshAuthHint({
+    detail,
+    ...(input.source ? { source: input.source } : {}),
+  });
+  if (authHint) {
+    return `${input.action}: ${authHint}`;
+  }
   if (detail.length > 0) {
     return `${input.action}: ${detail}`;
   }
   return `${input.action} (exit ${input.result.exitCode}).`;
+}
+
+function deriveMutagenSshAuthHint(input: {
+  readonly detail: string;
+  readonly source?: ParsedSshSource;
+}): string | null {
+  const detail = input.detail.trim();
+  if (!detail) {
+    return null;
+  }
+  const normalized = detail.toLowerCase();
+  const includesPromptFailure =
+    normalized.includes("prompter not found") ||
+    normalized.includes("unable to invoke prompt") ||
+    normalized.includes("context canceled");
+  const includesAuthFailure =
+    normalized.includes("permission denied") ||
+    normalized.includes("too many authentication failures") ||
+    normalized.includes("host key verification failed") ||
+    normalized.includes("connection closed by");
+  if (!(includesPromptFailure || includesAuthFailure)) {
+    return null;
+  }
+
+  const source = formatSshSourceForDisplay({ source: input.source });
+  const verifyCommand = input.source
+    ? formatBatchModeSshCheckCommand({ source: input.source })
+    : "ssh -o BatchMode=yes <user@host> true";
+  return [
+    `SSH authentication to ${source} is not working in non-interactive mode.`,
+    `Configure key-based SSH (no password prompt), then verify with: ${verifyCommand}.`,
+    "If your SSH agent offers many keys, set `IdentitiesOnly yes` for this host in `~/.ssh/config`.",
+    `Raw SSH error: ${collapseWhitespace({ value: detail })}`,
+  ].join(" ");
+}
+
+function collapseWhitespace(input: { readonly value: string }): string {
+  return input.value.replace(/\s+/g, " ").trim();
+}
+
+function formatSshSourceForDisplay(input: {
+  readonly source?: ParsedSshSource;
+}): string {
+  if (!input.source) {
+    return "<user@host>";
+  }
+  const user = input.source.user ? `${input.source.user}@` : "";
+  const port = input.source.port ? `:${input.source.port}` : "";
+  return `${user}${input.source.host}${port}`;
+}
+
+function formatBatchModeSshCheckCommand(input: {
+  readonly source: ParsedSshSource;
+}): string {
+  const args = ["ssh", "-o", "BatchMode=yes"];
+  if (input.source.port) {
+    args.push("-p", String(input.source.port));
+  }
+  const target = input.source.user
+    ? `${input.source.user}@${input.source.host}`
+    : input.source.host;
+  args.push(target, "true");
+  return args.join(" ");
 }
 
 export const __testOnlyMutagenSync = {

@@ -1,6 +1,13 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { hostname, tmpdir } from "node:os";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { homedir, hostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { confirm, isCancel, text } from "@clack/prompts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
@@ -66,6 +73,10 @@ const NODE_AUTH_LOOKUP_TTL_MS = 60_000;
 const NODE_STATUS_HTTP_TIMEOUT_MS = 8000;
 const NODE_PREFLIGHT_HTTP_TIMEOUT_MS = 3000;
 const TAILSCALE_AUTH_KEY_ENV = "HACK_TAILSCALE_AUTH_KEY";
+const DEFAULT_NODE_PAIR_SSH_KEY_NAME = "hack-node-pair-ed25519";
+const SSH_CONFIG_MARKER_PREFIX = "# >>> hack-node-pair ";
+const SSH_CONFIG_MARKER_SUFFIX = "# <<< hack-node-pair ";
+const PORT_DIGITS_PATTERN = /^\d+$/;
 
 type NodeAuthLookupCacheEntry = {
   readonly token: string | null;
@@ -551,6 +562,24 @@ const pairFulfillSpec = defineCommand({
   subcommands: [],
 } as const);
 
+const sshSpec = defineCommand({
+  name: "ssh",
+  summary: "Manage SSH bootstrap for node pairing and remote runs",
+  group: "Extensions",
+  options: [],
+  positionals: [],
+  subcommands: [],
+} as const);
+
+const sshSetupSpec = defineCommand({
+  name: "setup",
+  summary: "Install and verify passwordless SSH access for a node source",
+  group: "Extensions",
+  options: [optSource, optNode, optSshPort, optJson],
+  positionals: [],
+  subcommands: [],
+} as const);
+
 const listSpec = defineCommand({
   name: "list",
   summary: "List registered nodes",
@@ -764,6 +793,10 @@ type PairFulfillArgs = CommandArgs<
   typeof pairFulfillSpec.options,
   typeof pairFulfillSpec.positionals
 >;
+type SshSetupArgs = CommandArgs<
+  typeof sshSetupSpec.options,
+  typeof sshSetupSpec.positionals
+>;
 type ListArgs = CommandArgs<
   typeof listSpec.options,
   typeof listSpec.positionals
@@ -851,6 +884,23 @@ export const nodeCommand = withHandler(
           ],
         } as const),
         handleNodePair
+      ),
+      withHandler(
+        defineCommand({
+          ...sshSpec,
+          subcommands: [withHandler(sshSetupSpec, handleNodeSshSetup)],
+        } as const),
+        async () => {
+          await display.panel({
+            title: "Node SSH commands",
+            tone: "info",
+            lines: [
+              "hack node ssh setup --source <user@host> [--ssh-port <port>]",
+              "hack node ssh setup --node <id>",
+            ],
+          });
+          return 0;
+        }
       ),
       withHandler(addSpec, handleNodeAdd),
       withHandler(listSpec, handleNodeList),
@@ -958,6 +1008,7 @@ export const nodeCommand = withHandler(
         "hack node pair walkthrough [--source <user@host>] [--endpoint <url>] [--default]",
         "hack node pair list [--status pending|consumed|cancelled|expired|all]",
         "hack node pair fulfill --session <id> --code <code> [--default]",
+        "hack node ssh setup --source <user@host> [--ssh-port <port>]",
         "hack node add --bundle <file|->",
         "hack node list",
         "hack node status [--node <id>] [--watch]",
@@ -1134,9 +1185,27 @@ async function handleNodePair({
   }
   const source = target.source;
   const endpoint = target.endpoint;
+  const sshSource = resolveSshSourceTarget({
+    source,
+    sshPort: args.options.sshPort,
+  });
+  if (!sshSource.ok) {
+    logger.error({ message: sshSource.error });
+    return 1;
+  }
   const remoteHack = normalizeRemoteHackOverride({
     value: args.options.remoteHack,
   });
+
+  const sshReady = await ensureNodePairSshReady({
+    source,
+    sshPort: sshSource.port,
+    interactive: isTty(),
+  });
+  if (!sshReady.ok) {
+    logger.error({ message: sshReady.error });
+    return 1;
+  }
 
   const pairingName = derivePairingName({
     explicitName: args.options.name,
@@ -1148,7 +1217,7 @@ async function handleNodePair({
     endpoint,
     name: pairingName,
     labels,
-    sshPort: args.options.sshPort,
+    sshPort: sshSource.port,
     remoteHack,
   });
   if (!remoteInit.ok) {
@@ -1213,6 +1282,73 @@ async function handleNodePair({
       message: `Node paired but probe failed: ${registered.probe.error}`,
     });
   }
+  return 0;
+}
+
+async function handleNodeSshSetup({
+  args,
+}: {
+  readonly ctx: CliContext;
+  readonly args: SshSetupArgs;
+}): Promise<number> {
+  const sourceResolved = await resolveNodeSshSetupSource({
+    source: args.options.source,
+    nodeId: args.options.node,
+  });
+  if (!sourceResolved.ok) {
+    logger.error({ message: sourceResolved.error });
+    return 1;
+  }
+  const sshSource = resolveSshSourceTarget({
+    source: sourceResolved.source,
+    sshPort: args.options.sshPort,
+  });
+  if (!sshSource.ok) {
+    logger.error({ message: sshSource.error });
+    return 1;
+  }
+
+  const ready = await ensureNodePairSshReady({
+    source: sourceResolved.source,
+    sshPort: sshSource.port,
+    interactive: isTty(),
+  });
+  if (!ready.ok) {
+    logger.error({ message: ready.error });
+    return 1;
+  }
+
+  if (args.options.json) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          source: sourceResolved.source,
+          sshTarget: sshSource.target,
+          host: sshSource.host,
+          user: sshSource.user ?? null,
+          port: sshSource.port ?? null,
+          keyPath: ready.keyPath,
+          configPath: ready.configPath,
+          configured: ready.configured,
+        },
+        null,
+        2
+      )}\n`
+    );
+    return 0;
+  }
+
+  await display.kv({
+    title: "SSH setup complete",
+    entries: [
+      ["source", sourceResolved.source],
+      ["ssh_target", sshSource.target],
+      ["port", String(sshSource.port ?? 22)],
+      ["key_path", ready.keyPath],
+      ["ssh_config", ready.configPath],
+      ["configured", ready.configured ? "yes" : "already ready"],
+    ],
+  });
   return 0;
 }
 
@@ -1657,6 +1793,14 @@ async function handleNodePairFulfill({
     source: session.source,
   });
   const labels: string[] = [];
+  const sshSource = resolveSshSourceTarget({
+    source: session.source,
+    sshPort: args.options.sshPort,
+  });
+  if (!sshSource.ok) {
+    logger.error({ message: sshSource.error });
+    return 1;
+  }
   const commandSet = buildPairingCommandSet({
     source: session.source,
     endpoint: session.endpoint,
@@ -1665,7 +1809,18 @@ async function handleNodePairFulfill({
     defaultNode: args.options.defaultNode === true,
     sessionId,
     code,
+    sshPort: sshSource.port,
   });
+
+  const sshReady = await ensureNodePairSshReady({
+    source: session.source,
+    sshPort: sshSource.port,
+    interactive: isTty(),
+  });
+  if (!sshReady.ok) {
+    logger.error({ message: sshReady.error });
+    return 1;
+  }
 
   const approved = await runRemotePairApprove({
     source: session.source,
@@ -1674,7 +1829,7 @@ async function handleNodePairFulfill({
     labels,
     sessionId,
     code,
-    sshPort: args.options.sshPort,
+    sshPort: sshSource.port,
     remoteHack,
   });
   if (!approved.ok) {
@@ -1765,6 +1920,14 @@ async function handleNodePairWalkthrough({
     logger.error({ message: `Endpoint preflight failed: ${preflight.error}` });
     return 1;
   }
+  const sshSource = resolveSshSourceTarget({
+    source: input.source,
+    sshPort: input.sshPort,
+  });
+  if (!sshSource.ok) {
+    logger.error({ message: sshSource.error });
+    return 1;
+  }
 
   const created = await createNodePairingSession({
     source: input.source,
@@ -1779,6 +1942,7 @@ async function handleNodePairWalkthrough({
     defaultNode: input.defaultNode,
     sessionId: created.session.id,
     code: created.code,
+    sshPort: sshSource.port,
   });
 
   if (args.options.json) {
@@ -1839,6 +2003,16 @@ async function handleNodePairWalkthrough({
     return 0;
   }
 
+  const sshReady = await ensureNodePairSshReady({
+    source: input.source,
+    sshPort: sshSource.port,
+    interactive: isTty(),
+  });
+  if (!sshReady.ok) {
+    logger.error({ message: sshReady.error });
+    return 1;
+  }
+
   const approved = await runRemotePairApprove({
     source: input.source,
     endpoint: input.endpoint,
@@ -1846,7 +2020,7 @@ async function handleNodePairWalkthrough({
     labels: input.labels,
     sessionId: created.session.id,
     code: created.code,
-    sshPort: input.sshPort,
+    sshPort: sshSource.port,
     remoteHack: input.remoteHack,
   });
   if (!approved.ok) {
@@ -4576,9 +4750,16 @@ export const __testOnlyNodeWorkspace = {
 export const __testOnlyNodePair = {
   derivePairingName,
   extractSshHost,
+  parseSshSource,
+  sanitizePort,
+  resolveSshSourceTarget,
   buildAutoEndpointCandidates,
   normalizeHostHint,
   normalizeRemoteHackOverride,
+  buildSshCommandArgs,
+  buildAuthorizedKeysInstallCommand,
+  renderNodePairSshConfigBlock,
+  upsertManagedSshConfigBlock,
   parseEnrollmentBundleFromRemoteOutput,
   renderShellCommand,
   renderRemoteHackCommand,
@@ -5029,6 +5210,383 @@ async function fetchWithTimeout(input: {
   }
 }
 
+type ResolvedSshSourceTarget =
+  | {
+      readonly ok: true;
+      readonly rawSource: string;
+      readonly target: string;
+      readonly host: string;
+      readonly user: string | undefined;
+      readonly port: number | undefined;
+    }
+  | { readonly ok: false; readonly error: string };
+
+type NodePairSshReadyResult =
+  | {
+      readonly ok: true;
+      readonly configured: boolean;
+      readonly keyPath: string;
+      readonly configPath: string;
+    }
+  | { readonly ok: false; readonly error: string };
+
+type NodeSshSetupSourceResult =
+  | { readonly ok: true; readonly source: string }
+  | { readonly ok: false; readonly error: string };
+
+async function resolveNodeSshSetupSource(input: {
+  readonly source: string | undefined;
+  readonly nodeId: string | undefined;
+}): Promise<NodeSshSetupSourceResult> {
+  const explicitSource = (input.source ?? "").trim();
+  const nodeId = (input.nodeId ?? "").trim();
+  if (explicitSource && nodeId) {
+    return {
+      ok: false,
+      error: "Use either --source or --node, not both.",
+    };
+  }
+  if (explicitSource) {
+    return { ok: true, source: explicitSource };
+  }
+  if (!nodeId) {
+    return {
+      ok: false,
+      error: "Missing --source <user@host> (or pass --node <id>).",
+    };
+  }
+  const registry = await readNodesRegistry();
+  const node = registry.nodes.find((candidate) => candidate.id === nodeId);
+  if (!node) {
+    return { ok: false, error: `Unknown node id: ${nodeId}` };
+  }
+  const source = (node.source ?? "").trim();
+  if (!source) {
+    return {
+      ok: false,
+      error:
+        "Selected node is missing SSH source metadata. Re-pair with `hack node pair --source <user@host> ...`.",
+    };
+  }
+  return { ok: true, source };
+}
+
+function resolveSshSourceTarget(input: {
+  readonly source: string;
+  readonly sshPort: number | undefined;
+}): ResolvedSshSourceTarget {
+  const parsed = parseSshSource(input.source);
+  if (!parsed) {
+    return {
+      ok: false,
+      error: `Invalid SSH source "${input.source}". Expected <user@host> or <user@host:port>.`,
+    };
+  }
+  const port = sanitizePort(input.sshPort) ?? parsed.port;
+  return {
+    ok: true,
+    rawSource: input.source.trim(),
+    target: parsed.target,
+    host: parsed.host,
+    user: parsed.user,
+    port,
+  };
+}
+
+async function ensureNodePairSshReady(input: {
+  readonly source: string;
+  readonly sshPort: number | undefined;
+  readonly interactive: boolean;
+}): Promise<NodePairSshReadyResult> {
+  const source = resolveSshSourceTarget({
+    source: input.source,
+    sshPort: input.sshPort,
+  });
+  if (!source.ok) {
+    return source;
+  }
+  const keyPath = join(homedir(), ".ssh", DEFAULT_NODE_PAIR_SSH_KEY_NAME);
+  const keyPair = await ensureNodePairSshKey({ keyPath });
+  if (!keyPair.ok) {
+    return keyPair;
+  }
+  const configPath = join(homedir(), ".ssh", "config");
+  const configWrite = await upsertNodePairSshConfig({
+    host: source.host,
+    user: source.user,
+    port: source.port,
+    keyPath,
+    configPath,
+  });
+  if (!configWrite.ok) {
+    return configWrite;
+  }
+
+  const directReady = await verifyBatchModeSsh({
+    target: source.target,
+    port: source.port,
+    identityFile: keyPath,
+  });
+  if (directReady.ok) {
+    return {
+      ok: true,
+      configured: configWrite.changed,
+      keyPath,
+      configPath,
+    };
+  }
+  if (!input.interactive) {
+    return {
+      ok: false,
+      error: [
+        `Passwordless SSH is not ready for ${source.rawSource}.`,
+        directReady.error,
+        "Run `hack node ssh setup --source <user@host>` from an interactive shell to bootstrap access.",
+      ].join(" "),
+    };
+  }
+
+  const authorized = await installNodePairPublicKey({
+    target: source.target,
+    port: source.port,
+    identityFile: keyPath,
+    publicKey: keyPair.publicKey,
+  });
+  if (!authorized.ok) {
+    return authorized;
+  }
+
+  const ready = await verifyBatchModeSsh({
+    target: source.target,
+    port: source.port,
+    identityFile: keyPath,
+  });
+  if (!ready.ok) {
+    return {
+      ok: false,
+      error: [
+        `SSH bootstrap completed but non-interactive auth still failed for ${source.rawSource}.`,
+        ready.error,
+        "Check ~/.ssh/config host precedence and run `ssh -o BatchMode=yes <user@host> true`.",
+      ].join(" "),
+    };
+  }
+
+  return {
+    ok: true,
+    configured: true,
+    keyPath,
+    configPath,
+  };
+}
+
+async function ensureNodePairSshKey(input: {
+  readonly keyPath: string;
+}): Promise<
+  | { readonly ok: true; readonly publicKey: string }
+  | { readonly ok: false; readonly error: string }
+> {
+  const keyPath = input.keyPath;
+  const publicKeyPath = `${keyPath}.pub`;
+  const sshDir = join(homedir(), ".ssh");
+  try {
+    await mkdir(sshDir, { recursive: true });
+    await chmod(sshDir, 0o700);
+  } catch {
+    // Ignore chmod portability issues and continue.
+  }
+
+  const hasPrivate = await pathExists(keyPath);
+  const hasPublic = await pathExists(publicKeyPath);
+  if (!(hasPrivate && hasPublic)) {
+    const result = await exec(
+      [
+        "ssh-keygen",
+        "-t",
+        "ed25519",
+        "-f",
+        keyPath,
+        "-N",
+        "",
+        "-C",
+        `hack-node-pair@${hostname()}`,
+      ],
+      { stdin: "ignore" }
+    );
+    if (result.exitCode !== 0) {
+      const stderr = result.stderr.trim();
+      return {
+        ok: false,
+        error:
+          stderr.length > 0
+            ? `Failed to generate SSH key (${keyPath}): ${stderr}`
+            : `Failed to generate SSH key (${keyPath}).`,
+      };
+    }
+  }
+
+  try {
+    await chmod(keyPath, 0o600);
+    await chmod(publicKeyPath, 0o644);
+  } catch {
+    // Ignore chmod portability issues and continue.
+  }
+
+  try {
+    const publicKey = (await readFile(publicKeyPath, "utf8")).trim();
+    if (!publicKey.length) {
+      return {
+        ok: false,
+        error: `SSH public key is empty: ${publicKeyPath}`,
+      };
+    }
+    return { ok: true, publicKey };
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error ? error.message : "failed to read public key";
+    return {
+      ok: false,
+      error: `Failed to read SSH public key (${publicKeyPath}): ${message}`,
+    };
+  }
+}
+
+async function installNodePairPublicKey(input: {
+  readonly target: string;
+  readonly port: number | undefined;
+  readonly identityFile: string;
+  readonly publicKey: string;
+}): Promise<
+  { readonly ok: true } | { readonly ok: false; readonly error: string }
+> {
+  const remoteCommand = buildAuthorizedKeysInstallCommand({
+    publicKey: input.publicKey,
+  });
+  const result = await exec(
+    buildSshCommandArgs({
+      target: input.target,
+      port: input.port,
+      command: remoteCommand,
+      batchMode: false,
+      identityFile: input.identityFile,
+      identitiesOnly: true,
+    }),
+    { stdin: "inherit" }
+  );
+  if (result.exitCode !== 0) {
+    const stderr = result.stderr.trim();
+    return {
+      ok: false,
+      error:
+        stderr.length > 0
+          ? `SSH key install failed: ${stderr}`
+          : "SSH key install failed.",
+    };
+  }
+  return { ok: true };
+}
+
+function buildAuthorizedKeysInstallCommand(input: {
+  readonly publicKey: string;
+}): string {
+  const key = shellQuote(input.publicKey);
+  return [
+    "umask 077",
+    "mkdir -p ~/.ssh",
+    "touch ~/.ssh/authorized_keys",
+    "chmod 600 ~/.ssh/authorized_keys",
+    `grep -qxF ${key} ~/.ssh/authorized_keys || printf '%s\\n' ${key} >> ~/.ssh/authorized_keys`,
+  ].join("; ");
+}
+
+async function upsertNodePairSshConfig(input: {
+  readonly host: string;
+  readonly user: string | undefined;
+  readonly port: number | undefined;
+  readonly keyPath: string;
+  readonly configPath: string;
+}): Promise<
+  | { readonly ok: true; readonly changed: boolean }
+  | { readonly ok: false; readonly error: string }
+> {
+  const id = sanitizeSshConfigId({
+    host: input.host,
+    port: input.port,
+  });
+  const block = renderNodePairSshConfigBlock({
+    id,
+    host: input.host,
+    user: input.user,
+    port: input.port,
+    keyPath: input.keyPath,
+  });
+  const configDir = join(homedir(), ".ssh");
+  try {
+    await mkdir(configDir, { recursive: true });
+  } catch {
+    // Continue and let write fail with explicit error if needed.
+  }
+
+  let existing = "";
+  try {
+    if (await pathExists(input.configPath)) {
+      existing = await readFile(input.configPath, "utf8");
+    }
+  } catch {
+    existing = "";
+  }
+
+  const next = upsertManagedSshConfigBlock({
+    existing,
+    id,
+    block,
+  });
+  try {
+    const changed = next !== existing;
+    if (changed) {
+      await writeFile(input.configPath, next, "utf8");
+    }
+    await chmod(input.configPath, 0o600);
+    return { ok: true, changed };
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error ? error.message : "failed to write ~/.ssh/config";
+    return {
+      ok: false,
+      error: `Failed to update SSH config (${input.configPath}): ${message}`,
+    };
+  }
+}
+
+async function verifyBatchModeSsh(input: {
+  readonly target: string;
+  readonly port: number | undefined;
+  readonly identityFile: string;
+}): Promise<
+  { readonly ok: true } | { readonly ok: false; readonly error: string }
+> {
+  const result = await exec(
+    buildSshCommandArgs({
+      target: input.target,
+      port: input.port,
+      command: "true",
+      batchMode: true,
+      identityFile: input.identityFile,
+      identitiesOnly: true,
+      connectTimeoutSeconds: 8,
+    }),
+    { stdin: "ignore" }
+  );
+  if (result.exitCode !== 0) {
+    const stderr = result.stderr.trim();
+    return {
+      ok: false,
+      error: stderr.length > 0 ? stderr : "non-interactive SSH check failed",
+    };
+  }
+  return { ok: true };
+}
+
 type PairTargetResolution =
   | { readonly ok: true; readonly source: string; readonly endpoint: string }
   | { readonly ok: false; readonly error: string };
@@ -5128,29 +5686,176 @@ function normalizeHostHint(value: string | undefined): string {
   return extractSshHost(raw);
 }
 
-function extractSshHost(source: string): string {
+function parseSshSource(source: string):
+  | {
+      readonly user: string | undefined;
+      readonly host: string;
+      readonly port: number | undefined;
+      readonly target: string;
+    }
+  | undefined {
   const trimmed = source.trim();
   if (!trimmed) {
-    return "";
+    return undefined;
   }
-  const value = trimmed.includes("@")
-    ? trimmed.slice(trimmed.indexOf("@") + 1)
-    : trimmed;
-  if (!value) {
-    return "";
+  const split = splitSshSourceUser(trimmed);
+  const hostPort = parseSshSourceHostPort(split.hostPort);
+  if (!hostPort) {
+    return undefined;
   }
-  if (value.startsWith("[") && value.includes("]")) {
-    const closing = value.indexOf("]");
-    if (closing > 1) {
-      return value.slice(1, closing);
-    }
+  const host = hostPort.host.trim().replace(TRAILING_DOT_PATTERN, "");
+  if (!host) {
+    return undefined;
   }
+  const target = split.user ? `${split.user}@${host}` : host;
+  return { user: split.user, host, port: hostPort.port, target };
+}
+
+function splitSshSourceUser(source: string): {
+  readonly user: string | undefined;
+  readonly hostPort: string;
+} {
+  const atIndex = source.lastIndexOf("@");
+  if (atIndex <= 0) {
+    return { user: undefined, hostPort: source };
+  }
+  const user = source.slice(0, atIndex).trim() || undefined;
+  const hostPort = source.slice(atIndex + 1).trim();
+  return { user, hostPort };
+}
+
+function parseSshSourceHostPort(
+  value: string
+): { readonly host: string; readonly port: number | undefined } | undefined {
+  const hostPort = value.trim();
+  if (!hostPort) {
+    return undefined;
+  }
+  if (hostPort.startsWith("[") && hostPort.includes("]")) {
+    return parseBracketedSshHostPort(hostPort);
+  }
+  return parseUnbracketedSshHostPort(hostPort);
+}
+
+function parseBracketedSshHostPort(value: string): {
+  readonly host: string;
+  readonly port: number | undefined;
+} {
+  const closing = value.indexOf("]");
+  if (closing <= 1) {
+    return { host: value, port: undefined };
+  }
+  const host = value.slice(1, closing);
+  const rest = value.slice(closing + 1);
+  const port = rest.startsWith(":") ? sanitizePort(rest.slice(1)) : undefined;
+  return { host, port };
+}
+
+function parseUnbracketedSshHostPort(value: string): {
+  readonly host: string;
+  readonly port: number | undefined;
+} {
   const firstColon = value.indexOf(":");
   const lastColon = value.lastIndexOf(":");
   if (firstColon > 0 && firstColon === lastColon) {
-    return value.slice(0, lastColon);
+    const maybePort = sanitizePort(value.slice(lastColon + 1));
+    if (typeof maybePort === "number") {
+      return { host: value.slice(0, lastColon), port: maybePort };
+    }
   }
-  return value;
+  return { host: value, port: undefined };
+}
+
+function extractSshHost(source: string): string {
+  return parseSshSource(source)?.host ?? "";
+}
+
+function sanitizePort(value: number | string | undefined): number | undefined {
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      return undefined;
+    }
+    const port = Math.trunc(value);
+    return port >= 1 && port <= 65_535 ? port : undefined;
+  }
+  const raw = (value ?? "").trim();
+  if (!PORT_DIGITS_PATTERN.test(raw)) {
+    return undefined;
+  }
+  const port = Number.parseInt(raw, 10);
+  return port >= 1 && port <= 65_535 ? port : undefined;
+}
+
+function buildSshCommandArgs(input: {
+  readonly target: string;
+  readonly port: number | undefined;
+  readonly command: string;
+  readonly batchMode: boolean;
+  readonly identityFile?: string;
+  readonly identitiesOnly?: boolean;
+  readonly connectTimeoutSeconds?: number;
+}): string[] {
+  return [
+    "ssh",
+    ...(input.batchMode ? ["-o", "BatchMode=yes"] : []),
+    ...(typeof input.connectTimeoutSeconds === "number"
+      ? [
+          "-o",
+          `ConnectTimeout=${Math.max(1, Math.trunc(input.connectTimeoutSeconds))}`,
+        ]
+      : []),
+    ...(input.identitiesOnly ? ["-o", "IdentitiesOnly=yes"] : []),
+    ...(input.identityFile ? ["-i", input.identityFile] : []),
+    ...(typeof input.port === "number"
+      ? ["-p", String(Math.max(1, Math.trunc(input.port)))]
+      : []),
+    input.target,
+    input.command,
+  ];
+}
+
+function sanitizeSshConfigId(input: {
+  readonly host: string;
+  readonly port: number | undefined;
+}): string {
+  return `${input.host}:${input.port ?? 22}`.replace(/[^a-zA-Z0-9_.:-]+/g, "_");
+}
+
+function renderNodePairSshConfigBlock(input: {
+  readonly id: string;
+  readonly host: string;
+  readonly user: string | undefined;
+  readonly port: number | undefined;
+  readonly keyPath: string;
+}): string {
+  const lines = [
+    `${SSH_CONFIG_MARKER_PREFIX}${input.id} >>>`,
+    `Host ${input.host}`,
+    `  HostName ${input.host}`,
+    ...(input.user ? [`  User ${input.user}`] : []),
+    ...(typeof input.port === "number" ? [`  Port ${input.port}`] : []),
+    `  IdentityFile ${input.keyPath}`,
+    "  IdentitiesOnly yes",
+    `${SSH_CONFIG_MARKER_SUFFIX}${input.id} <<<`,
+  ];
+  return `${lines.join("\n")}\n`;
+}
+
+function upsertManagedSshConfigBlock(input: {
+  readonly existing: string;
+  readonly id: string;
+  readonly block: string;
+}): string {
+  const startMarker = `${SSH_CONFIG_MARKER_PREFIX}${input.id} >>>`;
+  const endMarker = `${SSH_CONFIG_MARKER_SUFFIX}${input.id} <<<`;
+  const escapedStart = startMarker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escapedEnd = endMarker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`${escapedStart}[\\s\\S]*?${escapedEnd}\\n?`, "g");
+  const withoutManagedBlock = input.existing.replace(pattern, "").trim();
+  if (!withoutManagedBlock.length) {
+    return input.block;
+  }
+  return `${input.block}\n${withoutManagedBlock}\n`;
 }
 
 function buildAutoEndpointCandidates(input: {
@@ -5236,6 +5941,13 @@ async function runRemoteNodeInit(input: {
   | { readonly ok: true; readonly stdout: string }
   | { readonly ok: false; readonly error: string }
 > {
+  const sshSource = resolveSshSourceTarget({
+    source: input.source,
+    sshPort: input.sshPort,
+  });
+  if (!sshSource.ok) {
+    return sshSource;
+  }
   const remoteArgs = [
     "node",
     "init",
@@ -5246,17 +5958,15 @@ async function runRemoteNodeInit(input: {
     ...(input.labels.length > 0 ? ["--labels", input.labels.join(",")] : []),
     "--json",
   ];
-  const sshArgs = [
-    "ssh",
-    ...(typeof input.sshPort === "number"
-      ? ["-p", String(Math.max(1, Math.trunc(input.sshPort)))]
-      : []),
-    input.source,
-    renderRemoteHackCommand({
+  const sshArgs = buildSshCommandArgs({
+    target: sshSource.target,
+    port: sshSource.port,
+    command: renderRemoteHackCommand({
       remoteHack: input.remoteHack,
       args: remoteArgs,
     }),
-  ];
+    batchMode: false,
+  });
   const result = await exec(sshArgs, { stdin: "ignore" });
   if (result.exitCode !== 0) {
     const stderr = result.stderr.trim();
@@ -5285,6 +5995,13 @@ async function runControllerPairStart(input: {
   | { readonly ok: true; readonly stdout: string }
   | { readonly ok: false; readonly error: string }
 > {
+  const sshSource = resolveSshSourceTarget({
+    source: input.controller,
+    sshPort: input.controllerSshPort,
+  });
+  if (!sshSource.ok) {
+    return sshSource;
+  }
   const remoteArgs = [
     "node",
     "pair",
@@ -5301,17 +6018,15 @@ async function runControllerPairStart(input: {
     String(Math.max(1, Math.trunc(input.ttlMinutes))),
     "--json",
   ];
-  const sshArgs = [
-    "ssh",
-    ...(typeof input.controllerSshPort === "number"
-      ? ["-p", String(Math.max(1, Math.trunc(input.controllerSshPort)))]
-      : []),
-    input.controller,
-    renderRemoteHackCommand({
+  const sshArgs = buildSshCommandArgs({
+    target: sshSource.target,
+    port: sshSource.port,
+    command: renderRemoteHackCommand({
       remoteHack: input.remoteHack,
       args: remoteArgs,
     }),
-  ];
+    batchMode: false,
+  });
   const result = await exec(sshArgs, { stdin: "ignore" });
   if (result.exitCode !== 0) {
     const stderr = result.stderr.trim();
@@ -5340,6 +6055,10 @@ function buildPairingCommandSet(input: {
   readonly completeController: string;
   readonly endToEnd: string;
 } {
+  const sshSource = resolveSshSourceTarget({
+    source: input.source,
+    sshPort: input.sshPort,
+  });
   const approveArgs = [
     "node",
     "pair",
@@ -5372,10 +6091,11 @@ function buildPairingCommandSet(input: {
   });
   const completeController = renderShellCommand({ args: completeArgs });
   const sshPrefix =
-    typeof input.sshPort === "number"
-      ? `ssh -p ${Math.max(1, Math.trunc(input.sshPort))}`
+    sshSource.ok && typeof sshSource.port === "number"
+      ? `ssh -p ${sshSource.port}`
       : "ssh";
-  const endToEnd = `${sshPrefix} ${input.source} ${approveRemote} | ${completeController}`;
+  const sshTarget = sshSource.ok ? sshSource.target : input.source;
+  const endToEnd = `${sshPrefix} ${sshTarget} ${approveRemote} | ${completeController}`;
   return {
     approveRemote,
     completeController,
@@ -5396,6 +6116,13 @@ async function runRemotePairApprove(input: {
   | { readonly ok: true; readonly stdout: string }
   | { readonly ok: false; readonly error: string }
 > {
+  const sshSource = resolveSshSourceTarget({
+    source: input.source,
+    sshPort: input.sshPort,
+  });
+  if (!sshSource.ok) {
+    return sshSource;
+  }
   const remoteArgs = [
     "node",
     "pair",
@@ -5411,17 +6138,15 @@ async function runRemotePairApprove(input: {
     ...(input.labels.length > 0 ? ["--labels", input.labels.join(",")] : []),
     "--json",
   ];
-  const sshArgs = [
-    "ssh",
-    ...(typeof input.sshPort === "number"
-      ? ["-p", String(Math.max(1, Math.trunc(input.sshPort)))]
-      : []),
-    input.source,
-    renderRemoteHackCommand({
+  const sshArgs = buildSshCommandArgs({
+    target: sshSource.target,
+    port: sshSource.port,
+    command: renderRemoteHackCommand({
       remoteHack: input.remoteHack,
       args: remoteArgs,
     }),
-  ];
+    batchMode: false,
+  });
   const result = await exec(sshArgs, { stdin: "ignore" });
   if (result.exitCode !== 0) {
     const stderr = result.stderr.trim();

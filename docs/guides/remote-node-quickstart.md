@@ -34,6 +34,13 @@ hack node pair \
   --default
 ```
 
+`hack node pair` now auto-bootstraps passwordless SSH for the provided source.
+If you need to repair SSH outside pairing, run:
+
+```bash
+hack node ssh setup --source "<user@remote-host>"
+```
+
 Validate:
 
 ```bash

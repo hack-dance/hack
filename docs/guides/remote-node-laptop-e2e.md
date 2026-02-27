@@ -82,8 +82,10 @@ Notes:
    - `/usr/local/bin/hack`
    - `/usr/bin/hack`
    - `PATH` fallback (`which hack`)
-2. If endpoint inference fails, pass `--endpoint` explicitly.
-3. If SSH username was wrong, retry with the correct user.
+2. `hack node pair` also auto-runs SSH bootstrap (managed key + `~/.ssh/config` host block) so remote runs can use non-interactive SSH.
+3. If you need to repair SSH independently, run `hack node ssh setup --source "<user@node-host>"`.
+4. If endpoint inference fails, pass `--endpoint` explicitly.
+5. If SSH username was wrong, retry with the correct user.
 
 Validate:
 

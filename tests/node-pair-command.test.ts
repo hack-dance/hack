@@ -26,6 +26,30 @@ test("extractSshHost removes username and optional port", () => {
   );
 });
 
+test("parseSshSource extracts user host and port", () => {
+  const parsed = __testOnlyNodePair.parseSshSource(
+    "remote-user@node-a.tailnet.ts.net:2201"
+  );
+  expect(parsed).toBeDefined();
+  expect(parsed?.user).toBe("remote-user");
+  expect(parsed?.host).toBe("node-a.tailnet.ts.net");
+  expect(parsed?.port).toBe(2201);
+  expect(parsed?.target).toBe("remote-user@node-a.tailnet.ts.net");
+});
+
+test("resolveSshSourceTarget applies explicit port override", () => {
+  const resolved = __testOnlyNodePair.resolveSshSourceTarget({
+    source: "remote-user@node-a.tailnet.ts.net:2201",
+    sshPort: 7788,
+  });
+  expect(resolved.ok).toBe(true);
+  if (!resolved.ok) {
+    return;
+  }
+  expect(resolved.port).toBe(7788);
+  expect(resolved.target).toBe("remote-user@node-a.tailnet.ts.net");
+});
+
 test("normalizeHostHint extracts host from URL", () => {
   const result = __testOnlyNodePair.normalizeHostHint(
     "https://node-a.tailnet.ts.net"
@@ -109,4 +133,44 @@ test("renderRemoteHackCommand uses explicit override when provided", () => {
   expect(command).toContain("'node'");
   expect(command).toContain("'init'");
   expect(command).not.toContain("__hack_bin");
+});
+
+test("buildAuthorizedKeysInstallCommand safely quotes public key", () => {
+  const command = __testOnlyNodePair.buildAuthorizedKeysInstallCommand({
+    publicKey:
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINe0bXv8rQxQqg5l1xS+5e9sQw3N test@host",
+  });
+  expect(command).toContain("grep -qxF");
+  expect(command).toContain("authorized_keys");
+  expect(command).toContain("printf '%s\\n'");
+});
+
+test("upsertManagedSshConfigBlock replaces prior managed section", () => {
+  const first = __testOnlyNodePair.renderNodePairSshConfigBlock({
+    id: "node-a:22",
+    host: "node-a.tailnet.ts.net",
+    user: "remote-user",
+    port: 22,
+    keyPath: "/Users/test/.ssh/hack-node-pair-ed25519",
+  });
+  const updated = __testOnlyNodePair.renderNodePairSshConfigBlock({
+    id: "node-a:22",
+    host: "node-a.tailnet.ts.net",
+    user: "remote-user",
+    port: 2201,
+    keyPath: "/Users/test/.ssh/hack-node-pair-ed25519",
+  });
+  const mergedOnce = __testOnlyNodePair.upsertManagedSshConfigBlock({
+    existing: "",
+    id: "node-a:22",
+    block: first,
+  });
+  const mergedTwice = __testOnlyNodePair.upsertManagedSshConfigBlock({
+    existing: mergedOnce,
+    id: "node-a:22",
+    block: updated,
+  });
+
+  expect(mergedTwice).toContain("Port 2201");
+  expect(mergedTwice.match(/Host node-a\.tailnet\.ts\.net/g)?.length).toBe(1);
 });

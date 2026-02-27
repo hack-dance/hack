@@ -749,6 +749,7 @@ Subcommands:
 | --- | --- |
 | `init` | Initialize this host as a node and emit enrollment bundle |
 | `pair` | Pair node with one-command or expiring verification-code flow |
+| `ssh` | Manage SSH bootstrap for node pairing and remote runs |
 | `add` | Add a node from an enrollment bundle |
 | `list` | List registered nodes |
 | `status` | Probe node health and report live status |
@@ -786,6 +787,9 @@ hack node pair approve --session <pair-session-id> --code <one-time-code> --endp
 hack node pair complete --session <pair-session-id> --bundle approved-bundle.json --default
 # controller one-shot approve + complete for existing pending request
 hack node pair fulfill --session <pair-session-id> --code <one-time-code> --default
+
+# repair/setup passwordless SSH explicitly (also run automatically by `hack node pair`)
+hack node ssh setup --source "remote-user@node-a.tailnet.ts.net"
 
 # on controller
 hack node add --bundle ./node-bundle.json

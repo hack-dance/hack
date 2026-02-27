@@ -4,7 +4,12 @@ import { hostname } from "node:os";
 import { dirname, resolve } from "node:path";
 import { resolveGatewayConfig } from "../../control-plane/extensions/gateway/config.ts";
 import { readControlPlaneConfig } from "../../control-plane/sdk/config.ts";
-import { ensureDir, pathExists } from "../../lib/fs.ts";
+import {
+  ensureDir,
+  pathExists,
+  readTextFile,
+  writeTextFileIfChanged,
+} from "../../lib/fs.ts";
 import {
   findNodeWorkspaceMapEntry,
   type NodeWorkspaceSource,
@@ -479,6 +484,17 @@ async function ensureWorkspaceFromInput(opts: {
     };
   }
 
+  const gatewayEnable = await ensureWorkspaceGatewayEnabled({
+    workspaceRoot: workspace.projectRoot,
+  });
+  if (!gatewayEnable.ok) {
+    return {
+      ok: false,
+      error: gatewayEnable.error,
+      statusCode: gatewayEnable.statusCode,
+    };
+  }
+
   const ensuredBranch = branch
     ? await ensureBranch({
         projectRoot: workspace.projectRoot,
@@ -513,6 +529,64 @@ async function ensureWorkspaceFromInput(opts: {
       ? { bootstrapAuthSource: workspace.bootstrapAuthSource }
       : {}),
   };
+}
+
+/**
+ * Ensure node workspaces are gateway-enabled so supervisor job routes are accepted immediately.
+ */
+async function ensureWorkspaceGatewayEnabled(opts: {
+  readonly workspaceRoot: string;
+}): Promise<
+  | { readonly ok: true }
+  | { readonly ok: false; readonly error: string; readonly statusCode: number }
+> {
+  const project = await findProjectContext(opts.workspaceRoot);
+  if (!project) {
+    return {
+      ok: false,
+      error: "workspace_not_hack_project",
+      statusCode: 412,
+    };
+  }
+
+  const existingText = await readTextFile(project.configFile);
+  let parsed: Record<string, unknown> = {};
+  if (existingText !== null && existingText.trim().length > 0) {
+    let value: unknown;
+    try {
+      value = JSON.parse(existingText);
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : "invalid_project_config_json";
+      return {
+        ok: false,
+        error: `invalid_project_config_json: ${message}`,
+        statusCode: 409,
+      };
+    }
+    if (!isRecord(value)) {
+      return {
+        ok: false,
+        error: "invalid_project_config_shape",
+        statusCode: 409,
+      };
+    }
+    parsed = { ...value };
+  }
+
+  const controlPlane = isRecord(parsed.controlPlane)
+    ? { ...parsed.controlPlane }
+    : {};
+  const gateway = isRecord(controlPlane.gateway)
+    ? { ...controlPlane.gateway }
+    : {};
+  gateway.enabled = true;
+  controlPlane.gateway = gateway;
+  parsed.controlPlane = controlPlane;
+
+  const nextText = `${JSON.stringify(parsed, null, 2)}\n`;
+  await writeTextFileIfChanged(project.configFile, nextText);
+  return { ok: true };
 }
 
 async function resolveWorkspaceByProjectMap(opts: {

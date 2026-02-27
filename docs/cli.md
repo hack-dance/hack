@@ -43,6 +43,7 @@ Run `hack help` or `hack help <command>` for interactive help.
 | `hack agent` | Agent utilities | Agents |
 | `hack mcp` | Manage MCP server integrations for coding agents | Agents |
 | `hack doctor` | Validate local setup (docker, networks, DNS, global infra, project config) | Diagnostics |
+| `hack crash-capture` | Capture runtime crash diagnostics into `.tmp/` for triage | Diagnostics |
 | `hack daemon` | Manage the local hack daemon (hackd) | Diagnostics |
 | `hack log-pipe` | Read log lines from stdin and pretty-print them | Diagnostics |
 | `hack help` | Show help for a command | Diagnostics |
@@ -1211,6 +1212,24 @@ Options:
 | `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
 | `--fix` | boolean | false | Attempt safe auto-remediations (network + CoreDNS + CA) |
 
+### hack crash-capture
+
+Usage: `hack crash-capture [options]`
+
+Collects a post-failure bundle under `.tmp/crash-capture-<timestamp>/` including:
+
+- `metadata.json` with platform/project context
+- `commands.json` with command outcomes
+- `docker` / `hack` snapshots
+- macOS unified log slices (OrbStack + kernel container events) when available
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `-p`, `--path <dir>` | string | - | Capture against a repo path (overrides cwd search) |
+| `--since <duration>` | string | `45m` | Look-back window for system logs (for example: `30m`, `2h`) |
+
 ### hack daemon
 
 Usage: `hack daemon <subcommand>`
@@ -1228,6 +1247,15 @@ Subcommands:
 | `clear` | Clear stale hackd pid/socket files |
 | `install` | Install hackd as a launchd service (macOS) |
 | `uninstall` | Uninstall hackd launchd service (macOS) |
+
+Autostart + self-heal behavior:
+
+- `controlPlane.daemon.autoStart` controls whether CLI flows auto-recover hackd when the socket is missing.
+- On macOS, auto-recovery prefers launchd management and keepalive before CLI fallback starts.
+- Configure with:
+  - `hack config set --global 'controlPlane.daemon.autoStart' true`
+  - `hack config set --global 'controlPlane.daemon.launchd.runAtLoad' true`
+  - `hack config set --global 'controlPlane.daemon.launchd.guiSessionOnly' true`
 
 #### hack daemon start
 

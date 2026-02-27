@@ -2,6 +2,7 @@ import pkg from "../../package.json";
 import { agentCommand } from "../commands/agent.ts";
 import { branchCommand } from "../commands/branch.ts";
 import { configCommand } from "../commands/config.ts";
+import { crashCaptureCommand } from "../commands/crash-capture.ts";
 import { daemonCommand } from "../commands/daemon.ts";
 import { dispatchCommand } from "../commands/dispatch.ts";
 import { doctorCommand } from "../commands/doctor.ts";
@@ -67,6 +68,7 @@ export const CLI_SPEC = defineCli({
     branchCommand,
     logPipeCommand,
     doctorCommand,
+    crashCaptureCommand,
     daemonCommand,
     dispatchCommand,
     theCommand,

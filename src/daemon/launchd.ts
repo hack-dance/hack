@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { dirname } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 
 import { DAEMON_LAUNCHD_LABEL } from "../constants.ts";
 import type { DaemonLaunchdConfig } from "../control-plane/sdk/config.ts";
@@ -10,6 +10,7 @@ import {
   writeTextFile,
 } from "../lib/fs.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
+import { findExecutableInPath } from "../lib/shell.ts";
 import type { DaemonPaths } from "./paths.ts";
 
 const PID_PATTERN = /pid\s*=\s*(\d+)/i;
@@ -106,7 +107,13 @@ export async function installLaunchdService({
   }
 
   const invocation = await resolveHackInvocation();
-  const hackBinPath = invocation.bin;
+  const hackBinPath = await resolveLaunchdHackBinPath({ invocation });
+  if (!hackBinPath) {
+    return {
+      ok: false,
+      error: "Could not resolve hack binary path for launchd service",
+    };
+  }
   const home = process.env.HOME ?? homedir();
 
   const plistContent = renderLaunchdPlist({
@@ -145,6 +152,50 @@ export async function installLaunchdService({
   }
 
   return { ok: true };
+}
+
+/**
+ * Resolve a stable absolute path to the hack executable for launchd.
+ *
+ * launchd should execute `hack` directly; writing `bun` here can break daemon
+ * startup when Bun is unavailable in non-interactive PATH contexts.
+ */
+async function resolveLaunchdHackBinPath(opts: {
+  readonly invocation: {
+    readonly bin: string;
+    readonly args: readonly string[];
+  };
+}): Promise<string | null> {
+  const candidates = [
+    process.argv[1] ?? null,
+    opts.invocation.args[0] ?? null,
+    opts.invocation.bin,
+    await findExecutableInPath("hack"),
+    resolve(process.env.HOME ?? homedir(), ".hack", "bin", "hack"),
+  ];
+
+  for (const raw of candidates) {
+    const path = normalizeHackExecutablePath(raw);
+    if (!path) {
+      continue;
+    }
+    if (await pathExists(path)) {
+      return path;
+    }
+  }
+  return null;
+}
+
+function normalizeHackExecutablePath(raw: string | null): string | null {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) {
+    return null;
+  }
+  const base = basename(trimmed).toLowerCase();
+  if (!(base === "hack" || base.startsWith("hack-"))) {
+    return null;
+  }
+  return trimmed;
 }
 
 export interface LaunchdUninstallResult {

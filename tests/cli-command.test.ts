@@ -51,3 +51,12 @@ test("parseOptionsForCommand converts number options", () => {
   expect(parsed.tail).toBe(10);
   expect(parsed.follow).toBe(true);
 });
+
+test("resolveCommand finds crash-capture command", () => {
+  const resolved = resolveCommand(CLI_SPEC, ["crash-capture"]);
+  expect(resolved.command?.name).toBe("crash-capture");
+  expect(resolved.path.map((command) => command.name)).toEqual([
+    "crash-capture",
+  ]);
+  expect(resolved.remainingPositionals).toEqual([]);
+});

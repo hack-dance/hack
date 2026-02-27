@@ -94,6 +94,18 @@ test("workspace ensure bootstraps a missing project by cloning repo", async () =
   expect(map.entries[0]?.projectName).toBe("bootstrap-target");
   expect(map.entries[0]?.source).toBe("managed");
   expect(map.entries[0]?.workspaceRoot).toBe(bootstrapRoot);
+
+  const configText = await Bun.file(
+    resolve(bootstrapRoot, ".dev", "hack.config.json")
+  ).text();
+  const config = JSON.parse(configText) as {
+    readonly controlPlane?: {
+      readonly gateway?: {
+        readonly enabled?: boolean;
+      };
+    };
+  };
+  expect(config.controlPlane?.gateway?.enabled).toBe(true);
 });
 
 test("workspace ensure still returns unknown project when bootstrap is absent", async () => {

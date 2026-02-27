@@ -1663,7 +1663,9 @@ async function resolveInternalComposeOverride(opts: {
     return null;
   }
 
-  const services = await readComposeServiceNames(opts.project.composeFile);
+  const services = await readComposeServicesForInternalOverride(
+    opts.project.composeFile
+  );
   if (services.length === 0) {
     return null;
   }
@@ -1826,7 +1828,7 @@ function buildInternalExtraHosts(opts: {
 }
 
 function renderInternalOverride(opts: {
-  readonly services: readonly string[];
+  readonly services: readonly InternalOverrideService[];
   readonly dnsServer: string | null;
   readonly extraHosts: Record<string, string>;
   readonly caPath: string | null;
@@ -1842,8 +1844,13 @@ function renderInternalOverride(opts: {
   return ensureTrailingNewline(cleanupYaml(yaml));
 }
 
+interface InternalOverrideService {
+  readonly name: string;
+  readonly enableInternalDns: boolean;
+}
+
 function buildInternalOverrideServices(opts: {
-  readonly services: readonly string[];
+  readonly services: readonly InternalOverrideService[];
   readonly dnsServer: string | null;
   readonly extraHosts: Record<string, string>;
   readonly caPath: string | null;
@@ -1852,7 +1859,7 @@ function buildInternalOverrideServices(opts: {
 
   for (const service of opts.services) {
     const entry: Record<string, unknown> = {};
-    if (opts.dnsServer) {
+    if (opts.dnsServer && service.enableInternalDns) {
       entry.dns = [opts.dnsServer];
     }
     if (Object.keys(opts.extraHosts).length > 0) {
@@ -1862,7 +1869,7 @@ function buildInternalOverrideServices(opts: {
       entry.volumes = [`${opts.caPath}:${INTERNAL_CA_CONTAINER_PATH}:ro`];
       entry.environment = buildInternalTlsEnvironment();
     }
-    overrideServices[service] = entry;
+    overrideServices[service.name] = entry;
   }
 
   return overrideServices;
@@ -1927,6 +1934,78 @@ async function readComposeServiceNames(
     return [];
   }
   return Object.keys(servicesRaw).sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * Resolve service metadata used to build `.hack/.internal/compose.override.yml`.
+ *
+ * DNS override should only be applied to ingress-network services; applying a
+ * CoreDNS override to non-ingress services can break external DNS resolution
+ * on remote nodes when cross-bridge CoreDNS routing is unavailable.
+ */
+async function readComposeServicesForInternalOverride(
+  composeFile: string
+): Promise<readonly InternalOverrideService[]> {
+  const text = await readTextFile(composeFile);
+  if (!text) {
+    return [];
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = YAML.parse(text);
+  } catch {
+    return [];
+  }
+
+  if (!isRecord(parsed)) {
+    return [];
+  }
+  const servicesRaw = parsed.services;
+  if (!isRecord(servicesRaw)) {
+    return [];
+  }
+
+  const out: InternalOverrideService[] = [];
+  const names = Object.keys(servicesRaw).sort((a, b) => a.localeCompare(b));
+  for (const name of names) {
+    const definition = servicesRaw[name];
+    const networks = parseComposeServiceNetworkNames(definition);
+    out.push({
+      name,
+      enableInternalDns: networks.includes(DEFAULT_INGRESS_NETWORK),
+    });
+  }
+  return out;
+}
+
+function parseComposeServiceNetworkNames(value: unknown): readonly string[] {
+  if (!isRecord(value)) {
+    return [];
+  }
+  const networks = value.networks;
+  if (Array.isArray(networks)) {
+    const out: string[] = [];
+    for (const entry of networks) {
+      if (typeof entry === "string" && entry.trim().length > 0) {
+        out.push(entry.trim());
+      } else if (isRecord(entry)) {
+        for (const key of Object.keys(entry)) {
+          const trimmed = key.trim();
+          if (trimmed.length > 0) {
+            out.push(trimmed);
+          }
+        }
+      }
+    }
+    return out;
+  }
+  if (isRecord(networks)) {
+    return Object.keys(networks)
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+  }
+  return [];
 }
 
 async function readComposeCaddyHosts(

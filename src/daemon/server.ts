@@ -540,7 +540,7 @@ async function handleGatewayRequest(opts: {
   const remote = opts.server.requestIP(opts.req);
   const remoteAddress = remote?.address;
   const userAgent = opts.req.headers.get("user-agent") ?? undefined;
-  const enabledProjectIds = new Set(
+  let enabledProjectIds = new Set(
     opts.enabledProjects.map((project) => project.projectId)
   );
 
@@ -567,6 +567,13 @@ async function handleGatewayRequest(opts: {
   const isReadOnly = isGatewayReadOnlyMethod({ method: opts.req.method });
   const isShellStream = isGatewayShellStreamRequest({ url });
   const gatewayProjectId = resolveGatewayProjectId({ url });
+
+  if (gatewayProjectId && !enabledProjectIds.has(gatewayProjectId)) {
+    const refreshed = await resolveGatewayConfig();
+    enabledProjectIds = new Set(
+      refreshed.enabledProjects.map((project) => project.projectId)
+    );
+  }
 
   if (gatewayProjectId && !enabledProjectIds.has(gatewayProjectId)) {
     const status = 403;

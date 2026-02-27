@@ -1,3 +1,7 @@
+## <small>1.15.2 (2026-02-27)</small>
+
+* fix(dispatch): use keychain token for interactive workspace bootstrap ([49c5b91](https://github.com/hack-dance/hack/commit/49c5b91))
+
 ## <small>1.15.1 (2026-02-27)</small>
 
 * fix(ci): retry release asset uploads on transient network failures ([9a9eada](https://github.com/hack-dance/hack/commit/9a9eada))

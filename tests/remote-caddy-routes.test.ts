@@ -44,10 +44,10 @@ test("extractCaddyHostsFromCompose returns normalized hostnames from caddy label
 
 test("resolveRemoteCaddyUpstream prefers ssh source host over endpoint host", () => {
   const upstream = resolveRemoteCaddyUpstream({
-    source: "devuser@100.70.10.5:2201",
+    source: "devuser@198.51.100.5:2201",
     endpoint: "http://127.0.0.1:7788",
   });
-  expect(upstream).toBe("http://100.70.10.5:80");
+  expect(upstream).toBe("http://198.51.100.5:80");
 });
 
 test("resolveProjectHostsForBridge falls back to <project>.hack when compose has no caddy labels", async () => {

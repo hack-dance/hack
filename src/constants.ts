@@ -58,6 +58,12 @@ export const DAEMON_LAUNCHD_LABEL = "dance.hack.hackd" as const;
 export const DAEMON_LAUNCHD_PLIST_FILENAME = "dance.hack.hackd.plist" as const;
 
 export const GLOBAL_CADDY_COMPOSE_FILENAME = "docker-compose.yml" as const;
+export const GLOBAL_CADDY_REMOTE_ROUTES_COMPOSE_FILENAME =
+  "docker-compose.remote-routes.yml" as const;
+export const GLOBAL_CADDY_REMOTE_ROUTES_REGISTRY_FILENAME =
+  "remote-routes.json" as const;
+export const GLOBAL_CADDY_REMOTE_ROUTES_PROJECT_NAME =
+  "hack-remote-routes" as const;
 export const GLOBAL_LOGGING_COMPOSE_FILENAME = "docker-compose.yml" as const;
 export const GLOBAL_ALLOY_FILENAME = "alloy.alloy" as const;
 export const GLOBAL_LOKI_CONFIG_FILENAME = "loki.yaml" as const;

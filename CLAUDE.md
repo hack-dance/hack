@@ -182,6 +182,13 @@ Global infra:
 - Start/stop/status: `hack global up`, `hack global down`, `hack global status`
 - Use `hack global up` before Loki/Grafana queries if global logging is offline.
 
+Remote nodes + dispatch:
+- Pair/register nodes: `hack node pair ...`, then verify with `hack node list` and `hack node status --watch`.
+- Repair SSH for remote Git/mutagen: `hack node ssh setup --node <id>`.
+- On node host, inspect workspace map via `hack node workspace list|resolve|attach|remove`.
+- Inspect/repair controller-side route bridge with `hack node routes status` and `hack node routes repair`.
+- Dispatch remote commands: `hack dispatch run --project <name|id> --node default --branch <branch> --runner generic -- "<command>"`.
+
 When to use a branch instance:
 - You need two versions running at once (PR review, experiments, migrations).
 - You want to keep a stable environment while testing another branch.

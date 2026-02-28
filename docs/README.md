@@ -22,6 +22,8 @@ Monorepo note:
 Quick diagnostics:
 - `hack usage` (resource usage across running projects)
 - `hack usage --watch` (live resource trends)
+- `hack node routes status` (controller-side remote route bridge state)
+- `hack node routes repair` (re-apply persisted remote route bridge routes)
 
 ## Guides
 

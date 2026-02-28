@@ -757,6 +757,7 @@ Subcommands:
 | `use` | Set default node |
 | `remove` | Remove node registration |
 | `workspace` | Inspect and repair node workspace map entries |
+| `routes` | Inspect and repair controller-side remote route bridge |
 | `provider` | Manage provider-specific node bootstrap workflows |
 | `devcontainer` | Manage remote node devcontainer lifecycle and attach hints |
 
@@ -803,6 +804,11 @@ ssh <user@node-host> 'hack node workspace list --json'
 ssh <user@node-host> 'hack node workspace resolve --project <name|id> --json'
 ssh <user@node-host> 'hack node workspace attach --project <name|id> --path <absolute-path> --json'
 ssh <user@node-host> 'hack node workspace remove --project <name|id> --json'
+
+# inspect/repair controller-side remote route bridge
+hack node routes status
+hack node routes status --json
+hack node routes repair
 
 # Railway provider bootstrap (existing service + auto domain endpoint)
 hack node provider railway bootstrap \
@@ -872,6 +878,25 @@ hack node workspace list --json
 hack node workspace resolve --project my-project --json
 hack node workspace attach --project my-project --path "$HOME/.hack/projects/my-project" --json
 hack node workspace remove --project my-project --json
+```
+
+### hack node routes
+
+Usage: `hack node routes <subcommand>`
+
+Subcommands:
+
+| Subcommand | Summary |
+| --- | --- |
+| `status` | Show controller-side remote route bridge state |
+| `repair` | Re-render and re-apply persisted route bridge stack |
+
+Examples:
+
+```bash
+hack node routes status
+hack node routes status --json
+hack node routes repair
 ```
 
 ### hack dispatch

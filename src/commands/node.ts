@@ -52,6 +52,10 @@ import {
 } from "../lib/nodes-registry.ts";
 import { findProjectContext, readProjectConfig } from "../lib/project.ts";
 import { upsertProjectRegistration } from "../lib/projects-registry.ts";
+import {
+  readRemoteCaddyRoutesState,
+  reconcileRemoteCaddyRoutesStack,
+} from "../lib/remote-caddy-routes.ts";
 import { exec } from "../lib/shell.ts";
 import { display } from "../ui/display.ts";
 import { logger } from "../ui/logger.ts";
@@ -661,6 +665,33 @@ const workspaceAttachSpec = defineCommand({
   subcommands: [],
 } as const);
 
+const routesSpec = defineCommand({
+  name: "routes",
+  summary: "Inspect and repair controller-side remote route bridge",
+  group: "Extensions",
+  options: [],
+  positionals: [],
+  subcommands: [],
+} as const);
+
+const routesStatusSpec = defineCommand({
+  name: "status",
+  summary: "Show controller-side remote route bridge state",
+  group: "Extensions",
+  options: [optJson],
+  positionals: [],
+  subcommands: [],
+} as const);
+
+const routesRepairSpec = defineCommand({
+  name: "repair",
+  summary: "Re-render and re-apply persisted remote route bridge stack",
+  group: "Extensions",
+  options: [optJson],
+  positionals: [],
+  subcommands: [],
+} as const);
+
 const devcontainerSpec = defineCommand({
   name: "devcontainer",
   summary: "Manage remote node devcontainers",
@@ -826,6 +857,14 @@ type WorkspaceAttachArgs = CommandArgs<
   typeof workspaceAttachSpec.options,
   typeof workspaceAttachSpec.positionals
 >;
+type RoutesStatusArgs = CommandArgs<
+  typeof routesStatusSpec.options,
+  typeof routesStatusSpec.positionals
+>;
+type RoutesRepairArgs = CommandArgs<
+  typeof routesRepairSpec.options,
+  typeof routesRepairSpec.positionals
+>;
 type DevcontainerUpArgs = CommandArgs<
   typeof devcontainerUpSpec.options,
   typeof devcontainerUpSpec.positionals
@@ -933,6 +972,27 @@ export const nodeCommand = withHandler(
       ),
       withHandler(
         defineCommand({
+          ...routesSpec,
+          subcommands: [
+            withHandler(routesStatusSpec, handleNodeRoutesStatus),
+            withHandler(routesRepairSpec, handleNodeRoutesRepair),
+          ],
+        } as const),
+        async () => {
+          await display.panel({
+            title: "Node routes commands",
+            tone: "info",
+            lines: [
+              "hack node routes status",
+              "hack node routes status --json",
+              "hack node routes repair",
+            ],
+          });
+          return 0;
+        }
+      ),
+      withHandler(
+        defineCommand({
           ...providerSpec,
           subcommands: [
             withHandler(
@@ -1016,6 +1076,8 @@ export const nodeCommand = withHandler(
         "hack node remove <id>",
         "hack node workspace list",
         "hack node workspace attach --project <name|id> --path <workspace-root>",
+        "hack node routes status",
+        "hack node routes repair",
         "hack node provider railway bootstrap --railway-project <id|name> [--railway-service <service>|--create-service] [--railway-environment production] [--railway-private --tailscale-auth-key <key>]",
         "hack node devcontainer up --node <id> --project <name|id> [--branch <branch>]",
       ],
@@ -3007,6 +3069,193 @@ function formatWorkspaceMapSelectorLabel(input: {
     return `${input.entry.projectName} (${input.entry.projectId})`;
   }
   return input.entry.projectName ?? input.entry.projectId ?? "<unknown>";
+}
+
+type RoutesStackRuntimeStatus = {
+  readonly stackState: "running" | "stopped" | "missing" | "unknown";
+  readonly runningServices: readonly string[];
+  readonly error?: string;
+};
+
+/**
+ * Show controller-side remote route bridge state and compose runtime health.
+ */
+async function handleNodeRoutesStatus({
+  args,
+}: {
+  readonly ctx: CliContext;
+  readonly args: RoutesStatusArgs;
+}): Promise<number> {
+  const state = await readRemoteCaddyRoutesState();
+  const runtime = await inspectRemoteRouteBridgeRuntime({
+    composePath: state.routesComposePath,
+    composeExists: state.routesComposeExists,
+  });
+
+  if (args.options.json) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          caddyDir: state.caddyDir,
+          caddyComposePath: state.caddyComposePath,
+          routesComposePath: state.routesComposePath,
+          routesRegistryPath: state.routesRegistryPath,
+          caddyComposeExists: state.caddyComposeExists,
+          routesComposeExists: state.routesComposeExists,
+          routesRegistryExists: state.routesRegistryExists,
+          routeCount: state.routes.length,
+          routes: state.routes,
+          runtime,
+        },
+        null,
+        2
+      )}\n`
+    );
+    return 0;
+  }
+
+  await display.kv({
+    title: "Remote route bridge status",
+    entries: [
+      ["caddy_dir", state.caddyDir],
+      ["caddy_compose", state.caddyComposePath],
+      ["routes_compose", state.routesComposePath],
+      ["routes_registry", state.routesRegistryPath],
+      ["global_caddy", state.caddyComposeExists ? "present" : "missing"],
+      ["routes_compose_state", runtime.stackState],
+      ["route_count", String(state.routes.length)],
+      [
+        "running_sidecars",
+        runtime.runningServices.length > 0
+          ? runtime.runningServices.join(", ")
+          : "",
+      ],
+      ["runtime_error", runtime.error ?? ""],
+    ],
+  });
+
+  if (state.routes.length === 0) {
+    await display.panel({
+      title: "No persisted remote routes",
+      tone: "info",
+      lines: [
+        "No remote route bridge entries are currently registered.",
+        "Entries are created automatically during dispatch/workspace ensure.",
+      ],
+    });
+    return 0;
+  }
+
+  await display.table({
+    columns: ["Project Key", "Host", "Upstream", "Node", "Updated At"],
+    rows: state.routes.map((route) => [
+      route.projectKey,
+      route.host,
+      route.upstream,
+      route.nodeId,
+      route.updatedAt,
+    ]),
+  });
+  return 0;
+}
+
+/**
+ * Re-applies persisted remote route bridge entries through docker compose.
+ */
+async function handleNodeRoutesRepair({
+  args,
+}: {
+  readonly ctx: CliContext;
+  readonly args: RoutesRepairArgs;
+}): Promise<number> {
+  const applied = await reconcileRemoteCaddyRoutesStack();
+  const state = await readRemoteCaddyRoutesState();
+  const runtime = await inspectRemoteRouteBridgeRuntime({
+    composePath: state.routesComposePath,
+    composeExists: state.routesComposeExists,
+  });
+
+  if (args.options.json) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          repair: applied,
+          routeCount: state.routes.length,
+          runtime,
+          routesComposePath: state.routesComposePath,
+          routesRegistryPath: state.routesRegistryPath,
+        },
+        null,
+        2
+      )}\n`
+    );
+    return applied.status === "failed" ? 1 : 0;
+  }
+
+  if (applied.status === "failed") {
+    logger.error({
+      message: `Remote route bridge repair failed: ${applied.error}`,
+    });
+    return 1;
+  }
+
+  logger.success({
+    message:
+      applied.status === "none"
+        ? "Remote route bridge repaired (no routes registered)."
+        : `Remote route bridge repaired (${state.routes.length} route${state.routes.length === 1 ? "" : "s"}).`,
+  });
+  if (runtime.error) {
+    logger.warn({
+      message: `Runtime probe warning: ${runtime.error}`,
+    });
+  }
+  return 0;
+}
+
+/**
+ * Inspects remote bridge compose runtime to report running sidecar services.
+ */
+async function inspectRemoteRouteBridgeRuntime(input: {
+  readonly composePath: string;
+  readonly composeExists: boolean;
+}): Promise<RoutesStackRuntimeStatus> {
+  if (!input.composeExists) {
+    return { stackState: "missing", runningServices: [] };
+  }
+  const running = await exec(
+    [
+      "docker",
+      "compose",
+      "-f",
+      input.composePath,
+      "ps",
+      "--services",
+      "--status",
+      "running",
+    ],
+    {
+      stdin: "ignore",
+    }
+  );
+  if (running.exitCode !== 0) {
+    const error = [running.stderr.trim(), running.stdout.trim()]
+      .filter((entry) => entry.length > 0)
+      .join(" | ");
+    return {
+      stackState: "unknown",
+      runningServices: [],
+      error: error.length > 0 ? error : "docker_compose_ps_failed",
+    };
+  }
+  const services = running.stdout
+    .split("\n")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  return {
+    stackState: services.length > 0 ? "running" : "stopped",
+    runningServices: services,
+  };
 }
 
 type RailwayBootstrapConfigDefaults = {

@@ -124,6 +124,8 @@ ssh <user@node-host> 'hack node workspace list --json'
 Expected:
 1. Mapping entry exists for controller project id/name.
 2. Workspace root resolves under `~/.hack/projects/<project-slug>/` unless explicitly attached elsewhere.
+3. Controller writes/updates the local remote-route bridge so `https://<project>.hack` is proxied through local Caddy to the remote node host.
+4. Route bridge diagnostics/repair are available on controller via `hack node routes status` and `hack node routes repair`.
 
 ### Private repo bootstrap behavior (default, no manual copy)
 
@@ -208,6 +210,10 @@ cat ~/.hack/registry/runs/<run-id>/summary.md
 9. `Mutagen binary was not found on this machine`
    - Cause: controller is missing mutagen and auto-install failed (permissions/network/tooling).
    - Fix: run `hack doctor --fix` (or `hack global install`) and retry.
+10. `hack up --target auto` succeeds remotely but local browser on `https://<project>.hack` fails TLS/connection
+   - Cause: local global proxy stack is down, so remote bridge routes were saved but not applied.
+   - Fix: run `hack global up`; remote routes are reconciled automatically on startup.
+   - Optional: run `hack node routes status` and `hack node routes repair` to inspect/re-apply bridge routes explicitly.
 
 ## Evidence capture
 
@@ -216,6 +222,7 @@ Record these outputs in your run notes:
 ```bash
 hack node list
 hack node status --json
+hack node routes status --json
 hack config get "controlPlane.execution.mode"
 hack config get "controlPlane.execution.nodeId"
 hack dispatch status <run-id>

@@ -46,6 +46,7 @@ Validate:
 ```bash
 hack node list
 hack node status --node <node-id>
+hack node routes status
 ```
 
 ## Step 3: route a project to the remote node
@@ -75,6 +76,12 @@ Optional remote check:
 ssh <user@remote-host> 'hack node workspace list --json'
 ```
 
+Controller route bridge check:
+
+```bash
+hack node routes status --json
+```
+
 ## macOS app flow
 
 You can do the same flow in Hack Desktop:
@@ -92,3 +99,6 @@ You can do the same flow in Hack Desktop:
    - install `hack` on remote or pass `--remote-hack` with the full path.
 3. `Connection closed by ... port 22`:
    - confirm username and shell access with `ssh <user@host> "echo ok"`.
+4. Local project URL fails after remote dispatch (`https://<project>.hack`):
+   - run `hack node routes status` then `hack node routes repair`.
+   - if global proxy is down, run `hack global up` and retry.

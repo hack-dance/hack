@@ -60,6 +60,10 @@ import {
   resolveRegisteredProjectByName,
   upsertProjectRegistration,
 } from "../lib/projects-registry.ts";
+import {
+  type RemoteCaddyRouteBridgeResult,
+  reconcileRemoteCaddyRoutesForProject,
+} from "../lib/remote-caddy-routes.ts";
 import { exec } from "../lib/shell.ts";
 import { display } from "../ui/display.ts";
 import { logger } from "../ui/logger.ts";
@@ -507,6 +511,34 @@ async function handleDispatchRun({
     ...(bootstrapProbe ? { probe: bootstrapProbe } : {}),
     ...(bootstrapAuthEnsured ? { ensured: bootstrapAuthEnsured } : {}),
   };
+  const remoteRouteBridge = await reconcileDispatchRemoteRouteBridge({
+    project,
+    workspace: workspace.data.workspace,
+    node: selectedNode.node,
+  });
+  if (remoteRouteBridge) {
+    await appendDispatchRunEvent({
+      runId,
+      event: {
+        type: "run.route.bridge",
+        status: remoteRouteBridge.status,
+        reason: remoteRouteBridge.reason,
+        hosts: remoteRouteBridge.hosts,
+        upstream: remoteRouteBridge.upstream,
+        composePath: remoteRouteBridge.composePath,
+        ...(remoteRouteBridge.error ? { error: remoteRouteBridge.error } : {}),
+      },
+    });
+    if (remoteRouteBridge.status === "failed") {
+      logger.warn({
+        message: `Remote route bridge failed: ${remoteRouteBridge.error ?? remoteRouteBridge.reason}`,
+      });
+    } else if (remoteRouteBridge.status === "applied") {
+      logger.info({
+        message: `Remote route bridge applied (${remoteRouteBridge.hosts.length} host${remoteRouteBridge.hosts.length === 1 ? "" : "s"})`,
+      });
+    }
+  }
 
   let syncMetadata: DispatchSyncMetadata | null = null;
   const preparedSync = await prepareDispatchSync({
@@ -690,6 +722,7 @@ async function handleDispatchRun({
       route: routeMetadata,
       sync: syncMetadata,
       bootstrapAuth,
+      remoteRouteBridge,
     });
     await writeDispatchRunArtifacts({
       runId,
@@ -718,6 +751,7 @@ async function handleDispatchRun({
         riskReasons: policy.reasons,
         route: routeMetadata,
         ...(Object.keys(bootstrapAuth).length > 0 ? { bootstrapAuth } : {}),
+        ...(remoteRouteBridge ? { remoteRouteBridge } : {}),
         ...(syncMetadata ? { sync: syncMetadata } : {}),
         ...(ticketId ? { ticketId } : {}),
         ...(prOutcome
@@ -1422,6 +1456,26 @@ type DispatchWorkspaceBootstrapAuth = {
   readonly probe?: WorkspaceBootstrapProbeResult;
   readonly ensured?: GatewayNodeBootstrapAuthSource;
 };
+
+async function reconcileDispatchRemoteRouteBridge(input: {
+  readonly project: DispatchProjectResolution;
+  readonly workspace: GatewayNodeWorkspace;
+  readonly node: NodeRecord;
+}): Promise<RemoteCaddyRouteBridgeResult | null> {
+  const projectKey =
+    input.project.controllerProjectId ??
+    normalizeOptionalString(input.workspace.projectId) ??
+    normalizeOptionalString(input.workspace.projectName);
+  if (!projectKey) {
+    return null;
+  }
+  return await reconcileRemoteCaddyRoutesForProject({
+    projectKey,
+    projectDir: input.project.projectDir,
+    fallbackProjectHost: input.workspace.projectName,
+    node: input.node,
+  });
+}
 
 function formatWorkspaceEnsureError(input: {
   readonly workspace: {
@@ -2760,6 +2814,7 @@ function buildSummaryMarkdown(input: {
   readonly route: DispatchRouteMetadata;
   readonly sync: DispatchSyncMetadata | null;
   readonly bootstrapAuth: DispatchWorkspaceBootstrapAuth;
+  readonly remoteRouteBridge: RemoteCaddyRouteBridgeResult | null;
 }): string {
   let prLines: string[] = ["- status: not requested"];
   if (input.prOutcome?.ok) {
@@ -2843,6 +2898,24 @@ function buildSummaryMarkdown(input: {
     ...(input.bootstrapAuth.ensured
       ? [`- workspace_ensure_source: ${input.bootstrapAuth.ensured}`]
       : ["- workspace_ensure_source: unknown_or_not_bootstrapped"]),
+    "",
+    "## Local route bridge",
+    ...(input.remoteRouteBridge
+      ? [
+          `- status: ${input.remoteRouteBridge.status}`,
+          `- reason: ${input.remoteRouteBridge.reason}`,
+          `- compose_path: ${input.remoteRouteBridge.composePath}`,
+          ...(input.remoteRouteBridge.upstream
+            ? [`- upstream: ${input.remoteRouteBridge.upstream}`]
+            : []),
+          ...(input.remoteRouteBridge.hosts.length > 0
+            ? input.remoteRouteBridge.hosts.map((host) => `- host: ${host}`)
+            : ["- host: none"]),
+          ...(input.remoteRouteBridge.error
+            ? [`- error: ${input.remoteRouteBridge.error}`]
+            : []),
+        ]
+      : ["- status: not attempted"]),
     "",
     "## Sync",
     ...(input.sync

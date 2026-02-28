@@ -63,6 +63,10 @@ import {
   getMutagenPath,
 } from "../lib/mutagen.ts";
 import { isMac } from "../lib/os.ts";
+import {
+  reconcileRemoteCaddyRoutesStack,
+  stopRemoteCaddyRoutesStack,
+} from "../lib/remote-caddy-routes.ts";
 import { exec, execOrThrow, findExecutableInPath, run } from "../lib/shell.ts";
 import { resolveSessionsMuxMode } from "../mux/mux-config.ts";
 import {
@@ -803,6 +807,16 @@ export async function globalUp(): Promise<number> {
   if (caddyExit !== 0) {
     return caddyExit;
   }
+  const remoteRoutes = await reconcileRemoteCaddyRoutesStack();
+  if (remoteRoutes.status === "failed") {
+    logger.warn({
+      message: `Remote route bridge sync failed: ${remoteRoutes.error}`,
+    });
+  } else if (remoteRoutes.status === "applied") {
+    logger.step({
+      message: `Remote route bridge active (${remoteRoutes.routeCount} host${remoteRoutes.routeCount === 1 ? "" : "s"})`,
+    });
+  }
 
   logger.step({ message: "Starting logging stack…" });
   const logExit = await run(
@@ -1211,6 +1225,12 @@ async function globalDown(): Promise<number> {
   if (await pathExists(paths.caddyCompose)) {
     await run(["docker", "compose", "-f", paths.caddyCompose, "down"], {
       cwd: dirname(paths.caddyCompose),
+    });
+  }
+  const remoteRoutes = await stopRemoteCaddyRoutesStack();
+  if (remoteRoutes.status === "failed") {
+    logger.warn({
+      message: `Unable to stop remote route bridge during shutdown: ${remoteRoutes.error}`,
     });
   }
 

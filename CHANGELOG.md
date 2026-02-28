@@ -1,3 +1,8 @@
+## 1.17.0 (2026-02-28)
+
+* fix(tests): replace private-ip route fixture ([1373858](https://github.com/hack-dance/hack/commit/1373858))
+* feat(remote): add route bridge status/repair commands and docs ([e53edfd](https://github.com/hack-dance/hack/commit/e53edfd))
+
 ## 1.16.0 (2026-02-27)
 
 * feat(remote): auto-bootstrap node workspaces and harden daemon startup ([f66334b](https://github.com/hack-dance/hack/commit/f66334b))

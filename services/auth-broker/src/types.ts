@@ -13,6 +13,9 @@ export type OAuthFlowAccount = {
   readonly accountName?: string;
   readonly accountId?: string;
   readonly accountEmail?: string;
+  readonly organizationId?: string;
+  readonly organizationName?: string;
+  readonly teamIds?: readonly string[];
   readonly installationIds?: readonly string[];
   readonly betterAuthUserId?: string;
   readonly betterAuthLinkState?:
@@ -69,6 +72,9 @@ export type OAuthFlowPublicStatus = {
   readonly accountName?: string;
   readonly accountId?: string;
   readonly accountEmail?: string;
+  readonly organizationId?: string;
+  readonly organizationName?: string;
+  readonly teamIds?: readonly string[];
   readonly betterAuthUserId?: string;
   readonly betterAuthLinkState?:
     | "disabled"

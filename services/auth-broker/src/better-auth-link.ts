@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 
 import type { BetterAuthRuntime } from "./better-auth.ts";
-import type { GitHubFlowAccount } from "./types.ts";
+import type { OAuthFlowAccount } from "./types.ts";
 
 export type BetterAuthUserLinkState =
   | "disabled"
@@ -29,8 +29,35 @@ export type BetterAuthUserLinkResult = {
  */
 export async function resolveBetterAuthUserFromGitHubAccount(input: {
   readonly runtime: BetterAuthRuntime;
-  readonly account: GitHubFlowAccount;
+  readonly account: OAuthFlowAccount;
   readonly autoProvision: boolean;
+}): Promise<BetterAuthUserLinkResult> {
+  return await resolveBetterAuthUserFromOAuthAccount({
+    runtime: input.runtime,
+    account: input.account,
+    autoProvision: input.autoProvision,
+    providerId: "github",
+  });
+}
+
+export async function resolveBetterAuthUserFromLinearAccount(input: {
+  readonly runtime: BetterAuthRuntime;
+  readonly account: OAuthFlowAccount;
+  readonly autoProvision: boolean;
+}): Promise<BetterAuthUserLinkResult> {
+  return await resolveBetterAuthUserFromOAuthAccount({
+    runtime: input.runtime,
+    account: input.account,
+    autoProvision: input.autoProvision,
+    providerId: "linear",
+  });
+}
+
+async function resolveBetterAuthUserFromOAuthAccount(input: {
+  readonly runtime: BetterAuthRuntime;
+  readonly account: OAuthFlowAccount;
+  readonly autoProvision: boolean;
+  readonly providerId: string;
 }): Promise<BetterAuthUserLinkResult> {
   if (!hasEnabledBetterAuthDb(input.runtime)) {
     return { state: "disabled" };
@@ -45,8 +72,9 @@ export async function resolveBetterAuthUserFromGitHubAccount(input: {
 
   try {
     if (accountId) {
-      const linkedUserId = await findUserIdByGitHubAccountId({
+      const linkedUserId = await findUserIdByProviderAccountId({
         runtime,
+        providerId: input.providerId,
         accountId,
       });
       if (linkedUserId) {
@@ -93,12 +121,13 @@ async function findUserIdByGitHubAccountId(input: {
   readonly runtime: BetterAuthRuntime & {
     readonly db: NonNullable<BetterAuthRuntime["db"]>;
   };
+  readonly providerId: string;
   readonly accountId: string;
 }): Promise<string | null> {
   const result = await input.runtime.db.execute(
     sql`select "userId" as "userId"
         from "account"
-        where "providerId" = 'github'
+        where "providerId" = ${input.providerId}
           and "accountId" = ${input.accountId}
         order by "createdAt" desc
         limit 1`
@@ -107,6 +136,16 @@ async function findUserIdByGitHubAccountId(input: {
     result,
     key: "userId",
   });
+}
+
+async function findUserIdByProviderAccountId(input: {
+  readonly runtime: BetterAuthRuntime & {
+    readonly db: NonNullable<BetterAuthRuntime["db"]>;
+  };
+  readonly providerId: string;
+  readonly accountId: string;
+}): Promise<string | null> {
+  return await findUserIdByGitHubAccountId(input);
 }
 
 async function findUserIdByEmail(input: {

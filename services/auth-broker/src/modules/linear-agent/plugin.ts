@@ -3,6 +3,8 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Elysia } from "elysia";
 
 import type { BrokerConfig } from "../../config.ts";
+import type { LinearConnectionStore } from "../linear-connections/service.ts";
+import type { LinearSyncStore } from "../linear-sync-store/service.ts";
 
 const MAX_LINEAR_WEBHOOK_SKEW_MS = 60_000;
 const SHA256_PREFIX = "sha256=";
@@ -11,12 +13,48 @@ const LEGACY_LINEAR_WEBHOOK_PATH = "/v1/integrations/linear/webhook";
 
 type CreateLinearAgentPluginOptions = {
   readonly config: BrokerConfig;
+  readonly syncStore: LinearSyncStore;
+  readonly connectionStore: LinearConnectionStore;
 };
 
 type LinearWebhookEvent = {
   readonly action?: string;
   readonly type?: string;
   readonly webhookTimestamp?: string;
+  readonly issueId?: string;
+  readonly issueIdentifier?: string;
+  readonly projectId?: string;
+  readonly teamId?: string;
+  readonly profileId?: string;
+  readonly organizationId?: string;
+};
+
+type LinearWebhookRouteResult = {
+  readonly statusCode: number;
+  readonly body:
+    | {
+        readonly ok: true;
+        readonly accepted: true;
+        readonly provider: "linear";
+        readonly deliveryId: string;
+        readonly deliveryStatus: string;
+        readonly signatureVerified: boolean;
+        readonly eventType: string | null;
+        readonly action: string | null;
+        readonly webhookTimestamp: string | null;
+      }
+    | {
+        readonly ok: false;
+        readonly error: string;
+      };
+};
+
+type PreparedWebhookRequest = {
+  readonly requestPath: string;
+  readonly rawBody: string;
+  readonly payload: unknown;
+  readonly event: LinearWebhookEvent;
+  readonly signatureVerified: boolean;
 };
 
 /**
@@ -27,6 +65,8 @@ type LinearWebhookEvent = {
  */
 export function createLinearAgentPlugin({
   config,
+  syncStore,
+  connectionStore,
 }: CreateLinearAgentPluginOptions) {
   const app = new Elysia({
     name: "hack-auth-broker.linear-agent",
@@ -36,66 +76,143 @@ export function createLinearAgentPlugin({
     configuredPath: config.linearWebhookPath,
   })) {
     app.post(path, async ({ request, set }) => {
-      const rawBody = await request.text();
-      const signatureHeader = request.headers.get("linear-signature");
-
-      const signature = verifyLinearWebhookSignature({
-        rawBody,
-        signatureHeader,
-        secret: config.linearWebhookSigningSecret,
+      const result = await handleLinearWebhookRequest({
+        request,
+        config,
+        syncStore,
+        connectionStore,
       });
-      if (!signature.ok) {
-        set.status = signature.statusCode;
-        return {
-          ok: false,
-          error: signature.error,
-        } as const;
-      }
-
-      const payload = parseJson({ raw: rawBody });
-      if (!payload.ok) {
-        set.status = 400;
-        return {
-          ok: false,
-          error: "invalid_json",
-        } as const;
-      }
-
-      const parsedEvent = parseLinearWebhookEvent({ payload: payload.value });
-      if (!parsedEvent.ok) {
-        set.status = 400;
-        return {
-          ok: false,
-          error: parsedEvent.error,
-        } as const;
-      }
-
-      const replayCheck = validateWebhookTimestamp({
-        event: parsedEvent.event,
-        requireTimestamp: signature.verified,
-        nowMs: Date.now(),
-      });
-      if (!replayCheck.ok) {
-        set.status = replayCheck.statusCode;
-        return {
-          ok: false,
-          error: replayCheck.error,
-        } as const;
-      }
-
-      set.status = 202;
-      return {
-        ok: true,
-        accepted: true,
-        provider: "linear",
-        signatureVerified: signature.verified,
-        eventType: parsedEvent.event.type ?? null,
-        action: parsedEvent.event.action ?? null,
-        webhookTimestamp: parsedEvent.event.webhookTimestamp ?? null,
-      } as const;
+      set.status = result.statusCode;
+      return result.body;
     });
   }
   return app;
+}
+
+async function handleLinearWebhookRequest(input: {
+  readonly request: Request;
+  readonly config: BrokerConfig;
+  readonly syncStore: LinearSyncStore;
+  readonly connectionStore: LinearConnectionStore;
+}): Promise<LinearWebhookRouteResult> {
+  const prepared = await prepareWebhookRequest({
+    request: input.request,
+    secret: input.config.linearWebhookSigningSecret,
+  });
+  if (!prepared.ok) {
+    return {
+      statusCode: prepared.statusCode,
+      body: {
+        ok: false,
+        error: prepared.error,
+      },
+    };
+  }
+  return await persistWebhookDelivery({
+    prepared: prepared.value,
+    syncStore: input.syncStore,
+    connectionStore: input.connectionStore,
+  });
+}
+
+async function prepareWebhookRequest(input: {
+  readonly request: Request;
+  readonly secret?: string;
+}): Promise<
+  | { readonly ok: true; readonly value: PreparedWebhookRequest }
+  | { readonly ok: false; readonly statusCode: number; readonly error: string }
+> {
+  const rawBody = await input.request.text();
+  const signature = verifyLinearWebhookSignature({
+    rawBody,
+    signatureHeader: input.request.headers.get("linear-signature"),
+    secret: input.secret,
+  });
+  if (!signature.ok) {
+    return signature;
+  }
+  const payload = parseJson({ raw: rawBody });
+  if (!payload.ok) {
+    return { ok: false, statusCode: 400, error: "invalid_json" };
+  }
+  const event = parseLinearWebhookEvent({ payload: payload.value });
+  if (!event.ok) {
+    return { ok: false, statusCode: 400, error: event.error };
+  }
+  const replayCheck = validateWebhookTimestamp({
+    event: event.event,
+    requireTimestamp: signature.verified,
+    nowMs: Date.now(),
+  });
+  if (!replayCheck.ok) {
+    return replayCheck;
+  }
+  return {
+    ok: true,
+    value: {
+      requestPath: new URL(input.request.url).pathname,
+      rawBody,
+      payload: payload.value,
+      event: event.event,
+      signatureVerified: signature.verified,
+    },
+  };
+}
+
+async function persistWebhookDelivery(input: {
+  readonly prepared: PreparedWebhookRequest;
+  readonly syncStore: LinearSyncStore;
+  readonly connectionStore: LinearConnectionStore;
+}): Promise<LinearWebhookRouteResult> {
+  try {
+    const ownership = await input.connectionStore.resolveWebhookOwnership({
+      profileId: input.prepared.event.profileId ?? null,
+      organizationId: input.prepared.event.organizationId ?? null,
+    });
+    const delivery = await input.syncStore.recordWebhookDelivery({
+      path: input.prepared.requestPath,
+      rawBody: input.prepared.rawBody,
+      payloadJson: input.prepared.payload,
+      signatureVerified: input.prepared.signatureVerified,
+      eventType: input.prepared.event.type ?? null,
+      action: input.prepared.event.action ?? null,
+      webhookTimestamp: input.prepared.event.webhookTimestamp ?? null,
+      profileId:
+        ownership.status === "matched"
+          ? ownership.profileId
+          : (input.prepared.event.profileId ?? null),
+      projectId: input.prepared.event.projectId ?? null,
+      issueId: input.prepared.event.issueId ?? null,
+      issueIdentifier: input.prepared.event.issueIdentifier ?? null,
+      betterAuthUserId:
+        ownership.status === "matched" ? ownership.betterAuthUserId : null,
+      organizationId:
+        input.prepared.event.organizationId ?? ownership.organizationId ?? null,
+      teamId: input.prepared.event.teamId ?? ownership.teamId ?? null,
+    });
+    return {
+      statusCode: 202,
+      body: {
+        ok: true,
+        accepted: true,
+        provider: "linear",
+        deliveryId: delivery.id,
+        deliveryStatus: delivery.status,
+        signatureVerified: input.prepared.signatureVerified,
+        eventType: input.prepared.event.type ?? null,
+        action: input.prepared.event.action ?? null,
+        webhookTimestamp: input.prepared.event.webhookTimestamp ?? null,
+      },
+    };
+  } catch {
+    return {
+      statusCode: 503,
+      body: {
+        ok: false,
+        error: "linear_webhook_persist_failed",
+      },
+    };
+  }
 }
 
 function verifyLinearWebhookSignature(input: {
@@ -209,12 +326,34 @@ function parseLinearWebhookEvent(input: {
   const action = normalizeString(input.payload.action);
   const type = normalizeString(input.payload.type);
   const webhookTimestamp = normalizeString(input.payload.webhookTimestamp);
+  const data = isRecord(input.payload.data) ? input.payload.data : null;
+  const organization = isRecord(input.payload.organization)
+    ? input.payload.organization
+    : null;
+  const project = isRecord(data?.project) ? data.project : null;
+  const team = isRecord(data?.team) ? data.team : null;
+  const issueId = normalizeString(data?.id);
+  const issueIdentifier =
+    normalizeString(data?.identifier) ?? normalizeString(data?.issueIdentifier);
+  const projectId =
+    normalizeString(data?.projectId) ?? normalizeString(project?.id);
+  const teamId = normalizeString(data?.teamId) ?? normalizeString(team?.id);
+  const profileId =
+    normalizeString(input.payload.profileId) ??
+    normalizeString(organization?.id);
+  const organizationId = normalizeString(organization?.id);
   return {
     ok: true,
     event: {
       ...(action ? { action } : {}),
       ...(type ? { type } : {}),
       ...(webhookTimestamp ? { webhookTimestamp } : {}),
+      ...(issueId ? { issueId } : {}),
+      ...(issueIdentifier ? { issueIdentifier } : {}),
+      ...(projectId ? { projectId } : {}),
+      ...(teamId ? { teamId } : {}),
+      ...(profileId ? { profileId } : {}),
+      ...(organizationId ? { organizationId } : {}),
     },
   };
 }

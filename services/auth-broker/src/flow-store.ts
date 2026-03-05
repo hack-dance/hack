@@ -277,6 +277,13 @@ function toPublicStatus(flow: OAuthFlow): OAuthFlowPublicStatus {
     ...(flow.account?.accountEmail
       ? { accountEmail: flow.account.accountEmail }
       : {}),
+    ...(flow.account?.organizationId
+      ? { organizationId: flow.account.organizationId }
+      : {}),
+    ...(flow.account?.organizationName
+      ? { organizationName: flow.account.organizationName }
+      : {}),
+    ...(flow.account?.teamIds ? { teamIds: flow.account.teamIds } : {}),
     ...(flow.account?.betterAuthUserId
       ? { betterAuthUserId: flow.account.betterAuthUserId }
       : {}),
@@ -429,6 +436,14 @@ function parsePersistedFlowAccount(input: {
   const accountName = asOptionalString(input.value.accountName);
   const accountId = asOptionalString(input.value.accountId);
   const accountEmail = asOptionalString(input.value.accountEmail);
+  const organizationId = asOptionalString(input.value.organizationId);
+  const organizationName = asOptionalString(input.value.organizationName);
+  const teamIds = Array.isArray(input.value.teamIds)
+    ? input.value.teamIds.filter(
+        (entry): entry is string =>
+          typeof entry === "string" && entry.trim().length > 0
+      )
+    : [];
   const betterAuthUserId = asOptionalString(input.value.betterAuthUserId);
   const betterAuthLinkState = asOptionalString(input.value.betterAuthLinkState);
   if (
@@ -438,6 +453,9 @@ function parsePersistedFlowAccount(input: {
       accountName ||
       accountId ||
       accountEmail ||
+      organizationId ||
+      organizationName ||
+      teamIds.length > 0 ||
       installationIds.length > 0 ||
       betterAuthUserId ||
       betterAuthLinkState
@@ -452,6 +470,9 @@ function parsePersistedFlowAccount(input: {
     ...(accountName ? { accountName } : {}),
     ...(accountId ? { accountId } : {}),
     ...(accountEmail ? { accountEmail } : {}),
+    ...(organizationId ? { organizationId } : {}),
+    ...(organizationName ? { organizationName } : {}),
+    ...(teamIds.length > 0 ? { teamIds } : {}),
     ...(betterAuthUserId ? { betterAuthUserId } : {}),
     ...(betterAuthLinkState
       ? {

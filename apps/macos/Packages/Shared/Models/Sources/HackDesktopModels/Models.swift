@@ -1839,6 +1839,7 @@ public struct TicketSummary: Decodable, Encodable, Identifiable, Hashable {
   public let blocks: [String]
   public let owner: String
   public let source: String
+  public let assignee: String?
   public let tags: [String]
   public let externalSystem: String?
   public let externalId: String?
@@ -1863,6 +1864,7 @@ public struct TicketSummary: Decodable, Encodable, Identifiable, Hashable {
     blocks: [String],
     owner: String,
     source: String,
+    assignee: String?,
     tags: [String],
     externalSystem: String?,
     externalId: String?,
@@ -1884,6 +1886,7 @@ public struct TicketSummary: Decodable, Encodable, Identifiable, Hashable {
     self.blocks = blocks
     self.owner = owner
     self.source = source
+    self.assignee = assignee
     self.tags = tags
     self.externalSystem = externalSystem
     self.externalId = externalId
@@ -1907,6 +1910,7 @@ public struct TicketSummary: Decodable, Encodable, Identifiable, Hashable {
     case blocks
     case owner
     case source
+    case assignee
     case tags
     case externalSystem
     case externalId
@@ -1931,6 +1935,7 @@ public struct TicketSummary: Decodable, Encodable, Identifiable, Hashable {
     blocks = try container.decodeIfPresent([String].self, forKey: .blocks) ?? []
     owner = try container.decodeIfPresent(String.self, forKey: .owner) ?? "hack"
     source = try container.decodeIfPresent(String.self, forKey: .source) ?? "hack"
+    assignee = try container.decodeIfPresent(String.self, forKey: .assignee)
     tags = try container.decodeIfPresent([String].self, forKey: .tags) ?? []
     externalSystem = try container.decodeIfPresent(String.self, forKey: .externalSystem)
     externalId = try container.decodeIfPresent(String.self, forKey: .externalId)
@@ -2048,6 +2053,372 @@ public extension TicketSummary {
   }
 }
 
+public indirect enum TicketMetadataValue: Decodable, Hashable {
+  case string(String)
+  case integer(Int)
+  case double(Double)
+  case boolean(Bool)
+  case array([TicketMetadataValue])
+  case object([String: TicketMetadataValue])
+  case null
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.singleValueContainer()
+    if container.decodeNil() {
+      self = .null
+      return
+    }
+    if let string = try? container.decode(String.self) {
+      self = .string(string)
+      return
+    }
+    if let integer = try? container.decode(Int.self) {
+      self = .integer(integer)
+      return
+    }
+    if let double = try? container.decode(Double.self) {
+      self = .double(double)
+      return
+    }
+    if let boolean = try? container.decode(Bool.self) {
+      self = .boolean(boolean)
+      return
+    }
+    if let array = try? container.decode([TicketMetadataValue].self) {
+      self = .array(array)
+      return
+    }
+    if let object = try? container.decode([String: TicketMetadataValue].self) {
+      self = .object(object)
+      return
+    }
+    throw DecodingError.dataCorruptedError(
+      in: container,
+      debugDescription: "Unsupported ticket metadata value."
+    )
+  }
+
+  public func hash(into hasher: inout Hasher) {
+    switch self {
+    case let .string(value):
+      hasher.combine(0)
+      hasher.combine(value)
+    case let .integer(value):
+      hasher.combine(1)
+      hasher.combine(value)
+    case let .double(value):
+      hasher.combine(2)
+      hasher.combine(value)
+    case let .boolean(value):
+      hasher.combine(3)
+      hasher.combine(value)
+    case let .array(values):
+      hasher.combine(4)
+      for value in values {
+        hasher.combine(value)
+      }
+    case let .object(values):
+      hasher.combine(5)
+      for key in values.keys.sorted() {
+        hasher.combine(key)
+        hasher.combine(values[key])
+      }
+    case .null:
+      hasher.combine(6)
+    }
+  }
+
+  public var displayText: String {
+    switch self {
+    case let .string(value):
+      return value
+    case let .integer(value):
+      return String(value)
+    case let .double(value):
+      return value.formatted(.number)
+    case let .boolean(value):
+      return value ? "true" : "false"
+    case let .array(values):
+      return "[\(values.map(\.displayText).joined(separator: ", "))]"
+    case let .object(values):
+      let entries = values.keys.sorted().compactMap { key -> String? in
+        guard let value = values[key] else {
+          return nil
+        }
+        return #""\#(key)":\#(value.quotedDisplayText)"#
+      }
+      return "{\(entries.joined(separator: ","))}"
+    case .null:
+      return "null"
+    }
+  }
+
+  private var quotedDisplayText: String {
+    switch self {
+    case .string:
+      return #""\#(escapedDisplayText)""#
+    default:
+      return displayText
+    }
+  }
+
+  private var escapedDisplayText: String {
+    displayText
+      .replacingOccurrences(of: "\\", with: "\\\\")
+      .replacingOccurrences(of: "\"", with: "\\\"")
+  }
+}
+
+public struct TicketComment: Decodable, Identifiable, Hashable {
+  public let commentId: String
+  public let ticketId: String
+  public let body: String
+  public let source: String
+  public let actor: String
+  public let createdAt: String
+  public let externalId: String?
+  public let externalUrl: String?
+
+  public var id: String { commentId }
+
+  public init(
+    commentId: String,
+    ticketId: String,
+    body: String,
+    source: String,
+    actor: String,
+    createdAt: String,
+    externalId: String?,
+    externalUrl: String?
+  ) {
+    self.commentId = commentId
+    self.ticketId = ticketId
+    self.body = body
+    self.source = source
+    self.actor = actor
+    self.createdAt = createdAt
+    self.externalId = externalId
+    self.externalUrl = externalUrl
+  }
+}
+
+public struct TicketSyncCheckpoint: Decodable, Identifiable, Hashable {
+  public let checkpointId: String
+  public let ticketId: String
+  public let provider: String
+  public let profileId: String?
+  public let direction: String?
+  public let remoteCursor: String?
+  public let remoteUpdatedAt: String?
+  public let localUpdatedAt: String?
+  public let actor: String
+  public let createdAt: String
+
+  public var id: String { checkpointId }
+
+  public init(
+    checkpointId: String,
+    ticketId: String,
+    provider: String,
+    profileId: String?,
+    direction: String?,
+    remoteCursor: String?,
+    remoteUpdatedAt: String?,
+    localUpdatedAt: String?,
+    actor: String,
+    createdAt: String
+  ) {
+    self.checkpointId = checkpointId
+    self.ticketId = ticketId
+    self.provider = provider
+    self.profileId = profileId
+    self.direction = direction
+    self.remoteCursor = remoteCursor
+    self.remoteUpdatedAt = remoteUpdatedAt
+    self.localUpdatedAt = localUpdatedAt
+    self.actor = actor
+    self.createdAt = createdAt
+  }
+}
+
+public enum TicketSyncConflictStatus: String, Decodable, Hashable {
+  case open
+  case resolved
+}
+
+public enum TicketSyncConflictResolution: String, Decodable, Hashable {
+  case acceptLocal = "accept_local"
+  case acceptRemote = "accept_remote"
+  case merged
+  case ignore
+}
+
+public struct TicketSyncConflict: Decodable, Identifiable, Hashable {
+  public let conflictId: String
+  public let ticketId: String
+  public let provider: String
+  public let field: String
+  public let status: TicketSyncConflictStatus
+  public let authority: String?
+  public let summary: String?
+  public let localValue: TicketMetadataValue?
+  public let remoteValue: TicketMetadataValue?
+  public let createdAt: String
+  public let updatedAt: String
+  public let resolution: TicketSyncConflictResolution?
+  public let resolutionSummary: String?
+  public let resolvedAt: String?
+  public let resolvedBy: String?
+
+  public var id: String { conflictId }
+
+  public init(
+    conflictId: String,
+    ticketId: String,
+    provider: String,
+    field: String,
+    status: TicketSyncConflictStatus,
+    authority: String?,
+    summary: String?,
+    localValue: TicketMetadataValue?,
+    remoteValue: TicketMetadataValue?,
+    createdAt: String,
+    updatedAt: String,
+    resolution: TicketSyncConflictResolution?,
+    resolutionSummary: String?,
+    resolvedAt: String?,
+    resolvedBy: String?
+  ) {
+    self.conflictId = conflictId
+    self.ticketId = ticketId
+    self.provider = provider
+    self.field = field
+    self.status = status
+    self.authority = authority
+    self.summary = summary
+    self.localValue = localValue
+    self.remoteValue = remoteValue
+    self.createdAt = createdAt
+    self.updatedAt = updatedAt
+    self.resolution = resolution
+    self.resolutionSummary = resolutionSummary
+    self.resolvedAt = resolvedAt
+    self.resolvedBy = resolvedBy
+  }
+}
+
+public enum TicketSyncReviewSeverity: String, Hashable {
+  case clear
+  case review
+  case conflict
+}
+
+public struct TicketSyncReviewState: Hashable {
+  public let severity: TicketSyncReviewSeverity
+  public let needsReview: Bool
+  public let badgeLabel: String
+  public let title: String
+  public let message: String
+  public let commentCount: Int
+  public let openConflictCount: Int
+  public let resolvedConflictCount: Int
+  public let checkpointSummary: String?
+  public let highlightedFields: [String]
+
+  public init(detail: TicketDetailResponse) {
+    let checkpointSummary = Self.makeCheckpointSummary(detail.latestSyncCheckpoint)
+    let openConflicts = detail.openSyncConflicts
+    let resolvedConflicts = detail.resolvedSyncConflicts
+    let highlightedFields = Self.makeHighlightedFields(
+      openConflicts: openConflicts,
+      reviewHint: detail.ticket.linearSyncUXState.reviewHint
+    )
+    let guidance = detail.ticket.linearSyncUXState.shortGuidance
+
+    let severity: TicketSyncReviewSeverity
+    let needsReview: Bool
+    let badgeLabel: String
+    let title: String
+    let message: String
+
+    if !openConflicts.isEmpty {
+      severity = .conflict
+      needsReview = true
+      badgeLabel = openConflicts.count == 1 ? "1 open conflict" : "\(openConflicts.count) open conflicts"
+      title = "Resolve sync conflicts"
+      let summaries = openConflicts.compactMap(\.summary).joined(separator: " ")
+      let fieldSummary = highlightedFields.joined(separator: ", ")
+      let checkpointClause = checkpointSummary.map { " \($0)" } ?? ""
+      message = "Review \(fieldSummary) before the next sync. Comments stay append-only. \(guidance) \(summaries)\(checkpointClause)"
+        .replacingOccurrences(of: "  ", with: " ")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    } else if let reviewHint = detail.ticket.linearSyncUXState.reviewHint {
+      severity = .review
+      needsReview = true
+      badgeLabel = "Needs review"
+      title = "Review mergeable fields"
+      let checkpointClause = checkpointSummary.map { " \($0)" } ?? ""
+      message = "\(reviewHint) \(guidance)\(checkpointClause)"
+        .replacingOccurrences(of: "  ", with: " ")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    } else {
+      severity = .clear
+      needsReview = false
+      badgeLabel = "Ready"
+      title = detail.ticket.linearSyncUXState.isLinkedToLinear ? "Sync ready" : "Local only"
+      let checkpointClause = checkpointSummary.map { " \($0)" } ?? ""
+      message = "\(guidance)\(checkpointClause)"
+        .replacingOccurrences(of: "  ", with: " ")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    self.severity = severity
+    self.needsReview = needsReview
+    self.badgeLabel = badgeLabel
+    self.title = title
+    self.message = message
+    commentCount = detail.comments.count
+    openConflictCount = openConflicts.count
+    resolvedConflictCount = resolvedConflicts.count
+    self.checkpointSummary = checkpointSummary
+    self.highlightedFields = highlightedFields
+  }
+
+  private static func makeCheckpointSummary(_ checkpoint: TicketSyncCheckpoint?) -> String? {
+    guard let checkpoint else {
+      return nil
+    }
+    let direction = checkpoint.direction?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let profile = checkpoint.profileId?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let provider = checkpoint.provider.capitalized
+    var segments: [String] = []
+    if let direction, !direction.isEmpty {
+      segments.append(direction)
+    }
+    segments.append("via \(provider)")
+    var summary = "Last sync: \(segments.joined(separator: " "))"
+    if let profile, !profile.isEmpty {
+      summary += " (profile \(profile))"
+    }
+    summary += "."
+    return summary
+  }
+
+  private static func makeHighlightedFields(
+    openConflicts: [TicketSyncConflict],
+    reviewHint: String?
+  ) -> [String] {
+    let fields = openConflicts.map(\.field)
+    if !fields.isEmpty {
+      return fields
+    }
+    guard reviewHint != nil else {
+      return []
+    }
+    return ["assignee", "labels", "dependencies"]
+  }
+}
+
 private enum LinearSyncActor: String {
   case hack
   case linear
@@ -2103,11 +2474,68 @@ public struct TicketsListResponse: Decodable {
 
 public struct TicketDetailResponse: Decodable {
   public let ticket: TicketSummary
+  public let comments: [TicketComment]
+  public let syncCheckpoints: [TicketSyncCheckpoint]
+  public let conflicts: [TicketSyncConflict]
   public let events: [TicketEvent]
 
   public init(ticket: TicketSummary, events: [TicketEvent]) {
     self.ticket = ticket
+    comments = []
+    syncCheckpoints = []
+    conflicts = []
     self.events = events
+  }
+
+  public init(
+    ticket: TicketSummary,
+    comments: [TicketComment],
+    syncCheckpoints: [TicketSyncCheckpoint],
+    conflicts: [TicketSyncConflict],
+    events: [TicketEvent]
+  ) {
+    self.ticket = ticket
+    self.comments = comments
+    self.syncCheckpoints = syncCheckpoints
+    self.conflicts = conflicts
+    self.events = events
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case ticket
+    case comments
+    case syncCheckpoints
+    case conflicts
+    case events
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    ticket = try container.decode(TicketSummary.self, forKey: .ticket)
+    comments = try container.decodeIfPresent([TicketComment].self, forKey: .comments) ?? []
+    syncCheckpoints = try container.decodeIfPresent([TicketSyncCheckpoint].self, forKey: .syncCheckpoints) ?? []
+    conflicts = try container.decodeIfPresent([TicketSyncConflict].self, forKey: .conflicts) ?? []
+    events = try container.decodeIfPresent([TicketEvent].self, forKey: .events) ?? []
+  }
+}
+
+public extension TicketDetailResponse {
+  var latestSyncCheckpoint: TicketSyncCheckpoint? {
+    syncCheckpoints.max(by: { lhs, rhs in
+      lhs.createdAt.localizedCompare(rhs.createdAt) == .orderedAscending
+    })
+  }
+
+  var openSyncConflicts: [TicketSyncConflict] {
+    conflicts.filter { $0.status == .open }
+  }
+
+  var resolvedSyncConflicts: [TicketSyncConflict] {
+    conflicts.filter { $0.status == .resolved }
+  }
+
+  var linearSyncReviewState: TicketSyncReviewState {
+    TicketSyncReviewState(detail: self)
   }
 }
 
@@ -2138,6 +2566,25 @@ public struct TicketStatusResponse: Decodable {
     self.ok = ok
     self.ticketId = ticketId
     self.status = status
+  }
+}
+
+public struct TicketConflictResolutionResponse: Decodable {
+  public let ok: Bool
+  public let ticketId: String
+  public let conflictId: String
+  public let resolution: TicketSyncConflictResolution
+
+  public init(
+    ok: Bool,
+    ticketId: String,
+    conflictId: String,
+    resolution: TicketSyncConflictResolution
+  ) {
+    self.ok = ok
+    self.ticketId = ticketId
+    self.conflictId = conflictId
+    self.resolution = resolution
   }
 }
 

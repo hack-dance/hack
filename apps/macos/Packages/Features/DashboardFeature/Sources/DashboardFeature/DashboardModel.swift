@@ -331,6 +331,28 @@ public final class DashboardModel {
     return response?.sync
   }
 
+  public func resolveTicketConflict(
+    for project: ProjectSummary,
+    ticketId: String,
+    conflictId: String,
+    resolution: TicketSyncConflictResolution,
+    summary: String? = nil
+  ) async -> TicketConflictResolutionResponse? {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return nil
+    }
+    return await runActionResult(message: "Resolving sync conflict…") {
+      try await self.ticketsClient.resolveTicketConflict(
+        path: path,
+        ticketId: ticketId,
+        conflictId: conflictId,
+        resolution: resolution,
+        summary: summary
+      )
+    }
+  }
+
   public func setupTickets(for project: ProjectSummary) async -> Bool {
     guard let path = resolveProjectPath(project) else {
       errorMessage = "Missing project path for \(project.name)"

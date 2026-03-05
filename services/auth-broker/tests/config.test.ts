@@ -23,6 +23,7 @@ const ENV_KEYS = [
   "LINEAR_WEBHOOK_SIGNING_SECRET",
   "FLOW_STORE_PATH",
   "BETTER_AUTH_GITHUB_AUTO_PROVISION_USERS",
+  "BETTER_AUTH_LINEAR_AUTO_PROVISION_USERS",
 ] as const;
 
 describe("auth broker config", () => {
@@ -64,6 +65,20 @@ describe("auth broker config", () => {
       () => {
         const config = resolveConfig();
         expect(config.betterAuthGitHubAutoProvisionUsers).toBe(true);
+      }
+    );
+  });
+
+  test("parses Better Auth Linear auto-provision boolean", () => {
+    withEnv(
+      {
+        GITHUB_CLIENT_ID: "test-client-id",
+        GITHUB_CLIENT_SECRET: "test-client-secret",
+        BETTER_AUTH_LINEAR_AUTO_PROVISION_USERS: "true",
+      },
+      () => {
+        const config = resolveConfig();
+        expect(config.betterAuthLinearAutoProvisionUsers).toBe(true);
       }
     );
   });

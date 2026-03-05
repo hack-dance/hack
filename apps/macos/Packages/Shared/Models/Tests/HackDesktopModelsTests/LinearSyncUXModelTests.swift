@@ -74,7 +74,8 @@ final class LinearSyncUXModelTests: XCTestCase {
     source: String,
     externalSystem: String?,
     externalId: String?,
-    externalKey: String?
+    externalKey: String?,
+    assignee: String? = nil
   ) -> TicketSummary {
     TicketSummary(
       ticketId: "T-00001",
@@ -87,6 +88,7 @@ final class LinearSyncUXModelTests: XCTestCase {
       blocks: [],
       owner: owner,
       source: source,
+      assignee: assignee,
       tags: ["linear"],
       externalSystem: externalSystem,
       externalId: externalId,

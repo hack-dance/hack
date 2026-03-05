@@ -220,3 +220,532 @@ test("buildOAuthArgsFromConnectArgs maps connect defaults into oauth args", () =
     "hack-linear-auth",
   ]);
 });
+
+test("parseDeliveriesArgs parses status, limit, and json flags", () => {
+  const parsed = __testOnly.parseDeliveriesArgs({
+    args: ["--status", "applied", "--limit", "10", "--json"],
+  });
+
+  expect(parsed.ok).toBe(true);
+  if (!parsed.ok) {
+    return;
+  }
+
+  expect(parsed.value).toEqual({
+    status: "applied",
+    limit: 10,
+    json: true,
+  });
+});
+
+test("parseApplyDeliveryArgs requires a delivery id", () => {
+  const parsed = __testOnly.parseApplyDeliveryArgs({
+    args: [],
+  });
+
+  expect(parsed.ok).toBe(false);
+  if (parsed.ok) {
+    return;
+  }
+
+  expect(parsed.error).toContain("--delivery-id");
+});
+
+test("detectAuthoritativeFieldConflicts reports divergence for hack-owned tickets", () => {
+  const conflicts = __testOnly.detectAuthoritativeFieldConflicts({
+    authority: "hack",
+    ticket: {
+      ticketId: "T-00001",
+      title: "Local title",
+      body: "Local body",
+      status: "in_progress",
+      createdAt: "2026-03-05T10:00:00.000Z",
+      updatedAt: "2026-03-05T10:00:00.000Z",
+      dependsOn: [],
+      blocks: [],
+      owner: "hack",
+      source: "hack",
+      tags: [],
+      projectId: "proj-local",
+      projectName: "Local Project",
+    },
+    issue: {
+      id: "issue-1",
+      identifier: "ENG-123",
+      title: "Remote title",
+      description: "Remote body",
+      url: "https://linear.app/issue/ENG-123",
+      state: {
+        id: "state-1",
+        name: "Started",
+        type: "started",
+      },
+      teamId: "team-1",
+      projectId: "proj-remote",
+      projectName: "Remote Project",
+      labels: [],
+    },
+    remoteProjection: {
+      body: "Remote body\n\n---\n\nLinear Issue: ENG-123\n\nLinear URL: https://linear.app/issue/ENG-123",
+      status: "done",
+    },
+  });
+
+  expect(conflicts.map((conflict) => conflict.field)).toEqual([
+    "title",
+    "body",
+    "status",
+    "project",
+  ]);
+});
+
+test("selectLinearCommentsToAppend keeps unmatched remote ids in FIFO order", () => {
+  const selected = __testOnly.selectLinearCommentsToAppend({
+    localComments: [
+      {
+        commentId: "comment-1",
+        ticketId: "T-00001",
+        body: "Already synced",
+        source: "linear",
+        actor: "linear",
+        createdAt: "2026-03-05T10:00:00.000Z",
+        externalId: "linear-comment-1",
+      },
+    ],
+    remoteComments: [
+      {
+        id: "linear-comment-1",
+        body: "Already synced",
+        createdAt: "2026-03-05T09:00:00.000Z",
+      },
+      {
+        id: "linear-comment-2",
+        body: "Same body duplicate",
+        createdAt: "2026-03-05T09:05:00.000Z",
+      },
+      {
+        id: "linear-comment-3",
+        body: "Same body duplicate",
+        createdAt: "2026-03-05T09:06:00.000Z",
+      },
+    ],
+  });
+
+  expect(selected.map((comment) => comment.id)).toEqual([
+    "linear-comment-2",
+    "linear-comment-3",
+  ]);
+});
+
+test("selectTicketCommentsToPush keeps unsynced local comments even when bodies repeat", () => {
+  const selected = __testOnly.selectTicketCommentsToPush({
+    localComments: [
+      {
+        commentId: "comment-1",
+        ticketId: "T-00001",
+        body: "Push me",
+        source: "hack",
+        actor: "dio",
+        createdAt: "2026-03-05T10:00:00.000Z",
+        externalId: "linear-comment-1",
+      },
+      {
+        commentId: "comment-2",
+        ticketId: "T-00001",
+        body: "Push me",
+        source: "hack",
+        actor: "dio",
+        createdAt: "2026-03-05T10:01:00.000Z",
+      },
+      {
+        commentId: "comment-3",
+        ticketId: "T-00001",
+        body: "Came from Linear",
+        source: "linear",
+        actor: "linear",
+        createdAt: "2026-03-05T10:02:00.000Z",
+        externalId: "linear-comment-3",
+      },
+    ],
+    remoteComments: [],
+  });
+
+  expect(selected.map((comment) => comment.commentId)).toEqual(["comment-2"]);
+});
+
+test("syncIssueFromLinearToTicket preserves hack authority, appends comments, and records checkpoints", async () => {
+  const conflicts: string[] = [];
+  const appendedBodies: string[] = [];
+  const checkpoints: string[] = [];
+  const updatedTickets: Record<string, unknown>[] = [];
+
+  const runtime = {
+    profileId: "default",
+    apiUrl: "https://api.linear.app/graphql",
+    projectBinding: {},
+    tickets: {
+      listTickets: async () => [
+        {
+          ticketId: "T-00001",
+          title: "Hack-owned title",
+          body: "Hack-owned body",
+          status: "open" as const,
+          createdAt: "2026-03-05T10:00:00.000Z",
+          updatedAt: "2026-03-05T10:00:00.000Z",
+          dependsOn: [],
+          blocks: [],
+          owner: "hack",
+          source: "hack",
+          assignee: "Local Owner",
+          tags: [],
+          externalSystem: "linear",
+          externalId: "issue-1",
+          externalKey: "ENG-123",
+          externalProjectId: "proj-local",
+        },
+      ],
+      updateTicket: async (input: Record<string, unknown>) => {
+        updatedTickets.push(input);
+        return { ok: true as const };
+      },
+      setStatus: async () => ({ ok: true as const }),
+      createTicket: async () => {
+        throw new Error("createTicket should not be called");
+      },
+      getTicket: async () => null,
+      getTicketDetail: async () => ({
+        ticket: null,
+        events: [],
+        comments: [
+          {
+            commentId: "comment-1",
+            ticketId: "T-00001",
+            body: "Already synced",
+            source: "linear",
+            actor: "linear",
+            createdAt: "2026-03-05T10:00:00.000Z",
+            externalId: "linear-comment-1",
+          },
+        ],
+        syncCheckpoints: [],
+        conflicts: [],
+      }),
+      appendComment: async (input: { readonly body: string }) => {
+        appendedBodies.push(input.body);
+        return {
+          ok: true as const,
+          comment: {
+            commentId: "comment-new",
+            ticketId: "T-00001",
+            body: input.body,
+            source: "linear",
+            actor: "linear",
+            createdAt: "2026-03-05T10:05:00.000Z",
+          },
+        };
+      },
+      recordSyncCheckpoint: async (input: { readonly direction?: string }) => {
+        checkpoints.push(input.direction ?? "");
+        return {
+          ok: true as const,
+          checkpoint: {
+            checkpointId: "checkpoint-1",
+            ticketId: "T-00001",
+            provider: "linear",
+            direction: input.direction,
+            actor: "test",
+            createdAt: "2026-03-05T10:10:00.000Z",
+          },
+        };
+      },
+      recordSyncConflict: async (input: { readonly field: string }) => {
+        conflicts.push(input.field);
+        return {
+          ok: true as const,
+          conflict: {
+            conflictId: `conflict-${input.field}`,
+            ticketId: "T-00001",
+            provider: "linear",
+            field: input.field,
+            status: "open",
+            createdAt: "2026-03-05T10:10:00.000Z",
+            updatedAt: "2026-03-05T10:10:00.000Z",
+          },
+        };
+      },
+    },
+    linear: {
+      getIssueByIdentifier: async () => ({
+        ok: true as const,
+        data: {
+          id: "issue-1",
+          identifier: "ENG-123",
+          title: "Linear title",
+          description: "Linear body",
+          url: "https://linear.app/issue/ENG-123",
+          state: {
+            id: "state-1",
+            name: "Done",
+            type: "completed" as const,
+          },
+          teamId: "team-1",
+          projectId: "proj-remote",
+          projectName: "Remote Project",
+          assigneeDisplayName: "Remote Owner",
+          labels: [],
+        },
+      }),
+      listIssueComments: async () => ({
+        ok: true as const,
+        data: [
+          {
+            id: "linear-comment-1",
+            body: "Already synced",
+            createdAt: "2026-03-05T09:00:00.000Z",
+          },
+          {
+            id: "linear-comment-2",
+            body: "Fresh remote note",
+            createdAt: "2026-03-05T09:10:00.000Z",
+            userDisplayName: "Remote Owner",
+          },
+        ],
+      }),
+    },
+  };
+
+  const result = await __testOnly.syncIssueFromLinearToTicket({
+    runtime,
+    issueIdentifier: "ENG-123",
+    syncToggles: {
+      labels: false,
+      statuses: true,
+      dependencies: false,
+      projects: true,
+    },
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  expect(result.commentsPulled).toBe(1);
+  expect(result.conflictsRecorded).toBe(4);
+  expect(appendedBodies).toEqual(["Fresh remote note"]);
+  expect(conflicts).toEqual(["title", "body", "status", "project"]);
+  expect(checkpoints).toEqual(["linear_to_hack"]);
+  expect(updatedTickets).toHaveLength(1);
+  expect(updatedTickets[0]?.title).toBeUndefined();
+  expect(updatedTickets[0]?.body).toBeUndefined();
+  expect(updatedTickets[0]?.assignee).toBe("Remote Owner");
+});
+
+test("syncTicketToLinearIssue pushes missing local comments and records a checkpoint", async () => {
+  const pushedBodies: string[] = [];
+  const checkpoints: string[] = [];
+  const linkedComments: Array<{
+    readonly commentId: string;
+    readonly externalId: string;
+  }> = [];
+  const updatedIssues: Record<string, unknown>[] = [];
+
+  const runtime = {
+    profileId: "default",
+    apiUrl: "https://api.linear.app/graphql",
+    projectBinding: {
+      teamId: "team-1",
+    },
+    tickets: {
+      getTicket: async () => ({
+        ticketId: "T-00001",
+        title: "Hack title",
+        body: "Hack body",
+        status: "open" as const,
+        createdAt: "2026-03-05T10:00:00.000Z",
+        updatedAt: "2026-03-05T10:00:00.000Z",
+        dependsOn: [],
+        blocks: [],
+        owner: "hack",
+        source: "hack",
+        assignee: "alice@example.com",
+        tags: [],
+        externalSystem: "linear",
+        externalId: "issue-1",
+        externalKey: "ENG-123",
+        externalTeamId: "team-1",
+      }),
+      updateTicket: async () => ({ ok: true as const }),
+      listTickets: async () => [],
+      getTicketDetail: async () => ({
+        ticket: null,
+        events: [],
+        comments: [
+          {
+            commentId: "comment-1",
+            ticketId: "T-00001",
+            body: "Already remote",
+            source: "hack",
+            actor: "dio",
+            createdAt: "2026-03-05T10:00:00.000Z",
+          },
+          {
+            commentId: "comment-2",
+            ticketId: "T-00001",
+            body: "Push me",
+            source: "hack",
+            actor: "dio",
+            createdAt: "2026-03-05T10:01:00.000Z",
+          },
+        ],
+        syncCheckpoints: [],
+        conflicts: [],
+      }),
+      linkCommentExternalId: async (input: {
+        readonly commentId: string;
+        readonly externalId: string;
+      }) => {
+        linkedComments.push({
+          commentId: input.commentId,
+          externalId: input.externalId,
+        });
+        return { ok: true as const };
+      },
+      recordSyncCheckpoint: async (input: { readonly direction?: string }) => {
+        checkpoints.push(input.direction ?? "");
+        return {
+          ok: true as const,
+          checkpoint: {
+            checkpointId: "checkpoint-1",
+            ticketId: "T-00001",
+            provider: "linear",
+            direction: input.direction,
+            actor: "test",
+            createdAt: "2026-03-05T10:10:00.000Z",
+          },
+        };
+      },
+      recordSyncConflict: async () => {
+        throw new Error("recordSyncConflict should not be called");
+      },
+    },
+    linear: {
+      getIssueById: async () => ({
+        ok: true as const,
+        data: {
+          id: "issue-1",
+          identifier: "ENG-123",
+          title: "Hack title",
+          description: "Hack body",
+          state: {
+            id: "state-1",
+            name: "Todo",
+            type: "unstarted" as const,
+          },
+          teamId: "team-1",
+          assigneeEmail: "alice@example.com",
+          labels: [],
+        },
+      }),
+      updateIssue: async (input: Record<string, unknown>) => {
+        updatedIssues.push(input);
+        return {
+          ok: true as const,
+          data: {
+            id: "issue-1",
+            identifier: "ENG-123",
+            title: "Hack title",
+            description: "Hack body",
+            state: {
+              id: "state-1",
+              name: "Todo",
+              type: "unstarted" as const,
+            },
+            teamId: "team-1",
+            assigneeId: "user-1",
+            labels: [],
+          },
+        };
+      },
+      createIssue: async () => {
+        throw new Error("createIssue should not be called");
+      },
+      listTeamStates: async () => ({
+        ok: true as const,
+        data: [
+          {
+            id: "state-1",
+            name: "Todo",
+            type: "unstarted" as const,
+          },
+        ],
+      }),
+      listTeamLabels: async () => ({
+        ok: true as const,
+        data: [],
+      }),
+      listIssueComments: async () => ({
+        ok: true as const,
+        data: [
+          {
+            id: "linear-comment-1",
+            body: "Already remote",
+            createdAt: "2026-03-05T09:00:00.000Z",
+          },
+        ],
+      }),
+      createComment: async (input: { readonly body: string }) => {
+        pushedBodies.push(input.body);
+        return {
+          ok: true as const,
+          data: {
+            id: `linear-${pushedBodies.length}`,
+            body: input.body,
+            createdAt: "2026-03-05T10:15:00.000Z",
+          },
+        };
+      },
+      listTeamUsers: async () => ({
+        ok: true as const,
+        data: [
+          {
+            id: "user-1",
+            email: "alice@example.com",
+            displayName: "Alice",
+          },
+        ],
+      }),
+      getIssueByIdentifier: async () => ({ ok: true as const, data: null }),
+      getProject: async () => ({ ok: true as const, data: null }),
+    },
+  };
+
+  const result = await __testOnly.syncTicketToLinearIssue({
+    runtime,
+    ticketId: "T-00001",
+    syncToggles: {
+      labels: false,
+      statuses: true,
+      dependencies: false,
+      projects: true,
+    },
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  expect(result.commentsPushed).toBe(1);
+  expect(result.assignee.matchedUserId).toBe("user-1");
+  expect(result.assignee.applied).toBe(true);
+  expect(pushedBodies).toEqual(["Push me"]);
+  expect(linkedComments).toEqual([
+    {
+      commentId: "comment-2",
+      externalId: "linear-1",
+    },
+  ]);
+  expect(checkpoints).toEqual(["hack_to_linear"]);
+  expect(updatedIssues[0]?.assigneeId).toBe("user-1");
+});

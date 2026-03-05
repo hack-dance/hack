@@ -33,6 +33,7 @@ struct TicketsView: View {
   @State private var linearRouteStatus: LinearStatusResponse? = nil
   @State private var pendingBulkSyncAction: TicketBulkSyncAction? = nil
   @State private var activeSyncAction: TicketSyncAction? = nil
+  @State private var resolvingConflictIds: Set<String> = []
   @FocusState private var ticketsListFocused: Bool
 
   var body: some View {
@@ -678,6 +679,9 @@ struct TicketsView: View {
       HStack(spacing: 6) {
         ticketMetaPill(ticket.owner, tone: ticket.owner == "linear" ? .orange : .secondary)
         ticketMetaPill(ticket.source, tone: ticket.source == "linear" ? .orange : .secondary)
+        if let assignee = ticket.assignee?.trimmingCharacters(in: .whitespacesAndNewlines), !assignee.isEmpty {
+          ticketMetaPill("Assignee \(assignee)", tone: .secondary)
+        }
         ticketMetaPill(ticketAuthorityBadgeLabel(for: ticket), tone: ticketAuthorityBadgeColor(for: ticket))
         if ticket.linearSyncUXState.reviewHint != nil {
           ticketMetaPill("Review sync", tone: .orange)
@@ -719,7 +723,11 @@ struct TicketsView: View {
         }
       }
 
-      ticketSyncGuidanceCallout(detail.ticket)
+      ticketSyncGuidanceCallout(detail)
+      ticketSyncSnapshotStrip(detail)
+      ticketCommentsSection(detail)
+      ticketSyncCheckpointSection(detail)
+      ticketConflictSection(detail)
     }
   }
 
@@ -728,6 +736,9 @@ struct TicketsView: View {
       HStack(spacing: 8) {
         ticketMetaPill(ticket.owner, tone: ticket.owner == "linear" ? .orange : .secondary)
         ticketMetaPill(ticket.source, tone: ticket.source == "linear" ? .orange : .secondary)
+        if let assignee = ticket.assignee?.trimmingCharacters(in: .whitespacesAndNewlines), !assignee.isEmpty {
+          ticketMetaPill("Assignee \(assignee)", tone: .secondary)
+        }
         ticketMetaPill(ticketAuthorityBadgeLabel(for: ticket), tone: ticketAuthorityBadgeColor(for: ticket))
         if ticket.linearSyncUXState.reviewHint != nil {
           ticketMetaPill("Review sync", tone: .orange)
@@ -750,14 +761,262 @@ struct TicketsView: View {
     }
   }
 
-  private func ticketSyncGuidanceCallout(_ ticket: TicketSummary) -> some View {
-    let guidance = ticketSyncGuidance(for: ticket)
+  private func ticketSyncGuidanceCallout(_ detail: TicketDetailResponse) -> some View {
+    let guidance = ticketSyncGuidance(for: detail)
     return InlineCallout(
       tone: guidance.tone,
       title: guidance.title,
       message: guidance.message,
-      actions: ticketSyncGuidanceActions(for: ticket)
+      actions: ticketSyncGuidanceActions(for: detail)
     )
+  }
+
+  @ViewBuilder
+  private func ticketSyncSnapshotStrip(_ detail: TicketDetailResponse) -> some View {
+    let review = detail.linearSyncReviewState
+    if detail.comments.isEmpty && detail.syncCheckpoints.isEmpty && detail.conflicts.isEmpty {
+      EmptyView()
+    } else {
+      VStack(alignment: .leading, spacing: 8) {
+        Text("Sync snapshot")
+          .font(.system(size: 12, weight: .semibold))
+          .foregroundStyle(.secondary)
+        ScrollView(.horizontal, showsIndicators: false) {
+          HStack(spacing: 8) {
+            ticketMetaPill(review.badgeLabel, tone: reviewToneColor(review.severity))
+            ticketMetaPill("\(review.commentCount) comment\(review.commentCount == 1 ? "" : "s")", tone: .secondary)
+            ticketMetaPill("\(review.openConflictCount) open", tone: review.openConflictCount > 0 ? .orange : .secondary)
+            ticketMetaPill("\(review.resolvedConflictCount) resolved", tone: review.resolvedConflictCount > 0 ? .green : .secondary)
+            if let checkpointSummary = review.checkpointSummary {
+              ticketMetaPill(checkpointSummary, tone: .secondary)
+            }
+          }
+        }
+      }
+    }
+  }
+
+  @ViewBuilder
+  private func ticketCommentsSection(_ detail: TicketDetailResponse) -> some View {
+    if !detail.comments.isEmpty {
+      VStack(alignment: .leading, spacing: 10) {
+        HStack(spacing: 8) {
+          Text("Comments")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(.secondary)
+          ticketMetaPill("Append-only FIFO", tone: .secondary)
+        }
+        VStack(alignment: .leading, spacing: 10) {
+          ForEach(detail.comments) { comment in
+            VStack(alignment: .leading, spacing: 8) {
+              HStack(spacing: 8) {
+                ticketMetaPill(comment.source, tone: comment.source == "linear" ? .orange : .secondary)
+                ticketMetaPill(comment.actor, tone: .secondary)
+                Text(humanReadableDetailDate(comment.createdAt))
+                  .font(.system(size: 12, weight: .medium))
+                  .foregroundStyle(.secondary)
+                Spacer()
+                if let externalUrl = comment.externalUrl,
+                   let url = URL(string: externalUrl) {
+                  Button {
+                    openURL(url)
+                  } label: {
+                    Label("Open", systemImage: "link")
+                  }
+                  .adaptiveToolbarButton()
+                }
+              }
+              markdownBody(comment.body)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+              RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(colorScheme == .dark ? Color.white.opacity(0.03) : Color.black.opacity(0.025))
+            )
+            .overlay(
+              RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+            )
+          }
+        }
+      }
+    }
+  }
+
+  @ViewBuilder
+  private func ticketSyncCheckpointSection(_ detail: TicketDetailResponse) -> some View {
+    if !detail.syncCheckpoints.isEmpty {
+      VStack(alignment: .leading, spacing: 10) {
+        Text("Sync checkpoints")
+          .font(.system(size: 12, weight: .semibold))
+          .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 8) {
+          ForEach(detail.syncCheckpoints.sorted(by: { $0.createdAt > $1.createdAt })) { checkpoint in
+            VStack(alignment: .leading, spacing: 6) {
+              HStack(spacing: 8) {
+                ticketMetaPill(checkpoint.provider.capitalized, tone: .accentColor)
+                if let direction = checkpoint.direction, !direction.isEmpty {
+                  ticketMetaPill(direction, tone: .secondary)
+                }
+                if let profileId = checkpoint.profileId, !profileId.isEmpty {
+                  ticketMetaPill("Profile \(profileId)", tone: .secondary)
+                }
+                Spacer()
+                Text(humanReadableDetailDate(checkpoint.createdAt))
+                  .font(.system(size: 12, weight: .medium))
+                  .foregroundStyle(.secondary)
+              }
+              if let remoteCursor = checkpoint.remoteCursor, !remoteCursor.isEmpty {
+                Text(remoteCursor)
+                  .font(.system(size: 12, weight: .medium, design: .monospaced))
+                  .foregroundStyle(.secondary)
+              }
+              if let remoteUpdatedAt = checkpoint.remoteUpdatedAt, !remoteUpdatedAt.isEmpty {
+                Text("Remote updated \(humanReadableDetailDate(remoteUpdatedAt))")
+                  .font(.system(size: 12, weight: .medium))
+                  .foregroundStyle(.secondary)
+              }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+              RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(colorScheme == .dark ? Color.white.opacity(0.03) : Color.black.opacity(0.025))
+            )
+            .overlay(
+              RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+            )
+          }
+        }
+      }
+    }
+  }
+
+  @ViewBuilder
+  private func ticketConflictSection(_ detail: TicketDetailResponse) -> some View {
+    if !detail.conflicts.isEmpty {
+      VStack(alignment: .leading, spacing: 10) {
+        HStack(spacing: 8) {
+          Text("Conflicts")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(.secondary)
+          if detail.openSyncConflicts.count > 0 {
+            ticketMetaPill("\(detail.openSyncConflicts.count) open", tone: .orange)
+          }
+          if detail.resolvedSyncConflicts.count > 0 {
+            ticketMetaPill("\(detail.resolvedSyncConflicts.count) resolved", tone: .green)
+          }
+        }
+        VStack(alignment: .leading, spacing: 8) {
+          ForEach(detail.conflicts.sorted(by: { $0.updatedAt > $1.updatedAt })) { conflict in
+            VStack(alignment: .leading, spacing: 8) {
+              HStack(spacing: 8) {
+                ticketMetaPill(conflict.field, tone: conflict.status == .open ? .orange : .green)
+                ticketMetaPill(conflict.status == .open ? "Open" : "Resolved", tone: conflict.status == .open ? .orange : .green)
+                if let authority = conflict.authority, !authority.isEmpty {
+                  ticketMetaPill(authority, tone: .secondary)
+                }
+                Spacer()
+                Text(humanReadableDetailDate(conflict.updatedAt))
+                  .font(.system(size: 12, weight: .medium))
+                  .foregroundStyle(.secondary)
+              }
+              if let summary = conflict.summary, !summary.isEmpty {
+                Text(summary)
+                  .font(.system(size: 13, weight: .medium))
+              }
+              VStack(alignment: .leading, spacing: 6) {
+                ticketConflictValueRow(label: "Local", value: conflict.localValue?.displayText)
+                ticketConflictValueRow(label: "Remote", value: conflict.remoteValue?.displayText)
+                if let resolution = conflict.resolution?.rawValue {
+                  ticketConflictValueRow(label: "Resolution", value: resolution.replacingOccurrences(of: "_", with: " "))
+                }
+                if let resolutionSummary = conflict.resolutionSummary, !resolutionSummary.isEmpty {
+                  ticketConflictValueRow(label: "Notes", value: resolutionSummary)
+                }
+              }
+              if conflict.status == .open {
+                ticketConflictActions(conflict)
+              }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+              RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(conflict.status == .open ? Color.orange.opacity(colorScheme == .dark ? 0.08 : 0.06) : Color.green.opacity(colorScheme == .dark ? 0.08 : 0.06))
+            )
+            .overlay(
+              RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(conflict.status == .open ? Color.orange.opacity(0.18) : Color.green.opacity(0.18), lineWidth: 1)
+            )
+          }
+        }
+      }
+    }
+  }
+
+  @ViewBuilder
+  private func ticketConflictActions(_ conflict: TicketSyncConflict) -> some View {
+    let isResolving = resolvingConflictIds.contains(conflict.conflictId)
+    HStack(spacing: 8) {
+      Button {
+        Task {
+          await resolveTicketConflict(
+            conflict,
+            resolution: .acceptLocal
+          )
+        }
+      } label: {
+        Label("Keep Hack", systemImage: "arrow.uturn.backward.circle")
+      }
+      .adaptiveToolbarButtonProminent()
+      .disabled(isResolving)
+
+      Button {
+        Task {
+          await resolveTicketConflict(
+            conflict,
+            resolution: .acceptRemote
+          )
+        }
+      } label: {
+        Label("Keep Linear", systemImage: "arrow.uturn.forward.circle")
+      }
+      .adaptiveToolbarButton()
+      .disabled(isResolving)
+
+      Menu {
+        Button("Mark merged") {
+          Task {
+            await resolveTicketConflict(
+              conflict,
+              resolution: .merged,
+              summary: "Marked merged from the macOS review UI."
+            )
+          }
+        }
+        Button("Ignore for now") {
+          Task {
+            await resolveTicketConflict(
+              conflict,
+              resolution: .ignore,
+              summary: "Ignored from the macOS review UI."
+            )
+          }
+        }
+      } label: {
+        Label("More", systemImage: "ellipsis.circle")
+      }
+      .adaptiveToolbarButton()
+      .disabled(isResolving)
+
+      if isResolving {
+        ProgressView()
+          .controlSize(.small)
+      }
+    }
   }
 
   private func ticketSyncGuidanceActions(for ticket: TicketSummary) -> [InlineCalloutAction] {
@@ -812,6 +1071,26 @@ struct TicketsView: View {
         },
       ]
     }
+  }
+
+  private func ticketSyncGuidanceActions(for detail: TicketDetailResponse) -> [InlineCalloutAction] {
+    if detail.linearSyncReviewState.needsReview {
+      var actions = [
+        InlineCalloutAction(label: "Project routing", systemImage: "slider.horizontal.3") {
+          openProjectRouting()
+        }
+      ]
+      if let externalURL = detail.ticket.externalUrl,
+         let url = URL(string: externalURL) {
+        actions.append(
+          InlineCalloutAction(label: "Open linked issue", systemImage: "link") {
+            openURL(url)
+          }
+        )
+      }
+      return actions
+    }
+    return ticketSyncGuidanceActions(for: detail.ticket)
   }
 
   private func ticketAuthorityBadgeLabel(for ticket: TicketSummary) -> String {
@@ -870,6 +1149,15 @@ struct TicketsView: View {
         tone: .neutral
       )
     }
+  }
+
+  private func ticketSyncGuidance(for detail: TicketDetailResponse) -> TicketSyncGuidance {
+    let review = detail.linearSyncReviewState
+    return TicketSyncGuidance(
+      title: review.title,
+      message: review.message,
+      tone: review.severity == .conflict || review.severity == .review ? .warn : .neutral
+    )
   }
 
   private func ticketDetailFooter(_ detail: TicketDetailResponse) -> some View {
@@ -1329,6 +1617,49 @@ struct TicketsView: View {
     }
   }
 
+  private func resolveTicketConflict(
+    _ conflict: TicketSyncConflict,
+    resolution: TicketSyncConflictResolution,
+    summary: String? = nil
+  ) async {
+    guard !resolvingConflictIds.contains(conflict.conflictId) else {
+      return
+    }
+    resolvingConflictIds.insert(conflict.conflictId)
+    defer { resolvingConflictIds.remove(conflict.conflictId) }
+
+    let result = await model.resolveTicketConflict(
+      for: project,
+      ticketId: conflict.ticketId,
+      conflictId: conflict.conflictId,
+      resolution: resolution,
+      summary: summary
+    )
+    guard result?.ok == true else {
+      loadNotice = model.errorMessage ?? "Failed to resolve ticket conflict."
+      return
+    }
+
+    loadNotice = "Resolved \(conflict.field) conflict by \(ticketConflictResolutionLabel(resolution))."
+    await refreshTickets()
+    await loadTicketDetail()
+  }
+
+  private func ticketConflictResolutionLabel(
+    _ resolution: TicketSyncConflictResolution
+  ) -> String {
+    switch resolution {
+    case .acceptLocal:
+      return "keeping Hack"
+    case .acceptRemote:
+      return "keeping Linear"
+    case .merged:
+      return "marking it merged"
+    case .ignore:
+      return "ignoring it"
+    }
+  }
+
   private func parseTicketRefs(_ text: String) -> [String] {
     let parts = text
       .split { $0 == "," || $0 == " " || $0 == "\n" || $0 == "\t" }
@@ -1426,6 +1757,7 @@ struct TicketsView: View {
       DetailRowItem(label: "Status", value: ticket.status.label),
       DetailRowItem(label: "Owner", value: ticket.owner),
       DetailRowItem(label: "Source", value: ticket.source),
+      DetailRowItem(label: "Assignee", value: ticket.assignee ?? "—"),
       DetailRowItem(label: "Tags", value: ticket.tags.joined(separator: ", ").nilIfEmpty ?? "—"),
       DetailRowItem(label: "Remote", value: ticket.externalSystem ?? "—"),
       DetailRowItem(label: "Issue key", value: ticket.externalKey ?? "—"),
@@ -1549,6 +1881,32 @@ struct TicketsView: View {
           .stroke(tone.opacity(colorScheme == .dark ? 0.34 : 0.2), lineWidth: 1)
       )
       .foregroundStyle(tone)
+  }
+
+  @ViewBuilder
+  private func ticketConflictValueRow(label: String, value: String?) -> some View {
+    if let value, !value.isEmpty {
+      VStack(alignment: .leading, spacing: 4) {
+        Text(label)
+          .font(.system(size: 11, weight: .semibold))
+          .foregroundStyle(.secondary)
+        Text(value)
+          .font(.system(size: 12, weight: .medium, design: .monospaced))
+          .foregroundStyle(.primary)
+          .textSelection(.enabled)
+      }
+    }
+  }
+
+  private func reviewToneColor(_ severity: TicketSyncReviewSeverity) -> Color {
+    switch severity {
+    case .clear:
+      return .green
+    case .review:
+      return .orange
+    case .conflict:
+      return .orange
+    }
   }
 
   private func ticketHeaderBadge(

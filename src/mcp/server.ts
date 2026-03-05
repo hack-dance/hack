@@ -930,6 +930,74 @@ function registerTools(opts: { readonly server: McpServer }): void {
       });
     }
   );
+
+  opts.server.registerTool(
+    "hack.linear.deliveries.list",
+    {
+      title: "List pending Linear deliveries",
+      description:
+        "List Linear webhook deliveries from the auth broker for manual review/apply flows.",
+      inputSchema: {
+        status: z
+          .enum(["pending", "applied", "ignored"])
+          .describe("Delivery status filter")
+          .optional(),
+        limit: z.number().describe("Max deliveries to return").optional(),
+      },
+      outputSchema: toolOutputSchema,
+    },
+    async (input) => {
+      const args = [
+        "linear",
+        "deliveries",
+        "--json",
+        ...(input.status ? ["--status", input.status] : []),
+        ...(input.limit ? ["--limit", String(input.limit)] : []),
+      ];
+
+      const result = await runHackCommand({
+        tool: "hack.linear.deliveries.list",
+        args,
+      });
+
+      return buildToolResult({
+        result,
+        data: parseJson(result.stdout),
+      });
+    }
+  );
+
+  opts.server.registerTool(
+    "hack.linear.deliveries.apply",
+    {
+      title: "Apply pending Linear delivery",
+      description:
+        "Mark a pending Linear webhook delivery as applied after manual handling.",
+      inputSchema: {
+        deliveryId: z.string().describe("Recorded Linear delivery id"),
+      },
+      outputSchema: toolOutputSchema,
+    },
+    async (input) => {
+      const args = [
+        "linear",
+        "apply-delivery",
+        "--json",
+        "--delivery-id",
+        input.deliveryId,
+      ];
+
+      const result = await runHackCommand({
+        tool: "hack.linear.deliveries.apply",
+        args,
+      });
+
+      return buildToolResult({
+        result,
+        data: parseJson(result.stdout),
+      });
+    }
+  );
 }
 
 function buildToolResult(opts: {

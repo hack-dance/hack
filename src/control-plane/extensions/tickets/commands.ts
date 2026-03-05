@@ -20,7 +20,10 @@ import {
   type TicketsRepoUntrackStatus,
   untrackTicketsRepo,
 } from "./repo-state.ts";
-import { createTicketsStore } from "./store.ts";
+import {
+  createTicketsStore,
+  type TicketSyncConflictResolution,
+} from "./store.ts";
 import { createGitTicketsChannel } from "./tickets-git-channel.ts";
 import {
   checkTicketsSkill,
@@ -264,6 +267,7 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
         ...(blocksResult.refs.length > 0 ? { blocks: blocksResult.refs } : {}),
         ...(parsed.value.owner ? { owner: parsed.value.owner } : {}),
         ...(parsed.value.source ? { source: parsed.value.source } : {}),
+        ...(parsed.value.assignee ? { assignee: parsed.value.assignee } : {}),
         ...(parsed.value.tags.length > 0 ? { tags: parsed.value.tags } : {}),
         ...(parsed.value.externalSystem
           ? { externalSystem: parsed.value.externalSystem }
@@ -366,6 +370,12 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
         });
         return 1;
       }
+      if (parsed.value.clearAssignee && parsed.value.assignee !== undefined) {
+        ctx.logger.error({
+          message: "--clear-assignee cannot be combined with --assignee.",
+        });
+        return 1;
+      }
 
       const bodyRequested =
         parsed.value.body !== undefined ||
@@ -439,6 +449,8 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
         bodyRequested ||
         dependsOn !== undefined ||
         blocks !== undefined ||
+        parsed.value.assignee !== undefined ||
+        parsed.value.clearAssignee ||
         tags !== undefined ||
         parsed.value.owner !== undefined ||
         parsed.value.source !== undefined ||
@@ -477,6 +489,10 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
           : {}),
         ...(parsed.value.source !== undefined
           ? { source: parsed.value.source }
+          : {}),
+        ...(parsed.value.clearAssignee ? { assignee: "" } : {}),
+        ...(!parsed.value.clearAssignee && parsed.value.assignee !== undefined
+          ? { assignee: parsed.value.assignee }
           : {}),
         ...(parsed.value.externalSystem !== undefined
           ? { externalSystem: parsed.value.externalSystem }
@@ -520,6 +536,80 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
         lines: [`${ticketId} updated`],
       });
 
+      return 0;
+    },
+  },
+  {
+    name: "comment",
+    summary: "Append an immutable ticket comment",
+    scope: "project",
+    handler: async ({ ctx, args }) => {
+      if (!ctx.project) {
+        ctx.logger.error({ message: "No project found. Run inside a repo." });
+        return 1;
+      }
+
+      const parsed = parseTicketsArgs({ args });
+      if (!parsed.ok) {
+        ctx.logger.error({ message: parsed.error });
+        return 1;
+      }
+
+      const ticketId = (parsed.value.rest[0] ?? "").trim();
+      if (!ticketId) {
+        ctx.logger.error({
+          message:
+            'Usage: hack x tickets comment <ticket-id> [--body "..."] [--body-file <path>] [--body-stdin] [--source hack] [--json]',
+        });
+        return 1;
+      }
+
+      const body = await resolveTicketBody({
+        body: parsed.value.body,
+        bodyFile: parsed.value.bodyFile,
+        bodyStdin: parsed.value.bodyStdin,
+      });
+      if (!body) {
+        ctx.logger.error({
+          message:
+            "Comment body is required. Use --body, --body-file, or --body-stdin.",
+        });
+        return 1;
+      }
+
+      await maybeEnsureTicketsSetup({ ctx, json: parsed.value.json });
+
+      const store = createTicketsStore({
+        projectRoot: ctx.project.projectRoot,
+        projectId: ctx.projectId,
+        projectName: ctx.projectName,
+        controlPlaneConfig: ctx.controlPlaneConfig,
+        logger: ctx.logger,
+      });
+
+      const appended = await store.appendComment({
+        ticketId,
+        body,
+        ...(parsed.value.source ? { source: parsed.value.source } : {}),
+        actor: parsed.value.actor,
+      });
+      if (!appended.ok) {
+        ctx.logger.error({ message: appended.error });
+        return 1;
+      }
+
+      if (parsed.value.json) {
+        process.stdout.write(
+          `${JSON.stringify({ comment: appended.comment }, null, 2)}\n`
+        );
+        return 0;
+      }
+
+      await display.panel({
+        title: "Ticket comment",
+        tone: "success",
+        lines: [`${ticketId} comment appended`, appended.comment.body],
+      });
       return 0;
     },
   },
@@ -658,17 +748,26 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
         logger: ctx.logger,
       });
 
-      const ticket = await store.getTicket({ ticketId });
+      const detail = await store.getTicketDetail({ ticketId });
+      const ticket = detail.ticket;
       if (!ticket) {
         ctx.logger.error({ message: `Ticket not found: ${ticketId}` });
         return 1;
       }
 
-      const events = await store.listEvents({ ticketId });
-
       if (parsed.value.json) {
         process.stdout.write(
-          `${JSON.stringify({ ticket, events }, null, 2)}\n`
+          `${JSON.stringify(
+            {
+              ticket,
+              comments: detail.comments,
+              syncCheckpoints: detail.syncCheckpoints,
+              conflicts: detail.conflicts,
+              events: detail.events,
+            },
+            null,
+            2
+          )}\n`
         );
         return 0;
       }
@@ -680,6 +779,7 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
           ["status", ticket.status],
           ["owner", ticket.owner],
           ["source", ticket.source],
+          ["assignee", ticket.assignee ?? ""],
           ["tags", ticket.tags.join(", ")],
           ["external_system", ticket.externalSystem ?? ""],
           ["external_id", ticket.externalId ?? ""],
@@ -705,9 +805,133 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
         });
       }
 
+      if (detail.comments.length > 0) {
+        await display.table({
+          columns: ["comment_id", "source", "actor", "created_at", "body"],
+          rows: detail.comments.map((comment) => [
+            comment.commentId,
+            comment.source,
+            comment.actor,
+            comment.createdAt,
+            comment.body,
+          ]),
+        });
+      }
+
+      if (detail.syncCheckpoints.length > 0) {
+        await display.table({
+          columns: [
+            "checkpoint_id",
+            "provider",
+            "profile",
+            "direction",
+            "cursor",
+          ],
+          rows: detail.syncCheckpoints.map((checkpoint) => [
+            checkpoint.checkpointId,
+            checkpoint.provider,
+            checkpoint.profileId ?? "",
+            checkpoint.direction ?? "",
+            checkpoint.remoteCursor ?? "",
+          ]),
+        });
+      }
+
+      if (detail.conflicts.length > 0) {
+        await display.table({
+          columns: ["conflict_id", "field", "status", "provider", "resolution"],
+          rows: detail.conflicts.map((conflict) => [
+            conflict.conflictId,
+            conflict.field,
+            conflict.status,
+            conflict.provider,
+            conflict.resolution ?? "",
+          ]),
+        });
+      }
+
       await display.table({
         columns: ["ts", "type", "event_id"],
-        rows: events.map((event) => [event.tsIso, event.type, event.eventId]),
+        rows: detail.events.map((event) => [
+          event.tsIso,
+          event.type,
+          event.eventId,
+        ]),
+      });
+      return 0;
+    },
+  },
+  {
+    name: "resolve-conflict",
+    summary: "Resolve a recorded ticket sync conflict",
+    scope: "project",
+    handler: async ({ ctx, args }) => {
+      if (!ctx.project) {
+        ctx.logger.error({ message: "No project found. Run inside a repo." });
+        return 1;
+      }
+
+      const parsed = parseResolveConflictArgs({ args });
+      if (!parsed.ok) {
+        ctx.logger.error({ message: parsed.error });
+        return 1;
+      }
+
+      const ticketId = (parsed.value.rest[0] ?? "").trim();
+      if (!ticketId) {
+        ctx.logger.error({
+          message:
+            'Usage: hack x tickets resolve-conflict <ticket-id> --conflict-id <id> --resolution <accept_local|accept_remote|merged|ignore> [--summary "..."] [--json]',
+        });
+        return 1;
+      }
+
+      await maybeEnsureTicketsSetup({ ctx, json: parsed.value.json });
+
+      const store = createTicketsStore({
+        projectRoot: ctx.project.projectRoot,
+        projectId: ctx.projectId,
+        projectName: ctx.projectName,
+        controlPlaneConfig: ctx.controlPlaneConfig,
+        logger: ctx.logger,
+      });
+
+      const resolved = await store.resolveSyncConflict({
+        ticketId,
+        conflictId: parsed.value.conflictId,
+        resolution: parsed.value.resolution,
+        ...(parsed.value.summary !== undefined
+          ? { summary: parsed.value.summary }
+          : {}),
+        actor: parsed.value.actor,
+      });
+      if (!resolved.ok) {
+        ctx.logger.error({ message: resolved.error });
+        return 1;
+      }
+
+      if (parsed.value.json) {
+        process.stdout.write(
+          `${JSON.stringify(
+            {
+              ok: true,
+              ticketId,
+              conflictId: parsed.value.conflictId,
+              resolution: parsed.value.resolution,
+            },
+            null,
+            2
+          )}\n`
+        );
+        return 0;
+      }
+
+      await display.panel({
+        title: "Ticket conflict resolved",
+        tone: "success",
+        lines: [
+          `${ticketId} ${parsed.value.conflictId} → ${parsed.value.resolution}`,
+        ],
       });
       return 0;
     },
@@ -848,6 +1072,8 @@ type TicketsArgs = {
   readonly clearBlocks: boolean;
   readonly owner?: string;
   readonly source?: string;
+  readonly assignee?: string;
+  readonly clearAssignee: boolean;
   readonly tags: readonly string[];
   readonly clearTags: boolean;
   readonly externalSystem?: string;
@@ -876,6 +1102,15 @@ type TicketsSetupArgs = {
   readonly json: boolean;
 };
 
+type ResolveConflictArgs = {
+  readonly conflictId: string;
+  readonly resolution: TicketSyncConflictResolution;
+  readonly summary?: string;
+  readonly actor?: string;
+  readonly json: boolean;
+  readonly rest: readonly string[];
+};
+
 type TicketsSetupParseResult =
   | { readonly ok: true; readonly value: TicketsSetupArgs }
   | { readonly ok: false; readonly error: string };
@@ -894,6 +1129,8 @@ function parseTicketsArgs(opts: {
   let clearBlocks = false;
   let owner: string | undefined;
   let source: string | undefined;
+  let assignee: string | undefined;
+  let clearAssignee = false;
   const tags: string[] = [];
   let clearTags = false;
   let externalSystem: string | undefined;
@@ -992,6 +1229,10 @@ function parseTicketsArgs(opts: {
       clearTags = true;
       continue;
     }
+    if (token === "--clear-assignee") {
+      clearAssignee = true;
+      continue;
+    }
 
     if (token.startsWith("--depends-on=")) {
       dependsOn.push(...splitTicketRefs(token.slice("--depends-on=".length)));
@@ -1051,6 +1292,19 @@ function parseTicketsArgs(opts: {
         return { ok: false, error: "--source requires a value." };
       }
       source = value;
+      i += 1;
+      continue;
+    }
+    if (token.startsWith("--assignee=")) {
+      assignee = token.slice("--assignee=".length);
+      continue;
+    }
+    if (token === "--assignee") {
+      const value = takeValue(token, opts.args[i + 1]);
+      if (!value) {
+        return { ok: false, error: "--assignee requires a value." };
+      }
+      assignee = value;
       i += 1;
       continue;
     }
@@ -1205,6 +1459,8 @@ function parseTicketsArgs(opts: {
       clearBlocks,
       ...(owner ? { owner } : {}),
       ...(source ? { source } : {}),
+      ...(assignee !== undefined ? { assignee } : {}),
+      clearAssignee,
       tags: normalizeTags(tags),
       clearTags,
       ...(externalSystem !== undefined ? { externalSystem } : {}),
@@ -1214,6 +1470,132 @@ function parseTicketsArgs(opts: {
       ...(externalProjectId !== undefined ? { externalProjectId } : {}),
       ...(externalProjectName !== undefined ? { externalProjectName } : {}),
       ...(externalTeamId !== undefined ? { externalTeamId } : {}),
+      ...(actor ? { actor } : {}),
+      json,
+      rest,
+    },
+  };
+}
+
+function parseResolveConflictArgs(opts: {
+  readonly args: readonly string[];
+}):
+  | { readonly ok: true; readonly value: ResolveConflictArgs }
+  | { readonly ok: false; readonly error: string } {
+  const rest: string[] = [];
+  let conflictId: string | undefined;
+  let resolution: TicketSyncConflictResolution | undefined;
+  let summary: string | undefined;
+  let actor: string | undefined;
+  let json = false;
+
+  const takeValue = (value: string | undefined): string | null => {
+    if (!value || value.startsWith("-")) {
+      return null;
+    }
+    return value;
+  };
+
+  for (let i = 0; i < opts.args.length; i += 1) {
+    const token = opts.args[i] ?? "";
+    if (token === "--") {
+      rest.push(...opts.args.slice(i + 1));
+      break;
+    }
+    if (token === "--json") {
+      json = true;
+      continue;
+    }
+    if (token.startsWith("--conflict-id=")) {
+      conflictId = token.slice("--conflict-id=".length);
+      continue;
+    }
+    if (token === "--conflict-id") {
+      const value = takeValue(opts.args[i + 1]);
+      if (!value) {
+        return { ok: false, error: "--conflict-id requires a value." };
+      }
+      conflictId = value;
+      i += 1;
+      continue;
+    }
+    if (token.startsWith("--resolution=")) {
+      resolution = parseConflictResolutionValue({
+        value: token.slice("--resolution=".length),
+      });
+      if (!resolution) {
+        return {
+          ok: false,
+          error:
+            "Invalid --resolution value. Expected accept_local|accept_remote|merged|ignore.",
+        };
+      }
+      continue;
+    }
+    if (token === "--resolution") {
+      const value = takeValue(opts.args[i + 1]);
+      if (!value) {
+        return { ok: false, error: "--resolution requires a value." };
+      }
+      resolution = parseConflictResolutionValue({ value });
+      if (!resolution) {
+        return {
+          ok: false,
+          error:
+            "Invalid --resolution value. Expected accept_local|accept_remote|merged|ignore.",
+        };
+      }
+      i += 1;
+      continue;
+    }
+    if (token.startsWith("--summary=")) {
+      summary = token.slice("--summary=".length);
+      continue;
+    }
+    if (token === "--summary") {
+      const value = takeValue(opts.args[i + 1]);
+      if (!value) {
+        return { ok: false, error: "--summary requires a value." };
+      }
+      summary = value;
+      i += 1;
+      continue;
+    }
+    if (token.startsWith("--actor=")) {
+      actor = token.slice("--actor=".length);
+      continue;
+    }
+    if (token === "--actor") {
+      const value = takeValue(opts.args[i + 1]);
+      if (!value) {
+        return { ok: false, error: "--actor requires a value." };
+      }
+      actor = value;
+      i += 1;
+      continue;
+    }
+    if (token.startsWith("-")) {
+      return { ok: false, error: `Unknown option: ${token}` };
+    }
+    rest.push(token);
+  }
+
+  if (!conflictId) {
+    return { ok: false, error: "Missing --conflict-id <ID>." };
+  }
+  if (!resolution) {
+    return {
+      ok: false,
+      error: "Missing --resolution <accept_local|accept_remote|merged|ignore>.",
+    };
+  }
+
+  return {
+    ok: true,
+    value: {
+      conflictId,
+      resolution,
+      ...(summary !== undefined ? { summary } : {}),
       ...(actor ? { actor } : {}),
       json,
       rest,
@@ -1259,6 +1641,21 @@ function splitTicketRefs(value: string): string[] {
     .split(TICKET_REF_SEPARATOR_PATTERN)
     .map((part) => part.trim())
     .filter((part) => part.length > 0);
+}
+
+function parseConflictResolutionValue(input: {
+  readonly value: string;
+}): TicketSyncConflictResolution | null {
+  const value = input.value.trim();
+  if (
+    value === "accept_local" ||
+    value === "accept_remote" ||
+    value === "merged" ||
+    value === "ignore"
+  ) {
+    return value;
+  }
+  return null;
 }
 
 function splitTags(value: string): string[] {

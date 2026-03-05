@@ -41,6 +41,8 @@ testIntegration(
     expect(names).toContain("hack.project.open");
     expect(names).toContain("hack.linear.status");
     expect(names).toContain("hack.linear.sync.project");
+    expect(names).toContain("hack.linear.deliveries.list");
+    expect(names).toContain("hack.linear.deliveries.apply");
   }
 );
 
@@ -90,6 +92,60 @@ testIntegration(
   }
 );
 
+testIntegration(
+  "hack.linear.deliveries.list forwards status and limit flags",
+  { timeout: 20_000 },
+  async () => {
+    const mcp = await startMcpClient();
+    const result = await mcp.callTool({
+      name: "hack.linear.deliveries.list",
+      arguments: {
+        status: "pending",
+        limit: 5,
+      },
+    });
+
+    const structured = result.structuredContent as {
+      ok: boolean;
+      data?: unknown;
+    };
+
+    expect(result.isError).toBeUndefined();
+    expect(structured.ok).toBe(true);
+    expect(structured.data).toEqual({
+      status: "pending",
+      limit: 5,
+      deliveries: [{ id: "delivery-1", status: "pending" }],
+    });
+  }
+);
+
+testIntegration(
+  "hack.linear.deliveries.apply forwards delivery id",
+  { timeout: 20_000 },
+  async () => {
+    const mcp = await startMcpClient();
+    const result = await mcp.callTool({
+      name: "hack.linear.deliveries.apply",
+      arguments: {
+        deliveryId: "delivery-1",
+      },
+    });
+
+    const structured = result.structuredContent as {
+      ok: boolean;
+      data?: unknown;
+    };
+
+    expect(result.isError).toBeUndefined();
+    expect(structured.ok).toBe(true);
+    expect(structured.data).toEqual({
+      deliveryId: "delivery-1",
+      status: "applied",
+    });
+  }
+);
+
 async function startMcpClient(): Promise<Client> {
   tempDir = await mkdtemp(join(tmpdir(), "hack-mcp-"));
   const homeDir = join(tempDir, "home");
@@ -133,6 +189,20 @@ function buildHackStubScript(): string {
     '  const sub = args[1] ?? ""',
     '  if (sub === "status") {',
     '    console.log(JSON.stringify({ extensionId: "dance.hack.linear", selectedProfile: "default", tokenResolved: true }))',
+    "    process.exit(0)",
+    "  }",
+    '  if (sub === "deliveries") {',
+    '    const statusIndex = args.indexOf("--status")',
+    '    const limitIndex = args.indexOf("--limit")',
+    '    const status = statusIndex === -1 ? "pending" : args[statusIndex + 1]',
+    "    const limit = limitIndex === -1 ? null : Number(args[limitIndex + 1])",
+    '    console.log(JSON.stringify({ status, limit, deliveries: [{ id: "delivery-1", status }] }))',
+    "    process.exit(0)",
+    "  }",
+    '  if (sub === "apply-delivery") {',
+    '    const idIndex = args.indexOf("--delivery-id")',
+    "    const deliveryId = idIndex === -1 ? null : args[idIndex + 1]",
+    '    console.log(JSON.stringify({ deliveryId, status: "applied" }))',
     "    process.exit(0)",
     "  }",
     "}",

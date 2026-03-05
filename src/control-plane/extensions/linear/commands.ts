@@ -11,6 +11,8 @@ import { openUrl } from "../../../lib/os.ts";
 import { display } from "../../../ui/display.ts";
 import {
   createTicketsStore,
+  type TicketComment,
+  type TicketMetadataValue,
   type TicketStatus,
   type TicketSummary,
 } from "../tickets/store.ts";
@@ -26,7 +28,9 @@ import {
 } from "./auth.ts";
 import {
   createLinearClient,
+  type LinearComment,
   type LinearIssue,
+  type LinearUser,
   type LinearWorkflowState,
   type LinearWorkflowStateType,
 } from "./client.ts";
@@ -48,6 +52,7 @@ const DEFAULT_OAUTH_SECRET_SERVICE = "hack-linear-auth";
 const OAUTH_TIMEOUT_MS = 5 * 60 * 1000;
 const OAUTH_POLL_INTERVAL_MS = 1000;
 const DEFAULT_PROJECT_SYNC_LIMIT = 100;
+const DEFAULT_DELIVERY_LIST_LIMIT = 50;
 const TRAILING_SLASH_REGEX = /\/+$/;
 
 export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
@@ -789,6 +794,91 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
       return 0;
     },
   },
+  {
+    name: "deliveries",
+    summary:
+      "List pending/applied Linear webhook deliveries from the auth broker",
+    scope: "global",
+    allowWhenDisabled: true,
+    handler: async ({ ctx, args }) => {
+      const parsed = parseDeliveriesArgs({ args });
+      if (!parsed.ok) {
+        ctx.logger.error({ message: parsed.error });
+        return 1;
+      }
+
+      const deliveries = await listLinearDeliveries({
+        controlPlaneConfig: ctx.controlPlaneConfig,
+        status: parsed.value.status,
+        limit: parsed.value.limit,
+      });
+      if (!deliveries.ok) {
+        ctx.logger.error({ message: deliveries.error });
+        return 1;
+      }
+
+      if (parsed.value.json) {
+        process.stdout.write(`${JSON.stringify(deliveries.data, null, 2)}\n`);
+        return 0;
+      }
+
+      await display.kv({
+        title: "Linear deliveries",
+        entries: [
+          ["status", deliveries.data.status ?? "all"],
+          ["count", String(deliveries.data.deliveries.length)],
+        ],
+      });
+      await display.table({
+        columns: ["Delivery ID", "Status", "Event", "Action", "Received At"],
+        rows: deliveries.data.deliveries.map((delivery) => [
+          delivery.id,
+          delivery.status,
+          delivery.eventType ?? "",
+          delivery.action ?? "",
+          delivery.receivedAt ?? "",
+        ]),
+      });
+      return 0;
+    },
+  },
+  {
+    name: "apply-delivery",
+    summary:
+      "Mark a pending Linear webhook delivery as applied after manual review",
+    scope: "global",
+    allowWhenDisabled: true,
+    handler: async ({ ctx, args }) => {
+      const parsed = parseApplyDeliveryArgs({ args });
+      if (!parsed.ok) {
+        ctx.logger.error({ message: parsed.error });
+        return 1;
+      }
+
+      const applied = await applyLinearDelivery({
+        controlPlaneConfig: ctx.controlPlaneConfig,
+        deliveryId: parsed.value.deliveryId,
+      });
+      if (!applied.ok) {
+        ctx.logger.error({ message: applied.error });
+        return 1;
+      }
+
+      if (parsed.value.json) {
+        process.stdout.write(`${JSON.stringify(applied.data, null, 2)}\n`);
+        return 0;
+      }
+
+      await display.kv({
+        title: "Linear delivery applied",
+        entries: [
+          ["delivery_id", applied.data.deliveryId],
+          ["status", applied.data.status],
+        ],
+      });
+      return 0;
+    },
+  },
 ];
 
 type LinearCommandContext = ExtensionCommandContext;
@@ -1305,9 +1395,38 @@ async function launchLinearOAuthBrowser(input: {
   return { ok: true };
 }
 
+type TicketSyncStore = Pick<
+  ReturnType<typeof createTicketsStore>,
+  | "appendComment"
+  | "createTicket"
+  | "getTicket"
+  | "getTicketDetail"
+  | "linkCommentExternalId"
+  | "listTickets"
+  | "recordSyncCheckpoint"
+  | "recordSyncConflict"
+  | "setStatus"
+  | "updateTicket"
+>;
+
+type LinearSyncClient = Pick<
+  ReturnType<typeof createLinearClient>,
+  | "createComment"
+  | "createIssue"
+  | "getIssueById"
+  | "getIssueByIdentifier"
+  | "getProject"
+  | "listIssueComments"
+  | "listProjectIssuesPage"
+  | "listTeamLabels"
+  | "listTeamStates"
+  | "listTeamUsers"
+  | "updateIssue"
+>;
+
 type SyncRuntime = {
-  readonly tickets: ReturnType<typeof createTicketsStore>;
-  readonly linear: ReturnType<typeof createLinearClient>;
+  readonly tickets: TicketSyncStore;
+  readonly linear: LinearSyncClient;
   readonly profileId: string;
   readonly apiUrl: string;
   readonly projectBinding: ReturnType<typeof resolveProjectLinearBinding>;
@@ -1318,6 +1437,72 @@ type SyncToggles = {
   readonly statuses: boolean;
   readonly dependencies: boolean;
   readonly projects: boolean;
+};
+
+type LinearDeliveryStatus = "pending" | "applied" | "ignored";
+
+type DeliveriesArgs = {
+  status?: LinearDeliveryStatus;
+  limit?: number;
+  json: boolean;
+};
+
+type ApplyDeliveryArgs = {
+  deliveryId: string;
+  json: boolean;
+};
+
+type SyncAssigneeResolution = {
+  readonly requestedAssignee?: string;
+  readonly matchedUserId?: string;
+  readonly matchedUserDisplayName?: string;
+  readonly applied: boolean;
+};
+
+type LinearToHackRuntime = {
+  readonly tickets: Pick<
+    TicketSyncStore,
+    | "appendComment"
+    | "createTicket"
+    | "getTicketDetail"
+    | "listTickets"
+    | "recordSyncCheckpoint"
+    | "recordSyncConflict"
+    | "setStatus"
+    | "updateTicket"
+  >;
+  readonly linear: Pick<
+    LinearSyncClient,
+    "getIssueByIdentifier" | "listIssueComments"
+  >;
+  readonly profileId: string;
+};
+
+type HackToLinearRuntime = {
+  readonly tickets: Pick<
+    TicketSyncStore,
+    | "getTicket"
+    | "getTicketDetail"
+    | "linkCommentExternalId"
+    | "recordSyncCheckpoint"
+    | "recordSyncConflict"
+    | "updateTicket"
+  >;
+  readonly linear: Pick<
+    LinearSyncClient,
+    | "createComment"
+    | "createIssue"
+    | "getIssueById"
+    | "getIssueByIdentifier"
+    | "getProject"
+    | "listIssueComments"
+    | "listTeamLabels"
+    | "listTeamStates"
+    | "listTeamUsers"
+    | "updateIssue"
+  >;
+  readonly profileId: string;
+  readonly projectBinding: ReturnType<typeof resolveProjectLinearBinding>;
 };
 
 async function createSyncRuntime(input: {
@@ -1369,18 +1554,481 @@ async function createSyncRuntime(input: {
   };
 }
 
+type RecordedSyncConflict = {
+  readonly field: string;
+  readonly authority: "hack" | "linear";
+  readonly summary: string;
+  readonly localValue?: TicketMetadataValue;
+  readonly remoteValue?: TicketMetadataValue;
+};
+
+type SyncTicketFromLinearSuccess = {
+  readonly ok: true;
+  readonly operation: "created" | "updated";
+  readonly ticketId: string;
+  readonly issueIdentifier: string;
+  readonly commentsPulled: number;
+  readonly conflictsRecorded: number;
+  readonly checkpointRecorded: boolean;
+};
+
+type SyncTicketToLinearSuccess = {
+  readonly ok: true;
+  readonly operation: "created" | "updated";
+  readonly ticketId: string;
+  readonly issueIdentifier: string;
+  readonly issueId: string;
+  readonly commentsPushed: number;
+  readonly conflictsRecorded: number;
+  readonly checkpointRecorded: boolean;
+  readonly assignee: SyncAssigneeResolution;
+};
+
+type LinearDeliverySummary = {
+  readonly id: string;
+  readonly status: string;
+  readonly eventType?: string;
+  readonly action?: string;
+  readonly receivedAt?: string;
+  readonly updatedAt?: string;
+  readonly payload?: unknown;
+};
+
+function resolveTicketAuthority(input: {
+  readonly ticket: TicketSummary;
+}): "hack" | "linear" {
+  const owner = input.ticket.owner.trim().toLowerCase();
+  const source = input.ticket.source.trim().toLowerCase();
+  if (owner === "linear" || source === "linear") {
+    return "linear";
+  }
+  return "hack";
+}
+
+function normalizeBodyForConflictComparison(input: {
+  readonly body?: string;
+}): string {
+  const body = (input.body ?? "").trim();
+  const markerIndex = body.indexOf("\n\n---\n\nLinear Issue:");
+  if (markerIndex !== -1) {
+    return body.slice(0, markerIndex).trim();
+  }
+  return body;
+}
+
+function normalizeCommentBody(input: { readonly body: string }): string {
+  return input.body.trim().replaceAll("\r\n", "\n");
+}
+
+function normalizeProjectValue(input: {
+  readonly projectId?: string;
+  readonly projectName?: string;
+}): TicketMetadataValue | undefined {
+  const projectId = readOptionalString(input.projectId);
+  const projectName = readOptionalString(input.projectName);
+  if (!(projectId || projectName)) {
+    return undefined;
+  }
+  return {
+    ...(projectId ? { projectId } : {}),
+    ...(projectName ? { projectName } : {}),
+  };
+}
+
+function detectAuthoritativeFieldConflicts(input: {
+  readonly authority: "hack" | "linear";
+  readonly ticket: TicketSummary;
+  readonly issue: LinearIssue;
+  readonly remoteProjection: Pick<
+    TicketProjectionFromLinearIssue,
+    "body" | "status"
+  >;
+}): readonly RecordedSyncConflict[] {
+  const conflicts: RecordedSyncConflict[] = [];
+  const localTitle = input.ticket.title.trim();
+  const remoteTitle = input.issue.title.trim();
+  if (localTitle !== remoteTitle) {
+    conflicts.push({
+      field: "title",
+      authority: input.authority,
+      summary: `Authoritative ${input.authority} title diverged from the other side.`,
+      localValue: localTitle,
+      remoteValue: remoteTitle,
+    });
+  }
+
+  const localBody = normalizeBodyForConflictComparison({
+    body: input.ticket.body,
+  });
+  const remoteBody = normalizeBodyForConflictComparison({
+    body: input.remoteProjection.body,
+  });
+  if (localBody !== remoteBody) {
+    conflicts.push({
+      field: "body",
+      authority: input.authority,
+      summary: `Authoritative ${input.authority} body diverged from the other side.`,
+      localValue: localBody,
+      remoteValue: remoteBody,
+    });
+  }
+
+  if (input.ticket.status !== input.remoteProjection.status) {
+    conflicts.push({
+      field: "status",
+      authority: input.authority,
+      summary: `Authoritative ${input.authority} status diverged from the other side.`,
+      localValue: input.ticket.status,
+      remoteValue: input.remoteProjection.status,
+    });
+  }
+
+  const localProject = normalizeProjectValue({
+    projectId: input.ticket.projectId,
+    projectName: input.ticket.projectName,
+  });
+  const remoteProject = normalizeProjectValue({
+    projectId: input.issue.projectId,
+    projectName: input.issue.projectName,
+  });
+  if (
+    JSON.stringify(localProject ?? null) !==
+    JSON.stringify(remoteProject ?? null)
+  ) {
+    conflicts.push({
+      field: "project",
+      authority: input.authority,
+      summary: `Authoritative ${input.authority} project routing diverged from the other side.`,
+      ...(localProject !== undefined ? { localValue: localProject } : {}),
+      ...(remoteProject !== undefined ? { remoteValue: remoteProject } : {}),
+    });
+  }
+
+  return conflicts;
+}
+
+function selectLinearCommentsToAppend(input: {
+  readonly localComments: readonly TicketComment[];
+  readonly remoteComments: readonly LinearComment[];
+}): readonly LinearComment[] {
+  const existingExternalIds = new Set(
+    input.localComments
+      .map((comment) => readOptionalString(comment.externalId))
+      .filter((value): value is string => value !== undefined)
+  );
+  const existingBodies = new Set(
+    input.localComments
+      .map((comment) => normalizeCommentBody({ body: comment.body }))
+      .filter((value) => value.length > 0)
+  );
+
+  return input.remoteComments.filter((comment) => {
+    if (existingExternalIds.has(comment.id)) {
+      return false;
+    }
+    const normalizedBody = normalizeCommentBody({ body: comment.body });
+    if (!normalizedBody) {
+      return false;
+    }
+    return !existingBodies.has(normalizedBody);
+  });
+}
+
+function selectTicketCommentsToPush(input: {
+  readonly localComments: readonly TicketComment[];
+  readonly remoteComments: readonly LinearComment[];
+}): readonly TicketComment[] {
+  const remoteBodies = new Set(
+    input.remoteComments
+      .map((comment) => normalizeCommentBody({ body: comment.body }))
+      .filter((value) => value.length > 0)
+  );
+
+  return input.localComments.filter((comment) => {
+    const source = comment.source.trim().toLowerCase();
+    if (source === "linear") {
+      return false;
+    }
+    if (readOptionalString(comment.externalId)) {
+      return false;
+    }
+    const normalizedBody = normalizeCommentBody({ body: comment.body });
+    if (!normalizedBody) {
+      return false;
+    }
+    return !remoteBodies.has(normalizedBody);
+  });
+}
+
+function deriveTicketAssigneeFromLinearIssue(input: {
+  readonly issue: LinearIssue;
+}): string | undefined {
+  return (
+    readOptionalString(input.issue.assigneeDisplayName) ??
+    readOptionalString(input.issue.assigneeEmail) ??
+    readOptionalString(input.issue.assigneeName)
+  );
+}
+
+function resolveLinearAssigneeMatch(input: {
+  readonly assignee?: string;
+  readonly users: readonly LinearUser[];
+}): LinearUser | null {
+  const requested = readOptionalString(input.assignee)?.toLowerCase();
+  if (!requested) {
+    return null;
+  }
+
+  const match =
+    input.users.find(
+      (user) => readOptionalString(user.email)?.toLowerCase() === requested
+    ) ??
+    input.users.find(
+      (user) =>
+        readOptionalString(user.displayName)?.toLowerCase() === requested
+    ) ??
+    input.users.find(
+      (user) => readOptionalString(user.name)?.toLowerCase() === requested
+    );
+
+  return match ?? null;
+}
+
+function buildConflictDedupKey(input: {
+  readonly field: string;
+  readonly localValue?: TicketMetadataValue;
+  readonly remoteValue?: TicketMetadataValue;
+}): string {
+  return [
+    input.field,
+    JSON.stringify(input.localValue ?? null),
+    JSON.stringify(input.remoteValue ?? null),
+  ].join("|");
+}
+
+async function recordAuthoritativeConflicts(input: {
+  readonly tickets: Pick<
+    TicketSyncStore,
+    "getTicketDetail" | "recordSyncConflict"
+  >;
+  readonly ticketId: string;
+  readonly conflicts: readonly RecordedSyncConflict[];
+}): Promise<
+  | { readonly ok: true; readonly recorded: number }
+  | { readonly ok: false; readonly error: string }
+> {
+  if (input.conflicts.length === 0) {
+    return { ok: true, recorded: 0 };
+  }
+
+  const detail = await input.tickets.getTicketDetail({
+    ticketId: input.ticketId,
+  });
+  const existing = new Set(
+    detail.conflicts
+      .filter((conflict) => conflict.status === "open")
+      .map((conflict) =>
+        buildConflictDedupKey({
+          field: conflict.field,
+          localValue: conflict.localValue,
+          remoteValue: conflict.remoteValue,
+        })
+      )
+  );
+
+  let recorded = 0;
+  for (const conflict of input.conflicts) {
+    const key = buildConflictDedupKey(conflict);
+    if (existing.has(key)) {
+      continue;
+    }
+    const result = await input.tickets.recordSyncConflict({
+      ticketId: input.ticketId,
+      provider: "linear",
+      field: conflict.field,
+      authority: conflict.authority,
+      summary: conflict.summary,
+      ...(conflict.localValue !== undefined
+        ? { localValue: conflict.localValue }
+        : {}),
+      ...(conflict.remoteValue !== undefined
+        ? { remoteValue: conflict.remoteValue }
+        : {}),
+    });
+    if (!result.ok) {
+      return { ok: false, error: result.error };
+    }
+    existing.add(key);
+    recorded += 1;
+  }
+
+  return { ok: true, recorded };
+}
+
+async function pullLinearCommentsToTicket(input: {
+  readonly runtime: Pick<LinearToHackRuntime, "tickets" | "linear">;
+  readonly ticketId: string;
+  readonly issue: LinearIssue;
+}): Promise<
+  | { readonly ok: true; readonly commentsPulled: number }
+  | { readonly ok: false; readonly error: string }
+> {
+  const detail = await input.runtime.tickets.getTicketDetail({
+    ticketId: input.ticketId,
+  });
+  const commentsResult = await input.runtime.linear.listIssueComments({
+    issueId: input.issue.id,
+  });
+  if (!commentsResult.ok) {
+    return { ok: false, error: commentsResult.error };
+  }
+
+  const selected = selectLinearCommentsToAppend({
+    localComments: detail.comments,
+    remoteComments: commentsResult.data,
+  });
+
+  for (const comment of selected) {
+    const appended = await input.runtime.tickets.appendComment({
+      ticketId: input.ticketId,
+      body: comment.body,
+      source: "linear",
+      actor:
+        readOptionalString(comment.userDisplayName) ??
+        readOptionalString(comment.userName) ??
+        readOptionalString(comment.userEmail) ??
+        "linear",
+      externalId: comment.id,
+    });
+    if (!appended.ok) {
+      return { ok: false, error: appended.error };
+    }
+  }
+
+  return { ok: true, commentsPulled: selected.length };
+}
+
+async function pushTicketCommentsToLinear(input: {
+  readonly runtime: Pick<HackToLinearRuntime, "tickets" | "linear">;
+  readonly ticketId: string;
+  readonly issueId: string;
+}): Promise<
+  | { readonly ok: true; readonly commentsPushed: number }
+  | { readonly ok: false; readonly error: string }
+> {
+  const detail = await input.runtime.tickets.getTicketDetail({
+    ticketId: input.ticketId,
+  });
+  const remoteComments = await input.runtime.linear.listIssueComments({
+    issueId: input.issueId,
+  });
+  if (!remoteComments.ok) {
+    return { ok: false, error: remoteComments.error };
+  }
+
+  const selected = selectTicketCommentsToPush({
+    localComments: detail.comments,
+    remoteComments: remoteComments.data,
+  });
+
+  for (const comment of selected) {
+    const created = await input.runtime.linear.createComment({
+      issueId: input.issueId,
+      body: comment.body,
+    });
+    if (!created.ok) {
+      return { ok: false, error: created.error };
+    }
+    const linked = await input.runtime.tickets.linkCommentExternalId({
+      ticketId: input.ticketId,
+      commentId: comment.commentId,
+      externalId: created.data.id,
+    });
+    if (!linked.ok) {
+      return { ok: false, error: linked.error };
+    }
+  }
+
+  return { ok: true, commentsPushed: selected.length };
+}
+
+async function recordLinearSyncCheckpoint(input: {
+  readonly tickets: Pick<TicketSyncStore, "recordSyncCheckpoint">;
+  readonly ticketId: string;
+  readonly profileId: string;
+  readonly direction: string;
+  readonly issue: LinearIssue;
+}): Promise<
+  | { readonly ok: true; readonly checkpointRecorded: boolean }
+  | { readonly ok: false; readonly error: string }
+> {
+  const checkpoint = await input.tickets.recordSyncCheckpoint({
+    ticketId: input.ticketId,
+    provider: "linear",
+    profileId: input.profileId,
+    direction: input.direction,
+    remoteCursor: input.issue.identifier,
+    localUpdatedAt: new Date().toISOString(),
+  });
+  if (!checkpoint.ok) {
+    return { ok: false, error: checkpoint.error };
+  }
+  return { ok: true, checkpointRecorded: true };
+}
+
+async function resolveTicketAssigneeForLinear(input: {
+  readonly runtime: Pick<HackToLinearRuntime, "linear">;
+  readonly ticket: TicketSummary;
+  readonly teamId: string;
+}): Promise<SyncAssigneeResolution> {
+  const requestedAssignee = readOptionalString(input.ticket.assignee);
+  if (!requestedAssignee) {
+    return { applied: false };
+  }
+
+  const users = await input.runtime.linear.listTeamUsers({
+    teamId: input.teamId,
+  });
+  if (!users.ok) {
+    return {
+      requestedAssignee,
+      applied: false,
+    };
+  }
+  const match = resolveLinearAssigneeMatch({
+    assignee: requestedAssignee,
+    users: users.data,
+  });
+  return {
+    requestedAssignee,
+    ...(match?.id ? { matchedUserId: match.id } : {}),
+    ...(readOptionalString(match?.displayName ?? match?.name)
+      ? {
+          matchedUserDisplayName:
+            readOptionalString(match?.displayName ?? match?.name) ?? undefined,
+        }
+      : {}),
+    applied: Boolean(match?.id),
+  };
+}
+
+type BrokerListDeliveriesPayload = {
+  readonly status?: string;
+  readonly limit?: number;
+  readonly deliveries: readonly LinearDeliverySummary[];
+};
+
+type BrokerApplyDeliveryPayload = {
+  readonly deliveryId: string;
+  readonly status: string;
+};
+
 async function syncIssueFromLinearToTicket(input: {
-  readonly runtime: SyncRuntime;
+  readonly runtime: LinearToHackRuntime;
   readonly issueIdentifier: string;
   readonly syncToggles: SyncToggles;
 }): Promise<
-  | {
-      readonly ok: true;
-      readonly operation: "created" | "updated";
-      readonly ticketId: string;
-      readonly issueIdentifier: string;
-    }
-  | { readonly ok: false; readonly error: string }
+  SyncTicketFromLinearSuccess | { readonly ok: false; readonly error: string }
 > {
   const issueResult = await input.runtime.linear.getIssueByIdentifier({
     identifier: input.issueIdentifier,
@@ -1406,20 +2054,13 @@ async function syncIssueFromLinearToTicket(input: {
 }
 
 async function syncTicketToLinearIssue(input: {
-  readonly runtime: SyncRuntime;
+  readonly runtime: HackToLinearRuntime;
   readonly ticketId: string;
   readonly explicitProjectId?: string;
   readonly explicitTeamId?: string;
   readonly syncToggles: SyncToggles;
 }): Promise<
-  | {
-      readonly ok: true;
-      readonly operation: "created" | "updated";
-      readonly ticketId: string;
-      readonly issueIdentifier: string;
-      readonly issueId: string;
-    }
-  | { readonly ok: false; readonly error: string }
+  SyncTicketToLinearSuccess | { readonly ok: false; readonly error: string }
 > {
   const ticket = await input.runtime.tickets.getTicket({
     ticketId: input.ticketId,
@@ -1457,13 +2098,71 @@ async function syncTicketToLinearIssue(input: {
     return fields;
   }
 
+  const authority = existingIssue.issue
+    ? resolveTicketAuthority({ ticket })
+    : "hack";
+
+  const assignee = await resolveTicketAssigneeForLinear({
+    runtime: input.runtime,
+    ticket,
+    teamId: target.value.teamId,
+  });
+
+  const conflicts = existingIssue.issue
+    ? detectAuthoritativeFieldConflicts({
+        authority,
+        ticket,
+        issue: existingIssue.issue,
+        remoteProjection: buildTicketProjectionFromLinearIssue({
+          issue: existingIssue.issue,
+          existingTicket: ticket,
+          syncToggles: input.syncToggles,
+          dependencyIndex: {
+            byLinearId: new Map<string, string>(),
+            byLinearIdentifier: new Map<string, string>(),
+          },
+        }),
+      })
+    : [];
+
+  const recordedConflicts = existingIssue.issue
+    ? await recordAuthoritativeConflicts({
+        tickets: input.runtime.tickets,
+        ticketId: ticket.ticketId,
+        conflicts,
+      })
+    : { ok: true as const, recorded: 0 };
+  if (!recordedConflicts.ok) {
+    return { ok: false, error: recordedConflicts.error };
+  }
+
+  const effectiveFields =
+    authority === "linear" && existingIssue.issue
+      ? {
+          ...fields.value,
+          title: existingIssue.issue.title,
+          description: existingIssue.issue.description ?? "",
+          ...(existingIssue.issue.assigneeId
+            ? { assigneeId: existingIssue.issue.assigneeId }
+            : {}),
+          ...(input.syncToggles.statuses
+            ? { stateId: existingIssue.issue.state.id }
+            : {}),
+        }
+      : fields.value;
+
+  const effectiveProjectId =
+    authority === "linear" && existingIssue.issue
+      ? existingIssue.issue.projectId
+      : target.value.projectId;
+
   const syncedIssue = await upsertLinearIssueForTicketSync({
     runtime: input.runtime,
     ticket,
     existingIssue: existingIssue.issue,
-    fields: fields.value,
+    fields: effectiveFields,
     teamId: target.value.teamId,
-    projectId: target.value.projectId,
+    projectId: effectiveProjectId,
     syncToggles: input.syncToggles,
   });
 
@@ -1485,12 +2184,36 @@ async function syncTicketToLinearIssue(input: {
     return { ok: false, error: updated.error };
   }
 
+  const pushedComments = await pushTicketCommentsToLinear({
+    runtime: input.runtime,
+    ticketId: ticket.ticketId,
+    issueId: syncedIssue.data.id,
+  });
+  if (!pushedComments.ok) {
+    return { ok: false, error: pushedComments.error };
+  }
+
+  const checkpoint = await recordLinearSyncCheckpoint({
+    tickets: input.runtime.tickets,
+    ticketId: ticket.ticketId,
+    profileId: input.runtime.profileId,
+    direction: "hack_to_linear",
+    issue: syncedIssue.data,
+  });
+  if (!checkpoint.ok) {
+    return { ok: false, error: checkpoint.error };
+  }
+
   return {
     ok: true,
     operation: existingIssue.issue ? "updated" : "created",
     ticketId: ticket.ticketId,
     issueIdentifier: syncedIssue.data.identifier,
     issueId: syncedIssue.data.id,
+    commentsPushed: pushedComments.commentsPushed,
+    conflictsRecorded: recordedConflicts.recorded,
+    checkpointRecorded: checkpoint.checkpointRecorded,
+    assignee,
   };
 }
 
@@ -1548,6 +2271,7 @@ type LinearTicketMutationFields = {
   readonly title: string;
   readonly description: string;
   readonly stateId?: string;
+  readonly assigneeId?: string;
   readonly labelIds?: readonly string[];
   readonly parentId?: string;
 };
@@ -1598,12 +2322,19 @@ async function resolveLinearMutationFieldsForTicketSync(input: {
     };
   }
 
+  const assignee = await resolveTicketAssigneeForLinear({
+    runtime: input.runtime,
+    ticket: input.ticket,
+    teamId: input.teamId,
+  });
+
   return {
     ok: true,
     value: {
       title,
       description: input.ticket.body ?? "",
       ...(stateId.value ? { stateId: stateId.value } : {}),
+      ...(assignee.matchedUserId ? { assigneeId: assignee.matchedUserId } : {}),
       ...(labelIds.value ? { labelIds: labelIds.value } : {}),
       ...(parentId.value !== undefined ? { parentId: parentId.value } : {}),
     },
@@ -1626,6 +2357,9 @@ async function upsertLinearIssueForTicketSync(input: {
       description: input.fields.description,
       ...(input.syncToggles.projects ? { projectId: input.projectId } : {}),
       ...(input.fields.stateId ? { stateId: input.fields.stateId } : {}),
+      ...(input.fields.assigneeId
+        ? { assigneeId: input.fields.assigneeId }
+        : {}),
       ...(input.fields.labelIds ? { labelIds: input.fields.labelIds } : {}),
       ...(input.fields.parentId !== undefined
         ? { parentId: input.fields.parentId }
@@ -1639,6 +2373,7 @@ async function upsertLinearIssueForTicketSync(input: {
     description: input.fields.description,
     ...(input.syncToggles.projects ? { projectId: input.projectId } : {}),
     ...(input.fields.stateId ? { stateId: input.fields.stateId } : {}),
+    ...(input.fields.assigneeId ? { assigneeId: input.fields.assigneeId } : {}),
     ...(input.fields.labelIds ? { labelIds: input.fields.labelIds } : {}),
     ...(input.fields.parentId !== undefined
       ? { parentId: input.fields.parentId }
@@ -1657,6 +2392,9 @@ async function syncProjectFromLinearToTickets(input: {
       readonly processed: number;
       readonly created: number;
       readonly updated: number;
+      readonly commentsPulled: number;
+      readonly conflictsRecorded: number;
+      readonly checkpointsRecorded: number;
     }
   | { readonly ok: false; readonly error: string }
 > {
@@ -1704,6 +2442,9 @@ async function syncProjectFromLinearToTickets(input: {
     processed: issuesResult.processed,
     created: upserted.created,
     updated: upserted.updated,
+    commentsPulled: upserted.commentsPulled,
+    conflictsRecorded: upserted.conflictsRecorded,
+    checkpointsRecorded: upserted.checkpointsRecorded,
   };
 }
 
@@ -1755,11 +2496,21 @@ async function upsertLinearProjectIssuesToTickets(input: {
     readonly byLinearIdentifier: Map<string, string>;
   };
 }): Promise<
-  | { readonly ok: true; readonly created: number; readonly updated: number }
+  | {
+      readonly ok: true;
+      readonly created: number;
+      readonly updated: number;
+      readonly commentsPulled: number;
+      readonly conflictsRecorded: number;
+      readonly checkpointsRecorded: number;
+    }
   | { readonly ok: false; readonly error: string }
 > {
   let created = 0;
   let updated = 0;
+  let commentsPulled = 0;
+  let conflictsRecorded = 0;
+  let checkpointsRecorded = 0;
 
   for (const issue of input.issues) {
     const synced = await upsertTicketFromLinearIssue({
@@ -1776,6 +2527,9 @@ async function upsertLinearProjectIssuesToTickets(input: {
     } else {
       updated += 1;
     }
+    commentsPulled += synced.commentsPulled;
+    conflictsRecorded += synced.conflictsRecorded;
+    checkpointsRecorded += synced.checkpointRecorded ? 1 : 0;
     input.dependencyIndex.byLinearId.set(issue.id, synced.ticketId);
     input.dependencyIndex.byLinearIdentifier.set(
       issue.identifier,
@@ -1787,6 +2541,9 @@ async function upsertLinearProjectIssuesToTickets(input: {
     ok: true,
     created,
     updated,
+    commentsPulled,
+    conflictsRecorded,
+    checkpointsRecorded,
   };
 }
 
@@ -1834,6 +2591,9 @@ async function syncProjectFromTicketsToLinear(input: {
       readonly processed: number;
       readonly created: number;
       readonly updated: number;
+      readonly commentsPushed: number;
+      readonly conflictsRecorded: number;
+      readonly checkpointsRecorded: number;
     }
   | { readonly ok: false; readonly error: string }
 > {
@@ -1853,6 +2613,9 @@ async function syncProjectFromTicketsToLinear(input: {
 
   let created = 0;
   let updated = 0;
+  let commentsPushed = 0;
+  let conflictsRecorded = 0;
+  let checkpointsRecorded = 0;
 
   for (const ticket of candidates) {
     const synced = await syncTicketToLinearIssue({
@@ -1870,6 +2633,9 @@ async function syncProjectFromTicketsToLinear(input: {
     } else {
       updated += 1;
     }
+    commentsPushed += synced.commentsPushed;
+    conflictsRecorded += synced.conflictsRecorded;
+    checkpointsRecorded += synced.checkpointRecorded ? 1 : 0;
   }
 
   return {
@@ -1877,11 +2643,14 @@ async function syncProjectFromTicketsToLinear(input: {
     processed: candidates.length,
     created,
     updated,
+    commentsPushed,
+    conflictsRecorded,
+    checkpointsRecorded,
   };
 }
 
 async function upsertTicketFromLinearIssue(input: {
-  readonly runtime: SyncRuntime;
+  readonly runtime: LinearToHackRuntime;
   readonly issue: LinearIssue;
   readonly syncToggles: SyncToggles;
   readonly dependencyIndex: {
@@ -1889,13 +2658,7 @@ async function upsertTicketFromLinearIssue(input: {
     readonly byLinearIdentifier: Map<string, string>;
   };
 }): Promise<
-  | {
-      readonly ok: true;
-      readonly operation: "created" | "updated";
-      readonly ticketId: string;
-      readonly issueIdentifier: string;
-    }
-  | { readonly ok: false; readonly error: string }
+  SyncTicketFromLinearSuccess | { readonly ok: false; readonly error: string }
 > {
   const snapshot = await input.runtime.tickets.listTickets();
   const existing = snapshot.find((ticket) =>
@@ -1909,20 +2672,39 @@ async function upsertTicketFromLinearIssue(input: {
     dependencyIndex: input.dependencyIndex,
   });
 
-  return existing
-    ? await applyLinearIssueToExistingTicket({
-        runtime: input.runtime,
+  if (existing) {
+    const authority = resolveTicketAuthority({ ticket: existing });
+    const recordedConflicts = await recordAuthoritativeConflicts({
+      tickets: input.runtime.tickets,
+      ticketId: existing.ticketId,
+      conflicts: detectAuthoritativeFieldConflicts({
+        authority,
+        ticket: existing,
         issue: input.issue,
-        existingTicket: existing,
-        projection,
-        syncToggles: input.syncToggles,
-      })
-    : await createTicketFromLinearIssueProjection({
-        runtime: input.runtime,
-        issue: input.issue,
-        projection,
-        syncToggles: input.syncToggles,
-      });
+        remoteProjection: projection,
+      }),
+    });
+    if (!recordedConflicts.ok) {
+      return { ok: false, error: recordedConflicts.error };
+    }
+
+    return await applyLinearIssueToExistingTicket({
+      runtime: input.runtime,
+      issue: input.issue,
+      existingTicket: existing,
+      projection,
+      syncToggles: input.syncToggles,
+      authority,
+      conflictsRecorded: recordedConflicts.recorded,
+    });
+  }
+
+  return await createTicketFromLinearIssueProjection({
+    runtime: input.runtime,
+    issue: input.issue,
+    projection,
+    syncToggles: input.syncToggles,
+  });
 }
 
 type TicketProjectionFromLinearIssue = {
@@ -1984,26 +2766,26 @@ function resolveLinearParentTicketId(input: {
 }
 
 async function applyLinearIssueToExistingTicket(input: {
-  readonly runtime: SyncRuntime;
+  readonly runtime: LinearToHackRuntime;
   readonly issue: LinearIssue;
   readonly existingTicket: TicketSummary;
   readonly projection: TicketProjectionFromLinearIssue;
   readonly syncToggles: SyncToggles;
+  readonly authority: "hack" | "linear";
+  readonly conflictsRecorded: number;
 }): Promise<
-  | {
-      readonly ok: true;
-      readonly operation: "updated";
-      readonly ticketId: string;
-      readonly issueIdentifier: string;
-    }
-  | { readonly ok: false; readonly error: string }
+  SyncTicketFromLinearSuccess | { readonly ok: false; readonly error: string }
 > {
+  const resolvedAssignee = deriveTicketAssigneeFromLinearIssue({
+    issue: input.issue,
+  });
   const updated = await input.runtime.tickets.updateTicket({
     ticketId: input.existingTicket.ticketId,
-    title: input.issue.title,
-    body: input.projection.body,
-    owner: "linear",
-    source: "linear",
+    ...(input.authority === "linear" ? { title: input.issue.title } : {}),
+    ...(input.authority === "linear" ? { body: input.projection.body } : {}),
+    ...(input.authority === "linear" ? { owner: "linear" as const } : {}),
+    ...(input.authority === "linear" ? { source: "linear" as const } : {}),
+    ...(resolvedAssignee ? { assignee: resolvedAssignee } : {}),
     tags: input.projection.tags,
     ...(input.projection.dependsOn !== undefined
       ? { dependsOn: input.projection.dependsOn }
@@ -2020,7 +2802,7 @@ async function applyLinearIssueToExistingTicket(input: {
     return { ok: false, error: updated.error };
   }
 
-  if (input.syncToggles.statuses) {
+  if (input.authority === "linear" && input.syncToggles.statuses) {
     const setStatus = await input.runtime.tickets.setStatus({
       ticketId: input.existingTicket.ticketId,
       status: input.projection.status,
@@ -2030,33 +2812,54 @@ async function applyLinearIssueToExistingTicket(input: {
     }
   }
 
+  const pulledComments = await pullLinearCommentsToTicket({
+    runtime: input.runtime,
+    ticketId: input.existingTicket.ticketId,
+    issue: input.issue,
+  });
+  if (!pulledComments.ok) {
+    return { ok: false, error: pulledComments.error };
+  }
+
+  const checkpoint = await recordLinearSyncCheckpoint({
+    tickets: input.runtime.tickets,
+    ticketId: input.existingTicket.ticketId,
+    profileId: input.runtime.profileId,
+    direction: "linear_to_hack",
+    issue: input.issue,
+  });
+  if (!checkpoint.ok) {
+    return { ok: false, error: checkpoint.error };
+  }
+
   return {
     ok: true,
     operation: "updated",
     ticketId: input.existingTicket.ticketId,
     issueIdentifier: input.issue.identifier,
+    commentsPulled: pulledComments.commentsPulled,
+    conflictsRecorded: input.conflictsRecorded,
+    checkpointRecorded: checkpoint.checkpointRecorded,
   };
 }
 
 async function createTicketFromLinearIssueProjection(input: {
-  readonly runtime: SyncRuntime;
+  readonly runtime: LinearToHackRuntime;
   readonly issue: LinearIssue;
   readonly projection: TicketProjectionFromLinearIssue;
   readonly syncToggles: SyncToggles;
 }): Promise<
-  | {
-      readonly ok: true;
-      readonly operation: "created";
-      readonly ticketId: string;
-      readonly issueIdentifier: string;
-    }
-  | { readonly ok: false; readonly error: string }
+  SyncTicketFromLinearSuccess | { readonly ok: false; readonly error: string }
 > {
+  const resolvedAssignee = deriveTicketAssigneeFromLinearIssue({
+    issue: input.issue,
+  });
   const created = await input.runtime.tickets.createTicket({
     title: input.issue.title,
     body: input.projection.body,
     owner: "linear",
     source: "linear",
+    ...(resolvedAssignee ? { assignee: resolvedAssignee } : {}),
     tags: input.projection.tags,
     ...(input.projection.dependsOn !== undefined
       ? { dependsOn: input.projection.dependsOn }
@@ -2083,16 +2886,39 @@ async function createTicketFromLinearIssueProjection(input: {
     }
   }
 
+  const pulledComments = await pullLinearCommentsToTicket({
+    runtime: input.runtime,
+    ticketId: created.ticket.ticketId,
+    issue: input.issue,
+  });
+  if (!pulledComments.ok) {
+    return { ok: false, error: pulledComments.error };
+  }
+
+  const checkpoint = await recordLinearSyncCheckpoint({
+    tickets: input.runtime.tickets,
+    ticketId: created.ticket.ticketId,
+    profileId: input.runtime.profileId,
+    direction: "linear_to_hack",
+    issue: input.issue,
+  });
+  if (!checkpoint.ok) {
+    return { ok: false, error: checkpoint.error };
+  }
+
   return {
     ok: true,
     operation: "created",
     ticketId: created.ticket.ticketId,
     issueIdentifier: input.issue.identifier,
+    commentsPulled: pulledComments.commentsPulled,
+    conflictsRecorded: 0,
+    checkpointRecorded: checkpoint.checkpointRecorded,
   };
 }
 
 async function buildLinearDependencyIndex(input: {
-  readonly tickets: ReturnType<typeof createTicketsStore>;
+  readonly tickets: Pick<TicketSyncStore, "listTickets">;
 }): Promise<{
   readonly byLinearId: Map<string, string>;
   readonly byLinearIdentifier: Map<string, string>;
@@ -2932,16 +3758,20 @@ function buildAuthorizeUrl(input: {
 
 async function fetchJson<T>(input: {
   readonly url: string;
+  readonly init?: RequestInit;
 }): Promise<
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly error: string }
 > {
   try {
     const response = await fetch(input.url, {
+      method: input.init?.method,
       headers: {
         accept: "application/json",
         "user-agent": "hack-cli",
+        ...(input.init?.headers ?? {}),
       },
+      body: input.init?.body,
     });
     const bodyText = await response.text();
     const payload = bodyText ? (JSON.parse(bodyText) as unknown) : null;
@@ -2962,6 +3792,196 @@ async function fetchJson<T>(input: {
       error: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+async function listLinearDeliveries(input: {
+  readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
+  readonly status?: LinearDeliveryStatus;
+  readonly limit?: number;
+}): Promise<
+  | { readonly ok: true; readonly data: BrokerListDeliveriesPayload }
+  | { readonly ok: false; readonly error: string }
+> {
+  const brokerConfig = resolveOAuthBrokerRuntimeConfig({
+    controlPlaneConfig: input.controlPlaneConfig,
+  });
+  const normalizedLimit = normalizePositiveInteger({
+    value: input.limit,
+    fallback: DEFAULT_DELIVERY_LIST_LIMIT,
+  });
+  const query = new URLSearchParams();
+  if (input.status) {
+    query.set("status", input.status);
+  }
+  if (normalizedLimit > 0) {
+    query.set("limit", String(normalizedLimit));
+  }
+
+  const candidatePaths = [
+    "/v1/linear/deliveries",
+    "/v1/linear/webhook-deliveries",
+    "/v1/auth/linear/deliveries",
+  ];
+
+  let lastError = "Unable to list Linear deliveries.";
+  for (const path of candidatePaths) {
+    const url = new URL(path, `${brokerConfig.baseUrl}/`);
+    if (query.size > 0) {
+      url.search = query.toString();
+    }
+    const response = await fetchJson<unknown>({
+      url: url.toString(),
+    });
+    if (!response.ok) {
+      lastError = response.error;
+      continue;
+    }
+
+    const payload = parseLinearDeliveriesListPayload({
+      payload: response.value,
+      requestedStatus: input.status,
+      requestedLimit: normalizedLimit,
+    });
+    if (payload) {
+      return { ok: true, data: payload };
+    }
+    lastError = "Linear delivery payload was invalid.";
+  }
+
+  return { ok: false, error: lastError };
+}
+
+async function applyLinearDelivery(input: {
+  readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
+  readonly deliveryId: string;
+}): Promise<
+  | { readonly ok: true; readonly data: BrokerApplyDeliveryPayload }
+  | { readonly ok: false; readonly error: string }
+> {
+  const brokerConfig = resolveOAuthBrokerRuntimeConfig({
+    controlPlaneConfig: input.controlPlaneConfig,
+  });
+  const candidatePaths = [
+    `/v1/linear/deliveries/${encodeURIComponent(input.deliveryId)}/apply`,
+    `/v1/linear/webhook-deliveries/${encodeURIComponent(input.deliveryId)}/apply`,
+    `/v1/auth/linear/deliveries/${encodeURIComponent(input.deliveryId)}/apply`,
+  ];
+
+  let lastError = "Unable to apply Linear delivery.";
+  for (const path of candidatePaths) {
+    const url = new URL(path, `${brokerConfig.baseUrl}/`);
+    const response = await fetchJson<unknown>({
+      url: url.toString(),
+      init: {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+      },
+    });
+    if (!response.ok) {
+      lastError = response.error;
+      continue;
+    }
+    const payload = parseLinearDeliveryApplyPayload({
+      payload: response.value,
+      deliveryId: input.deliveryId,
+    });
+    if (payload) {
+      return { ok: true, data: payload };
+    }
+    lastError = "Linear delivery apply payload was invalid.";
+  }
+
+  return { ok: false, error: lastError };
+}
+
+function parseLinearDeliveriesListPayload(input: {
+  readonly payload: unknown;
+  readonly requestedStatus?: LinearDeliveryStatus;
+  readonly requestedLimit: number;
+}): BrokerListDeliveriesPayload | null {
+  if (!isRecord(input.payload)) {
+    return null;
+  }
+  let deliveriesRaw: unknown[] | null = null;
+  if (Array.isArray(input.payload.deliveries)) {
+    deliveriesRaw = input.payload.deliveries;
+  } else if (Array.isArray(input.payload.items)) {
+    deliveriesRaw = input.payload.items;
+  }
+  if (!deliveriesRaw) {
+    return null;
+  }
+  const deliveries = deliveriesRaw
+    .map((value) => parseLinearDeliverySummary({ value }))
+    .filter((value): value is LinearDeliverySummary => value !== null)
+    .slice(0, input.requestedLimit);
+  return {
+    status:
+      readOptionalString(input.payload.status) ??
+      input.requestedStatus ??
+      undefined,
+    limit:
+      typeof input.payload.limit === "number" &&
+      Number.isFinite(input.payload.limit)
+        ? input.payload.limit
+        : input.requestedLimit,
+    deliveries,
+  };
+}
+
+function parseLinearDeliverySummary(input: {
+  readonly value: unknown;
+}): LinearDeliverySummary | null {
+  if (!isRecord(input.value)) {
+    return null;
+  }
+  const id = readOptionalString(input.value.id);
+  const status = readOptionalString(input.value.status);
+  if (!(id && status)) {
+    return null;
+  }
+  return {
+    id,
+    status,
+    ...(readOptionalString(input.value.eventType)
+      ? { eventType: readOptionalString(input.value.eventType) }
+      : {}),
+    ...(readOptionalString(input.value.action)
+      ? { action: readOptionalString(input.value.action) }
+      : {}),
+    ...(readOptionalString(input.value.receivedAt)
+      ? { receivedAt: readOptionalString(input.value.receivedAt) }
+      : {}),
+    ...(readOptionalString(input.value.updatedAt)
+      ? { updatedAt: readOptionalString(input.value.updatedAt) }
+      : {}),
+    ...(input.value.payload !== undefined
+      ? { payload: input.value.payload }
+      : {}),
+  };
+}
+
+function parseLinearDeliveryApplyPayload(input: {
+  readonly payload: unknown;
+  readonly deliveryId: string;
+}): BrokerApplyDeliveryPayload | null {
+  if (!isRecord(input.payload)) {
+    return null;
+  }
+  const deliveryId =
+    readOptionalString(input.payload.deliveryId) ??
+    readOptionalString(input.payload.id) ??
+    input.deliveryId;
+  const status = readOptionalString(input.payload.status);
+  if (!status) {
+    return null;
+  }
+  return {
+    deliveryId,
+    status,
+  };
 }
 
 async function exchangeLinearOAuthCode(input: {
@@ -3323,6 +4343,112 @@ type SyncProjectArgs = {
   syncLabels?: boolean;
   json: boolean;
 };
+
+function parseDeliveriesArgs(input: {
+  readonly args: readonly string[];
+}):
+  | { readonly ok: true; readonly value: DeliveriesArgs }
+  | { readonly ok: false; readonly error: string } {
+  const value: DeliveriesArgs = {
+    status: "pending",
+    json: false,
+  };
+
+  for (let i = 0; i < input.args.length; i += 1) {
+    const token = input.args[i] ?? "";
+    if (token === "--json") {
+      value.json = true;
+      continue;
+    }
+    if (token.startsWith("--limit=")) {
+      value.limit = Number.parseInt(token.slice("--limit=".length), 10);
+      continue;
+    }
+    if (token === "--limit") {
+      const next = input.args[i + 1];
+      if (!next || next.startsWith("-")) {
+        return { ok: false, error: "--limit requires a value." };
+      }
+      value.limit = Number.parseInt(next, 10);
+      i += 1;
+      continue;
+    }
+    const handled = assignKeyValueFlag({
+      token,
+      args: input.args,
+      index: i,
+      out: value,
+      keys: {
+        status: "status",
+      },
+    });
+    if (!handled.ok) {
+      return { ok: false, error: handled.error };
+    }
+    i = handled.nextIndex;
+  }
+
+  if (
+    !(
+      value.status === "pending" ||
+      value.status === "applied" ||
+      value.status === "ignored"
+    )
+  ) {
+    return {
+      ok: false,
+      error: `Invalid --status value: ${String(value.status)}. Expected pending|applied|ignored.`,
+    };
+  }
+
+  return { ok: true, value };
+}
+
+function parseApplyDeliveryArgs(input: {
+  readonly args: readonly string[];
+}):
+  | { readonly ok: true; readonly value: ApplyDeliveryArgs }
+  | { readonly ok: false; readonly error: string } {
+  const value: Partial<ApplyDeliveryArgs> & { json: boolean } = {
+    json: false,
+  };
+
+  for (let i = 0; i < input.args.length; i += 1) {
+    const token = input.args[i] ?? "";
+    if (token === "--json") {
+      value.json = true;
+      continue;
+    }
+    const handled = assignKeyValueFlag({
+      token,
+      args: input.args,
+      index: i,
+      out: value,
+      keys: {
+        "delivery-id": "deliveryId",
+      },
+    });
+    if (!handled.ok) {
+      return { ok: false, error: handled.error };
+    }
+    i = handled.nextIndex;
+  }
+
+  if (!value.deliveryId) {
+    return {
+      ok: false,
+      error: "Missing --delivery-id <ID>.",
+    };
+  }
+
+  return {
+    ok: true,
+    value: {
+      deliveryId: value.deliveryId,
+      json: value.json,
+    },
+  };
+}
 
 function parseSetupArgs(input: {
   readonly args: readonly string[];
@@ -3821,7 +4947,10 @@ function normalizeOAuthActor(value: string | undefined): "user" | "app" | null {
 
 export const __testOnly = {
   buildOAuthArgsFromConnectArgs,
+  detectAuthoritativeFieldConflicts,
+  parseApplyDeliveryArgs,
   parseConnectArgs,
+  parseDeliveriesArgs,
   parseProjectBindArgs,
   parseProjectsArgs,
   resolveOAuthBrokerRuntimeConfig,
@@ -3829,6 +4958,10 @@ export const __testOnly = {
   parseStatusArgs,
   parseSyncIssueArgs,
   parseSyncProjectArgs,
+  selectLinearCommentsToAppend,
+  selectTicketCommentsToPush,
   shouldFallbackConnectToOAuth,
   shouldUseBrokerOAuthFlow,
+  syncIssueFromLinearToTicket,
+  syncTicketToLinearIssue,
 } as const;

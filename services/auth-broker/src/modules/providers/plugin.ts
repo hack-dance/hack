@@ -45,6 +45,8 @@ export function createProvidersPlugin({
         tokenUrl: config.linearTokenUrl,
         apiBaseUrl: config.linearApiBaseUrl,
         webhookPath: config.linearWebhookPath,
+        connectionsPath: "/v1/auth/linear/connections",
+        accessControlMode: "manual_unenforced",
         developerAppTokenConfigured: Boolean(config.linearDeveloperAppToken),
         webhookSignatureVerification: config.linearWebhookSigningSecret
           ? "hmac-sha256"

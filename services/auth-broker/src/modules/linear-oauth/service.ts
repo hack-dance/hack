@@ -1,5 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
+import type { BetterAuthRuntime } from "../../better-auth.ts";
+import { resolveBetterAuthUserFromLinearAccount } from "../../better-auth-link.ts";
 import type { BrokerConfig } from "../../config.ts";
 import { type FlowStore, hashDeviceCode } from "../../flow-store.ts";
 import {
@@ -8,6 +10,8 @@ import {
   fetchIdentity,
   refreshAccessToken,
 } from "../../linear.ts";
+import type { OAuthFlow } from "../../types.ts";
+import type { LinearConnectionStore } from "../linear-connections/service.ts";
 import type { LinearOAuthModel } from "./model.ts";
 
 export type StartFlowPayload = {
@@ -83,51 +87,29 @@ export function createFlow(input: {
 export async function handleLinearCallback(input: {
   readonly config: BrokerConfig;
   readonly flowStore: FlowStore;
+  readonly connectionStore: LinearConnectionStore;
+  readonly betterAuthRuntime: BetterAuthRuntime;
   readonly query: LinearOAuthModel["callbackQuery"];
 }): Promise<Response> {
-  const state = normalizeText(input.query.state);
-  if (!state) {
-    return renderCallbackPage({
-      title: "Missing state",
-      body: "This Linear sign-in session is missing a state token.",
-      statusCode: 400,
-    });
+  const flowResult = resolveLinearCallbackFlow({
+    flowStore: input.flowStore,
+    query: input.query,
+  });
+  if (!flowResult.ok) {
+    return flowResult.response;
   }
-
-  const flow = input.flowStore.getByState(state);
-  if (!(flow && flow.provider === "linear")) {
-    return renderCallbackPage({
-      title: "Session not found",
-      body: "This Linear sign-in session was not found or already expired.",
-      statusCode: 404,
-    });
-  }
-
-  const nowMs = Date.now();
-  if (nowMs > flow.expiresAtMs) {
-    input.flowStore.markError({
-      flowId: flow.id,
-      error: "oauth_flow_expired",
-      status: "expired",
-    });
-    return renderCallbackPage({
-      title: "Session expired",
-      body: "This Linear sign-in session expired. Start a new flow from Hack.",
-      statusCode: 410,
-    });
-  }
+  const flow = flowResult.flow;
 
   const oauthError = normalizeText(input.query.error);
   if (oauthError) {
     const oauthDescription = normalizeText(input.query.error_description);
-    input.flowStore.markError({
+    return markLinearFlowError({
+      flowStore: input.flowStore,
       flowId: flow.id,
       error: oauthDescription
         ? `${oauthError}: ${oauthDescription}`
         : oauthError,
       status: "error",
-    });
-    return renderCallbackPage({
       title: "Linear authorization failed",
       body:
         oauthDescription ??
@@ -138,12 +120,11 @@ export async function handleLinearCallback(input: {
 
   const code = normalizeText(input.query.code);
   if (!code) {
-    input.flowStore.markError({
+    return markLinearFlowError({
+      flowStore: input.flowStore,
       flowId: flow.id,
       error: "missing_authorization_code",
       status: "error",
-    });
-    return renderCallbackPage({
       title: "Missing authorization code",
       body: "Linear did not return a code for this sign-in request.",
       statusCode: 400,
@@ -152,12 +133,11 @@ export async function handleLinearCallback(input: {
 
   const clientId = input.config.linearClientId;
   if (!(clientId && flow.codeVerifier)) {
-    input.flowStore.markError({
+    return markLinearFlowError({
+      flowStore: input.flowStore,
       flowId: flow.id,
       error: "linear_oauth_not_configured",
       status: "error",
-    });
-    return renderCallbackPage({
       title: "Linear OAuth not configured",
       body: "The auth broker is missing Linear OAuth configuration.",
       statusCode: 412,
@@ -175,12 +155,11 @@ export async function handleLinearCallback(input: {
     codeVerifier: flow.codeVerifier,
   });
   if (!exchange.ok) {
-    input.flowStore.markError({
+    return markLinearFlowError({
+      flowStore: input.flowStore,
       flowId: flow.id,
       error: exchange.error,
       status: "error",
-    });
-    return renderCallbackPage({
       title: "Token exchange failed",
       body: exchange.error,
       statusCode: 502,
@@ -192,32 +171,139 @@ export async function handleLinearCallback(input: {
     token: exchange.token,
   });
   if (!identity.ok) {
-    input.flowStore.markError({
+    return markLinearFlowError({
+      flowStore: input.flowStore,
       flowId: flow.id,
       error: identity.error,
       status: "error",
-    });
-    return renderCallbackPage({
       title: "Linear account lookup failed",
       body: identity.error,
       statusCode: 502,
     });
   }
 
+  const betterAuthLink = await resolveBetterAuthUserFromLinearAccount({
+    runtime: input.betterAuthRuntime,
+    account: identity.account,
+    autoProvision: input.config.betterAuthLinearAutoProvisionUsers,
+  });
+  const linkedAccount = {
+    ...identity.account,
+    ...(betterAuthLink.userId
+      ? { betterAuthUserId: betterAuthLink.userId }
+      : {}),
+    ...(betterAuthLink.state
+      ? { betterAuthLinkState: betterAuthLink.state }
+      : {}),
+  } as const;
+
   input.flowStore.markComplete({
     flowId: flow.id,
-    account: identity.account,
+    account: linkedAccount,
     token: exchange.token,
     tokenExpiresAt: exchange.tokenExpiresAt,
     refreshToken: exchange.refreshToken,
     refreshTokenExpiresAt: exchange.refreshTokenExpiresAt,
   });
+  try {
+    await input.connectionStore.upsertConnection({
+      profileId: flow.profileId,
+      accountId: identity.account.accountId,
+      accountName: identity.account.accountName,
+      accountEmail: identity.account.accountEmail,
+      betterAuthUserId: betterAuthLink.userId ?? null,
+      organizationId: identity.account.organizationId,
+      teamId: identity.account.teamIds?.[0] ?? null,
+      metadata: {
+        ...(betterAuthLink.state
+          ? { betterAuthLinkState: betterAuthLink.state }
+          : {}),
+        ...(identity.account.organizationName
+          ? { organizationName: identity.account.organizationName }
+          : {}),
+        ...(identity.account.teamIds
+          ? { teamIds: identity.account.teamIds }
+          : {}),
+      },
+    });
+  } catch {
+    // Connection persistence is diagnostic state and must not fail OAuth completion.
+  }
 
   return renderCallbackPage({
     title: "Linear connected",
     body: "Authorization is complete. Return to Hack to finish account setup.",
     statusCode: 200,
     success: true,
+  });
+}
+
+function resolveLinearCallbackFlow(input: {
+  readonly flowStore: FlowStore;
+  readonly query: LinearOAuthModel["callbackQuery"];
+}):
+  | { readonly ok: true; readonly flow: OAuthFlow }
+  | { readonly ok: false; readonly response: Response } {
+  const state = normalizeText(input.query.state);
+  if (!state) {
+    return {
+      ok: false,
+      response: renderCallbackPage({
+        title: "Missing state",
+        body: "This Linear sign-in session is missing a state token.",
+        statusCode: 400,
+      }),
+    };
+  }
+  const flow = input.flowStore.getByState(state);
+  if (!(flow && flow.provider === "linear")) {
+    return {
+      ok: false,
+      response: renderCallbackPage({
+        title: "Session not found",
+        body: "This Linear sign-in session was not found or already expired.",
+        statusCode: 404,
+      }),
+    };
+  }
+  if (Date.now() <= flow.expiresAtMs) {
+    return {
+      ok: true,
+      flow,
+    };
+  }
+  return {
+    ok: false,
+    response: markLinearFlowError({
+      flowStore: input.flowStore,
+      flowId: flow.id,
+      error: "oauth_flow_expired",
+      status: "expired",
+      title: "Session expired",
+      body: "This Linear sign-in session expired. Start a new flow from Hack.",
+      statusCode: 410,
+    }),
+  };
+}
+
+function markLinearFlowError(input: {
+  readonly flowStore: FlowStore;
+  readonly flowId: string;
+  readonly error: string;
+  readonly status: "error" | "expired";
+  readonly title: string;
+  readonly body: string;
+  readonly statusCode: number;
+}): Response {
+  input.flowStore.markError({
+    flowId: input.flowId,
+    error: input.error,
+    status: input.status,
+  });
+  return renderCallbackPage({
+    title: input.title,
+    body: input.body,
+    statusCode: input.statusCode,
   });
 }
 

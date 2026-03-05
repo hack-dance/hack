@@ -1,6 +1,26 @@
 import type { OAuthFlowAccount } from "./types.ts";
 
 const USER_AGENT = "hack-auth-broker";
+const LINEAR_VIEWER_QUERY = [
+  "query LinearViewer {",
+  "  viewer {",
+  "    id",
+  "    name",
+  "    email",
+  "    displayName",
+  "    organization {",
+  "      id",
+  "      name",
+  "    }",
+  "    teams(first: 50) {",
+  "      nodes {",
+  "        id",
+  "        name",
+  "      }",
+  "    }",
+  "  }",
+  "}",
+].join("\n");
 
 type LinearTokenExchangeResult =
   | {
@@ -175,68 +195,124 @@ export async function fetchIdentity(input: {
       "user-agent": USER_AGENT,
     },
     body: JSON.stringify({
-      query: [
-        "query LinearViewer {",
-        "  viewer {",
-        "    id",
-        "    name",
-        "    email",
-        "    displayName",
-        "  }",
-        "}",
-      ].join("\n"),
+      query: LINEAR_VIEWER_QUERY,
     }),
   });
-  const payload = (await response.json().catch(() => null)) as unknown;
-  if (!isRecord(payload)) {
-    return {
-      ok: false,
-      statusCode: response.status,
-      error: `identity_lookup_failed: invalid payload (${response.status})`,
-    };
+  const payload = await readJsonRecord({
+    response,
+    errorPrefix: "identity_lookup_failed",
+  });
+  if (!payload.ok) {
+    return payload;
   }
-  const errors = Array.isArray(payload.errors)
-    ? payload.errors
-        .map((entry) =>
-          isRecord(entry) ? readOptionalString(entry.message) : null
-        )
-        .filter((entry): entry is string => Boolean(entry))
-    : [];
-  if (!response.ok || errors.length > 0) {
-    return {
-      ok: false,
-      statusCode: response.status,
-      error: errors[0] ?? response.statusText,
-    };
+  const responseError = readGraphqlResponseError({
+    payload: payload.value,
+    response,
+  });
+  if (responseError) {
+    return responseError;
   }
-
-  const viewer =
-    isRecord(payload.data) && isRecord(payload.data.viewer)
-      ? payload.data.viewer
-      : null;
-  const accountId = viewer ? readOptionalString(viewer.id) : null;
-  if (!accountId) {
+  const account = buildIdentityAccount({ payload: payload.value });
+  if (!account) {
     return {
       ok: false,
       statusCode: 502,
       error: "identity_lookup_failed: missing viewer.id",
     };
   }
+  return { ok: true, account };
+}
+
+function buildIdentityAccount(input: {
+  readonly payload: Record<string, unknown>;
+}): OAuthFlowAccount | null {
+  const viewer = readViewerRecord({ payload: input.payload });
+  const accountId = readOptionalString(viewer?.id);
+  if (!accountId) {
+    return null;
+  }
   const accountName =
-    (viewer && readOptionalString(viewer.displayName)) ??
-    (viewer && readOptionalString(viewer.name)) ??
+    readOptionalString(viewer?.displayName) ??
+    readOptionalString(viewer?.name) ??
     undefined;
-  const accountEmail =
-    (viewer && readOptionalString(viewer.email)) ?? undefined;
+  const accountEmail = readOptionalString(viewer?.email) ?? undefined;
+  const organization = readRecord(viewer?.organization);
+  const organizationId = readOptionalString(organization?.id) ?? undefined;
+  const organizationName = readOptionalString(organization?.name) ?? undefined;
+  const teamIds = readTeamIds({ viewer });
+  return {
+    accountId,
+    ...(accountName ? { accountName, accountHandle: accountName } : {}),
+    ...(accountEmail ? { accountEmail } : {}),
+    ...(organizationId ? { organizationId } : {}),
+    ...(organizationName ? { organizationName } : {}),
+    ...(teamIds.length > 0 ? { teamIds } : {}),
+  };
+}
+
+async function readJsonRecord(input: {
+  readonly response: Response;
+  readonly errorPrefix: string;
+}): Promise<
+  | { readonly ok: true; readonly value: Record<string, unknown> }
+  | { readonly ok: false; readonly error: string; readonly statusCode: number }
+> {
+  const payload = (await input.response.json().catch(() => null)) as unknown;
+  if (!isRecord(payload)) {
+    return {
+      ok: false,
+      statusCode: input.response.status,
+      error: `${input.errorPrefix}: invalid payload (${input.response.status})`,
+    };
+  }
   return {
     ok: true,
-    account: {
-      accountId,
-      ...(accountName ? { accountName } : {}),
-      ...(accountEmail ? { accountEmail } : {}),
-      ...(accountName ? { accountHandle: accountName } : {}),
-    },
+    value: payload,
   };
+}
+
+function readGraphqlResponseError(input: {
+  readonly payload: Record<string, unknown>;
+  readonly response: Response;
+}): {
+  readonly ok: false;
+  readonly error: string;
+  readonly statusCode: number;
+} | null {
+  const errors = Array.isArray(input.payload.errors)
+    ? input.payload.errors
+        .map((entry) => readOptionalString(readRecord(entry)?.message))
+        .filter((entry): entry is string => Boolean(entry))
+    : [];
+  if (input.response.ok && errors.length === 0) {
+    return null;
+  }
+  return {
+    ok: false,
+    statusCode: input.response.status,
+    error: errors[0] ?? input.response.statusText,
+  };
+}
+
+function readViewerRecord(input: {
+  readonly payload: Record<string, unknown>;
+}): Record<string, unknown> | null {
+  const data = readRecord(input.payload.data);
+  return readRecord(data?.viewer);
+}
+
+function readTeamIds(input: {
+  readonly viewer: Record<string, unknown> | null;
+}): string[] {
+  const teams = readRecord(input.viewer?.teams);
+  const nodes = Array.isArray(teams?.nodes) ? teams.nodes : [];
+  return nodes
+    .map((entry) => readOptionalString(readRecord(entry)?.id))
+    .filter((entry): entry is string => Boolean(entry));
+}
+
+function readRecord(value: unknown): Record<string, unknown> | null {
+  return isRecord(value) ? value : null;
 }
 
 function readOptionalString(value: unknown): string | null {

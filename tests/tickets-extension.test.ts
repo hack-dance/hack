@@ -3,6 +3,8 @@ import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
+import { createTicketsStore } from "../src/control-plane/extensions/tickets/store.ts";
+import { readControlPlaneConfig } from "../src/control-plane/sdk/config.ts";
 import { testIntegration } from "./helpers/ci.ts";
 
 const originalGlobalConfigPath = process.env.HACK_GLOBAL_CONFIG_PATH;
@@ -119,6 +121,125 @@ testIntegration(
   }
 );
 
+testIntegration(
+  "tickets extension: assignee, comment, and conflict resolution commands work end to end",
+  { timeout: 60_000 },
+  async () => {
+    const root = await mkdirTempDir({ prefix: "hack-cli-tickets-sync-e2e-" });
+    const projectDir = join(root, "project");
+
+    await mkdir(projectDir, { recursive: true });
+    await copyDir({
+      from: resolve(import.meta.dir, "../examples/tickets"),
+      to: projectDir,
+    });
+
+    await run({ cwd: projectDir, cmd: ["git", "init"] });
+    await run({
+      cwd: projectDir,
+      cmd: ["git", "config", "user.email", "tests@hack"],
+    });
+    await run({
+      cwd: projectDir,
+      cmd: ["git", "config", "user.name", "hack-cli-tests"],
+    });
+    await run({ cwd: projectDir, cmd: ["git", "add", "-A"] });
+    await run({ cwd: projectDir, cmd: ["git", "commit", "-m", "init"] });
+
+    const created = await runHack({
+      cwd: projectDir,
+      args: [
+        "tickets",
+        "create",
+        "--title",
+        "Sync lifecycle ticket",
+        "--assignee",
+        "alice@hack",
+        "--json",
+      ],
+    });
+    const createdJson = JSON.parse(created.stdout) as {
+      ticket: { ticketId: string };
+    };
+    const ticketId = createdJson.ticket.ticketId;
+
+    const commented = await runHack({
+      cwd: projectDir,
+      args: [
+        "tickets",
+        "comment",
+        ticketId,
+        "--body",
+        "Append only note",
+        "--source",
+        "hack",
+        "--json",
+      ],
+    });
+    const commentJson = JSON.parse(commented.stdout) as {
+      comment: { body: string; source: string };
+    };
+    expect(commentJson.comment.body).toBe("Append only note");
+    expect(commentJson.comment.source).toBe("hack");
+
+    const store = await createStore({ projectRoot: projectDir });
+    const conflict = await store.recordSyncConflict({
+      ticketId,
+      provider: "linear",
+      field: "title",
+      authority: "origin",
+      localValue: "Local title",
+      remoteValue: "Remote title",
+      summary: "Title diverged during sync.",
+      actor: "sync@app",
+    });
+    expect(conflict.ok).toBe(true);
+    if (!conflict.ok) {
+      throw new Error(conflict.error);
+    }
+
+    const resolved = await runHack({
+      cwd: projectDir,
+      args: [
+        "tickets",
+        "resolve-conflict",
+        ticketId,
+        "--conflict-id",
+        conflict.conflict.conflictId,
+        "--resolution",
+        "accept_remote",
+        "--summary",
+        "Remote remains authoritative.",
+        "--json",
+      ],
+    });
+    const resolvedJson = JSON.parse(resolved.stdout) as {
+      ok: boolean;
+      resolution: string;
+    };
+    expect(resolvedJson.ok).toBe(true);
+    expect(resolvedJson.resolution).toBe("accept_remote");
+
+    const shown = await runHack({
+      cwd: projectDir,
+      args: ["tickets", "show", ticketId, "--json"],
+    });
+    const showJson = JSON.parse(shown.stdout) as {
+      ticket: { assignee?: string };
+      comments: Array<{ body: string }>;
+      conflicts: Array<{ status: string; resolution?: string }>;
+    };
+    expect(showJson.ticket.assignee).toBe("alice@hack");
+    expect(showJson.comments.map((comment) => comment.body)).toContain(
+      "Append only note"
+    );
+    expect(showJson.conflicts[0]?.status).toBe("resolved");
+    expect(showJson.conflicts[0]?.resolution).toBe("accept_remote");
+
+    await rm(root, { recursive: true, force: true });
+  }
+);
+
 interface RunResult {
   readonly stdout: string;
   readonly stderr: string;
@@ -164,6 +285,18 @@ async function runHack(opts: {
   return await run({
     cwd: opts.cwd,
     cmd: ["bun", resolve(import.meta.dir, "../index.ts"), ...opts.args],
+  });
+}
+
+async function createStore(opts: { readonly projectRoot: string }) {
+  const result = await readControlPlaneConfig({});
+  return createTicketsStore({
+    projectRoot: opts.projectRoot,
+    controlPlaneConfig: result.config,
+    logger: {
+      info: () => {},
+      warn: () => {},
+    },
   });
 }
 

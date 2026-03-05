@@ -17,6 +17,7 @@ export type BrokerConfig = {
   readonly githubApiBaseUrl: string;
   readonly githubRedirectUri: string;
   readonly betterAuthGitHubAutoProvisionUsers: boolean;
+  readonly betterAuthLinearAutoProvisionUsers: boolean;
   readonly linearClientId?: string;
   readonly linearClientSecret?: string;
   readonly linearDeveloperAppToken?: string;
@@ -80,6 +81,9 @@ export function resolveConfig(): BrokerConfig {
     ...github,
     betterAuthGitHubAutoProvisionUsers:
       parseBoolean(process.env.BETTER_AUTH_GITHUB_AUTO_PROVISION_USERS) ??
+      false,
+    betterAuthLinearAutoProvisionUsers:
+      parseBoolean(process.env.BETTER_AUTH_LINEAR_AUTO_PROVISION_USERS) ??
       false,
     ...linear,
     flowTtlMs: parsePositiveInt(process.env.FLOW_TTL_MS) ?? DEFAULT_FLOW_TTL_MS,

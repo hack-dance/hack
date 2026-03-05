@@ -27,6 +27,25 @@ export type LinearProject = {
   readonly teamName?: string;
 };
 
+export type LinearUser = {
+  readonly id: string;
+  readonly name?: string;
+  readonly displayName?: string;
+  readonly email?: string;
+  readonly active?: boolean;
+};
+
+export type LinearComment = {
+  readonly id: string;
+  readonly body: string;
+  readonly createdAt: string;
+  readonly updatedAt?: string;
+  readonly userId?: string;
+  readonly userName?: string;
+  readonly userDisplayName?: string;
+  readonly userEmail?: string;
+};
+
 export type LinearIssue = {
   readonly id: string;
   readonly identifier: string;
@@ -39,6 +58,11 @@ export type LinearIssue = {
   readonly teamName?: string;
   readonly projectId?: string;
   readonly projectName?: string;
+  readonly assigneeId?: string;
+  readonly assigneeName?: string;
+  readonly assigneeDisplayName?: string;
+  readonly assigneeEmail?: string;
+  readonly assigneeActive?: boolean;
   readonly labels: readonly LinearLabel[];
   readonly parentId?: string;
   readonly parentIdentifier?: string;
@@ -91,6 +115,7 @@ export type LinearClient = {
     readonly description?: string;
     readonly projectId?: string;
     readonly stateId?: string;
+    readonly assigneeId?: string;
     readonly labelIds?: readonly string[];
     readonly parentId?: string;
   }) => Promise<LinearRequestResult<LinearIssue>>;
@@ -100,6 +125,7 @@ export type LinearClient = {
     readonly description?: string;
     readonly projectId?: string;
     readonly stateId?: string;
+    readonly assigneeId?: string;
     readonly labelIds?: readonly string[];
     readonly parentId?: string;
   }) => Promise<LinearRequestResult<LinearIssue>>;
@@ -114,6 +140,18 @@ export type LinearClient = {
   readonly listTeamLabels: (input: {
     readonly teamId: string;
   }) => Promise<LinearRequestResult<readonly LinearLabel[]>>;
+  readonly listTeamUsers: (input: {
+    readonly teamId: string;
+    readonly first?: number;
+  }) => Promise<LinearRequestResult<readonly LinearUser[]>>;
+  readonly listIssueComments: (input: {
+    readonly issueId: string;
+    readonly first?: number;
+  }) => Promise<LinearRequestResult<readonly LinearComment[]>>;
+  readonly createComment: (input: {
+    readonly issueId: string;
+    readonly body: string;
+  }) => Promise<LinearRequestResult<LinearComment>>;
 };
 
 const DEFAULT_LINEAR_API_URL = "https://api.linear.app/graphql";
@@ -358,6 +396,9 @@ export function createLinearClient(input: {
       if (input.stateId) {
         mutationInput.stateId = input.stateId;
       }
+      if (input.assigneeId) {
+        mutationInput.assigneeId = input.assigneeId;
+      }
       if (input.labelIds && input.labelIds.length > 0) {
         mutationInput.labelIds = [...input.labelIds];
       }
@@ -420,6 +461,9 @@ export function createLinearClient(input: {
       }
       if (input.stateId !== undefined) {
         mutationInput.stateId = input.stateId;
+      }
+      if (input.assigneeId !== undefined) {
+        mutationInput.assigneeId = input.assigneeId;
       }
       if (input.labelIds !== undefined) {
         mutationInput.labelIds = [...input.labelIds];
@@ -592,6 +636,131 @@ export function createLinearClient(input: {
         data: labels,
       };
     },
+
+    listTeamUsers: async (input) => {
+      const teamId = input.teamId.trim();
+      if (!teamId) {
+        return {
+          ok: false,
+          status: 400,
+          error: "Missing team id.",
+        };
+      }
+      const first = normalizePositiveInt({
+        value: input.first,
+        fallback: DEFAULT_PAGE_SIZE,
+      });
+      const result = await request<{
+        readonly team?: unknown;
+      }>({
+        query: [
+          "query LinearTeamUsers($teamId: String!, $first: Int!) {",
+          "  team(id: $teamId) {",
+          "    memberships(first: $first) {",
+          "      nodes {",
+          "        user {",
+          userFieldsSelection({ indent: "          " }),
+          "        }",
+          "      }",
+          "    }",
+          "  }",
+          "}",
+        ].join("\n"),
+        variables: { teamId, first },
+      });
+      if (!result.ok) {
+        return result;
+      }
+      return {
+        ok: true,
+        data: parseTeamUsers(result.data.team),
+      };
+    },
+
+    listIssueComments: async (input) => {
+      const issueId = input.issueId.trim();
+      if (!issueId) {
+        return {
+          ok: false,
+          status: 400,
+          error: "Missing Linear issue id.",
+        };
+      }
+      const first = normalizePositiveInt({
+        value: input.first,
+        fallback: DEFAULT_PAGE_SIZE,
+      });
+      const result = await request<{
+        readonly issue?: unknown;
+      }>({
+        query: [
+          "query LinearIssueComments($issueId: String!, $first: Int!) {",
+          "  issue(id: $issueId) {",
+          "    comments(first: $first) {",
+          "      nodes {",
+          commentFieldsSelection({ indent: "        " }),
+          "      }",
+          "    }",
+          "  }",
+          "}",
+        ].join("\n"),
+        variables: { issueId, first },
+      });
+      if (!result.ok) {
+        return result;
+      }
+      return {
+        ok: true,
+        data: parseIssueComments(result.data.issue),
+      };
+    },
+
+    createComment: async (input) => {
+      const issueId = input.issueId.trim();
+      const body = input.body.trim();
+      if (!(issueId && body)) {
+        return {
+          ok: false,
+          status: 400,
+          error: "Linear comment creation requires issueId and body.",
+        };
+      }
+      const result = await request<{
+        readonly commentCreate?: unknown;
+      }>({
+        query: [
+          "mutation LinearCommentCreate($input: CommentCreateInput!) {",
+          "  commentCreate(input: $input) {",
+          "    success",
+          "    comment {",
+          commentFieldsSelection({ indent: "      " }),
+          "    }",
+          "  }",
+          "}",
+        ].join("\n"),
+        variables: {
+          input: {
+            issueId,
+            body,
+          },
+        },
+      });
+      if (!result.ok) {
+        return result;
+      }
+      const comment = parseCommentMutationComment(result.data.commentCreate);
+      if (!comment) {
+        return {
+          ok: false,
+          status: 500,
+          error: "Linear commentCreate payload missing comment data.",
+        };
+      }
+      return {
+        ok: true,
+        data: comment,
+      };
+    },
   };
 }
 
@@ -630,6 +799,9 @@ function issueFieldsSelection(): string {
     "  id",
     "  name",
     "}",
+    "assignee {",
+    userFieldsSelection({ indent: "  " }),
+    "}",
     "labels {",
     "  nodes {",
     "    id",
@@ -640,6 +812,24 @@ function issueFieldsSelection(): string {
     "  id",
     "  identifier",
     "}",
+  ].join("\n");
+}
+
+function userFieldsSelection(input: { readonly indent: string }): string {
+  return ["id", "name", "displayName", "email", "active"]
+    .map((field) => `${input.indent}${field}`)
+    .join("\n");
+}
+
+function commentFieldsSelection(input: { readonly indent: string }): string {
+  return [
+    `${input.indent}id`,
+    `${input.indent}body`,
+    `${input.indent}createdAt`,
+    `${input.indent}updatedAt`,
+    `${input.indent}user {`,
+    userFieldsSelection({ indent: `${input.indent}  ` }),
+    `${input.indent}}`,
   ].join("\n");
 }
 
@@ -695,6 +885,21 @@ function parseViewerProjects(value: unknown): LinearProject[] {
   return out;
 }
 
+function parseUser(value: unknown): LinearUser | null {
+  if (!(isRecord(value) && typeof value.id === "string")) {
+    return null;
+  }
+  return {
+    id: value.id,
+    ...(typeof value.name === "string" ? { name: value.name } : {}),
+    ...(typeof value.displayName === "string"
+      ? { displayName: value.displayName }
+      : {}),
+    ...(typeof value.email === "string" ? { email: value.email } : {}),
+    ...(typeof value.active === "boolean" ? { active: value.active } : {}),
+  };
+}
+
 function parseProject(value: unknown): LinearProject | null {
   if (!isRecord(value)) {
     return null;
@@ -719,13 +924,8 @@ function parseIssue(value: unknown): LinearIssue | null {
   if (!isRecord(value)) {
     return null;
   }
-  if (
-    !(
-      typeof value.id === "string" &&
-      typeof value.identifier === "string" &&
-      typeof value.title === "string"
-    )
-  ) {
+  const baseIssue = parseIssueBase(value);
+  if (!baseIssue) {
     return null;
   }
 
@@ -735,34 +935,20 @@ function parseIssue(value: unknown): LinearIssue | null {
     return null;
   }
   const project = isRecord(value.project) ? value.project : null;
+  const assignee = parseUser(value.assignee);
   const labels = parseLabels(value.labels);
   const parent = isRecord(value.parent) ? value.parent : null;
 
   return {
-    id: value.id,
-    identifier: value.identifier,
-    title: value.title,
-    ...(typeof value.description === "string"
-      ? { description: value.description }
-      : {}),
-    ...(typeof value.url === "string" ? { url: value.url } : {}),
+    ...baseIssue,
     state,
     teamId: team.id,
     ...(typeof team.key === "string" ? { teamKey: team.key } : {}),
     ...(typeof team.name === "string" ? { teamName: team.name } : {}),
-    ...(project && typeof project.id === "string"
-      ? {
-          projectId: project.id,
-          ...(typeof project.name === "string"
-            ? { projectName: project.name }
-            : {}),
-        }
-      : {}),
+    ...parseIssueProjectFields(project),
+    ...parseIssueAssigneeFields(assignee),
     labels,
-    ...(parent && typeof parent.id === "string" ? { parentId: parent.id } : {}),
-    ...(parent && typeof parent.identifier === "string"
-      ? { parentIdentifier: parent.identifier }
-      : {}),
+    ...parseIssueParentFields(parent),
   };
 }
 
@@ -887,6 +1073,163 @@ function parseTeamLabels(value: unknown): LinearLabel[] {
     });
   }
   return out;
+}
+
+function parseTeamUsers(value: unknown): LinearUser[] {
+  if (!isRecord(value)) {
+    return [];
+  }
+  const memberships = isRecord(value.memberships) ? value.memberships : null;
+  const nodes = Array.isArray(memberships?.nodes) ? memberships.nodes : [];
+  const out: LinearUser[] = [];
+  for (const node of nodes) {
+    if (!isRecord(node)) {
+      continue;
+    }
+    const user = parseUser(node.user);
+    if (!user) {
+      continue;
+    }
+    out.push(user);
+  }
+  return out;
+}
+
+function parseIssueComments(value: unknown): LinearComment[] {
+  if (!isRecord(value)) {
+    return [];
+  }
+  const comments = isRecord(value.comments) ? value.comments : null;
+  const nodes = Array.isArray(comments?.nodes) ? comments.nodes : [];
+  const out: LinearComment[] = [];
+  for (const node of nodes) {
+    const comment = parseComment(node);
+    if (!comment) {
+      continue;
+    }
+    out.push(comment);
+  }
+  return out;
+}
+
+function parseComment(value: unknown): LinearComment | null {
+  if (!(isRecord(value) && typeof value.id === "string")) {
+    return null;
+  }
+  if (
+    !(typeof value.body === "string" && typeof value.createdAt === "string")
+  ) {
+    return null;
+  }
+  const user = parseUser(value.user);
+  return {
+    id: value.id,
+    body: value.body,
+    createdAt: value.createdAt,
+    ...(typeof value.updatedAt === "string"
+      ? { updatedAt: value.updatedAt }
+      : {}),
+    ...(user
+      ? {
+          userId: user.id,
+          ...(typeof user.name === "string" ? { userName: user.name } : {}),
+          ...(typeof user.displayName === "string"
+            ? { userDisplayName: user.displayName }
+            : {}),
+          ...(typeof user.email === "string" ? { userEmail: user.email } : {}),
+        }
+      : {}),
+  };
+}
+
+function parseCommentMutationComment(value: unknown): LinearComment | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const success = value.success;
+  if (typeof success === "boolean" && !success) {
+    return null;
+  }
+  return parseComment(value.comment);
+}
+
+function parseIssueBase(value: Record<string, unknown>): {
+  readonly id: string;
+  readonly identifier: string;
+  readonly title: string;
+  readonly description?: string;
+  readonly url?: string;
+} | null {
+  if (
+    !(
+      typeof value.id === "string" &&
+      typeof value.identifier === "string" &&
+      typeof value.title === "string"
+    )
+  ) {
+    return null;
+  }
+  return {
+    id: value.id,
+    identifier: value.identifier,
+    title: value.title,
+    ...(typeof value.description === "string"
+      ? { description: value.description }
+      : {}),
+    ...(typeof value.url === "string" ? { url: value.url } : {}),
+  };
+}
+
+function parseIssueProjectFields(
+  value: Record<string, unknown> | null
+): Pick<LinearIssue, "projectId" | "projectName"> {
+  if (!(value && typeof value.id === "string")) {
+    return {};
+  }
+  return {
+    projectId: value.id,
+    ...(typeof value.name === "string" ? { projectName: value.name } : {}),
+  };
+}
+
+function parseIssueAssigneeFields(
+  value: LinearUser | null
+): Pick<
+  LinearIssue,
+  | "assigneeId"
+  | "assigneeName"
+  | "assigneeDisplayName"
+  | "assigneeEmail"
+  | "assigneeActive"
+> {
+  if (!value) {
+    return {};
+  }
+  return {
+    assigneeId: value.id,
+    ...(typeof value.name === "string" ? { assigneeName: value.name } : {}),
+    ...(typeof value.displayName === "string"
+      ? { assigneeDisplayName: value.displayName }
+      : {}),
+    ...(typeof value.email === "string" ? { assigneeEmail: value.email } : {}),
+    ...(typeof value.active === "boolean"
+      ? { assigneeActive: value.active }
+      : {}),
+  };
+}
+
+function parseIssueParentFields(
+  value: Record<string, unknown> | null
+): Pick<LinearIssue, "parentId" | "parentIdentifier"> {
+  if (!value) {
+    return {};
+  }
+  return {
+    ...(typeof value.id === "string" ? { parentId: value.id } : {}),
+    ...(typeof value.identifier === "string"
+      ? { parentIdentifier: value.identifier }
+      : {}),
+  };
 }
 
 function isLinearWorkflowStateType(

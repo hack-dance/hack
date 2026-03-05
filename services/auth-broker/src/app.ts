@@ -10,7 +10,19 @@ import { createBetterAuthPlugin } from "./modules/better-auth/plugin.ts";
 import { createCoreRoutesPlugin } from "./modules/core/plugin.ts";
 import { createGitHubOAuthPlugin } from "./modules/github-oauth/plugin.ts";
 import { createLinearAgentPlugin } from "./modules/linear-agent/plugin.ts";
+import { createLinearConnectionsPlugin } from "./modules/linear-connections/plugin.ts";
+import {
+  createLinearConnectionStoreFromDb,
+  InMemoryLinearConnectionStore,
+  type LinearConnectionStore,
+} from "./modules/linear-connections/service.ts";
 import { createLinearOAuthPlugin } from "./modules/linear-oauth/plugin.ts";
+import { createLinearSyncStorePlugin } from "./modules/linear-sync-store/plugin.ts";
+import {
+  createLinearSyncStoreFromDb,
+  InMemoryLinearSyncStore,
+  type LinearSyncStore,
+} from "./modules/linear-sync-store/service.ts";
 import { createProvidersPlugin } from "./modules/providers/plugin.ts";
 import { createSharedMiddlewarePlugin } from "./plugins/shared-middleware.ts";
 
@@ -18,6 +30,8 @@ export type CreateAuthBrokerAppOptions = {
   readonly config: BrokerConfig;
   readonly flowStore?: FlowStore;
   readonly betterAuthRuntime?: BetterAuthRuntime;
+  readonly linearSyncStore?: LinearSyncStore;
+  readonly linearConnectionStore?: LinearConnectionStore;
 };
 
 /**
@@ -27,11 +41,17 @@ export function createAuthBrokerApp({
   config,
   flowStore: externalStore,
   betterAuthRuntime: externalBetterAuthRuntime,
+  linearSyncStore: externalLinearSyncStore,
+  linearConnectionStore: externalLinearConnectionStore,
 }: CreateAuthBrokerAppOptions) {
   const flowStore =
     externalStore ?? new FlowStore({ filePath: config.flowStorePath });
   const betterAuthRuntime =
     externalBetterAuthRuntime ?? createBetterAuthRuntimeFromEnv();
+  const linearSyncStore =
+    externalLinearSyncStore ?? createDefaultLinearSyncStore();
+  const linearConnectionStore =
+    externalLinearConnectionStore ?? createDefaultLinearConnectionStore();
   let flowSweepTimer: ReturnType<typeof setInterval> | null = null;
 
   return new Elysia({
@@ -77,12 +97,26 @@ export function createAuthBrokerApp({
     .use(
       createLinearAgentPlugin({
         config,
+        syncStore: linearSyncStore,
+        connectionStore: linearConnectionStore,
+      })
+    )
+    .use(
+      createLinearConnectionsPlugin({
+        connectionStore: linearConnectionStore,
+      })
+    )
+    .use(
+      createLinearSyncStorePlugin({
+        syncStore: linearSyncStore,
       })
     )
     .use(
       createLinearOAuthPlugin({
         config,
         flowStore,
+        connectionStore: linearConnectionStore,
+        betterAuthRuntime,
       })
     )
     .onStart(() => {
@@ -99,6 +133,32 @@ export function createAuthBrokerApp({
       clearInterval(flowSweepTimer);
       flowSweepTimer = null;
     });
+}
+
+function createDefaultLinearSyncStore(): LinearSyncStore {
+  if (!process.env.DATABASE_URL) {
+    return new InMemoryLinearSyncStore();
+  }
+  try {
+    return createLinearSyncStoreFromDb({
+      databaseUrl: process.env.DATABASE_URL,
+    });
+  } catch {
+    return new InMemoryLinearSyncStore();
+  }
+}
+
+function createDefaultLinearConnectionStore(): LinearConnectionStore {
+  if (!process.env.DATABASE_URL) {
+    return new InMemoryLinearConnectionStore();
+  }
+  try {
+    return createLinearConnectionStoreFromDb({
+      databaseUrl: process.env.DATABASE_URL,
+    });
+  } catch {
+    return new InMemoryLinearConnectionStore();
+  }
 }
 
 /**
@@ -121,6 +181,12 @@ function isReadOnlyRoutePath(input: { readonly path: string }): boolean {
     return true;
   }
   if (input.path === "/v1/auth/linear/refresh") {
+    return false;
+  }
+  if (
+    input.path.startsWith("/v1/auth/linear/deliveries/") &&
+    input.path.endsWith("/apply")
+  ) {
     return false;
   }
   if (input.path.startsWith("/gh/")) {

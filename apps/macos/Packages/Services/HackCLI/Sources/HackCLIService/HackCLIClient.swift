@@ -1013,6 +1013,31 @@ public actor HackCLIClient {
     return try decodeLenient(TicketStatusResponse.self, from: result.stdout)
   }
 
+  public func resolveTicketConflict(
+    path: String,
+    ticketId: String,
+    conflictId: String,
+    resolution: TicketSyncConflictResolution,
+    summary: String? = nil
+  ) async throws -> TicketConflictResolutionResponse {
+    var args = [
+      "x",
+      "tickets",
+      "resolve-conflict",
+      ticketId,
+      "--conflict-id",
+      conflictId,
+      "--resolution",
+      resolution.rawValue,
+      "--json",
+    ]
+    if let summary, !summary.isEmpty {
+      args.append(contentsOf: ["--summary", summary])
+    }
+    let result = try await run(args, cwd: path)
+    return try decodeLenient(TicketConflictResolutionResponse.self, from: result.stdout)
+  }
+
   public func syncTickets(path: String) async throws -> TicketsSyncResponse {
     let result = try await run(["x", "tickets", "sync", "--json"], cwd: path)
     return try decodeLenient(TicketsSyncResponse.self, from: result.stdout)

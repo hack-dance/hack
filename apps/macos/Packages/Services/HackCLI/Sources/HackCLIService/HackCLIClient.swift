@@ -108,6 +108,47 @@ public actor HackCLIClient {
     let error: String?
   }
 
+  private struct LinearOAuthStartEnvelope: Decodable {
+    let ok: Bool
+    let flow: LinearOAuthStartEnvelopeFlow
+  }
+
+  private struct LinearOAuthStartEnvelopeFlow: Decodable {
+    let flowId: String
+    let profileId: String
+    let setDefault: Bool
+    let authorizeUrl: String
+    let deviceCode: String
+    let pollUrl: String
+    let expiresAt: String
+  }
+
+  private struct LinearOAuthStatusEnvelope: Decodable {
+    let ok: Bool
+    let status: LinearOAuthStatusEnvelopeStatus
+  }
+
+  private struct LinearOAuthStatusEnvelopeStatus: Decodable {
+    let id: String
+    let status: String
+    let profileId: String
+    let setDefault: Bool
+    let createdAt: String
+    let expiresAt: String
+    let completedAt: String?
+    let claimedAt: String?
+    let accountHandle: String?
+    let accountLogin: String?
+    let accountName: String?
+    let accountId: String?
+    let accountEmail: String?
+    let token: String?
+    let tokenExpiresAt: String?
+    let refreshToken: String?
+    let refreshTokenExpiresAt: String?
+    let error: String?
+  }
+
   public init() {}
 
   public func fetchProjects(includeGlobal: Bool) async throws -> ProjectListResponse {
@@ -401,6 +442,127 @@ public actor HackCLIClient {
     return try decodeJsonOrThrow(GitHubStatusResponse.self, result: result)
   }
 
+  public func inspectLinearProfiles() async throws -> LinearProfilesResponse {
+    let result = try await run(
+      ["x", "linear", "profiles", "--json"],
+      allowNonZeroExit: true
+    )
+    return try decodeJsonOrThrow(LinearProfilesResponse.self, result: result)
+  }
+
+  public func inspectLinearStatus(profileId: String? = nil) async throws -> LinearStatusResponse {
+    var args = ["x", "linear", "status", "--json"]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(LinearStatusResponse.self, result: result)
+  }
+
+  public func disconnectLinear(profileId: String) async throws {
+    let trimmed = profileId.trimmingCharacters(in: .whitespacesAndNewlines)
+    var args = ["x", "linear", "disconnect"]
+    if !trimmed.isEmpty {
+      args.append(contentsOf: ["--profile", trimmed])
+    }
+    _ = try await run(args)
+  }
+
+  public func listLinearProjects(profileId: String? = nil) async throws -> LinearProjectsResponse {
+    var args = ["x", "linear", "projects", "--json"]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(LinearProjectsResponse.self, result: result)
+  }
+
+  public func bindLinearProject(
+    path: String,
+    profileId: String?,
+    projectId: String?,
+    projectName: String?,
+    teamId: String?,
+    clear: Bool
+  ) async throws -> LinearProjectBindingResponse {
+    var args = ["x", "linear", "project-bind", "--json"]
+    if clear {
+      args.append("--clear")
+    }
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    if let projectId, !projectId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--project-id", projectId])
+    }
+    if let projectName, !projectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--project-name", projectName])
+    }
+    if let teamId, !teamId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--team-id", teamId])
+    }
+    let result = try await run(args, allowNonZeroExit: true, cwd: path)
+    return try decodeJsonOrThrow(LinearProjectBindingResponse.self, result: result)
+  }
+
+  public func syncLinearProject(
+    path: String,
+    from direction: String,
+    ownerMode: String? = nil,
+    projectId: String? = nil,
+    teamId: String? = nil,
+    limit: Int? = nil,
+    syncLabels: Bool? = nil
+  ) async throws -> LinearProjectSyncResponse {
+    var args = ["x", "linear", "sync-project", "--from", direction, "--json"]
+    if let ownerMode, !ownerMode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--owner", ownerMode])
+    }
+    if let projectId, !projectId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--project-id", projectId])
+    }
+    if let teamId, !teamId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--team-id", teamId])
+    }
+    if let limit {
+      args.append(contentsOf: ["--limit", String(limit)])
+    }
+    if syncLabels == true {
+      args.append("--sync-labels")
+    }
+    let result = try await run(args, allowNonZeroExit: true, cwd: path)
+    return try decodeJsonOrThrow(LinearProjectSyncResponse.self, result: result)
+  }
+
+  public func syncLinearIssue(
+    path: String,
+    from direction: String,
+    issueIdentifier: String? = nil,
+    ticketId: String? = nil,
+    projectId: String? = nil,
+    teamId: String? = nil,
+    syncLabels: Bool? = nil
+  ) async throws -> LinearIssueSyncResponse {
+    var args = ["x", "linear", "sync-issue", "--from", direction, "--json"]
+    if let issueIdentifier, !issueIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--issue", issueIdentifier])
+    }
+    if let ticketId, !ticketId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--ticket", ticketId])
+    }
+    if let projectId, !projectId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--project-id", projectId])
+    }
+    if let teamId, !teamId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--team-id", teamId])
+    }
+    if syncLabels == true {
+      args.append("--sync-labels")
+    }
+    let result = try await run(args, allowNonZeroExit: true, cwd: path)
+    return try decodeJsonOrThrow(LinearIssueSyncResponse.self, result: result)
+  }
+
   /// Resolves the effective system Git identity (global or repo-effective) and optional GitHub CLI account.
   ///
   /// This is read-only host identity state and is intentionally separate from remote OAuth/App profile routing.
@@ -532,6 +694,104 @@ public actor HackCLIClient {
         }
       }
       return normalizeBrokerFlowStatus(wrapped.status)
+    }
+    throw HackCLIError.network("Auth server returned invalid JSON.")
+  }
+
+  /// Starts cloud Linear OAuth with the dedicated auth broker surface.
+  public func startLinearOAuthFlow(
+    profileId: String,
+    setDefault: Bool
+  ) async throws -> LinearOAuthFlowStartResponse {
+    var lastError: String? = nil
+    for candidate in resolveAuthServerCandidates() {
+      guard
+        let startURL = buildAuthURL(
+          base: candidate,
+          path: "/v1/auth/linear/start",
+          queryItems: [
+            URLQueryItem(name: "profile", value: profileId),
+            URLQueryItem(name: "setDefault", value: setDefault ? "1" : "0"),
+            URLQueryItem(name: "set_default", value: setDefault ? "1" : "0"),
+          ]
+        )
+      else {
+        continue
+      }
+      do {
+        let body = try await fetchAuthBody(url: startURL)
+        if let direct = tryDecodeLenient(LinearOAuthFlowStartResponse.self, from: body) {
+          return direct
+        }
+        if let wrapped = tryDecodeLenient(LinearOAuthStartEnvelope.self, from: body), wrapped.ok {
+          guard
+            let statusURL = buildAuthURLWithQuery(
+              urlString: wrapped.flow.pollUrl,
+              queryItems: [
+                URLQueryItem(name: "deviceCode", value: wrapped.flow.deviceCode),
+                URLQueryItem(name: "claim", value: "1"),
+              ]
+            )?.absoluteString
+          else {
+            throw HackCLIError.network("Auth flow returned an invalid status URL.")
+          }
+          return LinearOAuthFlowStartResponse(
+            ok: true,
+            flowId: wrapped.flow.flowId,
+            profileId: wrapped.flow.profileId,
+            setDefault: wrapped.flow.setDefault,
+            authorizeUrl: wrapped.flow.authorizeUrl,
+            statusUrl: statusURL,
+            expiresAt: wrapped.flow.expiresAt
+          )
+        }
+        throw HackCLIError.network("Auth server returned invalid JSON.")
+      } catch {
+        lastError = error.localizedDescription
+      }
+    }
+
+    throw HackCLIError.network(
+      lastError
+        ?? "Unable to reach any configured auth broker endpoint. Check network/broker status and retry."
+    )
+  }
+
+  /// Polls Linear broker OAuth state and imports claimed tokens into local keychain-backed profiles.
+  public func fetchLinearOAuthFlowStatus(
+    statusURL: String
+  ) async throws -> LinearOAuthFlowStatusResponse {
+    guard let url = URL(string: statusURL) else {
+      throw HackCLIError.network("Invalid auth flow status URL.")
+    }
+    let body = try await fetchAuthBody(url: url)
+    if let direct = tryDecodeLenient(LinearOAuthFlowStatusResponse.self, from: body) {
+      return direct
+    }
+    if let wrapped = tryDecodeLenient(LinearOAuthStatusEnvelope.self, from: body), wrapped.ok {
+      if let token = normalized(wrapped.status.token) {
+        do {
+          try await persistLinearTokenFromBrokerFlow(
+            profileId: wrapped.status.profileId,
+            token: token,
+            tokenExpiresAt: wrapped.status.tokenExpiresAt,
+            refreshToken: wrapped.status.refreshToken,
+            refreshTokenExpiresAt: wrapped.status.refreshTokenExpiresAt,
+            setDefault: wrapped.status.setDefault
+          )
+        } catch {
+          throw HackCLIError.network(
+            "Linear OAuth callback succeeded, but Hack could not save the token locally (\(error.localizedDescription)). Retry Add account and allow keychain access."
+          )
+        }
+      } else if wrapped.status.status == "claimed" {
+        let profileId = wrapped.status.profileId
+        let localStatus = try await inspectLinearStatus(profileId: profileId)
+        if !localStatus.tokenResolved {
+          return brokerClaimedWithoutLocalLinearTokenStatus(wrapped.status)
+        }
+      }
+      return normalizeLinearBrokerFlowStatus(wrapped.status)
     }
     throw HackCLIError.network("Auth server returned invalid JSON.")
   }
@@ -1087,6 +1347,56 @@ public actor HackCLIClient {
     )
   }
 
+  private func normalizeLinearBrokerFlowStatus(
+    _ wrapped: LinearOAuthStatusEnvelopeStatus
+  ) -> LinearOAuthFlowStatusResponse {
+    let normalizedStatus: String
+    switch wrapped.status {
+    case "claimed":
+      normalizedStatus = "complete"
+    default:
+      normalizedStatus = wrapped.status
+    }
+    return LinearOAuthFlowStatusResponse(
+      id: wrapped.id,
+      status: normalizedStatus,
+      profileId: wrapped.profileId,
+      setDefault: wrapped.setDefault,
+      createdAt: wrapped.createdAt,
+      expiresAt: wrapped.expiresAt,
+      completedAt: wrapped.completedAt ?? wrapped.claimedAt,
+      accountHandle: wrapped.accountHandle,
+      accountLogin: wrapped.accountLogin,
+      accountName: wrapped.accountName,
+      accountId: wrapped.accountId,
+      accountEmail: wrapped.accountEmail,
+      tokenExpiresAt: wrapped.tokenExpiresAt,
+      error: wrapped.error
+    )
+  }
+
+  private func brokerClaimedWithoutLocalLinearTokenStatus(
+    _ wrapped: LinearOAuthStatusEnvelopeStatus
+  ) -> LinearOAuthFlowStatusResponse {
+    return LinearOAuthFlowStatusResponse(
+      id: wrapped.id,
+      status: "error",
+      profileId: wrapped.profileId,
+      setDefault: wrapped.setDefault,
+      createdAt: wrapped.createdAt,
+      expiresAt: wrapped.expiresAt,
+      completedAt: wrapped.completedAt ?? wrapped.claimedAt,
+      accountHandle: wrapped.accountHandle,
+      accountLogin: wrapped.accountLogin,
+      accountName: wrapped.accountName,
+      accountId: wrapped.accountId,
+      accountEmail: wrapped.accountEmail,
+      tokenExpiresAt: wrapped.tokenExpiresAt,
+      error:
+        "OAuth token was claimed remotely but is not available in local profile \(wrapped.profileId). Re-run Add account and allow keychain access."
+    )
+  }
+
   /// Persist a broker-issued GitHub token into local keychain-backed profile storage.
   private func persistGitHubTokenFromBrokerFlow(
     profileId: String,
@@ -1123,6 +1433,40 @@ public actor HackCLIClient {
       args.append("--set-default")
     }
     _ = try await run(args, stdin: "\(token)\n")
+  }
+
+  /// Persist a broker-issued Linear token into local keychain-backed profile storage.
+  private func persistLinearTokenFromBrokerFlow(
+    profileId: String,
+    token: String,
+    tokenExpiresAt: String?,
+    refreshToken: String?,
+    refreshTokenExpiresAt: String?,
+    setDefault: Bool
+  ) async throws {
+    var args = ["x", "linear", "connect", "--profile", profileId, "--stdin"]
+    if setDefault {
+      args.append("--set-default")
+    }
+    let envelope = LinearTokenPersistEnvelope(
+      token: token,
+      expiresAt: normalized(tokenExpiresAt),
+      refreshToken: normalized(refreshToken),
+      refreshTokenExpiresAt: normalized(refreshTokenExpiresAt)
+    )
+    let encoder = JSONEncoder()
+    let payload = try encoder.encode(envelope)
+    guard let text = String(data: payload, encoding: .utf8) else {
+      throw HackCLIError.invalidJson
+    }
+    _ = try await run(args, stdin: "\(text)\n")
+  }
+
+  private struct LinearTokenPersistEnvelope: Encodable {
+    let token: String
+    let expiresAt: String?
+    let refreshToken: String?
+    let refreshTokenExpiresAt: String?
   }
 
   private func fetchAuthBody(url: URL) async throws -> String {

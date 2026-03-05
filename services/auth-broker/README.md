@@ -30,6 +30,7 @@ stay decoupled:
 3. `src/modules/providers/plugin.ts`
 4. `src/modules/better-auth/plugin.ts`
 5. `src/modules/github-oauth/plugin.ts`
+6. `src/modules/linear-agent/plugin.ts`
 
 GitHub OAuth routes are internally composed from focused plugins so callback,
 provider, and polling route plumbing can evolve independently:
@@ -64,8 +65,11 @@ return `405` for non-`GET` requests.
 4. `GET /gh/start`
 5. `GET /gh/callback`
 6. `GET /v1/auth/github/flows/:flowId`
-7. `GET /v1/auth/better-auth/status`
-8. `ALL /api/auth/*` (proxied to Better Auth handler)
+7. `GET /linear/callback`
+8. `POST /linear/webhooks` (Linear agent + webhook ingest)
+9. `POST /v1/integrations/linear/webhook` (legacy alias)
+10. `GET /v1/auth/better-auth/status`
+11. `ALL /api/auth/*` (proxied to Better Auth handler)
 
 When `requireInstallation=1` is used, flow polling can defer token claim until
 an installation is visible for the flow, enabling one-pass authorize+install UX.
@@ -93,6 +97,21 @@ so desktop users can return focus to the app immediately after browser auth.
 16. `BETTER_AUTH_URL` (optional base URL override)
 17. `BETTER_AUTH_TRUSTED_ORIGINS` (optional comma-separated origins)
 18. `BETTER_AUTH_GITHUB_AUTO_PROVISION_USERS` (optional boolean; when true, callback can create a Better Auth user from GitHub email if no match exists)
+19. `HACK_LINEAR_CLIENT_ID` (recommended Linear OAuth client id)
+20. `HACK_LINEAR_SECRET` (optional Linear OAuth client secret; PKCE can run without it)
+21. `HACK_LINEAR_DEVELOPER_APP_TOKEN` (optional app token for agent/system automations)
+22. `HACK_LINEAR_WEBHOOK_SECRET` (recommended Linear webhook signing secret)
+23. `HACK_LINEAR_SCOPES` (optional; default: `read,write,app:mentionable,app:assignable`)
+24. `HACK_LINEAR_OAUTH_ACTOR` (optional; default: `app` for Linear agent/app installs)
+25. `HACK_LINEAR_REDIRECT_URI` (default: `${AUTH_BROKER_PUBLIC_BASE_URL}/linear/callback`)
+26. `HACK_LINEAR_WEBHOOK_PATH` (default: `/linear/webhooks`)
+27. `HACK_LINEAR_AUTHORIZE_URL` (optional; default: `https://linear.app/oauth/authorize`)
+28. `HACK_LINEAR_TOKEN_URL` (optional; default: `https://api.linear.app/oauth/token`)
+29. `HACK_LINEAR_API_BASE_URL` (optional; default: `https://api.linear.app`)
+30. `LINEAR_CLIENT_ID` / `LINEAR_CLIENT_SECRET` / `LINEAR_WEBHOOK_SIGNING_SECRET` / `LINEAR_OAUTH_ACTOR` (optional compatibility aliases)
+
+When running broker from repo root (`bun run auth:dev`), Linear env aliases also
+fallback to root `.env.local` / `.env` if process env values are unset.
 
 ## GitHub App setup (permissions + private key)
 

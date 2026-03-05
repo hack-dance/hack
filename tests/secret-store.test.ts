@@ -130,6 +130,42 @@ test("cloud backend shim is provider-scoped and persists through encrypted store
   expect(secondValue).toBeNull();
 });
 
+test("encrypted_file backend reads key material from configured keyPath when env is unset", async () => {
+  if (!tempDir) {
+    throw new Error("Missing temp dir");
+  }
+  process.env.HACK_SECRETS_FILE_KEY = undefined;
+  const storePath = join(tempDir, "secrets.enc.json");
+  const keyPath = join(tempDir, "secrets-file.key");
+  await writeFile(keyPath, "stable-file-key\n");
+  await writeGlobalConfig({
+    value: {
+      controlPlane: {
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: {
+            path: storePath,
+            keyPath,
+          },
+        },
+      },
+    },
+  });
+
+  const store = await resolveSecretStore({
+    projectName: "app",
+  });
+  await store.set({
+    key: "API_TOKEN",
+    value: "stable-key-value",
+  });
+
+  const resolved = await store.get({
+    key: "API_TOKEN",
+  });
+  expect(resolved).toBe("stable-key-value");
+});
+
 async function writeGlobalConfig(input: {
   readonly value: Record<string, unknown>;
 }): Promise<void> {

@@ -6,6 +6,13 @@ import HackDesktopModels
 extension Notification.Name {
   public static let hackCommandPaletteRequested = Notification.Name("hack.commandPalette.requested")
   public static let hackRefreshRequested = Notification.Name("hack.refresh.requested")
+  public static let hackProjectNavigationRequested = Notification.Name("hack.projectNavigation.requested")
+}
+
+enum ProjectNavigationRequest {
+  static let projectIdKey = "projectId"
+  static let tabKey = "tab"
+  static let sidebarKey = "sidebar"
 }
 
 struct CommandPaletteAction: Identifiable {
@@ -75,6 +82,16 @@ struct CommandPaletteView: View {
     )
 
     actions.append(
+      CommandPaletteAction(title: "Go to Linear Settings", subtitle: "Connected accounts + sync policy") {
+        NotificationCenter.default.post(
+          name: .hackSettingsRequested,
+          object: nil,
+          userInfo: [SettingsNavigationRequest.paneKey: SettingsSidebarItem.linear.rawValue]
+        )
+      }
+    )
+
+    actions.append(
       CommandPaletteAction(title: "Go to Runtime Settings", subtitle: "System status + daemon") {
         NotificationCenter.default.post(
           name: .hackSettingsRequested,
@@ -134,6 +151,24 @@ struct CommandPaletteView: View {
           model.selectedItem = .project(project.id)
         }
       )
+      if project.supportsTickets {
+        actions.append(
+          CommandPaletteAction(
+            title: "Open Tickets: \(project.name)",
+            subtitle: "Ticket board + manual sync tools"
+          ) {
+            openProjectTickets(project)
+          }
+        )
+        actions.append(
+          CommandPaletteAction(
+            title: "Open Linear routing: \(project.name)",
+            subtitle: "Project account + bound Linear project"
+          ) {
+            openProjectRouting(project)
+          }
+        )
+      }
     }
 
     if let project = model.selectedProject {
@@ -149,7 +184,12 @@ struct CommandPaletteView: View {
       }
       actions.append(
         CommandPaletteAction(title: "Project: Overview", subtitle: project.name) {
-          model.selectedProjectTab = .overview
+          openProjectOverview(project)
+        }
+      )
+      actions.append(
+        CommandPaletteAction(title: "Project: Linear routing", subtitle: project.name) {
+          openProjectRouting(project)
         }
       )
       if project.isRuntimeConfigured {
@@ -181,7 +221,7 @@ struct CommandPaletteView: View {
       if project.supportsTickets {
         actions.append(
           CommandPaletteAction(title: "Project: Tickets", subtitle: project.name) {
-            model.selectedProjectTab = .tickets
+            openProjectTickets(project)
           }
         )
       }
@@ -217,6 +257,27 @@ struct CommandPaletteView: View {
           }
         )
         actions.append(
+          CommandPaletteAction(title: "Tickets: Pull from Linear", subtitle: project.name) {
+            Task {
+              _ = await model.syncLinearProject(
+                for: project,
+                from: "linear"
+              )
+            }
+          }
+        )
+        actions.append(
+          CommandPaletteAction(title: "Tickets: Push Hack to Linear", subtitle: project.name) {
+            Task {
+              _ = await model.syncLinearProject(
+                for: project,
+                from: "hack",
+                ownerMode: "hack"
+              )
+            }
+          }
+        )
+        actions.append(
           CommandPaletteAction(title: "Tickets: Setup", subtitle: project.name) {
             Task { _ = await model.setupTickets(for: project) }
           }
@@ -242,6 +303,29 @@ struct CommandPaletteView: View {
       return projectDir
     }
     return nil
+  }
+
+  private func openProjectOverview(_ project: ProjectSummary) {
+    model.selectedItem = .project(project.id)
+    model.selectedProjectTab = .overview
+  }
+
+  private func openProjectTickets(_ project: ProjectSummary) {
+    model.selectedItem = .project(project.id)
+    model.selectedProjectTab = .tickets
+  }
+
+  private func openProjectRouting(_ project: ProjectSummary) {
+    openProjectOverview(project)
+    NotificationCenter.default.post(
+      name: .hackProjectNavigationRequested,
+      object: nil,
+      userInfo: [
+        ProjectNavigationRequest.projectIdKey: project.id,
+        ProjectNavigationRequest.tabKey: ProjectTab.overview.rawValue,
+        ProjectNavigationRequest.sidebarKey: "remoteExecution",
+      ]
+    )
   }
 
   private func openPreferredCodingAgent(for project: ProjectSummary, path: String) {

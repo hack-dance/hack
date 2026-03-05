@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
-import type { GitHubFlowPublicStatus, GitHubOAuthFlow } from "./types.ts";
+import type { OAuthFlow, OAuthFlowPublicStatus } from "./types.ts";
 
 const FLOW_STORE_VERSION = 1 as const;
 const FLOW_STATUS_VALUES = new Set([
@@ -15,7 +15,7 @@ const FLOW_STATUS_VALUES = new Set([
 
 type PersistedFlowStorePayload = {
   readonly version: typeof FLOW_STORE_VERSION;
-  readonly flows: readonly GitHubOAuthFlow[];
+  readonly flows: readonly OAuthFlow[];
 };
 
 type FlowStoreOptions = {
@@ -31,7 +31,7 @@ type FlowStoreOptions = {
  * - One-time token claim via `deviceCode`
  */
 export class FlowStore {
-  private readonly flowsById = new Map<string, GitHubOAuthFlow>();
+  private readonly flowsById = new Map<string, OAuthFlow>();
   private readonly flowIdByState = new Map<string, string>();
   private readonly filePath: string | null;
 
@@ -40,13 +40,13 @@ export class FlowStore {
     this.loadFromDisk();
   }
 
-  createFlow(flow: GitHubOAuthFlow): void {
+  createFlow(flow: OAuthFlow): void {
     this.flowsById.set(flow.id, flow);
     this.flowIdByState.set(flow.state, flow.id);
     this.persist();
   }
 
-  getByState(state: string): GitHubOAuthFlow | null {
+  getByState(state: string): OAuthFlow | null {
     const flowId = this.flowIdByState.get(state);
     if (!flowId) {
       return null;
@@ -54,7 +54,7 @@ export class FlowStore {
     return this.getById(flowId);
   }
 
-  getById(flowId: string): GitHubOAuthFlow | null {
+  getById(flowId: string): OAuthFlow | null {
     return this.flowsById.get(flowId) ?? null;
   }
 
@@ -62,7 +62,7 @@ export class FlowStore {
     readonly flowId: string;
     readonly error: string;
     readonly status?: "error" | "expired";
-  }): GitHubOAuthFlow | null {
+  }): OAuthFlow | null {
     const flow = this.getById(opts.flowId);
     if (!flow) {
       return null;
@@ -76,11 +76,13 @@ export class FlowStore {
 
   markComplete(opts: {
     readonly flowId: string;
-    readonly account: GitHubOAuthFlow["account"];
+    readonly account: OAuthFlow["account"];
     readonly token: string;
     readonly tokenExpiresAt?: string;
+    readonly refreshToken?: string;
+    readonly refreshTokenExpiresAt?: string;
     readonly installationId?: string;
-  }): GitHubOAuthFlow | null {
+  }): OAuthFlow | null {
     const flow = this.getById(opts.flowId);
     if (!flow) {
       return null;
@@ -88,6 +90,8 @@ export class FlowStore {
     flow.account = opts.account;
     flow.token = opts.token;
     flow.tokenExpiresAt = opts.tokenExpiresAt;
+    flow.refreshToken = opts.refreshToken;
+    flow.refreshTokenExpiresAt = opts.refreshTokenExpiresAt;
     flow.installationId = opts.installationId;
     flow.status = "complete";
     flow.completedAt = new Date().toISOString();
@@ -99,7 +103,7 @@ export class FlowStore {
     readonly flowId: string;
     readonly installationIds: readonly string[];
     readonly installationId?: string;
-  }): GitHubOAuthFlow | null {
+  }): OAuthFlow | null {
     const flow = this.getById(opts.flowId);
     if (!flow?.account) {
       return null;
@@ -122,7 +126,7 @@ export class FlowStore {
     readonly requireInstallation: boolean;
     readonly nowMs?: number;
   }):
-    | { readonly ok: true; readonly status: GitHubFlowPublicStatus }
+    | { readonly ok: true; readonly status: OAuthFlowPublicStatus }
     | {
         readonly ok: false;
         readonly error: string;
@@ -161,17 +165,23 @@ export class FlowStore {
     }
 
     const claimedAt = new Date(nowMs).toISOString();
-    const status: GitHubFlowPublicStatus = {
+    const status: OAuthFlowPublicStatus = {
       ...base,
       status: "claimed",
       claimedAt,
       token: flow.token,
       tokenExpiresAt: flow.tokenExpiresAt,
+      ...(flow.refreshToken ? { refreshToken: flow.refreshToken } : {}),
+      ...(flow.refreshTokenExpiresAt
+        ? { refreshTokenExpiresAt: flow.refreshTokenExpiresAt }
+        : {}),
     };
     flow.status = "claimed";
     flow.claimedAt = claimedAt;
     flow.token = undefined;
     flow.tokenExpiresAt = undefined;
+    flow.refreshToken = undefined;
+    flow.refreshTokenExpiresAt = undefined;
     changed = true;
     if (changed) {
       this.persist();
@@ -245,9 +255,10 @@ export function hashDeviceCode(deviceCode: string): string {
   return createHash("sha256").update(deviceCode).digest("hex");
 }
 
-function toPublicStatus(flow: GitHubOAuthFlow): GitHubFlowPublicStatus {
+function toPublicStatus(flow: OAuthFlow): OAuthFlowPublicStatus {
   return {
     id: flow.id,
+    provider: flow.provider,
     status: flow.status,
     profileId: flow.profileId,
     setDefault: flow.setDefault,
@@ -255,6 +266,9 @@ function toPublicStatus(flow: GitHubOAuthFlow): GitHubFlowPublicStatus {
     expiresAt: new Date(flow.expiresAtMs).toISOString(),
     ...(flow.completedAt ? { completedAt: flow.completedAt } : {}),
     ...(flow.claimedAt ? { claimedAt: flow.claimedAt } : {}),
+    ...(flow.account?.accountHandle
+      ? { accountHandle: flow.account.accountHandle }
+      : {}),
     ...(flow.account?.login ? { accountLogin: flow.account.login } : {}),
     ...(flow.account?.accountName
       ? { accountName: flow.account.accountName }
@@ -308,7 +322,7 @@ function parsePersistedPayload(input: {
   if (!Array.isArray(input.value.flows)) {
     return null;
   }
-  const flows: GitHubOAuthFlow[] = [];
+  const flows: OAuthFlow[] = [];
   for (const entry of input.value.flows) {
     const parsed = parsePersistedFlow({ value: entry });
     if (parsed) {
@@ -323,16 +337,18 @@ function parsePersistedPayload(input: {
 
 function parsePersistedFlow(input: {
   readonly value: unknown;
-}): GitHubOAuthFlow | null {
+}): OAuthFlow | null {
   if (!isRecord(input.value)) {
     return null;
   }
   const id = asNonEmptyString(input.value.id);
   const state = asNonEmptyString(input.value.state);
+  const provider = asProvider(input.value.provider) ?? "github";
   const profileId = asNonEmptyString(input.value.profileId);
   const deviceCodeHash = asNonEmptyString(input.value.deviceCodeHash);
   const authorizeUrl = asNonEmptyString(input.value.authorizeUrl);
   const redirectUri = asNonEmptyString(input.value.redirectUri);
+  const codeVerifier = asOptionalString(input.value.codeVerifier);
   const status = asFlowStatus(input.value.status);
   const setDefault =
     typeof input.value.setDefault === "boolean" ? input.value.setDefault : null;
@@ -361,16 +377,22 @@ function parsePersistedFlow(input: {
   const installationId = asOptionalString(input.value.installationId);
   const token = asOptionalString(input.value.token);
   const tokenExpiresAt = asOptionalString(input.value.tokenExpiresAt);
+  const refreshToken = asOptionalString(input.value.refreshToken);
+  const refreshTokenExpiresAt = asOptionalString(
+    input.value.refreshTokenExpiresAt
+  );
   const error = asOptionalString(input.value.error);
   const completedAt = asOptionalString(input.value.completedAt);
   const claimedAt = asOptionalString(input.value.claimedAt);
   return {
     id,
+    provider,
     state,
     profileId,
     setDefault,
     deviceCodeHash,
     authorizeUrl,
+    ...(codeVerifier ? { codeVerifier } : {}),
     ...(appId ? { appId } : {}),
     ...(appSlug ? { appSlug } : {}),
     ...(appInstallUrl ? { appInstallUrl } : {}),
@@ -382,6 +404,8 @@ function parsePersistedFlow(input: {
     ...(installationId ? { installationId } : {}),
     ...(token ? { token } : {}),
     ...(tokenExpiresAt ? { tokenExpiresAt } : {}),
+    ...(refreshToken ? { refreshToken } : {}),
+    ...(refreshTokenExpiresAt ? { refreshTokenExpiresAt } : {}),
     ...(error ? { error } : {}),
     ...(completedAt ? { completedAt } : {}),
     ...(claimedAt ? { claimedAt } : {}),
@@ -390,14 +414,12 @@ function parsePersistedFlow(input: {
 
 function parsePersistedFlowAccount(input: {
   readonly value: unknown;
-}): GitHubOAuthFlow["account"] | undefined {
+}): OAuthFlow["account"] | undefined {
   if (!isRecord(input.value)) {
     return undefined;
   }
-  const login = asNonEmptyString(input.value.login);
-  if (!login) {
-    return undefined;
-  }
+  const login = asOptionalString(input.value.login);
+  const accountHandle = asOptionalString(input.value.accountHandle);
   const installationIds = Array.isArray(input.value.installationIds)
     ? input.value.installationIds.filter(
         (entry): entry is string =>
@@ -409,8 +431,23 @@ function parsePersistedFlowAccount(input: {
   const accountEmail = asOptionalString(input.value.accountEmail);
   const betterAuthUserId = asOptionalString(input.value.betterAuthUserId);
   const betterAuthLinkState = asOptionalString(input.value.betterAuthLinkState);
+  if (
+    !(
+      login ||
+      accountHandle ||
+      accountName ||
+      accountId ||
+      accountEmail ||
+      installationIds.length > 0 ||
+      betterAuthUserId ||
+      betterAuthLinkState
+    )
+  ) {
+    return undefined;
+  }
   return {
-    login,
+    ...(login ? { login } : {}),
+    ...(accountHandle ? { accountHandle } : {}),
     installationIds,
     ...(accountName ? { accountName } : {}),
     ...(accountId ? { accountId } : {}),
@@ -419,7 +456,7 @@ function parsePersistedFlowAccount(input: {
     ...(betterAuthLinkState
       ? {
           betterAuthLinkState: betterAuthLinkState as NonNullable<
-            GitHubOAuthFlow["account"]
+            OAuthFlow["account"]
           >["betterAuthLinkState"],
         }
       : {}),
@@ -448,14 +485,21 @@ function asPositiveNumber(value: unknown): number | null {
   return value;
 }
 
-function asFlowStatus(value: unknown): GitHubOAuthFlow["status"] | null {
+function asFlowStatus(value: unknown): OAuthFlow["status"] | null {
   if (typeof value !== "string") {
     return null;
   }
-  if (!FLOW_STATUS_VALUES.has(value as GitHubOAuthFlow["status"])) {
+  if (!FLOW_STATUS_VALUES.has(value as OAuthFlow["status"])) {
     return null;
   }
-  return value as GitHubOAuthFlow["status"];
+  return value as OAuthFlow["status"];
+}
+
+function asProvider(value: unknown): OAuthFlow["provider"] | null {
+  if (value === "github" || value === "linear") {
+    return value;
+  }
+  return null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -472,9 +472,12 @@ async function resolveAllowedEnvAuthRef(
 }
 
 async function resolveNodeAuthSecretStore() {
-  const securityStore = resolveMacOsNodeAuthSecretStore();
-  if (securityStore) {
-    return securityStore;
+  const controlPlane = await readControlPlaneConfig({});
+  if (controlPlane.config.secrets.backend === "keychain") {
+    const securityStore = resolveMacOsNodeAuthSecretStore();
+    if (securityStore) {
+      return securityStore;
+    }
   }
   return await resolveSecretStore({
     projectName: NODE_SECRET_STORE_PROJECT_NAME,

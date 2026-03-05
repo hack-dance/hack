@@ -35,6 +35,21 @@ export function createProvidersPlugin({
         appSlug: config.githubAppSlug,
         appInstallUrl: config.githubAppInstallUrl,
       },
+      {
+        id: "linear",
+        enabled: Boolean(config.linearClientId),
+        mode: "oauth+agent",
+        requestedScopes: config.linearScopes,
+        redirectUri: config.linearRedirectUri,
+        authorizeUrl: config.linearAuthorizeUrl,
+        tokenUrl: config.linearTokenUrl,
+        apiBaseUrl: config.linearApiBaseUrl,
+        webhookPath: config.linearWebhookPath,
+        developerAppTokenConfigured: Boolean(config.linearDeveloperAppToken),
+        webhookSignatureVerification: config.linearWebhookSigningSecret
+          ? "hmac-sha256"
+          : "disabled",
+      },
     ] as const,
   }));
 }

@@ -9,6 +9,18 @@ const ENV_KEYS = [
   "GITHUB_CLIENT_ID",
   "GITHUB_CLIENT_SECRET",
   "GITHUB_SCOPES",
+  "HACK_LINEAR_CLIENT_ID",
+  "HACK_LINEAR_SECRET",
+  "HACK_LINEAR_DEVELOPER_APP_TOKEN",
+  "HACK_LINEAR_OAUTH_ACTOR",
+  "HACK_LINEAR_WEBHOOK_SECRET",
+  "HACK_LINEAR_SCOPES",
+  "HACK_LINEAR_REDIRECT_URI",
+  "HACK_LINEAR_WEBHOOK_PATH",
+  "LINEAR_OAUTH_ACTOR",
+  "LINEAR_CLIENT_ID",
+  "LINEAR_CLIENT_SECRET",
+  "LINEAR_WEBHOOK_SIGNING_SECRET",
   "FLOW_STORE_PATH",
   "BETTER_AUTH_GITHUB_AUTO_PROVISION_USERS",
 ] as const;
@@ -52,6 +64,68 @@ describe("auth broker config", () => {
       () => {
         const config = resolveConfig();
         expect(config.betterAuthGitHubAutoProvisionUsers).toBe(true);
+      }
+    );
+  });
+
+  test("resolves linear aliases and defaults", () => {
+    withEnv(
+      {
+        GITHUB_CLIENT_ID: "test-client-id",
+        GITHUB_CLIENT_SECRET: "test-client-secret",
+        HACK_LINEAR_CLIENT_ID: "hack-linear-client",
+        HACK_LINEAR_SECRET: "hack-linear-secret",
+        HACK_LINEAR_WEBHOOK_SECRET: "hook-secret",
+        HACK_LINEAR_DEVELOPER_APP_TOKEN: "app-token",
+        HACK_LINEAR_SCOPES:
+          "read,write,app:mentionable,app:assignable,read,write",
+      },
+      () => {
+        const config = resolveConfig();
+        expect(config.linearClientId).toBe("hack-linear-client");
+        expect(config.linearClientSecret).toBe("hack-linear-secret");
+        expect(config.linearWebhookSigningSecret).toBe("hook-secret");
+        expect(config.linearDeveloperAppToken).toBe("app-token");
+        expect(config.linearScopes).toBe(
+          "read,write,app:mentionable,app:assignable"
+        );
+        expect(config.linearActor).toBe("app");
+        expect(config.linearRedirectUri).toBe(
+          "http://127.0.0.1:8080/linear/callback"
+        );
+        expect(config.linearWebhookPath).toBe("/linear/webhooks");
+      }
+    );
+  });
+
+  test("uses legacy linear env aliases when hack aliases are absent", () => {
+    withEnv(
+      {
+        GITHUB_CLIENT_ID: "test-client-id",
+        GITHUB_CLIENT_SECRET: "test-client-secret",
+        LINEAR_CLIENT_ID: "legacy-linear-client",
+        LINEAR_CLIENT_SECRET: "legacy-linear-secret",
+        LINEAR_WEBHOOK_SIGNING_SECRET: "legacy-webhook-secret",
+      },
+      () => {
+        const config = resolveConfig();
+        expect(config.linearClientId).toBe("legacy-linear-client");
+        expect(config.linearClientSecret).toBe("legacy-linear-secret");
+        expect(config.linearWebhookSigningSecret).toBe("legacy-webhook-secret");
+      }
+    );
+  });
+
+  test("normalizes configured linear oauth actor", () => {
+    withEnv(
+      {
+        GITHUB_CLIENT_ID: "test-client-id",
+        GITHUB_CLIENT_SECRET: "test-client-secret",
+        HACK_LINEAR_OAUTH_ACTOR: " user ",
+      },
+      () => {
+        const config = resolveConfig();
+        expect(config.linearActor).toBe("user");
       }
     );
   });

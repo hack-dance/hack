@@ -11,6 +11,7 @@ import { gatewayCommand } from "../commands/gateway.ts";
 import { globalCommand } from "../commands/global.ts";
 import { helpCommand } from "../commands/help.ts";
 import { internalCommand } from "../commands/internal.ts";
+import { linearCommand } from "../commands/linear.ts";
 import { logPipeCommand } from "../commands/log-pipe.ts";
 import { mcpCommand } from "../commands/mcp.ts";
 import { nodeCommand } from "../commands/node.ts";
@@ -67,6 +68,7 @@ export const CLI_SPEC = defineCli({
     openCommand,
     branchCommand,
     logPipeCommand,
+    linearCommand,
     doctorCommand,
     crashCaptureCommand,
     daemonCommand,

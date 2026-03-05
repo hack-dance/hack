@@ -9,6 +9,8 @@ import { FlowStore } from "./flow-store.ts";
 import { createBetterAuthPlugin } from "./modules/better-auth/plugin.ts";
 import { createCoreRoutesPlugin } from "./modules/core/plugin.ts";
 import { createGitHubOAuthPlugin } from "./modules/github-oauth/plugin.ts";
+import { createLinearAgentPlugin } from "./modules/linear-agent/plugin.ts";
+import { createLinearOAuthPlugin } from "./modules/linear-oauth/plugin.ts";
 import { createProvidersPlugin } from "./modules/providers/plugin.ts";
 import { createSharedMiddlewarePlugin } from "./plugins/shared-middleware.ts";
 
@@ -72,6 +74,17 @@ export function createAuthBrokerApp({
         betterAuthRuntime,
       })
     )
+    .use(
+      createLinearAgentPlugin({
+        config,
+      })
+    )
+    .use(
+      createLinearOAuthPlugin({
+        config,
+        flowStore,
+      })
+    )
     .onStart(() => {
       const intervalMs = Math.max(config.flowSweepIntervalMs, 5000);
       flowSweepTimer = setInterval(() => {
@@ -101,10 +114,22 @@ function isReadOnlyRoutePath(input: { readonly path: string }): boolean {
   if (input.path === "/v1/auth/better-auth/status") {
     return true;
   }
+  if (input.path === "/linear/callback") {
+    return true;
+  }
+  if (input.path === "/linear/start") {
+    return true;
+  }
+  if (input.path === "/v1/auth/linear/refresh") {
+    return false;
+  }
   if (input.path.startsWith("/gh/")) {
     return true;
   }
   if (input.path.startsWith("/v1/auth/github/")) {
+    return true;
+  }
+  if (input.path.startsWith("/v1/auth/linear/")) {
     return true;
   }
   return false;

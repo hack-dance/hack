@@ -262,6 +262,30 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
           ? { dependsOn: dependsOnResult.refs }
           : {}),
         ...(blocksResult.refs.length > 0 ? { blocks: blocksResult.refs } : {}),
+        ...(parsed.value.owner ? { owner: parsed.value.owner } : {}),
+        ...(parsed.value.source ? { source: parsed.value.source } : {}),
+        ...(parsed.value.tags.length > 0 ? { tags: parsed.value.tags } : {}),
+        ...(parsed.value.externalSystem
+          ? { externalSystem: parsed.value.externalSystem }
+          : {}),
+        ...(parsed.value.externalId
+          ? { externalId: parsed.value.externalId }
+          : {}),
+        ...(parsed.value.externalKey
+          ? { externalKey: parsed.value.externalKey }
+          : {}),
+        ...(parsed.value.externalUrl
+          ? { externalUrl: parsed.value.externalUrl }
+          : {}),
+        ...(parsed.value.externalProjectId
+          ? { externalProjectId: parsed.value.externalProjectId }
+          : {}),
+        ...(parsed.value.externalProjectName
+          ? { externalProjectName: parsed.value.externalProjectName }
+          : {}),
+        ...(parsed.value.externalTeamId
+          ? { externalTeamId: parsed.value.externalTeamId }
+          : {}),
         actor: parsed.value.actor,
       });
 
@@ -283,6 +307,8 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
           ["ticket_id", created.ticket.ticketId],
           ["title", created.ticket.title],
           ["status", created.ticket.status],
+          ["owner", created.ticket.owner],
+          ["source", created.ticket.source],
           ["created_at", created.ticket.createdAt],
           ["updated_at", created.ticket.updatedAt],
         ],
@@ -331,6 +357,12 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
       if (parsed.value.clearBlocks && parsed.value.blocks.length > 0) {
         ctx.logger.error({
           message: "--clear-blocks cannot be combined with --blocks.",
+        });
+        return 1;
+      }
+      if (parsed.value.clearTags && parsed.value.tags.length > 0) {
+        ctx.logger.error({
+          message: "--clear-tags cannot be combined with --tags/--tag.",
         });
         return 1;
       }
@@ -393,11 +425,30 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
         blocks = undefined;
       }
 
+      let tags: string[] | undefined;
+      if (parsed.value.clearTags) {
+        tags = [];
+      } else if (parsed.value.tags.length > 0) {
+        tags = [...parsed.value.tags];
+      } else {
+        tags = undefined;
+      }
+
       const hasUpdates =
         title !== undefined ||
         bodyRequested ||
         dependsOn !== undefined ||
-        blocks !== undefined;
+        blocks !== undefined ||
+        tags !== undefined ||
+        parsed.value.owner !== undefined ||
+        parsed.value.source !== undefined ||
+        parsed.value.externalSystem !== undefined ||
+        parsed.value.externalId !== undefined ||
+        parsed.value.externalKey !== undefined ||
+        parsed.value.externalUrl !== undefined ||
+        parsed.value.externalProjectId !== undefined ||
+        parsed.value.externalProjectName !== undefined ||
+        parsed.value.externalTeamId !== undefined;
 
       if (!hasUpdates) {
         ctx.logger.error({ message: "No updates provided." });
@@ -420,6 +471,34 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
         ...(bodyRequested ? { body } : {}),
         ...(dependsOn !== undefined ? { dependsOn } : {}),
         ...(blocks !== undefined ? { blocks } : {}),
+        ...(tags !== undefined ? { tags } : {}),
+        ...(parsed.value.owner !== undefined
+          ? { owner: parsed.value.owner }
+          : {}),
+        ...(parsed.value.source !== undefined
+          ? { source: parsed.value.source }
+          : {}),
+        ...(parsed.value.externalSystem !== undefined
+          ? { externalSystem: parsed.value.externalSystem }
+          : {}),
+        ...(parsed.value.externalId !== undefined
+          ? { externalId: parsed.value.externalId }
+          : {}),
+        ...(parsed.value.externalKey !== undefined
+          ? { externalKey: parsed.value.externalKey }
+          : {}),
+        ...(parsed.value.externalUrl !== undefined
+          ? { externalUrl: parsed.value.externalUrl }
+          : {}),
+        ...(parsed.value.externalProjectId !== undefined
+          ? { externalProjectId: parsed.value.externalProjectId }
+          : {}),
+        ...(parsed.value.externalProjectName !== undefined
+          ? { externalProjectName: parsed.value.externalProjectName }
+          : {}),
+        ...(parsed.value.externalTeamId !== undefined
+          ? { externalTeamId: parsed.value.externalTeamId }
+          : {}),
         actor: parsed.value.actor,
       });
 
@@ -470,7 +549,28 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
         logger: ctx.logger,
       });
 
-      const tickets = await store.listTickets();
+      const tickets = (await store.listTickets()).filter((ticket) => {
+        if (
+          parsed.value.owner &&
+          ticket.owner.toLowerCase() !== parsed.value.owner.toLowerCase()
+        ) {
+          return false;
+        }
+        if (
+          parsed.value.source &&
+          ticket.source.toLowerCase() !== parsed.value.source.toLowerCase()
+        ) {
+          return false;
+        }
+        if (
+          parsed.value.externalSystem &&
+          (ticket.externalSystem ?? "").toLowerCase() !==
+            parsed.value.externalSystem.toLowerCase()
+        ) {
+          return false;
+        }
+        return true;
+      });
 
       if (parsed.value.json) {
         process.stdout.write(`${JSON.stringify({ tickets }, null, 2)}\n`);
@@ -487,11 +587,13 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
       }
 
       await display.table({
-        columns: ["Id", "Title", "Status", "Updated"],
+        columns: ["Id", "Title", "Status", "Owner", "Source", "Updated"],
         rows: tickets.map((ticket) => [
           ticket.ticketId,
           ticket.title,
           ticket.status,
+          ticket.owner,
+          ticket.source,
           ticket.updatedAt,
         ]),
       });
@@ -576,6 +678,16 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
         entries: [
           ["title", ticket.title],
           ["status", ticket.status],
+          ["owner", ticket.owner],
+          ["source", ticket.source],
+          ["tags", ticket.tags.join(", ")],
+          ["external_system", ticket.externalSystem ?? ""],
+          ["external_id", ticket.externalId ?? ""],
+          ["external_key", ticket.externalKey ?? ""],
+          ["external_url", ticket.externalUrl ?? ""],
+          ["external_project_id", ticket.externalProjectId ?? ""],
+          ["external_project_name", ticket.externalProjectName ?? ""],
+          ["external_team_id", ticket.externalTeamId ?? ""],
           ["depends_on", ticket.dependsOn.join(", ")],
           ["blocks", ticket.blocks.join(", ")],
           ["created_at", ticket.createdAt],
@@ -734,6 +846,17 @@ type TicketsArgs = {
   readonly blocks: readonly string[];
   readonly clearDependsOn: boolean;
   readonly clearBlocks: boolean;
+  readonly owner?: string;
+  readonly source?: string;
+  readonly tags: readonly string[];
+  readonly clearTags: boolean;
+  readonly externalSystem?: string;
+  readonly externalId?: string;
+  readonly externalKey?: string;
+  readonly externalUrl?: string;
+  readonly externalProjectId?: string;
+  readonly externalProjectName?: string;
+  readonly externalTeamId?: string;
   readonly actor?: string;
   readonly json: boolean;
   readonly rest: readonly string[];
@@ -769,6 +892,17 @@ function parseTicketsArgs(opts: {
   const blocks: string[] = [];
   let clearDependsOn = false;
   let clearBlocks = false;
+  let owner: string | undefined;
+  let source: string | undefined;
+  const tags: string[] = [];
+  let clearTags = false;
+  let externalSystem: string | undefined;
+  let externalId: string | undefined;
+  let externalKey: string | undefined;
+  let externalUrl: string | undefined;
+  let externalProjectId: string | undefined;
+  let externalProjectName: string | undefined;
+  let externalTeamId: string | undefined;
   let actor: string | undefined;
   let json = false;
 
@@ -854,6 +988,10 @@ function parseTicketsArgs(opts: {
       clearBlocks = true;
       continue;
     }
+    if (token === "--clear-tags") {
+      clearTags = true;
+      continue;
+    }
 
     if (token.startsWith("--depends-on=")) {
       dependsOn.push(...splitTicketRefs(token.slice("--depends-on=".length)));
@@ -890,6 +1028,153 @@ function parseTicketsArgs(opts: {
       continue;
     }
 
+    if (token.startsWith("--owner=")) {
+      owner = token.slice("--owner=".length);
+      continue;
+    }
+    if (token === "--owner") {
+      const value = takeValue(token, opts.args[i + 1]);
+      if (!value) {
+        return { ok: false, error: "--owner requires a value." };
+      }
+      owner = value;
+      i += 1;
+      continue;
+    }
+    if (token.startsWith("--source=")) {
+      source = token.slice("--source=".length);
+      continue;
+    }
+    if (token === "--source") {
+      const value = takeValue(token, opts.args[i + 1]);
+      if (!value) {
+        return { ok: false, error: "--source requires a value." };
+      }
+      source = value;
+      i += 1;
+      continue;
+    }
+    if (token.startsWith("--tags=")) {
+      tags.push(...splitTags(token.slice("--tags=".length)));
+      continue;
+    }
+    if (token === "--tags") {
+      const value = takeValue(token, opts.args[i + 1]);
+      if (!value) {
+        return { ok: false, error: "--tags requires a value." };
+      }
+      tags.push(...splitTags(value));
+      i += 1;
+      continue;
+    }
+    if (token.startsWith("--tag=")) {
+      tags.push(token.slice("--tag=".length));
+      continue;
+    }
+    if (token === "--tag") {
+      const value = takeValue(token, opts.args[i + 1]);
+      if (!value) {
+        return { ok: false, error: "--tag requires a value." };
+      }
+      tags.push(value);
+      i += 1;
+      continue;
+    }
+    if (token.startsWith("--external-system=")) {
+      externalSystem = token.slice("--external-system=".length);
+      continue;
+    }
+    if (token === "--external-system") {
+      const value = takeValue(token, opts.args[i + 1]);
+      if (!value) {
+        return { ok: false, error: "--external-system requires a value." };
+      }
+      externalSystem = value;
+      i += 1;
+      continue;
+    }
+    if (token.startsWith("--external-id=")) {
+      externalId = token.slice("--external-id=".length);
+      continue;
+    }
+    if (token === "--external-id") {
+      const value = takeValue(token, opts.args[i + 1]);
+      if (!value) {
+        return { ok: false, error: "--external-id requires a value." };
+      }
+      externalId = value;
+      i += 1;
+      continue;
+    }
+    if (token.startsWith("--external-key=")) {
+      externalKey = token.slice("--external-key=".length);
+      continue;
+    }
+    if (token === "--external-key") {
+      const value = takeValue(token, opts.args[i + 1]);
+      if (!value) {
+        return { ok: false, error: "--external-key requires a value." };
+      }
+      externalKey = value;
+      i += 1;
+      continue;
+    }
+    if (token.startsWith("--external-url=")) {
+      externalUrl = token.slice("--external-url=".length);
+      continue;
+    }
+    if (token === "--external-url") {
+      const value = takeValue(token, opts.args[i + 1]);
+      if (!value) {
+        return { ok: false, error: "--external-url requires a value." };
+      }
+      externalUrl = value;
+      i += 1;
+      continue;
+    }
+    if (token.startsWith("--external-project-id=")) {
+      externalProjectId = token.slice("--external-project-id=".length);
+      continue;
+    }
+    if (token === "--external-project-id") {
+      const value = takeValue(token, opts.args[i + 1]);
+      if (!value) {
+        return { ok: false, error: "--external-project-id requires a value." };
+      }
+      externalProjectId = value;
+      i += 1;
+      continue;
+    }
+    if (token.startsWith("--external-project-name=")) {
+      externalProjectName = token.slice("--external-project-name=".length);
+      continue;
+    }
+    if (token === "--external-project-name") {
+      const value = takeValue(token, opts.args[i + 1]);
+      if (!value) {
+        return {
+          ok: false,
+          error: "--external-project-name requires a value.",
+        };
+      }
+      externalProjectName = value;
+      i += 1;
+      continue;
+    }
+    if (token.startsWith("--external-team-id=")) {
+      externalTeamId = token.slice("--external-team-id=".length);
+      continue;
+    }
+    if (token === "--external-team-id") {
+      const value = takeValue(token, opts.args[i + 1]);
+      if (!value) {
+        return { ok: false, error: "--external-team-id requires a value." };
+      }
+      externalTeamId = value;
+      i += 1;
+      continue;
+    }
+
     if (token === "--actor") {
       const value = takeValue(token, opts.args[i + 1]);
       if (!value) {
@@ -918,6 +1203,17 @@ function parseTicketsArgs(opts: {
       blocks,
       clearDependsOn,
       clearBlocks,
+      ...(owner ? { owner } : {}),
+      ...(source ? { source } : {}),
+      tags: normalizeTags(tags),
+      clearTags,
+      ...(externalSystem !== undefined ? { externalSystem } : {}),
+      ...(externalId !== undefined ? { externalId } : {}),
+      ...(externalKey !== undefined ? { externalKey } : {}),
+      ...(externalUrl !== undefined ? { externalUrl } : {}),
+      ...(externalProjectId !== undefined ? { externalProjectId } : {}),
+      ...(externalProjectName !== undefined ? { externalProjectName } : {}),
+      ...(externalTeamId !== undefined ? { externalTeamId } : {}),
       ...(actor ? { actor } : {}),
       json,
       rest,
@@ -963,6 +1259,28 @@ function splitTicketRefs(value: string): string[] {
     .split(TICKET_REF_SEPARATOR_PATTERN)
     .map((part) => part.trim())
     .filter((part) => part.length > 0);
+}
+
+function splitTags(value: string): string[] {
+  return value
+    .split(TICKET_REF_SEPARATOR_PATTERN)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+}
+
+function normalizeTags(values: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const value of values) {
+    const tag = value.trim();
+    if (!(tag && !seen.has(tag))) {
+      continue;
+    }
+    seen.add(tag);
+    normalized.push(tag);
+  }
+  normalized.sort((left, right) => left.localeCompare(right));
+  return normalized;
 }
 
 function resolveTicketRefs(opts: {

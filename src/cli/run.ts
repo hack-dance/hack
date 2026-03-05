@@ -42,7 +42,9 @@ export async function runCli(argv: readonly string[]): Promise<number> {
     }
 
     const isExtensionDispatcher =
-      resolved.command?.name === "x" || resolved.command?.name === "tickets";
+      resolved.command?.name === "x" ||
+      resolved.command?.name === "tickets" ||
+      resolved.command?.name === "linear";
     if (!isExtensionDispatcher) {
       // Unknown options (not registered anywhere in the CLI)
       const unionOptNames = collectUnionOptionNames(cli);
@@ -125,7 +127,7 @@ function isExtensionDispatch(opts: {
     if (token.startsWith("-")) {
       continue;
     }
-    return token === "x" || token === "tickets";
+    return token === "x" || token === "tickets" || token === "linear";
   }
   return false;
 }

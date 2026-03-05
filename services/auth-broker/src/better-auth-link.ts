@@ -69,7 +69,11 @@ export async function resolveBetterAuthUserFromGitHubAccount(input: {
     const createdUserId = await createBetterAuthUserByEmail({
       runtime,
       email: accountEmail,
-      name: normalizeText(input.account.accountName) ?? input.account.login,
+      name:
+        normalizeText(input.account.accountName) ??
+        normalizeText(input.account.login) ??
+        normalizeText(input.account.accountHandle) ??
+        accountEmail,
     });
     if (createdUserId) {
       return { state: "created_new", userId: createdUserId };

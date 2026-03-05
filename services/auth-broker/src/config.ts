@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 export type BrokerConfig = {
   readonly port: number;
   readonly host: string;
@@ -14,6 +17,17 @@ export type BrokerConfig = {
   readonly githubApiBaseUrl: string;
   readonly githubRedirectUri: string;
   readonly betterAuthGitHubAutoProvisionUsers: boolean;
+  readonly linearClientId?: string;
+  readonly linearClientSecret?: string;
+  readonly linearDeveloperAppToken?: string;
+  readonly linearActor: "user" | "app";
+  readonly linearScopes: string;
+  readonly linearAuthorizeUrl: string;
+  readonly linearTokenUrl: string;
+  readonly linearApiBaseUrl: string;
+  readonly linearRedirectUri: string;
+  readonly linearWebhookPath: string;
+  readonly linearWebhookSigningSecret?: string;
   readonly flowTtlMs: number;
   readonly flowSweepIntervalMs: number;
 };
@@ -26,10 +40,22 @@ const DEFAULT_GITHUB_SCOPES = "read:user,user:email,read:org";
 const DEFAULT_GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize";
 const DEFAULT_GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token";
 const DEFAULT_GITHUB_API_BASE_URL = "https://api.github.com";
+const DEFAULT_LINEAR_SCOPES = "read,write,app:mentionable,app:assignable";
+const DEFAULT_LINEAR_ACTOR = "app";
+const DEFAULT_LINEAR_AUTHORIZE_URL = "https://linear.app/oauth/authorize";
+const DEFAULT_LINEAR_TOKEN_URL = "https://api.linear.app/oauth/token";
+const DEFAULT_LINEAR_API_BASE_URL = "https://api.linear.app";
+const DEFAULT_LINEAR_WEBHOOK_PATH = "/linear/webhooks";
 const DEFAULT_FLOW_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_FLOW_SWEEP_INTERVAL_MS = 30 * 1000;
 const TRAILING_SLASH_PATTERN = /\/$/;
 const GITHUB_SCOPE_SPLIT_PATTERN = /[,\s]+/;
+const NEWLINE_SPLIT_PATTERN = /\r?\n/;
+const ROOT_ENV_FALLBACK_FILES = [
+  resolve(import.meta.dir, "../../..", ".env.local"),
+  resolve(import.meta.dir, "../../..", ".env"),
+] as const;
+let cachedRootEnvFallback: Map<string, string> | null = null;
 
 /**
  * Resolve auth broker runtime config from environment variables.
@@ -38,18 +64,12 @@ export function resolveConfig(): BrokerConfig {
   const publicBaseUrl =
     normalizeUrl(process.env.AUTH_BROKER_PUBLIC_BASE_URL) ??
     DEFAULT_PUBLIC_BASE_URL;
-  const githubClientId = normalizeRequiredEnv("GITHUB_CLIENT_ID");
-  const githubClientSecret = normalizeRequiredEnv("GITHUB_CLIENT_SECRET");
-  const githubRedirectUri =
-    normalizeUrl(process.env.GITHUB_REDIRECT_URI) ??
-    `${publicBaseUrl}/gh/callback`;
-  const githubAppSlug =
-    normalizeString(process.env.GITHUB_APP_SLUG) ?? undefined;
-  const githubAppInstallUrl =
-    normalizeUrl(process.env.GITHUB_APP_INSTALL_URL) ??
-    (githubAppSlug
-      ? `https://github.com/apps/${encodeURIComponent(githubAppSlug)}/installations/new`
-      : undefined);
+  const github = resolveGitHubConfig({
+    publicBaseUrl,
+  });
+  const linear = resolveLinearConfig({
+    publicBaseUrl,
+  });
 
   return {
     port: parsePort(process.env.PORT) ?? DEFAULT_PORT,
@@ -57,25 +77,11 @@ export function resolveConfig(): BrokerConfig {
     publicBaseUrl,
     flowStorePath:
       normalizeString(process.env.FLOW_STORE_PATH) ?? DEFAULT_FLOW_STORE_PATH,
-    githubClientId,
-    githubClientSecret,
-    githubAppId: normalizeString(process.env.GITHUB_APP_ID) ?? undefined,
-    githubAppSlug,
-    githubAppInstallUrl,
-    githubScopes:
-      normalizeGitHubScopes(process.env.GITHUB_SCOPES) ?? DEFAULT_GITHUB_SCOPES,
-    githubAuthorizeUrl:
-      normalizeUrl(process.env.GITHUB_AUTHORIZE_URL) ??
-      DEFAULT_GITHUB_AUTHORIZE_URL,
-    githubTokenUrl:
-      normalizeUrl(process.env.GITHUB_TOKEN_URL) ?? DEFAULT_GITHUB_TOKEN_URL,
-    githubApiBaseUrl:
-      normalizeUrl(process.env.GITHUB_API_BASE_URL) ??
-      DEFAULT_GITHUB_API_BASE_URL,
-    githubRedirectUri,
+    ...github,
     betterAuthGitHubAutoProvisionUsers:
       parseBoolean(process.env.BETTER_AUTH_GITHUB_AUTO_PROVISION_USERS) ??
       false,
+    ...linear,
     flowTtlMs: parsePositiveInt(process.env.FLOW_TTL_MS) ?? DEFAULT_FLOW_TTL_MS,
     flowSweepIntervalMs:
       parsePositiveInt(process.env.FLOW_SWEEP_INTERVAL_MS) ??
@@ -137,8 +143,140 @@ function parseBoolean(value: string | undefined): boolean | null {
   return null;
 }
 
+function resolveGitHubConfig(input: {
+  readonly publicBaseUrl: string;
+}): Pick<
+  BrokerConfig,
+  | "githubClientId"
+  | "githubClientSecret"
+  | "githubAppId"
+  | "githubAppSlug"
+  | "githubAppInstallUrl"
+  | "githubScopes"
+  | "githubAuthorizeUrl"
+  | "githubTokenUrl"
+  | "githubApiBaseUrl"
+  | "githubRedirectUri"
+> {
+  const githubClientId = normalizeRequiredEnv("GITHUB_CLIENT_ID");
+  const githubClientSecret = normalizeRequiredEnv("GITHUB_CLIENT_SECRET");
+  const githubAppSlug =
+    normalizeString(process.env.GITHUB_APP_SLUG) ?? undefined;
+  const githubAppInstallUrl =
+    normalizeUrl(process.env.GITHUB_APP_INSTALL_URL) ??
+    (githubAppSlug
+      ? `https://github.com/apps/${encodeURIComponent(githubAppSlug)}/installations/new`
+      : undefined);
+  return {
+    githubClientId,
+    githubClientSecret,
+    githubAppId: normalizeString(process.env.GITHUB_APP_ID) ?? undefined,
+    githubAppSlug,
+    githubAppInstallUrl,
+    githubScopes:
+      normalizeGitHubScopes(process.env.GITHUB_SCOPES) ?? DEFAULT_GITHUB_SCOPES,
+    githubAuthorizeUrl:
+      normalizeUrl(process.env.GITHUB_AUTHORIZE_URL) ??
+      DEFAULT_GITHUB_AUTHORIZE_URL,
+    githubTokenUrl:
+      normalizeUrl(process.env.GITHUB_TOKEN_URL) ?? DEFAULT_GITHUB_TOKEN_URL,
+    githubApiBaseUrl:
+      normalizeUrl(process.env.GITHUB_API_BASE_URL) ??
+      DEFAULT_GITHUB_API_BASE_URL,
+    githubRedirectUri:
+      normalizeUrl(process.env.GITHUB_REDIRECT_URI) ??
+      `${input.publicBaseUrl}/gh/callback`,
+  };
+}
+
+function resolveLinearConfig(input: {
+  readonly publicBaseUrl: string;
+}): Pick<
+  BrokerConfig,
+  | "linearClientId"
+  | "linearClientSecret"
+  | "linearDeveloperAppToken"
+  | "linearActor"
+  | "linearScopes"
+  | "linearAuthorizeUrl"
+  | "linearTokenUrl"
+  | "linearApiBaseUrl"
+  | "linearRedirectUri"
+  | "linearWebhookPath"
+  | "linearWebhookSigningSecret"
+> {
+  const linearClientId = normalizeString(
+    readFirstEnv(["HACK_LINEAR_CLIENT_ID", "LINEAR_CLIENT_ID"])
+  );
+  const linearClientSecret = normalizeString(
+    readFirstEnv(["HACK_LINEAR_SECRET", "LINEAR_CLIENT_SECRET"])
+  );
+  const linearDeveloperAppToken = normalizeString(
+    readFirstEnv([
+      "HACK_LINEAR_DEVELOPER_APP_TOKEN",
+      "LINEAR_DEVELOPER_APP_TOKEN",
+    ])
+  );
+  return {
+    linearClientId: linearClientId ?? undefined,
+    linearClientSecret: linearClientSecret ?? undefined,
+    linearDeveloperAppToken: linearDeveloperAppToken ?? undefined,
+    linearActor:
+      normalizeLinearActor(
+        readFirstEnv(["HACK_LINEAR_OAUTH_ACTOR", "LINEAR_OAUTH_ACTOR"])
+      ) ?? DEFAULT_LINEAR_ACTOR,
+    linearScopes:
+      normalizeOAuthScopes({
+        value: readFirstEnv(["HACK_LINEAR_SCOPES", "LINEAR_SCOPES"]),
+      }) ?? DEFAULT_LINEAR_SCOPES,
+    linearAuthorizeUrl:
+      normalizeUrl(
+        readFirstEnv(["HACK_LINEAR_AUTHORIZE_URL", "LINEAR_AUTHORIZE_URL"])
+      ) ?? DEFAULT_LINEAR_AUTHORIZE_URL,
+    linearTokenUrl:
+      normalizeUrl(
+        readFirstEnv(["HACK_LINEAR_TOKEN_URL", "LINEAR_TOKEN_URL"])
+      ) ?? DEFAULT_LINEAR_TOKEN_URL,
+    linearApiBaseUrl:
+      normalizeUrl(
+        readFirstEnv(["HACK_LINEAR_API_BASE_URL", "LINEAR_API_BASE_URL"])
+      ) ?? DEFAULT_LINEAR_API_BASE_URL,
+    linearRedirectUri:
+      normalizeUrl(
+        readFirstEnv(["HACK_LINEAR_REDIRECT_URI", "LINEAR_REDIRECT_URI"])
+      ) ?? `${input.publicBaseUrl}/linear/callback`,
+    linearWebhookPath:
+      normalizePath(
+        readFirstEnv(["HACK_LINEAR_WEBHOOK_PATH", "LINEAR_WEBHOOK_PATH"])
+      ) ?? DEFAULT_LINEAR_WEBHOOK_PATH,
+    linearWebhookSigningSecret:
+      normalizeString(
+        readFirstEnv([
+          "HACK_LINEAR_WEBHOOK_SECRET",
+          "LINEAR_WEBHOOK_SIGNING_SECRET",
+        ])
+      ) ?? undefined,
+  };
+}
+
+function normalizeLinearActor(
+  value: string | undefined
+): "user" | "app" | null {
+  const normalized = normalizeString(value)?.toLowerCase();
+  if (normalized === "user" || normalized === "app") {
+    return normalized;
+  }
+  return null;
+}
+
 function normalizeGitHubScopes(value: string | undefined): string | null {
-  const normalized = normalizeString(value);
+  return normalizeOAuthScopes({ value });
+}
+
+function normalizeOAuthScopes(input: {
+  readonly value: string | undefined;
+}): string | null {
+  const normalized = normalizeString(input.value);
   if (!normalized) {
     return null;
   }
@@ -171,4 +309,98 @@ function normalizeUrl(value: string | undefined): string | null {
   } catch {
     return null;
   }
+}
+
+function normalizePath(value: string | undefined): string | null {
+  const normalized = normalizeString(value);
+  if (!normalized) {
+    return null;
+  }
+  const withLeadingSlash = normalized.startsWith("/")
+    ? normalized
+    : `/${normalized}`;
+  if (withLeadingSlash.length > 1 && withLeadingSlash.endsWith("/")) {
+    return withLeadingSlash.slice(0, -1);
+  }
+  return withLeadingSlash;
+}
+
+function readFirstEnv(keys: readonly string[]): string | undefined {
+  for (const key of keys) {
+    const value = process.env[key];
+    if (value !== undefined) {
+      return value;
+    }
+  }
+  const fallback = resolveRootEnvFallback();
+  for (const key of keys) {
+    const value = fallback.get(key);
+    if (value !== undefined) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function resolveRootEnvFallback(): Map<string, string> {
+  if (cachedRootEnvFallback) {
+    return cachedRootEnvFallback;
+  }
+  const values = new Map<string, string>();
+  for (const filePath of ROOT_ENV_FALLBACK_FILES) {
+    const parsed = parseDotenvFile({ filePath });
+    for (const [key, value] of parsed.entries()) {
+      if (!values.has(key)) {
+        values.set(key, value);
+      }
+    }
+  }
+  cachedRootEnvFallback = values;
+  return values;
+}
+
+function parseDotenvFile(input: {
+  readonly filePath: string;
+}): Map<string, string> {
+  let raw = "";
+  try {
+    raw = readFileSync(input.filePath, "utf8");
+  } catch {
+    return new Map();
+  }
+  const values = new Map<string, string>();
+  const lines = raw.split(NEWLINE_SPLIT_PATTERN);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!(trimmed && !trimmed.startsWith("#"))) {
+      continue;
+    }
+    const eq = trimmed.indexOf("=");
+    if (eq <= 0) {
+      continue;
+    }
+    const key = trimmed.slice(0, eq).trim();
+    if (!key) {
+      continue;
+    }
+    const rawValue = trimmed.slice(eq + 1);
+    const value = normalizeDotenvValue({ value: rawValue });
+    values.set(key, value);
+  }
+  return values;
+}
+
+function normalizeDotenvValue(input: { readonly value: string }): string {
+  const raw = input.value.trim();
+  if (raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')) {
+    return raw
+      .slice(1, -1)
+      .replaceAll("\\n", "\n")
+      .replaceAll('\\"', '"')
+      .replaceAll("\\\\", "\\");
+  }
+  if (raw.length >= 2 && raw.startsWith("'") && raw.endsWith("'")) {
+    return raw.slice(1, -1);
+  }
+  return raw;
 }

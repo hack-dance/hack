@@ -39,6 +39,8 @@ testIntegration(
     expect(names).toContain("hack.project.status");
     expect(names).toContain("hack.project.logs.tail");
     expect(names).toContain("hack.project.open");
+    expect(names).toContain("hack.linear.status");
+    expect(names).toContain("hack.linear.sync.project");
   }
 );
 
@@ -60,6 +62,31 @@ testIntegration(
     expect(result.isError).toBeUndefined();
     expect(structured.ok).toBe(true);
     expect(structured.data).toEqual({ projects: [{ name: "demo" }] });
+  }
+);
+
+testIntegration(
+  "hack.linear.status returns structured data",
+  { timeout: 20_000 },
+  async () => {
+    const mcp = await startMcpClient();
+    const result = await mcp.callTool({
+      name: "hack.linear.status",
+      arguments: {},
+    });
+
+    const structured = result.structuredContent as {
+      ok: boolean;
+      data?: unknown;
+    };
+
+    expect(result.isError).toBeUndefined();
+    expect(structured.ok).toBe(true);
+    expect(structured.data).toEqual({
+      extensionId: "dance.hack.linear",
+      selectedProfile: "default",
+      tokenResolved: true,
+    });
   }
 );
 
@@ -101,6 +128,13 @@ function buildHackStubScript(): string {
     '  const payload = { projects: [{ name: "demo" }] }',
     "  console.log(JSON.stringify(payload))",
     "  process.exit(0)",
+    "}",
+    'if (cmd === "linear") {',
+    '  const sub = args[1] ?? ""',
+    '  if (sub === "status") {',
+    '    console.log(JSON.stringify({ extensionId: "dance.hack.linear", selectedProfile: "default", tokenResolved: true }))',
+    "    process.exit(0)",
+    "  }",
     "}",
     "console.error(`unknown command: ${cmd}`)",
     "process.exit(1)",

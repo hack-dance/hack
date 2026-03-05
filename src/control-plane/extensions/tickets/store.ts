@@ -24,6 +24,16 @@ export type TicketSummary = {
   readonly updatedAt: string;
   readonly dependsOn: readonly string[];
   readonly blocks: readonly string[];
+  readonly owner: string;
+  readonly source: string;
+  readonly tags: readonly string[];
+  readonly externalSystem?: string;
+  readonly externalId?: string;
+  readonly externalKey?: string;
+  readonly externalUrl?: string;
+  readonly externalProjectId?: string;
+  readonly externalProjectName?: string;
+  readonly externalTeamId?: string;
   readonly projectId?: string;
   readonly projectName?: string;
 };
@@ -69,6 +79,16 @@ export function createTicketsStore(opts: {
     readonly body?: string;
     readonly dependsOn?: readonly string[];
     readonly blocks?: readonly string[];
+    readonly owner?: string;
+    readonly source?: string;
+    readonly tags?: readonly string[];
+    readonly externalSystem?: string;
+    readonly externalId?: string;
+    readonly externalKey?: string;
+    readonly externalUrl?: string;
+    readonly externalProjectId?: string;
+    readonly externalProjectName?: string;
+    readonly externalTeamId?: string;
     readonly actor?: string;
   }) => Promise<CreateTicketResult>;
   readonly updateTicket: (input: {
@@ -77,6 +97,16 @@ export function createTicketsStore(opts: {
     readonly body?: string;
     readonly dependsOn?: readonly string[];
     readonly blocks?: readonly string[];
+    readonly owner?: string;
+    readonly source?: string;
+    readonly tags?: readonly string[];
+    readonly externalSystem?: string;
+    readonly externalId?: string;
+    readonly externalKey?: string;
+    readonly externalUrl?: string;
+    readonly externalProjectId?: string;
+    readonly externalProjectName?: string;
+    readonly externalTeamId?: string;
     readonly actor?: string;
   }) => Promise<
     { readonly ok: true } | { readonly ok: false; readonly error: string }
@@ -257,6 +287,36 @@ export function createTicketsStore(opts: {
       const ticketId = await computeNextTicketId();
       const dependsOn = normalizeTicketRefs(input.dependsOn ?? []);
       const blocks = normalizeTicketRefs(input.blocks ?? []);
+      const owner = normalizeOwnerOrSource({
+        value: input.owner,
+        fallback: "hack",
+      });
+      const source = normalizeOwnerOrSource({
+        value: input.source,
+        fallback: "hack",
+      });
+      const tags = normalizeTags(input.tags ?? []);
+      const externalSystem = normalizeOptionalMetadataString({
+        value: input.externalSystem,
+      });
+      const externalId = normalizeOptionalMetadataString({
+        value: input.externalId,
+      });
+      const externalKey = normalizeOptionalMetadataString({
+        value: input.externalKey,
+      });
+      const externalUrl = normalizeOptionalMetadataString({
+        value: input.externalUrl,
+      });
+      const externalProjectId = normalizeOptionalMetadataString({
+        value: input.externalProjectId,
+      });
+      const externalProjectName = normalizeOptionalMetadataString({
+        value: input.externalProjectName,
+      });
+      const externalTeamId = normalizeOptionalMetadataString({
+        value: input.externalTeamId,
+      });
       const event = buildEvent({
         ticketId,
         type: "ticket.created",
@@ -265,6 +325,16 @@ export function createTicketsStore(opts: {
           ...(input.body ? { body: input.body } : {}),
           ...(dependsOn.length > 0 ? { dependsOn } : {}),
           ...(blocks.length > 0 ? { blocks } : {}),
+          owner,
+          source,
+          ...(tags.length > 0 ? { tags } : {}),
+          ...(externalSystem ? { externalSystem } : {}),
+          ...(externalId ? { externalId } : {}),
+          ...(externalKey ? { externalKey } : {}),
+          ...(externalUrl ? { externalUrl } : {}),
+          ...(externalProjectId ? { externalProjectId } : {}),
+          ...(externalProjectName ? { externalProjectName } : {}),
+          ...(externalTeamId ? { externalTeamId } : {}),
           status: "open",
         },
         actor: input.actor,
@@ -286,6 +356,16 @@ export function createTicketsStore(opts: {
           updatedAt: event.tsIso,
           dependsOn,
           blocks,
+          owner,
+          source,
+          tags,
+          ...(externalSystem ? { externalSystem } : {}),
+          ...(externalId ? { externalId } : {}),
+          ...(externalKey ? { externalKey } : {}),
+          ...(externalUrl ? { externalUrl } : {}),
+          ...(externalProjectId ? { externalProjectId } : {}),
+          ...(externalProjectName ? { externalProjectName } : {}),
+          ...(externalTeamId ? { externalTeamId } : {}),
           ...(opts.projectId ? { projectId: opts.projectId } : {}),
           ...(opts.projectName ? { projectName: opts.projectName } : {}),
         },
@@ -315,6 +395,56 @@ export function createTicketsStore(opts: {
       }
       if (input.blocks !== undefined) {
         payload.blocks = normalizeTicketRefs(input.blocks);
+      }
+      if (input.owner !== undefined) {
+        payload.owner = normalizeOwnerOrSource({
+          value: input.owner,
+          fallback: "hack",
+        });
+      }
+      if (input.source !== undefined) {
+        payload.source = normalizeOwnerOrSource({
+          value: input.source,
+          fallback: "hack",
+        });
+      }
+      if (input.tags !== undefined) {
+        payload.tags = normalizeTags(input.tags);
+      }
+      if (input.externalSystem !== undefined) {
+        payload.externalSystem = normalizeOptionalMetadataString({
+          value: input.externalSystem,
+        });
+      }
+      if (input.externalId !== undefined) {
+        payload.externalId = normalizeOptionalMetadataString({
+          value: input.externalId,
+        });
+      }
+      if (input.externalKey !== undefined) {
+        payload.externalKey = normalizeOptionalMetadataString({
+          value: input.externalKey,
+        });
+      }
+      if (input.externalUrl !== undefined) {
+        payload.externalUrl = normalizeOptionalMetadataString({
+          value: input.externalUrl,
+        });
+      }
+      if (input.externalProjectId !== undefined) {
+        payload.externalProjectId = normalizeOptionalMetadataString({
+          value: input.externalProjectId,
+        });
+      }
+      if (input.externalProjectName !== undefined) {
+        payload.externalProjectName = normalizeOptionalMetadataString({
+          value: input.externalProjectName,
+        });
+      }
+      if (input.externalTeamId !== undefined) {
+        payload.externalTeamId = normalizeOptionalMetadataString({
+          value: input.externalTeamId,
+        });
       }
 
       if (Object.keys(payload).length === 0) {
@@ -416,6 +546,36 @@ function applyTicketCreatedEvent(opts: {
   const blocks = parseDependencyList({
     value: opts.event.payload.blocks,
   });
+  const owner = normalizeOwnerOrSource({
+    value: readOptionalStringPayload({ value: opts.event.payload.owner }),
+    fallback: "hack",
+  });
+  const source = normalizeOwnerOrSource({
+    value: readOptionalStringPayload({ value: opts.event.payload.source }),
+    fallback: "hack",
+  });
+  const tags = parseTags({ value: opts.event.payload.tags });
+  const externalSystem = readOptionalStringPayload({
+    value: opts.event.payload.externalSystem,
+  });
+  const externalId = readOptionalStringPayload({
+    value: opts.event.payload.externalId,
+  });
+  const externalKey = readOptionalStringPayload({
+    value: opts.event.payload.externalKey,
+  });
+  const externalUrl = readOptionalStringPayload({
+    value: opts.event.payload.externalUrl,
+  });
+  const externalProjectId = readOptionalStringPayload({
+    value: opts.event.payload.externalProjectId,
+  });
+  const externalProjectName = readOptionalStringPayload({
+    value: opts.event.payload.externalProjectName,
+  });
+  const externalTeamId = readOptionalStringPayload({
+    value: opts.event.payload.externalTeamId,
+  });
 
   opts.tickets.set(opts.event.ticketId, {
     ticketId: opts.event.ticketId,
@@ -426,6 +586,16 @@ function applyTicketCreatedEvent(opts: {
     updatedAt: opts.event.tsIso,
     dependsOn,
     blocks,
+    owner,
+    source,
+    tags,
+    ...(externalSystem ? { externalSystem } : {}),
+    ...(externalId ? { externalId } : {}),
+    ...(externalKey ? { externalKey } : {}),
+    ...(externalUrl ? { externalUrl } : {}),
+    ...(externalProjectId ? { externalProjectId } : {}),
+    ...(externalProjectName ? { externalProjectName } : {}),
+    ...(externalTeamId ? { externalTeamId } : {}),
     ...(opts.event.projectId ? { projectId: opts.event.projectId } : {}),
     ...(opts.event.projectName ? { projectName: opts.event.projectName } : {}),
   });
@@ -477,6 +647,46 @@ function applyTicketUpdatedEvent(opts: {
     payload: opts.event.payload,
     key: "blocks",
   });
+  const owner = readOptionalStringUpdate({
+    payload: opts.event.payload,
+    key: "owner",
+  });
+  const source = readOptionalStringUpdate({
+    payload: opts.event.payload,
+    key: "source",
+  });
+  const tags = readTagsUpdate({
+    payload: opts.event.payload,
+    key: "tags",
+  });
+  const externalSystem = readOptionalStringUpdate({
+    payload: opts.event.payload,
+    key: "externalSystem",
+  });
+  const externalId = readOptionalStringUpdate({
+    payload: opts.event.payload,
+    key: "externalId",
+  });
+  const externalKey = readOptionalStringUpdate({
+    payload: opts.event.payload,
+    key: "externalKey",
+  });
+  const externalUrl = readOptionalStringUpdate({
+    payload: opts.event.payload,
+    key: "externalUrl",
+  });
+  const externalProjectId = readOptionalStringUpdate({
+    payload: opts.event.payload,
+    key: "externalProjectId",
+  });
+  const externalProjectName = readOptionalStringUpdate({
+    payload: opts.event.payload,
+    key: "externalProjectName",
+  });
+  const externalTeamId = readOptionalStringUpdate({
+    payload: opts.event.payload,
+    key: "externalTeamId",
+  });
 
   opts.tickets.set(opts.event.ticketId, {
     ...current,
@@ -484,6 +694,38 @@ function applyTicketUpdatedEvent(opts: {
     ...(body !== undefined ? { body } : {}),
     ...(dependsOn !== null ? { dependsOn } : {}),
     ...(blocks !== null ? { blocks } : {}),
+    ...(owner !== null
+      ? {
+          owner: normalizeOwnerOrSource({
+            value: owner,
+            fallback: current.owner,
+          }),
+        }
+      : {}),
+    ...(source !== null
+      ? {
+          source: normalizeOwnerOrSource({
+            value: source,
+            fallback: current.source,
+          }),
+        }
+      : {}),
+    ...(tags !== null ? { tags } : {}),
+    ...(externalSystem !== null
+      ? { externalSystem: externalSystem || undefined }
+      : {}),
+    ...(externalId !== null ? { externalId: externalId || undefined } : {}),
+    ...(externalKey !== null ? { externalKey: externalKey || undefined } : {}),
+    ...(externalUrl !== null ? { externalUrl: externalUrl || undefined } : {}),
+    ...(externalProjectId !== null
+      ? { externalProjectId: externalProjectId || undefined }
+      : {}),
+    ...(externalProjectName !== null
+      ? { externalProjectName: externalProjectName || undefined }
+      : {}),
+    ...(externalTeamId !== null
+      ? { externalTeamId: externalTeamId || undefined }
+      : {}),
     updatedAt: opts.event.tsIso,
   });
 }
@@ -512,6 +754,16 @@ function parseDependencyList(opts: { readonly value: unknown }): string[] {
   return normalizeTicketRefs(values);
 }
 
+function parseTags(opts: { readonly value: unknown }): string[] {
+  if (!Array.isArray(opts.value)) {
+    return [];
+  }
+  const tags = opts.value.filter(
+    (item): item is string => typeof item === "string"
+  );
+  return normalizeTags(tags);
+}
+
 function readDependencyUpdate(opts: {
   readonly payload: Record<string, unknown>;
   readonly key: "dependsOn" | "blocks";
@@ -520,6 +772,35 @@ function readDependencyUpdate(opts: {
     return null;
   }
   return parseDependencyList({ value: opts.payload[opts.key] });
+}
+
+function readTagsUpdate(opts: {
+  readonly payload: Record<string, unknown>;
+  readonly key: "tags";
+}): string[] | null {
+  if (!Object.hasOwn(opts.payload, opts.key)) {
+    return null;
+  }
+  return parseTags({ value: opts.payload[opts.key] });
+}
+
+function readOptionalStringUpdate(opts: {
+  readonly payload: Record<string, unknown>;
+  readonly key:
+    | "owner"
+    | "source"
+    | "externalSystem"
+    | "externalId"
+    | "externalKey"
+    | "externalUrl"
+    | "externalProjectId"
+    | "externalProjectName"
+    | "externalTeamId";
+}): string | null {
+  if (!Object.hasOwn(opts.payload, opts.key)) {
+    return null;
+  }
+  return readOptionalStringPayload({ value: opts.payload[opts.key] }) ?? "";
 }
 
 function applyDerivedBlocks(
@@ -547,6 +828,46 @@ function applyDerivedBlocks(
   }
 
   return tickets;
+}
+
+function readOptionalStringPayload(opts: {
+  readonly value: unknown;
+}): string | undefined {
+  if (typeof opts.value !== "string") {
+    return undefined;
+  }
+  const trimmed = opts.value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function normalizeOwnerOrSource(opts: {
+  readonly value: string | undefined;
+  readonly fallback: string;
+}): string {
+  const trimmed = (opts.value ?? "").trim();
+  return trimmed || opts.fallback;
+}
+
+function normalizeOptionalMetadataString(opts: {
+  readonly value: string | undefined;
+}): string | undefined {
+  const trimmed = (opts.value ?? "").trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function normalizeTags(tags: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const tag of tags) {
+    const trimmed = tag.trim();
+    if (!(trimmed && !seen.has(trimmed))) {
+      continue;
+    }
+    seen.add(trimmed);
+    normalized.push(trimmed);
+  }
+  normalized.sort((left, right) => left.localeCompare(right));
+  return normalized;
 }
 
 function safeJsonParse(text: string): unknown {

@@ -16,6 +16,7 @@ enum SettingsSidebarItem: String, Hashable, Identifiable {
   case supervisor
   case permissions
   case extensions
+  case linear
   case github
   case cloudflare
   case railway
@@ -45,6 +46,8 @@ enum SettingsSidebarItem: String, Hashable, Identifiable {
       return "Permissions"
     case .extensions:
       return "Extensions"
+    case .linear:
+      return "Linear"
     case .github:
       return "GitHub"
     case .cloudflare:
@@ -80,6 +83,8 @@ enum SettingsSidebarItem: String, Hashable, Identifiable {
       return "hand.raised.fill"
     case .extensions:
       return "puzzlepiece.extension"
+    case .linear:
+      return "line.3.horizontal.decrease.circle"
     case .github:
       return "chevron.left.forwardslash.chevron.right"
     case .cloudflare:
@@ -192,6 +197,7 @@ struct SettingsOverlayView: View {
       }
       Section("Extensions") {
         settingsRow(.extensions)
+        settingsRow(.linear)
         settingsRow(.github)
         settingsRow(.cloudflare)
         settingsRow(.railway)
@@ -233,6 +239,8 @@ struct SettingsOverlayView: View {
         PermissionsSettingsView()
       case .extensions:
         ExtensionsSettingsView(selection: $selection)
+      case .linear:
+        LinearExtensionSettingsView()
       case .github:
         GitHubExtensionSettingsView()
       case .cloudflare:
@@ -2640,6 +2648,759 @@ private struct TailscaleOAuthCredentialControl: View {
   }
 }
 
+private struct LinearExtensionSettingsView: View {
+  @Environment(DashboardModel.self) private var model
+  @State private var isLoadingConfig = false
+  @State private var isSavingConfig = false
+  @State private var isLoadingDiagnostics = false
+  @State private var suppressEnabledToggleChange = false
+  @State private var suppressSyncToggleChange = false
+  @State private var enabled = false
+  @State private var diagnostics: LinearProfilesResponse? = nil
+  @State private var profileStatusById: [String: LinearStatusResponse] = [:]
+  @State private var defaultProfile = ""
+  @State private var syncLabels = false
+  @State private var syncStatuses = true
+  @State private var syncDependencies = true
+  @State private var syncProjects = true
+  @State private var isAuthenticating = false
+  @State private var authPollingTask: Task<Void, Never>? = nil
+  @State private var authFlowStatus: LinearOAuthFlowStatusResponse? = nil
+  @State private var disconnectingLinearProfiles: Set<String> = []
+  @State private var message = ""
+  @State private var lastDiagnosticsRefreshAt: Date? = nil
+
+  var body: some View {
+    ScrollView {
+      LazyVStack(alignment: .leading, spacing: 20) {
+        SettingsSectionHeader(
+          breadcrumb: "Settings / Extensions / Linear",
+          title: "Linear Extension",
+          subtitle: "Manage connected Linear accounts and default issue-sync routing"
+        )
+        GlassCard(title: "Extension status", systemImage: "line.3.horizontal.decrease.circle") {
+          HStack(alignment: .center, spacing: 8) {
+            StatusPill(text: enabled ? "Enabled" : "Disabled", tone: enabled ? .good : .neutral)
+            StatusPill(
+              text: "\(linearProfiles.count) account\(linearProfiles.count == 1 ? "" : "s")",
+              tone: linearProfiles.isEmpty ? .neutral : .good
+            )
+            if !resolvedDefaultProfile.isEmpty {
+              StatusPill(
+                text: "Default remote: \(displayNameForRemoteProfileId(resolvedDefaultProfile))",
+                tone: .neutral
+              )
+            }
+            Spacer()
+            Toggle("Enabled", isOn: $enabled)
+              .labelsHidden()
+              .toggleStyle(.switch)
+              .onChange(of: enabled) { _, newValue in
+                guard !suppressEnabledToggleChange else { return }
+                Task {
+                  await applyLinearEnabledToggle(newValue)
+                }
+              }
+            if isLoadingConfig || isSavingConfig || isLoadingDiagnostics || isAuthenticating {
+              ProgressView()
+                .controlSize(.small)
+            }
+          }
+
+          if let lastDiagnosticsRefreshAt {
+            Text("Last checked \(lastDiagnosticsRefreshAt.formatted(date: .abbreviated, time: .shortened))")
+              .font(.mono(.caption2))
+              .foregroundStyle(.tertiary)
+          }
+        }
+
+        GlassCard(title: "Connected accounts", systemImage: "point.3.connected.trianglepath.dotted") {
+          HStack(alignment: .center, spacing: 10) {
+            Text("Remote Linear accounts used for ticket sync and project binding.")
+              .font(.mono(.caption))
+              .foregroundStyle(.secondary)
+            Spacer()
+            Button {
+              toggleLinearAuthFlow()
+            } label: {
+              Label(
+                isAuthenticating ? "Cancel add account" : "Add account",
+                systemImage: isAuthenticating ? "xmark.circle" : "plus.circle"
+              )
+            }
+            .adaptiveToolbarButtonProminent()
+          }
+
+          if isAuthenticating {
+            StatusPill(text: "Waiting for browser auth", tone: .good)
+          } else if let authFlowStatus {
+            switch authFlowStatus.status {
+            case "complete":
+              StatusPill(text: "Connected", tone: .good)
+            case "error", "expired":
+              StatusPill(text: "Connect failed", tone: .warn)
+            default:
+              StatusPill(text: "Connect pending", tone: .neutral)
+            }
+          }
+
+          InlineCallout(
+            tone: linearRoutingCalloutTone,
+            title: linearRoutingCalloutTitle,
+            message: linearRoutingCalloutMessage,
+            actions: []
+          )
+
+          if linearProfiles.isEmpty {
+            Text("No accounts connected yet.")
+              .font(.mono(.caption))
+              .foregroundStyle(.secondary)
+          } else {
+            VStack(alignment: .leading, spacing: 10) {
+              ForEach(linearProfiles, id: \.id) { profile in
+                let profileStatus = profileStatusById[profile.id]
+                let accountLabel = linearAccountLabel(profile: profile, status: profileStatus)
+                let accountEmail = linearAccountEmail(profile: profile, status: profileStatus)
+                let accountId = linearAccountId(profile: profile, status: profileStatus)
+                VStack(alignment: .leading, spacing: 6) {
+                  HStack(spacing: 8) {
+                    Text(accountLabel ?? profile.id)
+                      .font(.mono(.subheadline, weight: .semibold))
+                    if profile.isDefault {
+                      StatusPill(text: "Default remote", tone: .good)
+                    }
+                    if let profileStatus {
+                      StatusPill(
+                        text: profileStatus.tokenResolved ? "Token ready" : "Token missing",
+                        tone: profileStatus.tokenResolved ? .good : .warn
+                      )
+                    }
+                    Spacer()
+                    if !profile.isDefault {
+                      Button {
+                        Task { await saveLinearDefaultProfile(profile.id) }
+                      } label: {
+                        Label("Set default", systemImage: "star")
+                      }
+                      .adaptiveToolbarButton()
+                    }
+                    Button {
+                      Task {
+                        await reconnectLinearProfile(
+                          profile.id,
+                          setDefault: profile.isDefault
+                        )
+                      }
+                    } label: {
+                      Label("Reconnect", systemImage: "arrow.clockwise.circle")
+                    }
+                    .adaptiveToolbarButtonProminent()
+                    .disabled(
+                      isAuthenticating ||
+                        disconnectingLinearProfiles.contains(profile.id)
+                    )
+                    Button(role: .destructive) {
+                      Task { await disconnectLinearProfile(profile.id) }
+                    } label: {
+                      Label("Disconnect", systemImage: "trash")
+                    }
+                    .adaptiveToolbarButton()
+                    .disabled(
+                      isAuthenticating ||
+                        disconnectingLinearProfiles.contains(profile.id) ||
+                        profileStatus?.tokenResolved != true
+                    )
+                  }
+
+                  Text("profile: \(profile.id)")
+                    .font(.mono(.caption2))
+                    .foregroundStyle(.secondary)
+                  if let accountEmail, !accountEmail.isEmpty {
+                    Text("email: \(accountEmail)")
+                      .font(.mono(.caption2))
+                      .foregroundStyle(.secondary)
+                      .textSelection(.enabled)
+                  }
+                  Text("auth: \(profile.authRef) • service: \(profile.service)")
+                    .font(.mono(.caption2))
+                    .foregroundStyle(.secondary)
+                  Text("api: \(profile.apiUrl)")
+                    .font(.mono(.caption2))
+                    .foregroundStyle(.secondary)
+                  if let accountId, !accountId.isEmpty {
+                    Text("account id: \(accountId)")
+                      .font(.mono(.caption2))
+                      .foregroundStyle(.tertiary)
+                  }
+                  if let profileStatus,
+                    let tokenExpiresAt = profileStatus.tokenExpiresAt,
+                    !tokenExpiresAt.isEmpty
+                  {
+                    Text("token expires: \(tokenExpiresAt)")
+                      .font(.mono(.caption2))
+                      .foregroundStyle(.tertiary)
+                  }
+                }
+                if profile.id != linearProfiles.last?.id {
+                  Divider()
+                    .opacity(0.2)
+                }
+              }
+            }
+            Text(
+              "Disconnect removes the stored token, keeps the profile record for reconnect later, and leaves any existing project routing in place until you switch it."
+            )
+              .font(.mono(.caption2))
+              .foregroundStyle(.tertiary)
+          }
+        }
+
+        GlassCard(title: "Sync policy", systemImage: "arrow.triangle.branch") {
+          VStack(alignment: .leading, spacing: 12) {
+            InlineCallout(
+              tone: .neutral,
+              title: "How sync behaves",
+              message: linearSyncPolicySummary,
+              actions: []
+            )
+
+            Text("Manual sync stays the default. These toggles control which Linear fields Hack will translate when you run project or ticket sync tools.")
+              .font(.mono(.caption))
+              .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 10) {
+              Toggle("Sync labels", isOn: $syncLabels)
+                .toggleStyle(.switch)
+                .onChange(of: syncLabels) { _, newValue in
+                  guard !suppressSyncToggleChange else { return }
+                  Task {
+                    await saveLinearSyncToggle(
+                      key: "labels",
+                      value: newValue,
+                      successMessage: newValue ? "Linear label sync enabled." : "Linear label sync disabled."
+                    )
+                  }
+                }
+              Text(
+                "Translate Linear labels and Hack categories during manual sync. Review is still needed when names diverge or one side has no clean parallel."
+              )
+              .font(.mono(.caption2))
+              .foregroundStyle(.tertiary)
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+              Toggle("Sync statuses", isOn: $syncStatuses)
+                .toggleStyle(.switch)
+                .onChange(of: syncStatuses) { _, newValue in
+                  guard !suppressSyncToggleChange else { return }
+                  Task {
+                    await saveLinearSyncToggle(
+                      key: "statuses",
+                      value: newValue,
+                      successMessage: newValue ? "Linear status sync enabled." : "Linear status sync disabled."
+                    )
+                  }
+                }
+              Text(
+                "Translate status/state when both systems expose a matching workflow step. Conflicts on origin-owned status stay review-needed instead of auto-overwriting."
+              )
+              .font(.mono(.caption2))
+              .foregroundStyle(.tertiary)
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+              Toggle("Sync dependencies", isOn: $syncDependencies)
+                .toggleStyle(.switch)
+                .onChange(of: syncDependencies) { _, newValue in
+                  guard !suppressSyncToggleChange else { return }
+                  Task {
+                    await saveLinearSyncToggle(
+                      key: "dependencies",
+                      value: newValue,
+                      successMessage: newValue ? "Linear dependency sync enabled." : "Linear dependency sync disabled."
+                    )
+                  }
+                }
+              Text(
+                "Translate dependency and sub-issue style relationships when the counterpart ticket exists. Missing or ambiguous links stay review-needed."
+              )
+              .font(.mono(.caption2))
+              .foregroundStyle(.tertiary)
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+              Toggle("Sync project mapping", isOn: $syncProjects)
+                .toggleStyle(.switch)
+                .onChange(of: syncProjects) { _, newValue in
+                  guard !suppressSyncToggleChange else { return }
+                  Task {
+                    await saveLinearSyncToggle(
+                      key: "projects",
+                      value: newValue,
+                      successMessage: newValue ? "Linear project sync enabled." : "Linear project sync disabled."
+                    )
+                  }
+                }
+              Text(
+                "Allow Hack projects to read and write the paired Linear project binding. The account choice still comes from the global default or a per-project override."
+              )
+              .font(.mono(.caption2))
+              .foregroundStyle(.tertiary)
+            }
+
+            InlineCallout(
+              tone: .warn,
+              title: "Review still needed",
+              message: linearSyncReviewSummary,
+              actions: []
+            )
+          }
+        }
+
+        if !message.isEmpty {
+          InlineCallout(
+            tone: .neutral,
+            title: "Linear settings",
+            message: message,
+            actions: []
+          )
+        }
+      }
+      .padding(16)
+    }
+    .task {
+      await loadConfigFromDisk()
+    }
+    .onChange(of: model.lastUpdated) { _, _ in
+      Task { await loadConfigFromDisk() }
+    }
+    .onDisappear {
+      cancelLinearAuthFlow(userInitiated: false)
+    }
+  }
+
+  private var resolvedDefaultProfile: String {
+    let trimmed = defaultProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !trimmed.isEmpty {
+      return trimmed
+    }
+    return diagnostics?.defaultProfile ?? ""
+  }
+
+  private var linearProfiles: [LinearProfileSummary] {
+    (diagnostics?.profiles ?? []).sorted { lhs, rhs in
+      lhs.id.localizedCaseInsensitiveCompare(rhs.id) == .orderedAscending
+    }
+  }
+
+  private func nextLinearProfileId() -> String {
+    let existing = Set(linearProfiles.map { $0.id.lowercased() })
+    if !existing.contains("default") {
+      return "default"
+    }
+    var index = 2
+    while existing.contains("account-\(index)") {
+      index += 1
+    }
+    return "account-\(index)"
+  }
+
+  private var defaultLinearProfileNeedsRepair: Bool {
+    let defaultProfileId = resolvedDefaultProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !defaultProfileId.isEmpty else {
+      return false
+    }
+    guard linearProfiles.contains(where: { $0.id == defaultProfileId }) else {
+      return false
+    }
+    guard let status = profileStatusById[defaultProfileId] else {
+      return false
+    }
+    return !status.tokenResolved
+  }
+
+  private var linearRoutingCalloutTone: StatusTone {
+    if linearProfiles.isEmpty || defaultLinearProfileNeedsRepair || resolvedDefaultProfile.isEmpty {
+      return .warn
+    }
+    return .neutral
+  }
+
+  private var linearRoutingCalloutTitle: String {
+    if linearProfiles.isEmpty {
+      return "Connect an account first"
+    }
+    if defaultLinearProfileNeedsRepair {
+      return "Default routing needs repair"
+    }
+    if resolvedDefaultProfile.isEmpty {
+      return "Set a default remote"
+    }
+    return "Routing and disconnect behavior"
+  }
+
+  private var linearRoutingCalloutMessage: String {
+    if linearProfiles.isEmpty {
+      return "Add a Linear account before ticket or project sync can route through Linear. After the first account connects, set it as the default remote so projects inherit a working profile until they choose their own."
+    }
+
+    if defaultLinearProfileNeedsRepair {
+      let defaultLabel = displayNameForRemoteProfileId(resolvedDefaultProfile)
+      return "The default remote \(defaultLabel) no longer has a usable token. Reconnect it or switch the default before the next sync, because projects without an override still inherit that routing target."
+    }
+
+    if resolvedDefaultProfile.isEmpty {
+      return "Projects can still choose a specific Linear account, but anything without a per-project override has no fallback remote until you set a default profile here."
+    }
+
+    let defaultLabel = displayNameForRemoteProfileId(resolvedDefaultProfile)
+    return "Projects inherit \(defaultLabel) until they choose a different Linear profile in project settings. Disconnecting an account removes its token immediately, so reroute or reconnect affected projects before the next sync run."
+  }
+
+  private var linearSyncPolicySummary: String {
+    "Authority follows ticket origin. Origin-owned fields such as title, body, status, and project binding stay authoritative on the side that created the ticket, while assignees, labels, dependencies, and sub-issue links are best-effort mergeable when enabled. Comments are append-only and synced in FIFO order rather than edited in place."
+  }
+
+  private var linearSyncReviewSummary: String {
+    "These toggles only enable translation during manual sync. Hack still flags review-needed cases when both sides changed an origin-owned field, when assignees cannot be mapped cleanly, or when mergeable fields do not have a safe one-to-one counterpart."
+  }
+
+  private func loadConfigFromDisk() async {
+    isLoadingConfig = true
+    defer { isLoadingConfig = false }
+
+    let snapshot = GlobalConfigSnapshot.load()
+    suppressEnabledToggleChange = true
+    enabled = snapshot.linearExtensionEnabled ?? false
+    defaultProfile = snapshot.linearDefaultProfile ?? ""
+    suppressSyncToggleChange = true
+    syncLabels = snapshot.linearSyncLabels ?? false
+    syncStatuses = snapshot.linearSyncStatuses ?? true
+    syncDependencies = snapshot.linearSyncDependencies ?? true
+    syncProjects = snapshot.linearSyncProjects ?? true
+    suppressSyncToggleChange = false
+    suppressEnabledToggleChange = false
+    message = ""
+    await refreshLinearDiagnostics()
+  }
+
+  private func refreshLinearDiagnostics() async {
+    isLoadingDiagnostics = true
+    defer { isLoadingDiagnostics = false }
+    diagnostics = await model.inspectLinearProfiles()
+    if let diagnostics {
+      defaultProfile = diagnostics.defaultProfile
+    }
+    await refreshLinearProfileStatuses()
+    lastDiagnosticsRefreshAt = Date()
+  }
+
+  private func refreshLinearProfileStatuses() async {
+    guard let diagnostics else {
+      profileStatusById = [:]
+      return
+    }
+    var statuses: [String: LinearStatusResponse] = [:]
+    for profile in diagnostics.profiles {
+      if let status = await model.inspectLinearStatus(profileId: profile.id) {
+        statuses[profile.id] = status
+      }
+    }
+    profileStatusById = statuses
+  }
+
+  private func applyLinearEnabledToggle(_ newValue: Bool) async {
+    isSavingConfig = true
+    defer { isSavingConfig = false }
+    let didUpdate = await model.setGlobalConfig(
+      key: "controlPlane.extensions[\"dance.hack.linear\"].enabled",
+      value: newValue ? "true" : "false"
+    )
+    if !didUpdate {
+      await loadConfigFromDisk()
+      message = "Failed to update extension enabled state."
+      return
+    }
+    message = newValue ? "Linear extension enabled." : "Linear extension disabled."
+    await model.refresh()
+    await refreshLinearDiagnostics()
+  }
+
+  private func saveLinearSyncToggle(
+    key: String,
+    value: Bool,
+    successMessage: String
+  ) async {
+    isSavingConfig = true
+    defer { isSavingConfig = false }
+    let didUpdate = await model.setGlobalConfig(
+      key: "controlPlane.extensions[\"dance.hack.linear\"].config.sync.\(key)",
+      value: value ? "true" : "false"
+    )
+    if !didUpdate {
+      await loadConfigFromDisk()
+      message = "Failed to update Linear sync policy."
+      return
+    }
+    message = successMessage
+    await model.refresh()
+    await refreshLinearDiagnostics()
+  }
+
+  private func linearAccountLabel(
+    profile: LinearProfileSummary,
+    status: LinearStatusResponse?
+  ) -> String? {
+    let profileName = profile.accountName?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let profileName, !profileName.isEmpty {
+      return profileName
+    }
+    let statusName = status?.accountName?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let statusName, !statusName.isEmpty {
+      return statusName
+    }
+    let statusHandle = status?.accountEmail?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let statusHandle, !statusHandle.isEmpty {
+      return statusHandle
+    }
+    let profileEmail = profile.accountEmail?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let profileEmail, !profileEmail.isEmpty {
+      return profileEmail
+    }
+    return nil
+  }
+
+  private func linearAccountEmail(
+    profile: LinearProfileSummary,
+    status: LinearStatusResponse?
+  ) -> String? {
+    let profileEmail = profile.accountEmail?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let profileEmail, !profileEmail.isEmpty {
+      return profileEmail
+    }
+    let statusEmail = status?.accountEmail?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let statusEmail, !statusEmail.isEmpty {
+      return statusEmail
+    }
+    return nil
+  }
+
+  private func linearAccountId(
+    profile: LinearProfileSummary,
+    status: LinearStatusResponse?
+  ) -> String? {
+    let profileId = profile.accountId?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let profileId, !profileId.isEmpty {
+      return profileId
+    }
+    let statusId = status?.accountId?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let statusId, !statusId.isEmpty {
+      return statusId
+    }
+    return nil
+  }
+
+  private func displayNameForRemoteProfileId(_ profileId: String) -> String {
+    let trimmed = profileId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      return "none"
+    }
+    guard let profile = linearProfiles.first(where: { $0.id == trimmed }) else {
+      return trimmed
+    }
+    let status = profileStatusById[trimmed]
+    guard let label = linearAccountLabel(profile: profile, status: status) else {
+      return trimmed
+    }
+    return "\(label) (\(trimmed))"
+  }
+
+  private func saveLinearDefaultProfile(_ profileId: String) async {
+    isSavingConfig = true
+    defer { isSavingConfig = false }
+
+    let trimmedDefault = profileId.trimmingCharacters(in: .whitespacesAndNewlines)
+    let didSaveDefault = await model.setGlobalConfig(
+      key: "controlPlane.extensions[\"dance.hack.linear\"].config.defaultProfile",
+      value: trimmedDefault
+    )
+    if !didSaveDefault {
+      message = "Failed to save Linear default profile."
+      return
+    }
+
+    message = trimmedDefault.isEmpty
+      ? "Linear default profile cleared. Projects now need an explicit Linear routing override before sync can fall back to a remote account."
+      : "Linear default profile saved. Projects without their own override will now route through \(displayNameForRemoteProfileId(trimmedDefault))."
+    defaultProfile = trimmedDefault
+    await model.refresh()
+    await refreshLinearDiagnostics()
+  }
+
+  private func reconnectLinearProfile(
+    _ profileId: String,
+    setDefault: Bool
+  ) async {
+    await connectLinearAccountViaBrowser(
+      profileId: profileId,
+      setDefault: setDefault
+    )
+  }
+
+  private func disconnectLinearProfile(_ profileId: String) async {
+    let trimmed = profileId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      return
+    }
+    disconnectingLinearProfiles.insert(trimmed)
+    defer { disconnectingLinearProfiles.remove(trimmed) }
+
+    let disconnected = await model.disconnectLinear(profileId: trimmed)
+    if !disconnected {
+      message = model.errorMessage ?? "Failed to disconnect Linear account."
+      return
+    }
+
+    if resolvedDefaultProfile == trimmed {
+      message = "Disconnected token for \(displayNameForRemoteProfileId(trimmed)). The profile stays available for reconnect, but projects inheriting this default remote need a reconnect or a different default before the next sync."
+    } else {
+      message = "Disconnected token for \(displayNameForRemoteProfileId(trimmed)). The profile stays available for reconnect, and any project routed to it needs a reconnect or a different override before the next sync."
+    }
+    await model.refresh()
+    await refreshLinearDiagnostics()
+  }
+
+  private func toggleLinearAuthFlow() {
+    if isAuthenticating {
+      cancelLinearAuthFlow(userInitiated: true)
+      return
+    }
+    let repairDefaultProfileId = resolvedDefaultProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+    let generatedProfileId = defaultLinearProfileNeedsRepair && !repairDefaultProfileId.isEmpty
+      ? repairDefaultProfileId
+      : nextLinearProfileId()
+    let setAsDefault = linearProfiles.isEmpty || defaultLinearProfileNeedsRepair
+    authPollingTask = Task {
+      await connectLinearAccountViaBrowser(
+        profileId: generatedProfileId,
+        setDefault: setAsDefault
+      )
+    }
+  }
+
+  private func cancelLinearAuthFlow(userInitiated: Bool) {
+    authPollingTask?.cancel()
+    authPollingTask = nil
+    isAuthenticating = false
+    if userInitiated {
+      message = "Linear authentication canceled."
+    }
+  }
+
+  private func connectLinearAccountViaBrowser(
+    profileId: String,
+    setDefault: Bool
+  ) async {
+    defer {
+      authPollingTask = nil
+      isAuthenticating = false
+    }
+
+    let trimmed = profileId.trimmingCharacters(in: .whitespacesAndNewlines)
+    let profile = trimmed.isEmpty ? "default" : trimmed
+    isAuthenticating = true
+    authFlowStatus = nil
+    message = "Starting Linear browser auth for profile \(profile). When it completes, the profile can be used for default routing or project-specific sync."
+
+    guard
+      let started = await model.startLinearOAuthFlow(
+        profileId: profile,
+        setDefault: setDefault
+      )
+    else {
+      let detail = model.errorMessage?.trimmingCharacters(
+        in: .whitespacesAndNewlines
+      )
+      if let detail, !detail.isEmpty {
+        message = detail
+      } else {
+        message =
+          "Unable to start Linear auth. Confirm network access to the auth broker and retry."
+      }
+      return
+    }
+
+    if setDefault {
+      defaultProfile = profile
+    }
+
+    guard let authorizeURL = URL(string: started.authorizeUrl) else {
+      message = "Auth start returned an invalid authorize URL."
+      return
+    }
+
+    NSWorkspace.shared.open(authorizeURL)
+    message = "Browser opened. Approve access to finish connecting \(profile), then return here to use it for default or per-project routing."
+
+    let formatter = ISO8601DateFormatter()
+    let expiresAtDate = formatter.date(from: started.expiresAt)
+
+    while !Task.isCancelled {
+      if let expiresAtDate, Date() >= expiresAtDate {
+        message = "Authentication flow expired. Start a new connection."
+        return
+      }
+
+      try? await Task.sleep(nanoseconds: 1_000_000_000)
+      guard !Task.isCancelled else {
+        return
+      }
+
+      guard
+        let flowStatus = await model.fetchLinearOAuthFlowStatus(
+          statusURL: started.statusUrl
+        )
+      else {
+        let detail = model.errorMessage?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let detail, !detail.isEmpty {
+          message = detail
+          return
+        }
+        continue
+      }
+
+      authFlowStatus = flowStatus
+      if await handleLinearOAuthFlowStatus(flowStatus) {
+        return
+      }
+    }
+  }
+
+  private func handleLinearOAuthFlowStatus(
+    _ flowStatus: LinearOAuthFlowStatusResponse
+  ) async -> Bool {
+    switch flowStatus.status {
+    case "complete":
+      let account = flowStatus.accountName
+        ?? flowStatus.accountEmail
+        ?? flowStatus.accountHandle
+        ?? "Linear account"
+      message = "Connected \(account) to profile \(flowStatus.profileId). You can now use it for default routing or bind projects to it directly."
+      await model.refresh()
+      await refreshLinearDiagnostics()
+      return true
+    case "error":
+      message = flowStatus.error ?? "Linear authentication failed."
+      return true
+    case "expired":
+      message = "Authentication flow expired. Start a new connection."
+      return true
+    default:
+      return false
+    }
+  }
+}
+
 private struct GitHubExtensionSettingsView: View {
   @Environment(DashboardModel.self) private var model
   @State private var isLoadingConfig = false
@@ -4116,6 +4877,7 @@ private struct ExtensionsSettingsView: View {
   @Binding var selection: SettingsSidebarItem
   @State private var isLoading = false
   @State private var suppressToggleChange = false
+  @State private var linearEnabled = false
   @State private var githubEnabled = false
   @State private var cloudflareEnabled = false
   @State private var railwayEnabled = false
@@ -4137,6 +4899,16 @@ private struct ExtensionsSettingsView: View {
         )
         GlassCard(title: "Managed extensions", systemImage: "puzzlepiece.extension") {
           VStack(alignment: .leading, spacing: 12) {
+            extensionSummaryRow(
+              item: .linear,
+              name: "Linear",
+              description: "Issue sync profiles, default project routing, and broker-based OAuth account setup.",
+              projectCount: projectCount(for: "dance.hack.linear"),
+              exposure: extensionExposure(id: "linear"),
+              isOn: $linearEnabled
+            )
+            Divider()
+              .opacity(0.2)
             extensionSummaryRow(
               item: .github,
               name: "GitHub",
@@ -4260,6 +5032,8 @@ private struct ExtensionsSettingsView: View {
     for value in (project.extensionsEnabled ?? []) + (project.features ?? []) {
       let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
       switch normalized {
+      case "linear", "dance.hack.linear":
+        ids.insert("dance.hack.linear")
       case "cloudflare", "dance.hack.cloudflare":
         ids.insert("dance.hack.cloudflare")
       case "github", "dance.hack.github":
@@ -4282,6 +5056,7 @@ private struct ExtensionsSettingsView: View {
   private func loadConfigFromDisk() async {
     let snapshot = GlobalConfigSnapshot.load()
     suppressToggleChange = true
+    linearEnabled = snapshot.linearExtensionEnabled ?? false
     githubEnabled = snapshot.githubExtensionEnabled ?? false
     cloudflareEnabled = snapshot.cloudflareExtensionEnabled ?? false
     railwayEnabled = snapshot.railwayExtensionEnabled ?? false
@@ -4298,6 +5073,8 @@ private struct ExtensionsSettingsView: View {
 
     let key: String
     switch item {
+    case .linear:
+      key = "controlPlane.extensions[\"dance.hack.linear\"].enabled"
     case .github:
       key = "controlPlane.extensions[\"dance.hack.github\"].enabled"
     case .cloudflare:
@@ -4612,10 +5389,16 @@ private struct LoggingSettingsView: View {
 
 private struct GlobalConfigSnapshot {
   let daemonLaunchdRunAtLoad: Bool?
+  let linearExtensionEnabled: Bool?
   let githubExtensionEnabled: Bool?
   let cloudflareExtensionEnabled: Bool?
   let railwayExtensionEnabled: Bool?
   let tailscaleExtensionEnabled: Bool?
+  let linearDefaultProfile: String?
+  let linearSyncLabels: Bool?
+  let linearSyncStatuses: Bool?
+  let linearSyncDependencies: Bool?
+  let linearSyncProjects: Bool?
   let githubDefaultProfile: String?
   let railwayProject: String?
   let railwayService: String?
@@ -4678,10 +5461,13 @@ private struct GlobalConfigSnapshot {
     let sessionPreferences = dictionary(preferences, key: "sessions")
     let containerPreferences = dictionary(preferences, key: "containers")
     let extensions = dictionary(controlPlane, key: "extensions")
+    let linearExt = dictionary(extensions, key: "dance.hack.linear")
     let githubExt = dictionary(extensions, key: "dance.hack.github")
     let cloudflareExt = dictionary(extensions, key: "dance.hack.cloudflare")
     let railwayExt = dictionary(extensions, key: "dance.hack.railway")
     let tailscaleExt = dictionary(extensions, key: "dance.hack.tailscale")
+    let linearConfig = dictionary(linearExt, key: "config")
+    let linearSync = dictionary(linearConfig, key: "sync")
     let githubConfig = dictionary(githubExt, key: "config")
     let cloudflareConfig = dictionary(cloudflareExt, key: "config")
     let railwayConfig = dictionary(railwayExt, key: "config")
@@ -4689,10 +5475,16 @@ private struct GlobalConfigSnapshot {
 
     return Self(
       daemonLaunchdRunAtLoad: launchd["runAtLoad"] as? Bool,
+      linearExtensionEnabled: linearExt["enabled"] as? Bool,
       githubExtensionEnabled: githubExt["enabled"] as? Bool,
       cloudflareExtensionEnabled: cloudflareExt["enabled"] as? Bool,
       railwayExtensionEnabled: railwayExt["enabled"] as? Bool,
       tailscaleExtensionEnabled: tailscaleExt["enabled"] as? Bool,
+      linearDefaultProfile: linearConfig["defaultProfile"] as? String,
+      linearSyncLabels: linearSync["labels"] as? Bool,
+      linearSyncStatuses: linearSync["statuses"] as? Bool,
+      linearSyncDependencies: linearSync["dependencies"] as? Bool,
+      linearSyncProjects: linearSync["projects"] as? Bool,
       githubDefaultProfile: githubConfig["defaultProfile"] as? String,
       railwayProject: railwayConfig["project"] as? String,
       railwayService: railwayConfig["service"] as? String,
@@ -4728,10 +5520,16 @@ private struct GlobalConfigSnapshot {
   static var empty: Self {
     Self(
       daemonLaunchdRunAtLoad: nil,
+      linearExtensionEnabled: nil,
       githubExtensionEnabled: nil,
       cloudflareExtensionEnabled: nil,
       railwayExtensionEnabled: nil,
       tailscaleExtensionEnabled: nil,
+      linearDefaultProfile: nil,
+      linearSyncLabels: nil,
+      linearSyncStatuses: nil,
+      linearSyncDependencies: nil,
+      linearSyncProjects: nil,
       githubDefaultProfile: nil,
       railwayProject: nil,
       railwayService: nil,

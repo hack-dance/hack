@@ -61,6 +61,7 @@ export function createFlow(input: {
 
   input.flowStore.createFlow({
     id: flowId,
+    provider: "github",
     state,
     profileId,
     setDefault,
@@ -124,13 +125,14 @@ export async function refreshFlowInstallationsIfNeeded(input: {
   if (!identity.ok) {
     return;
   }
+  const installationIds = identity.account.installationIds ?? [];
   const installationId =
-    identity.account.installationIds.length === 1
-      ? (identity.account.installationIds[0] ?? undefined)
+    installationIds.length === 1
+      ? (installationIds[0] ?? undefined)
       : undefined;
   input.flowStore.updateInstallationState({
     flowId: flow.id,
-    installationIds: identity.account.installationIds,
+    installationIds,
     ...(installationId ? { installationId } : {}),
   });
 }
@@ -248,10 +250,11 @@ export async function handleGitHubCallback(input: {
     });
   }
 
+  const installationIds = identity.account.installationIds ?? [];
   const installationId =
     installationIdFromCallback ??
-    (identity.account.installationIds.length === 1
-      ? (identity.account.installationIds[0] ?? undefined)
+    (installationIds.length === 1
+      ? (installationIds[0] ?? undefined)
       : undefined);
 
   const betterAuthLink = await resolveBetterAuthUserFromGitHubAccount({

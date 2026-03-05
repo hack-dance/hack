@@ -229,10 +229,12 @@ const CloudSecretProviderSchema = z.enum(["aws", "gcp", "azure", "vault"]);
 
 const SecretsEncryptedFileConfigInputSchema = z.object({
   path: z.string().optional(),
+  keyPath: z.string().optional(),
 });
 
 const SecretsEncryptedFileConfigSchema = z.object({
   path: z.string().default("~/.hack/secrets.enc.json"),
+  keyPath: z.string().default("~/.hack/secrets-file.key"),
 });
 
 const SecretsCloudConfigInputSchema = z.object({

@@ -12,6 +12,7 @@ function createFlow(input: {
 }): GitHubOAuthFlow {
   return {
     id: input.id,
+    provider: "github",
     state: `${input.id}-state`,
     profileId: "default",
     setDefault: true,
@@ -48,6 +49,8 @@ describe("FlowStore persistence", () => {
         },
         token: "gho_test",
         tokenExpiresAt: new Date(nowMs + 3_600_000).toISOString(),
+        refreshToken: "ghr_refresh_test",
+        refreshTokenExpiresAt: new Date(nowMs + 7_200_000).toISOString(),
         installationId: "123",
       });
 
@@ -56,6 +59,10 @@ describe("FlowStore persistence", () => {
       expect(flow).not.toBeNull();
       expect(flow?.status).toBe("complete");
       expect(flow?.token).toBe("gho_test");
+      expect(flow?.refreshToken).toBe("ghr_refresh_test");
+      expect(flow?.refreshTokenExpiresAt).toBe(
+        new Date(nowMs + 7_200_000).toISOString()
+      );
       expect(flow?.account?.login).toBe("roodboi");
 
       const claimed = reloaded.getStatus({
@@ -70,11 +77,17 @@ describe("FlowStore persistence", () => {
       }
       expect(claimed.status.status).toBe("claimed");
       expect(claimed.status.token).toBe("gho_test");
+      expect(claimed.status.refreshToken).toBe("ghr_refresh_test");
+      expect(claimed.status.refreshTokenExpiresAt).toBe(
+        new Date(nowMs + 7_200_000).toISOString()
+      );
 
       const afterClaimReload = new FlowStore({ filePath });
       const claimedFlow = afterClaimReload.getById("flow-1");
       expect(claimedFlow?.status).toBe("claimed");
       expect(claimedFlow?.token).toBeUndefined();
+      expect(claimedFlow?.refreshToken).toBeUndefined();
+      expect(claimedFlow?.refreshTokenExpiresAt).toBeUndefined();
     } finally {
       rmSync(tempRoot, { recursive: true, force: true });
     }

@@ -1,4 +1,5 @@
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
+import { PROJECT_CONFIG_FILENAME } from "../constants.ts";
 import { resolveGlobalConfigPath } from "./config-paths.ts";
 import { ensureDir, readTextFile, writeTextFileIfChanged } from "./fs.ts";
 import { isRecord } from "./guards.ts";
@@ -18,6 +19,47 @@ export async function updateGlobalConfig({
   readonly value: unknown;
 }): Promise<{ readonly changed: boolean }> {
   const configPath = resolveGlobalConfigPath();
+  return await updateConfigFileAtPath({
+    configPath,
+    path,
+    value,
+  });
+}
+
+/**
+ * Updates a value in the project config file at <project>/.hack/hack.config.json.
+ *
+ * @param opts.projectDir - Project `.hack` directory path
+ * @param opts.path - Dot-separated path to the config key
+ * @param opts.value - The value to set
+ * @returns Whether the config was changed
+ */
+export async function updateProjectConfig({
+  projectDir,
+  path,
+  value,
+}: {
+  readonly projectDir: string;
+  readonly path: string;
+  readonly value: unknown;
+}): Promise<{ readonly changed: boolean }> {
+  const configPath = resolve(projectDir, PROJECT_CONFIG_FILENAME);
+  return await updateConfigFileAtPath({
+    configPath,
+    path,
+    value,
+  });
+}
+
+async function updateConfigFileAtPath({
+  configPath,
+  path,
+  value,
+}: {
+  readonly configPath: string;
+  readonly path: string;
+  readonly value: unknown;
+}): Promise<{ readonly changed: boolean }> {
   const parsedPath = parseKeyPath({ raw: path });
 
   if (parsedPath.length === 0) {

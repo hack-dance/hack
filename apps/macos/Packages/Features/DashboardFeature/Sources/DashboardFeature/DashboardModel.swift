@@ -627,6 +627,151 @@ public final class DashboardModel {
     }
   }
 
+  public func inspectLinearProfiles() async -> LinearProfilesResponse? {
+    do {
+      return try await client.inspectLinearProfiles()
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func inspectLinearStatus(profileId: String? = nil) async -> LinearStatusResponse? {
+    do {
+      return try await client.inspectLinearStatus(profileId: profileId)
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func disconnectLinear(profileId: String) async -> Bool {
+    do {
+      try await client.disconnectLinear(profileId: profileId)
+      return true
+    } catch {
+      errorMessage = error.localizedDescription
+      return false
+    }
+  }
+
+  public func listLinearProjects(profileId: String? = nil) async -> LinearProjectsResponse? {
+    do {
+      return try await client.listLinearProjects(profileId: profileId)
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func bindLinearProject(
+    for project: ProjectSummary,
+    profileId: String?,
+    projectId: String?,
+    projectName: String?,
+    teamId: String?,
+    clear: Bool
+  ) async -> LinearProjectBindingResponse? {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return nil
+    }
+    return await runActionResult(message: clear ? "Clearing Linear project binding…" : "Saving Linear project binding…") {
+      try await self.client.bindLinearProject(
+        path: path,
+        profileId: profileId,
+        projectId: projectId,
+        projectName: projectName,
+        teamId: teamId,
+        clear: clear
+      )
+    }
+  }
+
+  public func syncLinearProject(
+    for project: ProjectSummary,
+    from direction: String,
+    ownerMode: String? = nil,
+    projectId: String? = nil,
+    teamId: String? = nil,
+    limit: Int? = nil,
+    syncLabels: Bool? = nil
+  ) async -> LinearProjectSyncResponse? {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return nil
+    }
+    let message = direction == "linear"
+      ? "Syncing Linear issues into tickets…"
+      : "Syncing tickets into Linear…"
+    return await runActionResult(message: message) {
+      try await self.client.syncLinearProject(
+        path: path,
+        from: direction,
+        ownerMode: ownerMode,
+        projectId: projectId,
+        teamId: teamId,
+        limit: limit,
+        syncLabels: syncLabels
+      )
+    }
+  }
+
+  public func syncLinearIssue(
+    for project: ProjectSummary,
+    from direction: String,
+    issueIdentifier: String? = nil,
+    ticketId: String? = nil,
+    projectId: String? = nil,
+    teamId: String? = nil,
+    syncLabels: Bool? = nil
+  ) async -> LinearIssueSyncResponse? {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return nil
+    }
+    let message = direction == "linear"
+      ? "Refreshing ticket from Linear…"
+      : "Syncing ticket to Linear…"
+    return await runActionResult(message: message) {
+      try await self.client.syncLinearIssue(
+        path: path,
+        from: direction,
+        issueIdentifier: issueIdentifier,
+        ticketId: ticketId,
+        projectId: projectId,
+        teamId: teamId,
+        syncLabels: syncLabels
+      )
+    }
+  }
+
+  public func startLinearOAuthFlow(
+    profileId: String,
+    setDefault: Bool
+  ) async -> LinearOAuthFlowStartResponse? {
+    do {
+      return try await client.startLinearOAuthFlow(
+        profileId: profileId,
+        setDefault: setDefault
+      )
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func fetchLinearOAuthFlowStatus(
+    statusURL: String
+  ) async -> LinearOAuthFlowStatusResponse? {
+    do {
+      return try await client.fetchLinearOAuthFlowStatus(statusURL: statusURL)
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
   public func bootstrapRailwayNode(
     request: RailwayBootstrapRequest
   ) async -> RailwayBootstrapResponse? {

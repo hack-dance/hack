@@ -27,6 +27,7 @@ import {
 import { resolveRegisteredProjectByName } from "../lib/projects-registry.ts";
 import {
   formatSecretStoreDescriptor,
+  provisionEncryptedFileKey,
   resolveSecretStore,
 } from "../lib/secret-store.ts";
 import { display } from "../ui/display.ts";
@@ -89,6 +90,21 @@ const optStorePath = defineOption({
   description: "Encrypted file path when backend is encrypted_file",
 } as const);
 
+const optKeyPath = defineOption({
+  name: "keyPath",
+  type: "string",
+  long: "--key-path",
+  valueHint: "<path>",
+  description: "Stable key file path when backend is encrypted_file",
+} as const);
+
+const optProvisionKey = defineOption({
+  name: "provisionKey",
+  type: "boolean",
+  long: "--provision-key",
+  description: "Provision a stable key file for encrypted_file backend",
+} as const);
+
 const optSecretProject = defineOption({
   name: "secretProject",
   type: "string",
@@ -130,6 +146,8 @@ const backendUseSpec = defineCommand({
   options: [
     optProvider,
     optStorePath,
+    optKeyPath,
+    optProvisionKey,
     optSecretProject,
     optSecretPrefix,
     optJson,
@@ -141,6 +159,7 @@ const backendUseSpec = defineCommand({
 const ENV_KEY_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
 const SECRET_BACKEND_VALUES = ["keychain", "encrypted_file", "cloud"] as const;
 const CLOUD_PROVIDER_VALUES = ["aws", "gcp", "azure", "vault"] as const;
+const ENCRYPTED_FILE_KEY_ENV = "HACK_SECRETS_FILE_KEY";
 
 async function resolveProjectForEnv(opts: {
   readonly ctx: CliContext;
@@ -366,6 +385,7 @@ const handleEnvBackendStatus: CommandHandlerFor<
           backend: secretsConfig.backend,
           allow_env_auth_refs: secretsConfig.allowEnvAuthRefs,
           encrypted_file: secretsConfig.encryptedFile,
+          encrypted_file_key_env: ENCRYPTED_FILE_KEY_ENV,
           cloud: secretsConfig.cloud,
         },
         null,
@@ -384,6 +404,8 @@ const handleEnvBackendStatus: CommandHandlerFor<
         secretsConfig.allowEnvAuthRefs ? "true" : "false",
       ],
       ["encrypted_file_path", secretsConfig.encryptedFile.path],
+      ["encrypted_file_key_path", secretsConfig.encryptedFile.keyPath],
+      ["encrypted_file_key_env", ENCRYPTED_FILE_KEY_ENV],
       ["cloud_provider", secretsConfig.cloud.provider ?? ""],
       ["cloud_project", secretsConfig.cloud.project ?? ""],
       ["cloud_secret_prefix", secretsConfig.cloud.secretPrefix],
@@ -430,6 +452,13 @@ const handleEnvBackendUse: CommandHandlerFor<typeof backendUseSpec> = async ({
     });
   }
 
+  if (backend === "encrypted_file" && args.options.keyPath?.trim()) {
+    await updateGlobalConfig({
+      path: "controlPlane.secrets.encryptedFile.keyPath",
+      value: args.options.keyPath.trim(),
+    });
+  }
+
   if (backend === "cloud") {
     if (!providerRaw) {
       throw new CliUsageError(
@@ -456,6 +485,16 @@ const handleEnvBackendUse: CommandHandlerFor<typeof backendUseSpec> = async ({
 
   const controlPlane = await readControlPlaneConfig({});
   const secretsConfig = controlPlane.config.secrets;
+  let provisionedKey: {
+    readonly keyPath: string;
+    readonly source: "env" | "file" | "keychain" | "generated";
+  } | null = null;
+  if (backend === "encrypted_file" && args.options.provisionKey) {
+    provisionedKey = await provisionEncryptedFileKey({
+      keyPath: secretsConfig.encryptedFile.keyPath,
+      storePath: secretsConfig.encryptedFile.path,
+    });
+  }
   if (args.options.json) {
     process.stdout.write(
       `${JSON.stringify(
@@ -463,6 +502,8 @@ const handleEnvBackendUse: CommandHandlerFor<typeof backendUseSpec> = async ({
           backend: secretsConfig.backend,
           allow_env_auth_refs: secretsConfig.allowEnvAuthRefs,
           encrypted_file: secretsConfig.encryptedFile,
+          encrypted_file_key_env: ENCRYPTED_FILE_KEY_ENV,
+          encrypted_file_key_provisioned: provisionedKey,
           cloud: secretsConfig.cloud,
         },
         null,
@@ -477,15 +518,26 @@ const handleEnvBackendUse: CommandHandlerFor<typeof backendUseSpec> = async ({
     entries: [
       ["backend", secretsConfig.backend],
       ["encrypted_file_path", secretsConfig.encryptedFile.path],
+      ["encrypted_file_key_path", secretsConfig.encryptedFile.keyPath],
+      ["encrypted_file_key_env", ENCRYPTED_FILE_KEY_ENV],
+      ["encrypted_file_key_source", provisionedKey?.source ?? ""],
       ["cloud_provider", secretsConfig.cloud.provider ?? ""],
       ["cloud_project", secretsConfig.cloud.project ?? ""],
       ["cloud_secret_prefix", secretsConfig.cloud.secretPrefix],
     ],
   });
-  logger.info({
-    message:
-      "Secret writes now use the configured backend for keychain-sourced env values.",
-  });
+  if (backend === "encrypted_file") {
+    logger.info({
+      message: provisionedKey
+        ? `Provisioned stable encrypted backend key at ${provisionedKey.keyPath} (${provisionedKey.source}).`
+        : `Set ${ENCRYPTED_FILE_KEY_ENV} or provision ${secretsConfig.encryptedFile.keyPath} to avoid repeated macOS keychain prompts for encrypted file backend key access.`,
+    });
+  } else {
+    logger.info({
+      message:
+        "Secret writes now use the configured backend for keychain-sourced env values.",
+    });
+  }
   return 0;
 };
 

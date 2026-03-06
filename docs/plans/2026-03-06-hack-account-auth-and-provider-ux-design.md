@@ -26,6 +26,33 @@ This design introduces a first-class, optional Hack account layer while keeping 
 - Improve macOS configuration UX so forms are compact, styled, and easier to scan.
 - Establish the next design boundary for remote encrypted project/env portability.
 
+## Approved Contract
+
+The approved account/auth redesign is based on a small first-party auth shell
+hosted by `auth-broker` plus local client storage of a broker management token.
+
+### Auth shell routes
+
+The broker-owned Hack account surface is:
+
+- `GET /auth`
+- `GET /auth/account`
+- `GET /v1/auth/session/start`
+- `GET /v1/auth/session/flows/:flowId`
+- `GET /v1/auth/me`
+
+The expected client flow is:
+
+1. CLI or macOS starts `GET /v1/auth/session/start`
+2. Browser opens the returned `authorizeUrl`
+3. User signs into Hack through `/auth`
+4. Client polls `GET /v1/auth/session/flows/:flowId?claim=1`
+5. Client stores the claimed broker management token locally
+
+This token is a Hack-account bootstrap credential for broker-owned resources.
+It is not a replacement for provider tokens and it is not the same thing as a
+gateway or daemon transport token.
+
 ## Non-Goals
 
 - Do not make local project/runtime/ticket usage require sign-in.
@@ -59,6 +86,22 @@ This gives the product a clear rule:
 
 - local-only = no login required
 - shared/remote = login required
+
+### Local vs remote examples
+
+Local-only examples:
+
+- `hack up`, `hack down`, `hack logs`, `hack env`
+- local git-backed tickets
+- local Git identity and local provider tokens used only on-device
+- project routing decisions that do not call the broker
+
+Remote/shared examples:
+
+- broker-owned Linear connections, deliveries, and autosync subscriptions
+- future broker-owned GitHub management surfaces
+- future remote encrypted project/env bundles
+- any state owned by a Hack user, org, or team in `auth-broker`
 
 ## Identity Model
 
@@ -126,11 +169,8 @@ Current broker code already supports:
 
 - Better Auth with email/password
 - GitHub social login in Better Auth
-- organization/team plugin
-
-Current broker code does not yet support:
-
 - Google social login in Better Auth
+- organization/team plugin
 
 ### Design decision
 
@@ -140,7 +180,20 @@ That means:
 
 - if only GitHub is configured, show GitHub sign-in
 - if Google is added, show Google sign-in too
-- do not hardcode a product promise around Google before the broker exposes it
+- if both are configured, show both
+- do not hardcode provider buttons outside env-driven broker metadata
+
+### Configuration rule
+
+Social login configuration belongs to the broker, not to the desktop app.
+
+- `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` enable GitHub as a Hack login method
+- `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` enable Google as a Hack login method
+- the auth shell should show only the providers that are configured at runtime
+
+GitHub is a special case because the broker also uses the GitHub OAuth app
+credentials for GitHub provider integration flows. The UX still needs to keep
+`Sign in to Hack with GitHub` separate from `Connect GitHub integration`.
 
 ## Web Surface
 
@@ -199,7 +252,8 @@ Add a first-class `hack auth` command group.
 
 - opens the auth shell in browser
 - completes local session/bootstrap
-- stores enough local state to identify the signed-in Hack user/session for broker-backed workflows
+- stores the claimed Hack broker management token in the existing local secret backend
+- does not overwrite provider-specific local auth by default
 
 #### `hack auth status`
 
@@ -314,6 +368,17 @@ The broker already has the right ownership enforcement direction:
 
 The missing product layer is session visibility and a clean login path in CLI/macOS.
 
+### Account linking contract
+
+Account linking is intentionally strict:
+
+- automatic linking requires a verified provider email
+- different emails do not auto-link
+- unverified emails do not auto-link
+- trusted-provider bypasses are off by default
+
+This protects the Hack account boundary even when multiple login methods are available.
+
 ## Remote Secret Portability Direction
 
 This is not part of the immediate implementation, but the auth model should leave room for it.
@@ -326,6 +391,8 @@ We should explore remote encrypted project/env storage with:
 - remote portability across macOS/Linux/nodes
 - less dependence on single-machine keychain custody
 - clear ownership under Hack account/org/team
+- immutable bundle versions with explicit apply/publish checkpoints
+- no provider-token portability in the initial design
 
 ### Constraint
 
@@ -335,6 +402,15 @@ Track it as follow-on architecture work.
 ### Follow-on plan
 
 - `docs/plans/2026-03-06-remote-encrypted-project-env-portability-plan.md`
+
+### Dependency on Hack auth
+
+Remote env portability must build on the Hack account layer, not on provider auth.
+
+- ownership is Hack user/org/team scoped
+- broker stores encrypted bundle metadata and ciphertext
+- local clients still decrypt/apply for the initial slice
+- provider integrations such as Linear are orthogonal to env portability
 
 ## Implementation Priorities
 

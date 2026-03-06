@@ -710,14 +710,14 @@ struct ProjectDetailView: View {
           description: "Choose whether this repo defaults to local work or a routed remote node.",
           footnote: executionMode.summary
         ) {
-          Picker("Execution mode", selection: $executionMode) {
+          Picker("", selection: $executionMode) {
             ForEach(RemoteExecutionMode.allCases) { mode in
               Text(mode.title).tag(mode)
             }
           }
           .labelsHidden()
+          .accessibilityLabel("Execution mode")
           .pickerStyle(.menu)
-          .frame(maxWidth: 360, alignment: .leading)
           .onChange(of: executionMode) { _, _ in
             guard !executionTargetLoading else {
               return
@@ -734,15 +734,15 @@ struct ProjectDetailView: View {
           description: "Applies when execution mode routes work off this Mac.",
           footnote: selectedNodeSummary
         ) {
-          Picker("Default node", selection: $executionTargetNodeId) {
+          Picker("", selection: $executionTargetNodeId) {
             Text("Local").tag("")
             ForEach(executionTargetNodes, id: \.id) { node in
               Text(node.name).tag(node.id)
             }
           }
           .labelsHidden()
+          .accessibilityLabel("Default node")
           .pickerStyle(.menu)
-          .frame(maxWidth: 360, alignment: .leading)
           .onChange(of: executionTargetNodeId) { _, _ in
             guard !executionTargetLoading else {
               return
@@ -760,15 +760,15 @@ struct ProjectDetailView: View {
           description: "Pick the saved GitHub profile this repo should use for remote Git operations.",
           footnote: selectedGitSummary
         ) {
-          Picker("GitHub profile", selection: $githubProjectProfile) {
+          Picker("", selection: $githubProjectProfile) {
             Text("Local").tag("")
             ForEach(githubProfileOptions, id: \.self) { profile in
               Text(githubProfileLabel(profileId: profile)).tag(profile)
             }
           }
           .labelsHidden()
+          .accessibilityLabel("GitHub profile")
           .pickerStyle(.menu)
-          .frame(maxWidth: 360, alignment: .leading)
           .onChange(of: githubProjectProfile) { _, _ in
             guard !executionTargetLoading else {
               return
@@ -870,33 +870,38 @@ struct ProjectDetailView: View {
         ) {
           if linearResolvedStatus?.tokenResolved == true {
             projectSettingsControlGroup(footnote: selectedLinearProfileSummary) {
-              HStack(alignment: .center, spacing: 12) {
-                Picker("Saved profile", selection: $linearProjectProfile) {
-                  Text("Inherited").tag("")
-                  ForEach(linearProfileOptions, id: \.self) { profile in
-                    Text(linearProfileLabel(profileId: profile)).tag(profile)
+              VStack(alignment: .leading, spacing: 10) {
+                projectSettingsFieldLabel("Project profile")
+                projectSettingsControlShell(maxWidth: 320) {
+                  Picker("", selection: $linearProjectProfile) {
+                    Text("Inherited").tag("")
+                    ForEach(linearProfileOptions, id: \.self) { profile in
+                      Text(linearProfileLabel(profileId: profile)).tag(profile)
+                    }
                   }
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .frame(maxWidth: 320, alignment: .leading)
-                .onChange(of: linearProjectProfile) { _, _ in
-                  guard !executionTargetLoading else {
-                    return
+                  .labelsHidden()
+                  .accessibilityLabel("Saved profile")
+                  .pickerStyle(.menu)
+                  .onChange(of: linearProjectProfile) { _, _ in
+                    guard !executionTargetLoading else {
+                      return
+                    }
+                    Task { await persistLinearProfileOverride() }
                   }
-                  Task { await persistLinearProfileOverride() }
                 }
 
-                StatusPill(text: "Connected", tone: .good)
-                Spacer()
-                Button("Open Linear settings") {
-                  NotificationCenter.default.post(
-                    name: .hackSettingsRequested,
-                    object: nil,
-                    userInfo: ["pane": "linear"]
-                  )
+                HStack(alignment: .center, spacing: 12) {
+                  StatusPill(text: "Connected", tone: .good)
+                  Spacer()
+                  Button("Open Linear settings") {
+                    NotificationCenter.default.post(
+                      name: .hackSettingsRequested,
+                      object: nil,
+                      userInfo: ["pane": "linear"]
+                    )
+                  }
+                  .adaptiveToolbarButton()
                 }
-                .adaptiveToolbarButton()
               }
             }
           } else {
@@ -921,35 +926,39 @@ struct ProjectDetailView: View {
           description: "This is the primary Linear project route for project-level pull, push, and review."
         ) {
           projectSettingsControlGroup(footnote: selectedLinearProjectSummary) {
-            HStack(alignment: .center, spacing: 12) {
-              Picker("Default project route", selection: $selectedLinearProjectId) {
-                Text("Unbound").tag("")
-                ForEach(linearProjectOptions) { linearProject in
-                  Text(linearProjectMenuLabel(linearProject)).tag(linearProject.id)
+            VStack(alignment: .leading, spacing: 10) {
+              projectSettingsFieldLabel("Primary route")
+              projectSettingsControlShell(maxWidth: 360) {
+                Picker("", selection: $selectedLinearProjectId) {
+                  Text("Unbound").tag("")
+                  ForEach(linearProjectOptions) { linearProject in
+                    Text(linearProjectMenuLabel(linearProject)).tag(linearProject.id)
+                  }
                 }
-              }
-              .labelsHidden()
-              .pickerStyle(.menu)
-              .frame(maxWidth: 360, alignment: .leading)
-              .disabled(linearProjectOptions.isEmpty)
-              .onChange(of: selectedLinearProjectId) { _, newValue in
-                guard !executionTargetLoading else {
-                  return
+                .labelsHidden()
+                .accessibilityLabel("Default project route")
+                .pickerStyle(.menu)
+                .disabled(linearProjectOptions.isEmpty)
+                .onChange(of: selectedLinearProjectId) { _, newValue in
+                  guard !executionTargetLoading else {
+                    return
+                  }
+                  guard newValue != linearBoundProjectId else {
+                    return
+                  }
+                  Task { await persistLinearProjectBindingSelection() }
                 }
-                guard newValue != linearBoundProjectId else {
-                  return
-                }
-                Task { await persistLinearProjectBindingSelection() }
               }
 
-              if !linearBoundProjectId.isEmpty {
-                Button("Clear") {
-                  Task { await clearLinearProjectBinding() }
+              HStack(alignment: .center, spacing: 12) {
+                if !linearBoundProjectId.isEmpty {
+                  Button("Clear") {
+                    Task { await clearLinearProjectBinding() }
+                  }
+                  .adaptiveToolbarButton()
                 }
-                .adaptiveToolbarButton()
+                Spacer()
               }
-
-              Spacer()
             }
           }
 
@@ -975,29 +984,34 @@ struct ProjectDetailView: View {
           }
 
           projectSettingsControlGroup(footnote: additionalLinearProjectsSummary) {
-            HStack(spacing: 8) {
-              Picker("Add linked project", selection: $selectedAdditionalLinearProjectId) {
-                Text("Choose project").tag("")
-                ForEach(availableAdditionalLinearProjects) { linearProject in
-                  Text(linearProjectMenuLabel(linearProject)).tag(linearProject.id)
+            VStack(alignment: .leading, spacing: 10) {
+              projectSettingsFieldLabel("Add linked project")
+              HStack(spacing: 8) {
+                projectSettingsControlShell(maxWidth: 360) {
+                  Picker("", selection: $selectedAdditionalLinearProjectId) {
+                    Text("Choose project").tag("")
+                    ForEach(availableAdditionalLinearProjects) { linearProject in
+                      Text(linearProjectMenuLabel(linearProject)).tag(linearProject.id)
+                    }
+                  }
+                  .labelsHidden()
+                  .accessibilityLabel("Add linked project")
+                  .pickerStyle(.menu)
+                  .disabled(availableAdditionalLinearProjects.isEmpty)
                 }
-              }
-              .labelsHidden()
-              .pickerStyle(.menu)
-              .frame(maxWidth: 360, alignment: .leading)
-              .disabled(availableAdditionalLinearProjects.isEmpty)
 
-              Button("Add") {
-                Task { await persistAdditionalLinearProjectSelection() }
-              }
-              .adaptiveToolbarButton()
-              .disabled(
-                selectedAdditionalLinearProjectId
-                  .trimmingCharacters(in: .whitespacesAndNewlines)
-                  .isEmpty
-              )
+                Button("Add") {
+                  Task { await persistAdditionalLinearProjectSelection() }
+                }
+                .adaptiveToolbarButton()
+                .disabled(
+                  selectedAdditionalLinearProjectId
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .isEmpty
+                )
 
-              Spacer()
+                Spacer()
+              }
             }
           }
         }
@@ -1077,13 +1091,15 @@ struct ProjectDetailView: View {
     footnote: String,
     @ViewBuilder content: () -> Content
   ) -> some View {
-    VStack(alignment: .leading, spacing: 8) {
+    VStack(alignment: .leading, spacing: 10) {
       Text(title)
         .font(.system(size: 13, weight: .semibold))
       Text(description)
         .font(.system(size: 12, weight: .medium))
         .foregroundStyle(.secondary)
-      content()
+      projectSettingsControlShell(maxWidth: 360) {
+        content()
+      }
       projectSettingsFootnote(footnote)
     }
   }
@@ -1096,6 +1112,34 @@ struct ProjectDetailView: View {
       content()
       projectSettingsFootnote(footnote)
     }
+  }
+
+  private func projectSettingsFieldLabel(_ text: String) -> some View {
+    Text(text)
+      .font(.system(size: 11, weight: .semibold))
+      .foregroundStyle(.secondary)
+      .textCase(.uppercase)
+  }
+
+  private func projectSettingsControlShell<Content: View>(
+    maxWidth: CGFloat? = nil,
+    @ViewBuilder content: () -> Content
+  ) -> some View {
+    HStack(spacing: 0) {
+      content()
+      Spacer(minLength: 0)
+    }
+    .frame(maxWidth: maxWidth, alignment: .leading)
+    .padding(.horizontal, 12)
+    .padding(.vertical, 10)
+    .background(
+      RoundedRectangle(cornerRadius: 12, style: .continuous)
+        .fill(Color.primary.opacity(colorScheme == .dark ? 0.05 : 0.04))
+    )
+    .overlay(
+      RoundedRectangle(cornerRadius: 12, style: .continuous)
+        .stroke(Color.primary.opacity(colorScheme == .dark ? 0.12 : 0.08), lineWidth: 1)
+    )
   }
 
   private func routingSheetSection<Content: View>(

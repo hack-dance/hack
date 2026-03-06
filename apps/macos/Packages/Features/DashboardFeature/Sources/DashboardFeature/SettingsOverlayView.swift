@@ -422,32 +422,60 @@ struct SettingsSectionHeader: View {
 }
 
 private struct HackAccountSettingsCard: View {
+  @Environment(DashboardModel.self) private var model
   let state: HackAccountSettingsState?
   let isLoading: Bool
   let providerName: String?
   let onRefresh: () -> Void
+  @State private var isSubmitting = false
 
   var body: some View {
     GlassCard(title: "Hack account", systemImage: "person.crop.circle.badge.checkmark") {
       HStack(alignment: .center, spacing: 8) {
         if let state {
           StatusPill(
-            text: state.authEnabled ? "Broker auth enabled" : "Broker auth unavailable",
+            text: state.authEnabled ? "Hack auth ready" : "Hack auth unavailable",
             tone: state.authEnabled ? .good : .warn
           )
           StatusPill(
-            text: state.sessionAvailable ? "Session details available" : "Desktop session pending",
-            tone: state.sessionAvailable ? .good : .neutral
+            text: state.authenticated ? "Signed in" : "Signed out",
+            tone: state.authenticated ? .good : .neutral
+          )
+          StatusPill(
+            text: state.validated ? "Broker validated" : state.tokenStored ? "Stored locally" : "No local session",
+            tone: state.validated ? .good : state.tokenStored ? .neutral : .warn
+          )
+          StatusPill(
+            text: state.manageAccountAvailable ? "Manage account ready" : "Manage account unavailable",
+            tone: state.manageAccountAvailable ? .good : .neutral
           )
         } else {
-          StatusPill(text: "Broker status unavailable", tone: .warn)
+          StatusPill(text: "Auth status unavailable", tone: .warn)
         }
         Spacer()
+        Button("Manage account") {
+          openResolvedManageURL()
+        }
+        .adaptiveToolbarButton()
+        .disabled(resolvedManageURL == nil)
+        if let state, state.authenticated {
+          Button("Sign out") {
+            Task { await handleSignOut() }
+          }
+          .adaptiveToolbarButton()
+          .disabled(isBusy)
+        } else {
+          Button("Sign in") {
+            Task { await handleSignIn() }
+          }
+          .adaptiveToolbarButtonProminent()
+          .disabled(isBusy || state?.authEnabled == false)
+        }
         Button("Refresh") {
           onRefresh()
         }
         .adaptiveToolbarButton()
-        if isLoading {
+        if isBusy {
           ProgressView()
             .controlSize(.small)
         }
@@ -458,49 +486,40 @@ private struct HackAccountSettingsCard: View {
         .foregroundStyle(.secondary)
 
       if let state {
-        if state.sessionAvailable {
-          if let userLabel = state.userDisplayName, !userLabel.isEmpty {
-            Text("hack user: \(userLabel)")
-              .font(.mono(.caption2))
-              .foregroundStyle(.secondary)
-          }
+        if state.authenticated {
+          detailRow(title: "Hack user", value: state.userDisplayName ?? "Authenticated session")
           if let email = state.userEmail, !email.isEmpty {
-            Text("email: \(email)")
-              .font(.mono(.caption2))
-              .foregroundStyle(.secondary)
-              .textSelection(.enabled)
+            detailRow(title: "Email", value: email, selectable: true)
           }
           if let organizationName = state.organizationName, !organizationName.isEmpty {
-            Text("organization: \(organizationName)")
-              .font(.mono(.caption2))
-              .foregroundStyle(.secondary)
+            detailRow(title: "Organization", value: organizationName)
           }
           if let teamName = state.teamName, !teamName.isEmpty {
-            Text("team: \(teamName)")
-              .font(.mono(.caption2))
-              .foregroundStyle(.secondary)
+            detailRow(title: "Team", value: teamName)
           }
         } else {
-          Text(
-            "Desktop sign-in details are not exposed here yet. This card is reserved for first-party Hack identity, while provider pages below manage provider accounts and saved routing profiles."
-          )
+          Text(unauthenticatedMessage(for: state))
           .font(.mono(.caption2))
           .foregroundStyle(.tertiary)
         }
 
-        Text("broker: \(state.brokerBaseURL)\(state.authBasePath)")
-          .font(.mono(.caption2))
-          .foregroundStyle(.secondary)
-          .textSelection(.enabled)
+        detailRow(
+          title: "Manage account",
+          value: state.manageAccountAvailable
+            ? "Available in browser"
+            : "Available after broker auth is ready"
+        )
+        detailRow(title: "Broker", value: state.brokerBaseURL, selectable: true)
 
         if let reason = state.authReason, !reason.isEmpty {
-          Text("auth status: \(reason)")
-            .font(.mono(.caption2))
-            .foregroundStyle(.tertiary)
+          detailRow(title: "Session note", value: reason)
+        }
+        if let accessControlMode = state.accessControlMode, !accessControlMode.isEmpty {
+          detailRow(title: "Access mode", value: accessControlMode)
         }
       } else {
         Text(
-          "Hack Desktop could not read auth broker status yet. Provider account setup still depends on the broker being reachable."
+          "Hack Desktop could not read Hack auth status yet. Shared provider setup still depends on the broker being reachable."
         )
         .font(.mono(.caption2))
         .foregroundStyle(.tertiary)
@@ -509,12 +528,90 @@ private struct HackAccountSettingsCard: View {
   }
 
   private var summaryMessage: String {
+    if let state, state.authenticated {
+      if let providerName, !providerName.isEmpty {
+        return
+          "\(providerName) accounts below are connected under this Hack account. Saved profiles stay local to this Mac and only decide routing defaults."
+      }
+      return
+        "This Hack account owns shared provider connections and other broker-backed features. Local-only project and ticket workflows remain available without sign-in."
+    }
+
     if let providerName, !providerName.isEmpty {
       return
-        "\(providerName) accounts below are provider accounts connected through your Hack workspace. Saved profiles are local routing labels Hack uses for defaults and project overrides; they are not separate Hack users."
+        "Sign in to Hack before connecting \(providerName) for shared remote features. Linked login methods and account management stay in the browser, while saved profiles here remain local routing labels."
     }
     return
-      "Use this card to verify Hack auth is available before connecting external providers. GitHub and Linear pages manage provider accounts and saved routing profiles, not your first-party Hack identity."
+      "Use this card to sign in to Hack for shared remote features. External provider pages manage connected provider accounts and local routing profiles, not your first-party Hack identity."
+  }
+
+  private var isBusy: Bool {
+    isLoading || isSubmitting
+  }
+
+  private var resolvedManageURL: String? {
+    guard let state else {
+      return nil
+    }
+    return state.accountURL ?? state.shellURL
+  }
+
+  private func handleSignIn() async {
+    isSubmitting = true
+    defer { isSubmitting = false }
+    if await model.loginHackAccount() != nil {
+      onRefresh()
+      return
+    }
+    onRefresh()
+  }
+
+  private func handleSignOut() async {
+    isSubmitting = true
+    defer { isSubmitting = false }
+    if await model.logoutHackAccount() != nil {
+      onRefresh()
+      return
+    }
+    onRefresh()
+  }
+
+  private func openResolvedManageURL() {
+    guard let urlString = resolvedManageURL, let url = URL(string: urlString) else {
+      return
+    }
+    NSWorkspace.shared.open(url)
+  }
+
+  private func unauthenticatedMessage(for state: HackAccountSettingsState) -> String {
+    if state.tokenStored && !state.validated {
+      return "Hack has a locally stored session token, but the broker could not validate it. Sign in again to refresh this desktop session."
+    }
+    if state.tokenStored {
+      return "Hack has a stored session, but no authenticated browser session is active right now. Sign in again to continue."
+    }
+    if state.authEnabled {
+      return "Sign in to Hack before managing shared provider accounts, project routing, or other broker-backed features from this Mac."
+    }
+    return "Hack auth is not fully available on the broker yet, so shared remote features are unavailable from this Mac."
+  }
+
+  private func detailRow(title: String, value: String, selectable: Bool = false) -> some View {
+    VStack(alignment: .leading, spacing: 4) {
+      Text(title)
+        .font(.mono(.caption))
+        .foregroundStyle(.secondary)
+      if selectable {
+        Text(value)
+          .font(.mono(.caption, weight: .semibold))
+          .foregroundStyle(.primary)
+          .textSelection(.enabled)
+      } else {
+        Text(value)
+          .font(.mono(.caption, weight: .semibold))
+          .foregroundStyle(.primary)
+      }
+    }
   }
 }
 

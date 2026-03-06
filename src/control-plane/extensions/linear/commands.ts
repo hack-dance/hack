@@ -5770,7 +5770,17 @@ async function listLinearDeliveries(input: {
       },
     });
     if (!response.ok) {
-      lastError = response.error;
+      lastError = normalizeBrokerProtectedLinearError({
+        error: response.error,
+        profileId: brokerAuth.profileId,
+      });
+      if (
+        shouldStopLinearBrokerPathFallback({
+          error: response.error,
+        })
+      ) {
+        return { ok: false, error: lastError };
+      }
       continue;
     }
 
@@ -5835,7 +5845,17 @@ async function applyLinearDelivery(input: {
       },
     });
     if (!response.ok) {
-      lastError = response.error;
+      lastError = normalizeBrokerProtectedLinearError({
+        error: response.error,
+        profileId: brokerAuth.profileId,
+      });
+      if (
+        shouldStopLinearBrokerPathFallback({
+          error: response.error,
+        })
+      ) {
+        return { ok: false, error: lastError };
+      }
       continue;
     }
     const payload = parseLinearDeliveryApplyPayload({
@@ -5888,7 +5908,13 @@ async function listLinearAutosyncSubscriptions(input: {
     },
   });
   if (!response.ok) {
-    return response;
+    return {
+      ok: false,
+      error: normalizeBrokerProtectedLinearError({
+        error: response.error,
+        profileId: brokerAuth.profileId,
+      }),
+    };
   }
   const payload = parseLinearAutosyncSubscriptionsPayload({
     payload: response.value,
@@ -5948,7 +5974,13 @@ async function upsertLinearAutosyncSubscription(input: {
     },
   });
   if (!response.ok) {
-    return response;
+    return {
+      ok: false,
+      error: normalizeBrokerProtectedLinearError({
+        error: response.error,
+        profileId: brokerAuth.profileId,
+      }),
+    };
   }
   const payload = parseLinearAutosyncSubscriptionMutationPayload({
     payload: response.value,
@@ -6004,7 +6036,13 @@ async function removeLinearAutosyncSubscription(input: {
     },
   });
   if (!response.ok) {
-    return response;
+    return {
+      ok: false,
+      error: normalizeBrokerProtectedLinearError({
+        error: response.error,
+        profileId: brokerAuth.profileId,
+      }),
+    };
   }
   const payload = parseLinearAutosyncSubscriptionMutationPayload({
     payload: response.value,
@@ -6052,6 +6090,54 @@ async function resolveLinearBrokerAuthorization(input: {
       authorization: `Bearer ${management.managementToken}`,
     },
   };
+}
+
+function shouldStopLinearBrokerPathFallback(input: {
+  readonly error: string;
+}): boolean {
+  return isLinearBrokerProtectedAuthError({
+    error: input.error,
+  });
+}
+
+function normalizeBrokerProtectedLinearError(input: {
+  readonly error: string;
+  readonly profileId: string;
+}): string {
+  const error = input.error.trim();
+  if (!error) {
+    return error;
+  }
+  if (error.includes("hack auth login")) {
+    return error;
+  }
+  if (error === "better_auth_session_required") {
+    return `Linear broker access for profile "${input.profileId}" requires Hack account login. Run \`hack auth login\` and retry.`;
+  }
+  if (
+    error === "management_token_missing" ||
+    error === "management_token_invalid" ||
+    error === "management_token_expired"
+  ) {
+    return `Linear broker access for profile "${input.profileId}" needs a fresh Hack account session. Run \`hack auth login\` and retry.`;
+  }
+  if (error === "better_auth_profile_forbidden") {
+    return `The current Hack account does not have access to Linear profile "${input.profileId}". Run \`hack auth login\` with the correct account, or choose a permitted profile.`;
+  }
+  return error;
+}
+
+function isLinearBrokerProtectedAuthError(input: {
+  readonly error: string;
+}): boolean {
+  const error = input.error.trim();
+  return (
+    error === "better_auth_session_required" ||
+    error === "better_auth_profile_forbidden" ||
+    error === "management_token_missing" ||
+    error === "management_token_invalid" ||
+    error === "management_token_expired"
+  );
 }
 
 function parseLinearDeliveriesListPayload(input: {
@@ -7533,6 +7619,7 @@ export const __testOnly = {
   buildOAuthArgsFromConnectArgs,
   detectAuthoritativeFieldConflicts,
   findProjectBindingTarget,
+  normalizeBrokerProtectedLinearError,
   parseApplyDeliveryArgs,
   parseAutosyncSubscriptionsArgs,
   parseAssigneeMappingsArgs,

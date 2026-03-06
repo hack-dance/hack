@@ -8,6 +8,62 @@
 
 **Tech Stack:** Bun, Elysia, Better Auth, Drizzle/Neon, TypeScript, SwiftUI, Hack CLI ticket/config/auth flows.
 
+## Approved Documentation Contract
+
+The docs/config slice for this redesign must keep five points aligned across
+broker docs, env examples, and plans:
+
+1. Hack auth is a first-party account/session layer exposed through `/auth`,
+   `/auth/account`, `/v1/auth/session/start`, `/v1/auth/session/flows/:flowId`,
+   and `/v1/auth/me`.
+2. Local-only Hack workflows remain unauthenticated.
+3. Broker-owned/shared features require Hack sign-in.
+4. Login methods and provider integrations are separate concepts.
+5. Remote encrypted env portability is a follow-on that depends on Hack-account
+   ownership rather than provider identity.
+
+## Provider Configuration Rules
+
+The auth shell must remain provider-driven and env-driven.
+
+- `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` enable GitHub as a Hack login method.
+- `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` enable Google as a Hack login method.
+- The auth shell should render only the providers configured at runtime.
+- GitHub provider env is dual-use in the current broker: it powers both GitHub
+  provider OAuth routes and GitHub-as-a-Hack-login in Better Auth.
+- Google env is currently relevant only to Hack sign-in, not to a separate
+  provider integration surface.
+
+## Verified-Email Linking Rules
+
+The operational contract for account linking is:
+
+- auto-link only when provider email is present and verified
+- refuse auto-link on missing email
+- refuse auto-link on unverified email
+- refuse auto-link across mismatched emails
+- keep trusted-provider bypass lists empty by default
+
+## Local vs Remote Boundary
+
+Use this product rule consistently in docs and UI copy:
+
+- local-only = no Hack login required
+- shared/remote = Hack login required
+
+Examples that should stay on the remote/shared side:
+
+- broker-owned Linear connections, subscriptions, and deliveries
+- future broker-owned GitHub management surfaces
+- future remote encrypted project/env bundle storage
+
+Examples that should stay local-only:
+
+- runtime orchestration
+- local sessions
+- local git-backed tickets
+- local secret storage and local provider tokens used only on-device
+
 ---
 
 ### Task 1: Document and tighten broker auth requirements
@@ -316,6 +372,7 @@ git commit -m "feat: add optional Google auth provider"
 **Files:**
 - Modify: `services/auth-broker/README.md`
 - Modify: `docs/plans/2026-03-06-hack-account-auth-and-provider-ux-design.md`
+- Modify: `docs/plans/2026-03-06-remote-encrypted-project-env-portability-plan.md`
 - Create/Modify: auth usage docs discovered during implementation
 
 **Step 1: Write the failing doc check**
@@ -325,6 +382,7 @@ List the doc gaps explicitly in the PR/task notes before editing:
 - local-only vs remote/shared auth requirements
 - provider-driven auth shell behavior
 - Google optionality
+- Hack-auth dependency for remote encrypted env portability
 
 **Step 2: Update docs minimally**
 
@@ -333,6 +391,9 @@ Document:
 - broker-required feature guidance
 - provider integration ownership model
 - sign-in methods
+- verified-email account-linking policy
+- the local-storage boundary for claimed broker management tokens
+- the remote-ownership boundary for future env portability
 
 **Step 3: Run docs-adjacent verification**
 

@@ -32,6 +32,22 @@ export type HackAuthMeResponse = {
     readonly teamId?: string | null;
     readonly managementTokenProfileId?: string | null;
   } | null;
+  readonly user?: {
+    readonly id?: string;
+    readonly email?: string;
+    readonly name?: string;
+    readonly emailVerified?: boolean;
+  } | null;
+  readonly activeOrganization?: {
+    readonly id?: string;
+    readonly slug?: string;
+    readonly name?: string;
+  } | null;
+  readonly activeTeam?: {
+    readonly id?: string;
+    readonly slug?: string;
+    readonly name?: string;
+  } | null;
   readonly shellPath?: string;
   readonly accountPath?: string;
 } & Record<string, unknown>;

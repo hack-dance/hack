@@ -14,6 +14,64 @@ Minimal Bun + Elysia auth broker for browser-based provider callbacks.
 This keeps provider auth UX one-click while storing long-term credentials on the
 client host.
 
+## Hack account vs provider integrations
+
+The broker now has two distinct identity layers and the docs/UI need to keep
+them separate.
+
+### 1. Hack account auth
+
+Hack account auth is first-party identity handled through Better Auth and the
+broker auth shell:
+
+- `GET /auth`
+- `GET /auth/account`
+- `GET /v1/auth/session/start`
+- `GET /v1/auth/session/flows/:flowId`
+- `GET /v1/auth/me`
+
+CLI and macOS use this flow to claim and locally store a broker management
+token for remote broker-owned features.
+
+### 2. Provider integrations
+
+Provider integrations are separate resources that sit under a Hack account.
+Examples:
+
+- GitHub provider OAuth/app installs
+- Linear OAuth profiles, webhook deliveries, and autosync subscriptions
+
+Signing into Hack with GitHub is not the same thing as connecting a GitHub
+integration. The same separation applies to any future providers.
+
+## Local vs remote boundary
+
+Hack remains local-first.
+
+### Local-only flows
+
+These should continue to work without Hack sign-in:
+
+- project/runtime orchestration
+- local sessions
+- local git-backed tickets
+- local secret storage
+- local provider tokens used purely on-device
+
+### Remote/shared flows
+
+These require Hack auth because they are broker-owned:
+
+- broker-managed Linear connections
+- broker-managed deliveries and autosync subscriptions
+- future broker-managed GitHub account/org surfaces
+- future remote encrypted project/env bundle portability
+
+The product rule is:
+
+- local-only = no Hack login required
+- shared/remote = Hack login required
+
 ## Security boundary
 
 `auth-broker` handles cloud identity/provider OAuth only.
@@ -100,6 +158,18 @@ The claimed token is a signed broker management token. It can be stored by the
 CLI/macOS app and sent as `Authorization: Bearer <token>` to protected broker
 routes when a browser cookie session is not present.
 
+This token is:
+
+- local client state
+- scoped to Hack-account broker access
+- separate from provider-specific access tokens
+
+This token is not:
+
+- a replacement for provider OAuth/app tokens
+- a gateway or daemon transport bearer token
+- a general-purpose local secret export mechanism
+
 `GET /v1/auth/me` resolves either:
 
 1. the current Better Auth browser session, or
@@ -113,10 +183,72 @@ account-linking groundwork through Better Auth's own linking policy:
 2. different provider emails are not allowed by default
 3. no trusted providers are pre-whitelisted
 
+## Social provider configuration
+
+The auth shell is provider-driven and env-driven.
+
+### GitHub
+
+`GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` are currently dual-use:
+
+- they enable GitHub OAuth provider routes for integration flows
+- they also enable GitHub as a Hack login method in `/auth`
+
+Because of that, product surfaces must still distinguish:
+
+- `Sign in to Hack with GitHub`
+- `Connect GitHub integration`
+
+### Google
+
+`GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` are now relevant because they
+enable Google as a Hack login method in the Better Auth shell.
+
+Google is currently:
+
+- a Hack sign-in method
+- rendered only when both env vars are configured
+- not a separate provider-integration surface in this broker
+
+### Rendering rule
+
+The auth shell should render only the configured social providers at runtime.
+Do not hardcode provider promises in desktop or CLI copy that the broker is not
+currently configured to serve.
+
+## Verified-email account linking
+
+Hack account linking is intentionally strict.
+
+Automatic linking is allowed only when:
+
+- the provider returns an email
+- that email is verified
+- the normalized email matches an existing Hack user
+
+Automatic linking is refused when:
+
+- email is missing
+- email is unverified
+- emails do not match
+
+Trusted-provider bypasses are empty by default. This is an auth boundary, not a
+convenience feature.
+
+## Remote env portability boundary
+
+Remote encrypted project/env portability is follow-on work and should build on
+Hack account ownership, not on provider identity.
+
+- ownership is Hack user/org/team scoped
+- broker stores ciphertext plus metadata, not general plaintext env state
+- provider-token portability is out of scope
+- local decrypt/apply remains the first implementation boundary
+
 ## Environment
 
-1. `GITHUB_CLIENT_ID` (required)
-2. `GITHUB_CLIENT_SECRET` (required)
+1. `GITHUB_CLIENT_ID` (required; enables GitHub provider OAuth and GitHub social sign-in)
+2. `GITHUB_CLIENT_SECRET` (required; enables GitHub provider OAuth and GitHub social sign-in)
 3. `GITHUB_SCOPES` (optional; default: `read:user,user:email,read:org`)
 4. `GITHUB_APP_ID` (optional; returned in flow metadata for app-mode binding)
 5. `GITHUB_APP_SLUG` (optional; used to build install URL)
@@ -132,8 +264,8 @@ account-linking groundwork through Better Auth's own linking policy:
 15. `BETTER_AUTH_SECRET` (required to enable Better Auth runtime)
 16. `BETTER_AUTH_URL` (optional base URL override)
 17. `BETTER_AUTH_TRUSTED_ORIGINS` (optional comma-separated origins)
-18. `GOOGLE_CLIENT_ID` (optional; enables Google social sign-in in Better Auth shell)
-19. `GOOGLE_CLIENT_SECRET` (optional; enables Google social sign-in in Better Auth shell)
+18. `GOOGLE_CLIENT_ID` (optional; enables Google social sign-in in `/auth`)
+19. `GOOGLE_CLIENT_SECRET` (optional; enables Google social sign-in in `/auth`)
 20. `BETTER_AUTH_GITHUB_AUTO_PROVISION_USERS` (optional boolean; when true, callback can create a Better Auth user from GitHub email if no match exists)
 21. `BETTER_AUTH_LINEAR_AUTO_PROVISION_USERS` (optional boolean; when true, callback can create a Better Auth user from Linear email if no match exists)
 22. `HACK_LINEAR_CLIENT_ID` (recommended Linear OAuth client id)
@@ -148,6 +280,13 @@ account-linking groundwork through Better Auth's own linking policy:
 31. `HACK_LINEAR_TOKEN_URL` (optional; default: `https://api.linear.app/oauth/token`)
 32. `HACK_LINEAR_API_BASE_URL` (optional; default: `https://api.linear.app`)
 33. `LINEAR_CLIENT_ID` / `LINEAR_CLIENT_SECRET` / `LINEAR_WEBHOOK_SIGNING_SECRET` / `LINEAR_OAUTH_ACTOR` (optional compatibility aliases)
+
+`services/auth-broker/.env.example` reflects the recommended grouping:
+
+- GitHub env powers both provider OAuth and GitHub sign-in
+- Google env powers Google sign-in only
+- Better Auth env powers Hack account/session ownership
+- Linear env powers provider integration flows and agent webhooks
 
 When running broker from repo root (`bun run auth:dev`), Linear env aliases also
 fallback to root `.env.local` / `.env` if process env values are unset.

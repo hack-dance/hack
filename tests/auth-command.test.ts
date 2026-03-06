@@ -163,6 +163,33 @@ test("auth login opens browser, claims token, and stores the auth session", asyn
         },
       });
     }
+    if (url === "https://auth.hack.broker/v1/auth/me") {
+      return Response.json({
+        ok: true,
+        authenticated: true,
+        accessControlMode: "better_auth_team_owned",
+        session: {
+          userId: "user_123",
+          organizationId: "org_123",
+          teamId: "team_123",
+        },
+        user: {
+          id: "user_123",
+          email: "dio@hack.dance",
+          name: "Dio",
+        },
+        activeOrganization: {
+          id: "org_123",
+          slug: "hack",
+          name: "Hack",
+        },
+        activeTeam: {
+          id: "team_123",
+          slug: "cli",
+          name: "CLI",
+        },
+      });
+    }
     throw new Error(`Unexpected fetch URL: ${url}`);
   };
 
@@ -177,6 +204,7 @@ test("auth login opens browser, claims token, and stores the auth session", asyn
   expect(fetchCalls.map((call) => call.url)).toEqual([
     "https://auth.hack.broker/v1/auth/session/start",
     "https://auth.hack.broker/v1/auth/session/flows/flow-123?claim=1&deviceCode=device-123",
+    "https://auth.hack.broker/v1/auth/me",
   ]);
 
   const stored = await readStoredTokenEnvelope();
@@ -189,12 +217,26 @@ test("auth login opens browser, claims token, and stores the auth session", asyn
     readonly flowId: string;
     readonly brokerBaseUrl: string;
     readonly tokenStored: boolean;
+    readonly accessControlMode: string;
+    readonly user?: {
+      readonly email?: string;
+    };
+    readonly activeOrganization?: {
+      readonly slug?: string;
+    };
+    readonly activeTeam?: {
+      readonly slug?: string;
+    };
   };
   expect(payload.ok).toBe(true);
   expect(payload.authenticated).toBe(true);
   expect(payload.flowId).toBe("flow-123");
   expect(payload.brokerBaseUrl).toBe("https://auth.hack.broker");
   expect(payload.tokenStored).toBe(true);
+  expect(payload.accessControlMode).toBe("better_auth_team_owned");
+  expect(payload.user?.email).toBe("dio@hack.dance");
+  expect(payload.activeOrganization?.slug).toBe("hack");
+  expect(payload.activeTeam?.slug).toBe("cli");
 });
 
 test("auth whoami uses stored token against broker /v1/auth/me", async () => {
@@ -242,6 +284,70 @@ test("auth whoami uses stored token against broker /v1/auth/me", async () => {
   expect(payload.session.userId).toBe("user_123");
   expect(payload.session.organizationId).toBe("org_123");
   expect(payload.session.teamId).toBe("team_123");
+});
+
+test("auth status includes resolved account, org, and team metadata", async () => {
+  await writeStoredTokenEnvelope({ token: "hack-session-token" });
+
+  fetchImpl = async () =>
+    Response.json({
+      ok: true,
+      authenticated: true,
+      accessControlMode: "better_auth_team_owned",
+      user: {
+        id: "user_123",
+        email: "hack@example.com",
+        name: "Hack User",
+        emailVerified: true,
+      },
+      activeOrganization: {
+        id: "org_123",
+        name: "Hack Org",
+      },
+      activeTeam: {
+        id: "team_123",
+        name: "Infra",
+      },
+      session: {
+        userId: "user_123",
+        organizationId: "org_123",
+        teamId: "team_123",
+      },
+      shellPath: "/auth",
+      accountPath: "/auth/account",
+    });
+
+  const result = await runCliWithCapturedIo({
+    argv: ["auth", "status", "--json"],
+  });
+
+  expect(result.exitCode).toBe(0);
+  const payload = JSON.parse(result.stdout) as {
+    readonly authenticated: boolean;
+    readonly validated: boolean;
+    readonly user?: {
+      readonly id: string;
+      readonly email: string;
+      readonly name: string;
+    };
+    readonly activeOrganization?: {
+      readonly id: string;
+      readonly name: string;
+    };
+    readonly activeTeam?: {
+      readonly id: string;
+      readonly name: string;
+    };
+    readonly shellPath?: string;
+    readonly accountPath?: string;
+  };
+  expect(payload.authenticated).toBe(true);
+  expect(payload.validated).toBe(true);
+  expect(payload.user?.email).toBe("hack@example.com");
+  expect(payload.activeOrganization?.name).toBe("Hack Org");
+  expect(payload.activeTeam?.name).toBe("Infra");
+  expect(payload.shellPath).toBe("/auth");
+  expect(payload.accountPath).toBe("/auth/account");
 });
 
 test("auth logout clears the stored auth session", async () => {
@@ -314,6 +420,34 @@ test("auth status reports stored-token state even when broker validation endpoin
   expect(payload.tokenStored).toBe(true);
   expect(payload.validated).toBe(false);
   expect(payload.error).toContain("/v1/auth/me");
+});
+
+test("auth status interactive output tells the user to run hack auth login when no session exists", async () => {
+  const result = await runCliWithCapturedIo({
+    argv: ["auth", "status"],
+  });
+
+  expect(result.exitCode).toBe(0);
+  expect(result.stderr).toContain("Not authenticated with Hack auth");
+  expect(result.stderr).toContain("hack auth login");
+});
+
+test("auth status json includes a next step when login is required", async () => {
+  const result = await runCliWithCapturedIo({
+    argv: ["auth", "status", "--json"],
+  });
+
+  expect(result.exitCode).toBe(0);
+  const payload = JSON.parse(result.stdout) as {
+    readonly authenticated: boolean;
+    readonly tokenStored: boolean;
+    readonly loginRequired?: boolean;
+    readonly nextStep?: string;
+  };
+  expect(payload.authenticated).toBe(false);
+  expect(payload.tokenStored).toBe(false);
+  expect(payload.loginRequired).toBe(true);
+  expect(payload.nextStep).toContain("hack auth login");
 });
 
 type CapturedRunResult = {

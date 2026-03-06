@@ -220,15 +220,41 @@ export function createBetterAuthShellPlugin({
           error: runtime.reason ?? "Better Auth is not configured.",
         } as const;
       }
+      const rawSession = await runtime.auth.api.getSession({
+        headers: request.headers,
+      });
       const resolvedSession = await resolveBetterAuthSession({
         runtime,
         request,
+      });
+      const browserSession = toBrowserSessionUser({
+        session: rawSession,
+      });
+      const activeOrganization = extractNamedEntity({
+        session: rawSession,
+        kind: "organization",
+        fallbackId: resolvedSession.session?.organizationId ?? null,
+      });
+      const activeTeam = extractNamedEntity({
+        session: rawSession,
+        kind: "team",
+        fallbackId: resolvedSession.session?.teamId ?? null,
       });
       return {
         ok: true,
         authenticated: Boolean(resolvedSession.session),
         accessControlMode: resolvedSession.accessControlMode,
         session: resolvedSession.session,
+        user: browserSession
+          ? {
+              id: browserSession.id,
+              email: browserSession.email,
+              name: browserSession.name,
+              emailVerified: browserSession.emailVerified,
+            }
+          : null,
+        activeOrganization,
+        activeTeam,
         socialProviders: getSocialProviders({ runtime }),
         accountLinkingPolicy: getAccountLinkingPolicy({ runtime }),
         shellPath: "/auth",
@@ -542,6 +568,40 @@ function toBrowserSessionUser(input: {
     teamId:
       normalizeText(sessionRecord?.activeTeamId) ??
       normalizeText(record?.activeTeamId),
+  };
+}
+
+function extractNamedEntity(input: {
+  readonly session: unknown;
+  readonly kind: "organization" | "team";
+  readonly fallbackId: string | null;
+}): { readonly id: string; readonly name: string | null } | null {
+  const record = readRecord(input.session);
+  const sessionRecord = readRecord(record?.session);
+  const topLevelKey =
+    input.kind === "organization" ? "activeOrganization" : "activeTeam";
+  const entityRecord =
+    readRecord(sessionRecord?.[topLevelKey]) ??
+    readRecord(record?.[topLevelKey]);
+  const id =
+    normalizeText(entityRecord?.id) ??
+    normalizeText(
+      sessionRecord?.[
+        input.kind === "organization" ? "activeOrganizationId" : "activeTeamId"
+      ]
+    ) ??
+    normalizeText(
+      record?.[
+        input.kind === "organization" ? "activeOrganizationId" : "activeTeamId"
+      ]
+    ) ??
+    input.fallbackId;
+  if (!id) {
+    return null;
+  }
+  return {
+    id,
+    name: normalizeText(entityRecord?.name),
   };
 }
 

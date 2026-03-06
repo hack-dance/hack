@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 
+import { resolveLinearToken } from "../src/control-plane/extensions/linear/auth.ts";
 import { __testOnly } from "../src/control-plane/extensions/linear/commands.ts";
 
 const minimalLinearBindingConfig = {
@@ -581,6 +582,49 @@ test("parseRemoveAutosyncSubscriptionArgs parses optional scope", () => {
     teamId: "team-1",
     json: true,
   });
+});
+
+test("normalizeBrokerProtectedLinearError tells the user to run hack auth login when broker auth is required", () => {
+  const message = __testOnly.normalizeBrokerProtectedLinearError({
+    error: "better_auth_session_required",
+    profileId: "work",
+  });
+
+  expect(message).toContain("hack auth login");
+  expect(message).toContain('profile "work"');
+});
+
+test("normalizeBrokerProtectedLinearError explains profile access failures", () => {
+  const message = __testOnly.normalizeBrokerProtectedLinearError({
+    error: "better_auth_profile_forbidden",
+    profileId: "work",
+  });
+
+  expect(message).toContain("does not have access");
+  expect(message).toContain('profile "work"');
+  expect(message).toContain("hack auth login");
+});
+
+test("resolveLinearToken keeps local token setup ungated", async () => {
+  const result = await resolveLinearToken({
+    controlPlaneConfig: {} as Parameters<
+      typeof resolveLinearToken
+    >[0]["controlPlaneConfig"],
+    env: {},
+    store: {
+      get: async () => null,
+      set: async () => undefined,
+      delete: async () => false,
+    },
+  });
+
+  expect(result.ok).toBe(false);
+  if (result.ok) {
+    return;
+  }
+
+  expect(result.error).toContain("hack x linear connect");
+  expect(result.error).not.toContain("hack auth login");
 });
 
 test("parseUpsertAssigneeMappingArgs requires a local assignee and remote target", () => {

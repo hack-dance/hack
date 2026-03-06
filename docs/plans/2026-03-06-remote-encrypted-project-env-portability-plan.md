@@ -8,6 +8,30 @@
 
 **Tech Stack:** Bun, Elysia auth-broker, Better Auth user/org/team ownership, Drizzle/Postgres broker tables, Hack CLI env commands, macOS Hack Desktop follow-on UX.
 
+## Dependency on Hack Account Auth
+
+This plan depends on the approved Hack account/auth redesign.
+
+### Required auth assumptions
+
+- Hack account auth is provided through the broker auth shell
+- CLI/macOS can bootstrap a local broker management token through
+  `GET /v1/auth/session/start`, `GET /v1/auth/session/flows/:flowId`, and
+  `GET /v1/auth/me`
+- remote resources are owned by Hack user/org/team scope, not by provider identity
+- provider connections such as Linear remain separate resources under that Hack account
+
+### Boundary with provider auth
+
+Remote encrypted env portability must not be modeled as:
+
+- a GitHub integration feature
+- a Linear integration feature
+- a keychain-export convenience layer for provider tokens
+
+It is a Hack-account-owned remote secret portability feature with its own
+authorization and audit boundary.
+
 ---
 
 ## Scope Boundary
@@ -38,6 +62,7 @@
 - remote portability is opt-in per project
 - remote env state is owned by a Hack account scope, not by a provider profile
 - broker stores encrypted payloads and metadata, not editable plaintext
+- local provider auth remains separate and is not made portable by this plan
 
 ### Ownership model
 
@@ -88,6 +113,15 @@ For the first slice, choose one wrap path and keep it simple:
 - acceptable fallback: locally derived wrap key anchored to existing Hack secret storage plus explicit export/import support
 
 The critical design constraint is that the broker remains the durable registry for the encrypted payload and ownership metadata. The first slice should not require a single machine-local keychain to remain the only recovery path.
+
+### Local vs remote secret boundary
+
+Keep the plaintext boundary narrow:
+
+- local client may read and decrypt plaintext during explicit publish/apply
+- broker stores ciphertext, wrapped-key material, and metadata
+- remote portability does not imply remote plaintext editing in the broker
+- remote portability does not imply migration of provider OAuth tokens
 
 ### Apply model
 
@@ -396,4 +430,5 @@ git commit -m "Show portable env binding state in desktop"
 ## Links
 
 - `docs/plans/2026-03-06-hack-account-auth-and-provider-ux-design.md`
+- `docs/plans/2026-03-06-hack-account-auth-and-provider-ux-plan.md`
 - `T-00194`

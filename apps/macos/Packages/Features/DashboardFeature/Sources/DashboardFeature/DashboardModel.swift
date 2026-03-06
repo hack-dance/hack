@@ -674,6 +674,28 @@ public final class DashboardModel {
     }
   }
 
+  public func loginHackAccount() async -> HackAccountSettingsState? {
+    let didLogin: Bool? = await runActionResult(message: "Signing in to Hack…") {
+      try await self.client.loginHackAccount()
+      return true
+    }
+    guard didLogin == true else {
+      return nil
+    }
+    return await inspectHackAccountSettingsState()
+  }
+
+  public func logoutHackAccount() async -> HackAccountSettingsState? {
+    let didLogout: Bool? = await runActionResult(message: "Signing out of Hack…") {
+      try await self.client.logoutHackAccount()
+      return true
+    }
+    guard didLogout == true else {
+      return nil
+    }
+    return await inspectHackAccountSettingsState()
+  }
+
   public func startGitHubOAuthFlow(
     profileId: String,
     setDefault: Bool

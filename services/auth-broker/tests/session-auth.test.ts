@@ -206,6 +206,20 @@ describe("broker Hack session auth flow", () => {
       expect(meResponse.status).toBe(200);
       const mePayload = (await meResponse.json()) as {
         readonly ok: true;
+        readonly user: {
+          readonly id: string;
+          readonly email: string | null;
+          readonly name: string | null;
+          readonly emailVerified: boolean;
+        } | null;
+        readonly activeOrganization: {
+          readonly id: string;
+          readonly name: string | null;
+        } | null;
+        readonly activeTeam: {
+          readonly id: string;
+          readonly name: string | null;
+        } | null;
         readonly session: {
           readonly userId: string;
           readonly email: string | null;
@@ -215,6 +229,11 @@ describe("broker Hack session auth flow", () => {
         } | null;
       };
       expect(mePayload.ok).toBe(true);
+      expect(mePayload.user?.id).toBe("user-123");
+      expect(mePayload.user?.email).toBe("hack@example.com");
+      expect(mePayload.user?.emailVerified).toBe(true);
+      expect(mePayload.activeOrganization?.id).toBe("org-123");
+      expect(mePayload.activeTeam?.id).toBe("team-123");
       expect(mePayload.session?.userId).toBe("user-123");
       expect(mePayload.session?.email).toBe("hack@example.com");
       expect(mePayload.session?.organizationId).toBe("org-123");

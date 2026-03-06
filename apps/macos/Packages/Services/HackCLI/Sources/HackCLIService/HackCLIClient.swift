@@ -68,6 +68,47 @@ public actor HackCLIClient {
     let basePath: String
   }
 
+  private struct HackAuthStatusEnvelope: Decodable {
+    let ok: Bool
+    let authenticated: Bool?
+    let tokenStored: Bool?
+    let validated: Bool?
+    let brokerBaseUrl: String?
+    let accessControlMode: String?
+    let authReason: String?
+    let error: String?
+    let user: HackAuthUserEnvelope?
+    let activeOrganization: HackAuthNamedEntityEnvelope?
+    let activeTeam: HackAuthNamedEntityEnvelope?
+    let shellPath: String?
+    let accountPath: String?
+  }
+
+  private struct HackAuthUserEnvelope: Decodable {
+    let id: String?
+    let email: String?
+    let name: String?
+    let emailVerified: Bool?
+  }
+
+  private struct HackAuthNamedEntityEnvelope: Decodable {
+    let id: String?
+    let name: String?
+  }
+
+  private struct HackAuthLoginEnvelope: Decodable {
+    let ok: Bool
+    let authenticated: Bool?
+    let brokerBaseUrl: String?
+    let authorizeUrl: String?
+  }
+
+  private struct HackAuthLogoutEnvelope: Decodable {
+    let ok: Bool
+    let loggedOut: Bool?
+    let hadToken: Bool?
+  }
+
   private struct GitHubOAuthStartEnvelope: Decodable {
     let ok: Bool
     let flow: GitHubOAuthStartEnvelopeFlow
@@ -799,48 +840,90 @@ public actor HackCLIClient {
     )
   }
 
-  /// Reads the desktop-visible Hack account/auth broker state.
+  /// Reads the desktop-visible Hack account/auth broker state through the public CLI surface.
   ///
-  /// Session identity fields are intentionally optional because the broker only exposes
-  /// runtime Better Auth availability today. The desktop UI is structured around this
-  /// contract so real user/org/team fields can be filled in later without another view rewrite.
+  /// The desktop app intentionally mirrors `hack auth status --json` instead of reaching into
+  /// broker-only pages so browser login, local secret storage, and provider-linked identity
+  /// resolve through the same path as the CLI.
   public func inspectHackAccountSettingsState() async throws -> HackAccountSettingsState {
-    var lastError: String? = nil
-    for candidate in resolveAuthServerCandidates() {
-      guard
-        let statusURL = buildAuthURL(
-          base: candidate,
-          path: "/v1/auth/better-auth/status",
-          queryItems: []
-        )
-      else {
-        continue
-      }
-      do {
-        let body = try await fetchAuthBody(url: statusURL)
-        if let status = tryDecodeLenient(BetterAuthStatusEnvelope.self, from: body) {
-          return HackAccountSettingsState(
-            brokerBaseURL: candidate,
-            authEnabled: status.enabled,
-            authReason: normalized(status.reason),
-            authBasePath: normalized(status.basePath) ?? "/api/auth",
-            sessionAvailable: false,
-            userDisplayName: nil,
-            userEmail: nil,
-            organizationName: nil,
-            teamName: nil
-          )
-        }
-        throw HackCLIError.network("Auth broker returned invalid JSON.")
-      } catch {
-        lastError = error.localizedDescription
-      }
+    let result = try await run(["auth", "status", "--json"], allowNonZeroExit: true)
+    let payload = try decodeJsonOrThrow(HackAuthStatusEnvelope.self, result: result)
+    guard payload.ok else {
+      throw HackCLIError.network(
+        normalized(payload.error) ?? "Hack auth status returned an unexpected response."
+      )
     }
 
-    throw HackCLIError.network(
-      lastError
-        ?? "Unable to reach any configured auth broker endpoint. Check network/broker status and retry."
+    let brokerBaseURL = normalized(payload.brokerBaseUrl)
+      ?? resolveAuthServerCandidates().first
+      ?? "https://auth.hack.broker"
+    let betterAuthStatus = try? await fetchBetterAuthStatus(baseURL: brokerBaseURL)
+    let shellPath = normalized(payload.shellPath) ?? "/auth"
+    let accountPath = normalized(payload.accountPath) ?? "/auth/account"
+    let shellURL = buildAuthURL(base: brokerBaseURL, path: shellPath, queryItems: [])?.absoluteString
+    let accountURL =
+      buildAuthURL(base: brokerBaseURL, path: accountPath, queryItems: [])?.absoluteString
+    let userLabel = normalized(payload.user?.name)
+      ?? normalized(payload.user?.email)
+      ?? normalized(payload.user?.id)
+    let organizationLabel = normalized(payload.activeOrganization?.name)
+      ?? normalized(payload.activeOrganization?.id)
+    let teamLabel = normalized(payload.activeTeam?.name)
+      ?? normalized(payload.activeTeam?.id)
+
+    return HackAccountSettingsState(
+      brokerBaseURL: brokerBaseURL,
+      authEnabled: betterAuthStatus?.enabled ?? false,
+      authReason:
+        normalized(payload.authReason)
+        ?? normalized(payload.error)
+        ?? normalized(betterAuthStatus?.reason),
+      authBasePath: normalized(betterAuthStatus?.basePath) ?? "/api/auth",
+      authenticated: payload.authenticated == true,
+      validated: payload.validated == true,
+      tokenStored: payload.tokenStored == true,
+      accessControlMode: normalized(payload.accessControlMode),
+      shellURL: shellURL,
+      accountURL: accountURL,
+      sessionAvailable: payload.authenticated == true,
+      userDisplayName: userLabel,
+      userEmail: normalized(payload.user?.email),
+      organizationName: organizationLabel,
+      teamName: teamLabel
     )
+  }
+
+  public func loginHackAccount() async throws {
+    let result = try await run(["auth", "login", "--json"], allowNonZeroExit: true)
+    let payload = try decodeJsonOrThrow(HackAuthLoginEnvelope.self, result: result)
+    guard payload.ok else {
+      throw HackCLIError.network("Hack auth login did not complete.")
+    }
+  }
+
+  public func logoutHackAccount() async throws {
+    let result = try await run(["auth", "logout", "--json"], allowNonZeroExit: true)
+    let payload = try decodeJsonOrThrow(HackAuthLogoutEnvelope.self, result: result)
+    guard payload.ok else {
+      throw HackCLIError.network("Hack auth logout did not complete.")
+    }
+  }
+
+  private func fetchBetterAuthStatus(baseURL: String) async throws -> BetterAuthStatusEnvelope {
+    guard
+      let statusURL = buildAuthURL(
+        base: baseURL,
+        path: "/v1/auth/better-auth/status",
+        queryItems: []
+      )
+    else {
+      throw HackCLIError.network("Invalid auth broker URL.")
+    }
+    let body = try await fetchAuthBody(url: statusURL)
+    guard let status = tryDecodeLenient(BetterAuthStatusEnvelope.self, from: body) else {
+      throw HackCLIError.network("Auth broker returned invalid JSON.")
+    }
+    return status
   }
 
   /// Starts cloud GitHub OAuth with the dedicated auth broker surface.

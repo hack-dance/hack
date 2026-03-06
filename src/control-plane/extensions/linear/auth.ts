@@ -1,5 +1,6 @@
 import { secrets } from "bun";
 
+import { loadHackAuthSession } from "../../../lib/auth-session.ts";
 import { isRecord } from "../../../lib/guards.ts";
 import type { ControlPlaneConfig } from "../../sdk/config.ts";
 
@@ -541,9 +542,23 @@ export async function resolveLinearBrokerManagementToken(input: {
   const envelope = parseStoredTokenEnvelope(stored);
   const managementToken = envelope?.managementToken?.trim() ?? "";
   if (!managementToken) {
+    const genericHackSession = await loadHackAuthSession().catch(() => null);
+    const genericManagementToken = genericHackSession?.token?.trim() ?? "";
+    if (genericManagementToken) {
+      return {
+        ok: true,
+        managementToken: genericManagementToken,
+        ...(genericHackSession?.expiresAt
+          ? { managementTokenExpiresAt: genericHackSession.expiresAt }
+          : {}),
+        profileId: settings.profileId,
+        authRef,
+        service,
+      };
+    }
     return {
       ok: false,
-      error: `Linear broker management token is missing for profile "${settings.profileId}". Reconnect this Linear profile to manage broker-backed deliveries and autosync subscriptions.`,
+      error: `Linear broker management token is missing for profile "${settings.profileId}". Run \`hack auth login\` for broker-owned access, or reconnect this Linear profile if its saved broker token is stale.`,
       profileId: settings.profileId,
       authRef,
       service,
@@ -557,9 +572,23 @@ export async function resolveLinearBrokerManagementToken(input: {
     managementTokenExpiresAtMs !== null &&
     managementTokenExpiresAtMs <= Date.now()
   ) {
+    const genericHackSession = await loadHackAuthSession().catch(() => null);
+    const genericManagementToken = genericHackSession?.token?.trim() ?? "";
+    if (genericManagementToken) {
+      return {
+        ok: true,
+        managementToken: genericManagementToken,
+        ...(genericHackSession?.expiresAt
+          ? { managementTokenExpiresAt: genericHackSession.expiresAt }
+          : {}),
+        profileId: settings.profileId,
+        authRef,
+        service,
+      };
+    }
     return {
       ok: false,
-      error: `Linear broker management token expired for profile "${settings.profileId}". Reconnect this Linear profile to manage broker-backed deliveries and autosync subscriptions.`,
+      error: `Linear broker management token expired for profile "${settings.profileId}". Run \`hack auth login\` for broker-owned access, or reconnect this Linear profile to refresh its saved broker token.`,
       profileId: settings.profileId,
       authRef,
       service,

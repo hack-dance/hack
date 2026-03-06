@@ -957,6 +957,12 @@ public struct HackAccountSettingsState: Decodable, Hashable {
   public let authEnabled: Bool
   public let authReason: String?
   public let authBasePath: String
+  public let authenticated: Bool
+  public let validated: Bool
+  public let tokenStored: Bool
+  public let accessControlMode: String?
+  public let shellURL: String?
+  public let accountURL: String?
   public let sessionAvailable: Bool
   public let userDisplayName: String?
   public let userEmail: String?
@@ -968,6 +974,12 @@ public struct HackAccountSettingsState: Decodable, Hashable {
     authEnabled: Bool,
     authReason: String?,
     authBasePath: String,
+    authenticated: Bool,
+    validated: Bool,
+    tokenStored: Bool,
+    accessControlMode: String?,
+    shellURL: String?,
+    accountURL: String?,
     sessionAvailable: Bool,
     userDisplayName: String?,
     userEmail: String?,
@@ -978,11 +990,24 @@ public struct HackAccountSettingsState: Decodable, Hashable {
     self.authEnabled = authEnabled
     self.authReason = authReason
     self.authBasePath = authBasePath
+    self.authenticated = authenticated
+    self.validated = validated
+    self.tokenStored = tokenStored
+    self.accessControlMode = accessControlMode
+    self.shellURL = shellURL
+    self.accountURL = accountURL
     self.sessionAvailable = sessionAvailable
     self.userDisplayName = userDisplayName
     self.userEmail = userEmail
     self.organizationName = organizationName
     self.teamName = teamName
+  }
+
+  public var manageAccountAvailable: Bool {
+    guard let accountURL else {
+      return false
+    }
+    return !accountURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   }
 }
 

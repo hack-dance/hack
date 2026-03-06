@@ -135,16 +135,40 @@ async function handleAuthLogin({
     session: claimed.value,
   });
 
+  const me = await fetchHackAuthMe({
+    baseUrl: brokerBaseUrl,
+    token: claimed.value.token,
+  });
+  const identityPayload = me.ok
+    ? buildAuthIdentityPayload({
+        response: me.value,
+      })
+    : {};
+  const loginHuman =
+    me.ok && me.value.authenticated === true
+      ? renderWhoamiSummary({
+          response: me.value,
+        })
+      : "Hack auth session stored.";
+
   return writeSuccess({
     json: args.options.json === true,
-    human: "Hack auth session stored.",
+    human: loginHuman,
     payload: {
       ok: true,
       authenticated: true,
+      validated: me.ok && me.value.authenticated === true,
       brokerBaseUrl,
       flowId: start.value.flowId,
       authorizeUrl: start.value.authorizeUrl,
       tokenStored: true,
+      loginRequired: false,
+      ...identityPayload,
+      ...(me.ok
+        ? {}
+        : {
+            warning: `Hack auth session was stored, but broker identity could not be resolved yet: ${me.error}`,
+          }),
       ...(claimed.value.expiresAt
         ? { expiresAt: claimed.value.expiresAt }
         : {}),
@@ -188,12 +212,14 @@ async function handleAuthStatus({
   if (!stored) {
     return writeSuccess({
       json: args.options.json === true,
-      human: "Not authenticated with Hack auth.",
+      human: "Not authenticated with Hack auth. Run `hack auth login`.",
       payload: {
         ok: true,
         authenticated: false,
         tokenStored: false,
         validated: false,
+        loginRequired: true,
+        nextStep: "Run `hack auth login`.",
         brokerBaseUrl,
       },
     });
@@ -206,12 +232,14 @@ async function handleAuthStatus({
   if (!me.ok) {
     return writeSuccess({
       json: args.options.json === true,
-      human: `Hack auth token is stored locally, but broker validation failed: ${me.error}`,
+      human: `Hack auth token is stored locally, but broker validation failed: ${me.error} Run \`hack auth login\` if the session expired.`,
       payload: {
         ok: true,
         authenticated: false,
         tokenStored: true,
         validated: false,
+        loginRequired: true,
+        nextStep: "Run `hack auth login` if the stored session is stale.",
         brokerBaseUrl,
         error: me.error,
         ...(stored.expiresAt ? { expiresAt: stored.expiresAt } : {}),
@@ -222,33 +250,25 @@ async function handleAuthStatus({
   return writeSuccess({
     json: args.options.json === true,
     human: me.value.authenticated
-      ? "Hack auth session is valid."
-      : "Hack auth token is stored, but no authenticated broker session was resolved.",
+      ? renderAuthStatusSummary({
+          response: me.value,
+        })
+      : "Hack auth token is stored, but no authenticated broker session was resolved. Run `hack auth login` again.",
     payload: {
       ok: true,
       authenticated: me.value.authenticated === true,
       tokenStored: true,
       validated: true,
+      loginRequired: me.value.authenticated !== true,
+      ...(me.value.authenticated === true
+        ? {}
+        : {
+            nextStep: "Run `hack auth login` again.",
+          }),
       brokerBaseUrl,
-      accessControlMode: me.value.accessControlMode ?? null,
-      session: me.value.session ?? null,
-      ...(typeof me.value.user === "object" && me.value.user !== null
-        ? { user: me.value.user }
-        : {}),
-      ...(typeof me.value.activeOrganization === "object" &&
-      me.value.activeOrganization !== null
-        ? { activeOrganization: me.value.activeOrganization }
-        : {}),
-      ...(typeof me.value.activeTeam === "object" &&
-      me.value.activeTeam !== null
-        ? { activeTeam: me.value.activeTeam }
-        : {}),
-      shellPath:
-        typeof me.value.shellPath === "string" ? me.value.shellPath : "/auth",
-      accountPath:
-        typeof me.value.accountPath === "string"
-          ? me.value.accountPath
-          : "/auth/account",
+      ...buildAuthIdentityPayload({
+        response: me.value,
+      }),
       ...(stored.expiresAt ? { expiresAt: stored.expiresAt } : {}),
     },
   });
@@ -273,6 +293,10 @@ async function handleAuthWhoami({
     return writeFailure({
       json: args.options.json === true,
       error: "No stored Hack auth session. Run `hack auth login` first.",
+      payload: {
+        loginRequired: true,
+        nextStep: "Run `hack auth login` first.",
+      },
     });
   }
 
@@ -284,6 +308,10 @@ async function handleAuthWhoami({
     return writeFailure({
       json: args.options.json === true,
       error: me.error,
+      payload: {
+        loginRequired: true,
+        nextStep: "Run `hack auth login` if the stored session is stale.",
+      },
     });
   }
   if (me.value.authenticated !== true) {
@@ -291,6 +319,10 @@ async function handleAuthWhoami({
       json: args.options.json === true,
       error:
         "Stored Hack auth token is not authenticated anymore. Run `hack auth login` again.",
+      payload: {
+        loginRequired: true,
+        nextStep: "Run `hack auth login` again.",
+      },
     });
   }
 
@@ -325,6 +357,7 @@ function writeSuccess(input: {
 function writeFailure(input: {
   readonly json: boolean;
   readonly error: string;
+  readonly payload?: Record<string, unknown>;
 }): number {
   if (input.json) {
     process.stdout.write(
@@ -332,6 +365,7 @@ function writeFailure(input: {
         {
           ok: false,
           error: input.error,
+          ...(input.payload ?? {}),
         },
         null,
         2
@@ -349,21 +383,143 @@ function renderWhoamiSummary(input: {
   readonly response: HackAuthMeResponse;
 }): string {
   const session = input.response.session;
-  if (!session) {
-    return "Hack auth session is authenticated, but no session metadata was returned.";
+  const userLabel = formatHackAuthUserLabel({
+    response: input.response,
+  });
+  const orgLabel = formatHackAuthOrgLabel({
+    response: input.response,
+  });
+  const teamLabel = formatHackAuthTeamLabel({
+    response: input.response,
+  });
+  const details: string[] = [];
+  if (orgLabel) {
+    details.push(`org: ${orgLabel}`);
   }
-
-  const details = [
-    `user=${session.userId ?? "unknown"}`,
-    `org=${session.organizationId ?? "none"}`,
-    `team=${session.teamId ?? "none"}`,
-  ];
+  if (teamLabel) {
+    details.push(`team: ${teamLabel}`);
+  }
   if (input.response.accessControlMode) {
-    details.push(`mode=${input.response.accessControlMode}`);
+    details.push(`mode: ${input.response.accessControlMode}`);
   }
-  return `Hack auth: ${details.join(", ")}`;
+  if (session || userLabel || orgLabel || teamLabel) {
+    const headline = userLabel
+      ? `Signed in to Hack auth as ${userLabel}`
+      : "Signed in to Hack auth";
+    return details.length > 0
+      ? `${headline} (${details.join(", ")})`
+      : headline;
+  }
+  return "Hack auth session is authenticated, but no session metadata was returned.";
 }
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Unknown error";
+}
+
+function buildAuthIdentityPayload(input: {
+  readonly response: HackAuthMeResponse;
+}): Record<string, unknown> {
+  return {
+    accessControlMode: input.response.accessControlMode ?? null,
+    session: input.response.session ?? null,
+    ...(input.response.user ? { user: input.response.user } : {}),
+    ...(input.response.activeOrganization
+      ? { activeOrganization: input.response.activeOrganization }
+      : {}),
+    ...(input.response.activeTeam
+      ? { activeTeam: input.response.activeTeam }
+      : {}),
+    shellPath:
+      typeof input.response.shellPath === "string"
+        ? input.response.shellPath
+        : "/auth",
+    accountPath:
+      typeof input.response.accountPath === "string"
+        ? input.response.accountPath
+        : "/auth/account",
+  };
+}
+
+function renderAuthStatusSummary(input: {
+  readonly response: HackAuthMeResponse;
+}): string {
+  return renderWhoamiSummary({
+    response: input.response,
+  });
+}
+
+function formatHackAuthUserLabel(input: {
+  readonly response: HackAuthMeResponse;
+}): string | null {
+  const name =
+    typeof input.response.user?.name === "string"
+      ? input.response.user.name.trim()
+      : "";
+  const email =
+    typeof input.response.user?.email === "string"
+      ? input.response.user.email.trim()
+      : "";
+  if (name && email) {
+    return `${name} <${email}>`;
+  }
+  if (email) {
+    return email;
+  }
+  if (name) {
+    return name;
+  }
+  const userId =
+    typeof input.response.session?.userId === "string"
+      ? input.response.session.userId.trim()
+      : "";
+  return userId || null;
+}
+
+function formatHackAuthOrgLabel(input: {
+  readonly response: HackAuthMeResponse;
+}): string | null {
+  const name =
+    typeof input.response.activeOrganization?.name === "string"
+      ? input.response.activeOrganization.name.trim()
+      : "";
+  const slug =
+    typeof input.response.activeOrganization?.slug === "string"
+      ? input.response.activeOrganization.slug.trim()
+      : "";
+  if (name) {
+    return slug && slug !== name ? `${name} (${slug})` : name;
+  }
+  if (slug) {
+    return slug;
+  }
+  const orgId =
+    typeof input.response.session?.organizationId === "string"
+      ? input.response.session.organizationId.trim()
+      : "";
+  return orgId || null;
+}
+
+function formatHackAuthTeamLabel(input: {
+  readonly response: HackAuthMeResponse;
+}): string | null {
+  const name =
+    typeof input.response.activeTeam?.name === "string"
+      ? input.response.activeTeam.name.trim()
+      : "";
+  const slug =
+    typeof input.response.activeTeam?.slug === "string"
+      ? input.response.activeTeam.slug.trim()
+      : "";
+  if (name) {
+    return slug && slug !== name ? `${name} (${slug})` : name;
+  }
+  if (slug) {
+    return slug;
+  }
+  const teamId =
+    typeof input.response.session?.teamId === "string"
+      ? input.response.session.teamId.trim()
+      : "";
+  return teamId || null;
 }

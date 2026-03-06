@@ -4,10 +4,14 @@ import { createHmac } from "node:crypto";
 import type { BetterAuthRuntime } from "../src/better-auth.ts";
 import { FlowStore } from "../src/flow-store.ts";
 import { createAuthBrokerApp } from "../src/index.ts";
-import { InMemoryLinearConnectionStore } from "../src/modules/linear-connections/service.ts";
+import {
+  InMemoryLinearConnectionStore,
+  materializeLinearConnectionRecord,
+} from "../src/modules/linear-connections/service.ts";
 import {
   InMemoryLinearSyncStore,
   type LinearSyncStore,
+  materializeLinearWebhookDelivery,
 } from "../src/modules/linear-sync-store/service.ts";
 
 type BetterAuthDb = NonNullable<BetterAuthRuntime["db"]>;
@@ -110,6 +114,136 @@ function resolveFetchUrl(input: string | Request | URL): string {
 }
 
 describe("auth broker github flow routes", () => {
+  test("linear connection materialization prefers first-class ownership columns and falls back to legacy metadata", () => {
+    const fromColumns = materializeLinearConnectionRecord({
+      row: {
+        id: "conn-columns",
+        connectionKey: "profile:work",
+        profileId: "work",
+        accountId: null,
+        accountName: "Work",
+        accountEmail: "linear@example.com",
+        authRef: null,
+        betterAuthUserId: "user-a",
+        betterAuthOrganizationId: "column-org",
+        betterAuthTeamId: "column-team",
+        organizationId: "linear-org",
+        teamId: "linear-team",
+        metadataJson: JSON.stringify({
+          organizationName: "Hack",
+          _betterAuthOrganizationId: "legacy-org",
+          _betterAuthTeamId: "legacy-team",
+        }),
+        createdAt: new Date("2026-03-06T00:00:00.000Z"),
+        updatedAt: new Date("2026-03-06T00:00:00.000Z"),
+      },
+    });
+    expect(fromColumns.betterAuthOrganizationId).toBe("column-org");
+    expect(fromColumns.betterAuthTeamId).toBe("column-team");
+    expect(fromColumns.metadata).toEqual({
+      organizationName: "Hack",
+    });
+
+    const fromLegacyMetadata = materializeLinearConnectionRecord({
+      row: {
+        id: "conn-legacy",
+        connectionKey: "profile:legacy",
+        profileId: "legacy",
+        accountId: null,
+        accountName: null,
+        accountEmail: "legacy@example.com",
+        authRef: null,
+        betterAuthUserId: "user-b",
+        betterAuthOrganizationId: null,
+        betterAuthTeamId: null,
+        organizationId: "legacy-linear-org",
+        teamId: "legacy-linear-team",
+        metadataJson: JSON.stringify({
+          _betterAuthOrganizationId: "legacy-org",
+          _betterAuthTeamId: "legacy-team",
+        }),
+        createdAt: new Date("2026-03-06T00:00:00.000Z"),
+        updatedAt: new Date("2026-03-06T00:00:00.000Z"),
+      },
+    });
+    expect(fromLegacyMetadata.betterAuthOrganizationId).toBe("legacy-org");
+    expect(fromLegacyMetadata.betterAuthTeamId).toBe("legacy-team");
+  });
+
+  test("linear webhook delivery materialization prefers first-class ownership columns and falls back to legacy payload envelope", () => {
+    const fromColumns = materializeLinearWebhookDelivery({
+      row: {
+        id: "delivery-columns",
+        deliveryKey: "delivery-columns",
+        profileId: "work",
+        projectId: "project-a",
+        teamId: "linear-team-a",
+        issueId: "issue-a",
+        issueIdentifier: "HACK-1",
+        eventType: "Issue",
+        action: "create",
+        status: "pending",
+        payloadJson: JSON.stringify({
+          path: "/linear/webhooks",
+          rawBody: '{"type":"Issue"}',
+          payload: { type: "Issue" },
+          signatureVerified: true,
+          webhookTimestamp: "2026-03-06T00:00:00.000Z",
+          _betterAuthOrganizationId: "legacy-org",
+          _betterAuthTeamId: "legacy-team",
+        }),
+        applyError: null,
+        claimedBy: null,
+        betterAuthUserId: "user-a",
+        betterAuthOrganizationId: "column-org",
+        betterAuthTeamId: "column-team",
+        organizationId: "linear-org",
+        ownerTeamId: "linear-owner-team",
+        createdAt: new Date("2026-03-06T00:00:00.000Z"),
+        updatedAt: new Date("2026-03-06T00:00:00.000Z"),
+        appliedAt: null,
+      },
+    });
+    expect(fromColumns.betterAuthOrganizationId).toBe("column-org");
+    expect(fromColumns.betterAuthTeamId).toBe("column-team");
+
+    const fromLegacyPayload = materializeLinearWebhookDelivery({
+      row: {
+        id: "delivery-legacy",
+        deliveryKey: "delivery-legacy",
+        profileId: "legacy",
+        projectId: "project-b",
+        teamId: "linear-team-b",
+        issueId: "issue-b",
+        issueIdentifier: "HACK-2",
+        eventType: "Issue",
+        action: "update",
+        status: "pending",
+        payloadJson: JSON.stringify({
+          path: "/linear/webhooks",
+          rawBody: '{"type":"Issue"}',
+          payload: { type: "Issue" },
+          signatureVerified: true,
+          webhookTimestamp: "2026-03-06T00:00:00.000Z",
+          _betterAuthOrganizationId: "legacy-org",
+          _betterAuthTeamId: "legacy-team",
+        }),
+        applyError: null,
+        claimedBy: null,
+        betterAuthUserId: "user-b",
+        betterAuthOrganizationId: null,
+        betterAuthTeamId: null,
+        organizationId: "linear-org-b",
+        ownerTeamId: "linear-owner-team-b",
+        createdAt: new Date("2026-03-06T00:00:00.000Z"),
+        updatedAt: new Date("2026-03-06T00:00:00.000Z"),
+        appliedAt: null,
+      },
+    });
+    expect(fromLegacyPayload.betterAuthOrganizationId).toBe("legacy-org");
+    expect(fromLegacyPayload.betterAuthTeamId).toBe("legacy-team");
+  });
+
   test("better auth status endpoint is exposed", async () => {
     const app = createAuthBrokerApp({
       config: createTestConfig(),

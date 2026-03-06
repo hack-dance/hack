@@ -22,6 +22,7 @@ export type RecordLinearWebhookDeliveryInput = {
   readonly issueIdentifier?: string | null;
   readonly betterAuthUserId: string | null;
   readonly betterAuthOrganizationId?: string | null;
+  readonly betterAuthTeamId?: string | null;
   readonly organizationId: string | null;
   readonly teamId: string | null;
 };
@@ -33,6 +34,7 @@ export type ListLinearWebhookDeliveriesInput = {
   readonly teamId?: string | null;
   readonly betterAuthUserId?: string | null;
   readonly betterAuthOrganizationId?: string | null;
+  readonly betterAuthTeamId?: string | null;
 };
 
 export type LinearWebhookDelivery = {
@@ -51,6 +53,7 @@ export type LinearWebhookDelivery = {
   readonly issueIdentifier: string | null;
   readonly betterAuthUserId: string | null;
   readonly betterAuthOrganizationId: string | null;
+  readonly betterAuthTeamId: string | null;
   readonly organizationId: string | null;
   readonly ownerTeamId: string | null;
   readonly status: LinearWebhookDeliveryStatus;
@@ -103,6 +106,7 @@ export class InMemoryLinearSyncStore implements LinearSyncStore {
       issueIdentifier: normalizeText(input.issueIdentifier),
       betterAuthUserId: input.betterAuthUserId,
       betterAuthOrganizationId: input.betterAuthOrganizationId ?? null,
+      betterAuthTeamId: input.betterAuthTeamId ?? null,
       organizationId: input.organizationId,
       ownerTeamId: normalizeText(input.teamId),
       status: "pending",
@@ -157,6 +161,10 @@ export function createLinearSyncStoreFromDb(input: {
   const db = createDbClient({
     databaseUrl: input.databaseUrl,
   });
+  const ensureOwnershipColumns = createOwnershipColumnsEnsurer({
+    db,
+    tableName: "linear_webhook_events",
+  });
   return {
     recordWebhookDelivery: async ({
       path,
@@ -173,9 +181,11 @@ export function createLinearSyncStoreFromDb(input: {
       issueIdentifier,
       betterAuthUserId,
       betterAuthOrganizationId,
+      betterAuthTeamId,
       organizationId,
       teamId,
     }) => {
+      await ensureOwnershipColumns();
       const resolvedDeliveryKey =
         normalizeText(deliveryKey) ??
         buildDeliveryKey({
@@ -204,10 +214,13 @@ export function createLinearSyncStoreFromDb(input: {
             signatureVerified,
             webhookTimestamp,
             [BETTER_AUTH_ORGANIZATION_PAYLOAD_KEY]: betterAuthOrganizationId,
+            [BETTER_AUTH_TEAM_PAYLOAD_KEY]: betterAuthTeamId,
           }),
           applyError: null,
           claimedBy: null,
           betterAuthUserId,
+          betterAuthOrganizationId: normalizeText(betterAuthOrganizationId),
+          betterAuthTeamId: normalizeText(betterAuthTeamId),
           organizationId,
           ownerTeamId: teamId,
         })
@@ -232,6 +245,7 @@ export function createLinearSyncStoreFromDb(input: {
     },
 
     listWebhookDeliveries: async (input = {}) => {
+      await ensureOwnershipColumns();
       const filters = buildListFilters({ input });
       const rows =
         filters.length === 0
@@ -252,6 +266,7 @@ export function createLinearSyncStoreFromDb(input: {
     },
 
     getWebhookDelivery: async ({ deliveryId }) => {
+      await ensureOwnershipColumns();
       const rows = await db
         .select()
         .from(linearWebhookEvents)
@@ -261,6 +276,7 @@ export function createLinearSyncStoreFromDb(input: {
     },
 
     markWebhookDeliveryApplied: async ({ deliveryId }) => {
+      await ensureOwnershipColumns();
       const now = new Date();
       const updated = await db
         .update(linearWebhookEvents)
@@ -278,9 +294,12 @@ export function createLinearSyncStoreFromDb(input: {
   };
 }
 
-function toWebhookDelivery(input: {
+export function toWebhookDelivery(input: {
   readonly row: typeof linearWebhookEvents.$inferSelect;
 }): LinearWebhookDelivery {
+  const storedOwnership = readStoredDeliveryOwnership({
+    payloadJson: input.row.payloadJson,
+  });
   return {
     id: input.row.id,
     path: readStoredPath({ payloadJson: input.row.payloadJson }),
@@ -300,9 +319,11 @@ function toWebhookDelivery(input: {
     issueId: input.row.issueId ?? null,
     issueIdentifier: input.row.issueIdentifier ?? null,
     betterAuthUserId: input.row.betterAuthUserId ?? null,
-    betterAuthOrganizationId: readStoredBetterAuthOrganizationId({
-      payloadJson: input.row.payloadJson,
-    }),
+    betterAuthOrganizationId:
+      input.row.betterAuthOrganizationId ??
+      storedOwnership.betterAuthOrganizationId,
+    betterAuthTeamId:
+      input.row.betterAuthTeamId ?? storedOwnership.betterAuthTeamId,
     organizationId: input.row.organizationId ?? null,
     ownerTeamId: input.row.ownerTeamId ?? null,
     status: normalizeDeliveryStatus({ value: input.row.status }),
@@ -311,6 +332,8 @@ function toWebhookDelivery(input: {
     appliedAt: input.row.appliedAt?.toISOString() ?? null,
   };
 }
+
+export const materializeLinearWebhookDelivery = toWebhookDelivery;
 
 function buildListFilters(input: {
   readonly input: ListLinearWebhookDeliveriesInput;
@@ -380,6 +403,13 @@ function matchesDeliveryFilter(input: {
   } else if (betterAuthOrganizationId) {
     return true;
   }
+  const betterAuthTeamId = normalizeText(input.filter.betterAuthTeamId);
+  if (
+    betterAuthTeamId &&
+    input.delivery.betterAuthTeamId !== betterAuthTeamId
+  ) {
+    return false;
+  }
   const betterAuthUserId = normalizeText(input.filter.betterAuthUserId);
   if (
     betterAuthUserId &&
@@ -412,6 +442,7 @@ function buildDeliveryKey(input: {
 }
 
 const BETTER_AUTH_ORGANIZATION_PAYLOAD_KEY = "_betterAuthOrganizationId";
+const BETTER_AUTH_TEAM_PAYLOAD_KEY = "_betterAuthTeamId";
 
 function readStoredEnvelope(input: {
   readonly payloadJson: string;
@@ -449,13 +480,23 @@ function readStoredWebhookTimestamp(input: {
   });
 }
 
-function readStoredBetterAuthOrganizationId(input: {
+export function readStoredDeliveryOwnership(input: {
   readonly payloadJson: string;
-}): string | null {
-  return readStringField({
-    record: readStoredEnvelope(input),
-    key: BETTER_AUTH_ORGANIZATION_PAYLOAD_KEY,
-  });
+}): {
+  readonly betterAuthOrganizationId: string | null;
+  readonly betterAuthTeamId: string | null;
+} {
+  const record = readStoredEnvelope(input);
+  return {
+    betterAuthOrganizationId: readStringField({
+      record,
+      key: BETTER_AUTH_ORGANIZATION_PAYLOAD_KEY,
+    }),
+    betterAuthTeamId: readStringField({
+      record,
+      key: BETTER_AUTH_TEAM_PAYLOAD_KEY,
+    }),
+  };
 }
 
 function readStoredSignatureVerified(input: {
@@ -479,6 +520,33 @@ function readStringField(input: {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object";
+}
+
+function createOwnershipColumnsEnsurer(input: {
+  readonly db: ReturnType<typeof createDbClient>;
+  readonly tableName: "linear_webhook_events";
+}) {
+  let promise: Promise<void> | null = null;
+  return async () => {
+    promise ??= ensureOwnershipColumns(input);
+    await promise;
+  };
+}
+
+async function ensureOwnershipColumns(input: {
+  readonly db: ReturnType<typeof createDbClient>;
+  readonly tableName: "linear_webhook_events";
+}) {
+  await input.db.execute(
+    sql.raw(
+      `ALTER TABLE "${input.tableName}" ADD COLUMN IF NOT EXISTS "better_auth_organization_id" text`
+    )
+  );
+  await input.db.execute(
+    sql.raw(
+      `ALTER TABLE "${input.tableName}" ADD COLUMN IF NOT EXISTS "better_auth_team_id" text`
+    )
+  );
 }
 
 function normalizeText(value: unknown): string | null {

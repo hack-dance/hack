@@ -66,6 +66,8 @@ export const linearConnections = pgTable("linear_connections", {
   accountEmail: text("account_email"),
   authRef: text("auth_ref"),
   betterAuthUserId: text("better_auth_user_id"),
+  betterAuthOrganizationId: text("better_auth_organization_id"),
+  betterAuthTeamId: text("better_auth_team_id"),
   organizationId: text("organization_id"),
   teamId: text("team_id"),
   metadataJson: text("metadata_json").notNull().default("{}"),
@@ -119,6 +121,8 @@ export const linearWebhookEvents = pgTable("linear_webhook_events", {
   applyError: text("apply_error"),
   claimedBy: text("claimed_by"),
   betterAuthUserId: text("better_auth_user_id"),
+  betterAuthOrganizationId: text("better_auth_organization_id"),
+  betterAuthTeamId: text("better_auth_team_id"),
   organizationId: text("organization_id"),
   ownerTeamId: text("owner_team_id"),
   createdAt: timestamp("created_at", { withTimezone: true })

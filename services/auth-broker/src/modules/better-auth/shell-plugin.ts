@@ -968,13 +968,24 @@ function renderProviderActionButton(input: {
   )}" data-auth-provider-label="${escapeHtml(
     input.provider.label
   )}" data-auth-callback-url="${escapeHtml(input.callbackUrl)}">
-      <span class="provider-mark" aria-hidden="true">${escapeHtml(
-        input.provider.label.slice(0, 1)
-      )}</span>
+      <span class="provider-mark" aria-hidden="true">${renderProviderMark({
+        providerId: input.provider.id,
+        providerLabel: input.provider.label,
+      })}</span>
       <span>${
         input.mode === "link" ? "Link" : "Continue with"
       } ${escapeHtml(input.provider.label)}</span>
     </button>`;
+}
+
+function renderProviderMark(input: {
+  readonly providerId: string;
+  readonly providerLabel: string;
+}): string {
+  if (input.providerId === "github") {
+    return `<svg viewBox="0 0 16 16" fill="currentColor" role="presentation" focusable="false" aria-hidden="true"><path d="M8 0C3.58 0 0 3.67 0 8.2c0 3.63 2.29 6.7 5.47 7.79.4.08.55-.18.55-.4 0-.2-.01-.86-.01-1.57-2.01.38-2.53-.5-2.69-.96-.09-.24-.48-.96-.82-1.15-.28-.16-.68-.57-.01-.58.63-.01 1.08.59 1.23.84.72 1.24 1.87.89 2.33.68.07-.54.28-.89.51-1.09-1.78-.21-3.64-.92-3.64-4.07 0-.9.31-1.64.82-2.22-.08-.21-.36-1.06.08-2.2 0 0 .67-.22 2.2.85a7.42 7.42 0 0 1 4 0c1.53-1.07 2.2-.85 2.2-.85.44 1.14.16 1.99.08 2.2.51.58.82 1.32.82 2.22 0 3.16-1.87 3.86-3.65 4.07.29.25.54.73.54 1.47 0 1.06-.01 1.92-.01 2.18 0 .22.15.49.55.4A8.23 8.23 0 0 0 16 8.2C16 3.67 12.42 0 8 0Z"/></svg>`;
+  }
+  return escapeHtml(input.providerLabel.slice(0, 1));
 }
 
 function renderProviderActionScript(input: {
@@ -1359,6 +1370,11 @@ function renderHtmlPage(input: {
         font-weight: 700;
       }
 
+      .provider-mark svg {
+        width: 100%;
+        height: 100%;
+      }
+
       #auth-status {
         min-height: 1.25rem;
         margin: 0.55rem 0 0;
@@ -1467,15 +1483,19 @@ function renderHtmlPage(input: {
 
       .theme-handoff .providers {
         width: 100%;
+        display: flex;
+        justify-content: center;
       }
 
       .theme-handoff .provider-button {
         border: 1px solid rgba(255, 255, 255, 0.45);
-        border-radius: 0.4rem;
+        border-radius: 0;
+        width: auto;
+        min-width: min(20rem, calc(100vw - 4rem));
         background: transparent;
         color: #f5f5f5;
-        padding: 1rem 1.1rem;
-        font-size: 0.96rem;
+        padding: 0.82rem 1rem;
+        font-size: 0.92rem;
         font-weight: 500;
         letter-spacing: 0.08em;
         text-transform: uppercase;
@@ -1495,11 +1515,11 @@ function renderHtmlPage(input: {
       }
 
       .theme-handoff .provider-mark {
-        width: 1.1rem;
-        height: 1.1rem;
+        width: 0.95rem;
+        height: 0.95rem;
         background: transparent;
-        border: 1px solid #2563eb;
-        color: #2563eb;
+        border: none;
+        color: #f5f5f5;
         font-size: 0.62rem;
       }
 

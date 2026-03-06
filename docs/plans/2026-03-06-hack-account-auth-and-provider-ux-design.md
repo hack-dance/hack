@@ -332,6 +332,10 @@ We should explore remote encrypted project/env storage with:
 Do not fold this into the immediate auth/UX slice.
 Track it as follow-on architecture work.
 
+### Follow-on plan
+
+- `docs/plans/2026-03-06-remote-encrypted-project-env-portability-plan.md`
+
 ## Implementation Priorities
 
 ### Immediate

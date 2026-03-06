@@ -1,4 +1,7 @@
-import type { BetterAuthRuntime } from "../../better-auth.ts";
+import {
+  type BetterAuthRuntime,
+  ensureBetterAuthRuntimeReady,
+} from "../../better-auth.ts";
 import { verifyBrokerManagementToken } from "./management-token.ts";
 
 const AUTHORIZATION_BEARER_PATTERN = /^Bearer\s+(.+)$/i;
@@ -52,6 +55,7 @@ export async function resolveBetterAuthSession(input: {
       session: null,
     };
   }
+  await ensureBetterAuthRuntimeReady(input.runtime);
   const session = await input.runtime.auth.api.getSession({
     headers: input.request.headers,
   });

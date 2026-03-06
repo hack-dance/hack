@@ -7,6 +7,7 @@ import type {
   BetterAuthRuntime,
   BetterAuthSocialProvider,
 } from "../../better-auth.ts";
+import { ensureBetterAuthRuntimeReady } from "../../better-auth.ts";
 import type { BrokerConfig } from "../../config.ts";
 import { type FlowStore, hashDeviceCode } from "../../flow-store.ts";
 import { issueBrokerManagementToken } from "./management-token.ts";
@@ -220,6 +221,16 @@ export function createBetterAuthShellPlugin({
           error: runtime.reason ?? "Better Auth is not configured.",
         } as const;
       }
+      try {
+        await ensureBetterAuthRuntimeReady(runtime);
+      } catch (error) {
+        set.status = 503;
+        return {
+          ok: false,
+          error: "better_auth_storage_unavailable",
+          message: error instanceof Error ? error.message : String(error),
+        } as const;
+      }
       const rawSession = await runtime.auth.api.getSession({
         headers: request.headers,
       });
@@ -272,6 +283,8 @@ export function createBetterAuthShellPlugin({
         if (!(runtime.enabled && runtime.auth)) {
           return renderHtmlPage({
             title: "Hack auth unavailable",
+            heading: "Hack auth unavailable",
+            subtitle: "Shared Hack sign-in is not available right now.",
             body: renderStateCard({
               eyebrow: "Auth unavailable",
               title: "Hack auth is not configured",
@@ -279,6 +292,23 @@ export function createBetterAuthShellPlugin({
                 runtime.reason ??
                 "The auth broker is missing Better Auth configuration.",
               tone: "muted",
+            }),
+          });
+        }
+        try {
+          await ensureBetterAuthRuntimeReady(runtime);
+        } catch (error) {
+          return renderHtmlPage({
+            title: "Hack auth unavailable",
+            heading: "Hack auth unavailable",
+            subtitle: "Shared Hack sign-in is not available right now.",
+            body: renderLifecycleMessage({
+              eyebrow: "Unavailable",
+              title: "Auth storage is unavailable",
+              body: escapeHtml(
+                error instanceof Error ? error.message : String(error)
+              ),
+              tone: "danger",
             }),
           });
         }
@@ -309,40 +339,21 @@ export function createBetterAuthShellPlugin({
           deviceCode: query.deviceCode,
           returnUrl,
         });
-        const autoProviderId =
-          preferredProviderId ??
-          (socialProviders.length === 1
-            ? (socialProviders[0]?.id ?? null)
-            : null);
+        const authLanding = buildAuthLandingPresentation({
+          socialProviders,
+          preferredProviderId,
+          callbackUrl,
+          flowId: query.flowId,
+          deviceCode: query.deviceCode,
+        });
         return renderHtmlPage({
           title: "Hack auth",
-          body: [
-            renderStateCard({
-              eyebrow: "Sign in",
-              title: "Connect Hack auth",
-              body: "Use a configured provider to open a first-party Hack session in this browser.",
-              tone: "neutral",
-            }),
-            socialProviders.length > 0
-              ? renderProviderActionGrid({
-                  providers: socialProviders,
-                  callbackUrl,
-                  mode: "sign-in",
-                })
-              : renderStateCard({
-                  eyebrow: "No providers",
-                  title: "No social login providers are configured",
-                  body: "Configure GitHub or Google credentials for Better Auth, then reload this page.",
-                  tone: "muted",
-                }),
-            renderFlowHint({
-              flowId: query.flowId,
-              deviceCode: query.deviceCode,
-            }),
-          ].join(""),
+          heading: authLanding.heading,
+          subtitle: authLanding.subtitle,
+          body: authLanding.body,
           script: renderProviderActionScript({
             callbackUrl,
-            autoProviderId,
+            autoProviderId: authLanding.autoProviderId,
             mode: "sign-in",
           }),
         });
@@ -362,6 +373,8 @@ export function createBetterAuthShellPlugin({
         if (!(runtime.enabled && runtime.auth)) {
           return renderHtmlPage({
             title: "Hack account unavailable",
+            heading: "Hack account unavailable",
+            subtitle: "This browser cannot finish the Hack session right now.",
             body: renderStateCard({
               eyebrow: "Auth unavailable",
               title: "Hack auth is not configured",
@@ -369,6 +382,23 @@ export function createBetterAuthShellPlugin({
                 runtime.reason ??
                 "The auth broker is missing Better Auth configuration.",
               tone: "muted",
+            }),
+          });
+        }
+        try {
+          await ensureBetterAuthRuntimeReady(runtime);
+        } catch (error) {
+          return renderHtmlPage({
+            title: "Hack account unavailable",
+            heading: "Hack account unavailable",
+            subtitle: "This browser cannot finish the Hack session right now.",
+            body: renderLifecycleMessage({
+              eyebrow: "Unavailable",
+              title: "Auth storage is unavailable",
+              body: escapeHtml(
+                error instanceof Error ? error.message : String(error)
+              ),
+              tone: "danger",
             }),
           });
         }
@@ -391,6 +421,10 @@ export function createBetterAuthShellPlugin({
         });
         return renderHtmlPage({
           title: "Hack account",
+          heading: resolvedSession.session ? "Hack account" : "Finish sign-in",
+          subtitle: resolvedSession.session
+            ? "This browser is now signed in to Hack."
+            : "Complete sign-in to connect this browser to Hack.",
           body: renderAccountBody({
             session: resolvedSession.session,
             socialProviders,
@@ -624,66 +658,50 @@ function renderAccountBody(input: {
   readonly accountPageUrl: string;
 }): string {
   const sessionSummary = input.session
-    ? renderStateCard({
-        eyebrow: "Signed in",
-        title: escapeHtml(
-          input.session.name ?? input.session.email ?? "Hack account"
-        ),
-        body: [
-          input.session.email
-            ? `<strong>Email:</strong> ${escapeHtml(input.session.email)}`
-            : null,
-          `<strong>User ID:</strong> ${escapeHtml(input.session.userId)}`,
-          input.session.organizationId
-            ? `<strong>Organization:</strong> ${escapeHtml(input.session.organizationId)}`
-            : null,
-          input.session.teamId
-            ? `<strong>Team:</strong> ${escapeHtml(input.session.teamId)}`
-            : null,
-        ]
-          .filter(Boolean)
-          .join("<br />"),
-        tone: "neutral",
+    ? renderAccountSummary({
+        session: input.session,
+        lifecycle: input.lifecycle,
       })
-    : renderStateCard({
+    : renderLifecycleMessage({
         eyebrow: "Not signed in",
-        title: "Complete sign-in to finish setup",
-        body: "Use the provider buttons below or return to the auth landing page to open a browser session first.",
+        title: "Finish sign-in to continue",
+        body: "Use a provider below to open your Hack session in this browser.",
         tone: "warning",
       });
 
-  const lifecycleCard = renderLifecycleCard({
+  const lifecycleCard = renderLifecycleMessageForFlow({
     lifecycle: input.lifecycle,
     accountPageUrl: input.accountPageUrl,
   });
-  const linkingCard = input.session
-    ? [
-        renderStateCard({
-          eyebrow: "Linked providers",
-          title: "Link another provider",
-          body: renderLinkingPolicy(input.accountLinkingPolicy),
-          tone: "muted",
-        }),
-        renderProviderActionGrid({
-          providers: input.socialProviders,
-          callbackUrl: input.accountPageUrl,
-          mode: "link",
-        }),
-      ].join("")
-    : "";
+  const linkingCard =
+    input.session && input.socialProviders.length > 0
+      ? [
+          `<section class="section">`,
+          `<p class="section-label">Add another sign-in method</p>`,
+          renderProviderActionGrid({
+            providers: input.socialProviders,
+            callbackUrl: input.accountPageUrl,
+            mode: "link",
+          }),
+          `<details class="details"><summary>Linking details</summary><p>${renderLinkingPolicy(
+            input.accountLinkingPolicy
+          )}</p></details>`,
+          "</section>",
+        ].join("")
+      : "";
 
-  return [sessionSummary, lifecycleCard, linkingCard].join("");
+  return [sessionSummary, lifecycleCard, linkingCard].filter(Boolean).join("");
 }
 
-function renderLifecycleCard(input: {
+function renderLifecycleMessageForFlow(input: {
   readonly lifecycle: SessionFlowLifecycle;
   readonly accountPageUrl: string;
 }): string {
   if (input.lifecycle.state === "none") {
-    return renderStateCard({
-      eyebrow: "Ready",
-      title: "Hack session is active",
-      body: "You can return to the app now, or link another provider from this account page.",
+    return renderLifecycleMessage({
+      eyebrow: "Session active",
+      title: "You are signed in",
+      body: "Return to Hack or link another sign-in method from this page.",
       tone: "neutral",
     });
   }
@@ -694,9 +712,9 @@ function renderLifecycleCard(input: {
       deviceCode: input.lifecycle.deviceCode,
       returnUrl: input.lifecycle.returnUrl,
     });
-    return renderStateCard({
+    return renderLifecycleMessage({
       eyebrow: "Pending",
-      title: "Finish sign-in to complete this session flow",
+      title: "Finish sign-in to complete this setup",
       body: `Return to <a href="${escapeHtml(
         retryUrl
       )}">the auth landing page</a> and continue with a provider.`,
@@ -704,9 +722,9 @@ function renderLifecycleCard(input: {
     });
   }
   if (input.lifecycle.state === "ready") {
-    return renderStateCard({
+    return renderLifecycleMessage({
       eyebrow: "Ready",
-      title: "Hack auth is ready to claim",
+      title: "Hack is ready",
       body: renderCompletionBody({
         returnUrl: input.lifecycle.returnUrl,
       }),
@@ -714,16 +732,16 @@ function renderLifecycleCard(input: {
     });
   }
   if (input.lifecycle.state === "claimed") {
-    return renderStateCard({
+    return renderLifecycleMessage({
       eyebrow: "Claimed",
-      title: "This session flow was already claimed",
+      title: "Hack is already connected",
       body: renderCompletionBody({
         returnUrl: input.lifecycle.returnUrl,
       }),
       tone: "muted",
     });
   }
-  return renderStateCard({
+  return renderLifecycleMessage({
     eyebrow: "Unavailable",
     title: escapeHtml(input.lifecycle.title),
     body: escapeHtml(input.lifecycle.message),
@@ -735,11 +753,79 @@ function renderCompletionBody(input: {
   readonly returnUrl: string | null;
 }): string {
   if (!input.returnUrl) {
-    return "Return to Hack and finish the local setup flow.";
+    return "You can return to Hack now.";
   }
-  return `Return to Hack and finish the local setup flow. <a href="${escapeHtml(
-    input.returnUrl
-  )}">Open app</a>.`;
+  return `Return to Hack when you're ready. ${renderActionLink({
+    href: input.returnUrl,
+    label: "Open Hack",
+  })}`;
+}
+
+function renderAccountSummary(input: {
+  readonly session: NonNullable<
+    Awaited<ReturnType<typeof resolveBetterAuthSession>>["session"]
+  >;
+  readonly lifecycle: SessionFlowLifecycle;
+}): string {
+  const identity = input.session.name ?? input.session.email ?? "Hack account";
+  const avatarLabel = identity.slice(0, 1).toUpperCase();
+  const meta = [
+    input.session.organizationId
+      ? renderMetaPill({
+          label: "Org",
+          value: input.session.organizationId,
+        })
+      : "",
+    input.session.teamId
+      ? renderMetaPill({
+          label: "Team",
+          value: input.session.teamId,
+        })
+      : "",
+  ]
+    .filter(Boolean)
+    .join("");
+
+  return `<section class="summary">
+    <div class="avatar" aria-hidden="true">${escapeHtml(avatarLabel)}</div>
+    <div class="summary-copy">
+      <p class="section-label">Hack account</p>
+      <h2>${escapeHtml(identity)}</h2>
+      ${
+        input.session.email
+          ? `<p class="summary-detail">${escapeHtml(input.session.email)}</p>`
+          : ""
+      }
+      ${meta ? `<div class="meta-row">${meta}</div>` : ""}
+      ${
+        input.lifecycle.state === "ready" || input.lifecycle.state === "claimed"
+          ? `<p class="summary-status">This browser is linked to your Hack account.</p>`
+          : ""
+      }
+    </div>
+  </section>`;
+}
+
+function renderMetaPill(input: {
+  readonly label: string;
+  readonly value: string;
+}): string {
+  return `<span class="meta-pill"><span>${escapeHtml(
+    input.label
+  )}</span>${escapeHtml(input.value)}</span>`;
+}
+
+function renderLifecycleMessage(input: {
+  readonly eyebrow: string;
+  readonly title: string;
+  readonly body: string;
+  readonly tone: "neutral" | "muted" | "warning" | "success" | "danger";
+}): string {
+  return `<section class="message message-${input.tone}">
+    <p class="message-eyebrow">${escapeHtml(input.eyebrow)}</p>
+    <h2>${input.title}</h2>
+    <p>${input.body}</p>
+  </section>`;
 }
 
 function renderLifecycleAutoReturnScript(input: {
@@ -767,21 +853,131 @@ window.requestAnimationFrame(() => {
 `;
 }
 
+function buildAuthLandingPresentation(input: {
+  readonly socialProviders: readonly BetterAuthSocialProvider[];
+  readonly preferredProviderId: string | null;
+  readonly callbackUrl: string;
+  readonly flowId?: string;
+  readonly deviceCode?: string;
+}): {
+  readonly heading: string;
+  readonly subtitle: string;
+  readonly body: string;
+  readonly autoProviderId: string | null;
+} {
+  const autoProviderId =
+    input.preferredProviderId ??
+    (input.socialProviders.length === 1
+      ? (input.socialProviders[0]?.id ?? null)
+      : null);
+  const autoProvider = autoProviderId
+    ? (input.socialProviders.find(
+        (provider) => provider.id === autoProviderId
+      ) ?? null)
+    : null;
+  const bodySections = [
+    renderAuthLandingPrimarySection({
+      socialProviders: input.socialProviders,
+      autoProvider,
+      callbackUrl: input.callbackUrl,
+    }),
+    renderFlowHint({
+      flowId: input.flowId,
+      deviceCode: input.deviceCode,
+    }),
+  ].filter(Boolean);
+
+  return {
+    heading: autoProvider
+      ? `Continue in ${autoProvider.label}`
+      : "Sign in to Hack",
+    subtitle: autoProvider
+      ? "Hack will bring you back to the app when sign-in is done."
+      : "Choose a sign-in method for this Mac.",
+    body: bodySections.join(""),
+    autoProviderId,
+  };
+}
+
+function renderAuthLandingPrimarySection(input: {
+  readonly socialProviders: readonly BetterAuthSocialProvider[];
+  readonly autoProvider: BetterAuthSocialProvider | null;
+  readonly callbackUrl: string;
+}): string {
+  if (input.socialProviders.length === 0) {
+    return renderStateCard({
+      eyebrow: "No providers",
+      title: "No sign-in providers are configured",
+      body: "Configure GitHub or Google for Better Auth, then try again.",
+      tone: "muted",
+    });
+  }
+  if (input.autoProvider) {
+    return renderAutoRedirectPanel({
+      provider: input.autoProvider,
+      callbackUrl: input.callbackUrl,
+      mode: "sign-in",
+    });
+  }
+  return renderProviderActionGrid({
+    providers: input.socialProviders,
+    callbackUrl: input.callbackUrl,
+    mode: "sign-in",
+  });
+}
+
 function renderProviderActionGrid(input: {
   readonly providers: readonly BetterAuthSocialProvider[];
   readonly callbackUrl: string;
   readonly mode: "sign-in" | "link";
 }): string {
   return `<div class="providers">${input.providers
-    .map(
-      (provider) =>
-        `<button class="provider-button" type="button" data-auth-mode="${input.mode}" data-auth-provider="${escapeHtml(
-          provider.id
-        )}" data-auth-callback-url="${escapeHtml(input.callbackUrl)}">${
-          input.mode === "link" ? "Link" : "Continue with"
-        } ${escapeHtml(provider.label)}</button>`
+    .map((provider) =>
+      renderProviderActionButton({
+        provider,
+        callbackUrl: input.callbackUrl,
+        mode: input.mode,
+      })
     )
     .join("")}</div>`;
+}
+
+function renderAutoRedirectPanel(input: {
+  readonly provider: BetterAuthSocialProvider;
+  readonly callbackUrl: string;
+  readonly mode: "sign-in" | "link";
+}): string {
+  return `<section class="hero">
+    <p class="hero-kicker">This page is linked to your Mac</p>
+    <h2>Redirecting to ${escapeHtml(input.provider.label)}</h2>
+    <p class="hero-copy">If nothing happens, continue manually.</p>
+    ${renderProviderActionButton({
+      provider: input.provider,
+      callbackUrl: input.callbackUrl,
+      mode: input.mode,
+      compact: true,
+    })}
+  </section>`;
+}
+
+function renderProviderActionButton(input: {
+  readonly provider: BetterAuthSocialProvider;
+  readonly callbackUrl: string;
+  readonly mode: "sign-in" | "link";
+  readonly compact?: boolean;
+}): string {
+  return `<button class="provider-button ${
+    input.mode === "link" ? "provider-button-secondary" : ""
+  } ${input.compact ? "provider-button-compact" : ""}" type="button" data-auth-mode="${input.mode}" data-auth-provider="${escapeHtml(
+    input.provider.id
+  )}" data-auth-callback-url="${escapeHtml(input.callbackUrl)}">
+      <span class="provider-mark" aria-hidden="true">${escapeHtml(
+        input.provider.label.slice(0, 1)
+      )}</span>
+      <span>${
+        input.mode === "link" ? "Link" : "Continue with"
+      } ${escapeHtml(input.provider.label)}</span>
+    </button>`;
 }
 
 function renderFlowHint(input: {
@@ -791,12 +987,11 @@ function renderFlowHint(input: {
   if (!(input.flowId && input.deviceCode)) {
     return "";
   }
-  return renderStateCard({
-    eyebrow: "Device flow",
-    title: "This browser session is linked to a local client",
-    body: `Flow: <code>${escapeHtml(input.flowId)}</code>`,
-    tone: "muted",
-  });
+  return `<details class="details">
+    <summary>Details</summary>
+    <p>Linked to this Mac.</p>
+    <p>Flow <code>${escapeHtml(input.flowId)}</code></p>
+  </details>`;
 }
 
 function renderProviderActionScript(input: {
@@ -825,6 +1020,7 @@ async function runAuthAction(button) {
     return;
   }
   button.disabled = true;
+  button.classList.add("is-loading");
   if (authStatus) {
     authStatus.textContent = mode === "link" ? "Linking provider..." : "Redirecting to provider...";
   }
@@ -840,13 +1036,19 @@ async function runAuthAction(button) {
         callbackURL,
       }),
     });
-    const payload = await response.json().catch(() => null);
+    const rawText = await response.text();
+    let payload = null;
+    try {
+      payload = rawText ? JSON.parse(rawText) : null;
+    } catch {}
     if (!response.ok) {
       throw new Error(
         payload?.message ||
           payload?.error ||
           payload?.code ||
-          "Auth request failed"
+          (mode === "link"
+            ? "Couldn't link this provider right now."
+            : "Couldn't start sign-in right now.")
       );
     }
     const nextUrl =
@@ -860,6 +1062,7 @@ async function runAuthAction(button) {
         error instanceof Error ? error.message : String(error);
     }
     button.disabled = false;
+    button.classList.remove("is-loading");
   }
 }
 
@@ -884,8 +1087,8 @@ if (autoProviderId) {
 function renderLinkingPolicy(policy: BetterAuthAccountLinkingPolicy): string {
   const parts = [
     policy.requireVerifiedEmail
-      ? "Verified provider email is required for implicit account linking."
-      : "Implicit account linking can use unverified provider email.",
+      ? "Verified provider email is required for implicit linking."
+      : "Unverified provider email can be used for implicit linking.",
     policy.allowDifferentEmails
       ? "Different provider emails are allowed."
       : "Provider email must match the existing Hack account email.",
@@ -906,15 +1109,26 @@ function renderStateCard(input: {
   readonly body: string;
   readonly tone: "neutral" | "muted" | "warning" | "success" | "danger";
 }): string {
-  return `<section class="card card-${input.tone}">
-  <p class="eyebrow">${escapeHtml(input.eyebrow)}</p>
+  return `<section class="message message-${input.tone}">
+  <p class="message-eyebrow">${escapeHtml(input.eyebrow)}</p>
   <h2>${input.title}</h2>
   <p>${input.body}</p>
 </section>`;
 }
 
+function renderActionLink(input: {
+  readonly href: string;
+  readonly label: string;
+}): string {
+  return `<a class="action-link" href="${escapeHtml(input.href)}">${escapeHtml(
+    input.label
+  )}</a>`;
+}
+
 function renderHtmlPage(input: {
   readonly title: string;
+  readonly heading?: string;
+  readonly subtitle?: string;
   readonly body: string;
   readonly script?: string;
 }): Response {
@@ -928,15 +1142,17 @@ function renderHtmlPage(input: {
     <style>
       :root {
         color-scheme: light;
-        --bg: #f5f3ef;
-        --panel: rgba(255, 255, 255, 0.92);
-        --text: #1e1d1a;
-        --muted: #666155;
-        --line: rgba(33, 28, 19, 0.14);
-        --accent: #0f766e;
-        --accent-strong: #115e59;
+        --bg: #f3f5f8;
+        --panel: rgba(255, 255, 255, 0.82);
+        --text: #111827;
+        --muted: #667085;
+        --line: rgba(15, 23, 42, 0.08);
+        --accent: #0f172a;
+        --accent-strong: #2563eb;
+        --accent-soft: rgba(37, 99, 235, 0.1);
         --warning: #b45309;
         --danger: #b91c1c;
+        --success: #047857;
       }
 
       * { box-sizing: border-box; }
@@ -945,56 +1161,190 @@ function renderHtmlPage(input: {
         min-height: 100vh;
         font-family: "SF Pro Display", "Helvetica Neue", sans-serif;
         background:
-          radial-gradient(circle at top right, rgba(15, 118, 110, 0.12), transparent 28rem),
-          linear-gradient(180deg, #f8f6f1 0%, var(--bg) 100%);
+          radial-gradient(circle at top left, rgba(37, 99, 235, 0.16), transparent 26rem),
+          radial-gradient(circle at bottom right, rgba(15, 23, 42, 0.08), transparent 30rem),
+          linear-gradient(180deg, #f8fafc 0%, var(--bg) 100%);
         color: var(--text);
+        display: grid;
+        place-items: center;
       }
 
       main {
-        width: min(42rem, calc(100vw - 2rem));
-        margin: 0 auto;
-        padding: 2rem 0 3rem;
+        width: min(30rem, calc(100vw - 2rem));
+        padding: 1.5rem 0;
+      }
+
+      .shell {
+        padding: 1.35rem;
+        border-radius: 1.5rem;
+        border: 1px solid var(--line);
+        background: var(--panel);
+        backdrop-filter: blur(18px);
+        box-shadow: 0 24px 60px rgba(15, 23, 42, 0.08);
+      }
+
+      .brand {
+        margin: 0 0 0.65rem;
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--muted);
       }
 
       h1 {
-        font-size: clamp(2rem, 4vw, 2.8rem);
-        line-height: 1;
-        margin: 0 0 0.75rem;
+        font-size: clamp(2.1rem, 6vw, 2.45rem);
+        line-height: 0.96;
+        letter-spacing: -0.04em;
+        margin: 0;
       }
 
       p.lede {
-        margin: 0 0 1.5rem;
-        color: var(--muted);
-        font-size: 1rem;
-        line-height: 1.5;
-      }
-
-      .card {
-        padding: 1.1rem 1.15rem;
-        border-radius: 1rem;
-        border: 1px solid var(--line);
-        background: var(--panel);
-        box-shadow: 0 18px 48px rgba(18, 18, 18, 0.07);
-        margin-bottom: 0.9rem;
-      }
-
-      .card h2 {
-        margin: 0;
-        font-size: 1.05rem;
-      }
-
-      .card p {
         margin: 0.6rem 0 0;
         color: var(--muted);
-        line-height: 1.5;
+        font-size: 0.98rem;
+        line-height: 1.45;
       }
 
-      .card-success { border-color: rgba(17, 94, 89, 0.22); }
-      .card-warning { border-color: rgba(180, 83, 9, 0.22); }
-      .card-danger { border-color: rgba(185, 28, 28, 0.22); }
+      .stack {
+        display: grid;
+        gap: 1rem;
+        margin-top: 1.35rem;
+      }
 
-      .eyebrow {
-        margin: 0 0 0.45rem;
+      .summary,
+      .section,
+      .hero {
+        background: transparent;
+      }
+
+      .summary {
+        display: flex;
+        gap: 0.95rem;
+        align-items: flex-start;
+        padding: 0 0 1rem;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .avatar {
+        width: 2.5rem;
+        height: 2.5rem;
+        border-radius: 999px;
+        display: grid;
+        place-items: center;
+        background: linear-gradient(135deg, var(--accent-strong), #7c3aed);
+        color: white;
+        font-weight: 700;
+      }
+
+      .summary-copy h2,
+      .message h2 {
+        margin: 0;
+        font-size: 1.02rem;
+        line-height: 1.2;
+      }
+
+      .summary-copy {
+        display: grid;
+        gap: 0.28rem;
+      }
+
+      .summary-detail {
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.95rem;
+      }
+
+      .summary-status {
+        margin: 0.15rem 0 0;
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+
+      .section {
+        display: grid;
+        gap: 0.7rem;
+        padding: 0;
+      }
+
+      .hero {
+        display: grid;
+        gap: 0.6rem;
+      }
+
+      .hero h2 {
+        margin: 0;
+        font-size: 1.08rem;
+        line-height: 1.15;
+      }
+
+      .hero-kicker {
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.78rem;
+        font-weight: 600;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+
+      .hero-copy {
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.96rem;
+        line-height: 1.45;
+      }
+
+      .section-label {
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.78rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .meta-row {
+        display: flex;
+        gap: 0.45rem;
+        flex-wrap: wrap;
+        margin-top: 0.25rem;
+      }
+
+      .meta-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.45rem;
+        padding: 0.28rem 0.55rem;
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.05);
+        color: var(--text);
+        font-size: 0.83rem;
+      }
+
+      .meta-pill span {
+        color: var(--muted);
+      }
+
+      .message {
+        padding: 0.95rem 1rem;
+        border: 1px solid transparent;
+        border-radius: 1rem;
+      }
+
+      .message p {
+        margin: 0.45rem 0 0;
+        color: var(--muted);
+        line-height: 1.45;
+      }
+
+      .message-neutral { background: rgba(15, 23, 42, 0.04); }
+      .message-muted { background: rgba(15, 23, 42, 0.03); }
+      .message-success { border-color: rgba(4, 120, 87, 0.18); background: rgba(236, 253, 245, 0.88); }
+      .message-warning { border-color: rgba(180, 83, 9, 0.18); background: rgba(255, 251, 235, 0.92); }
+      .message-danger { border-color: rgba(185, 28, 28, 0.18); background: rgba(254, 242, 242, 0.92); }
+
+      .message-eyebrow {
+        margin: 0 0 0.3rem;
         color: var(--muted);
         font-size: 0.72rem;
         font-weight: 700;
@@ -1004,33 +1354,62 @@ function renderHtmlPage(input: {
 
       .providers {
         display: grid;
-        gap: 0.75rem;
-        margin-bottom: 0.9rem;
+        gap: 0.65rem;
       }
 
       .provider-button {
         appearance: none;
         width: 100%;
-        border: 0;
-        border-radius: 999px;
-        padding: 0.95rem 1.15rem;
-        background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+        border: 1px solid rgba(37, 99, 235, 0.12);
+        border-radius: 0.95rem;
+        padding: 0.88rem 0.95rem;
+        background: linear-gradient(135deg, var(--accent) 0%, #1d4ed8 100%);
         color: white;
-        font-size: 0.98rem;
-        font-weight: 700;
+        font-size: 0.97rem;
+        font-weight: 680;
         letter-spacing: 0.01em;
         cursor: pointer;
-        transition: transform 120ms ease, opacity 120ms ease;
+        transition: transform 120ms ease, opacity 120ms ease, box-shadow 120ms ease;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.7rem;
       }
 
-      .provider-button:hover { transform: translateY(-1px); }
-      .provider-button:disabled { opacity: 0.62; cursor: progress; transform: none; }
+      .provider-button:hover { transform: translateY(-1px); box-shadow: 0 14px 28px rgba(29, 78, 216, 0.18); }
+      .provider-button:disabled { opacity: 0.7; cursor: progress; transform: none; }
+      .provider-button.is-loading { opacity: 0.76; }
+
+      .provider-button-secondary {
+        background: rgba(255, 255, 255, 0.82);
+        color: var(--text);
+        border-color: var(--line);
+      }
+
+      .provider-button-secondary:hover {
+        box-shadow: 0 12px 24px rgba(15, 23, 42, 0.08);
+      }
+
+      .provider-button-compact {
+        justify-content: flex-start;
+      }
+
+      .provider-mark {
+        width: 1.5rem;
+        height: 1.5rem;
+        border-radius: 999px;
+        display: grid;
+        place-items: center;
+        background: rgba(255, 255, 255, 0.18);
+        font-size: 0.78rem;
+        font-weight: 700;
+      }
 
       #auth-status {
         min-height: 1.25rem;
-        margin: 0.65rem 0 0;
+        margin: 0.55rem 0 0;
         color: var(--muted);
-        font-size: 0.92rem;
+        font-size: 0.88rem;
       }
 
       code {
@@ -1041,16 +1420,60 @@ function renderHtmlPage(input: {
         font-size: 0.86em;
       }
 
+      .details {
+        margin: 0;
+        color: var(--muted);
+      }
+
+      .details summary {
+        cursor: pointer;
+        color: var(--muted);
+        font-size: 0.88rem;
+        list-style: none;
+      }
+
+      .details summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .details p {
+        margin: 0.55rem 0 0;
+        font-size: 0.9rem;
+        line-height: 1.45;
+      }
+
+      .action-link {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        margin-left: 0.35rem;
+        padding: 0.38rem 0.72rem;
+        border-radius: 999px;
+        border: 1px solid rgba(37, 99, 235, 0.16);
+        background: rgba(37, 99, 235, 0.08);
+        font-size: 0.88rem;
+        font-weight: 600;
+      }
+
       a { color: var(--accent-strong); text-decoration: none; }
       a:hover { text-decoration: underline; }
     </style>
   </head>
   <body>
     <main>
-      <h1>Hack auth</h1>
-      <p class="lede">First-party session setup for Hack CLI and Hack Desktop.</p>
-      ${input.body}
-      <p id="auth-status" aria-live="polite"></p>
+      <section class="shell">
+        <p class="brand">Hack</p>
+        <h1>${escapeHtml(input.heading ?? input.title)}</h1>
+        ${
+          input.subtitle
+            ? `<p class="lede">${escapeHtml(input.subtitle)}</p>`
+            : ""
+        }
+        <div class="stack">
+          ${input.body}
+        </div>
+        <p id="auth-status" aria-live="polite"></p>
+      </section>
     </main>
     ${input.script ? `<script>${input.script}</script>` : ""}
   </body>

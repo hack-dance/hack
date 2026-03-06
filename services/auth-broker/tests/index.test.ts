@@ -428,8 +428,9 @@ describe("auth broker github flow routes", () => {
     );
     expect(response.status).toBe(200);
     const html = await response.text();
-    expect(html).toContain("Connect Hack auth");
+    expect(html).toContain("Continue in GitHub");
     expect(html).toContain("Continue with GitHub");
+    expect(html).toContain("If nothing happens");
     expect(html).toContain("/api/auth/sign-in/social");
   });
 
@@ -487,8 +488,8 @@ describe("auth broker github flow routes", () => {
       );
       expect(accountResponse.status).toBe(200);
       const accountHtml = await accountResponse.text();
-      expect(accountHtml).toContain("Hack auth is ready to claim");
-      expect(accountHtml).toContain("Open app");
+      expect(accountHtml).toContain("Hack is ready");
+      expect(accountHtml).toContain("Open Hack");
 
       const claimResponse = await app.handle(
         new Request(

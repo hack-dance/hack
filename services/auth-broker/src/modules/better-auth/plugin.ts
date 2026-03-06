@@ -1,6 +1,9 @@
 import { Elysia } from "elysia";
 
-import type { BetterAuthRuntime } from "../../better-auth.ts";
+import {
+  type BetterAuthRuntime,
+  ensureBetterAuthRuntimeReady,
+} from "../../better-auth.ts";
 
 type CreateBetterAuthPluginOptions = {
   readonly runtime: BetterAuthRuntime;
@@ -27,7 +30,7 @@ export function createBetterAuthPlugin({
 }: CreateBetterAuthPluginOptions) {
   return new Elysia({
     name: "hack-auth-broker.better-auth",
-  }).all("/api/auth/*", ({ request, set }) => {
+  }).all("/api/auth/*", async ({ request, set }) => {
     if (!(runtime.enabled && runtime.auth)) {
       set.status = 503;
       return {
@@ -40,6 +43,16 @@ export function createBetterAuthPlugin({
       return {
         ok: false,
         error: `Unsupported method: ${request.method}`,
+      } as const;
+    }
+    try {
+      await ensureBetterAuthRuntimeReady(runtime);
+    } catch (error) {
+      set.status = 503;
+      return {
+        ok: false,
+        error: "better_auth_storage_unavailable",
+        message: error instanceof Error ? error.message : String(error),
       } as const;
     }
     return runtime.auth.handler(request);

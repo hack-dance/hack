@@ -189,20 +189,24 @@ The auth shell is provider-driven and env-driven.
 
 ### GitHub
 
-`GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` are currently dual-use:
+`BETTER_AUTH_GITHUB_CLIENT_ID` and `BETTER_AUTH_GITHUB_CLIENT_SECRET` are the
+preferred creds for Hack sign-in with GitHub.
 
-- they enable GitHub OAuth provider routes for integration flows
-- they also enable GitHub as a Hack login method in `/auth`
+If those are not set, the broker falls back to `GITHUB_CLIENT_ID` and
+`GITHUB_CLIENT_SECRET`.
 
-Because of that, product surfaces must still distinguish:
+Product surfaces must still distinguish:
 
 - `Sign in to Hack with GitHub`
 - `Connect GitHub integration`
 
 ### Google
 
-`GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` are now relevant because they
-enable Google as a Hack login method in the Better Auth shell.
+`BETTER_AUTH_GOOGLE_CLIENT_ID` and `BETTER_AUTH_GOOGLE_CLIENT_SECRET` are the
+preferred creds for Google sign-in in the Better Auth shell.
+
+If those are not set, the broker falls back to `GOOGLE_CLIENT_ID` and
+`GOOGLE_CLIENT_SECRET`.
 
 Google is currently:
 
@@ -247,8 +251,8 @@ Hack account ownership, not on provider identity.
 
 ## Environment
 
-1. `GITHUB_CLIENT_ID` (required; enables GitHub provider OAuth and GitHub social sign-in)
-2. `GITHUB_CLIENT_SECRET` (required; enables GitHub provider OAuth and GitHub social sign-in)
+1. `GITHUB_CLIENT_ID` (required for GitHub provider OAuth routes)
+2. `GITHUB_CLIENT_SECRET` (required for GitHub provider OAuth routes)
 3. `GITHUB_SCOPES` (optional; default: `read:user,user:email,read:org`)
 4. `GITHUB_APP_ID` (optional; returned in flow metadata for app-mode binding)
 5. `GITHUB_APP_SLUG` (optional; used to build install URL)
@@ -264,20 +268,24 @@ Hack account ownership, not on provider identity.
 15. `BETTER_AUTH_SECRET` (required to enable Better Auth runtime)
 16. `BETTER_AUTH_URL` (optional base URL override)
 17. `BETTER_AUTH_TRUSTED_ORIGINS` (optional comma-separated origins)
-18. `GOOGLE_CLIENT_ID` (optional; enables Google social sign-in in `/auth`)
-19. `GOOGLE_CLIENT_SECRET` (optional; enables Google social sign-in in `/auth`)
-20. `BETTER_AUTH_GITHUB_AUTO_PROVISION_USERS` (optional boolean; when true, callback can create a Better Auth user from GitHub email if no match exists)
-21. `BETTER_AUTH_LINEAR_AUTO_PROVISION_USERS` (optional boolean; when true, callback can create a Better Auth user from Linear email if no match exists)
-22. `HACK_LINEAR_CLIENT_ID` (recommended Linear OAuth client id)
-23. `HACK_LINEAR_SECRET` (optional Linear OAuth client secret; PKCE can run without it)
-24. `HACK_LINEAR_DEVELOPER_APP_TOKEN` (optional app token for agent/system automations)
-25. `HACK_LINEAR_WEBHOOK_SECRET` (recommended Linear webhook signing secret)
-26. `HACK_LINEAR_SCOPES` (optional; default: `read,write,app:mentionable,app:assignable`)
-27. `HACK_LINEAR_OAUTH_ACTOR` (optional; default: `app` for Linear agent/app installs)
-28. `HACK_LINEAR_REDIRECT_URI` (default: `${AUTH_BROKER_PUBLIC_BASE_URL}/linear/callback`)
-29. `HACK_LINEAR_WEBHOOK_PATH` (default: `/linear/webhooks`)
-30. `HACK_LINEAR_AUTHORIZE_URL` (optional; default: `https://linear.app/oauth/authorize`)
-31. `HACK_LINEAR_TOKEN_URL` (optional; default: `https://api.linear.app/oauth/token`)
+18. `BETTER_AUTH_GITHUB_CLIENT_ID` (optional; preferred GitHub social login client id for `/auth`)
+19. `BETTER_AUTH_GITHUB_CLIENT_SECRET` (optional; preferred GitHub social login client secret for `/auth`)
+20. `BETTER_AUTH_GOOGLE_CLIENT_ID` (optional; preferred Google social login client id for `/auth`)
+21. `BETTER_AUTH_GOOGLE_CLIENT_SECRET` (optional; preferred Google social login client secret for `/auth`)
+22. `GOOGLE_CLIENT_ID` (optional fallback; enables Google social sign-in in `/auth` when dedicated Better Auth creds are not set)
+23. `GOOGLE_CLIENT_SECRET` (optional fallback; enables Google social sign-in in `/auth` when dedicated Better Auth creds are not set)
+24. `BETTER_AUTH_GITHUB_AUTO_PROVISION_USERS` (optional boolean; when true, callback can create a Better Auth user from GitHub email if no match exists)
+25. `BETTER_AUTH_LINEAR_AUTO_PROVISION_USERS` (optional boolean; when true, callback can create a Better Auth user from Linear email if no match exists)
+26. `HACK_LINEAR_CLIENT_ID` (recommended Linear OAuth client id)
+27. `HACK_LINEAR_SECRET` (optional Linear OAuth client secret; PKCE can run without it)
+28. `HACK_LINEAR_DEVELOPER_APP_TOKEN` (optional app token for agent/system automations)
+29. `HACK_LINEAR_WEBHOOK_SECRET` (recommended Linear webhook signing secret)
+30. `HACK_LINEAR_SCOPES` (optional; default: `read,write,app:mentionable,app:assignable`)
+31. `HACK_LINEAR_OAUTH_ACTOR` (optional; default: `app` for Linear agent/app installs)
+32. `HACK_LINEAR_REDIRECT_URI` (default: `${AUTH_BROKER_PUBLIC_BASE_URL}/linear/callback`)
+33. `HACK_LINEAR_WEBHOOK_PATH` (default: `/linear/webhooks`)
+34. `HACK_LINEAR_AUTHORIZE_URL` (optional; default: `https://linear.app/oauth/authorize`)
+35. `HACK_LINEAR_TOKEN_URL` (optional; default: `https://api.linear.app/oauth/token`)
 32. `HACK_LINEAR_API_BASE_URL` (optional; default: `https://api.linear.app`)
 33. `LINEAR_CLIENT_ID` / `LINEAR_CLIENT_SECRET` / `LINEAR_WEBHOOK_SIGNING_SECRET` / `LINEAR_OAUTH_ACTOR` (optional compatibility aliases)
 

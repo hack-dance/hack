@@ -177,7 +177,7 @@ describe("broker Hack session auth flow", () => {
       const accountResponse = await app.handle(new Request(completeLocation));
       expect(accountResponse.status).toBe(200);
       const completeHtml = await accountResponse.text();
-      expect(completeHtml).toContain("Hack auth is ready to claim");
+      expect(completeHtml).toContain("Hack is ready");
 
       const pollResponse = await app.handle(
         new Request(
@@ -289,7 +289,7 @@ describe("broker Hack session auth flow", () => {
 
       const accountResponse = await app.handle(new Request(accountLocation));
       const html = await accountResponse.text();
-      expect(html).toContain("Open app");
+      expect(html).toContain("Open Hack");
       expect(html).toContain("hack://auth/complete");
       expect(html).toContain("Returning to Hack");
       expect(html).toContain("window.setTimeout");

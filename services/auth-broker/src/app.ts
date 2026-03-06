@@ -146,7 +146,8 @@ export function createAuthBrokerApp({
         betterAuthRuntime,
       })
     )
-    .onStart(() => {
+    .onStart(async () => {
+      await betterAuthRuntime.ready;
       const intervalMs = Math.max(config.flowSweepIntervalMs, 5000);
       flowSweepTimer = setInterval(() => {
         flowStore.pruneExpired();

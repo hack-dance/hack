@@ -691,9 +691,6 @@ struct ProjectDetailView: View {
         VStack(alignment: .leading, spacing: 4) {
           Text("Project settings")
             .font(.system(size: 20, weight: .semibold))
-          Text("Keep runtime defaults and provider routing here. Day-to-day sync stays in Tickets.")
-            .font(.system(size: 13, weight: .medium))
-            .foregroundStyle(.secondary)
         }
         Spacer()
         if executionTargetLoading || executionTargetSaving {
@@ -705,7 +702,7 @@ struct ProjectDetailView: View {
       VStack(alignment: .leading, spacing: 16) {
         projectSettingsField(
           title: "Execution mode",
-          description: "Choose whether this repo defaults to local work or a routed remote node.",
+          help: "Choose whether this repo defaults to local work on this Mac or routes execution to a remote node.",
           footnote: executionMode.summary
         ) {
           Menu {
@@ -739,11 +736,11 @@ struct ProjectDetailView: View {
 
         projectSettingsField(
           title: "Default node",
-          description: "Applies when execution mode routes work off this Mac.",
+          help: "Choose the default node when execution mode is set to remote.",
           footnote: selectedNodeSummary
         ) {
           if executionMode == .local {
-            projectSettingsMenuLabel("Local", isDisabled: true)
+            projectSettingsStaticValue("Uses this Mac while execution mode stays local")
               .accessibilityLabel("Default node")
           } else {
             Menu {
@@ -794,7 +791,7 @@ struct ProjectDetailView: View {
 
         projectSettingsField(
           title: "GitHub profile",
-          description: "Pick the saved GitHub profile this repo should use for remote Git operations.",
+          help: "Pick the saved GitHub profile this repo should use for remote Git operations.",
           footnote: selectedGitSummary
         ) {
           Menu {
@@ -919,17 +916,12 @@ struct ProjectDetailView: View {
   private var linearRoutingSheet: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 20) {
-        VStack(alignment: .leading, spacing: 6) {
-          Text("Linear routing")
-            .font(.system(size: 22, weight: .semibold))
-          Text("Choose which saved Linear account and projects this repo uses. Sync actions stay in Tickets.")
-            .font(.system(size: 13, weight: .medium))
-            .foregroundStyle(.secondary)
-        }
+        Text("Linear routing")
+          .font(.system(size: 22, weight: .semibold))
 
         routingSheetSection(
           title: "Saved profile",
-          description: "Choose the saved Linear profile Hack should use for this repo."
+          help: "Choose which saved Linear profile this repo routes through."
         ) {
           if hasConfiguredLinearProfile {
             projectSettingsControlGroup(footnote: selectedLinearProfileSummary) {
@@ -995,9 +987,6 @@ struct ProjectDetailView: View {
             }
           } else {
             VStack(alignment: .leading, spacing: 10) {
-              Text("Connect a Linear provider account before binding routes for this repo.")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(.secondary)
               Button("Connect Linear") {
                 NotificationCenter.default.post(
                   name: .hackSettingsRequested,
@@ -1010,111 +999,49 @@ struct ProjectDetailView: View {
           }
         }
 
-        routingSheetSection(
-          title: "Default project route",
-          description: "This is the primary Linear project for pull, push, and review."
-        ) {
-          projectSettingsControlGroup(footnote: selectedLinearProjectSummary) {
-            VStack(alignment: .leading, spacing: 10) {
-              projectSettingsFieldLabel("Primary route")
-              projectSettingsControlShell(maxWidth: 360) {
-                if linearProjectOptions.isEmpty {
-                  projectSettingsMenuLabel("Unbound", isDisabled: true)
-                    .accessibilityLabel("Default project route")
-                } else {
-                  Menu {
-                    Button {
-                      guard !selectedLinearProjectId.isEmpty else {
-                        return
-                      }
-                      selectedLinearProjectId = ""
-                      guard !executionTargetLoading else {
-                        return
-                      }
-                      Task { await persistLinearProjectBindingSelection() }
-                    } label: {
-                      if selectedLinearProjectId.isEmpty {
-                        Label("Unbound", systemImage: "checkmark")
-                      } else {
-                        Text("Unbound")
-                      }
-                    }
-                    ForEach(linearProjectOptions) { linearProject in
+        if hasConfiguredLinearProfile {
+          routingSheetSection(
+            title: "Default project route",
+            help: "This is the primary Linear project for pull, push, and review."
+          ) {
+            projectSettingsControlGroup(footnote: selectedLinearProjectSummary) {
+              VStack(alignment: .leading, spacing: 10) {
+                projectSettingsFieldLabel("Primary route")
+                projectSettingsControlShell(maxWidth: 360) {
+                  if linearProjectOptions.isEmpty {
+                    projectSettingsStaticValue("No projects available")
+                      .accessibilityLabel("Default project route")
+                  } else {
+                    Menu {
                       Button {
-                        guard selectedLinearProjectId != linearProject.id else {
+                        guard !selectedLinearProjectId.isEmpty else {
                           return
                         }
-                        selectedLinearProjectId = linearProject.id
+                        selectedLinearProjectId = ""
                         guard !executionTargetLoading else {
                           return
                         }
                         Task { await persistLinearProjectBindingSelection() }
                       } label: {
-                        let label = linearProjectMenuLabel(linearProject)
-                        if selectedLinearProjectId == linearProject.id {
-                          Label(label, systemImage: "checkmark")
+                        if selectedLinearProjectId.isEmpty {
+                          Label("Unbound", systemImage: "checkmark")
                         } else {
-                          Text(label)
+                          Text("Unbound")
                         }
                       }
-                    }
-                  } label: {
-                    projectSettingsMenuLabel(selectedLinearProjectSummary)
-                  }
-                  .buttonStyle(.plain)
-                  .accessibilityLabel("Default project route")
-                }
-              }
-
-              HStack(alignment: .center, spacing: 12) {
-                if !linearBoundProjectId.isEmpty {
-                  Button("Clear") {
-                    Task { await clearLinearProjectBinding() }
-                  }
-                  .adaptiveToolbarButton()
-                }
-                Spacer()
-              }
-            }
-          }
-
-          if let defaultTarget = defaultLinearRouteTarget {
-            linearScopeRouteRow(target: defaultTarget, isDefault: true)
-          }
-        }
-
-        routingSheetSection(
-          title: "Additional project routes",
-          description: "Link extra Linear projects when this repo needs review or autosync coverage beyond the default project route."
-        ) {
-          if linearAdditionalProjects.isEmpty {
-            Text("No additional linked projects.")
-              .font(.system(size: 12, weight: .medium))
-              .foregroundStyle(.secondary)
-          } else {
-            VStack(alignment: .leading, spacing: 8) {
-              ForEach(linearAdditionalProjects) { target in
-                linearScopeRouteRow(target: target, isDefault: false)
-              }
-            }
-          }
-
-          projectSettingsControlGroup(footnote: additionalLinearProjectsSummary) {
-            VStack(alignment: .leading, spacing: 10) {
-              projectSettingsFieldLabel("Add linked project")
-              HStack(spacing: 8) {
-                projectSettingsControlShell(maxWidth: 360) {
-                  if availableAdditionalLinearProjects.isEmpty {
-                    projectSettingsMenuLabel("Choose project", isDisabled: true)
-                      .accessibilityLabel("Add linked project")
-                  } else {
-                    Menu {
-                      ForEach(availableAdditionalLinearProjects) { linearProject in
+                      ForEach(linearProjectOptions) { linearProject in
                         Button {
-                          selectedAdditionalLinearProjectId = linearProject.id
+                          guard selectedLinearProjectId != linearProject.id else {
+                            return
+                          }
+                          selectedLinearProjectId = linearProject.id
+                          guard !executionTargetLoading else {
+                            return
+                          }
+                          Task { await persistLinearProjectBindingSelection() }
                         } label: {
                           let label = linearProjectMenuLabel(linearProject)
-                          if selectedAdditionalLinearProjectId == linearProject.id {
+                          if selectedLinearProjectId == linearProject.id {
                             Label(label, systemImage: "checkmark")
                           } else {
                             Text(label)
@@ -1122,28 +1049,87 @@ struct ProjectDetailView: View {
                         }
                       }
                     } label: {
-                      projectSettingsMenuLabel(
-                        additionalProjectMenuLabel(
-                          selectedAdditionalLinearProjectId
-                        )
-                      )
+                      projectSettingsMenuLabel(selectedLinearProjectSummary)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Add linked project")
+                    .accessibilityLabel("Default project route")
                   }
                 }
 
-                Button("Add") {
-                  Task { await persistAdditionalLinearProjectSelection() }
+                if !linearBoundProjectId.isEmpty {
+                  Button("Clear") {
+                    Task { await clearLinearProjectBinding() }
+                  }
+                  .adaptiveToolbarButton()
                 }
-                .adaptiveToolbarButton()
-                .disabled(
-                  selectedAdditionalLinearProjectId
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                    .isEmpty
-                )
+              }
+            }
+            if let defaultTarget = defaultLinearRouteTarget {
+              linearScopeRouteRow(target: defaultTarget, isDefault: true)
+            }
+          }
 
-                Spacer()
+          routingSheetSection(
+            title: "Additional project routes",
+            help: "Link extra Linear projects when this repo needs review or autosync coverage beyond the default project route."
+          ) {
+            if linearAdditionalProjects.isEmpty {
+              Text("No additional linked projects.")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+            } else {
+              VStack(alignment: .leading, spacing: 8) {
+                ForEach(linearAdditionalProjects) { target in
+                  linearScopeRouteRow(target: target, isDefault: false)
+                }
+              }
+            }
+            projectSettingsControlGroup(footnote: additionalLinearProjectsSummary) {
+              VStack(alignment: .leading, spacing: 10) {
+                projectSettingsFieldLabel("Add linked project")
+                HStack(spacing: 8) {
+                  projectSettingsControlShell(maxWidth: 360) {
+                    if availableAdditionalLinearProjects.isEmpty {
+                      projectSettingsStaticValue("No more projects available")
+                        .accessibilityLabel("Add linked project")
+                    } else {
+                      Menu {
+                        ForEach(availableAdditionalLinearProjects) { linearProject in
+                          Button {
+                            selectedAdditionalLinearProjectId = linearProject.id
+                          } label: {
+                            let label = linearProjectMenuLabel(linearProject)
+                            if selectedAdditionalLinearProjectId == linearProject.id {
+                              Label(label, systemImage: "checkmark")
+                            } else {
+                              Text(label)
+                            }
+                          }
+                        }
+                      } label: {
+                        projectSettingsMenuLabel(
+                          additionalProjectMenuLabel(
+                            selectedAdditionalLinearProjectId
+                          )
+                        )
+                      }
+                      .buttonStyle(.plain)
+                      .accessibilityLabel("Add linked project")
+                    }
+                  }
+
+                  Button("Add") {
+                    Task { await persistAdditionalLinearProjectSelection() }
+                  }
+                  .adaptiveToolbarButton()
+                  .disabled(
+                    selectedAdditionalLinearProjectId
+                      .trimmingCharacters(in: .whitespacesAndNewlines)
+                      .isEmpty
+                  )
+
+                  Spacer()
+                }
               }
             }
           }
@@ -1231,16 +1217,12 @@ struct ProjectDetailView: View {
 
   private func projectSettingsField<Content: View>(
     title: String,
-    description: String,
+    help: String? = nil,
     footnote: String,
     @ViewBuilder content: () -> Content
   ) -> some View {
     VStack(alignment: .leading, spacing: 10) {
-      Text(title)
-        .font(.system(size: 13, weight: .semibold))
-      Text(description)
-        .font(.system(size: 12, weight: .medium))
-        .foregroundStyle(.secondary)
+      projectSettingsFieldLabel(title, help: help)
       projectSettingsControlShell(maxWidth: 360) {
         content()
       }
@@ -1258,11 +1240,19 @@ struct ProjectDetailView: View {
     }
   }
 
-  private func projectSettingsFieldLabel(_ text: String) -> some View {
-    Text(text)
-      .font(.system(size: 11, weight: .semibold))
-      .foregroundStyle(.secondary)
-      .textCase(.uppercase)
+  private func projectSettingsFieldLabel(_ text: String, help: String? = nil) -> some View {
+    HStack(alignment: .center, spacing: 6) {
+      Text(text)
+        .font(.system(size: 11, weight: .semibold))
+        .foregroundStyle(.secondary)
+        .textCase(.uppercase)
+      if let help, !help.isEmpty {
+        Image(systemName: "info.circle")
+          .font(.system(size: 11, weight: .semibold))
+          .foregroundStyle(.tertiary)
+          .help(help)
+      }
+    }
   }
 
   private func projectSettingsMenuLabel(
@@ -1281,6 +1271,13 @@ struct ProjectDetailView: View {
     }
     .frame(maxWidth: .infinity, alignment: .leading)
     .contentShape(Rectangle())
+  }
+
+  private func projectSettingsStaticValue(_ text: String) -> some View {
+    Text(text)
+      .font(.system(size: 13, weight: .semibold))
+      .foregroundStyle(.secondary)
+      .frame(maxWidth: .infinity, alignment: .leading)
   }
 
   private func projectSettingsControlShell<Content: View>(
@@ -1317,16 +1314,19 @@ struct ProjectDetailView: View {
 
   private func routingSheetSection<Content: View>(
     title: String,
-    description: String,
+    help: String? = nil,
     @ViewBuilder content: () -> Content
   ) -> some View {
     VStack(alignment: .leading, spacing: 12) {
-      VStack(alignment: .leading, spacing: 4) {
+      HStack(alignment: .center, spacing: 6) {
         Text(title)
           .font(.system(size: 15, weight: .semibold))
-        Text(description)
-          .font(.system(size: 12, weight: .medium))
-          .foregroundStyle(.secondary)
+        if let help, !help.isEmpty {
+          Image(systemName: "info.circle")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(.tertiary)
+            .help(help)
+        }
       }
 
       content()
@@ -1871,8 +1871,8 @@ struct ProjectDetailView: View {
         }
         .disabled(isLinearAutosyncBusy(for: normalizedTarget))
 
-        Menu {
-          if !isDefault {
+        if !isDefault {
+          Menu {
             Button("Make default") {
               Task { await makeAdditionalLinearProjectDefault(normalizedTarget) }
             }
@@ -1881,11 +1881,11 @@ struct ProjectDetailView: View {
             } label: {
               Text("Remove")
             }
+          } label: {
+            Label("Actions", systemImage: "ellipsis.circle")
           }
-        } label: {
-          Label("Actions", systemImage: "ellipsis.circle")
+          .buttonStyle(PressableIconButtonStyle())
         }
-        .buttonStyle(PressableIconButtonStyle())
       }
 
       HStack(spacing: 8) {

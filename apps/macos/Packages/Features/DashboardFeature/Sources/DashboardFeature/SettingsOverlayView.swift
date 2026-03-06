@@ -147,6 +147,9 @@ struct SettingsOverlayView: View {
     .onExitCommand {
       onClose()
     }
+    .task {
+      await model.refreshHackAccountState(force: false, updateErrorMessage: false)
+    }
   }
 
   private var topBar: some View {
@@ -224,7 +227,7 @@ struct SettingsOverlayView: View {
     Group {
       switch selection {
       case .account:
-        AccountSettingsView(selection: $selection)
+        AccountSettingsView()
       case .preferences:
         PreferencesSettingsView()
       case .updates:
@@ -407,7 +410,7 @@ private struct UpdatesSettingsView: View {
 struct SettingsSectionHeader: View {
   let breadcrumb: String
   let title: String
-  let subtitle: String
+  let subtitle: String?
 
   var body: some View {
     VStack(alignment: .leading, spacing: 6) {
@@ -416,16 +419,17 @@ struct SettingsSectionHeader: View {
         .foregroundStyle(.secondary)
       Text(title)
         .font(.mono(.headline, weight: .semibold))
-      Text(subtitle)
-        .font(.mono(.caption))
-        .foregroundStyle(.secondary)
+      if let subtitle, !subtitle.isEmpty {
+        Text(subtitle)
+          .font(.mono(.caption))
+          .foregroundStyle(.secondary)
+      }
     }
   }
 }
 
 private struct AccountSettingsView: View {
   @Environment(DashboardModel.self) private var model
-  @Binding var selection: SettingsSidebarItem
 
   var body: some View {
     ScrollView {
@@ -433,75 +437,14 @@ private struct AccountSettingsView: View {
         SettingsSectionHeader(
           breadcrumb: "Settings / Account",
           title: "Hack account",
-          subtitle: "Sign in to Hack for shared remote features. Local-only workflows still work without an account."
+          subtitle: nil
         )
         HackAccountSettingsCard(
           state: model.hackAccountState,
           isLoading: model.isLoadingHackAccountState
         )
-        GlassCard(title: "Connected services", systemImage: "link.badge.plus") {
-          VStack(alignment: .leading, spacing: 12) {
-            integrationShortcutRow(
-              item: .linear,
-              title: "Linear",
-              subtitle: "Shared provider accounts, routing defaults, and sync policy."
-            )
-            Divider()
-              .opacity(0.2)
-            integrationShortcutRow(
-              item: .github,
-              title: "GitHub",
-              subtitle: "Shared provider accounts, PR automation routing, and app installs."
-            )
-            Divider()
-              .opacity(0.2)
-            integrationShortcutRow(
-              item: .cloudflare,
-              title: "Cloudflare",
-              subtitle: "Tunnel connectivity and deployment access."
-            )
-            Divider()
-              .opacity(0.2)
-            integrationShortcutRow(
-              item: .railway,
-              title: "Railway",
-              subtitle: "Service bootstrap defaults and provider access."
-            )
-            Divider()
-              .opacity(0.2)
-            integrationShortcutRow(
-              item: .tailscale,
-              title: "Tailscale",
-              subtitle: "Tailnet connectivity and auth key management."
-            )
-          }
-        }
       }
       .padding(24)
-    }
-    .task {
-      await model.refreshHackAccountState(force: false, updateErrorMessage: false)
-    }
-  }
-
-  private func integrationShortcutRow(
-    item: SettingsSidebarItem,
-    title: String,
-    subtitle: String
-  ) -> some View {
-    HStack(alignment: .center, spacing: 12) {
-      VStack(alignment: .leading, spacing: 3) {
-        Text(title)
-          .font(.mono(.subheadline, weight: .semibold))
-        Text(subtitle)
-          .font(.mono(.caption))
-          .foregroundStyle(.secondary)
-      }
-      Spacer()
-      Button("Open") {
-        selection = item
-      }
-      .adaptiveToolbarButton()
     }
   }
 }
@@ -1963,11 +1906,6 @@ private struct RailwayExtensionSettingsView: View {
               .font(.mono(.caption))
               .foregroundStyle(.secondary)
           }
-          if let lastDiagnosticsRefreshAt {
-            Text("Last checked \(lastDiagnosticsRefreshAt.formatted(date: .abbreviated, time: .shortened))")
-              .font(.mono(.caption2))
-              .foregroundStyle(.tertiary)
-          }
           if let error = diagnostics?.error, !error.isEmpty {
             Text(error)
               .font(.mono(.caption))
@@ -1975,13 +1913,6 @@ private struct RailwayExtensionSettingsView: View {
           }
 
           HStack(spacing: 10) {
-            Button {
-              Task { await refreshRailwayDiagnostics() }
-            } label: {
-              Label("Refresh status", systemImage: "arrow.clockwise")
-            }
-            .adaptiveToolbarButtonProminent()
-
             Button {
               openTailscaleSettings()
             } label: {
@@ -2062,13 +1993,15 @@ private struct RailwayExtensionSettingsView: View {
               .adaptiveToolbarButtonProminent()
               .disabled(isSavingConfig || isBootstrapping)
 
-              Button {
-                Task { await bootstrapRailwayNode() }
-              } label: {
-                Label("Bootstrap node now", systemImage: "play.fill")
+              if railwayInstalled && railwayAuthenticated && canBootstrapRailwayNode {
+                Button {
+                  Task { await bootstrapRailwayNode() }
+                } label: {
+                  Label("Bootstrap node now", systemImage: "play.fill")
+                }
+                .adaptiveToolbarButton()
+                .disabled(isBootstrapping)
               }
-              .adaptiveToolbarButton()
-              .disabled(!canBootstrapRailwayNode || isBootstrapping)
 
               Button {
                 openGlobalCommandInTerminalPanel(
@@ -2215,6 +2148,9 @@ private struct RailwayExtensionSettingsView: View {
   }
 
   private var canBootstrapRailwayNode: Bool {
+    if !railwayInstalled || !railwayAuthenticated {
+      return false
+    }
     if railwayPrivate, !privateBootstrapReady {
       return false
     }
@@ -2931,7 +2867,7 @@ private struct LinearExtensionSettingsView: View {
         SettingsSectionHeader(
           breadcrumb: "Settings / Linear",
           title: "Linear",
-          subtitle: "Connect accounts, choose a default routing profile, and tune sync behavior."
+          subtitle: nil
         )
         GlassCard(title: "Extension status", systemImage: "line.3.horizontal.decrease.circle") {
           HStack(alignment: .center, spacing: 8) {
@@ -2961,19 +2897,10 @@ private struct LinearExtensionSettingsView: View {
                 .controlSize(.small)
             }
           }
-
-          if let lastDiagnosticsRefreshAt {
-            Text("Last checked \(lastDiagnosticsRefreshAt.formatted(date: .abbreviated, time: .shortened))")
-              .font(.mono(.caption2))
-              .foregroundStyle(.tertiary)
-          }
         }
 
         GlassCard(title: "Accounts", systemImage: "point.3.connected.trianglepath.dotted") {
           HStack(alignment: .center, spacing: 10) {
-            Text("Saved profiles decide which Linear account a project uses.")
-              .font(.mono(.caption))
-              .foregroundStyle(.secondary)
             Spacer()
             if model.hackAccountState?.authenticated == true {
               Button {
@@ -2991,12 +2918,6 @@ private struct LinearExtensionSettingsView: View {
               }
               .adaptiveToolbarButtonProminent()
             }
-          }
-
-          if model.hackAccountState?.authenticated != true {
-            Text("Sign in to Hack to connect shared accounts.")
-              .font(.mono(.caption))
-              .foregroundStyle(.secondary)
           }
 
           if isAuthenticating {
@@ -3022,7 +2943,6 @@ private struct LinearExtensionSettingsView: View {
                 let profileStatus = profileStatusById[profile.id]
                 let accountLabel = linearAccountLabel(profile: profile, status: profileStatus)
                 let accountEmail = linearAccountEmail(profile: profile, status: profileStatus)
-                let accountId = linearAccountId(profile: profile, status: profileStatus)
                 VStack(alignment: .leading, spacing: 6) {
                   HStack(spacing: 8) {
                     Text(accountLabel ?? profile.id)
@@ -3039,63 +2959,49 @@ private struct LinearExtensionSettingsView: View {
                       }
                       .adaptiveToolbarButton()
                     }
-                    Button {
-                      Task {
-                        await reconnectLinearProfile(
-                          profile.id,
-                          setDefault: profile.isDefault
-                        )
+                    if model.hackAccountState?.authenticated == true {
+                      Button {
+                        Task {
+                          await reconnectLinearProfile(
+                            profile.id,
+                            setDefault: profile.isDefault
+                          )
+                        }
+                      } label: {
+                        Label("Reconnect", systemImage: "arrow.clockwise.circle")
                       }
-                    } label: {
-                      Label("Reconnect", systemImage: "arrow.clockwise.circle")
+                      .adaptiveToolbarButtonProminent()
+                      .disabled(
+                        isAuthenticating ||
+                          disconnectingLinearProfiles.contains(profile.id)
+                      )
+                      Button(role: .destructive) {
+                        Task { await disconnectLinearProfile(profile.id) }
+                      } label: {
+                        Label("Disconnect", systemImage: "trash")
+                      }
+                      .adaptiveToolbarButton()
+                      .disabled(
+                        isAuthenticating ||
+                          disconnectingLinearProfiles.contains(profile.id)
+                      )
                     }
-                    .adaptiveToolbarButtonProminent()
-                    .disabled(
-                      isAuthenticating ||
-                        disconnectingLinearProfiles.contains(profile.id)
-                    )
-                    Button(role: .destructive) {
-                      Task { await disconnectLinearProfile(profile.id) }
-                    } label: {
-                      Label("Disconnect", systemImage: "trash")
-                    }
-                    .adaptiveToolbarButton()
-                    .disabled(
-                      isAuthenticating ||
-                        disconnectingLinearProfiles.contains(profile.id)
-                    )
                   }
 
-                  Text("profile id: \(profile.id)")
-                    .font(.mono(.caption2))
-                    .foregroundStyle(.secondary)
-                  if let accountLabel, !accountLabel.isEmpty {
-                    Text("account: \(accountLabel)")
-                      .font(.mono(.caption2))
-                      .foregroundStyle(.secondary)
-                  }
                   if let accountEmail, !accountEmail.isEmpty {
-                    Text("email: \(accountEmail)")
+                    Text(accountEmail)
                       .font(.mono(.caption2))
                       .foregroundStyle(.secondary)
                       .textSelection(.enabled)
                   }
-                  Text("auth: \(profile.authRef) • service: \(profile.service)")
+                  Text("Profile \(profile.id)")
                     .font(.mono(.caption2))
-                    .foregroundStyle(.secondary)
-                  Text("api: \(profile.apiUrl)")
-                    .font(.mono(.caption2))
-                    .foregroundStyle(.secondary)
-                  if let accountId, !accountId.isEmpty {
-                    Text("account id: \(accountId)")
-                      .font(.mono(.caption2))
-                      .foregroundStyle(.tertiary)
-                  }
+                    .foregroundStyle(.tertiary)
                   if let profileStatus,
                     let tokenExpiresAt = profileStatus.tokenExpiresAt,
                     !tokenExpiresAt.isEmpty
                   {
-                    Text("token expires: \(tokenExpiresAt)")
+                    Text("Token expires \(tokenExpiresAt)")
                       .font(.mono(.caption2))
                       .foregroundStyle(.tertiary)
                   }
@@ -3106,123 +3012,72 @@ private struct LinearExtensionSettingsView: View {
                 }
               }
             }
-            Text(
-              "Disconnect removes the stored token, keeps the profile record for reconnect later, and leaves any existing project routing in place until you switch it."
-            )
-              .font(.mono(.caption2))
-              .foregroundStyle(.tertiary)
           }
         }
 
         GlassCard(title: "Sync fields", systemImage: "arrow.triangle.branch") {
           VStack(alignment: .leading, spacing: 12) {
-            Text(linearSyncPolicySummary)
-              .font(.mono(.caption))
-              .foregroundStyle(.secondary)
-            Text("Manual sync stays the default. These toggles control which fields Hack will translate when you run sync.")
-              .font(.mono(.caption))
-              .foregroundStyle(.secondary)
-
-            VStack(alignment: .leading, spacing: 10) {
-              Toggle("Sync labels", isOn: $syncLabels)
-                .toggleStyle(.switch)
-                .onChange(of: syncLabels) { _, newValue in
-                  guard !suppressSyncToggleChange else { return }
-                  Task {
-                    await saveLinearSyncToggle(
-                      key: "labels",
-                      value: newValue,
-                      successMessage: newValue ? "Linear label sync enabled." : "Linear label sync disabled."
-                    )
-                  }
-                }
-              Text(
-                "Translate Linear labels and Hack categories during manual sync. Review is still needed when names diverge or one side has no clean parallel."
+            syncToggleRow(
+              title: "Sync labels",
+              help: "Translate Linear labels and Hack categories during manual sync.",
+              isOn: $syncLabels
+            ) { newValue in
+              await saveLinearSyncToggle(
+                key: "labels",
+                value: newValue,
+                successMessage: newValue ? "Linear label sync enabled." : "Linear label sync disabled."
               )
-              .font(.mono(.caption2))
-              .foregroundStyle(.tertiary)
             }
-
-            VStack(alignment: .leading, spacing: 10) {
-              Toggle("Sync statuses", isOn: $syncStatuses)
-                .toggleStyle(.switch)
-                .onChange(of: syncStatuses) { _, newValue in
-                  guard !suppressSyncToggleChange else { return }
-                  Task {
-                    await saveLinearSyncToggle(
-                      key: "statuses",
-                      value: newValue,
-                      successMessage: newValue ? "Linear status sync enabled." : "Linear status sync disabled."
-                    )
-                  }
-                }
-              Text(
-                "Translate status/state when both systems expose a matching workflow step. Conflicts on origin-owned status stay review-needed instead of auto-overwriting."
+            syncToggleRow(
+              title: "Sync statuses",
+              help: "Translate workflow state when both sides expose a matching status.",
+              isOn: $syncStatuses
+            ) { newValue in
+              await saveLinearSyncToggle(
+                key: "statuses",
+                value: newValue,
+                successMessage: newValue ? "Linear status sync enabled." : "Linear status sync disabled."
               )
-              .font(.mono(.caption2))
-              .foregroundStyle(.tertiary)
             }
-
-            VStack(alignment: .leading, spacing: 10) {
-              Toggle("Sync dependencies", isOn: $syncDependencies)
-                .toggleStyle(.switch)
-                .onChange(of: syncDependencies) { _, newValue in
-                  guard !suppressSyncToggleChange else { return }
-                  Task {
-                    await saveLinearSyncToggle(
-                      key: "dependencies",
-                      value: newValue,
-                      successMessage: newValue ? "Linear dependency sync enabled." : "Linear dependency sync disabled."
-                    )
-                  }
-                }
-              Text(
-                "Translate dependency and sub-issue style relationships when the counterpart ticket exists. Missing or ambiguous links stay review-needed."
+            syncToggleRow(
+              title: "Sync dependencies",
+              help: "Translate dependency and sub-issue style relationships when the counterpart ticket exists.",
+              isOn: $syncDependencies
+            ) { newValue in
+              await saveLinearSyncToggle(
+                key: "dependencies",
+                value: newValue,
+                successMessage: newValue ? "Linear dependency sync enabled." : "Linear dependency sync disabled."
               )
-              .font(.mono(.caption2))
-              .foregroundStyle(.tertiary)
             }
-
-            VStack(alignment: .leading, spacing: 10) {
-              Toggle("Sync project mapping", isOn: $syncProjects)
-                .toggleStyle(.switch)
-                .onChange(of: syncProjects) { _, newValue in
-                  guard !suppressSyncToggleChange else { return }
-                  Task {
-                    await saveLinearSyncToggle(
-                      key: "projects",
-                      value: newValue,
-                      successMessage: newValue ? "Linear project sync enabled." : "Linear project sync disabled."
-                    )
-                  }
-                }
-              Text(
-                "Allow Hack projects to read and write the paired Linear project binding. The account choice still comes from the global default or a per-project override."
+            syncToggleRow(
+              title: "Sync project mapping",
+              help: "Allow Hack projects to read and write the paired Linear project binding.",
+              isOn: $syncProjects
+            ) { newValue in
+              await saveLinearSyncToggle(
+                key: "projects",
+                value: newValue,
+                successMessage: newValue ? "Linear project sync enabled." : "Linear project sync disabled."
               )
-              .font(.mono(.caption2))
-              .foregroundStyle(.tertiary)
             }
-
-            InlineCallout(
-              tone: .warn,
-              title: "Review still needed",
-              message: linearSyncReviewSummary,
-              actions: []
-            )
+            HStack(alignment: .center, spacing: 6) {
+              Text("Review still stays manual")
+                .font(.mono(.caption2))
+                .foregroundStyle(.secondary)
+              Image(systemName: "info.circle")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.tertiary)
+                .help(linearSyncReviewSummary)
+              Spacer()
+            }
           }
         }
 
         GlassCard(title: "Assignee mapping", systemImage: "person.crop.rectangle.stack") {
           VStack(alignment: .leading, spacing: 12) {
-            InlineCallout(
-              tone: .neutral,
-              title: "Best-effort assignee translation",
-              message: "Use explicit mappings when Hack assignee names do not line up cleanly with Linear users. Sync uses the profile and optional team scope here before it falls back to fuzzy email/name matching.",
-              actions: []
-            )
-
             if linearProfiles.isEmpty {
-              Text("Connect a Linear provider account before managing assignee mappings.")
+              Text("Connect an account to add assignee mappings.")
                 .font(.mono(.caption))
                 .foregroundStyle(.secondary)
             } else {
@@ -3250,14 +3105,6 @@ private struct LinearExtensionSettingsView: View {
                   }
 
                   Spacer()
-
-                  Button {
-                    Task { await refreshLinearAssigneeMappings() }
-                  } label: {
-                    Label("Reload", systemImage: "arrow.clockwise")
-                  }
-                  .adaptiveToolbarButton()
-                  .disabled(isLoadingAssigneeMappings || isSavingAssigneeMapping)
 
                   if isLoadingAssigneeMappings || isSavingAssigneeMapping {
                     ProgressView()
@@ -3344,10 +3191,6 @@ private struct LinearExtensionSettingsView: View {
                   TextField("Linear user email", text: $assigneeMappingLinearUserEmail)
                     .textFieldStyle(.roundedBorder)
 
-                  Text("Provide at least one Linear user field. Email is usually the safest stable fallback when user ids are not obvious.")
-                    .font(.mono(.caption2))
-                    .foregroundStyle(.tertiary)
-
                   HStack(spacing: 8) {
                     Button {
                       Task { await saveLinearAssigneeMapping() }
@@ -3382,7 +3225,6 @@ private struct LinearExtensionSettingsView: View {
     }
     .task {
       await loadConfigFromDisk()
-      await model.refreshHackAccountState(force: false, updateErrorMessage: false)
     }
     .onChange(of: assigneeMappingProfile) { _, _ in
       Task { await refreshLinearAssigneeMappings() }
@@ -3398,6 +3240,29 @@ private struct LinearExtensionSettingsView: View {
       return trimmed
     }
     return diagnostics?.defaultProfile ?? ""
+  }
+
+  private func syncToggleRow(
+    title: String,
+    help: String,
+    isOn: Binding<Bool>,
+    save: @escaping @MainActor (Bool) async -> Void
+  ) -> some View {
+    HStack(alignment: .center, spacing: 10) {
+      Toggle(title, isOn: isOn)
+        .toggleStyle(.switch)
+        .onChange(of: isOn.wrappedValue) { _, newValue in
+          guard !suppressSyncToggleChange else { return }
+          Task {
+            await save(newValue)
+          }
+        }
+      Image(systemName: "info.circle")
+        .font(.system(size: 11, weight: .semibold))
+        .foregroundStyle(.tertiary)
+        .help(help)
+      Spacer()
+    }
   }
 
   private var linearProfiles: [LinearProfileSummary] {
@@ -3938,7 +3803,7 @@ private struct GitHubExtensionSettingsView: View {
         SettingsSectionHeader(
           breadcrumb: "Settings / GitHub",
           title: "GitHub",
-          subtitle: "Connect accounts and app installs, then choose the default profile for automation."
+          subtitle: nil
         )
         GlassCard(title: "Extension status", systemImage: "chevron.left.forwardslash.chevron.right") {
           HStack(alignment: .center, spacing: 8) {
@@ -3967,12 +3832,6 @@ private struct GitHubExtensionSettingsView: View {
               ProgressView()
                 .controlSize(.small)
             }
-          }
-
-          if let lastDiagnosticsRefreshAt {
-            Text("Last checked \(lastDiagnosticsRefreshAt.formatted(date: .abbreviated, time: .shortened))")
-              .font(.mono(.caption2))
-              .foregroundStyle(.tertiary)
           }
         }
 
@@ -4018,9 +3877,6 @@ private struct GitHubExtensionSettingsView: View {
 
         GlassCard(title: "Accounts", systemImage: "person.2.badge.gearshape") {
           HStack(alignment: .center, spacing: 10) {
-            Text("Saved profiles decide which GitHub account or app install a project or node uses.")
-              .font(.mono(.caption))
-              .foregroundStyle(.secondary)
             Spacer()
             if model.hackAccountState?.authenticated == true {
               Button {
@@ -4038,12 +3894,6 @@ private struct GitHubExtensionSettingsView: View {
               }
               .adaptiveToolbarButtonProminent()
             }
-          }
-
-          if model.hackAccountState?.authenticated != true {
-            Text("Sign in to Hack to connect shared accounts.")
-              .font(.mono(.caption))
-              .foregroundStyle(.secondary)
           }
 
           if isAuthenticating {
@@ -4079,10 +3929,6 @@ private struct GitHubExtensionSettingsView: View {
                   profile: profile,
                   status: profileStatus
                 )
-                let accountId = remoteAccountId(
-                  profile: profile,
-                  status: profileStatus
-                )
                 VStack(alignment: .leading, spacing: 6) {
                   HStack(spacing: 8) {
                     Text(accountHandle.map { "@\($0)" } ?? profile.id)
@@ -4101,55 +3947,36 @@ private struct GitHubExtensionSettingsView: View {
                     }
                     Spacer()
                     if !profile.isDefault {
-                      Button {
-                        Task { await saveGitHubDefaultProfile(profile.id) }
-                      } label: {
-                        Label("Set default", systemImage: "star")
+                      if !(profile.mode.lowercased() == "app" && profile.installationId?.isEmpty != false) {
+                        Button {
+                          Task { await saveGitHubDefaultProfile(profile.id) }
+                        } label: {
+                          Label("Set default", systemImage: "star")
+                        }
+                        .adaptiveToolbarButton()
                       }
-                      .adaptiveToolbarButton()
                     }
                   }
 
-                  Text("profile id: \(profile.id)")
-                    .font(.mono(.caption2))
-                    .foregroundStyle(.secondary)
                   if let accountHandle, !accountHandle.isEmpty {
                     let accountNameSuffix = accountName.map { " (\($0))" } ?? ""
-                    Text("account: @\(accountHandle)\(accountNameSuffix)")
+                    Text("@\(accountHandle)\(accountNameSuffix)")
                       .font(.mono(.caption2))
                       .foregroundStyle(.secondary)
                   }
-                  if profile.mode.lowercased() == "app" {
-                    Text(
-                      profile.installationId?.isEmpty == false
-                        ? "permissions: GitHub App installation scoped to selected repos/org"
-                        : "permissions: install the GitHub App to enable repo-scoped access"
-                    )
+                  Text("Profile \(profile.id)")
                     .font(.mono(.caption2))
-                    .foregroundStyle(.secondary)
-                  } else {
-                    Text("permissions: OAuth token scopes from connected account")
-                      .font(.mono(.caption2))
-                      .foregroundStyle(.secondary)
-                  }
-                  Text("auth: \(profile.authRef) • service: \(profile.service)")
-                    .font(.mono(.caption2))
-                    .foregroundStyle(.secondary)
-                  if let accountId, !accountId.isEmpty {
-                    Text("account id: \(accountId)")
-                      .font(.mono(.caption2))
-                      .foregroundStyle(.tertiary)
-                  }
+                    .foregroundStyle(.tertiary)
                   if let profileStatus,
                     let tokenExpiresAt = profileStatus.tokenExpiresAt,
                     !tokenExpiresAt.isEmpty
                   {
-                    Text("token expires: \(tokenExpiresAt)")
+                    Text("Token expires \(tokenExpiresAt)")
                       .font(.mono(.caption2))
                       .foregroundStyle(.tertiary)
                   }
                   if let installation = profile.installationId, !installation.isEmpty {
-                    Text("installation: \(installation)")
+                    Text("Installation \(installation)")
                       .font(.mono(.caption2))
                       .foregroundStyle(.tertiary)
                   }
@@ -4176,7 +4003,6 @@ private struct GitHubExtensionSettingsView: View {
     }
     .task {
       await loadConfigFromDisk()
-      await model.refreshHackAccountState(force: false, updateErrorMessage: false)
     }
     .onChange(of: model.githubOAuthDeepLinkContext) { _, deepLink in
       guard let deepLink else { return }

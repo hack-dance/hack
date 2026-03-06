@@ -118,48 +118,68 @@ struct TicketsView: View {
   }
 
   private var header: some View {
-    VStack(alignment: .leading, spacing: 12) {
+    VStack(alignment: .leading, spacing: 10) {
       HStack(alignment: .center, spacing: 12) {
         statusFilterMenu
         originFilterMenu
         searchField
-        if !linearRouteStatusLabel.isEmpty {
-          linearRouteStatusButton
-        }
-        if reviewQueueCount > 0 {
-          reviewQueueButton
-        }
         Spacer(minLength: 12)
         if let activeSyncAction {
           HStack(spacing: 8) {
             ProgressView()
               .controlSize(.small)
             Text(activeSyncAction.progressLabel)
-              .font(.mono(.caption))
+              .font(.system(size: 12, weight: .medium, design: .monospaced))
               .foregroundStyle(.secondary)
           }
         }
+        if reviewQueueCount > 0 {
+          reviewQueueButton
+        }
+        newTicketButton
+      }
+
+      HStack(alignment: .center, spacing: 10) {
+        linearSyncStatusRow
+        Spacer(minLength: 12)
+
+        Button {
+          requestBulkSyncConfirmation(.pullLinear)
+        } label: {
+          Label("Pull", systemImage: "arrow.down.left")
+        }
+        .adaptiveToolbarButtonProminent()
+        .disabled(!canSyncProjectFromLinear || isAnySyncInFlight)
+
+        Button {
+          requestBulkSyncConfirmation(.pushHack)
+        } label: {
+          Label("Push", systemImage: "arrow.up.right")
+        }
+        .adaptiveToolbarButton()
+        .disabled(!canSyncProjectToLinear || isAnySyncInFlight)
+
+        if hasAnyLinearAutosyncRoutes {
+          Button {
+            Task { await runProjectLinearAutosync() }
+          } label: {
+            Label("Run autosync", systemImage: "bolt.badge.clock")
+          }
+          .adaptiveToolbarButton()
+          .disabled(linearRouteStatus?.tokenResolved != true || isAnySyncInFlight)
+        }
+
+        Button("Routing") {
+          openProjectRouting()
+        }
+        .adaptiveToolbarButton()
+
         Menu {
           Button("Refresh") {
             Task { await refreshTickets() }
           }
           Button("Sync ticket ref store") {
             Task { await syncTickets() }
-          }
-          Divider()
-          Button("Pull Linear into tickets") {
-            requestBulkSyncConfirmation(.pullLinear)
-          }
-          .disabled(!canSyncProjectFromLinear || isAnySyncInFlight)
-          Button("Push Hack tickets to Linear") {
-            requestBulkSyncConfirmation(.pushHack)
-          }
-          .disabled(!canSyncProjectToLinear || isAnySyncInFlight)
-          if hasAnyLinearAutosyncRoutes {
-            Button("Run project autosync routes") {
-              Task { await runProjectLinearAutosync() }
-            }
-            .disabled(linearRouteStatus?.tokenResolved != true || isAnySyncInFlight)
           }
           if let selectedTicket {
             Divider()
@@ -190,17 +210,13 @@ struct TicketsView: View {
             openProjectRouting()
           }
         } label: {
-          ticketHeaderBadge(
-            title: "Sync",
-            systemImage: "arrow.triangle.branch",
-            tone: .secondary
-          )
+          Image(systemName: "ellipsis.circle")
+            .font(.system(size: 15, weight: .semibold))
+            .foregroundStyle(.secondary)
         }
-        .buttonStyle(.plain)
-        newTicketButton
+        .buttonStyle(PressableIconButtonStyle())
       }
 
-      linearSyncPolicyCallout
       loadNoticeCallout
     }
   }
@@ -252,25 +268,6 @@ struct TicketsView: View {
     return remaining.first
   }
 
-  private var linearRouteStatusLabel: String {
-    if linearRouteStatus?.tokenResolved != true {
-      return "Linear not connected"
-    }
-    if !linearRouteProjectName.isEmpty && linearAdditionalProjects.isEmpty {
-      return linearRouteProjectName
-    }
-    if !linearRouteProjectName.isEmpty {
-      return "\(linearRouteProjectName) + \(linearAdditionalProjects.count)"
-    }
-    if !linearRouteProjectId.isEmpty {
-      return linearRouteProjectId
-    }
-    if !linearRouteProfile.isEmpty {
-      return "Profile \(linearRouteProfile)"
-    }
-    return ""
-  }
-
   private var canSyncProjectFromLinear: Bool {
     linearRouteStatus?.tokenResolved == true && hasAnyLinearProjectRouting
   }
@@ -295,18 +292,6 @@ struct TicketsView: View {
   }
 
   @ViewBuilder
-  private var linearSyncPolicyCallout: some View {
-    if linearSyncPolicyTone == .warn {
-      InlineCallout(
-        tone: linearSyncPolicyTone,
-        title: "Linear sync policy",
-        message: linearSyncPolicyMessage,
-        actions: linearSyncPolicyActions
-      )
-    }
-  }
-
-  @ViewBuilder
   private var loadNoticeCallout: some View {
     if let loadNotice {
       InlineCallout(
@@ -318,47 +303,6 @@ struct TicketsView: View {
     }
   }
 
-  private var linearSyncPolicyTone: StatusTone {
-    if linearRouteStatus?.tokenResolved != true || !hasAnyLinearProjectRouting {
-      return .warn
-    }
-    return .neutral
-  }
-
-  private var linearSyncPolicyMessage: String {
-    if linearRouteStatus?.tokenResolved != true {
-      return "Connect a Linear account to pull issues and refresh linked tickets. Hack or Linear ownership decides which side wins when fields diverge."
-    }
-    if !hasAnyLinearProjectRouting {
-      return "This project needs a Linear route before bulk pull can target the right project. Comments stay append-only, and mergeable fields may still need review."
-    }
-    if !linearAdditionalProjects.isEmpty {
-      return "Bulk pull includes the default route plus \(linearAdditionalProjects.count) linked Linear project\(linearAdditionalProjects.count == 1 ? "" : "s"). Comments stay append-only, and mergeable fields may still need review."
-    }
-    return "Pull Linear when Linear owns the ticket. Push Hack when Hack owns the ticket and you want to publish it outward."
-  }
-
-  private var linearSyncPolicyActions: [InlineCalloutAction] {
-    if linearRouteStatus?.tokenResolved != true {
-      return [
-        InlineCalloutAction(label: "Linear settings", systemImage: "link.badge.plus") {
-          openLinearSettings()
-        },
-        InlineCalloutAction(label: "Project routing", systemImage: "slider.horizontal.3") {
-          openProjectRouting()
-        },
-      ]
-    }
-    if !hasAnyLinearProjectRouting {
-      return [
-        InlineCalloutAction(label: "Project routing", systemImage: "slider.horizontal.3") {
-          openProjectRouting()
-        }
-      ]
-    }
-    return []
-  }
-
   private var hasAnyLinearProjectRouting: Bool {
     if !linearRouteProjectId.isEmpty {
       return true
@@ -368,6 +312,71 @@ struct TicketsView: View {
 
   private var hasAnyLinearAutosyncRoutes: Bool {
     !linearAutosyncRouteKeys.isEmpty
+  }
+
+  private var linearSyncStatusRow: some View {
+    HStack(spacing: 8) {
+      Image(systemName: linearRouteStatus?.tokenResolved == true ? "point.3.connected.trianglepath.dotted" : "exclamationmark.triangle.fill")
+        .font(.system(size: 12, weight: .semibold))
+        .foregroundStyle(linearRouteStatus?.tokenResolved == true ? Color.secondary : Color.orange)
+
+      Text(linearSyncStatusSummary)
+        .font(.system(size: 12, weight: .medium))
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+
+      if hasAnyLinearAutosyncRoutes {
+        StatusPill(
+          text: "\(linearAutosyncRouteKeys.count) autosync",
+          tone: .good
+        )
+      }
+
+      if reviewQueueCount > 0 {
+        StatusPill(
+          text: reviewQueueCount == 1 ? "1 review" : "\(reviewQueueCount) reviews",
+          tone: .warn
+        )
+      }
+    }
+    .padding(.horizontal, 12)
+    .padding(.vertical, 9)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(
+      RoundedRectangle(cornerRadius: 14, style: .continuous)
+        .fill(colorScheme == .dark ? Color.white.opacity(0.06) : Color.white.opacity(0.86))
+        .overlay(
+          RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .stroke(
+              linearRouteStatus?.tokenResolved == true && hasAnyLinearProjectRouting
+                ? Color.black.opacity(colorScheme == .dark ? 0.0 : 0.06)
+                : Color.orange.opacity(colorScheme == .dark ? 0.32 : 0.22),
+              lineWidth: 1
+            )
+        )
+    )
+  }
+
+  private var linearSyncStatusSummary: String {
+    if linearRouteStatus?.tokenResolved != true {
+      return "Connect Linear to route this repo's tickets."
+    }
+    if !hasAnyLinearProjectRouting {
+      return "Choose a default Linear project for this repo."
+    }
+    if linearAdditionalProjects.isEmpty {
+      let defaultLabel = linearRouteProjectName.isEmpty ? linearRouteProjectId : linearRouteProjectName
+      return "\(linearProfileDisplayName) · \(defaultLabel)"
+    }
+    let defaultLabel = linearRouteProjectName.isEmpty ? linearRouteProjectId : linearRouteProjectName
+    return "\(linearProfileDisplayName) · \(defaultLabel) + \(linearAdditionalProjects.count)"
+  }
+
+  private var linearProfileDisplayName: String {
+    if !linearRouteProfile.isEmpty {
+      return linearRouteProfile
+    }
+    return "Inherited profile"
   }
 
   private var allLinearRouteTargets: [LinearProjectBindingTarget] {
@@ -480,21 +489,6 @@ struct TicketsView: View {
       ]
     }
     return []
-  }
-
-  private var linearRouteStatusButton: some View {
-    Button {
-      openProjectRouting()
-    } label: {
-      ticketHeaderBadge(
-        title: linearRouteStatusLabel,
-        systemImage: linearRouteStatus?.tokenResolved == true
-          ? "point.3.connected.trianglepath.dotted"
-          : "exclamationmark.triangle",
-        tone: linearRouteStatus?.tokenResolved == true ? .secondary : .orange
-      )
-    }
-    .buttonStyle(.plain)
   }
 
   private var reviewQueueButton: some View {
@@ -788,7 +782,7 @@ struct TicketsView: View {
         .adaptiveToolbarButtonProminent()
         .disabled(!canSyncProjectFromLinear || isAnySyncInFlight)
 
-        Button("Project routing") {
+        Button("Routing") {
           openProjectRouting()
         }
         .adaptiveToolbarButton()
@@ -2630,14 +2624,11 @@ struct TicketsView: View {
 
   private func openProjectRouting() {
     model.selectedItem = .project(project.id)
-    model.selectedProjectTab = .overview
     NotificationCenter.default.post(
-      name: .hackProjectNavigationRequested,
+      name: .hackProjectRoutingRequested,
       object: nil,
       userInfo: [
-        ProjectNavigationRequest.projectIdKey: project.id,
-        ProjectNavigationRequest.tabKey: ProjectTab.overview.rawValue,
-        ProjectNavigationRequest.sidebarKey: "remoteExecution",
+        ProjectRoutingRequest.projectIdKey: project.id
       ]
     )
   }

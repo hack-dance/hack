@@ -8,6 +8,7 @@ extension Notification.Name {
   public static let hackRefreshRequested = Notification.Name("hack.refresh.requested")
   public static let hackProjectNavigationRequested = Notification.Name("hack.projectNavigation.requested")
   public static let hackTicketReviewQueueRequested = Notification.Name("hack.ticketReviewQueue.requested")
+  public static let hackProjectRoutingRequested = Notification.Name("hack.projectRouting.requested")
 }
 
 enum ProjectNavigationRequest {
@@ -17,6 +18,10 @@ enum ProjectNavigationRequest {
 }
 
 enum TicketReviewQueueRequest {
+  static let projectIdKey = "projectId"
+}
+
+enum ProjectRoutingRequest {
   static let projectIdKey = "projectId"
 }
 
@@ -348,14 +353,12 @@ struct CommandPaletteView: View {
   }
 
   private func openProjectRouting(_ project: ProjectSummary) {
-    openProjectOverview(project)
+    model.selectedItem = .project(project.id)
     NotificationCenter.default.post(
-      name: .hackProjectNavigationRequested,
+      name: .hackProjectRoutingRequested,
       object: nil,
       userInfo: [
-        ProjectNavigationRequest.projectIdKey: project.id,
-        ProjectNavigationRequest.tabKey: ProjectTab.overview.rawValue,
-        ProjectNavigationRequest.sidebarKey: "remoteExecution",
+        ProjectRoutingRequest.projectIdKey: project.id
       ]
     )
   }

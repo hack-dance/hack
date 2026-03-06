@@ -13,7 +13,6 @@ public struct DashboardView: View {
   @State private var showTerminalDrawer = false
   @State private var showSettingsOverlay = false
   @State private var selectedSettingsItem: SettingsSidebarItem = .account
-  @State private var toolbarHackAccountState: HackAccountSettingsState? = nil
   @State private var terminalDrawerHeight: CGFloat = 360
   @State private var terminalDrawerInitialHeight: CGFloat? = nil
   @State private var terminalDrawerModel = TerminalDrawerModel(globalShellProject: Self.makeGlobalShellProject())
@@ -130,7 +129,7 @@ public struct DashboardView: View {
       .tuneWindowToolbar()
       .task {
         model.start()
-        await refreshToolbarHackAccountState()
+        await model.refreshHackAccountState(force: false, updateErrorMessage: false)
       }
       .onReceive(NotificationCenter.default.publisher(for: .hackCommandPaletteRequested)) { _ in
         showCommandPalette = true
@@ -186,7 +185,7 @@ public struct DashboardView: View {
       .onChange(of: showSettingsOverlay) { _, isVisible in
         guard isVisible else { return }
         Task {
-          await refreshToolbarHackAccountState()
+          await model.refreshHackAccountState(force: false, updateErrorMessage: false)
         }
       }
       .sheet(isPresented: $showCommandPalette) {
@@ -561,7 +560,7 @@ public struct DashboardView: View {
 
   private var toolbarAccountMenu: some View {
     Menu {
-      if let state = toolbarHackAccountState {
+      if let state = model.hackAccountState {
         if let title = toolbarAccountPrimaryLabel {
           Text(title)
         }
@@ -587,7 +586,7 @@ public struct DashboardView: View {
         if state.authenticated {
           Button {
             Task {
-              toolbarHackAccountState = await model.logoutHackAccount()
+              _ = await model.logoutHackAccount()
             }
           } label: {
             Label("Sign out", systemImage: "rectangle.portrait.and.arrow.right")
@@ -595,23 +594,25 @@ public struct DashboardView: View {
         } else {
           Button {
             Task {
-              toolbarHackAccountState = await model.loginHackAccount()
+              _ = await model.loginHackAccount()
             }
           } label: {
             Label("Sign in to Hack", systemImage: "person.badge.key")
           }
         }
+        Divider()
+      } else if model.isLoadingHackAccountState {
+        Text("Loading account…")
       } else {
         Button {
           Task {
-            await refreshToolbarHackAccountState()
+            _ = await model.loginHackAccount()
           }
         } label: {
-          Label("Refresh account state", systemImage: "arrow.clockwise")
+          Label("Sign in to Hack", systemImage: "person.badge.key")
         }
+        Divider()
       }
-
-      Divider()
 
       Button {
         openSettings(.runtime)
@@ -630,7 +631,7 @@ public struct DashboardView: View {
     }
     .menuStyle(.borderlessButton)
     .menuIndicator(.hidden)
-    .help(toolbarHackAccountState?.authenticated == true ? "Hack account" : "Hack account and app actions")
+    .help(model.hackAccountState?.authenticated == true ? "Hack account" : "Hack account and app actions")
   }
 
   private var toolbarAccountLabel: some View {
@@ -657,33 +658,33 @@ public struct DashboardView: View {
   }
 
   private var toolbarAccountPrimaryLabel: String? {
-    if let name = toolbarHackAccountState?.userDisplayName, !name.isEmpty {
+    if let name = model.hackAccountState?.userDisplayName, !name.isEmpty {
       return name
     }
-    if let email = toolbarHackAccountState?.userEmail, !email.isEmpty {
+    if let email = model.hackAccountState?.userEmail, !email.isEmpty {
       return email
     }
-    return toolbarHackAccountState?.authenticated == true ? "Hack account" : nil
+    return model.hackAccountState?.authenticated == true ? "Hack account" : nil
   }
 
   private var toolbarAccountSecondaryLabel: String? {
-    if let organization = toolbarHackAccountState?.organizationName, !organization.isEmpty {
-      if let team = toolbarHackAccountState?.teamName, !team.isEmpty {
+    if let organization = model.hackAccountState?.organizationName, !organization.isEmpty {
+      if let team = model.hackAccountState?.teamName, !team.isEmpty {
         return "\(organization) • \(team)"
       }
       return organization
     }
-    if toolbarHackAccountState?.authenticated == false {
+    if model.hackAccountState?.authenticated == false {
       return "Signed out"
     }
     return nil
   }
 
   private var toolbarAccountInitials: String? {
-    guard toolbarHackAccountState?.authenticated == true else {
+    guard model.hackAccountState?.authenticated == true else {
       return nil
     }
-    let source = toolbarHackAccountState?.userDisplayName ?? toolbarHackAccountState?.userEmail ?? ""
+    let source = model.hackAccountState?.userDisplayName ?? model.hackAccountState?.userEmail ?? ""
     let tokens = source
       .split(whereSeparator: { $0 == " " || $0 == "." || $0 == "@" || $0 == "_" || $0 == "-" })
       .prefix(2)
@@ -692,22 +693,18 @@ public struct DashboardView: View {
   }
 
   private var toolbarAvatarBackgroundColor: Color {
-    guard toolbarHackAccountState?.authenticated == true else {
+    guard model.hackAccountState?.authenticated == true else {
       return Color.primary.opacity(0.08)
     }
     return Color.accentColor.opacity(colorScheme == .dark ? 0.30 : 0.18)
   }
 
   private var toolbarAvatarForegroundColor: Color {
-    toolbarHackAccountState?.authenticated == true ? .accentColor : .secondary
+    model.hackAccountState?.authenticated == true ? .accentColor : .secondary
   }
 
   private var globalToggleMenuTitle: String {
     model.globalInfraRunning ? "Stop local runtime" : "Start local runtime"
-  }
-
-  private func refreshToolbarHackAccountState() async {
-    toolbarHackAccountState = await model.inspectHackAccountSettingsState()
   }
 
   private var footer: some View {

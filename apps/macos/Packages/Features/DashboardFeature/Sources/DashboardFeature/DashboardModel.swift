@@ -82,6 +82,8 @@ public final class DashboardModel {
   public private(set) var runtimeResetAt: String? = nil
   public private(set) var runtimeResetCount: Int? = nil
   public private(set) var lastUpdated: Date? = nil
+  public private(set) var hackAccountState: HackAccountSettingsState? = nil
+  public private(set) var isLoadingHackAccountState = false
   public var selectedItem: SidebarItem? = .home {
     didSet {
       handleSelectedItemChange(previous: oldValue, current: selectedItem)
@@ -101,6 +103,9 @@ public final class DashboardModel {
   private var lastSelectedProjectId: String? = nil
   private var refreshTask: Task<Void, Never>? = nil
   private var statusClearTask: Task<Void, Never>? = nil
+  private var lastHackAccountRefreshAt: Date? = nil
+
+  private static let hackAccountRefreshTTL: TimeInterval = 20
 
   public init(client: HackCLIClient, ticketsClient: HackCLIClient = HackCLIClient()) {
     self.client = client
@@ -172,8 +177,13 @@ public final class DashboardModel {
     async let projectsTask = fetchProjects()
     async let daemonTask = fetchDaemonStatus()
     async let globalTask = fetchGlobalStatus()
+    async let hackAccountTask: Void = refreshHackAccountState(
+      force: false,
+      updateErrorMessage: false
+    )
 
     let errors = await [projectsTask, daemonTask, globalTask].compactMap { $0 }
+    _ = await hackAccountTask
     if !errors.isEmpty {
       errorMessage = errors.joined(separator: "\n")
     }
@@ -665,12 +675,46 @@ public final class DashboardModel {
     }
   }
 
-  public func inspectHackAccountSettingsState() async -> HackAccountSettingsState? {
+  public func inspectHackAccountSettingsState(
+    force: Bool = false,
+    updateErrorMessage: Bool = true
+  ) async -> HackAccountSettingsState? {
+    await refreshHackAccountState(
+      force: force,
+      updateErrorMessage: updateErrorMessage
+    )
+    return hackAccountState
+  }
+
+  public func refreshHackAccountState(
+    force: Bool = false,
+    updateErrorMessage: Bool = false
+  ) async {
+    if !force,
+      let lastHackAccountRefreshAt,
+      let hackAccountState,
+      Date().timeIntervalSince(lastHackAccountRefreshAt) < Self.hackAccountRefreshTTL
+    {
+      _ = hackAccountState
+      return
+    }
+
+    guard !isLoadingHackAccountState else {
+      return
+    }
+
+    isLoadingHackAccountState = true
+    defer {
+      isLoadingHackAccountState = false
+    }
+
     do {
-      return try await client.inspectHackAccountSettingsState()
+      hackAccountState = try await client.inspectHackAccountSettingsState()
+      lastHackAccountRefreshAt = Date()
     } catch {
-      errorMessage = error.localizedDescription
-      return nil
+      if updateErrorMessage {
+        errorMessage = error.localizedDescription
+      }
     }
   }
 
@@ -682,7 +726,8 @@ public final class DashboardModel {
     guard didLogin == true else {
       return nil
     }
-    return await inspectHackAccountSettingsState()
+    await refreshHackAccountState(force: true, updateErrorMessage: true)
+    return hackAccountState
   }
 
   public func logoutHackAccount() async -> HackAccountSettingsState? {
@@ -693,7 +738,8 @@ public final class DashboardModel {
     guard didLogout == true else {
       return nil
     }
-    return await inspectHackAccountSettingsState()
+    await refreshHackAccountState(force: true, updateErrorMessage: true)
+    return hackAccountState
   }
 
   public func startGitHubOAuthFlow(

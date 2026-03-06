@@ -426,8 +426,6 @@ struct SettingsSectionHeader: View {
 private struct AccountSettingsView: View {
   @Environment(DashboardModel.self) private var model
   @Binding var selection: SettingsSidebarItem
-  @State private var hackAccountState: HackAccountSettingsState? = nil
-  @State private var isLoadingHackAccount = false
 
   var body: some View {
     ScrollView {
@@ -438,12 +436,9 @@ private struct AccountSettingsView: View {
           subtitle: "Sign in to Hack for shared remote features. Local-only workflows still work without an account."
         )
         HackAccountSettingsCard(
-          state: hackAccountState,
-          isLoading: isLoadingHackAccount,
-          providerName: nil
-        ) {
-          Task { await refreshHackAccountState() }
-        }
+          state: model.hackAccountState,
+          isLoading: model.isLoadingHackAccountState
+        )
         GlassCard(title: "Connected services", systemImage: "link.badge.plus") {
           VStack(alignment: .leading, spacing: 12) {
             integrationShortcutRow(
@@ -485,7 +480,7 @@ private struct AccountSettingsView: View {
       .padding(24)
     }
     .task {
-      await refreshHackAccountState()
+      await model.refreshHackAccountState(force: false, updateErrorMessage: false)
     }
   }
 
@@ -509,51 +504,25 @@ private struct AccountSettingsView: View {
       .adaptiveToolbarButton()
     }
   }
-
-  private func refreshHackAccountState() async {
-    isLoadingHackAccount = true
-    defer { isLoadingHackAccount = false }
-    hackAccountState = await model.inspectHackAccountSettingsState()
-  }
 }
 
 private struct HackAccountSettingsCard: View {
   @Environment(DashboardModel.self) private var model
   let state: HackAccountSettingsState?
   let isLoading: Bool
-  let providerName: String?
-  let onRefresh: () -> Void
   @State private var isSubmitting = false
 
   var body: some View {
-    GlassCard(title: "Hack account", systemImage: "person.crop.circle.badge.checkmark") {
+    GlassCard(title: "Status", systemImage: "person.crop.circle.badge.checkmark") {
       HStack(alignment: .center, spacing: 8) {
-        if let state {
-          StatusPill(
-            text: state.authEnabled ? "Hack auth ready" : "Hack auth unavailable",
-            tone: state.authEnabled ? .good : .warn
-          )
-          StatusPill(
-            text: state.authenticated ? "Signed in" : "Signed out",
-            tone: state.authenticated ? .good : .neutral
-          )
-          StatusPill(
-            text: state.validated ? "Broker validated" : state.tokenStored ? "Stored locally" : "No local session",
-            tone: state.validated ? .good : state.tokenStored ? .neutral : .warn
-          )
-          StatusPill(
-            text: state.manageAccountAvailable ? "Manage account ready" : "Manage account unavailable",
-            tone: state.manageAccountAvailable ? .good : .neutral
-          )
-        } else {
-          StatusPill(text: "Auth status unavailable", tone: .warn)
-        }
+        StatusPill(text: primaryStatusText, tone: primaryStatusTone)
         Spacer()
-        Button("Manage account") {
-          openResolvedManageURL()
+        if let manageURL = resolvedManageURL, state?.authenticated == true {
+          Button("Manage account") {
+            openResolvedManageURL(manageURL)
+          }
+          .adaptiveToolbarButton()
         }
-        .adaptiveToolbarButton()
-        .disabled(resolvedManageURL == nil)
         if let state, state.authenticated {
           Button("Sign out") {
             Task { await handleSignOut() }
@@ -561,16 +530,12 @@ private struct HackAccountSettingsCard: View {
           .adaptiveToolbarButton()
           .disabled(isBusy)
         } else {
-          Button("Sign in") {
+          Button("Sign in to Hack") {
             Task { await handleSignIn() }
           }
           .adaptiveToolbarButtonProminent()
           .disabled(isBusy || state?.authEnabled == false)
         }
-        Button("Refresh") {
-          onRefresh()
-        }
-        .adaptiveToolbarButton()
         if isBusy {
           ProgressView()
             .controlSize(.small)
@@ -581,64 +546,62 @@ private struct HackAccountSettingsCard: View {
         .font(.mono(.caption))
         .foregroundStyle(.secondary)
 
-      if let state {
-        if state.authenticated {
-          detailRow(title: "Hack user", value: state.userDisplayName ?? "Authenticated session")
-          if let email = state.userEmail, !email.isEmpty {
-            detailRow(title: "Email", value: email, selectable: true)
-          }
-          if let organizationName = state.organizationName, !organizationName.isEmpty {
-            detailRow(title: "Organization", value: organizationName)
-          }
-          if let teamName = state.teamName, !teamName.isEmpty {
-            detailRow(title: "Team", value: teamName)
-          }
-        } else {
-          Text(unauthenticatedMessage(for: state))
+      if let state, state.authenticated {
+        detailRow(title: "Hack user", value: state.userDisplayName ?? "Authenticated session")
+        if let email = state.userEmail, !email.isEmpty {
+          detailRow(title: "Email", value: email, selectable: true)
+        }
+        if let organizationName = state.organizationName, !organizationName.isEmpty {
+          detailRow(title: "Organization", value: organizationName)
+        }
+        if let teamName = state.teamName, !teamName.isEmpty {
+          detailRow(title: "Team", value: teamName)
+        }
+      } else if let sessionHint {
+        Text(sessionHint)
           .font(.mono(.caption2))
           .foregroundStyle(.tertiary)
-        }
-
-        detailRow(
-          title: "Manage account",
-          value: state.manageAccountAvailable
-            ? "Available in browser"
-            : "Available after broker auth is ready"
-        )
-        detailRow(title: "Broker", value: state.brokerBaseURL, selectable: true)
-
-        if let reason = state.authReason, !reason.isEmpty {
-          detailRow(title: "Session note", value: reason)
-        }
-        if let accessControlMode = state.accessControlMode, !accessControlMode.isEmpty {
-          detailRow(title: "Access mode", value: accessControlMode)
-        }
-      } else {
-        Text(
-          "Hack Desktop could not read Hack auth status yet. Shared provider setup still depends on the broker being reachable."
-        )
-        .font(.mono(.caption2))
-        .foregroundStyle(.tertiary)
       }
     }
   }
 
+  private var primaryStatusText: String {
+    guard let state else {
+      return "Status unavailable"
+    }
+    if !state.authEnabled {
+      return "Unavailable"
+    }
+    if state.authenticated {
+      return "Signed in"
+    }
+    if state.tokenStored && !state.validated {
+      return "Session stale"
+    }
+    return "Sign in required"
+  }
+
+  private var primaryStatusTone: StatusTone {
+    guard let state else {
+      return .warn
+    }
+    if !state.authEnabled {
+      return .warn
+    }
+    if state.authenticated {
+      return .good
+    }
+    if state.tokenStored && !state.validated {
+      return .warn
+    }
+    return .neutral
+  }
+
   private var summaryMessage: String {
     if let state, state.authenticated {
-      if let providerName, !providerName.isEmpty {
-        return
-          "\(providerName) accounts below are connected under this Hack account. Saved profiles stay local to this Mac and only decide routing defaults."
-      }
-      return
-        "This Hack account owns shared provider connections and other broker-backed features. Local-only project and ticket workflows remain available without sign-in."
+      return "Shared provider connections and broker-backed features use this Hack account."
     }
-
-    if let providerName, !providerName.isEmpty {
-      return
-        "Sign in to Hack before connecting \(providerName) for shared remote features. Linked login methods and account management stay in the browser, while saved profiles here remain local routing labels."
-    }
-    return
-      "Use this card to sign in to Hack for shared remote features. External provider pages manage connected provider accounts and local routing profiles, not your first-party Hack identity."
+    return "Sign in to use shared provider connections and other broker-backed features."
   }
 
   private var isBusy: Bool {
@@ -646,50 +609,42 @@ private struct HackAccountSettingsCard: View {
   }
 
   private var resolvedManageURL: String? {
-    guard let state else {
+    guard let state, state.authenticated else {
       return nil
     }
     return state.accountURL ?? state.shellURL
   }
 
+  private var sessionHint: String? {
+    guard let state else {
+      return "Hack Desktop has not loaded account state yet."
+    }
+    if state.tokenStored && !state.validated {
+      return "A stored session could not be validated. Sign in again to refresh it."
+    }
+    if !state.authEnabled {
+      return "Hack auth is not available on the broker yet, so shared remote features are unavailable from this Mac."
+    }
+    return "Local-only workflows still work without signing in."
+  }
+
   private func handleSignIn() async {
     isSubmitting = true
     defer { isSubmitting = false }
-    if await model.loginHackAccount() != nil {
-      onRefresh()
-      return
-    }
-    onRefresh()
+    _ = await model.loginHackAccount()
   }
 
   private func handleSignOut() async {
     isSubmitting = true
     defer { isSubmitting = false }
-    if await model.logoutHackAccount() != nil {
-      onRefresh()
-      return
-    }
-    onRefresh()
+    _ = await model.logoutHackAccount()
   }
 
-  private func openResolvedManageURL() {
-    guard let urlString = resolvedManageURL, let url = URL(string: urlString) else {
+  private func openResolvedManageURL(_ urlString: String) {
+    guard let url = URL(string: urlString) else {
       return
     }
     NSWorkspace.shared.open(url)
-  }
-
-  private func unauthenticatedMessage(for state: HackAccountSettingsState) -> String {
-    if state.tokenStored && !state.validated {
-      return "Hack has a locally stored session token, but the broker could not validate it. Sign in again to refresh this desktop session."
-    }
-    if state.tokenStored {
-      return "Hack has a stored session, but no authenticated browser session is active right now. Sign in again to continue."
-    }
-    if state.authEnabled {
-      return "Sign in to Hack before managing shared provider accounts, project routing, or other broker-backed features from this Mac."
-    }
-    return "Hack auth is not fully available on the broker yet, so shared remote features are unavailable from this Mac."
   }
 
   private func detailRow(title: String, value: String, selectable: Bool = false) -> some View {
@@ -2969,8 +2924,6 @@ private struct LinearExtensionSettingsView: View {
   @State private var isSavingAssigneeMapping = false
   @State private var message = ""
   @State private var lastDiagnosticsRefreshAt: Date? = nil
-  @State private var hackAccountState: HackAccountSettingsState? = nil
-  @State private var isLoadingHackAccount = false
 
   var body: some View {
     ScrollView {
@@ -3022,7 +2975,7 @@ private struct LinearExtensionSettingsView: View {
               .font(.mono(.caption))
               .foregroundStyle(.secondary)
             Spacer()
-            if hackAccountState?.authenticated == true {
+            if model.hackAccountState?.authenticated == true {
               Button {
                 toggleLinearAuthFlow()
               } label: {
@@ -3040,8 +2993,8 @@ private struct LinearExtensionSettingsView: View {
             }
           }
 
-          if hackAccountState?.authenticated != true {
-            Text("Sign in to Hack before connecting shared Linear accounts.")
+          if model.hackAccountState?.authenticated != true {
+            Text("Sign in to Hack to connect shared accounts.")
               .font(.mono(.caption))
               .foregroundStyle(.secondary)
           }
@@ -3429,13 +3382,7 @@ private struct LinearExtensionSettingsView: View {
     }
     .task {
       await loadConfigFromDisk()
-      await refreshHackAccountState()
-    }
-    .onChange(of: model.lastUpdated) { _, _ in
-      Task {
-        await loadConfigFromDisk()
-        await refreshHackAccountState()
-      }
+      await model.refreshHackAccountState(force: false, updateErrorMessage: false)
     }
     .onChange(of: assigneeMappingProfile) { _, _ in
       Task { await refreshLinearAssigneeMappings() }
@@ -3523,12 +3470,6 @@ private struct LinearExtensionSettingsView: View {
     refreshSelectedAssigneeMappingProfile()
     await refreshLinearAssigneeMappings()
     lastDiagnosticsRefreshAt = Date()
-  }
-
-  private func refreshHackAccountState() async {
-    isLoadingHackAccount = true
-    defer { isLoadingHackAccount = false }
-    hackAccountState = await model.inspectHackAccountSettingsState()
   }
 
   private func refreshLinearProfileStatuses() async {
@@ -3990,8 +3931,6 @@ private struct GitHubExtensionSettingsView: View {
   @State private var message = ""
   @State private var lastDiagnosticsRefreshAt: Date? = nil
   @State private var systemIdentity: GitSystemIdentity? = nil
-  @State private var hackAccountState: HackAccountSettingsState? = nil
-  @State private var isLoadingHackAccount = false
 
   var body: some View {
     ScrollView {
@@ -4083,7 +4022,7 @@ private struct GitHubExtensionSettingsView: View {
               .font(.mono(.caption))
               .foregroundStyle(.secondary)
             Spacer()
-            if hackAccountState?.authenticated == true {
+            if model.hackAccountState?.authenticated == true {
               Button {
                 toggleGitHubAuthFlow()
               } label: {
@@ -4101,8 +4040,8 @@ private struct GitHubExtensionSettingsView: View {
             }
           }
 
-          if hackAccountState?.authenticated != true {
-            Text("Sign in to Hack before connecting shared GitHub accounts or app installs.")
+          if model.hackAccountState?.authenticated != true {
+            Text("Sign in to Hack to connect shared accounts.")
               .font(.mono(.caption))
               .foregroundStyle(.secondary)
           }
@@ -4237,13 +4176,7 @@ private struct GitHubExtensionSettingsView: View {
     }
     .task {
       await loadConfigFromDisk()
-      await refreshHackAccountState()
-    }
-    .onChange(of: model.lastUpdated) { _, _ in
-      Task {
-        await loadConfigFromDisk()
-        await refreshHackAccountState()
-      }
+      await model.refreshHackAccountState(force: false, updateErrorMessage: false)
     }
     .onChange(of: model.githubOAuthDeepLinkContext) { _, deepLink in
       guard let deepLink else { return }
@@ -4319,12 +4252,6 @@ private struct GitHubExtensionSettingsView: View {
     systemIdentity = await model.inspectSystemGitIdentity()
     await refreshGitHubProfileStatuses()
     lastDiagnosticsRefreshAt = Date()
-  }
-
-  private func refreshHackAccountState() async {
-    isLoadingHackAccount = true
-    defer { isLoadingHackAccount = false }
-    hackAccountState = await model.inspectHackAccountSettingsState()
   }
 
   private func refreshGitHubProfileStatuses() async {

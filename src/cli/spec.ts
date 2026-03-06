@@ -1,5 +1,6 @@
 import pkg from "../../package.json";
 import { agentCommand } from "../commands/agent.ts";
+import { authCommand } from "../commands/auth.ts";
 import { branchCommand } from "../commands/branch.ts";
 import { configCommand } from "../commands/config.ts";
 import { crashCaptureCommand } from "../commands/crash-capture.ts";
@@ -54,6 +55,7 @@ export const CLI_SPEC = defineCli({
   globalOptions: [],
   commands: [
     globalCommand,
+    authCommand,
     statusCommand,
     usageCommand,
     projectsCommand,

@@ -12,7 +12,8 @@ public struct DashboardView: View {
   @State private var showCommandPalette = false
   @State private var showTerminalDrawer = false
   @State private var showSettingsOverlay = false
-  @State private var selectedSettingsItem: SettingsSidebarItem = .runtime
+  @State private var selectedSettingsItem: SettingsSidebarItem = .account
+  @State private var toolbarHackAccountState: HackAccountSettingsState? = nil
   @State private var terminalDrawerHeight: CGFloat = 360
   @State private var terminalDrawerInitialHeight: CGFloat? = nil
   @State private var terminalDrawerModel = TerminalDrawerModel(globalShellProject: Self.makeGlobalShellProject())
@@ -106,28 +107,6 @@ public struct DashboardView: View {
         }
         ToolbarItemGroup(placement: .primaryAction) {
           ToolbarIconButton(
-            systemImage: "gearshape",
-            help: "Open settings",
-            accessibilityLabel: "Open settings",
-            symbolTint: titlebarNeutralIconTint,
-            hoverSymbolTint: titlebarNeutralIconHoverTint,
-            action: {
-              openSettings(.runtime)
-            }
-          )
-          ToolbarIconButton(
-            systemImage: globalToggleIcon,
-            hoverSystemImage: globalToggleHoverIcon,
-            help: globalToggleHelp,
-            accessibilityLabel: globalToggleAccessibilityLabel,
-            symbolTint: globalToggleTint,
-            hoverSymbolTint: globalToggleHoverTint,
-            action: {
-              guard !globalToggleIsBusy else { return }
-              Task { await model.toggleGlobalInfrastructure() }
-            }
-          )
-          ToolbarIconButton(
             systemImage: "terminal",
             help: "Toggle terminal",
             accessibilityLabel: "Toggle terminal",
@@ -142,6 +121,7 @@ public struct DashboardView: View {
               }
             }
           )
+          toolbarAccountMenu
         }
       }
       .navigationTitle("")
@@ -150,6 +130,7 @@ public struct DashboardView: View {
       .tuneWindowToolbar()
       .task {
         model.start()
+        await refreshToolbarHackAccountState()
       }
       .onReceive(NotificationCenter.default.publisher(for: .hackCommandPaletteRequested)) { _ in
         showCommandPalette = true
@@ -200,6 +181,12 @@ public struct DashboardView: View {
           openSettings(pane)
         } else {
           openSettings(.runtime)
+        }
+      }
+      .onChange(of: showSettingsOverlay) { _, isVisible in
+        guard isVisible else { return }
+        Task {
+          await refreshToolbarHackAccountState()
         }
       }
       .sheet(isPresented: $showCommandPalette) {
@@ -263,49 +250,11 @@ public struct DashboardView: View {
     return model.globalInfraRunning ? "bolt.fill" : "power.circle"
   }
 
-  private var globalToggleHoverIcon: String? {
-    if globalToggleIsBusy {
-      return nil
-    }
-    return model.globalInfraRunning ? "power.circle.fill" : "bolt.fill"
-  }
-
   private var updateBadgeHelpText: String {
     if latestKnownReleaseVersion.isEmpty {
       return "A new version is available. Click to update."
     }
     return "Version \(latestKnownReleaseVersion) is available. Click to update."
-  }
-
-  private var globalToggleTint: NSColor {
-    if globalToggleIsBusy {
-      return .secondaryLabelColor
-    }
-    return model.globalInfraRunning ? NSColor.systemGreen : NSColor.systemRed
-  }
-
-  private var globalToggleHoverTint: NSColor? {
-    if globalToggleIsBusy {
-      return nil
-    }
-    return model.globalInfraRunning ? NSColor.systemRed : NSColor.systemGreen
-  }
-
-  private var globalToggleHelp: String {
-    if let action = model.globalLifecycleAction {
-      return action == .starting ? "Starting global services…" : "Stopping global services…"
-    }
-    if model.globalInfraRunning {
-      return "Global services are running. Click to stop (`hack global down`)."
-    }
-    return "Global services are stopped. Click to start (`hack global up`)."
-  }
-
-  private var globalToggleAccessibilityLabel: String {
-    if let action = model.globalLifecycleAction {
-      return action == .starting ? "Starting global services" : "Stopping global services"
-    }
-    return model.globalInfraRunning ? "Stop global services" : "Start global services"
   }
 
   private var globalToggleIsBusy: Bool {
@@ -608,6 +557,157 @@ public struct DashboardView: View {
   private func openSettings(_ pane: SettingsSidebarItem) {
     selectedSettingsItem = pane
     showSettingsOverlay = true
+  }
+
+  private var toolbarAccountMenu: some View {
+    Menu {
+      if let state = toolbarHackAccountState {
+        if let title = toolbarAccountPrimaryLabel {
+          Text(title)
+        }
+        if let subtitle = toolbarAccountSecondaryLabel {
+          Text(subtitle)
+        }
+        if toolbarAccountPrimaryLabel != nil || toolbarAccountSecondaryLabel != nil {
+          Divider()
+        }
+        Button {
+          openSettings(.account)
+        } label: {
+          Label("Account settings", systemImage: "person.crop.circle")
+        }
+        if let accountURL = state.accountURL, let url = URL(string: accountURL) {
+          Button {
+            NSWorkspace.shared.open(url)
+          } label: {
+            Label("Manage account in browser", systemImage: "globe")
+          }
+        }
+        Divider()
+        if state.authenticated {
+          Button {
+            Task {
+              toolbarHackAccountState = await model.logoutHackAccount()
+            }
+          } label: {
+            Label("Sign out", systemImage: "rectangle.portrait.and.arrow.right")
+          }
+        } else {
+          Button {
+            Task {
+              toolbarHackAccountState = await model.loginHackAccount()
+            }
+          } label: {
+            Label("Sign in to Hack", systemImage: "person.badge.key")
+          }
+        }
+      } else {
+        Button {
+          Task {
+            await refreshToolbarHackAccountState()
+          }
+        } label: {
+          Label("Refresh account state", systemImage: "arrow.clockwise")
+        }
+      }
+
+      Divider()
+
+      Button {
+        openSettings(.runtime)
+      } label: {
+        Label("Open runtime settings", systemImage: "gearshape")
+      }
+
+      Button {
+        guard !globalToggleIsBusy else { return }
+        Task { await model.toggleGlobalInfrastructure() }
+      } label: {
+        Label(globalToggleMenuTitle, systemImage: globalToggleIcon)
+      }
+    } label: {
+      toolbarAccountLabel
+    }
+    .menuStyle(.borderlessButton)
+    .menuIndicator(.hidden)
+    .help(toolbarHackAccountState?.authenticated == true ? "Hack account" : "Hack account and app actions")
+  }
+
+  private var toolbarAccountLabel: some View {
+    ZStack {
+      Circle()
+        .fill(toolbarAvatarBackgroundColor)
+      if let initials = toolbarAccountInitials {
+        Text(initials)
+          .font(.system(size: 11, weight: .semibold, design: .rounded))
+          .foregroundStyle(toolbarAvatarForegroundColor)
+      } else {
+        Image(systemName: "person.crop.circle.fill")
+          .font(.system(size: 15, weight: .semibold))
+          .foregroundStyle(toolbarAvatarForegroundColor)
+      }
+    }
+    .frame(width: 28, height: 28)
+    .overlay(
+      Circle()
+        .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+    )
+    .contentShape(Circle())
+    .accessibilityLabel("Hack account")
+  }
+
+  private var toolbarAccountPrimaryLabel: String? {
+    if let name = toolbarHackAccountState?.userDisplayName, !name.isEmpty {
+      return name
+    }
+    if let email = toolbarHackAccountState?.userEmail, !email.isEmpty {
+      return email
+    }
+    return toolbarHackAccountState?.authenticated == true ? "Hack account" : nil
+  }
+
+  private var toolbarAccountSecondaryLabel: String? {
+    if let organization = toolbarHackAccountState?.organizationName, !organization.isEmpty {
+      if let team = toolbarHackAccountState?.teamName, !team.isEmpty {
+        return "\(organization) • \(team)"
+      }
+      return organization
+    }
+    if toolbarHackAccountState?.authenticated == false {
+      return "Signed out"
+    }
+    return nil
+  }
+
+  private var toolbarAccountInitials: String? {
+    guard toolbarHackAccountState?.authenticated == true else {
+      return nil
+    }
+    let source = toolbarHackAccountState?.userDisplayName ?? toolbarHackAccountState?.userEmail ?? ""
+    let tokens = source
+      .split(whereSeparator: { $0 == " " || $0 == "." || $0 == "@" || $0 == "_" || $0 == "-" })
+      .prefix(2)
+    let initials = tokens.compactMap { $0.first.map(String.init) }.joined().uppercased()
+    return initials.isEmpty ? nil : initials
+  }
+
+  private var toolbarAvatarBackgroundColor: Color {
+    guard toolbarHackAccountState?.authenticated == true else {
+      return Color.primary.opacity(0.08)
+    }
+    return Color.accentColor.opacity(colorScheme == .dark ? 0.30 : 0.18)
+  }
+
+  private var toolbarAvatarForegroundColor: Color {
+    toolbarHackAccountState?.authenticated == true ? .accentColor : .secondary
+  }
+
+  private var globalToggleMenuTitle: String {
+    model.globalInfraRunning ? "Stop local runtime" : "Start local runtime"
+  }
+
+  private func refreshToolbarHackAccountState() async {
+    toolbarHackAccountState = await model.inspectHackAccountSettingsState()
   }
 
   private var footer: some View {

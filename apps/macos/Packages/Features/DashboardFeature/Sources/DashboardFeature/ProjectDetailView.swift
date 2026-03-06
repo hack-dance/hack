@@ -120,7 +120,6 @@ struct ProjectDetailView: View {
   @State private var githubProfilesById: [String: GitHubProfileSummary] = [:]
   @State private var githubProfileStatusById: [String: GitHubStatusResponse] = [:]
   @State private var githubResolvedProfile = ""
-  @State private var githubResolvedStatus: GitHubStatusResponse? = nil
   @State private var githubProfileMessage = ""
   @State private var linearProjectProfile = ""
   @State private var linearDefaultProfile = ""
@@ -128,7 +127,6 @@ struct ProjectDetailView: View {
   @State private var linearProfilesById: [String: LinearProfileSummary] = [:]
   @State private var linearProfileStatusById: [String: LinearStatusResponse] = [:]
   @State private var linearResolvedProfile = ""
-  @State private var linearResolvedStatus: LinearStatusResponse? = nil
   @State private var linearBoundProjectId = ""
   @State private var linearBoundProjectName = ""
   @State private var linearBoundTeamId = ""
@@ -693,7 +691,7 @@ struct ProjectDetailView: View {
         VStack(alignment: .leading, spacing: 4) {
           Text("Project settings")
             .font(.system(size: 20, weight: .semibold))
-          Text("Keep runtime and identity settings here. Linear routing now lives in a focused sheet so ticket work stays in Tickets.")
+          Text("Keep runtime defaults and provider routing here. Day-to-day sync stays in Tickets.")
             .font(.system(size: 13, weight: .medium))
             .foregroundStyle(.secondary)
         }
@@ -710,20 +708,30 @@ struct ProjectDetailView: View {
           description: "Choose whether this repo defaults to local work or a routed remote node.",
           footnote: executionMode.summary
         ) {
-          Picker("", selection: $executionMode) {
+          Menu {
             ForEach(RemoteExecutionMode.allCases) { mode in
-              Text(mode.title).tag(mode)
+              Button {
+                guard executionMode != mode else {
+                  return
+                }
+                executionMode = mode
+                guard !executionTargetLoading else {
+                  return
+                }
+                Task { await persistExecutionModeSelection() }
+              } label: {
+                if executionMode == mode {
+                  Label(mode.title, systemImage: "checkmark")
+                } else {
+                  Text(mode.title)
+                }
+              }
             }
+          } label: {
+            projectSettingsMenuLabel(executionMode.title)
           }
-          .labelsHidden()
+          .buttonStyle(.plain)
           .accessibilityLabel("Execution mode")
-          .pickerStyle(.menu)
-          .onChange(of: executionMode) { _, _ in
-            guard !executionTargetLoading else {
-              return
-            }
-            Task { await persistExecutionModeSelection() }
-          }
         }
 
         Divider()
@@ -734,22 +742,51 @@ struct ProjectDetailView: View {
           description: "Applies when execution mode routes work off this Mac.",
           footnote: selectedNodeSummary
         ) {
-          Picker("", selection: $executionTargetNodeId) {
-            Text("Local").tag("")
-            ForEach(executionTargetNodes, id: \.id) { node in
-              Text(node.name).tag(node.id)
+          if executionMode == .local {
+            projectSettingsMenuLabel("Local", isDisabled: true)
+              .accessibilityLabel("Default node")
+          } else {
+            Menu {
+              Button {
+                guard !executionTargetNodeId.isEmpty else {
+                  return
+                }
+                executionTargetNodeId = ""
+                guard !executionTargetLoading else {
+                  return
+                }
+                Task { await persistSimpleDefaultNodeSelection() }
+              } label: {
+                if executionTargetNodeId.isEmpty {
+                  Label("Local", systemImage: "checkmark")
+                } else {
+                  Text("Local")
+                }
+              }
+              ForEach(executionTargetNodes, id: \.id) { node in
+                Button {
+                  guard executionTargetNodeId != node.id else {
+                    return
+                  }
+                  executionTargetNodeId = node.id
+                  guard !executionTargetLoading else {
+                    return
+                  }
+                  Task { await persistSimpleDefaultNodeSelection() }
+                } label: {
+                  if executionTargetNodeId == node.id {
+                    Label(node.name, systemImage: "checkmark")
+                  } else {
+                    Text(node.name)
+                  }
+                }
+              }
+            } label: {
+              projectSettingsMenuLabel(selectedNodeSummary)
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Default node")
           }
-          .labelsHidden()
-          .accessibilityLabel("Default node")
-          .pickerStyle(.menu)
-          .onChange(of: executionTargetNodeId) { _, _ in
-            guard !executionTargetLoading else {
-              return
-            }
-            Task { await persistSimpleDefaultNodeSelection() }
-          }
-          .disabled(executionMode == .local)
         }
 
         Divider()
@@ -760,21 +797,47 @@ struct ProjectDetailView: View {
           description: "Pick the saved GitHub profile this repo should use for remote Git operations.",
           footnote: selectedGitSummary
         ) {
-          Picker("", selection: $githubProjectProfile) {
-            Text("Local").tag("")
+          Menu {
+            Button {
+              guard !githubProjectProfile.isEmpty else {
+                return
+              }
+              githubProjectProfile = ""
+              guard !executionTargetLoading else {
+                return
+              }
+              Task { await persistGitCredentialsSelection() }
+            } label: {
+              if githubProjectProfile.isEmpty {
+                Label("Local", systemImage: "checkmark")
+              } else {
+                Text("Local")
+              }
+            }
             ForEach(githubProfileOptions, id: \.self) { profile in
-              Text(githubProfileLabel(profileId: profile)).tag(profile)
+              Button {
+                guard githubProjectProfile != profile else {
+                  return
+                }
+                githubProjectProfile = profile
+                guard !executionTargetLoading else {
+                  return
+                }
+                Task { await persistGitCredentialsSelection() }
+              } label: {
+                let label = githubProfileLabel(profileId: profile)
+                if githubProjectProfile == profile {
+                  Label(label, systemImage: "checkmark")
+                } else {
+                  Text(label)
+                }
+              }
             }
+          } label: {
+            projectSettingsMenuLabel(selectedGitSummary)
           }
-          .labelsHidden()
+          .buttonStyle(.plain)
           .accessibilityLabel("GitHub profile")
-          .pickerStyle(.menu)
-          .onChange(of: githubProjectProfile) { _, _ in
-            guard !executionTargetLoading else {
-              return
-            }
-            Task { await persistGitCredentialsSelection() }
-          }
         }
       }
       .padding(16)
@@ -811,15 +874,15 @@ struct ProjectDetailView: View {
             .foregroundStyle(.secondary)
         }
         Spacer()
-        Button(linearResolvedStatus?.tokenResolved == true ? "Edit routing" : "Connect Linear") {
+        Button(hasConfiguredLinearProfile ? "Edit routing" : "Connect Linear") {
           showLinearRoutingSheet = true
         }
         .adaptiveToolbarButtonProminent()
       }
 
       HStack(spacing: 8) {
-        if linearResolvedStatus?.tokenResolved == true {
-          StatusPill(text: "Connected", tone: .good)
+        if hasConfiguredLinearProfile {
+          StatusPill(text: "Configured", tone: .good)
         } else {
           StatusPill(text: "Needs connection", tone: .warn)
         }
@@ -859,35 +922,61 @@ struct ProjectDetailView: View {
         VStack(alignment: .leading, spacing: 6) {
           Text("Linear routing")
             .font(.system(size: 22, weight: .semibold))
-          Text("Choose the saved Linear profile and project routes for this repo. Ticket review and one-off sync actions stay in Tickets.")
+          Text("Choose which saved Linear account and projects this repo uses. Sync actions stay in Tickets.")
             .font(.system(size: 13, weight: .medium))
             .foregroundStyle(.secondary)
         }
 
         routingSheetSection(
           title: "Saved profile",
-          description: "Choose the saved Linear profile Hack should use for this repo. Profiles point to provider accounts connected in global Linear settings."
+          description: "Choose the saved Linear profile Hack should use for this repo."
         ) {
-          if linearResolvedStatus?.tokenResolved == true {
+          if hasConfiguredLinearProfile {
             projectSettingsControlGroup(footnote: selectedLinearProfileSummary) {
               VStack(alignment: .leading, spacing: 10) {
                 projectSettingsFieldLabel("Project profile")
                 projectSettingsControlShell(maxWidth: 320) {
-                  Picker("", selection: $linearProjectProfile) {
-                    Text("Inherited").tag("")
+                  Menu {
+                    Button {
+                      guard !linearProjectProfile.isEmpty else {
+                        return
+                      }
+                      linearProjectProfile = ""
+                      guard !executionTargetLoading else {
+                        return
+                      }
+                      Task { await persistLinearProfileOverride() }
+                    } label: {
+                      if linearProjectProfile.isEmpty {
+                        Label("Inherited", systemImage: "checkmark")
+                      } else {
+                        Text("Inherited")
+                      }
+                    }
                     ForEach(linearProfileOptions, id: \.self) { profile in
-                      Text(linearProfileLabel(profileId: profile)).tag(profile)
+                      Button {
+                        guard linearProjectProfile != profile else {
+                          return
+                        }
+                        linearProjectProfile = profile
+                        guard !executionTargetLoading else {
+                          return
+                        }
+                        Task { await persistLinearProfileOverride() }
+                      } label: {
+                        let label = linearProfileLabel(profileId: profile)
+                        if linearProjectProfile == profile {
+                          Label(label, systemImage: "checkmark")
+                        } else {
+                          Text(label)
+                        }
+                      }
                     }
+                  } label: {
+                    projectSettingsMenuLabel(selectedLinearProfileSummary)
                   }
-                  .labelsHidden()
+                  .buttonStyle(.plain)
                   .accessibilityLabel("Saved profile")
-                  .pickerStyle(.menu)
-                  .onChange(of: linearProjectProfile) { _, _ in
-                    guard !executionTargetLoading else {
-                      return
-                    }
-                    Task { await persistLinearProfileOverride() }
-                  }
                 }
 
                 HStack(alignment: .center, spacing: 12) {
@@ -923,30 +1012,57 @@ struct ProjectDetailView: View {
 
         routingSheetSection(
           title: "Default project route",
-          description: "This is the primary Linear project route for project-level pull, push, and review."
+          description: "This is the primary Linear project for pull, push, and review."
         ) {
           projectSettingsControlGroup(footnote: selectedLinearProjectSummary) {
             VStack(alignment: .leading, spacing: 10) {
               projectSettingsFieldLabel("Primary route")
               projectSettingsControlShell(maxWidth: 360) {
-                Picker("", selection: $selectedLinearProjectId) {
-                  Text("Unbound").tag("")
-                  ForEach(linearProjectOptions) { linearProject in
-                    Text(linearProjectMenuLabel(linearProject)).tag(linearProject.id)
+                if linearProjectOptions.isEmpty {
+                  projectSettingsMenuLabel("Unbound", isDisabled: true)
+                    .accessibilityLabel("Default project route")
+                } else {
+                  Menu {
+                    Button {
+                      guard !selectedLinearProjectId.isEmpty else {
+                        return
+                      }
+                      selectedLinearProjectId = ""
+                      guard !executionTargetLoading else {
+                        return
+                      }
+                      Task { await persistLinearProjectBindingSelection() }
+                    } label: {
+                      if selectedLinearProjectId.isEmpty {
+                        Label("Unbound", systemImage: "checkmark")
+                      } else {
+                        Text("Unbound")
+                      }
+                    }
+                    ForEach(linearProjectOptions) { linearProject in
+                      Button {
+                        guard selectedLinearProjectId != linearProject.id else {
+                          return
+                        }
+                        selectedLinearProjectId = linearProject.id
+                        guard !executionTargetLoading else {
+                          return
+                        }
+                        Task { await persistLinearProjectBindingSelection() }
+                      } label: {
+                        let label = linearProjectMenuLabel(linearProject)
+                        if selectedLinearProjectId == linearProject.id {
+                          Label(label, systemImage: "checkmark")
+                        } else {
+                          Text(label)
+                        }
+                      }
+                    }
+                  } label: {
+                    projectSettingsMenuLabel(selectedLinearProjectSummary)
                   }
-                }
-                .labelsHidden()
-                .accessibilityLabel("Default project route")
-                .pickerStyle(.menu)
-                .disabled(linearProjectOptions.isEmpty)
-                .onChange(of: selectedLinearProjectId) { _, newValue in
-                  guard !executionTargetLoading else {
-                    return
-                  }
-                  guard newValue != linearBoundProjectId else {
-                    return
-                  }
-                  Task { await persistLinearProjectBindingSelection() }
+                  .buttonStyle(.plain)
+                  .accessibilityLabel("Default project route")
                 }
               }
 
@@ -988,16 +1104,33 @@ struct ProjectDetailView: View {
               projectSettingsFieldLabel("Add linked project")
               HStack(spacing: 8) {
                 projectSettingsControlShell(maxWidth: 360) {
-                  Picker("", selection: $selectedAdditionalLinearProjectId) {
-                    Text("Choose project").tag("")
-                    ForEach(availableAdditionalLinearProjects) { linearProject in
-                      Text(linearProjectMenuLabel(linearProject)).tag(linearProject.id)
+                  if availableAdditionalLinearProjects.isEmpty {
+                    projectSettingsMenuLabel("Choose project", isDisabled: true)
+                      .accessibilityLabel("Add linked project")
+                  } else {
+                    Menu {
+                      ForEach(availableAdditionalLinearProjects) { linearProject in
+                        Button {
+                          selectedAdditionalLinearProjectId = linearProject.id
+                        } label: {
+                          let label = linearProjectMenuLabel(linearProject)
+                          if selectedAdditionalLinearProjectId == linearProject.id {
+                            Label(label, systemImage: "checkmark")
+                          } else {
+                            Text(label)
+                          }
+                        }
+                      }
+                    } label: {
+                      projectSettingsMenuLabel(
+                        additionalProjectMenuLabel(
+                          selectedAdditionalLinearProjectId
+                        )
+                      )
                     }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Add linked project")
                   }
-                  .labelsHidden()
-                  .accessibilityLabel("Add linked project")
-                  .pickerStyle(.menu)
-                  .disabled(availableAdditionalLinearProjects.isEmpty)
                 }
 
                 Button("Add") {
@@ -1028,6 +1161,9 @@ struct ProjectDetailView: View {
     }
     .frame(minWidth: 620, minHeight: 560)
     .background(Color.clear)
+    .task {
+      await loadLinearRoutingProjectOptionsIfNeeded()
+    }
   }
 
   private var defaultLinearRouteTarget: LinearProjectBindingTarget? {
@@ -1055,8 +1191,16 @@ struct ProjectDetailView: View {
     return inherited.isEmpty ? nil : inherited
   }
 
+  private var hasConfiguredLinearProfile: Bool {
+    let resolvedProfile = resolvedLinearRoutingProfileId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    if !resolvedProfile.isEmpty {
+      return linearProfilesById[resolvedProfile] != nil
+    }
+    return !linearProfileOptions.isEmpty
+  }
+
   private var linearRoutingSummaryLine: String {
-    if linearResolvedStatus?.tokenResolved != true {
+    if !hasConfiguredLinearProfile {
       return "No Linear provider account connected for this repo yet."
     }
     if !hasAnyLinearProjectRouting {
@@ -1121,6 +1265,24 @@ struct ProjectDetailView: View {
       .textCase(.uppercase)
   }
 
+  private func projectSettingsMenuLabel(
+    _ text: String,
+    isDisabled: Bool = false
+  ) -> some View {
+    HStack(spacing: 10) {
+      Text(text)
+        .font(.system(size: 13, weight: .semibold))
+        .foregroundStyle(isDisabled ? .tertiary : .primary)
+        .lineLimit(1)
+      Spacer(minLength: 8)
+      Image(systemName: "chevron.up.chevron.down")
+        .font(.system(size: 10, weight: .semibold))
+        .foregroundStyle(isDisabled ? .tertiary : .secondary)
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .contentShape(Rectangle())
+  }
+
   private func projectSettingsControlShell<Content: View>(
     maxWidth: CGFloat? = nil,
     @ViewBuilder content: () -> Content
@@ -1140,6 +1302,17 @@ struct ProjectDetailView: View {
       RoundedRectangle(cornerRadius: 12, style: .continuous)
         .stroke(Color.primary.opacity(colorScheme == .dark ? 0.12 : 0.08), lineWidth: 1)
     )
+  }
+
+  private func additionalProjectMenuLabel(_ projectId: String) -> String {
+    let trimmed = projectId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      return "Choose project"
+    }
+    guard let project = availableAdditionalLinearProjects.first(where: { $0.id == trimmed }) else {
+      return trimmed
+    }
+    return linearProjectMenuLabel(project)
   }
 
   private func routingSheetSection<Content: View>(
@@ -1979,6 +2152,25 @@ struct ProjectDetailView: View {
     return nil
   }
 
+  private func loadLinearRoutingProjectOptionsIfNeeded() async {
+    let resolvedProfile = resolvedLinearRoutingProfileId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    guard !resolvedProfile.isEmpty else {
+      linearProjectOptions = []
+      return
+    }
+    guard hasConfiguredLinearProfile else {
+      linearProjectOptions = []
+      return
+    }
+    if let projectCatalog = await model.listLinearProjects(profileId: resolvedProfile) {
+      linearProjectOptions = projectCatalog.projects.sorted { lhs, rhs in
+        lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+      }
+    } else {
+      linearProjectOptions = []
+    }
+  }
+
   private func linearAccountEmail(profileId: String) -> String? {
     let trimmed = profileId.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else {
@@ -2124,25 +2316,12 @@ struct ProjectDetailView: View {
       .sorted { lhs, rhs in
         lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
       }
-    var profileStatusById: [String: GitHubStatusResponse] = [:]
-    for profileId in githubProfileOptions {
-      if let status = await model.inspectGitHubStatus(profileId: profileId) {
-        profileStatusById[profileId] = status
-      }
-    }
-    githubProfileStatusById = profileStatusById
+    githubProfileStatusById = [:]
     let resolvedGitHubProfile = githubProjectProfile.isEmpty
       ? githubDefaultProfile
       : githubProjectProfile
     githubResolvedProfile = resolvedGitHubProfile
     projectSystemGitIdentity = resolvedSystemGitIdentity
-    if let preloadedStatus = profileStatusById[resolvedGitHubProfile] {
-      githubResolvedStatus = preloadedStatus
-    } else {
-      githubResolvedStatus = await model.inspectGitHubStatus(
-        profileId: resolvedGitHubProfile.isEmpty ? nil : resolvedGitHubProfile
-      )
-    }
 
     linearProjectProfile = (resolvedLinearBinding?.profileId ?? "")
       .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2162,34 +2341,12 @@ struct ProjectDetailView: View {
       .sorted { lhs, rhs in
         lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
       }
-    var linearStatusesById: [String: LinearStatusResponse] = [:]
-    for profileId in linearProfileOptions {
-      if let status = await model.inspectLinearStatus(profileId: profileId) {
-        linearStatusesById[profileId] = status
-      }
-    }
-    linearProfileStatusById = linearStatusesById
+    linearProfileStatusById = [:]
     let resolvedLinearProfile = linearProjectProfile.isEmpty
       ? linearDefaultProfile
       : linearProjectProfile
     linearResolvedProfile = resolvedLinearProfile
-    if let preloadedStatus = linearStatusesById[resolvedLinearProfile] {
-      linearResolvedStatus = preloadedStatus
-    } else {
-      linearResolvedStatus = await model.inspectLinearStatus(
-        profileId: resolvedLinearProfile.isEmpty ? nil : resolvedLinearProfile
-      )
-    }
-    if linearResolvedStatus?.tokenResolved == true {
-      let projectCatalog = await model.listLinearProjects(
-        profileId: resolvedLinearProfile.isEmpty ? nil : resolvedLinearProfile
-      )
-      linearProjectOptions = (projectCatalog?.projects ?? []).sorted { lhs, rhs in
-        lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
-      }
-    } else {
-      linearProjectOptions = []
-    }
+    linearProjectOptions = []
     selectedLinearProjectId = linearBoundProjectId
     if linearAdditionalProjects.contains(where: { $0.projectId == selectedAdditionalLinearProjectId }) {
       selectedAdditionalLinearProjectId = ""

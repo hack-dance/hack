@@ -7,6 +7,7 @@ import HackCLIService
 import HackDesktopModels
 
 enum SettingsSidebarItem: String, Hashable, Identifiable {
+  case account
   case preferences
   case updates
   case topology
@@ -15,7 +16,6 @@ enum SettingsSidebarItem: String, Hashable, Identifiable {
   case global
   case supervisor
   case permissions
-  case extensions
   case linear
   case github
   case cloudflare
@@ -28,6 +28,8 @@ enum SettingsSidebarItem: String, Hashable, Identifiable {
 
   var title: String {
     switch self {
+    case .account:
+      return "Account"
     case .preferences:
       return "Preferences"
     case .updates:
@@ -44,8 +46,6 @@ enum SettingsSidebarItem: String, Hashable, Identifiable {
       return "Supervisor"
     case .permissions:
       return "Permissions"
-    case .extensions:
-      return "Extensions"
     case .linear:
       return "Linear"
     case .github:
@@ -65,6 +65,8 @@ enum SettingsSidebarItem: String, Hashable, Identifiable {
 
   var icon: String {
     switch self {
+    case .account:
+      return "person.crop.circle"
     case .preferences:
       return "slider.horizontal.3"
     case .updates:
@@ -81,8 +83,6 @@ enum SettingsSidebarItem: String, Hashable, Identifiable {
       return "cpu"
     case .permissions:
       return "hand.raised.fill"
-    case .extensions:
-      return "puzzlepiece.extension"
     case .linear:
       return "line.3.horizontal.decrease.circle"
     case .github:
@@ -179,6 +179,9 @@ struct SettingsOverlayView: View {
 
   private var settingsSidebar: some View {
     List(selection: $selection) {
+      Section("Account") {
+        settingsRow(.account)
+      }
       Section("Preferences") {
         settingsRow(.preferences)
         settingsRow(.updates)
@@ -195,8 +198,7 @@ struct SettingsOverlayView: View {
         settingsRow(.logging)
         settingsRow(.certificates)
       }
-      Section("Extensions") {
-        settingsRow(.extensions)
+      Section("Integrations") {
         settingsRow(.linear)
         settingsRow(.github)
         settingsRow(.cloudflare)
@@ -221,6 +223,8 @@ struct SettingsOverlayView: View {
   private var settingsDetail: some View {
     Group {
       switch selection {
+      case .account:
+        AccountSettingsView(selection: $selection)
       case .preferences:
         PreferencesSettingsView()
       case .updates:
@@ -237,8 +241,6 @@ struct SettingsOverlayView: View {
         SupervisorSettingsView()
       case .permissions:
         PermissionsSettingsView()
-      case .extensions:
-        ExtensionsSettingsView(selection: $selection)
       case .linear:
         LinearExtensionSettingsView()
       case .github:
@@ -418,6 +420,100 @@ struct SettingsSectionHeader: View {
         .font(.mono(.caption))
         .foregroundStyle(.secondary)
     }
+  }
+}
+
+private struct AccountSettingsView: View {
+  @Environment(DashboardModel.self) private var model
+  @Binding var selection: SettingsSidebarItem
+  @State private var hackAccountState: HackAccountSettingsState? = nil
+  @State private var isLoadingHackAccount = false
+
+  var body: some View {
+    ScrollView {
+      VStack(alignment: .leading, spacing: 20) {
+        SettingsSectionHeader(
+          breadcrumb: "Settings / Account",
+          title: "Hack account",
+          subtitle: "Sign in to Hack for shared remote features. Local-only workflows still work without an account."
+        )
+        HackAccountSettingsCard(
+          state: hackAccountState,
+          isLoading: isLoadingHackAccount,
+          providerName: nil
+        ) {
+          Task { await refreshHackAccountState() }
+        }
+        GlassCard(title: "Connected services", systemImage: "link.badge.plus") {
+          VStack(alignment: .leading, spacing: 12) {
+            integrationShortcutRow(
+              item: .linear,
+              title: "Linear",
+              subtitle: "Shared provider accounts, routing defaults, and sync policy."
+            )
+            Divider()
+              .opacity(0.2)
+            integrationShortcutRow(
+              item: .github,
+              title: "GitHub",
+              subtitle: "Shared provider accounts, PR automation routing, and app installs."
+            )
+            Divider()
+              .opacity(0.2)
+            integrationShortcutRow(
+              item: .cloudflare,
+              title: "Cloudflare",
+              subtitle: "Tunnel connectivity and deployment access."
+            )
+            Divider()
+              .opacity(0.2)
+            integrationShortcutRow(
+              item: .railway,
+              title: "Railway",
+              subtitle: "Service bootstrap defaults and provider access."
+            )
+            Divider()
+              .opacity(0.2)
+            integrationShortcutRow(
+              item: .tailscale,
+              title: "Tailscale",
+              subtitle: "Tailnet connectivity and auth key management."
+            )
+          }
+        }
+      }
+      .padding(24)
+    }
+    .task {
+      await refreshHackAccountState()
+    }
+  }
+
+  private func integrationShortcutRow(
+    item: SettingsSidebarItem,
+    title: String,
+    subtitle: String
+  ) -> some View {
+    HStack(alignment: .center, spacing: 12) {
+      VStack(alignment: .leading, spacing: 3) {
+        Text(title)
+          .font(.mono(.subheadline, weight: .semibold))
+        Text(subtitle)
+          .font(.mono(.caption))
+          .foregroundStyle(.secondary)
+      }
+      Spacer()
+      Button("Open") {
+        selection = item
+      }
+      .adaptiveToolbarButton()
+    }
+  }
+
+  private func refreshHackAccountState() async {
+    isLoadingHackAccount = true
+    defer { isLoadingHackAccount = false }
+    hackAccountState = await model.inspectHackAccountSettingsState()
   }
 }
 
@@ -1467,8 +1563,8 @@ private struct CloudflareExtensionSettingsView: View {
     ScrollView {
       VStack(alignment: .leading, spacing: 20) {
         SettingsSectionHeader(
-          breadcrumb: "Settings / Extensions / Cloudflare",
-          title: "Cloudflare Extension",
+          breadcrumb: "Settings / Cloudflare",
+          title: "Cloudflare",
           subtitle: "Public tunnel exposure via cloudflared for HTTPS and SSH entrypoints"
         )
         GlassCard(title: "Extension status", systemImage: "cloud") {
@@ -1852,8 +1948,8 @@ private struct RailwayExtensionSettingsView: View {
     ScrollView {
       LazyVStack(alignment: .leading, spacing: 20) {
         SettingsSectionHeader(
-          breadcrumb: "Settings / Extensions / Railway",
-          title: "Railway Provider",
+          breadcrumb: "Settings / Railway",
+          title: "Railway",
           subtitle: "Bootstrap remote nodes with minimal input; advanced options stay optional"
         )
 
@@ -2880,17 +2976,10 @@ private struct LinearExtensionSettingsView: View {
     ScrollView {
       LazyVStack(alignment: .leading, spacing: 20) {
         SettingsSectionHeader(
-          breadcrumb: "Settings / Extensions / Linear",
-          title: "Linear Extension",
-          subtitle: "Manage Hack auth prerequisites, connected Linear provider accounts, and saved sync routing"
+          breadcrumb: "Settings / Linear",
+          title: "Linear",
+          subtitle: "Connect accounts, choose a default routing profile, and tune sync behavior."
         )
-        HackAccountSettingsCard(
-          state: hackAccountState,
-          isLoading: isLoadingHackAccount,
-          providerName: "Linear"
-        ) {
-          Task { await refreshHackAccountState() }
-        }
         GlassCard(title: "Extension status", systemImage: "line.3.horizontal.decrease.circle") {
           HStack(alignment: .center, spacing: 8) {
             StatusPill(text: enabled ? "Enabled" : "Disabled", tone: enabled ? .good : .neutral)
@@ -2927,21 +3016,34 @@ private struct LinearExtensionSettingsView: View {
           }
         }
 
-        GlassCard(title: "Connected provider accounts", systemImage: "point.3.connected.trianglepath.dotted") {
+        GlassCard(title: "Accounts", systemImage: "point.3.connected.trianglepath.dotted") {
           HStack(alignment: .center, spacing: 10) {
-            Text("These are the Linear accounts Hack can route sync through. Saved profiles decide which provider account a project uses.")
+            Text("Saved profiles decide which Linear account a project uses.")
               .font(.mono(.caption))
               .foregroundStyle(.secondary)
             Spacer()
-            Button {
-              toggleLinearAuthFlow()
-            } label: {
-              Label(
-                isAuthenticating ? "Cancel add account" : "Add account",
-                systemImage: isAuthenticating ? "xmark.circle" : "plus.circle"
-              )
+            if hackAccountState?.authenticated == true {
+              Button {
+                toggleLinearAuthFlow()
+              } label: {
+                Label(
+                  isAuthenticating ? "Cancel connect" : "Connect account",
+                  systemImage: isAuthenticating ? "xmark.circle" : "plus.circle"
+                )
+              }
+              .adaptiveToolbarButtonProminent()
+            } else {
+              Button("Sign in to Hack") {
+                Task { _ = await model.loginHackAccount() }
+              }
+              .adaptiveToolbarButtonProminent()
             }
-            .adaptiveToolbarButtonProminent()
+          }
+
+          if hackAccountState?.authenticated != true {
+            Text("Sign in to Hack before connecting shared Linear accounts.")
+              .font(.mono(.caption))
+              .foregroundStyle(.secondary)
           }
 
           if isAuthenticating {
@@ -2956,13 +3058,6 @@ private struct LinearExtensionSettingsView: View {
               StatusPill(text: "Connect pending", tone: .neutral)
             }
           }
-
-          InlineCallout(
-            tone: linearRoutingCalloutTone,
-            title: linearRoutingCalloutTitle,
-            message: linearRoutingCalloutMessage,
-            actions: []
-          )
 
           if linearProfiles.isEmpty {
             Text("No accounts connected yet.")
@@ -2981,12 +3076,6 @@ private struct LinearExtensionSettingsView: View {
                       .font(.mono(.subheadline, weight: .semibold))
                     if profile.isDefault {
                       StatusPill(text: "Default profile", tone: .good)
-                    }
-                    if let profileStatus {
-                      StatusPill(
-                        text: profileStatus.tokenResolved ? "Token ready" : "Token missing",
-                        tone: profileStatus.tokenResolved ? .good : .warn
-                      )
                     }
                     Spacer()
                     if !profile.isDefault {
@@ -3020,16 +3109,15 @@ private struct LinearExtensionSettingsView: View {
                     .adaptiveToolbarButton()
                     .disabled(
                       isAuthenticating ||
-                        disconnectingLinearProfiles.contains(profile.id) ||
-                        profileStatus?.tokenResolved != true
+                        disconnectingLinearProfiles.contains(profile.id)
                     )
                   }
 
-                  Text("routing profile: \(profile.id)")
+                  Text("profile id: \(profile.id)")
                     .font(.mono(.caption2))
                     .foregroundStyle(.secondary)
                   if let accountLabel, !accountLabel.isEmpty {
-                    Text("provider account: \(accountLabel)")
+                    Text("account: \(accountLabel)")
                       .font(.mono(.caption2))
                       .foregroundStyle(.secondary)
                   }
@@ -3073,16 +3161,12 @@ private struct LinearExtensionSettingsView: View {
           }
         }
 
-        GlassCard(title: "Sync policy", systemImage: "arrow.triangle.branch") {
+        GlassCard(title: "Sync fields", systemImage: "arrow.triangle.branch") {
           VStack(alignment: .leading, spacing: 12) {
-            InlineCallout(
-              tone: .neutral,
-              title: "How sync behaves",
-              message: linearSyncPolicySummary,
-              actions: []
-            )
-
-            Text("Manual sync stays the default. These toggles control which Linear fields Hack will translate when you run project or ticket sync tools.")
+            Text(linearSyncPolicySummary)
+              .font(.mono(.caption))
+              .foregroundStyle(.secondary)
+            Text("Manual sync stays the default. These toggles control which fields Hack will translate when you run sync.")
               .font(.mono(.caption))
               .foregroundStyle(.secondary)
 
@@ -3401,44 +3485,6 @@ private struct LinearExtensionSettingsView: View {
     return !status.tokenResolved
   }
 
-  private var linearRoutingCalloutTone: StatusTone {
-    if linearProfiles.isEmpty || defaultLinearProfileNeedsRepair || resolvedDefaultProfile.isEmpty {
-      return .warn
-    }
-    return .neutral
-  }
-
-  private var linearRoutingCalloutTitle: String {
-    if linearProfiles.isEmpty {
-      return "Connect a provider account first"
-    }
-    if defaultLinearProfileNeedsRepair {
-      return "Default profile needs repair"
-    }
-    if resolvedDefaultProfile.isEmpty {
-      return "Set a default profile"
-    }
-    return "Routing and disconnect behavior"
-  }
-
-  private var linearRoutingCalloutMessage: String {
-    if linearProfiles.isEmpty {
-      return "Add a Linear provider account before ticket or project sync can route through Linear. After the first account connects, set it as the default profile so projects inherit a working route until they choose their own."
-    }
-
-    if defaultLinearProfileNeedsRepair {
-      let defaultLabel = displayNameForRemoteProfileId(resolvedDefaultProfile)
-      return "The default profile \(defaultLabel) no longer has a usable token. Reconnect it or switch the default before the next sync, because projects without an override still inherit that routing target."
-    }
-
-    if resolvedDefaultProfile.isEmpty {
-      return "Projects can still choose a specific Linear provider account, but anything without a per-project override has no fallback route until you set a default profile here."
-    }
-
-    let defaultLabel = displayNameForRemoteProfileId(resolvedDefaultProfile)
-    return "Projects inherit \(defaultLabel) until they choose a different Linear profile in project settings. Disconnecting a provider account removes its token immediately, so reroute or reconnect affected projects before the next sync run."
-  }
-
   private var linearSyncPolicySummary: String {
     "Authority follows ticket origin. Origin-owned fields such as title, body, status, and project binding stay authoritative on the side that created the ticket, while assignees, labels, dependencies, and sub-issue links are best-effort mergeable when enabled. Comments are append-only and synced in FIFO order rather than edited in place."
   }
@@ -3486,17 +3532,8 @@ private struct LinearExtensionSettingsView: View {
   }
 
   private func refreshLinearProfileStatuses() async {
-    guard let diagnostics else {
-      profileStatusById = [:]
-      return
-    }
-    var statuses: [String: LinearStatusResponse] = [:]
-    for profile in diagnostics.profiles {
-      if let status = await model.inspectLinearStatus(profileId: profile.id) {
-        statuses[profile.id] = status
-      }
-    }
-    profileStatusById = statuses
+    // Passive settings pages should not trigger keychain-backed token resolution.
+    profileStatusById = [:]
   }
 
   private var normalizedAssigneeMappingProfile: String {
@@ -3960,17 +3997,10 @@ private struct GitHubExtensionSettingsView: View {
     ScrollView {
       LazyVStack(alignment: .leading, spacing: 20) {
         SettingsSectionHeader(
-          breadcrumb: "Settings / Extensions / GitHub",
-          title: "GitHub Extension",
-          subtitle: "Manage Hack auth prerequisites, connected GitHub provider accounts, and saved PR automation routing"
+          breadcrumb: "Settings / GitHub",
+          title: "GitHub",
+          subtitle: "Connect accounts and app installs, then choose the default profile for automation."
         )
-        HackAccountSettingsCard(
-          state: hackAccountState,
-          isLoading: isLoadingHackAccount,
-          providerName: "GitHub"
-        ) {
-          Task { await refreshHackAccountState() }
-        }
         GlassCard(title: "Extension status", systemImage: "chevron.left.forwardslash.chevron.right") {
           HStack(alignment: .center, spacing: 8) {
             StatusPill(text: enabled ? "Enabled" : "Disabled", tone: enabled ? .good : .neutral)
@@ -4047,21 +4077,34 @@ private struct GitHubExtensionSettingsView: View {
           }
         }
 
-        GlassCard(title: "Connected provider accounts", systemImage: "person.2.badge.gearshape") {
+        GlassCard(title: "Accounts", systemImage: "person.2.badge.gearshape") {
           HStack(alignment: .center, spacing: 10) {
-            Text("These are the GitHub accounts or app installs Hack can use. Saved profiles decide which provider account a project or node uses.")
+            Text("Saved profiles decide which GitHub account or app install a project or node uses.")
               .font(.mono(.caption))
               .foregroundStyle(.secondary)
             Spacer()
-            Button {
-              toggleGitHubAuthFlow()
-            } label: {
-              Label(
-                isAuthenticating ? "Cancel add account" : "Add account",
-                systemImage: isAuthenticating ? "xmark.circle" : "plus.circle"
-              )
+            if hackAccountState?.authenticated == true {
+              Button {
+                toggleGitHubAuthFlow()
+              } label: {
+                Label(
+                  isAuthenticating ? "Cancel connect" : "Connect account",
+                  systemImage: isAuthenticating ? "xmark.circle" : "plus.circle"
+                )
+              }
+              .adaptiveToolbarButtonProminent()
+            } else {
+              Button("Sign in to Hack") {
+                Task { _ = await model.loginHackAccount() }
+              }
+              .adaptiveToolbarButtonProminent()
             }
-            .adaptiveToolbarButtonProminent()
+          }
+
+          if hackAccountState?.authenticated != true {
+            Text("Sign in to Hack before connecting shared GitHub accounts or app installs.")
+              .font(.mono(.caption))
+              .foregroundStyle(.secondary)
           }
 
           if isAuthenticating {
@@ -4117,12 +4160,6 @@ private struct GitHubExtensionSettingsView: View {
                     } else if profile.mode.lowercased() == "app" {
                       StatusPill(text: "Install missing", tone: .warn)
                     }
-                    if let profileStatus {
-                      StatusPill(
-                        text: profileStatus.tokenResolved ? "Token ready" : "Token missing",
-                        tone: profileStatus.tokenResolved ? .good : .warn
-                      )
-                    }
                     Spacer()
                     if !profile.isDefault {
                       Button {
@@ -4134,12 +4171,12 @@ private struct GitHubExtensionSettingsView: View {
                     }
                   }
 
-                  Text("routing profile: \(profile.id)")
+                  Text("profile id: \(profile.id)")
                     .font(.mono(.caption2))
                     .foregroundStyle(.secondary)
                   if let accountHandle, !accountHandle.isEmpty {
                     let accountNameSuffix = accountName.map { " (\($0))" } ?? ""
-                    Text("provider account: @\(accountHandle)\(accountNameSuffix)")
+                    Text("account: @\(accountHandle)\(accountNameSuffix)")
                       .font(.mono(.caption2))
                       .foregroundStyle(.secondary)
                   }
@@ -4291,17 +4328,8 @@ private struct GitHubExtensionSettingsView: View {
   }
 
   private func refreshGitHubProfileStatuses() async {
-    guard let diagnostics else {
-      profileStatusById = [:]
-      return
-    }
-    var statuses: [String: GitHubStatusResponse] = [:]
-    for profile in diagnostics.profiles {
-      if let status = await model.inspectGitHubStatus(profileId: profile.id) {
-        statuses[profile.id] = status
-      }
-    }
-    profileStatusById = statuses
+    // Passive settings pages should not trigger keychain-backed token resolution.
+    profileStatusById = [:]
   }
 
   private func applyGitHubEnabledToggle(_ newValue: Bool) async {
@@ -4527,7 +4555,7 @@ private struct GitHubExtensionSettingsView: View {
       let activeAuthFlowId,
       let activeAuthStatusURL
     else {
-      message = "GitHub callback received. Use Add account to finish setup."
+      message = "GitHub callback received. Return to GitHub settings to finish setup."
       return
     }
 
@@ -4608,8 +4636,8 @@ private struct TailscaleExtensionSettingsView: View {
     ScrollView {
       LazyVStack(alignment: .leading, spacing: 20) {
         SettingsSectionHeader(
-          breadcrumb: "Settings / Extensions / Tailscale",
-          title: "Tailscale Extension",
+          breadcrumb: "Settings / Tailscale",
+          title: "Tailscale",
           subtitle: "Tailnet-based secure access and remote routing for gateway projects"
         )
         GlassCard(title: "Extension status", systemImage: "network") {
@@ -5420,252 +5448,6 @@ private struct PermissionsSettingsView: View {
         .font(.mono(.caption))
         .foregroundStyle(.secondary)
     }
-  }
-}
-
-private struct ExtensionsSettingsView: View {
-  @Environment(DashboardModel.self) private var model
-  @Binding var selection: SettingsSidebarItem
-  @State private var isLoading = false
-  @State private var isLoadingHackAccount = false
-  @State private var suppressToggleChange = false
-  @State private var hackAccountState: HackAccountSettingsState? = nil
-  @State private var linearEnabled = false
-  @State private var githubEnabled = false
-  @State private var cloudflareEnabled = false
-  @State private var railwayEnabled = false
-  @State private var tailscaleEnabled = false
-
-  var body: some View {
-    ScrollView {
-      VStack(alignment: .leading, spacing: 20) {
-        SettingsSectionHeader(
-          breadcrumb: "Settings / Extensions",
-          title: "Extensions",
-          subtitle: "External connectivity integrations available in this workspace"
-        )
-        InlineCallout(
-          tone: .neutral,
-          title: "Built-ins are hidden",
-          message: "Internal components like gateway, tickets, and supervisor are configured on dedicated system pages and are intentionally omitted from the extension list.",
-          actions: []
-        )
-        HackAccountSettingsCard(
-          state: hackAccountState,
-          isLoading: isLoadingHackAccount,
-          providerName: nil
-        ) {
-          Task { await refreshHackAccountState() }
-        }
-        GlassCard(title: "Managed extensions", systemImage: "puzzlepiece.extension") {
-          VStack(alignment: .leading, spacing: 12) {
-            extensionSummaryRow(
-              item: .linear,
-              name: "Linear",
-              description: "Issue sync profiles, default project routing, and broker-based OAuth account setup.",
-              projectCount: projectCount(for: "dance.hack.linear"),
-              exposure: extensionExposure(id: "linear"),
-              isOn: $linearEnabled
-            )
-            Divider()
-              .opacity(0.2)
-            extensionSummaryRow(
-              item: .github,
-              name: "GitHub",
-              description: "PR automation auth profiles, account routing, and install metadata.",
-              projectCount: projectCount(for: "dance.hack.github"),
-              exposure: extensionExposure(id: "github"),
-              isOn: $githubEnabled
-            )
-            Divider()
-              .opacity(0.2)
-            extensionSummaryRow(
-              item: .cloudflare,
-              name: "Cloudflare",
-              description: "Public HTTPS + SSH tunnel exposure via cloudflared.",
-              projectCount: projectCount(for: "dance.hack.cloudflare"),
-              exposure: extensionExposure(id: "cloudflare"),
-              isOn: $cloudflareEnabled
-            )
-            Divider()
-              .opacity(0.2)
-            extensionSummaryRow(
-              item: .railway,
-              name: "Railway",
-              description: "Remote node provider bootstrap, auth checks, and private tailscale bring-up.",
-              projectCount: projectCount(for: "dance.hack.railway"),
-              exposure: extensionExposure(id: "railway"),
-              isOn: $railwayEnabled
-            )
-            Divider()
-              .opacity(0.2)
-            extensionSummaryRow(
-              item: .tailscale,
-              name: "Tailscale",
-              description: "Tailnet exposure and secure remote access.",
-              projectCount: projectCount(for: "dance.hack.tailscale"),
-              exposure: extensionExposure(id: "tailscale"),
-              isOn: $tailscaleEnabled
-            )
-            if isLoading {
-              HStack(spacing: 8) {
-                ProgressView()
-                  .controlSize(.small)
-                Text("Saving extension settings…")
-                  .font(.mono(.caption))
-                  .foregroundStyle(.secondary)
-              }
-            }
-          }
-        }
-      }
-      .padding(16)
-    }
-    .task {
-      await loadConfigFromDisk()
-      await refreshHackAccountState()
-    }
-    .onChange(of: model.lastUpdated) { _, _ in
-      Task {
-        await loadConfigFromDisk()
-        await refreshHackAccountState()
-      }
-    }
-  }
-
-  private func extensionSummaryRow(
-    item: SettingsSidebarItem,
-    name: String,
-    description: String,
-    projectCount: Int,
-    exposure: GatewayExposure?,
-    isOn: Binding<Bool>
-  ) -> some View {
-    VStack(alignment: .leading, spacing: 6) {
-      HStack(spacing: 8) {
-        Text(name)
-          .font(.mono(.subheadline, weight: .semibold))
-        Spacer()
-        Toggle("", isOn: isOn)
-          .toggleStyle(.switch)
-          .labelsHidden()
-          .onTapGesture {
-            // Prevent row navigation tap when toggling inline.
-          }
-          .onChange(of: isOn.wrappedValue) { _, newValue in
-            guard !suppressToggleChange else { return }
-            Task {
-              await setExtensionEnabled(item: item, enabled: newValue)
-            }
-          }
-        if let exposure {
-          StatusPill(text: exposure.statusLabel, tone: exposure.statusTone)
-        } else {
-          StatusPill(text: "Unknown", tone: .neutral)
-        }
-        Image(systemName: "chevron.right")
-          .font(.mono(.caption))
-          .foregroundStyle(.tertiary)
-      }
-      Text(description)
-        .font(.mono(.caption))
-        .foregroundStyle(.secondary)
-      Text("\(projectCount) project\(projectCount == 1 ? "" : "s") enabled")
-        .font(.mono(.caption2))
-        .foregroundStyle(.tertiary)
-      if let detail = exposure?.detail, !detail.isEmpty {
-        Text(detail)
-          .font(.mono(.caption2))
-          .foregroundStyle(.secondary)
-      }
-    }
-    .contentShape(Rectangle())
-    .onTapGesture {
-      selection = item
-    }
-  }
-
-  private func projectCount(for extensionId: String) -> Int {
-    model.projects.filter { project in
-      canonicalExtensionIds(for: project).contains(extensionId)
-    }.count
-  }
-
-  private func canonicalExtensionIds(for project: ProjectSummary) -> Set<String> {
-    var ids: Set<String> = []
-    for value in (project.extensionsEnabled ?? []) + (project.features ?? []) {
-      let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-      switch normalized {
-      case "linear", "dance.hack.linear":
-        ids.insert("dance.hack.linear")
-      case "cloudflare", "dance.hack.cloudflare":
-        ids.insert("dance.hack.cloudflare")
-      case "github", "dance.hack.github":
-        ids.insert("dance.hack.github")
-      case "railway", "dance.hack.railway":
-        ids.insert("dance.hack.railway")
-      case "tailscale", "dance.hack.tailscale":
-        ids.insert("dance.hack.tailscale")
-      default:
-        continue
-      }
-    }
-    return ids
-  }
-
-  private func extensionExposure(id: String) -> GatewayExposure? {
-    model.globalStatus?.gateway?.exposures?.first(where: { $0.id == id })
-  }
-
-  private func loadConfigFromDisk() async {
-    let snapshot = GlobalConfigSnapshot.load()
-    suppressToggleChange = true
-    linearEnabled = snapshot.linearExtensionEnabled ?? false
-    githubEnabled = snapshot.githubExtensionEnabled ?? false
-    cloudflareEnabled = snapshot.cloudflareExtensionEnabled ?? false
-    railwayEnabled = snapshot.railwayExtensionEnabled ?? false
-    tailscaleEnabled = snapshot.tailscaleExtensionEnabled ?? false
-    suppressToggleChange = false
-  }
-
-  private func refreshHackAccountState() async {
-    isLoadingHackAccount = true
-    defer { isLoadingHackAccount = false }
-    hackAccountState = await model.inspectHackAccountSettingsState()
-  }
-
-  private func setExtensionEnabled(
-    item: SettingsSidebarItem,
-    enabled: Bool
-  ) async {
-    isLoading = true
-    defer { isLoading = false }
-
-    let key: String
-    switch item {
-    case .linear:
-      key = "controlPlane.extensions[\"dance.hack.linear\"].enabled"
-    case .github:
-      key = "controlPlane.extensions[\"dance.hack.github\"].enabled"
-    case .cloudflare:
-      key = "controlPlane.extensions[\"dance.hack.cloudflare\"].enabled"
-    case .railway:
-      key = "controlPlane.extensions[\"dance.hack.railway\"].enabled"
-    case .tailscale:
-      key = "controlPlane.extensions[\"dance.hack.tailscale\"].enabled"
-    default:
-      return
-    }
-
-    let didUpdate = await model.setGlobalConfig(
-      key: key,
-      value: enabled ? "true" : "false"
-    )
-    guard didUpdate else {
-      await loadConfigFromDisk()
-      return
-    }
-    await loadConfigFromDisk()
   }
 }
 

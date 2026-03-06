@@ -353,7 +353,6 @@ export function createBetterAuthShellPlugin({
           body: authLanding.body,
           script: renderProviderActionScript({
             callbackUrl,
-            autoProviderId: authLanding.autoProviderId,
             mode: "sign-in",
           }),
         });
@@ -446,7 +445,6 @@ export function createBetterAuthShellPlugin({
                     deviceCode: query.deviceCode,
                     returnUrl,
                   }),
-                  autoProviderId: null,
                   mode: "link",
                 }),
                 renderLifecycleAutoReturnScript({
@@ -863,23 +861,23 @@ function buildAuthLandingPresentation(input: {
   readonly heading: string;
   readonly subtitle: string;
   readonly body: string;
-  readonly autoProviderId: string | null;
 } {
-  const autoProviderId =
+  const primaryProviderId =
     input.preferredProviderId ??
     (input.socialProviders.length === 1
       ? (input.socialProviders[0]?.id ?? null)
       : null);
-  const autoProvider = autoProviderId
+  const primaryProvider = primaryProviderId
     ? (input.socialProviders.find(
-        (provider) => provider.id === autoProviderId
+        (provider) => provider.id === primaryProviderId
       ) ?? null)
     : null;
   const bodySections = [
     renderAuthLandingPrimarySection({
       socialProviders: input.socialProviders,
-      autoProvider,
+      primaryProvider,
       callbackUrl: input.callbackUrl,
+      isDeviceLinked: Boolean(input.flowId && input.deviceCode),
     }),
     renderFlowHint({
       flowId: input.flowId,
@@ -888,21 +886,20 @@ function buildAuthLandingPresentation(input: {
   ].filter(Boolean);
 
   return {
-    heading: autoProvider
-      ? `Continue in ${autoProvider.label}`
-      : "Sign in to Hack",
-    subtitle: autoProvider
-      ? "Hack will bring you back to the app when sign-in is done."
-      : "Choose a sign-in method for this Mac.",
+    heading: "Sign in to Hack",
+    subtitle:
+      input.flowId && input.deviceCode
+        ? "This request is linked to your Mac."
+        : "Use your Hack account for shared remote features.",
     body: bodySections.join(""),
-    autoProviderId,
   };
 }
 
 function renderAuthLandingPrimarySection(input: {
   readonly socialProviders: readonly BetterAuthSocialProvider[];
-  readonly autoProvider: BetterAuthSocialProvider | null;
+  readonly primaryProvider: BetterAuthSocialProvider | null;
   readonly callbackUrl: string;
+  readonly isDeviceLinked: boolean;
 }): string {
   if (input.socialProviders.length === 0) {
     return renderStateCard({
@@ -912,11 +909,12 @@ function renderAuthLandingPrimarySection(input: {
       tone: "muted",
     });
   }
-  if (input.autoProvider) {
-    return renderAutoRedirectPanel({
-      provider: input.autoProvider,
+  if (input.primaryProvider) {
+    return renderSingleProviderPanel({
+      provider: input.primaryProvider,
       callbackUrl: input.callbackUrl,
       mode: "sign-in",
+      isDeviceLinked: input.isDeviceLinked,
     });
   }
   return renderProviderActionGrid({
@@ -942,20 +940,22 @@ function renderProviderActionGrid(input: {
     .join("")}</div>`;
 }
 
-function renderAutoRedirectPanel(input: {
+function renderSingleProviderPanel(input: {
   readonly provider: BetterAuthSocialProvider;
   readonly callbackUrl: string;
   readonly mode: "sign-in" | "link";
+  readonly isDeviceLinked: boolean;
 }): string {
   return `<section class="hero">
-    <p class="hero-kicker">This page is linked to your Mac</p>
-    <h2>Redirecting to ${escapeHtml(input.provider.label)}</h2>
-    <p class="hero-copy">If nothing happens, continue manually.</p>
+    <p class="hero-copy">${
+      input.isDeviceLinked
+        ? "Continue in the browser to finish setup in Hack Desktop."
+        : "Continue in the browser to open your Hack account."
+    }</p>
     ${renderProviderActionButton({
       provider: input.provider,
       callbackUrl: input.callbackUrl,
       mode: input.mode,
-      compact: true,
     })}
   </section>`;
 }
@@ -964,12 +964,13 @@ function renderProviderActionButton(input: {
   readonly provider: BetterAuthSocialProvider;
   readonly callbackUrl: string;
   readonly mode: "sign-in" | "link";
-  readonly compact?: boolean;
 }): string {
   return `<button class="provider-button ${
     input.mode === "link" ? "provider-button-secondary" : ""
-  } ${input.compact ? "provider-button-compact" : ""}" type="button" data-auth-mode="${input.mode}" data-auth-provider="${escapeHtml(
+  }" type="button" data-auth-mode="${input.mode}" data-auth-provider="${escapeHtml(
     input.provider.id
+  )}" data-auth-provider-label="${escapeHtml(
+    input.provider.label
   )}" data-auth-callback-url="${escapeHtml(input.callbackUrl)}">
       <span class="provider-mark" aria-hidden="true">${escapeHtml(
         input.provider.label.slice(0, 1)
@@ -996,7 +997,6 @@ function renderFlowHint(input: {
 
 function renderProviderActionScript(input: {
   readonly callbackUrl: string;
-  readonly autoProviderId: string | null;
   readonly mode: "sign-in" | "link";
 }): string {
   return `
@@ -1009,6 +1009,8 @@ const authEndpoints = {
 
 async function runAuthAction(button) {
   const provider = button.getAttribute("data-auth-provider");
+  const providerLabel =
+    button.getAttribute("data-auth-provider-label") || "provider";
   const mode = button.getAttribute("data-auth-mode") || ${JSON.stringify(
     input.mode
   )};
@@ -1022,7 +1024,10 @@ async function runAuthAction(button) {
   button.disabled = true;
   button.classList.add("is-loading");
   if (authStatus) {
-    authStatus.textContent = mode === "link" ? "Linking provider..." : "Redirecting to provider...";
+    authStatus.textContent =
+      mode === "link"
+        ? "Linking " + providerLabel + "…"
+        : "Opening " + providerLabel + "…";
   }
   try {
     const response = await fetch(authEndpoints[mode] || authEndpoints["sign-in"], {
@@ -1068,18 +1073,6 @@ async function runAuthAction(button) {
 
 for (const button of authButtons) {
   button.addEventListener("click", () => void runAuthAction(button));
-}
-
-const autoProviderId = ${JSON.stringify(input.autoProviderId)};
-if (autoProviderId) {
-  const target = document.querySelector(
-    '[data-auth-provider="' + CSS.escape(autoProviderId) + '"]'
-  );
-  if (target instanceof HTMLButtonElement) {
-    window.requestAnimationFrame(() => {
-      void runAuthAction(target);
-    });
-  }
 }
 `;
 }
@@ -1142,14 +1135,14 @@ function renderHtmlPage(input: {
     <style>
       :root {
         color-scheme: light;
-        --bg: #f3f5f8;
-        --panel: rgba(255, 255, 255, 0.82);
+        --bg: #f4f4f5;
+        --panel: #ffffff;
         --text: #111827;
-        --muted: #667085;
-        --line: rgba(15, 23, 42, 0.08);
+        --muted: #6b7280;
+        --line: #e5e7eb;
         --accent: #0f172a;
-        --accent-strong: #2563eb;
-        --accent-soft: rgba(37, 99, 235, 0.1);
+        --accent-strong: #0f172a;
+        --accent-soft: #f3f4f6;
         --warning: #b45309;
         --danger: #b91c1c;
         --success: #047857;
@@ -1160,10 +1153,7 @@ function renderHtmlPage(input: {
         margin: 0;
         min-height: 100vh;
         font-family: "SF Pro Display", "Helvetica Neue", sans-serif;
-        background:
-          radial-gradient(circle at top left, rgba(37, 99, 235, 0.16), transparent 26rem),
-          radial-gradient(circle at bottom right, rgba(15, 23, 42, 0.08), transparent 30rem),
-          linear-gradient(180deg, #f8fafc 0%, var(--bg) 100%);
+        background: var(--bg);
         color: var(--text);
         display: grid;
         place-items: center;
@@ -1175,12 +1165,11 @@ function renderHtmlPage(input: {
       }
 
       .shell {
-        padding: 1.35rem;
-        border-radius: 1.5rem;
+        padding: 1.5rem;
+        border-radius: 1.25rem;
         border: 1px solid var(--line);
         background: var(--panel);
-        backdrop-filter: blur(18px);
-        box-shadow: 0 24px 60px rgba(15, 23, 42, 0.08);
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
       }
 
       .brand {
@@ -1232,7 +1221,7 @@ function renderHtmlPage(input: {
         border-radius: 999px;
         display: grid;
         place-items: center;
-        background: linear-gradient(135deg, var(--accent-strong), #7c3aed);
+        background: var(--accent);
         color: white;
         font-weight: 700;
       }
@@ -1270,21 +1259,6 @@ function renderHtmlPage(input: {
       .hero {
         display: grid;
         gap: 0.6rem;
-      }
-
-      .hero h2 {
-        margin: 0;
-        font-size: 1.08rem;
-        line-height: 1.15;
-      }
-
-      .hero-kicker {
-        margin: 0;
-        color: var(--muted);
-        font-size: 0.78rem;
-        font-weight: 600;
-        letter-spacing: 0.05em;
-        text-transform: uppercase;
       }
 
       .hero-copy {
@@ -1360,38 +1334,34 @@ function renderHtmlPage(input: {
       .provider-button {
         appearance: none;
         width: 100%;
-        border: 1px solid rgba(37, 99, 235, 0.12);
+        border: 1px solid var(--accent);
         border-radius: 0.95rem;
         padding: 0.88rem 0.95rem;
-        background: linear-gradient(135deg, var(--accent) 0%, #1d4ed8 100%);
+        background: var(--accent);
         color: white;
         font-size: 0.97rem;
         font-weight: 680;
         letter-spacing: 0.01em;
         cursor: pointer;
-        transition: transform 120ms ease, opacity 120ms ease, box-shadow 120ms ease;
+        transition: opacity 120ms ease, background 120ms ease;
         display: inline-flex;
         align-items: center;
         justify-content: center;
         gap: 0.7rem;
       }
 
-      .provider-button:hover { transform: translateY(-1px); box-shadow: 0 14px 28px rgba(29, 78, 216, 0.18); }
-      .provider-button:disabled { opacity: 0.7; cursor: progress; transform: none; }
+      .provider-button:hover { background: #1f2937; }
+      .provider-button:disabled { opacity: 0.7; cursor: progress; }
       .provider-button.is-loading { opacity: 0.76; }
 
       .provider-button-secondary {
-        background: rgba(255, 255, 255, 0.82);
+        background: #ffffff;
         color: var(--text);
         border-color: var(--line);
       }
 
       .provider-button-secondary:hover {
-        box-shadow: 0 12px 24px rgba(15, 23, 42, 0.08);
-      }
-
-      .provider-button-compact {
-        justify-content: flex-start;
+        background: #f9fafb;
       }
 
       .provider-mark {
@@ -1400,7 +1370,7 @@ function renderHtmlPage(input: {
         border-radius: 999px;
         display: grid;
         place-items: center;
-        background: rgba(255, 255, 255, 0.18);
+        background: rgba(255, 255, 255, 0.14);
         font-size: 0.78rem;
         font-weight: 700;
       }
@@ -1449,8 +1419,8 @@ function renderHtmlPage(input: {
         margin-left: 0.35rem;
         padding: 0.38rem 0.72rem;
         border-radius: 999px;
-        border: 1px solid rgba(37, 99, 235, 0.16);
-        background: rgba(37, 99, 235, 0.08);
+        border: 1px solid var(--line);
+        background: #ffffff;
         font-size: 0.88rem;
         font-weight: 600;
       }

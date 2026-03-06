@@ -424,13 +424,18 @@ describe("auth broker github flow routes", () => {
     });
 
     const response = await app.handle(
-      new Request("http://localhost/auth?provider=github")
+      new Request(
+        "http://localhost/auth?provider=github&flowId=test-flow&deviceCode=test-device"
+      )
     );
     expect(response.status).toBe(200);
     const html = await response.text();
-    expect(html).toContain("Continue in GitHub");
+    expect(html).toContain("Sign in to Hack");
+    expect(html).toContain("This request is linked to your Mac.");
     expect(html).toContain("Continue with GitHub");
-    expect(html).toContain("If nothing happens");
+    expect(html).toContain("finish setup in Hack Desktop");
+    expect(html).not.toContain("Redirecting to GitHub");
+    expect(html).not.toContain("If nothing happens");
     expect(html).toContain("/api/auth/sign-in/social");
   });
 

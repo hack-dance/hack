@@ -29,6 +29,12 @@ const applyDeliveryParamsSchema = t.Object({
   deliveryId: t.String(),
 });
 
+const applyDeliveryBodySchema = t.Optional(
+  t.Object({
+    claimedBy: t.Optional(t.String()),
+  })
+);
+
 /**
  * Routes for pending Linear webhook deliveries consumed by local clients.
  */
@@ -102,7 +108,7 @@ export function createLinearSyncStorePlugin({
     )
     .post(
       "/v1/auth/linear/deliveries/:deliveryId/apply",
-      async ({ params, request, set }) => {
+      async ({ body, params, request, set }) => {
         const session = await resolveBetterAuthSession({
           runtime: betterAuthRuntime,
           request,
@@ -136,6 +142,11 @@ export function createLinearSyncStorePlugin({
         }
         const delivery = await syncStore.markWebhookDeliveryApplied({
           deliveryId: params.deliveryId,
+          claimedBy:
+            typeof body?.claimedBy === "string" &&
+            body.claimedBy.trim().length > 0
+              ? body.claimedBy.trim()
+              : null,
         });
         if (!delivery) {
           set.status = 404;
@@ -150,6 +161,7 @@ export function createLinearSyncStorePlugin({
         } as const;
       },
       {
+        body: applyDeliveryBodySchema,
         params: applyDeliveryParamsSchema,
       }
     );

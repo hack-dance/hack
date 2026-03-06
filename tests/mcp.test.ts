@@ -44,6 +44,7 @@ testIntegration(
     expect(names).toContain("hack.linear.project.link");
     expect(names).toContain("hack.linear.project.unlink");
     expect(names).toContain("hack.linear.sync.project");
+    expect(names).toContain("hack.linear.autosync.run");
     expect(names).toContain("hack.linear.deliveries.list");
     expect(names).toContain("hack.linear.deliveries.apply");
     expect(names).toContain("hack.linear.subscriptions.list");
@@ -170,6 +171,45 @@ testIntegration(
       additionalProjects: [],
       additionalProjectChanged: true,
       removedProjectId: "proj-1",
+    });
+  }
+);
+
+testIntegration(
+  "hack.linear.autosync.run forwards project and team filters",
+  { timeout: 20_000 },
+  async () => {
+    const mcp = await startMcpClient();
+    const result = await mcp.callTool({
+      name: "hack.linear.autosync.run",
+      arguments: {
+        projectId: "proj-1",
+        teamId: "team-1",
+        limit: 5,
+      },
+    });
+
+    const structured = result.structuredContent as {
+      ok: boolean;
+      data?: unknown;
+    };
+
+    expect(result.isError).toBeUndefined();
+    expect(structured.ok).toBe(true);
+    expect(structured.data).toEqual({
+      ok: true,
+      subscribedRoutes: 1,
+      processedDeliveries: 5,
+      appliedDeliveries: 2,
+      skippedDeliveries: 0,
+      failedDeliveries: 0,
+      created: 1,
+      updated: 1,
+      commentsPulled: 0,
+      conflictsRecorded: 0,
+      checkpointsRecorded: 2,
+      projectIds: ["proj-1"],
+      teamId: "team-1",
     });
   }
 );
@@ -517,6 +557,16 @@ function buildHackStubScript(): string {
     '    const projectIdIndex = args.indexOf("--project-id")',
     "    const removedProjectId = projectIdIndex === -1 ? null : args[projectIdIndex + 1]",
     '    console.log(JSON.stringify({ ok: true, profileId: "default", projectId: "proj-default", projectName: "Default Project", teamId: "team-default", additionalProjects: [], additionalProjectChanged: true, removedProjectId }))',
+    "    process.exit(0)",
+    "  }",
+    '  if (sub === "run-autosync") {',
+    '    const projectIdIndex = args.indexOf("--project-id")',
+    '    const teamIdIndex = args.indexOf("--team-id")',
+    '    const limitIndex = args.indexOf("--limit")',
+    '    const projectId = projectIdIndex === -1 ? "proj-default" : args[projectIdIndex + 1]',
+    "    const teamId = teamIdIndex === -1 ? null : args[teamIdIndex + 1]",
+    "    const limit = limitIndex === -1 ? 2 : Number(args[limitIndex + 1])",
+    "    console.log(JSON.stringify({ ok: true, subscribedRoutes: 1, processedDeliveries: limit, appliedDeliveries: 2, skippedDeliveries: 0, failedDeliveries: 0, created: 1, updated: 1, commentsPulled: 0, conflictsRecorded: 0, checkpointsRecorded: 2, projectIds: [projectId], teamId }))",
     "    process.exit(0)",
     "  }",
     '  if (sub === "deliveries") {',

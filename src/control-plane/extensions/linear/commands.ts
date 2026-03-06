@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { hostname } from "node:os";
 
 import { secrets } from "bun";
 
@@ -1340,6 +1341,109 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
     },
   },
   {
+    name: "run-autosync",
+    summary:
+      "Consume subscribed pending Linear deliveries for the current project and apply them after local sync",
+    scope: "project",
+    allowWhenDisabled: true,
+    handler: async ({ ctx, args }) => {
+      if (!ctx.project) {
+        ctx.logger.error({ message: "No project found. Run inside a repo." });
+        return 1;
+      }
+
+      const parsed = parseRunAutosyncArgs({ args });
+      if (!parsed.ok) {
+        ctx.logger.error({ message: parsed.error });
+        return 1;
+      }
+
+      const result = await runProjectLinearAutosync({
+        binding: resolveProjectLinearBinding({
+          controlPlaneConfig: ctx.controlPlaneConfig,
+        }),
+        profileId: parsed.value.profileId,
+        projectId: parsed.value.projectId,
+        teamId: parsed.value.teamId,
+        limit: parsed.value.limit,
+        syncToggles: resolveSyncToggles({
+          controlPlaneConfig: ctx.controlPlaneConfig,
+          labelsOverride: parsed.value.syncLabels,
+        }),
+        deps: {
+          createRuntime: async ({ profileId }) =>
+            await createSyncRuntime({
+              ctx,
+              profileId,
+            }),
+          listSubscriptions: async ({ profileId, projectId, teamId }) =>
+            await listLinearAutosyncSubscriptions({
+              controlPlaneConfig: ctx.controlPlaneConfig,
+              profileId,
+              projectId,
+              teamId,
+            }),
+          listDeliveries: async ({
+            profileId,
+            status,
+            projectId,
+            teamId,
+            limit,
+          }) =>
+            await listLinearDeliveries({
+              controlPlaneConfig: ctx.controlPlaneConfig,
+              profileId,
+              status,
+              projectId,
+              teamId,
+              limit,
+            }),
+          syncIssue: async ({ runtime, delivery, syncToggles }) =>
+            await syncLinearDeliveryToTicket({
+              runtime: runtime as LinearToHackRuntime,
+              delivery,
+              syncToggles,
+            }),
+          syncProject: async ({ runtime, projectIds, limit, syncToggles }) =>
+            await syncProjectFromLinearProjectsToTickets({
+              runtime: runtime as SyncRuntime,
+              projectIds,
+              limit,
+              syncToggles,
+            }),
+          applyDelivery: async ({ profileId, deliveryId, claimedBy }) =>
+            await applyLinearDelivery({
+              controlPlaneConfig: ctx.controlPlaneConfig,
+              profileId,
+              deliveryId,
+              claimedBy,
+            }),
+          claimedBy: buildLinearAutosyncClaimedBy(),
+        },
+      });
+      if (!result.ok) {
+        ctx.logger.error({ message: result.error });
+        return 1;
+      }
+
+      if (parsed.value.json) {
+        process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      } else {
+        await display.kv({
+          title: "Linear autosync run",
+          entries: [
+            ["subscribed_routes", String(result.subscribedRoutes)],
+            ["processed_deliveries", String(result.processedDeliveries)],
+            ["applied_deliveries", String(result.appliedDeliveries)],
+            ["failed_deliveries", String(result.failedDeliveries)],
+            ["updated", String(result.updated)],
+          ],
+        });
+      }
+      return 0;
+    },
+  },
+  {
     name: "deliveries",
     summary:
       "List pending/applied Linear webhook deliveries from the auth broker",
@@ -2171,6 +2275,15 @@ type DeliveriesArgs = {
   json: boolean;
 };
 
+type RunAutosyncArgs = {
+  profileId?: string;
+  projectId?: string;
+  teamId?: string;
+  limit?: number;
+  syncLabels?: boolean;
+  json: boolean;
+};
+
 type ApplyDeliveryArgs = {
   profileId?: string;
   deliveryId: string;
@@ -2253,7 +2366,7 @@ type LinearToHackRuntime = {
   >;
   readonly linear: Pick<
     LinearSyncClient,
-    "getIssueByIdentifier" | "listIssueComments"
+    "getIssueById" | "getIssueByIdentifier" | "listIssueComments"
   >;
   readonly profileId: string;
 };
@@ -2562,6 +2675,12 @@ type SyncTicketToLinearSuccess = {
 type LinearDeliverySummary = {
   readonly id: string;
   readonly status: string;
+  readonly profileId?: string;
+  readonly projectId?: string;
+  readonly teamId?: string;
+  readonly issueId?: string;
+  readonly issueIdentifier?: string;
+  readonly claimedBy?: string;
   readonly eventType?: string;
   readonly action?: string;
   readonly receivedAt?: string;
@@ -3105,6 +3224,35 @@ type BrokerApplyDeliveryPayload = {
   readonly status: string;
 };
 
+type LinearAutosyncRunDeliveryOutcome = {
+  readonly deliveryId: string;
+  readonly profileId: string;
+  readonly projectId?: string;
+  readonly teamId?: string;
+  readonly issueId?: string;
+  readonly issueIdentifier?: string;
+  readonly mode: "issue" | "project";
+  readonly status: "applied" | "skipped" | "failed";
+  readonly ticketId?: string;
+  readonly reason?: string;
+};
+
+type LinearAutosyncRunSuccess = {
+  readonly ok: true;
+  readonly subscribedRoutes: number;
+  readonly processedDeliveries: number;
+  readonly appliedDeliveries: number;
+  readonly skippedDeliveries: number;
+  readonly failedDeliveries: number;
+  readonly created: number;
+  readonly updated: number;
+  readonly commentsPulled: number;
+  readonly conflictsRecorded: number;
+  readonly checkpointsRecorded: number;
+  readonly projectIds: readonly string[];
+  readonly deliveries: readonly LinearAutosyncRunDeliveryOutcome[];
+};
+
 type LinearAutosyncSubscriptionSummary = {
   readonly id: string;
   readonly profileId: string;
@@ -3125,23 +3273,108 @@ type BrokerAutosyncSubscriptionMutationPayload = {
   readonly subscription: LinearAutosyncSubscriptionSummary;
 };
 
-async function syncIssueFromLinearToTicket(input: {
+type ProjectLinearAutosyncDeps<TRuntime> = {
+  readonly createRuntime: (input: {
+    readonly profileId?: string;
+  }) => Promise<
+    | { readonly ok: true; readonly value: TRuntime }
+    | { readonly ok: false; readonly error: string }
+  >;
+  readonly listSubscriptions: (input: {
+    readonly profileId: string;
+    readonly projectId?: string;
+    readonly teamId?: string;
+  }) => Promise<
+    | {
+        readonly ok: true;
+        readonly data: BrokerListAutosyncSubscriptionsPayload;
+      }
+    | { readonly ok: false; readonly error: string }
+  >;
+  readonly listDeliveries: (input: {
+    readonly profileId: string;
+    readonly status?: LinearDeliveryStatus;
+    readonly projectId?: string;
+    readonly teamId?: string;
+    readonly limit?: number;
+  }) => Promise<
+    | { readonly ok: true; readonly data: BrokerListDeliveriesPayload }
+    | { readonly ok: false; readonly error: string }
+  >;
+  readonly syncIssue: (input: {
+    readonly runtime: TRuntime;
+    readonly delivery: LinearDeliverySummary;
+    readonly syncToggles: SyncToggles;
+  }) => Promise<
+    SyncTicketFromLinearSuccess | { readonly ok: false; readonly error: string }
+  >;
+  readonly syncProject: (input: {
+    readonly runtime: TRuntime;
+    readonly projectIds: readonly string[];
+    readonly limit?: number;
+    readonly syncToggles: SyncToggles;
+  }) => Promise<
+    | {
+        readonly ok: true;
+        readonly projectIds: readonly string[];
+        readonly processed: number;
+        readonly created: number;
+        readonly updated: number;
+        readonly commentsPulled: number;
+        readonly conflictsRecorded: number;
+        readonly checkpointsRecorded: number;
+      }
+    | { readonly ok: false; readonly error: string }
+  >;
+  readonly applyDelivery: (input: {
+    readonly profileId: string;
+    readonly deliveryId: string;
+    readonly claimedBy?: string;
+  }) => Promise<
+    | { readonly ok: true; readonly data: BrokerApplyDeliveryPayload }
+    | { readonly ok: false; readonly error: string }
+  >;
+  readonly claimedBy?: string;
+};
+
+async function syncLinearDeliveryToTicket(input: {
   readonly runtime: LinearToHackRuntime;
-  readonly issueIdentifier: string;
+  readonly delivery: Pick<LinearDeliverySummary, "issueIdentifier" | "issueId">;
   readonly syncToggles: SyncToggles;
 }): Promise<
   SyncTicketFromLinearSuccess | { readonly ok: false; readonly error: string }
 > {
-  const issueResult = await input.runtime.linear.getIssueByIdentifier({
-    identifier: input.issueIdentifier,
-  });
+  const issueIdentifier = readOptionalString(input.delivery.issueIdentifier);
+  const issueId = readOptionalString(input.delivery.issueId);
+  let issueResult: Awaited<
+    ReturnType<LinearToHackRuntime["linear"]["getIssueByIdentifier"]>
+  > | null = null;
+  if (issueIdentifier) {
+    issueResult = await input.runtime.linear.getIssueByIdentifier({
+      identifier: issueIdentifier,
+    });
+  } else if (issueId) {
+    issueResult = await input.runtime.linear.getIssueById({
+      issueId,
+    });
+  }
+
+  if (!issueResult) {
+    return {
+      ok: false,
+      error:
+        "Linear delivery does not include an issue identifier or issue id.",
+    };
+  }
   if (!issueResult.ok) {
     return { ok: false, error: issueResult.error };
   }
   if (!issueResult.data) {
     return {
       ok: false,
-      error: `Linear issue not found: ${input.issueIdentifier}`,
+      error: issueIdentifier
+        ? `Linear issue not found: ${issueIdentifier}`
+        : `Linear issue not found: ${issueId}`,
     };
   }
 
@@ -3152,6 +3385,22 @@ async function syncIssueFromLinearToTicket(input: {
     dependencyIndex: await buildLinearDependencyIndex({
       tickets: input.runtime.tickets,
     }),
+  });
+}
+
+async function syncIssueFromLinearToTicket(input: {
+  readonly runtime: LinearToHackRuntime;
+  readonly issueIdentifier: string;
+  readonly syncToggles: SyncToggles;
+}): Promise<
+  SyncTicketFromLinearSuccess | { readonly ok: false; readonly error: string }
+> {
+  return await syncLinearDeliveryToTicket({
+    runtime: input.runtime,
+    delivery: {
+      issueIdentifier: input.issueIdentifier,
+    },
+    syncToggles: input.syncToggles,
   });
 }
 
@@ -3562,6 +3811,315 @@ async function syncProjectFromLinearProjectsToTickets(input: {
     commentsPulled: upserted.commentsPulled,
     conflictsRecorded: upserted.conflictsRecorded,
     checkpointsRecorded: upserted.checkpointsRecorded,
+  };
+}
+
+function buildLinearAutosyncClaimedBy(): string {
+  const user =
+    readOptionalString(process.env.USER) ??
+    readOptionalString(process.env.LOGNAME) ??
+    "hack";
+  const host = readOptionalString(hostname());
+  return host ? `${user}@${host}` : user;
+}
+
+function hasActiveAutosyncSubscription(input: {
+  readonly subscriptions: readonly LinearAutosyncSubscriptionSummary[];
+  readonly projectId: string;
+  readonly teamId?: string;
+}): boolean {
+  const normalizedTeamId = readOptionalString(input.teamId) ?? undefined;
+  return input.subscriptions.some(
+    (subscription) =>
+      subscription.mode === "auto_apply" &&
+      subscription.status === "active" &&
+      subscription.projectId === input.projectId &&
+      (subscription.teamId ?? undefined) === normalizedTeamId
+  );
+}
+
+async function runProjectLinearAutosync<TRuntime>(input: {
+  readonly binding: ResolvedLinearProjectBinding;
+  readonly profileId?: string;
+  readonly projectId?: string;
+  readonly teamId?: string;
+  readonly limit?: number;
+  readonly syncToggles: SyncToggles;
+  readonly deps: ProjectLinearAutosyncDeps<TRuntime>;
+}): Promise<
+  LinearAutosyncRunSuccess | { readonly ok: false; readonly error: string }
+> {
+  const targets = resolveProjectPullTargets({
+    binding: input.binding,
+    explicitProjectId: input.projectId,
+  });
+  if (targets.length === 0) {
+    return {
+      ok: false,
+      error:
+        "Missing project id. Pass --project-id, bind a default project, or add additional linked projects first.",
+    };
+  }
+
+  let subscribedRoutes = 0;
+  let processedDeliveries = 0;
+  let appliedDeliveries = 0;
+  const skippedDeliveries = 0;
+  let failedDeliveries = 0;
+  let created = 0;
+  let updated = 0;
+  let commentsPulled = 0;
+  let conflictsRecorded = 0;
+  let checkpointsRecorded = 0;
+  const syncedProjectIds = new Set<string>();
+  const deliveries: LinearAutosyncRunDeliveryOutcome[] = [];
+
+  for (const target of targets) {
+    const profileId =
+      readOptionalString(input.profileId) ??
+      readOptionalString(target.profileId) ??
+      readOptionalString(input.binding.profileId);
+    if (!profileId) {
+      return {
+        ok: false,
+        error: `No Linear profile configured for project route ${target.projectId}.`,
+      };
+    }
+
+    const effectiveTeamId =
+      readOptionalString(input.teamId) ?? readOptionalString(target.teamId);
+    const subscriptions = await input.deps.listSubscriptions({
+      profileId,
+      projectId: target.projectId,
+      ...(effectiveTeamId ? { teamId: effectiveTeamId } : {}),
+    });
+    if (!subscriptions.ok) {
+      return { ok: false, error: subscriptions.error };
+    }
+    if (
+      !hasActiveAutosyncSubscription({
+        subscriptions: subscriptions.data.subscriptions,
+        projectId: target.projectId,
+        ...(effectiveTeamId ? { teamId: effectiveTeamId } : {}),
+      })
+    ) {
+      continue;
+    }
+    subscribedRoutes += 1;
+
+    const listedDeliveries = await input.deps.listDeliveries({
+      profileId,
+      status: "pending",
+      projectId: target.projectId,
+      ...(effectiveTeamId ? { teamId: effectiveTeamId } : {}),
+      ...(input.limit ? { limit: input.limit } : {}),
+    });
+    if (!listedDeliveries.ok) {
+      return { ok: false, error: listedDeliveries.error };
+    }
+    if (listedDeliveries.data.deliveries.length === 0) {
+      continue;
+    }
+
+    const runtime = await input.deps.createRuntime({ profileId });
+    if (!runtime.ok) {
+      return { ok: false, error: runtime.error };
+    }
+
+    const issueDeliveryGroups = new Map<string, LinearDeliverySummary[]>();
+    const projectDeliveries: LinearDeliverySummary[] = [];
+    for (const delivery of listedDeliveries.data.deliveries) {
+      const issueIdentifier = readOptionalString(delivery.issueIdentifier);
+      const issueId = readOptionalString(delivery.issueId);
+      if (issueIdentifier || issueId) {
+        const key = issueIdentifier
+          ? `identifier:${issueIdentifier}`
+          : `id:${issueId}`;
+        const existing = issueDeliveryGroups.get(key) ?? [];
+        existing.push(delivery);
+        issueDeliveryGroups.set(key, existing);
+        continue;
+      }
+      projectDeliveries.push(delivery);
+    }
+
+    for (const groupedDeliveries of issueDeliveryGroups.values()) {
+      processedDeliveries += groupedDeliveries.length;
+      const delivery = groupedDeliveries[0];
+      if (!delivery) {
+        continue;
+      }
+      const synced = await input.deps.syncIssue({
+        runtime: runtime.value,
+        delivery,
+        syncToggles: input.syncToggles,
+      });
+      if (!synced.ok) {
+        failedDeliveries += groupedDeliveries.length;
+        deliveries.push(
+          ...groupedDeliveries.map((groupedDelivery) => ({
+            deliveryId: groupedDelivery.id,
+            profileId,
+            ...(groupedDelivery.projectId
+              ? { projectId: groupedDelivery.projectId }
+              : {}),
+            ...(groupedDelivery.teamId
+              ? { teamId: groupedDelivery.teamId }
+              : {}),
+            ...(groupedDelivery.issueId
+              ? { issueId: groupedDelivery.issueId }
+              : {}),
+            ...(groupedDelivery.issueIdentifier
+              ? { issueIdentifier: groupedDelivery.issueIdentifier }
+              : {}),
+            mode: "issue" as const,
+            status: "failed" as const,
+            reason: synced.error,
+          }))
+        );
+        continue;
+      }
+
+      if (synced.operation === "created") {
+        created += 1;
+      } else {
+        updated += 1;
+      }
+      commentsPulled += synced.commentsPulled;
+      conflictsRecorded += synced.conflictsRecorded;
+      checkpointsRecorded += synced.checkpointRecorded ? 1 : 0;
+      syncedProjectIds.add(target.projectId);
+
+      for (const groupedDelivery of groupedDeliveries) {
+        const applied = await input.deps.applyDelivery({
+          profileId,
+          deliveryId: groupedDelivery.id,
+          ...(input.deps.claimedBy ? { claimedBy: input.deps.claimedBy } : {}),
+        });
+        if (!applied.ok) {
+          failedDeliveries += 1;
+          deliveries.push({
+            deliveryId: groupedDelivery.id,
+            profileId,
+            ...(groupedDelivery.projectId
+              ? { projectId: groupedDelivery.projectId }
+              : {}),
+            ...(groupedDelivery.teamId
+              ? { teamId: groupedDelivery.teamId }
+              : {}),
+            ...(groupedDelivery.issueId
+              ? { issueId: groupedDelivery.issueId }
+              : {}),
+            ...(groupedDelivery.issueIdentifier
+              ? { issueIdentifier: groupedDelivery.issueIdentifier }
+              : {}),
+            mode: "issue",
+            status: "failed",
+            ticketId: synced.ticketId,
+            reason: applied.error,
+          });
+          continue;
+        }
+        appliedDeliveries += 1;
+        deliveries.push({
+          deliveryId: groupedDelivery.id,
+          profileId,
+          ...(groupedDelivery.projectId
+            ? { projectId: groupedDelivery.projectId }
+            : {}),
+          ...(groupedDelivery.teamId ? { teamId: groupedDelivery.teamId } : {}),
+          ...(groupedDelivery.issueId
+            ? { issueId: groupedDelivery.issueId }
+            : {}),
+          ...(groupedDelivery.issueIdentifier
+            ? { issueIdentifier: groupedDelivery.issueIdentifier }
+            : {}),
+          mode: "issue",
+          status: "applied",
+          ticketId: synced.ticketId,
+        });
+      }
+    }
+
+    if (projectDeliveries.length > 0) {
+      processedDeliveries += projectDeliveries.length;
+      const synced = await input.deps.syncProject({
+        runtime: runtime.value,
+        projectIds: [target.projectId],
+        ...(input.limit ? { limit: input.limit } : {}),
+        syncToggles: input.syncToggles,
+      });
+      if (synced.ok) {
+        created += synced.created;
+        updated += synced.updated;
+        commentsPulled += synced.commentsPulled;
+        conflictsRecorded += synced.conflictsRecorded;
+        checkpointsRecorded += synced.checkpointsRecorded;
+        for (const projectId of synced.projectIds) {
+          syncedProjectIds.add(projectId);
+        }
+        for (const delivery of projectDeliveries) {
+          const applied = await input.deps.applyDelivery({
+            profileId,
+            deliveryId: delivery.id,
+            ...(input.deps.claimedBy
+              ? { claimedBy: input.deps.claimedBy }
+              : {}),
+          });
+          if (!applied.ok) {
+            failedDeliveries += 1;
+            deliveries.push({
+              deliveryId: delivery.id,
+              profileId,
+              ...(delivery.projectId ? { projectId: delivery.projectId } : {}),
+              ...(delivery.teamId ? { teamId: delivery.teamId } : {}),
+              mode: "project",
+              status: "failed",
+              reason: applied.error,
+            });
+            continue;
+          }
+          appliedDeliveries += 1;
+          deliveries.push({
+            deliveryId: delivery.id,
+            profileId,
+            ...(delivery.projectId ? { projectId: delivery.projectId } : {}),
+            ...(delivery.teamId ? { teamId: delivery.teamId } : {}),
+            mode: "project",
+            status: "applied",
+          });
+        }
+      } else {
+        failedDeliveries += projectDeliveries.length;
+        deliveries.push(
+          ...projectDeliveries.map((delivery) => ({
+            deliveryId: delivery.id,
+            profileId,
+            ...(delivery.projectId ? { projectId: delivery.projectId } : {}),
+            ...(delivery.teamId ? { teamId: delivery.teamId } : {}),
+            mode: "project" as const,
+            status: "failed" as const,
+            reason: synced.error,
+          }))
+        );
+      }
+    }
+  }
+
+  return {
+    ok: true,
+    subscribedRoutes,
+    processedDeliveries,
+    appliedDeliveries,
+    skippedDeliveries,
+    failedDeliveries,
+    created,
+    updated,
+    commentsPulled,
+    conflictsRecorded,
+    checkpointsRecorded,
+    projectIds: [...syncedProjectIds],
+    deliveries,
   };
 }
 
@@ -5158,6 +5716,8 @@ async function listLinearDeliveries(input: {
   readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
   readonly profileId?: string;
   readonly status?: LinearDeliveryStatus;
+  readonly projectId?: string;
+  readonly teamId?: string;
   readonly limit?: number;
 }): Promise<
   | { readonly ok: true; readonly data: BrokerListDeliveriesPayload }
@@ -5180,6 +5740,12 @@ async function listLinearDeliveries(input: {
   const query = new URLSearchParams();
   if (input.status) {
     query.set("status", input.status);
+  }
+  if (input.projectId) {
+    query.set("projectId", input.projectId);
+  }
+  if (input.teamId) {
+    query.set("teamId", input.teamId);
   }
   if (normalizedLimit > 0) {
     query.set("limit", String(normalizedLimit));
@@ -5227,6 +5793,7 @@ async function applyLinearDelivery(input: {
   readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
   readonly profileId?: string;
   readonly deliveryId: string;
+  readonly claimedBy?: string;
 }): Promise<
   | { readonly ok: true; readonly data: BrokerApplyDeliveryPayload }
   | { readonly ok: false; readonly error: string }
@@ -5258,6 +5825,13 @@ async function applyLinearDelivery(input: {
           "content-type": "application/json",
           ...brokerAuth.headers,
         },
+        ...(input.claimedBy
+          ? {
+              body: JSON.stringify({
+                claimedBy: input.claimedBy,
+              }),
+            }
+          : {}),
       },
     });
     if (!response.ok) {
@@ -5531,6 +6105,24 @@ function parseLinearDeliverySummary(input: {
   return {
     id,
     status,
+    ...(readOptionalString(input.value.profileId)
+      ? { profileId: readOptionalString(input.value.profileId) }
+      : {}),
+    ...(readOptionalString(input.value.projectId)
+      ? { projectId: readOptionalString(input.value.projectId) }
+      : {}),
+    ...(readOptionalString(input.value.teamId)
+      ? { teamId: readOptionalString(input.value.teamId) }
+      : {}),
+    ...(readOptionalString(input.value.issueId)
+      ? { issueId: readOptionalString(input.value.issueId) }
+      : {}),
+    ...(readOptionalString(input.value.issueIdentifier)
+      ? { issueIdentifier: readOptionalString(input.value.issueIdentifier) }
+      : {}),
+    ...(readOptionalString(input.value.claimedBy)
+      ? { claimedBy: readOptionalString(input.value.claimedBy) }
+      : {}),
     ...(readOptionalString(input.value.eventType)
       ? { eventType: readOptionalString(input.value.eventType) }
       : {}),
@@ -5557,11 +6149,17 @@ function parseLinearDeliveryApplyPayload(input: {
   if (!isRecord(input.payload)) {
     return null;
   }
+  const deliveryRecord = isRecord(input.payload.delivery)
+    ? input.payload.delivery
+    : input.payload;
   const deliveryId =
     readOptionalString(input.payload.deliveryId) ??
-    readOptionalString(input.payload.id) ??
+    readOptionalString(deliveryRecord.deliveryId) ??
+    readOptionalString(deliveryRecord.id) ??
     input.deliveryId;
-  const status = readOptionalString(input.payload.status);
+  const status =
+    readOptionalString(input.payload.status) ??
+    readOptionalString(deliveryRecord.status);
   if (!status) {
     return null;
   }
@@ -6833,6 +7431,56 @@ function parseSyncProjectArgs(input: {
   return { ok: true, value };
 }
 
+function parseRunAutosyncArgs(input: {
+  readonly args: readonly string[];
+}):
+  | { readonly ok: true; readonly value: RunAutosyncArgs }
+  | { readonly ok: false; readonly error: string } {
+  const value: RunAutosyncArgs = {
+    json: false,
+  };
+  for (let i = 0; i < input.args.length; i += 1) {
+    const token = input.args[i] ?? "";
+    if (token === "--json") {
+      value.json = true;
+      continue;
+    }
+    if (token === "--sync-labels") {
+      value.syncLabels = true;
+      continue;
+    }
+    if (token.startsWith("--limit=")) {
+      value.limit = Number.parseInt(token.slice("--limit=".length), 10);
+      continue;
+    }
+    if (token === "--limit") {
+      const next = input.args[i + 1];
+      if (!next || next.startsWith("-")) {
+        return { ok: false, error: "--limit requires a value." };
+      }
+      value.limit = Number.parseInt(next, 10);
+      i += 1;
+      continue;
+    }
+    const handled = assignKeyValueFlag({
+      token,
+      args: input.args,
+      index: i,
+      out: value,
+      keys: {
+        profile: "profileId",
+        "project-id": "projectId",
+        "team-id": "teamId",
+      },
+    });
+    if (!handled.ok) {
+      return { ok: false, error: handled.error };
+    }
+    i = handled.nextIndex;
+  }
+  return { ok: true, value };
+}
+
 function assignKeyValueFlag<T extends Record<string, unknown>>(input: {
   readonly token: string;
   readonly args: readonly string[];
@@ -6890,6 +7538,7 @@ export const __testOnly = {
   parseAssigneeMappingsArgs,
   parseConnectArgs,
   parseDeliveriesArgs,
+  parseRunAutosyncArgs,
   parseProjectBindArgs,
   parseProjectLinkArgs,
   parseProjectsArgs,
@@ -6909,6 +7558,7 @@ export const __testOnly = {
   selectTicketCommentsToPush,
   shouldFallbackConnectToOAuth,
   shouldUseBrokerOAuthFlow,
+  runProjectLinearAutosync,
   syncIssueFromLinearToTicket,
   syncTicketToLinearIssue,
 } as const;

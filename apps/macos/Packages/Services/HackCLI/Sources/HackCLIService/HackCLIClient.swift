@@ -709,6 +709,30 @@ public actor HackCLIClient {
     return try decodeJsonOrThrow(LinearProjectSyncResponse.self, result: result)
   }
 
+  public func runLinearAutosync(
+    path: String,
+    profileId: String? = nil,
+    projectId: String? = nil,
+    teamId: String? = nil,
+    limit: Int? = nil
+  ) async throws -> LinearAutosyncRunResponse {
+    var args = ["x", "linear", "run-autosync", "--json"]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    if let projectId, !projectId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--project-id", projectId])
+    }
+    if let teamId, !teamId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--team-id", teamId])
+    }
+    if let limit {
+      args.append(contentsOf: ["--limit", String(limit)])
+    }
+    let result = try await run(args, allowNonZeroExit: true, cwd: path)
+    return try decodeJsonOrThrow(LinearAutosyncRunResponse.self, result: result)
+  }
+
   public func syncLinearIssue(
     path: String,
     from direction: String,

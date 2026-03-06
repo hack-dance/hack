@@ -1036,6 +1036,60 @@ function registerTools(opts: { readonly server: McpServer }): void {
   );
 
   opts.server.registerTool(
+    "hack.linear.autosync.run",
+    {
+      title: "Run subscribed Linear autosync",
+      description:
+        "Consume pending broker-backed Linear deliveries for the current Hack project and apply them after local sync succeeds.",
+      inputSchema: {
+        ...projectSelectorInput,
+        ...linearCommonInput,
+        projectId: z
+          .string()
+          .describe("Optional Linear project id filter")
+          .optional(),
+        teamId: z
+          .string()
+          .describe("Optional Linear team id filter")
+          .optional(),
+        limit: z.number().describe("Max deliveries to process").optional(),
+      },
+      outputSchema: toolOutputSchema,
+    },
+    async (input) => {
+      const projectCwd = await resolveProjectCwd({
+        selection: toProjectSelection(input),
+        cwd: process.cwd(),
+        requireProjectContext: true,
+      });
+      if (!projectCwd.ok) {
+        return buildToolError({ message: projectCwd.message });
+      }
+
+      const args = [
+        "linear",
+        "run-autosync",
+        "--json",
+        ...(input.profile ? ["--profile", input.profile] : []),
+        ...(input.projectId ? ["--project-id", input.projectId] : []),
+        ...(input.teamId ? ["--team-id", input.teamId] : []),
+        ...(input.limit ? ["--limit", String(input.limit)] : []),
+      ];
+
+      const result = await runHackCommand({
+        tool: "hack.linear.autosync.run",
+        args,
+        cwd: projectCwd.cwd,
+      });
+
+      return buildToolResult({
+        result,
+        data: parseJson(result.stdout),
+      });
+    }
+  );
+
+  opts.server.registerTool(
     "hack.linear.deliveries.list",
     {
       title: "List pending Linear deliveries",

@@ -159,6 +159,35 @@ test("parseSyncProjectArgs parses owner filter and limits", () => {
   });
 });
 
+test("parseRunAutosyncArgs parses profile, route filters, and limit", () => {
+  const parsed = __testOnly.parseRunAutosyncArgs({
+    args: [
+      "--profile",
+      "work",
+      "--project-id",
+      "proj-1",
+      "--team-id",
+      "team-1",
+      "--limit",
+      "5",
+      "--json",
+    ],
+  });
+
+  expect(parsed.ok).toBe(true);
+  if (!parsed.ok) {
+    return;
+  }
+
+  expect(parsed.value).toEqual({
+    profileId: "work",
+    projectId: "proj-1",
+    teamId: "team-1",
+    limit: 5,
+    json: true,
+  });
+});
+
 test("parseProjectLinkArgs parses additional project routing flags", () => {
   const parsed = __testOnly.parseProjectLinkArgs({
     args: [
@@ -893,6 +922,7 @@ test("syncIssueFromLinearToTicket preserves hack authority, appends comments, an
       },
     },
     linear: {
+      getIssueById: async () => ({ ok: true as const, data: null }),
       getIssueByIdentifier: async () => ({
         ok: true as const,
         data: {
@@ -1169,4 +1199,152 @@ test("syncTicketToLinearIssue pushes missing local comments and records a checkp
   ]);
   expect(checkpoints).toEqual(["hack_to_linear"]);
   expect(updatedIssues[0]?.assigneeId).toBe("user-1");
+});
+
+test("runProjectLinearAutosync syncs issue and project deliveries, then applies them", async () => {
+  const appliedDeliveryIds: string[] = [];
+  const issueSyncCalls: Array<{ issueIdentifier?: string; issueId?: string }> =
+    [];
+  const projectSyncCalls: string[][] = [];
+
+  const result = await __testOnly.runProjectLinearAutosync({
+    binding: {
+      profileId: "work",
+      projectId: "proj-default",
+      projectName: "Default",
+      teamId: "team-default",
+      additionalProjects: [
+        {
+          profileId: "ops",
+          projectId: "proj-ops",
+          projectName: "Ops",
+          teamId: "team-ops",
+        },
+      ],
+    },
+    syncToggles: {
+      labels: false,
+      statuses: true,
+      dependencies: true,
+      projects: true,
+    },
+    limit: 10,
+    deps: {
+      createRuntime: async ({ profileId }) => ({
+        ok: true as const,
+        value: {
+          profileId: profileId ?? "work",
+        },
+      }),
+      listSubscriptions: async ({ profileId, projectId }) => ({
+        ok: true as const,
+        data: {
+          profileId,
+          subscriptions:
+            profileId === "work" && projectId === "proj-default"
+              ? [
+                  {
+                    id: "sub-default",
+                    profileId,
+                    projectId,
+                    teamId: "team-default",
+                    mode: "auto_apply" as const,
+                    status: "active" as const,
+                  },
+                ]
+              : [],
+        },
+      }),
+      listDeliveries: async ({ profileId, projectId }) => ({
+        ok: true as const,
+        data: {
+          profileId,
+          status: "pending",
+          limit: 10,
+          deliveries:
+            profileId === "work" && projectId === "proj-default"
+              ? [
+                  {
+                    id: "delivery-issue",
+                    status: "pending",
+                    profileId,
+                    projectId,
+                    teamId: "team-default",
+                    issueIdentifier: "ENG-101",
+                  },
+                  {
+                    id: "delivery-project",
+                    status: "pending",
+                    profileId,
+                    projectId,
+                    teamId: "team-default",
+                  },
+                ]
+              : [],
+        },
+      }),
+      syncIssue: async ({ delivery }) => {
+        issueSyncCalls.push({
+          issueIdentifier: delivery.issueIdentifier,
+          issueId: delivery.issueId,
+        });
+        return {
+          ok: true as const,
+          operation: "updated" as const,
+          ticketId: "T-00101",
+          issueIdentifier: delivery.issueIdentifier ?? "ENG-101",
+          commentsPulled: 1,
+          conflictsRecorded: 0,
+          checkpointRecorded: true,
+        };
+      },
+      syncProject: async ({ projectIds }) => {
+        projectSyncCalls.push([...projectIds]);
+        return {
+          ok: true as const,
+          projectIds,
+          processed: 3,
+          created: 1,
+          updated: 2,
+          commentsPulled: 4,
+          conflictsRecorded: 0,
+          checkpointsRecorded: 3,
+        };
+      },
+      applyDelivery: async ({ deliveryId }) => {
+        appliedDeliveryIds.push(deliveryId);
+        return {
+          ok: true as const,
+          data: {
+            deliveryId,
+            status: "applied",
+          },
+        };
+      },
+      claimedBy: "local-test-runner",
+    },
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  expect(issueSyncCalls).toEqual([
+    {
+      issueIdentifier: "ENG-101",
+      issueId: undefined,
+    },
+  ]);
+  expect(projectSyncCalls).toEqual([["proj-default"]]);
+  expect(appliedDeliveryIds).toEqual(["delivery-issue", "delivery-project"]);
+  expect(result.subscribedRoutes).toBe(1);
+  expect(result.processedDeliveries).toBe(2);
+  expect(result.appliedDeliveries).toBe(2);
+  expect(result.failedDeliveries).toBe(0);
+  expect(result.skippedDeliveries).toBe(0);
+  expect(result.created).toBe(1);
+  expect(result.updated).toBe(3);
+  expect(result.commentsPulled).toBe(5);
+  expect(result.checkpointsRecorded).toBe(4);
 });

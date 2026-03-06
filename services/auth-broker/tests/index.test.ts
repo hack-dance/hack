@@ -910,6 +910,36 @@ describe("auth broker github flow routes", () => {
     expect(payload.error).toBe("better_auth_session_required");
   });
 
+  test("linear autosync subscriptions are owner-scoped even when route keys match", async () => {
+    const autosyncStore = new InMemoryLinearAutosyncStore();
+
+    await autosyncStore.upsertSubscription({
+      profileId: "default",
+      projectId: "project-a",
+      teamId: "linear-team-a",
+      mode: "manual",
+      betterAuthUserId: "user-a",
+    });
+    await autosyncStore.upsertSubscription({
+      profileId: "default",
+      projectId: "project-a",
+      teamId: "linear-team-a",
+      mode: "manual",
+      betterAuthUserId: "user-b",
+    });
+
+    const subscriptions = await autosyncStore.listSubscriptions({
+      profileId: "default",
+      projectId: "project-a",
+      teamId: "linear-team-a",
+    });
+
+    expect(subscriptions).toHaveLength(2);
+    expect(
+      subscriptions.map((subscription) => subscription.betterAuthUserId).sort()
+    ).toEqual(["user-a", "user-b"]);
+  });
+
   test("linear autosync subscriptions can be created, listed, and removed for the active Better Auth team", async () => {
     const autosyncStore: LinearAutosyncStore =
       new InMemoryLinearAutosyncStore();
@@ -1024,6 +1054,64 @@ describe("auth broker github flow routes", () => {
     };
     expect(removed.ok).toBe(true);
     expect(removed.subscription.profileId).toBe("default");
+  });
+
+  test("profile-scoped management tokens default autosync listing to their own profile", async () => {
+    await withManagementTokenSecret("test-better-auth-secret", async () => {
+      const autosyncStore = new InMemoryLinearAutosyncStore();
+      const app = createAuthBrokerApp({
+        config: createTestConfig(),
+        flowStore: new FlowStore(),
+        linearAutosyncStore: autosyncStore,
+        betterAuthRuntime: createBetterAuthRuntimeWithSession(null),
+      });
+
+      await autosyncStore.upsertSubscription({
+        profileId: "work",
+        projectId: "project-a",
+        teamId: "team-a",
+        mode: "auto_apply",
+        status: "active",
+        betterAuthUserId: "user-a",
+      });
+      await autosyncStore.upsertSubscription({
+        profileId: "other-profile",
+        projectId: "project-b",
+        teamId: "team-b",
+        mode: "auto_apply",
+        status: "active",
+        betterAuthUserId: "user-a",
+      });
+
+      const scopedToken = issueBrokerManagementToken({
+        userId: "user-a",
+        profileId: "work",
+      });
+      expect(scopedToken).not.toBeNull();
+      if (!scopedToken) {
+        return;
+      }
+
+      const response = await app.handle(
+        new Request("http://localhost/v1/auth/linear/subscriptions", {
+          headers: {
+            authorization: `Bearer ${scopedToken.token}`,
+          },
+        })
+      );
+
+      expect(response.status).toBe(200);
+      const payload = (await response.json()) as {
+        readonly ok: true;
+        readonly subscriptions: ReadonlyArray<{
+          readonly profileId: string;
+        }>;
+      };
+      expect(payload.ok).toBe(true);
+      expect(
+        payload.subscriptions.map((subscription) => subscription.profileId)
+      ).toEqual(["work"]);
+    });
   });
 
   test("linear webhook keeps matching autosync deliveries pending until sync work runs", async () => {

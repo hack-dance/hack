@@ -32,6 +32,7 @@ struct TicketsView: View {
   @State private var linearRouteProjectName = ""
   @State private var linearRouteTeamId = ""
   @State private var linearAdditionalProjects: [LinearProjectBindingTarget] = []
+  @State private var linearAutosyncRouteKeys: Set<String> = []
   @State private var linearRouteStatus: LinearStatusResponse? = nil
   @State private var pendingBulkSyncAction: TicketBulkSyncAction? = nil
   @State private var activeSyncAction: TicketSyncAction? = nil
@@ -154,6 +155,12 @@ struct TicketsView: View {
             requestBulkSyncConfirmation(.pushHack)
           }
           .disabled(!canSyncProjectToLinear || isAnySyncInFlight)
+          if hasAnyLinearAutosyncRoutes {
+            Button("Run project autosync routes") {
+              Task { await runProjectLinearAutosync() }
+            }
+            .disabled(linearRouteStatus?.tokenResolved != true || isAnySyncInFlight)
+          }
           if let selectedTicket {
             Divider()
             Button("Push selected ticket to Linear") {
@@ -357,6 +364,46 @@ struct TicketsView: View {
       return true
     }
     return !linearAdditionalProjects.isEmpty
+  }
+
+  private var hasAnyLinearAutosyncRoutes: Bool {
+    !linearAutosyncRouteKeys.isEmpty
+  }
+
+  private var allLinearRouteTargets: [LinearProjectBindingTarget] {
+    var targets: [LinearProjectBindingTarget] = []
+    if !linearRouteProjectId.isEmpty {
+      targets.append(
+        LinearProjectBindingTarget(
+          profileId: linearRouteProfile.isEmpty ? nil : linearRouteProfile,
+          projectId: linearRouteProjectId,
+          projectName: linearRouteProjectName.isEmpty ? nil : linearRouteProjectName,
+          teamId: linearRouteTeamId.isEmpty ? nil : linearRouteTeamId
+        )
+      )
+    }
+    targets.append(contentsOf: linearAdditionalProjects.map(normalizedLinearRouteTarget(_:)))
+    return targets
+  }
+
+  private func normalizedLinearRouteTarget(_ target: LinearProjectBindingTarget) -> LinearProjectBindingTarget {
+    if let profileId = target.profileId?.trimmingCharacters(in: .whitespacesAndNewlines),
+       !profileId.isEmpty {
+      return target
+    }
+    return LinearProjectBindingTarget(
+      profileId: linearRouteProfile.isEmpty ? nil : linearRouteProfile,
+      projectId: target.projectId,
+      projectName: target.projectName,
+      teamId: target.teamId
+    )
+  }
+
+  private func linearRouteKey(for target: LinearProjectBindingTarget) -> String {
+    let normalized = normalizedLinearRouteTarget(target)
+    let profileId = normalized.profileId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "*"
+    let teamId = normalized.teamId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "*"
+    return [profileId, normalized.projectId, teamId].joined(separator: "::")
   }
 
   private var loadNoticeTone: StatusTone {
@@ -1588,7 +1635,12 @@ struct TicketsView: View {
   }
 
   private func ticketDetailFooter(_ detail: TicketDetailResponse) -> some View {
-    VStack(alignment: .leading, spacing: 12) {
+    let prefersPullPrimary =
+      detail.ticket.linearSyncUXState.authority == .linear &&
+      detail.linearSyncReviewState.needsReview == false &&
+      detail.ticket.externalKey?.isEmpty == false
+
+    return VStack(alignment: .leading, spacing: 12) {
       HStack(spacing: 10) {
         if let nextReviewQueueEntry {
           Button {
@@ -1600,21 +1652,39 @@ struct TicketsView: View {
           .adaptiveToolbarButton()
         }
 
-        Button {
-          Task { await syncSelectedTicketToLinear(detail.ticket) }
-        } label: {
-          Label("Push Hack changes", systemImage: "arrow.up.right")
-        }
-        .adaptiveToolbarButtonProminent()
-        .disabled(linearRouteStatus?.tokenResolved != true || isAnySyncInFlight)
+        if prefersPullPrimary {
+          Button {
+            Task { await syncSelectedTicketToLinear(detail.ticket) }
+          } label: {
+            Label("Push Hack changes", systemImage: "arrow.up.right")
+          }
+          .adaptiveToolbarButton()
+          .disabled(linearRouteStatus?.tokenResolved != true || isAnySyncInFlight)
 
-        Button {
-          Task { await syncSelectedTicketFromLinear(detail.ticket) }
-        } label: {
-          Label("Pull Linear changes", systemImage: "arrow.down.left")
+          Button {
+            Task { await syncSelectedTicketFromLinear(detail.ticket) }
+          } label: {
+            Label("Pull Linear changes", systemImage: "arrow.down.left")
+          }
+          .adaptiveToolbarButtonProminent()
+          .disabled(detail.ticket.externalKey?.isEmpty != false || isAnySyncInFlight)
+        } else {
+          Button {
+            Task { await syncSelectedTicketToLinear(detail.ticket) }
+          } label: {
+            Label("Push Hack changes", systemImage: "arrow.up.right")
+          }
+          .adaptiveToolbarButtonProminent()
+          .disabled(linearRouteStatus?.tokenResolved != true || isAnySyncInFlight)
+
+          Button {
+            Task { await syncSelectedTicketFromLinear(detail.ticket) }
+          } label: {
+            Label("Pull Linear changes", systemImage: "arrow.down.left")
+          }
+          .adaptiveToolbarButton()
+          .disabled(detail.ticket.externalKey?.isEmpty != false || isAnySyncInFlight)
         }
-        .adaptiveToolbarButton()
-        .disabled(detail.ticket.externalKey?.isEmpty != false || isAnySyncInFlight)
 
         if let externalURL = detail.ticket.externalUrl,
            let url = URL(string: externalURL) {
@@ -1953,6 +2023,35 @@ struct TicketsView: View {
     linearRouteStatus = await model.inspectLinearStatus(
       profileId: linearRouteProfile.isEmpty ? nil : linearRouteProfile
     )
+    linearAutosyncRouteKeys = await loadLinearAutosyncRouteKeys(targets: allLinearRouteTargets)
+  }
+
+  private func loadLinearAutosyncRouteKeys(
+    targets: [LinearProjectBindingTarget]
+  ) async -> Set<String> {
+    var nextKeys: Set<String> = []
+    for target in targets {
+      let normalizedTarget = normalizedLinearRouteTarget(target)
+      guard let profileId = normalizedTarget.profileId, !profileId.isEmpty else {
+        continue
+      }
+      guard let subscriptions = await model.listLinearAutosyncSubscriptions(
+        profileId: profileId,
+        projectId: normalizedTarget.projectId,
+        teamId: normalizedTarget.teamId
+      ) else {
+        continue
+      }
+      if subscriptions.subscriptions.contains(where: {
+        $0.projectId == normalizedTarget.projectId &&
+          $0.teamId == normalizedTarget.teamId &&
+          $0.mode == "auto_apply" &&
+          $0.status == "active"
+      }) {
+        nextKeys.insert(linearRouteKey(for: normalizedTarget))
+      }
+    }
+    return nextKeys
   }
 
   private func syncProjectFromLinear() async {
@@ -1973,6 +2072,20 @@ struct TicketsView: View {
       }
       let routedProjects = result.projectIds?.count ?? (linearAdditionalProjects.isEmpty ? 1 : linearAdditionalProjects.count + 1)
       loadNotice = "Pulled \(result.processed) item\(result.processed == 1 ? "" : "s") from \(routedProjects) routed Linear project\(routedProjects == 1 ? "" : "s")."
+      await refreshTickets()
+    }
+  }
+
+  private func runProjectLinearAutosync() async {
+    await runSyncAction(.runProjectAutosync) {
+      loadNotice = nil
+      let result = await model.runLinearAutosync(for: project)
+      guard let result, result.ok else {
+        loadNotice = model.errorMessage ?? "Linear autosync failed."
+        return
+      }
+      loadNotice =
+        "Processed \(result.processedDeliveries) pending delivery\(result.processedDeliveries == 1 ? "" : "ies") across \(result.subscribedRoutes) subscribed route\(result.subscribedRoutes == 1 ? "" : "s") • applied \(result.appliedDeliveries) • failed \(result.failedDeliveries)."
       await refreshTickets()
     }
   }
@@ -2834,6 +2947,7 @@ private enum TicketBulkSyncAction: String, Identifiable {
 
 private enum TicketSyncAction: Equatable {
   case pullProjectFromLinear
+  case runProjectAutosync
   case pushProjectToLinear
   case pushTicketToLinear(String)
   case pullTicketFromLinear(String)
@@ -2842,6 +2956,8 @@ private enum TicketSyncAction: Equatable {
     switch self {
     case .pullProjectFromLinear:
       return "Pulling Linear project…"
+    case .runProjectAutosync:
+      return "Running Linear autosync…"
     case .pushProjectToLinear:
       return "Pushing Hack tickets…"
     case let .pushTicketToLinear(ticketId):

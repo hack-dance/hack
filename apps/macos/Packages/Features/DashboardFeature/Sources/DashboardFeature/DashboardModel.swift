@@ -931,6 +931,28 @@ public final class DashboardModel {
     }
   }
 
+  public func runLinearAutosync(
+    for project: ProjectSummary,
+    profileId: String? = nil,
+    projectId: String? = nil,
+    teamId: String? = nil,
+    limit: Int? = nil
+  ) async -> LinearAutosyncRunResponse? {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return nil
+    }
+    return await runActionResult(message: "Running Linear autosync…") {
+      try await self.client.runLinearAutosync(
+        path: path,
+        profileId: profileId,
+        projectId: projectId,
+        teamId: teamId,
+        limit: limit
+      )
+    }
+  }
+
   public func syncLinearIssue(
     for project: ProjectSummary,
     from direction: String,

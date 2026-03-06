@@ -61,10 +61,14 @@ export function createLinearAutosyncPlugin({
             error: "better_auth_session_required",
           } as const;
         }
+        const profileId =
+          normalizeOptionalQueryValue(query.profileId) ??
+          session.session?.managementTokenProfileId ??
+          null;
         if (
           !hasBetterAuthProfileAccess({
             session: session.session,
-            profileId: normalizeOptionalQueryValue(query.profileId),
+            profileId,
           })
         ) {
           set.status = 403;
@@ -75,7 +79,7 @@ export function createLinearAutosyncPlugin({
         }
 
         const subscriptions = await autosyncStore.listSubscriptions({
-          profileId: normalizeOptionalQueryValue(query.profileId),
+          profileId,
           projectId: normalizeOptionalQueryValue(query.projectId),
           teamId: normalizeOptionalQueryValue(query.teamId),
         });
@@ -206,6 +210,9 @@ export function createLinearAutosyncPlugin({
           profileId: body.profileId,
           projectId: normalizeOptionalQueryValue(body.projectId),
           teamId: normalizeOptionalQueryValue(body.teamId),
+          betterAuthUserId: existing.betterAuthUserId,
+          betterAuthOrganizationId: existing.betterAuthOrganizationId,
+          betterAuthTeamId: existing.betterAuthTeamId,
         });
         if (!removed) {
           set.status = 404;

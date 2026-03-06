@@ -986,6 +986,16 @@ struct ProjectDetailView: View {
             }
             .adaptiveToolbarButton()
             .disabled(!canSyncToLinear)
+
+            if hasAnyLinearAutosyncRoutes {
+              Button {
+                Task { await runBoundLinearAutosync() }
+              } label: {
+                Label("Run all autosync routes", systemImage: "bolt.badge.clock")
+              }
+              .adaptiveToolbarButton()
+              .disabled(linearResolvedStatus?.tokenResolved != true)
+            }
           }
 
           Spacer()
@@ -1561,6 +1571,13 @@ struct ProjectDetailView: View {
         .disabled(isLinearAutosyncBusy(for: normalizedTarget))
 
         Menu {
+          if isLinearAutosyncEnabled(for: normalizedTarget) {
+            Button("Run this autosync route") {
+              Task { await runSpecificLinearAutosync(normalizedTarget) }
+            }
+            .disabled(linearResolvedStatus?.tokenResolved != true)
+            Divider()
+          }
           Button("Pull now") {
             Task { await syncSpecificLinearProject(normalizedTarget, from: "linear") }
           }
@@ -1694,6 +1711,10 @@ struct ProjectDetailView: View {
 
   private func isLinearAutosyncEnabled(for target: LinearProjectBindingTarget) -> Bool {
     linearAutosyncRouteKeys.contains(linearRouteKey(for: target))
+  }
+
+  private var hasAnyLinearAutosyncRoutes: Bool {
+    !linearAutosyncRouteKeys.isEmpty
   }
 
   private func isLinearAutosyncBusy(for target: LinearProjectBindingTarget) -> Bool {
@@ -2550,6 +2571,19 @@ struct ProjectDetailView: View {
     githubProfileMessage = ""
   }
 
+  private func runBoundLinearAutosync() async {
+    let result = await model.runLinearAutosync(for: project)
+    guard let result, result.ok else {
+      linearProjectMessage = model.errorMessage ?? "Linear autosync failed."
+      return
+    }
+
+    linearProjectMessage =
+      "Processed \(result.processedDeliveries) pending delivery\(result.processedDeliveries == 1 ? "" : "ies") across \(result.subscribedRoutes) subscribed route\(result.subscribedRoutes == 1 ? "" : "s") • applied \(result.appliedDeliveries) • failed \(result.failedDeliveries) • created \(result.created) • updated \(result.updated)."
+    executionTargetMessage = ""
+    githubProfileMessage = ""
+  }
+
   private func syncSpecificLinearProject(
     _ target: LinearProjectBindingTarget,
     from direction: String
@@ -2579,6 +2613,27 @@ struct ProjectDetailView: View {
       linearProjectMessage =
         "Pushed \(result.processed) Hack ticket\(result.processed == 1 ? "" : "s") to \(routeLabel) • created \(result.created) • updated \(result.updated)."
     }
+  }
+
+  private func runSpecificLinearAutosync(
+    _ target: LinearProjectBindingTarget
+  ) async {
+    let normalizedTarget = normalizedLinearRouteTarget(target)
+    let result = await model.runLinearAutosync(
+      for: project,
+      profileId: normalizedTarget.profileId,
+      projectId: normalizedTarget.projectId,
+      teamId: normalizedTarget.teamId,
+      limit: nil
+    )
+    guard let result, result.ok else {
+      linearProjectMessage = model.errorMessage ?? "Linear autosync failed."
+      return
+    }
+
+    let routeLabel = linearProjectBindingTargetLabel(normalizedTarget)
+    linearProjectMessage =
+      "Processed \(result.processedDeliveries) pending delivery\(result.processedDeliveries == 1 ? "" : "ies") for \(routeLabel) • applied \(result.appliedDeliveries) • failed \(result.failedDeliveries) • created \(result.created) • updated \(result.updated)."
   }
 
   private struct LifecycleSummaryCounts {

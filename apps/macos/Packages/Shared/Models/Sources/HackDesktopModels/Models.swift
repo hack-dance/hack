@@ -1659,6 +1659,49 @@ public struct LinearProjectSyncResponse: Decodable, Hashable {
   }
 }
 
+public struct LinearAutosyncRunResponse: Decodable, Hashable {
+  public let ok: Bool
+  public let subscribedRoutes: Int
+  public let processedDeliveries: Int
+  public let appliedDeliveries: Int
+  public let skippedDeliveries: Int
+  public let failedDeliveries: Int
+  public let created: Int
+  public let updated: Int
+  public let commentsPulled: Int
+  public let conflictsRecorded: Int
+  public let checkpointsRecorded: Int
+  public let projectIds: [String]?
+
+  public init(
+    ok: Bool,
+    subscribedRoutes: Int,
+    processedDeliveries: Int,
+    appliedDeliveries: Int,
+    skippedDeliveries: Int,
+    failedDeliveries: Int,
+    created: Int,
+    updated: Int,
+    commentsPulled: Int,
+    conflictsRecorded: Int,
+    checkpointsRecorded: Int,
+    projectIds: [String]? = nil
+  ) {
+    self.ok = ok
+    self.subscribedRoutes = subscribedRoutes
+    self.processedDeliveries = processedDeliveries
+    self.appliedDeliveries = appliedDeliveries
+    self.skippedDeliveries = skippedDeliveries
+    self.failedDeliveries = failedDeliveries
+    self.created = created
+    self.updated = updated
+    self.commentsPulled = commentsPulled
+    self.conflictsRecorded = conflictsRecorded
+    self.checkpointsRecorded = checkpointsRecorded
+    self.projectIds = projectIds
+  }
+}
+
 public struct RailwayBootstrapRequest: Hashable {
   public let railwayProject: String?
   public let railwayService: String?

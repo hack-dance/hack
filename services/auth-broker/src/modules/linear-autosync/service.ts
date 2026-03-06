@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { and, desc, eq, type SQL, sql } from "drizzle-orm";
+import { type AnyColumn, and, desc, eq, type SQL, sql } from "drizzle-orm";
 
 import { linearSyncSubscriptions } from "../../db/schema.ts";
 import { createDbClient } from "../../db.ts";
@@ -47,10 +47,22 @@ export type RemoveLinearAutosyncSubscriptionInput = {
   readonly profileId: string;
   readonly projectId?: string | null;
   readonly teamId?: string | null;
+  readonly betterAuthUserId?: string | null;
+  readonly betterAuthOrganizationId?: string | null;
+  readonly betterAuthTeamId?: string | null;
 };
 
 export type MatchLinearAutosyncSubscriptionInput = {
   readonly profileId?: string | null;
+  readonly projectId?: string | null;
+  readonly teamId?: string | null;
+  readonly betterAuthUserId?: string | null;
+  readonly betterAuthOrganizationId?: string | null;
+  readonly betterAuthTeamId?: string | null;
+};
+
+type SubscriptionScopeInput = {
+  readonly profileId: string;
   readonly projectId?: string | null;
   readonly teamId?: string | null;
   readonly betterAuthUserId?: string | null;
@@ -79,8 +91,8 @@ export class InMemoryLinearAutosyncStore implements LinearAutosyncStore {
   upsertSubscription(
     input: UpsertLinearAutosyncSubscriptionInput
   ): Promise<LinearAutosyncSubscription> {
+    const existing = this.findExistingSubscription({ input });
     const subscriptionKey = buildSubscriptionKey(input);
-    const existing = this.recordsByKey.get(subscriptionKey);
     const now = new Date().toISOString();
     const record: LinearAutosyncSubscription = {
       id: existing?.id ?? randomUUID(),
@@ -97,6 +109,8 @@ export class InMemoryLinearAutosyncStore implements LinearAutosyncStore {
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
     };
+
+    this.removeMatchingSubscriptions({ input });
     this.recordsByKey.set(subscriptionKey, record);
     return Promise.resolve(record);
   }
@@ -105,7 +119,9 @@ export class InMemoryLinearAutosyncStore implements LinearAutosyncStore {
     input: ListLinearAutosyncSubscriptionsInput = {}
   ): Promise<readonly LinearAutosyncSubscription[]> {
     return Promise.resolve(
-      [...this.recordsByKey.values()]
+      dedupeSubscriptions({
+        records: [...this.recordsByKey.values()],
+      })
         .filter((record) =>
           matchesSubscriptionFilter({ record, filter: input })
         )
@@ -116,11 +132,11 @@ export class InMemoryLinearAutosyncStore implements LinearAutosyncStore {
   removeSubscription(
     input: RemoveLinearAutosyncSubscriptionInput
   ): Promise<LinearAutosyncSubscription | null> {
-    const subscriptionKey = buildSubscriptionKey(input);
-    const existing = this.recordsByKey.get(subscriptionKey) ?? null;
-    if (existing) {
-      this.recordsByKey.delete(subscriptionKey);
+    const existing = this.findExistingSubscription({ input });
+    if (!existing) {
+      return Promise.resolve(null);
     }
+    this.removeMatchingSubscriptions({ input });
     return Promise.resolve(existing);
   }
 
@@ -146,6 +162,36 @@ export class InMemoryLinearAutosyncStore implements LinearAutosyncStore {
     );
 
     return matches.length === 1 ? (matches[0] ?? null) : null;
+  }
+
+  private findExistingSubscription(input: {
+    readonly input: SubscriptionScopeInput;
+  }): LinearAutosyncSubscription | null {
+    return (
+      dedupeSubscriptions({
+        records: [...this.recordsByKey.values()],
+      }).find((record) =>
+        matchesSubscriptionScope({
+          record,
+          input: input.input,
+        })
+      ) ?? null
+    );
+  }
+
+  private removeMatchingSubscriptions(input: {
+    readonly input: SubscriptionScopeInput;
+  }): void {
+    for (const [subscriptionKey, record] of this.recordsByKey.entries()) {
+      if (
+        matchesSubscriptionScope({
+          record,
+          input: input.input,
+        })
+      ) {
+        this.recordsByKey.delete(subscriptionKey);
+      }
+    }
   }
 }
 
@@ -199,6 +245,13 @@ export function createLinearAutosyncStoreFromDb(input: {
       if (!row) {
         throw new Error("Failed to persist Linear autosync subscription.");
       }
+
+      await deleteSubscriptionAliases({
+        db,
+        keepId: row.id,
+        input: subscription,
+      });
+
       return toAutosyncSubscription({ row });
     },
 
@@ -216,29 +269,34 @@ export function createLinearAutosyncStoreFromDb(input: {
               .from(linearSyncSubscriptions)
               .where(and(...filters))
               .orderBy(desc(linearSyncSubscriptions.updatedAt));
-      return rows
-        .map((row) => toAutosyncSubscription({ row }))
-        .filter((record) =>
-          matchesSubscriptionFilter({ record, filter: input })
-        );
+      return dedupeSubscriptions({
+        records: rows.map((row) => toAutosyncSubscription({ row })),
+      }).filter((record) =>
+        matchesSubscriptionFilter({ record, filter: input })
+      );
     },
 
     removeSubscription: async (inputToRemove) => {
       await ensureTable();
-      const subscriptionKey = buildSubscriptionKey(inputToRemove);
-      const existing = await db
-        .select()
-        .from(linearSyncSubscriptions)
-        .where(eq(linearSyncSubscriptions.subscriptionKey, subscriptionKey))
-        .limit(1);
-      const row = existing[0];
-      if (!row) {
+      const rows = await listMatchingSubscriptionRows({
+        db,
+        input: inputToRemove,
+      });
+      const existing =
+        dedupeSubscriptions({
+          records: rows.map((row) => toAutosyncSubscription({ row })),
+        })[0] ?? null;
+      if (!existing) {
         return null;
       }
-      await db
-        .delete(linearSyncSubscriptions)
-        .where(eq(linearSyncSubscriptions.subscriptionKey, subscriptionKey));
-      return toAutosyncSubscription({ row });
+
+      await deleteSubscriptionAliases({
+        db,
+        keepId: null,
+        input: inputToRemove,
+      });
+
+      return existing;
     },
 
     findMatchingSubscription: async (inputToMatch) => {
@@ -246,31 +304,31 @@ export function createLinearAutosyncStoreFromDb(input: {
       const profileId = normalizeRequiredText(inputToMatch.profileId);
       const projectId = normalizeText(inputToMatch.projectId);
       const teamId = normalizeText(inputToMatch.teamId);
-      const matches = (
-        await db
-          .select()
-          .from(linearSyncSubscriptions)
-          .where(
-            and(
-              eq(linearSyncSubscriptions.profileId, profileId),
-              ...(projectId
-                ? [eq(linearSyncSubscriptions.projectId, projectId)]
-                : []),
-              ...(teamId ? [eq(linearSyncSubscriptions.teamId, teamId)] : []),
-              eq(linearSyncSubscriptions.status, "active"),
-              eq(linearSyncSubscriptions.mode, "auto_apply")
+      const matches = dedupeSubscriptions({
+        records: (
+          await db
+            .select()
+            .from(linearSyncSubscriptions)
+            .where(
+              and(
+                eq(linearSyncSubscriptions.profileId, profileId),
+                ...(projectId
+                  ? [eq(linearSyncSubscriptions.projectId, projectId)]
+                  : []),
+                ...(teamId ? [eq(linearSyncSubscriptions.teamId, teamId)] : []),
+                eq(linearSyncSubscriptions.status, "active"),
+                eq(linearSyncSubscriptions.mode, "auto_apply")
+              )
             )
-          )
-      )
-        .map((row) => toAutosyncSubscription({ row }))
-        .filter((record) =>
-          matchesOwnership({
-            record,
-            betterAuthUserId: inputToMatch.betterAuthUserId,
-            betterAuthOrganizationId: inputToMatch.betterAuthOrganizationId,
-            betterAuthTeamId: inputToMatch.betterAuthTeamId,
-          })
-        );
+        ).map((row) => toAutosyncSubscription({ row })),
+      }).filter((record) =>
+        matchesOwnership({
+          record,
+          betterAuthUserId: inputToMatch.betterAuthUserId,
+          betterAuthOrganizationId: inputToMatch.betterAuthOrganizationId,
+          betterAuthTeamId: inputToMatch.betterAuthTeamId,
+        })
+      );
 
       return matches.length === 1 ? (matches[0] ?? null) : null;
     },
@@ -311,16 +369,39 @@ async function ensureSubscriptionsTable(input: {
   `);
 }
 
-function buildSubscriptionKey(input: {
-  readonly profileId: string;
-  readonly projectId?: string | null;
-  readonly teamId?: string | null;
-}): string {
+function buildSubscriptionKey(input: SubscriptionScopeInput): string {
   return [
+    buildSubscriptionOwnerKey({
+      betterAuthUserId: input.betterAuthUserId,
+      betterAuthOrganizationId: input.betterAuthOrganizationId,
+      betterAuthTeamId: input.betterAuthTeamId,
+    }),
     normalizeRequiredText(input.profileId),
     normalizeText(input.projectId) ?? "*",
     normalizeText(input.teamId) ?? "*",
   ].join("::");
+}
+
+function buildSubscriptionOwnerKey(input: {
+  readonly betterAuthUserId?: string | null;
+  readonly betterAuthOrganizationId?: string | null;
+  readonly betterAuthTeamId?: string | null;
+}): string {
+  const betterAuthTeamId = normalizeText(input.betterAuthTeamId);
+  if (betterAuthTeamId) {
+    return `team:${betterAuthTeamId}`;
+  }
+  const betterAuthOrganizationId = normalizeText(
+    input.betterAuthOrganizationId
+  );
+  if (betterAuthOrganizationId) {
+    return `org:${betterAuthOrganizationId}`;
+  }
+  const betterAuthUserId = normalizeText(input.betterAuthUserId);
+  if (betterAuthUserId) {
+    return `user:${betterAuthUserId}`;
+  }
+  return "legacy";
 }
 
 function buildListFilters(input: {
@@ -388,6 +469,115 @@ function matchesOwnership(input: {
   }
 
   return false;
+}
+
+function matchesSubscriptionScope(input: {
+  readonly record: LinearAutosyncSubscription;
+  readonly input: SubscriptionScopeInput;
+}): boolean {
+  return (
+    input.record.profileId === normalizeRequiredText(input.input.profileId) &&
+    input.record.projectId === normalizeText(input.input.projectId) &&
+    input.record.teamId === normalizeText(input.input.teamId) &&
+    input.record.betterAuthUserId ===
+      normalizeText(input.input.betterAuthUserId) &&
+    input.record.betterAuthOrganizationId ===
+      normalizeText(input.input.betterAuthOrganizationId) &&
+    input.record.betterAuthTeamId ===
+      normalizeText(input.input.betterAuthTeamId)
+  );
+}
+
+function dedupeSubscriptions(input: {
+  readonly records: readonly LinearAutosyncSubscription[];
+}): readonly LinearAutosyncSubscription[] {
+  const recordsByScope = new Map<string, LinearAutosyncSubscription>();
+  for (const record of input.records) {
+    const scopeKey = buildSubscriptionScopeFingerprint({ record });
+    const existing = recordsByScope.get(scopeKey);
+    if (!existing || existing.updatedAt.localeCompare(record.updatedAt) < 0) {
+      recordsByScope.set(scopeKey, record);
+    }
+  }
+  return [...recordsByScope.values()];
+}
+
+function buildSubscriptionScopeFingerprint(input: {
+  readonly record: LinearAutosyncSubscription;
+}): string {
+  return [
+    buildSubscriptionOwnerKey({
+      betterAuthUserId: input.record.betterAuthUserId,
+      betterAuthOrganizationId: input.record.betterAuthOrganizationId,
+      betterAuthTeamId: input.record.betterAuthTeamId,
+    }),
+    input.record.profileId,
+    input.record.projectId ?? "*",
+    input.record.teamId ?? "*",
+  ].join("::");
+}
+
+async function listMatchingSubscriptionRows(input: {
+  readonly db: ReturnType<typeof createDbClient>;
+  readonly input: SubscriptionScopeInput;
+}): Promise<readonly (typeof linearSyncSubscriptions.$inferSelect)[]> {
+  return await input.db
+    .select()
+    .from(linearSyncSubscriptions)
+    .where(
+      and(
+        eq(
+          linearSyncSubscriptions.profileId,
+          normalizeRequiredText(input.input.profileId)
+        ),
+        ...buildNullableMatchFilters({
+          column: linearSyncSubscriptions.projectId,
+          value: normalizeText(input.input.projectId),
+        }),
+        ...buildNullableMatchFilters({
+          column: linearSyncSubscriptions.teamId,
+          value: normalizeText(input.input.teamId),
+        }),
+        ...buildNullableMatchFilters({
+          column: linearSyncSubscriptions.betterAuthUserId,
+          value: normalizeText(input.input.betterAuthUserId),
+        }),
+        ...buildNullableMatchFilters({
+          column: linearSyncSubscriptions.betterAuthOrganizationId,
+          value: normalizeText(input.input.betterAuthOrganizationId),
+        }),
+        ...buildNullableMatchFilters({
+          column: linearSyncSubscriptions.betterAuthTeamId,
+          value: normalizeText(input.input.betterAuthTeamId),
+        })
+      )
+    )
+    .orderBy(desc(linearSyncSubscriptions.updatedAt));
+}
+
+async function deleteSubscriptionAliases(input: {
+  readonly db: ReturnType<typeof createDbClient>;
+  readonly keepId: string | null;
+  readonly input: SubscriptionScopeInput;
+}): Promise<void> {
+  const rows = await listMatchingSubscriptionRows(input);
+  for (const row of rows) {
+    if (input.keepId && row.id === input.keepId) {
+      continue;
+    }
+    await input.db
+      .delete(linearSyncSubscriptions)
+      .where(eq(linearSyncSubscriptions.id, row.id));
+  }
+}
+
+function buildNullableMatchFilters(input: {
+  readonly column: AnyColumn;
+  readonly value: string | null;
+}): SQL[] {
+  return input.value === null
+    ? [sql`${input.column} IS NULL`]
+    : [eq(input.column, input.value)];
 }
 
 function toAutosyncSubscription(input: {

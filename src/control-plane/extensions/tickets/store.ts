@@ -58,6 +58,15 @@ export type TicketComment = {
   readonly externalUrl?: string;
 };
 
+export type TicketReviewNote = {
+  readonly noteId: string;
+  readonly ticketId: string;
+  readonly body: string;
+  readonly actor: string;
+  readonly createdAt: string;
+  readonly context?: string;
+};
+
 export type TicketSyncCheckpoint = {
   readonly checkpointId: string;
   readonly ticketId: string;
@@ -112,6 +121,10 @@ export type TicketStoreSnapshot = {
   readonly tickets: readonly TicketSummary[];
   readonly eventsByTicket: ReadonlyMap<string, readonly TicketEvent[]>;
   readonly commentsByTicket: ReadonlyMap<string, readonly TicketComment[]>;
+  readonly reviewNotesByTicket: ReadonlyMap<
+    string,
+    readonly TicketReviewNote[]
+  >;
   readonly syncCheckpointsByTicket: ReadonlyMap<
     string,
     readonly TicketSyncCheckpoint[]
@@ -139,6 +152,7 @@ type SyncResult =
 type MaterializedTicketState = {
   readonly tickets: Map<string, TicketSummary>;
   readonly commentsByTicket: Map<string, TicketComment[]>;
+  readonly reviewNotesByTicket: Map<string, TicketReviewNote[]>;
   readonly syncCheckpointsByTicket: Map<string, TicketSyncCheckpoint[]>;
   readonly conflictsByTicket: Map<string, TicketSyncConflict[]>;
 };
@@ -203,6 +217,7 @@ export function createTicketsStore(opts: {
     readonly ticket: TicketSummary | null;
     readonly events: readonly TicketEvent[];
     readonly comments: readonly TicketComment[];
+    readonly reviewNotes: readonly TicketReviewNote[];
     readonly syncCheckpoints: readonly TicketSyncCheckpoint[];
     readonly conflicts: readonly TicketSyncConflict[];
   }>;
@@ -215,6 +230,15 @@ export function createTicketsStore(opts: {
     readonly actor?: string;
   }) => Promise<
     | { readonly ok: true; readonly comment: TicketComment }
+    | { readonly ok: false; readonly error: string }
+  >;
+  readonly appendReviewNote: (input: {
+    readonly ticketId: string;
+    readonly body: string;
+    readonly context?: string;
+    readonly actor?: string;
+  }) => Promise<
+    | { readonly ok: true; readonly reviewNote: TicketReviewNote }
     | { readonly ok: false; readonly error: string }
   >;
   readonly linkCommentExternalId: (input: {
@@ -362,6 +386,7 @@ export function createTicketsStore(opts: {
   }): MaterializedTicketState => {
     const tickets = new Map<string, TicketSummary>();
     const commentsByTicket = new Map<string, TicketComment[]>();
+    const reviewNotesByTicket = new Map<string, TicketReviewNote[]>();
     const syncCheckpointsByTicket = new Map<string, TicketSyncCheckpoint[]>();
     const conflictsByTicket = new Map<string, TicketSyncConflict[]>();
 
@@ -369,6 +394,7 @@ export function createTicketsStore(opts: {
       applyTicketEvent({
         tickets,
         commentsByTicket,
+        reviewNotesByTicket,
         syncCheckpointsByTicket,
         conflictsByTicket,
         event,
@@ -378,6 +404,7 @@ export function createTicketsStore(opts: {
     return {
       tickets: applyDerivedBlocks(tickets),
       commentsByTicket,
+      reviewNotesByTicket,
       syncCheckpointsByTicket,
       conflictsByTicket,
     };
@@ -657,6 +684,7 @@ export function createTicketsStore(opts: {
         ticket: snapshot.tickets.get(ticketId) ?? null,
         events: events.filter((event) => event.ticketId === ticketId),
         comments: snapshot.commentsByTicket.get(ticketId) ?? [],
+        reviewNotes: snapshot.reviewNotesByTicket.get(ticketId) ?? [],
         syncCheckpoints: snapshot.syncCheckpointsByTicket.get(ticketId) ?? [],
         conflicts: snapshot.conflictsByTicket.get(ticketId) ?? [],
       };
@@ -714,6 +742,50 @@ export function createTicketsStore(opts: {
           createdAt: event.tsIso,
           ...(externalId ? { externalId } : {}),
           ...(externalUrl ? { externalUrl } : {}),
+        },
+      };
+    },
+
+    appendReviewNote: async (input) => {
+      const tickets = await materializeTickets();
+      if (!tickets.has(input.ticketId)) {
+        return { ok: false, error: `Ticket not found: ${input.ticketId}` };
+      }
+
+      const body = input.body.trim();
+      if (!body) {
+        return { ok: false, error: "Review note body cannot be empty." };
+      }
+
+      const noteId = randomUUID();
+      const context = normalizeOptionalMetadataString({
+        value: input.context,
+      });
+      const event = buildEvent({
+        ticketId: input.ticketId,
+        type: "ticket.review_note_appended",
+        payload: {
+          noteId,
+          body,
+          ...(context ? { context } : {}),
+        },
+        actor: input.actor,
+      });
+
+      const wrote = await git.appendEvents({ events: [event] });
+      if (!wrote.ok) {
+        return wrote;
+      }
+
+      return {
+        ok: true,
+        reviewNote: {
+          noteId,
+          ticketId: input.ticketId,
+          body,
+          actor: event.actor,
+          createdAt: event.tsIso,
+          ...(context ? { context } : {}),
         },
       };
     },
@@ -925,6 +997,7 @@ export function createTicketsStore(opts: {
         tickets: sortTickets({ tickets: snapshot.tickets.values() }),
         eventsByTicket: groupEventsByTicket({ events }),
         commentsByTicket: snapshot.commentsByTicket,
+        reviewNotesByTicket: snapshot.reviewNotesByTicket,
         syncCheckpointsByTicket: snapshot.syncCheckpointsByTicket,
         conflictsByTicket: snapshot.conflictsByTicket,
       };
@@ -941,6 +1014,7 @@ export function createTicketsStore(opts: {
 function applyTicketEvent(input: {
   readonly tickets: Map<string, TicketSummary>;
   readonly commentsByTicket: Map<string, TicketComment[]>;
+  readonly reviewNotesByTicket: Map<string, TicketReviewNote[]>;
   readonly syncCheckpointsByTicket: Map<string, TicketSyncCheckpoint[]>;
   readonly conflictsByTicket: Map<string, TicketSyncConflict[]>;
   readonly event: TicketEvent;
@@ -978,6 +1052,14 @@ function applyTicketEvent(input: {
     case "ticket.comment_linked": {
       applyTicketCommentLinkedEvent({
         commentsByTicket: input.commentsByTicket,
+        event: input.event,
+      });
+      break;
+    }
+    case "ticket.review_note_appended": {
+      applyTicketReviewNoteAppendedEvent({
+        tickets: input.tickets,
+        reviewNotesByTicket: input.reviewNotesByTicket,
         event: input.event,
       });
       break;
@@ -1233,7 +1315,13 @@ function applyTicketCommentAppendedEvent(input: {
     return;
   }
 
-  const body = readOptionalStringPayload({ value: input.event.payload.body });
+  const body =
+    readOptionalStringPayload({
+      value: input.event.payload.body,
+    }) ??
+    readOptionalStringPayload({
+      value: input.event.payload.markdown,
+    });
   if (!body) {
     return;
   }
@@ -1299,6 +1387,42 @@ function applyTicketCommentLinkedEvent(input: {
         : comment
     )
   );
+}
+
+function applyTicketReviewNoteAppendedEvent(input: {
+  readonly tickets: Map<string, TicketSummary>;
+  readonly reviewNotesByTicket: Map<string, TicketReviewNote[]>;
+  readonly event: TicketEvent;
+}): void {
+  if (!input.tickets.has(input.event.ticketId)) {
+    return;
+  }
+
+  const body =
+    readOptionalStringPayload({ value: input.event.payload.body }) ??
+    readOptionalStringPayload({ value: input.event.payload.markdown });
+  if (!body) {
+    return;
+  }
+
+  const context = readOptionalStringPayload({
+    value: input.event.payload.context,
+  });
+
+  appendMapValue({
+    map: input.reviewNotesByTicket,
+    key: input.event.ticketId,
+    value: {
+      noteId:
+        readOptionalStringPayload({ value: input.event.payload.noteId }) ??
+        input.event.eventId,
+      ticketId: input.event.ticketId,
+      body,
+      actor: input.event.actor,
+      createdAt: input.event.tsIso,
+      ...(context ? { context } : {}),
+    },
+  });
 }
 
 function applyTicketSyncCheckpointRecordedEvent(input: {

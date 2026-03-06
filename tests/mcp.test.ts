@@ -40,9 +40,15 @@ testIntegration(
     expect(names).toContain("hack.project.logs.tail");
     expect(names).toContain("hack.project.open");
     expect(names).toContain("hack.linear.status");
+    expect(names).toContain("hack.linear.project.bind");
+    expect(names).toContain("hack.linear.project.link");
+    expect(names).toContain("hack.linear.project.unlink");
     expect(names).toContain("hack.linear.sync.project");
     expect(names).toContain("hack.linear.deliveries.list");
     expect(names).toContain("hack.linear.deliveries.apply");
+    expect(names).toContain("hack.linear.subscriptions.list");
+    expect(names).toContain("hack.linear.subscriptions.upsert");
+    expect(names).toContain("hack.linear.subscriptions.remove");
     expect(names).toContain("hack.linear.assignee-mappings.list");
     expect(names).toContain("hack.linear.assignee-mappings.upsert");
     expect(names).toContain("hack.linear.assignee-mappings.remove");
@@ -96,6 +102,79 @@ testIntegration(
 );
 
 testIntegration(
+  "hack.linear.project.link forwards additional project routing flags",
+  { timeout: 20_000 },
+  async () => {
+    const mcp = await startMcpClient();
+    const result = await mcp.callTool({
+      name: "hack.linear.project.link",
+      arguments: {
+        profile: "work",
+        projectId: "proj-1",
+        linearProjectName: "Ops",
+        teamId: "team-1",
+      },
+    });
+
+    const structured = result.structuredContent as {
+      ok: boolean;
+      data?: unknown;
+    };
+
+    expect(result.isError).toBeUndefined();
+    expect(structured.ok).toBe(true);
+    expect(structured.data).toEqual({
+      ok: true,
+      profileId: "work",
+      projectId: null,
+      projectName: null,
+      teamId: null,
+      additionalProjects: [
+        {
+          profileId: "work",
+          projectId: "proj-1",
+          projectName: "Ops",
+          teamId: "team-1",
+        },
+      ],
+      additionalProjectChanged: true,
+    });
+  }
+);
+
+testIntegration(
+  "hack.linear.project.unlink forwards the project id",
+  { timeout: 20_000 },
+  async () => {
+    const mcp = await startMcpClient();
+    const result = await mcp.callTool({
+      name: "hack.linear.project.unlink",
+      arguments: {
+        projectId: "proj-1",
+      },
+    });
+
+    const structured = result.structuredContent as {
+      ok: boolean;
+      data?: unknown;
+    };
+
+    expect(result.isError).toBeUndefined();
+    expect(structured.ok).toBe(true);
+    expect(structured.data).toEqual({
+      ok: true,
+      profileId: "default",
+      projectId: "proj-default",
+      projectName: "Default Project",
+      teamId: "team-default",
+      additionalProjects: [],
+      additionalProjectChanged: true,
+      removedProjectId: "proj-1",
+    });
+  }
+);
+
+testIntegration(
   "hack.linear.deliveries.list forwards status and limit flags",
   { timeout: 20_000 },
   async () => {
@@ -116,6 +195,7 @@ testIntegration(
     expect(result.isError).toBeUndefined();
     expect(structured.ok).toBe(true);
     expect(structured.data).toEqual({
+      profileId: "default",
       status: "pending",
       limit: 5,
       deliveries: [{ id: "delivery-1", status: "pending" }],
@@ -143,8 +223,118 @@ testIntegration(
     expect(result.isError).toBeUndefined();
     expect(structured.ok).toBe(true);
     expect(structured.data).toEqual({
+      profileId: "default",
       deliveryId: "delivery-1",
       status: "applied",
+    });
+  }
+);
+
+testIntegration(
+  "hack.linear.subscriptions.list forwards profile and scope filters",
+  { timeout: 20_000 },
+  async () => {
+    const mcp = await startMcpClient();
+    const result = await mcp.callTool({
+      name: "hack.linear.subscriptions.list",
+      arguments: {
+        profile: "work",
+        projectId: "proj-1",
+        teamId: "team-1",
+      },
+    });
+
+    const structured = result.structuredContent as {
+      ok: boolean;
+      data?: unknown;
+    };
+
+    expect(result.isError).toBeUndefined();
+    expect(structured.ok).toBe(true);
+    expect(structured.data).toEqual({
+      profileId: "work",
+      subscriptions: [
+        {
+          id: "sub-1",
+          profileId: "work",
+          projectId: "proj-1",
+          teamId: "team-1",
+          mode: "auto_apply",
+          status: "active",
+        },
+      ],
+    });
+  }
+);
+
+testIntegration(
+  "hack.linear.subscriptions.upsert forwards autosync settings",
+  { timeout: 20_000 },
+  async () => {
+    const mcp = await startMcpClient();
+    const result = await mcp.callTool({
+      name: "hack.linear.subscriptions.upsert",
+      arguments: {
+        profile: "work",
+        projectId: "proj-1",
+        teamId: "team-1",
+        mode: "auto_apply",
+        status: "active",
+      },
+    });
+
+    const structured = result.structuredContent as {
+      ok: boolean;
+      data?: unknown;
+    };
+
+    expect(result.isError).toBeUndefined();
+    expect(structured.ok).toBe(true);
+    expect(structured.data).toEqual({
+      profileId: "work",
+      subscription: {
+        id: "sub-1",
+        profileId: "work",
+        projectId: "proj-1",
+        teamId: "team-1",
+        mode: "auto_apply",
+        status: "active",
+      },
+    });
+  }
+);
+
+testIntegration(
+  "hack.linear.subscriptions.remove forwards autosync scope",
+  { timeout: 20_000 },
+  async () => {
+    const mcp = await startMcpClient();
+    const result = await mcp.callTool({
+      name: "hack.linear.subscriptions.remove",
+      arguments: {
+        profile: "work",
+        projectId: "proj-1",
+        teamId: "team-1",
+      },
+    });
+
+    const structured = result.structuredContent as {
+      ok: boolean;
+      data?: unknown;
+    };
+
+    expect(result.isError).toBeUndefined();
+    expect(structured.ok).toBe(true);
+    expect(structured.data).toEqual({
+      profileId: "work",
+      subscription: {
+        id: "sub-1",
+        profileId: "work",
+        projectId: "proj-1",
+        teamId: "team-1",
+        mode: "auto_apply",
+        status: "active",
+      },
     });
   }
 );
@@ -298,18 +488,87 @@ function buildHackStubScript(): string {
     '    console.log(JSON.stringify({ extensionId: "dance.hack.linear", selectedProfile: "default", tokenResolved: true }))',
     "    process.exit(0)",
     "  }",
+    '  if (sub === "project-bind") {',
+    '    const profileIndex = args.indexOf("--profile")',
+    '    const projectIdIndex = args.indexOf("--project-id")',
+    '    const projectNameIndex = args.indexOf("--project-name")',
+    '    const teamIdIndex = args.indexOf("--team-id")',
+    '    const clear = args.includes("--clear")',
+    '    const profileId = profileIndex === -1 ? "default" : args[profileIndex + 1]',
+    "    const projectId = clear || projectIdIndex === -1 ? null : args[projectIdIndex + 1]",
+    "    const projectName = clear || projectNameIndex === -1 ? null : args[projectNameIndex + 1]",
+    "    const teamId = clear || teamIdIndex === -1 ? null : args[teamIdIndex + 1]",
+    "    console.log(JSON.stringify({ ok: true, cleared: clear ? true : undefined, profileId, projectId, projectName, teamId, additionalProjects: [] }))",
+    "    process.exit(0)",
+    "  }",
+    '  if (sub === "project-link") {',
+    '    const profileIndex = args.indexOf("--profile")',
+    '    const projectIdIndex = args.indexOf("--project-id")',
+    '    const projectNameIndex = args.indexOf("--project-name")',
+    '    const teamIdIndex = args.indexOf("--team-id")',
+    '    const profileId = profileIndex === -1 ? "default" : args[profileIndex + 1]',
+    "    const projectId = projectIdIndex === -1 ? null : args[projectIdIndex + 1]",
+    "    const projectName = projectNameIndex === -1 ? null : args[projectNameIndex + 1]",
+    "    const teamId = teamIdIndex === -1 ? null : args[teamIdIndex + 1]",
+    "    console.log(JSON.stringify({ ok: true, profileId, projectId: null, projectName: null, teamId: null, additionalProjects: [{ profileId, projectId, projectName, teamId }], additionalProjectChanged: true }))",
+    "    process.exit(0)",
+    "  }",
+    '  if (sub === "project-unlink") {',
+    '    const projectIdIndex = args.indexOf("--project-id")',
+    "    const removedProjectId = projectIdIndex === -1 ? null : args[projectIdIndex + 1]",
+    '    console.log(JSON.stringify({ ok: true, profileId: "default", projectId: "proj-default", projectName: "Default Project", teamId: "team-default", additionalProjects: [], additionalProjectChanged: true, removedProjectId }))',
+    "    process.exit(0)",
+    "  }",
     '  if (sub === "deliveries") {',
+    '    const profileIndex = args.indexOf("--profile")',
     '    const statusIndex = args.indexOf("--status")',
     '    const limitIndex = args.indexOf("--limit")',
+    '    const profileId = profileIndex === -1 ? "default" : args[profileIndex + 1]',
     '    const status = statusIndex === -1 ? "pending" : args[statusIndex + 1]',
     "    const limit = limitIndex === -1 ? null : Number(args[limitIndex + 1])",
-    '    console.log(JSON.stringify({ status, limit, deliveries: [{ id: "delivery-1", status }] }))',
+    '    console.log(JSON.stringify({ profileId, status, limit, deliveries: [{ id: "delivery-1", status }] }))',
     "    process.exit(0)",
     "  }",
     '  if (sub === "apply-delivery") {',
+    '    const profileIndex = args.indexOf("--profile")',
     '    const idIndex = args.indexOf("--delivery-id")',
+    '    const profileId = profileIndex === -1 ? "default" : args[profileIndex + 1]',
     "    const deliveryId = idIndex === -1 ? null : args[idIndex + 1]",
-    '    console.log(JSON.stringify({ deliveryId, status: "applied" }))',
+    '    console.log(JSON.stringify({ profileId, deliveryId, status: "applied" }))',
+    "    process.exit(0)",
+    "  }",
+    '  if (sub === "subscriptions") {',
+    '    const profileIndex = args.indexOf("--profile")',
+    '    const projectIndex = args.indexOf("--project-id")',
+    '    const teamIndex = args.indexOf("--team-id")',
+    '    const profileId = profileIndex === -1 ? "default" : args[profileIndex + 1]',
+    "    const projectId = projectIndex === -1 ? null : args[projectIndex + 1]",
+    "    const teamId = teamIndex === -1 ? null : args[teamIndex + 1]",
+    '    console.log(JSON.stringify({ profileId, subscriptions: [{ id: "sub-1", profileId, projectId, teamId, mode: "auto_apply", status: "active" }] }))',
+    "    process.exit(0)",
+    "  }",
+    '  if (sub === "set-subscription") {',
+    '    const profileIndex = args.indexOf("--profile")',
+    '    const projectIndex = args.indexOf("--project-id")',
+    '    const teamIndex = args.indexOf("--team-id")',
+    '    const modeIndex = args.indexOf("--mode")',
+    '    const statusIndex = args.indexOf("--status")',
+    '    const profileId = profileIndex === -1 ? "default" : args[profileIndex + 1]',
+    "    const projectId = projectIndex === -1 ? null : args[projectIndex + 1]",
+    "    const teamId = teamIndex === -1 ? null : args[teamIndex + 1]",
+    '    const mode = modeIndex === -1 ? "auto_apply" : args[modeIndex + 1]',
+    '    const status = statusIndex === -1 ? "active" : args[statusIndex + 1]',
+    '    console.log(JSON.stringify({ profileId, subscription: { id: "sub-1", profileId, projectId, teamId, mode, status } }))',
+    "    process.exit(0)",
+    "  }",
+    '  if (sub === "remove-subscription") {',
+    '    const profileIndex = args.indexOf("--profile")',
+    '    const projectIndex = args.indexOf("--project-id")',
+    '    const teamIndex = args.indexOf("--team-id")',
+    '    const profileId = profileIndex === -1 ? "default" : args[profileIndex + 1]',
+    "    const projectId = projectIndex === -1 ? null : args[projectIndex + 1]",
+    "    const teamId = teamIndex === -1 ? null : args[teamIndex + 1]",
+    '    console.log(JSON.stringify({ profileId, subscription: { id: "sub-1", profileId, projectId, teamId, mode: "auto_apply", status: "active" } }))',
     "    process.exit(0)",
     "  }",
     '  if (sub === "assignee-mappings") {',

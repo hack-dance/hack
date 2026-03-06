@@ -122,7 +122,7 @@ testIntegration(
 );
 
 testIntegration(
-  "tickets extension: assignee, comment, and conflict resolution commands work end to end",
+  "tickets extension: assignee, review note, comment, and conflict resolution commands work end to end",
   { timeout: 60_000 },
   async () => {
     const root = await mkdirTempDir({ prefix: "hack-cli-tickets-sync-e2e-" });
@@ -182,6 +182,22 @@ testIntegration(
     expect(commentJson.comment.body).toBe("Append only note");
     expect(commentJson.comment.source).toBe("hack");
 
+    const reviewed = await runHack({
+      cwd: projectDir,
+      args: [
+        "tickets",
+        "review-note",
+        ticketId,
+        "--body",
+        "Shared review note",
+        "--json",
+      ],
+    });
+    const reviewJson = JSON.parse(reviewed.stdout) as {
+      reviewNote: { body: string };
+    };
+    expect(reviewJson.reviewNote.body).toBe("Shared review note");
+
     const store = await createStore({ projectRoot: projectDir });
     const conflict = await store.recordSyncConflict({
       ticketId,
@@ -227,11 +243,15 @@ testIntegration(
     const showJson = JSON.parse(shown.stdout) as {
       ticket: { assignee?: string };
       comments: Array<{ body: string }>;
+      reviewNotes: Array<{ body: string }>;
       conflicts: Array<{ status: string; resolution?: string }>;
     };
     expect(showJson.ticket.assignee).toBe("alice@hack");
     expect(showJson.comments.map((comment) => comment.body)).toContain(
       "Append only note"
+    );
+    expect(showJson.reviewNotes.map((reviewNote) => reviewNote.body)).toContain(
+      "Shared review note"
     );
     expect(showJson.conflicts[0]?.status).toBe("resolved");
     expect(showJson.conflicts[0]?.resolution).toBe("accept_remote");

@@ -2,6 +2,43 @@ import { expect, test } from "bun:test";
 
 import { __testOnly } from "../src/control-plane/extensions/linear/commands.ts";
 
+const minimalLinearBindingConfig = {
+  routing: {
+    mode: "existing_only",
+    bootstrap: {
+      enabled: false,
+      setAsProjectNode: false,
+    },
+    overrides: {
+      linear: {
+        profile: "work",
+        projectId: "proj_default",
+        projectName: "Default",
+        teamId: "team_default",
+        additionalProjects: [
+          {
+            projectId: "proj_extra",
+            projectName: "Extra",
+            teamId: "team_extra",
+          },
+          {
+            projectId: "proj_default",
+            projectName: "Duplicate default",
+            teamId: "team_default",
+          },
+          {
+            projectId: "proj_extra",
+            projectName: "Duplicate extra",
+            teamId: "team_extra",
+          },
+        ],
+      },
+    },
+  },
+} as unknown as Parameters<
+  typeof __testOnly.resolveProjectLinearBinding
+>[0]["controlPlaneConfig"];
+
 test("parseSetupArgs parses project binding flags", () => {
   const parsed = __testOnly.parseSetupArgs({
     args: [
@@ -122,6 +159,149 @@ test("parseSyncProjectArgs parses owner filter and limits", () => {
   });
 });
 
+test("parseProjectLinkArgs parses additional project routing flags", () => {
+  const parsed = __testOnly.parseProjectLinkArgs({
+    args: [
+      "--profile",
+      "work",
+      "--project-id",
+      "proj_456",
+      "--project-name",
+      "Operations",
+      "--team-id",
+      "team_456",
+      "--json",
+    ],
+  });
+
+  expect(parsed.ok).toBe(true);
+  if (!parsed.ok) {
+    return;
+  }
+
+  expect(parsed.value).toEqual({
+    profileId: "work",
+    projectId: "proj_456",
+    projectName: "Operations",
+    teamId: "team_456",
+    json: true,
+  });
+});
+
+test("resolveProjectLinearBinding keeps a default project and deduped additional projects", () => {
+  const binding = __testOnly.resolveProjectLinearBinding({
+    controlPlaneConfig: minimalLinearBindingConfig,
+  });
+
+  expect(binding).toEqual({
+    profileId: "work",
+    projectId: "proj_default",
+    projectName: "Default",
+    teamId: "team_default",
+    additionalProjects: [
+      {
+        profileId: "work",
+        projectId: "proj_extra",
+        projectName: "Duplicate extra",
+        teamId: "team_extra",
+      },
+    ],
+  });
+});
+
+test("resolveProjectPullTargets includes default and additional bound projects", () => {
+  const targets = __testOnly.resolveProjectPullTargets({
+    binding: {
+      profileId: "work",
+      projectId: "proj_default",
+      projectName: "Default",
+      teamId: "team_default",
+      additionalProjects: [
+        {
+          projectId: "proj_extra",
+          projectName: "Extra",
+          teamId: "team_extra",
+        },
+      ],
+    },
+  });
+
+  expect(targets).toEqual([
+    {
+      profileId: "work",
+      projectId: "proj_default",
+      projectName: "Default",
+      teamId: "team_default",
+    },
+    {
+      projectId: "proj_extra",
+      projectName: "Extra",
+      teamId: "team_extra",
+    },
+  ]);
+});
+
+test("resolveProjectPullTargets keeps per-project profile overrides for linked projects", () => {
+  const targets = __testOnly.resolveProjectPullTargets({
+    binding: {
+      profileId: "work",
+      projectId: "proj_default",
+      projectName: "Default",
+      teamId: "team_default",
+      additionalProjects: [
+        {
+          profileId: "ops",
+          projectId: "proj_ops",
+          projectName: "Operations",
+          teamId: "team_ops",
+        },
+      ],
+    },
+  });
+
+  expect(targets).toEqual([
+    {
+      profileId: "work",
+      projectId: "proj_default",
+      projectName: "Default",
+      teamId: "team_default",
+    },
+    {
+      profileId: "ops",
+      projectId: "proj_ops",
+      projectName: "Operations",
+      teamId: "team_ops",
+    },
+  ]);
+});
+
+test("findProjectBindingTarget resolves additional linked projects by id", () => {
+  const target = __testOnly.findProjectBindingTarget({
+    binding: {
+      profileId: "work",
+      projectId: "proj_default",
+      projectName: "Default",
+      teamId: "team_default",
+      additionalProjects: [
+        {
+          profileId: "ops",
+          projectId: "proj_ops",
+          projectName: "Operations",
+          teamId: "team_ops",
+        },
+      ],
+    },
+    projectId: "proj_ops",
+  });
+
+  expect(target).toEqual({
+    profileId: "ops",
+    projectId: "proj_ops",
+    projectName: "Operations",
+    teamId: "team_ops",
+  });
+});
+
 test("connect falls back to oauth when no token input exists", () => {
   const envKey = "HACK_LINEAR_TEST_TOKEN";
   const previous = process.env[envKey];
@@ -223,7 +403,15 @@ test("buildOAuthArgsFromConnectArgs maps connect defaults into oauth args", () =
 
 test("parseDeliveriesArgs parses status, limit, and json flags", () => {
   const parsed = __testOnly.parseDeliveriesArgs({
-    args: ["--status", "applied", "--limit", "10", "--json"],
+    args: [
+      "--profile",
+      "work",
+      "--status",
+      "applied",
+      "--limit",
+      "10",
+      "--json",
+    ],
   });
 
   expect(parsed.ok).toBe(true);
@@ -232,6 +420,7 @@ test("parseDeliveriesArgs parses status, limit, and json flags", () => {
   }
 
   expect(parsed.value).toEqual({
+    profileId: "work",
     status: "applied",
     limit: 10,
     json: true,
@@ -263,6 +452,103 @@ test("parseAssigneeMappingsArgs parses profile and team filters", () => {
 
   expect(parsed.value).toEqual({
     profileId: "work",
+    teamId: "team-1",
+    json: true,
+  });
+});
+
+test("parseAutosyncSubscriptionsArgs parses profile and scope filters", () => {
+  const parsed = __testOnly.parseAutosyncSubscriptionsArgs({
+    args: [
+      "--profile",
+      "work",
+      "--project-id",
+      "proj-1",
+      "--team-id",
+      "team-1",
+      "--json",
+    ],
+  });
+
+  expect(parsed.ok).toBe(true);
+  if (!parsed.ok) {
+    return;
+  }
+
+  expect(parsed.value).toEqual({
+    profileId: "work",
+    projectId: "proj-1",
+    teamId: "team-1",
+    json: true,
+  });
+});
+
+test("parseUpsertAutosyncSubscriptionArgs validates mode and status", () => {
+  const parsed = __testOnly.parseUpsertAutosyncSubscriptionArgs({
+    args: ["--mode", "invalid"],
+  });
+
+  expect(parsed.ok).toBe(false);
+  if (parsed.ok) {
+    return;
+  }
+
+  expect(parsed.error).toContain("manual|auto_apply");
+});
+
+test("parseUpsertAutosyncSubscriptionArgs parses autosync scope and state", () => {
+  const parsed = __testOnly.parseUpsertAutosyncSubscriptionArgs({
+    args: [
+      "--profile",
+      "work",
+      "--project-id",
+      "proj-1",
+      "--team-id",
+      "team-1",
+      "--mode",
+      "auto_apply",
+      "--status",
+      "paused",
+      "--json",
+    ],
+  });
+
+  expect(parsed.ok).toBe(true);
+  if (!parsed.ok) {
+    return;
+  }
+
+  expect(parsed.value).toEqual({
+    profileId: "work",
+    projectId: "proj-1",
+    teamId: "team-1",
+    mode: "auto_apply",
+    status: "paused",
+    json: true,
+  });
+});
+
+test("parseRemoveAutosyncSubscriptionArgs parses optional scope", () => {
+  const parsed = __testOnly.parseRemoveAutosyncSubscriptionArgs({
+    args: [
+      "--profile",
+      "work",
+      "--project-id",
+      "proj-1",
+      "--team-id",
+      "team-1",
+      "--json",
+    ],
+  });
+
+  expect(parsed.ok).toBe(true);
+  if (!parsed.ok) {
+    return;
+  }
+
+  expect(parsed.value).toEqual({
+    profileId: "work",
+    projectId: "proj-1",
     teamId: "team-1",
     json: true,
   });
@@ -511,7 +797,9 @@ test("syncIssueFromLinearToTicket preserves hack authority, appends comments, an
   const runtime = {
     profileId: "default",
     apiUrl: "https://api.linear.app/graphql",
-    projectBinding: {},
+    projectBinding: {
+      additionalProjects: [],
+    },
     tickets: {
       listTickets: async () => [
         {
@@ -556,6 +844,7 @@ test("syncIssueFromLinearToTicket preserves hack authority, appends comments, an
             externalId: "linear-comment-1",
           },
         ],
+        reviewNotes: [],
         syncCheckpoints: [],
         conflicts: [],
       }),
@@ -684,6 +973,7 @@ test("syncTicketToLinearIssue pushes missing local comments and records a checkp
     apiUrl: "https://api.linear.app/graphql",
     projectBinding: {
       teamId: "team-1",
+      additionalProjects: [],
     },
     assigneeMappings: [],
     tickets: {
@@ -728,6 +1018,7 @@ test("syncTicketToLinearIssue pushes missing local comments and records a checkp
             createdAt: "2026-03-05T10:01:00.000Z",
           },
         ],
+        reviewNotes: [],
         syncCheckpoints: [],
         conflicts: [],
       }),

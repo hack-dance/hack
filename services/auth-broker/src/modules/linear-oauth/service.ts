@@ -11,6 +11,7 @@ import {
   refreshAccessToken,
 } from "../../linear.ts";
 import type { OAuthFlow } from "../../types.ts";
+import { issueBrokerManagementToken } from "../better-auth/management-token.ts";
 import { resolveBetterAuthSession } from "../better-auth/session.ts";
 import type { LinearConnectionStore } from "../linear-connections/service.ts";
 import type { LinearOAuthModel } from "./model.ts";
@@ -202,6 +203,12 @@ export async function handleLinearCallback(input: {
       ? { betterAuthLinkState: betterAuthLink.state }
       : {}),
   } as const;
+  const managementToken = issueBrokerManagementToken({
+    userId: betterAuthSession.session?.userId ?? betterAuthLink.userId ?? "",
+    profileId: flow.profileId,
+    organizationId: betterAuthSession.session?.organizationId ?? null,
+    teamId: betterAuthSession.session?.teamId ?? null,
+  });
 
   input.flowStore.markComplete({
     flowId: flow.id,
@@ -210,6 +217,8 @@ export async function handleLinearCallback(input: {
     tokenExpiresAt: exchange.tokenExpiresAt,
     refreshToken: exchange.refreshToken,
     refreshTokenExpiresAt: exchange.refreshTokenExpiresAt,
+    managementToken: managementToken?.token,
+    managementTokenExpiresAt: managementToken?.expiresAt,
   });
   try {
     await input.connectionStore.upsertConnection({
@@ -220,6 +229,7 @@ export async function handleLinearCallback(input: {
       betterAuthUserId: betterAuthLink.userId ?? null,
       betterAuthOrganizationId:
         betterAuthSession.session?.organizationId ?? null,
+      betterAuthTeamId: betterAuthSession.session?.teamId ?? null,
       organizationId: identity.account.organizationId,
       teamId: identity.account.teamIds?.[0] ?? null,
       metadata: {

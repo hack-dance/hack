@@ -47,7 +47,7 @@ afterEach(async () => {
   }
 });
 
-test("tickets store materializes assignee, comments, checkpoints, and conflicts", async () => {
+test("tickets store materializes assignee, review notes, comments, checkpoints, and conflicts", async () => {
   const projectRoot = await createTempGitProject({
     prefix: "hack-cli-tickets-store-",
   });
@@ -94,6 +94,17 @@ test("tickets store materializes assignee, comments, checkpoints, and conflicts"
   expect(secondComment.ok).toBe(true);
   if (!secondComment.ok) {
     throw new Error(secondComment.error);
+  }
+
+  const reviewNote = await store.appendReviewNote({
+    ticketId,
+    body: "Investigate assignee before the next pull.",
+    context: "conflict_review",
+    actor: "alice@hack",
+  });
+  expect(reviewNote.ok).toBe(true);
+  if (!reviewNote.ok) {
+    throw new Error(reviewNote.error);
   }
 
   const linkedComment = await store.linkCommentExternalId({
@@ -164,6 +175,14 @@ test("tickets store materializes assignee, comments, checkpoints, and conflicts"
     externalUrl: "https://linear.app/issue/HACK-1#comment-2",
   });
 
+  const reviewNotes = snapshot.reviewNotesByTicket.get(ticketId) ?? [];
+  expect(reviewNotes).toHaveLength(1);
+  expect(reviewNotes[0]).toMatchObject({
+    actor: "alice@hack",
+    body: "Investigate assignee before the next pull.",
+    context: "conflict_review",
+  });
+
   const checkpoints = snapshot.syncCheckpointsByTicket.get(ticketId) ?? [];
   expect(checkpoints).toHaveLength(1);
   expect(checkpoints[0]).toMatchObject({
@@ -193,12 +212,13 @@ test("tickets store materializes assignee, comments, checkpoints, and conflicts"
     "ticket.updated",
     "ticket.comment_appended",
     "ticket.comment_appended",
+    "ticket.review_note_appended",
     "ticket.comment_linked",
     "ticket.sync_checkpoint_recorded",
     "ticket.sync_conflict_recorded",
     "ticket.sync_conflict_resolved",
   ]);
-});
+}, 20_000);
 
 test("tickets show json includes materialized sync metadata", async () => {
   const projectRoot = await createTempGitProject({
@@ -233,6 +253,13 @@ test("tickets show json includes materialized sync metadata", async () => {
   });
   expect(comment.ok).toBe(true);
 
+  const reviewNote = await store.appendReviewNote({
+    ticketId,
+    body: "Shared review note.",
+    actor: "alice@hack",
+  });
+  expect(reviewNote.ok).toBe(true);
+
   const checkpoint = await store.recordSyncCheckpoint({
     ticketId,
     provider: "linear",
@@ -264,6 +291,7 @@ test("tickets show json includes materialized sync metadata", async () => {
   const payload = JSON.parse(shown.stdout) as {
     ticket: { ticketId: string; assignee?: string };
     comments: { body: string }[];
+    reviewNotes: { body: string }[];
     syncCheckpoints: { provider: string; remoteCursor?: string }[];
     conflicts: { field: string; status: string }[];
     events: { type: string }[];
@@ -273,6 +301,8 @@ test("tickets show json includes materialized sync metadata", async () => {
   expect(payload.ticket.assignee).toBe("alice@hack");
   expect(payload.comments).toHaveLength(1);
   expect(payload.comments[0]?.body).toBe("Needs review.");
+  expect(payload.reviewNotes).toHaveLength(1);
+  expect(payload.reviewNotes[0]?.body).toBe("Shared review note.");
   expect(payload.syncCheckpoints[0]).toMatchObject({
     provider: "linear",
     remoteCursor: "issue/LIN-321#v3",
@@ -284,7 +314,7 @@ test("tickets show json includes materialized sync metadata", async () => {
   expect(
     payload.events.some((event) => event.type === "ticket.comment_appended")
   ).toBe(true);
-});
+}, 20_000);
 
 async function createStore(opts: { readonly projectRoot: string }) {
   const configResult = await readControlPlaneConfig({

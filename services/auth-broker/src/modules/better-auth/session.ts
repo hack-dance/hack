@@ -1,10 +1,22 @@
 import type { BetterAuthRuntime } from "../../better-auth.ts";
+import { verifyBrokerManagementToken } from "./management-token.ts";
+
+const AUTHORIZATION_BEARER_PATTERN = /^Bearer\s+(.+)$/i;
 
 export type BrokerBetterAuthSession = {
   readonly userId: string;
   readonly email: string | null;
   readonly name: string | null;
   readonly organizationId: string | null;
+  readonly teamId: string | null;
+  readonly managementTokenProfileId: string | null;
+};
+
+export type BetterAuthOwnedRecord = {
+  readonly betterAuthUserId: string | null;
+  readonly betterAuthOrganizationId: string | null;
+  readonly betterAuthTeamId: string | null;
+  readonly profileId?: string | null;
 };
 
 export type BetterAuthSessionResolution =
@@ -16,6 +28,7 @@ export type BetterAuthSessionResolution =
   | {
       readonly enabled: true;
       readonly accessControlMode:
+        | "better_auth_team_owned"
         | "better_auth_session_owned"
         | "better_auth_organization_owned";
       readonly session: BrokerBetterAuthSession | null;
@@ -42,21 +55,143 @@ export async function resolveBetterAuthSession(input: {
   const session = await input.runtime.auth.api.getSession({
     headers: input.request.headers,
   });
-  const resolvedSession = session?.user?.id
-    ? {
-        userId: session.user.id,
-        email: normalizeOptionalString(session.user.email),
-        name: normalizeOptionalString(session.user.name),
-        organizationId: extractBetterAuthOrganizationId(session),
-      }
-    : null;
+  const resolvedSession =
+    (session?.user?.id ? toResolvedSession({ session }) : null) ??
+    resolveManagementTokenSession({
+      request: input.request,
+    });
+  const accessControlMode = resolveAccessControlMode({
+    session: resolvedSession,
+  });
   return {
     enabled: true,
-    accessControlMode: resolvedSession?.organizationId
-      ? "better_auth_organization_owned"
-      : "better_auth_session_owned",
+    accessControlMode,
     session: resolvedSession,
   };
+}
+
+function resolveManagementTokenSession(input: {
+  readonly request: Request;
+}): BrokerBetterAuthSession | null {
+  const token = readBearerToken({
+    authorizationHeader: input.request.headers.get("authorization"),
+  });
+  if (!token) {
+    return null;
+  }
+  const verification = verifyBrokerManagementToken({ token });
+  if (!verification.ok) {
+    return null;
+  }
+  return {
+    userId: verification.claims.sub,
+    email: null,
+    name: null,
+    organizationId: verification.claims.organizationId ?? null,
+    teamId: verification.claims.teamId ?? null,
+    managementTokenProfileId: verification.claims.profileId ?? null,
+  };
+}
+
+function toResolvedSession(input: {
+  readonly session: NonNullable<
+    Awaited<
+      ReturnType<
+        NonNullable<NonNullable<BetterAuthRuntime["auth"]>["api"]>["getSession"]
+      >
+    >
+  >;
+}): BrokerBetterAuthSession {
+  return {
+    userId: input.session.user.id,
+    email: normalizeOptionalString(input.session.user.email),
+    name: normalizeOptionalString(input.session.user.name),
+    organizationId: extractBetterAuthOrganizationId(input.session),
+    teamId: extractBetterAuthTeamId(input.session),
+    managementTokenProfileId: null,
+  };
+}
+
+function resolveAccessControlMode(input: {
+  readonly session: BrokerBetterAuthSession | null;
+}):
+  | "better_auth_team_owned"
+  | "better_auth_session_owned"
+  | "better_auth_organization_owned" {
+  if (input.session?.teamId) {
+    return "better_auth_team_owned";
+  }
+  if (input.session?.organizationId) {
+    return "better_auth_organization_owned";
+  }
+  return "better_auth_session_owned";
+}
+
+export function hasBetterAuthAccess(input: {
+  readonly session: BrokerBetterAuthSession;
+  readonly record: BetterAuthOwnedRecord;
+}): boolean {
+  if (
+    !hasBetterAuthProfileAccess({
+      session: input.session,
+      profileId: normalizeOptionalString(input.record.profileId),
+    })
+  ) {
+    return false;
+  }
+
+  const recordTeamId = normalizeOptionalString(input.record.betterAuthTeamId);
+  if (recordTeamId) {
+    if (normalizeOptionalString(input.session.teamId) !== recordTeamId) {
+      return false;
+    }
+    const recordOrganizationId = normalizeOptionalString(
+      input.record.betterAuthOrganizationId
+    );
+    const sessionOrganizationId = normalizeOptionalString(
+      input.session.organizationId
+    );
+    if (
+      recordOrganizationId &&
+      sessionOrganizationId &&
+      recordOrganizationId !== sessionOrganizationId
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  const recordOrganizationId = normalizeOptionalString(
+    input.record.betterAuthOrganizationId
+  );
+  if (recordOrganizationId) {
+    return (
+      normalizeOptionalString(input.session.organizationId) ===
+      recordOrganizationId
+    );
+  }
+
+  return (
+    normalizeOptionalString(input.record.betterAuthUserId) ===
+    normalizeOptionalString(input.session.userId)
+  );
+}
+
+export function hasBetterAuthProfileAccess(input: {
+  readonly session: BrokerBetterAuthSession | null;
+  readonly profileId?: string | null;
+}): boolean {
+  const managementTokenProfileId = normalizeOptionalString(
+    input.session?.managementTokenProfileId
+  );
+  if (!managementTokenProfileId) {
+    return true;
+  }
+  const requestedProfileId = normalizeOptionalString(input.profileId);
+  if (!requestedProfileId) {
+    return true;
+  }
+  return requestedProfileId === managementTokenProfileId;
 }
 
 function extractBetterAuthOrganizationId(session: unknown): string | null {
@@ -69,6 +204,20 @@ function extractBetterAuthOrganizationId(session: unknown): string | null {
     normalizeOptionalString(record?.activeOrganizationId) ??
     normalizeOptionalString(record?.organizationId) ??
     readNestedRecordId(record?.activeOrganization) ??
+    null
+  );
+}
+
+function extractBetterAuthTeamId(session: unknown): string | null {
+  const record = readRecord(session);
+  const sessionRecord = readRecord(record?.session);
+  return (
+    normalizeOptionalString(sessionRecord?.activeTeamId) ??
+    normalizeOptionalString(sessionRecord?.teamId) ??
+    readNestedRecordId(sessionRecord?.activeTeam) ??
+    normalizeOptionalString(record?.activeTeamId) ??
+    normalizeOptionalString(record?.teamId) ??
+    readNestedRecordId(record?.activeTeam) ??
     null
   );
 }
@@ -88,4 +237,15 @@ function normalizeOptionalString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0
     ? value.trim()
     : null;
+}
+
+function readBearerToken(input: {
+  readonly authorizationHeader: string | null;
+}): string | null {
+  const header = normalizeOptionalString(input.authorizationHeader);
+  if (!header) {
+    return null;
+  }
+  const match = AUTHORIZATION_BEARER_PATTERN.exec(header);
+  return match ? normalizeOptionalString(match[1]) : null;
 }

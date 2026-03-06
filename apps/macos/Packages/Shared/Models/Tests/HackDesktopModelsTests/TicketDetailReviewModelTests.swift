@@ -50,6 +50,16 @@ final class TicketDetailReviewModelTests: XCTestCase {
             "createdAt": "2026-03-05T16:20:00Z"
           }
         ],
+        "reviewNotes": [
+          {
+            "noteId": "note-1",
+            "ticketId": "T-00042",
+            "markdown": "Follow up after assignee review.",
+            "actor": "alice@hack",
+            "createdAt": "2026-03-05T16:25:00Z",
+            "context": "conflict_review"
+          }
+        ],
         "syncCheckpoints": [
           {
             "checkpointId": "cp-1",
@@ -115,6 +125,8 @@ final class TicketDetailReviewModelTests: XCTestCase {
 
     XCTAssertEqual(detail.ticket.assignee, "alice@hack")
     XCTAssertEqual(detail.comments.count, 2)
+    XCTAssertEqual(detail.reviewNotes.count, 1)
+    XCTAssertEqual(detail.reviewNotes.first?.markdown, "Follow up after assignee review.")
     XCTAssertEqual(detail.syncCheckpoints.count, 1)
     XCTAssertEqual(detail.conflicts.count, 2)
     XCTAssertEqual(detail.latestSyncCheckpoint?.remoteCursor, "issue/ENG-42#v2")
@@ -281,13 +293,13 @@ final class TicketDetailReviewModelTests: XCTestCase {
       ]
     )
 
-    let entry = TicketReviewQueueEntry(ticket: detail.ticket, detail: detail, localNoteCount: 2)
+    let entry = TicketReviewQueueEntry(ticket: detail.ticket, detail: detail, reviewNoteCount: 2)
 
     XCTAssertEqual(entry?.ticketId, detail.ticket.ticketId)
     XCTAssertEqual(entry?.badgeLabel, "1 open conflict")
     XCTAssertEqual(entry?.commentCount, 1)
     XCTAssertEqual(entry?.openConflictCount, 1)
-    XCTAssertEqual(entry?.localNoteCount, 2)
+    XCTAssertEqual(entry?.reviewNoteCount, 2)
   }
 
   func testReviewComposerDraftIncludesConflictAndLatestComment() {
@@ -340,15 +352,36 @@ final class TicketDetailReviewModelTests: XCTestCase {
     XCTAssertTrue(draft.contains("> Imported from Linear."))
   }
 
+  func testReviewNoteDecodesLegacyBodyField() throws {
+    let data = Data(
+      #"""
+      {
+        "noteId": "note-legacy",
+        "ticketId": "T-00042",
+        "body": "Legacy review note body.",
+        "actor": "alice@hack",
+        "createdAt": "2026-03-05T16:25:00Z"
+      }
+      """#.utf8
+    )
+
+    let note = try JSONDecoder().decode(TicketReviewNote.self, from: data)
+
+    XCTAssertEqual(note.noteId, "note-legacy")
+    XCTAssertEqual(note.markdown, "Legacy review note body.")
+  }
+
   private func makeDetail(
     ticket: TicketSummary,
     comments: [TicketComment],
+    reviewNotes: [TicketReviewNote] = [],
     syncCheckpoints: [TicketSyncCheckpoint],
     conflicts: [TicketSyncConflict]
   ) -> TicketDetailResponse {
     TicketDetailResponse(
       ticket: ticket,
       comments: comments,
+      reviewNotes: reviewNotes,
       syncCheckpoints: syncCheckpoints,
       conflicts: conflicts,
       events: []

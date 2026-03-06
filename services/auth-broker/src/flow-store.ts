@@ -81,6 +81,8 @@ export class FlowStore {
     readonly tokenExpiresAt?: string;
     readonly refreshToken?: string;
     readonly refreshTokenExpiresAt?: string;
+    readonly managementToken?: string;
+    readonly managementTokenExpiresAt?: string;
     readonly installationId?: string;
   }): OAuthFlow | null {
     const flow = this.getById(opts.flowId);
@@ -92,6 +94,8 @@ export class FlowStore {
     flow.tokenExpiresAt = opts.tokenExpiresAt;
     flow.refreshToken = opts.refreshToken;
     flow.refreshTokenExpiresAt = opts.refreshTokenExpiresAt;
+    flow.managementToken = opts.managementToken;
+    flow.managementTokenExpiresAt = opts.managementTokenExpiresAt;
     flow.installationId = opts.installationId;
     flow.status = "complete";
     flow.completedAt = new Date().toISOString();
@@ -175,6 +179,12 @@ export class FlowStore {
       ...(flow.refreshTokenExpiresAt
         ? { refreshTokenExpiresAt: flow.refreshTokenExpiresAt }
         : {}),
+      ...(flow.managementToken
+        ? { managementToken: flow.managementToken }
+        : {}),
+      ...(flow.managementTokenExpiresAt
+        ? { managementTokenExpiresAt: flow.managementTokenExpiresAt }
+        : {}),
     };
     flow.status = "claimed";
     flow.claimedAt = claimedAt;
@@ -182,6 +192,8 @@ export class FlowStore {
     flow.tokenExpiresAt = undefined;
     flow.refreshToken = undefined;
     flow.refreshTokenExpiresAt = undefined;
+    flow.managementToken = undefined;
+    flow.managementTokenExpiresAt = undefined;
     changed = true;
     if (changed) {
       this.persist();
@@ -294,6 +306,10 @@ function toPublicStatus(flow: OAuthFlow): OAuthFlowPublicStatus {
     ...(flow.account?.installationIds
       ? { installationIds: flow.account.installationIds }
       : {}),
+    ...(flow.managementToken ? { managementToken: flow.managementToken } : {}),
+    ...(flow.managementTokenExpiresAt
+      ? { managementTokenExpiresAt: flow.managementTokenExpiresAt }
+      : {}),
     ...(flow.appId ? { appId: flow.appId } : {}),
     ...(flow.appSlug ? { appSlug: flow.appSlug } : {}),
     ...(flow.appInstallUrl ? { appInstallUrl: flow.appInstallUrl } : {}),
@@ -388,6 +404,10 @@ function parsePersistedFlow(input: {
   const refreshTokenExpiresAt = asOptionalString(
     input.value.refreshTokenExpiresAt
   );
+  const managementToken = asOptionalString(input.value.managementToken);
+  const managementTokenExpiresAt = asOptionalString(
+    input.value.managementTokenExpiresAt
+  );
   const error = asOptionalString(input.value.error);
   const completedAt = asOptionalString(input.value.completedAt);
   const claimedAt = asOptionalString(input.value.claimedAt);
@@ -413,6 +433,8 @@ function parsePersistedFlow(input: {
     ...(tokenExpiresAt ? { tokenExpiresAt } : {}),
     ...(refreshToken ? { refreshToken } : {}),
     ...(refreshTokenExpiresAt ? { refreshTokenExpiresAt } : {}),
+    ...(managementToken ? { managementToken } : {}),
+    ...(managementTokenExpiresAt ? { managementTokenExpiresAt } : {}),
     ...(error ? { error } : {}),
     ...(completedAt ? { completedAt } : {}),
     ...(claimedAt ? { claimedAt } : {}),

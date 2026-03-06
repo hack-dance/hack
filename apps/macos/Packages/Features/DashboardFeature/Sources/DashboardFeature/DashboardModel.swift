@@ -342,6 +342,26 @@ public final class DashboardModel {
     }
   }
 
+  public func appendTicketReviewNote(
+    for project: ProjectSummary,
+    ticketId: String,
+    body: String,
+    actor: String? = nil
+  ) async -> TicketReviewNoteAppendResponse? {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return nil
+    }
+    return await runActionResult(message: "Appending review note…") {
+      try await self.ticketsClient.appendTicketReviewNote(
+        path: path,
+        ticketId: ticketId,
+        body: body,
+        actor: actor
+      )
+    }
+  }
+
   public func syncTickets(for project: ProjectSummary) async -> TicketsSyncResult? {
     guard let path = resolveProjectPath(project) else {
       errorMessage = "Missing project path for \(project.name)"
@@ -757,6 +777,55 @@ public final class DashboardModel {
     }
   }
 
+  public func listLinearAutosyncSubscriptions(
+    profileId: String? = nil,
+    projectId: String? = nil,
+    teamId: String? = nil
+  ) async -> LinearAutosyncSubscriptionsResponse? {
+    do {
+      return try await client.listLinearAutosyncSubscriptions(
+        profileId: profileId,
+        projectId: projectId,
+        teamId: teamId
+      )
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func setLinearAutosyncSubscription(
+    profileId: String? = nil,
+    projectId: String? = nil,
+    teamId: String? = nil,
+    mode: String = "auto_apply",
+    status: String = "active"
+  ) async -> LinearAutosyncSubscriptionMutationResponse? {
+    return await runActionResult(message: "Saving Linear autosync…") {
+      try await self.client.setLinearAutosyncSubscription(
+        profileId: profileId,
+        projectId: projectId,
+        teamId: teamId,
+        mode: mode,
+        status: status
+      )
+    }
+  }
+
+  public func removeLinearAutosyncSubscription(
+    profileId: String? = nil,
+    projectId: String? = nil,
+    teamId: String? = nil
+  ) async -> LinearAutosyncSubscriptionMutationResponse? {
+    return await runActionResult(message: "Removing Linear autosync…") {
+      try await self.client.removeLinearAutosyncSubscription(
+        profileId: profileId,
+        projectId: projectId,
+        teamId: teamId
+      )
+    }
+  }
+
   public func bindLinearProject(
     for project: ProjectSummary,
     profileId: String?,
@@ -781,9 +850,60 @@ public final class DashboardModel {
     }
   }
 
+  public func inspectLinearProjectBinding(
+    for project: ProjectSummary
+  ) async -> LinearProjectBindingResponse? {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return nil
+    }
+    do {
+      return try await client.inspectLinearProjectBinding(path: path)
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func linkLinearProject(
+    for project: ProjectSummary,
+    profileId: String?,
+    projectId: String,
+    projectName: String?,
+    teamId: String?
+  ) async -> LinearProjectBindingResponse? {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return nil
+    }
+    return await runActionResult(message: "Adding Linear project to sync scope…") {
+      try await self.client.linkLinearProject(
+        path: path,
+        profileId: profileId,
+        projectId: projectId,
+        projectName: projectName,
+        teamId: teamId
+      )
+    }
+  }
+
+  public func unlinkLinearProject(
+    for project: ProjectSummary,
+    projectId: String
+  ) async -> LinearProjectBindingResponse? {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return nil
+    }
+    return await runActionResult(message: "Removing Linear project from sync scope…") {
+      try await self.client.unlinkLinearProject(path: path, projectId: projectId)
+    }
+  }
+
   public func syncLinearProject(
     for project: ProjectSummary,
     from direction: String,
+    profileId: String? = nil,
     ownerMode: String? = nil,
     projectId: String? = nil,
     teamId: String? = nil,
@@ -801,6 +921,7 @@ public final class DashboardModel {
       try await self.client.syncLinearProject(
         path: path,
         from: direction,
+        profileId: profileId,
         ownerMode: ownerMode,
         projectId: projectId,
         teamId: teamId,
@@ -813,6 +934,7 @@ public final class DashboardModel {
   public func syncLinearIssue(
     for project: ProjectSummary,
     from direction: String,
+    profileId: String? = nil,
     issueIdentifier: String? = nil,
     ticketId: String? = nil,
     projectId: String? = nil,
@@ -830,6 +952,7 @@ public final class DashboardModel {
       try await self.client.syncLinearIssue(
         path: path,
         from: direction,
+        profileId: profileId,
         issueIdentifier: issueIdentifier,
         ticketId: ticketId,
         projectId: projectId,

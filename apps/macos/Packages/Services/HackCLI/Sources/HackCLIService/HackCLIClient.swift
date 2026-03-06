@@ -550,6 +550,66 @@ public actor HackCLIClient {
     return try decodeJsonOrThrow(LinearAssigneeMappingRemovalResponse.self, result: result)
   }
 
+  public func listLinearAutosyncSubscriptions(
+    profileId: String? = nil,
+    projectId: String? = nil,
+    teamId: String? = nil
+  ) async throws -> LinearAutosyncSubscriptionsResponse {
+    var args = ["x", "linear", "subscriptions", "--json"]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    if let projectId, !projectId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--project-id", projectId])
+    }
+    if let teamId, !teamId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--team-id", teamId])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(LinearAutosyncSubscriptionsResponse.self, result: result)
+  }
+
+  public func setLinearAutosyncSubscription(
+    profileId: String? = nil,
+    projectId: String? = nil,
+    teamId: String? = nil,
+    mode: String = "auto_apply",
+    status: String = "active"
+  ) async throws -> LinearAutosyncSubscriptionMutationResponse {
+    var args = ["x", "linear", "set-subscription", "--json"]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    if let projectId, !projectId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--project-id", projectId])
+    }
+    if let teamId, !teamId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--team-id", teamId])
+    }
+    args.append(contentsOf: ["--mode", mode, "--status", status])
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(LinearAutosyncSubscriptionMutationResponse.self, result: result)
+  }
+
+  public func removeLinearAutosyncSubscription(
+    profileId: String? = nil,
+    projectId: String? = nil,
+    teamId: String? = nil
+  ) async throws -> LinearAutosyncSubscriptionMutationResponse {
+    var args = ["x", "linear", "remove-subscription", "--json"]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    if let projectId, !projectId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--project-id", projectId])
+    }
+    if let teamId, !teamId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--team-id", teamId])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(LinearAutosyncSubscriptionMutationResponse.self, result: result)
+  }
+
   public func bindLinearProject(
     path: String,
     profileId: String?,
@@ -578,9 +638,48 @@ public actor HackCLIClient {
     return try decodeJsonOrThrow(LinearProjectBindingResponse.self, result: result)
   }
 
+  public func inspectLinearProjectBinding(path: String) async throws -> LinearProjectBindingResponse {
+    let result = try await run(["x", "linear", "project-bind", "--json"], allowNonZeroExit: true, cwd: path)
+    return try decodeJsonOrThrow(LinearProjectBindingResponse.self, result: result)
+  }
+
+  public func linkLinearProject(
+    path: String,
+    profileId: String?,
+    projectId: String,
+    projectName: String?,
+    teamId: String?
+  ) async throws -> LinearProjectBindingResponse {
+    var args = ["x", "linear", "project-link", "--json", "--project-id", projectId]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    if let projectName, !projectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--project-name", projectName])
+    }
+    if let teamId, !teamId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--team-id", teamId])
+    }
+    let result = try await run(args, allowNonZeroExit: true, cwd: path)
+    return try decodeJsonOrThrow(LinearProjectBindingResponse.self, result: result)
+  }
+
+  public func unlinkLinearProject(
+    path: String,
+    projectId: String
+  ) async throws -> LinearProjectBindingResponse {
+    let result = try await run(
+      ["x", "linear", "project-unlink", "--json", "--project-id", projectId],
+      allowNonZeroExit: true,
+      cwd: path
+    )
+    return try decodeJsonOrThrow(LinearProjectBindingResponse.self, result: result)
+  }
+
   public func syncLinearProject(
     path: String,
     from direction: String,
+    profileId: String? = nil,
     ownerMode: String? = nil,
     projectId: String? = nil,
     teamId: String? = nil,
@@ -588,6 +687,9 @@ public actor HackCLIClient {
     syncLabels: Bool? = nil
   ) async throws -> LinearProjectSyncResponse {
     var args = ["x", "linear", "sync-project", "--from", direction, "--json"]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
     if let ownerMode, !ownerMode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
       args.append(contentsOf: ["--owner", ownerMode])
     }
@@ -610,6 +712,7 @@ public actor HackCLIClient {
   public func syncLinearIssue(
     path: String,
     from direction: String,
+    profileId: String? = nil,
     issueIdentifier: String? = nil,
     ticketId: String? = nil,
     projectId: String? = nil,
@@ -617,6 +720,9 @@ public actor HackCLIClient {
     syncLabels: Bool? = nil
   ) async throws -> LinearIssueSyncResponse {
     var args = ["x", "linear", "sync-issue", "--from", direction, "--json"]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
     if let issueIdentifier, !issueIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
       args.append(contentsOf: ["--issue", issueIdentifier])
     }
@@ -1110,6 +1216,28 @@ public actor HackCLIClient {
     }
     let result = try await run(args, cwd: path)
     return try decodeLenient(TicketCommentAppendResponse.self, from: result.stdout)
+  }
+
+  public func appendTicketReviewNote(
+    path: String,
+    ticketId: String,
+    body: String,
+    actor: String? = nil
+  ) async throws -> TicketReviewNoteAppendResponse {
+    var args = [
+      "x",
+      "tickets",
+      "review-note",
+      ticketId,
+      "--body",
+      body,
+      "--json",
+    ]
+    if let actor, !actor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--actor", actor])
+    }
+    let result = try await run(args, cwd: path)
+    return try decodeLenient(TicketReviewNoteAppendResponse.self, from: result.stdout)
   }
 
   public func resolveTicketConflict(

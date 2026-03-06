@@ -49,6 +49,8 @@ export type OAuthFlow = {
   tokenExpiresAt?: string;
   refreshToken?: string;
   refreshTokenExpiresAt?: string;
+  managementToken?: string;
+  managementTokenExpiresAt?: string;
   error?: string;
   completedAt?: string;
   claimedAt?: string;
@@ -89,6 +91,8 @@ export type OAuthFlowPublicStatus = {
   readonly tokenExpiresAt?: string;
   readonly refreshToken?: string;
   readonly refreshTokenExpiresAt?: string;
+  readonly managementToken?: string;
+  readonly managementTokenExpiresAt?: string;
   readonly error?: string;
 };
 

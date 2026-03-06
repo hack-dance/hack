@@ -146,8 +146,8 @@ export const linearSyncSubscriptions = pgTable("linear_sync_subscriptions", {
   mode: text("mode").notNull().default("manual"),
   status: text("status").notNull().default("active"),
   betterAuthUserId: text("better_auth_user_id"),
-  organizationId: text("organization_id"),
-  ownerTeamId: text("owner_team_id"),
+  betterAuthOrganizationId: text("better_auth_organization_id"),
+  betterAuthTeamId: text("better_auth_team_id"),
   configJson: text("config_json").notNull().default("{}"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()

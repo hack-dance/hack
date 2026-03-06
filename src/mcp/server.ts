@@ -769,7 +769,7 @@ function registerTools(opts: { readonly server: McpServer }): void {
         ...projectSelectorInput,
         ...linearCommonInput,
         projectId: z.string().describe("Linear project id to bind").optional(),
-        projectName: z
+        linearProjectName: z
           .string()
           .describe("Linear project name override")
           .optional(),
@@ -794,7 +794,9 @@ function registerTools(opts: { readonly server: McpServer }): void {
         "--json",
         ...(input.profile ? ["--profile", input.profile] : []),
         ...(input.projectId ? ["--project-id", input.projectId] : []),
-        ...(input.projectName ? ["--project-name", input.projectName] : []),
+        ...(input.linearProjectName
+          ? ["--project-name", input.linearProjectName]
+          : []),
         ...(input.teamId ? ["--team-id", input.teamId] : []),
         ...(input.clear ? ["--clear"] : []),
       ];
@@ -802,6 +804,108 @@ function registerTools(opts: { readonly server: McpServer }): void {
       const result = await runHackCommand({
         tool: "hack.linear.project.bind",
         args,
+        cwd: projectCwd.cwd,
+      });
+
+      return buildToolResult({
+        result,
+        data: parseJson(result.stdout),
+      });
+    }
+  );
+
+  opts.server.registerTool(
+    "hack.linear.project.link",
+    {
+      title: "Link additional Linear project",
+      description:
+        "Add an additional Linear project to the current hack project sync scope.",
+      inputSchema: {
+        ...projectSelectorInput,
+        ...linearCommonInput,
+        projectId: z.string().describe("Linear project id to add"),
+        linearProjectName: z
+          .string()
+          .describe("Linear project name override")
+          .optional(),
+        projectName: z
+          .string()
+          .describe("Deprecated alias for the Linear project name override")
+          .optional(),
+        teamId: z.string().describe("Linear team id override").optional(),
+      },
+      outputSchema: toolOutputSchema,
+    },
+    async (input) => {
+      const projectCwd = await resolveProjectCwd({
+        selection: toProjectSelection(input),
+        cwd: process.cwd(),
+        requireProjectContext: true,
+      });
+      if (!projectCwd.ok) {
+        return buildToolError({ message: projectCwd.message });
+      }
+
+      const args = [
+        "linear",
+        "project-link",
+        "--json",
+        "--project-id",
+        input.projectId,
+        ...(input.profile ? ["--profile", input.profile] : []),
+        ...((input.linearProjectName ?? input.projectName)
+          ? [
+              "--project-name",
+              input.linearProjectName ?? input.projectName ?? "",
+            ]
+          : []),
+        ...(input.teamId ? ["--team-id", input.teamId] : []),
+      ];
+
+      const result = await runHackCommand({
+        tool: "hack.linear.project.link",
+        args,
+        cwd: projectCwd.cwd,
+      });
+
+      return buildToolResult({
+        result,
+        data: parseJson(result.stdout),
+      });
+    }
+  );
+
+  opts.server.registerTool(
+    "hack.linear.project.unlink",
+    {
+      title: "Unlink additional Linear project",
+      description:
+        "Remove an additional Linear project from the current hack project sync scope.",
+      inputSchema: {
+        ...projectSelectorInput,
+        projectId: z.string().describe("Linear project id to remove"),
+      },
+      outputSchema: toolOutputSchema,
+    },
+    async (input) => {
+      const projectCwd = await resolveProjectCwd({
+        selection: toProjectSelection(input),
+        cwd: process.cwd(),
+        requireProjectContext: true,
+      });
+      if (!projectCwd.ok) {
+        return buildToolError({ message: projectCwd.message });
+      }
+
+      const result = await runHackCommand({
+        tool: "hack.linear.project.unlink",
+        args: [
+          "linear",
+          "project-unlink",
+          "--json",
+          "--project-id",
+          input.projectId,
+        ],
         cwd: projectCwd.cwd,
       });
 
@@ -938,6 +1042,7 @@ function registerTools(opts: { readonly server: McpServer }): void {
       description:
         "List Linear webhook deliveries from the auth broker for manual review/apply flows.",
       inputSchema: {
+        ...linearCommonInput,
         status: z
           .enum(["pending", "applied", "ignored"])
           .describe("Delivery status filter")
@@ -951,6 +1056,7 @@ function registerTools(opts: { readonly server: McpServer }): void {
         "linear",
         "deliveries",
         "--json",
+        ...(input.profile ? ["--profile", input.profile] : []),
         ...(input.status ? ["--status", input.status] : []),
         ...(input.limit ? ["--limit", String(input.limit)] : []),
       ];
@@ -974,6 +1080,7 @@ function registerTools(opts: { readonly server: McpServer }): void {
       description:
         "Mark a pending Linear webhook delivery as applied after manual handling.",
       inputSchema: {
+        ...linearCommonInput,
         deliveryId: z.string().describe("Recorded Linear delivery id"),
       },
       outputSchema: toolOutputSchema,
@@ -983,12 +1090,140 @@ function registerTools(opts: { readonly server: McpServer }): void {
         "linear",
         "apply-delivery",
         "--json",
+        ...(input.profile ? ["--profile", input.profile] : []),
         "--delivery-id",
         input.deliveryId,
       ];
 
       const result = await runHackCommand({
         tool: "hack.linear.deliveries.apply",
+        args,
+      });
+
+      return buildToolResult({
+        result,
+        data: parseJson(result.stdout),
+      });
+    }
+  );
+
+  opts.server.registerTool(
+    "hack.linear.subscriptions.list",
+    {
+      title: "List Linear autosync subscriptions",
+      description:
+        "List broker-backed Linear autosync subscriptions for the selected profile and optional project/team scope.",
+      inputSchema: {
+        ...linearCommonInput,
+        projectId: z
+          .string()
+          .describe("Optional Linear project id filter")
+          .optional(),
+        teamId: z
+          .string()
+          .describe("Optional Linear team id filter")
+          .optional(),
+      },
+      outputSchema: toolOutputSchema,
+    },
+    async (input) => {
+      const args = [
+        "linear",
+        "subscriptions",
+        "--json",
+        ...(input.profile ? ["--profile", input.profile] : []),
+        ...(input.projectId ? ["--project-id", input.projectId] : []),
+        ...(input.teamId ? ["--team-id", input.teamId] : []),
+      ];
+
+      const result = await runHackCommand({
+        tool: "hack.linear.subscriptions.list",
+        args,
+      });
+
+      return buildToolResult({
+        result,
+        data: parseJson(result.stdout),
+      });
+    }
+  );
+
+  opts.server.registerTool(
+    "hack.linear.subscriptions.upsert",
+    {
+      title: "Upsert Linear autosync subscription",
+      description:
+        "Create or update a broker-backed Linear autosync subscription for a profile/project/team scope.",
+      inputSchema: {
+        ...linearCommonInput,
+        projectId: z
+          .string()
+          .describe("Optional Linear project id scope")
+          .optional(),
+        teamId: z.string().describe("Optional Linear team id scope").optional(),
+        mode: z
+          .enum(["manual", "auto_apply"])
+          .describe("Autosync mode")
+          .optional(),
+        status: z
+          .enum(["active", "paused"])
+          .describe("Subscription status")
+          .optional(),
+      },
+      outputSchema: toolOutputSchema,
+    },
+    async (input) => {
+      const args = [
+        "linear",
+        "set-subscription",
+        "--json",
+        ...(input.profile ? ["--profile", input.profile] : []),
+        ...(input.projectId ? ["--project-id", input.projectId] : []),
+        ...(input.teamId ? ["--team-id", input.teamId] : []),
+        ...(input.mode ? ["--mode", input.mode] : []),
+        ...(input.status ? ["--status", input.status] : []),
+      ];
+
+      const result = await runHackCommand({
+        tool: "hack.linear.subscriptions.upsert",
+        args,
+      });
+
+      return buildToolResult({
+        result,
+        data: parseJson(result.stdout),
+      });
+    }
+  );
+
+  opts.server.registerTool(
+    "hack.linear.subscriptions.remove",
+    {
+      title: "Remove Linear autosync subscription",
+      description:
+        "Remove a broker-backed Linear autosync subscription for a profile/project/team scope.",
+      inputSchema: {
+        ...linearCommonInput,
+        projectId: z
+          .string()
+          .describe("Optional Linear project id scope")
+          .optional(),
+        teamId: z.string().describe("Optional Linear team id scope").optional(),
+      },
+      outputSchema: toolOutputSchema,
+    },
+    async (input) => {
+      const args = [
+        "linear",
+        "remove-subscription",
+        "--json",
+        ...(input.profile ? ["--profile", input.profile] : []),
+        ...(input.projectId ? ["--project-id", input.projectId] : []),
+        ...(input.teamId ? ["--team-id", input.teamId] : []),
+      ];
+
+      const result = await runHackCommand({
+        tool: "hack.linear.subscriptions.remove",
         args,
       });
 

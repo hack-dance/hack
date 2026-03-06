@@ -52,6 +52,7 @@ export function createProvidersPlugin({
           apiBaseUrl: config.linearApiBaseUrl,
           webhookPath: config.linearWebhookPath,
           connectionsPath: "/v1/auth/linear/connections",
+          subscriptionsPath: "/v1/auth/linear/subscriptions",
           accessControlMode: session.accessControlMode,
           developerAppTokenConfigured: Boolean(config.linearDeveloperAppToken),
           webhookSignatureVerification: config.linearWebhookSigningSecret

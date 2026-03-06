@@ -175,8 +175,12 @@ struct ProjectDetailView: View {
   @State private var linearBoundProjectId = ""
   @State private var linearBoundProjectName = ""
   @State private var linearBoundTeamId = ""
+  @State private var linearAdditionalProjects: [LinearProjectBindingTarget] = []
+  @State private var linearAutosyncRouteKeys: Set<String> = []
+  @State private var togglingLinearAutosyncRouteKeys: Set<String> = []
   @State private var linearProjectOptions: [LinearProjectSummary] = []
   @State private var selectedLinearProjectId = ""
+  @State private var selectedAdditionalLinearProjectId = ""
   @State private var linearProjectMessage = ""
   @State private var pendingLinearSyncAction: ProjectLinearSyncAction? = nil
   @State private var projectSystemGitIdentity: GitSystemIdentity? = nil
@@ -911,6 +915,56 @@ struct ProjectDetailView: View {
             .foregroundStyle(.tertiary)
         }
 
+        HStack(alignment: .top, spacing: 12) {
+          Text("Linear scope")
+            .font(.mono(.subheadline, weight: .semibold))
+            .frame(width: 120, alignment: .leading)
+
+          VStack(alignment: .leading, spacing: 8) {
+            if allLinearRouteTargets.isEmpty {
+              Text("No Linear route bound yet. Pick a default project first, then optionally add extra projects for pull review and autosync.")
+                .font(.mono(.caption2))
+                .foregroundStyle(.tertiary)
+            } else {
+              VStack(alignment: .leading, spacing: 8) {
+                ForEach(allLinearRouteTargets) { target in
+                  linearScopeRouteRow(
+                    target: target,
+                    isDefault: target.projectId == linearBoundProjectId
+                  )
+                }
+              }
+            }
+
+            HStack(spacing: 8) {
+              Picker("Add linked project", selection: $selectedAdditionalLinearProjectId) {
+                Text("Default only").tag("")
+                ForEach(availableAdditionalLinearProjects) { linearProject in
+                  Text(linearProjectMenuLabel(linearProject)).tag(linearProject.id)
+                }
+              }
+              .pickerStyle(.menu)
+              .frame(maxWidth: 360, alignment: .leading)
+              .disabled(availableAdditionalLinearProjects.isEmpty)
+
+              Button("Add") {
+                Task { await persistAdditionalLinearProjectSelection() }
+              }
+              .adaptiveToolbarButton()
+              .disabled(
+                selectedAdditionalLinearProjectId
+                  .trimmingCharacters(in: .whitespacesAndNewlines)
+                  .isEmpty
+              )
+            }
+          }
+
+          Spacer()
+          Text(additionalLinearProjectsSummary)
+            .font(.mono(.caption2))
+            .foregroundStyle(.tertiary)
+        }
+
         HStack(alignment: .center, spacing: 12) {
           Text("Ticket sync")
             .font(.mono(.subheadline, weight: .semibold))
@@ -950,7 +1004,10 @@ struct ProjectDetailView: View {
 
       if let accountName = linearResolvedAccountName, !accountName.isEmpty {
         let teamSuffix = linearBoundTeamId.isEmpty ? "" : " • team \(linearBoundTeamId)"
-        Text("Linear route: \(accountName)\(linearBoundProjectName.isEmpty ? "" : " • \(linearBoundProjectName)")\(teamSuffix)")
+        let additionalSuffix = linearAdditionalProjects.isEmpty
+          ? ""
+          : " • +\(linearAdditionalProjects.count) linked"
+        Text("Linear route: \(accountName)\(linearBoundProjectName.isEmpty ? "" : " • \(linearBoundProjectName)")\(teamSuffix)\(additionalSuffix)")
           .font(.mono(.caption2))
           .foregroundStyle(.secondary)
       }
@@ -1464,6 +1521,95 @@ struct ProjectDetailView: View {
     return githubProfileLabel(profileId: selectedProfileId)
   }
 
+  @ViewBuilder
+  private func linearScopeRouteRow(
+    target: LinearProjectBindingTarget,
+    isDefault: Bool
+  ) -> some View {
+    let normalizedTarget = normalizedLinearRouteTarget(target)
+    VStack(alignment: .leading, spacing: 8) {
+      HStack(alignment: .center, spacing: 8) {
+        Text(linearProjectBindingTargetLabel(normalizedTarget))
+          .font(.mono(.caption, weight: .semibold))
+          .foregroundStyle(.primary)
+        if isDefault {
+          StatusPill(text: "Default", tone: .good)
+        } else {
+          StatusPill(text: "Linked", tone: .neutral)
+        }
+        if isLinearAutosyncEnabled(for: normalizedTarget) {
+          StatusPill(text: "Autosync", tone: .good)
+        }
+        Spacer()
+        if isLinearAutosyncBusy(for: normalizedTarget) {
+          ProgressView()
+            .controlSize(.small)
+        }
+        Toggle(
+          isOn: Binding(
+            get: { isLinearAutosyncEnabled(for: normalizedTarget) },
+            set: { enabled in
+              toggleLinearAutosync(for: normalizedTarget, enabled: enabled)
+            }
+          )
+        ) {
+          Text("Auto")
+            .font(.mono(.caption2))
+            .foregroundStyle(.secondary)
+        }
+        .labelsHidden()
+        .disabled(isLinearAutosyncBusy(for: normalizedTarget))
+
+        Menu {
+          Button("Pull now") {
+            Task { await syncSpecificLinearProject(normalizedTarget, from: "linear") }
+          }
+          .disabled(linearResolvedStatus?.tokenResolved != true)
+          Button("Push now") {
+            Task { await syncSpecificLinearProject(normalizedTarget, from: "hack") }
+          }
+          .disabled(linearResolvedStatus?.tokenResolved != true)
+          if !isDefault {
+            Button("Make default") {
+              Task { await makeAdditionalLinearProjectDefault(normalizedTarget) }
+            }
+            Button(role: .destructive) {
+              Task { await removeAdditionalLinearProject(normalizedTarget) }
+            } label: {
+              Text("Remove")
+            }
+          }
+        } label: {
+          Label("Actions", systemImage: "ellipsis.circle")
+        }
+        .buttonStyle(PressableIconButtonStyle())
+      }
+
+      HStack(spacing: 8) {
+        if let profileId = normalizedTarget.profileId, !profileId.isEmpty {
+          Text("Profile \(linearProfileLabel(profileId: profileId))")
+            .font(.mono(.caption2))
+            .foregroundStyle(.secondary)
+        }
+        if let teamId = normalizedTarget.teamId, !teamId.isEmpty {
+          Text("Team \(teamId)")
+            .font(.mono(.caption2))
+            .foregroundStyle(.tertiary)
+        }
+      }
+    }
+    .padding(10)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(
+      RoundedRectangle(cornerRadius: 12, style: .continuous)
+        .fill(Color.primary.opacity(colorScheme == .dark ? 0.05 : 0.035))
+    )
+    .overlay(
+      RoundedRectangle(cornerRadius: 12, style: .continuous)
+        .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+    )
+  }
+
   private var selectedLinearProfileSummary: String {
     let selectedProfileId = linearProjectProfile.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !selectedProfileId.isEmpty else {
@@ -1489,6 +1635,71 @@ struct ProjectDetailView: View {
     return selectedProjectId
   }
 
+  private var availableAdditionalLinearProjects: [LinearProjectSummary] {
+    let linkedProjectIds = Set(linearAdditionalProjects.map(\.projectId))
+    return linearProjectOptions.filter { linearProject in
+      linearProject.id != linearBoundProjectId && !linkedProjectIds.contains(linearProject.id)
+    }
+  }
+
+  private var effectiveDefaultLinearTarget: LinearProjectBindingTarget? {
+    guard !linearBoundProjectId.isEmpty else {
+      return nil
+    }
+    return LinearProjectBindingTarget(
+      profileId: linearBoundProfileId,
+      projectId: linearBoundProjectId,
+      projectName: linearBoundProjectName.isEmpty ? nil : linearBoundProjectName,
+      teamId: linearBoundTeamId.isEmpty ? nil : linearBoundTeamId
+    )
+  }
+
+  private var linearBoundProfileId: String? {
+    let projectProfile = linearProjectProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !projectProfile.isEmpty {
+      return projectProfile
+    }
+    let resolvedProfile = linearResolvedProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+    return resolvedProfile.isEmpty ? nil : resolvedProfile
+  }
+
+  private var allLinearRouteTargets: [LinearProjectBindingTarget] {
+    var targets: [LinearProjectBindingTarget] = []
+    if let effectiveDefaultLinearTarget {
+      targets.append(effectiveDefaultLinearTarget)
+    }
+    targets.append(contentsOf: linearAdditionalProjects.map(normalizedLinearRouteTarget(_:)))
+    return targets
+  }
+
+  private func normalizedLinearRouteTarget(_ target: LinearProjectBindingTarget) -> LinearProjectBindingTarget {
+    if let profileId = target.profileId?.trimmingCharacters(in: .whitespacesAndNewlines),
+       !profileId.isEmpty {
+      return target
+    }
+    return LinearProjectBindingTarget(
+      profileId: linearBoundProfileId,
+      projectId: target.projectId,
+      projectName: target.projectName,
+      teamId: target.teamId
+    )
+  }
+
+  private func linearRouteKey(for target: LinearProjectBindingTarget) -> String {
+    let normalized = normalizedLinearRouteTarget(target)
+    let profileId = normalized.profileId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "*"
+    let teamId = normalized.teamId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "*"
+    return [profileId, normalized.projectId, teamId].joined(separator: "::")
+  }
+
+  private func isLinearAutosyncEnabled(for target: LinearProjectBindingTarget) -> Bool {
+    linearAutosyncRouteKeys.contains(linearRouteKey(for: target))
+  }
+
+  private func isLinearAutosyncBusy(for target: LinearProjectBindingTarget) -> Bool {
+    togglingLinearAutosyncRouteKeys.contains(linearRouteKey(for: target))
+  }
+
   private var linearResolvedAccountName: String? {
     let trimmed = linearResolvedProfile.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else {
@@ -1498,7 +1709,7 @@ struct ProjectDetailView: View {
   }
 
   private var canSyncFromLinear: Bool {
-    !resolvedLinearProjectId.isEmpty && linearResolvedStatus?.tokenResolved == true
+    hasAnyLinearProjectRouting && linearResolvedStatus?.tokenResolved == true
   }
 
   private var canSyncToLinear: Bool {
@@ -1513,18 +1724,35 @@ struct ProjectDetailView: View {
     return linearBoundProjectId.trimmingCharacters(in: .whitespacesAndNewlines)
   }
 
+  private var hasAnyLinearProjectRouting: Bool {
+    if !resolvedLinearProjectId.isEmpty {
+      return true
+    }
+    return !linearAdditionalProjects.isEmpty
+  }
+
+  private var additionalLinearProjectsSummary: String {
+    if linearAdditionalProjects.isEmpty {
+      return "Default only"
+    }
+    return "\(linearAdditionalProjects.count) linked"
+  }
+
   private var ticketSyncSummary: String {
     if linearResolvedStatus?.tokenResolved != true {
       return "Connect Linear first"
     }
-    let projectId = resolvedLinearProjectId
-    if projectId.isEmpty {
+    if !hasAnyLinearProjectRouting {
       return "Pick a Linear project"
     }
-    if linearBoundProjectName.isEmpty {
-      return "\(projectId) • origin decides authority"
+    if linearAdditionalProjects.isEmpty {
+      if linearBoundProjectName.isEmpty {
+        return "\(resolvedLinearProjectId) • origin decides authority"
+      }
+      return "\(linearBoundProjectName) • origin decides authority"
     }
-    return "\(linearBoundProjectName) • origin decides authority"
+    let defaultLabel = linearBoundProjectName.isEmpty ? resolvedLinearProjectId : linearBoundProjectName
+    return "\(defaultLabel) + \(linearAdditionalProjects.count) linked • origin decides authority"
   }
 
   private var remoteConfigMessage: String {
@@ -1578,7 +1806,7 @@ struct ProjectDetailView: View {
   }
 
   private var linearRoutingContractTone: StatusTone {
-    if linearResolvedStatus?.tokenResolved != true || resolvedLinearProjectId.isEmpty {
+    if linearResolvedStatus?.tokenResolved != true || !hasAnyLinearProjectRouting {
       return .warn
     }
     return .neutral
@@ -1587,10 +1815,14 @@ struct ProjectDetailView: View {
   private var linearRoutingContractMessage: String {
     let routeSummary: String
     if let accountName = linearResolvedAccountName, !accountName.isEmpty {
-      if linearBoundProjectName.isEmpty {
+      if linearBoundProjectName.isEmpty && linearAdditionalProjects.isEmpty {
         routeSummary = "Current route uses \(accountName)."
-      } else {
+      } else if linearAdditionalProjects.isEmpty {
         routeSummary = "Current route uses \(accountName) and \(linearBoundProjectName)."
+      } else {
+        let defaultProjectLabel = linearBoundProjectName.isEmpty ? "no default project" : linearBoundProjectName
+        routeSummary =
+          "Current route uses \(accountName), default project \(defaultProjectLabel), and \(linearAdditionalProjects.count) linked project\(linearAdditionalProjects.count == 1 ? "" : "s")."
       }
     } else {
       routeSummary = "Linear is not fully routed for this project yet."
@@ -1734,6 +1966,30 @@ struct ProjectDetailView: View {
     return project.name
   }
 
+  private func linearProjectBindingTargetLabel(_ target: LinearProjectBindingTarget) -> String {
+    if let matchingProject = linearProjectOptions.first(where: { $0.id == target.projectId }) {
+      let projectLabel = linearProjectMenuLabel(matchingProject)
+      if let profileId = target.profileId,
+         !profileId.isEmpty,
+         profileId != linearResolvedProfile,
+         profileId != linearProjectProfile {
+        return "\(linearProfileLabel(profileId: profileId)) • \(projectLabel)"
+      }
+      return projectLabel
+    }
+
+    let projectLabel: String
+    if let projectName = target.projectName, !projectName.isEmpty {
+      projectLabel = projectName
+    } else {
+      projectLabel = target.projectId
+    }
+    if let profileId = target.profileId, !profileId.isEmpty {
+      return "\(linearProfileLabel(profileId: profileId)) • \(projectLabel)"
+    }
+    return projectLabel
+  }
+
   /**
    Reload project-level remote execution defaults and Git credential routing.
    */
@@ -1762,22 +2018,7 @@ struct ProjectDetailView: View {
       for: project,
       key: "controlPlane.routing.overrides.github.profile"
     )
-    async let projectLinearProfile = model.getProjectConfig(
-      for: project,
-      key: "controlPlane.routing.overrides.linear.profile"
-    )
-    async let projectLinearProjectId = model.getProjectConfig(
-      for: project,
-      key: "controlPlane.routing.overrides.linear.projectId"
-    )
-    async let projectLinearProjectName = model.getProjectConfig(
-      for: project,
-      key: "controlPlane.routing.overrides.linear.projectName"
-    )
-    async let projectLinearTeamId = model.getProjectConfig(
-      for: project,
-      key: "controlPlane.routing.overrides.linear.teamId"
-    )
+    async let linearBinding = model.inspectLinearProjectBinding(for: project)
     async let defaultGitHubProfile = model.getGlobalConfig(
       key: "controlPlane.extensions[\"dance.hack.github\"].config.defaultProfile"
     )
@@ -1795,10 +2036,7 @@ struct ProjectDetailView: View {
     let resolvedExecutionNodeId = await executionNodeId
     let resolvedProjectNodeId = await projectNodeId
     let resolvedProjectGitHubProfile = await projectGitHubProfile
-    let resolvedProjectLinearProfile = await projectLinearProfile
-    let resolvedProjectLinearProjectId = await projectLinearProjectId
-    let resolvedProjectLinearProjectName = await projectLinearProjectName
-    let resolvedProjectLinearTeamId = await projectLinearTeamId
+    let resolvedLinearBinding = await linearBinding
     let resolvedDefaultGitHubProfile = await defaultGitHubProfile
     let resolvedDefaultLinearProfile = await defaultLinearProfile
     let resolvedGitHubProfiles = await githubProfiles
@@ -1850,14 +2088,15 @@ struct ProjectDetailView: View {
       )
     }
 
-    linearProjectProfile = (resolvedProjectLinearProfile ?? "")
+    linearProjectProfile = (resolvedLinearBinding?.profileId ?? "")
       .trimmingCharacters(in: .whitespacesAndNewlines)
-    linearBoundProjectId = (resolvedProjectLinearProjectId ?? "")
+    linearBoundProjectId = (resolvedLinearBinding?.projectId ?? "")
       .trimmingCharacters(in: .whitespacesAndNewlines)
-    linearBoundProjectName = (resolvedProjectLinearProjectName ?? "")
+    linearBoundProjectName = (resolvedLinearBinding?.projectName ?? "")
       .trimmingCharacters(in: .whitespacesAndNewlines)
-    linearBoundTeamId = (resolvedProjectLinearTeamId ?? "")
+    linearBoundTeamId = (resolvedLinearBinding?.teamId ?? "")
       .trimmingCharacters(in: .whitespacesAndNewlines)
+    linearAdditionalProjects = resolvedLinearBinding?.additionalProjects ?? []
     let fallbackDefaultLinearProfile = (resolvedDefaultLinearProfile ?? "")
       .trimmingCharacters(in: .whitespacesAndNewlines)
     linearDefaultProfile = resolvedLinearProfiles?.defaultProfile ?? fallbackDefaultLinearProfile
@@ -1896,6 +2135,10 @@ struct ProjectDetailView: View {
       linearProjectOptions = []
     }
     selectedLinearProjectId = linearBoundProjectId
+    if linearAdditionalProjects.contains(where: { $0.projectId == selectedAdditionalLinearProjectId }) {
+      selectedAdditionalLinearProjectId = ""
+    }
+    linearAutosyncRouteKeys = await loadLinearAutosyncRouteKeys(targets: allLinearRouteTargets)
     executionMode = RemoteExecutionMode.fromConfig(resolvedExecutionModeRaw)
       ?? (executionTargetNodeId.isEmpty ? .local : .localEditRemoteRun)
     executionTargetMessage = ""
@@ -2114,6 +2357,148 @@ struct ProjectDetailView: View {
     queueExecutionTargetReload()
   }
 
+  private func persistAdditionalLinearProjectSelection() async {
+    let selectedProjectId = selectedAdditionalLinearProjectId
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !selectedProjectId.isEmpty else {
+      linearProjectMessage = "Choose a Linear project to add."
+      return
+    }
+    guard let linearProject = linearProjectOptions.first(where: { $0.id == selectedProjectId }) else {
+      linearProjectMessage = "Choose a valid Linear project before adding it."
+      return
+    }
+
+    let profileOverride = linearProjectProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+    let response = await model.linkLinearProject(
+      for: project,
+      profileId: profileOverride.isEmpty ? nil : profileOverride,
+      projectId: linearProject.id,
+      projectName: linearProject.name,
+      teamId: linearProject.teamId
+    )
+    guard response?.ok == true else {
+      linearProjectMessage = model.errorMessage ?? "Failed to add Linear project to sync scope."
+      return
+    }
+
+    selectedAdditionalLinearProjectId = ""
+    linearProjectMessage = "Added \(linearProjectMenuLabel(linearProject)) to the sync scope."
+    executionTargetMessage = ""
+    githubProfileMessage = ""
+    await model.refresh()
+    queueExecutionTargetReload()
+  }
+
+  private func loadLinearAutosyncRouteKeys(
+    targets: [LinearProjectBindingTarget]
+  ) async -> Set<String> {
+    var nextKeys: Set<String> = []
+    for target in targets {
+      let normalizedTarget = normalizedLinearRouteTarget(target)
+      guard let profileId = normalizedTarget.profileId, !profileId.isEmpty else {
+        continue
+      }
+      guard let subscriptions = await model.listLinearAutosyncSubscriptions(
+        profileId: profileId,
+        projectId: normalizedTarget.projectId,
+        teamId: normalizedTarget.teamId
+      ) else {
+        continue
+      }
+      if subscriptions.subscriptions.contains(where: {
+        $0.projectId == normalizedTarget.projectId &&
+          $0.teamId == normalizedTarget.teamId &&
+          $0.mode == "auto_apply" &&
+          $0.status == "active"
+      }) {
+        nextKeys.insert(linearRouteKey(for: normalizedTarget))
+      }
+    }
+    return nextKeys
+  }
+
+  private func removeAdditionalLinearProject(_ target: LinearProjectBindingTarget) async {
+    let response = await model.unlinkLinearProject(
+      for: project,
+      projectId: target.projectId
+    )
+    guard response?.ok == true else {
+      linearProjectMessage = model.errorMessage ?? "Failed to remove linked Linear project."
+      return
+    }
+
+    linearProjectMessage = "Removed \(linearProjectBindingTargetLabel(target)) from the sync scope."
+    executionTargetMessage = ""
+    githubProfileMessage = ""
+    await model.refresh()
+    queueExecutionTargetReload()
+  }
+
+  private func toggleLinearAutosync(
+    for target: LinearProjectBindingTarget,
+    enabled: Bool
+  ) {
+    let routeKey = linearRouteKey(for: target)
+    togglingLinearAutosyncRouteKeys.insert(routeKey)
+    Task {
+      defer { togglingLinearAutosyncRouteKeys.remove(routeKey) }
+      let normalizedTarget = normalizedLinearRouteTarget(target)
+      guard let profileId = normalizedTarget.profileId, !profileId.isEmpty else {
+        linearProjectMessage = "Choose a Linear account before changing autosync."
+        return
+      }
+      if enabled {
+        let response = await model.setLinearAutosyncSubscription(
+          profileId: profileId,
+          projectId: normalizedTarget.projectId,
+          teamId: normalizedTarget.teamId,
+          mode: "auto_apply",
+          status: "active"
+        )
+        guard response != nil else {
+          linearProjectMessage = model.errorMessage ?? "Failed to enable Linear autosync."
+          return
+        }
+        linearAutosyncRouteKeys.insert(routeKey)
+        linearProjectMessage = "Autosync enabled for \(linearProjectBindingTargetLabel(normalizedTarget))."
+        return
+      }
+
+      let response = await model.removeLinearAutosyncSubscription(
+        profileId: profileId,
+        projectId: normalizedTarget.projectId,
+        teamId: normalizedTarget.teamId
+      )
+      guard response != nil else {
+        linearProjectMessage = model.errorMessage ?? "Failed to disable Linear autosync."
+        return
+      }
+      linearAutosyncRouteKeys.remove(routeKey)
+      linearProjectMessage = "Autosync disabled for \(linearProjectBindingTargetLabel(normalizedTarget))."
+    }
+  }
+
+  private func makeAdditionalLinearProjectDefault(_ target: LinearProjectBindingTarget) async {
+    let normalizedTarget = normalizedLinearRouteTarget(target)
+    let response = await model.bindLinearProject(
+      for: project,
+      profileId: normalizedTarget.profileId,
+      projectId: normalizedTarget.projectId,
+      projectName: normalizedTarget.projectName,
+      teamId: normalizedTarget.teamId,
+      clear: false
+    )
+    guard response?.ok == true else {
+      linearProjectMessage = model.errorMessage ?? "Failed to make the linked Linear project the default route."
+      return
+    }
+
+    linearProjectMessage = "Default Linear route set to \(linearProjectBindingTargetLabel(normalizedTarget))."
+    await model.refresh()
+    queueExecutionTargetReload()
+  }
+
   private func clearLinearProjectBinding() async {
     let profileOverride = linearProjectProfile.trimmingCharacters(in: .whitespacesAndNewlines)
     let response = await model.bindLinearProject(
@@ -2138,17 +2523,13 @@ struct ProjectDetailView: View {
   }
 
   private func syncBoundLinearProject(from direction: String) async {
-    let explicitProjectId = resolvedLinearProjectId
-      .trimmingCharacters(in: .whitespacesAndNewlines)
-    let explicitTeamId = linearBoundTeamId
-      .trimmingCharacters(in: .whitespacesAndNewlines)
     let ownerMode = direction == "hack" ? "hack" : nil
     let result = await model.syncLinearProject(
       for: project,
       from: direction,
       ownerMode: ownerMode,
-      projectId: explicitProjectId.isEmpty ? nil : explicitProjectId,
-      teamId: explicitTeamId.isEmpty ? nil : explicitTeamId,
+      projectId: nil,
+      teamId: nil,
       limit: nil,
       syncLabels: nil
     )
@@ -2158,14 +2539,46 @@ struct ProjectDetailView: View {
     }
 
     if direction == "linear" {
+      let routedProjects = result.projectIds?.count ?? (linearAdditionalProjects.isEmpty ? 1 : linearAdditionalProjects.count + 1)
       linearProjectMessage =
-        "Pulled \(result.processed) item\(result.processed == 1 ? "" : "s") • created \(result.created) • updated \(result.updated). Linear stays authoritative for Linear-origin title, body, status, and project binding."
+        "Pulled \(result.processed) item\(result.processed == 1 ? "" : "s") from \(routedProjects) routed project\(routedProjects == 1 ? "" : "s") • created \(result.created) • updated \(result.updated). Linear stays authoritative for Linear-origin title, body, status, and project binding."
     } else {
       linearProjectMessage =
         "Pushed \(result.processed) Hack ticket\(result.processed == 1 ? "" : "s") • created \(result.created) • updated \(result.updated). Hack stays authoritative for Hack-origin title, body, status, and project binding."
     }
     executionTargetMessage = ""
     githubProfileMessage = ""
+  }
+
+  private func syncSpecificLinearProject(
+    _ target: LinearProjectBindingTarget,
+    from direction: String
+  ) async {
+    let normalizedTarget = normalizedLinearRouteTarget(target)
+    let ownerMode = direction == "hack" ? "hack" : nil
+    let result = await model.syncLinearProject(
+      for: project,
+      from: direction,
+      profileId: normalizedTarget.profileId,
+      ownerMode: ownerMode,
+      projectId: normalizedTarget.projectId,
+      teamId: normalizedTarget.teamId,
+      limit: nil,
+      syncLabels: nil
+    )
+    guard let result, result.ok else {
+      linearProjectMessage = model.errorMessage ?? "Ticket sync failed."
+      return
+    }
+
+    let routeLabel = linearProjectBindingTargetLabel(normalizedTarget)
+    if direction == "linear" {
+      linearProjectMessage =
+        "Pulled \(result.processed) item\(result.processed == 1 ? "" : "s") from \(routeLabel) • created \(result.created) • updated \(result.updated)."
+    } else {
+      linearProjectMessage =
+        "Pushed \(result.processed) Hack ticket\(result.processed == 1 ? "" : "s") to \(routeLabel) • created \(result.created) • updated \(result.updated)."
+    }
   }
 
   private struct LifecycleSummaryCounts {

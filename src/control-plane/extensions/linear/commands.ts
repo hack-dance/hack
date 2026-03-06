@@ -23,6 +23,7 @@ import {
   listLinearAuthProfiles,
   resolveLinearAuthSettings,
   resolveLinearAuthSettingsResult,
+  resolveLinearBrokerManagementToken,
   resolveLinearToken,
   saveLinearToken,
 } from "./auth.ts";
@@ -661,6 +662,44 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
         projectDir: ctx.project.projectDir,
       });
 
+      const existingBinding = resolveProjectLinearBinding({
+        controlPlaneConfig: ctx.controlPlaneConfig,
+      });
+
+      if (
+        !(
+          parsed.value.clear ||
+          parsed.value.projectId ||
+          parsed.value.projectName ||
+          parsed.value.profileId ||
+          parsed.value.teamId
+        )
+      ) {
+        const payload = buildProjectBindingPayload({
+          binding: existingBinding,
+        });
+        if (parsed.value.json) {
+          process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+        } else {
+          await display.kv({
+            title: "Linear project binding",
+            entries: [
+              ["profile", payload.profileId ?? ""],
+              ["project_id", payload.projectId ?? ""],
+              ["project_name", payload.projectName ?? ""],
+              ["team_id", payload.teamId ?? ""],
+              [
+                "additional_projects",
+                payload.additionalProjects
+                  .map((project) => project.projectId)
+                  .join(", "),
+              ],
+            ],
+          });
+        }
+        return 0;
+      }
+
       if (parsed.value.clear) {
         await Promise.all([
           updateProjectConfig({
@@ -683,27 +722,32 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
             path: "controlPlane.routing.overrides.linear.teamId",
             value: "",
           }),
+          updateProjectConfig({
+            projectDir: ctx.project.projectDir,
+            path: "controlPlane.routing.overrides.linear.additionalProjects",
+            value: [],
+          }),
         ]);
 
+        const payload = buildProjectBindingPayload({
+          binding: { additionalProjects: [] },
+          cleared: true,
+        });
         if (parsed.value.json) {
-          process.stdout.write(
-            `${JSON.stringify({ ok: true, cleared: true }, null, 2)}\n`
-          );
+          process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
         } else {
           await display.panel({
             title: "Linear project binding",
             tone: "success",
-            lines: ["Cleared project-level Linear routing overrides."],
+            lines: [
+              "Cleared project-level Linear routing overrides, including additional synced projects.",
+            ],
           });
         }
         return 0;
       }
 
-      const boundProfile =
-        parsed.value.profileId ??
-        resolveProjectLinearBinding({
-          controlPlaneConfig: ctx.controlPlaneConfig,
-        }).profileId;
+      const boundProfile = parsed.value.profileId ?? existingBinding.profileId;
 
       if (boundProfile) {
         await updateProjectConfig({
@@ -750,15 +794,28 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
           path: "controlPlane.routing.overrides.linear.teamId",
           value: resolvedTeamAndName.teamId,
         }),
+        updateProjectConfig({
+          projectDir: ctx.project.projectDir,
+          path: "controlPlane.routing.overrides.linear.additionalProjects",
+          value: removeAdditionalProjectBinding({
+            existing: existingBinding.additionalProjects,
+            projectId,
+          }),
+        }),
       ]);
 
-      const payload = {
-        ok: true,
-        profileId: boundProfile ?? null,
-        projectId,
-        projectName: resolvedTeamAndName.projectName,
-        teamId: resolvedTeamAndName.teamId,
-      };
+      const payload = buildProjectBindingPayload({
+        binding: {
+          ...(boundProfile ? { profileId: boundProfile } : {}),
+          projectId,
+          projectName: resolvedTeamAndName.projectName,
+          teamId: resolvedTeamAndName.teamId,
+          additionalProjects: removeAdditionalProjectBinding({
+            existing: existingBinding.additionalProjects,
+            projectId,
+          }),
+        },
+      });
 
       if (parsed.value.json) {
         process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
@@ -770,10 +827,209 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
             ["project_id", payload.projectId],
             ["project_name", payload.projectName],
             ["team_id", payload.teamId],
+            [
+              "additional_projects",
+              payload.additionalProjects
+                .map((project) => project.projectId)
+                .join(", "),
+            ],
           ],
         });
       }
       return 0;
+    },
+  },
+  {
+    name: "project-link",
+    summary:
+      "Add an additional Linear project to the current hack project sync scope",
+    scope: "project",
+    allowWhenDisabled: true,
+    handler: async ({ ctx, args }) => {
+      if (!ctx.project) {
+        ctx.logger.error({ message: "No project found. Run inside a repo." });
+        return 1;
+      }
+      const parsed = parseProjectLinkArgs({ args });
+      if (!parsed.ok) {
+        ctx.logger.error({ message: parsed.error });
+        return 1;
+      }
+
+      await enableLinearProjectExtension({
+        projectDir: ctx.project.projectDir,
+      });
+
+      const projectId = parsed.value.projectId;
+      if (!projectId) {
+        ctx.logger.error({
+          message:
+            "Missing --project-id. Pass a Linear project id to add to the additional sync scope.",
+        });
+        return 1;
+      }
+
+      const binding = resolveProjectLinearBinding({
+        controlPlaneConfig: ctx.controlPlaneConfig,
+      });
+      const targetProfile = parsed.value.profileId ?? binding.profileId;
+      const resolvedTeamAndName = await resolveProjectBindingDetails({
+        controlPlaneConfig: ctx.controlPlaneConfig,
+        profileId: targetProfile,
+        projectId,
+        projectName: parsed.value.projectName,
+        teamId: parsed.value.teamId,
+      });
+      if (!resolvedTeamAndName.ok) {
+        ctx.logger.error({ message: resolvedTeamAndName.error });
+        return 1;
+      }
+
+      const additionalProjects = upsertAdditionalProjectBinding({
+        existing: binding.additionalProjects,
+        target: {
+          projectId,
+          projectName: resolvedTeamAndName.projectName,
+          teamId: resolvedTeamAndName.teamId,
+          ...(targetProfile ? { profileId: targetProfile } : {}),
+        },
+        defaultProjectId: binding.projectId,
+      });
+      const writes: Promise<{ readonly changed: boolean }>[] = [
+        updateProjectConfig({
+          projectDir: ctx.project.projectDir,
+          path: "controlPlane.routing.overrides.linear.additionalProjects",
+          value: additionalProjects,
+        }),
+      ];
+      if (!binding.profileId && targetProfile) {
+        writes.push(
+          updateProjectConfig({
+            projectDir: ctx.project.projectDir,
+            path: "controlPlane.routing.overrides.linear.profile",
+            value: targetProfile,
+          })
+        );
+      }
+      await Promise.all(writes);
+
+      const payload = buildProjectBindingPayload({
+        binding: {
+          ...((binding.profileId ?? targetProfile)
+            ? { profileId: binding.profileId ?? targetProfile }
+            : {}),
+          ...(binding.projectId ? { projectId: binding.projectId } : {}),
+          ...(binding.projectName ? { projectName: binding.projectName } : {}),
+          ...(binding.teamId ? { teamId: binding.teamId } : {}),
+          additionalProjects,
+        },
+        additionalProjectChanged: true,
+      });
+
+      if (parsed.value.json) {
+        process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+      } else {
+        await display.kv({
+          title: "Linear additional project linked",
+          entries: [
+            ["profile", payload.profileId ?? ""],
+            ["project_id", projectId],
+            ["project_name", resolvedTeamAndName.projectName],
+            ["team_id", resolvedTeamAndName.teamId],
+            [
+              "additional_projects",
+              payload.additionalProjects
+                .map((project) => project.projectId)
+                .join(", "),
+            ],
+          ],
+        });
+      }
+      return 0;
+    },
+  },
+  {
+    name: "project-unlink",
+    summary:
+      "Remove an additional Linear project from the current hack project sync scope",
+    scope: "project",
+    allowWhenDisabled: true,
+    handler: async ({ ctx, args }) => {
+      if (!ctx.project) {
+        ctx.logger.error({ message: "No project found. Run inside a repo." });
+        return 1;
+      }
+      const parsed = parseProjectLinkArgs({ args });
+      if (!parsed.ok) {
+        ctx.logger.error({ message: parsed.error });
+        return 1;
+      }
+
+      const projectId = parsed.value.projectId;
+      if (!projectId) {
+        ctx.logger.error({
+          message:
+            "Missing --project-id. Pass a Linear project id to remove from the additional sync scope.",
+        });
+        return 1;
+      }
+
+      const binding = resolveProjectLinearBinding({
+        controlPlaneConfig: ctx.controlPlaneConfig,
+      });
+      if (
+        binding.projectId &&
+        binding.projectId.toLowerCase() === projectId.toLowerCase()
+      ) {
+        ctx.logger.error({
+          message:
+            "Cannot unlink the default Linear project with `project-unlink`. Use `project-bind --clear` or bind a different default project instead.",
+        });
+        return 1;
+      }
+
+      const additionalProjects = removeAdditionalProjectBinding({
+        existing: binding.additionalProjects,
+        projectId,
+      });
+      const removed =
+        additionalProjects.length !== binding.additionalProjects.length;
+      await updateProjectConfig({
+        projectDir: ctx.project.projectDir,
+        path: "controlPlane.routing.overrides.linear.additionalProjects",
+        value: additionalProjects,
+      });
+
+      const payload = buildProjectBindingPayload({
+        binding: {
+          ...(binding.profileId ? { profileId: binding.profileId } : {}),
+          ...(binding.projectId ? { projectId: binding.projectId } : {}),
+          ...(binding.projectName ? { projectName: binding.projectName } : {}),
+          ...(binding.teamId ? { teamId: binding.teamId } : {}),
+          additionalProjects,
+        },
+        additionalProjectChanged: removed,
+        removedProjectId: removed ? projectId : null,
+      });
+
+      if (parsed.value.json) {
+        process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+      } else {
+        await display.kv({
+          title: "Linear additional project unlinked",
+          entries: [
+            ["removed", removed ? "yes" : "no"],
+            ["project_id", projectId],
+            [
+              "additional_projects",
+              payload.additionalProjects
+                .map((project) => project.projectId)
+                .join(", "),
+            ],
+          ],
+        });
+      }
+      return removed ? 0 : 1;
     },
   },
   {
@@ -793,21 +1049,21 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
         return 1;
       }
 
-      const runtime = await createSyncRuntime({
-        ctx,
-        profileId: parsed.value.profileId,
-      });
-      if (!runtime.ok) {
-        ctx.logger.error({ message: runtime.error });
-        return 1;
-      }
-
       const toggles = resolveSyncToggles({
         controlPlaneConfig: ctx.controlPlaneConfig,
         labelsOverride: parsed.value.syncLabels,
       });
 
       if (parsed.value.from === "linear") {
+        const runtime = await createSyncRuntime({
+          ctx,
+          profileId: parsed.value.profileId,
+        });
+        if (!runtime.ok) {
+          ctx.logger.error({ message: runtime.error });
+          return 1;
+        }
+
         const issueIdentifier = parsed.value.issueIdentifier;
         if (!issueIdentifier) {
           ctx.logger.error({
@@ -853,11 +1109,40 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
         return 1;
       }
 
+      const binding = resolveProjectLinearBinding({
+        controlPlaneConfig: ctx.controlPlaneConfig,
+      });
+      const selectedTarget =
+        (parsed.value.projectId
+          ? findProjectBindingTarget({
+              binding,
+              projectId: parsed.value.projectId,
+            })
+          : null) ??
+        (binding.projectId
+          ? {
+              projectId: binding.projectId,
+              ...(binding.projectName
+                ? { projectName: binding.projectName }
+                : {}),
+              ...(binding.teamId ? { teamId: binding.teamId } : {}),
+              ...(binding.profileId ? { profileId: binding.profileId } : {}),
+            }
+          : null);
+      const runtime = await createSyncRuntime({
+        ctx,
+        profileId: parsed.value.profileId ?? selectedTarget?.profileId,
+      });
+      if (!runtime.ok) {
+        ctx.logger.error({ message: runtime.error });
+        return 1;
+      }
+
       const synced = await syncTicketToLinearIssue({
         runtime: runtime.value,
         ticketId: normalizedTicketId,
-        explicitProjectId: parsed.value.projectId,
-        explicitTeamId: parsed.value.teamId,
+        explicitProjectId: parsed.value.projectId ?? selectedTarget?.projectId,
+        explicitTeamId: parsed.value.teamId ?? selectedTarget?.teamId,
         syncToggles: toggles,
       });
       if (!synced.ok) {
@@ -897,43 +1182,91 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
         return 1;
       }
 
-      const runtime = await createSyncRuntime({
-        ctx,
-        profileId: parsed.value.profileId,
-      });
-      if (!runtime.ok) {
-        ctx.logger.error({ message: runtime.error });
-        return 1;
-      }
-
       const toggles = resolveSyncToggles({
         controlPlaneConfig: ctx.controlPlaneConfig,
         labelsOverride: parsed.value.syncLabels,
       });
+      const binding = resolveProjectLinearBinding({
+        controlPlaneConfig: ctx.controlPlaneConfig,
+      });
 
       if (parsed.value.from === "linear") {
-        const bound = resolveProjectLinearBinding({
-          controlPlaneConfig: ctx.controlPlaneConfig,
+        const projectTargets = resolveProjectPullTargets({
+          binding,
+          explicitProjectId: parsed.value.projectId,
         });
-        const projectId = parsed.value.projectId ?? bound.projectId;
-        if (!projectId) {
+        if (projectTargets.length === 0) {
           ctx.logger.error({
             message:
-              "Missing project id. Pass --project-id or run `hack x linear project-bind --project-id ...` first.",
+              "Missing project id. Pass --project-id, bind a default project, or add additional linked projects first.",
           });
           return 1;
         }
 
-        const syncResult = await syncProjectFromLinearToTickets({
-          runtime: runtime.value,
-          projectId,
-          limit: parsed.value.limit,
-          syncToggles: toggles,
-        });
-        if (!syncResult.ok) {
-          ctx.logger.error({ message: syncResult.error });
-          return 1;
+        const targetsByProfile = new Map<
+          string,
+          LinearProjectBindingTarget[]
+        >();
+        for (const target of projectTargets) {
+          const key = (
+            parsed.value.profileId ??
+            target.profileId ??
+            binding.profileId ??
+            ""
+          ).trim();
+          const existingTargets = targetsByProfile.get(key) ?? [];
+          existingTargets.push(target);
+          targetsByProfile.set(key, existingTargets);
         }
+
+        let processed = 0;
+        let created = 0;
+        let updated = 0;
+        let commentsPulled = 0;
+        let conflictsRecorded = 0;
+        let checkpointsRecorded = 0;
+        const syncedProjectIds: string[] = [];
+
+        for (const [profileId, targets] of targetsByProfile.entries()) {
+          const runtime = await createSyncRuntime({
+            ctx,
+            profileId: profileId || undefined,
+          });
+          if (!runtime.ok) {
+            ctx.logger.error({ message: runtime.error });
+            return 1;
+          }
+
+          const syncResult = await syncProjectFromLinearProjectsToTickets({
+            runtime: runtime.value,
+            projectIds: targets.map((target) => target.projectId),
+            limit: parsed.value.limit,
+            syncToggles: toggles,
+          });
+          if (!syncResult.ok) {
+            ctx.logger.error({ message: syncResult.error });
+            return 1;
+          }
+
+          processed += syncResult.processed;
+          created += syncResult.created;
+          updated += syncResult.updated;
+          commentsPulled += syncResult.commentsPulled;
+          conflictsRecorded += syncResult.conflictsRecorded;
+          checkpointsRecorded += syncResult.checkpointsRecorded;
+          syncedProjectIds.push(...syncResult.projectIds);
+        }
+
+        const syncResult = {
+          ok: true as const,
+          projectIds: [...new Set(syncedProjectIds)],
+          processed,
+          created,
+          updated,
+          commentsPulled,
+          conflictsRecorded,
+          checkpointsRecorded,
+        };
 
         if (parsed.value.json) {
           process.stdout.write(`${JSON.stringify(syncResult, null, 2)}\n`);
@@ -941,7 +1274,7 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
           await display.kv({
             title: "Linear project -> tickets sync",
             entries: [
-              ["linear_project_id", projectId],
+              ["linear_project_ids", syncResult.projectIds.join(", ")],
               ["processed", String(syncResult.processed)],
               ["created", String(syncResult.created)],
               ["updated", String(syncResult.updated)],
@@ -951,14 +1284,36 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
         return 0;
       }
 
-      const bound = resolveProjectLinearBinding({
-        controlPlaneConfig: ctx.controlPlaneConfig,
+      const selectedTarget =
+        (parsed.value.projectId
+          ? findProjectBindingTarget({
+              binding,
+              projectId: parsed.value.projectId,
+            })
+          : null) ??
+        (binding.projectId
+          ? {
+              projectId: binding.projectId,
+              ...(binding.projectName
+                ? { projectName: binding.projectName }
+                : {}),
+              ...(binding.teamId ? { teamId: binding.teamId } : {}),
+              ...(binding.profileId ? { profileId: binding.profileId } : {}),
+            }
+          : null);
+      const projectId = parsed.value.projectId ?? selectedTarget?.projectId;
+      const runtime = await createSyncRuntime({
+        ctx,
+        profileId: parsed.value.profileId ?? selectedTarget?.profileId,
       });
-      const projectId = parsed.value.projectId ?? bound.projectId;
+      if (!runtime.ok) {
+        ctx.logger.error({ message: runtime.error });
+        return 1;
+      }
       const syncResult = await syncProjectFromTicketsToLinear({
         runtime: runtime.value,
         projectId,
-        explicitTeamId: parsed.value.teamId ?? bound.teamId,
+        explicitTeamId: parsed.value.teamId ?? selectedTarget?.teamId,
         limit: parsed.value.limit,
         ownerMode: parsed.value.ownerMode,
         syncToggles: toggles,
@@ -999,6 +1354,7 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
 
       const deliveries = await listLinearDeliveries({
         controlPlaneConfig: ctx.controlPlaneConfig,
+        profileId: parsed.value.profileId,
         status: parsed.value.status,
         limit: parsed.value.limit,
       });
@@ -1015,6 +1371,7 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
       await display.kv({
         title: "Linear deliveries",
         entries: [
+          ["profile", deliveries.data.profileId ?? ""],
           ["status", deliveries.data.status ?? "all"],
           ["count", String(deliveries.data.deliveries.length)],
         ],
@@ -1047,6 +1404,7 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
 
       const applied = await applyLinearDelivery({
         controlPlaneConfig: ctx.controlPlaneConfig,
+        profileId: parsed.value.profileId,
         deliveryId: parsed.value.deliveryId,
       });
       if (!applied.ok) {
@@ -1062,8 +1420,157 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
       await display.kv({
         title: "Linear delivery applied",
         entries: [
+          ["profile", applied.data.profileId ?? ""],
           ["delivery_id", applied.data.deliveryId],
           ["status", applied.data.status],
+        ],
+      });
+      return 0;
+    },
+  },
+  {
+    name: "subscriptions",
+    summary: "List Linear autosync subscriptions from the auth broker",
+    scope: "global",
+    allowWhenDisabled: true,
+    handler: async ({ ctx, args }) => {
+      const parsed = parseAutosyncSubscriptionsArgs({ args });
+      if (!parsed.ok) {
+        ctx.logger.error({ message: parsed.error });
+        return 1;
+      }
+
+      const profileId = resolveSelectedLinearProfileId({
+        controlPlaneConfig: ctx.controlPlaneConfig,
+        profileId: parsed.value.profileId,
+      });
+      const subscriptions = await listLinearAutosyncSubscriptions({
+        controlPlaneConfig: ctx.controlPlaneConfig,
+        profileId,
+        projectId: parsed.value.projectId,
+        teamId: parsed.value.teamId,
+      });
+      if (!subscriptions.ok) {
+        ctx.logger.error({ message: subscriptions.error });
+        return 1;
+      }
+
+      if (parsed.value.json) {
+        process.stdout.write(
+          `${JSON.stringify(subscriptions.data, null, 2)}\n`
+        );
+        return 0;
+      }
+
+      await display.kv({
+        title: "Linear autosync subscriptions",
+        entries: [
+          ["profile", subscriptions.data.profileId],
+          ["project_id", parsed.value.projectId ?? ""],
+          ["team_id", parsed.value.teamId ?? ""],
+          ["count", String(subscriptions.data.subscriptions.length)],
+        ],
+      });
+      await display.table({
+        columns: ["Project ID", "Team ID", "Mode", "Status", "Updated At"],
+        rows: subscriptions.data.subscriptions.map((subscription) => [
+          subscription.projectId ?? "",
+          subscription.teamId ?? "",
+          subscription.mode,
+          subscription.status,
+          subscription.updatedAt ?? "",
+        ]),
+      });
+      return 0;
+    },
+  },
+  {
+    name: "set-subscription",
+    summary: "Create or update a Linear autosync subscription",
+    scope: "global",
+    allowWhenDisabled: true,
+    handler: async ({ ctx, args }) => {
+      const parsed = parseUpsertAutosyncSubscriptionArgs({ args });
+      if (!parsed.ok) {
+        ctx.logger.error({ message: parsed.error });
+        return 1;
+      }
+
+      const profileId = resolveSelectedLinearProfileId({
+        controlPlaneConfig: ctx.controlPlaneConfig,
+        profileId: parsed.value.profileId,
+      });
+      const saved = await upsertLinearAutosyncSubscription({
+        controlPlaneConfig: ctx.controlPlaneConfig,
+        profileId,
+        projectId: parsed.value.projectId,
+        teamId: parsed.value.teamId,
+        mode: parsed.value.mode,
+        status: parsed.value.status,
+      });
+      if (!saved.ok) {
+        ctx.logger.error({ message: saved.error });
+        return 1;
+      }
+
+      if (parsed.value.json) {
+        process.stdout.write(`${JSON.stringify(saved.data, null, 2)}\n`);
+        return 0;
+      }
+
+      await display.kv({
+        title: "Linear autosync subscription saved",
+        entries: [
+          ["profile", saved.data.profileId],
+          ["project_id", saved.data.subscription.projectId ?? ""],
+          ["team_id", saved.data.subscription.teamId ?? ""],
+          ["mode", saved.data.subscription.mode],
+          ["status", saved.data.subscription.status],
+        ],
+      });
+      return 0;
+    },
+  },
+  {
+    name: "remove-subscription",
+    summary: "Remove a Linear autosync subscription",
+    scope: "global",
+    allowWhenDisabled: true,
+    handler: async ({ ctx, args }) => {
+      const parsed = parseRemoveAutosyncSubscriptionArgs({ args });
+      if (!parsed.ok) {
+        ctx.logger.error({ message: parsed.error });
+        return 1;
+      }
+
+      const profileId = resolveSelectedLinearProfileId({
+        controlPlaneConfig: ctx.controlPlaneConfig,
+        profileId: parsed.value.profileId,
+      });
+      const removed = await removeLinearAutosyncSubscription({
+        controlPlaneConfig: ctx.controlPlaneConfig,
+        profileId,
+        projectId: parsed.value.projectId,
+        teamId: parsed.value.teamId,
+      });
+      if (!removed.ok) {
+        ctx.logger.error({ message: removed.error });
+        return 1;
+      }
+
+      if (parsed.value.json) {
+        process.stdout.write(`${JSON.stringify(removed.data, null, 2)}\n`);
+        return 0;
+      }
+
+      await display.kv({
+        title: "Linear autosync subscription removed",
+        entries: [
+          ["profile", removed.data.profileId],
+          ["project_id", removed.data.subscription.projectId ?? ""],
+          ["team_id", removed.data.subscription.teamId ?? ""],
+          ["mode", removed.data.subscription.mode],
+          ["status", removed.data.subscription.status],
         ],
       });
       return 0;
@@ -1104,6 +1611,8 @@ async function handleLinearOAuthConnectCommand(input: {
           readonly expiresAt?: string;
           readonly refreshToken?: string;
           readonly refreshTokenExpiresAt?: string;
+          readonly managementToken?: string;
+          readonly managementTokenExpiresAt?: string;
         };
       }
     | { readonly ok: false; readonly error: string };
@@ -1177,6 +1686,15 @@ async function handleLinearOAuthConnectCommand(input: {
       : {}),
     ...(oauthFlow.tokenExchange.refreshTokenExpiresAt
       ? { refreshTokenExpiresAt: oauthFlow.tokenExchange.refreshTokenExpiresAt }
+      : {}),
+    ...(oauthFlow.tokenExchange.managementToken
+      ? { managementToken: oauthFlow.tokenExchange.managementToken }
+      : {}),
+    ...(oauthFlow.tokenExchange.managementTokenExpiresAt
+      ? {
+          managementTokenExpiresAt:
+            oauthFlow.tokenExchange.managementTokenExpiresAt,
+        }
       : {}),
     authRef: resolved.authRef,
     service: resolved.service,
@@ -1365,6 +1883,8 @@ async function runLinearOAuthFlow(input: OAuthConnectRuntime): Promise<
         readonly expiresAt?: string;
         readonly refreshToken?: string;
         readonly refreshTokenExpiresAt?: string;
+        readonly managementToken?: string;
+        readonly managementTokenExpiresAt?: string;
       };
     }
   | { readonly ok: false; readonly error: string }
@@ -1433,6 +1953,8 @@ async function runLinearBrokerOAuthFlow(
         readonly expiresAt?: string;
         readonly refreshToken?: string;
         readonly refreshTokenExpiresAt?: string;
+        readonly managementToken?: string;
+        readonly managementTokenExpiresAt?: string;
       };
     }
   | { readonly ok: false; readonly error: string }
@@ -1518,6 +2040,14 @@ async function runLinearBrokerOAuthFlow(
             : {}),
           ...(flowStatus.refreshTokenExpiresAt
             ? { refreshTokenExpiresAt: flowStatus.refreshTokenExpiresAt }
+            : {}),
+          ...(flowStatus.managementToken
+            ? { managementToken: flowStatus.managementToken }
+            : {}),
+          ...(flowStatus.managementTokenExpiresAt
+            ? {
+                managementTokenExpiresAt: flowStatus.managementTokenExpiresAt,
+              }
             : {}),
         },
       };
@@ -1631,15 +2161,42 @@ type SyncToggles = {
 };
 
 type LinearDeliveryStatus = "pending" | "applied" | "ignored";
+type LinearAutosyncMode = "manual" | "auto_apply";
+type LinearAutosyncStatus = "active" | "paused";
 
 type DeliveriesArgs = {
+  profileId?: string;
   status?: LinearDeliveryStatus;
   limit?: number;
   json: boolean;
 };
 
 type ApplyDeliveryArgs = {
+  profileId?: string;
   deliveryId: string;
+  json: boolean;
+};
+
+type AutosyncSubscriptionsArgs = {
+  profileId?: string;
+  projectId?: string;
+  teamId?: string;
+  json: boolean;
+};
+
+type UpsertAutosyncSubscriptionArgs = {
+  profileId?: string;
+  projectId?: string;
+  teamId?: string;
+  mode: LinearAutosyncMode;
+  status: LinearAutosyncStatus;
+  json: boolean;
+};
+
+type RemoveAutosyncSubscriptionArgs = {
+  profileId?: string;
+  projectId?: string;
+  teamId?: string;
   json: boolean;
 };
 
@@ -2536,14 +3093,36 @@ async function resolveTicketAssigneeForLinear(input: {
 }
 
 type BrokerListDeliveriesPayload = {
+  readonly profileId?: string;
   readonly status?: string;
   readonly limit?: number;
   readonly deliveries: readonly LinearDeliverySummary[];
 };
 
 type BrokerApplyDeliveryPayload = {
+  readonly profileId?: string;
   readonly deliveryId: string;
   readonly status: string;
+};
+
+type LinearAutosyncSubscriptionSummary = {
+  readonly id: string;
+  readonly profileId: string;
+  readonly projectId?: string;
+  readonly teamId?: string;
+  readonly mode: LinearAutosyncMode;
+  readonly status: LinearAutosyncStatus;
+  readonly updatedAt?: string;
+};
+
+type BrokerListAutosyncSubscriptionsPayload = {
+  readonly profileId: string;
+  readonly subscriptions: readonly LinearAutosyncSubscriptionSummary[];
+};
+
+type BrokerAutosyncSubscriptionMutationPayload = {
+  readonly profileId: string;
+  readonly subscription: LinearAutosyncSubscriptionSummary;
 };
 
 async function syncIssueFromLinearToTicket(input: {
@@ -2917,14 +3496,15 @@ async function upsertLinearIssueForTicketSync(input: {
   });
 }
 
-async function syncProjectFromLinearToTickets(input: {
+async function syncProjectFromLinearProjectsToTickets(input: {
   readonly runtime: SyncRuntime;
-  readonly projectId: string;
+  readonly projectIds: readonly string[];
   readonly limit?: number;
   readonly syncToggles: SyncToggles;
 }): Promise<
   | {
       readonly ok: true;
+      readonly projectIds: readonly string[];
       readonly processed: number;
       readonly created: number;
       readonly updated: number;
@@ -2941,7 +3521,7 @@ async function syncProjectFromLinearToTickets(input: {
 
   const issuesResult = await collectLinearProjectIssuesForSync({
     runtime: input.runtime,
-    projectId: input.projectId,
+    projectIds: input.projectIds,
     limit,
   });
   if (!issuesResult.ok) {
@@ -2975,6 +3555,7 @@ async function syncProjectFromLinearToTickets(input: {
 
   return {
     ok: true,
+    projectIds: issuesResult.projectIds,
     processed: issuesResult.processed,
     created: upserted.created,
     updated: upserted.updated,
@@ -2986,41 +3567,62 @@ async function syncProjectFromLinearToTickets(input: {
 
 async function collectLinearProjectIssuesForSync(input: {
   readonly runtime: SyncRuntime;
-  readonly projectId: string;
+  readonly projectIds: readonly string[];
   readonly limit: number;
 }): Promise<
   | {
       readonly ok: true;
+      readonly projectIds: readonly string[];
       readonly issues: readonly LinearIssue[];
       readonly processed: number;
     }
   | { readonly ok: false; readonly error: string }
 > {
-  let cursor: string | undefined;
-  let processed = 0;
-  const issues: LinearIssue[] = [];
+  const normalizedProjectIds = [
+    ...new Set(input.projectIds.map((value) => value.trim())),
+  ].filter((value) => value.length > 0);
+  const issuesById = new Map<string, LinearIssue>();
 
-  while (processed < input.limit) {
-    const page = await input.runtime.linear.listProjectIssuesPage({
-      projectId: input.projectId,
-      first: Math.min(50, input.limit - processed),
-      ...(cursor ? { after: cursor } : {}),
-    });
-    if (!page.ok) {
-      return { ok: false, error: page.error };
+  for (const projectId of normalizedProjectIds) {
+    let cursor: string | undefined;
+    while (issuesById.size < input.limit) {
+      const page = await input.runtime.linear.listProjectIssuesPage({
+        projectId,
+        first: Math.min(50, input.limit - issuesById.size),
+        ...(cursor ? { after: cursor } : {}),
+      });
+      if (!page.ok) {
+        return { ok: false, error: page.error };
+      }
+
+      for (const issue of page.data.issues) {
+        issuesById.set(issue.id, issue);
+        if (issuesById.size >= input.limit) {
+          break;
+        }
+      }
+      if (
+        !(
+          page.data.hasNextPage &&
+          page.data.endCursor &&
+          issuesById.size < input.limit
+        )
+      ) {
+        break;
+      }
+      cursor = page.data.endCursor;
     }
-
-    issues.push(...page.data.issues);
-    processed += page.data.issues.length;
-    if (
-      !(page.data.hasNextPage && page.data.endCursor && processed < input.limit)
-    ) {
+    if (issuesById.size >= input.limit) {
       break;
     }
-    cursor = page.data.endCursor;
   }
 
-  return { ok: true, issues, processed };
+  return {
+    ok: true,
+    projectIds: normalizedProjectIds,
+    issues: [...issuesById.values()],
+    processed: issuesById.size,
+  };
 }
 
 async function upsertLinearProjectIssuesToTickets(input: {
@@ -3805,17 +4407,27 @@ function linearProfilePath(input: { readonly profileId: string }): string {
   return `controlPlane.extensions["${EXTENSION_ID}"].config.profiles["${escapedProfileId}"]`;
 }
 
-function resolveProjectLinearBinding(input: {
-  readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
-}): {
+type LinearProjectBindingTarget = {
+  readonly projectId: string;
+  readonly projectName?: string;
+  readonly teamId?: string;
+  readonly profileId?: string;
+};
+
+type ResolvedLinearProjectBinding = {
   readonly profileId?: string;
   readonly projectId?: string;
   readonly projectName?: string;
   readonly teamId?: string;
-} {
+  readonly additionalProjects: readonly LinearProjectBindingTarget[];
+};
+
+function resolveProjectLinearBinding(input: {
+  readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
+}): ResolvedLinearProjectBinding {
   const overrides = input.controlPlaneConfig.routing?.overrides;
   if (!isRecord(overrides)) {
-    return {};
+    return { additionalProjects: [] };
   }
   const nested = isRecord(overrides.linear) ? overrides.linear : null;
 
@@ -3831,13 +4443,212 @@ function resolveProjectLinearBinding(input: {
   const teamId =
     readOptionalString(nested?.teamId) ??
     readOptionalString(overrides.linearTeamId);
+  const additionalProjects = parseAdditionalProjectBindings({
+    value: nested?.additionalProjects,
+    defaultProjectId: projectId,
+    defaultProfileId: profileId,
+  });
 
   return {
     ...(profileId ? { profileId } : {}),
     ...(projectId ? { projectId } : {}),
     ...(projectName ? { projectName } : {}),
     ...(teamId ? { teamId } : {}),
+    additionalProjects,
   };
+}
+
+function parseAdditionalProjectBindings(input: {
+  readonly value: unknown;
+  readonly defaultProjectId?: string;
+  readonly defaultProfileId?: string;
+}): readonly LinearProjectBindingTarget[] {
+  if (!Array.isArray(input.value)) {
+    return [];
+  }
+  const targets: LinearProjectBindingTarget[] = [];
+  for (const item of input.value) {
+    if (!isRecord(item)) {
+      continue;
+    }
+    const target = normalizeProjectBindingTarget({
+      projectId: item.projectId,
+      projectName: item.projectName,
+      teamId: item.teamId,
+      profileId: item.profileId ?? input.defaultProfileId,
+    });
+    if (!target) {
+      continue;
+    }
+    if (
+      input.defaultProjectId &&
+      target.projectId.toLowerCase() === input.defaultProjectId.toLowerCase()
+    ) {
+      continue;
+    }
+    targets.push(target);
+  }
+  return dedupeProjectBindingTargets({ targets });
+}
+
+function normalizeProjectBindingTarget(input: {
+  readonly projectId: unknown;
+  readonly projectName?: unknown;
+  readonly teamId?: unknown;
+  readonly profileId?: unknown;
+}): LinearProjectBindingTarget | null {
+  const projectId = readOptionalString(input.projectId);
+  if (!projectId) {
+    return null;
+  }
+  const projectName = readOptionalString(input.projectName);
+  const teamId = readOptionalString(input.teamId);
+  const profileId = readOptionalString(input.profileId);
+  return {
+    projectId,
+    ...(projectName ? { projectName } : {}),
+    ...(teamId ? { teamId } : {}),
+    ...(profileId ? { profileId } : {}),
+  };
+}
+
+function dedupeProjectBindingTargets(input: {
+  readonly targets: readonly LinearProjectBindingTarget[];
+}): readonly LinearProjectBindingTarget[] {
+  const byProjectId = new Map<string, LinearProjectBindingTarget>();
+  for (const target of input.targets) {
+    const key = `${(target.profileId ?? "").toLowerCase()}::${target.projectId.toLowerCase()}`;
+    byProjectId.set(key, target);
+  }
+  return [...byProjectId.values()].sort((left, right) =>
+    `${left.profileId ?? ""}:${left.projectId}`.localeCompare(
+      `${right.profileId ?? ""}:${right.projectId}`
+    )
+  );
+}
+
+function upsertAdditionalProjectBinding(input: {
+  readonly existing: readonly LinearProjectBindingTarget[];
+  readonly target: LinearProjectBindingTarget;
+  readonly defaultProjectId?: string;
+}): readonly LinearProjectBindingTarget[] {
+  if (
+    input.defaultProjectId &&
+    input.target.projectId.toLowerCase() ===
+      input.defaultProjectId.toLowerCase()
+  ) {
+    return dedupeProjectBindingTargets({ targets: input.existing });
+  }
+  return dedupeProjectBindingTargets({
+    targets: [...input.existing, input.target],
+  });
+}
+
+function removeAdditionalProjectBinding(input: {
+  readonly existing: readonly LinearProjectBindingTarget[];
+  readonly projectId: string;
+}): readonly LinearProjectBindingTarget[] {
+  const normalizedProjectId = input.projectId.toLowerCase();
+  return input.existing.filter(
+    (target) => target.projectId.toLowerCase() !== normalizedProjectId
+  );
+}
+
+function buildProjectBindingPayload(input: {
+  readonly binding: ResolvedLinearProjectBinding;
+  readonly cleared?: boolean;
+  readonly additionalProjectChanged?: boolean;
+  readonly removedProjectId?: string | null;
+}): {
+  readonly ok: true;
+  readonly cleared?: boolean;
+  readonly profileId: string | null;
+  readonly projectId: string | null;
+  readonly projectName: string | null;
+  readonly teamId: string | null;
+  readonly additionalProjects: readonly LinearProjectBindingTarget[];
+  readonly additionalProjectChanged?: boolean;
+  readonly removedProjectId?: string | null;
+} {
+  return {
+    ok: true,
+    ...(input.cleared ? { cleared: true } : {}),
+    profileId: input.binding.profileId ?? null,
+    projectId: input.binding.projectId ?? null,
+    projectName: input.binding.projectName ?? null,
+    teamId: input.binding.teamId ?? null,
+    additionalProjects: input.binding.additionalProjects,
+    ...(input.additionalProjectChanged !== undefined
+      ? { additionalProjectChanged: input.additionalProjectChanged }
+      : {}),
+    ...(input.removedProjectId !== undefined
+      ? { removedProjectId: input.removedProjectId }
+      : {}),
+  };
+}
+
+function resolveProjectPullTargets(input: {
+  readonly binding: ResolvedLinearProjectBinding;
+  readonly explicitProjectId?: string;
+}): readonly LinearProjectBindingTarget[] {
+  if (input.explicitProjectId) {
+    const matchedTarget = findProjectBindingTarget({
+      binding: input.binding,
+      projectId: input.explicitProjectId,
+    });
+    return [
+      matchedTarget ?? {
+        projectId: input.explicitProjectId,
+        ...(input.binding.profileId
+          ? { profileId: input.binding.profileId }
+          : {}),
+      },
+    ];
+  }
+  return [
+    ...(input.binding.projectId
+      ? [
+          {
+            projectId: input.binding.projectId,
+            ...(input.binding.projectName
+              ? { projectName: input.binding.projectName }
+              : {}),
+            ...(input.binding.teamId ? { teamId: input.binding.teamId } : {}),
+            ...(input.binding.profileId
+              ? { profileId: input.binding.profileId }
+              : {}),
+          },
+        ]
+      : []),
+    ...input.binding.additionalProjects,
+  ];
+}
+
+function findProjectBindingTarget(input: {
+  readonly binding: ResolvedLinearProjectBinding;
+  readonly projectId: string;
+}): LinearProjectBindingTarget | null {
+  const normalizedProjectId = input.projectId.toLowerCase();
+  if (
+    input.binding.projectId &&
+    input.binding.projectId.toLowerCase() === normalizedProjectId
+  ) {
+    return {
+      projectId: input.binding.projectId,
+      ...(input.binding.projectName
+        ? { projectName: input.binding.projectName }
+        : {}),
+      ...(input.binding.teamId ? { teamId: input.binding.teamId } : {}),
+      ...(input.binding.profileId
+        ? { profileId: input.binding.profileId }
+        : {}),
+    };
+  }
+  return (
+    input.binding.additionalProjects.find(
+      (target) => target.projectId.toLowerCase() === normalizedProjectId
+    ) ?? null
+  );
 }
 
 async function resolveProjectBindingDetails(input: {
@@ -3954,6 +4765,8 @@ type BrokerFlowStatusPayload = {
   readonly tokenExpiresAt?: string;
   readonly refreshToken?: string;
   readonly refreshTokenExpiresAt?: string;
+  readonly managementToken?: string;
+  readonly managementTokenExpiresAt?: string;
   readonly error?: string;
 };
 
@@ -4343,12 +5156,20 @@ async function fetchJson<T>(input: {
 
 async function listLinearDeliveries(input: {
   readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
+  readonly profileId?: string;
   readonly status?: LinearDeliveryStatus;
   readonly limit?: number;
 }): Promise<
   | { readonly ok: true; readonly data: BrokerListDeliveriesPayload }
   | { readonly ok: false; readonly error: string }
 > {
+  const brokerAuth = await resolveLinearBrokerAuthorization({
+    controlPlaneConfig: input.controlPlaneConfig,
+    profileId: input.profileId,
+  });
+  if (!brokerAuth.ok) {
+    return brokerAuth;
+  }
   const brokerConfig = resolveOAuthBrokerRuntimeConfig({
     controlPlaneConfig: input.controlPlaneConfig,
   });
@@ -4378,6 +5199,9 @@ async function listLinearDeliveries(input: {
     }
     const response = await fetchJson<unknown>({
       url: url.toString(),
+      init: {
+        headers: brokerAuth.headers,
+      },
     });
     if (!response.ok) {
       lastError = response.error;
@@ -4386,6 +5210,7 @@ async function listLinearDeliveries(input: {
 
     const payload = parseLinearDeliveriesListPayload({
       payload: response.value,
+      profileId: brokerAuth.profileId,
       requestedStatus: input.status,
       requestedLimit: normalizedLimit,
     });
@@ -4400,11 +5225,19 @@ async function listLinearDeliveries(input: {
 
 async function applyLinearDelivery(input: {
   readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
+  readonly profileId?: string;
   readonly deliveryId: string;
 }): Promise<
   | { readonly ok: true; readonly data: BrokerApplyDeliveryPayload }
   | { readonly ok: false; readonly error: string }
 > {
+  const brokerAuth = await resolveLinearBrokerAuthorization({
+    controlPlaneConfig: input.controlPlaneConfig,
+    profileId: input.profileId,
+  });
+  if (!brokerAuth.ok) {
+    return brokerAuth;
+  }
   const brokerConfig = resolveOAuthBrokerRuntimeConfig({
     controlPlaneConfig: input.controlPlaneConfig,
   });
@@ -4423,6 +5256,7 @@ async function applyLinearDelivery(input: {
         method: "POST",
         headers: {
           "content-type": "application/json",
+          ...brokerAuth.headers,
         },
       },
     });
@@ -4432,6 +5266,7 @@ async function applyLinearDelivery(input: {
     }
     const payload = parseLinearDeliveryApplyPayload({
       payload: response.value,
+      profileId: brokerAuth.profileId,
       deliveryId: input.deliveryId,
     });
     if (payload) {
@@ -4443,8 +5278,211 @@ async function applyLinearDelivery(input: {
   return { ok: false, error: lastError };
 }
 
+async function listLinearAutosyncSubscriptions(input: {
+  readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
+  readonly profileId: string;
+  readonly projectId?: string;
+  readonly teamId?: string;
+}): Promise<
+  | { readonly ok: true; readonly data: BrokerListAutosyncSubscriptionsPayload }
+  | { readonly ok: false; readonly error: string }
+> {
+  const brokerAuth = await resolveLinearBrokerAuthorization({
+    controlPlaneConfig: input.controlPlaneConfig,
+    profileId: input.profileId,
+  });
+  if (!brokerAuth.ok) {
+    return brokerAuth;
+  }
+  const brokerConfig = resolveOAuthBrokerRuntimeConfig({
+    controlPlaneConfig: input.controlPlaneConfig,
+  });
+  const url = new URL(
+    "/v1/auth/linear/subscriptions",
+    `${brokerConfig.baseUrl}/`
+  );
+  if (input.projectId) {
+    url.searchParams.set("projectId", input.projectId);
+  }
+  if (input.teamId) {
+    url.searchParams.set("teamId", input.teamId);
+  }
+  const response = await fetchJson<unknown>({
+    url: url.toString(),
+    init: {
+      headers: brokerAuth.headers,
+    },
+  });
+  if (!response.ok) {
+    return response;
+  }
+  const payload = parseLinearAutosyncSubscriptionsPayload({
+    payload: response.value,
+    profileId: brokerAuth.profileId,
+  });
+  if (!payload) {
+    return {
+      ok: false,
+      error: "Linear autosync subscriptions payload was invalid.",
+    };
+  }
+  return { ok: true, data: payload };
+}
+
+async function upsertLinearAutosyncSubscription(input: {
+  readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
+  readonly profileId: string;
+  readonly projectId?: string;
+  readonly teamId?: string;
+  readonly mode: LinearAutosyncMode;
+  readonly status: LinearAutosyncStatus;
+}): Promise<
+  | {
+      readonly ok: true;
+      readonly data: BrokerAutosyncSubscriptionMutationPayload;
+    }
+  | { readonly ok: false; readonly error: string }
+> {
+  const brokerAuth = await resolveLinearBrokerAuthorization({
+    controlPlaneConfig: input.controlPlaneConfig,
+    profileId: input.profileId,
+  });
+  if (!brokerAuth.ok) {
+    return brokerAuth;
+  }
+  const brokerConfig = resolveOAuthBrokerRuntimeConfig({
+    controlPlaneConfig: input.controlPlaneConfig,
+  });
+  const response = await fetchJson<unknown>({
+    url: new URL(
+      "/v1/auth/linear/subscriptions",
+      `${brokerConfig.baseUrl}/`
+    ).toString(),
+    init: {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...brokerAuth.headers,
+      },
+      body: JSON.stringify({
+        profileId: brokerAuth.profileId,
+        ...(input.projectId ? { projectId: input.projectId } : {}),
+        ...(input.teamId ? { teamId: input.teamId } : {}),
+        mode: input.mode,
+        status: input.status,
+      }),
+    },
+  });
+  if (!response.ok) {
+    return response;
+  }
+  const payload = parseLinearAutosyncSubscriptionMutationPayload({
+    payload: response.value,
+    profileId: brokerAuth.profileId,
+  });
+  if (!payload) {
+    return {
+      ok: false,
+      error: "Linear autosync subscription payload was invalid.",
+    };
+  }
+  return { ok: true, data: payload };
+}
+
+async function removeLinearAutosyncSubscription(input: {
+  readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
+  readonly profileId: string;
+  readonly projectId?: string;
+  readonly teamId?: string;
+}): Promise<
+  | {
+      readonly ok: true;
+      readonly data: BrokerAutosyncSubscriptionMutationPayload;
+    }
+  | { readonly ok: false; readonly error: string }
+> {
+  const brokerAuth = await resolveLinearBrokerAuthorization({
+    controlPlaneConfig: input.controlPlaneConfig,
+    profileId: input.profileId,
+  });
+  if (!brokerAuth.ok) {
+    return brokerAuth;
+  }
+  const brokerConfig = resolveOAuthBrokerRuntimeConfig({
+    controlPlaneConfig: input.controlPlaneConfig,
+  });
+  const response = await fetchJson<unknown>({
+    url: new URL(
+      "/v1/auth/linear/subscriptions/remove",
+      `${brokerConfig.baseUrl}/`
+    ).toString(),
+    init: {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...brokerAuth.headers,
+      },
+      body: JSON.stringify({
+        profileId: brokerAuth.profileId,
+        ...(input.projectId ? { projectId: input.projectId } : {}),
+        ...(input.teamId ? { teamId: input.teamId } : {}),
+      }),
+    },
+  });
+  if (!response.ok) {
+    return response;
+  }
+  const payload = parseLinearAutosyncSubscriptionMutationPayload({
+    payload: response.value,
+    profileId: brokerAuth.profileId,
+  });
+  if (!payload) {
+    return {
+      ok: false,
+      error: "Linear autosync subscription payload was invalid.",
+    };
+  }
+  return { ok: true, data: payload };
+}
+
+async function resolveLinearBrokerAuthorization(input: {
+  readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
+  readonly profileId?: string;
+}): Promise<
+  | {
+      readonly ok: true;
+      readonly profileId: string;
+      readonly headers: Record<string, string>;
+    }
+  | { readonly ok: false; readonly error: string }
+> {
+  const profileId = resolveSelectedLinearProfileId({
+    controlPlaneConfig: input.controlPlaneConfig,
+    profileId: input.profileId,
+  });
+  const management = await resolveLinearBrokerManagementToken({
+    controlPlaneConfig: input.controlPlaneConfig,
+    profileId,
+    allowProjectOverride: false,
+  });
+  if (!management.ok) {
+    return {
+      ok: false,
+      error: management.error,
+    };
+  }
+  return {
+    ok: true,
+    profileId,
+    headers: {
+      authorization: `Bearer ${management.managementToken}`,
+    },
+  };
+}
+
 function parseLinearDeliveriesListPayload(input: {
   readonly payload: unknown;
+  readonly profileId?: string;
   readonly requestedStatus?: LinearDeliveryStatus;
   readonly requestedLimit: number;
 }): BrokerListDeliveriesPayload | null {
@@ -4465,6 +5503,7 @@ function parseLinearDeliveriesListPayload(input: {
     .filter((value): value is LinearDeliverySummary => value !== null)
     .slice(0, input.requestedLimit);
   return {
+    ...(input.profileId ? { profileId: input.profileId } : {}),
     status:
       readOptionalString(input.payload.status) ??
       input.requestedStatus ??
@@ -4512,6 +5551,7 @@ function parseLinearDeliverySummary(input: {
 
 function parseLinearDeliveryApplyPayload(input: {
   readonly payload: unknown;
+  readonly profileId?: string;
   readonly deliveryId: string;
 }): BrokerApplyDeliveryPayload | null {
   if (!isRecord(input.payload)) {
@@ -4526,8 +5566,78 @@ function parseLinearDeliveryApplyPayload(input: {
     return null;
   }
   return {
+    ...(input.profileId ? { profileId: input.profileId } : {}),
     deliveryId,
     status,
+  };
+}
+
+function parseLinearAutosyncSubscriptionsPayload(input: {
+  readonly payload: unknown;
+  readonly profileId: string;
+}): BrokerListAutosyncSubscriptionsPayload | null {
+  if (
+    !(isRecord(input.payload) && Array.isArray(input.payload.subscriptions))
+  ) {
+    return null;
+  }
+  const subscriptions = input.payload.subscriptions
+    .map((value) => parseLinearAutosyncSubscriptionSummary({ value }))
+    .filter(
+      (value): value is LinearAutosyncSubscriptionSummary => value !== null
+    );
+  return {
+    profileId: input.profileId,
+    subscriptions,
+  };
+}
+
+function parseLinearAutosyncSubscriptionMutationPayload(input: {
+  readonly payload: unknown;
+  readonly profileId: string;
+}): BrokerAutosyncSubscriptionMutationPayload | null {
+  if (!isRecord(input.payload)) {
+    return null;
+  }
+  const subscription = parseLinearAutosyncSubscriptionSummary({
+    value: input.payload.subscription,
+  });
+  if (!subscription) {
+    return null;
+  }
+  return {
+    profileId: input.profileId,
+    subscription,
+  };
+}
+
+function parseLinearAutosyncSubscriptionSummary(input: {
+  readonly value: unknown;
+}): LinearAutosyncSubscriptionSummary | null {
+  if (!isRecord(input.value)) {
+    return null;
+  }
+  const id = readOptionalString(input.value.id);
+  const profileId = readOptionalString(input.value.profileId);
+  const mode = readOptionalString(input.value.mode);
+  const status = readOptionalString(input.value.status);
+  if (!(id && profileId && (mode === "manual" || mode === "auto_apply"))) {
+    return null;
+  }
+  if (!(status === "active" || status === "paused")) {
+    return null;
+  }
+  const projectId = readOptionalString(input.value.projectId) ?? undefined;
+  const teamId = readOptionalString(input.value.teamId) ?? undefined;
+  const updatedAt = readOptionalString(input.value.updatedAt) ?? undefined;
+  return {
+    id,
+    profileId,
+    ...(projectId ? { projectId } : {}),
+    ...(teamId ? { teamId } : {}),
+    mode,
+    status,
+    ...(updatedAt ? { updatedAt } : {}),
   };
 }
 
@@ -4869,6 +5979,14 @@ type ProjectBindArgs = {
   json: boolean;
 };
 
+type ProjectLinkArgs = {
+  profileId?: string;
+  projectId?: string;
+  projectName?: string;
+  teamId?: string;
+  json: boolean;
+};
+
 type SyncIssueArgs = {
   from: "linear" | "hack";
   issueIdentifier?: string;
@@ -4926,6 +6044,7 @@ function parseDeliveriesArgs(input: {
       index: i,
       out: value,
       keys: {
+        profile: "profileId",
         status: "status",
       },
     });
@@ -4972,6 +6091,7 @@ function parseApplyDeliveryArgs(input: {
       index: i,
       out: value,
       keys: {
+        profile: "profileId",
         "delivery-id": "deliveryId",
       },
     });
@@ -4995,6 +6115,117 @@ function parseApplyDeliveryArgs(input: {
       json: value.json,
     },
   };
+}
+
+function parseAutosyncSubscriptionsArgs(input: {
+  readonly args: readonly string[];
+}):
+  | { readonly ok: true; readonly value: AutosyncSubscriptionsArgs }
+  | { readonly ok: false; readonly error: string } {
+  const value: AutosyncSubscriptionsArgs = { json: false };
+  for (let i = 0; i < input.args.length; i += 1) {
+    const token = input.args[i] ?? "";
+    if (token === "--json") {
+      value.json = true;
+      continue;
+    }
+    const handled = assignKeyValueFlag({
+      token,
+      args: input.args,
+      index: i,
+      out: value,
+      keys: {
+        profile: "profileId",
+        "project-id": "projectId",
+        "team-id": "teamId",
+      },
+    });
+    if (!handled.ok) {
+      return { ok: false, error: handled.error };
+    }
+    i = handled.nextIndex;
+  }
+  return { ok: true, value };
+}
+
+function parseUpsertAutosyncSubscriptionArgs(input: {
+  readonly args: readonly string[];
+}):
+  | { readonly ok: true; readonly value: UpsertAutosyncSubscriptionArgs }
+  | { readonly ok: false; readonly error: string } {
+  const value: UpsertAutosyncSubscriptionArgs = {
+    mode: "auto_apply",
+    status: "active",
+    json: false,
+  };
+  for (let i = 0; i < input.args.length; i += 1) {
+    const token = input.args[i] ?? "";
+    if (token === "--json") {
+      value.json = true;
+      continue;
+    }
+    const handled = assignKeyValueFlag({
+      token,
+      args: input.args,
+      index: i,
+      out: value,
+      keys: {
+        profile: "profileId",
+        "project-id": "projectId",
+        "team-id": "teamId",
+        mode: "mode",
+        status: "status",
+      },
+    });
+    if (!handled.ok) {
+      return { ok: false, error: handled.error };
+    }
+    i = handled.nextIndex;
+  }
+  if (!(value.mode === "manual" || value.mode === "auto_apply")) {
+    return {
+      ok: false,
+      error: `Invalid --mode value: ${String(value.mode)}. Expected manual|auto_apply.`,
+    };
+  }
+  if (!(value.status === "active" || value.status === "paused")) {
+    return {
+      ok: false,
+      error: `Invalid --status value: ${String(value.status)}. Expected active|paused.`,
+    };
+  }
+  return { ok: true, value };
+}
+
+function parseRemoveAutosyncSubscriptionArgs(input: {
+  readonly args: readonly string[];
+}):
+  | { readonly ok: true; readonly value: RemoveAutosyncSubscriptionArgs }
+  | { readonly ok: false; readonly error: string } {
+  const value: RemoveAutosyncSubscriptionArgs = { json: false };
+  for (let i = 0; i < input.args.length; i += 1) {
+    const token = input.args[i] ?? "";
+    if (token === "--json") {
+      value.json = true;
+      continue;
+    }
+    const handled = assignKeyValueFlag({
+      token,
+      args: input.args,
+      index: i,
+      out: value,
+      keys: {
+        profile: "profileId",
+        "project-id": "projectId",
+        "team-id": "teamId",
+      },
+    });
+    if (!handled.ok) {
+      return { ok: false, error: handled.error };
+    }
+    i = handled.nextIndex;
+  }
+  return { ok: true, value };
 }
 
 function parseAssigneeMappingsArgs(input: {
@@ -5448,6 +6679,40 @@ function parseProjectBindArgs(input: {
   return { ok: true, value };
 }
 
+function parseProjectLinkArgs(input: {
+  readonly args: readonly string[];
+}):
+  | { readonly ok: true; readonly value: ProjectLinkArgs }
+  | { readonly ok: false; readonly error: string } {
+  const value: ProjectLinkArgs = {
+    json: false,
+  };
+  for (let i = 0; i < input.args.length; i += 1) {
+    const token = input.args[i] ?? "";
+    if (token === "--json") {
+      value.json = true;
+      continue;
+    }
+    const handled = assignKeyValueFlag({
+      token,
+      args: input.args,
+      index: i,
+      out: value,
+      keys: {
+        profile: "profileId",
+        "project-id": "projectId",
+        "project-name": "projectName",
+        "team-id": "teamId",
+      },
+    });
+    if (!handled.ok) {
+      return { ok: false, error: handled.error };
+    }
+    i = handled.nextIndex;
+  }
+  return { ok: true, value };
+}
+
 function parseSyncIssueArgs(input: {
   readonly args: readonly string[];
 }):
@@ -5619,13 +6884,19 @@ function normalizeOAuthActor(value: string | undefined): "user" | "app" | null {
 export const __testOnly = {
   buildOAuthArgsFromConnectArgs,
   detectAuthoritativeFieldConflicts,
+  findProjectBindingTarget,
   parseApplyDeliveryArgs,
+  parseAutosyncSubscriptionsArgs,
   parseAssigneeMappingsArgs,
   parseConnectArgs,
   parseDeliveriesArgs,
   parseProjectBindArgs,
+  parseProjectLinkArgs,
   parseProjectsArgs,
   parseRemoveAssigneeMappingArgs,
+  parseRemoveAutosyncSubscriptionArgs,
+  resolveProjectLinearBinding,
+  resolveProjectPullTargets,
   resolveOAuthBrokerRuntimeConfig,
   resolveTicketAssigneeForLinear,
   parseSetupArgs,
@@ -5633,6 +6904,7 @@ export const __testOnly = {
   parseSyncIssueArgs,
   parseSyncProjectArgs,
   parseUpsertAssigneeMappingArgs,
+  parseUpsertAutosyncSubscriptionArgs,
   selectLinearCommentsToAppend,
   selectTicketCommentsToPush,
   shouldFallbackConnectToOAuth,

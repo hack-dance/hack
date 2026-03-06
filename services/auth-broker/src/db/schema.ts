@@ -49,3 +49,23 @@ export const linearWebhookEvents = pgTable("linear_webhook_events", {
     .defaultNow(),
   appliedAt: timestamp("applied_at", { withTimezone: true }),
 });
+
+export const linearSyncSubscriptions = pgTable("linear_sync_subscriptions", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  subscriptionKey: text("subscription_key").notNull().unique(),
+  profileId: text("profile_id").notNull(),
+  projectId: text("project_id"),
+  teamId: text("team_id"),
+  mode: text("mode").notNull().default("manual"),
+  status: text("status").notNull().default("active"),
+  betterAuthUserId: text("better_auth_user_id"),
+  betterAuthOrganizationId: text("better_auth_organization_id"),
+  betterAuthTeamId: text("better_auth_team_id"),
+  configJson: text("config_json").notNull().default("{}"),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});

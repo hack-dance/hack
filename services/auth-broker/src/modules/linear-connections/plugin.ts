@@ -1,7 +1,11 @@
 import { Elysia, t } from "elysia";
 
 import type { BetterAuthRuntime } from "../../better-auth.ts";
-import { resolveBetterAuthSession } from "../better-auth/session.ts";
+import {
+  hasBetterAuthAccess,
+  hasBetterAuthProfileAccess,
+  resolveBetterAuthSession,
+} from "../better-auth/session.ts";
 import type { LinearConnectionStore } from "./service.ts";
 
 const listConnectionsQuerySchema = t.Object({
@@ -34,15 +38,36 @@ export function createLinearConnectionsPlugin({
           error: "better_auth_session_required",
         } as const;
       }
+      if (
+        !hasBetterAuthProfileAccess({
+          session: session.session,
+          profileId: normalizeOptionalQueryValue(query.profileId),
+        })
+      ) {
+        set.status = 403;
+        return {
+          ok: false,
+          error: "better_auth_profile_forbidden",
+        } as const;
+      }
+      const activeSession = session.session;
+      const allConnections = await connectionStore.listConnections({
+        profileId: normalizeOptionalQueryValue(query.profileId),
+        organizationId: normalizeOptionalQueryValue(query.organizationId),
+      });
+      const connections =
+        session.enabled && activeSession
+          ? allConnections.filter((connection) =>
+              hasBetterAuthAccess({
+                session: activeSession,
+                record: connection,
+              })
+            )
+          : allConnections;
       return {
         ok: true,
         accessControlMode: session.accessControlMode,
-        connections: await connectionStore.listConnections({
-          profileId: normalizeOptionalQueryValue(query.profileId),
-          organizationId: normalizeOptionalQueryValue(query.organizationId),
-          betterAuthUserId: session.session?.userId ?? null,
-          betterAuthOrganizationId: session.session?.organizationId ?? null,
-        }),
+        connections,
       } as const;
     },
     { query: listConnectionsQuerySchema }

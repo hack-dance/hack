@@ -5,7 +5,6 @@ import SwiftUI
 import HackDesktopModels
 
 struct TicketsView: View {
-  @AppStorage("hackDesktop.linearReviewNotes.v1") private var reviewNotesStorage = "{}"
   @Environment(DashboardModel.self) private var model
   @Environment(\.colorScheme) private var colorScheme
   @Environment(\.openURL) private var openURL
@@ -32,15 +31,15 @@ struct TicketsView: View {
   @State private var linearRouteProjectId = ""
   @State private var linearRouteProjectName = ""
   @State private var linearRouteTeamId = ""
+  @State private var linearAdditionalProjects: [LinearProjectBindingTarget] = []
   @State private var linearRouteStatus: LinearStatusResponse? = nil
   @State private var pendingBulkSyncAction: TicketBulkSyncAction? = nil
   @State private var activeSyncAction: TicketSyncAction? = nil
   @State private var resolvingConflictIds: Set<String> = []
   @State private var postingCommentTicketIds: Set<String> = []
+  @State private var postingReviewNoteTicketIds: Set<String> = []
   @State private var ticketDetailCache: [String: TicketDetailResponse] = [:]
-  @State private var reviewNotesByTicketKey: [String: [TicketLocalReviewNote]] = [:]
   @State private var reviewComposerDrafts: [String: String] = [:]
-  @State private var isReviewNotesExpanded = true
   @FocusState private var ticketsListFocused: Bool
 
   var body: some View {
@@ -53,13 +52,11 @@ struct TicketsView: View {
         content
       }
     }
-    .fontDesign(.monospaced)
     .padding(.horizontal, 24)
     .padding(.top, 12)
     .padding(.bottom, 24)
     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     .task {
-      loadPersistedReviewNotes()
       await refreshLinearRouting()
       loadCachedTickets()
       await refreshTickets()
@@ -76,9 +73,6 @@ struct TicketsView: View {
     }
     .onChange(of: selectedOriginFilter) { _, _ in
       updateSelectionAfterRefresh()
-    }
-    .onChange(of: reviewNotesStorage) { _, _ in
-      loadPersistedReviewNotes()
     }
     .onReceive(
       NotificationCenter.default.publisher(for: .hackTicketReviewQueueRequested)
@@ -129,33 +123,10 @@ struct TicketsView: View {
         originFilterMenu
         searchField
         if !linearRouteStatusLabel.isEmpty {
-          ticketHeaderBadge(
-            title: linearRouteStatusLabel,
-            systemImage: linearRouteStatus?.tokenResolved == true ? "point.3.connected.trianglepath.dotted" : "exclamationmark.triangle",
-            tone: linearRouteStatus?.tokenResolved == true ? .secondary : .orange
-          )
+          linearRouteStatusButton
         }
-        Button {
-          openProjectRouting()
-        } label: {
-          ticketHeaderBadge(
-            title: "Project routing",
-            systemImage: "slider.horizontal.3",
-            tone: .secondary
-          )
-        }
-        .buttonStyle(.plain)
         if reviewQueueCount > 0 {
-          Button {
-            activateReviewQueue()
-          } label: {
-            ticketHeaderBadge(
-              title: reviewQueueLabel,
-              systemImage: "bubble.left.and.exclamationmark.bubble.right",
-              tone: selectedFilter == .reviewQueue ? .orange : .secondary
-            )
-          }
-          .buttonStyle(.plain)
+          reviewQueueButton
         }
         Spacer(minLength: 12)
         if let activeSyncAction {
@@ -167,21 +138,6 @@ struct TicketsView: View {
               .foregroundStyle(.secondary)
           }
         }
-        Button {
-          requestBulkSyncConfirmation(.pullLinear)
-        } label: {
-          Label("Pull Linear", systemImage: "arrow.down.left")
-        }
-        .adaptiveToolbarButton()
-        .disabled(!canSyncProjectFromLinear || isAnySyncInFlight)
-        Button {
-          requestBulkSyncConfirmation(.pushHack)
-        } label: {
-          Label("Push Hack", systemImage: "arrow.up.right")
-        }
-        .adaptiveToolbarButton()
-        .disabled(!canSyncProjectToLinear || isAnySyncInFlight)
-        newTicketButton
         Menu {
           Button("Refresh") {
             Task { await refreshTickets() }
@@ -227,11 +183,14 @@ struct TicketsView: View {
             openProjectRouting()
           }
         } label: {
-          Image(systemName: "ellipsis.circle")
-            .font(.system(size: 16, weight: .semibold))
-            .foregroundStyle(.primary.opacity(0.7))
+          ticketHeaderBadge(
+            title: "Sync",
+            systemImage: "arrow.triangle.branch",
+            tone: .secondary
+          )
         }
-        .buttonStyle(PressableIconButtonStyle())
+        .buttonStyle(.plain)
+        newTicketButton
       }
 
       linearSyncPolicyCallout
@@ -255,7 +214,7 @@ struct TicketsView: View {
       TicketReviewQueueEntry(
         ticket: ticket,
         detail: ticketDetailCache[ticket.ticketId],
-        localNoteCount: reviewNotes(for: ticket).count
+        reviewNoteCount: reviewNotes(for: ticket).count
       )
     }
     .sorted { lhs, rhs in
@@ -290,8 +249,11 @@ struct TicketsView: View {
     if linearRouteStatus?.tokenResolved != true {
       return "Linear not connected"
     }
-    if !linearRouteProjectName.isEmpty {
+    if !linearRouteProjectName.isEmpty && linearAdditionalProjects.isEmpty {
       return linearRouteProjectName
+    }
+    if !linearRouteProjectName.isEmpty {
+      return "\(linearRouteProjectName) + \(linearAdditionalProjects.count)"
     }
     if !linearRouteProjectId.isEmpty {
       return linearRouteProjectId
@@ -303,7 +265,7 @@ struct TicketsView: View {
   }
 
   private var canSyncProjectFromLinear: Bool {
-    linearRouteStatus?.tokenResolved == true && !linearRouteProjectId.isEmpty
+    linearRouteStatus?.tokenResolved == true && hasAnyLinearProjectRouting
   }
 
   private var canSyncProjectToLinear: Bool {
@@ -325,13 +287,16 @@ struct TicketsView: View {
     )
   }
 
+  @ViewBuilder
   private var linearSyncPolicyCallout: some View {
-    InlineCallout(
-      tone: linearSyncPolicyTone,
-      title: "Linear sync policy",
-      message: linearSyncPolicyMessage,
-      actions: linearSyncPolicyActions
-    )
+    if linearSyncPolicyTone == .warn {
+      InlineCallout(
+        tone: linearSyncPolicyTone,
+        title: "Linear sync policy",
+        message: linearSyncPolicyMessage,
+        actions: linearSyncPolicyActions
+      )
+    }
   }
 
   @ViewBuilder
@@ -347,22 +312,23 @@ struct TicketsView: View {
   }
 
   private var linearSyncPolicyTone: StatusTone {
-    if linearRouteStatus?.tokenResolved != true || linearRouteProjectId.isEmpty {
+    if linearRouteStatus?.tokenResolved != true || !hasAnyLinearProjectRouting {
       return .warn
     }
     return .neutral
   }
 
   private var linearSyncPolicyMessage: String {
-    let baseMessage =
-      "Authority is origin-derived from the ticket owner. Comments stay append-only in arrival order. Assignee, labels, and dependencies are the mergeable fields and may need review."
     if linearRouteStatus?.tokenResolved != true {
-      return "\(baseMessage) Connect a Linear account to enable project pull and per-ticket refresh."
+      return "Connect a Linear account to pull issues and refresh linked tickets. Hack or Linear ownership decides which side wins when fields diverge."
     }
-    if linearRouteProjectId.isEmpty {
-      return "\(baseMessage) This project still needs a Linear route before bulk pull can target the right project."
+    if !hasAnyLinearProjectRouting {
+      return "This project needs a Linear route before bulk pull can target the right project. Comments stay append-only, and mergeable fields may still need review."
     }
-    return "\(baseMessage) Pull Linear when Linear owns the ticket. Push Hack when Hack owns the ticket and you want to publish it outward."
+    if !linearAdditionalProjects.isEmpty {
+      return "Bulk pull includes the default route plus \(linearAdditionalProjects.count) linked Linear project\(linearAdditionalProjects.count == 1 ? "" : "s"). Comments stay append-only, and mergeable fields may still need review."
+    }
+    return "Pull Linear when Linear owns the ticket. Push Hack when Hack owns the ticket and you want to publish it outward."
   }
 
   private var linearSyncPolicyActions: [InlineCalloutAction] {
@@ -376,7 +342,7 @@ struct TicketsView: View {
         },
       ]
     }
-    if linearRouteProjectId.isEmpty {
+    if !hasAnyLinearProjectRouting {
       return [
         InlineCalloutAction(label: "Project routing", systemImage: "slider.horizontal.3") {
           openProjectRouting()
@@ -384,6 +350,13 @@ struct TicketsView: View {
       ]
     }
     return []
+  }
+
+  private var hasAnyLinearProjectRouting: Bool {
+    if !linearRouteProjectId.isEmpty {
+      return true
+    }
+    return !linearAdditionalProjects.isEmpty
   }
 
   private var loadNoticeTone: StatusTone {
@@ -443,7 +416,7 @@ struct TicketsView: View {
           }
         ]
       }
-      if linearRouteProjectId.isEmpty {
+      if !hasAnyLinearProjectRouting {
         return [
           InlineCalloutAction(label: "Project routing", systemImage: "slider.horizontal.3") {
             openProjectRouting()
@@ -460,6 +433,34 @@ struct TicketsView: View {
       ]
     }
     return []
+  }
+
+  private var linearRouteStatusButton: some View {
+    Button {
+      openProjectRouting()
+    } label: {
+      ticketHeaderBadge(
+        title: linearRouteStatusLabel,
+        systemImage: linearRouteStatus?.tokenResolved == true
+          ? "point.3.connected.trianglepath.dotted"
+          : "exclamationmark.triangle",
+        tone: linearRouteStatus?.tokenResolved == true ? .secondary : .orange
+      )
+    }
+    .buttonStyle(.plain)
+  }
+
+  private var reviewQueueButton: some View {
+    Button {
+      activateReviewQueue()
+    } label: {
+      ticketHeaderBadge(
+        title: reviewQueueLabel,
+        systemImage: "bubble.left.and.exclamationmark.bubble.right",
+        tone: selectedFilter == .reviewQueue ? .orange : .secondary
+      )
+    }
+    .buttonStyle(.plain)
   }
 
   private var statusFilterMenu: some View {
@@ -655,7 +656,7 @@ struct TicketsView: View {
             tone: .secondary
           )
           ticketMetaPill(
-            "\(filteredReviewQueueEntries.reduce(0) { $0 + $1.localNoteCount }) local note\(filteredReviewQueueEntries.reduce(0) { $0 + $1.localNoteCount } == 1 ? "" : "s")",
+            "\(filteredReviewQueueEntries.reduce(0) { $0 + $1.reviewNoteCount }) review note\(filteredReviewQueueEntries.reduce(0) { $0 + $1.reviewNoteCount } == 1 ? "" : "s")",
             tone: .secondary
           )
         }
@@ -897,9 +898,9 @@ struct TicketsView: View {
                   "\(entry.commentCount) comment\(entry.commentCount == 1 ? "" : "s")",
                   tone: .secondary
                 )
-                if entry.localNoteCount > 0 {
+                if entry.reviewNoteCount > 0 {
                   ticketMetaPill(
-                    "\(entry.localNoteCount) local note\(entry.localNoteCount == 1 ? "" : "s")",
+                    "\(entry.reviewNoteCount) review note\(entry.reviewNoteCount == 1 ? "" : "s")",
                     tone: .secondary
                   )
                 }
@@ -1045,7 +1046,7 @@ struct TicketsView: View {
             ticketMetaPill("\(review.resolvedConflictCount) resolved", tone: review.resolvedConflictCount > 0 ? .green : .secondary)
             if reviewNotes(for: detail.ticket).count > 0 {
               let noteCount = reviewNotes(for: detail.ticket).count
-              ticketMetaPill("\(noteCount) local note\(noteCount == 1 ? "" : "s")", tone: .secondary)
+              ticketMetaPill("\(noteCount) review note\(noteCount == 1 ? "" : "s")", tone: .secondary)
             }
             if let checkpointSummary = review.checkpointSummary {
               ticketMetaPill(checkpointSummary, tone: .secondary)
@@ -1120,7 +1121,7 @@ struct TicketsView: View {
           Text("Review notes")
             .font(.system(size: 12, weight: .semibold))
             .foregroundStyle(.secondary)
-          ticketMetaPill("Local to Hack Desktop", tone: .secondary)
+          ticketMetaPill("Shared in ticket history", tone: .secondary)
           if !savedNotes.isEmpty {
             ticketMetaPill("\(savedNotes.count) saved", tone: .secondary)
           }
@@ -1129,7 +1130,7 @@ struct TicketsView: View {
         InlineCallout(
           tone: detail.linearSyncReviewState.needsReview ? .warn : .neutral,
           title: "Compose a review comment",
-          message: "Draft follow-up from conflicts and comment history here. You can keep it local as a review note or append it to the ticket as an immutable Hack comment that sync can push to Linear later.",
+          message: "Draft follow-up from conflicts and comment history here. Save it as a repo-shared review note or append it to the ticket as an immutable Hack comment that sync can push to Linear later.",
           actions: [
             InlineCalloutAction(label: "Use review summary", systemImage: "sparkles") {
               applyReviewDraftTemplate(for: detail)
@@ -1145,7 +1146,11 @@ struct TicketsView: View {
             ForEach(savedNotes.sorted(by: { $0.createdAt > $1.createdAt })) { note in
               VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
-                  ticketMetaPill("Saved note", tone: .secondary)
+                  ticketMetaPill("Review note", tone: .secondary)
+                  ticketMetaPill(note.actor, tone: .secondary)
+                  if let context = note.context, !context.isEmpty {
+                    ticketMetaPill(context, tone: .secondary)
+                  }
                   Text(humanReadableDetailDate(note.createdAt))
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
@@ -1188,7 +1193,7 @@ struct TicketsView: View {
               .padding(.vertical, 6)
               .frame(minHeight: 128)
             if reviewDraft(for: detail.ticket).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-              Text("Draft a local review comment, quote an imported comment, or stage a conflict summary.")
+              Text("Draft a shared review note, quote an imported comment, or stage a conflict summary.")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 14)
@@ -1219,12 +1224,15 @@ struct TicketsView: View {
             }
 
             Button {
-              saveReviewDraft(for: detail.ticket)
+              Task { await postReviewDraftAsReviewNote(for: detail.ticket) }
             } label: {
-              Label("Save local note", systemImage: "tray.and.arrow.down")
+              Label("Save review note", systemImage: "tray.and.arrow.down")
             }
             .adaptiveToolbarButtonProminent()
-            .disabled(reviewDraft(for: detail.ticket).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(
+              reviewDraft(for: detail.ticket).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                postingReviewNoteTicketIds.contains(detail.ticket.ticketId)
+            )
 
             Button {
               Task { await postReviewDraftAsTicketComment(for: detail.ticket) }
@@ -1243,7 +1251,9 @@ struct TicketsView: View {
             .adaptiveToolbarButton()
             .disabled(reviewDraft(for: detail.ticket).isEmpty)
 
-            if postingCommentTicketIds.contains(detail.ticket.ticketId) {
+            if postingReviewNoteTicketIds.contains(detail.ticket.ticketId) ||
+              postingCommentTicketIds.contains(detail.ticket.ticketId)
+            {
               ProgressView()
                 .controlSize(.small)
             }
@@ -1925,34 +1935,21 @@ struct TicketsView: View {
   }
 
   private func refreshLinearRouting() async {
-    async let projectProfile = model.getProjectConfig(
-      for: project,
-      key: "controlPlane.routing.overrides.linear.profile"
-    )
-    async let projectId = model.getProjectConfig(
-      for: project,
-      key: "controlPlane.routing.overrides.linear.projectId"
-    )
-    async let projectName = model.getProjectConfig(
-      for: project,
-      key: "controlPlane.routing.overrides.linear.projectName"
-    )
-    async let teamId = model.getProjectConfig(
-      for: project,
-      key: "controlPlane.routing.overrides.linear.teamId"
-    )
+    async let binding = model.inspectLinearProjectBinding(for: project)
     async let defaultProfile = model.getGlobalConfig(
       key: "controlPlane.extensions[\"dance.hack.linear\"].config.defaultProfile"
     )
 
-    let resolvedProjectProfile = (await projectProfile ?? "")
+    let resolvedBinding = await binding
+    let resolvedProjectProfile = (resolvedBinding?.profileId ?? "")
       .trimmingCharacters(in: .whitespacesAndNewlines)
     let resolvedDefaultProfile = (await defaultProfile ?? "")
       .trimmingCharacters(in: .whitespacesAndNewlines)
     linearRouteProfile = resolvedProjectProfile.isEmpty ? resolvedDefaultProfile : resolvedProjectProfile
-    linearRouteProjectId = (await projectId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-    linearRouteProjectName = (await projectName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-    linearRouteTeamId = (await teamId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    linearRouteProjectId = (resolvedBinding?.projectId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    linearRouteProjectName = (resolvedBinding?.projectName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    linearRouteTeamId = (resolvedBinding?.teamId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    linearAdditionalProjects = resolvedBinding?.additionalProjects ?? []
     linearRouteStatus = await model.inspectLinearStatus(
       profileId: linearRouteProfile.isEmpty ? nil : linearRouteProfile
     )
@@ -1965,7 +1962,7 @@ struct TicketsView: View {
         for: project,
         from: "linear",
         ownerMode: nil,
-        projectId: linearRouteProjectId.isEmpty ? nil : linearRouteProjectId,
+        projectId: nil,
         teamId: nil,
         limit: nil,
         syncLabels: nil
@@ -1974,7 +1971,8 @@ struct TicketsView: View {
         loadNotice = model.errorMessage ?? "Linear sync failed."
         return
       }
-      loadNotice = "Pulled \(result.processed) item\(result.processed == 1 ? "" : "s") from Linear."
+      let routedProjects = result.projectIds?.count ?? (linearAdditionalProjects.isEmpty ? 1 : linearAdditionalProjects.count + 1)
+      loadNotice = "Pulled \(result.processed) item\(result.processed == 1 ? "" : "s") from \(routedProjects) routed Linear project\(routedProjects == 1 ? "" : "s")."
       await refreshTickets()
     }
   }
@@ -1986,8 +1984,8 @@ struct TicketsView: View {
         for: project,
         from: "hack",
         ownerMode: "hack",
-        projectId: linearRouteProjectId.isEmpty ? nil : linearRouteProjectId,
-        teamId: linearRouteTeamId.isEmpty ? nil : linearRouteTeamId,
+        projectId: nil,
+        teamId: nil,
         limit: nil,
         syncLabels: nil
       )
@@ -2008,8 +2006,8 @@ struct TicketsView: View {
         from: "hack",
         issueIdentifier: nil,
         ticketId: ticket.ticketId,
-        projectId: linearRouteProjectId.isEmpty ? nil : linearRouteProjectId,
-        teamId: linearRouteTeamId.isEmpty ? nil : linearRouteTeamId,
+        projectId: nil,
+        teamId: nil,
         syncLabels: nil
       )
       guard let result, result.ok else {
@@ -2097,20 +2095,19 @@ struct TicketsView: View {
     ticketsListFocused = true
   }
 
-  private func ticketReviewStorageKey(for ticket: TicketSummary) -> String {
-    "\(project.id):\(ticket.ticketId)"
-  }
-
-  private func reviewNotes(for ticket: TicketSummary) -> [TicketLocalReviewNote] {
-    reviewNotesByTicketKey[ticketReviewStorageKey(for: ticket)] ?? []
+  private func reviewNotes(for ticket: TicketSummary) -> [TicketReviewNote] {
+    if let detail = ticketDetail, detail.ticket.ticketId == ticket.ticketId {
+      return detail.reviewNotes
+    }
+    return ticketDetailCache[ticket.ticketId]?.reviewNotes ?? []
   }
 
   private func reviewDraft(for ticket: TicketSummary) -> String {
-    reviewComposerDrafts[ticketReviewStorageKey(for: ticket)] ?? ""
+    reviewComposerDrafts[ticket.ticketId] ?? ""
   }
 
   private func reviewDraftBinding(for ticket: TicketSummary) -> Binding<String> {
-    let key = ticketReviewStorageKey(for: ticket)
+    let key = ticket.ticketId
     return Binding(
       get: { reviewComposerDrafts[key] ?? "" },
       set: { newValue in
@@ -2119,30 +2116,8 @@ struct TicketsView: View {
     )
   }
 
-  private func loadPersistedReviewNotes() {
-    guard let data = reviewNotesStorage.data(using: .utf8) else {
-      reviewNotesByTicketKey = [:]
-      return
-    }
-    do {
-      reviewNotesByTicketKey = try JSONDecoder().decode([String: [TicketLocalReviewNote]].self, from: data)
-    } catch {
-      reviewNotesByTicketKey = [:]
-    }
-  }
-
-  private func persistReviewNotes() {
-    do {
-      let data = try JSONEncoder().encode(reviewNotesByTicketKey)
-      reviewNotesStorage = String(decoding: data, as: UTF8.self)
-    } catch {
-      loadNotice = "Failed to save local review notes."
-    }
-  }
-
   private func applyReviewDraftTemplate(for detail: TicketDetailResponse) {
-    reviewComposerDrafts[ticketReviewStorageKey(for: detail.ticket)] = TicketReviewComposer.draft(for: detail)
-    isReviewNotesExpanded = true
+    reviewComposerDrafts[detail.ticket.ticketId] = TicketReviewComposer.draft(for: detail)
   }
 
   private func appendQuotedCommentToReviewDraft(_ comment: TicketComment, ticket: TicketSummary) {
@@ -2155,12 +2130,11 @@ struct TicketsView: View {
       return
     }
     let draft = TicketReviewComposer.draft(for: detail, highlightedConflict: conflict)
-    reviewComposerDrafts[ticketReviewStorageKey(for: detail.ticket)] = draft
-    isReviewNotesExpanded = true
+    reviewComposerDrafts[detail.ticket.ticketId] = draft
   }
 
   private func appendToReviewDraft(_ text: String, ticket: TicketSummary) {
-    let key = ticketReviewStorageKey(for: ticket)
+    let key = ticket.ticketId
     let existing = reviewComposerDrafts[key]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else {
@@ -2171,30 +2145,40 @@ struct TicketsView: View {
     } else {
       reviewComposerDrafts[key] = "\(existing)\n\n\(trimmed)"
     }
-    isReviewNotesExpanded = true
   }
 
-  private func saveReviewDraft(for ticket: TicketSummary) {
-    let key = ticketReviewStorageKey(for: ticket)
+  private func postReviewDraftAsReviewNote(for ticket: TicketSummary) async {
+    let key = ticket.ticketId
     let trimmed = (reviewComposerDrafts[key] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else {
+      loadNotice = "Draft a review note before saving it."
       return
     }
-    let note = TicketLocalReviewNote(
-      noteId: UUID().uuidString,
-      createdAt: TicketDateFormatter.isoBasic.string(from: Date()),
-      markdown: trimmed
+    guard !postingReviewNoteTicketIds.contains(ticket.ticketId) else {
+      return
+    }
+
+    postingReviewNoteTicketIds.insert(ticket.ticketId)
+    defer { postingReviewNoteTicketIds.remove(ticket.ticketId) }
+
+    let response = await model.appendTicketReviewNote(
+      for: project,
+      ticketId: ticket.ticketId,
+      body: trimmed
     )
-    var existing = reviewNotesByTicketKey[key] ?? []
-    existing.append(note)
-    reviewNotesByTicketKey[key] = existing
+    guard response != nil else {
+      loadNotice = model.errorMessage ?? "Failed to save review note."
+      return
+    }
+
     reviewComposerDrafts[key] = ""
-    persistReviewNotes()
-    loadNotice = "Saved a local review note."
+    loadNotice = "Saved a shared review note to \(ticket.ticketId)."
+    await refreshTickets()
+    await loadTicketDetail()
   }
 
   private func postReviewDraftAsTicketComment(for ticket: TicketSummary) async {
-    let key = ticketReviewStorageKey(for: ticket)
+    let key = ticket.ticketId
     let trimmed = (reviewComposerDrafts[key] ?? "")
       .trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else {
@@ -2226,7 +2210,7 @@ struct TicketsView: View {
   }
 
   private func clearReviewDraft(for ticket: TicketSummary) {
-    reviewComposerDrafts[ticketReviewStorageKey(for: ticket)] = ""
+    reviewComposerDrafts[ticket.ticketId] = ""
   }
 
   private func copyReviewDraft(for ticket: TicketSummary) {

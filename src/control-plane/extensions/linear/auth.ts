@@ -123,6 +123,8 @@ type LinearTokenEnvelope = {
   readonly expiresAt?: string;
   readonly refreshToken?: string;
   readonly refreshTokenExpiresAt?: string;
+  readonly managementToken?: string;
+  readonly managementTokenExpiresAt?: string;
 };
 
 type LinearProfileSelection = {
@@ -440,6 +442,8 @@ export async function saveLinearToken(input: {
   readonly expiresAt?: string;
   readonly refreshToken?: string;
   readonly refreshTokenExpiresAt?: string;
+  readonly managementToken?: string;
+  readonly managementTokenExpiresAt?: string;
   readonly authRef?: string;
   readonly service?: string;
   readonly store?: SecretStore;
@@ -475,6 +479,12 @@ export async function saveLinearToken(input: {
     ...(input.refreshTokenExpiresAt
       ? { refreshTokenExpiresAt: input.refreshTokenExpiresAt.trim() }
       : {}),
+    ...(input.managementToken
+      ? { managementToken: input.managementToken.trim() }
+      : {}),
+    ...(input.managementTokenExpiresAt
+      ? { managementTokenExpiresAt: input.managementTokenExpiresAt.trim() }
+      : {}),
   });
   await store.set({
     service,
@@ -483,6 +493,84 @@ export async function saveLinearToken(input: {
   });
 
   return {
+    profileId: settings.profileId,
+    authRef,
+    service,
+  };
+}
+
+/**
+ * Resolve a stored broker management token for Linear protected broker routes.
+ */
+export async function resolveLinearBrokerManagementToken(input: {
+  readonly controlPlaneConfig: ControlPlaneConfig;
+  readonly profileId?: string;
+  readonly allowProjectOverride?: boolean;
+  readonly authRef?: string;
+  readonly service?: string;
+  readonly store?: SecretStore;
+}): Promise<
+  | {
+      readonly ok: true;
+      readonly managementToken: string;
+      readonly managementTokenExpiresAt?: string;
+      readonly profileId: string;
+      readonly authRef: string;
+      readonly service: string;
+    }
+  | {
+      readonly ok: false;
+      readonly error: string;
+      readonly profileId: string;
+      readonly authRef: string;
+      readonly service: string;
+    }
+> {
+  const settings = resolveLinearAuthSettings({
+    controlPlaneConfig: input.controlPlaneConfig,
+    ...(input.profileId ? { profileId: input.profileId } : {}),
+    allowProjectOverride: input.allowProjectOverride,
+  });
+  const authRef = (input.authRef ?? settings.authRef).trim();
+  const service = (input.service ?? settings.service).trim();
+  const store = input.store ?? DEFAULT_SECRET_STORE;
+  const stored = await store.get({
+    service,
+    name: authRef,
+  });
+  const envelope = parseStoredTokenEnvelope(stored);
+  const managementToken = envelope?.managementToken?.trim() ?? "";
+  if (!managementToken) {
+    return {
+      ok: false,
+      error: `Linear broker management token is missing for profile "${settings.profileId}". Reconnect this Linear profile to manage broker-backed deliveries and autosync subscriptions.`,
+      profileId: settings.profileId,
+      authRef,
+      service,
+    };
+  }
+  const managementTokenExpiresAtMs = envelope?.managementTokenExpiresAt
+    ? parseTimestampMs(envelope.managementTokenExpiresAt)
+    : null;
+  if (
+    envelope?.managementTokenExpiresAt &&
+    managementTokenExpiresAtMs !== null &&
+    managementTokenExpiresAtMs <= Date.now()
+  ) {
+    return {
+      ok: false,
+      error: `Linear broker management token expired for profile "${settings.profileId}". Reconnect this Linear profile to manage broker-backed deliveries and autosync subscriptions.`,
+      profileId: settings.profileId,
+      authRef,
+      service,
+    };
+  }
+  return {
+    ok: true,
+    managementToken,
+    ...(envelope?.managementTokenExpiresAt
+      ? { managementTokenExpiresAt: envelope.managementTokenExpiresAt }
+      : {}),
     profileId: settings.profileId,
     authRef,
     service,
@@ -705,6 +793,12 @@ function serializeStoredToken(input: LinearTokenEnvelope): string {
     ...(input.refreshTokenExpiresAt
       ? { refreshTokenExpiresAt: input.refreshTokenExpiresAt }
       : {}),
+    ...(input.managementToken
+      ? { managementToken: input.managementToken }
+      : {}),
+    ...(input.managementTokenExpiresAt
+      ? { managementTokenExpiresAt: input.managementTokenExpiresAt }
+      : {}),
   });
 }
 
@@ -740,6 +834,13 @@ function parseStoredTokenEnvelope(
       ...(refreshToken ? { refreshToken } : {}),
       ...(typeof parsed.refreshTokenExpiresAt === "string"
         ? { refreshTokenExpiresAt: parsed.refreshTokenExpiresAt }
+        : {}),
+      ...(typeof parsed.managementToken === "string" &&
+      parsed.managementToken.trim().length > 0
+        ? { managementToken: parsed.managementToken.trim() }
+        : {}),
+      ...(typeof parsed.managementTokenExpiresAt === "string"
+        ? { managementTokenExpiresAt: parsed.managementTokenExpiresAt }
         : {}),
     };
   } catch {

@@ -10,6 +10,12 @@ import { createBetterAuthPlugin } from "./modules/better-auth/plugin.ts";
 import { createCoreRoutesPlugin } from "./modules/core/plugin.ts";
 import { createGitHubOAuthPlugin } from "./modules/github-oauth/plugin.ts";
 import { createLinearAgentPlugin } from "./modules/linear-agent/plugin.ts";
+import { createLinearAutosyncPlugin } from "./modules/linear-autosync/plugin.ts";
+import {
+  createLinearAutosyncStoreFromDb,
+  InMemoryLinearAutosyncStore,
+  type LinearAutosyncStore,
+} from "./modules/linear-autosync/service.ts";
 import { createLinearConnectionsPlugin } from "./modules/linear-connections/plugin.ts";
 import {
   createLinearConnectionStoreFromDb,
@@ -32,6 +38,7 @@ export type CreateAuthBrokerAppOptions = {
   readonly betterAuthRuntime?: BetterAuthRuntime;
   readonly linearSyncStore?: LinearSyncStore;
   readonly linearConnectionStore?: LinearConnectionStore;
+  readonly linearAutosyncStore?: LinearAutosyncStore;
 };
 
 /**
@@ -43,6 +50,7 @@ export function createAuthBrokerApp({
   betterAuthRuntime: externalBetterAuthRuntime,
   linearSyncStore: externalLinearSyncStore,
   linearConnectionStore: externalLinearConnectionStore,
+  linearAutosyncStore: externalLinearAutosyncStore,
 }: CreateAuthBrokerAppOptions) {
   const flowStore =
     externalStore ?? new FlowStore({ filePath: config.flowStorePath });
@@ -52,6 +60,8 @@ export function createAuthBrokerApp({
     externalLinearSyncStore ?? createDefaultLinearSyncStore();
   const linearConnectionStore =
     externalLinearConnectionStore ?? createDefaultLinearConnectionStore();
+  const linearAutosyncStore =
+    externalLinearAutosyncStore ?? createDefaultLinearAutosyncStore();
   let flowSweepTimer: ReturnType<typeof setInterval> | null = null;
 
   return new Elysia({
@@ -99,6 +109,13 @@ export function createAuthBrokerApp({
         config,
         syncStore: linearSyncStore,
         connectionStore: linearConnectionStore,
+        autosyncStore: linearAutosyncStore,
+      })
+    )
+    .use(
+      createLinearAutosyncPlugin({
+        autosyncStore: linearAutosyncStore,
+        betterAuthRuntime,
       })
     )
     .use(
@@ -163,6 +180,19 @@ function createDefaultLinearConnectionStore(): LinearConnectionStore {
   }
 }
 
+function createDefaultLinearAutosyncStore(): LinearAutosyncStore {
+  if (!process.env.DATABASE_URL) {
+    return new InMemoryLinearAutosyncStore();
+  }
+  try {
+    return createLinearAutosyncStoreFromDb({
+      databaseUrl: process.env.DATABASE_URL,
+    });
+  } catch {
+    return new InMemoryLinearAutosyncStore();
+  }
+}
+
 /**
  * Identify route paths that are intentionally GET-only in broker v1.
  */
@@ -183,6 +213,12 @@ function isReadOnlyRoutePath(input: { readonly path: string }): boolean {
     return true;
   }
   if (input.path === "/v1/auth/linear/refresh") {
+    return false;
+  }
+  if (input.path === "/v1/auth/linear/subscriptions") {
+    return false;
+  }
+  if (input.path === "/v1/auth/linear/subscriptions/remove") {
     return false;
   }
   if (

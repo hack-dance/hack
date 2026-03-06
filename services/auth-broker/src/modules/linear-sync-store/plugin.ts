@@ -1,7 +1,11 @@
 import { Elysia, t } from "elysia";
 
 import type { BetterAuthRuntime } from "../../better-auth.ts";
-import { resolveBetterAuthSession } from "../better-auth/session.ts";
+import {
+  hasBetterAuthAccess,
+  hasBetterAuthProfileAccess,
+  resolveBetterAuthSession,
+} from "../better-auth/session.ts";
 import type {
   LinearSyncStore,
   LinearWebhookDeliveryStatus,
@@ -57,15 +61,35 @@ export function createLinearSyncStorePlugin({
             error: "better_auth_session_required",
           } as const;
         }
+        if (
+          !hasBetterAuthProfileAccess({
+            session: session.session,
+            profileId: normalizeOptionalQueryValue({ value: query.profileId }),
+          })
+        ) {
+          set.status = 403;
+          return {
+            ok: false,
+            error: "better_auth_profile_forbidden",
+          } as const;
+        }
+        const activeSession = session.session;
 
-        const deliveries = await syncStore.listWebhookDeliveries({
+        const allDeliveries = await syncStore.listWebhookDeliveries({
           status: statusResult.status,
           profileId: normalizeOptionalQueryValue({ value: query.profileId }),
           projectId: normalizeOptionalQueryValue({ value: query.projectId }),
           teamId: normalizeOptionalQueryValue({ value: query.teamId }),
-          betterAuthUserId: session.session?.userId ?? null,
-          betterAuthOrganizationId: session.session?.organizationId ?? null,
         });
+        const deliveries =
+          session.enabled && activeSession
+            ? allDeliveries.filter((delivery) =>
+                hasBetterAuthAccess({
+                  session: activeSession,
+                  record: delivery,
+                })
+              )
+            : allDeliveries;
         return {
           ok: true,
           accessControlMode: session.accessControlMode,
@@ -94,16 +118,15 @@ export function createLinearSyncStorePlugin({
           const existing = await syncStore.getWebhookDelivery({
             deliveryId: params.deliveryId,
           });
-          const hasOrganizationAccess =
-            session.session.organizationId != null &&
-            (existing?.betterAuthOrganizationId ===
-              session.session.organizationId ||
-              (existing?.betterAuthOrganizationId == null &&
-                existing?.betterAuthUserId === session.session.userId));
-          const hasUserAccess =
-            session.session.organizationId == null &&
-            existing?.betterAuthUserId === session.session.userId;
-          if (!(existing && (hasOrganizationAccess || hasUserAccess))) {
+          if (
+            !(
+              existing &&
+              hasBetterAuthAccess({
+                session: session.session,
+                record: existing,
+              })
+            )
+          ) {
             set.status = 404;
             return {
               ok: false,

@@ -3,6 +3,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Elysia } from "elysia";
 
 import type { BrokerConfig } from "../../config.ts";
+import type { LinearAutosyncStore } from "../linear-autosync/service.ts";
 import type { LinearConnectionStore } from "../linear-connections/service.ts";
 import type { LinearSyncStore } from "../linear-sync-store/service.ts";
 
@@ -15,6 +16,7 @@ type CreateLinearAgentPluginOptions = {
   readonly config: BrokerConfig;
   readonly syncStore: LinearSyncStore;
   readonly connectionStore: LinearConnectionStore;
+  readonly autosyncStore: LinearAutosyncStore;
 };
 
 type LinearWebhookEvent = {
@@ -42,6 +44,8 @@ type LinearWebhookRouteResult = {
         readonly eventType: string | null;
         readonly action: string | null;
         readonly webhookTimestamp: string | null;
+        readonly autoApplied?: boolean;
+        readonly subscriptionId?: string;
       }
     | {
         readonly ok: false;
@@ -67,6 +71,7 @@ export function createLinearAgentPlugin({
   config,
   syncStore,
   connectionStore,
+  autosyncStore,
 }: CreateLinearAgentPluginOptions) {
   const app = new Elysia({
     name: "hack-auth-broker.linear-agent",
@@ -81,6 +86,7 @@ export function createLinearAgentPlugin({
         config,
         syncStore,
         connectionStore,
+        autosyncStore,
       });
       set.status = result.statusCode;
       return result.body;
@@ -94,6 +100,7 @@ async function handleLinearWebhookRequest(input: {
   readonly config: BrokerConfig;
   readonly syncStore: LinearSyncStore;
   readonly connectionStore: LinearConnectionStore;
+  readonly autosyncStore: LinearAutosyncStore;
 }): Promise<LinearWebhookRouteResult> {
   const prepared = await prepareWebhookRequest({
     request: input.request,
@@ -112,6 +119,7 @@ async function handleLinearWebhookRequest(input: {
     prepared: prepared.value,
     syncStore: input.syncStore,
     connectionStore: input.connectionStore,
+    autosyncStore: input.autosyncStore,
   });
 }
 
@@ -163,6 +171,7 @@ async function persistWebhookDelivery(input: {
   readonly prepared: PreparedWebhookRequest;
   readonly syncStore: LinearSyncStore;
   readonly connectionStore: LinearConnectionStore;
+  readonly autosyncStore: LinearAutosyncStore;
 }): Promise<LinearWebhookRouteResult> {
   try {
     const ownership = await input.connectionStore.resolveWebhookOwnership({
@@ -196,6 +205,17 @@ async function persistWebhookDelivery(input: {
         input.prepared.event.organizationId ?? ownership.organizationId ?? null,
       teamId: input.prepared.event.teamId ?? ownership.teamId ?? null,
     });
+    const matchingSubscription =
+      ownership.status === "matched"
+        ? await input.autosyncStore.findMatchingSubscription({
+            profileId: delivery.profileId,
+            projectId: delivery.projectId,
+            teamId: delivery.teamId,
+            betterAuthUserId: delivery.betterAuthUserId,
+            betterAuthOrganizationId: delivery.betterAuthOrganizationId,
+            betterAuthTeamId: delivery.betterAuthTeamId,
+          })
+        : null;
     return {
       statusCode: 202,
       body: {
@@ -208,6 +228,9 @@ async function persistWebhookDelivery(input: {
         eventType: input.prepared.event.type ?? null,
         action: input.prepared.event.action ?? null,
         webhookTimestamp: input.prepared.event.webhookTimestamp ?? null,
+        ...(matchingSubscription
+          ? { subscriptionId: matchingSubscription.id }
+          : {}),
       },
     };
   } catch {
@@ -347,7 +370,9 @@ function parseLinearWebhookEvent(input: {
   const profileId =
     normalizeString(input.payload.profileId) ??
     normalizeString(organization?.id);
-  const organizationId = normalizeString(organization?.id);
+  const organizationId =
+    normalizeString(organization?.id) ??
+    normalizeString(input.payload.organizationId);
   return {
     ok: true,
     event: {

@@ -614,6 +614,79 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
     },
   },
   {
+    name: "review-note",
+    summary: "Append a shared ticket review note",
+    scope: "project",
+    handler: async ({ ctx, args }) => {
+      if (!ctx.project) {
+        ctx.logger.error({ message: "No project found. Run inside a repo." });
+        return 1;
+      }
+
+      const parsed = parseTicketsArgs({ args });
+      if (!parsed.ok) {
+        ctx.logger.error({ message: parsed.error });
+        return 1;
+      }
+
+      const ticketId = (parsed.value.rest[0] ?? "").trim();
+      if (!ticketId) {
+        ctx.logger.error({
+          message:
+            'Usage: hack x tickets review-note <ticket-id> [--body "..."] [--body-file <path>] [--body-stdin] [--json]',
+        });
+        return 1;
+      }
+
+      const body = await resolveTicketBody({
+        body: parsed.value.body,
+        bodyFile: parsed.value.bodyFile,
+        bodyStdin: parsed.value.bodyStdin,
+      });
+      if (!body) {
+        ctx.logger.error({
+          message:
+            "Review note body is required. Use --body, --body-file, or --body-stdin.",
+        });
+        return 1;
+      }
+
+      await maybeEnsureTicketsSetup({ ctx, json: parsed.value.json });
+
+      const store = createTicketsStore({
+        projectRoot: ctx.project.projectRoot,
+        projectId: ctx.projectId,
+        projectName: ctx.projectName,
+        controlPlaneConfig: ctx.controlPlaneConfig,
+        logger: ctx.logger,
+      });
+
+      const appended = await store.appendReviewNote({
+        ticketId,
+        body,
+        actor: parsed.value.actor,
+      });
+      if (!appended.ok) {
+        ctx.logger.error({ message: appended.error });
+        return 1;
+      }
+
+      if (parsed.value.json) {
+        process.stdout.write(
+          `${JSON.stringify({ reviewNote: appended.reviewNote }, null, 2)}\n`
+        );
+        return 0;
+      }
+
+      await display.panel({
+        title: "Ticket review note",
+        tone: "success",
+        lines: [`${ticketId} review note appended`, appended.reviewNote.body],
+      });
+      return 0;
+    },
+  },
+  {
     name: "list",
     summary: "List tickets",
     scope: "project",
@@ -761,6 +834,7 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
             {
               ticket,
               comments: detail.comments,
+              reviewNotes: detail.reviewNotes,
               syncCheckpoints: detail.syncCheckpoints,
               conflicts: detail.conflicts,
               events: detail.events,
@@ -814,6 +888,19 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
             comment.actor,
             comment.createdAt,
             comment.body,
+          ]),
+        });
+      }
+
+      if (detail.reviewNotes.length > 0) {
+        await display.table({
+          columns: ["note_id", "actor", "created_at", "context", "body"],
+          rows: detail.reviewNotes.map((reviewNote) => [
+            reviewNote.noteId,
+            reviewNote.actor,
+            reviewNote.createdAt,
+            reviewNote.context ?? "",
+            reviewNote.body,
           ]),
         });
       }

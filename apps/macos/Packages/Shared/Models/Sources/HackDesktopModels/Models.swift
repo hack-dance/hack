@@ -1482,6 +1482,60 @@ public struct LinearAssigneeMappingRemovalResponse: Decodable, Hashable {
   }
 }
 
+public struct LinearAutosyncSubscription: Decodable, Hashable, Identifiable {
+  public let id: String
+  public let profileId: String
+  public let projectId: String?
+  public let teamId: String?
+  public let mode: String
+  public let status: String
+  public let updatedAt: String?
+
+  public init(
+    id: String,
+    profileId: String,
+    projectId: String?,
+    teamId: String?,
+    mode: String,
+    status: String,
+    updatedAt: String?
+  ) {
+    self.id = id
+    self.profileId = profileId
+    self.projectId = projectId
+    self.teamId = teamId
+    self.mode = mode
+    self.status = status
+    self.updatedAt = updatedAt
+  }
+}
+
+public struct LinearAutosyncSubscriptionsResponse: Decodable, Hashable {
+  public let profileId: String
+  public let subscriptions: [LinearAutosyncSubscription]
+
+  public init(
+    profileId: String,
+    subscriptions: [LinearAutosyncSubscription]
+  ) {
+    self.profileId = profileId
+    self.subscriptions = subscriptions
+  }
+}
+
+public struct LinearAutosyncSubscriptionMutationResponse: Decodable, Hashable {
+  public let profileId: String
+  public let subscription: LinearAutosyncSubscription
+
+  public init(
+    profileId: String,
+    subscription: LinearAutosyncSubscription
+  ) {
+    self.profileId = profileId
+    self.subscription = subscription
+  }
+}
+
 public struct LinearProjectBindingResponse: Decodable, Hashable {
   public let ok: Bool
   public let cleared: Bool?
@@ -1489,6 +1543,9 @@ public struct LinearProjectBindingResponse: Decodable, Hashable {
   public let projectId: String?
   public let projectName: String?
   public let teamId: String?
+  public let additionalProjects: [LinearProjectBindingTarget]
+  public let additionalProjectChanged: Bool?
+  public let removedProjectId: String?
 
   public init(
     ok: Bool,
@@ -1496,10 +1553,61 @@ public struct LinearProjectBindingResponse: Decodable, Hashable {
     profileId: String?,
     projectId: String?,
     projectName: String?,
-    teamId: String?
+    teamId: String?,
+    additionalProjects: [LinearProjectBindingTarget] = [],
+    additionalProjectChanged: Bool? = nil,
+    removedProjectId: String? = nil
   ) {
     self.ok = ok
     self.cleared = cleared
+    self.profileId = profileId
+    self.projectId = projectId
+    self.projectName = projectName
+    self.teamId = teamId
+    self.additionalProjects = additionalProjects
+    self.additionalProjectChanged = additionalProjectChanged
+    self.removedProjectId = removedProjectId
+  }
+
+  public var defaultProject: LinearProjectBindingTarget? {
+    guard let projectId else {
+      return nil
+    }
+    return LinearProjectBindingTarget(
+      profileId: profileId,
+      projectId: projectId,
+      projectName: projectName,
+      teamId: teamId
+    )
+  }
+
+  public var allProjects: [LinearProjectBindingTarget] {
+    var projects: [LinearProjectBindingTarget] = []
+    if let defaultProject {
+      projects.append(defaultProject)
+    }
+    projects.append(contentsOf: additionalProjects)
+    return projects
+  }
+}
+
+public struct LinearProjectBindingTarget: Decodable, Hashable, Identifiable {
+  public let profileId: String?
+  public let projectId: String
+  public let projectName: String?
+  public let teamId: String?
+
+  public var id: String {
+    let profile = profileId ?? ""
+    return "\(profile)::\(projectId)"
+  }
+
+  public init(
+    profileId: String?,
+    projectId: String,
+    projectName: String?,
+    teamId: String?
+  ) {
     self.profileId = profileId
     self.projectId = projectId
     self.projectName = projectName
@@ -1531,12 +1639,20 @@ public struct LinearIssueSyncResponse: Decodable, Hashable {
 
 public struct LinearProjectSyncResponse: Decodable, Hashable {
   public let ok: Bool
+  public let projectIds: [String]?
   public let processed: Int
   public let created: Int
   public let updated: Int
 
-  public init(ok: Bool, processed: Int, created: Int, updated: Int) {
+  public init(
+    ok: Bool,
+    projectIds: [String]? = nil,
+    processed: Int,
+    created: Int,
+    updated: Int
+  ) {
     self.ok = ok
+    self.projectIds = projectIds
     self.processed = processed
     self.created = created
     self.updated = updated
@@ -2506,7 +2622,7 @@ public struct TicketReviewQueueEntry: Hashable, Identifiable {
   public let summary: String
   public let commentCount: Int
   public let openConflictCount: Int
-  public let localNoteCount: Int
+  public let reviewNoteCount: Int
   public let updatedAt: String
 
   public var id: String { ticketId }
@@ -2514,9 +2630,9 @@ public struct TicketReviewQueueEntry: Hashable, Identifiable {
   public init?(
     ticket: TicketSummary,
     detail: TicketDetailResponse? = nil,
-    localNoteCount: Int = 0
+    reviewNoteCount: Int = 0
   ) {
-    let normalizedLocalNoteCount = max(localNoteCount, 0)
+    let normalizedReviewNoteCount = max(reviewNoteCount, 0)
     let summary: String
     let badgeLabel: String
     let commentCount: Int
@@ -2543,22 +2659,57 @@ public struct TicketReviewQueueEntry: Hashable, Identifiable {
     self.summary = summary
     self.commentCount = commentCount
     self.openConflictCount = openConflictCount
-    self.localNoteCount = normalizedLocalNoteCount
+    self.reviewNoteCount = normalizedReviewNoteCount
     updatedAt = detail?.ticket.updatedAt ?? ticket.updatedAt
   }
 }
 
-public struct TicketLocalReviewNote: Codable, Hashable, Identifiable {
+public struct TicketReviewNote: Decodable, Hashable, Identifiable {
   public let noteId: String
-  public let createdAt: String
+  public let ticketId: String
   public let markdown: String
+  public let actor: String
+  public let createdAt: String
+  public let context: String?
 
   public var id: String { noteId }
 
-  public init(noteId: String, createdAt: String, markdown: String) {
+  public init(
+    noteId: String,
+    ticketId: String,
+    markdown: String,
+    actor: String,
+    createdAt: String,
+    context: String?
+  ) {
     self.noteId = noteId
-    self.createdAt = createdAt
+    self.ticketId = ticketId
     self.markdown = markdown
+    self.actor = actor
+    self.createdAt = createdAt
+    self.context = context
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case noteId
+    case ticketId
+    case markdown
+    case body
+    case actor
+    case createdAt
+    case context
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    noteId = try container.decode(String.self, forKey: .noteId)
+    ticketId = try container.decode(String.self, forKey: .ticketId)
+    markdown =
+      try container.decodeIfPresent(String.self, forKey: .markdown)
+      ?? container.decode(String.self, forKey: .body)
+    actor = try container.decode(String.self, forKey: .actor)
+    createdAt = try container.decode(String.self, forKey: .createdAt)
+    context = try container.decodeIfPresent(String.self, forKey: .context)
   }
 }
 
@@ -2668,6 +2819,7 @@ public struct TicketsListResponse: Decodable {
 public struct TicketDetailResponse: Decodable {
   public let ticket: TicketSummary
   public let comments: [TicketComment]
+  public let reviewNotes: [TicketReviewNote]
   public let syncCheckpoints: [TicketSyncCheckpoint]
   public let conflicts: [TicketSyncConflict]
   public let events: [TicketEvent]
@@ -2675,6 +2827,7 @@ public struct TicketDetailResponse: Decodable {
   public init(ticket: TicketSummary, events: [TicketEvent]) {
     self.ticket = ticket
     comments = []
+    reviewNotes = []
     syncCheckpoints = []
     conflicts = []
     self.events = events
@@ -2683,12 +2836,14 @@ public struct TicketDetailResponse: Decodable {
   public init(
     ticket: TicketSummary,
     comments: [TicketComment],
+    reviewNotes: [TicketReviewNote],
     syncCheckpoints: [TicketSyncCheckpoint],
     conflicts: [TicketSyncConflict],
     events: [TicketEvent]
   ) {
     self.ticket = ticket
     self.comments = comments
+    self.reviewNotes = reviewNotes
     self.syncCheckpoints = syncCheckpoints
     self.conflicts = conflicts
     self.events = events
@@ -2697,6 +2852,7 @@ public struct TicketDetailResponse: Decodable {
   private enum CodingKeys: String, CodingKey {
     case ticket
     case comments
+    case reviewNotes
     case syncCheckpoints
     case conflicts
     case events
@@ -2706,6 +2862,8 @@ public struct TicketDetailResponse: Decodable {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     ticket = try container.decode(TicketSummary.self, forKey: .ticket)
     comments = try container.decodeIfPresent([TicketComment].self, forKey: .comments) ?? []
+    reviewNotes =
+      try container.decodeIfPresent([TicketReviewNote].self, forKey: .reviewNotes) ?? []
     syncCheckpoints = try container.decodeIfPresent([TicketSyncCheckpoint].self, forKey: .syncCheckpoints) ?? []
     conflicts = try container.decodeIfPresent([TicketSyncConflict].self, forKey: .conflicts) ?? []
     events = try container.decodeIfPresent([TicketEvent].self, forKey: .events) ?? []
@@ -2786,6 +2944,14 @@ public struct TicketCommentAppendResponse: Decodable {
 
   public init(comment: TicketComment) {
     self.comment = comment
+  }
+}
+
+public struct TicketReviewNoteAppendResponse: Decodable {
+  public let reviewNote: TicketReviewNote
+
+  public init(reviewNote: TicketReviewNote) {
+    self.reviewNote = reviewNote
   }
 }
 

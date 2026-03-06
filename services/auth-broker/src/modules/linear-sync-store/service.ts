@@ -56,6 +56,7 @@ export type LinearWebhookDelivery = {
   readonly betterAuthTeamId: string | null;
   readonly organizationId: string | null;
   readonly ownerTeamId: string | null;
+  readonly claimedBy: string | null;
   readonly status: LinearWebhookDeliveryStatus;
   readonly receivedAt: string;
   readonly updatedAt: string;
@@ -74,6 +75,7 @@ export type LinearSyncStore = {
   }) => Promise<LinearWebhookDelivery | null>;
   readonly markWebhookDeliveryApplied: (input: {
     readonly deliveryId: string;
+    readonly claimedBy?: string | null;
   }) => Promise<LinearWebhookDelivery | null>;
 };
 
@@ -109,6 +111,7 @@ export class InMemoryLinearSyncStore implements LinearSyncStore {
       betterAuthTeamId: input.betterAuthTeamId ?? null,
       organizationId: input.organizationId,
       ownerTeamId: normalizeText(input.teamId),
+      claimedBy: null,
       status: "pending",
       receivedAt: now,
       updatedAt: now,
@@ -138,6 +141,7 @@ export class InMemoryLinearSyncStore implements LinearSyncStore {
 
   markWebhookDeliveryApplied(input: {
     readonly deliveryId: string;
+    readonly claimedBy?: string | null;
   }): Promise<LinearWebhookDelivery | null> {
     const delivery = this.deliveriesById.get(input.deliveryId);
     if (!delivery) {
@@ -146,6 +150,7 @@ export class InMemoryLinearSyncStore implements LinearSyncStore {
     const appliedAt = delivery.appliedAt ?? new Date().toISOString();
     const updated: LinearWebhookDelivery = {
       ...delivery,
+      claimedBy: normalizeText(input.claimedBy) ?? delivery.claimedBy,
       status: "applied",
       updatedAt: new Date().toISOString(),
       appliedAt,
@@ -275,7 +280,7 @@ export function createLinearSyncStoreFromDb(input: {
       return rows[0] ? toWebhookDelivery({ row: rows[0] }) : null;
     },
 
-    markWebhookDeliveryApplied: async ({ deliveryId }) => {
+    markWebhookDeliveryApplied: async ({ deliveryId, claimedBy }) => {
       await ensureOwnershipColumns();
       const now = new Date();
       const updated = await db
@@ -283,7 +288,9 @@ export function createLinearSyncStoreFromDb(input: {
         .set({
           status: "applied",
           applyError: null,
-          claimedBy: sql`coalesce(${linearWebhookEvents.claimedBy}, 'manual')`,
+          claimedBy:
+            normalizeText(claimedBy) ??
+            sql`coalesce(${linearWebhookEvents.claimedBy}, 'manual')`,
           updatedAt: now,
           appliedAt: now,
         })
@@ -326,6 +333,7 @@ export function toWebhookDelivery(input: {
       input.row.betterAuthTeamId ?? storedOwnership.betterAuthTeamId,
     organizationId: input.row.organizationId ?? null,
     ownerTeamId: input.row.ownerTeamId ?? null,
+    claimedBy: input.row.claimedBy ?? null,
     status: normalizeDeliveryStatus({ value: input.row.status }),
     receivedAt: input.row.createdAt.toISOString(),
     updatedAt: input.row.updatedAt.toISOString(),

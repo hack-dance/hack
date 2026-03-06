@@ -348,6 +348,8 @@ export function createBetterAuthShellPlugin({
         });
         return renderHtmlPage({
           title: "Hack auth",
+          brand: "HACK",
+          theme: "handoff",
           heading: authLanding.heading,
           subtitle: authLanding.subtitle,
           body: authLanding.body,
@@ -858,8 +860,8 @@ function buildAuthLandingPresentation(input: {
   readonly flowId?: string;
   readonly deviceCode?: string;
 }): {
-  readonly heading: string;
-  readonly subtitle: string;
+  readonly heading?: string;
+  readonly subtitle?: string;
   readonly body: string;
 } {
   const primaryProviderId =
@@ -879,18 +881,17 @@ function buildAuthLandingPresentation(input: {
       callbackUrl: input.callbackUrl,
       isDeviceLinked: Boolean(input.flowId && input.deviceCode),
     }),
-    renderFlowHint({
-      flowId: input.flowId,
-      deviceCode: input.deviceCode,
-    }),
   ].filter(Boolean);
+  let subtitle: string | undefined;
+  if (input.flowId && input.deviceCode) {
+    subtitle = "Linked to this Mac.";
+  } else if (input.socialProviders.length > 1) {
+    subtitle = "Choose a sign-in method.";
+  }
 
   return {
-    heading: "Sign in to Hack",
-    subtitle:
-      input.flowId && input.deviceCode
-        ? "This request is linked to your Mac."
-        : "Use your Hack account for shared remote features.",
+    heading: undefined,
+    subtitle,
     body: bodySections.join(""),
   };
 }
@@ -947,11 +948,6 @@ function renderSingleProviderPanel(input: {
   readonly isDeviceLinked: boolean;
 }): string {
   return `<section class="hero">
-    <p class="hero-copy">${
-      input.isDeviceLinked
-        ? "Continue in the browser to finish setup in Hack Desktop."
-        : "Continue in the browser to open your Hack account."
-    }</p>
     ${renderProviderActionButton({
       provider: input.provider,
       callbackUrl: input.callbackUrl,
@@ -979,20 +975,6 @@ function renderProviderActionButton(input: {
         input.mode === "link" ? "Link" : "Continue with"
       } ${escapeHtml(input.provider.label)}</span>
     </button>`;
-}
-
-function renderFlowHint(input: {
-  readonly flowId?: string;
-  readonly deviceCode?: string;
-}): string {
-  if (!(input.flowId && input.deviceCode)) {
-    return "";
-  }
-  return `<details class="details">
-    <summary>Details</summary>
-    <p>Linked to this Mac.</p>
-    <p>Flow <code>${escapeHtml(input.flowId)}</code></p>
-  </details>`;
 }
 
 function renderProviderActionScript(input: {
@@ -1120,6 +1102,8 @@ function renderActionLink(input: {
 
 function renderHtmlPage(input: {
   readonly title: string;
+  readonly brand?: string;
+  readonly theme?: "default" | "handoff";
   readonly heading?: string;
   readonly subtitle?: string;
   readonly body: string;
@@ -1427,13 +1411,114 @@ function renderHtmlPage(input: {
 
       a { color: var(--accent-strong); text-decoration: none; }
       a:hover { text-decoration: underline; }
+
+      body.theme-handoff {
+        background: #111111;
+        color: #f5f5f5;
+      }
+
+      .theme-handoff main {
+        width: min(34rem, calc(100vw - 2.5rem));
+        padding: 2rem 0;
+      }
+
+      .theme-handoff .shell {
+        padding: 0;
+        border: none;
+        background: transparent;
+        box-shadow: none;
+      }
+
+      .theme-handoff .brand {
+        margin: 0;
+        text-align: center;
+        color: #f5f5f5;
+        font-size: 0.98rem;
+        letter-spacing: 0.28em;
+      }
+
+      .theme-handoff h1 {
+        display: none;
+      }
+
+      .theme-handoff .lede {
+        margin: 1.2rem 0 0;
+        text-align: center;
+        color: #9ca3af;
+        font-size: 0.9rem;
+        line-height: 1.45;
+      }
+
+      .theme-handoff .stack {
+        margin-top: 1.35rem;
+        gap: 1rem;
+      }
+
+      .theme-handoff .hero {
+        gap: 1rem;
+      }
+
+      .theme-handoff .hero-copy {
+        margin: 0;
+        text-align: center;
+        color: #71717a;
+        font-size: 0.9rem;
+      }
+
+      .theme-handoff .providers {
+        width: 100%;
+      }
+
+      .theme-handoff .provider-button {
+        border: 1px solid rgba(255, 255, 255, 0.45);
+        border-radius: 0.4rem;
+        background: transparent;
+        color: #f5f5f5;
+        padding: 1rem 1.1rem;
+        font-size: 0.96rem;
+        font-weight: 500;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .theme-handoff .provider-button:hover {
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      .theme-handoff .provider-button-secondary {
+        border-color: rgba(255, 255, 255, 0.24);
+        color: #f5f5f5;
+      }
+
+      .theme-handoff .provider-button-secondary:hover {
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      .theme-handoff .provider-mark {
+        width: 1.1rem;
+        height: 1.1rem;
+        background: transparent;
+        border: 1px solid #2563eb;
+        color: #2563eb;
+        font-size: 0.62rem;
+      }
+
+      .theme-handoff #auth-status {
+        margin-top: 1rem;
+        text-align: center;
+        color: #71717a;
+      }
+
+      .theme-handoff .details {
+        display: none;
+      }
     </style>
   </head>
-  <body>
+  <body class="${input.theme === "handoff" ? "theme-handoff" : "theme-default"}">
     <main>
       <section class="shell">
-        <p class="brand">Hack</p>
-        <h1>${escapeHtml(input.heading ?? input.title)}</h1>
+        <p class="brand">${escapeHtml(input.brand ?? "Hack")}</p>
+        ${input.heading ? `<h1>${escapeHtml(input.heading)}</h1>` : ""}
         ${
           input.subtitle
             ? `<p class="lede">${escapeHtml(input.subtitle)}</p>`

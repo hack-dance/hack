@@ -430,10 +430,11 @@ describe("auth broker github flow routes", () => {
     );
     expect(response.status).toBe(200);
     const html = await response.text();
-    expect(html).toContain("Sign in to Hack");
-    expect(html).toContain("This request is linked to your Mac.");
+    expect(html).toContain(">HACK<");
+    expect(html).toContain("Linked to this Mac.");
     expect(html).toContain("Continue with GitHub");
-    expect(html).toContain("finish setup in Hack Desktop");
+    expect(html).not.toContain("finish setup in Hack Desktop");
+    expect(html).not.toContain("<summary>Details</summary>");
     expect(html).not.toContain("Redirecting to GitHub");
     expect(html).not.toContain("If nothing happens");
     expect(html).toContain("/api/auth/sign-in/social");

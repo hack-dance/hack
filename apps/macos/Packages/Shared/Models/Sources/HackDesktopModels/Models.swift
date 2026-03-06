@@ -952,6 +952,40 @@ public struct RailwayInspectResponse: Decodable, Hashable {
   }
 }
 
+public struct HackAccountSettingsState: Decodable, Hashable {
+  public let brokerBaseURL: String
+  public let authEnabled: Bool
+  public let authReason: String?
+  public let authBasePath: String
+  public let sessionAvailable: Bool
+  public let userDisplayName: String?
+  public let userEmail: String?
+  public let organizationName: String?
+  public let teamName: String?
+
+  public init(
+    brokerBaseURL: String,
+    authEnabled: Bool,
+    authReason: String?,
+    authBasePath: String,
+    sessionAvailable: Bool,
+    userDisplayName: String?,
+    userEmail: String?,
+    organizationName: String?,
+    teamName: String?
+  ) {
+    self.brokerBaseURL = brokerBaseURL
+    self.authEnabled = authEnabled
+    self.authReason = authReason
+    self.authBasePath = authBasePath
+    self.sessionAvailable = sessionAvailable
+    self.userDisplayName = userDisplayName
+    self.userEmail = userEmail
+    self.organizationName = organizationName
+    self.teamName = teamName
+  }
+}
+
 public struct GitHubProfileSummary: Decodable, Hashable {
   public let id: String
   public let isDefault: Bool

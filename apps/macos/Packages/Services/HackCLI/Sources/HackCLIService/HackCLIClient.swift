@@ -62,6 +62,12 @@ public actor HackCLIClient {
 
   private static let authRequestTimeoutSeconds: TimeInterval = 10
 
+  private struct BetterAuthStatusEnvelope: Decodable {
+    let enabled: Bool
+    let reason: String?
+    let basePath: String
+  }
+
   private struct GitHubOAuthStartEnvelope: Decodable {
     let ok: Bool
     let flow: GitHubOAuthStartEnvelopeFlow
@@ -790,6 +796,50 @@ public actor HackCLIClient {
       githubLogin: githubIdentity?.login,
       githubName: githubIdentity?.name,
       githubId: githubIdentity?.id
+    )
+  }
+
+  /// Reads the desktop-visible Hack account/auth broker state.
+  ///
+  /// Session identity fields are intentionally optional because the broker only exposes
+  /// runtime Better Auth availability today. The desktop UI is structured around this
+  /// contract so real user/org/team fields can be filled in later without another view rewrite.
+  public func inspectHackAccountSettingsState() async throws -> HackAccountSettingsState {
+    var lastError: String? = nil
+    for candidate in resolveAuthServerCandidates() {
+      guard
+        let statusURL = buildAuthURL(
+          base: candidate,
+          path: "/v1/auth/better-auth/status",
+          queryItems: []
+        )
+      else {
+        continue
+      }
+      do {
+        let body = try await fetchAuthBody(url: statusURL)
+        if let status = tryDecodeLenient(BetterAuthStatusEnvelope.self, from: body) {
+          return HackAccountSettingsState(
+            brokerBaseURL: candidate,
+            authEnabled: status.enabled,
+            authReason: normalized(status.reason),
+            authBasePath: normalized(status.basePath) ?? "/api/auth",
+            sessionAvailable: false,
+            userDisplayName: nil,
+            userEmail: nil,
+            organizationName: nil,
+            teamName: nil
+          )
+        }
+        throw HackCLIError.network("Auth broker returned invalid JSON.")
+      } catch {
+        lastError = error.localizedDescription
+      }
+    }
+
+    throw HackCLIError.network(
+      lastError
+        ?? "Unable to reach any configured auth broker endpoint. Check network/broker status and retry."
     )
   }
 

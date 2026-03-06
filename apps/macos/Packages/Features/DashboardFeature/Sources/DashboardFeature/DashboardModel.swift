@@ -665,6 +665,15 @@ public final class DashboardModel {
     }
   }
 
+  public func inspectHackAccountSettingsState() async -> HackAccountSettingsState? {
+    do {
+      return try await client.inspectHackAccountSettingsState()
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
   public func startGitHubOAuthFlow(
     profileId: String,
     setDefault: Bool

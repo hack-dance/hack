@@ -704,15 +704,18 @@ struct ProjectDetailView: View {
         }
       }
 
-      VStack(alignment: .leading, spacing: 14) {
-        HStack(alignment: .center, spacing: 12) {
-          projectSettingsLabel("Execution mode")
-
+      VStack(alignment: .leading, spacing: 16) {
+        projectSettingsField(
+          title: "Execution mode",
+          description: "Choose whether this repo defaults to local work or a routed remote node.",
+          footnote: executionMode.summary
+        ) {
           Picker("Execution mode", selection: $executionMode) {
             ForEach(RemoteExecutionMode.allCases) { mode in
               Text(mode.title).tag(mode)
             }
           }
+          .labelsHidden()
           .pickerStyle(.menu)
           .frame(maxWidth: 360, alignment: .leading)
           .onChange(of: executionMode) { _, _ in
@@ -721,20 +724,23 @@ struct ProjectDetailView: View {
             }
             Task { await persistExecutionModeSelection() }
           }
-
-          Spacer()
-          projectSettingsFootnote(executionMode.summary)
         }
 
-        HStack(alignment: .center, spacing: 12) {
-          projectSettingsLabel("Default node")
+        Divider()
+          .opacity(0.12)
 
+        projectSettingsField(
+          title: "Default node",
+          description: "Applies when execution mode routes work off this Mac.",
+          footnote: selectedNodeSummary
+        ) {
           Picker("Default node", selection: $executionTargetNodeId) {
             Text("Local").tag("")
             ForEach(executionTargetNodes, id: \.id) { node in
               Text(node.name).tag(node.id)
             }
           }
+          .labelsHidden()
           .pickerStyle(.menu)
           .frame(maxWidth: 360, alignment: .leading)
           .onChange(of: executionTargetNodeId) { _, _ in
@@ -744,20 +750,23 @@ struct ProjectDetailView: View {
             Task { await persistSimpleDefaultNodeSelection() }
           }
           .disabled(executionMode == .local)
-
-          Spacer()
-          projectSettingsFootnote(selectedNodeSummary)
         }
 
-        HStack(alignment: .center, spacing: 12) {
-          projectSettingsLabel("Git creds")
+        Divider()
+          .opacity(0.12)
 
-          Picker("Git creds", selection: $githubProjectProfile) {
+        projectSettingsField(
+          title: "GitHub profile",
+          description: "Pick the saved GitHub profile this repo should use for remote Git operations.",
+          footnote: selectedGitSummary
+        ) {
+          Picker("GitHub profile", selection: $githubProjectProfile) {
             Text("Local").tag("")
             ForEach(githubProfileOptions, id: \.self) { profile in
               Text(githubProfileLabel(profileId: profile)).tag(profile)
             }
           }
+          .labelsHidden()
           .pickerStyle(.menu)
           .frame(maxWidth: 360, alignment: .leading)
           .onChange(of: githubProjectProfile) { _, _ in
@@ -766,9 +775,6 @@ struct ProjectDetailView: View {
             }
             Task { await persistGitCredentialsSelection() }
           }
-
-          Spacer()
-          projectSettingsFootnote(selectedGitSummary)
         }
       }
       .padding(16)
@@ -853,50 +859,49 @@ struct ProjectDetailView: View {
         VStack(alignment: .leading, spacing: 6) {
           Text("Linear routing")
             .font(.system(size: 22, weight: .semibold))
-          Text("Configure the account and Linear projects this repo syncs with. Pull, push, autosync execution, and review stay in Tickets.")
+          Text("Choose the saved Linear profile and project routes for this repo. Ticket review and one-off sync actions stay in Tickets.")
             .font(.system(size: 13, weight: .medium))
             .foregroundStyle(.secondary)
         }
 
         routingSheetSection(
-          title: "Account",
-          description: "Choose the Linear account used for this repo. If no account is connected yet, start from global Linear settings."
+          title: "Saved profile",
+          description: "Choose the saved Linear profile Hack should use for this repo. Profiles point to provider accounts connected in global Linear settings."
         ) {
           if linearResolvedStatus?.tokenResolved == true {
-            HStack(alignment: .center, spacing: 12) {
-              Picker("Linear account", selection: $linearProjectProfile) {
-                Text("Inherited").tag("")
-                ForEach(linearProfileOptions, id: \.self) { profile in
-                  Text(linearProfileLabel(profileId: profile)).tag(profile)
+            projectSettingsControlGroup(footnote: selectedLinearProfileSummary) {
+              HStack(alignment: .center, spacing: 12) {
+                Picker("Saved profile", selection: $linearProjectProfile) {
+                  Text("Inherited").tag("")
+                  ForEach(linearProfileOptions, id: \.self) { profile in
+                    Text(linearProfileLabel(profileId: profile)).tag(profile)
+                  }
                 }
-              }
-              .pickerStyle(.menu)
-              .frame(maxWidth: 320, alignment: .leading)
-              .onChange(of: linearProjectProfile) { _, _ in
-                guard !executionTargetLoading else {
-                  return
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(maxWidth: 320, alignment: .leading)
+                .onChange(of: linearProjectProfile) { _, _ in
+                  guard !executionTargetLoading else {
+                    return
+                  }
+                  Task { await persistLinearProfileOverride() }
                 }
-                Task { await persistLinearProfileOverride() }
-              }
 
-              StatusPill(text: "Connected", tone: .good)
-              Spacer()
-              Button("Linear settings") {
-                NotificationCenter.default.post(
-                  name: .hackSettingsRequested,
-                  object: nil,
-                  userInfo: ["pane": "linear"]
-                )
+                StatusPill(text: "Connected", tone: .good)
+                Spacer()
+                Button("Open Linear settings") {
+                  NotificationCenter.default.post(
+                    name: .hackSettingsRequested,
+                    object: nil,
+                    userInfo: ["pane": "linear"]
+                  )
+                }
+                .adaptiveToolbarButton()
               }
-              .adaptiveToolbarButton()
             }
-
-            Text(selectedLinearProfileSummary)
-              .font(.system(size: 12, weight: .medium))
-              .foregroundStyle(.secondary)
           } else {
             VStack(alignment: .leading, spacing: 10) {
-              Text("Connect a Linear account before binding routes for this repo.")
+              Text("Connect a Linear provider account before binding routes for this repo.")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.secondary)
               Button("Connect Linear") {
@@ -912,38 +917,40 @@ struct ProjectDetailView: View {
         }
 
         routingSheetSection(
-          title: "Default project",
-          description: "This is the primary Linear project for project-level pull, push, and routing."
+          title: "Default project route",
+          description: "This is the primary Linear project route for project-level pull, push, and review."
         ) {
-          HStack(alignment: .center, spacing: 12) {
-            Picker("Linear project", selection: $selectedLinearProjectId) {
-              Text("Unbound").tag("")
-              ForEach(linearProjectOptions) { linearProject in
-                Text(linearProjectMenuLabel(linearProject)).tag(linearProject.id)
+          projectSettingsControlGroup(footnote: selectedLinearProjectSummary) {
+            HStack(alignment: .center, spacing: 12) {
+              Picker("Default project route", selection: $selectedLinearProjectId) {
+                Text("Unbound").tag("")
+                ForEach(linearProjectOptions) { linearProject in
+                  Text(linearProjectMenuLabel(linearProject)).tag(linearProject.id)
+                }
               }
-            }
-            .pickerStyle(.menu)
-            .frame(maxWidth: 360, alignment: .leading)
-            .disabled(linearProjectOptions.isEmpty)
-            .onChange(of: selectedLinearProjectId) { _, newValue in
-              guard !executionTargetLoading else {
-                return
+              .labelsHidden()
+              .pickerStyle(.menu)
+              .frame(maxWidth: 360, alignment: .leading)
+              .disabled(linearProjectOptions.isEmpty)
+              .onChange(of: selectedLinearProjectId) { _, newValue in
+                guard !executionTargetLoading else {
+                  return
+                }
+                guard newValue != linearBoundProjectId else {
+                  return
+                }
+                Task { await persistLinearProjectBindingSelection() }
               }
-              guard newValue != linearBoundProjectId else {
-                return
-              }
-              Task { await persistLinearProjectBindingSelection() }
-            }
 
-            if !linearBoundProjectId.isEmpty {
-              Button("Clear") {
-                Task { await clearLinearProjectBinding() }
+              if !linearBoundProjectId.isEmpty {
+                Button("Clear") {
+                  Task { await clearLinearProjectBinding() }
+                }
+                .adaptiveToolbarButton()
               }
-              .adaptiveToolbarButton()
-            }
 
-            Spacer()
-            projectSettingsFootnote(selectedLinearProjectSummary)
+              Spacer()
+            }
           }
 
           if let defaultTarget = defaultLinearRouteTarget {
@@ -952,8 +959,8 @@ struct ProjectDetailView: View {
         }
 
         routingSheetSection(
-          title: "Additional synced projects",
-          description: "Link extra Linear projects when this repo needs review or autosync coverage beyond the default route."
+          title: "Additional project routes",
+          description: "Link extra Linear projects when this repo needs review or autosync coverage beyond the default project route."
         ) {
           if linearAdditionalProjects.isEmpty {
             Text("No additional linked projects.")
@@ -967,29 +974,31 @@ struct ProjectDetailView: View {
             }
           }
 
-          HStack(spacing: 8) {
-            Picker("Add linked project", selection: $selectedAdditionalLinearProjectId) {
-              Text("Choose project").tag("")
-              ForEach(availableAdditionalLinearProjects) { linearProject in
-                Text(linearProjectMenuLabel(linearProject)).tag(linearProject.id)
+          projectSettingsControlGroup(footnote: additionalLinearProjectsSummary) {
+            HStack(spacing: 8) {
+              Picker("Add linked project", selection: $selectedAdditionalLinearProjectId) {
+                Text("Choose project").tag("")
+                ForEach(availableAdditionalLinearProjects) { linearProject in
+                  Text(linearProjectMenuLabel(linearProject)).tag(linearProject.id)
+                }
               }
-            }
-            .pickerStyle(.menu)
-            .frame(maxWidth: 360, alignment: .leading)
-            .disabled(availableAdditionalLinearProjects.isEmpty)
+              .labelsHidden()
+              .pickerStyle(.menu)
+              .frame(maxWidth: 360, alignment: .leading)
+              .disabled(availableAdditionalLinearProjects.isEmpty)
 
-            Button("Add") {
-              Task { await persistAdditionalLinearProjectSelection() }
-            }
-            .adaptiveToolbarButton()
-            .disabled(
-              selectedAdditionalLinearProjectId
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .isEmpty
-            )
+              Button("Add") {
+                Task { await persistAdditionalLinearProjectSelection() }
+              }
+              .adaptiveToolbarButton()
+              .disabled(
+                selectedAdditionalLinearProjectId
+                  .trimmingCharacters(in: .whitespacesAndNewlines)
+                  .isEmpty
+              )
 
-            Spacer()
-            projectSettingsFootnote(additionalLinearProjectsSummary)
+              Spacer()
+            }
           }
         }
 
@@ -1034,10 +1043,10 @@ struct ProjectDetailView: View {
 
   private var linearRoutingSummaryLine: String {
     if linearResolvedStatus?.tokenResolved != true {
-      return "No Linear account connected for this repo yet."
+      return "No Linear provider account connected for this repo yet."
     }
     if !hasAnyLinearProjectRouting {
-      return "Account connected, but this repo does not have a default Linear project yet."
+      return "A Linear profile is connected, but this repo does not have a default project route yet."
     }
     if linearAdditionalProjects.isEmpty {
       let defaultLabel = linearBoundProjectName.isEmpty ? resolvedLinearProjectId : linearBoundProjectName
@@ -1056,16 +1065,37 @@ struct ProjectDetailView: View {
       )
   }
 
-  private func projectSettingsLabel(_ title: String) -> some View {
-    Text(title)
-      .font(.system(size: 13, weight: .semibold))
-      .frame(width: 120, alignment: .leading)
-  }
-
   private func projectSettingsFootnote(_ text: String) -> some View {
     Text(text)
       .font(.system(size: 12, weight: .medium, design: .monospaced))
       .foregroundStyle(.tertiary)
+  }
+
+  private func projectSettingsField<Content: View>(
+    title: String,
+    description: String,
+    footnote: String,
+    @ViewBuilder content: () -> Content
+  ) -> some View {
+    VStack(alignment: .leading, spacing: 8) {
+      Text(title)
+        .font(.system(size: 13, weight: .semibold))
+      Text(description)
+        .font(.system(size: 12, weight: .medium))
+        .foregroundStyle(.secondary)
+      content()
+      projectSettingsFootnote(footnote)
+    }
+  }
+
+  private func projectSettingsControlGroup<Content: View>(
+    footnote: String,
+    @ViewBuilder content: () -> Content
+  ) -> some View {
+    VStack(alignment: .leading, spacing: 8) {
+      content()
+      projectSettingsFootnote(footnote)
+    }
   }
 
   private func routingSheetSection<Content: View>(
@@ -1618,11 +1648,10 @@ struct ProjectDetailView: View {
             }
           )
         ) {
-          Text("Auto")
+          Text("Autosync")
             .font(.mono(.caption2))
             .foregroundStyle(.secondary)
         }
-        .labelsHidden()
         .disabled(isLinearAutosyncBusy(for: normalizedTarget))
 
         Menu {
@@ -2263,12 +2292,12 @@ struct ProjectDetailView: View {
       value: trimmed
     )
     if !didSave {
-      githubProfileMessage = "Failed to save Git creds."
+      githubProfileMessage = "Failed to save GitHub profile."
       return
     }
     githubProfileMessage = trimmed.isEmpty
-      ? "Git creds set to Local."
-      : "Git creds set to \(githubProfileLabel(profileId: trimmed))."
+      ? "GitHub profile set to Local."
+      : "GitHub profile set to \(githubProfileLabel(profileId: trimmed))."
     executionTargetMessage = ""
     await model.refresh()
     queueExecutionTargetReload()
@@ -2294,12 +2323,12 @@ struct ProjectDetailView: View {
       value: trimmed
     )
     if !didSave {
-      linearProjectMessage = "Failed to save Linear account routing."
+      linearProjectMessage = "Failed to save Linear profile routing."
       return
     }
     linearProjectMessage = trimmed.isEmpty
-      ? "Linear account set to inherited."
-      : "Linear account set to \(linearProfileLabel(profileId: trimmed))."
+      ? "Linear profile set to inherited."
+      : "Linear profile set to \(linearProfileLabel(profileId: trimmed))."
     executionTargetMessage = ""
     githubProfileMessage = ""
     await model.refresh()
@@ -2428,7 +2457,7 @@ struct ProjectDetailView: View {
       defer { togglingLinearAutosyncRouteKeys.remove(routeKey) }
       let normalizedTarget = normalizedLinearRouteTarget(target)
       guard let profileId = normalizedTarget.profileId, !profileId.isEmpty else {
-        linearProjectMessage = "Choose a Linear account before changing autosync."
+        linearProjectMessage = "Choose a Linear profile before changing autosync."
         return
       }
       if enabled {

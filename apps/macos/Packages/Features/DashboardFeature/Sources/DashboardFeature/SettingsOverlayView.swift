@@ -421,6 +421,103 @@ struct SettingsSectionHeader: View {
   }
 }
 
+private struct HackAccountSettingsCard: View {
+  let state: HackAccountSettingsState?
+  let isLoading: Bool
+  let providerName: String?
+  let onRefresh: () -> Void
+
+  var body: some View {
+    GlassCard(title: "Hack account", systemImage: "person.crop.circle.badge.checkmark") {
+      HStack(alignment: .center, spacing: 8) {
+        if let state {
+          StatusPill(
+            text: state.authEnabled ? "Broker auth enabled" : "Broker auth unavailable",
+            tone: state.authEnabled ? .good : .warn
+          )
+          StatusPill(
+            text: state.sessionAvailable ? "Session details available" : "Desktop session pending",
+            tone: state.sessionAvailable ? .good : .neutral
+          )
+        } else {
+          StatusPill(text: "Broker status unavailable", tone: .warn)
+        }
+        Spacer()
+        Button("Refresh") {
+          onRefresh()
+        }
+        .adaptiveToolbarButton()
+        if isLoading {
+          ProgressView()
+            .controlSize(.small)
+        }
+      }
+
+      Text(summaryMessage)
+        .font(.mono(.caption))
+        .foregroundStyle(.secondary)
+
+      if let state {
+        if state.sessionAvailable {
+          if let userLabel = state.userDisplayName, !userLabel.isEmpty {
+            Text("hack user: \(userLabel)")
+              .font(.mono(.caption2))
+              .foregroundStyle(.secondary)
+          }
+          if let email = state.userEmail, !email.isEmpty {
+            Text("email: \(email)")
+              .font(.mono(.caption2))
+              .foregroundStyle(.secondary)
+              .textSelection(.enabled)
+          }
+          if let organizationName = state.organizationName, !organizationName.isEmpty {
+            Text("organization: \(organizationName)")
+              .font(.mono(.caption2))
+              .foregroundStyle(.secondary)
+          }
+          if let teamName = state.teamName, !teamName.isEmpty {
+            Text("team: \(teamName)")
+              .font(.mono(.caption2))
+              .foregroundStyle(.secondary)
+          }
+        } else {
+          Text(
+            "Desktop sign-in details are not exposed here yet. This card is reserved for first-party Hack identity, while provider pages below manage provider accounts and saved routing profiles."
+          )
+          .font(.mono(.caption2))
+          .foregroundStyle(.tertiary)
+        }
+
+        Text("broker: \(state.brokerBaseURL)\(state.authBasePath)")
+          .font(.mono(.caption2))
+          .foregroundStyle(.secondary)
+          .textSelection(.enabled)
+
+        if let reason = state.authReason, !reason.isEmpty {
+          Text("auth status: \(reason)")
+            .font(.mono(.caption2))
+            .foregroundStyle(.tertiary)
+        }
+      } else {
+        Text(
+          "Hack Desktop could not read auth broker status yet. Provider account setup still depends on the broker being reachable."
+        )
+        .font(.mono(.caption2))
+        .foregroundStyle(.tertiary)
+      }
+    }
+  }
+
+  private var summaryMessage: String {
+    if let providerName, !providerName.isEmpty {
+      return
+        "\(providerName) accounts below are provider accounts connected through your Hack workspace. Saved profiles are local routing labels Hack uses for defaults and project overrides; they are not separate Hack users."
+    }
+    return
+      "Use this card to verify Hack auth is available before connecting external providers. GitHub and Linear pages manage provider accounts and saved routing profiles, not your first-party Hack identity."
+  }
+}
+
 private enum AppearanceThemeOption: String, CaseIterable, Identifiable {
   case system
   case light
@@ -2679,6 +2776,8 @@ private struct LinearExtensionSettingsView: View {
   @State private var isSavingAssigneeMapping = false
   @State private var message = ""
   @State private var lastDiagnosticsRefreshAt: Date? = nil
+  @State private var hackAccountState: HackAccountSettingsState? = nil
+  @State private var isLoadingHackAccount = false
 
   var body: some View {
     ScrollView {
@@ -2686,18 +2785,25 @@ private struct LinearExtensionSettingsView: View {
         SettingsSectionHeader(
           breadcrumb: "Settings / Extensions / Linear",
           title: "Linear Extension",
-          subtitle: "Manage connected Linear accounts and default issue-sync routing"
+          subtitle: "Manage Hack auth prerequisites, connected Linear provider accounts, and saved sync routing"
         )
+        HackAccountSettingsCard(
+          state: hackAccountState,
+          isLoading: isLoadingHackAccount,
+          providerName: "Linear"
+        ) {
+          Task { await refreshHackAccountState() }
+        }
         GlassCard(title: "Extension status", systemImage: "line.3.horizontal.decrease.circle") {
           HStack(alignment: .center, spacing: 8) {
             StatusPill(text: enabled ? "Enabled" : "Disabled", tone: enabled ? .good : .neutral)
             StatusPill(
-              text: "\(linearProfiles.count) account\(linearProfiles.count == 1 ? "" : "s")",
+              text: "\(linearProfiles.count) provider account\(linearProfiles.count == 1 ? "" : "s")",
               tone: linearProfiles.isEmpty ? .neutral : .good
             )
             if !resolvedDefaultProfile.isEmpty {
               StatusPill(
-                text: "Default remote: \(displayNameForRemoteProfileId(resolvedDefaultProfile))",
+                text: "Default profile: \(displayNameForRemoteProfileId(resolvedDefaultProfile))",
                 tone: .neutral
               )
             }
@@ -2724,9 +2830,9 @@ private struct LinearExtensionSettingsView: View {
           }
         }
 
-        GlassCard(title: "Connected accounts", systemImage: "point.3.connected.trianglepath.dotted") {
+        GlassCard(title: "Connected provider accounts", systemImage: "point.3.connected.trianglepath.dotted") {
           HStack(alignment: .center, spacing: 10) {
-            Text("Remote Linear accounts used for ticket sync and project binding.")
+            Text("These are the Linear accounts Hack can route sync through. Saved profiles decide which provider account a project uses.")
               .font(.mono(.caption))
               .foregroundStyle(.secondary)
             Spacer()
@@ -2777,7 +2883,7 @@ private struct LinearExtensionSettingsView: View {
                     Text(accountLabel ?? profile.id)
                       .font(.mono(.subheadline, weight: .semibold))
                     if profile.isDefault {
-                      StatusPill(text: "Default remote", tone: .good)
+                      StatusPill(text: "Default profile", tone: .good)
                     }
                     if let profileStatus {
                       StatusPill(
@@ -2822,9 +2928,14 @@ private struct LinearExtensionSettingsView: View {
                     )
                   }
 
-                  Text("profile: \(profile.id)")
+                  Text("routing profile: \(profile.id)")
                     .font(.mono(.caption2))
                     .foregroundStyle(.secondary)
+                  if let accountLabel, !accountLabel.isEmpty {
+                    Text("provider account: \(accountLabel)")
+                      .font(.mono(.caption2))
+                      .foregroundStyle(.secondary)
+                  }
                   if let accountEmail, !accountEmail.isEmpty {
                     Text("email: \(accountEmail)")
                       .font(.mono(.caption2))
@@ -2977,7 +3088,7 @@ private struct LinearExtensionSettingsView: View {
             )
 
             if linearProfiles.isEmpty {
-              Text("Connect a Linear account before managing assignee mappings.")
+              Text("Connect a Linear provider account before managing assignee mappings.")
                 .font(.mono(.caption))
                 .foregroundStyle(.secondary)
             } else {
@@ -3137,9 +3248,13 @@ private struct LinearExtensionSettingsView: View {
     }
     .task {
       await loadConfigFromDisk()
+      await refreshHackAccountState()
     }
     .onChange(of: model.lastUpdated) { _, _ in
-      Task { await loadConfigFromDisk() }
+      Task {
+        await loadConfigFromDisk()
+        await refreshHackAccountState()
+      }
     }
     .onChange(of: assigneeMappingProfile) { _, _ in
       Task { await refreshLinearAssigneeMappings() }
@@ -3198,33 +3313,33 @@ private struct LinearExtensionSettingsView: View {
 
   private var linearRoutingCalloutTitle: String {
     if linearProfiles.isEmpty {
-      return "Connect an account first"
+      return "Connect a provider account first"
     }
     if defaultLinearProfileNeedsRepair {
-      return "Default routing needs repair"
+      return "Default profile needs repair"
     }
     if resolvedDefaultProfile.isEmpty {
-      return "Set a default remote"
+      return "Set a default profile"
     }
     return "Routing and disconnect behavior"
   }
 
   private var linearRoutingCalloutMessage: String {
     if linearProfiles.isEmpty {
-      return "Add a Linear account before ticket or project sync can route through Linear. After the first account connects, set it as the default remote so projects inherit a working profile until they choose their own."
+      return "Add a Linear provider account before ticket or project sync can route through Linear. After the first account connects, set it as the default profile so projects inherit a working route until they choose their own."
     }
 
     if defaultLinearProfileNeedsRepair {
       let defaultLabel = displayNameForRemoteProfileId(resolvedDefaultProfile)
-      return "The default remote \(defaultLabel) no longer has a usable token. Reconnect it or switch the default before the next sync, because projects without an override still inherit that routing target."
+      return "The default profile \(defaultLabel) no longer has a usable token. Reconnect it or switch the default before the next sync, because projects without an override still inherit that routing target."
     }
 
     if resolvedDefaultProfile.isEmpty {
-      return "Projects can still choose a specific Linear account, but anything without a per-project override has no fallback remote until you set a default profile here."
+      return "Projects can still choose a specific Linear provider account, but anything without a per-project override has no fallback route until you set a default profile here."
     }
 
     let defaultLabel = displayNameForRemoteProfileId(resolvedDefaultProfile)
-    return "Projects inherit \(defaultLabel) until they choose a different Linear profile in project settings. Disconnecting an account removes its token immediately, so reroute or reconnect affected projects before the next sync run."
+    return "Projects inherit \(defaultLabel) until they choose a different Linear profile in project settings. Disconnecting a provider account removes its token immediately, so reroute or reconnect affected projects before the next sync run."
   }
 
   private var linearSyncPolicySummary: String {
@@ -3265,6 +3380,12 @@ private struct LinearExtensionSettingsView: View {
     refreshSelectedAssigneeMappingProfile()
     await refreshLinearAssigneeMappings()
     lastDiagnosticsRefreshAt = Date()
+  }
+
+  private func refreshHackAccountState() async {
+    isLoadingHackAccount = true
+    defer { isLoadingHackAccount = false }
+    hackAccountState = await model.inspectHackAccountSettingsState()
   }
 
   private func refreshLinearProfileStatuses() async {
@@ -3565,12 +3686,12 @@ private struct LinearExtensionSettingsView: View {
 
     let disconnected = await model.disconnectLinear(profileId: trimmed)
     if !disconnected {
-      message = model.errorMessage ?? "Failed to disconnect Linear account."
+      message = model.errorMessage ?? "Failed to disconnect the Linear provider account."
       return
     }
 
     if resolvedDefaultProfile == trimmed {
-      message = "Disconnected token for \(displayNameForRemoteProfileId(trimmed)). The profile stays available for reconnect, but projects inheriting this default remote need a reconnect or a different default before the next sync."
+      message = "Disconnected token for \(displayNameForRemoteProfileId(trimmed)). The profile stays available for reconnect, but projects inheriting this default profile need a reconnect or a different default before the next sync."
     } else {
       message = "Disconnected token for \(displayNameForRemoteProfileId(trimmed)). The profile stays available for reconnect, and any project routed to it needs a reconnect or a different override before the next sync."
     }
@@ -3692,7 +3813,7 @@ private struct LinearExtensionSettingsView: View {
       let account = flowStatus.accountName
         ?? flowStatus.accountEmail
         ?? flowStatus.accountHandle
-        ?? "Linear account"
+        ?? "Linear provider account"
       message = "Connected \(account) to profile \(flowStatus.profileId). You can now use it for default routing or bind projects to it directly."
       await model.refresh()
       await refreshLinearDiagnostics()
@@ -3735,6 +3856,8 @@ private struct GitHubExtensionSettingsView: View {
   @State private var message = ""
   @State private var lastDiagnosticsRefreshAt: Date? = nil
   @State private var systemIdentity: GitSystemIdentity? = nil
+  @State private var hackAccountState: HackAccountSettingsState? = nil
+  @State private var isLoadingHackAccount = false
 
   var body: some View {
     ScrollView {
@@ -3742,18 +3865,25 @@ private struct GitHubExtensionSettingsView: View {
         SettingsSectionHeader(
           breadcrumb: "Settings / Extensions / GitHub",
           title: "GitHub Extension",
-          subtitle: "Manage connected GitHub accounts and default PR automation routing"
+          subtitle: "Manage Hack auth prerequisites, connected GitHub provider accounts, and saved PR automation routing"
         )
+        HackAccountSettingsCard(
+          state: hackAccountState,
+          isLoading: isLoadingHackAccount,
+          providerName: "GitHub"
+        ) {
+          Task { await refreshHackAccountState() }
+        }
         GlassCard(title: "Extension status", systemImage: "chevron.left.forwardslash.chevron.right") {
           HStack(alignment: .center, spacing: 8) {
             StatusPill(text: enabled ? "Enabled" : "Disabled", tone: enabled ? .good : .neutral)
             StatusPill(
-              text: "\(githubProfiles.count) account\(githubProfiles.count == 1 ? "" : "s")",
+              text: "\(githubProfiles.count) provider account\(githubProfiles.count == 1 ? "" : "s")",
               tone: (diagnostics?.profiles.isEmpty == false) ? .good : .neutral
             )
             if !resolvedDefaultProfile.isEmpty {
               StatusPill(
-                text: "Default remote: \(displayNameForRemoteProfileId(resolvedDefaultProfile))",
+                text: "Default profile: \(displayNameForRemoteProfileId(resolvedDefaultProfile))",
                 tone: .neutral
               )
             }
@@ -3820,9 +3950,9 @@ private struct GitHubExtensionSettingsView: View {
           }
         }
 
-        GlassCard(title: "Connected accounts", systemImage: "person.2.badge.gearshape") {
+        GlassCard(title: "Connected provider accounts", systemImage: "person.2.badge.gearshape") {
           HStack(alignment: .center, spacing: 10) {
-            Text("Remote OAuth/App accounts used for remote node Git operations.")
+            Text("These are the GitHub accounts or app installs Hack can use. Saved profiles decide which provider account a project or node uses.")
               .font(.mono(.caption))
               .foregroundStyle(.secondary)
             Spacer()
@@ -3879,7 +4009,7 @@ private struct GitHubExtensionSettingsView: View {
                     Text(accountHandle.map { "@\($0)" } ?? profile.id)
                       .font(.mono(.subheadline, weight: .semibold))
                     if profile.isDefault {
-                      StatusPill(text: "Default remote", tone: .good)
+                      StatusPill(text: "Default profile", tone: .good)
                     }
                     StatusPill(
                       text: profile.mode.lowercased() == "app" ? "Remote app" : "Remote OAuth",
@@ -3907,12 +4037,12 @@ private struct GitHubExtensionSettingsView: View {
                     }
                   }
 
-                  Text("profile: \(profile.id)")
+                  Text("routing profile: \(profile.id)")
                     .font(.mono(.caption2))
                     .foregroundStyle(.secondary)
                   if let accountHandle, !accountHandle.isEmpty {
                     let accountNameSuffix = accountName.map { " (\($0))" } ?? ""
-                    Text("account: @\(accountHandle)\(accountNameSuffix)")
+                    Text("provider account: @\(accountHandle)\(accountNameSuffix)")
                       .font(.mono(.caption2))
                       .foregroundStyle(.secondary)
                   }
@@ -3973,9 +4103,13 @@ private struct GitHubExtensionSettingsView: View {
     }
     .task {
       await loadConfigFromDisk()
+      await refreshHackAccountState()
     }
     .onChange(of: model.lastUpdated) { _, _ in
-      Task { await loadConfigFromDisk() }
+      Task {
+        await loadConfigFromDisk()
+        await refreshHackAccountState()
+      }
     }
     .onChange(of: model.githubOAuthDeepLinkContext) { _, deepLink in
       guard let deepLink else { return }
@@ -4051,6 +4185,12 @@ private struct GitHubExtensionSettingsView: View {
     systemIdentity = await model.inspectSystemGitIdentity()
     await refreshGitHubProfileStatuses()
     lastDiagnosticsRefreshAt = Date()
+  }
+
+  private func refreshHackAccountState() async {
+    isLoadingHackAccount = true
+    defer { isLoadingHackAccount = false }
+    hackAccountState = await model.inspectHackAccountSettingsState()
   }
 
   private func refreshGitHubProfileStatuses() async {
@@ -5190,7 +5330,9 @@ private struct ExtensionsSettingsView: View {
   @Environment(DashboardModel.self) private var model
   @Binding var selection: SettingsSidebarItem
   @State private var isLoading = false
+  @State private var isLoadingHackAccount = false
   @State private var suppressToggleChange = false
+  @State private var hackAccountState: HackAccountSettingsState? = nil
   @State private var linearEnabled = false
   @State private var githubEnabled = false
   @State private var cloudflareEnabled = false
@@ -5211,6 +5353,13 @@ private struct ExtensionsSettingsView: View {
           message: "Internal components like gateway, tickets, and supervisor are configured on dedicated system pages and are intentionally omitted from the extension list.",
           actions: []
         )
+        HackAccountSettingsCard(
+          state: hackAccountState,
+          isLoading: isLoadingHackAccount,
+          providerName: nil
+        ) {
+          Task { await refreshHackAccountState() }
+        }
         GlassCard(title: "Managed extensions", systemImage: "puzzlepiece.extension") {
           VStack(alignment: .leading, spacing: 12) {
             extensionSummaryRow(
@@ -5277,9 +5426,13 @@ private struct ExtensionsSettingsView: View {
     }
     .task {
       await loadConfigFromDisk()
+      await refreshHackAccountState()
     }
     .onChange(of: model.lastUpdated) { _, _ in
-      Task { await loadConfigFromDisk() }
+      Task {
+        await loadConfigFromDisk()
+        await refreshHackAccountState()
+      }
     }
   }
 
@@ -5376,6 +5529,12 @@ private struct ExtensionsSettingsView: View {
     railwayEnabled = snapshot.railwayExtensionEnabled ?? false
     tailscaleEnabled = snapshot.tailscaleExtensionEnabled ?? false
     suppressToggleChange = false
+  }
+
+  private func refreshHackAccountState() async {
+    isLoadingHackAccount = true
+    defer { isLoadingHackAccount = false }
+    hackAccountState = await model.inspectHackAccountSettingsState()
   }
 
   private func setExtensionEnabled(

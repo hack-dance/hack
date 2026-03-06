@@ -11,6 +11,7 @@ import {
   refreshAccessToken,
 } from "../../linear.ts";
 import type { OAuthFlow } from "../../types.ts";
+import { resolveBetterAuthSession } from "../better-auth/session.ts";
 import type { LinearConnectionStore } from "../linear-connections/service.ts";
 import type { LinearOAuthModel } from "./model.ts";
 
@@ -89,6 +90,7 @@ export async function handleLinearCallback(input: {
   readonly flowStore: FlowStore;
   readonly connectionStore: LinearConnectionStore;
   readonly betterAuthRuntime: BetterAuthRuntime;
+  readonly request: Request;
   readonly query: LinearOAuthModel["callbackQuery"];
 }): Promise<Response> {
   const flowResult = resolveLinearCallbackFlow({
@@ -187,6 +189,10 @@ export async function handleLinearCallback(input: {
     account: identity.account,
     autoProvision: input.config.betterAuthLinearAutoProvisionUsers,
   });
+  const betterAuthSession = await resolveBetterAuthSession({
+    runtime: input.betterAuthRuntime,
+    request: input.request,
+  });
   const linkedAccount = {
     ...identity.account,
     ...(betterAuthLink.userId
@@ -212,6 +218,8 @@ export async function handleLinearCallback(input: {
       accountName: identity.account.accountName,
       accountEmail: identity.account.accountEmail,
       betterAuthUserId: betterAuthLink.userId ?? null,
+      betterAuthOrganizationId:
+        betterAuthSession.session?.organizationId ?? null,
       organizationId: identity.account.organizationId,
       teamId: identity.account.teamIds?.[0] ?? null,
       metadata: {

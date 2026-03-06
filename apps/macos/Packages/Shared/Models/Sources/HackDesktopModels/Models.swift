@@ -1402,6 +1402,86 @@ public struct LinearProjectsResponse: Decodable, Hashable {
   }
 }
 
+public struct LinearAssigneeMapping: Decodable, Hashable, Identifiable {
+  public let profileId: String
+  public let teamId: String?
+  public let localAssignee: String
+  public let linearUserId: String?
+  public let linearUserName: String?
+  public let linearUserEmail: String?
+
+  public var id: String {
+    [profileId, teamId ?? "*", localAssignee].joined(separator: "::")
+  }
+
+  public init(
+    profileId: String,
+    teamId: String?,
+    localAssignee: String,
+    linearUserId: String?,
+    linearUserName: String?,
+    linearUserEmail: String?
+  ) {
+    self.profileId = profileId
+    self.teamId = teamId
+    self.localAssignee = localAssignee
+    self.linearUserId = linearUserId
+    self.linearUserName = linearUserName
+    self.linearUserEmail = linearUserEmail
+  }
+}
+
+public struct LinearAssigneeMappingsResponse: Decodable, Hashable {
+  public let profileId: String
+  public let teamId: String?
+  public let mappings: [LinearAssigneeMapping]
+
+  public init(
+    profileId: String,
+    teamId: String?,
+    mappings: [LinearAssigneeMapping]
+  ) {
+    self.profileId = profileId
+    self.teamId = teamId
+    self.mappings = mappings
+  }
+}
+
+public struct LinearAssigneeMappingMutationResponse: Decodable, Hashable {
+  public let upserted: Bool
+  public let replacedExisting: Bool
+  public let mapping: LinearAssigneeMapping
+
+  public init(
+    upserted: Bool,
+    replacedExisting: Bool,
+    mapping: LinearAssigneeMapping
+  ) {
+    self.upserted = upserted
+    self.replacedExisting = replacedExisting
+    self.mapping = mapping
+  }
+}
+
+public struct LinearAssigneeMappingRemovalResponse: Decodable, Hashable {
+  public let removed: Bool
+  public let profileId: String
+  public let teamId: String?
+  public let localAssignee: String
+
+  public init(
+    removed: Bool,
+    profileId: String,
+    teamId: String?,
+    localAssignee: String
+  ) {
+    self.removed = removed
+    self.profileId = profileId
+    self.teamId = teamId
+    self.localAssignee = localAssignee
+  }
+}
+
 public struct LinearProjectBindingResponse: Decodable, Hashable {
   public let ok: Bool
   public let cleared: Bool?
@@ -2419,6 +2499,119 @@ public struct TicketSyncReviewState: Hashable {
   }
 }
 
+public struct TicketReviewQueueEntry: Hashable, Identifiable {
+  public let ticketId: String
+  public let title: String
+  public let badgeLabel: String
+  public let summary: String
+  public let commentCount: Int
+  public let openConflictCount: Int
+  public let localNoteCount: Int
+  public let updatedAt: String
+
+  public var id: String { ticketId }
+
+  public init?(
+    ticket: TicketSummary,
+    detail: TicketDetailResponse? = nil,
+    localNoteCount: Int = 0
+  ) {
+    let normalizedLocalNoteCount = max(localNoteCount, 0)
+    let summary: String
+    let badgeLabel: String
+    let commentCount: Int
+    let openConflictCount: Int
+
+    if let detail, detail.linearSyncReviewState.needsReview {
+      let review = detail.linearSyncReviewState
+      summary = review.message
+      badgeLabel = review.badgeLabel
+      commentCount = review.commentCount
+      openConflictCount = review.openConflictCount
+    } else if let reviewHint = ticket.linearSyncUXState.reviewHint {
+      summary = reviewHint
+      badgeLabel = "Needs review"
+      commentCount = detail?.comments.count ?? 0
+      openConflictCount = detail?.openSyncConflicts.count ?? 0
+    } else {
+      return nil
+    }
+
+    ticketId = ticket.ticketId
+    title = ticket.title
+    self.badgeLabel = badgeLabel
+    self.summary = summary
+    self.commentCount = commentCount
+    self.openConflictCount = openConflictCount
+    self.localNoteCount = normalizedLocalNoteCount
+    updatedAt = detail?.ticket.updatedAt ?? ticket.updatedAt
+  }
+}
+
+public struct TicketLocalReviewNote: Codable, Hashable, Identifiable {
+  public let noteId: String
+  public let createdAt: String
+  public let markdown: String
+
+  public var id: String { noteId }
+
+  public init(noteId: String, createdAt: String, markdown: String) {
+    self.noteId = noteId
+    self.createdAt = createdAt
+    self.markdown = markdown
+  }
+}
+
+public enum TicketReviewComposer {
+  public static func draft(
+    for detail: TicketDetailResponse,
+    highlightedConflict: TicketSyncConflict? = nil
+  ) -> String {
+    var lines = ["Review follow-up", ""]
+
+    if let highlightedConflict {
+      lines.append("Conflict to resolve:")
+      lines.append("- Field: \(highlightedConflict.field)")
+      if let summary = highlightedConflict.summary, !summary.isEmpty {
+        lines.append("- Summary: \(summary)")
+      }
+      if let localValue = highlightedConflict.localValue?.displayText, !localValue.isEmpty {
+        lines.append("- Hack: \(localValue)")
+      }
+      if let remoteValue = highlightedConflict.remoteValue?.displayText, !remoteValue.isEmpty {
+        lines.append("- Linear: \(remoteValue)")
+      }
+    } else if !detail.openSyncConflicts.isEmpty {
+      lines.append("Open conflicts:")
+      for conflict in detail.openSyncConflicts.prefix(3) {
+        let summary = conflict.summary?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let summarySuffix = (summary?.isEmpty == false) ? ": \(summary!)" : ""
+        lines.append("- \(conflict.field)\(summarySuffix)")
+      }
+    } else {
+      lines.append(detail.linearSyncReviewState.message)
+    }
+
+    if let latestComment = detail.comments.last {
+      lines.append("")
+      lines.append("Latest comment context:")
+      lines.append(quote(comment: latestComment))
+    }
+
+    return lines.joined(separator: "\n")
+      .replacingOccurrences(of: "\n\n\n", with: "\n\n")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+
+  public static func quote(comment: TicketComment) -> String {
+    let header = "> \(comment.actor) • \(comment.source) • \(comment.createdAt)"
+    let bodyLines = comment.body
+      .split(separator: "\n", omittingEmptySubsequences: false)
+      .map { "> \($0)" }
+    return ([header] + bodyLines).joined(separator: "\n")
+  }
+}
+
 private enum LinearSyncActor: String {
   case hack
   case linear
@@ -2585,6 +2778,14 @@ public struct TicketConflictResolutionResponse: Decodable {
     self.ticketId = ticketId
     self.conflictId = conflictId
     self.resolution = resolution
+  }
+}
+
+public struct TicketCommentAppendResponse: Decodable {
+  public let comment: TicketComment
+
+  public init(comment: TicketComment) {
+    self.comment = comment
   }
 }
 

@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import { createDbClient } from "@hack/db";
-import { linearWebhookEvents } from "@hack/db/schema/core";
 import { and, desc, eq, type SQL, sql } from "drizzle-orm";
+
+import { linearWebhookEvents } from "../../db/schema.ts";
+import { createDbClient } from "../../db.ts";
 
 export type LinearWebhookDeliveryStatus = "pending" | "applied" | "ignored";
 
@@ -20,6 +21,7 @@ export type RecordLinearWebhookDeliveryInput = {
   readonly issueId?: string | null;
   readonly issueIdentifier?: string | null;
   readonly betterAuthUserId: string | null;
+  readonly betterAuthOrganizationId?: string | null;
   readonly organizationId: string | null;
   readonly teamId: string | null;
 };
@@ -29,6 +31,8 @@ export type ListLinearWebhookDeliveriesInput = {
   readonly profileId?: string | null;
   readonly projectId?: string | null;
   readonly teamId?: string | null;
+  readonly betterAuthUserId?: string | null;
+  readonly betterAuthOrganizationId?: string | null;
 };
 
 export type LinearWebhookDelivery = {
@@ -46,6 +50,7 @@ export type LinearWebhookDelivery = {
   readonly issueId: string | null;
   readonly issueIdentifier: string | null;
   readonly betterAuthUserId: string | null;
+  readonly betterAuthOrganizationId: string | null;
   readonly organizationId: string | null;
   readonly ownerTeamId: string | null;
   readonly status: LinearWebhookDeliveryStatus;
@@ -61,6 +66,9 @@ export type LinearSyncStore = {
   readonly listWebhookDeliveries: (
     input?: ListLinearWebhookDeliveriesInput
   ) => Promise<readonly LinearWebhookDelivery[]>;
+  readonly getWebhookDelivery: (input: {
+    readonly deliveryId: string;
+  }) => Promise<LinearWebhookDelivery | null>;
   readonly markWebhookDeliveryApplied: (input: {
     readonly deliveryId: string;
   }) => Promise<LinearWebhookDelivery | null>;
@@ -94,6 +102,7 @@ export class InMemoryLinearSyncStore implements LinearSyncStore {
       issueId: normalizeText(input.issueId),
       issueIdentifier: normalizeText(input.issueIdentifier),
       betterAuthUserId: input.betterAuthUserId,
+      betterAuthOrganizationId: input.betterAuthOrganizationId ?? null,
       organizationId: input.organizationId,
       ownerTeamId: normalizeText(input.teamId),
       status: "pending",
@@ -115,6 +124,12 @@ export class InMemoryLinearSyncStore implements LinearSyncStore {
         )
         .sort((left, right) => right.receivedAt.localeCompare(left.receivedAt))
     );
+  }
+
+  getWebhookDelivery(input: {
+    readonly deliveryId: string;
+  }): Promise<LinearWebhookDelivery | null> {
+    return Promise.resolve(this.deliveriesById.get(input.deliveryId) ?? null);
   }
 
   markWebhookDeliveryApplied(input: {
@@ -157,6 +172,7 @@ export function createLinearSyncStoreFromDb(input: {
       issueId,
       issueIdentifier,
       betterAuthUserId,
+      betterAuthOrganizationId,
       organizationId,
       teamId,
     }) => {
@@ -187,6 +203,7 @@ export function createLinearSyncStoreFromDb(input: {
             payload: payloadJson,
             signatureVerified,
             webhookTimestamp,
+            [BETTER_AUTH_ORGANIZATION_PAYLOAD_KEY]: betterAuthOrganizationId,
           }),
           applyError: null,
           claimedBy: null,
@@ -227,7 +244,20 @@ export function createLinearSyncStoreFromDb(input: {
               .from(linearWebhookEvents)
               .where(and(...filters))
               .orderBy(desc(linearWebhookEvents.createdAt));
-      return rows.map((row) => toWebhookDelivery({ row }));
+      return rows
+        .map((row) => toWebhookDelivery({ row }))
+        .filter((delivery) =>
+          matchesDeliveryFilter({ delivery, filter: input })
+        );
+    },
+
+    getWebhookDelivery: async ({ deliveryId }) => {
+      const rows = await db
+        .select()
+        .from(linearWebhookEvents)
+        .where(eq(linearWebhookEvents.id, deliveryId))
+        .limit(1);
+      return rows[0] ? toWebhookDelivery({ row: rows[0] }) : null;
     },
 
     markWebhookDeliveryApplied: async ({ deliveryId }) => {
@@ -270,6 +300,9 @@ function toWebhookDelivery(input: {
     issueId: input.row.issueId ?? null,
     issueIdentifier: input.row.issueIdentifier ?? null,
     betterAuthUserId: input.row.betterAuthUserId ?? null,
+    betterAuthOrganizationId: readStoredBetterAuthOrganizationId({
+      payloadJson: input.row.payloadJson,
+    }),
     organizationId: input.row.organizationId ?? null,
     ownerTeamId: input.row.ownerTeamId ?? null,
     status: normalizeDeliveryStatus({ value: input.row.status }),
@@ -298,6 +331,13 @@ function buildListFilters(input: {
   if (teamId) {
     filters.push(eq(linearWebhookEvents.teamId, teamId));
   }
+  const betterAuthUserId = normalizeText(input.input.betterAuthUserId);
+  if (
+    betterAuthUserId &&
+    normalizeText(input.input.betterAuthOrganizationId) == null
+  ) {
+    filters.push(eq(linearWebhookEvents.betterAuthUserId, betterAuthUserId));
+  }
   return filters;
 }
 
@@ -318,6 +358,33 @@ function matchesDeliveryFilter(input: {
   }
   const teamId = normalizeText(input.filter.teamId);
   if (teamId && input.delivery.teamId !== teamId) {
+    return false;
+  }
+  const betterAuthOrganizationId = normalizeText(
+    input.filter.betterAuthOrganizationId
+  );
+  if (
+    betterAuthOrganizationId &&
+    input.delivery.betterAuthOrganizationId !== betterAuthOrganizationId
+  ) {
+    const fallbackBetterAuthUserId = normalizeText(
+      input.filter.betterAuthUserId
+    );
+    if (
+      input.delivery.betterAuthOrganizationId != null ||
+      fallbackBetterAuthUserId == null ||
+      input.delivery.betterAuthUserId !== fallbackBetterAuthUserId
+    ) {
+      return false;
+    }
+  } else if (betterAuthOrganizationId) {
+    return true;
+  }
+  const betterAuthUserId = normalizeText(input.filter.betterAuthUserId);
+  if (
+    betterAuthUserId &&
+    input.delivery.betterAuthUserId !== betterAuthUserId
+  ) {
     return false;
   }
   return true;
@@ -343,6 +410,8 @@ function buildDeliveryKey(input: {
     )
     .digest("hex");
 }
+
+const BETTER_AUTH_ORGANIZATION_PAYLOAD_KEY = "_betterAuthOrganizationId";
 
 function readStoredEnvelope(input: {
   readonly payloadJson: string;
@@ -380,6 +449,15 @@ function readStoredWebhookTimestamp(input: {
   });
 }
 
+function readStoredBetterAuthOrganizationId(input: {
+  readonly payloadJson: string;
+}): string | null {
+  return readStringField({
+    record: readStoredEnvelope(input),
+    key: BETTER_AUTH_ORGANIZATION_PAYLOAD_KEY,
+  });
+}
+
 function readStoredSignatureVerified(input: {
   readonly payloadJson: string;
 }): boolean {
@@ -403,7 +481,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object";
 }
 
-function normalizeText(value: string | null | undefined): string | null {
+function normalizeText(value: unknown): string | null {
   if (typeof value !== "string") {
     return null;
   }

@@ -452,6 +452,196 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
     },
   },
   {
+    name: "assignee-mappings",
+    summary: "List explicit local assignee to Linear user mappings",
+    scope: "global",
+    allowWhenDisabled: true,
+    handler: async ({ ctx, args }) => {
+      const parsed = parseAssigneeMappingsArgs({ args });
+      if (!parsed.ok) {
+        ctx.logger.error({ message: parsed.error });
+        return 1;
+      }
+
+      const profileId = resolveSelectedLinearProfileId({
+        controlPlaneConfig: ctx.controlPlaneConfig,
+        profileId: parsed.value.profileId,
+      });
+      const mappings = listLinearAssigneeMappings({
+        controlPlaneConfig: ctx.controlPlaneConfig,
+        profileId,
+        teamId: parsed.value.teamId,
+      });
+
+      const payload = {
+        profileId,
+        ...(parsed.value.teamId ? { teamId: parsed.value.teamId } : {}),
+        mappings,
+      };
+      if (parsed.value.json) {
+        process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+        return 0;
+      }
+
+      await display.kv({
+        title: "Linear assignee mappings",
+        entries: [
+          ["profile", profileId],
+          ["team_id", parsed.value.teamId ?? ""],
+          ["count", String(mappings.length)],
+        ],
+      });
+      await display.table({
+        columns: [
+          "Local Assignee",
+          "Team ID",
+          "Linear User ID",
+          "Linear User",
+          "Linear Email",
+        ],
+        rows: mappings.map((mapping) => [
+          mapping.localAssignee,
+          mapping.teamId ?? "",
+          mapping.linearUserId ?? "",
+          mapping.linearUserName ?? "",
+          mapping.linearUserEmail ?? "",
+        ]),
+      });
+      return 0;
+    },
+  },
+  {
+    name: "set-assignee-mapping",
+    summary:
+      "Create or replace an explicit local assignee to Linear user mapping",
+    scope: "global",
+    allowWhenDisabled: true,
+    handler: async ({ ctx, args }) => {
+      const parsed = parseUpsertAssigneeMappingArgs({ args });
+      if (!parsed.ok) {
+        ctx.logger.error({ message: parsed.error });
+        return 1;
+      }
+
+      const profileId = resolveSelectedLinearProfileId({
+        controlPlaneConfig: ctx.controlPlaneConfig,
+        profileId: parsed.value.profileId,
+      });
+      const nextMapping = createLinearAssigneeMapping({
+        profileId,
+        teamId: parsed.value.teamId,
+        localAssignee: parsed.value.localAssignee,
+        linearUserId: parsed.value.linearUserId,
+        linearUserName: parsed.value.linearUserName,
+        linearUserEmail: parsed.value.linearUserEmail,
+      });
+      if (!nextMapping) {
+        ctx.logger.error({
+          message:
+            "Missing --local-assignee or Linear user details. Pass --linear-user-id, --linear-user-name, or --linear-user-email.",
+        });
+        return 1;
+      }
+
+      const currentMappings = listLinearAssigneeMappings({
+        controlPlaneConfig: ctx.controlPlaneConfig,
+      });
+      const nextMappings = upsertLinearAssigneeMapping({
+        mappings: currentMappings,
+        mapping: nextMapping,
+      });
+      await updateGlobalConfig({
+        path: `controlPlane.extensions["${EXTENSION_ID}"].config.assigneeMappings`,
+        value: nextMappings,
+      });
+
+      const payload = {
+        upserted: true,
+        replacedExisting: hasLinearAssigneeMapping({
+          mappings: currentMappings,
+          mapping: nextMapping,
+        }),
+        mapping: nextMapping,
+      };
+      if (parsed.value.json) {
+        process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+        return 0;
+      }
+
+      await display.kv({
+        title: "Linear assignee mapping saved",
+        entries: [
+          ["profile", nextMapping.profileId],
+          ["team_id", nextMapping.teamId ?? ""],
+          ["local_assignee", nextMapping.localAssignee],
+          ["linear_user_id", nextMapping.linearUserId ?? ""],
+          ["linear_user_name", nextMapping.linearUserName ?? ""],
+          ["linear_user_email", nextMapping.linearUserEmail ?? ""],
+        ],
+      });
+      return 0;
+    },
+  },
+  {
+    name: "remove-assignee-mapping",
+    summary: "Remove an explicit local assignee to Linear user mapping",
+    scope: "global",
+    allowWhenDisabled: true,
+    handler: async ({ ctx, args }) => {
+      const parsed = parseRemoveAssigneeMappingArgs({ args });
+      if (!parsed.ok) {
+        ctx.logger.error({ message: parsed.error });
+        return 1;
+      }
+
+      const profileId = resolveSelectedLinearProfileId({
+        controlPlaneConfig: ctx.controlPlaneConfig,
+        profileId: parsed.value.profileId,
+      });
+      const localAssignee = readOptionalString(parsed.value.localAssignee);
+      if (!localAssignee) {
+        ctx.logger.error({ message: "Missing --local-assignee <value>." });
+        return 1;
+      }
+
+      const currentMappings = listLinearAssigneeMappings({
+        controlPlaneConfig: ctx.controlPlaneConfig,
+      });
+      const removed = removeLinearAssigneeMapping({
+        mappings: currentMappings,
+        profileId,
+        teamId: parsed.value.teamId,
+        localAssignee,
+      });
+      await updateGlobalConfig({
+        path: `controlPlane.extensions["${EXTENSION_ID}"].config.assigneeMappings`,
+        value: removed.mappings,
+      });
+
+      const payload = {
+        removed: removed.removed,
+        profileId,
+        ...(parsed.value.teamId ? { teamId: parsed.value.teamId } : {}),
+        localAssignee,
+      };
+      if (parsed.value.json) {
+        process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+        return removed.removed ? 0 : 1;
+      }
+
+      await display.kv({
+        title: "Linear assignee mapping removed",
+        entries: [
+          ["profile", profileId],
+          ["team_id", parsed.value.teamId ?? ""],
+          ["local_assignee", localAssignee],
+          ["removed", removed.removed ? "yes" : "no"],
+        ],
+      });
+      return removed.removed ? 0 : 1;
+    },
+  },
+  {
     name: "project-bind",
     summary: "Bind current hack project to a default Linear profile/project",
     scope: "project",
@@ -1430,6 +1620,7 @@ type SyncRuntime = {
   readonly profileId: string;
   readonly apiUrl: string;
   readonly projectBinding: ReturnType<typeof resolveProjectLinearBinding>;
+  readonly assigneeMappings: readonly LinearAssigneeMapping[];
 };
 
 type SyncToggles = {
@@ -1452,11 +1643,43 @@ type ApplyDeliveryArgs = {
   json: boolean;
 };
 
+type AssigneeMappingsArgs = {
+  profileId?: string;
+  teamId?: string;
+  json: boolean;
+};
+
+type UpsertAssigneeMappingArgs = {
+  profileId?: string;
+  teamId?: string;
+  localAssignee?: string;
+  linearUserId?: string;
+  linearUserName?: string;
+  linearUserEmail?: string;
+  json: boolean;
+};
+
+type RemoveAssigneeMappingArgs = {
+  profileId?: string;
+  teamId?: string;
+  localAssignee?: string;
+  json: boolean;
+};
+
 type SyncAssigneeResolution = {
   readonly requestedAssignee?: string;
   readonly matchedUserId?: string;
   readonly matchedUserDisplayName?: string;
   readonly applied: boolean;
+};
+
+type LinearAssigneeMapping = {
+  readonly profileId: string;
+  readonly localAssignee: string;
+  readonly teamId?: string;
+  readonly linearUserId?: string;
+  readonly linearUserName?: string;
+  readonly linearUserEmail?: string;
 };
 
 type LinearToHackRuntime = {
@@ -1501,7 +1724,9 @@ type HackToLinearRuntime = {
     | "listTeamUsers"
     | "updateIssue"
   >;
+  readonly assigneeMappings: readonly LinearAssigneeMapping[];
   readonly profileId: string;
+  readonly apiUrl: string;
   readonly projectBinding: ReturnType<typeof resolveProjectLinearBinding>;
 };
 
@@ -1550,8 +1775,201 @@ async function createSyncRuntime(input: {
       projectBinding: resolveProjectLinearBinding({
         controlPlaneConfig: input.ctx.controlPlaneConfig,
       }),
+      assigneeMappings: listLinearAssigneeMappings({
+        controlPlaneConfig: input.ctx.controlPlaneConfig,
+        profileId: token.profileId,
+      }),
     },
   };
+}
+
+function resolveSelectedLinearProfileId(input: {
+  readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
+  readonly profileId?: string;
+}): string {
+  return resolveLinearAuthSettings({
+    controlPlaneConfig: input.controlPlaneConfig,
+    ...(input.profileId ? { profileId: input.profileId } : {}),
+    allowProjectOverride: false,
+  }).profileId;
+}
+
+function listLinearAssigneeMappings(input: {
+  readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
+  readonly profileId?: string;
+  readonly teamId?: string;
+}): readonly LinearAssigneeMapping[] {
+  const extension = input.controlPlaneConfig.extensions?.[EXTENSION_ID];
+  const config =
+    isRecord(extension) && isRecord(extension.config) ? extension.config : null;
+  const rawMappings = config?.assigneeMappings;
+  const parsedMappings = parseStoredLinearAssigneeMappings({
+    value: rawMappings,
+  });
+
+  return parsedMappings.filter((mapping) => {
+    if (input.profileId && mapping.profileId !== input.profileId) {
+      return false;
+    }
+    if (input.teamId && mapping.teamId !== input.teamId) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function parseStoredLinearAssigneeMappings(input: {
+  readonly value: unknown;
+}): readonly LinearAssigneeMapping[] {
+  let rawItems: readonly unknown[] = [];
+  if (Array.isArray(input.value)) {
+    rawItems = input.value;
+  } else if (isRecord(input.value) && Array.isArray(input.value.items)) {
+    rawItems = input.value.items;
+  }
+  const deduped = new Map<string, LinearAssigneeMapping>();
+  for (const item of rawItems) {
+    const mapping = parseLinearAssigneeMapping({ value: item });
+    if (!mapping) {
+      continue;
+    }
+    deduped.set(buildLinearAssigneeMappingKey({ mapping }), mapping);
+  }
+  return [...deduped.values()].sort((left, right) => {
+    const leftKey = buildLinearAssigneeMappingKey({ mapping: left });
+    const rightKey = buildLinearAssigneeMappingKey({ mapping: right });
+    return leftKey.localeCompare(rightKey);
+  });
+}
+
+function parseLinearAssigneeMapping(input: {
+  readonly value: unknown;
+}): LinearAssigneeMapping | null {
+  if (!isRecord(input.value)) {
+    return null;
+  }
+  return createLinearAssigneeMapping({
+    profileId: input.value.profileId,
+    teamId: input.value.teamId,
+    localAssignee: input.value.localAssignee,
+    linearUserId: input.value.linearUserId,
+    linearUserName: input.value.linearUserName,
+    linearUserEmail: input.value.linearUserEmail,
+  });
+}
+
+function createLinearAssigneeMapping(input: {
+  readonly profileId: unknown;
+  readonly teamId?: unknown;
+  readonly localAssignee?: unknown;
+  readonly linearUserId?: unknown;
+  readonly linearUserName?: unknown;
+  readonly linearUserEmail?: unknown;
+}): LinearAssigneeMapping | null {
+  const profileId = readOptionalString(input.profileId);
+  const localAssignee = readOptionalString(input.localAssignee);
+  const linearUserId = readOptionalString(input.linearUserId);
+  const linearUserName = readOptionalString(input.linearUserName);
+  const linearUserEmail = readOptionalString(input.linearUserEmail);
+  if (!(profileId && localAssignee)) {
+    return null;
+  }
+  if (!(linearUserId || linearUserName || linearUserEmail)) {
+    return null;
+  }
+  const teamId = readOptionalString(input.teamId);
+  return {
+    profileId,
+    localAssignee,
+    ...(teamId ? { teamId } : {}),
+    ...(linearUserId ? { linearUserId } : {}),
+    ...(linearUserName ? { linearUserName } : {}),
+    ...(linearUserEmail ? { linearUserEmail } : {}),
+  };
+}
+
+function buildLinearAssigneeMappingKey(input: {
+  readonly mapping: Pick<
+    LinearAssigneeMapping,
+    "profileId" | "teamId" | "localAssignee"
+  >;
+}): string {
+  return [
+    input.mapping.profileId.trim().toLowerCase(),
+    readOptionalString(input.mapping.teamId)?.toLowerCase() ?? "*",
+    input.mapping.localAssignee.trim().toLowerCase(),
+  ].join("|");
+}
+
+function hasLinearAssigneeMapping(input: {
+  readonly mappings: readonly LinearAssigneeMapping[];
+  readonly mapping: LinearAssigneeMapping;
+}): boolean {
+  const targetKey = buildLinearAssigneeMappingKey({
+    mapping: input.mapping,
+  });
+  return input.mappings.some(
+    (mapping) =>
+      buildLinearAssigneeMappingKey({
+        mapping,
+      }) === targetKey
+  );
+}
+
+function upsertLinearAssigneeMapping(input: {
+  readonly mappings: readonly LinearAssigneeMapping[];
+  readonly mapping: LinearAssigneeMapping;
+}): readonly LinearAssigneeMapping[] {
+  const targetKey = buildLinearAssigneeMappingKey({
+    mapping: input.mapping,
+  });
+  const next: LinearAssigneeMapping[] = [];
+  for (const mapping of input.mappings) {
+    if (
+      buildLinearAssigneeMappingKey({
+        mapping,
+      }) === targetKey
+    ) {
+      continue;
+    }
+    next.push(mapping);
+  }
+  next.push(input.mapping);
+  return next.sort((left, right) => {
+    const leftKey = buildLinearAssigneeMappingKey({ mapping: left });
+    const rightKey = buildLinearAssigneeMappingKey({ mapping: right });
+    return leftKey.localeCompare(rightKey);
+  });
+}
+
+function removeLinearAssigneeMapping(input: {
+  readonly mappings: readonly LinearAssigneeMapping[];
+  readonly profileId: string;
+  readonly teamId?: string;
+  readonly localAssignee: string;
+}): {
+  readonly removed: boolean;
+  readonly mappings: readonly LinearAssigneeMapping[];
+} {
+  const targetKey = buildLinearAssigneeMappingKey({
+    mapping: {
+      profileId: input.profileId,
+      ...(input.teamId ? { teamId: input.teamId } : {}),
+      localAssignee: input.localAssignee,
+    },
+  });
+  let removed = false;
+  const next = input.mappings.filter((mapping) => {
+    const isTarget =
+      buildLinearAssigneeMappingKey({
+        mapping,
+      }) === targetKey;
+    if (isTarget) {
+      removed = true;
+    }
+    return !isTarget;
+  });
+  return { removed, mappings: next };
 }
 
 type RecordedSyncConflict = {
@@ -1794,6 +2212,75 @@ function resolveLinearAssigneeMatch(input: {
   return match ?? null;
 }
 
+function resolveExplicitLinearAssigneeMapping(input: {
+  readonly assigneeMappings: readonly LinearAssigneeMapping[];
+  readonly profileId: string;
+  readonly teamId: string;
+  readonly localAssignee: string;
+}): LinearAssigneeMapping | null {
+  const targetAssignee = input.localAssignee.trim().toLowerCase();
+  const exactMatch =
+    input.assigneeMappings.find(
+      (mapping) =>
+        mapping.profileId === input.profileId &&
+        mapping.teamId === input.teamId &&
+        mapping.localAssignee.trim().toLowerCase() === targetAssignee
+    ) ?? null;
+  if (exactMatch) {
+    return exactMatch;
+  }
+  return (
+    input.assigneeMappings.find(
+      (mapping) =>
+        mapping.profileId === input.profileId &&
+        !readOptionalString(mapping.teamId) &&
+        mapping.localAssignee.trim().toLowerCase() === targetAssignee
+    ) ?? null
+  );
+}
+
+function resolveLinearAssigneeFromMapping(input: {
+  readonly mapping: LinearAssigneeMapping;
+  readonly users: readonly LinearUser[];
+}): LinearUser | null {
+  if (input.mapping.linearUserId) {
+    const byId =
+      input.users.find((user) => user.id === input.mapping.linearUserId) ??
+      null;
+    if (byId) {
+      return byId;
+    }
+  }
+  const email = readOptionalString(
+    input.mapping.linearUserEmail
+  )?.toLowerCase();
+  if (email) {
+    const byEmail =
+      input.users.find(
+        (user) => readOptionalString(user.email)?.toLowerCase() === email
+      ) ?? null;
+    if (byEmail) {
+      return byEmail;
+    }
+  }
+  const displayName = readOptionalString(
+    input.mapping.linearUserName
+  )?.toLowerCase();
+  if (displayName) {
+    const byName =
+      input.users.find((user) => {
+        const userDisplayName = readOptionalString(
+          user.displayName ?? user.name
+        )?.toLowerCase();
+        return userDisplayName === displayName;
+      }) ?? null;
+    if (byName) {
+      return byName;
+    }
+  }
+  return null;
+}
+
 function buildConflictDedupKey(input: {
   readonly field: string;
   readonly localValue?: TicketMetadataValue;
@@ -1977,13 +2464,42 @@ async function recordLinearSyncCheckpoint(input: {
 }
 
 async function resolveTicketAssigneeForLinear(input: {
-  readonly runtime: Pick<HackToLinearRuntime, "linear">;
+  readonly runtime: {
+    readonly assigneeMappings: readonly LinearAssigneeMapping[];
+    readonly linear: Pick<LinearSyncClient, "listTeamUsers">;
+    readonly profileId: string;
+  };
   readonly ticket: TicketSummary;
   readonly teamId: string;
 }): Promise<SyncAssigneeResolution> {
   const requestedAssignee = readOptionalString(input.ticket.assignee);
   if (!requestedAssignee) {
     return { applied: false };
+  }
+
+  const explicitMapping = resolveExplicitLinearAssigneeMapping({
+    assigneeMappings: input.runtime.assigneeMappings,
+    profileId: input.runtime.profileId,
+    teamId: input.teamId,
+    localAssignee: requestedAssignee,
+  });
+  if (explicitMapping?.linearUserId) {
+    return {
+      requestedAssignee,
+      matchedUserId: explicitMapping.linearUserId,
+      ...(readOptionalString(
+        explicitMapping.linearUserName ?? explicitMapping.linearUserEmail
+      )
+        ? {
+            matchedUserDisplayName:
+              readOptionalString(
+                explicitMapping.linearUserName ??
+                  explicitMapping.linearUserEmail
+              ) ?? undefined,
+          }
+        : {}),
+      applied: true,
+    };
   }
 
   const users = await input.runtime.linear.listTeamUsers({
@@ -1995,10 +2511,17 @@ async function resolveTicketAssigneeForLinear(input: {
       applied: false,
     };
   }
-  const match = resolveLinearAssigneeMatch({
-    assignee: requestedAssignee,
-    users: users.data,
-  });
+  const match =
+    (explicitMapping
+      ? resolveLinearAssigneeFromMapping({
+          mapping: explicitMapping,
+          users: users.data,
+        })
+      : null) ??
+    resolveLinearAssigneeMatch({
+      assignee: requestedAssignee,
+      users: users.data,
+    });
   return {
     requestedAssignee,
     ...(match?.id ? { matchedUserId: match.id } : {}),
@@ -2218,7 +2741,10 @@ async function syncTicketToLinearIssue(input: {
 }
 
 async function resolveLinearTargetForTicketSync(input: {
-  readonly runtime: SyncRuntime;
+  readonly runtime: {
+    readonly linear: Pick<LinearSyncClient, "getProject">;
+    readonly projectBinding: ReturnType<typeof resolveProjectLinearBinding>;
+  };
   readonly ticket: TicketSummary;
   readonly existingIssue: LinearIssue | null;
   readonly explicitProjectId?: string;
@@ -2277,7 +2803,15 @@ type LinearTicketMutationFields = {
 };
 
 async function resolveLinearMutationFieldsForTicketSync(input: {
-  readonly runtime: SyncRuntime;
+  readonly runtime: {
+    readonly linear: Pick<
+      LinearSyncClient,
+      "listTeamLabels" | "listTeamStates" | "listTeamUsers"
+    >;
+    readonly tickets: Pick<TicketSyncStore, "getTicket">;
+    readonly profileId: string;
+    readonly assigneeMappings: readonly LinearAssigneeMapping[];
+  };
   readonly ticket: TicketSummary;
   readonly teamId: string;
   readonly syncToggles: SyncToggles;
@@ -2342,7 +2876,9 @@ async function resolveLinearMutationFieldsForTicketSync(input: {
 }
 
 async function upsertLinearIssueForTicketSync(input: {
-  readonly runtime: SyncRuntime;
+  readonly runtime: {
+    readonly linear: Pick<LinearSyncClient, "createIssue" | "updateIssue">;
+  };
   readonly ticket: TicketSummary;
   readonly existingIssue: LinearIssue | null;
   readonly fields: LinearTicketMutationFields;
@@ -2944,7 +3480,12 @@ async function buildLinearDependencyIndex(input: {
 }
 
 async function resolveLinkedLinearIssue(input: {
-  readonly runtime: SyncRuntime;
+  readonly runtime: {
+    readonly linear: Pick<
+      LinearSyncClient,
+      "getIssueById" | "getIssueByIdentifier"
+    >;
+  };
   readonly ticket: TicketSummary;
 }): Promise<
   | { readonly ok: true; readonly issue: LinearIssue | null }
@@ -2977,7 +3518,9 @@ async function resolveLinkedLinearIssue(input: {
 }
 
 async function resolveLinearStateIdForTicketStatus(input: {
-  readonly runtime: SyncRuntime;
+  readonly runtime: {
+    readonly linear: Pick<LinearSyncClient, "listTeamStates">;
+  };
   readonly teamId: string;
   readonly status: TicketStatus;
   readonly enabled: boolean;
@@ -3005,7 +3548,9 @@ async function resolveLinearStateIdForTicketStatus(input: {
 }
 
 async function resolveLinearLabelIds(input: {
-  readonly runtime: SyncRuntime;
+  readonly runtime: {
+    readonly linear: Pick<LinearSyncClient, "listTeamLabels">;
+  };
   readonly teamId: string;
   readonly tags: readonly string[];
   readonly enabled: boolean;
@@ -3045,7 +3590,9 @@ async function resolveLinearLabelIds(input: {
 }
 
 async function resolveLinearParentIssueId(input: {
-  readonly runtime: SyncRuntime;
+  readonly runtime: {
+    readonly tickets: Pick<TicketSyncStore, "getTicket">;
+  };
   readonly ticket: TicketSummary;
   readonly enabled: boolean;
 }): Promise<
@@ -4450,6 +4997,130 @@ function parseApplyDeliveryArgs(input: {
   };
 }
 
+function parseAssigneeMappingsArgs(input: {
+  readonly args: readonly string[];
+}):
+  | { readonly ok: true; readonly value: AssigneeMappingsArgs }
+  | { readonly ok: false; readonly error: string } {
+  const value: AssigneeMappingsArgs = { json: false };
+  for (let i = 0; i < input.args.length; i += 1) {
+    const token = input.args[i] ?? "";
+    if (token === "--json") {
+      value.json = true;
+      continue;
+    }
+    const handled = assignKeyValueFlag({
+      token,
+      args: input.args,
+      index: i,
+      out: value,
+      keys: {
+        profile: "profileId",
+        "team-id": "teamId",
+      },
+    });
+    if (!handled.ok) {
+      return { ok: false, error: handled.error };
+    }
+    i = handled.nextIndex;
+  }
+  return { ok: true, value };
+}
+
+function parseUpsertAssigneeMappingArgs(input: {
+  readonly args: readonly string[];
+}):
+  | { readonly ok: true; readonly value: UpsertAssigneeMappingArgs }
+  | { readonly ok: false; readonly error: string } {
+  const value: UpsertAssigneeMappingArgs = { json: false };
+  for (let i = 0; i < input.args.length; i += 1) {
+    const token = input.args[i] ?? "";
+    if (token === "--json") {
+      value.json = true;
+      continue;
+    }
+    const handled = assignKeyValueFlag({
+      token,
+      args: input.args,
+      index: i,
+      out: value,
+      keys: {
+        profile: "profileId",
+        "team-id": "teamId",
+        "local-assignee": "localAssignee",
+        "linear-user-id": "linearUserId",
+        "linear-user-name": "linearUserName",
+        "linear-user-email": "linearUserEmail",
+      },
+    });
+    if (!handled.ok) {
+      return { ok: false, error: handled.error };
+    }
+    i = handled.nextIndex;
+  }
+
+  if (!readOptionalString(value.localAssignee)) {
+    return {
+      ok: false,
+      error: "Missing --local-assignee <value>.",
+    };
+  }
+  if (
+    !(
+      readOptionalString(value.linearUserId) ||
+      readOptionalString(value.linearUserName) ||
+      readOptionalString(value.linearUserEmail)
+    )
+  ) {
+    return {
+      ok: false,
+      error:
+        "Missing Linear user target. Pass --linear-user-id, --linear-user-name, or --linear-user-email.",
+    };
+  }
+
+  return { ok: true, value };
+}
+
+function parseRemoveAssigneeMappingArgs(input: {
+  readonly args: readonly string[];
+}):
+  | { readonly ok: true; readonly value: RemoveAssigneeMappingArgs }
+  | { readonly ok: false; readonly error: string } {
+  const value: RemoveAssigneeMappingArgs = { json: false };
+  for (let i = 0; i < input.args.length; i += 1) {
+    const token = input.args[i] ?? "";
+    if (token === "--json") {
+      value.json = true;
+      continue;
+    }
+    const handled = assignKeyValueFlag({
+      token,
+      args: input.args,
+      index: i,
+      out: value,
+      keys: {
+        profile: "profileId",
+        "team-id": "teamId",
+        "local-assignee": "localAssignee",
+      },
+    });
+    if (!handled.ok) {
+      return { ok: false, error: handled.error };
+    }
+    i = handled.nextIndex;
+  }
+
+  if (!readOptionalString(value.localAssignee)) {
+    return {
+      ok: false,
+      error: "Missing --local-assignee <value>.",
+    };
+  }
+
+  return { ok: true, value };
+}
+
 function parseSetupArgs(input: {
   readonly args: readonly string[];
 }):
@@ -4949,15 +5620,19 @@ export const __testOnly = {
   buildOAuthArgsFromConnectArgs,
   detectAuthoritativeFieldConflicts,
   parseApplyDeliveryArgs,
+  parseAssigneeMappingsArgs,
   parseConnectArgs,
   parseDeliveriesArgs,
   parseProjectBindArgs,
   parseProjectsArgs,
+  parseRemoveAssigneeMappingArgs,
   resolveOAuthBrokerRuntimeConfig,
+  resolveTicketAssigneeForLinear,
   parseSetupArgs,
   parseStatusArgs,
   parseSyncIssueArgs,
   parseSyncProjectArgs,
+  parseUpsertAssigneeMappingArgs,
   selectLinearCommentsToAppend,
   selectTicketCommentsToPush,
   shouldFallbackConnectToOAuth,

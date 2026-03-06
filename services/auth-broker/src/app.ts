@@ -104,11 +104,13 @@ export function createAuthBrokerApp({
     .use(
       createLinearConnectionsPlugin({
         connectionStore: linearConnectionStore,
+        betterAuthRuntime,
       })
     )
     .use(
       createLinearSyncStorePlugin({
         syncStore: linearSyncStore,
+        betterAuthRuntime,
       })
     )
     .use(

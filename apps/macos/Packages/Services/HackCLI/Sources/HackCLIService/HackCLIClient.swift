@@ -477,6 +477,79 @@ public actor HackCLIClient {
     return try decodeJsonOrThrow(LinearProjectsResponse.self, result: result)
   }
 
+  public func listLinearAssigneeMappings(
+    profileId: String? = nil,
+    teamId: String? = nil
+  ) async throws -> LinearAssigneeMappingsResponse {
+    var args = ["x", "linear", "assignee-mappings", "--json"]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    if let teamId, !teamId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--team-id", teamId])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(LinearAssigneeMappingsResponse.self, result: result)
+  }
+
+  public func setLinearAssigneeMapping(
+    profileId: String? = nil,
+    teamId: String? = nil,
+    localAssignee: String,
+    linearUserId: String? = nil,
+    linearUserName: String? = nil,
+    linearUserEmail: String? = nil
+  ) async throws -> LinearAssigneeMappingMutationResponse {
+    var args = [
+      "x",
+      "linear",
+      "set-assignee-mapping",
+      "--json",
+      "--local-assignee",
+      localAssignee,
+    ]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    if let teamId, !teamId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--team-id", teamId])
+    }
+    if let linearUserId, !linearUserId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--linear-user-id", linearUserId])
+    }
+    if let linearUserName, !linearUserName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--linear-user-name", linearUserName])
+    }
+    if let linearUserEmail, !linearUserEmail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--linear-user-email", linearUserEmail])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(LinearAssigneeMappingMutationResponse.self, result: result)
+  }
+
+  public func removeLinearAssigneeMapping(
+    profileId: String? = nil,
+    teamId: String? = nil,
+    localAssignee: String
+  ) async throws -> LinearAssigneeMappingRemovalResponse {
+    var args = [
+      "x",
+      "linear",
+      "remove-assignee-mapping",
+      "--json",
+      "--local-assignee",
+      localAssignee,
+    ]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    if let teamId, !teamId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--team-id", teamId])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(LinearAssigneeMappingRemovalResponse.self, result: result)
+  }
+
   public func bindLinearProject(
     path: String,
     profileId: String?,
@@ -1011,6 +1084,32 @@ public actor HackCLIClient {
   ) async throws -> TicketStatusResponse {
     let result = try await run(["x", "tickets", "status", ticketId, status.rawValue, "--json"], cwd: path)
     return try decodeLenient(TicketStatusResponse.self, from: result.stdout)
+  }
+
+  public func appendTicketComment(
+    path: String,
+    ticketId: String,
+    body: String,
+    source: String? = nil,
+    actor: String? = nil
+  ) async throws -> TicketCommentAppendResponse {
+    var args = [
+      "x",
+      "tickets",
+      "comment",
+      ticketId,
+      "--body",
+      body,
+      "--json",
+    ]
+    if let source, !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--source", source])
+    }
+    if let actor, !actor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--actor", actor])
+    }
+    let result = try await run(args, cwd: path)
+    return try decodeLenient(TicketCommentAppendResponse.self, from: result.stdout)
   }
 
   public func resolveTicketConflict(

@@ -1,5 +1,7 @@
 import { Elysia, t } from "elysia";
 
+import type { BetterAuthRuntime } from "../../better-auth.ts";
+import { resolveBetterAuthSession } from "../better-auth/session.ts";
 import type {
   LinearSyncStore,
   LinearWebhookDeliveryStatus,
@@ -9,6 +11,7 @@ const LINEAR_DELIVERY_STATUSES = ["pending", "applied", "ignored"] as const;
 
 type CreateLinearSyncStorePluginOptions = {
   readonly syncStore: LinearSyncStore;
+  readonly betterAuthRuntime: BetterAuthRuntime;
 };
 
 const listDeliveriesQuerySchema = t.Object({
@@ -27,13 +30,14 @@ const applyDeliveryParamsSchema = t.Object({
  */
 export function createLinearSyncStorePlugin({
   syncStore,
+  betterAuthRuntime,
 }: CreateLinearSyncStorePluginOptions) {
   return new Elysia({
     name: "hack-auth-broker.linear-sync-store",
   })
     .get(
       "/v1/auth/linear/deliveries",
-      async ({ query, set }) => {
+      async ({ query, request, set }) => {
         const statusResult = normalizeStatusQuery({ value: query.status });
         if (!statusResult.ok) {
           set.status = 400;
@@ -42,15 +46,29 @@ export function createLinearSyncStorePlugin({
             error: statusResult.error,
           } as const;
         }
+        const session = await resolveBetterAuthSession({
+          runtime: betterAuthRuntime,
+          request,
+        });
+        if (session.enabled && !session.session) {
+          set.status = 401;
+          return {
+            ok: false,
+            error: "better_auth_session_required",
+          } as const;
+        }
 
         const deliveries = await syncStore.listWebhookDeliveries({
           status: statusResult.status,
           profileId: normalizeOptionalQueryValue({ value: query.profileId }),
           projectId: normalizeOptionalQueryValue({ value: query.projectId }),
           teamId: normalizeOptionalQueryValue({ value: query.teamId }),
+          betterAuthUserId: session.session?.userId ?? null,
+          betterAuthOrganizationId: session.session?.organizationId ?? null,
         });
         return {
           ok: true,
+          accessControlMode: session.accessControlMode,
           deliveries,
         } as const;
       },
@@ -60,7 +78,39 @@ export function createLinearSyncStorePlugin({
     )
     .post(
       "/v1/auth/linear/deliveries/:deliveryId/apply",
-      async ({ params, set }) => {
+      async ({ params, request, set }) => {
+        const session = await resolveBetterAuthSession({
+          runtime: betterAuthRuntime,
+          request,
+        });
+        if (session.enabled && !session.session) {
+          set.status = 401;
+          return {
+            ok: false,
+            error: "better_auth_session_required",
+          } as const;
+        }
+        if (session.session) {
+          const existing = await syncStore.getWebhookDelivery({
+            deliveryId: params.deliveryId,
+          });
+          const hasOrganizationAccess =
+            session.session.organizationId != null &&
+            (existing?.betterAuthOrganizationId ===
+              session.session.organizationId ||
+              (existing?.betterAuthOrganizationId == null &&
+                existing?.betterAuthUserId === session.session.userId));
+          const hasUserAccess =
+            session.session.organizationId == null &&
+            existing?.betterAuthUserId === session.session.userId;
+          if (!(existing && (hasOrganizationAccess || hasUserAccess))) {
+            set.status = 404;
+            return {
+              ok: false,
+              error: "linear_delivery_not_found",
+            } as const;
+          }
+        }
         const delivery = await syncStore.markWebhookDeliveryApplied({
           deliveryId: params.deliveryId,
         });

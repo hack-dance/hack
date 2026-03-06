@@ -2650,6 +2650,7 @@ private struct TailscaleOAuthCredentialControl: View {
 
 private struct LinearExtensionSettingsView: View {
   @Environment(DashboardModel.self) private var model
+  @Environment(\.colorScheme) private var colorScheme
   @State private var isLoadingConfig = false
   @State private var isSavingConfig = false
   @State private var isLoadingDiagnostics = false
@@ -2667,6 +2668,15 @@ private struct LinearExtensionSettingsView: View {
   @State private var authPollingTask: Task<Void, Never>? = nil
   @State private var authFlowStatus: LinearOAuthFlowStatusResponse? = nil
   @State private var disconnectingLinearProfiles: Set<String> = []
+  @State private var assigneeMappings: [LinearAssigneeMapping] = []
+  @State private var assigneeMappingProfile = ""
+  @State private var assigneeMappingTeamId = ""
+  @State private var assigneeMappingLocalAssignee = ""
+  @State private var assigneeMappingLinearUserId = ""
+  @State private var assigneeMappingLinearUserName = ""
+  @State private var assigneeMappingLinearUserEmail = ""
+  @State private var isLoadingAssigneeMappings = false
+  @State private var isSavingAssigneeMapping = false
   @State private var message = ""
   @State private var lastDiagnosticsRefreshAt: Date? = nil
 
@@ -2957,6 +2967,163 @@ private struct LinearExtensionSettingsView: View {
           }
         }
 
+        GlassCard(title: "Assignee mapping", systemImage: "person.crop.rectangle.stack") {
+          VStack(alignment: .leading, spacing: 12) {
+            InlineCallout(
+              tone: .neutral,
+              title: "Best-effort assignee translation",
+              message: "Use explicit mappings when Hack assignee names do not line up cleanly with Linear users. Sync uses the profile and optional team scope here before it falls back to fuzzy email/name matching.",
+              actions: []
+            )
+
+            if linearProfiles.isEmpty {
+              Text("Connect a Linear account before managing assignee mappings.")
+                .font(.mono(.caption))
+                .foregroundStyle(.secondary)
+            } else {
+              VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .center, spacing: 10) {
+                  VStack(alignment: .leading, spacing: 6) {
+                    Text("Profile")
+                      .font(.mono(.caption))
+                      .foregroundStyle(.secondary)
+                    Picker("Profile", selection: $assigneeMappingProfile) {
+                      ForEach(linearProfiles, id: \.id) { profile in
+                        Text(displayNameForRemoteProfileId(profile.id))
+                          .tag(profile.id)
+                      }
+                    }
+                    .pickerStyle(.menu)
+                  }
+
+                  VStack(alignment: .leading, spacing: 6) {
+                    Text("Team scope")
+                      .font(.mono(.caption))
+                      .foregroundStyle(.secondary)
+                    TextField("Optional team id", text: $assigneeMappingTeamId)
+                      .textFieldStyle(.roundedBorder)
+                  }
+
+                  Spacer()
+
+                  Button {
+                    Task { await refreshLinearAssigneeMappings() }
+                  } label: {
+                    Label("Reload", systemImage: "arrow.clockwise")
+                  }
+                  .adaptiveToolbarButton()
+                  .disabled(isLoadingAssigneeMappings || isSavingAssigneeMapping)
+
+                  if isLoadingAssigneeMappings || isSavingAssigneeMapping {
+                    ProgressView()
+                      .controlSize(.small)
+                  }
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                  HStack(spacing: 8) {
+                    Text("Saved mappings")
+                      .font(.mono(.caption))
+                      .foregroundStyle(.secondary)
+                    StatusPill(
+                      text: "\(assigneeMappings.count) mapping\(assigneeMappings.count == 1 ? "" : "s")",
+                      tone: assigneeMappings.isEmpty ? .neutral : .good
+                    )
+                  }
+
+                  if assigneeMappings.isEmpty {
+                    Text("No explicit mappings for this profile/team scope yet.")
+                      .font(.mono(.caption2))
+                      .foregroundStyle(.tertiary)
+                  } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                      ForEach(assigneeMappings) { mapping in
+                        VStack(alignment: .leading, spacing: 8) {
+                          HStack(spacing: 8) {
+                            Text(mapping.localAssignee)
+                              .font(.mono(.subheadline, weight: .semibold))
+                            if let teamId = mapping.teamId, !teamId.isEmpty {
+                              StatusPill(text: "Team \(teamId)", tone: .neutral)
+                            } else {
+                              StatusPill(text: "All teams", tone: .neutral)
+                            }
+                            Spacer()
+                            Button {
+                              populateAssigneeMappingDraft(from: mapping)
+                            } label: {
+                              Label("Use", systemImage: "arrow.down.left.circle")
+                            }
+                            .adaptiveToolbarButton()
+                            Button(role: .destructive) {
+                              Task { await removeLinearAssigneeMapping(mapping) }
+                            } label: {
+                              Label("Remove", systemImage: "trash")
+                            }
+                            .adaptiveToolbarButton()
+                            .disabled(isSavingAssigneeMapping)
+                          }
+                          Text(mappingDestinationLabel(mapping))
+                            .font(.mono(.caption2))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                        }
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                          RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(colorScheme == .dark ? Color.white.opacity(0.03) : Color.black.opacity(0.025))
+                        )
+                        .overlay(
+                          RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                        )
+                      }
+                    }
+                  }
+                }
+
+                Divider()
+                  .opacity(0.2)
+
+                VStack(alignment: .leading, spacing: 10) {
+                  Text("Edit mapping")
+                    .font(.mono(.caption))
+                    .foregroundStyle(.secondary)
+
+                  TextField("Local assignee (required)", text: $assigneeMappingLocalAssignee)
+                    .textFieldStyle(.roundedBorder)
+                  TextField("Linear user id", text: $assigneeMappingLinearUserId)
+                    .textFieldStyle(.roundedBorder)
+                  TextField("Linear user name", text: $assigneeMappingLinearUserName)
+                    .textFieldStyle(.roundedBorder)
+                  TextField("Linear user email", text: $assigneeMappingLinearUserEmail)
+                    .textFieldStyle(.roundedBorder)
+
+                  Text("Provide at least one Linear user field. Email is usually the safest stable fallback when user ids are not obvious.")
+                    .font(.mono(.caption2))
+                    .foregroundStyle(.tertiary)
+
+                  HStack(spacing: 8) {
+                    Button {
+                      Task { await saveLinearAssigneeMapping() }
+                    } label: {
+                      Label("Save mapping", systemImage: "tray.and.arrow.down")
+                    }
+                    .adaptiveToolbarButtonProminent()
+                    .disabled(!canSaveAssigneeMapping || isSavingAssigneeMapping)
+
+                    Button("Clear form") {
+                      clearAssigneeMappingDraft()
+                    }
+                    .adaptiveToolbarButton()
+                    .disabled(isSavingAssigneeMapping)
+                  }
+                }
+              }
+            }
+          }
+        }
+
         if !message.isEmpty {
           InlineCallout(
             tone: .neutral,
@@ -2973,6 +3140,9 @@ private struct LinearExtensionSettingsView: View {
     }
     .onChange(of: model.lastUpdated) { _, _ in
       Task { await loadConfigFromDisk() }
+    }
+    .onChange(of: assigneeMappingProfile) { _, _ in
+      Task { await refreshLinearAssigneeMappings() }
     }
     .onDisappear {
       cancelLinearAuthFlow(userInitiated: false)
@@ -3092,6 +3262,8 @@ private struct LinearExtensionSettingsView: View {
       defaultProfile = diagnostics.defaultProfile
     }
     await refreshLinearProfileStatuses()
+    refreshSelectedAssigneeMappingProfile()
+    await refreshLinearAssigneeMappings()
     lastDiagnosticsRefreshAt = Date()
   }
 
@@ -3107,6 +3279,142 @@ private struct LinearExtensionSettingsView: View {
       }
     }
     profileStatusById = statuses
+  }
+
+  private var normalizedAssigneeMappingProfile: String {
+    assigneeMappingProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+
+  private var normalizedAssigneeMappingTeamId: String? {
+    let trimmed = assigneeMappingTeamId.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
+  }
+
+  private var canSaveAssigneeMapping: Bool {
+    guard !normalizedAssigneeMappingProfile.isEmpty else {
+      return false
+    }
+    let localAssignee = assigneeMappingLocalAssignee.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !localAssignee.isEmpty else {
+      return false
+    }
+    let linearUserId = assigneeMappingLinearUserId.trimmingCharacters(in: .whitespacesAndNewlines)
+    let linearUserName = assigneeMappingLinearUserName.trimmingCharacters(in: .whitespacesAndNewlines)
+    let linearUserEmail = assigneeMappingLinearUserEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+    return !linearUserId.isEmpty || !linearUserName.isEmpty || !linearUserEmail.isEmpty
+  }
+
+  private func refreshSelectedAssigneeMappingProfile() {
+    let current = normalizedAssigneeMappingProfile
+    if !current.isEmpty, linearProfiles.contains(where: { $0.id == current }) {
+      return
+    }
+    let fallback = resolvedDefaultProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !fallback.isEmpty, linearProfiles.contains(where: { $0.id == fallback }) {
+      assigneeMappingProfile = fallback
+      return
+    }
+    assigneeMappingProfile = linearProfiles.first?.id ?? ""
+  }
+
+  private func refreshLinearAssigneeMappings() async {
+    refreshSelectedAssigneeMappingProfile()
+    let profileId = normalizedAssigneeMappingProfile
+    guard !profileId.isEmpty else {
+      assigneeMappings = []
+      return
+    }
+    isLoadingAssigneeMappings = true
+    defer { isLoadingAssigneeMappings = false }
+    let response = await model.listLinearAssigneeMappings(
+      profileId: profileId,
+      teamId: normalizedAssigneeMappingTeamId
+    )
+    if let response {
+      assigneeMappings = response.mappings.sorted {
+        $0.localAssignee.localizedCaseInsensitiveCompare($1.localAssignee) == .orderedAscending
+      }
+    } else {
+      assigneeMappings = []
+    }
+  }
+
+  private func clearAssigneeMappingDraft() {
+    assigneeMappingLocalAssignee = ""
+    assigneeMappingLinearUserId = ""
+    assigneeMappingLinearUserName = ""
+    assigneeMappingLinearUserEmail = ""
+  }
+
+  private func populateAssigneeMappingDraft(from mapping: LinearAssigneeMapping) {
+    assigneeMappingProfile = mapping.profileId
+    assigneeMappingTeamId = mapping.teamId ?? ""
+    assigneeMappingLocalAssignee = mapping.localAssignee
+    assigneeMappingLinearUserId = mapping.linearUserId ?? ""
+    assigneeMappingLinearUserName = mapping.linearUserName ?? ""
+    assigneeMappingLinearUserEmail = mapping.linearUserEmail ?? ""
+  }
+
+  private func mappingDestinationLabel(_ mapping: LinearAssigneeMapping) -> String {
+    if let email = mapping.linearUserEmail, !email.isEmpty {
+      return "\(mapping.linearUserName ?? mapping.linearUserId ?? "Linear user") • \(email)"
+    }
+    if let name = mapping.linearUserName, !name.isEmpty {
+      return "\(name) • \(mapping.linearUserId ?? "no id")"
+    }
+    if let userId = mapping.linearUserId, !userId.isEmpty {
+      return userId
+    }
+    return "Missing Linear user details"
+  }
+
+  private func saveLinearAssigneeMapping() async {
+    guard canSaveAssigneeMapping else {
+      message = "Fill in a local assignee and at least one Linear user field."
+      return
+    }
+    isSavingAssigneeMapping = true
+    defer { isSavingAssigneeMapping = false }
+
+    let response = await model.setLinearAssigneeMapping(
+      profileId: normalizedAssigneeMappingProfile,
+      teamId: normalizedAssigneeMappingTeamId,
+      localAssignee: assigneeMappingLocalAssignee.trimmingCharacters(in: .whitespacesAndNewlines),
+      linearUserId: assigneeMappingLinearUserId.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+      linearUserName: assigneeMappingLinearUserName.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+      linearUserEmail: assigneeMappingLinearUserEmail.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+    )
+    guard let response else {
+      message = model.errorMessage ?? "Failed to save Linear assignee mapping."
+      return
+    }
+    message = response.replacedExisting
+      ? "Updated the assignee mapping for \(response.mapping.localAssignee)."
+      : "Saved a new assignee mapping for \(response.mapping.localAssignee)."
+    await refreshLinearAssigneeMappings()
+    clearAssigneeMappingDraft()
+  }
+
+  private func removeLinearAssigneeMapping(_ mapping: LinearAssigneeMapping) async {
+    isSavingAssigneeMapping = true
+    defer { isSavingAssigneeMapping = false }
+
+    let response = await model.removeLinearAssigneeMapping(
+      profileId: mapping.profileId,
+      teamId: mapping.teamId,
+      localAssignee: mapping.localAssignee
+    )
+    guard let response, response.removed else {
+      message = model.errorMessage ?? "Failed to remove Linear assignee mapping."
+      return
+    }
+    if assigneeMappingLocalAssignee.trimmingCharacters(in: .whitespacesAndNewlines)
+      .caseInsensitiveCompare(mapping.localAssignee) == .orderedSame
+    {
+      clearAssigneeMappingDraft()
+    }
+    message = "Removed the assignee mapping for \(mapping.localAssignee)."
+    await refreshLinearAssigneeMappings()
   }
 
   private func applyLinearEnabledToggle(_ newValue: Bool) async {
@@ -3398,6 +3706,12 @@ private struct LinearExtensionSettingsView: View {
     default:
       return false
     }
+  }
+}
+
+private extension String {
+  var nilIfEmpty: String? {
+    isEmpty ? nil : self
   }
 }
 

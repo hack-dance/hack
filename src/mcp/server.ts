@@ -998,6 +998,130 @@ function registerTools(opts: { readonly server: McpServer }): void {
       });
     }
   );
+
+  opts.server.registerTool(
+    "hack.linear.assignee-mappings.list",
+    {
+      title: "List Linear assignee mappings",
+      description:
+        "List explicit local-assignee to Linear-user mappings for the selected profile/team.",
+      inputSchema: {
+        ...linearCommonInput,
+        teamId: z.string().describe("Optional Linear team filter").optional(),
+      },
+      outputSchema: toolOutputSchema,
+    },
+    async (input) => {
+      const args = [
+        "linear",
+        "assignee-mappings",
+        "--json",
+        ...(input.profile ? ["--profile", input.profile] : []),
+        ...(input.teamId ? ["--team-id", input.teamId] : []),
+      ];
+
+      const result = await runHackCommand({
+        tool: "hack.linear.assignee-mappings.list",
+        args,
+      });
+
+      return buildToolResult({
+        result,
+        data: parseJson(result.stdout),
+      });
+    }
+  );
+
+  opts.server.registerTool(
+    "hack.linear.assignee-mappings.upsert",
+    {
+      title: "Upsert Linear assignee mapping",
+      description:
+        "Create or replace an explicit local-assignee to Linear-user mapping.",
+      inputSchema: {
+        ...linearCommonInput,
+        teamId: z.string().describe("Optional Linear team scope").optional(),
+        localAssignee: z
+          .string()
+          .describe("Local assignee label or handle to match against tickets"),
+        linearUserId: z.string().describe("Linear user id").optional(),
+        linearUserName: z
+          .string()
+          .describe("Linear user display name fallback")
+          .optional(),
+        linearUserEmail: z
+          .string()
+          .describe("Linear user email fallback")
+          .optional(),
+      },
+      outputSchema: toolOutputSchema,
+    },
+    async (input) => {
+      const args = [
+        "linear",
+        "set-assignee-mapping",
+        "--json",
+        ...(input.profile ? ["--profile", input.profile] : []),
+        ...(input.teamId ? ["--team-id", input.teamId] : []),
+        "--local-assignee",
+        input.localAssignee,
+        ...(input.linearUserId ? ["--linear-user-id", input.linearUserId] : []),
+        ...(input.linearUserName
+          ? ["--linear-user-name", input.linearUserName]
+          : []),
+        ...(input.linearUserEmail
+          ? ["--linear-user-email", input.linearUserEmail]
+          : []),
+      ];
+
+      const result = await runHackCommand({
+        tool: "hack.linear.assignee-mappings.upsert",
+        args,
+      });
+
+      return buildToolResult({
+        result,
+        data: parseJson(result.stdout),
+      });
+    }
+  );
+
+  opts.server.registerTool(
+    "hack.linear.assignee-mappings.remove",
+    {
+      title: "Remove Linear assignee mapping",
+      description: "Remove an explicit local-assignee to Linear-user mapping.",
+      inputSchema: {
+        ...linearCommonInput,
+        teamId: z.string().describe("Optional Linear team scope").optional(),
+        localAssignee: z
+          .string()
+          .describe("Local assignee label or handle to remove"),
+      },
+      outputSchema: toolOutputSchema,
+    },
+    async (input) => {
+      const args = [
+        "linear",
+        "remove-assignee-mapping",
+        "--json",
+        ...(input.profile ? ["--profile", input.profile] : []),
+        ...(input.teamId ? ["--team-id", input.teamId] : []),
+        "--local-assignee",
+        input.localAssignee,
+      ];
+
+      const result = await runHackCommand({
+        tool: "hack.linear.assignee-mappings.remove",
+        args,
+      });
+
+      return buildToolResult({
+        result,
+        data: parseJson(result.stdout),
+      });
+    }
+  );
 }
 
 function buildToolResult(opts: {

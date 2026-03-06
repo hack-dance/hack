@@ -7,12 +7,17 @@ extension Notification.Name {
   public static let hackCommandPaletteRequested = Notification.Name("hack.commandPalette.requested")
   public static let hackRefreshRequested = Notification.Name("hack.refresh.requested")
   public static let hackProjectNavigationRequested = Notification.Name("hack.projectNavigation.requested")
+  public static let hackTicketReviewQueueRequested = Notification.Name("hack.ticketReviewQueue.requested")
 }
 
 enum ProjectNavigationRequest {
   static let projectIdKey = "projectId"
   static let tabKey = "tab"
   static let sidebarKey = "sidebar"
+}
+
+enum TicketReviewQueueRequest {
+  static let projectIdKey = "projectId"
 }
 
 struct CommandPaletteAction: Identifiable {
@@ -162,6 +167,14 @@ struct CommandPaletteView: View {
         )
         actions.append(
           CommandPaletteAction(
+            title: "Open Review Queue: \(project.name)",
+            subtitle: "Conflicts, comments, and merge follow-up"
+          ) {
+            openProjectTicketReviewQueue(project)
+          }
+        )
+        actions.append(
+          CommandPaletteAction(
             title: "Open Linear routing: \(project.name)",
             subtitle: "Project account + bound Linear project"
           ) {
@@ -222,6 +235,14 @@ struct CommandPaletteView: View {
         actions.append(
           CommandPaletteAction(title: "Project: Tickets", subtitle: project.name) {
             openProjectTickets(project)
+          }
+        )
+        actions.append(
+          CommandPaletteAction(
+            title: "Project: Review queue",
+            subtitle: project.name
+          ) {
+            openProjectTicketReviewQueue(project)
           }
         )
       }
@@ -313,6 +334,17 @@ struct CommandPaletteView: View {
   private func openProjectTickets(_ project: ProjectSummary) {
     model.selectedItem = .project(project.id)
     model.selectedProjectTab = .tickets
+  }
+
+  private func openProjectTicketReviewQueue(_ project: ProjectSummary) {
+    openProjectTickets(project)
+    DispatchQueue.main.async {
+      NotificationCenter.default.post(
+        name: .hackTicketReviewQueueRequested,
+        object: nil,
+        userInfo: [TicketReviewQueueRequest.projectIdKey: project.id]
+      )
+    }
   }
 
   private func openProjectRouting(_ project: ProjectSummary) {

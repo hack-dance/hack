@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 
-import { createDbClient } from "@hack/db";
-import { linearConnections } from "@hack/db/schema/core";
 import { and, desc, eq, type SQL } from "drizzle-orm";
+
+import { linearConnections } from "../../db/schema.ts";
+import { createDbClient } from "../../db.ts";
 
 export type LinearConnectionMetadata = Record<string, unknown>;
 
@@ -15,6 +16,7 @@ export type LinearConnectionRecord = {
   readonly accountEmail: string | null;
   readonly authRef: string | null;
   readonly betterAuthUserId: string | null;
+  readonly betterAuthOrganizationId: string | null;
   readonly organizationId: string | null;
   readonly teamId: string | null;
   readonly metadata: LinearConnectionMetadata;
@@ -29,6 +31,7 @@ export type UpsertLinearConnectionInput = {
   readonly accountEmail?: string | null;
   readonly authRef?: string | null;
   readonly betterAuthUserId?: string | null;
+  readonly betterAuthOrganizationId?: string | null;
   readonly organizationId?: string | null;
   readonly teamId?: string | null;
   readonly metadata?: LinearConnectionMetadata;
@@ -37,12 +40,15 @@ export type UpsertLinearConnectionInput = {
 export type ListLinearConnectionsInput = {
   readonly profileId?: string | null;
   readonly organizationId?: string | null;
+  readonly betterAuthUserId?: string | null;
+  readonly betterAuthOrganizationId?: string | null;
 };
 
 export type LinearWebhookOwnership = {
   readonly status: "matched" | "ambiguous" | "unmatched";
   readonly profileId: string | null;
   readonly betterAuthUserId: string | null;
+  readonly betterAuthOrganizationId: string | null;
   readonly organizationId: string | null;
   readonly teamId: string | null;
   readonly connectionId?: string;
@@ -70,6 +76,10 @@ export class InMemoryLinearConnectionStore implements LinearConnectionStore {
     const connectionKey = buildConnectionKey(input);
     const existing = this.recordsByKey.get(connectionKey);
     const now = new Date().toISOString();
+    const metadata = composeConnectionMetadata({
+      metadata: input.metadata,
+      betterAuthOrganizationId: input.betterAuthOrganizationId,
+    });
     const record: LinearConnectionRecord = {
       id: existing?.id ?? randomUUID(),
       connectionKey,
@@ -79,9 +89,10 @@ export class InMemoryLinearConnectionStore implements LinearConnectionStore {
       accountEmail: normalizeText(input.accountEmail),
       authRef: normalizeText(input.authRef),
       betterAuthUserId: normalizeText(input.betterAuthUserId),
+      betterAuthOrganizationId: normalizeText(input.betterAuthOrganizationId),
       organizationId: normalizeText(input.organizationId),
       teamId: normalizeText(input.teamId),
-      metadata: input.metadata ?? {},
+      metadata,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
     };
@@ -121,6 +132,7 @@ export class InMemoryLinearConnectionStore implements LinearConnectionStore {
         status: "unmatched",
         profileId: null,
         betterAuthUserId: null,
+        betterAuthOrganizationId: null,
         organizationId: null,
         teamId: null,
       };
@@ -142,6 +154,12 @@ export function createLinearConnectionStoreFromDb(input: {
     upsertConnection: async (connection) => {
       const connectionKey = buildConnectionKey(connection);
       const now = new Date();
+      const metadataJson = JSON.stringify(
+        composeConnectionMetadata({
+          metadata: connection.metadata,
+          betterAuthOrganizationId: connection.betterAuthOrganizationId,
+        })
+      );
       const inserted = await db
         .insert(linearConnections)
         .values({
@@ -154,7 +172,7 @@ export function createLinearConnectionStoreFromDb(input: {
           betterAuthUserId: normalizeText(connection.betterAuthUserId),
           organizationId: normalizeText(connection.organizationId),
           teamId: normalizeText(connection.teamId),
-          metadataJson: JSON.stringify(connection.metadata ?? {}),
+          metadataJson,
           updatedAt: now,
         })
         .onConflictDoUpdate({
@@ -168,7 +186,7 @@ export function createLinearConnectionStoreFromDb(input: {
             betterAuthUserId: normalizeText(connection.betterAuthUserId),
             organizationId: normalizeText(connection.organizationId),
             teamId: normalizeText(connection.teamId),
-            metadataJson: JSON.stringify(connection.metadata ?? {}),
+            metadataJson,
             updatedAt: now,
           },
         })
@@ -193,7 +211,9 @@ export function createLinearConnectionStoreFromDb(input: {
               .from(linearConnections)
               .where(and(...filters))
               .orderBy(desc(linearConnections.updatedAt));
-      return rows.map((row) => toConnectionRecord({ row }));
+      return rows
+        .map((row) => toConnectionRecord({ row }))
+        .filter((record) => matchesConnectionFilter({ record, filter: input }));
     },
 
     resolveWebhookOwnership: async ({ profileId, organizationId }) => {
@@ -219,6 +239,7 @@ export function createLinearConnectionStoreFromDb(input: {
           status: "unmatched",
           profileId: null,
           betterAuthUserId: null,
+          betterAuthOrganizationId: null,
           organizationId: null,
           teamId: null,
         };
@@ -268,6 +289,13 @@ function buildListFilters(input: {
   if (organizationId) {
     filters.push(eq(linearConnections.organizationId, organizationId));
   }
+  const betterAuthUserId = normalizeText(input.input.betterAuthUserId);
+  if (
+    betterAuthUserId &&
+    normalizeText(input.input.betterAuthOrganizationId) == null
+  ) {
+    filters.push(eq(linearConnections.betterAuthUserId, betterAuthUserId));
+  }
   return filters;
 }
 
@@ -281,6 +309,30 @@ function matchesConnectionFilter(input: {
   }
   const organizationId = normalizeText(input.filter.organizationId);
   if (organizationId && input.record.organizationId !== organizationId) {
+    return false;
+  }
+  const betterAuthOrganizationId = normalizeText(
+    input.filter.betterAuthOrganizationId
+  );
+  if (
+    betterAuthOrganizationId &&
+    input.record.betterAuthOrganizationId !== betterAuthOrganizationId
+  ) {
+    const fallbackBetterAuthUserId = normalizeText(
+      input.filter.betterAuthUserId
+    );
+    if (
+      input.record.betterAuthOrganizationId != null ||
+      fallbackBetterAuthUserId == null ||
+      input.record.betterAuthUserId !== fallbackBetterAuthUserId
+    ) {
+      return false;
+    }
+  } else if (betterAuthOrganizationId) {
+    return true;
+  }
+  const betterAuthUserId = normalizeText(input.filter.betterAuthUserId);
+  if (betterAuthUserId && input.record.betterAuthUserId !== betterAuthUserId) {
     return false;
   }
   return true;
@@ -298,6 +350,9 @@ function toConnectionRecord(input: {
     accountEmail: input.row.accountEmail ?? null,
     authRef: input.row.authRef ?? null,
     betterAuthUserId: input.row.betterAuthUserId ?? null,
+    betterAuthOrganizationId: parseStoredBetterAuthOrganizationId({
+      raw: input.row.metadataJson,
+    }),
     organizationId: input.row.organizationId ?? null,
     teamId: input.row.teamId ?? null,
     metadata: parseMetadata({ raw: input.row.metadataJson }),
@@ -311,9 +366,14 @@ function parseMetadata(input: {
 }): LinearConnectionMetadata {
   try {
     const parsed = JSON.parse(input.raw) as unknown;
-    return typeof parsed === "object" && parsed !== null
-      ? (parsed as LinearConnectionMetadata)
-      : {};
+    if (typeof parsed !== "object" || parsed === null) {
+      return {};
+    }
+    const metadata = {
+      ...(parsed as LinearConnectionMetadata),
+    };
+    delete metadata[BETTER_AUTH_ORGANIZATION_METADATA_KEY];
+    return metadata;
   } catch {
     return {};
   }
@@ -330,6 +390,7 @@ function toWebhookOwnership(input: {
       status: "matched",
       profileId: preferred.profileId,
       betterAuthUserId: preferred.betterAuthUserId,
+      betterAuthOrganizationId: preferred.betterAuthOrganizationId,
       organizationId: preferred.organizationId ?? input.fallbackOrganizationId,
       teamId: preferred.teamId,
       connectionId: preferred.id,
@@ -340,6 +401,7 @@ function toWebhookOwnership(input: {
       status: "ambiguous",
       profileId: null,
       betterAuthUserId: null,
+      betterAuthOrganizationId: null,
       organizationId: input.fallbackOrganizationId,
       teamId: null,
     };
@@ -348,12 +410,47 @@ function toWebhookOwnership(input: {
     status: "unmatched",
     profileId: null,
     betterAuthUserId: null,
+    betterAuthOrganizationId: null,
     organizationId: input.fallbackOrganizationId,
     teamId: null,
   };
 }
 
-function normalizeText(value: string | null | undefined): string | null {
+const BETTER_AUTH_ORGANIZATION_METADATA_KEY = "_betterAuthOrganizationId";
+
+function composeConnectionMetadata(input: {
+  readonly metadata?: LinearConnectionMetadata;
+  readonly betterAuthOrganizationId?: string | null;
+}): LinearConnectionMetadata {
+  const metadata = { ...(input.metadata ?? {}) };
+  const betterAuthOrganizationId = normalizeText(
+    input.betterAuthOrganizationId
+  );
+  if (betterAuthOrganizationId) {
+    metadata[BETTER_AUTH_ORGANIZATION_METADATA_KEY] = betterAuthOrganizationId;
+  } else {
+    delete metadata[BETTER_AUTH_ORGANIZATION_METADATA_KEY];
+  }
+  return metadata;
+}
+
+function parseStoredBetterAuthOrganizationId(input: {
+  readonly raw: string;
+}): string | null {
+  try {
+    const parsed = JSON.parse(input.raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null) {
+      return null;
+    }
+    return normalizeText(
+      (parsed as Record<string, unknown>)[BETTER_AUTH_ORGANIZATION_METADATA_KEY]
+    );
+  } catch {
+    return null;
+  }
+}
+
+function normalizeText(value: unknown): string | null {
   if (typeof value !== "string") {
     return null;
   }

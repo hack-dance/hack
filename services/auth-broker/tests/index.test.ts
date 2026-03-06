@@ -11,6 +11,10 @@ import {
 } from "../src/modules/linear-sync-store/service.ts";
 
 type BetterAuthDb = NonNullable<BetterAuthRuntime["db"]>;
+type BetterAuthAuth = NonNullable<BetterAuthRuntime["auth"]>;
+type BetterAuthSession = Awaited<
+  ReturnType<BetterAuthAuth["api"]["getSession"]>
+>;
 
 type StartFlowResponse = {
   readonly ok: true;
@@ -29,6 +33,38 @@ function createBetterAuthDb(
     rows: [...rows],
   })) as unknown as BetterAuthDb["execute"];
   return { execute } as unknown as BetterAuthDb;
+}
+
+function createBetterAuthRuntimeWithSession(
+  session: BetterAuthSession,
+  db?: BetterAuthDb
+): BetterAuthRuntime {
+  return {
+    enabled: true,
+    ...(db ? { db } : {}),
+    auth: {
+      api: {
+        getSession: async () => session,
+      },
+    } as unknown as BetterAuthAuth["api"],
+  } as unknown as BetterAuthRuntime;
+}
+
+function withActiveOrganization(
+  session: NonNullable<BetterAuthSession>,
+  organizationId: string
+): BetterAuthSession {
+  const base = session as unknown as {
+    readonly session: Record<string, unknown>;
+    readonly user: Record<string, unknown>;
+  };
+  return {
+    user: base.user,
+    session: {
+      ...base.session,
+      activeOrganizationId: organizationId,
+    },
+  } as unknown as BetterAuthSession;
 }
 
 /**
@@ -193,6 +229,70 @@ describe("auth broker github flow routes", () => {
     expect(linearProvider?.connectionsPath).toBe("/v1/auth/linear/connections");
     expect(linearProvider?.accessControlMode).toBe("manual_unenforced");
     expect(linearProvider?.webhookSignatureVerification).toBe("hmac-sha256");
+  });
+
+  test("providers route reports session-owned Linear access when Better Auth is enabled", async () => {
+    const app = createAuthBrokerApp({
+      config: createTestConfig(),
+      flowStore: new FlowStore(),
+      betterAuthRuntime: createBetterAuthRuntimeWithSession(null),
+    });
+    const response = await app.handle(
+      new Request("http://localhost/v1/auth/providers")
+    );
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as {
+      readonly providers: ReadonlyArray<{
+        readonly id: string;
+        readonly accessControlMode?: string;
+      }>;
+    };
+    const linearProvider = payload.providers.find((p) => p.id === "linear");
+    expect(linearProvider?.accessControlMode).toBe("better_auth_session_owned");
+  });
+
+  test("providers route reports organization-owned Linear access when Better Auth has an active organization", async () => {
+    const app = createAuthBrokerApp({
+      config: createTestConfig(),
+      flowStore: new FlowStore(),
+      betterAuthRuntime: createBetterAuthRuntimeWithSession(
+        withActiveOrganization(
+          {
+            session: {
+              id: "sess-org",
+              userId: "user-org",
+              expiresAt: new Date(),
+              createdAt: new Date(),
+              updatedAt: new Date(),
+              token: "token-org",
+            },
+            user: {
+              id: "user-org",
+              email: "org@example.com",
+              emailVerified: true,
+              name: "Org User",
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            },
+          },
+          "better-auth-org"
+        )
+      ),
+    });
+    const response = await app.handle(
+      new Request("http://localhost/v1/auth/providers")
+    );
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as {
+      readonly providers: ReadonlyArray<{
+        readonly id: string;
+        readonly accessControlMode?: string;
+      }>;
+    };
+    const linearProvider = payload.providers.find((p) => p.id === "linear");
+    expect(linearProvider?.accessControlMode).toBe(
+      "better_auth_organization_owned"
+    );
   });
 
   test("linear start flow requests app actor mode by default", async () => {
@@ -556,6 +656,215 @@ describe("auth broker github flow routes", () => {
     expect(payload.deliveries[0]?.ownerTeamId).toBe("team-a");
   });
 
+  test("linear pending deliveries route requires Better Auth session when enabled", async () => {
+    const syncStore: LinearSyncStore = new InMemoryLinearSyncStore();
+    const app = createAuthBrokerApp({
+      config: createTestConfig(),
+      flowStore: new FlowStore(),
+      linearSyncStore: syncStore,
+      betterAuthRuntime: createBetterAuthRuntimeWithSession(null),
+    });
+
+    const response = await app.handle(
+      new Request("http://localhost/v1/auth/linear/deliveries")
+    );
+    expect(response.status).toBe(401);
+    const payload = (await response.json()) as {
+      readonly ok: false;
+      readonly error: string;
+    };
+    expect(payload.ok).toBe(false);
+    expect(payload.error).toBe("better_auth_session_required");
+  });
+
+  test("linear pending deliveries route only returns the current user's deliveries when Better Auth is enabled", async () => {
+    const syncStore: LinearSyncStore = new InMemoryLinearSyncStore();
+    const app = createAuthBrokerApp({
+      config: createTestConfig(),
+      flowStore: new FlowStore(),
+      linearSyncStore: syncStore,
+      betterAuthRuntime: createBetterAuthRuntimeWithSession({
+        session: {
+          id: "sess-user-a",
+          userId: "user-a",
+          expiresAt: new Date(),
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          token: "token-user-a",
+        },
+        user: {
+          id: "user-a",
+          email: "user-a@example.com",
+          emailVerified: true,
+          name: "User A",
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      }),
+    });
+    const ownedDelivery = await syncStore.recordWebhookDelivery({
+      path: "/linear/webhooks",
+      rawBody: '{"type":"Issue"}',
+      payloadJson: {
+        type: "Issue",
+      },
+      signatureVerified: true,
+      eventType: "Issue",
+      action: "create",
+      webhookTimestamp: new Date().toISOString(),
+      profileId: "profile-a",
+      projectId: "project-a",
+      issueId: "issue-a",
+      issueIdentifier: "HACK-1",
+      betterAuthUserId: "user-a",
+      organizationId: "org-a",
+      teamId: "team-a",
+    });
+    await syncStore.recordWebhookDelivery({
+      path: "/linear/webhooks",
+      rawBody: '{"type":"Issue"}',
+      payloadJson: {
+        type: "Issue",
+      },
+      signatureVerified: true,
+      eventType: "Issue",
+      action: "create",
+      webhookTimestamp: new Date().toISOString(),
+      profileId: "profile-b",
+      projectId: "project-b",
+      issueId: "issue-b",
+      issueIdentifier: "HACK-2",
+      betterAuthUserId: "user-b",
+      organizationId: "org-b",
+      teamId: "team-b",
+    });
+
+    const response = await app.handle(
+      new Request("http://localhost/v1/auth/linear/deliveries")
+    );
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as {
+      readonly ok: true;
+      readonly accessControlMode: string;
+      readonly deliveries: ReadonlyArray<{
+        readonly id: string;
+        readonly betterAuthUserId: string | null;
+      }>;
+    };
+    expect(payload.ok).toBe(true);
+    expect(payload.accessControlMode).toBe("better_auth_session_owned");
+    expect(payload.deliveries).toHaveLength(1);
+    expect(payload.deliveries[0]?.id).toBe(ownedDelivery.id);
+    expect(payload.deliveries[0]?.betterAuthUserId).toBe("user-a");
+  });
+
+  test("linear pending deliveries route returns the current organization's deliveries when Better Auth has an active organization", async () => {
+    const syncStore: LinearSyncStore = new InMemoryLinearSyncStore();
+    const app = createAuthBrokerApp({
+      config: createTestConfig(),
+      flowStore: new FlowStore(),
+      linearSyncStore: syncStore,
+      betterAuthRuntime: createBetterAuthRuntimeWithSession(
+        withActiveOrganization(
+          {
+            session: {
+              id: "sess-user-a",
+              userId: "user-a",
+              expiresAt: new Date(),
+              createdAt: new Date(),
+              updatedAt: new Date(),
+              token: "token-user-a",
+            },
+            user: {
+              id: "user-a",
+              email: "user-a@example.com",
+              emailVerified: true,
+              name: "User A",
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            },
+          },
+          "shared-org"
+        )
+      ),
+    });
+    const firstDelivery = await syncStore.recordWebhookDelivery({
+      path: "/linear/webhooks",
+      rawBody: '{"type":"Issue"}',
+      payloadJson: { type: "Issue" },
+      signatureVerified: true,
+      eventType: "Issue",
+      action: "create",
+      webhookTimestamp: new Date().toISOString(),
+      profileId: "profile-a",
+      projectId: "project-a",
+      issueId: "issue-a",
+      issueIdentifier: "HACK-1",
+      betterAuthUserId: "user-a",
+      betterAuthOrganizationId: "shared-org",
+      organizationId: "org-a",
+      teamId: "team-a",
+    });
+    const secondDelivery = await syncStore.recordWebhookDelivery({
+      path: "/linear/webhooks",
+      rawBody: '{"type":"Issue"}',
+      payloadJson: { type: "Issue" },
+      signatureVerified: true,
+      eventType: "Issue",
+      action: "update",
+      webhookTimestamp: new Date().toISOString(),
+      profileId: "profile-b",
+      projectId: "project-b",
+      issueId: "issue-b",
+      issueIdentifier: "HACK-2",
+      betterAuthUserId: "user-b",
+      betterAuthOrganizationId: "shared-org",
+      organizationId: "org-b",
+      teamId: "team-b",
+    });
+    await syncStore.recordWebhookDelivery({
+      path: "/linear/webhooks",
+      rawBody: '{"type":"Issue"}',
+      payloadJson: { type: "Issue" },
+      signatureVerified: true,
+      eventType: "Issue",
+      action: "create",
+      webhookTimestamp: new Date().toISOString(),
+      profileId: "profile-c",
+      projectId: "project-c",
+      issueId: "issue-c",
+      issueIdentifier: "HACK-3",
+      betterAuthUserId: "user-c",
+      betterAuthOrganizationId: "other-org",
+      organizationId: "org-c",
+      teamId: "team-c",
+    });
+
+    const response = await app.handle(
+      new Request("http://localhost/v1/auth/linear/deliveries")
+    );
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as {
+      readonly ok: true;
+      readonly accessControlMode: string;
+      readonly deliveries: ReadonlyArray<{
+        readonly id: string;
+        readonly betterAuthOrganizationId: string | null;
+      }>;
+    };
+    expect(payload.ok).toBe(true);
+    expect(payload.accessControlMode).toBe("better_auth_organization_owned");
+    expect(payload.deliveries).toHaveLength(2);
+    expect(
+      [...payload.deliveries.map((delivery) => delivery.id)].sort()
+    ).toEqual([...([firstDelivery.id, secondDelivery.id] as const)].sort());
+    expect(
+      payload.deliveries.every(
+        (delivery) => delivery.betterAuthOrganizationId === "shared-org"
+      )
+    ).toBe(true);
+  });
+
   test("linear pending deliveries route can mark a delivery applied", async () => {
     const syncStore: LinearSyncStore = new InMemoryLinearSyncStore();
     const app = createAuthBrokerApp({
@@ -632,6 +941,135 @@ describe("auth broker github flow routes", () => {
     expect(payload.error).toBe("linear_delivery_not_found");
   });
 
+  test("linear pending deliveries apply route only allows the owner when Better Auth is enabled", async () => {
+    const syncStore: LinearSyncStore = new InMemoryLinearSyncStore();
+    const app = createAuthBrokerApp({
+      config: createTestConfig(),
+      flowStore: new FlowStore(),
+      linearSyncStore: syncStore,
+      betterAuthRuntime: createBetterAuthRuntimeWithSession({
+        session: {
+          id: "sess-user-a",
+          userId: "user-a",
+          expiresAt: new Date(),
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          token: "token-user-a",
+        },
+        user: {
+          id: "user-a",
+          email: "user-a@example.com",
+          emailVerified: true,
+          name: "User A",
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      }),
+    });
+    const otherUsersDelivery = await syncStore.recordWebhookDelivery({
+      path: "/linear/webhooks",
+      rawBody: '{"type":"Issue"}',
+      payloadJson: {
+        type: "Issue",
+      },
+      signatureVerified: true,
+      eventType: "Issue",
+      action: "create",
+      webhookTimestamp: new Date().toISOString(),
+      profileId: "profile-b",
+      projectId: "project-b",
+      issueId: "issue-b",
+      issueIdentifier: "HACK-2",
+      betterAuthUserId: "user-b",
+      betterAuthOrganizationId: "org-b",
+      organizationId: "org-b",
+      teamId: "team-b",
+    });
+
+    const response = await app.handle(
+      new Request(
+        `http://localhost/v1/auth/linear/deliveries/${otherUsersDelivery.id}/apply`,
+        {
+          method: "POST",
+        }
+      )
+    );
+    expect(response.status).toBe(404);
+    const payload = (await response.json()) as {
+      readonly ok: false;
+      readonly error: string;
+    };
+    expect(payload.ok).toBe(false);
+    expect(payload.error).toBe("linear_delivery_not_found");
+  });
+
+  test("linear pending deliveries apply route allows the active Better Auth organization", async () => {
+    const syncStore: LinearSyncStore = new InMemoryLinearSyncStore();
+    const app = createAuthBrokerApp({
+      config: createTestConfig(),
+      flowStore: new FlowStore(),
+      linearSyncStore: syncStore,
+      betterAuthRuntime: createBetterAuthRuntimeWithSession(
+        withActiveOrganization(
+          {
+            session: {
+              id: "sess-user-a",
+              userId: "user-a",
+              expiresAt: new Date(),
+              createdAt: new Date(),
+              updatedAt: new Date(),
+              token: "token-user-a",
+            },
+            user: {
+              id: "user-a",
+              email: "user-a@example.com",
+              emailVerified: true,
+              name: "User A",
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            },
+          },
+          "shared-org"
+        )
+      ),
+    });
+    const sharedDelivery = await syncStore.recordWebhookDelivery({
+      path: "/linear/webhooks",
+      rawBody: '{"type":"Issue"}',
+      payloadJson: { type: "Issue" },
+      signatureVerified: true,
+      eventType: "Issue",
+      action: "create",
+      webhookTimestamp: new Date().toISOString(),
+      profileId: "profile-b",
+      projectId: "project-b",
+      issueId: "issue-b",
+      issueIdentifier: "HACK-2",
+      betterAuthUserId: "user-b",
+      betterAuthOrganizationId: "shared-org",
+      organizationId: "org-b",
+      teamId: "team-b",
+    });
+
+    const response = await app.handle(
+      new Request(
+        `http://localhost/v1/auth/linear/deliveries/${sharedDelivery.id}/apply`,
+        { method: "POST" }
+      )
+    );
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as {
+      readonly ok: true;
+      readonly delivery: {
+        readonly id: string;
+        readonly status: string;
+      };
+    };
+    expect(payload.ok).toBe(true);
+    expect(payload.delivery.id).toBe(sharedDelivery.id);
+    expect(payload.delivery.status).toBe("applied");
+  });
+
   test("linear start route issues flow payload and polling reads pending state", async () => {
     const flowStore = new FlowStore();
     const app = createAuthBrokerApp({
@@ -685,10 +1123,30 @@ describe("auth broker github flow routes", () => {
       config: createTestConfig(),
       flowStore,
       linearConnectionStore: connectionStore,
-      betterAuthRuntime: {
-        enabled: true,
-        db: createBetterAuthDb([{ id: "better-auth-linear-user" }]),
-      },
+      betterAuthRuntime: createBetterAuthRuntimeWithSession(
+        withActiveOrganization(
+          {
+            session: {
+              id: "sess-linear",
+              userId: "better-auth-linear-user",
+              expiresAt: new Date(),
+              createdAt: new Date(),
+              updatedAt: new Date(),
+              token: "token-linear",
+            },
+            user: {
+              id: "better-auth-linear-user",
+              email: "linear@example.com",
+              emailVerified: true,
+              name: "Linear User",
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            },
+          },
+          "better-auth-org"
+        ),
+        createBetterAuthDb([{ id: "better-auth-linear-user" }])
+      ),
     });
 
     const startResponse = await app.handle(
@@ -808,11 +1266,14 @@ describe("auth broker github flow routes", () => {
           readonly accountEmail: string | null;
           readonly organizationId: string | null;
           readonly betterAuthUserId: string | null;
+          readonly betterAuthOrganizationId: string | null;
           readonly metadata: Record<string, unknown>;
         }>;
       };
       expect(connectionsPayload.ok).toBe(true);
-      expect(connectionsPayload.accessControlMode).toBe("manual_unenforced");
+      expect(connectionsPayload.accessControlMode).toBe(
+        "better_auth_organization_owned"
+      );
       expect(connectionsPayload.connections).toHaveLength(1);
       expect(connectionsPayload.connections[0]?.profileId).toBe("work");
       expect(connectionsPayload.connections[0]?.accountEmail).toBe(
@@ -824,6 +1285,9 @@ describe("auth broker github flow routes", () => {
       expect(connectionsPayload.connections[0]?.betterAuthUserId).toBe(
         "better-auth-linear-user"
       );
+      expect(connectionsPayload.connections[0]?.betterAuthOrganizationId).toBe(
+        "better-auth-org"
+      );
       expect(connectionsPayload.connections[0]?.metadata).toMatchObject({
         organizationName: "Hack Dance",
         teamIds: ["team-linear"],
@@ -831,6 +1295,169 @@ describe("auth broker github flow routes", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  test("linear connections route requires Better Auth session when enabled", async () => {
+    const connectionStore = new InMemoryLinearConnectionStore();
+    const app = createAuthBrokerApp({
+      config: createTestConfig(),
+      flowStore: new FlowStore(),
+      linearConnectionStore: connectionStore,
+      betterAuthRuntime: createBetterAuthRuntimeWithSession(null),
+    });
+    await connectionStore.upsertConnection({
+      profileId: "work",
+      accountEmail: "linear@example.com",
+      betterAuthUserId: "user-a",
+      organizationId: "org-a",
+    });
+
+    const response = await app.handle(
+      new Request("http://localhost/v1/auth/linear/connections")
+    );
+    expect(response.status).toBe(401);
+    const payload = (await response.json()) as {
+      readonly ok: false;
+      readonly error: string;
+    };
+    expect(payload.ok).toBe(false);
+    expect(payload.error).toBe("better_auth_session_required");
+  });
+
+  test("linear connections route only returns the current user's connections when Better Auth is enabled", async () => {
+    const connectionStore = new InMemoryLinearConnectionStore();
+    const app = createAuthBrokerApp({
+      config: createTestConfig(),
+      flowStore: new FlowStore(),
+      linearConnectionStore: connectionStore,
+      betterAuthRuntime: createBetterAuthRuntimeWithSession({
+        session: {
+          id: "sess-user-a",
+          userId: "user-a",
+          expiresAt: new Date(),
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          token: "token-user-a",
+        },
+        user: {
+          id: "user-a",
+          email: "user-a@example.com",
+          emailVerified: true,
+          name: "User A",
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      }),
+    });
+    await connectionStore.upsertConnection({
+      profileId: "work",
+      accountEmail: "linear-a@example.com",
+      betterAuthUserId: "user-a",
+      organizationId: "org-a",
+    });
+    await connectionStore.upsertConnection({
+      profileId: "other",
+      accountEmail: "linear-b@example.com",
+      betterAuthUserId: "user-b",
+      organizationId: "org-b",
+    });
+
+    const response = await app.handle(
+      new Request("http://localhost/v1/auth/linear/connections")
+    );
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as {
+      readonly ok: true;
+      readonly accessControlMode: string;
+      readonly connections: ReadonlyArray<{
+        readonly profileId: string | null;
+        readonly accountEmail: string | null;
+        readonly betterAuthUserId: string | null;
+      }>;
+    };
+    expect(payload.ok).toBe(true);
+    expect(payload.accessControlMode).toBe("better_auth_session_owned");
+    expect(payload.connections).toHaveLength(1);
+    expect(payload.connections[0]?.profileId).toBe("work");
+    expect(payload.connections[0]?.accountEmail).toBe("linear-a@example.com");
+    expect(payload.connections[0]?.betterAuthUserId).toBe("user-a");
+  });
+
+  test("linear connections route returns the current organization's connections when Better Auth has an active organization", async () => {
+    const connectionStore = new InMemoryLinearConnectionStore();
+    const app = createAuthBrokerApp({
+      config: createTestConfig(),
+      flowStore: new FlowStore(),
+      linearConnectionStore: connectionStore,
+      betterAuthRuntime: createBetterAuthRuntimeWithSession(
+        withActiveOrganization(
+          {
+            session: {
+              id: "sess-user-a",
+              userId: "user-a",
+              expiresAt: new Date(),
+              createdAt: new Date(),
+              updatedAt: new Date(),
+              token: "token-user-a",
+            },
+            user: {
+              id: "user-a",
+              email: "user-a@example.com",
+              emailVerified: true,
+              name: "User A",
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            },
+          },
+          "shared-org"
+        )
+      ),
+    });
+    await connectionStore.upsertConnection({
+      profileId: "work",
+      accountEmail: "linear-a@example.com",
+      betterAuthUserId: "user-a",
+      betterAuthOrganizationId: "shared-org",
+      organizationId: "org-a",
+    });
+    await connectionStore.upsertConnection({
+      profileId: "shared",
+      accountEmail: "linear-b@example.com",
+      betterAuthUserId: "user-b",
+      betterAuthOrganizationId: "shared-org",
+      organizationId: "org-b",
+    });
+    await connectionStore.upsertConnection({
+      profileId: "other",
+      accountEmail: "linear-c@example.com",
+      betterAuthUserId: "user-c",
+      betterAuthOrganizationId: "other-org",
+      organizationId: "org-c",
+    });
+
+    const response = await app.handle(
+      new Request("http://localhost/v1/auth/linear/connections")
+    );
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as {
+      readonly ok: true;
+      readonly accessControlMode: string;
+      readonly connections: ReadonlyArray<{
+        readonly profileId: string | null;
+        readonly betterAuthOrganizationId: string | null;
+      }>;
+    };
+    expect(payload.ok).toBe(true);
+    expect(payload.accessControlMode).toBe("better_auth_organization_owned");
+    expect(payload.connections).toHaveLength(2);
+    expect(
+      [...payload.connections.map((connection) => connection.profileId)].sort()
+    ).toEqual(["shared", "work"]);
+    expect(
+      payload.connections.every(
+        (connection) => connection.betterAuthOrganizationId === "shared-org"
+      )
+    ).toBe(true);
   });
 
   test("linear refresh route exchanges refresh token", async () => {

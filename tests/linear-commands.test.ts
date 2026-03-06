@@ -251,6 +251,84 @@ test("parseApplyDeliveryArgs requires a delivery id", () => {
   expect(parsed.error).toContain("--delivery-id");
 });
 
+test("parseAssigneeMappingsArgs parses profile and team filters", () => {
+  const parsed = __testOnly.parseAssigneeMappingsArgs({
+    args: ["--profile", "work", "--team-id", "team-1", "--json"],
+  });
+
+  expect(parsed.ok).toBe(true);
+  if (!parsed.ok) {
+    return;
+  }
+
+  expect(parsed.value).toEqual({
+    profileId: "work",
+    teamId: "team-1",
+    json: true,
+  });
+});
+
+test("parseUpsertAssigneeMappingArgs requires a local assignee and remote target", () => {
+  const parsed = __testOnly.parseUpsertAssigneeMappingArgs({
+    args: ["--profile", "work", "--local-assignee", "alice@hack"],
+  });
+
+  expect(parsed.ok).toBe(false);
+  if (parsed.ok) {
+    return;
+  }
+
+  expect(parsed.error).toContain("--linear-user-id");
+});
+
+test("parseUpsertAssigneeMappingArgs parses explicit mapping fields", () => {
+  const parsed = __testOnly.parseUpsertAssigneeMappingArgs({
+    args: [
+      "--profile",
+      "work",
+      "--team-id",
+      "team-1",
+      "--local-assignee",
+      "alice@hack",
+      "--linear-user-id",
+      "user-1",
+      "--linear-user-name",
+      "Alice Example",
+      "--linear-user-email",
+      "alice@example.com",
+      "--json",
+    ],
+  });
+
+  expect(parsed.ok).toBe(true);
+  if (!parsed.ok) {
+    return;
+  }
+
+  expect(parsed.value).toEqual({
+    profileId: "work",
+    teamId: "team-1",
+    localAssignee: "alice@hack",
+    linearUserId: "user-1",
+    linearUserName: "Alice Example",
+    linearUserEmail: "alice@example.com",
+    json: true,
+  });
+});
+
+test("parseRemoveAssigneeMappingArgs requires a local assignee", () => {
+  const parsed = __testOnly.parseRemoveAssigneeMappingArgs({
+    args: ["--profile", "work"],
+  });
+
+  expect(parsed.ok).toBe(false);
+  if (parsed.ok) {
+    return;
+  }
+
+  expect(parsed.error).toContain("--local-assignee");
+});
+
 test("detectAuthoritativeFieldConflicts reports divergence for hack-owned tickets", () => {
   const conflicts = __testOnly.detectAuthoritativeFieldConflicts({
     authority: "hack",
@@ -373,6 +451,57 @@ test("selectTicketCommentsToPush keeps unsynced local comments even when bodies 
   expect(selected.map((comment) => comment.commentId)).toEqual(["comment-2"]);
 });
 
+test("resolveTicketAssigneeForLinear prefers explicit mappings before fuzzy user matching", async () => {
+  const resolution = await __testOnly.resolveTicketAssigneeForLinear({
+    runtime: {
+      profileId: "work",
+      assigneeMappings: [
+        {
+          profileId: "work",
+          teamId: "team-1",
+          localAssignee: "backend-owner",
+          linearUserId: "user-2",
+          linearUserName: "Backend Owner",
+        },
+      ],
+      linear: {
+        listTeamUsers: async () => ({
+          ok: true as const,
+          data: [
+            {
+              id: "user-1",
+              email: "backend-owner@example.com",
+              displayName: "Wrong Match",
+            },
+          ],
+        }),
+      },
+    },
+    ticket: {
+      ticketId: "T-00001",
+      title: "Ship explicit assignee mappings",
+      body: "",
+      status: "open",
+      createdAt: "2026-03-05T10:00:00.000Z",
+      updatedAt: "2026-03-05T10:00:00.000Z",
+      dependsOn: [],
+      blocks: [],
+      owner: "hack",
+      source: "hack",
+      assignee: "backend-owner",
+      tags: [],
+    },
+    teamId: "team-1",
+  });
+
+  expect(resolution).toEqual({
+    requestedAssignee: "backend-owner",
+    matchedUserId: "user-2",
+    matchedUserDisplayName: "Backend Owner",
+    applied: true,
+  });
+});
+
 test("syncIssueFromLinearToTicket preserves hack authority, appends comments, and records checkpoints", async () => {
   const conflicts: string[] = [];
   const appendedBodies: string[] = [];
@@ -467,7 +596,7 @@ test("syncIssueFromLinearToTicket preserves hack authority, appends comments, an
             ticketId: "T-00001",
             provider: "linear",
             field: input.field,
-            status: "open",
+            status: "open" as const,
             createdAt: "2026-03-05T10:10:00.000Z",
             updatedAt: "2026-03-05T10:10:00.000Z",
           },
@@ -556,6 +685,7 @@ test("syncTicketToLinearIssue pushes missing local comments and records a checkp
     projectBinding: {
       teamId: "team-1",
     },
+    assigneeMappings: [],
     tickets: {
       getTicket: async () => ({
         ticketId: "T-00001",

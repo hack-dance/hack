@@ -244,6 +244,102 @@ final class TicketDetailReviewModelTests: XCTestCase {
     XCTAssertEqual(review.checkpointSummary, "Last sync: push via Linear (profile default).")
   }
 
+  func testReviewQueueEntryUsesDetailedReviewStateWhenAvailable() {
+    let detail = makeDetail(
+      ticket: makeTicketSummary(owner: "linear", source: "hack", assignee: "alice@hack"),
+      comments: [
+        TicketComment(
+          commentId: "c-1",
+          ticketId: "T-00042",
+          body: "Imported from Linear.",
+          source: "linear",
+          actor: "linear@app",
+          createdAt: "2026-03-05T16:10:00Z",
+          externalId: "comment-1",
+          externalUrl: nil
+        )
+      ],
+      syncCheckpoints: [],
+      conflicts: [
+        TicketSyncConflict(
+          conflictId: "conflict-1",
+          ticketId: "T-00042",
+          provider: "linear",
+          field: "assignee",
+          status: .open,
+          authority: "origin",
+          summary: "Assignee diverged during pull.",
+          localValue: .string("alice@hack"),
+          remoteValue: .string("bob@linear"),
+          createdAt: "2026-03-05T17:00:02Z",
+          updatedAt: "2026-03-05T17:00:02Z",
+          resolution: nil,
+          resolutionSummary: nil,
+          resolvedAt: nil,
+          resolvedBy: nil
+        )
+      ]
+    )
+
+    let entry = TicketReviewQueueEntry(ticket: detail.ticket, detail: detail, localNoteCount: 2)
+
+    XCTAssertEqual(entry?.ticketId, detail.ticket.ticketId)
+    XCTAssertEqual(entry?.badgeLabel, "1 open conflict")
+    XCTAssertEqual(entry?.commentCount, 1)
+    XCTAssertEqual(entry?.openConflictCount, 1)
+    XCTAssertEqual(entry?.localNoteCount, 2)
+  }
+
+  func testReviewComposerDraftIncludesConflictAndLatestComment() {
+    let detail = makeDetail(
+      ticket: makeTicketSummary(owner: "linear", source: "hack", assignee: "alice@hack"),
+      comments: [
+        TicketComment(
+          commentId: "c-1",
+          ticketId: "T-00042",
+          body: "Imported from Linear.",
+          source: "linear",
+          actor: "linear@app",
+          createdAt: "2026-03-05T16:10:00Z",
+          externalId: "comment-1",
+          externalUrl: nil
+        )
+      ],
+      syncCheckpoints: [],
+      conflicts: [
+        TicketSyncConflict(
+          conflictId: "conflict-1",
+          ticketId: "T-00042",
+          provider: "linear",
+          field: "assignee",
+          status: .open,
+          authority: "origin",
+          summary: "Assignee diverged during pull.",
+          localValue: .string("alice@hack"),
+          remoteValue: .string("bob@linear"),
+          createdAt: "2026-03-05T17:00:02Z",
+          updatedAt: "2026-03-05T17:00:02Z",
+          resolution: nil,
+          resolutionSummary: nil,
+          resolvedAt: nil,
+          resolvedBy: nil
+        )
+      ]
+    )
+
+    let draft = TicketReviewComposer.draft(
+      for: detail,
+      highlightedConflict: detail.openSyncConflicts.first
+    )
+
+    XCTAssertTrue(draft.contains("Conflict to resolve:"))
+    XCTAssertTrue(draft.contains("Field: assignee"))
+    XCTAssertTrue(draft.contains("Hack: alice@hack"))
+    XCTAssertTrue(draft.contains("Linear: bob@linear"))
+    XCTAssertTrue(draft.contains("> linear@app"))
+    XCTAssertTrue(draft.contains("> Imported from Linear."))
+  }
+
   private func makeDetail(
     ticket: TicketSummary,
     comments: [TicketComment],

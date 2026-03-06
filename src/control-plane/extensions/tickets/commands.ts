@@ -1520,16 +1520,17 @@ function parseResolveConflictArgs(opts: {
       continue;
     }
     if (token.startsWith("--resolution=")) {
-      resolution = parseConflictResolutionValue({
+      const parsedResolution = parseConflictResolutionValue({
         value: token.slice("--resolution=".length),
       });
-      if (!resolution) {
+      if (!parsedResolution) {
         return {
           ok: false,
           error:
             "Invalid --resolution value. Expected accept_local|accept_remote|merged|ignore.",
         };
       }
+      resolution = parsedResolution;
       continue;
     }
     if (token === "--resolution") {
@@ -1537,14 +1538,15 @@ function parseResolveConflictArgs(opts: {
       if (!value) {
         return { ok: false, error: "--resolution requires a value." };
       }
-      resolution = parseConflictResolutionValue({ value });
-      if (!resolution) {
+      const parsedResolution = parseConflictResolutionValue({ value });
+      if (!parsedResolution) {
         return {
           ok: false,
           error:
             "Invalid --resolution value. Expected accept_local|accept_remote|merged|ignore.",
         };
       }
+      resolution = parsedResolution;
       i += 1;
       continue;
     }

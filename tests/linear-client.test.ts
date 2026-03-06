@@ -9,9 +9,15 @@ afterEach(() => {
 });
 
 test("getIssueByIdentifier includes assignee data when present", async () => {
-  let requestBody: Record<string, unknown> | null = null;
-  globalThis.fetch = async (_input, init) => {
-    requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+  let requestBody: {
+    readonly query?: unknown;
+    readonly variables?: unknown;
+  } | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body)) as {
+      readonly query?: unknown;
+      readonly variables?: unknown;
+    };
     return new Response(
       JSON.stringify({
         data: {
@@ -51,7 +57,7 @@ test("getIssueByIdentifier includes assignee data when present", async () => {
       }),
       { status: 200 }
     );
-  };
+  }) as typeof fetch;
 
   const client = createLinearClient({ token: "linear-token" });
   const result = await client.getIssueByIdentifier({ identifier: "ENG-123" });
@@ -61,7 +67,9 @@ test("getIssueByIdentifier includes assignee data when present", async () => {
     return;
   }
 
-  expect(String(requestBody?.query)).toContain("assignee {");
+  expect(
+    String((requestBody as { readonly query?: unknown } | null)?.query ?? "")
+  ).toContain("assignee {");
   expect(result.data?.assigneeId).toBe("user_123");
   expect(result.data?.assigneeName).toBe("Alice Example");
   expect(result.data?.assigneeDisplayName).toBe("Alice");
@@ -70,9 +78,15 @@ test("getIssueByIdentifier includes assignee data when present", async () => {
 });
 
 test("listTeamUsers returns membership users for assignee mapping", async () => {
-  let requestBody: Record<string, unknown> | null = null;
-  globalThis.fetch = async (_input, init) => {
-    requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+  let requestBody: {
+    readonly query?: unknown;
+    readonly variables?: unknown;
+  } | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body)) as {
+      readonly query?: unknown;
+      readonly variables?: unknown;
+    };
     return new Response(
       JSON.stringify({
         data: {
@@ -103,7 +117,7 @@ test("listTeamUsers returns membership users for assignee mapping", async () => 
       }),
       { status: 200 }
     );
-  };
+  }) as typeof fetch;
 
   const client = createLinearClient({ token: "linear-token" });
   const result = await client.listTeamUsers({ teamId: "team_123" });
@@ -113,7 +127,9 @@ test("listTeamUsers returns membership users for assignee mapping", async () => 
     return;
   }
 
-  expect(String(requestBody?.query)).toContain("memberships");
+  expect(
+    String((requestBody as { readonly query?: unknown } | null)?.query ?? "")
+  ).toContain("memberships");
   expect(result.data).toEqual([
     {
       id: "user_123",
@@ -132,9 +148,15 @@ test("listTeamUsers returns membership users for assignee mapping", async () => 
 });
 
 test("listIssueComments parses issue comments", async () => {
-  let requestBody: Record<string, unknown> | null = null;
-  globalThis.fetch = async (_input, init) => {
-    requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+  let requestBody: {
+    readonly query?: unknown;
+    readonly variables?: unknown;
+  } | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body)) as {
+      readonly query?: unknown;
+      readonly variables?: unknown;
+    };
     return new Response(
       JSON.stringify({
         data: {
@@ -160,7 +182,7 @@ test("listIssueComments parses issue comments", async () => {
       }),
       { status: 200 }
     );
-  };
+  }) as typeof fetch;
 
   const client = createLinearClient({ token: "linear-token" });
   const result = await client.listIssueComments({ issueId: "issue_123" });
@@ -170,7 +192,9 @@ test("listIssueComments parses issue comments", async () => {
     return;
   }
 
-  expect(String(requestBody?.query)).toContain("comments(");
+  expect(
+    String((requestBody as { readonly query?: unknown } | null)?.query ?? "")
+  ).toContain("comments(");
   expect(result.data).toEqual([
     {
       id: "comment_123",
@@ -186,9 +210,15 @@ test("listIssueComments parses issue comments", async () => {
 });
 
 test("createComment returns created comment payload", async () => {
-  let requestBody: Record<string, unknown> | null = null;
-  globalThis.fetch = async (_input, init) => {
-    requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+  let requestBody: {
+    readonly query?: unknown;
+    readonly variables?: unknown;
+  } | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body)) as {
+      readonly query?: unknown;
+      readonly variables?: unknown;
+    };
     return new Response(
       JSON.stringify({
         data: {
@@ -209,7 +239,7 @@ test("createComment returns created comment payload", async () => {
       }),
       { status: 200 }
     );
-  };
+  }) as typeof fetch;
 
   const client = createLinearClient({ token: "linear-token" });
   const result = await client.createComment({
@@ -222,8 +252,12 @@ test("createComment returns created comment payload", async () => {
     return;
   }
 
-  expect(String(requestBody?.query)).toContain("commentCreate");
-  expect(requestBody?.variables).toEqual({
+  expect(
+    String((requestBody as { readonly query?: unknown } | null)?.query ?? "")
+  ).toContain("commentCreate");
+  expect(
+    (requestBody as { readonly variables?: unknown } | null)?.variables
+  ).toEqual({
     input: {
       issueId: "issue_123",
       body: "Ship it",
@@ -240,9 +274,15 @@ test("createComment returns created comment payload", async () => {
 });
 
 test("updateIssue forwards assigneeId when provided", async () => {
-  let requestBody: Record<string, unknown> | null = null;
-  globalThis.fetch = async (_input, init) => {
-    requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+  let requestBody: {
+    readonly query?: unknown;
+    readonly variables?: unknown;
+  } | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body)) as {
+      readonly query?: unknown;
+      readonly variables?: unknown;
+    };
     return new Response(
       JSON.stringify({
         data: {
@@ -276,7 +316,7 @@ test("updateIssue forwards assigneeId when provided", async () => {
       }),
       { status: 200 }
     );
-  };
+  }) as typeof fetch;
 
   const client = createLinearClient({ token: "linear-token" });
   const result = await client.updateIssue({
@@ -290,7 +330,9 @@ test("updateIssue forwards assigneeId when provided", async () => {
     return;
   }
 
-  expect(requestBody?.variables).toEqual({
+  expect(
+    (requestBody as { readonly variables?: unknown } | null)?.variables
+  ).toEqual({
     id: "issue_123",
     input: {
       title: "Ship assignee sync",

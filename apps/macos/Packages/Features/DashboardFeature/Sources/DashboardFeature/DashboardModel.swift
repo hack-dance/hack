@@ -320,6 +320,28 @@ public final class DashboardModel {
     }
   }
 
+  public func appendTicketComment(
+    for project: ProjectSummary,
+    ticketId: String,
+    body: String,
+    source: String? = nil,
+    actor: String? = nil
+  ) async -> TicketCommentAppendResponse? {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return nil
+    }
+    return await runActionResult(message: "Appending ticket comment…") {
+      try await self.ticketsClient.appendTicketComment(
+        path: path,
+        ticketId: ticketId,
+        body: body,
+        source: source,
+        actor: actor
+      )
+    }
+  }
+
   public func syncTickets(for project: ProjectSummary) async -> TicketsSyncResult? {
     guard let path = resolveProjectPath(project) else {
       errorMessage = "Missing project path for \(project.name)"
@@ -683,6 +705,55 @@ public final class DashboardModel {
     } catch {
       errorMessage = error.localizedDescription
       return nil
+    }
+  }
+
+  public func listLinearAssigneeMappings(
+    profileId: String? = nil,
+    teamId: String? = nil
+  ) async -> LinearAssigneeMappingsResponse? {
+    do {
+      return try await client.listLinearAssigneeMappings(
+        profileId: profileId,
+        teamId: teamId
+      )
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func setLinearAssigneeMapping(
+    profileId: String? = nil,
+    teamId: String? = nil,
+    localAssignee: String,
+    linearUserId: String? = nil,
+    linearUserName: String? = nil,
+    linearUserEmail: String? = nil
+  ) async -> LinearAssigneeMappingMutationResponse? {
+    return await runActionResult(message: "Saving Linear assignee mapping…") {
+      try await self.client.setLinearAssigneeMapping(
+        profileId: profileId,
+        teamId: teamId,
+        localAssignee: localAssignee,
+        linearUserId: linearUserId,
+        linearUserName: linearUserName,
+        linearUserEmail: linearUserEmail
+      )
+    }
+  }
+
+  public func removeLinearAssigneeMapping(
+    profileId: String? = nil,
+    teamId: String? = nil,
+    localAssignee: String
+  ) async -> LinearAssigneeMappingRemovalResponse? {
+    return await runActionResult(message: "Removing Linear assignee mapping…") {
+      try await self.client.removeLinearAssigneeMapping(
+        profileId: profileId,
+        teamId: teamId,
+        localAssignee: localAssignee
+      )
     }
   }
 

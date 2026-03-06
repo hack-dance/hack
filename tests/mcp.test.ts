@@ -43,6 +43,9 @@ testIntegration(
     expect(names).toContain("hack.linear.sync.project");
     expect(names).toContain("hack.linear.deliveries.list");
     expect(names).toContain("hack.linear.deliveries.apply");
+    expect(names).toContain("hack.linear.assignee-mappings.list");
+    expect(names).toContain("hack.linear.assignee-mappings.upsert");
+    expect(names).toContain("hack.linear.assignee-mappings.remove");
   }
 );
 
@@ -146,6 +149,110 @@ testIntegration(
   }
 );
 
+testIntegration(
+  "hack.linear.assignee-mappings.list forwards profile and team filters",
+  { timeout: 20_000 },
+  async () => {
+    const mcp = await startMcpClient();
+    const result = await mcp.callTool({
+      name: "hack.linear.assignee-mappings.list",
+      arguments: {
+        profile: "work",
+        teamId: "team-1",
+      },
+    });
+
+    const structured = result.structuredContent as {
+      ok: boolean;
+      data?: unknown;
+    };
+
+    expect(result.isError).toBeUndefined();
+    expect(structured.ok).toBe(true);
+    expect(structured.data).toEqual({
+      profileId: "work",
+      teamId: "team-1",
+      mappings: [
+        {
+          profileId: "work",
+          teamId: "team-1",
+          localAssignee: "alice@hack",
+          linearUserId: "user-1",
+        },
+      ],
+    });
+  }
+);
+
+testIntegration(
+  "hack.linear.assignee-mappings.upsert forwards explicit mapping fields",
+  { timeout: 20_000 },
+  async () => {
+    const mcp = await startMcpClient();
+    const result = await mcp.callTool({
+      name: "hack.linear.assignee-mappings.upsert",
+      arguments: {
+        profile: "work",
+        teamId: "team-1",
+        localAssignee: "alice@hack",
+        linearUserId: "user-1",
+        linearUserName: "Alice Example",
+        linearUserEmail: "alice@example.com",
+      },
+    });
+
+    const structured = result.structuredContent as {
+      ok: boolean;
+      data?: unknown;
+    };
+
+    expect(result.isError).toBeUndefined();
+    expect(structured.ok).toBe(true);
+    expect(structured.data).toEqual({
+      upserted: true,
+      replacedExisting: false,
+      mapping: {
+        profileId: "work",
+        teamId: "team-1",
+        localAssignee: "alice@hack",
+        linearUserId: "user-1",
+        linearUserName: "Alice Example",
+        linearUserEmail: "alice@example.com",
+      },
+    });
+  }
+);
+
+testIntegration(
+  "hack.linear.assignee-mappings.remove forwards mapping identity",
+  { timeout: 20_000 },
+  async () => {
+    const mcp = await startMcpClient();
+    const result = await mcp.callTool({
+      name: "hack.linear.assignee-mappings.remove",
+      arguments: {
+        profile: "work",
+        teamId: "team-1",
+        localAssignee: "alice@hack",
+      },
+    });
+
+    const structured = result.structuredContent as {
+      ok: boolean;
+      data?: unknown;
+    };
+
+    expect(result.isError).toBeUndefined();
+    expect(structured.ok).toBe(true);
+    expect(structured.data).toEqual({
+      removed: true,
+      profileId: "work",
+      teamId: "team-1",
+      localAssignee: "alice@hack",
+    });
+  }
+);
+
 async function startMcpClient(): Promise<Client> {
   tempDir = await mkdtemp(join(tmpdir(), "hack-mcp-"));
   const homeDir = join(tempDir, "home");
@@ -203,6 +310,40 @@ function buildHackStubScript(): string {
     '    const idIndex = args.indexOf("--delivery-id")',
     "    const deliveryId = idIndex === -1 ? null : args[idIndex + 1]",
     '    console.log(JSON.stringify({ deliveryId, status: "applied" }))',
+    "    process.exit(0)",
+    "  }",
+    '  if (sub === "assignee-mappings") {',
+    '    const profileIndex = args.indexOf("--profile")',
+    '    const teamIndex = args.indexOf("--team-id")',
+    '    const profileId = profileIndex === -1 ? "default" : args[profileIndex + 1]',
+    "    const teamId = teamIndex === -1 ? null : args[teamIndex + 1]",
+    '    console.log(JSON.stringify({ profileId, teamId, mappings: [{ profileId, teamId, localAssignee: "alice@hack", linearUserId: "user-1" }] }))',
+    "    process.exit(0)",
+    "  }",
+    '  if (sub === "set-assignee-mapping") {',
+    '    const profileIndex = args.indexOf("--profile")',
+    '    const teamIndex = args.indexOf("--team-id")',
+    '    const localIndex = args.indexOf("--local-assignee")',
+    '    const userIdIndex = args.indexOf("--linear-user-id")',
+    '    const userNameIndex = args.indexOf("--linear-user-name")',
+    '    const userEmailIndex = args.indexOf("--linear-user-email")',
+    '    const profileId = profileIndex === -1 ? "default" : args[profileIndex + 1]',
+    "    const teamId = teamIndex === -1 ? null : args[teamIndex + 1]",
+    "    const localAssignee = localIndex === -1 ? null : args[localIndex + 1]",
+    "    const linearUserId = userIdIndex === -1 ? null : args[userIdIndex + 1]",
+    "    const linearUserName = userNameIndex === -1 ? null : args[userNameIndex + 1]",
+    "    const linearUserEmail = userEmailIndex === -1 ? null : args[userEmailIndex + 1]",
+    "    console.log(JSON.stringify({ upserted: true, replacedExisting: false, mapping: { profileId, teamId, localAssignee, linearUserId, linearUserName, linearUserEmail } }))",
+    "    process.exit(0)",
+    "  }",
+    '  if (sub === "remove-assignee-mapping") {',
+    '    const profileIndex = args.indexOf("--profile")',
+    '    const teamIndex = args.indexOf("--team-id")',
+    '    const localIndex = args.indexOf("--local-assignee")',
+    '    const profileId = profileIndex === -1 ? "default" : args[profileIndex + 1]',
+    "    const teamId = teamIndex === -1 ? null : args[teamIndex + 1]",
+    "    const localAssignee = localIndex === -1 ? null : args[localIndex + 1]",
+    "    console.log(JSON.stringify({ removed: true, profileId, teamId, localAssignee }))",
     "    process.exit(0)",
     "  }",
     "}",

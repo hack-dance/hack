@@ -186,6 +186,10 @@ async function persistWebhookDelivery(input: {
       issueIdentifier: input.prepared.event.issueIdentifier ?? null,
       betterAuthUserId:
         ownership.status === "matched" ? ownership.betterAuthUserId : null,
+      betterAuthOrganizationId:
+        ownership.status === "matched"
+          ? ownership.betterAuthOrganizationId
+          : null,
       organizationId:
         input.prepared.event.organizationId ?? ownership.organizationId ?? null,
       teamId: input.prepared.event.teamId ?? ownership.teamId ?? null,

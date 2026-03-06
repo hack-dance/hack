@@ -47,162 +47,158 @@ afterEach(async () => {
   }
 });
 
-test(
-  "tickets store materializes assignee, comments, checkpoints, and conflicts",
-  { timeout: 20_000 },
-  async () => {
-    const projectRoot = await createTempGitProject({
-      prefix: "hack-cli-tickets-store-",
-    });
-    const store = await createStore({ projectRoot });
+test("tickets store materializes assignee, comments, checkpoints, and conflicts", async () => {
+  const projectRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-store-",
+  });
+  const store = await createStore({ projectRoot });
 
-    const created = await store.createTicket({
-      title: "Sync metadata ticket",
-      owner: "hack",
-      source: "hack",
-      actor: "creator@hack",
-    });
-    expect(created.ok).toBe(true);
-    if (!created.ok) {
-      throw new Error(created.error);
-    }
-
-    const ticketId = created.ticket.ticketId;
-
-    const updated = await store.updateTicket({
-      ticketId,
-      assignee: "alice@hack",
-      actor: "router@hack",
-    });
-    expect(updated.ok).toBe(true);
-
-    const firstComment = await store.appendComment({
-      ticketId,
-      body: "Imported from Linear.",
-      source: "linear",
-      externalId: "comment-1",
-      actor: "linear@app",
-    });
-    expect(firstComment.ok).toBe(true);
-    if (!firstComment.ok) {
-      throw new Error(firstComment.error);
-    }
-
-    const secondComment = await store.appendComment({
-      ticketId,
-      body: "Local follow-up.",
-      source: "hack",
-      actor: "alice@hack",
-    });
-    expect(secondComment.ok).toBe(true);
-    if (!secondComment.ok) {
-      throw new Error(secondComment.error);
-    }
-
-    const linkedComment = await store.linkCommentExternalId({
-      ticketId,
-      commentId: secondComment.comment.commentId,
-      externalId: "linear-comment-2",
-      externalUrl: "https://linear.app/issue/HACK-1#comment-2",
-      actor: "sync@app",
-    });
-    expect(linkedComment.ok).toBe(true);
-
-    const checkpoint = await store.recordSyncCheckpoint({
-      ticketId,
-      provider: "linear",
-      profileId: "default",
-      direction: "pull",
-      remoteCursor: "issue/LIN-123#v2",
-      remoteUpdatedAt: "2026-03-05T18:15:00.000Z",
-      actor: "sync@app",
-    });
-    expect(checkpoint.ok).toBe(true);
-    if (!checkpoint.ok) {
-      throw new Error(checkpoint.error);
-    }
-
-    const conflict = await store.recordSyncConflict({
-      ticketId,
-      provider: "linear",
-      field: "assignee",
-      localValue: "alice@hack",
-      remoteValue: "bob@linear",
-      authority: "origin",
-      summary: "Assignee diverged during pull.",
-      actor: "sync@app",
-    });
-    expect(conflict.ok).toBe(true);
-    if (!conflict.ok) {
-      throw new Error(conflict.error);
-    }
-
-    const resolved = await store.resolveSyncConflict({
-      ticketId,
-      conflictId: conflict.conflict.conflictId,
-      resolution: "accept_remote",
-      summary: "Linear remains source of truth for this field.",
-      actor: "alice@hack",
-    });
-    expect(resolved.ok).toBe(true);
-
-    const snapshot = await store.readSnapshot();
-    const ticket = snapshot.tickets.find((item) => item.ticketId === ticketId);
-    expect(ticket?.assignee).toBe("alice@hack");
-
-    const comments = snapshot.commentsByTicket.get(ticketId) ?? [];
-    expect(comments).toHaveLength(2);
-    expect(comments.map((item) => item.body)).toEqual([
-      "Imported from Linear.",
-      "Local follow-up.",
-    ]);
-    expect(comments[0]).toMatchObject({
-      source: "linear",
-      externalId: "comment-1",
-      actor: "linear@app",
-    });
-    expect(comments[1]).toMatchObject({
-      source: "hack",
-      externalId: "linear-comment-2",
-      externalUrl: "https://linear.app/issue/HACK-1#comment-2",
-    });
-
-    const checkpoints = snapshot.syncCheckpointsByTicket.get(ticketId) ?? [];
-    expect(checkpoints).toHaveLength(1);
-    expect(checkpoints[0]).toMatchObject({
-      provider: "linear",
-      profileId: "default",
-      direction: "pull",
-      remoteCursor: "issue/LIN-123#v2",
-      remoteUpdatedAt: "2026-03-05T18:15:00.000Z",
-    });
-
-    const conflicts = snapshot.conflictsByTicket.get(ticketId) ?? [];
-    expect(conflicts).toHaveLength(1);
-    expect(conflicts[0]).toMatchObject({
-      provider: "linear",
-      field: "assignee",
-      status: "resolved",
-      authority: "origin",
-      localValue: "alice@hack",
-      remoteValue: "bob@linear",
-      resolution: "accept_remote",
-      resolutionSummary: "Linear remains source of truth for this field.",
-    });
-
-    const events = await store.listEvents({ ticketId });
-    expect(events.map((item) => item.type)).toEqual([
-      "ticket.created",
-      "ticket.updated",
-      "ticket.comment_appended",
-      "ticket.comment_appended",
-      "ticket.comment_linked",
-      "ticket.sync_checkpoint_recorded",
-      "ticket.sync_conflict_recorded",
-      "ticket.sync_conflict_resolved",
-    ]);
+  const created = await store.createTicket({
+    title: "Sync metadata ticket",
+    owner: "hack",
+    source: "hack",
+    actor: "creator@hack",
+  });
+  expect(created.ok).toBe(true);
+  if (!created.ok) {
+    throw new Error(created.error);
   }
-);
+
+  const ticketId = created.ticket.ticketId;
+
+  const updated = await store.updateTicket({
+    ticketId,
+    assignee: "alice@hack",
+    actor: "router@hack",
+  });
+  expect(updated.ok).toBe(true);
+
+  const firstComment = await store.appendComment({
+    ticketId,
+    body: "Imported from Linear.",
+    source: "linear",
+    externalId: "comment-1",
+    actor: "linear@app",
+  });
+  expect(firstComment.ok).toBe(true);
+  if (!firstComment.ok) {
+    throw new Error(firstComment.error);
+  }
+
+  const secondComment = await store.appendComment({
+    ticketId,
+    body: "Local follow-up.",
+    source: "hack",
+    actor: "alice@hack",
+  });
+  expect(secondComment.ok).toBe(true);
+  if (!secondComment.ok) {
+    throw new Error(secondComment.error);
+  }
+
+  const linkedComment = await store.linkCommentExternalId({
+    ticketId,
+    commentId: secondComment.comment.commentId,
+    externalId: "linear-comment-2",
+    externalUrl: "https://linear.app/issue/HACK-1#comment-2",
+    actor: "sync@app",
+  });
+  expect(linkedComment.ok).toBe(true);
+
+  const checkpoint = await store.recordSyncCheckpoint({
+    ticketId,
+    provider: "linear",
+    profileId: "default",
+    direction: "pull",
+    remoteCursor: "issue/LIN-123#v2",
+    remoteUpdatedAt: "2026-03-05T18:15:00.000Z",
+    actor: "sync@app",
+  });
+  expect(checkpoint.ok).toBe(true);
+  if (!checkpoint.ok) {
+    throw new Error(checkpoint.error);
+  }
+
+  const conflict = await store.recordSyncConflict({
+    ticketId,
+    provider: "linear",
+    field: "assignee",
+    localValue: "alice@hack",
+    remoteValue: "bob@linear",
+    authority: "origin",
+    summary: "Assignee diverged during pull.",
+    actor: "sync@app",
+  });
+  expect(conflict.ok).toBe(true);
+  if (!conflict.ok) {
+    throw new Error(conflict.error);
+  }
+
+  const resolved = await store.resolveSyncConflict({
+    ticketId,
+    conflictId: conflict.conflict.conflictId,
+    resolution: "accept_remote",
+    summary: "Linear remains source of truth for this field.",
+    actor: "alice@hack",
+  });
+  expect(resolved.ok).toBe(true);
+
+  const snapshot = await store.readSnapshot();
+  const ticket = snapshot.tickets.find((item) => item.ticketId === ticketId);
+  expect(ticket?.assignee).toBe("alice@hack");
+
+  const comments = snapshot.commentsByTicket.get(ticketId) ?? [];
+  expect(comments).toHaveLength(2);
+  expect(comments.map((item) => item.body)).toEqual([
+    "Imported from Linear.",
+    "Local follow-up.",
+  ]);
+  expect(comments[0]).toMatchObject({
+    source: "linear",
+    externalId: "comment-1",
+    actor: "linear@app",
+  });
+  expect(comments[1]).toMatchObject({
+    source: "hack",
+    externalId: "linear-comment-2",
+    externalUrl: "https://linear.app/issue/HACK-1#comment-2",
+  });
+
+  const checkpoints = snapshot.syncCheckpointsByTicket.get(ticketId) ?? [];
+  expect(checkpoints).toHaveLength(1);
+  expect(checkpoints[0]).toMatchObject({
+    provider: "linear",
+    profileId: "default",
+    direction: "pull",
+    remoteCursor: "issue/LIN-123#v2",
+    remoteUpdatedAt: "2026-03-05T18:15:00.000Z",
+  });
+
+  const conflicts = snapshot.conflictsByTicket.get(ticketId) ?? [];
+  expect(conflicts).toHaveLength(1);
+  expect(conflicts[0]).toMatchObject({
+    provider: "linear",
+    field: "assignee",
+    status: "resolved",
+    authority: "origin",
+    localValue: "alice@hack",
+    remoteValue: "bob@linear",
+    resolution: "accept_remote",
+    resolutionSummary: "Linear remains source of truth for this field.",
+  });
+
+  const events = await store.listEvents({ ticketId });
+  expect(events.map((item) => item.type)).toEqual([
+    "ticket.created",
+    "ticket.updated",
+    "ticket.comment_appended",
+    "ticket.comment_appended",
+    "ticket.comment_linked",
+    "ticket.sync_checkpoint_recorded",
+    "ticket.sync_conflict_recorded",
+    "ticket.sync_conflict_resolved",
+  ]);
+});
 
 test("tickets show json includes materialized sync metadata", async () => {
   const projectRoot = await createTempGitProject({

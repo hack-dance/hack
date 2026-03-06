@@ -24,12 +24,13 @@ export function createLinearOAuthCallbackRoutesPlugin({
     name: "hack-auth-broker.linear-oauth.callback-routes",
   }).get(
     "/linear/callback",
-    ({ query }) =>
+    ({ query, request }) =>
       handleLinearCallback({
         config,
         flowStore,
         connectionStore,
         betterAuthRuntime,
+        request,
         query,
       }),
     { query: LinearOAuthModel.callbackQuery }

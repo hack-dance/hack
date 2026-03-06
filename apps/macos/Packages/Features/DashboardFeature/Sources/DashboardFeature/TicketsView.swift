@@ -1,9 +1,11 @@
+import AppKit
 import MarkdownUI
 import SwiftUI
 
 import HackDesktopModels
 
 struct TicketsView: View {
+  @AppStorage("hackDesktop.linearReviewNotes.v1") private var reviewNotesStorage = "{}"
   @Environment(DashboardModel.self) private var model
   @Environment(\.colorScheme) private var colorScheme
   @Environment(\.openURL) private var openURL
@@ -34,6 +36,11 @@ struct TicketsView: View {
   @State private var pendingBulkSyncAction: TicketBulkSyncAction? = nil
   @State private var activeSyncAction: TicketSyncAction? = nil
   @State private var resolvingConflictIds: Set<String> = []
+  @State private var postingCommentTicketIds: Set<String> = []
+  @State private var ticketDetailCache: [String: TicketDetailResponse] = [:]
+  @State private var reviewNotesByTicketKey: [String: [TicketLocalReviewNote]] = [:]
+  @State private var reviewComposerDrafts: [String: String] = [:]
+  @State private var isReviewNotesExpanded = true
   @FocusState private var ticketsListFocused: Bool
 
   var body: some View {
@@ -52,6 +59,7 @@ struct TicketsView: View {
     .padding(.bottom, 24)
     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     .task {
+      loadPersistedReviewNotes()
       await refreshLinearRouting()
       loadCachedTickets()
       await refreshTickets()
@@ -68,6 +76,21 @@ struct TicketsView: View {
     }
     .onChange(of: selectedOriginFilter) { _, _ in
       updateSelectionAfterRefresh()
+    }
+    .onChange(of: reviewNotesStorage) { _, _ in
+      loadPersistedReviewNotes()
+    }
+    .onReceive(
+      NotificationCenter.default.publisher(for: .hackTicketReviewQueueRequested)
+    ) { notification in
+      guard
+        let userInfo = notification.userInfo,
+        let requestedProjectId = userInfo[TicketReviewQueueRequest.projectIdKey] as? String,
+        requestedProjectId == project.id
+      else {
+        return
+      }
+      activateReviewQueue()
     }
     .sheet(isPresented: $showCreateSheet) {
       TicketCreateSheet(
@@ -122,6 +145,18 @@ struct TicketsView: View {
           )
         }
         .buttonStyle(.plain)
+        if reviewQueueCount > 0 {
+          Button {
+            activateReviewQueue()
+          } label: {
+            ticketHeaderBadge(
+              title: reviewQueueLabel,
+              systemImage: "bubble.left.and.exclamationmark.bubble.right",
+              tone: selectedFilter == .reviewQueue ? .orange : .secondary
+            )
+          }
+          .buttonStyle(.plain)
+        }
         Spacer(minLength: 12)
         if let activeSyncAction {
           HStack(spacing: 8) {
@@ -213,6 +248,42 @@ struct TicketsView: View {
       return nil
     }
     return tickets.first(where: { $0.ticketId == selectedTicketId })
+  }
+
+  private var reviewQueueEntries: [TicketReviewQueueEntry] {
+    tickets.compactMap { ticket in
+      TicketReviewQueueEntry(
+        ticket: ticket,
+        detail: ticketDetailCache[ticket.ticketId],
+        localNoteCount: reviewNotes(for: ticket).count
+      )
+    }
+    .sorted { lhs, rhs in
+      if lhs.openConflictCount != rhs.openConflictCount {
+        return lhs.openConflictCount > rhs.openConflictCount
+      }
+      return lhs.updatedAt > rhs.updatedAt
+    }
+  }
+
+  private var filteredReviewQueueEntries: [TicketReviewQueueEntry] {
+    let visibleTicketIds = Set(filteredTickets.map(\.ticketId))
+    return reviewQueueEntries.filter { visibleTicketIds.contains($0.ticketId) }
+  }
+
+  private var reviewQueueCount: Int {
+    reviewQueueEntries.count
+  }
+
+  private var reviewQueueLabel: String {
+    reviewQueueCount == 1 ? "1 review" : "\(reviewQueueCount) reviews"
+  }
+
+  private var nextReviewQueueEntry: TicketReviewQueueEntry? {
+    let remaining = filteredReviewQueueEntries.filter {
+      $0.ticketId != selectedTicketId
+    }
+    return remaining.first
   }
 
   private var linearRouteStatusLabel: String {
@@ -398,9 +469,9 @@ struct TicketsView: View {
           selectedFilter = filter
         } label: {
           if selectedFilter == filter {
-            Label("\(filter.label) (\(filter.count(in: tickets)))", systemImage: "checkmark")
+            Label("\(filter.label) (\(ticketCount(for: filter)))", systemImage: "checkmark")
           } else {
-            Text("\(filter.label) (\(filter.count(in: tickets)))")
+            Text("\(filter.label) (\(ticketCount(for: filter)))")
           }
         }
       }
@@ -410,7 +481,7 @@ struct TicketsView: View {
           .font(.system(size: 13, weight: .semibold))
         Text(selectedFilter.label)
           .font(.system(size: 13, weight: .semibold))
-        Text("\(selectedFilter.count(in: tickets))")
+        Text("\(ticketCount(for: selectedFilter))")
           .font(.system(size: 12, weight: .semibold))
           .foregroundStyle(.secondary)
       }
@@ -504,29 +575,30 @@ struct TicketsView: View {
   private var ticketsListCard: some View {
     ticketPanel(contentPadding: 0) {
       VStack(alignment: .leading, spacing: 0) {
-        HStack(spacing: 8) {
-          Text("\(filteredTickets.count) issue\(filteredTickets.count == 1 ? "" : "s")")
-            .font(.system(size: 14, weight: .semibold))
-          Spacer()
-          if !filteredTickets.isEmpty {
-            Text("Use ↑ ↓ to navigate")
-              .font(.system(size: 12, weight: .medium))
-              .foregroundStyle(.secondary)
-          }
+        if selectedFilter == .reviewQueue {
+          reviewQueueListHeader
+        } else {
+          standardTicketsListHeader
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
         Divider()
           .opacity(0.22)
         ScrollView {
           if isLoading && !hasLoadedOnce {
             skeletonList
+          } else if selectedFilter == .reviewQueue && filteredReviewQueueEntries.isEmpty {
+            reviewQueueEmptyView
           } else if filteredTickets.isEmpty {
             emptyTicketsView
           } else if selectedFilter == .all {
             LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
               ForEach(TicketStatus.allCases, id: \.self) { status in
                 ticketSection(status: status)
+              }
+            }
+          } else if selectedFilter == .reviewQueue {
+            LazyVStack(alignment: .leading, spacing: 0) {
+              ForEach(filteredReviewQueueEntries) { entry in
+                reviewQueueRow(entry)
               }
             }
           } else {
@@ -543,6 +615,70 @@ struct TicketsView: View {
     .focusable()
     .focused($ticketsListFocused)
     .focusEffectDisabled()
+  }
+
+  private var standardTicketsListHeader: some View {
+    HStack(spacing: 8) {
+      Text("\(filteredTickets.count) issue\(filteredTickets.count == 1 ? "" : "s")")
+        .font(.system(size: 14, weight: .semibold))
+      Spacer()
+      if !filteredTickets.isEmpty {
+        Text("Use ↑ ↓ to navigate")
+          .font(.system(size: 12, weight: .medium))
+          .foregroundStyle(.secondary)
+      }
+    }
+    .padding(.horizontal, 14)
+    .padding(.vertical, 12)
+  }
+
+  private var reviewQueueListHeader: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      HStack(spacing: 8) {
+        Text(
+          "\(filteredReviewQueueEntries.count) review item\(filteredReviewQueueEntries.count == 1 ? "" : "s")"
+        )
+        .font(.system(size: 14, weight: .semibold))
+        Spacer()
+        Text("Use ↑ ↓ to triage")
+          .font(.system(size: 12, weight: .medium))
+          .foregroundStyle(.secondary)
+      }
+      ScrollView(.horizontal, showsIndicators: false) {
+        HStack(spacing: 6) {
+          ticketMetaPill(
+            "\(filteredReviewQueueEntries.reduce(0) { $0 + $1.openConflictCount }) open conflict\(filteredReviewQueueEntries.reduce(0) { $0 + $1.openConflictCount } == 1 ? "" : "s")",
+            tone: filteredReviewQueueEntries.reduce(0) { $0 + $1.openConflictCount } > 0 ? .orange : .secondary
+          )
+          ticketMetaPill(
+            "\(filteredReviewQueueEntries.reduce(0) { $0 + $1.commentCount }) comment\(filteredReviewQueueEntries.reduce(0) { $0 + $1.commentCount } == 1 ? "" : "s")",
+            tone: .secondary
+          )
+          ticketMetaPill(
+            "\(filteredReviewQueueEntries.reduce(0) { $0 + $1.localNoteCount }) local note\(filteredReviewQueueEntries.reduce(0) { $0 + $1.localNoteCount } == 1 ? "" : "s")",
+            tone: .secondary
+          )
+        }
+      }
+      HStack(spacing: 8) {
+        if let nextReviewQueueEntry {
+          Button {
+            selectedTicketId = nextReviewQueueEntry.ticketId
+            ticketsListFocused = true
+          } label: {
+            Label("Next item", systemImage: "arrow.right.circle")
+          }
+          .adaptiveToolbarButton()
+        }
+        Button("All tickets") {
+          selectedFilter = .all
+          ticketsListFocused = true
+        }
+        .adaptiveToolbarButton()
+      }
+    }
+    .padding(.horizontal, 14)
+    .padding(.vertical, 12)
   }
 
   private var ticketDetailCard: some View {
@@ -621,6 +757,32 @@ struct TicketsView: View {
     .padding(.top, 8)
   }
 
+  private var reviewQueueEmptyView: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      Text(reviewQueueCount == 0 ? "No tickets need sync review." : "No review items match the current filters.")
+        .font(.system(size: 15, weight: .semibold))
+      Text(
+        reviewQueueCount == 0
+          ? "When conflicts, mergeable-field ambiguity, or follow-up notes land, they will appear here for triage."
+          : "Clear the search text, widen the origin filter, or switch back to the full ticket board."
+      )
+      .font(.system(size: 13, weight: .medium))
+      .foregroundStyle(.secondary)
+      HStack(spacing: 8) {
+        Button("All tickets") {
+          selectedFilter = .all
+        }
+        .adaptiveToolbarButton()
+        Button("Refresh") {
+          Task { await refreshTickets() }
+        }
+        .adaptiveToolbarButton()
+      }
+    }
+    .padding(.horizontal, 14)
+    .padding(.top, 8)
+  }
+
   private func ticketRow(_ ticket: TicketSummary) -> some View {
     Button {
       if selectedTicketId == ticket.ticketId {
@@ -670,6 +832,99 @@ struct TicketsView: View {
     .contentShape(Rectangle())
     .onHover { hovering in
       hoveredTicketId = hovering ? ticket.ticketId : nil
+    }
+    .animation(.easeInOut(duration: 0.12), value: hoveredTicketId)
+  }
+
+  private func reviewQueueRow(_ entry: TicketReviewQueueEntry) -> some View {
+    let ticket = tickets.first(where: { $0.ticketId == entry.ticketId })
+    return Button {
+      if selectedTicketId == entry.ticketId {
+        selectedTicketId = nil
+        ticketDetail = nil
+        detailErrorMessage = nil
+      } else {
+        selectedTicketId = entry.ticketId
+      }
+      ticketsListFocused = true
+    } label: {
+      VStack(alignment: .leading, spacing: 8) {
+        HStack(alignment: .top, spacing: 8) {
+          Image(systemName: entry.openConflictCount > 0 ? "exclamationmark.triangle.fill" : "arrow.triangle.branch")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(entry.openConflictCount > 0 ? .orange : .secondary)
+            .padding(.top, 2)
+          VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+              Text(entry.ticketId)
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+              ticketMetaPill(
+                entry.badgeLabel,
+                tone: entry.openConflictCount > 0 ? .orange : .secondary
+              )
+              if let ticket {
+                ticketMetaPill(
+                  ticketAuthorityBadgeLabel(for: ticket),
+                  tone: ticketAuthorityBadgeColor(for: ticket)
+                )
+                ticketMetaPill(
+                  ticket.owner,
+                  tone: ticket.owner == "linear" ? .orange : .secondary
+                )
+              }
+              Spacer(minLength: 8)
+              Text(humanReadableListDate(entry.updatedAt))
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+            }
+            Text(entry.title)
+              .font(.system(size: 15, weight: .semibold))
+              .multilineTextAlignment(.leading)
+              .lineLimit(2)
+            Text(entry.summary)
+              .font(.system(size: 13, weight: .medium))
+              .foregroundStyle(.secondary)
+              .multilineTextAlignment(.leading)
+              .lineLimit(3)
+            ScrollView(.horizontal, showsIndicators: false) {
+              HStack(spacing: 6) {
+                ticketMetaPill(
+                  "\(entry.openConflictCount) open",
+                  tone: entry.openConflictCount > 0 ? .orange : .secondary
+                )
+                ticketMetaPill(
+                  "\(entry.commentCount) comment\(entry.commentCount == 1 ? "" : "s")",
+                  tone: .secondary
+                )
+                if entry.localNoteCount > 0 {
+                  ticketMetaPill(
+                    "\(entry.localNoteCount) local note\(entry.localNoteCount == 1 ? "" : "s")",
+                    tone: .secondary
+                  )
+                }
+                if let checkpointSummary = ticketDetailCache[entry.ticketId]?.linearSyncReviewState.checkpointSummary {
+                  ticketMetaPill(checkpointSummary, tone: .secondary)
+                }
+              }
+            }
+          }
+        }
+      }
+      .padding(.horizontal, 12)
+      .padding(.vertical, 12)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .background(selectionBackground(for: entry.ticketId))
+      .overlay(alignment: .bottom) {
+        Rectangle()
+          .fill(selectionBorder(for: entry.ticketId))
+          .frame(height: 1)
+      }
+    }
+    .buttonStyle(.plain)
+    .contentShape(Rectangle())
+    .onHover { hovering in
+      hoveredTicketId = hovering ? entry.ticketId : nil
     }
     .animation(.easeInOut(duration: 0.12), value: hoveredTicketId)
   }
@@ -726,6 +981,7 @@ struct TicketsView: View {
       ticketSyncGuidanceCallout(detail)
       ticketSyncSnapshotStrip(detail)
       ticketCommentsSection(detail)
+      ticketReviewNotesSection(detail)
       ticketSyncCheckpointSection(detail)
       ticketConflictSection(detail)
     }
@@ -787,6 +1043,10 @@ struct TicketsView: View {
             ticketMetaPill("\(review.commentCount) comment\(review.commentCount == 1 ? "" : "s")", tone: .secondary)
             ticketMetaPill("\(review.openConflictCount) open", tone: review.openConflictCount > 0 ? .orange : .secondary)
             ticketMetaPill("\(review.resolvedConflictCount) resolved", tone: review.resolvedConflictCount > 0 ? .green : .secondary)
+            if reviewNotes(for: detail.ticket).count > 0 {
+              let noteCount = reviewNotes(for: detail.ticket).count
+              ticketMetaPill("\(noteCount) local note\(noteCount == 1 ? "" : "s")", tone: .secondary)
+            }
             if let checkpointSummary = review.checkpointSummary {
               ticketMetaPill(checkpointSummary, tone: .secondary)
             }
@@ -825,6 +1085,12 @@ struct TicketsView: View {
                   }
                   .adaptiveToolbarButton()
                 }
+                Button {
+                  appendQuotedCommentToReviewDraft(comment, ticket: detail.ticket)
+                } label: {
+                  Label("Quote", systemImage: "text.quote")
+                }
+                .adaptiveToolbarButton()
               }
               markdownBody(comment.body)
             }
@@ -838,6 +1104,149 @@ struct TicketsView: View {
               RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(Color.primary.opacity(0.08), lineWidth: 1)
             )
+          }
+        }
+      }
+    }
+  }
+
+  @ViewBuilder
+  private func ticketReviewNotesSection(_ detail: TicketDetailResponse) -> some View {
+    let savedNotes = reviewNotes(for: detail.ticket)
+    let isRelevant = detail.ticket.linearSyncUXState.isLinkedToLinear || detail.linearSyncReviewState.needsReview || !savedNotes.isEmpty
+    if isRelevant {
+      VStack(alignment: .leading, spacing: 10) {
+        HStack(spacing: 8) {
+          Text("Review notes")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(.secondary)
+          ticketMetaPill("Local to Hack Desktop", tone: .secondary)
+          if !savedNotes.isEmpty {
+            ticketMetaPill("\(savedNotes.count) saved", tone: .secondary)
+          }
+        }
+
+        InlineCallout(
+          tone: detail.linearSyncReviewState.needsReview ? .warn : .neutral,
+          title: "Compose a review comment",
+          message: "Draft follow-up from conflicts and comment history here. You can keep it local as a review note or append it to the ticket as an immutable Hack comment that sync can push to Linear later.",
+          actions: [
+            InlineCalloutAction(label: "Use review summary", systemImage: "sparkles") {
+              applyReviewDraftTemplate(for: detail)
+            },
+            InlineCalloutAction(label: "Copy draft", systemImage: "doc.on.doc") {
+              copyReviewDraft(for: detail.ticket)
+            },
+          ]
+        )
+
+        if !savedNotes.isEmpty {
+          VStack(alignment: .leading, spacing: 8) {
+            ForEach(savedNotes.sorted(by: { $0.createdAt > $1.createdAt })) { note in
+              VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                  ticketMetaPill("Saved note", tone: .secondary)
+                  Text(humanReadableDetailDate(note.createdAt))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                  Spacer()
+                  Button {
+                    copyToPasteboard(note.markdown)
+                    loadNotice = "Copied saved review note."
+                  } label: {
+                    Label("Copy", systemImage: "doc.on.doc")
+                  }
+                  .adaptiveToolbarButton()
+                }
+                markdownBody(note.markdown)
+              }
+              .padding(12)
+              .frame(maxWidth: .infinity, alignment: .leading)
+              .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                  .fill(colorScheme == .dark ? Color.white.opacity(0.03) : Color.black.opacity(0.025))
+              )
+              .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                  .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+              )
+            }
+          }
+        }
+
+        VStack(alignment: .leading, spacing: 8) {
+          Text("Draft")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(.secondary)
+          ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+              .fill(colorScheme == .dark ? Color.white.opacity(0.03) : Color.black.opacity(0.025))
+            TextEditor(text: reviewDraftBinding(for: detail.ticket))
+              .font(.system(size: 13, weight: .medium, design: .monospaced))
+              .scrollContentBackground(.hidden)
+              .padding(.horizontal, 8)
+              .padding(.vertical, 6)
+              .frame(minHeight: 128)
+            if reviewDraft(for: detail.ticket).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+              Text("Draft a local review comment, quote an imported comment, or stage a conflict summary.")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 14)
+                .allowsHitTesting(false)
+            }
+          }
+          .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+              .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+          )
+
+          HStack(spacing: 8) {
+            Button {
+              applyReviewDraftTemplate(for: detail)
+            } label: {
+              Label("Insert summary", systemImage: "text.append")
+            }
+            .adaptiveToolbarButton()
+
+            if let latestComment = detail.comments.last {
+              Button {
+                appendQuotedCommentToReviewDraft(latestComment, ticket: detail.ticket)
+              } label: {
+                Label("Quote latest", systemImage: "text.quote")
+              }
+              .adaptiveToolbarButton()
+            }
+
+            Button {
+              saveReviewDraft(for: detail.ticket)
+            } label: {
+              Label("Save local note", systemImage: "tray.and.arrow.down")
+            }
+            .adaptiveToolbarButtonProminent()
+            .disabled(reviewDraft(for: detail.ticket).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+            Button {
+              Task { await postReviewDraftAsTicketComment(for: detail.ticket) }
+            } label: {
+              Label("Post ticket comment", systemImage: "plus.bubble")
+            }
+            .adaptiveToolbarButton()
+            .disabled(
+              reviewDraft(for: detail.ticket).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                postingCommentTicketIds.contains(detail.ticket.ticketId)
+            )
+
+            Button("Clear") {
+              clearReviewDraft(for: detail.ticket)
+            }
+            .adaptiveToolbarButton()
+            .disabled(reviewDraft(for: detail.ticket).isEmpty)
+
+            if postingCommentTicketIds.contains(detail.ticket.ticketId) {
+              ProgressView()
+                .controlSize(.small)
+            }
           }
         }
       }
@@ -961,6 +1370,14 @@ struct TicketsView: View {
   private func ticketConflictActions(_ conflict: TicketSyncConflict) -> some View {
     let isResolving = resolvingConflictIds.contains(conflict.conflictId)
     HStack(spacing: 8) {
+      Button {
+        stageConflictReviewDraft(conflict)
+      } label: {
+        Label("Draft note", systemImage: "square.and.pencil")
+      }
+      .adaptiveToolbarButton()
+      .disabled(isResolving)
+
       Button {
         Task {
           await resolveTicketConflict(
@@ -1163,6 +1580,16 @@ struct TicketsView: View {
   private func ticketDetailFooter(_ detail: TicketDetailResponse) -> some View {
     VStack(alignment: .leading, spacing: 12) {
       HStack(spacing: 10) {
+        if let nextReviewQueueEntry {
+          Button {
+            selectedFilter = .reviewQueue
+            selectedTicketId = nextReviewQueueEntry.ticketId
+          } label: {
+            Label("Next review", systemImage: "arrow.right.circle")
+          }
+          .adaptiveToolbarButton()
+        }
+
         Button {
           Task { await syncSelectedTicketToLinear(detail.ticket) }
         } label: {
@@ -1429,7 +1856,9 @@ struct TicketsView: View {
     isHistoryExpanded = false
     isPropertiesExpanded = false
     do {
-      ticketDetail = try await model.showTicket(for: project, ticketId: selectedTicketId)
+      let detail = try await model.showTicket(for: project, ticketId: selectedTicketId)
+      ticketDetail = detail
+      ticketDetailCache[selectedTicketId] = detail
     } catch {
       detailErrorMessage = error.localizedDescription
     }
@@ -1660,12 +2089,176 @@ struct TicketsView: View {
     }
   }
 
+  private func activateReviewQueue() {
+    selectedFilter = .reviewQueue
+    if selectedTicketId == nil || !filteredTickets.contains(where: { $0.ticketId == selectedTicketId }) {
+      selectedTicketId = reviewQueueEntries.first?.ticketId
+    }
+    ticketsListFocused = true
+  }
+
+  private func ticketReviewStorageKey(for ticket: TicketSummary) -> String {
+    "\(project.id):\(ticket.ticketId)"
+  }
+
+  private func reviewNotes(for ticket: TicketSummary) -> [TicketLocalReviewNote] {
+    reviewNotesByTicketKey[ticketReviewStorageKey(for: ticket)] ?? []
+  }
+
+  private func reviewDraft(for ticket: TicketSummary) -> String {
+    reviewComposerDrafts[ticketReviewStorageKey(for: ticket)] ?? ""
+  }
+
+  private func reviewDraftBinding(for ticket: TicketSummary) -> Binding<String> {
+    let key = ticketReviewStorageKey(for: ticket)
+    return Binding(
+      get: { reviewComposerDrafts[key] ?? "" },
+      set: { newValue in
+        reviewComposerDrafts[key] = newValue
+      }
+    )
+  }
+
+  private func loadPersistedReviewNotes() {
+    guard let data = reviewNotesStorage.data(using: .utf8) else {
+      reviewNotesByTicketKey = [:]
+      return
+    }
+    do {
+      reviewNotesByTicketKey = try JSONDecoder().decode([String: [TicketLocalReviewNote]].self, from: data)
+    } catch {
+      reviewNotesByTicketKey = [:]
+    }
+  }
+
+  private func persistReviewNotes() {
+    do {
+      let data = try JSONEncoder().encode(reviewNotesByTicketKey)
+      reviewNotesStorage = String(decoding: data, as: UTF8.self)
+    } catch {
+      loadNotice = "Failed to save local review notes."
+    }
+  }
+
+  private func applyReviewDraftTemplate(for detail: TicketDetailResponse) {
+    reviewComposerDrafts[ticketReviewStorageKey(for: detail.ticket)] = TicketReviewComposer.draft(for: detail)
+    isReviewNotesExpanded = true
+  }
+
+  private func appendQuotedCommentToReviewDraft(_ comment: TicketComment, ticket: TicketSummary) {
+    let quote = TicketReviewComposer.quote(comment: comment)
+    appendToReviewDraft(quote, ticket: ticket)
+  }
+
+  private func stageConflictReviewDraft(_ conflict: TicketSyncConflict) {
+    guard let detail = ticketDetail, detail.ticket.ticketId == conflict.ticketId else {
+      return
+    }
+    let draft = TicketReviewComposer.draft(for: detail, highlightedConflict: conflict)
+    reviewComposerDrafts[ticketReviewStorageKey(for: detail.ticket)] = draft
+    isReviewNotesExpanded = true
+  }
+
+  private func appendToReviewDraft(_ text: String, ticket: TicketSummary) {
+    let key = ticketReviewStorageKey(for: ticket)
+    let existing = reviewComposerDrafts[key]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      return
+    }
+    if existing.isEmpty {
+      reviewComposerDrafts[key] = trimmed
+    } else {
+      reviewComposerDrafts[key] = "\(existing)\n\n\(trimmed)"
+    }
+    isReviewNotesExpanded = true
+  }
+
+  private func saveReviewDraft(for ticket: TicketSummary) {
+    let key = ticketReviewStorageKey(for: ticket)
+    let trimmed = (reviewComposerDrafts[key] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      return
+    }
+    let note = TicketLocalReviewNote(
+      noteId: UUID().uuidString,
+      createdAt: TicketDateFormatter.isoBasic.string(from: Date()),
+      markdown: trimmed
+    )
+    var existing = reviewNotesByTicketKey[key] ?? []
+    existing.append(note)
+    reviewNotesByTicketKey[key] = existing
+    reviewComposerDrafts[key] = ""
+    persistReviewNotes()
+    loadNotice = "Saved a local review note."
+  }
+
+  private func postReviewDraftAsTicketComment(for ticket: TicketSummary) async {
+    let key = ticketReviewStorageKey(for: ticket)
+    let trimmed = (reviewComposerDrafts[key] ?? "")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      loadNotice = "Draft a review comment before posting it."
+      return
+    }
+    guard !postingCommentTicketIds.contains(ticket.ticketId) else {
+      return
+    }
+
+    postingCommentTicketIds.insert(ticket.ticketId)
+    defer { postingCommentTicketIds.remove(ticket.ticketId) }
+
+    let response = await model.appendTicketComment(
+      for: project,
+      ticketId: ticket.ticketId,
+      body: trimmed,
+      source: "hack"
+    )
+    guard response != nil else {
+      loadNotice = model.errorMessage ?? "Failed to append ticket comment."
+      return
+    }
+
+    reviewComposerDrafts[key] = ""
+    loadNotice = "Posted an immutable Hack comment to \(ticket.ticketId)."
+    await refreshTickets()
+    await loadTicketDetail()
+  }
+
+  private func clearReviewDraft(for ticket: TicketSummary) {
+    reviewComposerDrafts[ticketReviewStorageKey(for: ticket)] = ""
+  }
+
+  private func copyReviewDraft(for ticket: TicketSummary) {
+    let trimmed = reviewDraft(for: ticket).trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      loadNotice = "Draft a review comment before copying it."
+      return
+    }
+    copyToPasteboard(trimmed)
+    loadNotice = "Copied review draft."
+  }
+
+  private func copyToPasteboard(_ text: String) {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(text, forType: .string)
+  }
+
   private func parseTicketRefs(_ text: String) -> [String] {
     let parts = text
       .split { $0 == "," || $0 == " " || $0 == "\n" || $0 == "\t" }
       .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
       .filter { !$0.isEmpty }
     return Array(Set(parts)).sorted()
+  }
+
+  private func ticketCount(for filter: TicketFilter) -> Int {
+    switch filter {
+    case .reviewQueue:
+      return reviewQueueCount
+    default:
+      return filter.count(in: tickets)
+    }
   }
 
   private var filteredTickets: [TicketSummary] {
@@ -1682,13 +2275,17 @@ struct TicketsView: View {
       base = originFiltered.filter { $0.status == .blocked }
     case .done:
       base = originFiltered.filter { $0.status == .done }
+    case .reviewQueue:
+      let visibleTicketsById = Dictionary(
+        uniqueKeysWithValues: originFiltered.map { ($0.ticketId, $0) }
+      )
+      base = reviewQueueEntries.compactMap { visibleTicketsById[$0.ticketId] }
     }
 
     let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return base }
-    let lower = trimmed.lowercased()
     return base.filter {
-      $0.title.lowercased().contains(lower) || $0.ticketId.lowercased().contains(lower)
+      $0.title.localizedStandardContains(trimmed) || $0.ticketId.localizedStandardContains(trimmed)
     }
   }
 
@@ -2145,6 +2742,7 @@ private enum TicketFilter: String, CaseIterable {
   case inProgress = "in_progress"
   case blocked
   case done
+  case reviewQueue = "review_queue"
 
   var label: String {
     switch self {
@@ -2158,6 +2756,8 @@ private enum TicketFilter: String, CaseIterable {
       return "Blocked"
     case .done:
       return "Done"
+    case .reviewQueue:
+      return "Review queue"
     }
   }
 
@@ -2173,6 +2773,8 @@ private enum TicketFilter: String, CaseIterable {
       return tickets.filter { $0.status == .blocked }.count
     case .done:
       return tickets.filter { $0.status == .done }.count
+    case .reviewQueue:
+      return tickets.filter { $0.linearSyncUXState.reviewHint != nil }.count
     }
   }
 }

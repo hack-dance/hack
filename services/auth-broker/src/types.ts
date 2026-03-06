@@ -5,7 +5,7 @@ export type FlowStatus =
   | "expired"
   | "claimed";
 
-export type OAuthProvider = "github" | "linear";
+export type OAuthProvider = "github" | "linear" | "session";
 
 export type OAuthFlowAccount = {
   readonly login?: string;
@@ -13,6 +13,7 @@ export type OAuthFlowAccount = {
   readonly accountName?: string;
   readonly accountId?: string;
   readonly accountEmail?: string;
+  readonly accountEmailVerified?: boolean;
   readonly organizationId?: string;
   readonly organizationName?: string;
   readonly teamIds?: readonly string[];
@@ -20,6 +21,7 @@ export type OAuthFlowAccount = {
   readonly betterAuthUserId?: string;
   readonly betterAuthLinkState?:
     | "disabled"
+    | "email_not_verified"
     | "missing_email"
     | "linked_existing"
     | "created_new"
@@ -74,12 +76,14 @@ export type OAuthFlowPublicStatus = {
   readonly accountName?: string;
   readonly accountId?: string;
   readonly accountEmail?: string;
+  readonly accountEmailVerified?: boolean;
   readonly organizationId?: string;
   readonly organizationName?: string;
   readonly teamIds?: readonly string[];
   readonly betterAuthUserId?: string;
   readonly betterAuthLinkState?:
     | "disabled"
+    | "email_not_verified"
     | "missing_email"
     | "linked_existing"
     | "created_new"

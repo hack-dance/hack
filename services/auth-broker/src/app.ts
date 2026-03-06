@@ -7,6 +7,7 @@ import {
 import type { BrokerConfig } from "./config.ts";
 import { FlowStore } from "./flow-store.ts";
 import { createBetterAuthPlugin } from "./modules/better-auth/plugin.ts";
+import { createBetterAuthShellPlugin } from "./modules/better-auth/shell-plugin.ts";
 import { createCoreRoutesPlugin } from "./modules/core/plugin.ts";
 import { createGitHubOAuthPlugin } from "./modules/github-oauth/plugin.ts";
 import { createLinearAgentPlugin } from "./modules/linear-agent/plugin.ts";
@@ -95,6 +96,13 @@ export function createAuthBrokerApp({
     .use(
       createBetterAuthPlugin({
         runtime: betterAuthRuntime,
+      })
+    )
+    .use(
+      createBetterAuthShellPlugin({
+        config,
+        runtime: betterAuthRuntime,
+        flowStore,
       })
     )
     .use(
@@ -206,6 +214,18 @@ function isReadOnlyRoutePath(input: { readonly path: string }): boolean {
   if (input.path === "/v1/auth/better-auth/status") {
     return true;
   }
+  if (input.path === "/auth") {
+    return true;
+  }
+  if (input.path === "/auth/account") {
+    return true;
+  }
+  if (input.path === "/v1/auth/session/start") {
+    return true;
+  }
+  if (input.path === "/v1/auth/me") {
+    return true;
+  }
   if (input.path === "/linear/callback") {
     return true;
   }
@@ -231,6 +251,9 @@ function isReadOnlyRoutePath(input: { readonly path: string }): boolean {
     return true;
   }
   if (input.path.startsWith("/v1/auth/github/")) {
+    return true;
+  }
+  if (input.path.startsWith("/v1/auth/session/flows/")) {
     return true;
   }
   if (input.path.startsWith("/v1/auth/linear/")) {

@@ -30,6 +30,16 @@ export function createProvidersPlugin({
           enabled: betterAuthRuntime.enabled,
           mode: "session",
           basePath: "/api/auth",
+          shellPath: "/auth",
+          accountPath: "/auth/account",
+          sessionStartPath: "/v1/auth/session/start",
+          mePath: "/v1/auth/me",
+          socialProviders: betterAuthRuntime.socialProviders ?? [],
+          accountLinkingPolicy: betterAuthRuntime.accountLinkingPolicy ?? {
+            requireVerifiedEmail: true,
+            allowDifferentEmails: false,
+            trustedProviders: [],
+          },
         },
         {
           id: "github",

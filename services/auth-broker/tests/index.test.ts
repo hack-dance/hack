@@ -35,6 +35,21 @@ type StartFlowResponse = {
   };
 };
 
+type SessionStartFlowResponse = {
+  readonly ok: true;
+  readonly flow: {
+    readonly flowId: string;
+    readonly deviceCode: string;
+    readonly pollUrl: string;
+    readonly authorizeUrl: string;
+    readonly socialProviders: ReadonlyArray<{
+      readonly id: string;
+      readonly label: string;
+    }>;
+    readonly provider?: string;
+  };
+};
+
 function createBetterAuthDb(
   rows: readonly Record<string, unknown>[]
 ): BetterAuthDb {
@@ -51,6 +66,12 @@ function createBetterAuthRuntimeWithSession(
   return {
     enabled: true,
     ...(db ? { db } : {}),
+    socialProviders: [{ id: "github", label: "GitHub" }],
+    accountLinkingPolicy: {
+      requireVerifiedEmail: true,
+      allowDifferentEmails: false,
+      trustedProviders: [],
+    },
     auth: {
       api: {
         getSession: async () => session,
@@ -316,6 +337,219 @@ describe("auth broker github flow routes", () => {
     expect(payload.enabled).toBe(false);
     expect(payload.reason).toBe("test-disabled");
     expect(payload.basePath).toBe("/api/auth");
+  });
+
+  test("providers route includes better-auth shell metadata", async () => {
+    const app = createAuthBrokerApp({
+      config: createTestConfig(),
+      flowStore: new FlowStore(),
+      betterAuthRuntime: createBetterAuthRuntimeWithSession(null),
+    });
+
+    const response = await app.handle(
+      new Request("http://localhost/v1/auth/providers")
+    );
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as {
+      readonly providers: ReadonlyArray<{
+        readonly id: string;
+        readonly shellPath?: string;
+        readonly accountPath?: string;
+        readonly sessionStartPath?: string;
+        readonly mePath?: string;
+        readonly socialProviders?: ReadonlyArray<{
+          readonly id: string;
+          readonly label: string;
+        }>;
+        readonly accountLinkingPolicy?: {
+          readonly requireVerifiedEmail: boolean;
+          readonly allowDifferentEmails: boolean;
+        };
+      }>;
+    };
+    const betterAuthProvider = payload.providers.find(
+      (provider) => provider.id === "better-auth"
+    );
+    expect(betterAuthProvider).toBeDefined();
+    expect(betterAuthProvider?.shellPath).toBe("/auth");
+    expect(betterAuthProvider?.accountPath).toBe("/auth/account");
+    expect(betterAuthProvider?.sessionStartPath).toBe("/v1/auth/session/start");
+    expect(betterAuthProvider?.mePath).toBe("/v1/auth/me");
+    expect(betterAuthProvider?.socialProviders).toEqual([
+      {
+        id: "github",
+        label: "GitHub",
+      },
+    ]);
+    expect(betterAuthProvider?.accountLinkingPolicy).toMatchObject({
+      requireVerifiedEmail: true,
+      allowDifferentEmails: false,
+    });
+  });
+
+  test("session start route issues auth shell flow payload", async () => {
+    const app = createAuthBrokerApp({
+      config: createTestConfig(),
+      flowStore: new FlowStore(),
+      betterAuthRuntime: createBetterAuthRuntimeWithSession(null),
+    });
+
+    const response = await app.handle(
+      new Request(
+        "http://localhost/v1/auth/session/start?provider=github&redirect=hack://auth/complete"
+      )
+    );
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as SessionStartFlowResponse;
+    expect(payload.ok).toBe(true);
+    expect(payload.flow.authorizeUrl).toContain("/auth?");
+    expect(payload.flow.authorizeUrl).toContain("provider=github");
+    expect(payload.flow.authorizeUrl).toContain(
+      "redirect=hack%3A%2F%2Fauth%2Fcomplete"
+    );
+    expect(payload.flow.socialProviders).toEqual([
+      {
+        id: "github",
+        label: "GitHub",
+      },
+    ]);
+    expect(payload.flow.provider).toBe("github");
+  });
+
+  test("auth page renders provider-driven sign-in surface", async () => {
+    const app = createAuthBrokerApp({
+      config: createTestConfig(),
+      flowStore: new FlowStore(),
+      betterAuthRuntime: createBetterAuthRuntimeWithSession(null),
+    });
+
+    const response = await app.handle(
+      new Request("http://localhost/auth?provider=github")
+    );
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain("Connect Hack auth");
+    expect(html).toContain("Continue with GitHub");
+    expect(html).toContain("/api/auth/sign-in/social");
+  });
+
+  test("account page completes session flow and claimed token resolves /v1/auth/me", async () => {
+    await withManagementTokenSecret("broker-session-secret", async () => {
+      const flowStore = new FlowStore();
+      const app = createAuthBrokerApp({
+        config: createTestConfig(),
+        flowStore,
+        betterAuthRuntime: createBetterAuthRuntimeWithSession(
+          withActiveTeam(
+            {
+              session: {
+                id: "sess-auth",
+                userId: "better-auth-user",
+                expiresAt: new Date(),
+                createdAt: new Date(),
+                updatedAt: new Date(),
+                token: "auth-token",
+              },
+              user: {
+                id: "better-auth-user",
+                email: "user@example.com",
+                emailVerified: true,
+                name: "Hack User",
+                createdAt: new Date(),
+                updatedAt: new Date(),
+              },
+            },
+            {
+              organizationId: "org-auth",
+              teamId: "team-auth",
+            }
+          )
+        ),
+      });
+
+      const startResponse = await app.handle(
+        new Request(
+          "http://localhost/v1/auth/session/start?provider=github&redirect=hack://desktop/open"
+        )
+      );
+      expect(startResponse.status).toBe(200);
+      const startPayload =
+        (await startResponse.json()) as SessionStartFlowResponse;
+
+      const accountResponse = await app.handle(
+        new Request(
+          `http://localhost/auth/account?flowId=${encodeURIComponent(
+            startPayload.flow.flowId
+          )}&deviceCode=${encodeURIComponent(
+            startPayload.flow.deviceCode
+          )}&redirect=${encodeURIComponent("hack://desktop/open")}`
+        )
+      );
+      expect(accountResponse.status).toBe(200);
+      const accountHtml = await accountResponse.text();
+      expect(accountHtml).toContain("Hack auth is ready to claim");
+      expect(accountHtml).toContain("Open app");
+
+      const claimResponse = await app.handle(
+        new Request(
+          `http://localhost/v1/auth/session/flows/${encodeURIComponent(
+            startPayload.flow.flowId
+          )}?deviceCode=${encodeURIComponent(
+            startPayload.flow.deviceCode
+          )}&claim=1`
+        )
+      );
+      expect(claimResponse.status).toBe(200);
+      const claimPayload = (await claimResponse.json()) as {
+        readonly ok: true;
+        readonly status: {
+          readonly status: string;
+          readonly managementToken?: string;
+          readonly managementTokenExpiresAt?: string;
+          readonly accountEmail?: string;
+          readonly betterAuthUserId?: string;
+        };
+      };
+      expect(claimPayload.ok).toBe(true);
+      expect(claimPayload.status.status).toBe("claimed");
+      expect(claimPayload.status.managementToken).toBeDefined();
+      expect(claimPayload.status.managementTokenExpiresAt).toBeDefined();
+      expect(claimPayload.status.accountEmail).toBe("user@example.com");
+      expect(claimPayload.status.betterAuthUserId).toBe("better-auth-user");
+
+      const managementToken = claimPayload.status.managementToken;
+      expect(managementToken).toBeDefined();
+      if (!managementToken) {
+        return;
+      }
+
+      const meResponse = await app.handle(
+        new Request("http://localhost/v1/auth/me", {
+          headers: {
+            authorization: `Bearer ${managementToken}`,
+          },
+        })
+      );
+      expect(meResponse.status).toBe(200);
+      const mePayload = (await meResponse.json()) as {
+        readonly ok: true;
+        readonly authenticated: boolean;
+        readonly accessControlMode: string;
+        readonly session: {
+          readonly userId: string;
+          readonly organizationId: string | null;
+          readonly teamId: string | null;
+          readonly managementTokenProfileId: string | null;
+        } | null;
+      };
+      expect(mePayload.ok).toBe(true);
+      expect(mePayload.authenticated).toBe(true);
+      expect(mePayload.accessControlMode).toBe("better_auth_team_owned");
+      expect(mePayload.session?.userId).toBe("better-auth-user");
+      expect(mePayload.session?.organizationId).toBe("org-auth");
+      expect(mePayload.session?.teamId).toBe("team-auth");
+      expect(mePayload.session?.managementTokenProfileId).toBeNull();
+    });
   });
 
   test("shared middleware accepts optional inbound request id header", async () => {

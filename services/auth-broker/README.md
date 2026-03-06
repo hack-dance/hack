@@ -8,6 +8,8 @@ Minimal Bun + Elysia auth broker for browser-based provider callbacks.
 2. Handle browser callback redirects.
 3. Expose short-lived polling endpoints so local clients can claim tokens.
 4. Host Better Auth endpoints (`/api/auth/*`) for first-party session/org/team auth.
+5. Expose a minimal Hack auth shell (`/auth`, `/auth/account`) and a
+   management-token bootstrap flow for non-browser clients.
 
 This keeps provider auth UX one-click while storing long-term credentials on the
 client host.
@@ -29,8 +31,9 @@ stay decoupled:
 2. `src/modules/core/plugin.ts`
 3. `src/modules/providers/plugin.ts`
 4. `src/modules/better-auth/plugin.ts`
-5. `src/modules/github-oauth/plugin.ts`
-6. `src/modules/linear-agent/plugin.ts`
+5. `src/modules/better-auth/shell-plugin.ts`
+6. `src/modules/github-oauth/plugin.ts`
+7. `src/modules/linear-agent/plugin.ts`
 
 GitHub OAuth routes are internally composed from focused plugins so callback,
 provider, and polling route plumbing can evolve independently:
@@ -69,13 +72,46 @@ return `405` for non-`GET` requests.
 8. `POST /linear/webhooks` (Linear agent + webhook ingest)
 9. `POST /v1/integrations/linear/webhook` (legacy alias)
 10. `GET /v1/auth/better-auth/status`
-11. `ALL /api/auth/*` (proxied to Better Auth handler)
+11. `GET /v1/auth/session/start`
+12. `GET /v1/auth/session/flows/:flowId`
+13. `GET /v1/auth/me`
+14. `GET /auth`
+15. `GET /auth/account`
+16. `ALL /api/auth/*` (proxied to Better Auth handler)
 
 When `requireInstallation=1` is used, flow polling can defer token claim until
 an installation is visible for the flow, enabling one-pass authorize+install UX.
 
 Callback success pages now include an `Open Hack app` deep link (`hack://...`)
 so desktop users can return focus to the app immediately after browser auth.
+
+## Hack auth session flow
+
+The broker now exposes a lightweight Better Auth bootstrap flow that mirrors the
+existing OAuth start/poll/claim pattern used by GitHub and Linear:
+
+1. `GET /v1/auth/session/start`
+2. Open the returned `authorizeUrl` in a browser
+3. Browser completes Better Auth sign-in on `/auth` and `/auth/account`
+4. Local client polls `GET /v1/auth/session/flows/:flowId`
+5. Local client claims `managementToken` with `?claim=1`
+
+The claimed token is a signed broker management token. It can be stored by the
+CLI/macOS app and sent as `Authorization: Bearer <token>` to protected broker
+routes when a browser cookie session is not present.
+
+`GET /v1/auth/me` resolves either:
+
+1. the current Better Auth browser session, or
+2. a valid broker management token
+
+The Better Auth shell surfaces provider-driven sign-in and account-link actions
+from the providers configured in broker env. The runtime also enables strict
+account-linking groundwork through Better Auth's own linking policy:
+
+1. verified provider email required for implicit linking
+2. different provider emails are not allowed by default
+3. no trusted providers are pre-whitelisted
 
 ## Environment
 
@@ -96,20 +132,22 @@ so desktop users can return focus to the app immediately after browser auth.
 15. `BETTER_AUTH_SECRET` (required to enable Better Auth runtime)
 16. `BETTER_AUTH_URL` (optional base URL override)
 17. `BETTER_AUTH_TRUSTED_ORIGINS` (optional comma-separated origins)
-18. `BETTER_AUTH_GITHUB_AUTO_PROVISION_USERS` (optional boolean; when true, callback can create a Better Auth user from GitHub email if no match exists)
-19. `BETTER_AUTH_LINEAR_AUTO_PROVISION_USERS` (optional boolean; when true, callback can create a Better Auth user from Linear email if no match exists)
-20. `HACK_LINEAR_CLIENT_ID` (recommended Linear OAuth client id)
-21. `HACK_LINEAR_SECRET` (optional Linear OAuth client secret; PKCE can run without it)
-22. `HACK_LINEAR_DEVELOPER_APP_TOKEN` (optional app token for agent/system automations)
-23. `HACK_LINEAR_WEBHOOK_SECRET` (recommended Linear webhook signing secret)
-24. `HACK_LINEAR_SCOPES` (optional; default: `read,write,app:mentionable,app:assignable`)
-25. `HACK_LINEAR_OAUTH_ACTOR` (optional; default: `app` for Linear agent/app installs)
-26. `HACK_LINEAR_REDIRECT_URI` (default: `${AUTH_BROKER_PUBLIC_BASE_URL}/linear/callback`)
-27. `HACK_LINEAR_WEBHOOK_PATH` (default: `/linear/webhooks`)
-28. `HACK_LINEAR_AUTHORIZE_URL` (optional; default: `https://linear.app/oauth/authorize`)
-29. `HACK_LINEAR_TOKEN_URL` (optional; default: `https://api.linear.app/oauth/token`)
-30. `HACK_LINEAR_API_BASE_URL` (optional; default: `https://api.linear.app`)
-31. `LINEAR_CLIENT_ID` / `LINEAR_CLIENT_SECRET` / `LINEAR_WEBHOOK_SIGNING_SECRET` / `LINEAR_OAUTH_ACTOR` (optional compatibility aliases)
+18. `GOOGLE_CLIENT_ID` (optional; enables Google social sign-in in Better Auth shell)
+19. `GOOGLE_CLIENT_SECRET` (optional; enables Google social sign-in in Better Auth shell)
+20. `BETTER_AUTH_GITHUB_AUTO_PROVISION_USERS` (optional boolean; when true, callback can create a Better Auth user from GitHub email if no match exists)
+21. `BETTER_AUTH_LINEAR_AUTO_PROVISION_USERS` (optional boolean; when true, callback can create a Better Auth user from Linear email if no match exists)
+22. `HACK_LINEAR_CLIENT_ID` (recommended Linear OAuth client id)
+23. `HACK_LINEAR_SECRET` (optional Linear OAuth client secret; PKCE can run without it)
+24. `HACK_LINEAR_DEVELOPER_APP_TOKEN` (optional app token for agent/system automations)
+25. `HACK_LINEAR_WEBHOOK_SECRET` (recommended Linear webhook signing secret)
+26. `HACK_LINEAR_SCOPES` (optional; default: `read,write,app:mentionable,app:assignable`)
+27. `HACK_LINEAR_OAUTH_ACTOR` (optional; default: `app` for Linear agent/app installs)
+28. `HACK_LINEAR_REDIRECT_URI` (default: `${AUTH_BROKER_PUBLIC_BASE_URL}/linear/callback`)
+29. `HACK_LINEAR_WEBHOOK_PATH` (default: `/linear/webhooks`)
+30. `HACK_LINEAR_AUTHORIZE_URL` (optional; default: `https://linear.app/oauth/authorize`)
+31. `HACK_LINEAR_TOKEN_URL` (optional; default: `https://api.linear.app/oauth/token`)
+32. `HACK_LINEAR_API_BASE_URL` (optional; default: `https://api.linear.app`)
+33. `LINEAR_CLIENT_ID` / `LINEAR_CLIENT_SECRET` / `LINEAR_WEBHOOK_SIGNING_SECRET` / `LINEAR_OAUTH_ACTOR` (optional compatibility aliases)
 
 When running broker from repo root (`bun run auth:dev`), Linear env aliases also
 fallback to root `.env.local` / `.env` if process env values are unset.

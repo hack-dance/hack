@@ -8,11 +8,24 @@ import { z } from "zod";
 type BetterAuthInstance = ReturnType<typeof betterAuth>;
 type AuthBrokerDbClient = ReturnType<typeof createAuthBrokerDbClient>;
 
+export type BetterAuthSocialProvider = {
+  readonly id: string;
+  readonly label: string;
+};
+
+export type BetterAuthAccountLinkingPolicy = {
+  readonly requireVerifiedEmail: boolean;
+  readonly allowDifferentEmails: boolean;
+  readonly trustedProviders: readonly string[];
+};
+
 type BetterAuthRuntime = {
   readonly enabled: boolean;
   readonly reason?: string;
   readonly auth?: BetterAuthInstance;
   readonly db?: AuthBrokerDbClient;
+  readonly socialProviders?: readonly BetterAuthSocialProvider[];
+  readonly accountLinkingPolicy?: BetterAuthAccountLinkingPolicy;
 };
 
 const betterAuthEnvSchema = z.object({
@@ -22,6 +35,8 @@ const betterAuthEnvSchema = z.object({
   BETTER_AUTH_TRUSTED_ORIGINS: z.string().optional(),
   GITHUB_CLIENT_ID: z.string().min(1).optional(),
   GITHUB_CLIENT_SECRET: z.string().min(1).optional(),
+  GOOGLE_CLIENT_ID: z.string().min(1).optional(),
+  GOOGLE_CLIENT_SECRET: z.string().min(1).optional(),
 });
 
 /**
@@ -39,6 +54,8 @@ export function createBetterAuthRuntimeFromEnv(): BetterAuthRuntime {
     BETTER_AUTH_TRUSTED_ORIGINS: process.env.BETTER_AUTH_TRUSTED_ORIGINS,
     GITHUB_CLIENT_ID: process.env.GITHUB_CLIENT_ID,
     GITHUB_CLIENT_SECRET: process.env.GITHUB_CLIENT_SECRET,
+    GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
   });
 
   if (!env.DATABASE_URL) {
@@ -58,6 +75,18 @@ export function createBetterAuthRuntimeFromEnv(): BetterAuthRuntime {
   const githubEnabled = Boolean(
     env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET
   );
+  const googleEnabled = Boolean(
+    env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET
+  );
+  const socialProviders = [
+    ...(githubEnabled ? [{ id: "github", label: "GitHub" }] : []),
+    ...(googleEnabled ? [{ id: "google", label: "Google" }] : []),
+  ] as const satisfies readonly BetterAuthSocialProvider[];
+  const accountLinkingPolicy = {
+    requireVerifiedEmail: true,
+    allowDifferentEmails: false,
+    trustedProviders: [],
+  } as const satisfies BetterAuthAccountLinkingPolicy;
   const db = createAuthBrokerDbClient({ databaseUrl: env.DATABASE_URL });
 
   const auth = betterAuth({
@@ -70,13 +99,32 @@ export function createBetterAuthRuntimeFromEnv(): BetterAuthRuntime {
     emailAndPassword: {
       enabled: true,
     },
-    ...(githubEnabled
+    account: {
+      accountLinking: {
+        enabled: true,
+        allowDifferentEmails: accountLinkingPolicy.allowDifferentEmails,
+        trustedProviders: [...accountLinkingPolicy.trustedProviders],
+      },
+    },
+    ...(socialProviders.length > 0
       ? {
           socialProviders: {
-            github: {
-              clientId: env.GITHUB_CLIENT_ID ?? "",
-              clientSecret: env.GITHUB_CLIENT_SECRET ?? "",
-            },
+            ...(githubEnabled
+              ? {
+                  github: {
+                    clientId: env.GITHUB_CLIENT_ID ?? "",
+                    clientSecret: env.GITHUB_CLIENT_SECRET ?? "",
+                  },
+                }
+              : {}),
+            ...(googleEnabled
+              ? {
+                  google: {
+                    clientId: env.GOOGLE_CLIENT_ID ?? "",
+                    clientSecret: env.GOOGLE_CLIENT_SECRET ?? "",
+                  },
+                }
+              : {}),
           },
         }
       : {}),
@@ -99,6 +147,8 @@ export function createBetterAuthRuntimeFromEnv(): BetterAuthRuntime {
     enabled: true,
     auth,
     db,
+    socialProviders,
+    accountLinkingPolicy,
   };
 }
 

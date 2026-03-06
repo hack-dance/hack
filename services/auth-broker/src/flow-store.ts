@@ -77,7 +77,7 @@ export class FlowStore {
   markComplete(opts: {
     readonly flowId: string;
     readonly account: OAuthFlow["account"];
-    readonly token: string;
+    readonly token?: string;
     readonly tokenExpiresAt?: string;
     readonly refreshToken?: string;
     readonly refreshTokenExpiresAt?: string;
@@ -156,7 +156,11 @@ export class FlowStore {
     }
 
     const base = toPublicStatus(flow);
-    if (!opts.claimToken || flow.status !== "complete" || !flow.token) {
+    if (
+      !opts.claimToken ||
+      flow.status !== "complete" ||
+      !((flow.token && flow.token.length > 0) || flow.managementToken)
+    ) {
       return { ok: true, status: base };
     }
 
@@ -173,8 +177,8 @@ export class FlowStore {
       ...base,
       status: "claimed",
       claimedAt,
-      token: flow.token,
-      tokenExpiresAt: flow.tokenExpiresAt,
+      ...(flow.token ? { token: flow.token } : {}),
+      ...(flow.tokenExpiresAt ? { tokenExpiresAt: flow.tokenExpiresAt } : {}),
       ...(flow.refreshToken ? { refreshToken: flow.refreshToken } : {}),
       ...(flow.refreshTokenExpiresAt
         ? { refreshTokenExpiresAt: flow.refreshTokenExpiresAt }
@@ -278,30 +282,7 @@ function toPublicStatus(flow: OAuthFlow): OAuthFlowPublicStatus {
     expiresAt: new Date(flow.expiresAtMs).toISOString(),
     ...(flow.completedAt ? { completedAt: flow.completedAt } : {}),
     ...(flow.claimedAt ? { claimedAt: flow.claimedAt } : {}),
-    ...(flow.account?.accountHandle
-      ? { accountHandle: flow.account.accountHandle }
-      : {}),
-    ...(flow.account?.login ? { accountLogin: flow.account.login } : {}),
-    ...(flow.account?.accountName
-      ? { accountName: flow.account.accountName }
-      : {}),
-    ...(flow.account?.accountId ? { accountId: flow.account.accountId } : {}),
-    ...(flow.account?.accountEmail
-      ? { accountEmail: flow.account.accountEmail }
-      : {}),
-    ...(flow.account?.organizationId
-      ? { organizationId: flow.account.organizationId }
-      : {}),
-    ...(flow.account?.organizationName
-      ? { organizationName: flow.account.organizationName }
-      : {}),
-    ...(flow.account?.teamIds ? { teamIds: flow.account.teamIds } : {}),
-    ...(flow.account?.betterAuthUserId
-      ? { betterAuthUserId: flow.account.betterAuthUserId }
-      : {}),
-    ...(flow.account?.betterAuthLinkState
-      ? { betterAuthLinkState: flow.account.betterAuthLinkState }
-      : {}),
+    ...toPublicAccountFields(flow),
     ...(flow.installationId ? { installationId: flow.installationId } : {}),
     ...(flow.account?.installationIds
       ? { installationIds: flow.account.installationIds }
@@ -314,6 +295,38 @@ function toPublicStatus(flow: OAuthFlow): OAuthFlowPublicStatus {
     ...(flow.appSlug ? { appSlug: flow.appSlug } : {}),
     ...(flow.appInstallUrl ? { appInstallUrl: flow.appInstallUrl } : {}),
     ...(flow.error ? { error: flow.error } : {}),
+  };
+}
+
+function toPublicAccountFields(
+  flow: OAuthFlow
+): Partial<OAuthFlowPublicStatus> {
+  const account = flow.account;
+  if (!account) {
+    return {};
+  }
+  return {
+    ...(account.accountHandle ? { accountHandle: account.accountHandle } : {}),
+    ...(account.login ? { accountLogin: account.login } : {}),
+    ...(account.accountName ? { accountName: account.accountName } : {}),
+    ...(account.accountId ? { accountId: account.accountId } : {}),
+    ...(account.accountEmail ? { accountEmail: account.accountEmail } : {}),
+    ...(typeof account.accountEmailVerified === "boolean"
+      ? { accountEmailVerified: account.accountEmailVerified }
+      : {}),
+    ...(account.organizationId
+      ? { organizationId: account.organizationId }
+      : {}),
+    ...(account.organizationName
+      ? { organizationName: account.organizationName }
+      : {}),
+    ...(account.teamIds ? { teamIds: account.teamIds } : {}),
+    ...(account.betterAuthUserId
+      ? { betterAuthUserId: account.betterAuthUserId }
+      : {}),
+    ...(account.betterAuthLinkState
+      ? { betterAuthLinkState: account.betterAuthLinkState }
+      : {}),
   };
 }
 

@@ -101,6 +101,8 @@ public actor HackCLIClient {
     let authenticated: Bool?
     let brokerBaseUrl: String?
     let authorizeUrl: String?
+    let error: String?
+    let nextStep: String?
   }
 
   private struct HackAuthLogoutEnvelope: Decodable {
@@ -894,10 +896,16 @@ public actor HackCLIClient {
   }
 
   public func loginHackAccount() async throws {
-    let result = try await run(["auth", "login", "--json"], allowNonZeroExit: true)
+    let result = try await run(
+      ["auth", "login", "--json", "--redirect", "hack://auth/complete"],
+      allowNonZeroExit: true
+    )
     let payload = try decodeJsonOrThrow(HackAuthLoginEnvelope.self, result: result)
     guard payload.ok else {
-      throw HackCLIError.network("Hack auth login did not complete.")
+      let message = normalized(payload.error)
+        ?? normalized(payload.nextStep)
+        ?? "Hack auth login did not complete."
+      throw HackCLIError.network(message)
     }
   }
 

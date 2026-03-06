@@ -240,4 +240,59 @@ describe("broker Hack session auth flow", () => {
       expect(mePayload.session?.teamId).toBe("team-123");
     });
   });
+
+  test("auth account page auto-returns to the desktop app when a hack redirect is supplied", async () => {
+    await withManagementTokenSecret("session-auth-return-secret", async () => {
+      const session = {
+        user: {
+          id: "user-123",
+          email: "hack@example.com",
+          emailVerified: true,
+          name: "Hack User",
+        },
+        session: {
+          id: "sess-123",
+          userId: "user-123",
+          token: "session-token",
+          activeOrganizationId: "org-123",
+          activeTeamId: "team-123",
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          expiresAt: new Date(Date.now() + 60_000),
+        },
+      } as unknown as BetterAuthSession;
+
+      const app = createAuthBrokerApp({
+        config: createTestConfig(),
+        flowStore: new FlowStore(),
+        betterAuthRuntime: createBetterAuthRuntimeWithSession(session),
+      });
+
+      const startResponse = await app.handle(
+        new Request(
+          "http://localhost/v1/auth/session/start?redirect=hack://auth/complete"
+        )
+      );
+      const startPayload = (
+        (await startResponse.json()) as SessionStartFlowResponse
+      ).flow;
+      const completeResponse = await app.handle(
+        new Request(startPayload.authorizeUrl)
+      );
+      const accountLocation = completeResponse.headers.get("location");
+      expect(accountLocation).toContain(
+        "redirect=hack%3A%2F%2Fauth%2Fcomplete"
+      );
+      if (!accountLocation) {
+        return;
+      }
+
+      const accountResponse = await app.handle(new Request(accountLocation));
+      const html = await accountResponse.text();
+      expect(html).toContain("Open app");
+      expect(html).toContain("hack://auth/complete");
+      expect(html).toContain("Returning to Hack");
+      expect(html).toContain("window.setTimeout");
+    });
+  });
 });

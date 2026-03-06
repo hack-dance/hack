@@ -30,11 +30,19 @@ const optBrokerUrl = defineOption({
   description: "Override the Hack auth broker base URL",
 } as const);
 
+const optRedirect = defineOption({
+  name: "redirect",
+  type: "string",
+  long: "--redirect",
+  valueHint: "<url>",
+  description: "Return to this URL after browser sign-in finishes",
+} as const);
+
 const loginSpec = defineCommand({
   name: "login",
   summary: "Open a browser and sign in to Hack auth",
   group: "Global",
-  options: [optJson, optNoOpen, optBrokerUrl] as const,
+  options: [optJson, optNoOpen, optBrokerUrl, optRedirect] as const,
   positionals: [] as const,
   subcommands: [] as const,
 } as const);
@@ -94,6 +102,7 @@ async function handleAuthLogin({
   });
   const start = await startHackAuthSessionFlow({
     baseUrl: brokerBaseUrl,
+    redirectUrl: args.options.redirect,
   });
   if (!start.ok) {
     return writeFailure({

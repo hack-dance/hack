@@ -404,17 +404,26 @@ export function createBetterAuthShellPlugin({
             }),
           }),
           script: resolvedSession.session
-            ? renderProviderActionScript({
-                callbackUrl: buildAccountPageUrl({
-                  publicBaseUrl: config.publicBaseUrl,
-                  flowId: query.flowId,
-                  deviceCode: query.deviceCode,
-                  returnUrl,
+            ? [
+                renderProviderActionScript({
+                  callbackUrl: buildAccountPageUrl({
+                    publicBaseUrl: config.publicBaseUrl,
+                    flowId: query.flowId,
+                    deviceCode: query.deviceCode,
+                    returnUrl,
+                  }),
+                  autoProviderId: null,
+                  mode: "link",
                 }),
-                autoProviderId: null,
-                mode: "link",
-              })
-            : undefined,
+                renderLifecycleAutoReturnScript({
+                  lifecycle,
+                }),
+              ]
+                .filter(Boolean)
+                .join("\n")
+            : renderLifecycleAutoReturnScript({
+                lifecycle,
+              }) || undefined,
         });
       },
       {
@@ -731,6 +740,31 @@ function renderCompletionBody(input: {
   return `Return to Hack and finish the local setup flow. <a href="${escapeHtml(
     input.returnUrl
   )}">Open app</a>.`;
+}
+
+function renderLifecycleAutoReturnScript(input: {
+  readonly lifecycle: SessionFlowLifecycle;
+}): string {
+  if (
+    (input.lifecycle.state !== "ready" &&
+      input.lifecycle.state !== "claimed") ||
+    !shouldAutoReturnToDesktop({
+      returnUrl: input.lifecycle.returnUrl,
+    })
+  ) {
+    return "";
+  }
+
+  return `
+window.requestAnimationFrame(() => {
+  if (authStatus) {
+    authStatus.textContent = "Returning to Hack…";
+  }
+  window.setTimeout(() => {
+    window.location.assign(${JSON.stringify(input.lifecycle.returnUrl)});
+  }, 180);
+});
+`;
 }
 
 function renderProviderActionGrid(input: {
@@ -1116,6 +1150,20 @@ function normalizeSafeReturnUrl(input: {
     return candidate.origin === baseOrigin ? candidate.toString() : null;
   } catch {
     return null;
+  }
+}
+
+function shouldAutoReturnToDesktop(input: {
+  readonly returnUrl: string | null;
+}): boolean {
+  if (!input.returnUrl) {
+    return false;
+  }
+  try {
+    const candidate = new URL(input.returnUrl);
+    return candidate.protocol === "hack:";
+  } catch {
+    return false;
   }
 }
 

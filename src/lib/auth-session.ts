@@ -150,13 +150,18 @@ export async function deleteHackAuthSession(input?: {
  */
 export async function startHackAuthSessionFlow(input?: {
   readonly baseUrl?: string;
+  readonly redirectUrl?: string;
   readonly fetchImpl?: FetchLike;
 }): Promise<BrokerResult<HackAuthStartFlow>> {
   const baseUrl = resolveHackAuthBrokerBaseUrl({
     override: input?.baseUrl,
   });
+  const startUrl = new URL("/v1/auth/session/start", `${baseUrl}/`);
+  if (input?.redirectUrl?.trim()) {
+    startUrl.searchParams.set("redirect", input.redirectUrl.trim());
+  }
   const response = await requestBrokerJson({
-    url: `${baseUrl}/v1/auth/session/start`,
+    url: startUrl.toString(),
     routePath: "/v1/auth/session/start",
     fetchImpl: input?.fetchImpl,
   });

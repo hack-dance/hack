@@ -145,7 +145,7 @@ test("auth login opens browser, claims token, and stores the auth session", asyn
             "https://auth.hack.broker/auth?flowId=flow-123&deviceCode=device-123",
           deviceCode: "device-123",
           pollUrl: "https://auth.hack.broker/v1/auth/session/flows/flow-123",
-          expiresAt: "2026-03-06T18:00:00.000Z",
+          expiresAt: "2099-03-06T18:00:00.000Z",
           socialProviders: [{ id: "github", label: "GitHub" }],
         },
       });
@@ -159,7 +159,7 @@ test("auth login opens browser, claims token, and stores the auth session", asyn
         status: {
           status: "claimed",
           managementToken: "hack-session-token",
-          managementTokenExpiresAt: "2026-03-06T19:00:00.000Z",
+          managementTokenExpiresAt: "2099-03-06T19:00:00.000Z",
         },
       });
     }
@@ -209,7 +209,7 @@ test("auth login opens browser, claims token, and stores the auth session", asyn
 
   const stored = await readStoredTokenEnvelope();
   expect(stored?.token).toBe("hack-session-token");
-  expect(stored?.expiresAt).toBe("2026-03-06T19:00:00.000Z");
+  expect(stored?.expiresAt).toBe("2099-03-06T19:00:00.000Z");
 
   const payload = JSON.parse(result.stdout) as {
     readonly ok: boolean;
@@ -237,6 +237,68 @@ test("auth login opens browser, claims token, and stores the auth session", asyn
   expect(payload.user?.email).toBe("dio@hack.dance");
   expect(payload.activeOrganization?.slug).toBe("hack");
   expect(payload.activeTeam?.slug).toBe("cli");
+});
+
+test("auth login forwards a desktop return URL to the broker session start route", async () => {
+  fetchImpl = async (input) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+    if (
+      url ===
+      "https://auth.hack.broker/v1/auth/session/start?redirect=hack%3A%2F%2Fauth%2Fcomplete"
+    ) {
+      return Response.json({
+        ok: true,
+        flow: {
+          flowId: "flow-redirect",
+          authorizeUrl:
+            "https://auth.hack.broker/auth?flowId=flow-redirect&deviceCode=device-redirect&redirect=hack%3A%2F%2Fauth%2Fcomplete",
+          deviceCode: "device-redirect",
+          pollUrl:
+            "https://auth.hack.broker/v1/auth/session/flows/flow-redirect",
+          expiresAt: "2099-03-06T18:00:00.000Z",
+          socialProviders: [{ id: "github", label: "GitHub" }],
+        },
+      });
+    }
+    if (
+      url ===
+      "https://auth.hack.broker/v1/auth/session/flows/flow-redirect?claim=1&deviceCode=device-redirect"
+    ) {
+      return Response.json({
+        ok: true,
+        status: {
+          status: "claimed",
+          managementToken: "hack-session-token",
+        },
+      });
+    }
+    if (url === "https://auth.hack.broker/v1/auth/me") {
+      return Response.json({
+        ok: true,
+        authenticated: true,
+      });
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  const result = await runCliWithCapturedIo({
+    argv: ["auth", "login", "--json", "--redirect", "hack://auth/complete"],
+  });
+
+  expect(result.exitCode).toBe(0);
+  expect(fetchCalls.map((call) => call.url)).toEqual([
+    "https://auth.hack.broker/v1/auth/session/start?redirect=hack%3A%2F%2Fauth%2Fcomplete",
+    "https://auth.hack.broker/v1/auth/session/flows/flow-redirect?claim=1&deviceCode=device-redirect",
+    "https://auth.hack.broker/v1/auth/me",
+  ]);
+  expect(openUrlCalls).toEqual([
+    "https://auth.hack.broker/auth?flowId=flow-redirect&deviceCode=device-redirect&redirect=hack%3A%2F%2Fauth%2Fcomplete",
+  ]);
 });
 
 test("auth whoami uses stored token against broker /v1/auth/me", async () => {

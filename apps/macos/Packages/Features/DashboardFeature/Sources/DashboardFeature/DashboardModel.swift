@@ -1168,6 +1168,33 @@ public final class DashboardModel {
   }
 
   @discardableResult
+  public func ingestHackAuthDeepLink(url: URL) -> Bool {
+    guard isHackAuthCompletionDeepLink(url: url) else {
+      return false
+    }
+    errorMessage = nil
+    statusMessage = "Hack auth callback received. Finalizing…"
+    Task { @MainActor [weak self] in
+      guard let self else { return }
+      for attempt in 0..<6 {
+        await self.refreshHackAccountState(force: true, updateErrorMessage: false)
+        if let state = self.hackAccountState,
+          state.authenticated || state.tokenStored
+        {
+          self.statusMessage = state.authenticated
+            ? "Hack account connected."
+            : "Hack auth session stored locally."
+          return
+        }
+        if attempt < 5 {
+          try? await Task.sleep(for: .seconds(1))
+        }
+      }
+    }
+    return true
+  }
+
+  @discardableResult
   public func ingestGitHubOAuthDeepLink(url: URL) -> Bool {
     guard let context = parseGitHubOAuthDeepLink(url: url) else {
       return false
@@ -1189,6 +1216,18 @@ public final class DashboardModel {
       return
     }
     githubOAuthDeepLinkContext = nil
+  }
+
+  private func isHackAuthCompletionDeepLink(url: URL) -> Bool {
+    guard url.scheme?.lowercased() == "hack" else {
+      return false
+    }
+
+    let host = url.host?.lowercased() ?? ""
+    let path = normalizedPath(url.path)
+    return (host == "auth" && path == "/complete")
+      || (host == "complete" && path == "/")
+      || (host == "complete" && path.isEmpty)
   }
 
   private func parseGitHubOAuthDeepLink(url: URL) -> GitHubOAuthDeepLinkContext? {

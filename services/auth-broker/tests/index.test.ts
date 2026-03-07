@@ -2391,6 +2391,25 @@ describe("auth broker github flow routes", () => {
     expect(pollPayload.status.setDefault).toBe(true);
   });
 
+  test("linear start route persists desktop redirect URL for browser handoff", async () => {
+    const flowStore = new FlowStore();
+    const app = createAuthBrokerApp({
+      config: createTestConfig(),
+      flowStore,
+    });
+
+    const startResponse = await app.handle(
+      new Request(
+        "http://localhost/v1/auth/linear/start?profile=default&desktopRedirectUrl=hack-dev%3A%2F%2Fauth%2Flinear%2Fcallback"
+      )
+    );
+    expect(startResponse.status).toBe(200);
+    const startPayload = (await startResponse.json()) as StartFlowResponse;
+    const flow = flowStore.getById(startPayload.flow.flowId);
+    expect(flow).not.toBeNull();
+    expect(flow?.desktopRedirectUrl).toBe("hack-dev://auth/linear/callback");
+  });
+
   test("linear callback completes flow and claim returns token", async () => {
     await withManagementTokenSecret("broker-management-secret", async () => {
       const flowStore = new FlowStore();
@@ -2588,6 +2607,342 @@ describe("auth broker github flow routes", () => {
         globalThis.fetch = originalFetch;
       }
     });
+  });
+
+  test("linear callback renders Open Hack action when desktop redirect is present", async () => {
+    await withManagementTokenSecret("broker-management-secret", async () => {
+      const flowStore = new FlowStore();
+      const connectionStore = new InMemoryLinearConnectionStore();
+      const app = createAuthBrokerApp({
+        config: createTestConfig(),
+        flowStore,
+        linearConnectionStore: connectionStore,
+        betterAuthRuntime: createBetterAuthRuntimeWithSession(
+          withActiveTeam(
+            {
+              session: {
+                id: "sess-linear-open-hack",
+                userId: "better-auth-linear-user",
+                expiresAt: new Date(),
+                createdAt: new Date(),
+                updatedAt: new Date(),
+                token: "token-linear",
+              },
+              user: {
+                id: "better-auth-linear-user",
+                email: "linear@example.com",
+                emailVerified: true,
+                name: "Linear User",
+                createdAt: new Date(),
+                updatedAt: new Date(),
+              },
+            },
+            {
+              organizationId: "better-auth-org",
+              teamId: "better-auth-team",
+            }
+          ),
+          createBetterAuthDb([{ id: "better-auth-linear-user" }])
+        ),
+      });
+
+      const startResponse = await app.handle(
+        new Request(
+          "http://localhost/v1/auth/linear/start?profile=work&desktopRedirectUrl=hack-dev%3A%2F%2Fauth%2Flinear%2Fcallback"
+        )
+      );
+      expect(startResponse.status).toBe(200);
+      const startPayload = (await startResponse.json()) as StartFlowResponse;
+      const flow = flowStore.getById(startPayload.flow.flowId);
+      expect(flow).not.toBeNull();
+      if (!flow) {
+        return;
+      }
+
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = ((
+        input: string | URL | Request,
+        init?: RequestInit
+      ) => {
+        const url = resolveFetchUrl(input);
+        if (url === createTestConfig().linearTokenUrl) {
+          return new Response(
+            JSON.stringify({
+              access_token: "lin_oauth_token",
+              expires_in: 3600,
+              refresh_token: "lin_refresh_token",
+              refresh_token_expires_in: 86_400,
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            }
+          );
+        }
+        if (url === createTestConfig().linearApiBaseUrl) {
+          const bodyText =
+            typeof init?.body === "string"
+              ? init.body
+              : String(init?.body ?? "");
+          if (bodyText.includes("viewer")) {
+            return new Response(
+              JSON.stringify({
+                data: {
+                  viewer: {
+                    id: "usr_linear",
+                    name: "Linear User",
+                    email: "linear@example.com",
+                    displayName: "Linear User",
+                    organization: { id: "org-linear", name: "Hack Dance" },
+                    teams: { nodes: [{ id: "team-linear", name: "Platform" }] },
+                  },
+                },
+              }),
+              {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              }
+            );
+          }
+        }
+        return new Response("not found", { status: 404 });
+      }) as unknown as typeof fetch;
+
+      try {
+        const callbackResponse = await app.handle(
+          new Request(
+            `http://localhost/linear/callback?state=${encodeURIComponent(flow.state)}&code=test-code`
+          )
+        );
+        expect(callbackResponse.status).toBe(200);
+        const callbackHtml = await callbackResponse.text();
+        expect(callbackHtml).toContain("Open Hack");
+        expect(callbackHtml).toContain("hack-dev://auth/linear/callback");
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+  });
+
+  test("linear callback returns Hack-branded error page when token exchange throws", async () => {
+    const flowStore = new FlowStore();
+    const app = createAuthBrokerApp({
+      config: createTestConfig(),
+      flowStore,
+    });
+
+    const startResponse = await app.handle(
+      new Request("http://localhost/v1/auth/linear/start?profile=default")
+    );
+    expect(startResponse.status).toBe(200);
+    const startPayload = (await startResponse.json()) as StartFlowResponse;
+    const flow = flowStore.getById(startPayload.flow.flowId);
+    expect(flow).not.toBeNull();
+    if (!flow) {
+      return;
+    }
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (() => {
+      throw new Error("network down");
+    }) as unknown as typeof fetch;
+
+    try {
+      const callbackResponse = await app.handle(
+        new Request(
+          `http://localhost/linear/callback?state=${encodeURIComponent(flow.state)}&code=test-code`
+        )
+      );
+      expect(callbackResponse.status).toBe(502);
+      const callbackHtml = await callbackResponse.text();
+      expect(callbackHtml).toContain("Connection failed");
+      expect(callbackHtml).toContain("Return to Hack");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("linear callback fails when connection persistence cannot be saved", async () => {
+    await withManagementTokenSecret("broker-management-secret", async () => {
+      const flowStore = new FlowStore();
+      const app = createAuthBrokerApp({
+        config: createTestConfig(),
+        flowStore,
+        linearConnectionStore: {
+          upsertConnection() {
+            return Promise.reject(new Error("linear connection write failed"));
+          },
+          listConnections() {
+            return Promise.resolve([]);
+          },
+          resolveWebhookOwnership() {
+            return Promise.resolve({
+              status: "unmatched",
+              profileId: null,
+              betterAuthUserId: null,
+              betterAuthOrganizationId: null,
+              betterAuthTeamId: null,
+              organizationId: null,
+              teamId: null,
+            } as const);
+          },
+        },
+        betterAuthRuntime: createBetterAuthRuntimeWithSession(
+          withActiveTeam(
+            {
+              session: {
+                id: "sess-linear-persist-fail",
+                userId: "better-auth-linear-user",
+                expiresAt: new Date(),
+                createdAt: new Date(),
+                updatedAt: new Date(),
+                token: "token-linear",
+              },
+              user: {
+                id: "better-auth-linear-user",
+                email: "linear@example.com",
+                emailVerified: true,
+                name: "Linear User",
+                createdAt: new Date(),
+                updatedAt: new Date(),
+              },
+            },
+            {
+              organizationId: "better-auth-org",
+              teamId: "better-auth-team",
+            }
+          ),
+          createBetterAuthDb([{ id: "better-auth-linear-user" }])
+        ),
+      });
+
+      const startResponse = await app.handle(
+        new Request(
+          "http://localhost/v1/auth/linear/start?profile=work&desktopRedirectUrl=hack-dev%3A%2F%2Fauth%2Flinear%2Fcallback"
+        )
+      );
+      expect(startResponse.status).toBe(200);
+      const startPayload = (await startResponse.json()) as StartFlowResponse;
+      const flow = flowStore.getById(startPayload.flow.flowId);
+      expect(flow).not.toBeNull();
+      if (!flow) {
+        return;
+      }
+
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = ((
+        input: string | URL | Request,
+        init?: RequestInit
+      ) => {
+        const url = resolveFetchUrl(input);
+        if (url === createTestConfig().linearTokenUrl) {
+          return new Response(
+            JSON.stringify({
+              access_token: "lin_oauth_token",
+              expires_in: 3600,
+              refresh_token: "lin_refresh_token",
+              refresh_token_expires_in: 86_400,
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            }
+          );
+        }
+        if (url === createTestConfig().linearApiBaseUrl) {
+          const bodyText =
+            typeof init?.body === "string"
+              ? init.body
+              : String(init?.body ?? "");
+          if (bodyText.includes("viewer")) {
+            return new Response(
+              JSON.stringify({
+                data: {
+                  viewer: {
+                    id: "usr_linear",
+                    name: "Linear User",
+                    email: "linear@example.com",
+                    displayName: "Linear User",
+                    organization: { id: "org-linear", name: "Hack Dance" },
+                    teams: { nodes: [{ id: "team-linear", name: "Platform" }] },
+                  },
+                },
+              }),
+              {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              }
+            );
+          }
+        }
+        return new Response("not found", { status: 404 });
+      }) as unknown as typeof fetch;
+
+      try {
+        const callbackResponse = await app.handle(
+          new Request(
+            `http://localhost/linear/callback?state=${encodeURIComponent(flow.state)}&code=test-code`
+          )
+        );
+        expect(callbackResponse.status).toBe(502);
+        const callbackHtml = await callbackResponse.text();
+        expect(callbackHtml).toContain("Connection failed");
+        expect(callbackHtml).toContain("Open Hack");
+        expect(callbackHtml).toContain("hack-dev://auth/linear/callback");
+
+        const completedFlow = flowStore.getById(startPayload.flow.flowId);
+        expect(completedFlow?.status).toBe("error");
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+  });
+
+  test("linear callback still renders a Hack page when flow error recording fails", async () => {
+    const flowStore = new FlowStore();
+    const originalMarkError = flowStore.markError.bind(flowStore);
+    flowStore.markError = (() => {
+      throw new Error("flow store unavailable");
+    }) as typeof flowStore.markError;
+
+    const app = createAuthBrokerApp({
+      config: createTestConfig(),
+      flowStore,
+    });
+
+    const startResponse = await app.handle(
+      new Request(
+        "http://localhost/v1/auth/linear/start?profile=default&desktopRedirectUrl=hack-dev%3A%2F%2Fauth%2Flinear%2Fcallback"
+      )
+    );
+    expect(startResponse.status).toBe(200);
+    const startPayload = (await startResponse.json()) as StartFlowResponse;
+    const flow = flowStore.getById(startPayload.flow.flowId);
+    expect(flow).not.toBeNull();
+    if (!flow) {
+      return;
+    }
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (() => {
+      throw new Error("network down");
+    }) as unknown as typeof fetch;
+
+    try {
+      const callbackResponse = await app.handle(
+        new Request(
+          `http://localhost/linear/callback?state=${encodeURIComponent(flow.state)}&code=test-code`
+        )
+      );
+      expect(callbackResponse.status).toBe(502);
+      const callbackHtml = await callbackResponse.text();
+      expect(callbackHtml).toContain("Connection failed");
+      expect(callbackHtml).toContain("Open Hack");
+      expect(callbackHtml).toContain("hack-dev://auth/linear/callback");
+    } finally {
+      globalThis.fetch = originalFetch;
+      flowStore.markError = originalMarkError;
+    }
   });
 
   test("claimed management token authorizes protected Linear routes without a browser session", async () => {

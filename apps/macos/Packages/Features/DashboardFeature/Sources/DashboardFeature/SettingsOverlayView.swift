@@ -2849,6 +2849,8 @@ private struct LinearExtensionSettingsView: View {
   @State private var isAuthenticating = false
   @State private var authPollingTask: Task<Void, Never>? = nil
   @State private var authFlowStatus: LinearOAuthFlowStatusResponse? = nil
+  @State private var activeAuthFlowId: String? = nil
+  @State private var activeAuthStatusURL: String? = nil
   @State private var disconnectingLinearProfiles: Set<String> = []
   @State private var assigneeMappings: [LinearAssigneeMapping] = []
   @State private var assigneeMappingProfile = ""
@@ -2872,11 +2874,16 @@ private struct LinearExtensionSettingsView: View {
         )
         GlassCard(title: "Extension status", systemImage: "line.3.horizontal.decrease.circle") {
           HStack(alignment: .center, spacing: 8) {
-            StatusPill(text: enabled ? "Enabled" : "Disabled", tone: enabled ? .good : .neutral)
             StatusPill(
-              text: "\(remoteLinearConnections.count) remote account\(remoteLinearConnections.count == 1 ? "" : "s")",
-              tone: remoteLinearConnections.isEmpty ? .neutral : .good
+              text: linearConnectionStateLabel,
+              tone: linearConnectionStateTone
             )
+            if !remoteLinearConnections.isEmpty {
+              StatusPill(
+                text: "\(remoteLinearConnections.count) account\(remoteLinearConnections.count == 1 ? "" : "s")",
+                tone: .neutral
+              )
+            }
             if !resolvedDefaultProfile.isEmpty {
               StatusPill(
                 text: "Default profile: \(displayNameForRemoteProfileId(resolvedDefaultProfile))",
@@ -2936,7 +2943,7 @@ private struct LinearExtensionSettingsView: View {
 
           if model.hackAccountState?.authenticated == true {
             if remoteLinearConnections.isEmpty && localOnlyLinearProfiles.isEmpty {
-              Text("No Hack-account Linear connections yet.")
+              Text("No connected accounts yet.")
                 .font(.mono(.caption))
                 .foregroundStyle(.secondary)
             }
@@ -2962,7 +2969,7 @@ private struct LinearExtensionSettingsView: View {
                         StatusPill(text: "Default profile", tone: .good)
                       }
                       StatusPill(
-                        text: localProfile == nil ? "Needs local token on this Mac" : "Saved on this Mac",
+                        text: localProfile == nil ? "Needs attention" : "Connected",
                         tone: localProfile == nil ? .warn : .good
                       )
                       Spacer()
@@ -2983,7 +2990,7 @@ private struct LinearExtensionSettingsView: View {
                         }
                       } label: {
                         Label(
-                          localProfile == nil ? "Link this Mac" : "Reconnect",
+                          localProfile == nil ? "Finish setup" : "Reconnect",
                           systemImage: "arrow.clockwise.circle"
                         )
                       }
@@ -2996,7 +3003,7 @@ private struct LinearExtensionSettingsView: View {
                         Button(role: .destructive) {
                           Task { await disconnectLinearProfile(localProfile.id) }
                         } label: {
-                          Label("Remove local token", systemImage: "trash")
+                          Label("Remove access", systemImage: "trash")
                         }
                         .adaptiveToolbarButton()
                         .disabled(
@@ -3038,7 +3045,7 @@ private struct LinearExtensionSettingsView: View {
 
             if !localOnlyLinearProfiles.isEmpty {
               VStack(alignment: .leading, spacing: 8) {
-                Text("Local-only on this Mac")
+                Text("Needs attention")
                   .font(.mono(.caption))
                   .foregroundStyle(.secondary)
                 ForEach(localOnlyLinearProfiles, id: \.id) { profile in
@@ -3048,7 +3055,7 @@ private struct LinearExtensionSettingsView: View {
                       Text(linearAccountLabel(profile: profile, status: profileStatus) ?? profile.id)
                         .font(.mono(.subheadline, weight: .semibold))
                       StatusPill(text: "Profile \(profile.id)", tone: .neutral)
-                      StatusPill(text: "Not linked to Hack account yet", tone: .warn)
+                      StatusPill(text: "Needs attention", tone: .warn)
                       Spacer()
                       Button {
                         Task {
@@ -3058,7 +3065,7 @@ private struct LinearExtensionSettingsView: View {
                           )
                         }
                       } label: {
-                        Label("Link account", systemImage: "plus.circle")
+                        Label("Repair connection", systemImage: "arrow.clockwise.circle")
                       }
                       .adaptiveToolbarButtonProminent()
                       .disabled(
@@ -3079,226 +3086,234 @@ private struct LinearExtensionSettingsView: View {
               }
             }
           } else if linearProfiles.isEmpty {
-            Text("Sign in to Hack to inspect remote Linear connections.")
+            Text("Sign in to Hack to manage connected accounts.")
               .font(.mono(.caption))
               .foregroundStyle(.secondary)
           } else {
-            Text("This Mac still has \(linearProfiles.count) local Linear profile\(linearProfiles.count == 1 ? "" : "s"), but remote account-owned connections require Hack sign-in.")
+            Text("Sign in to Hack to finish managing Linear connections.")
               .font(.mono(.caption))
               .foregroundStyle(.secondary)
           }
+
+          if !message.isEmpty {
+            Text(message)
+              .font(.mono(.caption2))
+              .foregroundStyle(.secondary)
+              .fixedSize(horizontal: false, vertical: true)
+          }
         }
 
-        GlassCard(title: "Sync fields", systemImage: "arrow.triangle.branch") {
-          VStack(alignment: .leading, spacing: 12) {
-            syncToggleRow(
-              title: "Sync labels",
-              help: "Translate Linear labels and Hack categories during manual sync.",
-              isOn: $syncLabels
-            ) { newValue in
-              await saveLinearSyncToggle(
-                key: "labels",
-                value: newValue,
-                successMessage: newValue ? "Linear label sync enabled." : "Linear label sync disabled."
-              )
-            }
-            syncToggleRow(
-              title: "Sync statuses",
-              help: "Translate workflow state when both sides expose a matching status.",
-              isOn: $syncStatuses
-            ) { newValue in
-              await saveLinearSyncToggle(
-                key: "statuses",
-                value: newValue,
-                successMessage: newValue ? "Linear status sync enabled." : "Linear status sync disabled."
-              )
-            }
-            syncToggleRow(
-              title: "Sync dependencies",
-              help: "Translate dependency and sub-issue style relationships when the counterpart ticket exists.",
-              isOn: $syncDependencies
-            ) { newValue in
-              await saveLinearSyncToggle(
-                key: "dependencies",
-                value: newValue,
-                successMessage: newValue ? "Linear dependency sync enabled." : "Linear dependency sync disabled."
-              )
-            }
-            syncToggleRow(
-              title: "Sync project mapping",
-              help: "Allow Hack projects to read and write the paired Linear project binding.",
-              isOn: $syncProjects
-            ) { newValue in
-              await saveLinearSyncToggle(
-                key: "projects",
-                value: newValue,
-                successMessage: newValue ? "Linear project sync enabled." : "Linear project sync disabled."
-              )
-            }
-            HStack(alignment: .center, spacing: 6) {
-              Text("Review still stays manual")
-                .font(.mono(.caption2))
-                .foregroundStyle(.secondary)
-              Image(systemName: "info.circle")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.tertiary)
-                .help(linearSyncReviewSummary)
-              Spacer()
+        if !remoteLinearConnections.isEmpty || !localOnlyLinearProfiles.isEmpty {
+          GlassCard(title: "Sync fields", systemImage: "arrow.triangle.branch") {
+            VStack(alignment: .leading, spacing: 12) {
+              syncToggleRow(
+                title: "Sync labels",
+                help: "Translate Linear labels and Hack categories during manual sync.",
+                isOn: $syncLabels
+              ) { newValue in
+                await saveLinearSyncToggle(
+                  key: "labels",
+                  value: newValue,
+                  successMessage: newValue ? "Linear label sync enabled." : "Linear label sync disabled."
+                )
+              }
+              syncToggleRow(
+                title: "Sync statuses",
+                help: "Translate workflow state when both sides expose a matching status.",
+                isOn: $syncStatuses
+              ) { newValue in
+                await saveLinearSyncToggle(
+                  key: "statuses",
+                  value: newValue,
+                  successMessage: newValue ? "Linear status sync enabled." : "Linear status sync disabled."
+                )
+              }
+              syncToggleRow(
+                title: "Sync dependencies",
+                help: "Translate dependency and sub-issue style relationships when the counterpart ticket exists.",
+                isOn: $syncDependencies
+              ) { newValue in
+                await saveLinearSyncToggle(
+                  key: "dependencies",
+                  value: newValue,
+                  successMessage: newValue ? "Linear dependency sync enabled." : "Linear dependency sync disabled."
+                )
+              }
+              syncToggleRow(
+                title: "Sync project mapping",
+                help: "Allow Hack projects to read and write the paired Linear project binding.",
+                isOn: $syncProjects
+              ) { newValue in
+                await saveLinearSyncToggle(
+                  key: "projects",
+                  value: newValue,
+                  successMessage: newValue ? "Linear project sync enabled." : "Linear project sync disabled."
+                )
+              }
+              HStack(alignment: .center, spacing: 6) {
+                Text("Review still stays manual")
+                  .font(.mono(.caption2))
+                  .foregroundStyle(.secondary)
+                Image(systemName: "info.circle")
+                  .font(.system(size: 11, weight: .semibold))
+                  .foregroundStyle(.tertiary)
+                  .help(linearSyncReviewSummary)
+                Spacer()
+              }
             }
           }
         }
 
-        GlassCard(title: "Assignee mapping", systemImage: "person.crop.rectangle.stack") {
-          VStack(alignment: .leading, spacing: 12) {
-            if linearProfiles.isEmpty {
-              Text("Connect an account to add assignee mappings.")
-                .font(.mono(.caption))
-                .foregroundStyle(.secondary)
-            } else {
-              VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .center, spacing: 10) {
-                  VStack(alignment: .leading, spacing: 6) {
-                    Text("Profile")
-                      .font(.mono(.caption))
-                      .foregroundStyle(.secondary)
-                    Picker("Profile", selection: $assigneeMappingProfile) {
-                      ForEach(linearProfiles, id: \.id) { profile in
-                        Text(displayNameForRemoteProfileId(profile.id))
-                          .tag(profile.id)
-                      }
-                    }
-                    .pickerStyle(.menu)
-                  }
-
-                  VStack(alignment: .leading, spacing: 6) {
-                    Text("Team scope")
-                      .font(.mono(.caption))
-                      .foregroundStyle(.secondary)
-                    TextField("Optional team id", text: $assigneeMappingTeamId)
-                      .textFieldStyle(.roundedBorder)
-                  }
-
-                  Spacer()
-
-                  if isLoadingAssigneeMappings || isSavingAssigneeMapping {
-                    ProgressView()
-                      .controlSize(.small)
-                  }
-                }
-
-                VStack(alignment: .leading, spacing: 8) {
-                  HStack(spacing: 8) {
-                    Text("Saved mappings")
-                      .font(.mono(.caption))
-                      .foregroundStyle(.secondary)
-                    StatusPill(
-                      text: "\(assigneeMappings.count) mapping\(assigneeMappings.count == 1 ? "" : "s")",
-                      tone: assigneeMappings.isEmpty ? .neutral : .good
-                    )
-                  }
-
-                  if assigneeMappings.isEmpty {
-                    Text("No explicit mappings for this profile/team scope yet.")
-                      .font(.mono(.caption2))
-                      .foregroundStyle(.tertiary)
-                  } else {
-                    VStack(alignment: .leading, spacing: 8) {
-                      ForEach(assigneeMappings) { mapping in
-                        VStack(alignment: .leading, spacing: 8) {
-                          HStack(spacing: 8) {
-                            Text(mapping.localAssignee)
-                              .font(.mono(.subheadline, weight: .semibold))
-                            if let teamId = mapping.teamId, !teamId.isEmpty {
-                              StatusPill(text: "Team \(teamId)", tone: .neutral)
-                            } else {
-                              StatusPill(text: "All teams", tone: .neutral)
-                            }
-                            Spacer()
-                            Button {
-                              populateAssigneeMappingDraft(from: mapping)
-                            } label: {
-                              Label("Use", systemImage: "arrow.down.left.circle")
-                            }
-                            .adaptiveToolbarButton()
-                            Button(role: .destructive) {
-                              Task { await removeLinearAssigneeMapping(mapping) }
-                            } label: {
-                              Label("Remove", systemImage: "trash")
-                            }
-                            .adaptiveToolbarButton()
-                            .disabled(isSavingAssigneeMapping)
-                          }
-                          Text(mappingDestinationLabel(mapping))
-                            .font(.mono(.caption2))
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                        }
-                        .padding(12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(
-                          RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(colorScheme == .dark ? Color.white.opacity(0.03) : Color.black.opacity(0.025))
-                        )
-                        .overlay(
-                          RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-                        )
-                      }
-                    }
-                  }
-                }
-
-                Divider()
-                  .opacity(0.2)
-
+        if !remoteLinearConnections.isEmpty || !localOnlyLinearProfiles.isEmpty {
+          GlassCard(title: "Assignee mapping", systemImage: "person.crop.rectangle.stack") {
+            VStack(alignment: .leading, spacing: 12) {
+              if linearProfiles.isEmpty {
+                Text("Connect an account to add assignee mappings.")
+                  .font(.mono(.caption))
+                  .foregroundStyle(.secondary)
+              } else {
                 VStack(alignment: .leading, spacing: 10) {
-                  Text("Edit mapping")
-                    .font(.mono(.caption))
-                    .foregroundStyle(.secondary)
-
-                  TextField("Local assignee (required)", text: $assigneeMappingLocalAssignee)
-                    .textFieldStyle(.roundedBorder)
-                  TextField("Linear user id", text: $assigneeMappingLinearUserId)
-                    .textFieldStyle(.roundedBorder)
-                  TextField("Linear user name", text: $assigneeMappingLinearUserName)
-                    .textFieldStyle(.roundedBorder)
-                  TextField("Linear user email", text: $assigneeMappingLinearUserEmail)
-                    .textFieldStyle(.roundedBorder)
-
-                  HStack(spacing: 8) {
-                    Button {
-                      Task { await saveLinearAssigneeMapping() }
-                    } label: {
-                      Label("Save mapping", systemImage: "tray.and.arrow.down")
+                  HStack(alignment: .center, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 6) {
+                      Text("Profile")
+                        .font(.mono(.caption))
+                        .foregroundStyle(.secondary)
+                      Picker("Profile", selection: $assigneeMappingProfile) {
+                        ForEach(linearProfiles, id: \.id) { profile in
+                          Text(displayNameForRemoteProfileId(profile.id))
+                            .tag(profile.id)
+                        }
+                      }
+                      .pickerStyle(.menu)
                     }
-                    .adaptiveToolbarButtonProminent()
-                    .disabled(!canSaveAssigneeMapping || isSavingAssigneeMapping)
 
-                    Button("Clear form") {
-                      clearAssigneeMappingDraft()
+                    VStack(alignment: .leading, spacing: 6) {
+                      Text("Team scope")
+                        .font(.mono(.caption))
+                        .foregroundStyle(.secondary)
+                      TextField("Optional team id", text: $assigneeMappingTeamId)
+                        .textFieldStyle(.roundedBorder)
                     }
-                    .adaptiveToolbarButton()
-                    .disabled(isSavingAssigneeMapping)
+
+                    Spacer()
+
+                    if isLoadingAssigneeMappings || isSavingAssigneeMapping {
+                      ProgressView()
+                        .controlSize(.small)
+                    }
+                  }
+
+                  VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                      Text("Saved mappings")
+                        .font(.mono(.caption))
+                        .foregroundStyle(.secondary)
+                      StatusPill(
+                        text: "\(assigneeMappings.count) mapping\(assigneeMappings.count == 1 ? "" : "s")",
+                        tone: assigneeMappings.isEmpty ? .neutral : .good
+                      )
+                    }
+
+                    if assigneeMappings.isEmpty {
+                      Text("No explicit mappings for this profile/team scope yet.")
+                        .font(.mono(.caption2))
+                        .foregroundStyle(.tertiary)
+                    } else {
+                      VStack(alignment: .leading, spacing: 8) {
+                        ForEach(assigneeMappings) { mapping in
+                          VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 8) {
+                              Text(mapping.localAssignee)
+                                .font(.mono(.subheadline, weight: .semibold))
+                              if let teamId = mapping.teamId, !teamId.isEmpty {
+                                StatusPill(text: "Team \(teamId)", tone: .neutral)
+                              } else {
+                                StatusPill(text: "All teams", tone: .neutral)
+                              }
+                              Spacer()
+                              Button {
+                                populateAssigneeMappingDraft(from: mapping)
+                              } label: {
+                                Label("Use", systemImage: "arrow.down.left.circle")
+                              }
+                              .adaptiveToolbarButton()
+                              Button(role: .destructive) {
+                                Task { await removeLinearAssigneeMapping(mapping) }
+                              } label: {
+                                Label("Remove", systemImage: "trash")
+                              }
+                              .adaptiveToolbarButton()
+                              .disabled(isSavingAssigneeMapping)
+                            }
+                            Text(mappingDestinationLabel(mapping))
+                              .font(.mono(.caption2))
+                              .foregroundStyle(.secondary)
+                              .textSelection(.enabled)
+                          }
+                          .padding(12)
+                          .frame(maxWidth: .infinity, alignment: .leading)
+                          .background(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                              .fill(colorScheme == .dark ? Color.white.opacity(0.03) : Color.black.opacity(0.025))
+                          )
+                          .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                              .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                          )
+                        }
+                      }
+                    }
+                  }
+
+                  Divider()
+                    .opacity(0.2)
+
+                  VStack(alignment: .leading, spacing: 10) {
+                    Text("Edit mapping")
+                      .font(.mono(.caption))
+                      .foregroundStyle(.secondary)
+
+                    TextField("Local assignee (required)", text: $assigneeMappingLocalAssignee)
+                      .textFieldStyle(.roundedBorder)
+                    TextField("Linear user id", text: $assigneeMappingLinearUserId)
+                      .textFieldStyle(.roundedBorder)
+                    TextField("Linear user name", text: $assigneeMappingLinearUserName)
+                      .textFieldStyle(.roundedBorder)
+                    TextField("Linear user email", text: $assigneeMappingLinearUserEmail)
+                      .textFieldStyle(.roundedBorder)
+
+                    HStack(spacing: 8) {
+                      Button {
+                        Task { await saveLinearAssigneeMapping() }
+                      } label: {
+                        Label("Save mapping", systemImage: "tray.and.arrow.down")
+                      }
+                      .adaptiveToolbarButtonProminent()
+                      .disabled(!canSaveAssigneeMapping || isSavingAssigneeMapping)
+
+                      Button("Clear form") {
+                        clearAssigneeMappingDraft()
+                      }
+                      .adaptiveToolbarButton()
+                      .disabled(isSavingAssigneeMapping)
+                    }
                   }
                 }
               }
             }
           }
         }
-
-        if !message.isEmpty {
-          InlineCallout(
-            tone: .neutral,
-            title: "Linear settings",
-            message: message,
-            actions: []
-          )
-        }
       }
       .padding(16)
     }
     .task {
       await loadConfigFromDisk()
+    }
+    .onChange(of: model.linearOAuthDeepLinkContext) { _, deepLink in
+      guard let deepLink else { return }
+      Task {
+        await handleLinearOAuthDeepLink(deepLink)
+      }
     }
     .onChange(of: assigneeMappingProfile) { _, _ in
       Task { await refreshLinearAssigneeMappings() }
@@ -3358,6 +3373,46 @@ private struct LinearExtensionSettingsView: View {
       !remoteLinearConnections.contains(where: {
         $0.profileId?.caseInsensitiveCompare(profile.id) == .orderedSame
       })
+    }
+  }
+
+  private var linearConnectionNeedsAttention: Bool {
+    !localOnlyLinearProfiles.isEmpty ||
+      remoteLinearConnections.contains { connection in
+        let profileId = connection.profileId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !profileId.isEmpty else {
+          return true
+        }
+        return !linearProfiles.contains(where: {
+          $0.id.caseInsensitiveCompare(profileId) == .orderedSame
+        })
+      }
+  }
+
+  private var linearConnectionStateLabel: String {
+    if !enabled {
+      return "Disabled"
+    }
+    if isAuthenticating {
+      return "Connecting"
+    }
+    if !remoteLinearConnections.isEmpty {
+      return linearConnectionNeedsAttention ? "Needs attention" : "Connected"
+    }
+    if !localOnlyLinearProfiles.isEmpty {
+      return "Needs attention"
+    }
+    return "Not connected"
+  }
+
+  private var linearConnectionStateTone: StatusTone {
+    switch linearConnectionStateLabel {
+    case "Connected":
+      return .good
+    case "Needs attention":
+      return .warn
+    default:
+      return .neutral
     }
   }
 
@@ -3709,7 +3764,7 @@ private struct LinearExtensionSettingsView: View {
     }
 
     message = trimmedDefault.isEmpty
-      ? "Linear default profile cleared. Projects now need an explicit Linear routing override before sync can fall back to a remote account."
+      ? "Linear default profile cleared."
       : "Linear default profile saved. Projects without their own override will now route through \(displayNameForRemoteProfileId(trimmedDefault))."
     defaultProfile = trimmedDefault
     await model.refresh()
@@ -3741,9 +3796,9 @@ private struct LinearExtensionSettingsView: View {
     }
 
     if resolvedDefaultProfile == trimmed {
-      message = "Disconnected token for \(displayNameForRemoteProfileId(trimmed)). The profile stays available for reconnect, but projects inheriting this default profile need a reconnect or a different default before the next sync."
+      message = "Removed access for \(displayNameForRemoteProfileId(trimmed)). Reconnect it before using this default again."
     } else {
-      message = "Disconnected token for \(displayNameForRemoteProfileId(trimmed)). The profile stays available for reconnect, and any project routed to it needs a reconnect or a different override before the next sync."
+      message = "Removed access for \(displayNameForRemoteProfileId(trimmed)). Reconnect it before using it again."
     }
     await model.refresh()
     await refreshLinearDiagnostics()
@@ -3773,6 +3828,8 @@ private struct LinearExtensionSettingsView: View {
     authPollingTask?.cancel()
     authPollingTask = nil
     isAuthenticating = false
+    activeAuthFlowId = nil
+    activeAuthStatusURL = nil
     if userInitiated {
       message = "Linear authentication canceled."
     }
@@ -3791,7 +3848,7 @@ private struct LinearExtensionSettingsView: View {
     let profile = trimmed.isEmpty ? "default" : trimmed
     isAuthenticating = true
     authFlowStatus = nil
-    message = "Starting Linear browser auth for profile \(profile). When it completes, the profile can be used for default routing or project-specific sync."
+    message = "Starting Linear connection for \(profile)…"
 
     guard
       let started = await model.startLinearOAuthFlow(
@@ -3814,6 +3871,8 @@ private struct LinearExtensionSettingsView: View {
     if setDefault {
       defaultProfile = profile
     }
+    activeAuthFlowId = started.flowId
+    activeAuthStatusURL = started.statusUrl
 
     guard let authorizeURL = URL(string: started.authorizeUrl) else {
       message = "Auth start returned an invalid authorize URL."
@@ -3821,7 +3880,7 @@ private struct LinearExtensionSettingsView: View {
     }
 
     NSWorkspace.shared.open(authorizeURL)
-    message = "Browser opened. Approve access to finish connecting \(profile), then return here to use it for default or per-project routing."
+    message = "Approve access in the browser to finish connecting \(profile)."
 
     let formatter = ISO8601DateFormatter()
     let expiresAtDate = formatter.date(from: started.expiresAt)
@@ -3865,10 +3924,10 @@ private struct LinearExtensionSettingsView: View {
             $0.profileId?.caseInsensitiveCompare(profile) == .orderedSame
           }) {
             message =
-              "Linear already appears connected on this Hack account for \(profile). If the browser opened a manage/install page instead of returning here, finish there or revoke the existing Linear app token, then retry linking this Mac."
+              "Hack already sees this account for \(profile). Finish the browser step or retry Connect account to complete setup."
           } else {
             message =
-              "Still waiting for Linear to return to Hack. If the browser opened a manage/install page, finish there and then return here."
+              "Still waiting for Linear to finish connecting."
           }
         }
         if pendingPollCount >= 16 {
@@ -3876,10 +3935,10 @@ private struct LinearExtensionSettingsView: View {
             $0.profileId?.caseInsensitiveCompare(profile) == .orderedSame
           }) {
             message =
-              "Linear is already linked on this Hack account for \(profile), but this Mac did not receive a fresh callback token. Close the browser and use Link this Mac if you need a local token cached here."
+              "Hack sees the account for \(profile), but setup still needs attention. Try Connect account again."
           } else {
             message =
-              "Linear did not return a callback for \(profile). If Linear shows Hack already installed, revoke the existing Hack app authorization in Linear and reconnect once so Hack can persist it on this account."
+              "Connection did not finish. If Linear says Hack is already installed, remove that authorization and reconnect once."
           }
           await refreshLinearDiagnostics()
           authFlowStatus = nil
@@ -3901,7 +3960,7 @@ private struct LinearExtensionSettingsView: View {
         ?? flowStatus.accountEmail
         ?? flowStatus.accountHandle
         ?? "Linear provider account"
-      message = "Connected \(account) to profile \(flowStatus.profileId). You can now use it for default routing or bind projects to it directly."
+      message = "Connected \(account)."
       await model.refresh()
       await refreshLinearDiagnostics()
       return true
@@ -3914,6 +3973,35 @@ private struct LinearExtensionSettingsView: View {
     default:
       return false
     }
+  }
+
+  private func handleLinearOAuthDeepLink(_ deepLink: LinearOAuthDeepLinkContext) async {
+    defer {
+      model.clearLinearOAuthDeepLink(flowId: deepLink.flowId)
+    }
+
+    guard
+      let activeAuthFlowId,
+      let activeAuthStatusURL
+    else {
+      message = "Linear callback received. Return to Linear settings to finish setup."
+      return
+    }
+
+    guard activeAuthFlowId == deepLink.flowId else {
+      return
+    }
+
+    message = "Browser callback received. Finalizing Linear connection…"
+    guard let flowStatus = await model.fetchLinearOAuthFlowStatus(statusURL: activeAuthStatusURL) else {
+      let detail = model.errorMessage?.trimmingCharacters(in: .whitespacesAndNewlines)
+      if let detail, !detail.isEmpty {
+        message = detail
+      }
+      return
+    }
+    authFlowStatus = flowStatus
+    _ = await handleLinearOAuthFlowStatus(flowStatus)
   }
 }
 

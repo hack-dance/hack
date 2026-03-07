@@ -69,6 +69,18 @@ public struct GitHubOAuthDeepLinkContext: Hashable {
   }
 }
 
+public struct LinearOAuthDeepLinkContext: Hashable {
+  public let flowId: String
+  public let profileId: String?
+  public let status: String?
+
+  public init(flowId: String, profileId: String?, status: String?) {
+    self.flowId = flowId
+    self.profileId = profileId
+    self.status = status
+  }
+}
+
 @Observable
 @MainActor
 public final class DashboardModel {
@@ -93,6 +105,7 @@ public final class DashboardModel {
   public var errorMessage: String? = nil
   public var statusMessage: String? = nil
   public private(set) var githubOAuthDeepLinkContext: GitHubOAuthDeepLinkContext? = nil
+  public private(set) var linearOAuthDeepLinkContext: LinearOAuthDeepLinkContext? = nil
   public var isRefreshing = false
   public private(set) var projectLifecycleActions: [String: ProjectLifecycleAction] = [:]
   public private(set) var globalLifecycleAction: GlobalLifecycleAction? = nil
@@ -1233,6 +1246,30 @@ public final class DashboardModel {
     githubOAuthDeepLinkContext = nil
   }
 
+  @discardableResult
+  public func ingestLinearOAuthDeepLink(url: URL) -> Bool {
+    guard let context = parseLinearOAuthDeepLink(url: url) else {
+      return false
+    }
+    linearOAuthDeepLinkContext = context
+    if let profileId = context.profileId {
+      statusMessage = "Linear callback received for profile \(profileId). Finalizing…"
+    } else {
+      statusMessage = "Linear callback received. Finalizing…"
+    }
+    return true
+  }
+
+  public func clearLinearOAuthDeepLink(flowId: String? = nil) {
+    guard let current = linearOAuthDeepLinkContext else {
+      return
+    }
+    if let flowId, current.flowId != flowId {
+      return
+    }
+    linearOAuthDeepLinkContext = nil
+  }
+
   private func isHackAuthCompletionDeepLink(url: URL) -> Bool {
     guard isRegisteredHackDeepLinkScheme(url.scheme) else {
       return false
@@ -1281,6 +1318,42 @@ public final class DashboardModel {
       status: normalizedQueryValue(named: "status", items: items),
       installationId: normalizedQueryValue(named: "installationId", items: items)
         ?? normalizedQueryValue(named: "installation_id", items: items)
+    )
+  }
+
+  private func parseLinearOAuthDeepLink(url: URL) -> LinearOAuthDeepLinkContext? {
+    guard isRegisteredHackDeepLinkScheme(url.scheme) else {
+      return nil
+    }
+
+    let host = url.host?.lowercased() ?? ""
+    let path = normalizedPath(url.path)
+    let isLinearCallbackRoute =
+      (host == "auth" && path == "/linear/callback")
+      || (host == "linear" && path == "/callback")
+    guard isLinearCallbackRoute else {
+      return nil
+    }
+
+    guard
+      let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+      let items = components.queryItems
+    else {
+      return nil
+    }
+
+    let flowId =
+      normalizedQueryValue(named: "flowId", items: items)
+      ?? normalizedQueryValue(named: "flow_id", items: items)
+    guard let flowId else {
+      return nil
+    }
+
+    return LinearOAuthDeepLinkContext(
+      flowId: flowId,
+      profileId: normalizedQueryValue(named: "profileId", items: items)
+        ?? normalizedQueryValue(named: "profile", items: items),
+      status: normalizedQueryValue(named: "status", items: items)
     )
   }
 

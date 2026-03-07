@@ -166,6 +166,7 @@ export function createLinearConnectionStoreFromDb(input: {
       await ensureTable();
       const connectionKey = buildConnectionKey(connection);
       const now = new Date();
+      const id = randomUUID();
       const metadataJson = JSON.stringify(
         composeConnectionMetadata({
           metadata: connection.metadata,
@@ -176,6 +177,7 @@ export function createLinearConnectionStoreFromDb(input: {
       const inserted = await db
         .insert(linearConnections)
         .values({
+          id,
           connectionKey,
           profileId: normalizeText(connection.profileId),
           accountId: normalizeText(connection.accountId),

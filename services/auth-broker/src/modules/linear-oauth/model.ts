@@ -9,6 +9,7 @@ export const LinearOAuthModel = {
     profile: t.Optional(t.String()),
     setDefault: t.Optional(t.String()),
     redirect: t.Optional(t.String()),
+    desktopRedirectUrl: t.Optional(t.String()),
   }),
   callbackQuery: t.Object({
     code: t.Optional(t.String()),

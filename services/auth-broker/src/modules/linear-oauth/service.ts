@@ -13,6 +13,7 @@ import {
 import type { OAuthFlow } from "../../types.ts";
 import { issueBrokerManagementToken } from "../better-auth/management-token.ts";
 import { resolveBetterAuthSession } from "../better-auth/session.ts";
+import { buildHackDesktopDeepLink } from "../github-oauth/service.ts";
 import type { LinearConnectionStore } from "../linear-connections/service.ts";
 import type { LinearOAuthModel } from "./model.ts";
 
@@ -27,12 +28,17 @@ export type StartFlowPayload = {
   readonly expiresAt: string;
 };
 
+type CallbackPageAction = {
+  readonly label: string;
+  readonly url: string;
+};
+
 export function createFlow(input: {
   readonly config: BrokerConfig;
   readonly flowStore: FlowStore;
   readonly query: Pick<
     LinearOAuthModel["startQuery"],
-    "profile" | "setDefault"
+    "profile" | "setDefault" | "desktopRedirectUrl"
   >;
 }): StartFlowPayload {
   if (!(input.config.linearClientId && input.config.linearRedirectUri)) {
@@ -44,6 +50,9 @@ export function createFlow(input: {
   const deviceCode = makeToken();
   const profileId = normalizeText(input.query.profile) ?? "default";
   const setDefault = isTruthy(input.query.setDefault);
+  const desktopRedirectUrl = normalizeDesktopRedirectUrl(
+    input.query.desktopRedirectUrl
+  );
   const expiresAtMs = nowMs + input.config.flowTtlMs;
   const codeVerifier = randomBytes(64).toString("base64url");
   const codeChallenge = createHash("sha256")
@@ -71,6 +80,7 @@ export function createFlow(input: {
     createdAtMs: nowMs,
     expiresAtMs,
     redirectUri: input.config.linearRedirectUri,
+    ...(desktopRedirectUrl ? { desktopRedirectUrl } : {}),
     status: "pending",
   });
 
@@ -102,125 +112,164 @@ export async function handleLinearCallback(input: {
     return flowResult.response;
   }
   const flow = flowResult.flow;
-
-  const oauthError = normalizeText(input.query.error);
-  if (oauthError) {
-    const oauthDescription = normalizeText(input.query.error_description);
-    return markLinearFlowError({
-      flowStore: input.flowStore,
-      flowId: flow.id,
-      error: oauthDescription
-        ? `${oauthError}: ${oauthDescription}`
-        : oauthError,
-      status: "error",
-      title: "Linear authorization failed",
-      body:
-        oauthDescription ??
-        "Linear denied access. Return to Hack and try again.",
-      statusCode: 400,
-    });
-  }
-
-  const code = normalizeText(input.query.code);
-  if (!code) {
-    return markLinearFlowError({
-      flowStore: input.flowStore,
-      flowId: flow.id,
-      error: "missing_authorization_code",
-      status: "error",
-      title: "Missing authorization code",
-      body: "Linear did not return a code for this sign-in request.",
-      statusCode: 400,
-    });
-  }
-
-  const clientId = input.config.linearClientId;
-  if (!(clientId && flow.codeVerifier)) {
-    return markLinearFlowError({
-      flowStore: input.flowStore,
-      flowId: flow.id,
-      error: "linear_oauth_not_configured",
-      status: "error",
-      title: "Linear OAuth not configured",
-      body: "The auth broker is missing Linear OAuth configuration.",
-      statusCode: 412,
-    });
-  }
-
-  const exchange = await exchangeCodeForToken({
-    tokenUrl: input.config.linearTokenUrl,
-    clientId,
-    ...(input.config.linearClientSecret
-      ? { clientSecret: input.config.linearClientSecret }
-      : {}),
-    code,
-    redirectUri: flow.redirectUri,
-    codeVerifier: flow.codeVerifier,
-  });
-  if (!exchange.ok) {
-    return markLinearFlowError({
-      flowStore: input.flowStore,
-      flowId: flow.id,
-      error: exchange.error,
-      status: "error",
-      title: "Token exchange failed",
-      body: exchange.error,
-      statusCode: 502,
-    });
-  }
-
-  const identity = await fetchIdentity({
-    apiBaseUrl: input.config.linearApiBaseUrl,
-    token: exchange.token,
-  });
-  if (!identity.ok) {
-    return markLinearFlowError({
-      flowStore: input.flowStore,
-      flowId: flow.id,
-      error: identity.error,
-      status: "error",
-      title: "Linear account lookup failed",
-      body: identity.error,
-      statusCode: 502,
-    });
-  }
-
-  const betterAuthLink = await resolveBetterAuthUserFromLinearAccount({
-    runtime: input.betterAuthRuntime,
-    account: identity.account,
-    autoProvision: input.config.betterAuthLinearAutoProvisionUsers,
-  });
-  const betterAuthSession = await resolveBetterAuthSession({
-    runtime: input.betterAuthRuntime,
-    request: input.request,
-  });
-  const linkedAccount = {
-    ...identity.account,
-    ...(betterAuthLink.userId
-      ? { betterAuthUserId: betterAuthLink.userId }
-      : {}),
-    ...(betterAuthLink.state
-      ? { betterAuthLinkState: betterAuthLink.state }
-      : {}),
-  } as const;
-  const managementToken = issueBrokerManagementToken({
-    userId: betterAuthSession.session?.userId ?? betterAuthLink.userId ?? "",
-    profileId: flow.profileId,
-    organizationId: betterAuthSession.session?.organizationId ?? null,
-    teamId: betterAuthSession.session?.teamId ?? null,
-  });
-
-  input.flowStore.markComplete({
-    flowId: flow.id,
-    account: linkedAccount,
-    token: exchange.token,
-    tokenExpiresAt: exchange.tokenExpiresAt,
-    refreshToken: exchange.refreshToken,
-    refreshTokenExpiresAt: exchange.refreshTokenExpiresAt,
-    managementToken: managementToken?.token,
-    managementTokenExpiresAt: managementToken?.expiresAt,
-  });
   try {
+    const oauthError = normalizeText(input.query.error);
+    if (oauthError) {
+      const oauthDescription = normalizeText(input.query.error_description);
+      return markLinearFlowError({
+        flowStore: input.flowStore,
+        flowId: flow.id,
+        error: oauthDescription
+          ? `${oauthError}: ${oauthDescription}`
+          : oauthError,
+        status: "error",
+        title: "Linear authorization failed",
+        body:
+          oauthDescription ??
+          "Linear denied access. Return to Hack and try again.",
+        statusCode: 400,
+        ...(flow.desktopRedirectUrl
+          ? {
+              actions: [
+                buildOpenHackAction({
+                  flow,
+                  status: "error",
+                }),
+              ],
+            }
+          : {}),
+      });
+    }
+
+    const code = normalizeText(input.query.code);
+    if (!code) {
+      return markLinearFlowError({
+        flowStore: input.flowStore,
+        flowId: flow.id,
+        error: "missing_authorization_code",
+        status: "error",
+        title: "Missing authorization code",
+        body: "Linear did not return a code for this sign-in request.",
+        statusCode: 400,
+        ...(flow.desktopRedirectUrl
+          ? {
+              actions: [
+                buildOpenHackAction({
+                  flow,
+                  status: "error",
+                }),
+              ],
+            }
+          : {}),
+      });
+    }
+
+    const clientId = input.config.linearClientId;
+    if (!(clientId && flow.codeVerifier)) {
+      return markLinearFlowError({
+        flowStore: input.flowStore,
+        flowId: flow.id,
+        error: "linear_oauth_not_configured",
+        status: "error",
+        title: "Linear OAuth not configured",
+        body: "The auth broker is missing Linear OAuth configuration.",
+        statusCode: 412,
+        ...(flow.desktopRedirectUrl
+          ? {
+              actions: [
+                buildOpenHackAction({
+                  flow,
+                  status: "error",
+                }),
+              ],
+            }
+          : {}),
+      });
+    }
+
+    const exchange = await exchangeCodeForToken({
+      tokenUrl: input.config.linearTokenUrl,
+      clientId,
+      ...(input.config.linearClientSecret
+        ? { clientSecret: input.config.linearClientSecret }
+        : {}),
+      code,
+      redirectUri: flow.redirectUri,
+      codeVerifier: flow.codeVerifier,
+    });
+    if (!exchange.ok) {
+      return markLinearFlowError({
+        flowStore: input.flowStore,
+        flowId: flow.id,
+        error: exchange.error,
+        status: "error",
+        title: "Token exchange failed",
+        body: exchange.error,
+        statusCode: 502,
+        ...(flow.desktopRedirectUrl
+          ? {
+              actions: [
+                buildOpenHackAction({
+                  flow,
+                  status: "error",
+                }),
+              ],
+            }
+          : {}),
+      });
+    }
+
+    const identity = await fetchIdentity({
+      apiBaseUrl: input.config.linearApiBaseUrl,
+      token: exchange.token,
+    });
+    if (!identity.ok) {
+      return markLinearFlowError({
+        flowStore: input.flowStore,
+        flowId: flow.id,
+        error: identity.error,
+        status: "error",
+        title: "Linear account lookup failed",
+        body: identity.error,
+        statusCode: 502,
+        ...(flow.desktopRedirectUrl
+          ? {
+              actions: [
+                buildOpenHackAction({
+                  flow,
+                  status: "error",
+                }),
+              ],
+            }
+          : {}),
+      });
+    }
+
+    const betterAuthLink = await resolveBetterAuthUserFromLinearAccount({
+      runtime: input.betterAuthRuntime,
+      account: identity.account,
+      autoProvision: input.config.betterAuthLinearAutoProvisionUsers,
+    });
+    const betterAuthSession = await resolveBetterAuthSession({
+      runtime: input.betterAuthRuntime,
+      request: input.request,
+    });
+    const linkedAccount = {
+      ...identity.account,
+      ...(betterAuthLink.userId
+        ? { betterAuthUserId: betterAuthLink.userId }
+        : {}),
+      ...(betterAuthLink.state
+        ? { betterAuthLinkState: betterAuthLink.state }
+        : {}),
+    } as const;
+    const managementToken = issueBrokerManagementToken({
+      userId: betterAuthSession.session?.userId ?? betterAuthLink.userId ?? "",
+      profileId: flow.profileId,
+      organizationId: betterAuthSession.session?.organizationId ?? null,
+      teamId: betterAuthSession.session?.teamId ?? null,
+    });
+
     await input.connectionStore.upsertConnection({
       profileId: flow.profileId,
       accountId: identity.account.accountId,
@@ -244,16 +293,62 @@ export async function handleLinearCallback(input: {
           : {}),
       },
     });
-  } catch {
-    // Connection persistence is diagnostic state and must not fail OAuth completion.
-  }
 
-  return renderCallbackPage({
-    title: "Linear connected",
-    body: "Authorization is complete. Return to Hack to finish account setup.",
-    statusCode: 200,
-    success: true,
-  });
+    input.flowStore.markComplete({
+      flowId: flow.id,
+      account: linkedAccount,
+      token: exchange.token,
+      tokenExpiresAt: exchange.tokenExpiresAt,
+      refreshToken: exchange.refreshToken,
+      refreshTokenExpiresAt: exchange.refreshTokenExpiresAt,
+      managementToken: managementToken?.token,
+      managementTokenExpiresAt: managementToken?.expiresAt,
+    });
+
+    return renderCallbackPage({
+      title: "Linear connected",
+      body: "Authorization is complete. Return to Hack to finish account setup.",
+      statusCode: 200,
+      success: true,
+      actions: flow.desktopRedirectUrl
+        ? [
+            buildOpenHackAction({
+              flow,
+              status: "complete",
+            }),
+          ]
+        : [],
+    });
+  } catch (error) {
+    const actions = flow.desktopRedirectUrl
+      ? [
+          buildOpenHackAction({
+            flow,
+            status: "error",
+          }),
+        ]
+      : [];
+    try {
+      return markLinearFlowError({
+        flowStore: input.flowStore,
+        flowId: flow.id,
+        error:
+          error instanceof Error ? error.message : "linear_callback_failed",
+        status: "error",
+        title: "Connection failed",
+        body: "Linear authorization could not be completed. Return to Hack and try again.",
+        statusCode: 502,
+        actions,
+      });
+    } catch {
+      return renderCallbackPage({
+        title: "Connection failed",
+        body: "Linear authorization could not be completed. Return to Hack and try again.",
+        statusCode: 502,
+        actions,
+      });
+    }
+  }
 }
 
 function resolveLinearCallbackFlow(input: {
@@ -312,16 +407,23 @@ function markLinearFlowError(input: {
   readonly title: string;
   readonly body: string;
   readonly statusCode: number;
+  readonly actions?: readonly CallbackPageAction[];
 }): Response {
-  input.flowStore.markError({
-    flowId: input.flowId,
-    error: input.error,
-    status: input.status,
-  });
+  try {
+    input.flowStore.markError({
+      flowId: input.flowId,
+      error: input.error,
+      status: input.status,
+    });
+  } catch {
+    // Rendering the browser recovery page matters more than recording flow
+    // state. Callback failures must never surface as raw host errors.
+  }
   return renderCallbackPage({
     title: input.title,
     body: input.body,
     statusCode: input.statusCode,
+    actions: input.actions,
   });
 }
 
@@ -404,31 +506,92 @@ function renderCallbackPage(input: {
   readonly body: string;
   readonly statusCode: number;
   readonly success?: boolean;
+  readonly actions?: readonly CallbackPageAction[];
 }): Response {
-  const html = [
-    "<!doctype html>",
-    "<html>",
-    "<head>",
-    '  <meta charset="utf-8" />',
-    '  <meta name="viewport" content="width=device-width, initial-scale=1" />',
-    `  <title>${escapeHtml(input.title)}</title>`,
-    "  <style>",
-    "    :root { color-scheme: light dark; }",
-    "    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #0b0c0e; color: #f4f5f7; }",
-    "    .card { max-width: 520px; margin: 10vh auto; padding: 24px; border-radius: 16px; background: rgba(22, 24, 29, 0.92); border: 1px solid rgba(255,255,255,0.08); }",
-    "    h1 { margin: 0 0 12px; font-size: 22px; }",
-    "    p { margin: 0; line-height: 1.5; opacity: 0.92; white-space: pre-wrap; }",
-    `    .tone { color: ${input.success ? "#73e2a7" : "#ffb3b3"}; }`,
-    "  </style>",
-    "</head>",
-    "<body>",
-    '  <div class="card">',
-    `    <h1 class="tone">${escapeHtml(input.title)}</h1>`,
-    `    <p>${escapeHtml(input.body)}</p>`,
-    "  </div>",
-    "</body>",
-    "</html>",
-  ].join("\n");
+  const actions = input.actions ?? [];
+  const actionsHtml =
+    actions.length > 0
+      ? `<div class="actions">${actions
+          .map(
+            (action) =>
+              `<a class="button" href="${escapeHtml(action.url)}">${escapeHtml(action.label)}</a>`
+          )
+          .join("")}</div>`
+      : "";
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${escapeHtml(input.title)}</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: #0a0a0a;
+      color: #f5f5f5;
+      font-family: ui-monospace, "SF Mono", Menlo, Monaco, monospace;
+    }
+    main {
+      width: min(92vw, 560px);
+      display: grid;
+      gap: 18px;
+      justify-items: center;
+      text-align: center;
+    }
+    .brand {
+      font-size: 28px;
+      letter-spacing: 0.22em;
+      color: #d4d4d8;
+    }
+    h1 {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 600;
+      color: ${input.success ? "#e4e4e7" : "#fca5a5"};
+    }
+    p {
+      margin: 0;
+      max-width: 440px;
+      font-size: 13px;
+      line-height: 1.6;
+      color: #a1a1aa;
+      white-space: pre-wrap;
+    }
+    .actions {
+      display: grid;
+      gap: 12px;
+      width: min(92vw, 360px);
+    }
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 46px;
+      padding: 0 20px;
+      border: 1px solid #52525b;
+      border-radius: 0;
+      color: #f5f5f5;
+      text-decoration: none;
+      font-size: 13px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      background: transparent;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="brand">HACK</div>
+    <h1>${escapeHtml(input.title)}</h1>
+    <p>${escapeHtml(input.body)}</p>
+    ${actionsHtml}
+  </main>
+</body>
+</html>`;
   return new Response(html, {
     status: input.statusCode,
     headers: {
@@ -436,6 +599,39 @@ function renderCallbackPage(input: {
       "cache-control": "no-store",
     },
   });
+}
+
+function buildOpenHackAction(input: {
+  readonly flow: OAuthFlow;
+  readonly status: string;
+}): CallbackPageAction {
+  return {
+    label: "Open Hack",
+    url: buildHackDesktopDeepLink({
+      flowId: input.flow.id,
+      profileId: input.flow.profileId,
+      status: input.status,
+      ...(input.flow.desktopRedirectUrl
+        ? { baseUrl: input.flow.desktopRedirectUrl }
+        : {}),
+    }),
+  };
+}
+
+function normalizeDesktopRedirectUrl(value: string | undefined): string | null {
+  const normalized = normalizeText(value);
+  if (!normalized) {
+    return null;
+  }
+  try {
+    const url = new URL(normalized);
+    if (url.protocol !== "hack:" && url.protocol !== "hack-dev:") {
+      return null;
+    }
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
 
 function normalizeText(value: string | undefined): string | null {

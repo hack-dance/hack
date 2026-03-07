@@ -1067,6 +1067,7 @@ public actor HackCLIClient {
     profileId: String,
     setDefault: Bool
   ) async throws -> LinearOAuthFlowStartResponse {
+    let desktopRedirectURL = desktopLinearOAuthCallbackURL()
     var lastError: String? = nil
     for candidate in resolveAuthServerCandidates() {
       guard
@@ -1077,6 +1078,7 @@ public actor HackCLIClient {
             URLQueryItem(name: "profile", value: profileId),
             URLQueryItem(name: "setDefault", value: setDefault ? "1" : "0"),
             URLQueryItem(name: "set_default", value: setDefault ? "1" : "0"),
+            URLQueryItem(name: "desktopRedirectUrl", value: desktopRedirectURL),
           ]
         )
       else {
@@ -1714,6 +1716,11 @@ public actor HackCLIClient {
   private func desktopGitHubOAuthCallbackURL() -> String {
     bundleString(forInfoDictionaryKey: "HackGitHubOAuthCallbackURL")
       ?? "\(desktopURLScheme())://auth/github/callback"
+  }
+
+  private func desktopLinearOAuthCallbackURL() -> String {
+    bundleString(forInfoDictionaryKey: "HackLinearOAuthCallbackURL")
+      ?? "\(desktopURLScheme())://auth/linear/callback"
   }
 
   private func desktopURLScheme() -> String {

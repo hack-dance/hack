@@ -226,7 +226,7 @@ export async function handleLinearCallback(input: {
         status: "error",
         title: "Token exchange failed",
         body: exchange.error,
-        statusCode: 502,
+        statusCode: 200,
         ...(flow.desktopRedirectUrl
           ? {
               actions: [
@@ -252,7 +252,7 @@ export async function handleLinearCallback(input: {
         status: "error",
         title: "Linear account lookup failed",
         body: identity.error,
-        statusCode: 502,
+        statusCode: 200,
         ...(flow.desktopRedirectUrl
           ? {
               actions: [
@@ -364,14 +364,14 @@ export async function handleLinearCallback(input: {
         status: "error",
         title: "Connection failed",
         body: "Linear authorization could not be completed. Return to Hack and try again.",
-        statusCode: 502,
+        statusCode: 200,
         actions,
       });
     } catch {
       return renderCallbackPage({
         title: "Connection failed",
         body: "Linear authorization could not be completed. Return to Hack and try again.",
-        statusCode: 502,
+        statusCode: 200,
         actions,
       });
     }

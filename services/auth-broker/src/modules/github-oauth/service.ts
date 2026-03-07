@@ -233,7 +233,7 @@ export async function handleGitHubCallback(input: {
     return renderCallbackPage({
       title: "Token exchange failed",
       body: exchange.error,
-      statusCode: 502,
+      statusCode: 200,
     });
   }
 
@@ -250,7 +250,7 @@ export async function handleGitHubCallback(input: {
     return renderCallbackPage({
       title: "GitHub account lookup failed",
       body: identity.error,
-      statusCode: 502,
+      statusCode: 200,
     });
   }
 

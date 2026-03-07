@@ -2789,7 +2789,7 @@ describe("auth broker github flow routes", () => {
           `http://localhost/linear/callback?state=${encodeURIComponent(flow.state)}&code=test-code`
         )
       );
-      expect(callbackResponse.status).toBe(502);
+      expect(callbackResponse.status).toBe(200);
       const callbackHtml = await callbackResponse.text();
       expect(callbackHtml).toContain("Connection failed");
       expect(callbackHtml).toContain("Return to Hack");
@@ -2920,7 +2920,7 @@ describe("auth broker github flow routes", () => {
             `http://localhost/linear/callback?state=${encodeURIComponent(flow.state)}&code=test-code`
           )
         );
-        expect(callbackResponse.status).toBe(502);
+        expect(callbackResponse.status).toBe(200);
         const callbackHtml = await callbackResponse.text();
         expect(callbackHtml).toContain("Connection failed");
         expect(callbackHtml).toContain("Open Hack");
@@ -2970,7 +2970,7 @@ describe("auth broker github flow routes", () => {
           `http://localhost/linear/callback?state=${encodeURIComponent(flow.state)}&code=test-code`
         )
       );
-      expect(callbackResponse.status).toBe(502);
+      expect(callbackResponse.status).toBe(200);
       const callbackHtml = await callbackResponse.text();
       expect(callbackHtml).toContain("Connection failed");
       expect(callbackHtml).toContain("Open Hack");

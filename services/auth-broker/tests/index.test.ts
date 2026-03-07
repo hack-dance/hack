@@ -2391,6 +2391,58 @@ describe("auth broker github flow routes", () => {
     expect(pollPayload.status.setDefault).toBe(true);
   });
 
+  test("linear start route requires Hack auth when Better Auth is enabled", async () => {
+    const flowStore = new FlowStore();
+    const app = createAuthBrokerApp({
+      config: createTestConfig(),
+      flowStore,
+      betterAuthRuntime: createBetterAuthRuntimeWithSession(null),
+    });
+
+    const startResponse = await app.handle(
+      new Request("http://localhost/v1/auth/linear/start?profile=default")
+    );
+    expect(startResponse.status).toBe(401);
+    const payload = (await startResponse.json()) as {
+      readonly ok: false;
+      readonly error: string;
+    };
+    expect(payload.ok).toBe(false);
+    expect(payload.error).toBe("better_auth_session_required");
+  });
+
+  test("linear start route persists Hack account ownership from management token", async () => {
+    await withManagementTokenSecret("broker-management-secret", async () => {
+      const flowStore = new FlowStore();
+      const managementToken = issueBrokerManagementToken({
+        userId: "better-auth-linear-user",
+        organizationId: "better-auth-org",
+        teamId: "better-auth-team",
+      });
+      const app = createAuthBrokerApp({
+        config: createTestConfig(),
+        flowStore,
+        betterAuthRuntime: createBetterAuthRuntimeWithSession(null),
+      });
+
+      const startResponse = await app.handle(
+        new Request("http://localhost/v1/auth/linear/start?profile=default", {
+          headers: managementToken
+            ? {
+                authorization: `Bearer ${managementToken.token}`,
+              }
+            : {},
+        })
+      );
+      expect(startResponse.status).toBe(200);
+      const startPayload = (await startResponse.json()) as StartFlowResponse;
+      const flow = flowStore.getById(startPayload.flow.flowId);
+      expect(flow?.requestedByBetterAuthUserId).toBe("better-auth-linear-user");
+      expect(flow?.requestedByBetterAuthOrganizationId).toBe("better-auth-org");
+      expect(flow?.requestedByBetterAuthTeamId).toBe("better-auth-team");
+    });
+  });
+
   test("linear start route persists desktop redirect URL for browser handoff", async () => {
     const flowStore = new FlowStore();
     const app = createAuthBrokerApp({
@@ -2414,41 +2466,29 @@ describe("auth broker github flow routes", () => {
     await withManagementTokenSecret("broker-management-secret", async () => {
       const flowStore = new FlowStore();
       const connectionStore = new InMemoryLinearConnectionStore();
+      const managementToken = issueBrokerManagementToken({
+        userId: "better-auth-linear-user",
+        organizationId: "better-auth-org",
+        teamId: "better-auth-team",
+      });
       const app = createAuthBrokerApp({
         config: createTestConfig(),
         flowStore,
         linearConnectionStore: connectionStore,
         betterAuthRuntime: createBetterAuthRuntimeWithSession(
-          withActiveTeam(
-            {
-              session: {
-                id: "sess-linear",
-                userId: "better-auth-linear-user",
-                expiresAt: new Date(),
-                createdAt: new Date(),
-                updatedAt: new Date(),
-                token: "token-linear",
-              },
-              user: {
-                id: "better-auth-linear-user",
-                email: "linear@example.com",
-                emailVerified: true,
-                name: "Linear User",
-                createdAt: new Date(),
-                updatedAt: new Date(),
-              },
-            },
-            {
-              organizationId: "better-auth-org",
-              teamId: "better-auth-team",
-            }
-          ),
+          null,
           createBetterAuthDb([{ id: "better-auth-linear-user" }])
         ),
       });
 
       const startResponse = await app.handle(
-        new Request("http://localhost/v1/auth/linear/start?profile=work")
+        new Request("http://localhost/v1/auth/linear/start?profile=work", {
+          headers: managementToken
+            ? {
+                authorization: `Bearer ${managementToken.token}`,
+              }
+            : {},
+        })
       );
       expect(startResponse.status).toBe(200);
       const startPayload = (await startResponse.json()) as StartFlowResponse;
@@ -2561,7 +2601,14 @@ describe("auth broker github flow routes", () => {
 
         const connectionsResponse = await app.handle(
           new Request(
-            "http://localhost/v1/auth/linear/connections?profileId=work"
+            "http://localhost/v1/auth/linear/connections?profileId=work",
+            {
+              headers: claimPayload.status.managementToken
+                ? {
+                    authorization: `Bearer ${claimPayload.status.managementToken}`,
+                  }
+                : {},
+            }
           )
         );
         expect(connectionsResponse.status).toBe(200);
@@ -2613,42 +2660,31 @@ describe("auth broker github flow routes", () => {
     await withManagementTokenSecret("broker-management-secret", async () => {
       const flowStore = new FlowStore();
       const connectionStore = new InMemoryLinearConnectionStore();
+      const managementToken = issueBrokerManagementToken({
+        userId: "better-auth-linear-user",
+        organizationId: "better-auth-org",
+        teamId: "better-auth-team",
+      });
       const app = createAuthBrokerApp({
         config: createTestConfig(),
         flowStore,
         linearConnectionStore: connectionStore,
         betterAuthRuntime: createBetterAuthRuntimeWithSession(
-          withActiveTeam(
-            {
-              session: {
-                id: "sess-linear-open-hack",
-                userId: "better-auth-linear-user",
-                expiresAt: new Date(),
-                createdAt: new Date(),
-                updatedAt: new Date(),
-                token: "token-linear",
-              },
-              user: {
-                id: "better-auth-linear-user",
-                email: "linear@example.com",
-                emailVerified: true,
-                name: "Linear User",
-                createdAt: new Date(),
-                updatedAt: new Date(),
-              },
-            },
-            {
-              organizationId: "better-auth-org",
-              teamId: "better-auth-team",
-            }
-          ),
+          null,
           createBetterAuthDb([{ id: "better-auth-linear-user" }])
         ),
       });
 
       const startResponse = await app.handle(
         new Request(
-          "http://localhost/v1/auth/linear/start?profile=work&desktopRedirectUrl=hack-dev%3A%2F%2Fauth%2Flinear%2Fcallback"
+          "http://localhost/v1/auth/linear/start?profile=work&desktopRedirectUrl=hack-dev%3A%2F%2Fauth%2Flinear%2Fcallback",
+          {
+            headers: managementToken
+              ? {
+                  authorization: `Bearer ${managementToken.token}`,
+                }
+              : {},
+          }
         )
       );
       expect(startResponse.status).toBe(200);
@@ -2949,6 +2985,11 @@ describe("auth broker github flow routes", () => {
     await withManagementTokenSecret("broker-management-secret", async () => {
       const flowStore = new FlowStore();
       const connectionStore = new InMemoryLinearConnectionStore();
+      const startManagementToken = issueBrokerManagementToken({
+        userId: "better-auth-linear-user",
+        organizationId: "better-auth-org",
+        teamId: "better-auth-team",
+      });
       const app = createAuthBrokerApp({
         config: createTestConfig(),
         flowStore,
@@ -2960,7 +3001,13 @@ describe("auth broker github flow routes", () => {
       });
 
       const startResponse = await app.handle(
-        new Request("http://localhost/v1/auth/linear/start?profile=work")
+        new Request("http://localhost/v1/auth/linear/start?profile=work", {
+          headers: startManagementToken
+            ? {
+                authorization: `Bearer ${startManagementToken.token}`,
+              }
+            : {},
+        })
       );
       expect(startResponse.status).toBe(200);
       const startPayload = (await startResponse.json()) as StartFlowResponse;
@@ -3077,7 +3124,7 @@ describe("auth broker github flow routes", () => {
         };
         expect(connectionsPayload.ok).toBe(true);
         expect(connectionsPayload.accessControlMode).toBe(
-          "better_auth_session_owned"
+          "better_auth_team_owned"
         );
         expect(connectionsPayload.connections).toHaveLength(1);
         expect(connectionsPayload.connections[0]?.profileId).toBe("work");

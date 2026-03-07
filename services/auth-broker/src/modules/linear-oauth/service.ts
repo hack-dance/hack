@@ -40,6 +40,11 @@ export function createFlow(input: {
     LinearOAuthModel["startQuery"],
     "profile" | "setDefault" | "desktopRedirectUrl"
   >;
+  readonly requestedBy?: {
+    readonly betterAuthUserId: string;
+    readonly betterAuthOrganizationId?: string | null;
+    readonly betterAuthTeamId?: string | null;
+  } | null;
 }): StartFlowPayload {
   if (!(input.config.linearClientId && input.config.linearRedirectUri)) {
     throw new Error("linear_oauth_not_configured");
@@ -81,6 +86,22 @@ export function createFlow(input: {
     expiresAtMs,
     redirectUri: input.config.linearRedirectUri,
     ...(desktopRedirectUrl ? { desktopRedirectUrl } : {}),
+    ...(input.requestedBy?.betterAuthUserId
+      ? {
+          requestedByBetterAuthUserId: input.requestedBy.betterAuthUserId,
+          ...(input.requestedBy.betterAuthOrganizationId
+            ? {
+                requestedByBetterAuthOrganizationId:
+                  input.requestedBy.betterAuthOrganizationId,
+              }
+            : {}),
+          ...(input.requestedBy.betterAuthTeamId
+            ? {
+                requestedByBetterAuthTeamId: input.requestedBy.betterAuthTeamId,
+              }
+            : {}),
+        }
+      : {}),
     status: "pending",
   });
 
@@ -250,14 +271,19 @@ export async function handleLinearCallback(input: {
       account: identity.account,
       autoProvision: input.config.betterAuthLinearAutoProvisionUsers,
     });
-    const betterAuthSession = await resolveBetterAuthSession({
-      runtime: input.betterAuthRuntime,
-      request: input.request,
-    });
+    const betterAuthSession = flow.requestedByBetterAuthUserId
+      ? createRequestedBetterAuthSession({ flow })
+      : await resolveBetterAuthSession({
+          runtime: input.betterAuthRuntime,
+          request: input.request,
+        });
     const linkedAccount = {
       ...identity.account,
-      ...(betterAuthLink.userId
-        ? { betterAuthUserId: betterAuthLink.userId }
+      ...((betterAuthSession.session?.userId ?? betterAuthLink.userId)
+        ? {
+            betterAuthUserId:
+              betterAuthSession.session?.userId ?? betterAuthLink.userId,
+          }
         : {}),
       ...(betterAuthLink.state
         ? { betterAuthLinkState: betterAuthLink.state }
@@ -275,7 +301,8 @@ export async function handleLinearCallback(input: {
       accountId: identity.account.accountId,
       accountName: identity.account.accountName,
       accountEmail: identity.account.accountEmail,
-      betterAuthUserId: betterAuthLink.userId ?? null,
+      betterAuthUserId:
+        betterAuthSession.session?.userId ?? betterAuthLink.userId ?? null,
       betterAuthOrganizationId:
         betterAuthSession.session?.organizationId ?? null,
       betterAuthTeamId: betterAuthSession.session?.teamId ?? null,
@@ -349,6 +376,46 @@ export async function handleLinearCallback(input: {
       });
     }
   }
+}
+
+function createRequestedBetterAuthSession(input: {
+  readonly flow: OAuthFlow;
+}): {
+  readonly enabled: true;
+  readonly accessControlMode:
+    | "better_auth_team_owned"
+    | "better_auth_session_owned"
+    | "better_auth_organization_owned";
+  readonly session: {
+    readonly userId: string;
+    readonly email: null;
+    readonly name: null;
+    readonly organizationId: string | null;
+    readonly teamId: string | null;
+    readonly managementTokenProfileId: null;
+  };
+} {
+  let accessControlMode:
+    | "better_auth_team_owned"
+    | "better_auth_session_owned"
+    | "better_auth_organization_owned" = "better_auth_session_owned";
+  if (input.flow.requestedByBetterAuthTeamId) {
+    accessControlMode = "better_auth_team_owned";
+  } else if (input.flow.requestedByBetterAuthOrganizationId) {
+    accessControlMode = "better_auth_organization_owned";
+  }
+  return {
+    enabled: true,
+    accessControlMode,
+    session: {
+      userId: input.flow.requestedByBetterAuthUserId ?? "",
+      email: null,
+      name: null,
+      organizationId: input.flow.requestedByBetterAuthOrganizationId ?? null,
+      teamId: input.flow.requestedByBetterAuthTeamId ?? null,
+      managementTokenProfileId: null,
+    },
+  };
 }
 
 function resolveLinearCallbackFlow(input: {

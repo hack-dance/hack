@@ -29,6 +29,7 @@ export function createLinearOAuthPlugin({
       createLinearOAuthStartRoutesPlugin({
         config,
         flowStore,
+        betterAuthRuntime,
       })
     )
     .use(

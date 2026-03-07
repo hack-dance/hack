@@ -385,6 +385,15 @@ function parsePersistedFlow(input: {
   const authorizeUrl = asNonEmptyString(input.value.authorizeUrl);
   const redirectUri = asNonEmptyString(input.value.redirectUri);
   const desktopRedirectUrl = asOptionalString(input.value.desktopRedirectUrl);
+  const requestedByBetterAuthUserId = asOptionalString(
+    input.value.requestedByBetterAuthUserId
+  );
+  const requestedByBetterAuthOrganizationId = asOptionalString(
+    input.value.requestedByBetterAuthOrganizationId
+  );
+  const requestedByBetterAuthTeamId = asOptionalString(
+    input.value.requestedByBetterAuthTeamId
+  );
   const codeVerifier = asOptionalString(input.value.codeVerifier);
   const status = asFlowStatus(input.value.status);
   const setDefault =
@@ -441,6 +450,11 @@ function parsePersistedFlow(input: {
     expiresAtMs,
     redirectUri,
     ...(desktopRedirectUrl ? { desktopRedirectUrl } : {}),
+    ...(requestedByBetterAuthUserId ? { requestedByBetterAuthUserId } : {}),
+    ...(requestedByBetterAuthOrganizationId
+      ? { requestedByBetterAuthOrganizationId }
+      : {}),
+    ...(requestedByBetterAuthTeamId ? { requestedByBetterAuthTeamId } : {}),
     status,
     ...(account ? { account } : {}),
     ...(installationId ? { installationId } : {}),

@@ -364,7 +364,8 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
   },
   {
     name: "connections",
-    summary: "List broker-owned Linear connections for the current Hack account",
+    summary:
+      "List broker-owned Linear connections for the current Hack account",
     scope: "global",
     allowWhenDisabled: true,
     handler: async ({ ctx, args }) => {
@@ -2121,6 +2122,16 @@ async function runLinearBrokerOAuthFlow(
     }
   | { readonly ok: false; readonly error: string }
 > {
+  const brokerAuth = await resolveLinearBrokerAuthorization({
+    controlPlaneConfig: input.controlPlaneConfig,
+    profileId: input.profileId,
+  });
+  if (!brokerAuth.ok) {
+    return {
+      ok: false,
+      error: brokerAuth.error,
+    };
+  }
   const startUrl = new URL(
     "/v1/auth/linear/start",
     `${input.brokerConfig.baseUrl}/`
@@ -2130,11 +2141,17 @@ async function runLinearBrokerOAuthFlow(
 
   const start = await fetchJson<BrokerStartFlowEnvelope>({
     url: startUrl.toString(),
+    init: {
+      headers: brokerAuth.headers,
+    },
   });
   if (!start.ok) {
     return {
       ok: false,
-      error: `Auth broker Linear start failed: ${start.error}`,
+      error: normalizeBrokerProtectedLinearError({
+        error: start.error,
+        profileId: brokerAuth.profileId,
+      }),
     };
   }
 
@@ -6291,7 +6308,7 @@ function parseLinearConnectionSummary(input: {
   const id = readOptionalString(input.value.id);
   const createdAt = readOptionalString(input.value.createdAt);
   const updatedAt = readOptionalString(input.value.updatedAt);
-  if (!id || !createdAt || !updatedAt) {
+  if (!(id && createdAt && updatedAt)) {
     return null;
   }
   return {

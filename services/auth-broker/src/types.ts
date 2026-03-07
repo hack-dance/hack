@@ -45,6 +45,9 @@ export type OAuthFlow = {
   readonly expiresAtMs: number;
   readonly redirectUri: string;
   readonly desktopRedirectUrl?: string;
+  readonly requestedByBetterAuthUserId?: string;
+  readonly requestedByBetterAuthOrganizationId?: string;
+  readonly requestedByBetterAuthTeamId?: string;
   installationId?: string;
   status: FlowStatus;
   account?: OAuthFlowAccount;

@@ -494,7 +494,8 @@ describe("auth broker github flow routes", () => {
       );
       expect(accountResponse.status).toBe(200);
       const accountHtml = await accountResponse.text();
-      expect(accountHtml).toContain("Hack is ready");
+      expect(accountHtml).toContain("Connected to this Mac.");
+      expect(accountHtml).toContain(">HACK<");
       expect(accountHtml).toContain("Open Hack");
 
       const claimResponse = await app.handle(

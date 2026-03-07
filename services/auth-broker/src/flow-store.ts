@@ -384,6 +384,7 @@ function parsePersistedFlow(input: {
   const deviceCodeHash = asNonEmptyString(input.value.deviceCodeHash);
   const authorizeUrl = asNonEmptyString(input.value.authorizeUrl);
   const redirectUri = asNonEmptyString(input.value.redirectUri);
+  const desktopRedirectUrl = asOptionalString(input.value.desktopRedirectUrl);
   const codeVerifier = asOptionalString(input.value.codeVerifier);
   const status = asFlowStatus(input.value.status);
   const setDefault =
@@ -439,6 +440,7 @@ function parsePersistedFlow(input: {
     createdAtMs,
     expiresAtMs,
     redirectUri,
+    ...(desktopRedirectUrl ? { desktopRedirectUrl } : {}),
     status,
     ...(account ? { account } : {}),
     ...(installationId ? { installationId } : {}),

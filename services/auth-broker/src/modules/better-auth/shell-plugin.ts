@@ -14,7 +14,7 @@ import { issueBrokerManagementToken } from "./management-token.ts";
 import { resolveBetterAuthSession } from "./session.ts";
 
 const SESSION_FLOW_PROFILE_ID = "session";
-const SAFE_RETURN_PROTOCOLS = new Set(["hack:"]);
+const SAFE_RETURN_PROTOCOLS = new Set(["hack:", "hack-dev:"]);
 
 const BetterAuthShellModel = {
   startQuery: t.Object({
@@ -422,15 +422,16 @@ export function createBetterAuthShellPlugin({
         });
         return renderHtmlPage({
           title: "Hack account",
-          heading: resolvedSession.session ? "Hack account" : "Finish sign-in",
+          brand: "HACK",
+          theme: "handoff",
+          heading: undefined,
           subtitle: resolvedSession.session
-            ? "This browser is now signed in to Hack."
-            : "Complete sign-in to connect this browser to Hack.",
+            ? "Signed in to Hack."
+            : "Sign in to Hack.",
           body: renderAccountBody({
             session: resolvedSession.session,
             socialProviders,
             lifecycle,
-            accountLinkingPolicy: getAccountLinkingPolicy({ runtime }),
             accountPageUrl: buildAccountPageUrl({
               publicBaseUrl: config.publicBaseUrl,
               flowId: query.flowId,
@@ -654,7 +655,6 @@ function renderAccountBody(input: {
   >["session"];
   readonly socialProviders: readonly BetterAuthSocialProvider[];
   readonly lifecycle: SessionFlowLifecycle;
-  readonly accountLinkingPolicy: BetterAuthAccountLinkingPolicy;
   readonly accountPageUrl: string;
 }): string {
   const sessionSummary = input.session
@@ -662,84 +662,99 @@ function renderAccountBody(input: {
         session: input.session,
         lifecycle: input.lifecycle,
       })
-    : renderLifecycleMessage({
-        eyebrow: "Not signed in",
-        title: "Finish sign-in to continue",
-        body: "Use a provider below to open your Hack session in this browser.",
-        tone: "warning",
-      });
+    : "";
 
   const lifecycleCard = renderLifecycleMessageForFlow({
     lifecycle: input.lifecycle,
-    accountPageUrl: input.accountPageUrl,
+    hasSession: Boolean(input.session),
   });
-  const linkingCard =
-    input.session && input.socialProviders.length > 0
-      ? [
-          `<section class="section">`,
-          `<p class="section-label">Add another sign-in method</p>`,
-          renderProviderActionGrid({
-            providers: input.socialProviders,
-            callbackUrl: input.accountPageUrl,
-            mode: "link",
-          }),
-          `<details class="details"><summary>Linking details</summary><p>${renderLinkingPolicy(
-            input.accountLinkingPolicy
-          )}</p></details>`,
-          "</section>",
-        ].join("")
-      : "";
+  let linkingCard = "";
+  if (input.socialProviders.length > 0) {
+    if (input.session) {
+      linkingCard = [
+        `<section class="section">`,
+        `<p class="section-label">Add another sign-in method</p>`,
+        renderProviderActionGrid({
+          providers: input.socialProviders,
+          callbackUrl: input.accountPageUrl,
+          mode: "link",
+        }),
+        "</section>",
+      ].join("");
+    } else {
+      linkingCard = [
+        `<section class="section">`,
+        renderProviderActionGrid({
+          providers: input.socialProviders,
+          callbackUrl: input.accountPageUrl,
+          mode: "sign-in",
+        }),
+        "</section>",
+      ].join("");
+    }
+  }
 
   return [sessionSummary, lifecycleCard, linkingCard].filter(Boolean).join("");
 }
 
 function renderLifecycleMessageForFlow(input: {
   readonly lifecycle: SessionFlowLifecycle;
-  readonly accountPageUrl: string;
+  readonly hasSession: boolean;
 }): string {
   if (input.lifecycle.state === "none") {
-    return renderLifecycleMessage({
-      eyebrow: "Session active",
-      title: "You are signed in",
-      body: "Return to Hack or link another sign-in method from this page.",
-      tone: "neutral",
-    });
+    return input.hasSession
+      ? renderLifecycleMessage({
+          eyebrow: "Ready",
+          title: "Signed in to Hack.",
+          body: "Manage sign-in methods from this page.",
+          tone: "neutral",
+        })
+      : "";
   }
   if (input.lifecycle.state === "sign_in_required") {
-    const retryUrl = buildAuthShellUrlFromAccountPageUrl({
-      accountPageUrl: input.accountPageUrl,
-      flowId: input.lifecycle.flowId,
-      deviceCode: input.lifecycle.deviceCode,
-      returnUrl: input.lifecycle.returnUrl,
-    });
     return renderLifecycleMessage({
-      eyebrow: "Pending",
-      title: "Finish sign-in to complete this setup",
-      body: `Return to <a href="${escapeHtml(
-        retryUrl
-      )}">the auth landing page</a> and continue with a provider.`,
-      tone: "warning",
+      eyebrow: "Linked",
+      title: "This request is linked to this Mac.",
+      body: "Continue with a provider below to finish setup.",
+      tone: "neutral",
     });
   }
   if (input.lifecycle.state === "ready") {
     return renderLifecycleMessage({
       eyebrow: "Ready",
-      title: "Hack is ready",
+      title: "Connected to this Mac.",
       body: renderCompletionBody({
         returnUrl: input.lifecycle.returnUrl,
       }),
-      tone: "success",
+      tone: "neutral",
     });
   }
   if (input.lifecycle.state === "claimed") {
     return renderLifecycleMessage({
-      eyebrow: "Claimed",
-      title: "Hack is already connected",
+      eyebrow: "Ready",
+      title: "Hack is already connected.",
       body: renderCompletionBody({
         returnUrl: input.lifecycle.returnUrl,
       }),
-      tone: "muted",
+      tone: "neutral",
     });
+  }
+  if (input.hasSession) {
+    return input.lifecycle.returnUrl
+      ? renderLifecycleMessage({
+          eyebrow: "Ready",
+          title: "Signed in to Hack.",
+          body: renderCompletionBody({
+            returnUrl: input.lifecycle.returnUrl,
+          }),
+          tone: "neutral",
+        })
+      : renderLifecycleMessage({
+          eyebrow: "Ready",
+          title: "Signed in to Hack.",
+          body: "Manage sign-in methods from this page.",
+          tone: "neutral",
+        });
   }
   return renderLifecycleMessage({
     eyebrow: "Unavailable",
@@ -768,35 +783,19 @@ function renderAccountSummary(input: {
   readonly lifecycle: SessionFlowLifecycle;
 }): string {
   const identity = input.session.name ?? input.session.email ?? "Hack account";
-  const avatarLabel = identity.slice(0, 1).toUpperCase();
-  const meta = [
-    input.session.organizationId
-      ? renderMetaPill({
-          label: "Org",
-          value: input.session.organizationId,
-        })
-      : "",
-    input.session.teamId
-      ? renderMetaPill({
-          label: "Team",
-          value: input.session.teamId,
-        })
-      : "",
+  const detail = [
+    input.session.email,
+    input.session.organizationId ? `Org ${input.session.organizationId}` : null,
+    input.session.teamId ? `Team ${input.session.teamId}` : null,
   ]
-    .filter(Boolean)
-    .join("");
+    .filter((value): value is string => Boolean(value))
+    .join(" • ");
 
   return `<section class="summary">
-    <div class="avatar" aria-hidden="true">${escapeHtml(avatarLabel)}</div>
     <div class="summary-copy">
-      <p class="section-label">Hack account</p>
+      <p class="section-label">Account</p>
       <h2>${escapeHtml(identity)}</h2>
-      ${
-        input.session.email
-          ? `<p class="summary-detail">${escapeHtml(input.session.email)}</p>`
-          : ""
-      }
-      ${meta ? `<div class="meta-row">${meta}</div>` : ""}
+      ${detail ? `<p class="summary-detail">${escapeHtml(detail)}</p>` : ""}
       ${
         input.lifecycle.state === "ready" || input.lifecycle.state === "claimed"
           ? `<p class="summary-status">This browser is linked to your Hack account.</p>`
@@ -804,15 +803,6 @@ function renderAccountSummary(input: {
       }
     </div>
   </section>`;
-}
-
-function renderMetaPill(input: {
-  readonly label: string;
-  readonly value: string;
-}): string {
-  return `<span class="meta-pill"><span>${escapeHtml(
-    input.label
-  )}</span>${escapeHtml(input.value)}</span>`;
 }
 
 function renderLifecycleMessage(input: {
@@ -1070,25 +1060,6 @@ for (const button of authButtons) {
 `;
 }
 
-function renderLinkingPolicy(policy: BetterAuthAccountLinkingPolicy): string {
-  const parts = [
-    policy.requireVerifiedEmail
-      ? "Verified provider email is required for implicit linking."
-      : "Unverified provider email can be used for implicit linking.",
-    policy.allowDifferentEmails
-      ? "Different provider emails are allowed."
-      : "Provider email must match the existing Hack account email.",
-  ];
-  if (policy.trustedProviders.length > 0) {
-    parts.push(
-      `Trusted providers: ${policy.trustedProviders
-        .map((providerId) => escapeHtml(providerId))
-        .join(", ")}.`
-    );
-  }
-  return parts.join(" ");
-}
-
 function renderStateCard(input: {
   readonly eyebrow: string;
   readonly title: string;
@@ -1203,22 +1174,10 @@ function renderHtmlPage(input: {
       }
 
       .summary {
-        display: flex;
+        display: grid;
         gap: 0.95rem;
-        align-items: flex-start;
         padding: 0 0 1rem;
         border-bottom: 1px solid var(--line);
-      }
-
-      .avatar {
-        width: 2.5rem;
-        height: 2.5rem;
-        border-radius: 999px;
-        display: grid;
-        place-items: center;
-        background: var(--accent);
-        color: white;
-        font-weight: 700;
       }
 
       .summary-copy h2,
@@ -1270,28 +1229,6 @@ function renderHtmlPage(input: {
         font-weight: 700;
         letter-spacing: 0.08em;
         text-transform: uppercase;
-      }
-
-      .meta-row {
-        display: flex;
-        gap: 0.45rem;
-        flex-wrap: wrap;
-        margin-top: 0.25rem;
-      }
-
-      .meta-pill {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.45rem;
-        padding: 0.28rem 0.55rem;
-        border-radius: 999px;
-        background: rgba(15, 23, 42, 0.05);
-        color: var(--text);
-        font-size: 0.83rem;
-      }
-
-      .meta-pill span {
-        color: var(--muted);
       }
 
       .message {
@@ -1467,7 +1404,7 @@ function renderHtmlPage(input: {
 
       .theme-handoff .stack {
         margin-top: 1.35rem;
-        gap: 1rem;
+        gap: 1.15rem;
       }
 
       .theme-handoff .hero {
@@ -1521,6 +1458,84 @@ function renderHtmlPage(input: {
         border: none;
         color: #f5f5f5;
         font-size: 0.62rem;
+      }
+
+      .theme-handoff .summary {
+        justify-items: center;
+        text-align: center;
+        gap: 0.4rem;
+        padding: 0;
+        border-bottom: none;
+      }
+
+      .theme-handoff .summary-copy {
+        justify-items: center;
+        gap: 0.35rem;
+      }
+
+      .theme-handoff .summary-copy h2 {
+        font-size: 1.35rem;
+        line-height: 1.05;
+        color: #f5f5f5;
+      }
+
+      .theme-handoff .summary-detail,
+      .theme-handoff .summary-status {
+        color: #71717a;
+        font-size: 0.9rem;
+      }
+
+      .theme-handoff .section {
+        justify-items: center;
+        text-align: center;
+      }
+
+      .theme-handoff .section-label {
+        color: #71717a;
+      }
+
+      .theme-handoff .message {
+        display: grid;
+        gap: 0.35rem;
+        padding: 0;
+        border: none;
+        border-radius: 0;
+        background: transparent;
+        text-align: center;
+      }
+
+      .theme-handoff .message h2 {
+        font-size: 1rem;
+        line-height: 1.3;
+        color: #f5f5f5;
+      }
+
+      .theme-handoff .message p {
+        margin: 0;
+        color: #9ca3af;
+      }
+
+      .theme-handoff .message-eyebrow {
+        margin: 0;
+        color: #71717a;
+      }
+
+      .theme-handoff .action-link {
+        margin-left: 0.5rem;
+        padding: 0.82rem 1rem;
+        border-radius: 0;
+        border-color: rgba(255, 255, 255, 0.24);
+        background: transparent;
+        color: #f5f5f5;
+        font-size: 0.92rem;
+        font-weight: 500;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .theme-handoff .action-link:hover {
+        text-decoration: none;
+        background: rgba(255, 255, 255, 0.04);
       }
 
       .theme-handoff #auth-status {
@@ -1585,21 +1600,6 @@ function buildAuthShellUrl(input: {
   return url.toString();
 }
 
-function buildAuthShellUrlFromAccountPageUrl(input: {
-  readonly accountPageUrl: string;
-  readonly flowId: string;
-  readonly deviceCode: string;
-  readonly returnUrl: string | null;
-}): string {
-  const accountPageUrl = new URL(input.accountPageUrl);
-  return buildAuthShellUrl({
-    publicBaseUrl: accountPageUrl.origin,
-    flowId: input.flowId,
-    deviceCode: input.deviceCode,
-    ...(input.returnUrl ? { returnUrl: input.returnUrl } : {}),
-  });
-}
-
 function buildAccountPageUrl(input: {
   readonly publicBaseUrl: string;
   readonly flowId?: string;
@@ -1659,7 +1659,7 @@ function shouldAutoReturnToDesktop(input: {
   }
   try {
     const candidate = new URL(input.returnUrl);
-    return candidate.protocol === "hack:";
+    return SAFE_RETURN_PROTOCOLS.has(candidate.protocol);
   } catch {
     return false;
   }

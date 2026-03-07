@@ -177,7 +177,8 @@ describe("broker Hack session auth flow", () => {
       const accountResponse = await app.handle(new Request(completeLocation));
       expect(accountResponse.status).toBe(200);
       const completeHtml = await accountResponse.text();
-      expect(completeHtml).toContain("Hack is ready");
+      expect(completeHtml).toContain("Connected to this Mac.");
+      expect(completeHtml).toContain(">HACK<");
 
       const pollResponse = await app.handle(
         new Request(
@@ -294,5 +295,56 @@ describe("broker Hack session auth flow", () => {
       expect(html).toContain("Returning to Hack");
       expect(html).toContain("window.setTimeout");
     });
+  });
+
+  test("auth account page accepts debug deep links and keeps the dark handoff shell", async () => {
+    const session = {
+      user: {
+        id: "user-debug",
+        email: "debug@example.com",
+        emailVerified: true,
+        name: "Debug User",
+      },
+      session: {
+        id: "sess-debug",
+        userId: "user-debug",
+        token: "session-token",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        expiresAt: new Date(Date.now() + 60_000),
+      },
+    } as unknown as BetterAuthSession;
+
+    const app = createAuthBrokerApp({
+      config: createTestConfig(),
+      flowStore: new FlowStore(),
+      betterAuthRuntime: createBetterAuthRuntimeWithSession(session),
+    });
+
+    const startResponse = await app.handle(
+      new Request(
+        "http://localhost/v1/auth/session/start?redirect=hack-dev://auth/complete"
+      )
+    );
+    const startPayload = (
+      (await startResponse.json()) as SessionStartFlowResponse
+    ).flow;
+    const completeResponse = await app.handle(
+      new Request(startPayload.authorizeUrl)
+    );
+    const accountLocation = completeResponse.headers.get("location");
+    expect(accountLocation).toContain(
+      "redirect=hack-dev%3A%2F%2Fauth%2Fcomplete"
+    );
+    if (!accountLocation) {
+      return;
+    }
+
+    const accountResponse = await app.handle(new Request(accountLocation));
+    const html = await accountResponse.text();
+    expect(html).toContain(">HACK<");
+    expect(html).toContain("Signed in to Hack.");
+    expect(html).toContain("hack-dev://auth/complete");
+    expect(html).not.toContain("Session not found");
   });
 });

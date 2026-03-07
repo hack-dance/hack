@@ -21,10 +21,14 @@
 			<string>dance.hack.desktop</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>hack</string>
+				<string>$(HACK_URL_SCHEME)</string>
 			</array>
 		</dict>
 	</array>
+	<key>HackAuthCompletionURL</key>
+	<string>$(HACK_URL_SCHEME)://auth/complete</string>
+	<key>HackGitHubOAuthCallbackURL</key>
+	<string>$(HACK_URL_SCHEME)://auth/github/callback</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

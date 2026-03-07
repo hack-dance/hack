@@ -1219,7 +1219,7 @@ public final class DashboardModel {
   }
 
   private func isHackAuthCompletionDeepLink(url: URL) -> Bool {
-    guard url.scheme?.lowercased() == "hack" else {
+    guard isRegisteredHackDeepLinkScheme(url.scheme) else {
       return false
     }
 
@@ -1231,7 +1231,7 @@ public final class DashboardModel {
   }
 
   private func parseGitHubOAuthDeepLink(url: URL) -> GitHubOAuthDeepLinkContext? {
-    guard url.scheme?.lowercased() == "hack" else {
+    guard isRegisteredHackDeepLinkScheme(url.scheme) else {
       return nil
     }
 
@@ -1267,6 +1267,36 @@ public final class DashboardModel {
       installationId: normalizedQueryValue(named: "installationId", items: items)
         ?? normalizedQueryValue(named: "installation_id", items: items)
     )
+  }
+
+  private func isRegisteredHackDeepLinkScheme(_ scheme: String?) -> Bool {
+    guard
+      let normalizedScheme = scheme?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased(),
+      !normalizedScheme.isEmpty
+    else {
+      return false
+    }
+    return registeredHackDeepLinkSchemes.contains(normalizedScheme)
+  }
+
+  private var registeredHackDeepLinkSchemes: Set<String> {
+    if
+      let urlTypes = Bundle.main.object(forInfoDictionaryKey: "CFBundleURLTypes")
+        as? [[String: Any]]
+    {
+      let schemes = urlTypes
+        .flatMap { $0["CFBundleURLSchemes"] as? [String] ?? [] }
+        .compactMap {
+          let trimmed = $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+          return trimmed.isEmpty ? nil : trimmed
+        }
+      if !schemes.isEmpty {
+        return Set(schemes)
+      }
+    }
+    return ["hack", "hack-dev"]
   }
 
   private func normalizedPath(_ path: String) -> String {

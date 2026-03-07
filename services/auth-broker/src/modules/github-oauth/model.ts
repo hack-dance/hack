@@ -14,6 +14,7 @@ export const GitHubOAuthModel = {
     setDefault: t.Optional(t.String()),
     redirect: t.Optional(t.String()),
     requireInstallation: t.Optional(t.String()),
+    desktopRedirectUrl: t.Optional(t.String()),
   }),
   callbackQuery: t.Object({
     code: t.Optional(t.String()),

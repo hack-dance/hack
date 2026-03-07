@@ -29,4 +29,17 @@ describe("github oauth callback deep link", () => {
     const url = new URL(deepLink);
     expect(url.searchParams.get("installationId")).toBe("123456");
   });
+
+  test("uses a custom desktop callback URL when provided", () => {
+    const deepLink = buildHackDesktopDeepLink({
+      flowId: "flow_custom",
+      profileId: "debug",
+      status: "complete",
+      baseUrl: "hack-dev://auth/github/callback",
+    });
+    const url = new URL(deepLink);
+    expect(url.protocol).toBe("hack-dev:");
+    expect(url.hostname).toBe("auth");
+    expect(url.pathname).toBe("/github/callback");
+  });
 });

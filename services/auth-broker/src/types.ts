@@ -44,6 +44,7 @@ export type OAuthFlow = {
   readonly createdAtMs: number;
   readonly expiresAtMs: number;
   readonly redirectUri: string;
+  readonly desktopRedirectUrl?: string;
   installationId?: string;
   status: FlowStatus;
   account?: OAuthFlowAccount;

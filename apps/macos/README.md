@@ -71,8 +71,8 @@ For GitHub browser OAuth, the app defaults to:
 
 Set `HACK_AUTH_BROKER_URL` to override and pin a custom broker endpoint.
 
-The app registers URL scheme `hack` and handles `hack://auth/github/callback`
-and `hack://auth/complete` deep links for browser return-to-app UX.
+Release builds register URL scheme `hack`. Debug/Xcode builds register `hack-dev`
+so browser auth returns target the running debug app instead of any installed release copy.
 
 ## Data source
 

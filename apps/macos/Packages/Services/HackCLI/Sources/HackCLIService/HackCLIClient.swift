@@ -896,8 +896,9 @@ public actor HackCLIClient {
   }
 
   public func loginHackAccount() async throws {
+    let redirectURL = desktopAuthCompletionURL()
     let result = try await run(
-      ["auth", "login", "--json", "--redirect", "hack://auth/complete"],
+      ["auth", "login", "--json", "--redirect", redirectURL],
       allowNonZeroExit: true
     )
     let payload = try decodeJsonOrThrow(HackAuthLoginEnvelope.self, result: result)
@@ -941,6 +942,7 @@ public actor HackCLIClient {
     profileId: String,
     setDefault: Bool
   ) async throws -> GitHubOAuthFlowStartResponse {
+    let desktopRedirectURL = desktopGitHubOAuthCallbackURL()
     var lastError: String? = nil
     for candidate in resolveAuthServerCandidates() {
       guard
@@ -952,6 +954,7 @@ public actor HackCLIClient {
             URLQueryItem(name: "setDefault", value: setDefault ? "1" : "0"),
             URLQueryItem(name: "set_default", value: setDefault ? "1" : "0"),
             URLQueryItem(name: "requireInstallation", value: "1"),
+            URLQueryItem(name: "desktopRedirectUrl", value: desktopRedirectURL),
           ]
         )
       else {
@@ -1686,6 +1689,34 @@ public actor HackCLIClient {
     return components.url
   }
 
+  private func desktopAuthCompletionURL() -> String {
+    bundleString(forInfoDictionaryKey: "HackAuthCompletionURL")
+      ?? "\(desktopURLScheme())://auth/complete"
+  }
+
+  private func desktopGitHubOAuthCallbackURL() -> String {
+    bundleString(forInfoDictionaryKey: "HackGitHubOAuthCallbackURL")
+      ?? "\(desktopURLScheme())://auth/github/callback"
+  }
+
+  private func desktopURLScheme() -> String {
+    if
+      let urlTypes = Bundle.main.object(forInfoDictionaryKey: "CFBundleURLTypes")
+        as? [[String: Any]]
+    {
+      for urlType in urlTypes {
+        if
+          let schemes = urlType["CFBundleURLSchemes"] as? [String],
+          let scheme = schemes.first?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !scheme.isEmpty
+        {
+          return scheme
+        }
+      }
+    }
+    return "hack"
+  }
+
   private func buildAuthURLWithQuery(
     urlString: String,
     queryItems: [URLQueryItem]
@@ -2110,6 +2141,10 @@ public actor HackCLIClient {
     guard let value else { return nil }
     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
     return trimmed.isEmpty ? nil : trimmed
+  }
+
+  private func bundleString(forInfoDictionaryKey key: String) -> String? {
+    normalized(Bundle.main.object(forInfoDictionaryKey: key) as? String)
   }
 
   private func resolveAuthServerCandidates() -> [String] {

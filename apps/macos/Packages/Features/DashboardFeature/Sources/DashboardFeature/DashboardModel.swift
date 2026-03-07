@@ -805,6 +805,15 @@ public final class DashboardModel {
     }
   }
 
+  public func seedLinearLocalAccess(profileId: String) async -> LinearLocalAccessSeedResponse? {
+    do {
+      return try await client.seedLinearLocalAccess(profileId: profileId)
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
   public func inspectLinearStatus(profileId: String? = nil) async -> LinearStatusResponse? {
     do {
       return try await client.inspectLinearStatus(profileId: profileId)

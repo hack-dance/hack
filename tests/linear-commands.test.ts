@@ -206,6 +206,23 @@ test("parseConnectionsArgs parses broker connection filters", () => {
   });
 });
 
+test("parseSeedLocalAccessArgs parses repair flags", () => {
+  const parsed = __testOnly.parseSeedLocalAccessArgs({
+    args: ["--profile", "work", "--set-default", "--json"],
+  });
+
+  expect(parsed.ok).toBe(true);
+  if (!parsed.ok) {
+    return;
+  }
+
+  expect(parsed.value).toEqual({
+    profileId: "work",
+    setDefault: true,
+    json: true,
+  });
+});
+
 test("parseRunAutosyncArgs parses profile, route filters, and limit", () => {
   const parsed = __testOnly.parseRunAutosyncArgs({
     args: [

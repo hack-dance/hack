@@ -28,6 +28,8 @@ test("toConnectionRecord prefers first-class ownership columns and strips legacy
     betterAuthTeamId: "team-column",
     organizationId: "linear-org",
     teamId: "linear-team",
+    localAccessSealed: null,
+    localAccessUpdatedAt: null,
     metadataJson: JSON.stringify({
       _betterAuthOrganizationId: "org-legacy",
       _betterAuthTeamId: "team-legacy",
@@ -57,6 +59,8 @@ test("toConnectionRecord falls back to legacy ownership metadata when structured
     betterAuthTeamId: null,
     organizationId: null,
     teamId: null,
+    localAccessSealed: null,
+    localAccessUpdatedAt: null,
     metadataJson: JSON.stringify({
       _betterAuthOrganizationId: "org-legacy",
       _betterAuthTeamId: "team-legacy",

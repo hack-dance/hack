@@ -2852,6 +2852,7 @@ private struct LinearExtensionSettingsView: View {
   @State private var activeAuthFlowId: String? = nil
   @State private var activeAuthStatusURL: String? = nil
   @State private var disconnectingLinearProfiles: Set<String> = []
+  @State private var repairingLinearProfiles: Set<String> = []
   @State private var assigneeMappings: [LinearAssigneeMapping] = []
   @State private var assigneeMappingProfile = ""
   @State private var assigneeMappingTeamId = ""
@@ -2900,7 +2901,9 @@ private struct LinearExtensionSettingsView: View {
                   await applyLinearEnabledToggle(newValue)
                 }
               }
-            if isLoadingConfig || isSavingConfig || isLoadingDiagnostics || isAuthenticating {
+            if isLoadingConfig || isSavingConfig || isLoadingDiagnostics || isAuthenticating
+              || !repairingLinearProfiles.isEmpty
+            {
               ProgressView()
                 .controlSize(.small)
             }
@@ -2920,6 +2923,7 @@ private struct LinearExtensionSettingsView: View {
                 )
               }
               .adaptiveToolbarButtonProminent()
+              .disabled(!isAuthenticating && !repairingLinearProfiles.isEmpty)
             } else {
               Button("Sign in to Hack") {
                 Task { _ = await model.loginHackAccount() }
@@ -2929,15 +2933,25 @@ private struct LinearExtensionSettingsView: View {
           }
 
           if isAuthenticating {
-            StatusPill(text: "Waiting for browser auth", tone: .good)
+            StatusPill(
+              text: LinearConnectionPresentationState.connecting.label,
+              tone: .neutral
+            )
           } else if let authFlowStatus {
             switch authFlowStatus.status {
             case "complete":
-              StatusPill(text: "Connected", tone: .good)
+              let state = linearConnectionNeedsAttention
+                ? LinearConnectionPresentationState.needsAttention
+                : LinearConnectionPresentationState.connected
+              StatusPill(text: state.label, tone: linearTone(for: state))
             case "error", "expired":
-              StatusPill(text: "Connect failed", tone: .warn)
+              let state = LinearConnectionPresentationState.needsAttention
+              StatusPill(text: state.label, tone: linearTone(for: state))
             default:
-              StatusPill(text: "Connect pending", tone: .neutral)
+              StatusPill(
+                text: LinearConnectionPresentationState.connecting.label,
+                tone: .neutral
+              )
             }
           }
 
@@ -2952,7 +2966,10 @@ private struct LinearExtensionSettingsView: View {
               VStack(alignment: .leading, spacing: 10) {
                 ForEach(remoteLinearConnections) { connection in
                   let profileId = connection.profileId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                  let localProfile = linearProfiles.first(where: { $0.id == profileId })
+                  let localProfile = localLinearProfile(profileId: profileId)
+                  let rowState = linearRemoteConnectionState(connection)
+                  let needsRepair = rowState == .needsAttention
+                  let rowActionProfileId = profileId.isEmpty ? nextLinearProfileId() : profileId
                   let accountLabel =
                     connection.accountName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
                     ?? connection.accountEmail?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
@@ -2969,8 +2986,8 @@ private struct LinearExtensionSettingsView: View {
                         StatusPill(text: "Default profile", tone: .good)
                       }
                       StatusPill(
-                        text: localProfile == nil ? "Needs attention" : "Connected",
-                        tone: localProfile == nil ? .warn : .good
+                        text: rowState.label,
+                        tone: linearTone(for: rowState)
                       )
                       Spacer()
                       if !profileId.isEmpty && resolvedDefaultProfile != profileId {
@@ -2981,24 +2998,41 @@ private struct LinearExtensionSettingsView: View {
                         }
                         .adaptiveToolbarButton()
                       }
-                      Button {
-                        Task {
-                          await reconnectLinearProfile(
-                            profileId.isEmpty ? nextLinearProfileId() : profileId,
-                            setDefault: resolvedDefaultProfile == profileId
-                          )
+                      if needsRepair {
+                        Button {
+                          Task {
+                            await repairLinearLocalAccess(
+                              profileId: rowActionProfileId,
+                              setDefault: resolvedDefaultProfile == profileId
+                            )
+                          }
+                        } label: {
+                          Label("Repair access", systemImage: "arrow.clockwise.circle")
                         }
-                      } label: {
-                        Label(
-                          localProfile == nil ? "Finish setup" : "Reconnect",
-                          systemImage: "arrow.clockwise.circle"
+                        .adaptiveToolbarButtonProminent()
+                        .disabled(
+                          isAuthenticating ||
+                            repairingLinearProfiles.contains(rowActionProfileId) ||
+                            (!profileId.isEmpty && disconnectingLinearProfiles.contains(profileId))
+                        )
+                      } else {
+                        Button {
+                          Task {
+                            await reconnectLinearProfile(
+                              rowActionProfileId,
+                              setDefault: resolvedDefaultProfile == profileId
+                            )
+                          }
+                        } label: {
+                          Label("Reconnect", systemImage: "arrow.clockwise.circle")
+                        }
+                        .adaptiveToolbarButton()
+                        .disabled(
+                          isAuthenticating ||
+                            repairingLinearProfiles.contains(rowActionProfileId) ||
+                            (!profileId.isEmpty && disconnectingLinearProfiles.contains(profileId))
                         )
                       }
-                      .adaptiveToolbarButtonProminent()
-                      .disabled(
-                        isAuthenticating ||
-                          (!profileId.isEmpty && disconnectingLinearProfiles.contains(profileId))
-                      )
                       if let localProfile {
                         Button(role: .destructive) {
                           Task { await disconnectLinearProfile(localProfile.id) }
@@ -3055,7 +3089,8 @@ private struct LinearExtensionSettingsView: View {
                       Text(linearAccountLabel(profile: profile, status: profileStatus) ?? profile.id)
                         .font(.mono(.subheadline, weight: .semibold))
                       StatusPill(text: "Profile \(profile.id)", tone: .neutral)
-                      StatusPill(text: "Needs attention", tone: .warn)
+                      let rowState = LinearConnectionPresentationState.needsAttention
+                      StatusPill(text: rowState.label, tone: linearTone(for: rowState))
                       Spacer()
                       Button {
                         Task {
@@ -3065,7 +3100,7 @@ private struct LinearExtensionSettingsView: View {
                           )
                         }
                       } label: {
-                        Label("Repair connection", systemImage: "arrow.clockwise.circle")
+                        Label("Connect account", systemImage: "plus.circle")
                       }
                       .adaptiveToolbarButtonProminent()
                       .disabled(
@@ -3376,43 +3411,81 @@ private struct LinearExtensionSettingsView: View {
     }
   }
 
+  private func localLinearProfile(profileId: String) -> LinearProfileSummary? {
+    let trimmed = profileId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      return nil
+    }
+    return linearProfiles.first(where: { profile in
+      profile.id.caseInsensitiveCompare(trimmed) == .orderedSame
+    })
+  }
+
+  private func hasLocalLinearAccess(profileId: String) -> Bool {
+    guard localLinearProfile(profileId: profileId) != nil else {
+      return false
+    }
+    guard let status = profileStatusById[profileId] else {
+      return true
+    }
+    return status.tokenResolved
+  }
+
+  private func linearRemoteConnectionState(
+    _ connection: LinearRemoteConnection
+  ) -> LinearConnectionPresentationState {
+    let profileId = connection.profileId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    guard !profileId.isEmpty else {
+      return .needsAttention
+    }
+    return hasLocalLinearAccess(profileId: profileId) ? .connected : .needsAttention
+  }
+
   private var linearConnectionNeedsAttention: Bool {
     !localOnlyLinearProfiles.isEmpty ||
       remoteLinearConnections.contains { connection in
-        let profileId = connection.profileId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !profileId.isEmpty else {
-          return true
-        }
-        return !linearProfiles.contains(where: {
-          $0.id.caseInsensitiveCompare(profileId) == .orderedSame
-        })
+        linearRemoteConnectionState(connection) == .needsAttention
       }
+  }
+
+  private var linearConnectionState: LinearConnectionPresentationState {
+    if !enabled {
+      return .notConnected
+    }
+    if isAuthenticating {
+      return .connecting
+    }
+    if let authFlowStatus, authFlowStatus.status == "error" || authFlowStatus.status == "expired" {
+      return .needsAttention
+    }
+    if !remoteLinearConnections.isEmpty {
+      return linearConnectionNeedsAttention ? .needsAttention : .connected
+    }
+    if !localOnlyLinearProfiles.isEmpty {
+      return .needsAttention
+    }
+    return .notConnected
   }
 
   private var linearConnectionStateLabel: String {
     if !enabled {
       return "Disabled"
     }
-    if isAuthenticating {
-      return "Connecting"
-    }
-    if !remoteLinearConnections.isEmpty {
-      return linearConnectionNeedsAttention ? "Needs attention" : "Connected"
-    }
-    if !localOnlyLinearProfiles.isEmpty {
-      return "Needs attention"
-    }
-    return "Not connected"
+    return linearConnectionState.label
   }
 
   private var linearConnectionStateTone: StatusTone {
-    switch linearConnectionStateLabel {
-    case "Connected":
-      return .good
-    case "Needs attention":
-      return .warn
-    default:
-      return .neutral
+    linearTone(for: linearConnectionState)
+  }
+
+  private func linearTone(for state: LinearConnectionPresentationState) -> StatusTone {
+    switch state {
+    case .connected:
+      .good
+    case .needsAttention:
+      .warn
+    case .connecting, .notConnected:
+      .neutral
     }
   }
 
@@ -3436,7 +3509,14 @@ private struct LinearExtensionSettingsView: View {
     guard !defaultProfileId.isEmpty else {
       return false
     }
-    guard linearProfiles.contains(where: { $0.id == defaultProfileId }) else {
+    if remoteLinearConnections.contains(where: { connection in
+      connection.profileId?.caseInsensitiveCompare(defaultProfileId) == .orderedSame
+    }) {
+      return !hasLocalLinearAccess(profileId: defaultProfileId)
+    }
+    guard linearProfiles.contains(where: {
+      $0.id.caseInsensitiveCompare(defaultProfileId) == .orderedSame
+    }) else {
       return false
     }
     guard let status = profileStatusById[defaultProfileId] else {
@@ -3771,6 +3851,52 @@ private struct LinearExtensionSettingsView: View {
     await refreshLinearDiagnostics()
   }
 
+  private func shouldFallbackLinearRepairToReconnect(_ error: String) -> Bool {
+    let normalized = error.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    guard !normalized.isEmpty else {
+      return false
+    }
+    return normalized.contains("seed-local-access")
+      || normalized.contains("linear_local_access_")
+      || normalized.contains("provider_token_custody_not_configured")
+      || normalized.contains("local access needs repair")
+  }
+
+  private func repairLinearLocalAccess(
+    profileId: String,
+    setDefault: Bool
+  ) async {
+    let trimmed = profileId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      return
+    }
+    repairingLinearProfiles.insert(trimmed)
+    defer { repairingLinearProfiles.remove(trimmed) }
+
+    if let repaired = await model.seedLinearLocalAccess(profileId: trimmed) {
+      let account = repaired.accountName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        ?? repaired.accountEmail?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        ?? displayNameForRemoteProfileId(trimmed)
+      message = repaired.refreshed
+        ? "Repaired local access for \(account)."
+        : "Local access restored for \(account)."
+      await model.refresh()
+      await refreshLinearDiagnostics()
+      return
+    }
+
+    let detail = model.errorMessage?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    if shouldFallbackLinearRepairToReconnect(detail) {
+      await reconnectLinearProfile(trimmed, setDefault: setDefault)
+      return
+    }
+    if !detail.isEmpty {
+      message = detail
+    } else {
+      message = "Unable to repair local access for \(displayNameForRemoteProfileId(trimmed)). Reconnect the account if the problem persists."
+    }
+  }
+
   private func reconnectLinearProfile(
     _ profileId: String,
     setDefault: Bool
@@ -3919,27 +4045,23 @@ private struct LinearExtensionSettingsView: View {
         {
           remoteConnections = refreshedRemoteConnections
         }
+        let remoteConnectionVisible = remoteLinearConnections.contains(where: {
+          $0.profileId?.caseInsensitiveCompare(profile) == .orderedSame
+        })
+        if remoteConnectionVisible && pendingPollCount >= 8 {
+          message =
+            "Hack already sees this account for \(profile). If this Mac still needs access, use Repair access."
+          await refreshLinearDiagnostics()
+          authFlowStatus = nil
+          return
+        }
         if pendingPollCount == 8 {
-          if remoteLinearConnections.contains(where: {
-            $0.profileId?.caseInsensitiveCompare(profile) == .orderedSame
-          }) {
-            message =
-              "Hack already sees this account for \(profile). Finish the browser step or retry Connect account to complete setup."
-          } else {
-            message =
-              "Still waiting for Linear to finish connecting."
-          }
+          message =
+            "Still waiting for Linear to finish connecting."
         }
         if pendingPollCount >= 16 {
-          if remoteLinearConnections.contains(where: {
-            $0.profileId?.caseInsensitiveCompare(profile) == .orderedSame
-          }) {
-            message =
-              "Hack sees the account for \(profile), but setup still needs attention. Try Connect account again."
-          } else {
-            message =
-              "Connection did not finish. If Linear says Hack is already installed, remove that authorization and reconnect once."
-          }
+          message =
+            "Connection did not finish. If Linear says Hack is already installed, remove that authorization and reconnect once."
           await refreshLinearDiagnostics()
           authFlowStatus = nil
           return
@@ -3960,9 +4082,15 @@ private struct LinearExtensionSettingsView: View {
         ?? flowStatus.accountEmail
         ?? flowStatus.accountHandle
         ?? "Linear provider account"
-      message = "Connected \(account)."
       await model.refresh()
       await refreshLinearDiagnostics()
+      if remoteLinearConnections.contains(where: {
+        $0.profileId?.caseInsensitiveCompare(flowStatus.profileId) == .orderedSame
+      }) && !hasLocalLinearAccess(profileId: flowStatus.profileId) {
+        message = "\(account) is connected on Hack. Use Repair access to finish setup on this Mac."
+      } else {
+        message = "Connected \(account)."
+      }
       return true
     case "error":
       message = flowStatus.error ?? "Linear authentication failed."

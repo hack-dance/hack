@@ -136,6 +136,9 @@ return `405` for non-`GET` requests.
 14. `GET /auth`
 15. `GET /auth/account`
 16. `ALL /api/auth/*` (proxied to Better Auth handler)
+17. `GET /v1/auth/linear/connections`
+18. `POST /v1/auth/linear/connections/seed`
+19. `POST /v1/auth/linear/connections/update-local-access`
 
 When `requireInstallation=1` is used, flow polling can defer token claim until
 an installation is visible for the flow, enabling one-pass authorize+install UX.
@@ -168,6 +171,28 @@ This token is not:
 
 - a replacement for provider OAuth/app tokens
 - a gateway or daemon transport bearer token
+
+## Linear local-access seeding
+
+Linear connections are owned remotely by the active Hack account, but the sync
+engine still needs a local provider token envelope on each Mac. The broker now
+stores that Linear token envelope in encrypted custody and exposes protected
+repair routes so a signed-in client can reseed local access without sending the
+user back through Linear OAuth.
+
+Required env:
+
+- `HACK_PROVIDER_TOKEN_ENCRYPTION_KEY`
+
+Generate a stable 32-byte secret, for example:
+
+```bash
+openssl rand -base64 32
+```
+
+This key is used only on the broker to encrypt/decrypt provider-token custody.
+Losing or rotating it without migrating stored data will invalidate previously
+stored Linear local-access envelopes.
 - a general-purpose local secret export mechanism
 
 `GET /v1/auth/me` resolves either:

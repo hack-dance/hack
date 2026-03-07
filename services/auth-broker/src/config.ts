@@ -6,6 +6,7 @@ export type BrokerConfig = {
   readonly host: string;
   readonly publicBaseUrl: string;
   readonly flowStorePath: string;
+  readonly providerTokenEncryptionKey?: string;
   readonly githubClientId: string;
   readonly githubClientSecret: string;
   readonly githubAppId?: string;
@@ -78,6 +79,13 @@ export function resolveConfig(): BrokerConfig {
     publicBaseUrl,
     flowStorePath:
       normalizeString(process.env.FLOW_STORE_PATH) ?? DEFAULT_FLOW_STORE_PATH,
+    providerTokenEncryptionKey:
+      normalizeString(
+        readFirstEnv([
+          "HACK_PROVIDER_TOKEN_ENCRYPTION_KEY",
+          "PROVIDER_TOKEN_ENCRYPTION_KEY",
+        ])
+      ) ?? undefined,
     ...github,
     betterAuthGitHubAutoProvisionUsers:
       parseBoolean(process.env.BETTER_AUTH_GITHUB_AUTO_PROVISION_USERS) ??

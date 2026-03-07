@@ -70,6 +70,10 @@ export const linearConnections = pgTable("linear_connections", {
   betterAuthTeamId: text("better_auth_team_id"),
   organizationId: text("organization_id"),
   teamId: text("team_id"),
+  localAccessSealed: text("local_access_sealed"),
+  localAccessUpdatedAt: timestamp("local_access_updated_at", {
+    withTimezone: true,
+  }),
   metadataJson: text("metadata_json").notNull().default("{}"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()

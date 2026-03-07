@@ -22,6 +22,7 @@ import type { ExtensionCommand, ExtensionCommandContext } from "../types.ts";
 import {
   deleteLinearToken,
   listLinearAuthProfiles,
+  readStoredLinearTokenEnvelope,
   resolveLinearAuthSettings,
   resolveLinearAuthSettingsResult,
   resolveLinearBrokerManagementToken,
@@ -409,14 +410,58 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
       }
 
       await display.table({
-        columns: ["Profile", "Account", "Email", "Owner", "Updated"],
+        columns: ["Profile", "Account", "Email", "Local", "Owner", "Updated"],
         rows: connections.data.connections.map((connection) => [
           connection.profileId ?? "",
           connection.accountName ?? connection.accountId ?? "",
           connection.accountEmail ?? "",
+          connection.localAccessAvailable ? "ready" : "missing",
           describeLinearConnectionOwner(connection),
           connection.updatedAt,
         ]),
+      });
+      return 0;
+    },
+  },
+  {
+    name: "seed-local-access",
+    summary:
+      "Seed this Mac with local Linear access from a Hack-owned remote connection",
+    scope: "global",
+    allowWhenDisabled: true,
+    handler: async ({ ctx, args }) => {
+      const parsed = parseSeedLocalAccessArgs({ args });
+      if (!parsed.ok) {
+        ctx.logger.error({ message: parsed.error });
+        return 1;
+      }
+
+      const seeded = await seedLinearLocalAccessFromBroker({
+        controlPlaneConfig: ctx.controlPlaneConfig,
+        profileId: parsed.value.profileId,
+        setDefault: parsed.value.setDefault,
+      });
+      if (!seeded.ok) {
+        ctx.logger.error({ message: seeded.error });
+        return 1;
+      }
+
+      if (parsed.value.json) {
+        process.stdout.write(`${JSON.stringify(seeded.data, null, 2)}\n`);
+        return 0;
+      }
+
+      await display.kv({
+        title: "Linear local access seeded",
+        entries: [
+          ["profile", seeded.data.profileId],
+          [
+            "account",
+            seeded.data.accountName ?? seeded.data.accountEmail ?? "",
+          ],
+          ["refreshed", seeded.data.refreshed ? "yes" : "no"],
+          ["set_default", seeded.data.setDefault ? "yes" : "no"],
+        ],
       });
       return 0;
     },
@@ -3400,6 +3445,7 @@ type LinearConnectionSummary = {
   readonly betterAuthTeamId: string | null;
   readonly organizationId: string | null;
   readonly teamId: string | null;
+  readonly localAccessAvailable: boolean;
   readonly metadata: Record<string, unknown>;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -3408,6 +3454,27 @@ type LinearConnectionSummary = {
 type BrokerListConnectionsPayload = {
   readonly accessControlMode?: string;
   readonly connections: readonly LinearConnectionSummary[];
+};
+
+type BrokerSeedLocalAccessPayload = {
+  readonly seed: {
+    readonly profileId: string;
+    readonly accountName: string | null;
+    readonly accountEmail: string | null;
+    readonly token: string;
+    readonly tokenExpiresAt?: string;
+    readonly refreshToken?: string;
+    readonly refreshTokenExpiresAt?: string;
+    readonly refreshed: boolean;
+  };
+};
+
+type SeededLinearLocalAccessResult = {
+  readonly profileId: string;
+  readonly accountName: string | null;
+  readonly accountEmail: string | null;
+  readonly refreshed: boolean;
+  readonly setDefault: boolean;
 };
 
 type BrokerApplyDeliveryPayload = {
@@ -5634,6 +5701,40 @@ async function resolveLinearTokenWithBrokerRefresh(input: {
   const brokerConfig = resolveOAuthBrokerRuntimeConfig({
     controlPlaneConfig: input.controlPlaneConfig,
   });
+  const resolved = await resolveLinearToken({
+    controlPlaneConfig: input.controlPlaneConfig,
+    ...(input.profileId ? { profileId: input.profileId } : {}),
+    allowProjectOverride: input.allowProjectOverride,
+    refreshConfig: {
+      baseUrl: brokerConfig.baseUrl,
+    },
+  });
+  if (resolved.ok) {
+    if (resolved.source === "refreshed") {
+      await syncLinearLocalAccessToBroker({
+        controlPlaneConfig: input.controlPlaneConfig,
+        profileId: resolved.profileId,
+      });
+    }
+    return resolved;
+  }
+
+  if (
+    !shouldAttemptLinearBrokerLocalAccessSeed({
+      error: resolved.error,
+    })
+  ) {
+    return resolved;
+  }
+
+  const seeded = await seedLinearLocalAccessFromBroker({
+    controlPlaneConfig: input.controlPlaneConfig,
+    ...(input.profileId ? { profileId: input.profileId } : {}),
+  });
+  if (!seeded.ok) {
+    return resolved;
+  }
+
   return await resolveLinearToken({
     controlPlaneConfig: input.controlPlaneConfig,
     ...(input.profileId ? { profileId: input.profileId } : {}),
@@ -5642,6 +5743,17 @@ async function resolveLinearTokenWithBrokerRefresh(input: {
       baseUrl: brokerConfig.baseUrl,
     },
   });
+}
+
+function shouldAttemptLinearBrokerLocalAccessSeed(input: {
+  readonly error: string;
+}): boolean {
+  const error = input.error.trim();
+  return (
+    error.startsWith("Missing Linear token") ||
+    error.includes("linear_local_access_unavailable") ||
+    error.includes("linear_local_access_refresh_required")
+  );
 }
 
 function shouldUseBrokerOAuthFlow(input: {
@@ -5957,6 +6069,150 @@ async function listLinearConnections(input: {
     };
   }
   return { ok: true, data: payload };
+}
+
+async function seedLinearLocalAccessFromBroker(input: {
+  readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
+  readonly profileId?: string;
+  readonly setDefault?: boolean;
+}): Promise<
+  | { readonly ok: true; readonly data: SeededLinearLocalAccessResult }
+  | { readonly ok: false; readonly error: string }
+> {
+  const profileId = resolveSelectedLinearProfileId({
+    controlPlaneConfig: input.controlPlaneConfig,
+    profileId: input.profileId,
+  });
+  const brokerAuth = await resolveLinearBrokerAuthorization({
+    controlPlaneConfig: input.controlPlaneConfig,
+    profileId,
+  });
+  if (!brokerAuth.ok) {
+    return brokerAuth;
+  }
+  const brokerConfig = resolveOAuthBrokerRuntimeConfig({
+    controlPlaneConfig: input.controlPlaneConfig,
+  });
+  const response = await fetchJson<unknown>({
+    url: new URL(
+      "/v1/auth/linear/connections/seed",
+      `${brokerConfig.baseUrl}/`
+    ).toString(),
+    init: {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...brokerAuth.headers,
+      },
+      body: JSON.stringify({
+        profileId: brokerAuth.profileId,
+      }),
+    },
+  });
+  if (!response.ok) {
+    return {
+      ok: false,
+      error: normalizeBrokerProtectedLinearError({
+        error: response.error,
+        profileId: brokerAuth.profileId,
+      }),
+    };
+  }
+  const payload = parseLinearSeedLocalAccessPayload({
+    payload: response.value,
+  });
+  if (!payload) {
+    return {
+      ok: false,
+      error: "Linear local access seed payload was invalid.",
+    };
+  }
+
+  const settings = resolveLinearAuthSettings({
+    controlPlaneConfig: input.controlPlaneConfig,
+    profileId: payload.seed.profileId,
+    allowProjectOverride: false,
+  });
+  await saveLinearToken({
+    controlPlaneConfig: input.controlPlaneConfig,
+    profileId: payload.seed.profileId,
+    allowProjectOverride: false,
+    token: payload.seed.token,
+    ...(payload.seed.tokenExpiresAt
+      ? { expiresAt: payload.seed.tokenExpiresAt }
+      : {}),
+    ...(payload.seed.refreshToken
+      ? { refreshToken: payload.seed.refreshToken }
+      : {}),
+    ...(payload.seed.refreshTokenExpiresAt
+      ? { refreshTokenExpiresAt: payload.seed.refreshTokenExpiresAt }
+      : {}),
+  });
+  await persistLinearProfileDefaults({
+    profileId: payload.seed.profileId,
+    tokenEnv: settings.tokenEnv,
+    authRef: settings.authRef,
+    service: settings.service,
+    apiUrl: settings.apiUrl,
+    accountName: payload.seed.accountName ?? undefined,
+    accountEmail: payload.seed.accountEmail ?? undefined,
+    setAsDefault: input.setDefault ?? false,
+  });
+
+  return {
+    ok: true,
+    data: {
+      profileId: payload.seed.profileId,
+      accountName: payload.seed.accountName,
+      accountEmail: payload.seed.accountEmail,
+      refreshed: payload.seed.refreshed,
+      setDefault: input.setDefault ?? false,
+    },
+  };
+}
+
+async function syncLinearLocalAccessToBroker(input: {
+  readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
+  readonly profileId: string;
+}): Promise<void> {
+  const stored = await readStoredLinearTokenEnvelope({
+    controlPlaneConfig: input.controlPlaneConfig,
+    profileId: input.profileId,
+    allowProjectOverride: false,
+  });
+  if (!stored.envelope) {
+    return;
+  }
+  const brokerAuth = await resolveLinearBrokerAuthorization({
+    controlPlaneConfig: input.controlPlaneConfig,
+    profileId: input.profileId,
+  });
+  if (!brokerAuth.ok) {
+    return;
+  }
+  const brokerConfig = resolveOAuthBrokerRuntimeConfig({
+    controlPlaneConfig: input.controlPlaneConfig,
+  });
+  await fetchJson<unknown>({
+    url: new URL(
+      "/v1/auth/linear/connections/update-local-access",
+      `${brokerConfig.baseUrl}/`
+    ).toString(),
+    init: {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...brokerAuth.headers,
+      },
+      body: JSON.stringify({
+        profileId: brokerAuth.profileId,
+        token: stored.envelope.token,
+        tokenExpiresAt: stored.envelope.expiresAt,
+        refreshToken: stored.envelope.refreshToken,
+        refreshTokenExpiresAt: stored.envelope.refreshTokenExpiresAt,
+      }),
+    },
+  }).catch(() => null);
 }
 
 async function listLinearDeliveries(input: {
@@ -6394,6 +6650,45 @@ function parseLinearConnectionsPayload(input: {
   };
 }
 
+function parseLinearSeedLocalAccessPayload(input: {
+  readonly payload: unknown;
+}): BrokerSeedLocalAccessPayload | null {
+  if (!(isRecord(input.payload) && isRecord(input.payload.seed))) {
+    return null;
+  }
+  const profileId = readOptionalString(input.payload.seed.profileId);
+  const token = readOptionalString(input.payload.seed.token);
+  if (!(profileId && token)) {
+    return null;
+  }
+  return {
+    seed: {
+      profileId,
+      accountName: readOptionalString(input.payload.seed.accountName) ?? null,
+      accountEmail: readOptionalString(input.payload.seed.accountEmail) ?? null,
+      token,
+      ...(readOptionalString(input.payload.seed.tokenExpiresAt)
+        ? {
+            tokenExpiresAt: readOptionalString(
+              input.payload.seed.tokenExpiresAt
+            ),
+          }
+        : {}),
+      ...(readOptionalString(input.payload.seed.refreshToken)
+        ? { refreshToken: readOptionalString(input.payload.seed.refreshToken) }
+        : {}),
+      ...(readOptionalString(input.payload.seed.refreshTokenExpiresAt)
+        ? {
+            refreshTokenExpiresAt: readOptionalString(
+              input.payload.seed.refreshTokenExpiresAt
+            ),
+          }
+        : {}),
+      refreshed: input.payload.seed.refreshed === true,
+    },
+  };
+}
+
 function parseLinearConnectionSummary(input: {
   readonly value: unknown;
 }): LinearConnectionSummary | null {
@@ -6419,6 +6714,7 @@ function parseLinearConnectionSummary(input: {
     betterAuthTeamId: readOptionalString(input.value.betterAuthTeamId) ?? null,
     organizationId: readOptionalString(input.value.organizationId) ?? null,
     teamId: readOptionalString(input.value.teamId) ?? null,
+    localAccessAvailable: input.value.localAccessAvailable === true,
     metadata: isRecord(input.value.metadata)
       ? input.value.metadata
       : ({} as Record<string, unknown>),
@@ -6962,6 +7258,12 @@ type ProfilesArgs = {
 type ConnectionsArgs = {
   profileId?: string;
   organizationId?: string;
+  json: boolean;
+};
+
+type SeedLocalAccessArgs = {
+  profileId?: string;
+  setDefault: boolean;
   json: boolean;
 };
 
@@ -7606,6 +7908,42 @@ function parseConnectionsArgs(input: {
   return { ok: true, value };
 }
 
+function parseSeedLocalAccessArgs(input: {
+  readonly args: readonly string[];
+}):
+  | { readonly ok: true; readonly value: SeedLocalAccessArgs }
+  | { readonly ok: false; readonly error: string } {
+  const value: SeedLocalAccessArgs = {
+    setDefault: false,
+    json: false,
+  };
+  for (let i = 0; i < input.args.length; i += 1) {
+    const token = input.args[i] ?? "";
+    if (token === "--set-default") {
+      value.setDefault = true;
+      continue;
+    }
+    if (token === "--json") {
+      value.json = true;
+      continue;
+    }
+    const handled = assignKeyValueFlag({
+      token,
+      args: input.args,
+      index: i,
+      out: value,
+      keys: {
+        profile: "profileId",
+      },
+    });
+    if (!handled.ok) {
+      return { ok: false, error: handled.error };
+    }
+    i = handled.nextIndex;
+  }
+  return { ok: true, value };
+}
+
 function parseUseArgs(input: {
   readonly args: readonly string[];
 }):
@@ -7984,6 +8322,7 @@ export const __testOnly = {
   parseConnectionsArgs,
   parseDeliveriesArgs,
   parseOAuthConnectArgs,
+  parseSeedLocalAccessArgs,
   parseRunAutosyncArgs,
   parseProjectBindArgs,
   parseProjectLinkArgs,

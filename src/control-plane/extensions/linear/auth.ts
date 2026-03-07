@@ -128,6 +128,8 @@ type LinearTokenEnvelope = {
   readonly managementTokenExpiresAt?: string;
 };
 
+export type LinearStoredTokenEnvelope = LinearTokenEnvelope;
+
 type LinearProfileSelection = {
   readonly selectedProfileId: string;
   readonly selectedProfileSource: LinearProfileSelectionSource;
@@ -603,6 +605,42 @@ export async function resolveLinearBrokerManagementToken(input: {
     profileId: settings.profileId,
     authRef,
     service,
+  };
+}
+
+/**
+ * Read the currently stored Linear token envelope for a selected profile.
+ */
+export async function readStoredLinearTokenEnvelope(input: {
+  readonly controlPlaneConfig: ControlPlaneConfig;
+  readonly profileId?: string;
+  readonly allowProjectOverride?: boolean;
+  readonly authRef?: string;
+  readonly service?: string;
+  readonly store?: SecretStore;
+}): Promise<{
+  readonly profileId: string;
+  readonly authRef: string;
+  readonly service: string;
+  readonly envelope: LinearStoredTokenEnvelope | null;
+}> {
+  const settings = resolveLinearAuthSettings({
+    controlPlaneConfig: input.controlPlaneConfig,
+    ...(input.profileId ? { profileId: input.profileId } : {}),
+    allowProjectOverride: input.allowProjectOverride,
+  });
+  const authRef = (input.authRef ?? settings.authRef).trim();
+  const service = (input.service ?? settings.service).trim();
+  const store = input.store ?? DEFAULT_SECRET_STORE;
+  const stored = await store.get({
+    service,
+    name: authRef,
+  });
+  return {
+    profileId: settings.profileId,
+    authRef,
+    service,
+    envelope: parseStoredTokenEnvelope(stored),
   };
 }
 

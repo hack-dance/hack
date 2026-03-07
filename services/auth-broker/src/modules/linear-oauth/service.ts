@@ -14,6 +14,7 @@ import type { OAuthFlow } from "../../types.ts";
 import { issueBrokerManagementToken } from "../better-auth/management-token.ts";
 import { resolveBetterAuthSession } from "../better-auth/session.ts";
 import { buildHackDesktopDeepLink } from "../github-oauth/service.ts";
+import { persistLinearLocalAccessCustody } from "../linear-connections/local-access.ts";
 import type { LinearConnectionStore } from "../linear-connections/service.ts";
 import type { LinearOAuthModel } from "./model.ts";
 
@@ -320,6 +321,40 @@ export async function handleLinearCallback(input: {
           : {}),
       },
     });
+
+    const persistedLocalAccess = await persistLinearLocalAccessCustody({
+      config: input.config,
+      connectionStore: input.connectionStore,
+      profileId: flow.profileId,
+      token: exchange.token,
+      tokenExpiresAt: exchange.tokenExpiresAt,
+      refreshToken: exchange.refreshToken,
+      refreshTokenExpiresAt: exchange.refreshTokenExpiresAt,
+    });
+    if (!persistedLocalAccess.ok) {
+      return markLinearFlowError({
+        flowStore: input.flowStore,
+        flowId: flow.id,
+        error: persistedLocalAccess.error,
+        status: "error",
+        title: "Connection failed",
+        body:
+          persistedLocalAccess.error === "provider_token_custody_not_configured"
+            ? "Hack could not secure this Linear account for reuse yet. Return to Hack and try again later."
+            : "Hack could not finish securing this Linear account. Return to Hack and try again.",
+        statusCode: 200,
+        ...(flow.desktopRedirectUrl
+          ? {
+              actions: [
+                buildOpenHackAction({
+                  flow,
+                  status: "error",
+                }),
+              ],
+            }
+          : {}),
+      });
+    }
 
     input.flowStore.markComplete({
       flowId: flow.id,

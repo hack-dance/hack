@@ -54,6 +54,8 @@ test("ensureLinearConnectionsTable creates the broker connection table", async (
   expect(queries[0]).toContain("CREATE TABLE IF NOT EXISTS linear_connections");
   expect(queries[0]).toContain("connection_key text NOT NULL UNIQUE");
   expect(queries[0]).toContain("better_auth_organization_id text");
+  expect(queries[0]).toContain("local_access_sealed text");
+  expect(queries[0]).toContain("local_access_updated_at timestamptz");
 });
 
 test("ensureLinearWebhookEventsTable creates the broker webhook delivery table", async () => {

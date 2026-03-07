@@ -1,4 +1,10 @@
-import { randomUUID } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  randomBytes,
+  randomUUID,
+} from "node:crypto";
 
 import { and, desc, eq, type SQL, sql } from "drizzle-orm";
 
@@ -21,9 +27,32 @@ export type LinearConnectionRecord = {
   readonly betterAuthTeamId: string | null;
   readonly organizationId: string | null;
   readonly teamId: string | null;
+  readonly localAccessAvailable: boolean;
   readonly metadata: LinearConnectionMetadata;
   readonly createdAt: string;
   readonly updatedAt: string;
+};
+
+export type LinearLocalAccessEnvelope = {
+  readonly token?: string;
+  readonly tokenExpiresAt?: string;
+  readonly refreshToken?: string;
+  readonly refreshTokenExpiresAt?: string;
+  readonly updatedAt: string;
+};
+
+export type SaveLinearLocalAccessInput = {
+  readonly profileId: string;
+  readonly token?: string | null;
+  readonly tokenExpiresAt?: string | null;
+  readonly refreshToken?: string | null;
+  readonly refreshTokenExpiresAt?: string | null;
+  readonly encryptionKey: string;
+};
+
+export type LinearStoredLocalAccess = {
+  readonly connection: LinearConnectionRecord;
+  readonly envelope: LinearLocalAccessEnvelope;
 };
 
 export type UpsertLinearConnectionInput = {
@@ -70,10 +99,21 @@ export type LinearConnectionStore = {
     readonly profileId?: string | null;
     readonly organizationId?: string | null;
   }) => Promise<LinearWebhookOwnership>;
+  readonly saveLocalAccess: (
+    input: SaveLinearLocalAccessInput
+  ) => Promise<LinearConnectionRecord>;
+  readonly readLocalAccess: (input: {
+    readonly profileId: string;
+    readonly encryptionKey: string;
+  }) => Promise<LinearStoredLocalAccess | null>;
 };
 
 export class InMemoryLinearConnectionStore implements LinearConnectionStore {
   private readonly recordsByKey = new Map<string, LinearConnectionRecord>();
+  private readonly localAccessByKey = new Map<
+    string,
+    LinearLocalAccessEnvelope
+  >();
 
   upsertConnection(
     input: UpsertLinearConnectionInput
@@ -99,6 +139,7 @@ export class InMemoryLinearConnectionStore implements LinearConnectionStore {
       betterAuthTeamId: normalizeText(input.betterAuthTeamId),
       organizationId: normalizeText(input.organizationId),
       teamId: normalizeText(input.teamId),
+      localAccessAvailable: this.localAccessByKey.has(connectionKey),
       metadata,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
@@ -151,6 +192,72 @@ export class InMemoryLinearConnectionStore implements LinearConnectionStore {
       matches,
       fallbackOrganizationId: organizationId,
     });
+  }
+
+  saveLocalAccess(
+    input: SaveLinearLocalAccessInput
+  ): Promise<LinearConnectionRecord> {
+    const profileId = normalizeText(input.profileId);
+    if (!profileId) {
+      throw new Error("Missing Linear profile id for local access.");
+    }
+    const connection = [...this.recordsByKey.values()]
+      .filter((record) => record.profileId === profileId)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+    if (!connection) {
+      throw new Error(
+        `Linear connection not found for profile "${profileId}".`
+      );
+    }
+    const envelope = normalizeLocalAccessEnvelope({
+      token: input.token,
+      tokenExpiresAt: input.tokenExpiresAt,
+      refreshToken: input.refreshToken,
+      refreshTokenExpiresAt: input.refreshTokenExpiresAt,
+    });
+    if (!envelope) {
+      throw new Error("Linear local access requires a token or refresh token.");
+    }
+    const updatedAt = new Date().toISOString();
+    const storedEnvelope: LinearLocalAccessEnvelope = {
+      ...envelope,
+      updatedAt,
+    };
+    this.localAccessByKey.set(connection.connectionKey, storedEnvelope);
+    const nextRecord: LinearConnectionRecord = {
+      ...connection,
+      localAccessAvailable: true,
+      updatedAt,
+    };
+    this.recordsByKey.set(connection.connectionKey, nextRecord);
+    return nextRecord;
+  }
+
+  readLocalAccess(input: {
+    readonly profileId: string;
+    readonly encryptionKey: string;
+  }): Promise<LinearStoredLocalAccess | null> {
+    const profileId = normalizeText(input.profileId);
+    if (!profileId) {
+      return null;
+    }
+    const connection = [...this.recordsByKey.values()]
+      .filter((record) => record.profileId === profileId)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+    if (!connection) {
+      return null;
+    }
+    const envelope = this.localAccessByKey.get(connection.connectionKey);
+    if (!envelope) {
+      return null;
+    }
+    return {
+      connection: {
+        ...connection,
+        localAccessAvailable: true,
+      },
+      envelope,
+    };
   }
 }
 
@@ -282,6 +389,84 @@ export function createLinearConnectionStoreFromDb(input: {
         fallbackOrganizationId: normalizedOrganizationId,
       });
     },
+    saveLocalAccess: async (input) => {
+      await ensureTable();
+      const profileId = normalizeText(input.profileId);
+      if (!profileId) {
+        throw new Error("Missing Linear profile id for local access.");
+      }
+      const row = (
+        await db
+          .select()
+          .from(linearConnections)
+          .where(eq(linearConnections.profileId, profileId))
+          .orderBy(desc(linearConnections.updatedAt))
+          .limit(1)
+      )[0];
+      if (!row) {
+        throw new Error(
+          `Linear connection not found for profile "${profileId}".`
+        );
+      }
+      const envelope = normalizeLocalAccessEnvelope({
+        token: input.token,
+        tokenExpiresAt: input.tokenExpiresAt,
+        refreshToken: input.refreshToken,
+        refreshTokenExpiresAt: input.refreshTokenExpiresAt,
+      });
+      if (!envelope) {
+        throw new Error(
+          "Linear local access requires a token or refresh token."
+        );
+      }
+      const updatedAt = new Date();
+      const storedEnvelope: LinearLocalAccessEnvelope = {
+        ...envelope,
+        updatedAt: updatedAt.toISOString(),
+      };
+      const updated = await db
+        .update(linearConnections)
+        .set({
+          localAccessSealed: sealLocalAccessEnvelope({
+            encryptionKey: input.encryptionKey,
+            envelope: storedEnvelope,
+          }),
+          localAccessUpdatedAt: updatedAt,
+          updatedAt,
+        })
+        .where(eq(linearConnections.id, row.id))
+        .returning();
+      const saved = updated[0];
+      if (!saved) {
+        throw new Error("Failed to persist Linear local access custody.");
+      }
+      return toConnectionRecord({ row: saved });
+    },
+    readLocalAccess: async (input) => {
+      await ensureTable();
+      const profileId = normalizeText(input.profileId);
+      if (!profileId) {
+        return null;
+      }
+      const row = (
+        await db
+          .select()
+          .from(linearConnections)
+          .where(eq(linearConnections.profileId, profileId))
+          .orderBy(desc(linearConnections.updatedAt))
+          .limit(1)
+      )[0];
+      if (!(row && normalizeText(row.localAccessSealed))) {
+        return null;
+      }
+      return {
+        connection: toConnectionRecord({ row }),
+        envelope: unsealLocalAccessEnvelope({
+          encryptionKey: input.encryptionKey,
+          sealed: row.localAccessSealed ?? "",
+        }),
+      };
+    },
   };
 }
 
@@ -299,6 +484,14 @@ function createLinearConnectionsTableEnsurer(input: {
       {
         name: "better_auth_team_id",
         definition: "text",
+      },
+      {
+        name: "local_access_sealed",
+        definition: "text",
+      },
+      {
+        name: "local_access_updated_at",
+        definition: "timestamptz",
       },
     ],
   });
@@ -333,6 +526,8 @@ export async function ensureLinearConnectionsTable(input: {
       better_auth_team_id text,
       organization_id text,
       team_id text,
+      local_access_sealed text,
+      local_access_updated_at timestamptz,
       metadata_json text NOT NULL DEFAULT '{}',
       created_at timestamptz NOT NULL DEFAULT now(),
       updated_at timestamptz NOT NULL DEFAULT now()
@@ -445,6 +640,9 @@ export function toConnectionRecord(input: {
       input.row.betterAuthTeamId ?? storedOwnership.betterAuthTeamId,
     organizationId: input.row.organizationId ?? null,
     teamId: input.row.teamId ?? null,
+    localAccessAvailable: Boolean(
+      normalizeText(input.row.localAccessSealed ?? null)
+    ),
     metadata: parseMetadata({ raw: input.row.metadataJson }),
     createdAt: input.row.createdAt.toISOString(),
     updatedAt: input.row.updatedAt.toISOString(),
@@ -514,6 +712,9 @@ function toWebhookOwnership(input: {
 
 const BETTER_AUTH_ORGANIZATION_METADATA_KEY = "_betterAuthOrganizationId";
 const BETTER_AUTH_TEAM_METADATA_KEY = "_betterAuthTeamId";
+const LOCAL_ACCESS_CIPHERTEXT_VERSION = 1;
+const LOCAL_ACCESS_IV_BYTES = 12;
+const LOCAL_ACCESS_ALGORITHM = "aes-256-gcm";
 
 function composeConnectionMetadata(input: {
   readonly metadata?: LinearConnectionMetadata;
@@ -573,4 +774,106 @@ function normalizeText(value: unknown): string | null {
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeLocalAccessEnvelope(input: {
+  readonly token?: unknown;
+  readonly tokenExpiresAt?: unknown;
+  readonly refreshToken?: unknown;
+  readonly refreshTokenExpiresAt?: unknown;
+}): Omit<LinearLocalAccessEnvelope, "updatedAt"> | null {
+  const token = normalizeText(input.token);
+  const refreshToken = normalizeText(input.refreshToken);
+  if (!(token || refreshToken)) {
+    return null;
+  }
+  return {
+    ...(token ? { token } : {}),
+    ...(normalizeText(input.tokenExpiresAt)
+      ? { tokenExpiresAt: normalizeText(input.tokenExpiresAt) ?? undefined }
+      : {}),
+    ...(refreshToken ? { refreshToken } : {}),
+    ...(normalizeText(input.refreshTokenExpiresAt)
+      ? {
+          refreshTokenExpiresAt:
+            normalizeText(input.refreshTokenExpiresAt) ?? undefined,
+        }
+      : {}),
+  };
+}
+
+function sealLocalAccessEnvelope(input: {
+  readonly encryptionKey: string;
+  readonly envelope: LinearLocalAccessEnvelope;
+}): string {
+  const key = deriveEncryptionKey({ source: input.encryptionKey });
+  const iv = randomBytes(LOCAL_ACCESS_IV_BYTES);
+  const cipher = createCipheriv(LOCAL_ACCESS_ALGORITHM, key, iv);
+  const ciphertext = Buffer.concat([
+    cipher.update(JSON.stringify(input.envelope), "utf8"),
+    cipher.final(),
+  ]);
+  const tag = cipher.getAuthTag();
+  return JSON.stringify({
+    v: LOCAL_ACCESS_CIPHERTEXT_VERSION,
+    iv: iv.toString("base64"),
+    tag: tag.toString("base64"),
+    ciphertext: ciphertext.toString("base64"),
+  });
+}
+
+function unsealLocalAccessEnvelope(input: {
+  readonly encryptionKey: string;
+  readonly sealed: string;
+}): LinearLocalAccessEnvelope {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(input.sealed) as Record<string, unknown>;
+  } catch {
+    throw new Error("Invalid stored Linear local access envelope.");
+  }
+  const ciphertext = normalizeText(parsed.ciphertext);
+  const iv = normalizeText(parsed.iv);
+  const tag = normalizeText(parsed.tag);
+  if (!(ciphertext && iv && tag)) {
+    throw new Error("Stored Linear local access envelope is incomplete.");
+  }
+  const decipher = createDecipheriv(
+    LOCAL_ACCESS_ALGORITHM,
+    deriveEncryptionKey({ source: input.encryptionKey }),
+    Buffer.from(iv, "base64")
+  );
+  decipher.setAuthTag(Buffer.from(tag, "base64"));
+  const plaintext = Buffer.concat([
+    decipher.update(Buffer.from(ciphertext, "base64")),
+    decipher.final(),
+  ]).toString("utf8");
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(plaintext) as Record<string, unknown>;
+  } catch {
+    throw new Error("Stored Linear local access payload is invalid.");
+  }
+  const updatedAt = normalizeText(payload.updatedAt);
+  const normalized = normalizeLocalAccessEnvelope({
+    token: payload.token,
+    tokenExpiresAt: payload.tokenExpiresAt,
+    refreshToken: payload.refreshToken,
+    refreshTokenExpiresAt: payload.refreshTokenExpiresAt,
+  });
+  if (!(updatedAt && normalized)) {
+    throw new Error("Stored Linear local access payload is incomplete.");
+  }
+  return {
+    ...normalized,
+    updatedAt,
+  };
+}
+
+function deriveEncryptionKey(input: { readonly source: string }): Buffer {
+  const source = input.source.trim();
+  if (!source) {
+    throw new Error("Missing provider token encryption key.");
+  }
+  return createHash("sha256").update(source).digest();
 }

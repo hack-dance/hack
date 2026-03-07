@@ -516,6 +516,16 @@ public actor HackCLIClient {
     return try decodeJsonOrThrow(LinearConnectionsResponse.self, result: result)
   }
 
+  public func seedLinearLocalAccess(profileId: String) async throws -> LinearLocalAccessSeedResponse {
+    let trimmed = profileId.trimmingCharacters(in: .whitespacesAndNewlines)
+    var args = ["x", "linear", "seed-local-access", "--json"]
+    if !trimmed.isEmpty {
+      args.append(contentsOf: ["--profile", trimmed])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(LinearLocalAccessSeedResponse.self, result: result)
+  }
+
   public func inspectLinearStatus(profileId: String? = nil) async throws -> LinearStatusResponse {
     var args = ["x", "linear", "status", "--json"]
     if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -1114,8 +1124,12 @@ public actor HackCLIClient {
         }
       } else if wrapped.status.status == "claimed" {
         let profileId = wrapped.status.profileId
-        let localStatus = try await inspectLinearStatus(profileId: profileId)
-        if !localStatus.tokenResolved {
+        let localStatus = try? await inspectLinearStatus(profileId: profileId)
+        if localStatus?.tokenResolved != true {
+          _ = try? await seedLinearLocalAccess(profileId: profileId)
+        }
+        let repairedStatus = try? await inspectLinearStatus(profileId: profileId)
+        if repairedStatus?.tokenResolved != true {
           return brokerClaimedWithoutLocalLinearTokenStatus(wrapped.status)
         }
       }
@@ -1827,7 +1841,7 @@ public actor HackCLIClient {
       accountEmail: wrapped.accountEmail,
       tokenExpiresAt: wrapped.tokenExpiresAt,
       error:
-        "OAuth token was claimed remotely but is not available in local profile \(wrapped.profileId). Re-run Add account and allow keychain access."
+        "Hack already connected \(wrapped.profileId) remotely, but this Mac still needs local access. Use Repair access or reconnect the account."
     )
   }
 

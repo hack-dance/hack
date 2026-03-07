@@ -1306,6 +1306,7 @@ public struct LinearRemoteConnection: Decodable, Hashable, Identifiable {
   public let betterAuthTeamId: String?
   public let organizationId: String?
   public let teamId: String?
+  public let localAccessAvailable: Bool
   public let createdAt: String
   public let updatedAt: String
 
@@ -1321,6 +1322,7 @@ public struct LinearRemoteConnection: Decodable, Hashable, Identifiable {
     betterAuthTeamId: String?,
     organizationId: String?,
     teamId: String?,
+    localAccessAvailable: Bool,
     createdAt: String,
     updatedAt: String
   ) {
@@ -1335,8 +1337,47 @@ public struct LinearRemoteConnection: Decodable, Hashable, Identifiable {
     self.betterAuthTeamId = betterAuthTeamId
     self.organizationId = organizationId
     self.teamId = teamId
+    self.localAccessAvailable = localAccessAvailable
     self.createdAt = createdAt
     self.updatedAt = updatedAt
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case id
+    case profileId
+    case accountId
+    case accountName
+    case accountEmail
+    case authRef
+    case betterAuthUserId
+    case betterAuthOrganizationId
+    case betterAuthTeamId
+    case organizationId
+    case teamId
+    case localAccessAvailable
+    case createdAt
+    case updatedAt
+  }
+
+  public init(from decoder: any Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    id = try container.decode(String.self, forKey: .id)
+    profileId = try container.decodeIfPresent(String.self, forKey: .profileId)
+    accountId = try container.decodeIfPresent(String.self, forKey: .accountId)
+    accountName = try container.decodeIfPresent(String.self, forKey: .accountName)
+    accountEmail = try container.decodeIfPresent(String.self, forKey: .accountEmail)
+    authRef = try container.decodeIfPresent(String.self, forKey: .authRef)
+    betterAuthUserId = try container.decodeIfPresent(String.self, forKey: .betterAuthUserId)
+    betterAuthOrganizationId = try container.decodeIfPresent(
+      String.self,
+      forKey: .betterAuthOrganizationId
+    )
+    betterAuthTeamId = try container.decodeIfPresent(String.self, forKey: .betterAuthTeamId)
+    organizationId = try container.decodeIfPresent(String.self, forKey: .organizationId)
+    teamId = try container.decodeIfPresent(String.self, forKey: .teamId)
+    localAccessAvailable = try container.decodeIfPresent(Bool.self, forKey: .localAccessAvailable) ?? false
+    createdAt = try container.decode(String.self, forKey: .createdAt)
+    updatedAt = try container.decode(String.self, forKey: .updatedAt)
   }
 }
 
@@ -1350,6 +1391,48 @@ public struct LinearConnectionsResponse: Decodable, Hashable {
   ) {
     self.accessControlMode = accessControlMode
     self.connections = connections
+  }
+}
+
+public struct LinearLocalAccessSeedResponse: Decodable, Hashable {
+  public let profileId: String
+  public let accountName: String?
+  public let accountEmail: String?
+  public let refreshed: Bool
+  public let setDefault: Bool
+
+  public init(
+    profileId: String,
+    accountName: String?,
+    accountEmail: String?,
+    refreshed: Bool,
+    setDefault: Bool
+  ) {
+    self.profileId = profileId
+    self.accountName = accountName
+    self.accountEmail = accountEmail
+    self.refreshed = refreshed
+    self.setDefault = setDefault
+  }
+}
+
+public enum LinearConnectionPresentationState: String, Hashable {
+  case connected
+  case connecting
+  case needsAttention
+  case notConnected
+
+  public var label: String {
+    switch self {
+    case .connected:
+      "Connected"
+    case .connecting:
+      "Connecting"
+    case .needsAttention:
+      "Needs attention"
+    case .notConnected:
+      "Not connected"
+    }
   }
 }
 

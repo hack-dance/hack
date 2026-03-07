@@ -127,6 +127,7 @@ function createTestConfig() {
     host: "127.0.0.1",
     publicBaseUrl: "http://127.0.0.1:8080",
     flowStorePath: ".data/test-oauth-flows.json",
+    providerTokenEncryptionKey: "linear-token-custody-test-key",
     githubClientId: "test-client-id",
     githubClientSecret: "test-client-secret",
     githubScopes: "repo,read:org",
@@ -200,6 +201,8 @@ describe("auth broker github flow routes", () => {
         betterAuthTeamId: "column-team",
         organizationId: "linear-org",
         teamId: "linear-team",
+        localAccessSealed: null,
+        localAccessUpdatedAt: null,
         metadataJson: JSON.stringify({
           organizationName: "Hack",
           _betterAuthOrganizationId: "legacy-org",
@@ -229,6 +232,8 @@ describe("auth broker github flow routes", () => {
         betterAuthTeamId: null,
         organizationId: "legacy-linear-org",
         teamId: "legacy-linear-team",
+        localAccessSealed: null,
+        localAccessUpdatedAt: null,
         metadataJson: JSON.stringify({
           _betterAuthOrganizationId: "legacy-org",
           _betterAuthTeamId: "legacy-team",
@@ -2821,6 +2826,12 @@ describe("auth broker github flow routes", () => {
               organizationId: null,
               teamId: null,
             } as const);
+          },
+          saveLocalAccess() {
+            return Promise.reject(new Error("local access write failed"));
+          },
+          readLocalAccess() {
+            return Promise.resolve(null);
           },
         },
         betterAuthRuntime: createBetterAuthRuntimeWithSession(

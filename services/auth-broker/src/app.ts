@@ -128,6 +128,7 @@ export function createAuthBrokerApp({
     )
     .use(
       createLinearConnectionsPlugin({
+        config,
         connectionStore: linearConnectionStore,
         betterAuthRuntime,
       })
@@ -234,6 +235,12 @@ function isReadOnlyRoutePath(input: { readonly path: string }): boolean {
     return true;
   }
   if (input.path === "/v1/auth/linear/refresh") {
+    return false;
+  }
+  if (input.path === "/v1/auth/linear/connections/seed") {
+    return false;
+  }
+  if (input.path === "/v1/auth/linear/connections/update-local-access") {
     return false;
   }
   if (input.path === "/v1/auth/linear/subscriptions") {

@@ -1067,60 +1067,22 @@ public actor HackCLIClient {
     profileId: String,
     setDefault: Bool
   ) async throws -> LinearOAuthFlowStartResponse {
-    let desktopRedirectURL = desktopLinearOAuthCallbackURL()
-    var lastError: String? = nil
-    for candidate in resolveAuthServerCandidates() {
-      guard
-        let startURL = buildAuthURL(
-          base: candidate,
-          path: "/v1/auth/linear/start",
-          queryItems: [
-            URLQueryItem(name: "profile", value: profileId),
-            URLQueryItem(name: "setDefault", value: setDefault ? "1" : "0"),
-            URLQueryItem(name: "set_default", value: setDefault ? "1" : "0"),
-            URLQueryItem(name: "desktopRedirectUrl", value: desktopRedirectURL),
-          ]
-        )
-      else {
-        continue
-      }
-      do {
-        let body = try await fetchAuthBody(url: startURL)
-        if let direct = tryDecodeLenient(LinearOAuthFlowStartResponse.self, from: body) {
-          return direct
-        }
-        if let wrapped = tryDecodeLenient(LinearOAuthStartEnvelope.self, from: body), wrapped.ok {
-          guard
-            let statusURL = buildAuthURLWithQuery(
-              urlString: wrapped.flow.pollUrl,
-              queryItems: [
-                URLQueryItem(name: "deviceCode", value: wrapped.flow.deviceCode),
-                URLQueryItem(name: "claim", value: "1"),
-              ]
-            )?.absoluteString
-          else {
-            throw HackCLIError.network("Auth flow returned an invalid status URL.")
-          }
-          return LinearOAuthFlowStartResponse(
-            ok: true,
-            flowId: wrapped.flow.flowId,
-            profileId: wrapped.flow.profileId,
-            setDefault: wrapped.flow.setDefault,
-            authorizeUrl: wrapped.flow.authorizeUrl,
-            statusUrl: statusURL,
-            expiresAt: wrapped.flow.expiresAt
-          )
-        }
-        throw HackCLIError.network("Auth server returned invalid JSON.")
-      } catch {
-        lastError = error.localizedDescription
-      }
+    var args = [
+      "x",
+      "linear",
+      "oauth-connect",
+      "--json",
+      "--start-only",
+      "--profile",
+      profileId,
+      "--desktop-redirect-url",
+      desktopLinearOAuthCallbackURL(),
+    ]
+    if setDefault {
+      args.append("--set-default")
     }
-
-    throw HackCLIError.network(
-      lastError
-        ?? "Unable to reach any configured auth broker endpoint. Check network/broker status and retry."
-    )
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(LinearOAuthFlowStartResponse.self, result: result)
   }
 
   /// Polls Linear broker OAuth state and imports claimed tokens into local keychain-backed profiles.

@@ -1781,7 +1781,40 @@ async function handleLinearOAuthConnectCommand(input: {
     | { readonly ok: false; readonly error: string };
 
   if (shouldUseBrokerOAuthFlow({ parsed: parsed.value })) {
+    const brokerFlow = await startLinearBrokerOAuthFlow({
+      controlPlaneConfig: input.ctx.controlPlaneConfig,
+      parsed: parsed.value,
+      brokerConfig: resolveOAuthBrokerRuntimeConfig({
+        controlPlaneConfig: input.ctx.controlPlaneConfig,
+      }),
+      profileId: resolved.profileId,
+    });
+    if (parsed.value.startOnly) {
+      if (!brokerFlow.ok) {
+        input.ctx.logger.error({ message: brokerFlow.error });
+        return 1;
+      }
+      if (parsed.value.json) {
+        process.stdout.write(
+          `${JSON.stringify(buildLinearOAuthStartPayload({ flow: brokerFlow.flow }), null, 2)}\n`
+        );
+      } else {
+        await display.panel({
+          title: "Linear OAuth",
+          tone: "info",
+          lines: [
+            "Open this URL in your browser to continue:",
+            brokerFlow.flow.authorizeUrl,
+            "",
+            `Status URL: ${buildLinearOAuthStatusUrl({ pollUrl: brokerFlow.flow.pollUrl, deviceCode: brokerFlow.flow.deviceCode })}`,
+          ],
+        });
+      }
+      return 0;
+    }
+
     oauthFlow = await runLinearBrokerOAuthFlow({
+      controlPlaneConfig: input.ctx.controlPlaneConfig,
       parsed: parsed.value,
       brokerConfig: resolveOAuthBrokerRuntimeConfig({
         controlPlaneConfig: input.ctx.controlPlaneConfig,
@@ -2033,6 +2066,7 @@ type OAuthConnectRuntime = {
 };
 
 type OAuthBrokerConnectRuntime = {
+  readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
   readonly parsed: OAuthConnectArgs;
   readonly brokerConfig: OAuthBrokerRuntimeConfig;
   readonly profileId: string;
@@ -2106,19 +2140,12 @@ async function runLinearOAuthFlow(input: OAuthConnectRuntime): Promise<
   };
 }
 
-async function runLinearBrokerOAuthFlow(
+async function startLinearBrokerOAuthFlow(
   input: OAuthBrokerConnectRuntime
 ): Promise<
   | {
       readonly ok: true;
-      readonly tokenExchange: {
-        readonly token: string;
-        readonly expiresAt?: string;
-        readonly refreshToken?: string;
-        readonly refreshTokenExpiresAt?: string;
-        readonly managementToken?: string;
-        readonly managementTokenExpiresAt?: string;
-      };
+      readonly flow: BrokerStartFlowPayload;
     }
   | { readonly ok: false; readonly error: string }
 > {
@@ -2138,6 +2165,12 @@ async function runLinearBrokerOAuthFlow(
   );
   startUrl.searchParams.set("profile", input.profileId);
   startUrl.searchParams.set("setDefault", input.parsed.setDefault ? "1" : "0");
+  if (input.parsed.desktopRedirectUrl) {
+    startUrl.searchParams.set(
+      "desktopRedirectUrl",
+      input.parsed.desktopRedirectUrl
+    );
+  }
 
   const start = await fetchJson<BrokerStartFlowEnvelope>({
     url: startUrl.toString(),
@@ -2155,18 +2188,80 @@ async function runLinearBrokerOAuthFlow(
     };
   }
 
+  return {
+    ok: true,
+    flow: start.value.flow,
+  };
+}
+
+function buildLinearOAuthStatusUrl(input: {
+  readonly pollUrl: string;
+  readonly deviceCode: string;
+}): string {
+  const statusUrl = new URL(input.pollUrl);
+  statusUrl.searchParams.set("deviceCode", input.deviceCode);
+  statusUrl.searchParams.set("claim", "1");
+  return statusUrl.toString();
+}
+
+function buildLinearOAuthStartPayload(input: {
+  readonly flow: BrokerStartFlowPayload;
+}): {
+  readonly ok: true;
+  readonly flowId: string;
+  readonly profileId: string;
+  readonly setDefault: boolean;
+  readonly authorizeUrl: string;
+  readonly statusUrl: string;
+  readonly expiresAt: string;
+} {
+  return {
+    ok: true,
+    flowId: input.flow.flowId,
+    profileId: input.flow.profileId,
+    setDefault: input.flow.setDefault,
+    authorizeUrl: input.flow.authorizeUrl,
+    statusUrl: buildLinearOAuthStatusUrl({
+      pollUrl: input.flow.pollUrl,
+      deviceCode: input.flow.deviceCode,
+    }),
+    expiresAt: input.flow.expiresAt,
+  };
+}
+
+async function runLinearBrokerOAuthFlow(
+  input: OAuthBrokerConnectRuntime
+): Promise<
+  | {
+      readonly ok: true;
+      readonly tokenExchange: {
+        readonly token: string;
+        readonly expiresAt?: string;
+        readonly refreshToken?: string;
+        readonly refreshTokenExpiresAt?: string;
+        readonly managementToken?: string;
+        readonly managementTokenExpiresAt?: string;
+      };
+    }
+  | { readonly ok: false; readonly error: string }
+> {
+  const start = await startLinearBrokerOAuthFlow(input);
+  if (!start.ok) {
+    return start;
+  }
+
   const launch = await launchLinearOAuthBrowser({
     parsed: input.parsed,
-    authorizeUrl: start.value.flow.authorizeUrl,
-    pollUrl: start.value.flow.pollUrl,
+    authorizeUrl: start.flow.authorizeUrl,
+    pollUrl: start.flow.pollUrl,
   });
   if (!launch.ok) {
     return launch;
   }
 
-  const expiresAtMs = Date.parse(start.value.flow.expiresAt);
-  const statusUrl = new URL(start.value.flow.pollUrl);
-  statusUrl.searchParams.set("deviceCode", start.value.flow.deviceCode);
+  const expiresAtMs = Date.parse(start.flow.expiresAt);
+  const statusUrl = new URL(start.flow.pollUrl);
+  statusUrl.searchParams.set("deviceCode", start.flow.deviceCode);
   statusUrl.searchParams.set("claim", "1");
 
   while (true) {
@@ -6313,18 +6408,17 @@ function parseLinearConnectionSummary(input: {
   }
   return {
     id,
-    profileId: readOptionalString(input.value.profileId),
-    accountId: readOptionalString(input.value.accountId),
-    accountName: readOptionalString(input.value.accountName),
-    accountEmail: readOptionalString(input.value.accountEmail),
-    authRef: readOptionalString(input.value.authRef),
-    betterAuthUserId: readOptionalString(input.value.betterAuthUserId),
-    betterAuthOrganizationId: readOptionalString(
-      input.value.betterAuthOrganizationId
-    ),
-    betterAuthTeamId: readOptionalString(input.value.betterAuthTeamId),
-    organizationId: readOptionalString(input.value.organizationId),
-    teamId: readOptionalString(input.value.teamId),
+    profileId: readOptionalString(input.value.profileId) ?? null,
+    accountId: readOptionalString(input.value.accountId) ?? null,
+    accountName: readOptionalString(input.value.accountName) ?? null,
+    accountEmail: readOptionalString(input.value.accountEmail) ?? null,
+    authRef: readOptionalString(input.value.authRef) ?? null,
+    betterAuthUserId: readOptionalString(input.value.betterAuthUserId) ?? null,
+    betterAuthOrganizationId:
+      readOptionalString(input.value.betterAuthOrganizationId) ?? null,
+    betterAuthTeamId: readOptionalString(input.value.betterAuthTeamId) ?? null,
+    organizationId: readOptionalString(input.value.organizationId) ?? null,
+    teamId: readOptionalString(input.value.teamId) ?? null,
     metadata: isRecord(input.value.metadata)
       ? input.value.metadata
       : ({} as Record<string, unknown>),
@@ -6832,6 +6926,7 @@ type ConnectArgs = {
 type OAuthConnectArgs = {
   profileId?: string;
   setDefault: boolean;
+  startOnly: boolean;
   clientId?: string;
   clientSecret?: string;
   clientSecretStdin: boolean;
@@ -6844,6 +6939,7 @@ type OAuthConnectArgs = {
   tokenEnv?: string;
   authRef?: string;
   service?: string;
+  desktopRedirectUrl?: string;
   noOpen: boolean;
   json: boolean;
 };
@@ -7348,6 +7444,7 @@ function parseOAuthConnectArgs(input: {
   | { readonly ok: false; readonly error: string } {
   const value: OAuthConnectArgs = {
     setDefault: false,
+    startOnly: false,
     clientSecretStdin: false,
     noOpen: false,
     json: false,
@@ -7361,6 +7458,10 @@ function parseOAuthConnectArgs(input: {
     }
     if (token === "--client-secret-stdin") {
       value.clientSecretStdin = true;
+      continue;
+    }
+    if (token === "--start-only") {
+      value.startOnly = true;
       continue;
     }
     if (token === "--no-open") {
@@ -7390,6 +7491,7 @@ function parseOAuthConnectArgs(input: {
         "token-env": "tokenEnv",
         "auth-ref": "authRef",
         service: "service",
+        "desktop-redirect-url": "desktopRedirectUrl",
       },
     });
     if (handled.ok) {
@@ -7881,6 +7983,7 @@ export const __testOnly = {
   parseConnectArgs,
   parseConnectionsArgs,
   parseDeliveriesArgs,
+  parseOAuthConnectArgs,
   parseRunAutosyncArgs,
   parseProjectBindArgs,
   parseProjectLinkArgs,

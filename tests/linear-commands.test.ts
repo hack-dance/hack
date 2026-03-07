@@ -114,6 +114,35 @@ test("parseConnectArgs parses token connection flags", () => {
   });
 });
 
+test("parseOAuthConnectArgs parses desktop handoff flags", () => {
+  const parsed = __testOnly.parseOAuthConnectArgs({
+    args: [
+      "--profile",
+      "work",
+      "--set-default",
+      "--start-only",
+      "--desktop-redirect-url",
+      "hack-dev://auth/linear/callback",
+      "--json",
+    ],
+  });
+
+  expect(parsed.ok).toBe(true);
+  if (!parsed.ok) {
+    return;
+  }
+
+  expect(parsed.value).toEqual({
+    profileId: "work",
+    setDefault: true,
+    startOnly: true,
+    clientSecretStdin: false,
+    desktopRedirectUrl: "hack-dev://auth/linear/callback",
+    noOpen: false,
+    json: true,
+  });
+});
+
 test("parseSyncIssueArgs rejects invalid direction", () => {
   const parsed = __testOnly.parseSyncIssueArgs({
     args: ["--from", "other"],
@@ -162,13 +191,7 @@ test("parseSyncProjectArgs parses owner filter and limits", () => {
 
 test("parseConnectionsArgs parses broker connection filters", () => {
   const parsed = __testOnly.parseConnectionsArgs({
-    args: [
-      "--profile",
-      "work",
-      "--organization-id",
-      "shared-org",
-      "--json",
-    ],
+    args: ["--profile", "work", "--organization-id", "shared-org", "--json"],
   });
 
   expect(parsed.ok).toBe(true);
@@ -403,6 +426,7 @@ test("oauth connect prefers broker flow when no local oauth overrides are provid
   const useBroker = __testOnly.shouldUseBrokerOAuthFlow({
     parsed: {
       setDefault: false,
+      startOnly: false,
       clientSecretStdin: false,
       noOpen: false,
       json: false,
@@ -416,6 +440,7 @@ test("oauth connect disables broker flow when local oauth overrides are provided
   const useBroker = __testOnly.shouldUseBrokerOAuthFlow({
     parsed: {
       setDefault: false,
+      startOnly: false,
       clientId: "client-id",
       clientSecretStdin: false,
       noOpen: false,

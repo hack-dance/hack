@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { and, desc, eq, type SQL, sql } from "drizzle-orm";
 
+import { createTableColumnsEnsurer } from "../../db/ensure-columns.ts";
 import { linearConnections } from "../../db/schema.ts";
 import { createDbClient } from "../../db.ts";
 
@@ -157,13 +158,12 @@ export function createLinearConnectionStoreFromDb(input: {
   readonly databaseUrl: string;
 }): LinearConnectionStore {
   const db = createDbClient({ databaseUrl: input.databaseUrl });
-  const ensureOwnershipColumns = createOwnershipColumnsEnsurer({
+  const ensureTable = createLinearConnectionsTableEnsurer({
     db,
-    tableName: "linear_connections",
   });
   return {
     upsertConnection: async (connection) => {
-      await ensureOwnershipColumns();
+      await ensureTable();
       const connectionKey = buildConnectionKey(connection);
       const now = new Date();
       const metadataJson = JSON.stringify(
@@ -220,7 +220,7 @@ export function createLinearConnectionStoreFromDb(input: {
     },
 
     listConnections: async (input = {}) => {
-      await ensureOwnershipColumns();
+      await ensureTable();
       const filters = buildListFilters({ input });
       const rows =
         filters.length === 0
@@ -239,7 +239,7 @@ export function createLinearConnectionStoreFromDb(input: {
     },
 
     resolveWebhookOwnership: async ({ profileId, organizationId }) => {
-      await ensureOwnershipColumns();
+      await ensureTable();
       const normalizedProfileId = normalizeText(profileId);
       if (normalizedProfileId) {
         const rows = await db
@@ -281,6 +281,61 @@ export function createLinearConnectionStoreFromDb(input: {
       });
     },
   };
+}
+
+function createLinearConnectionsTableEnsurer(input: {
+  readonly db: ReturnType<typeof createDbClient>;
+}) {
+  const ensureOwnershipColumns = createTableColumnsEnsurer({
+    db: input.db,
+    tableName: "linear_connections",
+    columns: [
+      {
+        name: "better_auth_organization_id",
+        definition: "text",
+      },
+      {
+        name: "better_auth_team_id",
+        definition: "text",
+      },
+    ],
+  });
+  let promise: Promise<void> | null = null;
+  return async (): Promise<void> => {
+    if (!promise) {
+      promise = ensureLinearConnectionsTable({ db: input.db })
+        .then(() => ensureOwnershipColumns())
+        .catch((error) => {
+          promise = null;
+          throw error;
+        });
+    }
+    await promise;
+  };
+}
+
+export async function ensureLinearConnectionsTable(input: {
+  readonly db: ReturnType<typeof createDbClient>;
+}): Promise<void> {
+  await input.db.execute(sql`
+    CREATE TABLE IF NOT EXISTS linear_connections (
+      id uuid PRIMARY KEY,
+      connection_key text NOT NULL UNIQUE,
+      profile_id text,
+      account_id text,
+      account_name text,
+      account_email text,
+      auth_ref text,
+      better_auth_user_id text,
+      better_auth_organization_id text,
+      better_auth_team_id text,
+      organization_id text,
+      team_id text,
+      metadata_json text NOT NULL DEFAULT '{}',
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )
+  `);
 }
 
 function buildConnectionKey(input: UpsertLinearConnectionInput): string {
@@ -508,33 +563,6 @@ export function readStoredConnectionOwnership(input: {
       betterAuthTeamId: null,
     };
   }
-}
-
-function createOwnershipColumnsEnsurer(input: {
-  readonly db: ReturnType<typeof createDbClient>;
-  readonly tableName: "linear_connections";
-}) {
-  let promise: Promise<void> | null = null;
-  return async () => {
-    promise ??= ensureOwnershipColumns(input);
-    await promise;
-  };
-}
-
-async function ensureOwnershipColumns(input: {
-  readonly db: ReturnType<typeof createDbClient>;
-  readonly tableName: "linear_connections";
-}) {
-  await input.db.execute(
-    sql.raw(
-      `ALTER TABLE "${input.tableName}" ADD COLUMN IF NOT EXISTS "better_auth_organization_id" text`
-    )
-  );
-  await input.db.execute(
-    sql.raw(
-      `ALTER TABLE "${input.tableName}" ADD COLUMN IF NOT EXISTS "better_auth_team_id" text`
-    )
-  );
 }
 
 function normalizeText(value: unknown): string | null {

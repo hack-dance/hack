@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 
 import { and, desc, eq, type SQL, sql } from "drizzle-orm";
 
+import { createTableColumnsEnsurer } from "../../db/ensure-columns.ts";
 import { linearWebhookEvents } from "../../db/schema.ts";
 import { createDbClient } from "../../db.ts";
 
@@ -166,9 +167,8 @@ export function createLinearSyncStoreFromDb(input: {
   const db = createDbClient({
     databaseUrl: input.databaseUrl,
   });
-  const ensureOwnershipColumns = createOwnershipColumnsEnsurer({
+  const ensureTable = createLinearWebhookEventsTableEnsurer({
     db,
-    tableName: "linear_webhook_events",
   });
   return {
     recordWebhookDelivery: async ({
@@ -190,7 +190,7 @@ export function createLinearSyncStoreFromDb(input: {
       organizationId,
       teamId,
     }) => {
-      await ensureOwnershipColumns();
+      await ensureTable();
       const resolvedDeliveryKey =
         normalizeText(deliveryKey) ??
         buildDeliveryKey({
@@ -250,7 +250,7 @@ export function createLinearSyncStoreFromDb(input: {
     },
 
     listWebhookDeliveries: async (input = {}) => {
-      await ensureOwnershipColumns();
+      await ensureTable();
       const filters = buildListFilters({ input });
       const rows =
         filters.length === 0
@@ -271,7 +271,7 @@ export function createLinearSyncStoreFromDb(input: {
     },
 
     getWebhookDelivery: async ({ deliveryId }) => {
-      await ensureOwnershipColumns();
+      await ensureTable();
       const rows = await db
         .select()
         .from(linearWebhookEvents)
@@ -281,7 +281,7 @@ export function createLinearSyncStoreFromDb(input: {
     },
 
     markWebhookDeliveryApplied: async ({ deliveryId, claimedBy }) => {
-      await ensureOwnershipColumns();
+      await ensureTable();
       const now = new Date();
       const updated = await db
         .update(linearWebhookEvents)
@@ -299,6 +299,79 @@ export function createLinearSyncStoreFromDb(input: {
       return updated[0] ? toWebhookDelivery({ row: updated[0] }) : null;
     },
   };
+}
+
+function createLinearWebhookEventsTableEnsurer(input: {
+  readonly db: ReturnType<typeof createDbClient>;
+}) {
+  const ensureOwnershipColumns = createTableColumnsEnsurer({
+    db: input.db,
+    tableName: "linear_webhook_events",
+    columns: [
+      {
+        name: "better_auth_organization_id",
+        definition: "text",
+      },
+      {
+        name: "better_auth_team_id",
+        definition: "text",
+      },
+      {
+        name: "owner_team_id",
+        definition: "text",
+      },
+      {
+        name: "claimed_by",
+        definition: "text",
+      },
+      {
+        name: "applied_at",
+        definition: "timestamp with time zone",
+      },
+    ],
+  });
+  let promise: Promise<void> | null = null;
+  return async (): Promise<void> => {
+    if (!promise) {
+      promise = ensureLinearWebhookEventsTable({ db: input.db })
+        .then(() => ensureOwnershipColumns())
+        .catch((error) => {
+          promise = null;
+          throw error;
+        });
+    }
+    await promise;
+  };
+}
+
+export async function ensureLinearWebhookEventsTable(input: {
+  readonly db: ReturnType<typeof createDbClient>;
+}): Promise<void> {
+  await input.db.execute(sql`
+    CREATE TABLE IF NOT EXISTS linear_webhook_events (
+      id uuid PRIMARY KEY,
+      delivery_key text NOT NULL UNIQUE,
+      profile_id text,
+      project_id text,
+      team_id text,
+      issue_id text,
+      issue_identifier text,
+      event_type text,
+      action text,
+      status text NOT NULL DEFAULT 'pending',
+      payload_json text NOT NULL DEFAULT '{}',
+      apply_error text,
+      claimed_by text,
+      better_auth_user_id text,
+      better_auth_organization_id text,
+      better_auth_team_id text,
+      organization_id text,
+      owner_team_id text,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now(),
+      applied_at timestamptz
+    )
+  `);
 }
 
 export function toWebhookDelivery(input: {
@@ -528,33 +601,6 @@ function readStringField(input: {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object";
-}
-
-function createOwnershipColumnsEnsurer(input: {
-  readonly db: ReturnType<typeof createDbClient>;
-  readonly tableName: "linear_webhook_events";
-}) {
-  let promise: Promise<void> | null = null;
-  return async () => {
-    promise ??= ensureOwnershipColumns(input);
-    await promise;
-  };
-}
-
-async function ensureOwnershipColumns(input: {
-  readonly db: ReturnType<typeof createDbClient>;
-  readonly tableName: "linear_webhook_events";
-}) {
-  await input.db.execute(
-    sql.raw(
-      `ALTER TABLE "${input.tableName}" ADD COLUMN IF NOT EXISTS "better_auth_organization_id" text`
-    )
-  );
-  await input.db.execute(
-    sql.raw(
-      `ALTER TABLE "${input.tableName}" ADD COLUMN IF NOT EXISTS "better_auth_team_id" text`
-    )
-  );
 }
 
 function normalizeText(value: unknown): string | null {

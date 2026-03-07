@@ -2839,6 +2839,7 @@ private struct LinearExtensionSettingsView: View {
   @State private var suppressSyncToggleChange = false
   @State private var enabled = false
   @State private var diagnostics: LinearProfilesResponse? = nil
+  @State private var remoteConnections: LinearConnectionsResponse? = nil
   @State private var profileStatusById: [String: LinearStatusResponse] = [:]
   @State private var defaultProfile = ""
   @State private var syncLabels = false
@@ -2873,8 +2874,8 @@ private struct LinearExtensionSettingsView: View {
           HStack(alignment: .center, spacing: 8) {
             StatusPill(text: enabled ? "Enabled" : "Disabled", tone: enabled ? .good : .neutral)
             StatusPill(
-              text: "\(linearProfiles.count) provider account\(linearProfiles.count == 1 ? "" : "s")",
-              tone: linearProfiles.isEmpty ? .neutral : .good
+              text: "\(remoteLinearConnections.count) remote account\(remoteLinearConnections.count == 1 ? "" : "s")",
+              tone: remoteLinearConnections.isEmpty ? .neutral : .good
             )
             if !resolvedDefaultProfile.isEmpty {
               StatusPill(
@@ -2933,33 +2934,122 @@ private struct LinearExtensionSettingsView: View {
             }
           }
 
-          if linearProfiles.isEmpty {
-            Text("No accounts connected yet.")
-              .font(.mono(.caption))
-              .foregroundStyle(.secondary)
-          } else {
-            VStack(alignment: .leading, spacing: 10) {
-              ForEach(linearProfiles, id: \.id) { profile in
-                let profileStatus = profileStatusById[profile.id]
-                let accountLabel = linearAccountLabel(profile: profile, status: profileStatus)
-                let accountEmail = linearAccountEmail(profile: profile, status: profileStatus)
-                VStack(alignment: .leading, spacing: 6) {
-                  HStack(spacing: 8) {
-                    Text(accountLabel ?? profile.id)
-                      .font(.mono(.subheadline, weight: .semibold))
-                    if profile.isDefault {
-                      StatusPill(text: "Default profile", tone: .good)
-                    }
-                    Spacer()
-                    if !profile.isDefault {
-                      Button {
-                        Task { await saveLinearDefaultProfile(profile.id) }
-                      } label: {
-                        Label("Set default", systemImage: "star")
+          if model.hackAccountState?.authenticated == true {
+            if remoteLinearConnections.isEmpty && localOnlyLinearProfiles.isEmpty {
+              Text("No Hack-account Linear connections yet.")
+                .font(.mono(.caption))
+                .foregroundStyle(.secondary)
+            }
+
+            if !remoteLinearConnections.isEmpty {
+              VStack(alignment: .leading, spacing: 10) {
+                ForEach(remoteLinearConnections) { connection in
+                  let profileId = connection.profileId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                  let localProfile = linearProfiles.first(where: { $0.id == profileId })
+                  let accountLabel =
+                    connection.accountName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                    ?? connection.accountEmail?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                    ?? connection.accountId?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+                    ?? profileId
+                  VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
+                      Text(accountLabel)
+                        .font(.mono(.subheadline, weight: .semibold))
+                      if !profileId.isEmpty {
+                        StatusPill(text: "Profile \(profileId)", tone: .neutral)
                       }
-                      .adaptiveToolbarButton()
+                      if !profileId.isEmpty && resolvedDefaultProfile == profileId {
+                        StatusPill(text: "Default profile", tone: .good)
+                      }
+                      StatusPill(
+                        text: localProfile == nil ? "Needs local token on this Mac" : "Saved on this Mac",
+                        tone: localProfile == nil ? .warn : .good
+                      )
+                      Spacer()
+                      if !profileId.isEmpty && resolvedDefaultProfile != profileId {
+                        Button {
+                          Task { await saveLinearDefaultProfile(profileId) }
+                        } label: {
+                          Label("Set default", systemImage: "star")
+                        }
+                        .adaptiveToolbarButton()
+                      }
+                      Button {
+                        Task {
+                          await reconnectLinearProfile(
+                            profileId.isEmpty ? nextLinearProfileId() : profileId,
+                            setDefault: resolvedDefaultProfile == profileId
+                          )
+                        }
+                      } label: {
+                        Label(
+                          localProfile == nil ? "Link this Mac" : "Reconnect",
+                          systemImage: "arrow.clockwise.circle"
+                        )
+                      }
+                      .adaptiveToolbarButtonProminent()
+                      .disabled(
+                        isAuthenticating ||
+                          (!profileId.isEmpty && disconnectingLinearProfiles.contains(profileId))
+                      )
+                      if let localProfile {
+                        Button(role: .destructive) {
+                          Task { await disconnectLinearProfile(localProfile.id) }
+                        } label: {
+                          Label("Remove local token", systemImage: "trash")
+                        }
+                        .adaptiveToolbarButton()
+                        .disabled(
+                          isAuthenticating ||
+                            disconnectingLinearProfiles.contains(localProfile.id)
+                        )
+                      }
                     }
-                    if model.hackAccountState?.authenticated == true {
+
+                    if let email = connection.accountEmail?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !email.isEmpty
+                    {
+                      Text(email)
+                        .font(.mono(.caption2))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                    }
+                    if let teamId = connection.teamId?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !teamId.isEmpty
+                    {
+                      Text("Linear team \(teamId)")
+                        .font(.mono(.caption2))
+                        .foregroundStyle(.tertiary)
+                    } else if let organizationId = connection.organizationId?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !organizationId.isEmpty
+                    {
+                      Text("Linear organization \(organizationId)")
+                        .font(.mono(.caption2))
+                        .foregroundStyle(.tertiary)
+                    }
+                  }
+                  if connection.id != remoteLinearConnections.last?.id {
+                    Divider()
+                      .opacity(0.2)
+                  }
+                }
+              }
+            }
+
+            if !localOnlyLinearProfiles.isEmpty {
+              VStack(alignment: .leading, spacing: 8) {
+                Text("Local-only on this Mac")
+                  .font(.mono(.caption))
+                  .foregroundStyle(.secondary)
+                ForEach(localOnlyLinearProfiles, id: \.id) { profile in
+                  let profileStatus = profileStatusById[profile.id]
+                  VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
+                      Text(linearAccountLabel(profile: profile, status: profileStatus) ?? profile.id)
+                        .font(.mono(.subheadline, weight: .semibold))
+                      StatusPill(text: "Profile \(profile.id)", tone: .neutral)
+                      StatusPill(text: "Not linked to Hack account yet", tone: .warn)
+                      Spacer()
                       Button {
                         Task {
                           await reconnectLinearProfile(
@@ -2968,50 +3058,34 @@ private struct LinearExtensionSettingsView: View {
                           )
                         }
                       } label: {
-                        Label("Reconnect", systemImage: "arrow.clockwise.circle")
+                        Label("Link account", systemImage: "plus.circle")
                       }
                       .adaptiveToolbarButtonProminent()
                       .disabled(
                         isAuthenticating ||
                           disconnectingLinearProfiles.contains(profile.id)
                       )
-                      Button(role: .destructive) {
-                        Task { await disconnectLinearProfile(profile.id) }
-                      } label: {
-                        Label("Disconnect", systemImage: "trash")
-                      }
-                      .adaptiveToolbarButton()
-                      .disabled(
-                        isAuthenticating ||
-                          disconnectingLinearProfiles.contains(profile.id)
-                      )
+                    }
+                    if let accountEmail = linearAccountEmail(profile: profile, status: profileStatus),
+                      !accountEmail.isEmpty
+                    {
+                      Text(accountEmail)
+                        .font(.mono(.caption2))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
                     }
                   }
-
-                  if let accountEmail, !accountEmail.isEmpty {
-                    Text(accountEmail)
-                      .font(.mono(.caption2))
-                      .foregroundStyle(.secondary)
-                      .textSelection(.enabled)
-                  }
-                  Text("Profile \(profile.id)")
-                    .font(.mono(.caption2))
-                    .foregroundStyle(.tertiary)
-                  if let profileStatus,
-                    let tokenExpiresAt = profileStatus.tokenExpiresAt,
-                    !tokenExpiresAt.isEmpty
-                  {
-                    Text("Token expires \(tokenExpiresAt)")
-                      .font(.mono(.caption2))
-                      .foregroundStyle(.tertiary)
-                  }
-                }
-                if profile.id != linearProfiles.last?.id {
-                  Divider()
-                    .opacity(0.2)
                 }
               }
             }
+          } else if linearProfiles.isEmpty {
+            Text("Sign in to Hack to inspect remote Linear connections.")
+              .font(.mono(.caption))
+              .foregroundStyle(.secondary)
+          } else {
+            Text("This Mac still has \(linearProfiles.count) local Linear profile\(linearProfiles.count == 1 ? "" : "s"), but remote account-owned connections require Hack sign-in.")
+              .font(.mono(.caption))
+              .foregroundStyle(.secondary)
           }
         }
 
@@ -3271,8 +3345,27 @@ private struct LinearExtensionSettingsView: View {
     }
   }
 
+  private var remoteLinearConnections: [LinearRemoteConnection] {
+    (remoteConnections?.connections ?? []).sorted { lhs, rhs in
+      let left = lhs.updatedAt.trimmingCharacters(in: .whitespacesAndNewlines)
+      let right = rhs.updatedAt.trimmingCharacters(in: .whitespacesAndNewlines)
+      return left.localizedCompare(right) == .orderedDescending
+    }
+  }
+
+  private var localOnlyLinearProfiles: [LinearProfileSummary] {
+    linearProfiles.filter { profile in
+      !remoteLinearConnections.contains(where: {
+        $0.profileId?.caseInsensitiveCompare(profile.id) == .orderedSame
+      })
+    }
+  }
+
   private func nextLinearProfileId() -> String {
-    let existing = Set(linearProfiles.map { $0.id.lowercased() })
+    let existing = Set(
+      linearProfiles.map { $0.id.lowercased() } +
+        remoteLinearConnections.compactMap { $0.profileId?.lowercased() }
+    )
     if !existing.contains("default") {
       return "default"
     }
@@ -3327,7 +3420,16 @@ private struct LinearExtensionSettingsView: View {
   private func refreshLinearDiagnostics() async {
     isLoadingDiagnostics = true
     defer { isLoadingDiagnostics = false }
-    diagnostics = await model.inspectLinearProfiles()
+    let hackAccountAuthenticated = model.hackAccountState?.authenticated == true
+    async let localProfilesTask = model.inspectLinearProfiles()
+    async let remoteConnectionsTask: LinearConnectionsResponse? = {
+      guard hackAccountAuthenticated else {
+        return nil
+      }
+      return await model.listLinearConnections()
+    }()
+    diagnostics = await localProfilesTask
+    remoteConnections = await remoteConnectionsTask
     if let diagnostics {
       defaultProfile = diagnostics.defaultProfile
     }
@@ -3575,6 +3677,14 @@ private struct LinearExtensionSettingsView: View {
       return "none"
     }
     guard let profile = linearProfiles.first(where: { $0.id == trimmed }) else {
+      if let connection = remoteLinearConnections.first(where: {
+        $0.profileId?.caseInsensitiveCompare(trimmed) == .orderedSame
+      }) {
+        return connection.accountName
+          ?? connection.accountEmail
+          ?? connection.accountId
+          ?? trimmed
+      }
       return trimmed
     }
     let status = profileStatusById[trimmed]
@@ -3648,7 +3758,9 @@ private struct LinearExtensionSettingsView: View {
     let generatedProfileId = defaultLinearProfileNeedsRepair && !repairDefaultProfileId.isEmpty
       ? repairDefaultProfileId
       : nextLinearProfileId()
-    let setAsDefault = linearProfiles.isEmpty || defaultLinearProfileNeedsRepair
+    let setAsDefault =
+      (linearProfiles.isEmpty && remoteLinearConnections.isEmpty) ||
+      defaultLinearProfileNeedsRepair
     authPollingTask = Task {
       await connectLinearAccountViaBrowser(
         profileId: generatedProfileId,
@@ -3713,6 +3825,7 @@ private struct LinearExtensionSettingsView: View {
 
     let formatter = ISO8601DateFormatter()
     let expiresAtDate = formatter.date(from: started.expiresAt)
+    var pendingPollCount = 0
 
     while !Task.isCancelled {
       if let expiresAtDate, Date() >= expiresAtDate {
@@ -3739,6 +3852,40 @@ private struct LinearExtensionSettingsView: View {
       }
 
       authFlowStatus = flowStatus
+      if flowStatus.status == "pending" {
+        pendingPollCount += 1
+        if pendingPollCount.isMultiple(of: 4),
+          model.hackAccountState?.authenticated == true,
+          let refreshedRemoteConnections = await model.listLinearConnections()
+        {
+          remoteConnections = refreshedRemoteConnections
+        }
+        if pendingPollCount == 8 {
+          if remoteLinearConnections.contains(where: {
+            $0.profileId?.caseInsensitiveCompare(profile) == .orderedSame
+          }) {
+            message =
+              "Linear already appears connected on this Hack account for \(profile). If the browser opened a manage/install page instead of returning here, finish there or revoke the existing Linear app token, then retry linking this Mac."
+          } else {
+            message =
+              "Still waiting for Linear to return to Hack. If the browser opened a manage/install page, finish there and then return here."
+          }
+        }
+        if pendingPollCount >= 16 {
+          if remoteLinearConnections.contains(where: {
+            $0.profileId?.caseInsensitiveCompare(profile) == .orderedSame
+          }) {
+            message =
+              "Linear is already linked on this Hack account for \(profile), but this Mac did not receive a fresh callback token. Close the browser and use Link this Mac if you need a local token cached here."
+          } else {
+            message =
+              "Linear did not return a callback for \(profile). If Linear shows Hack already installed, revoke the existing Hack app authorization in Linear and reconnect once so Hack can persist it on this account."
+          }
+          await refreshLinearDiagnostics()
+          authFlowStatus = nil
+          return
+        }
+      }
       if await handleLinearOAuthFlowStatus(flowStatus) {
         return
       }

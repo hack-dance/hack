@@ -160,6 +160,29 @@ test("parseSyncProjectArgs parses owner filter and limits", () => {
   });
 });
 
+test("parseConnectionsArgs parses broker connection filters", () => {
+  const parsed = __testOnly.parseConnectionsArgs({
+    args: [
+      "--profile",
+      "work",
+      "--organization-id",
+      "shared-org",
+      "--json",
+    ],
+  });
+
+  expect(parsed.ok).toBe(true);
+  if (!parsed.ok) {
+    return;
+  }
+
+  expect(parsed.value).toEqual({
+    profileId: "work",
+    organizationId: "shared-org",
+    json: true,
+  });
+});
+
 test("parseRunAutosyncArgs parses profile, route filters, and limit", () => {
   const parsed = __testOnly.parseRunAutosyncArgs({
     args: [

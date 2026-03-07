@@ -499,6 +499,23 @@ public actor HackCLIClient {
     return try decodeJsonOrThrow(LinearProfilesResponse.self, result: result)
   }
 
+  public func listLinearConnections(
+    profileId: String? = nil,
+    organizationId: String? = nil
+  ) async throws -> LinearConnectionsResponse {
+    var args = ["x", "linear", "connections", "--json"]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    if let organizationId,
+      !organizationId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    {
+      args.append(contentsOf: ["--organization-id", organizationId])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(LinearConnectionsResponse.self, result: result)
+  }
+
   public func inspectLinearStatus(profileId: String? = nil) async throws -> LinearStatusResponse {
     var args = ["x", "linear", "status", "--json"]
     if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

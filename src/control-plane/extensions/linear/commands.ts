@@ -363,6 +363,64 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
     },
   },
   {
+    name: "connections",
+    summary: "List broker-owned Linear connections for the current Hack account",
+    scope: "global",
+    allowWhenDisabled: true,
+    handler: async ({ ctx, args }) => {
+      const parsed = parseConnectionsArgs({ args });
+      if (!parsed.ok) {
+        ctx.logger.error({ message: parsed.error });
+        return 1;
+      }
+
+      const connections = await listLinearConnections({
+        controlPlaneConfig: ctx.controlPlaneConfig,
+        profileId: parsed.value.profileId,
+        organizationId: parsed.value.organizationId,
+      });
+      if (!connections.ok) {
+        ctx.logger.error({ message: connections.error });
+        return 1;
+      }
+
+      if (parsed.value.json) {
+        process.stdout.write(`${JSON.stringify(connections.data, null, 2)}\n`);
+        return 0;
+      }
+
+      await display.kv({
+        title: "Linear broker connections",
+        entries: [
+          ["access_control_mode", connections.data.accessControlMode ?? ""],
+          ["connections", String(connections.data.connections.length)],
+        ],
+      });
+      if (connections.data.connections.length === 0) {
+        await display.panel({
+          title: "No broker-owned Linear connections",
+          lines: [
+            "No Linear accounts are persisted on this Hack account yet, or this account does not have access to them.",
+          ],
+          tone: "info",
+        });
+        return 0;
+      }
+
+      await display.table({
+        columns: ["Profile", "Account", "Email", "Owner", "Updated"],
+        rows: connections.data.connections.map((connection) => [
+          connection.profileId ?? "",
+          connection.accountName ?? connection.accountId ?? "",
+          connection.accountEmail ?? "",
+          describeLinearConnectionOwner(connection),
+          connection.updatedAt,
+        ]),
+      });
+      return 0;
+    },
+  },
+  {
     name: "use",
     summary: "Set global default Linear profile",
     scope: "global",
@@ -3218,6 +3276,28 @@ type BrokerListDeliveriesPayload = {
   readonly deliveries: readonly LinearDeliverySummary[];
 };
 
+type LinearConnectionSummary = {
+  readonly id: string;
+  readonly profileId: string | null;
+  readonly accountId: string | null;
+  readonly accountName: string | null;
+  readonly accountEmail: string | null;
+  readonly authRef: string | null;
+  readonly betterAuthUserId: string | null;
+  readonly betterAuthOrganizationId: string | null;
+  readonly betterAuthTeamId: string | null;
+  readonly organizationId: string | null;
+  readonly teamId: string | null;
+  readonly metadata: Record<string, unknown>;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+};
+
+type BrokerListConnectionsPayload = {
+  readonly accessControlMode?: string;
+  readonly connections: readonly LinearConnectionSummary[];
+};
+
 type BrokerApplyDeliveryPayload = {
   readonly profileId?: string;
   readonly deliveryId: string;
@@ -5712,6 +5792,61 @@ async function fetchJson<T>(input: {
   }
 }
 
+async function listLinearConnections(input: {
+  readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
+  readonly profileId?: string;
+  readonly organizationId?: string;
+}): Promise<
+  | { readonly ok: true; readonly data: BrokerListConnectionsPayload }
+  | { readonly ok: false; readonly error: string }
+> {
+  const brokerAuth = await resolveLinearBrokerAuthorization({
+    controlPlaneConfig: input.controlPlaneConfig,
+    profileId: input.profileId,
+  });
+  if (!brokerAuth.ok) {
+    return brokerAuth;
+  }
+  const brokerConfig = resolveOAuthBrokerRuntimeConfig({
+    controlPlaneConfig: input.controlPlaneConfig,
+  });
+  const url = new URL(
+    "/v1/auth/linear/connections",
+    `${brokerConfig.baseUrl}/`
+  );
+  if (input.profileId) {
+    url.searchParams.set("profileId", input.profileId);
+  }
+  if (input.organizationId) {
+    url.searchParams.set("organizationId", input.organizationId);
+  }
+  const response = await fetchJson<unknown>({
+    url: url.toString(),
+    init: {
+      headers: brokerAuth.headers,
+    },
+  });
+  if (!response.ok) {
+    return {
+      ok: false,
+      error: normalizeBrokerProtectedLinearError({
+        error: response.error,
+        profileId: brokerAuth.profileId,
+      }),
+    };
+  }
+  const payload = parseLinearConnectionsPayload({
+    payload: response.value,
+  });
+  if (!payload) {
+    return {
+      ok: false,
+      error: "Linear connection payload was invalid.",
+    };
+  }
+  return { ok: true, data: payload };
+}
+
 async function listLinearDeliveries(input: {
   readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
   readonly profileId?: string;
@@ -6127,6 +6262,60 @@ function normalizeBrokerProtectedLinearError(input: {
   return error;
 }
 
+function parseLinearConnectionsPayload(input: {
+  readonly payload: unknown;
+}): BrokerListConnectionsPayload | null {
+  if (!isRecord(input.payload)) {
+    return null;
+  }
+  if (!Array.isArray(input.payload.connections)) {
+    return null;
+  }
+  const connections = input.payload.connections
+    .map((value) => parseLinearConnectionSummary({ value }))
+    .filter((value): value is LinearConnectionSummary => value !== null);
+  return {
+    ...(typeof input.payload.accessControlMode === "string"
+      ? { accessControlMode: input.payload.accessControlMode }
+      : {}),
+    connections,
+  };
+}
+
+function parseLinearConnectionSummary(input: {
+  readonly value: unknown;
+}): LinearConnectionSummary | null {
+  if (!isRecord(input.value)) {
+    return null;
+  }
+  const id = readOptionalString(input.value.id);
+  const createdAt = readOptionalString(input.value.createdAt);
+  const updatedAt = readOptionalString(input.value.updatedAt);
+  if (!id || !createdAt || !updatedAt) {
+    return null;
+  }
+  return {
+    id,
+    profileId: readOptionalString(input.value.profileId),
+    accountId: readOptionalString(input.value.accountId),
+    accountName: readOptionalString(input.value.accountName),
+    accountEmail: readOptionalString(input.value.accountEmail),
+    authRef: readOptionalString(input.value.authRef),
+    betterAuthUserId: readOptionalString(input.value.betterAuthUserId),
+    betterAuthOrganizationId: readOptionalString(
+      input.value.betterAuthOrganizationId
+    ),
+    betterAuthTeamId: readOptionalString(input.value.betterAuthTeamId),
+    organizationId: readOptionalString(input.value.organizationId),
+    teamId: readOptionalString(input.value.teamId),
+    metadata: isRecord(input.value.metadata)
+      ? input.value.metadata
+      : ({} as Record<string, unknown>),
+    createdAt,
+    updatedAt,
+  };
+}
+
 function isLinearBrokerProtectedAuthError(input: {
   readonly error: string;
 }): boolean {
@@ -6138,6 +6327,19 @@ function isLinearBrokerProtectedAuthError(input: {
     error === "management_token_invalid" ||
     error === "management_token_expired"
   );
+}
+
+function describeLinearConnectionOwner(input: LinearConnectionSummary): string {
+  if (input.betterAuthTeamId) {
+    return `team:${input.betterAuthTeamId}`;
+  }
+  if (input.betterAuthOrganizationId) {
+    return `org:${input.betterAuthOrganizationId}`;
+  }
+  if (input.betterAuthUserId) {
+    return `user:${input.betterAuthUserId}`;
+  }
+  return "legacy";
 }
 
 function parseLinearDeliveriesListPayload(input: {
@@ -6641,6 +6843,12 @@ type StatusArgs = {
 };
 
 type ProfilesArgs = {
+  json: boolean;
+};
+
+type ConnectionsArgs = {
+  profileId?: string;
+  organizationId?: string;
   json: boolean;
 };
 
@@ -7249,6 +7457,36 @@ function parseProfilesArgs(input: {
   return { ok: true, value };
 }
 
+function parseConnectionsArgs(input: {
+  readonly args: readonly string[];
+}):
+  | { readonly ok: true; readonly value: ConnectionsArgs }
+  | { readonly ok: false; readonly error: string } {
+  const value: ConnectionsArgs = { json: false };
+  for (let i = 0; i < input.args.length; i += 1) {
+    const token = input.args[i] ?? "";
+    if (token === "--json") {
+      value.json = true;
+      continue;
+    }
+    const handled = assignKeyValueFlag({
+      token,
+      args: input.args,
+      index: i,
+      out: value,
+      keys: {
+        profile: "profileId",
+        "organization-id": "organizationId",
+      },
+    });
+    if (!handled.ok) {
+      return { ok: false, error: handled.error };
+    }
+    i = handled.nextIndex;
+  }
+  return { ok: true, value };
+}
+
 function parseUseArgs(input: {
   readonly args: readonly string[];
 }):
@@ -7624,6 +7862,7 @@ export const __testOnly = {
   parseAutosyncSubscriptionsArgs,
   parseAssigneeMappingsArgs,
   parseConnectArgs,
+  parseConnectionsArgs,
   parseDeliveriesArgs,
   parseRunAutosyncArgs,
   parseProjectBindArgs,

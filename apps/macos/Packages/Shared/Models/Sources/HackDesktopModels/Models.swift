@@ -1294,6 +1294,65 @@ public struct LinearProfilesResponse: Decodable, Hashable {
   }
 }
 
+public struct LinearRemoteConnection: Decodable, Hashable, Identifiable {
+  public let id: String
+  public let profileId: String?
+  public let accountId: String?
+  public let accountName: String?
+  public let accountEmail: String?
+  public let authRef: String?
+  public let betterAuthUserId: String?
+  public let betterAuthOrganizationId: String?
+  public let betterAuthTeamId: String?
+  public let organizationId: String?
+  public let teamId: String?
+  public let createdAt: String
+  public let updatedAt: String
+
+  public init(
+    id: String,
+    profileId: String?,
+    accountId: String?,
+    accountName: String?,
+    accountEmail: String?,
+    authRef: String?,
+    betterAuthUserId: String?,
+    betterAuthOrganizationId: String?,
+    betterAuthTeamId: String?,
+    organizationId: String?,
+    teamId: String?,
+    createdAt: String,
+    updatedAt: String
+  ) {
+    self.id = id
+    self.profileId = profileId
+    self.accountId = accountId
+    self.accountName = accountName
+    self.accountEmail = accountEmail
+    self.authRef = authRef
+    self.betterAuthUserId = betterAuthUserId
+    self.betterAuthOrganizationId = betterAuthOrganizationId
+    self.betterAuthTeamId = betterAuthTeamId
+    self.organizationId = organizationId
+    self.teamId = teamId
+    self.createdAt = createdAt
+    self.updatedAt = updatedAt
+  }
+}
+
+public struct LinearConnectionsResponse: Decodable, Hashable {
+  public let accessControlMode: String?
+  public let connections: [LinearRemoteConnection]
+
+  public init(
+    accessControlMode: String?,
+    connections: [LinearRemoteConnection]
+  ) {
+    self.accessControlMode = accessControlMode
+    self.connections = connections
+  }
+}
+
 public struct LinearStatusResponse: Decodable, Hashable {
   public let extensionId: String
   public let selectedProfile: String

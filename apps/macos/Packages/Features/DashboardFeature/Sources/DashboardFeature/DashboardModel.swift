@@ -777,6 +777,21 @@ public final class DashboardModel {
     }
   }
 
+  public func listLinearConnections(
+    profileId: String? = nil,
+    organizationId: String? = nil
+  ) async -> LinearConnectionsResponse? {
+    do {
+      return try await client.listLinearConnections(
+        profileId: profileId,
+        organizationId: organizationId
+      )
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
   public func inspectLinearStatus(profileId: String? = nil) async -> LinearStatusResponse? {
     do {
       return try await client.inspectLinearStatus(profileId: profileId)

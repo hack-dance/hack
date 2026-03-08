@@ -316,6 +316,30 @@ test("tickets show json includes materialized sync metadata", async () => {
   ).toBe(true);
 }, 20_000);
 
+test("tickets store recovers from a stale tickets bare repo index.lock", async () => {
+  const projectRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-stale-lock-",
+  });
+  const store = await createStore({ projectRoot });
+
+  const created = await store.createTicket({
+    title: "Stale lock ticket",
+    owner: "hack",
+    source: "hack",
+    actor: "creator@hack",
+  });
+  expect(created.ok).toBe(true);
+  if (!created.ok) {
+    throw new Error(created.error);
+  }
+
+  const lockPath = join(projectRoot, ".hack/tickets/git/bare.git/index.lock");
+  await writeFile(lockPath, "stale lock\n");
+
+  const tickets = await store.listTickets();
+  expect(tickets.map((ticket) => ticket.title)).toContain("Stale lock ticket");
+}, 20_000);
+
 async function createStore(opts: { readonly projectRoot: string }) {
   const configResult = await readControlPlaneConfig({
     projectDir: join(opts.projectRoot, ".hack"),

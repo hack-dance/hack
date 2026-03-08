@@ -78,6 +78,7 @@ export function createGitTicketsChannel(opts: {
   const localBranchRef = `refs/heads/${branch}`;
   const trackingRef = `refs/remotes/origin/${branch}`;
   const remoteName = gitEnabled ? (opts.config.remote ?? "origin").trim() : "";
+  const bareIndexLockPath = resolve(bareDir, "index.lock");
 
   const runGitDir = async (input: {
     readonly args: readonly string[];
@@ -86,6 +87,39 @@ export function createGitTicketsChannel(opts: {
     readonly stdout: string;
     readonly stderr: string;
   }> => {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const result = await runGit({
+        cwd: opts.projectRoot,
+        args: [
+          `--git-dir=${bareDir}`,
+          `--work-tree=${worktreeDir}`,
+          ...input.args,
+        ],
+      });
+      if (result.ok) {
+        return result;
+      }
+
+      const message = `${result.stderr}\n${result.stdout}`.trim();
+      if (!isGitIndexLockError(message)) {
+        return result;
+      }
+
+      if (attempt < 3) {
+        await Bun.sleep(150 * (attempt + 1));
+        continue;
+      }
+
+      opts.logger.warn({
+        message: `tickets git index.lock blocked ${input.args.join(" ")}; removing stale lock and retrying`,
+      });
+      try {
+        await rm(bareIndexLockPath, { force: true });
+      } catch {
+        // Best-effort stale lock cleanup; retry will surface a real error if it still exists.
+      }
+    }
+
     return await runGit({
       cwd: opts.projectRoot,
       args: [
@@ -868,5 +902,12 @@ function isHiddenRefRejected(message: string): boolean {
     normalized.includes("update is not allowed") ||
     normalized.includes("remote rejected") ||
     normalized.includes("not a valid ref")
+  );
+}
+
+function isGitIndexLockError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("index.lock") && normalized.includes("file exists")
   );
 }

@@ -1049,7 +1049,7 @@ struct ProjectDetailView: View {
     if linearProjectOptionsLoading {
       return "Loading projects…"
     }
-    if linearBoundProjectId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+    if resolvedLinearProjectId.isEmpty {
       return "Choose the main Linear project for this repo."
     }
     return selectedLinearProjectSummary
@@ -1780,7 +1780,7 @@ struct ProjectDetailView: View {
   }
 
   private var selectedLinearProjectSummary: String {
-    let selectedProjectId = linearBoundProjectId.trimmingCharacters(in: .whitespacesAndNewlines)
+    let selectedProjectId = resolvedLinearProjectId
     guard !selectedProjectId.isEmpty else {
       return "Unbound"
     }

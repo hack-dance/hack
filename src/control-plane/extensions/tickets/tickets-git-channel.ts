@@ -220,9 +220,30 @@ export function createGitTicketsChannel(opts: {
     | { readonly ok: true }
     | { readonly ok: false; readonly error: string; readonly missing: boolean }
   > => {
-    const fetched = await runGitDir({
-      args: ["fetch", "--prune", "origin", `+${ref}:${trackingRef}`],
+    const fetchArgs = [
+      "fetch",
+      "--prune",
+      "origin",
+      `+${ref}:${trackingRef}`,
+    ] as const;
+    let fetched = await runGitDir({
+      args: fetchArgs,
     });
+    if (!fetched.ok) {
+      const retryableLockFailure = isRetryableTrackingRefLockFailure({
+        stderr: fetched.stderr,
+        trackingRef,
+      });
+      if (retryableLockFailure) {
+        const deletedTrackingRef = await runGitDir({
+          args: ["update-ref", "-d", trackingRef],
+        });
+        void deletedTrackingRef;
+        fetched = await runGitDir({
+          args: fetchArgs,
+        });
+      }
+    }
     if (fetched.ok) {
       return { ok: true };
     }
@@ -862,6 +883,18 @@ function safeJsonParse(text: string): unknown {
   } catch {
     return null;
   }
+}
+
+function isRetryableTrackingRefLockFailure(input: {
+  readonly stderr: string;
+  readonly trackingRef: string;
+}): boolean {
+  const message = input.stderr.toLowerCase();
+  return (
+    message.includes("cannot lock ref") &&
+    message.includes(input.trackingRef.toLowerCase()) &&
+    message.includes("expected")
+  );
 }
 
 function isMissingRemoteRef(message: string): boolean {

@@ -187,6 +187,99 @@ test("listProjects queries the top-level projects connection", async () => {
   ]);
 });
 
+test("listProjectIssuesPage queries project teams instead of deprecated project.team", async () => {
+  let requestBody: {
+    readonly query?: unknown;
+    readonly variables?: unknown;
+  } | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body)) as {
+      readonly query?: unknown;
+      readonly variables?: unknown;
+    };
+    return new Response(
+      JSON.stringify({
+        data: {
+          project: {
+            id: "project_live_nation",
+            name: "Live Nation",
+            teams: {
+              nodes: [
+                {
+                  id: "team_hack",
+                  key: "HACK",
+                  name: "Hack",
+                },
+              ],
+            },
+            issues: {
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null,
+              },
+              nodes: [
+                {
+                  id: "issue_123",
+                  identifier: "HACK-123",
+                  title: "Sync Linear issues",
+                  description: "Bring issues across.",
+                  url: "https://linear.app/issue/HACK-123",
+                  state: {
+                    id: "state_1",
+                    name: "Todo",
+                    type: "unstarted",
+                  },
+                  team: {
+                    id: "team_hack",
+                    key: "HACK",
+                    name: "Hack",
+                  },
+                  project: {
+                    id: "project_live_nation",
+                    name: "Live Nation",
+                  },
+                  assignee: null,
+                  labels: { nodes: [] },
+                  parent: null,
+                },
+              ],
+            },
+          },
+        },
+      }),
+      { status: 200 }
+    );
+  }) as typeof fetch;
+
+  const client = createLinearClient({ token: "linear-token" });
+  const result = await client.listProjectIssuesPage({
+    projectId: "project_live_nation",
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  const query = String(
+    (requestBody as { readonly query?: unknown } | null)?.query ?? ""
+  );
+  expect(query).toContain("project(id: $projectId)");
+  expect(query).toContain("teams {");
+  expect(query).not.toContain(
+    "project(id: $projectId) {\n    id\n    name\n    team {"
+  );
+  expect(result.data.project).toEqual({
+    id: "project_live_nation",
+    name: "Live Nation",
+    teamId: "team_hack",
+    teamKey: "HACK",
+    teamName: "Hack",
+  });
+  expect(result.data.issues).toHaveLength(1);
+  expect(result.data.issues[0]?.projectName).toBe("Live Nation");
+});
+
 test("listTeamUsers returns membership users for assignee mapping", async () => {
   let requestBody: {
     readonly query?: unknown;

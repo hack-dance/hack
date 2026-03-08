@@ -177,6 +177,12 @@ struct ProjectDetailView: View {
       ensureSidebarSelection()
     }
     .onChange(of: model.lastUpdated) { _, _ in
+      guard !executionTargetSaving else {
+        return
+      }
+      guard selectedSidebarItem != .remoteExecution else {
+        return
+      }
       queueExecutionTargetReload()
     }
     .onReceive(NotificationCenter.default.publisher(for: .hackProjectNavigationRequested)) { notification in
@@ -931,63 +937,19 @@ struct ProjectDetailView: View {
             Spacer(minLength: 0)
           }
 
-          projectSettingsControlGroup(footnote: additionalLinearProjectsSummary) {
-            VStack(alignment: .leading, spacing: 10) {
-              projectSettingsFieldLabel(
-                "Additional projects",
-                help: "Optionally include more Linear projects for this repo beyond the main project above."
-              )
+          if !linearAdditionalProjects.isEmpty {
+            projectSettingsControlGroup(footnote: additionalLinearProjectsSummary) {
+              VStack(alignment: .leading, spacing: 10) {
+                projectSettingsFieldLabel(
+                  "Also sync",
+                  help: "These extra Linear projects are already linked to this repo."
+                )
 
-              if linearAdditionalProjects.isEmpty {
-                projectSettingsStaticValue("Default project only")
-              } else {
                 VStack(alignment: .leading, spacing: 8) {
                   ForEach(linearAdditionalProjects) { target in
                     linearScopeRouteRow(target: target, isDefault: false)
                   }
                 }
-              }
-
-              HStack(spacing: 8) {
-                projectSettingsControlShell(maxWidth: 360) {
-                  if availableAdditionalLinearProjects.isEmpty {
-                    projectSettingsStaticValue("No more projects available")
-                      .accessibilityLabel("Additional Linear project")
-                  } else {
-                    Menu {
-                      ForEach(availableAdditionalLinearProjects) { linearProject in
-                        Button {
-                          selectedAdditionalLinearProjectId = linearProject.id
-                        } label: {
-                          let label = linearProjectMenuLabel(linearProject)
-                          if selectedAdditionalLinearProjectId == linearProject.id {
-                            Label(label, systemImage: "checkmark")
-                          } else {
-                            Text(label)
-                          }
-                        }
-                      }
-                    } label: {
-                      projectSettingsMenuLabel(
-                        additionalProjectMenuLabel(selectedAdditionalLinearProjectId)
-                      )
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Additional Linear project")
-                  }
-                }
-
-                Button("Add") {
-                  Task { await persistAdditionalLinearProjectSelection() }
-                }
-                .adaptiveToolbarButton()
-                .disabled(
-                  selectedAdditionalLinearProjectId
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                    .isEmpty
-                )
-
-                Spacer(minLength: 0)
               }
             }
           }
@@ -1087,8 +1049,8 @@ struct ProjectDetailView: View {
     if linearProjectOptionsLoading {
       return "Loading projects…"
     }
-    if !linearBoundTeamId.isEmpty {
-      return "Team \(linearBoundTeamId)"
+    if linearBoundProjectId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      return "Choose the main Linear project for this repo."
     }
     return selectedLinearProjectSummary
   }
@@ -2361,7 +2323,6 @@ struct ProjectDetailView: View {
       ? linearDefaultProfile
       : linearProjectProfile
     linearResolvedProfile = resolvedLinearProfile
-    linearProjectOptions = []
     selectedLinearProjectId = linearBoundProjectId
     if linearAdditionalProjects.contains(where: { $0.projectId == selectedAdditionalLinearProjectId }) {
       selectedAdditionalLinearProjectId = ""
@@ -2579,6 +2540,9 @@ struct ProjectDetailView: View {
   }
 
   private func persistLinearProjectBindingSelection() async {
+    executionTargetSaving = true
+    defer { executionTargetSaving = false }
+
     let selectedProjectId = selectedLinearProjectId
       .trimmingCharacters(in: .whitespacesAndNewlines)
     if selectedProjectId.isEmpty {
@@ -2605,6 +2569,10 @@ struct ProjectDetailView: View {
       return
     }
 
+    linearBoundProjectId = linearProject.id
+    linearBoundProjectName = linearProject.name
+    linearBoundTeamId = linearProject.teamId
+    selectedLinearProjectId = linearProject.id
     linearProjectMessage = "Linear project bound to \(linearProjectMenuLabel(linearProject))."
     executionTargetMessage = ""
     githubProfileMessage = ""
@@ -2769,6 +2737,9 @@ struct ProjectDetailView: View {
       return
     }
 
+    linearBoundProjectId = ""
+    linearBoundProjectName = ""
+    linearBoundTeamId = ""
     selectedLinearProjectId = ""
     linearProjectMessage = "Cleared project-level Linear binding."
     executionTargetMessage = ""

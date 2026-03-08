@@ -230,7 +230,7 @@ export class InMemoryLinearConnectionStore implements LinearConnectionStore {
       updatedAt,
     };
     this.recordsByKey.set(connection.connectionKey, nextRecord);
-    return nextRecord;
+    return Promise.resolve(nextRecord);
   }
 
   readLocalAccess(input: {
@@ -239,25 +239,25 @@ export class InMemoryLinearConnectionStore implements LinearConnectionStore {
   }): Promise<LinearStoredLocalAccess | null> {
     const profileId = normalizeText(input.profileId);
     if (!profileId) {
-      return null;
+      return Promise.resolve(null);
     }
     const connection = [...this.recordsByKey.values()]
       .filter((record) => record.profileId === profileId)
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
     if (!connection) {
-      return null;
+      return Promise.resolve(null);
     }
     const envelope = this.localAccessByKey.get(connection.connectionKey);
     if (!envelope) {
-      return null;
+      return Promise.resolve(null);
     }
-    return {
+    return Promise.resolve({
       connection: {
         ...connection,
         localAccessAvailable: true,
       },
       envelope,
-    };
+    });
   }
 }
 

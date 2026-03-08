@@ -139,8 +139,6 @@ struct ProjectDetailView: View {
   @State private var linearProjectMessage = ""
   @State private var projectSystemGitIdentity: GitSystemIdentity? = nil
   @State private var executionTargetReloadTask: Task<Void, Never>? = nil
-  @State private var showLinearRoutingSheet = false
-  @State private var linearRoutingSheetLoading = false
   @State private var linearProjectOptionsLoading = false
 
   var body: some View {
@@ -181,14 +179,6 @@ struct ProjectDetailView: View {
     .onChange(of: model.lastUpdated) { _, _ in
       queueExecutionTargetReload()
     }
-    .onChange(of: showLinearRoutingSheet) { _, isPresented in
-      guard isPresented else {
-        return
-      }
-      Task {
-        await refreshLinearRoutingSheetState()
-      }
-    }
     .onReceive(NotificationCenter.default.publisher(for: .hackProjectNavigationRequested)) { notification in
       guard
         let userInfo = notification.userInfo,
@@ -215,7 +205,10 @@ struct ProjectDetailView: View {
       else {
         return
       }
-      showLinearRoutingSheet = true
+      model.selectedProjectTab = .overview
+      selectedSidebarItem = .remoteExecution
+      ensureSidebarSelection()
+      queueExecutionTargetReload()
     }
     .onDisappear {
       executionTargetReloadTask?.cancel()
@@ -223,9 +216,6 @@ struct ProjectDetailView: View {
     }
     .sheet(isPresented: $showAddBranchSheet) {
       addBranchSheet
-    }
-    .sheet(isPresented: $showLinearRoutingSheet) {
-      linearRoutingSheet
     }
   }
 
@@ -884,10 +874,16 @@ struct ProjectDetailView: View {
             .foregroundStyle(.secondary)
         }
         Spacer()
-        Button(hasConfiguredLinearProfile ? "Advanced" : "Open Linear settings") {
-          showLinearRoutingSheet = true
+        if !hasConfiguredLinearProfile {
+          Button("Open Linear settings") {
+            NotificationCenter.default.post(
+              name: .hackSettingsRequested,
+              object: nil,
+              userInfo: ["pane": "linear"]
+            )
+          }
+          .adaptiveToolbarButtonProminent()
         }
-        .adaptiveToolbarButtonProminent()
       }
 
       if hasConfiguredLinearProfile {
@@ -934,6 +930,92 @@ struct ProjectDetailView: View {
             }
             Spacer(minLength: 0)
           }
+
+          projectSettingsControlGroup(footnote: additionalLinearProjectsSummary) {
+            VStack(alignment: .leading, spacing: 10) {
+              projectSettingsFieldLabel(
+                "Additional projects",
+                help: "Optionally include more Linear projects for this repo beyond the main project above."
+              )
+
+              if linearAdditionalProjects.isEmpty {
+                projectSettingsStaticValue("Default project only")
+              } else {
+                VStack(alignment: .leading, spacing: 8) {
+                  ForEach(linearAdditionalProjects) { target in
+                    linearScopeRouteRow(target: target, isDefault: false)
+                  }
+                }
+              }
+
+              HStack(spacing: 8) {
+                projectSettingsControlShell(maxWidth: 360) {
+                  if availableAdditionalLinearProjects.isEmpty {
+                    projectSettingsStaticValue("No more projects available")
+                      .accessibilityLabel("Additional Linear project")
+                  } else {
+                    Menu {
+                      ForEach(availableAdditionalLinearProjects) { linearProject in
+                        Button {
+                          selectedAdditionalLinearProjectId = linearProject.id
+                        } label: {
+                          let label = linearProjectMenuLabel(linearProject)
+                          if selectedAdditionalLinearProjectId == linearProject.id {
+                            Label(label, systemImage: "checkmark")
+                          } else {
+                            Text(label)
+                          }
+                        }
+                      }
+                    } label: {
+                      projectSettingsMenuLabel(
+                        additionalProjectMenuLabel(selectedAdditionalLinearProjectId)
+                      )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Additional Linear project")
+                  }
+                }
+
+                Button("Add") {
+                  Task { await persistAdditionalLinearProjectSelection() }
+                }
+                .adaptiveToolbarButton()
+                .disabled(
+                  selectedAdditionalLinearProjectId
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .isEmpty
+                )
+
+                Spacer(minLength: 0)
+              }
+            }
+          }
+
+          if let defaultTarget = defaultLinearRouteTarget {
+            projectSettingsControlGroup(
+              footnote: hasAnyLinearAutosyncRoutes
+                ? "Autosync enabled for \(linearAutosyncRouteKeys.count) project\(linearAutosyncRouteKeys.count == 1 ? "" : "s")."
+                : "Manual sync only"
+            ) {
+              VStack(alignment: .leading, spacing: 10) {
+                projectSettingsFieldLabel(
+                  "Autosync",
+                  help: "Keep autosync scoped to the projects this repo should update without a manual pull or push."
+                )
+
+                linearScopeRouteRow(target: defaultTarget, isDefault: true)
+
+                if !linearAdditionalProjects.isEmpty {
+                  VStack(alignment: .leading, spacing: 8) {
+                    ForEach(linearAdditionalProjects) { target in
+                      linearScopeRouteRow(target: target, isDefault: false)
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       } else {
         HStack(spacing: 8) {
@@ -951,142 +1033,7 @@ struct ProjectDetailView: View {
     .padding(16)
     .background(projectSettingsCardBackground)
     .task(id: resolvedLinearRoutingProfileId ?? "") {
-      guard !showLinearRoutingSheet else {
-        return
-      }
       await loadLinearRoutingProjectOptionsIfNeeded()
-    }
-  }
-
-  private var linearRoutingSheet: some View {
-    ScrollView {
-      VStack(alignment: .leading, spacing: 18) {
-        Text("Linear settings")
-          .font(.system(size: 22, weight: .semibold))
-
-        if linearRoutingSheetLoading {
-          HStack(spacing: 10) {
-            ProgressView()
-              .controlSize(.small)
-            Text("Loading Linear settings…")
-              .font(.system(size: 12, weight: .medium))
-              .foregroundStyle(.secondary)
-          }
-        }
-
-        if hasConfiguredLinearProfile {
-          routingSheetSection(
-            title: "Additional projects",
-            help: "Add more Linear projects when this repo needs broader review or autosync coverage than the main project above."
-          ) {
-            if linearAdditionalProjects.isEmpty {
-              Text("No additional projects.")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.secondary)
-            } else {
-              VStack(alignment: .leading, spacing: 8) {
-                ForEach(linearAdditionalProjects) { target in
-                  linearScopeRouteRow(target: target, isDefault: false)
-                }
-              }
-            }
-            projectSettingsControlGroup(footnote: additionalLinearProjectsSummary) {
-              VStack(alignment: .leading, spacing: 10) {
-                projectSettingsFieldLabel("Additional project")
-                HStack(spacing: 8) {
-                  projectSettingsControlShell(maxWidth: 360) {
-                    if availableAdditionalLinearProjects.isEmpty {
-                      projectSettingsStaticValue("No more projects available")
-                        .accessibilityLabel("Add linked project")
-                    } else {
-                      Menu {
-                        ForEach(availableAdditionalLinearProjects) { linearProject in
-                          Button {
-                            selectedAdditionalLinearProjectId = linearProject.id
-                          } label: {
-                            let label = linearProjectMenuLabel(linearProject)
-                            if selectedAdditionalLinearProjectId == linearProject.id {
-                              Label(label, systemImage: "checkmark")
-                            } else {
-                              Text(label)
-                            }
-                          }
-                        }
-                      } label: {
-                        projectSettingsMenuLabel(
-                          additionalProjectMenuLabel(
-                            selectedAdditionalLinearProjectId
-                          )
-                        )
-                      }
-                      .buttonStyle(.plain)
-                      .accessibilityLabel("Add linked project")
-                    }
-                  }
-
-                  Button("Add") {
-                    Task { await persistAdditionalLinearProjectSelection() }
-                  }
-                  .adaptiveToolbarButton()
-                  .disabled(
-                    selectedAdditionalLinearProjectId
-                      .trimmingCharacters(in: .whitespacesAndNewlines)
-                      .isEmpty
-                  )
-
-                  Spacer()
-                }
-              }
-            }
-          }
-
-          if let defaultTarget = defaultLinearRouteTarget {
-            routingSheetSection(
-              title: "Autosync",
-              help: "Autosync stays optional. Turn it on only for the projects this repo should keep current without a manual pull or push."
-            ) {
-              linearScopeRouteRow(target: defaultTarget, isDefault: true)
-              if !linearAdditionalProjects.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                  ForEach(linearAdditionalProjects) { target in
-                    linearScopeRouteRow(target: target, isDefault: false)
-                  }
-                }
-              }
-            }
-          }
-        } else {
-          VStack(alignment: .leading, spacing: 12) {
-            Text("Connect Linear in Settings first, then choose the project this repo should sync with.")
-              .font(.system(size: 13, weight: .medium))
-              .foregroundStyle(.secondary)
-
-            Button("Open Linear settings") {
-              NotificationCenter.default.post(
-                name: .hackSettingsRequested,
-                object: nil,
-                userInfo: ["pane": "linear"]
-              )
-              showLinearRoutingSheet = false
-            }
-            .adaptiveToolbarButtonProminent()
-          }
-        }
-
-        HStack {
-          Spacer()
-          Button("Done") {
-            showLinearRoutingSheet = false
-          }
-          .adaptiveToolbarButtonProminent()
-        }
-      }
-      .padding(24)
-    }
-    .frame(minWidth: 520, minHeight: hasConfiguredLinearProfile ? 420 : 220)
-    .background(Color.clear)
-    .task {
-      await refreshLinearRoutingSheetState()
     }
   }
 
@@ -2114,15 +2061,6 @@ struct ProjectDetailView: View {
     } else {
       linearProjectOptions = []
     }
-  }
-
-  private func refreshLinearRoutingSheetState() async {
-    guard showLinearRoutingSheet else {
-      return
-    }
-    linearRoutingSheetLoading = true
-    defer { linearRoutingSheetLoading = false }
-    await reloadExecutionTargetState()
   }
 
   @ViewBuilder

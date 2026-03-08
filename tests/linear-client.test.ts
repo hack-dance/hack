@@ -123,6 +123,70 @@ test("getViewer sends bearer authorization for oauth tokens", async () => {
   expect(requestedUrl).toBe("https://api.linear.app/graphql");
 });
 
+test("listProjects queries the top-level projects connection", async () => {
+  let requestBody: {
+    readonly query?: unknown;
+    readonly variables?: unknown;
+  } | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body)) as {
+      readonly query?: unknown;
+      readonly variables?: unknown;
+    };
+    return new Response(
+      JSON.stringify({
+        data: {
+          projects: {
+            nodes: [
+              {
+                id: "project_123",
+                name: "Event Agent",
+                teams: {
+                  nodes: [
+                    {
+                      id: "team_123",
+                      key: "OPS",
+                      name: "Operations",
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      }),
+      { status: 200 }
+    );
+  }) as typeof fetch;
+
+  const client = createLinearClient({ token: "linear-token" });
+  const result = await client.listProjects();
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  expect(
+    String((requestBody as { readonly query?: unknown } | null)?.query ?? "")
+  ).toContain("projects(first: $first)");
+  expect(
+    String((requestBody as { readonly query?: unknown } | null)?.query ?? "")
+  ).not.toContain("viewer {");
+  expect(
+    String((requestBody as { readonly query?: unknown } | null)?.query ?? "")
+  ).toContain("teams {");
+  expect(result.data).toEqual([
+    {
+      id: "project_123",
+      name: "Event Agent",
+      teamId: "team_123",
+      teamKey: "OPS",
+      teamName: "Operations",
+    },
+  ]);
+});
+
 test("listTeamUsers returns membership users for assignee mapping", async () => {
   let requestBody: {
     readonly query?: unknown;

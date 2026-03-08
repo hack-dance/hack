@@ -253,16 +253,20 @@ export function createLinearClient(input: {
         fallback: DEFAULT_PAGE_SIZE,
       });
       const result = await request<{
-        readonly viewer?: unknown;
+        readonly projects?: unknown;
       }>({
         query: [
           "query LinearProjects($first: Int!) {",
-          "  viewer {",
-          "    projects(first: $first) {",
-          "      nodes {",
-          "        id",
-          "        name",
-          "        team { id key name }",
+          "  projects(first: $first) {",
+          "    nodes {",
+          "      id",
+          "      name",
+          "      teams {",
+          "        nodes {",
+          "          id",
+          "          key",
+          "          name",
+          "        }",
           "      }",
           "    }",
           "  }",
@@ -273,7 +277,7 @@ export function createLinearClient(input: {
       if (!result.ok) {
         return result;
       }
-      const projects = parseViewerProjects(result.data.viewer);
+      const projects = parseProjectsConnection(result.data.projects);
       return { ok: true, data: projects };
     },
 
@@ -294,7 +298,13 @@ export function createLinearClient(input: {
           "  project(id: $projectId) {",
           "    id",
           "    name",
-          "    team { id key name }",
+          "    teams {",
+          "      nodes {",
+          "        id",
+          "        key",
+          "        name",
+          "      }",
+          "    }",
           "  }",
           "}",
         ].join("\n"),
@@ -869,12 +879,11 @@ function parseViewer(value: unknown): {
   };
 }
 
-function parseViewerProjects(value: unknown): LinearProject[] {
+function parseProjectsConnection(value: unknown): LinearProject[] {
   if (!isRecord(value)) {
     return [];
   }
-  const projects = isRecord(value.projects) ? value.projects : null;
-  const nodes = Array.isArray(projects?.nodes) ? projects.nodes : [];
+  const nodes = Array.isArray(value.nodes) ? value.nodes : [];
   const out: LinearProject[] = [];
   for (const node of nodes) {
     const parsed = parseProject(node);
@@ -908,7 +917,15 @@ function parseProject(value: unknown): LinearProject | null {
   if (!(typeof value.id === "string" && typeof value.name === "string")) {
     return null;
   }
-  const team = isRecord(value.team) ? value.team : null;
+  const teams = isRecord(value.teams) ? value.teams : null;
+  const teamNodes = Array.isArray(teams?.nodes) ? teams.nodes : [];
+  const firstTeam = teamNodes.find((node) => isRecord(node));
+  let team: Record<string, unknown> | null = null;
+  if (isRecord(firstTeam)) {
+    team = firstTeam;
+  } else if (isRecord(value.team)) {
+    team = value.team;
+  }
   if (!(team && typeof team.id === "string")) {
     return null;
   }

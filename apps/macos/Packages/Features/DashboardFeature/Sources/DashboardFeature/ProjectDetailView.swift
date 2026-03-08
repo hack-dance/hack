@@ -140,6 +140,7 @@ struct ProjectDetailView: View {
   @State private var projectSystemGitIdentity: GitSystemIdentity? = nil
   @State private var executionTargetReloadTask: Task<Void, Never>? = nil
   @State private var showLinearRoutingSheet = false
+  @State private var linearRoutingSheetLoading = false
 
   var body: some View {
     @Bindable var model = model
@@ -175,6 +176,17 @@ struct ProjectDetailView: View {
     }
     .onChange(of: project.kind) { _, _ in
       ensureSidebarSelection()
+    }
+    .onChange(of: model.lastUpdated) { _, _ in
+      queueExecutionTargetReload()
+    }
+    .onChange(of: showLinearRoutingSheet) { _, isPresented in
+      guard isPresented else {
+        return
+      }
+      Task {
+        await refreshLinearRoutingSheetState()
+      }
     }
     .onReceive(NotificationCenter.default.publisher(for: .hackProjectNavigationRequested)) { notification in
       guard
@@ -919,75 +931,84 @@ struct ProjectDetailView: View {
         Text("Linear routing")
           .font(.system(size: 22, weight: .semibold))
 
+        if linearRoutingSheetLoading {
+          HStack(spacing: 10) {
+            ProgressView()
+              .controlSize(.small)
+            Text("Loading connected account and project routes…")
+              .font(.system(size: 12, weight: .medium))
+              .foregroundStyle(.secondary)
+          }
+        }
+
         routingSheetSection(
-          title: "Saved profile",
-          help: "Choose which saved Linear profile this repo routes through."
+          title: "Account",
+          help: "Choose which saved Linear account this repo routes through."
         ) {
           if hasConfiguredLinearProfile {
             projectSettingsControlGroup(footnote: selectedLinearProfileSummary) {
               VStack(alignment: .leading, spacing: 10) {
-                projectSettingsFieldLabel("Project profile")
-                projectSettingsControlShell(maxWidth: 320) {
-                  Menu {
-                    Button {
-                      guard !linearProjectProfile.isEmpty else {
-                        return
-                      }
-                      linearProjectProfile = ""
-                      guard !executionTargetLoading else {
-                        return
-                      }
-                      Task { await persistLinearProfileOverride() }
-                    } label: {
-                      if linearProjectProfile.isEmpty {
-                        Label("Inherited", systemImage: "checkmark")
-                      } else {
-                        Text("Inherited")
-                      }
-                    }
-                    ForEach(linearProfileOptions, id: \.self) { profile in
+                if linearProfileOptions.count <= 1 {
+                  projectSettingsFieldLabel("Connected account")
+                  projectSettingsControlShell(maxWidth: 320) {
+                    projectSettingsStaticValue(selectedLinearProfileSummary)
+                      .accessibilityLabel("Connected account")
+                  }
+                } else {
+                  projectSettingsFieldLabel("Connected account")
+                  projectSettingsControlShell(maxWidth: 320) {
+                    Menu {
                       Button {
-                        guard linearProjectProfile != profile else {
+                        guard !linearProjectProfile.isEmpty else {
                           return
                         }
-                        linearProjectProfile = profile
+                        linearProjectProfile = ""
                         guard !executionTargetLoading else {
                           return
                         }
                         Task { await persistLinearProfileOverride() }
                       } label: {
-                        let label = linearProfileLabel(profileId: profile)
-                        if linearProjectProfile == profile {
-                          Label(label, systemImage: "checkmark")
+                        if linearProjectProfile.isEmpty {
+                          Label("Inherited", systemImage: "checkmark")
                         } else {
-                          Text(label)
+                          Text("Inherited")
                         }
                       }
+                      ForEach(linearProfileOptions, id: \.self) { profile in
+                        Button {
+                          guard linearProjectProfile != profile else {
+                            return
+                          }
+                          linearProjectProfile = profile
+                          guard !executionTargetLoading else {
+                            return
+                          }
+                          Task { await persistLinearProfileOverride() }
+                        } label: {
+                          let label = linearProfileLabel(profileId: profile)
+                          if linearProjectProfile == profile {
+                            Label(label, systemImage: "checkmark")
+                          } else {
+                            Text(label)
+                          }
+                        }
+                      }
+                    } label: {
+                      projectSettingsMenuLabel(selectedLinearProfileSummary)
                     }
-                  } label: {
-                    projectSettingsMenuLabel(selectedLinearProfileSummary)
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Connected account")
                   }
-                  .buttonStyle(.plain)
-                  .accessibilityLabel("Saved profile")
                 }
 
                 HStack(alignment: .center, spacing: 12) {
                   StatusPill(text: "Connected", tone: .good)
-                  Spacer()
-                  Button("Open Linear settings") {
-                    NotificationCenter.default.post(
-                      name: .hackSettingsRequested,
-                      object: nil,
-                      userInfo: ["pane": "linear"]
-                    )
-                  }
-                  .adaptiveToolbarButton()
                 }
               }
             }
           } else {
             VStack(alignment: .leading, spacing: 10) {
-              Button("Connect Linear") {
+              Button("Connect account") {
                 NotificationCenter.default.post(
                   name: .hackSettingsRequested,
                   object: nil,
@@ -1145,10 +1166,10 @@ struct ProjectDetailView: View {
       }
       .padding(24)
     }
-    .frame(minWidth: 620, minHeight: 560)
+    .frame(minWidth: 620, minHeight: hasConfiguredLinearProfile ? 560 : 360)
     .background(Color.clear)
     .task {
-      await loadLinearRoutingProjectOptionsIfNeeded()
+      await refreshLinearRoutingSheetState()
     }
   }
 
@@ -2169,6 +2190,16 @@ struct ProjectDetailView: View {
     } else {
       linearProjectOptions = []
     }
+  }
+
+  private func refreshLinearRoutingSheetState() async {
+    guard showLinearRoutingSheet else {
+      return
+    }
+    linearRoutingSheetLoading = true
+    defer { linearRoutingSheetLoading = false }
+    await reloadExecutionTargetState()
+    await loadLinearRoutingProjectOptionsIfNeeded()
   }
 
   private func linearAccountEmail(profileId: String) -> String? {

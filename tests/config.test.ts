@@ -3,7 +3,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { readGlobalConfig, updateGlobalConfig } from "../src/lib/config.ts";
+import {
+  readGlobalConfig,
+  updateGlobalConfig,
+  updateProjectConfigBatch,
+} from "../src/lib/config.ts";
 
 describe("global config utilities", () => {
   let tempDir: string;
@@ -131,5 +135,50 @@ describe("global config utilities", () => {
     });
 
     expect(result.changed).toBe(false);
+  });
+});
+
+describe("project config batch utilities", () => {
+  let tempDir: string;
+  let projectDir: string;
+  let configPath: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "hack-project-test-"));
+    projectDir = join(tempDir, ".hack");
+    configPath = join(projectDir, "hack.config.json");
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("updateProjectConfigBatch persists multi-key linear binding in one write", async () => {
+    await updateProjectConfigBatch({
+      projectDir,
+      values: [
+        {
+          path: "controlPlane.routing.overrides.linear.projectId",
+          value: "proj_live_nation",
+        },
+        {
+          path: "controlPlane.routing.overrides.linear.projectName",
+          value: "Live Nation",
+        },
+        {
+          path: "controlPlane.routing.overrides.linear.teamId",
+          value: "team_hack",
+        },
+      ],
+    });
+
+    const content = await Bun.file(configPath).text();
+    const parsed = JSON.parse(content);
+
+    expect(parsed.controlPlane.routing.overrides.linear).toEqual({
+      projectId: "proj_live_nation",
+      projectName: "Live Nation",
+      teamId: "team_hack",
+    });
   });
 });

@@ -51,6 +51,30 @@ export async function updateProjectConfig({
   });
 }
 
+/**
+ * Updates multiple values in the project config file atomically using a single read/write cycle.
+ *
+ * @param opts.projectDir - Project `.hack` directory path
+ * @param opts.values - Dot-separated config paths and values to set
+ * @returns Whether the config file changed
+ */
+export async function updateProjectConfigBatch({
+  projectDir,
+  values,
+}: {
+  readonly projectDir: string;
+  readonly values: ReadonlyArray<{
+    readonly path: string;
+    readonly value: unknown;
+  }>;
+}): Promise<{ readonly changed: boolean }> {
+  const configPath = resolve(projectDir, PROJECT_CONFIG_FILENAME);
+  return await updateConfigFileValuesAtPath({
+    configPath,
+    values,
+  });
+}
+
 async function updateConfigFileAtPath({
   configPath,
   path,
@@ -66,11 +90,44 @@ async function updateConfigFileAtPath({
     throw new Error(`Invalid config path: ${path}`);
   }
 
+  return await updateConfigFileValuesAtPath({
+    configPath,
+    values: [{ path, value }],
+  });
+}
+
+async function updateConfigFileValuesAtPath({
+  configPath,
+  values,
+}: {
+  readonly configPath: string;
+  readonly values: ReadonlyArray<{
+    readonly path: string;
+    readonly value: unknown;
+  }>;
+}): Promise<{ readonly changed: boolean }> {
+  if (values.length === 0) {
+    return { changed: false };
+  }
+
+  for (const entry of values) {
+    const parsedPath = parseKeyPath({ raw: entry.path });
+    if (parsedPath.length === 0) {
+      throw new Error(`Invalid config path: ${entry.path}`);
+    }
+  }
+
   const jsonText = await readTextFile(configPath);
   const config: Record<string, unknown> =
     jsonText !== null ? parseJsonSafe(jsonText) : {};
 
-  setPathValue({ target: config, path: parsedPath, value });
+  for (const entry of values) {
+    setPathValue({
+      target: config,
+      path: parseKeyPath({ raw: entry.path }),
+      value: entry.value,
+    });
+  }
 
   const nextText = `${JSON.stringify(config, null, 2)}\n`;
   await ensureDir(dirname(configPath));

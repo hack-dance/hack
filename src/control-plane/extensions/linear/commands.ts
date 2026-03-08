@@ -6,6 +6,7 @@ import { secrets } from "bun";
 import {
   updateGlobalConfig,
   updateProjectConfig,
+  updateProjectConfigBatch,
 } from "../../../lib/config.ts";
 import { isRecord } from "../../../lib/guards.ts";
 import { openUrl } from "../../../lib/os.ts";
@@ -806,33 +807,31 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
       }
 
       if (parsed.value.clear) {
-        await Promise.all([
-          updateProjectConfig({
-            projectDir: ctx.project.projectDir,
-            path: "controlPlane.routing.overrides.linear.profile",
-            value: "",
-          }),
-          updateProjectConfig({
-            projectDir: ctx.project.projectDir,
-            path: "controlPlane.routing.overrides.linear.projectId",
-            value: "",
-          }),
-          updateProjectConfig({
-            projectDir: ctx.project.projectDir,
-            path: "controlPlane.routing.overrides.linear.projectName",
-            value: "",
-          }),
-          updateProjectConfig({
-            projectDir: ctx.project.projectDir,
-            path: "controlPlane.routing.overrides.linear.teamId",
-            value: "",
-          }),
-          updateProjectConfig({
-            projectDir: ctx.project.projectDir,
-            path: "controlPlane.routing.overrides.linear.additionalProjects",
-            value: [],
-          }),
-        ]);
+        await updateProjectConfigBatch({
+          projectDir: ctx.project.projectDir,
+          values: [
+            {
+              path: "controlPlane.routing.overrides.linear.profile",
+              value: "",
+            },
+            {
+              path: "controlPlane.routing.overrides.linear.projectId",
+              value: "",
+            },
+            {
+              path: "controlPlane.routing.overrides.linear.projectName",
+              value: "",
+            },
+            {
+              path: "controlPlane.routing.overrides.linear.teamId",
+              value: "",
+            },
+            {
+              path: "controlPlane.routing.overrides.linear.additionalProjects",
+              value: [],
+            },
+          ],
+        });
 
         const payload = buildProjectBindingPayload({
           binding: { additionalProjects: [] },
@@ -883,31 +882,30 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
         return 1;
       }
 
-      await Promise.all([
-        updateProjectConfig({
-          projectDir: ctx.project.projectDir,
-          path: "controlPlane.routing.overrides.linear.projectId",
-          value: projectId,
-        }),
-        updateProjectConfig({
-          projectDir: ctx.project.projectDir,
-          path: "controlPlane.routing.overrides.linear.projectName",
-          value: resolvedTeamAndName.projectName,
-        }),
-        updateProjectConfig({
-          projectDir: ctx.project.projectDir,
-          path: "controlPlane.routing.overrides.linear.teamId",
-          value: resolvedTeamAndName.teamId,
-        }),
-        updateProjectConfig({
-          projectDir: ctx.project.projectDir,
-          path: "controlPlane.routing.overrides.linear.additionalProjects",
-          value: removeAdditionalProjectBinding({
-            existing: existingBinding.additionalProjects,
-            projectId,
-          }),
-        }),
-      ]);
+      await updateProjectConfigBatch({
+        projectDir: ctx.project.projectDir,
+        values: [
+          {
+            path: "controlPlane.routing.overrides.linear.projectId",
+            value: projectId,
+          },
+          {
+            path: "controlPlane.routing.overrides.linear.projectName",
+            value: resolvedTeamAndName.projectName,
+          },
+          {
+            path: "controlPlane.routing.overrides.linear.teamId",
+            value: resolvedTeamAndName.teamId,
+          },
+          {
+            path: "controlPlane.routing.overrides.linear.additionalProjects",
+            value: removeAdditionalProjectBinding({
+              existing: existingBinding.additionalProjects,
+              projectId,
+            }),
+          },
+        ],
+      });
 
       const payload = buildProjectBindingPayload({
         binding: {
@@ -1000,23 +998,23 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
         },
         defaultProjectId: binding.projectId,
       });
-      const writes: Promise<{ readonly changed: boolean }>[] = [
-        updateProjectConfig({
-          projectDir: ctx.project.projectDir,
-          path: "controlPlane.routing.overrides.linear.additionalProjects",
-          value: additionalProjects,
-        }),
-      ];
-      if (!binding.profileId && targetProfile) {
-        writes.push(
-          updateProjectConfig({
-            projectDir: ctx.project.projectDir,
-            path: "controlPlane.routing.overrides.linear.profile",
-            value: targetProfile,
-          })
-        );
-      }
-      await Promise.all(writes);
+      await updateProjectConfigBatch({
+        projectDir: ctx.project.projectDir,
+        values: [
+          {
+            path: "controlPlane.routing.overrides.linear.additionalProjects",
+            value: additionalProjects,
+          },
+          ...(!binding.profileId && targetProfile
+            ? [
+                {
+                  path: "controlPlane.routing.overrides.linear.profile",
+                  value: targetProfile,
+                },
+              ]
+            : []),
+        ],
+      });
 
       const payload = buildProjectBindingPayload({
         binding: {

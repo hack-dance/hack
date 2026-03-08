@@ -3,6 +3,28 @@ import XCTest
 @testable import HackDesktopModels
 
 final class LinearSyncUXModelTests: XCTestCase {
+  func testRemoteLinearConnectionWithBrokerSeededLocalAccessRendersConnected() {
+    let state = LinearConnectionStateResolver.presentationState(
+      profileId: "default",
+      localProfilePresent: false,
+      localTokenResolved: nil,
+      remoteLocalAccessAvailable: true
+    )
+
+    XCTAssertEqual(state, .connected)
+  }
+
+  func testRemoteLinearConnectionWithoutLocalOrBrokerAccessNeedsAttention() {
+    let state = LinearConnectionStateResolver.presentationState(
+      profileId: "default",
+      localProfilePresent: false,
+      localTokenResolved: nil,
+      remoteLocalAccessAvailable: false
+    )
+
+    XCTAssertEqual(state, .needsAttention)
+  }
+
   func testHackOriginLinkedTicketIsHackAuthoritative() {
     let ticket = makeTicketSummary(
       owner: "hack",

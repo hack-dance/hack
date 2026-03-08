@@ -3435,10 +3435,14 @@ private struct LinearExtensionSettingsView: View {
     _ connection: LinearRemoteConnection
   ) -> LinearConnectionPresentationState {
     let profileId = connection.profileId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    guard !profileId.isEmpty else {
-      return .needsAttention
-    }
-    return hasLocalLinearAccess(profileId: profileId) ? .connected : .needsAttention
+    let localProfilePresent = localLinearProfile(profileId: profileId) != nil
+    let localTokenResolved = profileStatusById[profileId]?.tokenResolved
+    return LinearConnectionStateResolver.presentationState(
+      profileId: profileId,
+      localProfilePresent: localProfilePresent,
+      localTokenResolved: localTokenResolved,
+      remoteLocalAccessAvailable: connection.localAccessAvailable
+    )
   }
 
   private var linearConnectionNeedsAttention: Bool {
@@ -3509,10 +3513,10 @@ private struct LinearExtensionSettingsView: View {
     guard !defaultProfileId.isEmpty else {
       return false
     }
-    if remoteLinearConnections.contains(where: { connection in
+    if let remoteConnection = remoteLinearConnections.first(where: { connection in
       connection.profileId?.caseInsensitiveCompare(defaultProfileId) == .orderedSame
     }) {
-      return !hasLocalLinearAccess(profileId: defaultProfileId)
+      return linearRemoteConnectionState(remoteConnection) == .needsAttention
     }
     guard linearProfiles.contains(where: {
       $0.id.caseInsensitiveCompare(defaultProfileId) == .orderedSame
@@ -4084,9 +4088,12 @@ private struct LinearExtensionSettingsView: View {
         ?? "Linear provider account"
       await model.refresh()
       await refreshLinearDiagnostics()
-      if remoteLinearConnections.contains(where: {
+      let resolvedConnection = remoteLinearConnections.first(where: {
         $0.profileId?.caseInsensitiveCompare(flowStatus.profileId) == .orderedSame
-      }) && !hasLocalLinearAccess(profileId: flowStatus.profileId) {
+      })
+      if let resolvedConnection,
+        linearRemoteConnectionState(resolvedConnection) == .needsAttention
+      {
         message = "\(account) is connected on Hack. Use Repair access to finish setup on this Mac."
       } else {
         message = "Connected \(account)."

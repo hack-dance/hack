@@ -1436,6 +1436,23 @@ public enum LinearConnectionPresentationState: String, Hashable {
   }
 }
 
+public enum LinearConnectionStateResolver {
+  public static func presentationState(
+    profileId: String?,
+    localProfilePresent: Bool,
+    localTokenResolved: Bool?,
+    remoteLocalAccessAvailable: Bool
+  ) -> LinearConnectionPresentationState {
+    let trimmedProfileId = profileId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    guard !trimmedProfileId.isEmpty else {
+      return .needsAttention
+    }
+
+    let localAccessReady = localProfilePresent && (localTokenResolved ?? true)
+    return (localAccessReady || remoteLocalAccessAvailable) ? .connected : .needsAttention
+  }
+}
+
 public struct LinearStatusResponse: Decodable, Hashable {
   public let extensionId: String
   public let selectedProfile: String

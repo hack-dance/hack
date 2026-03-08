@@ -143,7 +143,7 @@ function createTestConfig() {
     linearScopes: "read,write,app:mentionable,app:assignable",
     linearAuthorizeUrl: "https://linear.app/oauth/authorize",
     linearTokenUrl: "https://api.linear.app/oauth/token",
-    linearApiBaseUrl: "https://api.linear.app",
+    linearApiBaseUrl: "https://api.linear.app/graphql",
     linearRedirectUri: "http://127.0.0.1:8080/linear/callback",
     linearWebhookPath: "/linear/webhooks",
     flowTtlMs: 60_000,

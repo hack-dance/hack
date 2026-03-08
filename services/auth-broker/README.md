@@ -311,7 +311,7 @@ Hack account ownership, not on provider identity.
 33. `HACK_LINEAR_WEBHOOK_PATH` (default: `/linear/webhooks`)
 34. `HACK_LINEAR_AUTHORIZE_URL` (optional; default: `https://linear.app/oauth/authorize`)
 35. `HACK_LINEAR_TOKEN_URL` (optional; default: `https://api.linear.app/oauth/token`)
-36. `HACK_LINEAR_API_BASE_URL` (optional; default: `https://api.linear.app`)
+36. `HACK_LINEAR_API_BASE_URL` (optional; default: `https://api.linear.app/graphql`)
 37. `LINEAR_CLIENT_ID` / `LINEAR_CLIENT_SECRET` / `LINEAR_WEBHOOK_SIGNING_SECRET` / `LINEAR_OAUTH_ACTOR` (optional compatibility aliases)
 
 `services/auth-broker/.env.example` reflects the recommended grouping:

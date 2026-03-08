@@ -46,11 +46,12 @@ const DEFAULT_LINEAR_SCOPES = "read,write,app:mentionable,app:assignable";
 const DEFAULT_LINEAR_ACTOR = "app";
 const DEFAULT_LINEAR_AUTHORIZE_URL = "https://linear.app/oauth/authorize";
 const DEFAULT_LINEAR_TOKEN_URL = "https://api.linear.app/oauth/token";
-const DEFAULT_LINEAR_API_BASE_URL = "https://api.linear.app";
+const DEFAULT_LINEAR_API_BASE_URL = "https://api.linear.app/graphql";
 const DEFAULT_LINEAR_WEBHOOK_PATH = "/linear/webhooks";
 const DEFAULT_FLOW_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_FLOW_SWEEP_INTERVAL_MS = 30 * 1000;
 const TRAILING_SLASH_PATTERN = /\/$/;
+const TRAILING_PATH_SLASHES_PATTERN = /\/+$/;
 const GITHUB_SCOPE_SPLIT_PATTERN = /[,\s]+/;
 const NEWLINE_SPLIT_PATTERN = /\r?\n/;
 const ROOT_ENV_FALLBACK_FILES = [
@@ -250,7 +251,7 @@ function resolveLinearConfig(input: {
         readFirstEnv(["HACK_LINEAR_TOKEN_URL", "LINEAR_TOKEN_URL"])
       ) ?? DEFAULT_LINEAR_TOKEN_URL,
     linearApiBaseUrl:
-      normalizeUrl(
+      normalizeLinearApiBaseUrl(
         readFirstEnv(["HACK_LINEAR_API_BASE_URL", "LINEAR_API_BASE_URL"])
       ) ?? DEFAULT_LINEAR_API_BASE_URL,
     linearRedirectUri:
@@ -279,6 +280,17 @@ function normalizeLinearActor(
     return normalized;
   }
   return null;
+}
+
+function normalizeLinearApiBaseUrl(value: string | undefined): string | null {
+  const normalized = normalizeUrl(value);
+  if (!normalized) {
+    return null;
+  }
+  const url = new URL(normalized);
+  const pathname = url.pathname.replace(TRAILING_PATH_SLASHES_PATTERN, "");
+  url.pathname = pathname.length === 0 ? "/graphql" : pathname;
+  return url.toString();
 }
 
 function normalizeGitHubScopes(value: string | undefined): string | null {

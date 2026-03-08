@@ -46,3 +46,45 @@ test("fetchIdentity sends bearer authorization for oauth tokens", async () => {
   expect(result.ok).toBe(true);
   expect(String(authorization)).toBe("Bearer linear-oauth-token");
 });
+
+test("fetchIdentity normalizes the Linear GraphQL endpoint", async () => {
+  let requestedUrl: string | null = null;
+  globalThis.fetch = ((_input, _init) => {
+    if (typeof _input === "string") {
+      requestedUrl = _input;
+    } else if (_input instanceof URL) {
+      requestedUrl = _input.toString();
+    } else {
+      requestedUrl = _input.url;
+    }
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({
+          data: {
+            viewer: {
+              id: "usr_123",
+              displayName: "Alice Example",
+              email: "alice@example.com",
+              organization: {
+                id: "org_123",
+                name: "Hack",
+              },
+              teams: {
+                nodes: [],
+              },
+            },
+          },
+        }),
+        { status: 200 }
+      )
+    );
+  }) as typeof fetch;
+
+  const result = await fetchIdentity({
+    apiBaseUrl: "https://api.linear.app",
+    token: "linear-oauth-token",
+  });
+
+  expect(result.ok).toBe(true);
+  expect(String(requestedUrl)).toBe("https://api.linear.app/graphql");
+});

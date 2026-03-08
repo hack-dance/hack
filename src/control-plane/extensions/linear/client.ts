@@ -156,6 +156,7 @@ export type LinearClient = {
 
 const DEFAULT_LINEAR_API_URL = "https://api.linear.app/graphql";
 const DEFAULT_PAGE_SIZE = 50;
+const TRAILING_PATH_SLASHES_PATTERN = /\/+$/;
 
 /**
  * Build a Linear GraphQL client for issue/project sync operations.
@@ -1264,5 +1265,8 @@ function normalizeApiUrl(input: { readonly value: string }): string {
   if (!trimmed) {
     return DEFAULT_LINEAR_API_URL;
   }
-  return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
+  const url = new URL(trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed);
+  const pathname = url.pathname.replace(TRAILING_PATH_SLASHES_PATTERN, "");
+  url.pathname = pathname.length === 0 ? "/graphql" : pathname;
+  return url.toString();
 }

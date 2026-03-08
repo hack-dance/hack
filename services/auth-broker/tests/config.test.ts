@@ -144,6 +144,33 @@ describe("auth broker config", () => {
       }
     );
   });
+
+  test("defaults Linear API base URL to the GraphQL endpoint", () => {
+    withEnv(
+      {
+        GITHUB_CLIENT_ID: "test-client-id",
+        GITHUB_CLIENT_SECRET: "test-client-secret",
+      },
+      () => {
+        const config = resolveConfig();
+        expect(config.linearApiBaseUrl).toBe("https://api.linear.app/graphql");
+      }
+    );
+  });
+
+  test("normalizes configured Linear API base URL to the GraphQL endpoint", () => {
+    withEnv(
+      {
+        GITHUB_CLIENT_ID: "test-client-id",
+        GITHUB_CLIENT_SECRET: "test-client-secret",
+        HACK_LINEAR_API_BASE_URL: "https://api.linear.app",
+      },
+      () => {
+        const config = resolveConfig();
+        expect(config.linearApiBaseUrl).toBe("https://api.linear.app/graphql");
+      }
+    );
+  });
 });
 
 function withEnv(overrides: EnvMap, run: () => void): void {

@@ -1,6 +1,7 @@
 import type { OAuthFlowAccount } from "./types.ts";
 
 const USER_AGENT = "hack-auth-broker";
+const TRAILING_PATH_SLASHES_PATTERN = /\/+$/;
 const LINEAR_VIEWER_QUERY = [
   "query LinearViewer {",
   "  viewer {",
@@ -186,7 +187,7 @@ export async function fetchIdentity(input: {
   readonly apiBaseUrl: string;
   readonly token: string;
 }): Promise<LinearIdentityResult> {
-  const response = await fetch(input.apiBaseUrl, {
+  const response = await fetch(normalizeGraphqlUrl(input.apiBaseUrl), {
     method: "POST",
     headers: {
       Authorization: `Bearer ${input.token}`,
@@ -221,6 +222,17 @@ export async function fetchIdentity(input: {
     };
   }
   return { ok: true, account };
+}
+
+function normalizeGraphqlUrl(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "https://api.linear.app/graphql";
+  }
+  const url = new URL(trimmed);
+  const pathname = url.pathname.replace(TRAILING_PATH_SLASHES_PATTERN, "");
+  url.pathname = pathname.length === 0 ? "/graphql" : pathname;
+  return url.toString();
 }
 
 function buildIdentityAccount(input: {

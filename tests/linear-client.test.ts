@@ -79,7 +79,14 @@ test("getIssueByIdentifier includes assignee data when present", async () => {
 
 test("getViewer sends bearer authorization for oauth tokens", async () => {
   let authorization: string | null = null;
+  let requestedUrl: string | null = null;
   globalThis.fetch = (async (_input, init) => {
+    requestedUrl =
+      typeof _input === "string"
+        ? _input
+        : _input instanceof URL
+          ? _input.toString()
+          : _input.url;
     if (
       init?.headers &&
       typeof Headers !== "undefined" &&
@@ -105,11 +112,15 @@ test("getViewer sends bearer authorization for oauth tokens", async () => {
     );
   }) as typeof fetch;
 
-  const client = createLinearClient({ token: "linear-oauth-token" });
+  const client = createLinearClient({
+    token: "linear-oauth-token",
+    apiUrl: "https://api.linear.app",
+  });
   const result = await client.getViewer();
 
   expect(result.ok).toBe(true);
   expect(authorization).toBe("Bearer linear-oauth-token");
+  expect(requestedUrl).toBe("https://api.linear.app/graphql");
 });
 
 test("listTeamUsers returns membership users for assignee mapping", async () => {

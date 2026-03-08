@@ -141,6 +141,7 @@ struct ProjectDetailView: View {
   @State private var executionTargetReloadTask: Task<Void, Never>? = nil
   @State private var showLinearRoutingSheet = false
   @State private var linearRoutingSheetLoading = false
+  @State private var linearProjectOptionsLoading = false
 
   var body: some View {
     @Bindable var model = model
@@ -876,43 +877,69 @@ struct ProjectDetailView: View {
     VStack(alignment: .leading, spacing: 12) {
       HStack(alignment: .top, spacing: 12) {
         VStack(alignment: .leading, spacing: 4) {
-          Text("Linear routing")
+          Text("Ticket sync")
             .font(.system(size: 15, weight: .semibold))
           Text(linearRoutingSummaryLine)
             .font(.system(size: 13, weight: .medium))
             .foregroundStyle(.secondary)
         }
         Spacer()
-        Button(hasConfiguredLinearProfile ? "Edit routing" : "Connect Linear") {
+        Button(hasConfiguredLinearProfile ? "Advanced" : "Open Linear settings") {
           showLinearRoutingSheet = true
         }
         .adaptiveToolbarButtonProminent()
       }
 
-      HStack(spacing: 8) {
-        if hasConfiguredLinearProfile {
-          StatusPill(text: "Configured", tone: .good)
-        } else {
+      if hasConfiguredLinearProfile {
+        VStack(alignment: .leading, spacing: 14) {
+          if linearProfileOptions.count > 1 {
+            projectSettingsField(
+              title: "Linear account",
+              help: "Use a different saved Linear account for this repo when needed.",
+              footnote: selectedLinearProfileSummary
+            ) {
+              linearAccountPickerControl(accessibilityLabel: "Linear account")
+            }
+          } else {
+            projectSettingsField(
+              title: "Linear account",
+              help: "The connected Linear account this repo uses for ticket sync.",
+              footnote: selectedLinearProfileSummary
+            ) {
+              projectSettingsStaticValue(selectedLinearProfileSummary)
+                .accessibilityLabel("Linear account")
+            }
+          }
+
+          projectSettingsField(
+            title: "Linear project",
+            help: "Choose the main Linear project this repo should pull from and push to.",
+            footnote: selectedLinearProjectFootnote
+          ) {
+            linearProjectPickerControl(accessibilityLabel: "Linear project")
+          }
+
+          HStack(spacing: 8) {
+            if !linearAdditionalProjects.isEmpty {
+              StatusPill(
+                text: "\(linearAdditionalProjects.count) additional project\(linearAdditionalProjects.count == 1 ? "" : "s")",
+                tone: .neutral
+              )
+            }
+            if hasAnyLinearAutosyncRoutes {
+              StatusPill(
+                text: "Autosync on for \(linearAutosyncRouteKeys.count)",
+                tone: .good
+              )
+            }
+            Spacer(minLength: 0)
+          }
+        }
+      } else {
+        HStack(spacing: 8) {
           StatusPill(text: "Needs connection", tone: .warn)
+          Spacer(minLength: 0)
         }
-        if !linearBoundProjectName.isEmpty {
-          StatusPill(text: "Default \(linearBoundProjectName)", tone: .neutral)
-        } else if !linearBoundProjectId.isEmpty {
-          StatusPill(text: "Default bound", tone: .neutral)
-        }
-        if !linearAdditionalProjects.isEmpty {
-          StatusPill(
-            text: "\(linearAdditionalProjects.count) linked project\(linearAdditionalProjects.count == 1 ? "" : "s")",
-            tone: .neutral
-          )
-        }
-        if hasAnyLinearAutosyncRoutes {
-          StatusPill(
-            text: "\(linearAutosyncRouteKeys.count) autosync route\(linearAutosyncRouteKeys.count == 1 ? "" : "s")",
-            tone: .good
-          )
-        }
-        Spacer(minLength: 0)
       }
 
       if !linearProjectMessage.isEmpty {
@@ -923,179 +950,37 @@ struct ProjectDetailView: View {
     }
     .padding(16)
     .background(projectSettingsCardBackground)
+    .task(id: resolvedLinearRoutingProfileId ?? "") {
+      guard !showLinearRoutingSheet else {
+        return
+      }
+      await loadLinearRoutingProjectOptionsIfNeeded()
+    }
   }
 
   private var linearRoutingSheet: some View {
     ScrollView {
-      VStack(alignment: .leading, spacing: 20) {
-        Text("Linear routing")
+      VStack(alignment: .leading, spacing: 18) {
+        Text("Linear settings")
           .font(.system(size: 22, weight: .semibold))
 
         if linearRoutingSheetLoading {
           HStack(spacing: 10) {
             ProgressView()
               .controlSize(.small)
-            Text("Loading connected account and project routes…")
+            Text("Loading Linear settings…")
               .font(.system(size: 12, weight: .medium))
               .foregroundStyle(.secondary)
           }
         }
 
-        routingSheetSection(
-          title: "Account",
-          help: "Choose which saved Linear account this repo routes through."
-        ) {
-          if hasConfiguredLinearProfile {
-            projectSettingsControlGroup(footnote: selectedLinearProfileSummary) {
-              VStack(alignment: .leading, spacing: 10) {
-                if linearProfileOptions.count <= 1 {
-                  projectSettingsFieldLabel("Connected account")
-                  projectSettingsControlShell(maxWidth: 320) {
-                    projectSettingsStaticValue(selectedLinearProfileSummary)
-                      .accessibilityLabel("Connected account")
-                  }
-                } else {
-                  projectSettingsFieldLabel("Connected account")
-                  projectSettingsControlShell(maxWidth: 320) {
-                    Menu {
-                      Button {
-                        guard !linearProjectProfile.isEmpty else {
-                          return
-                        }
-                        linearProjectProfile = ""
-                        guard !executionTargetLoading else {
-                          return
-                        }
-                        Task { await persistLinearProfileOverride() }
-                      } label: {
-                        if linearProjectProfile.isEmpty {
-                          Label("Inherited", systemImage: "checkmark")
-                        } else {
-                          Text("Inherited")
-                        }
-                      }
-                      ForEach(linearProfileOptions, id: \.self) { profile in
-                        Button {
-                          guard linearProjectProfile != profile else {
-                            return
-                          }
-                          linearProjectProfile = profile
-                          guard !executionTargetLoading else {
-                            return
-                          }
-                          Task { await persistLinearProfileOverride() }
-                        } label: {
-                          let label = linearProfileLabel(profileId: profile)
-                          if linearProjectProfile == profile {
-                            Label(label, systemImage: "checkmark")
-                          } else {
-                            Text(label)
-                          }
-                        }
-                      }
-                    } label: {
-                      projectSettingsMenuLabel(selectedLinearProfileSummary)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Connected account")
-                  }
-                }
-
-                HStack(alignment: .center, spacing: 12) {
-                  StatusPill(text: "Connected", tone: .good)
-                }
-              }
-            }
-          } else {
-            VStack(alignment: .leading, spacing: 10) {
-              Button("Connect account") {
-                NotificationCenter.default.post(
-                  name: .hackSettingsRequested,
-                  object: nil,
-                  userInfo: ["pane": "linear"]
-                )
-              }
-              .adaptiveToolbarButtonProminent()
-            }
-          }
-        }
-
         if hasConfiguredLinearProfile {
           routingSheetSection(
-            title: "Default project route",
-            help: "This is the primary Linear project for pull, push, and review."
-          ) {
-            projectSettingsControlGroup(footnote: selectedLinearProjectSummary) {
-              VStack(alignment: .leading, spacing: 10) {
-                projectSettingsFieldLabel("Primary route")
-                projectSettingsControlShell(maxWidth: 360) {
-                  if linearProjectOptions.isEmpty {
-                    projectSettingsStaticValue("No projects available")
-                      .accessibilityLabel("Default project route")
-                  } else {
-                    Menu {
-                      Button {
-                        guard !selectedLinearProjectId.isEmpty else {
-                          return
-                        }
-                        selectedLinearProjectId = ""
-                        guard !executionTargetLoading else {
-                          return
-                        }
-                        Task { await persistLinearProjectBindingSelection() }
-                      } label: {
-                        if selectedLinearProjectId.isEmpty {
-                          Label("Unbound", systemImage: "checkmark")
-                        } else {
-                          Text("Unbound")
-                        }
-                      }
-                      ForEach(linearProjectOptions) { linearProject in
-                        Button {
-                          guard selectedLinearProjectId != linearProject.id else {
-                            return
-                          }
-                          selectedLinearProjectId = linearProject.id
-                          guard !executionTargetLoading else {
-                            return
-                          }
-                          Task { await persistLinearProjectBindingSelection() }
-                        } label: {
-                          let label = linearProjectMenuLabel(linearProject)
-                          if selectedLinearProjectId == linearProject.id {
-                            Label(label, systemImage: "checkmark")
-                          } else {
-                            Text(label)
-                          }
-                        }
-                      }
-                    } label: {
-                      projectSettingsMenuLabel(selectedLinearProjectSummary)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Default project route")
-                  }
-                }
-
-                if !linearBoundProjectId.isEmpty {
-                  Button("Clear") {
-                    Task { await clearLinearProjectBinding() }
-                  }
-                  .adaptiveToolbarButton()
-                }
-              }
-            }
-            if let defaultTarget = defaultLinearRouteTarget {
-              linearScopeRouteRow(target: defaultTarget, isDefault: true)
-            }
-          }
-
-          routingSheetSection(
-            title: "Additional project routes",
-            help: "Link extra Linear projects when this repo needs review or autosync coverage beyond the default project route."
+            title: "Additional projects",
+            help: "Add more Linear projects when this repo needs broader review or autosync coverage than the main project above."
           ) {
             if linearAdditionalProjects.isEmpty {
-              Text("No additional linked projects.")
+              Text("No additional projects.")
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.secondary)
             } else {
@@ -1107,7 +992,7 @@ struct ProjectDetailView: View {
             }
             projectSettingsControlGroup(footnote: additionalLinearProjectsSummary) {
               VStack(alignment: .leading, spacing: 10) {
-                projectSettingsFieldLabel("Add linked project")
+                projectSettingsFieldLabel("Additional project")
                 HStack(spacing: 8) {
                   projectSettingsControlShell(maxWidth: 360) {
                     if availableAdditionalLinearProjects.isEmpty {
@@ -1154,6 +1039,38 @@ struct ProjectDetailView: View {
               }
             }
           }
+
+          if let defaultTarget = defaultLinearRouteTarget {
+            routingSheetSection(
+              title: "Autosync",
+              help: "Autosync stays optional. Turn it on only for the projects this repo should keep current without a manual pull or push."
+            ) {
+              linearScopeRouteRow(target: defaultTarget, isDefault: true)
+              if !linearAdditionalProjects.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                  ForEach(linearAdditionalProjects) { target in
+                    linearScopeRouteRow(target: target, isDefault: false)
+                  }
+                }
+              }
+            }
+          }
+        } else {
+          VStack(alignment: .leading, spacing: 12) {
+            Text("Connect Linear in Settings first, then choose the project this repo should sync with.")
+              .font(.system(size: 13, weight: .medium))
+              .foregroundStyle(.secondary)
+
+            Button("Open Linear settings") {
+              NotificationCenter.default.post(
+                name: .hackSettingsRequested,
+                object: nil,
+                userInfo: ["pane": "linear"]
+              )
+              showLinearRoutingSheet = false
+            }
+            .adaptiveToolbarButtonProminent()
+          }
         }
 
         HStack {
@@ -1166,7 +1083,7 @@ struct ProjectDetailView: View {
       }
       .padding(24)
     }
-    .frame(minWidth: 620, minHeight: hasConfiguredLinearProfile ? 560 : 360)
+    .frame(minWidth: 520, minHeight: hasConfiguredLinearProfile ? 420 : 220)
     .background(Color.clear)
     .task {
       await refreshLinearRoutingSheetState()
@@ -1201,24 +1118,32 @@ struct ProjectDetailView: View {
   private var hasConfiguredLinearProfile: Bool {
     let resolvedProfile = resolvedLinearRoutingProfileId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     if !resolvedProfile.isEmpty {
-      return linearProfilesById[resolvedProfile] != nil
+      return true
     }
-    return !linearProfileOptions.isEmpty
+    return !linearProfileOptions.isEmpty || !linearProfilesById.isEmpty
   }
 
   private var linearRoutingSummaryLine: String {
     if !hasConfiguredLinearProfile {
-      return "No Linear provider account connected for this repo yet."
+      return "Connect Linear in Settings, then choose the project this repo should sync with."
     }
     if !hasAnyLinearProjectRouting {
-      return "A Linear profile is connected, but this repo does not have a default project route yet."
+      return "Linear is connected. Choose the project this repo should pull from and push to."
     }
     if linearAdditionalProjects.isEmpty {
-      let defaultLabel = linearBoundProjectName.isEmpty ? resolvedLinearProjectId : linearBoundProjectName
-      return "\(selectedLinearProfileSummary) • default project \(defaultLabel)"
+      return "Linear · \(selectedLinearProfileSummary) · \(selectedLinearProjectSummary)"
     }
-    let defaultLabel = linearBoundProjectName.isEmpty ? resolvedLinearProjectId : linearBoundProjectName
-    return "\(selectedLinearProfileSummary) • default project \(defaultLabel) • \(linearAdditionalProjects.count) linked"
+    return "Linear · \(selectedLinearProfileSummary) · \(selectedLinearProjectSummary) · \(linearAdditionalProjects.count) additional"
+  }
+
+  private var selectedLinearProjectFootnote: String {
+    if linearProjectOptionsLoading {
+      return "Loading projects…"
+    }
+    if !linearBoundTeamId.isEmpty {
+      return "Team \(linearBoundTeamId)"
+    }
+    return selectedLinearProjectSummary
   }
 
   private var projectSettingsCardBackground: some View {
@@ -2177,12 +2102,11 @@ struct ProjectDetailView: View {
     let resolvedProfile = resolvedLinearRoutingProfileId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     guard !resolvedProfile.isEmpty else {
       linearProjectOptions = []
+      linearProjectOptionsLoading = false
       return
     }
-    guard hasConfiguredLinearProfile else {
-      linearProjectOptions = []
-      return
-    }
+    linearProjectOptionsLoading = true
+    defer { linearProjectOptionsLoading = false }
     if let projectCatalog = await model.listLinearProjects(profileId: resolvedProfile) {
       linearProjectOptions = projectCatalog.projects.sorted { lhs, rhs in
         lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
@@ -2199,7 +2123,104 @@ struct ProjectDetailView: View {
     linearRoutingSheetLoading = true
     defer { linearRoutingSheetLoading = false }
     await reloadExecutionTargetState()
-    await loadLinearRoutingProjectOptionsIfNeeded()
+  }
+
+  @ViewBuilder
+  private func linearAccountPickerControl(accessibilityLabel: String) -> some View {
+    Menu {
+      Button {
+        guard !linearProjectProfile.isEmpty else {
+          return
+        }
+        linearProjectProfile = ""
+        guard !executionTargetLoading else {
+          return
+        }
+        Task { await persistLinearProfileOverride() }
+      } label: {
+        if linearProjectProfile.isEmpty {
+          Label("Inherited", systemImage: "checkmark")
+        } else {
+          Text("Inherited")
+        }
+      }
+      ForEach(linearProfileOptions, id: \.self) { profile in
+        Button {
+          guard linearProjectProfile != profile else {
+            return
+          }
+          linearProjectProfile = profile
+          guard !executionTargetLoading else {
+            return
+          }
+          Task { await persistLinearProfileOverride() }
+        } label: {
+          let label = linearProfileLabel(profileId: profile)
+          if linearProjectProfile == profile {
+            Label(label, systemImage: "checkmark")
+          } else {
+            Text(label)
+          }
+        }
+      }
+    } label: {
+      projectSettingsMenuLabel(selectedLinearProfileSummary)
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel(accessibilityLabel)
+  }
+
+  @ViewBuilder
+  private func linearProjectPickerControl(accessibilityLabel: String) -> some View {
+    if linearProjectOptionsLoading {
+      projectSettingsStaticValue("Loading projects…")
+        .accessibilityLabel(accessibilityLabel)
+    } else if linearProjectOptions.isEmpty {
+      projectSettingsStaticValue("No projects available")
+        .accessibilityLabel(accessibilityLabel)
+    } else {
+      Menu {
+        Button {
+          guard !selectedLinearProjectId.isEmpty else {
+            return
+          }
+          selectedLinearProjectId = ""
+          guard !executionTargetLoading else {
+            return
+          }
+          Task { await persistLinearProjectBindingSelection() }
+        } label: {
+          if selectedLinearProjectId.isEmpty {
+            Label("Unbound", systemImage: "checkmark")
+          } else {
+            Text("Unbound")
+          }
+        }
+        ForEach(linearProjectOptions) { linearProject in
+          Button {
+            guard selectedLinearProjectId != linearProject.id else {
+              return
+            }
+            selectedLinearProjectId = linearProject.id
+            guard !executionTargetLoading else {
+              return
+            }
+            Task { await persistLinearProjectBindingSelection() }
+          } label: {
+            let label = linearProjectMenuLabel(linearProject)
+            if selectedLinearProjectId == linearProject.id {
+              Label(label, systemImage: "checkmark")
+            } else {
+              Text(label)
+            }
+          }
+        }
+      } label: {
+        projectSettingsMenuLabel(selectedLinearProjectSummary)
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel(accessibilityLabel)
+    }
   }
 
   private func linearAccountEmail(profileId: String) -> String? {
@@ -2279,6 +2300,9 @@ struct ProjectDetailView: View {
     executionTargetLoading = true
     defer { executionTargetLoading = false }
     let identityProjectPath = project.repoRoot ?? project.projectDir
+    let hackAccountAuthenticated = await MainActor.run {
+      model.hackAccountState?.authenticated == true
+    }
 
     async let nodeList = model.listNodes()
     async let executionModeRaw = model.getProjectConfig(
@@ -2306,6 +2330,12 @@ struct ProjectDetailView: View {
     )
     async let githubProfiles = model.inspectGitHubProfiles()
     async let linearProfiles = model.inspectLinearProfiles()
+    async let remoteLinearConnections: LinearConnectionsResponse? = {
+      guard hackAccountAuthenticated else {
+        return nil
+      }
+      return await model.listLinearConnections()
+    }()
     async let systemGitIdentity = model.inspectSystemGitIdentity(
       projectPath: identityProjectPath
     )
@@ -2319,7 +2349,8 @@ struct ProjectDetailView: View {
     let resolvedDefaultGitHubProfile = await defaultGitHubProfile
     let resolvedDefaultLinearProfile = await defaultLinearProfile
     let resolvedGitHubProfiles = await githubProfiles
-    let resolvedLinearProfiles = await linearProfiles
+    var resolvedLinearProfiles = await linearProfiles
+    let resolvedRemoteLinearConnections = await remoteLinearConnections
     let resolvedSystemGitIdentity = await systemGitIdentity
 
     if Task.isCancelled {
@@ -2365,6 +2396,21 @@ struct ProjectDetailView: View {
     linearAdditionalProjects = resolvedLinearBinding?.additionalProjects ?? []
     let fallbackDefaultLinearProfile = (resolvedDefaultLinearProfile ?? "")
       .trimmingCharacters(in: .whitespacesAndNewlines)
+    let initialLinearDefaultProfile = resolvedLinearProfiles?.defaultProfile ?? fallbackDefaultLinearProfile
+    let explicitLinearProfile = (resolvedLinearBinding?.profileId ?? "")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    let initialResolvedLinearProfile =
+      explicitLinearProfile.isEmpty ? initialLinearDefaultProfile : explicitLinearProfile
+    if !initialResolvedLinearProfile.isEmpty,
+       !linearProfilesResponse(resolvedLinearProfiles, containsProfileId: initialResolvedLinearProfile),
+       remoteLinearConnection(
+         profileId: initialResolvedLinearProfile,
+         in: resolvedRemoteLinearConnections
+       )?.localAccessAvailable == true,
+       await model.seedLinearLocalAccess(profileId: initialResolvedLinearProfile) != nil
+    {
+      resolvedLinearProfiles = await model.inspectLinearProfiles()
+    }
     linearDefaultProfile = resolvedLinearProfiles?.defaultProfile ?? fallbackDefaultLinearProfile
     linearProfilesById = mapLinearProfilesById(response: resolvedLinearProfiles)
     linearProfileOptions = (resolvedLinearProfiles?.profiles ?? [])
@@ -2382,6 +2428,7 @@ struct ProjectDetailView: View {
     if linearAdditionalProjects.contains(where: { $0.projectId == selectedAdditionalLinearProjectId }) {
       selectedAdditionalLinearProjectId = ""
     }
+    await loadLinearRoutingProjectOptionsIfNeeded()
     linearAutosyncRouteKeys = await loadLinearAutosyncRouteKeys(targets: allLinearRouteTargets)
     executionMode = RemoteExecutionMode.fromConfig(resolvedExecutionModeRaw)
       ?? (executionTargetNodeId.isEmpty ? .local : .localEditRemoteRun)
@@ -2395,6 +2442,32 @@ struct ProjectDetailView: View {
     executionTargetReloadTask = Task {
       await reloadExecutionTargetState()
     }
+  }
+
+  private func linearProfilesResponse(
+    _ response: LinearProfilesResponse?,
+    containsProfileId profileId: String
+  ) -> Bool {
+    let trimmed = profileId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      return false
+    }
+    return response?.profiles.contains(where: {
+      $0.id.caseInsensitiveCompare(trimmed) == .orderedSame
+    }) == true
+  }
+
+  private func remoteLinearConnection(
+    profileId: String,
+    in response: LinearConnectionsResponse?
+  ) -> LinearRemoteConnection? {
+    let trimmed = profileId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      return nil
+    }
+    return response?.connections.first(where: { connection in
+      connection.profileId?.caseInsensitiveCompare(trimmed) == .orderedSame
+    })
   }
 
   /**

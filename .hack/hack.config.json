@@ -6,6 +6,9 @@
     "extensions": {
       "dance.hack.tickets": {
         "enabled": true
+      },
+      "dance.hack.linear": {
+        "enabled": true
       }
     },
     "gateway": {

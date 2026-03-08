@@ -77,6 +77,41 @@ test("getIssueByIdentifier includes assignee data when present", async () => {
   expect(result.data?.assigneeActive).toBe(true);
 });
 
+test("getViewer sends bearer authorization for oauth tokens", async () => {
+  let authorization: string | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    if (
+      init?.headers &&
+      typeof Headers !== "undefined" &&
+      init.headers instanceof Headers
+    ) {
+      authorization = init.headers.get("Authorization");
+    } else if (init?.headers && !Array.isArray(init.headers)) {
+      authorization =
+        (init.headers as Record<string, string>).Authorization ?? null;
+    }
+    return new Response(
+      JSON.stringify({
+        data: {
+          viewer: {
+            id: "usr_123",
+            name: "Alice Example",
+            email: "alice@example.com",
+            displayName: "Alice",
+          },
+        },
+      }),
+      { status: 200 }
+    );
+  }) as typeof fetch;
+
+  const client = createLinearClient({ token: "linear-oauth-token" });
+  const result = await client.getViewer();
+
+  expect(result.ok).toBe(true);
+  expect(authorization).toBe("Bearer linear-oauth-token");
+});
+
 test("listTeamUsers returns membership users for assignee mapping", async () => {
   let requestBody: {
     readonly query?: unknown;

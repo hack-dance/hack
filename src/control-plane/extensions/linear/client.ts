@@ -176,7 +176,7 @@ export function createLinearClient(input: {
     const response = await fetch(apiUrl, {
       method: "POST",
       headers: {
-        Authorization: token,
+        Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
         "User-Agent": "hack-cli",
       },

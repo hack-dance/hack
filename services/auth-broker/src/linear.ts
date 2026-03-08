@@ -189,7 +189,7 @@ export async function fetchIdentity(input: {
   const response = await fetch(input.apiBaseUrl, {
     method: "POST",
     headers: {
-      Authorization: input.token,
+      Authorization: `Bearer ${input.token}`,
       "content-type": "application/json",
       accept: "application/json",
       "user-agent": USER_AGENT,

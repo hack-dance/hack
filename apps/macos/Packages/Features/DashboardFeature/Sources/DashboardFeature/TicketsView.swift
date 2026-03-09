@@ -36,7 +36,6 @@ struct TicketsView: View {
   @State private var linearSyncFromLinearEnabled = true
   @State private var linearCreateHackTicketsEnabled = false
   @State private var linearRouteStatus: LinearStatusResponse? = nil
-  @State private var pendingBulkSyncAction: TicketBulkSyncAction? = nil
   @State private var activeSyncAction: TicketSyncAction? = nil
   @State private var resolvingConflictIds: Set<String> = []
   @State private var postingCommentTicketIds: Set<String> = []
@@ -110,24 +109,6 @@ struct TicketsView: View {
         }
       )
     }
-    .confirmationDialog(
-      pendingBulkSyncAction?.dialogTitle ?? "Confirm Linear sync",
-      isPresented: bulkSyncConfirmationPresented,
-      titleVisibility: .visible
-    ) {
-      if let pendingBulkSyncAction {
-        Button(pendingBulkSyncAction.confirmLabel) {
-          Task { await performBulkSync(pendingBulkSyncAction) }
-        }
-      }
-      Button("Cancel", role: .cancel) {
-        pendingBulkSyncAction = nil
-      }
-    } message: {
-      if let pendingBulkSyncAction {
-        Text(pendingBulkSyncAction.message)
-      }
-    }
   }
 
   private var header: some View {
@@ -160,26 +141,18 @@ struct TicketsView: View {
           Button("Refresh tickets") {
             Task { await refreshTickets() }
           }
-          Button("Sync ticket ref store") {
-            Task { await syncTickets() }
-          }
           if canSyncProjectFromLinear {
             Divider()
             Button("Reconcile from Linear") {
-              requestBulkSyncConfirmation(.pullLinear)
-            }
-          }
-          if linearRouteStatus?.tokenResolved == true && hasAnyLinearAutosyncRoutes {
-            Button("Run autosync now") {
-              Task { await runProjectLinearAutosync() }
+              Task { await syncProjectFromLinear() }
             }
           }
           if let selectedTicket {
             Divider()
-            Button("Push selected ticket to Linear") {
+            Button(canPushTicketToLinear(selectedTicket) && selectedTicket.externalKey?.isEmpty != false ? "Create selected ticket in Linear" : "Update selected ticket in Linear") {
               Task { await syncSelectedTicketToLinear(selectedTicket) }
             }
-            .disabled(linearRouteStatus?.tokenResolved != true || isAnySyncInFlight)
+            .disabled(!canPushTicketToLinear(selectedTicket) || isAnySyncInFlight)
             Button("Refresh selected ticket from Linear") {
               Task { await syncSelectedTicketFromLinear(selectedTicket) }
             }
@@ -265,23 +238,23 @@ struct TicketsView: View {
     linearRouteStatus?.tokenResolved == true && hasAnyLinearProjectRouting && linearSyncFromLinearEnabled
   }
 
-  private var canSyncProjectToLinear: Bool {
-    linearRouteStatus?.tokenResolved == true && linearCreateHackTicketsEnabled
+  private var canSyncLinkedTicketsToLinear: Bool {
+    linearRouteStatus?.tokenResolved == true && hasAnyLinearProjectRouting
+  }
+
+  private var canSyncHackOwnedTicketsToLinear: Bool {
+    canSyncLinkedTicketsToLinear && linearCreateHackTicketsEnabled
+  }
+
+  private func canPushTicketToLinear(_ ticket: TicketSummary) -> Bool {
+    if ticket.externalKey?.isEmpty == false {
+      return linearRouteStatus?.tokenResolved == true
+    }
+    return linearRouteStatus?.tokenResolved == true && linearCreateHackTicketsEnabled
   }
 
   private var isAnySyncInFlight: Bool {
     activeSyncAction != nil
-  }
-
-  private var bulkSyncConfirmationPresented: Binding<Bool> {
-    Binding(
-      get: { pendingBulkSyncAction != nil },
-      set: { isPresented in
-        if !isPresented {
-          pendingBulkSyncAction = nil
-        }
-      }
-    )
   }
 
   @ViewBuilder
@@ -301,10 +274,6 @@ struct TicketsView: View {
       return true
     }
     return !linearAdditionalProjects.isEmpty
-  }
-
-  private var hasAnyLinearAutosyncRoutes: Bool {
-    !linearAutosyncRouteKeys.isEmpty
   }
 
   private var backgroundSyncTaskKey: String {
@@ -334,12 +303,6 @@ struct TicketsView: View {
         .lineLimit(1)
 
       Spacer(minLength: 0)
-
-      if hasAnyLinearAutosyncRoutes {
-        Text("autosync on")
-          .font(.system(size: 11, weight: .medium, design: .monospaced))
-          .foregroundStyle(.secondary)
-      }
 
       if reviewQueueCount > 0 {
         Text(reviewQueueCount == 1 ? "1 review" : "\(reviewQueueCount) reviews")
@@ -374,22 +337,15 @@ struct TicketsView: View {
     }
     let defaultLabel = linearRouteProjectName.isEmpty ? linearRouteProjectId : linearRouteProjectName
     if linearSyncFromLinearEnabled && linearCreateHackTicketsEnabled {
-      return "\(defaultLabel) · inbound on · create in Linear on"
+      return "\(defaultLabel) · syncing with Linear · create in Linear on"
     }
     if linearSyncFromLinearEnabled {
-      return "\(defaultLabel) · syncing from Linear"
+      return "\(defaultLabel) · syncing with Linear"
     }
     if linearCreateHackTicketsEnabled {
       return "\(defaultLabel) · create in Linear on"
     }
-    return "\(defaultLabel) · sync off"
-  }
-
-  private var linearProfileDisplayName: String {
-    if !linearRouteProfile.isEmpty {
-      return linearRouteProfile
-    }
-    return "Inherited profile"
+    return "\(defaultLabel) · local-only outbound"
   }
 
   private var allLinearRouteTargets: [LinearProjectBindingTarget] {
@@ -450,19 +406,13 @@ struct TicketsView: View {
       return "Linear sync needs attention"
     }
     if normalized.contains("not linked") {
-      return "Linear link required"
+      return "Local-only ticket"
     }
-    if normalized.hasPrefix("pulled") {
-      return "Linear pull complete"
+    if normalized.hasPrefix("reconciled") {
+      return "Reconciliation complete"
     }
-    if normalized.hasPrefix("pushed") {
-      return "Hack push complete"
-    }
-    if normalized.hasPrefix("synced") {
-      return "Ticket pushed to Linear"
-    }
-    if normalized.hasPrefix("refreshed") {
-      return "Ticket refreshed from Linear"
+    if normalized.hasPrefix("created") || normalized.hasPrefix("updated") {
+      return "Linear issue updated"
     }
     return "Ticket status"
   }
@@ -487,7 +437,7 @@ struct TicketsView: View {
       }
       if !hasAnyLinearProjectRouting {
         return [
-          InlineCalloutAction(label: "Project routing", systemImage: "slider.horizontal.3") {
+          InlineCalloutAction(label: "Ticket sync settings", systemImage: "slider.horizontal.3") {
             openProjectRouting()
           }
         ]
@@ -495,7 +445,14 @@ struct TicketsView: View {
     }
     if normalized.contains("not linked") && linearRouteStatus?.tokenResolved == true {
       return [
-        InlineCalloutAction(label: "Push selected ticket", systemImage: "arrow.up.right") {
+        InlineCalloutAction(
+          label: linearCreateHackTicketsEnabled ? "Create in Linear" : "Ticket sync settings",
+          systemImage: linearCreateHackTicketsEnabled ? "arrow.up.right" : "slider.horizontal.3"
+        ) {
+          if !linearCreateHackTicketsEnabled {
+            openProjectRouting()
+            return
+          }
           guard let selectedTicket else { return }
           Task { await syncSelectedTicketToLinear(selectedTicket) }
         }
@@ -788,7 +745,7 @@ struct TicketsView: View {
         .adaptiveToolbarButton()
 
         Button("Reconcile now") {
-          requestBulkSyncConfirmation(.pullLinear)
+          Task { await syncProjectFromLinear() }
         }
         .adaptiveToolbarButtonProminent()
         .disabled(!canSyncProjectFromLinear || isAnySyncInFlight)
@@ -826,7 +783,7 @@ struct TicketsView: View {
           selectedFilter = .all
         }
         .adaptiveToolbarButton()
-        Button("Refresh") {
+        Button("Refresh list") {
           Task { await refreshTickets() }
         }
         .adaptiveToolbarButton()
@@ -1046,14 +1003,20 @@ struct TicketsView: View {
     }
   }
 
+  @ViewBuilder
   private func ticketSyncGuidanceCallout(_ detail: TicketDetailResponse) -> some View {
-    let guidance = ticketSyncGuidance(for: detail)
-    return InlineCallout(
-      tone: guidance.tone,
-      title: guidance.title,
-      message: guidance.message,
-      actions: ticketSyncGuidanceActions(for: detail)
-    )
+    let shouldShowGuidance =
+      detail.linearSyncReviewState.needsReview ||
+      !detail.ticket.linearSyncUXState.isLinkedToLinear
+    if shouldShowGuidance {
+      let guidance = ticketSyncGuidance(for: detail)
+      InlineCallout(
+        tone: guidance.tone,
+        title: guidance.title,
+        message: guidance.message,
+        actions: ticketSyncGuidanceActions(for: detail)
+      )
+    }
   }
 
   @ViewBuilder
@@ -1090,10 +1053,9 @@ struct TicketsView: View {
     if !detail.comments.isEmpty {
       VStack(alignment: .leading, spacing: 10) {
         HStack(spacing: 8) {
-          Text("Comments")
+          Text("Activity")
             .font(.system(size: 12, weight: .semibold))
             .foregroundStyle(.secondary)
-          ticketMetaPill("Append-only FIFO", tone: .secondary)
         }
         VStack(alignment: .leading, spacing: 10) {
           ForEach(detail.comments) { comment in
@@ -1478,16 +1440,16 @@ struct TicketsView: View {
     let syncState = ticket.linearSyncUXState
     if syncState.reviewHint != nil {
       return [
-        InlineCalloutAction(label: "Project routing", systemImage: "slider.horizontal.3") {
+        InlineCalloutAction(label: "Ticket sync settings", systemImage: "slider.horizontal.3") {
           openProjectRouting()
         }
       ]
     }
 
     if !syncState.isLinkedToLinear {
-      if linearRouteStatus?.tokenResolved == true {
+      if canPushTicketToLinear(ticket) {
         return [
-          InlineCalloutAction(label: "Push Hack changes", systemImage: "arrow.up.right") {
+          InlineCalloutAction(label: "Create in Linear", systemImage: "arrow.up.right") {
             Task { await syncSelectedTicketToLinear(ticket) }
           }
         ]
@@ -1496,7 +1458,7 @@ struct TicketsView: View {
         InlineCalloutAction(label: "Linear settings", systemImage: "link.badge.plus") {
           openLinearSettings()
         },
-        InlineCalloutAction(label: "Project routing", systemImage: "slider.horizontal.3") {
+        InlineCalloutAction(label: "Ticket sync settings", systemImage: "slider.horizontal.3") {
           openProjectRouting()
         },
       ]
@@ -1504,18 +1466,11 @@ struct TicketsView: View {
 
     switch syncState.authority {
     case .linear:
-      if let externalKey = ticket.externalKey, !externalKey.isEmpty {
-        return [
-          InlineCalloutAction(label: "Pull Linear changes", systemImage: "arrow.down.left") {
-            Task { await syncSelectedTicketFromLinear(ticket) }
-          }
-        ]
-      }
       return []
     case .hack:
-      if linearRouteStatus?.tokenResolved == true {
+      if !syncState.isLinkedToLinear, canPushTicketToLinear(ticket) {
         return [
-          InlineCalloutAction(label: "Push Hack changes", systemImage: "arrow.up.right") {
+          InlineCalloutAction(label: "Create in Linear", systemImage: "arrow.up.right") {
             Task { await syncSelectedTicketToLinear(ticket) }
           }
         ]
@@ -1531,7 +1486,7 @@ struct TicketsView: View {
   private func ticketSyncGuidanceActions(for detail: TicketDetailResponse) -> [InlineCalloutAction] {
     if detail.linearSyncReviewState.needsReview {
       var actions = [
-        InlineCalloutAction(label: "Project routing", systemImage: "slider.horizontal.3") {
+        InlineCalloutAction(label: "Ticket sync settings", systemImage: "slider.horizontal.3") {
           openProjectRouting()
         }
       ]
@@ -1548,41 +1503,24 @@ struct TicketsView: View {
     return ticketSyncGuidanceActions(for: detail.ticket)
   }
 
-  private func ticketAuthorityBadgeLabel(for ticket: TicketSummary) -> String {
-    if ticket.linearSyncUXState.reviewHint != nil {
-      return "Review authority"
-    }
-    switch ticket.linearSyncUXState.authority {
-    case .hack:
-      return "Hack authority"
-    case .linear:
-      return "Linear authority"
-    }
-  }
-
-  private func ticketAuthorityBadgeColor(for ticket: TicketSummary) -> Color {
-    if ticket.linearSyncUXState.reviewHint != nil {
-      return .orange
-    }
-    switch ticket.linearSyncUXState.authority {
-    case .hack:
-      return .secondary
-    case .linear:
-      return .orange
-    }
-  }
-
   private func ticketSyncGuidance(for ticket: TicketSummary) -> TicketSyncGuidance {
     let syncState = ticket.linearSyncUXState
     if let reviewHint = syncState.reviewHint {
       return TicketSyncGuidance(
-        title: "Review authority before syncing",
+        title: "Needs sync review",
         message: "\(syncState.shortGuidance) \(reviewHint)",
         tone: .warn
       )
     }
 
     if !syncState.isLinkedToLinear {
+      if linearRouteStatus?.tokenResolved == true && !linearCreateHackTicketsEnabled {
+        return TicketSyncGuidance(
+          title: "Local ticket",
+          message: "This ticket stays in Hack until Create Hack tickets in Linear is enabled for this repo.",
+          tone: .neutral
+        )
+      }
       return TicketSyncGuidance(
         title: "Local ticket",
         message: syncState.shortGuidance,
@@ -1593,14 +1531,14 @@ struct TicketsView: View {
     switch syncState.authority {
     case .hack:
       return TicketSyncGuidance(
-        title: "Hack owns authoritative edits",
-        message: "\(syncState.shortGuidance) Push when you want to publish local changes outward.",
+        title: "Linked ticket",
+        message: "\(syncState.shortGuidance) Linked changes continue syncing in the background.",
         tone: .neutral
       )
     case .linear:
       return TicketSyncGuidance(
-        title: "Linear owns authoritative edits",
-        message: "\(syncState.shortGuidance) Pull when you want the local ticket to match the linked Linear issue.",
+        title: "Linked ticket",
+        message: "\(syncState.shortGuidance) Remote updates keep flowing in automatically.",
         tone: .neutral
       )
     }
@@ -1616,10 +1554,8 @@ struct TicketsView: View {
   }
 
   private func ticketDetailFooter(_ detail: TicketDetailResponse) -> some View {
-    let prefersPullPrimary =
-      detail.ticket.linearSyncUXState.authority == .linear &&
-      detail.linearSyncReviewState.needsReview == false &&
-      detail.ticket.externalKey?.isEmpty == false
+    let canPushThisTicket = canPushTicketToLinear(detail.ticket)
+    let isLinkedToLinear = detail.ticket.externalKey?.isEmpty == false
 
     return VStack(alignment: .leading, spacing: 12) {
       HStack(spacing: 10) {
@@ -1633,38 +1569,21 @@ struct TicketsView: View {
           .adaptiveToolbarButton()
         }
 
-        if prefersPullPrimary {
+        if canPushThisTicket && !isLinkedToLinear {
           Button {
             Task { await syncSelectedTicketToLinear(detail.ticket) }
           } label: {
-            Label("Push Hack changes", systemImage: "arrow.up.right")
-          }
-          .adaptiveToolbarButton()
-          .disabled(linearRouteStatus?.tokenResolved != true || isAnySyncInFlight)
-
-          Button {
-            Task { await syncSelectedTicketFromLinear(detail.ticket) }
-          } label: {
-            Label("Pull Linear changes", systemImage: "arrow.down.left")
+            Label("Create in Linear", systemImage: "arrow.up.right")
           }
           .adaptiveToolbarButtonProminent()
-          .disabled(detail.ticket.externalKey?.isEmpty != false || isAnySyncInFlight)
-        } else {
+          .disabled(!canPushThisTicket || isAnySyncInFlight)
+        } else if !isLinkedToLinear {
           Button {
-            Task { await syncSelectedTicketToLinear(detail.ticket) }
+            openProjectRouting()
           } label: {
-            Label("Push Hack changes", systemImage: "arrow.up.right")
-          }
-          .adaptiveToolbarButtonProminent()
-          .disabled(linearRouteStatus?.tokenResolved != true || isAnySyncInFlight)
-
-          Button {
-            Task { await syncSelectedTicketFromLinear(detail.ticket) }
-          } label: {
-            Label("Pull Linear changes", systemImage: "arrow.down.left")
+            Label("Ticket sync settings", systemImage: "slider.horizontal.3")
           }
           .adaptiveToolbarButton()
-          .disabled(detail.ticket.externalKey?.isEmpty != false || isAnySyncInFlight)
         }
 
         if let externalURL = detail.ticket.externalUrl,
@@ -1711,7 +1630,6 @@ struct TicketsView: View {
 
       bottomPinnedDisclosure(title: "Properties", isExpanded: $isPropertiesExpanded) {
         VStack(alignment: .leading, spacing: 14) {
-          inspectorGroup(title: "Dates", rows: inspectorDateRows(for: detail.ticket))
           inspectorGroup(title: "Links", rows: inspectorLinkRows(for: detail.ticket))
           inspectorGroup(title: "Dependencies", rows: inspectorDependencyRows(for: detail.ticket))
         }
@@ -1969,25 +1887,6 @@ struct TicketsView: View {
     await refreshTickets()
   }
 
-  private func syncTickets() async {
-    _ = await model.syncTickets(for: project)
-    await refreshTickets()
-  }
-
-  private func requestBulkSyncConfirmation(_ action: TicketBulkSyncAction) {
-    pendingBulkSyncAction = action
-  }
-
-  private func performBulkSync(_ action: TicketBulkSyncAction) async {
-    pendingBulkSyncAction = nil
-    switch action {
-    case .pullLinear:
-      await syncProjectFromLinear()
-    case .pushHack:
-      await syncProjectToLinear()
-    }
-  }
-
   private func runSyncAction(
     _ action: TicketSyncAction,
     operation: () async -> Void
@@ -2094,7 +1993,7 @@ struct TicketsView: View {
         return
       }
       let routedProjects = result.projectIds?.count ?? (linearAdditionalProjects.isEmpty ? 1 : linearAdditionalProjects.count + 1)
-      loadNotice = "Pulled \(result.processed) item\(result.processed == 1 ? "" : "s") from \(routedProjects) routed Linear project\(routedProjects == 1 ? "" : "s")."
+      loadNotice = "Reconciled \(result.processed) ticket\(result.processed == 1 ? "" : "s") against \(routedProjects) Linear project\(routedProjects == 1 ? "" : "s")."
       await refreshLinearRouting()
       await refreshTickets()
     }
@@ -2107,7 +2006,12 @@ struct TicketsView: View {
 
     if linearSyncFromLinearEnabled, canSyncProjectFromLinear {
       let autosyncResult = await model.runLinearAutosync(for: project)
-      if autosyncResult?.ok == true {
+      if let autosyncResult,
+        autosyncResult.ok,
+        autosyncResult.processedDeliveries > 0 ||
+          autosyncResult.created > 0 ||
+          autosyncResult.updated > 0
+      {
         await refreshLinearRouting()
         await refreshTickets()
       }
@@ -2117,42 +2021,31 @@ struct TicketsView: View {
       return
     }
 
-    if linearCreateHackTicketsEnabled, canSyncProjectToLinear {
-      let outboundResult = await model.syncLinearProject(
+    if canSyncLinkedTicketsToLinear {
+      let linkedUpdateResult = await model.syncLinearProject(
         for: project,
         from: "hack",
-        ownerMode: "hack",
+        ownerMode: "linear",
         projectId: nil,
         teamId: nil,
         limit: nil,
         syncLabels: nil
       )
-      if outboundResult?.ok == true {
+      if let linkedUpdateResult,
+        linkedUpdateResult.ok,
+        linkedUpdateResult.processed > 0 || linkedUpdateResult.updated > 0
+      {
         await refreshLinearRouting()
         await refreshTickets()
       }
     }
-  }
 
-  private func runProjectLinearAutosync() async {
-    await runSyncAction(.runProjectAutosync) {
-      loadNotice = nil
-      let result = await model.runLinearAutosync(for: project)
-      guard let result, result.ok else {
-        loadNotice = model.errorMessage ?? "Linear autosync failed."
-        return
-      }
-      loadNotice =
-        "Processed \(result.processedDeliveries) pending delivery\(result.processedDeliveries == 1 ? "" : "ies") across \(result.subscribedRoutes) subscribed route\(result.subscribedRoutes == 1 ? "" : "s") • applied \(result.appliedDeliveries) • failed \(result.failedDeliveries)."
-      await refreshLinearRouting()
-      await refreshTickets()
+    guard !isAnySyncInFlight else {
+      return
     }
-  }
 
-  private func syncProjectToLinear() async {
-    await runSyncAction(.pushProjectToLinear) {
-      loadNotice = nil
-      let result = await model.syncLinearProject(
+    if linearCreateHackTicketsEnabled, canSyncHackOwnedTicketsToLinear {
+      let outboundCreateResult = await model.syncLinearProject(
         for: project,
         from: "hack",
         ownerMode: "hack",
@@ -2161,13 +2054,13 @@ struct TicketsView: View {
         limit: nil,
         syncLabels: nil
       )
-      guard let result, result.ok else {
-        loadNotice = model.errorMessage ?? "Linear sync failed."
-        return
+      if let outboundCreateResult,
+        outboundCreateResult.ok,
+        outboundCreateResult.processed > 0 || outboundCreateResult.created > 0
+      {
+        await refreshLinearRouting()
+        await refreshTickets()
       }
-      loadNotice = "Pushed \(result.processed) Hack ticket\(result.processed == 1 ? "" : "s") to Linear."
-      await refreshLinearRouting()
-      await refreshTickets()
     }
   }
 
@@ -2187,7 +2080,10 @@ struct TicketsView: View {
         loadNotice = model.errorMessage ?? "Ticket sync failed."
         return
       }
-      loadNotice = "Synced \(result.ticketId) to \(result.issueIdentifier)."
+      loadNotice =
+        result.operation == "created"
+        ? "Created \(result.issueIdentifier) for \(result.ticketId)."
+        : "Updated \(result.issueIdentifier) from \(result.ticketId)."
       await refreshLinearRouting()
       await refreshTickets()
     }
@@ -2213,7 +2109,7 @@ struct TicketsView: View {
         loadNotice = model.errorMessage ?? "Ticket refresh failed."
         return
       }
-      loadNotice = "Refreshed \(result.ticketId) from \(result.issueIdentifier)."
+      loadNotice = "Reconciled \(result.ticketId) with \(result.issueIdentifier)."
       await refreshLinearRouting()
       await refreshTickets()
     }
@@ -2971,59 +2867,19 @@ private enum TicketOriginFilter: String, CaseIterable {
   }
 }
 
-private enum TicketBulkSyncAction: String, Identifiable {
-  case pullLinear
-  case pushHack
-
-  var id: String { rawValue }
-
-  var dialogTitle: String {
-    switch self {
-    case .pullLinear:
-      return "Pull Linear issues into tickets?"
-    case .pushHack:
-      return "Push Hack tickets to Linear?"
-    }
-  }
-
-  var confirmLabel: String {
-    switch self {
-    case .pullLinear:
-      return "Pull from Linear"
-    case .pushHack:
-      return "Push to Linear"
-    }
-  }
-
-  var message: String {
-    switch self {
-    case .pullLinear:
-      return "Use this when Linear is the source of truth for the project. Linear-owned tickets will refresh local authoritative fields, while comments remain append-only."
-    case .pushHack:
-      return "Use this when Hack owns the local ticket set for this project. Hack-owned tickets will publish outward, while assignees, labels, and dependencies merge best effort."
-    }
-  }
-}
-
 private enum TicketSyncAction: Equatable {
   case pullProjectFromLinear
-  case runProjectAutosync
-  case pushProjectToLinear
   case pushTicketToLinear(String)
   case pullTicketFromLinear(String)
 
   var progressLabel: String {
     switch self {
     case .pullProjectFromLinear:
-      return "Pulling Linear project…"
-    case .runProjectAutosync:
-      return "Running Linear autosync…"
-    case .pushProjectToLinear:
-      return "Pushing Hack tickets…"
+      return "Reconciling Linear…"
     case let .pushTicketToLinear(ticketId):
-      return "Pushing \(ticketId)…"
+      return "Syncing \(ticketId)…"
     case let .pullTicketFromLinear(ticketId):
-      return "Refreshing \(ticketId)…"
+      return "Reconciling \(ticketId)…"
     }
   }
 }

@@ -67,10 +67,14 @@ export function createLinearSyncStorePlugin({
             error: "better_auth_session_required",
           } as const;
         }
+        const profileId =
+          normalizeOptionalQueryValue({ value: query.profileId }) ??
+          session.session?.managementTokenProfileId ??
+          null;
         if (
           !hasBetterAuthProfileAccess({
             session: session.session,
-            profileId: normalizeOptionalQueryValue({ value: query.profileId }),
+            profileId,
           })
         ) {
           set.status = 403;
@@ -83,7 +87,7 @@ export function createLinearSyncStorePlugin({
 
         const allDeliveries = await syncStore.listWebhookDeliveries({
           status: statusResult.status,
-          profileId: normalizeOptionalQueryValue({ value: query.profileId }),
+          profileId,
           projectId: normalizeOptionalQueryValue({ value: query.projectId }),
           teamId: normalizeOptionalQueryValue({ value: query.teamId }),
         });

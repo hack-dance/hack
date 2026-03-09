@@ -1038,10 +1038,32 @@ describe("auth broker github flow routes", () => {
 
   test("linear pending deliveries route lists pending deliveries with scope filters", async () => {
     const syncStore: LinearSyncStore = new InMemoryLinearSyncStore();
+    const session = {
+      session: {
+        id: "sess-team-a",
+        userId: "user-a",
+        expiresAt: new Date(),
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        token: "token-team-a",
+      },
+      user: {
+        id: "user-a",
+        email: "user-a@example.com",
+        emailVerified: true,
+        name: "User A",
+      },
+    } as NonNullable<BetterAuthSession>;
     const app = createAuthBrokerApp({
       config: createTestConfig(),
       flowStore: new FlowStore(),
       linearSyncStore: syncStore,
+      betterAuthRuntime: createBetterAuthRuntimeWithSession(
+        withActiveTeam(session, {
+          organizationId: "org-a",
+          teamId: "team-a",
+        })
+      ),
     });
 
     const matchingDelivery = await syncStore.recordWebhookDelivery({

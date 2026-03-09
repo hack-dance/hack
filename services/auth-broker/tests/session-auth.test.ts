@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { BetterAuthRuntime } from "../src/better-auth.ts";
 import { FlowStore } from "../src/flow-store.ts";
 import { createAuthBrokerApp } from "../src/index.ts";
+import { hasBetterAuthProfileAccess } from "../src/modules/better-auth/session.ts";
 
 type BetterAuthAuth = NonNullable<BetterAuthRuntime["auth"]>;
 type BetterAuthSession = Awaited<
@@ -104,6 +105,43 @@ async function withManagementTokenSecret<T>(
 }
 
 describe("broker Hack session auth flow", () => {
+  test("profile access fails closed when session or requested profile is missing", () => {
+    expect(
+      hasBetterAuthProfileAccess({
+        session: null,
+        profileId: "work",
+      })
+    ).toBe(false);
+
+    expect(
+      hasBetterAuthProfileAccess({
+        session: {
+          userId: "user-123",
+          email: null,
+          name: null,
+          organizationId: null,
+          teamId: null,
+          managementTokenProfileId: "work",
+        },
+        profileId: null,
+      })
+    ).toBe(false);
+
+    expect(
+      hasBetterAuthProfileAccess({
+        session: {
+          userId: "user-123",
+          email: null,
+          name: null,
+          organizationId: null,
+          teamId: null,
+          managementTokenProfileId: "work",
+        },
+        profileId: "work",
+      })
+    ).toBe(true);
+  });
+
   test("session start exposes configured social providers", async () => {
     const app = createAuthBrokerApp({
       config: createTestConfig(),

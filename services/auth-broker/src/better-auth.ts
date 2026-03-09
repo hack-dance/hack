@@ -112,7 +112,7 @@ export function createBetterAuthRuntimeFromEnv(): BetterAuthRuntime {
 
   return {
     enabled: true,
-    auth,
+    auth: auth as unknown as BetterAuthInstance,
     db,
     ready,
     socialProviders: socialProviderConfig.socialProviders,

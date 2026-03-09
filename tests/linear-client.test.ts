@@ -119,8 +119,8 @@ test("getViewer sends bearer authorization for oauth tokens", async () => {
   const result = await client.getViewer();
 
   expect(result.ok).toBe(true);
-  expect(authorization).toBe("Bearer linear-oauth-token");
-  expect(requestedUrl).toBe("https://api.linear.app/graphql");
+  expect(authorization ?? "").toBe("Bearer linear-oauth-token");
+  expect(requestedUrl ?? "").toBe("https://api.linear.app/graphql");
 });
 
 test("listProjects queries the top-level projects connection", async () => {

@@ -50,10 +50,14 @@ export function createLinearConnectionsPlugin({
             error: "better_auth_session_required",
           } as const;
         }
+        const profileId =
+          normalizeOptionalQueryValue(query.profileId) ??
+          session.session?.managementTokenProfileId ??
+          null;
         if (
           !hasBetterAuthProfileAccess({
             session: session.session,
-            profileId: normalizeOptionalQueryValue(query.profileId),
+            profileId,
           })
         ) {
           set.status = 403;
@@ -64,7 +68,7 @@ export function createLinearConnectionsPlugin({
         }
         const activeSession = session.session;
         const allConnections = await connectionStore.listConnections({
-          profileId: normalizeOptionalQueryValue(query.profileId),
+          profileId,
           organizationId: normalizeOptionalQueryValue(query.organizationId),
         });
         const connections =
@@ -95,7 +99,10 @@ export function createLinearConnectionsPlugin({
           set.status = 401;
           return { ok: false, error: "better_auth_session_required" } as const;
         }
-        const profileId = normalizeOptionalQueryValue(body.profileId);
+        const profileId =
+          normalizeOptionalQueryValue(body.profileId) ??
+          session.session?.managementTokenProfileId ??
+          null;
         if (
           !hasBetterAuthProfileAccess({
             session: session.session,
@@ -162,7 +169,10 @@ export function createLinearConnectionsPlugin({
           set.status = 401;
           return { ok: false, error: "better_auth_session_required" } as const;
         }
-        const profileId = normalizeOptionalQueryValue(body.profileId);
+        const profileId =
+          normalizeOptionalQueryValue(body.profileId) ??
+          session.session?.managementTokenProfileId ??
+          null;
         if (
           !hasBetterAuthProfileAccess({
             session: session.session,

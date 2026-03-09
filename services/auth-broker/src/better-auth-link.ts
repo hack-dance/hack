@@ -7,6 +7,7 @@ import type { OAuthFlowAccount } from "./types.ts";
 
 export type BetterAuthUserLinkState =
   | "disabled"
+  | "email_not_verified"
   | "missing_email"
   | "linked_existing"
   | "created_new"
@@ -68,6 +69,9 @@ async function resolveBetterAuthUserFromOAuthAccount(input: {
   const accountEmail = normalizeText(input.account.accountEmail);
   if (!accountEmail) {
     return { state: "missing_email" };
+  }
+  if (input.account.accountEmailVerified === false) {
+    return { state: "email_not_verified" };
   }
 
   try {

@@ -43,6 +43,7 @@ describe("better-auth github account linking", () => {
       },
       account: {
         accountEmail: "linear@example.com",
+        accountEmailVerified: true,
         accountName: "Linear User",
       },
       autoProvision: false,
@@ -50,5 +51,23 @@ describe("better-auth github account linking", () => {
 
     expect(result.state).toBe("linked_existing");
     expect(result.userId).toBe("user-linear-1");
+  });
+
+  test("rejects unverified provider emails before linking or provisioning", async () => {
+    const result = await resolveBetterAuthUserFromLinearAccount({
+      runtime: {
+        enabled: true,
+        db: createBetterAuthDb([{ id: "user-linear-1" }]),
+      },
+      account: {
+        accountEmail: "linear@example.com",
+        accountEmailVerified: false,
+        accountName: "Linear User",
+      },
+      autoProvision: true,
+    });
+
+    expect(result.state).toBe("email_not_verified");
+    expect(result.userId).toBeUndefined();
   });
 });

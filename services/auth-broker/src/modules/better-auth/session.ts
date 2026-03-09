@@ -185,15 +185,18 @@ export function hasBetterAuthProfileAccess(input: {
   readonly session: BrokerBetterAuthSession | null;
   readonly profileId?: string | null;
 }): boolean {
+  if (!input.session) {
+    return false;
+  }
   const managementTokenProfileId = normalizeOptionalString(
-    input.session?.managementTokenProfileId
+    input.session.managementTokenProfileId
   );
   if (!managementTokenProfileId) {
     return true;
   }
   const requestedProfileId = normalizeOptionalString(input.profileId);
   if (!requestedProfileId) {
-    return true;
+    return false;
   }
   return requestedProfileId === managementTokenProfileId;
 }

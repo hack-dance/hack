@@ -1,3 +1,12 @@
+## <small>1.17.1 (2026-03-09)</small>
+
+* fix: trigger release after merged linear integration ([c8991f9](https://github.com/hack-dance/hack/commit/c8991f9))
+* fix(tests): avoid keychain dependency in linear alias test ([43654c2](https://github.com/hack-dance/hack/commit/43654c2))
+* fix(tests): harden tickets and linear alias CI behavior ([4ef36e5](https://github.com/hack-dance/hack/commit/4ef36e5))
+* fix(tests): parse linear alias json payload robustly ([6f4f9fb](https://github.com/hack-dance/hack/commit/6f4f9fb))
+* fix(tests): use config-only linear alias coverage ([42ca8b1](https://github.com/hack-dance/hack/commit/42ca8b1))
+* Fix Linear integration setup and docs (#18) ([3a46a21](https://github.com/hack-dance/hack/commit/3a46a21)), closes [#18](https://github.com/hack-dance/hack/issues/18)
+
 ## 1.17.0 (2026-02-28)
 
 * fix(tests): replace private-ip route fixture ([1373858](https://github.com/hack-dance/hack/commit/1373858))

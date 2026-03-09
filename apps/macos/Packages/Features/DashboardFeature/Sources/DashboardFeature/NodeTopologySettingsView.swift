@@ -207,8 +207,8 @@ struct NodeTopologySettingsView: View {
               Button("Open Tailscale") {
                 openTailscaleSettings()
               }
-              Button("Open Extensions") {
-                openExtensionsSettings()
+              Button("Open account") {
+                openAccountSettings()
               }
             } label: {
               Label("Add node", systemImage: "plus.circle")
@@ -301,9 +301,9 @@ struct NodeTopologySettingsView: View {
               topologyExpanded = false
               openTailscaleSettings()
             }
-            Button("Open Extensions") {
+            Button("Open account") {
               topologyExpanded = false
-              openExtensionsSettings()
+              openAccountSettings()
             }
           } label: {
             Label("Add node", systemImage: "plus.circle")
@@ -1444,11 +1444,11 @@ struct NodeTopologySettingsView: View {
     )
   }
 
-  private func openExtensionsSettings() {
+  private func openAccountSettings() {
     NotificationCenter.default.post(
       name: .hackSettingsRequested,
       object: nil,
-      userInfo: [SettingsNavigationRequest.paneKey: SettingsSidebarItem.extensions.rawValue]
+      userInfo: [SettingsNavigationRequest.paneKey: SettingsSidebarItem.account.rawValue]
     )
   }
 

@@ -14,5 +14,12 @@
   "oauth": {
     "enabled": false,
     "tld": "gy"
+  },
+  "controlPlane": {
+    "extensions": {
+      "dance.hack.linear": {
+        "enabled": true
+      }
+    }
   }
 }

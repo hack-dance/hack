@@ -2,6 +2,7 @@ import { Elysia } from "elysia";
 
 import type { BetterAuthRuntime } from "../../better-auth.ts";
 import type { BrokerConfig } from "../../config.ts";
+import { resolveBetterAuthSession } from "../better-auth/session.ts";
 
 type CreateProvidersPluginOptions = {
   readonly config: BrokerConfig;
@@ -17,24 +18,58 @@ export function createProvidersPlugin({
 }: CreateProvidersPluginOptions) {
   return new Elysia({
     name: "hack-auth-broker.providers",
-  }).all("/v1/auth/providers", () => ({
-    providers: [
-      {
-        id: "better-auth",
-        enabled: betterAuthRuntime.enabled,
-        mode: "session",
-        basePath: "/api/auth",
-      },
-      {
-        id: "github",
-        enabled: true,
-        mode: "oauth",
-        requestedScopes: config.githubScopes,
-        redirectUri: config.githubRedirectUri,
-        appId: config.githubAppId,
-        appSlug: config.githubAppSlug,
-        appInstallUrl: config.githubAppInstallUrl,
-      },
-    ] as const,
-  }));
+  }).all("/v1/auth/providers", async ({ request }) => {
+    const session = await resolveBetterAuthSession({
+      runtime: betterAuthRuntime,
+      request,
+    });
+    return {
+      providers: [
+        {
+          id: "better-auth",
+          enabled: betterAuthRuntime.enabled,
+          mode: "session",
+          basePath: "/api/auth",
+          shellPath: "/auth",
+          accountPath: "/auth/account",
+          sessionStartPath: "/v1/auth/session/start",
+          mePath: "/v1/auth/me",
+          socialProviders: betterAuthRuntime.socialProviders ?? [],
+          accountLinkingPolicy: betterAuthRuntime.accountLinkingPolicy ?? {
+            requireVerifiedEmail: true,
+            allowDifferentEmails: false,
+            trustedProviders: [],
+          },
+        },
+        {
+          id: "github",
+          enabled: true,
+          mode: "oauth",
+          requestedScopes: config.githubScopes,
+          redirectUri: config.githubRedirectUri,
+          appId: config.githubAppId,
+          appSlug: config.githubAppSlug,
+          appInstallUrl: config.githubAppInstallUrl,
+        },
+        {
+          id: "linear",
+          enabled: Boolean(config.linearClientId),
+          mode: "oauth+agent",
+          requestedScopes: config.linearScopes,
+          redirectUri: config.linearRedirectUri,
+          authorizeUrl: config.linearAuthorizeUrl,
+          tokenUrl: config.linearTokenUrl,
+          apiBaseUrl: config.linearApiBaseUrl,
+          webhookPath: config.linearWebhookPath,
+          connectionsPath: "/v1/auth/linear/connections",
+          subscriptionsPath: "/v1/auth/linear/subscriptions",
+          accessControlMode: session.accessControlMode,
+          developerAppTokenConfigured: Boolean(config.linearDeveloperAppToken),
+          webhookSignatureVerification: config.linearWebhookSigningSecret
+            ? "hmac-sha256"
+            : "disabled",
+        },
+      ] as const,
+    };
+  });
 }

@@ -40,7 +40,7 @@ export function createFlow(input: {
   readonly flowStore: FlowStore;
   readonly query: Pick<
     GitHubOAuthModel["startQuery"],
-    "profile" | "setDefault" | "requireInstallation"
+    "profile" | "setDefault" | "requireInstallation" | "desktopRedirectUrl"
   >;
 }): StartFlowPayload {
   const nowMs = Date.now();
@@ -50,6 +50,9 @@ export function createFlow(input: {
   const profileId = normalizeText(input.query.profile) ?? "default";
   const setDefault = isTruthy(input.query.setDefault);
   const requireInstallation = isTruthy(input.query.requireInstallation);
+  const desktopRedirectUrl = normalizeDesktopRedirectUrl(
+    input.query.desktopRedirectUrl
+  );
   const expiresAtMs = nowMs + input.config.flowTtlMs;
   const authorizeUrl = buildAuthorizeUrl({
     authorizeUrl: input.config.githubAuthorizeUrl,
@@ -61,6 +64,7 @@ export function createFlow(input: {
 
   input.flowStore.createFlow({
     id: flowId,
+    provider: "github",
     state,
     profileId,
     setDefault,
@@ -76,6 +80,7 @@ export function createFlow(input: {
     createdAtMs: nowMs,
     expiresAtMs,
     redirectUri: input.config.githubRedirectUri,
+    ...(desktopRedirectUrl ? { desktopRedirectUrl } : {}),
     status: "pending",
   });
 
@@ -124,13 +129,14 @@ export async function refreshFlowInstallationsIfNeeded(input: {
   if (!identity.ok) {
     return;
   }
+  const installationIds = identity.account.installationIds ?? [];
   const installationId =
-    identity.account.installationIds.length === 1
-      ? (identity.account.installationIds[0] ?? undefined)
+    installationIds.length === 1
+      ? (installationIds[0] ?? undefined)
       : undefined;
   input.flowStore.updateInstallationState({
     flowId: flow.id,
-    installationIds: identity.account.installationIds,
+    installationIds,
     ...(installationId ? { installationId } : {}),
   });
 }
@@ -227,7 +233,7 @@ export async function handleGitHubCallback(input: {
     return renderCallbackPage({
       title: "Token exchange failed",
       body: exchange.error,
-      statusCode: 502,
+      statusCode: 200,
     });
   }
 
@@ -244,14 +250,15 @@ export async function handleGitHubCallback(input: {
     return renderCallbackPage({
       title: "GitHub account lookup failed",
       body: identity.error,
-      statusCode: 502,
+      statusCode: 200,
     });
   }
 
+  const installationIds = identity.account.installationIds ?? [];
   const installationId =
     installationIdFromCallback ??
-    (identity.account.installationIds.length === 1
-      ? (identity.account.installationIds[0] ?? undefined)
+    (installationIds.length === 1
+      ? (installationIds[0] ?? undefined)
       : undefined);
 
   const betterAuthLink = await resolveBetterAuthUserFromGitHubAccount({
@@ -282,6 +289,7 @@ export async function handleGitHubCallback(input: {
       flowId: flow.id,
       profileId: flow.profileId,
       status: installationId ? "complete" : "install_required",
+      ...(flow.desktopRedirectUrl ? { baseUrl: flow.desktopRedirectUrl } : {}),
       ...(installationId ? { installationId } : {}),
     }),
   };
@@ -359,9 +367,10 @@ export function buildHackDesktopDeepLink(input: {
   readonly flowId: string;
   readonly profileId: string;
   readonly status: string;
+  readonly baseUrl?: string;
   readonly installationId?: string;
 }): string {
-  const url = new URL("hack://auth/github/callback");
+  const url = new URL(input.baseUrl ?? "hack://auth/github/callback");
   url.searchParams.set("flowId", input.flowId);
   url.searchParams.set("profileId", input.profileId);
   url.searchParams.set("status", input.status);
@@ -369,6 +378,22 @@ export function buildHackDesktopDeepLink(input: {
     url.searchParams.set("installationId", input.installationId);
   }
   return url.toString();
+}
+
+function normalizeDesktopRedirectUrl(value: string | undefined): string | null {
+  const normalized = normalizeText(value);
+  if (!normalized) {
+    return null;
+  }
+  try {
+    const url = new URL(normalized);
+    if (url.protocol !== "hack:" && url.protocol !== "hack-dev:") {
+      return null;
+    }
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
 
 function renderCallbackPage(input: {

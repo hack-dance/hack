@@ -17,6 +17,7 @@ Native macOS app for managing local hack projects and daemon status.
 - GitHub account connect now runs browser OAuth through the auth-broker endpoint surface and imports tokens into local profile keychain storage.
 - GitHub connect now supports authorize+install flow hints from the broker and can keep polling in "install required" state until a GitHub App installation is selected.
 - Browser callback pages can deep-link back to the app (`hack://auth/github/callback?...`) to immediately refocus and finalize active connect flows.
+- Hack account browser sign-in can deep-link back to the app (`hack://auth/complete`) to refocus the account/settings UI after Better Auth finishes in the browser.
 - Cloud OAuth remains separate from local gateway/daemon bearer-token auth (transport auth boundary).
 - Node topology pane includes a controller-host mode toggle, interactive network graph canvas (node selection, typed edge labels, draggable node layout persisted per controller profile, auto-tidy reflow, expandable full map), primary/default node view, authorized node management, connectivity probes, and pairing request inbox approval actions.
 - Tailscale settings now include a dedicated bootstrap auth-key panel; saving there writes the shared key used by private Railway bootstrap (`controlPlane.extensions["dance.hack.tailscale"].config.authKey`, mirrored to Railway compatibility key) with optional `HACK_TAILSCALE_AUTH_KEY` fallback.
@@ -70,8 +71,8 @@ For GitHub browser OAuth, the app defaults to:
 
 Set `HACK_AUTH_BROKER_URL` to override and pin a custom broker endpoint.
 
-The app registers URL scheme `hack` and handles `hack://auth/github/callback`
-deep links for GitHub OAuth return-to-app UX.
+Release builds register URL scheme `hack`. Debug/Xcode builds register `hack-dev`
+so browser auth returns target the running debug app instead of any installed release copy.
 
 ## Data source
 

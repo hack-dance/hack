@@ -232,7 +232,12 @@ async function writeGlobalSecretsConfig(input: {
           ? { allowEnvAuthRefs: input.allowEnvAuthRefs }
           : {}),
         ...(input.encryptedFilePath
-          ? { encryptedFile: { path: input.encryptedFilePath } }
+          ? {
+              encryptedFile: {
+                path: input.encryptedFilePath,
+                keyPath: "~/.hack/secrets-file.key",
+              },
+            }
           : {}),
         ...(input.cloudProvider
           ? {

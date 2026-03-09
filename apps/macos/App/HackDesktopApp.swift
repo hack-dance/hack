@@ -108,9 +108,10 @@ struct HackDesktopApp: App {
 
   @MainActor
   private func handleIncomingDeepLink(url: URL) {
-    guard model.ingestGitHubOAuthDeepLink(url: url) else {
-      return
-    }
+    let handledHackAuth = model.ingestHackAuthDeepLink(url: url)
+    let handledGitHub = model.ingestGitHubOAuthDeepLink(url: url)
+    let handledLinear = model.ingestLinearOAuthDeepLink(url: url)
+    guard handledHackAuth || handledGitHub || handledLinear else { return }
 
 #if os(macOS)
     NSApp.activate(ignoringOtherApps: true)
@@ -119,7 +120,7 @@ struct HackDesktopApp: App {
       name: .hackSettingsRequested,
       object: nil,
       userInfo: [
-        "pane": "github",
+        "pane": handledHackAuth ? "account" : (handledLinear ? "linear" : "github"),
       ]
     )
   }

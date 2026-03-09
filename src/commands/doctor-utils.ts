@@ -1,6 +1,10 @@
 import { YAML } from "bun";
 
-import { DEFAULT_CADDY_IP, DEFAULT_INGRESS_NETWORK } from "../constants.ts";
+import {
+  DEFAULT_CADDY_IP,
+  DEFAULT_HOST_DNS_IP,
+  DEFAULT_INGRESS_NETWORK,
+} from "../constants.ts";
 import { isRecord, isStringArray } from "../lib/guards.ts";
 
 export type ComposeNetworkHygieneError =
@@ -26,15 +30,28 @@ export function dnsmasqConfigHasDomain(opts: {
   readonly text: string;
   readonly domain: string;
 }): boolean {
-  // Accept container IP (preferred), IPv6, or legacy IPv4 config
+  // Accept either supported host target plus the legacy IPv6 form.
   const containerIpLine = `address=/.${opts.domain}/${DEFAULT_CADDY_IP}`;
   const ipv6Line = `address=/.${opts.domain}/::1`;
-  const ipv4Line = `address=/.${opts.domain}/127.0.0.1`;
+  const ipv4Line = `address=/.${opts.domain}/${DEFAULT_HOST_DNS_IP}`;
   return (
     opts.text.includes(containerIpLine) ||
     opts.text.includes(ipv6Line) ||
     opts.text.includes(ipv4Line)
   );
+}
+
+export function resolvePreferredHostDnsTarget(opts: {
+  readonly containerIpReachable: boolean;
+  readonly localhostReachable: boolean;
+}): string {
+  if (opts.containerIpReachable) {
+    return DEFAULT_CADDY_IP;
+  }
+  if (opts.localhostReachable) {
+    return DEFAULT_HOST_DNS_IP;
+  }
+  return DEFAULT_CADDY_IP;
 }
 
 export function analyzeComposeNetworkHygiene(opts: {

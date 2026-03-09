@@ -1,5 +1,6 @@
 import pkg from "../../package.json";
 import { agentCommand } from "../commands/agent.ts";
+import { authCommand } from "../commands/auth.ts";
 import { branchCommand } from "../commands/branch.ts";
 import { configCommand } from "../commands/config.ts";
 import { crashCaptureCommand } from "../commands/crash-capture.ts";
@@ -11,6 +12,7 @@ import { gatewayCommand } from "../commands/gateway.ts";
 import { globalCommand } from "../commands/global.ts";
 import { helpCommand } from "../commands/help.ts";
 import { internalCommand } from "../commands/internal.ts";
+import { linearCommand } from "../commands/linear.ts";
 import { logPipeCommand } from "../commands/log-pipe.ts";
 import { mcpCommand } from "../commands/mcp.ts";
 import { nodeCommand } from "../commands/node.ts";
@@ -53,6 +55,7 @@ export const CLI_SPEC = defineCli({
   globalOptions: [],
   commands: [
     globalCommand,
+    authCommand,
     statusCommand,
     usageCommand,
     projectsCommand,
@@ -67,6 +70,7 @@ export const CLI_SPEC = defineCli({
     openCommand,
     branchCommand,
     logPipeCommand,
+    linearCommand,
     doctorCommand,
     crashCaptureCommand,
     daemonCommand,

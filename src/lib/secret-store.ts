@@ -4,6 +4,7 @@ import {
   createHash,
   randomBytes,
 } from "node:crypto";
+import { chmod, stat, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { secrets } from "bun";
 import type {
@@ -15,12 +16,16 @@ import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { ensureDir, readTextFile } from "./fs.ts";
 
 const ENCRYPTED_FILE_KEY_ENV = "HACK_SECRETS_FILE_KEY";
+const DEFAULT_ENCRYPTED_FILE_KEY_PATH = "~/.hack/secrets-file.key";
 const ENCRYPTED_FILE_KEY_SERVICE = "hack-secrets-backend";
 const ENCRYPTED_FILE_KEY_NAME = "encrypted-file-key";
+const ENCRYPTED_FILE_KEY_FAILURE_COOLDOWN_MS = 60_000;
 const ENCRYPTED_STORE_VERSION = 1 as const;
 const PLAINTEXT_STORE_VERSION = 1 as const;
 const ENCRYPTED_ALGORITHM = "aes-256-gcm";
 const ENCRYPTED_IV_BYTES = 12;
+let cachedEncryptedFileKey: string | null = null;
+let encryptedFileKeyFailureCooldownUntilMs = 0;
 
 type EncryptedStorePayload = {
   readonly version: typeof ENCRYPTED_STORE_VERSION;
@@ -129,10 +134,20 @@ async function createEncryptedFileSecretStore(input: {
   readonly projectName: string;
   readonly secretsConfig: SecretsConfig;
 }): Promise<SecretStore> {
-  const encryptionKey = await resolveEncryptedFileKeyMaterial();
   const filePath = resolveConfiguredPath({
     path: input.secretsConfig.encryptedFile.path,
   });
+  const keyPath = resolveConfiguredPath({
+    path:
+      input.secretsConfig.encryptedFile.keyPath ??
+      DEFAULT_ENCRYPTED_FILE_KEY_PATH,
+  });
+  const encryptionKey = (
+    await resolveEncryptedFileKeyMaterial({
+      keyPath,
+      storePath: filePath,
+    })
+  ).key;
   return createEncryptedScopedStore({
     backend: "encrypted_file",
     scope: input.projectName,
@@ -215,10 +230,20 @@ async function createCloudShimAdapter(input: {
 > {
   const project = input.secretsConfig.cloud.project?.trim() || "default";
   const prefix = input.secretsConfig.cloud.secretPrefix.trim() || "hack";
-  const encryptionKey = await resolveEncryptedFileKeyMaterial();
   const filePath = resolveConfiguredPath({
     path: input.secretsConfig.encryptedFile.path,
   });
+  const keyPath = resolveConfiguredPath({
+    path:
+      input.secretsConfig.encryptedFile.keyPath ??
+      DEFAULT_ENCRYPTED_FILE_KEY_PATH,
+  });
+  const encryptionKey = (
+    await resolveEncryptedFileKeyMaterial({
+      keyPath,
+      storePath: filePath,
+    })
+  ).key;
   const scope = [
     "cloud",
     input.provider,
@@ -332,19 +357,143 @@ function resolveConfiguredPath(input: { readonly path: string }): string {
   return resolve(home, raw);
 }
 
-async function resolveEncryptedFileKeyMaterial(): Promise<string> {
+export async function provisionEncryptedFileKey(input: {
+  readonly keyPath?: string;
+  readonly storePath?: string;
+}): Promise<{
+  readonly keyPath: string;
+  readonly source: "env" | "file" | "keychain" | "generated";
+}> {
+  const keyPath = resolveConfiguredPath({
+    path: input.keyPath ?? DEFAULT_ENCRYPTED_FILE_KEY_PATH,
+  });
+  const storePath = input.storePath
+    ? resolveConfiguredPath({
+        path: input.storePath,
+      })
+    : undefined;
+  const resolved = await resolveEncryptedFileKeyMaterial({
+    keyPath,
+    storePath,
+    persistResolvedKey: true,
+  });
+  return {
+    keyPath,
+    source: resolved.source,
+  };
+}
+
+async function resolveEncryptedFileKeyMaterial(input?: {
+  readonly keyPath?: string;
+  readonly storePath?: string;
+  readonly persistResolvedKey?: boolean;
+}): Promise<{
+  readonly key: string;
+  readonly source: "env" | "file" | "keychain" | "generated";
+}> {
   const envValue = (process.env[ENCRYPTED_FILE_KEY_ENV] ?? "").trim();
   if (envValue.length > 0) {
-    return envValue;
+    cachedEncryptedFileKey = envValue;
+    encryptedFileKeyFailureCooldownUntilMs = 0;
+    if (input?.persistResolvedKey && input.keyPath) {
+      await writeEncryptedFileKey({
+        keyPath: input.keyPath,
+        key: envValue,
+      });
+    }
+    return {
+      key: envValue,
+      source: "env",
+    };
   }
-  const existing = (
-    await secrets.get({
-      service: ENCRYPTED_FILE_KEY_SERVICE,
-      name: ENCRYPTED_FILE_KEY_NAME,
-    })
-  )?.trim();
+
+  const configuredKeyPath = input?.keyPath?.trim();
+  if (configuredKeyPath) {
+    const fileKey = await readEncryptedFileKey({
+      keyPath: configuredKeyPath,
+    });
+    if (fileKey) {
+      cachedEncryptedFileKey = fileKey;
+      encryptedFileKeyFailureCooldownUntilMs = 0;
+      return {
+        key: fileKey,
+        source: "file",
+      };
+    }
+  }
+  if (cachedEncryptedFileKey) {
+    if (input?.persistResolvedKey && input.keyPath) {
+      await writeEncryptedFileKey({
+        keyPath: input.keyPath,
+        key: cachedEncryptedFileKey,
+      });
+    }
+    return {
+      key: cachedEncryptedFileKey,
+      source: "keychain",
+    };
+  }
+
+  const shouldBootstrapFileKey =
+    Boolean(configuredKeyPath) &&
+    (await canBootstrapEncryptedFileKey({
+      storePath: input?.storePath,
+    }));
+  if (configuredKeyPath && shouldBootstrapFileKey) {
+    const generated = randomBytes(32).toString("base64url");
+    await writeEncryptedFileKey({
+      keyPath: configuredKeyPath,
+      key: generated,
+    });
+    cachedEncryptedFileKey = generated;
+    encryptedFileKeyFailureCooldownUntilMs = 0;
+    return {
+      key: generated,
+      source: "generated",
+    };
+  }
+
+  const nowMs = Date.now();
+  if (nowMs < encryptedFileKeyFailureCooldownUntilMs) {
+    throw new Error(
+      `Encrypted backend key access is cooling down after a failed keychain lookup. Set ${ENCRYPTED_FILE_KEY_ENV} to bypass keychain prompts.`
+    );
+  }
+
+  let existing: string | undefined;
+  try {
+    existing = (
+      await secrets.get({
+        service: ENCRYPTED_FILE_KEY_SERVICE,
+        name: ENCRYPTED_FILE_KEY_NAME,
+      })
+    )?.trim();
+  } catch {
+    encryptedFileKeyFailureCooldownUntilMs =
+      Date.now() + ENCRYPTED_FILE_KEY_FAILURE_COOLDOWN_MS;
+    throw new Error(
+      `Failed to access encrypted backend key in keychain service "${ENCRYPTED_FILE_KEY_SERVICE}". Set ${ENCRYPTED_FILE_KEY_ENV} to bypass keychain prompts.`
+    );
+  }
   if (existing) {
-    return existing;
+    if (configuredKeyPath) {
+      await writeEncryptedFileKey({
+        keyPath: configuredKeyPath,
+        key: existing,
+      });
+    }
+    cachedEncryptedFileKey = existing;
+    encryptedFileKeyFailureCooldownUntilMs = 0;
+    return {
+      key: existing,
+      source: "keychain",
+    };
+  }
+
+  if (configuredKeyPath) {
+    throw new Error(
+      `Missing encrypted backend key. Provision ${configuredKeyPath} or set ${ENCRYPTED_FILE_KEY_ENV}.`
+    );
   }
 
   const generated = randomBytes(32).toString("base64url");
@@ -355,11 +504,52 @@ async function resolveEncryptedFileKeyMaterial(): Promise<string> {
       value: generated,
     });
   } catch {
+    encryptedFileKeyFailureCooldownUntilMs =
+      Date.now() + ENCRYPTED_FILE_KEY_FAILURE_COOLDOWN_MS;
     throw new Error(
-      `Missing encrypted backend key. Set ${ENCRYPTED_FILE_KEY_ENV} or configure keychain access.`
+      `Missing encrypted backend key. Set ${ENCRYPTED_FILE_KEY_ENV} or configure keychain access for service "${ENCRYPTED_FILE_KEY_SERVICE}".`
     );
   }
-  return generated;
+  cachedEncryptedFileKey = generated;
+  encryptedFileKeyFailureCooldownUntilMs = 0;
+  return {
+    key: generated,
+    source: "generated",
+  };
+}
+
+async function canBootstrapEncryptedFileKey(input: {
+  readonly storePath?: string;
+}): Promise<boolean> {
+  if (!input.storePath) {
+    return true;
+  }
+  try {
+    const info = await stat(input.storePath);
+    return info.size === 0;
+  } catch {
+    return true;
+  }
+}
+
+async function readEncryptedFileKey(input: {
+  readonly keyPath: string;
+}): Promise<string | null> {
+  const raw = await readTextFile(input.keyPath);
+  const key = raw?.trim() ?? "";
+  return key.length > 0 ? key : null;
+}
+
+async function writeEncryptedFileKey(input: {
+  readonly keyPath: string;
+  readonly key: string;
+}): Promise<void> {
+  await ensureDir(dirname(input.keyPath));
+  await writeFile(input.keyPath, `${input.key}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  await chmod(input.keyPath, 0o600).catch(() => undefined);
 }
 
 async function readEncryptedEntries(input: {

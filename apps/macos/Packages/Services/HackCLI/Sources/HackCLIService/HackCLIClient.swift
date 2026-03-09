@@ -62,6 +62,55 @@ public actor HackCLIClient {
 
   private static let authRequestTimeoutSeconds: TimeInterval = 10
 
+  private struct BetterAuthStatusEnvelope: Decodable {
+    let enabled: Bool
+    let reason: String?
+    let basePath: String
+  }
+
+  private struct HackAuthStatusEnvelope: Decodable {
+    let ok: Bool
+    let authenticated: Bool?
+    let tokenStored: Bool?
+    let validated: Bool?
+    let brokerBaseUrl: String?
+    let accessControlMode: String?
+    let authReason: String?
+    let error: String?
+    let user: HackAuthUserEnvelope?
+    let activeOrganization: HackAuthNamedEntityEnvelope?
+    let activeTeam: HackAuthNamedEntityEnvelope?
+    let shellPath: String?
+    let accountPath: String?
+  }
+
+  private struct HackAuthUserEnvelope: Decodable {
+    let id: String?
+    let email: String?
+    let name: String?
+    let emailVerified: Bool?
+  }
+
+  private struct HackAuthNamedEntityEnvelope: Decodable {
+    let id: String?
+    let name: String?
+  }
+
+  private struct HackAuthLoginEnvelope: Decodable {
+    let ok: Bool
+    let authenticated: Bool?
+    let brokerBaseUrl: String?
+    let authorizeUrl: String?
+    let error: String?
+    let nextStep: String?
+  }
+
+  private struct HackAuthLogoutEnvelope: Decodable {
+    let ok: Bool
+    let loggedOut: Bool?
+    let hadToken: Bool?
+  }
+
   private struct GitHubOAuthStartEnvelope: Decodable {
     let ok: Bool
     let flow: GitHubOAuthStartEnvelopeFlow
@@ -105,6 +154,47 @@ public actor HackCLIClient {
     let appSlug: String?
     let token: String?
     let tokenExpiresAt: String?
+    let error: String?
+  }
+
+  private struct LinearOAuthStartEnvelope: Decodable {
+    let ok: Bool
+    let flow: LinearOAuthStartEnvelopeFlow
+  }
+
+  private struct LinearOAuthStartEnvelopeFlow: Decodable {
+    let flowId: String
+    let profileId: String
+    let setDefault: Bool
+    let authorizeUrl: String
+    let deviceCode: String
+    let pollUrl: String
+    let expiresAt: String
+  }
+
+  private struct LinearOAuthStatusEnvelope: Decodable {
+    let ok: Bool
+    let status: LinearOAuthStatusEnvelopeStatus
+  }
+
+  private struct LinearOAuthStatusEnvelopeStatus: Decodable {
+    let id: String
+    let status: String
+    let profileId: String
+    let setDefault: Bool
+    let createdAt: String
+    let expiresAt: String
+    let completedAt: String?
+    let claimedAt: String?
+    let accountHandle: String?
+    let accountLogin: String?
+    let accountName: String?
+    let accountId: String?
+    let accountEmail: String?
+    let token: String?
+    let tokenExpiresAt: String?
+    let refreshToken: String?
+    let refreshTokenExpiresAt: String?
     let error: String?
   }
 
@@ -401,6 +491,357 @@ public actor HackCLIClient {
     return try decodeJsonOrThrow(GitHubStatusResponse.self, result: result)
   }
 
+  public func inspectLinearProfiles() async throws -> LinearProfilesResponse {
+    let result = try await run(
+      ["x", "linear", "profiles", "--json"],
+      allowNonZeroExit: true
+    )
+    return try decodeJsonOrThrow(LinearProfilesResponse.self, result: result)
+  }
+
+  public func listLinearConnections(
+    profileId: String? = nil,
+    organizationId: String? = nil
+  ) async throws -> LinearConnectionsResponse {
+    var args = ["x", "linear", "connections", "--json"]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    if let organizationId,
+      !organizationId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    {
+      args.append(contentsOf: ["--organization-id", organizationId])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(LinearConnectionsResponse.self, result: result)
+  }
+
+  public func seedLinearLocalAccess(profileId: String) async throws -> LinearLocalAccessSeedResponse {
+    let trimmed = profileId.trimmingCharacters(in: .whitespacesAndNewlines)
+    var args = ["x", "linear", "seed-local-access", "--json"]
+    if !trimmed.isEmpty {
+      args.append(contentsOf: ["--profile", trimmed])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(LinearLocalAccessSeedResponse.self, result: result)
+  }
+
+  public func inspectLinearStatus(profileId: String? = nil) async throws -> LinearStatusResponse {
+    var args = ["x", "linear", "status", "--json"]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(LinearStatusResponse.self, result: result)
+  }
+
+  public func disconnectLinear(profileId: String) async throws {
+    let trimmed = profileId.trimmingCharacters(in: .whitespacesAndNewlines)
+    var args = ["x", "linear", "disconnect"]
+    if !trimmed.isEmpty {
+      args.append(contentsOf: ["--profile", trimmed])
+    }
+    _ = try await run(args)
+  }
+
+  public func listLinearProjects(profileId: String? = nil) async throws -> LinearProjectsResponse {
+    var args = ["x", "linear", "projects", "--json"]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(LinearProjectsResponse.self, result: result)
+  }
+
+  public func listLinearAssigneeMappings(
+    profileId: String? = nil,
+    teamId: String? = nil
+  ) async throws -> LinearAssigneeMappingsResponse {
+    var args = ["x", "linear", "assignee-mappings", "--json"]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    if let teamId, !teamId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--team-id", teamId])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(LinearAssigneeMappingsResponse.self, result: result)
+  }
+
+  public func setLinearAssigneeMapping(
+    profileId: String? = nil,
+    teamId: String? = nil,
+    localAssignee: String,
+    linearUserId: String? = nil,
+    linearUserName: String? = nil,
+    linearUserEmail: String? = nil
+  ) async throws -> LinearAssigneeMappingMutationResponse {
+    var args = [
+      "x",
+      "linear",
+      "set-assignee-mapping",
+      "--json",
+      "--local-assignee",
+      localAssignee,
+    ]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    if let teamId, !teamId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--team-id", teamId])
+    }
+    if let linearUserId, !linearUserId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--linear-user-id", linearUserId])
+    }
+    if let linearUserName, !linearUserName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--linear-user-name", linearUserName])
+    }
+    if let linearUserEmail, !linearUserEmail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--linear-user-email", linearUserEmail])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(LinearAssigneeMappingMutationResponse.self, result: result)
+  }
+
+  public func removeLinearAssigneeMapping(
+    profileId: String? = nil,
+    teamId: String? = nil,
+    localAssignee: String
+  ) async throws -> LinearAssigneeMappingRemovalResponse {
+    var args = [
+      "x",
+      "linear",
+      "remove-assignee-mapping",
+      "--json",
+      "--local-assignee",
+      localAssignee,
+    ]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    if let teamId, !teamId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--team-id", teamId])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(LinearAssigneeMappingRemovalResponse.self, result: result)
+  }
+
+  public func listLinearAutosyncSubscriptions(
+    profileId: String? = nil,
+    projectId: String? = nil,
+    teamId: String? = nil
+  ) async throws -> LinearAutosyncSubscriptionsResponse {
+    var args = ["x", "linear", "subscriptions", "--json"]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    if let projectId, !projectId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--project-id", projectId])
+    }
+    if let teamId, !teamId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--team-id", teamId])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(LinearAutosyncSubscriptionsResponse.self, result: result)
+  }
+
+  public func setLinearAutosyncSubscription(
+    profileId: String? = nil,
+    projectId: String? = nil,
+    teamId: String? = nil,
+    mode: String = "auto_apply",
+    status: String = "active"
+  ) async throws -> LinearAutosyncSubscriptionMutationResponse {
+    var args = ["x", "linear", "set-subscription", "--json"]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    if let projectId, !projectId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--project-id", projectId])
+    }
+    if let teamId, !teamId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--team-id", teamId])
+    }
+    args.append(contentsOf: ["--mode", mode, "--status", status])
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(LinearAutosyncSubscriptionMutationResponse.self, result: result)
+  }
+
+  public func removeLinearAutosyncSubscription(
+    profileId: String? = nil,
+    projectId: String? = nil,
+    teamId: String? = nil
+  ) async throws -> LinearAutosyncSubscriptionMutationResponse {
+    var args = ["x", "linear", "remove-subscription", "--json"]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    if let projectId, !projectId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--project-id", projectId])
+    }
+    if let teamId, !teamId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--team-id", teamId])
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(LinearAutosyncSubscriptionMutationResponse.self, result: result)
+  }
+
+  public func bindLinearProject(
+    path: String,
+    profileId: String?,
+    projectId: String?,
+    projectName: String?,
+    teamId: String?,
+    clear: Bool
+  ) async throws -> LinearProjectBindingResponse {
+    var args = ["x", "linear", "project-bind", "--json"]
+    if clear {
+      args.append("--clear")
+    }
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    if let projectId, !projectId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--project-id", projectId])
+    }
+    if let projectName, !projectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--project-name", projectName])
+    }
+    if let teamId, !teamId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--team-id", teamId])
+    }
+    let result = try await run(args, allowNonZeroExit: true, cwd: path)
+    return try decodeJsonOrThrow(LinearProjectBindingResponse.self, result: result)
+  }
+
+  public func inspectLinearProjectBinding(path: String) async throws -> LinearProjectBindingResponse {
+    let result = try await run(["x", "linear", "project-bind", "--json"], allowNonZeroExit: true, cwd: path)
+    return try decodeJsonOrThrow(LinearProjectBindingResponse.self, result: result)
+  }
+
+  public func linkLinearProject(
+    path: String,
+    profileId: String?,
+    projectId: String,
+    projectName: String?,
+    teamId: String?
+  ) async throws -> LinearProjectBindingResponse {
+    var args = ["x", "linear", "project-link", "--json", "--project-id", projectId]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    if let projectName, !projectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--project-name", projectName])
+    }
+    if let teamId, !teamId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--team-id", teamId])
+    }
+    let result = try await run(args, allowNonZeroExit: true, cwd: path)
+    return try decodeJsonOrThrow(LinearProjectBindingResponse.self, result: result)
+  }
+
+  public func unlinkLinearProject(
+    path: String,
+    projectId: String
+  ) async throws -> LinearProjectBindingResponse {
+    let result = try await run(
+      ["x", "linear", "project-unlink", "--json", "--project-id", projectId],
+      allowNonZeroExit: true,
+      cwd: path
+    )
+    return try decodeJsonOrThrow(LinearProjectBindingResponse.self, result: result)
+  }
+
+  public func syncLinearProject(
+    path: String,
+    from direction: String,
+    profileId: String? = nil,
+    ownerMode: String? = nil,
+    projectId: String? = nil,
+    teamId: String? = nil,
+    limit: Int? = nil,
+    syncLabels: Bool? = nil
+  ) async throws -> LinearProjectSyncResponse {
+    var args = ["x", "linear", "sync-project", "--from", direction, "--json"]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    if let ownerMode, !ownerMode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--owner", ownerMode])
+    }
+    if let projectId, !projectId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--project-id", projectId])
+    }
+    if let teamId, !teamId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--team-id", teamId])
+    }
+    if let limit {
+      args.append(contentsOf: ["--limit", String(limit)])
+    }
+    if syncLabels == true {
+      args.append("--sync-labels")
+    }
+    let result = try await run(args, allowNonZeroExit: true, cwd: path)
+    return try decodeJsonOrThrow(LinearProjectSyncResponse.self, result: result)
+  }
+
+  public func runLinearAutosync(
+    path: String,
+    profileId: String? = nil,
+    projectId: String? = nil,
+    teamId: String? = nil,
+    limit: Int? = nil
+  ) async throws -> LinearAutosyncRunResponse {
+    var args = ["x", "linear", "run-autosync", "--json"]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    if let projectId, !projectId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--project-id", projectId])
+    }
+    if let teamId, !teamId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--team-id", teamId])
+    }
+    if let limit {
+      args.append(contentsOf: ["--limit", String(limit)])
+    }
+    let result = try await run(args, allowNonZeroExit: true, cwd: path)
+    return try decodeJsonOrThrow(LinearAutosyncRunResponse.self, result: result)
+  }
+
+  public func syncLinearIssue(
+    path: String,
+    from direction: String,
+    profileId: String? = nil,
+    issueIdentifier: String? = nil,
+    ticketId: String? = nil,
+    projectId: String? = nil,
+    teamId: String? = nil,
+    syncLabels: Bool? = nil
+  ) async throws -> LinearIssueSyncResponse {
+    var args = ["x", "linear", "sync-issue", "--from", direction, "--json"]
+    if let profileId, !profileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--profile", profileId])
+    }
+    if let issueIdentifier, !issueIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--issue", issueIdentifier])
+    }
+    if let ticketId, !ticketId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--ticket", ticketId])
+    }
+    if let projectId, !projectId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--project-id", projectId])
+    }
+    if let teamId, !teamId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--team-id", teamId])
+    }
+    if syncLabels == true {
+      args.append("--sync-labels")
+    }
+    let result = try await run(args, allowNonZeroExit: true, cwd: path)
+    return try decodeJsonOrThrow(LinearIssueSyncResponse.self, result: result)
+  }
+
   /// Resolves the effective system Git identity (global or repo-effective) and optional GitHub CLI account.
   ///
   /// This is read-only host identity state and is intentionally separate from remote OAuth/App profile routing.
@@ -428,6 +869,99 @@ public actor HackCLIClient {
     )
   }
 
+  /// Reads the desktop-visible Hack account/auth broker state through the public CLI surface.
+  ///
+  /// The desktop app intentionally mirrors `hack auth status --json` instead of reaching into
+  /// broker-only pages so browser login, local secret storage, and provider-linked identity
+  /// resolve through the same path as the CLI.
+  public func inspectHackAccountSettingsState() async throws -> HackAccountSettingsState {
+    let result = try await run(["auth", "status", "--json"], allowNonZeroExit: true)
+    let payload = try decodeJsonOrThrow(HackAuthStatusEnvelope.self, result: result)
+    guard payload.ok else {
+      throw HackCLIError.network(
+        normalized(payload.error) ?? "Hack auth status returned an unexpected response."
+      )
+    }
+
+    let brokerBaseURL = normalized(payload.brokerBaseUrl)
+      ?? resolveAuthServerCandidates().first
+      ?? "https://auth.hack.broker"
+    let betterAuthStatus = try? await fetchBetterAuthStatus(baseURL: brokerBaseURL)
+    let shellPath = normalized(payload.shellPath) ?? "/auth"
+    let accountPath = normalized(payload.accountPath) ?? "/auth/account"
+    let shellURL = buildAuthURL(base: brokerBaseURL, path: shellPath, queryItems: [])?.absoluteString
+    let accountURL =
+      buildAuthURL(base: brokerBaseURL, path: accountPath, queryItems: [])?.absoluteString
+    let userLabel = normalized(payload.user?.name)
+      ?? normalized(payload.user?.email)
+      ?? normalized(payload.user?.id)
+    let organizationLabel = normalized(payload.activeOrganization?.name)
+      ?? normalized(payload.activeOrganization?.id)
+    let teamLabel = normalized(payload.activeTeam?.name)
+      ?? normalized(payload.activeTeam?.id)
+
+    return HackAccountSettingsState(
+      brokerBaseURL: brokerBaseURL,
+      authEnabled: betterAuthStatus?.enabled ?? false,
+      authReason:
+        normalized(payload.authReason)
+        ?? normalized(payload.error)
+        ?? normalized(betterAuthStatus?.reason),
+      authBasePath: normalized(betterAuthStatus?.basePath) ?? "/api/auth",
+      authenticated: payload.authenticated == true,
+      validated: payload.validated == true,
+      tokenStored: payload.tokenStored == true,
+      accessControlMode: normalized(payload.accessControlMode),
+      shellURL: shellURL,
+      accountURL: accountURL,
+      sessionAvailable: payload.authenticated == true,
+      userDisplayName: userLabel,
+      userEmail: normalized(payload.user?.email),
+      organizationName: organizationLabel,
+      teamName: teamLabel
+    )
+  }
+
+  public func loginHackAccount() async throws {
+    let redirectURL = desktopAuthCompletionURL()
+    let result = try await run(
+      ["auth", "login", "--json", "--redirect", redirectURL],
+      allowNonZeroExit: true
+    )
+    let payload = try decodeJsonOrThrow(HackAuthLoginEnvelope.self, result: result)
+    guard payload.ok else {
+      let message = normalized(payload.error)
+        ?? normalized(payload.nextStep)
+        ?? "Hack auth login did not complete."
+      throw HackCLIError.network(message)
+    }
+  }
+
+  public func logoutHackAccount() async throws {
+    let result = try await run(["auth", "logout", "--json"], allowNonZeroExit: true)
+    let payload = try decodeJsonOrThrow(HackAuthLogoutEnvelope.self, result: result)
+    guard payload.ok else {
+      throw HackCLIError.network("Hack auth logout did not complete.")
+    }
+  }
+
+  private func fetchBetterAuthStatus(baseURL: String) async throws -> BetterAuthStatusEnvelope {
+    guard
+      let statusURL = buildAuthURL(
+        base: baseURL,
+        path: "/v1/auth/better-auth/status",
+        queryItems: []
+      )
+    else {
+      throw HackCLIError.network("Invalid auth broker URL.")
+    }
+    let body = try await fetchAuthBody(url: statusURL)
+    guard let status = tryDecodeLenient(BetterAuthStatusEnvelope.self, from: body) else {
+      throw HackCLIError.network("Auth broker returned invalid JSON.")
+    }
+    return status
+  }
+
   /// Starts cloud GitHub OAuth with the dedicated auth broker surface.
   ///
   /// This flow is intentionally separate from local gateway/daemon bearer-token auth.
@@ -435,6 +969,7 @@ public actor HackCLIClient {
     profileId: String,
     setDefault: Bool
   ) async throws -> GitHubOAuthFlowStartResponse {
+    let desktopRedirectURL = desktopGitHubOAuthCallbackURL()
     var lastError: String? = nil
     for candidate in resolveAuthServerCandidates() {
       guard
@@ -446,6 +981,7 @@ public actor HackCLIClient {
             URLQueryItem(name: "setDefault", value: setDefault ? "1" : "0"),
             URLQueryItem(name: "set_default", value: setDefault ? "1" : "0"),
             URLQueryItem(name: "requireInstallation", value: "1"),
+            URLQueryItem(name: "desktopRedirectUrl", value: desktopRedirectURL),
           ]
         )
       else {
@@ -532,6 +1068,72 @@ public actor HackCLIClient {
         }
       }
       return normalizeBrokerFlowStatus(wrapped.status)
+    }
+    throw HackCLIError.network("Auth server returned invalid JSON.")
+  }
+
+  /// Starts cloud Linear OAuth with the dedicated auth broker surface.
+  public func startLinearOAuthFlow(
+    profileId: String,
+    setDefault: Bool
+  ) async throws -> LinearOAuthFlowStartResponse {
+    var args = [
+      "x",
+      "linear",
+      "oauth-connect",
+      "--json",
+      "--start-only",
+      "--profile",
+      profileId,
+      "--desktop-redirect-url",
+      desktopLinearOAuthCallbackURL(),
+    ]
+    if setDefault {
+      args.append("--set-default")
+    }
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(LinearOAuthFlowStartResponse.self, result: result)
+  }
+
+  /// Polls Linear broker OAuth state and imports claimed tokens into local keychain-backed profiles.
+  public func fetchLinearOAuthFlowStatus(
+    statusURL: String
+  ) async throws -> LinearOAuthFlowStatusResponse {
+    guard let url = URL(string: statusURL) else {
+      throw HackCLIError.network("Invalid auth flow status URL.")
+    }
+    let body = try await fetchAuthBody(url: url)
+    if let direct = tryDecodeLenient(LinearOAuthFlowStatusResponse.self, from: body) {
+      return direct
+    }
+    if let wrapped = tryDecodeLenient(LinearOAuthStatusEnvelope.self, from: body), wrapped.ok {
+      if let token = normalized(wrapped.status.token) {
+        do {
+          try await persistLinearTokenFromBrokerFlow(
+            profileId: wrapped.status.profileId,
+            token: token,
+            tokenExpiresAt: wrapped.status.tokenExpiresAt,
+            refreshToken: wrapped.status.refreshToken,
+            refreshTokenExpiresAt: wrapped.status.refreshTokenExpiresAt,
+            setDefault: wrapped.status.setDefault
+          )
+        } catch {
+          throw HackCLIError.network(
+            "Linear OAuth callback succeeded, but Hack could not save the token locally (\(error.localizedDescription)). Retry Add account and allow keychain access."
+          )
+        }
+      } else if wrapped.status.status == "claimed" {
+        let profileId = wrapped.status.profileId
+        let localStatus = try? await inspectLinearStatus(profileId: profileId)
+        if localStatus?.tokenResolved != true {
+          _ = try? await seedLinearLocalAccess(profileId: profileId)
+        }
+        let repairedStatus = try? await inspectLinearStatus(profileId: profileId)
+        if repairedStatus?.tokenResolved != true {
+          return brokerClaimedWithoutLocalLinearTokenStatus(wrapped.status)
+        }
+      }
+      return normalizeLinearBrokerFlowStatus(wrapped.status)
     }
     throw HackCLIError.network("Auth server returned invalid JSON.")
   }
@@ -751,6 +1353,79 @@ public actor HackCLIClient {
   ) async throws -> TicketStatusResponse {
     let result = try await run(["x", "tickets", "status", ticketId, status.rawValue, "--json"], cwd: path)
     return try decodeLenient(TicketStatusResponse.self, from: result.stdout)
+  }
+
+  public func appendTicketComment(
+    path: String,
+    ticketId: String,
+    body: String,
+    source: String? = nil,
+    actor: String? = nil
+  ) async throws -> TicketCommentAppendResponse {
+    var args = [
+      "x",
+      "tickets",
+      "comment",
+      ticketId,
+      "--body",
+      body,
+      "--json",
+    ]
+    if let source, !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--source", source])
+    }
+    if let actor, !actor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--actor", actor])
+    }
+    let result = try await run(args, cwd: path)
+    return try decodeLenient(TicketCommentAppendResponse.self, from: result.stdout)
+  }
+
+  public func appendTicketReviewNote(
+    path: String,
+    ticketId: String,
+    body: String,
+    actor: String? = nil
+  ) async throws -> TicketReviewNoteAppendResponse {
+    var args = [
+      "x",
+      "tickets",
+      "review-note",
+      ticketId,
+      "--body",
+      body,
+      "--json",
+    ]
+    if let actor, !actor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      args.append(contentsOf: ["--actor", actor])
+    }
+    let result = try await run(args, cwd: path)
+    return try decodeLenient(TicketReviewNoteAppendResponse.self, from: result.stdout)
+  }
+
+  public func resolveTicketConflict(
+    path: String,
+    ticketId: String,
+    conflictId: String,
+    resolution: TicketSyncConflictResolution,
+    summary: String? = nil
+  ) async throws -> TicketConflictResolutionResponse {
+    var args = [
+      "x",
+      "tickets",
+      "resolve-conflict",
+      ticketId,
+      "--conflict-id",
+      conflictId,
+      "--resolution",
+      resolution.rawValue,
+      "--json",
+    ]
+    if let summary, !summary.isEmpty {
+      args.append(contentsOf: ["--summary", summary])
+    }
+    let result = try await run(args, cwd: path)
+    return try decodeLenient(TicketConflictResolutionResponse.self, from: result.stdout)
   }
 
   public func syncTickets(path: String) async throws -> TicketsSyncResponse {
@@ -1009,6 +1684,39 @@ public actor HackCLIClient {
     return components.url
   }
 
+  private func desktopAuthCompletionURL() -> String {
+    bundleString(forInfoDictionaryKey: "HackAuthCompletionURL")
+      ?? "\(desktopURLScheme())://auth/complete"
+  }
+
+  private func desktopGitHubOAuthCallbackURL() -> String {
+    bundleString(forInfoDictionaryKey: "HackGitHubOAuthCallbackURL")
+      ?? "\(desktopURLScheme())://auth/github/callback"
+  }
+
+  private func desktopLinearOAuthCallbackURL() -> String {
+    bundleString(forInfoDictionaryKey: "HackLinearOAuthCallbackURL")
+      ?? "\(desktopURLScheme())://auth/linear/callback"
+  }
+
+  private func desktopURLScheme() -> String {
+    if
+      let urlTypes = Bundle.main.object(forInfoDictionaryKey: "CFBundleURLTypes")
+        as? [[String: Any]]
+    {
+      for urlType in urlTypes {
+        if
+          let schemes = urlType["CFBundleURLSchemes"] as? [String],
+          let scheme = schemes.first?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !scheme.isEmpty
+        {
+          return scheme
+        }
+      }
+    }
+    return "hack"
+  }
+
   private func buildAuthURLWithQuery(
     urlString: String,
     queryItems: [URLQueryItem]
@@ -1087,6 +1795,56 @@ public actor HackCLIClient {
     )
   }
 
+  private func normalizeLinearBrokerFlowStatus(
+    _ wrapped: LinearOAuthStatusEnvelopeStatus
+  ) -> LinearOAuthFlowStatusResponse {
+    let normalizedStatus: String
+    switch wrapped.status {
+    case "claimed":
+      normalizedStatus = "complete"
+    default:
+      normalizedStatus = wrapped.status
+    }
+    return LinearOAuthFlowStatusResponse(
+      id: wrapped.id,
+      status: normalizedStatus,
+      profileId: wrapped.profileId,
+      setDefault: wrapped.setDefault,
+      createdAt: wrapped.createdAt,
+      expiresAt: wrapped.expiresAt,
+      completedAt: wrapped.completedAt ?? wrapped.claimedAt,
+      accountHandle: wrapped.accountHandle,
+      accountLogin: wrapped.accountLogin,
+      accountName: wrapped.accountName,
+      accountId: wrapped.accountId,
+      accountEmail: wrapped.accountEmail,
+      tokenExpiresAt: wrapped.tokenExpiresAt,
+      error: wrapped.error
+    )
+  }
+
+  private func brokerClaimedWithoutLocalLinearTokenStatus(
+    _ wrapped: LinearOAuthStatusEnvelopeStatus
+  ) -> LinearOAuthFlowStatusResponse {
+    return LinearOAuthFlowStatusResponse(
+      id: wrapped.id,
+      status: "error",
+      profileId: wrapped.profileId,
+      setDefault: wrapped.setDefault,
+      createdAt: wrapped.createdAt,
+      expiresAt: wrapped.expiresAt,
+      completedAt: wrapped.completedAt ?? wrapped.claimedAt,
+      accountHandle: wrapped.accountHandle,
+      accountLogin: wrapped.accountLogin,
+      accountName: wrapped.accountName,
+      accountId: wrapped.accountId,
+      accountEmail: wrapped.accountEmail,
+      tokenExpiresAt: wrapped.tokenExpiresAt,
+      error:
+        "Hack already connected \(wrapped.profileId) remotely, but this Mac still needs local access. Use Repair access or reconnect the account."
+    )
+  }
+
   /// Persist a broker-issued GitHub token into local keychain-backed profile storage.
   private func persistGitHubTokenFromBrokerFlow(
     profileId: String,
@@ -1123,6 +1881,40 @@ public actor HackCLIClient {
       args.append("--set-default")
     }
     _ = try await run(args, stdin: "\(token)\n")
+  }
+
+  /// Persist a broker-issued Linear token into local keychain-backed profile storage.
+  private func persistLinearTokenFromBrokerFlow(
+    profileId: String,
+    token: String,
+    tokenExpiresAt: String?,
+    refreshToken: String?,
+    refreshTokenExpiresAt: String?,
+    setDefault: Bool
+  ) async throws {
+    var args = ["x", "linear", "connect", "--profile", profileId, "--stdin"]
+    if setDefault {
+      args.append("--set-default")
+    }
+    let envelope = LinearTokenPersistEnvelope(
+      token: token,
+      expiresAt: normalized(tokenExpiresAt),
+      refreshToken: normalized(refreshToken),
+      refreshTokenExpiresAt: normalized(refreshTokenExpiresAt)
+    )
+    let encoder = JSONEncoder()
+    let payload = try encoder.encode(envelope)
+    guard let text = String(data: payload, encoding: .utf8) else {
+      throw HackCLIError.invalidJson
+    }
+    _ = try await run(args, stdin: "\(text)\n")
+  }
+
+  private struct LinearTokenPersistEnvelope: Encodable {
+    let token: String
+    let expiresAt: String?
+    let refreshToken: String?
+    let refreshTokenExpiresAt: String?
   }
 
   private func fetchAuthBody(url: URL) async throws -> String {
@@ -1349,6 +2141,10 @@ public actor HackCLIClient {
     guard let value else { return nil }
     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
     return trimmed.isEmpty ? nil : trimmed
+  }
+
+  private func bundleString(forInfoDictionaryKey key: String) -> String? {
+    normalized(Bundle.main.object(forInfoDictionaryKey: key) as? String)
   }
 
   private func resolveAuthServerCandidates() -> [String] {

@@ -7,8 +7,29 @@ import {
 import type { BrokerConfig } from "./config.ts";
 import { FlowStore } from "./flow-store.ts";
 import { createBetterAuthPlugin } from "./modules/better-auth/plugin.ts";
+import { createBetterAuthShellPlugin } from "./modules/better-auth/shell-plugin.ts";
 import { createCoreRoutesPlugin } from "./modules/core/plugin.ts";
 import { createGitHubOAuthPlugin } from "./modules/github-oauth/plugin.ts";
+import { createLinearAgentPlugin } from "./modules/linear-agent/plugin.ts";
+import { createLinearAutosyncPlugin } from "./modules/linear-autosync/plugin.ts";
+import {
+  createLinearAutosyncStoreFromDb,
+  InMemoryLinearAutosyncStore,
+  type LinearAutosyncStore,
+} from "./modules/linear-autosync/service.ts";
+import { createLinearConnectionsPlugin } from "./modules/linear-connections/plugin.ts";
+import {
+  createLinearConnectionStoreFromDb,
+  InMemoryLinearConnectionStore,
+  type LinearConnectionStore,
+} from "./modules/linear-connections/service.ts";
+import { createLinearOAuthPlugin } from "./modules/linear-oauth/plugin.ts";
+import { createLinearSyncStorePlugin } from "./modules/linear-sync-store/plugin.ts";
+import {
+  createLinearSyncStoreFromDb,
+  InMemoryLinearSyncStore,
+  type LinearSyncStore,
+} from "./modules/linear-sync-store/service.ts";
 import { createProvidersPlugin } from "./modules/providers/plugin.ts";
 import { createSharedMiddlewarePlugin } from "./plugins/shared-middleware.ts";
 
@@ -16,6 +37,9 @@ export type CreateAuthBrokerAppOptions = {
   readonly config: BrokerConfig;
   readonly flowStore?: FlowStore;
   readonly betterAuthRuntime?: BetterAuthRuntime;
+  readonly linearSyncStore?: LinearSyncStore;
+  readonly linearConnectionStore?: LinearConnectionStore;
+  readonly linearAutosyncStore?: LinearAutosyncStore;
 };
 
 /**
@@ -25,11 +49,20 @@ export function createAuthBrokerApp({
   config,
   flowStore: externalStore,
   betterAuthRuntime: externalBetterAuthRuntime,
+  linearSyncStore: externalLinearSyncStore,
+  linearConnectionStore: externalLinearConnectionStore,
+  linearAutosyncStore: externalLinearAutosyncStore,
 }: CreateAuthBrokerAppOptions) {
   const flowStore =
     externalStore ?? new FlowStore({ filePath: config.flowStorePath });
   const betterAuthRuntime =
     externalBetterAuthRuntime ?? createBetterAuthRuntimeFromEnv();
+  const linearSyncStore =
+    externalLinearSyncStore ?? createDefaultLinearSyncStore();
+  const linearConnectionStore =
+    externalLinearConnectionStore ?? createDefaultLinearConnectionStore();
+  const linearAutosyncStore =
+    externalLinearAutosyncStore ?? createDefaultLinearAutosyncStore();
   let flowSweepTimer: ReturnType<typeof setInterval> | null = null;
 
   return new Elysia({
@@ -66,13 +99,56 @@ export function createAuthBrokerApp({
       })
     )
     .use(
+      createBetterAuthShellPlugin({
+        config,
+        runtime: betterAuthRuntime,
+        flowStore,
+      })
+    )
+    .use(
       createGitHubOAuthPlugin({
         config,
         flowStore,
         betterAuthRuntime,
       })
     )
-    .onStart(() => {
+    .use(
+      createLinearAgentPlugin({
+        config,
+        syncStore: linearSyncStore,
+        connectionStore: linearConnectionStore,
+        autosyncStore: linearAutosyncStore,
+      })
+    )
+    .use(
+      createLinearAutosyncPlugin({
+        autosyncStore: linearAutosyncStore,
+        betterAuthRuntime,
+      })
+    )
+    .use(
+      createLinearConnectionsPlugin({
+        config,
+        connectionStore: linearConnectionStore,
+        betterAuthRuntime,
+      })
+    )
+    .use(
+      createLinearSyncStorePlugin({
+        syncStore: linearSyncStore,
+        betterAuthRuntime,
+      })
+    )
+    .use(
+      createLinearOAuthPlugin({
+        config,
+        flowStore,
+        connectionStore: linearConnectionStore,
+        betterAuthRuntime,
+      })
+    )
+    .onStart(async () => {
+      await betterAuthRuntime.ready;
       const intervalMs = Math.max(config.flowSweepIntervalMs, 5000);
       flowSweepTimer = setInterval(() => {
         flowStore.pruneExpired();
@@ -88,6 +164,45 @@ export function createAuthBrokerApp({
     });
 }
 
+function createDefaultLinearSyncStore(): LinearSyncStore {
+  if (!process.env.DATABASE_URL) {
+    return new InMemoryLinearSyncStore();
+  }
+  try {
+    return createLinearSyncStoreFromDb({
+      databaseUrl: process.env.DATABASE_URL,
+    });
+  } catch {
+    return new InMemoryLinearSyncStore();
+  }
+}
+
+function createDefaultLinearConnectionStore(): LinearConnectionStore {
+  if (!process.env.DATABASE_URL) {
+    return new InMemoryLinearConnectionStore();
+  }
+  try {
+    return createLinearConnectionStoreFromDb({
+      databaseUrl: process.env.DATABASE_URL,
+    });
+  } catch {
+    return new InMemoryLinearConnectionStore();
+  }
+}
+
+function createDefaultLinearAutosyncStore(): LinearAutosyncStore {
+  if (!process.env.DATABASE_URL) {
+    return new InMemoryLinearAutosyncStore();
+  }
+  try {
+    return createLinearAutosyncStoreFromDb({
+      databaseUrl: process.env.DATABASE_URL,
+    });
+  } catch {
+    return new InMemoryLinearAutosyncStore();
+  }
+}
+
 /**
  * Identify route paths that are intentionally GET-only in broker v1.
  */
@@ -101,10 +216,55 @@ function isReadOnlyRoutePath(input: { readonly path: string }): boolean {
   if (input.path === "/v1/auth/better-auth/status") {
     return true;
   }
+  if (input.path === "/auth") {
+    return true;
+  }
+  if (input.path === "/auth/account") {
+    return true;
+  }
+  if (input.path === "/v1/auth/session/start") {
+    return true;
+  }
+  if (input.path === "/v1/auth/me") {
+    return true;
+  }
+  if (input.path === "/linear/callback") {
+    return true;
+  }
+  if (input.path === "/linear/start") {
+    return true;
+  }
+  if (input.path === "/v1/auth/linear/refresh") {
+    return false;
+  }
+  if (input.path === "/v1/auth/linear/connections/seed") {
+    return false;
+  }
+  if (input.path === "/v1/auth/linear/connections/update-local-access") {
+    return false;
+  }
+  if (input.path === "/v1/auth/linear/subscriptions") {
+    return false;
+  }
+  if (input.path === "/v1/auth/linear/subscriptions/remove") {
+    return false;
+  }
+  if (
+    input.path.startsWith("/v1/auth/linear/deliveries/") &&
+    input.path.endsWith("/apply")
+  ) {
+    return false;
+  }
   if (input.path.startsWith("/gh/")) {
     return true;
   }
   if (input.path.startsWith("/v1/auth/github/")) {
+    return true;
+  }
+  if (input.path.startsWith("/v1/auth/session/flows/")) {
+    return true;
+  }
+  if (input.path.startsWith("/v1/auth/linear/")) {
     return true;
   }
   return false;

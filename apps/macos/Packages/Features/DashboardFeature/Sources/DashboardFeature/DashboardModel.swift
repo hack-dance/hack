@@ -69,6 +69,18 @@ public struct GitHubOAuthDeepLinkContext: Hashable {
   }
 }
 
+public struct LinearOAuthDeepLinkContext: Hashable {
+  public let flowId: String
+  public let profileId: String?
+  public let status: String?
+
+  public init(flowId: String, profileId: String?, status: String?) {
+    self.flowId = flowId
+    self.profileId = profileId
+    self.status = status
+  }
+}
+
 @Observable
 @MainActor
 public final class DashboardModel {
@@ -82,6 +94,8 @@ public final class DashboardModel {
   public private(set) var runtimeResetAt: String? = nil
   public private(set) var runtimeResetCount: Int? = nil
   public private(set) var lastUpdated: Date? = nil
+  public private(set) var hackAccountState: HackAccountSettingsState? = nil
+  public private(set) var isLoadingHackAccountState = false
   public var selectedItem: SidebarItem? = .home {
     didSet {
       handleSelectedItemChange(previous: oldValue, current: selectedItem)
@@ -91,6 +105,7 @@ public final class DashboardModel {
   public var errorMessage: String? = nil
   public var statusMessage: String? = nil
   public private(set) var githubOAuthDeepLinkContext: GitHubOAuthDeepLinkContext? = nil
+  public private(set) var linearOAuthDeepLinkContext: LinearOAuthDeepLinkContext? = nil
   public var isRefreshing = false
   public private(set) var projectLifecycleActions: [String: ProjectLifecycleAction] = [:]
   public private(set) var globalLifecycleAction: GlobalLifecycleAction? = nil
@@ -101,6 +116,9 @@ public final class DashboardModel {
   private var lastSelectedProjectId: String? = nil
   private var refreshTask: Task<Void, Never>? = nil
   private var statusClearTask: Task<Void, Never>? = nil
+  private var lastHackAccountRefreshAt: Date? = nil
+
+  private static let hackAccountRefreshTTL: TimeInterval = 20
 
   public init(client: HackCLIClient, ticketsClient: HackCLIClient = HackCLIClient()) {
     self.client = client
@@ -172,8 +190,13 @@ public final class DashboardModel {
     async let projectsTask = fetchProjects()
     async let daemonTask = fetchDaemonStatus()
     async let globalTask = fetchGlobalStatus()
+    async let hackAccountTask: Void = refreshHackAccountState(
+      force: false,
+      updateErrorMessage: false
+    )
 
     let errors = await [projectsTask, daemonTask, globalTask].compactMap { $0 }
+    _ = await hackAccountTask
     if !errors.isEmpty {
       errorMessage = errors.joined(separator: "\n")
     }
@@ -294,7 +317,10 @@ public final class DashboardModel {
       errorMessage = "Missing project path for \(project.name)"
       return nil
     }
-    let response = await runActionResult(message: "Creating ticket…") {
+    let response = await runActionResult(
+      message: "Creating ticket…",
+      refreshDashboard: false
+    ) {
       try await self.ticketsClient.createTicket(
         path: path,
         title: title,
@@ -315,8 +341,59 @@ public final class DashboardModel {
       errorMessage = "Missing project path for \(project.name)"
       return nil
     }
-    return await runActionResult(message: "Updating ticket status…") {
+    return await runActionResult(
+      message: "Updating ticket status…",
+      refreshDashboard: false
+    ) {
       try await self.ticketsClient.setTicketStatus(path: path, ticketId: ticketId, status: status)
+    }
+  }
+
+  public func appendTicketComment(
+    for project: ProjectSummary,
+    ticketId: String,
+    body: String,
+    source: String? = nil,
+    actor: String? = nil
+  ) async -> TicketCommentAppendResponse? {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return nil
+    }
+    return await runActionResult(
+      message: "Appending ticket comment…",
+      refreshDashboard: false
+    ) {
+      try await self.ticketsClient.appendTicketComment(
+        path: path,
+        ticketId: ticketId,
+        body: body,
+        source: source,
+        actor: actor
+      )
+    }
+  }
+
+  public func appendTicketReviewNote(
+    for project: ProjectSummary,
+    ticketId: String,
+    body: String,
+    actor: String? = nil
+  ) async -> TicketReviewNoteAppendResponse? {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return nil
+    }
+    return await runActionResult(
+      message: "Appending review note…",
+      refreshDashboard: false
+    ) {
+      try await self.ticketsClient.appendTicketReviewNote(
+        path: path,
+        ticketId: ticketId,
+        body: body,
+        actor: actor
+      )
     }
   }
 
@@ -325,10 +402,38 @@ public final class DashboardModel {
       errorMessage = "Missing project path for \(project.name)"
       return nil
     }
-    let response = await runActionResult(message: "Syncing tickets…") {
+    let response = await runActionResult(
+      message: "Syncing tickets…",
+      refreshDashboard: false
+    ) {
       try await self.ticketsClient.syncTickets(path: path)
     }
     return response?.sync
+  }
+
+  public func resolveTicketConflict(
+    for project: ProjectSummary,
+    ticketId: String,
+    conflictId: String,
+    resolution: TicketSyncConflictResolution,
+    summary: String? = nil
+  ) async -> TicketConflictResolutionResponse? {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return nil
+    }
+    return await runActionResult(
+      message: "Resolving sync conflict…",
+      refreshDashboard: false
+    ) {
+      try await self.ticketsClient.resolveTicketConflict(
+        path: path,
+        ticketId: ticketId,
+        conflictId: conflictId,
+        resolution: resolution,
+        summary: summary
+      )
+    }
   }
 
   public func setupTickets(for project: ProjectSummary) async -> Bool {
@@ -601,6 +706,73 @@ public final class DashboardModel {
     }
   }
 
+  public func inspectHackAccountSettingsState(
+    force: Bool = false,
+    updateErrorMessage: Bool = true
+  ) async -> HackAccountSettingsState? {
+    await refreshHackAccountState(
+      force: force,
+      updateErrorMessage: updateErrorMessage
+    )
+    return hackAccountState
+  }
+
+  public func refreshHackAccountState(
+    force: Bool = false,
+    updateErrorMessage: Bool = false
+  ) async {
+    if !force,
+      let lastHackAccountRefreshAt,
+      let hackAccountState,
+      Date().timeIntervalSince(lastHackAccountRefreshAt) < Self.hackAccountRefreshTTL
+    {
+      _ = hackAccountState
+      return
+    }
+
+    guard !isLoadingHackAccountState else {
+      return
+    }
+
+    isLoadingHackAccountState = true
+    defer {
+      isLoadingHackAccountState = false
+    }
+
+    do {
+      hackAccountState = try await client.inspectHackAccountSettingsState()
+      lastHackAccountRefreshAt = Date()
+    } catch {
+      if updateErrorMessage {
+        errorMessage = error.localizedDescription
+      }
+    }
+  }
+
+  public func loginHackAccount() async -> HackAccountSettingsState? {
+    let didLogin: Bool? = await runActionResult(message: "Signing in to Hack…") {
+      try await self.client.loginHackAccount()
+      return true
+    }
+    guard didLogin == true else {
+      return nil
+    }
+    await refreshHackAccountState(force: true, updateErrorMessage: true)
+    return hackAccountState
+  }
+
+  public func logoutHackAccount() async -> HackAccountSettingsState? {
+    let didLogout: Bool? = await runActionResult(message: "Signing out of Hack…") {
+      try await self.client.logoutHackAccount()
+      return true
+    }
+    guard didLogout == true else {
+      return nil
+    }
+    await refreshHackAccountState(force: true, updateErrorMessage: true)
+    return hackAccountState
+  }
+
   public func startGitHubOAuthFlow(
     profileId: String,
     setDefault: Bool
@@ -621,6 +793,358 @@ public final class DashboardModel {
   ) async -> GitHubOAuthFlowStatusResponse? {
     do {
       return try await client.fetchGitHubOAuthFlowStatus(statusURL: statusURL)
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func inspectLinearProfiles() async -> LinearProfilesResponse? {
+    do {
+      return try await client.inspectLinearProfiles()
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func listLinearConnections(
+    profileId: String? = nil,
+    organizationId: String? = nil
+  ) async -> LinearConnectionsResponse? {
+    do {
+      return try await client.listLinearConnections(
+        profileId: profileId,
+        organizationId: organizationId
+      )
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func seedLinearLocalAccess(profileId: String) async -> LinearLocalAccessSeedResponse? {
+    do {
+      return try await client.seedLinearLocalAccess(profileId: profileId)
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func inspectLinearStatus(profileId: String? = nil) async -> LinearStatusResponse? {
+    do {
+      return try await client.inspectLinearStatus(profileId: profileId)
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func disconnectLinear(profileId: String) async -> Bool {
+    do {
+      try await client.disconnectLinear(profileId: profileId)
+      return true
+    } catch {
+      errorMessage = error.localizedDescription
+      return false
+    }
+  }
+
+  public func listLinearProjects(profileId: String? = nil) async -> LinearProjectsResponse? {
+    do {
+      return try await client.listLinearProjects(profileId: profileId)
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func listLinearAssigneeMappings(
+    profileId: String? = nil,
+    teamId: String? = nil
+  ) async -> LinearAssigneeMappingsResponse? {
+    do {
+      return try await client.listLinearAssigneeMappings(
+        profileId: profileId,
+        teamId: teamId
+      )
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func setLinearAssigneeMapping(
+    profileId: String? = nil,
+    teamId: String? = nil,
+    localAssignee: String,
+    linearUserId: String? = nil,
+    linearUserName: String? = nil,
+    linearUserEmail: String? = nil
+  ) async -> LinearAssigneeMappingMutationResponse? {
+    return await runActionResult(message: "Saving Linear assignee mapping…") {
+      try await self.client.setLinearAssigneeMapping(
+        profileId: profileId,
+        teamId: teamId,
+        localAssignee: localAssignee,
+        linearUserId: linearUserId,
+        linearUserName: linearUserName,
+        linearUserEmail: linearUserEmail
+      )
+    }
+  }
+
+  public func removeLinearAssigneeMapping(
+    profileId: String? = nil,
+    teamId: String? = nil,
+    localAssignee: String
+  ) async -> LinearAssigneeMappingRemovalResponse? {
+    return await runActionResult(message: "Removing Linear assignee mapping…") {
+      try await self.client.removeLinearAssigneeMapping(
+        profileId: profileId,
+        teamId: teamId,
+        localAssignee: localAssignee
+      )
+    }
+  }
+
+  public func listLinearAutosyncSubscriptions(
+    profileId: String? = nil,
+    projectId: String? = nil,
+    teamId: String? = nil
+  ) async -> LinearAutosyncSubscriptionsResponse? {
+    do {
+      return try await client.listLinearAutosyncSubscriptions(
+        profileId: profileId,
+        projectId: projectId,
+        teamId: teamId
+      )
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func setLinearAutosyncSubscription(
+    profileId: String? = nil,
+    projectId: String? = nil,
+    teamId: String? = nil,
+    mode: String = "auto_apply",
+    status: String = "active"
+  ) async -> LinearAutosyncSubscriptionMutationResponse? {
+    return await runActionResult(message: "Saving Linear autosync…") {
+      try await self.client.setLinearAutosyncSubscription(
+        profileId: profileId,
+        projectId: projectId,
+        teamId: teamId,
+        mode: mode,
+        status: status
+      )
+    }
+  }
+
+  public func removeLinearAutosyncSubscription(
+    profileId: String? = nil,
+    projectId: String? = nil,
+    teamId: String? = nil
+  ) async -> LinearAutosyncSubscriptionMutationResponse? {
+    return await runActionResult(message: "Removing Linear autosync…") {
+      try await self.client.removeLinearAutosyncSubscription(
+        profileId: profileId,
+        projectId: projectId,
+        teamId: teamId
+      )
+    }
+  }
+
+  public func bindLinearProject(
+    for project: ProjectSummary,
+    profileId: String?,
+    projectId: String?,
+    projectName: String?,
+    teamId: String?,
+    clear: Bool
+  ) async -> LinearProjectBindingResponse? {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return nil
+    }
+    return await runActionResult(message: clear ? "Clearing Linear project binding…" : "Saving Linear project binding…") {
+      try await self.client.bindLinearProject(
+        path: path,
+        profileId: profileId,
+        projectId: projectId,
+        projectName: projectName,
+        teamId: teamId,
+        clear: clear
+      )
+    }
+  }
+
+  public func inspectLinearProjectBinding(
+    for project: ProjectSummary
+  ) async -> LinearProjectBindingResponse? {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return nil
+    }
+    do {
+      return try await client.inspectLinearProjectBinding(path: path)
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func linkLinearProject(
+    for project: ProjectSummary,
+    profileId: String?,
+    projectId: String,
+    projectName: String?,
+    teamId: String?
+  ) async -> LinearProjectBindingResponse? {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return nil
+    }
+    return await runActionResult(
+      message: "Adding Linear project to sync scope…",
+      refreshDashboard: false
+    ) {
+      try await self.client.linkLinearProject(
+        path: path,
+        profileId: profileId,
+        projectId: projectId,
+        projectName: projectName,
+        teamId: teamId
+      )
+    }
+  }
+
+  public func unlinkLinearProject(
+    for project: ProjectSummary,
+    projectId: String
+  ) async -> LinearProjectBindingResponse? {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return nil
+    }
+    return await runActionResult(
+      message: "Removing Linear project from sync scope…",
+      refreshDashboard: false
+    ) {
+      try await self.client.unlinkLinearProject(path: path, projectId: projectId)
+    }
+  }
+
+  public func syncLinearProject(
+    for project: ProjectSummary,
+    from direction: String,
+    profileId: String? = nil,
+    ownerMode: String? = nil,
+    projectId: String? = nil,
+    teamId: String? = nil,
+    limit: Int? = nil,
+    syncLabels: Bool? = nil
+  ) async -> LinearProjectSyncResponse? {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return nil
+    }
+    let message = direction == "linear"
+      ? "Syncing Linear issues into tickets…"
+      : "Syncing tickets into Linear…"
+    return await runActionResult(message: message, refreshDashboard: false) {
+      try await self.client.syncLinearProject(
+        path: path,
+        from: direction,
+        profileId: profileId,
+        ownerMode: ownerMode,
+        projectId: projectId,
+        teamId: teamId,
+        limit: limit,
+        syncLabels: syncLabels
+      )
+    }
+  }
+
+  public func runLinearAutosync(
+    for project: ProjectSummary,
+    profileId: String? = nil,
+    projectId: String? = nil,
+    teamId: String? = nil,
+    limit: Int? = nil
+  ) async -> LinearAutosyncRunResponse? {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return nil
+    }
+    return await runActionResult(
+      message: "Running Linear autosync…",
+      refreshDashboard: false
+    ) {
+      try await self.client.runLinearAutosync(
+        path: path,
+        profileId: profileId,
+        projectId: projectId,
+        teamId: teamId,
+        limit: limit
+      )
+    }
+  }
+
+  public func syncLinearIssue(
+    for project: ProjectSummary,
+    from direction: String,
+    profileId: String? = nil,
+    issueIdentifier: String? = nil,
+    ticketId: String? = nil,
+    projectId: String? = nil,
+    teamId: String? = nil,
+    syncLabels: Bool? = nil
+  ) async -> LinearIssueSyncResponse? {
+    guard let path = resolveProjectPath(project) else {
+      errorMessage = "Missing project path for \(project.name)"
+      return nil
+    }
+    let message = direction == "linear"
+      ? "Refreshing ticket from Linear…"
+      : "Syncing ticket to Linear…"
+    return await runActionResult(message: message, refreshDashboard: false) {
+      try await self.client.syncLinearIssue(
+        path: path,
+        from: direction,
+        profileId: profileId,
+        issueIdentifier: issueIdentifier,
+        ticketId: ticketId,
+        projectId: projectId,
+        teamId: teamId,
+        syncLabels: syncLabels
+      )
+    }
+  }
+
+  public func startLinearOAuthFlow(
+    profileId: String,
+    setDefault: Bool
+  ) async -> LinearOAuthFlowStartResponse? {
+    do {
+      return try await client.startLinearOAuthFlow(
+        profileId: profileId,
+        setDefault: setDefault
+      )
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  public func fetchLinearOAuthFlowStatus(
+    statusURL: String
+  ) async -> LinearOAuthFlowStatusResponse? {
+    do {
+      return try await client.fetchLinearOAuthFlowStatus(statusURL: statusURL)
     } catch {
       errorMessage = error.localizedDescription
       return nil
@@ -708,6 +1232,33 @@ public final class DashboardModel {
   }
 
   @discardableResult
+  public func ingestHackAuthDeepLink(url: URL) -> Bool {
+    guard isHackAuthCompletionDeepLink(url: url) else {
+      return false
+    }
+    errorMessage = nil
+    statusMessage = "Hack auth callback received. Finalizing…"
+    Task { @MainActor [weak self] in
+      guard let self else { return }
+      for attempt in 0..<6 {
+        await self.refreshHackAccountState(force: true, updateErrorMessage: false)
+        if let state = self.hackAccountState,
+          state.authenticated || state.tokenStored
+        {
+          self.statusMessage = state.authenticated
+            ? "Hack account connected."
+            : "Hack auth session stored locally."
+          return
+        }
+        if attempt < 5 {
+          try? await Task.sleep(for: .seconds(1))
+        }
+      }
+    }
+    return true
+  }
+
+  @discardableResult
   public func ingestGitHubOAuthDeepLink(url: URL) -> Bool {
     guard let context = parseGitHubOAuthDeepLink(url: url) else {
       return false
@@ -731,8 +1282,44 @@ public final class DashboardModel {
     githubOAuthDeepLinkContext = nil
   }
 
+  @discardableResult
+  public func ingestLinearOAuthDeepLink(url: URL) -> Bool {
+    guard let context = parseLinearOAuthDeepLink(url: url) else {
+      return false
+    }
+    linearOAuthDeepLinkContext = context
+    if let profileId = context.profileId {
+      statusMessage = "Linear callback received for profile \(profileId). Finalizing…"
+    } else {
+      statusMessage = "Linear callback received. Finalizing…"
+    }
+    return true
+  }
+
+  public func clearLinearOAuthDeepLink(flowId: String? = nil) {
+    guard let current = linearOAuthDeepLinkContext else {
+      return
+    }
+    if let flowId, current.flowId != flowId {
+      return
+    }
+    linearOAuthDeepLinkContext = nil
+  }
+
+  private func isHackAuthCompletionDeepLink(url: URL) -> Bool {
+    guard isRegisteredHackDeepLinkScheme(url.scheme) else {
+      return false
+    }
+
+    let host = url.host?.lowercased() ?? ""
+    let path = normalizedPath(url.path)
+    return (host == "auth" && path == "/complete")
+      || (host == "complete" && path == "/")
+      || (host == "complete" && path.isEmpty)
+  }
+
   private func parseGitHubOAuthDeepLink(url: URL) -> GitHubOAuthDeepLinkContext? {
-    guard url.scheme?.lowercased() == "hack" else {
+    guard isRegisteredHackDeepLinkScheme(url.scheme) else {
       return nil
     }
 
@@ -768,6 +1355,72 @@ public final class DashboardModel {
       installationId: normalizedQueryValue(named: "installationId", items: items)
         ?? normalizedQueryValue(named: "installation_id", items: items)
     )
+  }
+
+  private func parseLinearOAuthDeepLink(url: URL) -> LinearOAuthDeepLinkContext? {
+    guard isRegisteredHackDeepLinkScheme(url.scheme) else {
+      return nil
+    }
+
+    let host = url.host?.lowercased() ?? ""
+    let path = normalizedPath(url.path)
+    let isLinearCallbackRoute =
+      (host == "auth" && path == "/linear/callback")
+      || (host == "linear" && path == "/callback")
+    guard isLinearCallbackRoute else {
+      return nil
+    }
+
+    guard
+      let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+      let items = components.queryItems
+    else {
+      return nil
+    }
+
+    let flowId =
+      normalizedQueryValue(named: "flowId", items: items)
+      ?? normalizedQueryValue(named: "flow_id", items: items)
+    guard let flowId else {
+      return nil
+    }
+
+    return LinearOAuthDeepLinkContext(
+      flowId: flowId,
+      profileId: normalizedQueryValue(named: "profileId", items: items)
+        ?? normalizedQueryValue(named: "profile", items: items),
+      status: normalizedQueryValue(named: "status", items: items)
+    )
+  }
+
+  private func isRegisteredHackDeepLinkScheme(_ scheme: String?) -> Bool {
+    guard
+      let normalizedScheme = scheme?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased(),
+      !normalizedScheme.isEmpty
+    else {
+      return false
+    }
+    return registeredHackDeepLinkSchemes.contains(normalizedScheme)
+  }
+
+  private var registeredHackDeepLinkSchemes: Set<String> {
+    if
+      let urlTypes = Bundle.main.object(forInfoDictionaryKey: "CFBundleURLTypes")
+        as? [[String: Any]]
+    {
+      let schemes = urlTypes
+        .flatMap { $0["CFBundleURLSchemes"] as? [String] ?? [] }
+        .compactMap {
+          let trimmed = $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+          return trimmed.isEmpty ? nil : trimmed
+        }
+      if !schemes.isEmpty {
+        return Set(schemes)
+      }
+    }
+    return ["hack", "hack-dev"]
   }
 
   private func normalizedPath(_ path: String) -> String {
@@ -910,6 +1563,7 @@ public final class DashboardModel {
 
   private func runActionResult<T>(
     message: String,
+    refreshDashboard: Bool = true,
     action: @escaping () async throws -> T
   ) async -> T? {
     statusMessage = message
@@ -918,7 +1572,9 @@ public final class DashboardModel {
     do {
       let result = try await action()
       statusMessage = "Done"
-      await refresh()
+      if refreshDashboard {
+        await refresh()
+      }
       statusClearTask = Task { [weak self] in
         try? await Task.sleep(for: .seconds(2))
         self?.statusMessage = nil

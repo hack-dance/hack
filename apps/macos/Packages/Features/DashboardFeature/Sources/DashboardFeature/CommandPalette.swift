@@ -6,6 +6,23 @@ import HackDesktopModels
 extension Notification.Name {
   public static let hackCommandPaletteRequested = Notification.Name("hack.commandPalette.requested")
   public static let hackRefreshRequested = Notification.Name("hack.refresh.requested")
+  public static let hackProjectNavigationRequested = Notification.Name("hack.projectNavigation.requested")
+  public static let hackTicketReviewQueueRequested = Notification.Name("hack.ticketReviewQueue.requested")
+  public static let hackProjectRoutingRequested = Notification.Name("hack.projectRouting.requested")
+}
+
+enum ProjectNavigationRequest {
+  static let projectIdKey = "projectId"
+  static let tabKey = "tab"
+  static let sidebarKey = "sidebar"
+}
+
+enum TicketReviewQueueRequest {
+  static let projectIdKey = "projectId"
+}
+
+enum ProjectRoutingRequest {
+  static let projectIdKey = "projectId"
 }
 
 struct CommandPaletteAction: Identifiable {
@@ -75,6 +92,16 @@ struct CommandPaletteView: View {
     )
 
     actions.append(
+      CommandPaletteAction(title: "Go to Linear Settings", subtitle: "Connected accounts + sync policy") {
+        NotificationCenter.default.post(
+          name: .hackSettingsRequested,
+          object: nil,
+          userInfo: [SettingsNavigationRequest.paneKey: SettingsSidebarItem.linear.rawValue]
+        )
+      }
+    )
+
+    actions.append(
       CommandPaletteAction(title: "Go to Runtime Settings", subtitle: "System status + daemon") {
         NotificationCenter.default.post(
           name: .hackSettingsRequested,
@@ -134,6 +161,32 @@ struct CommandPaletteView: View {
           model.selectedItem = .project(project.id)
         }
       )
+      if project.supportsTickets {
+        actions.append(
+          CommandPaletteAction(
+            title: "Open Tickets: \(project.name)",
+            subtitle: "Ticket board + manual sync tools"
+          ) {
+            openProjectTickets(project)
+          }
+        )
+        actions.append(
+          CommandPaletteAction(
+            title: "Open Review Queue: \(project.name)",
+            subtitle: "Conflicts, comments, and merge follow-up"
+          ) {
+            openProjectTicketReviewQueue(project)
+          }
+        )
+        actions.append(
+          CommandPaletteAction(
+            title: "Open Linear routing: \(project.name)",
+            subtitle: "Project account + bound Linear project"
+          ) {
+            openProjectRouting(project)
+          }
+        )
+      }
     }
 
     if let project = model.selectedProject {
@@ -149,7 +202,12 @@ struct CommandPaletteView: View {
       }
       actions.append(
         CommandPaletteAction(title: "Project: Overview", subtitle: project.name) {
-          model.selectedProjectTab = .overview
+          openProjectOverview(project)
+        }
+      )
+      actions.append(
+        CommandPaletteAction(title: "Project: Linear routing", subtitle: project.name) {
+          openProjectRouting(project)
         }
       )
       if project.isRuntimeConfigured {
@@ -181,7 +239,15 @@ struct CommandPaletteView: View {
       if project.supportsTickets {
         actions.append(
           CommandPaletteAction(title: "Project: Tickets", subtitle: project.name) {
-            model.selectedProjectTab = .tickets
+            openProjectTickets(project)
+          }
+        )
+        actions.append(
+          CommandPaletteAction(
+            title: "Project: Review queue",
+            subtitle: project.name
+          ) {
+            openProjectTicketReviewQueue(project)
           }
         )
       }
@@ -217,6 +283,27 @@ struct CommandPaletteView: View {
           }
         )
         actions.append(
+          CommandPaletteAction(title: "Tickets: Pull from Linear", subtitle: project.name) {
+            Task {
+              _ = await model.syncLinearProject(
+                for: project,
+                from: "linear"
+              )
+            }
+          }
+        )
+        actions.append(
+          CommandPaletteAction(title: "Tickets: Push Hack to Linear", subtitle: project.name) {
+            Task {
+              _ = await model.syncLinearProject(
+                for: project,
+                from: "hack",
+                ownerMode: "hack"
+              )
+            }
+          }
+        )
+        actions.append(
           CommandPaletteAction(title: "Tickets: Setup", subtitle: project.name) {
             Task { _ = await model.setupTickets(for: project) }
           }
@@ -242,6 +329,38 @@ struct CommandPaletteView: View {
       return projectDir
     }
     return nil
+  }
+
+  private func openProjectOverview(_ project: ProjectSummary) {
+    model.selectedItem = .project(project.id)
+    model.selectedProjectTab = .overview
+  }
+
+  private func openProjectTickets(_ project: ProjectSummary) {
+    model.selectedItem = .project(project.id)
+    model.selectedProjectTab = .tickets
+  }
+
+  private func openProjectTicketReviewQueue(_ project: ProjectSummary) {
+    openProjectTickets(project)
+    DispatchQueue.main.async {
+      NotificationCenter.default.post(
+        name: .hackTicketReviewQueueRequested,
+        object: nil,
+        userInfo: [TicketReviewQueueRequest.projectIdKey: project.id]
+      )
+    }
+  }
+
+  private func openProjectRouting(_ project: ProjectSummary) {
+    model.selectedItem = .project(project.id)
+    NotificationCenter.default.post(
+      name: .hackProjectRoutingRequested,
+      object: nil,
+      userInfo: [
+        ProjectRoutingRequest.projectIdKey: project.id
+      ]
+    )
   }
 
   private func openPreferredCodingAgent(for project: ProjectSummary, path: String) {

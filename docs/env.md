@@ -61,6 +61,8 @@ Fields:
 Notes:
 - `hack env set` also supports interactive prompting when `KEY` or `VALUE` is omitted.
 - Keychain mode uses service name `hack-<projectName>` (project name from `.hack/hack.config.json`).
+- Encrypted-file mode uses `HACK_SECRETS_FILE_KEY` (if set) before keychain key lookup (`hack-secrets-backend/encrypted-file-key`).
+- If you keep getting macOS keychain prompts in encrypted-file mode, set `HACK_SECRETS_FILE_KEY` in your shell/`.env.local` and restart `hackd`.
 - `cloud` mode currently uses provider-scoped shim storage to validate adapter contracts before provider-native transports land.
 
 ## Backend Strategy Contract (`controlPlane.secrets`)

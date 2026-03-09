@@ -7,6 +7,7 @@ import { optPath } from "../cli/options.ts";
 import {
   DEFAULT_CADDY_IP,
   DEFAULT_GRAFANA_HOST,
+  DEFAULT_HOST_DNS_IP,
   DEFAULT_INGRESS_GATEWAY,
   DEFAULT_INGRESS_NETWORK,
   DEFAULT_INGRESS_SUBNET,
@@ -23,6 +24,8 @@ import {
 } from "../constants.ts";
 import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config.ts";
 import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts";
+import { createGitTicketsChannel } from "../control-plane/extensions/tickets/tickets-git-channel.ts";
+import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { requestDaemonJson } from "../daemon/client.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { buildDaemonStatusReport, readDaemonStatus } from "../daemon/status.ts";
@@ -63,6 +66,7 @@ import { isColorEnabled } from "../ui/terminal.ts";
 import {
   analyzeComposeNetworkHygiene,
   dnsmasqConfigHasDomain,
+  resolvePreferredHostDnsTarget,
   resolverHasNameserver,
 } from "./doctor-utils.ts";
 
@@ -77,6 +81,15 @@ interface CheckResult {
 interface TimedCheckResult extends CheckResult {
   readonly durationMs: number;
 }
+
+const noopLogger = {
+  info: (_input: { readonly message: string }) => {
+    // Intentionally quiet during read-only health checks.
+  },
+  warn: (_input: { readonly message: string }) => {
+    // Intentionally quiet during read-only health checks.
+  },
+} as const;
 
 const optFix = defineOption({
   name: "fix",
@@ -343,9 +356,20 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
         }
       )
     );
+    results.push(
+      await runCheck(s, "tickets git", () =>
+        checkProjectTicketsGitHealth({ startDir })
+      )
+    );
   } else {
     results.push({
       name: "DEV_HOST",
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+      durationMs: 0,
+    });
+    results.push({
+      name: "tickets git",
       status: "warn",
       message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
       durationMs: 0,
@@ -356,7 +380,7 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   renderMacNote();
 
   if (args.options.fix) {
-    await runDoctorFix();
+    await runDoctorFix({ startDir });
     note("Re-run: hack doctor", "doctor");
   }
 
@@ -793,8 +817,6 @@ async function checkMacResolverForDomain(domain: string): Promise<CheckResult> {
 async function checkMacDnsmasqConfigForDomain(
   domain: string
 ): Promise<CheckResult> {
-  const desiredLine = `address=/.${domain}/${DEFAULT_CADDY_IP}`;
-
   const brew = await findExecutableInPath("brew");
   if (!brew) {
     return {
@@ -824,7 +846,7 @@ async function checkMacDnsmasqConfigForDomain(
     status: ok ? "ok" : "warn",
     message: ok
       ? dnsmasqConf
-      : `Missing "${desiredLine}" in ${dnsmasqConf} (run: hack global install)`,
+      : `Missing .${domain} dnsmasq address line in ${dnsmasqConf} (run: hack global install)`,
   };
 }
 
@@ -1339,6 +1361,76 @@ async function checkDevHost({
   };
 }
 
+async function checkProjectTicketsGitHealth({
+  startDir,
+}: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const project = await findProjectContext(startDir);
+  if (!project) {
+    return {
+      name: "tickets git",
+      status: "warn",
+      message: `Missing ${HACK_PROJECT_DIR_PRIMARY}/ (run 'hack init' in a repo)`,
+    };
+  }
+
+  const controlPlane = await readControlPlaneConfig({
+    projectDir: project.projectDir,
+  });
+  const gitConfig = controlPlane.config.tickets.git;
+  if (!gitConfig.enabled) {
+    return {
+      name: "tickets git",
+      status: "ok",
+      message: "Disabled",
+    };
+  }
+
+  const channel = createGitTicketsChannel({
+    projectRoot: project.projectRoot,
+    config: gitConfig,
+    logger: noopLogger,
+  });
+  const inspected = await channel.inspect();
+  if (!inspected.ok) {
+    return {
+      name: "tickets git",
+      status: "warn",
+      message: inspected.error,
+    };
+  }
+
+  const health = inspected.health;
+  const problems: string[] = [];
+  if (health.hasRefDivergence) {
+    const remoteOid = health.remoteRefOid?.slice(0, 8) ?? "missing";
+    const legacyOid = health.legacyRefOid?.slice(0, 8) ?? "missing";
+    problems.push(
+      `hidden ref diverges from legacy branch (${remoteOid} vs ${legacyOid})`
+    );
+  } else if (health.hasLegacyRef && health.legacyRef) {
+    problems.push(`legacy ref ${health.legacyRef} still exists`);
+  }
+  if (health.hasNonTicketFiles) {
+    problems.push("non-ticket files present");
+  }
+
+  if (problems.length === 0) {
+    return {
+      name: "tickets git",
+      status: "ok",
+      message: `Healthy (${health.remoteRef})`,
+    };
+  }
+
+  return {
+    name: "tickets git",
+    status: "warn",
+    message: `${problems.join("; ")} (run: hack doctor --fix)`,
+  };
+}
+
 async function checkCaddyHostMapping({
   startDir,
 }: {
@@ -1448,9 +1540,12 @@ async function readLegacyEnvDevHost(envFile: string): Promise<string | null> {
   return typeof host === "string" && host.length > 0 ? host : null;
 }
 
-async function runDoctorFix(): Promise<void> {
+async function runDoctorFix(opts: {
+  readonly startDir: string;
+}): Promise<void> {
   const ok = await confirmOrThrow({
-    message: "Attempt safe auto-remediations now? (network + CoreDNS + CA)",
+    message:
+      "Attempt safe auto-remediations now? (network + CoreDNS + CA + tickets refs)",
     initialValue: true,
   });
   if (!ok) {
@@ -1489,6 +1584,109 @@ async function runDoctorFix(): Promise<void> {
   await maybeStartGlobalCaddyCompose({ paths });
   await maybeExportCaddyCaCert({ paths });
   await maybeMigrateDnsmasq();
+  await maybeRepairProjectTicketsGitHealth({ startDir: opts.startDir });
+}
+
+async function maybeRepairProjectTicketsGitHealth(opts: {
+  readonly startDir: string;
+}): Promise<void> {
+  const project = await findProjectContext(opts.startDir);
+  if (!project) {
+    return;
+  }
+
+  const controlPlane = await readControlPlaneConfig({
+    projectDir: project.projectDir,
+  });
+  const gitConfig = controlPlane.config.tickets.git;
+  if (!gitConfig.enabled) {
+    return;
+  }
+
+  const channel = createGitTicketsChannel({
+    projectRoot: project.projectRoot,
+    config: gitConfig,
+    logger: {
+      info: ({ message }) => note(message, "tickets"),
+      warn: ({ message }) => note(message, "tickets"),
+    },
+  });
+  const inspected = await channel.inspect();
+  if (!inspected.ok) {
+    note(`Unable to inspect tickets git health: ${inspected.error}`, "doctor");
+    return;
+  }
+
+  const health = inspected.health;
+  if (
+    !(
+      health.hasRefDivergence ||
+      health.hasLegacyRef ||
+      health.hasNonTicketFiles
+    )
+  ) {
+    return;
+  }
+
+  const reasons: string[] = [];
+  if (health.hasRefDivergence) {
+    reasons.push("hidden ref diverges from legacy branch");
+  } else if (health.hasLegacyRef) {
+    reasons.push("legacy branch still exists");
+  }
+  if (health.hasNonTicketFiles) {
+    reasons.push("non-ticket files present");
+  }
+
+  const okRepair = await confirmOrThrow({
+    message: `Repair tickets git storage now? (${reasons.join("; ")})`,
+    initialValue: true,
+  });
+  if (!okRepair) {
+    return;
+  }
+
+  const pruneLegacyRef =
+    health.hasLegacyRef &&
+    (await confirmOrThrow({
+      message: `Prune legacy tickets ref ${health.legacyRef ?? "refs/heads/hack/tickets"} after repair?`,
+      initialValue: true,
+    }));
+
+  const repaired = await channel.repair({ pruneLegacyRef });
+  if (!repaired.ok) {
+    note(`Tickets repair failed: ${repaired.error}`, "doctor");
+    return;
+  }
+
+  const legacyRepairStatus = describeLegacyRepairStatus({
+    hadLegacyRef: health.hasLegacyRef,
+    pruneLegacyRef,
+    didPruneLegacy: repaired.didPruneLegacy,
+  });
+  const lines = [
+    `commit: ${repaired.didCommit ? "created" : "noop"}`,
+    `push: ${repaired.didPush ? "pushed" : "skipped"}`,
+    `legacy ref: ${legacyRepairStatus}`,
+  ];
+  if (repaired.pruneError) {
+    lines.push(`legacy prune error: ${repaired.pruneError}`);
+  }
+  note(lines.join("\n"), "tickets repair");
+}
+
+function describeLegacyRepairStatus(input: {
+  readonly hadLegacyRef: boolean;
+  readonly pruneLegacyRef: boolean;
+  readonly didPruneLegacy: boolean;
+}): string {
+  if (!input.hadLegacyRef) {
+    return "not present";
+  }
+  if (!input.pruneLegacyRef) {
+    return "left intact";
+  }
+  return input.didPruneLegacy ? "pruned" : "prune failed";
 }
 
 async function maybeInstallMutagenForDoctorFix(): Promise<void> {
@@ -1700,15 +1898,11 @@ async function maybeMigrateDnsmasq(): Promise<void> {
     return;
   }
 
-  note(
-    "dnsmasq migrated to container IP - port forwarding issues resolved",
-    "doctor"
-  );
+  note("dnsmasq updated to the reachable local ingress target", "doctor");
 }
 
 /**
- * Check if dnsmasq has legacy localhost config and offer to migrate to container IP.
- * Using the container IP directly bypasses OrbStack port forwarding issues.
+ * Reconcile dnsmasq host routing to whichever ingress target is actually reachable.
  */
 async function migrateDnsmasqToContainerIpIfNeeded(): Promise<
   "migrated" | "skipped" | "not-needed"
@@ -1728,25 +1922,28 @@ async function migrateDnsmasqToContainerIpIfNeeded(): Promise<
     return "skipped";
   }
 
-  const containerIpHackLine = `address=/.${DEFAULT_PROJECT_TLD}/${DEFAULT_CADDY_IP}`;
-  const containerIpOauthLine = `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/${DEFAULT_CADDY_IP}`;
+  const targetIp = await resolvePreferredMacHostDnsTarget();
+  const desiredHackLine = `address=/.${DEFAULT_PROJECT_TLD}/${targetIp}`;
+  const desiredOauthLine = `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/${targetIp}`;
+  const legacyHostTarget =
+    targetIp === DEFAULT_CADDY_IP ? DEFAULT_HOST_DNS_IP : DEFAULT_CADDY_IP;
   const legacyLines = [
-    `address=/.${DEFAULT_PROJECT_TLD}/127.0.0.1`,
-    `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/127.0.0.1`,
+    `address=/.${DEFAULT_PROJECT_TLD}/${legacyHostTarget}`,
+    `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/${legacyHostTarget}`,
     `address=/.${DEFAULT_PROJECT_TLD}/::1`,
     `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/::1`,
   ];
 
-  const hasContainerIp =
-    text.includes(containerIpHackLine) && text.includes(containerIpOauthLine);
+  const hasDesired =
+    text.includes(desiredHackLine) && text.includes(desiredOauthLine);
   const hasLegacy = legacyLines.some((line) => text.includes(line));
 
-  if (hasContainerIp || !hasLegacy) {
+  if (hasDesired || !hasLegacy) {
     return "not-needed";
   }
 
   const okMigrate = await confirm({
-    message: "Migrate dnsmasq to container IP? (fixes port forwarding issues)",
+    message: `Update dnsmasq to use ${targetIp} for host routing?`,
     initialValue: true,
   });
   if (isCancel(okMigrate)) {
@@ -1756,13 +1953,13 @@ async function migrateDnsmasqToContainerIpIfNeeded(): Promise<
     return "skipped";
   }
 
-  // Remove legacy lines and add container IP
+  // Remove the old host target lines and add the newly selected one.
   let updated = text;
   for (const legacyLine of legacyLines) {
     updated = updated.replace(legacyLine, "");
   }
   updated = updated.replace(/\n{3,}/g, "\n\n").trim();
-  updated = `${updated}\n${containerIpHackLine}\n${containerIpOauthLine}\n`;
+  updated = `${updated}\n${desiredHackLine}\n${desiredOauthLine}\n`;
 
   await writeTextFileIfChanged(dnsmasqConf, updated);
 
@@ -2013,12 +2210,52 @@ function renderMacNote(): void {
     note(
       [
         "macOS tip:",
-        `- wildcard DNS: /etc/resolver/${DEFAULT_PROJECT_TLD} + dnsmasq address=/.${DEFAULT_PROJECT_TLD}/${DEFAULT_CADDY_IP}`,
-        `- OAuth alias DNS: /etc/resolver/${DEFAULT_OAUTH_ALIAS_ROOT} + dnsmasq address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/${DEFAULT_CADDY_IP}`,
+        `- wildcard DNS: /etc/resolver/${DEFAULT_PROJECT_TLD} + dnsmasq address=/.${DEFAULT_PROJECT_TLD}/<reachable-ingress-target>`,
+        `- OAuth alias DNS: /etc/resolver/${DEFAULT_OAUTH_ALIAS_ROOT} + dnsmasq address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/<reachable-ingress-target>`,
       ].join("\n"),
       "doctor"
     );
   }
+}
+
+async function resolvePreferredMacHostDnsTarget(): Promise<string> {
+  const [containerIpReachable, localhostReachable] = await Promise.all([
+    canConnectTcp({ host: DEFAULT_CADDY_IP, port: 443, timeoutMs: 1500 }),
+    canConnectTcp({ host: DEFAULT_HOST_DNS_IP, port: 443, timeoutMs: 1500 }),
+  ]);
+
+  return resolvePreferredHostDnsTarget({
+    containerIpReachable,
+    localhostReachable,
+  });
+}
+
+async function canConnectTcp(opts: {
+  readonly host: string;
+  readonly port: number;
+  readonly timeoutMs: number;
+}): Promise<boolean> {
+  const { createConnection } = await import("node:net");
+
+  return await new Promise((resolve) => {
+    const socket = createConnection({
+      host: opts.host,
+      port: opts.port,
+      timeout: opts.timeoutMs,
+    });
+    socket.on("connect", () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.on("error", () => {
+      socket.destroy();
+      resolve(false);
+    });
+    socket.on("timeout", () => {
+      socket.destroy();
+      resolve(false);
+    });
+  });
 }
 
 // Keep macOS guidance at the end so it doesn't push other output off-screen.

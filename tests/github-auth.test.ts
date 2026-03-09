@@ -130,6 +130,7 @@ function createControlPlaneConfig(overrides?: {
       allowEnvAuthRefs: true,
       encryptedFile: {
         path: "~/.hack/secrets.enc.json",
+        keyPath: "~/.hack/secrets-file.key",
       },
       cloud: {
         secretPrefix: "hack",

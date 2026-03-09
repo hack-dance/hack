@@ -54,7 +54,7 @@ private enum ProjectSidebarItem: String, CaseIterable, Identifiable {
   var title: String {
     switch self {
     case .remoteExecution:
-      return "Remote execution"
+      return "Project settings"
     case .services:
       return "Services"
     case .lifecycle:
@@ -71,7 +71,7 @@ private enum ProjectSidebarItem: String, CaseIterable, Identifiable {
   var icon: String {
     switch self {
     case .remoteExecution:
-      return "point.3.connected.trianglepath.dotted"
+      return "slider.horizontal.3"
     case .services:
       return "shippingbox"
     case .lifecycle:
@@ -120,10 +120,28 @@ struct ProjectDetailView: View {
   @State private var githubProfilesById: [String: GitHubProfileSummary] = [:]
   @State private var githubProfileStatusById: [String: GitHubStatusResponse] = [:]
   @State private var githubResolvedProfile = ""
-  @State private var githubResolvedStatus: GitHubStatusResponse? = nil
   @State private var githubProfileMessage = ""
+  @State private var linearProjectProfile = ""
+  @State private var linearDefaultProfile = ""
+  @State private var linearProfileOptions: [String] = []
+  @State private var linearProfilesById: [String: LinearProfileSummary] = [:]
+  @State private var linearProfileStatusById: [String: LinearStatusResponse] = [:]
+  @State private var linearResolvedProfile = ""
+  @State private var linearBoundProjectId = ""
+  @State private var linearBoundProjectName = ""
+  @State private var linearBoundTeamId = ""
+  @State private var linearAdditionalProjects: [LinearProjectBindingTarget] = []
+  @State private var linearAutosyncRouteKeys: Set<String> = []
+  @State private var togglingLinearAutosyncRouteKeys: Set<String> = []
+  @State private var linearProjectOptions: [LinearProjectSummary] = []
+  @State private var selectedLinearProjectId = ""
+  @State private var selectedAdditionalLinearProjectId = ""
+  @State private var linearSyncFromLinearEnabled = true
+  @State private var linearCreateHackTicketsEnabled = false
+  @State private var linearProjectMessage = ""
   @State private var projectSystemGitIdentity: GitSystemIdentity? = nil
   @State private var executionTargetReloadTask: Task<Void, Never>? = nil
+  @State private var linearProjectOptionsLoading = false
 
   var body: some View {
     @Bindable var model = model
@@ -159,6 +177,37 @@ struct ProjectDetailView: View {
     }
     .onChange(of: project.kind) { _, _ in
       ensureSidebarSelection()
+    }
+    .onReceive(NotificationCenter.default.publisher(for: .hackProjectNavigationRequested)) { notification in
+      guard
+        let userInfo = notification.userInfo,
+        let requestedProjectId = userInfo[ProjectNavigationRequest.projectIdKey] as? String,
+        requestedProjectId == project.id
+      else {
+        return
+      }
+      if let requestedTab = userInfo[ProjectNavigationRequest.tabKey] as? String,
+         let tab = ProjectTab(rawValue: requestedTab) {
+        model.selectedProjectTab = tab
+      }
+      if let requestedSidebar = userInfo[ProjectNavigationRequest.sidebarKey] as? String,
+         let item = ProjectSidebarItem(rawValue: requestedSidebar) {
+        selectedSidebarItem = item
+      }
+      ensureSidebarSelection()
+    }
+    .onReceive(NotificationCenter.default.publisher(for: .hackProjectRoutingRequested)) { notification in
+      guard
+        let userInfo = notification.userInfo,
+        let requestedProjectId = userInfo[ProjectRoutingRequest.projectIdKey] as? String,
+        requestedProjectId == project.id
+      else {
+        return
+      }
+      model.selectedProjectTab = .overview
+      selectedSidebarItem = .remoteExecution
+      ensureSidebarSelection()
+      queueExecutionTargetReload()
     }
     .onDisappear {
       executionTargetReloadTask?.cancel()
@@ -467,7 +516,7 @@ struct ProjectDetailView: View {
 
   private func sidebarSectionHeader(_ title: String) -> some View {
     Text(title)
-      .font(.mono(.caption, weight: .semibold))
+      .font(.system(size: 11, weight: .semibold))
       .foregroundStyle(.secondary)
       .textCase(.uppercase)
   }
@@ -479,16 +528,16 @@ struct ProjectDetailView: View {
     } label: {
       HStack(spacing: 8) {
         Image(systemName: item.icon)
-          .font(.mono(.caption, weight: .semibold))
+          .font(.system(size: 12, weight: .semibold))
           .foregroundStyle(selected ? Color.accentColor : Color.secondary)
           .frame(width: 14, alignment: .center)
         Text(item.title)
-          .font(.mono(.subheadline, weight: .medium))
+          .font(.system(size: 13, weight: .semibold))
           .foregroundStyle(selected ? .primary : .secondary)
         Spacer(minLength: 6)
         if let count = sidebarItemCountLabel(item) {
           Text(count)
-            .font(.mono(.caption2, weight: .semibold))
+            .font(.system(size: 11, weight: .semibold, design: .monospaced))
             .foregroundStyle(selected ? .primary : .tertiary)
         }
       }
@@ -497,7 +546,7 @@ struct ProjectDetailView: View {
       .frame(maxWidth: .infinity, alignment: .leading)
       .background(
         RoundedRectangle(cornerRadius: 9, style: .continuous)
-          .fill(selected ? Color.accentColor.opacity(0.18) : hoveredSidebarItem == item ? Color.white.opacity(0.06) : .clear)
+          .fill(selected ? Color.accentColor.opacity(0.14) : hoveredSidebarItem == item ? Color.primary.opacity(colorScheme == .dark ? 0.06 : 0.04) : .clear)
       )
     }
     .buttonStyle(.plain)
@@ -514,21 +563,17 @@ struct ProjectDetailView: View {
     Button(action: action) {
       HStack(spacing: 8) {
         Image(systemName: icon)
-          .font(.mono(.caption, weight: .semibold))
+          .font(.system(size: 12, weight: .semibold))
           .foregroundStyle(.secondary)
           .frame(width: 14, alignment: .center)
         Text(title)
-          .font(.mono(.subheadline, weight: .medium))
+          .font(.system(size: 13, weight: .medium))
           .foregroundStyle(.secondary)
         Spacer(minLength: 6)
       }
       .padding(.horizontal, 10)
       .padding(.vertical, 8)
       .frame(maxWidth: .infinity, alignment: .leading)
-      .background(
-        RoundedRectangle(cornerRadius: 9, style: .continuous)
-          .fill(Color.white.opacity(0.04))
-      )
     }
     .buttonStyle(.plain)
   }
@@ -640,126 +685,541 @@ struct ProjectDetailView: View {
   }
 
   private var remoteExecutionSection: some View {
-    VStack(alignment: .leading, spacing: 14) {
-      HStack(spacing: 10) {
-        Image(systemName: "point.3.connected.trianglepath.dotted")
+    VStack(alignment: .leading, spacing: 18) {
+      HStack(alignment: .top, spacing: 12) {
+        Image(systemName: "slider.horizontal.3")
           .foregroundStyle(.secondary)
-        Text("Remote execution")
-          .font(.mono(.headline, weight: .semibold))
+          .padding(.top, 2)
+        VStack(alignment: .leading, spacing: 4) {
+          Text("Project settings")
+            .font(.system(size: 20, weight: .semibold))
+        }
         Spacer()
         if executionTargetLoading || executionTargetSaving {
           ProgressView()
             .controlSize(.small)
         }
-        Button {
-          NotificationCenter.default.post(
-            name: .hackSettingsRequested,
-            object: nil,
-            userInfo: ["pane": "github"]
-          )
-        } label: {
-          Label("Manage accounts", systemImage: "gearshape")
-        }
-        .buttonStyle(PressableIconButtonStyle())
       }
 
-      Text("Select the default node and Git credentials for remote runs. Local uses this machine's inherited Git setup.")
-        .font(.mono(.caption))
-        .foregroundStyle(.secondary)
-
-      VStack(alignment: .leading, spacing: 12) {
-        HStack(alignment: .center, spacing: 12) {
-          Text("Execution mode")
-            .font(.mono(.subheadline, weight: .semibold))
-            .frame(width: 120, alignment: .leading)
-
-          Picker("Execution mode", selection: $executionMode) {
+      VStack(alignment: .leading, spacing: 16) {
+        projectSettingsField(
+          title: "Execution mode",
+          help: "Choose whether this repo defaults to local work on this Mac or routes execution to a remote node.",
+          footnote: executionMode.summary
+        ) {
+          Menu {
             ForEach(RemoteExecutionMode.allCases) { mode in
-              Text(mode.title).tag(mode)
+              Button {
+                guard executionMode != mode else {
+                  return
+                }
+                executionMode = mode
+                guard !executionTargetLoading else {
+                  return
+                }
+                Task { await persistExecutionModeSelection() }
+              } label: {
+                if executionMode == mode {
+                  Label(mode.title, systemImage: "checkmark")
+                } else {
+                  Text(mode.title)
+                }
+              }
             }
+          } label: {
+            projectSettingsMenuLabel(executionMode.title)
           }
-          .pickerStyle(.menu)
-          .frame(maxWidth: 360, alignment: .leading)
-          .onChange(of: executionMode) { _, _ in
-            guard !executionTargetLoading else {
-              return
-            }
-            Task { await persistExecutionModeSelection() }
-          }
-
-          Spacer()
-          Text(executionMode.summary)
-            .font(.mono(.caption2))
-            .foregroundStyle(.tertiary)
+          .buttonStyle(.plain)
+          .accessibilityLabel("Execution mode")
         }
 
-        HStack(alignment: .center, spacing: 12) {
-          Text("Default node")
-            .font(.mono(.subheadline, weight: .semibold))
-            .frame(width: 120, alignment: .leading)
+        Divider()
+          .opacity(0.12)
 
-          Picker("Default node", selection: $executionTargetNodeId) {
-            Text("Local").tag("")
-            ForEach(executionTargetNodes, id: \.id) { node in
-              Text(node.name).tag(node.id)
+        projectSettingsField(
+          title: "Default node",
+          help: "Choose the default node when execution mode is set to remote.",
+          footnote: selectedNodeSummary
+        ) {
+          if executionMode == .local {
+            projectSettingsStaticValue("Uses this Mac while execution mode stays local")
+              .accessibilityLabel("Default node")
+          } else {
+            Menu {
+              Button {
+                guard !executionTargetNodeId.isEmpty else {
+                  return
+                }
+                executionTargetNodeId = ""
+                guard !executionTargetLoading else {
+                  return
+                }
+                Task { await persistSimpleDefaultNodeSelection() }
+              } label: {
+                if executionTargetNodeId.isEmpty {
+                  Label("Local", systemImage: "checkmark")
+                } else {
+                  Text("Local")
+                }
+              }
+              ForEach(executionTargetNodes, id: \.id) { node in
+                Button {
+                  guard executionTargetNodeId != node.id else {
+                    return
+                  }
+                  executionTargetNodeId = node.id
+                  guard !executionTargetLoading else {
+                    return
+                  }
+                  Task { await persistSimpleDefaultNodeSelection() }
+                } label: {
+                  if executionTargetNodeId == node.id {
+                    Label(node.name, systemImage: "checkmark")
+                  } else {
+                    Text(node.name)
+                  }
+                }
+              }
+            } label: {
+              projectSettingsMenuLabel(selectedNodeSummary)
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Default node")
           }
-          .pickerStyle(.menu)
-          .frame(maxWidth: 360, alignment: .leading)
-          .onChange(of: executionTargetNodeId) { _, _ in
-            guard !executionTargetLoading else {
-              return
-            }
-            Task { await persistSimpleDefaultNodeSelection() }
-          }
-          .disabled(executionMode == .local)
-
-          Spacer()
-          Text(selectedNodeSummary)
-            .font(.mono(.caption2))
-            .foregroundStyle(.tertiary)
         }
 
-        HStack(alignment: .center, spacing: 12) {
-          Text("Git creds")
-            .font(.mono(.subheadline, weight: .semibold))
-            .frame(width: 120, alignment: .leading)
+        Divider()
+          .opacity(0.12)
 
-          Picker("Git creds", selection: $githubProjectProfile) {
-            Text("Local").tag("")
+        projectSettingsField(
+          title: "GitHub profile",
+          help: "Pick the saved GitHub profile this repo should use for remote Git operations.",
+          footnote: selectedGitSummary
+        ) {
+          Menu {
+            Button {
+              guard !githubProjectProfile.isEmpty else {
+                return
+              }
+              githubProjectProfile = ""
+              guard !executionTargetLoading else {
+                return
+              }
+              Task { await persistGitCredentialsSelection() }
+            } label: {
+              if githubProjectProfile.isEmpty {
+                Label("Local", systemImage: "checkmark")
+              } else {
+                Text("Local")
+              }
+            }
             ForEach(githubProfileOptions, id: \.self) { profile in
-              Text(githubProfileLabel(profileId: profile)).tag(profile)
+              Button {
+                guard githubProjectProfile != profile else {
+                  return
+                }
+                githubProjectProfile = profile
+                guard !executionTargetLoading else {
+                  return
+                }
+                Task { await persistGitCredentialsSelection() }
+              } label: {
+                let label = githubProfileLabel(profileId: profile)
+                if githubProjectProfile == profile {
+                  Label(label, systemImage: "checkmark")
+                } else {
+                  Text(label)
+                }
+              }
             }
+          } label: {
+            projectSettingsMenuLabel(selectedGitSummary)
           }
-          .pickerStyle(.menu)
-          .frame(maxWidth: 360, alignment: .leading)
-          .onChange(of: githubProjectProfile) { _, _ in
-            guard !executionTargetLoading else {
-              return
-            }
-            Task { await persistGitCredentialsSelection() }
-          }
-
-          Spacer()
-          Text(selectedGitSummary)
-            .font(.mono(.caption2))
-            .foregroundStyle(.tertiary)
+          .buttonStyle(.plain)
+          .accessibilityLabel("GitHub profile")
         }
       }
+      .padding(16)
+      .background(projectSettingsCardBackground)
+
+      linearRoutingSummaryCard
 
       if let projectSystemGitIdentity {
         let systemAccountLabel = projectSystemGitIdentity.githubLogin.map { "@\($0)" } ?? "unavailable"
         Text("Local system Git: \(systemAccountLabel)\(projectSystemGitIdentity.gitEmail.map { " • \($0)" } ?? "")")
-          .font(.mono(.caption2))
+          .font(.system(size: 12, weight: .medium, design: .monospaced))
           .foregroundStyle(.secondary)
       }
 
       if !remoteConfigMessage.isEmpty {
-        Text(remoteConfigMessage)
-          .font(.mono(.caption2))
-          .foregroundStyle(remoteConfigMessage.hasPrefix("Failed") ? Color.orange : Color.green)
+        InlineCallout(
+          tone: remoteConfigTone,
+          title: remoteConfigTone == .warn ? "Settings issue" : "Settings updated",
+          message: remoteConfigMessage,
+          actions: remoteConfigActions
+        )
       }
     }
+  }
+
+  private var linearRoutingSummaryCard: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      HStack(alignment: .top, spacing: 12) {
+        VStack(alignment: .leading, spacing: 4) {
+          Text("Ticket sync")
+            .font(.system(size: 15, weight: .semibold))
+          Text(linearRoutingSummaryLine)
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(.secondary)
+        }
+        Spacer()
+        if !hasConfiguredLinearProfile {
+          Button("Open Linear settings") {
+            NotificationCenter.default.post(
+              name: .hackSettingsRequested,
+              object: nil,
+              userInfo: ["pane": "linear"]
+            )
+          }
+          .adaptiveToolbarButtonProminent()
+        }
+      }
+
+      if hasConfiguredLinearProfile {
+        VStack(alignment: .leading, spacing: 14) {
+          if linearProfileOptions.count > 1 {
+            projectSettingsField(
+              title: "Linear account",
+              help: "Use a different saved Linear account for this repo when needed.",
+              footnote: selectedLinearProfileSummary
+            ) {
+              linearAccountPickerControl(accessibilityLabel: "Linear account")
+            }
+          }
+
+          projectSettingsField(
+            title: "Linear project",
+            help: "Choose the main Linear project this repo should sync with.",
+            footnote: selectedLinearProjectFootnote
+          ) {
+            linearProjectPickerControl(accessibilityLabel: "Linear project")
+          }
+
+          projectSettingsControlGroup(
+            footnote: linearSyncPolicySummary
+          ) {
+            VStack(alignment: .leading, spacing: 10) {
+              projectSettingsToggleRow(
+                title: "Sync from Linear",
+                subtitle: "Receive webhook-backed updates from the bound Linear project.",
+                isOn: Binding(
+                  get: { linearSyncFromLinearEnabled },
+                  set: { enabled in
+                    linearSyncFromLinearEnabled = enabled
+                    Task { await persistLinearSyncFromLinearSetting(enabled: enabled) }
+                  }
+                ),
+                isBusy: togglingLinearAutosyncRouteKeys.contains(defaultLinearRouteKey),
+                isEnabled: defaultLinearRouteTarget != nil
+              )
+
+              projectSettingsToggleRow(
+                title: "Create Hack tickets in Linear",
+                subtitle: "Automatically create linked Linear issues for new Hack tickets in this repo.",
+                isOn: Binding(
+                  get: { linearCreateHackTicketsEnabled },
+                  set: { enabled in
+                    linearCreateHackTicketsEnabled = enabled
+                    Task { await persistLinearCreateHackTicketsSetting(enabled: enabled) }
+                  }
+                ),
+                isBusy: executionTargetSaving,
+                isEnabled: defaultLinearRouteTarget != nil
+              )
+
+              if !linearAdditionalProjects.isEmpty {
+                Divider()
+                  .opacity(0.12)
+
+                projectSettingsFieldLabel(
+                  "Additional projects",
+                  help: "Advanced multi-project sync scope already linked for this repo."
+                )
+
+                VStack(alignment: .leading, spacing: 8) {
+                  ForEach(linearAdditionalProjects) { target in
+                    linearScopeRouteRow(target: target, isDefault: false)
+                  }
+                }
+              }
+            }
+          }
+        }
+      } else {
+        HStack(spacing: 8) {
+          StatusPill(text: "Needs connection", tone: .warn)
+          Spacer(minLength: 0)
+        }
+      }
+
+      if !linearProjectMessage.isEmpty {
+        Text(linearProjectMessage)
+          .font(.system(size: 12, weight: .medium))
+          .foregroundStyle(remoteConfigTone == .warn ? Color.orange : .secondary)
+      }
+    }
+    .padding(16)
+    .background(projectSettingsCardBackground)
+    .task(id: resolvedLinearRoutingProfileId ?? "") {
+      await loadLinearRoutingProjectOptionsIfNeeded()
+    }
+  }
+
+  private var defaultLinearRouteTarget: LinearProjectBindingTarget? {
+    guard !linearBoundProjectId.isEmpty else {
+      return nil
+    }
+    return LinearProjectBindingTarget(
+      profileId: resolvedLinearRoutingProfileId,
+      projectId: linearBoundProjectId,
+      projectName: linearBoundProjectName.isEmpty ? nil : linearBoundProjectName,
+      teamId: linearBoundTeamId.isEmpty ? nil : linearBoundTeamId
+    )
+  }
+
+  private var resolvedLinearRoutingProfileId: String? {
+    let resolved = linearResolvedProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !resolved.isEmpty {
+      return resolved
+    }
+    let explicit = linearProjectProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !explicit.isEmpty {
+      return explicit
+    }
+    let inherited = linearDefaultProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+    return inherited.isEmpty ? nil : inherited
+  }
+
+  private var hasConfiguredLinearProfile: Bool {
+    let resolvedProfile = resolvedLinearRoutingProfileId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    if !resolvedProfile.isEmpty {
+      return true
+    }
+    return !linearProfileOptions.isEmpty || !linearProfilesById.isEmpty
+  }
+
+  private var linearRoutingSummaryLine: String {
+    if !hasConfiguredLinearProfile {
+      return "Connect Linear in Settings, then choose the project this repo should sync with."
+    }
+    if !hasAnyLinearProjectRouting {
+      return "Linear is connected. Choose the main Linear project for this repo."
+    }
+    if !linearSyncFromLinearEnabled {
+      return "Linear · \(selectedLinearProjectSummary) · inbound sync off"
+    }
+    if linearCreateHackTicketsEnabled {
+      return "Linear · \(selectedLinearProjectSummary) · inbound on · create in Linear on"
+    }
+    return "Linear · \(selectedLinearProjectSummary) · inbound on"
+  }
+
+  private var selectedLinearProjectFootnote: String {
+    if linearProjectOptionsLoading {
+      return "Loading projects…"
+    }
+    if resolvedLinearProjectId.isEmpty {
+      return "Choose the main Linear project for this repo."
+    }
+    return selectedLinearProjectSummary
+  }
+
+  private var linearSyncPolicySummary: String {
+    guard defaultLinearRouteTarget != nil else {
+      return "Choose a Linear project before sync can start."
+    }
+    if linearSyncFromLinearEnabled && linearCreateHackTicketsEnabled {
+      return "Inbound sync is on. New Hack tickets will also create linked Linear issues."
+    }
+    if linearSyncFromLinearEnabled {
+      return "Inbound sync is on for the bound Linear project. Hack tickets stay local unless you turn on outbound creation."
+    }
+    if linearCreateHackTicketsEnabled {
+      return "Inbound sync is off. New Hack tickets will still create linked Linear issues."
+    }
+    return "Sync is manual until you enable one of the project sync toggles."
+  }
+
+  private var defaultLinearRouteKey: String {
+    guard let defaultLinearRouteTarget else {
+      return "__no_linear_route__"
+    }
+    return linearRouteKey(for: defaultLinearRouteTarget)
+  }
+
+  private var projectSettingsCardBackground: some View {
+    RoundedRectangle(cornerRadius: 16, style: .continuous)
+      .fill(Color.primary.opacity(colorScheme == .dark ? 0.045 : 0.03))
+      .overlay(
+        RoundedRectangle(cornerRadius: 16, style: .continuous)
+          .stroke(Color.primary.opacity(colorScheme == .dark ? 0.1 : 0.08), lineWidth: 1)
+      )
+  }
+
+  private func projectSettingsFootnote(_ text: String) -> some View {
+    Text(text)
+      .font(.system(size: 12, weight: .medium, design: .monospaced))
+      .foregroundStyle(.tertiary)
+  }
+
+  private func projectSettingsField<Content: View>(
+    title: String,
+    help: String? = nil,
+    footnote: String,
+    @ViewBuilder content: () -> Content
+  ) -> some View {
+    VStack(alignment: .leading, spacing: 10) {
+      projectSettingsFieldLabel(title, help: help)
+      projectSettingsControlShell(maxWidth: 360) {
+        content()
+      }
+      projectSettingsFootnote(footnote)
+    }
+  }
+
+  private func projectSettingsControlGroup<Content: View>(
+    footnote: String,
+    @ViewBuilder content: () -> Content
+  ) -> some View {
+    VStack(alignment: .leading, spacing: 8) {
+      content()
+      projectSettingsFootnote(footnote)
+    }
+  }
+
+  private func projectSettingsToggleRow(
+    title: String,
+    subtitle: String,
+    isOn: Binding<Bool>,
+    isBusy: Bool,
+    isEnabled: Bool = true
+  ) -> some View {
+    projectSettingsControlShell(maxWidth: 520) {
+      HStack(alignment: .center, spacing: 12) {
+        VStack(alignment: .leading, spacing: 2) {
+          Text(title)
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(isEnabled ? .primary : .secondary)
+          Text(subtitle)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(.tertiary)
+        }
+        Spacer(minLength: 12)
+        if isBusy {
+          ProgressView()
+            .controlSize(.small)
+        }
+        Toggle(title, isOn: isOn)
+          .labelsHidden()
+          .toggleStyle(.switch)
+          .disabled(!isEnabled || isBusy)
+      }
+    }
+  }
+
+  private func projectSettingsFieldLabel(_ text: String, help: String? = nil) -> some View {
+    HStack(alignment: .center, spacing: 6) {
+      Text(text)
+        .font(.system(size: 11, weight: .semibold))
+        .foregroundStyle(.secondary)
+        .textCase(.uppercase)
+      if let help, !help.isEmpty {
+        Image(systemName: "info.circle")
+          .font(.system(size: 11, weight: .semibold))
+          .foregroundStyle(.tertiary)
+          .help(help)
+      }
+    }
+  }
+
+  private func projectSettingsMenuLabel(
+    _ text: String,
+    isDisabled: Bool = false
+  ) -> some View {
+    HStack(spacing: 10) {
+      Text(text)
+        .font(.system(size: 13, weight: .semibold))
+        .foregroundStyle(isDisabled ? .tertiary : .primary)
+        .lineLimit(1)
+      Spacer(minLength: 8)
+      Image(systemName: "chevron.up.chevron.down")
+        .font(.system(size: 10, weight: .semibold))
+        .foregroundStyle(isDisabled ? .tertiary : .secondary)
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .contentShape(Rectangle())
+  }
+
+  private func projectSettingsStaticValue(_ text: String) -> some View {
+    Text(text)
+      .font(.system(size: 13, weight: .semibold))
+      .foregroundStyle(.secondary)
+      .frame(maxWidth: .infinity, alignment: .leading)
+  }
+
+  private func projectSettingsControlShell<Content: View>(
+    maxWidth: CGFloat? = nil,
+    @ViewBuilder content: () -> Content
+  ) -> some View {
+    HStack(spacing: 0) {
+      content()
+      Spacer(minLength: 0)
+    }
+    .frame(maxWidth: maxWidth, alignment: .leading)
+    .padding(.horizontal, 12)
+    .padding(.vertical, 10)
+    .background(
+      RoundedRectangle(cornerRadius: 12, style: .continuous)
+        .fill(Color.primary.opacity(colorScheme == .dark ? 0.05 : 0.04))
+    )
+    .overlay(
+      RoundedRectangle(cornerRadius: 12, style: .continuous)
+        .stroke(Color.primary.opacity(colorScheme == .dark ? 0.12 : 0.08), lineWidth: 1)
+    )
+  }
+
+  private func additionalProjectMenuLabel(_ projectId: String) -> String {
+    let trimmed = projectId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      return "Choose project"
+    }
+    guard let project = availableAdditionalLinearProjects.first(where: { $0.id == trimmed }) else {
+      return trimmed
+    }
+    return linearProjectMenuLabel(project)
+  }
+
+  private func routingSheetSection<Content: View>(
+    title: String,
+    help: String? = nil,
+    @ViewBuilder content: () -> Content
+  ) -> some View {
+    VStack(alignment: .leading, spacing: 12) {
+      HStack(alignment: .center, spacing: 6) {
+        Text(title)
+          .font(.system(size: 15, weight: .semibold))
+        if let help, !help.isEmpty {
+          Image(systemName: "info.circle")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(.tertiary)
+            .help(help)
+        }
+      }
+
+      content()
+    }
+    .padding(18)
+    .background(projectSettingsCardBackground)
   }
 
   private var servicesSection: some View {
@@ -1260,6 +1720,205 @@ struct ProjectDetailView: View {
     return githubProfileLabel(profileId: selectedProfileId)
   }
 
+  @ViewBuilder
+  private func linearScopeRouteRow(
+    target: LinearProjectBindingTarget,
+    isDefault: Bool
+  ) -> some View {
+    let normalizedTarget = normalizedLinearRouteTarget(target)
+    VStack(alignment: .leading, spacing: 8) {
+      HStack(alignment: .center, spacing: 8) {
+        Text(linearProjectBindingTargetLabel(normalizedTarget))
+          .font(.mono(.caption, weight: .semibold))
+          .foregroundStyle(.primary)
+        if isDefault {
+          StatusPill(text: "Default", tone: .good)
+        } else {
+          StatusPill(text: "Linked", tone: .neutral)
+        }
+        if isLinearAutosyncEnabled(for: normalizedTarget) {
+          StatusPill(text: "Autosync", tone: .good)
+        }
+        Spacer()
+        if isLinearAutosyncBusy(for: normalizedTarget) {
+          ProgressView()
+            .controlSize(.small)
+        }
+        Toggle(
+          isOn: Binding(
+            get: { isLinearAutosyncEnabled(for: normalizedTarget) },
+            set: { enabled in
+              Task {
+                await toggleLinearAutosync(for: normalizedTarget, enabled: enabled)
+              }
+            }
+          )
+        ) {
+          Text("Autosync")
+            .font(.mono(.caption2))
+            .foregroundStyle(.secondary)
+        }
+        .disabled(isLinearAutosyncBusy(for: normalizedTarget))
+
+        if !isDefault {
+          Menu {
+            Button("Make default") {
+              Task { await makeAdditionalLinearProjectDefault(normalizedTarget) }
+            }
+            Button(role: .destructive) {
+              Task { await removeAdditionalLinearProject(normalizedTarget) }
+            } label: {
+              Text("Remove")
+            }
+          } label: {
+            Label("Actions", systemImage: "ellipsis.circle")
+          }
+          .buttonStyle(PressableIconButtonStyle())
+        }
+      }
+
+      HStack(spacing: 8) {
+        if let profileId = normalizedTarget.profileId, !profileId.isEmpty {
+          Text("Profile \(linearProfileLabel(profileId: profileId))")
+            .font(.mono(.caption2))
+            .foregroundStyle(.secondary)
+        }
+        if let teamId = normalizedTarget.teamId, !teamId.isEmpty {
+          Text("Team \(teamId)")
+            .font(.mono(.caption2))
+            .foregroundStyle(.tertiary)
+        }
+      }
+    }
+    .padding(10)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(
+      RoundedRectangle(cornerRadius: 12, style: .continuous)
+        .fill(Color.primary.opacity(colorScheme == .dark ? 0.05 : 0.035))
+    )
+    .overlay(
+      RoundedRectangle(cornerRadius: 12, style: .continuous)
+        .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+    )
+  }
+
+  private var selectedLinearProfileSummary: String {
+    let selectedProfileId = linearProjectProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !selectedProfileId.isEmpty else {
+      if linearDefaultProfile.isEmpty {
+        return "Inherited"
+      }
+      return linearProfileLabel(profileId: linearDefaultProfile)
+    }
+    return linearProfileLabel(profileId: selectedProfileId)
+  }
+
+  private var selectedLinearProjectSummary: String {
+    let selectedProjectId = resolvedLinearProjectId
+    guard !selectedProjectId.isEmpty else {
+      return "Unbound"
+    }
+    if let linearProject = linearProjectOptions.first(where: { $0.id == selectedProjectId }) {
+      return linearProjectMenuLabel(linearProject)
+    }
+    if !linearBoundProjectName.isEmpty {
+      return linearBoundProjectName
+    }
+    return selectedProjectId
+  }
+
+  private var availableAdditionalLinearProjects: [LinearProjectSummary] {
+    let linkedProjectIds = Set(linearAdditionalProjects.map(\.projectId))
+    return linearProjectOptions.filter { linearProject in
+      linearProject.id != linearBoundProjectId && !linkedProjectIds.contains(linearProject.id)
+    }
+  }
+
+  private var effectiveDefaultLinearTarget: LinearProjectBindingTarget? {
+    guard !linearBoundProjectId.isEmpty else {
+      return nil
+    }
+    return LinearProjectBindingTarget(
+      profileId: linearBoundProfileId,
+      projectId: linearBoundProjectId,
+      projectName: linearBoundProjectName.isEmpty ? nil : linearBoundProjectName,
+      teamId: linearBoundTeamId.isEmpty ? nil : linearBoundTeamId
+    )
+  }
+
+  private var linearBoundProfileId: String? {
+    let projectProfile = linearProjectProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !projectProfile.isEmpty {
+      return projectProfile
+    }
+    let resolvedProfile = linearResolvedProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+    return resolvedProfile.isEmpty ? nil : resolvedProfile
+  }
+
+  private var allLinearRouteTargets: [LinearProjectBindingTarget] {
+    var targets: [LinearProjectBindingTarget] = []
+    if let effectiveDefaultLinearTarget {
+      targets.append(effectiveDefaultLinearTarget)
+    }
+    targets.append(contentsOf: linearAdditionalProjects.map(normalizedLinearRouteTarget(_:)))
+    return targets
+  }
+
+  private func normalizedLinearRouteTarget(_ target: LinearProjectBindingTarget) -> LinearProjectBindingTarget {
+    if let profileId = target.profileId?.trimmingCharacters(in: .whitespacesAndNewlines),
+       !profileId.isEmpty {
+      return target
+    }
+    return LinearProjectBindingTarget(
+      profileId: linearBoundProfileId,
+      projectId: target.projectId,
+      projectName: target.projectName,
+      teamId: target.teamId
+    )
+  }
+
+  private func linearRouteKey(for target: LinearProjectBindingTarget) -> String {
+    let normalized = normalizedLinearRouteTarget(target)
+    let profileId = normalized.profileId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "*"
+    let teamId = normalized.teamId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "*"
+    return [profileId, normalized.projectId, teamId].joined(separator: "::")
+  }
+
+  private func isLinearAutosyncEnabled(for target: LinearProjectBindingTarget) -> Bool {
+    linearAutosyncRouteKeys.contains(linearRouteKey(for: target))
+  }
+
+  private var hasAnyLinearAutosyncRoutes: Bool {
+    !linearAutosyncRouteKeys.isEmpty
+  }
+
+  private func isLinearAutosyncBusy(for target: LinearProjectBindingTarget) -> Bool {
+    togglingLinearAutosyncRouteKeys.contains(linearRouteKey(for: target))
+  }
+
+  private var linearResolvedAccountName: String? {
+    let trimmed = linearResolvedProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      return nil
+    }
+    return linearAccountLabel(profileId: trimmed)
+  }
+
+  private var resolvedLinearProjectId: String {
+    let selected = selectedLinearProjectId.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !selected.isEmpty {
+      return selected
+    }
+    return linearBoundProjectId.trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+
+  private var hasAnyLinearProjectRouting: Bool {
+    if !resolvedLinearProjectId.isEmpty {
+      return true
+    }
+    return !linearAdditionalProjects.isEmpty
+  }
+
   private var remoteConfigMessage: String {
     if !executionTargetMessage.isEmpty {
       return executionTargetMessage
@@ -1267,7 +1926,47 @@ struct ProjectDetailView: View {
     if !githubProfileMessage.isEmpty {
       return githubProfileMessage
     }
+    if !linearProjectMessage.isEmpty {
+      return linearProjectMessage
+    }
     return ""
+  }
+
+  private var remoteConfigTone: StatusTone {
+    if remoteConfigMessage.hasPrefix("Failed") {
+      return .warn
+    }
+    return .good
+  }
+
+  private var remoteConfigActions: [InlineCalloutAction] {
+    if remoteConfigTone == .warn {
+      return [
+        InlineCalloutAction(
+          label: "Linear settings",
+          systemImage: "point.3.connected.trianglepath.dotted"
+        ) {
+          NotificationCenter.default.post(
+            name: .hackSettingsRequested,
+            object: nil,
+            userInfo: ["pane": "linear"]
+          )
+        }
+      ]
+    }
+    return [
+      InlineCalloutAction(label: "Open tickets", systemImage: "ticket") {
+        NotificationCenter.default.post(
+          name: .hackProjectNavigationRequested,
+          object: nil,
+          userInfo: [
+            ProjectNavigationRequest.projectIdKey: project.id,
+            ProjectNavigationRequest.tabKey: ProjectTab.tickets.rawValue,
+            ProjectNavigationRequest.sidebarKey: ProjectSidebarItem.tickets.rawValue,
+          ]
+        )
+      }
+    ]
   }
 
   private func githubAccountLogin(profileId: String) -> String? {
@@ -1317,6 +2016,207 @@ struct ProjectDetailView: View {
     return "@\(account) (\(trimmed))"
   }
 
+  private func linearAccountName(profileId: String) -> String? {
+    let trimmed = profileId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      return nil
+    }
+    let summaryName = linearProfilesById[trimmed]?.accountName?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    if let summaryName, !summaryName.isEmpty {
+      return summaryName
+    }
+    let statusName = linearProfileStatusById[trimmed]?.accountName?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    if let statusName, !statusName.isEmpty {
+      return statusName
+    }
+    return nil
+  }
+
+  private func loadLinearRoutingProjectOptionsIfNeeded() async {
+    let resolvedProfile = resolvedLinearRoutingProfileId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    guard !resolvedProfile.isEmpty else {
+      linearProjectOptions = []
+      linearProjectOptionsLoading = false
+      return
+    }
+    linearProjectOptionsLoading = true
+    defer { linearProjectOptionsLoading = false }
+    if let projectCatalog = await model.listLinearProjects(profileId: resolvedProfile) {
+      linearProjectOptions = projectCatalog.projects.sorted { lhs, rhs in
+        lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+      }
+    } else {
+      linearProjectOptions = []
+    }
+  }
+
+  @ViewBuilder
+  private func linearAccountPickerControl(accessibilityLabel: String) -> some View {
+    Menu {
+      Button {
+        guard !linearProjectProfile.isEmpty else {
+          return
+        }
+        linearProjectProfile = ""
+        guard !executionTargetLoading else {
+          return
+        }
+        Task { await persistLinearProfileOverride() }
+      } label: {
+        if linearProjectProfile.isEmpty {
+          Label("Inherited", systemImage: "checkmark")
+        } else {
+          Text("Inherited")
+        }
+      }
+      ForEach(linearProfileOptions, id: \.self) { profile in
+        Button {
+          guard linearProjectProfile != profile else {
+            return
+          }
+          linearProjectProfile = profile
+          guard !executionTargetLoading else {
+            return
+          }
+          Task { await persistLinearProfileOverride() }
+        } label: {
+          let label = linearProfileLabel(profileId: profile)
+          if linearProjectProfile == profile {
+            Label(label, systemImage: "checkmark")
+          } else {
+            Text(label)
+          }
+        }
+      }
+    } label: {
+      projectSettingsMenuLabel(selectedLinearProfileSummary)
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel(accessibilityLabel)
+  }
+
+  @ViewBuilder
+  private func linearProjectPickerControl(accessibilityLabel: String) -> some View {
+    if linearProjectOptionsLoading {
+      projectSettingsStaticValue("Loading projects…")
+        .accessibilityLabel(accessibilityLabel)
+    } else if linearProjectOptions.isEmpty {
+      projectSettingsStaticValue("No projects available")
+        .accessibilityLabel(accessibilityLabel)
+    } else {
+      Menu {
+        Button {
+          guard !selectedLinearProjectId.isEmpty else {
+            return
+          }
+          selectedLinearProjectId = ""
+          guard !executionTargetLoading else {
+            return
+          }
+          Task { await persistLinearProjectBindingSelection() }
+        } label: {
+          if selectedLinearProjectId.isEmpty {
+            Label("Unbound", systemImage: "checkmark")
+          } else {
+            Text("Unbound")
+          }
+        }
+        ForEach(linearProjectOptions) { linearProject in
+          Button {
+            guard selectedLinearProjectId != linearProject.id else {
+              return
+            }
+            selectedLinearProjectId = linearProject.id
+            guard !executionTargetLoading else {
+              return
+            }
+            Task { await persistLinearProjectBindingSelection() }
+          } label: {
+            let label = linearProjectMenuLabel(linearProject)
+            if selectedLinearProjectId == linearProject.id {
+              Label(label, systemImage: "checkmark")
+            } else {
+              Text(label)
+            }
+          }
+        }
+      } label: {
+        projectSettingsMenuLabel(selectedLinearProjectSummary)
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel(accessibilityLabel)
+    }
+  }
+
+  private func linearAccountEmail(profileId: String) -> String? {
+    let trimmed = profileId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      return nil
+    }
+    let summaryEmail = linearProfilesById[trimmed]?.accountEmail?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    if let summaryEmail, !summaryEmail.isEmpty {
+      return summaryEmail
+    }
+    let statusEmail = linearProfileStatusById[trimmed]?.accountEmail?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    if let statusEmail, !statusEmail.isEmpty {
+      return statusEmail
+    }
+    return nil
+  }
+
+  private func linearAccountLabel(profileId: String) -> String? {
+    linearAccountName(profileId: profileId) ?? linearAccountEmail(profileId: profileId)
+  }
+
+  private func linearProfileLabel(profileId: String) -> String {
+    let trimmed = profileId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      return "Inherited"
+    }
+    guard let label = linearAccountLabel(profileId: trimmed) else {
+      return trimmed
+    }
+    return "\(label) (\(trimmed))"
+  }
+
+  private func linearProjectMenuLabel(_ project: LinearProjectSummary) -> String {
+    if let teamKey = project.teamKey, !teamKey.isEmpty {
+      return "\(project.name) (\(teamKey))"
+    }
+    if let teamName = project.teamName, !teamName.isEmpty {
+      return "\(project.name) (\(teamName))"
+    }
+    return project.name
+  }
+
+  private func linearProjectBindingTargetLabel(_ target: LinearProjectBindingTarget) -> String {
+    if let matchingProject = linearProjectOptions.first(where: { $0.id == target.projectId }) {
+      let projectLabel = linearProjectMenuLabel(matchingProject)
+      if let profileId = target.profileId,
+         !profileId.isEmpty,
+         profileId != linearResolvedProfile,
+         profileId != linearProjectProfile {
+        return "\(linearProfileLabel(profileId: profileId)) • \(projectLabel)"
+      }
+      return projectLabel
+    }
+
+    let projectLabel: String
+    if let projectName = target.projectName, !projectName.isEmpty {
+      projectLabel = projectName
+    } else {
+      projectLabel = target.projectId
+    }
+    if let profileId = target.profileId, !profileId.isEmpty {
+      return "\(linearProfileLabel(profileId: profileId)) • \(projectLabel)"
+    }
+    return projectLabel
+  }
+
   /**
    Reload project-level remote execution defaults and Git credential routing.
    */
@@ -1327,6 +2227,9 @@ struct ProjectDetailView: View {
     executionTargetLoading = true
     defer { executionTargetLoading = false }
     let identityProjectPath = project.repoRoot ?? project.projectDir
+    let hackAccountAuthenticated = await MainActor.run {
+      model.hackAccountState?.authenticated == true
+    }
 
     async let nodeList = model.listNodes()
     async let executionModeRaw = model.getProjectConfig(
@@ -1345,10 +2248,29 @@ struct ProjectDetailView: View {
       for: project,
       key: "controlPlane.routing.overrides.github.profile"
     )
+    async let linearSyncFromLinearConfig = model.getProjectConfig(
+      for: project,
+      key: "controlPlane.routing.overrides.linear.syncFromLinear"
+    )
+    async let linearCreateHackTicketsConfig = model.getProjectConfig(
+      for: project,
+      key: "controlPlane.routing.overrides.linear.createHackTicketsInLinear"
+    )
+    async let linearBinding = model.inspectLinearProjectBinding(for: project)
     async let defaultGitHubProfile = model.getGlobalConfig(
       key: "controlPlane.extensions[\"dance.hack.github\"].config.defaultProfile"
     )
+    async let defaultLinearProfile = model.getGlobalConfig(
+      key: "controlPlane.extensions[\"dance.hack.linear\"].config.defaultProfile"
+    )
     async let githubProfiles = model.inspectGitHubProfiles()
+    async let linearProfiles = model.inspectLinearProfiles()
+    async let remoteLinearConnections: LinearConnectionsResponse? = {
+      guard hackAccountAuthenticated else {
+        return nil
+      }
+      return await model.listLinearConnections()
+    }()
     async let systemGitIdentity = model.inspectSystemGitIdentity(
       projectPath: identityProjectPath
     )
@@ -1358,8 +2280,14 @@ struct ProjectDetailView: View {
     let resolvedExecutionNodeId = await executionNodeId
     let resolvedProjectNodeId = await projectNodeId
     let resolvedProjectGitHubProfile = await projectGitHubProfile
+    let resolvedLinearSyncFromLinearConfig = await linearSyncFromLinearConfig
+    let resolvedLinearCreateHackTicketsConfig = await linearCreateHackTicketsConfig
+    let resolvedLinearBinding = await linearBinding
     let resolvedDefaultGitHubProfile = await defaultGitHubProfile
+    let resolvedDefaultLinearProfile = await defaultLinearProfile
     let resolvedGitHubProfiles = await githubProfiles
+    var resolvedLinearProfiles = await linearProfiles
+    let resolvedRemoteLinearConnections = await remoteLinearConnections
     let resolvedSystemGitIdentity = await systemGitIdentity
 
     if Task.isCancelled {
@@ -1387,29 +2315,70 @@ struct ProjectDetailView: View {
       .sorted { lhs, rhs in
         lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
       }
-    var profileStatusById: [String: GitHubStatusResponse] = [:]
-    for profileId in githubProfileOptions {
-      if let status = await model.inspectGitHubStatus(profileId: profileId) {
-        profileStatusById[profileId] = status
-      }
-    }
-    githubProfileStatusById = profileStatusById
+    githubProfileStatusById = [:]
     let resolvedGitHubProfile = githubProjectProfile.isEmpty
       ? githubDefaultProfile
       : githubProjectProfile
     githubResolvedProfile = resolvedGitHubProfile
     projectSystemGitIdentity = resolvedSystemGitIdentity
-    if let preloadedStatus = profileStatusById[resolvedGitHubProfile] {
-      githubResolvedStatus = preloadedStatus
-    } else {
-      githubResolvedStatus = await model.inspectGitHubStatus(
-        profileId: resolvedGitHubProfile.isEmpty ? nil : resolvedGitHubProfile
-      )
+
+    linearProjectProfile = (resolvedLinearBinding?.profileId ?? "")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    linearBoundProjectId = (resolvedLinearBinding?.projectId ?? "")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    linearBoundProjectName = (resolvedLinearBinding?.projectName ?? "")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    linearBoundTeamId = (resolvedLinearBinding?.teamId ?? "")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    linearAdditionalProjects = resolvedLinearBinding?.additionalProjects ?? []
+    let fallbackDefaultLinearProfile = (resolvedDefaultLinearProfile ?? "")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    let initialLinearDefaultProfile = resolvedLinearProfiles?.defaultProfile ?? fallbackDefaultLinearProfile
+    let explicitLinearProfile = (resolvedLinearBinding?.profileId ?? "")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    let initialResolvedLinearProfile =
+      explicitLinearProfile.isEmpty ? initialLinearDefaultProfile : explicitLinearProfile
+    if !initialResolvedLinearProfile.isEmpty,
+       !linearProfilesResponse(resolvedLinearProfiles, containsProfileId: initialResolvedLinearProfile),
+       remoteLinearConnection(
+         profileId: initialResolvedLinearProfile,
+         in: resolvedRemoteLinearConnections
+       )?.localAccessAvailable == true,
+       await model.seedLinearLocalAccess(profileId: initialResolvedLinearProfile) != nil
+    {
+      resolvedLinearProfiles = await model.inspectLinearProfiles()
     }
+    linearDefaultProfile = resolvedLinearProfiles?.defaultProfile ?? fallbackDefaultLinearProfile
+    linearProfilesById = mapLinearProfilesById(response: resolvedLinearProfiles)
+    linearProfileOptions = (resolvedLinearProfiles?.profiles ?? [])
+      .map(\.id)
+      .sorted { lhs, rhs in
+        lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
+      }
+    linearProfileStatusById = [:]
+    let resolvedLinearProfile = linearProjectProfile.isEmpty
+      ? linearDefaultProfile
+      : linearProjectProfile
+    linearResolvedProfile = resolvedLinearProfile
+    linearSyncFromLinearEnabled = parseProjectBooleanConfig(
+      resolvedLinearSyncFromLinearConfig,
+      default: true
+    )
+    linearCreateHackTicketsEnabled = parseProjectBooleanConfig(
+      resolvedLinearCreateHackTicketsConfig,
+      default: false
+    )
+    selectedLinearProjectId = linearBoundProjectId
+    if linearAdditionalProjects.contains(where: { $0.projectId == selectedAdditionalLinearProjectId }) {
+      selectedAdditionalLinearProjectId = ""
+    }
+    await loadLinearRoutingProjectOptionsIfNeeded()
+    linearAutosyncRouteKeys = await loadLinearAutosyncRouteKeys(targets: allLinearRouteTargets)
     executionMode = RemoteExecutionMode.fromConfig(resolvedExecutionModeRaw)
       ?? (executionTargetNodeId.isEmpty ? .local : .localEditRemoteRun)
     executionTargetMessage = ""
     githubProfileMessage = ""
+    linearProjectMessage = ""
   }
 
   private func queueExecutionTargetReload() {
@@ -1417,6 +2386,32 @@ struct ProjectDetailView: View {
     executionTargetReloadTask = Task {
       await reloadExecutionTargetState()
     }
+  }
+
+  private func linearProfilesResponse(
+    _ response: LinearProfilesResponse?,
+    containsProfileId profileId: String
+  ) -> Bool {
+    let trimmed = profileId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      return false
+    }
+    return response?.profiles.contains(where: {
+      $0.id.caseInsensitiveCompare(trimmed) == .orderedSame
+    }) == true
+  }
+
+  private func remoteLinearConnection(
+    profileId: String,
+    in response: LinearConnectionsResponse?
+  ) -> LinearRemoteConnection? {
+    let trimmed = profileId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      return nil
+    }
+    return response?.connections.first(where: { connection in
+      connection.profileId?.caseInsensitiveCompare(trimmed) == .orderedSame
+    })
   }
 
   /**
@@ -1458,7 +2453,6 @@ struct ProjectDetailView: View {
 
     executionTargetMessage = "Execution mode set to \(executionMode.title)."
     githubProfileMessage = ""
-    await model.refresh()
     queueExecutionTargetReload()
   }
 
@@ -1508,7 +2502,6 @@ struct ProjectDetailView: View {
       executionTargetMessage = "Default node updated."
     }
     githubProfileMessage = ""
-    await model.refresh()
     queueExecutionTargetReload()
   }
 
@@ -1525,6 +2518,29 @@ struct ProjectDetailView: View {
     }
   }
 
+  private func mapLinearProfilesById(response: LinearProfilesResponse?) -> [String: LinearProfileSummary] {
+    guard let response else {
+      return [:]
+    }
+    return response.profiles.reduce(into: [:]) { partialResult, profile in
+      partialResult[profile.id] = profile
+    }
+  }
+
+  private func parseProjectBooleanConfig(_ value: String?, default defaultValue: Bool) -> Bool {
+    guard let value else {
+      return defaultValue
+    }
+    switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+    case "true", "1", "yes", "on":
+      return true
+    case "false", "0", "no", "off":
+      return false
+    default:
+      return defaultValue
+    }
+  }
+
   private func persistGitHubProfileOverride() async {
     executionTargetSaving = true
     defer { executionTargetSaving = false }
@@ -1537,14 +2553,314 @@ struct ProjectDetailView: View {
       value: trimmed
     )
     if !didSave {
-      githubProfileMessage = "Failed to save Git creds."
+      githubProfileMessage = "Failed to save GitHub profile."
       return
     }
     githubProfileMessage = trimmed.isEmpty
-      ? "Git creds set to Local."
-      : "Git creds set to \(githubProfileLabel(profileId: trimmed))."
+      ? "GitHub profile set to Local."
+      : "GitHub profile set to \(githubProfileLabel(profileId: trimmed))."
     executionTargetMessage = ""
-    await model.refresh()
+    queueExecutionTargetReload()
+  }
+
+  private func persistLinearProfileOverride() async {
+    executionTargetSaving = true
+    defer { executionTargetSaving = false }
+
+    let trimmed = linearProjectProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+    let didEnable = await model.setProjectConfig(
+      for: project,
+      key: "controlPlane.extensions[\"dance.hack.linear\"].enabled",
+      value: "true"
+    )
+    if !didEnable {
+      linearProjectMessage = "Failed to enable Linear for this project."
+      return
+    }
+    let didSave = await model.setProjectConfig(
+      for: project,
+      key: "controlPlane.routing.overrides.linear.profile",
+      value: trimmed
+    )
+    if !didSave {
+      linearProjectMessage = "Failed to save Linear profile routing."
+      return
+    }
+    linearProjectMessage = trimmed.isEmpty
+      ? "Linear profile set to inherited."
+      : "Linear profile set to \(linearProfileLabel(profileId: trimmed))."
+    executionTargetMessage = ""
+    githubProfileMessage = ""
+    queueExecutionTargetReload()
+  }
+
+  private func persistLinearSyncFromLinearSetting(
+    enabled: Bool,
+    refreshAfterSave: Bool = true
+  ) async {
+    let didSave = await model.setProjectConfig(
+      for: project,
+      key: "controlPlane.routing.overrides.linear.syncFromLinear",
+      value: enabled ? "true" : "false"
+    )
+    guard didSave else {
+      linearSyncFromLinearEnabled.toggle()
+      linearProjectMessage = "Failed to save inbound Linear sync."
+      return
+    }
+
+    if let defaultTarget = defaultLinearRouteTarget {
+      await toggleLinearAutosync(
+        for: defaultTarget,
+        enabled: enabled,
+        refreshAfterSave: false
+      )
+    }
+
+    linearProjectMessage = enabled
+      ? "Inbound Linear sync enabled."
+      : "Inbound Linear sync disabled."
+    if refreshAfterSave {
+      queueExecutionTargetReload()
+    }
+  }
+
+  private func persistLinearCreateHackTicketsSetting(enabled: Bool) async {
+    let didSave = await model.setProjectConfig(
+      for: project,
+      key: "controlPlane.routing.overrides.linear.createHackTicketsInLinear",
+      value: enabled ? "true" : "false"
+    )
+    guard didSave else {
+      linearCreateHackTicketsEnabled.toggle()
+      linearProjectMessage = "Failed to save outbound Linear creation."
+      return
+    }
+    linearProjectMessage = enabled
+      ? "New Hack tickets will now create linked Linear issues."
+      : "New Hack tickets will stay local by default."
+  }
+
+  private func persistLinearProjectBindingSelection() async {
+    executionTargetSaving = true
+    defer { executionTargetSaving = false }
+
+    let selectedProjectId = selectedLinearProjectId
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    if selectedProjectId.isEmpty {
+      await clearLinearProjectBinding()
+      return
+    }
+
+    guard let linearProject = linearProjectOptions.first(where: { $0.id == selectedProjectId }) else {
+      linearProjectMessage = "Choose a valid Linear project before saving."
+      return
+    }
+
+    let profileOverride = linearProjectProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+    let response = await model.bindLinearProject(
+      for: project,
+      profileId: profileOverride.isEmpty ? nil : profileOverride,
+      projectId: linearProject.id,
+      projectName: linearProject.name,
+      teamId: linearProject.teamId,
+      clear: false
+    )
+    guard response?.ok == true else {
+      linearProjectMessage = model.errorMessage ?? "Failed to save Linear project binding."
+      return
+    }
+
+    linearBoundProjectId = linearProject.id
+    linearBoundProjectName = linearProject.name
+    linearBoundTeamId = linearProject.teamId
+    selectedLinearProjectId = linearProject.id
+    if linearSyncFromLinearEnabled {
+      await toggleLinearAutosync(
+        for: normalizedLinearRouteTarget(
+          LinearProjectBindingTarget(
+            profileId: profileOverride.isEmpty ? nil : profileOverride,
+            projectId: linearProject.id,
+            projectName: linearProject.name,
+            teamId: linearProject.teamId
+          )
+        ),
+        enabled: true,
+        refreshAfterSave: false
+      )
+    }
+    linearProjectMessage = "Linear project bound to \(linearProjectMenuLabel(linearProject))."
+    executionTargetMessage = ""
+    githubProfileMessage = ""
+    queueExecutionTargetReload()
+  }
+
+  private func persistAdditionalLinearProjectSelection() async {
+    let selectedProjectId = selectedAdditionalLinearProjectId
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !selectedProjectId.isEmpty else {
+      linearProjectMessage = "Choose a Linear project to add."
+      return
+    }
+    guard let linearProject = linearProjectOptions.first(where: { $0.id == selectedProjectId }) else {
+      linearProjectMessage = "Choose a valid Linear project before adding it."
+      return
+    }
+
+    let profileOverride = linearProjectProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+    let response = await model.linkLinearProject(
+      for: project,
+      profileId: profileOverride.isEmpty ? nil : profileOverride,
+      projectId: linearProject.id,
+      projectName: linearProject.name,
+      teamId: linearProject.teamId
+    )
+    guard response?.ok == true else {
+      linearProjectMessage = model.errorMessage ?? "Failed to add Linear project to sync scope."
+      return
+    }
+
+    selectedAdditionalLinearProjectId = ""
+    linearProjectMessage = "Added \(linearProjectMenuLabel(linearProject)) to the sync scope."
+    executionTargetMessage = ""
+    githubProfileMessage = ""
+    queueExecutionTargetReload()
+  }
+
+  private func loadLinearAutosyncRouteKeys(
+    targets: [LinearProjectBindingTarget]
+  ) async -> Set<String> {
+    var nextKeys: Set<String> = []
+    for target in targets {
+      let normalizedTarget = normalizedLinearRouteTarget(target)
+      guard let profileId = normalizedTarget.profileId, !profileId.isEmpty else {
+        continue
+      }
+      guard let subscriptions = await model.listLinearAutosyncSubscriptions(
+        profileId: profileId,
+        projectId: normalizedTarget.projectId,
+        teamId: normalizedTarget.teamId
+      ) else {
+        continue
+      }
+      if subscriptions.subscriptions.contains(where: {
+        $0.projectId == normalizedTarget.projectId &&
+          $0.teamId == normalizedTarget.teamId &&
+          $0.mode == "auto_apply" &&
+          $0.status == "active"
+      }) {
+        nextKeys.insert(linearRouteKey(for: normalizedTarget))
+      }
+    }
+    return nextKeys
+  }
+
+  private func removeAdditionalLinearProject(_ target: LinearProjectBindingTarget) async {
+    let response = await model.unlinkLinearProject(
+      for: project,
+      projectId: target.projectId
+    )
+    guard response?.ok == true else {
+      linearProjectMessage = model.errorMessage ?? "Failed to remove linked Linear project."
+      return
+    }
+
+    linearProjectMessage = "Removed \(linearProjectBindingTargetLabel(target)) from the sync scope."
+    executionTargetMessage = ""
+    githubProfileMessage = ""
+    queueExecutionTargetReload()
+  }
+
+  private func toggleLinearAutosync(
+    for target: LinearProjectBindingTarget,
+    enabled: Bool,
+    refreshAfterSave: Bool = true
+  ) async {
+    let routeKey = linearRouteKey(for: target)
+    togglingLinearAutosyncRouteKeys.insert(routeKey)
+    defer { togglingLinearAutosyncRouteKeys.remove(routeKey) }
+    let normalizedTarget = normalizedLinearRouteTarget(target)
+    guard let profileId = normalizedTarget.profileId, !profileId.isEmpty else {
+      linearProjectMessage = "Choose a Linear profile before changing autosync."
+      return
+    }
+    if enabled {
+      let response = await model.setLinearAutosyncSubscription(
+        profileId: profileId,
+        projectId: normalizedTarget.projectId,
+        teamId: normalizedTarget.teamId,
+        mode: "auto_apply",
+        status: "active"
+      )
+      guard response != nil else {
+        linearProjectMessage = model.errorMessage ?? "Failed to enable Linear autosync."
+        return
+      }
+      linearAutosyncRouteKeys.insert(routeKey)
+      linearProjectMessage = "Autosync enabled for \(linearProjectBindingTargetLabel(normalizedTarget))."
+      if refreshAfterSave {
+        queueExecutionTargetReload()
+      }
+      return
+    }
+
+    let response = await model.removeLinearAutosyncSubscription(
+      profileId: profileId,
+      projectId: normalizedTarget.projectId,
+      teamId: normalizedTarget.teamId
+    )
+    guard response != nil else {
+      linearProjectMessage = model.errorMessage ?? "Failed to disable Linear autosync."
+      return
+    }
+    linearAutosyncRouteKeys.remove(routeKey)
+    linearProjectMessage = "Autosync disabled for \(linearProjectBindingTargetLabel(normalizedTarget))."
+    if refreshAfterSave {
+      queueExecutionTargetReload()
+    }
+  }
+
+  private func makeAdditionalLinearProjectDefault(_ target: LinearProjectBindingTarget) async {
+    let normalizedTarget = normalizedLinearRouteTarget(target)
+    let response = await model.bindLinearProject(
+      for: project,
+      profileId: normalizedTarget.profileId,
+      projectId: normalizedTarget.projectId,
+      projectName: normalizedTarget.projectName,
+      teamId: normalizedTarget.teamId,
+      clear: false
+    )
+    guard response?.ok == true else {
+      linearProjectMessage = model.errorMessage ?? "Failed to make the linked Linear project the default route."
+      return
+    }
+
+    linearProjectMessage = "Default Linear route set to \(linearProjectBindingTargetLabel(normalizedTarget))."
+    queueExecutionTargetReload()
+  }
+
+  private func clearLinearProjectBinding() async {
+    let profileOverride = linearProjectProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+    let response = await model.bindLinearProject(
+      for: project,
+      profileId: profileOverride.isEmpty ? nil : profileOverride,
+      projectId: nil,
+      projectName: nil,
+      teamId: nil,
+      clear: true
+    )
+    guard response?.ok == true else {
+      linearProjectMessage = model.errorMessage ?? "Failed to clear Linear project binding."
+      return
+    }
+
+    linearBoundProjectId = ""
+    linearBoundProjectName = ""
+    linearBoundTeamId = ""
+    selectedLinearProjectId = ""
+    linearProjectMessage = "Cleared project-level Linear binding."
+    executionTargetMessage = ""
+    githubProfileMessage = ""
     queueExecutionTargetReload()
   }
 

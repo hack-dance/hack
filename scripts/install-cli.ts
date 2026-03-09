@@ -175,12 +175,13 @@ async function desiredInstall(opts: {
   readonly targetPath: string;
 }): Promise<DesiredInstall> {
   if (opts.mode === "dev") {
+    const bunExecutable = resolveBunExecutablePath();
     const content = [
       "#!/usr/bin/env bash",
       "set -euo pipefail",
       "# hack-cli local-dev shim (auto-generated)",
       "",
-      `exec bun ${shellQuote(resolve(opts.repoRoot, "index.ts"))} "$@"`,
+      `exec ${shellQuote(bunExecutable)} ${shellQuote(resolve(opts.repoRoot, "index.ts"))} "$@"`,
       "",
     ].join("\n");
 
@@ -208,6 +209,12 @@ async function desiredInstall(opts: {
     targetPath: opts.targetPath,
     linkTarget,
   };
+}
+
+function resolveBunExecutablePath(): string {
+  const candidate =
+    typeof process.execPath === "string" ? process.execPath.trim() : "";
+  return candidate.length > 0 ? candidate : "bun";
 }
 
 type CurrentInstall =

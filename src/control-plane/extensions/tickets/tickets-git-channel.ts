@@ -38,6 +38,9 @@ export type TicketsGitHealth = {
   readonly remoteRef: string;
   readonly legacyRef?: string;
   readonly hasLegacyRef: boolean;
+  readonly hasRefDivergence: boolean;
+  readonly remoteRefOid?: string;
+  readonly legacyRefOid?: string;
   readonly hasNonTicketFiles: boolean;
   readonly nonTicketPaths: readonly string[];
 };
@@ -77,7 +80,21 @@ export function createGitTicketsChannel(opts: {
     refMode === "hidden" ? buildRemoteRef({ branch, refMode: "heads" }) : null;
   const localBranchRef = `refs/heads/${branch}`;
   const trackingRef = `refs/remotes/origin/${branch}`;
+  const legacyTrackingRef = legacyRemoteRef
+    ? `refs/remotes/origin/__legacy__/${branch}`
+    : null;
   const remoteName = gitEnabled ? (opts.config.remote ?? "origin").trim() : "";
+  const bareIndexLockPath = resolve(bareDir, "index.lock");
+
+  const resolvePushRefForCheckout = (input: {
+    readonly checkoutRef: string;
+  }): string =>
+    resolvePushRefForCheckoutRef({
+      checkoutRef: input.checkoutRef,
+      remoteRef,
+      legacyTrackingRef,
+      legacyRemoteRef,
+    });
 
   const runGitDir = async (input: {
     readonly args: readonly string[];
@@ -86,6 +103,39 @@ export function createGitTicketsChannel(opts: {
     readonly stdout: string;
     readonly stderr: string;
   }> => {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const result = await runGit({
+        cwd: opts.projectRoot,
+        args: [
+          `--git-dir=${bareDir}`,
+          `--work-tree=${worktreeDir}`,
+          ...input.args,
+        ],
+      });
+      if (result.ok) {
+        return result;
+      }
+
+      const message = `${result.stderr}\n${result.stdout}`.trim();
+      if (!isGitIndexLockError(message)) {
+        return result;
+      }
+
+      if (attempt < 3) {
+        await Bun.sleep(150 * (attempt + 1));
+        continue;
+      }
+
+      opts.logger.warn({
+        message: `tickets git index.lock blocked ${input.args.join(" ")}; removing stale lock and retrying`,
+      });
+      try {
+        await rm(bareIndexLockPath, { force: true });
+      } catch {
+        // Best-effort stale lock cleanup; retry will surface a real error if it still exists.
+      }
+    }
+
     return await runGit({
       cwd: opts.projectRoot,
       args: [
@@ -180,15 +230,98 @@ export function createGitTicketsChannel(opts: {
     return { remoteUrl };
   };
 
-  const fetchRemoteRef = async (
-    ref: string
+  const hasPendingWorktreeChanges = async (): Promise<boolean> => {
+    const currentBranch = await runGitDir({
+      args: ["branch", "--show-current"],
+    });
+    if (!currentBranch.ok) {
+      return false;
+    }
+    if (currentBranch.stdout.trim() !== branch) {
+      return false;
+    }
+
+    const status = await runGitDir({
+      args: ["status", "--short"],
+    });
+    return status.ok && status.stdout.trim().length > 0;
+  };
+
+  const resolvePreferredTrackingRef = async (): Promise<string | null> => {
+    const tracking = await runGitDir({
+      args: ["rev-parse", "--verify", trackingRef],
+    });
+    if (tracking.ok) {
+      return trackingRef;
+    }
+
+    if (legacyTrackingRef) {
+      const legacy = await runGitDir({
+        args: ["rev-parse", "--verify", legacyTrackingRef],
+      });
+      if (legacy.ok) {
+        return legacyTrackingRef;
+      }
+    }
+
+    return null;
+  };
+
+  const hasAheadLocalBranchCommits = async (input: {
+    readonly trackingRef: string | null;
+  }): Promise<boolean> => {
+    if (!input.trackingRef) {
+      return false;
+    }
+
+    const currentBranch = await runGitDir({
+      args: ["branch", "--show-current"],
+    });
+    if (!currentBranch.ok || currentBranch.stdout.trim() !== branch) {
+      return false;
+    }
+
+    const ahead = await runGitDir({
+      args: ["rev-list", "--count", `${input.trackingRef}..${branch}`],
+    });
+    if (!ahead.ok) {
+      return false;
+    }
+
+    return Number.parseInt(ahead.stdout.trim(), 10) > 0;
+  };
+
+  const fetchRemoteRefToTracking = async (
+    ref: string,
+    destinationRef: string
   ): Promise<
     | { readonly ok: true }
     | { readonly ok: false; readonly error: string; readonly missing: boolean }
   > => {
-    const fetched = await runGitDir({
-      args: ["fetch", "--prune", "origin", `+${ref}:${trackingRef}`],
+    const fetchArgs = [
+      "fetch",
+      "--prune",
+      "origin",
+      `+${ref}:${destinationRef}`,
+    ] as const;
+    let fetched = await runGitDir({
+      args: fetchArgs,
     });
+    if (!fetched.ok) {
+      const retryableLockFailure = isRetryableTrackingRefLockFailure({
+        stderr: fetched.stderr,
+        trackingRef: destinationRef,
+      });
+      if (retryableLockFailure) {
+        const deletedTrackingRef = await runGitDir({
+          args: ["update-ref", "-d", destinationRef],
+        });
+        void deletedTrackingRef;
+        fetched = await runGitDir({
+          args: fetchArgs,
+        });
+      }
+    }
     if (fetched.ok) {
       return { ok: true };
     }
@@ -199,24 +332,52 @@ export function createGitTicketsChannel(opts: {
     return { ok: false, error: message, missing: false };
   };
 
+  const fetchRemoteRef = async (
+    ref: string
+  ): Promise<
+    | { readonly ok: true }
+    | { readonly ok: false; readonly error: string; readonly missing: boolean }
+  > => {
+    return await fetchRemoteRefToTracking(ref, trackingRef);
+  };
+
   const checkoutHead = async (input: {
     readonly remoteUrl: string | null;
   }): Promise<
-    { readonly ok: true } | { readonly ok: false; readonly error: string }
+    | { readonly ok: true; readonly pushRef: string }
+    | { readonly ok: false; readonly error: string }
   > => {
     await rm(worktreeDir, { recursive: true, force: true });
     await mkdir(worktreeDir, { recursive: true });
 
     if (input.remoteUrl) {
       let canCheckoutRemote = false;
+      let checkoutRef = `origin/${branch}`;
 
       const fetched = await fetchRemoteRef(remoteRef);
       if (fetched.ok) {
         canCheckoutRemote = true;
+        if (legacyRemoteRef && legacyTrackingRef) {
+          const legacyFetch = await fetchRemoteRefToTracking(
+            legacyRemoteRef,
+            legacyTrackingRef
+          );
+          if (!(legacyFetch.ok || legacyFetch.missing)) {
+            return {
+              ok: false,
+              error: `git fetch failed: ${legacyFetch.error}`,
+            };
+          }
+        }
       } else if (fetched.missing && legacyRemoteRef) {
-        const legacyFetch = await fetchRemoteRef(legacyRemoteRef);
+        const legacyFetch = legacyTrackingRef
+          ? await fetchRemoteRefToTracking(legacyRemoteRef, legacyTrackingRef)
+          : await fetchRemoteRef(legacyRemoteRef);
         if (legacyFetch.ok) {
           canCheckoutRemote = true;
+          if (legacyTrackingRef) {
+            checkoutRef = legacyTrackingRef;
+          }
         } else if (!legacyFetch.missing) {
           return { ok: false, error: `git fetch failed: ${legacyFetch.error}` };
         }
@@ -226,7 +387,7 @@ export function createGitTicketsChannel(opts: {
 
       if (canCheckoutRemote) {
         const rev = await runGitDir({
-          args: ["rev-parse", "--verify", `origin/${branch}`],
+          args: ["rev-parse", "--verify", checkoutRef],
         });
         if (rev.ok) {
           const checkout = await runGitDir({
@@ -247,7 +408,10 @@ export function createGitTicketsChannel(opts: {
             };
           }
 
-          return { ok: true };
+          return {
+            ok: true,
+            pushRef: resolvePushRefForCheckout({ checkoutRef }),
+          };
         }
       }
     }
@@ -286,7 +450,7 @@ export function createGitTicketsChannel(opts: {
         };
       }
 
-      return { ok: true };
+      return { ok: true, pushRef: remoteRef };
     }
 
     const checkout = await runGitDir({ args: ["checkout", branch] });
@@ -302,11 +466,98 @@ export function createGitTicketsChannel(opts: {
       return { ok: false, error: `git reset failed: ${reset.stderr.trim()}` };
     }
 
-    return { ok: true };
+    return { ok: true, pushRef: remoteRef };
+  };
+
+  const mergeLegacyRefIntoCurrentBranch = async (input: {
+    readonly remoteUrl: string | null;
+  }): Promise<
+    | { readonly ok: true; readonly imported: boolean }
+    | { readonly ok: false; readonly error: string }
+  > => {
+    if (!(input.remoteUrl && legacyRemoteRef && legacyTrackingRef)) {
+      return { ok: true, imported: false };
+    }
+
+    const fetched = await fetchRemoteRefToTracking(
+      legacyRemoteRef,
+      legacyTrackingRef
+    );
+    if (!fetched.ok) {
+      if (fetched.missing) {
+        return { ok: true, imported: false };
+      }
+      return { ok: false, error: `git fetch failed: ${fetched.error}` };
+    }
+
+    const listed = await runGitDir({
+      args: [
+        "ls-tree",
+        "-r",
+        "--name-only",
+        legacyTrackingRef,
+        ".hack/tickets/events",
+      ],
+    });
+    if (!listed.ok) {
+      return {
+        ok: false,
+        error: `git ls-tree failed: ${listed.stderr.trim() || listed.stdout.trim()}`,
+      };
+    }
+
+    let imported = false;
+    const legacyPaths = listed.stdout
+      .split("\n")
+      .map((path) => path.trim())
+      .filter((path) => path.startsWith(".hack/tickets/events/"));
+
+    for (const relativePath of legacyPaths) {
+      const shown = await runGitDir({
+        args: ["show", `${legacyTrackingRef}:${relativePath}`],
+      });
+      if (!shown.ok) {
+        return {
+          ok: false,
+          error: `git show failed: ${shown.stderr.trim() || shown.stdout.trim()}`,
+        };
+      }
+
+      const targetPath = resolve(worktreeDir, relativePath);
+      const existing = await Bun.file(targetPath)
+        .text()
+        .catch(() => "");
+      const merged = mergeTicketEventLogs({
+        existing,
+        incoming: shown.stdout,
+      });
+      if (merged === existing) {
+        continue;
+      }
+
+      await mkdir(dirname(targetPath), { recursive: true });
+      await Bun.write(targetPath, merged);
+      imported = true;
+    }
+
+    if (!imported) {
+      return { ok: true, imported: false };
+    }
+
+    const normalized = await normalizeLogs();
+    if (!normalized.ok) {
+      return normalized;
+    }
+
+    return { ok: true, imported: true };
   };
 
   const ensureCheckedOut = async (): Promise<
-    | { readonly ok: true; readonly remoteUrl: string | null }
+    | {
+        readonly ok: true;
+        readonly remoteUrl: string | null;
+        readonly pushRef: string;
+      }
     | { readonly ok: false; readonly error: string }
   > => {
     await ensureDirs();
@@ -314,12 +565,34 @@ export function createGitTicketsChannel(opts: {
     await ensureSparseCheckout();
     const { remoteUrl } = await ensureRemote();
 
+    if (await hasPendingWorktreeChanges()) {
+      const pushRef =
+        refMode === "hidden" && legacyRemoteRef ? legacyRemoteRef : remoteRef;
+      return { ok: true, remoteUrl, pushRef };
+    }
+
+    const preferredTrackingRef = await resolvePreferredTrackingRef();
+    if (
+      await hasAheadLocalBranchCommits({ trackingRef: preferredTrackingRef })
+    ) {
+      const pushRef =
+        preferredTrackingRef === legacyTrackingRef && legacyRemoteRef
+          ? legacyRemoteRef
+          : remoteRef;
+      return { ok: true, remoteUrl, pushRef };
+    }
+
     const checkedOut = await checkoutHead({ remoteUrl });
     if (!checkedOut.ok) {
       return checkedOut;
     }
 
-    return { ok: true, remoteUrl };
+    const migratedLegacy = await mergeLegacyRefIntoCurrentBranch({ remoteUrl });
+    if (!migratedLegacy.ok) {
+      return migratedLegacy;
+    }
+
+    return { ok: true, remoteUrl, pushRef: checkedOut.pushRef };
   };
 
   const resolveEventsPath = (tsSeconds: number): string => {
@@ -482,6 +755,7 @@ export function createGitTicketsChannel(opts: {
 
   const pushWithRetry = async (input: {
     readonly remoteUrl: string | null;
+    readonly pushRef: string;
     readonly pendingEvents?: readonly Record<string, unknown>[];
   }): Promise<
     | { readonly ok: true; readonly didPush: boolean }
@@ -492,7 +766,7 @@ export function createGitTicketsChannel(opts: {
     }
 
     const push = await runGitDir({
-      args: ["push", "origin", `${localBranchRef}:${remoteRef}`],
+      args: ["push", "origin", `${localBranchRef}:${input.pushRef}`],
     });
     if (push.ok) {
       return { ok: true, didPush: true };
@@ -528,7 +802,7 @@ export function createGitTicketsChannel(opts: {
     }
 
     const retry = await runGitDir({
-      args: ["push", "origin", `${localBranchRef}:${remoteRef}`],
+      args: ["push", "origin", `${localBranchRef}:${checkedOut.pushRef}`],
     });
     if (!retry.ok) {
       const retryMessage = `${retry.stderr}\n${retry.stdout}`.trim();
@@ -570,6 +844,17 @@ export function createGitTicketsChannel(opts: {
     }
     const listed = await runGitDir({ args: ["ls-remote", "origin", ref] });
     return listed.ok && listed.stdout.trim().length > 0;
+  };
+
+  const resolveRefOid = async (ref: string): Promise<string | null> => {
+    const resolved = await runGitDir({
+      args: ["rev-parse", "--verify", ref],
+    });
+    if (!resolved.ok) {
+      return null;
+    }
+    const oid = resolved.stdout.trim();
+    return oid.length > 0 ? oid : null;
   };
 
   const pruneWorktreeToTickets = async (): Promise<
@@ -634,6 +919,16 @@ export function createGitTicketsChannel(opts: {
     const hasLegacyRef = legacyRemoteRef
       ? await hasRemoteRef(legacyRemoteRef)
       : false;
+    const remoteRefOid = await resolveRefOid(trackingRef);
+    const legacyRefOid =
+      hasLegacyRef && legacyTrackingRef
+        ? await resolveRefOid(legacyTrackingRef)
+        : null;
+    const hasRefDivergence =
+      hasLegacyRef &&
+      remoteRefOid !== null &&
+      legacyRefOid !== null &&
+      remoteRefOid !== legacyRefOid;
 
     return {
       ok: true,
@@ -644,6 +939,9 @@ export function createGitTicketsChannel(opts: {
         legacyRef: legacyRemoteRef ?? undefined,
         remote: checkedOut.remoteUrl ? remoteName : undefined,
         hasLegacyRef,
+        hasRefDivergence,
+        remoteRefOid: remoteRefOid ?? undefined,
+        legacyRefOid: legacyRefOid ?? undefined,
         hasNonTicketFiles: nonTicketPaths.length > 0,
         nonTicketPaths,
       },
@@ -689,7 +987,10 @@ export function createGitTicketsChannel(opts: {
       return committed;
     }
 
-    const pushed = await pushWithRetry({ remoteUrl: checkedOut.remoteUrl });
+    const pushed = await pushWithRetry({
+      remoteUrl: checkedOut.remoteUrl,
+      pushRef: checkedOut.pushRef,
+    });
     if (!pushed.ok) {
       return pushed;
     }
@@ -703,6 +1004,11 @@ export function createGitTicketsChannel(opts: {
       });
       if (prunedLegacy.ok) {
         didPruneLegacy = true;
+        if (legacyTrackingRef) {
+          await runGitDir({
+            args: ["update-ref", "-d", legacyTrackingRef],
+          });
+        }
       } else {
         pruneError = `${prunedLegacy.stderr}\n${prunedLegacy.stdout}`.trim();
       }
@@ -739,6 +1045,7 @@ export function createGitTicketsChannel(opts: {
 
     const pushed = await pushWithRetry({
       remoteUrl: checkedOut.remoteUrl,
+      pushRef: checkedOut.pushRef,
       pendingEvents: input.events,
     });
     if (!pushed.ok) {
@@ -773,7 +1080,10 @@ export function createGitTicketsChannel(opts: {
       return committed;
     }
 
-    const pushed = await pushWithRetry({ remoteUrl: checkedOut.remoteUrl });
+    const pushed = await pushWithRetry({
+      remoteUrl: checkedOut.remoteUrl,
+      pushRef: checkedOut.pushRef,
+    });
     if (!pushed.ok) {
       return pushed;
     }
@@ -830,6 +1140,63 @@ function safeJsonParse(text: string): unknown {
   }
 }
 
+function mergeTicketEventLogs(input: {
+  readonly existing: string;
+  readonly incoming: string;
+}): string {
+  const parsed: Record<string, unknown>[] = [];
+  const seen = new Set<string>();
+
+  for (const text of [input.existing, input.incoming]) {
+    for (const line of text.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
+      const value = safeJsonParse(trimmed);
+      if (!isRecord(value)) {
+        continue;
+      }
+      const eventId = typeof value.eventId === "string" ? value.eventId : "";
+      const ts = typeof value.ts === "number" ? value.ts : Number.NaN;
+      if (!(eventId && Number.isFinite(ts))) {
+        continue;
+      }
+      if (seen.has(eventId)) {
+        continue;
+      }
+      seen.add(eventId);
+      parsed.push(value);
+    }
+  }
+
+  parsed.sort((a, b) => {
+    const aTs = typeof a.ts === "number" ? (a.ts as number) : 0;
+    const bTs = typeof b.ts === "number" ? (b.ts as number) : 0;
+    if (aTs !== bTs) {
+      return aTs - bTs;
+    }
+    const aId = typeof a.eventId === "string" ? (a.eventId as string) : "";
+    const bId = typeof b.eventId === "string" ? (b.eventId as string) : "";
+    return aId.localeCompare(bId);
+  });
+
+  const next = parsed.map((event) => stableStringify(event)).join("\n");
+  return next ? `${next}\n` : "";
+}
+
+function isRetryableTrackingRefLockFailure(input: {
+  readonly stderr: string;
+  readonly trackingRef: string;
+}): boolean {
+  const message = input.stderr.toLowerCase();
+  return (
+    message.includes("cannot lock ref") &&
+    message.includes(input.trackingRef.toLowerCase()) &&
+    message.includes("expected")
+  );
+}
+
 function isMissingRemoteRef(message: string): boolean {
   const normalized = message.toLowerCase();
   return (
@@ -869,4 +1236,32 @@ function isHiddenRefRejected(message: string): boolean {
     normalized.includes("remote rejected") ||
     normalized.includes("not a valid ref")
   );
+}
+
+function isGitIndexLockError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("index.lock") && normalized.includes("file exists")
+  );
+}
+
+export const __testOnly = {
+  mergeTicketEventLogs,
+  resolvePushRefForCheckoutRef,
+};
+
+function resolvePushRefForCheckoutRef(input: {
+  readonly checkoutRef: string;
+  readonly remoteRef: string;
+  readonly legacyTrackingRef?: string | null;
+  readonly legacyRemoteRef?: string | null;
+}): string {
+  if (
+    input.legacyTrackingRef &&
+    input.legacyRemoteRef &&
+    input.checkoutRef === input.legacyTrackingRef
+  ) {
+    return input.legacyRemoteRef;
+  }
+  return input.remoteRef;
 }

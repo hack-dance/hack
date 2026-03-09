@@ -17,6 +17,7 @@ import {
 import {
   DEFAULT_CADDY_IP,
   DEFAULT_COREDNS_IP,
+  DEFAULT_HOST_DNS_IP,
   DEFAULT_INGRESS_GATEWAY,
   DEFAULT_INGRESS_NETWORK,
   DEFAULT_INGRESS_SUBNET,
@@ -86,6 +87,7 @@ import { display } from "../ui/display.ts";
 import { dockerComposeLogsPretty } from "../ui/docker-logs.ts";
 import { ensureBundledGumInstalled } from "../ui/gum.ts";
 import { logger } from "../ui/logger.ts";
+import { resolvePreferredHostDnsTarget } from "./doctor-utils.ts";
 
 const globalLogsOptions = [optFollow, optNoFollow, optTail, optPretty] as const;
 const globalLogsPositionals = [{ name: "service", required: false }] as const;
@@ -552,21 +554,6 @@ async function globalInstall(): Promise<number> {
     });
   }
 
-  if (isMac()) {
-    await ensureMacHackDns();
-  } else {
-    logger.warn({
-      message: "Skipping DNS bootstrap (only implemented for macOS for now).",
-    });
-    note(
-      [
-        "You need wildcard DNS for *.hack pointing to 127.0.0.1.",
-        "Recommended: dnsmasq + OS resolver config for the 'hack' TLD.",
-      ].join("\n"),
-      "DNS setup"
-    );
-  }
-
   const paths = getGlobalPaths();
   await ensureDir(paths.caddyDir);
   await ensureDir(paths.loggingDir);
@@ -629,7 +616,20 @@ async function globalInstall(): Promise<number> {
   await globalUp();
 
   if (isMac()) {
+    const hostDnsTarget = await resolvePreferredMacHostDnsTarget();
+    await ensureMacHackDns({ targetIp: hostDnsTarget });
     await ensureMacTrustCaddyLocalCa();
+  } else {
+    logger.warn({
+      message: "Skipping DNS bootstrap (only implemented for macOS for now).",
+    });
+    note(
+      [
+        `You need wildcard DNS for *.hack pointing to ${DEFAULT_HOST_DNS_IP}.`,
+        "Recommended: dnsmasq + OS resolver config for the 'hack' TLD.",
+      ].join("\n"),
+      "DNS setup"
+    );
   }
 
   note(
@@ -2196,7 +2196,9 @@ async function hasMkcertLocalCa({
   return (await pathExists(certPath)) && (await pathExists(keyPath));
 }
 
-async function ensureMacHackDns(): Promise<void> {
+async function ensureMacHackDns(opts: {
+  readonly targetIp: string;
+}): Promise<void> {
   const brewOk = await ensureBrewForDnsmasq();
   if (!brewOk) {
     return;
@@ -2209,11 +2211,11 @@ async function ensureMacHackDns(): Promise<void> {
 
   const brewPrefix = await resolveBrewPrefix();
   const dnsmasqConf = resolve(brewPrefix, "etc", "dnsmasq.conf");
-  await ensureDnsmasqHackAliases({ dnsmasqConf });
+  await ensureDnsmasqHackAliases({ dnsmasqConf, targetIp: opts.targetIp });
   await ensureMacResolverFiles();
   await restartDnsmasq();
   await flushMacDnsCache();
-  noteDnsConfigured({ dnsmasqConf });
+  noteDnsConfigured({ dnsmasqConf, targetIp: opts.targetIp });
 }
 
 async function ensureBrewForDnsmasq(): Promise<boolean> {
@@ -2273,14 +2275,17 @@ async function resolveBrewPrefix(): Promise<string> {
 
 async function ensureDnsmasqHackAliases(opts: {
   readonly dnsmasqConf: string;
+  readonly targetIp: string;
 }): Promise<void> {
-  const containerIpLines = [
-    `address=/.${DEFAULT_PROJECT_TLD}/${DEFAULT_CADDY_IP}`,
-    `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/${DEFAULT_CADDY_IP}`,
+  const desiredLines = [
+    `address=/.${DEFAULT_PROJECT_TLD}/${opts.targetIp}`,
+    `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/${opts.targetIp}`,
   ] as const;
+  const legacyHostTarget =
+    opts.targetIp === DEFAULT_CADDY_IP ? DEFAULT_HOST_DNS_IP : DEFAULT_CADDY_IP;
   const legacyLines = [
-    `address=/.${DEFAULT_PROJECT_TLD}/127.0.0.1`,
-    `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/127.0.0.1`,
+    `address=/.${DEFAULT_PROJECT_TLD}/${legacyHostTarget}`,
+    `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/${legacyHostTarget}`,
     `address=/.${DEFAULT_PROJECT_TLD}/::1`,
     `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/::1`,
   ] as const;
@@ -2290,7 +2295,7 @@ async function ensureDnsmasqHackAliases(opts: {
     content: existing,
     legacyLines,
   });
-  const missing = containerIpLines.filter(
+  const missing = desiredLines.filter(
     (line) => !migrated.content.includes(line)
   );
   const shouldWrite = migrated.changed || missing.length > 0;
@@ -2331,7 +2336,9 @@ function removeLegacyDnsmasqLines(opts: {
 
   // Clean up any double newlines left from removal.
   const cleaned = updated.replace(/\n{3,}/g, "\n\n").trim();
-  logger.info({ message: "Migrating dnsmasq to use container IP..." });
+  logger.info({
+    message: "Migrating dnsmasq to the reachable local ingress target...",
+  });
   return { content: cleaned, changed: true };
 }
 
@@ -2400,17 +2407,80 @@ async function flushMacDnsCache(): Promise<void> {
   await run(["sudo", "killall", "-HUP", "mDNSResponder"], { stdin: "inherit" });
 }
 
-function noteDnsConfigured(opts: { readonly dnsmasqConf: string }): void {
+function noteDnsConfigured(opts: {
+  readonly dnsmasqConf: string;
+  readonly targetIp: string;
+}): void {
+  const targetLabel =
+    opts.targetIp === DEFAULT_CADDY_IP ? "container ingress" : "localhost";
   note(
     [
-      `DNS configured: *.${DEFAULT_PROJECT_TLD} → ${DEFAULT_CADDY_IP} (container)`,
-      `DNS configured: *.${DEFAULT_OAUTH_ALIAS_ROOT} → ${DEFAULT_CADDY_IP} (container)`,
+      `DNS configured: *.${DEFAULT_PROJECT_TLD} → ${opts.targetIp} (${targetLabel})`,
+      `DNS configured: *.${DEFAULT_OAUTH_ALIAS_ROOT} → ${opts.targetIp} (${targetLabel})`,
       `- dnsmasq: ${opts.dnsmasqConf}`,
       `- resolver: /etc/resolver/${DEFAULT_PROJECT_TLD}`,
       `- resolver: /etc/resolver/${DEFAULT_OAUTH_ALIAS_ROOT}`,
     ].join("\n"),
     "DNS"
   );
+}
+
+async function resolvePreferredMacHostDnsTarget(): Promise<string> {
+  const [containerIpReachable, localhostReachable] = await Promise.all([
+    canConnectTcp({ host: DEFAULT_CADDY_IP, port: 443, timeoutMs: 1500 }),
+    canConnectTcp({ host: DEFAULT_HOST_DNS_IP, port: 443, timeoutMs: 1500 }),
+  ]);
+
+  const targetIp = resolvePreferredHostDnsTarget({
+    containerIpReachable,
+    localhostReachable,
+  });
+
+  if (!containerIpReachable && localhostReachable) {
+    logger.warn({
+      message: [
+        `Host cannot reach ${DEFAULT_CADDY_IP}:443 directly.`,
+        `Falling back to ${DEFAULT_HOST_DNS_IP} for macOS host DNS.`,
+      ].join("\n"),
+    });
+  } else if (!(containerIpReachable || localhostReachable)) {
+    logger.warn({
+      message: [
+        `Unable to reach either ${DEFAULT_CADDY_IP}:443 or ${DEFAULT_HOST_DNS_IP}:443 after startup.`,
+        `Keeping ${DEFAULT_CADDY_IP} as the host DNS target.`,
+      ].join("\n"),
+    });
+  }
+
+  return targetIp;
+}
+
+async function canConnectTcp(opts: {
+  readonly host: string;
+  readonly port: number;
+  readonly timeoutMs: number;
+}): Promise<boolean> {
+  const { createConnection } = await import("node:net");
+
+  return await new Promise((resolve) => {
+    const socket = createConnection({
+      host: opts.host,
+      port: opts.port,
+      timeout: opts.timeoutMs,
+    });
+    socket.on("connect", () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.on("error", () => {
+      socket.destroy();
+      resolve(false);
+    });
+    socket.on("timeout", () => {
+      socket.destroy();
+      resolve(false);
+    });
+  });
 }
 
 async function ensureMacDnsmasqRunning(): Promise<void> {

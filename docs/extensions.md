@@ -104,6 +104,7 @@ Use `hack x <namespace> help` to list commands.
 - Tailscale: `hack x tailscale setup|status|inspect|oauth-status|oauth-connect|oauth-disconnect|ip`
 - Tickets: `hack x tickets setup|create|update|list|show|status|sync|tui` (see `docs/guides/tickets.md`)
 - GitHub: `hack x github connect|oauth-connect|disconnect|profiles|use|status|pr-upsert`
+- Linear: `hack x linear setup|connect|oauth-connect|disconnect|status|profiles|use|projects|project-bind|sync-issue|sync-project`
 
 Gateway tokens default to `read` scope. Use `--scope write` to permit non-GET requests (also
 requires global `controlPlane.gateway.allowWrites = true`).
@@ -271,6 +272,57 @@ Notes:
 - macOS desktop includes a dedicated panel at `Settings / Extensions / GitHub` with connected-account management and direct browser auth. It starts a local auth flow (via `auth.hack.gy` with localhost fallback), opens GitHub in your browser, then polls callback status and refreshes profiles automatically.
 - macOS desktop shows read-only system Git identity (host-level inherited Git/gh context) separately from remote OAuth/App accounts to keep local gateway identity and remote auth routing boundaries explicit.
 - `auth.hack` and `auth.hack.gy` are routed by global Caddy to the daemon auth listener (`127.0.0.1:7790` by default), so this endpoint can also host future provider callbacks/hooks.
+
+### Linear extension (`hack x linear`)
+
+Linear integration supports multiple auth profiles, project-level binding, and manual sync in both
+directions between Linear issues and hack tickets.
+
+Quick start:
+
+```bash
+# connect a Linear account/profile
+hack x linear oauth-connect --profile work --set-default
+# or, default one-shot behavior (falls back to OAuth when no token is present):
+hack x linear connect --profile work --set-default
+
+# bind this hack project to a default Linear project
+hack x linear project-bind --profile work --project-id "<linear-project-id>"
+
+# one-off syncs (manual by default)
+hack x linear sync-issue --from linear --issue ENG-123
+hack x linear sync-issue --from hack --ticket T-00001
+
+# bulk sync by project (still manual)
+hack x linear sync-project --from linear
+hack x linear sync-project --from hack --owner both
+```
+
+Notes:
+- Profile selection precedence is:
+  `--profile` -> `controlPlane.routing.overrides.linear.profile` ->
+  `controlPlane.extensions["dance.hack.linear"].config.defaultProfile` -> implicit `default`.
+- Project mapping is stored in project config:
+  `controlPlane.routing.overrides.linear.projectId|projectName|teamId`.
+- Sync is manual by default (`sync-issue` / `sync-project`); there is no background autosync yet.
+- Ticket provenance is preserved during sync via `owner`, `source`, `tags`, and `external*` linkage fields.
+- `hack x linear connect` uses token mode when `--token`/`--stdin`/`$HACK_LINEAR_API_TOKEN` is present, and otherwise falls back to browser OAuth.
+- Linear OAuth uses PKCE; client secret is optional. A client id is still required (`--client-id`, `controlPlane.extensions["dance.hack.linear"].config.oauthClientId`, `HACK_LINEAR_OAUTH_CLIENT_ID`, or `HACK_LINEAR_CLIENT_ID`).
+- Auth-broker + Linear Agent setup can use these env aliases directly:
+  - `HACK_LINEAR_CLIENT_ID` (OAuth client id)
+  - `HACK_LINEAR_SECRET` (optional OAuth client secret)
+  - `HACK_LINEAR_DEVELOPER_APP_TOKEN` (optional developer app token)
+  - `HACK_LINEAR_WEBHOOK_SECRET` (webhook signature secret)
+- Auth-broker Linear endpoints:
+  - OAuth callback page: `/linear/callback`
+  - Webhook ingest: `/linear/webhooks` (legacy alias: `/v1/integrations/linear/webhook`)
+- Sync toggles are configurable at
+  `controlPlane.extensions["dance.hack.linear"].config.sync`:
+  - `labels` (default `false`)
+  - `statuses` (default `true`)
+  - `dependencies` (default `true`)
+  - `projects` (default `true`)
+- Architecture + rollout guide: `docs/guides/linear-integration-architecture.md`.
 
 #### job-show
 
@@ -460,15 +512,15 @@ Usage: `hack x tickets setup [--global] [--agents|--claude|--all] [--check|--rem
 
 #### create
 
-Usage: `hack x tickets create --title "..." [--body "..."] [--body-file <path>] [--body-stdin] [--depends-on "T-00001"] [--blocks "T-00002"] [--actor "..."] [--json]`
+Usage: `hack x tickets create --title "..." [--body "..."] [--body-file <path>] [--body-stdin] [--depends-on "T-00001"] [--blocks "T-00002"] [--owner "hack|linear|..."] [--source "hack|linear|..."] [--tag "foo"] [--external-system "linear"] [--external-id "<id>"] [--external-key "ENG-123"] [--external-url "<url>"] [--external-project-id "<id>"] [--external-project-name "..."] [--external-team-id "<id>"] [--actor "..."] [--json]`
 
 #### update
 
-Usage: `hack x tickets update <ticket-id> [--title "..."] [--body "..."] [--body-file <path>] [--body-stdin] [--depends-on "T-00001"] [--blocks "T-00002"] [--clear-depends-on] [--clear-blocks] [--actor "..."] [--json]`
+Usage: `hack x tickets update <ticket-id> [--title "..."] [--body "..."] [--body-file <path>] [--body-stdin] [--depends-on "T-00001"] [--blocks "T-00002"] [--clear-depends-on] [--clear-blocks] [--owner "..."] [--source "..."] [--tag "foo"] [--clear-tags] [--external-system "linear"] [--external-id "<id>"] [--external-key "ENG-123"] [--external-url "<url>"] [--external-project-id "<id>"] [--external-project-name "..."] [--external-team-id "<id>"] [--actor "..."] [--json]`
 
 #### list
 
-Usage: `hack x tickets list [--json]`
+Usage: `hack x tickets list [--owner "..."] [--source "..."] [--external-system "..."] [--json]`
 
 #### tui
 

@@ -952,6 +952,65 @@ public struct RailwayInspectResponse: Decodable, Hashable {
   }
 }
 
+public struct HackAccountSettingsState: Decodable, Hashable {
+  public let brokerBaseURL: String
+  public let authEnabled: Bool
+  public let authReason: String?
+  public let authBasePath: String
+  public let authenticated: Bool
+  public let validated: Bool
+  public let tokenStored: Bool
+  public let accessControlMode: String?
+  public let shellURL: String?
+  public let accountURL: String?
+  public let sessionAvailable: Bool
+  public let userDisplayName: String?
+  public let userEmail: String?
+  public let organizationName: String?
+  public let teamName: String?
+
+  public init(
+    brokerBaseURL: String,
+    authEnabled: Bool,
+    authReason: String?,
+    authBasePath: String,
+    authenticated: Bool,
+    validated: Bool,
+    tokenStored: Bool,
+    accessControlMode: String?,
+    shellURL: String?,
+    accountURL: String?,
+    sessionAvailable: Bool,
+    userDisplayName: String?,
+    userEmail: String?,
+    organizationName: String?,
+    teamName: String?
+  ) {
+    self.brokerBaseURL = brokerBaseURL
+    self.authEnabled = authEnabled
+    self.authReason = authReason
+    self.authBasePath = authBasePath
+    self.authenticated = authenticated
+    self.validated = validated
+    self.tokenStored = tokenStored
+    self.accessControlMode = accessControlMode
+    self.shellURL = shellURL
+    self.accountURL = accountURL
+    self.sessionAvailable = sessionAvailable
+    self.userDisplayName = userDisplayName
+    self.userEmail = userEmail
+    self.organizationName = organizationName
+    self.teamName = teamName
+  }
+
+  public var manageAccountAvailable: Bool {
+    guard let accountURL else {
+      return false
+    }
+    return !accountURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+}
+
 public struct GitHubProfileSummary: Decodable, Hashable {
   public let id: String
   public let isDefault: Bool
@@ -1173,6 +1232,691 @@ public struct GitHubOAuthFlowStatusResponse: Decodable, Hashable {
     self.appId = appId
     self.appSlug = appSlug
     self.error = error
+  }
+}
+
+public struct LinearProfileSummary: Decodable, Hashable {
+  public let id: String
+  public let isDefault: Bool
+  public let authRef: String
+  public let service: String
+  public let tokenEnv: String
+  public let apiUrl: String
+  public let accountId: String?
+  public let accountName: String?
+  public let accountEmail: String?
+
+  public init(
+    id: String,
+    isDefault: Bool,
+    authRef: String,
+    service: String,
+    tokenEnv: String,
+    apiUrl: String,
+    accountId: String?,
+    accountName: String?,
+    accountEmail: String?
+  ) {
+    self.id = id
+    self.isDefault = isDefault
+    self.authRef = authRef
+    self.service = service
+    self.tokenEnv = tokenEnv
+    self.apiUrl = apiUrl
+    self.accountId = accountId
+    self.accountName = accountName
+    self.accountEmail = accountEmail
+  }
+}
+
+public struct LinearProfilesResponse: Decodable, Hashable {
+  public let selectedProfile: String
+  public let selectedSource: String
+  public let defaultProfile: String
+  public let projectOverride: String?
+  public let selectedMissing: Bool
+  public let profiles: [LinearProfileSummary]
+
+  public init(
+    selectedProfile: String,
+    selectedSource: String,
+    defaultProfile: String,
+    projectOverride: String?,
+    selectedMissing: Bool,
+    profiles: [LinearProfileSummary]
+  ) {
+    self.selectedProfile = selectedProfile
+    self.selectedSource = selectedSource
+    self.defaultProfile = defaultProfile
+    self.projectOverride = projectOverride
+    self.selectedMissing = selectedMissing
+    self.profiles = profiles
+  }
+}
+
+public struct LinearRemoteConnection: Decodable, Hashable, Identifiable {
+  public let id: String
+  public let profileId: String?
+  public let accountId: String?
+  public let accountName: String?
+  public let accountEmail: String?
+  public let authRef: String?
+  public let betterAuthUserId: String?
+  public let betterAuthOrganizationId: String?
+  public let betterAuthTeamId: String?
+  public let organizationId: String?
+  public let teamId: String?
+  public let localAccessAvailable: Bool
+  public let createdAt: String
+  public let updatedAt: String
+
+  public init(
+    id: String,
+    profileId: String?,
+    accountId: String?,
+    accountName: String?,
+    accountEmail: String?,
+    authRef: String?,
+    betterAuthUserId: String?,
+    betterAuthOrganizationId: String?,
+    betterAuthTeamId: String?,
+    organizationId: String?,
+    teamId: String?,
+    localAccessAvailable: Bool,
+    createdAt: String,
+    updatedAt: String
+  ) {
+    self.id = id
+    self.profileId = profileId
+    self.accountId = accountId
+    self.accountName = accountName
+    self.accountEmail = accountEmail
+    self.authRef = authRef
+    self.betterAuthUserId = betterAuthUserId
+    self.betterAuthOrganizationId = betterAuthOrganizationId
+    self.betterAuthTeamId = betterAuthTeamId
+    self.organizationId = organizationId
+    self.teamId = teamId
+    self.localAccessAvailable = localAccessAvailable
+    self.createdAt = createdAt
+    self.updatedAt = updatedAt
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case id
+    case profileId
+    case accountId
+    case accountName
+    case accountEmail
+    case authRef
+    case betterAuthUserId
+    case betterAuthOrganizationId
+    case betterAuthTeamId
+    case organizationId
+    case teamId
+    case localAccessAvailable
+    case createdAt
+    case updatedAt
+  }
+
+  public init(from decoder: any Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    id = try container.decode(String.self, forKey: .id)
+    profileId = try container.decodeIfPresent(String.self, forKey: .profileId)
+    accountId = try container.decodeIfPresent(String.self, forKey: .accountId)
+    accountName = try container.decodeIfPresent(String.self, forKey: .accountName)
+    accountEmail = try container.decodeIfPresent(String.self, forKey: .accountEmail)
+    authRef = try container.decodeIfPresent(String.self, forKey: .authRef)
+    betterAuthUserId = try container.decodeIfPresent(String.self, forKey: .betterAuthUserId)
+    betterAuthOrganizationId = try container.decodeIfPresent(
+      String.self,
+      forKey: .betterAuthOrganizationId
+    )
+    betterAuthTeamId = try container.decodeIfPresent(String.self, forKey: .betterAuthTeamId)
+    organizationId = try container.decodeIfPresent(String.self, forKey: .organizationId)
+    teamId = try container.decodeIfPresent(String.self, forKey: .teamId)
+    localAccessAvailable = try container.decodeIfPresent(Bool.self, forKey: .localAccessAvailable) ?? false
+    createdAt = try container.decode(String.self, forKey: .createdAt)
+    updatedAt = try container.decode(String.self, forKey: .updatedAt)
+  }
+}
+
+public struct LinearConnectionsResponse: Decodable, Hashable {
+  public let accessControlMode: String?
+  public let connections: [LinearRemoteConnection]
+
+  public init(
+    accessControlMode: String?,
+    connections: [LinearRemoteConnection]
+  ) {
+    self.accessControlMode = accessControlMode
+    self.connections = connections
+  }
+}
+
+public struct LinearLocalAccessSeedResponse: Decodable, Hashable {
+  public let profileId: String
+  public let accountName: String?
+  public let accountEmail: String?
+  public let refreshed: Bool
+  public let setDefault: Bool
+
+  public init(
+    profileId: String,
+    accountName: String?,
+    accountEmail: String?,
+    refreshed: Bool,
+    setDefault: Bool
+  ) {
+    self.profileId = profileId
+    self.accountName = accountName
+    self.accountEmail = accountEmail
+    self.refreshed = refreshed
+    self.setDefault = setDefault
+  }
+}
+
+public enum LinearConnectionPresentationState: String, Hashable {
+  case connected
+  case connecting
+  case needsAttention
+  case notConnected
+
+  public var label: String {
+    switch self {
+    case .connected:
+      "Connected"
+    case .connecting:
+      "Connecting"
+    case .needsAttention:
+      "Needs attention"
+    case .notConnected:
+      "Not connected"
+    }
+  }
+}
+
+public enum LinearConnectionStateResolver {
+  public static func presentationState(
+    profileId: String?,
+    localProfilePresent: Bool,
+    localTokenResolved: Bool?,
+    remoteLocalAccessAvailable: Bool
+  ) -> LinearConnectionPresentationState {
+    let trimmedProfileId = profileId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    guard !trimmedProfileId.isEmpty else {
+      return .needsAttention
+    }
+
+    let localAccessReady = localProfilePresent && (localTokenResolved ?? true)
+    return (localAccessReady || remoteLocalAccessAvailable) ? .connected : .needsAttention
+  }
+}
+
+public struct LinearStatusResponse: Decodable, Hashable {
+  public let extensionId: String
+  public let selectedProfile: String
+  public let selectedSource: String
+  public let defaultProfile: String
+  public let selectedMissing: Bool
+  public let authRef: String
+  public let service: String
+  public let tokenEnvFallback: String
+  public let apiUrl: String
+  public let accountId: String?
+  public let accountName: String?
+  public let accountEmail: String?
+  public let tokenResolved: Bool
+  public let tokenSource: String?
+  public let tokenExpiresAt: String?
+  public let error: String?
+  public let profileError: String?
+
+  public init(
+    extensionId: String,
+    selectedProfile: String,
+    selectedSource: String,
+    defaultProfile: String,
+    selectedMissing: Bool,
+    authRef: String,
+    service: String,
+    tokenEnvFallback: String,
+    apiUrl: String,
+    accountId: String?,
+    accountName: String?,
+    accountEmail: String?,
+    tokenResolved: Bool,
+    tokenSource: String?,
+    tokenExpiresAt: String?,
+    error: String?,
+    profileError: String?
+  ) {
+    self.extensionId = extensionId
+    self.selectedProfile = selectedProfile
+    self.selectedSource = selectedSource
+    self.defaultProfile = defaultProfile
+    self.selectedMissing = selectedMissing
+    self.authRef = authRef
+    self.service = service
+    self.tokenEnvFallback = tokenEnvFallback
+    self.apiUrl = apiUrl
+    self.accountId = accountId
+    self.accountName = accountName
+    self.accountEmail = accountEmail
+    self.tokenResolved = tokenResolved
+    self.tokenSource = tokenSource
+    self.tokenExpiresAt = tokenExpiresAt
+    self.error = error
+    self.profileError = profileError
+  }
+}
+
+public struct LinearOAuthFlowStartResponse: Decodable, Hashable {
+  public let ok: Bool
+  public let flowId: String
+  public let profileId: String
+  public let setDefault: Bool
+  public let authorizeUrl: String
+  public let statusUrl: String
+  public let expiresAt: String
+
+  public init(
+    ok: Bool,
+    flowId: String,
+    profileId: String,
+    setDefault: Bool,
+    authorizeUrl: String,
+    statusUrl: String,
+    expiresAt: String
+  ) {
+    self.ok = ok
+    self.flowId = flowId
+    self.profileId = profileId
+    self.setDefault = setDefault
+    self.authorizeUrl = authorizeUrl
+    self.statusUrl = statusUrl
+    self.expiresAt = expiresAt
+  }
+}
+
+public struct LinearOAuthFlowStatusResponse: Decodable, Hashable {
+  public let id: String
+  public let status: String
+  public let profileId: String
+  public let setDefault: Bool
+  public let createdAt: String
+  public let expiresAt: String
+  public let completedAt: String?
+  public let accountHandle: String?
+  public let accountLogin: String?
+  public let accountName: String?
+  public let accountId: String?
+  public let accountEmail: String?
+  public let tokenExpiresAt: String?
+  public let error: String?
+
+  public init(
+    id: String,
+    status: String,
+    profileId: String,
+    setDefault: Bool,
+    createdAt: String,
+    expiresAt: String,
+    completedAt: String?,
+    accountHandle: String?,
+    accountLogin: String?,
+    accountName: String?,
+    accountId: String?,
+    accountEmail: String?,
+    tokenExpiresAt: String?,
+    error: String?
+  ) {
+    self.id = id
+    self.status = status
+    self.profileId = profileId
+    self.setDefault = setDefault
+    self.createdAt = createdAt
+    self.expiresAt = expiresAt
+    self.completedAt = completedAt
+    self.accountHandle = accountHandle
+    self.accountLogin = accountLogin
+    self.accountName = accountName
+    self.accountId = accountId
+    self.accountEmail = accountEmail
+    self.tokenExpiresAt = tokenExpiresAt
+    self.error = error
+  }
+}
+
+public struct LinearProjectSummary: Decodable, Hashable, Identifiable {
+  public let id: String
+  public let name: String
+  public let teamId: String
+  public let teamKey: String?
+  public let teamName: String?
+
+  public init(
+    id: String,
+    name: String,
+    teamId: String,
+    teamKey: String?,
+    teamName: String?
+  ) {
+    self.id = id
+    self.name = name
+    self.teamId = teamId
+    self.teamKey = teamKey
+    self.teamName = teamName
+  }
+}
+
+public struct LinearProjectsResponse: Decodable, Hashable {
+  public let profile: String
+  public let projects: [LinearProjectSummary]
+
+  public init(profile: String, projects: [LinearProjectSummary]) {
+    self.profile = profile
+    self.projects = projects
+  }
+}
+
+public struct LinearAssigneeMapping: Decodable, Hashable, Identifiable {
+  public let profileId: String
+  public let teamId: String?
+  public let localAssignee: String
+  public let linearUserId: String?
+  public let linearUserName: String?
+  public let linearUserEmail: String?
+
+  public var id: String {
+    [profileId, teamId ?? "*", localAssignee].joined(separator: "::")
+  }
+
+  public init(
+    profileId: String,
+    teamId: String?,
+    localAssignee: String,
+    linearUserId: String?,
+    linearUserName: String?,
+    linearUserEmail: String?
+  ) {
+    self.profileId = profileId
+    self.teamId = teamId
+    self.localAssignee = localAssignee
+    self.linearUserId = linearUserId
+    self.linearUserName = linearUserName
+    self.linearUserEmail = linearUserEmail
+  }
+}
+
+public struct LinearAssigneeMappingsResponse: Decodable, Hashable {
+  public let profileId: String
+  public let teamId: String?
+  public let mappings: [LinearAssigneeMapping]
+
+  public init(
+    profileId: String,
+    teamId: String?,
+    mappings: [LinearAssigneeMapping]
+  ) {
+    self.profileId = profileId
+    self.teamId = teamId
+    self.mappings = mappings
+  }
+}
+
+public struct LinearAssigneeMappingMutationResponse: Decodable, Hashable {
+  public let upserted: Bool
+  public let replacedExisting: Bool
+  public let mapping: LinearAssigneeMapping
+
+  public init(
+    upserted: Bool,
+    replacedExisting: Bool,
+    mapping: LinearAssigneeMapping
+  ) {
+    self.upserted = upserted
+    self.replacedExisting = replacedExisting
+    self.mapping = mapping
+  }
+}
+
+public struct LinearAssigneeMappingRemovalResponse: Decodable, Hashable {
+  public let removed: Bool
+  public let profileId: String
+  public let teamId: String?
+  public let localAssignee: String
+
+  public init(
+    removed: Bool,
+    profileId: String,
+    teamId: String?,
+    localAssignee: String
+  ) {
+    self.removed = removed
+    self.profileId = profileId
+    self.teamId = teamId
+    self.localAssignee = localAssignee
+  }
+}
+
+public struct LinearAutosyncSubscription: Decodable, Hashable, Identifiable {
+  public let id: String
+  public let profileId: String
+  public let projectId: String?
+  public let teamId: String?
+  public let mode: String
+  public let status: String
+  public let updatedAt: String?
+
+  public init(
+    id: String,
+    profileId: String,
+    projectId: String?,
+    teamId: String?,
+    mode: String,
+    status: String,
+    updatedAt: String?
+  ) {
+    self.id = id
+    self.profileId = profileId
+    self.projectId = projectId
+    self.teamId = teamId
+    self.mode = mode
+    self.status = status
+    self.updatedAt = updatedAt
+  }
+}
+
+public struct LinearAutosyncSubscriptionsResponse: Decodable, Hashable {
+  public let profileId: String
+  public let subscriptions: [LinearAutosyncSubscription]
+
+  public init(
+    profileId: String,
+    subscriptions: [LinearAutosyncSubscription]
+  ) {
+    self.profileId = profileId
+    self.subscriptions = subscriptions
+  }
+}
+
+public struct LinearAutosyncSubscriptionMutationResponse: Decodable, Hashable {
+  public let profileId: String
+  public let subscription: LinearAutosyncSubscription
+
+  public init(
+    profileId: String,
+    subscription: LinearAutosyncSubscription
+  ) {
+    self.profileId = profileId
+    self.subscription = subscription
+  }
+}
+
+public struct LinearProjectBindingResponse: Decodable, Hashable {
+  public let ok: Bool
+  public let cleared: Bool?
+  public let profileId: String?
+  public let projectId: String?
+  public let projectName: String?
+  public let teamId: String?
+  public let additionalProjects: [LinearProjectBindingTarget]
+  public let additionalProjectChanged: Bool?
+  public let removedProjectId: String?
+
+  public init(
+    ok: Bool,
+    cleared: Bool?,
+    profileId: String?,
+    projectId: String?,
+    projectName: String?,
+    teamId: String?,
+    additionalProjects: [LinearProjectBindingTarget] = [],
+    additionalProjectChanged: Bool? = nil,
+    removedProjectId: String? = nil
+  ) {
+    self.ok = ok
+    self.cleared = cleared
+    self.profileId = profileId
+    self.projectId = projectId
+    self.projectName = projectName
+    self.teamId = teamId
+    self.additionalProjects = additionalProjects
+    self.additionalProjectChanged = additionalProjectChanged
+    self.removedProjectId = removedProjectId
+  }
+
+  public var defaultProject: LinearProjectBindingTarget? {
+    guard let projectId else {
+      return nil
+    }
+    return LinearProjectBindingTarget(
+      profileId: profileId,
+      projectId: projectId,
+      projectName: projectName,
+      teamId: teamId
+    )
+  }
+
+  public var allProjects: [LinearProjectBindingTarget] {
+    var projects: [LinearProjectBindingTarget] = []
+    if let defaultProject {
+      projects.append(defaultProject)
+    }
+    projects.append(contentsOf: additionalProjects)
+    return projects
+  }
+}
+
+public struct LinearProjectBindingTarget: Decodable, Hashable, Identifiable {
+  public let profileId: String?
+  public let projectId: String
+  public let projectName: String?
+  public let teamId: String?
+
+  public var id: String {
+    let profile = profileId ?? ""
+    return "\(profile)::\(projectId)"
+  }
+
+  public init(
+    profileId: String?,
+    projectId: String,
+    projectName: String?,
+    teamId: String?
+  ) {
+    self.profileId = profileId
+    self.projectId = projectId
+    self.projectName = projectName
+    self.teamId = teamId
+  }
+}
+
+public struct LinearIssueSyncResponse: Decodable, Hashable {
+  public let ok: Bool
+  public let operation: String
+  public let ticketId: String
+  public let issueIdentifier: String
+  public let issueId: String?
+
+  public init(
+    ok: Bool,
+    operation: String,
+    ticketId: String,
+    issueIdentifier: String,
+    issueId: String?
+  ) {
+    self.ok = ok
+    self.operation = operation
+    self.ticketId = ticketId
+    self.issueIdentifier = issueIdentifier
+    self.issueId = issueId
+  }
+}
+
+public struct LinearProjectSyncResponse: Decodable, Hashable {
+  public let ok: Bool
+  public let projectIds: [String]?
+  public let processed: Int
+  public let created: Int
+  public let updated: Int
+
+  public init(
+    ok: Bool,
+    projectIds: [String]? = nil,
+    processed: Int,
+    created: Int,
+    updated: Int
+  ) {
+    self.ok = ok
+    self.projectIds = projectIds
+    self.processed = processed
+    self.created = created
+    self.updated = updated
+  }
+}
+
+public struct LinearAutosyncRunResponse: Decodable, Hashable {
+  public let ok: Bool
+  public let subscribedRoutes: Int
+  public let processedDeliveries: Int
+  public let appliedDeliveries: Int
+  public let skippedDeliveries: Int
+  public let failedDeliveries: Int
+  public let created: Int
+  public let updated: Int
+  public let commentsPulled: Int
+  public let conflictsRecorded: Int
+  public let checkpointsRecorded: Int
+  public let projectIds: [String]?
+
+  public init(
+    ok: Bool,
+    subscribedRoutes: Int,
+    processedDeliveries: Int,
+    appliedDeliveries: Int,
+    skippedDeliveries: Int,
+    failedDeliveries: Int,
+    created: Int,
+    updated: Int,
+    commentsPulled: Int,
+    conflictsRecorded: Int,
+    checkpointsRecorded: Int,
+    projectIds: [String]? = nil
+  ) {
+    self.ok = ok
+    self.subscribedRoutes = subscribedRoutes
+    self.processedDeliveries = processedDeliveries
+    self.appliedDeliveries = appliedDeliveries
+    self.skippedDeliveries = skippedDeliveries
+    self.failedDeliveries = failedDeliveries
+    self.created = created
+    self.updated = updated
+    self.commentsPulled = commentsPulled
+    self.conflictsRecorded = conflictsRecorded
+    self.checkpointsRecorded = checkpointsRecorded
+    self.projectIds = projectIds
   }
 }
 
@@ -1550,6 +2294,17 @@ public struct TicketSummary: Decodable, Encodable, Identifiable, Hashable {
   public let updatedAt: String
   public let dependsOn: [String]
   public let blocks: [String]
+  public let owner: String
+  public let source: String
+  public let assignee: String?
+  public let tags: [String]
+  public let externalSystem: String?
+  public let externalId: String?
+  public let externalKey: String?
+  public let externalUrl: String?
+  public let externalProjectId: String?
+  public let externalProjectName: String?
+  public let externalTeamId: String?
   public let projectId: String?
   public let projectName: String?
 
@@ -1564,6 +2319,17 @@ public struct TicketSummary: Decodable, Encodable, Identifiable, Hashable {
     updatedAt: String,
     dependsOn: [String],
     blocks: [String],
+    owner: String,
+    source: String,
+    assignee: String?,
+    tags: [String],
+    externalSystem: String?,
+    externalId: String?,
+    externalKey: String?,
+    externalUrl: String?,
+    externalProjectId: String?,
+    externalProjectName: String?,
+    externalTeamId: String?,
     projectId: String?,
     projectName: String?
   ) {
@@ -1575,8 +2341,698 @@ public struct TicketSummary: Decodable, Encodable, Identifiable, Hashable {
     self.updatedAt = updatedAt
     self.dependsOn = dependsOn
     self.blocks = blocks
+    self.owner = owner
+    self.source = source
+    self.assignee = assignee
+    self.tags = tags
+    self.externalSystem = externalSystem
+    self.externalId = externalId
+    self.externalKey = externalKey
+    self.externalUrl = externalUrl
+    self.externalProjectId = externalProjectId
+    self.externalProjectName = externalProjectName
+    self.externalTeamId = externalTeamId
     self.projectId = projectId
     self.projectName = projectName
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case ticketId
+    case title
+    case body
+    case status
+    case createdAt
+    case updatedAt
+    case dependsOn
+    case blocks
+    case owner
+    case source
+    case assignee
+    case tags
+    case externalSystem
+    case externalId
+    case externalKey
+    case externalUrl
+    case externalProjectId
+    case externalProjectName
+    case externalTeamId
+    case projectId
+    case projectName
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    ticketId = try container.decode(String.self, forKey: .ticketId)
+    title = try container.decode(String.self, forKey: .title)
+    body = try container.decodeIfPresent(String.self, forKey: .body)
+    status = try container.decode(TicketStatus.self, forKey: .status)
+    createdAt = try container.decode(String.self, forKey: .createdAt)
+    updatedAt = try container.decode(String.self, forKey: .updatedAt)
+    dependsOn = try container.decodeIfPresent([String].self, forKey: .dependsOn) ?? []
+    blocks = try container.decodeIfPresent([String].self, forKey: .blocks) ?? []
+    owner = try container.decodeIfPresent(String.self, forKey: .owner) ?? "hack"
+    source = try container.decodeIfPresent(String.self, forKey: .source) ?? "hack"
+    assignee = try container.decodeIfPresent(String.self, forKey: .assignee)
+    tags = try container.decodeIfPresent([String].self, forKey: .tags) ?? []
+    externalSystem = try container.decodeIfPresent(String.self, forKey: .externalSystem)
+    externalId = try container.decodeIfPresent(String.self, forKey: .externalId)
+    externalKey = try container.decodeIfPresent(String.self, forKey: .externalKey)
+    externalUrl = try container.decodeIfPresent(String.self, forKey: .externalUrl)
+    externalProjectId = try container.decodeIfPresent(String.self, forKey: .externalProjectId)
+    externalProjectName = try container.decodeIfPresent(String.self, forKey: .externalProjectName)
+    externalTeamId = try container.decodeIfPresent(String.self, forKey: .externalTeamId)
+    projectId = try container.decodeIfPresent(String.self, forKey: .projectId)
+    projectName = try container.decodeIfPresent(String.self, forKey: .projectName)
+  }
+}
+
+/// Describes which system currently owns authoritative Linear-sync fields for a ticket.
+public enum LinearSyncAuthority: String, Hashable {
+  case hack
+  case linear
+
+  public var label: String {
+    switch self {
+    case .hack:
+      "Hack"
+    case .linear:
+      "Linear"
+    }
+  }
+}
+
+/// Pure, metadata-derived sync hints for UI surfaces that need to explain Linear ticket behavior.
+public struct LinearSyncUXState: Hashable {
+  public let authority: LinearSyncAuthority
+  public let isLinkedToLinear: Bool
+  public let shortGuidance: String
+  public let reviewHint: String?
+
+  public init(ticket: TicketSummary) {
+    let authority = Self.resolveAuthority(source: ticket.source)
+    let isLinkedToLinear = Self.isLinkedToLinear(ticket: ticket)
+    self.authority = authority
+    self.isLinkedToLinear = isLinkedToLinear
+    shortGuidance = Self.makeShortGuidance(
+      authority: authority,
+      isLinkedToLinear: isLinkedToLinear
+    )
+    reviewHint = Self.makeReviewHint(
+      source: ticket.source,
+      owner: ticket.owner,
+      isLinkedToLinear: isLinkedToLinear
+    )
+  }
+
+  private static func resolveAuthority(source: String) -> LinearSyncAuthority {
+    switch LinearSyncActor(rawValue: source.normalizedSyncActor) ?? .unknown {
+    case .linear:
+      .linear
+    case .hack, .unknown:
+      .hack
+    }
+  }
+
+  private static func isLinkedToLinear(ticket: TicketSummary) -> Bool {
+    if ticket.source.normalizedSyncActor == LinearSyncActor.linear.rawValue {
+      return true
+    }
+    if ticket.owner.normalizedSyncActor == LinearSyncActor.linear.rawValue {
+      return true
+    }
+    if ticket.externalSystem?.normalizedSyncActor == LinearSyncActor.linear.rawValue {
+      return true
+    }
+    if ticket.externalId?.isEmpty == false {
+      return true
+    }
+    if ticket.externalKey?.isEmpty == false {
+      return true
+    }
+    return false
+  }
+
+  private static func makeShortGuidance(
+    authority: LinearSyncAuthority,
+    isLinkedToLinear: Bool
+  ) -> String {
+    guard isLinkedToLinear else {
+      return "Local only. Connect to Linear to sync this ticket."
+    }
+    return "\(authority.label) controls title, body, status, and project. Comments append only. Assignee, labels, and dependencies sync best effort."
+  }
+
+  private static func makeReviewHint(
+    source: String,
+    owner: String,
+    isLinkedToLinear: Bool
+  ) -> String? {
+    guard isLinkedToLinear else {
+      return nil
+    }
+    let normalizedSource = LinearSyncActor(rawValue: source.normalizedSyncActor) ?? .unknown
+    let normalizedOwner = LinearSyncActor(rawValue: owner.normalizedSyncActor) ?? .unknown
+    guard normalizedSource == .unknown || normalizedOwner == .unknown || normalizedSource != normalizedOwner
+    else {
+      return nil
+    }
+    return "Review assignee, labels, and dependencies before the next sync."
+  }
+}
+
+public extension TicketSummary {
+  var linearSyncAuthority: LinearSyncAuthority {
+    linearSyncUXState.authority
+  }
+
+  var linearSyncUXState: LinearSyncUXState {
+    LinearSyncUXState(ticket: self)
+  }
+}
+
+public indirect enum TicketMetadataValue: Decodable, Hashable {
+  case string(String)
+  case integer(Int)
+  case double(Double)
+  case boolean(Bool)
+  case array([TicketMetadataValue])
+  case object([String: TicketMetadataValue])
+  case null
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.singleValueContainer()
+    if container.decodeNil() {
+      self = .null
+      return
+    }
+    if let string = try? container.decode(String.self) {
+      self = .string(string)
+      return
+    }
+    if let integer = try? container.decode(Int.self) {
+      self = .integer(integer)
+      return
+    }
+    if let double = try? container.decode(Double.self) {
+      self = .double(double)
+      return
+    }
+    if let boolean = try? container.decode(Bool.self) {
+      self = .boolean(boolean)
+      return
+    }
+    if let array = try? container.decode([TicketMetadataValue].self) {
+      self = .array(array)
+      return
+    }
+    if let object = try? container.decode([String: TicketMetadataValue].self) {
+      self = .object(object)
+      return
+    }
+    throw DecodingError.dataCorruptedError(
+      in: container,
+      debugDescription: "Unsupported ticket metadata value."
+    )
+  }
+
+  public func hash(into hasher: inout Hasher) {
+    switch self {
+    case let .string(value):
+      hasher.combine(0)
+      hasher.combine(value)
+    case let .integer(value):
+      hasher.combine(1)
+      hasher.combine(value)
+    case let .double(value):
+      hasher.combine(2)
+      hasher.combine(value)
+    case let .boolean(value):
+      hasher.combine(3)
+      hasher.combine(value)
+    case let .array(values):
+      hasher.combine(4)
+      for value in values {
+        hasher.combine(value)
+      }
+    case let .object(values):
+      hasher.combine(5)
+      for key in values.keys.sorted() {
+        hasher.combine(key)
+        hasher.combine(values[key])
+      }
+    case .null:
+      hasher.combine(6)
+    }
+  }
+
+  public var displayText: String {
+    switch self {
+    case let .string(value):
+      return value
+    case let .integer(value):
+      return String(value)
+    case let .double(value):
+      return value.formatted(.number)
+    case let .boolean(value):
+      return value ? "true" : "false"
+    case let .array(values):
+      return "[\(values.map(\.displayText).joined(separator: ", "))]"
+    case let .object(values):
+      let entries = values.keys.sorted().compactMap { key -> String? in
+        guard let value = values[key] else {
+          return nil
+        }
+        return #""\#(key)":\#(value.quotedDisplayText)"#
+      }
+      return "{\(entries.joined(separator: ","))}"
+    case .null:
+      return "null"
+    }
+  }
+
+  private var quotedDisplayText: String {
+    switch self {
+    case .string:
+      return #""\#(escapedDisplayText)""#
+    default:
+      return displayText
+    }
+  }
+
+  private var escapedDisplayText: String {
+    displayText
+      .replacingOccurrences(of: "\\", with: "\\\\")
+      .replacingOccurrences(of: "\"", with: "\\\"")
+  }
+}
+
+public struct TicketComment: Decodable, Identifiable, Hashable {
+  public let commentId: String
+  public let ticketId: String
+  public let body: String
+  public let source: String
+  public let actor: String
+  public let createdAt: String
+  public let externalId: String?
+  public let externalUrl: String?
+
+  public var id: String { commentId }
+
+  public init(
+    commentId: String,
+    ticketId: String,
+    body: String,
+    source: String,
+    actor: String,
+    createdAt: String,
+    externalId: String?,
+    externalUrl: String?
+  ) {
+    self.commentId = commentId
+    self.ticketId = ticketId
+    self.body = body
+    self.source = source
+    self.actor = actor
+    self.createdAt = createdAt
+    self.externalId = externalId
+    self.externalUrl = externalUrl
+  }
+}
+
+public struct TicketSyncCheckpoint: Decodable, Identifiable, Hashable {
+  public let checkpointId: String
+  public let ticketId: String
+  public let provider: String
+  public let profileId: String?
+  public let direction: String?
+  public let remoteCursor: String?
+  public let remoteUpdatedAt: String?
+  public let localUpdatedAt: String?
+  public let actor: String
+  public let createdAt: String
+
+  public var id: String { checkpointId }
+
+  public init(
+    checkpointId: String,
+    ticketId: String,
+    provider: String,
+    profileId: String?,
+    direction: String?,
+    remoteCursor: String?,
+    remoteUpdatedAt: String?,
+    localUpdatedAt: String?,
+    actor: String,
+    createdAt: String
+  ) {
+    self.checkpointId = checkpointId
+    self.ticketId = ticketId
+    self.provider = provider
+    self.profileId = profileId
+    self.direction = direction
+    self.remoteCursor = remoteCursor
+    self.remoteUpdatedAt = remoteUpdatedAt
+    self.localUpdatedAt = localUpdatedAt
+    self.actor = actor
+    self.createdAt = createdAt
+  }
+}
+
+public enum TicketSyncConflictStatus: String, Decodable, Hashable {
+  case open
+  case resolved
+}
+
+public enum TicketSyncConflictResolution: String, Decodable, Hashable {
+  case acceptLocal = "accept_local"
+  case acceptRemote = "accept_remote"
+  case merged
+  case ignore
+}
+
+public struct TicketSyncConflict: Decodable, Identifiable, Hashable {
+  public let conflictId: String
+  public let ticketId: String
+  public let provider: String
+  public let field: String
+  public let status: TicketSyncConflictStatus
+  public let authority: String?
+  public let summary: String?
+  public let localValue: TicketMetadataValue?
+  public let remoteValue: TicketMetadataValue?
+  public let createdAt: String
+  public let updatedAt: String
+  public let resolution: TicketSyncConflictResolution?
+  public let resolutionSummary: String?
+  public let resolvedAt: String?
+  public let resolvedBy: String?
+
+  public var id: String { conflictId }
+
+  public init(
+    conflictId: String,
+    ticketId: String,
+    provider: String,
+    field: String,
+    status: TicketSyncConflictStatus,
+    authority: String?,
+    summary: String?,
+    localValue: TicketMetadataValue?,
+    remoteValue: TicketMetadataValue?,
+    createdAt: String,
+    updatedAt: String,
+    resolution: TicketSyncConflictResolution?,
+    resolutionSummary: String?,
+    resolvedAt: String?,
+    resolvedBy: String?
+  ) {
+    self.conflictId = conflictId
+    self.ticketId = ticketId
+    self.provider = provider
+    self.field = field
+    self.status = status
+    self.authority = authority
+    self.summary = summary
+    self.localValue = localValue
+    self.remoteValue = remoteValue
+    self.createdAt = createdAt
+    self.updatedAt = updatedAt
+    self.resolution = resolution
+    self.resolutionSummary = resolutionSummary
+    self.resolvedAt = resolvedAt
+    self.resolvedBy = resolvedBy
+  }
+}
+
+public enum TicketSyncReviewSeverity: String, Hashable {
+  case clear
+  case review
+  case conflict
+}
+
+public struct TicketSyncReviewState: Hashable {
+  public let severity: TicketSyncReviewSeverity
+  public let needsReview: Bool
+  public let badgeLabel: String
+  public let title: String
+  public let message: String
+  public let commentCount: Int
+  public let openConflictCount: Int
+  public let resolvedConflictCount: Int
+  public let checkpointSummary: String?
+  public let highlightedFields: [String]
+
+  public init(detail: TicketDetailResponse) {
+    let checkpointSummary = Self.makeCheckpointSummary(detail.latestSyncCheckpoint)
+    let openConflicts = detail.openSyncConflicts
+    let resolvedConflicts = detail.resolvedSyncConflicts
+    let highlightedFields = Self.makeHighlightedFields(
+      openConflicts: openConflicts,
+      reviewHint: detail.ticket.linearSyncUXState.reviewHint
+    )
+    let guidance = detail.ticket.linearSyncUXState.shortGuidance
+
+    let severity: TicketSyncReviewSeverity
+    let needsReview: Bool
+    let badgeLabel: String
+    let title: String
+    let message: String
+
+    if !openConflicts.isEmpty {
+      severity = .conflict
+      needsReview = true
+      badgeLabel = openConflicts.count == 1 ? "1 open conflict" : "\(openConflicts.count) open conflicts"
+      title = "Resolve sync conflicts"
+      let summaries = openConflicts.compactMap(\.summary).joined(separator: " ")
+      let fieldSummary = highlightedFields.joined(separator: ", ")
+      let checkpointClause = checkpointSummary.map { " \($0)" } ?? ""
+      message = "Review \(fieldSummary) before the next sync. Comments stay append-only. \(guidance) \(summaries)\(checkpointClause)"
+        .replacingOccurrences(of: "  ", with: " ")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    } else if let reviewHint = detail.ticket.linearSyncUXState.reviewHint {
+      severity = .review
+      needsReview = true
+      badgeLabel = "Needs review"
+      title = "Review mergeable fields"
+      let checkpointClause = checkpointSummary.map { " \($0)" } ?? ""
+      message = "\(reviewHint) \(guidance)\(checkpointClause)"
+        .replacingOccurrences(of: "  ", with: " ")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    } else {
+      severity = .clear
+      needsReview = false
+      badgeLabel = "Ready"
+      title = detail.ticket.linearSyncUXState.isLinkedToLinear ? "Sync ready" : "Local only"
+      let checkpointClause = checkpointSummary.map { " \($0)" } ?? ""
+      message = "\(guidance)\(checkpointClause)"
+        .replacingOccurrences(of: "  ", with: " ")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    self.severity = severity
+    self.needsReview = needsReview
+    self.badgeLabel = badgeLabel
+    self.title = title
+    self.message = message
+    commentCount = detail.comments.count
+    openConflictCount = openConflicts.count
+    resolvedConflictCount = resolvedConflicts.count
+    self.checkpointSummary = checkpointSummary
+    self.highlightedFields = highlightedFields
+  }
+
+  private static func makeCheckpointSummary(_ checkpoint: TicketSyncCheckpoint?) -> String? {
+    guard let checkpoint else {
+      return nil
+    }
+    let direction = checkpoint.direction?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let profile = checkpoint.profileId?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let provider = checkpoint.provider.capitalized
+    var segments: [String] = []
+    if let direction, !direction.isEmpty {
+      segments.append(direction)
+    }
+    segments.append("via \(provider)")
+    var summary = "Last sync: \(segments.joined(separator: " "))"
+    if let profile, !profile.isEmpty {
+      summary += " (profile \(profile))"
+    }
+    summary += "."
+    return summary
+  }
+
+  private static func makeHighlightedFields(
+    openConflicts: [TicketSyncConflict],
+    reviewHint: String?
+  ) -> [String] {
+    let fields = openConflicts.map(\.field)
+    if !fields.isEmpty {
+      return fields
+    }
+    guard reviewHint != nil else {
+      return []
+    }
+    return ["assignee", "labels", "dependencies"]
+  }
+}
+
+public struct TicketReviewQueueEntry: Hashable, Identifiable {
+  public let ticketId: String
+  public let title: String
+  public let badgeLabel: String
+  public let summary: String
+  public let commentCount: Int
+  public let openConflictCount: Int
+  public let reviewNoteCount: Int
+  public let updatedAt: String
+
+  public var id: String { ticketId }
+
+  public init?(
+    ticket: TicketSummary,
+    detail: TicketDetailResponse? = nil,
+    reviewNoteCount: Int = 0
+  ) {
+    let normalizedReviewNoteCount = max(reviewNoteCount, 0)
+    let summary: String
+    let badgeLabel: String
+    let commentCount: Int
+    let openConflictCount: Int
+
+    if let detail, detail.linearSyncReviewState.needsReview {
+      let review = detail.linearSyncReviewState
+      summary = review.message
+      badgeLabel = review.badgeLabel
+      commentCount = review.commentCount
+      openConflictCount = review.openConflictCount
+    } else if let reviewHint = ticket.linearSyncUXState.reviewHint {
+      summary = reviewHint
+      badgeLabel = "Needs review"
+      commentCount = detail?.comments.count ?? 0
+      openConflictCount = detail?.openSyncConflicts.count ?? 0
+    } else {
+      return nil
+    }
+
+    ticketId = ticket.ticketId
+    title = ticket.title
+    self.badgeLabel = badgeLabel
+    self.summary = summary
+    self.commentCount = commentCount
+    self.openConflictCount = openConflictCount
+    self.reviewNoteCount = normalizedReviewNoteCount
+    updatedAt = detail?.ticket.updatedAt ?? ticket.updatedAt
+  }
+}
+
+public struct TicketReviewNote: Decodable, Hashable, Identifiable {
+  public let noteId: String
+  public let ticketId: String
+  public let markdown: String
+  public let actor: String
+  public let createdAt: String
+  public let context: String?
+
+  public var id: String { noteId }
+
+  public init(
+    noteId: String,
+    ticketId: String,
+    markdown: String,
+    actor: String,
+    createdAt: String,
+    context: String?
+  ) {
+    self.noteId = noteId
+    self.ticketId = ticketId
+    self.markdown = markdown
+    self.actor = actor
+    self.createdAt = createdAt
+    self.context = context
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case noteId
+    case ticketId
+    case markdown
+    case body
+    case actor
+    case createdAt
+    case context
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    noteId = try container.decode(String.self, forKey: .noteId)
+    ticketId = try container.decode(String.self, forKey: .ticketId)
+    markdown =
+      try container.decodeIfPresent(String.self, forKey: .markdown)
+      ?? container.decode(String.self, forKey: .body)
+    actor = try container.decode(String.self, forKey: .actor)
+    createdAt = try container.decode(String.self, forKey: .createdAt)
+    context = try container.decodeIfPresent(String.self, forKey: .context)
+  }
+}
+
+public enum TicketReviewComposer {
+  public static func draft(
+    for detail: TicketDetailResponse,
+    highlightedConflict: TicketSyncConflict? = nil
+  ) -> String {
+    var lines = ["Review follow-up", ""]
+
+    if let highlightedConflict {
+      lines.append("Conflict to resolve:")
+      lines.append("- Field: \(highlightedConflict.field)")
+      if let summary = highlightedConflict.summary, !summary.isEmpty {
+        lines.append("- Summary: \(summary)")
+      }
+      if let localValue = highlightedConflict.localValue?.displayText, !localValue.isEmpty {
+        lines.append("- Hack: \(localValue)")
+      }
+      if let remoteValue = highlightedConflict.remoteValue?.displayText, !remoteValue.isEmpty {
+        lines.append("- Linear: \(remoteValue)")
+      }
+    } else if !detail.openSyncConflicts.isEmpty {
+      lines.append("Open conflicts:")
+      for conflict in detail.openSyncConflicts.prefix(3) {
+        let summary = conflict.summary?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let summarySuffix = (summary?.isEmpty == false) ? ": \(summary!)" : ""
+        lines.append("- \(conflict.field)\(summarySuffix)")
+      }
+    } else {
+      lines.append(detail.linearSyncReviewState.message)
+    }
+
+    if let latestComment = detail.comments.last {
+      lines.append("")
+      lines.append("Latest comment context:")
+      lines.append(quote(comment: latestComment))
+    }
+
+    return lines.joined(separator: "\n")
+      .replacingOccurrences(of: "\n\n\n", with: "\n\n")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+
+  public static func quote(comment: TicketComment) -> String {
+    let header = "> \(comment.actor) • \(comment.source) • \(comment.createdAt)"
+    let bodyLines = comment.body
+      .split(separator: "\n", omittingEmptySubsequences: false)
+      .map { "> \($0)" }
+    return ([header] + bodyLines).joined(separator: "\n")
+  }
+}
+
+private enum LinearSyncActor: String {
+  case hack
+  case linear
+  case unknown
+}
+
+private extension String {
+  var normalizedSyncActor: String {
+    trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
   }
 }
 
@@ -1623,11 +3079,75 @@ public struct TicketsListResponse: Decodable {
 
 public struct TicketDetailResponse: Decodable {
   public let ticket: TicketSummary
+  public let comments: [TicketComment]
+  public let reviewNotes: [TicketReviewNote]
+  public let syncCheckpoints: [TicketSyncCheckpoint]
+  public let conflicts: [TicketSyncConflict]
   public let events: [TicketEvent]
 
   public init(ticket: TicketSummary, events: [TicketEvent]) {
     self.ticket = ticket
+    comments = []
+    reviewNotes = []
+    syncCheckpoints = []
+    conflicts = []
     self.events = events
+  }
+
+  public init(
+    ticket: TicketSummary,
+    comments: [TicketComment],
+    reviewNotes: [TicketReviewNote],
+    syncCheckpoints: [TicketSyncCheckpoint],
+    conflicts: [TicketSyncConflict],
+    events: [TicketEvent]
+  ) {
+    self.ticket = ticket
+    self.comments = comments
+    self.reviewNotes = reviewNotes
+    self.syncCheckpoints = syncCheckpoints
+    self.conflicts = conflicts
+    self.events = events
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case ticket
+    case comments
+    case reviewNotes
+    case syncCheckpoints
+    case conflicts
+    case events
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    ticket = try container.decode(TicketSummary.self, forKey: .ticket)
+    comments = try container.decodeIfPresent([TicketComment].self, forKey: .comments) ?? []
+    reviewNotes =
+      try container.decodeIfPresent([TicketReviewNote].self, forKey: .reviewNotes) ?? []
+    syncCheckpoints = try container.decodeIfPresent([TicketSyncCheckpoint].self, forKey: .syncCheckpoints) ?? []
+    conflicts = try container.decodeIfPresent([TicketSyncConflict].self, forKey: .conflicts) ?? []
+    events = try container.decodeIfPresent([TicketEvent].self, forKey: .events) ?? []
+  }
+}
+
+public extension TicketDetailResponse {
+  var latestSyncCheckpoint: TicketSyncCheckpoint? {
+    syncCheckpoints.max(by: { lhs, rhs in
+      lhs.createdAt.localizedCompare(rhs.createdAt) == .orderedAscending
+    })
+  }
+
+  var openSyncConflicts: [TicketSyncConflict] {
+    conflicts.filter { $0.status == .open }
+  }
+
+  var resolvedSyncConflicts: [TicketSyncConflict] {
+    conflicts.filter { $0.status == .resolved }
+  }
+
+  var linearSyncReviewState: TicketSyncReviewState {
+    TicketSyncReviewState(detail: self)
   }
 }
 
@@ -1658,6 +3178,41 @@ public struct TicketStatusResponse: Decodable {
     self.ok = ok
     self.ticketId = ticketId
     self.status = status
+  }
+}
+
+public struct TicketConflictResolutionResponse: Decodable {
+  public let ok: Bool
+  public let ticketId: String
+  public let conflictId: String
+  public let resolution: TicketSyncConflictResolution
+
+  public init(
+    ok: Bool,
+    ticketId: String,
+    conflictId: String,
+    resolution: TicketSyncConflictResolution
+  ) {
+    self.ok = ok
+    self.ticketId = ticketId
+    self.conflictId = conflictId
+    self.resolution = resolution
+  }
+}
+
+public struct TicketCommentAppendResponse: Decodable {
+  public let comment: TicketComment
+
+  public init(comment: TicketComment) {
+    self.comment = comment
+  }
+}
+
+public struct TicketReviewNoteAppendResponse: Decodable {
+  public let reviewNote: TicketReviewNote
+
+  public init(reviewNote: TicketReviewNote) {
+    self.reviewNote = reviewNote
   }
 }
 

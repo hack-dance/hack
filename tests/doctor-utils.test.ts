@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import {
   analyzeComposeNetworkHygiene,
   dnsmasqConfigHasDomain,
+  resolvePreferredHostDnsTarget,
   resolverHasNameserver,
 } from "../src/commands/doctor-utils.ts";
 
@@ -69,4 +70,22 @@ test("dnsmasqConfigHasDomain detects expected address line", () => {
   const text = "address=/.hack/127.0.0.1\naddress=/.hack.gy/127.0.0.1\n";
   expect(dnsmasqConfigHasDomain({ text, domain: "hack" })).toBe(true);
   expect(dnsmasqConfigHasDomain({ text, domain: "example" })).toBe(false);
+});
+
+test("resolvePreferredHostDnsTarget keeps container ip when it is reachable", () => {
+  expect(
+    resolvePreferredHostDnsTarget({
+      containerIpReachable: true,
+      localhostReachable: true,
+    })
+  ).toBe("172.30.0.2");
+});
+
+test("resolvePreferredHostDnsTarget falls back to localhost when container ip is unreachable", () => {
+  expect(
+    resolvePreferredHostDnsTarget({
+      containerIpReachable: false,
+      localhostReachable: true,
+    })
+  ).toBe("127.0.0.1");
 });

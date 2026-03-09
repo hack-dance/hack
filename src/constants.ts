@@ -7,6 +7,7 @@ export const DEFAULT_INGRESS_SUBNET = "172.30.0.0/16" as const;
 export const DEFAULT_INGRESS_GATEWAY = "172.30.0.1" as const;
 export const DEFAULT_CADDY_IP = "172.30.0.2" as const;
 export const DEFAULT_COREDNS_IP = "172.30.0.53" as const;
+export const DEFAULT_HOST_DNS_IP = "127.0.0.1" as const;
 
 export const DEFAULT_PROJECT_TLD = "hack" as const;
 export const DEFAULT_GRAFANA_HOST = `logs.${DEFAULT_PROJECT_TLD}` as const;

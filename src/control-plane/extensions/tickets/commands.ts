@@ -1937,11 +1937,20 @@ async function maybeEnsureTicketsGitHealth(opts: {
   }
 
   const health = inspected.health;
-  if (!(health.hasLegacyRef || health.hasNonTicketFiles)) {
+  if (
+    !(
+      health.hasLegacyRef ||
+      health.hasRefDivergence ||
+      health.hasNonTicketFiles
+    )
+  ) {
     return;
   }
 
   const reasons: string[] = [];
+  if (health.hasRefDivergence) {
+    reasons.push("hidden ref diverges from legacy branch");
+  }
   if (health.hasLegacyRef && health.legacyRef) {
     reasons.push(`legacy ref ${health.legacyRef}`);
   }
@@ -1997,6 +2006,13 @@ async function maybeEnsureTicketsGitHealth(opts: {
   if (health.hasLegacyRef && health.legacyRef) {
     lines.push(
       `legacy ref: ${health.legacyRef} ${pruneLegacyRef ? "pruned" : "left intact"}`
+    );
+  }
+  if (health.hasRefDivergence) {
+    lines.push(
+      `ref divergence: ${
+        health.remoteRefOid?.slice(0, 8) ?? "missing"
+      } vs ${health.legacyRefOid?.slice(0, 8) ?? "missing"}`
     );
   }
   lines.push(`commit: ${repaired.didCommit ? "created" : "noop"}`);

@@ -38,6 +38,9 @@ export type TicketsGitHealth = {
   readonly remoteRef: string;
   readonly legacyRef?: string;
   readonly hasLegacyRef: boolean;
+  readonly hasRefDivergence: boolean;
+  readonly remoteRefOid?: string;
+  readonly legacyRefOid?: string;
   readonly hasNonTicketFiles: boolean;
   readonly nonTicketPaths: readonly string[];
 };
@@ -245,6 +248,13 @@ export function createGitTicketsChannel(opts: {
   };
 
   const resolvePreferredTrackingRef = async (): Promise<string | null> => {
+    const tracking = await runGitDir({
+      args: ["rev-parse", "--verify", trackingRef],
+    });
+    if (tracking.ok) {
+      return trackingRef;
+    }
+
     if (legacyTrackingRef) {
       const legacy = await runGitDir({
         args: ["rev-parse", "--verify", legacyTrackingRef],
@@ -252,13 +262,6 @@ export function createGitTicketsChannel(opts: {
       if (legacy.ok) {
         return legacyTrackingRef;
       }
-    }
-
-    const tracking = await runGitDir({
-      args: ["rev-parse", "--verify", trackingRef],
-    });
-    if (tracking.ok) {
-      return trackingRef;
     }
 
     return null;
@@ -359,9 +362,7 @@ export function createGitTicketsChannel(opts: {
             legacyRemoteRef,
             legacyTrackingRef
           );
-          if (legacyFetch.ok) {
-            checkoutRef = legacyTrackingRef;
-          } else if (!legacyFetch.missing) {
+          if (!(legacyFetch.ok || legacyFetch.missing)) {
             return {
               ok: false,
               error: `git fetch failed: ${legacyFetch.error}`,
@@ -845,6 +846,17 @@ export function createGitTicketsChannel(opts: {
     return listed.ok && listed.stdout.trim().length > 0;
   };
 
+  const resolveRefOid = async (ref: string): Promise<string | null> => {
+    const resolved = await runGitDir({
+      args: ["rev-parse", "--verify", ref],
+    });
+    if (!resolved.ok) {
+      return null;
+    }
+    const oid = resolved.stdout.trim();
+    return oid.length > 0 ? oid : null;
+  };
+
   const pruneWorktreeToTickets = async (): Promise<
     { readonly ok: true } | { readonly ok: false; readonly error: string }
   > => {
@@ -907,6 +919,16 @@ export function createGitTicketsChannel(opts: {
     const hasLegacyRef = legacyRemoteRef
       ? await hasRemoteRef(legacyRemoteRef)
       : false;
+    const remoteRefOid = await resolveRefOid(trackingRef);
+    const legacyRefOid =
+      hasLegacyRef && legacyTrackingRef
+        ? await resolveRefOid(legacyTrackingRef)
+        : null;
+    const hasRefDivergence =
+      hasLegacyRef &&
+      remoteRefOid !== null &&
+      legacyRefOid !== null &&
+      remoteRefOid !== legacyRefOid;
 
     return {
       ok: true,
@@ -917,6 +939,9 @@ export function createGitTicketsChannel(opts: {
         legacyRef: legacyRemoteRef ?? undefined,
         remote: checkedOut.remoteUrl ? remoteName : undefined,
         hasLegacyRef,
+        hasRefDivergence,
+        remoteRefOid: remoteRefOid ?? undefined,
+        legacyRefOid: legacyRefOid ?? undefined,
         hasNonTicketFiles: nonTicketPaths.length > 0,
         nonTicketPaths,
       },
@@ -979,6 +1004,11 @@ export function createGitTicketsChannel(opts: {
       });
       if (prunedLegacy.ok) {
         didPruneLegacy = true;
+        if (legacyTrackingRef) {
+          await runGitDir({
+            args: ["update-ref", "-d", legacyTrackingRef],
+          });
+        }
       } else {
         pruneError = `${prunedLegacy.stderr}\n${prunedLegacy.stdout}`.trim();
       }

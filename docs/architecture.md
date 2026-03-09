@@ -52,7 +52,7 @@ graph LR
 - Global scope (`~/.hack`)
   - Caddy proxy on 80/443 (routes via Docker labels)
   - CoreDNS for container DNS (`*.hack` → Caddy)
-  - macOS DNS helper: dnsmasq + `/etc/resolver` for `*.hack` → Caddy container IP
+  - macOS DNS helper: dnsmasq + `/etc/resolver` for `*.hack` → `127.0.0.1`
   - Logging stack (Alloy → Loki → Grafana)
   - Global config: `hack.config.json` (control plane defaults + extension settings)
     - Gateway bind/port/allowWrites

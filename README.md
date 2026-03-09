@@ -598,8 +598,8 @@ hack up --project my-project
 OAuth providers (notably Google) require `localhost` or a host that ends with a real public suffix.
 
 We keep `.hack` as the primary local dev domain, and optionally expose an alias domain for OAuth flows.
-If the OAuth alias is enabled, `hack global install` configures `*.hack.gy` to resolve to the Caddy
-container IP via dnsmasq + the OS resolver (bypasses port forwarding issues with Tailscale/VPNs).
+If the OAuth alias is enabled, `hack global install` configures `*.hack.gy` to resolve to `127.0.0.1`
+via dnsmasq + the OS resolver.
 
 Routing rules:
 

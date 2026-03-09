@@ -1,6 +1,10 @@
 import { YAML } from "bun";
 
-import { DEFAULT_CADDY_IP, DEFAULT_INGRESS_NETWORK } from "../constants.ts";
+import {
+  DEFAULT_CADDY_IP,
+  DEFAULT_HOST_DNS_IP,
+  DEFAULT_INGRESS_NETWORK,
+} from "../constants.ts";
 import { isRecord, isStringArray } from "../lib/guards.ts";
 
 export type ComposeNetworkHygieneError =
@@ -26,10 +30,10 @@ export function dnsmasqConfigHasDomain(opts: {
   readonly text: string;
   readonly domain: string;
 }): boolean {
-  // Accept container IP (preferred), IPv6, or legacy IPv4 config
+  // Accept localhost (preferred), container IP, or IPv6 config.
   const containerIpLine = `address=/.${opts.domain}/${DEFAULT_CADDY_IP}`;
   const ipv6Line = `address=/.${opts.domain}/::1`;
-  const ipv4Line = `address=/.${opts.domain}/127.0.0.1`;
+  const ipv4Line = `address=/.${opts.domain}/${DEFAULT_HOST_DNS_IP}`;
   return (
     opts.text.includes(containerIpLine) ||
     opts.text.includes(ipv6Line) ||

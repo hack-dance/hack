@@ -17,6 +17,7 @@ import {
 import {
   DEFAULT_CADDY_IP,
   DEFAULT_COREDNS_IP,
+  DEFAULT_HOST_DNS_IP,
   DEFAULT_INGRESS_GATEWAY,
   DEFAULT_INGRESS_NETWORK,
   DEFAULT_INGRESS_SUBNET,
@@ -2274,13 +2275,13 @@ async function resolveBrewPrefix(): Promise<string> {
 async function ensureDnsmasqHackAliases(opts: {
   readonly dnsmasqConf: string;
 }): Promise<void> {
-  const containerIpLines = [
-    `address=/.${DEFAULT_PROJECT_TLD}/${DEFAULT_CADDY_IP}`,
-    `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/${DEFAULT_CADDY_IP}`,
+  const desiredLines = [
+    `address=/.${DEFAULT_PROJECT_TLD}/${DEFAULT_HOST_DNS_IP}`,
+    `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/${DEFAULT_HOST_DNS_IP}`,
   ] as const;
   const legacyLines = [
-    `address=/.${DEFAULT_PROJECT_TLD}/127.0.0.1`,
-    `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/127.0.0.1`,
+    `address=/.${DEFAULT_PROJECT_TLD}/${DEFAULT_CADDY_IP}`,
+    `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/${DEFAULT_CADDY_IP}`,
     `address=/.${DEFAULT_PROJECT_TLD}/::1`,
     `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/::1`,
   ] as const;
@@ -2290,7 +2291,7 @@ async function ensureDnsmasqHackAliases(opts: {
     content: existing,
     legacyLines,
   });
-  const missing = containerIpLines.filter(
+  const missing = desiredLines.filter(
     (line) => !migrated.content.includes(line)
   );
   const shouldWrite = migrated.changed || missing.length > 0;
@@ -2331,7 +2332,7 @@ function removeLegacyDnsmasqLines(opts: {
 
   // Clean up any double newlines left from removal.
   const cleaned = updated.replace(/\n{3,}/g, "\n\n").trim();
-  logger.info({ message: "Migrating dnsmasq to use container IP..." });
+  logger.info({ message: "Migrating dnsmasq to use localhost..." });
   return { content: cleaned, changed: true };
 }
 
@@ -2403,8 +2404,8 @@ async function flushMacDnsCache(): Promise<void> {
 function noteDnsConfigured(opts: { readonly dnsmasqConf: string }): void {
   note(
     [
-      `DNS configured: *.${DEFAULT_PROJECT_TLD} → ${DEFAULT_CADDY_IP} (container)`,
-      `DNS configured: *.${DEFAULT_OAUTH_ALIAS_ROOT} → ${DEFAULT_CADDY_IP} (container)`,
+      `DNS configured: *.${DEFAULT_PROJECT_TLD} → ${DEFAULT_HOST_DNS_IP} (localhost)`,
+      `DNS configured: *.${DEFAULT_OAUTH_ALIAS_ROOT} → ${DEFAULT_HOST_DNS_IP} (localhost)`,
       `- dnsmasq: ${opts.dnsmasqConf}`,
       `- resolver: /etc/resolver/${DEFAULT_PROJECT_TLD}`,
       `- resolver: /etc/resolver/${DEFAULT_OAUTH_ALIAS_ROOT}`,

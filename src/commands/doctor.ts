@@ -7,6 +7,7 @@ import { optPath } from "../cli/options.ts";
 import {
   DEFAULT_CADDY_IP,
   DEFAULT_GRAFANA_HOST,
+  DEFAULT_HOST_DNS_IP,
   DEFAULT_INGRESS_GATEWAY,
   DEFAULT_INGRESS_NETWORK,
   DEFAULT_INGRESS_SUBNET,
@@ -793,7 +794,7 @@ async function checkMacResolverForDomain(domain: string): Promise<CheckResult> {
 async function checkMacDnsmasqConfigForDomain(
   domain: string
 ): Promise<CheckResult> {
-  const desiredLine = `address=/.${domain}/${DEFAULT_CADDY_IP}`;
+  const desiredLine = `address=/.${domain}/${DEFAULT_HOST_DNS_IP}`;
 
   const brew = await findExecutableInPath("brew");
   if (!brew) {
@@ -1256,7 +1257,7 @@ async function checkProxyPortForwarding(): Promise<CheckResult> {
       name: "proxy ports",
       status: "warn",
       message:
-        "Port 443 not forwarding properly. Fix: hack global install (configures DNS to use container IP)",
+        "Port 443 not forwarding properly. Fix: hack global install (configures DNS to use localhost)",
     };
   }
 
@@ -1700,15 +1701,11 @@ async function maybeMigrateDnsmasq(): Promise<void> {
     return;
   }
 
-  note(
-    "dnsmasq migrated to container IP - port forwarding issues resolved",
-    "doctor"
-  );
+  note("dnsmasq migrated to localhost for macOS host routing", "doctor");
 }
 
 /**
- * Check if dnsmasq has legacy localhost config and offer to migrate to container IP.
- * Using the container IP directly bypasses OrbStack port forwarding issues.
+ * Check if dnsmasq still points at the container IP and offer to migrate it back to localhost.
  */
 async function migrateDnsmasqToContainerIpIfNeeded(): Promise<
   "migrated" | "skipped" | "not-needed"
@@ -1728,25 +1725,25 @@ async function migrateDnsmasqToContainerIpIfNeeded(): Promise<
     return "skipped";
   }
 
-  const containerIpHackLine = `address=/.${DEFAULT_PROJECT_TLD}/${DEFAULT_CADDY_IP}`;
-  const containerIpOauthLine = `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/${DEFAULT_CADDY_IP}`;
   const legacyLines = [
-    `address=/.${DEFAULT_PROJECT_TLD}/127.0.0.1`,
-    `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/127.0.0.1`,
+    `address=/.${DEFAULT_PROJECT_TLD}/${DEFAULT_CADDY_IP}`,
+    `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/${DEFAULT_CADDY_IP}`,
     `address=/.${DEFAULT_PROJECT_TLD}/::1`,
     `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/::1`,
   ];
+  const desiredHackLine = `address=/.${DEFAULT_PROJECT_TLD}/${DEFAULT_HOST_DNS_IP}`;
+  const desiredOauthLine = `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/${DEFAULT_HOST_DNS_IP}`;
 
-  const hasContainerIp =
-    text.includes(containerIpHackLine) && text.includes(containerIpOauthLine);
+  const hasDesired =
+    text.includes(desiredHackLine) && text.includes(desiredOauthLine);
   const hasLegacy = legacyLines.some((line) => text.includes(line));
 
-  if (hasContainerIp || !hasLegacy) {
+  if (hasDesired || !hasLegacy) {
     return "not-needed";
   }
 
   const okMigrate = await confirm({
-    message: "Migrate dnsmasq to container IP? (fixes port forwarding issues)",
+    message: "Migrate dnsmasq to localhost? (fixes macOS host routing)",
     initialValue: true,
   });
   if (isCancel(okMigrate)) {
@@ -1756,13 +1753,13 @@ async function migrateDnsmasqToContainerIpIfNeeded(): Promise<
     return "skipped";
   }
 
-  // Remove legacy lines and add container IP
+  // Remove legacy lines and add localhost mapping.
   let updated = text;
   for (const legacyLine of legacyLines) {
     updated = updated.replace(legacyLine, "");
   }
   updated = updated.replace(/\n{3,}/g, "\n\n").trim();
-  updated = `${updated}\n${containerIpHackLine}\n${containerIpOauthLine}\n`;
+  updated = `${updated}\n${desiredHackLine}\n${desiredOauthLine}\n`;
 
   await writeTextFileIfChanged(dnsmasqConf, updated);
 
@@ -2013,8 +2010,8 @@ function renderMacNote(): void {
     note(
       [
         "macOS tip:",
-        `- wildcard DNS: /etc/resolver/${DEFAULT_PROJECT_TLD} + dnsmasq address=/.${DEFAULT_PROJECT_TLD}/${DEFAULT_CADDY_IP}`,
-        `- OAuth alias DNS: /etc/resolver/${DEFAULT_OAUTH_ALIAS_ROOT} + dnsmasq address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/${DEFAULT_CADDY_IP}`,
+        `- wildcard DNS: /etc/resolver/${DEFAULT_PROJECT_TLD} + dnsmasq address=/.${DEFAULT_PROJECT_TLD}/${DEFAULT_HOST_DNS_IP}`,
+        `- OAuth alias DNS: /etc/resolver/${DEFAULT_OAUTH_ALIAS_ROOT} + dnsmasq address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/${DEFAULT_HOST_DNS_IP}`,
       ].join("\n"),
       "doctor"
     );

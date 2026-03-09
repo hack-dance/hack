@@ -41,7 +41,10 @@ struct TicketsView: View {
   @State private var postingReviewNoteTicketIds: Set<String> = []
   @State private var ticketDetailCache: [String: TicketDetailResponse] = [:]
   @State private var reviewComposerDrafts: [String: String] = [:]
+  @State private var refreshGeneration = 0
   @FocusState private var ticketsListFocused: Bool
+
+  private static let ticketCacheTTL: TimeInterval = 60 * 10
 
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
@@ -58,16 +61,14 @@ struct TicketsView: View {
     .padding(.bottom, 24)
     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     .task {
-      await refreshLinearRouting()
       loadCachedTickets()
+      async let routingRefresh: Void = refreshLinearRouting()
       await refreshTickets()
+      _ = await routingRefresh
       ticketsListFocused = true
     }
     .task(id: selectedTicketId) {
       await loadTicketDetail()
-    }
-    .onChange(of: model.lastUpdated) { _, _ in
-      Task { await refreshLinearRouting() }
     }
     .onChange(of: selectedFilter) { _, _ in
       updateSelectionAfterRefresh()
@@ -1896,14 +1897,24 @@ struct TicketsView: View {
   }
 
   private func refreshTickets() async {
+    refreshGeneration += 1
+    let generation = refreshGeneration
+    let previousSelectedTicketId = selectedTicketId
     isLoading = true
     errorMessage = nil
-    loadNotice = nil
-    let result = await loadTicketsWithTimeout(seconds: 4)
+    let result = await loadTicketsWithTimeout(seconds: 12)
+    guard generation == refreshGeneration else {
+      return
+    }
     switch result {
     case let .success(fetched):
       tickets = fetched
       updateSelectionAfterRefresh()
+      if selectedTicketId != nil,
+        selectedTicketId == previousSelectedTicketId
+      {
+        await loadTicketDetail()
+      }
       hasLoadedOnce = true
       persistCachedTickets()
     case .timedOut:
@@ -1943,9 +1954,11 @@ struct TicketsView: View {
     let filtered = filteredTickets
     if let selectedTicketId,
        !filtered.contains(where: { $0.ticketId == selectedTicketId }) {
-      self.selectedTicketId = nil
-      ticketDetail = nil
-      detailErrorMessage = nil
+      self.selectedTicketId = filtered.first?.ticketId
+      if self.selectedTicketId == nil {
+        ticketDetail = nil
+        detailErrorMessage = nil
+      }
     }
   }
 
@@ -2066,6 +2079,7 @@ struct TicketsView: View {
       }
       let routedProjects = result.projectIds?.count ?? (linearAdditionalProjects.isEmpty ? 1 : linearAdditionalProjects.count + 1)
       loadNotice = "Pulled \(result.processed) item\(result.processed == 1 ? "" : "s") from \(routedProjects) routed Linear project\(routedProjects == 1 ? "" : "s")."
+      await refreshLinearRouting()
       await refreshTickets()
     }
   }
@@ -2080,6 +2094,7 @@ struct TicketsView: View {
       }
       loadNotice =
         "Processed \(result.processedDeliveries) pending delivery\(result.processedDeliveries == 1 ? "" : "ies") across \(result.subscribedRoutes) subscribed route\(result.subscribedRoutes == 1 ? "" : "s") • applied \(result.appliedDeliveries) • failed \(result.failedDeliveries)."
+      await refreshLinearRouting()
       await refreshTickets()
     }
   }
@@ -2101,6 +2116,7 @@ struct TicketsView: View {
         return
       }
       loadNotice = "Pushed \(result.processed) Hack ticket\(result.processed == 1 ? "" : "s") to Linear."
+      await refreshLinearRouting()
       await refreshTickets()
     }
   }
@@ -2122,6 +2138,7 @@ struct TicketsView: View {
         return
       }
       loadNotice = "Synced \(result.ticketId) to \(result.issueIdentifier)."
+      await refreshLinearRouting()
       await refreshTickets()
     }
   }
@@ -2147,6 +2164,7 @@ struct TicketsView: View {
         return
       }
       loadNotice = "Refreshed \(result.ticketId) from \(result.issueIdentifier)."
+      await refreshLinearRouting()
       await refreshTickets()
     }
   }
@@ -2489,7 +2507,8 @@ struct TicketsView: View {
   }
 
   private func cacheKey() -> String {
-    "tickets.cache.\(project.id)"
+    let projectPath = project.repoRoot ?? project.projectDir ?? project.id
+    return "tickets.cache.\(project.id).\(projectPath)"
   }
 
   private func loadCachedTickets() {
@@ -2497,6 +2516,10 @@ struct TicketsView: View {
     guard let data = UserDefaults.standard.data(forKey: key) else { return }
     let decoder = JSONDecoder()
     if let payload = try? decoder.decode(TicketCachePayload.self, from: data) {
+      guard Date().timeIntervalSince(payload.updatedAt) <= Self.ticketCacheTTL else {
+        UserDefaults.standard.removeObject(forKey: key)
+        return
+      }
       tickets = payload.tickets
       hasLoadedOnce = true
       updateSelectionAfterRefresh()

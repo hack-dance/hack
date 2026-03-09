@@ -317,7 +317,10 @@ public final class DashboardModel {
       errorMessage = "Missing project path for \(project.name)"
       return nil
     }
-    let response = await runActionResult(message: "Creating ticket…") {
+    let response = await runActionResult(
+      message: "Creating ticket…",
+      refreshDashboard: false
+    ) {
       try await self.ticketsClient.createTicket(
         path: path,
         title: title,
@@ -338,7 +341,10 @@ public final class DashboardModel {
       errorMessage = "Missing project path for \(project.name)"
       return nil
     }
-    return await runActionResult(message: "Updating ticket status…") {
+    return await runActionResult(
+      message: "Updating ticket status…",
+      refreshDashboard: false
+    ) {
       try await self.ticketsClient.setTicketStatus(path: path, ticketId: ticketId, status: status)
     }
   }
@@ -354,7 +360,10 @@ public final class DashboardModel {
       errorMessage = "Missing project path for \(project.name)"
       return nil
     }
-    return await runActionResult(message: "Appending ticket comment…") {
+    return await runActionResult(
+      message: "Appending ticket comment…",
+      refreshDashboard: false
+    ) {
       try await self.ticketsClient.appendTicketComment(
         path: path,
         ticketId: ticketId,
@@ -375,7 +384,10 @@ public final class DashboardModel {
       errorMessage = "Missing project path for \(project.name)"
       return nil
     }
-    return await runActionResult(message: "Appending review note…") {
+    return await runActionResult(
+      message: "Appending review note…",
+      refreshDashboard: false
+    ) {
       try await self.ticketsClient.appendTicketReviewNote(
         path: path,
         ticketId: ticketId,
@@ -390,7 +402,10 @@ public final class DashboardModel {
       errorMessage = "Missing project path for \(project.name)"
       return nil
     }
-    let response = await runActionResult(message: "Syncing tickets…") {
+    let response = await runActionResult(
+      message: "Syncing tickets…",
+      refreshDashboard: false
+    ) {
       try await self.ticketsClient.syncTickets(path: path)
     }
     return response?.sync
@@ -407,7 +422,10 @@ public final class DashboardModel {
       errorMessage = "Missing project path for \(project.name)"
       return nil
     }
-    return await runActionResult(message: "Resolving sync conflict…") {
+    return await runActionResult(
+      message: "Resolving sync conflict…",
+      refreshDashboard: false
+    ) {
       try await self.ticketsClient.resolveTicketConflict(
         path: path,
         ticketId: ticketId,
@@ -990,7 +1008,10 @@ public final class DashboardModel {
       errorMessage = "Missing project path for \(project.name)"
       return nil
     }
-    return await runActionResult(message: "Adding Linear project to sync scope…") {
+    return await runActionResult(
+      message: "Adding Linear project to sync scope…",
+      refreshDashboard: false
+    ) {
       try await self.client.linkLinearProject(
         path: path,
         profileId: profileId,
@@ -1009,7 +1030,10 @@ public final class DashboardModel {
       errorMessage = "Missing project path for \(project.name)"
       return nil
     }
-    return await runActionResult(message: "Removing Linear project from sync scope…") {
+    return await runActionResult(
+      message: "Removing Linear project from sync scope…",
+      refreshDashboard: false
+    ) {
       try await self.client.unlinkLinearProject(path: path, projectId: projectId)
     }
   }
@@ -1031,7 +1055,7 @@ public final class DashboardModel {
     let message = direction == "linear"
       ? "Syncing Linear issues into tickets…"
       : "Syncing tickets into Linear…"
-    return await runActionResult(message: message) {
+    return await runActionResult(message: message, refreshDashboard: false) {
       try await self.client.syncLinearProject(
         path: path,
         from: direction,
@@ -1056,7 +1080,10 @@ public final class DashboardModel {
       errorMessage = "Missing project path for \(project.name)"
       return nil
     }
-    return await runActionResult(message: "Running Linear autosync…") {
+    return await runActionResult(
+      message: "Running Linear autosync…",
+      refreshDashboard: false
+    ) {
       try await self.client.runLinearAutosync(
         path: path,
         profileId: profileId,
@@ -1084,7 +1111,7 @@ public final class DashboardModel {
     let message = direction == "linear"
       ? "Refreshing ticket from Linear…"
       : "Syncing ticket to Linear…"
-    return await runActionResult(message: message) {
+    return await runActionResult(message: message, refreshDashboard: false) {
       try await self.client.syncLinearIssue(
         path: path,
         from: direction,
@@ -1536,6 +1563,7 @@ public final class DashboardModel {
 
   private func runActionResult<T>(
     message: String,
+    refreshDashboard: Bool = true,
     action: @escaping () async throws -> T
   ) async -> T? {
     statusMessage = message
@@ -1544,7 +1572,9 @@ public final class DashboardModel {
     do {
       let result = try await action()
       statusMessage = "Done"
-      await refresh()
+      if refreshDashboard {
+        await refresh()
+      }
       statusClearTask = Task { [weak self] in
         try? await Task.sleep(for: .seconds(2))
         self?.statusMessage = nil

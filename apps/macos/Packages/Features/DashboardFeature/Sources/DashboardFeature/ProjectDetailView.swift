@@ -176,15 +176,6 @@ struct ProjectDetailView: View {
     .onChange(of: project.kind) { _, _ in
       ensureSidebarSelection()
     }
-    .onChange(of: model.lastUpdated) { _, _ in
-      guard !executionTargetSaving else {
-        return
-      }
-      guard selectedSidebarItem != .remoteExecution else {
-        return
-      }
-      queueExecutionTargetReload()
-    }
     .onReceive(NotificationCenter.default.publisher(for: .hackProjectNavigationRequested)) { notification in
       guard
         let userInfo = notification.userInfo,
@@ -921,39 +912,6 @@ struct ProjectDetailView: View {
             linearProjectPickerControl(accessibilityLabel: "Linear project")
           }
 
-          HStack(spacing: 8) {
-            if !linearAdditionalProjects.isEmpty {
-              StatusPill(
-                text: "\(linearAdditionalProjects.count) additional project\(linearAdditionalProjects.count == 1 ? "" : "s")",
-                tone: .neutral
-              )
-            }
-            if hasAnyLinearAutosyncRoutes {
-              StatusPill(
-                text: "Autosync on for \(linearAutosyncRouteKeys.count)",
-                tone: .good
-              )
-            }
-            Spacer(minLength: 0)
-          }
-
-          if !linearAdditionalProjects.isEmpty {
-            projectSettingsControlGroup(footnote: additionalLinearProjectsSummary) {
-              VStack(alignment: .leading, spacing: 10) {
-                projectSettingsFieldLabel(
-                  "Also sync",
-                  help: "These extra Linear projects are already linked to this repo."
-                )
-
-                VStack(alignment: .leading, spacing: 8) {
-                  ForEach(linearAdditionalProjects) { target in
-                    linearScopeRouteRow(target: target, isDefault: false)
-                  }
-                }
-              }
-            }
-          }
-
           if let defaultTarget = defaultLinearRouteTarget {
             projectSettingsControlGroup(
               footnote: hasAnyLinearAutosyncRoutes
@@ -969,6 +927,14 @@ struct ProjectDetailView: View {
                 linearScopeRouteRow(target: defaultTarget, isDefault: true)
 
                 if !linearAdditionalProjects.isEmpty {
+                  Divider()
+                    .opacity(0.12)
+
+                  projectSettingsFieldLabel(
+                    "Additional projects",
+                    help: "Only shown when this repo already has extra Linear projects linked."
+                  )
+
                   VStack(alignment: .leading, spacing: 8) {
                     ForEach(linearAdditionalProjects) { target in
                       linearScopeRouteRow(target: target, isDefault: false)
@@ -1885,13 +1851,6 @@ struct ProjectDetailView: View {
     return !linearAdditionalProjects.isEmpty
   }
 
-  private var additionalLinearProjectsSummary: String {
-    if linearAdditionalProjects.isEmpty {
-      return "Default only"
-    }
-    return "\(linearAdditionalProjects.count) linked"
-  }
-
   private var remoteConfigMessage: String {
     if !executionTargetMessage.isEmpty {
       return executionTargetMessage
@@ -2408,7 +2367,6 @@ struct ProjectDetailView: View {
 
     executionTargetMessage = "Execution mode set to \(executionMode.title)."
     githubProfileMessage = ""
-    await model.refresh()
     queueExecutionTargetReload()
   }
 
@@ -2458,7 +2416,6 @@ struct ProjectDetailView: View {
       executionTargetMessage = "Default node updated."
     }
     githubProfileMessage = ""
-    await model.refresh()
     queueExecutionTargetReload()
   }
 
@@ -2503,7 +2460,6 @@ struct ProjectDetailView: View {
       ? "GitHub profile set to Local."
       : "GitHub profile set to \(githubProfileLabel(profileId: trimmed))."
     executionTargetMessage = ""
-    await model.refresh()
     queueExecutionTargetReload()
   }
 
@@ -2535,7 +2491,6 @@ struct ProjectDetailView: View {
       : "Linear profile set to \(linearProfileLabel(profileId: trimmed))."
     executionTargetMessage = ""
     githubProfileMessage = ""
-    await model.refresh()
     queueExecutionTargetReload()
   }
 
@@ -2576,7 +2531,6 @@ struct ProjectDetailView: View {
     linearProjectMessage = "Linear project bound to \(linearProjectMenuLabel(linearProject))."
     executionTargetMessage = ""
     githubProfileMessage = ""
-    await model.refresh()
     queueExecutionTargetReload()
   }
 
@@ -2609,7 +2563,6 @@ struct ProjectDetailView: View {
     linearProjectMessage = "Added \(linearProjectMenuLabel(linearProject)) to the sync scope."
     executionTargetMessage = ""
     githubProfileMessage = ""
-    await model.refresh()
     queueExecutionTargetReload()
   }
 
@@ -2654,7 +2607,6 @@ struct ProjectDetailView: View {
     linearProjectMessage = "Removed \(linearProjectBindingTargetLabel(target)) from the sync scope."
     executionTargetMessage = ""
     githubProfileMessage = ""
-    await model.refresh()
     queueExecutionTargetReload()
   }
 
@@ -2718,7 +2670,6 @@ struct ProjectDetailView: View {
     }
 
     linearProjectMessage = "Default Linear route set to \(linearProjectBindingTargetLabel(normalizedTarget))."
-    await model.refresh()
     queueExecutionTargetReload()
   }
 
@@ -2744,7 +2695,6 @@ struct ProjectDetailView: View {
     linearProjectMessage = "Cleared project-level Linear binding."
     executionTargetMessage = ""
     githubProfileMessage = ""
-    await model.refresh()
     queueExecutionTargetReload()
   }
 

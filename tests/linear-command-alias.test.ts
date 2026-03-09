@@ -65,10 +65,13 @@ test("hack linear alias forwards extension options like --json", async () => {
       cwd: tempDir ?? resolve(import.meta.dir, ".."),
       env: {
         ...process.env,
+        CI: "1",
+        FORCE_COLOR: "0",
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_LOGGER: "console",
         HACK_SETUP_SYNC_MODE: "off",
         HOME: tempDir ?? process.env.HOME ?? "",
+        NO_COLOR: "1",
       },
       stdin: "ignore",
       stdout: "pipe",
@@ -81,7 +84,7 @@ test("hack linear alias forwards extension options like --json", async () => {
     proc.exited,
   ]);
 
-  const payload = JSON.parse(stdout) as {
+  const payload = JSON.parse(extractJsonPayload(stdout)) as {
     readonly extensionId?: string;
     readonly ok?: boolean;
   };
@@ -89,3 +92,12 @@ test("hack linear alias forwards extension options like --json", async () => {
   expect(stderr).not.toContain('Option(s) not valid for "linear": --json');
   expect(payload.extensionId).toBe("dance.hack.linear");
 });
+
+function extractJsonPayload(stdout: string): string {
+  const trimmed = stdout.trim();
+  const objectStart = trimmed.indexOf("{");
+  if (objectStart === -1) {
+    throw new Error(`Expected JSON payload in stdout, got: ${stdout}`);
+  }
+  return trimmed.slice(objectStart);
+}

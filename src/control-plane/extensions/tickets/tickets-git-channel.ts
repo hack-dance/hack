@@ -1125,11 +1125,43 @@ async function runGit(opts: {
     stdout: "pipe",
     stderr: "pipe",
     stdin: "ignore",
+    env: {
+      ...process.env,
+      ...resolveTicketGitIdentityEnv(),
+    },
   });
   const stdout = await new Response(proc.stdout).text();
   const stderr = await new Response(proc.stderr).text();
   const exitCode = await proc.exited;
   return { ok: exitCode === 0, stdout, stderr };
+}
+
+function resolveTicketGitIdentityEnv(): Record<string, string> {
+  const authorName =
+    readOptionalEnv("GIT_AUTHOR_NAME") ??
+    readOptionalEnv("GIT_COMMITTER_NAME") ??
+    "hack tickets";
+  const authorEmail =
+    readOptionalEnv("GIT_AUTHOR_EMAIL") ??
+    readOptionalEnv("GIT_COMMITTER_EMAIL") ??
+    "tickets@hack.local";
+  const committerName = readOptionalEnv("GIT_COMMITTER_NAME") ?? authorName;
+  const committerEmail = readOptionalEnv("GIT_COMMITTER_EMAIL") ?? authorEmail;
+  return {
+    GIT_AUTHOR_NAME: authorName,
+    GIT_AUTHOR_EMAIL: authorEmail,
+    GIT_COMMITTER_NAME: committerName,
+    GIT_COMMITTER_EMAIL: committerEmail,
+  };
+}
+
+function readOptionalEnv(key: string): string | null {
+  const value = process.env[key];
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 function safeJsonParse(text: string): unknown {

@@ -82,7 +82,7 @@ test("hack linear alias forwards extension options like --json", async () => {
       "bun",
       resolve(import.meta.dir, "../index.ts"),
       "linear",
-      "status",
+      "profiles",
       "--json",
     ],
     {
@@ -110,12 +110,14 @@ test("hack linear alias forwards extension options like --json", async () => {
   ]);
 
   const payload = JSON.parse(extractJsonPayload(stdout)) as {
-    readonly extensionId?: string;
-    readonly ok?: boolean;
+    readonly selectedProfileId?: string;
+    readonly defaultProfileId?: string;
+    readonly selectedProfileMissing?: boolean;
   };
-  expect(exitCode).toBe(payload.ok ? 0 : 1);
+  expect(exitCode).toBe(payload.selectedProfileMissing ? 1 : 0);
   expect(stderr).not.toContain('Option(s) not valid for "linear": --json');
-  expect(payload.extensionId).toBe("dance.hack.linear");
+  expect(payload.selectedProfileId).toBe("default");
+  expect(payload.defaultProfileId).toBe("default");
 });
 
 function extractJsonPayload(stdout: string): string {

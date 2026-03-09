@@ -8,6 +8,7 @@ let tempGlobalConfigPath: string | null = null;
 let previousGlobalConfigPath: string | undefined;
 let previousHome: string | undefined;
 let previousLogger: string | undefined;
+let previousSecretsKey: string | undefined;
 let previousSetupSyncMode: string | undefined;
 
 beforeEach(async () => {
@@ -16,12 +17,30 @@ beforeEach(async () => {
   previousGlobalConfigPath = process.env.HACK_GLOBAL_CONFIG_PATH;
   previousHome = process.env.HOME;
   previousLogger = process.env.HACK_LOGGER;
+  previousSecretsKey = process.env.HACK_SECRETS_FILE_KEY;
   previousSetupSyncMode = process.env.HACK_SETUP_SYNC_MODE;
   process.env.HACK_GLOBAL_CONFIG_PATH = tempGlobalConfigPath;
   process.env.HOME = tempDir;
   process.env.HACK_LOGGER = "console";
+  process.env.HACK_SECRETS_FILE_KEY = "test-linear-alias-key";
   process.env.HACK_SETUP_SYNC_MODE = "off";
-  await writeFile(tempGlobalConfigPath, "{}\n");
+  await writeFile(
+    tempGlobalConfigPath,
+    `${JSON.stringify(
+      {
+        controlPlane: {
+          secrets: {
+            backend: "encrypted_file",
+            encryptedFile: {
+              path: resolve(tempDir, "secrets.enc.json"),
+            },
+          },
+        },
+      },
+      null,
+      2
+    )}\n`
+  );
 });
 
 afterEach(async () => {
@@ -44,6 +63,11 @@ afterEach(async () => {
     process.env.HACK_LOGGER = undefined;
   } else {
     process.env.HACK_LOGGER = previousLogger;
+  }
+  if (previousSecretsKey === undefined) {
+    process.env.HACK_SECRETS_FILE_KEY = undefined;
+  } else {
+    process.env.HACK_SECRETS_FILE_KEY = previousSecretsKey;
   }
   if (previousSetupSyncMode === undefined) {
     process.env.HACK_SETUP_SYNC_MODE = undefined;
@@ -69,6 +93,7 @@ test("hack linear alias forwards extension options like --json", async () => {
         FORCE_COLOR: "0",
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_LOGGER: "console",
+        HACK_SECRETS_FILE_KEY: "test-linear-alias-key",
         HACK_SETUP_SYNC_MODE: "off",
         HOME: tempDir ?? process.env.HOME ?? "",
         NO_COLOR: "1",

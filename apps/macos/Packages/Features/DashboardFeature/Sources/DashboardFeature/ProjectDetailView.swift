@@ -136,6 +136,8 @@ struct ProjectDetailView: View {
   @State private var linearProjectOptions: [LinearProjectSummary] = []
   @State private var selectedLinearProjectId = ""
   @State private var selectedAdditionalLinearProjectId = ""
+  @State private var linearSyncFromLinearEnabled = true
+  @State private var linearCreateHackTicketsEnabled = false
   @State private var linearProjectMessage = ""
   @State private var projectSystemGitIdentity: GitSystemIdentity? = nil
   @State private var executionTargetReloadTask: Task<Void, Never>? = nil
@@ -893,52 +895,60 @@ struct ProjectDetailView: View {
             ) {
               linearAccountPickerControl(accessibilityLabel: "Linear account")
             }
-          } else {
-            projectSettingsField(
-              title: "Linear account",
-              help: "The connected Linear account this repo uses for ticket sync.",
-              footnote: selectedLinearProfileSummary
-            ) {
-              projectSettingsStaticValue(selectedLinearProfileSummary)
-                .accessibilityLabel("Linear account")
-            }
           }
 
           projectSettingsField(
             title: "Linear project",
-            help: "Choose the main Linear project this repo should pull from and push to.",
+            help: "Choose the main Linear project this repo should sync with.",
             footnote: selectedLinearProjectFootnote
           ) {
             linearProjectPickerControl(accessibilityLabel: "Linear project")
           }
 
-          if let defaultTarget = defaultLinearRouteTarget {
-            projectSettingsControlGroup(
-              footnote: hasAnyLinearAutosyncRoutes
-                ? "Autosync enabled for \(linearAutosyncRouteKeys.count) project\(linearAutosyncRouteKeys.count == 1 ? "" : "s")."
-                : "Manual sync only"
-            ) {
-              VStack(alignment: .leading, spacing: 10) {
+          projectSettingsControlGroup(
+            footnote: linearSyncPolicySummary
+          ) {
+            VStack(alignment: .leading, spacing: 10) {
+              projectSettingsToggleRow(
+                title: "Sync from Linear",
+                subtitle: "Receive webhook-backed updates from the bound Linear project.",
+                isOn: Binding(
+                  get: { linearSyncFromLinearEnabled },
+                  set: { enabled in
+                    linearSyncFromLinearEnabled = enabled
+                    Task { await persistLinearSyncFromLinearSetting(enabled: enabled) }
+                  }
+                ),
+                isBusy: togglingLinearAutosyncRouteKeys.contains(defaultLinearRouteKey),
+                isEnabled: defaultLinearRouteTarget != nil
+              )
+
+              projectSettingsToggleRow(
+                title: "Create Hack tickets in Linear",
+                subtitle: "Automatically create linked Linear issues for new Hack tickets in this repo.",
+                isOn: Binding(
+                  get: { linearCreateHackTicketsEnabled },
+                  set: { enabled in
+                    linearCreateHackTicketsEnabled = enabled
+                    Task { await persistLinearCreateHackTicketsSetting(enabled: enabled) }
+                  }
+                ),
+                isBusy: executionTargetSaving,
+                isEnabled: defaultLinearRouteTarget != nil
+              )
+
+              if !linearAdditionalProjects.isEmpty {
+                Divider()
+                  .opacity(0.12)
+
                 projectSettingsFieldLabel(
-                  "Autosync",
-                  help: "Keep autosync scoped to the projects this repo should update without a manual pull or push."
+                  "Additional projects",
+                  help: "Advanced multi-project sync scope already linked for this repo."
                 )
 
-                linearScopeRouteRow(target: defaultTarget, isDefault: true)
-
-                if !linearAdditionalProjects.isEmpty {
-                  Divider()
-                    .opacity(0.12)
-
-                  projectSettingsFieldLabel(
-                    "Additional projects",
-                    help: "Only shown when this repo already has extra Linear projects linked."
-                  )
-
-                  VStack(alignment: .leading, spacing: 8) {
-                    ForEach(linearAdditionalProjects) { target in
-                      linearScopeRouteRow(target: target, isDefault: false)
-                    }
+                VStack(alignment: .leading, spacing: 8) {
+                  ForEach(linearAdditionalProjects) { target in
+                    linearScopeRouteRow(target: target, isDefault: false)
                   }
                 }
               }
@@ -1003,12 +1013,15 @@ struct ProjectDetailView: View {
       return "Connect Linear in Settings, then choose the project this repo should sync with."
     }
     if !hasAnyLinearProjectRouting {
-      return "Linear is connected. Choose the project this repo should pull from and push to."
+      return "Linear is connected. Choose the main Linear project for this repo."
     }
-    if linearAdditionalProjects.isEmpty {
-      return "Linear · \(selectedLinearProfileSummary) · \(selectedLinearProjectSummary)"
+    if !linearSyncFromLinearEnabled {
+      return "Linear · \(selectedLinearProjectSummary) · inbound sync off"
     }
-    return "Linear · \(selectedLinearProfileSummary) · \(selectedLinearProjectSummary) · \(linearAdditionalProjects.count) additional"
+    if linearCreateHackTicketsEnabled {
+      return "Linear · \(selectedLinearProjectSummary) · inbound on · create in Linear on"
+    }
+    return "Linear · \(selectedLinearProjectSummary) · inbound on"
   }
 
   private var selectedLinearProjectFootnote: String {
@@ -1019,6 +1032,29 @@ struct ProjectDetailView: View {
       return "Choose the main Linear project for this repo."
     }
     return selectedLinearProjectSummary
+  }
+
+  private var linearSyncPolicySummary: String {
+    guard defaultLinearRouteTarget != nil else {
+      return "Choose a Linear project before sync can start."
+    }
+    if linearSyncFromLinearEnabled && linearCreateHackTicketsEnabled {
+      return "Inbound sync is on. New Hack tickets will also create linked Linear issues."
+    }
+    if linearSyncFromLinearEnabled {
+      return "Inbound sync is on for the bound Linear project. Hack tickets stay local unless you turn on outbound creation."
+    }
+    if linearCreateHackTicketsEnabled {
+      return "Inbound sync is off. New Hack tickets will still create linked Linear issues."
+    }
+    return "Sync is manual until you enable one of the project sync toggles."
+  }
+
+  private var defaultLinearRouteKey: String {
+    guard let defaultLinearRouteTarget else {
+      return "__no_linear_route__"
+    }
+    return linearRouteKey(for: defaultLinearRouteTarget)
   }
 
   private var projectSettingsCardBackground: some View {
@@ -1058,6 +1094,36 @@ struct ProjectDetailView: View {
     VStack(alignment: .leading, spacing: 8) {
       content()
       projectSettingsFootnote(footnote)
+    }
+  }
+
+  private func projectSettingsToggleRow(
+    title: String,
+    subtitle: String,
+    isOn: Binding<Bool>,
+    isBusy: Bool,
+    isEnabled: Bool = true
+  ) -> some View {
+    projectSettingsControlShell(maxWidth: 520) {
+      HStack(alignment: .center, spacing: 12) {
+        VStack(alignment: .leading, spacing: 2) {
+          Text(title)
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(isEnabled ? .primary : .secondary)
+          Text(subtitle)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(.tertiary)
+        }
+        Spacer(minLength: 12)
+        if isBusy {
+          ProgressView()
+            .controlSize(.small)
+        }
+        Toggle(title, isOn: isOn)
+          .labelsHidden()
+          .toggleStyle(.switch)
+          .disabled(!isEnabled || isBusy)
+      }
     }
   }
 
@@ -1682,7 +1748,9 @@ struct ProjectDetailView: View {
           isOn: Binding(
             get: { isLinearAutosyncEnabled(for: normalizedTarget) },
             set: { enabled in
-              toggleLinearAutosync(for: normalizedTarget, enabled: enabled)
+              Task {
+                await toggleLinearAutosync(for: normalizedTarget, enabled: enabled)
+              }
             }
           )
         ) {
@@ -2180,6 +2248,14 @@ struct ProjectDetailView: View {
       for: project,
       key: "controlPlane.routing.overrides.github.profile"
     )
+    async let linearSyncFromLinearConfig = model.getProjectConfig(
+      for: project,
+      key: "controlPlane.routing.overrides.linear.syncFromLinear"
+    )
+    async let linearCreateHackTicketsConfig = model.getProjectConfig(
+      for: project,
+      key: "controlPlane.routing.overrides.linear.createHackTicketsInLinear"
+    )
     async let linearBinding = model.inspectLinearProjectBinding(for: project)
     async let defaultGitHubProfile = model.getGlobalConfig(
       key: "controlPlane.extensions[\"dance.hack.github\"].config.defaultProfile"
@@ -2204,6 +2280,8 @@ struct ProjectDetailView: View {
     let resolvedExecutionNodeId = await executionNodeId
     let resolvedProjectNodeId = await projectNodeId
     let resolvedProjectGitHubProfile = await projectGitHubProfile
+    let resolvedLinearSyncFromLinearConfig = await linearSyncFromLinearConfig
+    let resolvedLinearCreateHackTicketsConfig = await linearCreateHackTicketsConfig
     let resolvedLinearBinding = await linearBinding
     let resolvedDefaultGitHubProfile = await defaultGitHubProfile
     let resolvedDefaultLinearProfile = await defaultLinearProfile
@@ -2282,6 +2360,14 @@ struct ProjectDetailView: View {
       ? linearDefaultProfile
       : linearProjectProfile
     linearResolvedProfile = resolvedLinearProfile
+    linearSyncFromLinearEnabled = parseProjectBooleanConfig(
+      resolvedLinearSyncFromLinearConfig,
+      default: true
+    )
+    linearCreateHackTicketsEnabled = parseProjectBooleanConfig(
+      resolvedLinearCreateHackTicketsConfig,
+      default: false
+    )
     selectedLinearProjectId = linearBoundProjectId
     if linearAdditionalProjects.contains(where: { $0.projectId == selectedAdditionalLinearProjectId }) {
       selectedAdditionalLinearProjectId = ""
@@ -2441,6 +2527,20 @@ struct ProjectDetailView: View {
     }
   }
 
+  private func parseProjectBooleanConfig(_ value: String?, default defaultValue: Bool) -> Bool {
+    guard let value else {
+      return defaultValue
+    }
+    switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+    case "true", "1", "yes", "on":
+      return true
+    case "false", "0", "no", "off":
+      return false
+    default:
+      return defaultValue
+    }
+  }
+
   private func persistGitHubProfileOverride() async {
     executionTargetSaving = true
     defer { executionTargetSaving = false }
@@ -2494,6 +2594,53 @@ struct ProjectDetailView: View {
     queueExecutionTargetReload()
   }
 
+  private func persistLinearSyncFromLinearSetting(
+    enabled: Bool,
+    refreshAfterSave: Bool = true
+  ) async {
+    let didSave = await model.setProjectConfig(
+      for: project,
+      key: "controlPlane.routing.overrides.linear.syncFromLinear",
+      value: enabled ? "true" : "false"
+    )
+    guard didSave else {
+      linearSyncFromLinearEnabled.toggle()
+      linearProjectMessage = "Failed to save inbound Linear sync."
+      return
+    }
+
+    if let defaultTarget = defaultLinearRouteTarget {
+      await toggleLinearAutosync(
+        for: defaultTarget,
+        enabled: enabled,
+        refreshAfterSave: false
+      )
+    }
+
+    linearProjectMessage = enabled
+      ? "Inbound Linear sync enabled."
+      : "Inbound Linear sync disabled."
+    if refreshAfterSave {
+      queueExecutionTargetReload()
+    }
+  }
+
+  private func persistLinearCreateHackTicketsSetting(enabled: Bool) async {
+    let didSave = await model.setProjectConfig(
+      for: project,
+      key: "controlPlane.routing.overrides.linear.createHackTicketsInLinear",
+      value: enabled ? "true" : "false"
+    )
+    guard didSave else {
+      linearCreateHackTicketsEnabled.toggle()
+      linearProjectMessage = "Failed to save outbound Linear creation."
+      return
+    }
+    linearProjectMessage = enabled
+      ? "New Hack tickets will now create linked Linear issues."
+      : "New Hack tickets will stay local by default."
+  }
+
   private func persistLinearProjectBindingSelection() async {
     executionTargetSaving = true
     defer { executionTargetSaving = false }
@@ -2528,6 +2675,20 @@ struct ProjectDetailView: View {
     linearBoundProjectName = linearProject.name
     linearBoundTeamId = linearProject.teamId
     selectedLinearProjectId = linearProject.id
+    if linearSyncFromLinearEnabled {
+      await toggleLinearAutosync(
+        for: normalizedLinearRouteTarget(
+          LinearProjectBindingTarget(
+            profileId: profileOverride.isEmpty ? nil : profileOverride,
+            projectId: linearProject.id,
+            projectName: linearProject.name,
+            teamId: linearProject.teamId
+          )
+        ),
+        enabled: true,
+        refreshAfterSave: false
+      )
+    }
     linearProjectMessage = "Linear project bound to \(linearProjectMenuLabel(linearProject))."
     executionTargetMessage = ""
     githubProfileMessage = ""
@@ -2612,45 +2773,50 @@ struct ProjectDetailView: View {
 
   private func toggleLinearAutosync(
     for target: LinearProjectBindingTarget,
-    enabled: Bool
-  ) {
+    enabled: Bool,
+    refreshAfterSave: Bool = true
+  ) async {
     let routeKey = linearRouteKey(for: target)
     togglingLinearAutosyncRouteKeys.insert(routeKey)
-    Task {
-      defer { togglingLinearAutosyncRouteKeys.remove(routeKey) }
-      let normalizedTarget = normalizedLinearRouteTarget(target)
-      guard let profileId = normalizedTarget.profileId, !profileId.isEmpty else {
-        linearProjectMessage = "Choose a Linear profile before changing autosync."
-        return
-      }
-      if enabled {
-        let response = await model.setLinearAutosyncSubscription(
-          profileId: profileId,
-          projectId: normalizedTarget.projectId,
-          teamId: normalizedTarget.teamId,
-          mode: "auto_apply",
-          status: "active"
-        )
-        guard response != nil else {
-          linearProjectMessage = model.errorMessage ?? "Failed to enable Linear autosync."
-          return
-        }
-        linearAutosyncRouteKeys.insert(routeKey)
-        linearProjectMessage = "Autosync enabled for \(linearProjectBindingTargetLabel(normalizedTarget))."
-        return
-      }
-
-      let response = await model.removeLinearAutosyncSubscription(
+    defer { togglingLinearAutosyncRouteKeys.remove(routeKey) }
+    let normalizedTarget = normalizedLinearRouteTarget(target)
+    guard let profileId = normalizedTarget.profileId, !profileId.isEmpty else {
+      linearProjectMessage = "Choose a Linear profile before changing autosync."
+      return
+    }
+    if enabled {
+      let response = await model.setLinearAutosyncSubscription(
         profileId: profileId,
         projectId: normalizedTarget.projectId,
-        teamId: normalizedTarget.teamId
+        teamId: normalizedTarget.teamId,
+        mode: "auto_apply",
+        status: "active"
       )
       guard response != nil else {
-        linearProjectMessage = model.errorMessage ?? "Failed to disable Linear autosync."
+        linearProjectMessage = model.errorMessage ?? "Failed to enable Linear autosync."
         return
       }
-      linearAutosyncRouteKeys.remove(routeKey)
-      linearProjectMessage = "Autosync disabled for \(linearProjectBindingTargetLabel(normalizedTarget))."
+      linearAutosyncRouteKeys.insert(routeKey)
+      linearProjectMessage = "Autosync enabled for \(linearProjectBindingTargetLabel(normalizedTarget))."
+      if refreshAfterSave {
+        queueExecutionTargetReload()
+      }
+      return
+    }
+
+    let response = await model.removeLinearAutosyncSubscription(
+      profileId: profileId,
+      projectId: normalizedTarget.projectId,
+      teamId: normalizedTarget.teamId
+    )
+    guard response != nil else {
+      linearProjectMessage = model.errorMessage ?? "Failed to disable Linear autosync."
+      return
+    }
+    linearAutosyncRouteKeys.remove(routeKey)
+    linearProjectMessage = "Autosync disabled for \(linearProjectBindingTargetLabel(normalizedTarget))."
+    if refreshAfterSave {
+      queueExecutionTargetReload()
     }
   }
 

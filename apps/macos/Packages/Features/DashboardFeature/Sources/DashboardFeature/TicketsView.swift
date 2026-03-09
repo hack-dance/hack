@@ -33,6 +33,8 @@ struct TicketsView: View {
   @State private var linearRouteTeamId = ""
   @State private var linearAdditionalProjects: [LinearProjectBindingTarget] = []
   @State private var linearAutosyncRouteKeys: Set<String> = []
+  @State private var linearSyncFromLinearEnabled = true
+  @State private var linearCreateHackTicketsEnabled = false
   @State private var linearRouteStatus: LinearStatusResponse? = nil
   @State private var pendingBulkSyncAction: TicketBulkSyncAction? = nil
   @State private var activeSyncAction: TicketSyncAction? = nil
@@ -66,6 +68,16 @@ struct TicketsView: View {
       await refreshTickets()
       _ = await routingRefresh
       ticketsListFocused = true
+    }
+    .task(id: backgroundSyncTaskKey) {
+      guard shouldRunBackgroundSyncLoop else {
+        return
+      }
+      await runBackgroundSyncCycle()
+      while !Task.isCancelled {
+        try? await Task.sleep(for: .seconds(90))
+        await runBackgroundSyncCycle()
+      }
     }
     .task(id: selectedTicketId) {
       await loadTicketDetail()
@@ -144,43 +156,23 @@ struct TicketsView: View {
         linearSyncStatusRow
         Spacer(minLength: 12)
 
-        Button {
-          requestBulkSyncConfirmation(.pullLinear)
-        } label: {
-          Label("Pull", systemImage: "arrow.down.left")
-        }
-        .adaptiveToolbarButtonProminent()
-        .disabled(!canSyncProjectFromLinear || isAnySyncInFlight)
-
-        Button {
-          requestBulkSyncConfirmation(.pushHack)
-        } label: {
-          Label("Push", systemImage: "arrow.up.right")
-        }
-        .adaptiveToolbarButton()
-        .disabled(!canSyncProjectToLinear || isAnySyncInFlight)
-
-        if hasAnyLinearAutosyncRoutes {
-          Button {
-            Task { await runProjectLinearAutosync() }
-          } label: {
-            Label("Run autosync", systemImage: "bolt.badge.clock")
-          }
-          .adaptiveToolbarButton()
-          .disabled(linearRouteStatus?.tokenResolved != true || isAnySyncInFlight)
-        }
-
-        Button("Routing") {
-          openProjectRouting()
-        }
-        .adaptiveToolbarButton()
-
         Menu {
-          Button("Refresh") {
+          Button("Refresh tickets") {
             Task { await refreshTickets() }
           }
           Button("Sync ticket ref store") {
             Task { await syncTickets() }
+          }
+          if canSyncProjectFromLinear {
+            Divider()
+            Button("Reconcile from Linear") {
+              requestBulkSyncConfirmation(.pullLinear)
+            }
+          }
+          if linearRouteStatus?.tokenResolved == true && hasAnyLinearAutosyncRoutes {
+            Button("Run autosync now") {
+              Task { await runProjectLinearAutosync() }
+            }
           }
           if let selectedTicket {
             Divider()
@@ -200,15 +192,15 @@ struct TicketsView: View {
             }
           }
           Divider()
+          Button("Open ticket sync settings") {
+            openProjectRouting()
+          }
           Button("Open Linear settings") {
             NotificationCenter.default.post(
               name: .hackSettingsRequested,
               object: nil,
               userInfo: ["pane": "linear"]
             )
-          }
-          Button("Open project routing") {
-            openProjectRouting()
           }
         } label: {
           Image(systemName: "ellipsis.circle")
@@ -270,11 +262,11 @@ struct TicketsView: View {
   }
 
   private var canSyncProjectFromLinear: Bool {
-    linearRouteStatus?.tokenResolved == true && hasAnyLinearProjectRouting
+    linearRouteStatus?.tokenResolved == true && hasAnyLinearProjectRouting && linearSyncFromLinearEnabled
   }
 
   private var canSyncProjectToLinear: Bool {
-    linearRouteStatus?.tokenResolved == true
+    linearRouteStatus?.tokenResolved == true && linearCreateHackTicketsEnabled
   }
 
   private var isAnySyncInFlight: Bool {
@@ -315,42 +307,57 @@ struct TicketsView: View {
     !linearAutosyncRouteKeys.isEmpty
   }
 
+  private var backgroundSyncTaskKey: String {
+    [
+      project.id,
+      linearRouteProfile,
+      linearRouteProjectId,
+      linearSyncFromLinearEnabled ? "inbound-on" : "inbound-off",
+      linearCreateHackTicketsEnabled ? "outbound-on" : "outbound-off"
+    ].joined(separator: "::")
+  }
+
+  private var shouldRunBackgroundSyncLoop: Bool {
+    linearRouteStatus?.tokenResolved == true && hasAnyLinearProjectRouting &&
+      (linearSyncFromLinearEnabled || linearCreateHackTicketsEnabled)
+  }
+
   private var linearSyncStatusRow: some View {
-    HStack(spacing: 8) {
+    HStack(spacing: 10) {
       Image(systemName: linearRouteStatus?.tokenResolved == true ? "point.3.connected.trianglepath.dotted" : "exclamationmark.triangle.fill")
-        .font(.system(size: 12, weight: .semibold))
+        .font(.system(size: 11, weight: .semibold))
         .foregroundStyle(linearRouteStatus?.tokenResolved == true ? Color.secondary : Color.orange)
 
       Text(linearSyncStatusSummary)
-        .font(.system(size: 12, weight: .medium))
+        .font(.system(size: 12, weight: .medium, design: .monospaced))
         .foregroundStyle(.secondary)
         .lineLimit(1)
 
+      Spacer(minLength: 0)
+
       if hasAnyLinearAutosyncRoutes {
-        StatusPill(
-          text: "\(linearAutosyncRouteKeys.count) autosync",
-          tone: .good
-        )
+        Text("autosync on")
+          .font(.system(size: 11, weight: .medium, design: .monospaced))
+          .foregroundStyle(.secondary)
       }
 
       if reviewQueueCount > 0 {
-        StatusPill(
-          text: reviewQueueCount == 1 ? "1 review" : "\(reviewQueueCount) reviews",
-          tone: .warn
-        )
+        Text(reviewQueueCount == 1 ? "1 review" : "\(reviewQueueCount) reviews")
+          .font(.system(size: 11, weight: .medium, design: .monospaced))
+          .foregroundStyle(.orange)
       }
     }
-    .padding(.horizontal, 12)
-    .padding(.vertical, 9)
+    .padding(.horizontal, 10)
+    .padding(.vertical, 7)
     .frame(maxWidth: .infinity, alignment: .leading)
     .background(
-      RoundedRectangle(cornerRadius: 14, style: .continuous)
-        .fill(colorScheme == .dark ? Color.white.opacity(0.06) : Color.white.opacity(0.86))
+      RoundedRectangle(cornerRadius: 10, style: .continuous)
+        .fill(colorScheme == .dark ? Color.white.opacity(0.04) : Color.black.opacity(0.03))
         .overlay(
-          RoundedRectangle(cornerRadius: 14, style: .continuous)
+          RoundedRectangle(cornerRadius: 10, style: .continuous)
             .stroke(
               linearRouteStatus?.tokenResolved == true && hasAnyLinearProjectRouting
-                ? Color.black.opacity(colorScheme == .dark ? 0.0 : 0.06)
+                ? Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.06)
                 : Color.orange.opacity(colorScheme == .dark ? 0.32 : 0.22),
               lineWidth: 1
             )
@@ -363,14 +370,19 @@ struct TicketsView: View {
       return "Connect Linear to route this repo's tickets."
     }
     if !hasAnyLinearProjectRouting {
-      return "Choose a default Linear project for this repo."
-    }
-    if linearAdditionalProjects.isEmpty {
-      let defaultLabel = linearRouteProjectName.isEmpty ? linearRouteProjectId : linearRouteProjectName
-      return "\(linearProfileDisplayName) · \(defaultLabel)"
+      return "Choose a Linear project for this repo."
     }
     let defaultLabel = linearRouteProjectName.isEmpty ? linearRouteProjectId : linearRouteProjectName
-    return "\(linearProfileDisplayName) · \(defaultLabel) + \(linearAdditionalProjects.count)"
+    if linearSyncFromLinearEnabled && linearCreateHackTicketsEnabled {
+      return "\(defaultLabel) · inbound on · create in Linear on"
+    }
+    if linearSyncFromLinearEnabled {
+      return "\(defaultLabel) · syncing from Linear"
+    }
+    if linearCreateHackTicketsEnabled {
+      return "\(defaultLabel) · create in Linear on"
+    }
+    return "\(defaultLabel) · sync off"
   }
 
   private var linearProfileDisplayName: String {
@@ -576,7 +588,7 @@ struct TicketsView: View {
         .foregroundStyle(.secondary)
       TextField("Search title or ID", text: $searchText)
         .textFieldStyle(.plain)
-        .font(.system(size: 14, weight: .medium))
+        .font(.system(size: 14, weight: .medium, design: .monospaced))
         .frame(minWidth: 180, maxWidth: 320)
       if !searchText.isEmpty {
         Button {
@@ -597,11 +609,11 @@ struct TicketsView: View {
   }
 
   private var content: some View {
-    HStack(alignment: .top, spacing: 16) {
+    HStack(alignment: .top, spacing: 0) {
       ticketsListCard
         .frame(
           minWidth: 320,
-          maxWidth: hasSelection ? 430 : .infinity,
+          maxWidth: hasSelection ? 520 : .infinity,
           maxHeight: .infinity,
           alignment: .topLeading
         )
@@ -616,44 +628,42 @@ struct TicketsView: View {
   }
 
   private var ticketsListCard: some View {
-    ticketPanel(contentPadding: 0) {
-      VStack(alignment: .leading, spacing: 0) {
-        if selectedFilter == .reviewQueue {
-          reviewQueueListHeader
+    VStack(alignment: .leading, spacing: 0) {
+      if selectedFilter == .reviewQueue {
+        reviewQueueListHeader
+      } else {
+        standardTicketsListHeader
+      }
+      Divider()
+        .opacity(0.12)
+      ScrollView {
+        if isLoading && !hasLoadedOnce {
+          skeletonList
+        } else if selectedFilter == .reviewQueue && filteredReviewQueueEntries.isEmpty {
+          reviewQueueEmptyView
+        } else if filteredTickets.isEmpty {
+          emptyTicketsView
+        } else if selectedFilter == .all {
+          LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+            ForEach(TicketStatus.allCases, id: \.self) { status in
+              ticketSection(status: status)
+            }
+          }
+        } else if selectedFilter == .reviewQueue {
+          LazyVStack(alignment: .leading, spacing: 0) {
+            ForEach(filteredReviewQueueEntries) { entry in
+              reviewQueueRow(entry)
+            }
+          }
         } else {
-          standardTicketsListHeader
-        }
-        Divider()
-          .opacity(0.22)
-        ScrollView {
-          if isLoading && !hasLoadedOnce {
-            skeletonList
-          } else if selectedFilter == .reviewQueue && filteredReviewQueueEntries.isEmpty {
-            reviewQueueEmptyView
-          } else if filteredTickets.isEmpty {
-            emptyTicketsView
-          } else if selectedFilter == .all {
-            LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
-              ForEach(TicketStatus.allCases, id: \.self) { status in
-                ticketSection(status: status)
-              }
-            }
-          } else if selectedFilter == .reviewQueue {
-            LazyVStack(alignment: .leading, spacing: 0) {
-              ForEach(filteredReviewQueueEntries) { entry in
-                reviewQueueRow(entry)
-              }
-            }
-          } else {
-            LazyVStack(alignment: .leading, spacing: 0) {
-              ForEach(filteredTickets) { ticket in
-                ticketRow(ticket)
-              }
+          LazyVStack(alignment: .leading, spacing: 0) {
+            ForEach(filteredTickets) { ticket in
+              ticketRow(ticket)
             }
           }
         }
-        .frame(maxHeight: .infinity, alignment: .topLeading)
       }
+      .frame(maxHeight: .infinity, alignment: .topLeading)
     }
     .focusable()
     .focused($ticketsListFocused)
@@ -663,16 +673,16 @@ struct TicketsView: View {
   private var standardTicketsListHeader: some View {
     HStack(spacing: 8) {
       Text("\(filteredTickets.count) issue\(filteredTickets.count == 1 ? "" : "s")")
-        .font(.system(size: 14, weight: .semibold))
+        .font(.system(size: 14, weight: .semibold, design: .monospaced))
       Spacer()
       if !filteredTickets.isEmpty {
         Text("Use ↑ ↓ to navigate")
-          .font(.system(size: 12, weight: .medium))
+          .font(.system(size: 12, weight: .medium, design: .monospaced))
           .foregroundStyle(.secondary)
       }
     }
-    .padding(.horizontal, 14)
-    .padding(.vertical, 12)
+    .padding(.horizontal, 8)
+    .padding(.vertical, 8)
   }
 
   private var reviewQueueListHeader: some View {
@@ -681,10 +691,10 @@ struct TicketsView: View {
         Text(
           "\(filteredReviewQueueEntries.count) review item\(filteredReviewQueueEntries.count == 1 ? "" : "s")"
         )
-        .font(.system(size: 14, weight: .semibold))
+        .font(.system(size: 14, weight: .semibold, design: .monospaced))
         Spacer()
         Text("Use ↑ ↓ to triage")
-          .font(.system(size: 12, weight: .medium))
+          .font(.system(size: 12, weight: .medium, design: .monospaced))
           .foregroundStyle(.secondary)
       }
       ScrollView(.horizontal, showsIndicators: false) {
@@ -720,8 +730,8 @@ struct TicketsView: View {
         .adaptiveToolbarButton()
       }
     }
-    .padding(.horizontal, 14)
-    .padding(.vertical, 12)
+    .padding(.horizontal, 8)
+    .padding(.vertical, 8)
   }
 
   private var ticketDetailCard: some View {
@@ -767,9 +777,9 @@ struct TicketsView: View {
   private var emptyTicketsView: some View {
     VStack(alignment: .leading, spacing: 8) {
       Text("No tickets found.")
-        .font(.system(size: 15, weight: .semibold))
-      Text("Adjust filters, pull from Linear, or create a new ticket.")
-        .font(.system(size: 13, weight: .medium))
+        .font(.system(size: 15, weight: .semibold, design: .monospaced))
+      Text("Adjust filters, reconcile from Linear, or create a new ticket.")
+        .font(.system(size: 13, weight: .medium, design: .monospaced))
         .foregroundStyle(.secondary)
       HStack(spacing: 8) {
         Button("New ticket") {
@@ -777,13 +787,13 @@ struct TicketsView: View {
         }
         .adaptiveToolbarButton()
 
-        Button("Pull Linear") {
+        Button("Reconcile now") {
           requestBulkSyncConfirmation(.pullLinear)
         }
         .adaptiveToolbarButtonProminent()
         .disabled(!canSyncProjectFromLinear || isAnySyncInFlight)
 
-        Button("Routing") {
+        Button("Ticket sync") {
           openProjectRouting()
         }
         .adaptiveToolbarButton()
@@ -803,13 +813,13 @@ struct TicketsView: View {
   private var reviewQueueEmptyView: some View {
     VStack(alignment: .leading, spacing: 8) {
       Text(reviewQueueCount == 0 ? "No tickets need sync review." : "No review items match the current filters.")
-        .font(.system(size: 15, weight: .semibold))
+        .font(.system(size: 15, weight: .semibold, design: .monospaced))
       Text(
         reviewQueueCount == 0
           ? "When conflicts, mergeable-field ambiguity, or follow-up notes land, they will appear here for triage."
           : "Clear the search text, widen the origin filter, or switch back to the full ticket board."
       )
-      .font(.system(size: 13, weight: .medium))
+      .font(.system(size: 13, weight: .medium, design: .monospaced))
       .foregroundStyle(.secondary)
       HStack(spacing: 8) {
         Button("All tickets") {
@@ -847,22 +857,21 @@ struct TicketsView: View {
             Text(ticket.ticketId)
               .font(.system(size: 12, weight: .medium, design: .monospaced))
               .foregroundStyle(.secondary)
-            ticketStatusBadge(ticket.status)
             Spacer()
             Text(humanReadableListDate(ticket.updatedAt))
-              .font(.system(size: 12, weight: .medium))
+              .font(.system(size: 12, weight: .medium, design: .monospaced))
               .foregroundStyle(.secondary)
           }
           Text(ticket.title)
-            .font(.system(size: 15, weight: .semibold))
-            .lineLimit(2)
+            .font(.system(size: 14, weight: .semibold, design: .monospaced))
+            .lineLimit(1)
             .multilineTextAlignment(.leading)
           ticketRowMetadata(ticket)
         }
         Spacer(minLength: 0)
       }
-      .padding(.horizontal, 12)
-      .padding(.vertical, 10)
+      .padding(.horizontal, 8)
+      .padding(.vertical, 8)
       .frame(maxWidth: .infinity, alignment: .leading)
       .background(selectionBackground(for: ticket.ticketId))
       .overlay(alignment: .bottom) {
@@ -880,7 +889,6 @@ struct TicketsView: View {
   }
 
   private func reviewQueueRow(_ entry: TicketReviewQueueEntry) -> some View {
-    let ticket = tickets.first(where: { $0.ticketId == entry.ticketId })
     return Button {
       if selectedTicketId == entry.ticketId {
         selectedTicketId = nil
@@ -906,39 +914,25 @@ struct TicketsView: View {
                 entry.badgeLabel,
                 tone: entry.openConflictCount > 0 ? .orange : .secondary
               )
-              if let ticket {
-                ticketMetaPill(
-                  ticketAuthorityBadgeLabel(for: ticket),
-                  tone: ticketAuthorityBadgeColor(for: ticket)
-                )
-                ticketMetaPill(
-                  ticket.owner,
-                  tone: ticket.owner == "linear" ? .orange : .secondary
-                )
-              }
               Spacer(minLength: 8)
               Text(humanReadableListDate(entry.updatedAt))
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
                 .foregroundStyle(.secondary)
             }
             Text(entry.title)
-              .font(.system(size: 15, weight: .semibold))
+              .font(.system(size: 14, weight: .semibold, design: .monospaced))
               .multilineTextAlignment(.leading)
-              .lineLimit(2)
+              .lineLimit(1)
             Text(entry.summary)
-              .font(.system(size: 13, weight: .medium))
+              .font(.system(size: 12, weight: .medium, design: .monospaced))
               .foregroundStyle(.secondary)
               .multilineTextAlignment(.leading)
-              .lineLimit(3)
+              .lineLimit(2)
             ScrollView(.horizontal, showsIndicators: false) {
               HStack(spacing: 6) {
                 ticketMetaPill(
                   "\(entry.openConflictCount) open",
                   tone: entry.openConflictCount > 0 ? .orange : .secondary
-                )
-                ticketMetaPill(
-                  "\(entry.commentCount) comment\(entry.commentCount == 1 ? "" : "s")",
-                  tone: .secondary
                 )
                 if entry.reviewNoteCount > 0 {
                   ticketMetaPill(
@@ -954,8 +948,8 @@ struct TicketsView: View {
           }
         }
       }
-      .padding(.horizontal, 12)
-      .padding(.vertical, 12)
+      .padding(.horizontal, 8)
+      .padding(.vertical, 8)
       .frame(maxWidth: .infinity, alignment: .leading)
       .background(selectionBackground(for: entry.ticketId))
       .overlay(alignment: .bottom) {
@@ -973,23 +967,25 @@ struct TicketsView: View {
   }
 
   private func ticketRowMetadata(_ ticket: TicketSummary) -> some View {
-    ScrollView(.horizontal, showsIndicators: false) {
-      HStack(spacing: 6) {
-        ticketMetaPill(ticket.owner, tone: ticket.owner == "linear" ? .orange : .secondary)
-        ticketMetaPill(ticket.source, tone: ticket.source == "linear" ? .orange : .secondary)
-        if let assignee = ticket.assignee?.trimmingCharacters(in: .whitespacesAndNewlines), !assignee.isEmpty {
-          ticketMetaPill("Assignee \(assignee)", tone: .secondary)
-        }
-        ticketMetaPill(ticketAuthorityBadgeLabel(for: ticket), tone: ticketAuthorityBadgeColor(for: ticket))
-        if ticket.linearSyncUXState.reviewHint != nil {
-          ticketMetaPill("Review sync", tone: .orange)
-        }
-        if let externalKey = ticket.externalKey, !externalKey.isEmpty {
-          ticketMetaPill(externalKey, tone: .accentColor)
-        }
+    HStack(spacing: 10) {
+      if let externalKey = ticket.externalKey, !externalKey.isEmpty {
+        Text(externalKey)
+          .font(.system(size: 11, weight: .medium, design: .monospaced))
+          .foregroundStyle(.secondary)
       }
-      .padding(.top, 2)
+      if let assignee = ticket.assignee?.trimmingCharacters(in: .whitespacesAndNewlines), !assignee.isEmpty {
+        Text(assignee)
+          .font(.system(size: 11, weight: .medium, design: .monospaced))
+          .foregroundStyle(.secondary)
+          .lineLimit(1)
+      }
+      if ticket.linearSyncUXState.reviewHint != nil {
+        Text("review")
+          .font(.system(size: 11, weight: .medium, design: .monospaced))
+          .foregroundStyle(.orange)
+      }
     }
+    .padding(.top, 2)
   }
 
   private func ticketDetailView(_ detail: TicketDetailResponse) -> some View {
@@ -997,13 +993,13 @@ struct TicketsView: View {
       HStack(alignment: .top, spacing: 12) {
         VStack(alignment: .leading, spacing: 6) {
           Text(detail.ticket.title)
-            .font(.system(size: 29, weight: .bold, design: .rounded))
+            .font(.system(size: 24, weight: .semibold, design: .monospaced))
           HStack(spacing: 10) {
             Text(detail.ticket.ticketId)
               .font(.system(size: 13, weight: .medium, design: .monospaced))
               .foregroundStyle(.secondary)
             Text("Updated \(humanReadableDetailDate(detail.ticket.updatedAt))")
-              .font(.system(size: 13, weight: .medium))
+              .font(.system(size: 13, weight: .medium, design: .monospaced))
               .foregroundStyle(.secondary)
           }
           ticketDetailMetadata(detail.ticket)
@@ -1014,9 +1010,6 @@ struct TicketsView: View {
 
       if let body = detail.ticket.body, !body.isEmpty {
         VStack(alignment: .leading, spacing: 6) {
-          Text("Body")
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(.secondary)
           markdownBody(body)
         }
       }
@@ -1033,14 +1026,9 @@ struct TicketsView: View {
   private func ticketDetailMetadata(_ ticket: TicketSummary) -> some View {
     ScrollView(.horizontal, showsIndicators: false) {
       HStack(spacing: 8) {
-        ticketMetaPill(ticket.owner, tone: ticket.owner == "linear" ? .orange : .secondary)
-        ticketMetaPill(ticket.source, tone: ticket.source == "linear" ? .orange : .secondary)
+        ticketMetaPill(ticket.status.label, tone: ticket.status.color)
         if let assignee = ticket.assignee?.trimmingCharacters(in: .whitespacesAndNewlines), !assignee.isEmpty {
-          ticketMetaPill("Assignee \(assignee)", tone: .secondary)
-        }
-        ticketMetaPill(ticketAuthorityBadgeLabel(for: ticket), tone: ticketAuthorityBadgeColor(for: ticket))
-        if ticket.linearSyncUXState.reviewHint != nil {
-          ticketMetaPill("Review sync", tone: .orange)
+          ticketMetaPill(assignee, tone: .secondary)
         }
         if let externalSystem = ticket.externalSystem, !externalSystem.isEmpty {
           ticketMetaPill(externalSystem, tone: .accentColor)
@@ -1051,10 +1039,8 @@ struct TicketsView: View {
         if let projectName = ticket.externalProjectName, !projectName.isEmpty {
           ticketMetaPill(projectName, tone: .secondary)
         }
-        if !ticket.tags.isEmpty {
-          ForEach(ticket.tags, id: \.self) { tag in
-            ticketMetaPill(tag, tone: .secondary)
-          }
+        if ticket.linearSyncUXState.reviewHint != nil {
+          ticketMetaPill("Needs review", tone: .orange)
         }
       }
     }
@@ -2016,12 +2002,28 @@ struct TicketsView: View {
     async let defaultProfile = model.getGlobalConfig(
       key: "controlPlane.extensions[\"dance.hack.linear\"].config.defaultProfile"
     )
+    async let syncFromLinearConfig = model.getProjectConfig(
+      for: project,
+      key: "controlPlane.routing.overrides.linear.syncFromLinear"
+    )
+    async let createHackTicketsConfig = model.getProjectConfig(
+      for: project,
+      key: "controlPlane.routing.overrides.linear.createHackTicketsInLinear"
+    )
 
     let resolvedBinding = await binding
     let resolvedProjectProfile = (resolvedBinding?.profileId ?? "")
       .trimmingCharacters(in: .whitespacesAndNewlines)
     let resolvedDefaultProfile = (await defaultProfile ?? "")
       .trimmingCharacters(in: .whitespacesAndNewlines)
+    linearSyncFromLinearEnabled = parseProjectBooleanConfig(
+      await syncFromLinearConfig,
+      default: true
+    )
+    linearCreateHackTicketsEnabled = parseProjectBooleanConfig(
+      await createHackTicketsConfig,
+      default: false
+    )
     linearRouteProfile = resolvedProjectProfile.isEmpty ? resolvedDefaultProfile : resolvedProjectProfile
     linearRouteProjectId = (resolvedBinding?.projectId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     linearRouteProjectName = (resolvedBinding?.projectName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2031,6 +2033,20 @@ struct TicketsView: View {
       profileId: linearRouteProfile.isEmpty ? nil : linearRouteProfile
     )
     linearAutosyncRouteKeys = await loadLinearAutosyncRouteKeys(targets: allLinearRouteTargets)
+  }
+
+  private func parseProjectBooleanConfig(_ value: String?, default defaultValue: Bool) -> Bool {
+    guard let value else {
+      return defaultValue
+    }
+    switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+    case "true", "1", "yes", "on":
+      return true
+    case "false", "0", "no", "off":
+      return false
+    default:
+      return defaultValue
+    }
   }
 
   private func loadLinearAutosyncRouteKeys(
@@ -2081,6 +2097,40 @@ struct TicketsView: View {
       loadNotice = "Pulled \(result.processed) item\(result.processed == 1 ? "" : "s") from \(routedProjects) routed Linear project\(routedProjects == 1 ? "" : "s")."
       await refreshLinearRouting()
       await refreshTickets()
+    }
+  }
+
+  private func runBackgroundSyncCycle() async {
+    guard !isAnySyncInFlight else {
+      return
+    }
+
+    if linearSyncFromLinearEnabled, canSyncProjectFromLinear {
+      let autosyncResult = await model.runLinearAutosync(for: project)
+      if autosyncResult?.ok == true {
+        await refreshLinearRouting()
+        await refreshTickets()
+      }
+    }
+
+    guard !isAnySyncInFlight else {
+      return
+    }
+
+    if linearCreateHackTicketsEnabled, canSyncProjectToLinear {
+      let outboundResult = await model.syncLinearProject(
+        for: project,
+        from: "hack",
+        ownerMode: "hack",
+        projectId: nil,
+        teamId: nil,
+        limit: nil,
+        syncLabels: nil
+      )
+      if outboundResult?.ok == true {
+        await refreshLinearRouting()
+        await refreshTickets()
+      }
     }
   }
 
@@ -2414,21 +2464,17 @@ struct TicketsView: View {
             .fill(status.color)
             .frame(width: 8, height: 8)
           Text(status.label)
-            .font(.system(size: 13, weight: .semibold))
+            .font(.system(size: 13, weight: .semibold, design: .monospaced))
           Text("\(items.count)")
-            .font(.system(size: 12, weight: .semibold))
+            .font(.system(size: 12, weight: .semibold, design: .monospaced))
             .foregroundStyle(.secondary)
         }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .padding(.horizontal, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-          ZStack {
-            Rectangle()
-              .fill(.ultraThinMaterial)
-            Rectangle()
-              .fill(status.color.opacity(colorScheme == .dark ? 0.18 : 0.08))
-          }
+          Rectangle()
+            .fill(status.color.opacity(colorScheme == .dark ? 0.14 : 0.07))
         )
         .overlay(alignment: .bottom) {
           Rectangle()
@@ -2444,7 +2490,7 @@ struct TicketsView: View {
   private func inspectorGroup(title: String, rows: [DetailRowItem]) -> some View {
     VStack(alignment: .leading, spacing: 6) {
       Text(title)
-        .font(.system(size: 12, weight: .semibold))
+        .font(.system(size: 12, weight: .semibold, design: .monospaced))
         .foregroundStyle(.secondary)
       DetailRows(rows: rows, labelWidth: 88)
     }

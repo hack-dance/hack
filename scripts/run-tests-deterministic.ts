@@ -1,22 +1,30 @@
 import { Glob } from "bun";
 
-const bootstrapTestPath = "tests/node-workspace-bootstrap.test.ts";
+const isolatedTestPaths = [
+  "tests/node-workspace-bootstrap.test.ts",
+  "tests/nodes-registry.test.ts",
+] as const;
 const maxConcurrencyArg = "--max-concurrency=1";
 
 /**
- * Runs the test suite in deterministic batches to avoid Bun mock.module cross-file bleed.
- * The bootstrap test must run in a clean process before suites that mock shared modules.
+ * Runs the test suite in deterministic batches to avoid Bun mock.module/env cross-file bleed.
+ * Files in isolatedTestPaths must run in their own process before the remaining suite.
  */
 async function runTestsDeterministically(): Promise<void> {
   const allTests = await collectTestFiles();
   const remainingTests = allTests.filter(
-    (testPath) => testPath !== bootstrapTestPath
+    (testPath) =>
+      !isolatedTestPaths.includes(
+        testPath as (typeof isolatedTestPaths)[number]
+      )
   );
 
-  await runBunTest({
-    label: "bootstrap workspace",
-    testPaths: [bootstrapTestPath],
-  });
+  for (const isolatedTestPath of isolatedTestPaths) {
+    await runBunTest({
+      label: testLabel({ testPath: isolatedTestPath }),
+      testPaths: [isolatedTestPath],
+    });
+  }
   await runBunTest({
     label: "remaining suite",
     testPaths: remainingTests,
@@ -34,11 +42,23 @@ async function collectTestFiles(): Promise<string[]> {
   }
   files.sort((left, right) => left.localeCompare(right));
 
-  if (!files.includes(bootstrapTestPath)) {
-    throw new Error(`Missing required bootstrap test: ${bootstrapTestPath}`);
+  for (const isolatedTestPath of isolatedTestPaths) {
+    if (!files.includes(isolatedTestPath)) {
+      throw new Error(`Missing required isolated test: ${isolatedTestPath}`);
+    }
   }
 
   return files;
+}
+
+function testLabel(opts: { readonly testPath: string }): string {
+  if (opts.testPath === "tests/node-workspace-bootstrap.test.ts") {
+    return "bootstrap workspace";
+  }
+  if (opts.testPath === "tests/nodes-registry.test.ts") {
+    return "nodes registry auth";
+  }
+  return opts.testPath;
 }
 
 /**

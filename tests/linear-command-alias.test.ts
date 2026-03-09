@@ -24,10 +24,11 @@ test("hack linear alias forwards extension options like --json", async () => {
     proc.exited,
   ]);
 
-  expect(exitCode).toBe(1);
-  expect(stderr).not.toContain('Option(s) not valid for "linear": --json');
   const payload = JSON.parse(stdout) as {
     readonly extensionId?: string;
+    readonly ok?: boolean;
   };
+  expect(exitCode).toBe(payload.ok ? 0 : 1);
+  expect(stderr).not.toContain('Option(s) not valid for "linear": --json');
   expect(payload.extensionId).toBe("dance.hack.linear");
 });

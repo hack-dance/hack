@@ -87,6 +87,7 @@ test("saveLinearToken persists refresh metadata in the stored envelope", async (
 });
 
 test("resolveLinearToken refreshes expired stored credentials via auth broker", async () => {
+  const fixedNowMs = Date.parse("2026-03-05T12:30:00.000Z");
   const config = createControlPlaneConfig({
     profiles: {
       default: {
@@ -110,6 +111,7 @@ test("resolveLinearToken refreshes expired stored credentials via auth broker", 
   const resolved = await resolveLinearToken({
     controlPlaneConfig: config,
     store: memory.store,
+    nowMs: fixedNowMs,
     refreshConfig: {
       baseUrl: "https://auth.hack.broker",
       fetch: (async (input, init) => {

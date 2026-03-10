@@ -1,7 +1,7 @@
 {
   "name": "@hack/db",
   "private": true,
-  "version": "1.17.0",
+  "version": "1.17.1",
   "type": "module",
   "main": "src/client.ts",
   "module": "src/client.ts",

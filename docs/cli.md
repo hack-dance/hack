@@ -936,6 +936,7 @@ Options:
 | `--ticket <ticket-id>` | string | - | Ticket id to associate with run metadata |
 | `--runner <generic|codex|claude|cursor>` | string | `generic` | Runner identity for policy and audit |
 | `--approve` | boolean | false | Approve high/critical risk commands non-interactively |
+| `--local` | boolean | false | Execute the dispatch run in the local project workspace instead of a remote node |
 | `--pr` | boolean | false | Push branch + create/update GitHub PR on successful run |
 | `--pr-base <branch>` | string | `main` | Base branch used with `--pr` |
 | `--pr-title <title>` | string | auto | Override PR title |
@@ -944,6 +945,20 @@ Options:
 | `--json` | boolean | false | Output machine-readable run payload |
 
 Note: when the target node does not already have the project workspace, dispatch sends bootstrap metadata (git origin + project name) to `/v1/node/workspaces/ensure` so the node can clone/register the repo automatically.
+
+Local dispatch notes:
+
+- `--local` cannot be combined with `--node`, `--provider`, `--profile`, or `--bootstrap-if-needed`.
+- `--local --pr` emits typed terminal states in JSON and persisted artifacts:
+  - `completed`
+  - `no_diff`
+  - `no_commit`
+  - `pr_created`
+  - `pr_failed`
+- Dispatch exit codes for PR terminal states:
+  - `20` = `no_diff`
+  - `21` = `no_commit`
+  - `22` = `pr_failed`
 
 Route precedence for dispatch:
 
@@ -966,6 +981,26 @@ Usage: `hack dispatch status <run-id> [--json]`
 #### hack dispatch logs
 
 Usage: `hack dispatch logs <run-id> [--follow] [--tail <n>] [--json]`
+
+### hack workspace
+
+Usage: `hack workspace <subcommand>`
+
+Subcommands:
+
+| Subcommand | Summary |
+| --- | --- |
+| `reset` | Reset a workspace to a base ref and clean untracked files |
+
+#### hack workspace reset
+
+Usage: `hack workspace reset --base <remote/branch|ref> [--path <dir>|--project <name>] [--exclude <csv>] [--json]`
+
+Notes:
+
+- Removes stale `.git/index.lock` before reset when present.
+- Resets tracked changes and cleans untracked files while preserving explicit excludes.
+- Emits a deterministic JSON summary with removed paths, preserved excludes, and before/after status details.
 
 ### hack remote
 

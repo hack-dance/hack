@@ -16,6 +16,13 @@ export type DispatchRunStatus =
   | "cancelled"
   | "error";
 
+export type DispatchRunTerminalState =
+  | "completed"
+  | "pr_created"
+  | "no_diff"
+  | "no_commit"
+  | "pr_failed";
+
 export type DispatchRunPolicyDecision = {
   readonly level: "low" | "medium" | "high" | "critical";
   readonly requiresApproval: boolean;
@@ -41,6 +48,7 @@ export type DispatchRunRecord = {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly status: DispatchRunStatus;
+  readonly terminalState?: DispatchRunTerminalState;
   readonly nodeId: string;
   readonly nodeName: string;
   readonly nodeEndpoint: string;
@@ -382,12 +390,16 @@ function parseDispatchRunRecord(value: unknown): DispatchRunRecord | null {
   const jobStatus = parseOptionalStringField(value, "jobStatus");
   const startedAt = parseOptionalStringField(value, "startedAt");
   const finishedAt = parseOptionalStringField(value, "finishedAt");
+  const terminalState = normalizeRunTerminalState(
+    parseOptionalStringField(value, "terminalState")
+  );
 
   return {
     runId: required.runId,
     createdAt: required.createdAt,
     updatedAt: required.updatedAt,
     status: normalizeRunStatus(required.status),
+    ...(terminalState ? { terminalState } : {}),
     nodeId: required.nodeId,
     nodeName: required.nodeName,
     nodeEndpoint: required.nodeEndpoint,
@@ -423,6 +435,21 @@ function normalizeRunStatus(value: string): DispatchRunStatus {
     return value;
   }
   return "error";
+}
+
+function normalizeRunTerminalState(
+  value: string | undefined
+): DispatchRunTerminalState | undefined {
+  if (
+    value === "completed" ||
+    value === "pr_created" ||
+    value === "no_diff" ||
+    value === "no_commit" ||
+    value === "pr_failed"
+  ) {
+    return value;
+  }
+  return undefined;
 }
 
 function parsePolicyDecision(value: unknown): DispatchRunPolicyDecision | null {

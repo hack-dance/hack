@@ -10,6 +10,7 @@ import {
 } from "../control-plane/extensions/github/auth.ts";
 import {
   createGitHubAppClient,
+  type GitHubAppClient,
   parseGitHubRepoRef,
 } from "../control-plane/extensions/github/client.ts";
 import type { JobMeta } from "../control-plane/extensions/supervisor/job-store.ts";
@@ -40,6 +41,7 @@ import {
   createDispatchRunRecord,
   type DispatchRunRecord,
   type DispatchRunStatus,
+  type DispatchRunTerminalState,
   readDispatchRunLogTail,
   readDispatchRunRecord,
   updateDispatchRunRecord,
@@ -142,6 +144,13 @@ const optApprove = defineOption({
   description: "Approve high/critical command risk without interactive prompt",
 } as const);
 
+const optLocal = defineOption({
+  name: "local",
+  type: "boolean",
+  long: "--local",
+  description: "Execute the dispatch run in the local project workspace",
+} as const);
+
 const optPr = defineOption({
   name: "pr",
   type: "boolean",
@@ -191,6 +200,7 @@ const runOptions = [
   optTicket,
   optRunner,
   optApprove,
+  optLocal,
   optPr,
   optPrBase,
   optPrTitle,
@@ -267,6 +277,7 @@ export const dispatchCommand = withHandler(
       tone: "info",
       lines: [
         "hack dispatch run --project <name|id> [--node <id|default|auto>] [--provider <name>] [--profile <id>] [--bootstrap-if-needed] [--branch <name>] [--runner <runner>] [--pr --github-profile <id>] -- <command...>",
+        "hack dispatch run --project <name|id> --local -- <command...>",
         "hack dispatch status <run-id>",
         "hack dispatch logs <run-id> [--follow]",
       ],
@@ -310,6 +321,19 @@ async function handleDispatchRun({
   });
   if (controlPlane.parseError) {
     logger.warn({ message: controlPlane.parseError });
+  }
+
+  if (args.options.local === true) {
+    return await handleDispatchRunLocal({
+      args,
+      project,
+      controlPlaneConfig: controlPlane.config,
+      actor,
+      command,
+      runner,
+      ticketId,
+      branch,
+    });
   }
 
   const requestedNode = normalizeOptionalString(args.options.node);
@@ -649,6 +673,17 @@ async function handleDispatchRun({
       runId,
       patch: {
         status,
+        ...(resolveDispatchTerminalState({
+          status,
+          prOutcome: null,
+        })
+          ? {
+              terminalState: resolveDispatchTerminalState({
+                status,
+                prOutcome: null,
+              }),
+            }
+          : {}),
         jobStatus: outcome.job.status,
         logOffset: outcome.logsOffset,
         eventsSeq: outcome.eventsSeq,
@@ -711,6 +746,10 @@ async function handleDispatchRun({
     const summary = buildSummaryMarkdown({
       runId,
       runStatus: status,
+      terminalState: resolveDispatchTerminalState({
+        status,
+        prOutcome,
+      }),
       node: selectedNode.node,
       workspace: workspace.data.workspace,
       job: outcome.job,
@@ -732,6 +771,17 @@ async function handleDispatchRun({
         runner,
         command,
         status,
+        ...(resolveDispatchTerminalState({
+          status,
+          prOutcome,
+        })
+          ? {
+              terminalState: resolveDispatchTerminalState({
+                status,
+                prOutcome,
+              }),
+            }
+          : {}),
         jobStatus: outcome.job.status,
         ...(outcome.exitCode !== undefined
           ? { exitCode: outcome.exitCode }
@@ -747,6 +797,17 @@ async function handleDispatchRun({
         jobStatus: outcome.job.status,
         runner,
         command,
+        ...(resolveDispatchTerminalState({
+          status,
+          prOutcome,
+        })
+          ? {
+              terminalState: resolveDispatchTerminalState({
+                status,
+                prOutcome,
+              }),
+            }
+          : {}),
         riskLevel: policy.level,
         riskReasons: policy.reasons,
         route: routeMetadata,
@@ -784,17 +845,30 @@ async function handleDispatchRun({
       actor,
     });
 
-    const exitCode =
-      status === "completed" &&
-      (args.options.pr !== true || prOutcome === null || prOutcome.ok)
-        ? 0
-        : 1;
+    const exitCode = runStatusToExitCode({
+      status,
+      terminalState: resolveDispatchTerminalState({
+        status,
+        prOutcome,
+      }),
+    });
     if (args.options.json) {
       process.stdout.write(
         `${JSON.stringify(
           {
             runId,
             status,
+            ...(resolveDispatchTerminalState({
+              status,
+              prOutcome,
+            })
+              ? {
+                  terminalState: resolveDispatchTerminalState({
+                    status,
+                    prOutcome,
+                  }),
+                }
+              : {}),
             job: outcome.job,
             node: selectedNode.node,
             workspace: workspace.data.workspace,
@@ -819,6 +893,10 @@ async function handleDispatchRun({
       entries: [
         ["run_id", runId],
         ["status", status],
+        [
+          "terminal_state",
+          resolveDispatchTerminalState({ status, prOutcome }) ?? "",
+        ],
         ["job_status", outcome.job.status],
         ["job_id", outcome.job.jobId],
         ["route_source", routeMetadata.nodeSource],
@@ -977,7 +1055,10 @@ async function handleDispatchLogs({
   if (args.options.json) {
     process.stdout.write(`${JSON.stringify({ run: updated }, null, 2)}\n`);
   }
-  return runStatusToExitCode({ status });
+  return runStatusToExitCode({
+    status,
+    terminalState: updated?.terminalState,
+  });
 }
 
 type DispatchProjectResolution = {
@@ -989,6 +1070,357 @@ type DispatchProjectResolution = {
   readonly projectDir?: string;
   readonly projectRoot?: string;
 };
+
+async function handleDispatchRunLocal(input: {
+  readonly args: DispatchRunArgs;
+  readonly project: DispatchProjectResolution;
+  readonly controlPlaneConfig: ControlPlaneConfig;
+  readonly actor: string;
+  readonly command: readonly string[];
+  readonly runner: string;
+  readonly ticketId?: string;
+  readonly branch?: string;
+}): Promise<number> {
+  if (!input.project.projectRoot) {
+    logger.error({
+      message:
+        "Local dispatch requires a registered project workspace. Re-run against a local project path or registered project.",
+    });
+    return 1;
+  }
+  if (
+    input.args.options.node ||
+    input.args.options.provider ||
+    input.args.options.profile ||
+    input.args.options.bootstrapIfNeeded === true
+  ) {
+    logger.error({
+      message:
+        "--local cannot be combined with --node, --provider, --profile, or --bootstrap-if-needed.",
+    });
+    return 1;
+  }
+
+  const risk = assessCommandRisk({
+    command: input.command,
+    runner: input.runner,
+  });
+  const policy = await resolvePolicyDecision({
+    level: risk.level,
+    reasons: risk.reasons,
+    requiresApproval: risk.requiresApproval,
+    approveFlag: input.args.options.approve === true,
+    actor: input.actor,
+    promptLabel: "primary command",
+  });
+
+  const runId = randomUUID();
+  const run = await createDispatchRunRecord({
+    runId,
+    nodeId: "local",
+    nodeName: "local",
+    nodeEndpoint: "local://workspace",
+    projectSelector: input.project.selector,
+    ...(input.project.projectName
+      ? { projectName: input.project.projectName }
+      : {}),
+    ...(input.project.projectRoot
+      ? { projectRoot: input.project.projectRoot }
+      : {}),
+    ...(input.project.controllerProjectId
+      ? { projectId: input.project.controllerProjectId }
+      : {}),
+    ...(input.branch ? { branch: input.branch } : {}),
+    ...(input.ticketId ? { ticketId: input.ticketId } : {}),
+    runner: input.runner,
+    command: input.command,
+    policy: {
+      level: policy.level,
+      requiresApproval: policy.requiresApproval,
+      approved: policy.approved,
+      rationale: [...policy.reasons],
+      actor: input.actor,
+      decidedAt: new Date().toISOString(),
+      mode: policy.mode,
+    },
+  });
+  await appendDispatchRunEvent({
+    runId,
+    event: {
+      type: "run.created",
+      mode: "local",
+      project: input.project.projectName ?? input.project.selector,
+      branch: input.branch ?? null,
+      runner: input.runner,
+      ticketId: input.ticketId ?? null,
+    },
+  });
+  await appendDispatchRunEvent({
+    runId,
+    event: {
+      type: "policy.decision",
+      level: policy.level,
+      requiresApproval: policy.requiresApproval,
+      approved: policy.approved,
+      mode: policy.mode,
+      reasons: policy.reasons,
+      actor: input.actor,
+    },
+  });
+  await appendPolicyAuditEvent({
+    actor: input.actor,
+    operation: "dispatch.run.local",
+    level: policy.level,
+    requiresApproval: policy.requiresApproval,
+    approved: policy.approved,
+    mode: policy.mode,
+    reasons: policy.reasons,
+    command: input.command,
+    runner: input.runner,
+    runId,
+    ...(input.ticketId ? { ticketId: input.ticketId } : {}),
+    nodeId: "local",
+    projectSelector: input.project.selector,
+    ...(policy.approved ? {} : { error: policy.error }),
+  });
+  if (!policy.approved) {
+    await finalizeFailedRun({
+      run,
+      errorMessage: policy.error,
+      status: "cancelled",
+      reason: "policy_denied",
+      controlPlaneConfig: input.controlPlaneConfig,
+      actor: input.actor,
+    });
+    logger.error({ message: policy.error });
+    return 1;
+  }
+
+  await updateDispatchRunRecord({
+    runId,
+    patch: {
+      status: "running",
+      startedAt: new Date().toISOString(),
+    },
+  });
+
+  if (!input.args.options.json) {
+    await display.kv({
+      title: "Dispatch run started",
+      entries: [
+        ["run_id", runId],
+        ["mode", "local"],
+        ["project", input.project.projectName ?? input.project.selector],
+        ["branch", input.branch ?? ""],
+        ["runner", input.runner],
+      ],
+    });
+  }
+
+  const result = await exec([...input.command], {
+    cwd: input.project.projectRoot,
+    stdin: "ignore",
+  });
+  const combinedLogs = [result.stdout, result.stderr]
+    .filter((value) => value.length > 0)
+    .join("");
+  if (combinedLogs.length > 0) {
+    await appendDispatchRunLog({
+      runId,
+      text: combinedLogs,
+    });
+    if (!input.args.options.json) {
+      process.stdout.write(result.stdout);
+      process.stderr.write(result.stderr);
+    }
+  }
+
+  const status: DispatchRunStatus =
+    result.exitCode === 0 ? "completed" : "failed";
+  let prOutcome: DispatchPrOutcome | null = null;
+  let terminalState = resolveDispatchTerminalState({
+    status,
+    prOutcome: null,
+  });
+  if (status === "completed" && input.args.options.pr === true) {
+    const localPr = await runLocalDispatchPrAutomation({
+      actor: input.actor,
+      approveFlag: input.args.options.approve === true,
+      command: input.command,
+      controlPlaneConfig: input.controlPlaneConfig,
+      projectRoot: input.project.projectRoot,
+      prBase: (input.args.options.prBase ?? "main").trim() || "main",
+      prTitle: input.args.options.prTitle?.trim(),
+      prBody: input.args.options.prBody,
+      githubProfile: normalizeOptionalString(input.args.options.githubProfile),
+      run,
+    });
+    terminalState = localPr.terminalState;
+    prOutcome = localPr.prOutcome;
+    let prEventType = "run.pr.skipped";
+    if (terminalState === "pr_created") {
+      prEventType = "run.pr.upserted";
+    } else if (terminalState === "pr_failed") {
+      prEventType = "run.pr.failed";
+    }
+    await appendDispatchRunEvent({
+      runId,
+      event: {
+        type: prEventType,
+        terminalState,
+        ...(prOutcome?.ok
+          ? {
+              number: prOutcome.pull.number,
+              url: prOutcome.pull.htmlUrl,
+              base: prOutcome.pull.baseRef,
+              head: prOutcome.pull.headRef,
+              profileId: prOutcome.profileId,
+              profileSource: prOutcome.profileSource,
+            }
+          : {}),
+        ...(prOutcome && !prOutcome.ok
+          ? {
+              error: prOutcome.error,
+              profileId: prOutcome.profileId,
+              profileSource: prOutcome.profileSource,
+            }
+          : {}),
+      },
+    });
+  }
+  await updateDispatchRunRecord({
+    runId,
+    patch: {
+      status,
+      ...(terminalState ? { terminalState } : {}),
+      exitCode: result.exitCode,
+      finishedAt: new Date().toISOString(),
+    },
+  });
+  await appendDispatchRunEvent({
+    runId,
+    event: {
+      type: "run.completed",
+      mode: "local",
+      runStatus: status,
+      terminalState: terminalState ?? null,
+      exitCode: result.exitCode,
+    },
+  });
+
+  const summary = buildLocalDispatchSummaryMarkdown({
+    runId,
+    status,
+    terminalState,
+    project: input.project,
+    command: input.command,
+    runner: input.runner,
+    riskLevel: policy.level,
+    riskReasons: policy.reasons,
+    exitCode: result.exitCode,
+    prOutcome,
+  });
+  await writeDispatchRunArtifacts({
+    runId,
+    summaryMarkdown: summary,
+    patchDiff: "# no diff captured for this run",
+    testsManifest: {
+      mode: "local",
+      command: input.command,
+      status,
+      ...(terminalState ? { terminalState } : {}),
+      exitCode: result.exitCode,
+    },
+    manifest: {
+      runId,
+      mode: "local",
+      status,
+      ...(terminalState ? { terminalState } : {}),
+      projectName: input.project.projectName ?? null,
+      projectRoot: input.project.projectRoot,
+      branch: input.branch ?? null,
+      runner: input.runner,
+      command: input.command,
+      riskLevel: policy.level,
+      riskReasons: policy.reasons,
+      ...(input.ticketId ? { ticketId: input.ticketId } : {}),
+      exitCode: result.exitCode,
+      ...(prOutcome
+        ? {
+            pr: prOutcome.ok
+              ? {
+                  status: "ok",
+                  profileId: prOutcome.profileId,
+                  profileSource: prOutcome.profileSource,
+                  number: prOutcome.pull.number,
+                  url: prOutcome.pull.htmlUrl,
+                  base: prOutcome.pull.baseRef,
+                  head: prOutcome.pull.headRef,
+                }
+              : {
+                  status: "error",
+                  profileId: prOutcome.profileId,
+                  profileSource: prOutcome.profileSource,
+                  error: prOutcome.error,
+                },
+          }
+        : {}),
+    },
+  });
+
+  const currentRun = (await readDispatchRunRecord({ runId })) ?? run;
+  await persistRunArtifactsToCanonicalTickets({
+    run: currentRun,
+    controlPlaneConfig: input.controlPlaneConfig,
+    actor: input.actor,
+  });
+
+  const exitCode = runStatusToExitCode({
+    status,
+    terminalState,
+  });
+  if (input.args.options.json) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          runId,
+          status,
+          ...(terminalState ? { terminalState } : {}),
+          mode: "local",
+          artifacts: run.artifacts,
+          ...(prOutcome ? { pr: prOutcome } : {}),
+          exitCode: result.exitCode,
+        },
+        null,
+        2
+      )}\n`
+    );
+    return exitCode;
+  }
+
+  await display.kv({
+    title: "Dispatch run completed",
+    entries: [
+      ["run_id", runId],
+      ["mode", "local"],
+      ["status", status],
+      ["terminal_state", terminalState ?? ""],
+      ["exit_code", String(result.exitCode)],
+      ...(prOutcome
+        ? ([["github_profile", prOutcome.profileId]] as const)
+        : []),
+      ["logs", run.artifacts.logPath],
+      ["summary", run.artifacts.summaryPath],
+      ...(prOutcome?.ok ? ([["pr", prOutcome.pull.htmlUrl]] as const) : []),
+    ],
+  });
+  emitDispatchTerminalStateGuidance({
+    terminalState,
+    prOutcome,
+    jsonMode: false,
+  });
+  return exitCode;
+}
 
 type WorkspaceEnsureRequest = {
   readonly project?: string;
@@ -1122,7 +1554,7 @@ async function resolveWorkspaceBootstrap(input: {
 
   const token = await resolveGitHubAppToken({
     controlPlaneConfig: input.controlPlaneConfig,
-    preferEnvTokenOnly: shouldPreferEnvTokenOnlyForBootstrap(),
+    preferEnvTokenOnly: shouldPreferEnvTokenOnlyForGitHubOperations(),
   });
   if (!token.ok) {
     return {
@@ -1143,11 +1575,21 @@ async function resolveWorkspaceBootstrap(input: {
 }
 
 /**
- * Uses env-only token lookup for unattended invocations to avoid interactive
- * keychain prompts; interactive terminals can leverage keychain-backed tokens.
+ * Uses env-only token lookup for unattended/agent invocations to avoid
+ * interactive keychain prompts; normal human CLI sessions can still use
+ * keychain-backed tokens.
  */
-function shouldPreferEnvTokenOnlyForBootstrap(): boolean {
-  return !(process.stdin.isTTY && process.stdout.isTTY);
+function shouldPreferEnvTokenOnlyForGitHubOperations(): boolean {
+  if (!(process.stdin.isTTY && process.stdout.isTTY)) {
+    return true;
+  }
+  if (process.env.CODEX_CI === "1" || process.env.CODEX_SHELL === "1") {
+    return true;
+  }
+  if ((process.env.__CFBundleIdentifier ?? "").trim() === "com.openai.codex") {
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -2154,11 +2596,34 @@ function mapJobStatusToRunStatus(input: {
 
 function runStatusToExitCode(input: {
   readonly status: DispatchRunStatus;
+  readonly terminalState?: DispatchRunTerminalState;
 }): number {
+  if (input.terminalState === "no_diff") {
+    return 20;
+  }
+  if (input.terminalState === "no_commit") {
+    return 21;
+  }
+  if (input.terminalState === "pr_failed") {
+    return 22;
+  }
   if (input.status === "running" || input.status === "completed") {
     return 0;
   }
   return 1;
+}
+
+function resolveDispatchTerminalState(input: {
+  readonly status: DispatchRunStatus;
+  readonly prOutcome: DispatchPrOutcome | null;
+}): DispatchRunTerminalState | undefined {
+  if (input.status !== "completed") {
+    return undefined;
+  }
+  if (!input.prOutcome) {
+    return "completed";
+  }
+  return input.prOutcome.ok ? "pr_created" : "pr_failed";
 }
 
 type DispatchPrOutcome =
@@ -2180,6 +2645,31 @@ type DispatchPrOutcome =
       readonly profileSource: string;
       readonly error: string;
     };
+
+type DispatchGitHubContext =
+  | {
+      readonly ok: true;
+      readonly client: GitHubAppClient;
+      readonly profileId: string;
+      readonly profileSource: string;
+      readonly repo: {
+        readonly owner: string;
+        readonly repo: string;
+      };
+    }
+  | {
+      readonly ok: false;
+      readonly profileId: string;
+      readonly profileSource: string;
+      readonly error: string;
+    };
+
+type LocalDispatchPrAutomationResult = {
+  readonly terminalState: DispatchRunTerminalState;
+  readonly prOutcome: DispatchPrOutcome | null;
+  readonly branch?: string;
+  readonly message?: string;
+};
 
 async function persistRunArtifactsToCanonicalTickets(input: {
   readonly run: DispatchRunRecord;
@@ -2234,22 +2724,19 @@ async function runDispatchPrAutomation(input: {
   readonly prBody?: string;
   readonly githubProfile?: string;
 }): Promise<DispatchPrOutcome> {
-  const requestedGitHubProfile = normalizeOptionalString(input.githubProfile);
-  const selectedGitHubProfile =
-    requestedGitHubProfile ??
-    resolveGitHubAuthSettings({
-      controlPlaneConfig: input.controlPlaneConfig,
-    }).profileId;
-  const selectedGitHubProfileSource = requestedGitHubProfile
-    ? "command_flags"
-    : "project_or_global";
-
   const branch = (input.workspace.branch ?? input.run.branch ?? "").trim();
   if (!branch) {
+    const selectedGitHubProfile = normalizeOptionalString(input.githubProfile)
+      ? input.githubProfile.trim()
+      : resolveGitHubAuthSettings({
+          controlPlaneConfig: input.controlPlaneConfig,
+        }).profileId;
     return {
       ok: false,
       profileId: selectedGitHubProfile,
-      profileSource: selectedGitHubProfileSource,
+      profileSource: normalizeOptionalString(input.githubProfile)
+        ? "command_flags"
+        : "project_or_global",
       error: "Cannot open PR without a resolved workspace branch.",
     };
   }
@@ -2294,8 +2781,14 @@ async function runDispatchPrAutomation(input: {
   if (!pushPolicy.approved) {
     return {
       ok: false,
-      profileId: selectedGitHubProfile,
-      profileSource: selectedGitHubProfileSource,
+      profileId: normalizeOptionalString(input.githubProfile)
+        ? input.githubProfile.trim()
+        : resolveGitHubAuthSettings({
+            controlPlaneConfig: input.controlPlaneConfig,
+          }).profileId,
+      profileSource: normalizeOptionalString(input.githubProfile)
+        ? "command_flags"
+        : "project_or_global",
       error: pushPolicy.error,
     };
   }
@@ -2308,8 +2801,14 @@ async function runDispatchPrAutomation(input: {
   if (!createdPush.ok) {
     return {
       ok: false,
-      profileId: selectedGitHubProfile,
-      profileSource: selectedGitHubProfileSource,
+      profileId: normalizeOptionalString(input.githubProfile)
+        ? input.githubProfile.trim()
+        : resolveGitHubAuthSettings({
+            controlPlaneConfig: input.controlPlaneConfig,
+          }).profileId,
+      profileSource: normalizeOptionalString(input.githubProfile)
+        ? "command_flags"
+        : "project_or_global",
       error: `Failed to create push job (${createdPush.status}): ${createdPush.error.message}`,
     };
   }
@@ -2326,22 +2825,346 @@ async function runDispatchPrAutomation(input: {
   if (!pushOutcome.job) {
     return {
       ok: false,
-      profileId: selectedGitHubProfile,
-      profileSource: selectedGitHubProfileSource,
+      profileId: normalizeOptionalString(input.githubProfile)
+        ? input.githubProfile.trim()
+        : resolveGitHubAuthSettings({
+            controlPlaneConfig: input.controlPlaneConfig,
+          }).profileId,
+      profileSource: normalizeOptionalString(input.githubProfile)
+        ? "command_flags"
+        : "project_or_global",
       error: "Push job ended without terminal state.",
     };
   }
   if (pushOutcome.job.status !== "completed") {
     return {
       ok: false,
-      profileId: selectedGitHubProfile,
-      profileSource: selectedGitHubProfileSource,
+      profileId: normalizeOptionalString(input.githubProfile)
+        ? input.githubProfile.trim()
+        : resolveGitHubAuthSettings({
+            controlPlaneConfig: input.controlPlaneConfig,
+          }).profileId,
+      profileSource: normalizeOptionalString(input.githubProfile)
+        ? "command_flags"
+        : "project_or_global",
       error: `Push job failed with status ${pushOutcome.job.status}`,
     };
   }
 
-  const repo = await resolveDispatchGitHubRepo({
+  const githubContext = await resolveDispatchGitHubContext({
+    controlPlaneConfig: input.controlPlaneConfig,
+    githubProfile: normalizeOptionalString(input.githubProfile),
     projectRoot: input.project.projectRoot ?? input.run.projectRoot,
+  });
+  if (!githubContext.ok) {
+    return githubContext;
+  }
+
+  return await upsertDispatchPullRequest({
+    branch,
+    command: input.command,
+    github: githubContext,
+    prBase: input.prBase,
+    prBody: input.prBody,
+    prTitle: input.prTitle,
+    run: input.run,
+    pushed: true,
+  });
+}
+
+async function runLocalDispatchPrAutomation(input: {
+  readonly run: DispatchRunRecord;
+  readonly actor: string;
+  readonly approveFlag: boolean;
+  readonly command: readonly string[];
+  readonly controlPlaneConfig: ControlPlaneConfig;
+  readonly projectRoot: string;
+  readonly prBase: string;
+  readonly prTitle?: string;
+  readonly prBody?: string;
+  readonly githubProfile?: string;
+}): Promise<LocalDispatchPrAutomationResult> {
+  const inspection = await inspectLocalDispatchPrState({
+    branch: input.run.branch,
+    controlPlaneConfig: input.controlPlaneConfig,
+    githubProfile: normalizeOptionalString(input.githubProfile),
+    prBase: input.prBase,
+    projectRoot: input.projectRoot,
+  });
+  if (!inspection.ok) {
+    return {
+      terminalState: "pr_failed",
+      message: inspection.error,
+      prOutcome: {
+        ok: false,
+        profileId: inspection.profileId,
+        profileSource: inspection.profileSource,
+        error: inspection.error,
+      },
+    };
+  }
+  if (inspection.terminalState === "no_diff") {
+    return {
+      terminalState: "no_diff",
+      branch: inspection.branch,
+      message: `Branch ${inspection.branch} has no committed diff ahead of ${input.prBase}.`,
+      prOutcome: null,
+    };
+  }
+  if (inspection.terminalState === "no_commit") {
+    return {
+      terminalState: "no_commit",
+      branch: inspection.branch,
+      message:
+        "Dispatch run completed with local changes still uncommitted. Commit the branch before opening a PR.",
+      prOutcome: null,
+    };
+  }
+
+  const pushCommand = [
+    "git",
+    "-C",
+    input.projectRoot,
+    "push",
+    "-u",
+    "origin",
+    inspection.branch,
+  ] as const;
+  const pushRisk = assessCommandRisk({
+    command: pushCommand,
+    runner: "generic",
+  });
+  const pushPolicy = await resolvePolicyDecision({
+    level: pushRisk.level,
+    reasons: pushRisk.reasons,
+    requiresApproval: pushRisk.requiresApproval,
+    approveFlag: input.approveFlag,
+    actor: input.actor,
+    promptLabel: "git push for --pr",
+  });
+  await appendPolicyAuditEvent({
+    actor: input.actor,
+    operation: "dispatch.pr.push",
+    level: pushPolicy.level,
+    requiresApproval: pushPolicy.requiresApproval,
+    approved: pushPolicy.approved,
+    mode: pushPolicy.mode,
+    reasons: pushPolicy.reasons,
+    command: pushCommand,
+    runner: "generic",
+    runId: input.run.runId,
+    ...(input.run.ticketId ? { ticketId: input.run.ticketId } : {}),
+    nodeId: input.run.nodeId,
+    projectSelector: input.run.projectSelector,
+    ...(pushPolicy.approved ? {} : { error: pushPolicy.error }),
+  });
+  if (!pushPolicy.approved) {
+    return {
+      terminalState: "pr_failed",
+      branch: inspection.branch,
+      message: pushPolicy.error,
+      prOutcome: {
+        ok: false,
+        profileId: inspection.profileId,
+        profileSource: inspection.profileSource,
+        error: pushPolicy.error,
+      },
+    };
+  }
+
+  const pushed = await exec(pushCommand, {
+    stdin: "ignore",
+  });
+  if (pushed.exitCode !== 0) {
+    return {
+      terminalState: "pr_failed",
+      branch: inspection.branch,
+      message: `git push failed (${pushed.exitCode}): ${(pushed.stderr || pushed.stdout).trim() || "unknown error"}`,
+      prOutcome: {
+        ok: false,
+        profileId: inspection.profileId,
+        profileSource: inspection.profileSource,
+        error: `git push failed (${pushed.exitCode}): ${(pushed.stderr || pushed.stdout).trim() || "unknown error"}`,
+      },
+    };
+  }
+
+  const githubContext = await resolveDispatchGitHubContext({
+    controlPlaneConfig: input.controlPlaneConfig,
+    githubProfile: normalizeOptionalString(input.githubProfile),
+    projectRoot: input.projectRoot,
+  });
+  if (!githubContext.ok) {
+    return {
+      terminalState: "pr_failed",
+      branch: inspection.branch,
+      message: githubContext.error,
+      prOutcome: githubContext,
+    };
+  }
+
+  const prOutcome = await upsertDispatchPullRequest({
+    branch: inspection.branch,
+    command: input.command,
+    github: githubContext,
+    prBase: input.prBase,
+    prBody: input.prBody,
+    prTitle: input.prTitle,
+    run: input.run,
+    pushed: true,
+  });
+  return {
+    terminalState: prOutcome.ok ? "pr_created" : "pr_failed",
+    prOutcome,
+    branch: inspection.branch,
+    ...(prOutcome.ok ? {} : { message: prOutcome.error }),
+  };
+}
+
+async function inspectLocalDispatchPrState(input: {
+  readonly projectRoot: string;
+  readonly prBase: string;
+  readonly branch?: string;
+  readonly controlPlaneConfig: ControlPlaneConfig;
+  readonly githubProfile?: string;
+}): Promise<
+  | {
+      readonly ok: true;
+      readonly terminalState: "ready" | "no_diff" | "no_commit";
+      readonly branch: string;
+      readonly profileId: string;
+      readonly profileSource: string;
+    }
+  | {
+      readonly ok: false;
+      readonly profileId: string;
+      readonly profileSource: string;
+      readonly error: string;
+    }
+> {
+  const requestedGitHubProfile = normalizeOptionalString(input.githubProfile);
+  const profileId =
+    requestedGitHubProfile ??
+    resolveGitHubAuthSettings({
+      controlPlaneConfig: input.controlPlaneConfig,
+    }).profileId;
+  const profileSource = requestedGitHubProfile
+    ? "command_flags"
+    : "project_or_global";
+  const branch =
+    normalizeOptionalString(input.branch) ??
+    (await resolveLocalGitBranch({ projectRoot: input.projectRoot }));
+  if (!branch) {
+    return {
+      ok: false,
+      profileId,
+      profileSource,
+      error: "Cannot open PR without a resolved local branch.",
+    };
+  }
+
+  const status = await exec(
+    [
+      "git",
+      "-C",
+      input.projectRoot,
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=all",
+    ],
+    {
+      stdin: "ignore",
+    }
+  );
+  if (status.exitCode !== 0) {
+    return {
+      ok: false,
+      profileId,
+      profileSource,
+      error: `Failed to inspect git status (${status.exitCode}).`,
+    };
+  }
+  if (status.stdout.trim().length > 0) {
+    return {
+      ok: true,
+      terminalState: "no_commit",
+      branch,
+      profileId,
+      profileSource,
+    };
+  }
+
+  await exec(
+    ["git", "-C", input.projectRoot, "fetch", "origin", input.prBase],
+    {
+      stdin: "ignore",
+    }
+  );
+  const baseRef = await resolveLocalDispatchPrBaseRef({
+    prBase: input.prBase,
+    projectRoot: input.projectRoot,
+  });
+  if (!baseRef) {
+    return {
+      ok: false,
+      profileId,
+      profileSource,
+      error: `Unable to resolve PR base ref ${input.prBase}.`,
+    };
+  }
+
+  const ahead = await exec(
+    ["git", "-C", input.projectRoot, "rev-list", "--count", `${baseRef}..HEAD`],
+    {
+      stdin: "ignore",
+    }
+  );
+  if (ahead.exitCode !== 0) {
+    return {
+      ok: false,
+      profileId,
+      profileSource,
+      error: `Failed to inspect git history against ${baseRef}.`,
+    };
+  }
+
+  const aheadCount = Number.parseInt(ahead.stdout.trim() || "0", 10);
+  if (!Number.isFinite(aheadCount) || aheadCount <= 0) {
+    return {
+      ok: true,
+      terminalState: "no_diff",
+      branch,
+      profileId,
+      profileSource,
+    };
+  }
+
+  return {
+    ok: true,
+    terminalState: "ready",
+    branch,
+    profileId,
+    profileSource,
+  };
+}
+
+async function resolveDispatchGitHubContext(input: {
+  readonly controlPlaneConfig: ControlPlaneConfig;
+  readonly githubProfile?: string;
+  readonly projectRoot?: string;
+}): Promise<DispatchGitHubContext> {
+  const requestedGitHubProfile = normalizeOptionalString(input.githubProfile);
+  const selectedGitHubProfile =
+    requestedGitHubProfile ??
+    resolveGitHubAuthSettings({
+      controlPlaneConfig: input.controlPlaneConfig,
+    }).profileId;
+  const selectedGitHubProfileSource = requestedGitHubProfile
+    ? "command_flags"
+    : "project_or_global";
+
+  const repo = await resolveDispatchGitHubRepo({
+    projectRoot: input.projectRoot,
   });
   if (!repo) {
     return {
@@ -2357,6 +3180,7 @@ async function runDispatchPrAutomation(input: {
     controlPlaneConfig: input.controlPlaneConfig,
     ...(requestedGitHubProfile ? { profileId: requestedGitHubProfile } : {}),
     allowProjectOverride: !requestedGitHubProfile,
+    preferEnvTokenOnly: shouldPreferEnvTokenOnlyForGitHubOperations(),
   });
   if (!token.ok) {
     return {
@@ -2367,55 +3191,73 @@ async function runDispatchPrAutomation(input: {
     };
   }
 
-  const client = createGitHubAppClient({
-    token: token.token,
-    userAgent: "hack-cli",
-  });
-  const found = await client.findOpenPullRequest({
+  return {
+    ok: true,
+    client: createGitHubAppClient({
+      token: token.token,
+      userAgent: "hack-cli",
+    }),
+    profileId: token.profileId,
+    profileSource: token.profileSource,
     repo,
-    headRef: branch,
+  };
+}
+
+async function upsertDispatchPullRequest(input: {
+  readonly run: DispatchRunRecord;
+  readonly command: readonly string[];
+  readonly github: Extract<DispatchGitHubContext, { readonly ok: true }>;
+  readonly branch: string;
+  readonly prBase: string;
+  readonly prTitle?: string;
+  readonly prBody?: string;
+  readonly pushed: true;
+}): Promise<DispatchPrOutcome> {
+  const found = await input.github.client.findOpenPullRequest({
+    repo: input.github.repo,
+    headRef: input.branch,
   });
   if (!found.ok) {
     return {
       ok: false,
-      profileId: token.profileId,
-      profileSource: token.profileSource,
+      profileId: input.github.profileId,
+      profileSource: input.github.profileSource,
       error: `GitHub lookup failed (${found.status}): ${found.error}`,
     };
   }
 
   const title =
     input.prTitle ||
-    `hack: ${input.run.projectName ?? input.run.projectSelector} (${branch})`;
+    `hack: ${input.run.projectName ?? input.run.projectSelector} (${input.branch})`;
   const body =
     input.prBody ??
     `Automated by hack dispatch run.\n\n- run_id: ${input.run.runId}\n- node: ${input.run.nodeName} (${input.run.nodeId})`;
 
   const upserted = found.data
-    ? await client.updatePullRequest({
-        repo,
+    ? await input.github.client.updatePullRequest({
+        repo: input.github.repo,
         number: found.data.number,
         title,
         body,
       })
-    : await client.createPullRequest({
-        repo,
+    : await input.github.client.createPullRequest({
+        repo: input.github.repo,
         title,
         body,
-        headRef: branch,
+        headRef: input.branch,
         baseRef: input.prBase,
       });
   if (!upserted.ok) {
     return {
       ok: false,
-      profileId: token.profileId,
-      profileSource: token.profileSource,
+      profileId: input.github.profileId,
+      profileSource: input.github.profileSource,
       error: `GitHub PR upsert failed (${upserted.status}): ${upserted.error}`,
     };
   }
 
-  const comment = await client.createIssueComment({
-    repo,
+  const comment = await input.github.client.createIssueComment({
+    repo: input.github.repo,
     issueNumber: upserted.data.number,
     body: `Dispatch run \`${input.run.runId}\` completed.\n\nCommand: \`${input.command.join(" ")}\``,
   });
@@ -2427,16 +3269,84 @@ async function runDispatchPrAutomation(input: {
 
   return {
     ok: true,
-    profileId: token.profileId,
-    profileSource: token.profileSource,
+    profileId: input.github.profileId,
+    profileSource: input.github.profileSource,
     pull: {
       number: upserted.data.number,
       htmlUrl: upserted.data.htmlUrl,
       baseRef: upserted.data.baseRef,
       headRef: upserted.data.headRef,
     },
-    pushed: true,
+    pushed: input.pushed,
   };
+}
+
+async function resolveLocalGitBranch(input: {
+  readonly projectRoot: string;
+}): Promise<string | null> {
+  const branch = await exec(
+    ["git", "-C", input.projectRoot, "branch", "--show-current"],
+    {
+      stdin: "ignore",
+    }
+  );
+  if (branch.exitCode !== 0) {
+    return null;
+  }
+  const value = branch.stdout.trim();
+  return value.length > 0 ? value : null;
+}
+
+async function resolveLocalDispatchPrBaseRef(input: {
+  readonly projectRoot: string;
+  readonly prBase: string;
+}): Promise<string | null> {
+  const candidates = [`origin/${input.prBase}`, input.prBase] as const;
+  for (const candidate of candidates) {
+    const resolved = await exec(
+      ["git", "-C", input.projectRoot, "rev-parse", "--verify", candidate],
+      {
+        stdin: "ignore",
+      }
+    );
+    if (resolved.exitCode === 0) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function emitDispatchTerminalStateGuidance(input: {
+  readonly terminalState?: DispatchRunTerminalState;
+  readonly prOutcome: DispatchPrOutcome | null;
+  readonly jsonMode: boolean;
+}): void {
+  if (input.jsonMode) {
+    return;
+  }
+  if (input.terminalState === "no_diff") {
+    logger.info({
+      message:
+        "PR automation skipped: no committed diff exists versus the selected base branch.",
+    });
+    return;
+  }
+  if (input.terminalState === "no_commit") {
+    logger.warn({
+      message:
+        "PR automation skipped: the workspace has uncommitted changes. Commit them and retry.",
+    });
+    return;
+  }
+  if (
+    input.terminalState === "pr_failed" &&
+    input.prOutcome &&
+    !input.prOutcome.ok
+  ) {
+    logger.warn({
+      message: `PR automation failed: ${input.prOutcome.error}`,
+    });
+  }
 }
 
 async function resolveDispatchGitHubRepo(input: {
@@ -2445,16 +3355,23 @@ async function resolveDispatchGitHubRepo(input: {
   if (!input.projectRoot) {
     return null;
   }
-  const remote = await exec(
+  const candidates = [
+    ["git", "-C", input.projectRoot, "config", "--get", "remote.origin.url"],
     ["git", "-C", input.projectRoot, "remote", "get-url", "origin"],
-    {
+  ] as const;
+  for (const command of candidates) {
+    const remote = await exec(command, {
       stdin: "ignore",
+    });
+    if (remote.exitCode !== 0) {
+      continue;
     }
-  );
-  if (remote.exitCode !== 0) {
-    return null;
+    const parsed = parseGitHubRepoRef({ remoteUrl: remote.stdout.trim() });
+    if (parsed) {
+      return parsed;
+    }
   }
-  return parseGitHubRepoRef({ remoteUrl: remote.stdout.trim() });
+  return null;
 }
 
 type StreamOutcome = {
@@ -2799,6 +3716,7 @@ function extractFirstJsonBlock(text: string): unknown {
 function buildSummaryMarkdown(input: {
   readonly runId: string;
   readonly runStatus: DispatchRunStatus;
+  readonly terminalState?: DispatchRunTerminalState;
   readonly node: NodeRecord;
   readonly workspace: {
     readonly projectId: string;
@@ -2841,6 +3759,9 @@ function buildSummaryMarkdown(input: {
     "",
     "## Summary",
     `- status: ${input.runStatus}`,
+    ...(input.terminalState
+      ? [`- terminal_state: ${input.terminalState}`]
+      : []),
     `- node: ${input.node.name} (${input.node.id})`,
     `- project: ${input.workspace.projectName} (${input.workspace.projectId})`,
     `- branch: ${input.workspace.branch ?? "detached/unknown"}`,
@@ -2930,6 +3851,75 @@ function buildSummaryMarkdown(input: {
             : ["- exclude: none"]),
         ]
       : ["- status: not enabled"]),
+    "",
+    "## Pull Request",
+    ...prLines,
+    "",
+  ].join("\n");
+}
+
+function buildLocalDispatchSummaryMarkdown(input: {
+  readonly runId: string;
+  readonly status: DispatchRunStatus;
+  readonly terminalState?: DispatchRunTerminalState;
+  readonly project: DispatchProjectResolution;
+  readonly command: readonly string[];
+  readonly runner: string;
+  readonly riskLevel: string;
+  readonly riskReasons: readonly string[];
+  readonly exitCode: number;
+  readonly prOutcome: DispatchPrOutcome | null;
+}): string {
+  let prLines: string[] = ["- status: not requested"];
+  if (input.terminalState === "no_diff") {
+    prLines = ["- status: skipped", "- reason: no committed diff versus base"];
+  } else if (input.terminalState === "no_commit") {
+    prLines = [
+      "- status: skipped",
+      "- reason: workspace has uncommitted changes",
+    ];
+  } else if (input.prOutcome?.ok) {
+    prLines = [
+      "- status: upserted",
+      `- profile: ${input.prOutcome.profileId}`,
+      `- profile_source: ${input.prOutcome.profileSource}`,
+      `- number: ${input.prOutcome.pull.number}`,
+      `- url: ${input.prOutcome.pull.htmlUrl}`,
+      `- base: ${input.prOutcome.pull.baseRef}`,
+      `- head: ${input.prOutcome.pull.headRef}`,
+    ];
+  } else if (input.prOutcome && !input.prOutcome.ok) {
+    prLines = [
+      "- status: failed",
+      `- profile: ${input.prOutcome.profileId}`,
+      `- profile_source: ${input.prOutcome.profileSource}`,
+      `- error: ${input.prOutcome.error}`,
+    ];
+  }
+  return [
+    `# Dispatch Run ${input.runId}`,
+    "",
+    "## Summary",
+    `- status: ${input.status}`,
+    ...(input.terminalState
+      ? [`- terminal_state: ${input.terminalState}`]
+      : []),
+    "- mode: local",
+    `- project: ${input.project.projectName ?? input.project.selector}`,
+    `- root: ${input.project.projectRoot ?? "unknown"}`,
+    `- runner: ${input.runner}`,
+    `- exit_code: ${input.exitCode}`,
+    "",
+    "## Command",
+    "```sh",
+    input.command.join(" "),
+    "```",
+    "",
+    "## Policy",
+    `- risk_level: ${input.riskLevel}`,
+    ...(input.riskReasons.length > 0
+      ? input.riskReasons.map((reason) => `- rationale: ${reason}`)
+      : ["- rationale: none"]),
     "",
     "## Pull Request",
     ...prLines,

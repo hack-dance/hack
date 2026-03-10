@@ -257,6 +257,8 @@ export function renderAgentDocsSnippet(): string {
     "- On node host, inspect workspace map via `hack node workspace list|resolve|attach|remove`.",
     "- Inspect/repair controller-side route bridge with `hack node routes status` and `hack node routes repair`.",
     '- Dispatch remote commands: `hack dispatch run --project <name|id> --node default --branch <branch> --runner generic -- "<command>"`.',
+    '- Dispatch local fallback runs with the same artifact pipeline: `hack dispatch run --project <name|id> --local -- "<command>"`.',
+    '- Reset unattended runner workspaces safely: `hack workspace reset --base origin/main --exclude ".env,.env.*"`.',
     "",
     "When to use a branch instance:",
     "- You need two versions running at once (PR review, experiments, migrations).",

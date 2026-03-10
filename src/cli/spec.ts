@@ -38,6 +38,7 @@ import { tuiCommand } from "../commands/tui.ts";
 import { updateCommand } from "../commands/update.ts";
 import { usageCommand } from "../commands/usage.ts";
 import { versionCommand } from "../commands/version.ts";
+import { workspaceCommand } from "../commands/workspace.ts";
 import { xCommand } from "../commands/x.ts";
 import { defineCli } from "./command.ts";
 
@@ -86,6 +87,7 @@ export const CLI_SPEC = defineCli({
     ticketsCommand,
     agentCommand,
     gatewayCommand,
+    workspaceCommand,
     nodeCommand,
     remoteCommand,
     internalCommand,

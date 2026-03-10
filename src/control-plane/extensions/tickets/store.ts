@@ -157,6 +157,96 @@ type MaterializedTicketState = {
   readonly conflictsByTicket: Map<string, TicketSyncConflict[]>;
 };
 
+type Mutable<T> = {
+  -readonly [K in keyof T]: T[K];
+};
+
+type TicketOptionalMetadataInput = {
+  readonly owner?: string;
+  readonly source?: string;
+  readonly assignee?: string;
+  readonly tags?: readonly string[];
+  readonly externalSystem?: string;
+  readonly externalId?: string;
+  readonly externalKey?: string;
+  readonly externalUrl?: string;
+  readonly externalProjectId?: string;
+  readonly externalProjectName?: string;
+  readonly externalTeamId?: string;
+};
+
+type TicketNormalizedMetadata = {
+  readonly owner: string;
+  readonly source: string;
+  readonly assignee?: string;
+  readonly tags: readonly string[];
+  readonly externalSystem?: string;
+  readonly externalId?: string;
+  readonly externalKey?: string;
+  readonly externalUrl?: string;
+  readonly externalProjectId?: string;
+  readonly externalProjectName?: string;
+  readonly externalTeamId?: string;
+};
+
+type TicketCreateInput = {
+  readonly title: string;
+  readonly body?: string;
+  readonly dependsOn?: readonly string[];
+  readonly blocks?: readonly string[];
+  readonly actor?: string;
+} & TicketOptionalMetadataInput;
+
+type TicketUpdateInput = {
+  readonly ticketId: string;
+  readonly title?: string;
+  readonly body?: string;
+  readonly dependsOn?: readonly string[];
+  readonly blocks?: readonly string[];
+  readonly actor?: string;
+} & TicketOptionalMetadataInput;
+
+type TicketCheckpointInput = {
+  readonly ticketId: string;
+  readonly provider: string;
+  readonly profileId?: string;
+  readonly direction?: string;
+  readonly remoteCursor?: string;
+  readonly remoteUpdatedAt?: string;
+  readonly localUpdatedAt?: string;
+  readonly actor?: string;
+};
+
+type TicketConflictInput = {
+  readonly ticketId: string;
+  readonly provider: string;
+  readonly field: string;
+  readonly authority?: string;
+  readonly summary?: string;
+  readonly localValue?: TicketMetadataValue;
+  readonly remoteValue?: TicketMetadataValue;
+  readonly actor?: string;
+};
+
+const TICKET_OPTIONAL_METADATA_KEYS = [
+  "externalSystem",
+  "externalId",
+  "externalKey",
+  "externalUrl",
+  "externalProjectId",
+  "externalProjectName",
+  "externalTeamId",
+] as const;
+
+const TICKET_OPTIONAL_UPDATE_KEYS = [
+  "assignee",
+  "owner",
+  "source",
+  ...TICKET_OPTIONAL_METADATA_KEYS,
+] as const;
+
+type TicketOptionalUpdateKey = (typeof TICKET_OPTIONAL_UPDATE_KEYS)[number];
+
 export function createTicketsStore(opts: {
   readonly projectRoot: string;
   readonly projectId?: string;
@@ -471,64 +561,24 @@ export function createTicketsStore(opts: {
   };
 
   return {
-    createTicket: async (input) => {
+    createTicket: async (input: TicketCreateInput) => {
       const ticketId = await computeNextTicketId();
       const dependsOn = normalizeTicketRefs(input.dependsOn ?? []);
       const blocks = normalizeTicketRefs(input.blocks ?? []);
-      const owner = normalizeOwnerOrSource({
-        value: input.owner,
-        fallback: "hack",
-      });
-      const source = normalizeOwnerOrSource({
-        value: input.source,
-        fallback: "hack",
-      });
-      const assignee = normalizeOptionalMetadataString({
-        value: input.assignee,
-      });
-      const tags = normalizeTags(input.tags ?? []);
-      const externalSystem = normalizeOptionalMetadataString({
-        value: input.externalSystem,
-      });
-      const externalId = normalizeOptionalMetadataString({
-        value: input.externalId,
-      });
-      const externalKey = normalizeOptionalMetadataString({
-        value: input.externalKey,
-      });
-      const externalUrl = normalizeOptionalMetadataString({
-        value: input.externalUrl,
-      });
-      const externalProjectId = normalizeOptionalMetadataString({
-        value: input.externalProjectId,
-      });
-      const externalProjectName = normalizeOptionalMetadataString({
-        value: input.externalProjectName,
-      });
-      const externalTeamId = normalizeOptionalMetadataString({
-        value: input.externalTeamId,
+      const metadata = normalizeTicketMetadata({
+        input,
+        ownerFallback: "hack",
+        sourceFallback: "hack",
       });
       const event = buildEvent({
         ticketId,
         type: "ticket.created",
-        payload: {
-          title: input.title,
-          ...(input.body ? { body: input.body } : {}),
-          ...(dependsOn.length > 0 ? { dependsOn } : {}),
-          ...(blocks.length > 0 ? { blocks } : {}),
-          owner,
-          source,
-          ...(assignee ? { assignee } : {}),
-          ...(tags.length > 0 ? { tags } : {}),
-          ...(externalSystem ? { externalSystem } : {}),
-          ...(externalId ? { externalId } : {}),
-          ...(externalKey ? { externalKey } : {}),
-          ...(externalUrl ? { externalUrl } : {}),
-          ...(externalProjectId ? { externalProjectId } : {}),
-          ...(externalProjectName ? { externalProjectName } : {}),
-          ...(externalTeamId ? { externalTeamId } : {}),
-          status: "open",
-        },
+        payload: buildTicketCreatedPayload({
+          input,
+          dependsOn,
+          blocks,
+          metadata,
+        }),
         actor: input.actor,
       });
 
@@ -539,121 +589,35 @@ export function createTicketsStore(opts: {
 
       return {
         ok: true,
-        ticket: {
+        ticket: buildCreatedTicketSummary({
           ticketId,
-          title: input.title,
-          ...(input.body ? { body: input.body } : {}),
-          status: "open",
-          createdAt: event.tsIso,
-          updatedAt: event.tsIso,
+          input,
           dependsOn,
           blocks,
-          owner,
-          source,
-          ...(assignee ? { assignee } : {}),
-          tags,
-          ...(externalSystem ? { externalSystem } : {}),
-          ...(externalId ? { externalId } : {}),
-          ...(externalKey ? { externalKey } : {}),
-          ...(externalUrl ? { externalUrl } : {}),
-          ...(externalProjectId ? { externalProjectId } : {}),
-          ...(externalProjectName ? { externalProjectName } : {}),
-          ...(externalTeamId ? { externalTeamId } : {}),
-          ...(opts.projectId ? { projectId: opts.projectId } : {}),
-          ...(opts.projectName ? { projectName: opts.projectName } : {}),
-        },
+          metadata,
+          event,
+          projectId: opts.projectId,
+          projectName: opts.projectName,
+        }),
       };
     },
 
-    updateTicket: async (input) => {
+    updateTicket: async (input: TicketUpdateInput) => {
       const tickets = await materializeTickets();
       const current = tickets.get(input.ticketId);
       if (!current) {
         return { ok: false, error: `Ticket not found: ${input.ticketId}` };
       }
 
-      const payload: Record<string, unknown> = {};
-      if (input.title !== undefined) {
-        const title = input.title.trim();
-        if (!title) {
-          return { ok: false, error: "Title cannot be empty." };
-        }
-        payload.title = title;
-      }
-      if (input.body !== undefined) {
-        payload.body = input.body;
-      }
-      if (input.dependsOn !== undefined) {
-        payload.dependsOn = normalizeTicketRefs(input.dependsOn);
-      }
-      if (input.blocks !== undefined) {
-        payload.blocks = normalizeTicketRefs(input.blocks);
-      }
-      if (input.owner !== undefined) {
-        payload.owner = normalizeOwnerOrSource({
-          value: input.owner,
-          fallback: "hack",
-        });
-      }
-      if (input.source !== undefined) {
-        payload.source = normalizeOwnerOrSource({
-          value: input.source,
-          fallback: "hack",
-        });
-      }
-      if (input.assignee !== undefined) {
-        payload.assignee =
-          normalizeOptionalMetadataString({
-            value: input.assignee,
-          }) ?? null;
-      }
-      if (input.tags !== undefined) {
-        payload.tags = normalizeTags(input.tags);
-      }
-      if (input.externalSystem !== undefined) {
-        payload.externalSystem = normalizeOptionalMetadataString({
-          value: input.externalSystem,
-        });
-      }
-      if (input.externalId !== undefined) {
-        payload.externalId = normalizeOptionalMetadataString({
-          value: input.externalId,
-        });
-      }
-      if (input.externalKey !== undefined) {
-        payload.externalKey = normalizeOptionalMetadataString({
-          value: input.externalKey,
-        });
-      }
-      if (input.externalUrl !== undefined) {
-        payload.externalUrl = normalizeOptionalMetadataString({
-          value: input.externalUrl,
-        });
-      }
-      if (input.externalProjectId !== undefined) {
-        payload.externalProjectId = normalizeOptionalMetadataString({
-          value: input.externalProjectId,
-        });
-      }
-      if (input.externalProjectName !== undefined) {
-        payload.externalProjectName = normalizeOptionalMetadataString({
-          value: input.externalProjectName,
-        });
-      }
-      if (input.externalTeamId !== undefined) {
-        payload.externalTeamId = normalizeOptionalMetadataString({
-          value: input.externalTeamId,
-        });
-      }
-
-      if (Object.keys(payload).length === 0) {
-        return { ok: false, error: "No updates provided." };
+      const payloadResult = buildTicketUpdatedPayload({ input });
+      if (!payloadResult.ok) {
+        return payloadResult;
       }
 
       const event = buildEvent({
         ticketId: input.ticketId,
         type: "ticket.updated",
-        payload,
+        payload: payloadResult.payload,
         actor: input.actor,
       });
 
@@ -824,47 +788,22 @@ export function createTicketsStore(opts: {
       return await git.appendEvents({ events: [event] });
     },
 
-    recordSyncCheckpoint: async (input) => {
+    recordSyncCheckpoint: async (input: TicketCheckpointInput) => {
       const tickets = await materializeTickets();
       if (!tickets.has(input.ticketId)) {
         return { ok: false, error: `Ticket not found: ${input.ticketId}` };
       }
 
-      const provider = normalizeOptionalMetadataString({
-        value: input.provider,
-      });
-      if (!provider) {
-        return { ok: false, error: "Provider is required." };
+      const checkpointResult = buildTicketSyncCheckpointData({ input });
+      if (!checkpointResult.ok) {
+        return checkpointResult;
       }
 
-      const checkpointId = randomUUID();
-      const profileId = normalizeOptionalMetadataString({
-        value: input.profileId,
-      });
-      const direction = normalizeOptionalMetadataString({
-        value: input.direction,
-      });
-      const remoteCursor = normalizeOptionalMetadataString({
-        value: input.remoteCursor,
-      });
-      const remoteUpdatedAt = normalizeOptionalMetadataString({
-        value: input.remoteUpdatedAt,
-      });
-      const localUpdatedAt = normalizeOptionalMetadataString({
-        value: input.localUpdatedAt,
-      });
+      const { payload, checkpoint } = checkpointResult;
       const event = buildEvent({
         ticketId: input.ticketId,
         type: "ticket.sync_checkpoint_recorded",
-        payload: {
-          checkpointId,
-          provider,
-          ...(profileId ? { profileId } : {}),
-          ...(direction ? { direction } : {}),
-          ...(remoteCursor ? { remoteCursor } : {}),
-          ...(remoteUpdatedAt ? { remoteUpdatedAt } : {}),
-          ...(localUpdatedAt ? { localUpdatedAt } : {}),
-        },
+        payload,
         actor: input.actor,
       });
 
@@ -876,62 +815,29 @@ export function createTicketsStore(opts: {
       return {
         ok: true,
         checkpoint: {
-          checkpointId,
-          ticketId: input.ticketId,
-          provider,
-          ...(profileId ? { profileId } : {}),
-          ...(direction ? { direction } : {}),
-          ...(remoteCursor ? { remoteCursor } : {}),
-          ...(remoteUpdatedAt ? { remoteUpdatedAt } : {}),
-          ...(localUpdatedAt ? { localUpdatedAt } : {}),
+          ...checkpoint,
           actor: event.actor,
           createdAt: event.tsIso,
         },
       };
     },
 
-    recordSyncConflict: async (input) => {
+    recordSyncConflict: async (input: TicketConflictInput) => {
       const tickets = await materializeTickets();
       if (!tickets.has(input.ticketId)) {
         return { ok: false, error: `Ticket not found: ${input.ticketId}` };
       }
 
-      const provider = normalizeOptionalMetadataString({
-        value: input.provider,
-      });
-      if (!provider) {
-        return { ok: false, error: "Provider is required." };
-      }
-      const field = normalizeOptionalMetadataString({
-        value: input.field,
-      });
-      if (!field) {
-        return { ok: false, error: "Field is required." };
+      const conflictResult = buildTicketSyncConflictData({ input });
+      if (!conflictResult.ok) {
+        return conflictResult;
       }
 
-      const conflictId = randomUUID();
-      const authority = normalizeOptionalMetadataString({
-        value: input.authority,
-      });
-      const summary = normalizeOptionalMetadataString({
-        value: input.summary,
-      });
+      const { payload, conflict } = conflictResult;
       const event = buildEvent({
         ticketId: input.ticketId,
         type: "ticket.sync_conflict_recorded",
-        payload: {
-          conflictId,
-          provider,
-          field,
-          ...(authority ? { authority } : {}),
-          ...(summary ? { summary } : {}),
-          ...(input.localValue !== undefined
-            ? { localValue: input.localValue }
-            : {}),
-          ...(input.remoteValue !== undefined
-            ? { remoteValue: input.remoteValue }
-            : {}),
-        },
+        payload,
         actor: input.actor,
       });
 
@@ -943,19 +849,7 @@ export function createTicketsStore(opts: {
       return {
         ok: true,
         conflict: {
-          conflictId,
-          ticketId: input.ticketId,
-          provider,
-          field,
-          status: "open",
-          ...(authority ? { authority } : {}),
-          ...(summary ? { summary } : {}),
-          ...(input.localValue !== undefined
-            ? { localValue: input.localValue }
-            : {}),
-          ...(input.remoteValue !== undefined
-            ? { remoteValue: input.remoteValue }
-            : {}),
+          ...conflict,
           createdAt: event.tsIso,
           updatedAt: event.tsIso,
         },
@@ -1111,65 +1005,53 @@ function applyTicketCreatedEvent(input: {
   const blocks = parseDependencyList({
     value: input.event.payload.blocks,
   });
-  const owner = normalizeOwnerOrSource({
-    value: readOptionalStringPayload({ value: input.event.payload.owner }),
-    fallback: "hack",
-  });
-  const source = normalizeOwnerOrSource({
-    value: readOptionalStringPayload({ value: input.event.payload.source }),
-    fallback: "hack",
-  });
-  const assignee = readOptionalStringPayload({
-    value: input.event.payload.assignee,
-  });
-  const tags = parseTags({ value: input.event.payload.tags });
-  const externalSystem = readOptionalStringPayload({
-    value: input.event.payload.externalSystem,
-  });
-  const externalId = readOptionalStringPayload({
-    value: input.event.payload.externalId,
-  });
-  const externalKey = readOptionalStringPayload({
-    value: input.event.payload.externalKey,
-  });
-  const externalUrl = readOptionalStringPayload({
-    value: input.event.payload.externalUrl,
-  });
-  const externalProjectId = readOptionalStringPayload({
-    value: input.event.payload.externalProjectId,
-  });
-  const externalProjectName = readOptionalStringPayload({
-    value: input.event.payload.externalProjectName,
-  });
-  const externalTeamId = readOptionalStringPayload({
-    value: input.event.payload.externalTeamId,
+  const metadata = normalizeTicketMetadata({
+    input: {
+      owner: readOptionalStringPayload({ value: input.event.payload.owner }),
+      source: readOptionalStringPayload({ value: input.event.payload.source }),
+      assignee: readOptionalStringPayload({
+        value: input.event.payload.assignee,
+      }),
+      tags: parseTags({ value: input.event.payload.tags }),
+      externalSystem: readOptionalStringPayload({
+        value: input.event.payload.externalSystem,
+      }),
+      externalId: readOptionalStringPayload({
+        value: input.event.payload.externalId,
+      }),
+      externalKey: readOptionalStringPayload({
+        value: input.event.payload.externalKey,
+      }),
+      externalUrl: readOptionalStringPayload({
+        value: input.event.payload.externalUrl,
+      }),
+      externalProjectId: readOptionalStringPayload({
+        value: input.event.payload.externalProjectId,
+      }),
+      externalProjectName: readOptionalStringPayload({
+        value: input.event.payload.externalProjectName,
+      }),
+      externalTeamId: readOptionalStringPayload({
+        value: input.event.payload.externalTeamId,
+      }),
+    },
+    ownerFallback: "hack",
+    sourceFallback: "hack",
   });
 
-  input.tickets.set(input.event.ticketId, {
-    ticketId: input.event.ticketId,
-    title,
-    body,
-    status: "open",
-    createdAt: input.event.tsIso,
-    updatedAt: input.event.tsIso,
-    dependsOn,
-    blocks,
-    owner,
-    source,
-    ...(assignee ? { assignee } : {}),
-    tags,
-    ...(externalSystem ? { externalSystem } : {}),
-    ...(externalId ? { externalId } : {}),
-    ...(externalKey ? { externalKey } : {}),
-    ...(externalUrl ? { externalUrl } : {}),
-    ...(externalProjectId ? { externalProjectId } : {}),
-    ...(externalProjectName ? { externalProjectName } : {}),
-    ...(externalTeamId ? { externalTeamId } : {}),
-    ...(input.event.projectId ? { projectId: input.event.projectId } : {}),
-    ...(input.event.projectName
-      ? { projectName: input.event.projectName }
-      : {}),
-  });
+  input.tickets.set(
+    input.event.ticketId,
+    buildCreatedTicketSummary({
+      ticketId: input.event.ticketId,
+      input: { title, body },
+      dependsOn,
+      blocks,
+      metadata,
+      event: input.event,
+      projectId: input.event.projectId,
+      projectName: input.event.projectName,
+    })
+  );
 }
 
 function applyTicketStatusChangedEvent(input: {
@@ -1202,108 +1084,355 @@ function applyTicketUpdatedEvent(input: {
     return;
   }
 
-  const title =
-    typeof input.event.payload.title === "string"
-      ? input.event.payload.title
-      : undefined;
-  const body =
-    typeof input.event.payload.body === "string"
-      ? input.event.payload.body
-      : undefined;
-  const dependsOn = readDependencyUpdate({
+  const next = buildTicketSummaryFromUpdate({
+    current,
     payload: input.event.payload,
+    tsIso: input.event.tsIso,
+  });
+  input.tickets.set(input.event.ticketId, next);
+}
+
+function normalizeTicketMetadata(input: {
+  readonly input: TicketOptionalMetadataInput;
+  readonly ownerFallback: string;
+  readonly sourceFallback: string;
+}): TicketNormalizedMetadata {
+  const metadata: Mutable<TicketNormalizedMetadata> = {
+    owner: normalizeOwnerOrSource({
+      value: input.input.owner,
+      fallback: input.ownerFallback,
+    }),
+    source: normalizeOwnerOrSource({
+      value: input.input.source,
+      fallback: input.sourceFallback,
+    }),
+    tags: normalizeTags(input.input.tags ?? []),
+  };
+
+  const assignee = normalizeOptionalMetadataString({
+    value: input.input.assignee,
+  });
+  if (assignee) {
+    metadata.assignee = assignee;
+  }
+
+  for (const key of TICKET_OPTIONAL_METADATA_KEYS) {
+    const value = normalizeOptionalMetadataString({
+      value: input.input[key],
+    });
+    if (value) {
+      metadata[key] = value;
+    }
+  }
+
+  return metadata;
+}
+
+function buildTicketCreatedPayload(input: {
+  readonly input: Pick<TicketCreateInput, "title" | "body">;
+  readonly dependsOn: readonly string[];
+  readonly blocks: readonly string[];
+  readonly metadata: TicketNormalizedMetadata;
+}): Record<string, unknown> {
+  return {
+    title: input.input.title,
+    ...(input.input.body ? { body: input.input.body } : {}),
+    ...(input.dependsOn.length > 0 ? { dependsOn: input.dependsOn } : {}),
+    ...(input.blocks.length > 0 ? { blocks: input.blocks } : {}),
+    ...serializeTicketMetadata({ metadata: input.metadata }),
+    status: "open",
+  };
+}
+
+function buildCreatedTicketSummary(input: {
+  readonly ticketId: string;
+  readonly input: Pick<TicketCreateInput, "title" | "body">;
+  readonly dependsOn: readonly string[];
+  readonly blocks: readonly string[];
+  readonly metadata: TicketNormalizedMetadata;
+  readonly event: TicketEvent;
+  readonly projectId?: string;
+  readonly projectName?: string;
+}): TicketSummary {
+  return {
+    ticketId: input.ticketId,
+    title: input.input.title,
+    ...(input.input.body ? { body: input.input.body } : {}),
+    status: "open",
+    createdAt: input.event.tsIso,
+    updatedAt: input.event.tsIso,
+    dependsOn: [...input.dependsOn],
+    blocks: [...input.blocks],
+    ...input.metadata,
+    ...(input.projectId ? { projectId: input.projectId } : {}),
+    ...(input.projectName ? { projectName: input.projectName } : {}),
+  };
+}
+
+function serializeTicketMetadata(input: {
+  readonly metadata: TicketNormalizedMetadata;
+}): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    owner: input.metadata.owner,
+    source: input.metadata.source,
+    ...(input.metadata.tags.length > 0 ? { tags: input.metadata.tags } : {}),
+  };
+
+  if (input.metadata.assignee) {
+    payload.assignee = input.metadata.assignee;
+  }
+
+  for (const key of TICKET_OPTIONAL_METADATA_KEYS) {
+    const value = input.metadata[key];
+    if (value) {
+      payload[key] = value;
+    }
+  }
+
+  return payload;
+}
+
+function buildTicketUpdatedPayload(input: {
+  readonly input: TicketUpdateInput;
+}):
+  | { readonly ok: true; readonly payload: Record<string, unknown> }
+  | { readonly ok: false; readonly error: string } {
+  const payload: Record<string, unknown> = {};
+
+  if (input.input.title !== undefined) {
+    const title = input.input.title.trim();
+    if (!title) {
+      return { ok: false, error: "Title cannot be empty." };
+    }
+    payload.title = title;
+  }
+
+  if (input.input.body !== undefined) {
+    payload.body = input.input.body;
+  }
+  if (input.input.dependsOn !== undefined) {
+    payload.dependsOn = normalizeTicketRefs(input.input.dependsOn);
+  }
+  if (input.input.blocks !== undefined) {
+    payload.blocks = normalizeTicketRefs(input.input.blocks);
+  }
+  if (input.input.tags !== undefined) {
+    payload.tags = normalizeTags(input.input.tags);
+  }
+
+  if (input.input.owner !== undefined) {
+    payload.owner = normalizeOwnerOrSource({
+      value: input.input.owner,
+      fallback: "hack",
+    });
+  }
+  if (input.input.source !== undefined) {
+    payload.source = normalizeOwnerOrSource({
+      value: input.input.source,
+      fallback: "hack",
+    });
+  }
+  if (input.input.assignee !== undefined) {
+    payload.assignee =
+      normalizeOptionalMetadataString({
+        value: input.input.assignee,
+      }) ?? null;
+  }
+
+  for (const key of TICKET_OPTIONAL_METADATA_KEYS) {
+    const value = input.input[key];
+    if (value !== undefined) {
+      payload[key] = normalizeOptionalMetadataString({ value });
+    }
+  }
+
+  if (Object.keys(payload).length === 0) {
+    return { ok: false, error: "No updates provided." };
+  }
+
+  return { ok: true, payload };
+}
+
+function buildTicketSyncCheckpointData(input: {
+  readonly input: TicketCheckpointInput;
+}):
+  | {
+      readonly ok: true;
+      readonly payload: Record<string, unknown>;
+      readonly checkpoint: Omit<TicketSyncCheckpoint, "actor" | "createdAt">;
+    }
+  | { readonly ok: false; readonly error: string } {
+  const provider = normalizeOptionalMetadataString({
+    value: input.input.provider,
+  });
+  if (!provider) {
+    return { ok: false, error: "Provider is required." };
+  }
+
+  const checkpointId = randomUUID();
+  const payload: Record<string, unknown> = {
+    checkpointId,
+    provider,
+  };
+  const checkpoint: Mutable<Omit<TicketSyncCheckpoint, "actor" | "createdAt">> =
+    {
+      checkpointId,
+      ticketId: input.input.ticketId,
+      provider,
+    };
+
+  for (const key of [
+    "profileId",
+    "direction",
+    "remoteCursor",
+    "remoteUpdatedAt",
+    "localUpdatedAt",
+  ] as const) {
+    const value = normalizeOptionalMetadataString({
+      value: input.input[key],
+    });
+    if (!value) {
+      continue;
+    }
+    payload[key] = value;
+    checkpoint[key] = value;
+  }
+
+  return { ok: true, payload, checkpoint };
+}
+
+function buildTicketSyncConflictData(input: {
+  readonly input: TicketConflictInput;
+}):
+  | {
+      readonly ok: true;
+      readonly payload: Record<string, unknown>;
+      readonly conflict: Omit<TicketSyncConflict, "createdAt" | "updatedAt">;
+    }
+  | { readonly ok: false; readonly error: string } {
+  const provider = normalizeOptionalMetadataString({
+    value: input.input.provider,
+  });
+  if (!provider) {
+    return { ok: false, error: "Provider is required." };
+  }
+
+  const field = normalizeOptionalMetadataString({
+    value: input.input.field,
+  });
+  if (!field) {
+    return { ok: false, error: "Field is required." };
+  }
+
+  const conflictId = randomUUID();
+  const authority = normalizeOptionalMetadataString({
+    value: input.input.authority,
+  });
+  const summary = normalizeOptionalMetadataString({
+    value: input.input.summary,
+  });
+  const payload: Record<string, unknown> = {
+    conflictId,
+    provider,
+    field,
+  };
+  const conflict: Mutable<Omit<TicketSyncConflict, "createdAt" | "updatedAt">> =
+    {
+      conflictId,
+      ticketId: input.input.ticketId,
+      provider,
+      field,
+      status: "open",
+    };
+
+  if (authority) {
+    payload.authority = authority;
+    conflict.authority = authority;
+  }
+  if (summary) {
+    payload.summary = summary;
+    conflict.summary = summary;
+  }
+
+  if (input.input.localValue !== undefined) {
+    payload.localValue = input.input.localValue;
+    conflict.localValue = input.input.localValue;
+  }
+  if (input.input.remoteValue !== undefined) {
+    payload.remoteValue = input.input.remoteValue;
+    conflict.remoteValue = input.input.remoteValue;
+  }
+
+  return { ok: true, payload, conflict };
+}
+
+function buildTicketSummaryFromUpdate(input: {
+  readonly current: TicketSummary;
+  readonly payload: Record<string, unknown>;
+  readonly tsIso: string;
+}): TicketSummary {
+  const updates: Mutable<Partial<TicketSummary>> = {
+    updatedAt: input.tsIso,
+  };
+  const title = readTicketTitleUpdate({ payload: input.payload });
+  if (title) {
+    updates.title = title;
+  }
+  const body = readTicketBodyUpdate({ payload: input.payload });
+  if (body !== null) {
+    updates.body = body || undefined;
+  }
+  const dependsOn = readDependencyUpdate({
+    payload: input.payload,
     key: "dependsOn",
   });
+  if (dependsOn !== null) {
+    updates.dependsOn = dependsOn;
+  }
   const blocks = readDependencyUpdate({
-    payload: input.event.payload,
+    payload: input.payload,
     key: "blocks",
   });
-  const owner = readOptionalStringUpdate({
-    payload: input.event.payload,
-    key: "owner",
-  });
-  const source = readOptionalStringUpdate({
-    payload: input.event.payload,
-    key: "source",
-  });
-  const assignee = readOptionalStringUpdate({
-    payload: input.event.payload,
-    key: "assignee",
-  });
+  if (blocks !== null) {
+    updates.blocks = blocks;
+  }
   const tags = readTagsUpdate({
-    payload: input.event.payload,
+    payload: input.payload,
     key: "tags",
   });
-  const externalSystem = readOptionalStringUpdate({
-    payload: input.event.payload,
-    key: "externalSystem",
-  });
-  const externalId = readOptionalStringUpdate({
-    payload: input.event.payload,
-    key: "externalId",
-  });
-  const externalKey = readOptionalStringUpdate({
-    payload: input.event.payload,
-    key: "externalKey",
-  });
-  const externalUrl = readOptionalStringUpdate({
-    payload: input.event.payload,
-    key: "externalUrl",
-  });
-  const externalProjectId = readOptionalStringUpdate({
-    payload: input.event.payload,
-    key: "externalProjectId",
-  });
-  const externalProjectName = readOptionalStringUpdate({
-    payload: input.event.payload,
-    key: "externalProjectName",
-  });
-  const externalTeamId = readOptionalStringUpdate({
-    payload: input.event.payload,
-    key: "externalTeamId",
-  });
+  if (tags !== null) {
+    updates.tags = tags;
+  }
 
-  input.tickets.set(input.event.ticketId, {
-    ...current,
-    ...(title ? { title } : {}),
-    ...(body !== undefined ? { body } : {}),
-    ...(dependsOn !== null ? { dependsOn } : {}),
-    ...(blocks !== null ? { blocks } : {}),
-    ...(owner !== null
-      ? {
-          owner: normalizeOwnerOrSource({
-            value: owner,
-            fallback: current.owner,
-          }),
-        }
-      : {}),
-    ...(source !== null
-      ? {
-          source: normalizeOwnerOrSource({
-            value: source,
-            fallback: current.source,
-          }),
-        }
-      : {}),
-    ...(assignee !== null ? { assignee: assignee || undefined } : {}),
-    ...(tags !== null ? { tags } : {}),
-    ...(externalSystem !== null
-      ? { externalSystem: externalSystem || undefined }
-      : {}),
-    ...(externalId !== null ? { externalId: externalId || undefined } : {}),
-    ...(externalKey !== null ? { externalKey: externalKey || undefined } : {}),
-    ...(externalUrl !== null ? { externalUrl: externalUrl || undefined } : {}),
-    ...(externalProjectId !== null
-      ? { externalProjectId: externalProjectId || undefined }
-      : {}),
-    ...(externalProjectName !== null
-      ? { externalProjectName: externalProjectName || undefined }
-      : {}),
-    ...(externalTeamId !== null
-      ? { externalTeamId: externalTeamId || undefined }
-      : {}),
-    updatedAt: input.event.tsIso,
-  });
+  for (const key of TICKET_OPTIONAL_UPDATE_KEYS) {
+    const value = readOptionalStringUpdate({
+      payload: input.payload,
+      key,
+    });
+    if (value === null) {
+      continue;
+    }
+    if (key === "owner") {
+      updates.owner = normalizeOwnerOrSource({
+        value,
+        fallback: input.current.owner,
+      });
+      continue;
+    }
+    if (key === "source") {
+      updates.source = normalizeOwnerOrSource({
+        value,
+        fallback: input.current.source,
+      });
+      continue;
+    }
+    updates[key] = value || undefined;
+  }
+
+  return {
+    ...input.current,
+    ...updates,
+  };
 }
 
 function applyTicketCommentAppendedEvent(input: {
@@ -1619,19 +1748,30 @@ function readTagsUpdate(input: {
   return parseTags({ value: input.payload[input.key] });
 }
 
+function readTicketTitleUpdate(input: {
+  readonly payload: Record<string, unknown>;
+}): string | undefined {
+  if (typeof input.payload.title !== "string") {
+    return undefined;
+  }
+  return input.payload.title;
+}
+
+function readTicketBodyUpdate(input: {
+  readonly payload: Record<string, unknown>;
+}): string | null {
+  if (!Object.hasOwn(input.payload, "body")) {
+    return null;
+  }
+  if (typeof input.payload.body !== "string") {
+    return "";
+  }
+  return input.payload.body;
+}
+
 function readOptionalStringUpdate(input: {
   readonly payload: Record<string, unknown>;
-  readonly key:
-    | "assignee"
-    | "owner"
-    | "source"
-    | "externalSystem"
-    | "externalId"
-    | "externalKey"
-    | "externalUrl"
-    | "externalProjectId"
-    | "externalProjectName"
-    | "externalTeamId";
+  readonly key: TicketOptionalUpdateKey;
 }): string | null {
   if (!Object.hasOwn(input.payload, input.key)) {
     return null;

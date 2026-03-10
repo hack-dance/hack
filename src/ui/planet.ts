@@ -67,12 +67,19 @@ export async function playPlanetAnimation(opts: {
     return true;
   }
 
-  const lipgloss = await loadLipgloss();
-  const prepared = animations.map((anim) => ({
+  return await playTerminalPlanetAnimations({ animations, loop: opts.loop });
+}
+
+async function playTerminalPlanetAnimations(opts: {
+  readonly animations: readonly PlanetAnimation[];
+  readonly loop: boolean;
+}): Promise<boolean> {
+  const animations = opts.animations.map((anim) => ({
     anim,
     metrics: computeFrameMetrics(anim.frames),
   }));
 
+  const lipgloss = await loadLipgloss();
   const banner = lipgloss ? buildPlanetBanner(lipgloss) : null;
   const renderFrame = (opts: RenderFrameOptions) =>
     renderPlanetFrame({ ...opts, banner });
@@ -85,31 +92,13 @@ export async function playPlanetAnimation(opts: {
     process.stdout.write("\x1b[0m\x1b[H\x1b[J");
 
     do {
-      for (const { anim, metrics } of prepared) {
-        const frameMs = Math.max(1, Math.round(1000 / anim.fps));
-        for (const frame of anim.frames) {
-          if (stop.shouldStop()) {
-            break;
-          }
-
-          // Reset styles before clearing to avoid per-frame ANSI state leaking into the border.
-          process.stdout.write("\x1b[0m\x1b[H\x1b[J");
-          const size = readTerminalSize();
-          process.stdout.write(
-            renderFrame({
-              frame,
-              contentWidth: metrics.width,
-              contentHeight: metrics.height,
-              cols: size.cols ?? undefined,
-              rows: size.rows ?? undefined,
-            })
-          );
-
-          await sleep(frameMs);
-        }
-        if (stop.shouldStop()) {
-          break;
-        }
+      const completed = await playLegacyFrameSequence({
+        animations,
+        shouldStop: stop.shouldStop,
+        renderFrame,
+      });
+      if (!completed) {
+        break;
       }
     } while (opts.loop && !stop.shouldStop());
   } finally {
@@ -213,51 +202,17 @@ async function playCompositedAnimations(opts: {
   try {
     process.stdout.write("\x1b[0m\x1b[H\x1b[J");
     do {
-      for (const anim of opts.animations) {
-        const frameMs = Math.max(1, Math.round(1000 / anim.fps));
-        for (const frame of anim.frames) {
-          if (stop.shouldStop()) {
-            break;
-          }
-          const contentLines = fitFrameToArea({
-            frame,
-            width: videoBox.innerWidth,
-            height: videoBox.innerHeight,
-          });
-          const panelLines = opts.layout.panel
-            ? renderPanelFrame({
-                tick,
-                seed,
-                panel: opts.layout.panel,
-                theme,
-              })
-            : null;
-
-          const screen = renderCompositedFrame({
-            layout: opts.layout,
-            theme,
-            tick,
-            contentLines,
-            panelLines,
-            videoBox,
-          });
-          process.stdout.write(`\x1b[H${screen}`);
-          if (shouldShowOverlay(tick)) {
-            const overlay = renderOverlayFrame({
-              tick,
-              layout: opts.layout,
-              theme,
-            });
-            if (overlay) {
-              writeOverlayFrame(overlay);
-            }
-          }
-          await sleep(frameMs);
-          tick += 1;
-        }
-        if (stop.shouldStop()) {
-          break;
-        }
+      tick = await playCompositedAnimationLoop({
+        animations: opts.animations,
+        layout: opts.layout,
+        theme,
+        videoBox,
+        seed,
+        tick,
+        shouldStop: stop.shouldStop,
+      });
+      if (stop.shouldStop()) {
+        break;
       }
     } while (opts.loop && !stop.shouldStop());
   } finally {
@@ -266,6 +221,119 @@ async function playCompositedAnimations(opts: {
   }
 
   return true;
+}
+
+async function playLegacyFrameSequence(input: {
+  readonly animations: ReadonlyArray<{
+    readonly anim: PlanetAnimation;
+    readonly metrics: { readonly width: number; readonly height: number };
+  }>;
+  readonly shouldStop: () => boolean;
+  readonly renderFrame: (opts: RenderFrameOptions) => string;
+}): Promise<boolean> {
+  for (const { anim, metrics } of input.animations) {
+    const frameMs = Math.max(1, Math.round(1000 / anim.fps));
+    for (const frame of anim.frames) {
+      if (input.shouldStop()) {
+        return false;
+      }
+      process.stdout.write("\x1b[0m\x1b[H\x1b[J");
+      const size = readTerminalSize();
+      process.stdout.write(
+        input.renderFrame({
+          frame,
+          contentWidth: metrics.width,
+          contentHeight: metrics.height,
+          cols: size.cols ?? undefined,
+          rows: size.rows ?? undefined,
+        })
+      );
+      await sleep(frameMs);
+    }
+  }
+  return true;
+}
+
+async function playCompositedAnimationLoop(input: {
+  readonly animations: readonly PlanetAnimation[];
+  readonly layout: ChafaLayout;
+  readonly theme: PlanetTheme;
+  readonly videoBox: VideoBox;
+  readonly seed: number;
+  readonly tick: number;
+  readonly shouldStop: () => boolean;
+}): Promise<number> {
+  let nextTick = input.tick;
+  for (const anim of input.animations) {
+    const frameMs = Math.max(1, Math.round(1000 / anim.fps));
+    for (const frame of anim.frames) {
+      if (input.shouldStop()) {
+        return nextTick;
+      }
+      renderCompositedAnimationFrame({
+        frame,
+        layout: input.layout,
+        theme: input.theme,
+        videoBox: input.videoBox,
+        seed: input.seed,
+        tick: nextTick,
+      });
+      await sleep(frameMs);
+      nextTick += 1;
+    }
+  }
+  return nextTick;
+}
+
+function renderCompositedAnimationFrame(input: {
+  readonly frame: string;
+  readonly layout: ChafaLayout;
+  readonly theme: PlanetTheme;
+  readonly videoBox: VideoBox;
+  readonly seed: number;
+  readonly tick: number;
+}): void {
+  const contentLines = fitFrameToArea({
+    frame: input.frame,
+    width: input.videoBox.innerWidth,
+    height: input.videoBox.innerHeight,
+  });
+  const panelLines = input.layout.panel
+    ? renderPanelFrame({
+        tick: input.tick,
+        seed: input.seed,
+        panel: input.layout.panel,
+        theme: input.theme,
+      })
+    : null;
+  const screen = renderCompositedFrame({
+    layout: input.layout,
+    theme: input.theme,
+    tick: input.tick,
+    contentLines,
+    panelLines,
+    videoBox: input.videoBox,
+  });
+  process.stdout.write(`\x1b[H${screen}`);
+  writeOverlayIfNeeded({
+    tick: input.tick,
+    layout: input.layout,
+    theme: input.theme,
+  });
+}
+
+function writeOverlayIfNeeded(input: {
+  readonly tick: number;
+  readonly layout: ChafaLayout;
+  readonly theme: PlanetTheme;
+}): void {
+  if (!shouldShowOverlay(input.tick)) {
+    return;
+  }
+  const overlay = renderOverlayFrame(input);
+  if (overlay) {
+    writeOverlayFrame(overlay);
+  }
 }
 
 type ChafaEntry = {
@@ -1132,16 +1200,14 @@ function renderTvFrameLegacy(opts: RenderFrameOptions): string {
 
   const desiredPadX = 4;
   const desiredPadY = 1;
-
-  const maxPadX = cols
-    ? Math.max(0, Math.floor((cols - contentWidth - 2) / 2))
-    : desiredPadX;
-  const maxPadY = rows
-    ? Math.max(0, Math.floor((rows - contentHeight - 2) / 2))
-    : desiredPadY;
-
-  const padX = Math.min(desiredPadX, maxPadX);
-  const padY = Math.min(desiredPadY, maxPadY);
+  const { padX, padY } = resolveTvPadding({
+    cols,
+    rows,
+    contentWidth,
+    contentHeight,
+    desiredPadX,
+    desiredPadY,
+  });
 
   const innerWidth = contentWidth + padX * 2;
   const outerWidth = innerWidth + 2;
@@ -1149,27 +1215,15 @@ function renderTvFrameLegacy(opts: RenderFrameOptions): string {
 
   // If the terminal is too small to fit the border, just center the raw frame.
   if (
-    (cols !== null && contentWidth > cols) ||
-    (rows !== null && contentHeight > rows)
+    shouldCenterRawFrame({
+      cols,
+      rows,
+      contentWidth,
+      contentHeight,
+      outerWidth,
+      outerHeight,
+    })
   ) {
-    return centerRaw({
-      lines,
-      width: contentWidth,
-      height: contentHeight,
-      cols,
-      rows,
-    });
-  }
-  if (cols !== null && outerWidth > cols) {
-    return centerRaw({
-      lines,
-      width: contentWidth,
-      height: contentHeight,
-      cols,
-      rows,
-    });
-  }
-  if (rows !== null && outerHeight > rows) {
     return centerRaw({
       lines,
       width: contentWidth,
@@ -1210,6 +1264,48 @@ function renderTvFrameLegacy(opts: RenderFrameOptions): string {
   out.push(`${reset}${margin}╰${h}╯${reset}`);
 
   return out.join("\n");
+}
+
+function resolveTvPadding(input: {
+  readonly cols: number | null;
+  readonly rows: number | null;
+  readonly contentWidth: number;
+  readonly contentHeight: number;
+  readonly desiredPadX: number;
+  readonly desiredPadY: number;
+}): { readonly padX: number; readonly padY: number } {
+  const maxPadX =
+    input.cols !== null
+      ? Math.max(0, Math.floor((input.cols - input.contentWidth - 2) / 2))
+      : input.desiredPadX;
+  const maxPadY =
+    input.rows !== null
+      ? Math.max(0, Math.floor((input.rows - input.contentHeight - 2) / 2))
+      : input.desiredPadY;
+  return {
+    padX: Math.min(input.desiredPadX, maxPadX),
+    padY: Math.min(input.desiredPadY, maxPadY),
+  };
+}
+
+function shouldCenterRawFrame(input: {
+  readonly cols: number | null;
+  readonly rows: number | null;
+  readonly contentWidth: number;
+  readonly contentHeight: number;
+  readonly outerWidth: number;
+  readonly outerHeight: number;
+}): boolean {
+  if (input.cols !== null && input.contentWidth > input.cols) {
+    return true;
+  }
+  if (input.rows !== null && input.contentHeight > input.rows) {
+    return true;
+  }
+  if (input.cols !== null && input.outerWidth > input.cols) {
+    return true;
+  }
+  return input.rows !== null && input.outerHeight > input.rows;
 }
 
 function centerRaw(opts: {

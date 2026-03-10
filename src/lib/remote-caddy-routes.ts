@@ -403,6 +403,7 @@ function resolveRemoteRouteBridgePaths(input: {
   };
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Remote route registry parsing must repair historical file shapes and tolerate partial writes from multiple producers.
 async function readRemoteRouteRegistry(input: {
   readonly registryPath: string;
 }): Promise<RemoteRouteRegistry> {

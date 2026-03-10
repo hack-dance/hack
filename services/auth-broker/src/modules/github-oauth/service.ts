@@ -144,6 +144,7 @@ export async function refreshFlowInstallationsIfNeeded(input: {
 /**
  * Complete OAuth callback flow and return browser-facing HTML response.
  */
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: The callback handler must preserve the full OAuth/browser recovery contract across missing state, exchange failures, identity lookup, and install-required flows.
 export async function handleGitHubCallback(input: {
   readonly config: BrokerConfig;
   readonly flowStore: FlowStore;

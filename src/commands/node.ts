@@ -9,6 +9,17 @@ import {
 } from "node:fs/promises";
 import { homedir, hostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import {
+  DescribeInstancesCommand,
+  EC2Client,
+  StartInstancesCommand,
+} from "@aws-sdk/client-ec2";
+import {
+  DescribeInstanceInformationCommand,
+  GetCommandInvocationCommand,
+  SendCommandCommand,
+  SSMClient,
+} from "@aws-sdk/client-ssm";
 import { confirm, isCancel, text } from "@clack/prompts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
@@ -71,6 +82,8 @@ const DEFAULT_RAILWAY_GATEWAY_PORT = DEFAULT_NODE_GATEWAY_PORT;
 const DEFAULT_RAILWAY_BOOTSTRAP_RETRIES = 6;
 const DEFAULT_RAILWAY_BOOTSTRAP_DELAY_MS = 5000;
 const DEFAULT_RAILWAY_TAILSCALE_SOCKET = "/tmp/tailscaled.sock";
+const DEFAULT_AWS_BOOTSTRAP_RETRIES = 40;
+const DEFAULT_AWS_BOOTSTRAP_DELAY_MS = 250;
 const RAILWAY_SERVICE_NAME_PATTERN = /[^a-z0-9-]+/g;
 const TRAILING_DOT_PATTERN = /\.$/;
 const NODE_AUTH_LOOKUP_TTL_MS = 60_000;
@@ -383,6 +396,54 @@ const optRailwayPrivate = defineOption({
   long: "--railway-private",
   description:
     "Use private networking bootstrap (skip public domain generation; prefer Tailscale endpoint)",
+} as const);
+
+const optAwsInstanceId = defineOption({
+  name: "instanceId",
+  type: "string",
+  long: "--instance-id",
+  valueHint: "<id>",
+  description: "EC2 instance id to bootstrap",
+} as const);
+
+const optAwsInstanceTagKey = defineOption({
+  name: "instanceTagKey",
+  type: "string",
+  long: "--instance-tag-key",
+  valueHint: "<key>",
+  description: "EC2 tag key used with --instance-tag-value (default: Name)",
+} as const);
+
+const optAwsInstanceTagValue = defineOption({
+  name: "instanceTagValue",
+  type: "string",
+  long: "--instance-tag-value",
+  valueHint: "<value>",
+  description: "EC2 tag value used to discover the bootstrap target",
+} as const);
+
+const optAwsRegion = defineOption({
+  name: "region",
+  type: "string",
+  long: "--region",
+  valueHint: "<region>",
+  description: "AWS region for EC2 + SSM operations",
+} as const);
+
+const optAwsProfile = defineOption({
+  name: "profile",
+  type: "string",
+  long: "--profile",
+  valueHint: "<profile>",
+  description: "Optional AWS shared credentials profile",
+} as const);
+
+const optAwsBootstrapCommand = defineOption({
+  name: "bootstrapCommand",
+  type: "string",
+  long: "--bootstrap-command",
+  valueHint: "<shell-command>",
+  description: "Optional shell command to run over SSM before node init",
 } as const);
 
 const optTailscaleAuthKey = defineOption({
@@ -790,6 +851,15 @@ const providerRailwaySpec = defineCommand({
   subcommands: [],
 } as const);
 
+const providerAwsSpec = defineCommand({
+  name: "aws",
+  summary: "Bootstrap and register nodes hosted on AWS",
+  group: "Extensions",
+  options: [],
+  positionals: [],
+  subcommands: [],
+} as const);
+
 const providerRailwayBootstrapSpec = defineCommand({
   name: "bootstrap",
   summary: "Create/configure Railway service and register it as a node",
@@ -812,6 +882,46 @@ const providerRailwayBootstrapSpec = defineCommand({
     optTailscaleAuthKey,
     optTailscaleHostname,
     optTailscaleTags,
+    optJson,
+  ],
+  positionals: [],
+  subcommands: [],
+} as const);
+
+const providerAwsBootstrapSpec = defineCommand({
+  name: "bootstrap",
+  summary: "Bootstrap an EC2 instance over SSM and register it as a node",
+  group: "Extensions",
+  options: [
+    optAwsInstanceId,
+    optAwsInstanceTagKey,
+    optAwsInstanceTagValue,
+    optAwsRegion,
+    optAwsProfile,
+    optAwsBootstrapCommand,
+    optSource,
+    optName,
+    optEndpoint,
+    optLabels,
+    optDefault,
+    optJson,
+  ],
+  positionals: [],
+  subcommands: [],
+} as const);
+
+const providerAwsInspectSpec = defineCommand({
+  name: "inspect",
+  summary: "Inspect AWS bootstrap defaults and target instance readiness",
+  group: "Extensions",
+  options: [
+    optAwsInstanceId,
+    optAwsInstanceTagKey,
+    optAwsInstanceTagValue,
+    optAwsRegion,
+    optAwsProfile,
+    optSource,
+    optEndpoint,
     optJson,
   ],
   positionals: [],
@@ -923,6 +1033,14 @@ type DevcontainerAttachArgs = CommandArgs<
 type ProviderRailwayBootstrapArgs = CommandArgs<
   typeof providerRailwayBootstrapSpec.options,
   typeof providerRailwayBootstrapSpec.positionals
+>;
+type ProviderAwsBootstrapArgs = CommandArgs<
+  typeof providerAwsBootstrapSpec.options,
+  typeof providerAwsBootstrapSpec.positionals
+>;
+type ProviderAwsInspectArgs = CommandArgs<
+  typeof providerAwsInspectSpec.options,
+  typeof providerAwsInspectSpec.positionals
 >;
 
 type NodeEnrollmentBundle = {
@@ -1077,6 +1195,34 @@ export const nodeCommand = withHandler(
                 return 0;
               }
             ),
+            withHandler(
+              defineCommand({
+                ...providerAwsSpec,
+                subcommands: [
+                  withHandler(
+                    providerAwsBootstrapSpec,
+                    handleNodeProviderAwsBootstrap
+                  ),
+                  withHandler(
+                    providerAwsInspectSpec,
+                    handleNodeProviderAwsInspect
+                  ),
+                ],
+              } as const),
+              async () => {
+                await display.panel({
+                  title: "Node provider aws commands",
+                  tone: "info",
+                  lines: [
+                    "hack node provider aws bootstrap --instance-id <i-...> --region <region> --source <user@host> --endpoint <url> [--name <node-name>] [--default]",
+                    "hack node provider aws bootstrap --instance-tag-value <value> --instance-tag-key Name --region <region> --source <user@host> --endpoint <url>",
+                    "hack node provider aws bootstrap --instance-id <i-...> --region <region> --bootstrap-command 'sudo systemctl start hack-node'",
+                    "hack node provider aws inspect --instance-id <i-...> --region <region> --json",
+                  ],
+                });
+                return 0;
+              }
+            ),
           ],
         } as const),
         async () => {
@@ -1085,6 +1231,8 @@ export const nodeCommand = withHandler(
             tone: "info",
             lines: [
               "hack node provider railway bootstrap --railway-project <id|name> [--railway-service <service>|--create-service] [--railway-private --tailscale-auth-key <key>]",
+              "hack node provider aws bootstrap --instance-id <i-...>|--instance-tag-value <value> --region <region> --source <user@host> --endpoint <url>",
+              "hack node provider aws inspect [--instance-id <i-...>|--instance-tag-value <value>] [--region <region>]",
             ],
           });
           return 0;
@@ -1296,112 +1444,183 @@ async function handleNodeEnsure({
   readonly ctx: CliContext;
   readonly args: EnsureArgs;
 }): Promise<number> {
-  const authRef = (args.options.authRef ?? "").trim();
-  if (!authRef) {
-    logger.error({ message: "Missing --auth-ref <ref>." });
-    return 1;
-  }
-  const name = (args.options.name ?? hostname()).trim();
-  if (!name) {
-    logger.error({ message: "Missing node name. Pass --name." });
-    return 1;
-  }
-
-  const gateway = await resolveGatewayConfig();
-  if (!gateway.config.enabled) {
-    logger.error({
-      message:
-        "Gateway is not enabled on this host. Run `hack gateway enable` in a project first.",
-    });
-    return 1;
-  }
-
-  const endpointRaw =
-    args.options.endpoint?.trim() ||
-    buildDefaultEndpoint({
-      bind: gateway.config.bind,
-      port: gateway.config.port,
-    });
-  const endpoint = endpointRaw.replace(TRAILING_SLASH_PATTERN, "");
-  if (!isHttpUrl(endpoint)) {
-    logger.error({ message: "Invalid --endpoint. Expected http(s) URL." });
+  const resolved = await resolveNodeEnsureInputs({ args });
+  if (!resolved.ok) {
+    logger.error({ message: resolved.error });
     return 1;
   }
 
   const registry = await readNodesRegistry();
   const existing =
-    registry.nodes.find((node) => node.authRef === authRef) ?? null;
+    registry.nodes.find((node) => node.authRef === resolved.authRef) ?? null;
   const prepared = await upsertNodeRecord({
     id: existing?.id,
-    name,
+    name: resolved.name,
     source: existing?.source,
     labels:
       args.options.labels !== undefined
         ? parseCsv(args.options.labels)
         : (existing?.labels ?? []),
     capabilities: existing?.capabilities ?? [...DEFAULT_NODE_CAPABILITIES],
-    endpoint,
-    authRef,
+    endpoint: resolved.endpoint,
+    authRef: resolved.authRef,
     status: existing?.status ?? "unknown",
     version: existing?.version,
     platform: existing?.platform,
     arch: existing?.arch,
   });
 
-  let mintedToken: string | undefined;
-  let verification = await verifyNodeAuth({
+  const repaired = await ensureNodeVerification({
     node: prepared.node,
+    authRef: resolved.authRef,
+    name: resolved.name,
   });
-  if (!(verification.ok || verification.state === "unreachable")) {
-    const issued = await issueNodeAuthToken({
-      authRef,
-      name,
-    });
-    if (!issued.ok) {
-      logger.error({ message: issued.error });
-      return 1;
-    }
-    mintedToken = issued.token;
-    verification = await verifyNodeAuth({
-      node: prepared.node,
-    });
+  if (!repaired.ok) {
+    logger.error({ message: repaired.error });
+    return 1;
   }
 
   if (args.options.defaultNode === true) {
     await setDefaultNode({ id: prepared.node.id });
   }
 
-  const ok = verification.ok;
-  const nodeForOutput = verification.ok ? verification.node : prepared.node;
+  return await renderNodeEnsureResult({
+    args,
+    created: prepared.created,
+    verification: repaired.verification,
+    node: prepared.node,
+    token: repaired.token,
+  });
+}
+
+async function resolveNodeEnsureInputs(input: {
+  readonly args: EnsureArgs;
+}): Promise<
+  | {
+      readonly ok: true;
+      readonly authRef: string;
+      readonly name: string;
+      readonly endpoint: string;
+    }
+  | { readonly ok: false; readonly error: string }
+> {
+  const authRef = (input.args.options.authRef ?? "").trim();
+  if (!authRef) {
+    return { ok: false, error: "Missing --auth-ref <ref>." };
+  }
+  const name = (input.args.options.name ?? hostname()).trim();
+  if (!name) {
+    return { ok: false, error: "Missing node name. Pass --name." };
+  }
+
+  const gateway = await resolveGatewayConfig();
+  if (!gateway.config.enabled) {
+    return {
+      ok: false,
+      error:
+        "Gateway is not enabled on this host. Run `hack gateway enable` in a project first.",
+    };
+  }
+
+  const endpointRaw =
+    input.args.options.endpoint?.trim() ||
+    buildDefaultEndpoint({
+      bind: gateway.config.bind,
+      port: gateway.config.port,
+    });
+  const endpoint = endpointRaw.replace(TRAILING_SLASH_PATTERN, "");
+  if (!isHttpUrl(endpoint)) {
+    return {
+      ok: false,
+      error: "Invalid --endpoint. Expected http(s) URL.",
+    };
+  }
+
+  return {
+    ok: true,
+    authRef,
+    name,
+    endpoint,
+  };
+}
+
+async function ensureNodeVerification(input: {
+  readonly node: NodeRecord;
+  readonly authRef: string;
+  readonly name: string;
+}): Promise<
+  | {
+      readonly ok: true;
+      readonly verification: Awaited<ReturnType<typeof verifyNodeAuth>>;
+      readonly token?: string;
+    }
+  | { readonly ok: false; readonly error: string }
+> {
+  let mintedToken: string | undefined;
+  let verification = await verifyNodeAuth({
+    node: input.node,
+  });
+  if (!(verification.ok || verification.state === "unreachable")) {
+    const issued = await issueNodeAuthToken({
+      authRef: input.authRef,
+      name: input.name,
+    });
+    if (!issued.ok) {
+      return { ok: false, error: issued.error };
+    }
+    mintedToken = issued.token;
+    verification = await verifyNodeAuth({
+      node: input.node,
+    });
+  }
+
+  return {
+    ok: true,
+    verification,
+    ...(mintedToken ? { token: mintedToken } : {}),
+  };
+}
+
+async function renderNodeEnsureResult(input: {
+  readonly args: EnsureArgs;
+  readonly created: boolean;
+  readonly verification: Awaited<ReturnType<typeof verifyNodeAuth>>;
+  readonly node: NodeRecord;
+  readonly token?: string;
+}): Promise<number> {
+  const ok = input.verification.ok;
+  const nodeForOutput = input.verification.ok
+    ? input.verification.node
+    : input.node;
   const payload = {
     ok,
-    created: prepared.created,
+    created: input.created,
     node: nodeForOutput,
     probe: {
       ok,
-      state: verification.state,
-      ...(verification.ok ? {} : { error: verification.error }),
+      state: input.verification.state,
+      ...(input.verification.ok ? {} : { error: input.verification.error }),
     },
-    ...(mintedToken ? { token: mintedToken } : {}),
+    ...(input.token ? { token: input.token } : {}),
   };
 
-  if (args.options.json) {
+  if (input.args.options.json) {
     process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
     return ok ? 0 : 1;
   }
 
   await display.kv({
-    title: prepared.created ? "Node ensured" : "Node reused",
+    title: input.created ? "Node ensured" : "Node reused",
     entries: [
       ["id", nodeForOutput.id],
       ["name", nodeForOutput.name],
       ["endpoint", nodeForOutput.endpoint],
-      ["status", verification.state],
-      ["default", args.options.defaultNode ? "yes" : "no"],
+      ["status", input.verification.state],
+      ["default", input.args.options.defaultNode ? "yes" : "no"],
     ],
   });
-  if (!(ok || !verification.error)) {
-    logger.error({ message: verification.error });
+  if (!(ok || !input.verification.error)) {
+    logger.error({ message: input.verification.error });
   }
   return ok ? 0 : 1;
 }
@@ -3503,6 +3722,19 @@ type RailwayBootstrapConfigDefaults = {
   readonly initRetries?: number;
 };
 
+type AwsBootstrapConfigDefaults = {
+  readonly instanceId?: string;
+  readonly instanceTagKey?: string;
+  readonly instanceTagValue?: string;
+  readonly region?: string;
+  readonly profile?: string;
+  readonly bootstrapCommand?: string;
+  readonly endpoint?: string;
+  readonly source?: string;
+  readonly nodeName?: string;
+  readonly labelsCsv?: string;
+};
+
 async function resolveRailwayBootstrapConfigDefaults(input: {
   readonly cwd: string;
 }): Promise<RailwayBootstrapConfigDefaults> {
@@ -3639,6 +3871,1001 @@ function resolveRailwayConfigInteger(input: {
   );
 }
 
+async function resolveAwsBootstrapConfigDefaults(input: {
+  readonly cwd: string;
+}): Promise<AwsBootstrapConfigDefaults> {
+  const project = await findProjectContext(input.cwd);
+  const controlPlane = await readControlPlaneConfig({
+    ...(project ? { projectDir: project.projectDir } : {}),
+  });
+  const route = resolveDispatchRoute({
+    config: controlPlane.config,
+    commandProvider: "aws",
+    commandBootstrapIfNeeded: true,
+  });
+  const routeConfig =
+    route.providerRoute.provider === "aws"
+      ? route.providerRoute.effectiveConfig
+      : {};
+
+  const extensions = controlPlane.config.extensions;
+  const awsExtension = extensions["dance.hack.aws"];
+  let extensionConfig: Record<string, unknown> = {};
+  if (isRecord(awsExtension) && isRecord(awsExtension.config)) {
+    extensionConfig = awsExtension.config;
+  }
+
+  return {
+    instanceId: resolveAwsConfigString({
+      routeConfig,
+      extensionConfig,
+      key: "instanceId",
+    }),
+    instanceTagKey: resolveAwsConfigString({
+      routeConfig,
+      extensionConfig,
+      key: "instanceTagKey",
+    }),
+    instanceTagValue: resolveAwsConfigString({
+      routeConfig,
+      extensionConfig,
+      key: "instanceTagValue",
+    }),
+    region: resolveAwsConfigString({
+      routeConfig,
+      extensionConfig,
+      key: "region",
+    }),
+    profile: resolveAwsConfigString({
+      routeConfig,
+      extensionConfig,
+      key: "profile",
+    }),
+    bootstrapCommand: resolveAwsConfigString({
+      routeConfig,
+      extensionConfig,
+      key: "bootstrapCommand",
+    }),
+    endpoint: resolveAwsConfigString({
+      routeConfig,
+      extensionConfig,
+      key: "endpoint",
+    }),
+    source: resolveAwsConfigString({
+      routeConfig,
+      extensionConfig,
+      key: "source",
+    }),
+    nodeName: resolveAwsConfigString({
+      routeConfig,
+      extensionConfig,
+      key: "nodeName",
+    }),
+    labelsCsv: resolveAwsConfigString({
+      routeConfig,
+      extensionConfig,
+      key: "labelsCsv",
+    }),
+  };
+}
+
+function resolveAwsConfigString(input: {
+  readonly routeConfig: Record<string, unknown>;
+  readonly extensionConfig: Record<string, unknown>;
+  readonly key: string;
+}): string | undefined {
+  return (
+    getOptionalString(input.routeConfig[input.key]) ??
+    getOptionalString(input.extensionConfig[input.key])
+  );
+}
+
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: AWS diagnostics intentionally resolve defaults, credentials, target selection, and SSM readiness in one operator-facing probe.
+async function inspectAwsBootstrap(input: {
+  readonly cwd: string;
+  readonly options: {
+    readonly instanceId?: string;
+    readonly instanceTagKey?: string;
+    readonly instanceTagValue?: string;
+    readonly region?: string;
+    readonly profile?: string;
+    readonly source?: string;
+    readonly endpoint?: string;
+  };
+}): Promise<{
+  readonly provider: "aws";
+  readonly selectorSummary: string;
+  readonly config: {
+    readonly instanceId?: string;
+    readonly instanceTagKey?: string;
+    readonly instanceTagValue?: string;
+    readonly region?: string;
+    readonly profile?: string;
+    readonly source?: string;
+    readonly endpoint?: string;
+    readonly endpointValid: boolean;
+  };
+  readonly canBootstrap: boolean;
+  readonly issues: readonly string[];
+  readonly target?: {
+    readonly resolved: boolean;
+    readonly instanceId?: string;
+    readonly state?: string;
+    readonly ssmOnline?: boolean;
+    readonly error?: string;
+  };
+}> {
+  const defaults = await resolveAwsBootstrapConfigDefaults({
+    cwd: input.cwd,
+  });
+  const instanceId =
+    getOptionalString(input.options.instanceId)?.trim() ?? defaults.instanceId;
+  const instanceTagKey =
+    getOptionalString(input.options.instanceTagKey)?.trim() ??
+    defaults.instanceTagKey ??
+    "Name";
+  const instanceTagValue =
+    getOptionalString(input.options.instanceTagValue)?.trim() ??
+    defaults.instanceTagValue;
+  const region =
+    getOptionalString(input.options.region)?.trim() ?? defaults.region;
+  const profile =
+    getOptionalString(input.options.profile)?.trim() ?? defaults.profile;
+  const source =
+    getOptionalString(input.options.source)?.trim() ?? defaults.source;
+  const endpoint =
+    getOptionalString(input.options.endpoint)?.trim() ?? defaults.endpoint;
+  const endpointValid = !!endpoint && isHttpUrl(endpoint);
+  const selectorCount = (instanceId ? 1 : 0) + (instanceTagValue ? 1 : 0);
+  const issues: string[] = [];
+
+  if (selectorCount !== 1) {
+    issues.push(
+      "Configure exactly one selector: instance id or instance tag value."
+    );
+  }
+  if (!region) {
+    issues.push("Missing region.");
+  }
+  if (!source) {
+    issues.push("Missing SSH source.");
+  }
+  if (!endpoint) {
+    issues.push("Missing gateway endpoint.");
+  } else if (!endpointValid) {
+    issues.push("Gateway endpoint is not a valid http(s) URL.");
+  }
+
+  let selectorSummary = "missing";
+  if (instanceId) {
+    selectorSummary = `instance-id:${instanceId}`;
+  } else if (instanceTagValue) {
+    selectorSummary = `tag:${instanceTagKey}=${instanceTagValue}`;
+  }
+
+  const config = {
+    ...(instanceId ? { instanceId } : {}),
+    ...(instanceTagKey ? { instanceTagKey } : {}),
+    ...(instanceTagValue ? { instanceTagValue } : {}),
+    ...(region ? { region } : {}),
+    ...(profile ? { profile } : {}),
+    ...(source ? { source } : {}),
+    ...(endpoint ? { endpoint } : {}),
+    endpointValid,
+  };
+
+  if (!(region && selectorCount === 1)) {
+    return {
+      provider: "aws",
+      selectorSummary,
+      config,
+      canBootstrap: issues.length === 0,
+      issues,
+    };
+  }
+
+  const credentials = profile
+    ? (await import("@aws-sdk/credential-providers")).fromIni({
+        profile,
+      })
+    : undefined;
+  const ec2 = new EC2Client({
+    region,
+    ...(credentials ? { credentials } : {}),
+  });
+  const ssm = new SSMClient({
+    region,
+    ...(credentials ? { credentials } : {}),
+  });
+
+  const instance = await resolveAwsBootstrapInstance({
+    ec2,
+    instanceId: instanceId ?? "",
+    instanceTagKey,
+    instanceTagValue: instanceTagValue ?? "",
+  });
+  if (!instance.ok) {
+    issues.push(instance.error);
+    return {
+      provider: "aws",
+      selectorSummary,
+      config,
+      canBootstrap: issues.length === 0,
+      issues,
+      target: {
+        resolved: false,
+        error: instance.error,
+      },
+    };
+  }
+
+  const ssmStatus = await inspectAwsSsmStatus({
+    ssm,
+    instanceId: instance.instance.instanceId,
+  });
+  if (!ssmStatus.ok) {
+    issues.push(ssmStatus.error);
+  } else if (!ssmStatus.online) {
+    issues.push(
+      `SSM is not online for instance ${instance.instance.instanceId}.`
+    );
+  }
+
+  return {
+    provider: "aws",
+    selectorSummary,
+    config,
+    canBootstrap: issues.length === 0,
+    issues,
+    target: {
+      resolved: true,
+      instanceId: instance.instance.instanceId,
+      state: instance.instance.state,
+      ...(ssmStatus.ok ? { ssmOnline: ssmStatus.online } : {}),
+      ...(ssmStatus.ok ? {} : { error: ssmStatus.error }),
+    },
+  };
+}
+
+async function handleNodeProviderAwsBootstrap({
+  ctx,
+  args,
+}: {
+  readonly ctx: CliContext;
+  readonly args: ProviderAwsBootstrapArgs;
+}): Promise<number> {
+  const resolved = await resolveAwsBootstrapInput({
+    cwd: ctx.cwd,
+    args,
+  });
+  if (!resolved.ok) {
+    logger.error({ message: resolved.error });
+    return 1;
+  }
+
+  const credentials = resolved.profile
+    ? (await import("@aws-sdk/credential-providers")).fromIni({
+        profile: resolved.profile,
+      })
+    : undefined;
+  const ec2 = new EC2Client({
+    region: resolved.region,
+    ...(credentials ? { credentials } : {}),
+  });
+  const ssm = new SSMClient({
+    region: resolved.region,
+    ...(credentials ? { credentials } : {}),
+  });
+
+  const instance = await resolveAwsBootstrapInstance({
+    ec2,
+    instanceId: resolved.instanceId,
+    instanceTagKey: resolved.instanceTagKey,
+    instanceTagValue: resolved.instanceTagValue,
+  });
+  if (!instance.ok) {
+    logger.error({ message: instance.error });
+    return 1;
+  }
+
+  const prepared = await ensureAwsInstanceReady({
+    ec2,
+    ssm,
+    instance: instance.instance,
+    bootstrapCommand: resolved.bootstrapCommand,
+  });
+  if (!prepared.ok) {
+    logger.error({ message: prepared.error });
+    return 1;
+  }
+
+  const initCommand = renderRemoteHackCommand({
+    remoteHack: undefined,
+    args: [
+      "node",
+      "init",
+      "--name",
+      resolved.name,
+      "--endpoint",
+      resolved.endpoint,
+      ...(resolved.labels.length > 0
+        ? ["--labels", resolved.labels.join(",")]
+        : []),
+      "--json",
+    ],
+  });
+  const nodeInit = await runAwsSsmShellCommand({
+    ssm,
+    instanceId: prepared.instance.instanceId,
+    command: initCommand,
+    retries: DEFAULT_AWS_BOOTSTRAP_RETRIES,
+    delayMs: DEFAULT_AWS_BOOTSTRAP_DELAY_MS,
+  });
+  if (!nodeInit.ok) {
+    logger.error({ message: nodeInit.error });
+    return 1;
+  }
+
+  const parsed = parseEnrollmentBundleFromRemoteOutput({
+    text: nodeInit.stdout,
+  });
+  if (!parsed.ok) {
+    logger.error({ message: parsed.error });
+    return 1;
+  }
+
+  const registered = await registerBundleOnController({
+    bundle: parsed.bundle,
+    makeDefault: args.options.defaultNode === true,
+    source: resolved.source,
+  });
+  if (!registered.ok) {
+    logger.error({ message: registered.error });
+    return 1;
+  }
+  const stabilizedProbe = await stabilizeNodeProbe({
+    snapshot: registered.probe,
+    node: registered.nodeForOutput,
+    retries: DEFAULT_AWS_BOOTSTRAP_RETRIES,
+    delayMs: DEFAULT_AWS_BOOTSTRAP_DELAY_MS,
+    jsonMode: args.options.json === true,
+  });
+
+  if (args.options.json) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          provider: "aws",
+          aws: {
+            instanceId: prepared.instance.instanceId,
+            region: resolved.region,
+            ...(resolved.profile ? { profile: resolved.profile } : {}),
+            ...(resolved.instanceTagValue
+              ? {
+                  tag: {
+                    key: resolved.instanceTagKey,
+                    value: resolved.instanceTagValue,
+                  },
+                }
+              : {}),
+          },
+          created: registered.created,
+          endpoint: resolved.endpoint,
+          node: registered.nodeForOutput,
+          probe: {
+            ok: stabilizedProbe.ok,
+            status: stabilizedProbe.status,
+            error: stabilizedProbe.error,
+          },
+        },
+        null,
+        2
+      )}\n`
+    );
+    return 0;
+  }
+
+  await display.kv({
+    title: registered.created ? "AWS node registered" : "AWS node updated",
+    entries: [
+      ["provider", "aws"],
+      ["instance_id", prepared.instance.instanceId],
+      ["region", resolved.region],
+      ["node_id", registered.nodeForOutput.id],
+      ["endpoint", resolved.endpoint],
+      ["status", stabilizedProbe.status],
+      ["default", args.options.defaultNode ? "yes" : "no"],
+    ],
+  });
+  if (!stabilizedProbe.ok && stabilizedProbe.error) {
+    logger.warn({
+      message: `Node registered but probe failed: ${stabilizedProbe.error}`,
+    });
+  }
+  return 0;
+}
+
+async function handleNodeProviderAwsInspect({
+  ctx,
+  args,
+}: {
+  readonly ctx: CliContext;
+  readonly args: ProviderAwsInspectArgs;
+}): Promise<number> {
+  const diagnostics = await inspectAwsBootstrap({
+    cwd: ctx.cwd,
+    options: {
+      instanceId: args.options.instanceId,
+      instanceTagKey: args.options.instanceTagKey,
+      instanceTagValue: args.options.instanceTagValue,
+      region: args.options.region,
+      profile: args.options.profile,
+      source: args.options.source,
+      endpoint: args.options.endpoint,
+    },
+  });
+
+  if (args.options.json) {
+    process.stdout.write(`${JSON.stringify(diagnostics, null, 2)}\n`);
+    return 0;
+  }
+
+  await display.kv({
+    title: "AWS provider inspect",
+    entries: [
+      ["region", diagnostics.config.region ?? ""],
+      ["profile", diagnostics.config.profile ?? ""],
+      ["selector", diagnostics.selectorSummary],
+      ["source", diagnostics.config.source ?? ""],
+      ["endpoint", diagnostics.config.endpoint ?? ""],
+      ["endpoint_valid", diagnostics.config.endpointValid ? "yes" : "no"],
+      ["can_bootstrap", diagnostics.canBootstrap ? "yes" : "no"],
+      [
+        "instance_resolved",
+        diagnostics.target?.resolved === true ? "yes" : "no",
+      ],
+      ["instance_state", diagnostics.target?.state ?? ""],
+      ["ssm_online", diagnostics.target?.ssmOnline === true ? "yes" : "no"],
+    ],
+  });
+  if (diagnostics.issues.length > 0) {
+    await display.panel({
+      title: "AWS inspect issues",
+      tone: diagnostics.canBootstrap ? "info" : "warn",
+      lines: diagnostics.issues,
+    });
+  }
+  return 0;
+}
+
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: AWS bootstrap input resolution intentionally merges CLI flags, saved defaults, validation, and parity requirements in one place.
+async function resolveAwsBootstrapInput(input: {
+  readonly cwd: string;
+  readonly args: ProviderAwsBootstrapArgs;
+}): Promise<
+  | {
+      readonly ok: true;
+      readonly bootstrapCommand: string;
+      readonly endpoint: string;
+      readonly instanceId: string;
+      readonly instanceTagKey: string;
+      readonly instanceTagValue: string;
+      readonly labels: string[];
+      readonly name: string;
+      readonly profile: string;
+      readonly region: string;
+      readonly source: string;
+    }
+  | { readonly ok: false; readonly error: string }
+> {
+  const defaults = await resolveAwsBootstrapConfigDefaults({
+    cwd: input.cwd,
+  });
+  const instanceId = (
+    input.args.options.instanceId ??
+    defaults.instanceId ??
+    ""
+  ).trim();
+  const instanceTagValue = (
+    input.args.options.instanceTagValue ??
+    defaults.instanceTagValue ??
+    ""
+  ).trim();
+  if ((instanceId ? 1 : 0) + (instanceTagValue ? 1 : 0) !== 1) {
+    return {
+      ok: false,
+      error:
+        "Pass exactly one of --instance-id <id> or --instance-tag-value <value>.",
+    };
+  }
+
+  const region = (input.args.options.region ?? defaults.region ?? "").trim();
+  if (!region) {
+    return {
+      ok: false,
+      error:
+        'Missing AWS region. Pass --region <region> or set controlPlane.providers profile config / controlPlane.extensions["dance.hack.aws"].config.region.',
+    };
+  }
+
+  const source = (input.args.options.source ?? defaults.source ?? "").trim();
+  if (!source) {
+    return {
+      ok: false,
+      error:
+        "Missing --source <user@host>. AWS bootstrap requires SSH source metadata for remote workflow parity.",
+    };
+  }
+
+  const endpoint = (
+    input.args.options.endpoint ??
+    defaults.endpoint ??
+    ""
+  ).trim();
+  if (!endpoint) {
+    return {
+      ok: false,
+      error:
+        "Missing --endpoint <url>. AWS bootstrap requires a reachable node gateway URL.",
+    };
+  }
+  if (!isHttpUrl(endpoint)) {
+    return {
+      ok: false,
+      error: "Invalid --endpoint. Expected http(s) URL.",
+    };
+  }
+
+  const name = (
+    input.args.options.name ??
+    defaults.nodeName ??
+    hostname()
+  ).trim();
+  if (!name) {
+    return { ok: false, error: "Missing node name. Pass --name." };
+  }
+
+  return {
+    ok: true,
+    bootstrapCommand: (
+      input.args.options.bootstrapCommand ??
+      defaults.bootstrapCommand ??
+      ""
+    ).trim(),
+    endpoint,
+    instanceId,
+    instanceTagKey:
+      (
+        input.args.options.instanceTagKey ??
+        defaults.instanceTagKey ??
+        "Name"
+      ).trim() || "Name",
+    instanceTagValue,
+    labels: parseCsv(input.args.options.labels ?? defaults.labelsCsv),
+    name,
+    profile: (input.args.options.profile ?? defaults.profile ?? "").trim(),
+    region,
+    source,
+  };
+}
+
+async function ensureAwsInstanceReady(input: {
+  readonly bootstrapCommand: string;
+  readonly ec2: EC2Client;
+  readonly instance: AwsBootstrapInstance;
+  readonly ssm: SSMClient;
+}): Promise<
+  | { readonly ok: true; readonly instance: AwsBootstrapInstance }
+  | { readonly ok: false; readonly error: string }
+> {
+  const running = await ensureAwsInstanceRunning({
+    ec2: input.ec2,
+    instance: input.instance,
+  });
+  if (!running.ok) {
+    return running;
+  }
+
+  const ssmReady = await waitForAwsSsmOnline({
+    ssm: input.ssm,
+    instanceId: running.instance.instanceId,
+    retries: DEFAULT_AWS_BOOTSTRAP_RETRIES,
+    delayMs: DEFAULT_AWS_BOOTSTRAP_DELAY_MS,
+  });
+  if (!ssmReady.ok) {
+    return ssmReady;
+  }
+
+  if (!input.bootstrapCommand) {
+    return running;
+  }
+
+  const bootstrap = await runAwsSsmShellCommand({
+    ssm: input.ssm,
+    instanceId: running.instance.instanceId,
+    command: input.bootstrapCommand,
+    retries: DEFAULT_AWS_BOOTSTRAP_RETRIES,
+    delayMs: DEFAULT_AWS_BOOTSTRAP_DELAY_MS,
+  });
+  if (!bootstrap.ok) {
+    return bootstrap;
+  }
+
+  return running;
+}
+
+async function ensureAwsInstanceRunning(input: {
+  readonly ec2: EC2Client;
+  readonly instance: AwsBootstrapInstance;
+}): Promise<
+  | { readonly ok: true; readonly instance: AwsBootstrapInstance }
+  | { readonly ok: false; readonly error: string }
+> {
+  if (input.instance.state === "stopped") {
+    const started = await startAwsBootstrapInstance({
+      ec2: input.ec2,
+      instanceId: input.instance.instanceId,
+    });
+    if (!started.ok) {
+      return started;
+    }
+  }
+
+  if (input.instance.state === "running") {
+    return { ok: true, instance: input.instance };
+  }
+
+  return await waitForAwsInstanceState({
+    ec2: input.ec2,
+    instanceId: input.instance.instanceId,
+    targetState: "running",
+    retries: DEFAULT_AWS_BOOTSTRAP_RETRIES,
+    delayMs: DEFAULT_AWS_BOOTSTRAP_DELAY_MS,
+  });
+}
+
+type AwsBootstrapInstance = {
+  readonly instanceId: string;
+  readonly state: string;
+};
+
+async function resolveAwsBootstrapInstance(input: {
+  readonly ec2: EC2Client;
+  readonly instanceId: string;
+  readonly instanceTagKey: string;
+  readonly instanceTagValue: string;
+}): Promise<
+  | { readonly ok: true; readonly instance: AwsBootstrapInstance }
+  | { readonly ok: false; readonly error: string }
+> {
+  try {
+    const response = await input.ec2.send(
+      new DescribeInstancesCommand(
+        input.instanceId
+          ? {
+              InstanceIds: [input.instanceId],
+            }
+          : {
+              Filters: [
+                {
+                  Name: `tag:${input.instanceTagKey}`,
+                  Values: [input.instanceTagValue],
+                },
+              ],
+            }
+      )
+    );
+    const instance = extractAwsBootstrapInstance({ response });
+    if (!instance) {
+      return {
+        ok: false,
+        error: input.instanceId
+          ? `EC2 instance ${input.instanceId} was not found.`
+          : `No EC2 instances matched tag ${input.instanceTagKey}=${input.instanceTagValue}.`,
+      };
+    }
+    return { ok: true, instance };
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error ? error.message : "EC2 DescribeInstances failed";
+    return { ok: false, error: `Failed to resolve EC2 instance: ${message}` };
+  }
+}
+
+function extractAwsBootstrapInstance(input: {
+  readonly response: {
+    readonly Reservations?: readonly {
+      readonly Instances?: readonly {
+        readonly InstanceId?: string;
+        readonly State?: {
+          readonly Name?: string;
+        };
+      }[];
+    }[];
+  };
+}): AwsBootstrapInstance | null {
+  for (const reservation of input.response.Reservations ?? []) {
+    for (const instance of reservation.Instances ?? []) {
+      if (!instance.InstanceId) {
+        continue;
+      }
+      return {
+        instanceId: instance.InstanceId,
+        state: (instance.State?.Name ?? "").trim().toLowerCase(),
+      };
+    }
+  }
+  return null;
+}
+
+async function startAwsBootstrapInstance(input: {
+  readonly ec2: EC2Client;
+  readonly instanceId: string;
+}): Promise<
+  { readonly ok: true } | { readonly ok: false; readonly error: string }
+> {
+  try {
+    await input.ec2.send(
+      new StartInstancesCommand({
+        InstanceIds: [input.instanceId],
+      })
+    );
+    return { ok: true };
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error ? error.message : "EC2 StartInstances failed";
+    return { ok: false, error: `Failed to start EC2 instance: ${message}` };
+  }
+}
+
+async function waitForAwsInstanceState(input: {
+  readonly ec2: EC2Client;
+  readonly instanceId: string;
+  readonly targetState: string;
+  readonly retries: number;
+  readonly delayMs: number;
+}): Promise<
+  | { readonly ok: true; readonly instance: AwsBootstrapInstance }
+  | { readonly ok: false; readonly error: string }
+> {
+  for (let attempt = 1; attempt <= input.retries; attempt += 1) {
+    const resolved = await resolveAwsBootstrapInstance({
+      ec2: input.ec2,
+      instanceId: input.instanceId,
+      instanceTagKey: "",
+      instanceTagValue: "",
+    });
+    if (!resolved.ok) {
+      return resolved;
+    }
+    if (resolved.instance.state === input.targetState) {
+      return resolved;
+    }
+    if (attempt < input.retries) {
+      await Bun.sleep(input.delayMs);
+    }
+  }
+  return {
+    ok: false,
+    error: `Timed out waiting for EC2 instance ${input.instanceId} to reach state ${input.targetState}.`,
+  };
+}
+
+async function waitForAwsSsmOnline(input: {
+  readonly ssm: SSMClient;
+  readonly instanceId: string;
+  readonly retries: number;
+  readonly delayMs: number;
+}): Promise<
+  { readonly ok: true } | { readonly ok: false; readonly error: string }
+> {
+  for (let attempt = 1; attempt <= input.retries; attempt += 1) {
+    try {
+      const response = await input.ssm.send(
+        new DescribeInstanceInformationCommand({
+          Filters: [
+            {
+              Key: "InstanceIds",
+              Values: [input.instanceId],
+            },
+          ],
+        })
+      );
+      const online = (response.InstanceInformationList ?? []).some(
+        (entry) =>
+          entry.InstanceId === input.instanceId && entry.PingStatus === "Online"
+      );
+      if (online) {
+        return { ok: true };
+      }
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "SSM DescribeInstanceInformation failed";
+      return {
+        ok: false,
+        error: `Failed to verify SSM readiness: ${message}`,
+      };
+    }
+    if (attempt < input.retries) {
+      await Bun.sleep(input.delayMs);
+    }
+  }
+  return {
+    ok: false,
+    error: `Timed out waiting for SSM on instance ${input.instanceId}.`,
+  };
+}
+
+async function inspectAwsSsmStatus(input: {
+  readonly ssm: SSMClient;
+  readonly instanceId: string;
+}): Promise<
+  | { readonly ok: true; readonly online: boolean }
+  | { readonly ok: false; readonly error: string }
+> {
+  try {
+    const response = await input.ssm.send(
+      new DescribeInstanceInformationCommand({
+        Filters: [
+          {
+            Key: "InstanceIds",
+            Values: [input.instanceId],
+          },
+        ],
+      })
+    );
+    const online = (response.InstanceInformationList ?? []).some(
+      (entry) =>
+        entry.InstanceId === input.instanceId && entry.PingStatus === "Online"
+    );
+    return { ok: true, online };
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "SSM DescribeInstanceInformation failed";
+    return {
+      ok: false,
+      error: `Failed to inspect SSM readiness: ${message}`,
+    };
+  }
+}
+
+async function runAwsSsmShellCommand(input: {
+  readonly ssm: SSMClient;
+  readonly instanceId: string;
+  readonly command: string;
+  readonly retries: number;
+  readonly delayMs: number;
+}): Promise<
+  | { readonly ok: true; readonly stdout: string; readonly stderr: string }
+  | { readonly ok: false; readonly error: string }
+> {
+  const commandId = await sendAwsSsmCommand(input);
+  if (!commandId) {
+    return { ok: false, error: "SSM command did not return a command id." };
+  }
+
+  for (let attempt = 1; attempt <= input.retries; attempt += 1) {
+    const invocation = await readAwsSsmCommandInvocation({
+      ssm: input.ssm,
+      instanceId: input.instanceId,
+      commandId,
+    });
+    if (!invocation.ok) {
+      return invocation;
+    }
+    if (invocation.status === "Success") {
+      return {
+        ok: true,
+        stdout: invocation.stdout,
+        stderr: invocation.stderr,
+      };
+    }
+    if (!isAwsSsmPendingStatus(invocation.status)) {
+      return {
+        ok: false,
+        error: formatAwsSsmCommandFailure({
+          status: invocation.status,
+          stdout: invocation.stdout,
+          stderr: invocation.stderr,
+        }),
+      };
+    }
+    if (attempt < input.retries) {
+      await Bun.sleep(input.delayMs);
+    }
+  }
+  return {
+    ok: false,
+    error: `Timed out waiting for SSM command on instance ${input.instanceId}.`,
+  };
+}
+
+async function sendAwsSsmCommand(input: {
+  readonly ssm: SSMClient;
+  readonly instanceId: string;
+  readonly command: string;
+}): Promise<string> {
+  try {
+    const sent = await input.ssm.send(
+      new SendCommandCommand({
+        DocumentName: "AWS-RunShellScript",
+        InstanceIds: [input.instanceId],
+        Parameters: {
+          commands: [input.command],
+        },
+      })
+    );
+    return sent.Command?.CommandId?.trim() ?? "";
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error ? error.message : "SSM SendCommand failed";
+    throw new Error(`Failed to send SSM command: ${message}`);
+  }
+}
+
+async function readAwsSsmCommandInvocation(input: {
+  readonly ssm: SSMClient;
+  readonly instanceId: string;
+  readonly commandId: string;
+}): Promise<
+  | {
+      readonly ok: true;
+      readonly status: string;
+      readonly stdout: string;
+      readonly stderr: string;
+    }
+  | { readonly ok: false; readonly error: string }
+> {
+  try {
+    const invocation = await input.ssm.send(
+      new GetCommandInvocationCommand({
+        CommandId: input.commandId,
+        InstanceId: input.instanceId,
+      })
+    );
+    return {
+      ok: true,
+      status: (invocation.Status ?? "").trim(),
+      stdout: invocation.StandardOutputContent ?? "",
+      stderr: invocation.StandardErrorContent ?? "",
+    };
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "SSM GetCommandInvocation failed";
+    return {
+      ok: false,
+      error: `Failed to read SSM command invocation: ${message}`,
+    };
+  }
+}
+
+function isAwsSsmPendingStatus(status: string): boolean {
+  return ["Pending", "InProgress", "Delayed"].includes(status);
+}
+
+function formatAwsSsmCommandFailure(input: {
+  readonly status: string;
+  readonly stdout: string;
+  readonly stderr: string;
+}): string {
+  const stderr = input.stderr.trim();
+  const stdout = input.stdout.trim();
+  return [
+    `SSM command failed with status ${input.status}.`,
+    stderr.length > 0 ? `stderr: ${stderr}` : null,
+    stdout.length > 0 ? `stdout: ${stdout}` : null,
+  ]
+    .filter((value): value is string => value !== null)
+    .join(" ");
+}
+
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Railway bootstrap remains a controller-facing orchestration flow spanning profile resolution, provisioning, pairing, and status reporting.
 async function handleNodeProviderRailwayBootstrap({
   ctx,
   args,
@@ -4846,6 +6073,7 @@ function parseRailwayDomainEndpoint(input: {
   };
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Railway domain discovery recursively inspects several nested payload shapes returned by different API surfaces.
 function findRailwayDomainValue(input: {
   readonly value: unknown;
 }): string | null {

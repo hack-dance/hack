@@ -417,102 +417,214 @@ const handleEnvBackendStatus: CommandHandlerFor<
 const handleEnvBackendUse: CommandHandlerFor<typeof backendUseSpec> = async ({
   args,
 }): Promise<number> => {
-  const backend = args.positionals.backend.trim();
-  if (
-    !SECRET_BACKEND_VALUES.includes(
-      backend as (typeof SECRET_BACKEND_VALUES)[number]
-    )
-  ) {
-    throw new CliUsageError(
-      `Invalid backend "${backend}". Expected one of: ${SECRET_BACKEND_VALUES.join(", ")}`
-    );
-  }
-
-  const providerRaw = args.options.provider?.trim();
-  if (
-    providerRaw &&
-    !CLOUD_PROVIDER_VALUES.includes(
-      providerRaw as (typeof CLOUD_PROVIDER_VALUES)[number]
-    )
-  ) {
-    throw new CliUsageError(
-      `Invalid --provider "${providerRaw}". Expected one of: ${CLOUD_PROVIDER_VALUES.join(", ")}`
-    );
-  }
+  const backend = resolveSecretBackend({
+    value: args.positionals.backend,
+  });
+  const providerRaw = resolveCloudProvider({
+    value: args.options.provider,
+  });
 
   await updateGlobalConfig({
     path: "controlPlane.secrets.backend",
     value: backend,
   });
-
-  if (backend === "encrypted_file" && args.options.storePath?.trim()) {
-    await updateGlobalConfig({
-      path: "controlPlane.secrets.encryptedFile.path",
-      value: args.options.storePath.trim(),
-    });
-  }
-
-  if (backend === "encrypted_file" && args.options.keyPath?.trim()) {
-    await updateGlobalConfig({
-      path: "controlPlane.secrets.encryptedFile.keyPath",
-      value: args.options.keyPath.trim(),
-    });
-  }
-
-  if (backend === "cloud") {
-    if (!providerRaw) {
-      throw new CliUsageError(
-        "Cloud backend requires --provider <aws|gcp|azure|vault>."
-      );
-    }
-    await updateGlobalConfig({
-      path: "controlPlane.secrets.cloud.provider",
-      value: providerRaw,
-    });
-    if (args.options.secretProject?.trim()) {
-      await updateGlobalConfig({
-        path: "controlPlane.secrets.cloud.project",
-        value: args.options.secretProject.trim(),
-      });
-    }
-    if (args.options.secretPrefix?.trim()) {
-      await updateGlobalConfig({
-        path: "controlPlane.secrets.cloud.secretPrefix",
-        value: args.options.secretPrefix.trim(),
-      });
-    }
-  }
+  await persistSecretBackendConfig({
+    backend,
+    providerRaw,
+    storePath: args.options.storePath,
+    keyPath: args.options.keyPath,
+    secretProject: args.options.secretProject,
+    secretPrefix: args.options.secretPrefix,
+  });
 
   const controlPlane = await readControlPlaneConfig({});
   const secretsConfig = controlPlane.config.secrets;
-  let provisionedKey: {
-    readonly keyPath: string;
-    readonly source: "env" | "file" | "keychain" | "generated";
-  } | null = null;
-  if (backend === "encrypted_file" && args.options.provisionKey) {
-    provisionedKey = await provisionEncryptedFileKey({
-      keyPath: secretsConfig.encryptedFile.keyPath,
-      storePath: secretsConfig.encryptedFile.path,
-    });
-  }
+  const provisionedKey = await maybeProvisionEncryptedFileKey({
+    backend,
+    shouldProvision: args.options.provisionKey === true,
+    secretsConfig,
+  });
   if (args.options.json) {
-    process.stdout.write(
-      `${JSON.stringify(
-        {
-          backend: secretsConfig.backend,
-          allow_env_auth_refs: secretsConfig.allowEnvAuthRefs,
-          encrypted_file: secretsConfig.encryptedFile,
-          encrypted_file_key_env: ENCRYPTED_FILE_KEY_ENV,
-          encrypted_file_key_provisioned: provisionedKey,
-          cloud: secretsConfig.cloud,
-        },
-        null,
-        2
-      )}\n`
-    );
+    writeEnvBackendUseJson({
+      secretsConfig,
+      provisionedKey,
+    });
     return 0;
   }
 
+  await displayEnvBackendUseSummary({
+    backend,
+    provisionedKey,
+    secretsConfig,
+  });
+  return 0;
+};
+
+async function maybeProvisionEncryptedFileKey(input: {
+  readonly backend: (typeof SECRET_BACKEND_VALUES)[number];
+  readonly shouldProvision: boolean;
+  readonly secretsConfig: Awaited<
+    ReturnType<typeof readControlPlaneConfig>
+  >["config"]["secrets"];
+}): Promise<{
+  readonly keyPath: string;
+  readonly source: "env" | "file" | "keychain" | "generated";
+} | null> {
+  if (!(input.backend === "encrypted_file" && input.shouldProvision)) {
+    return null;
+  }
+  return await provisionEncryptedFileKey({
+    keyPath: input.secretsConfig.encryptedFile.keyPath,
+    storePath: input.secretsConfig.encryptedFile.path,
+  });
+}
+
+function writeEnvBackendUseJson(input: {
+  readonly secretsConfig: Awaited<
+    ReturnType<typeof readControlPlaneConfig>
+  >["config"]["secrets"];
+  readonly provisionedKey: {
+    readonly keyPath: string;
+    readonly source: "env" | "file" | "keychain" | "generated";
+  } | null;
+}): void {
+  process.stdout.write(
+    `${JSON.stringify(
+      {
+        backend: input.secretsConfig.backend,
+        allow_env_auth_refs: input.secretsConfig.allowEnvAuthRefs,
+        encrypted_file: input.secretsConfig.encryptedFile,
+        encrypted_file_key_env: ENCRYPTED_FILE_KEY_ENV,
+        encrypted_file_key_provisioned: input.provisionedKey,
+        cloud: input.secretsConfig.cloud,
+      },
+      null,
+      2
+    )}\n`
+  );
+}
+
+function resolveSecretBackend(input: {
+  readonly value: string;
+}): (typeof SECRET_BACKEND_VALUES)[number] {
+  const backend = input.value.trim();
+  if (
+    SECRET_BACKEND_VALUES.includes(
+      backend as (typeof SECRET_BACKEND_VALUES)[number]
+    )
+  ) {
+    return backend as (typeof SECRET_BACKEND_VALUES)[number];
+  }
+  throw new CliUsageError(
+    `Invalid backend "${backend}". Expected one of: ${SECRET_BACKEND_VALUES.join(", ")}`
+  );
+}
+
+function resolveCloudProvider(input: {
+  readonly value?: string;
+}): (typeof CLOUD_PROVIDER_VALUES)[number] | null {
+  const providerRaw = input.value?.trim();
+  if (!providerRaw) {
+    return null;
+  }
+  if (
+    CLOUD_PROVIDER_VALUES.includes(
+      providerRaw as (typeof CLOUD_PROVIDER_VALUES)[number]
+    )
+  ) {
+    return providerRaw as (typeof CLOUD_PROVIDER_VALUES)[number];
+  }
+  throw new CliUsageError(
+    `Invalid --provider "${providerRaw}". Expected one of: ${CLOUD_PROVIDER_VALUES.join(", ")}`
+  );
+}
+
+async function persistSecretBackendConfig(input: {
+  readonly backend: (typeof SECRET_BACKEND_VALUES)[number];
+  readonly providerRaw: (typeof CLOUD_PROVIDER_VALUES)[number] | null;
+  readonly storePath?: string;
+  readonly keyPath?: string;
+  readonly secretProject?: string;
+  readonly secretPrefix?: string;
+}): Promise<void> {
+  await persistEncryptedFileBackendConfig(input);
+  await persistCloudBackendConfig(input);
+}
+
+async function persistEncryptedFileBackendConfig(input: {
+  readonly backend: (typeof SECRET_BACKEND_VALUES)[number];
+  readonly storePath?: string;
+  readonly keyPath?: string;
+}): Promise<void> {
+  if (input.backend !== "encrypted_file") {
+    return;
+  }
+
+  const storePath = input.storePath?.trim();
+  if (storePath) {
+    await updateGlobalConfig({
+      path: "controlPlane.secrets.encryptedFile.path",
+      value: storePath,
+    });
+  }
+
+  const keyPath = input.keyPath?.trim();
+  if (keyPath) {
+    await updateGlobalConfig({
+      path: "controlPlane.secrets.encryptedFile.keyPath",
+      value: keyPath,
+    });
+  }
+}
+
+async function persistCloudBackendConfig(input: {
+  readonly backend: (typeof SECRET_BACKEND_VALUES)[number];
+  readonly providerRaw: (typeof CLOUD_PROVIDER_VALUES)[number] | null;
+  readonly secretProject?: string;
+  readonly secretPrefix?: string;
+}): Promise<void> {
+  if (input.backend !== "cloud") {
+    return;
+  }
+  if (!input.providerRaw) {
+    throw new CliUsageError(
+      "Cloud backend requires --provider <aws|gcp|azure|vault>."
+    );
+  }
+
+  await updateGlobalConfig({
+    path: "controlPlane.secrets.cloud.provider",
+    value: input.providerRaw,
+  });
+
+  const secretProject = input.secretProject?.trim();
+  if (secretProject) {
+    await updateGlobalConfig({
+      path: "controlPlane.secrets.cloud.project",
+      value: secretProject,
+    });
+  }
+
+  const secretPrefix = input.secretPrefix?.trim();
+  if (secretPrefix) {
+    await updateGlobalConfig({
+      path: "controlPlane.secrets.cloud.secretPrefix",
+      value: secretPrefix,
+    });
+  }
+}
+
+async function displayEnvBackendUseSummary(input: {
+  readonly backend: (typeof SECRET_BACKEND_VALUES)[number];
+  readonly provisionedKey: {
+    readonly keyPath: string;
+    readonly source: "env" | "file" | "keychain" | "generated";
+  } | null;
+  readonly secretsConfig: Awaited<
+    ReturnType<typeof readControlPlaneConfig>
+  >["config"]["secrets"];
+}): Promise<void> {
+  const { backend, provisionedKey, secretsConfig } = input;
   await display.kv({
     title: "Env/secret backend updated",
     entries: [
@@ -526,20 +638,21 @@ const handleEnvBackendUse: CommandHandlerFor<typeof backendUseSpec> = async ({
       ["cloud_secret_prefix", secretsConfig.cloud.secretPrefix],
     ],
   });
+
   if (backend === "encrypted_file") {
     logger.info({
       message: provisionedKey
         ? `Provisioned stable encrypted backend key at ${provisionedKey.keyPath} (${provisionedKey.source}).`
         : `Set ${ENCRYPTED_FILE_KEY_ENV} or provision ${secretsConfig.encryptedFile.keyPath} to avoid repeated macOS keychain prompts for encrypted file backend key access.`,
     });
-  } else {
-    logger.info({
-      message:
-        "Secret writes now use the configured backend for keychain-sourced env values.",
-    });
+    return;
   }
-  return 0;
-};
+
+  logger.info({
+    message:
+      "Secret writes now use the configured backend for keychain-sourced env values.",
+  });
+}
 
 function parseKeyValueSpec(spec: string): readonly [string, string | null] {
   const trimmed = spec.trim();

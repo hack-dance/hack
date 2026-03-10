@@ -141,6 +141,7 @@ function linePrefix(opts: {
   return `${project}/${service}`;
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Loki range queries intentionally coordinate auth, query shaping, formatting, pagination, and error reporting in one operator flow.
 async function lokiQueryRange(opts: LokiLogsParams): Promise<number> {
   const baseUrl = normalizeBaseUrl(opts.baseUrl);
 
@@ -351,6 +352,7 @@ async function lokiTail(opts: LokiLogsParams): Promise<number> {
     });
   }
 
+  // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Websocket log streaming must parse mixed message types, update cursors, and format incremental output inline.
   ws.addEventListener("message", (event) => {
     const text = typeof event.data === "string" ? event.data : null;
     if (!text) {

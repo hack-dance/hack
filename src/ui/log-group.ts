@@ -38,6 +38,7 @@ export function createStructuredLogGrouper(opts: {
     emit(buffer.rawLines);
   };
 
+  // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Grouping log lines must track nested ANSI resets and boundary detection while streaming incrementally.
   const handleLine = (line: string) => {
     const current: string | null = line;
     while (current) {

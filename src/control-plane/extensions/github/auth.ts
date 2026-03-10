@@ -333,25 +333,14 @@ export async function resolveGitHubAppToken(input: {
     allowProjectOverride: input.allowProjectOverride,
   });
   if (!resolved.ok) {
-    const fallback = resolveGitHubAuthSettings({
-      controlPlaneConfig: input.controlPlaneConfig,
-      ...(input.profileId ? { profileId: input.profileId } : {}),
-      allowProjectOverride: input.allowProjectOverride,
-    });
-    return {
-      ok: false,
+    return buildGitHubTokenFallbackFailure({
+      input,
       error: resolved.error,
-      tokenEnv: fallback.tokenEnv,
-      authRef: fallback.authRef,
-      service: fallback.service,
-      profileId: fallback.profileId,
-      profileSource: fallback.profileSource,
-    };
+    });
   }
 
   const settings = resolved.settings;
   const allowProjectOverride = input.allowProjectOverride ?? true;
-  const profileId = settings.profileId;
   const env = input.env ?? process.env;
   const store = input.store ?? DEFAULT_SECRET_STORE;
   const nowMs = input.nowMs ?? Date.now();
@@ -359,26 +348,13 @@ export async function resolveGitHubAppToken(input: {
 
   if (input.preferEnvTokenOnly) {
     if (envToken.length > 0) {
-      return {
-        ok: true,
+      return buildGitHubTokenSuccess({
+        settings,
         token: envToken,
         source: "env",
-        tokenEnv: settings.tokenEnv,
-        authRef: settings.authRef,
-        service: settings.service,
-        profileId,
-        profileSource: settings.profileSource,
-      };
+      });
     }
-    return {
-      ok: false,
-      error: `Missing GitHub token for profile "${profileId}". Store one with \`hack x github connect --profile ${profileId}\`, or set ${settings.tokenEnv}.`,
-      tokenEnv: settings.tokenEnv,
-      authRef: settings.authRef,
-      service: settings.service,
-      profileId,
-      profileSource: settings.profileSource,
-    };
+    return buildGitHubMissingTokenFailure({ settings });
   }
 
   const stored = await store.get({
@@ -391,23 +367,16 @@ export async function resolveGitHubAppToken(input: {
       !!storedEnvelope.expiresAt &&
       isTokenExpiredSoon({ expiresAt: storedEnvelope.expiresAt, nowMs });
     if (!stale) {
-      return {
-        ok: true,
+      return buildGitHubTokenSuccess({
+        settings,
         token: storedEnvelope.token,
         source: "keychain",
-        tokenEnv: settings.tokenEnv,
-        authRef: settings.authRef,
-        service: settings.service,
-        profileId,
-        profileSource: settings.profileSource,
-        ...(storedEnvelope.expiresAt
-          ? { expiresAt: storedEnvelope.expiresAt }
-          : {}),
-      };
+        expiresAt: storedEnvelope.expiresAt,
+      });
     }
     const refreshed = await refreshGitHubInstallationToken({
       controlPlaneConfig: input.controlPlaneConfig,
-      profileId,
+      profileId: settings.profileId,
       allowProjectOverride,
       env,
       store,
@@ -415,63 +384,35 @@ export async function resolveGitHubAppToken(input: {
       nowMs,
     });
     if (refreshed.ok) {
-      return {
-        ok: true,
+      return buildGitHubTokenSuccess({
+        settings,
         token: refreshed.token,
         source: "refreshed",
-        tokenEnv: settings.tokenEnv,
-        authRef: settings.authRef,
-        service: settings.service,
-        profileId,
-        profileSource: settings.profileSource,
-        ...(refreshed.expiresAt ? { expiresAt: refreshed.expiresAt } : {}),
-      };
+        expiresAt: refreshed.expiresAt,
+      });
     }
     if (envToken.length > 0) {
-      return {
-        ok: true,
+      return buildGitHubTokenSuccess({
+        settings,
         token: envToken,
         source: "env",
-        tokenEnv: settings.tokenEnv,
-        authRef: settings.authRef,
-        service: settings.service,
-        profileId,
-        profileSource: settings.profileSource,
-      };
+      });
     }
-    return {
-      ok: false,
-      error: `Stored GitHub token for profile "${profileId}" is expired and refresh failed: ${refreshed.error}`,
-      tokenEnv: settings.tokenEnv,
-      authRef: settings.authRef,
-      service: settings.service,
-      profileId,
-      profileSource: settings.profileSource,
-    };
+    return buildGitHubTokenFailure({
+      settings,
+      error: `Stored GitHub token for profile "${settings.profileId}" is expired and refresh failed: ${refreshed.error}`,
+    });
   }
 
   if (envToken.length > 0) {
-    return {
-      ok: true,
+    return buildGitHubTokenSuccess({
+      settings,
       token: envToken,
       source: "env",
-      tokenEnv: settings.tokenEnv,
-      authRef: settings.authRef,
-      service: settings.service,
-      profileId,
-      profileSource: settings.profileSource,
-    };
+    });
   }
 
-  return {
-    ok: false,
-    error: `Missing GitHub token for profile "${profileId}". Store one with \`hack x github connect --profile ${profileId}\`, or set ${settings.tokenEnv}.`,
-    tokenEnv: settings.tokenEnv,
-    authRef: settings.authRef,
-    service: settings.service,
-    profileId,
-    profileSource: settings.profileSource,
-  };
+  return buildGitHubMissingTokenFailure({ settings });
 }
 
 /**
@@ -758,6 +699,68 @@ function getGitHubExtensionConfig(input: {
   return extension.config;
 }
 
+function buildGitHubTokenSuccess(input: {
+  readonly settings: GitHubAuthSettings;
+  readonly token: string;
+  readonly source: "keychain" | "env" | "refreshed";
+  readonly expiresAt?: string;
+}): GitHubTokenResolution {
+  return {
+    ok: true,
+    token: input.token,
+    source: input.source,
+    tokenEnv: input.settings.tokenEnv,
+    authRef: input.settings.authRef,
+    service: input.settings.service,
+    profileId: input.settings.profileId,
+    profileSource: input.settings.profileSource,
+    ...(input.expiresAt ? { expiresAt: input.expiresAt } : {}),
+  };
+}
+
+function buildGitHubTokenFailure(input: {
+  readonly settings: GitHubAuthSettings;
+  readonly error: string;
+}): GitHubTokenResolution {
+  return {
+    ok: false,
+    error: input.error,
+    tokenEnv: input.settings.tokenEnv,
+    authRef: input.settings.authRef,
+    service: input.settings.service,
+    profileId: input.settings.profileId,
+    profileSource: input.settings.profileSource,
+  };
+}
+
+function buildGitHubMissingTokenFailure(input: {
+  readonly settings: GitHubAuthSettings;
+}): GitHubTokenResolution {
+  return buildGitHubTokenFailure({
+    settings: input.settings,
+    error: `Missing GitHub token for profile "${input.settings.profileId}". Store one with \`hack x github connect --profile ${input.settings.profileId}\`, or set ${input.settings.tokenEnv}.`,
+  });
+}
+
+function buildGitHubTokenFallbackFailure(input: {
+  readonly input: {
+    readonly controlPlaneConfig: ControlPlaneConfig;
+    readonly profileId?: string;
+    readonly allowProjectOverride?: boolean;
+  };
+  readonly error: string;
+}): GitHubTokenResolution {
+  const fallback = resolveGitHubAuthSettings({
+    controlPlaneConfig: input.input.controlPlaneConfig,
+    ...(input.input.profileId ? { profileId: input.input.profileId } : {}),
+    allowProjectOverride: input.input.allowProjectOverride,
+  });
+  return buildGitHubTokenFailure({
+    settings: fallback,
+    error: input.error,
+  });
+}
+
 function buildGitHubProfileSettings(input: {
   readonly profileId: string;
   readonly profileConfig: Record<string, unknown> | null;
@@ -766,50 +769,83 @@ function buildGitHubProfileSettings(input: {
 }): GitHubProfileSettings {
   const fallback = input.includeLegacyFallback ? input.legacyConfig : null;
   const tokenEnv =
-    normalizeConfigString(input.profileConfig?.tokenEnv) ??
-    normalizeConfigString(fallback?.tokenEnv) ??
-    DEFAULT_GITHUB_TOKEN_ENV;
+    resolveGitHubProfileStringSetting({
+      profileConfig: input.profileConfig,
+      fallbackConfig: fallback,
+      key: "tokenEnv",
+      defaultValue: DEFAULT_GITHUB_TOKEN_ENV,
+    }) ?? DEFAULT_GITHUB_TOKEN_ENV;
   const authRef =
-    normalizeConfigString(input.profileConfig?.authRef) ??
-    normalizeConfigString(fallback?.authRef) ??
-    resolveDefaultAuthRefForProfile({ profileId: input.profileId });
+    resolveGitHubProfileStringSetting({
+      profileConfig: input.profileConfig,
+      fallbackConfig: fallback,
+      key: "authRef",
+      defaultValue: resolveDefaultAuthRefForProfile({
+        profileId: input.profileId,
+      }),
+    }) ?? resolveDefaultAuthRefForProfile({ profileId: input.profileId });
   const service =
-    normalizeConfigString(input.profileConfig?.service) ??
-    normalizeConfigString(fallback?.service) ??
-    GITHUB_SECRET_SERVICE;
-  const appId =
-    normalizeConfigString(input.profileConfig?.appId) ??
-    normalizeConfigString(fallback?.appId);
-  const installationId =
-    normalizeConfigString(input.profileConfig?.installationId) ??
-    normalizeConfigString(fallback?.installationId);
+    resolveGitHubProfileStringSetting({
+      profileConfig: input.profileConfig,
+      fallbackConfig: fallback,
+      key: "service",
+      defaultValue: GITHUB_SECRET_SERVICE,
+    }) ?? GITHUB_SECRET_SERVICE;
+  const appId = resolveGitHubProfileStringSetting({
+    profileConfig: input.profileConfig,
+    fallbackConfig: fallback,
+    key: "appId",
+  });
+  const installationId = resolveGitHubProfileStringSetting({
+    profileConfig: input.profileConfig,
+    fallbackConfig: fallback,
+    key: "installationId",
+  });
   const privateKeyEnv =
-    normalizeConfigString(input.profileConfig?.privateKeyEnv) ??
-    normalizeConfigString(fallback?.privateKeyEnv) ??
-    DEFAULT_GITHUB_PRIVATE_KEY_ENV;
-  const privateKeyAuthRef =
-    normalizeConfigString(input.profileConfig?.privateKeyAuthRef) ??
-    normalizeConfigString(fallback?.privateKeyAuthRef);
+    resolveGitHubProfileStringSetting({
+      profileConfig: input.profileConfig,
+      fallbackConfig: fallback,
+      key: "privateKeyEnv",
+      defaultValue: DEFAULT_GITHUB_PRIVATE_KEY_ENV,
+    }) ?? DEFAULT_GITHUB_PRIVATE_KEY_ENV;
+  const privateKeyAuthRef = resolveGitHubProfileStringSetting({
+    profileConfig: input.profileConfig,
+    fallbackConfig: fallback,
+    key: "privateKeyAuthRef",
+  });
   const apiBaseUrl = normalizeApiBaseUrl({
     value:
-      normalizeConfigString(input.profileConfig?.apiBaseUrl) ??
-      normalizeConfigString(fallback?.apiBaseUrl) ??
-      DEFAULT_GITHUB_API_BASE,
+      resolveGitHubProfileStringSetting({
+        profileConfig: input.profileConfig,
+        fallbackConfig: fallback,
+        key: "apiBaseUrl",
+      }) ?? DEFAULT_GITHUB_API_BASE,
   });
-  const accountLogin =
-    normalizeConfigString(input.profileConfig?.accountLogin) ??
-    normalizeConfigString(fallback?.accountLogin);
-  const accountName =
-    normalizeConfigString(input.profileConfig?.accountName) ??
-    normalizeConfigString(fallback?.accountName);
+  const accountLogin = resolveGitHubProfileStringSetting({
+    profileConfig: input.profileConfig,
+    fallbackConfig: fallback,
+    key: "accountLogin",
+  });
+  const accountName = resolveGitHubProfileStringSetting({
+    profileConfig: input.profileConfig,
+    fallbackConfig: fallback,
+    key: "accountName",
+  });
   const accountId =
-    normalizeConfigNumberishString(input.profileConfig?.accountId) ??
-    normalizeConfigNumberishString(fallback?.accountId);
+    resolveGitHubProfileNumberishSetting({
+      profileConfig: input.profileConfig,
+      fallbackConfig: fallback,
+      key: "accountId",
+    }) ?? null;
 
   const mode =
-    normalizeGitHubAuthMode(input.profileConfig?.mode) ??
-    normalizeGitHubAuthMode(fallback?.mode) ??
-    (appId && installationId ? "app" : "token");
+    normalizeGitHubAuthMode(
+      resolveGitHubProfileStringSetting({
+        profileConfig: input.profileConfig,
+        fallbackConfig: fallback,
+        key: "mode",
+      })
+    ) ?? (appId && installationId ? "app" : "token");
 
   return {
     profileId: input.profileId,
@@ -826,6 +862,32 @@ function buildGitHubProfileSettings(input: {
     ...(accountName ? { accountName } : {}),
     ...(accountId ? { accountId } : {}),
   };
+}
+
+function resolveGitHubProfileStringSetting(input: {
+  readonly profileConfig: Record<string, unknown> | null;
+  readonly fallbackConfig: Record<string, unknown> | null;
+  readonly key: string;
+  readonly defaultValue?: string;
+}): string | null {
+  return (
+    normalizeConfigString(input.profileConfig?.[input.key]) ??
+    normalizeConfigString(input.fallbackConfig?.[input.key]) ??
+    input.defaultValue ??
+    null
+  );
+}
+
+function resolveGitHubProfileNumberishSetting(input: {
+  readonly profileConfig: Record<string, unknown> | null;
+  readonly fallbackConfig: Record<string, unknown> | null;
+  readonly key: string;
+}): string | null {
+  return (
+    normalizeConfigNumberishString(input.profileConfig?.[input.key]) ??
+    normalizeConfigNumberishString(input.fallbackConfig?.[input.key]) ??
+    null
+  );
 }
 
 function resolveProjectGitHubProfileOverride(input: {
@@ -853,52 +915,22 @@ function resolveGitHubProfileSelection(input: {
   const extensionConfig = getGitHubExtensionConfig({
     controlPlaneConfig: input.controlPlaneConfig,
   });
-
-  const profilesById: Record<string, GitHubProfileSettings> = {};
-  const profilesValue = extensionConfig?.profiles;
-  if (isRecord(profilesValue)) {
-    for (const [profileIdRaw, profileRaw] of Object.entries(profilesValue)) {
-      const profileId = profileIdRaw.trim();
-      if (!profileId) {
-        continue;
-      }
-      if (!isRecord(profileRaw)) {
-        continue;
-      }
-      profilesById[profileId] = buildGitHubProfileSettings({
-        profileId,
-        profileConfig: profileRaw,
-        legacyConfig: extensionConfig,
-        includeLegacyFallback: profileId === DEFAULT_GITHUB_PROFILE_ID,
-      });
-    }
-  }
-
-  if (Object.keys(profilesById).length === 0) {
-    profilesById[DEFAULT_GITHUB_PROFILE_ID] = buildGitHubProfileSettings({
-      profileId: DEFAULT_GITHUB_PROFILE_ID,
-      profileConfig: null,
-      legacyConfig: extensionConfig,
-      includeLegacyFallback: true,
-    });
-  }
-
+  const profilesById = collectGitHubProfilesById({
+    extensionConfig,
+  });
   const sortedProfileIds = Object.keys(profilesById).sort((left, right) =>
     left.localeCompare(right)
   );
-  const defaultProfileFromConfig = normalizeConfigString(
-    extensionConfig?.defaultProfile
-  );
-  const defaultProfileId =
-    (defaultProfileFromConfig &&
-    Object.hasOwn(profilesById, defaultProfileFromConfig)
-      ? defaultProfileFromConfig
-      : null) ??
-    (Object.hasOwn(profilesById, DEFAULT_GITHUB_PROFILE_ID)
-      ? DEFAULT_GITHUB_PROFILE_ID
-      : null) ??
-    sortedProfileIds[0] ??
-    DEFAULT_GITHUB_PROFILE_ID;
+  const defaultProfileFromConfig = resolveGitHubProfileStringSetting({
+    profileConfig: extensionConfig,
+    fallbackConfig: null,
+    key: "defaultProfile",
+  });
+  const defaultProfileId = resolveGitHubDefaultProfileId({
+    profilesById,
+    configuredDefaultProfileId: defaultProfileFromConfig ?? undefined,
+    sortedProfileIds,
+  });
 
   const explicitProfileId = normalizeConfigString(input.explicitProfileId);
   const projectProfileOverride =
@@ -908,31 +940,99 @@ function resolveGitHubProfileSelection(input: {
           controlPlaneConfig: input.controlPlaneConfig,
         });
 
-  const selectedProfile = explicitProfileId ?? projectProfileOverride;
-  let selectedProfileId: string;
-  let selectedProfileSource: GitHubProfileSelectionSource;
-  if (selectedProfile) {
-    selectedProfileId = selectedProfile;
-    selectedProfileSource = explicitProfileId
-      ? "command_flags"
-      : "project_routing";
-  } else if (defaultProfileFromConfig) {
-    selectedProfileId = defaultProfileId;
-    selectedProfileSource = "global_default";
-  } else {
-    selectedProfileId = defaultProfileId;
-    selectedProfileSource = "implicit_default";
-  }
+  const selection = resolveSelectedGitHubProfile({
+    explicitProfileId,
+    projectProfileOverride,
+    defaultProfileFromConfig,
+    defaultProfileId,
+  });
 
-  const selectedProfileExists = Object.hasOwn(profilesById, selectedProfileId);
+  const selectedProfileExists = Object.hasOwn(
+    profilesById,
+    selection.selectedProfileId
+  );
   return {
-    selectedProfileId,
-    selectedProfileSource,
+    selectedProfileId: selection.selectedProfileId,
+    selectedProfileSource: selection.selectedProfileSource,
     selectedProfileExists,
     defaultProfileId,
     sortedProfileIds,
     profilesById,
     ...(projectProfileOverride ? { projectProfileOverride } : {}),
+  };
+}
+
+function collectGitHubProfilesById(input: {
+  readonly extensionConfig: Record<string, unknown> | null;
+}): Record<string, GitHubProfileSettings> {
+  const profilesById: Record<string, GitHubProfileSettings> = {};
+  const profilesValue = input.extensionConfig?.profiles;
+  if (isRecord(profilesValue)) {
+    for (const [profileIdRaw, profileRaw] of Object.entries(profilesValue)) {
+      const profileId = profileIdRaw.trim();
+      if (!(profileId && isRecord(profileRaw))) {
+        continue;
+      }
+      profilesById[profileId] = buildGitHubProfileSettings({
+        profileId,
+        profileConfig: profileRaw,
+        legacyConfig: input.extensionConfig,
+        includeLegacyFallback: profileId === DEFAULT_GITHUB_PROFILE_ID,
+      });
+    }
+  }
+  if (Object.keys(profilesById).length === 0) {
+    profilesById[DEFAULT_GITHUB_PROFILE_ID] = buildGitHubProfileSettings({
+      profileId: DEFAULT_GITHUB_PROFILE_ID,
+      profileConfig: null,
+      legacyConfig: input.extensionConfig,
+      includeLegacyFallback: true,
+    });
+  }
+  return profilesById;
+}
+
+function resolveGitHubDefaultProfileId(input: {
+  readonly profilesById: Record<string, GitHubProfileSettings>;
+  readonly configuredDefaultProfileId?: string;
+  readonly sortedProfileIds: readonly string[];
+}): string {
+  if (
+    input.configuredDefaultProfileId &&
+    Object.hasOwn(input.profilesById, input.configuredDefaultProfileId)
+  ) {
+    return input.configuredDefaultProfileId;
+  }
+  if (Object.hasOwn(input.profilesById, DEFAULT_GITHUB_PROFILE_ID)) {
+    return DEFAULT_GITHUB_PROFILE_ID;
+  }
+  return input.sortedProfileIds[0] ?? DEFAULT_GITHUB_PROFILE_ID;
+}
+
+function resolveSelectedGitHubProfile(input: {
+  readonly explicitProfileId: string | null;
+  readonly projectProfileOverride: string | null;
+  readonly defaultProfileFromConfig: string | null;
+  readonly defaultProfileId: string;
+}): {
+  readonly selectedProfileId: string;
+  readonly selectedProfileSource: GitHubProfileSelectionSource;
+} {
+  const selectedProfile =
+    input.explicitProfileId ?? input.projectProfileOverride;
+  if (selectedProfile) {
+    return {
+      selectedProfileId: selectedProfile,
+      selectedProfileSource: input.explicitProfileId
+        ? "command_flags"
+        : "project_routing",
+    };
+  }
+  return {
+    selectedProfileId: input.defaultProfileId,
+    selectedProfileSource: input.defaultProfileFromConfig
+      ? "global_default"
+      : "implicit_default",
   };
 }
 

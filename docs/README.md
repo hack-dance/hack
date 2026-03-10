@@ -30,6 +30,7 @@ Quick diagnostics:
 - Start here (first remote node in ~10 minutes):
   - [Remote node quickstart](guides/remote-node-quickstart.md)
   - [Run laptop-to-laptop node pairing e2e](guides/remote-node-laptop-e2e.md)
+  - [Bootstrap a remote node on AWS](guides/remote-node-aws.md)
   - [Bootstrap a remote node on Railway](guides/remote-node-railway.md)
 - Remote setup (one command): `hack remote setup`
 - [Initialize a project](guides/init-project.md)
@@ -40,6 +41,7 @@ Quick diagnostics:
 - [Expose the gateway with Tailscale](guides/remote-tailscale.md)
 - [Run remote supervisor jobs](guides/remote-supervisor.md)
 - [Run a remote node via container image](guides/remote-node-container.md)
+- [Bootstrap a remote node on AWS](guides/remote-node-aws.md)
 - [Bootstrap a remote node on Railway](guides/remote-node-railway.md)
 - [Bootstrap auth-broker with Neon + Railway](guides/auth-broker-neon-bootstrap.md)
 - [Create a new extension](guides/create-extension.md)

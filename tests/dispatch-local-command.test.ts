@@ -204,176 +204,166 @@ test("dispatch run --local --pr returns no_commit when command leaves local diff
   expect(manifest.terminalState).toBe("no_commit");
 });
 
-test(
-  "dispatch run --local --pr creates a pull request when branch is committed and ahead",
-  { timeout: 15_000 },
-  async () => {
-    if (!tempDir) {
-      throw new Error("Missing temp dir");
+test("dispatch run --local --pr creates a pull request when branch is committed and ahead", async () => {
+  if (!tempDir) {
+    throw new Error("Missing temp dir");
+  }
+  const repoRoot = resolve(tempDir, "repo-pr-created");
+  await createMinimalHackRepo({ repoRoot });
+  await initGitRepo({ repoRoot, remoteName: "origin" });
+  await git({ cwd: repoRoot, cmd: ["checkout", "-b", "feat/local-pr"] });
+  await writeFile(resolve(repoRoot, "feature.txt"), "feature\n");
+  await git({ cwd: repoRoot, cmd: ["add", "feature.txt"] });
+  await git({
+    cwd: repoRoot,
+    cmd: ["commit", "-m", "Add local feature for PR"],
+  });
+
+  process.env.HACK_GITHUB_APP_TOKEN = "test-token";
+  globalThis.fetch = (async (input, init) => {
+    const requestUrl =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+    const method = init?.method ?? "GET";
+    if (
+      method === "GET" &&
+      requestUrl.includes("/repos/acme/dispatch-local-test/pulls?")
+    ) {
+      return Response.json([]);
     }
-    const repoRoot = resolve(tempDir, "repo-pr-created");
-    await createMinimalHackRepo({ repoRoot });
-    await initGitRepo({ repoRoot, remoteName: "origin" });
-    await git({ cwd: repoRoot, cmd: ["checkout", "-b", "feat/local-pr"] });
-    await writeFile(resolve(repoRoot, "feature.txt"), "feature\n");
-    await git({ cwd: repoRoot, cmd: ["add", "feature.txt"] });
-    await git({
-      cwd: repoRoot,
-      cmd: ["commit", "-m", "Add local feature for PR"],
-    });
+    if (
+      method === "POST" &&
+      requestUrl.endsWith("/repos/acme/dispatch-local-test/pulls")
+    ) {
+      return Response.json({
+        number: 42,
+        url: "https://api.github.com/repos/acme/dispatch-local-test/pulls/42",
+        html_url: "https://github.com/acme/dispatch-local-test/pull/42",
+        title: "hack: dispatch-local-test (feat/local-pr)",
+        state: "open",
+        head: { ref: "feat/local-pr" },
+        base: { ref: "main" },
+      });
+    }
+    if (
+      method === "POST" &&
+      requestUrl.endsWith("/repos/acme/dispatch-local-test/issues/42/comments")
+    ) {
+      return Response.json({
+        id: 7,
+        url: "https://api.github.com/repos/acme/dispatch-local-test/issues/comments/7",
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  }) as typeof fetch;
 
-    process.env.HACK_GITHUB_APP_TOKEN = "test-token";
-    globalThis.fetch = async (input, init) => {
-      const requestUrl =
-        typeof input === "string"
-          ? input
-          : input instanceof URL
-            ? input.toString()
-            : input.url;
-      const method = init?.method ?? "GET";
-      if (
-        method === "GET" &&
-        requestUrl.includes("/repos/acme/dispatch-local-test/pulls?")
-      ) {
-        return Response.json([]);
-      }
-      if (
-        method === "POST" &&
-        requestUrl.endsWith("/repos/acme/dispatch-local-test/pulls")
-      ) {
-        return Response.json({
-          number: 42,
-          url: "https://api.github.com/repos/acme/dispatch-local-test/pulls/42",
-          html_url: "https://github.com/acme/dispatch-local-test/pull/42",
-          title: "hack: dispatch-local-test (feat/local-pr)",
-          state: "open",
-          head: { ref: "feat/local-pr" },
-          base: { ref: "main" },
-        });
-      }
-      if (
-        method === "POST" &&
-        requestUrl.endsWith(
-          "/repos/acme/dispatch-local-test/issues/42/comments"
-        )
-      ) {
-        return Response.json({
-          id: 7,
-          url: "https://api.github.com/repos/acme/dispatch-local-test/issues/comments/7",
-        });
-      }
-      return new Response("unexpected request", { status: 500 });
-    };
+  const result = await runCliWithCapturedIo({
+    argv: [
+      "dispatch",
+      "run",
+      "--project",
+      "dispatch-local-test",
+      "--local",
+      "--pr",
+      "--json",
+      "--",
+      "bash",
+      "-lc",
+      "printf 'ready\\n'",
+    ],
+  });
 
-    const result = await runCliWithCapturedIo({
-      argv: [
-        "dispatch",
-        "run",
-        "--project",
-        "dispatch-local-test",
-        "--local",
-        "--pr",
-        "--json",
-        "--",
-        "bash",
-        "-lc",
-        "printf 'ready\\n'",
-      ],
-    });
-
-    expect(result.exitCode).toBe(0);
-    const payload = JSON.parse(result.stdout) as {
-      readonly terminalState?: string;
-      readonly pr?: {
-        readonly ok: boolean;
-        readonly pull?: {
-          readonly number: number;
-          readonly htmlUrl: string;
-        };
+  expect(result.exitCode).toBe(0);
+  const payload = JSON.parse(result.stdout) as {
+    readonly terminalState?: string;
+    readonly pr?: {
+      readonly ok: boolean;
+      readonly pull?: {
+        readonly number: number;
+        readonly htmlUrl: string;
       };
     };
-    expect(payload.terminalState).toBe("pr_created");
-    expect(payload.pr?.ok).toBe(true);
-    expect(payload.pr?.pull?.number).toBe(42);
-  }
-);
+  };
+  expect(payload.terminalState).toBe("pr_created");
+  expect(payload.pr?.ok).toBe(true);
+  expect(payload.pr?.pull?.number).toBe(42);
+});
 
-test(
-  "dispatch run --local --pr returns pr_failed when GitHub PR automation fails",
-  { timeout: 15_000 },
-  async () => {
-    if (!tempDir) {
-      throw new Error("Missing temp dir");
+test("dispatch run --local --pr returns pr_failed when GitHub PR automation fails", async () => {
+  if (!tempDir) {
+    throw new Error("Missing temp dir");
+  }
+  const repoRoot = resolve(tempDir, "repo-pr-failed");
+  await createMinimalHackRepo({ repoRoot });
+  await initGitRepo({ repoRoot, remoteName: "origin" });
+  await git({ cwd: repoRoot, cmd: ["checkout", "-b", "feat/pr-fails"] });
+  await writeFile(resolve(repoRoot, "feature.txt"), "feature\n");
+  await git({ cwd: repoRoot, cmd: ["add", "feature.txt"] });
+  await git({
+    cwd: repoRoot,
+    cmd: ["commit", "-m", "Add local feature for failing PR"],
+  });
+
+  process.env.HACK_GITHUB_APP_TOKEN = "test-token";
+  globalThis.fetch = (async (input, init) => {
+    const requestUrl =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+    const method = init?.method ?? "GET";
+    if (
+      method === "GET" &&
+      requestUrl.includes("/repos/acme/dispatch-local-test/pulls?")
+    ) {
+      return Response.json([]);
     }
-    const repoRoot = resolve(tempDir, "repo-pr-failed");
-    await createMinimalHackRepo({ repoRoot });
-    await initGitRepo({ repoRoot, remoteName: "origin" });
-    await git({ cwd: repoRoot, cmd: ["checkout", "-b", "feat/pr-fails"] });
-    await writeFile(resolve(repoRoot, "feature.txt"), "feature\n");
-    await git({ cwd: repoRoot, cmd: ["add", "feature.txt"] });
-    await git({
-      cwd: repoRoot,
-      cmd: ["commit", "-m", "Add local feature for failing PR"],
-    });
+    if (
+      method === "POST" &&
+      requestUrl.endsWith("/repos/acme/dispatch-local-test/pulls")
+    ) {
+      return Response.json(
+        {
+          message: "validation failed",
+        },
+        { status: 422 }
+      );
+    }
+    return new Response("unexpected request", { status: 500 });
+  }) as typeof fetch;
 
-    process.env.HACK_GITHUB_APP_TOKEN = "test-token";
-    globalThis.fetch = async (input, init) => {
-      const requestUrl =
-        typeof input === "string"
-          ? input
-          : input instanceof URL
-            ? input.toString()
-            : input.url;
-      const method = init?.method ?? "GET";
-      if (
-        method === "GET" &&
-        requestUrl.includes("/repos/acme/dispatch-local-test/pulls?")
-      ) {
-        return Response.json([]);
-      }
-      if (
-        method === "POST" &&
-        requestUrl.endsWith("/repos/acme/dispatch-local-test/pulls")
-      ) {
-        return Response.json(
-          {
-            message: "validation failed",
-          },
-          { status: 422 }
-        );
-      }
-      return new Response("unexpected request", { status: 500 });
+  const result = await runCliWithCapturedIo({
+    argv: [
+      "dispatch",
+      "run",
+      "--project",
+      "dispatch-local-test",
+      "--local",
+      "--pr",
+      "--json",
+      "--",
+      "bash",
+      "-lc",
+      "printf 'ready\\n'",
+    ],
+  });
+
+  expect(result.exitCode).toBe(22);
+  const payload = JSON.parse(result.stdout) as {
+    readonly terminalState?: string;
+    readonly pr?: {
+      readonly ok: boolean;
+      readonly error?: string;
     };
-
-    const result = await runCliWithCapturedIo({
-      argv: [
-        "dispatch",
-        "run",
-        "--project",
-        "dispatch-local-test",
-        "--local",
-        "--pr",
-        "--json",
-        "--",
-        "bash",
-        "-lc",
-        "printf 'ready\\n'",
-      ],
-    });
-
-    expect(result.exitCode).toBe(22);
-    const payload = JSON.parse(result.stdout) as {
-      readonly terminalState?: string;
-      readonly pr?: {
-        readonly ok: boolean;
-        readonly error?: string;
-      };
-    };
-    expect(payload.terminalState).toBe("pr_failed");
-    expect(payload.pr?.ok).toBe(false);
-    expect(payload.pr?.error).toContain("GitHub PR upsert failed");
-  }
-);
+  };
+  expect(payload.terminalState).toBe("pr_failed");
+  expect(payload.pr?.ok).toBe(false);
+  expect(payload.pr?.error).toContain("GitHub PR upsert failed");
+});
 
 async function createMinimalHackRepo(input: {
   readonly repoRoot: string;

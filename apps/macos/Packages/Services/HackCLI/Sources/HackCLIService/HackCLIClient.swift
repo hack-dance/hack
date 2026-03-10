@@ -1206,6 +1206,87 @@ public actor HackCLIClient {
     return try decodeJsonOrThrow(RailwayBootstrapResponse.self, result: result)
   }
 
+  public func bootstrapAwsNode(
+    request: AwsBootstrapRequest
+  ) async throws -> AwsBootstrapResponse {
+    var args = [
+      "node",
+      "provider",
+      "aws",
+      "bootstrap",
+      "--json",
+    ]
+
+    if let value = normalized(request.instanceId) {
+      args.append(contentsOf: ["--instance-id", value])
+    }
+    if let value = normalized(request.instanceTagKey) {
+      args.append(contentsOf: ["--instance-tag-key", value])
+    }
+    if let value = normalized(request.instanceTagValue) {
+      args.append(contentsOf: ["--instance-tag-value", value])
+    }
+    if let value = normalized(request.region) {
+      args.append(contentsOf: ["--region", value])
+    }
+    if let value = normalized(request.profile) {
+      args.append(contentsOf: ["--profile", value])
+    }
+    if let value = normalized(request.bootstrapCommand) {
+      args.append(contentsOf: ["--bootstrap-command", value])
+    }
+    if let value = normalized(request.source) {
+      args.append(contentsOf: ["--source", value])
+    }
+    if let value = normalized(request.endpoint) {
+      args.append(contentsOf: ["--endpoint", value])
+    }
+    if let value = normalized(request.nodeName) {
+      args.append(contentsOf: ["--name", value])
+    }
+    if !request.labels.isEmpty {
+      args.append(contentsOf: ["--labels", request.labels.joined(separator: ",")])
+    }
+    if request.defaultNode {
+      args.append("--default")
+    }
+
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(AwsBootstrapResponse.self, result: result)
+  }
+
+  public func inspectAws(
+    request: AwsBootstrapRequest? = nil
+  ) async throws -> AwsInspectResponse {
+    var args = ["node", "provider", "aws", "inspect", "--json"]
+    if let request {
+      if let value = normalized(request.instanceId) {
+        args.append(contentsOf: ["--instance-id", value])
+      }
+      if let value = normalized(request.instanceTagKey) {
+        args.append(contentsOf: ["--instance-tag-key", value])
+      }
+      if let value = normalized(request.instanceTagValue) {
+        args.append(contentsOf: ["--instance-tag-value", value])
+      }
+      if let value = normalized(request.region) {
+        args.append(contentsOf: ["--region", value])
+      }
+      if let value = normalized(request.profile) {
+        args.append(contentsOf: ["--profile", value])
+      }
+      if let value = normalized(request.source) {
+        args.append(contentsOf: ["--source", value])
+      }
+      if let value = normalized(request.endpoint) {
+        args.append(contentsOf: ["--endpoint", value])
+      }
+    }
+
+    let result = try await run(args, allowNonZeroExit: true)
+    return try decodeJsonOrThrow(AwsInspectResponse.self, result: result)
+  }
+
   public func listNodes() async throws -> NodeRegistryListResponse {
     let result = try await run(["node", "list", "--json"], allowNonZeroExit: true)
     do {

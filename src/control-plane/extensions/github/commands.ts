@@ -552,6 +552,7 @@ const OAUTH_VALUE_KEYS = {
   "api-base-url": "apiBaseUrl",
 } as const;
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: GitHub connect parsing models the full flag grammar, stdin fallback, and validation in one place.
 function parseConnectArgs(input: {
   readonly args: readonly string[];
 }): ConnectParseResult {
@@ -1323,6 +1324,7 @@ function resolveGhExecutable(input: {
   return findExecutableInPath("gh");
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: GitHub identity inspection intentionally normalizes multiple API payload shapes and installation/account cases for operator output.
 async function inspectGitHubIdentity(input: {
   readonly token: string;
   readonly apiBaseUrl: string;

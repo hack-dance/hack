@@ -24,7 +24,11 @@ import {
   createTicketsStore,
   type TicketSyncConflictResolution,
 } from "./store.ts";
-import { createGitTicketsChannel } from "./tickets-git-channel.ts";
+import {
+  createGitTicketsChannel,
+  type TicketsGitHealth,
+  type TicketsGitRepairResult,
+} from "./tickets-git-channel.ts";
 import {
   checkTicketsSkill,
   installTicketsSkill,
@@ -41,503 +45,19 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
     name: "setup",
     summary: "Install tickets integrations (skill + agent docs)",
     scope: "project",
-    handler: async ({ ctx, args }) => {
-      if (!ctx.project) {
-        ctx.logger.error({ message: "No project found. Run inside a repo." });
-        return 1;
-      }
-
-      // Enable the extension in project config if not already enabled
-      await ensureTicketsExtensionEnabled({
-        projectDir: ctx.project.projectDir,
-        logger: ctx.logger,
-      });
-
-      const parsed = parseTicketsSetupArgs({ args });
-      if (!parsed.ok) {
-        ctx.logger.error({ message: parsed.error });
-        return 1;
-      }
-
-      const targets = parsed.value.all
-        ? (["agents", "claude"] as const)
-        : ([
-            ...(parsed.value.agents ? (["agents"] as const) : []),
-            ...(parsed.value.claude ? (["claude"] as const) : []),
-          ] as const);
-
-      const resolvedTargets =
-        targets.length > 0 ? targets : (["agents", "claude"] as const);
-
-      const scope = parsed.value.global ? "user" : "project";
-      const projectRoot = ctx.project.projectRoot;
-
-      let action: "install" | "check" | "remove";
-      if (parsed.value.remove) {
-        action = "remove";
-      } else if (parsed.value.check) {
-        action = "check";
-      } else {
-        action = "install";
-      }
-      const repoState = await checkTicketsRepoState({ projectRoot });
-
-      let repoGitignore: {
-        status: TicketsRepoGitignoreStatus | TicketsRepoGitignoreFixStatus;
-        path: string;
-        message?: string;
-      } = {
-        status: repoState.gitignore.status,
-        path: repoState.gitignore.path,
-        message: repoState.gitignore.message,
-      };
-      let repoTracking: {
-        status: TicketsRepoTrackedStatus | TicketsRepoUntrackStatus;
-        message?: string;
-      } = {
-        status: repoState.tracked.status,
-        message: repoState.tracked.message,
-      };
-
-      if (action === "install") {
-        if (repoState.gitignore.status === "missing") {
-          repoGitignore = await ensureTicketsGitignore({ projectRoot });
-        } else if (repoState.gitignore.status === "present") {
-          repoGitignore = { status: "noop", path: repoState.gitignore.path };
-        }
-
-        if (repoState.tracked.status === "tracked") {
-          const canPrompt = isTty() && isGumAvailable() && !parsed.value.json;
-          if (canPrompt) {
-            const confirmed = await gumConfirm({
-              prompt:
-                "Untrack .hack/tickets from the main branch? (keeps files on disk)",
-              default: true,
-            });
-            if (confirmed.ok && confirmed.value) {
-              repoTracking = await untrackTicketsRepo({ projectRoot });
-            } else {
-              repoTracking = {
-                status: "skipped",
-                message: "Skipped untracking .hack/tickets.",
-              };
-            }
-          } else {
-            repoTracking = {
-              status: "skipped",
-              message: "Run: git rm -r --cached .hack/tickets",
-            };
-          }
-        }
-      }
-
-      let skill: Awaited<ReturnType<typeof checkTicketsSkill>>;
-      const skillProjectRoot = scope === "project" ? projectRoot : undefined;
-      if (action === "check") {
-        skill = await checkTicketsSkill({
-          scope,
-          projectRoot: skillProjectRoot,
-        });
-      } else if (action === "remove") {
-        skill = await removeTicketsSkill({
-          scope,
-          projectRoot: skillProjectRoot,
-        });
-      } else {
-        skill = await installTicketsSkill({
-          scope,
-          projectRoot: skillProjectRoot,
-        });
-      }
-
-      let docs:
-        | TicketsAgentDocCheckResult[]
-        | TicketsAgentDocRemoveResult[]
-        | TicketsAgentDocUpdateResult[];
-      if (action === "check") {
-        docs = await checkTicketsAgentDocs({
-          projectRoot,
-          targets: resolvedTargets,
-        });
-      } else if (action === "remove") {
-        docs = await removeTicketsAgentDocs({
-          projectRoot,
-          targets: resolvedTargets,
-        });
-      } else {
-        docs = await upsertTicketsAgentDocs({
-          projectRoot,
-          targets: resolvedTargets,
-        });
-      }
-
-      if (parsed.value.json) {
-        process.stdout.write(
-          `${JSON.stringify({ skill, docs, repo: { gitignore: repoGitignore, tracking: repoTracking } }, null, 2)}\n`
-        );
-        return 0;
-      }
-
-      await display.panel({
-        title: "Tickets setup",
-        tone: "success",
-        lines: [
-          `skill: ${skill.status} (${skill.path})`,
-          ...docs.map((r) => `${r.target}: ${r.status} (${r.path})`),
-          `repo.gitignore: ${repoGitignore.status} (${repoGitignore.path})`,
-          `repo.tracking: ${repoTracking.status}${
-            repoTracking.message ? ` (${repoTracking.message})` : ""
-          }`,
-        ],
-      });
-
-      if (action === "install") {
-        await maybeEnsureTicketsGitHealth({ ctx, json: parsed.value.json });
-      }
-
-      return docs.some((r) => r.status === "error") || skill.status === "error"
-        ? 1
-        : 0;
-    },
+    handler: ({ ctx, args }) => handleTicketsSetupCommand({ ctx, args }),
   },
   {
     name: "create",
     summary: "Create a new ticket",
     scope: "project",
-    handler: async ({ ctx, args }) => {
-      if (!ctx.project) {
-        ctx.logger.error({ message: "No project found. Run inside a repo." });
-        return 1;
-      }
-
-      const parsed = parseTicketsArgs({ args });
-      if (!parsed.ok) {
-        ctx.logger.error({ message: parsed.error });
-        return 1;
-      }
-
-      const title = (parsed.value.title ?? "").trim();
-      if (!title) {
-        ctx.logger.error({
-          message: 'Usage: hack x tickets create --title "..."',
-        });
-        return 1;
-      }
-
-      await maybeEnsureTicketsSetup({ ctx, json: parsed.value.json });
-
-      const store = createTicketsStore({
-        projectRoot: ctx.project.projectRoot,
-        projectId: ctx.projectId,
-        projectName: ctx.projectName,
-        controlPlaneConfig: ctx.controlPlaneConfig,
-        logger: ctx.logger,
-      });
-
-      const body = await resolveTicketBody({
-        body: parsed.value.body,
-        bodyFile: parsed.value.bodyFile,
-        bodyStdin: parsed.value.bodyStdin,
-      });
-
-      const dependsOnResult = resolveTicketRefs({
-        values: parsed.value.dependsOn,
-        label: "--depends-on",
-      });
-      if (!dependsOnResult.ok) {
-        ctx.logger.error({ message: dependsOnResult.error });
-        return 1;
-      }
-
-      const blocksResult = resolveTicketRefs({
-        values: parsed.value.blocks,
-        label: "--blocks",
-      });
-      if (!blocksResult.ok) {
-        ctx.logger.error({ message: blocksResult.error });
-        return 1;
-      }
-
-      const created = await store.createTicket({
-        title,
-        body,
-        ...(dependsOnResult.refs.length > 0
-          ? { dependsOn: dependsOnResult.refs }
-          : {}),
-        ...(blocksResult.refs.length > 0 ? { blocks: blocksResult.refs } : {}),
-        ...(parsed.value.owner ? { owner: parsed.value.owner } : {}),
-        ...(parsed.value.source ? { source: parsed.value.source } : {}),
-        ...(parsed.value.assignee ? { assignee: parsed.value.assignee } : {}),
-        ...(parsed.value.tags.length > 0 ? { tags: parsed.value.tags } : {}),
-        ...(parsed.value.externalSystem
-          ? { externalSystem: parsed.value.externalSystem }
-          : {}),
-        ...(parsed.value.externalId
-          ? { externalId: parsed.value.externalId }
-          : {}),
-        ...(parsed.value.externalKey
-          ? { externalKey: parsed.value.externalKey }
-          : {}),
-        ...(parsed.value.externalUrl
-          ? { externalUrl: parsed.value.externalUrl }
-          : {}),
-        ...(parsed.value.externalProjectId
-          ? { externalProjectId: parsed.value.externalProjectId }
-          : {}),
-        ...(parsed.value.externalProjectName
-          ? { externalProjectName: parsed.value.externalProjectName }
-          : {}),
-        ...(parsed.value.externalTeamId
-          ? { externalTeamId: parsed.value.externalTeamId }
-          : {}),
-        actor: parsed.value.actor,
-      });
-
-      if (!created.ok) {
-        ctx.logger.error({ message: created.error });
-        return 1;
-      }
-
-      if (parsed.value.json) {
-        process.stdout.write(
-          `${JSON.stringify({ ticket: created.ticket }, null, 2)}\n`
-        );
-        return 0;
-      }
-
-      await display.kv({
-        title: "Ticket created",
-        entries: [
-          ["ticket_id", created.ticket.ticketId],
-          ["title", created.ticket.title],
-          ["status", created.ticket.status],
-          ["owner", created.ticket.owner],
-          ["source", created.ticket.source],
-          ["created_at", created.ticket.createdAt],
-          ["updated_at", created.ticket.updatedAt],
-        ],
-      });
-      return 0;
-    },
+    handler: ({ ctx, args }) => handleTicketsCreateCommand({ ctx, args }),
   },
   {
     name: "update",
     summary: "Update a ticket",
     scope: "project",
-    handler: async ({ ctx, args }) => {
-      if (!ctx.project) {
-        ctx.logger.error({ message: "No project found. Run inside a repo." });
-        return 1;
-      }
-
-      const parsed = parseTicketsArgs({ args });
-      if (!parsed.ok) {
-        ctx.logger.error({ message: parsed.error });
-        return 1;
-      }
-
-      const ticketId = (parsed.value.rest[0] ?? "").trim();
-      if (!ticketId) {
-        ctx.logger.error({
-          message:
-            'Usage: hack x tickets update <ticket-id> [--title "..."] [--body "..."] [--body-file <path>] [--body-stdin] [--depends-on "..."] [--blocks "..."] [--clear-depends-on] [--clear-blocks] [--json]',
-        });
-        return 1;
-      }
-
-      const title = parsed.value.title?.trim();
-      if (parsed.value.title !== undefined && !title) {
-        ctx.logger.error({ message: "Title cannot be empty." });
-        return 1;
-      }
-
-      if (parsed.value.clearDependsOn && parsed.value.dependsOn.length > 0) {
-        ctx.logger.error({
-          message: "--clear-depends-on cannot be combined with --depends-on.",
-        });
-        return 1;
-      }
-
-      if (parsed.value.clearBlocks && parsed.value.blocks.length > 0) {
-        ctx.logger.error({
-          message: "--clear-blocks cannot be combined with --blocks.",
-        });
-        return 1;
-      }
-      if (parsed.value.clearTags && parsed.value.tags.length > 0) {
-        ctx.logger.error({
-          message: "--clear-tags cannot be combined with --tags/--tag.",
-        });
-        return 1;
-      }
-      if (parsed.value.clearAssignee && parsed.value.assignee !== undefined) {
-        ctx.logger.error({
-          message: "--clear-assignee cannot be combined with --assignee.",
-        });
-        return 1;
-      }
-
-      const bodyRequested =
-        parsed.value.body !== undefined ||
-        parsed.value.bodyFile !== undefined ||
-        parsed.value.bodyStdin;
-
-      const body = bodyRequested
-        ? await resolveTicketBody({
-            body: parsed.value.body,
-            bodyFile: parsed.value.bodyFile,
-            bodyStdin: parsed.value.bodyStdin,
-            allowEmpty: true,
-          })
-        : undefined;
-
-      const dependsOnResult =
-        parsed.value.dependsOn.length > 0
-          ? resolveTicketRefs({
-              values: parsed.value.dependsOn,
-              label: "--depends-on",
-            })
-          : { ok: true as const, refs: [] };
-
-      if (!dependsOnResult.ok) {
-        ctx.logger.error({ message: dependsOnResult.error });
-        return 1;
-      }
-
-      const blocksResult =
-        parsed.value.blocks.length > 0
-          ? resolveTicketRefs({
-              values: parsed.value.blocks,
-              label: "--blocks",
-            })
-          : { ok: true as const, refs: [] };
-
-      if (!blocksResult.ok) {
-        ctx.logger.error({ message: blocksResult.error });
-        return 1;
-      }
-
-      let dependsOn: string[] | undefined;
-      if (parsed.value.clearDependsOn) {
-        dependsOn = [];
-      } else if (parsed.value.dependsOn.length > 0) {
-        dependsOn = dependsOnResult.refs;
-      } else {
-        dependsOn = undefined;
-      }
-
-      let blocks: string[] | undefined;
-      if (parsed.value.clearBlocks) {
-        blocks = [];
-      } else if (parsed.value.blocks.length > 0) {
-        blocks = blocksResult.refs;
-      } else {
-        blocks = undefined;
-      }
-
-      let tags: string[] | undefined;
-      if (parsed.value.clearTags) {
-        tags = [];
-      } else if (parsed.value.tags.length > 0) {
-        tags = [...parsed.value.tags];
-      } else {
-        tags = undefined;
-      }
-
-      const hasUpdates =
-        title !== undefined ||
-        bodyRequested ||
-        dependsOn !== undefined ||
-        blocks !== undefined ||
-        parsed.value.assignee !== undefined ||
-        parsed.value.clearAssignee ||
-        tags !== undefined ||
-        parsed.value.owner !== undefined ||
-        parsed.value.source !== undefined ||
-        parsed.value.externalSystem !== undefined ||
-        parsed.value.externalId !== undefined ||
-        parsed.value.externalKey !== undefined ||
-        parsed.value.externalUrl !== undefined ||
-        parsed.value.externalProjectId !== undefined ||
-        parsed.value.externalProjectName !== undefined ||
-        parsed.value.externalTeamId !== undefined;
-
-      if (!hasUpdates) {
-        ctx.logger.error({ message: "No updates provided." });
-        return 1;
-      }
-
-      await maybeEnsureTicketsSetup({ ctx, json: parsed.value.json });
-
-      const store = createTicketsStore({
-        projectRoot: ctx.project.projectRoot,
-        projectId: ctx.projectId,
-        projectName: ctx.projectName,
-        controlPlaneConfig: ctx.controlPlaneConfig,
-        logger: ctx.logger,
-      });
-
-      const updated = await store.updateTicket({
-        ticketId,
-        ...(title !== undefined ? { title } : {}),
-        ...(bodyRequested ? { body } : {}),
-        ...(dependsOn !== undefined ? { dependsOn } : {}),
-        ...(blocks !== undefined ? { blocks } : {}),
-        ...(tags !== undefined ? { tags } : {}),
-        ...(parsed.value.owner !== undefined
-          ? { owner: parsed.value.owner }
-          : {}),
-        ...(parsed.value.source !== undefined
-          ? { source: parsed.value.source }
-          : {}),
-        ...(parsed.value.clearAssignee ? { assignee: "" } : {}),
-        ...(!parsed.value.clearAssignee && parsed.value.assignee !== undefined
-          ? { assignee: parsed.value.assignee }
-          : {}),
-        ...(parsed.value.externalSystem !== undefined
-          ? { externalSystem: parsed.value.externalSystem }
-          : {}),
-        ...(parsed.value.externalId !== undefined
-          ? { externalId: parsed.value.externalId }
-          : {}),
-        ...(parsed.value.externalKey !== undefined
-          ? { externalKey: parsed.value.externalKey }
-          : {}),
-        ...(parsed.value.externalUrl !== undefined
-          ? { externalUrl: parsed.value.externalUrl }
-          : {}),
-        ...(parsed.value.externalProjectId !== undefined
-          ? { externalProjectId: parsed.value.externalProjectId }
-          : {}),
-        ...(parsed.value.externalProjectName !== undefined
-          ? { externalProjectName: parsed.value.externalProjectName }
-          : {}),
-        ...(parsed.value.externalTeamId !== undefined
-          ? { externalTeamId: parsed.value.externalTeamId }
-          : {}),
-        actor: parsed.value.actor,
-      });
-
-      if (!updated.ok) {
-        ctx.logger.error({ message: updated.error });
-        return 1;
-      }
-
-      if (parsed.value.json) {
-        process.stdout.write(
-          `${JSON.stringify({ ok: true, ticketId }, null, 2)}\n`
-        );
-        return 0;
-      }
-
-      await display.panel({
-        title: "Ticket updated",
-        tone: "success",
-        lines: [`${ticketId} updated`],
-      });
-
-      return 0;
-    },
+    handler: ({ ctx, args }) => handleTicketsUpdateCommand({ ctx, args }),
   },
   {
     name: "comment",
@@ -793,160 +313,7 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
     name: "show",
     summary: "Show a ticket",
     scope: "project",
-    handler: async ({ ctx, args }) => {
-      if (!ctx.project) {
-        ctx.logger.error({ message: "No project found. Run inside a repo." });
-        return 1;
-      }
-
-      const parsed = parseTicketsArgs({ args });
-      if (!parsed.ok) {
-        ctx.logger.error({ message: parsed.error });
-        return 1;
-      }
-
-      const ticketId = (parsed.value.rest[0] ?? "").trim();
-      if (!ticketId) {
-        ctx.logger.error({ message: "Usage: hack x tickets show <ticket-id>" });
-        return 1;
-      }
-
-      await maybeEnsureTicketsSetup({ ctx, json: parsed.value.json });
-
-      const store = createTicketsStore({
-        projectRoot: ctx.project.projectRoot,
-        projectId: ctx.projectId,
-        projectName: ctx.projectName,
-        controlPlaneConfig: ctx.controlPlaneConfig,
-        logger: ctx.logger,
-      });
-
-      const detail = await store.getTicketDetail({ ticketId });
-      const ticket = detail.ticket;
-      if (!ticket) {
-        ctx.logger.error({ message: `Ticket not found: ${ticketId}` });
-        return 1;
-      }
-
-      if (parsed.value.json) {
-        process.stdout.write(
-          `${JSON.stringify(
-            {
-              ticket,
-              comments: detail.comments,
-              reviewNotes: detail.reviewNotes,
-              syncCheckpoints: detail.syncCheckpoints,
-              conflicts: detail.conflicts,
-              events: detail.events,
-            },
-            null,
-            2
-          )}\n`
-        );
-        return 0;
-      }
-
-      await display.kv({
-        title: `Ticket ${ticket.ticketId}`,
-        entries: [
-          ["title", ticket.title],
-          ["status", ticket.status],
-          ["owner", ticket.owner],
-          ["source", ticket.source],
-          ["assignee", ticket.assignee ?? ""],
-          ["tags", ticket.tags.join(", ")],
-          ["external_system", ticket.externalSystem ?? ""],
-          ["external_id", ticket.externalId ?? ""],
-          ["external_key", ticket.externalKey ?? ""],
-          ["external_url", ticket.externalUrl ?? ""],
-          ["external_project_id", ticket.externalProjectId ?? ""],
-          ["external_project_name", ticket.externalProjectName ?? ""],
-          ["external_team_id", ticket.externalTeamId ?? ""],
-          ["depends_on", ticket.dependsOn.join(", ")],
-          ["blocks", ticket.blocks.join(", ")],
-          ["created_at", ticket.createdAt],
-          ["updated_at", ticket.updatedAt],
-          ["project_id", ticket.projectId ?? ""],
-          ["project_name", ticket.projectName ?? ""],
-        ],
-      });
-
-      if (ticket.body) {
-        await display.panel({
-          title: "Body",
-          tone: "info",
-          lines: ticket.body.split("\n"),
-        });
-      }
-
-      if (detail.comments.length > 0) {
-        await display.table({
-          columns: ["comment_id", "source", "actor", "created_at", "body"],
-          rows: detail.comments.map((comment) => [
-            comment.commentId,
-            comment.source,
-            comment.actor,
-            comment.createdAt,
-            comment.body,
-          ]),
-        });
-      }
-
-      if (detail.reviewNotes.length > 0) {
-        await display.table({
-          columns: ["note_id", "actor", "created_at", "context", "body"],
-          rows: detail.reviewNotes.map((reviewNote) => [
-            reviewNote.noteId,
-            reviewNote.actor,
-            reviewNote.createdAt,
-            reviewNote.context ?? "",
-            reviewNote.body,
-          ]),
-        });
-      }
-
-      if (detail.syncCheckpoints.length > 0) {
-        await display.table({
-          columns: [
-            "checkpoint_id",
-            "provider",
-            "profile",
-            "direction",
-            "cursor",
-          ],
-          rows: detail.syncCheckpoints.map((checkpoint) => [
-            checkpoint.checkpointId,
-            checkpoint.provider,
-            checkpoint.profileId ?? "",
-            checkpoint.direction ?? "",
-            checkpoint.remoteCursor ?? "",
-          ]),
-        });
-      }
-
-      if (detail.conflicts.length > 0) {
-        await display.table({
-          columns: ["conflict_id", "field", "status", "provider", "resolution"],
-          rows: detail.conflicts.map((conflict) => [
-            conflict.conflictId,
-            conflict.field,
-            conflict.status,
-            conflict.provider,
-            conflict.resolution ?? "",
-          ]),
-        });
-      }
-
-      await display.table({
-        columns: ["ts", "type", "event_id"],
-        rows: detail.events.map((event) => [
-          event.tsIso,
-          event.type,
-          event.eventId,
-        ]),
-      });
-      return 0;
-    },
+    handler: ({ ctx, args }) => handleTicketsShowCommand({ ctx, args }),
   },
   {
     name: "resolve-conflict",
@@ -1148,6 +515,903 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
   },
 ];
 
+const DEFAULT_TICKETS_SETUP_TARGETS = ["agents", "claude"] as const;
+const TICKETS_SETUP_USAGE =
+  "Usage: hack x tickets setup [--agents|--claude|--all] [--global] [--check|--remove] [--json]";
+const TICKETS_UPDATE_USAGE =
+  'Usage: hack x tickets update <ticket-id> [--title "..."] [--body "..."] [--body-file <path>] [--body-stdin] [--depends-on "..."] [--blocks "..."] [--clear-depends-on] [--clear-blocks] [--json]';
+const TICKETS_RESOLUTION_ERROR =
+  "Invalid --resolution value. Expected accept_local|accept_remote|merged|ignore.";
+
+type TicketsSetupTarget = (typeof DEFAULT_TICKETS_SETUP_TARGETS)[number];
+type TicketsSetupAction = "install" | "check" | "remove";
+type TicketsRepoGitignoreResult = {
+  status: TicketsRepoGitignoreStatus | TicketsRepoGitignoreFixStatus;
+  path: string;
+  message?: string;
+};
+type TicketsRepoTrackingResult = {
+  status: TicketsRepoTrackedStatus | TicketsRepoUntrackStatus;
+  message?: string;
+};
+type TicketsSetupDocResults =
+  | TicketsAgentDocCheckResult[]
+  | TicketsAgentDocRemoveResult[]
+  | TicketsAgentDocUpdateResult[];
+type ProjectContext = NonNullable<ExtensionCommandContext["project"]>;
+
+function requireTicketsProject(opts: {
+  readonly ctx: ExtensionCommandContext;
+}): ProjectContext | null {
+  if (!opts.ctx.project) {
+    opts.ctx.logger.error({ message: "No project found. Run inside a repo." });
+    return null;
+  }
+  return opts.ctx.project;
+}
+
+function createTicketsStoreForProject(opts: {
+  readonly ctx: ExtensionCommandContext;
+  readonly projectRoot: string;
+}) {
+  return createTicketsStore({
+    projectRoot: opts.projectRoot,
+    projectId: opts.ctx.projectId,
+    projectName: opts.ctx.projectName,
+    controlPlaneConfig: opts.ctx.controlPlaneConfig,
+    logger: opts.ctx.logger,
+  });
+}
+
+function resolveTicketsSetupTargets(opts: {
+  readonly input: TicketsSetupArgs;
+}): readonly TicketsSetupTarget[] {
+  if (opts.input.all) {
+    return DEFAULT_TICKETS_SETUP_TARGETS;
+  }
+  const targets = [
+    ...(opts.input.agents ? (["agents"] as const) : []),
+    ...(opts.input.claude ? (["claude"] as const) : []),
+  ];
+  return targets.length > 0 ? targets : DEFAULT_TICKETS_SETUP_TARGETS;
+}
+
+function resolveTicketsSetupAction(opts: {
+  readonly input: TicketsSetupArgs;
+}): TicketsSetupAction {
+  if (opts.input.remove) {
+    return "remove";
+  }
+  if (opts.input.check) {
+    return "check";
+  }
+  return "install";
+}
+
+function createRepoGitignoreResult(opts: {
+  readonly status: TicketsRepoGitignoreStatus | TicketsRepoGitignoreFixStatus;
+  readonly path: string;
+  readonly message?: string;
+}): TicketsRepoGitignoreResult {
+  return {
+    status: opts.status,
+    path: opts.path,
+    ...(opts.message ? { message: opts.message } : {}),
+  };
+}
+
+function createRepoTrackingResult(opts: {
+  readonly status: TicketsRepoTrackedStatus | TicketsRepoUntrackStatus;
+  readonly message?: string;
+}): TicketsRepoTrackingResult {
+  return {
+    status: opts.status,
+    ...(opts.message ? { message: opts.message } : {}),
+  };
+}
+
+async function resolveTicketsSetupRepoState(opts: {
+  readonly action: TicketsSetupAction;
+  readonly projectRoot: string;
+  readonly json: boolean;
+}) {
+  const repoState = await checkTicketsRepoState({
+    projectRoot: opts.projectRoot,
+  });
+  let repoGitignore = createRepoGitignoreResult({
+    status: repoState.gitignore.status,
+    path: repoState.gitignore.path,
+    message: repoState.gitignore.message,
+  });
+  let repoTracking = createRepoTrackingResult({
+    status: repoState.tracked.status,
+    message: repoState.tracked.message,
+  });
+  if (opts.action !== "install") {
+    return { repoGitignore, repoTracking };
+  }
+
+  repoGitignore = await ensureTicketsSetupGitignore({
+    projectRoot: opts.projectRoot,
+    status: repoState.gitignore.status,
+    path: repoState.gitignore.path,
+  });
+  repoTracking = await ensureTicketsSetupTracking({
+    projectRoot: opts.projectRoot,
+    status: repoState.tracked.status,
+    json: opts.json,
+  });
+
+  return { repoGitignore, repoTracking };
+}
+
+function ensureTicketsSetupGitignore(opts: {
+  readonly projectRoot: string;
+  readonly status: TicketsRepoGitignoreStatus;
+  readonly path: string;
+}): Promise<TicketsRepoGitignoreResult> {
+  if (opts.status === "missing") {
+    return ensureTicketsGitignore({ projectRoot: opts.projectRoot });
+  }
+  if (opts.status === "present") {
+    return Promise.resolve(
+      createRepoGitignoreResult({ status: "noop", path: opts.path })
+    );
+  }
+  return Promise.resolve(
+    createRepoGitignoreResult({ status: opts.status, path: opts.path })
+  );
+}
+
+async function ensureTicketsSetupTracking(opts: {
+  readonly projectRoot: string;
+  readonly status: TicketsRepoTrackedStatus;
+  readonly json: boolean;
+}): Promise<TicketsRepoTrackingResult> {
+  if (opts.status !== "tracked") {
+    return createRepoTrackingResult({ status: opts.status });
+  }
+  const canPrompt = isTty() && isGumAvailable() && !opts.json;
+  if (!canPrompt) {
+    return createRepoTrackingResult({
+      status: "skipped",
+      message: "Run: git rm -r --cached .hack/tickets",
+    });
+  }
+  const confirmed = await gumConfirm({
+    prompt: "Untrack .hack/tickets from the main branch? (keeps files on disk)",
+    default: true,
+  });
+  if (!(confirmed.ok && confirmed.value)) {
+    return createRepoTrackingResult({
+      status: "skipped",
+      message: "Skipped untracking .hack/tickets.",
+    });
+  }
+  return untrackTicketsRepo({ projectRoot: opts.projectRoot });
+}
+
+function runTicketsSkillAction(opts: {
+  readonly action: TicketsSetupAction;
+  readonly scope: "project" | "user";
+  readonly projectRoot: string;
+}) {
+  const projectRoot = opts.scope === "project" ? opts.projectRoot : undefined;
+  if (opts.action === "check") {
+    return checkTicketsSkill({ scope: opts.scope, projectRoot });
+  }
+  if (opts.action === "remove") {
+    return removeTicketsSkill({ scope: opts.scope, projectRoot });
+  }
+  return installTicketsSkill({ scope: opts.scope, projectRoot });
+}
+
+function runTicketsDocsAction(opts: {
+  readonly action: TicketsSetupAction;
+  readonly projectRoot: string;
+  readonly targets: readonly TicketsSetupTarget[];
+}): Promise<TicketsSetupDocResults> {
+  if (opts.action === "check") {
+    return checkTicketsAgentDocs({
+      projectRoot: opts.projectRoot,
+      targets: opts.targets,
+    });
+  }
+  if (opts.action === "remove") {
+    return removeTicketsAgentDocs({
+      projectRoot: opts.projectRoot,
+      targets: opts.targets,
+    });
+  }
+  return upsertTicketsAgentDocs({
+    projectRoot: opts.projectRoot,
+    targets: opts.targets,
+  });
+}
+
+async function writeTicketsSetupOutput(opts: {
+  readonly json: boolean;
+  readonly skill: Awaited<ReturnType<typeof checkTicketsSkill>>;
+  readonly docs: TicketsSetupDocResults;
+  readonly repoGitignore: TicketsRepoGitignoreResult;
+  readonly repoTracking: TicketsRepoTrackingResult;
+}) {
+  if (opts.json) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          skill: opts.skill,
+          docs: opts.docs,
+          repo: {
+            gitignore: opts.repoGitignore,
+            tracking: opts.repoTracking,
+          },
+        },
+        null,
+        2
+      )}\n`
+    );
+    return;
+  }
+
+  await display.panel({
+    title: "Tickets setup",
+    tone: "success",
+    lines: [
+      `skill: ${opts.skill.status} (${opts.skill.path})`,
+      ...opts.docs.map(
+        (result) => `${result.target}: ${result.status} (${result.path})`
+      ),
+      `repo.gitignore: ${opts.repoGitignore.status} (${opts.repoGitignore.path})`,
+      `repo.tracking: ${opts.repoTracking.status}${
+        opts.repoTracking.message ? ` (${opts.repoTracking.message})` : ""
+      }`,
+    ],
+  });
+}
+
+function getTicketsSetupExitCode(opts: {
+  readonly skill: Awaited<ReturnType<typeof checkTicketsSkill>>;
+  readonly docs: TicketsSetupDocResults;
+}): number {
+  return opts.docs.some((result) => result.status === "error") ||
+    opts.skill.status === "error"
+    ? 1
+    : 0;
+}
+
+async function handleTicketsSetupCommand(opts: {
+  readonly ctx: ExtensionCommandContext;
+  readonly args: readonly string[];
+}): Promise<number> {
+  const project = requireTicketsProject({ ctx: opts.ctx });
+  if (!project) {
+    return 1;
+  }
+
+  await ensureTicketsExtensionEnabled({
+    projectDir: project.projectDir,
+    logger: opts.ctx.logger,
+  });
+
+  const parsed = parseTicketsSetupArgs({ args: opts.args });
+  if (!parsed.ok) {
+    opts.ctx.logger.error({ message: parsed.error });
+    return 1;
+  }
+
+  const action = resolveTicketsSetupAction({ input: parsed.value });
+  const projectRoot = project.projectRoot;
+  const scope = parsed.value.global ? "user" : "project";
+  const targets = resolveTicketsSetupTargets({ input: parsed.value });
+  const { repoGitignore, repoTracking } = await resolveTicketsSetupRepoState({
+    action,
+    projectRoot,
+    json: parsed.value.json,
+  });
+  const skill = await runTicketsSkillAction({ action, scope, projectRoot });
+  const docs = await runTicketsDocsAction({ action, projectRoot, targets });
+
+  await writeTicketsSetupOutput({
+    json: parsed.value.json,
+    skill,
+    docs,
+    repoGitignore,
+    repoTracking,
+  });
+
+  if (action === "install") {
+    await maybeEnsureTicketsGitHealth({
+      ctx: opts.ctx,
+      json: parsed.value.json,
+    });
+  }
+
+  return getTicketsSetupExitCode({ skill, docs });
+}
+
+function buildCreateTicketInput(opts: {
+  readonly parsed: TicketsArgs;
+  readonly title: string;
+  readonly body?: string;
+  readonly dependsOn: readonly string[];
+  readonly blocks: readonly string[];
+}) {
+  return {
+    title: opts.title,
+    ...(opts.body !== undefined ? { body: opts.body } : {}),
+    ...(opts.dependsOn.length > 0 ? { dependsOn: opts.dependsOn } : {}),
+    ...(opts.blocks.length > 0 ? { blocks: opts.blocks } : {}),
+    ...(opts.parsed.owner ? { owner: opts.parsed.owner } : {}),
+    ...(opts.parsed.source ? { source: opts.parsed.source } : {}),
+    ...(opts.parsed.assignee ? { assignee: opts.parsed.assignee } : {}),
+    ...(opts.parsed.tags.length > 0 ? { tags: opts.parsed.tags } : {}),
+    ...(opts.parsed.externalSystem
+      ? { externalSystem: opts.parsed.externalSystem }
+      : {}),
+    ...(opts.parsed.externalId ? { externalId: opts.parsed.externalId } : {}),
+    ...(opts.parsed.externalKey
+      ? { externalKey: opts.parsed.externalKey }
+      : {}),
+    ...(opts.parsed.externalUrl
+      ? { externalUrl: opts.parsed.externalUrl }
+      : {}),
+    ...(opts.parsed.externalProjectId
+      ? { externalProjectId: opts.parsed.externalProjectId }
+      : {}),
+    ...(opts.parsed.externalProjectName
+      ? { externalProjectName: opts.parsed.externalProjectName }
+      : {}),
+    ...(opts.parsed.externalTeamId
+      ? { externalTeamId: opts.parsed.externalTeamId }
+      : {}),
+    actor: opts.parsed.actor,
+  };
+}
+
+async function handleTicketsCreateCommand(opts: {
+  readonly ctx: ExtensionCommandContext;
+  readonly args: readonly string[];
+}): Promise<number> {
+  const project = requireTicketsProject({ ctx: opts.ctx });
+  if (!project) {
+    return 1;
+  }
+
+  const parsed = parseTicketsArgs({ args: opts.args });
+  if (!parsed.ok) {
+    opts.ctx.logger.error({ message: parsed.error });
+    return 1;
+  }
+
+  const title = (parsed.value.title ?? "").trim();
+  if (!title) {
+    opts.ctx.logger.error({
+      message: 'Usage: hack x tickets create --title "..."',
+    });
+    return 1;
+  }
+
+  await maybeEnsureTicketsSetup({ ctx: opts.ctx, json: parsed.value.json });
+
+  const dependsOnResult = resolveTicketRefs({
+    values: parsed.value.dependsOn,
+    label: "--depends-on",
+  });
+  if (!dependsOnResult.ok) {
+    opts.ctx.logger.error({ message: dependsOnResult.error });
+    return 1;
+  }
+  const blocksResult = resolveTicketRefs({
+    values: parsed.value.blocks,
+    label: "--blocks",
+  });
+  if (!blocksResult.ok) {
+    opts.ctx.logger.error({ message: blocksResult.error });
+    return 1;
+  }
+
+  const body = await resolveTicketBody({
+    body: parsed.value.body,
+    bodyFile: parsed.value.bodyFile,
+    bodyStdin: parsed.value.bodyStdin,
+  });
+  const store = createTicketsStoreForProject({
+    ctx: opts.ctx,
+    projectRoot: project.projectRoot,
+  });
+  const created = await store.createTicket(
+    buildCreateTicketInput({
+      parsed: parsed.value,
+      title,
+      body,
+      dependsOn: dependsOnResult.refs,
+      blocks: blocksResult.refs,
+    })
+  );
+  if (!created.ok) {
+    opts.ctx.logger.error({ message: created.error });
+    return 1;
+  }
+
+  if (parsed.value.json) {
+    process.stdout.write(
+      `${JSON.stringify({ ticket: created.ticket }, null, 2)}\n`
+    );
+    return 0;
+  }
+
+  await display.kv({
+    title: "Ticket created",
+    entries: [
+      ["ticket_id", created.ticket.ticketId],
+      ["title", created.ticket.title],
+      ["status", created.ticket.status],
+      ["owner", created.ticket.owner],
+      ["source", created.ticket.source],
+      ["created_at", created.ticket.createdAt],
+      ["updated_at", created.ticket.updatedAt],
+    ],
+  });
+  return 0;
+}
+
+function resolveUpdateRefValue(opts: {
+  readonly clear: boolean;
+  readonly values: readonly string[];
+  readonly refs: readonly string[];
+}): string[] | undefined {
+  if (opts.clear) {
+    return [];
+  }
+  if (opts.values.length > 0) {
+    return [...opts.refs];
+  }
+  return undefined;
+}
+
+function resolveUpdateTags(opts: {
+  readonly clear: boolean;
+  readonly tags: readonly string[];
+}): string[] | undefined {
+  if (opts.clear) {
+    return [];
+  }
+  if (opts.tags.length > 0) {
+    return [...opts.tags];
+  }
+  return undefined;
+}
+
+function validateTicketUpdateArgs(opts: {
+  readonly parsed: TicketsArgs;
+  readonly ticketId: string;
+  readonly title?: string;
+}): string | null {
+  if (!opts.ticketId) {
+    return TICKETS_UPDATE_USAGE;
+  }
+  if (opts.parsed.title !== undefined && !opts.title) {
+    return "Title cannot be empty.";
+  }
+  if (opts.parsed.clearDependsOn && opts.parsed.dependsOn.length > 0) {
+    return "--clear-depends-on cannot be combined with --depends-on.";
+  }
+  if (opts.parsed.clearBlocks && opts.parsed.blocks.length > 0) {
+    return "--clear-blocks cannot be combined with --blocks.";
+  }
+  if (opts.parsed.clearTags && opts.parsed.tags.length > 0) {
+    return "--clear-tags cannot be combined with --tags/--tag.";
+  }
+  if (opts.parsed.clearAssignee && opts.parsed.assignee !== undefined) {
+    return "--clear-assignee cannot be combined with --assignee.";
+  }
+  return null;
+}
+
+type TicketUpdatePayload = {
+  readonly ticketId: string;
+  readonly title?: string;
+  readonly bodyRequested: boolean;
+  readonly body?: string;
+  readonly dependsOn?: readonly string[];
+  readonly blocks?: readonly string[];
+  readonly tags?: readonly string[];
+};
+
+async function resolveTicketUpdatePayload(opts: {
+  readonly parsed: TicketsArgs;
+  readonly ticketId: string;
+  readonly title?: string;
+}): Promise<
+  | { readonly ok: true; readonly value: TicketUpdatePayload }
+  | { readonly ok: false; readonly error: string }
+> {
+  const dependsOnResult =
+    opts.parsed.dependsOn.length > 0
+      ? resolveTicketRefs({
+          values: opts.parsed.dependsOn,
+          label: "--depends-on",
+        })
+      : { ok: true as const, refs: [] };
+  if (!dependsOnResult.ok) {
+    return dependsOnResult;
+  }
+  const blocksResult =
+    opts.parsed.blocks.length > 0
+      ? resolveTicketRefs({
+          values: opts.parsed.blocks,
+          label: "--blocks",
+        })
+      : { ok: true as const, refs: [] };
+  if (!blocksResult.ok) {
+    return blocksResult;
+  }
+
+  const bodyRequested =
+    opts.parsed.body !== undefined ||
+    opts.parsed.bodyFile !== undefined ||
+    opts.parsed.bodyStdin;
+  const body = bodyRequested
+    ? await resolveTicketBody({
+        body: opts.parsed.body,
+        bodyFile: opts.parsed.bodyFile,
+        bodyStdin: opts.parsed.bodyStdin,
+        allowEmpty: true,
+      })
+    : undefined;
+
+  return {
+    ok: true,
+    value: {
+      ticketId: opts.ticketId,
+      ...(opts.title !== undefined ? { title: opts.title } : {}),
+      bodyRequested,
+      ...(bodyRequested ? { body } : {}),
+      ...(resolveUpdateRefValue({
+        clear: opts.parsed.clearDependsOn,
+        values: opts.parsed.dependsOn,
+        refs: dependsOnResult.refs,
+      }) !== undefined
+        ? {
+            dependsOn: resolveUpdateRefValue({
+              clear: opts.parsed.clearDependsOn,
+              values: opts.parsed.dependsOn,
+              refs: dependsOnResult.refs,
+            }),
+          }
+        : {}),
+      ...(resolveUpdateRefValue({
+        clear: opts.parsed.clearBlocks,
+        values: opts.parsed.blocks,
+        refs: blocksResult.refs,
+      }) !== undefined
+        ? {
+            blocks: resolveUpdateRefValue({
+              clear: opts.parsed.clearBlocks,
+              values: opts.parsed.blocks,
+              refs: blocksResult.refs,
+            }),
+          }
+        : {}),
+      ...(resolveUpdateTags({
+        clear: opts.parsed.clearTags,
+        tags: opts.parsed.tags,
+      }) !== undefined
+        ? {
+            tags: resolveUpdateTags({
+              clear: opts.parsed.clearTags,
+              tags: opts.parsed.tags,
+            }),
+          }
+        : {}),
+    },
+  };
+}
+
+function hasTicketUpdateChanges(opts: {
+  readonly parsed: TicketsArgs;
+  readonly payload: TicketUpdatePayload;
+}): boolean {
+  return (
+    opts.payload.title !== undefined ||
+    opts.payload.bodyRequested ||
+    opts.payload.dependsOn !== undefined ||
+    opts.payload.blocks !== undefined ||
+    opts.payload.tags !== undefined ||
+    opts.parsed.assignee !== undefined ||
+    opts.parsed.clearAssignee ||
+    opts.parsed.owner !== undefined ||
+    opts.parsed.source !== undefined ||
+    opts.parsed.externalSystem !== undefined ||
+    opts.parsed.externalId !== undefined ||
+    opts.parsed.externalKey !== undefined ||
+    opts.parsed.externalUrl !== undefined ||
+    opts.parsed.externalProjectId !== undefined ||
+    opts.parsed.externalProjectName !== undefined ||
+    opts.parsed.externalTeamId !== undefined
+  );
+}
+
+function buildTicketUpdateInput(opts: {
+  readonly parsed: TicketsArgs;
+  readonly payload: TicketUpdatePayload;
+}) {
+  return {
+    ticketId: opts.payload.ticketId,
+    ...(opts.payload.title !== undefined ? { title: opts.payload.title } : {}),
+    ...(opts.payload.bodyRequested ? { body: opts.payload.body } : {}),
+    ...(opts.payload.dependsOn !== undefined
+      ? { dependsOn: opts.payload.dependsOn }
+      : {}),
+    ...(opts.payload.blocks !== undefined
+      ? { blocks: opts.payload.blocks }
+      : {}),
+    ...(opts.payload.tags !== undefined ? { tags: opts.payload.tags } : {}),
+    ...(opts.parsed.owner !== undefined ? { owner: opts.parsed.owner } : {}),
+    ...(opts.parsed.source !== undefined ? { source: opts.parsed.source } : {}),
+    ...(opts.parsed.clearAssignee ? { assignee: "" } : {}),
+    ...(!opts.parsed.clearAssignee && opts.parsed.assignee !== undefined
+      ? { assignee: opts.parsed.assignee }
+      : {}),
+    ...(opts.parsed.externalSystem !== undefined
+      ? { externalSystem: opts.parsed.externalSystem }
+      : {}),
+    ...(opts.parsed.externalId !== undefined
+      ? { externalId: opts.parsed.externalId }
+      : {}),
+    ...(opts.parsed.externalKey !== undefined
+      ? { externalKey: opts.parsed.externalKey }
+      : {}),
+    ...(opts.parsed.externalUrl !== undefined
+      ? { externalUrl: opts.parsed.externalUrl }
+      : {}),
+    ...(opts.parsed.externalProjectId !== undefined
+      ? { externalProjectId: opts.parsed.externalProjectId }
+      : {}),
+    ...(opts.parsed.externalProjectName !== undefined
+      ? { externalProjectName: opts.parsed.externalProjectName }
+      : {}),
+    ...(opts.parsed.externalTeamId !== undefined
+      ? { externalTeamId: opts.parsed.externalTeamId }
+      : {}),
+    actor: opts.parsed.actor,
+  };
+}
+
+async function handleTicketsUpdateCommand(opts: {
+  readonly ctx: ExtensionCommandContext;
+  readonly args: readonly string[];
+}): Promise<number> {
+  const project = requireTicketsProject({ ctx: opts.ctx });
+  if (!project) {
+    return 1;
+  }
+
+  const parsed = parseTicketsArgs({ args: opts.args });
+  if (!parsed.ok) {
+    opts.ctx.logger.error({ message: parsed.error });
+    return 1;
+  }
+
+  const ticketId = (parsed.value.rest[0] ?? "").trim();
+  const title = parsed.value.title?.trim();
+  const validationError = validateTicketUpdateArgs({
+    parsed: parsed.value,
+    ticketId,
+    title,
+  });
+  if (validationError) {
+    opts.ctx.logger.error({ message: validationError });
+    return 1;
+  }
+
+  const payload = await resolveTicketUpdatePayload({
+    parsed: parsed.value,
+    ticketId,
+    title,
+  });
+  if (!payload.ok) {
+    opts.ctx.logger.error({ message: payload.error });
+    return 1;
+  }
+  if (
+    !hasTicketUpdateChanges({ parsed: parsed.value, payload: payload.value })
+  ) {
+    opts.ctx.logger.error({ message: "No updates provided." });
+    return 1;
+  }
+
+  await maybeEnsureTicketsSetup({ ctx: opts.ctx, json: parsed.value.json });
+
+  const store = createTicketsStoreForProject({
+    ctx: opts.ctx,
+    projectRoot: project.projectRoot,
+  });
+  const updated = await store.updateTicket(
+    buildTicketUpdateInput({ parsed: parsed.value, payload: payload.value })
+  );
+  if (!updated.ok) {
+    opts.ctx.logger.error({ message: updated.error });
+    return 1;
+  }
+
+  if (parsed.value.json) {
+    process.stdout.write(
+      `${JSON.stringify({ ok: true, ticketId }, null, 2)}\n`
+    );
+    return 0;
+  }
+
+  await display.panel({
+    title: "Ticket updated",
+    tone: "success",
+    lines: [`${ticketId} updated`],
+  });
+  return 0;
+}
+
+async function writeTicketDetailSections(opts: {
+  readonly detail: Awaited<
+    ReturnType<ReturnType<typeof createTicketsStore>["getTicketDetail"]>
+  >;
+}) {
+  const { detail } = opts;
+  const ticket = detail.ticket;
+  if (!ticket) {
+    return;
+  }
+
+  await display.kv({
+    title: `Ticket ${ticket.ticketId}`,
+    entries: [
+      ["title", ticket.title],
+      ["status", ticket.status],
+      ["owner", ticket.owner],
+      ["source", ticket.source],
+      ["assignee", ticket.assignee ?? ""],
+      ["tags", ticket.tags.join(", ")],
+      ["external_system", ticket.externalSystem ?? ""],
+      ["external_id", ticket.externalId ?? ""],
+      ["external_key", ticket.externalKey ?? ""],
+      ["external_url", ticket.externalUrl ?? ""],
+      ["external_project_id", ticket.externalProjectId ?? ""],
+      ["external_project_name", ticket.externalProjectName ?? ""],
+      ["external_team_id", ticket.externalTeamId ?? ""],
+      ["depends_on", ticket.dependsOn.join(", ")],
+      ["blocks", ticket.blocks.join(", ")],
+      ["created_at", ticket.createdAt],
+      ["updated_at", ticket.updatedAt],
+      ["project_id", ticket.projectId ?? ""],
+      ["project_name", ticket.projectName ?? ""],
+    ],
+  });
+  if (ticket.body) {
+    await display.panel({
+      title: "Body",
+      tone: "info",
+      lines: ticket.body.split("\n"),
+    });
+  }
+  await maybeDisplayTable({
+    rows: detail.comments.map((comment) => [
+      comment.commentId,
+      comment.source,
+      comment.actor,
+      comment.createdAt,
+      comment.body,
+    ]),
+    columns: ["comment_id", "source", "actor", "created_at", "body"],
+  });
+  await maybeDisplayTable({
+    rows: detail.reviewNotes.map((reviewNote) => [
+      reviewNote.noteId,
+      reviewNote.actor,
+      reviewNote.createdAt,
+      reviewNote.context ?? "",
+      reviewNote.body,
+    ]),
+    columns: ["note_id", "actor", "created_at", "context", "body"],
+  });
+  await maybeDisplayTable({
+    rows: detail.syncCheckpoints.map((checkpoint) => [
+      checkpoint.checkpointId,
+      checkpoint.provider,
+      checkpoint.profileId ?? "",
+      checkpoint.direction ?? "",
+      checkpoint.remoteCursor ?? "",
+    ]),
+    columns: ["checkpoint_id", "provider", "profile", "direction", "cursor"],
+  });
+  await maybeDisplayTable({
+    rows: detail.conflicts.map((conflict) => [
+      conflict.conflictId,
+      conflict.field,
+      conflict.status,
+      conflict.provider,
+      conflict.resolution ?? "",
+    ]),
+    columns: ["conflict_id", "field", "status", "provider", "resolution"],
+  });
+  await display.table({
+    columns: ["ts", "type", "event_id"],
+    rows: detail.events.map((event) => [
+      event.tsIso,
+      event.type,
+      event.eventId,
+    ]),
+  });
+}
+
+async function maybeDisplayTable(opts: {
+  readonly columns: readonly string[];
+  readonly rows: readonly (readonly string[])[];
+}) {
+  if (opts.rows.length === 0) {
+    return;
+  }
+  await display.table({
+    columns: [...opts.columns],
+    rows: opts.rows.map((row) => [...row]),
+  });
+}
+
+async function handleTicketsShowCommand(opts: {
+  readonly ctx: ExtensionCommandContext;
+  readonly args: readonly string[];
+}): Promise<number> {
+  const project = requireTicketsProject({ ctx: opts.ctx });
+  if (!project) {
+    return 1;
+  }
+
+  const parsed = parseTicketsArgs({ args: opts.args });
+  if (!parsed.ok) {
+    opts.ctx.logger.error({ message: parsed.error });
+    return 1;
+  }
+
+  const ticketId = (parsed.value.rest[0] ?? "").trim();
+  if (!ticketId) {
+    opts.ctx.logger.error({
+      message: "Usage: hack x tickets show <ticket-id>",
+    });
+    return 1;
+  }
+
+  await maybeEnsureTicketsSetup({ ctx: opts.ctx, json: parsed.value.json });
+  const store = createTicketsStoreForProject({
+    ctx: opts.ctx,
+    projectRoot: project.projectRoot,
+  });
+  const detail = await store.getTicketDetail({ ticketId });
+  if (!detail.ticket) {
+    opts.ctx.logger.error({ message: `Ticket not found: ${ticketId}` });
+    return 1;
+  }
+
+  if (parsed.value.json) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          ticket: detail.ticket,
+          comments: detail.comments,
+          reviewNotes: detail.reviewNotes,
+          syncCheckpoints: detail.syncCheckpoints,
+          conflicts: detail.conflicts,
+          events: detail.events,
+        },
+        null,
+        2
+      )}\n`
+    );
+    return 0;
+  }
+
+  await writeTicketDetailSections({ detail });
+  return 0;
+}
+
 type TicketsArgs = {
   readonly title?: string;
   readonly body?: string;
@@ -1202,366 +1466,294 @@ type TicketsSetupParseResult =
   | { readonly ok: true; readonly value: TicketsSetupArgs }
   | { readonly ok: false; readonly error: string };
 
+type MutableTicketsArgs = {
+  rest: string[];
+  title?: string;
+  body?: string;
+  bodyFile?: string;
+  bodyStdin: boolean;
+  dependsOn: string[];
+  blocks: string[];
+  clearDependsOn: boolean;
+  clearBlocks: boolean;
+  owner?: string;
+  source?: string;
+  assignee?: string;
+  clearAssignee: boolean;
+  tags: string[];
+  clearTags: boolean;
+  externalSystem?: string;
+  externalId?: string;
+  externalKey?: string;
+  externalUrl?: string;
+  externalProjectId?: string;
+  externalProjectName?: string;
+  externalTeamId?: string;
+  actor?: string;
+  json: boolean;
+};
+
+type MutableResolveConflictArgs = {
+  rest: string[];
+  conflictId?: string;
+  resolution?: TicketSyncConflictResolution;
+  summary?: string;
+  actor?: string;
+  json: boolean;
+};
+
+type ParsedCliToken =
+  | { readonly kind: "terminator" }
+  | {
+      readonly kind: "option";
+      readonly name: string;
+      readonly inlineValue?: string;
+    }
+  | { readonly kind: "positional"; readonly value: string };
+
+type OptionApplyResult =
+  | { readonly ok: true; readonly consumedNext: boolean }
+  | { readonly ok: false; readonly error: string };
+
+const TICKETS_STRING_OPTION_FIELDS = {
+  title: "title",
+  body: "body",
+  "body-file": "bodyFile",
+  actor: "actor",
+  owner: "owner",
+  source: "source",
+  assignee: "assignee",
+  "external-system": "externalSystem",
+  "external-id": "externalId",
+  "external-key": "externalKey",
+  "external-url": "externalUrl",
+  "external-project-id": "externalProjectId",
+  "external-project-name": "externalProjectName",
+  "external-team-id": "externalTeamId",
+} as const;
+
+const TICKETS_BOOLEAN_OPTION_FIELDS = {
+  json: "json",
+  "body-stdin": "bodyStdin",
+  "clear-depends-on": "clearDependsOn",
+  "clear-blocks": "clearBlocks",
+  "clear-tags": "clearTags",
+  "clear-assignee": "clearAssignee",
+} as const;
+
+const TICKETS_LIST_OPTION_FIELDS = {
+  "depends-on": { field: "dependsOn", split: splitTicketRefs },
+  blocks: { field: "blocks", split: splitTicketRefs },
+  tags: { field: "tags", split: splitTags },
+  tag: { field: "tags", split: (value: string) => [value] },
+} as const;
+
+const TICKETS_SETUP_FLAGS = {
+  "--agents": "agents",
+  "--agents-md": "agents",
+  "--claude": "claude",
+  "--claude-md": "claude",
+  "--all": "all",
+  "--global": "global",
+  "--check": "check",
+  "--remove": "remove",
+  "--json": "json",
+} as const;
+
+function createMutableTicketsArgs(): MutableTicketsArgs {
+  return {
+    rest: [],
+    bodyStdin: false,
+    dependsOn: [],
+    blocks: [],
+    clearDependsOn: false,
+    clearBlocks: false,
+    clearAssignee: false,
+    tags: [],
+    clearTags: false,
+    json: false,
+  };
+}
+
+function createMutableResolveConflictArgs(): MutableResolveConflictArgs {
+  return {
+    rest: [],
+    json: false,
+  };
+}
+
+function parseCliToken(opts: { readonly token: string }): ParsedCliToken {
+  if (opts.token === "--") {
+    return { kind: "terminator" };
+  }
+  if (!opts.token.startsWith("-")) {
+    return { kind: "positional", value: opts.token };
+  }
+  if (!opts.token.startsWith("--")) {
+    return { kind: "option", name: opts.token.slice(1) };
+  }
+  const equalsIndex = opts.token.indexOf("=");
+  if (equalsIndex === -1) {
+    return { kind: "option", name: opts.token.slice(2) };
+  }
+  return {
+    kind: "option",
+    name: opts.token.slice(2, equalsIndex),
+    inlineValue: opts.token.slice(equalsIndex + 1),
+  };
+}
+
+function takeRequiredOptionValue(opts: {
+  readonly option: string;
+  readonly inlineValue?: string;
+  readonly nextToken?: string;
+}):
+  | {
+      readonly ok: true;
+      readonly value: string;
+      readonly consumedNext: boolean;
+    }
+  | { readonly ok: false; readonly error: string } {
+  if (opts.inlineValue !== undefined) {
+    return { ok: true, value: opts.inlineValue, consumedNext: false };
+  }
+  if (!opts.nextToken || opts.nextToken.startsWith("-")) {
+    return { ok: false, error: `--${opts.option} requires a value.` };
+  }
+  return { ok: true, value: opts.nextToken, consumedNext: true };
+}
+
+function applyTicketsOption(opts: {
+  readonly state: MutableTicketsArgs;
+  readonly option: string;
+  readonly inlineValue?: string;
+  readonly nextToken?: string;
+}): OptionApplyResult {
+  const booleanField =
+    TICKETS_BOOLEAN_OPTION_FIELDS[
+      opts.option as keyof typeof TICKETS_BOOLEAN_OPTION_FIELDS
+    ];
+  if (booleanField) {
+    if (opts.inlineValue !== undefined) {
+      return {
+        ok: false,
+        error: `Unknown option: --${opts.option}=${opts.inlineValue}`,
+      };
+    }
+    opts.state[booleanField] = true;
+    return { ok: true, consumedNext: false };
+  }
+
+  const stringField =
+    TICKETS_STRING_OPTION_FIELDS[
+      opts.option as keyof typeof TICKETS_STRING_OPTION_FIELDS
+    ];
+  if (stringField) {
+    const value = takeRequiredOptionValue({
+      option: opts.option,
+      inlineValue: opts.inlineValue,
+      nextToken: opts.nextToken,
+    });
+    if (!value.ok) {
+      return value;
+    }
+    opts.state[stringField] = value.value;
+    return { ok: true, consumedNext: value.consumedNext };
+  }
+
+  const listField =
+    TICKETS_LIST_OPTION_FIELDS[
+      opts.option as keyof typeof TICKETS_LIST_OPTION_FIELDS
+    ];
+  if (listField) {
+    const value = takeRequiredOptionValue({
+      option: opts.option,
+      inlineValue: opts.inlineValue,
+      nextToken: opts.nextToken,
+    });
+    if (!value.ok) {
+      return value;
+    }
+    opts.state[listField.field].push(...listField.split(value.value));
+    return { ok: true, consumedNext: value.consumedNext };
+  }
+
+  return { ok: false, error: `Unknown option: --${opts.option}` };
+}
+
+function finalizeTicketsArgs(opts: {
+  readonly state: MutableTicketsArgs;
+}): TicketsArgs {
+  const { state } = opts;
+  return {
+    ...(state.title ? { title: state.title } : {}),
+    ...(state.body ? { body: state.body } : {}),
+    ...(state.bodyFile ? { bodyFile: state.bodyFile } : {}),
+    bodyStdin: state.bodyStdin,
+    dependsOn: state.dependsOn,
+    blocks: state.blocks,
+    clearDependsOn: state.clearDependsOn,
+    clearBlocks: state.clearBlocks,
+    ...(state.owner ? { owner: state.owner } : {}),
+    ...(state.source ? { source: state.source } : {}),
+    ...(state.assignee !== undefined ? { assignee: state.assignee } : {}),
+    clearAssignee: state.clearAssignee,
+    tags: normalizeTags(state.tags),
+    clearTags: state.clearTags,
+    ...(state.externalSystem !== undefined
+      ? { externalSystem: state.externalSystem }
+      : {}),
+    ...(state.externalId !== undefined ? { externalId: state.externalId } : {}),
+    ...(state.externalKey !== undefined
+      ? { externalKey: state.externalKey }
+      : {}),
+    ...(state.externalUrl !== undefined
+      ? { externalUrl: state.externalUrl }
+      : {}),
+    ...(state.externalProjectId !== undefined
+      ? { externalProjectId: state.externalProjectId }
+      : {}),
+    ...(state.externalProjectName !== undefined
+      ? { externalProjectName: state.externalProjectName }
+      : {}),
+    ...(state.externalTeamId !== undefined
+      ? { externalTeamId: state.externalTeamId }
+      : {}),
+    ...(state.actor ? { actor: state.actor } : {}),
+    json: state.json,
+    rest: state.rest,
+  };
+}
+
 function parseTicketsArgs(opts: {
   readonly args: readonly string[];
 }): TicketsParseResult {
-  const rest: string[] = [];
-  let title: string | undefined;
-  let body: string | undefined;
-  let bodyFile: string | undefined;
-  let bodyStdin = false;
-  const dependsOn: string[] = [];
-  const blocks: string[] = [];
-  let clearDependsOn = false;
-  let clearBlocks = false;
-  let owner: string | undefined;
-  let source: string | undefined;
-  let assignee: string | undefined;
-  let clearAssignee = false;
-  const tags: string[] = [];
-  let clearTags = false;
-  let externalSystem: string | undefined;
-  let externalId: string | undefined;
-  let externalKey: string | undefined;
-  let externalUrl: string | undefined;
-  let externalProjectId: string | undefined;
-  let externalProjectName: string | undefined;
-  let externalTeamId: string | undefined;
-  let actor: string | undefined;
-  let json = false;
-
-  const takeValue = (
-    _flag: string,
-    value: string | undefined
-  ): string | null => {
-    if (!value || value.startsWith("-")) {
-      return null;
-    }
-    return value;
-  };
-
+  const state = createMutableTicketsArgs();
   for (let i = 0; i < opts.args.length; i += 1) {
-    const token = opts.args[i] ?? "";
-
-    if (token === "--") {
-      rest.push(...opts.args.slice(i + 1));
+    const parsedToken = parseCliToken({ token: opts.args[i] ?? "" });
+    if (parsedToken.kind === "terminator") {
+      state.rest.push(...opts.args.slice(i + 1));
       break;
     }
-
-    if (token === "--json") {
-      json = true;
+    if (parsedToken.kind === "positional") {
+      state.rest.push(parsedToken.value);
       continue;
     }
-
-    if (token.startsWith("--title=")) {
-      title = token.slice("--title=".length);
-      continue;
+    const applied = applyTicketsOption({
+      state,
+      option: parsedToken.name,
+      inlineValue: parsedToken.inlineValue,
+      nextToken: opts.args[i + 1],
+    });
+    if (!applied.ok) {
+      return applied;
     }
-
-    if (token === "--title") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--title requires a value." };
-      }
-      title = value;
+    if (applied.consumedNext) {
       i += 1;
-      continue;
     }
-
-    if (token.startsWith("--body=")) {
-      body = token.slice("--body=".length);
-      continue;
-    }
-
-    if (token === "--body") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--body requires a value." };
-      }
-      body = value;
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("--body-file=")) {
-      bodyFile = token.slice("--body-file=".length);
-      continue;
-    }
-
-    if (token === "--body-file") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--body-file requires a value." };
-      }
-      bodyFile = value;
-      i += 1;
-      continue;
-    }
-
-    if (token === "--body-stdin") {
-      bodyStdin = true;
-      continue;
-    }
-
-    if (token === "--clear-depends-on") {
-      clearDependsOn = true;
-      continue;
-    }
-
-    if (token === "--clear-blocks") {
-      clearBlocks = true;
-      continue;
-    }
-    if (token === "--clear-tags") {
-      clearTags = true;
-      continue;
-    }
-    if (token === "--clear-assignee") {
-      clearAssignee = true;
-      continue;
-    }
-
-    if (token.startsWith("--depends-on=")) {
-      dependsOn.push(...splitTicketRefs(token.slice("--depends-on=".length)));
-      continue;
-    }
-
-    if (token === "--depends-on") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--depends-on requires a value." };
-      }
-      dependsOn.push(...splitTicketRefs(value));
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("--blocks=")) {
-      blocks.push(...splitTicketRefs(token.slice("--blocks=".length)));
-      continue;
-    }
-
-    if (token === "--blocks") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--blocks requires a value." };
-      }
-      blocks.push(...splitTicketRefs(value));
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("--actor=")) {
-      actor = token.slice("--actor=".length);
-      continue;
-    }
-
-    if (token.startsWith("--owner=")) {
-      owner = token.slice("--owner=".length);
-      continue;
-    }
-    if (token === "--owner") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--owner requires a value." };
-      }
-      owner = value;
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--source=")) {
-      source = token.slice("--source=".length);
-      continue;
-    }
-    if (token === "--source") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--source requires a value." };
-      }
-      source = value;
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--assignee=")) {
-      assignee = token.slice("--assignee=".length);
-      continue;
-    }
-    if (token === "--assignee") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--assignee requires a value." };
-      }
-      assignee = value;
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--tags=")) {
-      tags.push(...splitTags(token.slice("--tags=".length)));
-      continue;
-    }
-    if (token === "--tags") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--tags requires a value." };
-      }
-      tags.push(...splitTags(value));
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--tag=")) {
-      tags.push(token.slice("--tag=".length));
-      continue;
-    }
-    if (token === "--tag") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--tag requires a value." };
-      }
-      tags.push(value);
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--external-system=")) {
-      externalSystem = token.slice("--external-system=".length);
-      continue;
-    }
-    if (token === "--external-system") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--external-system requires a value." };
-      }
-      externalSystem = value;
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--external-id=")) {
-      externalId = token.slice("--external-id=".length);
-      continue;
-    }
-    if (token === "--external-id") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--external-id requires a value." };
-      }
-      externalId = value;
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--external-key=")) {
-      externalKey = token.slice("--external-key=".length);
-      continue;
-    }
-    if (token === "--external-key") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--external-key requires a value." };
-      }
-      externalKey = value;
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--external-url=")) {
-      externalUrl = token.slice("--external-url=".length);
-      continue;
-    }
-    if (token === "--external-url") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--external-url requires a value." };
-      }
-      externalUrl = value;
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--external-project-id=")) {
-      externalProjectId = token.slice("--external-project-id=".length);
-      continue;
-    }
-    if (token === "--external-project-id") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--external-project-id requires a value." };
-      }
-      externalProjectId = value;
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--external-project-name=")) {
-      externalProjectName = token.slice("--external-project-name=".length);
-      continue;
-    }
-    if (token === "--external-project-name") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return {
-          ok: false,
-          error: "--external-project-name requires a value.",
-        };
-      }
-      externalProjectName = value;
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--external-team-id=")) {
-      externalTeamId = token.slice("--external-team-id=".length);
-      continue;
-    }
-    if (token === "--external-team-id") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--external-team-id requires a value." };
-      }
-      externalTeamId = value;
-      i += 1;
-      continue;
-    }
-
-    if (token === "--actor") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--actor requires a value." };
-      }
-      actor = value;
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("-")) {
-      return { ok: false, error: `Unknown option: ${token}` };
-    }
-
-    rest.push(token);
   }
 
-  return {
-    ok: true,
-    value: {
-      ...(title ? { title } : {}),
-      ...(body ? { body } : {}),
-      ...(bodyFile ? { bodyFile } : {}),
-      bodyStdin,
-      dependsOn,
-      blocks,
-      clearDependsOn,
-      clearBlocks,
-      ...(owner ? { owner } : {}),
-      ...(source ? { source } : {}),
-      ...(assignee !== undefined ? { assignee } : {}),
-      clearAssignee,
-      tags: normalizeTags(tags),
-      clearTags,
-      ...(externalSystem !== undefined ? { externalSystem } : {}),
-      ...(externalId !== undefined ? { externalId } : {}),
-      ...(externalKey !== undefined ? { externalKey } : {}),
-      ...(externalUrl !== undefined ? { externalUrl } : {}),
-      ...(externalProjectId !== undefined ? { externalProjectId } : {}),
-      ...(externalProjectName !== undefined ? { externalProjectName } : {}),
-      ...(externalTeamId !== undefined ? { externalTeamId } : {}),
-      ...(actor ? { actor } : {}),
-      json,
-      rest,
-    },
-  };
+  return { ok: true, value: finalizeTicketsArgs({ state }) };
 }
 
 function parseResolveConflictArgs(opts: {
@@ -1569,110 +1761,35 @@ function parseResolveConflictArgs(opts: {
 }):
   | { readonly ok: true; readonly value: ResolveConflictArgs }
   | { readonly ok: false; readonly error: string } {
-  const rest: string[] = [];
-  let conflictId: string | undefined;
-  let resolution: TicketSyncConflictResolution | undefined;
-  let summary: string | undefined;
-  let actor: string | undefined;
-  let json = false;
-
-  const takeValue = (value: string | undefined): string | null => {
-    if (!value || value.startsWith("-")) {
-      return null;
-    }
-    return value;
-  };
-
+  const state = createMutableResolveConflictArgs();
   for (let i = 0; i < opts.args.length; i += 1) {
-    const token = opts.args[i] ?? "";
-    if (token === "--") {
-      rest.push(...opts.args.slice(i + 1));
+    const parsedToken = parseCliToken({ token: opts.args[i] ?? "" });
+    if (parsedToken.kind === "terminator") {
+      state.rest.push(...opts.args.slice(i + 1));
       break;
     }
-    if (token === "--json") {
-      json = true;
+    if (parsedToken.kind === "positional") {
+      state.rest.push(parsedToken.value);
       continue;
     }
-    if (token.startsWith("--conflict-id=")) {
-      conflictId = token.slice("--conflict-id=".length);
-      continue;
+    const applied = applyResolveConflictOption({
+      state,
+      option: parsedToken.name,
+      inlineValue: parsedToken.inlineValue,
+      nextToken: opts.args[i + 1],
+    });
+    if (!applied.ok) {
+      return applied;
     }
-    if (token === "--conflict-id") {
-      const value = takeValue(opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--conflict-id requires a value." };
-      }
-      conflictId = value;
+    if (applied.consumedNext) {
       i += 1;
-      continue;
     }
-    if (token.startsWith("--resolution=")) {
-      const parsedResolution = parseConflictResolutionValue({
-        value: token.slice("--resolution=".length),
-      });
-      if (!parsedResolution) {
-        return {
-          ok: false,
-          error:
-            "Invalid --resolution value. Expected accept_local|accept_remote|merged|ignore.",
-        };
-      }
-      resolution = parsedResolution;
-      continue;
-    }
-    if (token === "--resolution") {
-      const value = takeValue(opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--resolution requires a value." };
-      }
-      const parsedResolution = parseConflictResolutionValue({ value });
-      if (!parsedResolution) {
-        return {
-          ok: false,
-          error:
-            "Invalid --resolution value. Expected accept_local|accept_remote|merged|ignore.",
-        };
-      }
-      resolution = parsedResolution;
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--summary=")) {
-      summary = token.slice("--summary=".length);
-      continue;
-    }
-    if (token === "--summary") {
-      const value = takeValue(opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--summary requires a value." };
-      }
-      summary = value;
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--actor=")) {
-      actor = token.slice("--actor=".length);
-      continue;
-    }
-    if (token === "--actor") {
-      const value = takeValue(opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--actor requires a value." };
-      }
-      actor = value;
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("-")) {
-      return { ok: false, error: `Unknown option: ${token}` };
-    }
-    rest.push(token);
   }
 
-  if (!conflictId) {
+  if (!state.conflictId) {
     return { ok: false, error: "Missing --conflict-id <ID>." };
   }
-  if (!resolution) {
+  if (!state.resolution) {
     return {
       ok: false,
       error: "Missing --resolution <accept_local|accept_remote|merged|ignore>.",
@@ -1682,14 +1799,67 @@ function parseResolveConflictArgs(opts: {
   return {
     ok: true,
     value: {
-      conflictId,
-      resolution,
-      ...(summary !== undefined ? { summary } : {}),
-      ...(actor ? { actor } : {}),
-      json,
-      rest,
+      conflictId: state.conflictId,
+      resolution: state.resolution,
+      ...(state.summary !== undefined ? { summary: state.summary } : {}),
+      ...(state.actor ? { actor: state.actor } : {}),
+      json: state.json,
+      rest: state.rest,
     },
   };
+}
+
+function applyResolveConflictOption(opts: {
+  readonly state: MutableResolveConflictArgs;
+  readonly option: string;
+  readonly inlineValue?: string;
+  readonly nextToken?: string;
+}): OptionApplyResult {
+  if (opts.option === "json") {
+    if (opts.inlineValue !== undefined) {
+      return {
+        ok: false,
+        error: `Unknown option: --${opts.option}=${opts.inlineValue}`,
+      };
+    }
+    opts.state.json = true;
+    return { ok: true, consumedNext: false };
+  }
+  if (opts.option === "resolution") {
+    const value = takeRequiredOptionValue({
+      option: opts.option,
+      inlineValue: opts.inlineValue,
+      nextToken: opts.nextToken,
+    });
+    if (!value.ok) {
+      return value;
+    }
+    const resolution = parseConflictResolutionValue({ value: value.value });
+    if (!resolution) {
+      return { ok: false, error: TICKETS_RESOLUTION_ERROR };
+    }
+    opts.state.resolution = resolution;
+    return { ok: true, consumedNext: value.consumedNext };
+  }
+  const fieldMap = {
+    "conflict-id": "conflictId",
+    summary: "summary",
+    actor: "actor",
+  } as const;
+  const field = fieldMap[opts.option as keyof typeof fieldMap];
+  if (!field) {
+    return { ok: false, error: `Unknown option: --${opts.option}` };
+  }
+  const value = takeRequiredOptionValue({
+    option: opts.option,
+    inlineValue: opts.inlineValue,
+    nextToken: opts.nextToken,
+  });
+  if (!value.ok) {
+    return value;
+  }
+  opts.state[field] = value.value;
+  return { ok: true, consumedNext: value.consumedNext };
 }
 
 async function resolveTicketBody(opts: {
@@ -1800,6 +1970,64 @@ function resolveTicketRefs(opts: {
   return { ok: true, refs: normalizeTicketRefs(normalized) };
 }
 
+function buildTicketsSetupNotices(opts: {
+  readonly needsGitignore: boolean;
+  readonly needsUntrack: boolean;
+  readonly needsSkill: boolean;
+  readonly needsDocs: boolean;
+}): string[] {
+  const notices: string[] = [];
+  if (opts.needsGitignore) {
+    notices.push("add .hack/tickets/ to .gitignore");
+  }
+  if (opts.needsUntrack) {
+    notices.push("untrack .hack/tickets from main branch");
+  }
+  if (opts.needsSkill || opts.needsDocs) {
+    notices.push("run tickets setup");
+  }
+  return notices;
+}
+
+async function applyTicketsSetupRepairs(opts: {
+  readonly projectRoot: string;
+  readonly needsGitignore: boolean;
+  readonly needsUntrack: boolean;
+  readonly needsSkill: boolean;
+  readonly needsDocs: boolean;
+}): Promise<string[]> {
+  const lines: string[] = [];
+  if (opts.needsGitignore) {
+    const gitignore = await ensureTicketsGitignore({
+      projectRoot: opts.projectRoot,
+    });
+    lines.push(`repo.gitignore: ${gitignore.status} (${gitignore.path})`);
+  }
+  if (opts.needsUntrack) {
+    const untrack = await untrackTicketsRepo({ projectRoot: opts.projectRoot });
+    lines.push(
+      `repo.tracking: ${untrack.status}${untrack.message ? ` (${untrack.message})` : ""}`
+    );
+  }
+  if (opts.needsSkill) {
+    const installed = await installTicketsSkill({
+      scope: "project",
+      projectRoot: opts.projectRoot,
+    });
+    lines.push(`skill: ${installed.status} (${installed.path})`);
+  }
+  if (opts.needsDocs) {
+    const updatedDocs = await upsertTicketsAgentDocs({
+      projectRoot: opts.projectRoot,
+      targets: ["agents", "claude"],
+    });
+    lines.push(
+      ...updatedDocs.map((doc) => `${doc.target}: ${doc.status} (${doc.path})`)
+    );
+  }
+  return lines;
+}
+
 async function maybeEnsureTicketsSetup(opts: {
   readonly ctx: ExtensionCommandContext;
   readonly json: boolean;
@@ -1827,21 +2055,18 @@ async function maybeEnsureTicketsSetup(opts: {
     (doc) => doc.status === "missing" || doc.status === "error"
   );
 
-  if (!(needsGitignore || needsUntrack || needsSkill || needsDocs)) {
+  const needsRepair = needsGitignore || needsUntrack || needsSkill || needsDocs;
+  if (!needsRepair) {
     return;
   }
 
+  const notices = buildTicketsSetupNotices({
+    needsGitignore,
+    needsUntrack,
+    needsSkill,
+    needsDocs,
+  });
   if (!(isTty() && isGumAvailable())) {
-    const notices: string[] = [];
-    if (needsGitignore) {
-      notices.push("add .hack/tickets/ to .gitignore");
-    }
-    if (needsUntrack) {
-      notices.push("untrack .hack/tickets from main branch");
-    }
-    if (needsSkill || needsDocs) {
-      notices.push("run tickets setup");
-    }
     if (notices.length > 0) {
       opts.ctx.logger.warn({
         message: `Tickets setup incomplete: ${notices.join("; ")}.`,
@@ -1857,39 +2082,13 @@ async function maybeEnsureTicketsSetup(opts: {
   if (!(confirmed.ok && confirmed.value)) {
     return;
   }
-
-  const lines: string[] = [];
-
-  if (needsGitignore) {
-    const gitignore = await ensureTicketsGitignore({ projectRoot });
-    lines.push(`repo.gitignore: ${gitignore.status} (${gitignore.path})`);
-  }
-
-  if (needsUntrack) {
-    const untrack = await untrackTicketsRepo({ projectRoot });
-    lines.push(
-      `repo.tracking: ${untrack.status}${untrack.message ? ` (${untrack.message})` : ""}`
-    );
-  }
-
-  if (needsSkill) {
-    const installed = await installTicketsSkill({
-      scope: "project",
-      projectRoot,
-    });
-    lines.push(`skill: ${installed.status} (${installed.path})`);
-  }
-
-  if (needsDocs) {
-    const updatedDocs = await upsertTicketsAgentDocs({
-      projectRoot,
-      targets: ["agents", "claude"],
-    });
-    lines.push(
-      ...updatedDocs.map((doc) => `${doc.target}: ${doc.status} (${doc.path})`)
-    );
-  }
-
+  const lines = await applyTicketsSetupRepairs({
+    projectRoot,
+    needsGitignore,
+    needsUntrack,
+    needsSkill,
+    needsDocs,
+  });
   if (lines.length > 0) {
     await display.panel({
       title: "Tickets setup",
@@ -1899,6 +2098,83 @@ async function maybeEnsureTicketsSetup(opts: {
   }
 
   await maybeEnsureTicketsGitHealth({ ctx: opts.ctx, json: opts.json });
+}
+
+function needsTicketsGitHealthRepair(opts: {
+  readonly health: TicketsGitHealth;
+}): boolean {
+  return (
+    opts.health.hasLegacyRef ||
+    opts.health.hasRefDivergence ||
+    opts.health.hasNonTicketFiles
+  );
+}
+
+function buildTicketsGitHealthReasons(opts: {
+  readonly health: TicketsGitHealth;
+}): string[] {
+  const reasons: string[] = [];
+  if (opts.health.hasRefDivergence) {
+    reasons.push("hidden ref diverges from legacy branch");
+  }
+  if (opts.health.hasLegacyRef && opts.health.legacyRef) {
+    reasons.push(`legacy ref ${opts.health.legacyRef}`);
+  }
+  if (opts.health.hasNonTicketFiles) {
+    reasons.push("non-ticket files in tickets ref");
+  }
+  return reasons;
+}
+
+async function confirmLegacyRefPrune(opts: {
+  readonly health: TicketsGitHealth;
+}): Promise<boolean> {
+  if (!(opts.health.hasLegacyRef && opts.health.legacyRef)) {
+    return false;
+  }
+  const prune = await gumConfirm({
+    prompt: `Remove legacy ref ${opts.health.legacyRef} from the remote?`,
+    default: true,
+  });
+  return prune.ok && prune.value;
+}
+
+function buildTicketsRepairLines(opts: {
+  readonly health: TicketsGitHealth;
+  readonly pruneLegacyRef: boolean;
+  readonly repaired: Extract<TicketsGitRepairResult, { readonly ok: true }>;
+}): string[] {
+  const lines: string[] = [];
+  if (opts.health.hasNonTicketFiles) {
+    const sample = opts.health.nonTicketPaths.slice(0, 5);
+    const extra = opts.health.nonTicketPaths.length - sample.length;
+    lines.push(`non-ticket files: ${opts.health.nonTicketPaths.length}`);
+    if (sample.length > 0) {
+      lines.push(
+        `sample: ${sample.join(", ")}${extra > 0 ? ` (+${extra} more)` : ""}`
+      );
+    }
+  }
+  if (opts.health.hasLegacyRef && opts.health.legacyRef) {
+    lines.push(
+      `legacy ref: ${opts.health.legacyRef} ${
+        opts.pruneLegacyRef ? "pruned" : "left intact"
+      }`
+    );
+  }
+  if (opts.health.hasRefDivergence) {
+    lines.push(
+      `ref divergence: ${
+        opts.health.remoteRefOid?.slice(0, 8) ?? "missing"
+      } vs ${opts.health.legacyRefOid?.slice(0, 8) ?? "missing"}`
+    );
+  }
+  lines.push(`commit: ${opts.repaired.didCommit ? "created" : "noop"}`);
+  lines.push(`push: ${opts.repaired.didPush ? "pushed" : "skipped"}`);
+  if (opts.repaired.pruneError) {
+    lines.push(`legacy prune error: ${opts.repaired.pruneError}`);
+  }
+  return lines;
 }
 
 async function maybeEnsureTicketsGitHealth(opts: {
@@ -1937,26 +2213,11 @@ async function maybeEnsureTicketsGitHealth(opts: {
   }
 
   const health = inspected.health;
-  if (
-    !(
-      health.hasLegacyRef ||
-      health.hasRefDivergence ||
-      health.hasNonTicketFiles
-    )
-  ) {
+  if (!needsTicketsGitHealthRepair({ health })) {
     return;
   }
 
-  const reasons: string[] = [];
-  if (health.hasRefDivergence) {
-    reasons.push("hidden ref diverges from legacy branch");
-  }
-  if (health.hasLegacyRef && health.legacyRef) {
-    reasons.push(`legacy ref ${health.legacyRef}`);
-  }
-  if (health.hasNonTicketFiles) {
-    reasons.push("non-ticket files in tickets ref");
-  }
+  const reasons = buildTicketsGitHealthReasons({ health });
 
   if (!(isTty() && isGumAvailable())) {
     opts.ctx.logger.warn({
@@ -1972,16 +2233,7 @@ async function maybeEnsureTicketsGitHealth(opts: {
   if (!(confirmed.ok && confirmed.value)) {
     return;
   }
-
-  let pruneLegacyRef = false;
-  if (health.hasLegacyRef && health.legacyRef) {
-    const prune = await gumConfirm({
-      prompt: `Remove legacy ref ${health.legacyRef} from the remote?`,
-      default: true,
-    });
-    pruneLegacyRef = prune.ok && prune.value;
-  }
-
+  const pruneLegacyRef = await confirmLegacyRefPrune({ health });
   const repaired = await channel.repair({ pruneLegacyRef });
   if (!repaired.ok) {
     await display.panel({
@@ -1991,109 +2243,45 @@ async function maybeEnsureTicketsGitHealth(opts: {
     });
     return;
   }
-
-  const lines: string[] = [];
-  if (health.hasNonTicketFiles) {
-    const sample = health.nonTicketPaths.slice(0, 5);
-    const extra = health.nonTicketPaths.length - sample.length;
-    lines.push(`non-ticket files: ${health.nonTicketPaths.length}`);
-    if (sample.length > 0) {
-      lines.push(
-        `sample: ${sample.join(", ")}${extra > 0 ? ` (+${extra} more)` : ""}`
-      );
-    }
-  }
-  if (health.hasLegacyRef && health.legacyRef) {
-    lines.push(
-      `legacy ref: ${health.legacyRef} ${pruneLegacyRef ? "pruned" : "left intact"}`
-    );
-  }
-  if (health.hasRefDivergence) {
-    lines.push(
-      `ref divergence: ${
-        health.remoteRefOid?.slice(0, 8) ?? "missing"
-      } vs ${health.legacyRefOid?.slice(0, 8) ?? "missing"}`
-    );
-  }
-  lines.push(`commit: ${repaired.didCommit ? "created" : "noop"}`);
-  lines.push(`push: ${repaired.didPush ? "pushed" : "skipped"}`);
-  if (repaired.pruneError) {
-    lines.push(`legacy prune error: ${repaired.pruneError}`);
-  }
-
   await display.panel({
     title: "Tickets repair",
     tone: repaired.pruneError ? "warn" : "success",
-    lines,
+    lines: buildTicketsRepairLines({
+      health,
+      pruneLegacyRef,
+      repaired,
+    }),
   });
 }
 
 function parseTicketsSetupArgs(opts: {
   readonly args: readonly string[];
 }): TicketsSetupParseResult {
-  let agents = false;
-  let claude = false;
-  let all = false;
-  let global = false;
-  let check = false;
-  let remove = false;
-  let json = false;
-
+  const value = {
+    agents: false,
+    claude: false,
+    all: false,
+    global: false,
+    check: false,
+    remove: false,
+    json: false,
+  };
   for (const token of opts.args) {
-    if (token === "--agents" || token === "--agents-md") {
-      agents = true;
-      continue;
-    }
-
-    if (token === "--claude" || token === "--claude-md") {
-      claude = true;
-      continue;
-    }
-
-    if (token === "--all") {
-      all = true;
-      continue;
-    }
-
-    if (token === "--global") {
-      global = true;
-      continue;
-    }
-
-    if (token === "--check") {
-      check = true;
-      continue;
-    }
-
-    if (token === "--remove") {
-      remove = true;
-      continue;
-    }
-
-    if (token === "--json") {
-      json = true;
-      continue;
-    }
-
     if (token === "--help" || token === "help") {
-      return {
-        ok: false,
-        error:
-          "Usage: hack x tickets setup [--agents|--claude|--all] [--global] [--check|--remove] [--json]",
-      };
+      return { ok: false, error: TICKETS_SETUP_USAGE };
     }
-
-    return { ok: false, error: `Unknown option: ${token}` };
+    const field =
+      TICKETS_SETUP_FLAGS[token as keyof typeof TICKETS_SETUP_FLAGS];
+    if (!field) {
+      return { ok: false, error: `Unknown option: ${token}` };
+    }
+    value[field] = true;
   }
 
-  if (check && remove) {
+  if (value.check && value.remove) {
     return { ok: false, error: "--check and --remove are mutually exclusive." };
   }
-
-  return {
-    ok: true,
-    value: { agents, claude, all, global, check, remove, json },
-  };
+  return { ok: true, value };
 }
 
 /**

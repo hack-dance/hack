@@ -851,6 +851,29 @@ hack node provider railway bootstrap \
   --railway-private \
   --default
 
+# AWS provider bootstrap (explicit instance id)
+hack node provider aws bootstrap \
+  --instance-id "i-0123456789abcdef0" \
+  --region us-east-1 \
+  --source "ec2-user@runner.internal" \
+  --endpoint "https://runner.example.internal" \
+  --name "aws-runner-1" \
+  --labels aws,linux \
+  --default
+
+# AWS provider bootstrap (tag discovery + optional pre-init command)
+hack node provider aws bootstrap \
+  --instance-tag-value "event-agent-qa-runner" \
+  --instance-tag-key Name \
+  --region us-east-1 \
+  --profile qa \
+  --source "ec2-user@runner.internal" \
+  --endpoint "https://runner.example.internal" \
+  --bootstrap-command "sudo systemctl start hack-node"
+
+# AWS provider e2e validation
+bun run test:e2e:aws
+
 hack node devcontainer up --node <node-id> --project my-project --branch feature/foo
 hack node devcontainer attach --node <node-id> --id <session-id> --ide vscode --ssh-host node.example.com --ssh-alias hack-node-dev
 ```

@@ -65,6 +65,7 @@ export async function persistLinearLocalAccessCustody(input: {
   }
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Local-access seeding preserves the full refresh-and-rehydrate flow, including custody persistence and operator-facing error mapping.
 export async function seedLinearLocalAccess(input: {
   readonly config: {
     readonly providerTokenEncryptionKey?: string;

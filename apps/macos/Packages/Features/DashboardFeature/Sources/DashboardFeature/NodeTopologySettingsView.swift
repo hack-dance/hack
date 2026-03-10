@@ -131,7 +131,7 @@ struct NodeTopologySettingsView: View {
         Spacer()
         if isControllerHost {
           Button {
-            openRailwaySettings()
+            openAwsSettings()
           } label: {
             Label("Add remote node", systemImage: "plus.circle")
           }
@@ -201,6 +201,9 @@ struct NodeTopologySettingsView: View {
           )
           if isControllerHost {
             Menu {
+              Button("Add via AWS") {
+                openAwsSettings()
+              }
               Button("Add via Railway") {
                 openRailwaySettings()
               }
@@ -248,7 +251,7 @@ struct NodeTopologySettingsView: View {
         .overlay(alignment: .topTrailing) {
           if isControllerHost {
             Button {
-              openRailwaySettings()
+              openAwsSettings()
             } label: {
               Image(systemName: "plus")
                 .font(.system(size: 12, weight: .semibold))
@@ -293,6 +296,10 @@ struct NodeTopologySettingsView: View {
         Spacer()
         if isControllerHost {
           Menu {
+            Button("Add via AWS") {
+              topologyExpanded = false
+              openAwsSettings()
+            }
             Button("Add via Railway") {
               topologyExpanded = false
               openRailwaySettings()
@@ -1151,11 +1158,20 @@ struct NodeTopologySettingsView: View {
             StatusPill(text: "Unknown", tone: .neutral)
           }
           StatusPill(text: "Authorized", tone: .neutral)
+          if let source = node.source, !source.isEmpty {
+            StatusPill(text: "Source-backed", tone: .good)
+          }
         }
         Text(node.endpoint)
           .font(.mono(.caption))
           .foregroundStyle(.secondary)
           .textSelection(.enabled)
+        if let source = node.source, !source.isEmpty {
+          Text(source)
+            .font(.mono(.caption2))
+            .foregroundStyle(.secondary)
+            .textSelection(.enabled)
+        }
         Text(node.id)
           .font(.mono(.caption2))
           .foregroundStyle(.tertiary)
@@ -1433,6 +1449,14 @@ struct NodeTopologySettingsView: View {
       name: .hackSettingsRequested,
       object: nil,
       userInfo: [SettingsNavigationRequest.paneKey: SettingsSidebarItem.railway.rawValue]
+    )
+  }
+
+  private func openAwsSettings() {
+    NotificationCenter.default.post(
+      name: .hackSettingsRequested,
+      object: nil,
+      userInfo: [SettingsNavigationRequest.paneKey: SettingsSidebarItem.aws.rawValue]
     )
   }
 

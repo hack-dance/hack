@@ -167,6 +167,7 @@ async function prepareWebhookRequest(input: {
   };
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Webhook persistence intentionally bundles ownership resolution, delivery recording, and autosync subscription lookup into one transactional response path.
 async function persistWebhookDelivery(input: {
   readonly prepared: PreparedWebhookRequest;
   readonly syncStore: LinearSyncStore;

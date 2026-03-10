@@ -150,6 +150,209 @@ const DEFAULT_SECRET_STORE: SecretStore = {
 
 const TOKEN_REFRESH_WINDOW_MS = 60_000;
 
+function buildLinearTokenSuccess(input: {
+  readonly settings: LinearAuthSettings;
+  readonly token: string;
+  readonly source: "keychain" | "env" | "refreshed";
+  readonly expiresAt?: string;
+}): LinearTokenResolution {
+  return {
+    ok: true,
+    token: input.token,
+    source: input.source,
+    tokenEnv: input.settings.tokenEnv,
+    authRef: input.settings.authRef,
+    service: input.settings.service,
+    profileId: input.settings.profileId,
+    profileSource: input.settings.profileSource,
+    ...(input.expiresAt ? { expiresAt: input.expiresAt } : {}),
+  };
+}
+
+function buildLinearTokenFailure(input: {
+  readonly settings: LinearAuthSettings;
+  readonly error: string;
+}): LinearTokenResolution {
+  return {
+    ok: false,
+    error: input.error,
+    tokenEnv: input.settings.tokenEnv,
+    authRef: input.settings.authRef,
+    service: input.settings.service,
+    profileId: input.settings.profileId,
+    profileSource: input.settings.profileSource,
+  };
+}
+
+function buildLinearTokenFallbackFailure(input: {
+  readonly controlPlaneConfig: ControlPlaneConfig;
+  readonly profileId?: string;
+  readonly allowProjectOverride?: boolean;
+  readonly error: string;
+}): LinearTokenResolution {
+  const fallback = resolveLinearAuthSettings({
+    controlPlaneConfig: input.controlPlaneConfig,
+    ...(input.profileId ? { profileId: input.profileId } : {}),
+    allowProjectOverride: input.allowProjectOverride,
+  });
+  return buildLinearTokenFailure({
+    settings: fallback,
+    error: input.error,
+  });
+}
+
+function buildRefreshedLinearTokenEnvelope(input: {
+  readonly refreshed: {
+    readonly token: string;
+    readonly expiresAt?: string;
+    readonly refreshToken?: string;
+    readonly refreshTokenExpiresAt?: string;
+  };
+  readonly storedEnvelope: LinearTokenEnvelope;
+}): LinearTokenEnvelope {
+  const nextRefreshToken =
+    input.refreshed.refreshToken ?? input.storedEnvelope.refreshToken;
+  const nextRefreshTokenExpiresAt =
+    input.refreshed.refreshTokenExpiresAt ??
+    input.storedEnvelope.refreshTokenExpiresAt;
+  return {
+    token: input.refreshed.token,
+    ...(input.refreshed.expiresAt
+      ? { expiresAt: input.refreshed.expiresAt }
+      : {}),
+    ...(nextRefreshToken ? { refreshToken: nextRefreshToken } : {}),
+    ...(nextRefreshTokenExpiresAt
+      ? { refreshTokenExpiresAt: nextRefreshTokenExpiresAt }
+      : {}),
+  };
+}
+
+async function refreshStoredLinearTokenIfNeeded(input: {
+  readonly settings: LinearAuthSettings;
+  readonly store: SecretStore;
+  readonly storedEnvelope: LinearTokenEnvelope | null;
+  readonly refreshConfig?: LinearRefreshConfig;
+  readonly nowMs: number;
+}): Promise<{
+  readonly storedEnvelope: LinearTokenEnvelope | null;
+  readonly refreshedToken: boolean;
+  readonly refreshError: string | null;
+  readonly fallbackResolution?: LinearTokenResolution;
+}> {
+  if (
+    !(
+      input.storedEnvelope &&
+      shouldRefreshStoredToken({
+        envelope: input.storedEnvelope,
+        nowMs: input.nowMs,
+      }) &&
+      input.refreshConfig
+    )
+  ) {
+    return {
+      storedEnvelope: input.storedEnvelope,
+      refreshedToken: false,
+      refreshError: null,
+    };
+  }
+
+  const refreshed = await refreshLinearAccessToken({
+    refreshConfig: input.refreshConfig,
+    refreshToken: input.storedEnvelope.refreshToken ?? "",
+    currentRefreshTokenExpiresAt: input.storedEnvelope.refreshTokenExpiresAt,
+  });
+  if (refreshed.ok) {
+    const storedEnvelope = buildRefreshedLinearTokenEnvelope({
+      refreshed,
+      storedEnvelope: input.storedEnvelope,
+    });
+    try {
+      await input.store.set({
+        service: input.settings.service,
+        name: input.settings.authRef,
+        value: serializeStoredToken(storedEnvelope),
+      });
+    } catch {
+      // Best effort: use the fresh token for this command even if re-persist fails.
+    }
+    return {
+      storedEnvelope,
+      refreshedToken: true,
+      refreshError: null,
+    };
+  }
+
+  if (
+    isUsableStoredAccessToken({
+      envelope: input.storedEnvelope,
+      nowMs: input.nowMs,
+    })
+  ) {
+    return {
+      storedEnvelope: input.storedEnvelope,
+      refreshedToken: false,
+      refreshError: null,
+      fallbackResolution: buildLinearTokenSuccess({
+        settings: input.settings,
+        token: input.storedEnvelope.token ?? "",
+        source: "keychain",
+        expiresAt: input.storedEnvelope.expiresAt,
+      }),
+    };
+  }
+
+  return {
+    storedEnvelope: input.storedEnvelope,
+    refreshedToken: false,
+    refreshError: refreshed.error,
+  };
+}
+
+async function resolveLinearFallbackManagementToken(input: {
+  readonly settings: LinearAuthSettings;
+  readonly authRef: string;
+  readonly service: string;
+  readonly error: string;
+}): Promise<
+  | {
+      readonly ok: true;
+      readonly managementToken: string;
+      readonly managementTokenExpiresAt?: string;
+      readonly profileId: string;
+      readonly authRef: string;
+      readonly service: string;
+    }
+  | {
+      readonly ok: false;
+      readonly error: string;
+      readonly profileId: string;
+      readonly authRef: string;
+      readonly service: string;
+    }
+> {
+  const genericHackSession = await loadHackAuthSession().catch(() => null);
+  const genericManagementToken = genericHackSession?.token?.trim() ?? "";
+  if (genericManagementToken) {
+    return {
+      ok: true,
+      managementToken: genericManagementToken,
+      ...(genericHackSession?.expiresAt
+        ? { managementTokenExpiresAt: genericHackSession.expiresAt }
+        : {}),
+      profileId: input.settings.profileId,
+      authRef: input.authRef,
+      service: input.service,
+    };
+  }
+  return {
+    ok: false,
+    error: input.error,
+    profileId: input.settings.profileId,
+    authRef: input.authRef,
+    service: input.service,
+  };
+}
+
 /**
  * Resolve Linear profile catalog using command flags, project overrides, and global defaults.
  */
@@ -300,20 +503,12 @@ export async function resolveLinearToken(input: {
   });
 
   if (!resolved.ok) {
-    const fallback = resolveLinearAuthSettings({
+    return buildLinearTokenFallbackFailure({
       controlPlaneConfig: input.controlPlaneConfig,
       ...(input.profileId ? { profileId: input.profileId } : {}),
       allowProjectOverride: input.allowProjectOverride,
-    });
-    return {
-      ok: false,
       error: resolved.error,
-      tokenEnv: fallback.tokenEnv,
-      authRef: fallback.authRef,
-      service: fallback.service,
-      profileId: fallback.profileId,
-      profileSource: fallback.profileSource,
-    };
+    });
   }
 
   const settings = resolved.settings;
@@ -325,113 +520,45 @@ export async function resolveLinearToken(input: {
     service: settings.service,
     name: settings.authRef,
   });
-  let storedEnvelope = parseStoredTokenEnvelope(stored);
-  let refreshError: string | null = null;
-  let refreshedToken = false;
-  if (
-    storedEnvelope &&
-    shouldRefreshStoredToken({
-      envelope: storedEnvelope,
-      nowMs,
-    }) &&
-    input.refreshConfig
-  ) {
-    const refreshed = await refreshLinearAccessToken({
-      refreshConfig: input.refreshConfig,
-      refreshToken: storedEnvelope.refreshToken ?? "",
-      currentRefreshTokenExpiresAt: storedEnvelope.refreshTokenExpiresAt,
-    });
-    if (refreshed.ok) {
-      refreshedToken = true;
-      const nextRefreshToken =
-        refreshed.refreshToken ?? storedEnvelope.refreshToken;
-      const nextRefreshTokenExpiresAt =
-        refreshed.refreshTokenExpiresAt ?? storedEnvelope.refreshTokenExpiresAt;
-      storedEnvelope = {
-        token: refreshed.token,
-        ...(refreshed.expiresAt ? { expiresAt: refreshed.expiresAt } : {}),
-        ...(nextRefreshToken ? { refreshToken: nextRefreshToken } : {}),
-        ...(nextRefreshTokenExpiresAt
-          ? { refreshTokenExpiresAt: nextRefreshTokenExpiresAt }
-          : {}),
-      };
-      try {
-        await store.set({
-          service: settings.service,
-          name: settings.authRef,
-          value: serializeStoredToken(storedEnvelope),
-        });
-      } catch {
-        // Best effort: use the fresh token for this command even if re-persist fails.
-      }
-    } else if (
-      isUsableStoredAccessToken({
-        envelope: storedEnvelope,
-        nowMs,
-      })
-    ) {
-      return {
-        ok: true,
-        token: storedEnvelope.token ?? "",
-        source: "keychain",
-        tokenEnv: settings.tokenEnv,
-        authRef: settings.authRef,
-        service: settings.service,
-        profileId: settings.profileId,
-        profileSource: settings.profileSource,
-        ...(storedEnvelope.expiresAt
-          ? { expiresAt: storedEnvelope.expiresAt }
-          : {}),
-      };
-    } else {
-      refreshError = refreshed.error;
-    }
+  const refreshResult = await refreshStoredLinearTokenIfNeeded({
+    settings,
+    store,
+    storedEnvelope: parseStoredTokenEnvelope(stored),
+    refreshConfig: input.refreshConfig,
+    nowMs,
+  });
+  if (refreshResult.fallbackResolution) {
+    return refreshResult.fallbackResolution;
   }
+  const storedEnvelope = refreshResult.storedEnvelope;
 
   if (
     storedEnvelope?.token &&
     isUsableStoredAccessToken({ envelope: storedEnvelope, nowMs })
   ) {
-    return {
-      ok: true,
+    return buildLinearTokenSuccess({
+      settings,
       token: storedEnvelope.token,
-      source: refreshedToken ? "refreshed" : "keychain",
-      tokenEnv: settings.tokenEnv,
-      authRef: settings.authRef,
-      service: settings.service,
-      profileId: settings.profileId,
-      profileSource: settings.profileSource,
-      ...(storedEnvelope.expiresAt
-        ? { expiresAt: storedEnvelope.expiresAt }
-        : {}),
-    };
+      source: refreshResult.refreshedToken ? "refreshed" : "keychain",
+      expiresAt: storedEnvelope.expiresAt,
+    });
   }
 
   const envToken = (env[settings.tokenEnv] ?? "").trim();
   if (envToken) {
-    return {
-      ok: true,
+    return buildLinearTokenSuccess({
+      settings,
       token: envToken,
       source: "env",
-      tokenEnv: settings.tokenEnv,
-      authRef: settings.authRef,
-      service: settings.service,
-      profileId: settings.profileId,
-      profileSource: settings.profileSource,
-    };
+    });
   }
 
-  return {
-    ok: false,
+  return buildLinearTokenFailure({
+    settings,
     error:
-      refreshError ??
+      refreshResult.refreshError ??
       `Missing Linear token for profile "${settings.profileId}". Store one with \`hack x linear connect --profile ${settings.profileId}\`, or set ${settings.tokenEnv}.`,
-    tokenEnv: settings.tokenEnv,
-    authRef: settings.authRef,
-    service: settings.service,
-    profileId: settings.profileId,
-    profileSource: settings.profileSource,
-  };
+  });
 }
 
 /**
@@ -544,27 +671,12 @@ export async function resolveLinearBrokerManagementToken(input: {
   const envelope = parseStoredTokenEnvelope(stored);
   const managementToken = envelope?.managementToken?.trim() ?? "";
   if (!managementToken) {
-    const genericHackSession = await loadHackAuthSession().catch(() => null);
-    const genericManagementToken = genericHackSession?.token?.trim() ?? "";
-    if (genericManagementToken) {
-      return {
-        ok: true,
-        managementToken: genericManagementToken,
-        ...(genericHackSession?.expiresAt
-          ? { managementTokenExpiresAt: genericHackSession.expiresAt }
-          : {}),
-        profileId: settings.profileId,
-        authRef,
-        service,
-      };
-    }
-    return {
-      ok: false,
-      error: `Linear broker management token is missing for profile "${settings.profileId}". Run \`hack auth login\` for broker-owned access, or reconnect this Linear profile if its saved broker token is stale.`,
-      profileId: settings.profileId,
+    return await resolveLinearFallbackManagementToken({
+      settings,
       authRef,
       service,
-    };
+      error: `Linear broker management token is missing for profile "${settings.profileId}". Run \`hack auth login\` for broker-owned access, or reconnect this Linear profile if its saved broker token is stale.`,
+    });
   }
   const managementTokenExpiresAtMs = envelope?.managementTokenExpiresAt
     ? parseTimestampMs(envelope.managementTokenExpiresAt)
@@ -574,27 +686,12 @@ export async function resolveLinearBrokerManagementToken(input: {
     managementTokenExpiresAtMs !== null &&
     managementTokenExpiresAtMs <= Date.now()
   ) {
-    const genericHackSession = await loadHackAuthSession().catch(() => null);
-    const genericManagementToken = genericHackSession?.token?.trim() ?? "";
-    if (genericManagementToken) {
-      return {
-        ok: true,
-        managementToken: genericManagementToken,
-        ...(genericHackSession?.expiresAt
-          ? { managementTokenExpiresAt: genericHackSession.expiresAt }
-          : {}),
-        profileId: settings.profileId,
-        authRef,
-        service,
-      };
-    }
-    return {
-      ok: false,
-      error: `Linear broker management token expired for profile "${settings.profileId}". Run \`hack auth login\` for broker-owned access, or reconnect this Linear profile to refresh its saved broker token.`,
-      profileId: settings.profileId,
+    return await resolveLinearFallbackManagementToken({
+      settings,
       authRef,
       service,
-    };
+      error: `Linear broker management token expired for profile "${settings.profileId}". Run \`hack auth login\` for broker-owned access, or reconnect this Linear profile to refresh its saved broker token.`,
+    });
   }
   return {
     ok: true,

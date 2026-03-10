@@ -92,6 +92,7 @@ export function filterRuntimeProjects(opts: {
   return opts.runtime.filter((project) => !project.isGlobal);
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Runtime project discovery intentionally folds together docker, registry, lifecycle, and global-project state.
 export async function readRuntimeProjects(opts: {
   readonly includeGlobal: boolean;
 }): Promise<RuntimeProjectsResult> {
@@ -262,6 +263,7 @@ type LifecycleActivity = {
   readonly runningWindows: ReadonlySet<string> | null;
 };
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Lifecycle service synthesis maps host-managed processes onto runtime views and container-derived service state.
 async function addLifecycleProcessServices(opts: {
   readonly runtime: readonly RuntimeProject[];
 }): Promise<RuntimeProject[]> {

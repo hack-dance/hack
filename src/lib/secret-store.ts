@@ -383,6 +383,7 @@ export async function provisionEncryptedFileKey(input: {
   };
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Encrypted-file key resolution intentionally checks env, file, keychain, generation, and migration paths in one routine.
 async function resolveEncryptedFileKeyMaterial(input?: {
   readonly keyPath?: string;
   readonly storePath?: string;

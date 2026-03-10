@@ -2,6 +2,10 @@
 
 Use this guide to connect one remote machine as a `hack` execution node and run a project on it.
 
+Provider-specific bootstrap flows:
+- [Bootstrap a remote node on AWS](remote-node-aws.md)
+- [Bootstrap a remote node on Railway](remote-node-railway.md)
+
 ## What you need
 
 1. A host machine (controller) with `hack` installed.

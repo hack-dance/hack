@@ -111,6 +111,7 @@ type BuildProjectViewsOptions = {
   readonly muxSessions?: readonly MuxSession[];
 };
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Project view building composes runtime, registry, controller, and branch metadata into one dashboard-oriented shape.
 export async function buildProjectViews(
   opts: BuildProjectViewsOptions
 ): Promise<ProjectView[]> {
@@ -861,6 +862,8 @@ function mapExtensionFeature(id: string): string | null {
   switch (id) {
     case "dance.hack.tickets":
       return "tickets";
+    case "dance.hack.aws":
+      return "aws";
     case "dance.hack.cloudflare":
       return "cloudflare";
     case "dance.hack.railway":

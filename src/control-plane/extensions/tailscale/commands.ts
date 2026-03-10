@@ -493,6 +493,7 @@ export function parseTailscaleOauthStatusArgs(opts: {
   };
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Tailscale OAuth connect parsing models several optional flags, defaults, and validation branches in one parser.
 export function parseTailscaleOauthConnectArgs(opts: {
   readonly args: readonly string[];
 }): TailscaleOauthConnectArgsParseResult {

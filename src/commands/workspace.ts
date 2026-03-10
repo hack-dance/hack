@@ -34,7 +34,7 @@ const optExclude = defineOption({
 const workspaceSpec = defineCommand({
   name: "workspace",
   summary: "Inspect and repair project workspaces",
-  group: "Git",
+  group: "Project",
   options: [],
   positionals: [],
   subcommands: [],
@@ -43,7 +43,7 @@ const workspaceSpec = defineCommand({
 const workspaceResetSpec = defineCommand({
   name: "reset",
   summary: "Reset a workspace to a clean base ref while preserving excludes",
-  group: "Git",
+  group: "Project",
   options: [optPath, optProject, optBase, optExclude, optJson],
   positionals: [],
   subcommands: [],
@@ -101,15 +101,24 @@ async function handleWorkspaceReset({
   try {
     const project = await resolveProjectForArgs({
       ctx,
-      pathOpt: args.options.path,
-      projectOpt: args.options.project,
+      pathOpt:
+        typeof args.options.path === "string" ? args.options.path : undefined,
+      projectOpt:
+        typeof args.options.project === "string"
+          ? args.options.project
+          : undefined,
     });
-    const baseRef = (args.options.base ?? "").trim();
+    const baseRef =
+      typeof args.options.base === "string" ? args.options.base.trim() : "";
     if (!baseRef) {
       throw new CliUsageError("Missing --base <ref>.");
     }
 
-    const excludes = parseCsv(args.options.exclude);
+    const excludes = parseCsv(
+      typeof args.options.exclude === "string"
+        ? args.options.exclude
+        : undefined
+    );
     const summary = await resetWorkspace({
       projectRoot: project.projectRoot,
       baseRef,

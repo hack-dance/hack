@@ -480,47 +480,49 @@ function networkHasSubnet(raw: string, subnet: string): boolean {
 }
 
 async function globalInstall(): Promise<number> {
-  const s = spinner();
-  s.start("Ensuring gum…");
-  const gum = await ensureBundledGumInstalled();
-  if (gum.ok) {
-    s.stop(gum.installed ? "Installed bundled gum" : "gum already installed");
-  } else {
-    const systemGum = Bun.which("gum");
-    s.stop(
-      systemGum ? "gum available on PATH" : "gum not installed (optional)"
-    );
-    if (gum.reason === "failed") {
-      logger.warn({
-        message: `gum install failed: ${gum.message ?? "unknown error"}`,
-      });
-    }
-  }
+  await prepareGlobalInstallFiles();
+  logger.success({ message: "Global files ready in ~/.hack/" });
+  await globalUp();
+  await ensureGlobalDnsReady();
+  showGlobalInstallNextSteps();
+  return 0;
+}
 
-  s.start("Ensuring mutagen…");
-  const mutagen = await ensureBundledMutagenInstalled();
-  if (mutagen.ok) {
-    s.stop(
-      mutagen.installed
-        ? "Installed managed mutagen"
-        : "mutagen already installed"
-    );
-  } else {
-    const systemMutagen = getMutagenPath();
-    s.stop(
-      systemMutagen ? "mutagen available on PATH" : "mutagen not installed"
-    );
-    if (!systemMutagen) {
-      const detail = mutagen.message ? `: ${mutagen.message}` : "";
+const s = spinner();
+
+async function ensureGlobalOptionalDependencies(): Promise<void> {
+  await ensureOptionalCliDependency({
+    label: "gum",
+    install: () => ensureBundledGumInstalled(),
+    resolveSystemPath: () => Bun.which("gum"),
+    installedMessage: "Installed bundled gum",
+    readyMessage: "gum already installed",
+    missingMessage: "gum not installed (optional)",
+    warnOnFailure: ({ message }) => {
       logger.warn({
-        message: `mutagen install skipped (${mutagen.reason}${detail})`,
+        message: `gum install failed: ${message ?? "unknown error"}`,
+      });
+    },
+  });
+
+  await ensureOptionalCliDependency({
+    label: "mutagen",
+    install: () => ensureBundledMutagenInstalled(),
+    resolveSystemPath: () => getMutagenPath(),
+    installedMessage: "Installed managed mutagen",
+    readyMessage: "mutagen already installed",
+    missingMessage: "mutagen not installed",
+    warnOnMissing: ({ reason, message }) => {
+      const detail = message ? `: ${message}` : "";
+      logger.warn({
+        message: `mutagen install skipped (${reason}${detail})`,
       });
       logger.warn({
         message:
           "Remote sync may fail without mutagen. Repair with: hack doctor --fix",
       });
-    }
-  }
+    },
+  });
 
   if (isMac()) {
     await ensureMacChafa();
@@ -532,11 +534,50 @@ async function globalInstall(): Promise<number> {
   }
 
   await warnIfSessionsMuxUnavailable();
+}
 
-  s.start("Checking Docker…");
-  await ensureDockerRunning();
-  s.stop("Docker is running");
+async function ensureOptionalCliDependency(input: {
+  readonly label: string;
+  readonly install: () => Promise<{
+    readonly ok: boolean;
+    readonly installed?: boolean;
+    readonly reason?: string;
+    readonly message?: string;
+  }>;
+  readonly resolveSystemPath: () => string | null;
+  readonly installedMessage: string;
+  readonly readyMessage: string;
+  readonly missingMessage: string;
+  readonly warnOnFailure?: (input: { readonly message?: string }) => void;
+  readonly warnOnMissing?: (input: {
+    readonly reason?: string;
+    readonly message?: string;
+  }) => void;
+}): Promise<void> {
+  s.start(`Ensuring ${input.label}…`);
+  const result = await input.install();
+  if (result.ok) {
+    s.stop(result.installed ? input.installedMessage : input.readyMessage);
+    return;
+  }
 
+  const systemPath = input.resolveSystemPath();
+  s.stop(
+    systemPath ? `${input.label} available on PATH` : input.missingMessage
+  );
+  if (result.reason === "failed") {
+    input.warnOnFailure?.({ message: result.message });
+    return;
+  }
+  if (!systemPath) {
+    input.warnOnMissing?.({
+      reason: result.reason,
+      message: result.message,
+    });
+  }
+}
+
+async function ensureGlobalNetworksReady(): Promise<boolean> {
   s.start("Ensuring shared networks…");
   const ingressNetwork = await ensureNetwork(DEFAULT_INGRESS_NETWORK, {
     subnet: DEFAULT_INGRESS_SUBNET,
@@ -546,15 +587,50 @@ async function globalInstall(): Promise<number> {
   s.stop(
     `Networks ready (${DEFAULT_INGRESS_NETWORK}, ${DEFAULT_LOGGING_NETWORK})`
   );
-  const useStaticIps = ingressNetwork.hasSubnet;
-  if (!useStaticIps) {
+  if (!ingressNetwork.hasSubnet) {
     logger.warn({
       message:
         "hack-dev network has no subnet; CoreDNS will resolve via dynamic IP.",
     });
   }
+  return ingressNetwork.hasSubnet;
+}
 
+async function prepareGlobalInstallFiles(): Promise<
+  ReturnType<typeof getGlobalPaths>
+> {
+  await ensureGlobalOptionalDependencies();
+  await ensureGlobalDockerReady();
+  const useStaticIps = await ensureGlobalNetworksReady();
   const paths = getGlobalPaths();
+  await ensureGlobalPathsReady(paths);
+  await writeGlobalManagedFiles({
+    paths,
+    useStaticIps,
+  });
+  return paths;
+}
+
+async function ensureGlobalDockerReady(): Promise<void> {
+  s.start("Checking Docker…");
+  await ensureDockerRunning();
+  s.stop("Docker is running");
+}
+
+function showGlobalInstallNextSteps(): void {
+  note(
+    [
+      "Next:",
+      "- Open https://logs.hack",
+      "- Start a repo with: hack init && hack up",
+    ].join("\n"),
+    "Global install"
+  );
+}
+
+async function ensureGlobalPathsReady(
+  paths: ReturnType<typeof getGlobalPaths>
+): Promise<void> {
   await ensureDir(paths.caddyDir);
   await ensureDir(paths.loggingDir);
   await ensureDir(paths.schemasDir);
@@ -563,7 +639,13 @@ async function globalInstall(): Promise<number> {
   await ensureDir(dirname(paths.grafanaDashboard));
   await ensureDir(dirname(paths.alloyConfig));
   await ensureDir(dirname(paths.lokiConfig));
+}
 
+async function writeGlobalManagedFiles(input: {
+  readonly paths: ReturnType<typeof getGlobalPaths>;
+  readonly useStaticIps: boolean;
+}): Promise<void> {
+  const { paths, useStaticIps } = input;
   await writeWithPromptIfDifferent(
     paths.caddyCompose,
     renderGlobalCaddyCompose({
@@ -611,37 +693,26 @@ async function globalInstall(): Promise<number> {
     paths.branchesSchema,
     renderProjectBranchesSchemaJson()
   );
+}
 
-  logger.success({ message: "Global files ready in ~/.hack/" });
-  await globalUp();
-
+async function ensureGlobalDnsReady(): Promise<void> {
   if (isMac()) {
     const hostDnsTarget = await resolvePreferredMacHostDnsTarget();
     await ensureMacHackDns({ targetIp: hostDnsTarget });
     await ensureMacTrustCaddyLocalCa();
-  } else {
-    logger.warn({
-      message: "Skipping DNS bootstrap (only implemented for macOS for now).",
-    });
-    note(
-      [
-        `You need wildcard DNS for *.hack pointing to ${DEFAULT_HOST_DNS_IP}.`,
-        "Recommended: dnsmasq + OS resolver config for the 'hack' TLD.",
-      ].join("\n"),
-      "DNS setup"
-    );
+    return;
   }
 
+  logger.warn({
+    message: "Skipping DNS bootstrap (only implemented for macOS for now).",
+  });
   note(
     [
-      "Next:",
-      "- Open https://logs.hack",
-      "- Start a repo with: hack init && hack up",
+      `You need wildcard DNS for *.hack pointing to ${DEFAULT_HOST_DNS_IP}.`,
+      "Recommended: dnsmasq + OS resolver config for the 'hack' TLD.",
     ].join("\n"),
-    "Global install"
+    "DNS setup"
   );
-
-  return 0;
 }
 
 async function globalLogsReset(): Promise<number> {
@@ -894,6 +965,16 @@ async function findIngressIpConflicts(opts: {
 }
 
 async function inspectIngressNetworkSnapshot(): Promise<IngressNetworkSnapshot | null> {
+  const entries = await readIngressNetworkInspectEntries();
+  if (!entries) {
+    return null;
+  }
+  return buildIngressNetworkSnapshot({ entries });
+}
+
+async function readIngressNetworkInspectEntries(): Promise<
+  readonly unknown[] | null
+> {
   const inspect = await exec(
     ["docker", "network", "inspect", DEFAULT_INGRESS_NETWORK],
     {
@@ -903,69 +984,44 @@ async function inspectIngressNetworkSnapshot(): Promise<IngressNetworkSnapshot |
   if (inspect.exitCode !== 0) {
     return null;
   }
+  return parseIngressNetworkInspectEntries({ stdout: inspect.stdout });
+}
 
+function parseIngressNetworkInspectEntries(input: {
+  readonly stdout: string;
+}): readonly unknown[] | null {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(inspect.stdout);
+    parsed = JSON.parse(input.stdout);
   } catch {
     return null;
   }
-  if (!Array.isArray(parsed)) {
-    return null;
-  }
+  return Array.isArray(parsed) ? parsed : null;
+}
 
+function buildIngressNetworkSnapshot(input: {
+  readonly entries: readonly unknown[];
+}): IngressNetworkSnapshot {
   let subnet: string | null = null;
   let gateway: string | null = null;
   const usedIps = new Set<string>();
   const containerIpByName = new Map<string, string>();
-  for (const entry of parsed) {
+  for (const entry of input.entries) {
     if (!entry || typeof entry !== "object") {
       continue;
     }
+    const ipam = extractIngressNetworkIpam({
+      entry,
+      subnet,
+      gateway,
+    });
     if (subnet === null) {
-      const ipamConfig = (
-        entry as {
-          IPAM?: {
-            Config?: Array<{ Subnet?: unknown; Gateway?: unknown }>;
-          };
-        }
-      ).IPAM?.Config;
-      if (Array.isArray(ipamConfig)) {
-        for (const config of ipamConfig) {
-          if (subnet === null && typeof config?.Subnet === "string") {
-            subnet = config.Subnet;
-          }
-          if (gateway === null && typeof config?.Gateway === "string") {
-            gateway = config.Gateway;
-          }
-          if (subnet !== null && gateway !== null) {
-            break;
-          }
-        }
-      }
+      subnet = ipam.subnet;
     }
-
-    const containers = (entry as { Containers?: Record<string, unknown> })
-      .Containers;
-    if (!containers || typeof containers !== "object") {
-      continue;
+    if (gateway === null) {
+      gateway = ipam.gateway;
     }
-
-    for (const info of Object.values(containers)) {
-      if (!info || typeof info !== "object") {
-        continue;
-      }
-      const record = info as { Name?: unknown; IPv4Address?: unknown };
-      const name = typeof record.Name === "string" ? record.Name : "";
-      const ipRaw =
-        typeof record.IPv4Address === "string" ? record.IPv4Address : "";
-      if (!(name && ipRaw)) {
-        continue;
-      }
-      const ip = extractIpv4Address({ raw: ipRaw });
-      if (ip.length === 0) {
-        continue;
-      }
+    for (const { name, ip } of extractIngressNetworkContainers({ entry })) {
       usedIps.add(ip);
       containerIpByName.set(name, ip);
     }
@@ -977,6 +1033,89 @@ async function inspectIngressNetworkSnapshot(): Promise<IngressNetworkSnapshot |
     usedIps,
     containerIpByName,
   };
+}
+
+function extractIngressNetworkIpam(input: {
+  readonly entry: object;
+  readonly subnet: string | null;
+  readonly gateway: string | null;
+}): { readonly subnet: string | null; readonly gateway: string | null } {
+  if (!(input.subnet === null || input.gateway === null)) {
+    return {
+      subnet: input.subnet,
+      gateway: input.gateway,
+    };
+  }
+
+  const ipamConfig = (
+    input.entry as {
+      IPAM?: {
+        Config?: Array<{ Subnet?: unknown; Gateway?: unknown }>;
+      };
+    }
+  ).IPAM?.Config;
+  if (!Array.isArray(ipamConfig)) {
+    return {
+      subnet: input.subnet,
+      gateway: input.gateway,
+    };
+  }
+
+  let subnet = input.subnet;
+  let gateway = input.gateway;
+  for (const config of ipamConfig) {
+    if (subnet === null && typeof config?.Subnet === "string") {
+      subnet = config.Subnet;
+    }
+    if (gateway === null && typeof config?.Gateway === "string") {
+      gateway = config.Gateway;
+    }
+    if (subnet !== null && gateway !== null) {
+      break;
+    }
+  }
+
+  return { subnet, gateway };
+}
+
+function extractIngressNetworkContainers(input: {
+  readonly entry: object;
+}): Array<{ readonly name: string; readonly ip: string }> {
+  const containers = (input.entry as { Containers?: Record<string, unknown> })
+    .Containers;
+  if (!containers || typeof containers !== "object") {
+    return [];
+  }
+
+  const resolved: Array<{ readonly name: string; readonly ip: string }> = [];
+  for (const info of Object.values(containers)) {
+    const record = parseIngressNetworkContainerRecord({ value: info });
+    if (!record) {
+      continue;
+    }
+    resolved.push(record);
+  }
+  return resolved;
+}
+
+function parseIngressNetworkContainerRecord(input: {
+  readonly value: unknown;
+}): { readonly name: string; readonly ip: string } | null {
+  if (!input.value || typeof input.value !== "object") {
+    return null;
+  }
+  const record = input.value as { Name?: unknown; IPv4Address?: unknown };
+  const name = typeof record.Name === "string" ? record.Name : "";
+  const ipRaw =
+    typeof record.IPv4Address === "string" ? record.IPv4Address : "";
+  if (!(name && ipRaw)) {
+    return null;
+  }
+  const ip = extractIpv4Address({ raw: ipRaw });
+  if (ip.length === 0) {
+    return null;
+  }
+  return { name, ip };
 }
 
 async function reassignIngressIpConflicts(opts: {

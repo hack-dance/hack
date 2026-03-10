@@ -407,109 +407,60 @@ export const SUPERVISOR_COMMANDS: readonly ExtensionCommand[] = [
         return 1;
       }
 
-      const envGateway = (process.env.HACK_GATEWAY_URL ?? "").trim();
-      const gatewayUrl =
-        parsed.value.gateway ??
-        (envGateway.length > 0 ? envGateway : "http://127.0.0.1:7788");
-      const token =
-        parsed.value.token ?? (process.env.HACK_GATEWAY_TOKEN ?? "").trim();
-      if (!token) {
+      const connection = resolveShellConnection({ parsed: parsed.value });
+      if (!connection.ok) {
         ctx.logger.error({
-          message:
-            "Missing gateway token. Set HACK_GATEWAY_TOKEN or pass --token (write scope required).",
+          message: connection.error,
         });
         return 1;
       }
 
-      const client = createGatewayClient({ baseUrl: gatewayUrl, token });
-      let projectId: string | undefined =
-        parsed.value.projectId ?? ctx.projectId;
-      let projectName: string | undefined =
-        parsed.value.project ?? ctx.projectName;
-
-      let localProject: ProjectContext | undefined = ctx.project;
-
-      if (parsed.value.project || parsed.value.path) {
-        const localProjectResult = await resolveSupervisorProject({
-          ctx,
-          projectOpt: parsed.value.project,
-          pathOpt: parsed.value.path,
-        });
-        if (!localProjectResult.ok) {
-          ctx.logger.error({ message: localProjectResult.error });
-          return 1;
-        }
-        localProject = localProjectResult.project;
-        projectId = projectId ?? localProjectResult.projectId;
-        projectName = localProjectResult.projectName ?? projectName;
-      }
-
-      const projectIdResult = await resolveGatewayProjectId({
-        client,
-        projectId,
-        projectName,
+      const client = createGatewayClient({
+        baseUrl: connection.gatewayUrl,
+        token: connection.token,
       });
-      if (!projectIdResult.ok) {
-        ctx.logger.error({ message: projectIdResult.error });
+      const shellProject = await resolveShellProject({
+        ctx,
+        parsed: parsed.value,
+        client,
+      });
+      if (!shellProject.ok) {
+        ctx.logger.error({ message: shellProject.error });
         return 1;
       }
 
-      const fallbackCols = 120;
-      const fallbackRows = 30;
-      const cols =
-        parsed.value.cols ??
-        (typeof process.stdout.columns === "number"
-          ? process.stdout.columns
-          : fallbackCols);
-      const rows =
-        parsed.value.rows ??
-        (typeof process.stdout.rows === "number"
-          ? process.stdout.rows
-          : fallbackRows);
+      const shellDimensions = resolveShellDimensions({ parsed: parsed.value });
+      const shellInput = buildShellCreateInput({
+        parsed: parsed.value,
+        projectId: shellProject.projectId,
+        cols: shellDimensions.cols,
+        rows: shellDimensions.rows,
+      });
 
-      const shellInput = {
-        projectId: projectIdResult.projectId,
-        ...(parsed.value.shell ? { shell: parsed.value.shell } : {}),
-        ...(parsed.value.cwd ? { cwd: parsed.value.cwd } : {}),
-        ...(parsed.value.env ? { env: parsed.value.env } : {}),
-        cols,
-        rows,
-      };
-
-      let created = await client.createShell(shellInput);
-      if (!created.ok && created.error.code === "writes_disabled") {
-        const didEnable = await maybeEnableGatewayWrites({
-          ctx,
-          project: localProject,
-        });
-        if (didEnable) {
-          created = await client.createShell(shellInput);
-        }
-      }
-
+      const created = await createShellWithRetry({
+        ctx,
+        client,
+        localProject: shellProject.localProject,
+        shellInput,
+      });
       if (!created.ok) {
-        if (
-          created.error.code === "writes_disabled" ||
-          created.error.code === "write_scope_required"
-        ) {
-          await reportGatewayConfigSource({ logger: ctx.logger });
-        }
-        const detailed = buildShellCreateErrorHint({ error: created.error });
-        ctx.logger.error({
-          message: `Shell create failed (${created.status}): ${created.error.message}`,
+        await reportShellCreateFailure({
+          logger: ctx.logger,
+          created,
         });
-        if (detailed) {
-          ctx.logger.info({ message: detailed });
-        }
         return 1;
       }
 
       const shellId = created.data.shell.shellId;
       const ws = client.openShellStream({
-        projectId: projectIdResult.projectId,
+        projectId: shellProject.projectId,
         shellId,
       });
-      const outcome = await attachGatewayShellStream({ ws, cols, rows });
+      const outcome = await attachGatewayShellStream({
+        ws,
+        cols: shellDimensions.cols,
+        rows: shellDimensions.rows,
+      });
 
       if (outcome.signal) {
         ctx.logger.info({ message: `Shell exited via ${outcome.signal}` });
@@ -533,175 +484,55 @@ type ParseResult =
   | { readonly ok: true; readonly value: SupervisorArgs }
   | { readonly ok: false; readonly error: string };
 
+type ArgStepResult =
+  | { readonly kind: "handled"; readonly nextIndex: number }
+  | { readonly kind: "unhandled" }
+  | { readonly kind: "error"; readonly error: string };
+
+type SupervisorArgsState = {
+  project?: string;
+  path?: string;
+  json: boolean;
+  follow: boolean;
+  logsFrom?: number;
+  eventsFrom?: number;
+  rest: string[];
+};
+
 export function parseSupervisorArgs(opts: {
   readonly args: readonly string[];
   readonly allowLogsFrom?: boolean;
   readonly allowEventsFrom?: boolean;
   readonly allowFollow?: boolean;
 }): ParseResult {
-  const rest: string[] = [];
-  let project: string | undefined;
-  let path: string | undefined;
-  let json = false;
-  let follow = true;
-  let logsFrom: number | undefined;
-  let eventsFrom: number | undefined;
-
-  const takeValue = (
-    _flag: string,
-    value: string | undefined
-  ): string | null => {
-    if (!value || value.startsWith("-")) {
-      return null;
-    }
-    return value;
+  const state: SupervisorArgsState = {
+    json: false,
+    follow: true,
+    rest: [],
   };
 
   for (let i = 0; i < opts.args.length; i += 1) {
     const token = opts.args[i] ?? "";
+
     if (token === "--") {
-      rest.push(...opts.args.slice(i + 1));
+      state.rest.push(...opts.args.slice(i + 1));
       break;
     }
 
-    if (token === "--json") {
-      json = true;
-      continue;
+    const step = handleSupervisorArg({
+      args: opts.args,
+      index: i,
+      token,
+      state,
+      allowLogsFrom: opts.allowLogsFrom === true,
+      allowEventsFrom: opts.allowEventsFrom === true,
+      allowFollow: opts.allowFollow === true,
+    });
+    if (step.kind === "error") {
+      return { ok: false, error: step.error };
     }
-
-    if (token === "--follow") {
-      if (!opts.allowFollow) {
-        return { ok: false, error: "--follow is not supported here." };
-      }
-      follow = true;
-      continue;
-    }
-
-    if (token === "--no-follow") {
-      if (!opts.allowFollow) {
-        return { ok: false, error: "--no-follow is not supported here." };
-      }
-      follow = false;
-      continue;
-    }
-
-    if (token.startsWith("--project=")) {
-      project = token.slice("--project=".length).trim();
-      continue;
-    }
-
-    if (token === "--project") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--project requires a value." };
-      }
-      project = value;
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("--path=")) {
-      path = token.slice("--path=".length).trim();
-      continue;
-    }
-
-    if (token === "--path") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--path requires a value." };
-      }
-      path = value;
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("--logs-from=")) {
-      if (!opts.allowLogsFrom) {
-        return { ok: false, error: "--logs-from is not supported here." };
-      }
-      const value = token.slice("--logs-from=".length).trim();
-      const parsed = parseOffset(value);
-      if (parsed === null) {
-        return { ok: false, error: "--logs-from must be a number." };
-      }
-      logsFrom = parsed;
-      continue;
-    }
-
-    if (token === "--logs-from") {
-      if (!opts.allowLogsFrom) {
-        return { ok: false, error: "--logs-from is not supported here." };
-      }
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--logs-from requires a value." };
-      }
-      const parsed = parseOffset(value);
-      if (parsed === null) {
-        return { ok: false, error: "--logs-from must be a number." };
-      }
-      logsFrom = parsed;
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("--from=")) {
-      if (!opts.allowLogsFrom) {
-        return { ok: false, error: "--from is not supported here." };
-      }
-      const value = token.slice("--from=".length).trim();
-      const parsed = parseOffset(value);
-      if (parsed === null) {
-        return { ok: false, error: "--from must be a number." };
-      }
-      logsFrom = parsed;
-      continue;
-    }
-
-    if (token === "--from") {
-      if (!opts.allowLogsFrom) {
-        return { ok: false, error: "--from is not supported here." };
-      }
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--from requires a value." };
-      }
-      const parsed = parseOffset(value);
-      if (parsed === null) {
-        return { ok: false, error: "--from must be a number." };
-      }
-      logsFrom = parsed;
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("--events-from=")) {
-      if (!opts.allowEventsFrom) {
-        return { ok: false, error: "--events-from is not supported here." };
-      }
-      const value = token.slice("--events-from=".length).trim();
-      const parsed = parseOffset(value);
-      if (parsed === null) {
-        return { ok: false, error: "--events-from must be a number." };
-      }
-      eventsFrom = parsed;
-      continue;
-    }
-
-    if (token === "--events-from") {
-      if (!opts.allowEventsFrom) {
-        return { ok: false, error: "--events-from is not supported here." };
-      }
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--events-from requires a value." };
-      }
-      const parsed = parseOffset(value);
-      if (parsed === null) {
-        return { ok: false, error: "--events-from must be a number." };
-      }
-      eventsFrom = parsed;
-      i += 1;
+    if (step.kind === "handled") {
+      i = step.nextIndex;
       continue;
     }
 
@@ -709,19 +540,21 @@ export function parseSupervisorArgs(opts: {
       return { ok: false, error: `Unknown option: ${token}` };
     }
 
-    rest.push(token);
+    state.rest.push(token);
   }
 
   return {
     ok: true,
     value: {
-      ...(project ? { project } : {}),
-      ...(path ? { path } : {}),
-      ...(logsFrom !== undefined ? { logsFrom } : {}),
-      ...(eventsFrom !== undefined ? { eventsFrom } : {}),
-      json,
-      follow,
-      rest,
+      ...(state.project ? { project: state.project } : {}),
+      ...(state.path ? { path: state.path } : {}),
+      ...(state.logsFrom !== undefined ? { logsFrom: state.logsFrom } : {}),
+      ...(state.eventsFrom !== undefined
+        ? { eventsFrom: state.eventsFrom }
+        : {}),
+      json: state.json,
+      follow: state.follow,
+      rest: state.rest,
     },
   };
 }
@@ -740,114 +573,44 @@ type JobCreateParseResult =
   | { readonly ok: true; readonly value: JobCreateArgs }
   | { readonly ok: false; readonly error: string };
 
+type JobCreateArgsState = {
+  project?: string;
+  path?: string;
+  json: boolean;
+  runner: string;
+  cwd?: string;
+  command: string[];
+  envEntries: string[];
+};
+
 export function parseJobCreateArgs(opts: {
   readonly args: readonly string[];
 }): JobCreateParseResult {
-  const command: string[] = [];
-  const envEntries: string[] = [];
-  let project: string | undefined;
-  let path: string | undefined;
-  let json = false;
-  let runner = "generic";
-  let cwd: string | undefined;
-
-  const takeValue = (
-    _flag: string,
-    value: string | undefined
-  ): string | null => {
-    if (!value || value.startsWith("-")) {
-      return null;
-    }
-    return value;
+  const state: JobCreateArgsState = {
+    json: false,
+    runner: "generic",
+    command: [],
+    envEntries: [],
   };
 
   for (let i = 0; i < opts.args.length; i += 1) {
     const token = opts.args[i] ?? "";
     if (token === "--") {
-      command.push(...opts.args.slice(i + 1));
+      state.command.push(...opts.args.slice(i + 1));
       break;
     }
 
-    if (token === "--json") {
-      json = true;
-      continue;
+    const step = handleJobCreateArg({
+      args: opts.args,
+      index: i,
+      token,
+      state,
+    });
+    if (step.kind === "error") {
+      return { ok: false, error: step.error };
     }
-
-    if (token.startsWith("--project=")) {
-      project = token.slice("--project=".length).trim();
-      continue;
-    }
-
-    if (token === "--project") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--project requires a value." };
-      }
-      project = value;
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("--path=")) {
-      path = token.slice("--path=".length).trim();
-      continue;
-    }
-
-    if (token === "--path") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--path requires a value." };
-      }
-      path = value;
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("--runner=")) {
-      const value = token.slice("--runner=".length).trim();
-      if (value.length > 0) {
-        runner = value;
-      }
-      continue;
-    }
-
-    if (token === "--runner") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--runner requires a value." };
-      }
-      runner = value;
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("--cwd=")) {
-      cwd = token.slice("--cwd=".length).trim();
-      continue;
-    }
-
-    if (token === "--cwd") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--cwd requires a value." };
-      }
-      cwd = value;
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("--env=")) {
-      envEntries.push(token.slice("--env=".length));
-      continue;
-    }
-
-    if (token === "--env") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--env requires KEY=VALUE." };
-      }
-      envEntries.push(value);
-      i += 1;
+    if (step.kind === "handled") {
+      i = step.nextIndex;
       continue;
     }
 
@@ -855,18 +618,18 @@ export function parseJobCreateArgs(opts: {
       return { ok: false, error: `Unknown option: ${token}` };
     }
 
-    command.push(...opts.args.slice(i));
+    state.command.push(...opts.args.slice(i));
     break;
   }
 
-  if (command.length === 0) {
+  if (state.command.length === 0) {
     return {
       ok: false,
       error: "Usage: hack x supervisor job-create [options] -- <command...>",
     };
   }
 
-  const envParsed = parseEnvAssignments({ entries: envEntries });
+  const envParsed = parseEnvAssignments({ entries: state.envEntries });
   if (!envParsed.ok) {
     return envParsed;
   }
@@ -874,13 +637,13 @@ export function parseJobCreateArgs(opts: {
   return {
     ok: true,
     value: {
-      ...(project ? { project } : {}),
-      ...(path ? { path } : {}),
-      json,
-      runner,
-      ...(cwd ? { cwd } : {}),
+      ...(state.project ? { project: state.project } : {}),
+      ...(state.path ? { path: state.path } : {}),
+      json: state.json,
+      runner: state.runner,
+      ...(state.cwd ? { cwd: state.cwd } : {}),
       ...(envParsed.value ? { env: envParsed.value } : {}),
-      command,
+      command: state.command,
     },
   };
 }
@@ -902,222 +665,37 @@ type ShellParseResult =
   | { readonly ok: true; readonly value: ShellArgs }
   | { readonly ok: false; readonly error: string };
 
+type ShellArgsState = {
+  project?: string;
+  projectId?: string;
+  path?: string;
+  gateway?: string;
+  token?: string;
+  shell?: string;
+  cwd?: string;
+  cols?: number;
+  rows?: number;
+  envEntries: string[];
+};
+
 export function parseShellArgs(opts: {
   readonly args: readonly string[];
 }): ShellParseResult {
-  let project: string | undefined;
-  let projectId: string | undefined;
-  let path: string | undefined;
-  let gateway: string | undefined;
-  let token: string | undefined;
-  let shell: string | undefined;
-  let cwd: string | undefined;
-  let cols: number | undefined;
-  let rows: number | undefined;
-  const envEntries: string[] = [];
-
-  const takeValue = (
-    _flag: string,
-    value: string | undefined
-  ): string | null => {
-    if (!value || value.startsWith("-")) {
-      return null;
-    }
-    return value;
-  };
-
-  for (let i = 0; i < opts.args.length; i += 1) {
-    const tokenArg = opts.args[i] ?? "";
-    if (tokenArg === "--") {
-      if (opts.args.length > i + 1) {
-        return { ok: false, error: "Unexpected extra arguments for shell." };
-      }
-      break;
-    }
-
-    if (tokenArg.startsWith("--project=")) {
-      project = tokenArg.slice("--project=".length).trim();
-      continue;
-    }
-
-    if (tokenArg === "--project") {
-      const value = takeValue(tokenArg, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--project requires a value." };
-      }
-      project = value;
-      i += 1;
-      continue;
-    }
-
-    if (tokenArg.startsWith("--project-id=")) {
-      projectId = tokenArg.slice("--project-id=".length).trim();
-      continue;
-    }
-
-    if (tokenArg === "--project-id") {
-      const value = takeValue(tokenArg, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--project-id requires a value." };
-      }
-      projectId = value;
-      i += 1;
-      continue;
-    }
-
-    if (tokenArg.startsWith("--path=")) {
-      path = tokenArg.slice("--path=".length).trim();
-      continue;
-    }
-
-    if (tokenArg === "--path") {
-      const value = takeValue(tokenArg, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--path requires a value." };
-      }
-      path = value;
-      i += 1;
-      continue;
-    }
-
-    if (tokenArg.startsWith("--gateway=")) {
-      gateway = tokenArg.slice("--gateway=".length).trim();
-      continue;
-    }
-
-    if (tokenArg === "--gateway") {
-      const value = takeValue(tokenArg, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--gateway requires a value." };
-      }
-      gateway = value;
-      i += 1;
-      continue;
-    }
-
-    if (tokenArg.startsWith("--token=")) {
-      token = tokenArg.slice("--token=".length).trim();
-      continue;
-    }
-
-    if (tokenArg === "--token") {
-      const value = takeValue(tokenArg, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--token requires a value." };
-      }
-      token = value;
-      i += 1;
-      continue;
-    }
-
-    if (tokenArg.startsWith("--shell=")) {
-      shell = tokenArg.slice("--shell=".length).trim();
-      continue;
-    }
-
-    if (tokenArg === "--shell") {
-      const value = takeValue(tokenArg, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--shell requires a value." };
-      }
-      shell = value;
-      i += 1;
-      continue;
-    }
-
-    if (tokenArg.startsWith("--cwd=")) {
-      cwd = tokenArg.slice("--cwd=".length).trim();
-      continue;
-    }
-
-    if (tokenArg === "--cwd") {
-      const value = takeValue(tokenArg, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--cwd requires a value." };
-      }
-      cwd = value;
-      i += 1;
-      continue;
-    }
-
-    if (tokenArg.startsWith("--cols=")) {
-      const value = tokenArg.slice("--cols=".length).trim();
-      const parsed = parsePositiveInt(value);
-      if (parsed === null) {
-        return { ok: false, error: "--cols must be a positive number." };
-      }
-      cols = parsed;
-      continue;
-    }
-
-    if (tokenArg === "--cols") {
-      const value = takeValue(tokenArg, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--cols requires a value." };
-      }
-      const parsed = parsePositiveInt(value);
-      if (parsed === null) {
-        return { ok: false, error: "--cols must be a positive number." };
-      }
-      cols = parsed;
-      i += 1;
-      continue;
-    }
-
-    if (tokenArg.startsWith("--rows=")) {
-      const value = tokenArg.slice("--rows=".length).trim();
-      const parsed = parsePositiveInt(value);
-      if (parsed === null) {
-        return { ok: false, error: "--rows must be a positive number." };
-      }
-      rows = parsed;
-      continue;
-    }
-
-    if (tokenArg === "--rows") {
-      const value = takeValue(tokenArg, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--rows requires a value." };
-      }
-      const parsed = parsePositiveInt(value);
-      if (parsed === null) {
-        return { ok: false, error: "--rows must be a positive number." };
-      }
-      rows = parsed;
-      i += 1;
-      continue;
-    }
-
-    if (tokenArg.startsWith("--env=")) {
-      envEntries.push(tokenArg.slice("--env=".length));
-      continue;
-    }
-
-    if (tokenArg === "--env") {
-      const value = takeValue(tokenArg, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--env requires KEY=VALUE." };
-      }
-      envEntries.push(value);
-      i += 1;
-      continue;
-    }
-
-    if (tokenArg.startsWith("-")) {
-      return { ok: false, error: `Unknown option: ${tokenArg}` };
-    }
-
-    return { ok: false, error: "Unexpected extra arguments for shell." };
+  const parsedState = parseShellArgsState({ args: opts.args });
+  if (!parsedState.ok) {
+    return parsedState;
   }
 
-  if (project && projectId) {
+  if (parsedState.state.project && parsedState.state.projectId) {
     return {
       ok: false,
       error: "Use either --project or --project-id (not both).",
     };
   }
 
-  const envParsed = parseEnvAssignments({ entries: envEntries });
+  const envParsed = parseEnvAssignments({
+    entries: parsedState.state.envEntries,
+  });
   if (!envParsed.ok) {
     return envParsed;
   }
@@ -1125,18 +703,567 @@ export function parseShellArgs(opts: {
   return {
     ok: true,
     value: {
-      ...(project ? { project } : {}),
-      ...(projectId ? { projectId } : {}),
-      ...(path ? { path } : {}),
-      ...(gateway ? { gateway } : {}),
-      ...(token ? { token } : {}),
-      ...(shell ? { shell } : {}),
-      ...(cwd ? { cwd } : {}),
-      ...(cols !== undefined ? { cols } : {}),
-      ...(rows !== undefined ? { rows } : {}),
+      ...(parsedState.state.project
+        ? { project: parsedState.state.project }
+        : {}),
+      ...(parsedState.state.projectId
+        ? { projectId: parsedState.state.projectId }
+        : {}),
+      ...(parsedState.state.path ? { path: parsedState.state.path } : {}),
+      ...(parsedState.state.gateway
+        ? { gateway: parsedState.state.gateway }
+        : {}),
+      ...(parsedState.state.token ? { token: parsedState.state.token } : {}),
+      ...(parsedState.state.shell ? { shell: parsedState.state.shell } : {}),
+      ...(parsedState.state.cwd ? { cwd: parsedState.state.cwd } : {}),
+      ...(parsedState.state.cols !== undefined
+        ? { cols: parsedState.state.cols }
+        : {}),
+      ...(parsedState.state.rows !== undefined
+        ? { rows: parsedState.state.rows }
+        : {}),
       ...(envParsed.value ? { env: envParsed.value } : {}),
     },
   };
+}
+
+function parseShellArgsState(input: {
+  readonly args: readonly string[];
+}):
+  | { readonly ok: true; readonly state: ShellArgsState }
+  | { readonly ok: false; readonly error: string } {
+  const state: ShellArgsState = {
+    envEntries: [],
+  };
+
+  for (let i = 0; i < input.args.length; i += 1) {
+    const token = input.args[i] ?? "";
+    const structuralError = validateShellStructuralToken({
+      args: input.args,
+      index: i,
+      token,
+    });
+    if (structuralError) {
+      return { ok: false, error: structuralError };
+    }
+    if (token === "--") {
+      break;
+    }
+
+    const step = handleShellArg({
+      args: input.args,
+      index: i,
+      token,
+      state,
+    });
+    if (step.kind === "error") {
+      return { ok: false, error: step.error };
+    }
+    if (step.kind === "handled") {
+      i = step.nextIndex;
+      continue;
+    }
+    return {
+      ok: false,
+      error: token.startsWith("-")
+        ? `Unknown option: ${token}`
+        : "Unexpected extra arguments for shell.",
+    };
+  }
+
+  return { ok: true, state };
+}
+
+function validateShellStructuralToken(input: {
+  readonly args: readonly string[];
+  readonly index: number;
+  readonly token: string;
+}): string | null {
+  if (input.token !== "--") {
+    return null;
+  }
+  return input.args.length > input.index + 1
+    ? "Unexpected extra arguments for shell."
+    : null;
+}
+
+function handleSupervisorArg(input: {
+  readonly args: readonly string[];
+  readonly index: number;
+  readonly token: string;
+  readonly state: SupervisorArgsState;
+  readonly allowLogsFrom: boolean;
+  readonly allowEventsFrom: boolean;
+  readonly allowFollow: boolean;
+}): ArgStepResult {
+  return (
+    handleSupervisorBooleanArg(input) ??
+    handleSupervisorStringArg(input) ??
+    handleSupervisorOffsetArg(input) ?? { kind: "unhandled" }
+  );
+}
+
+function handleSupervisorBooleanArg(input: {
+  readonly token: string;
+  readonly state: SupervisorArgsState;
+  readonly allowFollow: boolean;
+  readonly index: number;
+}): ArgStepResult | null {
+  if (input.token === "--json") {
+    input.state.json = true;
+    return { kind: "handled", nextIndex: input.index };
+  }
+  if (input.token === "--follow" || input.token === "--no-follow") {
+    if (!input.allowFollow) {
+      return {
+        kind: "error",
+        error: `${input.token} is not supported here.`,
+      };
+    }
+    input.state.follow = input.token === "--follow";
+    return { kind: "handled", nextIndex: input.index };
+  }
+  return null;
+}
+
+function handleSupervisorStringArg(input: {
+  readonly args: readonly string[];
+  readonly index: number;
+  readonly token: string;
+  readonly state: SupervisorArgsState;
+}): ArgStepResult | null {
+  const project = readStringOption({
+    args: input.args,
+    index: input.index,
+    token: input.token,
+    flag: "--project",
+  });
+  if (project.kind !== "unhandled") {
+    return assignStringOption({
+      result: project,
+      assign: (value) => {
+        input.state.project = value;
+      },
+    });
+  }
+
+  const path = readStringOption({
+    args: input.args,
+    index: input.index,
+    token: input.token,
+    flag: "--path",
+  });
+  if (path.kind !== "unhandled") {
+    return assignStringOption({
+      result: path,
+      assign: (value) => {
+        input.state.path = value;
+      },
+    });
+  }
+
+  return null;
+}
+
+function handleSupervisorOffsetArg(input: {
+  readonly args: readonly string[];
+  readonly index: number;
+  readonly token: string;
+  readonly state: SupervisorArgsState;
+  readonly allowLogsFrom: boolean;
+  readonly allowEventsFrom: boolean;
+}): ArgStepResult | null {
+  const logsFrom = readNumericOption({
+    args: input.args,
+    index: input.index,
+    token: input.token,
+    aliases: ["--logs-from", "--from"],
+    allow: input.allowLogsFrom,
+    unsupportedError: `${input.token.split("=")[0]} is not supported here.`,
+    requiredError:
+      input.token === "--from"
+        ? "--from requires a value."
+        : "--logs-from requires a value.",
+    invalidError: input.token.startsWith("--from")
+      ? "--from must be a number."
+      : "--logs-from must be a number.",
+    parser: parseOffset,
+  });
+  if (logsFrom.kind !== "unhandled") {
+    return assignNumericOption({
+      result: logsFrom,
+      assign: (value) => {
+        input.state.logsFrom = value;
+      },
+    });
+  }
+
+  const eventsFrom = readNumericOption({
+    args: input.args,
+    index: input.index,
+    token: input.token,
+    aliases: ["--events-from"],
+    allow: input.allowEventsFrom,
+    unsupportedError: "--events-from is not supported here.",
+    requiredError: "--events-from requires a value.",
+    invalidError: "--events-from must be a number.",
+    parser: parseOffset,
+  });
+  if (eventsFrom.kind !== "unhandled") {
+    return assignNumericOption({
+      result: eventsFrom,
+      assign: (value) => {
+        input.state.eventsFrom = value;
+      },
+    });
+  }
+
+  return null;
+}
+
+function handleJobCreateArg(input: {
+  readonly args: readonly string[];
+  readonly index: number;
+  readonly token: string;
+  readonly state: JobCreateArgsState;
+}): ArgStepResult {
+  return (
+    handleJobCreateBooleanArg(input) ??
+    handleJobCreateStringArg(input) ??
+    handleJobCreateEnvArg(input) ?? { kind: "unhandled" }
+  );
+}
+
+function handleJobCreateBooleanArg(input: {
+  readonly token: string;
+  readonly state: JobCreateArgsState;
+  readonly index: number;
+}): ArgStepResult | null {
+  if (input.token !== "--json") {
+    return null;
+  }
+  input.state.json = true;
+  return { kind: "handled", nextIndex: input.index };
+}
+
+function handleJobCreateStringArg(input: {
+  readonly args: readonly string[];
+  readonly index: number;
+  readonly token: string;
+  readonly state: JobCreateArgsState;
+}): ArgStepResult | null {
+  const project = readStringOption({
+    args: input.args,
+    index: input.index,
+    token: input.token,
+    flag: "--project",
+  });
+  if (project.kind !== "unhandled") {
+    return assignStringOption({
+      result: project,
+      assign: (value) => {
+        input.state.project = value;
+      },
+    });
+  }
+
+  const path = readStringOption({
+    args: input.args,
+    index: input.index,
+    token: input.token,
+    flag: "--path",
+  });
+  if (path.kind !== "unhandled") {
+    return assignStringOption({
+      result: path,
+      assign: (value) => {
+        input.state.path = value;
+      },
+    });
+  }
+
+  const runner = readStringOption({
+    args: input.args,
+    index: input.index,
+    token: input.token,
+    flag: "--runner",
+  });
+  if (runner.kind !== "unhandled") {
+    return assignStringOption({
+      result: runner,
+      assign: (value) => {
+        if (value.length > 0) {
+          input.state.runner = value;
+        }
+      },
+    });
+  }
+
+  const cwd = readStringOption({
+    args: input.args,
+    index: input.index,
+    token: input.token,
+    flag: "--cwd",
+  });
+  if (cwd.kind !== "unhandled") {
+    return assignStringOption({
+      result: cwd,
+      assign: (value) => {
+        input.state.cwd = value;
+      },
+    });
+  }
+
+  return null;
+}
+
+function handleJobCreateEnvArg(input: {
+  readonly args: readonly string[];
+  readonly index: number;
+  readonly token: string;
+  readonly state: JobCreateArgsState;
+}): ArgStepResult | null {
+  const env = readStringOption({
+    args: input.args,
+    index: input.index,
+    token: input.token,
+    flag: "--env",
+    requiredError: "--env requires KEY=VALUE.",
+  });
+  if (env.kind === "unhandled") {
+    return null;
+  }
+  return assignStringOption({
+    result: env,
+    assign: (value) => {
+      input.state.envEntries.push(value);
+    },
+  });
+}
+
+function handleShellArg(input: {
+  readonly args: readonly string[];
+  readonly index: number;
+  readonly token: string;
+  readonly state: ShellArgsState;
+}): ArgStepResult {
+  return (
+    handleShellStringArg(input) ??
+    handleShellDimensionArg(input) ??
+    handleShellEnvArg(input) ?? { kind: "unhandled" }
+  );
+}
+
+function handleShellStringArg(input: {
+  readonly args: readonly string[];
+  readonly index: number;
+  readonly token: string;
+  readonly state: ShellArgsState;
+}): ArgStepResult | null {
+  const options: ReadonlyArray<{
+    readonly flag: string;
+    readonly assign: (value: string) => void;
+  }> = [
+    { flag: "--project", assign: (value) => (input.state.project = value) },
+    {
+      flag: "--project-id",
+      assign: (value) => (input.state.projectId = value),
+    },
+    { flag: "--path", assign: (value) => (input.state.path = value) },
+    { flag: "--gateway", assign: (value) => (input.state.gateway = value) },
+    { flag: "--token", assign: (value) => (input.state.token = value) },
+    { flag: "--shell", assign: (value) => (input.state.shell = value) },
+    { flag: "--cwd", assign: (value) => (input.state.cwd = value) },
+  ];
+  for (const option of options) {
+    const result = readStringOption({
+      args: input.args,
+      index: input.index,
+      token: input.token,
+      flag: option.flag,
+    });
+    if (result.kind === "unhandled") {
+      continue;
+    }
+    return assignStringOption({ result, assign: option.assign });
+  }
+  return null;
+}
+
+function handleShellDimensionArg(input: {
+  readonly args: readonly string[];
+  readonly index: number;
+  readonly token: string;
+  readonly state: ShellArgsState;
+}): ArgStepResult | null {
+  const dimensions: ReadonlyArray<{
+    readonly flag: string;
+    readonly assign: (value: number) => void;
+  }> = [
+    { flag: "--cols", assign: (value) => (input.state.cols = value) },
+    { flag: "--rows", assign: (value) => (input.state.rows = value) },
+  ];
+  for (const dimension of dimensions) {
+    const result = readNumericOption({
+      args: input.args,
+      index: input.index,
+      token: input.token,
+      aliases: [dimension.flag],
+      allow: true,
+      unsupportedError: "",
+      requiredError: `${dimension.flag} requires a value.`,
+      invalidError: `${dimension.flag} must be a positive number.`,
+      parser: parsePositiveInt,
+    });
+    if (result.kind === "unhandled") {
+      continue;
+    }
+    return assignNumericOption({ result, assign: dimension.assign });
+  }
+  return null;
+}
+
+function handleShellEnvArg(input: {
+  readonly args: readonly string[];
+  readonly index: number;
+  readonly token: string;
+  readonly state: ShellArgsState;
+}): ArgStepResult | null {
+  const env = readStringOption({
+    args: input.args,
+    index: input.index,
+    token: input.token,
+    flag: "--env",
+    requiredError: "--env requires KEY=VALUE.",
+  });
+  if (env.kind === "unhandled") {
+    return null;
+  }
+  return assignStringOption({
+    result: env,
+    assign: (value) => {
+      input.state.envEntries.push(value);
+    },
+  });
+}
+
+type ParsedStringOption =
+  | {
+      readonly kind: "handled";
+      readonly nextIndex: number;
+      readonly value: string;
+    }
+  | { readonly kind: "unhandled" }
+  | { readonly kind: "error"; readonly error: string };
+
+function readStringOption(input: {
+  readonly args: readonly string[];
+  readonly index: number;
+  readonly token: string;
+  readonly flag: string;
+  readonly requiredError?: string;
+}): ParsedStringOption {
+  const inlinePrefix = `${input.flag}=`;
+  if (input.token.startsWith(inlinePrefix)) {
+    return {
+      kind: "handled",
+      nextIndex: input.index,
+      value: input.token.slice(inlinePrefix.length).trim(),
+    };
+  }
+  if (input.token !== input.flag) {
+    return { kind: "unhandled" };
+  }
+  const value = takeOptionValue(input.args[input.index + 1]);
+  if (value === null) {
+    return {
+      kind: "error",
+      error: input.requiredError ?? `${input.flag} requires a value.`,
+    };
+  }
+  return { kind: "handled", nextIndex: input.index + 1, value };
+}
+
+type ParsedNumericOption =
+  | {
+      readonly kind: "handled";
+      readonly nextIndex: number;
+      readonly value: number;
+    }
+  | { readonly kind: "unhandled" }
+  | { readonly kind: "error"; readonly error: string };
+
+function readNumericOption(input: {
+  readonly args: readonly string[];
+  readonly index: number;
+  readonly token: string;
+  readonly aliases: readonly string[];
+  readonly allow: boolean;
+  readonly unsupportedError: string;
+  readonly requiredError: string;
+  readonly invalidError: string;
+  readonly parser: (value: string) => number | null;
+}): ParsedNumericOption {
+  for (const alias of input.aliases) {
+    const inlinePrefix = `${alias}=`;
+    if (input.token === alias || input.token.startsWith(inlinePrefix)) {
+      if (!input.allow) {
+        return { kind: "error", error: input.unsupportedError };
+      }
+      const value =
+        input.token === alias
+          ? takeOptionValue(input.args[input.index + 1])
+          : input.token.slice(inlinePrefix.length).trim();
+      if (value === null) {
+        return { kind: "error", error: input.requiredError };
+      }
+      const parsed = input.parser(value);
+      if (parsed === null) {
+        return { kind: "error", error: input.invalidError };
+      }
+      return {
+        kind: "handled",
+        nextIndex: input.token === alias ? input.index + 1 : input.index,
+        value: parsed,
+      };
+    }
+  }
+  return { kind: "unhandled" };
+}
+
+function assignStringOption(input: {
+  readonly result: ParsedStringOption;
+  readonly assign: (value: string) => void;
+}): ArgStepResult {
+  if (input.result.kind === "error") {
+    return input.result;
+  }
+  if (input.result.kind === "unhandled") {
+    return input.result;
+  }
+  input.assign(input.result.value);
+  return { kind: "handled", nextIndex: input.result.nextIndex };
+}
+
+function assignNumericOption(input: {
+  readonly result: ParsedNumericOption;
+  readonly assign: (value: number) => void;
+}): ArgStepResult {
+  if (input.result.kind === "error") {
+    return input.result;
+  }
+  if (input.result.kind === "unhandled") {
+    return input.result;
+  }
+  input.assign(input.result.value);
+  return { kind: "handled", nextIndex: input.result.nextIndex };
+}
+
+function takeOptionValue(value: string | undefined): string | null {
+  if (!value || value.startsWith("-")) {
+    return null;
+  }
+  return value;
 }
 
 function parseOffset(value: string): number | null {
@@ -1767,95 +1894,360 @@ async function streamJobLogs(opts: {
   let lastHeartbeatAt = Date.now();
   const heartbeatIntervalMs = 5000;
 
-  if (opts.json) {
-    writeJsonLine({
-      type: "start",
-      jobId: opts.jobId,
-      logsOffset,
-      ...(opts.includeEvents ? { eventsSeq } : {}),
-    });
-  }
+  emitStreamBoundary({
+    json: opts.json,
+    type: "start",
+    jobId: opts.jobId,
+    logsOffset,
+    includeEvents: opts.includeEvents,
+    eventsSeq,
+  });
 
   while (true) {
-    let didWork = false;
-
-    const logChunk = await readFileChunk({
-      path: opts.store.getJobPaths({ jobId: opts.jobId }).combinedPath,
+    const logResult = await streamJobLogChunk({
+      store: opts.store,
+      jobId: opts.jobId,
       offset: logsOffset,
+      json: opts.json,
     });
-    if (logChunk) {
-      didWork = true;
-      logsOffset = logChunk.nextOffset;
-      if (opts.json) {
-        writeJsonLine({
-          type: "log",
-          stream: "combined",
-          offset: logsOffset,
-          data: logChunk.data,
-        });
-      } else {
-        process.stdout.write(logChunk.data);
-      }
-    }
+    logsOffset = logResult.nextOffset;
 
-    if (opts.includeEvents) {
-      const events = await opts.store.readEvents({ jobId: opts.jobId });
-      const next = events.filter((event) => event.seq > eventsSeq);
-      if (next.length > 0) {
-        didWork = true;
-        for (const event of next) {
-          eventsSeq = event.seq;
-          if (opts.json) {
-            writeJsonLine({ type: "event", seq: event.seq, event });
-          } else {
-            opts.logger.info({ message: `event ${event.type}` });
-          }
-        }
-      }
-    }
+    const eventResult = opts.includeEvents
+      ? await streamJobEventBatch({
+          store: opts.store,
+          jobId: opts.jobId,
+          eventsSeq,
+          json: opts.json,
+          logger: opts.logger,
+        })
+      : { didWork: false, nextEventsSeq: eventsSeq };
+    eventsSeq = eventResult.nextEventsSeq;
+
+    const didWork = logResult.didWork || eventResult.didWork;
+    const now = Date.now();
+    lastHeartbeatAt = maybeEmitStreamHeartbeat({
+      json: opts.json,
+      didWork,
+      now,
+      lastHeartbeatAt,
+      heartbeatIntervalMs,
+      logsOffset,
+      includeEvents: opts.includeEvents,
+      eventsSeq,
+    });
 
     if (!opts.follow) {
       break;
     }
 
-    if (
-      opts.json &&
-      !didWork &&
-      Date.now() - lastHeartbeatAt >= heartbeatIntervalMs
-    ) {
-      writeJsonLine({
-        type: "heartbeat",
-        ts: new Date().toISOString(),
-        logsOffset,
-        ...(opts.includeEvents ? { eventsSeq } : {}),
-      });
-      lastHeartbeatAt = Date.now();
-    }
-
-    if (!didWork) {
-      const meta = await opts.store.readJobMeta({ jobId: opts.jobId });
-      if (meta && TERMINAL_STATUSES.has(meta.status)) {
-        break;
-      }
-    }
-
-    if (didWork) {
-      lastHeartbeatAt = Date.now();
+    const shouldStop = await shouldStopStreaming({
+      store: opts.store,
+      jobId: opts.jobId,
+      didWork,
+    });
+    if (shouldStop) {
+      break;
     }
 
     await sleep(500);
   }
 
-  if (opts.json) {
-    writeJsonLine({
-      type: "end",
-      jobId: opts.jobId,
-      logsOffset,
-      ...(opts.includeEvents ? { eventsSeq } : {}),
-    });
-  }
+  emitStreamBoundary({
+    json: opts.json,
+    type: "end",
+    jobId: opts.jobId,
+    logsOffset,
+    includeEvents: opts.includeEvents,
+    eventsSeq,
+  });
 
   return { logsOffset, eventsSeq };
+}
+
+type ShellConnectionResult =
+  | { readonly ok: true; readonly gatewayUrl: string; readonly token: string }
+  | { readonly ok: false; readonly error: string };
+
+function resolveShellConnection(input: {
+  readonly parsed: ShellArgs;
+}): ShellConnectionResult {
+  const envGateway = (process.env.HACK_GATEWAY_URL ?? "").trim();
+  const gatewayUrl =
+    input.parsed.gateway ??
+    (envGateway.length > 0 ? envGateway : "http://127.0.0.1:7788");
+  const token =
+    input.parsed.token ?? (process.env.HACK_GATEWAY_TOKEN ?? "").trim();
+  if (!token) {
+    return {
+      ok: false,
+      error:
+        "Missing gateway token. Set HACK_GATEWAY_TOKEN or pass --token (write scope required).",
+    };
+  }
+  return { ok: true, gatewayUrl, token };
+}
+
+type ResolvedShellProject =
+  | {
+      readonly ok: true;
+      readonly projectId: string;
+      readonly localProject?: ProjectContext;
+    }
+  | { readonly ok: false; readonly error: string };
+
+async function resolveShellProject(input: {
+  readonly ctx: {
+    readonly project?: ProjectContext;
+    readonly projectId?: string;
+    readonly projectName?: string;
+    readonly cwd: string;
+    readonly logger: {
+      warn: (input: { message: string }) => void;
+    };
+  };
+  readonly parsed: ShellArgs;
+  readonly client: GatewayClient;
+}): Promise<ResolvedShellProject> {
+  let projectId: string | undefined =
+    input.parsed.projectId ?? input.ctx.projectId;
+  let projectName: string | undefined =
+    input.parsed.project ?? input.ctx.projectName;
+  let localProject: ProjectContext | undefined = input.ctx.project;
+
+  if (input.parsed.project || input.parsed.path) {
+    const localProjectResult = await resolveSupervisorProject({
+      ctx: input.ctx,
+      projectOpt: input.parsed.project,
+      pathOpt: input.parsed.path,
+    });
+    if (!localProjectResult.ok) {
+      return localProjectResult;
+    }
+    localProject = localProjectResult.project;
+    projectId = projectId ?? localProjectResult.projectId;
+    projectName = localProjectResult.projectName ?? projectName;
+  }
+
+  const projectIdResult = await resolveGatewayProjectId({
+    client: input.client,
+    projectId,
+    projectName,
+  });
+  if (!projectIdResult.ok) {
+    return projectIdResult;
+  }
+
+  return {
+    ok: true,
+    projectId: projectIdResult.projectId,
+    ...(localProject ? { localProject } : {}),
+  };
+}
+
+function resolveShellDimensions(input: { readonly parsed: ShellArgs }): {
+  readonly cols: number;
+  readonly rows: number;
+} {
+  const fallbackCols = 120;
+  const fallbackRows = 30;
+  return {
+    cols:
+      input.parsed.cols ??
+      (typeof process.stdout.columns === "number"
+        ? process.stdout.columns
+        : fallbackCols),
+    rows:
+      input.parsed.rows ??
+      (typeof process.stdout.rows === "number"
+        ? process.stdout.rows
+        : fallbackRows),
+  };
+}
+
+function buildShellCreateInput(input: {
+  readonly parsed: ShellArgs;
+  readonly projectId: string;
+  readonly cols: number;
+  readonly rows: number;
+}): {
+  readonly projectId: string;
+  readonly shell?: string;
+  readonly cwd?: string;
+  readonly env?: Record<string, string>;
+  readonly cols: number;
+  readonly rows: number;
+} {
+  return {
+    projectId: input.projectId,
+    ...(input.parsed.shell ? { shell: input.parsed.shell } : {}),
+    ...(input.parsed.cwd ? { cwd: input.parsed.cwd } : {}),
+    ...(input.parsed.env ? { env: input.parsed.env } : {}),
+    cols: input.cols,
+    rows: input.rows,
+  };
+}
+
+type ShellCreateResult = Awaited<ReturnType<GatewayClient["createShell"]>>;
+
+async function createShellWithRetry(input: {
+  readonly ctx: {
+    readonly logger: {
+      info: (input: { message: string }) => void;
+      warn: (input: { message: string }) => void;
+    };
+  };
+  readonly client: GatewayClient;
+  readonly localProject?: ProjectContext;
+  readonly shellInput: Parameters<GatewayClient["createShell"]>[0];
+}): Promise<ShellCreateResult> {
+  let created = await input.client.createShell(input.shellInput);
+  if (!(created.ok || created.error.code !== "writes_disabled")) {
+    const didEnable = await maybeEnableGatewayWrites({
+      ctx: input.ctx,
+      project: input.localProject,
+    });
+    if (didEnable) {
+      created = await input.client.createShell(input.shellInput);
+    }
+  }
+  return created;
+}
+
+async function reportShellCreateFailure(input: {
+  readonly logger: {
+    error: (input: { message: string }) => void;
+    info: (input: { message: string }) => void;
+    warn: (input: { message: string }) => void;
+  };
+  readonly created: ShellCreateResult;
+}): Promise<void> {
+  if (input.created.ok) {
+    return;
+  }
+  if (
+    input.created.error.code === "writes_disabled" ||
+    input.created.error.code === "write_scope_required"
+  ) {
+    await reportGatewayConfigSource({ logger: input.logger });
+  }
+  const detailed = buildShellCreateErrorHint({ error: input.created.error });
+  input.logger.error({
+    message: `Shell create failed (${input.created.status}): ${input.created.error.message}`,
+  });
+  if (detailed) {
+    input.logger.info({ message: detailed });
+  }
+}
+
+function emitStreamBoundary(input: {
+  readonly json: boolean;
+  readonly type: "start" | "end";
+  readonly jobId: string;
+  readonly logsOffset: number;
+  readonly includeEvents: boolean;
+  readonly eventsSeq: number;
+}): void {
+  if (!input.json) {
+    return;
+  }
+  writeJsonLine({
+    type: input.type,
+    jobId: input.jobId,
+    logsOffset: input.logsOffset,
+    ...(input.includeEvents ? { eventsSeq: input.eventsSeq } : {}),
+  });
+}
+
+async function streamJobLogChunk(input: {
+  readonly store: JobStore;
+  readonly jobId: string;
+  readonly offset: number;
+  readonly json: boolean;
+}): Promise<{ readonly didWork: boolean; readonly nextOffset: number }> {
+  const logChunk = await readFileChunk({
+    path: input.store.getJobPaths({ jobId: input.jobId }).combinedPath,
+    offset: input.offset,
+  });
+  if (!logChunk) {
+    return { didWork: false, nextOffset: input.offset };
+  }
+  if (input.json) {
+    writeJsonLine({
+      type: "log",
+      stream: "combined",
+      offset: logChunk.nextOffset,
+      data: logChunk.data,
+    });
+  } else {
+    process.stdout.write(logChunk.data);
+  }
+  return { didWork: true, nextOffset: logChunk.nextOffset };
+}
+
+async function streamJobEventBatch(input: {
+  readonly store: JobStore;
+  readonly jobId: string;
+  readonly eventsSeq: number;
+  readonly json: boolean;
+  readonly logger: { info: (input: { message: string }) => void };
+}): Promise<{ readonly didWork: boolean; readonly nextEventsSeq: number }> {
+  const events = await input.store.readEvents({ jobId: input.jobId });
+  const nextEvents = events.filter((event) => event.seq > input.eventsSeq);
+  if (nextEvents.length === 0) {
+    return { didWork: false, nextEventsSeq: input.eventsSeq };
+  }
+  let nextEventsSeq = input.eventsSeq;
+  for (const event of nextEvents) {
+    nextEventsSeq = event.seq;
+    if (input.json) {
+      writeJsonLine({ type: "event", seq: event.seq, event });
+      continue;
+    }
+    input.logger.info({ message: `event ${event.type}` });
+  }
+  return { didWork: true, nextEventsSeq };
+}
+
+function maybeEmitStreamHeartbeat(input: {
+  readonly json: boolean;
+  readonly didWork: boolean;
+  readonly now: number;
+  readonly lastHeartbeatAt: number;
+  readonly heartbeatIntervalMs: number;
+  readonly logsOffset: number;
+  readonly includeEvents: boolean;
+  readonly eventsSeq: number;
+}): number {
+  if (input.didWork) {
+    return input.now;
+  }
+  if (
+    !(
+      input.json &&
+      input.now - input.lastHeartbeatAt >= input.heartbeatIntervalMs
+    )
+  ) {
+    return input.lastHeartbeatAt;
+  }
+  writeJsonLine({
+    type: "heartbeat",
+    ts: new Date().toISOString(),
+    logsOffset: input.logsOffset,
+    ...(input.includeEvents ? { eventsSeq: input.eventsSeq } : {}),
+  });
+  return input.now;
+}
+
+async function shouldStopStreaming(input: {
+  readonly store: JobStore;
+  readonly jobId: string;
+  readonly didWork: boolean;
+}): Promise<boolean> {
+  if (input.didWork) {
+    return false;
+  }
+  const meta = await input.store.readJobMeta({ jobId: input.jobId });
+  return meta ? TERMINAL_STATUSES.has(meta.status) : false;
 }
 
 function writeJsonLine(value: Record<string, unknown>): void {

@@ -5,6 +5,7 @@ import {
   dim,
   fg,
   InputRenderable,
+  type KeyEvent,
   RenderableEvents,
   RGBA,
   ScrollBoxRenderable,
@@ -839,61 +840,81 @@ export async function runTicketsTui({
       focusPane(activePane);
     };
 
+    const setOverlayWarning = (message: string) => {
+      overlayStatus.content = t`${fg("#e0af68")(message)}`;
+    };
+
+    const setOverlayProgress = (message: string) => {
+      overlayStatus.content = t`${fg("#7dcfff")(message)}`;
+    };
+
+    const setOverlayError = (message: string) => {
+      overlayStatus.content = t`${fg("#f7768e")(message)}`;
+    };
+
+    const submitNewOverlay = async () => {
+      const title = titleInput.value.trim();
+      const body = bodyInput.value.trim();
+      if (!title) {
+        setOverlayWarning("Title is required.");
+        return;
+      }
+
+      setOverlayProgress("Creating ticket...");
+      const created = await store.createTicket({
+        title,
+        body: body.length > 0 ? body : undefined,
+      });
+
+      if (!created.ok) {
+        setOverlayError(created.error);
+        return;
+      }
+
+      closeOverlay();
+      await refreshTickets();
+      const index = ticketsSelect.options.findIndex(
+        (option) => option.value === created.ticket.ticketId
+      );
+      ticketsSelect.setSelectedIndex(index >= 0 ? index : 0);
+      setToast({ message: `Created ${created.ticket.ticketId}` });
+    };
+
+    const submitStatusOverlay = async () => {
+      const ticketId = selectedTicketId();
+      if (!ticketId) {
+        setOverlayWarning("Select a ticket first.");
+        return;
+      }
+
+      const next = statusSelect.getSelectedOption()?.value as
+        | StatusOption
+        | undefined;
+      if (!next) {
+        setOverlayWarning("Select a status.");
+        return;
+      }
+
+      setOverlayProgress("Updating status...");
+      const updated = await store.setStatus({ ticketId, status: next });
+      if (!updated.ok) {
+        setOverlayError(updated.error);
+        return;
+      }
+
+      closeOverlay();
+      await refreshTickets();
+      setToast({ message: `Updated ${ticketId} -> ${next}` });
+    };
+
     const submitOverlay = async () => {
       if (overlayState.mode === "new") {
-        const title = titleInput.value.trim();
-        const body = bodyInput.value.trim();
-        if (!title) {
-          overlayStatus.content = t`${fg("#e0af68")("Title is required.")}`;
-          return;
-        }
-
-        overlayStatus.content = t`${fg("#7dcfff")("Creating ticket...")}`;
-        const created = await store.createTicket({
-          title,
-          body: body.length > 0 ? body : undefined,
-        });
-
-        if (!created.ok) {
-          overlayStatus.content = t`${fg("#f7768e")(`${created.error}`)}`;
-          return;
-        }
-
-        closeOverlay();
-        await refreshTickets();
-        const index = ticketsSelect.options.findIndex(
-          (option) => option.value === created.ticket.ticketId
-        );
-        ticketsSelect.setSelectedIndex(index >= 0 ? index : 0);
-        setToast({ message: `Created ${created.ticket.ticketId}` });
+        await submitNewOverlay();
         return;
       }
 
       if (overlayState.mode === "status") {
-        const ticketId = selectedTicketId();
-        if (!ticketId) {
-          overlayStatus.content = t`${fg("#e0af68")("Select a ticket first.")}`;
-          return;
-        }
-
-        const next = statusSelect.getSelectedOption()?.value as
-          | StatusOption
-          | undefined;
-        if (!next) {
-          overlayStatus.content = t`${fg("#e0af68")("Select a status.")}`;
-          return;
-        }
-
-        overlayStatus.content = t`${fg("#7dcfff")("Updating status...")}`;
-        const updated = await store.setStatus({ ticketId, status: next });
-        if (!updated.ok) {
-          overlayStatus.content = t`${fg("#f7768e")(`${updated.error}`)}`;
-          return;
-        }
-
-        closeOverlay();
-        await refreshTickets();
-        setToast({ message: `Updated ${ticketId} -> ${next}` });
+        await submitStatusOverlay();
       }
     };
 
@@ -916,67 +937,77 @@ export async function runTicketsTui({
     renderFooter();
     setActivePane("list");
 
-    activeRenderer.keyInput.on("keypress", (key) => {
-      if (overlayState.mode !== "none") {
-        if (key.name === "escape") {
-          key.preventDefault();
-          closeOverlay();
-          return;
-        }
-        if (key.name === "tab") {
-          key.preventDefault();
-          const total = overlayState.focusables.length;
-          if (total === 0) {
-            return;
-          }
-          const next =
-            (overlayState.focusIndex + (key.shift ? -1 : 1) + total) % total;
-          overlayState.focusIndex = next;
-          overlayState.focusables[next]?.focus();
-          return;
-        }
-        if (
-          key.name === "enter" ||
-          key.name === "return" ||
-          key.name === "linefeed"
-        ) {
-          key.preventDefault();
-          void submitOverlay();
-          return;
-        }
+    const focusNextOverlayField = (direction: number) => {
+      const total = overlayState.focusables.length;
+      if (total === 0) {
         return;
       }
+      const next = (overlayState.focusIndex + direction + total) % total;
+      overlayState.focusIndex = next;
+      overlayState.focusables[next]?.focus();
+    };
 
+    const handleOverlayKeypress = (key: KeyEvent) => {
+      if (key.name === "escape") {
+        key.preventDefault();
+        closeOverlay();
+        return true;
+      }
+      if (key.name === "tab") {
+        key.preventDefault();
+        focusNextOverlayField(key.shift ? -1 : 1);
+        return true;
+      }
+      if (
+        key.name === "enter" ||
+        key.name === "return" ||
+        key.name === "linefeed"
+      ) {
+        key.preventDefault();
+        void submitOverlay();
+        return true;
+      }
+      return false;
+    };
+
+    const handleGlobalKeypress = (key: KeyEvent) => {
       if (key.name === "q" || (key.ctrl && key.name === "c")) {
         key.preventDefault();
         void shutdown();
         return;
       }
-
       if (key.name === "tab") {
         key.preventDefault();
         focusNextPane(key.shift ? -1 : 1);
         return;
       }
-
-      if (key.name === "n" && !key.ctrl && !key.meta) {
+      if (key.ctrl || key.meta) {
+        return;
+      }
+      if (key.name === "n") {
         key.preventDefault();
         openOverlay("new");
         return;
       }
-
-      if (key.name === "s" && !key.ctrl && !key.meta) {
+      if (key.name === "s") {
         key.preventDefault();
         openOverlay("status");
         return;
       }
-
-      if (key.name === "r" && !key.ctrl && !key.meta) {
+      if (key.name === "r") {
         key.preventDefault();
         void refreshTickets().then(() =>
           setToast({ message: "Refreshed tickets" })
         );
       }
+    };
+
+    activeRenderer.keyInput.on("keypress", (key) => {
+      if (overlayState.mode !== "none") {
+        handleOverlayKeypress(key);
+        return;
+      }
+      handleGlobalKeypress(key);
     });
 
     await refreshTickets();
@@ -1126,44 +1157,33 @@ function parseTicketBodyMeta(opts: { readonly body: string }): TicketBodyMeta {
 
   for (const rawLine of lines) {
     const line = rawLine.trim();
-    if (line.startsWith("```")) {
-      inCodeBlock = !inCodeBlock;
+    const nextCodeBlockState = getNextCodeBlockState({
+      line,
+      inCodeBlock,
+    });
+    if (nextCodeBlockState !== null) {
+      inCodeBlock = nextCodeBlockState;
       continue;
     }
     if (inCodeBlock) {
       continue;
     }
 
-    const headingMatch = line.match(MARKDOWN_HEADING_REGEX);
-    if (headingMatch) {
-      const heading = normalizeHeading(headingMatch[1] ?? "");
-      section = resolveMetaSection(heading);
+    const nextSection = resolveMetaHeadingLine({ line });
+    if (nextSection !== undefined) {
+      section = nextSection;
       continue;
     }
 
-    if (!meta.priority) {
-      const priorityMatch = line.match(PRIORITY_LINE_REGEX);
-      if (priorityMatch?.[1]) {
-        meta.priority = priorityMatch[1].trim();
-        continue;
-      }
+    if (!meta.priority && applyTicketPriorityLine({ line, meta })) {
+      continue;
     }
 
     if (!section || line.length === 0) {
       continue;
     }
 
-    const listItem = extractListItem({ line });
-    if (!listItem) {
-      continue;
-    }
-
-    if (section === "links") {
-      const link = extractLinkLabel({ text: listItem }) ?? listItem;
-      meta.links.push(link);
-    } else {
-      meta.acceptanceCriteria.push(listItem);
-    }
+    appendTicketMetaListItem({ line, section, meta });
   }
 
   return {
@@ -1171,6 +1191,58 @@ function parseTicketBodyMeta(opts: { readonly body: string }): TicketBodyMeta {
     acceptanceCriteria: uniqueNonEmpty(meta.acceptanceCriteria),
     priority: meta.priority,
   };
+}
+
+function getNextCodeBlockState(opts: {
+  readonly line: string;
+  readonly inCodeBlock: boolean;
+}): boolean | null {
+  if (!opts.line.startsWith("```")) {
+    return null;
+  }
+  return !opts.inCodeBlock;
+}
+
+function resolveMetaHeadingLine(opts: {
+  readonly line: string;
+}): "links" | "acceptance" | null | undefined {
+  const headingMatch = opts.line.match(MARKDOWN_HEADING_REGEX);
+  if (!headingMatch) {
+    return undefined;
+  }
+  const heading = normalizeHeading(headingMatch[1] ?? "");
+  return resolveMetaSection(heading);
+}
+
+function applyTicketPriorityLine(opts: {
+  readonly line: string;
+  readonly meta: MutableTicketBodyMeta;
+}): boolean {
+  const priorityMatch = opts.line.match(PRIORITY_LINE_REGEX);
+  if (!priorityMatch?.[1]) {
+    return false;
+  }
+  opts.meta.priority = priorityMatch[1].trim();
+  return true;
+}
+
+function appendTicketMetaListItem(opts: {
+  readonly line: string;
+  readonly section: "links" | "acceptance";
+  readonly meta: MutableTicketBodyMeta;
+}): void {
+  const listItem = extractListItem({ line: opts.line });
+  if (!listItem) {
+    return;
+  }
+
+  if (opts.section === "links") {
+    const link = extractLinkLabel({ text: listItem }) ?? listItem;
+    opts.meta.links.push(link);
+    return;
+  }
+
+  opts.meta.acceptanceCriteria.push(listItem);
 }
 
 function renderMetaExtras(meta: TicketBodyMeta): StyledText[] {
@@ -1425,120 +1497,140 @@ function applyAnsiCodes(opts: {
   let i = 0;
   while (i < opts.codes.length) {
     const code = opts.codes[i] ?? 0;
-    switch (code) {
-      case 0:
-        style = createAnsiStyle();
-        i += 1;
-        break;
-      case 1:
-        style = { ...style, bold: true };
-        i += 1;
-        break;
-      case 2:
-        style = { ...style, dim: true };
-        i += 1;
-        break;
-      case 3:
-        style = { ...style, italic: true };
-        i += 1;
-        break;
-      case 4:
-        style = { ...style, underline: true };
-        i += 1;
-        break;
-      case 7:
-        style = { ...style, inverse: true };
-        i += 1;
-        break;
-      case 9:
-        style = { ...style, strikethrough: true };
-        i += 1;
-        break;
-      case 22:
-        style = { ...style, bold: false, dim: false };
-        i += 1;
-        break;
-      case 23:
-        style = { ...style, italic: false };
-        i += 1;
-        break;
-      case 24:
-        style = { ...style, underline: false };
-        i += 1;
-        break;
-      case 27:
-        style = { ...style, inverse: false };
-        i += 1;
-        break;
-      case 29:
-        style = { ...style, strikethrough: false };
-        i += 1;
-        break;
-      case 39:
-        style = { ...style, fg: undefined };
-        i += 1;
-        break;
-      case 49:
-        style = { ...style, bg: undefined };
-        i += 1;
-        break;
-      default: {
-        if (code >= 30 && code <= 37) {
-          style = { ...style, fg: ansiToRgba(code - 30, false) };
-          i += 1;
-          break;
-        }
-        if (code >= 90 && code <= 97) {
-          style = { ...style, fg: ansiToRgba(code - 90, true) };
-          i += 1;
-          break;
-        }
-        if (code >= 40 && code <= 47) {
-          style = { ...style, bg: ansiToRgba(code - 40, false) };
-          i += 1;
-          break;
-        }
-        if (code >= 100 && code <= 107) {
-          style = { ...style, bg: ansiToRgba(code - 100, true) };
-          i += 1;
-          break;
-        }
-        if (code === 38 || code === 48) {
-          const isFg = code === 38;
-          const next = opts.codes[i + 1];
-          if (next === 5) {
-            const colorIndex = opts.codes[i + 2];
-            if (typeof colorIndex === "number") {
-              const rgba = xtermToRgba(colorIndex);
-              style = isFg ? { ...style, fg: rgba } : { ...style, bg: rgba };
-            }
-            i += 3;
-            break;
-          }
-          if (next === 2) {
-            const r = opts.codes[i + 2];
-            const g = opts.codes[i + 3];
-            const b = opts.codes[i + 4];
-            if ([r, g, b].every((v) => typeof v === "number")) {
-              const rgba = RGBA.fromInts(
-                clampColor(r ?? 0),
-                clampColor(g ?? 0),
-                clampColor(b ?? 0),
-                255
-              );
-              style = isFg ? { ...style, fg: rgba } : { ...style, bg: rgba };
-            }
-            i += 5;
-            break;
-          }
-        }
-        i += 1;
-        break;
-      }
+    const basicStyle = applyBasicAnsiCode({ style, code });
+    if (basicStyle) {
+      style = basicStyle;
+      i += 1;
+      continue;
     }
+
+    const paletteStyle = applyPaletteAnsiCode({ style, code });
+    if (paletteStyle) {
+      style = paletteStyle;
+      i += 1;
+      continue;
+    }
+
+    const extended = applyExtendedAnsiCode({
+      style,
+      codes: opts.codes,
+      index: i,
+    });
+    if (extended) {
+      style = extended.style;
+      i += extended.consumed;
+      continue;
+    }
+
+    i += 1;
   }
 
   return style;
+}
+
+function applyBasicAnsiCode(opts: {
+  readonly style: AnsiStyle;
+  readonly code: number;
+}): AnsiStyle | null {
+  switch (opts.code) {
+    case 0:
+      return createAnsiStyle();
+    case 1:
+      return { ...opts.style, bold: true };
+    case 2:
+      return { ...opts.style, dim: true };
+    case 3:
+      return { ...opts.style, italic: true };
+    case 4:
+      return { ...opts.style, underline: true };
+    case 7:
+      return { ...opts.style, inverse: true };
+    case 9:
+      return { ...opts.style, strikethrough: true };
+    case 22:
+      return { ...opts.style, bold: false, dim: false };
+    case 23:
+      return { ...opts.style, italic: false };
+    case 24:
+      return { ...opts.style, underline: false };
+    case 27:
+      return { ...opts.style, inverse: false };
+    case 29:
+      return { ...opts.style, strikethrough: false };
+    case 39:
+      return { ...opts.style, fg: undefined };
+    case 49:
+      return { ...opts.style, bg: undefined };
+    default:
+      return null;
+  }
+}
+
+function applyPaletteAnsiCode(opts: {
+  readonly style: AnsiStyle;
+  readonly code: number;
+}): AnsiStyle | null {
+  if (opts.code >= 30 && opts.code <= 37) {
+    return { ...opts.style, fg: ansiToRgba(opts.code - 30, false) };
+  }
+  if (opts.code >= 90 && opts.code <= 97) {
+    return { ...opts.style, fg: ansiToRgba(opts.code - 90, true) };
+  }
+  if (opts.code >= 40 && opts.code <= 47) {
+    return { ...opts.style, bg: ansiToRgba(opts.code - 40, false) };
+  }
+  if (opts.code >= 100 && opts.code <= 107) {
+    return { ...opts.style, bg: ansiToRgba(opts.code - 100, true) };
+  }
+  return null;
+}
+
+function applyExtendedAnsiCode(opts: {
+  readonly style: AnsiStyle;
+  readonly codes: readonly number[];
+  readonly index: number;
+}): { readonly style: AnsiStyle; readonly consumed: number } | null {
+  const code = opts.codes[opts.index];
+  if (code !== 38 && code !== 48) {
+    return null;
+  }
+
+  const isFg = code === 38;
+  const next = opts.codes[opts.index + 1];
+  if (next === 5) {
+    const colorIndex = opts.codes[opts.index + 2];
+    if (typeof colorIndex !== "number") {
+      return { style: opts.style, consumed: 3 };
+    }
+    const rgba = xtermToRgba(colorIndex);
+    return {
+      style: isFg ? { ...opts.style, fg: rgba } : { ...opts.style, bg: rgba },
+      consumed: 3,
+    };
+  }
+  if (next !== 2) {
+    return null;
+  }
+
+  const [r, g, b] = [
+    opts.codes[opts.index + 2],
+    opts.codes[opts.index + 3],
+    opts.codes[opts.index + 4],
+  ];
+  if ([r, g, b].every((value) => typeof value === "number")) {
+    const rgba = RGBA.fromInts(
+      clampColor(r ?? 0),
+      clampColor(g ?? 0),
+      clampColor(b ?? 0),
+      255
+    );
+    return {
+      style: isFg ? { ...opts.style, fg: rgba } : { ...opts.style, bg: rgba },
+      consumed: 5,
+    };
+  }
+
+  return { style: opts.style, consumed: 5 };
 }
 
 function clampColor(value: number): number {

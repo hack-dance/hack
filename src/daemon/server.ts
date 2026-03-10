@@ -514,6 +514,7 @@ async function routeExtensionRequest(input: {
   return await handleEnvRoutes({ req: input.req, url: input.url });
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Gateway requests multiplex websocket upgrades, auth checks, and several controller route families in one entrypoint.
 async function handleGatewayRequest(opts: {
   readonly req: Request;
   readonly server: ReturnType<typeof Bun.serve>;
@@ -730,6 +731,7 @@ function sanitizeGatewayAuditPath(opts: { url: URL }): string {
   return `${opts.url.pathname}${search.length > 0 ? `?${search}` : ""}`;
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Control-plane routing intentionally centralizes the daemon's HTTP API surface and method-specific validation.
 async function handleControlPlaneRequest(opts: {
   readonly req: Request;
   readonly url: URL;

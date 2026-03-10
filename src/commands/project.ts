@@ -1979,6 +1979,7 @@ async function readComposeServicesForInternalOverride(
   return out;
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Compose network parsing accepts several Docker/Compose object shapes and degrades safely on malformed definitions.
 function parseComposeServiceNetworkNames(value: unknown): readonly string[] {
   if (!isRecord(value)) {
     return [];

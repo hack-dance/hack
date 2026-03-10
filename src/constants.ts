@@ -42,6 +42,7 @@ export const GLOBAL_CERTS_DIR_NAME = "certs" as const;
 export const GLOBAL_COREDNS_FILENAME = "Corefile" as const;
 
 export const GLOBAL_ONLY_EXTENSION_IDS = [
+  "dance.hack.aws",
   "dance.hack.cloudflare",
   "dance.hack.github",
   "dance.hack.railway",

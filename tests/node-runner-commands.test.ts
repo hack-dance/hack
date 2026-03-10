@@ -376,7 +376,7 @@ test("node ensure repairs a missing token for an existing auth ref", async () =>
   expect(payload.token).toBe(process.env.HACK_NODE_REPAIR_TOKEN);
   expect(
     await readNodeAuthToken({ authRef: "env:HACK_NODE_REPAIR_TOKEN" })
-  ).toBe(process.env.HACK_NODE_REPAIR_TOKEN);
+  ).toBe(process.env.HACK_NODE_REPAIR_TOKEN ?? null);
 });
 
 async function createGatewayEnabledProject(input: {

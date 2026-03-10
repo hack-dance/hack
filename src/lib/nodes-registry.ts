@@ -267,6 +267,7 @@ export async function upsertNodeRecord(input: {
   readonly platform?: string;
   readonly arch?: string;
 }): Promise<{ readonly node: NodeRecord; readonly created: boolean }> {
+  // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Node upsert must merge partial updates, defaults, timestamps, and token state atomically under the registry lock.
   return await withRegistryLock(async () => {
     const registry = await readNodesRegistry();
     const nowIso = new Date().toISOString();

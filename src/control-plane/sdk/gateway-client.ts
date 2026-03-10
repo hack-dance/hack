@@ -562,6 +562,7 @@ export function createGatewayClient(opts: GatewayClientOptions): GatewayClient {
     readonly path?: string;
     readonly branch?: string;
     readonly bootstrap?: GatewayNodeWorkspaceBootstrap;
+    // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Workspace attach requests must normalize optional routing, SSH, sync, and bootstrap parameters into one gateway payload.
   }): Promise<GatewayResponse<GatewayNodeWorkspaceResponse>> =>
     await requestJson({
       method: "POST",

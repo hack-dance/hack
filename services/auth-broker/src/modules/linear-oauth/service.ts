@@ -118,6 +118,7 @@ export function createFlow(input: {
   };
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: The callback flow coordinates OAuth exchange, Better Auth linking, management token issuance, secure custody, and browser recovery paths.
 export async function handleLinearCallback(input: {
   readonly config: BrokerConfig;
   readonly flowStore: FlowStore;

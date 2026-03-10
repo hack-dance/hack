@@ -262,6 +262,19 @@ type DispatchStatusArgs = CommandArgs<
 >;
 type DispatchLogsArgs = CommandArgs<typeof logsOptions, typeof logsPositionals>;
 
+type ProviderBootstrapCliArgsResult =
+  | {
+      readonly ok: true;
+      readonly provider: "railway" | "aws";
+      readonly cliArgs: string[];
+    }
+  | { readonly ok: false; readonly error: string };
+
+type DispatchPrProfileContext = {
+  readonly profileId: string;
+  readonly profileSource: string;
+};
+
 export const dispatchCommand = withHandler(
   defineCommand({
     ...dispatchSpec,
@@ -286,6 +299,7 @@ export const dispatchCommand = withHandler(
   }
 );
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Dispatch run is the top-level controller entrypoint that intentionally sequences project resolution, routing, node/bootstrap handling, execution, artifact storage, and PR automation.
 async function handleDispatchRun({
   args,
 }: {
@@ -1071,6 +1085,7 @@ type DispatchProjectResolution = {
   readonly projectRoot?: string;
 };
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Local dispatch mirrors the remote pipeline, including workspace checks, artifact handling, and PR-state outcomes.
 async function handleDispatchRunLocal(input: {
   readonly args: DispatchRunArgs;
   readonly project: DispatchProjectResolution;
@@ -2217,130 +2232,24 @@ async function bootstrapNodeFromProviderRoute(input: {
 }): Promise<
   | {
       readonly ok: true;
-      readonly provider: "railway";
+      readonly provider: "railway" | "aws";
       readonly created: boolean;
       readonly nodeId: string;
     }
   | { readonly ok: false; readonly error: string }
 > {
-  if (input.route.providerRoute.provider !== "railway") {
-    return {
-      ok: false,
-      error: `Bootstrap handoff is not implemented for provider "${input.route.providerRoute.provider}".`,
-    };
+  const provider = input.route.providerRoute.provider;
+  const cliArgs = buildProviderBootstrapCliArgs({
+    provider,
+    config: input.route.providerRoute.effectiveConfig,
+    project: input.project,
+    privateNetworking: input.route.providerRoute.privateNetworking,
+  });
+  if (!cliArgs.ok) {
+    return cliArgs;
   }
 
-  const config = input.route.providerRoute.effectiveConfig;
-  const railwayProject = resolveConfigString({
-    config,
-    key: "project",
-  });
-  if (!railwayProject) {
-    return {
-      ok: false,
-      error:
-        "Provider route is missing railway project. Set controlPlane.providers.profiles.<id>.config.project.",
-    };
-  }
-
-  const cliArgs = [
-    "bun",
-    resolve(import.meta.dir, "../index.ts"),
-    "node",
-    "provider",
-    "railway",
-    "bootstrap",
-    "--json",
-    "--railway-project",
-    railwayProject,
-  ];
-
-  const railwayService = resolveConfigString({
-    config,
-    key: "service",
-  });
-  if (railwayService) {
-    cliArgs.push("--railway-service", railwayService);
-  }
-  const createService =
-    parseConfigBoolean({ config, key: "createService" }) ??
-    railwayService === undefined;
-  if (createService) {
-    cliArgs.push("--create-service");
-  }
-  const railwayEnvironment = resolveConfigString({
-    config,
-    key: "environment",
-  });
-  if (railwayEnvironment) {
-    cliArgs.push("--railway-environment", railwayEnvironment);
-  }
-  const railwayWorkspace = resolveConfigString({
-    config,
-    key: "workspace",
-  });
-  if (railwayWorkspace) {
-    cliArgs.push("--railway-workspace", railwayWorkspace);
-  }
-  const image = resolveConfigString({
-    config,
-    key: "image",
-  });
-  if (image) {
-    cliArgs.push("--railway-image", image);
-  }
-  const endpoint = resolveConfigString({
-    config,
-    key: "endpoint",
-  });
-  if (endpoint) {
-    cliArgs.push("--endpoint", endpoint);
-  }
-  const nodeName =
-    resolveConfigString({
-      config,
-      key: "nodeName",
-    }) ??
-    input.project.projectName ??
-    input.project.selector;
-  if (nodeName) {
-    cliArgs.push("--name", nodeName);
-  }
-  const labelsCsv = resolveConfigString({
-    config,
-    key: "labelsCsv",
-  });
-  if (labelsCsv) {
-    cliArgs.push("--labels", labelsCsv);
-  }
-
-  if (input.route.providerRoute.privateNetworking) {
-    cliArgs.push("--railway-private");
-    const auth = isRecord(config.auth) ? config.auth : {};
-    const tailscaleAuthKey = resolveConfigString({
-      config: { ...auth, ...config },
-      key: "tailscaleAuthKey",
-    });
-    if (tailscaleAuthKey) {
-      cliArgs.push("--tailscale-auth-key", tailscaleAuthKey);
-    }
-    const hostname = resolveConfigString({
-      config: { ...auth, ...config },
-      key: "tailscaleHostname",
-    });
-    if (hostname) {
-      cliArgs.push("--tailscale-hostname", hostname);
-    }
-    const tags = resolveConfigString({
-      config: { ...auth, ...config },
-      key: "tailscaleTagsCsv",
-    });
-    if (tags) {
-      cliArgs.push("--tailscale-tags", tags);
-    }
-  }
-
-  const result = await exec(cliArgs, {
+  const result = await exec(cliArgs.cliArgs, {
     stdin: "ignore",
     env: {
       NO_COLOR: "1",
@@ -2373,15 +2282,274 @@ async function bootstrapNodeFromProviderRoute(input: {
   const created = payload.created === true;
   if (!input.jsonMode) {
     logger.info({
-      message: `Bootstrap handoff registered node ${nodeId} via provider railway.`,
+      message: `Bootstrap handoff registered node ${nodeId} via provider ${cliArgs.provider}.`,
     });
   }
   return {
     ok: true,
-    provider: "railway",
+    provider: cliArgs.provider,
     created,
     nodeId,
   };
+}
+
+function buildProviderBootstrapCliArgs(input: {
+  readonly provider: string;
+  readonly config: Record<string, unknown>;
+  readonly project: DispatchProjectResolution;
+  readonly privateNetworking: boolean;
+}): ProviderBootstrapCliArgsResult {
+  if (!(input.provider === "railway" || input.provider === "aws")) {
+    return {
+      ok: false,
+      error: `Bootstrap handoff is not implemented for provider "${input.provider}".`,
+    };
+  }
+
+  const cliArgs = [
+    "bun",
+    resolve(import.meta.dir, "../index.ts"),
+    "node",
+    "provider",
+    input.provider,
+    "bootstrap",
+    "--json",
+  ];
+  const providerArgs =
+    input.provider === "railway"
+      ? buildRailwayProviderBootstrapCliArgs({
+          config: input.config,
+          privateNetworking: input.privateNetworking,
+        })
+      : buildAwsProviderBootstrapCliArgs({
+          config: input.config,
+        });
+  if (!providerArgs.ok) {
+    return providerArgs;
+  }
+  cliArgs.push(...providerArgs.args);
+  appendOptionalCliArg({
+    cliArgs,
+    flag: "--name",
+    value:
+      resolveConfigString({
+        config: input.config,
+        key: "nodeName",
+      }) ??
+      input.project.projectName ??
+      input.project.selector,
+  });
+  appendOptionalCliArg({
+    cliArgs,
+    flag: "--labels",
+    value: resolveConfigString({
+      config: input.config,
+      key: "labelsCsv",
+    }),
+  });
+  return {
+    ok: true,
+    provider: input.provider,
+    cliArgs,
+  };
+}
+
+function buildRailwayProviderBootstrapCliArgs(input: {
+  readonly config: Record<string, unknown>;
+  readonly privateNetworking: boolean;
+}):
+  | { readonly ok: true; readonly args: string[] }
+  | { readonly ok: false; readonly error: string } {
+  const railwayProject = resolveConfigString({
+    config: input.config,
+    key: "project",
+  });
+  if (!railwayProject) {
+    return {
+      ok: false,
+      error:
+        "Provider route is missing railway project. Set controlPlane.providers.profiles.<id>.config.project.",
+    };
+  }
+
+  const args = ["--railway-project", railwayProject];
+  const railwayService = resolveConfigString({
+    config: input.config,
+    key: "service",
+  });
+  appendOptionalCliArg({
+    cliArgs: args,
+    flag: "--railway-service",
+    value: railwayService,
+  });
+  if (
+    parseConfigBoolean({ config: input.config, key: "createService" }) ??
+    railwayService === undefined
+  ) {
+    args.push("--create-service");
+  }
+  appendOptionalCliArg({
+    cliArgs: args,
+    flag: "--railway-environment",
+    value: resolveConfigString({
+      config: input.config,
+      key: "environment",
+    }),
+  });
+  appendOptionalCliArg({
+    cliArgs: args,
+    flag: "--railway-workspace",
+    value: resolveConfigString({
+      config: input.config,
+      key: "workspace",
+    }),
+  });
+  appendOptionalCliArg({
+    cliArgs: args,
+    flag: "--railway-image",
+    value: resolveConfigString({
+      config: input.config,
+      key: "image",
+    }),
+  });
+  appendOptionalCliArg({
+    cliArgs: args,
+    flag: "--endpoint",
+    value: resolveConfigString({
+      config: input.config,
+      key: "endpoint",
+    }),
+  });
+
+  if (input.privateNetworking) {
+    args.push("--railway-private");
+    const authConfig = isRecord(input.config.auth) ? input.config.auth : {};
+    const privateConfig = { ...authConfig, ...input.config };
+    appendOptionalCliArg({
+      cliArgs: args,
+      flag: "--tailscale-auth-key",
+      value: resolveConfigString({
+        config: privateConfig,
+        key: "tailscaleAuthKey",
+      }),
+    });
+    appendOptionalCliArg({
+      cliArgs: args,
+      flag: "--tailscale-hostname",
+      value: resolveConfigString({
+        config: privateConfig,
+        key: "tailscaleHostname",
+      }),
+    });
+    appendOptionalCliArg({
+      cliArgs: args,
+      flag: "--tailscale-tags",
+      value: resolveConfigString({
+        config: privateConfig,
+        key: "tailscaleTagsCsv",
+      }),
+    });
+  }
+  return { ok: true, args };
+}
+
+function buildAwsProviderBootstrapCliArgs(input: {
+  readonly config: Record<string, unknown>;
+}):
+  | { readonly ok: true; readonly args: string[] }
+  | { readonly ok: false; readonly error: string } {
+  const instanceId = resolveConfigString({
+    config: input.config,
+    key: "instanceId",
+  });
+  const instanceTagValue = resolveConfigString({
+    config: input.config,
+    key: "instanceTagValue",
+  });
+  if ((instanceId ? 1 : 0) + (instanceTagValue ? 1 : 0) !== 1) {
+    return {
+      ok: false,
+      error:
+        "Provider route must define exactly one of config.instanceId or config.instanceTagValue for AWS bootstrap.",
+    };
+  }
+
+  const region = resolveConfigString({
+    config: input.config,
+    key: "region",
+  });
+  if (!region) {
+    return {
+      ok: false,
+      error:
+        "Provider route is missing aws region. Set controlPlane.providers.profiles.<id>.config.region.",
+    };
+  }
+  const endpoint = resolveConfigString({
+    config: input.config,
+    key: "endpoint",
+  });
+  if (!endpoint) {
+    return {
+      ok: false,
+      error:
+        "Provider route is missing aws endpoint. Set controlPlane.providers.profiles.<id>.config.endpoint.",
+    };
+  }
+  const source = resolveConfigString({
+    config: input.config,
+    key: "source",
+  });
+  if (!source) {
+    return {
+      ok: false,
+      error:
+        "Provider route is missing aws source. Set controlPlane.providers.profiles.<id>.config.source.",
+    };
+  }
+
+  const args = ["--region", region, "--endpoint", endpoint, "--source", source];
+  if (instanceId) {
+    args.push("--instance-id", instanceId);
+  }
+  if (instanceTagValue) {
+    args.push("--instance-tag-value", instanceTagValue);
+  }
+  appendOptionalCliArg({
+    cliArgs: args,
+    flag: "--instance-tag-key",
+    value: resolveConfigString({
+      config: input.config,
+      key: "instanceTagKey",
+    }),
+  });
+  appendOptionalCliArg({
+    cliArgs: args,
+    flag: "--profile",
+    value: resolveConfigString({
+      config: input.config,
+      key: "profile",
+    }),
+  });
+  appendOptionalCliArg({
+    cliArgs: args,
+    flag: "--bootstrap-command",
+    value: resolveConfigString({
+      config: input.config,
+      key: "bootstrapCommand",
+    }),
+  });
+  return { ok: true, args };
+}
+
+function appendOptionalCliArg(input: {
+  readonly cliArgs: string[];
+  readonly flag: string;
+  readonly value?: string;
+}): void {
+  if (input.value) {
+    input.cliArgs.push(input.flag, input.value);
+  }
 }
 
 async function resolveNodeClient(input: {
@@ -2724,19 +2892,16 @@ async function runDispatchPrAutomation(input: {
   readonly prBody?: string;
   readonly githubProfile?: string;
 }): Promise<DispatchPrOutcome> {
+  const githubProfile = resolveDispatchPrProfileContext({
+    controlPlaneConfig: input.controlPlaneConfig,
+    githubProfile: input.githubProfile,
+  });
   const branch = (input.workspace.branch ?? input.run.branch ?? "").trim();
   if (!branch) {
-    const selectedGitHubProfile = normalizeOptionalString(input.githubProfile)
-      ? input.githubProfile.trim()
-      : resolveGitHubAuthSettings({
-          controlPlaneConfig: input.controlPlaneConfig,
-        }).profileId;
     return {
       ok: false,
-      profileId: selectedGitHubProfile,
-      profileSource: normalizeOptionalString(input.githubProfile)
-        ? "command_flags"
-        : "project_or_global",
+      profileId: githubProfile.profileId,
+      profileSource: githubProfile.profileSource,
       error: "Cannot open PR without a resolved workspace branch.",
     };
   }
@@ -2750,17 +2915,10 @@ async function runDispatchPrAutomation(input: {
     "origin",
     branch,
   ] as const;
-  const pushRisk = assessCommandRisk({
-    command: pushCommand,
-    runner: "generic",
-  });
-  const pushPolicy = await resolvePolicyDecision({
-    level: pushRisk.level,
-    reasons: pushRisk.reasons,
-    requiresApproval: pushRisk.requiresApproval,
-    approveFlag: input.approveFlag,
+  const pushPolicy = await resolveDispatchPrPushPolicy({
     actor: input.actor,
-    promptLabel: "git push for --pr",
+    approveFlag: input.approveFlag,
+    command: pushCommand,
   });
   await appendPolicyAuditEvent({
     actor: input.actor,
@@ -2781,73 +2939,24 @@ async function runDispatchPrAutomation(input: {
   if (!pushPolicy.approved) {
     return {
       ok: false,
-      profileId: normalizeOptionalString(input.githubProfile)
-        ? input.githubProfile.trim()
-        : resolveGitHubAuthSettings({
-            controlPlaneConfig: input.controlPlaneConfig,
-          }).profileId,
-      profileSource: normalizeOptionalString(input.githubProfile)
-        ? "command_flags"
-        : "project_or_global",
+      profileId: githubProfile.profileId,
+      profileSource: githubProfile.profileSource,
       error: pushPolicy.error,
     };
   }
 
-  const createdPush = await input.selectedNode.client.createJob({
-    projectId: input.workspace.projectId,
-    runner: "generic",
-    command: [...pushCommand],
-  });
-  if (!createdPush.ok) {
-    return {
-      ok: false,
-      profileId: normalizeOptionalString(input.githubProfile)
-        ? input.githubProfile.trim()
-        : resolveGitHubAuthSettings({
-            controlPlaneConfig: input.controlPlaneConfig,
-          }).profileId,
-      profileSource: normalizeOptionalString(input.githubProfile)
-        ? "command_flags"
-        : "project_or_global",
-      error: `Failed to create push job (${createdPush.status}): ${createdPush.error.message}`,
-    };
-  }
-
-  const pushOutcome = await streamRemoteJob({
+  const pushOutcome = await runRemoteDispatchPushJob({
     runId: input.run.runId,
     client: input.selectedNode.client,
     projectId: input.workspace.projectId,
-    jobId: createdPush.data.job.jobId,
-    logsFrom: 0,
-    eventsFrom: 0,
-    printLogs: false,
+    pushCommand,
   });
-  if (!pushOutcome.job) {
+  if (!pushOutcome.ok) {
     return {
       ok: false,
-      profileId: normalizeOptionalString(input.githubProfile)
-        ? input.githubProfile.trim()
-        : resolveGitHubAuthSettings({
-            controlPlaneConfig: input.controlPlaneConfig,
-          }).profileId,
-      profileSource: normalizeOptionalString(input.githubProfile)
-        ? "command_flags"
-        : "project_or_global",
-      error: "Push job ended without terminal state.",
-    };
-  }
-  if (pushOutcome.job.status !== "completed") {
-    return {
-      ok: false,
-      profileId: normalizeOptionalString(input.githubProfile)
-        ? input.githubProfile.trim()
-        : resolveGitHubAuthSettings({
-            controlPlaneConfig: input.controlPlaneConfig,
-          }).profileId,
-      profileSource: normalizeOptionalString(input.githubProfile)
-        ? "command_flags"
-        : "project_or_global",
-      error: `Push job failed with status ${pushOutcome.job.status}`,
+      profileId: githubProfile.profileId,
+      profileSource: githubProfile.profileSource,
+      error: pushOutcome.error,
     };
   }
 
@@ -2870,6 +2979,86 @@ async function runDispatchPrAutomation(input: {
     run: input.run,
     pushed: true,
   });
+}
+
+function resolveDispatchPrProfileContext(input: {
+  readonly controlPlaneConfig: ControlPlaneConfig;
+  readonly githubProfile?: string;
+}): DispatchPrProfileContext {
+  const explicitGitHubProfile = normalizeOptionalString(input.githubProfile);
+  return {
+    profileId:
+      explicitGitHubProfile ??
+      resolveGitHubAuthSettings({
+        controlPlaneConfig: input.controlPlaneConfig,
+      }).profileId,
+    profileSource: explicitGitHubProfile
+      ? "command_flags"
+      : "project_or_global",
+  };
+}
+
+async function resolveDispatchPrPushPolicy(input: {
+  readonly actor: string;
+  readonly approveFlag: boolean;
+  readonly command: readonly string[];
+}): Promise<Awaited<ReturnType<typeof resolvePolicyDecision>>> {
+  const pushRisk = assessCommandRisk({
+    command: input.command,
+    runner: "generic",
+  });
+  return await resolvePolicyDecision({
+    level: pushRisk.level,
+    reasons: pushRisk.reasons,
+    requiresApproval: pushRisk.requiresApproval,
+    approveFlag: input.approveFlag,
+    actor: input.actor,
+    promptLabel: "git push for --pr",
+  });
+}
+
+async function runRemoteDispatchPushJob(input: {
+  readonly runId: string;
+  readonly client: GatewayClient;
+  readonly projectId: string;
+  readonly pushCommand: readonly string[];
+}): Promise<
+  { readonly ok: true } | { readonly ok: false; readonly error: string }
+> {
+  const createdPush = await input.client.createJob({
+    projectId: input.projectId,
+    runner: "generic",
+    command: [...input.pushCommand],
+  });
+  if (!createdPush.ok) {
+    return {
+      ok: false,
+      error: `Failed to create push job (${createdPush.status}): ${createdPush.error.message}`,
+    };
+  }
+
+  const pushOutcome = await streamRemoteJob({
+    runId: input.runId,
+    client: input.client,
+    projectId: input.projectId,
+    jobId: createdPush.data.job.jobId,
+    logsFrom: 0,
+    eventsFrom: 0,
+    printLogs: false,
+  });
+  if (!pushOutcome.job) {
+    return {
+      ok: false,
+      error: "Push job ended without terminal state.",
+    };
+  }
+  if (pushOutcome.job.status !== "completed") {
+    return {
+      ok: false,
+      error: `Push job failed with status ${pushOutcome.job.status}`,
+    };
+  }
+  return { ok: true };
 }
 
 async function runLocalDispatchPrAutomation(input: {
@@ -3663,6 +3852,7 @@ function parseEmbeddedJson(text: string): unknown {
   }
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: JSON block extraction must scan mixed stdout/stderr text while tracking nesting and string escaping safely.
 function extractFirstJsonBlock(text: string): unknown {
   let start = -1;
   for (let i = 0; i < text.length; i += 1) {
@@ -3713,6 +3903,7 @@ function extractFirstJsonBlock(text: string): unknown {
   return null;
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Run summaries intentionally fold together command context, status, artifacts, and optional PR metadata for a single durable handoff record.
 function buildSummaryMarkdown(input: {
   readonly runId: string;
   readonly runStatus: DispatchRunStatus;

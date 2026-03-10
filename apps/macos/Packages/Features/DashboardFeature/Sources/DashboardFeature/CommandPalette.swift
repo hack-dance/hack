@@ -138,6 +138,15 @@ struct CommandPaletteView: View {
       }
     )
     actions.append(
+      CommandPaletteAction(title: "Go to AWS Settings", subtitle: "AWS provider + bootstrap controls") {
+        NotificationCenter.default.post(
+          name: .hackSettingsRequested,
+          object: nil,
+          userInfo: [SettingsNavigationRequest.paneKey: SettingsSidebarItem.aws.rawValue]
+        )
+      }
+    )
+    actions.append(
       CommandPaletteAction(title: "Go to Permissions Settings", subtitle: "Automation + local network access") {
         NotificationCenter.default.post(
           name: .hackSettingsRequested,

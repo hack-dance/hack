@@ -1159,6 +1159,25 @@ public final class DashboardModel {
     }
   }
 
+  public func bootstrapAwsNode(
+    request: AwsBootstrapRequest
+  ) async -> AwsBootstrapResponse? {
+    await runActionResult(message: "Bootstrapping AWS node…") {
+      try await self.client.bootstrapAwsNode(request: request)
+    }
+  }
+
+  public func inspectAws(
+    request: AwsBootstrapRequest? = nil
+  ) async -> AwsInspectResponse? {
+    do {
+      return try await client.inspectAws(request: request)
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
   public func listNodes() async -> NodeRegistryListResponse? {
     do {
       return try await client.listNodes()

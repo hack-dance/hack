@@ -620,6 +620,7 @@ public enum NodeRegistryStatus: String, Decodable {
 public struct NodeRegistryRecord: Decodable, Identifiable, Hashable {
   public let id: String
   public let name: String
+  public let source: String?
   public let labels: [String]
   public let capabilities: [String]
   public let endpoint: String
@@ -636,6 +637,7 @@ public struct NodeRegistryRecord: Decodable, Identifiable, Hashable {
   public init(
     id: String,
     name: String,
+    source: String?,
     labels: [String],
     capabilities: [String],
     endpoint: String,
@@ -651,6 +653,7 @@ public struct NodeRegistryRecord: Decodable, Identifiable, Hashable {
   ) {
     self.id = id
     self.name = name
+    self.source = source
     self.labels = labels
     self.capabilities = capabilities
     self.endpoint = endpoint
@@ -2046,6 +2049,198 @@ public struct RailwayBootstrapResponse: Decodable, Hashable {
     self.endpoint = endpoint
     self.created = created
     self.probe = probe
+  }
+}
+
+public struct AwsBootstrapRequest: Hashable {
+  public let instanceId: String?
+  public let instanceTagKey: String?
+  public let instanceTagValue: String?
+  public let region: String?
+  public let profile: String?
+  public let bootstrapCommand: String?
+  public let source: String?
+  public let endpoint: String?
+  public let nodeName: String?
+  public let labels: [String]
+  public let defaultNode: Bool
+
+  public init(
+    instanceId: String?,
+    instanceTagKey: String?,
+    instanceTagValue: String?,
+    region: String?,
+    profile: String?,
+    bootstrapCommand: String?,
+    source: String?,
+    endpoint: String?,
+    nodeName: String?,
+    labels: [String],
+    defaultNode: Bool
+  ) {
+    self.instanceId = instanceId
+    self.instanceTagKey = instanceTagKey
+    self.instanceTagValue = instanceTagValue
+    self.region = region
+    self.profile = profile
+    self.bootstrapCommand = bootstrapCommand
+    self.source = source
+    self.endpoint = endpoint
+    self.nodeName = nodeName
+    self.labels = labels
+    self.defaultNode = defaultNode
+  }
+}
+
+public struct AwsBootstrapProviderTag: Decodable, Hashable {
+  public let key: String
+  public let value: String
+
+  public init(key: String, value: String) {
+    self.key = key
+    self.value = value
+  }
+}
+
+public struct AwsBootstrapProviderMetadata: Decodable, Hashable {
+  public let instanceId: String
+  public let region: String
+  public let profile: String?
+  public let tag: AwsBootstrapProviderTag?
+
+  public init(
+    instanceId: String,
+    region: String,
+    profile: String?,
+    tag: AwsBootstrapProviderTag?
+  ) {
+    self.instanceId = instanceId
+    self.region = region
+    self.profile = profile
+    self.tag = tag
+  }
+}
+
+public struct AwsBootstrapProbe: Decodable, Hashable {
+  public let ok: Bool
+  public let status: NodeRegistryStatus?
+  public let error: String?
+
+  public init(ok: Bool, status: NodeRegistryStatus?, error: String?) {
+    self.ok = ok
+    self.status = status
+    self.error = error
+  }
+}
+
+public struct AwsBootstrapResponse: Decodable, Hashable {
+  public let provider: String
+  public let aws: AwsBootstrapProviderMetadata
+  public let node: NodeRegistryRecord
+  public let endpoint: String
+  public let created: Bool
+  public let probe: AwsBootstrapProbe
+
+  public init(
+    provider: String,
+    aws: AwsBootstrapProviderMetadata,
+    node: NodeRegistryRecord,
+    endpoint: String,
+    created: Bool,
+    probe: AwsBootstrapProbe
+  ) {
+    self.provider = provider
+    self.aws = aws
+    self.node = node
+    self.endpoint = endpoint
+    self.created = created
+    self.probe = probe
+  }
+}
+
+public struct AwsInspectTarget: Decodable, Hashable {
+  public let resolved: Bool
+  public let instanceId: String?
+  public let state: String?
+  public let ssmOnline: Bool?
+  public let error: String?
+
+  public init(
+    resolved: Bool,
+    instanceId: String?,
+    state: String?,
+    ssmOnline: Bool?,
+    error: String?
+  ) {
+    self.resolved = resolved
+    self.instanceId = instanceId
+    self.state = state
+    self.ssmOnline = ssmOnline
+    self.error = error
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case resolved
+    case instanceId
+    case state
+    case ssmOnline
+    case error
+  }
+}
+
+public struct AwsInspectConfig: Decodable, Hashable {
+  public let instanceId: String?
+  public let instanceTagKey: String?
+  public let instanceTagValue: String?
+  public let region: String?
+  public let profile: String?
+  public let source: String?
+  public let endpoint: String?
+  public let endpointValid: Bool
+
+  public init(
+    instanceId: String?,
+    instanceTagKey: String?,
+    instanceTagValue: String?,
+    region: String?,
+    profile: String?,
+    source: String?,
+    endpoint: String?,
+    endpointValid: Bool
+  ) {
+    self.instanceId = instanceId
+    self.instanceTagKey = instanceTagKey
+    self.instanceTagValue = instanceTagValue
+    self.region = region
+    self.profile = profile
+    self.source = source
+    self.endpoint = endpoint
+    self.endpointValid = endpointValid
+  }
+}
+
+public struct AwsInspectResponse: Decodable, Hashable {
+  public let provider: String
+  public let selectorSummary: String
+  public let config: AwsInspectConfig
+  public let canBootstrap: Bool
+  public let issues: [String]
+  public let target: AwsInspectTarget?
+
+  public init(
+    provider: String,
+    selectorSummary: String,
+    config: AwsInspectConfig,
+    canBootstrap: Bool,
+    issues: [String],
+    target: AwsInspectTarget?
+  ) {
+    self.provider = provider
+    self.selectorSummary = selectorSummary
+    self.config = config
+    self.canBootstrap = canBootstrap
+    self.issues = issues
+    self.target = target
   }
 }
 

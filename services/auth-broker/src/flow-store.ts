@@ -371,6 +371,7 @@ function parsePersistedPayload(input: {
   };
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Persisted OAuth flows intentionally deserialize many optional legacy fields while rejecting malformed required state.
 function parsePersistedFlow(input: {
   readonly value: unknown;
 }): OAuthFlow | null {

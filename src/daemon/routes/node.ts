@@ -104,6 +104,7 @@ type WorkspaceLookupResult =
     }
   | { readonly kind: "skip" };
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Node route handling must dispatch multiple controller subroutes while preserving explicit error mapping.
 export async function handleNodeRoutes(opts: {
   readonly req: Request;
   readonly url: URL;

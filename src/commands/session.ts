@@ -220,6 +220,254 @@ type TailArgs = CommandArgs<
   typeof tailSpec.positionals
 >;
 
+type SessionOption = {
+  readonly value: string;
+  readonly label: string;
+  readonly hint?: string;
+};
+
+type SessionStreamContext = {
+  readonly session: string;
+  readonly target: string;
+  readonly lines: number;
+  readonly follow: boolean;
+  readonly intervalMs?: number;
+  readonly maxMs?: number;
+};
+
+function shortenHomePath(input: {
+  readonly path: string;
+  readonly home: string;
+}): string {
+  if (input.home && input.path.startsWith(input.home)) {
+    return `~${input.path.slice(input.home.length)}`;
+  }
+  return input.path;
+}
+
+function findProjectByName(input: {
+  readonly projects: readonly RegisteredProject[];
+  readonly name: string;
+}): RegisteredProject | undefined {
+  return input.projects.find((project) => project.name === input.name);
+}
+
+function buildSessionPickerOptions(input: {
+  readonly sessions: readonly TmuxSession[];
+  readonly projects: readonly RegisteredProject[];
+  readonly home: string;
+}): SessionOption[] {
+  const sessionNames = new Set(input.sessions.map((session) => session.name));
+  const availableProjects = input.projects.filter(
+    (project) => !sessionNames.has(project.name)
+  );
+  const options: SessionOption[] = [];
+
+  for (const session of input.sessions.filter((session) => session.attached)) {
+    options.push({
+      value: `session:${session.name}`,
+      label: session.name,
+      hint: `attached${session.path ? ` • ${shortenHomePath({ path: session.path, home: input.home })}` : ""}`,
+    });
+  }
+
+  for (const session of input.sessions.filter((session) => !session.attached)) {
+    options.push({
+      value: `session:${session.name}`,
+      label: session.name,
+      hint: session.path
+        ? shortenHomePath({ path: session.path, home: input.home })
+        : "detached",
+    });
+  }
+
+  for (const project of availableProjects) {
+    options.push({
+      value: `project:${project.name}`,
+      label: project.name,
+      hint: `new • ${shortenHomePath({ path: project.repoRoot, home: input.home })}`,
+    });
+  }
+
+  return options;
+}
+
+async function resolveAttachedSessionAction(input: {
+  readonly sessionName: string;
+  readonly sessions: readonly TmuxSession[];
+  readonly projects: readonly RegisteredProject[];
+}): Promise<
+  | { readonly ok: true; readonly action: "attach" }
+  | {
+      readonly ok: true;
+      readonly action: "new";
+      readonly cwd: string;
+      readonly nextNum: number;
+    }
+  | { readonly ok: true; readonly action: "cancelled" }
+> {
+  const session = input.sessions.find(
+    (candidate) => candidate.name === input.sessionName
+  );
+  if (!session?.attached) {
+    return { ok: true, action: "attach" };
+  }
+
+  const nextNum = getNextSessionNumber([...input.sessions], input.sessionName);
+  const action = await p.select({
+    message: `Session '${input.sessionName}' is attached elsewhere`,
+    options: [
+      { value: "attach", label: "Attach", hint: "detaches other clients" },
+      {
+        value: "new",
+        label: "Create new",
+        hint: `${input.sessionName}:${nextNum}`,
+      },
+    ],
+  });
+
+  if (p.isCancel(action)) {
+    p.outro("Cancelled");
+    return { ok: true, action: "cancelled" };
+  }
+
+  if (action === "attach") {
+    return { ok: true, action: "attach" };
+  }
+
+  const project = findProjectByName({
+    projects: input.projects,
+    name: input.sessionName,
+  });
+  return {
+    ok: true,
+    action: "new",
+    cwd: project?.repoRoot ?? session.path ?? process.cwd(),
+    nextNum,
+  };
+}
+
+function isJsonSessionOutput(input: {
+  readonly json: boolean;
+  readonly pretty: boolean;
+}): boolean | null {
+  if (input.json && input.pretty) {
+    process.stderr.write("Cannot combine --json with --pretty.\n");
+    return null;
+  }
+  return input.json || !input.pretty;
+}
+
+function writeSessionError(input: {
+  readonly json: boolean;
+  readonly context: SessionStreamContext;
+  readonly message: string;
+}): void {
+  if (input.json) {
+    writeSessionStreamEvent({
+      event: buildSessionStreamErrorEvent({
+        context: input.context,
+        message: input.message,
+      }),
+    });
+    writeSessionStreamEvent({
+      event: buildSessionStreamEndEvent({
+        context: input.context,
+        reason: "error",
+      }),
+    });
+    return;
+  }
+  console.error(input.message);
+}
+
+function writeSessionOutputLines(input: {
+  readonly json: boolean;
+  readonly context: SessionStreamContext;
+  readonly text: string;
+}): void {
+  if (input.json) {
+    for (const line of splitLines(input.text)) {
+      writeSessionStreamEvent({
+        event: buildSessionStreamLogEvent({ context: input.context, line }),
+      });
+    }
+    return;
+  }
+  process.stdout.write(input.text);
+}
+
+function resolveProjectForSessionStart(input: {
+  readonly projects: readonly RegisteredProject[];
+  readonly projectNameOrPath?: string;
+}): RegisteredProject | null {
+  if (!input.projectNameOrPath) {
+    return null;
+  }
+  const resolvedPath = resolve(input.projectNameOrPath);
+  return (
+    input.projects.find(
+      (project) =>
+        project.name === input.projectNameOrPath ||
+        project.projectDir === resolvedPath
+    ) ?? null
+  );
+}
+
+async function resolveSessionStartName(input: {
+  readonly baseName: string;
+  readonly forceNew: boolean;
+  readonly customName?: string;
+  readonly detach: boolean;
+  readonly runUp: boolean;
+  readonly project: RegisteredProject;
+}): Promise<
+  | { readonly ok: true; readonly sessionName: string }
+  | { readonly ok: true; readonly existingSession: string }
+> {
+  if (input.customName) {
+    return {
+      ok: true,
+      sessionName: `${input.baseName}:${input.customName}`,
+    };
+  }
+
+  const sessions = await listTmuxSessions();
+  if (!input.forceNew) {
+    const existing = sessions.find(
+      (session) => session.name === input.baseName
+    );
+    if (existing) {
+      if (input.detach) {
+        logger.info({ message: `Session ready: ${input.baseName}` });
+      } else {
+        logger.info({
+          message: `Attaching to existing session: ${input.baseName}`,
+        });
+      }
+      if (input.runUp) {
+        await runHackUp(input.project.projectDir);
+      }
+      return {
+        ok: true,
+        existingSession: input.baseName,
+      };
+    }
+  }
+
+  if (input.forceNew) {
+    return {
+      ok: true,
+      sessionName: `${input.baseName}:${getNextSessionNumber(sessions, input.baseName)}`,
+    };
+  }
+
+  return {
+    ok: true,
+    sessionName: input.baseName,
+  };
+}
+
 /**
  * Interactive session picker (default when no subcommand).
  *
@@ -231,59 +479,8 @@ async function handleSessionPicker(): Promise<number> {
   const projects = registry.projects;
 
   p.intro("Sessions");
-
-  const sessionNames = new Set(sessions.map((s) => s.name));
   const home = process.env.HOME ?? "";
-
-  // Helper to shorten paths with ~/
-  const shortenPath = (path: string): string => {
-    if (home && path.startsWith(home)) {
-      return `~${path.slice(home.length)}`;
-    }
-    return path;
-  };
-
-  // Build options for clack select
-  type SessionOption = {
-    value: string;
-    label: string;
-    hint?: string;
-  };
-
-  const options: SessionOption[] = [];
-
-  // Active sessions
-  const attachedSessions = sessions.filter((s) => s.attached);
-  const detachedSessions = sessions.filter((s) => !s.attached);
-
-  for (const session of attachedSessions) {
-    options.push({
-      value: `session:${session.name}`,
-      label: session.name,
-      hint: `attached${session.path ? ` • ${shortenPath(session.path)}` : ""}`,
-    });
-  }
-
-  for (const session of detachedSessions) {
-    options.push({
-      value: `session:${session.name}`,
-      label: session.name,
-      hint: session.path ? shortenPath(session.path) : "detached",
-    });
-  }
-
-  // Projects without active sessions
-  const availableProjects = projects.filter(
-    (proj: RegisteredProject) => !sessionNames.has(proj.name)
-  );
-
-  for (const project of availableProjects) {
-    options.push({
-      value: `project:${project.name}`,
-      label: project.name,
-      hint: `new • ${shortenPath(project.repoRoot)}`,
-    });
-  }
+  const options = buildSessionPickerOptions({ sessions, projects, home });
 
   if (options.length === 0) {
     p.log.warn(
@@ -313,44 +510,26 @@ async function handleSessionPicker(): Promise<number> {
   }
 
   if (type === "session") {
-    const session = sessions.find((s) => s.name === name);
-
-    // If session is attached elsewhere, offer choice
-    if (session?.attached) {
-      const nextNum = getNextSessionNumber(sessions, name);
-
-      const action = await p.select({
-        message: `Session '${name}' is attached elsewhere`,
-        options: [
-          { value: "attach", label: "Attach", hint: "detaches other clients" },
-          { value: "new", label: "Create new", hint: `${name}:${nextNum}` },
-        ],
+    const action = await resolveAttachedSessionAction({
+      sessionName: name,
+      sessions,
+      projects,
+    });
+    if (action.action === "cancelled") {
+      return 0;
+    }
+    if (action.action === "new") {
+      return await createAndAttachSession({
+        name: `${name}:${action.nextNum}`,
+        cwd: action.cwd,
       });
-
-      if (p.isCancel(action)) {
-        p.outro("Cancelled");
-        return 0;
-      }
-
-      if (action === "new") {
-        const project = projects.find(
-          (proj: RegisteredProject) => proj.name === name
-        );
-        const cwd = project?.repoRoot ?? session.path ?? process.cwd();
-        return await createAndAttachSession({
-          name: `${name}:${nextNum}`,
-          cwd,
-        });
-      }
     }
 
     return await attachToSession(name);
   }
 
   // Create new session for project
-  const project = projects.find(
-    (proj: RegisteredProject) => proj.name === name
-  );
+  const project = findProjectByName({ projects, name });
   if (!project) {
     p.log.error(`Project not found: ${name}`);
     return 1;
@@ -366,7 +545,7 @@ async function handleSessionPicker(): Promise<number> {
  * Get the next available session number for a base name.
  */
 function getNextSessionNumber(
-  sessions: TmuxSession[],
+  sessions: readonly TmuxSession[],
   baseName: string
 ): number {
   const existing = sessions.filter(
@@ -428,21 +607,10 @@ const handleStart = async ({
   // Find project
   const registry = await readProjectsRegistry();
   const projects = registry.projects;
-  let project = projectNameOrPath
-    ? projects.find(
-        (p: RegisteredProject) =>
-          p.name === projectNameOrPath ||
-          p.projectDir === resolve(projectNameOrPath)
-      )
-    : null;
-
-  if (!project && projectNameOrPath) {
-    // Try as path
-    const resolvedPath = resolve(projectNameOrPath);
-    project = projects.find(
-      (p: RegisteredProject) => p.projectDir === resolvedPath
-    );
-  }
+  const project = resolveProjectForSessionStart({
+    projects,
+    projectNameOrPath,
+  });
 
   if (!project) {
     if (projectNameOrPath) {
@@ -456,44 +624,21 @@ const handleStart = async ({
   }
 
   const baseName = project.name;
-  let sessionName = baseName;
-
-  if (forceNew || customName) {
-    if (customName) {
-      sessionName = `${baseName}:${customName}`;
-    } else {
-      // Find next available number
-      const sessions = await listTmuxSessions();
-      const existing = sessions.filter(
-        (s) => s.name === baseName || s.name.startsWith(`${baseName}:`)
-      );
-      if (existing.length > 0) {
-        let n = 2;
-        while (existing.some((s) => s.name === `${baseName}:${n}`)) {
-          n++;
-        }
-        sessionName = `${baseName}:${n}`;
-      }
+  const sessionPlan = await resolveSessionStartName({
+    baseName,
+    forceNew,
+    customName,
+    detach,
+    runUp,
+    project,
+  });
+  if ("existingSession" in sessionPlan) {
+    if (detach) {
+      return 0;
     }
-  } else {
-    // Check if session exists
-    const sessions = await listTmuxSessions();
-    const existing = sessions.find((s) => s.name === baseName);
-    if (existing) {
-      if (detach) {
-        logger.info({ message: `Session ready: ${baseName}` });
-      } else {
-        logger.info({ message: `Attaching to existing session: ${baseName}` });
-      }
-      if (runUp) {
-        await runHackUp(project.projectDir);
-      }
-      if (detach) {
-        return 0;
-      }
-      return await attachToSession(baseName);
-    }
+    return await attachToSession(sessionPlan.existingSession);
   }
+  const sessionName = sessionPlan.sessionName;
 
   // Run hack up if requested
   if (runUp) {
@@ -705,14 +850,15 @@ const handleTail = async ({
   const intervalMs = args.options.intervalMs ?? 500;
   const maxMs = args.options.maxMs ?? 5000;
   const pretty = args.options.pretty === true;
-  const json = args.options.json === true || !pretty;
-
-  if (json && pretty) {
-    process.stderr.write("Cannot combine --json with --pretty.\n");
+  const json = isJsonSessionOutput({
+    json: args.options.json === true,
+    pretty,
+  });
+  if (json === null) {
     return 1;
   }
 
-  const context = {
+  const context: SessionStreamContext = {
     session: sessionName,
     target,
     lines,
@@ -729,17 +875,11 @@ const handleTail = async ({
 
   const initial = await capturePane({ target, lines });
   if (initial.exitCode !== 0) {
-    const message = initial.stderr || `Failed to capture ${sessionName}`;
-    if (json) {
-      writeSessionStreamEvent({
-        event: buildSessionStreamErrorEvent({ context, message }),
-      });
-      writeSessionStreamEvent({
-        event: buildSessionStreamEndEvent({ context, reason: "error" }),
-      });
-    } else {
-      console.error(message);
-    }
+    writeSessionError({
+      json,
+      context,
+      message: initial.stderr || `Failed to capture ${sessionName}`,
+    });
     return 1;
   }
 
@@ -751,32 +891,18 @@ const handleTail = async ({
 
     const result = await capturePane({ target, lines });
     if (result.exitCode !== 0) {
-      const message = result.stderr || `Failed to capture ${sessionName}`;
-      if (json) {
-        writeSessionStreamEvent({
-          event: buildSessionStreamErrorEvent({ context, message }),
-        });
-        writeSessionStreamEvent({
-          event: buildSessionStreamEndEvent({ context, reason: "error" }),
-        });
-      } else {
-        console.error(message);
-      }
+      writeSessionError({
+        json,
+        context,
+        message: result.stderr || `Failed to capture ${sessionName}`,
+      });
       return 1;
     }
 
     const nextOutput = result.stdout;
     const suffix = diffNewLines({ previous: lastOutput, next: nextOutput });
     if (suffix) {
-      if (json) {
-        for (const line of splitLines(suffix)) {
-          writeSessionStreamEvent({
-            event: buildSessionStreamLogEvent({ context, line }),
-          });
-        }
-      } else {
-        process.stdout.write(suffix);
-      }
+      writeSessionOutputLines({ json, context, text: suffix });
     }
 
     lastOutput = nextOutput;

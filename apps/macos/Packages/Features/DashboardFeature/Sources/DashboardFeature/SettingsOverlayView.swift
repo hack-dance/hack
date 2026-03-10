@@ -19,6 +19,7 @@ enum SettingsSidebarItem: String, Hashable, Identifiable {
   case linear
   case github
   case cloudflare
+  case aws
   case railway
   case tailscale
   case certificates
@@ -52,6 +53,8 @@ enum SettingsSidebarItem: String, Hashable, Identifiable {
       return "GitHub"
     case .cloudflare:
       return "Cloudflare"
+    case .aws:
+      return "AWS"
     case .railway:
       return "Railway"
     case .tailscale:
@@ -89,6 +92,8 @@ enum SettingsSidebarItem: String, Hashable, Identifiable {
       return "chevron.left.forwardslash.chevron.right"
     case .cloudflare:
       return "cloud"
+    case .aws:
+      return "server.rack"
     case .railway:
       return "tram.fill.tunnel"
     case .tailscale:
@@ -205,6 +210,7 @@ struct SettingsOverlayView: View {
         settingsRow(.linear)
         settingsRow(.github)
         settingsRow(.cloudflare)
+        settingsRow(.aws)
         settingsRow(.railway)
         settingsRow(.tailscale)
       }
@@ -250,6 +256,8 @@ struct SettingsOverlayView: View {
         GitHubExtensionSettingsView()
       case .cloudflare:
         CloudflareExtensionSettingsView()
+      case .aws:
+        AwsExtensionSettingsView()
       case .railway:
         RailwayExtensionSettingsView()
       case .tailscale:
@@ -1808,6 +1816,381 @@ private struct CloudflareExtensionSettingsView: View {
 
   private func normalizedValue(_ value: String) -> String {
     value.trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+}
+
+private struct AwsExtensionSettingsView: View {
+  @Environment(DashboardModel.self) private var model
+  @State private var isLoadingConfig = false
+  @State private var isSavingConfig = false
+  @State private var isBootstrapping = false
+  @State private var isLoadingDiagnostics = false
+  @State private var suppressEnabledToggleChange = false
+  @State private var showAdvancedOptions = false
+  @State private var enabled = false
+  @State private var diagnostics: AwsInspectResponse? = nil
+  @State private var bootstrapResult: AwsBootstrapResponse? = nil
+  @State private var instanceId = ""
+  @State private var instanceTagKey = "Name"
+  @State private var instanceTagValue = ""
+  @State private var region = ""
+  @State private var profile = ""
+  @State private var nodeName = ""
+  @State private var source = ""
+  @State private var endpoint = ""
+  @State private var labelsCsv = "aws,linux"
+  @State private var bootstrapCommand = ""
+  @State private var defaultNode = false
+
+  var body: some View {
+    ScrollView {
+      LazyVStack(alignment: .leading, spacing: 20) {
+        SettingsSectionHeader(
+          breadcrumb: "Settings / AWS",
+          title: "AWS",
+          subtitle: "Store EC2 + SSM bootstrap defaults and register nodes without leaving the app"
+        )
+
+        GlassCard(title: "Provider status", systemImage: "server.rack") {
+          HStack(alignment: .center, spacing: 8) {
+            StatusPill(text: enabled ? "Enabled" : "Disabled", tone: enabled ? .good : .neutral)
+            StatusPill(
+              text: hasTargetSelector ? "Target configured" : "Target missing",
+              tone: hasTargetSelector ? .good : .warn
+            )
+            StatusPill(
+              text: canBootstrapAwsNode ? "Bootstrap ready" : "Needs required fields",
+              tone: canBootstrapAwsNode ? .good : .warn
+            )
+            if let diagnostics {
+              StatusPill(
+                text: diagnostics.target?.resolved == true ? "Instance resolved" : "Instance unresolved",
+                tone: diagnostics.target?.resolved == true ? .good : .warn
+              )
+              StatusPill(
+                text: diagnostics.target?.ssmOnline == true ? "SSM online" : "SSM offline",
+                tone: diagnostics.target?.ssmOnline == true ? .good : .warn
+              )
+            }
+            Spacer()
+            Toggle("Enabled", isOn: $enabled)
+              .labelsHidden()
+              .toggleStyle(.switch)
+              .onChange(of: enabled) { _, newValue in
+                guard !suppressEnabledToggleChange else { return }
+                Task { await applyAwsEnabledToggle(newValue) }
+              }
+            if isLoadingConfig || isSavingConfig || isBootstrapping || isLoadingDiagnostics {
+              ProgressView()
+                .controlSize(.small)
+            }
+          }
+
+          Text("This page saves defaults for controlPlane.extensions[\"dance.hack.aws\"] and calls the built-in `hack node provider aws bootstrap` flow.")
+            .font(.mono(.caption2))
+            .foregroundStyle(.secondary)
+
+          if !hasExclusiveTargetSelector {
+            Text("Choose exactly one selector: instance id or tag value.")
+              .font(.mono(.caption2))
+              .foregroundStyle(Color.orange)
+          }
+          if let diagnostics {
+            Text("selector: \(diagnostics.selectorSummary)")
+              .font(.mono(.caption2))
+              .foregroundStyle(.secondary)
+              .textSelection(.enabled)
+            if let instanceId = diagnostics.target?.instanceId {
+              Text("instance: \(instanceId)")
+                .font(.mono(.caption2))
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+            }
+            if !diagnostics.issues.isEmpty {
+              ForEach(diagnostics.issues, id: \.self) { issue in
+                Text(issue)
+                  .font(.mono(.caption2))
+                  .foregroundStyle(Color.orange)
+              }
+            }
+          }
+
+          HStack(spacing: 10) {
+            Button {
+              Task { await refreshAwsDiagnostics() }
+            } label: {
+              Label("Refresh diagnostics", systemImage: "arrow.clockwise")
+            }
+            .adaptiveToolbarButton()
+            .disabled(isLoadingDiagnostics || isBootstrapping)
+
+            Spacer()
+          }
+        }
+
+        GlassCard(title: "Bootstrap configuration", systemImage: "gearshape.2") {
+          VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+              TextField("Region", text: $region)
+                .textFieldStyle(.roundedBorder)
+              TextField("Profile (optional)", text: $profile)
+                .textFieldStyle(.roundedBorder)
+              Toggle("Set as default after bootstrap", isOn: $defaultNode)
+                .font(.mono(.caption))
+            }
+
+            HStack(spacing: 10) {
+              TextField("Instance id", text: $instanceId)
+                .textFieldStyle(.roundedBorder)
+              TextField("Tag key", text: $instanceTagKey)
+                .textFieldStyle(.roundedBorder)
+              TextField("Tag value", text: $instanceTagValue)
+                .textFieldStyle(.roundedBorder)
+            }
+
+            HStack(spacing: 10) {
+              TextField("SSH source", text: $source)
+                .textFieldStyle(.roundedBorder)
+              TextField("Gateway endpoint", text: $endpoint)
+                .textFieldStyle(.roundedBorder)
+            }
+
+            HStack(spacing: 10) {
+              TextField("Node display name", text: $nodeName)
+                .textFieldStyle(.roundedBorder)
+              TextField("Labels (comma-separated)", text: $labelsCsv)
+                .textFieldStyle(.roundedBorder)
+            }
+
+            HStack(spacing: 10) {
+              Button {
+                Task { await saveAwsDefaults() }
+              } label: {
+                Label("Save defaults", systemImage: "square.and.arrow.down")
+              }
+              .adaptiveToolbarButtonProminent()
+              .disabled(isSavingConfig || isBootstrapping)
+
+              Button {
+                Task { await bootstrapAwsNode() }
+              } label: {
+                Label("Bootstrap node now", systemImage: "play.fill")
+              }
+              .adaptiveToolbarButton()
+              .disabled(isBootstrapping || !canBootstrapAwsNode)
+
+              Button {
+                openGlobalCommandInTerminalPanel(
+                  command: "hack node provider aws bootstrap --help",
+                  title: "hack aws bootstrap help"
+                )
+              } label: {
+                Label("Open CLI help", systemImage: "questionmark.circle")
+              }
+              .adaptiveToolbarButton()
+
+              Button {
+                openTopologySettings()
+              } label: {
+                Label("Open topology", systemImage: "point.3.connected.trianglepath.dotted")
+              }
+              .adaptiveToolbarButton()
+
+              Spacer()
+            }
+
+            DisclosureGroup("Advanced options", isExpanded: $showAdvancedOptions) {
+              VStack(alignment: .leading, spacing: 10) {
+                TextField("Bootstrap command (optional)", text: $bootstrapCommand)
+                  .textFieldStyle(.roundedBorder)
+                Text("Use this for host prep such as starting a systemd unit before `hack node init` runs.")
+                  .font(.mono(.caption2))
+                  .foregroundStyle(.secondary)
+              }
+              .padding(.top, 8)
+            }
+          }
+        }
+
+        if let bootstrapResult {
+          GlassCard(title: "Latest bootstrap result", systemImage: "checkmark.seal") {
+            HStack(alignment: .center, spacing: 8) {
+              StatusPill(
+                text: bootstrapResult.created ? "Node registered" : "Node updated",
+                tone: .good
+              )
+              StatusPill(
+                text: bootstrapResult.probe.ok ? "Probe healthy" : "Probe failed",
+                tone: bootstrapResult.probe.ok ? .good : .warn
+              )
+              StatusPill(text: bootstrapResult.aws.region, tone: .neutral)
+              Spacer()
+            }
+            Text("Instance: \(bootstrapResult.aws.instanceId)")
+              .font(.mono(.caption))
+              .foregroundStyle(.secondary)
+              .textSelection(.enabled)
+            Text("Node: \(bootstrapResult.node.name) (\(bootstrapResult.node.id))")
+              .font(.mono(.caption))
+              .foregroundStyle(.secondary)
+              .textSelection(.enabled)
+            Text("Endpoint: \(bootstrapResult.endpoint)")
+              .font(.mono(.caption))
+              .foregroundStyle(.secondary)
+              .textSelection(.enabled)
+            if let error = bootstrapResult.probe.error, !error.isEmpty {
+              Text(error)
+                .font(.mono(.caption2))
+                .foregroundStyle(Color.orange)
+            }
+          }
+        }
+      }
+      .padding(16)
+    }
+    .task {
+      await loadAwsConfigFromDisk()
+    }
+  }
+
+  private var hasTargetSelector: Bool {
+    normalizedOrNil(instanceId) != nil || normalizedOrNil(instanceTagValue) != nil
+  }
+
+  private var hasExclusiveTargetSelector: Bool {
+    (normalizedOrNil(instanceId) != nil ? 1 : 0) + (normalizedOrNil(instanceTagValue) != nil ? 1 : 0) == 1
+  }
+
+  private var canBootstrapAwsNode: Bool {
+    hasExclusiveTargetSelector
+      && normalizedOrNil(region) != nil
+      && normalizedOrNil(source) != nil
+      && normalizedOrNil(endpoint) != nil
+  }
+
+  private func loadAwsConfigFromDisk() async {
+    isLoadingConfig = true
+    defer { isLoadingConfig = false }
+
+    let snapshot = GlobalConfigSnapshot.load()
+    suppressEnabledToggleChange = true
+    enabled = snapshot.awsExtensionEnabled ?? false
+    suppressEnabledToggleChange = false
+    instanceId = snapshot.awsInstanceId ?? ""
+    instanceTagKey = snapshot.awsInstanceTagKey ?? "Name"
+    instanceTagValue = snapshot.awsInstanceTagValue ?? ""
+    region = snapshot.awsRegion ?? ""
+    profile = snapshot.awsProfile ?? ""
+    nodeName = snapshot.awsNodeName ?? ""
+    source = snapshot.awsSource ?? ""
+    endpoint = snapshot.awsEndpoint ?? ""
+    labelsCsv = snapshot.awsLabelsCsv ?? "aws,linux"
+    bootstrapCommand = snapshot.awsBootstrapCommand ?? ""
+    await refreshAwsDiagnostics()
+  }
+
+  private func applyAwsEnabledToggle(_ isEnabled: Bool) async {
+    isSavingConfig = true
+    defer { isSavingConfig = false }
+
+    let didUpdate = await model.setGlobalConfig(
+      key: "controlPlane.extensions[\"dance.hack.aws\"].enabled",
+      value: isEnabled ? "true" : "false"
+    )
+    guard didUpdate else {
+      await loadAwsConfigFromDisk()
+      return
+    }
+    await loadAwsConfigFromDisk()
+  }
+
+  private func refreshAwsDiagnostics() async {
+    isLoadingDiagnostics = true
+    defer { isLoadingDiagnostics = false }
+    diagnostics = await model.inspectAws(
+      request: AwsBootstrapRequest(
+        instanceId: normalizedOrNil(instanceId),
+        instanceTagKey: normalizedOrNil(instanceTagKey),
+        instanceTagValue: normalizedOrNil(instanceTagValue),
+        region: normalizedOrNil(region),
+        profile: normalizedOrNil(profile),
+        bootstrapCommand: normalizedOrNil(bootstrapCommand),
+        source: normalizedOrNil(source),
+        endpoint: normalizedOrNil(endpoint),
+        nodeName: normalizedOrNil(nodeName),
+        labels: parseCSV(labelsCsv),
+        defaultNode: defaultNode
+      )
+    )
+  }
+
+  private func saveAwsDefaults() async {
+    isSavingConfig = true
+    defer { isSavingConfig = false }
+
+    let writes: [(String, String)] = [
+      ("controlPlane.extensions[\"dance.hack.aws\"].enabled", enabled ? "true" : "false"),
+      ("controlPlane.extensions[\"dance.hack.aws\"].config.instanceId", instanceId),
+      ("controlPlane.extensions[\"dance.hack.aws\"].config.instanceTagKey", instanceTagKey),
+      ("controlPlane.extensions[\"dance.hack.aws\"].config.instanceTagValue", instanceTagValue),
+      ("controlPlane.extensions[\"dance.hack.aws\"].config.region", region),
+      ("controlPlane.extensions[\"dance.hack.aws\"].config.profile", profile),
+      ("controlPlane.extensions[\"dance.hack.aws\"].config.nodeName", nodeName),
+      ("controlPlane.extensions[\"dance.hack.aws\"].config.source", source),
+      ("controlPlane.extensions[\"dance.hack.aws\"].config.endpoint", endpoint),
+      ("controlPlane.extensions[\"dance.hack.aws\"].config.labelsCsv", labelsCsv),
+      ("controlPlane.extensions[\"dance.hack.aws\"].config.bootstrapCommand", bootstrapCommand),
+    ]
+
+    for (key, value) in writes {
+      _ = await model.setGlobalConfig(key: key, value: value)
+    }
+
+    await loadAwsConfigFromDisk()
+  }
+
+  private func bootstrapAwsNode() async {
+    guard canBootstrapAwsNode else {
+      return
+    }
+    isBootstrapping = true
+    defer { isBootstrapping = false }
+
+    let request = AwsBootstrapRequest(
+      instanceId: normalizedOrNil(instanceId),
+      instanceTagKey: normalizedOrNil(instanceTagKey),
+      instanceTagValue: normalizedOrNil(instanceTagValue),
+      region: normalizedOrNil(region),
+      profile: normalizedOrNil(profile),
+      bootstrapCommand: normalizedOrNil(bootstrapCommand),
+      source: normalizedOrNil(source),
+      endpoint: normalizedOrNil(endpoint),
+      nodeName: normalizedOrNil(nodeName),
+      labels: parseCSV(labelsCsv),
+      defaultNode: defaultNode
+    )
+    bootstrapResult = await model.bootstrapAwsNode(request: request)
+    await refreshAwsDiagnostics()
+  }
+
+  private func normalizedOrNil(_ value: String) -> String? {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
+  }
+
+  private func parseCSV(_ value: String) -> [String] {
+    value
+      .split(separator: ",")
+      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .filter { !$0.isEmpty }
+  }
+
+  private func openTopologySettings() {
+    NotificationCenter.default.post(
+      name: .hackSettingsRequested,
+      object: nil,
+      userInfo: [SettingsNavigationRequest.paneKey: SettingsSidebarItem.topology.rawValue]
+    )
   }
 }
 
@@ -5867,6 +6250,7 @@ private struct GlobalConfigSnapshot {
   let linearExtensionEnabled: Bool?
   let githubExtensionEnabled: Bool?
   let cloudflareExtensionEnabled: Bool?
+  let awsExtensionEnabled: Bool?
   let railwayExtensionEnabled: Bool?
   let tailscaleExtensionEnabled: Bool?
   let linearDefaultProfile: String?
@@ -5875,6 +6259,16 @@ private struct GlobalConfigSnapshot {
   let linearSyncDependencies: Bool?
   let linearSyncProjects: Bool?
   let githubDefaultProfile: String?
+  let awsInstanceId: String?
+  let awsInstanceTagKey: String?
+  let awsInstanceTagValue: String?
+  let awsRegion: String?
+  let awsProfile: String?
+  let awsBootstrapCommand: String?
+  let awsSource: String?
+  let awsEndpoint: String?
+  let awsNodeName: String?
+  let awsLabelsCsv: String?
   let railwayProject: String?
   let railwayService: String?
   let railwayEnvironment: String?
@@ -5939,12 +6333,14 @@ private struct GlobalConfigSnapshot {
     let linearExt = dictionary(extensions, key: "dance.hack.linear")
     let githubExt = dictionary(extensions, key: "dance.hack.github")
     let cloudflareExt = dictionary(extensions, key: "dance.hack.cloudflare")
+    let awsExt = dictionary(extensions, key: "dance.hack.aws")
     let railwayExt = dictionary(extensions, key: "dance.hack.railway")
     let tailscaleExt = dictionary(extensions, key: "dance.hack.tailscale")
     let linearConfig = dictionary(linearExt, key: "config")
     let linearSync = dictionary(linearConfig, key: "sync")
     let githubConfig = dictionary(githubExt, key: "config")
     let cloudflareConfig = dictionary(cloudflareExt, key: "config")
+    let awsConfig = dictionary(awsExt, key: "config")
     let railwayConfig = dictionary(railwayExt, key: "config")
     let tailscaleConfig = dictionary(tailscaleExt, key: "config")
 
@@ -5953,6 +6349,7 @@ private struct GlobalConfigSnapshot {
       linearExtensionEnabled: linearExt["enabled"] as? Bool,
       githubExtensionEnabled: githubExt["enabled"] as? Bool,
       cloudflareExtensionEnabled: cloudflareExt["enabled"] as? Bool,
+      awsExtensionEnabled: awsExt["enabled"] as? Bool,
       railwayExtensionEnabled: railwayExt["enabled"] as? Bool,
       tailscaleExtensionEnabled: tailscaleExt["enabled"] as? Bool,
       linearDefaultProfile: linearConfig["defaultProfile"] as? String,
@@ -5961,6 +6358,16 @@ private struct GlobalConfigSnapshot {
       linearSyncDependencies: linearSync["dependencies"] as? Bool,
       linearSyncProjects: linearSync["projects"] as? Bool,
       githubDefaultProfile: githubConfig["defaultProfile"] as? String,
+      awsInstanceId: awsConfig["instanceId"] as? String,
+      awsInstanceTagKey: awsConfig["instanceTagKey"] as? String,
+      awsInstanceTagValue: awsConfig["instanceTagValue"] as? String,
+      awsRegion: awsConfig["region"] as? String,
+      awsProfile: awsConfig["profile"] as? String,
+      awsBootstrapCommand: awsConfig["bootstrapCommand"] as? String,
+      awsSource: awsConfig["source"] as? String,
+      awsEndpoint: awsConfig["endpoint"] as? String,
+      awsNodeName: awsConfig["nodeName"] as? String,
+      awsLabelsCsv: awsConfig["labelsCsv"] as? String,
       railwayProject: railwayConfig["project"] as? String,
       railwayService: railwayConfig["service"] as? String,
       railwayEnvironment: railwayConfig["environment"] as? String,
@@ -5998,6 +6405,7 @@ private struct GlobalConfigSnapshot {
       linearExtensionEnabled: nil,
       githubExtensionEnabled: nil,
       cloudflareExtensionEnabled: nil,
+      awsExtensionEnabled: nil,
       railwayExtensionEnabled: nil,
       tailscaleExtensionEnabled: nil,
       linearDefaultProfile: nil,
@@ -6006,6 +6414,16 @@ private struct GlobalConfigSnapshot {
       linearSyncDependencies: nil,
       linearSyncProjects: nil,
       githubDefaultProfile: nil,
+      awsInstanceId: nil,
+      awsInstanceTagKey: nil,
+      awsInstanceTagValue: nil,
+      awsRegion: nil,
+      awsProfile: nil,
+      awsBootstrapCommand: nil,
+      awsSource: nil,
+      awsEndpoint: nil,
+      awsNodeName: nil,
+      awsLabelsCsv: nil,
       railwayProject: nil,
       railwayService: nil,
       railwayEnvironment: nil,

@@ -842,6 +842,8 @@ struct ProjectDetailView: View {
       .padding(16)
       .background(projectSettingsCardBackground)
 
+      explicitRemoteActionsCard
+
       linearRoutingSummaryCard
 
       if let projectSystemGitIdentity {
@@ -973,6 +975,83 @@ struct ProjectDetailView: View {
     .task(id: resolvedLinearRoutingProfileId ?? "") {
       await loadLinearRoutingProjectOptionsIfNeeded()
     }
+  }
+
+  private var explicitRemoteActionsCard: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      HStack(alignment: .top, spacing: 12) {
+        VStack(alignment: .leading, spacing: 4) {
+          Text("Explicit remote actions")
+            .font(.system(size: 15, weight: .semibold))
+          Text("Project settings above are defaults. These actions let you use a remote node without changing the saved default behavior.")
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(.secondary)
+        }
+        Spacer()
+      }
+
+      HStack(alignment: .center, spacing: 8) {
+        StatusPill(
+          text: executionMode == .local ? "Default: local" : "Default: \(executionMode.title)",
+          tone: executionMode == .local ? .neutral : .good
+        )
+        StatusPill(
+          text: explicitRemoteActionNode?.name ?? "No remote node selected",
+          tone: explicitRemoteActionNode == nil ? .warn : .good
+        )
+        StatusPill(
+          text: explicitRemoteActionHasSource ? "Source-backed" : "No SSH source",
+          tone: explicitRemoteActionHasSource ? .good : .warn
+        )
+        Spacer()
+      }
+
+      HStack(spacing: 10) {
+        Button {
+          openExplicitRemoteRun()
+        } label: {
+          Label("Run on remote once", systemImage: "play.fill")
+        }
+        .adaptiveToolbarButtonProminent()
+        .disabled(explicitRemoteActionNode == nil)
+
+        Button {
+          openExplicitRemoteDevcontainer()
+        } label: {
+          Label("Start devcontainer", systemImage: "shippingbox.circle")
+        }
+        .adaptiveToolbarButton()
+        .disabled(!explicitRemoteActionHasSource)
+
+        Button {
+          openExplicitRemoteNodeStatus()
+        } label: {
+          Label("Inspect node", systemImage: "stethoscope")
+        }
+        .adaptiveToolbarButton()
+        .disabled(explicitRemoteActionNode == nil)
+
+        Button {
+          NotificationCenter.default.post(
+            name: .hackSettingsRequested,
+            object: nil,
+            userInfo: [SettingsNavigationRequest.paneKey: SettingsSidebarItem.topology.rawValue]
+          )
+        } label: {
+          Label("Open topology", systemImage: "point.3.connected.trianglepath.dotted")
+        }
+        .adaptiveToolbarButton()
+
+        Spacer()
+      }
+
+      Text(explicitRemoteActionFootnote)
+        .font(.system(size: 12, weight: .medium, design: .monospaced))
+        .foregroundStyle(.secondary)
+        .textSelection(.enabled)
+    }
+    .padding(16)
+    .background(projectSettingsCardBackground)
   }
 
   private var defaultLinearRouteTarget: LinearProjectBindingTarget? {
@@ -1710,6 +1789,41 @@ struct ProjectDetailView: View {
       return "Inherited (\(defaultNode.name))"
     }
     return "Inherited (\(inheritedDefaultNodeId))"
+  }
+
+  private var dispatchProjectSelector: String {
+    let candidate = (project.projectId ?? project.name).trimmingCharacters(in: .whitespacesAndNewlines)
+    if !candidate.isEmpty {
+      return candidate
+    }
+    return project.name
+  }
+
+  private var explicitRemoteActionNode: NodeRegistryRecord? {
+    let selectedNodeId = executionTargetNodeId.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !selectedNodeId.isEmpty {
+      return executionTargetNodes.first(where: { $0.id == selectedNodeId })
+    }
+    let defaultNodeId = executionDefaultNodeId.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !defaultNodeId.isEmpty {
+      return executionTargetNodes.first(where: { $0.id == defaultNodeId })
+    }
+    return executionTargetNodes.first(where: { $0.isDefault == true })
+  }
+
+  private var explicitRemoteActionHasSource: Bool {
+    let source = explicitRemoteActionNode?.source?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return !source.isEmpty
+  }
+
+  private var explicitRemoteActionFootnote: String {
+    guard let node = explicitRemoteActionNode else {
+      return "Pick a remote node above or from Topology to enable one-off remote actions."
+    }
+    if explicitRemoteActionHasSource {
+      return "Using \(node.name) with SSH source \(node.source ?? "")."
+    }
+    return "Using \(node.name). Add SSH source metadata if you want source-backed flows like devcontainer attach."
   }
 
   private var selectedGitSummary: String {
@@ -3852,6 +3966,42 @@ struct ProjectDetailView: View {
       return "''"
     }
     return "'\(value.replacingOccurrences(of: "'", with: "'\"'\"'"))'"
+  }
+
+  private func openExplicitRemoteRun() {
+    guard let node = explicitRemoteActionNode else {
+      return
+    }
+    let command = [
+      "hack dispatch run",
+      "--project \(shellQuote(dispatchProjectSelector))",
+      "--node \(shellQuote(node.id))",
+      "--target remote",
+      "--runner generic",
+      "--",
+      "sh -lc \(shellQuote("pwd && uname -a"))",
+    ].joined(separator: " ")
+    openTerminal(kind: .shell, command: command, title: "remote run")
+  }
+
+  private func openExplicitRemoteDevcontainer() {
+    guard let node = explicitRemoteActionNode, explicitRemoteActionHasSource else {
+      return
+    }
+    let command = [
+      "hack node devcontainer up",
+      "--node \(shellQuote(node.id))",
+      "--project \(shellQuote(dispatchProjectSelector))",
+    ].joined(separator: " ")
+    openTerminal(kind: .shell, command: command, title: "remote devcontainer")
+  }
+
+  private func openExplicitRemoteNodeStatus() {
+    guard let node = explicitRemoteActionNode else {
+      return
+    }
+    let command = "hack node status --node \(shellQuote(node.id)) --json"
+    openTerminal(kind: .shell, command: command, title: "node status")
   }
 
 }

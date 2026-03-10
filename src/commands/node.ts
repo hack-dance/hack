@@ -129,6 +129,14 @@ const optBundle = defineOption({
   description: "Enrollment bundle path, or - for stdin",
 } as const);
 
+const optAuthRef = defineOption({
+  name: "authRef",
+  type: "string",
+  long: "--auth-ref",
+  valueHint: "<ref>",
+  description: "Stored auth token reference (supports env:NAME)",
+} as const);
+
 const optSource = defineOption({
   name: "source",
   type: "string",
@@ -431,6 +439,15 @@ const addSpec = defineCommand({
   subcommands: [],
 } as const);
 
+const ensureSpec = defineCommand({
+  name: "ensure",
+  summary: "Ensure a local node registration exists for this host",
+  group: "Extensions",
+  options: [optAuthRef, optName, optEndpoint, optLabels, optDefault, optJson],
+  positionals: [],
+  subcommands: [],
+} as const);
+
 const pairSpec = defineCommand({
   name: "pair",
   summary: "Pair node with one-command or expiring verification-code flow",
@@ -580,6 +597,24 @@ const sshSetupSpec = defineCommand({
   summary: "Install and verify passwordless SSH access for a node source",
   group: "Extensions",
   options: [optSource, optNode, optSshPort, optJson],
+  positionals: [],
+  subcommands: [],
+} as const);
+
+const authSpec = defineCommand({
+  name: "auth",
+  summary: "Verify and inspect node auth state",
+  group: "Extensions",
+  options: [],
+  positionals: [],
+  subcommands: [],
+} as const);
+
+const authVerifySpec = defineCommand({
+  name: "verify",
+  summary: "Verify the stored auth token for a node",
+  group: "Extensions",
+  options: [optNode, optAuthRef, optJson],
   positionals: [],
   subcommands: [],
 } as const);
@@ -788,6 +823,10 @@ type InitArgs = CommandArgs<
   typeof initSpec.positionals
 >;
 type AddArgs = CommandArgs<typeof addSpec.options, typeof addSpec.positionals>;
+type EnsureArgs = CommandArgs<
+  typeof ensureSpec.options,
+  typeof ensureSpec.positionals
+>;
 type PairArgs = CommandArgs<
   typeof pairSpec.options,
   typeof pairSpec.positionals
@@ -827,6 +866,10 @@ type PairFulfillArgs = CommandArgs<
 type SshSetupArgs = CommandArgs<
   typeof sshSetupSpec.options,
   typeof sshSetupSpec.positionals
+>;
+type AuthVerifyArgs = CommandArgs<
+  typeof authVerifySpec.options,
+  typeof authVerifySpec.positionals
 >;
 type ListArgs = CommandArgs<
   typeof listSpec.options,
@@ -908,6 +951,7 @@ export const nodeCommand = withHandler(
     ...nodeSpec,
     subcommands: [
       withHandler(initSpec, handleNodeInit),
+      withHandler(ensureSpec, handleNodeEnsure),
       withHandler(
         defineCommand({
           ...pairSpec,
@@ -937,6 +981,20 @@ export const nodeCommand = withHandler(
               "hack node ssh setup --source <user@host> [--ssh-port <port>]",
               "hack node ssh setup --node <id>",
             ],
+          });
+          return 0;
+        }
+      ),
+      withHandler(
+        defineCommand({
+          ...authSpec,
+          subcommands: [withHandler(authVerifySpec, handleNodeAuthVerify)],
+        } as const),
+        async () => {
+          await display.panel({
+            title: "Node auth commands",
+            tone: "info",
+            lines: ["hack node auth verify --node <id> [--auth-ref <ref>]"],
           });
           return 0;
         }
@@ -1062,6 +1120,7 @@ export const nodeCommand = withHandler(
       tone: "info",
       lines: [
         "hack node init --name <name> --endpoint <url>",
+        "hack node ensure --auth-ref <ref> [--name <name>] [--default]",
         "hack node pair --host <host> [--name <name>] [--labels a,b] [--default]",
         "hack node pair --source <user@host> --endpoint <url> [--name <name>] [--labels a,b] [--default]",
         "hack node pair request --controller <user@host> --source <user@host> [--endpoint <url>]",
@@ -1069,6 +1128,7 @@ export const nodeCommand = withHandler(
         "hack node pair list [--status pending|consumed|cancelled|expired|all]",
         "hack node pair fulfill --session <id> --code <code> [--default]",
         "hack node ssh setup --source <user@host> [--ssh-port <port>]",
+        "hack node auth verify --node <id> [--auth-ref <ref>]",
         "hack node add --bundle <file|->",
         "hack node list",
         "hack node status [--node <id>] [--watch]",
@@ -1228,6 +1288,122 @@ async function handleNodeAdd({
     });
   }
   return 0;
+}
+
+async function handleNodeEnsure({
+  args,
+}: {
+  readonly ctx: CliContext;
+  readonly args: EnsureArgs;
+}): Promise<number> {
+  const authRef = (args.options.authRef ?? "").trim();
+  if (!authRef) {
+    logger.error({ message: "Missing --auth-ref <ref>." });
+    return 1;
+  }
+  const name = (args.options.name ?? hostname()).trim();
+  if (!name) {
+    logger.error({ message: "Missing node name. Pass --name." });
+    return 1;
+  }
+
+  const gateway = await resolveGatewayConfig();
+  if (!gateway.config.enabled) {
+    logger.error({
+      message:
+        "Gateway is not enabled on this host. Run `hack gateway enable` in a project first.",
+    });
+    return 1;
+  }
+
+  const endpointRaw =
+    args.options.endpoint?.trim() ||
+    buildDefaultEndpoint({
+      bind: gateway.config.bind,
+      port: gateway.config.port,
+    });
+  const endpoint = endpointRaw.replace(TRAILING_SLASH_PATTERN, "");
+  if (!isHttpUrl(endpoint)) {
+    logger.error({ message: "Invalid --endpoint. Expected http(s) URL." });
+    return 1;
+  }
+
+  const registry = await readNodesRegistry();
+  const existing =
+    registry.nodes.find((node) => node.authRef === authRef) ?? null;
+  const prepared = await upsertNodeRecord({
+    id: existing?.id,
+    name,
+    source: existing?.source,
+    labels:
+      args.options.labels !== undefined
+        ? parseCsv(args.options.labels)
+        : (existing?.labels ?? []),
+    capabilities: existing?.capabilities ?? [...DEFAULT_NODE_CAPABILITIES],
+    endpoint,
+    authRef,
+    status: existing?.status ?? "unknown",
+    version: existing?.version,
+    platform: existing?.platform,
+    arch: existing?.arch,
+  });
+
+  let mintedToken: string | undefined;
+  let verification = await verifyNodeAuth({
+    node: prepared.node,
+  });
+  if (!(verification.ok || verification.state === "unreachable")) {
+    const issued = await issueNodeAuthToken({
+      authRef,
+      name,
+    });
+    if (!issued.ok) {
+      logger.error({ message: issued.error });
+      return 1;
+    }
+    mintedToken = issued.token;
+    verification = await verifyNodeAuth({
+      node: prepared.node,
+    });
+  }
+
+  if (args.options.defaultNode === true) {
+    await setDefaultNode({ id: prepared.node.id });
+  }
+
+  const ok = verification.ok;
+  const nodeForOutput = verification.ok ? verification.node : prepared.node;
+  const payload = {
+    ok,
+    created: prepared.created,
+    node: nodeForOutput,
+    probe: {
+      ok,
+      state: verification.state,
+      ...(verification.ok ? {} : { error: verification.error }),
+    },
+    ...(mintedToken ? { token: mintedToken } : {}),
+  };
+
+  if (args.options.json) {
+    process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+    return ok ? 0 : 1;
+  }
+
+  await display.kv({
+    title: prepared.created ? "Node ensured" : "Node reused",
+    entries: [
+      ["id", nodeForOutput.id],
+      ["name", nodeForOutput.name],
+      ["endpoint", nodeForOutput.endpoint],
+      ["status", verification.state],
+      ["default", args.options.defaultNode ? "yes" : "no"],
+    ],
+  });
+  if (!(ok || !verification.error)) {
+    logger.error({ message: verification.error });
+  }
+  return ok ? 0 : 1;
 }
 
 async function handleNodePair({
@@ -2514,6 +2690,58 @@ async function handleNodeStatus({
     }
     await Bun.sleep(2000);
   }
+}
+
+async function handleNodeAuthVerify({
+  args,
+}: {
+  readonly ctx: CliContext;
+  readonly args: AuthVerifyArgs;
+}): Promise<number> {
+  const nodeId = (args.options.node ?? "").trim();
+  if (!nodeId) {
+    logger.error({ message: "Missing --node <id>." });
+    return 1;
+  }
+  const registry = await readNodesRegistry();
+  const node = registry.nodes.find((candidate) => candidate.id === nodeId);
+  if (!node) {
+    logger.error({ message: `Unknown node id: ${nodeId}` });
+    return 1;
+  }
+
+  const verification = await verifyNodeAuth({
+    node,
+    authRef: args.options.authRef,
+  });
+  const nodeForOutput = verification.ok ? verification.node : node;
+  const payload = {
+    ok: verification.ok,
+    state: verification.state,
+    authRef: verification.authRef,
+    node: nodeForOutput,
+    ...(verification.ok ? {} : { error: verification.error }),
+  };
+
+  if (args.options.json) {
+    process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+    return verification.ok ? 0 : 1;
+  }
+
+  await display.kv({
+    title: verification.ok ? "Node auth verified" : "Node auth failed",
+    entries: [
+      ["id", nodeForOutput.id],
+      ["name", nodeForOutput.name],
+      ["state", verification.state],
+      ["auth_ref", verification.authRef],
+      ["endpoint", nodeForOutput.endpoint],
+    ],
+  });
+  if (!(verification.ok || !verification.error)) {
+    logger.error({ message: verification.error });
+  }
+  return verification.ok ? 0 : 1;
 }
 
 type NodeStatusSnapshot = Awaited<ReturnType<typeof probeNode>>;
@@ -5040,6 +5268,128 @@ export const __testOnlyNodeStatus = {
   clearNodeAuthLookupCache,
 };
 
+type NodeAuthVerificationResult =
+  | {
+      readonly ok: true;
+      readonly state: "ok";
+      readonly authRef: string;
+      readonly node: NodeRecord;
+      readonly payload: Record<string, unknown>;
+    }
+  | {
+      readonly ok: false;
+      readonly state: "missing_token" | "invalid_token" | "unreachable";
+      readonly authRef: string;
+      readonly node: NodeRecord;
+      readonly error: string;
+    };
+
+async function verifyNodeAuth(input: {
+  readonly node: NodeRecord;
+  readonly authRef?: string;
+}): Promise<NodeAuthVerificationResult> {
+  const authRef = (input.authRef ?? input.node.authRef).trim();
+  if (!authRef) {
+    return {
+      ok: false,
+      state: "missing_token",
+      authRef,
+      node: input.node,
+      error: "Missing auth token reference.",
+    };
+  }
+
+  const tokenLookup = await resolveNodeAuthLookup({ authRef });
+  if (!tokenLookup.ok) {
+    return {
+      ok: false,
+      state: "missing_token",
+      authRef,
+      node: input.node,
+      error: tokenLookup.error,
+    };
+  }
+  if (!tokenLookup.token) {
+    return {
+      ok: false,
+      state: "missing_token",
+      authRef,
+      node: input.node,
+      error: `Missing auth token for ${authRef}`,
+    };
+  }
+
+  try {
+    const res = await fetchWithTimeout({
+      url: `${input.node.endpoint}/v1/node/status`,
+      timeoutMs: NODE_PREFLIGHT_HTTP_TIMEOUT_MS,
+      init: {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${tokenLookup.token}`,
+        },
+      },
+    });
+    if (!res.ok) {
+      if (res.status === 401 || res.status === 403) {
+        clearNodeAuthLookupCache({ authRef });
+        return {
+          ok: false,
+          state: "invalid_token",
+          authRef,
+          node: input.node,
+          error: `HTTP ${res.status}`,
+        };
+      }
+      return {
+        ok: false,
+        state: "unreachable",
+        authRef,
+        node: input.node,
+        error: `HTTP ${res.status}`,
+      };
+    }
+
+    const payload = (await res.json()) as Record<string, unknown>;
+    const nodeObj = isRecord(payload.node) ? payload.node : {};
+    const version = getOptionalString(nodeObj.version);
+    const platform = getOptionalString(nodeObj.platform);
+    const arch = getOptionalString(nodeObj.arch);
+    const upserted = await upsertNodeRecord({
+      id: input.node.id,
+      name: input.node.name,
+      source: input.node.source,
+      labels: input.node.labels,
+      capabilities: input.node.capabilities,
+      endpoint: input.node.endpoint,
+      authRef: input.node.authRef,
+      lastSeenAt: new Date().toISOString(),
+      status: "healthy",
+      ...(version ? { version } : {}),
+      ...(platform ? { platform } : {}),
+      ...(arch ? { arch } : {}),
+    });
+    return {
+      ok: true,
+      state: "ok",
+      authRef,
+      node: upserted.node,
+      payload,
+    };
+  } catch (error: unknown) {
+    return {
+      ok: false,
+      state: "unreachable",
+      authRef,
+      node: input.node,
+      error: describeRequestError({
+        error,
+        timeoutMs: NODE_PREFLIGHT_HTTP_TIMEOUT_MS,
+      }),
+    };
+  }
+}
+
 /**
  * Resolve node auth token once and reuse a short-lived cache entry to avoid
  * repeated keychain prompts during polling.
@@ -5093,6 +5443,33 @@ async function resolveNodeAuthLookup(input: {
       expiresAtMs: nowMs + ttlMs,
     });
     return { ok: false, error: formatted };
+  }
+}
+
+async function issueNodeAuthToken(input: {
+  readonly authRef: string;
+  readonly name: string;
+}): Promise<
+  | { readonly ok: true; readonly token: string }
+  | { readonly ok: false; readonly error: string }
+> {
+  try {
+    const daemonPaths = resolveDaemonPaths({});
+    const issued = await createGatewayToken({
+      rootDir: daemonPaths.root,
+      label: `node-ensure:${input.name}`,
+      scope: "write",
+    });
+    await saveNodeAuthToken({
+      authRef: input.authRef,
+      token: issued.token,
+    });
+    clearNodeAuthLookupCache({ authRef: input.authRef });
+    return { ok: true, token: issued.token };
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error ? error.message : "failed to issue auth token";
+    return { ok: false, error: `Failed to issue auth token: ${message}` };
   }
 }
 

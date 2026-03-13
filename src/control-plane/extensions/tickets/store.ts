@@ -6,6 +6,16 @@ import { resolve } from "node:path";
 import { isRecord } from "../../../lib/guards.ts";
 import type { ControlPlaneConfig } from "../../sdk/config.ts";
 import {
+  buildLegacyDescriptionDocument,
+  buildTicketDocument,
+  getActiveTicketDescription,
+  isTicketDocumentKind,
+  isTicketDocumentRole,
+  type TicketDocument,
+  type TicketDocumentKind,
+  type TicketDocumentRole,
+} from "./documents.ts";
+import {
   createNormalizedTicket,
   projectNormalizedTicketSummary,
 } from "./domain.ts";
@@ -134,6 +144,7 @@ export type TicketEvent = {
 export type TicketStoreSnapshot = {
   readonly tickets: readonly TicketSummary[];
   readonly eventsByTicket: ReadonlyMap<string, readonly TicketEvent[]>;
+  readonly documentsByTicket: ReadonlyMap<string, readonly TicketDocument[]>;
   readonly commentsByTicket: ReadonlyMap<string, readonly TicketComment[]>;
   readonly reviewNotesByTicket: ReadonlyMap<
     string,
@@ -165,6 +176,7 @@ type SyncResult =
 
 type MaterializedTicketState = {
   readonly tickets: Map<string, TicketSummary>;
+  readonly documentsByTicket: Map<string, TicketDocument[]>;
   readonly commentsByTicket: Map<string, TicketComment[]>;
   readonly reviewNotesByTicket: Map<string, TicketReviewNote[]>;
   readonly syncCheckpointsByTicket: Map<string, TicketSyncCheckpoint[]>;
@@ -245,6 +257,7 @@ export function createTicketsStore(opts: {
   readonly getTicketDetail: (input: { readonly ticketId: string }) => Promise<{
     readonly ticket: TicketSummary | null;
     readonly events: readonly TicketEvent[];
+    readonly documents: readonly TicketDocument[];
     readonly comments: readonly TicketComment[];
     readonly reviewNotes: readonly TicketReviewNote[];
     readonly syncCheckpoints: readonly TicketSyncCheckpoint[];
@@ -268,6 +281,16 @@ export function createTicketsStore(opts: {
     readonly actor?: string;
   }) => Promise<
     | { readonly ok: true; readonly reviewNote: TicketReviewNote }
+    | { readonly ok: false; readonly error: string }
+  >;
+  readonly appendDocument: (input: {
+    readonly ticketId: string;
+    readonly kind: TicketDocumentKind;
+    readonly role?: TicketDocumentRole;
+    readonly content: string;
+    readonly actor?: string;
+  }) => Promise<
+    | { readonly ok: true; readonly document: TicketDocument }
     | { readonly ok: false; readonly error: string }
   >;
   readonly linkCommentExternalId: (input: {
@@ -448,6 +471,7 @@ export function createTicketsStore(opts: {
     readonly events: readonly TicketEvent[];
   }): MaterializedTicketState => {
     const tickets = new Map<string, TicketSummary>();
+    const documentsByTicket = new Map<string, TicketDocument[]>();
     const commentsByTicket = new Map<string, TicketComment[]>();
     const reviewNotesByTicket = new Map<string, TicketReviewNote[]>();
     const syncCheckpointsByTicket = new Map<string, TicketSyncCheckpoint[]>();
@@ -456,6 +480,7 @@ export function createTicketsStore(opts: {
     for (const event of input.events) {
       applyTicketEvent({
         tickets,
+        documentsByTicket,
         commentsByTicket,
         reviewNotesByTicket,
         syncCheckpointsByTicket,
@@ -466,6 +491,7 @@ export function createTicketsStore(opts: {
 
     return {
       tickets: applyDerivedBlocks(tickets),
+      documentsByTicket,
       commentsByTicket,
       reviewNotesByTicket,
       syncCheckpointsByTicket,
@@ -504,6 +530,7 @@ export function createTicketsStore(opts: {
     return {
       tickets: sortTickets({ tickets: input.materialized.tickets.values() }),
       eventsByTicket: groupEventsByTicket({ events: input.events }),
+      documentsByTicket: input.materialized.documentsByTicket,
       commentsByTicket: input.materialized.commentsByTicket,
       reviewNotesByTicket: input.materialized.reviewNotesByTicket,
       syncCheckpointsByTicket: input.materialized.syncCheckpointsByTicket,
@@ -764,12 +791,12 @@ export function createTicketsStore(opts: {
 
     updateTicket: async (input) => {
       const tickets = await materializeTickets();
-      const current = tickets.get(input.ticketId);
-      if (!current) {
+      if (!tickets.has(input.ticketId)) {
         return { ok: false, error: `Ticket not found: ${input.ticketId}` };
       }
 
       const payload: Record<string, unknown> = {};
+      const events: TicketEvent[] = [];
       if (input.title !== undefined) {
         const title = input.title.trim();
         if (!title) {
@@ -778,7 +805,22 @@ export function createTicketsStore(opts: {
         payload.title = title;
       }
       if (input.body !== undefined) {
-        payload.body = input.body;
+        const content = input.body.trimEnd();
+        if (!content) {
+          return { ok: false, error: "Body cannot be empty." };
+        }
+        events.push(
+          buildEvent({
+            ticketId: input.ticketId,
+            type: "ticket.document_recorded",
+            payload: {
+              documentId: randomUUID(),
+              kind: "description",
+              content,
+            },
+            actor: input.actor,
+          })
+        );
       }
       if (input.dependsOn !== undefined) {
         payload.dependsOn = normalizeTicketRefs(input.dependsOn);
@@ -843,18 +885,22 @@ export function createTicketsStore(opts: {
         });
       }
 
-      if (Object.keys(payload).length === 0) {
+      if (Object.keys(payload).length > 0) {
+        events.push(
+          buildEvent({
+            ticketId: input.ticketId,
+            type: "ticket.updated",
+            payload,
+            actor: input.actor,
+          })
+        );
+      }
+
+      if (events.length === 0) {
         return { ok: false, error: "No updates provided." };
       }
 
-      const event = buildEvent({
-        ticketId: input.ticketId,
-        type: "ticket.updated",
-        payload,
-        actor: input.actor,
-      });
-
-      return await appendEventsAndRefresh({ events: [event] });
+      return await appendEventsAndRefresh({ events });
     },
 
     listTickets: async () => {
@@ -881,6 +927,7 @@ export function createTicketsStore(opts: {
           snapshot.tickets.find((ticket) => ticket.ticketId === ticketId) ??
           null,
         events: snapshot.eventsByTicket.get(ticketId) ?? [],
+        documents: snapshot.documentsByTicket.get(ticketId) ?? [],
         comments: snapshot.commentsByTicket.get(ticketId) ?? [],
         reviewNotes: snapshot.reviewNotesByTicket.get(ticketId) ?? [],
         syncCheckpoints: snapshot.syncCheckpointsByTicket.get(ticketId) ?? [],
@@ -985,6 +1032,49 @@ export function createTicketsStore(opts: {
           createdAt: event.tsIso,
           ...(context ? { context } : {}),
         },
+      };
+    },
+
+    appendDocument: async (input) => {
+      const tickets = await materializeTickets();
+      if (!tickets.has(input.ticketId)) {
+        return { ok: false, error: `Ticket not found: ${input.ticketId}` };
+      }
+
+      const content = input.content.trimEnd();
+      if (!content.trim()) {
+        return { ok: false, error: "Document content cannot be empty." };
+      }
+
+      const documentId = randomUUID();
+      const event = buildEvent({
+        ticketId: input.ticketId,
+        type: "ticket.document_recorded",
+        payload: {
+          documentId,
+          kind: input.kind,
+          ...(input.role ? { role: input.role } : {}),
+          content,
+        },
+        actor: input.actor,
+      });
+
+      const wrote = await appendEventsAndRefresh({ events: [event] });
+      if (!wrote.ok) {
+        return wrote;
+      }
+
+      return {
+        ok: true,
+        document: buildTicketDocument({
+          documentId,
+          ticketId: input.ticketId,
+          kind: input.kind,
+          ...(input.role ? { role: input.role } : {}),
+          content,
+          createdAt: event.tsIso,
+          updatedAt: event.tsIso,
+        }),
       };
     },
 
@@ -1207,6 +1297,7 @@ export function createTicketsStore(opts: {
 
 function applyTicketEvent(input: {
   readonly tickets: Map<string, TicketSummary>;
+  readonly documentsByTicket: Map<string, TicketDocument[]>;
   readonly commentsByTicket: Map<string, TicketComment[]>;
   readonly reviewNotesByTicket: Map<string, TicketReviewNote[]>;
   readonly syncCheckpointsByTicket: Map<string, TicketSyncCheckpoint[]>;
@@ -1217,6 +1308,7 @@ function applyTicketEvent(input: {
     case "ticket.created": {
       applyTicketCreatedEvent({
         tickets: input.tickets,
+        documentsByTicket: input.documentsByTicket,
         event: input.event,
       });
       break;
@@ -1231,6 +1323,15 @@ function applyTicketEvent(input: {
     case "ticket.updated": {
       applyTicketUpdatedEvent({
         tickets: input.tickets,
+        documentsByTicket: input.documentsByTicket,
+        event: input.event,
+      });
+      break;
+    }
+    case "ticket.document_recorded": {
+      applyTicketDocumentRecordedEvent({
+        tickets: input.tickets,
+        documentsByTicket: input.documentsByTicket,
         event: input.event,
       });
       break;
@@ -1289,6 +1390,7 @@ function applyTicketEvent(input: {
 
 function applyTicketCreatedEvent(input: {
   readonly tickets: Map<string, TicketSummary>;
+  readonly documentsByTicket: Map<string, TicketDocument[]>;
   readonly event: TicketEvent;
 }): void {
   const title =
@@ -1369,6 +1471,20 @@ function applyTicketCreatedEvent(input: {
       },
     })
   );
+
+  if (body) {
+    appendMapValue({
+      map: input.documentsByTicket,
+      key: input.event.ticketId,
+      value: buildLegacyDescriptionDocument({
+        eventId: input.event.eventId,
+        ticketId: input.event.ticketId,
+        content: body,
+        createdAt: input.event.tsIso,
+        updatedAt: input.event.tsIso,
+      }),
+    });
+  }
 }
 
 function applyTicketStatusChangedEvent(input: {
@@ -1399,6 +1515,7 @@ function applyTicketStatusChangedEvent(input: {
 
 function applyTicketUpdatedEvent(input: {
   readonly tickets: Map<string, TicketSummary>;
+  readonly documentsByTicket: Map<string, TicketDocument[]>;
   readonly event: TicketEvent;
 }): void {
   const current = input.tickets.get(input.event.ticketId);
@@ -1517,6 +1634,78 @@ function applyTicketUpdatedEvent(input: {
       },
     })
   );
+
+  if (body !== undefined) {
+    appendMapValue({
+      map: input.documentsByTicket,
+      key: input.event.ticketId,
+      value: buildLegacyDescriptionDocument({
+        eventId: input.event.eventId,
+        ticketId: input.event.ticketId,
+        content: body,
+        createdAt: input.event.tsIso,
+        updatedAt: input.event.tsIso,
+      }),
+    });
+  }
+}
+
+function applyTicketDocumentRecordedEvent(input: {
+  readonly tickets: Map<string, TicketSummary>;
+  readonly documentsByTicket: Map<string, TicketDocument[]>;
+  readonly event: TicketEvent;
+}): void {
+  const current = input.tickets.get(input.event.ticketId);
+  if (!current) {
+    return;
+  }
+
+  const kindValue = readOptionalStringPayload({
+    value: input.event.payload.kind,
+  });
+  const content = readOptionalTextPayload({
+    value: input.event.payload.content,
+  });
+  if (!(kindValue && content && isTicketDocumentKind(kindValue))) {
+    return;
+  }
+
+  const roleValue = readOptionalStringPayload({
+    value: input.event.payload.role,
+  });
+  const role =
+    roleValue && isTicketDocumentRole(roleValue) ? roleValue : undefined;
+
+  const document = buildTicketDocument({
+    documentId:
+      readOptionalStringPayload({ value: input.event.payload.documentId }) ??
+      input.event.eventId,
+    ticketId: input.event.ticketId,
+    kind: kindValue,
+    ...(role ? { role } : {}),
+    content,
+    createdAt: input.event.tsIso,
+    updatedAt: input.event.tsIso,
+  });
+
+  appendMapValue({
+    map: input.documentsByTicket,
+    key: input.event.ticketId,
+    value: document,
+  });
+
+  const documents = input.documentsByTicket.get(input.event.ticketId) ?? [];
+  const activeDescription = getActiveTicketDescription({ documents });
+  input.tickets.set(
+    input.event.ticketId,
+    normalizeTicketSummaryCompatibility({
+      ticket: {
+        ...current,
+        ...(activeDescription ? { body: activeDescription.content } : {}),
+        updatedAt: input.event.tsIso,
+      },
+    })
+  );
 }
 
 function applyTicketCommentAppendedEvent(input: {
@@ -1529,10 +1718,10 @@ function applyTicketCommentAppendedEvent(input: {
   }
 
   const body =
-    readOptionalStringPayload({
+    readOptionalTextPayload({
       value: input.event.payload.body,
     }) ??
-    readOptionalStringPayload({
+    readOptionalTextPayload({
       value: input.event.payload.markdown,
     });
   if (!body) {
@@ -1612,8 +1801,8 @@ function applyTicketReviewNoteAppendedEvent(input: {
   }
 
   const body =
-    readOptionalStringPayload({ value: input.event.payload.body }) ??
-    readOptionalStringPayload({ value: input.event.payload.markdown });
+    readOptionalTextPayload({ value: input.event.payload.body }) ??
+    readOptionalTextPayload({ value: input.event.payload.markdown });
   if (!body) {
     return;
   }
@@ -1950,6 +2139,15 @@ function readOptionalStringPayload(input: {
   }
   const trimmed = input.value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function readOptionalTextPayload(input: {
+  readonly value: unknown;
+}): string | undefined {
+  if (typeof input.value !== "string") {
+    return undefined;
+  }
+  return input.value.trim().length > 0 ? input.value : undefined;
 }
 
 function normalizeOwnerOrSource(input: {

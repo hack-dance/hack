@@ -500,6 +500,73 @@ test("tickets store ignores duplicate sync checkpoints with the same idempotency
   ).toHaveLength(1);
 });
 
+test("tickets store records immutable documents and projects body from the active description", async () => {
+  const projectRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-documents-",
+  });
+  const store = await createStore({ projectRoot });
+
+  const created = await store.createTicket({
+    title: "Document-backed ticket",
+    body: "## Context\nInitial description",
+    owner: "hack",
+    source: "hack",
+    actor: "creator@hack",
+  });
+  expect(created.ok).toBe(true);
+  if (!created.ok) {
+    throw new Error(created.error);
+  }
+
+  const spec = await store.appendDocument({
+    ticketId: created.ticket.ticketId,
+    kind: "spec",
+    content: "\n## Goals\n- Ship immutable ticket documents",
+    actor: "author@hack",
+  });
+  expect(spec.ok).toBe(true);
+  if (!spec.ok) {
+    throw new Error(spec.error);
+  }
+
+  const description = await store.appendDocument({
+    ticketId: created.ticket.ticketId,
+    kind: "description",
+    content: "## Context\nUpdated description",
+    actor: "author@hack",
+  });
+  expect(description.ok).toBe(true);
+  if (!description.ok) {
+    throw new Error(description.error);
+  }
+
+  const detail = await store.getTicketDetail({
+    ticketId: created.ticket.ticketId,
+  });
+
+  expect(detail.ticket?.body).toBe("## Context\nUpdated description");
+  expect(detail.documents).toEqual([
+    expect.objectContaining({
+      kind: "description",
+      role: "description",
+      content: "## Context\nInitial description",
+    }),
+    expect.objectContaining({
+      kind: "spec",
+      role: "spec",
+      content: "\n## Goals\n- Ship immutable ticket documents",
+    }),
+    expect.objectContaining({
+      kind: "description",
+      role: "description",
+      content: "## Context\nUpdated description",
+    }),
+  ]);
+  expect(
+    detail.events.filter((event) => event.type === "ticket.document_recorded")
+  ).toHaveLength(2);
+}, 20_000);
+
 test("tickets store persists a sqlite projection and rebuilds it when deleted", async () => {
   const projectRoot = await createTempGitProject({
     prefix: "hack-cli-tickets-projection-",

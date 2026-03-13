@@ -1,8 +1,8 @@
+import { buildLegacyDescriptionDocument } from "./documents.ts";
 import {
   buildTicketProvenance,
   projectRemoteLinkToCompatibilityFields,
 } from "./provenance.ts";
-import { sha256Hex } from "./util.ts";
 
 export type TicketStatus = "open" | "in_progress" | "blocked" | "done";
 
@@ -114,19 +114,11 @@ export type TicketFieldVersion = {
   readonly value?: TicketMetadataValue;
 };
 
-export type TicketDocumentKind = "description" | "spec" | "notes";
-export type TicketDocumentRole = TicketDocumentKind | "handoff";
-
-export type TicketDocument = {
-  readonly documentId: string;
-  readonly ticketId: string;
-  readonly kind: TicketDocumentKind;
-  readonly role: TicketDocumentRole;
-  readonly content: string;
-  readonly contentSha256: string;
-  readonly createdAt: string;
-  readonly updatedAt: string;
-};
+export type {
+  TicketDocument,
+  TicketDocumentKind,
+  TicketDocumentRole,
+} from "./documents.ts";
 
 export type TicketFieldState = {
   readonly field: string;
@@ -162,8 +154,12 @@ export function createNormalizedTicket(input: {
   readonly ticket: TicketSummaryCompatibility;
   readonly syncCheckpoints?: readonly TicketSyncCheckpointCompatibility[];
   readonly conflicts?: readonly TicketSyncConflictCompatibility[];
+  readonly documents?: readonly TicketDocument[];
 }): NormalizedTicket {
-  const documents = buildDocuments({ ticket: input.ticket });
+  const documents = buildDocuments({
+    ticket: input.ticket,
+    documents: input.documents,
+  });
   const checkpoints = input.syncCheckpoints ?? [];
   const conflicts = input.conflicts ?? [];
   const provenance = buildTicketProvenance({
@@ -238,23 +234,22 @@ export function projectNormalizedTicketSummary(input: {
 
 function buildDocuments(input: {
   readonly ticket: TicketSummaryCompatibility;
+  readonly documents?: readonly TicketDocument[];
 }): TicketDocument[] {
+  if (input.documents && input.documents.length > 0) {
+    return [...input.documents];
+  }
   if (!input.ticket.body) {
     return [];
   }
-
-  const contentSha256 = sha256Hex({ value: input.ticket.body });
   return [
-    {
-      documentId: `${input.ticket.ticketId}:description:${contentSha256.slice(0, 12)}`,
+    buildLegacyDescriptionDocument({
+      eventId: "compatibility-summary",
       ticketId: input.ticket.ticketId,
-      kind: "description",
-      role: "description",
       content: input.ticket.body,
-      contentSha256,
       createdAt: input.ticket.createdAt,
       updatedAt: input.ticket.updatedAt,
-    },
+    }),
   ];
 }
 

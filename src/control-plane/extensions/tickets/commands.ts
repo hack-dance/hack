@@ -12,6 +12,12 @@ import {
   upsertTicketsAgentDocs,
 } from "./agent-docs.ts";
 import {
+  isTicketDocumentKind,
+  isTicketDocumentRole,
+  type TicketDocumentKind,
+  type TicketDocumentRole,
+} from "./documents.ts";
+import {
   checkTicketsRepoState,
   ensureTicketsGitignore,
   type TicketsRepoGitignoreFixStatus,
@@ -687,6 +693,91 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
     },
   },
   {
+    name: "document",
+    summary: "Append an immutable ticket document",
+    scope: "project",
+    handler: async ({ ctx, args }) => {
+      if (!ctx.project) {
+        ctx.logger.error({ message: "No project found. Run inside a repo." });
+        return 1;
+      }
+
+      const parsed = parseTicketsArgs({ args });
+      if (!parsed.ok) {
+        ctx.logger.error({ message: parsed.error });
+        return 1;
+      }
+
+      const ticketId = (parsed.value.rest[0] ?? "").trim();
+      if (!ticketId) {
+        ctx.logger.error({
+          message:
+            'Usage: hack x tickets document <ticket-id> --kind <description|spec|notes> [--role <description|spec|notes|handoff>] [--body "..."] [--body-file <path>] [--body-stdin] [--json]',
+        });
+        return 1;
+      }
+      if (!parsed.value.kind) {
+        ctx.logger.error({
+          message:
+            "Document kind is required. Use --kind <description|spec|notes>.",
+        });
+        return 1;
+      }
+
+      const body = await resolveTicketBody({
+        body: parsed.value.body,
+        bodyFile: parsed.value.bodyFile,
+        bodyStdin: parsed.value.bodyStdin,
+      });
+      if (!body) {
+        ctx.logger.error({
+          message:
+            "Document body is required. Use --body, --body-file, or --body-stdin.",
+        });
+        return 1;
+      }
+
+      await maybeEnsureTicketsSetup({ ctx, json: parsed.value.json });
+
+      const store = createTicketsStore({
+        projectRoot: ctx.project.projectRoot,
+        projectId: ctx.projectId,
+        projectName: ctx.projectName,
+        controlPlaneConfig: ctx.controlPlaneConfig,
+        logger: ctx.logger,
+      });
+
+      const appended = await store.appendDocument({
+        ticketId,
+        kind: parsed.value.kind,
+        ...(parsed.value.role ? { role: parsed.value.role } : {}),
+        content: body,
+        actor: parsed.value.actor,
+      });
+      if (!appended.ok) {
+        ctx.logger.error({ message: appended.error });
+        return 1;
+      }
+
+      if (parsed.value.json) {
+        process.stdout.write(
+          `${JSON.stringify({ document: appended.document }, null, 2)}\n`
+        );
+        return 0;
+      }
+
+      await display.panel({
+        title: "Ticket document",
+        tone: "success",
+        lines: [
+          `${ticketId} ${appended.document.role} document appended`,
+          appended.document.content,
+        ],
+      });
+      return 0;
+    },
+  },
+  {
     name: "list",
     summary: "List tickets",
     scope: "project",
@@ -833,6 +924,7 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
           `${JSON.stringify(
             {
               ticket,
+              documents: detail.documents,
               comments: detail.comments,
               reviewNotes: detail.reviewNotes,
               syncCheckpoints: detail.syncCheckpoints,
@@ -876,6 +968,18 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
           title: "Body",
           tone: "info",
           lines: ticket.body.split("\n"),
+        });
+      }
+
+      if (detail.documents.length > 0) {
+        await display.table({
+          columns: ["document_id", "kind", "role", "updated_at"],
+          rows: detail.documents.map((document) => [
+            document.documentId,
+            document.kind,
+            document.role,
+            document.updatedAt,
+          ]),
         });
       }
 
@@ -1153,6 +1257,8 @@ type TicketsArgs = {
   readonly body?: string;
   readonly bodyFile?: string;
   readonly bodyStdin: boolean;
+  readonly kind?: TicketDocumentKind;
+  readonly role?: TicketDocumentRole;
   readonly dependsOn: readonly string[];
   readonly blocks: readonly string[];
   readonly clearDependsOn: boolean;
@@ -1210,6 +1316,8 @@ function parseTicketsArgs(opts: {
   let body: string | undefined;
   let bodyFile: string | undefined;
   let bodyStdin = false;
+  let kind: TicketDocumentKind | undefined;
+  let role: TicketDocumentRole | undefined;
   const dependsOn: string[] = [];
   const blocks: string[] = [];
   let clearDependsOn = false;
@@ -1300,6 +1408,64 @@ function parseTicketsArgs(opts: {
 
     if (token === "--body-stdin") {
       bodyStdin = true;
+      continue;
+    }
+
+    if (token.startsWith("--kind=")) {
+      const value = token.slice("--kind=".length);
+      if (!isTicketDocumentKind(value)) {
+        return {
+          ok: false,
+          error: "Invalid --kind value. Expected description|spec|notes.",
+        };
+      }
+      kind = value;
+      continue;
+    }
+
+    if (token === "--kind") {
+      const value = takeValue(token, opts.args[i + 1]);
+      if (!value) {
+        return { ok: false, error: "--kind requires a value." };
+      }
+      if (!isTicketDocumentKind(value)) {
+        return {
+          ok: false,
+          error: "Invalid --kind value. Expected description|spec|notes.",
+        };
+      }
+      kind = value;
+      i += 1;
+      continue;
+    }
+
+    if (token.startsWith("--role=")) {
+      const value = token.slice("--role=".length);
+      if (!isTicketDocumentRole(value)) {
+        return {
+          ok: false,
+          error:
+            "Invalid --role value. Expected description|spec|notes|handoff.",
+        };
+      }
+      role = value;
+      continue;
+    }
+
+    if (token === "--role") {
+      const value = takeValue(token, opts.args[i + 1]);
+      if (!value) {
+        return { ok: false, error: "--role requires a value." };
+      }
+      if (!isTicketDocumentRole(value)) {
+        return {
+          ok: false,
+          error:
+            "Invalid --role value. Expected description|spec|notes|handoff.",
+        };
+      }
+      role = value;
+      i += 1;
       continue;
     }
 
@@ -1540,6 +1706,8 @@ function parseTicketsArgs(opts: {
       ...(body ? { body } : {}),
       ...(bodyFile ? { bodyFile } : {}),
       bodyStdin,
+      ...(kind ? { kind } : {}),
+      ...(role ? { role } : {}),
       dependsOn,
       blocks,
       clearDependsOn,

@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { mkdir, readdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
+import type { TicketDocument } from "./documents.ts";
 import type {
   TicketComment,
   TicketEvent,
@@ -105,6 +106,9 @@ export function createTicketsSqliteProjection(opts: {
       const insertComment = db.query(
         "INSERT INTO ticket_comments (comment_id, ticket_id, json_value) VALUES (?, ?, ?)"
       );
+      const insertDocument = db.query(
+        "INSERT INTO ticket_documents (document_id, ticket_id, json_value) VALUES (?, ?, ?)"
+      );
       const insertReviewNote = db.query(
         "INSERT INTO ticket_review_notes (note_id, ticket_id, json_value) VALUES (?, ?, ?)"
       );
@@ -123,6 +127,7 @@ export function createTicketsSqliteProjection(opts: {
           DELETE FROM tickets;
           DELETE FROM journal_events;
           DELETE FROM ticket_comments;
+          DELETE FROM ticket_documents;
           DELETE FROM ticket_review_notes;
           DELETE FROM ticket_sync_checkpoints;
           DELETE FROM ticket_sync_conflicts;
@@ -160,6 +165,17 @@ export function createTicketsSqliteProjection(opts: {
               comment.commentId,
               comment.ticketId,
               JSON.stringify(comment)
+            );
+          },
+        });
+
+        writeMapEntries({
+          map: input.snapshot.documentsByTicket,
+          write: (document: TicketDocument) => {
+            insertDocument.run(
+              document.documentId,
+              document.ticketId,
+              JSON.stringify(document)
             );
           },
         });
@@ -244,6 +260,10 @@ export function createTicketsSqliteProjection(opts: {
         db,
         table: "ticket_comments",
       });
+      const documentsByTicket = readRowsByTicket<TicketDocument>({
+        db,
+        table: "ticket_documents",
+      });
       const reviewNotesByTicket = readRowsByTicket<TicketReviewNote>({
         db,
         table: "ticket_review_notes",
@@ -260,6 +280,7 @@ export function createTicketsSqliteProjection(opts: {
       return {
         tickets,
         eventsByTicket,
+        documentsByTicket,
         commentsByTicket,
         reviewNotesByTicket,
         syncCheckpointsByTicket,
@@ -305,6 +326,11 @@ function initializeProjectionSchema(input: { readonly db: Database }): void {
       ticket_id TEXT NOT NULL,
       json_value TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS ticket_documents (
+      document_id TEXT PRIMARY KEY,
+      ticket_id TEXT NOT NULL,
+      json_value TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS ticket_review_notes (
       note_id TEXT PRIMARY KEY,
       ticket_id TEXT NOT NULL,
@@ -324,6 +350,8 @@ function initializeProjectionSchema(input: { readonly db: Database }): void {
       ON journal_events (ticket_id, ts, order_key);
     CREATE INDEX IF NOT EXISTS ticket_comments_ticket_id_idx
       ON ticket_comments (ticket_id);
+    CREATE INDEX IF NOT EXISTS ticket_documents_ticket_id_idx
+      ON ticket_documents (ticket_id);
     CREATE INDEX IF NOT EXISTS ticket_review_notes_ticket_id_idx
       ON ticket_review_notes (ticket_id);
     CREATE INDEX IF NOT EXISTS ticket_sync_checkpoints_ticket_id_idx
@@ -367,6 +395,7 @@ function readRowsByTicket<T>(input: {
   readonly db: Database;
   readonly table:
     | "ticket_comments"
+    | "ticket_documents"
     | "ticket_review_notes"
     | "ticket_sync_checkpoints"
     | "ticket_sync_conflicts";

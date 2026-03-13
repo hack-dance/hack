@@ -264,13 +264,6 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
     return resolved.missingRequired.length > 0 ? 1 : 0;
   }
 
-  if (resolved.contract.vars.length === 0) {
-    logger.info({
-      message: `No ${project.projectDir}/hack.env.json contract found (or it has no vars).`,
-    });
-    return 0;
-  }
-
   await display.kv({
     title: "Env storage",
     entries: [
@@ -292,6 +285,13 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
       ],
     ],
   });
+
+  if (resolved.contract.vars.length === 0) {
+    logger.info({
+      message: `No ${project.projectDir}/hack.env.json contract found (or it has no vars).`,
+    });
+    return 0;
+  }
 
   await display.section("Resolved env vars");
 

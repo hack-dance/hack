@@ -12,6 +12,7 @@ import { optJson, optPath, optProject } from "../cli/options.ts";
 import { PROJECT_ENV_FILENAME } from "../constants.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
+import type { HackEnvStorageSummary } from "../lib/hack-env.ts";
 import {
   removeDotEnvKey,
   resolveHackEnv,
@@ -242,6 +243,7 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
       `${JSON.stringify(
         {
           project: projectName,
+          storage: serializeEnvStorageForJson({ storage: resolved.storage }),
           vars: resolved.values.map((v) => ({
             key: v.key,
             required: v.required,
@@ -269,6 +271,30 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
     return 0;
   }
 
+  await display.kv({
+    title: "Env storage",
+    entries: [
+      [
+        "contract",
+        `${resolved.storage.contract.path} (committed contract, no values)`,
+      ],
+      [
+        "local_plaintext",
+        `${resolved.storage.localPlaintext.path} (${resolved.storage.localPlaintext.exists ? "present" : "missing"} local plaintext for plain_env)`,
+      ],
+      [
+        "local_secrets",
+        `${formatSecretStoreDescriptor({ descriptor: resolved.storage.localSecrets })} (local secret backend)`,
+      ],
+      [
+        "portable_state",
+        `${resolved.storage.portableState.status}: ${resolved.storage.portableState.message}`,
+      ],
+    ],
+  });
+
+  await display.section("Resolved env vars");
+
   for (const v of resolved.values) {
     const value =
       v.source === "keychain" && !showSecrets && v.value !== null
@@ -291,6 +317,34 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
 
   return 0;
 };
+
+function serializeEnvStorageForJson(input: {
+  readonly storage: HackEnvStorageSummary;
+}) {
+  return {
+    contract: {
+      path: input.storage.contract.path,
+      trust_model: input.storage.contract.trustModel,
+    },
+    local_plaintext: {
+      path: input.storage.localPlaintext.path,
+      exists: input.storage.localPlaintext.exists,
+      trust_model: input.storage.localPlaintext.trustModel,
+    },
+    local_secrets: {
+      backend: input.storage.localSecrets.backend,
+      location: input.storage.localSecrets.location,
+      mode: input.storage.localSecrets.mode,
+      provider: input.storage.localSecrets.provider ?? null,
+      trust_model: input.storage.localSecrets.trustModel,
+    },
+    portable_state: {
+      status: input.storage.portableState.status,
+      trust_model: input.storage.portableState.trustModel,
+      message: input.storage.portableState.message,
+    },
+  };
+}
 
 const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
   ctx,

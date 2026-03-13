@@ -258,6 +258,113 @@ test("env set --secret stores value using encrypted backend", async () => {
   expect(apiKey?.value).toBe("super-secret");
 });
 
+test("env list --json explains storage and trust boundaries", async () => {
+  if (!tempDir) {
+    throw new Error("Missing temp dir");
+  }
+  process.env.HACK_SECRETS_FILE_KEY = "env-storage-summary-key";
+  const projectRoot = resolve(tempDir, "storage-repo");
+  const projectDir = resolve(projectRoot, ".hack");
+  const encryptedStorePath = resolve(tempDir, "storage-secrets.enc.json");
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(resolve(projectDir, "docker-compose.yml"), "services: {}\n");
+  await writeFile(resolve(projectDir, ".env"), 'PUBLIC_TOKEN="hello world"\n');
+  await writeFile(
+    resolve(projectDir, "hack.config.json"),
+    `${JSON.stringify(
+      {
+        name: "storage-summary-project",
+        controlPlane: {
+          secrets: {
+            backend: "encrypted_file",
+            encryptedFile: {
+              path: encryptedStorePath,
+            },
+          },
+        },
+      },
+      null,
+      2
+    )}\n`
+  );
+  await writeFile(
+    resolve(projectDir, "hack.env.json"),
+    `${JSON.stringify(
+      {
+        version: 1,
+        vars: [
+          {
+            key: "PUBLIC_TOKEN",
+            required: true,
+            source: "plain_env",
+          },
+          {
+            key: "DATABASE_URL",
+            required: true,
+            source: "keychain",
+          },
+        ],
+      },
+      null,
+      2
+    )}\n`
+  );
+
+  const result = await runHack({
+    args: ["env", "list", "--json"],
+    env: {
+      ...process.env,
+      HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
+      HACK_SECRETS_FILE_KEY: "env-storage-summary-key",
+    },
+    cwd: projectRoot,
+  });
+
+  expect(result.exitCode).toBe(1);
+
+  const json = JSON.parse(result.stdout) as {
+    readonly storage?: {
+      readonly contract?: {
+        readonly path: string;
+        readonly trust_model: string;
+      };
+      readonly local_plaintext?: {
+        readonly path: string;
+        readonly exists: boolean;
+        readonly trust_model: string;
+      };
+      readonly local_secrets?: {
+        readonly backend: string;
+        readonly location: string;
+        readonly mode: string;
+        readonly trust_model: string;
+      };
+      readonly portable_state?: {
+        readonly status: string;
+        readonly trust_model: string;
+        readonly message: string;
+      };
+    };
+  };
+
+  expect(json.storage?.contract?.path).toBe(
+    resolve(projectDir, "hack.env.json")
+  );
+  expect(json.storage?.contract?.trust_model).toBe("committed_no_values");
+  expect(json.storage?.local_plaintext?.path).toBe(resolve(projectDir, ".env"));
+  expect(json.storage?.local_plaintext?.exists).toBe(true);
+  expect(json.storage?.local_plaintext?.trust_model).toBe(
+    "gitignored_plaintext"
+  );
+  expect(json.storage?.local_secrets?.backend).toBe("encrypted_file");
+  expect(json.storage?.local_secrets?.location).toBe(encryptedStorePath);
+  expect(json.storage?.local_secrets?.mode).toBe("native");
+  expect(json.storage?.local_secrets?.trust_model).toBe("local_secret_backend");
+  expect(json.storage?.portable_state?.status).toBe("not_configured");
+  expect(json.storage?.portable_state?.trust_model).toBe("local_only");
+  expect(json.storage?.portable_state?.message).toContain("not portable");
+});
+
 async function runHack(input: {
   readonly args: readonly string[];
   readonly env: NodeJS.ProcessEnv;

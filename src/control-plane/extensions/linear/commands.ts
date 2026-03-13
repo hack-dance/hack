@@ -3186,6 +3186,52 @@ function buildConflictDedupKey(input: {
   ].join("|");
 }
 
+function buildLinearCheckpointIdempotencyKey(input: {
+  readonly ticketId: string;
+  readonly profileId: string;
+  readonly direction: string;
+  readonly issue: LinearIssue;
+}): string {
+  const fingerprint = createHash("sha256")
+    .update(
+      JSON.stringify({
+        issueId: input.issue.id,
+        identifier: input.issue.identifier,
+        title: input.issue.title,
+        description: input.issue.description ?? null,
+        stateId: input.issue.state.id,
+        teamId: input.issue.teamId,
+        projectId: input.issue.projectId ?? null,
+        assigneeId: input.issue.assigneeId ?? null,
+        labels: input.issue.labels.map((label) => label.id).sort(),
+      })
+    )
+    .digest("hex")
+    .slice(0, 16);
+
+  return `linear:checkpoint:${input.ticketId}:${input.profileId}:${input.direction}:${fingerprint}`;
+}
+
+function buildLinearConflictIdempotencyKey(input: {
+  readonly ticketId: string;
+  readonly conflict: RecordedSyncConflict;
+}): string {
+  const fingerprint = createHash("sha256")
+    .update(
+      JSON.stringify({
+        field: input.conflict.field,
+        authority: input.conflict.authority ?? null,
+        summary: input.conflict.summary ?? null,
+        localValue: input.conflict.localValue ?? null,
+        remoteValue: input.conflict.remoteValue ?? null,
+      })
+    )
+    .digest("hex")
+    .slice(0, 16);
+
+  return `linear:conflict:${input.ticketId}:${fingerprint}`;
+}
+
 async function recordAuthoritativeConflicts(input: {
   readonly tickets: Pick<
     TicketSyncStore,
@@ -3228,6 +3274,10 @@ async function recordAuthoritativeConflicts(input: {
       field: conflict.field,
       authority: conflict.authority,
       summary: conflict.summary,
+      idempotencyKey: buildLinearConflictIdempotencyKey({
+        ticketId: input.ticketId,
+        conflict,
+      }),
       ...(conflict.localValue !== undefined
         ? { localValue: conflict.localValue }
         : {}),
@@ -3349,6 +3399,12 @@ async function recordLinearSyncCheckpoint(input: {
     direction: input.direction,
     remoteCursor: input.issue.identifier,
     localUpdatedAt: new Date().toISOString(),
+    idempotencyKey: buildLinearCheckpointIdempotencyKey({
+      ticketId: input.ticketId,
+      profileId: input.profileId,
+      direction: input.direction,
+      issue: input.issue,
+    }),
   });
   if (!checkpoint.ok) {
     return { ok: false, error: checkpoint.error };

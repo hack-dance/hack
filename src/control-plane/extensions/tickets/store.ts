@@ -287,6 +287,7 @@ export function createTicketsStore(opts: {
     readonly remoteCursor?: string;
     readonly remoteUpdatedAt?: string;
     readonly localUpdatedAt?: string;
+    readonly idempotencyKey?: string;
     readonly actor?: string;
   }) => Promise<
     | { readonly ok: true; readonly checkpoint: TicketSyncCheckpoint }
@@ -300,6 +301,7 @@ export function createTicketsStore(opts: {
     readonly summary?: string;
     readonly localValue?: TicketMetadataValue;
     readonly remoteValue?: TicketMetadataValue;
+    readonly idempotencyKey?: string;
     readonly actor?: string;
   }) => Promise<
     | { readonly ok: true; readonly conflict: TicketSyncConflict }
@@ -635,7 +637,22 @@ export function createTicketsStore(opts: {
   }): Promise<
     { readonly ok: true } | { readonly ok: false; readonly error: string }
   > => {
-    const wrote = await git.appendEvents({ events: input.events });
+    const context = await loadStoreContext();
+    const seenIdempotencyKeys = new Set(
+      context.events.map((event) => event.idempotencyKey)
+    );
+    const pendingEvents = input.events.filter((event) => {
+      if (seenIdempotencyKeys.has(event.idempotencyKey)) {
+        return false;
+      }
+      seenIdempotencyKeys.add(event.idempotencyKey);
+      return true;
+    });
+    if (pendingEvents.length === 0) {
+      return { ok: true };
+    }
+
+    const wrote = await git.appendEvents({ events: pendingEvents });
     if (!wrote.ok) {
       return wrote;
     }
@@ -1045,6 +1062,9 @@ export function createTicketsStore(opts: {
           ...(remoteUpdatedAt ? { remoteUpdatedAt } : {}),
           ...(localUpdatedAt ? { localUpdatedAt } : {}),
         },
+        ...(input.idempotencyKey
+          ? { idempotencyKey: input.idempotencyKey }
+          : {}),
         actor: input.actor,
       });
 
@@ -1112,6 +1132,9 @@ export function createTicketsStore(opts: {
             ? { remoteValue: input.remoteValue }
             : {}),
         },
+        ...(input.idempotencyKey
+          ? { idempotencyKey: input.idempotencyKey }
+          : {}),
         actor: input.actor,
       });
 

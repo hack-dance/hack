@@ -450,6 +450,56 @@ test("tickets store writes normalized journal envelope metadata and ignores dupl
   });
 }, 20_000);
 
+test("tickets store ignores duplicate sync checkpoints with the same idempotency key", async () => {
+  const projectRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-checkpoint-idempotency-",
+  });
+  const store = await createStore({ projectRoot });
+
+  const created = await store.createTicket({
+    title: "Checkpoint idempotency",
+    owner: "hack",
+    source: "linear",
+    actor: "creator@hack",
+  });
+  expect(created.ok).toBe(true);
+  if (!created.ok) {
+    throw new Error(created.error);
+  }
+
+  const first = await store.recordSyncCheckpoint({
+    ticketId: created.ticket.ticketId,
+    provider: "linear",
+    profileId: "default",
+    direction: "hack_to_linear",
+    remoteCursor: "ENG-321",
+    idempotencyKey: "linear:checkpoint:T-00001:ENG-321",
+    actor: "sync@app",
+  });
+  expect(first.ok).toBe(true);
+
+  const second = await store.recordSyncCheckpoint({
+    ticketId: created.ticket.ticketId,
+    provider: "linear",
+    profileId: "default",
+    direction: "hack_to_linear",
+    remoteCursor: "ENG-321",
+    idempotencyKey: "linear:checkpoint:T-00001:ENG-321",
+    actor: "sync@app",
+  });
+  expect(second.ok).toBe(true);
+
+  const detail = await store.getTicketDetail({
+    ticketId: created.ticket.ticketId,
+  });
+  expect(detail.syncCheckpoints).toHaveLength(1);
+  expect(
+    detail.events.filter(
+      (event) => event.type === "ticket.sync_checkpoint_recorded"
+    )
+  ).toHaveLength(1);
+});
+
 test("tickets store persists a sqlite projection and rebuilds it when deleted", async () => {
   const projectRoot = await createTempGitProject({
     prefix: "hack-cli-tickets-projection-",

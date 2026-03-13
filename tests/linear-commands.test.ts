@@ -1457,6 +1457,170 @@ test("syncTicketToLinearIssue reuses a linked Linear issue inferred from provena
   expect(updatedIssues).toHaveLength(1);
 });
 
+test("syncTicketToLinearIssue records a deterministic checkpoint idempotency key", async () => {
+  const checkpointInputs: Record<string, unknown>[] = [];
+
+  const runtime = {
+    profileId: "default",
+    apiUrl: "https://api.linear.app/graphql",
+    projectBinding: {
+      teamId: "team-1",
+      additionalProjects: [],
+    },
+    assigneeMappings: [],
+    tickets: {
+      getTicket: async () => ({
+        ticketId: "T-00003",
+        title: "Deterministic checkpoint",
+        body: "Keep checkpoint writes idempotent.",
+        status: "open" as const,
+        createdAt: "2026-03-05T10:00:00.000Z",
+        updatedAt: "2026-03-05T10:00:00.000Z",
+        dependsOn: [],
+        blocks: [],
+        owner: "hack",
+        source: "hack",
+        assignee: "alice@example.com",
+        tags: [],
+        externalSystem: "linear",
+        externalId: "issue-3",
+        externalKey: "ENG-333",
+        externalTeamId: "team-1",
+      }),
+      updateTicket: async () => ({ ok: true as const }),
+      listTickets: async () => [],
+      getTicketDetail: async () => ({
+        ticket: null,
+        events: [],
+        comments: [],
+        reviewNotes: [],
+        syncCheckpoints: [],
+        conflicts: [],
+      }),
+      linkCommentExternalId: async () => ({ ok: true as const }),
+      recordSyncCheckpoint: async (input: Record<string, unknown>) => {
+        checkpointInputs.push(input);
+        return {
+          ok: true as const,
+          checkpoint: {
+            checkpointId: "checkpoint-3",
+            ticketId: "T-00003",
+            provider: "linear",
+            direction: input.direction,
+            actor: "test",
+            createdAt: "2026-03-05T10:10:00.000Z",
+          },
+        };
+      },
+      recordSyncConflict: async () => ({ ok: true as const, conflict: null }),
+    },
+    linear: {
+      getIssueById: async () => ({
+        ok: true as const,
+        data: {
+          id: "issue-3",
+          identifier: "ENG-333",
+          title: "Deterministic checkpoint",
+          description: "Keep checkpoint writes idempotent.",
+          state: {
+            id: "state-1",
+            name: "Todo",
+            type: "unstarted" as const,
+          },
+          teamId: "team-1",
+          assigneeId: "user-1",
+          labels: [],
+        },
+      }),
+      updateIssue: async () => ({
+        ok: true as const,
+        data: {
+          id: "issue-3",
+          identifier: "ENG-333",
+          title: "Deterministic checkpoint",
+          description: "Keep checkpoint writes idempotent.",
+          state: {
+            id: "state-1",
+            name: "Todo",
+            type: "unstarted" as const,
+          },
+          teamId: "team-1",
+          assigneeId: "user-1",
+          labels: [],
+        },
+      }),
+      createIssue: async () => {
+        throw new Error("createIssue should not be called");
+      },
+      listTeamStates: async () => ({
+        ok: true as const,
+        data: [
+          {
+            id: "state-1",
+            name: "Todo",
+            type: "unstarted" as const,
+          },
+        ],
+      }),
+      listTeamLabels: async () => ({
+        ok: true as const,
+        data: [],
+      }),
+      listIssueComments: async () => ({
+        ok: true as const,
+        data: [],
+      }),
+      createComment: async () => {
+        throw new Error("createComment should not be called");
+      },
+      listTeamUsers: async () => ({
+        ok: true as const,
+        data: [
+          {
+            id: "user-1",
+            email: "alice@example.com",
+            displayName: "Alice",
+          },
+        ],
+      }),
+      getIssueByIdentifier: async () => ({ ok: true as const, data: null }),
+      getProject: async () => ({ ok: true as const, data: null }),
+    },
+  };
+
+  const first = await __testOnly.syncTicketToLinearIssue({
+    runtime,
+    ticketId: "T-00003",
+    syncToggles: {
+      labels: false,
+      statuses: true,
+      dependencies: false,
+      projects: true,
+    },
+  });
+  expect(first.ok).toBe(true);
+
+  const second = await __testOnly.syncTicketToLinearIssue({
+    runtime,
+    ticketId: "T-00003",
+    syncToggles: {
+      labels: false,
+      statuses: true,
+      dependencies: false,
+      projects: true,
+    },
+  });
+  expect(second.ok).toBe(true);
+
+  expect(checkpointInputs).toHaveLength(2);
+  expect(checkpointInputs[0]?.idempotencyKey).toBe(
+    checkpointInputs[1]?.idempotencyKey
+  );
+  expect(checkpointInputs[0]?.idempotencyKey).toContain(
+    "linear:checkpoint:T-00003"
+  );
+});
+
 test("runProjectLinearAutosync syncs issue and project deliveries, then applies them", async () => {
   const appliedDeliveryIds: string[] = [];
   const issueSyncCalls: Array<{ issueIdentifier?: string; issueId?: string }> =

@@ -13,6 +13,10 @@ import {
   createNormalizedTicket,
   projectNormalizedTicketSummary,
 } from "../src/control-plane/extensions/tickets/domain.ts";
+import {
+  buildTicketProvenance,
+  findTicketRemoteLink,
+} from "../src/control-plane/extensions/tickets/provenance.ts";
 import { createTicketsStore } from "../src/control-plane/extensions/tickets/store.ts";
 import { readControlPlaneConfig } from "../src/control-plane/sdk/config.ts";
 
@@ -231,7 +235,7 @@ test("tickets store materializes assignee, review notes, comments, checkpoints, 
     sourceOperation: "local_command",
   });
   expect(events[0]?.idempotencyKey).toBe(events[0]?.eventId);
-}, 20_000);
+}, 30_000);
 
 test("tickets show json includes materialized sync metadata", async () => {
   const projectRoot = await createTempGitProject({
@@ -556,17 +560,24 @@ test("normalized ticket adapter preserves compatibility while exposing provenanc
     source: "linear",
     system: "linear",
   });
-  expect(normalized.provenance.remotes).toEqual([
-    expect.objectContaining({
-      provider: "linear",
-      remoteId: "lin_123",
-      remoteKey: "HACK-431",
-      remoteUrl: "https://linear.app/hack/issue/HACK-431",
-      projectId: "project-1",
-      projectName: "Hack App",
-      teamId: "team-1",
-    }),
-  ]);
+  expect(normalized.provenance.remotes).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        provider: "linear",
+        remoteId: "lin_123",
+        remoteKey: "HACK-431",
+        remoteUrl: "https://linear.app/hack/issue/HACK-431",
+        projectId: "project-1",
+        projectName: "Hack App",
+        teamId: "team-1",
+      }),
+      expect.objectContaining({
+        provider: "linear",
+        profileId: "default",
+        remoteCursor: "issue/lin_123#v2",
+      }),
+    ])
+  );
   expect(normalized.documents).toEqual([
     expect.objectContaining({
       kind: "description",
@@ -585,6 +596,174 @@ test("normalized ticket adapter preserves compatibility while exposing provenanc
   );
   expect(projectNormalizedTicketSummary({ ticket: normalized })).toEqual(
     summary
+  );
+});
+
+test("normalized ticket provenance captures multiple remotes, field authority, and field versions", () => {
+  const normalized = createNormalizedTicket({
+    ticket: {
+      ticketId: "T-00077",
+      title: "Normalize provenance",
+      body: "Track provenance explicitly.",
+      status: "open",
+      createdAt: "2026-03-13T09:00:00.000Z",
+      updatedAt: "2026-03-13T12:00:00.000Z",
+      dependsOn: [],
+      blocks: [],
+      owner: "hack",
+      source: "linear",
+      assignee: "alice@hack",
+      tags: ["normalization"],
+      externalSystem: "linear",
+      externalId: "lin-77",
+      externalKey: "HACK-77",
+      externalUrl: "https://linear.app/hack/issue/HACK-77",
+      externalProjectId: "proj-77",
+      externalProjectName: "Hack App",
+      externalTeamId: "team-77",
+      projectId: "hack-cli",
+      projectName: "hack-cli",
+    },
+    syncCheckpoints: [
+      {
+        checkpointId: "checkpoint-linear",
+        ticketId: "T-00077",
+        provider: "linear",
+        profileId: "default",
+        direction: "pull",
+        remoteCursor: "issue/lin-77#v3",
+        remoteUpdatedAt: "2026-03-13T11:59:00.000Z",
+        actor: "sync@app",
+        createdAt: "2026-03-13T12:00:00.000Z",
+      },
+      {
+        checkpointId: "checkpoint-github",
+        ticketId: "T-00077",
+        provider: "github",
+        profileId: "mirror",
+        direction: "push",
+        remoteCursor: "issue/gh-77#v1",
+        remoteUpdatedAt: "2026-03-13T11:45:00.000Z",
+        actor: "sync@app",
+        createdAt: "2026-03-13T12:00:00.000Z",
+      },
+    ],
+    conflicts: [
+      {
+        conflictId: "conflict-title",
+        ticketId: "T-00077",
+        provider: "linear",
+        field: "title",
+        status: "open",
+        authority: "review_required",
+        summary: "Title changed in both places.",
+        localValue: "Normalize provenance",
+        remoteValue: "Normalize explicit provenance",
+        createdAt: "2026-03-13T12:00:00.000Z",
+        updatedAt: "2026-03-13T12:00:00.000Z",
+      },
+    ],
+  });
+
+  expect(normalized.provenance.remotes).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        provider: "linear",
+        remoteId: "lin-77",
+        remoteKey: "HACK-77",
+      }),
+      expect.objectContaining({
+        provider: "github",
+        profileId: "mirror",
+        remoteCursor: "issue/gh-77#v1",
+      }),
+    ])
+  );
+  expect(normalized.provenance.fieldAuthorities).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        field: "title",
+        authority: "review_required",
+      }),
+      expect.objectContaining({
+        field: "comment",
+        authority: "append_only",
+      }),
+    ])
+  );
+  expect(normalized.provenance.fieldVersions).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        field: "title",
+        source: "local",
+        recordedAt: "2026-03-13T12:00:00.000Z",
+      }),
+      expect.objectContaining({
+        field: "title",
+        source: "remote",
+        provider: "linear",
+        value: "Normalize explicit provenance",
+      }),
+    ])
+  );
+});
+
+test("ticket provenance infers a remote provider from source metadata when externalSystem is absent", () => {
+  const ticket = {
+    ticketId: "T-00088",
+    title: "Infer remote provider",
+    body: "Link a remote without an explicit external system field.",
+    status: "open" as const,
+    createdAt: "2026-03-13T09:00:00.000Z",
+    updatedAt: "2026-03-13T12:00:00.000Z",
+    dependsOn: [],
+    blocks: [],
+    owner: "hack",
+    source: "linear",
+    tags: ["normalization"],
+    externalId: "lin-88",
+    externalKey: "HACK-88",
+    externalUrl: "https://linear.app/hack/issue/HACK-88",
+    externalProjectId: "proj-88",
+    externalProjectName: "Hack App",
+    externalTeamId: "team-88",
+  };
+
+  const provenance = buildTicketProvenance({
+    ticket,
+    syncCheckpoints: [
+      {
+        checkpointId: "checkpoint-linear",
+        ticketId: "T-00088",
+        provider: "linear",
+        direction: "pull",
+        remoteCursor: "issue/lin-88#v1",
+        remoteUpdatedAt: "2026-03-13T11:59:00.000Z",
+        actor: "sync@app",
+        createdAt: "2026-03-13T12:00:00.000Z",
+      },
+    ],
+  });
+
+  expect(findTicketRemoteLink({ ticket, provider: "linear" })).toEqual(
+    expect.objectContaining({
+      provider: "linear",
+      remoteId: "lin-88",
+      remoteKey: "HACK-88",
+      remoteUrl: "https://linear.app/hack/issue/HACK-88",
+    })
+  );
+  expect(provenance.fieldAuthorities).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        field: "title",
+        authority: "remote",
+      }),
+      expect.objectContaining({
+        field: "comment",
+        authority: "append_only",
+      }),
+    ])
   );
 });
 

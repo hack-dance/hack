@@ -1,3 +1,7 @@
+import {
+  buildTicketProvenance,
+  projectRemoteLinkToCompatibilityFields,
+} from "./provenance.ts";
 import { sha256Hex } from "./util.ts";
 
 export type TicketStatus = "open" | "in_progress" | "blocked" | "done";
@@ -82,9 +86,32 @@ export type TicketRemoteLink = {
   readonly remoteId?: string;
   readonly remoteKey?: string;
   readonly remoteUrl?: string;
+  readonly profileId?: string;
   readonly projectId?: string;
   readonly projectName?: string;
   readonly teamId?: string;
+  readonly remoteCursor?: string;
+  readonly remoteUpdatedAt?: string;
+};
+
+export type TicketFieldAuthority =
+  | "local"
+  | "remote"
+  | "append_only"
+  | "derived"
+  | "review_required";
+
+export type TicketFieldAuthorityEntry = {
+  readonly field: string;
+  readonly authority: TicketFieldAuthority;
+};
+
+export type TicketFieldVersion = {
+  readonly field: string;
+  readonly source: "local" | "remote";
+  readonly provider?: string;
+  readonly recordedAt: string;
+  readonly value?: TicketMetadataValue;
 };
 
 export type TicketDocumentKind = "description" | "spec" | "notes";
@@ -120,6 +147,8 @@ export type NormalizedTicket = {
   readonly provenance: {
     readonly origin: TicketOrigin;
     readonly remotes: readonly TicketRemoteLink[];
+    readonly fieldAuthorities: readonly TicketFieldAuthorityEntry[];
+    readonly fieldVersions: readonly TicketFieldVersion[];
   };
   readonly documents: readonly TicketDocument[];
   readonly fieldStates: readonly TicketFieldState[];
@@ -134,14 +163,14 @@ export function createNormalizedTicket(input: {
   readonly syncCheckpoints?: readonly TicketSyncCheckpointCompatibility[];
   readonly conflicts?: readonly TicketSyncConflictCompatibility[];
 }): NormalizedTicket {
-  const sourceSystem = inferSourceSystem({ ticket: input.ticket });
   const documents = buildDocuments({ ticket: input.ticket });
-  const remotes = buildRemoteLinks({
-    ticket: input.ticket,
-    sourceSystem,
-  });
   const checkpoints = input.syncCheckpoints ?? [];
   const conflicts = input.conflicts ?? [];
+  const provenance = buildTicketProvenance({
+    ticket: input.ticket,
+    syncCheckpoints: checkpoints,
+    conflicts,
+  });
 
   return {
     identity: {
@@ -159,16 +188,12 @@ export function createNormalizedTicket(input: {
     blocks: [...input.ticket.blocks],
     ...(input.ticket.assignee ? { assignee: input.ticket.assignee } : {}),
     tags: [...input.ticket.tags],
-    provenance: {
-      origin: {
-        owner: input.ticket.owner,
-        source: input.ticket.source,
-        system: sourceSystem,
-      },
-      remotes,
-    },
+    provenance,
     documents,
-    fieldStates: buildFieldStates({ remotes, conflicts }),
+    fieldStates: buildFieldStates({
+      fieldAuthorities: provenance.fieldAuthorities,
+      conflicts,
+    }),
     sync: {
       checkpoints: [...checkpoints],
       conflicts: [...conflicts],
@@ -198,27 +223,9 @@ export function projectNormalizedTicketSummary(input: {
     ...(input.ticket.assignee ? { assignee: input.ticket.assignee } : {}),
     tags: [...input.ticket.tags],
     ...(primaryRemote
-      ? {
-          externalSystem: primaryRemote.provider,
-          ...(primaryRemote.remoteId
-            ? { externalId: primaryRemote.remoteId }
-            : {}),
-          ...(primaryRemote.remoteKey
-            ? { externalKey: primaryRemote.remoteKey }
-            : {}),
-          ...(primaryRemote.remoteUrl
-            ? { externalUrl: primaryRemote.remoteUrl }
-            : {}),
-          ...(primaryRemote.projectId
-            ? { externalProjectId: primaryRemote.projectId }
-            : {}),
-          ...(primaryRemote.projectName
-            ? { externalProjectName: primaryRemote.projectName }
-            : {}),
-          ...(primaryRemote.teamId
-            ? { externalTeamId: primaryRemote.teamId }
-            : {}),
-        }
+      ? projectRemoteLinkToCompatibilityFields({
+          remote: primaryRemote,
+        })
       : {}),
     ...(input.ticket.identity.projectId
       ? { projectId: input.ticket.identity.projectId }
@@ -227,21 +234,6 @@ export function projectNormalizedTicketSummary(input: {
       ? { projectName: input.ticket.identity.projectName }
       : {}),
   };
-}
-
-function inferSourceSystem(input: {
-  readonly ticket: TicketSummaryCompatibility;
-}): string {
-  if (input.ticket.externalSystem) {
-    return input.ticket.externalSystem;
-  }
-  if (input.ticket.source !== "hack") {
-    return input.ticket.source;
-  }
-  if (input.ticket.owner !== "hack") {
-    return input.ticket.owner;
-  }
-  return "hack";
 }
 
 function buildDocuments(input: {
@@ -266,71 +258,21 @@ function buildDocuments(input: {
   ];
 }
 
-function buildRemoteLinks(input: {
-  readonly ticket: TicketSummaryCompatibility;
-  readonly sourceSystem: string;
-}): TicketRemoteLink[] {
-  if (
-    !(
-      input.ticket.externalSystem ||
-      input.ticket.externalId ||
-      input.ticket.externalKey ||
-      input.ticket.externalUrl ||
-      input.ticket.externalProjectId ||
-      input.ticket.externalProjectName ||
-      input.ticket.externalTeamId
-    )
-  ) {
-    return [];
-  }
-
-  return [
-    {
-      provider: input.ticket.externalSystem ?? input.sourceSystem,
-      ...(input.ticket.externalId ? { remoteId: input.ticket.externalId } : {}),
-      ...(input.ticket.externalKey
-        ? { remoteKey: input.ticket.externalKey }
-        : {}),
-      ...(input.ticket.externalUrl
-        ? { remoteUrl: input.ticket.externalUrl }
-        : {}),
-      ...(input.ticket.externalProjectId
-        ? { projectId: input.ticket.externalProjectId }
-        : {}),
-      ...(input.ticket.externalProjectName
-        ? { projectName: input.ticket.externalProjectName }
-        : {}),
-      ...(input.ticket.externalTeamId
-        ? { teamId: input.ticket.externalTeamId }
-        : {}),
-    },
-  ];
-}
-
 function buildFieldStates(input: {
-  readonly remotes: readonly TicketRemoteLink[];
+  readonly fieldAuthorities: readonly TicketFieldAuthorityEntry[];
   readonly conflicts: readonly TicketSyncConflictCompatibility[];
 }): TicketFieldState[] {
-  const defaultAuthority = input.remotes.length > 0 ? "remote" : "local";
-  const byField = new Map<string, TicketFieldState>();
-
-  for (const field of ["title", "status", "assignee", "description"]) {
-    byField.set(field, {
-      field,
-      authority: defaultAuthority,
-      conflictIds: [],
-    });
-  }
-
-  for (const conflict of input.conflicts) {
-    const current = byField.get(conflict.field);
-    const conflictIds = [...(current?.conflictIds ?? []), conflict.conflictId];
-    byField.set(conflict.field, {
-      field: conflict.field,
-      authority: conflict.authority ?? current?.authority ?? defaultAuthority,
-      conflictIds,
-    });
-  }
-
-  return [...byField.values()];
+  return input.fieldAuthorities
+    .filter((fieldAuthority) =>
+      ["title", "status", "assignee", "description"].includes(
+        fieldAuthority.field
+      )
+    )
+    .map((fieldAuthority) => ({
+      field: fieldAuthority.field,
+      authority: fieldAuthority.authority,
+      conflictIds: input.conflicts
+        .filter((conflict) => conflict.field === fieldAuthority.field)
+        .map((conflict) => conflict.conflictId),
+    }));
 }

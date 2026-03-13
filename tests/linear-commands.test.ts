@@ -1310,6 +1310,153 @@ test("syncTicketToLinearIssue pushes missing local comments and records a checkp
   expect(updatedIssues[0]?.assigneeId).toBe("user-1");
 });
 
+test("syncTicketToLinearIssue reuses a linked Linear issue inferred from provenance metadata", async () => {
+  const updatedIssues: Record<string, unknown>[] = [];
+
+  const runtime = {
+    profileId: "default",
+    apiUrl: "https://api.linear.app/graphql",
+    projectBinding: {
+      teamId: "team-1",
+      additionalProjects: [],
+    },
+    assigneeMappings: [],
+    tickets: {
+      getTicket: async () => ({
+        ticketId: "T-00002",
+        title: "Synced from Linear",
+        body: "Keep using the existing Linear issue.",
+        status: "open" as const,
+        createdAt: "2026-03-05T10:00:00.000Z",
+        updatedAt: "2026-03-05T10:00:00.000Z",
+        dependsOn: [],
+        blocks: [],
+        owner: "hack",
+        source: "linear",
+        tags: [],
+        externalId: "issue-2",
+        externalKey: "ENG-222",
+        externalUrl: "https://linear.app/hack/issue/ENG-222",
+        externalProjectId: "proj-2",
+        externalTeamId: "team-1",
+      }),
+      updateTicket: async () => ({ ok: true as const }),
+      listTickets: async () => [],
+      getTicketDetail: async () => ({
+        ticket: null,
+        events: [],
+        comments: [],
+        reviewNotes: [],
+        syncCheckpoints: [],
+        conflicts: [],
+      }),
+      linkCommentExternalId: async () => ({ ok: true as const }),
+      recordSyncCheckpoint: async () => ({
+        ok: true as const,
+        checkpoint: {
+          checkpointId: "checkpoint-2",
+          ticketId: "T-00002",
+          provider: "linear",
+          direction: "hack_to_linear",
+          actor: "test",
+          createdAt: "2026-03-05T10:10:00.000Z",
+        },
+      }),
+      recordSyncConflict: async () => ({ ok: true as const, conflict: null }),
+    },
+    linear: {
+      getIssueById: async () => ({
+        ok: true as const,
+        data: {
+          id: "issue-2",
+          identifier: "ENG-222",
+          title: "Synced from Linear",
+          description: "Keep using the existing Linear issue.",
+          state: {
+            id: "state-1",
+            name: "Todo",
+            type: "unstarted" as const,
+          },
+          url: "https://linear.app/hack/issue/ENG-222",
+          teamId: "team-1",
+          projectId: "proj-2",
+          labels: [],
+        },
+      }),
+      getIssueByIdentifier: async () => ({ ok: true as const, data: null }),
+      updateIssue: async (input: Record<string, unknown>) => {
+        updatedIssues.push(input);
+        return {
+          ok: true as const,
+          data: {
+            id: "issue-2",
+            identifier: "ENG-222",
+            title: "Synced from Linear",
+            description: "Keep using the existing Linear issue.",
+            state: {
+              id: "state-1",
+              name: "Todo",
+              type: "unstarted" as const,
+            },
+            url: "https://linear.app/hack/issue/ENG-222",
+            teamId: "team-1",
+            projectId: "proj-2",
+            labels: [],
+          },
+        };
+      },
+      createIssue: async () => {
+        throw new Error("createIssue should not be called");
+      },
+      listTeamStates: async () => ({
+        ok: true as const,
+        data: [
+          {
+            id: "state-1",
+            name: "Todo",
+            type: "unstarted" as const,
+          },
+        ],
+      }),
+      listTeamLabels: async () => ({
+        ok: true as const,
+        data: [],
+      }),
+      listIssueComments: async () => ({
+        ok: true as const,
+        data: [],
+      }),
+      createComment: async () => {
+        throw new Error("createComment should not be called");
+      },
+      listTeamUsers: async () => ({
+        ok: true as const,
+        data: [],
+      }),
+      getProject: async () => ({ ok: true as const, data: null }),
+    },
+  };
+
+  const result = await __testOnly.syncTicketToLinearIssue({
+    runtime,
+    ticketId: "T-00002",
+    syncToggles: {
+      labels: false,
+      statuses: true,
+      dependencies: false,
+      projects: true,
+    },
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  expect(result.operation).toBe("updated");
+  expect(updatedIssues).toHaveLength(1);
+});
+
 test("runProjectLinearAutosync syncs issue and project deliveries, then applies them", async () => {
   const appliedDeliveryIds: string[] = [];
   const issueSyncCalls: Array<{ issueIdentifier?: string; issueId?: string }> =

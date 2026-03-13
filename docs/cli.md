@@ -959,6 +959,12 @@ GitHub profile precedence for `--pr`:
 2. Project `controlPlane.routing.overrides.github.profile`.
 3. Global `controlPlane.extensions["dance.hack.github"].config.defaultProfile`.
 
+Scope note for `--pr`:
+
+- `hack dispatch run --pr` currently covers the PR update workflow only: push the branch, then create or update the PR.
+- It does not imply broader GitHub workflow support such as review submission, standalone PR comments, merge actions, or repo-admin actions.
+- The broader first-class GitHub workflow model lives in the GitHub extension docs and `docs/plans/2026-03-13-github-first-class-workflows-design.md`, and is intentionally sequenced beyond the current `--pr` path.
+
 #### hack dispatch status
 
 Usage: `hack dispatch status <run-id> [--json]`

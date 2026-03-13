@@ -126,7 +126,9 @@ Tip: use `--body-stdin` for multi-line markdown.
 ## How it works
 
 - Ticket history is an append-only event log (`ticket.created`, etc.) stored as monthly JSONL files.
-- The extension reads events, materializes tickets in-memory, and renders `list/show` outputs.
+- Each event carries a normalized journal envelope (`eventId`, schema version, occurrence/recording times, source metadata, and idempotency key).
+- The journal is the portable source of truth for tickets.
+- The extension projects journal state into a local SQLite cache for durable reads and rebuilds that cache automatically when it is missing or stale.
 - Ticket writes automatically commit and push to the tickets ref when git sync is enabled and a remote exists.
 - `sync` normalizes the event logs, commits, and pushes the tickets ref.
 
@@ -135,8 +137,15 @@ Tip: use `--body-stdin` for multi-line markdown.
 In your project repo:
 
 - `.hack/tickets/events/events-YYYY-MM.jsonl` — event log segments (UTC month)
+- `.hack/tickets/projection.sqlite` — local SQLite projection cache rebuilt from the journal
 - `.hack/tickets/git/bare.git` — a bare repo used to manage the tickets ref
 - `.hack/tickets/git/worktree` — a worktree used for reading/writing ticket data
+
+Portability rules:
+
+- Only the journal under `.hack/tickets/events/` is portable ticket state.
+- The SQLite projection is local-only and can be deleted safely.
+- After sync or clone, peers rebuild `.hack/tickets/projection.sqlite` from the journal on first read.
 
 ## Configuration
 

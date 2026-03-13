@@ -5,6 +5,10 @@ import { resolve } from "node:path";
 
 import { isRecord } from "../../../lib/guards.ts";
 import type { ControlPlaneConfig } from "../../sdk/config.ts";
+import {
+  createNormalizedTicket,
+  projectNormalizedTicketSummary,
+} from "./domain.ts";
 import { createGitTicketsChannel } from "./tickets-git-channel.ts";
 import {
   formatTicketId,
@@ -106,9 +110,18 @@ export type TicketSyncConflict = {
 
 export type TicketEvent = {
   readonly eventId: string;
+  readonly schemaVersion: number;
   readonly ts: number;
   readonly tsIso: string;
+  readonly eventType: string;
+  readonly occurredAt: string;
+  readonly recordedAt: string;
   readonly actor: string;
+  readonly sourceSystem: string;
+  readonly sourceOperation: string;
+  readonly idempotencyKey: string;
+  readonly causationId?: string;
+  readonly correlationId?: string;
   readonly orderKey?: string;
   readonly projectId?: string;
   readonly projectName?: string;
@@ -156,6 +169,16 @@ type MaterializedTicketState = {
   readonly syncCheckpointsByTicket: Map<string, TicketSyncCheckpoint[]>;
   readonly conflictsByTicket: Map<string, TicketSyncConflict[]>;
 };
+
+function normalizeTicketSummaryCompatibility(input: {
+  readonly ticket: TicketSummary;
+}): TicketSummary {
+  return projectNormalizedTicketSummary({
+    ticket: createNormalizedTicket({
+      ticket: input.ticket,
+    }),
+  });
+}
 
 export function createTicketsStore(opts: {
   readonly projectRoot: string;
@@ -316,15 +339,32 @@ export function createTicketsStore(opts: {
     readonly type: string;
     readonly payload: Record<string, unknown>;
     readonly actor?: string;
+    readonly occurredAt?: string;
+    readonly sourceSystem?: string;
+    readonly sourceOperation?: string;
+    readonly idempotencyKey?: string;
+    readonly causationId?: string;
+    readonly correlationId?: string;
   }): TicketEvent => {
     const ts = unixSeconds();
+    const recordedAt = new Date(ts * 1000).toISOString();
+    const eventId = randomUUID();
     const orderKey = `${Date.now()}-${String(eventSequence).padStart(6, "0")}`;
     eventSequence += 1;
     return {
-      eventId: randomUUID(),
+      eventId,
+      schemaVersion: 1,
       ts,
-      tsIso: new Date(ts * 1000).toISOString(),
+      tsIso: recordedAt,
+      eventType: input.type,
+      occurredAt: input.occurredAt ?? recordedAt,
+      recordedAt,
       actor: resolveActor(input.actor),
+      sourceSystem: input.sourceSystem ?? "hack",
+      sourceOperation: input.sourceOperation ?? "local_command",
+      idempotencyKey: input.idempotencyKey ?? eventId,
+      ...(input.causationId ? { causationId: input.causationId } : {}),
+      ...(input.correlationId ? { correlationId: input.correlationId } : {}),
       orderKey,
       ...(opts.projectId ? { projectId: opts.projectId } : {}),
       ...(opts.projectName ? { projectName: opts.projectName } : {}),
@@ -346,6 +386,8 @@ export function createTicketsStore(opts: {
     }
 
     const events: TicketEvent[] = [];
+    const seenEventIds = new Set<string>();
+    const seenIdempotencyKeys = new Set<string>();
     for (const filename of entries.sort()) {
       const path = resolve(eventsDir, filename);
       const text = await Bun.file(path)
@@ -358,13 +400,27 @@ export function createTicketsStore(opts: {
         }
         const parsed = safeJsonParse(trimmed);
         const event = parseEvent(parsed);
-        if (event) {
-          events.push(event);
+        if (!event || seenEventIds.has(event.eventId)) {
+          continue;
         }
+        if (seenIdempotencyKeys.has(event.idempotencyKey)) {
+          continue;
+        }
+        seenEventIds.add(event.eventId);
+        seenIdempotencyKeys.add(event.idempotencyKey);
+        events.push(event);
       }
     }
 
     events.sort((a, b) => {
+      if (a.ticketId === b.ticketId && a.type !== b.type) {
+        if (a.type === "ticket.created") {
+          return -1;
+        }
+        if (b.type === "ticket.created") {
+          return 1;
+        }
+      }
       if (a.ts !== b.ts) {
         return a.ts - b.ts;
       }
@@ -539,29 +595,31 @@ export function createTicketsStore(opts: {
 
       return {
         ok: true,
-        ticket: {
-          ticketId,
-          title: input.title,
-          ...(input.body ? { body: input.body } : {}),
-          status: "open",
-          createdAt: event.tsIso,
-          updatedAt: event.tsIso,
-          dependsOn,
-          blocks,
-          owner,
-          source,
-          ...(assignee ? { assignee } : {}),
-          tags,
-          ...(externalSystem ? { externalSystem } : {}),
-          ...(externalId ? { externalId } : {}),
-          ...(externalKey ? { externalKey } : {}),
-          ...(externalUrl ? { externalUrl } : {}),
-          ...(externalProjectId ? { externalProjectId } : {}),
-          ...(externalProjectName ? { externalProjectName } : {}),
-          ...(externalTeamId ? { externalTeamId } : {}),
-          ...(opts.projectId ? { projectId: opts.projectId } : {}),
-          ...(opts.projectName ? { projectName: opts.projectName } : {}),
-        },
+        ticket: normalizeTicketSummaryCompatibility({
+          ticket: {
+            ticketId,
+            title: input.title,
+            ...(input.body ? { body: input.body } : {}),
+            status: "open",
+            createdAt: event.tsIso,
+            updatedAt: event.tsIso,
+            dependsOn,
+            blocks,
+            owner,
+            source,
+            ...(assignee ? { assignee } : {}),
+            tags,
+            ...(externalSystem ? { externalSystem } : {}),
+            ...(externalId ? { externalId } : {}),
+            ...(externalKey ? { externalKey } : {}),
+            ...(externalUrl ? { externalUrl } : {}),
+            ...(externalProjectId ? { externalProjectId } : {}),
+            ...(externalProjectName ? { externalProjectName } : {}),
+            ...(externalTeamId ? { externalTeamId } : {}),
+            ...(opts.projectId ? { projectId: opts.projectId } : {}),
+            ...(opts.projectName ? { projectName: opts.projectName } : {}),
+          },
+        }),
       };
     },
 
@@ -1145,31 +1203,36 @@ function applyTicketCreatedEvent(input: {
     value: input.event.payload.externalTeamId,
   });
 
-  input.tickets.set(input.event.ticketId, {
-    ticketId: input.event.ticketId,
-    title,
-    body,
-    status: "open",
-    createdAt: input.event.tsIso,
-    updatedAt: input.event.tsIso,
-    dependsOn,
-    blocks,
-    owner,
-    source,
-    ...(assignee ? { assignee } : {}),
-    tags,
-    ...(externalSystem ? { externalSystem } : {}),
-    ...(externalId ? { externalId } : {}),
-    ...(externalKey ? { externalKey } : {}),
-    ...(externalUrl ? { externalUrl } : {}),
-    ...(externalProjectId ? { externalProjectId } : {}),
-    ...(externalProjectName ? { externalProjectName } : {}),
-    ...(externalTeamId ? { externalTeamId } : {}),
-    ...(input.event.projectId ? { projectId: input.event.projectId } : {}),
-    ...(input.event.projectName
-      ? { projectName: input.event.projectName }
-      : {}),
-  });
+  input.tickets.set(
+    input.event.ticketId,
+    normalizeTicketSummaryCompatibility({
+      ticket: {
+        ticketId: input.event.ticketId,
+        title,
+        body,
+        status: "open",
+        createdAt: input.event.tsIso,
+        updatedAt: input.event.tsIso,
+        dependsOn,
+        blocks,
+        owner,
+        source,
+        ...(assignee ? { assignee } : {}),
+        tags,
+        ...(externalSystem ? { externalSystem } : {}),
+        ...(externalId ? { externalId } : {}),
+        ...(externalKey ? { externalKey } : {}),
+        ...(externalUrl ? { externalUrl } : {}),
+        ...(externalProjectId ? { externalProjectId } : {}),
+        ...(externalProjectName ? { externalProjectName } : {}),
+        ...(externalTeamId ? { externalTeamId } : {}),
+        ...(input.event.projectId ? { projectId: input.event.projectId } : {}),
+        ...(input.event.projectName
+          ? { projectName: input.event.projectName }
+          : {}),
+      },
+    })
+  );
 }
 
 function applyTicketStatusChangedEvent(input: {
@@ -1186,11 +1249,16 @@ function applyTicketStatusChangedEvent(input: {
     return;
   }
 
-  input.tickets.set(input.event.ticketId, {
-    ...current,
-    status,
-    updatedAt: input.event.tsIso,
-  });
+  input.tickets.set(
+    input.event.ticketId,
+    normalizeTicketSummaryCompatibility({
+      ticket: {
+        ...current,
+        status,
+        updatedAt: input.event.tsIso,
+      },
+    })
+  );
 }
 
 function applyTicketUpdatedEvent(input: {
@@ -1263,47 +1331,56 @@ function applyTicketUpdatedEvent(input: {
     key: "externalTeamId",
   });
 
-  input.tickets.set(input.event.ticketId, {
-    ...current,
-    ...(title ? { title } : {}),
-    ...(body !== undefined ? { body } : {}),
-    ...(dependsOn !== null ? { dependsOn } : {}),
-    ...(blocks !== null ? { blocks } : {}),
-    ...(owner !== null
-      ? {
-          owner: normalizeOwnerOrSource({
-            value: owner,
-            fallback: current.owner,
-          }),
-        }
-      : {}),
-    ...(source !== null
-      ? {
-          source: normalizeOwnerOrSource({
-            value: source,
-            fallback: current.source,
-          }),
-        }
-      : {}),
-    ...(assignee !== null ? { assignee: assignee || undefined } : {}),
-    ...(tags !== null ? { tags } : {}),
-    ...(externalSystem !== null
-      ? { externalSystem: externalSystem || undefined }
-      : {}),
-    ...(externalId !== null ? { externalId: externalId || undefined } : {}),
-    ...(externalKey !== null ? { externalKey: externalKey || undefined } : {}),
-    ...(externalUrl !== null ? { externalUrl: externalUrl || undefined } : {}),
-    ...(externalProjectId !== null
-      ? { externalProjectId: externalProjectId || undefined }
-      : {}),
-    ...(externalProjectName !== null
-      ? { externalProjectName: externalProjectName || undefined }
-      : {}),
-    ...(externalTeamId !== null
-      ? { externalTeamId: externalTeamId || undefined }
-      : {}),
-    updatedAt: input.event.tsIso,
-  });
+  input.tickets.set(
+    input.event.ticketId,
+    normalizeTicketSummaryCompatibility({
+      ticket: {
+        ...current,
+        ...(title ? { title } : {}),
+        ...(body !== undefined ? { body } : {}),
+        ...(dependsOn !== null ? { dependsOn } : {}),
+        ...(blocks !== null ? { blocks } : {}),
+        ...(owner !== null
+          ? {
+              owner: normalizeOwnerOrSource({
+                value: owner,
+                fallback: current.owner,
+              }),
+            }
+          : {}),
+        ...(source !== null
+          ? {
+              source: normalizeOwnerOrSource({
+                value: source,
+                fallback: current.source,
+              }),
+            }
+          : {}),
+        ...(assignee !== null ? { assignee: assignee || undefined } : {}),
+        ...(tags !== null ? { tags } : {}),
+        ...(externalSystem !== null
+          ? { externalSystem: externalSystem || undefined }
+          : {}),
+        ...(externalId !== null ? { externalId: externalId || undefined } : {}),
+        ...(externalKey !== null
+          ? { externalKey: externalKey || undefined }
+          : {}),
+        ...(externalUrl !== null
+          ? { externalUrl: externalUrl || undefined }
+          : {}),
+        ...(externalProjectId !== null
+          ? { externalProjectId: externalProjectId || undefined }
+          : {}),
+        ...(externalProjectName !== null
+          ? { externalProjectName: externalProjectName || undefined }
+          : {}),
+        ...(externalTeamId !== null
+          ? { externalTeamId: externalTeamId || undefined }
+          : {}),
+        updatedAt: input.event.tsIso,
+      },
+    })
+  );
 }
 
 function applyTicketCommentAppendedEvent(input: {
@@ -1782,12 +1859,35 @@ function parseEvent(value: unknown): TicketEvent | null {
     return null;
   }
   const eventId = typeof value.eventId === "string" ? value.eventId : "";
+  const schemaVersion =
+    typeof value.schemaVersion === "number" ? value.schemaVersion : 0;
   const ts = typeof value.ts === "number" ? value.ts : Number.NaN;
+  const tsIso = new Date(ts * 1000).toISOString();
   const actor = typeof value.actor === "string" ? value.actor : "";
+  const eventTypeCandidate =
+    typeof value.eventType === "string" ? value.eventType : undefined;
+  const typeCandidate = typeof value.type === "string" ? value.type : undefined;
+  const eventType = eventTypeCandidate ?? typeCandidate ?? "";
+  const occurredAt =
+    typeof value.occurredAt === "string" ? value.occurredAt : tsIso;
+  const recordedAt =
+    typeof value.recordedAt === "string" ? value.recordedAt : tsIso;
   const orderKey =
     typeof value.orderKey === "string" ? value.orderKey : undefined;
+  const sourceSystem =
+    typeof value.sourceSystem === "string" ? value.sourceSystem : "hack";
+  const sourceOperation =
+    typeof value.sourceOperation === "string"
+      ? value.sourceOperation
+      : eventType;
+  const idempotencyKey =
+    typeof value.idempotencyKey === "string" ? value.idempotencyKey : eventId;
+  const causationId =
+    typeof value.causationId === "string" ? value.causationId : undefined;
+  const correlationId =
+    typeof value.correlationId === "string" ? value.correlationId : undefined;
   const ticketId = typeof value.ticketId === "string" ? value.ticketId : "";
-  const type = typeof value.type === "string" ? value.type : "";
+  const type = typeCandidate ?? eventType;
   const payload = isRecord(value.payload)
     ? (value.payload as Record<string, unknown>)
     : null;
@@ -1805,9 +1905,18 @@ function parseEvent(value: unknown): TicketEvent | null {
 
   return {
     eventId,
+    schemaVersion,
     ts,
-    tsIso: new Date(ts * 1000).toISOString(),
+    tsIso,
+    eventType,
+    occurredAt,
+    recordedAt,
     actor,
+    sourceSystem,
+    sourceOperation,
+    idempotencyKey,
+    ...(causationId ? { causationId } : {}),
+    ...(correlationId ? { correlationId } : {}),
     ...(orderKey ? { orderKey } : {}),
     ...(projectId ? { projectId } : {}),
     ...(projectName ? { projectName } : {}),

@@ -631,6 +631,7 @@ export function createGitTicketsChannel(opts: {
         .text()
         .catch(() => "");
       const existingIds = new Set<string>();
+      const existingIdempotencyKeys = new Set<string>();
       for (const line of existing.split("\n")) {
         const trimmed = line.trim();
         if (!trimmed) {
@@ -639,15 +640,29 @@ export function createGitTicketsChannel(opts: {
         const parsed = safeJsonParse(trimmed);
         if (isRecord(parsed) && typeof parsed.eventId === "string") {
           existingIds.add(parsed.eventId);
+          const idempotencyKey =
+            typeof parsed.idempotencyKey === "string"
+              ? parsed.idempotencyKey
+              : parsed.eventId;
+          existingIdempotencyKeys.add(idempotencyKey);
         }
       }
 
       const lines: string[] = [];
+      const pendingIdempotencyKeys = new Set<string>();
       for (const ev of events) {
         const id = typeof ev.eventId === "string" ? ev.eventId : "";
-        if (!id || existingIds.has(id)) {
+        const idempotencyKey =
+          typeof ev.idempotencyKey === "string" ? ev.idempotencyKey : id;
+        if (
+          !id ||
+          existingIds.has(id) ||
+          existingIdempotencyKeys.has(idempotencyKey) ||
+          pendingIdempotencyKeys.has(idempotencyKey)
+        ) {
           continue;
         }
+        pendingIdempotencyKeys.add(idempotencyKey);
         lines.push(stableStringify(ev));
       }
 
@@ -684,6 +699,7 @@ export function createGitTicketsChannel(opts: {
         .catch(() => "");
       const parsed: Record<string, unknown>[] = [];
       const seen = new Set<string>();
+      const seenIdempotencyKeys = new Set<string>();
 
       for (const line of text.split("\n")) {
         const trimmed = line.trim();
@@ -695,14 +711,19 @@ export function createGitTicketsChannel(opts: {
           continue;
         }
         const eventId = typeof value.eventId === "string" ? value.eventId : "";
+        const idempotencyKey =
+          typeof value.idempotencyKey === "string"
+            ? value.idempotencyKey
+            : eventId;
         const ts = typeof value.ts === "number" ? value.ts : Number.NaN;
         if (!(eventId && Number.isFinite(ts))) {
           continue;
         }
-        if (seen.has(eventId)) {
+        if (seen.has(eventId) || seenIdempotencyKeys.has(idempotencyKey)) {
           continue;
         }
         seen.add(eventId);
+        seenIdempotencyKeys.add(idempotencyKey);
         parsed.push(value);
       }
 
@@ -1178,6 +1199,7 @@ function mergeTicketEventLogs(input: {
 }): string {
   const parsed: Record<string, unknown>[] = [];
   const seen = new Set<string>();
+  const seenIdempotencyKeys = new Set<string>();
 
   for (const text of [input.existing, input.incoming]) {
     for (const line of text.split("\n")) {
@@ -1190,14 +1212,19 @@ function mergeTicketEventLogs(input: {
         continue;
       }
       const eventId = typeof value.eventId === "string" ? value.eventId : "";
+      const idempotencyKey =
+        typeof value.idempotencyKey === "string"
+          ? value.idempotencyKey
+          : eventId;
       const ts = typeof value.ts === "number" ? value.ts : Number.NaN;
       if (!(eventId && Number.isFinite(ts))) {
         continue;
       }
-      if (seen.has(eventId)) {
+      if (seen.has(eventId) || seenIdempotencyKeys.has(idempotencyKey)) {
         continue;
       }
       seen.add(eventId);
+      seenIdempotencyKeys.add(idempotencyKey);
       parsed.push(value);
     }
   }

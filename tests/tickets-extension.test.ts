@@ -260,6 +260,58 @@ testIntegration(
   }
 );
 
+testIntegration(
+  "tickets extension: cli rebuilds sqlite projection after local deletion",
+  { timeout: 60_000 },
+  async () => {
+    const root = await mkdirTempDir({
+      prefix: "hack-cli-tickets-projection-e2e-",
+    });
+    const projectDir = join(root, "project");
+
+    await mkdir(projectDir, { recursive: true });
+    await copyDir({
+      from: resolve(import.meta.dir, "../examples/tickets"),
+      to: projectDir,
+    });
+
+    await run({ cwd: projectDir, cmd: ["git", "init"] });
+    await run({
+      cwd: projectDir,
+      cmd: ["git", "config", "user.email", "tests@hack"],
+    });
+    await run({
+      cwd: projectDir,
+      cmd: ["git", "config", "user.name", "hack-cli-tests"],
+    });
+    await run({ cwd: projectDir, cmd: ["git", "add", "-A"] });
+    await run({ cwd: projectDir, cmd: ["git", "commit", "-m", "init"] });
+
+    const created = await runHack({
+      cwd: projectDir,
+      args: ["tickets", "create", "--title", "Projection lifecycle", "--json"],
+    });
+    const createdJson = JSON.parse(created.stdout) as {
+      ticket: { ticketId: string };
+    };
+
+    const projectionPath = join(projectDir, ".hack/tickets/projection.sqlite");
+    expect(await Bun.file(projectionPath).exists()).toBe(true);
+
+    await rm(projectionPath, { force: true });
+    expect(await Bun.file(projectionPath).exists()).toBe(false);
+
+    const shown = await runHack({
+      cwd: projectDir,
+      args: ["tickets", "show", createdJson.ticket.ticketId, "--json"],
+    });
+    expect(shown.exitCode).toBe(0);
+    expect(await Bun.file(projectionPath).exists()).toBe(true);
+
+    await rm(root, { recursive: true, force: true });
+  }
+);
+
 interface RunResult {
   readonly stdout: string;
   readonly stderr: string;

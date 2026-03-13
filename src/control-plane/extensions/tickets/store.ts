@@ -9,6 +9,7 @@ import {
   createNormalizedTicket,
   projectNormalizedTicketSummary,
 } from "./domain.ts";
+import { createTicketsSqliteProjection } from "./sqlite-projection.ts";
 import { createGitTicketsChannel } from "./tickets-git-channel.ts";
 import {
   formatTicketId,
@@ -170,6 +171,11 @@ type MaterializedTicketState = {
   readonly conflictsByTicket: Map<string, TicketSyncConflict[]>;
 };
 
+type TicketStoreContext = {
+  readonly events: readonly TicketEvent[];
+  readonly snapshot: TicketStoreSnapshot;
+};
+
 function normalizeTicketSummaryCompatibility(input: {
   readonly ticket: TicketSummary;
 }): TicketSummary {
@@ -323,6 +329,9 @@ export function createTicketsStore(opts: {
     config: opts.controlPlaneConfig.tickets.git,
     logger: opts.logger,
   });
+  const projection = createTicketsSqliteProjection({
+    projectRoot: opts.projectRoot,
+  });
   let eventSequence = 0;
 
   const resolveActor = (override?: string): string => {
@@ -374,9 +383,10 @@ export function createTicketsStore(opts: {
     };
   };
 
-  const readAllEvents = async (): Promise<readonly TicketEvent[]> => {
-    const root = await git.ensureCheckedOut();
-    const eventsDir = resolve(root, ".hack/tickets/events");
+  const readAllEventsFromRoot = async (input: {
+    readonly root: string;
+  }): Promise<readonly TicketEvent[]> => {
+    const eventsDir = resolve(input.root, ".hack/tickets/events");
 
     let entries: string[] = [];
     try {
@@ -432,11 +442,6 @@ export function createTicketsStore(opts: {
     return events;
   };
 
-  const materializeTickets = async (): Promise<Map<string, TicketSummary>> => {
-    const events = await readAllEvents();
-    return materializeSnapshotFromEvents({ events }).tickets;
-  };
-
   const materializeSnapshotFromEvents = (input: {
     readonly events: readonly TicketEvent[];
   }): MaterializedTicketState => {
@@ -490,12 +495,101 @@ export function createTicketsStore(opts: {
     return out;
   };
 
+  const buildStoreSnapshot = (input: {
+    readonly events: readonly TicketEvent[];
+    readonly materialized: MaterializedTicketState;
+  }): TicketStoreSnapshot => {
+    return {
+      tickets: sortTickets({ tickets: input.materialized.tickets.values() }),
+      eventsByTicket: groupEventsByTicket({ events: input.events }),
+      commentsByTicket: input.materialized.commentsByTicket,
+      reviewNotesByTicket: input.materialized.reviewNotesByTicket,
+      syncCheckpointsByTicket: input.materialized.syncCheckpointsByTicket,
+      conflictsByTicket: input.materialized.conflictsByTicket,
+    };
+  };
+
+  const rebuildProjectionFromJournal = async (): Promise<
+    | { readonly ok: true; readonly context: TicketStoreContext }
+    | {
+        readonly ok: false;
+        readonly error: string;
+      }
+  > => {
+    try {
+      const root = await git.ensureCheckedOut();
+      const events = await readAllEventsFromRoot({ root });
+      const materialized = materializeSnapshotFromEvents({ events });
+      const snapshot = buildStoreSnapshot({ events, materialized });
+      const journalSignature = await projection.computeJournalSignature({
+        ticketsRoot: root,
+      });
+      await projection.replaceSnapshot({
+        journalSignature,
+        snapshot,
+      });
+      return {
+        ok: true,
+        context: {
+          events,
+          snapshot,
+        },
+      };
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Failed to rebuild tickets sqlite projection";
+      return {
+        ok: false,
+        error: message,
+      };
+    }
+  };
+
+  const loadStoreContext = async (): Promise<TicketStoreContext> => {
+    const root = await git.ensureCheckedOut();
+    const journalSignature = await projection.computeJournalSignature({
+      ticketsRoot: root,
+    });
+    const persisted = await projection.readSnapshot({
+      journalSignature,
+    });
+    if (persisted) {
+      const events = [...persisted.eventsByTicket.values()].flat();
+      return {
+        events,
+        snapshot: persisted,
+      };
+    }
+
+    const rebuilt = await rebuildProjectionFromJournal();
+    if (rebuilt.ok) {
+      return rebuilt.context;
+    }
+
+    const events = await readAllEventsFromRoot({ root });
+    const materialized = materializeSnapshotFromEvents({ events });
+    return {
+      events,
+      snapshot: buildStoreSnapshot({ events, materialized }),
+    };
+  };
+
+  const materializeTickets = async (): Promise<Map<string, TicketSummary>> => {
+    const context = await loadStoreContext();
+    return new Map(
+      context.snapshot.tickets.map(
+        (ticket) => [ticket.ticketId, ticket] as const
+      )
+    );
+  };
+
   const computeNextTicketId = async (): Promise<string> => {
-    const events = await readAllEvents();
-    const snapshot = materializeSnapshotFromEvents({ events });
+    const { snapshot } = await loadStoreContext();
     let max = 0;
-    for (const ticketId of snapshot.tickets.keys()) {
-      const n = parseTicketNumber(ticketId);
+    for (const ticket of snapshot.tickets) {
+      const n = parseTicketNumber(ticket.ticketId);
       if (n !== null && n > max) {
         max = n;
       }
@@ -523,7 +617,35 @@ export function createTicketsStore(opts: {
       actor: input.actor,
     });
 
-    return await git.appendEvents({ events: [event] });
+    const wrote = await git.appendEvents({ events: [event] });
+    if (!wrote.ok) {
+      return wrote;
+    }
+
+    const rebuilt = await rebuildProjectionFromJournal();
+    if (!rebuilt.ok) {
+      return rebuilt;
+    }
+
+    return { ok: true };
+  };
+
+  const appendEventsAndRefresh = async (input: {
+    readonly events: readonly TicketEvent[];
+  }): Promise<
+    { readonly ok: true } | { readonly ok: false; readonly error: string }
+  > => {
+    const wrote = await git.appendEvents({ events: input.events });
+    if (!wrote.ok) {
+      return wrote;
+    }
+
+    const rebuilt = await rebuildProjectionFromJournal();
+    if (!rebuilt.ok) {
+      return rebuilt;
+    }
+
+    return { ok: true };
   };
 
   return {
@@ -588,7 +710,7 @@ export function createTicketsStore(opts: {
         actor: input.actor,
       });
 
-      const wrote = await git.appendEvents({ events: [event] });
+      const wrote = await appendEventsAndRefresh({ events: [event] });
       if (!wrote.ok) {
         return wrote;
       }
@@ -715,32 +837,33 @@ export function createTicketsStore(opts: {
         actor: input.actor,
       });
 
-      return await git.appendEvents({ events: [event] });
+      return await appendEventsAndRefresh({ events: [event] });
     },
 
     listTickets: async () => {
-      const events = await readAllEvents();
-      const snapshot = materializeSnapshotFromEvents({ events });
-      return sortTickets({ tickets: snapshot.tickets.values() });
+      const { snapshot } = await loadStoreContext();
+      return snapshot.tickets;
     },
 
     getTicket: async ({ ticketId }) => {
-      const events = await readAllEvents();
-      const snapshot = materializeSnapshotFromEvents({ events });
-      return snapshot.tickets.get(ticketId) ?? null;
+      const { snapshot } = await loadStoreContext();
+      return (
+        snapshot.tickets.find((ticket) => ticket.ticketId === ticketId) ?? null
+      );
     },
 
     listEvents: async ({ ticketId }) => {
-      const events = await readAllEvents();
-      return events.filter((event) => event.ticketId === ticketId);
+      const { snapshot } = await loadStoreContext();
+      return snapshot.eventsByTicket.get(ticketId) ?? [];
     },
 
     getTicketDetail: async ({ ticketId }) => {
-      const events = await readAllEvents();
-      const snapshot = materializeSnapshotFromEvents({ events });
+      const { snapshot } = await loadStoreContext();
       return {
-        ticket: snapshot.tickets.get(ticketId) ?? null,
-        events: events.filter((event) => event.ticketId === ticketId),
+        ticket:
+          snapshot.tickets.find((ticket) => ticket.ticketId === ticketId) ??
+          null,
+        events: snapshot.eventsByTicket.get(ticketId) ?? [],
         comments: snapshot.commentsByTicket.get(ticketId) ?? [],
         reviewNotes: snapshot.reviewNotesByTicket.get(ticketId) ?? [],
         syncCheckpoints: snapshot.syncCheckpointsByTicket.get(ticketId) ?? [],
@@ -784,7 +907,7 @@ export function createTicketsStore(opts: {
         actor: input.actor,
       });
 
-      const wrote = await git.appendEvents({ events: [event] });
+      const wrote = await appendEventsAndRefresh({ events: [event] });
       if (!wrote.ok) {
         return wrote;
       }
@@ -830,7 +953,7 @@ export function createTicketsStore(opts: {
         actor: input.actor,
       });
 
-      const wrote = await git.appendEvents({ events: [event] });
+      const wrote = await appendEventsAndRefresh({ events: [event] });
       if (!wrote.ok) {
         return wrote;
       }
@@ -849,8 +972,7 @@ export function createTicketsStore(opts: {
     },
 
     linkCommentExternalId: async (input) => {
-      const detail = await readAllEvents();
-      const snapshot = materializeSnapshotFromEvents({ events: detail });
+      const { snapshot } = await loadStoreContext();
       const comments = snapshot.commentsByTicket.get(input.ticketId) ?? [];
       const current = comments.find(
         (comment) => comment.commentId === input.commentId
@@ -879,7 +1001,7 @@ export function createTicketsStore(opts: {
         actor: input.actor,
       });
 
-      return await git.appendEvents({ events: [event] });
+      return await appendEventsAndRefresh({ events: [event] });
     },
 
     recordSyncCheckpoint: async (input) => {
@@ -926,7 +1048,7 @@ export function createTicketsStore(opts: {
         actor: input.actor,
       });
 
-      const wrote = await git.appendEvents({ events: [event] });
+      const wrote = await appendEventsAndRefresh({ events: [event] });
       if (!wrote.ok) {
         return wrote;
       }
@@ -993,7 +1115,7 @@ export function createTicketsStore(opts: {
         actor: input.actor,
       });
 
-      const wrote = await git.appendEvents({ events: [event] });
+      const wrote = await appendEventsAndRefresh({ events: [event] });
       if (!wrote.ok) {
         return wrote;
       }
@@ -1021,8 +1143,7 @@ export function createTicketsStore(opts: {
     },
 
     resolveSyncConflict: async (input) => {
-      const detail = await readAllEvents();
-      const snapshot = materializeSnapshotFromEvents({ events: detail });
+      const { snapshot } = await loadStoreContext();
       const conflicts = snapshot.conflictsByTicket.get(input.ticketId) ?? [];
       const current = conflicts.find(
         (conflict) => conflict.conflictId === input.conflictId
@@ -1045,20 +1166,12 @@ export function createTicketsStore(opts: {
         actor: input.actor,
       });
 
-      return await git.appendEvents({ events: [event] });
+      return await appendEventsAndRefresh({ events: [event] });
     },
 
     readSnapshot: async () => {
-      const events = await readAllEvents();
-      const snapshot = materializeSnapshotFromEvents({ events });
-      return {
-        tickets: sortTickets({ tickets: snapshot.tickets.values() }),
-        eventsByTicket: groupEventsByTicket({ events }),
-        commentsByTicket: snapshot.commentsByTicket,
-        reviewNotesByTicket: snapshot.reviewNotesByTicket,
-        syncCheckpointsByTicket: snapshot.syncCheckpointsByTicket,
-        conflictsByTicket: snapshot.conflictsByTicket,
-      };
+      const { snapshot } = await loadStoreContext();
+      return snapshot;
     },
 
     sync: async () => {

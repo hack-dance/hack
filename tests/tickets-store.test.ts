@@ -446,6 +446,48 @@ test("tickets store writes normalized journal envelope metadata and ignores dupl
   });
 }, 20_000);
 
+test("tickets store persists a sqlite projection and rebuilds it when deleted", async () => {
+  const projectRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-projection-",
+  });
+  const projectionPath = join(projectRoot, ".hack/tickets/projection.sqlite");
+
+  const firstStore = await createStore({ projectRoot });
+  const created = await firstStore.createTicket({
+    title: "Projection ticket",
+    body: "Persisted through sqlite projection.",
+    owner: "hack",
+    source: "hack",
+    actor: "creator@hack",
+  });
+  expect(created.ok).toBe(true);
+  if (!created.ok) {
+    throw new Error(created.error);
+  }
+
+  const initialTickets = await firstStore.listTickets();
+  expect(initialTickets.map((ticket) => ticket.title)).toContain(
+    "Projection ticket"
+  );
+  expect(await Bun.file(projectionPath).exists()).toBe(true);
+
+  const secondStore = await createStore({ projectRoot });
+  const persistedTickets = await secondStore.listTickets();
+  expect(persistedTickets.map((ticket) => ticket.title)).toContain(
+    "Projection ticket"
+  );
+
+  await rm(projectionPath, { force: true });
+  expect(await Bun.file(projectionPath).exists()).toBe(false);
+
+  const rebuiltStore = await createStore({ projectRoot });
+  const rebuiltTickets = await rebuiltStore.listTickets();
+  expect(rebuiltTickets.map((ticket) => ticket.title)).toContain(
+    "Projection ticket"
+  );
+  expect(await Bun.file(projectionPath).exists()).toBe(true);
+}, 20_000);
+
 test("normalized ticket adapter preserves compatibility while exposing provenance and documents", () => {
   const summary = {
     ticketId: "T-00042",

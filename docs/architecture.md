@@ -68,6 +68,50 @@ graph LR
     - `.internal/extra-hosts.json` (user-managed extra_hosts merged into the override)
     - `.branch/compose.<branch>.override.yml` (branch builds)
 
+## Administrative trust boundary
+
+Hack remains local-first. Shared administration is an explicit escalation, not an ambient property of
+using the CLI.
+
+### Resource scopes
+
+- **Local project**: device-local project metadata and runtime state managed from `.hack/` without broker
+  dependency.
+- **Shared project**: broker-managed project metadata owned by a Hack team or organization.
+- **Organization**: top-level shared administrative boundary for teams and org-wide projects.
+- **Team**: collaboration boundary inside an organization; the default shared owner for most projects.
+- **Environment bundle**: a declared env contract plus an explicit sharing policy for metadata and values.
+
+### Ownership rules
+
+- Projects default to `local` ownership.
+- Promotion from `local` to shared ownership must be explicit.
+- Shared projects are managed by the broker; local projects are managed only from the local machine.
+- Project ownership and env value disclosure are separate decisions.
+- Team or org membership alone does not imply secret-value access.
+
+### Local-only operations
+
+- project init/up/down/restart/logs/open/session workflows
+- local tickets
+- local `.hack/.env` edits and local secret backend operations
+- local project owner inspection and local user ownership assignment
+
+### Broker-mediated operations
+
+- organization and team lifecycle
+- org/team membership changes
+- project transfer to team or organization ownership
+- shared project access grants
+- shared env grants, rotation, and encrypted value custody
+- audit logging for shared admin mutations
+
+### Boundary rule
+
+If an operation mutates shared identity, shared membership, shared project access, or shared secret
+custody, it must be broker-mediated and authenticated. If it only changes device-local runtime state,
+it stays local.
+
 
 ## Internal DNS + TLS (containers)
 

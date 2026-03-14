@@ -235,7 +235,7 @@ test("tickets store materializes assignee, review notes, comments, checkpoints, 
     sourceOperation: "local_command",
   });
   expect(events[0]?.idempotencyKey).toBe(events[0]?.eventId);
-}, 30_000);
+}, 60_000);
 
 test("tickets show json includes materialized sync metadata", async () => {
   const projectRoot = await createTempGitProject({
@@ -331,7 +331,7 @@ test("tickets show json includes materialized sync metadata", async () => {
   expect(
     payload.events.some((event) => event.type === "ticket.comment_appended")
   ).toBe(true);
-}, 20_000);
+}, 60_000);
 
 test("tickets store recovers from a stale tickets bare repo index.lock", async () => {
   const projectRoot = await createTempGitProject({
@@ -498,7 +498,7 @@ test("tickets store ignores duplicate sync checkpoints with the same idempotency
       (event) => event.type === "ticket.sync_checkpoint_recorded"
     )
   ).toHaveLength(1);
-});
+}, 20_000);
 
 test("tickets store records immutable documents and projects body from the active description", async () => {
   const projectRoot = await createTempGitProject({

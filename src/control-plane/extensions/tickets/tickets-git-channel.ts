@@ -59,6 +59,21 @@ export type TicketsGitRepairResult =
     }
   | { readonly ok: false; readonly error: string };
 
+type ParsedJournalEvent = {
+  readonly eventId: string;
+  readonly idempotencyKey: string;
+  readonly ts: number;
+  readonly value: Record<string, unknown>;
+};
+
+type PushAttemptResult =
+  | { readonly ok: true; readonly didPush: boolean }
+  | {
+      readonly ok: false;
+      readonly error: string;
+      readonly hiddenRefRejected?: boolean;
+    };
+
 export function createGitTicketsChannel(opts: {
   readonly projectRoot: string;
   readonly config: TicketsGitConfig;
@@ -339,6 +354,72 @@ export function createGitTicketsChannel(opts: {
     | { readonly ok: false; readonly error: string; readonly missing: boolean }
   > => {
     return await fetchRemoteRefToTracking(ref, trackingRef);
+  };
+
+  const buildHiddenRefPushError = (message: string): PushAttemptResult => {
+    return {
+      ok: false,
+      error: `git push failed: ${message}\nRemote rejected hidden refs. Set controlPlane.tickets.git.refMode to "heads" to use a branch ref.`,
+      hiddenRefRejected: true,
+    };
+  };
+
+  const pushCurrentBranch = async (input: {
+    readonly pushRef: string;
+  }): Promise<PushAttemptResult> => {
+    const push = await runGitDir({
+      args: ["push", "origin", `${localBranchRef}:${input.pushRef}`],
+    });
+    if (push.ok) {
+      return { ok: true, didPush: true };
+    }
+
+    const message = `${push.stderr}\n${push.stdout}`.trim();
+    if (refMode === "hidden" && isHiddenRefRejected(message)) {
+      return buildHiddenRefPushError(message);
+    }
+    return { ok: false, error: `git push failed: ${message}` };
+  };
+
+  const rewritePendingEventsAfterCheckout = async (input: {
+    readonly pendingEvents?: readonly Record<string, unknown>[];
+  }): Promise<
+    { readonly ok: true } | { readonly ok: false; readonly error: string }
+  > => {
+    if (!(input.pendingEvents && input.pendingEvents.length > 0)) {
+      return { ok: true };
+    }
+    return await writeEvents({ events: input.pendingEvents });
+  };
+
+  const pruneLegacyRemoteRefIfRequested = async (input: {
+    readonly pruneLegacyRef: boolean;
+    readonly remoteUrl: string | null;
+  }): Promise<{
+    readonly didPruneLegacy: boolean;
+    readonly pruneError?: string;
+  }> => {
+    if (!(input.pruneLegacyRef && legacyRemoteRef && input.remoteUrl)) {
+      return { didPruneLegacy: false };
+    }
+
+    const prunedLegacy = await runGitDir({
+      args: ["push", "origin", `:${legacyRemoteRef}`],
+    });
+    if (!prunedLegacy.ok) {
+      return {
+        didPruneLegacy: false,
+        pruneError: `${prunedLegacy.stderr}\n${prunedLegacy.stdout}`.trim(),
+      };
+    }
+
+    if (legacyTrackingRef) {
+      await runGitDir({
+        args: ["update-ref", "-d", legacyTrackingRef],
+      });
+    }
+
+    return { didPruneLegacy: true };
   };
 
   const checkoutHead = async (input: {
@@ -630,41 +711,10 @@ export function createGitTicketsChannel(opts: {
       const existing = await Bun.file(path)
         .text()
         .catch(() => "");
-      const existingIds = new Set<string>();
-      const existingIdempotencyKeys = new Set<string>();
-      for (const line of existing.split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed) {
-          continue;
-        }
-        const parsed = safeJsonParse(trimmed);
-        if (isRecord(parsed) && typeof parsed.eventId === "string") {
-          existingIds.add(parsed.eventId);
-          const idempotencyKey =
-            typeof parsed.idempotencyKey === "string"
-              ? parsed.idempotencyKey
-              : parsed.eventId;
-          existingIdempotencyKeys.add(idempotencyKey);
-        }
-      }
-
-      const lines: string[] = [];
-      const pendingIdempotencyKeys = new Set<string>();
-      for (const ev of events) {
-        const id = typeof ev.eventId === "string" ? ev.eventId : "";
-        const idempotencyKey =
-          typeof ev.idempotencyKey === "string" ? ev.idempotencyKey : id;
-        if (
-          !id ||
-          existingIds.has(id) ||
-          existingIdempotencyKeys.has(idempotencyKey) ||
-          pendingIdempotencyKeys.has(idempotencyKey)
-        ) {
-          continue;
-        }
-        pendingIdempotencyKeys.add(idempotencyKey);
-        lines.push(stableStringify(ev));
-      }
+      const lines = collectPendingSerializedEvents({
+        existingText: existing,
+        incomingEvents: events,
+      });
 
       if (lines.length > 0) {
         const prefix =
@@ -697,48 +747,11 @@ export function createGitTicketsChannel(opts: {
       const text = await Bun.file(path)
         .text()
         .catch(() => "");
-      const parsed: Record<string, unknown>[] = [];
-      const seen = new Set<string>();
-      const seenIdempotencyKeys = new Set<string>();
-
-      for (const line of text.split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed) {
-          continue;
-        }
-        const value = safeJsonParse(trimmed);
-        if (!isRecord(value)) {
-          continue;
-        }
-        const eventId = typeof value.eventId === "string" ? value.eventId : "";
-        const idempotencyKey =
-          typeof value.idempotencyKey === "string"
-            ? value.idempotencyKey
-            : eventId;
-        const ts = typeof value.ts === "number" ? value.ts : Number.NaN;
-        if (!(eventId && Number.isFinite(ts))) {
-          continue;
-        }
-        if (seen.has(eventId) || seenIdempotencyKeys.has(idempotencyKey)) {
-          continue;
-        }
-        seen.add(eventId);
-        seenIdempotencyKeys.add(idempotencyKey);
-        parsed.push(value);
-      }
-
-      parsed.sort((a, b) => {
-        const aTs = typeof a.ts === "number" ? (a.ts as number) : 0;
-        const bTs = typeof b.ts === "number" ? (b.ts as number) : 0;
-        if (aTs !== bTs) {
-          return aTs - bTs;
-        }
-        const aId = typeof a.eventId === "string" ? (a.eventId as string) : "";
-        const bId = typeof b.eventId === "string" ? (b.eventId as string) : "";
-        return aId.localeCompare(bId);
-      });
-
-      const next = parsed.map((ev) => stableStringify(ev)).join("\n");
+      const next = collectUniqueJournalEvents({
+        texts: [text],
+      })
+        .map((event) => stableStringify(event.value))
+        .join("\n");
       const normalized = next.length > 0 ? `${next}\n` : "";
       if (normalized !== text) {
         await Bun.write(path, normalized);
@@ -786,23 +799,16 @@ export function createGitTicketsChannel(opts: {
       return { ok: true, didPush: false };
     }
 
-    const push = await runGitDir({
-      args: ["push", "origin", `${localBranchRef}:${input.pushRef}`],
-    });
+    const push = await pushCurrentBranch({ pushRef: input.pushRef });
     if (push.ok) {
-      return { ok: true, didPush: true };
+      return push;
     }
-
-    const pushMessage = `${push.stderr}\n${push.stdout}`.trim();
-    if (refMode === "hidden" && isHiddenRefRejected(pushMessage)) {
-      return {
-        ok: false,
-        error: `git push failed: ${pushMessage}\nRemote rejected hidden refs. Set controlPlane.tickets.git.refMode to "heads" to use a branch ref.`,
-      };
+    if (push.hiddenRefRejected) {
+      return push;
     }
 
     opts.logger.warn({
-      message: `git push failed, retrying after fetch: ${pushMessage}`,
+      message: `git push failed, retrying after fetch: ${push.error.replace("git push failed: ", "")}`,
     });
 
     const checkedOut = await checkoutHead({ remoteUrl: input.remoteUrl });
@@ -810,11 +816,11 @@ export function createGitTicketsChannel(opts: {
       return checkedOut;
     }
 
-    if (input.pendingEvents && input.pendingEvents.length > 0) {
-      const wrote = await writeEvents({ events: input.pendingEvents });
-      if (!wrote.ok) {
-        return wrote;
-      }
+    const rewrote = await rewritePendingEventsAfterCheckout({
+      pendingEvents: input.pendingEvents,
+    });
+    if (!rewrote.ok) {
+      return rewrote;
     }
 
     const committed = await commitAll("tickets: retry");
@@ -822,21 +828,8 @@ export function createGitTicketsChannel(opts: {
       return committed;
     }
 
-    const retry = await runGitDir({
-      args: ["push", "origin", `${localBranchRef}:${checkedOut.pushRef}`],
-    });
-    if (!retry.ok) {
-      const retryMessage = `${retry.stderr}\n${retry.stdout}`.trim();
-      if (refMode === "hidden" && isHiddenRefRejected(retryMessage)) {
-        return {
-          ok: false,
-          error: `git push failed: ${retryMessage}\nRemote rejected hidden refs. Set controlPlane.tickets.git.refMode to "heads" to use a branch ref.`,
-        };
-      }
-      return { ok: false, error: `git push failed: ${retryMessage}` };
-    }
-
-    return { ok: true, didPush: true };
+    const retry = await pushCurrentBranch({ pushRef: checkedOut.pushRef });
+    return retry;
   };
 
   const listTrackedPaths = async (): Promise<
@@ -1016,31 +1009,19 @@ export function createGitTicketsChannel(opts: {
       return pushed;
     }
 
-    let didPruneLegacy = false;
-    let pruneError: string | undefined;
-
-    if (input.pruneLegacyRef && legacyRemoteRef && checkedOut.remoteUrl) {
-      const prunedLegacy = await runGitDir({
-        args: ["push", "origin", `:${legacyRemoteRef}`],
-      });
-      if (prunedLegacy.ok) {
-        didPruneLegacy = true;
-        if (legacyTrackingRef) {
-          await runGitDir({
-            args: ["update-ref", "-d", legacyTrackingRef],
-          });
-        }
-      } else {
-        pruneError = `${prunedLegacy.stderr}\n${prunedLegacy.stdout}`.trim();
-      }
-    }
+    const prunedLegacy = await pruneLegacyRemoteRefIfRequested({
+      pruneLegacyRef: input.pruneLegacyRef,
+      remoteUrl: checkedOut.remoteUrl,
+    });
 
     return {
       ok: true,
       didCommit: committed.didCommit,
       didPush: pushed.didPush,
-      didPruneLegacy,
-      ...(pruneError ? { pruneError } : {}),
+      didPruneLegacy: prunedLegacy.didPruneLegacy,
+      ...(prunedLegacy.pruneError
+        ? { pruneError: prunedLegacy.pruneError }
+        : {}),
     };
   };
 
@@ -1197,51 +1178,111 @@ function mergeTicketEventLogs(input: {
   readonly existing: string;
   readonly incoming: string;
 }): string {
-  const parsed: Record<string, unknown>[] = [];
+  const next = collectUniqueJournalEvents({
+    texts: [input.existing, input.incoming],
+  })
+    .map((event) => stableStringify(event.value))
+    .join("\n");
+  return next ? `${next}\n` : "";
+}
+
+function collectPendingSerializedEvents(input: {
+  readonly existingText: string;
+  readonly incomingEvents: readonly Record<string, unknown>[];
+}): string[] {
+  const existingEvents = collectUniqueJournalEvents({
+    texts: [input.existingText],
+  });
+  const existingIds = new Set(existingEvents.map((event) => event.eventId));
+  const existingIdempotencyKeys = new Set(
+    existingEvents.map((event) => event.idempotencyKey)
+  );
+  const pendingIdempotencyKeys = new Set<string>();
+  const lines: string[] = [];
+
+  for (const event of input.incomingEvents) {
+    const parsed = parseJournalEvent(event);
+    if (!parsed) {
+      continue;
+    }
+    if (
+      existingIds.has(parsed.eventId) ||
+      existingIdempotencyKeys.has(parsed.idempotencyKey) ||
+      pendingIdempotencyKeys.has(parsed.idempotencyKey)
+    ) {
+      continue;
+    }
+    pendingIdempotencyKeys.add(parsed.idempotencyKey);
+    lines.push(stableStringify(event));
+  }
+
+  return lines;
+}
+
+function collectUniqueJournalEvents(input: {
+  readonly texts: readonly string[];
+}): ParsedJournalEvent[] {
+  const parsed: ParsedJournalEvent[] = [];
   const seen = new Set<string>();
   const seenIdempotencyKeys = new Set<string>();
 
-  for (const text of [input.existing, input.incoming]) {
+  for (const text of input.texts) {
     for (const line of text.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed) {
+      const event = parseJournalEventLine(line);
+      if (!event) {
         continue;
       }
-      const value = safeJsonParse(trimmed);
-      if (!isRecord(value)) {
+      if (
+        seen.has(event.eventId) ||
+        seenIdempotencyKeys.has(event.idempotencyKey)
+      ) {
         continue;
       }
-      const eventId = typeof value.eventId === "string" ? value.eventId : "";
-      const idempotencyKey =
-        typeof value.idempotencyKey === "string"
-          ? value.idempotencyKey
-          : eventId;
-      const ts = typeof value.ts === "number" ? value.ts : Number.NaN;
-      if (!(eventId && Number.isFinite(ts))) {
-        continue;
-      }
-      if (seen.has(eventId) || seenIdempotencyKeys.has(idempotencyKey)) {
-        continue;
-      }
-      seen.add(eventId);
-      seenIdempotencyKeys.add(idempotencyKey);
-      parsed.push(value);
+      seen.add(event.eventId);
+      seenIdempotencyKeys.add(event.idempotencyKey);
+      parsed.push(event);
     }
   }
 
-  parsed.sort((a, b) => {
-    const aTs = typeof a.ts === "number" ? (a.ts as number) : 0;
-    const bTs = typeof b.ts === "number" ? (b.ts as number) : 0;
-    if (aTs !== bTs) {
-      return aTs - bTs;
-    }
-    const aId = typeof a.eventId === "string" ? (a.eventId as string) : "";
-    const bId = typeof b.eventId === "string" ? (b.eventId as string) : "";
-    return aId.localeCompare(bId);
-  });
+  parsed.sort(compareParsedJournalEvents);
+  return parsed;
+}
 
-  const next = parsed.map((event) => stableStringify(event)).join("\n");
-  return next ? `${next}\n` : "";
+function parseJournalEventLine(line: string): ParsedJournalEvent | null {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return null;
+  }
+  return parseJournalEvent(safeJsonParse(trimmed));
+}
+
+function parseJournalEvent(value: unknown): ParsedJournalEvent | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const eventId = typeof value.eventId === "string" ? value.eventId : "";
+  const idempotencyKey =
+    typeof value.idempotencyKey === "string" ? value.idempotencyKey : eventId;
+  const ts = typeof value.ts === "number" ? value.ts : Number.NaN;
+  if (!(eventId && Number.isFinite(ts))) {
+    return null;
+  }
+  return {
+    eventId,
+    idempotencyKey,
+    ts,
+    value,
+  };
+}
+
+function compareParsedJournalEvents(
+  left: ParsedJournalEvent,
+  right: ParsedJournalEvent
+): number {
+  if (left.ts !== right.ts) {
+    return left.ts - right.ts;
+  }
+  return left.eventId.localeCompare(right.eventId);
 }
 
 function isRetryableTrackingRefLockFailure(input: {

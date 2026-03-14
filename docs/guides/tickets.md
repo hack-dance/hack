@@ -144,6 +144,8 @@ In your project repo:
 Portability rules:
 
 - Only the journal under `.hack/tickets/events/` is portable ticket state.
+- The hidden ref stores only the journal tree; it does not include `projection.sqlite` or other local cache files.
+- After `hack x tickets sync`, the checked-out tickets worktree materializes that journal under `.hack/tickets/git/worktree/.hack/tickets/events/`.
 - The SQLite projection is local-only and can be deleted safely.
 - After sync or clone, peers rebuild `.hack/tickets/projection.sqlite` from the journal on first read.
 

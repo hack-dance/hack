@@ -2907,9 +2907,15 @@ type LinearDeliverySummary = {
 
 function resolveTicketAuthority(input: {
   readonly ticket: TicketSummary;
-}): "hack" | "linear" {
+}): "hack" | "linear" | "review_required" {
   const owner = input.ticket.owner.trim().toLowerCase();
   const source = input.ticket.source.trim().toLowerCase();
+  if (
+    (owner === "linear" && source !== "linear") ||
+    (source === "linear" && owner !== "linear")
+  ) {
+    return "review_required";
+  }
   if (owner === "linear" || source === "linear") {
     return "linear";
   }
@@ -2947,7 +2953,7 @@ function normalizeProjectValue(input: {
 }
 
 function detectAuthoritativeFieldConflicts(input: {
-  readonly authority: "hack" | "linear";
+  readonly authority: "hack" | "linear" | "review_required";
   readonly ticket: TicketSummary;
   readonly issue: LinearIssue;
   readonly remoteProjection: Pick<
@@ -2956,13 +2962,15 @@ function detectAuthoritativeFieldConflicts(input: {
   >;
 }): readonly RecordedSyncConflict[] {
   const conflicts: RecordedSyncConflict[] = [];
+  const authorityLabel =
+    input.authority === "review_required" ? "review-required" : input.authority;
   const localTitle = input.ticket.title.trim();
   const remoteTitle = input.issue.title.trim();
   if (localTitle !== remoteTitle) {
     conflicts.push({
       field: "title",
       authority: input.authority,
-      summary: `Authoritative ${input.authority} title diverged from the other side.`,
+      summary: `Authoritative ${authorityLabel} title diverged from the other side.`,
       localValue: localTitle,
       remoteValue: remoteTitle,
     });
@@ -2978,7 +2986,7 @@ function detectAuthoritativeFieldConflicts(input: {
     conflicts.push({
       field: "body",
       authority: input.authority,
-      summary: `Authoritative ${input.authority} body diverged from the other side.`,
+      summary: `Authoritative ${authorityLabel} body diverged from the other side.`,
       localValue: localBody,
       remoteValue: remoteBody,
     });
@@ -2988,7 +2996,7 @@ function detectAuthoritativeFieldConflicts(input: {
     conflicts.push({
       field: "status",
       authority: input.authority,
-      summary: `Authoritative ${input.authority} status diverged from the other side.`,
+      summary: `Authoritative ${authorityLabel} status diverged from the other side.`,
       localValue: input.ticket.status,
       remoteValue: input.remoteProjection.status,
     });
@@ -3009,7 +3017,7 @@ function detectAuthoritativeFieldConflicts(input: {
     conflicts.push({
       field: "project",
       authority: input.authority,
-      summary: `Authoritative ${input.authority} project routing diverged from the other side.`,
+      summary: `Authoritative ${authorityLabel} project routing diverged from the other side.`,
       ...(localProject !== undefined ? { localValue: localProject } : {}),
       ...(remoteProject !== undefined ? { remoteValue: remoteProject } : {}),
     });
@@ -4792,7 +4800,7 @@ async function applyLinearIssueToExistingTicket(input: {
   readonly existingTicket: TicketSummary;
   readonly projection: TicketProjectionFromLinearIssue;
   readonly syncToggles: SyncToggles;
-  readonly authority: "hack" | "linear";
+  readonly authority: "hack" | "linear" | "review_required";
   readonly conflictsRecorded: number;
 }): Promise<
   SyncTicketFromLinearSuccess | { readonly ok: false; readonly error: string }

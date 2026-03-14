@@ -1098,6 +1098,164 @@ test("syncIssueFromLinearToTicket preserves hack authority, appends comments, an
   expect(updatedTickets[0]?.assignee).toBe("Remote Owner");
 });
 
+test("syncIssueFromLinearToTicket records review-required conflicts for dual-homed authority", async () => {
+  const recordedConflicts: Array<{
+    readonly field: string;
+    readonly authority?: string;
+  }> = [];
+  const updatedTickets: Record<string, unknown>[] = [];
+
+  const runtime = {
+    profileId: "default",
+    apiUrl: "https://api.linear.app/graphql",
+    projectBinding: {
+      additionalProjects: [],
+    },
+    tickets: {
+      listTickets: async () => [
+        {
+          ticketId: "T-00004",
+          title: "Local title",
+          body: "Local body",
+          status: "open" as const,
+          createdAt: "2026-03-05T10:00:00.000Z",
+          updatedAt: "2026-03-05T10:00:00.000Z",
+          dependsOn: [],
+          blocks: [],
+          owner: "hack",
+          source: "linear",
+          assignee: "Local Owner",
+          tags: [],
+          externalId: "issue-4",
+          externalKey: "ENG-444",
+          externalProjectId: "proj-local",
+        },
+      ],
+      updateTicket: async (input: Record<string, unknown>) => {
+        updatedTickets.push(input);
+        return { ok: true as const };
+      },
+      setStatus: async () => ({ ok: true as const }),
+      createTicket: async () => {
+        throw new Error("createTicket should not be called");
+      },
+      getTicket: async () => null,
+      getTicketDetail: async () => ({
+        ticket: null,
+        events: [],
+        comments: [],
+        reviewNotes: [],
+        syncCheckpoints: [],
+        conflicts: [],
+      }),
+      appendComment: async () => ({
+        ok: true as const,
+        comment: {
+          commentId: "comment-new",
+          ticketId: "T-00004",
+          body: "Fresh remote note",
+          source: "linear",
+          actor: "linear",
+          createdAt: "2026-03-05T10:05:00.000Z",
+        },
+      }),
+      recordSyncCheckpoint: async () => ({
+        ok: true as const,
+        checkpoint: {
+          checkpointId: "checkpoint-4",
+          ticketId: "T-00004",
+          provider: "linear",
+          direction: "linear_to_hack",
+          actor: "test",
+          createdAt: "2026-03-05T10:10:00.000Z",
+        },
+      }),
+      recordSyncConflict: async (input: {
+        readonly field: string;
+        readonly authority?: string;
+      }) => {
+        recordedConflicts.push(input);
+        return {
+          ok: true as const,
+          conflict: {
+            conflictId: `conflict-${input.field}`,
+            ticketId: "T-00004",
+            provider: "linear",
+            field: input.field,
+            status: "open" as const,
+            authority: input.authority,
+            createdAt: "2026-03-05T10:10:00.000Z",
+            updatedAt: "2026-03-05T10:10:00.000Z",
+          },
+        };
+      },
+    },
+    linear: {
+      getIssueById: async () => ({ ok: true as const, data: null }),
+      getIssueByIdentifier: async () => ({
+        ok: true as const,
+        data: {
+          id: "issue-4",
+          identifier: "ENG-444",
+          title: "Linear title",
+          description: "Linear body",
+          url: "https://linear.app/issue/ENG-444",
+          state: {
+            id: "state-1",
+            name: "Done",
+            type: "completed" as const,
+          },
+          teamId: "team-1",
+          projectId: "proj-remote",
+          projectName: "Remote Project",
+          assigneeDisplayName: "Remote Owner",
+          labels: [],
+        },
+      }),
+      listIssueComments: async () => ({
+        ok: true as const,
+        data: [
+          {
+            id: "linear-comment-4",
+            body: "Fresh remote note",
+            createdAt: "2026-03-05T09:10:00.000Z",
+            userDisplayName: "Remote Owner",
+          },
+        ],
+      }),
+    },
+  };
+
+  const result = await __testOnly.syncIssueFromLinearToTicket({
+    runtime,
+    issueIdentifier: "ENG-444",
+    syncToggles: {
+      labels: false,
+      statuses: true,
+      dependencies: false,
+      projects: true,
+    },
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  expect(result.conflictsRecorded).toBe(4);
+  expect(recordedConflicts).toEqual([
+    expect.objectContaining({ field: "title", authority: "review_required" }),
+    expect.objectContaining({ field: "body", authority: "review_required" }),
+    expect.objectContaining({ field: "status", authority: "review_required" }),
+    expect.objectContaining({ field: "project", authority: "review_required" }),
+  ]);
+  expect(updatedTickets).toHaveLength(1);
+  expect(updatedTickets[0]?.title).toBeUndefined();
+  expect(updatedTickets[0]?.body).toBeUndefined();
+  expect(updatedTickets[0]?.owner).toBeUndefined();
+  expect(updatedTickets[0]?.source).toBeUndefined();
+});
+
 test("syncTicketToLinearIssue pushes missing local comments and records a checkpoint", async () => {
   const pushedBodies: string[] = [];
   const checkpoints: string[] = [];

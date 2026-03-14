@@ -2497,6 +2497,32 @@ type RunAutosyncArgs = {
   json: boolean;
 };
 
+type ProjectArtifactArgsBase = {
+  verb: string;
+  profileId?: string;
+  projectId?: string;
+  projectName?: string;
+  teamId?: string;
+  path?: string;
+  json: boolean;
+};
+
+type ProjectDocumentsVerb = "list" | "pull" | "plan" | "apply" | "archive";
+type ProjectMilestonesVerb = ProjectDocumentsVerb;
+type ProjectStatusUpdatesVerb = "list" | "pull" | "plan" | "publish";
+
+type ProjectDocumentsArgs = Omit<ProjectArtifactArgsBase, "verb"> & {
+  verb: ProjectDocumentsVerb;
+};
+
+type ProjectMilestonesArgs = Omit<ProjectArtifactArgsBase, "verb"> & {
+  verb: ProjectMilestonesVerb;
+};
+
+type ProjectStatusUpdatesArgs = Omit<ProjectArtifactArgsBase, "verb"> & {
+  verb: ProjectStatusUpdatesVerb;
+};
+
 type ApplyDeliveryArgs = {
   profileId?: string;
   deliveryId: string;
@@ -8260,6 +8286,100 @@ function parseRunAutosyncArgs(input: {
   return { ok: true, value };
 }
 
+function parseProjectDocumentsArgs(input: {
+  readonly args: readonly string[];
+}):
+  | { readonly ok: true; readonly value: ProjectDocumentsArgs }
+  | { readonly ok: false; readonly error: string } {
+  return parseProjectArtifactArgs({
+    args: input.args,
+    allowedVerbs: ["list", "pull", "plan", "apply", "archive"],
+  }) as
+    | { readonly ok: true; readonly value: ProjectDocumentsArgs }
+    | { readonly ok: false; readonly error: string };
+}
+
+function parseProjectMilestonesArgs(input: {
+  readonly args: readonly string[];
+}):
+  | { readonly ok: true; readonly value: ProjectMilestonesArgs }
+  | { readonly ok: false; readonly error: string } {
+  return parseProjectArtifactArgs({
+    args: input.args,
+    allowedVerbs: ["list", "pull", "plan", "apply", "archive"],
+  }) as
+    | { readonly ok: true; readonly value: ProjectMilestonesArgs }
+    | { readonly ok: false; readonly error: string };
+}
+
+function parseProjectStatusUpdatesArgs(input: {
+  readonly args: readonly string[];
+}):
+  | { readonly ok: true; readonly value: ProjectStatusUpdatesArgs }
+  | { readonly ok: false; readonly error: string } {
+  return parseProjectArtifactArgs({
+    args: input.args,
+    allowedVerbs: ["list", "pull", "plan", "publish"],
+  }) as
+    | { readonly ok: true; readonly value: ProjectStatusUpdatesArgs }
+    | { readonly ok: false; readonly error: string };
+}
+
+function parseProjectArtifactArgs<TVerb extends string>(input: {
+  readonly args: readonly string[];
+  readonly allowedVerbs: readonly TVerb[];
+}):
+  | {
+      readonly ok: true;
+      readonly value: ProjectArtifactArgsBase & { readonly verb: TVerb };
+    }
+  | { readonly ok: false; readonly error: string } {
+  const first = readOptionalString(input.args[0]);
+  if (!first) {
+    return {
+      ok: false,
+      error: `Missing verb. Expected ${input.allowedVerbs.join("|")}.`,
+    };
+  }
+  if (!input.allowedVerbs.includes(first as TVerb)) {
+    return {
+      ok: false,
+      error: `Invalid verb: ${first}. Expected ${input.allowedVerbs.join("|")}.`,
+    };
+  }
+
+  const value: ProjectArtifactArgsBase & { readonly verb: TVerb } = {
+    verb: first as TVerb,
+    json: false,
+  };
+  const remainingArgs = input.args.slice(1);
+  for (let i = 0; i < remainingArgs.length; i += 1) {
+    const token = remainingArgs[i] ?? "";
+    if (token === "--json") {
+      value.json = true;
+      continue;
+    }
+    const handled = assignKeyValueFlag({
+      token,
+      args: remainingArgs,
+      index: i,
+      out: value,
+      keys: {
+        profile: "profileId",
+        "project-id": "projectId",
+        "project-name": "projectName",
+        "team-id": "teamId",
+        path: "path",
+      },
+    });
+    if (!handled.ok) {
+      return { ok: false, error: handled.error };
+    }
+    i = handled.nextIndex;
+  }
+  return { ok: true, value };
+}
+
 function assignKeyValueFlag<T extends Record<string, unknown>>(input: {
   readonly token: string;
   readonly args: readonly string[];
@@ -8322,6 +8442,9 @@ export const __testOnly = {
   parseOAuthConnectArgs,
   parseSeedLocalAccessArgs,
   parseRunAutosyncArgs,
+  parseProjectDocumentsArgs,
+  parseProjectMilestonesArgs,
+  parseProjectStatusUpdatesArgs,
   parseProjectBindArgs,
   parseProjectLinkArgs,
   parseProjectsArgs,

@@ -1457,3 +1457,99 @@ test("runProjectLinearAutosync syncs issue and project deliveries, then applies 
   expect(result.commentsPulled).toBe(5);
   expect(result.checkpointsRecorded).toBe(4);
 });
+
+test("parseProjectDocumentsArgs parses verb and shared routing flags", () => {
+  const parsed = __testOnly.parseProjectDocumentsArgs({
+    args: [
+      "list",
+      "--profile",
+      "work",
+      "--project-id",
+      "proj_123",
+      "--project-name",
+      "Platform",
+      "--team-id",
+      "team_123",
+      "--path",
+      ".hack/linear/projects/proj_123/documents",
+      "--json",
+    ],
+  });
+
+  expect(parsed.ok).toBe(true);
+  if (!parsed.ok) {
+    return;
+  }
+
+  expect(parsed.value).toEqual({
+    verb: "list",
+    profileId: "work",
+    projectId: "proj_123",
+    projectName: "Platform",
+    teamId: "team_123",
+    path: ".hack/linear/projects/proj_123/documents",
+    json: true,
+  });
+});
+
+test("parseProjectMilestonesArgs parses apply verbs and file paths", () => {
+  const parsed = __testOnly.parseProjectMilestonesArgs({
+    args: [
+      "apply",
+      "--path",
+      ".hack/linear/projects/proj_123/milestones/private-beta.md",
+      "--json",
+    ],
+  });
+
+  expect(parsed.ok).toBe(true);
+  if (!parsed.ok) {
+    return;
+  }
+
+  expect(parsed.value).toEqual({
+    verb: "apply",
+    path: ".hack/linear/projects/proj_123/milestones/private-beta.md",
+    json: true,
+  });
+});
+
+test("parseProjectStatusUpdatesArgs parses publish verbs", () => {
+  const parsed = __testOnly.parseProjectStatusUpdatesArgs({
+    args: [
+      "publish",
+      "--profile",
+      "work",
+      "--project-id",
+      "proj_123",
+      "--path",
+      ".hack/linear/projects/proj_123/status-updates/drafts/2026-03-14-weekly.md",
+    ],
+  });
+
+  expect(parsed.ok).toBe(true);
+  if (!parsed.ok) {
+    return;
+  }
+
+  expect(parsed.value).toEqual({
+    verb: "publish",
+    profileId: "work",
+    projectId: "proj_123",
+    path: ".hack/linear/projects/proj_123/status-updates/drafts/2026-03-14-weekly.md",
+    json: false,
+  });
+});
+
+test("parseProjectDocumentsArgs rejects unsupported verbs", () => {
+  const parsed = __testOnly.parseProjectDocumentsArgs({
+    args: ["publish"],
+  });
+
+  expect(parsed.ok).toBe(false);
+  if (parsed.ok) {
+    return;
+  }
+
+  expect(parsed.error).toContain("Expected list|pull|plan|apply|archive");
+});

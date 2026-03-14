@@ -185,6 +185,11 @@ function groupRootEntries(cli: CliSpec): Map<CliGroup, RootEntry[]> {
 
   for (const cmd of cli.commands) {
     if (cmd.expandInRootHelp && cmd.subcommands.length > 0) {
+      push(cmd.group, {
+        group: cmd.group,
+        invocation: buildInvocation(cli.name, [cmd.name], cmd),
+        summary: cmd.summary,
+      });
       for (const sub of cmd.subcommands) {
         const invocation = buildInvocation(cli.name, [cmd.name, sub.name], sub);
         push(cmd.group, { group: cmd.group, invocation, summary: sub.summary });

@@ -101,7 +101,7 @@ instead of treating Linear as a separate universe.
 
 - Main surface: `hack linear ...`
 - Common use: connect a profile, bind a project, sync issues or project state
-- Reference: [docs/integrations.md](docs/integrations.md)
+- Reference: [docs/guides/linear-integration-architecture.md](docs/guides/linear-integration-architecture.md)
 
 ### Tickets
 
@@ -146,7 +146,7 @@ Beta surfaces are intentionally separate:
 Reference surfaces:
 
 - Extensions and SDK: [docs/extensions.md](docs/extensions.md)
-- Gateway API: [docs/gateway-api.md](docs/gateway-api.md)
+- Gateway API (Beta): [docs/gateway-api.md](docs/gateway-api.md)
 - Architecture: [docs/architecture.md](docs/architecture.md)
 
 ## `hack help` guide

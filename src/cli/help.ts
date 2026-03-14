@@ -222,7 +222,7 @@ function renderCommandHelp(
   lines.push(`${invocation} — ${command.summary}`);
   lines.push("");
   lines.push("Usage:");
-  lines.push(`  ${invocation} [options]`);
+  lines.push(`  ${renderCommandUsage(invocation, command)}`);
   lines.push("");
 
   if (command.group === "Beta") {
@@ -276,7 +276,7 @@ function renderCommandHelpMarkdown(
   lines.push("### Usage");
   lines.push("");
   lines.push("```bash");
-  lines.push(`${invocation} [options]`);
+  lines.push(renderCommandUsage(invocation, command));
   lines.push("```");
   lines.push("");
 
@@ -322,6 +322,16 @@ function renderCommandHelpMarkdown(
   }
 
   return lines.join("\n");
+}
+
+function renderCommandUsage(
+  invocation: string,
+  command: AnyCommandSpec
+): string {
+  const hasSubcommands = command.subcommands.length > 0;
+  return hasSubcommands
+    ? `${invocation} <subcommand> [options]`
+    : `${invocation} [options]`;
 }
 
 function buildInvocation(

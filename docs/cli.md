@@ -46,6 +46,9 @@ Current practical rule:
 | Command | Summary | Group |
 | --- | --- | --- |
 | `hack global` | Manage machine-wide infra (DNS/TLS, Caddy proxy, logs) | Global |
+| `hack auth` | Manage Hack auth sessions and recipient-side invitations | Global |
+| `hack org` | Manage organizations and org-scoped membership lifecycle | Global |
+| `hack team` | Manage teams and team-scoped membership lifecycle | Global |
 | `hack projects` | Show all projects (registry + running docker compose) | Global |
 | `hack status` | Show project status (shortcut for `hack projects --details`) | Global |
 | `hack usage` | Show resource usage across running projects | Global |
@@ -151,6 +154,445 @@ Options:
 | ------------- | ------- | --------------- | ------------------------------------------- |
 | `--install`   | boolean | false           | Run mkcert -install before generating certs |
 | `--out <dir>` | string  | `~/.hack/certs` | Directory for generated cert/key            |
+
+### hack auth
+
+Usage: `hack auth <subcommand>`
+
+Subcommands:
+
+| Subcommand | Summary |
+| --- | --- |
+| `login` | Open a browser and sign in to Hack auth |
+| `logout` | Clear the locally stored Hack auth session |
+| `status` | Show whether Hack auth is configured locally |
+| `whoami` | Resolve the current Hack auth identity via the broker |
+| `invites` | List pending invitations for the authenticated user |
+| `invite` | Act on a specific invitation |
+
+#### hack auth login
+
+Usage: `hack auth login [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | boolean | false | Output JSON (machine-readable) |
+| `--no-open` | boolean | false | Print the browser URL instead of opening it automatically |
+| `--broker-url <url>` | string | - | Override the Hack auth broker base URL |
+| `--redirect <url>` | string | - | Return to this URL after browser sign-in finishes |
+
+#### hack auth logout
+
+Usage: `hack auth logout [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | boolean | false | Output JSON (machine-readable) |
+
+#### hack auth status
+
+Usage: `hack auth status [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | boolean | false | Output JSON (machine-readable) |
+| `--broker-url <url>` | string | - | Override the Hack auth broker base URL |
+
+#### hack auth whoami
+
+Usage: `hack auth whoami [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | boolean | false | Output JSON (machine-readable) |
+| `--broker-url <url>` | string | - | Override the Hack auth broker base URL |
+
+#### hack auth invites
+
+Usage: `hack auth invites [options]`
+
+Recipient-side lifecycle command. Lists pending org and team invites that the authenticated user can accept or decline explicitly.
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | boolean | false | Output JSON (machine-readable) |
+| `--broker-url <url>` | string | - | Override the Hack auth broker base URL |
+
+#### hack auth invite
+
+Usage: `hack auth invite <subcommand>`
+
+Recipient-side invitation actions. Acceptance and decline stay under `hack auth` so admins cannot implicitly activate access for someone else.
+
+Subcommands:
+
+| Subcommand | Summary |
+| --- | --- |
+| `accept` | Accept a pending invitation and activate membership |
+| `decline` | Decline a pending invitation and mark it removed |
+
+#### hack auth invite accept
+
+Usage: `hack auth invite accept <invite-id> [options]`
+
+Arguments:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `invite-id` | string | yes | Pending invite identifier |
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | boolean | false | Output JSON (machine-readable) |
+| `--broker-url <url>` | string | - | Override the Hack auth broker base URL |
+
+#### hack auth invite decline
+
+Usage: `hack auth invite decline <invite-id> [options]`
+
+Arguments:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `invite-id` | string | yes | Pending invite identifier |
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | boolean | false | Output JSON (machine-readable) |
+| `--broker-url <url>` | string | - | Override the Hack auth broker base URL |
+
+### hack org
+
+Usage: `hack org <subcommand>`
+
+Admin-side organization surface. Org membership is the parent grant for team access.
+
+Subcommands:
+
+| Subcommand | Summary |
+| --- | --- |
+| `create` | Create an organization without creating any teams implicitly |
+| `list` | List organizations visible to the authenticated user |
+| `show` | Show one organization and its current membership context |
+| `member` | Manage org memberships and invitation lifecycle |
+
+#### hack org create
+
+Usage: `hack org create <slug> [options]`
+
+Arguments:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `slug` | string | yes | Organization slug |
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--name <display-name>` | string | - | Human-friendly name to store alongside the slug |
+| `--json` | boolean | false | Output JSON (machine-readable) |
+
+#### hack org list
+
+Usage: `hack org list [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | boolean | false | Output JSON (machine-readable) |
+
+#### hack org show
+
+Usage: `hack org show <org> [options]`
+
+Arguments:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `org` | string | yes | Organization slug or id |
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | boolean | false | Output JSON (machine-readable) |
+
+#### hack org member
+
+Usage: `hack org member <subcommand>`
+
+Subcommands:
+
+| Subcommand | Summary |
+| --- | --- |
+| `list` | List org members and pending invites |
+| `invite` | Create pending org membership for an email address |
+| `add` | Grant active org membership immediately to an existing user |
+| `remove` | Remove org membership or cancel a pending org invite |
+
+Lifecycle semantics:
+
+- `invite` creates `pending`
+- `add` creates `active`
+- `remove` transitions `pending` or `active` membership to `removed`
+- Removing org access is expected to preview and cascade affected team memberships in the same org
+
+#### hack org member list
+
+Usage: `hack org member list <org> [options]`
+
+Arguments:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `org` | string | yes | Organization slug or id |
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--state <pending|active|removed|all>` | string | - | Filter membership rows by lifecycle state |
+| `--json` | boolean | false | Output JSON (machine-readable) |
+
+Notes:
+
+- Default output should focus on actionable memberships rather than removed audit history.
+- Use `--state removed` or `--state all` to inspect audit-visible removals.
+
+#### hack org member invite
+
+Usage: `hack org member invite <org> <target> [options]`
+
+Arguments:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `org` | string | yes | Organization slug or id |
+| `target` | string | yes | Invitee email address |
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--team <team>` | string | - | Seed one or more team-scoped invites alongside the org invite |
+| `--json` | boolean | false | Output JSON (machine-readable) |
+
+#### hack org member add
+
+Usage: `hack org member add <org> <target> [options]`
+
+Arguments:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `org` | string | yes | Organization slug or id |
+| `target` | string | yes | Existing Hack user id, slug, or email |
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | boolean | false | Output JSON (machine-readable) |
+
+Notes:
+
+- `add` is immediate-access semantics and should fail when the target cannot be resolved to an existing Hack user.
+- Use `invite` instead when the person does not already have a Hack account.
+
+#### hack org member remove
+
+Usage: `hack org member remove <org> <target> [options]`
+
+Arguments:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `org` | string | yes | Organization slug or id |
+| `target` | string | yes | Membership target to revoke or cancel |
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | boolean | false | Output JSON (machine-readable) |
+
+### hack team
+
+Usage: `hack team <subcommand>`
+
+Admin-side team surface. Team membership is always nested under one organization.
+
+Subcommands:
+
+| Subcommand | Summary |
+| --- | --- |
+| `create` | Create a team inside an existing organization |
+| `list` | List teams for one organization |
+| `show` | Show one team and its parent org context |
+| `member` | Manage team memberships and invitation lifecycle |
+
+#### hack team create
+
+Usage: `hack team create <slug> --org <org> [options]`
+
+Arguments:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `slug` | string | yes | Team slug |
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--org <org>` | string | - | Parent organization slug or id |
+| `--name <display-name>` | string | - | Human-friendly name to store alongside the slug |
+| `--json` | boolean | false | Output JSON (machine-readable) |
+
+Notes:
+
+- Team creation requires explicit org targeting and does not add members implicitly.
+
+#### hack team list
+
+Usage: `hack team list --org <org> [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--org <org>` | string | - | Parent organization slug or id |
+| `--json` | boolean | false | Output JSON (machine-readable) |
+
+#### hack team show
+
+Usage: `hack team show <team> --org <org> [options]`
+
+Arguments:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `team` | string | yes | Team slug or id |
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--org <org>` | string | - | Parent organization slug or id |
+| `--json` | boolean | false | Output JSON (machine-readable) |
+
+#### hack team member
+
+Usage: `hack team member <subcommand>`
+
+Subcommands:
+
+| Subcommand | Summary |
+| --- | --- |
+| `list` | List team members and pending invites |
+| `invite` | Create pending team membership for an email address |
+| `add` | Grant active team membership immediately to an existing user |
+| `remove` | Remove team membership or cancel a pending team invite |
+
+Lifecycle semantics:
+
+- Team membership depends on active org membership in the same organization
+- `invite` creates `pending`
+- `add` creates `active`
+- `remove` transitions `pending` or `active` membership to `removed`
+- Removing team access does not change the parent org membership
+
+#### hack team member list
+
+Usage: `hack team member list <team> --org <org> [options]`
+
+Arguments:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `team` | string | yes | Team slug or id |
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--org <org>` | string | - | Parent organization slug or id |
+| `--state <pending|active|removed|all>` | string | - | Filter membership rows by lifecycle state |
+| `--json` | boolean | false | Output JSON (machine-readable) |
+
+#### hack team member invite
+
+Usage: `hack team member invite <team> --org <org> <target> [options]`
+
+Arguments:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `team` | string | yes | Team slug or id |
+| `target` | string | yes | Invitee email address |
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--org <org>` | string | - | Parent organization slug or id |
+| `--json` | boolean | false | Output JSON (machine-readable) |
+
+Notes:
+
+- Final implementation should pair this with an org invite when the recipient is not already an org member.
+
+#### hack team member add
+
+Usage: `hack team member add <team> --org <org> <target> [options]`
+
+Arguments:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `team` | string | yes | Team slug or id |
+| `target` | string | yes | Existing Hack user id, slug, or email |
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--org <org>` | string | - | Parent organization slug or id |
+| `--json` | boolean | false | Output JSON (machine-readable) |
+
+#### hack team member remove
+
+Usage: `hack team member remove <team> --org <org> <target> [options]`
+
+Arguments:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `team` | string | yes | Team slug or id |
+| `target` | string | yes | Membership target to revoke or cancel |
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--org <org>` | string | - | Parent organization slug or id |
+| `--json` | boolean | false | Output JSON (machine-readable) |
 
 ### hack projects
 

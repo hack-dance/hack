@@ -30,6 +30,11 @@ import {
   InMemoryLinearSyncStore,
   type LinearSyncStore,
 } from "./modules/linear-sync-store/service.ts";
+import { createOrgsPlugin } from "./modules/orgs/plugin.ts";
+import {
+  InMemoryOrgTeamsStore,
+  type OrgTeamsStore,
+} from "./modules/orgs/service.ts";
 import { createProvidersPlugin } from "./modules/providers/plugin.ts";
 import { createSharedMiddlewarePlugin } from "./plugins/shared-middleware.ts";
 
@@ -40,6 +45,7 @@ export type CreateAuthBrokerAppOptions = {
   readonly linearSyncStore?: LinearSyncStore;
   readonly linearConnectionStore?: LinearConnectionStore;
   readonly linearAutosyncStore?: LinearAutosyncStore;
+  readonly orgTeamsStore?: OrgTeamsStore;
 };
 
 /**
@@ -52,6 +58,7 @@ export function createAuthBrokerApp({
   linearSyncStore: externalLinearSyncStore,
   linearConnectionStore: externalLinearConnectionStore,
   linearAutosyncStore: externalLinearAutosyncStore,
+  orgTeamsStore: externalOrgTeamsStore,
 }: CreateAuthBrokerAppOptions) {
   const flowStore =
     externalStore ?? new FlowStore({ filePath: config.flowStorePath });
@@ -63,6 +70,7 @@ export function createAuthBrokerApp({
     externalLinearConnectionStore ?? createDefaultLinearConnectionStore();
   const linearAutosyncStore =
     externalLinearAutosyncStore ?? createDefaultLinearAutosyncStore();
+  const orgTeamsStore = externalOrgTeamsStore ?? createDefaultOrgTeamsStore();
   let flowSweepTimer: ReturnType<typeof setInterval> | null = null;
 
   return new Elysia({
@@ -134,6 +142,12 @@ export function createAuthBrokerApp({
       })
     )
     .use(
+      createOrgsPlugin({
+        store: orgTeamsStore,
+        betterAuthRuntime,
+      })
+    )
+    .use(
       createLinearSyncStorePlugin({
         syncStore: linearSyncStore,
         betterAuthRuntime,
@@ -201,6 +215,10 @@ function createDefaultLinearAutosyncStore(): LinearAutosyncStore {
   } catch {
     return new InMemoryLinearAutosyncStore();
   }
+}
+
+function createDefaultOrgTeamsStore(): OrgTeamsStore {
+  return new InMemoryOrgTeamsStore();
 }
 
 /**

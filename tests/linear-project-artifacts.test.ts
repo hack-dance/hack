@@ -248,6 +248,42 @@ test("planLinearProjectArtifactChanges flags slug-matched remotes when local lin
   expect(plan.remoteOnly).toEqual([]);
 });
 
+test("planLinearProjectArtifactChanges flags slug-matched remotes when local linearId is stale", () => {
+  const plan = planLinearProjectArtifactChanges({
+    localArtifacts: [
+      {
+        kind: "linear-project-document",
+        linearProjectId: "proj_123",
+        title: "Launch plan",
+        linearId: "doc_stale",
+        slug: "launch-plan",
+        body: "# Launch plan\n",
+        path: "/repo/.hack/linear/projects/proj_123/documents/launch-plan.md",
+        archived: false,
+      },
+    ],
+    remoteArtifacts: [
+      {
+        kind: "linear-project-document",
+        linearProjectId: "proj_123",
+        title: "Launch plan",
+        linearId: "doc_123",
+        slug: "launch-plan",
+        body: "# Remote launch plan\n",
+        archived: false,
+      },
+    ],
+  });
+
+  expect(plan.errors).toEqual([
+    'Local artifact /repo/.hack/linear/projects/proj_123/documents/launch-plan.md matches remote linearId "doc_123" by slug/title. Pull first or add the remote linearId before apply.',
+  ]);
+  expect(plan.create).toEqual([]);
+  expect(plan.update).toEqual([]);
+  expect(plan.noop).toEqual([]);
+  expect(plan.remoteOnly).toEqual([]);
+});
+
 test("serializeLinearProjectArtifactFile writes stable frontmatter", () => {
   const text = serializeLinearProjectArtifactFile({
     artifact: {
@@ -272,7 +308,7 @@ title: Weekly update
 linearId: update_123
 slug: weekly
 archived: false
-date: 2026-03-14
+date: "2026-03-14"
 health: onTrack
 linkedMilestoneIds:
   - milestone_123
@@ -302,4 +338,28 @@ test("serializeLinearProjectArtifactFile round-trips YAML-sensitive string field
 
   expect(reparsed.title).toBe("API: Launch #1");
   expect(reparsed.slug).toBe("api-launch");
+});
+
+test("serializeLinearProjectArtifactFile round-trips YAML edge-case scalars", () => {
+  for (const title of ["- bad", "? question", "1e3"]) {
+    const text = serializeLinearProjectArtifactFile({
+      artifact: {
+        kind: "linear-project-document",
+        linearProjectId: "proj_123",
+        title,
+        linearId: "doc_123",
+        slug: "edge-case",
+        body: "# Edge case\n",
+        archived: false,
+        path: "/repo/.hack/linear/projects/proj_123/documents/edge-case.md",
+      },
+    });
+
+    const reparsed = parseLinearProjectArtifactFile({
+      filePath: "/repo/.hack/linear/projects/proj_123/documents/edge-case.md",
+      text,
+    });
+
+    expect(reparsed.title).toBe(title);
+  }
 });

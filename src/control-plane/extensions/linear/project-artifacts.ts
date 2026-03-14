@@ -68,6 +68,7 @@ const FRONTMATTER_PATTERN = /^---\n([\s\S]*?)\n---\n?/;
 const YAML_EDGE_WHITESPACE_PATTERN = /^\s|\s$/;
 const YAML_COMMENT_PATTERN = /(^|\s)#/;
 const YAML_COLON_SPACE_PATTERN = /:\s/;
+const YAML_PLAIN_SAFE_PATTERN = /^[A-Za-z_./][A-Za-z0-9_./ -]*$/;
 const YAML_SPECIAL_CHARACTER_PATTERN = /[\n\r[\]{}&,*!|>'"%@`]/;
 const YAML_RESERVED_LITERAL_PATTERN = /^(?:true|false|null|~)$/i;
 
@@ -693,6 +694,7 @@ const serializeYamlString = ({ value }: { readonly value: string }): string =>
 
 const needsYamlQuoting = ({ value }: { readonly value: string }): boolean =>
   value.length === 0 ||
+  !YAML_PLAIN_SAFE_PATTERN.test(value) ||
   YAML_EDGE_WHITESPACE_PATTERN.test(value) ||
   YAML_COMMENT_PATTERN.test(value) ||
   YAML_COLON_SPACE_PATTERN.test(value) ||
@@ -776,10 +778,6 @@ const findRemoteArtifactAliasMatch = ({
     LinearProjectArtifactSnapshot | null
   >;
 }): LinearProjectArtifactSnapshot | null => {
-  if (artifact.linearId) {
-    return null;
-  }
-
   if (artifact.slug) {
     const matchedBySlug = remoteBySlugKey.get(
       buildArtifactSlugKey({ artifact })

@@ -2076,7 +2076,7 @@ archived: false
     resolve(documentsDir, "create-me.md")
   ).text();
   expect(createdText).toContain("linearId: doc_create");
-  expect(createdText).toContain("updatedAt: 2026-03-15T09:00:00.000Z");
+  expect(createdText).toContain('updatedAt: "2026-03-15T09:00:00.000Z"');
 });
 
 test("runProjectArtifactCommand apply rewrites renamed managed documents to the canonical path", async () => {
@@ -2314,7 +2314,7 @@ test("runProjectArtifactCommand pulls project milestones into repo state", async
   const file = await Bun.file(result.payload.writtenPaths[0] ?? "").text();
   expect(file).toContain("kind: linear-project-milestone");
   expect(file).toContain("linearId: milestone_123");
-  expect(file).toContain("targetDate: 2026-04-01");
+  expect(file).toContain('targetDate: "2026-04-01"');
   expect(file).toContain("state: pending");
 });
 
@@ -2437,14 +2437,14 @@ Prepare launch checklist.
     resolve(milestonesDir, "private-beta.md")
   ).text();
   expect(createdText).toContain("linearId: milestone_private_beta");
-  expect(createdText).toContain("updatedAt: 2026-03-15T09:00:00.000Z");
+  expect(createdText).toContain('updatedAt: "2026-03-15T09:00:00.000Z"');
   expect(createdText).toContain("state: pending");
 
   const updatedText = await Bun.file(
     resolve(milestonesDir, "launch.md")
   ).text();
   expect(updatedText).toContain("linearId: milestone_launch");
-  expect(updatedText).toContain("updatedAt: 2026-03-15T10:00:00.000Z");
+  expect(updatedText).toContain('updatedAt: "2026-03-15T10:00:00.000Z"');
   expect(updatedText).toContain("state: planned");
 });
 
@@ -2586,7 +2586,7 @@ Still on track for dogfooding.
     result.payload.movedPaths[0]?.to ?? ""
   ).text();
   expect(publishedText).toContain("linearId: update_123");
-  expect(publishedText).toContain("updatedAt: 2026-03-14T10:15:00.000Z");
+  expect(publishedText).toContain('updatedAt: "2026-03-14T10:15:00.000Z"');
 });
 
 test("runProjectArtifactCommand publish fails for drafts that already have a remote id", async () => {

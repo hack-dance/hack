@@ -661,20 +661,32 @@ export const COMMANDS_WITH_LOCAL_PREREQUISITE_HANDLING = [
   },
 ] as const satisfies readonly LocalPrerequisiteHandling[];
 
+function normalizePrerequisiteCommand(input: {
+  readonly command: string;
+}): string {
+  if (!input.command.startsWith("x linear")) {
+    return input.command;
+  }
+
+  return input.command.slice(2);
+}
+
 export function getCommandPrerequisiteContracts(input: {
   readonly command: string;
 }): readonly CommandPrerequisiteContract[] {
+  const command = normalizePrerequisiteCommand({ command: input.command });
   return COMMAND_PREREQUISITE_CONTRACTS.filter((contract) =>
-    contract.commands.includes(input.command)
+    contract.commands.includes(command)
   );
 }
 
 export function getLocalPrerequisiteHandling(input: {
   readonly command: string;
 }): LocalPrerequisiteHandling | null {
+  const command = normalizePrerequisiteCommand({ command: input.command });
   return (
     COMMANDS_WITH_LOCAL_PREREQUISITE_HANDLING.find(
-      (entry) => entry.command === input.command
+      (entry) => entry.command === command
     ) ?? null
   );
 }

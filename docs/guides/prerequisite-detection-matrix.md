@@ -150,6 +150,9 @@ linear set-subscription
 linear remove-subscription
 ```
 
+`hack linear ...` entries also apply to the equivalent `hack x linear ...`
+alias path.
+
 ## Notes for Follow-on Implementation
 
 - Preserve the current distinction between diagnostics and actions. Status commands should not disappear behind setup wizards.

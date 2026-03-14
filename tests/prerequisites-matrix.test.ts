@@ -109,6 +109,24 @@ test("status-style auth commands warn instead of intercepting missing auth", () 
   );
 });
 
+test("x linear aliases resolve to the shared Linear prerequisite contracts", () => {
+  const [linearStatus] = getCommandPrerequisiteContracts({
+    command: "linear status",
+  });
+  const [xLinearStatus] = getCommandPrerequisiteContracts({
+    command: "x linear status",
+  });
+  const [linearSyncIssue] = getCommandPrerequisiteContracts({
+    command: "linear sync-issue",
+  });
+  const [xLinearSyncIssue] = getCommandPrerequisiteContracts({
+    command: "x linear sync-issue",
+  });
+
+  expect(xLinearStatus).toEqual(linearStatus);
+  expect(xLinearSyncIssue).toEqual(linearSyncIssue);
+});
+
 test("action commands escalate to guidance for missing integration auth", () => {
   const [githubAction] = getCommandPrerequisiteContracts({
     command: "x github pr-upsert",
@@ -150,6 +168,9 @@ test("cleanup and local-config commands stay out of shared prerequisite intercep
   expect(
     getCommandPrerequisiteContracts({ command: "linear project-unlink" })
   ).toEqual([]);
+  expect(
+    getCommandPrerequisiteContracts({ command: "x linear disconnect" })
+  ).toEqual([]);
 });
 
 test("major setup commands can be explicitly excluded from shared interception", () => {
@@ -169,6 +190,9 @@ test("major setup commands can be explicitly excluded from shared interception",
   ).toContain("primary repair/bootstrap path");
   expect(
     getLocalPrerequisiteHandling({ command: "linear setup" })?.reason
+  ).toContain("local project wiring command");
+  expect(
+    getLocalPrerequisiteHandling({ command: "x linear setup" })?.reason
   ).toContain("local project wiring command");
 });
 

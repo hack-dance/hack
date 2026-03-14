@@ -1,92 +1,108 @@
 # Sessions
 
-Sessions provide a way to manage persistent terminal workspaces using **tmux** or **zellij**. They're designed for:
-- **Remote access**: SSH into your machine and attach to an existing workspace
-- **Agent execution**: Run long-running agents in isolated sessions
-- **Multi-terminal workflows**: Keep multiple project contexts alive across sessions
+Sessions are **persistent project workspaces**. They keep a repo-root shell alive across terminal restarts, SSH reconnects, and long-running agent work so you can return to the same context instead of rebuilding it each time.
+
+The guided default is **tmux**:
+- `hack session` opens a tmux-first interactive picker
+- `hack session start <project>` reuses the default project workspace unless you ask for an isolated one
+- `hack setup tmux` installs the recommended popup binding so the picker is easy to reach from tmux
+
+Other mux backends still exist. `sessions.mux=auto` prefers tmux and falls back to zellij when tmux is unavailable, and you can explicitly set `sessions.mux=zellij` if that is your preferred backend. The interactive onboarding and pane tooling are tmux-first today.
 
 ## Quick start
 
 ```bash
-# Interactive session picker (shows sessions + projects)
+# Interactive picker for existing workspaces and new project workspaces
 hack session
 
-# Start a session for a project
+# Reuse the default workspace for a project, or create it if needed
 hack session start <project>
 
-# List all sessions
+# List active tmux workspaces
 hack session list
 
-# Attach to an existing session
-hack session attach <session>
+# Attach to an existing workspace by name
+hack session attach <workspace>
 
-# Run a command in a session
-hack session exec <session> "bun test"
+# Queue a command in a running workspace
+hack session exec <workspace> "bun test"
 
-# Stop a session
-hack session stop <session>
+# Stop a workspace
+hack session stop <workspace>
 
 # Capture recent output (defaults to active pane)
-hack session capture <session>
+hack session capture <workspace>
 
-# Tail session output for a short window (defaults to active pane)
-hack session tail <session>
+# Tail workspace output for a short window (defaults to active pane)
+hack session tail <workspace>
 
-# List panes in a session
-hack session panes <session>
+# List panes in a workspace
+hack session panes <workspace>
 ```
 
-## Session management
+## Core flows
 
 ### Interactive picker
 
 Running `hack session` without arguments opens an interactive picker showing:
-- **Active sessions**: tmux and zellij sessions (tmux shows attached/detached; zellij attach state is unknown)
-- **Available projects**: Registered projects without active sessions
+- **Active workspaces**: running tmux workspaces, with attached/detached status
+- **Available projects**: registered projects that do not currently have a default workspace
 
 When selecting an attached session, you can choose to:
-- **Attach**: Detach other clients and take over the session
-- **Create new**: Start a new numbered session (e.g., `project--2`)
+- **Attach**: detach other clients and take over the workspace
+- **Create isolated**: start a separate long-running workspace such as `project--2`
 
-### Creating sessions
+This is the recommended entry point when you want to resume a project context but do not remember the exact workspace name.
+
+### Start and create
 
 ```bash
-# Start session for a project (creates or attaches)
+# Reuse the default project workspace (creates it if needed)
 hack session start my-project
 
-# Force create a new numbered session
+# Force creation of an isolated numbered workspace
 hack session start my-project --new
 
-# Create with custom name suffix
+# Create an isolated workspace with a custom suffix
 hack session start my-project --name agent-1
 # Creates: my-project--agent-1
 
-# Run `hack up -d` before attaching
+# Prepare services before creating or attaching
 hack session start my-project --up
+
+# Create or reuse without attaching the current terminal
+hack session start my-project --detach
 ```
 
-Sessions are created at the project's repo root, not the `.hack/` directory.
+Default behavior is deliberate:
+- The first workspace for a project is just the project name, for example `my-project`
+- `--new` or `--name` creates an isolated workspace for a second agent, experiment, or review lane
+- `--detach` keeps the workspace alive for another tool or terminal to attach later
 
-### Attaching to sessions
+Workspaces are created at the project's repo root, not the `.hack/` directory.
+
+### Attach
 
 ```bash
-# Attach to an existing session
+# Attach to an existing workspace
 hack session attach my-project
 
-# From inside tmux, this switches to the session instead of nesting
+# From inside tmux, this switches clients instead of nesting tmux
 ```
 
-When attaching, the `-d` flag detaches other clients to avoid terminal size conflicts when multiple devices are connected.
+Use `attach` when you already know which workspace you want. If you are already inside tmux, hack switches clients instead of nesting tmux inside tmux. When attaching, tmux detaches other clients to avoid terminal size conflicts across multiple devices.
 
-### Executing commands
+### Exec
 
 ```bash
-# Send a command to a running session
+# Send a command to a running workspace
 hack session exec my-project "bun test"
 
-# tmux: sends the command + Enter to the session's active pane
-# zellij: opens a new pane and runs the command (no "active pane" concept)
+# tmux: sends the command + Enter to the active pane
+# zellij: opens a new pane and runs the command because there is no active-pane equivalent
 ```
+
+Use `exec` when you want to drive a persistent workspace from another terminal, script, or agent without attaching interactively first.
 
 ### Listing panes (tmux only)
 
@@ -147,7 +163,7 @@ hack ssh --direct --host 192.168.1.100
 # Specify user and port
 hack ssh --host example.com --user dev --port 2222
 
-# Connect directly to a session
+# Connect directly to a workspace
 hack ssh my-session
 ```
 
@@ -155,8 +171,8 @@ hack ssh my-session
 
 1. **SSH command**: Copy-paste command to connect
 2. **QR code**: Scan with mobile SSH apps (Blink, Termius)
-3. **Active sessions**: List of active tmux sessions on this machine (currently tmux-only)
-4. **Action picker**: Done or connect to a session
+3. **Active workspaces**: List of active tmux workspaces on this machine (currently tmux-only)
+4. **Action picker**: Done or connect to a workspace
 
 ### Tailscale setup
 
@@ -171,9 +187,9 @@ Tailscale connected!
 
 ### Terminal size conflicts
 
-When multiple clients attach to the same tmux session, terminal size can get messed up. The session commands use `tmux attach -d` to detach other clients, avoiding this issue.
+When multiple clients attach to the same tmux workspace, terminal size can get messed up. The session commands use `tmux attach -d` to detach other clients, avoiding this issue.
 
-If you're already in tmux and want to switch sessions without detaching:
+If you're already in tmux and want to switch workspaces without detaching:
 
 ```bash
 # Inside tmux: prefix + s to open session switcher
@@ -207,10 +223,20 @@ Global default:
 hack config set --global sessions.mux zellij
 ```
 
+Recommended onboarding:
+
+```bash
+# Install the tmux popup binding that launches the picker
+hack setup tmux
+
+# Keep tmux as the guided default, but switch globally if your team prefers zellij
+hack config set --global sessions.mux zellij
+```
+
 ## Daemon sessions API
 
-The hack daemon exposes a REST API for managing mux sessions programmatically (tmux and zellij). This is useful for:
-- Remote session control via the gateway
+The hack daemon exposes a REST API for managing mux-backed workspaces programmatically (tmux and zellij). This is useful for:
+- Remote workspace control via the gateway
 - Building automation tools
 - Agent orchestration
 
@@ -223,14 +249,14 @@ See the [Gateway API](gateway-api.md) for authentication and endpoint details.
 
 | Method | Path | Description |
 | --- | --- | --- |
-| GET | `/v1/sessions` | List all sessions |
-| POST | `/v1/sessions` | Create a new session |
-| GET | `/v1/sessions/:id` | Get session details |
-| POST | `/v1/sessions/:id/stop` | Stop (kill) a session |
-| POST | `/v1/sessions/:id/exec` | Execute command in session |
+| GET | `/v1/sessions` | List all workspaces |
+| POST | `/v1/sessions` | Create a new workspace |
+| GET | `/v1/sessions/:id` | Get workspace details |
+| POST | `/v1/sessions/:id/stop` | Stop (kill) a workspace |
+| POST | `/v1/sessions/:id/exec` | Execute command in a workspace |
 | POST | `/v1/sessions/:id/input` | Send raw keystrokes |
 
-### List sessions
+### List workspaces
 
 ```bash
 curl -H "Authorization: Bearer $HACK_GATEWAY_TOKEN" \
@@ -259,7 +285,7 @@ Response:
 }
 ```
 
-### Create session
+### Create workspace
 
 ```bash
 curl -X POST http://127.0.0.1:7788/v1/sessions \
@@ -271,7 +297,7 @@ curl -X POST http://127.0.0.1:7788/v1/sessions \
 Request body:
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `name` | string | yes | Session name (alphanumeric, dash, underscore) |
+| `name` | string | yes | Workspace name (alphanumeric, dash, underscore) |
 | `cwd` | string | no | Working directory |
 | `backend` | string | no | Override backend (`tmux` or `zellij`) |
 
@@ -289,14 +315,14 @@ Response (201):
 }
 ```
 
-### Get session
+### Get workspace
 
 ```bash
 curl -H "Authorization: Bearer $HACK_GATEWAY_TOKEN" \
   http://127.0.0.1:7788/v1/sessions/agent-1
 ```
 
-Response includes connection info for SSH access:
+Response includes connection info for SSH access to the workspace:
 ```json
 {
   "session": { ... },
@@ -356,7 +382,7 @@ Response:
 }
 ```
 
-### Stop session
+### Stop workspace
 
 ```bash
 curl -X POST -H "Authorization: Bearer $HACK_GATEWAY_TOKEN" \
@@ -376,8 +402,8 @@ Response:
 | Status | Error | Description |
 | --- | --- | --- |
 | 400 | `invalid_json` | Request body is not valid JSON |
-| 400 | `missing_name` | Session name not provided |
-| 400 | `invalid_name` | Session name contains invalid characters |
+| 400 | `missing_name` | Workspace name not provided |
+| 400 | `invalid_name` | Workspace name contains invalid characters |
 | 400 | `missing_command` | Command not provided for exec |
 | 400 | `missing_keys` | Keys not provided for input |
 | 400 | `missing_session_id` | Session ID not in URL |
@@ -390,7 +416,7 @@ Response:
 
 ## Example: Remote agent workflow
 
-1. **Create a session from your remote client**:
+1. **Create a workspace from your remote client**:
    ```bash
    curl -X POST http://gateway.example.com/v1/sessions \
      -H "Authorization: Bearer $TOKEN" \

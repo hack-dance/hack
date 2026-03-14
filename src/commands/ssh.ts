@@ -69,7 +69,11 @@ const sshSpec = defineCommand({
   group: "Project",
   options: [optHost, optUser, optTailscale, optDirect, optPort],
   positionals: [
-    { name: "session", description: "Session to connect to", required: false },
+    {
+      name: "workspace",
+      description: "Workspace to connect to",
+      required: false,
+    },
   ],
   subcommands: [],
 } as const);
@@ -130,34 +134,34 @@ async function handleSsh(opts: {
   qrcode.generate(sshUri, { small: true });
   console.log("");
 
-  // Step 4: Show active sessions
+  // Step 4: Show active workspaces
   const sessions = await listTmuxSessions();
 
   if (sessions.length > 0) {
     const sessionList = sessions
       .map((s) => `  • ${s.name}${s.attached ? " (attached)" : ""}`)
       .join("\n");
-    p.log.info(`Active tmux sessions:\n${sessionList}`);
+    p.log.info(`Active tmux workspaces:\n${sessionList}`);
   } else {
-    p.log.info("No active tmux sessions");
+    p.log.info("No active tmux workspaces");
   }
 
   // Step 5: Ask what to do
-  const sessionArg = args.positionals.session;
+  const workspaceArg = args.positionals.workspace;
 
-  if (sessionArg) {
-    if (!SESSION_NAME_PATTERN.test(sessionArg)) {
+  if (workspaceArg) {
+    if (!SESSION_NAME_PATTERN.test(workspaceArg)) {
       p.log.error(
-        "Invalid session name (only letters, numbers, dashes, underscores, or dots)"
+        "Invalid workspace name (only letters, numbers, dashes, underscores, or dots)"
       );
       return 1;
     }
-    // Direct connect to specified session
+    // Direct connect to specified workspace
     return await connectToSession({
       hostname,
       user,
       port,
-      sessionName: sessionArg,
+      sessionName: workspaceArg,
     });
   }
 
@@ -285,8 +289,8 @@ async function resolveSessionNameToConnect(opts: {
       },
       {
         value: "connect" as const,
-        label: "Connect to session",
-        hint: "SSH into a tmux session",
+        label: "Connect to workspace",
+        hint: "SSH into a tmux workspace",
       },
     ],
   });
@@ -301,11 +305,11 @@ async function resolveSessionNameToConnect(opts: {
       label: s.name,
       hint: s.attached ? "attached" : undefined,
     })),
-    { value: "__new__", label: "Create new session" },
+    { value: "__new__", label: "Create new workspace" },
   ];
 
   const selectedSession = await p.select({
-    message: "Select session",
+    message: "Select workspace",
     options: sessionOptions,
   });
 
@@ -318,7 +322,7 @@ async function resolveSessionNameToConnect(opts: {
   }
 
   const name = await p.text({
-    message: "Session name",
+    message: "Workspace name",
     placeholder: "main",
     defaultValue: "main",
     validate: (value) => {
@@ -403,7 +407,7 @@ async function setupTailscale(): Promise<
 }
 
 /**
- * Connect to a tmux session via SSH.
+ * Connect to a tmux workspace via SSH.
  */
 async function connectToSession(opts: {
   readonly hostname: string;
@@ -414,12 +418,12 @@ async function connectToSession(opts: {
   const sessionName = opts.sessionName.trim();
   if (!SESSION_NAME_PATTERN.test(sessionName)) {
     p.log.error(
-      "Invalid session name (only letters, numbers, dashes, underscores, or dots)"
+      "Invalid workspace name (only letters, numbers, dashes, underscores, or dots)"
     );
     return 1;
   }
 
-  p.log.step(`Connecting to ${sessionName}...`);
+  p.log.step(`Connecting to workspace ${sessionName}...`);
   console.log("");
 
   // Use login shell to ensure PATH includes homebrew etc.

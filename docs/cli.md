@@ -31,7 +31,7 @@ Run `hack help` or `hack help <command>` for interactive help.
 | `hack linear` | Linear account connection and ticket sync | Project |
 | `hack config` | Read/write hack.config.json values | Project |
 | `hack env` | Manage project environment variables and secrets | Project |
-| `hack session` | Manage terminal sessions for hack projects | Project |
+| `hack session` | Manage persistent project workspaces with tmux-first onboarding | Project |
 | `hack ssh` | Show SSH connection info for remote access | Project |
 | `hack tickets` | Git-backed ticket management | Project |
 | `hack internal` | Manage hack-managed internal overrides | Internal |
@@ -563,35 +563,53 @@ Options:
 Usage: `hack session [subcommand]`
 
 With no subcommand, opens an interactive picker of active sessions and available projects.
+Sessions keep a project workspace alive across terminal restarts, SSH reconnects, and long-running agent work.
+The guided default is tmux, including `hack setup tmux` for a popup picker. Other mux backends such as zellij remain configurable through `sessions.mux`, but the interactive session flow is tmux-first today.
 
 Subcommands:
 
 | Subcommand | Summary |
 | --- | --- |
-| `list` | List active sessions |
-| `start` | Start or attach to a session for a project |
-| `stop` | Stop (kill) a session |
-| `attach` | Attach to an existing session |
-| `exec` | Execute a command in a session |
-| `panes` | List panes in a tmux session |
-| `capture` | Capture recent output from a tmux session |
-| `tail` | Tail output from a tmux session |
+| `list` | List active tmux workspaces |
+| `start` | Reuse the default project workspace or create an isolated one |
+| `stop` | Stop a tmux-backed workspace |
+| `attach` | Attach to an existing workspace |
+| `exec` | Send a command to a running workspace |
+| `panes` | List panes in a tmux workspace |
+| `capture` | Capture recent output from a tmux workspace |
+| `tail` | Tail output from a tmux workspace |
 
 #### hack session start
 
 Usage: `hack session start [project] [options]`
 
+Reuse the default project workspace when it already exists, or create an isolated long-running workspace with `--new` or `--name`.
+Use `--detach` when another tool should keep the workspace alive without attaching your terminal.
+
 Options:
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--up` | boolean | false | Run hack up -d before attaching |
-| `--new` | boolean | false | Force create new session even if one exists |
-| `--name <suffix>` | string | - | Custom suffix for new session (e.g., agent-1) |
+| `--up` | boolean | false | Run hack up -d before creating or attaching |
+| `--new` | boolean | false | Create an isolated workspace instead of reusing the default project workspace |
+| `--name <suffix>` | string | - | Suffix for an isolated workspace name (for example: agent-1 -> project--agent-1) |
+| `--detach`, `-d` | boolean | false | Create or reuse the workspace without attaching (for GUI/non-TTY use) |
+
+#### hack session attach
+
+Usage: `hack session attach <workspace>`
+
+Attach to a running tmux workspace by name. When you are already inside tmux, hack switches clients instead of nesting tmux inside tmux.
+
+#### hack session exec
+
+Usage: `hack session exec <workspace> <command>`
+
+Queue a command in the workspace's active pane without opening a new shell. This is useful for long-running agents, background checks, or remote follow-up work.
 
 #### hack session panes
 
-Usage: `hack session panes <session> [options]`
+Usage: `hack session panes <workspace> [options]`
 
 Options:
 
@@ -602,7 +620,7 @@ Options:
 
 #### hack session capture
 
-Usage: `hack session capture <session> [options]`
+Usage: `hack session capture <workspace> [options]`
 
 Options:
 
@@ -615,7 +633,7 @@ Options:
 
 #### hack session tail
 
-Usage: `hack session tail <session> [options]`
+Usage: `hack session tail <workspace> [options]`
 
 Options:
 
@@ -630,7 +648,7 @@ Options:
 
 ### hack ssh
 
-Usage: `hack ssh [session] [options]`
+Usage: `hack ssh [workspace] [options]`
 
 Options:
 
@@ -1061,6 +1079,7 @@ Subcommands:
 
 | Subcommand | Summary |
 | --- | --- |
+| `tmux` | Install the recommended tmux binding for hack workspaces |
 | `cursor` | Install Cursor rules for hack CLI usage |
 | `claude` | Install Claude Code hooks for hack CLI usage |
 | `codex` | Install Codex skill for hack CLI usage |
@@ -1068,6 +1087,17 @@ Subcommands:
 | `agents` | Install AGENTS.md / CLAUDE.md snippets |
 | `sync` | Refresh agent docs, skills, and MCP configs |
 | `mcp` | Install MCP configs for hack CLI usage (no-shell only) |
+
+#### hack setup tmux
+
+Usage: `hack setup tmux [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--check` | boolean | false | Check whether integration is installed |
+| `--remove` | boolean | false | Remove integration files/config |
 
 #### hack setup cursor
 

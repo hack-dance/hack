@@ -172,8 +172,10 @@ hack ssh my-session
 
 1. **SSH command**: Copy-paste command to connect
 2. **QR code**: Scan with mobile SSH apps (Blink, Termius)
-3. **Active workspaces**: List of active tmux workspaces on this machine (currently tmux-only)
+3. **Active workspaces**: List of active workspaces on this machine, including the active mux backend when known
 4. **Action picker**: Done or connect to a workspace
+
+When you connect to an existing workspace, hack uses that workspace's backend. When you create a new one from the SSH flow, hack uses the configured default backend (`sessions.mux`).
 
 ### Tailscale setup
 

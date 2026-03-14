@@ -46,4 +46,5 @@ test("hack ssh help uses workspace terminology", () => {
 
   expect(help).toContain("hack ssh [workspace]");
   expect(help).toContain("Workspace to connect to");
+  expect(help).toContain("reuse their current mux backend");
 });

@@ -817,7 +817,12 @@ See examples:
 
 ## Troubleshooting
 
-- `*.hack` doesn’t resolve: run `hack doctor`, then `hack global install` (macOS: ensure dnsmasq is running).
+- Start with `hack doctor`. It now separates:
+  - temporary breakage that is usually fixed by `hack global up`, `hack restart`, or a daemon restart
+  - deeper DNS/network/CA drift that should go through `hack doctor --fix`
+  - issues that need manual follow-up instead of a guessed repair
+
+- `*.hack` doesn’t resolve: run `hack doctor`, then follow the suggested restart or repair path (macOS may still need dnsmasq running via `hack global install`).
 
 - Stale global setup / CoreDNS issues: run `hack doctor --fix` (refreshes network + CoreDNS + CA).
 
@@ -836,6 +841,9 @@ See examples:
   `docker network rm hack-dev` then `hack global install`.
 
 - OAuth redirect errors: use the OAuth alias host (`*.hack.gy`) or `localhost` (providers may reject non-public suffixes like `.hack`).
+
+- If runtime or proxy failures still reproduce after the recovery steps, collect a bundle with
+  `hack crash-capture --path <repo>` and review `summary.json` first.
 
 
 

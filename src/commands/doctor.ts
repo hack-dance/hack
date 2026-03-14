@@ -60,6 +60,7 @@ import {
   renderGlobalCaddyCompose,
   renderGlobalCoreDnsConfig,
 } from "../templates.ts";
+import { display } from "../ui/display.ts";
 import { getFzfPath } from "../ui/fzf.ts";
 import { getGumPath } from "../ui/gum.ts";
 import { isColorEnabled } from "../ui/terminal.ts";
@@ -69,6 +70,7 @@ import {
   resolvePreferredHostDnsTarget,
   resolverHasNameserver,
 } from "./doctor-utils.ts";
+import { buildDoctorRecoveryGuidance } from "./recovery-guidance.ts";
 
 type CheckStatus = "ok" | "warn" | "error";
 
@@ -378,6 +380,9 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
 
   emitSlowChecksNote(results);
   renderMacNote();
+  if (!args.options.fix) {
+    await renderRecoveryGuidance(results);
+  }
 
   if (args.options.fix) {
     await runDoctorFix({ startDir });
@@ -2169,6 +2174,67 @@ function emitSlowChecksNote(results: readonly TimedCheckResult[]): void {
     return;
   }
   note(slow.join("\n"), "Slow checks");
+}
+
+async function renderRecoveryGuidance(
+  results: readonly TimedCheckResult[]
+): Promise<void> {
+  const guidance = buildDoctorRecoveryGuidance({ results });
+  const hasActions =
+    guidance.temporaryBreakage.length > 0 ||
+    guidance.configurationRepair.length > 0 ||
+    guidance.followUp.length > 0;
+
+  if (!hasActions) {
+    return;
+  }
+
+  const lines: string[] = [];
+
+  if (guidance.temporaryBreakage.length > 0) {
+    lines.push("Temporary breakage:");
+    for (const command of guidance.temporaryBreakage) {
+      lines.push(`- ${command}`);
+    }
+  }
+
+  if (guidance.configurationRepair.length > 0) {
+    if (lines.length > 0) {
+      lines.push("");
+    }
+    lines.push("Configuration repair:");
+    for (const command of guidance.configurationRepair) {
+      lines.push(`- ${command}`);
+    }
+  }
+
+  if (guidance.followUp.length > 0) {
+    if (lines.length > 0) {
+      lines.push("");
+    }
+    lines.push("Manual follow-up:");
+    for (const item of guidance.followUp) {
+      lines.push(`- ${item}`);
+    }
+  }
+
+  lines.push("");
+  lines.push("Verify:");
+  for (const command of guidance.verify) {
+    lines.push(`- ${command}`);
+  }
+
+  lines.push("");
+  lines.push("If it still fails:");
+  for (const command of guidance.capture) {
+    lines.push(`- ${command}`);
+  }
+
+  await display.panel({
+    title: "Recovery workflow",
+    tone: "info",
+    lines,
+  });
 }
 
 function formatTimedResult(opts: {

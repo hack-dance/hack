@@ -4,6 +4,10 @@ import { basename, resolve } from "node:path";
 import type { CommandHandlerFor } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
 import { optPath } from "../cli/options.ts";
+import {
+  DEFAULT_INGRESS_NETWORK,
+  DEFAULT_LOGGING_NETWORK,
+} from "../constants.ts";
 import { findProjectContext, readProjectConfig } from "../lib/project.ts";
 import { exec } from "../lib/shell.ts";
 import { display } from "../ui/display.ts";
@@ -49,6 +53,16 @@ type CaptureCommandResult = {
   readonly exitCode: number;
   readonly file: string;
   readonly bytes: number;
+};
+
+type CrashCaptureSummary = {
+  readonly captureRoot: string;
+  readonly projectRoot: string | null;
+  readonly commandCount: number;
+  readonly failureCount: number;
+  readonly failedCommands: readonly string[];
+  readonly errors: readonly string[];
+  readonly nextSteps: readonly string[];
 };
 
 type CaptureMetadata = {
@@ -169,6 +183,26 @@ const handleCrashCapture: CommandHandlerFor<typeof crashCaptureSpec> = async ({
     },
   });
 
+  const summary = buildCrashCaptureSummary({
+    captureRoot,
+    projectRoot: project?.projectRoot ?? null,
+    results,
+    errors,
+  });
+  await writeJsonFile({
+    path: resolve(captureRoot, "summary.json"),
+    value: summary,
+  });
+  await Bun.write(
+    resolve(captureRoot, "README.txt"),
+    renderCrashCaptureReadme({
+      captureRoot,
+      projectRoot: project?.projectRoot ?? null,
+      failedCommands: summary.failedCommands,
+    }),
+    { createPath: true }
+  );
+
   await display.kv({
     title: "Crash capture complete",
     entries: [
@@ -254,12 +288,17 @@ async function resolveComposeProject(input: {
   }
 }
 
-function buildBaseCaptureCommands(input: {
+export function buildBaseCaptureCommands(input: {
   readonly projectRoot: string | null;
   readonly logWindow: string;
 }): readonly CaptureCommandSpec[] {
   const projectCommands: CaptureCommandSpec[] = input.projectRoot
     ? [
+        {
+          name: "hack_doctor_project",
+          cmd: ["hack", "doctor", "--path", input.projectRoot],
+          optional: true,
+        },
         {
           name: "hack_ps_project",
           cmd: ["hack", "ps", "--json", "--path", input.projectRoot],
@@ -330,11 +369,36 @@ function buildBaseCaptureCommands(input: {
       optional: true,
     },
     {
+      name: "hack_daemon_logs",
+      cmd: ["hack", "daemon", "logs", "--no-follow"],
+      optional: true,
+    },
+    {
+      name: "hack_global_status",
+      cmd: ["hack", "global", "status", "--json"],
+      optional: true,
+    },
+    {
+      name: "hack_global_logs_caddy",
+      cmd: ["hack", "global", "logs", "caddy", "--no-follow", "--tail", "200"],
+      optional: true,
+    },
+    {
+      name: `docker_network_inspect_${DEFAULT_INGRESS_NETWORK}`,
+      cmd: ["docker", "network", "inspect", DEFAULT_INGRESS_NETWORK],
+      optional: true,
+    },
+    {
+      name: `docker_network_inspect_${DEFAULT_LOGGING_NETWORK}`,
+      cmd: ["docker", "network", "inspect", DEFAULT_LOGGING_NETWORK],
+      optional: true,
+    },
+    {
       name: "ps_orbstack_processes",
       cmd: [
         "/bin/sh",
         "-lc",
-        "ps -Ao pid,ppid,etime,command | rg -i 'orbstack|vz|docker'",
+        "ps -Ao pid,ppid,etime,command | grep -iE 'orbstack|vz|docker' || true",
       ],
       optional: true,
     },
@@ -473,4 +537,72 @@ async function writeJsonFile(input: {
   await Bun.write(input.path, `${JSON.stringify(input.value, null, 2)}\n`, {
     createPath: true,
   });
+}
+
+export function buildCrashCaptureSummary(input: {
+  readonly captureRoot: string;
+  readonly projectRoot: string | null;
+  readonly results: readonly CaptureCommandResult[];
+  readonly errors: readonly string[];
+}): CrashCaptureSummary {
+  const failedCommands = input.results
+    .filter((result) => result.exitCode !== 0)
+    .map((result) => result.name);
+
+  return {
+    captureRoot: input.captureRoot,
+    projectRoot: input.projectRoot,
+    commandCount: input.results.length,
+    failureCount: failedCommands.length,
+    failedCommands,
+    errors: input.errors,
+    nextSteps: buildCrashCaptureNextSteps({
+      projectRoot: input.projectRoot,
+    }),
+  };
+}
+
+function buildCrashCaptureNextSteps(input: {
+  readonly projectRoot: string | null;
+}): readonly string[] {
+  const projectRoot = input.projectRoot ?? "<repo>";
+  return [
+    `Run \`hack doctor --path ${projectRoot}\` to classify restart versus repair work.`,
+    "If global proxy/runtime is down, run `hack global up`.",
+    `If project host mappings are stale, run \`hack restart --path ${projectRoot}\`.`,
+    `If doctor reports DNS/network/CA drift, run \`hack doctor --fix --path ${projectRoot}\`.`,
+  ];
+}
+
+export function renderCrashCaptureReadme(input: {
+  readonly captureRoot: string;
+  readonly projectRoot: string | null;
+  readonly failedCommands: readonly string[];
+}): string {
+  const projectRoot = input.projectRoot ?? "<repo>";
+  const failedCommands =
+    input.failedCommands.length > 0
+      ? input.failedCommands.map((command) => `- ${command}`)
+      : ["- none"];
+
+  return [
+    "Crash capture bundle",
+    "",
+    `Location: ${input.captureRoot}`,
+    `Project root: ${projectRoot}`,
+    "",
+    "Read in this order:",
+    "- summary.json",
+    "- commands.json",
+    "- *.log command captures",
+    "",
+    "Failed commands:",
+    ...failedCommands,
+    "",
+    "Suggested recovery flow:",
+    `1. hack doctor --path ${projectRoot}`,
+    "2. hack global up",
+    `3. hack restart --path ${projectRoot}`,
+    `4. hack doctor --fix --path ${projectRoot}`,
+  ].join("\n");
 }

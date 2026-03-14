@@ -1238,6 +1238,14 @@ Options:
 
 Usage: `hack doctor [options]`
 
+Use this as the first recovery step when runtime or proxy behavior looks wrong. The command now groups failures into:
+
+- temporary breakage you can usually recover with restart commands such as `hack global up`, `hack restart`, or daemon restart
+- deeper configuration drift that should go through `hack doctor --fix`
+- manual follow-up items that are intentionally not auto-classified
+
+If the problem still reproduces after the suggested recovery flow, collect a bundle with `hack crash-capture`.
+
 Options:
 
 | Flag | Type | Default | Description |
@@ -1253,8 +1261,16 @@ Collects a post-failure bundle under `.tmp/crash-capture-<timestamp>/` including
 
 - `metadata.json` with platform/project context
 - `commands.json` with command outcomes
+- `summary.json` with failed commands and recommended next steps
+- `README.txt` with a short triage map for the bundle
 - `docker` / `hack` snapshots
 - macOS unified log slices (OrbStack + kernel container events) when available
+
+Recommended usage:
+
+1. Run `hack doctor` first to try restart or repair guidance.
+2. If the issue persists, run `hack crash-capture --path <repo>`.
+3. Read `summary.json`, then `commands.json`, then the referenced `*.log` files.
 
 Options:
 

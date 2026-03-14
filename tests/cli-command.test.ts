@@ -60,3 +60,17 @@ test("resolveCommand finds crash-capture command", () => {
   ]);
   expect(resolved.remainingPositionals).toEqual([]);
 });
+
+test("linear command metadata advertises project artifact workflows", () => {
+  const resolved = resolveCommand(CLI_SPEC, ["linear"]);
+  expect(resolved.command?.summary).toBe(
+    "Linear account connection, issue sync, and project artifact management"
+  );
+  expect(resolved.command?.description).toContain("hack linear documents pull");
+  expect(resolved.command?.description).toContain(
+    "hack linear milestones plan"
+  );
+  expect(resolved.command?.description).toContain(
+    "hack linear status-updates publish"
+  );
+});

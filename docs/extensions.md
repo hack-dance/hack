@@ -323,7 +323,7 @@ Notes:
   - `dependencies` (default `true`)
   - `projects` (default `true`)
 - Architecture + rollout guide: `docs/guides/linear-integration-architecture.md`.
-- Planned managed project artifacts (documents, milestones, status updates):
+- Managed project artifacts (documents, milestones, status updates) are documented in:
   `docs/plans/2026-03-14-linear-project-artifacts-design.md`.
 
 #### job-show

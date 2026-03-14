@@ -13,7 +13,8 @@ import { logger } from "../ui/logger.ts";
  */
 const linearSpec = defineCommand({
   name: "linear",
-  summary: "Linear account connection and ticket sync",
+  summary:
+    "Linear account connection, issue sync, and project artifact management",
   description: [
     "Usage:",
     "  hack linear status",
@@ -24,6 +25,9 @@ const linearSpec = defineCommand({
     "  hack linear sync-issue --from linear --issue ENG-123",
     "  hack linear sync-issue --from hack --ticket T-00001",
     "  hack linear sync-project --from linear --project-id <linear-project-id>",
+    "  hack linear documents pull",
+    "  hack linear milestones plan",
+    "  hack linear status-updates publish --path .hack/linear/projects/<project-id>/status-updates/drafts/<yyyy-mm-dd>-<slug>.md",
     "",
     "Alias for `hack x linear <command>`. Requires extension enabled.",
   ].join("\n"),

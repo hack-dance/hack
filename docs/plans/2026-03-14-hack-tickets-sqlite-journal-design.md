@@ -179,7 +179,7 @@ This table is the durable idempotency fence and powers fast `show` queries witho
 - `line_count INTEGER NOT NULL`
 - `scanned_at TEXT NOT NULL`
 
-This table tracks which journal segment bytes have already been scanned into the projection. Replay correctness must not rely on the last applied sort key alone because a merged segment can introduce older events that sort before the current replay cursor.
+This table tracks which journal segment bytes have already been scanned into the projection. Replay correctness must not rely on the last applied sort key alone because a merged segment can introduce older events that sort before the current replay cursor. If the current journal inventory ever drops a segment that was previously scanned, startup must treat that as source-of-truth drift and rebuild from the remaining journal bytes so removed history does not linger in SQLite.
 
 ### Ticket projection
 
@@ -237,6 +237,13 @@ Indexes:
 - `ticket_dependencies_depends_idx (depends_on_ticket_id, ticket_id)`
 - `ticket_blocks_blocks_idx (blocks_ticket_id, ticket_id)`
 - `ticket_tags_tag_idx (tag, ticket_id)`
+
+`ticket_blocks` stores the effective blocker edges exposed by reads, not just the explicit `blocks` payload field. To preserve current ticket semantics, replay must materialize `ticket.blocks` as the union of:
+
+- explicit `blocks` values written on that ticket
+- reverse `dependsOn` edges from other tickets that depend on this ticket
+
+That matches the current in-memory materializer, where blockers are derived from both direct `blocks` fields and reverse dependencies.
 
 ### Append-only child entities
 
@@ -310,7 +317,7 @@ Indexes:
 1. Open SQLite in WAL mode.
 2. Read `projection_meta`.
 3. If the file is missing, `schema_version` is wrong, `journal_format_version` is wrong, status is `rebuilding`, or SQLite reports corruption, delete and rebuild.
-4. Otherwise compare the current segment inventory against `journal_segments` and fully rescan any segment whose bytes changed or that was not seen before.
+4. Otherwise compare the current segment inventory against `journal_segments`. If any previously scanned segment is now missing, rebuild from scratch. Fully rescan any segment whose bytes changed or that was not seen before.
 5. Inspect newly discovered events from those segments in canonical replay order.
 6. If every new event sorts strictly after the current replay cursor, append incrementally.
 7. If any new event sorts at or before the current replay cursor, rebuild instead of trying to patch mutable state out of order.
@@ -337,8 +344,8 @@ This keeps replay crash-safe, allows progress to resume from the last committed 
 
 ### Event application rules
 
-- `ticket.created`: insert a row into `tickets`, replace dependency/block/tag sets from payload, set `created_at` and `updated_at` from the event timestamp.
-- `ticket.updated`: patch only provided fields, replace dependency/block/tag sets only when they appear in payload, set `updated_at`.
+- `ticket.created`: insert a row into `tickets`, replace dependency/tag sets from payload, recompute effective blocker rows for the touched ticket and any tickets referenced by its dependency edges, and set `created_at` and `updated_at` from the event timestamp.
+- `ticket.updated`: patch only provided fields, replace dependency/tag sets only when they appear in payload, recompute effective blocker rows whenever explicit `blocks` or dependency edges change, and set `updated_at`.
 - `ticket.status_changed`: update `status` and `updated_at`.
 - `ticket.comment_appended`: insert into `ticket_comments`.
 - `ticket.comment_linked`: patch `external_id` and `external_url` for the existing comment row.
@@ -409,6 +416,7 @@ The projection specifically accelerates:
 
 - Multiple machines can append semantically equivalent journals and later merge through git.
 - Normalization merges by `eventId` union, not by trusting file order.
+- Journal normalization and projection replay must use the same `ts` / `orderKey` / `eventId` ordering so same-second events do not materialize differently before and after `sync`.
 - Projection replay is safe after repeated fetch, merge, or sync because tail-only additions replay incrementally while historical insertions force rebuild instead of out-of-order mutation.
 - Because SQLite is local-only, machines never need to coordinate projection files. They only need the same journal bytes.
 
@@ -423,8 +431,11 @@ The projection specifically accelerates:
 - Rebuilding from the same journal twice yields byte-equivalent query results.
 - Reapplying the same merged journal does not duplicate comments, checkpoints, or conflicts.
 - Merging a segment that contains older events than the current replay cursor still converges because the projection detects the historical insertion and rebuilds instead of applying it out of order.
+- Removing or replacing a scanned segment converges because startup treats missing segment inventory as a rebuild trigger.
 - Deleting the SQLite file does not lose ticket history.
 - Sync-heavy reads stop scanning all JSONL files on each command.
+- Tickets that are only blocked through reverse `dependsOn` edges still surface the same effective `blocks` list after reads move to SQLite.
+- `ticket.status_changed` continues to drive the visible ticket status and `updated_at` once reads are served from the projection.
 - Duplicate `eventId` with mismatched payload is detected as corruption.
 
 ## Recommendation

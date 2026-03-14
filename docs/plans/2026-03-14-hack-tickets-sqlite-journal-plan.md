@@ -22,6 +22,7 @@
 - Add a test that rebuilds from a fixed journal and asserts ticket, comment, checkpoint, and conflict rows are present in the projection.
 - Add a test that replays the same event stream twice and asserts child rows are not duplicated.
 - Add a test that feeds the same `eventId` with different payloads and asserts replay fails with a corruption error.
+- Add a test that applies `ticket.status_changed` and asserts the projected `status` and `updated_at` match the journal.
 
 **Step 2: Run focused tests to verify failure** Run: `bun test tests/tickets-projection.test.ts tests/tickets-store.test.ts` Expected: FAIL because no projection module or corruption checks exist yet.
 
@@ -75,17 +76,21 @@ git commit -m "feat(tickets): add projection schema bootstrap"
 
 - Modify: `src/control-plane/extensions/tickets/projection.ts`
 - Modify: `src/control-plane/extensions/tickets/store.ts`
+- Modify: `src/control-plane/extensions/tickets/tickets-git-channel.ts`
 - Test: `tests/tickets-projection.test.ts`
+- Test: `tests/tickets-git-channel.test.ts`
 
 **Step 1: Write the replay engine**
 
 - Detect new or changed journal segments by fingerprint, then rescan those segments fully.
+- Trigger rebuild when a previously scanned segment is missing from the current journal inventory.
 - Parse candidate events in canonical order by `ts`, `orderKey`, `eventId`.
 - If every new event sorts after the replay cursor, append incrementally.
 - If any newly discovered event sorts at or before the replay cursor, trigger rebuild instead of out-of-order patch replay.
 - Insert each event into `journal_events` before mutating read tables.
 - Compare payload hashes on duplicate `eventId`.
 - Advance `journal_segments` only after the segment scan succeeds.
+- Update journal normalization helpers so `sync` and merge repair sort by the same `ts`, `orderKey`, `eventId` order used by replay.
 
 **Step 2: Implement event appliers**
 
@@ -99,12 +104,14 @@ git commit -m "feat(tickets): add projection schema bootstrap"
 - `ticket.sync_conflict_recorded`
 - `ticket.sync_conflict_resolved`
 
+Preserve current `blocks` semantics by recomputing effective blocker rows as the union of explicit `blocks` fields and reverse `dependsOn` edges.
+
 **Step 3: Run focused tests** Run: `bun test tests/tickets-projection.test.ts` Expected: PASS
 
 **Step 4: Commit**
 
 ```bash
-git add src/control-plane/extensions/tickets/projection.ts src/control-plane/extensions/tickets/store.ts tests/tickets-projection.test.ts
+git add src/control-plane/extensions/tickets/projection.ts src/control-plane/extensions/tickets/store.ts src/control-plane/extensions/tickets/tickets-git-channel.ts tests/tickets-projection.test.ts tests/tickets-git-channel.test.ts
 git commit -m "feat(tickets): replay journal into sqlite projection"
 ```
 
@@ -126,6 +133,7 @@ git commit -m "feat(tickets): replay journal into sqlite projection"
 - any sync lookup helpers added during implementation
 
 These reads should prefer SQLite and only trigger replay or rebuild when projection state is missing or stale.
+Add assertions that `tickets list`, `tickets show`, and `tickets status` still expose the correct status, `updated_at`, and effective blocker set once reads come from SQLite.
 
 **Step 2: Preserve write path semantics**
 
@@ -184,6 +192,8 @@ git commit -m "feat(tickets): add projection rebuild recovery"
 - sync remote journal content into a local clone
 - replay merged logs with duplicate events
 - replay a merged monthly segment that introduces older events than the current replay cursor
+- remove or replace a previously scanned segment and confirm startup rebuilds instead of serving orphaned rows
+- normalize same-second events with distinct `orderKey` values and confirm replay order matches post-sync order
 - confirm projection rows remain correct after repeated sync
 
 **Step 2: Run focused tests** Run: `bun test tests/tickets-git-channel.test.ts tests/tickets-extension.test.ts` Expected: PASS
@@ -217,7 +227,13 @@ bun run check
 
 Expected: PASS
 
-**Step 3: Commit**
+**Step 3: Land the session-close workflow**
+
+- File follow-up tickets for anything discovered during implementation that should not block merge.
+- Update the local tracking state for this work item and any spawned follow-up tickets.
+- Leave a concise next-session handoff that names the projection state, remaining risks, and exact commands/tests already verified.
+
+**Step 4: Commit**
 
 ```bash
 git add docs/guides/tickets.md docs/plans/2026-03-14-hack-tickets-sqlite-journal-design.md docs/plans/2026-03-14-hack-tickets-sqlite-journal-plan.md tests/tickets-projection.test.ts tests/tickets-store.test.ts tests/tickets-extension.test.ts tests/tickets-git-channel.test.ts src/control-plane/extensions/tickets/projection.ts src/control-plane/extensions/tickets/store.ts src/control-plane/extensions/tickets/commands.ts

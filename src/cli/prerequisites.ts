@@ -655,6 +655,16 @@ export const COMMANDS_WITH_LOCAL_PREREQUISITE_HANDLING = [
       "Assignee mapping inspection should continue to rely on command-local validation rather than shared prerequisite interception.",
   },
   {
+    command: "linear set-assignee-mapping",
+    reason:
+      "Assignee mapping updates are local config mutations and should continue to rely on command-local validation.",
+  },
+  {
+    command: "linear remove-assignee-mapping",
+    reason:
+      "Assignee mapping cleanup is local config mutation state and should not be hidden behind shared setup guidance.",
+  },
+  {
     command: "linear project-unlink",
     reason:
       "Project unlink is local cleanup state and should not be hidden behind shared setup guidance.",

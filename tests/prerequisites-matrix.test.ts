@@ -166,10 +166,28 @@ test("cleanup and local-config commands stay out of shared prerequisite intercep
     getCommandPrerequisiteContracts({ command: "linear assignee-mappings" })
   ).toEqual([]);
   expect(
+    getCommandPrerequisiteContracts({ command: "linear set-assignee-mapping" })
+  ).toEqual([]);
+  expect(
+    getCommandPrerequisiteContracts({
+      command: "linear remove-assignee-mapping",
+    })
+  ).toEqual([]);
+  expect(
     getCommandPrerequisiteContracts({ command: "linear project-unlink" })
   ).toEqual([]);
   expect(
     getCommandPrerequisiteContracts({ command: "x linear disconnect" })
+  ).toEqual([]);
+  expect(
+    getCommandPrerequisiteContracts({
+      command: "x linear set-assignee-mapping",
+    })
+  ).toEqual([]);
+  expect(
+    getCommandPrerequisiteContracts({
+      command: "x linear remove-assignee-mapping",
+    })
   ).toEqual([]);
 });
 
@@ -182,6 +200,8 @@ test("major setup commands can be explicitly excluded from shared interception",
     "x github disconnect",
     "linear disconnect",
     "linear assignee-mappings",
+    "linear set-assignee-mapping",
+    "linear remove-assignee-mapping",
     "linear project-unlink",
   ]);
 

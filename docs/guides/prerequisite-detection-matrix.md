@@ -157,6 +157,6 @@ alias path.
 
 - Preserve the current distinction between diagnostics and actions. Status commands should not disappear behind setup wizards.
 - Keep conditional checks conditional. `mux_backend` only matters for lifecycle-backed `hack up`/`hack restart` when lifecycle host processes are configured.
-- Keep cleanup and local-only config commands out of shared interception. `x github disconnect`, `linear disconnect`, `linear assignee-mappings`, and `linear project-unlink` should use command-local validation instead of the prerequisite matrix.
+- Keep cleanup and local-only config commands out of shared interception. `x github disconnect`, `linear disconnect`, `linear assignee-mappings`, `linear set-assignee-mapping`, `linear remove-assignee-mapping`, and `linear project-unlink` should use command-local validation instead of the prerequisite matrix.
 - Docker detection should distinguish CLI missing from daemon unavailable because the repair path is different.
 - GitHub and Linear setup flows already contain parts of this guidance. Interception should centralize the decision, not duplicate every downstream error string.

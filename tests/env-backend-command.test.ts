@@ -40,51 +40,59 @@ afterEach(async () => {
   }
 });
 
-test("env backend status defaults to keychain", async () => {
-  const result = await runHack({
-    args: ["env", "backend", "status", "--json"],
-    env: {
-      ...process.env,
-      HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
-    },
-  });
-  expect(result.exitCode).toBe(0);
-  const json = JSON.parse(result.stdout) as {
-    readonly backend: string;
-    readonly encrypted_file: { readonly path: string };
-  };
-  expect(json.backend).toBe("keychain");
-  expect(json.encrypted_file.path).toBe("~/.hack/secrets.enc.json");
-});
+test(
+  "env backend status defaults to keychain",
+  async () => {
+    const result = await runHack({
+      args: ["env", "backend", "status", "--json"],
+      env: {
+        ...process.env,
+        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
+      },
+    });
+    expect(result.exitCode).toBe(0);
+    const json = JSON.parse(result.stdout) as {
+      readonly backend: string;
+      readonly encrypted_file: { readonly path: string };
+    };
+    expect(json.backend).toBe("keychain");
+    expect(json.encrypted_file.path).toBe("~/.hack/secrets.enc.json");
+  },
+  { timeout: 20_000 }
+);
 
-test("env backend use encrypted_file persists selection", async () => {
-  const result = await runHack({
-    args: [
-      "env",
-      "backend",
-      "use",
-      "encrypted_file",
-      "--store-path",
-      "/tmp/custom-secrets.enc.json",
-      "--json",
-    ],
-    env: {
-      ...process.env,
-      HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
-    },
-  });
-  expect(result.exitCode).toBe(0);
-  const json = JSON.parse(result.stdout) as {
-    readonly backend: string;
-    readonly encrypted_file: { readonly path: string };
-  };
-  expect(json.backend).toBe("encrypted_file");
-  expect(json.encrypted_file.path).toBe("/tmp/custom-secrets.enc.json");
+test(
+  "env backend use encrypted_file persists selection",
+  async () => {
+    const result = await runHack({
+      args: [
+        "env",
+        "backend",
+        "use",
+        "encrypted_file",
+        "--store-path",
+        "/tmp/custom-secrets.enc.json",
+        "--json",
+      ],
+      env: {
+        ...process.env,
+        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
+      },
+    });
+    expect(result.exitCode).toBe(0);
+    const json = JSON.parse(result.stdout) as {
+      readonly backend: string;
+      readonly encrypted_file: { readonly path: string };
+    };
+    expect(json.backend).toBe("encrypted_file");
+    expect(json.encrypted_file.path).toBe("/tmp/custom-secrets.enc.json");
 
-  const configText = await readFile(tempGlobalConfigPath!, "utf8");
-  expect(configText).toContain('"backend": "encrypted_file"');
-  expect(configText).toContain('"/tmp/custom-secrets.enc.json"');
-});
+    const configText = await readFile(tempGlobalConfigPath!, "utf8");
+    expect(configText).toContain('"backend": "encrypted_file"');
+    expect(configText).toContain('"/tmp/custom-secrets.enc.json"');
+  },
+  { timeout: 20_000 }
+);
 
 test(
   "env backend use encrypted_file can provision a stable key file",

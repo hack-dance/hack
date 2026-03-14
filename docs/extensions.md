@@ -13,7 +13,8 @@ If you just want remote access working, start here:
 hack remote setup
 ```
 
-The wizard enables the gateway for the current project, creates a token + QR, and can configure Cloudflare/Tailscale/SSH exposure in one flow.
+The wizard enables the gateway for the current project, creates a token + QR, and can configure
+Cloudflare/Tailscale/SSH exposure in one flow.
 
 ## Behavior
 
@@ -21,7 +22,8 @@ The wizard enables the gateway for the current project, creates a token + QR, an
 - Each extension provides a manifest + commands (`ExtensionDefinition`).
 - The CLI dispatches extension commands via `hack x <namespace> <command>`.
 - Global enablement lives in `~/.hack/hack.config.json` (`hack config set --global ...`).
-- Per-project overrides live in `.hack/hack.config.json` and typically win over global values (except global-only extensions like Cloudflare/Tailscale/GitHub, which ignore project overrides).
+- Per-project overrides live in `.hack/hack.config.json` and typically win over global values
+  (except global-only extensions like Cloudflare/Tailscale/GitHub, which ignore project overrides).
 - Built-in Gateway enablement is project-scoped: `controlPlane.gateway.enabled` opts a project into routing.
 
 ## Extension definition (API surface)
@@ -47,14 +49,14 @@ export type ExtensionCommand = {
 ```
 
 The `ExtensionCommandContext` includes:
-
 - `controlPlaneConfig` (parsed config)
 - `projectId` and `projectName` (when available)
 - `logger` and `cwd`
 
 ## Config + enablement
 
-Global `controlPlane` lives in `~/.hack/hack.config.json` and is parsed by `src/control-plane/sdk/config.ts`. Per-project overrides use `.hack/hack.config.json`.
+Global `controlPlane` lives in `~/.hack/hack.config.json` and is parsed by
+`src/control-plane/sdk/config.ts`. Per-project overrides use `.hack/hack.config.json`.
 
 Enable a global extension by id:
 
@@ -78,10 +80,10 @@ Shortcut for gateway (project-scoped):
 }
 ```
 
-Global-only extensions (e.g. Cloudflare, Tailscale, GitHub) must be configured in the global config. Project overrides for these are ignored.
+Global-only extensions (e.g. Cloudflare, Tailscale, GitHub) must be configured in the global config.
+Project overrides for these are ignored.
 
 CLI helpers:
-
 - `hack gateway enable` (sets both gateway + extension flags)
 - `hack gateway setup` (guided enable + optional writes + token creation + QR by default)
 - `hack config set --global 'controlPlane.extensions[\"dance.hack.gateway\"].enabled' true`
@@ -106,10 +108,10 @@ Use `hack x <namespace> help` to list commands.
 - GitHub: `hack x github connect|oauth-connect|disconnect|profiles|use|status|pr-upsert`
 - Linear: `hack x linear setup|connect|oauth-connect|disconnect|status|profiles|use|projects|project-bind|sync-issue|sync-project`
 
-Gateway tokens default to `read` scope. Use `--scope write` to permit non-GET requests (also requires global `controlPlane.gateway.allowWrites = true`).
+Gateway tokens default to `read` scope. Use `--scope write` to permit non-GET requests (also
+requires global `controlPlane.gateway.allowWrites = true`).
 
 Current gateway API surface (HTTP/WS):
-
 - `GET /v1/status`, `GET /v1/metrics`, `GET /v1/projects`, `GET /v1/ps`
 - `GET/POST /control-plane/projects/:id/jobs`
 - `GET /control-plane/projects/:id/jobs/:jobId`
@@ -120,7 +122,6 @@ Current gateway API surface (HTTP/WS):
 - `WS /control-plane/projects/:id/shells/:shellId/stream` (requires write token + allowWrites)
 
 Local auth service surface (daemon + global Caddy route):
-
 - `GET /health`
 - `GET /v1/auth/providers`
 - `GET /gh/start` (GitHub browser OAuth entrypoint)
@@ -129,14 +130,15 @@ Local auth service surface (daemon + global Caddy route):
 - `GET /v1/auth/github/start`
 - `GET /v1/auth/github/flows/:id`
 
-Interactive shell/TTY is available via the shell stream endpoints; use `hack x supervisor shell` or see protocol below.
+Interactive shell/TTY is available via the shell stream endpoints; use
+`hack x supervisor shell` or see protocol below.
 
 For full usage guidance and structured workflow patterns, see `gateway-api.md`.
 
 For exposure helpers, see the guides:
-
 - `guides/remote-cloudflare.md`
-- `guides/remote-tailscale.md` DNS note: Cloudflare Tunnel uses a CNAME (`<tunnel-id>.cfargotunnel.com`) in your Cloudflare zone.
+- `guides/remote-tailscale.md`
+DNS note: Cloudflare Tunnel uses a CNAME (`<tunnel-id>.cfargotunnel.com`) in your Cloudflare zone.
 
 ## Command reference
 
@@ -148,14 +150,13 @@ Usage: `hack x gateway token-create [options] [label]`
 
 Options:
 
-| Flag              | Type    | Default | Description                  |
-| ----------------- | ------- | ------- | ---------------------------- | ----------- |
-| `--scope <read    | write>` | string  | `read`                       | Token scope |
-| `--write`         | boolean | false   | Shortcut for `--scope write` |
-| `--label <label>` | string  | -       | Optional label               |
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--scope <read|write>` | string | `read` | Token scope |
+| `--write` | boolean | false | Shortcut for `--scope write` |
+| `--label <label>` | string | - | Optional label |
 
 Notes:
-
 - The first non-flag argument is treated as the label if `--label` is not used.
 
 #### token-list
@@ -176,11 +177,11 @@ Usage: `hack x supervisor job-list [options]`
 
 Options:
 
-| Flag               | Type    | Default | Description                 |
-| ------------------ | ------- | ------- | --------------------------- |
-| `--project <name>` | string  | -       | Target a registered project |
-| `--path <dir>`     | string  | -       | Target a repo path          |
-| `--json`           | boolean | false   | Output JSON                 |
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--project <name>` | string | - | Target a registered project |
+| `--path <dir>` | string | - | Target a repo path |
+| `--json` | boolean | false | Output JSON |
 
 #### job-create
 
@@ -188,14 +189,14 @@ Usage: `hack x supervisor job-create [options] -- <command...>`
 
 Options:
 
-| Flag                | Type    | Default   | Description                                  |
-| ------------------- | ------- | --------- | -------------------------------------------- |
-| `--project <name>`  | string  | -         | Target a registered project                  |
-| `--path <dir>`      | string  | -         | Target a repo path                           |
-| `--runner <name>`   | string  | `generic` | Runner name                                  |
-| `--cwd <path>`      | string  | -         | Working directory (relative to project root) |
-| `--env <KEY=VALUE>` | string  | -         | Environment override (repeatable)            |
-| `--json`            | boolean | false     | Output JSON                                  |
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--project <name>` | string | - | Target a registered project |
+| `--path <dir>` | string | - | Target a repo path |
+| `--runner <name>` | string | `generic` | Runner name |
+| `--cwd <path>` | string | - | Working directory (relative to project root) |
+| `--env <KEY=VALUE>` | string | - | Environment override (repeatable) |
+| `--json` | boolean | false | Output JSON |
 
 ### GitHub extension (`hack x github`)
 
@@ -258,9 +259,10 @@ hack x github pr-upsert \
 ```
 
 Notes:
-
-- Profile config lives at: `controlPlane.extensions["dance.hack.github"].config.profiles`.
-- Profile selection precedence is: `--profile` -> `controlPlane.routing.overrides.github.profile` -> `config.defaultProfile`.
+- Profile config lives at:
+  `controlPlane.extensions["dance.hack.github"].config.profiles`.
+- Profile selection precedence is:
+  `--profile` -> `controlPlane.routing.overrides.github.profile` -> `config.defaultProfile`.
 - Keychain storage uses profile-specific `authRef` + `service`.
 - Token resolution order is keychain first, then environment fallback (`tokenEnv`).
 - If token metadata includes `expiresAt`, auth resolution attempts automatic GitHub App refresh using profile `appId`, `installationId`, and private key source.
@@ -339,7 +341,8 @@ Detailed design and sequencing live in:
 
 ### Linear extension (`hack x linear`)
 
-Linear integration supports multiple auth profiles, project-level binding, and manual sync in both directions between Linear issues and hack tickets.
+Linear integration supports multiple auth profiles, project-level binding, and manual sync in both
+directions between Linear issues and hack tickets.
 
 Quick start:
 
@@ -362,9 +365,11 @@ hack x linear sync-project --from hack --owner both
 ```
 
 Notes:
-
-- Profile selection precedence is: `--profile` -> `controlPlane.routing.overrides.linear.profile` -> `controlPlane.extensions["dance.hack.linear"].config.defaultProfile` -> implicit `default`.
-- Project mapping is stored in project config: `controlPlane.routing.overrides.linear.projectId|projectName|teamId`.
+- Profile selection precedence is:
+  `--profile` -> `controlPlane.routing.overrides.linear.profile` ->
+  `controlPlane.extensions["dance.hack.linear"].config.defaultProfile` -> implicit `default`.
+- Project mapping is stored in project config:
+  `controlPlane.routing.overrides.linear.projectId|projectName|teamId`.
 - Sync is manual by default (`sync-issue` / `sync-project`); there is no background autosync yet.
 - Ticket provenance is preserved during sync via `owner`, `source`, `tags`, and `external*` linkage fields.
 - `hack x linear connect` uses token mode when `--token`/`--stdin`/`$HACK_LINEAR_API_TOKEN` is present, and otherwise falls back to browser OAuth.
@@ -377,7 +382,8 @@ Notes:
 - Auth-broker Linear endpoints:
   - OAuth callback page: `/linear/callback`
   - Webhook ingest: `/linear/webhooks` (legacy alias: `/v1/integrations/linear/webhook`)
-- Sync toggles are configurable at `controlPlane.extensions["dance.hack.linear"].config.sync`:
+- Sync toggles are configurable at
+  `controlPlane.extensions["dance.hack.linear"].config.sync`:
   - `labels` (default `false`)
   - `statuses` (default `true`)
   - `dependencies` (default `true`)
@@ -390,11 +396,11 @@ Usage: `hack x supervisor job-show <job-id> [options]`
 
 Options:
 
-| Flag               | Type    | Default | Description                 |
-| ------------------ | ------- | ------- | --------------------------- |
-| `--project <name>` | string  | -       | Target a registered project |
-| `--path <dir>`     | string  | -       | Target a repo path          |
-| `--json`           | boolean | false   | Output JSON                 |
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--project <name>` | string | - | Target a registered project |
+| `--path <dir>` | string | - | Target a repo path |
+| `--json` | boolean | false | Output JSON |
 
 #### job-cancel
 
@@ -402,10 +408,10 @@ Usage: `hack x supervisor job-cancel <job-id> [options]`
 
 Options:
 
-| Flag               | Type   | Default | Description                 |
-| ------------------ | ------ | ------- | --------------------------- |
-| `--project <name>` | string | -       | Target a registered project |
-| `--path <dir>`     | string | -       | Target a repo path          |
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--project <name>` | string | - | Target a registered project |
+| `--path <dir>` | string | - | Target a repo path |
 
 #### job-tail
 
@@ -413,15 +419,15 @@ Usage: `hack x supervisor job-tail <job-id> [options]`
 
 Options:
 
-| Flag               | Type    | Default | Description                 |
-| ------------------ | ------- | ------- | --------------------------- |
-| `--project <name>` | string  | -       | Target a registered project |
-| `--path <dir>`     | string  | -       | Target a repo path          |
-| `--follow`         | boolean | true    | Follow logs (default)       |
-| `--no-follow`      | boolean | false   | Print logs and exit         |
-| `--logs-from <n>`  | number  | 0       | Resume from log offset      |
-| `--from <n>`       | number  | 0       | Alias for `--logs-from`     |
-| `--json`           | boolean | false   | Output JSON                 |
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--project <name>` | string | - | Target a registered project |
+| `--path <dir>` | string | - | Target a repo path |
+| `--follow` | boolean | true | Follow logs (default) |
+| `--no-follow` | boolean | false | Print logs and exit |
+| `--logs-from <n>` | number | 0 | Resume from log offset |
+| `--from <n>` | number | 0 | Alias for `--logs-from` |
+| `--json` | boolean | false | Output JSON |
 
 #### job-attach
 
@@ -429,16 +435,16 @@ Usage: `hack x supervisor job-attach <job-id> [options]`
 
 Options:
 
-| Flag                | Type    | Default | Description                 |
-| ------------------- | ------- | ------- | --------------------------- |
-| `--project <name>`  | string  | -       | Target a registered project |
-| `--path <dir>`      | string  | -       | Target a repo path          |
-| `--follow`          | boolean | true    | Follow logs (default)       |
-| `--no-follow`       | boolean | false   | Print logs and exit         |
-| `--logs-from <n>`   | number  | 0       | Resume from log offset      |
-| `--from <n>`        | number  | 0       | Alias for `--logs-from`     |
-| `--events-from <n>` | number  | 0       | Resume from event sequence  |
-| `--json`            | boolean | false   | Output JSON                 |
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--project <name>` | string | - | Target a registered project |
+| `--path <dir>` | string | - | Target a repo path |
+| `--follow` | boolean | true | Follow logs (default) |
+| `--no-follow` | boolean | false | Print logs and exit |
+| `--logs-from <n>` | number | 0 | Resume from log offset |
+| `--from <n>` | number | 0 | Alias for `--logs-from` |
+| `--events-from <n>` | number | 0 | Resume from event sequence |
+| `--json` | boolean | false | Output JSON |
 
 #### shell
 
@@ -446,21 +452,20 @@ Usage: `hack x supervisor shell [options]`
 
 Options:
 
-| Flag                | Type   | Default                 | Description                       |
-| ------------------- | ------ | ----------------------- | --------------------------------- |
-| `--project <name>`  | string | -                       | Target a registered project       |
-| `--project-id <id>` | string | -                       | Target by project id (gateway)    |
-| `--path <dir>`      | string | -                       | Target a repo path                |
-| `--gateway <url>`   | string | `http://127.0.0.1:7788` | Gateway URL                       |
-| `--token <token>`   | string | -                       | Gateway write token               |
-| `--shell <path>`    | string | -                       | Shell path                        |
-| `--cwd <path>`      | string | -                       | Working directory                 |
-| `--cols <n>`        | number | -                       | Terminal columns                  |
-| `--rows <n>`        | number | -                       | Terminal rows                     |
-| `--env <KEY=VALUE>` | string | -                       | Environment override (repeatable) |
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--project <name>` | string | - | Target a registered project |
+| `--project-id <id>` | string | - | Target by project id (gateway) |
+| `--path <dir>` | string | - | Target a repo path |
+| `--gateway <url>` | string | `http://127.0.0.1:7788` | Gateway URL |
+| `--token <token>` | string | - | Gateway write token |
+| `--shell <path>` | string | - | Shell path |
+| `--cwd <path>` | string | - | Working directory |
+| `--cols <n>` | number | - | Terminal columns |
+| `--rows <n>` | number | - | Terminal rows |
+| `--env <KEY=VALUE>` | string | - | Environment override (repeatable) |
 
 Notes:
-
 - `--project` and `--project-id` are mutually exclusive.
 
 ### Cloudflare extension (`hack x cloudflare`)
@@ -471,15 +476,15 @@ Usage: `hack x cloudflare tunnel-print [options]`
 
 Options:
 
-| Flag                        | Type   | Default                 | Description                  |
-| --------------------------- | ------ | ----------------------- | ---------------------------- |
-| `--hostname <host>`         | string | -                       | Gateway hostname             |
-| `--tunnel <name>`           | string | `hack-gateway`          | Tunnel name                  |
-| `--origin <url>`            | string | `http://127.0.0.1:7788` | Gateway origin               |
-| `--ssh-hostname <host>`     | string | -                       | SSH hostname (optional)      |
-| `--ssh-origin <url>`        | string | `ssh://127.0.0.1:22`    | SSH origin                   |
-| `--credentials-file <path>` | string | -                       | Cloudflared credentials file |
-| `--out <path>`              | string | -                       | Write config to a file       |
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--hostname <host>` | string | - | Gateway hostname |
+| `--tunnel <name>` | string | `hack-gateway` | Tunnel name |
+| `--origin <url>` | string | `http://127.0.0.1:7788` | Gateway origin |
+| `--ssh-hostname <host>` | string | - | SSH hostname (optional) |
+| `--ssh-origin <url>` | string | `ssh://127.0.0.1:22` | SSH origin |
+| `--credentials-file <path>` | string | - | Cloudflared credentials file |
+| `--out <path>` | string | - | Write config to a file |
 
 #### tunnel-setup
 
@@ -506,11 +511,11 @@ Usage: `hack x cloudflare tunnel-start [options]`
 
 Options:
 
-| Flag              | Type   | Default                     | Description          |
-| ----------------- | ------ | --------------------------- | -------------------- |
-| `--config <path>` | string | `~/.cloudflared/config.yml` | Config path          |
-| `--out <path>`    | string | -                           | Alias for `--config` |
-| `--tunnel <name>` | string | -                           | Override tunnel name |
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--config <path>` | string | `~/.cloudflared/config.yml` | Config path |
+| `--out <path>` | string | - | Alias for `--config` |
+| `--tunnel <name>` | string | - | Override tunnel name |
 
 #### tunnel-stop
 
@@ -522,10 +527,10 @@ Usage: `hack x cloudflare access-setup [options]`
 
 Options:
 
-| Flag                    | Type   | Default | Description  |
-| ----------------------- | ------ | ------- | ------------ |
-| `--ssh-hostname <host>` | string | -       | SSH hostname |
-| `--user <user>`         | string | -       | SSH username |
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--ssh-hostname <host>` | string | - | SSH hostname |
+| `--user <user>` | string | - | SSH username |
 
 ### Tailscale extension (`hack x tailscale`)
 
@@ -558,7 +563,6 @@ Usage: `hack x tailscale oauth-disconnect [--auth-ref <ref>] [--json]`
 Usage: `hack x tailscale ip [args...]`
 
 Notes:
-
 - `status` and `ip` forward extra args directly to `tailscale`.
 - `ip` defaults to `-4` when no args are provided.
 
@@ -607,18 +611,17 @@ The gateway binds to `127.0.0.1` by default. Expose it through one of:
 - SSH tunnel (ad‑hoc): `ssh -L 7788:127.0.0.1:7788 <host>`
 - Zero Trust/VPN (persistent): Tailscale, Cloudflare, etc. targeting the gateway port
 - Optional Caddy route for local convenience (`https://gateway.hack`):
-  - Add a small labeled container in the global Caddy compose that proxies to `host.docker.internal:7788` (or `host-gateway` on Linux).
+  - Add a small labeled container in the global Caddy compose that proxies to
+    `host.docker.internal:7788` (or `host-gateway` on Linux).
 
 Keep tokens read-only unless you explicitly need writes.
 
 Recommended order:
-
-1. Start with SSH tunneling for quick remote access.
-2. Move to a private Zero Trust/VPN network once you want persistent access.
-3. Add the Caddy route only for nicer local URLs (not required for remote access).
+1) Start with SSH tunneling for quick remote access.
+2) Move to a private Zero Trust/VPN network once you want persistent access.
+3) Add the Caddy route only for nicer local URLs (not required for remote access).
 
 Remote helper commands:
-
 - `hack remote status` shows gateway + exposure status.
 - `hack remote qr` emits QR payloads for SSH or gateway clients.
 

@@ -45,6 +45,7 @@ git commit -m "test(tickets): define projection replay contract"
 - Create schema helpers for:
   - `projection_meta`
   - `journal_events`
+  - `journal_segments`
   - `tickets`
   - `ticket_dependencies`
   - `ticket_blocks`
@@ -78,9 +79,11 @@ git commit -m "feat(tickets): add projection schema bootstrap"
 
 **Step 1: Write the replay engine**
 
-- Parse journal files in canonical order by `ts`, `orderKey`, `eventId`.
+- Detect new or changed journal segments by fingerprint, then rescan those segments fully.
+- Parse candidate events in canonical order by `ts`, `orderKey`, `eventId`.
 - Insert each event into `journal_events` before mutating read tables.
 - Compare payload hashes on duplicate `eventId`.
+- Advance `journal_segments` only after the segment scan succeeds.
 
 **Step 2: Implement event appliers**
 
@@ -177,6 +180,7 @@ git commit -m "feat(tickets): add projection rebuild recovery"
 
 - sync remote journal content into a local clone
 - replay merged logs with duplicate events
+- replay a merged monthly segment that introduces older events than the current replay cursor
 - confirm projection rows remain correct after repeated sync
 
 **Step 2: Run focused tests** Run: `bun test tests/tickets-git-channel.test.ts tests/tickets-extension.test.ts` Expected: PASS

@@ -127,6 +127,7 @@ Required keys:
 - `schema_version`
 - `journal_format_version`
 - `projection_status` with values `ready` or `rebuilding`
+- `last_scan_completed_at`
 - `last_replayed_ts`
 - `last_replayed_order_key`
 - `last_replayed_event_id`
@@ -158,6 +159,18 @@ Indexes:
 - `journal_events_project_idx (project_id, ts, event_id)`
 
 This table is the durable idempotency fence and powers fast `show` queries without reparsing JSONL.
+
+### Segment scan inventory
+
+`journal_segments`
+
+- `segment_name TEXT PRIMARY KEY`
+- `content_hash TEXT NOT NULL`
+- `byte_size INTEGER NOT NULL`
+- `line_count INTEGER NOT NULL`
+- `scanned_at TEXT NOT NULL`
+
+This table tracks which journal segment bytes have already been scanned into the projection. Replay correctness must not rely on the last applied sort key alone because a merged segment can introduce older events that sort before the current replay cursor.
 
 ### Ticket projection
 
@@ -288,21 +301,26 @@ Indexes:
 1. Open SQLite in WAL mode.
 2. Read `projection_meta`.
 3. If the file is missing, schema version is wrong, status is `rebuilding`, or SQLite reports corruption, delete and rebuild.
-4. Otherwise scan journal segments for new or changed lines after the last applied sort key.
+4. Otherwise compare the current segment inventory against `journal_segments` and fully rescan any segment whose bytes changed or that was not seen before.
+5. Combine all events from changed segments, sort them by canonical replay order, and rely on `journal_events` dedupe to skip events that were already applied.
 
 ### Incremental replay
 
-For each journal line in canonical order:
+Incremental replay works on candidate events gathered from changed segments, not only events after the current cursor. This preserves correctness when two machines append different events into the same monthly file and later merge through git.
+
+For each candidate journal line in canonical order:
 
 1. Parse and validate the event envelope.
 2. Start a transaction.
 3. Insert into `journal_events`.
 4. If the insert is a duplicate with the same hash, commit a no-op transaction.
 5. If it is new, apply the event to the relevant projection tables.
-6. Update `projection_meta` with the last applied sort key.
+6. Update `projection_meta` with the last applied sort key for diagnostics and crash resume.
 7. Commit.
 
-This keeps replay crash-safe and allows progress to resume from the last committed event.
+After a segment scan finishes, update `journal_segments` with the segment fingerprint in a separate transaction boundary only after all of that segment's candidate events were processed successfully.
+
+This keeps replay crash-safe, allows progress to resume from the last committed event, and ensures newly merged historical events are not skipped.
 
 ### Event application rules
 
@@ -328,7 +346,8 @@ Full rebuild is deterministic:
 2. Recreate schema.
 3. Mark `projection_status = rebuilding`.
 4. Replay every journal segment in canonical order.
-5. Mark `projection_status = ready`.
+5. Populate `journal_segments` for the scanned segment set.
+6. Mark `projection_status = ready`.
 
 Given the same journal bytes, rebuild produces the same projection rows and indexes every time.
 
@@ -339,6 +358,7 @@ Crash recovery relies on SQLite transactions and WAL:
 - a half-applied event rolls back automatically
 - committed events remain durable
 - the replay cursor only advances in the same transaction as the projection updates
+- `journal_segments` is only advanced after a successful segment scan
 
 If the process dies mid-rebuild, the next startup sees `projection_status = rebuilding` and starts a clean rebuild rather than trusting partial state.
 
@@ -364,6 +384,8 @@ The projection specifically accelerates:
 
 - `tickets list` by reading `tickets` plus indexed filters
 - `tickets show` by reading one ticket and its child tables
+- `tickets show --json` by reading the ticket projection, child projections, and `journal_events`
+- `tickets inspect` or equivalent health queries later by reading projection metadata instead of rescanning JSONL
 - external sync lookup by `external_system` and `external_id`
 - checkpoint lookup by provider and profile
 - conflict review queries such as open conflicts by provider, project, or ticket
@@ -373,7 +395,7 @@ The projection specifically accelerates:
 
 - Multiple machines can append semantically equivalent journals and later merge through git.
 - Normalization merges by `eventId` union, not by trusting file order.
-- Projection replay is safe after repeated fetch, merge, or sync because duplicate events are idempotent.
+- Projection replay is safe after repeated fetch, merge, or sync because changed segments are rescanned and duplicate events are idempotent.
 - Because SQLite is local-only, machines never need to coordinate projection files. They only need the same journal bytes.
 
 ## Implementation Notes
@@ -386,6 +408,7 @@ The projection specifically accelerates:
 
 - Rebuilding from the same journal twice yields byte-equivalent query results.
 - Reapplying the same merged journal does not duplicate comments, checkpoints, or conflicts.
+- Merging a segment that contains older events than the current replay cursor still converges because replay rescans the changed segment and deduplicates by `eventId`.
 - Deleting the SQLite file does not lose ticket history.
 - Sync-heavy reads stop scanning all JSONL files on each command.
 - Duplicate `eventId` with mismatched payload is detected as corruption.

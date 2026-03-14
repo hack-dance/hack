@@ -1,15 +1,18 @@
 # Hack Tickets SQLite Projection And Journal Design
 
 ## Goal
+
 Define a durable local storage architecture for Hack Tickets that keeps the git-backed JSONL journal as the canonical, portable source of truth while adding a deterministic SQLite projection for fast reads, sync queries, and repeated replay.
 
 ## Current Foundation
+
 - Ticket history is stored as append-only monthly JSONL segments in `.hack/tickets/events/events-YYYY-MM.jsonl`.
 - The tickets ref is transported through git, so the system already has good offline and multi-machine portability.
 - Reads currently parse the full journal and materialize ticket state in memory on demand.
 - Sync-oriented reads such as external id lookup, conflict lookup, and checkpoint lookup are derived by replaying every event.
 
 ## Design Summary
+
 - Keep the JSONL journal in the tickets git ref as the only portable source of truth.
 - Add a local SQLite database as a projection and replay index, not as a second authority.
 - Make replay idempotent by event identity first and deterministic by a total ordering key second.
@@ -17,27 +20,36 @@ Define a durable local storage architecture for Hack Tickets that keeps the git-
 - Treat recovery as a normal path: if the projection is missing, stale, corrupted, or on an old schema, rebuild it from the journal.
 
 ## Non-Goals
+
 - Do not replace the git-backed journal with SQLite.
 - Do not require SQLite files to sync through git.
 - Do not introduce mutable event updates, event compaction that changes meaning, or snapshot files that become a new source of truth.
 - Do not redesign ticket semantics beyond what is needed for deterministic replay and indexed reads.
 
 ## Alternatives Considered
+
 ### Recommended: journal as source of truth, SQLite as local projection
+
 This keeps portability and inspectability in git while solving the current replay cost for reads and sync. It also gives a clean recovery story because the projection is disposable.
 
 ### Rejected: SQLite as the primary store with git export/import
+
 This would improve local read performance, but it would weaken the current portability model and create a second system boundary around export timing, merge semantics, and operational recovery.
 
 ### Rejected: keep pure JSONL replay and optimize the in-memory materializer
+
 This avoids a new storage layer, but it does not materially improve cold-start reads, repeated sync scans, or future richer queries such as open conflicts by provider or external id lookup.
 
 ## Storage Layout
+
 ### Canonical journal
+
 Keep the existing git-backed journal layout inside the tickets ref worktree:
+
 - `.hack/tickets/events/events-YYYY-MM.jsonl`
 
 Each line remains one immutable event envelope:
+
 - `eventId`
 - `ts`
 - `tsIso`
@@ -50,32 +62,42 @@ Each line remains one immutable event envelope:
 - `payload`
 
 ### Local-only projection
+
 Add a local SQLite file outside the synced tickets worktree:
+
 - `.hack/tickets/state/projection.sqlite`
 
 Companion files that are safe to delete:
+
 - `.hack/tickets/state/projection.sqlite-shm`
 - `.hack/tickets/state/projection.sqlite-wal`
 
 This directory should stay local-only and be ignored by both the main repo and the tickets ref.
 
 ## Journal Semantics
+
 ### Source of truth
+
 The journal is authoritative. SQLite is derived state. If the two disagree, the journal wins and the projection must be rebuilt or repaired.
 
 ### Append-only rule
+
 Published events are immutable. The only allowed rewrite is semantic-preserving normalization during sync:
+
 - remove duplicate lines with the same `eventId`
 - keep exactly one payload for a given `eventId`
 - rewrite segment ordering into the canonical replay order
 
 ### Event identity
+
 `eventId` is the logical identity of an event across machines. Reapplying the same `eventId` is a no-op if the payload hash matches.
 
 If the same `eventId` appears with different content, that is corruption, not conflict. Replay must stop and report the bad event ids instead of guessing.
 
 ### Canonical replay order
+
 Replay uses this total order:
+
 1. `ts` ascending
 2. `orderKey` ascending when present
 3. `eventId` ascending
@@ -83,19 +105,25 @@ Replay uses this total order:
 This order is deterministic across machines and rebuilds, even when segment files were merged from multiple writers. Segment filename and line number are recorded for diagnostics and incremental scanning, but they are not part of domain ordering.
 
 ### Idempotency rule
+
 Applying an event more than once must have the same effect as applying it once.
 
 The projection enforces this by inserting the event envelope into `journal_events` first. If the insert conflicts on `event_id`, replay compares the stored payload hash:
+
 - same hash: skip as already applied
 - different hash: stop replay and mark the projection unhealthy
 
 ## SQLite Projection Schema
+
 ### Projection metadata
+
 `projection_meta`
+
 - `key TEXT PRIMARY KEY`
 - `value TEXT NOT NULL`
 
 Required keys:
+
 - `schema_version`
 - `journal_format_version`
 - `projection_status` with values `ready` or `rebuilding`
@@ -105,7 +133,9 @@ Required keys:
 - `last_replayed_at`
 
 ### Replay index
+
 `journal_events`
+
 - `event_id TEXT PRIMARY KEY`
 - `ticket_id TEXT NOT NULL`
 - `ts INTEGER NOT NULL`
@@ -122,6 +152,7 @@ Required keys:
 - `applied_at TEXT NOT NULL`
 
 Indexes:
+
 - `journal_events_ticket_order_idx (ticket_id, ts, order_key, event_id)`
 - `journal_events_type_idx (type, ts, event_id)`
 - `journal_events_project_idx (project_id, ts, event_id)`
@@ -129,7 +160,9 @@ Indexes:
 This table is the durable idempotency fence and powers fast `show` queries without reparsing JSONL.
 
 ### Ticket projection
+
 `tickets`
+
 - `ticket_id TEXT PRIMARY KEY`
 - `title TEXT NOT NULL`
 - `body TEXT`
@@ -151,34 +184,42 @@ This table is the durable idempotency fence and powers fast `show` queries witho
 - `last_event_id TEXT NOT NULL`
 
 Indexes:
+
 - `tickets_status_updated_idx (status, updated_at DESC)`
 - `tickets_project_updated_idx (project_id, updated_at DESC)`
 - `tickets_external_lookup_idx (external_system, external_id)`
 - `tickets_source_status_idx (source, status, updated_at DESC)`
 
 ### Multi-value projections
+
 `ticket_dependencies`
+
 - `ticket_id TEXT NOT NULL`
 - `depends_on_ticket_id TEXT NOT NULL`
 - `PRIMARY KEY (ticket_id, depends_on_ticket_id)`
 
 `ticket_blocks`
+
 - `ticket_id TEXT NOT NULL`
 - `blocks_ticket_id TEXT NOT NULL`
 - `PRIMARY KEY (ticket_id, blocks_ticket_id)`
 
 `ticket_tags`
+
 - `ticket_id TEXT NOT NULL`
 - `tag TEXT NOT NULL`
 - `PRIMARY KEY (ticket_id, tag)`
 
 Indexes:
+
 - `ticket_dependencies_depends_idx (depends_on_ticket_id, ticket_id)`
 - `ticket_blocks_blocks_idx (blocks_ticket_id, ticket_id)`
 - `ticket_tags_tag_idx (tag, ticket_id)`
 
 ### Append-only child entities
+
 `ticket_comments`
+
 - `comment_id TEXT PRIMARY KEY`
 - `ticket_id TEXT NOT NULL`
 - `body TEXT NOT NULL`
@@ -190,6 +231,7 @@ Indexes:
 - `last_event_id TEXT NOT NULL`
 
 `ticket_review_notes`
+
 - `note_id TEXT PRIMARY KEY`
 - `ticket_id TEXT NOT NULL`
 - `body TEXT NOT NULL`
@@ -199,6 +241,7 @@ Indexes:
 - `last_event_id TEXT NOT NULL`
 
 `ticket_sync_checkpoints`
+
 - `checkpoint_id TEXT PRIMARY KEY`
 - `ticket_id TEXT NOT NULL`
 - `provider TEXT NOT NULL`
@@ -212,6 +255,7 @@ Indexes:
 - `last_event_id TEXT NOT NULL`
 
 `ticket_sync_conflicts`
+
 - `conflict_id TEXT PRIMARY KEY`
 - `ticket_id TEXT NOT NULL`
 - `provider TEXT NOT NULL`
@@ -230,6 +274,7 @@ Indexes:
 - `last_event_id TEXT NOT NULL`
 
 Indexes:
+
 - `ticket_comments_ticket_created_idx (ticket_id, created_at, comment_id)`
 - `ticket_review_notes_ticket_created_idx (ticket_id, created_at, note_id)`
 - `ticket_sync_checkpoints_lookup_idx (ticket_id, provider, profile_id, created_at DESC)`
@@ -237,14 +282,18 @@ Indexes:
 - `ticket_sync_conflicts_ticket_idx (ticket_id, updated_at DESC)`
 
 ## Replay Rules
+
 ### Startup path
+
 1. Open SQLite in WAL mode.
 2. Read `projection_meta`.
 3. If the file is missing, schema version is wrong, status is `rebuilding`, or SQLite reports corruption, delete and rebuild.
 4. Otherwise scan journal segments for new or changed lines after the last applied sort key.
 
 ### Incremental replay
+
 For each journal line in canonical order:
+
 1. Parse and validate the event envelope.
 2. Start a transaction.
 3. Insert into `journal_events`.
@@ -256,6 +305,7 @@ For each journal line in canonical order:
 This keeps replay crash-safe and allows progress to resume from the last committed event.
 
 ### Event application rules
+
 - `ticket.created`: insert a row into `tickets`, replace dependency/block/tag sets from payload, set `created_at` and `updated_at` from the event timestamp.
 - `ticket.updated`: patch only provided fields, replace dependency/block/tag sets only when they appear in payload, set `updated_at`.
 - `ticket.status_changed`: update `status` and `updated_at`.
@@ -269,8 +319,11 @@ This keeps replay crash-safe and allows progress to resume from the last committ
 If an event references missing local state that should already exist, replay stops with a projection error instead of silently inventing rows.
 
 ## Rebuild And Recovery
+
 ### Full rebuild
+
 Full rebuild is deterministic:
+
 1. Delete or move aside the SQLite file.
 2. Recreate schema.
 3. Mark `projection_status = rebuilding`.
@@ -280,7 +333,9 @@ Full rebuild is deterministic:
 Given the same journal bytes, rebuild produces the same projection rows and indexes every time.
 
 ### Crash recovery
+
 Crash recovery relies on SQLite transactions and WAL:
+
 - a half-applied event rolls back automatically
 - committed events remain durable
 - the replay cursor only advances in the same transaction as the projection updates
@@ -288,12 +343,15 @@ Crash recovery relies on SQLite transactions and WAL:
 If the process dies mid-rebuild, the next startup sees `projection_status = rebuilding` and starts a clean rebuild rather than trusting partial state.
 
 ### Corruption recovery
+
 Recoverable failures:
+
 - missing SQLite file
 - outdated projection schema
 - WAL or database corruption
 
 Unrecoverable without operator action:
+
 - malformed JSONL that cannot be parsed
 - duplicate `eventId` with different payload hashes
 - event references to impossible prior state caused by journal corruption
@@ -301,7 +359,9 @@ Unrecoverable without operator action:
 In recoverable cases, automatically rebuild. In unrecoverable cases, surface a hard error with the offending segment and line number.
 
 ## Sync And Query Benefits
+
 The projection specifically accelerates:
+
 - `tickets list` by reading `tickets` plus indexed filters
 - `tickets show` by reading one ticket and its child tables
 - external sync lookup by `external_system` and `external_id`
@@ -310,17 +370,20 @@ The projection specifically accelerates:
 - repeated daemon or autosync loops that need to ask “what changed since cursor X?”
 
 ## Multi-Machine Behavior
+
 - Multiple machines can append semantically equivalent journals and later merge through git.
 - Normalization merges by `eventId` union, not by trusting file order.
 - Projection replay is safe after repeated fetch, merge, or sync because duplicate events are idempotent.
 - Because SQLite is local-only, machines never need to coordinate projection files. They only need the same journal bytes.
 
 ## Implementation Notes
+
 - Use `bun:sqlite` for the projection layer.
 - Keep journal parsing and replay in one module so rebuild and incremental apply share the same code path.
 - Expose a small health surface later, for example `tickets inspect` or `tickets rebuild`, but keep those commands out of this design’s critical path.
 
 ## Validation
+
 - Rebuilding from the same journal twice yields byte-equivalent query results.
 - Reapplying the same merged journal does not duplicate comments, checkpoints, or conflicts.
 - Deleting the SQLite file does not lose ticket history.
@@ -328,4 +391,5 @@ The projection specifically accelerates:
 - Duplicate `eventId` with mismatched payload is detected as corruption.
 
 ## Recommendation
+
 Implement the projection as a local SQLite cache with `journal_events` as the idempotent replay fence and the `tickets` plus child tables as the read model. This gives deterministic rebuilds, fast reads, and safe repeated event application without weakening the current git-portable journal architecture.

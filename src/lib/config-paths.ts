@@ -11,5 +11,6 @@ export function resolveGlobalConfigPath(): string {
   if (override.length > 0) {
     return override;
   }
-  return resolve(homedir(), GLOBAL_HACK_DIR_NAME, GLOBAL_CONFIG_FILENAME);
+  const home = (process.env.HOME ?? homedir()).trim();
+  return resolve(home, GLOBAL_HACK_DIR_NAME, GLOBAL_CONFIG_FILENAME);
 }

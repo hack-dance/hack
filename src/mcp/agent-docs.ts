@@ -234,7 +234,7 @@ export function renderAgentDocsSnippet(): string {
     "- Use `lifecycle.up.before` for pre-start hooks and `lifecycle.processes` for long-running host tasks.",
     "- Inspect lifecycle status via `hack projects --details` and stream via `hack logs <service-or-process>`.",
     "",
-    "Workspaces (mux-managed):",
+    "Workspaces (mux-managed, tmux-first by default):",
     "- Picker: `hack session` for persistent project workspaces.",
     "- Reuse/create: `hack session start <project>`",
     "- Force isolated agent workspace: `hack session start <project> --new --name agent-1` (`<project>--agent-1`).",

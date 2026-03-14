@@ -20,6 +20,7 @@ import { type DaemonPaths, resolveDaemonPaths } from "../daemon/paths.ts";
 import { removeFileIfExists, waitForProcessExit } from "../daemon/process.ts";
 import { runDaemon } from "../daemon/server.ts";
 import {
+  buildDaemonRepairMessage,
   buildDaemonStatusReport,
   type DaemonStatusReport,
   readDaemonStatus,
@@ -412,9 +413,12 @@ function reportDaemonStatus(opts: {
   }
 
   logger.warn({
-    message: report.stale
-      ? `hackd stopped (stale state detected; run \`${report.nextStep}\`)`
-      : "hackd is not running",
+    message: buildDaemonRepairMessage({
+      report,
+      launchdStatus,
+      dockerBackendName: opts.dockerBackendName,
+      dockerReachable: opts.dockerReachable,
+    }),
   });
   logLaunchdStatus({ launchdStatus, running: false });
   return 1;

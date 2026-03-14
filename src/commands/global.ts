@@ -66,6 +66,10 @@ import {
   reconcileRemoteCaddyRoutesStack,
   stopRemoteCaddyRoutesStack,
 } from "../lib/remote-caddy-routes.ts";
+import {
+  detectDockerBackend,
+  formatDockerConnectionGuidance,
+} from "../lib/runtime-guidance.ts";
 import { exec, execOrThrow, findExecutableInPath, run } from "../lib/shell.ts";
 import { resolveSessionsMuxMode } from "../mux/mux-config.ts";
 import {
@@ -299,7 +303,12 @@ async function ensureDockerRunning(): Promise<void> {
   const backend = await detectDockerBackend();
   if (!backend) {
     throw new Error(
-      "Docker does not seem to be running and no Docker backend was detected.\nInstall Docker Desktop or OrbStack, then retry."
+      formatDockerConnectionGuidance({
+        backend,
+        failureText:
+          "Docker does not seem to be running and no Docker backend was detected.",
+        retryCommand: "hack global install",
+      })
     );
   }
 
@@ -326,50 +335,6 @@ async function ensureDockerRunning(): Promise<void> {
 
   logger.success({ message: `${backend.name} is running` });
 }
-
-type DockerBackend = {
-  readonly name: string;
-  readonly startCommand: readonly string[];
-};
-
-/**
- * Detects the installed Docker backend on macOS (OrbStack, Docker Desktop)
- * or checks for the docker socket on Linux.
- */
-async function detectDockerBackend(): Promise<DockerBackend | null> {
-  if (isMac()) {
-    if (await pathExists("/Applications/OrbStack.app")) {
-      const hasOrbctl = await findExecutableInPath("orbctl");
-      return {
-        name: "OrbStack",
-        startCommand: hasOrbctl
-          ? ["orbctl", "start"]
-          : ["open", "-a", "OrbStack"],
-      };
-    }
-    if (await pathExists("/Applications/Docker.app")) {
-      return {
-        name: "Docker Desktop",
-        startCommand: ["open", "-a", "Docker"],
-      };
-    }
-    return null;
-  }
-
-  const hasDocker = await findExecutableInPath("docker");
-  if (hasDocker) {
-    const hasSystemctl = await findExecutableInPath("systemctl");
-    if (hasSystemctl) {
-      return {
-        name: "Docker (systemd)",
-        startCommand: ["sudo", "systemctl", "start", "docker"],
-      };
-    }
-  }
-
-  return null;
-}
-
 async function waitForDocker(opts: {
   readonly timeoutMs: number;
   readonly intervalMs: number;

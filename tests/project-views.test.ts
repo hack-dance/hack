@@ -185,6 +185,49 @@ test("buildProjectViews includes defined services and runtime status", async () 
   });
 });
 
+test("buildProjectViews includes explicit project ownership metadata", async () => {
+  const alpha = await createProject({
+    name: "alpha",
+    services: ["api"],
+    configJson: JSON.stringify(
+      {
+        ownership: {
+          mode: "shared",
+          owner_type: "team",
+          owner_id: "team_alpha",
+        },
+      },
+      null,
+      2
+    ),
+  });
+
+  const views = await buildProjectViews({
+    registryProjects: [alpha],
+    runtime: [],
+    runtimeOk: true,
+    filter: null,
+    includeUnregistered: false,
+    muxSessions: [],
+  });
+
+  const alphaView = views.find((view) => view.name === "alpha");
+  expect(alphaView?.ownership).toEqual({
+    mode: "shared",
+    ownerType: "team",
+    ownerId: "team_alpha",
+    managedBy: "broker",
+  });
+
+  const serialized = alphaView ? serializeProjectView(alphaView) : null;
+  expect(serialized?.ownership).toEqual({
+    mode: "shared",
+    owner_type: "team",
+    owner_id: "team_alpha",
+    managed_by: "broker",
+  });
+});
+
 test("buildProjectViews includes lifecycle and startup summaries", async () => {
   const lifecycleConfig = JSON.stringify(
     {

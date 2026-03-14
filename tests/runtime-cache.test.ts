@@ -144,6 +144,7 @@ test("getProjectsPayload keeps working when resolveProjectMeta fails for one pro
     devHost: null,
     repoRoot: null,
     projectDir: null,
+    ownership: null,
     definedServices: null,
     extensionsEnabled: null,
     features: null,
@@ -168,6 +169,12 @@ test("getProjectsPayload keeps working when resolveProjectMeta fails for one pro
           throw new Error("boom");
         }
         const meta: ProjectMeta = {
+          ownership: {
+            mode: "local",
+            ownerType: "user",
+            ownerId: null,
+            managedBy: "local",
+          },
           git: {
             isRepo: false,
             head: null,
@@ -216,6 +223,12 @@ test("getProjectsPayload keeps working when resolveProjectMeta fails for one pro
         localBranchCount: null,
         worktrees: null,
         error: null,
+      },
+      ownership: {
+        mode: "local",
+        ownerType: "user",
+        ownerId: null,
+        managedBy: "local",
       },
       hackBranches: { path: "", parseError: null, branches: [] },
       env: {

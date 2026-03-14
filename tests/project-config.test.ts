@@ -73,6 +73,11 @@ test("readProjectConfig parses json config fields", async () => {
             "db.example.com": "127.0.0.1",
           },
         },
+        ownership: {
+          mode: "shared",
+          owner_type: "team",
+          owner_id: "team_123",
+        },
       },
       null,
       2
@@ -93,6 +98,12 @@ test("readProjectConfig parses json config fields", async () => {
     "api.example.com": "host-gateway",
     "db.example.com": "127.0.0.1",
   });
+  expect(cfg.ownership).toEqual({
+    mode: "shared",
+    ownerType: "team",
+    ownerId: "team_123",
+    managedBy: "broker",
+  });
 });
 
 test("readProjectConfig captures parse errors", async () => {
@@ -100,6 +111,19 @@ test("readProjectConfig captures parse errors", async () => {
   await writeFile(ctx.configFile, "{ invalid json");
   const cfg = await readProjectConfig(ctx);
   expect(cfg.parseError).toBeTruthy();
+});
+
+test("readProjectConfig defaults ownership to local user scope", async () => {
+  const ctx = await createProjectDir();
+
+  const cfg = await readProjectConfig(ctx);
+
+  expect(cfg.ownership).toEqual({
+    mode: "local",
+    ownerType: "user",
+    ownerId: null,
+    managedBy: "local",
+  });
 });
 
 test("resolveProjectOauthTld falls back to default when enabled", () => {

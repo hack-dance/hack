@@ -26,6 +26,7 @@ import {
   runCommand,
   upCommand,
 } from "../commands/project.ts";
+import { projectCommand } from "../commands/project-admin.ts";
 import { projectsCommand, statusCommand } from "../commands/projects.ts";
 import { remoteCommand } from "../commands/remote.ts";
 import { secretsCommand } from "../commands/secrets.ts";
@@ -59,6 +60,7 @@ export const CLI_SPEC = defineCli({
     statusCommand,
     usageCommand,
     projectsCommand,
+    projectCommand,
     initCommand,
     upCommand,
     downCommand,

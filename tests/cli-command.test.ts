@@ -60,3 +60,14 @@ test("resolveCommand finds crash-capture command", () => {
   ]);
   expect(resolved.remainingPositionals).toEqual([]);
 });
+
+test("resolveCommand finds nested project owner show command", () => {
+  const resolved = resolveCommand(CLI_SPEC, ["project", "owner", "show"]);
+  expect(resolved.command?.name).toBe("show");
+  expect(resolved.path.map((command) => command.name)).toEqual([
+    "project",
+    "owner",
+    "show",
+  ]);
+  expect(resolved.remainingPositionals).toEqual([]);
+});

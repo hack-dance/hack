@@ -129,8 +129,20 @@ export interface ProjectConfig {
   readonly internal?: ProjectInternalConfig;
   readonly sessions?: ProjectSessionsConfig;
   readonly lifecycle?: ProjectLifecycleConfig;
+  readonly ownership: ProjectOwnershipConfig;
   readonly configPath?: string;
   readonly parseError?: string;
+}
+
+export type ProjectOwnershipMode = "local" | "shared";
+export type ProjectOwnershipOwnerType = "user" | "team" | "organization";
+export type ProjectOwnershipManager = "local" | "broker";
+
+export interface ProjectOwnershipConfig {
+  readonly mode: ProjectOwnershipMode;
+  readonly ownerType: ProjectOwnershipOwnerType;
+  readonly ownerId: string | null;
+  readonly managedBy: ProjectOwnershipManager;
 }
 
 export interface ProjectSessionsConfig {
@@ -268,7 +280,9 @@ export async function readProjectConfig(
     return parseProjectConfigToml({ text: tomlText, path: tomlPath });
   }
 
-  return {};
+  return {
+    ownership: defaultProjectOwnership(),
+  };
 }
 
 function parseProjectConfigJson(opts: {
@@ -280,7 +294,11 @@ function parseProjectConfigJson(opts: {
     parsed = JSON.parse(opts.text);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Invalid JSON";
-    return { parseError: message, configPath: opts.path };
+    return {
+      parseError: message,
+      configPath: opts.path,
+      ownership: defaultProjectOwnership(),
+    };
   }
   return parseProjectConfigRecord(parsed, opts.path);
 }
@@ -294,14 +312,18 @@ function parseProjectConfigToml(opts: {
     parsed = Bun.TOML.parse(opts.text);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Invalid TOML";
-    return { parseError: message, configPath: opts.path };
+    return {
+      parseError: message,
+      configPath: opts.path,
+      ownership: defaultProjectOwnership(),
+    };
   }
   return parseProjectConfigRecord(parsed, opts.path);
 }
 
 function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
   if (!isRecord(value)) {
-    return { configPath: path };
+    return { configPath: path, ownership: defaultProjectOwnership() };
   }
 
   const name = getString(value, "name");
@@ -316,6 +338,7 @@ function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
     lifecycle: lifecycleBase,
     startup,
   });
+  const ownership = parseProjectOwnership(getRecord(value, "ownership"));
 
   return {
     ...(name ? { name } : {}),
@@ -325,8 +348,64 @@ function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
     ...(internal ? { internal } : {}),
     ...(sessions ? { sessions } : {}),
     ...(lifecycle ? { lifecycle } : {}),
+    ownership,
     configPath: path,
   };
+}
+
+export function defaultProjectOwnership(): ProjectOwnershipConfig {
+  return {
+    mode: "local",
+    ownerType: "user",
+    ownerId: null,
+    managedBy: "local",
+  };
+}
+
+function parseProjectOwnership(
+  value: Record<string, unknown> | undefined
+): ProjectOwnershipConfig {
+  const mode =
+    parseProjectOwnershipMode(value ? getString(value, "mode") : undefined) ??
+    "local";
+  if (mode === "local") {
+    return defaultProjectOwnership();
+  }
+
+  return {
+    mode: "shared",
+    ownerType:
+      parseProjectOwnershipOwnerType(
+        value ? getString(value, "owner_type") : undefined
+      ) ?? "team",
+    ownerId: normalizeProjectOwnerId(
+      value ? getString(value, "owner_id") : undefined
+    ),
+    managedBy: "broker",
+  };
+}
+
+function parseProjectOwnershipMode(
+  value: string | undefined
+): ProjectOwnershipMode | undefined {
+  if (value === "local" || value === "shared") {
+    return value;
+  }
+  return undefined;
+}
+
+function parseProjectOwnershipOwnerType(
+  value: string | undefined
+): ProjectOwnershipOwnerType | undefined {
+  if (value === "user" || value === "team" || value === "organization") {
+    return value;
+  }
+  return undefined;
+}
+
+function normalizeProjectOwnerId(value: string | undefined): string | null {
+  const trimmed = value?.trim() ?? "";
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 function parseStartupEntries(

@@ -658,8 +658,9 @@ Run `hack linear` with no args to see available subcommands.
 
 Examples:
 
-- `hack linear documents pull`
-- `hack linear milestones plan`
+- `hack linear documents list|pull|plan|apply`
+- `hack linear milestones list|pull|plan|apply`
+- `hack linear status-updates list|pull|plan|publish`
 - `hack linear status-updates publish --path .hack/linear/projects/<project-id>/status-updates/drafts/<yyyy-mm-dd>-<slug>.md`
 
 ## Internal commands

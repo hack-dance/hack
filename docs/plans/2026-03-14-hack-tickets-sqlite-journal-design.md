@@ -11,7 +11,7 @@ Define a durable local storage architecture for Hack Tickets that keeps the git-
 
 ## Current Foundation
 
-- Ticket history is stored as append-only monthly JSONL segments in `.hack/tickets/events/events-YYYY-MM.jsonl`.
+- Ticket history is stored as append-only monthly JSONL segments in `.hack/tickets/git/worktree/.hack/tickets/events/events-YYYY-MM.jsonl`.
 - The tickets ref is transported through git, so the system already has good offline and multi-machine portability.
 - Reads currently parse the full journal and materialize ticket state in memory on demand.
 - Sync-oriented reads such as external id lookup, conflict lookup, and checkpoint lookup are derived by replaying every event.
@@ -51,7 +51,7 @@ This avoids a new storage layer, but it does not materially improve cold-start r
 
 Keep the existing git-backed journal layout inside the tickets ref worktree:
 
-- `.hack/tickets/events/events-YYYY-MM.jsonl`
+- `.hack/tickets/git/worktree/.hack/tickets/events/events-YYYY-MM.jsonl`
 
 Each line remains one immutable event envelope:
 
@@ -107,9 +107,11 @@ Replay uses this total order:
 2. `orderKey` ascending when present
 3. `eventId` ascending
 
-Current writers already stamp `orderKey`, so same-second local writes preserve their original append sequence. The `eventId` fallback exists for legacy rows or any imported events that are missing `orderKey`.
+Current writers already stamp `orderKey`, so the projection can preserve same-second local append sequence once it owns replay ordering. The `eventId` fallback exists for legacy rows or any imported events that are missing `orderKey`.
 
-This order is deterministic across machines and rebuilds, even when segment files were merged from multiple writers. Segment filename and line number are recorded for diagnostics and incremental scanning, but they are not part of domain ordering.
+Today’s JSONL normalizer still rewrites files by `ts` and `eventId`. Part of this projection work is to make replay and future normalization agree on the stronger `ts` / `orderKey` / `eventId` ordering.
+
+This order is deterministic across machines and rebuilds once the projection exists, even when segment files were merged from multiple writers. Segment filename and line number are recorded for diagnostics and incremental scanning, but they are not part of domain ordering.
 
 ### Idempotency rule
 
@@ -309,11 +311,13 @@ Indexes:
 2. Read `projection_meta`.
 3. If the file is missing, `schema_version` is wrong, `journal_format_version` is wrong, status is `rebuilding`, or SQLite reports corruption, delete and rebuild.
 4. Otherwise compare the current segment inventory against `journal_segments` and fully rescan any segment whose bytes changed or that was not seen before.
-5. Combine all events from changed segments, sort them by canonical replay order, and rely on `journal_events` dedupe to skip events that were already applied.
+5. Inspect newly discovered events from those segments in canonical replay order.
+6. If every new event sorts strictly after the current replay cursor, append incrementally.
+7. If any new event sorts at or before the current replay cursor, rebuild instead of trying to patch mutable state out of order.
 
 ### Incremental replay
 
-Incremental replay works on candidate events gathered from changed segments, not only events after the current cursor. This preserves correctness when two machines append different events into the same monthly file and later merge through git.
+Incremental replay is only valid for monotonic tail growth. It works when new events gathered from changed segments all sort strictly after the current replay cursor.
 
 For each candidate journal line in canonical order:
 
@@ -327,7 +331,9 @@ For each candidate journal line in canonical order:
 
 After a segment scan finishes, update `journal_segments` with the segment fingerprint in a separate transaction boundary only after all of that segment's candidate events were processed successfully.
 
-This keeps replay crash-safe, allows progress to resume from the last committed event, and ensures newly merged historical events are not skipped.
+If a changed segment introduces a newly discovered event that sorts before already applied mutable events, replay must not rely on `journal_events` dedupe alone. In that case the correct behavior is to rebuild from journal bytes rather than apply the older event after newer state mutations.
+
+This keeps replay crash-safe, allows progress to resume from the last committed event, and avoids converging to the wrong state after multi-machine merges.
 
 ### Event application rules
 
@@ -403,7 +409,7 @@ The projection specifically accelerates:
 
 - Multiple machines can append semantically equivalent journals and later merge through git.
 - Normalization merges by `eventId` union, not by trusting file order.
-- Projection replay is safe after repeated fetch, merge, or sync because changed segments are rescanned and duplicate events are idempotent.
+- Projection replay is safe after repeated fetch, merge, or sync because tail-only additions replay incrementally while historical insertions force rebuild instead of out-of-order mutation.
 - Because SQLite is local-only, machines never need to coordinate projection files. They only need the same journal bytes.
 
 ## Implementation Notes
@@ -416,7 +422,7 @@ The projection specifically accelerates:
 
 - Rebuilding from the same journal twice yields byte-equivalent query results.
 - Reapplying the same merged journal does not duplicate comments, checkpoints, or conflicts.
-- Merging a segment that contains older events than the current replay cursor still converges because replay rescans the changed segment and deduplicates by `eventId`.
+- Merging a segment that contains older events than the current replay cursor still converges because the projection detects the historical insertion and rebuilds instead of applying it out of order.
 - Deleting the SQLite file does not lose ticket history.
 - Sync-heavy reads stop scanning all JSONL files on each command.
 - Duplicate `eventId` with mismatched payload is detected as corruption.

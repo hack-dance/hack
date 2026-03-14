@@ -81,6 +81,8 @@ git commit -m "feat(tickets): add projection schema bootstrap"
 
 - Detect new or changed journal segments by fingerprint, then rescan those segments fully.
 - Parse candidate events in canonical order by `ts`, `orderKey`, `eventId`.
+- If every new event sorts after the replay cursor, append incrementally.
+- If any newly discovered event sorts at or before the replay cursor, trigger rebuild instead of out-of-order patch replay.
 - Insert each event into `journal_events` before mutating read tables.
 - Compare payload hashes on duplicate `eventId`.
 - Advance `journal_segments` only after the segment scan succeeds.

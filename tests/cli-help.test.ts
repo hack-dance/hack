@@ -23,6 +23,12 @@ test("root help leads with core promises and separates core from beta surfaces",
   expect(help).toMatch(
     /hack tickets(?: \[args\.\.\.\])?\s+Track repo-local work in git-backed tickets/
   );
+  expect(help).toMatch(
+    /hack projects\s+Show all projects \(registry \+ running docker compose\)/
+  );
+  expect(help).toMatch(
+    /hack projects prune\s+Remove missing registry entries and stop orphaned containers/
+  );
 
   expect(help.indexOf("Core workflows:")).toBeLessThan(
     help.indexOf("Beta workflows:")
@@ -49,4 +55,6 @@ test("markdown help preserves the core offer and command grouping", () => {
   expect(help).toContain("### Beta workflows");
   expect(help).toContain("### Extension commands");
   expect(help).toContain("`hack auth`");
+  expect(help).toContain("`hack projects`");
+  expect(help).toContain("`hack projects prune`");
 });

@@ -28,7 +28,7 @@ Run `hack help` or `hack help <command>` for interactive help.
 | `hack open` | Open a URL for the project (default: https://<project>.hack) | Project |
 | `hack tui` | Open the project TUI (services + logs) | Project |
 | `hack branch` | Manage branch aliases for a project | Project |
-| `hack linear` | Linear account connection and ticket sync | Project |
+| `hack linear` | Linear project routing, connection status, and ticket sync | Project |
 | `hack config` | Read/write hack.config.json values | Project |
 | `hack env` | Manage project environment variables and secrets | Project |
 | `hack session` | Manage terminal sessions for hack projects | Project |

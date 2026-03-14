@@ -62,7 +62,7 @@ const TRAILING_SLASH_REGEX = /\/+$/;
 export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
   {
     name: "setup",
-    summary: "Enable Linear extension and wire project defaults",
+    summary: "Set the active Linear profile and repo project route",
     scope: "project",
     allowWhenDisabled: true,
     handler: async ({ ctx, args }) => {
@@ -290,7 +290,7 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
   },
   {
     name: "status",
-    summary: "Show Linear profile/config resolution and token status",
+    summary: "Show the active Linear profile, repo route, and next steps",
     scope: "global",
     allowWhenDisabled: true,
     handler: async ({ ctx, args }) =>
@@ -738,7 +738,7 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
   },
   {
     name: "project-bind",
-    summary: "Bind current hack project to a default Linear profile/project",
+    summary: "Bind this repo to its default Linear project route",
     scope: "project",
     allowWhenDisabled: true,
     handler: async ({ ctx, args }) => {

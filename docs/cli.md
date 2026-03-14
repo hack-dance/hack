@@ -654,7 +654,8 @@ Run `hack tickets` with no args to see available subcommands.
 Usage: `hack linear <args...>`
 
 `hack linear` is a convenience alias for the Linear extension (`hack x linear ...`).
-Run `hack linear` with no args to see available subcommands.
+Run `hack linear` with no args to see available subcommands. Use `hack linear status` to check the
+active Linear profile, repo route, and available next steps.
 
 ## Internal commands
 

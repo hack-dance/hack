@@ -286,8 +286,11 @@ hack x linear oauth-connect --profile work --set-default
 # or, default one-shot behavior (falls back to OAuth when no token is present):
 hack x linear connect --profile work --set-default
 
-# bind this hack project to a default Linear project
+# bind this repo to its default Linear project route
 hack x linear project-bind --profile work --project-id "<linear-project-id>"
+
+# confirm what this repo is connected to and can do next
+hack x linear status
 
 # one-off syncs (manual by default)
 hack x linear sync-issue --from linear --issue ENG-123
@@ -304,6 +307,13 @@ Notes:
   `controlPlane.extensions["dance.hack.linear"].config.defaultProfile` -> implicit `default`.
 - Project mapping is stored in project config:
   `controlPlane.routing.overrides.linear.projectId|projectName|teamId`.
+- `hack x linear status` is the primary "what is connected here?" command. It reports the active
+  profile, repo route, linked projects, available capabilities, and repair commands for missing
+  profile/token/binding states.
+- `hack x linear setup` now summarizes repo readiness for Linear instead of only echoing raw config
+  keys.
+- `hack x linear project-bind` now explains which team/project the repo will affect and what command
+  to run next.
 - Sync is manual by default (`sync-issue` / `sync-project`); there is no background autosync yet.
 - Ticket provenance is preserved during sync via `owner`, `source`, `tags`, and `external*` linkage fields.
 - `hack x linear connect` uses token mode when `--token`/`--stdin`/`$HACK_LINEAR_API_TOKEN` is present, and otherwise falls back to browser OAuth.

@@ -80,58 +80,46 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
         projectDir: ctx.project.projectDir,
       });
 
-      if (parsed.value.profileId) {
-        await updateProjectConfig({
-          projectDir: ctx.project.projectDir,
-          path: "controlPlane.routing.overrides.linear.profile",
-          value: parsed.value.profileId,
-        });
-      }
-      if (parsed.value.projectId) {
-        await updateProjectConfig({
-          projectDir: ctx.project.projectDir,
-          path: "controlPlane.routing.overrides.linear.projectId",
-          value: parsed.value.projectId,
-        });
-      }
-      if (parsed.value.projectName !== undefined) {
-        await updateProjectConfig({
-          projectDir: ctx.project.projectDir,
-          path: "controlPlane.routing.overrides.linear.projectName",
-          value: parsed.value.projectName,
-        });
-      }
-      if (parsed.value.teamId !== undefined) {
-        await updateProjectConfig({
-          projectDir: ctx.project.projectDir,
-          path: "controlPlane.routing.overrides.linear.teamId",
-          value: parsed.value.teamId,
-        });
-      }
+      const existingBinding = resolveProjectLinearBinding({
+        controlPlaneConfig: ctx.controlPlaneConfig,
+      });
+      await persistLinearSetupOverrides({
+        projectDir: ctx.project.projectDir,
+        parsed: parsed.value,
+      });
 
-      const payload = {
-        ok: true,
-        extension: EXTENSION_ID,
-        projectProfile: parsed.value.profileId ?? null,
-        projectId: parsed.value.projectId ?? null,
-        projectName: parsed.value.projectName ?? null,
-        teamId: parsed.value.teamId ?? null,
-      };
+      const binding = resolveLinearSetupBinding({
+        parsed: parsed.value,
+        existingBinding,
+      });
+      const status = await resolveLinearStatusPayload({
+        controlPlaneConfig: ctx.controlPlaneConfig,
+        profileId: binding.profileId,
+      });
+      const summary = buildLinearProjectManagementSummary({
+        status,
+        binding,
+      });
+      const setupSummary = buildLinearSetupSummary({
+        profileId: parsed.value.profileId,
+        binding,
+        status,
+      });
+      const payload = buildLinearSetupPayload({
+        binding,
+        status,
+        summary,
+        setupSummary,
+      });
 
       if (parsed.value.json) {
         process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
         return 0;
       }
 
-      await display.kv({
-        title: "Linear setup",
-        entries: [
-          ["extension", EXTENSION_ID],
-          ["project_profile", parsed.value.profileId ?? ""],
-          ["linear_project_id", parsed.value.projectId ?? ""],
-          ["linear_project_name", parsed.value.projectName ?? ""],
-          ["linear_team_id", parsed.value.teamId ?? ""],
-        ],
+      await renderLinearSetupPanel({
+        summary,
+        setupSummary,
       });
       return 0;
     },
@@ -784,22 +772,25 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
         const payload = buildProjectBindingPayload({
           binding: existingBinding,
         });
+        const summary = buildLinearProjectBindSummary({
+          binding: existingBinding,
+        });
         if (parsed.value.json) {
-          process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+          process.stdout.write(
+            `${JSON.stringify({ ...payload, summary }, null, 2)}\n`
+          );
         } else {
-          await display.kv({
+          await display.panel({
             title: "Linear project binding",
-            entries: [
-              ["profile", payload.profileId ?? ""],
-              ["project_id", payload.projectId ?? ""],
-              ["project_name", payload.projectName ?? ""],
-              ["team_id", payload.teamId ?? ""],
-              [
-                "additional_projects",
-                payload.additionalProjects
-                  .map((project) => project.projectId)
-                  .join(", "),
-              ],
+            tone: payload.projectId ? "info" : "warn",
+            lines: [
+              `Active profile: ${summary.activeProfile}`,
+              `Route: ${summary.routeLabel}`,
+              ...(summary.linkedProjectsLabel
+                ? [summary.linkedProjectsLabel]
+                : []),
+              "Next:",
+              ...summary.nextSteps.map((step) => `- ${step}`),
             ],
           });
         }
@@ -837,14 +828,22 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
           binding: { additionalProjects: [] },
           cleared: true,
         });
+        const summary = buildLinearProjectBindSummary({
+          binding: { additionalProjects: [] },
+        });
         if (parsed.value.json) {
-          process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+          process.stdout.write(
+            `${JSON.stringify({ ...payload, summary }, null, 2)}\n`
+          );
         } else {
           await display.panel({
             title: "Linear project binding",
             tone: "success",
             lines: [
-              "Cleared project-level Linear routing overrides, including additional synced projects.",
+              "Cleared this repo's Linear routing overrides, including linked projects.",
+              `Route: ${summary.routeLabel}`,
+              "Next:",
+              "- Run `hack linear status` to review what is still connected.",
             ],
           });
         }
@@ -919,23 +918,35 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
           }),
         },
       });
+      const summary = buildLinearProjectBindSummary({
+        binding: {
+          ...(boundProfile ? { profileId: boundProfile } : {}),
+          projectId,
+          projectName: resolvedTeamAndName.projectName,
+          teamId: resolvedTeamAndName.teamId,
+          additionalProjects: removeAdditionalProjectBinding({
+            existing: existingBinding.additionalProjects,
+            projectId,
+          }),
+        },
+      });
 
       if (parsed.value.json) {
-        process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+        process.stdout.write(
+          `${JSON.stringify({ ...payload, summary }, null, 2)}\n`
+        );
       } else {
-        await display.kv({
+        await display.panel({
           title: "Linear project binding",
-          entries: [
-            ["profile", payload.profileId ?? ""],
-            ["project_id", payload.projectId],
-            ["project_name", payload.projectName],
-            ["team_id", payload.teamId],
-            [
-              "additional_projects",
-              payload.additionalProjects
-                .map((project) => project.projectId)
-                .join(", "),
-            ],
+          tone: "success",
+          lines: [
+            `Active profile: ${summary.activeProfile}`,
+            `Route: ${summary.routeLabel}`,
+            ...(summary.linkedProjectsLabel
+              ? [summary.linkedProjectsLabel]
+              : []),
+            "Next:",
+            ...summary.nextSteps.map((step) => `- ${step}`),
           ],
         });
       }
@@ -1984,7 +1995,7 @@ async function handleLinearStatusCommand(input: {
     return 1;
   }
 
-  const payload = await resolveLinearStatusPayload({
+  const payload = await resolveLinearStatusCommandPayload({
     controlPlaneConfig: input.ctx.controlPlaneConfig,
     profileId: parsed.value.profileId,
   });
@@ -2020,6 +2031,11 @@ type LinearStatusPayload = {
   readonly error: string | null;
   readonly profileError: string | null;
   readonly ok: boolean;
+};
+
+type LinearStatusCommandPayload = LinearStatusPayload & {
+  readonly projectBinding: ReturnType<typeof buildProjectBindingPayload>;
+  readonly summary: LinearProjectManagementSummary;
 };
 
 async function resolveLinearStatusPayload(input: {
@@ -2072,28 +2088,72 @@ async function resolveLinearStatusPayload(input: {
   };
 }
 
+async function resolveLinearStatusCommandPayload(input: {
+  readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
+  readonly profileId?: string;
+}): Promise<LinearStatusCommandPayload> {
+  const status = await resolveLinearStatusPayload(input);
+  const projectBinding = buildProjectBindingPayload({
+    binding: resolveProjectLinearBinding({
+      controlPlaneConfig: input.controlPlaneConfig,
+    }),
+  });
+  const summary = buildLinearProjectManagementSummary({
+    status,
+    binding: {
+      ...(projectBinding.profileId
+        ? { profileId: projectBinding.profileId }
+        : {}),
+      ...(projectBinding.projectId
+        ? { projectId: projectBinding.projectId }
+        : {}),
+      ...(projectBinding.projectName
+        ? { projectName: projectBinding.projectName }
+        : {}),
+      ...(projectBinding.teamId ? { teamId: projectBinding.teamId } : {}),
+      additionalProjects: projectBinding.additionalProjects,
+    },
+  });
+  return {
+    ...status,
+    projectBinding,
+    summary,
+  };
+}
+
 async function renderLinearStatusPayload(input: {
-  readonly payload: LinearStatusPayload;
+  readonly payload: LinearStatusCommandPayload;
   readonly logger: ExtensionCommandContext["logger"];
 }): Promise<void> {
-  await display.kv({
+  const lines = [
+    `Active profile: ${input.payload.summary.activeProfile}`,
+    `Connection: ${input.payload.summary.connectionLabel}`,
+    `Route: ${input.payload.summary.routingSummary}`,
+    ...(input.payload.summary.linkedProjectsLabel
+      ? [input.payload.summary.linkedProjectsLabel]
+      : []),
+    ...(input.payload.summary.capabilities.length > 0
+      ? [
+          "Capabilities:",
+          ...input.payload.summary.capabilities.map(
+            (capability) => `- ${capability}`
+          ),
+        ]
+      : []),
+    ...(input.payload.summary.repair
+      ? [
+          `Repair: ${input.payload.summary.repair.reason}`,
+          `Run: ${input.payload.summary.repair.command}`,
+        ]
+      : []),
+    ...(input.payload.summary.nextSteps.length > 0
+      ? ["Next:", ...input.payload.summary.nextSteps.map((step) => `- ${step}`)]
+      : []),
+  ];
+  await display.panel({
     title: "Linear status",
-    entries: [
-      ["selected_profile", input.payload.selectedProfile],
-      ["selected_source", input.payload.selectedSource],
-      ["default_profile", input.payload.defaultProfile],
-      ["selected_missing", input.payload.selectedMissing ? "yes" : "no"],
-      ["auth_ref", input.payload.authRef],
-      ["service", input.payload.service],
-      ["token_env_fallback", input.payload.tokenEnvFallback],
-      ["api_url", input.payload.apiUrl],
-      ["account_id", input.payload.accountId ?? ""],
-      ["account_name", input.payload.accountName ?? ""],
-      ["account_email", input.payload.accountEmail ?? ""],
-      ["token_resolved", input.payload.tokenResolved ? "yes" : "no"],
-      ["token_source", input.payload.tokenSource ?? ""],
-      ["token_expires_at", input.payload.tokenExpiresAt ?? ""],
-    ],
+    tone: input.payload.ok ? "info" : "warn",
+    lines,
   });
   if (input.payload.profileError) {
     input.logger.warn({ message: input.payload.profileError });
@@ -5237,6 +5297,170 @@ type ResolvedLinearProjectBinding = {
   readonly additionalProjects: readonly LinearProjectBindingTarget[];
 };
 
+type LinearRepairAction = {
+  readonly reason: string;
+  readonly command: string;
+};
+
+type LinearProjectManagementSummary = {
+  readonly activeProfile: string;
+  readonly connected: boolean;
+  readonly connectionLabel: string;
+  readonly routingSummary: string;
+  readonly linkedProjectsLabel: string | null;
+  readonly capabilities: readonly string[];
+  readonly repair: LinearRepairAction | null;
+  readonly nextSteps: readonly string[];
+};
+
+type LinearSetupSummary = {
+  readonly ready: boolean;
+  readonly activeProfile: string;
+  readonly connected: boolean;
+  readonly routeLabel: string;
+  readonly nextSteps: readonly string[];
+};
+
+type LinearProjectBindSummary = {
+  readonly activeProfile: string;
+  readonly routeLabel: string;
+  readonly linkedProjectsLabel: string | null;
+  readonly nextSteps: readonly string[];
+};
+
+async function persistLinearSetupOverrides(input: {
+  readonly projectDir: string;
+  readonly parsed: SetupArgs;
+}): Promise<void> {
+  if (input.parsed.profileId) {
+    await updateProjectConfig({
+      projectDir: input.projectDir,
+      path: "controlPlane.routing.overrides.linear.profile",
+      value: input.parsed.profileId,
+    });
+  }
+  if (input.parsed.projectId) {
+    await updateProjectConfig({
+      projectDir: input.projectDir,
+      path: "controlPlane.routing.overrides.linear.projectId",
+      value: input.parsed.projectId,
+    });
+  }
+  if (input.parsed.projectName !== undefined) {
+    await updateProjectConfig({
+      projectDir: input.projectDir,
+      path: "controlPlane.routing.overrides.linear.projectName",
+      value: input.parsed.projectName,
+    });
+  }
+  if (input.parsed.teamId !== undefined) {
+    await updateProjectConfig({
+      projectDir: input.projectDir,
+      path: "controlPlane.routing.overrides.linear.teamId",
+      value: input.parsed.teamId,
+    });
+  }
+}
+
+function resolveLinearSetupBinding(input: {
+  readonly parsed: SetupArgs;
+  readonly existingBinding: ResolvedLinearProjectBinding;
+}): ResolvedLinearProjectBinding {
+  const effectiveProfileId =
+    input.parsed.profileId ?? input.existingBinding.profileId;
+  const effectiveProjectId =
+    input.parsed.projectId ?? input.existingBinding.projectId;
+  const effectiveProjectName =
+    input.parsed.projectName !== undefined
+      ? input.parsed.projectName || undefined
+      : input.existingBinding.projectName;
+  const effectiveTeamId =
+    input.parsed.teamId !== undefined
+      ? input.parsed.teamId || undefined
+      : input.existingBinding.teamId;
+
+  return {
+    ...(effectiveProfileId ? { profileId: effectiveProfileId } : {}),
+    ...(effectiveProjectId ? { projectId: effectiveProjectId } : {}),
+    ...(effectiveProjectName ? { projectName: effectiveProjectName } : {}),
+    ...(effectiveTeamId ? { teamId: effectiveTeamId } : {}),
+    additionalProjects: input.existingBinding.additionalProjects,
+  };
+}
+
+function buildLinearSetupPayload(input: {
+  readonly binding: ResolvedLinearProjectBinding;
+  readonly status: LinearStatusPayload;
+  readonly summary: LinearProjectManagementSummary;
+  readonly setupSummary: LinearSetupSummary;
+}): {
+  readonly ok: boolean;
+  readonly extension: string;
+  readonly projectProfile: string | null;
+  readonly projectId: string | null;
+  readonly projectName: string | null;
+  readonly teamId: string | null;
+  readonly connected: boolean;
+  readonly connectionLabel: string;
+  readonly routingSummary: string;
+  readonly capabilities: readonly string[];
+  readonly repair: LinearRepairAction | null;
+  readonly ready: boolean;
+  readonly nextSteps: readonly string[];
+} {
+  return {
+    ok: input.status.ok,
+    extension: EXTENSION_ID,
+    projectProfile: input.binding.profileId ?? null,
+    projectId: input.binding.projectId ?? null,
+    projectName: input.binding.projectName ?? null,
+    teamId: input.binding.teamId ?? null,
+    connected: input.summary.connected,
+    connectionLabel: input.summary.connectionLabel,
+    routingSummary: input.summary.routingSummary,
+    capabilities: input.summary.capabilities,
+    repair: input.summary.repair,
+    ready: input.setupSummary.ready,
+    nextSteps: input.setupSummary.nextSteps,
+  };
+}
+
+async function renderLinearSetupPanel(input: {
+  readonly summary: LinearProjectManagementSummary;
+  readonly setupSummary: LinearSetupSummary;
+}): Promise<void> {
+  await display.panel({
+    title: "Linear setup",
+    tone: input.setupSummary.ready ? "success" : "info",
+    lines: [
+      `Extension: ${EXTENSION_ID}`,
+      `Active profile: ${input.setupSummary.activeProfile}`,
+      `Connection: ${input.summary.connectionLabel}`,
+      `Route: ${input.setupSummary.routeLabel}`,
+      ...(input.summary.linkedProjectsLabel
+        ? [input.summary.linkedProjectsLabel]
+        : []),
+      ...(input.summary.capabilities.length > 0
+        ? [
+            "Capabilities:",
+            ...input.summary.capabilities.map(
+              (capability) => `- ${capability}`
+            ),
+          ]
+        : []),
+      ...(input.summary.repair
+        ? [
+            `Repair: ${input.summary.repair.reason}`,
+            `Run: ${input.summary.repair.command}`,
+          ]
+        : []),
+      ...(input.setupSummary.nextSteps.length > 0
+        ? ["Next:", ...input.setupSummary.nextSteps.map((step) => `- ${step}`)]
+        : []),
+    ],
+  });
+}
+
 function resolveProjectLinearBinding(input: {
   readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
 }): ResolvedLinearProjectBinding {
@@ -5399,6 +5623,266 @@ function buildProjectBindingPayload(input: {
     ...(input.removedProjectId !== undefined
       ? { removedProjectId: input.removedProjectId }
       : {}),
+  };
+}
+
+function pluralize(input: {
+  readonly count: number;
+  readonly singular: string;
+  readonly plural?: string;
+}): string {
+  if (input.count === 1) {
+    return input.singular;
+  }
+  return input.plural ?? `${input.singular}s`;
+}
+
+function formatLinearProjectTarget(input: {
+  readonly projectId: string;
+  readonly projectName?: string;
+  readonly teamId?: string;
+}): string {
+  const projectLabel = input.projectName
+    ? `${input.projectName} (${input.projectId})`
+    : input.projectId;
+  return input.teamId
+    ? `${projectLabel} in team ${input.teamId}`
+    : projectLabel;
+}
+
+function resolveLinearConnectionLabel(input: {
+  readonly activeProfile: string;
+  readonly connected: boolean;
+  readonly status: LinearStatusPayload;
+}): string {
+  if (input.connected) {
+    if (input.status.accountName) {
+      return `Connected as ${input.status.accountName}`;
+    }
+    if (input.status.accountEmail) {
+      return `Connected as ${input.status.accountEmail}`;
+    }
+    return "Connected";
+  }
+  if (input.status.selectedMissing) {
+    return `Profile "${input.activeProfile}" is selected but not configured`;
+  }
+  return "Not connected";
+}
+
+function buildLinearRoutingSummary(input: {
+  readonly binding: ResolvedLinearProjectBinding;
+}): string {
+  if (!input.binding.projectId) {
+    return "This repo does not have a default Linear project route yet.";
+  }
+  return `This repo routes Linear sync to ${formatLinearProjectTarget({
+    projectId: input.binding.projectId,
+    projectName: input.binding.projectName,
+    teamId: input.binding.teamId,
+  })}.`;
+}
+
+function buildLinkedProjectsLabel(input: {
+  readonly binding: ResolvedLinearProjectBinding;
+}): string | null {
+  const linkedProjectsCount = input.binding.additionalProjects.length;
+  if (linkedProjectsCount === 0) {
+    return null;
+  }
+  return `${linkedProjectsCount} linked ${pluralize({
+    count: linkedProjectsCount,
+    singular: "project",
+  })}: ${input.binding.additionalProjects
+    .map((project) =>
+      formatLinearProjectTarget({
+        projectId: project.projectId,
+        projectName: project.projectName,
+        teamId: project.teamId,
+      })
+    )
+    .join(", ")}.`;
+}
+
+function resolveLinearRepairAction(input: {
+  readonly activeProfile: string;
+  readonly connected: boolean;
+  readonly status: LinearStatusPayload;
+}): LinearRepairAction | null {
+  if (input.status.selectedMissing || input.status.profileError) {
+    return {
+      reason: "The active Linear profile binding is invalid.",
+      command: `hack linear setup --profile ${input.activeProfile}`,
+    };
+  }
+  if (input.status.error?.includes("hack auth login")) {
+    return {
+      reason: "Hack account login is required for broker-owned Linear access.",
+      command: "hack auth login",
+    };
+  }
+  if (!input.connected) {
+    return {
+      reason: "Local Linear access is missing for the active profile.",
+      command: `hack linear connect --profile ${input.activeProfile}`,
+    };
+  }
+  return null;
+}
+
+function buildLinearCapabilities(input: {
+  readonly connected: boolean;
+  readonly binding: ResolvedLinearProjectBinding;
+}): readonly string[] {
+  const capabilities: string[] = [];
+  if (input.connected && input.binding.projectId) {
+    capabilities.push("Sync tickets for the bound Linear project");
+  }
+  if (input.connected && input.binding.additionalProjects.length > 0) {
+    capabilities.push(
+      `Pull issues from ${input.binding.additionalProjects.length} linked Linear ${pluralize(
+        {
+          count: input.binding.additionalProjects.length,
+          singular: "project",
+        }
+      )}`
+    );
+  }
+  if (input.connected && !input.binding.projectId) {
+    capabilities.push("Bind this repo to a Linear project before project sync");
+  }
+  if (!input.connected && input.binding.projectId) {
+    capabilities.push("Repair local Linear access for the active profile");
+  }
+  return capabilities;
+}
+
+function buildLinearNextSteps(input: {
+  readonly repair: LinearRepairAction | null;
+  readonly binding: ResolvedLinearProjectBinding;
+  readonly activeProfile: string;
+}): readonly string[] {
+  if (input.repair) {
+    return [`Run \`${input.repair.command}\`.`];
+  }
+  if (input.binding.projectId) {
+    return ["Run `hack linear sync-project --from linear`."];
+  }
+  return [
+    `Run \`hack linear project-bind --profile ${input.activeProfile} --project-id <linear-project-id>\`.`,
+  ];
+}
+
+function buildLinearProjectManagementSummary(input: {
+  readonly status: LinearStatusPayload;
+  readonly binding: ResolvedLinearProjectBinding;
+}): LinearProjectManagementSummary {
+  const activeProfile =
+    input.status.selectedProfile ?? input.binding.profileId ?? "default";
+  const connected = input.status.tokenResolved;
+  const connectionLabel = resolveLinearConnectionLabel({
+    activeProfile,
+    connected,
+    status: input.status,
+  });
+  const routingSummary = buildLinearRoutingSummary({
+    binding: input.binding,
+  });
+  const linkedProjectsLabel = buildLinkedProjectsLabel({
+    binding: input.binding,
+  });
+  const repair = resolveLinearRepairAction({
+    activeProfile,
+    connected,
+    status: input.status,
+  });
+  const capabilities = buildLinearCapabilities({
+    connected,
+    binding: input.binding,
+  });
+  const nextSteps = buildLinearNextSteps({
+    repair,
+    binding: input.binding,
+    activeProfile,
+  });
+
+  return {
+    activeProfile,
+    connected,
+    connectionLabel,
+    routingSummary,
+    linkedProjectsLabel,
+    capabilities,
+    repair,
+    nextSteps,
+  };
+}
+
+function buildLinearSetupSummary(input: {
+  readonly profileId?: string;
+  readonly binding: ResolvedLinearProjectBinding;
+  readonly status: LinearStatusPayload;
+}): LinearSetupSummary {
+  const projectSummary = buildLinearProjectManagementSummary({
+    status: input.status,
+    binding: input.binding,
+  });
+  return {
+    ready: projectSummary.connected && Boolean(input.binding.projectId),
+    activeProfile:
+      input.profileId ??
+      input.binding.profileId ??
+      input.status.selectedProfile,
+    connected: projectSummary.connected,
+    routeLabel: input.binding.projectId
+      ? projectSummary.routingSummary
+      : "No default Linear project is bound to this repo yet.",
+    nextSteps: input.binding.projectId
+      ? ["Run `hack linear status` to confirm the active route."]
+      : [
+          `Run \`hack linear project-bind --profile ${projectSummary.activeProfile} --project-id <linear-project-id>\`.`,
+        ],
+  };
+}
+
+function buildLinearProjectBindSummary(input: {
+  readonly binding: ResolvedLinearProjectBinding;
+}): LinearProjectBindSummary {
+  const routeLabel = input.binding.projectId
+    ? `This repo now uses ${formatLinearProjectTarget({
+        projectId: input.binding.projectId,
+        projectName: input.binding.projectName,
+        teamId: input.binding.teamId,
+      })} as its default Linear route.`
+    : "This repo no longer has a default Linear route.";
+  const linkedProjectsCount = input.binding.additionalProjects.length;
+  const linkedProjectsLabel =
+    linkedProjectsCount > 0
+      ? `${linkedProjectsCount} linked ${pluralize({
+          count: linkedProjectsCount,
+          singular: "project",
+        })} remains in scope: ${input.binding.additionalProjects
+          .map((project) =>
+            formatLinearProjectTarget({
+              projectId: project.projectId,
+              projectName: project.projectName,
+            })
+          )
+          .join(", ")}.`
+      : null;
+  return {
+    activeProfile: input.binding.profileId ?? "default",
+    routeLabel,
+    linkedProjectsLabel,
+    nextSteps: input.binding.projectId
+      ? [
+          "Run `hack linear status` to review active capabilities.",
+          "Run `hack linear sync-project --from linear` to sync the default route.",
+        ]
+      : [
+          `Run \`hack linear project-bind --profile ${input.binding.profileId ?? "default"} --project-id <linear-project-id>\` to bind a default route.`,
+          "Run `hack linear status` to review what is still connected.",
+        ],
   };
 }
 
@@ -8309,6 +8793,9 @@ function normalizeOAuthActor(value: string | undefined): "user" | "app" | null {
 }
 
 export const __testOnly = {
+  buildLinearProjectBindSummary,
+  buildLinearProjectManagementSummary,
+  buildLinearSetupSummary,
   buildOAuthArgsFromConnectArgs,
   detectAuthoritativeFieldConflicts,
   findProjectBindingTarget,

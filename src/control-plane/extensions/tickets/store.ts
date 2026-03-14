@@ -7,9 +7,9 @@ import { isRecord } from "../../../lib/guards.ts";
 import type { ControlPlaneConfig } from "../../sdk/config.ts";
 import { createGitTicketsChannel } from "./tickets-git-channel.ts";
 import {
-  formatTicketId,
+  compareTicketIds,
+  generateTicketId,
   normalizeTicketRefs,
-  parseTicketNumber,
   unixSeconds,
 } from "./util.ts";
 
@@ -426,25 +426,14 @@ export function createTicketsStore(opts: {
     readonly tickets: Iterable<TicketSummary>;
   }): TicketSummary[] => {
     const out = [...input.tickets];
-    out.sort(
-      (a, b) =>
-        (parseTicketNumber(a.ticketId) ?? 0) -
-        (parseTicketNumber(b.ticketId) ?? 0)
-    );
-    return out;
-  };
-
-  const computeNextTicketId = async (): Promise<string> => {
-    const events = await readAllEvents();
-    const snapshot = materializeSnapshotFromEvents({ events });
-    let max = 0;
-    for (const ticketId of snapshot.tickets.keys()) {
-      const n = parseTicketNumber(ticketId);
-      if (n !== null && n > max) {
-        max = n;
+    out.sort((left, right) => {
+      const createdAt = left.createdAt.localeCompare(right.createdAt);
+      if (createdAt !== 0) {
+        return createdAt;
       }
-    }
-    return formatTicketId(max + 1);
+      return compareTicketIds(left.ticketId, right.ticketId);
+    });
+    return out;
   };
 
   const setStatus = async (input: {
@@ -472,7 +461,7 @@ export function createTicketsStore(opts: {
 
   return {
     createTicket: async (input) => {
-      const ticketId = await computeNextTicketId();
+      const ticketId = generateTicketId();
       const dependsOn = normalizeTicketRefs(input.dependsOn ?? []);
       const blocks = normalizeTicketRefs(input.blocks ?? []);
       const owner = normalizeOwnerOrSource({

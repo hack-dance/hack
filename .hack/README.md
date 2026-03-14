@@ -7,8 +7,8 @@ This repo is dogfooding the tickets extension.
   - `hack x tickets setup`
   - `hack x tickets create --title "..." --body-stdin`
   - `hack x tickets list`
-  - `hack x tickets show T-00001`
-  - `hack x tickets status T-00001 in_progress`
+  - `hack x tickets show T-AB12CD34EF`
+  - `hack x tickets status T-AB12CD34EF in_progress`
   - `hack x tickets sync`
 
 No services are required for this repo; `docker-compose.yml` is intentionally empty.

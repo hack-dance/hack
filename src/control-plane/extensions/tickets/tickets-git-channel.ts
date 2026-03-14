@@ -1,4 +1,4 @@
-import { mkdir, readdir, rm, stat } from "node:fs/promises";
+import { mkdir, open, readdir, rm, stat, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import { isRecord } from "../../../lib/guards.ts";
@@ -7,6 +7,9 @@ import { stableStringify } from "./util.ts";
 
 const REFS_HEADS_PREFIX_PATTERN = /^refs\/heads\//;
 const REFS_PREFIX_PATTERN = /^refs\//;
+const MUTATION_LOCK_RETRY_MS = 100;
+const MUTATION_LOCK_STALE_MS = 30_000;
+const MUTATION_LOCK_TIMEOUT_MS = 10_000;
 
 export type TicketsGitChannel = {
   readonly ensureCheckedOut: () => Promise<string>;
@@ -85,6 +88,7 @@ export function createGitTicketsChannel(opts: {
     : null;
   const remoteName = gitEnabled ? (opts.config.remote ?? "origin").trim() : "";
   const bareIndexLockPath = resolve(bareDir, "index.lock");
+  const mutationLockPath = resolve(gitDir, ".mutation.lock");
 
   const resolvePushRefForCheckout = (input: {
     readonly checkoutRef: string;
@@ -164,6 +168,58 @@ export function createGitTicketsChannel(opts: {
   const ensureDirs = async () => {
     await mkdir(gitDir, { recursive: true });
     await mkdir(worktreeDir, { recursive: true });
+  };
+
+  const withMutationLock = async <T>(fn: () => Promise<T>): Promise<T> => {
+    await acquireMutationLock();
+    try {
+      return await fn();
+    } finally {
+      await releaseMutationLock();
+    }
+  };
+
+  const acquireMutationLock = async (): Promise<void> => {
+    await mkdir(dirname(mutationLockPath), { recursive: true });
+    const start = Date.now();
+
+    while (true) {
+      try {
+        const file = await open(mutationLockPath, "wx");
+        await file.writeFile(`${process.pid}\n`);
+        await file.close();
+        return;
+      } catch (error: unknown) {
+        const code =
+          typeof error === "object" && error !== null && "code" in error
+            ? (error as { code?: string }).code
+            : undefined;
+        if (code !== "EEXIST") {
+          throw error;
+        }
+        if (await isMutationLockStale()) {
+          await unlink(mutationLockPath).catch(() => undefined);
+          continue;
+        }
+        if (Date.now() - start > MUTATION_LOCK_TIMEOUT_MS) {
+          throw new Error("Timed out waiting for tickets git mutation lock");
+        }
+        await Bun.sleep(MUTATION_LOCK_RETRY_MS);
+      }
+    }
+  };
+
+  const releaseMutationLock = async (): Promise<void> => {
+    await unlink(mutationLockPath).catch(() => undefined);
+  };
+
+  const isMutationLockStale = async (): Promise<boolean> => {
+    try {
+      const info = await stat(mutationLockPath);
+      return Date.now() - info.mtimeMs > MUTATION_LOCK_STALE_MS;
+    } catch {
+      return false;
+    }
   };
 
   const ensureBareRepo = async () => {
@@ -951,76 +1007,78 @@ export function createGitTicketsChannel(opts: {
   const repair = async (input: {
     readonly pruneLegacyRef: boolean;
   }): Promise<TicketsGitRepairResult> => {
-    const checkedOut = await ensureCheckedOut();
-    if (!checkedOut.ok) {
-      return checkedOut;
-    }
-
-    const repairBranch = `${branch}-repair`;
-    const orphan = await runGitDir({
-      args: ["checkout", "--orphan", repairBranch],
-    });
-    if (!orphan.ok) {
-      return {
-        ok: false,
-        error: `git checkout --orphan failed: ${orphan.stderr.trim()}`,
-      };
-    }
-
-    const pruned = await pruneWorktreeToTickets();
-    if (!pruned.ok) {
-      return pruned;
-    }
-
-    const renamed = await runGitDir({
-      args: ["branch", "-M", repairBranch, branch],
-    });
-    if (!renamed.ok) {
-      return {
-        ok: false,
-        error: `git branch -M failed: ${renamed.stderr.trim()}`,
-      };
-    }
-
-    const committed = await commitAll("tickets: repair");
-    if (!committed.ok) {
-      return committed;
-    }
-
-    const pushed = await pushWithRetry({
-      remoteUrl: checkedOut.remoteUrl,
-      pushRef: checkedOut.pushRef,
-    });
-    if (!pushed.ok) {
-      return pushed;
-    }
-
-    let didPruneLegacy = false;
-    let pruneError: string | undefined;
-
-    if (input.pruneLegacyRef && legacyRemoteRef && checkedOut.remoteUrl) {
-      const prunedLegacy = await runGitDir({
-        args: ["push", "origin", `:${legacyRemoteRef}`],
-      });
-      if (prunedLegacy.ok) {
-        didPruneLegacy = true;
-        if (legacyTrackingRef) {
-          await runGitDir({
-            args: ["update-ref", "-d", legacyTrackingRef],
-          });
-        }
-      } else {
-        pruneError = `${prunedLegacy.stderr}\n${prunedLegacy.stdout}`.trim();
+    return await withMutationLock(async () => {
+      const checkedOut = await ensureCheckedOut();
+      if (!checkedOut.ok) {
+        return checkedOut;
       }
-    }
 
-    return {
-      ok: true,
-      didCommit: committed.didCommit,
-      didPush: pushed.didPush,
-      didPruneLegacy,
-      ...(pruneError ? { pruneError } : {}),
-    };
+      const repairBranch = `${branch}-repair`;
+      const orphan = await runGitDir({
+        args: ["checkout", "--orphan", repairBranch],
+      });
+      if (!orphan.ok) {
+        return {
+          ok: false,
+          error: `git checkout --orphan failed: ${orphan.stderr.trim()}`,
+        };
+      }
+
+      const pruned = await pruneWorktreeToTickets();
+      if (!pruned.ok) {
+        return pruned;
+      }
+
+      const renamed = await runGitDir({
+        args: ["branch", "-M", repairBranch, branch],
+      });
+      if (!renamed.ok) {
+        return {
+          ok: false,
+          error: `git branch -M failed: ${renamed.stderr.trim()}`,
+        };
+      }
+
+      const committed = await commitAll("tickets: repair");
+      if (!committed.ok) {
+        return committed;
+      }
+
+      const pushed = await pushWithRetry({
+        remoteUrl: checkedOut.remoteUrl,
+        pushRef: checkedOut.pushRef,
+      });
+      if (!pushed.ok) {
+        return pushed;
+      }
+
+      let didPruneLegacy = false;
+      let pruneError: string | undefined;
+
+      if (input.pruneLegacyRef && legacyRemoteRef && checkedOut.remoteUrl) {
+        const prunedLegacy = await runGitDir({
+          args: ["push", "origin", `:${legacyRemoteRef}`],
+        });
+        if (prunedLegacy.ok) {
+          didPruneLegacy = true;
+          if (legacyTrackingRef) {
+            await runGitDir({
+              args: ["update-ref", "-d", legacyTrackingRef],
+            });
+          }
+        } else {
+          pruneError = `${prunedLegacy.stderr}\n${prunedLegacy.stdout}`.trim();
+        }
+      }
+
+      return {
+        ok: true,
+        didCommit: committed.didCommit,
+        didPush: pushed.didPush,
+        didPruneLegacy,
+        ...(pruneError ? { pruneError } : {}),
+      };
+    });
   };
 
   const appendEvents = async (input: {
@@ -1028,31 +1086,33 @@ export function createGitTicketsChannel(opts: {
   }): Promise<
     { readonly ok: true } | { readonly ok: false; readonly error: string }
   > => {
-    const checkedOut = await ensureCheckedOut();
-    if (!checkedOut.ok) {
-      return checkedOut;
-    }
+    return await withMutationLock(async () => {
+      const checkedOut = await ensureCheckedOut();
+      if (!checkedOut.ok) {
+        return checkedOut;
+      }
 
-    const wrote = await writeEvents({ events: input.events });
-    if (!wrote.ok) {
-      return wrote;
-    }
+      const wrote = await writeEvents({ events: input.events });
+      if (!wrote.ok) {
+        return wrote;
+      }
 
-    const committed = await commitAll("tickets: append events");
-    if (!committed.ok) {
-      return committed;
-    }
+      const committed = await commitAll("tickets: append events");
+      if (!committed.ok) {
+        return committed;
+      }
 
-    const pushed = await pushWithRetry({
-      remoteUrl: checkedOut.remoteUrl,
-      pushRef: checkedOut.pushRef,
-      pendingEvents: input.events,
+      const pushed = await pushWithRetry({
+        remoteUrl: checkedOut.remoteUrl,
+        pushRef: checkedOut.pushRef,
+        pendingEvents: input.events,
+      });
+      if (!pushed.ok) {
+        return pushed;
+      }
+
+      return { ok: true };
     });
-    if (!pushed.ok) {
-      return pushed;
-    }
-
-    return { ok: true };
   };
 
   const sync = async (): Promise<
@@ -1065,36 +1125,38 @@ export function createGitTicketsChannel(opts: {
       }
     | { readonly ok: false; readonly error: string }
   > => {
-    const checkedOut = await ensureCheckedOut();
-    if (!checkedOut.ok) {
-      return checkedOut;
-    }
+    return await withMutationLock(async () => {
+      const checkedOut = await ensureCheckedOut();
+      if (!checkedOut.ok) {
+        return checkedOut;
+      }
 
-    const normalized = await normalizeLogs();
-    if (!normalized.ok) {
-      return normalized;
-    }
+      const normalized = await normalizeLogs();
+      if (!normalized.ok) {
+        return normalized;
+      }
 
-    const committed = await commitAll("tickets: sync");
-    if (!committed.ok) {
-      return committed;
-    }
+      const committed = await commitAll("tickets: sync");
+      if (!committed.ok) {
+        return committed;
+      }
 
-    const pushed = await pushWithRetry({
-      remoteUrl: checkedOut.remoteUrl,
-      pushRef: checkedOut.pushRef,
+      const pushed = await pushWithRetry({
+        remoteUrl: checkedOut.remoteUrl,
+        pushRef: checkedOut.pushRef,
+      });
+      if (!pushed.ok) {
+        return pushed;
+      }
+
+      return {
+        ok: true,
+        branch,
+        ...(checkedOut.remoteUrl ? { remote: remoteName } : {}),
+        didCommit: committed.didCommit,
+        didPush: pushed.didPush,
+      };
     });
-    if (!pushed.ok) {
-      return pushed;
-    }
-
-    return {
-      ok: true,
-      branch,
-      ...(checkedOut.remoteUrl ? { remote: remoteName } : {}),
-      didCommit: committed.didCommit,
-      didPush: pushed.didPush,
-    };
   };
 
   return {

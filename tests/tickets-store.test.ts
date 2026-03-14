@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createTicketsStore } from "../src/control-plane/extensions/tickets/store.ts";
+import { createGitTicketsChannel } from "../src/control-plane/extensions/tickets/tickets-git-channel.ts";
 import { readControlPlaneConfig } from "../src/control-plane/sdk/config.ts";
 
 const originalGlobalConfigPath = process.env.HACK_GLOBAL_CONFIG_PATH;
@@ -338,6 +339,81 @@ test("tickets store recovers from a stale tickets bare repo index.lock", async (
 
   const tickets = await store.listTickets();
   expect(tickets.map((ticket) => ticket.title)).toContain("Stale lock ticket");
+}, 20_000);
+
+test("tickets store creates non-sequential ids and keeps them unique under concurrent creates", async () => {
+  const projectRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-concurrent-create-",
+  });
+  const store = await createStore({ projectRoot });
+
+  const results = await Promise.all(
+    Array.from({ length: 16 }, (_value, index) =>
+      store.createTicket({
+        title: `Concurrent ticket ${index + 1}`,
+        owner: "hack",
+        source: "hack",
+        actor: `creator-${index}@hack`,
+      })
+    )
+  );
+
+  expect(results.every((result) => result.ok)).toBe(true);
+
+  const ticketIds = results.flatMap((result) =>
+    result.ok ? [result.ticket.ticketId] : []
+  );
+  expect(ticketIds).toHaveLength(16);
+  expect(new Set(ticketIds).size).toBe(ticketIds.length);
+
+  for (const ticketId of ticketIds) {
+    expect(ticketId).toMatch(/^T-[0-9A-Z]{10}$/);
+    expect(ticketId).not.toMatch(/^T-\d{5}$/);
+  }
+}, 20_000);
+
+test("tickets store continues to read and update legacy sequential ids", async () => {
+  const projectRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-legacy-id-",
+  });
+  const store = await createStore({ projectRoot });
+  const configResult = await readControlPlaneConfig({
+    projectDir: join(projectRoot, ".hack"),
+  });
+  const git = createGitTicketsChannel({
+    projectRoot,
+    config: configResult.config.tickets.git,
+    logger,
+  });
+
+  const legacyEvent = {
+    actor: "creator@hack",
+    eventId: "legacy-ticket-created",
+    payload: {
+      owner: "hack",
+      source: "hack",
+      title: "Legacy sequential ticket",
+    },
+    ticketId: "T-00001",
+    ts: 1_762_000_000,
+    tsIso: "2025-11-04T00:00:00.000Z",
+    type: "ticket.created",
+  };
+  const appended = await git.appendEvents({ events: [legacyEvent] });
+  expect(appended.ok).toBe(true);
+
+  const ticket = await store.getTicket({ ticketId: "T-00001" });
+  expect(ticket?.title).toBe("Legacy sequential ticket");
+
+  const updated = await store.updateTicket({
+    ticketId: "T-00001",
+    title: "Legacy sequential ticket updated",
+    actor: "updater@hack",
+  });
+  expect(updated.ok).toBe(true);
+
+  const updatedTicket = await store.getTicket({ ticketId: "T-00001" });
+  expect(updatedTicket?.title).toBe("Legacy sequential ticket updated");
 }, 20_000);
 
 async function createStore(opts: { readonly projectRoot: string }) {

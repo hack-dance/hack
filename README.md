@@ -143,7 +143,7 @@ hack x tickets list
 hack x tickets tui
 
 # Update status
-hack x tickets status T-00001 in_progress
+hack x tickets status T-AB12CD34EF in_progress
 
 # Sync to remote
 hack x tickets sync

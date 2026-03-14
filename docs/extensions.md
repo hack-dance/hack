@@ -291,7 +291,7 @@ hack x linear project-bind --profile work --project-id "<linear-project-id>"
 
 # one-off syncs (manual by default)
 hack x linear sync-issue --from linear --issue ENG-123
-hack x linear sync-issue --from hack --ticket T-00001
+hack x linear sync-issue --from hack --ticket T-AB12CD34EF
 
 # bulk sync by project (still manual)
 hack x linear sync-project --from linear
@@ -504,6 +504,8 @@ Notes:
 
 A lightweight, git-backed ticket log stored in `.hack/tickets/` and syncable via a dedicated git ref (`refs/hack/tickets` hidden by default).
 
+New tickets use random `T-XXXXXXXXXX` ids. Existing legacy sequential ids such as `T-00001` remain valid for lookup and updates.
+
 Guide: `docs/guides/tickets.md`
 
 #### setup
@@ -512,11 +514,11 @@ Usage: `hack x tickets setup [--global] [--agents|--claude|--all] [--check|--rem
 
 #### create
 
-Usage: `hack x tickets create --title "..." [--body "..."] [--body-file <path>] [--body-stdin] [--depends-on "T-00001"] [--blocks "T-00002"] [--owner "hack|linear|..."] [--source "hack|linear|..."] [--tag "foo"] [--external-system "linear"] [--external-id "<id>"] [--external-key "ENG-123"] [--external-url "<url>"] [--external-project-id "<id>"] [--external-project-name "..."] [--external-team-id "<id>"] [--actor "..."] [--json]`
+Usage: `hack x tickets create --title "..." [--body "..."] [--body-file <path>] [--body-stdin] [--depends-on "T-AB12CD34EF"] [--blocks "T-ZX98NM12QR"] [--owner "hack|linear|..."] [--source "hack|linear|..."] [--tag "foo"] [--external-system "linear"] [--external-id "<id>"] [--external-key "ENG-123"] [--external-url "<url>"] [--external-project-id "<id>"] [--external-project-name "..."] [--external-team-id "<id>"] [--actor "..."] [--json]`
 
 #### update
 
-Usage: `hack x tickets update <ticket-id> [--title "..."] [--body "..."] [--body-file <path>] [--body-stdin] [--depends-on "T-00001"] [--blocks "T-00002"] [--clear-depends-on] [--clear-blocks] [--owner "..."] [--source "..."] [--tag "foo"] [--clear-tags] [--external-system "linear"] [--external-id "<id>"] [--external-key "ENG-123"] [--external-url "<url>"] [--external-project-id "<id>"] [--external-project-name "..."] [--external-team-id "<id>"] [--actor "..."] [--json]`
+Usage: `hack x tickets update <ticket-id> [--title "..."] [--body "..."] [--body-file <path>] [--body-stdin] [--depends-on "T-AB12CD34EF"] [--blocks "T-ZX98NM12QR"] [--clear-depends-on] [--clear-blocks] [--owner "..."] [--source "..."] [--tag "foo"] [--clear-tags] [--external-system "linear"] [--external-id "<id>"] [--external-key "ENG-123"] [--external-url "<url>"] [--external-project-id "<id>"] [--external-project-name "..."] [--external-team-id "<id>"] [--actor "..."] [--json]`
 
 #### list
 

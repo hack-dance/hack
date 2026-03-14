@@ -61,12 +61,12 @@ Usage: `hack global <subcommand>`
 Subcommands:
 
 | Subcommand   | Summary                                                      |
-| ------------ | ------------------------------------------------------------ | ------- | ---- | ------ |
+| ------------ | ------------------------------------------------------------ |
 | `install`    | Bootstrap `~/.hack` and start Caddy + Grafana/Loki/Alloy     |
 | `up`         | Start global infra containers                                |
 | `down`       | Stop global infra containers                                 |
 | `status`     | Show status for global infra (containers + networks)         |
-| `logs`       | Tail global infra logs (caddy                                | grafana | loki | alloy) |
+| `logs`       | Tail global infra logs (`caddy`, `grafana`, `loki`, `alloy`) |
 | `ca`         | Export Caddy Local CA cert (print path or PEM)               |
 | `cert`       | Generate local TLS certs via mkcert (for non-Caddy services) |
 | `trust`      | Trust Caddy Local CA (macOS) so https://\*.hack is trusted   |
@@ -199,13 +199,13 @@ Usage: `hack up [options]`
 Options:
 
 | Flag | Type | Default | Description |
-| --- | --- | --- | --- | --- | --- |
+| --- | --- | --- | --- |
 | `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
 | `--project <name>` | string | - | Target a registered project by name |
 | `--branch <name>` | string | - | Run against a branch-specific instance |
 | `-d`, `--detach` | boolean | false | Run in background (docker compose up -d) |
 | `--profile <name[,name...]>` | string | - | Enable one or more compose profiles |
-| `--target <auto | local | remote>` | string | `auto` | Execution routing target (`auto` follows project execution mode and node affinity) |
+| `--target <auto \| local \| remote>` | string | `auto` | Execution routing target (`auto` follows project execution mode and node affinity) |
 
 ### hack down
 
@@ -214,12 +214,12 @@ Usage: `hack down [options]`
 Options:
 
 | Flag | Type | Default | Description |
-| --- | --- | --- | --- | --- | --- |
+| --- | --- | --- | --- |
 | `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
 | `--project <name>` | string | - | Target a registered project by name |
 | `--branch <name>` | string | - | Run against a branch-specific instance |
 | `--profile <name[,name...]>` | string | - | Enable one or more compose profiles |
-| `--target <auto | local | remote>` | string | `auto` | Execution routing target (`auto` follows project execution mode and node affinity) |
+| `--target <auto \| local \| remote>` | string | `auto` | Execution routing target (`auto` follows project execution mode and node affinity) |
 
 ### hack restart
 
@@ -228,12 +228,12 @@ Usage: `hack restart [options]`
 Options:
 
 | Flag | Type | Default | Description |
-| --- | --- | --- | --- | --- | --- |
+| --- | --- | --- | --- |
 | `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
 | `--project <name>` | string | - | Target a registered project by name |
 | `--branch <name>` | string | - | Run against a branch-specific instance |
 | `--profile <name[,name...]>` | string | - | Enable one or more compose profiles |
-| `--target <auto | local | remote>` | string | `auto` | Execution routing target (`auto` follows project execution mode and node affinity) |
+| `--target <auto \| local \| remote>` | string | `auto` | Execution routing target (`auto` follows project execution mode and node affinity) |
 
 ### hack ps
 
@@ -550,8 +550,8 @@ Usage: `hack env backend use <keychain|encrypted_file|cloud> [options]`
 Options:
 
 | Flag | Type | Default | Description |
-| --- | --- | --- | --- | --- | --- | --- |
-| `--provider <aws | gcp | azure | vault>` | string | - | Cloud provider when backend is `cloud` |
+| --- | --- | --- | --- |
+| `--provider <aws \| gcp \| azure \| vault>` | string | - | Cloud provider when backend is `cloud` |
 | `--store-path <path>` | string | - | Encrypted file path when backend is `encrypted_file` |
 | `--secret-project <id>` | string | - | Optional cloud account/project identifier |
 | `--secret-prefix <prefix>` | string | - | Optional cloud secret name prefix |
@@ -923,15 +923,15 @@ Usage: `hack dispatch run --project <name|id> [options] -- <command...>`
 Options:
 
 | Flag | Type | Default | Description |
-| --- | --- | --- | --- | --- | --- | --- |
-| `--project <name | id>` | string | - | Project name or id |
-| `--node <id | default | auto>` | string | auto | Target node id, or use default/auto |
+| --- | --- | --- | --- |
+| `--project <name \| id>` | string | - | Project name or id |
+| `--node <id \| default \| auto>` | string | auto | Target node id, or use default/auto |
 | `--provider <provider>` | string | - | Provider route override used when resolving profile/bootstrap intent |
 | `--profile <profile-id>` | string | - | Provider profile route override |
 | `--bootstrap-if-needed` | boolean | false | Allow guarded provider bootstrap handoff when no reachable node is found |
 | `--branch <branch>` | string | current | Target branch on selected node |
 | `--ticket <ticket-id>` | string | - | Ticket id to associate with run metadata |
-| `--runner <generic | codex | claude | cursor>` | string | `generic` | Runner identity for policy and audit |
+| `--runner <generic \| codex \| claude \| cursor>` | string | `generic` | Runner identity for policy and audit |
 | `--approve` | boolean | false | Approve high/critical risk commands non-interactively |
 | `--pr` | boolean | false | Push branch + create/update GitHub PR on successful run |
 | `--pr-base <branch>` | string | `main` | Base branch used with `--pr` |
@@ -1181,9 +1181,9 @@ Usage: `hack agent init [options]`
 Options:
 
 | Flag                    | Type   | Default | Description                                    |
-| ----------------------- | ------ | ------- | ---------------------------------------------- | ------ | --- | ---------------------------------------------- |
+| ----------------------- | ------ | ------- | ---------------------------------------------- |
 | `-p`, `--path <dir>`    | string | -       | Run against a repo path (overrides cwd search) |
-| `-c`, `--client <cursor | claude | codex   | print>`                                        | string | -   | Open init prompt in an agent client (or print) |
+| `-c`, `--client <cursor \| claude \| codex \| print>` | string | - | Open init prompt in an agent client (or print) |
 
 ### hack mcp
 
@@ -1203,9 +1203,9 @@ Usage: `hack mcp install [options]`
 
 Options:
 
-| Flag                 | Type      | Default | Description                                    |
-| -------------------- | --------- | ------- | ---------------------------------------------- | ----------------------------------------- |
-| `--scope <user       | project>` | string  | `user`                                         | Write MCP config to user or project scope |
+| Flag                 | Type   | Default | Description                                    |
+| -------------------- | ------ | ------- | ---------------------------------------------- |
+| `--scope <user \| project>` | string | `user` | Write MCP config to user or project scope |
 | `-p`, `--path <dir>` | string    | -       | Run against a repo path (overrides cwd search) |
 | `--all`              | boolean   | false   | Target all supported clients                   |
 | `--cursor`           | boolean   | false   | Target Cursor MCP config                       |
@@ -1226,9 +1226,9 @@ Usage: `hack mcp print [options]`
 
 Options:
 
-| Flag                 | Type      | Default | Description                                    |
-| -------------------- | --------- | ------- | ---------------------------------------------- | ------------------------------------------ |
-| `--scope <user       | project>` | string  | `user`                                         | Print MCP config for user or project scope |
+| Flag                 | Type   | Default | Description                                    |
+| -------------------- | ------ | ------- | ---------------------------------------------- |
+| `--scope <user \| project>` | string | `user` | Print MCP config for user or project scope |
 | `-p`, `--path <dir>` | string    | -       | Run against a repo path (overrides cwd search) |
 | `--all`              | boolean   | false   | Target all supported clients                   |
 | `--cursor`           | boolean   | false   | Target Cursor MCP config                       |
@@ -1352,10 +1352,10 @@ Usage: `hack log-pipe [options]`
 
 Options:
 
-| Flag              | Type           | Default | Description |
-| ----------------- | -------------- | ------- | ----------- | ------------------------------- | -------------------------------------- |
-| `--format <auto   | docker-compose | plain>` | string      | `auto`                          | How to parse incoming lines from stdin |
-| `--stream <stdout | stderr>`       | string  | `stdout`    | Treat stdin as stdout or stderr |
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--format <auto \| docker-compose \| plain>` | string | `auto` | How to parse incoming lines from stdin |
+| `--stream <stdout \| stderr>` | string | `stdout` | Treat stdin as stdout or stderr |
 
 ### hack help
 
@@ -1418,7 +1418,7 @@ Usage: `hack the planet [options]`
 
 Options:
 
-| Flag            | Type    | Default | Description       |
-| --------------- | ------- | ------- | ----------------- | ------ | ------- | ----------------- |
-| `--variant <cut | mash    | cycle   | random>`          | string | `cycle` | Animation variant |
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--variant <cut \| mash \| cycle \| random>` | string | `cycle` | Animation variant |
 | `--loop`        | boolean | true    | Loop until Ctrl+C |

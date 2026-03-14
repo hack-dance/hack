@@ -2590,7 +2590,7 @@ type ProjectArtifactArgsBase = {
   json: boolean;
 };
 
-type ProjectDocumentsVerb = "list" | "pull" | "plan" | "apply" | "archive";
+type ProjectDocumentsVerb = "list" | "pull" | "plan" | "apply";
 type ProjectMilestonesVerb = ProjectDocumentsVerb;
 type ProjectStatusUpdatesVerb = "list" | "pull" | "plan" | "publish";
 
@@ -2907,14 +2907,6 @@ async function runProjectArtifactCommand(input: {
   | { readonly ok: false; readonly error: string }
 > {
   try {
-    if (input.verb === "archive") {
-      return {
-        ok: false,
-        error:
-          "Archive is not implemented yet for managed Linear project artifacts.",
-      };
-    }
-
     if (input.verb === "list") {
       const artifacts = await listRemoteProjectArtifacts({
         family: input.family,
@@ -9359,7 +9351,7 @@ function parseProjectDocumentsArgs(input: {
   | { readonly ok: false; readonly error: string } {
   return parseProjectArtifactArgs({
     args: input.args,
-    allowedVerbs: ["list", "pull", "plan", "apply", "archive"],
+    allowedVerbs: ["list", "pull", "plan", "apply"],
   }) as
     | { readonly ok: true; readonly value: ProjectDocumentsArgs }
     | { readonly ok: false; readonly error: string };
@@ -9372,7 +9364,7 @@ function parseProjectMilestonesArgs(input: {
   | { readonly ok: false; readonly error: string } {
   return parseProjectArtifactArgs({
     args: input.args,
-    allowedVerbs: ["list", "pull", "plan", "apply", "archive"],
+    allowedVerbs: ["list", "pull", "plan", "apply"],
   }) as
     | { readonly ok: true; readonly value: ProjectMilestonesArgs }
     | { readonly ok: false; readonly error: string };

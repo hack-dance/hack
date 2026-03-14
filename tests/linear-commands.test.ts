@@ -1560,9 +1560,9 @@ test("parseProjectStatusUpdatesArgs parses publish verbs", () => {
   });
 });
 
-test("parseProjectDocumentsArgs rejects unsupported verbs", () => {
+test("parseProjectDocumentsArgs rejects archive until destructive flows are implemented", () => {
   const parsed = __testOnly.parseProjectDocumentsArgs({
-    args: ["publish"],
+    args: ["archive"],
   });
 
   expect(parsed.ok).toBe(false);
@@ -1570,7 +1570,20 @@ test("parseProjectDocumentsArgs rejects unsupported verbs", () => {
     return;
   }
 
-  expect(parsed.error).toContain("Expected list|pull|plan|apply|archive");
+  expect(parsed.error).toContain("Expected list|pull|plan|apply");
+});
+
+test("parseProjectMilestonesArgs rejects archive until destructive flows are implemented", () => {
+  const parsed = __testOnly.parseProjectMilestonesArgs({
+    args: ["archive"],
+  });
+
+  expect(parsed.ok).toBe(false);
+  if (parsed.ok) {
+    return;
+  }
+
+  expect(parsed.error).toContain("Expected list|pull|plan|apply");
 });
 
 test("LINEAR_COMMANDS registers project artifact command families", () => {

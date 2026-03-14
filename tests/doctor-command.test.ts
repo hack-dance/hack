@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import {
   buildDoctorRecoveryGuidance,
   buildRecoveryNextSteps,
+  buildRecoveryWorkflowLines,
 } from "../src/commands/recovery-guidance.ts";
 
 test("doctor guidance distinguishes restartable proxy drift from deeper repair", () => {
@@ -123,5 +124,34 @@ test("recovery next steps quote repo paths for copy-paste safety", () => {
     "Configuration repair: `hack doctor --fix --path '/tmp/work repo'`.",
     "Verify with `hack doctor --path '/tmp/work repo'`.",
     "If it still fails, run `hack crash-capture --path '/tmp/work repo'` again after the next repro.",
+  ]);
+});
+
+test("recovery workflow lines scope repo-specific commands for doctor output", () => {
+  const lines = buildRecoveryWorkflowLines({
+    guidance: {
+      temporaryBreakage: ["hack restart"],
+      configurationRepair: ["hack doctor --fix"],
+      followUp: ["gateway tokens: No active tokens"],
+      verify: ["hack doctor"],
+      capture: ["hack crash-capture --path <repo>"],
+    },
+    projectRoot: "/tmp/work repo",
+    includeClassifyStep: true,
+  });
+
+  expect(lines).toEqual([
+    "1. Classify:",
+    "   - `hack doctor --path '/tmp/work repo'`",
+    "2. Temporary breakage:",
+    "   - `hack restart --path '/tmp/work repo'`",
+    "3. Configuration repair:",
+    "   - `hack doctor --fix --path '/tmp/work repo'`",
+    "4. Manual follow-up:",
+    "   - gateway tokens: No active tokens",
+    "5. Verify:",
+    "   - `hack doctor --path '/tmp/work repo'`",
+    "6. If it still fails:",
+    "   - `hack crash-capture --path '/tmp/work repo'`",
   ]);
 });

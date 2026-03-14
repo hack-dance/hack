@@ -70,7 +70,10 @@ import {
   resolvePreferredHostDnsTarget,
   resolverHasNameserver,
 } from "./doctor-utils.ts";
-import { buildDoctorRecoveryGuidance } from "./recovery-guidance.ts";
+import {
+  buildDoctorRecoveryGuidance,
+  buildRecoveryWorkflowLines,
+} from "./recovery-guidance.ts";
 
 type CheckStatus = "ok" | "warn" | "error";
 
@@ -2189,51 +2192,13 @@ async function renderRecoveryGuidance(
     return;
   }
 
-  const lines: string[] = [];
-
-  if (guidance.temporaryBreakage.length > 0) {
-    lines.push("Temporary breakage:");
-    for (const command of guidance.temporaryBreakage) {
-      lines.push(`- ${command}`);
-    }
-  }
-
-  if (guidance.configurationRepair.length > 0) {
-    if (lines.length > 0) {
-      lines.push("");
-    }
-    lines.push("Configuration repair:");
-    for (const command of guidance.configurationRepair) {
-      lines.push(`- ${command}`);
-    }
-  }
-
-  if (guidance.followUp.length > 0) {
-    if (lines.length > 0) {
-      lines.push("");
-    }
-    lines.push("Manual follow-up:");
-    for (const item of guidance.followUp) {
-      lines.push(`- ${item}`);
-    }
-  }
-
-  lines.push("");
-  lines.push("Verify:");
-  for (const command of guidance.verify) {
-    lines.push(`- ${command}`);
-  }
-
-  lines.push("");
-  lines.push("If it still fails:");
-  for (const command of guidance.capture) {
-    lines.push(`- ${command}`);
-  }
-
   await display.panel({
     title: "Recovery workflow",
     tone: "info",
-    lines,
+    lines: buildRecoveryWorkflowLines({
+      guidance,
+      projectRoot: null,
+    }),
   });
 }
 

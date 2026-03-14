@@ -147,6 +147,67 @@ export function buildRecoveryNextSteps(input: {
   return nextSteps;
 }
 
+export function buildRecoveryWorkflowLines(input: {
+  readonly guidance: DoctorRecoveryGuidance;
+  readonly projectRoot: string | null;
+  readonly includeClassifyStep?: boolean;
+}): readonly string[] {
+  const scoped = scopeDoctorRecoveryGuidance({
+    guidance: input.guidance,
+    projectRoot: input.projectRoot,
+  });
+  const lines: string[] = [];
+  let stepNumber = 1;
+
+  if (input.includeClassifyStep ?? false) {
+    lines.push(`${stepNumber}. Classify:`);
+    lines.push(
+      `   - \`${scopeRecoveryCommand({
+        command: "hack doctor",
+        projectRoot: input.projectRoot,
+      })}\``
+    );
+    stepNumber += 1;
+  }
+
+  if (scoped.temporaryBreakage.length > 0) {
+    lines.push(`${stepNumber}. Temporary breakage:`);
+    for (const command of scoped.temporaryBreakage) {
+      lines.push(`   - \`${command}\``);
+    }
+    stepNumber += 1;
+  }
+
+  if (scoped.configurationRepair.length > 0) {
+    lines.push(`${stepNumber}. Configuration repair:`);
+    for (const command of scoped.configurationRepair) {
+      lines.push(`   - \`${command}\``);
+    }
+    stepNumber += 1;
+  }
+
+  if (scoped.followUp.length > 0) {
+    lines.push(`${stepNumber}. Manual follow-up:`);
+    for (const item of scoped.followUp) {
+      lines.push(`   - ${item}`);
+    }
+    stepNumber += 1;
+  }
+
+  lines.push(`${stepNumber}. Verify:`);
+  for (const command of scoped.verify) {
+    lines.push(`   - \`${command}\``);
+  }
+  stepNumber += 1;
+
+  lines.push(`${stepNumber}. If it still fails:`);
+  for (const command of scoped.capture) {
+    lines.push(`   - \`${command}\``);
+  }
+
+  return lines;
+}
+
 export function scopeRecoveryCommand(input: {
   readonly command: string;
   readonly projectRoot: string | null;

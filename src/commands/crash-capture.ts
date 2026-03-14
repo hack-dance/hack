@@ -14,10 +14,9 @@ import { display } from "../ui/display.ts";
 import {
   buildDoctorRecoveryGuidance,
   buildRecoveryNextSteps,
+  buildRecoveryWorkflowLines,
   type DoctorRecoveryGuidance,
   type RecoveryCheckResult,
-  scopeDoctorRecoveryGuidance,
-  scopeRecoveryCommand,
 } from "./recovery-guidance.ts";
 
 const DEFAULT_LOG_WINDOW = "45m";
@@ -931,64 +930,10 @@ export function renderCrashCaptureReadme(input: {
     ...failedCommands,
     "",
     "Suggested recovery flow:",
-    ...renderRecoveryWorkflow({
+    ...buildRecoveryWorkflowLines({
       guidance: input.recovery,
       projectRoot: input.projectRoot,
+      includeClassifyStep: true,
     }),
   ].join("\n");
-}
-
-function renderRecoveryWorkflow(input: {
-  readonly guidance: DoctorRecoveryGuidance;
-  readonly projectRoot: string | null;
-}): readonly string[] {
-  const scoped = scopeDoctorRecoveryGuidance({
-    guidance: input.guidance,
-    projectRoot: input.projectRoot,
-  });
-  const lines = [
-    "1. Classify:",
-    `   - \`${scopeRecoveryCommand({
-      command: "hack doctor",
-      projectRoot: input.projectRoot,
-    })}\``,
-  ];
-  let stepNumber = 2;
-
-  if (scoped.temporaryBreakage.length > 0) {
-    lines.push(`${stepNumber}. Temporary breakage:`);
-    for (const command of scoped.temporaryBreakage) {
-      lines.push(`   - \`${command}\``);
-    }
-    stepNumber += 1;
-  }
-
-  if (scoped.configurationRepair.length > 0) {
-    lines.push(`${stepNumber}. Configuration repair:`);
-    for (const command of scoped.configurationRepair) {
-      lines.push(`   - \`${command}\``);
-    }
-    stepNumber += 1;
-  }
-
-  if (scoped.followUp.length > 0) {
-    lines.push(`${stepNumber}. Manual follow-up:`);
-    for (const item of scoped.followUp) {
-      lines.push(`   - ${item}`);
-    }
-    stepNumber += 1;
-  }
-
-  lines.push(`${stepNumber}. Verify:`);
-  for (const command of scoped.verify) {
-    lines.push(`   - \`${command}\``);
-  }
-  stepNumber += 1;
-
-  lines.push(`${stepNumber}. If it still fails:`);
-  for (const command of scoped.capture) {
-    lines.push(`   - \`${command}\``);
-  }
-
-  return lines;
 }

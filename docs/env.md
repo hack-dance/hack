@@ -100,6 +100,7 @@ Managed artifact rules:
 
 - `entries[].value.kind` distinguishes logical plaintext from logical secrets
 - `entries[].value.text` is the canonical string value before outer-envelope encryption
+- duplicate keys and unsorted entry lists are parser and writer invariants; the JSON Schema documents the contract but cannot enforce those constraints on its own
 - `services` belongs in the managed artifact because portability must preserve service intent outside the originating machine
 - `metadata` captures human and CLI/Desktop provenance, not machine-local backend details
 - the artifact must not store local absolute paths, keychain service names, backend provider configuration, or runtime resolution history such as `resolvedFrom`
@@ -113,7 +114,7 @@ Local compatibility rules:
 
 Planned CLI behavior when a managed artifact is active:
 
-1. Reads validate artifact keys against `.hack/hack.env.json` when present.
+1. Reads validate artifact keys against the normalized `.hack/hack.env.json` contract when present. Current contract parsing is looser than the published schema, so artifact-aware commands should surface drift instead of assuming strict schema parity.
 2. Reads report artifact intent, local materialization state, and drift between them.
 3. `hack env set` mutates the canonical artifact first, then materializes the entry to `.hack/.env` or the configured secret backend based on `value.kind`.
 4. If an entry changes kind, Hack removes stale local state from the old compatibility target before writing the new one.

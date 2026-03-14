@@ -148,7 +148,7 @@ Purpose:
 - `metadata.updatedAt`: RFC 3339 timestamp for the last artifact mutation
 - `metadata.updatedBy`: actor class such as `cli`, `desktop`, or `api`
 - `metadata.source`: producing surface such as `hack-cli` or `hack-desktop`
-- `entries`: stable, key-sorted list of managed env entries
+- `entries`: stable, key-sorted list of managed env entries. Duplicate keys and unsorted lists are parser and writer errors even though JSON Schema cannot enforce them directly.
 
 ### Entry fields
 
@@ -222,9 +222,11 @@ The contract and artifact intentionally overlap on a few fields. The rules shoul
 
 - contract defines the expected shape of the project env surface
 - artifact carries the managed snapshot used for portability
-- when both exist, key names must be validated against the contract
+- when both exist, key names must be validated against the normalized contract
 - if `required`, `services`, or `description` disagree, the artifact wins for apply/export behavior and the CLI should surface drift
 - unknown artifact keys should warn by default and require explicit confirmation before apply
+
+Today the live contract parser is looser than the published contract schema. Artifact-aware commands should therefore normalize and compare contract entries explicitly instead of assuming the current parser already enforces uppercase key, source, or service-shape invariants.
 
 This keeps the artifact self-contained while still treating the committed contract as the project declaration surface.
 

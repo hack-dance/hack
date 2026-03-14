@@ -694,7 +694,7 @@ export function renderProjectManagedEnvSchemaJson(): string {
       entries: {
         type: "array",
         description:
-          "Managed env entries sorted by key. Duplicate keys must be rejected by artifact parsers and writers.",
+          "Managed env entries sorted by key. Duplicate keys and unsorted entries must be rejected by dedicated artifact parsers and writers.",
         items: {
           type: "object",
           additionalProperties: false,

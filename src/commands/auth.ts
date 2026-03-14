@@ -41,7 +41,7 @@ const optRedirect = defineOption({
 const loginSpec = defineCommand({
   name: "login",
   summary: "Open a browser and sign in to Hack auth",
-  group: "Global",
+  group: "Integrations",
   options: [optJson, optNoOpen, optBrokerUrl, optRedirect] as const,
   positionals: [] as const,
   subcommands: [] as const,
@@ -50,7 +50,7 @@ const loginSpec = defineCommand({
 const logoutSpec = defineCommand({
   name: "logout",
   summary: "Clear the locally stored Hack auth session",
-  group: "Global",
+  group: "Integrations",
   options: [optJson] as const,
   positionals: [] as const,
   subcommands: [] as const,
@@ -59,7 +59,7 @@ const logoutSpec = defineCommand({
 const statusSpec = defineCommand({
   name: "status",
   summary: "Show whether Hack auth is configured locally",
-  group: "Global",
+  group: "Integrations",
   options: [optJson, optBrokerUrl] as const,
   positionals: [] as const,
   subcommands: [] as const,
@@ -68,7 +68,7 @@ const statusSpec = defineCommand({
 const whoamiSpec = defineCommand({
   name: "whoami",
   summary: "Resolve the current Hack auth identity via the broker",
-  group: "Global",
+  group: "Integrations",
   options: [optJson, optBrokerUrl] as const,
   positionals: [] as const,
   subcommands: [] as const,
@@ -76,9 +76,9 @@ const whoamiSpec = defineCommand({
 
 export const authCommand = defineCommand({
   name: "auth",
-  summary: "Manage Hack auth sessions",
-  group: "Global",
-  expandInRootHelp: true,
+  summary: "Manage Hack account sign-in",
+  group: "Integrations",
+  expandInRootHelp: false,
   options: [] as const,
   positionals: [] as const,
   subcommands: [

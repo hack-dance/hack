@@ -1,5 +1,6 @@
-# Expose the gateway with Cloudflare
+# Expose the gateway with Cloudflare (Beta)
 
+> Beta: Cloudflare gateway exposure is part of the remote control plane beta.
 > ⚠️ Experimental: this guide has not been validated end-to-end yet. Use with caution and report issues.
 
 Cloudflare Tunnel is ideal for HTTP/WS gateway access from a phone or browser when you are off-network.

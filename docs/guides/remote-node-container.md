@@ -1,6 +1,8 @@
-# Remote Node Runtime Container
+# Remote Node Runtime Container (Beta)
 
 Use the published node-runtime container to spin up a remote node with minimal host setup.
+
+> Beta: multi-node execution is still being validated and is not part of the core local-dev path.
 
 Recommended public image:
 - `hackdance/hack:latest`

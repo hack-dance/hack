@@ -1,8 +1,10 @@
-# Run laptop-to-laptop node pairing e2e
+# Run laptop-to-laptop node pairing e2e (Beta)
 
 This guide is the full validation run for two Macs:
 1. Controller Mac (host mode)
 2. Remote MacBook node
+
+> Beta: laptop-to-laptop multi-node flows are still being validated and are not part of the core local-dev path.
 
 It validates pairing, remote routing, workspace mapping, mutagen sync, and dispatch execution.
 

@@ -1,6 +1,8 @@
-# Expose the gateway with Tailscale
+# Expose the gateway with Tailscale (Beta)
 
 Use this guide when you want private tailnet-only access to `hack` gateway endpoints.
+
+> Beta: Tailscale gateway exposure is part of the remote control plane beta.
 
 Tailscale is recommended for:
 1. SSH from mobile/desktop clients.

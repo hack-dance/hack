@@ -1,6 +1,8 @@
-# Remote Node Quickstart
+# Remote Node Quickstart (Beta)
 
 Use this guide to connect one remote machine as a `hack` execution node and run a project on it.
+
+> Beta: multi-node execution is still being validated and is not part of the core local-dev path.
 
 ## What you need
 

@@ -1,6 +1,8 @@
-# Run remote supervisor jobs
+# Run remote supervisor jobs (Beta)
 
 Use the gateway API to run commands and stream logs remotely.
+
+> Beta: remote supervisor workflows are part of the remote control plane beta.
 
 ## Prereqs
 

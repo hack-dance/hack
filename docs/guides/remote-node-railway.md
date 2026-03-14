@@ -1,6 +1,8 @@
-# Railway Node Bootstrap Guide
+# Railway Node Bootstrap Guide (Beta)
 
 Use this guide to register a Railway-hosted runtime as a `hack` remote node.
+
+> Beta: provider-backed remote nodes are still being validated and are not part of the core local-dev path.
 
 If this is your first remote node, start with [Remote node quickstart](remote-node-quickstart.md) for core concepts.
 

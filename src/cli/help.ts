@@ -225,6 +225,11 @@ function renderCommandHelp(
   lines.push(`  ${invocation} [options]`);
   lines.push("");
 
+  if (command.group === "Beta") {
+    lines.push("Status: Beta workflow");
+    lines.push("");
+  }
+
   if (command.description) {
     lines.push(command.description);
     lines.push("");
@@ -274,6 +279,11 @@ function renderCommandHelpMarkdown(
   lines.push(`${invocation} [options]`);
   lines.push("```");
   lines.push("");
+
+  if (command.group === "Beta") {
+    lines.push("> Status: Beta workflow.");
+    lines.push("");
+  }
 
   if (command.description) {
     lines.push(mdEscape(command.description));

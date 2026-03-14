@@ -58,3 +58,12 @@ test("markdown help preserves the core offer and command grouping", () => {
   expect(help).toContain("`hack projects`");
   expect(help).toContain("`hack projects prune`");
 });
+
+test("beta subcommand help stays visibly labeled beta", () => {
+  const help = renderHelpForPath(CLI_SPEC, ["remote", "setup"]);
+  const markdown = renderHelpMarkdownForPath(CLI_SPEC, ["remote", "setup"]);
+
+  expect(help).toContain("hack remote setup");
+  expect(help).toContain("Status: Beta workflow");
+  expect(markdown).toContain("> Status: Beta workflow.");
+});

@@ -278,6 +278,7 @@ When available, providers should also persist the specific remote field scope th
 
 This design implies follow-up changes in the normalized sync core:
 
+- The execution plan for those changes lives in `docs/plans/2026-03-14-tickets-normalized-sync-idempotency-plan.md`.
 - external sync helpers must accept caller-provided stable ids instead of always generating random UUIDs
 - checkpoint and conflict events should persist `operationKey` and baseline metadata
 - conflict dedupe should move from ad hoc field/value matching to deterministic conflict keys

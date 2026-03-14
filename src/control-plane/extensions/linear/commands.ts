@@ -6696,16 +6696,15 @@ function resolveBoundProjectArtifactTarget(input: {
       binding: input.binding,
       projectId,
     });
-    if (!target) {
-      return { ok: true, target: null };
-    }
     return {
       ok: true,
-      target: {
-        ...target,
-        ...(projectName ? { projectName } : {}),
-        ...(teamId ? { teamId } : {}),
-      },
+      target: target
+        ? applyExplicitProjectArtifactOverrides({
+            target,
+            projectName,
+            teamId,
+          })
+        : null,
     };
   }
 
@@ -6716,26 +6715,16 @@ function resolveBoundProjectArtifactTarget(input: {
   if (!selector) {
     return {
       ok: true,
-      target: input.binding.projectId
-        ? {
-            projectId: input.binding.projectId,
-            ...(input.binding.projectName
-              ? { projectName: input.binding.projectName }
-              : {}),
-            ...(input.binding.teamId ? { teamId: input.binding.teamId } : {}),
-            ...(input.binding.profileId
-              ? { profileId: input.binding.profileId }
-              : {}),
-          }
-        : null,
+      target: buildDefaultProjectBindingTarget({
+        binding: input.binding,
+      }),
     };
   }
 
-  const candidates = resolveProjectPullTargets({
+  const candidates = findBoundProjectArtifactTargetsBySelector({
     binding: input.binding,
-  }).filter((target) =>
-    projectArtifactTargetMatchesSelector({ target, selector })
-  );
+    selector,
+  });
   if (candidates.length === 0) {
     return { ok: true, target: null };
   }
@@ -6753,6 +6742,51 @@ function resolveBoundProjectArtifactTarget(input: {
     ok: true,
     target: candidates[0] ?? null,
   };
+}
+
+function applyExplicitProjectArtifactOverrides(input: {
+  readonly target: LinearProjectBindingTarget;
+  readonly projectName?: string;
+  readonly teamId?: string;
+}): LinearProjectBindingTarget {
+  return {
+    ...input.target,
+    ...(input.projectName ? { projectName: input.projectName } : {}),
+    ...(input.teamId ? { teamId: input.teamId } : {}),
+  };
+}
+
+function buildDefaultProjectBindingTarget(input: {
+  readonly binding: ResolvedLinearProjectBinding;
+}): LinearProjectBindingTarget | null {
+  if (!input.binding.projectId) {
+    return null;
+  }
+  return {
+    projectId: input.binding.projectId,
+    ...(input.binding.projectName
+      ? { projectName: input.binding.projectName }
+      : {}),
+    ...(input.binding.teamId ? { teamId: input.binding.teamId } : {}),
+    ...(input.binding.profileId ? { profileId: input.binding.profileId } : {}),
+  };
+}
+
+function findBoundProjectArtifactTargetsBySelector(input: {
+  readonly binding: ResolvedLinearProjectBinding;
+  readonly selector: {
+    readonly projectName?: string;
+    readonly teamId?: string;
+  };
+}): readonly LinearProjectBindingTarget[] {
+  return resolveProjectPullTargets({
+    binding: input.binding,
+  }).filter((target) =>
+    projectArtifactTargetMatchesSelector({
+      target,
+      selector: input.selector,
+    })
+  );
 }
 
 async function resolveProjectArtifactTarget(input: {

@@ -220,11 +220,3 @@ Expected: PASS
 git add docs/guides/tickets.md docs/plans/2026-03-14-hack-tickets-sqlite-journal-design.md docs/plans/2026-03-14-hack-tickets-sqlite-journal-plan.md tests/tickets-projection.test.ts tests/tickets-store.test.ts tests/tickets-extension.test.ts tests/tickets-git-channel.test.ts src/control-plane/extensions/tickets/projection.ts src/control-plane/extensions/tickets/store.ts src/control-plane/extensions/tickets/commands.ts
 git commit -m "feat(tickets): finish sqlite projection architecture"
 ```
-
-Plan complete and saved to `docs/plans/2026-03-14-hack-tickets-sqlite-journal-plan.md`. Two execution options:
-
-**1. Subagent-Driven (this session)** - I dispatch fresh subagent per task, review between tasks, fast iteration
-
-**2. Parallel Session (separate)** - Open new session with executing-plans, batch execution with checkpoints
-
-Which approach?

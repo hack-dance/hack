@@ -4,6 +4,11 @@
 
 Define a durable local storage architecture for Hack Tickets that keeps the git-backed JSONL journal as the canonical, portable source of truth while adding a deterministic SQLite projection for fast reads, sync queries, and repeated replay.
 
+## Inputs
+
+- Linear issue: `HACK-450`
+- Relevant spec: Tickets Normalization And Storage Spec
+
 ## Current Foundation
 
 - Ticket history is stored as append-only monthly JSONL segments in `.hack/tickets/events/events-YYYY-MM.jsonl`.

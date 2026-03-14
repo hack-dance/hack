@@ -6,6 +6,8 @@ This directory contains the public documentation for hack. Specs remain in `SPEC
 
 - [CLI reference](cli.md)
 - [Architecture](architecture.md)
+- [Agent-native runtime landscape](agent-native-runtime-landscape.md)
+- [Agent-native runtime provider capabilities](agent-native-runtime-provider-capabilities.md)
 - [Sessions](sessions.md) - mux session management (tmux or zellij) + API
 - [Env & secrets](env.md) - env contract + `.hack/.env` + OS keychain secrets
 - [Lifecycle](lifecycle.md) - project startup hooks + managed host processes
@@ -16,10 +18,12 @@ This directory contains the public documentation for hack. Specs remain in `SPEC
 - [Control-plane SDK](sdk.md)
 
 Monorepo note:
+
 - Root scripts orchestrate workspace tasks through Turbo.
 - Package-local commands remain available via `bun run --cwd <workspace> <script>`.
 
 Quick diagnostics:
+
 - `hack usage` (resource usage across running projects)
 - `hack usage --watch` (live resource trends)
 - `hack node routes status` (controller-side remote route bridge state)

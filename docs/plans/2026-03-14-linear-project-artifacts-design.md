@@ -188,14 +188,12 @@ Documents:
 - `pull`
 - `plan`
 - `apply`
-- `archive`
 
 Milestones:
 - `list`
 - `pull`
 - `plan`
 - `apply`
-- `archive`
 
 Status updates:
 - `list`
@@ -207,6 +205,7 @@ Reasoning:
 - `plan` is the non-mutating diff/preflight verb across all families.
 - `apply` is correct for upsertable artifacts.
 - `publish` is clearer than `apply` for append-only status updates.
+- destructive archive flows should ship later, after the base upsert/publish path proves stable
 
 ### Shared targeting flags
 All three families should accept the same routing flags:
@@ -224,7 +223,7 @@ Resolution order:
 
 ### UX rules
 1. No remote writes on plain `list` or `pull`.
-2. `plan` is required for safe review and should show create/update/archive counts before `apply` or `publish`.
+2. `plan` is required for safe review and should show create/update/noop/remote-only counts before `apply` or `publish`.
 3. `apply` and `publish` must be explicit; no autosync for planning artifacts in this slice.
 4. Missing project binding should fail with the same pattern as existing project-bound commands and suggest `hack linear project-bind`.
 5. `--json` output must be stable and structured so desktop/MCP clients can adopt the same surface later.
@@ -242,7 +241,7 @@ Resolution order:
 
 ### Plan
 - Compare local files and remote artifacts.
-- Categorize results as `create`, `update`, `archive`, `noop`, `conflict`.
+- Categorize results as `create`, `update`, `noop`, `remoteOnly`, `conflict`.
 - Exit non-zero only for hard resolution failures, not for pending work.
 
 ### Apply

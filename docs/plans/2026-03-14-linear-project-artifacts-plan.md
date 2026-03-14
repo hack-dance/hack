@@ -260,8 +260,8 @@ Expected: FAIL because the planner does not yet compute a complete action set.
 Implement a planner that returns:
 - `creates`
 - `updates`
-- `archives`
 - `noops`
+- `remoteOnly`
 - `conflicts`
 
 Render human output with existing `display.table` / `display.kv` helpers and structured JSON for machine use.

@@ -2147,6 +2147,185 @@ archived: false
   expect(await Bun.file(oldPath).exists()).toBe(false);
 });
 
+test("runProjectArtifactCommand pulls project milestones into repo state", async () => {
+  const projectDir = ensureTempDir();
+  const result = await __testOnly.runProjectArtifactCommand({
+    family: "milestones",
+    verb: "pull",
+    runtime: {
+      profileId: "work",
+      projectDir,
+      projectId: "proj_123",
+      linear: {
+        listProjectMilestones: async () => ({
+          ok: true as const,
+          data: [
+            {
+              id: "milestone_123",
+              title: "Private beta",
+              description: "Ship the beta cohort.\n",
+              status: "pending",
+              targetDate: "2026-04-01",
+              sortOrder: 7,
+              archived: false,
+              updatedAt: "2026-03-14T10:00:00.000Z",
+            },
+          ],
+        }),
+      },
+    },
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  expect(result.payload.changed).toBe(1);
+  expect(result.payload.writtenPaths).toEqual([
+    resolve(
+      projectDir,
+      ".hack/linear/projects/proj_123/milestones/private-beta.md"
+    ),
+  ]);
+
+  const file = await Bun.file(result.payload.writtenPaths[0] ?? "").text();
+  expect(file).toContain("kind: linear-project-milestone");
+  expect(file).toContain("linearId: milestone_123");
+  expect(file).toContain("targetDate: 2026-04-01");
+  expect(file).toContain("state: pending");
+});
+
+test("runProjectArtifactCommand applies milestone upserts and writes back linear ids", async () => {
+  const projectDir = ensureTempDir();
+  const milestonesDir = resolve(
+    projectDir,
+    ".hack/linear/projects/proj_123/milestones"
+  );
+  await mkdir(milestonesDir, { recursive: true });
+  await writeFile(
+    resolve(milestonesDir, "private-beta.md"),
+    `---
+kind: linear-project-milestone
+linearProjectId: proj_123
+title: Private beta
+slug: private-beta
+targetDate: 2026-04-01
+state: pending
+archived: false
+---
+Ship the beta cohort.
+`
+  );
+  await writeFile(
+    resolve(milestonesDir, "launch.md"),
+    `---
+kind: linear-project-milestone
+linearProjectId: proj_123
+title: Launch
+linearId: milestone_launch
+slug: launch
+targetDate: 2026-05-01
+state: planned
+archived: false
+---
+Prepare launch checklist.
+`
+  );
+
+  const createCalls: string[] = [];
+  const updateCalls: string[] = [];
+  const result = await __testOnly.runProjectArtifactCommand({
+    family: "milestones",
+    verb: "apply",
+    runtime: {
+      profileId: "work",
+      projectDir,
+      projectId: "proj_123",
+      linear: {
+        listProjectMilestones: async () => ({
+          ok: true as const,
+          data: [
+            {
+              id: "milestone_launch",
+              title: "Launch",
+              description: "Old launch notes.\n",
+              status: "planned",
+              targetDate: "2026-05-01",
+              archived: false,
+            },
+          ],
+        }),
+        createProjectMilestone: async ({ title, description, targetDate }) => {
+          createCalls.push(`${title}:${description ?? ""}:${targetDate ?? ""}`);
+          return {
+            ok: true as const,
+            data: {
+              id: "milestone_private_beta",
+              title,
+              description,
+              status: "pending",
+              targetDate,
+              archived: false,
+              updatedAt: "2026-03-15T09:00:00.000Z",
+            },
+          };
+        },
+        updateProjectMilestone: async ({
+          milestoneId,
+          title,
+          description,
+          status,
+        }) => {
+          updateCalls.push(
+            `${milestoneId}:${title ?? ""}:${description ?? ""}:${status ?? ""}`
+          );
+          return {
+            ok: true as const,
+            data: {
+              id: milestoneId,
+              title: title ?? "Launch",
+              description: description ?? "Prepare launch checklist.\n",
+              status: status ?? "planned",
+              targetDate: "2026-05-01",
+              archived: false,
+              updatedAt: "2026-03-15T10:00:00.000Z",
+            },
+          };
+        },
+      },
+    },
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  expect(createCalls).toEqual([
+    "Private beta:Ship the beta cohort.\n:2026-04-01",
+  ]);
+  expect(updateCalls).toEqual([
+    "milestone_launch:Launch:Prepare launch checklist.\n:planned",
+  ]);
+  expect(result.payload.summary.created).toBe(1);
+  expect(result.payload.summary.updated).toBe(1);
+
+  const createdText = await Bun.file(
+    resolve(milestonesDir, "private-beta.md")
+  ).text();
+  expect(createdText).toContain("linearId: milestone_private_beta");
+  expect(createdText).toContain("updatedAt: 2026-03-15T09:00:00.000Z");
+  expect(createdText).toContain("state: pending");
+
+  const updatedText = await Bun.file(
+    resolve(milestonesDir, "launch.md")
+  ).text();
+  expect(updatedText).toContain("linearId: milestone_launch");
+  expect(updatedText).toContain("updatedAt: 2026-03-15T10:00:00.000Z");
+  expect(updatedText).toContain("state: planned");
+});
+
 test("runProjectArtifactCommand publishes draft status updates and moves them to published", async () => {
   const projectDir = ensureTempDir();
   const draftsDir = resolve(

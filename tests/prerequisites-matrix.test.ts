@@ -3,7 +3,9 @@ import { expect, test } from "bun:test";
 import {
   COMMAND_PREREQUISITE_CONTRACTS,
   COMMANDS_THAT_INVOKE_PREREQUISITE_CHECKS,
+  COMMANDS_WITH_LOCAL_PREREQUISITE_HANDLING,
   getCommandPrerequisiteContracts,
+  getLocalPrerequisiteHandling,
   PREREQUISITE_CHECKS,
 } from "../src/cli/prerequisites.ts";
 
@@ -148,6 +150,26 @@ test("cleanup and local-config commands stay out of shared prerequisite intercep
   expect(
     getCommandPrerequisiteContracts({ command: "linear project-unlink" })
   ).toEqual([]);
+});
+
+test("major setup commands can be explicitly excluded from shared interception", () => {
+  expect(
+    COMMANDS_WITH_LOCAL_PREREQUISITE_HANDLING.map((entry) => entry.command)
+  ).toEqual([
+    "x github connect",
+    "linear setup",
+    "x github disconnect",
+    "linear disconnect",
+    "linear assignee-mappings",
+    "linear project-unlink",
+  ]);
+
+  expect(
+    getLocalPrerequisiteHandling({ command: "x github connect" })?.reason
+  ).toContain("primary repair/bootstrap path");
+  expect(
+    getLocalPrerequisiteHandling({ command: "linear setup" })?.reason
+  ).toContain("local project wiring command");
 });
 
 test("broker-backed linear commands guide through Hack auth", () => {

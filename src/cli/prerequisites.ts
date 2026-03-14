@@ -52,6 +52,15 @@ export type CommandPrerequisiteContract = {
   readonly rules: readonly CommandPrerequisiteRule[];
 };
 
+/**
+ * A user-facing command that is intentionally handled outside the shared
+ * prerequisite interception matrix.
+ */
+export type LocalPrerequisiteHandling = {
+  readonly command: string;
+  readonly reason: string;
+};
+
 export const PREREQUISITE_CHECKS = [
   {
     id: "docker_cli",
@@ -619,10 +628,53 @@ export const COMMANDS_THAT_INVOKE_PREREQUISITE_CHECKS = [
   ),
 ] as const;
 
+export const COMMANDS_WITH_LOCAL_PREREQUISITE_HANDLING = [
+  {
+    command: "x github connect",
+    reason:
+      "GitHub connect is already the primary repair/bootstrap path, so it should keep command-local validation instead of redirecting into shared interception.",
+  },
+  {
+    command: "linear setup",
+    reason:
+      "Linear setup is a local project wiring command that can run before auth or profile state exists, so it should stay outside the shared interception matrix.",
+  },
+  {
+    command: "x github disconnect",
+    reason:
+      "Disconnect only removes stored local auth material and should keep command-local validation.",
+  },
+  {
+    command: "linear disconnect",
+    reason:
+      "Disconnect only removes stored local auth material and should keep command-local validation.",
+  },
+  {
+    command: "linear assignee-mappings",
+    reason:
+      "Assignee mapping inspection should continue to rely on command-local validation rather than shared prerequisite interception.",
+  },
+  {
+    command: "linear project-unlink",
+    reason:
+      "Project unlink is local cleanup state and should not be hidden behind shared setup guidance.",
+  },
+] as const satisfies readonly LocalPrerequisiteHandling[];
+
 export function getCommandPrerequisiteContracts(input: {
   readonly command: string;
 }): readonly CommandPrerequisiteContract[] {
   return COMMAND_PREREQUISITE_CONTRACTS.filter((contract) =>
     contract.commands.includes(input.command)
+  );
+}
+
+export function getLocalPrerequisiteHandling(input: {
+  readonly command: string;
+}): LocalPrerequisiteHandling | null {
+  return (
+    COMMANDS_WITH_LOCAL_PREREQUISITE_HANDLING.find(
+      (entry) => entry.command === input.command
+    ) ?? null
   );
 }

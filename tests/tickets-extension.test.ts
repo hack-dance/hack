@@ -260,6 +260,116 @@ testIntegration(
   }
 );
 
+testIntegration(
+  "tickets extension: list and show fall back to local tickets ref when origin fetch fails",
+  { timeout: 60_000 },
+  async () => {
+    const root = await mkdirTempDir({
+      prefix: "hack-cli-tickets-offline-read-",
+    });
+    const projectDir = join(root, "project");
+    const remoteDir = join(root, "remote.git");
+
+    await mkdir(projectDir, { recursive: true });
+    await copyDir({
+      from: resolve(import.meta.dir, "../examples/tickets"),
+      to: projectDir,
+    });
+
+    await run({ cwd: projectDir, cmd: ["git", "init"] });
+    await run({
+      cwd: projectDir,
+      cmd: ["git", "config", "user.email", "tests@hack"],
+    });
+    await run({
+      cwd: projectDir,
+      cmd: ["git", "config", "user.name", "hack-cli-tests"],
+    });
+    await run({ cwd: projectDir, cmd: ["git", "add", "-A"] });
+    await run({ cwd: projectDir, cmd: ["git", "commit", "-m", "init"] });
+
+    await run({ cwd: root, cmd: ["git", "init", "--bare", remoteDir] });
+    await run({
+      cwd: projectDir,
+      cmd: ["git", "remote", "add", "origin", remoteDir],
+    });
+    await run({
+      cwd: projectDir,
+      cmd: ["git", "push", "-u", "origin", "HEAD:main"],
+    });
+
+    const created = await runHack({
+      cwd: projectDir,
+      args: [
+        "tickets",
+        "create",
+        "--title",
+        "Offline-readable ticket",
+        "--json",
+      ],
+    });
+    expect(created.exitCode).toBe(0);
+    const createdJson = JSON.parse(created.stdout) as {
+      ticket: { ticketId: string };
+    };
+
+    await run({
+      cwd: projectDir,
+      cmd: [
+        "git",
+        "remote",
+        "set-url",
+        "origin",
+        join(root, "missing-remote.git"),
+      ],
+    });
+
+    const listed = await runAllowFail({
+      cwd: projectDir,
+      cmd: [
+        "bun",
+        resolve(import.meta.dir, "../index.ts"),
+        "tickets",
+        "list",
+        "--json",
+      ],
+    });
+    expect(listed.exitCode).toBe(0);
+    const listJson = JSON.parse(listed.stdout) as {
+      tickets: { ticketId: string; title: string }[];
+    };
+    expect(
+      listJson.tickets.some(
+        (ticket) =>
+          ticket.ticketId === createdJson.ticket.ticketId &&
+          ticket.title === "Offline-readable ticket"
+      )
+    ).toBe(true);
+
+    const shown = await runAllowFail({
+      cwd: projectDir,
+      cmd: [
+        "bun",
+        resolve(import.meta.dir, "../index.ts"),
+        "tickets",
+        "show",
+        createdJson.ticket.ticketId,
+        "--json",
+      ],
+    });
+    expect(shown.exitCode).toBe(0);
+    const showJson = JSON.parse(shown.stdout) as {
+      ticket: { ticketId: string; title: string };
+    };
+    expect(showJson.ticket).toMatchObject({
+      ticketId: createdJson.ticket.ticketId,
+      title: "Offline-readable ticket",
+    });
+
+    await rm(root, { recursive: true, force: true });
+  }
+);
+
 interface RunResult {
   readonly stdout: string;
   readonly stderr: string;

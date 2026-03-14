@@ -2814,36 +2814,41 @@ async function handleProjectArtifactFamilyCommand(input: {
   const binding = resolveProjectLinearBinding({
     controlPlaneConfig: input.ctx.controlPlaneConfig,
   });
-  const selectedTarget =
-    (parsed.value.projectId
-      ? findProjectBindingTarget({
-          binding,
-          projectId: parsed.value.projectId,
-        })
-      : null) ??
-    (binding.projectId
-      ? {
-          projectId: binding.projectId,
-          ...(binding.projectName ? { projectName: binding.projectName } : {}),
-          ...(binding.teamId ? { teamId: binding.teamId } : {}),
-          ...(binding.profileId ? { profileId: binding.profileId } : {}),
-        }
-      : null);
-  const projectId = parsed.value.projectId ?? selectedTarget?.projectId;
-  if (!projectId) {
-    input.ctx.logger.error({
-      message:
-        "Missing project id. Pass --project-id, bind a default project, or add additional linked projects first.",
-    });
+  const boundTarget = resolveBoundProjectArtifactTarget({
+    binding,
+    projectId: parsed.value.projectId,
+    projectName: parsed.value.projectName,
+    teamId: parsed.value.teamId,
+  });
+  if (!boundTarget.ok) {
+    input.ctx.logger.error({ message: boundTarget.error });
     return 1;
   }
 
   const runtime = await createSyncRuntime({
     ctx: input.ctx,
-    profileId: parsed.value.profileId ?? selectedTarget?.profileId,
+    profileId:
+      parsed.value.profileId ??
+      boundTarget.target?.profileId ??
+      binding.profileId,
   });
   if (!runtime.ok) {
     input.ctx.logger.error({ message: runtime.error });
+    return 1;
+  }
+
+  const selectedTarget = await resolveProjectArtifactTarget({
+    binding,
+    profileId: runtime.value.profileId,
+    projectId: parsed.value.projectId,
+    projectName: parsed.value.projectName,
+    teamId: parsed.value.teamId,
+    linear: runtime.value.linear,
+  });
+  if (!selectedTarget.ok) {
+    input.ctx.logger.error({
+      message: selectedTarget.error,
+    });
     return 1;
   }
 
@@ -2855,7 +2860,7 @@ async function handleProjectArtifactFamilyCommand(input: {
       linear: runtime.value.linear,
       profileId: runtime.value.profileId,
       projectDir: input.ctx.project.projectDir,
-      projectId,
+      projectId: selectedTarget.target.projectId,
     },
   });
   if (!result.ok) {
@@ -6674,6 +6679,263 @@ function findProjectBindingTarget(input: {
   );
 }
 
+function resolveBoundProjectArtifactTarget(input: {
+  readonly binding: ResolvedLinearProjectBinding;
+  readonly projectId?: string;
+  readonly projectName?: string;
+  readonly teamId?: string;
+}):
+  | { readonly ok: true; readonly target: LinearProjectBindingTarget | null }
+  | { readonly ok: false; readonly error: string } {
+  const projectId = readOptionalString(input.projectId);
+  const projectName = readOptionalString(input.projectName);
+  const teamId = readOptionalString(input.teamId);
+
+  if (projectId) {
+    const target = findProjectBindingTarget({
+      binding: input.binding,
+      projectId,
+    });
+    if (!target) {
+      return { ok: true, target: null };
+    }
+    return {
+      ok: true,
+      target: {
+        ...target,
+        ...(projectName ? { projectName } : {}),
+        ...(teamId ? { teamId } : {}),
+      },
+    };
+  }
+
+  const selector = createProjectArtifactSelector({
+    projectName,
+    teamId,
+  });
+  if (!selector) {
+    return {
+      ok: true,
+      target: input.binding.projectId
+        ? {
+            projectId: input.binding.projectId,
+            ...(input.binding.projectName
+              ? { projectName: input.binding.projectName }
+              : {}),
+            ...(input.binding.teamId ? { teamId: input.binding.teamId } : {}),
+            ...(input.binding.profileId
+              ? { profileId: input.binding.profileId }
+              : {}),
+          }
+        : null,
+    };
+  }
+
+  const candidates = resolveProjectPullTargets({
+    binding: input.binding,
+  }).filter((target) =>
+    projectArtifactTargetMatchesSelector({ target, selector })
+  );
+  if (candidates.length === 0) {
+    return { ok: true, target: null };
+  }
+  if (candidates.length > 1) {
+    return {
+      ok: false,
+      error: describeAmbiguousProjectArtifactTarget({
+        projectName,
+        teamId,
+        source: "bound",
+      }),
+    };
+  }
+  return {
+    ok: true,
+    target: candidates[0] ?? null,
+  };
+}
+
+async function resolveProjectArtifactTarget(input: {
+  readonly binding: ResolvedLinearProjectBinding;
+  readonly profileId: string;
+  readonly projectId?: string;
+  readonly projectName?: string;
+  readonly teamId?: string;
+  readonly linear: Pick<ProjectArtifactRuntime["linear"], "listProjects">;
+}): Promise<
+  | {
+      readonly ok: true;
+      readonly target: LinearProjectBindingTarget;
+    }
+  | { readonly ok: false; readonly error: string }
+> {
+  const boundTarget = resolveBoundProjectArtifactTarget(input);
+  if (!boundTarget.ok) {
+    return boundTarget;
+  }
+  if (boundTarget.target) {
+    return {
+      ok: true,
+      target: {
+        ...boundTarget.target,
+        profileId: boundTarget.target.profileId ?? input.profileId,
+      },
+    };
+  }
+
+  const projectId = readOptionalString(input.projectId);
+  const projectName = readOptionalString(input.projectName);
+  const teamId = readOptionalString(input.teamId);
+  if (projectId) {
+    return {
+      ok: true,
+      target: {
+        projectId,
+        profileId: input.profileId,
+        ...(projectName ? { projectName } : {}),
+        ...(teamId ? { teamId } : {}),
+      },
+    };
+  }
+
+  const selector = createProjectArtifactSelector({
+    projectName,
+    teamId,
+  });
+  if (!selector) {
+    return {
+      ok: false,
+      error:
+        "Missing project id. Pass --project-id, bind a default project, or add additional linked projects first.",
+    };
+  }
+
+  const projects = await input.linear.listProjects({
+    first: DEFAULT_PROJECT_SYNC_LIMIT,
+  });
+  if (!projects.ok) {
+    return {
+      ok: false,
+      error: projects.error,
+    };
+  }
+
+  const matches = projects.data.filter((project) =>
+    projectArtifactTargetMatchesSelector({
+      target: {
+        projectId: project.id,
+        projectName: project.name,
+        teamId: project.teamId,
+      },
+      selector,
+    })
+  );
+  if (matches.length === 0) {
+    return {
+      ok: false,
+      error: describeMissingProjectArtifactTarget({
+        projectName,
+        teamId,
+      }),
+    };
+  }
+  if (matches.length > 1) {
+    return {
+      ok: false,
+      error: describeAmbiguousProjectArtifactTarget({
+        projectName,
+        teamId,
+        source: "remote",
+      }),
+    };
+  }
+
+  const match = matches[0];
+  if (!match) {
+    return {
+      ok: false,
+      error: describeMissingProjectArtifactTarget({
+        projectName,
+        teamId,
+      }),
+    };
+  }
+  return {
+    ok: true,
+    target: {
+      profileId: input.profileId,
+      projectId: match.id,
+      projectName: match.name,
+      teamId: match.teamId,
+    },
+  };
+}
+
+function createProjectArtifactSelector(input: {
+  readonly projectName?: string;
+  readonly teamId?: string;
+}): { readonly projectName?: string; readonly teamId?: string } | null {
+  const projectName = readOptionalString(input.projectName);
+  const teamId = readOptionalString(input.teamId);
+  if (!(projectName || teamId)) {
+    return null;
+  }
+  return {
+    ...(projectName ? { projectName: projectName.toLowerCase() } : {}),
+    ...(teamId ? { teamId: teamId.toLowerCase() } : {}),
+  };
+}
+
+function projectArtifactTargetMatchesSelector(input: {
+  readonly target: Pick<
+    LinearProjectBindingTarget,
+    "projectName" | "teamId" | "projectId"
+  >;
+  readonly selector: {
+    readonly projectName?: string;
+    readonly teamId?: string;
+  };
+}): boolean {
+  if (
+    input.selector.projectName &&
+    readOptionalString(input.target.projectName)?.toLowerCase() !==
+      input.selector.projectName
+  ) {
+    return false;
+  }
+  if (
+    input.selector.teamId &&
+    readOptionalString(input.target.teamId)?.toLowerCase() !==
+      input.selector.teamId
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function describeAmbiguousProjectArtifactTarget(input: {
+  readonly projectName?: string;
+  readonly teamId?: string;
+  readonly source: "bound" | "remote";
+}): string {
+  const parts = [
+    input.projectName ? `project name "${input.projectName}"` : null,
+    input.teamId ? `team id "${input.teamId}"` : null,
+  ].filter((part): part is string => Boolean(part));
+  return `Multiple ${input.source} Linear projects match ${parts.join(" and ")}. Pass --project-id to disambiguate.`;
+}
+
+function describeMissingProjectArtifactTarget(input: {
+  readonly projectName?: string;
+  readonly teamId?: string;
+}): string {
+  const parts = [
+    input.projectName ? `project name "${input.projectName}"` : null,
+    input.teamId ? `team id "${input.teamId}"` : null,
+  ].filter((part): part is string => Boolean(part));
+  return `No Linear project matches ${parts.join(" and ")}. Pass --project-id or update the project binding.`;
+}
+
 async function resolveProjectBindingDetails(input: {
   readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
   readonly profileId?: string;
@@ -9643,6 +9905,7 @@ export const __testOnly = {
   parseSyncProjectArgs,
   parseUpsertAssigneeMappingArgs,
   parseUpsertAutosyncSubscriptionArgs,
+  resolveProjectArtifactTarget,
   selectLinearCommentsToAppend,
   selectTicketCommentsToPush,
   shouldFallbackConnectToOAuth,

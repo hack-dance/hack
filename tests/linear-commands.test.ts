@@ -414,6 +414,84 @@ test("findProjectBindingTarget resolves additional linked projects by id", () =>
   });
 });
 
+test("resolveProjectArtifactTarget matches a bound project by explicit name and team", async () => {
+  const resolved = await __testOnly.resolveProjectArtifactTarget({
+    binding: {
+      profileId: "work",
+      projectId: "proj_default",
+      projectName: "Default",
+      teamId: "team_default",
+      additionalProjects: [
+        {
+          profileId: "ops",
+          projectId: "proj_ops",
+          projectName: "Operations",
+          teamId: "team_ops",
+        },
+      ],
+    },
+    profileId: "work",
+    projectName: "Operations",
+    teamId: "team_ops",
+    linear: {
+      listProjects: async () => {
+        throw new Error("should not look up remote projects");
+      },
+    },
+  });
+
+  expect(resolved).toEqual({
+    ok: true,
+    target: {
+      profileId: "ops",
+      projectId: "proj_ops",
+      projectName: "Operations",
+      teamId: "team_ops",
+    },
+  });
+});
+
+test("resolveProjectArtifactTarget falls back to remote lookup for explicit project names", async () => {
+  const resolved = await __testOnly.resolveProjectArtifactTarget({
+    binding: {
+      profileId: "work",
+      additionalProjects: [],
+    },
+    profileId: "work",
+    projectName: "Roadmap",
+    teamId: "team_strategy",
+    linear: {
+      listProjects: async () => ({
+        ok: true as const,
+        data: [
+          {
+            id: "proj_strategy",
+            name: "Roadmap",
+            teamId: "team_strategy",
+            teamKey: "STRAT",
+          },
+          {
+            id: "proj_other",
+            name: "Roadmap",
+            teamId: "team_other",
+            teamKey: "OPS",
+          },
+        ],
+      }),
+    },
+  });
+
+  expect(resolved).toEqual({
+    ok: true,
+    target: {
+      profileId: "work",
+      projectId: "proj_strategy",
+      projectName: "Roadmap",
+      teamId: "team_strategy",
+    },
+  });
+});
+
 test("connect falls back to oauth when no token input exists", () => {
   const envKey = "HACK_LINEAR_TEST_TOKEN";
   const previous = process.env[envKey];

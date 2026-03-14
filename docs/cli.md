@@ -351,7 +351,7 @@ Lifecycle semantics:
 - `invite` creates `pending`
 - `add` creates `active`
 - `remove` transitions `pending` or `active` membership to `removed`
-- Removing org access is expected to preview and cascade affected team memberships in the same org
+- Removing org access also transitions matching team memberships and team invites in that organization to `removed`
 
 #### hack org member list
 

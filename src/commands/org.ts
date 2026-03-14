@@ -109,7 +109,7 @@ const memberRemoveSpec = defineCommand({
   name: "remove",
   summary: "Remove org membership or cancel a pending org invite",
   description:
-    "Admin-side revoke verb. Removing org access is expected to preview and cascade affected team memberships in the same org.",
+    "Admin-side revoke verb. Removing org access also removes matching team memberships and invites in that organization.",
   group: "Global",
   options: [optJson, optBrokerUrl] as const,
   positionals: orgMemberTargetPositionals,

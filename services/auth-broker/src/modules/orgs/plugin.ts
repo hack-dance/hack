@@ -602,7 +602,7 @@ function normalizeOptionalString(value: unknown): string | null {
 
 function normalizeState(input: {
   readonly value: string | undefined;
-}): MembershipState | "all" {
+}): MembershipState | "all" | "actionable" {
   const normalized = normalizeOptionalString(input.value);
   if (
     normalized === "pending" ||
@@ -612,7 +612,7 @@ function normalizeState(input: {
   ) {
     return normalized;
   }
-  return "all";
+  return "actionable";
 }
 
 async function hasActiveParentOrgMembership(input: {

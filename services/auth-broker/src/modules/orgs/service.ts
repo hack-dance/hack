@@ -86,7 +86,7 @@ export type OrgTeamsStore = {
     readonly scope: "organization" | "team";
     readonly orgKey: string;
     readonly teamKey?: string | null;
-    readonly state: MembershipState | "all";
+    readonly state: MembershipState | "all" | "actionable";
   }) => MaybePromise<readonly MembershipRecord[]>;
   readonly inviteMember: (input: {
     readonly scope: "organization" | "team";
@@ -279,7 +279,7 @@ export class InMemoryOrgTeamsStore implements OrgTeamsStore {
     readonly scope: "organization" | "team";
     readonly orgKey: string;
     readonly teamKey?: string | null;
-    readonly state: MembershipState | "all";
+    readonly state: MembershipState | "all" | "actionable";
   }): MaybePromise<readonly MembershipRecord[]> {
     const organization = this.findOrganization({ orgKey: input.orgKey });
     if (!organization) {
@@ -318,6 +318,9 @@ export class InMemoryOrgTeamsStore implements OrgTeamsStore {
     }
     if (input.state === "removed") {
       return removed;
+    }
+    if (input.state === "actionable") {
+      return [...pending, ...active];
     }
     return [...pending, ...active, ...removed];
   }
@@ -430,6 +433,12 @@ export class InMemoryOrgTeamsStore implements OrgTeamsStore {
           target: invitation.email,
         });
         this.removedMemberships.set(membership.id, membership);
+        if (input.scope === "organization") {
+          this.cascadeRemovedOrganizationTarget({
+            organizationId: organization.id,
+            target: normalizedTarget,
+          });
+        }
         return membership;
       }
     }
@@ -451,6 +460,12 @@ export class InMemoryOrgTeamsStore implements OrgTeamsStore {
           target: membership.target,
         });
         this.removedMemberships.set(removed.id, removed);
+        if (input.scope === "organization") {
+          this.cascadeRemovedOrganizationTarget({
+            organizationId: organization.id,
+            target: normalizedTarget,
+          });
+        }
         return removed;
       }
     }
@@ -619,5 +634,66 @@ export class InMemoryOrgTeamsStore implements OrgTeamsStore {
       createdAt: now,
       updatedAt: now,
     };
+  }
+
+  private cascadeRemovedOrganizationTarget(input: {
+    readonly organizationId: string;
+    readonly target: string;
+  }): void {
+    const normalizedTarget = input.target.trim();
+
+    for (const invitation of this.invitations.values()) {
+      if (
+        invitation.status !== "pending" ||
+        invitation.scope !== "team" ||
+        invitation.organizationId !== input.organizationId ||
+        invitation.email !== normalizedTarget
+      ) {
+        continue;
+      }
+
+      this.invitations.set(invitation.id, {
+        ...invitation,
+        status: "removed",
+        updatedAt: new Date().toISOString(),
+      });
+      const removed = this.toRemovedMembership({
+        scope: invitation.scope,
+        organizationId: invitation.organizationId,
+        teamId: invitation.teamId,
+        userId: null,
+        email: invitation.email,
+        target: invitation.email,
+      });
+      this.removedMemberships.set(removed.id, removed);
+    }
+
+    for (const [key, membership] of this.activeMemberships.entries()) {
+      if (
+        membership.scope !== "team" ||
+        membership.organizationId !== input.organizationId
+      ) {
+        continue;
+      }
+
+      const membershipEmail = membership.email?.trim() ?? "";
+      if (
+        membership.target !== normalizedTarget &&
+        membershipEmail !== normalizedTarget
+      ) {
+        continue;
+      }
+
+      this.activeMemberships.delete(key);
+      const removed = this.toRemovedMembership({
+        scope: membership.scope,
+        organizationId: membership.organizationId,
+        teamId: membership.teamId,
+        userId: membership.userId,
+        email: membership.email,
+        target: membership.target,
+      });
+      this.removedMemberships.set(removed.id, removed);
+    }
   }
 }

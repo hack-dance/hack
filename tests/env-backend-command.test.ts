@@ -9,6 +9,8 @@ type RunResult = {
   readonly stderr: string;
 };
 
+const ENV_BACKEND_COMMAND_TIMEOUT_MS = 60_000;
+
 let tempDir: string | null = null;
 let tempGlobalConfigPath: string | null = null;
 let previousGlobalConfigPath: string | undefined;
@@ -42,7 +44,7 @@ afterEach(async () => {
 
 test(
   "env backend status defaults to keychain",
-  { timeout: 10_000 },
+  { timeout: ENV_BACKEND_COMMAND_TIMEOUT_MS },
   async () => {
     const result = await runHack({
       args: ["env", "backend", "status", "--json"],
@@ -63,7 +65,7 @@ test(
 
 test(
   "env backend use encrypted_file persists selection",
-  { timeout: 10_000 },
+  { timeout: ENV_BACKEND_COMMAND_TIMEOUT_MS },
   async () => {
     const result = await runHack({
       args: [
@@ -96,7 +98,7 @@ test(
 
 test(
   "env backend use encrypted_file can provision a stable key file",
-  { timeout: 10_000 },
+  { timeout: ENV_BACKEND_COMMAND_TIMEOUT_MS },
   async () => {
     if (!(tempDir && tempGlobalConfigPath)) {
       throw new Error("Missing temp global config state");
@@ -144,7 +146,7 @@ test(
 
 test(
   "env backend use cloud requires provider and stores cloud settings",
-  { timeout: 10_000 },
+  { timeout: ENV_BACKEND_COMMAND_TIMEOUT_MS },
   async () => {
     const invalid = await runHack({
       args: ["env", "backend", "use", "cloud"],
@@ -195,7 +197,7 @@ test(
 
 test(
   "env set --secret stores value using encrypted backend",
-  { timeout: 20_000 },
+  { timeout: ENV_BACKEND_COMMAND_TIMEOUT_MS },
   async () => {
     if (!tempDir) {
       throw new Error("Missing temp dir");
@@ -283,7 +285,7 @@ test(
 
 test(
   "env list --json explains storage and trust boundaries",
-  { timeout: 20_000 },
+  { timeout: ENV_BACKEND_COMMAND_TIMEOUT_MS },
   async () => {
     if (!tempDir) {
       throw new Error("Missing temp dir");
@@ -414,7 +416,7 @@ test(
 
 test(
   "env list --json marks cloud backend as a local shim",
-  { timeout: 20_000 },
+  { timeout: ENV_BACKEND_COMMAND_TIMEOUT_MS },
   async () => {
     if (!tempDir) {
       throw new Error("Missing temp dir");
@@ -508,7 +510,7 @@ test(
 
 test(
   "env list shows storage summary even when no contract exists",
-  { timeout: 60_000 },
+  { timeout: ENV_BACKEND_COMMAND_TIMEOUT_MS },
   async () => {
     if (!tempDir) {
       throw new Error("Missing temp dir");

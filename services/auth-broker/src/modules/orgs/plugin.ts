@@ -579,7 +579,7 @@ export function createOrgsPlugin(input: {
 async function requireSession(input: {
   readonly runtime: BetterAuthRuntime;
   readonly request: Request;
-  readonly set: { status?: number };
+  readonly set: { status?: number | string };
 }) {
   const session = await resolveBetterAuthSession({
     runtime: input.runtime,

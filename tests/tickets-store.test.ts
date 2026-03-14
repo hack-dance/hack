@@ -825,6 +825,92 @@ test("normalized ticket provenance captures multiple remotes, field authority, a
   );
 });
 
+test("projectNormalizedTicketSummary uses the latest description document", () => {
+  const normalized = createNormalizedTicket({
+    ticket: {
+      ticketId: "T-00089",
+      title: "Prefer the latest description",
+      body: "Legacy body",
+      status: "open",
+      createdAt: "2026-03-13T09:00:00.000Z",
+      updatedAt: "2026-03-13T12:00:00.000Z",
+      dependsOn: [],
+      blocks: [],
+      owner: "hack",
+      source: "hack",
+      tags: [],
+    },
+    documents: [
+      {
+        documentId: "T-00089:description:created",
+        ticketId: "T-00089",
+        kind: "description",
+        role: "description",
+        content: "Original description",
+        contentSha256: "sha-original",
+        createdAt: "2026-03-13T09:00:00.000Z",
+        updatedAt: "2026-03-13T09:00:00.000Z",
+      },
+      {
+        documentId: "T-00089:description:updated",
+        ticketId: "T-00089",
+        kind: "description",
+        role: "description",
+        content: "Latest description",
+        contentSha256: "sha-latest",
+        createdAt: "2026-03-13T11:00:00.000Z",
+        updatedAt: "2026-03-13T12:00:00.000Z",
+      },
+    ],
+  });
+
+  expect(projectNormalizedTicketSummary({ ticket: normalized }).body).toBe(
+    "Latest description"
+  );
+});
+
+test("normalized ticket field states map legacy body conflicts to description", () => {
+  const normalized = createNormalizedTicket({
+    ticket: {
+      ticketId: "T-00090",
+      title: "Normalize body conflicts",
+      body: "Local body",
+      status: "open",
+      createdAt: "2026-03-13T09:00:00.000Z",
+      updatedAt: "2026-03-13T12:00:00.000Z",
+      dependsOn: [],
+      blocks: [],
+      owner: "hack",
+      source: "linear",
+      tags: [],
+    },
+    conflicts: [
+      {
+        conflictId: "conflict-description",
+        ticketId: "T-00090",
+        provider: "linear",
+        field: "body",
+        status: "open",
+        authority: "review_required",
+        localValue: "Local body",
+        remoteValue: "Remote body",
+        createdAt: "2026-03-13T12:00:00.000Z",
+        updatedAt: "2026-03-13T12:00:00.000Z",
+      },
+    ],
+  });
+
+  expect(normalized.fieldStates).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        field: "description",
+        authority: "review_required",
+        conflictIds: ["conflict-description"],
+      }),
+    ])
+  );
+});
+
 test("ticket provenance infers a remote provider from source metadata when externalSystem is absent", () => {
   const ticket = {
     ticketId: "T-00088",

@@ -93,6 +93,10 @@ export type TicketFieldVersion = {
   readonly value?: TicketMetadataValue;
 };
 
+export function normalizeTicketFieldName(field: string): string {
+  return field === "body" ? "description" : field;
+}
+
 export function inferTicketSourceSystem(input: {
   readonly ticket: Pick<
     TicketProvenanceCompatibility,
@@ -300,9 +304,10 @@ export function buildTicketFieldAuthorities(input: {
   });
 
   for (const conflict of input.conflicts ?? []) {
-    const current = byField.get(conflict.field);
-    byField.set(conflict.field, {
-      field: conflict.field,
+    const field = normalizeTicketFieldName(conflict.field);
+    const current = byField.get(field);
+    byField.set(field, {
+      field,
       authority: conflict.authority ?? current?.authority ?? defaultAuthority,
     });
   }
@@ -345,9 +350,10 @@ export function buildTicketFieldVersions(input: {
   }
 
   for (const conflict of input.conflicts ?? []) {
+    const field = normalizeTicketFieldName(conflict.field);
     if (conflict.localValue !== undefined) {
       versions.push({
-        field: conflict.field,
+        field,
         source: "local",
         recordedAt: conflict.updatedAt,
         value: conflict.localValue,
@@ -355,7 +361,7 @@ export function buildTicketFieldVersions(input: {
     }
     if (conflict.remoteValue !== undefined) {
       versions.push({
-        field: conflict.field,
+        field,
         source: "remote",
         provider: conflict.provider,
         recordedAt: conflict.updatedAt,

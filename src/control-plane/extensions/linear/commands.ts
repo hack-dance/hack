@@ -13,6 +13,7 @@ import { openUrl } from "../../../lib/os.ts";
 import { display } from "../../../ui/display.ts";
 import {
   findTicketRemoteLink,
+  normalizeTicketFieldName,
   projectRemoteLinkToCompatibilityFields,
 } from "../tickets/provenance.ts";
 import {
@@ -2984,7 +2985,7 @@ function detectAuthoritativeFieldConflicts(input: {
   });
   if (localBody !== remoteBody) {
     conflicts.push({
-      field: "body",
+      field: normalizeTicketFieldName("body"),
       authority: input.authority,
       summary: `Authoritative ${authorityLabel} body diverged from the other side.`,
       localValue: localBody,
@@ -3188,7 +3189,7 @@ function buildConflictDedupKey(input: {
   readonly remoteValue?: TicketMetadataValue;
 }): string {
   return [
-    input.field,
+    normalizeTicketFieldName(input.field),
     JSON.stringify(input.localValue ?? null),
     JSON.stringify(input.remoteValue ?? null),
   ].join("|");
@@ -3227,7 +3228,7 @@ function buildLinearConflictIdempotencyKey(input: {
   const fingerprint = createHash("sha256")
     .update(
       JSON.stringify({
-        field: input.conflict.field,
+        field: normalizeTicketFieldName(input.conflict.field),
         authority: input.conflict.authority ?? null,
         summary: input.conflict.summary ?? null,
         localValue: input.conflict.localValue ?? null,
@@ -3812,25 +3813,25 @@ async function syncTicketToLinearIssue(input: {
     return { ok: false, error: recordedConflicts.error };
   }
 
-  const effectiveFields =
-    authority === "linear" && existingIssue.issue
-      ? {
-          ...fields.value,
-          title: existingIssue.issue.title,
-          description: existingIssue.issue.description ?? "",
-          ...(existingIssue.issue.assigneeId
-            ? { assigneeId: existingIssue.issue.assigneeId }
-            : {}),
-          ...(input.syncToggles.statuses
-            ? { stateId: existingIssue.issue.state.id }
-            : {}),
-        }
-      : fields.value;
+  const preserveRemoteIssueFields = authority !== "hack" && existingIssue.issue;
 
-  const effectiveProjectId =
-    authority === "linear" && existingIssue.issue
-      ? existingIssue.issue.projectId
-      : target.value.projectId;
+  const effectiveFields = preserveRemoteIssueFields
+    ? {
+        ...fields.value,
+        title: existingIssue.issue.title,
+        description: existingIssue.issue.description ?? "",
+        ...(existingIssue.issue.assigneeId
+          ? { assigneeId: existingIssue.issue.assigneeId }
+          : {}),
+        ...(input.syncToggles.statuses
+          ? { stateId: existingIssue.issue.state.id }
+          : {}),
+      }
+    : fields.value;
+
+  const effectiveProjectId = preserveRemoteIssueFields
+    ? existingIssue.issue.projectId
+    : target.value.projectId;
 
   const syncedIssue = await upsertLinearIssueForTicketSync({
     runtime: input.runtime,

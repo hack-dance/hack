@@ -795,7 +795,7 @@ test("detectAuthoritativeFieldConflicts reports divergence for hack-owned ticket
 
   expect(conflicts.map((conflict) => conflict.field)).toEqual([
     "title",
-    "body",
+    "description",
     "status",
     "project",
   ]);
@@ -1090,7 +1090,7 @@ test("syncIssueFromLinearToTicket preserves hack authority, appends comments, an
   expect(result.commentsPulled).toBe(1);
   expect(result.conflictsRecorded).toBe(4);
   expect(appendedBodies).toEqual(["Fresh remote note"]);
-  expect(conflicts).toEqual(["title", "body", "status", "project"]);
+  expect(conflicts).toEqual(["title", "description", "status", "project"]);
   expect(checkpoints).toEqual(["linear_to_hack"]);
   expect(updatedTickets).toHaveLength(1);
   expect(updatedTickets[0]?.title).toBeUndefined();
@@ -1245,7 +1245,10 @@ test("syncIssueFromLinearToTicket records review-required conflicts for dual-hom
   expect(result.conflictsRecorded).toBe(4);
   expect(recordedConflicts).toEqual([
     expect.objectContaining({ field: "title", authority: "review_required" }),
-    expect.objectContaining({ field: "body", authority: "review_required" }),
+    expect.objectContaining({
+      field: "description",
+      authority: "review_required",
+    }),
     expect.objectContaining({ field: "status", authority: "review_required" }),
     expect.objectContaining({ field: "project", authority: "review_required" }),
   ]);
@@ -1613,6 +1616,402 @@ test("syncTicketToLinearIssue reuses a linked Linear issue inferred from provena
 
   expect(result.operation).toBe("updated");
   expect(updatedIssues).toHaveLength(1);
+});
+
+test("syncTicketToLinearIssue preserves remote issue fields for review-required authority", async () => {
+  const recordedConflicts: Array<{
+    readonly field: string;
+    readonly authority?: string;
+  }> = [];
+  const updatedIssues: Record<string, unknown>[] = [];
+
+  const runtime = {
+    profileId: "default",
+    apiUrl: "https://api.linear.app/graphql",
+    projectBinding: {
+      teamId: "team-1",
+      additionalProjects: [],
+    },
+    assigneeMappings: [],
+    tickets: {
+      getTicket: async () => ({
+        ticketId: "T-00005",
+        title: "Local title",
+        body: "Local body",
+        status: "open" as const,
+        createdAt: "2026-03-05T10:00:00.000Z",
+        updatedAt: "2026-03-05T10:00:00.000Z",
+        dependsOn: [],
+        blocks: [],
+        owner: "hack",
+        source: "linear",
+        assignee: "alice@example.com",
+        tags: [],
+        externalSystem: "linear",
+        externalId: "issue-5",
+        externalKey: "ENG-555",
+        externalProjectId: "proj-local",
+        externalTeamId: "team-1",
+      }),
+      updateTicket: async () => ({ ok: true as const }),
+      listTickets: async () => [],
+      getTicketDetail: async () => ({
+        ticket: null,
+        events: [],
+        comments: [],
+        reviewNotes: [],
+        syncCheckpoints: [],
+        conflicts: [],
+      }),
+      linkCommentExternalId: async () => ({ ok: true as const }),
+      recordSyncCheckpoint: async () => ({
+        ok: true as const,
+        checkpoint: {
+          checkpointId: "checkpoint-5",
+          ticketId: "T-00005",
+          provider: "linear",
+          direction: "hack_to_linear",
+          actor: "test",
+          createdAt: "2026-03-05T10:10:00.000Z",
+        },
+      }),
+      recordSyncConflict: async (input: {
+        readonly field: string;
+        readonly authority?: string;
+      }) => {
+        recordedConflicts.push(input);
+        return {
+          ok: true as const,
+          conflict: {
+            conflictId: `conflict-${input.field}`,
+            ticketId: "T-00005",
+            provider: "linear",
+            field: input.field,
+            status: "open" as const,
+            authority: input.authority,
+            createdAt: "2026-03-05T10:10:00.000Z",
+            updatedAt: "2026-03-05T10:10:00.000Z",
+          },
+        };
+      },
+    },
+    linear: {
+      getIssueById: async () => ({
+        ok: true as const,
+        data: {
+          id: "issue-5",
+          identifier: "ENG-555",
+          title: "Linear title",
+          description: "Linear body",
+          state: {
+            id: "state-2",
+            name: "Done",
+            type: "completed" as const,
+          },
+          url: "https://linear.app/hack/issue/ENG-555",
+          teamId: "team-1",
+          projectId: "proj-remote",
+          assigneeId: "user-1",
+          labels: [],
+        },
+      }),
+      getIssueByIdentifier: async () => ({ ok: true as const, data: null }),
+      updateIssue: async (input: Record<string, unknown>) => {
+        updatedIssues.push(input);
+        return {
+          ok: true as const,
+          data: {
+            id: "issue-5",
+            identifier: "ENG-555",
+            title: "Linear title",
+            description: "Linear body",
+            state: {
+              id: "state-2",
+              name: "Done",
+              type: "completed" as const,
+            },
+            url: "https://linear.app/hack/issue/ENG-555",
+            teamId: "team-1",
+            projectId: "proj-remote",
+            assigneeId: "user-1",
+            labels: [],
+          },
+        };
+      },
+      createIssue: async () => {
+        throw new Error("createIssue should not be called");
+      },
+      listTeamStates: async () => ({
+        ok: true as const,
+        data: [
+          {
+            id: "state-1",
+            name: "Todo",
+            type: "unstarted" as const,
+          },
+          {
+            id: "state-2",
+            name: "Done",
+            type: "completed" as const,
+          },
+        ],
+      }),
+      listTeamLabels: async () => ({
+        ok: true as const,
+        data: [],
+      }),
+      listIssueComments: async () => ({
+        ok: true as const,
+        data: [],
+      }),
+      createComment: async () => {
+        throw new Error("createComment should not be called");
+      },
+      listTeamUsers: async () => ({
+        ok: true as const,
+        data: [
+          {
+            id: "user-1",
+            email: "alice@example.com",
+            displayName: "Alice",
+          },
+        ],
+      }),
+      getProject: async () => ({ ok: true as const, data: null }),
+    },
+  };
+
+  const result = await __testOnly.syncTicketToLinearIssue({
+    runtime,
+    ticketId: "T-00005",
+    syncToggles: {
+      labels: false,
+      statuses: true,
+      dependencies: false,
+      projects: true,
+    },
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  expect(recordedConflicts).toEqual([
+    expect.objectContaining({ field: "title", authority: "review_required" }),
+    expect.objectContaining({
+      field: "description",
+      authority: "review_required",
+    }),
+    expect.objectContaining({ field: "status", authority: "review_required" }),
+    expect.objectContaining({ field: "project", authority: "review_required" }),
+  ]);
+  expect(updatedIssues).toHaveLength(1);
+  expect(updatedIssues[0]).toEqual(
+    expect.objectContaining({
+      issueId: "issue-5",
+      title: "Linear title",
+      description: "Linear body",
+      stateId: "state-2",
+      projectId: "proj-remote",
+      assigneeId: "user-1",
+    })
+  );
+});
+
+test("syncTicketToLinearIssue does not duplicate legacy body conflicts after field normalization", async () => {
+  const recordedConflicts: Array<{
+    readonly field: string;
+    readonly authority?: string;
+  }> = [];
+
+  const runtime = {
+    profileId: "default",
+    apiUrl: "https://api.linear.app/graphql",
+    projectBinding: {
+      teamId: "team-1",
+      additionalProjects: [],
+    },
+    assigneeMappings: [],
+    tickets: {
+      getTicket: async () => ({
+        ticketId: "T-00006",
+        title: "Local title",
+        body: "Local body",
+        status: "open" as const,
+        createdAt: "2026-03-05T10:00:00.000Z",
+        updatedAt: "2026-03-05T10:00:00.000Z",
+        dependsOn: [],
+        blocks: [],
+        owner: "hack",
+        source: "linear",
+        assignee: "alice@example.com",
+        tags: [],
+        externalSystem: "linear",
+        externalId: "issue-6",
+        externalKey: "ENG-666",
+        externalProjectId: "proj-local",
+        externalTeamId: "team-1",
+      }),
+      updateTicket: async () => ({ ok: true as const }),
+      listTickets: async () => [],
+      getTicketDetail: async () => ({
+        ticket: null,
+        events: [],
+        comments: [],
+        reviewNotes: [],
+        syncCheckpoints: [],
+        conflicts: [
+          {
+            conflictId: "conflict-body",
+            ticketId: "T-00006",
+            provider: "linear" as const,
+            field: "body",
+            status: "open" as const,
+            authority: "review_required" as const,
+            localValue: "Local body",
+            remoteValue: "Linear body",
+            createdAt: "2026-03-05T10:05:00.000Z",
+            updatedAt: "2026-03-05T10:05:00.000Z",
+          },
+        ],
+      }),
+      linkCommentExternalId: async () => ({ ok: true as const }),
+      recordSyncCheckpoint: async () => ({
+        ok: true as const,
+        checkpoint: {
+          checkpointId: "checkpoint-6",
+          ticketId: "T-00006",
+          provider: "linear",
+          direction: "hack_to_linear",
+          actor: "test",
+          createdAt: "2026-03-05T10:10:00.000Z",
+        },
+      }),
+      recordSyncConflict: async (input: {
+        readonly field: string;
+        readonly authority?: string;
+      }) => {
+        recordedConflicts.push(input);
+        return {
+          ok: true as const,
+          conflict: {
+            conflictId: `conflict-${input.field}`,
+            ticketId: "T-00006",
+            provider: "linear",
+            field: input.field,
+            status: "open" as const,
+            authority: input.authority,
+            createdAt: "2026-03-05T10:10:00.000Z",
+            updatedAt: "2026-03-05T10:10:00.000Z",
+          },
+        };
+      },
+    },
+    linear: {
+      getIssueById: async () => ({
+        ok: true as const,
+        data: {
+          id: "issue-6",
+          identifier: "ENG-666",
+          title: "Linear title",
+          description: "Linear body",
+          state: {
+            id: "state-2",
+            name: "Done",
+            type: "completed" as const,
+          },
+          url: "https://linear.app/hack/issue/ENG-666",
+          teamId: "team-1",
+          projectId: "proj-remote",
+          assigneeId: "user-1",
+          labels: [],
+        },
+      }),
+      getIssueByIdentifier: async () => ({ ok: true as const, data: null }),
+      updateIssue: async () => ({
+        ok: true as const,
+        data: {
+          id: "issue-6",
+          identifier: "ENG-666",
+          title: "Linear title",
+          description: "Linear body",
+          state: {
+            id: "state-2",
+            name: "Done",
+            type: "completed" as const,
+          },
+          url: "https://linear.app/hack/issue/ENG-666",
+          teamId: "team-1",
+          projectId: "proj-remote",
+          assigneeId: "user-1",
+          labels: [],
+        },
+      }),
+      createIssue: async () => {
+        throw new Error("createIssue should not be called");
+      },
+      listTeamStates: async () => ({
+        ok: true as const,
+        data: [
+          {
+            id: "state-1",
+            name: "Todo",
+            type: "unstarted" as const,
+          },
+          {
+            id: "state-2",
+            name: "Done",
+            type: "completed" as const,
+          },
+        ],
+      }),
+      listTeamLabels: async () => ({
+        ok: true as const,
+        data: [],
+      }),
+      listIssueComments: async () => ({
+        ok: true as const,
+        data: [],
+      }),
+      createComment: async () => {
+        throw new Error("createComment should not be called");
+      },
+      listTeamUsers: async () => ({
+        ok: true as const,
+        data: [
+          {
+            id: "user-1",
+            email: "alice@example.com",
+            displayName: "Alice",
+          },
+        ],
+      }),
+      getProject: async () => ({ ok: true as const, data: null }),
+    },
+  };
+
+  const result = await __testOnly.syncTicketToLinearIssue({
+    runtime,
+    ticketId: "T-00006",
+    syncToggles: {
+      labels: false,
+      statuses: true,
+      dependencies: false,
+      projects: true,
+    },
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  expect(recordedConflicts).toEqual([
+    expect.objectContaining({ field: "title", authority: "review_required" }),
+    expect.objectContaining({ field: "status", authority: "review_required" }),
+    expect.objectContaining({ field: "project", authority: "review_required" }),
+  ]);
 });
 
 test("syncTicketToLinearIssue records a deterministic checkpoint idempotency key", async () => {

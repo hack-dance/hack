@@ -1,6 +1,10 @@
-import { buildLegacyDescriptionDocument } from "./documents.ts";
+import {
+  buildLegacyDescriptionDocument,
+  getActiveTicketDescription,
+} from "./documents.ts";
 import {
   buildTicketProvenance,
+  normalizeTicketFieldName,
   projectRemoteLinkToCompatibilityFields,
 } from "./provenance.ts";
 
@@ -200,9 +204,9 @@ export function createNormalizedTicket(input: {
 export function projectNormalizedTicketSummary(input: {
   readonly ticket: NormalizedTicket;
 }): TicketSummaryCompatibility {
-  const description = input.ticket.documents.find(
-    (document) => document.role === "description"
-  );
+  const description = getActiveTicketDescription({
+    documents: input.ticket.documents,
+  });
   const primaryRemote = input.ticket.provenance.remotes[0];
 
   return {
@@ -257,17 +261,31 @@ function buildFieldStates(input: {
   readonly fieldAuthorities: readonly TicketFieldAuthorityEntry[];
   readonly conflicts: readonly TicketSyncConflictCompatibility[];
 }): TicketFieldState[] {
-  return input.fieldAuthorities
-    .filter((fieldAuthority) =>
-      ["title", "status", "assignee", "description"].includes(
-        fieldAuthority.field
-      )
-    )
-    .map((fieldAuthority) => ({
-      field: fieldAuthority.field,
+  const trackedFields = new Map<string, TicketFieldState>();
+
+  for (const fieldAuthority of input.fieldAuthorities) {
+    const field = normalizeTicketFieldName(fieldAuthority.field);
+    if (!["title", "status", "assignee", "description"].includes(field)) {
+      continue;
+    }
+    trackedFields.set(field, {
+      field,
       authority: fieldAuthority.authority,
-      conflictIds: input.conflicts
-        .filter((conflict) => conflict.field === fieldAuthority.field)
-        .map((conflict) => conflict.conflictId),
-    }));
+      conflictIds: [],
+    });
+  }
+
+  for (const conflict of input.conflicts) {
+    const field = normalizeTicketFieldName(conflict.field);
+    const current = trackedFields.get(field);
+    if (!current) {
+      continue;
+    }
+    trackedFields.set(field, {
+      ...current,
+      conflictIds: [...current.conflictIds, conflict.conflictId],
+    });
+  }
+
+  return [...trackedFields.values()];
 }

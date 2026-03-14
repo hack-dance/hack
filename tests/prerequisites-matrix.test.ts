@@ -37,10 +37,14 @@ test("command coverage includes the major first-run and integration paths", () =
     "ps",
     "run",
     "tui",
+    "projects prune",
+    "status",
+    "projects",
     "open",
     "logs",
     "logs --loki",
     "logs --query",
+    "logs --compose",
     "session",
     "session list",
     "session start",
@@ -109,6 +113,26 @@ test("status-style auth commands warn instead of intercepting missing auth", () 
   );
 });
 
+test("runtime inventory diagnostics warn instead of intercepting Docker availability", () => {
+  const [status] = getCommandPrerequisiteContracts({
+    command: "status",
+  });
+  const [projects] = getCommandPrerequisiteContracts({
+    command: "projects",
+  });
+
+  expect(status?.rules.every((rule) => rule.onMissing === "warn")).toBe(true);
+  expect(projects?.rules.every((rule) => rule.onMissing === "warn")).toBe(true);
+  expect(status?.rules.map((rule) => rule.checkId)).toEqual([
+    "docker_cli",
+    "docker_daemon",
+  ]);
+  expect(projects?.rules.map((rule) => rule.checkId)).toEqual([
+    "docker_cli",
+    "docker_daemon",
+  ]);
+});
+
 test("x linear aliases resolve to the shared Linear prerequisite contracts", () => {
   const [linearStatus] = getCommandPrerequisiteContracts({
     command: "linear status",
@@ -140,6 +164,32 @@ test("action commands escalate to guidance for missing integration auth", () => 
     "guide",
   ]);
   expect(linearAction?.rules.map((rule) => rule.onMissing)).toEqual([
+    "guide",
+    "guide",
+  ]);
+});
+
+test("compose-only operational commands guide Docker availability", () => {
+  const [projectsPrune] = getCommandPrerequisiteContracts({
+    command: "projects prune",
+  });
+  const [logsCompose] = getCommandPrerequisiteContracts({
+    command: "logs --compose",
+  });
+
+  expect(projectsPrune?.rules.map((rule) => rule.checkId)).toEqual([
+    "docker_cli",
+    "docker_daemon",
+  ]);
+  expect(projectsPrune?.rules.map((rule) => rule.onMissing)).toEqual([
+    "guide",
+    "guide",
+  ]);
+  expect(logsCompose?.rules.map((rule) => rule.checkId)).toEqual([
+    "docker_cli",
+    "docker_daemon",
+  ]);
+  expect(logsCompose?.rules.map((rule) => rule.onMissing)).toEqual([
     "guide",
     "guide",
   ]);

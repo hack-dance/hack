@@ -46,10 +46,13 @@ The goal is not to make every command fail earlier. The goal is to decide, in a 
 | `hack global down` | `docker_cli`, `docker_daemon` | guide, guide | Conditional: only when a managed global stack already exists; otherwise teardown should stay idempotent |
 | `hack global ca`, `hack global trust` | `global_bootstrap`, `docker_cli`, `docker_daemon`, `global_services` | guide, guide, guide, guide | CA export/trust depends on an installed and running Caddy-managed global stack |
 | `hack up`, `hack down`, `hack restart`, `hack ps`, `hack run`, `hack tui` | `docker_cli`, `docker_daemon` | guide, guide | Core Docker-backed runtime commands |
+| `hack projects prune` | `docker_cli`, `docker_daemon` | guide, guide | Operational cleanup should repair Docker availability before mutating runtime state |
+| `hack status`, `hack projects` | `docker_cli`, `docker_daemon` | warn, warn | Inventory/diagnostic commands should preserve degraded runtime visibility instead of intercepting |
 | `hack up`, `hack restart` | `mux_backend` | guide | Only when lifecycle host processes or mux-backed pre-start hooks are configured |
 | `hack open` | `global_services` | guide | Routed `*.hack` access should repair global routing instead of failing opaquely |
 | `hack logs` | `docker_cli`, `docker_daemon`, `global_services` | guide, guide, warn | Default logs may fall back from Loki to compose logs |
 | `hack logs --loki`, `hack logs --query` | `global_services` | guide | Explicit Loki mode should not silently fall back |
+| `hack logs --compose` | `docker_cli`, `docker_daemon` | guide, guide | Explicit compose logs bypass Loki entirely, so only Docker availability matters |
 | `hack session`, `hack session list`, `hack session start`, `hack session attach`, `hack session exec`, `hack session stop`, `hack ssh` | `tmux_binary` | guide | The current session and session-aware SSH implementation is tmux-backed even when mux config exists elsewhere |
 | `hack session panes`, `hack session capture`, `hack session tail`, `hack setup tmux` | `tmux_binary` | guide | tmux-only surfaces |
 | `hack x github status`, `hack x github profiles` | `github_profile`, `github_token` | warn, warn | Diagnostics should expose missing state instead of intercepting it |
@@ -110,10 +113,14 @@ restart
 ps
 run
 tui
+projects prune
+status
+projects
 open
 logs
 logs --loki
 logs --query
+logs --compose
 session
 session list
 session start

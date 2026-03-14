@@ -291,7 +291,7 @@ export const COMMAND_PREREQUISITE_CONTRACTS = [
   },
   {
     name: "Project runtime lifecycle",
-    commands: ["up", "down", "restart", "ps", "run", "tui"],
+    commands: ["up", "down", "restart", "ps", "run", "tui", "projects prune"],
     rules: [
       {
         checkId: "docker_cli",
@@ -304,6 +304,24 @@ export const COMMAND_PREREQUISITE_CONTRACTS = [
         onMissing: "guide",
         reason:
           "The preferred first-run behavior is guided Docker startup rather than a hard failure.",
+      },
+    ],
+  },
+  {
+    name: "Project inventory diagnostics",
+    commands: ["status", "projects"],
+    rules: [
+      {
+        checkId: "docker_cli",
+        onMissing: "warn",
+        reason:
+          "Project inventory commands can still show registered state even when Docker is unavailable, so they should surface degraded runtime status instead of redirecting.",
+      },
+      {
+        checkId: "docker_daemon",
+        onMissing: "warn",
+        reason:
+          "These commands already report runtime unavailability inline and should preserve that diagnostic behavior.",
       },
     ],
   },
@@ -366,6 +384,24 @@ export const COMMAND_PREREQUISITE_CONTRACTS = [
         onMissing: "guide",
         reason:
           "An explicit Loki request should not silently fall back; it should route into global logging setup.",
+      },
+    ],
+  },
+  {
+    name: "Project logs with compose-only backend",
+    commands: ["logs --compose"],
+    rules: [
+      {
+        checkId: "docker_cli",
+        onMissing: "guide",
+        reason:
+          "An explicit compose log request bypasses Loki entirely and still depends on Docker-backed logs.",
+      },
+      {
+        checkId: "docker_daemon",
+        onMissing: "guide",
+        reason:
+          "Without a reachable daemon there is no compose log backend available for an explicit `--compose` request.",
       },
     ],
   },

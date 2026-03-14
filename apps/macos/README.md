@@ -1,6 +1,8 @@
-# Hack Desktop (macOS)
+# Hack Desktop for macOS (Beta)
 
 Native macOS app for managing local hack projects and daemon status.
+
+> Beta: the macOS app is useful, but it is still outside Hack's core getting-started path.
 
 ## Requirements
 

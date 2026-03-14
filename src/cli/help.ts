@@ -80,6 +80,14 @@ function renderRootHelp(cli: CliSpec): string {
   lines.push(`  ${cli.name} <command> [options]`);
   lines.push("");
 
+  if (cli.highlights && cli.highlights.length > 0) {
+    lines.push("Core promises:");
+    for (const [index, highlight] of cli.highlights.entries()) {
+      lines.push(`  ${index + 1}. ${highlight}`);
+    }
+    lines.push("");
+  }
+
   const grouped = groupRootEntries(cli);
   for (const group of groupsInOrder()) {
     const entries = grouped.get(group);
@@ -120,6 +128,15 @@ function renderRootHelpMarkdown(cli: CliSpec): string {
   lines.push(`${cli.name} <command> [options]`);
   lines.push("```");
   lines.push("");
+
+  if (cli.highlights && cli.highlights.length > 0) {
+    lines.push("### Core promises");
+    lines.push("");
+    for (const highlight of cli.highlights) {
+      lines.push(`1. ${mdEscape(highlight)}`);
+    }
+    lines.push("");
+  }
 
   const grouped = groupRootEntries(cli);
   for (const group of groupsInOrder()) {
@@ -393,6 +410,8 @@ function groupsInOrder(): readonly CliGroup[] {
   return [
     "Global",
     "Project",
+    "Integrations",
+    "Beta",
     "Extensions",
     "Agents",
     "Diagnostics",
@@ -405,8 +424,10 @@ function groupLabel(group: CliGroup): string {
   return (
     {
       Global: "Global commands",
-      Project: "Project commands",
-      Extensions: "Extensions",
+      Project: "Core workflows",
+      Integrations: "Collaboration & integrations",
+      Beta: "Beta workflows",
+      Extensions: "Extension commands",
       Agents: "Agent integrations",
       Diagnostics: "Diagnostics",
       Secrets: "Secrets",

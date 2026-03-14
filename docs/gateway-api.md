@@ -1,9 +1,10 @@
-# Gateway API (hackd HTTP/WS)
+# Gateway API (Beta)
 
 The gateway exposes a small, authenticated HTTP/WS surface for remote orchestration. It is
 designed for structured workflows (jobs + log streaming + shells) and keeps write access
 opt-in with explicit guardrails.
 
+> Beta: this API belongs to the remote control plane, which is still beta.
 > ⚠️ Experimental: remote exposure steps are still being validated end-to-end.
 
 ## Security model (read this first)

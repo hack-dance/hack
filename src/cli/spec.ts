@@ -50,8 +50,12 @@ const packageJson = pkg as unknown as PackageJsonType;
 export const CLI_SPEC = defineCli({
   name: "hack",
   version: packageJson.version,
-  summary:
-    "run multiple local projects concurrently (network isolation + https://*.hack)",
+  summary: "Local development without the port-collision tax",
+  highlights: [
+    "Run multiple repos or branches at the same time without port conflicts.",
+    "Give every project a stable HTTPS URL like https://myapp.hack.",
+    "Keep env, sessions, tickets, and integrations close to the repo.",
+  ] as const,
   globalOptions: [],
   commands: [
     globalCommand,

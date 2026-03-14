@@ -1,9 +1,10 @@
-# Gateway (remote control plane)
+# Gateway (Beta remote control plane)
 
 The gateway exposes a small HTTP/WS surface on top of `hackd` so you can orchestrate jobs, stream
 logs, and open shells remotely. It is disabled by default and binds to `127.0.0.1` unless you
 explicitly expose it through SSH, Cloudflare, or Tailscale.
 
+> Beta: the remote control plane is not part of the core getting-started path yet.
 > ⚠️ Experimental: the remote exposure guides below are still being validated end-to-end.
 
 ## Concepts

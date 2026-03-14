@@ -1,45 +1,52 @@
 # Docs
 
-This directory contains the public documentation for hack. Specs remain in `SPECS/` (working notes).
+This directory is organized around the product story instead of the implementation tree.
 
-## Core docs
+If you are new to Hack, start with the core path first, then move into integrations, then only
+visit the beta and reference surfaces you actually need.
 
+## Core workflows
+
+- [Initialize a project](guides/init-project.md)
 - [CLI reference](cli.md)
+- [Env & secrets](env.md)
+- [Sessions](sessions.md)
+- [Lifecycle](lifecycle.md)
+- [Global settings](guides/global-settings.md)
 - [Architecture](architecture.md)
-- [Sessions](sessions.md) - mux session management (tmux or zellij) + API
-- [Env & secrets](env.md) - env contract + `.hack/.env` + OS keychain secrets
-- [Lifecycle](lifecycle.md) - project startup hooks + managed host processes
-- [Gateway overview](gateway.md)
-- [Gateway API](gateway-api.md)
-- [Supervisor](supervisor.md)
-- [Extensions](extensions.md)
+
+## Integrations & collaboration
+
+- [Integrations overview](integrations.md)
+- [Tickets (git-backed)](guides/tickets.md)
+- [Linear integration architecture](guides/linear-integration-architecture.md)
+
+## Beta workflows
+
+- [Gateway (Beta)](gateway.md)
+- [Remote node quickstart (Beta)](guides/remote-node-quickstart.md)
+- [Remote node runtime container (Beta)](guides/remote-node-container.md)
+- [Remote node on Railway (Beta)](guides/remote-node-railway.md)
+- [Laptop-to-laptop remote node validation (Beta)](guides/remote-node-laptop-e2e.md)
+- [Expose the gateway over SSH (Beta)](guides/remote-ssh.md)
+- [Expose the gateway with Cloudflare (Beta)](guides/remote-cloudflare.md)
+- [Expose the gateway with Tailscale (Beta)](guides/remote-tailscale.md)
+- [Run remote supervisor jobs (Beta)](guides/remote-supervisor.md)
+- [Hack Desktop for macOS (Beta)](../apps/macos/README.md)
+
+## Extensions & reference
+
+- [Extensions & SDK reference](extensions.md)
+- [Gateway API (Beta)](gateway-api.md)
+- [Supervisor (Beta)](supervisor.md)
+- [Gateway auth-broker bootstrap](guides/auth-broker-neon-bootstrap.md)
+- [Create a new extension](guides/create-extension.md)
 - [Control-plane SDK](sdk.md)
 
-Monorepo note:
-- Root scripts orchestrate workspace tasks through Turbo.
-- Package-local commands remain available via `bun run --cwd <workspace> <script>`.
+## Quick diagnostics
 
-Quick diagnostics:
-- `hack usage` (resource usage across running projects)
-- `hack usage --watch` (live resource trends)
-- `hack node routes status` (controller-side remote route bridge state)
-- `hack node routes repair` (re-apply persisted remote route bridge routes)
-
-## Guides
-
-- Start here (first remote node in ~10 minutes):
-  - [Remote node quickstart](guides/remote-node-quickstart.md)
-  - [Run laptop-to-laptop node pairing e2e](guides/remote-node-laptop-e2e.md)
-  - [Bootstrap a remote node on Railway](guides/remote-node-railway.md)
-- Remote setup (one command): `hack remote setup`
-- [Initialize a project](guides/init-project.md)
-- [Global settings](guides/global-settings.md)
-- [Tickets (git-backed)](guides/tickets.md)
-- [Expose the gateway over SSH](guides/remote-ssh.md)
-- [Expose the gateway with Cloudflare](guides/remote-cloudflare.md)
-- [Expose the gateway with Tailscale](guides/remote-tailscale.md)
-- [Run remote supervisor jobs](guides/remote-supervisor.md)
-- [Run a remote node via container image](guides/remote-node-container.md)
-- [Bootstrap a remote node on Railway](guides/remote-node-railway.md)
-- [Bootstrap auth-broker with Neon + Railway](guides/auth-broker-neon-bootstrap.md)
-- [Create a new extension](guides/create-extension.md)
+- `hack help`
+- `hack status`
+- `hack usage`
+- `hack usage --watch`
+- `hack doctor`

@@ -49,8 +49,8 @@ import { isTty } from "../ui/terminal.ts";
 
 const gatewaySpec = defineCommand({
   name: "gateway",
-  summary: "Manage gateway enablement",
-  group: "Extensions",
+  summary: "Beta: manage the remote control plane entrypoint",
+  group: "Beta",
   options: [],
   positionals: [],
   subcommands: [],
@@ -61,7 +61,7 @@ const toggleOptions = [optPath, optProject] as const;
 const enableSpec = defineCommand({
   name: "enable",
   summary: "Enable the gateway and start hackd",
-  group: "Extensions",
+  group: "Beta",
   options: toggleOptions,
   positionals: [],
   subcommands: [],
@@ -93,7 +93,7 @@ const setupOptions = [optPath, optProject, optQr, optNoQr, optYes] as const;
 const setupSpec = defineCommand({
   name: "setup",
   summary: "Guided gateway setup (enable + token)",
-  group: "Extensions",
+  group: "Beta",
   options: setupOptions,
   positionals: [],
   subcommands: [],
@@ -102,7 +102,7 @@ const setupSpec = defineCommand({
 const disableSpec = defineCommand({
   name: "disable",
   summary: "Disable the gateway (does not stop hackd)",
-  group: "Extensions",
+  group: "Beta",
   options: toggleOptions,
   positionals: [],
   subcommands: [],

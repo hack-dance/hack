@@ -49,6 +49,7 @@ import {
   type LocalLinearProjectArtifact,
   loadLocalLinearProjectArtifacts,
   materializeLocalLinearProjectArtifact,
+  parseLinearProjectArtifactFile,
   planLinearProjectArtifactChanges,
   resolveLinearProjectArtifactPath,
   serializeLinearProjectArtifactFile,
@@ -2936,24 +2937,45 @@ async function runProjectArtifactCommand(input: {
         return artifacts;
       }
 
+      const localArtifacts = await loadManagedProjectArtifacts({
+        family: input.family,
+        ignoreParseErrors: true,
+        runtime: input.runtime,
+      });
+      if (!localArtifacts.ok) {
+        return localArtifacts;
+      }
+
+      const localByLinearId = new Map(
+        localArtifacts.data
+          .filter((artifact) => artifact.linearId)
+          .map((artifact) => [artifact.linearId as string, artifact])
+      );
+
       let changed = 0;
       const writtenPaths: string[] = [];
       for (const artifact of artifacts.data) {
-        const localArtifact = materializeLocalLinearProjectArtifact({
+        const canonicalArtifact = materializeLocalLinearProjectArtifact({
           projectDir: input.runtime.projectDir,
           artifact,
           ...(input.family === "status-updates"
             ? { statusUpdateState: "published" as const }
             : {}),
         });
-        const wrote = await writeLocalLinearProjectArtifact({
-          artifact: localArtifact,
+        const existingManagedArtifact = artifact.linearId
+          ? localByLinearId.get(artifact.linearId)
+          : undefined;
+        const wrote = await writeManagedProjectArtifactToCanonicalPath({
+          artifact: canonicalArtifact,
+          ...(existingManagedArtifact
+            ? { previousPath: existingManagedArtifact.path }
+            : {}),
         });
         if (!wrote) {
           continue;
         }
         changed += 1;
-        writtenPaths.push(localArtifact.path);
+        writtenPaths.push(canonicalArtifact.path);
       }
 
       return {
@@ -2990,6 +3012,12 @@ async function runProjectArtifactCommand(input: {
         localArtifacts: localArtifacts.data,
         remoteArtifacts: remoteArtifacts.data,
       });
+      if (plan.errors.length > 0) {
+        return {
+          ok: false,
+          error: plan.errors.join("\n"),
+        };
+      }
       return {
         ok: true,
         payload: {
@@ -3055,14 +3083,20 @@ async function runProjectArtifactCommand(input: {
         if (!saved.ok) {
           return saved;
         }
-        const wrote = await writeLocalLinearProjectArtifact({
-          artifact: {
-            ...saved.data,
-            path: artifact.path,
-          },
+        const wrote = await writeManagedProjectArtifactToCanonicalPath({
+          artifact: materializeLocalLinearProjectArtifact({
+            projectDir: input.runtime.projectDir,
+            artifact: saved.data,
+          }),
+          previousPath: artifact.path,
         });
         if (wrote) {
-          writtenPaths.push(artifact.path);
+          writtenPaths.push(
+            resolveLinearProjectArtifactPath({
+              projectDir: input.runtime.projectDir,
+              artifact: saved.data,
+            })
+          );
         }
       }
 
@@ -3075,14 +3109,16 @@ async function runProjectArtifactCommand(input: {
         if (!saved.ok) {
           return saved;
         }
-        const wrote = await writeLocalLinearProjectArtifact({
-          artifact: {
-            ...saved.data,
-            path: entry.local.path,
-          },
+        const nextArtifact = materializeLocalLinearProjectArtifact({
+          projectDir: input.runtime.projectDir,
+          artifact: saved.data,
+        });
+        const wrote = await writeManagedProjectArtifactToCanonicalPath({
+          artifact: nextArtifact,
+          previousPath: entry.local.path,
         });
         if (wrote) {
-          writtenPaths.push(entry.local.path);
+          writtenPaths.push(nextArtifact.path);
         }
       }
 
@@ -3121,12 +3157,23 @@ async function runProjectArtifactCommand(input: {
       return localArtifacts;
     }
 
-    const drafts = localArtifacts.data.filter(
+    const draftArtifacts = localArtifacts.data.filter(
       (artifact) =>
         artifact.kind === "linear-project-status-update" &&
-        isDraftStatusUpdatePath({ path: artifact.path }) &&
-        !artifact.linearId
+        isDraftStatusUpdatePath({ path: artifact.path })
     );
+    const alreadyPublishedDraft = draftArtifacts.find(
+      (artifact) => artifact.linearId
+    );
+    if (alreadyPublishedDraft) {
+      return {
+        ok: false,
+        error:
+          "Publish requires a draft status update without a linearId. Remove the linearId or move the file to published/ first.",
+      };
+    }
+
+    const drafts = draftArtifacts.filter((artifact) => !artifact.linearId);
 
     const movedPaths: Array<{ from: string; to: string }> = [];
     for (const artifact of drafts) {
@@ -3240,6 +3287,7 @@ async function loadManagedProjectArtifacts(input: {
   readonly family: LinearProjectArtifactFamily;
   readonly runtime: ProjectArtifactRuntime;
   readonly path?: string;
+  readonly ignoreParseErrors?: boolean;
 }): Promise<
   | { readonly ok: true; readonly data: readonly LocalLinearProjectArtifact[] }
   | { readonly ok: false; readonly error: string }
@@ -3249,6 +3297,9 @@ async function loadManagedProjectArtifacts(input: {
       ok: true,
       data: await loadLocalLinearProjectArtifacts({
         family: input.family,
+        ...(input.ignoreParseErrors !== undefined
+          ? { ignoreParseErrors: input.ignoreParseErrors }
+          : {}),
         linearProjectId: input.runtime.projectId,
         path: input.path,
         projectDir: input.runtime.projectDir,
@@ -3621,6 +3672,79 @@ async function writeLocalLinearProjectArtifact(input: {
   await mkdir(dirname(input.artifact.path), { recursive: true });
   await Bun.write(input.artifact.path, text);
   return true;
+}
+
+async function writeManagedProjectArtifactToCanonicalPath(input: {
+  readonly artifact: LocalLinearProjectArtifact;
+  readonly previousPath?: string;
+}): Promise<boolean> {
+  await assertManagedArtifactPathWritable({
+    artifact: input.artifact,
+    ...(input.previousPath ? { previousPath: input.previousPath } : {}),
+  });
+  const wrote = await writeLocalLinearProjectArtifact({
+    artifact: input.artifact,
+  });
+  if (
+    input.previousPath &&
+    input.previousPath !== input.artifact.path &&
+    (wrote || (await Bun.file(input.artifact.path).exists()))
+  ) {
+    await removeFileIfExists({
+      path: input.previousPath,
+    });
+  }
+  return wrote;
+}
+
+async function assertManagedArtifactPathWritable(input: {
+  readonly artifact: LocalLinearProjectArtifact;
+  readonly previousPath?: string;
+}): Promise<void> {
+  const existingText = await readFileIfExists({
+    path: input.artifact.path,
+  });
+  if (existingText === null) {
+    return;
+  }
+
+  if (input.previousPath && input.previousPath === input.artifact.path) {
+    return;
+  }
+
+  const parsedExisting = parseExistingManagedArtifactAtPath({
+    path: input.artifact.path,
+    text: existingText,
+  });
+  if (!parsedExisting) {
+    throw new Error(
+      `Refusing to overwrite unmanaged file: ${input.artifact.path}`
+    );
+  }
+
+  if (
+    parsedExisting.kind !== input.artifact.kind ||
+    parsedExisting.linearProjectId !== input.artifact.linearProjectId ||
+    parsedExisting.linearId !== input.artifact.linearId
+  ) {
+    throw new Error(
+      `Refusing to overwrite managed file for a different artifact: ${input.artifact.path}`
+    );
+  }
+}
+
+function parseExistingManagedArtifactAtPath(input: {
+  readonly path: string;
+  readonly text: string;
+}): LocalLinearProjectArtifact | null {
+  try {
+    return parseLinearProjectArtifactFile({
+      filePath: input.path,
+      text: input.text,
+    });
+  } catch {
+    return null;
+  }
 }
 
 async function readFileIfExists(input: {

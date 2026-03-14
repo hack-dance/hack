@@ -257,11 +257,13 @@ export const loadLocalLinearProjectArtifacts = async ({
   linearProjectId,
   family,
   path,
+  ignoreParseErrors = false,
 }: {
   readonly projectDir: string;
   readonly linearProjectId: string;
   readonly family: LinearProjectArtifactFamily;
   readonly path?: string;
+  readonly ignoreParseErrors?: boolean;
 }): Promise<readonly LocalLinearProjectArtifact[]> => {
   const targetPath =
     resolveArtifactInputPath({
@@ -290,7 +292,15 @@ export const loadLocalLinearProjectArtifacts = async ({
     left.localeCompare(right)
   )) {
     const text = await Bun.file(filePath).text();
-    const artifact = parseLinearProjectArtifactFile({ filePath, text });
+    let artifact: LocalLinearProjectArtifact;
+    try {
+      artifact = parseLinearProjectArtifactFile({ filePath, text });
+    } catch (error) {
+      if (ignoreParseErrors) {
+        continue;
+      }
+      throw error;
+    }
     if (artifact.linearProjectId !== linearProjectId) {
       continue;
     }

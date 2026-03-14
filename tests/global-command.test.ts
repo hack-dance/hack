@@ -13,6 +13,8 @@ import {
   GLOBAL_HACK_DIR_NAME,
   GLOBAL_LOGGING_COMPOSE_FILENAME,
   GLOBAL_LOGGING_DIR_NAME,
+  GLOBAL_MANAGED_ENV_SCHEMA_FILENAME,
+  GLOBAL_SCHEMAS_DIR_NAME,
 } from "../src/constants.ts";
 
 let tempDir: string | null = null;
@@ -273,9 +275,17 @@ test("global install writes compose files and starts stacks", async () => {
   );
   const hasCaddy = await Bun.file(caddyCompose).exists();
   const hasLogging = await Bun.file(loggingCompose).exists();
+  const managedEnvSchema = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_SCHEMAS_DIR_NAME,
+    GLOBAL_MANAGED_ENV_SCHEMA_FILENAME
+  );
+  const hasManagedEnvSchema = await Bun.file(managedEnvSchema).exists();
 
   expect(hasCaddy).toBe(true);
   expect(hasLogging).toBe(true);
+  expect(hasManagedEnvSchema).toBe(true);
   expect(
     runCalls.some((call) => call.includes(caddyCompose) && call.includes("up"))
   ).toBe(true);

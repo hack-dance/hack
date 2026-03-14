@@ -669,6 +669,70 @@ export function renderProjectEnvSchemaJson(): string {
   return `${JSON.stringify(schema, null, 2)}\n`;
 }
 
+export function renderProjectManagedEnvSchemaJson(): string {
+  const schema = {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    title: "hack.env.managed.json",
+    type: "object",
+    additionalProperties: false,
+    required: ["version", "environment", "metadata", "entries"],
+    properties: {
+      $schema: { type: "string" },
+      version: { type: "integer", const: 1 },
+      environment: { type: "string", minLength: 1 },
+      metadata: {
+        type: "object",
+        additionalProperties: false,
+        required: ["updatedAt", "updatedBy", "source"],
+        properties: {
+          description: { type: "string" },
+          updatedAt: { type: "string", format: "date-time" },
+          updatedBy: { type: "string", minLength: 1 },
+          source: { type: "string", minLength: 1 },
+        },
+      },
+      entries: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["key", "value", "required"],
+          properties: {
+            key: {
+              type: "string",
+              pattern: "^[A-Z_][A-Z0-9_]*$",
+              minLength: 1,
+            },
+            value: {
+              type: "object",
+              additionalProperties: false,
+              required: ["kind", "text"],
+              properties: {
+                kind: { type: "string", enum: ["plaintext", "secret"] },
+                text: { type: "string" },
+              },
+            },
+            required: { type: "boolean" },
+            services: {
+              anyOf: [
+                { type: "null" },
+                {
+                  type: "array",
+                  items: { type: "string", minLength: 1 },
+                  uniqueItems: true,
+                },
+              ],
+            },
+            description: { type: "string" },
+          },
+        },
+      },
+    },
+  } as const;
+
+  return `${JSON.stringify(schema, null, 2)}\n`;
+}
+
 export function renderProjectBranchesSchemaJson(): string {
   const schema = {
     $schema: "https://json-schema.org/draft/2020-12/schema",

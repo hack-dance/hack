@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { renderProjectConfigSchemaJson } from "../src/templates.ts";
+import {
+  renderProjectConfigSchemaJson,
+  renderProjectManagedEnvSchemaJson,
+} from "../src/templates.ts";
 
 test("project config schema includes startup validation", () => {
   const schema = JSON.parse(renderProjectConfigSchemaJson()) as Record<
@@ -48,4 +51,52 @@ test("project config schema includes strict lifecycle hooks and processes", () =
   const processItems = processes.items as Record<string, unknown>;
   expect(processItems.additionalProperties).toBe(false);
   expect(processItems.required).toEqual(["name", "command"]);
+});
+
+test("managed env schema models entry kind, metadata, and service scope", () => {
+  const schema = JSON.parse(renderProjectManagedEnvSchemaJson()) as Record<
+    string,
+    unknown
+  >;
+  const properties = schema.properties as Record<string, unknown>;
+
+  expect(schema.additionalProperties).toBe(false);
+  expect(schema.required).toEqual([
+    "version",
+    "environment",
+    "metadata",
+    "entries",
+  ]);
+
+  const metadata = properties.metadata as Record<string, unknown>;
+  expect(metadata.additionalProperties).toBe(false);
+  const metadataProperties = metadata.properties as Record<string, unknown>;
+  expect(metadataProperties.updatedAt).toEqual({
+    type: "string",
+    format: "date-time",
+  });
+
+  const entries = properties.entries as Record<string, unknown>;
+  const entry = entries.items as Record<string, unknown>;
+  expect(entry.additionalProperties).toBe(false);
+  expect(entry.required).toEqual(["key", "value", "required"]);
+
+  const entryProperties = entry.properties as Record<string, unknown>;
+  const value = entryProperties.value as Record<string, unknown>;
+  expect(value.additionalProperties).toBe(false);
+  const valueProperties = value.properties as Record<string, unknown>;
+  expect(valueProperties.kind).toEqual({
+    type: "string",
+    enum: ["plaintext", "secret"],
+  });
+
+  const services = entryProperties.services as Record<string, unknown>;
+  expect(services.anyOf).toEqual([
+    { type: "null" },
+    {
+      type: "array",
+      items: { type: "string", minLength: 1 },
+      uniqueItems: true,
+    },
+  ]);
 });

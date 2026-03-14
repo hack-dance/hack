@@ -34,6 +34,7 @@ hack supports a project-scoped env contract (shareable, no values) plus safe sec
 ```
 
 Fields:
+
 - `key`: uppercase snake-case env var name (e.g. `AWS_PROFILE`).
 - `required`: if true, `hack up/run/restart` fails when missing (for targeted services).
 - `source`:
@@ -41,6 +42,83 @@ Fields:
   - `keychain`: read from the OS keychain only.
 - `services`: `null` (or omitted) means all services; otherwise a list of Compose service names.
 - `description`: optional, for humans/UI.
+
+## Portable managed artifact
+
+Portable env management uses three layers:
+
+- `.hack/hack.env.json`: committed declaration contract for keys, required flags, service scope, and descriptions
+- `PortableProjectEnvArtifactV1`: canonical managed-value artifact for portability, import/export, and future remote publish/apply flows
+- local compatibility storage: `.hack/.env` for plaintext values plus the configured secret backend for secret values
+
+The managed artifact is intentionally separate from `.hack/hack.env.json`. The contract remains safe to commit. The managed artifact carries actual values plus intent metadata and should be encrypted as a whole when stored outside the local machine.
+
+Suggested import/export filename:
+
+- `.hack/hack.env.managed.json`
+- schema URL: `https://schemas.hack/hack.env.managed.schema.json`
+
+Artifact shape:
+
+```json
+{
+  "$schema": "https://schemas.hack/hack.env.managed.schema.json",
+  "version": 1,
+  "environment": "default",
+  "metadata": {
+    "description": "Shared dev environment for Hack App",
+    "updatedAt": "2026-03-13T18:00:00Z",
+    "updatedBy": "cli",
+    "source": "hack-cli"
+  },
+  "entries": [
+    {
+      "key": "AWS_REGION",
+      "value": {
+        "kind": "plaintext",
+        "text": "us-east-1"
+      },
+      "required": true,
+      "services": ["api"],
+      "description": "AWS region used by the API"
+    },
+    {
+      "key": "DATABASE_URL",
+      "value": {
+        "kind": "secret",
+        "text": "postgres://..."
+      },
+      "required": true,
+      "services": ["api", "worker"],
+      "description": "Primary application database"
+    }
+  ]
+}
+```
+
+Managed artifact rules:
+
+- `entries[].value.kind` distinguishes logical plaintext from logical secrets
+- `entries[].value.text` is the canonical string value before outer-envelope encryption
+- `services` belongs in the managed artifact because portability must preserve service intent outside the originating machine
+- `metadata` captures human and CLI/Desktop provenance, not machine-local backend details
+- the artifact must not store local absolute paths, keychain service names, backend provider configuration, or runtime resolution history such as `resolvedFrom`
+
+Local compatibility rules:
+
+- `.hack/.env` contains only plaintext values
+- the configured secret backend contains only secret values keyed by env var name
+- neither compatibility target stores descriptions, service scope, timestamps, or actor metadata
+- compatibility targets are derived outputs and may be regenerated from the managed artifact at any time
+
+CLI behavior when a managed artifact is active:
+
+1. Reads validate artifact keys against `.hack/hack.env.json` when present.
+2. Reads report artifact intent, local materialization state, and drift between them.
+3. `hack env set` mutates the canonical artifact first, then materializes the entry to `.hack/.env` or the configured secret backend based on `value.kind`.
+4. If an entry changes kind, Hack removes stale local state from the old compatibility target before writing the new one.
+
+See [docs/plans/2026-03-13-portable-project-env-artifact-schema-design.md](plans/2026-03-13-portable-project-env-artifact-schema-design.md) for the full design rationale and implementation boundary.
 
 ## CLI
 
@@ -59,6 +137,7 @@ Fields:
   - sets global backend strategy for multi-node/env secret storage
 
 Notes:
+
 - `hack env set` also supports interactive prompting when `KEY` or `VALUE` is omitted.
 - Keychain mode uses service name `hack-<projectName>` (project name from `.hack/hack.config.json`).
 - Encrypted-file mode uses `HACK_SECRETS_FILE_KEY` (if set) before keychain key lookup (`hack-secrets-backend/encrypted-file-key`).
@@ -89,6 +168,7 @@ Global config supports backend selection for secret portability:
 ```
 
 Fields:
+
 - `backend`: `keychain` | `encrypted_file` | `cloud`.
 - `allowEnvAuthRefs`: allow `env:VAR_NAME` auth/secret references for node/controller workflows.
 - `encryptedFile.path`: target path for encrypted local store mode.
@@ -106,23 +186,28 @@ When you run `hack up`, `hack restart`, or `hack run`, hack:
 4. Invokes `docker compose` with an environment that includes resolved values (including secret backend values).
 
 Security posture:
+
 - Secret values are never written into `.hack/` YAML files.
 - Plain env values live in `.hack/.env` (expected to be gitignored in most repos).
 
 ## Remote node secret behavior
 
 Current behavior (today):
+
 - Node auth tokens and extension auth refs are stored through the configured secret backend.
 - `env:VAR_NAME` auth refs are allowed only when `controlPlane.secrets.allowEnvAuthRefs=true`.
 - Remote dispatch/workspace bootstrap does **not** automatically copy all host env values to remote nodes.
 
 Recommended setup:
+
 - Keep controller secrets in `keychain` or `encrypted_file` backend (not shell env).
 - Configure each remote node to use the same secret backend strategy where possible.
 - Use project env contract (`.hack/hack.env.json`) to make required keys explicit before runs.
 
 Planned direction:
+
 - Add an explicit host-to-node secret sync command with least-privilege scoping, encrypted payload delivery, and audit events per run.
+- Keep the committed contract (`.hack/hack.env.json`) separate from the future portable managed-values artifact. See `docs/plans/2026-03-13-portable-project-env-artifact-schema-design.md`.
 
 ## Daemon/gateway API (UI integration)
 

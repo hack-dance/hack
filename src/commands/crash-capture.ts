@@ -11,6 +11,13 @@ import {
 import { findProjectContext, readProjectConfig } from "../lib/project.ts";
 import { exec } from "../lib/shell.ts";
 import { display } from "../ui/display.ts";
+import {
+  buildDoctorRecoveryGuidance,
+  buildRecoveryNextSteps,
+  type DoctorRecoveryGuidance,
+  type RecoveryCheckResult,
+  scopeDoctorRecoveryGuidance,
+} from "./recovery-guidance.ts";
 
 const DEFAULT_LOG_WINDOW = "45m";
 const DEFAULT_DOCKER_LOG_LINES = 300;
@@ -62,6 +69,7 @@ type CrashCaptureSummary = {
   readonly failureCount: number;
   readonly failedCommands: readonly string[];
   readonly errors: readonly string[];
+  readonly recovery: DoctorRecoveryGuidance;
   readonly nextSteps: readonly string[];
 };
 
@@ -183,7 +191,7 @@ const handleCrashCapture: CommandHandlerFor<typeof crashCaptureSpec> = async ({
     },
   });
 
-  const summary = buildCrashCaptureSummary({
+  const summary = await buildCrashCaptureSummary({
     captureRoot,
     projectRoot: project?.projectRoot ?? null,
     results,
@@ -198,6 +206,7 @@ const handleCrashCapture: CommandHandlerFor<typeof crashCaptureSpec> = async ({
     renderCrashCaptureReadme({
       captureRoot,
       projectRoot: project?.projectRoot ?? null,
+      recovery: summary.recovery,
       failedCommands: summary.failedCommands,
     }),
     { createPath: true }
@@ -539,15 +548,18 @@ async function writeJsonFile(input: {
   });
 }
 
-export function buildCrashCaptureSummary(input: {
+export async function buildCrashCaptureSummary(input: {
   readonly captureRoot: string;
   readonly projectRoot: string | null;
   readonly results: readonly CaptureCommandResult[];
   readonly errors: readonly string[];
-}): CrashCaptureSummary {
+}): Promise<CrashCaptureSummary> {
   const failedCommands = input.results
     .filter((result) => result.exitCode !== 0)
     .map((result) => result.name);
+  const recovery = buildDoctorRecoveryGuidance({
+    results: await inferRecoveryCheckResults({ results: input.results }),
+  });
 
   return {
     captureRoot: input.captureRoot,
@@ -556,27 +568,276 @@ export function buildCrashCaptureSummary(input: {
     failureCount: failedCommands.length,
     failedCommands,
     errors: input.errors,
-    nextSteps: buildCrashCaptureNextSteps({
+    recovery,
+    nextSteps: buildRecoveryNextSteps({
+      guidance: recovery,
       projectRoot: input.projectRoot,
+      includeClassifyStep: true,
     }),
   };
 }
 
-function buildCrashCaptureNextSteps(input: {
-  readonly projectRoot: string | null;
+async function inferRecoveryCheckResults(input: {
+  readonly results: readonly CaptureCommandResult[];
+}): Promise<readonly RecoveryCheckResult[]> {
+  const inferred: RecoveryCheckResult[] = [];
+  const seen = new Set<string>();
+
+  for (const result of input.results) {
+    if (!shouldInferRecoveryFromResult({ result })) {
+      continue;
+    }
+
+    const checkResults = await inferRecoveryCheckResult({ result });
+    for (const checkResult of checkResults) {
+      pushRecoveryCheckResult({
+        target: inferred,
+        seen,
+        result: checkResult,
+      });
+    }
+  }
+
+  return inferred;
+}
+
+async function inferRecoveryCheckResult(input: {
+  readonly result: CaptureCommandResult;
+}): Promise<readonly RecoveryCheckResult[]> {
+  const inferred: RecoveryCheckResult[] = [];
+  const seen = new Set<string>();
+  const output = await readCaptureOutput({
+    path: input.result.file,
+  });
+
+  if (output) {
+    pushRecoveryCheckResults({
+      target: inferred,
+      seen,
+      results: inferRecoveryCheckResultsFromOutput({ output }),
+    });
+  }
+
+  if (
+    input.result.name === "hack_global_status" &&
+    input.result.exitCode !== 0 &&
+    inferred.length === 0
+  ) {
+    pushRecoveryCheckResult({
+      target: inferred,
+      seen,
+      result: buildRecoveryFollowUpResult({
+        name: "hack global status",
+        logFile: "hack_global_status.log",
+      }),
+    });
+  }
+
+  if (
+    input.result.name === "hack_daemon_status" &&
+    input.result.exitCode !== 0 &&
+    inferred.length === 0
+  ) {
+    pushRecoveryCheckResult({
+      target: inferred,
+      seen,
+      result: buildRecoveryFollowUpResult({
+        name: "hack daemon status",
+        logFile: "hack_daemon_status.log",
+      }),
+    });
+  }
+
+  if (
+    input.result.name === "hack_doctor_project" &&
+    input.result.exitCode !== 0 &&
+    inferred.length === 0
+  ) {
+    pushRecoveryCheckResult({
+      target: inferred,
+      seen,
+      result: buildRecoveryFollowUpResult({
+        name: "doctor",
+        logFile: "hack_doctor_project.log",
+      }),
+    });
+  }
+
+  return inferred;
+}
+
+async function readCaptureOutput(input: {
+  readonly path: string;
+}): Promise<string | null> {
+  try {
+    return await Bun.file(input.path).text();
+  } catch {
+    return null;
+  }
+}
+
+function shouldInferRecoveryFromResult(input: {
+  readonly result: CaptureCommandResult;
+}): boolean {
+  if (input.result.name === "hack_doctor_project") {
+    return true;
+  }
+
+  return input.result.exitCode !== 0;
+}
+
+function inferRecoveryCheckResultsFromOutput(input: {
+  readonly output: string;
+}): readonly RecoveryCheckResult[] {
+  const inferred: RecoveryCheckResult[] = [];
+
+  if (input.output.includes("hack global up")) {
+    inferred.push({
+      name: "proxy ports",
+      status: "warn",
+      message: "Captured recovery guidance (run: hack global up)",
+    });
+  }
+
+  if (input.output.includes("hack restart")) {
+    inferred.push({
+      name: "caddy hosts",
+      status: "warn",
+      message: "Captured recovery guidance (run: hack restart)",
+    });
+  }
+
+  if (input.output.includes("hack daemon clear")) {
+    inferred.push({
+      name: "daemon",
+      status: "warn",
+      message: "Captured daemon status failure (run: hack daemon clear)",
+    });
+  } else if (input.output.includes("hack daemon start")) {
+    inferred.push({
+      name: "daemon",
+      status: "warn",
+      message: "Captured daemon status failure (run: hack daemon start)",
+    });
+  }
+
+  if (input.output.includes("hack doctor --fix")) {
+    inferred.push({
+      name: "coredns forwarding",
+      status: "warn",
+      message:
+        "Captured configuration repair guidance (run: hack doctor --fix)",
+    });
+  }
+
+  for (const item of extractManualFollowUpItems({ output: input.output })) {
+    const followUp = parseManualFollowUpItem({ item });
+    inferred.push({
+      name: followUp.name,
+      status: "warn",
+      message: followUp.message,
+    });
+  }
+
+  return inferred;
+}
+
+function extractManualFollowUpItems(input: {
+  readonly output: string;
 }): readonly string[] {
-  const projectRoot = input.projectRoot ?? "<repo>";
-  return [
-    `Run \`hack doctor --path ${projectRoot}\` to classify restart versus repair work.`,
-    "If global proxy/runtime is down, run `hack global up`.",
-    `If project host mappings are stale, run \`hack restart --path ${projectRoot}\`.`,
-    `If doctor reports DNS/network/CA drift, run \`hack doctor --fix --path ${projectRoot}\`.`,
-  ];
+  const lines = input.output.split("\n");
+  const items: string[] = [];
+  let inManualFollowUp = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    if (trimmed === "Manual follow-up:") {
+      inManualFollowUp = true;
+      continue;
+    }
+
+    if (!inManualFollowUp) {
+      continue;
+    }
+
+    if (trimmed.length === 0) {
+      break;
+    }
+
+    if (trimmed.endsWith(":") && !trimmed.startsWith("- ")) {
+      break;
+    }
+
+    if (trimmed.startsWith("- ")) {
+      items.push(trimmed.slice(2));
+    }
+  }
+
+  return items;
+}
+
+function parseManualFollowUpItem(input: { readonly item: string }): {
+  readonly name: string;
+  readonly message: string;
+} {
+  const separatorIndex = input.item.indexOf(": ");
+  if (separatorIndex === -1) {
+    return {
+      name: "doctor follow-up",
+      message: input.item,
+    };
+  }
+
+  return {
+    name: input.item.slice(0, separatorIndex),
+    message: input.item.slice(separatorIndex + 2),
+  };
+}
+
+function buildRecoveryFollowUpResult(input: {
+  readonly name: string;
+  readonly logFile: string;
+}): RecoveryCheckResult {
+  return {
+    name: input.name,
+    status: "warn",
+    message: `Review ${input.logFile} for detailed recovery guidance`,
+  };
+}
+
+function pushRecoveryCheckResults(input: {
+  readonly target: RecoveryCheckResult[];
+  readonly seen: Set<string>;
+  readonly results: readonly RecoveryCheckResult[];
+}): void {
+  for (const result of input.results) {
+    pushRecoveryCheckResult({
+      target: input.target,
+      seen: input.seen,
+      result,
+    });
+  }
+}
+
+function pushRecoveryCheckResult(input: {
+  readonly target: RecoveryCheckResult[];
+  readonly seen: Set<string>;
+  readonly result: RecoveryCheckResult;
+}): void {
+  const key = `${input.result.name}\u0000${input.result.message}`;
+  if (input.seen.has(key)) {
+    return;
+  }
+
+  input.seen.add(key);
+  input.target.push(input.result);
 }
 
 export function renderCrashCaptureReadme(input: {
   readonly captureRoot: string;
   readonly projectRoot: string | null;
+  readonly recovery: DoctorRecoveryGuidance;
   readonly failedCommands: readonly string[];
 }): string {
   const projectRoot = input.projectRoot ?? "<repo>";
@@ -600,9 +861,59 @@ export function renderCrashCaptureReadme(input: {
     ...failedCommands,
     "",
     "Suggested recovery flow:",
-    `1. hack doctor --path ${projectRoot}`,
-    "2. hack global up",
-    `3. hack restart --path ${projectRoot}`,
-    `4. hack doctor --fix --path ${projectRoot}`,
+    ...renderRecoveryWorkflow({
+      guidance: input.recovery,
+      projectRoot: input.projectRoot,
+    }),
   ].join("\n");
+}
+
+function renderRecoveryWorkflow(input: {
+  readonly guidance: DoctorRecoveryGuidance;
+  readonly projectRoot: string | null;
+}): readonly string[] {
+  const scoped = scopeDoctorRecoveryGuidance({
+    guidance: input.guidance,
+    projectRoot: input.projectRoot,
+  });
+  const projectRoot = input.projectRoot ?? "<repo>";
+  const lines = ["1. Classify:", `   - \`hack doctor --path ${projectRoot}\``];
+  let stepNumber = 2;
+
+  if (scoped.temporaryBreakage.length > 0) {
+    lines.push(`${stepNumber}. Temporary breakage:`);
+    for (const command of scoped.temporaryBreakage) {
+      lines.push(`   - \`${command}\``);
+    }
+    stepNumber += 1;
+  }
+
+  if (scoped.configurationRepair.length > 0) {
+    lines.push(`${stepNumber}. Configuration repair:`);
+    for (const command of scoped.configurationRepair) {
+      lines.push(`   - \`${command}\``);
+    }
+    stepNumber += 1;
+  }
+
+  if (scoped.followUp.length > 0) {
+    lines.push(`${stepNumber}. Manual follow-up:`);
+    for (const item of scoped.followUp) {
+      lines.push(`   - ${item}`);
+    }
+    stepNumber += 1;
+  }
+
+  lines.push(`${stepNumber}. Verify:`);
+  for (const command of scoped.verify) {
+    lines.push(`   - \`${command}\``);
+  }
+  stepNumber += 1;
+
+  lines.push(`${stepNumber}. If it still fails:`);
+  for (const command of scoped.capture) {
+    lines.push(`   - \`${command}\``);
+  }
+
+  return lines;
 }

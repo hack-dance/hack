@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 
 import {
   buildBaseCaptureCommands,
@@ -28,44 +31,205 @@ test("crash capture includes doctor and proxy-relevant diagnostics", () => {
   expect(processSnapshot?.cmd.join(" ")).not.toContain("rg ");
 });
 
-test("crash capture summary reports failures and ordered next steps", () => {
-  const summary = buildCrashCaptureSummary({
-    captureRoot: "/tmp/demo/.tmp/crash-capture-1",
-    projectRoot: "/tmp/demo",
-    results: [
-      {
-        name: "hack_doctor_project",
-        cmd: ["hack", "doctor", "--path", "/tmp/demo"],
-        exitCode: 1,
-        file: "/tmp/demo/.tmp/crash-capture-1/hack_doctor_project.log",
-        bytes: 120,
-      },
-      {
-        name: "hack_global_status",
-        cmd: ["hack", "global", "status", "--json"],
-        exitCode: 0,
-        file: "/tmp/demo/.tmp/crash-capture-1/hack_global_status.log",
-        bytes: 80,
-      },
-    ],
-    errors: ["hack_doctor_project failed (1)"],
-  });
+test("crash capture summary restores doctor recovery guidance from warning-only doctor logs", async () => {
+  const captureRoot = await mkdtemp(resolve(tmpdir(), "hack-crash-capture-"));
+  const doctorLog = resolve(captureRoot, "hack_doctor_project.log");
+  await Bun.write(
+    doctorLog,
+    [
+      "$ hack doctor --path /tmp/demo",
+      "exit_code=1",
+      "",
+      "Temporary breakage:",
+      "- hack restart",
+      "",
+      "Configuration repair:",
+      "- hack doctor --fix",
+      "",
+      "Manual follow-up:",
+      "- gateway tokens: No active tokens (run: hack x gateway token-create)",
+    ].join("\n")
+  );
 
-  expect(summary.commandCount).toBe(2);
-  expect(summary.failureCount).toBe(1);
-  expect(summary.failedCommands).toEqual(["hack_doctor_project"]);
-  expect(summary.nextSteps).toEqual([
-    "Run `hack doctor --path /tmp/demo` to classify restart versus repair work.",
-    "If global proxy/runtime is down, run `hack global up`.",
-    "If project host mappings are stale, run `hack restart --path /tmp/demo`.",
-    "If doctor reports DNS/network/CA drift, run `hack doctor --fix --path /tmp/demo`.",
-  ]);
+  try {
+    const summary = await buildCrashCaptureSummary({
+      captureRoot,
+      projectRoot: "/tmp/demo",
+      results: [
+        {
+          name: "hack_doctor_project",
+          cmd: ["hack", "doctor", "--path", "/tmp/demo"],
+          exitCode: 0,
+          file: doctorLog,
+          bytes: 120,
+        },
+        {
+          name: "hack_global_status",
+          cmd: ["hack", "global", "status", "--json"],
+          exitCode: 0,
+          file: resolve(captureRoot, "hack_global_status.log"),
+          bytes: 80,
+        },
+      ],
+      errors: ["hack_doctor_project failed (1)"],
+    });
+
+    expect(summary.commandCount).toBe(2);
+    expect(summary.failureCount).toBe(0);
+    expect(summary.failedCommands).toEqual([]);
+    expect(summary.recovery.temporaryBreakage).toEqual(["hack restart"]);
+    expect(summary.recovery.configurationRepair).toEqual(["hack doctor --fix"]);
+    expect(summary.recovery.followUp).toEqual([
+      "gateway tokens: No active tokens (run: hack x gateway token-create)",
+    ]);
+    expect(summary.nextSteps).toEqual([
+      "Run `hack doctor --path /tmp/demo` to classify restart versus repair work.",
+      "Temporary breakage: `hack restart --path /tmp/demo`.",
+      "Configuration repair: `hack doctor --fix --path /tmp/demo`.",
+      "Manual follow-up: gateway tokens: No active tokens (run: hack x gateway token-create)",
+      "Verify with `hack doctor --path /tmp/demo`.",
+      "If it still fails, run `hack crash-capture --path /tmp/demo` again after the next repro.",
+    ]);
+  } finally {
+    await rm(captureRoot, { force: true, recursive: true });
+  }
+});
+
+test("crash capture summary infers stale daemon recovery from captured failures", async () => {
+  const captureRoot = await mkdtemp(resolve(tmpdir(), "hack-crash-capture-"));
+  const globalStatusLog = resolve(captureRoot, "hack_global_status.log");
+  const daemonLog = resolve(captureRoot, "hack_daemon_status.log");
+  await Bun.write(
+    globalStatusLog,
+    [
+      "$ hack global status --json",
+      "exit_code=1",
+      "",
+      "Caddy not reachable (run: hack global up)",
+    ].join("\n")
+  );
+  await Bun.write(
+    daemonLog,
+    [
+      "$ hack daemon status",
+      "exit_code=1",
+      "",
+      "hackd not running (stale pid/socket; run: hack daemon clear)",
+    ].join("\n")
+  );
+
+  try {
+    const summary = await buildCrashCaptureSummary({
+      captureRoot,
+      projectRoot: "/tmp/demo",
+      results: [
+        {
+          name: "hack_global_status",
+          cmd: ["hack", "global", "status", "--json"],
+          exitCode: 1,
+          file: globalStatusLog,
+          bytes: 80,
+        },
+        {
+          name: "hack_daemon_status",
+          cmd: ["hack", "daemon", "status"],
+          exitCode: 1,
+          file: daemonLog,
+          bytes: 80,
+        },
+      ],
+      errors: [],
+    });
+
+    expect(summary.recovery.temporaryBreakage).toEqual([
+      "hack global up",
+      "hack daemon clear",
+      "hack daemon start",
+    ]);
+    expect(summary.recovery.configurationRepair).toEqual([]);
+    expect(summary.nextSteps).toEqual([
+      "Run `hack doctor --path /tmp/demo` to classify restart versus repair work.",
+      "Temporary breakage: `hack global up`.",
+      "Temporary breakage: `hack daemon clear`.",
+      "Temporary breakage: `hack daemon start`.",
+      "Verify with `hack doctor --path /tmp/demo`.",
+      "If it still fails, run `hack crash-capture --path /tmp/demo` again after the next repro.",
+    ]);
+  } finally {
+    await rm(captureRoot, { force: true, recursive: true });
+  }
+});
+
+test("crash capture keeps unknown status failures as manual follow-up", async () => {
+  const captureRoot = await mkdtemp(resolve(tmpdir(), "hack-crash-capture-"));
+  const globalStatusLog = resolve(captureRoot, "hack_global_status.log");
+  const daemonLog = resolve(captureRoot, "hack_daemon_status.log");
+  await Bun.write(
+    globalStatusLog,
+    [
+      "$ hack global status --json",
+      "exit_code=1",
+      "",
+      "permission denied",
+    ].join("\n")
+  );
+  await Bun.write(
+    daemonLog,
+    ["$ hack daemon status", "exit_code=1", "", "internal rpc error"].join("\n")
+  );
+
+  try {
+    const summary = await buildCrashCaptureSummary({
+      captureRoot,
+      projectRoot: "/tmp/demo",
+      results: [
+        {
+          name: "hack_global_status",
+          cmd: ["hack", "global", "status", "--json"],
+          exitCode: 1,
+          file: globalStatusLog,
+          bytes: 32,
+        },
+        {
+          name: "hack_daemon_status",
+          cmd: ["hack", "daemon", "status"],
+          exitCode: 1,
+          file: daemonLog,
+          bytes: 24,
+        },
+      ],
+      errors: [],
+    });
+
+    expect(summary.recovery.temporaryBreakage).toEqual([]);
+    expect(summary.recovery.configurationRepair).toEqual([]);
+    expect(summary.recovery.followUp).toEqual([
+      "hack global status: Review hack_global_status.log for detailed recovery guidance",
+      "hack daemon status: Review hack_daemon_status.log for detailed recovery guidance",
+    ]);
+    expect(summary.nextSteps).toEqual([
+      "Run `hack doctor --path /tmp/demo` to classify restart versus repair work.",
+      "Manual follow-up: hack global status: Review hack_global_status.log for detailed recovery guidance",
+      "Manual follow-up: hack daemon status: Review hack_daemon_status.log for detailed recovery guidance",
+      "Verify with `hack doctor --path /tmp/demo`.",
+      "If it still fails, run `hack crash-capture --path /tmp/demo` again after the next repro.",
+    ]);
+  } finally {
+    await rm(captureRoot, { force: true, recursive: true });
+  }
 });
 
 test("crash capture readme points operators to the summary and raw logs", () => {
   const text = renderCrashCaptureReadme({
     captureRoot: "/tmp/demo/.tmp/crash-capture-1",
     projectRoot: "/tmp/demo",
+    recovery: {
+      temporaryBreakage: [],
+      configurationRepair: [],
+      followUp: [],
+      verify: ["hack doctor"],
+      capture: ["hack crash-capture --path <repo>"],
+    },
     failedCommands: ["hack_doctor_project", "hack_daemon_logs"],
   });
 
@@ -75,4 +239,29 @@ test("crash capture readme points operators to the summary and raw logs", () => 
   expect(text).toContain("hack_doctor_project");
   expect(text).toContain("hack_daemon_logs");
   expect(text).toContain("hack doctor --path /tmp/demo");
+  expect(text).toContain("Verify:");
+  expect(text).toContain("- `hack doctor --path /tmp/demo`");
+  expect(text).toContain("If it still fails:");
+  expect(text).toContain("- `hack crash-capture --path /tmp/demo`");
+});
+
+test("crash capture readme groups inferred restart actions into sections", () => {
+  const text = renderCrashCaptureReadme({
+    captureRoot: "/tmp/demo/.tmp/crash-capture-1",
+    projectRoot: "/tmp/demo",
+    recovery: {
+      temporaryBreakage: ["hack global up", "hack daemon start"],
+      configurationRepair: [],
+      followUp: [],
+      verify: ["hack doctor"],
+      capture: ["hack crash-capture --path <repo>"],
+    },
+    failedCommands: ["hack_global_status", "hack_daemon_status"],
+  });
+
+  expect(text).toContain("Temporary breakage:");
+  expect(text).toContain("- `hack global up`");
+  expect(text).toContain("- `hack daemon start`");
+  expect(text).toContain("Verify:");
+  expect(text).toContain("If it still fails:");
 });

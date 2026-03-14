@@ -14,13 +14,8 @@ export type DoctorRecoveryGuidance = {
   readonly capture: readonly string[];
 };
 
-const FIX_CHECKS = new Set([
-  "caddy local ca",
-  "coredns forwarding",
-  "dns:hack",
-  "dns:hack.gy",
-  "dnsmasq:53",
-]);
+const FIX_CHECKS = new Set(["caddy local ca", "dns:hack", "dns:hack.gy"]);
+const SAFE_SHELL_ARG_PATTERN = /^[A-Za-z0-9_./:-]+$/u;
 
 function pushUnique(target: string[], value: string): void {
   if (!target.includes(value)) {
@@ -40,36 +35,29 @@ export function buildDoctorRecoveryGuidance(input: {
       continue;
     }
 
-    if (
-      result.name === "proxy ports" &&
-      result.message.includes("hack global up")
-    ) {
+    if (result.message.includes("hack global up")) {
       pushUnique(temporaryBreakage, "hack global up");
       continue;
     }
 
-    if (
-      result.name === "caddy hosts" &&
-      result.message.includes("hack restart")
-    ) {
+    if (result.message.includes("hack restart")) {
       pushUnique(temporaryBreakage, "hack restart");
       continue;
     }
 
-    if (
-      result.name === "daemon" &&
-      result.message.includes("hack daemon clear")
-    ) {
+    if (result.message.includes("hack daemon clear")) {
       pushUnique(temporaryBreakage, "hack daemon clear");
       pushUnique(temporaryBreakage, "hack daemon start");
       continue;
     }
 
-    if (
-      result.name === "daemon" &&
-      result.message.includes("hack daemon start")
-    ) {
+    if (result.message.includes("hack daemon start")) {
       pushUnique(temporaryBreakage, "hack daemon start");
+      continue;
+    }
+
+    if (result.message.includes("sudo brew services restart dnsmasq")) {
+      pushUnique(temporaryBreakage, "sudo brew services restart dnsmasq");
       continue;
     }
 
@@ -123,12 +111,14 @@ export function buildRecoveryNextSteps(input: {
     guidance: input.guidance,
     projectRoot: input.projectRoot,
   });
-  const projectRoot = input.projectRoot ?? "<repo>";
   const nextSteps: string[] = [];
 
   if (input.includeClassifyStep ?? false) {
     nextSteps.push(
-      `Run \`hack doctor --path ${projectRoot}\` to classify restart versus repair work.`
+      `Run \`${scopeRecoveryCommand({
+        command: "hack doctor",
+        projectRoot: input.projectRoot,
+      })}\` to classify restart versus repair work.`
     );
   }
 
@@ -157,7 +147,7 @@ export function buildRecoveryNextSteps(input: {
   return nextSteps;
 }
 
-function scopeRecoveryCommand(input: {
+export function scopeRecoveryCommand(input: {
   readonly command: string;
   readonly projectRoot: string | null;
 }): string {
@@ -165,18 +155,27 @@ function scopeRecoveryCommand(input: {
   if (!projectRoot) {
     return input.command;
   }
+  const quotedProjectRoot = quoteShellArg(projectRoot);
 
   if (input.command === "hack doctor") {
-    return `hack doctor --path ${projectRoot}`;
+    return `hack doctor --path ${quotedProjectRoot}`;
   }
 
   if (input.command === "hack doctor --fix") {
-    return `hack doctor --fix --path ${projectRoot}`;
+    return `hack doctor --fix --path ${quotedProjectRoot}`;
   }
 
   if (input.command === "hack restart") {
-    return `hack restart --path ${projectRoot}`;
+    return `hack restart --path ${quotedProjectRoot}`;
   }
 
-  return input.command.replace("<repo>", projectRoot);
+  return input.command.replace("<repo>", quotedProjectRoot);
+}
+
+function quoteShellArg(value: string): string {
+  if (SAFE_SHELL_ARG_PATTERN.test(value)) {
+    return value;
+  }
+
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
 }

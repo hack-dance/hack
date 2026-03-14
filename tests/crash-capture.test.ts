@@ -103,9 +103,39 @@ test("crash capture summary infers stale daemon recovery from captured failures"
     globalStatusLog,
     [
       "$ hack global status --json",
-      "exit_code=1",
+      "exit_code=0",
       "",
-      "Caddy not reachable (run: hack global up)",
+      "## stdout",
+      JSON.stringify({
+        caddy: { ok: false, error: "caddy down", services: [] },
+        logging: { ok: true, error: null, services: [] },
+        networks: { ok: true, missing: [], networks: [] },
+        gateway: {
+          gateway_enabled: false,
+          warnings: [],
+          exposures: [],
+          tokens: [],
+          tokens_active: 0,
+          tokens_revoked: 0,
+          tokens_write: 0,
+          tokens_read: 0,
+          config_path: "/tmp/global.json",
+          gateway_url: "http://127.0.0.1:7777",
+          gateway_bind: "127.0.0.1",
+          gateway_port: 7777,
+          allow_writes: false,
+          gateway_projects_enabled: 0,
+        },
+        summary: {
+          ok: false,
+          caddy_ok: false,
+          logging_ok: true,
+          networks_ok: true,
+          gateway_enabled: false,
+        },
+      }),
+      "",
+      "## stderr",
     ].join("\n")
   );
   await Bun.write(
@@ -126,7 +156,7 @@ test("crash capture summary infers stale daemon recovery from captured failures"
         {
           name: "hack_global_status",
           cmd: ["hack", "global", "status", "--json"],
-          exitCode: 1,
+          exitCode: 0,
           file: globalStatusLog,
           bytes: 80,
         },
@@ -264,4 +294,24 @@ test("crash capture readme groups inferred restart actions into sections", () =>
   expect(text).toContain("- `hack daemon start`");
   expect(text).toContain("Verify:");
   expect(text).toContain("If it still fails:");
+});
+
+test("crash capture readme quotes repo paths in recovery commands", () => {
+  const text = renderCrashCaptureReadme({
+    captureRoot: "/tmp/demo/.tmp/crash-capture-1",
+    projectRoot: "/tmp/work repo",
+    recovery: {
+      temporaryBreakage: ["hack restart"],
+      configurationRepair: ["hack doctor --fix"],
+      followUp: [],
+      verify: ["hack doctor"],
+      capture: ["hack crash-capture --path <repo>"],
+    },
+    failedCommands: [],
+  });
+
+  expect(text).toContain("`hack doctor --path '/tmp/work repo'`");
+  expect(text).toContain("`hack restart --path '/tmp/work repo'`");
+  expect(text).toContain("`hack doctor --fix --path '/tmp/work repo'`");
+  expect(text).toContain("`hack crash-capture --path '/tmp/work repo'`");
 });

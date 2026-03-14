@@ -17,6 +17,7 @@ import {
   type DoctorRecoveryGuidance,
   type RecoveryCheckResult,
   scopeDoctorRecoveryGuidance,
+  scopeRecoveryCommand,
 } from "./recovery-guidance.ts";
 
 const DEFAULT_LOG_WINDOW = "45m";
@@ -616,6 +617,14 @@ async function inferRecoveryCheckResult(input: {
       seen,
       results: inferRecoveryCheckResultsFromOutput({ output }),
     });
+
+    if (input.result.name === "hack_global_status") {
+      pushRecoveryCheckResults({
+        target: inferred,
+        seen,
+        results: inferRecoveryCheckResultsFromGlobalStatus({ output }),
+      });
+    }
   }
 
   if (
@@ -679,7 +688,10 @@ async function readCaptureOutput(input: {
 function shouldInferRecoveryFromResult(input: {
   readonly result: CaptureCommandResult;
 }): boolean {
-  if (input.result.name === "hack_doctor_project") {
+  if (
+    input.result.name === "hack_doctor_project" ||
+    input.result.name === "hack_global_status"
+  ) {
     return true;
   }
 
@@ -742,6 +754,24 @@ function inferRecoveryCheckResultsFromOutput(input: {
   return inferred;
 }
 
+function inferRecoveryCheckResultsFromGlobalStatus(input: {
+  readonly output: string;
+}): readonly RecoveryCheckResult[] {
+  const payload = extractJsonStdoutPayload({ output: input.output });
+  if (!payload || isGlobalStatusHealthy(payload)) {
+    return [];
+  }
+
+  return [
+    {
+      name: "global status",
+      status: "warn",
+      message:
+        "Captured global status reports unhealthy global runtime (run: hack global up)",
+    },
+  ];
+}
+
 function extractManualFollowUpItems(input: {
   readonly output: string;
 }): readonly string[] {
@@ -793,6 +823,46 @@ function parseManualFollowUpItem(input: { readonly item: string }): {
     name: input.item.slice(0, separatorIndex),
     message: input.item.slice(separatorIndex + 2),
   };
+}
+
+function extractJsonStdoutPayload(input: {
+  readonly output: string;
+}): unknown | null {
+  const stdoutMarker = "## stdout\n";
+  const stdoutIndex = input.output.indexOf(stdoutMarker);
+  if (stdoutIndex === -1) {
+    return null;
+  }
+
+  const contentStart = stdoutIndex + stdoutMarker.length;
+  const stderrIndex = input.output.indexOf("\n\n## stderr", contentStart);
+  const rawJson =
+    stderrIndex === -1
+      ? input.output.slice(contentStart)
+      : input.output.slice(contentStart, stderrIndex);
+  const text = rawJson.trim();
+  if (text.length === 0) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function isGlobalStatusHealthy(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object") {
+    return true;
+  }
+
+  const summary = Reflect.get(payload, "summary");
+  if (!summary || typeof summary !== "object") {
+    return true;
+  }
+
+  return Reflect.get(summary, "ok") === true;
 }
 
 function buildRecoveryFollowUpResult(input: {
@@ -876,8 +946,13 @@ function renderRecoveryWorkflow(input: {
     guidance: input.guidance,
     projectRoot: input.projectRoot,
   });
-  const projectRoot = input.projectRoot ?? "<repo>";
-  const lines = ["1. Classify:", `   - \`hack doctor --path ${projectRoot}\``];
+  const lines = [
+    "1. Classify:",
+    `   - \`${scopeRecoveryCommand({
+      command: "hack doctor",
+      projectRoot: input.projectRoot,
+    })}\``,
+  ];
   let stepNumber = 2;
 
   if (scoped.temporaryBreakage.length > 0) {

@@ -25,9 +25,10 @@ test("hack session attach and exec help explain workspace-oriented flows", () =>
   const attachHelp = renderHelpMarkdownForPath(CLI_SPEC, ["session", "attach"]);
   const execHelp = renderHelpMarkdownForPath(CLI_SPEC, ["session", "exec"]);
 
-  expect(attachHelp).toContain("Attach to a running tmux workspace by name");
-  expect(attachHelp).toContain("switches clients instead of nesting");
-  expect(execHelp).toContain("Queue a command in the workspace's active pane");
+  expect(attachHelp).toContain("Attach to a running workspace by name");
+  expect(attachHelp).toContain("zellij attaches to the named session directly");
+  expect(execHelp).toContain("Queue a command in the workspace");
+  expect(execHelp).toContain("zellij opens a new pane");
   expect(execHelp).toContain("long-running agents");
 });
 

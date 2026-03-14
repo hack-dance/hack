@@ -61,3 +61,39 @@ test("resolveRunUpCwd uses the repo root instead of the .hack directory", () => 
     })
   ).toBe("/tmp/alpha");
 });
+
+test("resolveWorkspaceBackendName detects zellij-backed workspaces", () => {
+  expect(
+    __testOnlySessionCommand.resolveWorkspaceBackendName({
+      workspaceName: "alpha--agent-1",
+      sessions: [
+        {
+          backend: "zellij",
+          name: "alpha--agent-1",
+          attached: null,
+          path: null,
+          windows: null,
+          createdAt: null,
+        },
+      ],
+    })
+  ).toBe("zellij");
+});
+
+test("resolveTmuxOnlyWorkspaceError explains tmux-only pane tooling on zellij", () => {
+  expect(
+    __testOnlySessionCommand.resolveTmuxOnlyWorkspaceError({
+      workspaceName: "alpha--agent-1",
+      sessions: [
+        {
+          backend: "zellij",
+          name: "alpha--agent-1",
+          attached: null,
+          path: null,
+          windows: null,
+          createdAt: null,
+        },
+      ],
+    })
+  ).toContain("tmux-only");
+});

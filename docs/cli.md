@@ -570,9 +570,9 @@ Subcommands:
 
 | Subcommand | Summary |
 | --- | --- |
-| `list` | List active tmux workspaces |
+| `list` | List active workspaces |
 | `start` | Reuse the default project workspace or create an isolated one |
-| `stop` | Stop a tmux-backed workspace |
+| `stop` | Stop a workspace |
 | `attach` | Attach to an existing workspace |
 | `exec` | Send a command to a running workspace |
 | `panes` | List panes in a tmux workspace |
@@ -599,13 +599,13 @@ Options:
 
 Usage: `hack session attach <workspace>`
 
-Attach to a running tmux workspace by name. When you are already inside tmux, hack switches clients instead of nesting tmux inside tmux.
+Attach to a running workspace by name. Tmux switches clients instead of nesting tmux inside tmux, while zellij attaches to the named session directly.
 
 #### hack session exec
 
 Usage: `hack session exec <workspace> <command>`
 
-Queue a command in the workspace's active pane without opening a new shell. This is useful for long-running agents, background checks, or remote follow-up work.
+Queue a command in the workspace without opening a new interactive attach flow. Tmux sends it to the active pane; zellij opens a new pane for the command. This is useful for long-running agents, background checks, or remote follow-up work.
 
 #### hack session panes
 

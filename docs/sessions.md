@@ -18,7 +18,7 @@ hack session
 # Reuse the default workspace for a project, or create it if needed
 hack session start <project>
 
-# List active tmux workspaces
+# List active workspaces
 hack session list
 
 # Attach to an existing workspace by name
@@ -45,7 +45,7 @@ hack session panes <workspace>
 ### Interactive picker
 
 Running `hack session` without arguments opens an interactive picker showing:
-- **Active workspaces**: running tmux workspaces, with attached/detached status
+- **Active workspaces**: running workspaces from the configured mux backend(s), with attached status when the backend can report it
 - **Available projects**: registered projects that do not currently have a default workspace
 
 When selecting an attached session, you can choose to:
@@ -91,6 +91,7 @@ hack session attach my-project
 ```
 
 Use `attach` when you already know which workspace you want. If you are already inside tmux, hack switches clients instead of nesting tmux inside tmux. When attaching, tmux detaches other clients to avoid terminal size conflicts across multiple devices.
+If the workspace is running in zellij, hack attaches to that named session directly instead.
 
 ### Exec
 

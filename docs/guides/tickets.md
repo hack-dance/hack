@@ -130,6 +130,17 @@ Tip: use `--body-stdin` for multi-line markdown.
 - Ticket writes automatically commit and push to the tickets ref when git sync is enabled and a remote exists.
 - `sync` normalizes the event logs, commits, and pushes the tickets ref.
 
+### Storage architecture
+
+The adopted storage model keeps git portability as the primary constraint:
+
+- The JSONL journal remains the only portable source of truth.
+- A local SQLite projection under `.hack/tickets/state/` is the planned read model for fast queries and sync lookups.
+- The projection is disposable local state, not a second authority. If it is missing, stale, or corrupted, it should be rebuilt from the journal.
+- Replay is deterministic and idempotent by ordering events on `ts`, `orderKey`, and `eventId`, then deduplicating by `eventId`.
+
+Until the SQLite projection lands in code, reads still materialize from JSONL directly. The detailed projection design lives in [`docs/plans/2026-03-14-hack-tickets-sqlite-journal-design.md`](../plans/2026-03-14-hack-tickets-sqlite-journal-design.md).
+
 ### Storage layout
 
 In your project repo:
@@ -137,6 +148,8 @@ In your project repo:
 - `.hack/tickets/events/events-YYYY-MM.jsonl` — event log segments (UTC month)
 - `.hack/tickets/git/bare.git` — a bare repo used to manage the tickets ref
 - `.hack/tickets/git/worktree` — a worktree used for reading/writing ticket data
+- `.hack/tickets/state/projection.sqlite` — planned local-only SQLite projection for indexed reads and replay state
+- `.hack/tickets/state/projection.sqlite-wal` / `.hack/tickets/state/projection.sqlite-shm` — planned SQLite companion files, safe to delete and rebuild
 
 ## Configuration
 

@@ -201,6 +201,7 @@ extension manifests and exposes their APIs; the CLI dispatches extension command
 
 - **Gateway**: optional HTTP/WS access to `hackd` (localhost by default).
 - **Supervisor**: job execution + streaming for agents.
+- **Tickets**: git-backed append-only journal storage with a planned rebuildable local SQLite projection for fast reads and sync indexing.
 
 ```mermaid
 graph LR

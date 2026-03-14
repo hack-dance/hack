@@ -442,3 +442,120 @@ test("rejects blank remote identifiers when building normalized links", () => {
     })
   ).toThrow("normalized ticket remote id must be a non-empty string");
 });
+
+test("rejects local-origin tickets that still carry an origin link", () => {
+  const normalized = createMinimalNormalizedTicket();
+
+  expect(() =>
+    normalizedTicketEntitySchema.parse({
+      ...normalized,
+      provenance: {
+        ...normalized.provenance,
+        links: [
+          buildNormalizedTicketLink({
+            system: "github",
+            remoteId: "issue_51",
+            role: "origin",
+          }),
+        ],
+      },
+    })
+  ).toThrow("normalized ticket local origin cannot include origin links");
+});
+
+test("rejects parsed links whose linkId does not match the remote system identity", () => {
+  expect(() =>
+    normalizedTicketEntitySchema.parse({
+      ...createMinimalNormalizedTicket(),
+      provenance: {
+        origin: {
+          kind: "external",
+          system: "linear",
+          linkId: "linear:lin_52",
+        },
+        links: [
+          {
+            ...buildNormalizedTicketLink({
+              system: "linear",
+              remoteId: "lin_52",
+              role: "origin",
+            }),
+            linkId: "linear:lin_other",
+          },
+        ],
+        authority: {
+          defaultRule: {
+            policy: "replace",
+            winner: { kind: "origin" },
+          },
+          fieldRules: {},
+        },
+      },
+    })
+  ).toThrow("normalized ticket linkId must match system and remote id");
+});
+
+test("rejects duplicate canonical list values in parsed entities", () => {
+  expect(() =>
+    normalizedTicketEntitySchema.parse({
+      ...createMinimalNormalizedTicket(),
+      canonical: {
+        ...createMinimalNormalizedTicket().canonical,
+        tags: ["sync", "sync"],
+      },
+    })
+  ).toThrow("normalized ticket canonical tags must not contain duplicates");
+});
+
+test("rejects duplicate remote containers in parsed links", () => {
+  expect(() =>
+    normalizedTicketEntitySchema.parse({
+      ...createMinimalNormalizedTicket(),
+      provenance: {
+        origin: {
+          kind: "external",
+          system: "asana",
+          linkId: "asana:task_53",
+        },
+        links: [
+          {
+            ...buildNormalizedTicketLink({
+              system: "asana",
+              remoteId: "task_53",
+              role: "origin",
+              containers: [
+                {
+                  kind: "project",
+                  id: "proj_1",
+                  name: "Tickets",
+                },
+              ],
+            }),
+            remote: {
+              id: "task_53",
+              containers: [
+                {
+                  kind: "project",
+                  id: "proj_1",
+                  name: "Tickets",
+                },
+                {
+                  kind: "project",
+                  id: "proj_1",
+                  name: "Tickets",
+                },
+              ],
+            },
+          },
+        ],
+        authority: {
+          defaultRule: {
+            policy: "replace",
+            winner: { kind: "origin" },
+          },
+          fieldRules: {},
+        },
+      },
+    })
+  ).toThrow("normalized ticket remote containers must not contain duplicates");
+});

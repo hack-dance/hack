@@ -134,11 +134,16 @@ The schema is intentionally stricter than a plain JSON shape. A valid normalized
 satisfy these cross-record rules:
 
 - `provenance.links[*].linkId` values are unique within a ticket.
+- `provenance.links[*].linkId` must equal `${system}:${remote.id}` so persisted records keep a stable
+  provider-derived identity.
 - Local-origin tickets cannot carry an `origin`-role external link.
 - External-origin tickets must point at a matching `origin`-role link with the same `system` and
   `linkId`.
 - Any authority winner with `{ kind: "link", linkId }` must reference a link that exists on the
   same ticket.
+- `canonical.tags`, `canonical.relationships.dependsOn`, `canonical.relationships.blocks`, and
+  `provenance.links[*].remote.containers` are deduplicated sets in persisted state, not just
+  normalized on write.
 - `buildNormalizedTicketLink()` validates remote identifiers and URLs up front, so adapter code
   cannot emit blank link records accidentally.
 - Legacy summaries with `source` set to an external provider must include matching

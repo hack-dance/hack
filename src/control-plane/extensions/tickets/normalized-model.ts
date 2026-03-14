@@ -715,6 +715,10 @@ const parseNormalizedTicketLink = (input: unknown): NormalizedTicketLink => {
 
   const remoteRecord = asRecord(record.remote, "normalized ticket remote");
   assertNonEmptyString(remoteRecord.id, "normalized ticket remote id");
+  assertValue(
+    record.linkId === `${record.system}:${remoteRecord.id}`,
+    "normalized ticket linkId must match system and remote id"
+  );
   if (remoteRecord.key !== undefined) {
     assertNonEmptyString(remoteRecord.key, "normalized ticket remote key");
   }
@@ -725,6 +729,7 @@ const parseNormalizedTicketLink = (input: unknown): NormalizedTicketLink => {
     Array.isArray(remoteRecord.containers),
     "normalized ticket remote containers must be an array"
   );
+  const containerKeys = new Set<string>();
   for (const container of remoteRecord.containers) {
     const containerRecord = asRecord(container, "normalized ticket container");
     assertValue(
@@ -740,6 +745,12 @@ const parseNormalizedTicketLink = (input: unknown): NormalizedTicketLink => {
         "normalized ticket container name"
       );
     }
+    const containerKey = `${containerRecord.kind}:${containerRecord.id}`;
+    assertValue(
+      !containerKeys.has(containerKey),
+      "normalized ticket remote containers must not contain duplicates"
+    );
+    containerKeys.add(containerKey);
   }
 
   if (record.adapterMetadata !== undefined) {
@@ -824,8 +835,11 @@ const assertTicketSchemaValue = (input: unknown, label: string): void => {
 
 const assertStringList = (input: unknown, label: string): void => {
   assertValue(Array.isArray(input), `${label} must be an array`);
+  const seen = new Set<string>();
   for (const [index, value] of input.entries()) {
     assertNonEmptyString(value, `${label}[${index}]`);
+    assertValue(!seen.has(value), `${label} must not contain duplicates`);
+    seen.add(value);
   }
 };
 

@@ -97,3 +97,12 @@ test("resolveTmuxOnlyWorkspaceError explains tmux-only pane tooling on zellij", 
     })
   ).toContain("tmux-only");
 });
+
+test("resolveWorkspaceBackendNameForCreate prefers the existing workspace backend over the default", () => {
+  expect(
+    __testOnlySessionCommand.resolveWorkspaceBackendNameForCreate({
+      preferredBackendName: "zellij",
+      defaultBackendName: "tmux",
+    })
+  ).toBe("zellij");
+});

@@ -372,7 +372,7 @@ async function handleSelectedSession(opts: {
     : await resolveCurrentProjectContext();
   const resolvedBackend = await resolveWorkspaceBackendForCreate({
     project: projectContext,
-    fallback: session.backend,
+    preferredBackendName: session.backend,
   });
   if (!resolvedBackend) {
     logger.error({
@@ -530,19 +530,19 @@ async function listWorkspaceSessions(opts: {
 
 async function resolveWorkspaceBackendForCreate(opts: {
   readonly project: ProjectContext | null;
-  readonly fallback?: MuxBackendName;
+  readonly preferredBackendName?: MuxBackendName;
 }): Promise<{
   readonly backendName: MuxBackendName;
   readonly backend: MuxBackend;
 } | null> {
   const mux = await resolveMux({ project: opts.project });
-  const backendName =
-    resolveDefaultBackendName({
+  const backendName = resolveWorkspaceBackendNameForCreate({
+    preferredBackendName: opts.preferredBackendName,
+    defaultBackendName: resolveDefaultBackendName({
       mode: mux.mode,
       backends: mux.backends,
-    }) ??
-    opts.fallback ??
-    null;
+    }),
+  });
   if (!backendName) {
     return null;
   }
@@ -551,6 +551,13 @@ async function resolveWorkspaceBackendForCreate(opts: {
     return null;
   }
   return { backendName, backend };
+}
+
+function resolveWorkspaceBackendNameForCreate(opts: {
+  readonly preferredBackendName?: MuxBackendName | null;
+  readonly defaultBackendName?: MuxBackendName | null;
+}): MuxBackendName | null {
+  return opts.preferredBackendName ?? opts.defaultBackendName ?? null;
 }
 
 function resolveWorkspaceBackendName(opts: {
@@ -1373,6 +1380,7 @@ async function runHackUp(projectPath: string): Promise<void> {
 
 export const __testOnlySessionCommand = {
   resolveNextIsolatedWorkspaceName,
+  resolveWorkspaceBackendNameForCreate,
   resolveTmuxOnlyWorkspaceError,
   resolveRunUpCwd,
   resolveWorkspaceBackendName,

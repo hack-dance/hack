@@ -55,7 +55,7 @@ hack tickets setup
 hack tickets create --title "Investigate flaky auth flow"
 hack tickets list
 hack linear project-bind --project-id "<linear-project-id>"
-hack linear sync-project --from linear
+hack linear sync-project --from linear --project-id "<linear-project-id>"
 ```
 
 Docs:

@@ -1,8 +1,6 @@
 # Tickets (git-backed)
 
-The tickets extension is a lightweight, git-backed ticket log intended for small teams and solo dev.
-It stores events in a dedicated git ref (`refs/hack/tickets` by default, hidden from branch lists) so
-ticket history is versioned and syncable without requiring an external service.
+The tickets extension is a lightweight, git-backed ticket log intended for small teams and solo dev. It stores events in a dedicated git ref (`refs/hack/tickets` by default, hidden from branch lists) so ticket history is versioned and syncable without requiring an external service.
 
 - CLI namespace: `tickets`
 - Extension id: `dance.hack.tickets`
@@ -40,13 +38,14 @@ hack x tickets setup
 ```
 
 Options:
+
 - `--global` installs the Codex skill into `~/.codex/skills/hack-tickets/` instead of the repo.
 - `--agents` / `--claude` / `--all` control which agent-doc files get a tickets snippet.
 - `--check` and `--remove` work as expected.
 
 Notes:
-- Most tickets commands prompt to run setup if `.hack/tickets/` is tracked, missing from `.gitignore`,
-  or if agent docs/skills are missing (TTY + gum only).
+
+- Most tickets commands prompt to run setup if `.hack/tickets/` is tracked, missing from `.gitignore`, or if agent docs/skills are missing (TTY + gum only).
 - Setup also prompts to repair legacy tickets branches or stray files in the tickets ref.
 - In non-interactive or `--json` modes, the CLI prints a warning instead of prompting.
 
@@ -116,8 +115,11 @@ Recommended body template (Markdown):
 
 ```md
 ## Context
+
 ## Goals
+
 ## Notes
+
 ## Links
 ```
 
@@ -130,6 +132,14 @@ Tip: use `--body-stdin` for multi-line markdown.
 - Ticket writes automatically commit and push to the tickets ref when git sync is enabled and a remote exists.
 - `sync` normalizes the event logs, commits, and pushes the tickets ref.
 
+### Sync guarantees
+
+- Log normalization dedupes repeated raw events by `eventId`.
+- Normalized logs are ordered by `ts`, then `eventId`, so every machine folds the same log in the same order.
+- When adding external sync adapters, treat `eventId` as transport dedupe only. The logical external change also needs a deterministic operation identity so repeated deliveries and multi-machine replays collapse safely.
+- If two systems disagree on a shared field, record an explicit sync conflict instead of silently overwriting one side.
+- Detailed design guidance for normalized external sync lives in `docs/plans/2026-03-14-tickets-normalized-sync-idempotency-design.md`.
+
 ### Storage layout
 
 In your project repo:
@@ -140,8 +150,7 @@ In your project repo:
 
 ## Configuration
 
-Tickets git configuration lives under `controlPlane.tickets.git`.
-Defaults:
+Tickets git configuration lives under `controlPlane.tickets.git`. Defaults:
 
 - `enabled: true`
 - `branch: "hack/tickets"`
@@ -158,16 +167,18 @@ hack config set --global 'controlPlane.tickets.git.refMode' 'hidden'
 ```
 
 Notes:
-- If your remote rejects hidden refs, set `refMode` to `heads` to use `refs/heads/<branch>` and
-  protect the branch in your git hosting UI.
+
+- If your remote rejects hidden refs, set `refMode` to `heads` to use `refs/heads/<branch>` and protect the branch in your git hosting UI.
 
 ## When to use this
 
 Use tickets when you want:
+
 - A local-first backlog that works offline.
 - A shared ticket stream without adding Jira/Linear.
 - A simple paper trail for small projects.
 
 Don’t use it when:
+
 - You need multi-user assignment, workflow states, or strict permissions.
 - You need rich issue templates or deep integrations.

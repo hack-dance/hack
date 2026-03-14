@@ -132,8 +132,7 @@ git commit -m "feat(tickets): replay journal into sqlite projection"
 - `getTicketDetail`
 - any sync lookup helpers added during implementation
 
-These reads should prefer SQLite and only trigger replay or rebuild when projection state is missing or stale.
-Add assertions that `tickets list`, `tickets show`, and `tickets status` still expose the correct status, `updated_at`, and effective blocker set once reads come from SQLite.
+These reads should prefer SQLite and only trigger replay or rebuild when projection state is missing or stale. Add assertions that `tickets list`, `tickets show`, and `tickets status` still expose the correct status, `updated_at`, and effective blocker set once reads come from SQLite.
 
 **Step 2: Preserve write path semantics**
 

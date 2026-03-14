@@ -107,6 +107,8 @@ Replay uses this total order:
 2. `orderKey` ascending when present
 3. `eventId` ascending
 
+Current writers already stamp `orderKey`, so same-second local writes preserve their original append sequence. The `eventId` fallback exists for legacy rows or any imported events that are missing `orderKey`.
+
 This order is deterministic across machines and rebuilds, even when segment files were merged from multiple writers. Segment filename and line number are recorded for diagnostics and incremental scanning, but they are not part of domain ordering.
 
 ### Idempotency rule
@@ -305,7 +307,7 @@ Indexes:
 
 1. Open SQLite in WAL mode.
 2. Read `projection_meta`.
-3. If the file is missing, schema version is wrong, status is `rebuilding`, or SQLite reports corruption, delete and rebuild.
+3. If the file is missing, `schema_version` is wrong, `journal_format_version` is wrong, status is `rebuilding`, or SQLite reports corruption, delete and rebuild.
 4. Otherwise compare the current segment inventory against `journal_segments` and fully rescan any segment whose bytes changed or that was not seen before.
 5. Combine all events from changed segments, sort them by canonical replay order, and rely on `journal_events` dedupe to skip events that were already applied.
 
@@ -373,6 +375,7 @@ Recoverable failures:
 
 - missing SQLite file
 - outdated projection schema
+- outdated journal format version
 - WAL or database corruption
 
 Unrecoverable without operator action:

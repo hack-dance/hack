@@ -152,6 +152,7 @@ git commit -m "feat(tickets): serve reads from sqlite projection"
 
 - missing database
 - schema version mismatch
+- journal format version mismatch
 - `projection_status = rebuilding`
 - SQLite open failure or corruption
 

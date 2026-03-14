@@ -383,9 +383,10 @@ export function createGitTicketsChannel(opts: {
   }): Promise<{
     readonly checkoutRef?: string;
     readonly fetchFailure: string | null;
+    readonly allowFetchFailureFallback: boolean;
   }> => {
     if (!input.remoteUrl) {
-      return { fetchFailure: null };
+      return { fetchFailure: null, allowFetchFailureFallback: true };
     }
 
     const fetched = await fetchRemoteRef(remoteRef);
@@ -400,16 +401,20 @@ export function createGitTicketsChannel(opts: {
       return {
         checkoutRef: `origin/${branch}`,
         fetchFailure,
+        allowFetchFailureFallback: false,
       };
     }
 
     if (fetched.missing) {
       return legacyRemoteRef
         ? await resolveLegacyRemoteCheckoutPlan()
-        : { fetchFailure: null };
+        : { fetchFailure: null, allowFetchFailureFallback: true };
     }
 
-    return { fetchFailure: `git fetch failed: ${fetched.error}` };
+    return {
+      fetchFailure: `git fetch failed: ${fetched.error}`,
+      allowFetchFailureFallback: true,
+    };
   };
 
   const resolveLegacyFetchFailure = async (input: {
@@ -429,9 +434,10 @@ export function createGitTicketsChannel(opts: {
   const resolveLegacyRemoteCheckoutPlan = async (): Promise<{
     readonly checkoutRef?: string;
     readonly fetchFailure: string | null;
+    readonly allowFetchFailureFallback: boolean;
   }> => {
     if (!legacyRemoteRef) {
-      return { fetchFailure: null };
+      return { fetchFailure: null, allowFetchFailureFallback: true };
     }
 
     const legacyFetch = legacyTrackingRef
@@ -441,12 +447,16 @@ export function createGitTicketsChannel(opts: {
       return {
         checkoutRef: legacyTrackingRef ?? `origin/${branch}`,
         fetchFailure: null,
+        allowFetchFailureFallback: true,
       };
     }
     if (legacyFetch.missing) {
-      return { fetchFailure: null };
+      return { fetchFailure: null, allowFetchFailureFallback: true };
     }
-    return { fetchFailure: `git fetch failed: ${legacyFetch.error}` };
+    return {
+      fetchFailure: `git fetch failed: ${legacyFetch.error}`,
+      allowFetchFailureFallback: false,
+    };
   };
 
   const initializeOrphanTicketsBranch = async (): Promise<
@@ -486,7 +496,9 @@ export function createGitTicketsChannel(opts: {
     return { ok: true, pushRef: remoteRef };
   };
 
-  const checkoutLocalBranch = async (): Promise<
+  const checkoutLocalBranch = async (input: {
+    readonly pushRef: string;
+  }): Promise<
     | { readonly ok: true; readonly pushRef: string }
     | { readonly ok: false; readonly error: string }
   > => {
@@ -503,11 +515,12 @@ export function createGitTicketsChannel(opts: {
       return { ok: false, error: `git reset failed: ${reset.stderr.trim()}` };
     }
 
-    return { ok: true, pushRef: remoteRef };
+    return { ok: true, pushRef: input.pushRef };
   };
 
   const checkoutHead = async (input: {
     readonly remoteUrl: string | null;
+    readonly allowFetchFailureFallback: boolean;
   }): Promise<
     | { readonly ok: true; readonly pushRef: string }
     | { readonly ok: false; readonly error: string }
@@ -538,7 +551,21 @@ export function createGitTicketsChannel(opts: {
       return await initializeOrphanTicketsBranch();
     }
 
-    return await checkoutLocalBranch();
+    const preferredTrackingRef = await resolvePreferredTrackingRef();
+    const localFallback = resolveLocalCheckoutFallback({
+      fetchFailure: remotePlan.fetchFailure,
+      allowFetchFailureFallback:
+        input.allowFetchFailureFallback && remotePlan.allowFetchFailureFallback,
+      preferredTrackingRef,
+      remoteRef,
+      legacyTrackingRef,
+      legacyRemoteRef,
+    });
+    if (!localFallback.ok) {
+      return localFallback;
+    }
+
+    return await checkoutLocalBranch({ pushRef: localFallback.pushRef });
   };
 
   const mergeLegacyRefIntoCurrentBranch = async (input: {
@@ -556,10 +583,10 @@ export function createGitTicketsChannel(opts: {
       legacyTrackingRef
     );
     if (!fetched.ok) {
-      if (fetched.missing) {
-        return { ok: true, imported: false };
-      }
-      return { ok: true, imported: false };
+      return resolveLegacyImportFetchResult({
+        missing: fetched.missing,
+        error: fetched.error,
+      });
     }
 
     const legacyPaths = await listLegacyEventPaths({
@@ -592,7 +619,9 @@ export function createGitTicketsChannel(opts: {
     return { ok: true, imported: true };
   };
 
-  const ensureCheckedOut = async (): Promise<
+  const ensureCheckedOut = async (input: {
+    readonly allowFetchFailureFallback: boolean;
+  }): Promise<
     | {
         readonly ok: true;
         readonly remoteUrl: string | null;
@@ -622,7 +651,10 @@ export function createGitTicketsChannel(opts: {
       return { ok: true, remoteUrl, pushRef };
     }
 
-    const checkedOut = await checkoutHead({ remoteUrl });
+    const checkedOut = await checkoutHead({
+      remoteUrl,
+      allowFetchFailureFallback: input.allowFetchFailureFallback,
+    });
     if (!checkedOut.ok) {
       return checkedOut;
     }
@@ -767,7 +799,10 @@ export function createGitTicketsChannel(opts: {
       message: `git push failed, retrying after fetch: ${pushError.message}`,
     });
 
-    const checkedOut = await checkoutHead({ remoteUrl: input.remoteUrl });
+    const checkedOut = await checkoutHead({
+      remoteUrl: input.remoteUrl,
+      allowFetchFailureFallback: false,
+    });
     if (!checkedOut.ok) {
       return checkedOut;
     }
@@ -891,7 +926,9 @@ export function createGitTicketsChannel(opts: {
   };
 
   const inspect = async (): Promise<TicketsGitInspectResult> => {
-    const checkedOut = await ensureCheckedOut();
+    const checkedOut = await ensureCheckedOut({
+      allowFetchFailureFallback: true,
+    });
     if (!checkedOut.ok) {
       return checkedOut;
     }
@@ -940,7 +977,9 @@ export function createGitTicketsChannel(opts: {
   const repair = async (input: {
     readonly pruneLegacyRef: boolean;
   }): Promise<TicketsGitRepairResult> => {
-    const checkedOut = await ensureCheckedOut();
+    const checkedOut = await ensureCheckedOut({
+      allowFetchFailureFallback: false,
+    });
     if (!checkedOut.ok) {
       return checkedOut;
     }
@@ -1006,7 +1045,9 @@ export function createGitTicketsChannel(opts: {
   }): Promise<
     { readonly ok: true } | { readonly ok: false; readonly error: string }
   > => {
-    const checkedOut = await ensureCheckedOut();
+    const checkedOut = await ensureCheckedOut({
+      allowFetchFailureFallback: false,
+    });
     if (!checkedOut.ok) {
       return checkedOut;
     }
@@ -1043,7 +1084,9 @@ export function createGitTicketsChannel(opts: {
       }
     | { readonly ok: false; readonly error: string }
   > => {
-    const checkedOut = await ensureCheckedOut();
+    const checkedOut = await ensureCheckedOut({
+      allowFetchFailureFallback: false,
+    });
     if (!checkedOut.ok) {
       return checkedOut;
     }
@@ -1077,7 +1120,9 @@ export function createGitTicketsChannel(opts: {
 
   return {
     ensureCheckedOut: async () => {
-      const checkedOut = await ensureCheckedOut();
+      const checkedOut = await ensureCheckedOut({
+        allowFetchFailureFallback: true,
+      });
       if (!checkedOut.ok) {
         throw new Error(checkedOut.error);
       }
@@ -1537,8 +1582,54 @@ function isGitIndexLockError(message: string): boolean {
 
 export const __testOnly = {
   mergeTicketEventLogs,
+  resolveLegacyImportFetchResult,
+  resolveLocalCheckoutFallback,
   resolvePushRefForCheckoutRef,
 };
+
+function resolveLegacyImportFetchResult(input: {
+  readonly missing: boolean;
+  readonly error: string;
+}):
+  | { readonly ok: true; readonly imported: false }
+  | { readonly ok: false; readonly error: string } {
+  if (input.missing) {
+    return { ok: true, imported: false };
+  }
+  return {
+    ok: false,
+    error: `git fetch failed: ${input.error}`,
+  };
+}
+
+function resolveLocalCheckoutFallback(input: {
+  readonly fetchFailure: string | null;
+  readonly allowFetchFailureFallback: boolean;
+  readonly preferredTrackingRef: string | null;
+  readonly remoteRef: string;
+  readonly legacyTrackingRef?: string | null;
+  readonly legacyRemoteRef?: string | null;
+}):
+  | { readonly ok: true; readonly pushRef: string }
+  | { readonly ok: false; readonly error: string } {
+  if (input.fetchFailure && !input.allowFetchFailureFallback) {
+    return { ok: false, error: input.fetchFailure };
+  }
+
+  if (!input.preferredTrackingRef) {
+    return { ok: true, pushRef: input.remoteRef };
+  }
+
+  return {
+    ok: true,
+    pushRef: resolvePushRefForCheckoutRef({
+      checkoutRef: input.preferredTrackingRef,
+      remoteRef: input.remoteRef,
+      legacyTrackingRef: input.legacyTrackingRef,
+      legacyRemoteRef: input.legacyRemoteRef,
+    }),
+  };
+}
 
 function resolvePushRefForCheckoutRef(input: {
   readonly checkoutRef: string;

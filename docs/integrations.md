@@ -10,23 +10,34 @@ The easiest way to think about these integrations is:
 
 ## GitHub
 
-GitHub integration is for repo auth and pull-request workflows.
+GitHub integration is the capability layer for repo auth, pull-request workflows, and repo-aware
+handoff between GitHub context and local Hack work.
 
 Use it when you want Hack to:
 
 - authenticate private repo or automation flows
+- keep more than one GitHub identity or installation context available on the same machine
 - create or update a PR as part of a run or release workflow
-- keep more than one GitHub profile available on the same machine
+- make the first-class GitHub workflow set explicit before deeper review/comment/repo-handoff
+  commands land
 
-Main surface:
+Main surface today:
 
 - `hack x github connect`
 - `hack x github status`
 - `hack x github pr-upsert`
 
+Defined workflow boundary for this milestone:
+
+- review intake and review decision
+- PR update and readiness management
+- PR-level conversation comments
+- PR-adjacent repo handoff actions
+
 Reference:
 
 - [Extensions & SDK reference](extensions.md)
+- [GitHub first-class workflows design](plans/2026-03-13-github-first-class-workflows-design.md)
 
 ## Linear
 

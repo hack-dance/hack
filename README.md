@@ -87,11 +87,12 @@ Hack has a few supporting surfaces that matter after your project is already run
 
 ### GitHub
 
-Use GitHub integration when you want Hack to authenticate repo workflows or create and update pull
-requests for you.
+Use GitHub integration when you want Hack to authenticate repo workflows and carry pull-request
+context cleanly between GitHub and local Hack work.
 
 - Main surface: `hack x github ...`
-- Common use: connect a profile, then use PR or repo automation from Hack workflows
+- Common use: connect a profile, inspect status, then use PR update or repo-aware automation
+  workflows from Hack
 - Reference: [docs/extensions.md](docs/extensions.md)
 
 ### Linear

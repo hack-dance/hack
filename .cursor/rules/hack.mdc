@@ -37,12 +37,6 @@ hack down
 hack global status
 hack session
 hack tickets list
-hack node list
-hack node status --watch
-hack node ssh setup --node <id>
-hack node routes status
-hack node routes repair
-hack dispatch run --project <name|id> --node default --branch <branch> --runner generic -- "pwd"
 hack internal extra-hosts list
 hack internal extra-hosts set <hostname> <target>
 hack internal extra-hosts unset <hostname>

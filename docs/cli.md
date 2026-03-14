@@ -35,6 +35,7 @@ Current practical rule:
 | `hack status` | Show project status (shortcut for `hack projects --details`) | Global |
 | `hack usage` | Show resource usage across running projects | Global |
 | `hack init` | Initialize a repo (generate .hack/ with compose + config) | Project |
+| `hack project` | Inspect or manage project metadata | Project |
 | `hack up` | Start project services (docker compose up) | Project |
 | `hack down` | Stop project services (docker compose down) | Project |
 | `hack restart` | Restart project services (down then up) | Project |
@@ -208,6 +209,33 @@ Options:
 | `--oauth` | boolean | false | Enable OAuth-safe alias host |
 | `--oauth-tld <tld>` | string | `gy` | OAuth alias TLD override |
 | `--no-discovery` | boolean | false | Skip discovery and generate a minimal compose |
+
+### hack project
+
+Usage: `hack project [options]`
+
+Subcommands:
+
+| Subcommand | Summary |
+| --- | --- |
+| `owner` | Inspect or manage project ownership |
+
+#### hack project owner show
+
+Usage: `hack project owner show [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
+| `--project <name>` | string | - | Target a registered project by name |
+| `--json` | boolean | false | Output JSON (machine-readable) |
+
+Notes:
+
+- This is a read-only ownership inspection surface.
+- If the project config cannot be parsed, the command fails instead of guessing a local owner.
 
 ### hack up
 

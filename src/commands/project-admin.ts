@@ -50,6 +50,10 @@ const handleOwnerShow: CommandHandlerFor<typeof ownerShowSpec> = async ({
     projectOpt: args.options.project,
   });
   const config = await readProjectConfig(project);
+  if (config.parseError) {
+    const configPath = config.configPath ?? project.configFile;
+    throw new Error(`Failed to parse ${configPath}: ${config.parseError}`);
+  }
   const payload = {
     project_root: project.projectRoot,
     ownership: {

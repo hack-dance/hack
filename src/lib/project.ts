@@ -145,6 +145,11 @@ export interface ProjectOwnershipConfig {
   readonly managedBy: ProjectOwnershipManager;
 }
 
+type ParsedProjectOwnership = {
+  readonly ownership: ProjectOwnershipConfig;
+  readonly parseError?: string;
+};
+
 export interface ProjectSessionsConfig {
   /**
    * Mux backend for `hack session`.
@@ -323,7 +328,11 @@ function parseProjectConfigToml(opts: {
 
 function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
   if (!isRecord(value)) {
-    return { configPath: path, ownership: defaultProjectOwnership() };
+    return {
+      configPath: path,
+      parseError: "Project config root must be an object.",
+      ownership: defaultProjectOwnership(),
+    };
   }
 
   const name = getString(value, "name");
@@ -338,7 +347,7 @@ function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
     lifecycle: lifecycleBase,
     startup,
   });
-  const ownership = parseProjectOwnership(getRecord(value, "ownership"));
+  const parsedOwnership = parseProjectOwnership(value.ownership);
 
   return {
     ...(name ? { name } : {}),
@@ -348,7 +357,10 @@ function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
     ...(internal ? { internal } : {}),
     ...(sessions ? { sessions } : {}),
     ...(lifecycle ? { lifecycle } : {}),
-    ownership,
+    ownership: parsedOwnership.ownership,
+    ...(parsedOwnership.parseError
+      ? { parseError: parsedOwnership.parseError }
+      : {}),
     configPath: path,
   };
 }
@@ -362,26 +374,72 @@ export function defaultProjectOwnership(): ProjectOwnershipConfig {
   };
 }
 
-function parseProjectOwnership(
-  value: Record<string, unknown> | undefined
-): ProjectOwnershipConfig {
-  const mode =
-    parseProjectOwnershipMode(value ? getString(value, "mode") : undefined) ??
-    "local";
+function parseProjectOwnership(value: unknown): ParsedProjectOwnership {
+  if (value === undefined) {
+    return { ownership: defaultProjectOwnership() };
+  }
+  if (!isRecord(value)) {
+    return {
+      ownership: defaultProjectOwnership(),
+      parseError: "Project ownership must be an object.",
+    };
+  }
+
+  const modeValue = value.mode;
+  const mode = parseProjectOwnershipMode(
+    typeof modeValue === "string" ? modeValue : undefined
+  );
+  if (modeValue !== undefined && mode === undefined) {
+    return {
+      ownership: defaultProjectOwnership(),
+      parseError: "Project ownership.mode must be 'local' or 'shared'.",
+    };
+  }
+  if (modeValue === undefined) {
+    if (value.owner_type !== undefined || value.owner_id !== undefined) {
+      return {
+        ownership: defaultProjectOwnership(),
+        parseError:
+          "Project ownership.mode is required when ownership.owner_type or ownership.owner_id is set.",
+      };
+    }
+    return { ownership: defaultProjectOwnership() };
+  }
   if (mode === "local") {
-    return defaultProjectOwnership();
+    return { ownership: defaultProjectOwnership() };
+  }
+
+  const ownerTypeValue = value.owner_type;
+  const ownerType = parseProjectOwnershipOwnerType(
+    typeof ownerTypeValue === "string" ? ownerTypeValue : undefined
+  );
+  if (ownerType === undefined) {
+    return {
+      ownership: defaultProjectOwnership(),
+      parseError:
+        "Project ownership.owner_type must be 'user', 'team', or 'organization'.",
+    };
+  }
+
+  const ownerIdValue = value.owner_id;
+  if (
+    ownerIdValue !== undefined &&
+    ownerIdValue !== null &&
+    typeof ownerIdValue !== "string"
+  ) {
+    return {
+      ownership: defaultProjectOwnership(),
+      parseError: "Project ownership.owner_id must be a string when provided.",
+    };
   }
 
   return {
-    mode: "shared",
-    ownerType:
-      parseProjectOwnershipOwnerType(
-        value ? getString(value, "owner_type") : undefined
-      ) ?? "team",
-    ownerId: normalizeProjectOwnerId(
-      value ? getString(value, "owner_id") : undefined
-    ),
-    managedBy: "broker",
+    ownership: {
+      mode: "shared",
+      ownerType,
+      ownerId: normalizeProjectOwnerId(ownerIdValue),
+      managedBy: "broker",
+    },
   };
 }
 
@@ -403,7 +461,9 @@ function parseProjectOwnershipOwnerType(
   return undefined;
 }
 
-function normalizeProjectOwnerId(value: string | undefined): string | null {
+function normalizeProjectOwnerId(
+  value: string | null | undefined
+): string | null {
   const trimmed = value?.trim() ?? "";
   return trimmed.length > 0 ? trimmed : null;
 }

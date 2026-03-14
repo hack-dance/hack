@@ -573,13 +573,20 @@ async function renderProjectMeta(opts: {
 }): Promise<void> {
   await display.section("Meta");
 
+  const ownershipEntries: Array<readonly [string, string]> = opts.meta.ownership
+    ? [
+        ["Ownership mode", opts.meta.ownership.mode],
+        ["Owner type", opts.meta.ownership.ownerType],
+        ["Owner id", opts.meta.ownership.ownerId ?? ""],
+        ["Managed by", opts.meta.ownership.managedBy],
+      ]
+    : [["Ownership", "unavailable"]];
+  if (opts.meta.configError) {
+    ownershipEntries.push(["Config error", opts.meta.configError]);
+  }
+
   await display.kv({
-    entries: [
-      ["Ownership mode", opts.meta.ownership.mode],
-      ["Owner type", opts.meta.ownership.ownerType],
-      ["Owner id", opts.meta.ownership.ownerId ?? ""],
-      ["Managed by", opts.meta.ownership.managedBy],
-    ],
+    entries: ownershipEntries,
   });
   await renderGitMeta({ git: opts.meta.git });
   await renderGitWorktrees({ worktrees: opts.meta.git.worktrees });

@@ -275,7 +275,7 @@ async function buildRegisteredProjectView(opts: {
     devHost: opts.registration.devHost ?? null,
     repoRoot: opts.registration.repoRoot,
     projectDir: opts.registration.projectDir,
-    ownership: config?.ownership ?? null,
+    ownership: config && !config.parseError ? config.ownership : null,
     definedServices,
     extensionsEnabled: extensions?.enabled ?? null,
     features: extensions?.features ?? null,

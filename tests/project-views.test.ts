@@ -228,6 +228,29 @@ test("buildProjectViews includes explicit project ownership metadata", async () 
   });
 });
 
+test("buildProjectViews omits ownership when config parsing fails", async () => {
+  const alpha = await createProject({
+    name: "alpha",
+    services: ["api"],
+    configJson: "{ invalid json",
+  });
+
+  const views = await buildProjectViews({
+    registryProjects: [alpha],
+    runtime: [],
+    runtimeOk: true,
+    filter: null,
+    includeUnregistered: false,
+    muxSessions: [],
+  });
+
+  const alphaView = views.find((view) => view.name === "alpha");
+  expect(alphaView?.ownership).toBeNull();
+
+  const serialized = alphaView ? serializeProjectView(alphaView) : null;
+  expect(serialized?.ownership).toBeNull();
+});
+
 test("buildProjectViews includes lifecycle and startup summaries", async () => {
   const lifecycleConfig = JSON.stringify(
     {

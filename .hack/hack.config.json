@@ -11,6 +11,11 @@
         "enabled": true
       }
     },
+    "tickets": {
+      "git": {
+        "enabled": false
+      }
+    },
     "gateway": {
       "enabled": true
     }

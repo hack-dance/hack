@@ -73,7 +73,8 @@ export type ComposeBuildMeta = {
 };
 
 export type ProjectMeta = {
-  readonly ownership: ProjectOwnershipConfig;
+  readonly ownership: ProjectOwnershipConfig | null;
+  readonly configError: string | null;
   readonly git: GitMeta;
   readonly hackBranches: HackBranchesMeta;
   readonly env: EnvMeta;
@@ -108,7 +109,8 @@ export async function resolveProjectMeta(opts: {
     ]);
 
   return {
-    ownership: config.ownership,
+    ownership: config.parseError ? null : config.ownership,
+    configError: config.parseError ?? null,
     git,
     hackBranches,
     env,

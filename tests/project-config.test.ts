@@ -113,6 +113,48 @@ test("readProjectConfig captures parse errors", async () => {
   expect(cfg.parseError).toBeTruthy();
 });
 
+test("readProjectConfig rejects non-object config roots", async () => {
+  const ctx = await createProjectDir();
+  await writeFile(ctx.configFile, JSON.stringify(["not", "an", "object"]));
+
+  const cfg = await readProjectConfig(ctx);
+
+  expect(cfg.parseError).toBe("Project config root must be an object.");
+});
+
+test("readProjectConfig rejects malformed ownership payloads", async () => {
+  const ctx = await createProjectDir();
+  await writeFile(
+    ctx.configFile,
+    JSON.stringify({
+      ownership: [],
+    })
+  );
+
+  const cfg = await readProjectConfig(ctx);
+
+  expect(cfg.parseError).toBe("Project ownership must be an object.");
+});
+
+test("readProjectConfig rejects ownership fields without an explicit mode", async () => {
+  const ctx = await createProjectDir();
+  await writeFile(
+    ctx.configFile,
+    JSON.stringify({
+      ownership: {
+        owner_type: "team",
+        owner_id: "team_123",
+      },
+    })
+  );
+
+  const cfg = await readProjectConfig(ctx);
+
+  expect(cfg.parseError).toBe(
+    "Project ownership.mode is required when ownership.owner_type or ownership.owner_id is set."
+  );
+});
+
 test("readProjectConfig defaults ownership to local user scope", async () => {
   const ctx = await createProjectDir();
 

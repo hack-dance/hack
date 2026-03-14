@@ -175,6 +175,7 @@ test("getProjectsPayload keeps working when resolveProjectMeta fails for one pro
             ownerId: null,
             managedBy: "local",
           },
+          configError: null,
           git: {
             isRepo: false,
             head: null,

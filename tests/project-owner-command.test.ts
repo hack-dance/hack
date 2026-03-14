@@ -99,12 +99,78 @@ test("project owner show returns explicit shared ownership as json", async () =>
   });
 });
 
+test("project owner show fails when config parsing fails", async () => {
+  const projectRoot = await createHackProject({
+    rawConfig: "{ invalid json",
+  });
+
+  const result = await runCliWithCapturedOutput([
+    "project",
+    "owner",
+    "show",
+    "--path",
+    projectRoot,
+    "--json",
+  ]);
+
+  expect(result.exitCode).toBe(1);
+  expect(`${result.stdout}\n${result.stderr}`).toContain("Failed to parse");
+});
+
+test("project owner show fails when ownership payload is malformed", async () => {
+  const projectRoot = await createHackProject({
+    rawConfig: JSON.stringify({
+      ownership: [],
+    }),
+  });
+
+  const result = await runCliWithCapturedOutput([
+    "project",
+    "owner",
+    "show",
+    "--path",
+    projectRoot,
+    "--json",
+  ]);
+
+  expect(result.exitCode).toBe(1);
+  expect(`${result.stdout}\n${result.stderr}`).toContain(
+    "Project ownership must be an object."
+  );
+});
+
+test("project owner show fails when ownership fields omit mode", async () => {
+  const projectRoot = await createHackProject({
+    rawConfig: JSON.stringify({
+      ownership: {
+        owner_type: "team",
+        owner_id: "team_123",
+      },
+    }),
+  });
+
+  const result = await runCliWithCapturedOutput([
+    "project",
+    "owner",
+    "show",
+    "--path",
+    projectRoot,
+    "--json",
+  ]);
+
+  expect(result.exitCode).toBe(1);
+  expect(`${result.stdout}\n${result.stderr}`).toContain(
+    "Project ownership.mode is required when ownership.owner_type or ownership.owner_id is set."
+  );
+});
+
 async function createHackProject(opts?: {
   readonly ownership?: {
     readonly mode: "local" | "shared";
     readonly owner_type: "user" | "team" | "organization";
     readonly owner_id?: string;
   };
+  readonly rawConfig?: string;
 }): Promise<string> {
   if (!tempDir) {
     throw new Error("Missing temp directory");
@@ -117,15 +183,16 @@ async function createHackProject(opts?: {
   await writeFile(join(projectDir, PROJECT_ENV_FILENAME), "");
   await writeFile(
     join(projectDir, PROJECT_CONFIG_FILENAME),
-    JSON.stringify(
-      opts?.ownership
-        ? {
-            ownership: opts.ownership,
-          }
-        : {},
-      null,
-      2
-    )
+    opts?.rawConfig ??
+      JSON.stringify(
+        opts?.ownership
+          ? {
+              ownership: opts.ownership,
+            }
+          : {},
+        null,
+        2
+      )
   );
 
   return projectRoot;

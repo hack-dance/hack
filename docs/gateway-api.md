@@ -204,8 +204,8 @@ Base URL: `http://127.0.0.1:7788` (or your tunnel URL)
 | GET | `/v1/metrics` | no | Cache + stream metrics |
 | GET | `/v1/projects` | no | Gateway-enabled projects + runtime snapshot |
 | GET | `/v1/ps` | no | Compose project container list |
-| GET | `/v1/sessions` | no | List persistent tmux-backed workspaces |
-| POST | `/v1/sessions` | yes | Create persistent tmux-backed workspace |
+| GET | `/v1/sessions` | no | List persistent mux-backed workspaces |
+| POST | `/v1/sessions` | yes | Create persistent mux-backed workspace |
 | GET | `/v1/sessions/:id` | no | Get workspace details |
 | POST | `/v1/sessions/:id/stop` | yes | Stop (kill) workspace |
 | POST | `/v1/sessions/:id/exec` | yes | Execute command in workspace |

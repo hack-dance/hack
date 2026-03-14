@@ -77,6 +77,7 @@ test("managed env schema models entry kind, metadata, and service scope", () => 
   });
 
   const entries = properties.entries as Record<string, unknown>;
+  expect(entries.description).toContain("Duplicate keys must be rejected");
   const entry = entries.items as Record<string, unknown>;
   expect(entry.additionalProperties).toBe(false);
   expect(entry.required).toEqual(["key", "value", "required"]);
@@ -95,6 +96,7 @@ test("managed env schema models entry kind, metadata, and service scope", () => 
     { type: "null" },
     {
       type: "array",
+      minItems: 1,
       items: { type: "string", minLength: 1 },
       uniqueItems: true,
     },

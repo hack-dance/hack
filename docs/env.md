@@ -111,12 +111,14 @@ Local compatibility rules:
 - neither compatibility target stores descriptions, service scope, timestamps, or actor metadata
 - compatibility targets are derived outputs and may be regenerated from the managed artifact at any time
 
-CLI behavior when a managed artifact is active:
+Planned CLI behavior when a managed artifact is active:
 
 1. Reads validate artifact keys against `.hack/hack.env.json` when present.
 2. Reads report artifact intent, local materialization state, and drift between them.
 3. `hack env set` mutates the canonical artifact first, then materializes the entry to `.hack/.env` or the configured secret backend based on `value.kind`.
 4. If an entry changes kind, Hack removes stale local state from the old compatibility target before writing the new one.
+
+This behavior is design intent for the managed artifact workflow; it is not fully implemented by the current CLI yet.
 
 See [docs/plans/2026-03-13-portable-project-env-artifact-schema-design.md](plans/2026-03-13-portable-project-env-artifact-schema-design.md) for the full design rationale and implementation boundary.
 

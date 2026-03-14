@@ -295,9 +295,10 @@ Rules:
 
 - reject unknown schema versions
 - reject entries without a valid uppercase env key
-- reject duplicate keys inside one artifact
+- reject duplicate keys inside one artifact during parser/CLI validation, since the JSON Schema cannot express key uniqueness within an array of objects
 - reject invalid `value.kind` values
 - reject non-array `services` values other than `null`/omitted
+- reject empty `services` arrays
 - sort and de-duplicate service names at serialization boundaries
 - warn, rather than silently discard, when artifact keys are not declared in `.hack/hack.env.json`
 - require explicit confirmation before applying artifact entries that are unknown to the contract

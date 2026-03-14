@@ -249,6 +249,98 @@ describe("org and team membership broker routes", () => {
     expect(listMembersResponse.status).toBe(404);
   });
 
+  test("active org members can administer teams without direct team membership", async () => {
+    const store = new InMemoryOrgTeamsStore();
+    const ownerApp = createAuthBrokerApp({
+      config: createTestConfig(),
+      betterAuthRuntime: createBetterAuthRuntimeWithSession(createSession()),
+      orgTeamsStore: store,
+    });
+
+    await ownerApp.handle(
+      new Request("http://localhost/v1/auth/orgs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          slug: "hack",
+          name: "Hack",
+        }),
+      })
+    );
+
+    await ownerApp.handle(
+      new Request("http://localhost/v1/auth/teams", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          slug: "cli",
+          org: "hack",
+          name: "CLI",
+        }),
+      })
+    );
+
+    await ownerApp.handle(
+      new Request("http://localhost/v1/auth/orgs/hack/members/add", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          target: "user-456",
+        }),
+      })
+    );
+
+    await ownerApp.handle(
+      new Request("http://localhost/v1/auth/orgs/hack/members/add", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          target: "user-789",
+        }),
+      })
+    );
+
+    const orgAdminApp = createAuthBrokerApp({
+      config: createTestConfig(),
+      betterAuthRuntime: createBetterAuthRuntimeWithSession(
+        createSession({
+          userId: "user-456",
+          email: "org-admin@example.com",
+        })
+      ),
+      orgTeamsStore: store,
+    });
+
+    const listTeamsResponse = await orgAdminApp.handle(
+      new Request("http://localhost/v1/auth/teams?org=hack")
+    );
+    expect(listTeamsResponse.status).toBe(200);
+    const listedTeams = (await listTeamsResponse.json()) as {
+      readonly teams?: ReadonlyArray<{ readonly slug?: string }>;
+    };
+    expect(listedTeams.teams?.map((team) => team.slug)).toEqual(["cli"]);
+
+    const addTeamMemberResponse = await orgAdminApp.handle(
+      new Request("http://localhost/v1/auth/teams/cli/members/add", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          org: "hack",
+          target: "user-789",
+        }),
+      })
+    );
+    expect(addTeamMemberResponse.status).toBe(200);
+    const addedMembership = (await addTeamMemberResponse.json()) as {
+      readonly membership?: {
+        readonly scope?: string;
+        readonly state?: string;
+      };
+    };
+    expect(addedMembership.membership?.scope).toBe("team");
+    expect(addedMembership.membership?.state).toBe("active");
+  });
+
   test("team membership changes require an active parent org membership", async () => {
     const store = new InMemoryOrgTeamsStore();
     const ownerApp = createAuthBrokerApp({

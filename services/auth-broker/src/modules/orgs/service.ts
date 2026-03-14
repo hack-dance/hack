@@ -233,15 +233,14 @@ export class InMemoryOrgTeamsStore implements OrgTeamsStore {
     readonly orgKey: string | null;
     readonly actorUserId: string;
   }): MaybePromise<readonly TeamRecord[]> {
-    const allowedTeamIds = new Set(
+    const allowedOrgIds = new Set(
       [...this.activeMemberships.values()]
         .filter(
           (membership) =>
-            membership.scope === "team" &&
+            membership.scope === "organization" &&
             membership.userId === input.actorUserId
         )
-        .map((membership) => membership.teamId)
-        .filter((teamId): teamId is string => typeof teamId === "string")
+        .map((membership) => membership.organizationId)
     );
     const organization = input.orgKey
       ? this.findOrganization({ orgKey: input.orgKey })
@@ -250,7 +249,7 @@ export class InMemoryOrgTeamsStore implements OrgTeamsStore {
       if (organization && team.organizationId !== organization.id) {
         return false;
       }
-      return allowedTeamIds.has(team.id);
+      return allowedOrgIds.has(team.organizationId);
     });
   }
 
@@ -268,8 +267,8 @@ export class InMemoryOrgTeamsStore implements OrgTeamsStore {
     }
     const allowed = [...this.activeMemberships.values()].some(
       (membership) =>
-        membership.scope === "team" &&
-        membership.teamId === team.id &&
+        membership.scope === "organization" &&
+        membership.organizationId === team.organizationId &&
         membership.userId === input.actorUserId
     );
     return allowed ? team : null;
@@ -410,66 +409,30 @@ export class InMemoryOrgTeamsStore implements OrgTeamsStore {
       return null;
     }
     const normalizedTarget = input.target.trim();
-    for (const invitation of this.invitations.values()) {
-      if (
-        invitation.status === "pending" &&
-        invitation.scope === input.scope &&
-        invitation.organizationId === organization.id &&
-        invitation.teamId === (team?.id ?? null) &&
-        invitation.email === normalizedTarget
-      ) {
-        const removed: InvitationRecord = {
-          ...invitation,
-          status: "removed",
-          updatedAt: new Date().toISOString(),
-        };
-        this.invitations.set(invitation.id, removed);
-        const membership = this.toRemovedMembership({
-          scope: invitation.scope,
-          organizationId: invitation.organizationId,
-          teamId: invitation.teamId,
-          userId: null,
-          email: invitation.email,
-          target: invitation.email,
-        });
-        this.removedMemberships.set(membership.id, membership);
-        if (input.scope === "organization") {
-          this.cascadeRemovedOrganizationTarget({
-            organizationId: organization.id,
-            target: normalizedTarget,
-          });
-        }
-        return membership;
-      }
+    const teamId = team?.id ?? null;
+    const removedMembership =
+      this.removePendingInvitationMembership({
+        scope: input.scope,
+        organizationId: organization.id,
+        teamId,
+        target: normalizedTarget,
+      }) ??
+      this.removeActiveMembership({
+        scope: input.scope,
+        organizationId: organization.id,
+        teamId,
+        target: normalizedTarget,
+      });
+    if (!removedMembership) {
+      return null;
     }
-
-    for (const [key, membership] of this.activeMemberships.entries()) {
-      if (
-        membership.scope === input.scope &&
-        membership.organizationId === organization.id &&
-        membership.teamId === (team?.id ?? null) &&
-        membership.target === normalizedTarget
-      ) {
-        this.activeMemberships.delete(key);
-        const removed = this.toRemovedMembership({
-          scope: membership.scope,
-          organizationId: membership.organizationId,
-          teamId: membership.teamId,
-          userId: membership.userId,
-          email: membership.email,
-          target: membership.target,
-        });
-        this.removedMemberships.set(removed.id, removed);
-        if (input.scope === "organization") {
-          this.cascadeRemovedOrganizationTarget({
-            organizationId: organization.id,
-            target: normalizedTarget,
-          });
-        }
-        return removed;
-      }
+    if (input.scope === "organization") {
+      this.cascadeRemovedOrganizationTarget({
+        organizationId: organization.id,
+        target: normalizedTarget,
+      });
     }
-    return null;
+    return removedMembership;
   }
 
   listInvitationsForEmail(input: {
@@ -634,6 +597,72 @@ export class InMemoryOrgTeamsStore implements OrgTeamsStore {
       createdAt: now,
       updatedAt: now,
     };
+  }
+
+  private removePendingInvitationMembership(input: {
+    readonly scope: "organization" | "team";
+    readonly organizationId: string;
+    readonly teamId: string | null;
+    readonly target: string;
+  }): MembershipRecord | null {
+    for (const invitation of this.invitations.values()) {
+      if (
+        invitation.status !== "pending" ||
+        invitation.scope !== input.scope ||
+        invitation.organizationId !== input.organizationId ||
+        invitation.teamId !== input.teamId ||
+        invitation.email !== input.target
+      ) {
+        continue;
+      }
+      const removed: InvitationRecord = {
+        ...invitation,
+        status: "removed",
+        updatedAt: new Date().toISOString(),
+      };
+      this.invitations.set(invitation.id, removed);
+      const membership = this.toRemovedMembership({
+        scope: invitation.scope,
+        organizationId: invitation.organizationId,
+        teamId: invitation.teamId,
+        userId: null,
+        email: invitation.email,
+        target: invitation.email,
+      });
+      this.removedMemberships.set(membership.id, membership);
+      return membership;
+    }
+    return null;
+  }
+
+  private removeActiveMembership(input: {
+    readonly scope: "organization" | "team";
+    readonly organizationId: string;
+    readonly teamId: string | null;
+    readonly target: string;
+  }): MembershipRecord | null {
+    for (const [key, membership] of this.activeMemberships.entries()) {
+      if (
+        membership.scope !== input.scope ||
+        membership.organizationId !== input.organizationId ||
+        membership.teamId !== input.teamId ||
+        membership.target !== input.target
+      ) {
+        continue;
+      }
+      this.activeMemberships.delete(key);
+      const removed = this.toRemovedMembership({
+        scope: membership.scope,
+        organizationId: membership.organizationId,
+        teamId: membership.teamId,
+        userId: membership.userId,
+        email: membership.email,
+        target: membership.target,
+      });
+      this.removedMemberships.set(removed.id, removed);
+      return removed;
+    }
+    return null;
   }
 
   private cascadeRemovedOrganizationTarget(input: {

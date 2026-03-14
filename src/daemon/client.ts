@@ -38,14 +38,16 @@ export async function requestDaemonJson(opts: {
   readonly method?: "GET" | "POST";
   readonly body?: Record<string, unknown>;
   readonly allowIncompatible?: boolean;
+  readonly autoStart?: boolean;
 }): Promise<DaemonJsonResponse | null> {
+  const autoStart = opts.autoStart ?? true;
   const paths = resolveDaemonPaths({});
-  const status = await readDaemonStatus({ paths });
-  if (!status.socketExists) {
-    const started = await ensureDaemonReady({ paths });
-    if (!started) {
-      return null;
-    }
+  const daemonReady = await ensureDaemonSocketReady({
+    paths,
+    autoStart,
+  });
+  if (!daemonReady) {
+    return null;
   }
 
   if (!opts.allowIncompatible) {
@@ -66,36 +68,16 @@ export async function requestDaemonJson(opts: {
     body: opts.body,
     timeoutMs: opts.timeoutMs ?? 1000,
   });
-  if (!raw) {
-    const restarted = await ensureDaemonReady({ paths });
-    if (!restarted) {
-      return null;
-    }
-    const retry = await requestDaemonRaw({
-      socketPath: paths.socketPath,
-      method: opts.method ?? "GET",
-      path: opts.path,
-      query: opts.query,
-      body: opts.body,
-      timeoutMs: opts.timeoutMs ?? 1000,
-    });
-    if (!retry) {
-      return null;
-    }
-    const retryJson = safeJsonParse({ text: retry.body });
-    return {
-      ok: retry.statusCode >= 200 && retry.statusCode < 300,
-      status: retry.statusCode,
-      json: retryJson,
-    };
-  }
-
-  const json = safeJsonParse({ text: raw.body });
-  return {
-    ok: raw.statusCode >= 200 && raw.statusCode < 300,
-    status: raw.statusCode,
-    json,
-  };
+  return await resolveDaemonJsonResponse({
+    raw,
+    autoStart,
+    paths,
+    method: opts.method ?? "GET",
+    path: opts.path,
+    query: opts.query,
+    body: opts.body,
+    timeoutMs: opts.timeoutMs ?? 1000,
+  });
 }
 
 /**
@@ -148,6 +130,20 @@ async function ensureDaemonReady(opts: {
   }
 
   return false;
+}
+
+async function ensureDaemonSocketReady(opts: {
+  readonly paths: ReturnType<typeof resolveDaemonPaths>;
+  readonly autoStart: boolean;
+}): Promise<boolean> {
+  const status = await readDaemonStatus({ paths: opts.paths });
+  if (status.socketExists) {
+    return true;
+  }
+  if (!opts.autoStart) {
+    return false;
+  }
+  return await ensureDaemonReady({ paths: opts.paths });
 }
 
 /**
@@ -274,6 +270,52 @@ async function requestDaemonRaw(opts: {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function resolveDaemonJsonResponse(opts: {
+  readonly raw: { readonly statusCode: number; readonly body: string } | null;
+  readonly autoStart: boolean;
+  readonly paths: ReturnType<typeof resolveDaemonPaths>;
+  readonly method: "GET" | "POST";
+  readonly path: string;
+  readonly query?: Record<string, string | boolean | null>;
+  readonly body?: Record<string, unknown>;
+  readonly timeoutMs: number;
+}): Promise<DaemonJsonResponse | null> {
+  if (opts.raw) {
+    return buildDaemonJsonResponse({ raw: opts.raw });
+  }
+  if (!opts.autoStart) {
+    return null;
+  }
+
+  const restarted = await ensureDaemonReady({ paths: opts.paths });
+  if (!restarted) {
+    return null;
+  }
+  const retry = await requestDaemonRaw({
+    socketPath: opts.paths.socketPath,
+    method: opts.method,
+    path: opts.path,
+    query: opts.query,
+    body: opts.body,
+    timeoutMs: opts.timeoutMs,
+  });
+  if (!retry) {
+    return null;
+  }
+  return buildDaemonJsonResponse({ raw: retry });
+}
+
+function buildDaemonJsonResponse(opts: {
+  readonly raw: { readonly statusCode: number; readonly body: string };
+}): DaemonJsonResponse {
+  const json = safeJsonParse({ text: opts.raw.body });
+  return {
+    ok: opts.raw.statusCode >= 200 && opts.raw.statusCode < 300,
+    status: opts.raw.statusCode,
+    json,
+  };
 }
 
 function buildQueryString(opts: {

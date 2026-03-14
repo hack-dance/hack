@@ -423,6 +423,12 @@ async function handleRequest({
       runtime_last_ok_at: runtimeHealth.lastOkAt,
       runtime_reset_at: runtimeHealth.lastResetAt,
       runtime_reset_count: runtimeHealth.resetCount,
+      runtime_reset_summary: runtimeHealth.lastResetSummary,
+      runtime_reset_changes: runtimeHealth.lastResetChanges,
+      runtime_last_repair_at: runtimeHealth.lastRepairAt,
+      runtime_repair_action: runtimeHealth.lastRepairAction,
+      runtime_repair_outcome: runtimeHealth.lastRepairOutcome,
+      runtime_next_step: runtimeHealth.nextStep,
     });
   }
 
@@ -1493,6 +1499,12 @@ function formatRuntimeHealth(opts: { readonly health: RuntimeHealth | null }): {
   readonly lastOkAt: string | null;
   readonly lastResetAt: string | null;
   readonly resetCount: number;
+  readonly lastResetSummary: string | null;
+  readonly lastResetChanges: readonly string[];
+  readonly lastRepairAt: string | null;
+  readonly lastRepairAction: string | null;
+  readonly lastRepairOutcome: "stabilized" | "manual_action_required" | null;
+  readonly nextStep: string | null;
 } {
   if (!opts.health) {
     return {
@@ -1502,6 +1514,12 @@ function formatRuntimeHealth(opts: { readonly health: RuntimeHealth | null }): {
       lastOkAt: null,
       lastResetAt: null,
       resetCount: 0,
+      lastResetSummary: null,
+      lastResetChanges: [],
+      lastRepairAt: null,
+      lastRepairAction: null,
+      lastRepairOutcome: null,
+      nextStep: null,
     };
   }
   return {
@@ -1511,6 +1529,12 @@ function formatRuntimeHealth(opts: { readonly health: RuntimeHealth | null }): {
     lastOkAt: toIso({ ms: opts.health.lastOkAtMs }),
     lastResetAt: toIso({ ms: opts.health.lastResetAtMs }),
     resetCount: opts.health.resetCount,
+    lastResetSummary: opts.health.lastResetSummary,
+    lastResetChanges: opts.health.lastResetChanges,
+    lastRepairAt: toIso({ ms: opts.health.lastRepairAtMs }),
+    lastRepairAction: opts.health.lastRepairAction,
+    lastRepairOutcome: opts.health.lastRepairOutcome,
+    nextStep: opts.health.nextStep,
   };
 }
 

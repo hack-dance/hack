@@ -13,6 +13,19 @@ export type RuntimeIdentityResult =
   | { readonly ok: true; readonly identity: RuntimeIdentity }
   | { readonly ok: false; readonly error: string };
 
+export type RuntimeDriftField =
+  | "docker_host"
+  | "socket_path"
+  | "socket_inode"
+  | "engine_id"
+  | "engine_name"
+  | "engine_version";
+
+export type RuntimeDrift = {
+  readonly changed: readonly RuntimeDriftField[];
+  readonly summary: string | null;
+};
+
 export async function readRuntimeIdentity(opts?: {
   readonly env?: Record<string, string | undefined>;
 }): Promise<RuntimeIdentityResult> {
@@ -48,6 +61,43 @@ export function buildRuntimeFingerprint(opts: {
       : "none";
   const engineId = opts.identity.engineId ?? "unknown";
   return [dockerHost, socketPath, socketInode, engineId].join("|");
+}
+
+export function detectRuntimeDrift(opts: {
+  readonly previous: RuntimeIdentity | null;
+  readonly current: RuntimeIdentity;
+}): RuntimeDrift {
+  if (!opts.previous) {
+    return {
+      changed: [],
+      summary: null,
+    };
+  }
+
+  const changed: RuntimeDriftField[] = [];
+  if (opts.previous.dockerHost !== opts.current.dockerHost) {
+    changed.push("docker_host");
+  }
+  if (opts.previous.socketPath !== opts.current.socketPath) {
+    changed.push("socket_path");
+  }
+  if (opts.previous.socketInode !== opts.current.socketInode) {
+    changed.push("socket_inode");
+  }
+  if (opts.previous.engineId !== opts.current.engineId) {
+    changed.push("engine_id");
+  }
+  if (opts.previous.engineName !== opts.current.engineName) {
+    changed.push("engine_name");
+  }
+  if (opts.previous.engineVersion !== opts.current.engineVersion) {
+    changed.push("engine_version");
+  }
+
+  return {
+    changed,
+    summary: changed.length > 0 ? summarizeRuntimeDrift({ changed }) : null,
+  };
 }
 
 function resolveDockerHost(opts: {
@@ -169,3 +219,19 @@ function formatDockerError(opts: {
   }
   return `docker info failed (exit ${opts.exitCode})`;
 }
+
+function summarizeRuntimeDrift(opts: {
+  readonly changed: readonly RuntimeDriftField[];
+}): string {
+  const labels = opts.changed.map((field) => runtimeDriftLabels[field]);
+  return `${labels.join(", ")} changed`;
+}
+
+const runtimeDriftLabels: Record<RuntimeDriftField, string> = {
+  docker_host: "docker host",
+  socket_path: "socket path",
+  socket_inode: "socket inode",
+  engine_id: "engine id",
+  engine_name: "engine name",
+  engine_version: "engine version",
+};

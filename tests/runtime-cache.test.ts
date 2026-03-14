@@ -85,7 +85,30 @@ test("runtime cache refresh records healthy snapshot", async () => {
     {
       project: "alpha",
       workingDir: null,
-      services: new Map(),
+      services: new Map([
+        [
+          "app",
+          {
+            service: "app",
+            containers: [
+              {
+                id: "alpha-app-1",
+                project: "alpha",
+                service: "app",
+                state: "running",
+                status: "Up 10 seconds",
+                name: "alpha-app-1",
+                ports: "",
+                workingDir: "/tmp/alpha/.hack",
+                image: "imbios/bun-node:latest",
+                labels: null,
+                mounts: [],
+                networks: [],
+              },
+            ],
+          },
+        ],
+      ]),
       isGlobal: false,
     },
   ];
@@ -321,6 +344,23 @@ test("runtime cache detects runtime resets via fingerprint", async () => {
       engineVersion: null,
     },
   });
+  runtimeQueue.push({
+    ok: true,
+    runtime,
+    error: null,
+    checkedAtMs: Date.now(),
+  });
+  identityQueue.push({
+    ok: true,
+    identity: {
+      dockerHost: null,
+      socketPath: null,
+      socketInode: null,
+      engineId: "engine-b",
+      engineName: "docker-desktop",
+      engineVersion: "27.0.0",
+    },
+  });
 
   const cache = createRuntimeCache({});
   await cache.refresh({ reason: "prime" });
@@ -329,6 +369,105 @@ test("runtime cache detects runtime resets via fingerprint", async () => {
   const snapshot = cache.getSnapshot();
   expect(snapshot?.health.resetCount).toBe(1);
   expect(snapshot?.health.lastResetAtMs).not.toBeNull();
+  expect(snapshot?.health.lastResetSummary).toContain("engine id");
+  expect(snapshot?.health.lastResetChanges).toEqual(["engine_id"]);
+  expect(snapshot?.health.lastRepairAction).toBe("refresh_runtime_snapshot");
+  expect(snapshot?.health.lastRepairOutcome).toBe("stabilized");
+  expect(snapshot?.health.nextStep).toBe(null);
+  expect(autoRegisterCalls.length).toBe(3);
+});
+
+test("runtime cache gives a clear next step when reset repair cannot restore prior runtime", async () => {
+  const runtime: RuntimeProject[] = [
+    {
+      project: "alpha",
+      workingDir: null,
+      services: new Map([
+        [
+          "app",
+          {
+            service: "app",
+            containers: [
+              {
+                id: "alpha-app-1",
+                project: "alpha",
+                service: "app",
+                state: "running",
+                status: "Up 10 seconds",
+                name: "alpha-app-1",
+                ports: "",
+                workingDir: "/tmp/alpha/.hack",
+                image: "imbios/bun-node:latest",
+                labels: null,
+                mounts: [],
+                networks: [],
+              },
+            ],
+          },
+        ],
+      ]),
+      isGlobal: false,
+    },
+  ];
+  runtimeQueue.push({
+    ok: true,
+    runtime,
+    error: null,
+    checkedAtMs: Date.now(),
+  });
+  identityQueue.push({
+    ok: true,
+    identity: {
+      dockerHost: null,
+      socketPath: null,
+      socketInode: null,
+      engineId: "engine-a",
+      engineName: null,
+      engineVersion: null,
+    },
+  });
+  runtimeQueue.push({
+    ok: true,
+    runtime: [],
+    error: null,
+    checkedAtMs: Date.now(),
+  });
+  identityQueue.push({
+    ok: true,
+    identity: {
+      dockerHost: null,
+      socketPath: null,
+      socketInode: null,
+      engineId: "engine-b",
+      engineName: null,
+      engineVersion: null,
+    },
+  });
+  runtimeQueue.push({
+    ok: true,
+    runtime: [],
+    error: null,
+    checkedAtMs: Date.now(),
+  });
+  identityQueue.push({
+    ok: true,
+    identity: {
+      dockerHost: null,
+      socketPath: null,
+      socketInode: null,
+      engineId: "engine-b",
+      engineName: null,
+      engineVersion: null,
+    },
+  });
+
+  const cache = createRuntimeCache({});
+  await cache.refresh({ reason: "prime" });
+  await cache.refresh({ reason: "reset" });
+
+  const snapshot = cache.getSnapshot();
+  expect(snapshot?.health.lastRepairOutcome).toBe("manual_action_required");
+  expect(snapshot?.health.nextStep).toContain("hack up");
 });
 
 test("getPsPayload matches normalized compose project names", async () => {

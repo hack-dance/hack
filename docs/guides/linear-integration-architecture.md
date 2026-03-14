@@ -69,3 +69,21 @@ This guarantees filtering by local-only, Linear-only, or mixed sets without ambi
 1. Phase 1 (current): manual sync only, explicit one-off operations.
 2. Phase 2: webhook-driven candidate updates (still gated/manual apply).
 3. Phase 3: selective autosync per project/profile with conflict policies.
+4. Phase 4 (planned): repo-managed project documents, milestones, and status updates.
+
+## Planned Project Artifact Layer
+
+The next Linear planning slice should extend the existing project binding model with repo-managed
+project artifacts:
+
+- documents
+- milestones
+- status updates
+
+These artifacts should not live in `hack.config.json` blobs or direct one-shot CLI flags. They
+should live in a dedicated repo tree under `.hack/linear/projects/<project-id>/` and use explicit
+`pull`, `plan`, and `apply`/`publish` workflows.
+
+Detailed design:
+- `docs/plans/2026-03-14-linear-project-artifacts-design.md`
+- `docs/plans/2026-03-14-linear-project-artifacts-plan.md`

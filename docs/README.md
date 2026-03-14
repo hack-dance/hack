@@ -34,6 +34,7 @@ Quick diagnostics:
 - Remote setup (one command): `hack remote setup`
 - [Initialize a project](guides/init-project.md)
 - [Global settings](guides/global-settings.md)
+- [Prerequisite detection matrix](guides/prerequisite-detection-matrix.md)
 - [Tickets (git-backed)](guides/tickets.md)
 - [Expose the gateway over SSH](guides/remote-ssh.md)
 - [Expose the gateway with Cloudflare](guides/remote-cloudflare.md)

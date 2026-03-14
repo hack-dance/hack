@@ -1,7 +1,26 @@
-import { expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 
 import { resolveLinearToken } from "../src/control-plane/extensions/linear/auth.ts";
-import { __testOnly } from "../src/control-plane/extensions/linear/commands.ts";
+import {
+  __testOnly,
+  LINEAR_COMMANDS,
+} from "../src/control-plane/extensions/linear/commands.ts";
+
+let tempDir: string | null = null;
+
+beforeEach(async () => {
+  tempDir = await mkdtemp(resolve(tmpdir(), "hack-linear-artifacts-"));
+});
+
+afterEach(async () => {
+  if (tempDir) {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+  tempDir = null;
+});
 
 const minimalLinearBindingConfig = {
   routing: {
@@ -1553,3 +1572,338 @@ test("parseProjectDocumentsArgs rejects unsupported verbs", () => {
 
   expect(parsed.error).toContain("Expected list|pull|plan|apply|archive");
 });
+
+test("LINEAR_COMMANDS registers project artifact command families", () => {
+  const names = LINEAR_COMMANDS.map((command) => command.name);
+
+  expect(names).toContain("documents");
+  expect(names).toContain("milestones");
+  expect(names).toContain("status-updates");
+});
+
+test("runProjectArtifactCommand pulls project documents into repo state", async () => {
+  const projectDir = ensureTempDir();
+  const result = await __testOnly.runProjectArtifactCommand({
+    family: "documents",
+    verb: "pull",
+    runtime: {
+      profileId: "work",
+      projectDir,
+      projectId: "proj_123",
+      linear: {
+        listProjectDocuments: async () => ({
+          ok: true as const,
+          data: [
+            {
+              id: "doc_123",
+              title: "Launch plan",
+              content: "# Launch plan\n",
+              slugId: "launch-plan",
+              sortOrder: 1,
+              icon: "rocket",
+              archived: false,
+              updatedAt: "2026-03-14T10:00:00.000Z",
+            },
+          ],
+        }),
+      },
+    },
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  expect(result.payload.changed).toBe(1);
+  expect(result.payload.writtenPaths).toEqual([
+    resolve(
+      projectDir,
+      ".hack/linear/projects/proj_123/documents/launch-plan.md"
+    ),
+  ]);
+
+  const file = await Bun.file(result.payload.writtenPaths[0] ?? "").text();
+  expect(file).toContain("kind: linear-project-document");
+  expect(file).toContain("linearId: doc_123");
+  expect(file).toContain("icon: rocket");
+});
+
+test("runProjectArtifactCommand plans create update noop and remote-only documents", async () => {
+  const projectDir = ensureTempDir();
+  const documentsDir = resolve(
+    projectDir,
+    ".hack/linear/projects/proj_123/documents"
+  );
+  await mkdir(documentsDir, { recursive: true });
+  await writeFile(
+    resolve(documentsDir, "create-me.md"),
+    `---
+kind: linear-project-document
+linearProjectId: proj_123
+title: Create me
+slug: create-me
+archived: false
+---
+# Create me
+`
+  );
+  await writeFile(
+    resolve(documentsDir, "update-me.md"),
+    `---
+kind: linear-project-document
+linearProjectId: proj_123
+title: Update me
+linearId: doc_update
+slug: update-me
+archived: false
+---
+# Updated body
+`
+  );
+  await writeFile(
+    resolve(documentsDir, "noop-me.md"),
+    `---
+kind: linear-project-document
+linearProjectId: proj_123
+title: No-op me
+linearId: doc_noop
+slug: noop-me
+archived: false
+---
+# No changes
+`
+  );
+
+  const result = await __testOnly.runProjectArtifactCommand({
+    family: "documents",
+    verb: "plan",
+    runtime: {
+      profileId: "work",
+      projectDir,
+      projectId: "proj_123",
+      linear: {
+        listProjectDocuments: async () => ({
+          ok: true as const,
+          data: [
+            {
+              id: "doc_update",
+              title: "Update me",
+              content: "# Old body\n",
+              slugId: "update-me",
+              archived: false,
+            },
+            {
+              id: "doc_noop",
+              title: "No-op me",
+              content: "# No changes\n",
+              slugId: "noop-me",
+              archived: false,
+            },
+            {
+              id: "doc_remote",
+              title: "Remote only",
+              content: "# Remote only\n",
+              slugId: "remote-only",
+              archived: false,
+            },
+          ],
+        }),
+      },
+    },
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  expect(result.payload.summary).toEqual({
+    create: 1,
+    update: 1,
+    noop: 1,
+    remoteOnly: 1,
+    errors: 0,
+  });
+});
+
+test("runProjectArtifactCommand applies document upserts and writes back linear ids", async () => {
+  const projectDir = ensureTempDir();
+  const documentsDir = resolve(
+    projectDir,
+    ".hack/linear/projects/proj_123/documents"
+  );
+  await mkdir(documentsDir, { recursive: true });
+  await writeFile(
+    resolve(documentsDir, "create-me.md"),
+    `---
+kind: linear-project-document
+linearProjectId: proj_123
+title: Create me
+slug: create-me
+archived: false
+---
+# Create me
+`
+  );
+  await writeFile(
+    resolve(documentsDir, "update-me.md"),
+    `---
+kind: linear-project-document
+linearProjectId: proj_123
+title: Update me
+linearId: doc_update
+slug: update-me
+archived: false
+---
+# Updated body
+`
+  );
+
+  const createCalls: string[] = [];
+  const updateCalls: string[] = [];
+  const result = await __testOnly.runProjectArtifactCommand({
+    family: "documents",
+    verb: "apply",
+    runtime: {
+      profileId: "work",
+      projectDir,
+      projectId: "proj_123",
+      linear: {
+        listProjectDocuments: async () => ({
+          ok: true as const,
+          data: [
+            {
+              id: "doc_update",
+              title: "Update me",
+              content: "# Old body\n",
+              slugId: "update-me",
+              archived: false,
+            },
+          ],
+        }),
+        createProjectDocument: async ({ title }) => {
+          createCalls.push(title);
+          return {
+            ok: true as const,
+            data: {
+              id: "doc_create",
+              title,
+              content: "# Create me\n",
+              slugId: "create-me",
+              archived: false,
+              updatedAt: "2026-03-15T09:00:00.000Z",
+            },
+          };
+        },
+        updateProjectDocument: async ({ documentId, title }) => {
+          updateCalls.push(`${documentId}:${title ?? ""}`);
+          return {
+            ok: true as const,
+            data: {
+              id: documentId,
+              title: title ?? "Update me",
+              content: "# Updated body\n",
+              slugId: "update-me",
+              archived: false,
+              updatedAt: "2026-03-15T10:00:00.000Z",
+            },
+          };
+        },
+      },
+    },
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  expect(createCalls).toEqual(["Create me"]);
+  expect(updateCalls).toEqual(["doc_update:Update me"]);
+  expect(result.payload.summary.created).toBe(1);
+  expect(result.payload.summary.updated).toBe(1);
+
+  const createdText = await Bun.file(
+    resolve(documentsDir, "create-me.md")
+  ).text();
+  expect(createdText).toContain("linearId: doc_create");
+  expect(createdText).toContain("updatedAt: 2026-03-15T09:00:00.000Z");
+});
+
+test("runProjectArtifactCommand publishes draft status updates and moves them to published", async () => {
+  const projectDir = ensureTempDir();
+  const draftsDir = resolve(
+    projectDir,
+    ".hack/linear/projects/proj_123/status-updates/drafts"
+  );
+  await mkdir(draftsDir, { recursive: true });
+  await writeFile(
+    resolve(draftsDir, "2026-03-14-weekly.md"),
+    `---
+kind: linear-project-status-update
+linearProjectId: proj_123
+title: Weekly update
+slug: weekly
+archived: false
+date: 2026-03-14
+health: onTrack
+---
+Still on track for dogfooding.
+`
+  );
+
+  const result = await __testOnly.runProjectArtifactCommand({
+    family: "status-updates",
+    verb: "publish",
+    runtime: {
+      profileId: "work",
+      projectDir,
+      projectId: "proj_123",
+      linear: {
+        createProjectUpdate: async ({ body, health }) => ({
+          ok: true as const,
+          data: {
+            id: "update_123",
+            body,
+            health,
+            slugId: "weekly",
+            createdAt: "2026-03-14T10:00:00.000Z",
+            updatedAt: "2026-03-14T10:15:00.000Z",
+            projectId: "proj_123",
+            projectName: "Dogfood",
+          },
+        }),
+      },
+    },
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  expect(result.payload.summary.published).toBe(1);
+  expect(result.payload.movedPaths).toEqual([
+    {
+      from: resolve(draftsDir, "2026-03-14-weekly.md"),
+      to: resolve(
+        projectDir,
+        ".hack/linear/projects/proj_123/status-updates/published/2026-03-14-weekly.md"
+      ),
+    },
+  ]);
+
+  const publishedText = await Bun.file(
+    result.payload.movedPaths[0]?.to ?? ""
+  ).text();
+  expect(publishedText).toContain("linearId: update_123");
+  expect(publishedText).toContain("updatedAt: 2026-03-14T10:15:00.000Z");
+});
+
+function ensureTempDir(): string {
+  if (!tempDir) {
+    throw new Error("Missing temp dir");
+  }
+  return tempDir;
+}

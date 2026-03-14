@@ -1,4 +1,5 @@
-import { join } from "node:path";
+import { readdir, stat } from "node:fs/promises";
+import { isAbsolute, join, resolve } from "node:path";
 import { YAML } from "bun";
 
 import { isRecord } from "../../../lib/guards.ts";
@@ -7,6 +8,13 @@ export type LinearProjectArtifactKind =
   | "linear-project-document"
   | "linear-project-milestone"
   | "linear-project-status-update";
+
+export type LinearProjectArtifactFamily =
+  | "documents"
+  | "milestones"
+  | "status-updates";
+
+export type LinearProjectStatusUpdateState = "draft" | "published";
 
 type LinearProjectArtifactBase = {
   readonly kind: LinearProjectArtifactKind;
@@ -66,6 +74,21 @@ export const resolveLinearProjectArtifactsRoot = ({
   readonly projectDir: string;
   readonly linearProjectId: string;
 }): string => join(projectDir, ".hack/linear/projects", linearProjectId);
+
+/** Resolve the canonical directory for a specific Linear project artifact family. */
+export const resolveLinearProjectArtifactsFamilyRoot = ({
+  projectDir,
+  linearProjectId,
+  family,
+}: {
+  readonly projectDir: string;
+  readonly linearProjectId: string;
+  readonly family: LinearProjectArtifactFamily;
+}): string =>
+  join(
+    resolveLinearProjectArtifactsRoot({ projectDir, linearProjectId }),
+    family
+  );
 
 /** Parse a repo-managed Markdown artifact into a normalized record for planning and sync. */
 export const parseLinearProjectArtifactFile = ({
@@ -228,6 +251,126 @@ export const planLinearProjectArtifactChanges = ({
   };
 };
 
+/** Load repo-managed Linear project artifacts from a file or directory target. */
+export const loadLocalLinearProjectArtifacts = async ({
+  projectDir,
+  linearProjectId,
+  family,
+  path,
+}: {
+  readonly projectDir: string;
+  readonly linearProjectId: string;
+  readonly family: LinearProjectArtifactFamily;
+  readonly path?: string;
+}): Promise<readonly LocalLinearProjectArtifact[]> => {
+  const targetPath =
+    resolveArtifactInputPath({
+      projectDir,
+      linearProjectId,
+      family,
+      path,
+    }) ??
+    resolveLinearProjectArtifactsFamilyRoot({
+      projectDir,
+      linearProjectId,
+      family,
+    });
+
+  const targetStat = await safeStat(targetPath);
+  if (!targetStat) {
+    return [];
+  }
+
+  const markdownPaths = targetStat.isFile()
+    ? [targetPath]
+    : await collectMarkdownFiles(targetPath);
+  const loaded: LocalLinearProjectArtifact[] = [];
+
+  for (const filePath of markdownPaths.sort((left, right) =>
+    left.localeCompare(right)
+  )) {
+    const text = await Bun.file(filePath).text();
+    const artifact = parseLinearProjectArtifactFile({ filePath, text });
+    if (artifact.linearProjectId !== linearProjectId) {
+      continue;
+    }
+    if (resolveArtifactFamily({ kind: artifact.kind }) !== family) {
+      continue;
+    }
+    loaded.push(artifact);
+  }
+
+  return loaded;
+};
+
+/** Convert a snapshot into a local repo-managed artifact with a canonical file path. */
+export const materializeLocalLinearProjectArtifact = ({
+  projectDir,
+  artifact,
+  statusUpdateState,
+}: {
+  readonly projectDir: string;
+  readonly artifact: LinearProjectArtifactSnapshot;
+  readonly statusUpdateState?: LinearProjectStatusUpdateState;
+}): LocalLinearProjectArtifact => ({
+  ...artifact,
+  path: resolveLinearProjectArtifactPath({
+    projectDir,
+    artifact,
+    statusUpdateState,
+  }),
+});
+
+/** Resolve a canonical artifact file path for a local snapshot. */
+export const resolveLinearProjectArtifactPath = ({
+  projectDir,
+  artifact,
+  statusUpdateState,
+}: {
+  readonly projectDir: string;
+  readonly artifact: LinearProjectArtifactSnapshot;
+  readonly statusUpdateState?: LinearProjectStatusUpdateState;
+}): string => {
+  if (artifact.kind === "linear-project-status-update") {
+    const datePart =
+      artifact.date ?? artifact.updatedAt?.slice(0, 10) ?? "undated";
+    const slug = normalizeArtifactSlug({
+      slug: artifact.slug,
+      title: artifact.title,
+    });
+    const state = statusUpdateState ?? "published";
+    return join(
+      resolveLinearProjectArtifactsFamilyRoot({
+        projectDir,
+        linearProjectId: artifact.linearProjectId,
+        family: "status-updates",
+      }),
+      state === "draft" ? "drafts" : "published",
+      `${datePart}-${slug}.md`
+    );
+  }
+
+  const family = resolveArtifactFamily({ kind: artifact.kind });
+  return join(
+    resolveLinearProjectArtifactsFamilyRoot({
+      projectDir,
+      linearProjectId: artifact.linearProjectId,
+      family,
+    }),
+    `${normalizeArtifactSlug({
+      slug: artifact.slug,
+      title: artifact.title,
+    })}.md`
+  );
+};
+
+/** Normalize an artifact title into a stable repo filename slug. */
+export const slugifyLinearProjectArtifactTitle = ({
+  title,
+}: {
+  readonly title: string;
+}): string => normalizeArtifactSlug({ title });
+
 const parseKind = (
   value: unknown,
   filePath: string
@@ -240,6 +383,93 @@ const parseKind = (
     return value;
   }
   throw new Error(`Invalid or missing kind in ${filePath}`);
+};
+
+const resolveArtifactFamily = ({
+  kind,
+}: {
+  readonly kind: LinearProjectArtifactKind;
+}): LinearProjectArtifactFamily => {
+  if (kind === "linear-project-document") {
+    return "documents";
+  }
+  if (kind === "linear-project-milestone") {
+    return "milestones";
+  }
+  return "status-updates";
+};
+
+const normalizeArtifactSlug = ({
+  slug,
+  title,
+}: {
+  readonly slug?: string;
+  readonly title: string;
+}): string => {
+  const raw = (slug?.trim() || title.trim()).toLowerCase();
+  const normalized = raw
+    .replaceAll(/[^a-z0-9]+/g, "-")
+    .replaceAll(/^-+|-+$/g, "")
+    .replaceAll(/-{2,}/g, "-");
+  return normalized || "untitled";
+};
+
+const resolveArtifactInputPath = ({
+  projectDir,
+  linearProjectId,
+  family,
+  path,
+}: {
+  readonly projectDir: string;
+  readonly linearProjectId: string;
+  readonly family: LinearProjectArtifactFamily;
+  readonly path?: string;
+}): string | null => {
+  const candidate = path?.trim();
+  if (!candidate) {
+    return null;
+  }
+  if (isAbsolute(candidate)) {
+    return candidate;
+  }
+  if (candidate.startsWith(".hack/")) {
+    return resolve(projectDir, candidate);
+  }
+  return resolve(
+    resolveLinearProjectArtifactsFamilyRoot({
+      projectDir,
+      linearProjectId,
+      family,
+    }),
+    candidate
+  );
+};
+
+const safeStat = async (
+  path: string
+): Promise<Awaited<ReturnType<typeof stat>> | null> => {
+  try {
+    return await stat(path);
+  } catch {
+    return null;
+  }
+};
+
+const collectMarkdownFiles = async (root: string): Promise<string[]> => {
+  const entries = await readdir(root, { withFileTypes: true });
+  const nested = await Promise.all(
+    entries.map(async (entry) => {
+      const absolutePath = join(root, entry.name);
+      if (entry.isDirectory()) {
+        return await collectMarkdownFiles(absolutePath);
+      }
+      if (entry.isFile() && absolutePath.endsWith(".md")) {
+        return [absolutePath];
+      }
+      return [];
+    })
+  );
+  return nested.flat();
 };
 
 const readRequiredString = ({

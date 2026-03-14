@@ -5,15 +5,19 @@ This directory contains the public documentation for hack. Specs remain in `SPEC
 ## Core docs
 
 - [CLI reference](cli.md)
-- [Architecture](architecture.md)
+- [Architecture](architecture.md) - system model, trust boundaries, and local vs broker-mediated admin
 - [Sessions](sessions.md) - mux session management (tmux or zellij) + API
-- [Env & secrets](env.md) - env contract + `.hack/.env` + OS keychain secrets
+- [Env & secrets](env.md) - env contract, sharing policy, `.hack/.env`, and OS keychain secrets
 - [Lifecycle](lifecycle.md) - project startup hooks + managed host processes
 - [Gateway overview](gateway.md)
 - [Gateway API](gateway-api.md)
 - [Supervisor](supervisor.md)
 - [Extensions](extensions.md)
 - [Control-plane SDK](sdk.md)
+
+Admin model reference:
+- See [Architecture](architecture.md) for the local-only vs broker-mediated admin boundary.
+- See [Env & secrets](env.md) for env ownership, sharing modes, and secure-by-default secret custody.
 
 Monorepo note:
 - Root scripts orchestrate workspace tasks through Turbo.

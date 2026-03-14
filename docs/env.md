@@ -7,8 +7,8 @@ hack supports a project-scoped env contract (shareable, no values) plus safe sec
 Hack currently has three env layers, and they should be understood separately:
 
 - Contract: `.hack/hack.env.json` defines what keys exist and how they should materialize locally.
-- Local values: `.hack/.env` stores local plaintext values for `plain_env`.
-- Local secrets: the configured secret backend stores secret values for keys that should not live in `.hack/.env`.
+- Local values: `.hack/.env` is the usual plaintext file for `plain_env`, and `plain_env` falls back to the current process env when `.hack/.env` does not provide a value.
+- Local secrets: the configured secret backend stores secret values for keys that should not live in `.hack/.env`. In `cloud` mode today, this is still a local shim over encrypted-file storage, not a remote portable copy.
 
 Current status:
 
@@ -27,7 +27,8 @@ See `docs/plans/2026-03-13-env-portability-and-secret-management-design.md` for 
 ## Files and storage
 
 - `.hack/hack.env.json` (committed): declares env vars, required vs optional, per-service scope, and where values should come from.
-- `.hack/.env` (gitignored): stores non-secret values (`source: "plain_env"`).
+- `.hack/.env` (local plaintext file): stores non-secret values (`source: "plain_env"`). Most repos should gitignore it, but Hack does not currently enforce that.
+- `process.env` (ambient fallback): supplies `plain_env` values when `.hack/.env` is missing a key.
 - Configured secret backend (`controlPlane.secrets.backend`): stores secret values for `source: "keychain"` contract vars.
 
 ## Contract format (`.hack/hack.env.json`)
@@ -69,7 +70,7 @@ Fields:
 
 - `hack env list [--json] [--show-secrets]`
   - shows contract + resolution state
-  - includes a storage summary for the committed contract, local `.hack/.env`, configured secret backend, and current portable-state status
+  - includes a storage summary for the committed contract, local `.hack/.env`, ambient `process.env` fallback, configured secret backend mode, and current portable-state status
   - exits `1` if required vars are missing
 - `hack env set KEY=VALUE`
   - writes to `.hack/.env`
@@ -134,7 +135,8 @@ When you run `hack up`, `hack restart`, or `hack run`, hack:
 Security posture:
 
 - Secret values are never written into `.hack/` YAML files.
-- Plain env values live in `.hack/.env` (expected to be gitignored in most repos).
+- Plain env values typically live in `.hack/.env`, but Hack can also read them from the current process env for `plain_env` keys.
+- `.hack/.env` should be gitignored by the repo, but Hack does not currently enforce that invariant during `hack init`.
 
 ## Remote node secret behavior
 

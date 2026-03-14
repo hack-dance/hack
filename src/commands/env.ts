@@ -273,11 +273,15 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
       ],
       [
         "local_plaintext",
-        `${resolved.storage.localPlaintext.path} (${resolved.storage.localPlaintext.exists ? "present" : "missing"} local plaintext for plain_env)`,
+        `${resolved.storage.localPlaintext.path} (${resolved.storage.localPlaintext.exists ? "present" : "missing"} plaintext file for plain_env, gitignore not enforced)`,
+      ],
+      [
+        "local_fallback",
+        `${resolved.storage.localPlaintext.fallback.source} (used when .env does not provide a plain_env value)`,
       ],
       [
         "local_secrets",
-        `${formatSecretStoreDescriptor({ descriptor: resolved.storage.localSecrets })} (local secret backend)`,
+        `${formatSecretStoreDescriptor({ descriptor: resolved.storage.localSecrets })} (${resolved.storage.localSecrets.mode === "shim" ? "local secret backend shim" : "local secret backend"})`,
       ],
       [
         "portable_state",
@@ -330,6 +334,11 @@ function serializeEnvStorageForJson(input: {
       path: input.storage.localPlaintext.path,
       exists: input.storage.localPlaintext.exists,
       trust_model: input.storage.localPlaintext.trustModel,
+      fallback: {
+        enabled: input.storage.localPlaintext.fallback.enabled,
+        source: input.storage.localPlaintext.fallback.source,
+        trust_model: input.storage.localPlaintext.fallback.trustModel,
+      },
     },
     local_secrets: {
       backend: input.storage.localSecrets.backend,

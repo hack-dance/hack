@@ -71,10 +71,15 @@ export type HackEnvStorageSummary = {
   readonly localPlaintext: {
     readonly path: string;
     readonly exists: boolean;
-    readonly trustModel: "gitignored_plaintext";
+    readonly trustModel: "unenforced_plaintext_file";
+    readonly fallback: {
+      readonly enabled: true;
+      readonly source: "process_env";
+      readonly trustModel: "ambient_process_env";
+    };
   };
   readonly localSecrets: SecretStoreDescriptor & {
-    readonly trustModel: "local_secret_backend";
+    readonly trustModel: "local_secret_backend" | "local_secret_backend_shim";
   };
   readonly portableState: HackEnvPortableStateSummary;
 };
@@ -208,11 +213,19 @@ export async function resolveHackEnv(opts: {
       localPlaintext: {
         path: envPath,
         exists: envExists,
-        trustModel: "gitignored_plaintext",
+        trustModel: "unenforced_plaintext_file",
+        fallback: {
+          enabled: true,
+          source: "process_env",
+          trustModel: "ambient_process_env",
+        },
       },
       localSecrets: {
         ...secretStore.descriptor,
-        trustModel: "local_secret_backend",
+        trustModel:
+          secretStore.descriptor.mode === "shim"
+            ? "local_secret_backend_shim"
+            : "local_secret_backend",
       },
       portableState: {
         status: "not_configured",

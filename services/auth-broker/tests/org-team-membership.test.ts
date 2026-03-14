@@ -305,6 +305,204 @@ describe("org and team membership broker routes", () => {
     expect(inviteResponse.status).toBe(409);
   });
 
+  test("org member removal cascades matching team memberships and invites to removed", async () => {
+    const store = new InMemoryOrgTeamsStore();
+    const ownerApp = createAuthBrokerApp({
+      config: createTestConfig(),
+      betterAuthRuntime: createBetterAuthRuntimeWithSession(createSession()),
+      orgTeamsStore: store,
+    });
+
+    await ownerApp.handle(
+      new Request("http://localhost/v1/auth/orgs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          slug: "hack",
+          name: "Hack",
+        }),
+      })
+    );
+
+    await ownerApp.handle(
+      new Request("http://localhost/v1/auth/teams", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          slug: "cli",
+          org: "hack",
+          name: "CLI",
+        }),
+      })
+    );
+
+    await ownerApp.handle(
+      new Request("http://localhost/v1/auth/orgs/hack/members/add", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          target: "user-456",
+        }),
+      })
+    );
+
+    await ownerApp.handle(
+      new Request("http://localhost/v1/auth/teams/cli/members/add", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          org: "hack",
+          target: "user-456",
+        }),
+      })
+    );
+
+    await ownerApp.handle(
+      new Request("http://localhost/v1/auth/orgs/hack/members/add", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          target: "person@example.com",
+        }),
+      })
+    );
+
+    await ownerApp.handle(
+      new Request("http://localhost/v1/auth/teams/cli/members/invite", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          org: "hack",
+          target: "person@example.com",
+        }),
+      })
+    );
+
+    const removeActiveResponse = await ownerApp.handle(
+      new Request("http://localhost/v1/auth/orgs/hack/members/remove", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          target: "user-456",
+        }),
+      })
+    );
+    expect(removeActiveResponse.status).toBe(200);
+
+    const removePendingResponse = await ownerApp.handle(
+      new Request("http://localhost/v1/auth/orgs/hack/members/remove", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          target: "person@example.com",
+        }),
+      })
+    );
+    expect(removePendingResponse.status).toBe(200);
+
+    const teamRemovedResponse = await ownerApp.handle(
+      new Request(
+        "http://localhost/v1/auth/teams/cli/members?org=hack&state=removed"
+      )
+    );
+    expect(teamRemovedResponse.status).toBe(200);
+    const removedPayload = (await teamRemovedResponse.json()) as {
+      readonly memberships?: ReadonlyArray<{
+        readonly target?: string;
+        readonly state?: string;
+      }>;
+    };
+    const removedTargets = new Set(
+      (removedPayload.memberships ?? []).map((membership) => membership.target)
+    );
+    expect(removedTargets.has("user-456")).toBe(true);
+    expect(removedTargets.has("person@example.com")).toBe(true);
+    expect(
+      (removedPayload.memberships ?? []).every(
+        (membership) => membership.state === "removed"
+      )
+    ).toBe(true);
+  });
+
+  test("member list hides removed memberships by default and exposes them with state filters", async () => {
+    const store = new InMemoryOrgTeamsStore();
+    const ownerApp = createAuthBrokerApp({
+      config: createTestConfig(),
+      betterAuthRuntime: createBetterAuthRuntimeWithSession(createSession()),
+      orgTeamsStore: store,
+    });
+
+    await ownerApp.handle(
+      new Request("http://localhost/v1/auth/orgs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          slug: "hack",
+          name: "Hack",
+        }),
+      })
+    );
+
+    await ownerApp.handle(
+      new Request("http://localhost/v1/auth/orgs/hack/members/add", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          target: "user-456",
+        }),
+      })
+    );
+
+    await ownerApp.handle(
+      new Request("http://localhost/v1/auth/orgs/hack/members/remove", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          target: "user-456",
+        }),
+      })
+    );
+
+    const defaultListResponse = await ownerApp.handle(
+      new Request("http://localhost/v1/auth/orgs/hack/members")
+    );
+    expect(defaultListResponse.status).toBe(200);
+    const defaultListPayload = (await defaultListResponse.json()) as {
+      readonly memberships?: ReadonlyArray<{
+        readonly target?: string;
+        readonly state?: string;
+      }>;
+    };
+    expect(
+      (defaultListPayload.memberships ?? []).some(
+        (membership) => membership.target === "user-456"
+      )
+    ).toBe(false);
+    expect(
+      (defaultListPayload.memberships ?? []).every(
+        (membership) =>
+          membership.state === "pending" || membership.state === "active"
+      )
+    ).toBe(true);
+
+    const removedListResponse = await ownerApp.handle(
+      new Request("http://localhost/v1/auth/orgs/hack/members?state=removed")
+    );
+    expect(removedListResponse.status).toBe(200);
+    const removedListPayload = (await removedListResponse.json()) as {
+      readonly memberships?: ReadonlyArray<{
+        readonly target?: string;
+        readonly state?: string;
+      }>;
+    };
+    expect(
+      (removedListPayload.memberships ?? []).some(
+        (membership) =>
+          membership.target === "user-456" && membership.state === "removed"
+      )
+    ).toBe(true);
+  });
+
   test("recipient invitation accept and decline are scoped to the signed-in email", async () => {
     const store = new InMemoryOrgTeamsStore();
     const session = createSession({

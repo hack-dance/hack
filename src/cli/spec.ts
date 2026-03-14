@@ -16,6 +16,7 @@ import { linearCommand } from "../commands/linear.ts";
 import { logPipeCommand } from "../commands/log-pipe.ts";
 import { mcpCommand } from "../commands/mcp.ts";
 import { nodeCommand } from "../commands/node.ts";
+import { orgCommand } from "../commands/org.ts";
 import {
   downCommand,
   initCommand,
@@ -32,6 +33,7 @@ import { secretsCommand } from "../commands/secrets.ts";
 import { sessionCommand } from "../commands/session.ts";
 import { setupCommand } from "../commands/setup.ts";
 import { sshCommand } from "../commands/ssh.ts";
+import { teamCommand } from "../commands/team.ts";
 import { theCommand } from "../commands/the.ts";
 import { ticketsCommand } from "../commands/tickets.ts";
 import { tuiCommand } from "../commands/tui.ts";
@@ -56,6 +58,8 @@ export const CLI_SPEC = defineCli({
   commands: [
     globalCommand,
     authCommand,
+    orgCommand,
+    teamCommand,
     statusCommand,
     usageCommand,
     projectsCommand,

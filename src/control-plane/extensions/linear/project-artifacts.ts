@@ -65,6 +65,11 @@ export type LinearProjectArtifactPlan = {
 };
 
 const FRONTMATTER_PATTERN = /^---\n([\s\S]*?)\n---\n?/;
+const YAML_EDGE_WHITESPACE_PATTERN = /^\s|\s$/;
+const YAML_COMMENT_PATTERN = /(^|\s)#/;
+const YAML_COLON_SPACE_PATTERN = /:\s/;
+const YAML_SPECIAL_CHARACTER_PATTERN = /[\n\r[\]{}&,*!|>'"%@`]/;
+const YAML_RESERVED_LITERAL_PATTERN = /^(?:true|false|null|~)$/i;
 
 /** Resolve the repo-backed root for all managed artifacts of a bound Linear project. */
 export const resolveLinearProjectArtifactsRoot = ({
@@ -208,8 +213,19 @@ export const planLinearProjectArtifactChanges = ({
   }
 
   const remoteByKey = new Map<string, LinearProjectArtifactSnapshot>();
+  const remoteBySlugKey = new Map<string, LinearProjectArtifactSnapshot>();
+  const remoteByTitleKey = new Map<
+    string,
+    LinearProjectArtifactSnapshot | null
+  >();
   for (const artifact of remoteArtifacts) {
     remoteByKey.set(buildArtifactKey({ artifact }), artifact);
+    if (artifact.slug) {
+      remoteBySlugKey.set(buildArtifactSlugKey({ artifact }), artifact);
+    }
+    const titleKey = buildArtifactTitleKey({ artifact });
+    const existing = remoteByTitleKey.get(titleKey);
+    remoteByTitleKey.set(titleKey, existing ? null : artifact);
   }
 
   const create: LocalLinearProjectArtifact[] = [];
@@ -227,6 +243,17 @@ export const planLinearProjectArtifactChanges = ({
     const key = buildArtifactKey({ artifact: local });
     const remote = remoteByKey.get(key);
     if (!remote) {
+      const matchedRemote = findRemoteArtifactAliasMatch({
+        artifact: local,
+        remoteBySlugKey,
+        remoteByTitleKey,
+      });
+      if (matchedRemote) {
+        errors.push(
+          `Local artifact ${local.path} matches remote linearId "${matchedRemote.linearId}" by slug/title. Pull first or add the remote linearId before apply.`
+        );
+        continue;
+      }
       create.push(local);
       continue;
     }
@@ -242,8 +269,18 @@ export const planLinearProjectArtifactChanges = ({
     (artifact) => !seenRemoteKeys.has(buildArtifactKey({ artifact }))
   );
 
+  if (errors.length > 0) {
+    return {
+      errors,
+      create: [],
+      update: [],
+      noop: [],
+      remoteOnly: [],
+    };
+  }
+
   return {
-    errors: [],
+    errors,
     create,
     update,
     noop,
@@ -503,20 +540,34 @@ const serializeCommonFrontmatter = ({
   readonly artifact: LocalLinearProjectArtifact;
 }): string[] => {
   const lines = [
-    `kind: ${artifact.kind}`,
-    `linearProjectId: ${artifact.linearProjectId}`,
-    `title: ${artifact.title}`,
+    serializeFrontmatterValue({ key: "kind", value: artifact.kind }),
+    serializeFrontmatterValue({
+      key: "linearProjectId",
+      value: artifact.linearProjectId,
+    }),
+    serializeFrontmatterValue({ key: "title", value: artifact.title }),
   ];
 
   if (artifact.linearId) {
-    lines.push(`linearId: ${artifact.linearId}`);
+    lines.push(
+      serializeFrontmatterValue({ key: "linearId", value: artifact.linearId })
+    );
   }
   if (artifact.slug) {
-    lines.push(`slug: ${artifact.slug}`);
+    lines.push(
+      serializeFrontmatterValue({ key: "slug", value: artifact.slug })
+    );
   }
-  lines.push(`archived: ${artifact.archived ? "true" : "false"}`);
+  lines.push(
+    serializeFrontmatterValue({ key: "archived", value: artifact.archived })
+  );
   if (artifact.updatedAt) {
-    lines.push(`updatedAt: ${artifact.updatedAt}`);
+    lines.push(
+      serializeFrontmatterValue({
+        key: "updatedAt",
+        value: artifact.updatedAt,
+      })
+    );
   }
 
   return lines;
@@ -548,10 +599,14 @@ const serializeDocumentFrontmatter = ({
 }): string[] => {
   const lines: string[] = [];
   if (artifact.sortOrder !== undefined) {
-    lines.push(`sortOrder: ${artifact.sortOrder}`);
+    lines.push(
+      serializeFrontmatterValue({ key: "sortOrder", value: artifact.sortOrder })
+    );
   }
   if (artifact.icon) {
-    lines.push(`icon: ${artifact.icon}`);
+    lines.push(
+      serializeFrontmatterValue({ key: "icon", value: artifact.icon })
+    );
   }
   return lines;
 };
@@ -566,13 +621,22 @@ const serializeMilestoneFrontmatter = ({
 }): string[] => {
   const lines: string[] = [];
   if (artifact.targetDate) {
-    lines.push(`targetDate: ${artifact.targetDate}`);
+    lines.push(
+      serializeFrontmatterValue({
+        key: "targetDate",
+        value: artifact.targetDate,
+      })
+    );
   }
   if (artifact.state) {
-    lines.push(`state: ${artifact.state}`);
+    lines.push(
+      serializeFrontmatterValue({ key: "state", value: artifact.state })
+    );
   }
   if (artifact.sortOrder !== undefined) {
-    lines.push(`sortOrder: ${artifact.sortOrder}`);
+    lines.push(
+      serializeFrontmatterValue({ key: "sortOrder", value: artifact.sortOrder })
+    );
   }
   return lines;
 };
@@ -587,19 +651,53 @@ const serializeStatusUpdateFrontmatter = ({
 }): string[] => {
   const lines: string[] = [];
   if (artifact.date) {
-    lines.push(`date: ${artifact.date}`);
+    lines.push(
+      serializeFrontmatterValue({ key: "date", value: artifact.date })
+    );
   }
   if (artifact.health) {
-    lines.push(`health: ${artifact.health}`);
+    lines.push(
+      serializeFrontmatterValue({ key: "health", value: artifact.health })
+    );
   }
   if (artifact.linkedMilestoneIds && artifact.linkedMilestoneIds.length > 0) {
     lines.push("linkedMilestoneIds:");
     for (const milestoneId of artifact.linkedMilestoneIds) {
-      lines.push(`  - ${milestoneId}`);
+      lines.push(`  - ${serializeYamlString({ value: milestoneId })}`);
     }
   }
   return lines;
 };
+
+const serializeFrontmatterValue = ({
+  key,
+  value,
+}: {
+  readonly key: string;
+  readonly value: boolean | number | string;
+}): string => `${key}: ${serializeYamlPrimitive({ value })}`;
+
+const serializeYamlPrimitive = ({
+  value,
+}: {
+  readonly value: boolean | number | string;
+}): string => {
+  if (typeof value === "string") {
+    return serializeYamlString({ value });
+  }
+  return String(value);
+};
+
+const serializeYamlString = ({ value }: { readonly value: string }): string =>
+  needsYamlQuoting({ value }) ? JSON.stringify(value) : value;
+
+const needsYamlQuoting = ({ value }: { readonly value: string }): boolean =>
+  value.length === 0 ||
+  YAML_EDGE_WHITESPACE_PATTERN.test(value) ||
+  YAML_COMMENT_PATTERN.test(value) ||
+  YAML_COLON_SPACE_PATTERN.test(value) ||
+  YAML_SPECIAL_CHARACTER_PATTERN.test(value) ||
+  YAML_RESERVED_LITERAL_PATTERN.test(value);
 
 const detectLocalDuplicates = ({
   artifacts,
@@ -645,6 +743,7 @@ const detectRemoteDuplicates = ({
 }): string[] => {
   const errors: string[] = [];
   const seenKeys = new Set<string>();
+  const seenSlugKeys = new Set<string>();
   for (const artifact of artifacts) {
     const key = buildArtifactKey({ artifact });
     if (seenKeys.has(key)) {
@@ -652,8 +751,52 @@ const detectRemoteDuplicates = ({
       continue;
     }
     seenKeys.add(key);
+
+    if (artifact.slug) {
+      const slugKey = buildArtifactSlugKey({ artifact });
+      if (seenSlugKeys.has(slugKey)) {
+        errors.push(`Duplicate remote artifact slug mapping for ${slugKey}`);
+      } else {
+        seenSlugKeys.add(slugKey);
+      }
+    }
   }
   return errors;
+};
+
+const findRemoteArtifactAliasMatch = ({
+  artifact,
+  remoteBySlugKey,
+  remoteByTitleKey,
+}: {
+  readonly artifact: LocalLinearProjectArtifact;
+  readonly remoteBySlugKey: ReadonlyMap<string, LinearProjectArtifactSnapshot>;
+  readonly remoteByTitleKey: ReadonlyMap<
+    string,
+    LinearProjectArtifactSnapshot | null
+  >;
+}): LinearProjectArtifactSnapshot | null => {
+  if (artifact.linearId) {
+    return null;
+  }
+
+  if (artifact.slug) {
+    const matchedBySlug = remoteBySlugKey.get(
+      buildArtifactSlugKey({ artifact })
+    );
+    if (matchedBySlug?.linearId) {
+      return matchedBySlug;
+    }
+  }
+
+  const matchedByTitle = remoteByTitleKey.get(
+    buildArtifactTitleKey({ artifact })
+  );
+  if (matchedByTitle?.linearId) {
+    return matchedByTitle;
+  }
+
+  return null;
 };
 
 const buildArtifactKey = ({
@@ -669,6 +812,26 @@ const buildArtifactKey = ({
   }
   return `${artifact.kind}:title:${artifact.linearProjectId}:${artifact.title}`;
 };
+
+const buildArtifactSlugKey = ({
+  artifact,
+}: {
+  readonly artifact: Pick<
+    LinearProjectArtifactSnapshot,
+    "kind" | "linearProjectId" | "slug"
+  >;
+}): string =>
+  `${artifact.kind}:slug:${artifact.linearProjectId}:${artifact.slug}`;
+
+const buildArtifactTitleKey = ({
+  artifact,
+}: {
+  readonly artifact: Pick<
+    LinearProjectArtifactSnapshot,
+    "kind" | "linearProjectId" | "title"
+  >;
+}): string =>
+  `${artifact.kind}:title:${artifact.linearProjectId}:${artifact.title}`;
 
 const artifactsEqual = ({
   local,

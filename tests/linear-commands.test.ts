@@ -2147,6 +2147,128 @@ archived: false
   expect(await Bun.file(oldPath).exists()).toBe(false);
 });
 
+test("runProjectArtifactCommand apply refuses to create a duplicate document when a matching remote slug already exists", async () => {
+  const projectDir = ensureTempDir();
+  const documentsDir = resolve(
+    projectDir,
+    ".hack/linear/projects/proj_123/documents"
+  );
+  await mkdir(documentsDir, { recursive: true });
+  await writeFile(
+    resolve(documentsDir, "launch-plan.md"),
+    `---
+kind: linear-project-document
+linearProjectId: proj_123
+title: Launch plan
+slug: launch-plan
+archived: false
+---
+# Launch plan
+`
+  );
+
+  const result = await __testOnly.runProjectArtifactCommand({
+    family: "documents",
+    verb: "apply",
+    runtime: {
+      profileId: "work",
+      projectDir,
+      projectId: "proj_123",
+      linear: {
+        listProjectDocuments: async () => ({
+          ok: true as const,
+          data: [
+            {
+              id: "doc_123",
+              title: "Launch plan",
+              content: "# Remote launch plan\n",
+              slugId: "launch-plan",
+              archived: false,
+            },
+          ],
+        }),
+        createProjectDocument: async () => {
+          throw new Error("createProjectDocument should not be called");
+        },
+      },
+    },
+  });
+
+  expect(result.ok).toBe(false);
+  if (result.ok) {
+    return;
+  }
+
+  expect(result.error).toContain('matches remote linearId "doc_123"');
+});
+
+test("runProjectArtifactCommand apply sends empty document bodies to clear remote content", async () => {
+  const projectDir = ensureTempDir();
+  const documentsDir = resolve(
+    projectDir,
+    ".hack/linear/projects/proj_123/documents"
+  );
+  await mkdir(documentsDir, { recursive: true });
+  await writeFile(
+    resolve(documentsDir, "launch-plan.md"),
+    `---
+kind: linear-project-document
+linearProjectId: proj_123
+title: Launch plan
+linearId: doc_123
+slug: launch-plan
+archived: false
+---
+`
+  );
+
+  const updateCalls: string[] = [];
+  const result = await __testOnly.runProjectArtifactCommand({
+    family: "documents",
+    verb: "apply",
+    runtime: {
+      profileId: "work",
+      projectDir,
+      projectId: "proj_123",
+      linear: {
+        listProjectDocuments: async () => ({
+          ok: true as const,
+          data: [
+            {
+              id: "doc_123",
+              title: "Launch plan",
+              content: "# Remote launch plan\n",
+              slugId: "launch-plan",
+              archived: false,
+            },
+          ],
+        }),
+        updateProjectDocument: async ({ documentId, content }) => {
+          updateCalls.push(`${documentId}:${content ?? "<missing>"}`);
+          return {
+            ok: true as const,
+            data: {
+              id: documentId,
+              title: "Launch plan",
+              content: content ?? "",
+              slugId: "launch-plan",
+              archived: false,
+              updatedAt: "2026-03-15T10:00:00.000Z",
+            },
+          };
+        },
+      },
+    },
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  expect(updateCalls).toEqual(["doc_123:"]);
+});
+
 test("runProjectArtifactCommand pulls project milestones into repo state", async () => {
   const projectDir = ensureTempDir();
   const result = await __testOnly.runProjectArtifactCommand({
@@ -2324,6 +2446,77 @@ Prepare launch checklist.
   expect(updatedText).toContain("linearId: milestone_launch");
   expect(updatedText).toContain("updatedAt: 2026-03-15T10:00:00.000Z");
   expect(updatedText).toContain("state: planned");
+});
+
+test("runProjectArtifactCommand apply sends empty milestone notes to clear remote content", async () => {
+  const projectDir = ensureTempDir();
+  const milestonesDir = resolve(
+    projectDir,
+    ".hack/linear/projects/proj_123/milestones"
+  );
+  await mkdir(milestonesDir, { recursive: true });
+  await writeFile(
+    resolve(milestonesDir, "launch.md"),
+    `---
+kind: linear-project-milestone
+linearProjectId: proj_123
+title: Launch
+linearId: milestone_launch
+slug: launch
+targetDate: 2026-05-01
+state: planned
+archived: false
+---
+`
+  );
+
+  const updateCalls: string[] = [];
+  const result = await __testOnly.runProjectArtifactCommand({
+    family: "milestones",
+    verb: "apply",
+    runtime: {
+      profileId: "work",
+      projectDir,
+      projectId: "proj_123",
+      linear: {
+        listProjectMilestones: async () => ({
+          ok: true as const,
+          data: [
+            {
+              id: "milestone_launch",
+              title: "Launch",
+              description: "Old launch notes.\n",
+              status: "planned",
+              targetDate: "2026-05-01",
+              archived: false,
+            },
+          ],
+        }),
+        updateProjectMilestone: async ({ milestoneId, description }) => {
+          updateCalls.push(`${milestoneId}:${description ?? "<missing>"}`);
+          return {
+            ok: true as const,
+            data: {
+              id: milestoneId,
+              title: "Launch",
+              description: description ?? "",
+              status: "planned",
+              targetDate: "2026-05-01",
+              archived: false,
+              updatedAt: "2026-03-15T10:00:00.000Z",
+            },
+          };
+        },
+      },
+    },
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  expect(updateCalls).toEqual(["milestone_launch:"]);
 });
 
 test("runProjectArtifactCommand publishes draft status updates and moves them to published", async () => {

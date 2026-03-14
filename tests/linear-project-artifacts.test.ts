@@ -213,6 +213,41 @@ test("planLinearProjectArtifactChanges distinguishes create update noop and remo
   expect(plan.remoteOnly.map((item) => item.title)).toEqual(["Remote only"]);
 });
 
+test("planLinearProjectArtifactChanges flags slug-matched remotes when local linearId is missing", () => {
+  const plan = planLinearProjectArtifactChanges({
+    localArtifacts: [
+      {
+        kind: "linear-project-document",
+        linearProjectId: "proj_123",
+        title: "Launch plan",
+        slug: "launch-plan",
+        body: "# Launch plan\n",
+        path: "/repo/.hack/linear/projects/proj_123/documents/launch-plan.md",
+        archived: false,
+      },
+    ],
+    remoteArtifacts: [
+      {
+        kind: "linear-project-document",
+        linearProjectId: "proj_123",
+        title: "Launch plan",
+        linearId: "doc_123",
+        slug: "launch-plan",
+        body: "# Remote launch plan\n",
+        archived: false,
+      },
+    ],
+  });
+
+  expect(plan.errors).toEqual([
+    'Local artifact /repo/.hack/linear/projects/proj_123/documents/launch-plan.md matches remote linearId "doc_123" by slug/title. Pull first or add the remote linearId before apply.',
+  ]);
+  expect(plan.create).toEqual([]);
+  expect(plan.update).toEqual([]);
+  expect(plan.noop).toEqual([]);
+  expect(plan.remoteOnly).toEqual([]);
+});
+
 test("serializeLinearProjectArtifactFile writes stable frontmatter", () => {
   const text = serializeLinearProjectArtifactFile({
     artifact: {
@@ -244,4 +279,27 @@ linkedMilestoneIds:
 ---
 Still on track for dogfooding.
 `);
+});
+
+test("serializeLinearProjectArtifactFile round-trips YAML-sensitive string fields", () => {
+  const text = serializeLinearProjectArtifactFile({
+    artifact: {
+      kind: "linear-project-document",
+      linearProjectId: "proj_123",
+      title: "API: Launch #1",
+      linearId: "doc_123",
+      slug: "api-launch",
+      body: "# API launch\n",
+      archived: false,
+      path: "/repo/.hack/linear/projects/proj_123/documents/api-launch.md",
+    },
+  });
+
+  const reparsed = parseLinearProjectArtifactFile({
+    filePath: "/repo/.hack/linear/projects/proj_123/documents/api-launch.md",
+    text,
+  });
+
+  expect(reparsed.title).toBe("API: Launch #1");
+  expect(reparsed.slug).toBe("api-launch");
 });

@@ -3336,7 +3336,7 @@ async function applyManagedProjectArtifactCreate(input: {
     const created = await input.runtime.linear.createProjectDocument({
       projectId: input.runtime.projectId,
       title: input.artifact.title,
-      ...(input.artifact.body ? { content: input.artifact.body } : {}),
+      content: input.artifact.body,
       ...(input.artifact.icon ? { icon: input.artifact.icon } : {}),
       ...(input.artifact.sortOrder !== undefined
         ? { sortOrder: input.artifact.sortOrder }
@@ -3366,7 +3366,7 @@ async function applyManagedProjectArtifactCreate(input: {
   const created = await input.runtime.linear.createProjectMilestone({
     projectId: input.runtime.projectId,
     title: input.artifact.title,
-    ...(input.artifact.body ? { description: input.artifact.body } : {}),
+    description: input.artifact.body,
     ...(input.artifact.targetDate
       ? { targetDate: input.artifact.targetDate }
       : {}),
@@ -3410,7 +3410,7 @@ async function applyManagedProjectArtifactUpdate(input: {
     const updated = await input.runtime.linear.updateProjectDocument({
       documentId: input.artifact.linearId,
       title: input.artifact.title,
-      ...(input.artifact.body ? { content: input.artifact.body } : {}),
+      content: input.artifact.body,
       ...(input.artifact.icon ? { icon: input.artifact.icon } : {}),
       ...(input.artifact.sortOrder !== undefined
         ? { sortOrder: input.artifact.sortOrder }
@@ -3443,7 +3443,7 @@ async function applyManagedProjectArtifactUpdate(input: {
   const updated = await input.runtime.linear.updateProjectMilestone({
     milestoneId: input.artifact.linearId,
     title: input.artifact.title,
-    ...(input.artifact.body ? { description: input.artifact.body } : {}),
+    description: input.artifact.body,
     ...(input.artifact.targetDate
       ? { targetDate: input.artifact.targetDate }
       : {}),

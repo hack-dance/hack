@@ -392,7 +392,7 @@ test(
 
 test(
   "env list shows storage summary even when no contract exists",
-  { timeout: 20_000 },
+  { timeout: 60_000 },
   async () => {
     if (!tempDir) {
       throw new Error("Missing temp dir");

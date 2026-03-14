@@ -148,9 +148,9 @@ Usage: `hack x gateway token-create [options] [label]`
 
 Options:
 
-| Flag              | Type    | Default | Description                  |
-| ----------------- | ------- | ------- | ---------------------------- | ----------- |
-| `--scope <read    | write>` | string  | `read`                       | Token scope |
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--scope <read \| write>` | string | `read` | Token scope |
 | `--write`         | boolean | false   | Shortcut for `--scope write` |
 | `--label <label>` | string  | -       | Optional label               |
 

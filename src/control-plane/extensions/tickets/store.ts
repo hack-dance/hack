@@ -157,11 +157,14 @@ type MaterializedTicketState = {
   readonly conflictsByTicket: Map<string, TicketSyncConflict[]>;
 };
 
+const MAX_TICKET_ID_ALLOCATION_ATTEMPTS = 32;
+
 export function createTicketsStore(opts: {
   readonly projectRoot: string;
   readonly projectId?: string;
   readonly projectName?: string;
   readonly controlPlaneConfig: ControlPlaneConfig;
+  readonly generateTicketId?: () => string;
   readonly logger: {
     info: (input: { message: string }) => void;
     warn: (input: { message: string }) => void;
@@ -300,6 +303,7 @@ export function createTicketsStore(opts: {
     config: opts.controlPlaneConfig.tickets.git,
     logger: opts.logger,
   });
+  const allocateTicketId = opts.generateTicketId ?? generateTicketId;
   let eventSequence = 0;
 
   const resolveActor = (override?: string): string => {
@@ -336,7 +340,13 @@ export function createTicketsStore(opts: {
 
   const readAllEvents = async (): Promise<readonly TicketEvent[]> => {
     const root = await git.ensureCheckedOut();
-    const eventsDir = resolve(root, ".hack/tickets/events");
+    return await readEventsFromRoot({ root });
+  };
+
+  const readEventsFromRoot = async (opts: {
+    readonly root: string;
+  }): Promise<readonly TicketEvent[]> => {
+    const eventsDir = resolve(opts.root, ".hack/tickets/events");
 
     let entries: string[] = [];
     try {
@@ -461,7 +471,6 @@ export function createTicketsStore(opts: {
 
   return {
     createTicket: async (input) => {
-      const ticketId = generateTicketId();
       const dependsOn = normalizeTicketRefs(input.dependsOn ?? []);
       const blocks = normalizeTicketRefs(input.blocks ?? []);
       const owner = normalizeOwnerOrSource({
@@ -497,61 +506,89 @@ export function createTicketsStore(opts: {
       const externalTeamId = normalizeOptionalMetadataString({
         value: input.externalTeamId,
       });
-      const event = buildEvent({
-        ticketId,
-        type: "ticket.created",
-        payload: {
-          title: input.title,
-          ...(input.body ? { body: input.body } : {}),
-          ...(dependsOn.length > 0 ? { dependsOn } : {}),
-          ...(blocks.length > 0 ? { blocks } : {}),
-          owner,
-          source,
-          ...(assignee ? { assignee } : {}),
-          ...(tags.length > 0 ? { tags } : {}),
-          ...(externalSystem ? { externalSystem } : {}),
-          ...(externalId ? { externalId } : {}),
-          ...(externalKey ? { externalKey } : {}),
-          ...(externalUrl ? { externalUrl } : {}),
-          ...(externalProjectId ? { externalProjectId } : {}),
-          ...(externalProjectName ? { externalProjectName } : {}),
-          ...(externalTeamId ? { externalTeamId } : {}),
-          status: "open",
-        },
-        actor: input.actor,
-      });
+      const wrote = await git.appendPreparedEvents({
+        prepare: async (root) => {
+          const events = await readEventsFromRoot({ root });
+          const snapshot = materializeSnapshotFromEvents({ events });
 
-      const wrote = await git.appendEvents({ events: [event] });
+          let ticketId: string | null = null;
+          for (
+            let attempt = 0;
+            attempt < MAX_TICKET_ID_ALLOCATION_ATTEMPTS;
+            attempt += 1
+          ) {
+            const candidate = allocateTicketId();
+            if (!snapshot.tickets.has(candidate)) {
+              ticketId = candidate;
+              break;
+            }
+          }
+
+          if (!ticketId) {
+            return {
+              ok: false,
+              error: "Failed to allocate a unique ticket id.",
+            };
+          }
+
+          const event = buildEvent({
+            ticketId,
+            type: "ticket.created",
+            payload: {
+              title: input.title,
+              ...(input.body ? { body: input.body } : {}),
+              ...(dependsOn.length > 0 ? { dependsOn } : {}),
+              ...(blocks.length > 0 ? { blocks } : {}),
+              owner,
+              source,
+              ...(assignee ? { assignee } : {}),
+              ...(tags.length > 0 ? { tags } : {}),
+              ...(externalSystem ? { externalSystem } : {}),
+              ...(externalId ? { externalId } : {}),
+              ...(externalKey ? { externalKey } : {}),
+              ...(externalUrl ? { externalUrl } : {}),
+              ...(externalProjectId ? { externalProjectId } : {}),
+              ...(externalProjectName ? { externalProjectName } : {}),
+              ...(externalTeamId ? { externalTeamId } : {}),
+              status: "open",
+            },
+            actor: input.actor,
+          });
+
+          return {
+            ok: true,
+            events: [event],
+            result: {
+              ticketId,
+              title: input.title,
+              ...(input.body ? { body: input.body } : {}),
+              status: "open" as const,
+              createdAt: event.tsIso,
+              updatedAt: event.tsIso,
+              dependsOn,
+              blocks,
+              owner,
+              source,
+              ...(assignee ? { assignee } : {}),
+              tags,
+              ...(externalSystem ? { externalSystem } : {}),
+              ...(externalId ? { externalId } : {}),
+              ...(externalKey ? { externalKey } : {}),
+              ...(externalUrl ? { externalUrl } : {}),
+              ...(externalProjectId ? { externalProjectId } : {}),
+              ...(externalProjectName ? { externalProjectName } : {}),
+              ...(externalTeamId ? { externalTeamId } : {}),
+              ...(opts.projectId ? { projectId: opts.projectId } : {}),
+              ...(opts.projectName ? { projectName: opts.projectName } : {}),
+            } satisfies TicketSummary,
+          };
+        },
+      });
       if (!wrote.ok) {
         return wrote;
       }
 
-      return {
-        ok: true,
-        ticket: {
-          ticketId,
-          title: input.title,
-          ...(input.body ? { body: input.body } : {}),
-          status: "open",
-          createdAt: event.tsIso,
-          updatedAt: event.tsIso,
-          dependsOn,
-          blocks,
-          owner,
-          source,
-          ...(assignee ? { assignee } : {}),
-          tags,
-          ...(externalSystem ? { externalSystem } : {}),
-          ...(externalId ? { externalId } : {}),
-          ...(externalKey ? { externalKey } : {}),
-          ...(externalUrl ? { externalUrl } : {}),
-          ...(externalProjectId ? { externalProjectId } : {}),
-          ...(externalProjectName ? { externalProjectName } : {}),
-          ...(externalTeamId ? { externalTeamId } : {}),
-          ...(opts.projectId ? { projectId: opts.projectId } : {}),
-          ...(opts.projectName ? { projectName: opts.projectName } : {}),
-        },
-      };
+      return { ok: true, ticket: wrote.result };
     },
 
     updateTicket: async (input) => {

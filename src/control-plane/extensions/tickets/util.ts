@@ -4,6 +4,7 @@ const DIGITS_ONLY_PATTERN = /^\d+$/;
 const LEGACY_TICKET_ID_PATTERN = /^T-(\d+)$/i;
 const RANDOM_TICKET_ID_PATTERN = /^T-([0-9A-Z]{10})$/i;
 const RANDOM_TICKET_ID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+const RANDOM_TICKET_ID_PREFIX_ALPHABET = "ABCDEFGHJKMNPQRSTVWXYZ";
 const RANDOM_TICKET_ID_LENGTH = 10;
 
 export function unixSeconds(): number {
@@ -36,19 +37,15 @@ export function parseTicketNumber(ticketId: string): number | null {
 }
 
 export function generateTicketId(): string {
-  let suffix = "";
-  while (suffix.length < RANDOM_TICKET_ID_LENGTH) {
-    const chunk = randomBytes(RANDOM_TICKET_ID_LENGTH);
-    for (const byte of chunk) {
-      suffix +=
-        RANDOM_TICKET_ID_ALPHABET[byte % RANDOM_TICKET_ID_ALPHABET.length] ??
-        "";
-      if (suffix.length === RANDOM_TICKET_ID_LENGTH) {
-        break;
-      }
-    }
-  }
-  return `T-${suffix}`;
+  const prefix = generateRandomTicketIdChunk({
+    alphabet: RANDOM_TICKET_ID_PREFIX_ALPHABET,
+    length: 1,
+  });
+  const suffix = generateRandomTicketIdChunk({
+    alphabet: RANDOM_TICKET_ID_ALPHABET,
+    length: RANDOM_TICKET_ID_LENGTH - prefix.length,
+  });
+  return `T-${prefix}${suffix}`;
 }
 
 export function normalizeTicketRef(input: string): string | null {
@@ -121,4 +118,21 @@ function stableSort(value: unknown): unknown {
     return out;
   }
   return value;
+}
+
+function generateRandomTicketIdChunk(opts: {
+  readonly alphabet: string;
+  readonly length: number;
+}): string {
+  let chunkText = "";
+  while (chunkText.length < opts.length) {
+    const chunk = randomBytes(opts.length);
+    for (const byte of chunk) {
+      chunkText += opts.alphabet[byte % opts.alphabet.length] ?? "";
+      if (chunkText.length === opts.length) {
+        break;
+      }
+    }
+  }
+  return chunkText;
 }

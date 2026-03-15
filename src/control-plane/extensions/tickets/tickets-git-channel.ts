@@ -9,7 +9,7 @@ const REFS_HEADS_PREFIX_PATTERN = /^refs\/heads\//;
 const REFS_PREFIX_PATTERN = /^refs\//;
 const MUTATION_LOCK_RETRY_MS = 100;
 const MUTATION_LOCK_STALE_MS = 30_000;
-const MUTATION_LOCK_TIMEOUT_MS = 10_000;
+const MUTATION_LOCK_TIMEOUT_MS = 30_000;
 
 export type TicketsGitChannel = {
   readonly ensureCheckedOut: () => Promise<string>;
@@ -17,6 +17,19 @@ export type TicketsGitChannel = {
     readonly events: readonly Record<string, unknown>[];
   }) => Promise<
     { readonly ok: true } | { readonly ok: false; readonly error: string }
+  >;
+  readonly appendPreparedEvents: <T>(input: {
+    readonly prepare: (root: string) => Promise<
+      | {
+          readonly ok: true;
+          readonly events: readonly Record<string, unknown>[];
+          readonly result: T;
+        }
+      | { readonly ok: false; readonly error: string }
+    >;
+  }) => Promise<
+    | { readonly ok: true; readonly result: T }
+    | { readonly ok: false; readonly error: string }
   >;
   readonly inspect: () => Promise<TicketsGitInspectResult>;
   readonly repair: (input: {
@@ -1115,6 +1128,53 @@ export function createGitTicketsChannel(opts: {
     });
   };
 
+  const appendPreparedEvents = async <T>(input: {
+    readonly prepare: (root: string) => Promise<
+      | {
+          readonly ok: true;
+          readonly events: readonly Record<string, unknown>[];
+          readonly result: T;
+        }
+      | { readonly ok: false; readonly error: string }
+    >;
+  }): Promise<
+    | { readonly ok: true; readonly result: T }
+    | { readonly ok: false; readonly error: string }
+  > => {
+    return await withMutationLock(async () => {
+      const checkedOut = await ensureCheckedOut();
+      if (!checkedOut.ok) {
+        return checkedOut;
+      }
+
+      const prepared = await input.prepare(worktreeDir);
+      if (!prepared.ok) {
+        return prepared;
+      }
+
+      const wrote = await writeEvents({ events: prepared.events });
+      if (!wrote.ok) {
+        return wrote;
+      }
+
+      const committed = await commitAll("tickets: append events");
+      if (!committed.ok) {
+        return committed;
+      }
+
+      const pushed = await pushWithRetry({
+        remoteUrl: checkedOut.remoteUrl,
+        pushRef: checkedOut.pushRef,
+        pendingEvents: prepared.events,
+      });
+      if (!pushed.ok) {
+        return pushed;
+      }
+
+      return { ok: true, result: prepared.result };
+    });
+  };
+
   const sync = async (): Promise<
     | {
         readonly ok: true;
@@ -1168,6 +1228,7 @@ export function createGitTicketsChannel(opts: {
       return worktreeDir;
     },
     appendEvents,
+    appendPreparedEvents,
     inspect,
     repair,
     sync,

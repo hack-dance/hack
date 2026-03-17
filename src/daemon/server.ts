@@ -423,6 +423,8 @@ async function handleRequest({
       runtime_last_ok_at: runtimeHealth.lastOkAt,
       runtime_reset_at: runtimeHealth.lastResetAt,
       runtime_reset_count: runtimeHealth.resetCount,
+      runtime_reset_reasons: runtimeHealth.lastResetReasons,
+      runtime_reset_summary: runtimeHealth.lastResetSummary,
     });
   }
 
@@ -530,168 +532,30 @@ async function handleGatewayRequest(opts: {
   const url = new URL(opts.req.url);
   const isWebSocket =
     opts.req.headers.get("upgrade")?.toLowerCase() === "websocket";
-  const auditPath = sanitizeGatewayAuditPath({ url });
-  const auth = await authenticateGatewayRequest({
-    rootDir: opts.gatewayRoot,
-    headers: opts.req.headers,
+  const audit = buildGatewayAuditContext({
+    req: opts.req,
     url,
-    allowQueryToken: isWebSocket,
+    gatewayRoot: opts.gatewayRoot,
+    server: opts.server,
   });
-  const remote = opts.server.requestIP(opts.req);
-  const remoteAddress = remote?.address;
-  const userAgent = opts.req.headers.get("user-agent") ?? undefined;
-  let enabledProjectIds = new Set(
-    opts.enabledProjects.map((project) => project.projectId)
-  );
-
-  if (!auth.ok) {
-    const status = 401;
-    const response = jsonResponse(
-      { error: auth.reason === "missing" ? "missing_token" : "invalid_token" },
-      status
-    );
-    void appendGatewayAuditEntry({
-      rootDir: opts.gatewayRoot,
-      entry: {
-        ts: new Date().toISOString(),
-        method: opts.req.method,
-        path: auditPath,
-        status,
-        ...(remoteAddress ? { remoteAddress } : {}),
-        ...(userAgent ? { userAgent } : {}),
-      },
-    });
-    return response;
-  }
-
-  const isReadOnly = isGatewayReadOnlyMethod({ method: opts.req.method });
-  const isShellStream = isGatewayShellStreamRequest({ url });
-  const gatewayProjectId = resolveGatewayProjectId({ url });
-
-  if (gatewayProjectId && !enabledProjectIds.has(gatewayProjectId)) {
-    const refreshed = await resolveGatewayConfig();
-    enabledProjectIds = new Set(
-      refreshed.enabledProjects.map((project) => project.projectId)
-    );
-  }
-
-  if (gatewayProjectId && !enabledProjectIds.has(gatewayProjectId)) {
-    const status = 403;
-    const response = jsonResponse({ error: "project_disabled" }, status);
-    void appendGatewayAuditEntry({
-      rootDir: opts.gatewayRoot,
-      entry: {
-        ts: new Date().toISOString(),
-        tokenId: auth.tokenId,
-        method: opts.req.method,
-        path: auditPath,
-        status,
-        ...(remoteAddress ? { remoteAddress } : {}),
-        ...(userAgent ? { userAgent } : {}),
-      },
-    });
-    return response;
-  }
-
-  if (!(opts.gatewayConfig.allowWrites || isReadOnly)) {
-    const status = 403;
-    const response = jsonResponse({ error: "writes_disabled" }, status);
-    void appendGatewayAuditEntry({
-      rootDir: opts.gatewayRoot,
-      entry: {
-        ts: new Date().toISOString(),
-        tokenId: auth.tokenId,
-        method: opts.req.method,
-        path: auditPath,
-        status,
-        ...(remoteAddress ? { remoteAddress } : {}),
-        ...(userAgent ? { userAgent } : {}),
-      },
-    });
-    return response;
-  }
-
-  if (!isReadOnly && auth.scope !== "write") {
-    const status = 403;
-    const response = jsonResponse({ error: "write_scope_required" }, status);
-    void appendGatewayAuditEntry({
-      rootDir: opts.gatewayRoot,
-      entry: {
-        ts: new Date().toISOString(),
-        tokenId: auth.tokenId,
-        method: opts.req.method,
-        path: auditPath,
-        status,
-        ...(remoteAddress ? { remoteAddress } : {}),
-        ...(userAgent ? { userAgent } : {}),
-      },
-    });
-    return response;
-  }
-
-  if (isShellStream && !opts.gatewayConfig.allowWrites) {
-    const status = 403;
-    const response = jsonResponse({ error: "writes_disabled" }, status);
-    void appendGatewayAuditEntry({
-      rootDir: opts.gatewayRoot,
-      entry: {
-        ts: new Date().toISOString(),
-        tokenId: auth.tokenId,
-        method: opts.req.method,
-        path: auditPath,
-        status,
-        ...(remoteAddress ? { remoteAddress } : {}),
-        ...(userAgent ? { userAgent } : {}),
-      },
-    });
-    return response;
-  }
-
-  if (isShellStream && auth.scope !== "write") {
-    const status = 403;
-    const response = jsonResponse({ error: "write_scope_required" }, status);
-    void appendGatewayAuditEntry({
-      rootDir: opts.gatewayRoot,
-      entry: {
-        ts: new Date().toISOString(),
-        tokenId: auth.tokenId,
-        method: opts.req.method,
-        path: auditPath,
-        status,
-        ...(remoteAddress ? { remoteAddress } : {}),
-        ...(userAgent ? { userAgent } : {}),
-      },
-    });
-    return response;
+  const access = await authorizeGatewayRequest({
+    req: opts.req,
+    url,
+    gatewayRoot: opts.gatewayRoot,
+    gatewayConfig: opts.gatewayConfig,
+    enabledProjects: opts.enabledProjects,
+    allowQueryToken: isWebSocket,
+    audit,
+  });
+  if (!access.ok) {
+    return access.response;
   }
 
   if (url.pathname === "/v1/projects") {
-    const filter = normalizeQueryParam({
-      value: url.searchParams.get("filter"),
-    });
-    const includeGlobal = parseBoolean({
-      value: url.searchParams.get("include_global"),
-    });
-    const includeMeta = parseBoolean({
-      value: url.searchParams.get("include_meta"),
-    });
-    const payload = await opts.cache.getProjectsPayload({
-      filter,
-      includeGlobal,
-      includeUnregistered: false,
-      includeMeta,
-    });
-    const filtered = payload.projects.filter((project) => {
-      if (!project || typeof project !== "object") {
-        return false;
-      }
-      const id = (project as Record<string, unknown>).project_id;
-      return typeof id === "string" && enabledProjectIds.has(id);
-    });
-    return jsonResponse({
-      ...payload,
-      include_unregistered: false,
-      projects: filtered,
+    return await handleGatewayProjectsRoute({
+      url,
+      cache: opts.cache,
+      enabledProjectIds: access.enabledProjectIds,
     });
   }
 
@@ -706,20 +570,208 @@ async function handleGatewayRequest(opts: {
     shells: opts.shells,
   });
 
-  void appendGatewayAuditEntry({
-    rootDir: opts.gatewayRoot,
-    entry: {
-      ts: new Date().toISOString(),
-      tokenId: auth.tokenId,
-      method: opts.req.method,
-      path: auditPath,
-      status: response.status,
-      ...(remoteAddress ? { remoteAddress } : {}),
-      ...(userAgent ? { userAgent } : {}),
-    },
+  appendGatewayAudit({
+    audit,
+    tokenId: access.auth.tokenId,
+    status: response.status,
   });
 
   return response;
+}
+
+type GatewayAuditContext = {
+  readonly rootDir: string;
+  readonly method: string;
+  readonly path: string;
+  readonly remoteAddress?: string;
+  readonly userAgent?: string;
+};
+
+type GatewayAuthResult = Awaited<ReturnType<typeof authenticateGatewayRequest>>;
+
+type GatewayAccessResult =
+  | {
+      readonly ok: true;
+      readonly auth: Extract<GatewayAuthResult, { readonly ok: true }>;
+      readonly enabledProjectIds: Set<string>;
+    }
+  | { readonly ok: false; readonly response: Response };
+
+function buildGatewayAuditContext(input: {
+  readonly req: Request;
+  readonly url: URL;
+  readonly gatewayRoot: string;
+  readonly server: ReturnType<typeof Bun.serve>;
+}): GatewayAuditContext {
+  const remote = input.server.requestIP(input.req);
+  return {
+    rootDir: input.gatewayRoot,
+    method: input.req.method,
+    path: sanitizeGatewayAuditPath({ url: input.url }),
+    ...(remote?.address ? { remoteAddress: remote.address } : {}),
+    ...(input.req.headers.get("user-agent")
+      ? { userAgent: input.req.headers.get("user-agent") ?? undefined }
+      : {}),
+  };
+}
+
+function appendGatewayAudit(input: {
+  readonly audit: GatewayAuditContext;
+  readonly status: number;
+  readonly tokenId?: string;
+}): void {
+  void appendGatewayAuditEntry({
+    rootDir: input.audit.rootDir,
+    entry: {
+      ts: new Date().toISOString(),
+      ...(input.tokenId ? { tokenId: input.tokenId } : {}),
+      method: input.audit.method,
+      path: input.audit.path,
+      status: input.status,
+      ...(input.audit.remoteAddress
+        ? { remoteAddress: input.audit.remoteAddress }
+        : {}),
+      ...(input.audit.userAgent ? { userAgent: input.audit.userAgent } : {}),
+    },
+  });
+}
+
+function gatewayErrorResponse(input: {
+  readonly audit: GatewayAuditContext;
+  readonly status: number;
+  readonly body: Record<string, unknown>;
+  readonly tokenId?: string;
+}): Response {
+  const response = jsonResponse(input.body, input.status);
+  appendGatewayAudit({
+    audit: input.audit,
+    tokenId: input.tokenId,
+    status: input.status,
+  });
+  return response;
+}
+
+async function authorizeGatewayRequest(input: {
+  readonly req: Request;
+  readonly url: URL;
+  readonly gatewayRoot: string;
+  readonly gatewayConfig: ControlPlaneConfig["gateway"];
+  readonly enabledProjects: readonly GatewayProject[];
+  readonly allowQueryToken: boolean;
+  readonly audit: GatewayAuditContext;
+}): Promise<GatewayAccessResult> {
+  const auth = await authenticateGatewayRequest({
+    rootDir: input.gatewayRoot,
+    headers: input.req.headers,
+    url: input.url,
+    allowQueryToken: input.allowQueryToken,
+  });
+  if (!auth.ok) {
+    return {
+      ok: false,
+      response: gatewayErrorResponse({
+        audit: input.audit,
+        status: 401,
+        body: {
+          error: auth.reason === "missing" ? "missing_token" : "invalid_token",
+        },
+      }),
+    };
+  }
+
+  const enabledProjectIds = await resolveEnabledGatewayProjectIds({
+    url: input.url,
+    enabledProjects: input.enabledProjects,
+  });
+  const isReadOnly = isGatewayReadOnlyMethod({ method: input.req.method });
+  const requiresWrite =
+    !isReadOnly || isGatewayShellStreamRequest({ url: input.url });
+  const projectId = resolveGatewayProjectId({ url: input.url });
+
+  if (projectId && !enabledProjectIds.has(projectId)) {
+    return {
+      ok: false,
+      response: gatewayErrorResponse({
+        audit: input.audit,
+        tokenId: auth.tokenId,
+        status: 403,
+        body: { error: "project_disabled" },
+      }),
+    };
+  }
+  if (requiresWrite && !input.gatewayConfig.allowWrites) {
+    return {
+      ok: false,
+      response: gatewayErrorResponse({
+        audit: input.audit,
+        tokenId: auth.tokenId,
+        status: 403,
+        body: { error: "writes_disabled" },
+      }),
+    };
+  }
+  if (requiresWrite && auth.scope !== "write") {
+    return {
+      ok: false,
+      response: gatewayErrorResponse({
+        audit: input.audit,
+        tokenId: auth.tokenId,
+        status: 403,
+        body: { error: "write_scope_required" },
+      }),
+    };
+  }
+
+  return { ok: true, auth, enabledProjectIds };
+}
+
+async function resolveEnabledGatewayProjectIds(input: {
+  readonly url: URL;
+  readonly enabledProjects: readonly GatewayProject[];
+}): Promise<Set<string>> {
+  const enabledProjectIds = new Set(
+    input.enabledProjects.map((project) => project.projectId)
+  );
+  const projectId = resolveGatewayProjectId({ url: input.url });
+  if (!(projectId && !enabledProjectIds.has(projectId))) {
+    return enabledProjectIds;
+  }
+  const refreshed = await resolveGatewayConfig();
+  return new Set(refreshed.enabledProjects.map((project) => project.projectId));
+}
+
+async function handleGatewayProjectsRoute(input: {
+  readonly url: URL;
+  readonly cache: ReturnType<typeof createRuntimeCache>;
+  readonly enabledProjectIds: Set<string>;
+}): Promise<Response> {
+  const filter = normalizeQueryParam({
+    value: input.url.searchParams.get("filter"),
+  });
+  const includeGlobal = parseBoolean({
+    value: input.url.searchParams.get("include_global"),
+  });
+  const includeMeta = parseBoolean({
+    value: input.url.searchParams.get("include_meta"),
+  });
+  const payload = await input.cache.getProjectsPayload({
+    filter,
+    includeGlobal,
+    includeUnregistered: false,
+    includeMeta,
+  });
+  const projects = payload.projects.filter((project) => {
+    if (!project || typeof project !== "object") {
+      return false;
+    }
+    const id = (project as Record<string, unknown>).project_id;
+    return typeof id === "string" && input.enabledProjectIds.has(id);
+  });
+  return jsonResponse({
+    ...payload,
+    include_unregistered: false,
+    projects,
+  });
 }
 
 function sanitizeGatewayAuditPath(opts: { url: URL }): string {
@@ -741,11 +793,49 @@ async function handleControlPlaneRequest(opts: {
   if (segments[0] !== "control-plane") {
     return null;
   }
-  if (segments[1] !== "projects") {
+  const project = await resolveControlPlaneProjectContext({ segments });
+  if (project instanceof Response) {
+    return project;
+  }
+
+  const jobResponse = await handleControlPlaneJobRequest({
+    req: opts.req,
+    server: opts.server,
+    supervisor: opts.supervisor,
+    project,
+  });
+  if (jobResponse) {
+    return jobResponse;
+  }
+
+  const shellResponse = await handleControlPlaneShellRequest({
+    req: opts.req,
+    server: opts.server,
+    shells: opts.shells,
+    project,
+  });
+  if (shellResponse) {
+    return shellResponse;
+  }
+
+  return jsonResponse({ error: "not_found" }, 404);
+}
+
+type ControlPlaneProjectContext = {
+  readonly segments: string[];
+  readonly project: NonNullable<
+    Awaited<ReturnType<typeof resolveRegisteredProjectById>>
+  >;
+};
+
+async function resolveControlPlaneProjectContext(input: {
+  readonly segments: string[];
+}): Promise<ControlPlaneProjectContext | Response> {
+  if (input.segments[1] !== "projects") {
     return jsonResponse({ error: "not_found" }, 404);
   }
 
-  const projectId = segments[2];
+  const projectId = input.segments[2];
   if (!projectId) {
     return jsonResponse({ error: "missing_project_id" }, 400);
   }
@@ -755,176 +845,269 @@ async function handleControlPlaneRequest(opts: {
     return jsonResponse({ error: "unknown_project" }, 404);
   }
 
-  if (segments[3] === "jobs" && segments[4] && segments[5] === "stream") {
-    if (opts.req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
-      return jsonResponse({ error: "upgrade_required" }, 426);
-    }
+  return {
+    segments: input.segments,
+    project,
+  };
+}
 
-    const jobId = segments[4];
-    const upgraded = opts.server.upgrade(opts.req, {
-      data: {
-        kind: "job",
-        jobId,
-        projectDir: project.project.projectDir,
-      } satisfies JobStreamState,
-    });
-    if (upgraded) {
-      return new Response(null, { status: 101 });
-    }
-    return jsonResponse({ error: "upgrade_failed" }, 400);
+async function handleControlPlaneJobRequest(input: {
+  readonly req: Request;
+  readonly server: ReturnType<typeof Bun.serve>;
+  readonly supervisor: ReturnType<typeof createSupervisorService>;
+  readonly project: ControlPlaneProjectContext;
+}): Promise<Response | null> {
+  if (input.project.segments[3] !== "jobs") {
+    return null;
   }
 
-  if (segments[3] === "jobs" && segments.length === 4) {
-    if (opts.req.method === "GET") {
-      const jobs = await opts.supervisor.listJobs({
-        projectDir: project.project.projectDir,
-      });
-      return jsonResponse({ jobs });
-    }
-
-    const body = await readJsonBody(opts.req);
-    if (!body) {
-      return jsonResponse({ error: "invalid_json" }, 400);
-    }
-
-    const payload = parseJobCreateInput(body);
-    if (!payload.ok) {
-      return jsonResponse({ error: payload.error }, 400);
-    }
-
-    const created = await opts.supervisor.createJob({
-      projectDir: project.project.projectDir,
-      projectId: project.registration.id,
-      projectName: project.registration.name,
-      runner: payload.value.runner,
-      command: payload.value.command,
-      ...(payload.value.cwd ? { cwd: payload.value.cwd } : {}),
-      ...(payload.value.env ? { env: payload.value.env } : {}),
-    });
-
-    return jsonResponse({ job: created.meta }, 201);
-  }
-
-  if (segments[3] === "jobs" && segments[4]) {
-    const jobId = segments[4];
-    if (segments[5] === "cancel") {
-      if (opts.req.method !== "POST") {
-        return jsonResponse({ error: "method_not_allowed" }, 405);
-      }
-      const cancelled = await opts.supervisor.cancelJob({
-        projectDir: project.project.projectDir,
-        jobId,
-      });
-      if (!cancelled.ok && cancelled.status === "not_found") {
-        return jsonResponse({ error: "job_not_found" }, 404);
-      }
-      if (!cancelled.ok && cancelled.status === "not_running") {
-        return jsonResponse({ error: "job_not_running" }, 409);
-      }
-      return jsonResponse({ status: "cancelled" });
-    }
-
-    if (opts.req.method !== "GET") {
-      return jsonResponse({ error: "method_not_allowed" }, 405);
-    }
-    const job = await opts.supervisor.getJob({
-      projectDir: project.project.projectDir,
+  const jobId = input.project.segments[4];
+  if (jobId && input.project.segments[5] === "stream") {
+    return upgradeJobStream({
+      req: input.req,
+      server: input.server,
       jobId,
+      projectDir: input.project.project.project.projectDir,
     });
-    if (!job) {
-      return jsonResponse({ error: "job_not_found" }, 404);
-    }
-    return jsonResponse({ job });
   }
-
-  if (segments[3] === "shells" && segments[4] && segments[5] === "stream") {
-    if (opts.req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
-      return jsonResponse({ error: "upgrade_required" }, 426);
-    }
-
-    const shellId = segments[4];
-    const shell = opts.shells.getShell({ shellId });
-    if (
-      !shell ||
-      (shell.projectId && shell.projectId !== project.registration.id)
-    ) {
-      return jsonResponse({ error: "shell_not_found" }, 404);
-    }
-    const upgraded = opts.server.upgrade(opts.req, {
-      data: {
-        kind: "shell",
-        shellId,
-        projectDir: project.project.projectDir,
-      } satisfies ShellStreamState,
+  if (input.project.segments.length === 4) {
+    return await handleJobCollectionRequest({
+      req: input.req,
+      supervisor: input.supervisor,
+      project: input.project.project,
     });
-    if (upgraded) {
-      return new Response(null, { status: 101 });
-    }
-    return jsonResponse({ error: "upgrade_failed" }, 400);
   }
-
-  if (segments[3] === "shells" && segments.length === 4) {
-    if (opts.req.method !== "POST") {
-      return jsonResponse({ error: "method_not_allowed" }, 405);
-    }
-
-    const body = await readJsonBody(opts.req);
-    if (!body) {
-      return jsonResponse({ error: "invalid_json" }, 400);
-    }
-
-    const payload = parseShellCreateInput(body);
-    if (!payload.ok) {
-      return jsonResponse({ error: payload.error }, 400);
-    }
-
-    const cwd = resolveShellCwd({
-      projectRoot: project.project.projectRoot,
-      cwd: payload.value.cwd,
+  if (jobId) {
+    return await handleJobItemRequest({
+      req: input.req,
+      supervisor: input.supervisor,
+      project: input.project.project,
+      jobId,
+      action: input.project.segments[5],
     });
-    if (!cwd) {
-      return jsonResponse({ error: "invalid_cwd" }, 400);
-    }
-
-    const created = opts.shells.createShell({
-      projectRoot: project.project.projectRoot,
-      projectId: project.registration.id,
-      projectName: project.registration.name,
-      cwd,
-      ...(payload.value.env ? { env: payload.value.env } : {}),
-      ...(payload.value.shell ? { shell: payload.value.shell } : {}),
-      ...(payload.value.cols ? { cols: payload.value.cols } : {}),
-      ...(payload.value.rows ? { rows: payload.value.rows } : {}),
-    });
-
-    if (!created.ok) {
-      return jsonResponse(
-        { error: "shell_create_failed", message: created.error },
-        500
-      );
-    }
-
-    return jsonResponse({ shell: created.shell }, 201);
-  }
-
-  if (segments[3] === "shells" && segments[4] && segments.length === 5) {
-    const shellId = segments[4];
-    if (opts.req.method !== "GET") {
-      return jsonResponse({ error: "method_not_allowed" }, 405);
-    }
-
-    const shell = opts.shells.getShell({ shellId });
-    if (
-      !shell ||
-      (shell.projectId && shell.projectId !== project.registration.id)
-    ) {
-      return jsonResponse({ error: "shell_not_found" }, 404);
-    }
-
-    return jsonResponse({ shell });
   }
 
   return jsonResponse({ error: "not_found" }, 404);
+}
+
+function upgradeJobStream(input: {
+  readonly req: Request;
+  readonly server: ReturnType<typeof Bun.serve>;
+  readonly jobId: string;
+  readonly projectDir: string;
+}): Response {
+  if (input.req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+    return jsonResponse({ error: "upgrade_required" }, 426);
+  }
+  const upgraded = input.server.upgrade(input.req, {
+    data: {
+      kind: "job",
+      jobId: input.jobId,
+      projectDir: input.projectDir,
+    } satisfies JobStreamState,
+  });
+  return upgraded
+    ? new Response(null, { status: 101 })
+    : jsonResponse({ error: "upgrade_failed" }, 400);
+}
+
+async function handleJobCollectionRequest(input: {
+  readonly req: Request;
+  readonly supervisor: ReturnType<typeof createSupervisorService>;
+  readonly project: ControlPlaneProjectContext["project"];
+}): Promise<Response> {
+  if (input.req.method === "GET") {
+    const jobs = await input.supervisor.listJobs({
+      projectDir: input.project.project.projectDir,
+    });
+    return jsonResponse({ jobs });
+  }
+
+  const body = await readJsonBody(input.req);
+  if (!body) {
+    return jsonResponse({ error: "invalid_json" }, 400);
+  }
+  const payload = parseJobCreateInput(body);
+  if (!payload.ok) {
+    return jsonResponse({ error: payload.error }, 400);
+  }
+
+  const created = await input.supervisor.createJob({
+    projectDir: input.project.project.projectDir,
+    projectId: input.project.registration.id,
+    projectName: input.project.registration.name,
+    runner: payload.value.runner,
+    command: payload.value.command,
+    ...(payload.value.cwd ? { cwd: payload.value.cwd } : {}),
+    ...(payload.value.env ? { env: payload.value.env } : {}),
+  });
+  return jsonResponse({ job: created.meta }, 201);
+}
+
+async function handleJobItemRequest(input: {
+  readonly req: Request;
+  readonly supervisor: ReturnType<typeof createSupervisorService>;
+  readonly project: ControlPlaneProjectContext["project"];
+  readonly jobId: string;
+  readonly action?: string;
+}): Promise<Response> {
+  if (input.action === "cancel") {
+    if (input.req.method !== "POST") {
+      return jsonResponse({ error: "method_not_allowed" }, 405);
+    }
+    const cancelled = await input.supervisor.cancelJob({
+      projectDir: input.project.project.projectDir,
+      jobId: input.jobId,
+    });
+    if (!cancelled.ok && cancelled.status === "not_found") {
+      return jsonResponse({ error: "job_not_found" }, 404);
+    }
+    if (!cancelled.ok && cancelled.status === "not_running") {
+      return jsonResponse({ error: "job_not_running" }, 409);
+    }
+    return jsonResponse({ status: "cancelled" });
+  }
+
+  if (input.req.method !== "GET") {
+    return jsonResponse({ error: "method_not_allowed" }, 405);
+  }
+  const job = await input.supervisor.getJob({
+    projectDir: input.project.project.projectDir,
+    jobId: input.jobId,
+  });
+  return job
+    ? jsonResponse({ job })
+    : jsonResponse({ error: "job_not_found" }, 404);
+}
+
+async function handleControlPlaneShellRequest(input: {
+  readonly req: Request;
+  readonly server: ReturnType<typeof Bun.serve>;
+  readonly shells: ReturnType<typeof createShellService>;
+  readonly project: ControlPlaneProjectContext;
+}): Promise<Response | null> {
+  if (input.project.segments[3] !== "shells") {
+    return null;
+  }
+
+  const shellId = input.project.segments[4];
+  if (shellId && input.project.segments[5] === "stream") {
+    return upgradeShellStream({
+      req: input.req,
+      server: input.server,
+      shells: input.shells,
+      project: input.project.project,
+      shellId,
+    });
+  }
+  if (input.project.segments.length === 4) {
+    return await handleShellCollectionRequest({
+      req: input.req,
+      shells: input.shells,
+      project: input.project.project,
+    });
+  }
+  if (shellId && input.project.segments.length === 5) {
+    return handleShellItemRequest({
+      req: input.req,
+      shells: input.shells,
+      project: input.project.project,
+      shellId,
+    });
+  }
+
+  return jsonResponse({ error: "not_found" }, 404);
+}
+
+function upgradeShellStream(input: {
+  readonly req: Request;
+  readonly server: ReturnType<typeof Bun.serve>;
+  readonly shells: ReturnType<typeof createShellService>;
+  readonly project: ControlPlaneProjectContext["project"];
+  readonly shellId: string;
+}): Response {
+  if (input.req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+    return jsonResponse({ error: "upgrade_required" }, 426);
+  }
+  const shell = input.shells.getShell({ shellId: input.shellId });
+  if (
+    !shell ||
+    (shell.projectId && shell.projectId !== input.project.registration.id)
+  ) {
+    return jsonResponse({ error: "shell_not_found" }, 404);
+  }
+  const upgraded = input.server.upgrade(input.req, {
+    data: {
+      kind: "shell",
+      shellId: input.shellId,
+      projectDir: input.project.project.projectDir,
+    } satisfies ShellStreamState,
+  });
+  return upgraded
+    ? new Response(null, { status: 101 })
+    : jsonResponse({ error: "upgrade_failed" }, 400);
+}
+
+async function handleShellCollectionRequest(input: {
+  readonly req: Request;
+  readonly shells: ReturnType<typeof createShellService>;
+  readonly project: ControlPlaneProjectContext["project"];
+}): Promise<Response> {
+  if (input.req.method !== "POST") {
+    return jsonResponse({ error: "method_not_allowed" }, 405);
+  }
+
+  const body = await readJsonBody(input.req);
+  if (!body) {
+    return jsonResponse({ error: "invalid_json" }, 400);
+  }
+  const payload = parseShellCreateInput(body);
+  if (!payload.ok) {
+    return jsonResponse({ error: payload.error }, 400);
+  }
+  const cwd = resolveShellCwd({
+    projectRoot: input.project.project.projectRoot,
+    cwd: payload.value.cwd,
+  });
+  if (!cwd) {
+    return jsonResponse({ error: "invalid_cwd" }, 400);
+  }
+
+  const created = input.shells.createShell({
+    projectRoot: input.project.project.projectRoot,
+    projectId: input.project.registration.id,
+    projectName: input.project.registration.name,
+    cwd,
+    ...(payload.value.env ? { env: payload.value.env } : {}),
+    ...(payload.value.shell ? { shell: payload.value.shell } : {}),
+    ...(payload.value.cols ? { cols: payload.value.cols } : {}),
+    ...(payload.value.rows ? { rows: payload.value.rows } : {}),
+  });
+  return created.ok
+    ? jsonResponse({ shell: created.shell }, 201)
+    : jsonResponse(
+        { error: "shell_create_failed", message: created.error },
+        500
+      );
+}
+
+function handleShellItemRequest(input: {
+  readonly req: Request;
+  readonly shells: ReturnType<typeof createShellService>;
+  readonly project: ControlPlaneProjectContext["project"];
+  readonly shellId: string;
+}): Response {
+  if (input.req.method !== "GET") {
+    return jsonResponse({ error: "method_not_allowed" }, 405);
+  }
+  const shell = input.shells.getShell({ shellId: input.shellId });
+  if (
+    !shell ||
+    (shell.projectId && shell.projectId !== input.project.registration.id)
+  ) {
+    return jsonResponse({ error: "shell_not_found" }, 404);
+  }
+  return jsonResponse({ shell });
 }
 
 async function readJsonBody(
@@ -1493,6 +1676,8 @@ function formatRuntimeHealth(opts: { readonly health: RuntimeHealth | null }): {
   readonly lastOkAt: string | null;
   readonly lastResetAt: string | null;
   readonly resetCount: number;
+  readonly lastResetReasons: readonly string[];
+  readonly lastResetSummary: string | null;
 } {
   if (!opts.health) {
     return {
@@ -1502,6 +1687,8 @@ function formatRuntimeHealth(opts: { readonly health: RuntimeHealth | null }): {
       lastOkAt: null,
       lastResetAt: null,
       resetCount: 0,
+      lastResetReasons: [],
+      lastResetSummary: null,
     };
   }
   return {
@@ -1511,6 +1698,8 @@ function formatRuntimeHealth(opts: { readonly health: RuntimeHealth | null }): {
     lastOkAt: toIso({ ms: opts.health.lastOkAtMs }),
     lastResetAt: toIso({ ms: opts.health.lastResetAtMs }),
     resetCount: opts.health.resetCount,
+    lastResetReasons: opts.health.lastResetReasons,
+    lastResetSummary: opts.health.lastResetSummary,
   };
 }
 

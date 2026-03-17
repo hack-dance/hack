@@ -14,6 +14,9 @@ import {
 } from "../lib/runtime-projects.ts";
 import {
   buildRuntimeFingerprint,
+  describeRuntimeReset,
+  type RuntimeIdentity,
+  type RuntimeResetReason,
   readRuntimeIdentity,
 } from "./runtime-health.ts";
 
@@ -25,6 +28,9 @@ export type RuntimeHealth = {
   readonly lastResetAtMs: number | null;
   readonly resetCount: number;
   readonly fingerprint: string | null;
+  readonly identity: RuntimeIdentity | null;
+  readonly lastResetReasons: readonly RuntimeResetReason[];
+  readonly lastResetSummary: string | null;
 };
 
 export type RuntimeSnapshot = {
@@ -45,6 +51,8 @@ export type ProjectsPayload = {
   readonly runtime_last_ok_at: string | null;
   readonly runtime_reset_at: string | null;
   readonly runtime_reset_count: number;
+  readonly runtime_reset_reasons: readonly RuntimeResetReason[];
+  readonly runtime_reset_summary: string | null;
   readonly projects: readonly Record<string, unknown>[];
 };
 
@@ -65,6 +73,8 @@ export type PsPayload = {
   readonly runtime_last_ok_at: string | null;
   readonly runtime_reset_at: string | null;
   readonly runtime_reset_count: number;
+  readonly runtime_reset_reasons: readonly RuntimeResetReason[];
+  readonly runtime_reset_summary: string | null;
   readonly items: readonly PsItem[];
 };
 
@@ -113,6 +123,9 @@ export function createRuntimeCache(opts: {
     lastResetAtMs: null,
     resetCount: 0,
     fingerprint: null,
+    identity: null,
+    lastResetReasons: [],
+    lastResetSummary: null,
   };
 
   const refresh = async ({
@@ -139,13 +152,27 @@ export function createRuntimeCache(opts: {
         let fingerprint = health.fingerprint;
         let resetCount = health.resetCount;
         let lastResetAtMs = health.lastResetAtMs;
+        let identity = health.identity;
+        let lastResetReasons = health.lastResetReasons;
+        let lastResetSummary = health.lastResetSummary;
         if (identityResult.ok) {
+          identity = identityResult.identity;
           fingerprint = buildRuntimeFingerprint({
             identity: identityResult.identity,
           });
-          if (health.fingerprint && fingerprint !== health.fingerprint) {
+          if (
+            health.fingerprint &&
+            fingerprint !== health.fingerprint &&
+            health.identity
+          ) {
+            const described = describeRuntimeReset({
+              previous: health.identity,
+              next: identityResult.identity,
+            });
             resetCount += 1;
             lastResetAtMs = checkedAtMs;
+            lastResetReasons = described.reasons;
+            lastResetSummary = described.summary;
           }
         }
         nextHealth = {
@@ -154,8 +181,11 @@ export function createRuntimeCache(opts: {
           error: null,
           lastOkAtMs: checkedAtMs,
           fingerprint,
+          identity,
           resetCount,
           lastResetAtMs,
+          lastResetReasons,
+          lastResetSummary,
         };
       } else {
         nextHealth = {
@@ -263,6 +293,8 @@ export function createRuntimeCache(opts: {
       runtime_last_ok_at: runtimeMeta.lastOkAt,
       runtime_reset_at: runtimeMeta.lastResetAt,
       runtime_reset_count: runtimeMeta.resetCount,
+      runtime_reset_reasons: runtimeMeta.lastResetReasons,
+      runtime_reset_summary: runtimeMeta.lastResetSummary,
       projects: views.map((view, i) => ({
         ...deps.serializeProjectView(view),
         ...(includeMeta ? { meta: metas[i] ?? null } : {}),
@@ -296,6 +328,8 @@ export function createRuntimeCache(opts: {
       runtime_last_ok_at: runtimeMeta.lastOkAt,
       runtime_reset_at: runtimeMeta.lastResetAt,
       runtime_reset_count: runtimeMeta.resetCount,
+      runtime_reset_reasons: runtimeMeta.lastResetReasons,
+      runtime_reset_summary: runtimeMeta.lastResetSummary,
       items,
     };
   };
@@ -374,6 +408,8 @@ function serializeRuntimeHealth(opts: { readonly health: RuntimeHealth }): {
   readonly lastOkAt: string | null;
   readonly lastResetAt: string | null;
   readonly resetCount: number;
+  readonly lastResetReasons: readonly RuntimeResetReason[];
+  readonly lastResetSummary: string | null;
 } {
   const checkedAt = toIso({ ms: opts.health.checkedAtMs });
   const lastOkAt = toIso({ ms: opts.health.lastOkAtMs });
@@ -385,6 +421,8 @@ function serializeRuntimeHealth(opts: { readonly health: RuntimeHealth }): {
     lastOkAt,
     lastResetAt,
     resetCount: opts.health.resetCount,
+    lastResetReasons: opts.health.lastResetReasons,
+    lastResetSummary: opts.health.lastResetSummary,
   };
 }
 

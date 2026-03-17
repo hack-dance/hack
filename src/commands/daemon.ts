@@ -8,7 +8,7 @@ import {
 import { optJson, optTail } from "../cli/options.ts";
 import type { DaemonLaunchdConfig } from "../control-plane/sdk/config.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
-import { requestDaemonJson } from "../daemon/client.ts";
+import { probeDaemonApi, requestDaemonJson } from "../daemon/client.ts";
 import {
   getLaunchdServiceStatus,
   installLaunchdService,
@@ -296,13 +296,17 @@ async function handleDaemonStatus({
 }): Promise<number> {
   const paths = resolveDaemonPaths({});
   const status = await readDaemonStatus({ paths });
-  const apiOk = await checkDaemonApi({ socketExists: status.socketExists });
+  const api = await checkDaemonApi({
+    socketExists: status.socketExists,
+    paths,
+  });
   const report = buildDaemonStatusReport({
     pid: status.pid,
     processRunning: status.running,
     socketExists: status.socketExists,
     logExists: status.logExists,
-    apiOk,
+    apiReachable: api.reachable,
+    apiCompatible: api.compatible,
   });
   const launchdStatus = await resolveLaunchdStatus({ paths });
 
@@ -323,16 +327,16 @@ async function handleDaemonStatus({
 
 async function checkDaemonApi(opts: {
   readonly socketExists: boolean;
-}): Promise<boolean> {
+  readonly paths: DaemonPaths;
+}): Promise<{ readonly reachable: boolean; readonly compatible: boolean }> {
   if (!opts.socketExists) {
-    return false;
+    return { reachable: false, compatible: false };
   }
-  const ping = await requestDaemonJson({
-    path: "/v1/status",
+  const probe = await probeDaemonApi({
+    socketPath: opts.paths.socketPath,
     timeoutMs: 500,
-    allowIncompatible: true,
   });
-  return ping?.ok ?? false;
+  return { reachable: probe.reachable, compatible: probe.compatible };
 }
 
 async function resolveLaunchdStatus(opts: {
@@ -353,9 +357,13 @@ function outputDaemonStatusJson(opts: {
     status: opts.report.status,
     running: opts.report.running,
     api_ok: opts.report.apiOk,
+    api_reachable: opts.report.apiReachable,
+    api_compatible: opts.report.apiCompatible,
     process_running: opts.report.processRunning,
     stale: opts.report.stale,
     stale_reason: opts.report.staleReason,
+    issue: opts.report.issue,
+    next_step: opts.report.nextStep,
     pid: opts.report.pid,
     socket_path: opts.paths.socketPath,
     socket_exists: opts.report.socketExists,
@@ -395,9 +403,17 @@ function reportDaemonStatus(opts: {
     return 1;
   }
 
+  if (report.status === "incompatible") {
+    logger.warn({
+      message: `hackd is running but incompatible with this CLI; run \`${report.nextStep}\``,
+    });
+    logLaunchdStatus({ launchdStatus, running: true });
+    return 1;
+  }
+
   logger.warn({
     message: report.stale
-      ? "hackd stopped (stale state detected)"
+      ? `hackd stopped (stale state detected; run \`${report.nextStep}\`)`
       : "hackd is not running",
   });
   logLaunchdStatus({ launchdStatus, running: false });

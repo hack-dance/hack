@@ -64,8 +64,44 @@ mock.module("../src/daemon/runtime-health.ts", () => ({
       },
     },
   buildRuntimeFingerprint: (opts: {
-    readonly identity: { readonly engineId: string | null };
-  }) => opts.identity.engineId ?? "unknown",
+    readonly identity: {
+      readonly engineId: string | null;
+      readonly engineName: string | null;
+      readonly engineVersion: string | null;
+    };
+  }) =>
+    [
+      opts.identity.engineId ?? "unknown",
+      opts.identity.engineName ?? "unknown",
+      opts.identity.engineVersion ?? "unknown",
+    ].join("|"),
+  describeRuntimeReset: (opts: {
+    readonly previous: {
+      readonly engineId: string | null;
+      readonly engineName: string | null;
+      readonly engineVersion: string | null;
+    };
+    readonly next: {
+      readonly engineId: string | null;
+      readonly engineName: string | null;
+      readonly engineVersion: string | null;
+    };
+  }) => {
+    const reasons: string[] = [];
+    if (opts.previous.engineId !== opts.next.engineId) {
+      reasons.push("engine_id_changed");
+    }
+    if (opts.previous.engineName !== opts.next.engineName) {
+      reasons.push("engine_name_changed");
+    }
+    if (opts.previous.engineVersion !== opts.next.engineVersion) {
+      reasons.push("engine_version_changed");
+    }
+    return {
+      reasons,
+      summary: reasons.join(", "),
+    };
+  },
 }));
 
 import { createRuntimeCache } from "../src/daemon/runtime-cache.ts";
@@ -329,6 +365,67 @@ test("runtime cache detects runtime resets via fingerprint", async () => {
   const snapshot = cache.getSnapshot();
   expect(snapshot?.health.resetCount).toBe(1);
   expect(snapshot?.health.lastResetAtMs).not.toBeNull();
+  expect(snapshot?.health.lastResetReasons).toEqual(["engine_id_changed"]);
+  expect(snapshot?.health.lastResetSummary).toBe("engine_id_changed");
+});
+
+test("runtime cache records reset reasons when runtime identity metadata changes", async () => {
+  const runtime: RuntimeProject[] = [
+    {
+      project: "alpha",
+      workingDir: null,
+      services: new Map(),
+      isGlobal: false,
+    },
+  ];
+  runtimeQueue.push({
+    ok: true,
+    runtime,
+    error: null,
+    checkedAtMs: Date.now(),
+  });
+  identityQueue.push({
+    ok: true,
+    identity: {
+      dockerHost: null,
+      socketPath: null,
+      socketInode: null,
+      engineId: "engine-a",
+      engineName: "orb",
+      engineVersion: "1.0.0",
+    },
+  });
+  runtimeQueue.push({
+    ok: true,
+    runtime,
+    error: null,
+    checkedAtMs: Date.now(),
+  });
+  identityQueue.push({
+    ok: true,
+    identity: {
+      dockerHost: null,
+      socketPath: null,
+      socketInode: null,
+      engineId: "engine-a",
+      engineName: "orb-next",
+      engineVersion: "1.1.0",
+    },
+  });
+
+  const cache = createRuntimeCache({});
+  await cache.refresh({ reason: "prime" });
+  await cache.refresh({ reason: "reset" });
+
+  const snapshot = cache.getSnapshot();
+  expect(snapshot?.health.resetCount).toBe(1);
+  expect(snapshot?.health.lastResetReasons).toEqual([
+    "engine_name_changed",
+    "engine_version_changed",
+  ]);
+  expect(snapshot?.health.lastResetSummary).toBe(
+    "engine_name_changed, engine_version_changed"
+  );
 });
 
 test("getPsPayload matches normalized compose project names", async () => {

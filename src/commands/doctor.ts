@@ -26,7 +26,7 @@ import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config
 import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts";
 import { createGitTicketsChannel } from "../control-plane/extensions/tickets/tickets-git-channel.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
-import { requestDaemonJson } from "../daemon/client.ts";
+import { probeDaemonApi } from "../daemon/client.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { buildDaemonStatusReport, readDaemonStatus } from "../daemon/status.ts";
 import {
@@ -648,22 +648,17 @@ async function checkGlobalFiles(): Promise<CheckResult> {
 async function checkDaemonStatus(): Promise<CheckResult> {
   const paths = resolveDaemonPaths({});
   const status = await readDaemonStatus({ paths });
-  let apiOk = false;
-  if (status.socketExists) {
-    const ping = await requestDaemonJson({
-      path: "/v1/status",
-      timeoutMs: 500,
-      allowIncompatible: true,
-    });
-    apiOk = ping?.ok ?? false;
-  }
+  const probe = status.socketExists
+    ? await probeDaemonApi({ socketPath: paths.socketPath, timeoutMs: 500 })
+    : { reachable: false, compatible: false, version: null };
 
   const report = buildDaemonStatusReport({
     pid: status.pid,
     processRunning: status.running,
     socketExists: status.socketExists,
     logExists: status.logExists,
-    apiOk,
+    apiReachable: probe.reachable,
+    apiCompatible: probe.compatible,
   });
 
   if (report.status === "running") {
@@ -682,11 +677,19 @@ async function checkDaemonStatus(): Promise<CheckResult> {
     };
   }
 
+  if (report.status === "incompatible") {
+    return {
+      name: "daemon",
+      status: "warn",
+      message: `hackd is running but incompatible (run: ${report.nextStep})`,
+    };
+  }
+
   if (report.status === "stale") {
     return {
       name: "daemon",
       status: "warn",
-      message: "hackd not running (stale pid/socket; run: hack daemon clear)",
+      message: `hackd not running (stale pid/socket; run: ${report.nextStep})`,
     };
   }
 
@@ -1742,6 +1745,17 @@ async function maybeRepairHackd(): Promise<void> {
     return;
   }
 
+  if (report.status === "incompatible") {
+    const okRestart = await confirmOrThrow({
+      message: "Restart incompatible hackd now?",
+      initialValue: true,
+    });
+    if (okRestart) {
+      await runHackSubcommand({ args: ["daemon", "restart"] });
+    }
+    return;
+  }
+
   if (report.status === "stale") {
     const okClear = await confirmOrThrow({
       message: "Clear stale hackd pid/socket files?",
@@ -1766,23 +1780,20 @@ async function resolveDaemonReportForDoctorFix(): Promise<
 > {
   const daemonPaths = resolveDaemonPaths({});
   const daemonStatus = await readDaemonStatus({ paths: daemonPaths });
-
-  let apiOk = false;
-  if (daemonStatus.socketExists) {
-    const ping = await requestDaemonJson({
-      path: "/v1/status",
-      timeoutMs: 500,
-      allowIncompatible: true,
-    });
-    apiOk = ping?.ok ?? false;
-  }
+  const probe = daemonStatus.socketExists
+    ? await probeDaemonApi({
+        socketPath: daemonPaths.socketPath,
+        timeoutMs: 500,
+      })
+    : { reachable: false, compatible: false, version: null };
 
   return buildDaemonStatusReport({
     pid: daemonStatus.pid,
     processRunning: daemonStatus.running,
     socketExists: daemonStatus.socketExists,
     logExists: daemonStatus.logExists,
-    apiOk,
+    apiReachable: probe.reachable,
+    apiCompatible: probe.compatible,
   });
 }
 

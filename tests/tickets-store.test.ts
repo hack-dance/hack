@@ -340,6 +340,44 @@ test("tickets store recovers from a stale tickets bare repo index.lock", async (
   expect(tickets.map((ticket) => ticket.title)).toContain("Stale lock ticket");
 }, 20_000);
 
+test("tickets store assigns unique ticket ids under concurrent creation", async () => {
+  const projectRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-concurrent-create-",
+  });
+  const store = await createStore({ projectRoot });
+
+  const created = await Promise.all(
+    Array.from(
+      { length: 5 },
+      async (_, index) =>
+        await store.createTicket({
+          title: `Concurrent ticket ${index + 1}`,
+          owner: "hack",
+          source: "hack",
+          actor: `creator-${index + 1}@hack`,
+        })
+    )
+  );
+
+  for (const result of created) {
+    expect(result.ok).toBe(true);
+  }
+
+  const ticketIds = created
+    .flatMap((result) => (result.ok ? [result.ticket.ticketId] : []))
+    .sort();
+  expect(ticketIds).toEqual([
+    "T-00001",
+    "T-00002",
+    "T-00003",
+    "T-00004",
+    "T-00005",
+  ]);
+
+  const listed = await store.listTickets();
+  expect(listed.map((ticket) => ticket.ticketId)).toEqual(ticketIds);
+}, 20_000);
+
 async function createStore(opts: { readonly projectRoot: string }) {
   const configResult = await readControlPlaneConfig({
     projectDir: join(opts.projectRoot, ".hack"),

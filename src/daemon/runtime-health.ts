@@ -13,6 +13,14 @@ export type RuntimeIdentityResult =
   | { readonly ok: true; readonly identity: RuntimeIdentity }
   | { readonly ok: false; readonly error: string };
 
+export type RuntimeResetReason =
+  | "docker_host_changed"
+  | "socket_path_changed"
+  | "socket_inode_changed"
+  | "engine_id_changed"
+  | "engine_name_changed"
+  | "engine_version_changed";
+
 export async function readRuntimeIdentity(opts?: {
   readonly env?: Record<string, string | undefined>;
 }): Promise<RuntimeIdentityResult> {
@@ -47,7 +55,49 @@ export function buildRuntimeFingerprint(opts: {
       ? String(opts.identity.socketInode)
       : "none";
   const engineId = opts.identity.engineId ?? "unknown";
-  return [dockerHost, socketPath, socketInode, engineId].join("|");
+  const engineName = opts.identity.engineName ?? "unknown";
+  const engineVersion = opts.identity.engineVersion ?? "unknown";
+  return [
+    dockerHost,
+    socketPath,
+    socketInode,
+    engineId,
+    engineName,
+    engineVersion,
+  ].join("|");
+}
+
+export function describeRuntimeReset(opts: {
+  readonly previous: RuntimeIdentity;
+  readonly next: RuntimeIdentity;
+}): {
+  readonly reasons: readonly RuntimeResetReason[];
+  readonly summary: string | null;
+} {
+  const reasons: RuntimeResetReason[] = [];
+  if (opts.previous.dockerHost !== opts.next.dockerHost) {
+    reasons.push("docker_host_changed");
+  }
+  if (opts.previous.socketPath !== opts.next.socketPath) {
+    reasons.push("socket_path_changed");
+  }
+  if (opts.previous.socketInode !== opts.next.socketInode) {
+    reasons.push("socket_inode_changed");
+  }
+  if (opts.previous.engineId !== opts.next.engineId) {
+    reasons.push("engine_id_changed");
+  }
+  if (opts.previous.engineName !== opts.next.engineName) {
+    reasons.push("engine_name_changed");
+  }
+  if (opts.previous.engineVersion !== opts.next.engineVersion) {
+    reasons.push("engine_version_changed");
+  }
+
+  return {
+    reasons,
+    summary: reasons.length > 0 ? reasons.join(", ") : null,
+  };
 }
 
 function resolveDockerHost(opts: {

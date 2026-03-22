@@ -28,12 +28,12 @@ Run `hack help` or `hack help <command>` for interactive help.
 | `hack open` | Open a URL for the project (default: https://<project>.hack) | Project |
 | `hack tui` | Open the project TUI (services + logs) | Project |
 | `hack branch` | Manage branch aliases for a project | Project |
-| `hack linear` | Linear account connection and ticket sync | Project |
+| `hack linear` | Connect Linear and sync repo work with Linear projects/issues | Project |
 | `hack config` | Read/write hack.config.json values | Project |
-| `hack env` | Manage project environment variables and secrets | Project |
-| `hack session` | Manage terminal sessions for hack projects | Project |
+| `hack env` | Set project env vars and local secrets | Project |
+| `hack session` | Keep reusable terminal workspaces alive | Project |
 | `hack ssh` | Show SSH connection info for remote access | Project |
-| `hack tickets` | Git-backed ticket management | Project |
+| `hack tickets` | Track repo-local work without leaving git | Project |
 | `hack internal` | Manage hack-managed internal overrides | Internal |
 | `hack gateway` | Manage gateway enablement | Extensions |
 | `hack node` | Manage remote execution nodes | Extensions |

@@ -192,7 +192,7 @@ export const GITHUB_COMMANDS: readonly ExtensionCommand[] = [
   },
   {
     name: "disconnect",
-    summary: "Remove stored GitHub token from keychain",
+    summary: "Disconnect a GitHub profile from Hack",
     scope: "global",
     handler: async ({ ctx, args }) => {
       const parsed = parseDisconnectArgs({ args });
@@ -225,7 +225,7 @@ export const GITHUB_COMMANDS: readonly ExtensionCommand[] = [
   },
   {
     name: "status",
-    summary: "Show GitHub profile/config status",
+    summary: "Show which GitHub profile and auth Hack will use",
     scope: "global",
     handler: async ({ ctx, args }) =>
       await handleGitHubStatusCommand({
@@ -236,7 +236,7 @@ export const GITHUB_COMMANDS: readonly ExtensionCommand[] = [
   },
   {
     name: "profiles",
-    summary: "List configured GitHub auth profiles",
+    summary: "List available GitHub profiles and the active selection",
     scope: "global",
     handler: async ({ ctx, args }) => {
       const parsed = parseProfilesArgs({ args });
@@ -269,7 +269,7 @@ export const GITHUB_COMMANDS: readonly ExtensionCommand[] = [
   },
   {
     name: "use",
-    summary: "Set global default GitHub profile",
+    summary: "Set the default GitHub profile for Hack workflows",
     scope: "global",
     handler: async ({ ctx, args }) => {
       const parsed = parseProfileUseArgs({ args });

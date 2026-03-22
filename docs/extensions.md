@@ -198,6 +198,10 @@ Options:
 
 ### GitHub extension (`hack x github`)
 
+Use GitHub when you want `hack` to help with branch sharing and pull request workflows from the same
+place you run local work. It becomes relevant once a branch is ready to open, update, or hand off for
+review.
+
 Connect or update a profile directly from token input:
 
 ```bash
@@ -274,6 +278,10 @@ Notes:
 - `auth.hack` and `auth.hack.gy` are routed by global Caddy to the daemon auth listener (`127.0.0.1:7790` by default), so this endpoint can also host future provider callbacks/hooks.
 
 ### Linear extension (`hack x linear`)
+
+Use Linear when your team plans work there and you want repo work to stay connected to Linear projects
+or issues. It becomes relevant when a repo should map to a Linear project or when you want manual sync
+between Linear and repo-local tickets.
 
 Linear integration supports multiple auth profiles, project-level binding, and manual sync in both
 directions between Linear issues and hack tickets.
@@ -501,6 +509,10 @@ Notes:
 - `ip` defaults to `-4` when no args are provided.
 
 ### Tickets extension (`hack x tickets`)
+
+Use tickets when you want lightweight work tracking that stays with the repo and is easy for agents or
+small teams to update. It becomes relevant as soon as you want to capture follow-up work without
+depending on a separate tracker.
 
 A lightweight, git-backed ticket log stored in `.hack/tickets/` and syncable via a dedicated git ref (`refs/hack/tickets` hidden by default).
 

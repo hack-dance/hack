@@ -793,7 +793,7 @@ const handleTail = async ({
 
 export const sessionCommand = defineCommand({
   name: "session",
-  summary: "Manage tmux sessions for hack projects",
+  summary: "Keep reusable terminal workspaces alive",
   group: "Project",
   options: [],
   positionals: [],

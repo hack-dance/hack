@@ -13,7 +13,7 @@ import { logger } from "../ui/logger.ts";
  */
 const linearSpec = defineCommand({
   name: "linear",
-  summary: "Linear account connection and ticket sync",
+  summary: "Connect Linear and sync repo work with Linear projects/issues",
   description: [
     "Usage:",
     "  hack linear status",

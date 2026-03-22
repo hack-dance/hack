@@ -2479,7 +2479,7 @@ public struct LinearSyncUXState: Hashable {
     guard isLinkedToLinear else {
       return "Local only. Connect to Linear to sync this ticket."
     }
-    return "\(authority.label) controls title, body, status, and project. Comments append only. Assignee, labels, and dependencies sync best effort."
+    return "\(authority.label) controls title, body, and status. Linear linkage metadata refreshes from Linear, while Hack project placement stays local. Comments append only. Assignee, labels, and dependencies sync best effort."
   }
 
   private static func makeReviewHint(

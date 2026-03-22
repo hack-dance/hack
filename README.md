@@ -123,6 +123,19 @@ bun run build:node-runtime-image --tag hack-node-runtime:dev
 
 Full operator guide: [`docs/guides/remote-node-container.md`](docs/guides/remote-node-container.md)
 
+### GitHub workflows (optional)
+
+Connect GitHub only when you want Hack to do GitHub work for you. Today that mainly means:
+
+- creating or updating PRs from `hack dispatch run --pr` or `hack x github pr-upsert`
+- helping the controller bootstrap a private GitHub repo onto a remote node when the node cannot
+  already clone it
+
+You do not need GitHub for local `hack init/up/open`, logs, tickets, or remote runs against public
+repos.
+
+Guide: [`docs/guides/github-workflows.md`](docs/guides/github-workflows.md)
+
 ### Tickets (optional, git-backed issue tracking)
 
 `hack` includes a lightweight, git-backed ticket system for tracking work without leaving your repo. Tickets are stored in a hidden git ref (`refs/hack/tickets`) so they sync with your code but don't clutter your branch list.

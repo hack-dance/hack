@@ -102,7 +102,7 @@ export const GITHUB_COMMANDS: readonly ExtensionCommand[] = [
   {
     name: "connect",
     summary:
-      "Store a GitHub token in keychain and persist profile config (direct or App exchange)",
+      "Connect GitHub for PR automation or remote repo bootstrap (token or App)",
     scope: "global",
     handler: async ({ ctx, args }) => {
       const parsed = parseConnectArgs({ args });
@@ -181,7 +181,7 @@ export const GITHUB_COMMANDS: readonly ExtensionCommand[] = [
   {
     name: "oauth-connect",
     summary:
-      "Open browser GitHub auth via gh CLI, import token, and bind selected profile",
+      "Connect GitHub in a browser and import a profile for Hack workflows",
     scope: "global",
     handler: async ({ ctx, args }) =>
       await handleGitHubOAuthConnectCommand({

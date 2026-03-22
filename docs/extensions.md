@@ -198,6 +198,36 @@ Options:
 
 ### GitHub extension (`hack x github`)
 
+Use GitHub when you want Hack to do GitHub work for you. GitHub is optional for core Hack setup
+and day-to-day local orchestration.
+
+GitHub currently unlocks:
+
+- PR automation from `hack dispatch run --pr` or `hack x github pr-upsert`
+- private GitHub repo bootstrap fallback for remote nodes when the node cannot clone on its own
+- explicit GitHub profile routing across Hack Desktop and the CLI
+
+You do not need GitHub for `hack init`, `hack up`, `hack open`, logs, tickets, or remote workflows
+against public repos.
+
+GitHub becomes required when:
+
+- you want Hack to create or update a GitHub PR
+- you want the controller to supply private GitHub clone credentials during remote bootstrap
+
+`Connect GitHub integration` is also separate from `Sign in to Hack with GitHub`. The first gives
+Hack a GitHub identity for GitHub-specific workflows. The second is only about Hack account auth.
+
+For the workflow-first guide, see [GitHub workflows](guides/github-workflows.md).
+
+Fastest setup paths:
+
+Interactive browser auth + installation picker:
+
+```bash
+hack x github oauth-connect --profile personal --set-default
+```
+
 Connect or update a profile directly from token input:
 
 ```bash
@@ -225,11 +255,9 @@ printf "%s" "$GITHUB_APP_PRIVATE_KEY" | hack x github connect \
   --private-key-auth-ref github.app.private_key.default
 ```
 
-One-click browser OAuth bootstrap (via `gh`) + installation picker:
+Optional non-interactive installation bind with browser OAuth:
 
 ```bash
-hack x github oauth-connect --profile personal --set-default
-# optional non-interactive installation bind:
 hack x github oauth-connect --profile personal --installation-id 12345678
 ```
 

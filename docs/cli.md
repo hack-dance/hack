@@ -959,6 +959,9 @@ GitHub profile precedence for `--pr`:
 2. Project `controlPlane.routing.overrides.github.profile`.
 3. Global `controlPlane.extensions["dance.hack.github"].config.defaultProfile`.
 
+`--pr` requires GitHub auth to resolve for the selected profile. Set that up with
+`hack x github oauth-connect` or `hack x github connect` before using PR automation.
+
 #### hack dispatch status
 
 Usage: `hack dispatch status <run-id> [--json]`

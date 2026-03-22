@@ -219,6 +219,19 @@ These materially improve the runtime, but they should not block initial architec
 
 - Make it easier to move project runtime state, env contracts, and workspace metadata between controller and node without rebuilding everything from scratch.
 
+## Workflow Traceability
+
+This is the minimum traceability map for architecture review. Every mandatory requirement should be justified by at least one real Hack workflow, and every source workflow should be protected by more than one runtime capability where appropriate.
+
+| Workflow | Primary requirements it drives |
+| --- | --- |
+| WF-1 Parallel branch environments | Project Instance Isolation, First-Class Hack Networking, Recovery As A First-Class Capability |
+| WF-2 Agent-heavy local work | Sessions As Runtime Objects, Cheap Concurrent Execution For Subagents, Control-Plane Native Runtime Introspection |
+| WF-3 Host-side helpers | Host-Native Lifecycle Integration, Sessions As Runtime Objects, Recovery As A First-Class Capability |
+| WF-4 Remote control-plane execution | Control-Plane Native Runtime Introspection, Cheap Concurrent Execution For Subagents, Recovery As A First-Class Capability |
+| WF-5 Controller local-edit, remote-run | Remote Workspace Bootstrap And Branch Ensure, First-Class Hack Networking, Control-Plane Native Runtime Introspection, Recovery As A First-Class Capability |
+| WF-6 Fresh-node bootstrap and devcontainers | Remote Workspace Bootstrap And Branch Ensure, Control-Plane Native Runtime Introspection |
+
 ## Explicit Non-Requirements
 
 These should not distort the architecture discussion.
@@ -250,6 +263,21 @@ A candidate runtime should be evaluated against these questions before implement
 3. Does it reduce the amount of ad hoc state that lives outside Hack’s project and control-plane models?
 4. Does it make job, shell, session, and lifecycle logging more coherent?
 5. Does it make architecture simpler for the desktop app, CLI, and gateway consumers?
+
+## Required Prototype Evidence
+
+The evaluation loop should not accept slideware or narrow happy-path demos. A runtime spike should prove each mandatory capability with direct evidence and should avoid the false positives listed here.
+
+| Requirement | Minimum proof for architecture evaluation | False positive to avoid |
+| --- | --- | --- |
+| Project Instance Isolation | Start two branch instances of one repo, confirm independent routing, logs, and teardown, then restart the daemon/CLI and rediscover both instances by stable identity. | Demoing two unrelated projects or two manual ports instead of true branch-instance isolation. |
+| First-Class Hack Networking | Prove stable `*.hack` access from browser, from inside a service, and through a controller-side remote route bridge to a node-hosted workload. Then force drift and show route repair. | Showing only host-to-container localhost access or static port mappings with no hostname model. |
+| Sessions As Runtime Objects | Create named sessions, reconnect after CLI exit, exec commands, capture/tail output, and stop them through the local API surface. | Replacing durable sessions with plain subprocesses that die when the caller disconnects. |
+| Cheap Concurrent Execution For Subagents | Run several concurrent jobs and interactive shells against one project instance, with isolated terminal state, streamed output, stable run ids, and reliable cancellation. | Serial command execution or one shared PTY presented as “multi-agent support.” |
+| Host-Native Lifecycle Integration | Start a project with required host hooks and persistent helper processes, surface them in logs and runtime state, then tear them down cleanly with the project instance. | Treating host helpers as external prerequisites or unmanaged terminal tabs. |
+| Remote Workspace Bootstrap And Branch Ensure | On a fresh node, bootstrap the repo from hints only, ensure a branch, record bootstrap auth source, and reuse the workspace for later dispatch or devcontainer startup. | Assuming the workspace was pre-cloned or manually prepared outside Hack. |
+| Control-Plane Native Runtime Introspection | Use one runtime-backed API surface to list projects, instances, jobs, shells, sessions, and lifecycle processes for both local CLI and gateway consumers. | Scraping ad hoc shell output differently in each client and calling that a control plane. |
+| Recovery As A First-Class Capability | Simulate runtime reset or stale daemon state, distinguish the failure mode, preserve discoverability of live instances, and prove reconnect or guided repair by stable identity. | Only proving clean-start behavior and ignoring reset, drift, or stale-state recovery. |
 
 ## Recommendation For Option Evaluation
 

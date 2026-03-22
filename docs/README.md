@@ -31,6 +31,8 @@ Quick diagnostics:
   - [Remote node quickstart](guides/remote-node-quickstart.md)
   - [Run laptop-to-laptop node pairing e2e](guides/remote-node-laptop-e2e.md)
   - [Bootstrap a remote node on Railway](guides/remote-node-railway.md)
+- Current runtime design notes:
+  - [Agent-native runtime requirements](plans/2026-03-22-agent-native-runtime-requirements-design.md)
 - Remote setup (one command): `hack remote setup`
 - [Initialize a project](guides/init-project.md)
 - [Global settings](guides/global-settings.md)

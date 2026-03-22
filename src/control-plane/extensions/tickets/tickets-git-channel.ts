@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, open, readdir, rm, stat, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
@@ -7,9 +8,10 @@ import { stableStringify } from "./util.ts";
 
 const REFS_HEADS_PREFIX_PATTERN = /^refs\/heads\//;
 const REFS_PREFIX_PATTERN = /^refs\//;
-const MUTATION_LOCK_RETRY_MS = 100;
-const MUTATION_LOCK_STALE_MS = 30_000;
-const MUTATION_LOCK_TIMEOUT_MS = 30_000;
+const DEFAULT_MUTATION_LOCK_HEARTBEAT_MS = 1000;
+const DEFAULT_MUTATION_LOCK_RETRY_MS = 100;
+const DEFAULT_MUTATION_LOCK_STALE_MS = 30_000;
+const DEFAULT_MUTATION_LOCK_TIMEOUT_MS = 30_000;
 
 export type TicketsGitChannel = {
   readonly ensureCheckedOut: () => Promise<string>;
@@ -82,6 +84,12 @@ export function createGitTicketsChannel(opts: {
     info: (input: { message: string }) => void;
     warn: (input: { message: string }) => void;
   };
+  readonly testOverrides?: {
+    readonly mutationLockHeartbeatMs?: number;
+    readonly mutationLockRetryMs?: number;
+    readonly mutationLockStaleMs?: number;
+    readonly mutationLockTimeoutMs?: number;
+  };
 }): TicketsGitChannel {
   const ticketsDir = resolve(opts.projectRoot, ".hack/tickets");
   const gitDir = resolve(ticketsDir, "git");
@@ -102,6 +110,16 @@ export function createGitTicketsChannel(opts: {
   const remoteName = gitEnabled ? (opts.config.remote ?? "origin").trim() : "";
   const bareIndexLockPath = resolve(bareDir, "index.lock");
   const mutationLockPath = resolve(gitDir, ".mutation.lock");
+  const mutationLockHeartbeatMs =
+    opts.testOverrides?.mutationLockHeartbeatMs ??
+    DEFAULT_MUTATION_LOCK_HEARTBEAT_MS;
+  const mutationLockRetryMs =
+    opts.testOverrides?.mutationLockRetryMs ?? DEFAULT_MUTATION_LOCK_RETRY_MS;
+  const mutationLockStaleMs =
+    opts.testOverrides?.mutationLockStaleMs ?? DEFAULT_MUTATION_LOCK_STALE_MS;
+  const mutationLockTimeoutMs =
+    opts.testOverrides?.mutationLockTimeoutMs ??
+    DEFAULT_MUTATION_LOCK_TIMEOUT_MS;
 
   const resolvePushRefForCheckout = (input: {
     readonly checkoutRef: string;
@@ -183,53 +201,126 @@ export function createGitTicketsChannel(opts: {
     await mkdir(worktreeDir, { recursive: true });
   };
 
+  type MutationLockHandle = {
+    readonly ownerToken: string;
+    readonly heartbeatTimer: ReturnType<typeof setInterval>;
+  };
+
   const withMutationLock = async <T>(fn: () => Promise<T>): Promise<T> => {
-    await acquireMutationLock();
+    const lockHandle = await acquireMutationLock();
     try {
       return await fn();
     } finally {
-      await releaseMutationLock();
+      await releaseMutationLock(lockHandle);
     }
   };
 
-  const acquireMutationLock = async (): Promise<void> => {
-    await mkdir(dirname(mutationLockPath), { recursive: true });
-    const start = Date.now();
+  const readMutationLockOwner = async (): Promise<string | null> => {
+    const ownerToken = (
+      await Bun.file(mutationLockPath)
+        .text()
+        .catch(() => "")
+    )
+      .split("\n")[0]
+      ?.trim();
+    return ownerToken ? ownerToken : null;
+  };
 
-    while (true) {
+  const writeMutationLockOwner = async (ownerToken: string): Promise<void> => {
+    await Bun.write(mutationLockPath, `${ownerToken}\n`);
+  };
+
+  const refreshMutationLock = async (
+    input: Pick<MutationLockHandle, "ownerToken">
+  ): Promise<void> => {
+    if ((await readMutationLockOwner()) !== input.ownerToken) {
+      return;
+    }
+    await writeMutationLockOwner(input.ownerToken);
+  };
+
+  const clearStaleMutationLock = async (): Promise<void> => {
+    const ownerToken = await readMutationLockOwner();
+    if (!ownerToken) {
+      await unlink(mutationLockPath).catch(() => undefined);
+      return;
+    }
+    if (!(await isMutationLockStale())) {
+      return;
+    }
+    if ((await readMutationLockOwner()) !== ownerToken) {
+      return;
+    }
+    await unlink(mutationLockPath).catch(() => undefined);
+  };
+
+  const startMutationLockHeartbeat = (
+    ownerToken: string
+  ): MutationLockHandle["heartbeatTimer"] => {
+    const heartbeatTimer = setInterval(() => {
+      void refreshMutationLock({ ownerToken });
+    }, mutationLockHeartbeatMs);
+    heartbeatTimer.unref?.();
+    return heartbeatTimer;
+  };
+
+  const tryAcquireMutationLock =
+    async (): Promise<MutationLockHandle | null> => {
+      const ownerToken = randomUUID();
       try {
         const file = await open(mutationLockPath, "wx");
-        await file.writeFile(`${process.pid}\n`);
+        await file.writeFile(`${ownerToken}\n`);
         await file.close();
-        return;
+        return {
+          ownerToken,
+          heartbeatTimer: startMutationLockHeartbeat(ownerToken),
+        };
       } catch (error: unknown) {
         const code =
           typeof error === "object" && error !== null && "code" in error
             ? (error as { code?: string }).code
             : undefined;
-        if (code !== "EEXIST") {
-          throw error;
+        if (code === "EEXIST") {
+          return null;
         }
-        if (await isMutationLockStale()) {
-          await unlink(mutationLockPath).catch(() => undefined);
-          continue;
-        }
-        if (Date.now() - start > MUTATION_LOCK_TIMEOUT_MS) {
-          throw new Error("Timed out waiting for tickets git mutation lock");
-        }
-        await Bun.sleep(MUTATION_LOCK_RETRY_MS);
+        throw error;
       }
+    };
+
+  const acquireMutationLock = async (): Promise<MutationLockHandle> => {
+    await mkdir(dirname(mutationLockPath), { recursive: true });
+    const start = Date.now();
+
+    while (true) {
+      const lockHandle = await tryAcquireMutationLock();
+      if (lockHandle) {
+        return lockHandle;
+      }
+      if (await isMutationLockStale()) {
+        await clearStaleMutationLock();
+        continue;
+      }
+      if (Date.now() - start > mutationLockTimeoutMs) {
+        throw new Error("Timed out waiting for tickets git mutation lock");
+      }
+      await Bun.sleep(mutationLockRetryMs);
     }
   };
 
-  const releaseMutationLock = async (): Promise<void> => {
+  const releaseMutationLock = async (
+    input: MutationLockHandle
+  ): Promise<void> => {
+    clearInterval(input.heartbeatTimer);
+    if ((await readMutationLockOwner()) !== input.ownerToken) {
+      return;
+    }
     await unlink(mutationLockPath).catch(() => undefined);
   };
 
   const isMutationLockStale = async (): Promise<boolean> => {
     try {
       const info = await stat(mutationLockPath);
-      return Date.now() - info.mtimeMs > MUTATION_LOCK_STALE_MS;
+      return Date.now() - info.mtimeMs > mutationLockStaleMs;
     } catch {
       return false;
     }
@@ -826,6 +917,9 @@ export function createGitTicketsChannel(opts: {
     readonly remoteUrl: string | null;
     readonly pushRef: string;
     readonly pendingEvents?: readonly Record<string, unknown>[];
+    readonly replayPendingEvents?: () => Promise<
+      { readonly ok: true } | { readonly ok: false; readonly error: string }
+    >;
   }): Promise<
     | { readonly ok: true; readonly didPush: boolean }
     | { readonly ok: false; readonly error: string }
@@ -858,7 +952,12 @@ export function createGitTicketsChannel(opts: {
       return checkedOut;
     }
 
-    if (input.pendingEvents && input.pendingEvents.length > 0) {
+    if (input.replayPendingEvents) {
+      const replayed = await input.replayPendingEvents();
+      if (!replayed.ok) {
+        return replayed;
+      }
+    } else if (input.pendingEvents && input.pendingEvents.length > 0) {
       const wrote = await writeEvents({ events: input.pendingEvents });
       if (!wrote.ok) {
         return wrote;
@@ -1152,6 +1251,8 @@ export function createGitTicketsChannel(opts: {
         return prepared;
       }
 
+      let preparedResult = prepared.result;
+
       const wrote = await writeEvents({ events: prepared.events });
       if (!wrote.ok) {
         return wrote;
@@ -1165,13 +1266,20 @@ export function createGitTicketsChannel(opts: {
       const pushed = await pushWithRetry({
         remoteUrl: checkedOut.remoteUrl,
         pushRef: checkedOut.pushRef,
-        pendingEvents: prepared.events,
+        replayPendingEvents: async () => {
+          const replayed = await input.prepare(worktreeDir);
+          if (!replayed.ok) {
+            return replayed;
+          }
+          preparedResult = replayed.result;
+          return await writeEvents({ events: replayed.events });
+        },
       });
       if (!pushed.ok) {
         return pushed;
       }
 
-      return { ok: true, result: prepared.result };
+      return { ok: true, result: preparedResult };
     });
   };
 
@@ -1401,6 +1509,7 @@ function isGitIndexLockError(message: string): boolean {
 }
 
 export const __testOnly = {
+  createGitTicketsChannel,
   mergeTicketEventLogs,
   resolvePushRefForCheckoutRef,
 };

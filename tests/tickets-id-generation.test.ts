@@ -88,20 +88,83 @@ test("tickets store retries generated ids that collide during concurrent creates
   ]);
 }, 20_000);
 
-async function createStore(opts: { readonly projectRoot: string }) {
+test("tickets store reallocates ticket ids after a push retry sees a remote collision", async () => {
+  const remoteRoot = await mkdtemp(join(tmpdir(), "hack-cli-tickets-remote-"));
+  tempRoots.push(remoteRoot);
+  await run({ cwd: remoteRoot, cmd: ["git", "init", "--bare"] });
+
+  const projectRootA = await createTempGitProject({
+    prefix: "hack-cli-tickets-remote-a-",
+    remoteRoot,
+  });
+  const projectRootB = await createTempGitProject({
+    prefix: "hack-cli-tickets-remote-b-",
+    remoteRoot,
+  });
+
+  const storeA = await createStore({
+    projectRoot: projectRootA,
+    generateTicketId: () => "T-AAAAAAAAAA",
+  });
+  const storeB = await createStore({
+    projectRoot: projectRootB,
+    generateTicketId: (() => {
+      const generatedIds = ["T-AAAAAAAAAA", "T-BBBBBBBBBB"];
+      return () => generatedIds.shift() ?? "T-CCCCCCCCCC";
+    })(),
+  });
+
+  expect(await storeB.listTickets()).toEqual([]);
+
+  const createdA = await storeA.createTicket({
+    title: "First repo ticket",
+    owner: "hack",
+    source: "hack",
+    actor: "creator-a@hack",
+  });
+  expect(createdA.ok).toBe(true);
+
+  const createdB = await storeB.createTicket({
+    title: "Second repo ticket",
+    owner: "hack",
+    source: "hack",
+    actor: "creator-b@hack",
+  });
+  expect(createdB.ok).toBe(true);
+  if (!(createdA.ok && createdB.ok)) {
+    throw new Error("Expected both ticket creates to succeed");
+  }
+
+  expect(createdA.ticket.ticketId).toBe("T-AAAAAAAAAA");
+  expect(createdB.ticket.ticketId).toBe("T-BBBBBBBBBB");
+
+  const tickets = await storeB.listTickets();
+  expect(tickets.map((ticket) => ticket.ticketId)).toEqual([
+    "T-AAAAAAAAAA",
+    "T-BBBBBBBBBB",
+  ]);
+}, 20_000);
+
+async function createStore(opts: {
+  readonly projectRoot: string;
+  readonly generateTicketId?: () => string;
+}) {
   const configResult = await readControlPlaneConfig({
     projectDir: join(opts.projectRoot, ".hack"),
   });
   return createTicketsStore({
     projectRoot: opts.projectRoot,
     controlPlaneConfig: configResult.config,
-    generateTicketId: () => generatedTicketIds.shift() ?? "T-ZZZZZZZZZZ",
+    generateTicketId:
+      opts.generateTicketId ??
+      (() => generatedTicketIds.shift() ?? "T-ZZZZZZZZZZ"),
     logger,
   });
 }
 
 async function createTempGitProject(opts: {
   readonly prefix: string;
+  readonly remoteRoot?: string;
 }): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), opts.prefix));
   tempRoots.push(root);
@@ -117,6 +180,12 @@ async function createTempGitProject(opts: {
   });
   await run({ cwd: root, cmd: ["git", "add", "-A"] });
   await run({ cwd: root, cmd: ["git", "commit", "-m", "init"] });
+  if (opts.remoteRoot) {
+    await run({
+      cwd: root,
+      cmd: ["git", "remote", "add", "origin", opts.remoteRoot],
+    });
+  }
   return root;
 }
 

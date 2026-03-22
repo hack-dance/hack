@@ -8,6 +8,8 @@ const SHORT_OPTION_PREFIX_REGEX = /^-/;
 export type CliGroup =
   | "Global"
   | "Project"
+  | "Integrations"
+  | "Beta"
   | "Extensions"
   | "Agents"
   | "Diagnostics"
@@ -111,6 +113,7 @@ export interface CliSpec {
   readonly name: string;
   readonly version: string;
   readonly summary: string;
+  readonly highlights?: readonly string[];
   readonly commands: readonly AnyCommandSpec[];
   readonly globalOptions: readonly OptionSpec[];
 }

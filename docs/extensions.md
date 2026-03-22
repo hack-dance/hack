@@ -1,7 +1,9 @@
-# Extensions & SDK (v0.1)
+# Extensions & SDK Reference
 
-This doc defines the extension surface area for `hack` and how extension commands are authored,
-configured, and dispatched.
+This is the lower-level reference for extension commands, SDK surfaces, and extension dispatch.
+
+If you want the plain-language product overview first, read [integrations.md](integrations.md)
+before this page.
 
 ## Quick start (one command)
 

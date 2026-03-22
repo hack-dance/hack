@@ -65,8 +65,8 @@ const optPort = defineOption({
 
 const sshSpec = defineCommand({
   name: "ssh",
-  summary: "Show SSH connection info for remote access to this machine",
-  group: "Project",
+  summary: "Show SSH details for reaching this machine and its sessions",
+  group: "Integrations",
   options: [optHost, optUser, optTailscale, optDirect, optPort],
   positionals: [
     { name: "session", description: "Session to connect to", required: false },

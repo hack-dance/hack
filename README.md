@@ -123,6 +123,22 @@ hack up --detach
 hack open
 ```
 
+What those commands do:
+
+- `hack global install` boots the machine-level DNS, TLS, and logging services
+- `hack init` creates the `.hack/` project config
+- `hack up --detach` starts your stack on an isolated network
+- `hack open` opens the project URL in your browser
+
+Useful next commands:
+
+```bash
+hack logs --pretty
+hack run <service> <command...>
+hack status
+hack down
+```
+
 If you want the shortest non-interactive path for an existing repo, use `hack init --auto`.
 
 ### 4. Optional: install agent integrations
@@ -134,12 +150,15 @@ hack setup cursor
 hack setup claude
 hack setup codex
 hack setup sync --all-scopes
+hack agent init --client codex
 ```
 
 If your agent does not have shell access, use MCP instead:
 
 ```bash
 hack mcp install --all --scope project
+hack setup mcp
+hack mcp serve
 ```
 
 Docs:
@@ -265,3 +284,10 @@ Useful repo commands:
 bun test
 bun x ultracite check
 ```
+
+Useful repo-level commands:
+
+- `bun run build`
+- `bun run test`
+- `bun run check`
+- `bun run macos:build`

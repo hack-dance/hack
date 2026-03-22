@@ -3,6 +3,14 @@
 This reference mirrors the CLI spec in `src/cli/spec.ts`.
 Run `hack help` or `hack help <command>` for interactive help.
 
+If you are new to Hack, scan the CLI in this order:
+
+1. `Global commands` for machine setup
+2. `Core workflows` for day-to-day local development
+3. `Collaboration & integrations` for env, sessions, tickets, Linear, and SSH access
+4. `Beta workflows` for remote control plane and multi-node execution
+5. `Extension commands` when you need the lower-level namespace surface
+
 ## Conventions
 
 - Commands that accept both `--path` and `--project` treat them as mutually exclusive.
@@ -18,31 +26,32 @@ Run `hack help` or `hack help <command>` for interactive help.
 | `hack projects` | Show all projects (registry + running docker compose) | Global |
 | `hack status` | Show project status (shortcut for `hack projects --details`) | Global |
 | `hack usage` | Show resource usage across running projects | Global |
-| `hack init` | Initialize a repo (generate .hack/ with compose + config) | Project |
-| `hack up` | Start project services (docker compose up) | Project |
-| `hack down` | Stop project services (docker compose down) | Project |
-| `hack restart` | Restart project services (down then up) | Project |
-| `hack ps` | Show project status (docker compose ps) | Project |
-| `hack logs` | Tail logs (compose by default; Loki for queries/history via --loki/--query) | Project |
-| `hack run` | Run a one-off command in a service container (docker compose run --rm) | Project |
-| `hack open` | Open a URL for the project (default: https://<project>.hack) | Project |
-| `hack tui` | Open the project TUI (services + logs) | Project |
-| `hack branch` | Manage branch aliases for a project | Project |
-| `hack linear` | Linear account connection and ticket sync | Project |
-| `hack config` | Read/write hack.config.json values | Project |
-| `hack env` | Manage project environment variables and secrets | Project |
-| `hack session` | Manage terminal sessions for hack projects | Project |
-| `hack ssh` | Show SSH connection info for remote access | Project |
-| `hack tickets` | Git-backed ticket management | Project |
+| `hack init` | Initialize a repo (generate .hack/ with compose + config) | Core workflows |
+| `hack up` | Start project services (docker compose up) | Core workflows |
+| `hack down` | Stop project services (docker compose down) | Core workflows |
+| `hack restart` | Restart project services (down then up) | Core workflows |
+| `hack ps` | Show project status (docker compose ps) | Core workflows |
+| `hack logs` | Tail logs (compose by default; Loki for queries/history via --loki/--query) | Core workflows |
+| `hack run` | Run a one-off command in a service container (docker compose run --rm) | Core workflows |
+| `hack open` | Open a URL for the project (default: https://<project>.hack) | Core workflows |
+| `hack tui` | Open the project TUI (services + logs) | Core workflows |
+| `hack branch` | Manage branch aliases for a project | Core workflows |
+| `hack config` | Read/write hack.config.json values | Core workflows |
+| `hack auth` | Manage Hack account sign-in | Collaboration & integrations |
+| `hack linear` | Connect Linear and sync selected work into the repo | Collaboration & integrations |
+| `hack env` | Share project env contracts and store local secrets | Collaboration & integrations |
+| `hack session` | Keep persistent work sessions for projects and agents | Collaboration & integrations |
+| `hack ssh` | Show SSH details for reaching this machine and its sessions | Collaboration & integrations |
+| `hack tickets` | Track repo-local work in git-backed tickets | Collaboration & integrations |
 | `hack internal` | Manage hack-managed internal overrides | Internal |
-| `hack gateway` | Manage gateway enablement | Extensions |
-| `hack node` | Manage remote execution nodes | Extensions |
-| `hack dispatch` | Dispatch branch-scoped jobs to remote nodes | Extensions |
-| `hack remote` | Remote workflow helpers | Extensions |
-| `hack x` | Run extension commands | Extensions |
-| `hack setup` | Install integrations for coding agents | Agents |
-| `hack agent` | Agent utilities | Agents |
-| `hack mcp` | Manage MCP server integrations for coding agents | Agents |
+| `hack gateway` | Beta: manage the remote control plane entrypoint | Beta workflows |
+| `hack node` | Beta: manage remote execution nodes | Beta workflows |
+| `hack dispatch` | Beta: run branch-scoped jobs on remote nodes | Beta workflows |
+| `hack remote` | Beta: guided remote access and gateway helpers | Beta workflows |
+| `hack x` | Run extension commands | Extension commands |
+| `hack setup` | Install integrations for coding agents | Agent integrations |
+| `hack agent` | Agent utilities | Agent integrations |
+| `hack mcp` | Manage MCP server integrations for coding agents | Agent integrations |
 | `hack doctor` | Validate local setup (docker, networks, DNS, global infra, project config) | Diagnostics |
 | `hack crash-capture` | Capture runtime crash diagnostics into `.tmp/` for triage | Diagnostics |
 | `hack daemon` | Manage the local hack daemon (hackd) | Diagnostics |
@@ -174,7 +183,7 @@ Options:
 | `--no-host` | boolean | false | Skip host process metrics |
 | `--json` | boolean | false | Output JSON (machine-readable); not supported with `--watch` |
 
-## Project commands
+## Core workflows
 
 ### hack init
 
@@ -472,6 +481,66 @@ Options:
 | `--project <name>` | string | - | Target a registered project by name |
 | `--global` | boolean | false | Write global `~/.hack/hack.config.json` |
 
+## Collaboration & integrations
+
+### hack auth
+
+Usage: `hack auth <subcommand>`
+
+Subcommands:
+
+| Subcommand | Summary |
+| --- | --- |
+| `login` | Open a browser and sign in to Hack auth |
+| `logout` | Clear the locally stored Hack auth session |
+| `status` | Show whether Hack auth is configured locally |
+| `whoami` | Resolve the current Hack auth identity via the broker |
+
+#### hack auth login
+
+Usage: `hack auth login [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | boolean | false | Output JSON |
+| `--no-open` | boolean | false | Print the browser URL instead of opening it automatically |
+| `--broker-url <url>` | string | - | Override the Hack auth broker base URL |
+| `--redirect <url>` | string | - | Return to this URL after browser sign-in finishes |
+
+#### hack auth logout
+
+Usage: `hack auth logout [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | boolean | false | Output JSON |
+
+#### hack auth status
+
+Usage: `hack auth status [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | boolean | false | Output JSON |
+| `--broker-url <url>` | string | - | Override the Hack auth broker base URL |
+
+#### hack auth whoami
+
+Usage: `hack auth whoami [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | boolean | false | Output JSON |
+| `--broker-url <url>` | string | - | Override the Hack auth broker base URL |
+
 ### hack env
 
 Usage: `hack env <subcommand>`
@@ -698,7 +767,7 @@ Usage: `hack internal extra-hosts unset <hostname> [options]`
 
 Usage: `hack internal extra-hosts list [options]`
 
-## Extension commands
+## Beta workflows
 
 ### hack gateway
 
@@ -1042,6 +1111,8 @@ Options:
 | `--ssh-port <port>` | number | - | SSH port for QR payload (omitted defaults to 22) |
 | `--yes` | boolean | false | Skip confirmation before printing sensitive QR payloads |
 
+## Extension commands
+
 ### hack x
 
 Usage: `hack x <namespace> <command> [args...]`
@@ -1057,7 +1128,7 @@ Notes:
 - `hack x list` lists available extensions.
 - `hack x <namespace> help` lists commands for a namespace.
 
-## Agent commands
+## Agent integrations
 
 ### hack setup
 

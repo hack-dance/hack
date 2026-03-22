@@ -420,6 +420,13 @@ function parseProjectOwnership(value: unknown): ParsedProjectOwnership {
         "Project ownership.owner_type must be 'user', 'team', or 'organization'.",
     };
   }
+  if (ownerType === "user") {
+    return {
+      ownership: defaultProjectOwnership(),
+      parseError:
+        "Project shared ownership.owner_type must be 'team' or 'organization'.",
+    };
+  }
 
   const ownerIdValue = value.owner_id;
   if (
@@ -432,12 +439,20 @@ function parseProjectOwnership(value: unknown): ParsedProjectOwnership {
       parseError: "Project ownership.owner_id must be a string when provided.",
     };
   }
+  const ownerId = normalizeProjectOwnerId(ownerIdValue);
+  if (ownerId === null) {
+    return {
+      ownership: defaultProjectOwnership(),
+      parseError:
+        "Project shared ownership.owner_id must be a non-empty string.",
+    };
+  }
 
   return {
     ownership: {
       mode: "shared",
       ownerType,
-      ownerId: normalizeProjectOwnerId(ownerIdValue),
+      ownerId,
       managedBy: "broker",
     },
   };

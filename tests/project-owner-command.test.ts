@@ -164,6 +164,57 @@ test("project owner show fails when ownership fields omit mode", async () => {
   );
 });
 
+test("project owner show fails when shared ownership uses a user owner", async () => {
+  const projectRoot = await createHackProject({
+    rawConfig: JSON.stringify({
+      ownership: {
+        mode: "shared",
+        owner_type: "user",
+        owner_id: "user_123",
+      },
+    }),
+  });
+
+  const result = await runCliWithCapturedOutput([
+    "project",
+    "owner",
+    "show",
+    "--path",
+    projectRoot,
+    "--json",
+  ]);
+
+  expect(result.exitCode).toBe(1);
+  expect(`${result.stdout}\n${result.stderr}`).toContain(
+    "Project shared ownership.owner_type must be 'team' or 'organization'."
+  );
+});
+
+test("project owner show fails when shared ownership omits owner id", async () => {
+  const projectRoot = await createHackProject({
+    rawConfig: JSON.stringify({
+      ownership: {
+        mode: "shared",
+        owner_type: "team",
+      },
+    }),
+  });
+
+  const result = await runCliWithCapturedOutput([
+    "project",
+    "owner",
+    "show",
+    "--path",
+    projectRoot,
+    "--json",
+  ]);
+
+  expect(result.exitCode).toBe(1);
+  expect(`${result.stdout}\n${result.stderr}`).toContain(
+    "Project shared ownership.owner_id must be a non-empty string."
+  );
+});
+
 async function createHackProject(opts?: {
   readonly ownership?: {
     readonly mode: "local" | "shared";

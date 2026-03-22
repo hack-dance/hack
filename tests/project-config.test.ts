@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,11 +13,23 @@ import {
 } from "../src/lib/project.ts";
 
 let tempDir: string | null = null;
+let originalSetupSyncMode: string | undefined;
+
+beforeEach(() => {
+  originalSetupSyncMode = process.env.HACK_SETUP_SYNC_MODE;
+  process.env.HACK_SETUP_SYNC_MODE = "off";
+});
 
 afterEach(async () => {
   if (tempDir) {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;
+  }
+
+  if (originalSetupSyncMode !== undefined) {
+    process.env.HACK_SETUP_SYNC_MODE = originalSetupSyncMode;
+  } else {
+    process.env.HACK_SETUP_SYNC_MODE = undefined;
   }
 });
 
@@ -152,6 +164,46 @@ test("readProjectConfig rejects ownership fields without an explicit mode", asyn
 
   expect(cfg.parseError).toBe(
     "Project ownership.mode is required when ownership.owner_type or ownership.owner_id is set."
+  );
+});
+
+test("readProjectConfig rejects shared ownership without a non-user owner", async () => {
+  const ctx = await createProjectDir();
+  await writeFile(
+    ctx.configFile,
+    JSON.stringify({
+      ownership: {
+        mode: "shared",
+        owner_type: "user",
+        owner_id: "user_123",
+      },
+    })
+  );
+
+  const cfg = await readProjectConfig(ctx);
+
+  expect(cfg.parseError).toBe(
+    "Project shared ownership.owner_type must be 'team' or 'organization'."
+  );
+});
+
+test("readProjectConfig rejects shared ownership without a concrete owner id", async () => {
+  const ctx = await createProjectDir();
+  await writeFile(
+    ctx.configFile,
+    JSON.stringify({
+      ownership: {
+        mode: "shared",
+        owner_type: "team",
+        owner_id: "   ",
+      },
+    })
+  );
+
+  const cfg = await readProjectConfig(ctx);
+
+  expect(cfg.parseError).toBe(
+    "Project shared ownership.owner_id must be a non-empty string."
   );
 });
 

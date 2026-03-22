@@ -10,6 +10,24 @@ Run `hack help` or `hack help <command>` for interactive help.
 - `--profile` accepts comma-separated compose profiles.
 - Options marked repeatable can be passed multiple times.
 
+## Adjacent capabilities
+
+These commands usually matter after the basic `hack init` / `hack up` / `hack open` loop is already
+working. You do not need all of them for every repo.
+
+- **GitHub**: Use `hack x github` when you want `hack` to help with connected-account setup and pull
+  request workflows. It becomes relevant once a branch is ready to open, update, or hand off for
+  review.
+- **Linear**: Use `hack linear` when repo work should stay connected to Linear issues or projects. It
+  becomes relevant when the repo maps to a Linear workflow and you want sync without leaving the CLI.
+- **Tickets**: Use `hack tickets` when you want lightweight repo-local work tracking that stays in git.
+  It becomes relevant as soon as you want to capture follow-up work without depending on an external
+  tracker.
+- **Sessions**: Use `hack session` when you want a reusable terminal workspace you can return to or hand
+  off. It becomes relevant when you keep long-running shells, agent runs, or SSH workspaces alive.
+- **Env**: Use `hack env` when a project needs explicit local config or secrets. It becomes relevant as
+  soon as `hack up`, `hack run`, or remote workflows depend on values that should not be hardcoded.
+
 ## Top-level commands
 
 | Command | Summary | Group |

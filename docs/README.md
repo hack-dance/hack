@@ -13,6 +13,7 @@ visit the beta and reference surfaces you actually need.
 - [Sessions](sessions.md)
 - [Lifecycle](lifecycle.md)
 - [Global settings](guides/global-settings.md)
+- [Prerequisite detection matrix](guides/prerequisite-detection-matrix.md)
 - [Architecture](architecture.md)
 
 ## Integrations & collaboration
@@ -54,6 +55,8 @@ visit the beta and reference surfaces you actually need.
 - `hack status`
 - `hack usage`
 - `hack usage --watch`
+- `hack node routes status`
+- `hack node routes repair`
 - `hack doctor`
 
 ## Monorepo note

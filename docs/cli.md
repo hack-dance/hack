@@ -1,7 +1,14 @@
 # CLI Reference
 
-This reference mirrors the CLI spec in `src/cli/spec.ts`.
-Run `hack help` or `hack help <command>` for interactive help.
+This reference mirrors the CLI spec in `src/cli/spec.ts`. Run `hack help` or `hack help <command>` for interactive help.
+
+If you are new to Hack, scan the CLI in this order:
+
+1. `Global commands` for machine setup
+2. `Core workflows` for day-to-day local development
+3. `Collaboration & integrations` for env, sessions, tickets, Linear, and SSH access
+4. `Beta workflows` for remote control plane and multi-node execution
+5. `Extension commands` when you need the lower-level namespace surface
 
 If you are new to Hack, scan the CLI in this order:
 
@@ -70,17 +77,17 @@ Usage: `hack global <subcommand>`
 
 Subcommands:
 
-| Subcommand | Summary |
-| --- | --- |
-| `install` | Bootstrap `~/.hack` and start Caddy + Grafana/Loki/Alloy |
-| `up` | Start global infra containers |
-| `down` | Stop global infra containers |
-| `status` | Show status for global infra (containers + networks) |
-| `logs` | Tail global infra logs (caddy|grafana|loki|alloy) |
-| `ca` | Export Caddy Local CA cert (print path or PEM) |
-| `cert` | Generate local TLS certs via mkcert (for non-Caddy services) |
-| `trust` | Trust Caddy Local CA (macOS) so https://*.hack is trusted |
-| `logs-reset` | Wipe Loki/Grafana volumes (fresh logs + dashboards) |
+| Subcommand   | Summary                                                      |
+| ------------ | ------------------------------------------------------------ |
+| `install`    | Bootstrap `~/.hack` and start Caddy + Grafana/Loki/Alloy     |
+| `up`         | Start global infra containers                                |
+| `down`       | Stop global infra containers                                 |
+| `status`     | Show status for global infra (containers + networks)         |
+| `logs`       | Tail global infra logs (`caddy`, `grafana`, `loki`, `alloy`) |
+| `ca`         | Export Caddy Local CA cert (print path or PEM)               |
+| `cert`       | Generate local TLS certs via mkcert (for non-Caddy services) |
+| `trust`      | Trust Caddy Local CA (macOS) so https://\*.hack is trusted   |
+| `logs-reset` | Wipe Loki/Grafana volumes (fresh logs + dashboards)          |
 
 #### hack global logs
 
@@ -88,18 +95,18 @@ Usage: `hack global logs [service] [options]`
 
 Arguments:
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `service` | string | no | Filter to one global service (caddy, grafana, loki, alloy) |
+| Name      | Type   | Required | Description                                                |
+| --------- | ------ | -------- | ---------------------------------------------------------- |
+| `service` | string | no       | Filter to one global service (caddy, grafana, loki, alloy) |
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `-f`, `--follow` | boolean | true | Follow logs (default) |
-| `--no-follow` | boolean | false | Print logs and exit |
-| `--tail <n>` | number | 200 | Tail last N log lines |
-| `--pretty` | boolean | false | Pretty-print logs (best-effort JSON parsing + formatting) |
+| Flag             | Type    | Default | Description                                               |
+| ---------------- | ------- | ------- | --------------------------------------------------------- |
+| `-f`, `--follow` | boolean | true    | Follow logs (default)                                     |
+| `--no-follow`    | boolean | false   | Print logs and exit                                       |
+| `--tail <n>`     | number  | 200     | Tail last N log lines                                     |
+| `--pretty`       | boolean | false   | Pretty-print logs (best-effort JSON parsing + formatting) |
 
 #### hack global ca
 
@@ -107,9 +114,9 @@ Usage: `hack global ca [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `--print` | boolean | false | Print the CA cert PEM to stdout (instead of printing its path) |
+| Flag      | Type    | Default | Description                                                    |
+| --------- | ------- | ------- | -------------------------------------------------------------- |
+| `--print` | boolean | false   | Print the CA cert PEM to stdout (instead of printing its path) |
 
 #### hack global cert
 
@@ -117,16 +124,16 @@ Usage: `hack global cert <hosts...> [options]`
 
 Arguments:
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `hosts` | string[] | yes | One or more hostnames to generate certs for |
+| Name    | Type     | Required | Description                                 |
+| ------- | -------- | -------- | ------------------------------------------- |
+| `hosts` | string[] | yes      | One or more hostnames to generate certs for |
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `--install` | boolean | false | Run mkcert -install before generating certs |
-| `--out <dir>` | string | `~/.hack/certs` | Directory for generated cert/key |
+| Flag          | Type    | Default         | Description                                 |
+| ------------- | ------- | --------------- | ------------------------------------------- |
+| `--install`   | boolean | false           | Run mkcert -install before generating certs |
+| `--out <dir>` | string  | `~/.hack/certs` | Directory for generated cert/key            |
 
 ### hack projects
 
@@ -151,9 +158,9 @@ Usage: `hack projects prune [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `--include-global` | boolean | false | Include global infra projects under `~/.hack` |
+| Flag               | Type    | Default | Description                                   |
+| ------------------ | ------- | ------- | --------------------------------------------- |
+| `--include-global` | boolean | false   | Include global infra projects under `~/.hack` |
 
 ### hack status
 
@@ -161,12 +168,12 @@ Usage: `hack status [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `--project <name>` | string | - | Filter to a registered project name |
-| `--include-global` | boolean | false | Include global infra projects under `~/.hack` |
-| `--all` | boolean | false | Include unregistered docker compose projects |
-| `--json` | boolean | false | Output JSON (machine-readable) |
+| Flag               | Type    | Default | Description                                   |
+| ------------------ | ------- | ------- | --------------------------------------------- |
+| `--project <name>` | string  | -       | Filter to a registered project name           |
+| `--include-global` | boolean | false   | Include global infra projects under `~/.hack` |
+| `--all`            | boolean | false   | Include unregistered docker compose projects  |
+| `--json`           | boolean | false   | Output JSON (machine-readable)                |
 
 ### hack usage
 
@@ -215,7 +222,7 @@ Options:
 | `--branch <name>` | string | - | Run against a branch-specific instance |
 | `-d`, `--detach` | boolean | false | Run in background (docker compose up -d) |
 | `--profile <name[,name...]>` | string | - | Enable one or more compose profiles |
-| `--target <auto|local|remote>` | string | `auto` | Execution routing target (`auto` follows project execution mode and node affinity) |
+| `--target <auto \| local \| remote>` | string | `auto` | Execution routing target (`auto` follows project execution mode and node affinity) |
 
 ### hack down
 
@@ -229,7 +236,7 @@ Options:
 | `--project <name>` | string | - | Target a registered project by name |
 | `--branch <name>` | string | - | Run against a branch-specific instance |
 | `--profile <name[,name...]>` | string | - | Enable one or more compose profiles |
-| `--target <auto|local|remote>` | string | `auto` | Execution routing target (`auto` follows project execution mode and node affinity) |
+| `--target <auto \| local \| remote>` | string | `auto` | Execution routing target (`auto` follows project execution mode and node affinity) |
 
 ### hack restart
 
@@ -243,7 +250,7 @@ Options:
 | `--project <name>` | string | - | Target a registered project by name |
 | `--branch <name>` | string | - | Run against a branch-specific instance |
 | `--profile <name[,name...]>` | string | - | Enable one or more compose profiles |
-| `--target <auto|local|remote>` | string | `auto` | Execution routing target (`auto` follows project execution mode and node affinity) |
+| `--target <auto \| local \| remote>` | string | `auto` | Execution routing target (`auto` follows project execution mode and node affinity) |
 
 ### hack ps
 
@@ -265,9 +272,9 @@ Usage: `hack logs [service] [options]`
 
 Arguments:
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `service` | string | no | Filter logs by service (shortcut for `--services`) |
+| Name      | Type   | Required | Description                                        |
+| --------- | ------ | -------- | -------------------------------------------------- |
+| `service` | string | no       | Filter logs by service (shortcut for `--services`) |
 
 Options:
 
@@ -301,10 +308,10 @@ Usage: `hack run <service> [-- <cmd...>] [options]`
 
 Arguments:
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `service` | string | yes | Compose service name |
-| `cmd` | string[] | no | Command to run (defaults to service entrypoint) |
+| Name      | Type     | Required | Description                                     |
+| --------- | -------- | -------- | ----------------------------------------------- |
+| `service` | string   | yes      | Compose service name                            |
+| `cmd`     | string[] | no       | Command to run (defaults to service entrypoint) |
 
 Options:
 
@@ -322,18 +329,18 @@ Usage: `hack open [target] [options]`
 
 Arguments:
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `target` | string | no | `www` (default), `logs`, a subdomain, or a full URL |
+| Name     | Type   | Required | Description                                         |
+| -------- | ------ | -------- | --------------------------------------------------- |
+| `target` | string | no       | `www` (default), `logs`, a subdomain, or a full URL |
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
-| `--project <name>` | string | - | Target a registered project by name |
-| `--branch <name>` | string | - | Run against a branch-specific instance |
-| `--json` | boolean | false | Output JSON with `{ "url": "..." }` |
+| Flag                 | Type    | Default | Description                                    |
+| -------------------- | ------- | ------- | ---------------------------------------------- |
+| `-p`, `--path <dir>` | string  | -       | Run against a repo path (overrides cwd search) |
+| `--project <name>`   | string  | -       | Target a registered project by name            |
+| `--branch <name>`    | string  | -       | Run against a branch-specific instance         |
+| `--json`             | boolean | false   | Output JSON with `{ "url": "..." }`            |
 
 Notes:
 
@@ -348,10 +355,10 @@ Usage: `hack tui [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
-| `--project <name>` | string | - | Target a registered project by name |
+| Flag                 | Type   | Default | Description                                    |
+| -------------------- | ------ | ------- | ---------------------------------------------- |
+| `-p`, `--path <dir>` | string | -       | Run against a repo path (overrides cwd search) |
+| `--project <name>`   | string | -       | Target a registered project by name            |
 
 Notes:
 
@@ -363,12 +370,12 @@ Usage: `hack branch <subcommand>`
 
 Subcommands:
 
-| Subcommand | Summary |
-| --- | --- |
-| `add` | Register a branch alias for this project |
-| `list` | List registered branch aliases |
-| `remove` | Remove a branch alias |
-| `open` | Open the branch host in a browser |
+| Subcommand | Summary                                  |
+| ---------- | ---------------------------------------- |
+| `add`      | Register a branch alias for this project |
+| `list`     | List registered branch aliases           |
+| `remove`   | Remove a branch alias                    |
+| `open`     | Open the branch host in a browser        |
 
 #### hack branch add
 
@@ -376,17 +383,17 @@ Usage: `hack branch add <name> [options]`
 
 Arguments:
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `name` | string | yes | Branch name or alias |
+| Name   | Type   | Required | Description          |
+| ------ | ------ | -------- | -------------------- |
+| `name` | string | yes      | Branch name or alias |
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
-| `--project <name>` | string | - | Target a registered project by name |
-| `--note <text>` | string | - | Optional note for the branch entry |
+| Flag                 | Type   | Default | Description                                    |
+| -------------------- | ------ | ------- | ---------------------------------------------- |
+| `-p`, `--path <dir>` | string | -       | Run against a repo path (overrides cwd search) |
+| `--project <name>`   | string | -       | Target a registered project by name            |
+| `--note <text>`      | string | -       | Optional note for the branch entry             |
 
 #### hack branch list
 
@@ -394,10 +401,10 @@ Usage: `hack branch list [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
-| `--project <name>` | string | - | Target a registered project by name |
+| Flag                 | Type   | Default | Description                                    |
+| -------------------- | ------ | ------- | ---------------------------------------------- |
+| `-p`, `--path <dir>` | string | -       | Run against a repo path (overrides cwd search) |
+| `--project <name>`   | string | -       | Target a registered project by name            |
 
 #### hack branch remove
 
@@ -405,16 +412,16 @@ Usage: `hack branch remove <name> [options]`
 
 Arguments:
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `name` | string | yes | Branch name or alias |
+| Name   | Type   | Required | Description          |
+| ------ | ------ | -------- | -------------------- |
+| `name` | string | yes      | Branch name or alias |
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
-| `--project <name>` | string | - | Target a registered project by name |
+| Flag                 | Type   | Default | Description                                    |
+| -------------------- | ------ | ------- | ---------------------------------------------- |
+| `-p`, `--path <dir>` | string | -       | Run against a repo path (overrides cwd search) |
+| `--project <name>`   | string | -       | Target a registered project by name            |
 
 #### hack branch open
 
@@ -422,16 +429,16 @@ Usage: `hack branch open <name> [options]`
 
 Arguments:
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `name` | string | yes | Branch name or alias |
+| Name   | Type   | Required | Description          |
+| ------ | ------ | -------- | -------------------- |
+| `name` | string | yes      | Branch name or alias |
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
-| `--project <name>` | string | - | Target a registered project by name |
+| Flag                 | Type   | Default | Description                                    |
+| -------------------- | ------ | ------- | ---------------------------------------------- |
+| `-p`, `--path <dir>` | string | -       | Run against a repo path (overrides cwd search) |
+| `--project <name>`   | string | -       | Target a registered project by name            |
 
 ### hack config
 
@@ -439,10 +446,10 @@ Usage: `hack config <subcommand>`
 
 Subcommands:
 
-| Subcommand | Summary |
-| --- | --- |
-| `get` | Read a value from hack.config.json |
-| `set` | Update a value in hack.config.json |
+| Subcommand | Summary                            |
+| ---------- | ---------------------------------- |
+| `get`      | Read a value from hack.config.json |
+| `set`      | Update a value in hack.config.json |
 
 #### hack config get
 
@@ -450,17 +457,17 @@ Usage: `hack config get <key> [options]`
 
 Arguments:
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `key` | string | yes | Dot path (e.g. `logs.snapshot_backend`) |
+| Name  | Type   | Required | Description                             |
+| ----- | ------ | -------- | --------------------------------------- |
+| `key` | string | yes      | Dot path (e.g. `logs.snapshot_backend`) |
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
-| `--project <name>` | string | - | Target a registered project by name |
-| `--global` | boolean | false | Read global `~/.hack/hack.config.json` |
+| Flag                 | Type    | Default | Description                                    |
+| -------------------- | ------- | ------- | ---------------------------------------------- |
+| `-p`, `--path <dir>` | string  | -       | Run against a repo path (overrides cwd search) |
+| `--project <name>`   | string  | -       | Target a registered project by name            |
+| `--global`           | boolean | false   | Read global `~/.hack/hack.config.json`         |
 
 #### hack config set
 
@@ -468,18 +475,78 @@ Usage: `hack config set <key> <value> [options]`
 
 Arguments:
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `key` | string | yes | Dot path (e.g. `logs.snapshot_backend`) |
-| `value` | string | yes | JSON value or raw string (parsed as JSON when valid) |
+| Name    | Type   | Required | Description                                          |
+| ------- | ------ | -------- | ---------------------------------------------------- |
+| `key`   | string | yes      | Dot path (e.g. `logs.snapshot_backend`)              |
+| `value` | string | yes      | JSON value or raw string (parsed as JSON when valid) |
+
+Options:
+
+| Flag                 | Type    | Default | Description                                    |
+| -------------------- | ------- | ------- | ---------------------------------------------- |
+| `-p`, `--path <dir>` | string  | -       | Run against a repo path (overrides cwd search) |
+| `--project <name>`   | string  | -       | Target a registered project by name            |
+| `--global`           | boolean | false   | Write global `~/.hack/hack.config.json`        |
+
+## Collaboration & integrations
+
+### hack auth
+
+Usage: `hack auth <subcommand>`
+
+Subcommands:
+
+| Subcommand | Summary |
+| --- | --- |
+| `login` | Open a browser and sign in to Hack auth |
+| `logout` | Clear the locally stored Hack auth session |
+| `status` | Show whether Hack auth is configured locally |
+| `whoami` | Resolve the current Hack auth identity via the broker |
+
+#### hack auth login
+
+Usage: `hack auth login [options]`
 
 Options:
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
-| `--project <name>` | string | - | Target a registered project by name |
-| `--global` | boolean | false | Write global `~/.hack/hack.config.json` |
+| `--json` | boolean | false | Output JSON |
+| `--no-open` | boolean | false | Print the browser URL instead of opening it automatically |
+| `--broker-url <url>` | string | - | Override the Hack auth broker base URL |
+| `--redirect <url>` | string | - | Return to this URL after browser sign-in finishes |
+
+#### hack auth logout
+
+Usage: `hack auth logout [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | boolean | false | Output JSON |
+
+#### hack auth status
+
+Usage: `hack auth status [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | boolean | false | Output JSON |
+| `--broker-url <url>` | string | - | Override the Hack auth broker base URL |
+
+#### hack auth whoami
+
+Usage: `hack auth whoami [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | boolean | false | Output JSON |
+| `--broker-url <url>` | string | - | Override the Hack auth broker base URL |
 
 ## Collaboration & integrations
 
@@ -547,12 +614,12 @@ Usage: `hack env <subcommand>`
 
 Subcommands:
 
-| Subcommand | Summary |
-| --- | --- |
-| `list` | List env contract vars and resolution state |
-| `set` | Set an env value (.hack/.env or secret backend) |
-| `unset` | Unset an env value (.hack/.env and secret backend) |
-| `backend` | Manage env/secret backend strategy |
+| Subcommand | Summary                                            |
+| ---------- | -------------------------------------------------- |
+| `list`     | List env contract vars and resolution state        |
+| `set`      | Set an env value (.hack/.env or secret backend)    |
+| `unset`    | Unset an env value (.hack/.env and secret backend) |
+| `backend`  | Manage env/secret backend strategy                 |
 
 #### hack env list
 
@@ -560,12 +627,12 @@ Usage: `hack env list [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
-| `--project <name>` | string | - | Target a registered project by name |
-| `--json` | boolean | false | Output JSON (machine-readable) |
-| `--show-secrets` | boolean | false | Print secret values (secret backend) in plaintext |
+| Flag                 | Type    | Default | Description                                       |
+| -------------------- | ------- | ------- | ------------------------------------------------- |
+| `-p`, `--path <dir>` | string  | -       | Run against a repo path (overrides cwd search)    |
+| `--project <name>`   | string  | -       | Target a registered project by name               |
+| `--json`             | boolean | false   | Output JSON (machine-readable)                    |
+| `--show-secrets`     | boolean | false   | Print secret values (secret backend) in plaintext |
 
 #### hack env set
 
@@ -587,10 +654,10 @@ Usage: `hack env unset [key] [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
-| `--project <name>` | string | - | Target a registered project by name |
+| Flag                 | Type   | Default | Description                                    |
+| -------------------- | ------ | ------- | ---------------------------------------------- |
+| `-p`, `--path <dir>` | string | -       | Run against a repo path (overrides cwd search) |
+| `--project <name>`   | string | -       | Target a registered project by name            |
 
 #### hack env backend
 
@@ -598,10 +665,10 @@ Usage: `hack env backend <subcommand>`
 
 Subcommands:
 
-| Subcommand | Summary |
-| --- | --- |
-| `status` | Show configured env/secret backend strategy |
-| `use` | Select env/secret backend strategy |
+| Subcommand | Summary                                     |
+| ---------- | ------------------------------------------- |
+| `status`   | Show configured env/secret backend strategy |
+| `use`      | Select env/secret backend strategy          |
 
 #### hack env backend status
 
@@ -609,9 +676,9 @@ Usage: `hack env backend status [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `--json` | boolean | false | Output JSON (machine-readable) |
+| Flag     | Type    | Default | Description                    |
+| -------- | ------- | ------- | ------------------------------ |
+| `--json` | boolean | false   | Output JSON (machine-readable) |
 
 #### hack env backend use
 
@@ -621,7 +688,7 @@ Options:
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--provider <aws|gcp|azure|vault>` | string | - | Cloud provider when backend is `cloud` |
+| `--provider <aws \| gcp \| azure \| vault>` | string | - | Cloud provider when backend is `cloud` |
 | `--store-path <path>` | string | - | Encrypted file path when backend is `encrypted_file` |
 | `--secret-project <id>` | string | - | Optional cloud account/project identifier |
 | `--secret-prefix <prefix>` | string | - | Optional cloud secret name prefix |
@@ -635,16 +702,16 @@ With no subcommand, opens an interactive picker of active sessions and available
 
 Subcommands:
 
-| Subcommand | Summary |
-| --- | --- |
-| `list` | List active sessions |
-| `start` | Start or attach to a session for a project |
-| `stop` | Stop (kill) a session |
-| `attach` | Attach to an existing session |
-| `exec` | Execute a command in a session |
-| `panes` | List panes in a tmux session |
-| `capture` | Capture recent output from a tmux session |
-| `tail` | Tail output from a tmux session |
+| Subcommand | Summary                                    |
+| ---------- | ------------------------------------------ |
+| `list`     | List active sessions                       |
+| `start`    | Start or attach to a session for a project |
+| `stop`     | Stop (kill) a session                      |
+| `attach`   | Attach to an existing session              |
+| `exec`     | Execute a command in a session             |
+| `panes`    | List panes in a tmux session               |
+| `capture`  | Capture recent output from a tmux session  |
+| `tail`     | Tail output from a tmux session            |
 
 #### hack session start
 
@@ -652,11 +719,11 @@ Usage: `hack session start [project] [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `--up` | boolean | false | Run hack up -d before attaching |
-| `--new` | boolean | false | Force create new session even if one exists |
-| `--name <suffix>` | string | - | Custom suffix for new session (e.g., agent-1) |
+| Flag              | Type    | Default | Description                                   |
+| ----------------- | ------- | ------- | --------------------------------------------- |
+| `--up`            | boolean | false   | Run hack up -d before attaching               |
+| `--new`           | boolean | false   | Force create new session even if one exists   |
+| `--name <suffix>` | string  | -       | Custom suffix for new session (e.g., agent-1) |
 
 #### hack session panes
 
@@ -664,10 +731,10 @@ Usage: `hack session panes <session> [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `--json` | boolean | false | Output NDJSON stream (start/log/end) |
-| `--pretty` | boolean | false | Output human-friendly text |
+| Flag       | Type    | Default | Description                          |
+| ---------- | ------- | ------- | ------------------------------------ |
+| `--json`   | boolean | false   | Output NDJSON stream (start/log/end) |
+| `--pretty` | boolean | false   | Output human-friendly text           |
 
 #### hack session capture
 
@@ -675,12 +742,12 @@ Usage: `hack session capture <session> [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `--target <target>` | string | - | Tmux pane target (default: active pane) |
-| `--lines <n>` | number | 200 | Number of lines to capture |
-| `--json` | boolean | false | Output NDJSON stream (start/log/end) |
-| `--pretty` | boolean | false | Output human-friendly text |
+| Flag                | Type    | Default | Description                             |
+| ------------------- | ------- | ------- | --------------------------------------- |
+| `--target <target>` | string  | -       | Tmux pane target (default: active pane) |
+| `--lines <n>`       | number  | 200     | Number of lines to capture              |
+| `--json`            | boolean | false   | Output NDJSON stream (start/log/end)    |
+| `--pretty`          | boolean | false   | Output human-friendly text              |
 
 #### hack session tail
 
@@ -688,14 +755,14 @@ Usage: `hack session tail <session> [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `--target <target>` | string | - | Tmux pane target (default: active pane) |
-| `--lines <n>` | number | 200 | Number of lines to capture |
-| `--interval-ms <ms>` | number | 500 | Polling interval in milliseconds |
-| `--max-ms <ms>` | number | 5000 | Stop tailing after N milliseconds |
-| `--json` | boolean | false | Output NDJSON stream (start/log/end) |
-| `--pretty` | boolean | false | Output human-friendly text |
+| Flag                 | Type    | Default | Description                             |
+| -------------------- | ------- | ------- | --------------------------------------- |
+| `--target <target>`  | string  | -       | Tmux pane target (default: active pane) |
+| `--lines <n>`        | number  | 200     | Number of lines to capture              |
+| `--interval-ms <ms>` | number  | 500     | Polling interval in milliseconds        |
+| `--max-ms <ms>`      | number  | 5000    | Stop tailing after N milliseconds       |
+| `--json`             | boolean | false   | Output NDJSON stream (start/log/end)    |
+| `--pretty`           | boolean | false   | Output human-friendly text              |
 
 ### hack ssh
 
@@ -703,27 +770,25 @@ Usage: `hack ssh [session] [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `-H`, `--host <host>` | string | - | SSH host (hostname or IP) |
-| `-u`, `--user <user>` | string | - | SSH username |
-| `-t`, `--tailscale` | boolean | false | Use Tailscale SSH |
-| `-d`, `--direct` | boolean | false | Use direct SSH (requires --host) |
-| `-p`, `--port <port>` | string | - | SSH port for direct connection (default: 22) |
+| Flag                  | Type    | Default | Description                                  |
+| --------------------- | ------- | ------- | -------------------------------------------- |
+| `-H`, `--host <host>` | string  | -       | SSH host (hostname or IP)                    |
+| `-u`, `--user <user>` | string  | -       | SSH username                                 |
+| `-t`, `--tailscale`   | boolean | false   | Use Tailscale SSH                            |
+| `-d`, `--direct`      | boolean | false   | Use direct SSH (requires --host)             |
+| `-p`, `--port <port>` | string  | -       | SSH port for direct connection (default: 22) |
 
 ### hack tickets
 
 Usage: `hack tickets <args...>`
 
-`hack tickets` is a convenience alias for the tickets extension (`hack x tickets ...`).
-Run `hack tickets` with no args to see available subcommands.
+`hack tickets` is a convenience alias for the tickets extension (`hack x tickets ...`). Run `hack tickets` with no args to see available subcommands.
 
 ### hack linear
 
 Usage: `hack linear <args...>`
 
-`hack linear` is a convenience alias for the Linear extension (`hack x linear ...`).
-Run `hack linear` with no args to see available subcommands.
+`hack linear` is a convenience alias for the Linear extension (`hack x linear ...`). Run `hack linear` with no args to see available subcommands.
 
 ## Internal commands
 
@@ -733,8 +798,8 @@ Usage: `hack internal <subcommand>`
 
 Subcommands:
 
-| Subcommand | Summary |
-| --- | --- |
+| Subcommand    | Summary                             |
+| ------------- | ----------------------------------- |
 | `extra-hosts` | Manage internal Compose extra_hosts |
 
 #### hack internal extra-hosts
@@ -743,17 +808,17 @@ Usage: `hack internal extra-hosts <subcommand> [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `-p`, `--path <path>` | string | - | Start directory (defaults to cwd) |
+| Flag                  | Type   | Default | Description                       |
+| --------------------- | ------ | ------- | --------------------------------- |
+| `-p`, `--path <path>` | string | -       | Start directory (defaults to cwd) |
 
 Subcommands:
 
-| Subcommand | Summary |
-| --- | --- |
-| `set` | Set an internal extra_hosts entry |
-| `unset` | Remove an internal extra_hosts entry |
-| `list` | List internal extra_hosts entries |
+| Subcommand | Summary                              |
+| ---------- | ------------------------------------ |
+| `set`      | Set an internal extra_hosts entry    |
+| `unset`    | Remove an internal extra_hosts entry |
+| `list`     | List internal extra_hosts entries    |
 
 #### hack internal extra-hosts set
 
@@ -775,11 +840,11 @@ Usage: `hack gateway <subcommand>`
 
 Subcommands:
 
-| Subcommand | Summary |
-| --- | --- |
-| `enable` | Enable the gateway and start hackd |
-| `setup` | Guided gateway setup (enable + token) |
-| `disable` | Disable the gateway (does not stop hackd) |
+| Subcommand | Summary                                   |
+| ---------- | ----------------------------------------- |
+| `enable`   | Enable the gateway and start hackd        |
+| `setup`    | Guided gateway setup (enable + token)     |
+| `disable`  | Disable the gateway (does not stop hackd) |
 
 #### hack gateway enable
 
@@ -787,10 +852,10 @@ Usage: `hack gateway enable [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
-| `--project <name>` | string | - | Target a registered project by name |
+| Flag                 | Type   | Default | Description                                    |
+| -------------------- | ------ | ------- | ---------------------------------------------- |
+| `-p`, `--path <dir>` | string | -       | Run against a repo path (overrides cwd search) |
+| `--project <name>`   | string | -       | Target a registered project by name            |
 
 #### hack gateway setup
 
@@ -798,13 +863,13 @@ Usage: `hack gateway setup [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
-| `--project <name>` | string | - | Target a registered project by name |
-| `--qr` | boolean | true | Force QR output after setup (default) |
-| `--no-qr` | boolean | false | Skip QR output after setup |
-| `--yes` | boolean | false | Skip confirmation prompts when printing QR payloads |
+| Flag                 | Type    | Default | Description                                         |
+| -------------------- | ------- | ------- | --------------------------------------------------- |
+| `-p`, `--path <dir>` | string  | -       | Run against a repo path (overrides cwd search)      |
+| `--project <name>`   | string  | -       | Target a registered project by name                 |
+| `--qr`               | boolean | true    | Force QR output after setup (default)               |
+| `--no-qr`            | boolean | false   | Skip QR output after setup                          |
+| `--yes`              | boolean | false   | Skip confirmation prompts when printing QR payloads |
 
 #### hack gateway disable
 
@@ -812,10 +877,10 @@ Usage: `hack gateway disable [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
-| `--project <name>` | string | - | Target a registered project by name |
+| Flag                 | Type   | Default | Description                                    |
+| -------------------- | ------ | ------- | ---------------------------------------------- |
+| `-p`, `--path <dir>` | string | -       | Run against a repo path (overrides cwd search) |
+| `--project <name>`   | string | -       | Target a registered project by name            |
 
 ### hack node
 
@@ -823,20 +888,20 @@ Usage: `hack node <subcommand>`
 
 Subcommands:
 
-| Subcommand | Summary |
-| --- | --- |
-| `init` | Initialize this host as a node and emit enrollment bundle |
-| `pair` | Pair node with one-command or expiring verification-code flow |
-| `ssh` | Manage SSH bootstrap for node pairing and remote runs |
-| `add` | Add a node from an enrollment bundle |
-| `list` | List registered nodes |
-| `status` | Probe node health and report live status |
-| `use` | Set default node |
-| `remove` | Remove node registration |
-| `workspace` | Inspect and repair node workspace map entries |
-| `routes` | Inspect and repair controller-side remote route bridge |
-| `provider` | Manage provider-specific node bootstrap workflows |
-| `devcontainer` | Manage remote node devcontainer lifecycle and attach hints |
+| Subcommand     | Summary                                                       |
+| -------------- | ------------------------------------------------------------- |
+| `init`         | Initialize this host as a node and emit enrollment bundle     |
+| `pair`         | Pair node with one-command or expiring verification-code flow |
+| `ssh`          | Manage SSH bootstrap for node pairing and remote runs         |
+| `add`          | Add a node from an enrollment bundle                          |
+| `list`         | List registered nodes                                         |
+| `status`       | Probe node health and report live status                      |
+| `use`          | Set default node                                              |
+| `remove`       | Remove node registration                                      |
+| `workspace`    | Inspect and repair node workspace map entries                 |
+| `routes`       | Inspect and repair controller-side remote route bridge        |
+| `provider`     | Manage provider-specific node bootstrap workflows             |
+| `devcontainer` | Manage remote node devcontainer lifecycle and attach hints    |
 
 Examples:
 
@@ -941,12 +1006,12 @@ Usage: `hack node workspace <subcommand>`
 
 Subcommands:
 
-| Subcommand | Summary |
-| --- | --- |
-| `list` | List node-local workspace map entries |
-| `resolve` | Resolve a map entry by controller project selector |
-| `attach` | Attach an existing local workspace to project selector |
-| `remove` | Remove a map entry by project selector |
+| Subcommand | Summary                                                |
+| ---------- | ------------------------------------------------------ |
+| `list`     | List node-local workspace map entries                  |
+| `resolve`  | Resolve a map entry by controller project selector     |
+| `attach`   | Attach an existing local workspace to project selector |
+| `remove`   | Remove a map entry by project selector                 |
 
 Examples:
 
@@ -963,10 +1028,10 @@ Usage: `hack node routes <subcommand>`
 
 Subcommands:
 
-| Subcommand | Summary |
-| --- | --- |
-| `status` | Show controller-side remote route bridge state |
-| `repair` | Re-render and re-apply persisted route bridge stack |
+| Subcommand | Summary                                             |
+| ---------- | --------------------------------------------------- |
+| `status`   | Show controller-side remote route bridge state      |
+| `repair`   | Re-render and re-apply persisted route bridge stack |
 
 Examples:
 
@@ -982,11 +1047,11 @@ Usage: `hack dispatch <subcommand>`
 
 Subcommands:
 
-| Subcommand | Summary |
-| --- | --- |
-| `run` | Dispatch a command to a node workspace |
-| `status` | Show dispatched run status |
-| `logs` | Show or follow persisted/remote run logs |
+| Subcommand | Summary                                  |
+| ---------- | ---------------------------------------- |
+| `run`      | Dispatch a command to a node workspace   |
+| `status`   | Show dispatched run status               |
+| `logs`     | Show or follow persisted/remote run logs |
 
 #### hack dispatch run
 
@@ -996,14 +1061,14 @@ Options:
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--project <name|id>` | string | - | Project name or id |
-| `--node <id|default|auto>` | string | auto | Target node id, or use default/auto |
+| `--project <name \| id>` | string | - | Project name or id |
+| `--node <id \| default \| auto>` | string | auto | Target node id, or use default/auto |
 | `--provider <provider>` | string | - | Provider route override used when resolving profile/bootstrap intent |
 | `--profile <profile-id>` | string | - | Provider profile route override |
 | `--bootstrap-if-needed` | boolean | false | Allow guarded provider bootstrap handoff when no reachable node is found |
 | `--branch <branch>` | string | current | Target branch on selected node |
 | `--ticket <ticket-id>` | string | - | Ticket id to associate with run metadata |
-| `--runner <generic|codex|claude|cursor>` | string | `generic` | Runner identity for policy and audit |
+| `--runner <generic \| codex \| claude \| cursor>` | string | `generic` | Runner identity for policy and audit |
 | `--approve` | boolean | false | Approve high/critical risk commands non-interactively |
 | `--pr` | boolean | false | Push branch + create/update GitHub PR on successful run |
 | `--pr-base <branch>` | string | `main` | Base branch used with `--pr` |
@@ -1050,12 +1115,12 @@ If you run `hack remote` with no subcommand, it prints status and offers to run 
 
 Subcommands:
 
-| Subcommand | Summary |
-| --- | --- |
-| `setup` | Run the guided gateway setup |
-| `status` | Show remote/gateway status |
-| `monitor` | Open a remote status TUI |
-| `qr` | Print a QR payload for remote access |
+| Subcommand | Summary                              |
+| ---------- | ------------------------------------ |
+| `setup`    | Run the guided gateway setup         |
+| `status`   | Show remote/gateway status           |
+| `monitor`  | Open a remote status TUI             |
+| `qr`       | Print a QR payload for remote access |
 
 #### hack remote setup
 
@@ -1063,13 +1128,13 @@ Usage: `hack remote setup [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
-| `--project <name>` | string | - | Target a registered project by name |
-| `--qr` | boolean | true | Force QR output after setup (default) |
-| `--no-qr` | boolean | false | Skip QR output after setup |
-| `--yes` | boolean | false | Skip confirmation prompts when printing QR payloads |
+| Flag                 | Type    | Default | Description                                         |
+| -------------------- | ------- | ------- | --------------------------------------------------- |
+| `-p`, `--path <dir>` | string  | -       | Run against a repo path (overrides cwd search)      |
+| `--project <name>`   | string  | -       | Target a registered project by name                 |
+| `--qr`               | boolean | true    | Force QR output after setup (default)               |
+| `--no-qr`            | boolean | false   | Skip QR output after setup                          |
+| `--yes`              | boolean | false   | Skip confirmation prompts when printing QR payloads |
 
 #### hack remote status
 
@@ -1077,10 +1142,10 @@ Usage: `hack remote status [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
-| `--project <name>` | string | - | Target a registered project by name |
+| Flag                 | Type   | Default | Description                                    |
+| -------------------- | ------ | ------- | ---------------------------------------------- |
+| `-p`, `--path <dir>` | string | -       | Run against a repo path (overrides cwd search) |
+| `--project <name>`   | string | -       | Target a registered project by name            |
 
 #### hack remote monitor
 
@@ -1088,10 +1153,10 @@ Usage: `hack remote monitor [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
-| `--project <name>` | string | - | Target a registered project by name |
+| Flag                 | Type   | Default | Description                                    |
+| -------------------- | ------ | ------- | ---------------------------------------------- |
+| `-p`, `--path <dir>` | string | -       | Run against a repo path (overrides cwd search) |
+| `--project <name>`   | string | -       | Target a registered project by name            |
 
 #### hack remote qr
 
@@ -1119,9 +1184,9 @@ Usage: `hack x <namespace> <command> [args...]`
 
 Arguments:
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `args` | string[] | no | Extension command args (passed through) |
+| Name   | Type     | Required | Description                             |
+| ------ | -------- | -------- | --------------------------------------- |
+| `args` | string[] | no       | Extension command args (passed through) |
 
 Notes:
 
@@ -1136,15 +1201,15 @@ Usage: `hack setup <subcommand>`
 
 Subcommands:
 
-| Subcommand | Summary |
-| --- | --- |
-| `cursor` | Install Cursor rules for hack CLI usage |
-| `claude` | Install Claude Code hooks for hack CLI usage |
-| `codex` | Install Codex skill for hack CLI usage |
-| `tickets` | Install Codex skill for hack tickets usage |
-| `agents` | Install AGENTS.md / CLAUDE.md snippets |
-| `sync` | Refresh agent docs, skills, and MCP configs |
-| `mcp` | Install MCP configs for hack CLI usage (no-shell only) |
+| Subcommand | Summary                                                |
+| ---------- | ------------------------------------------------------ |
+| `cursor`   | Install Cursor rules for hack CLI usage                |
+| `claude`   | Install Claude Code hooks for hack CLI usage           |
+| `codex`    | Install Codex skill for hack CLI usage                 |
+| `tickets`  | Install Codex skill for hack tickets usage             |
+| `agents`   | Install AGENTS.md / CLAUDE.md snippets                 |
+| `sync`     | Refresh agent docs, skills, and MCP configs            |
+| `mcp`      | Install MCP configs for hack CLI usage (no-shell only) |
 
 #### hack setup cursor
 
@@ -1152,12 +1217,12 @@ Usage: `hack setup cursor [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
-| `--global` | boolean | false | Use global (user) scope instead of project scope |
-| `--check` | boolean | false | Check whether integration is installed |
-| `--remove` | boolean | false | Remove integration files/config |
+| Flag                 | Type    | Default | Description                                      |
+| -------------------- | ------- | ------- | ------------------------------------------------ |
+| `-p`, `--path <dir>` | string  | -       | Run against a repo path (overrides cwd search)   |
+| `--global`           | boolean | false   | Use global (user) scope instead of project scope |
+| `--check`            | boolean | false   | Check whether integration is installed           |
+| `--remove`           | boolean | false   | Remove integration files/config                  |
 
 #### hack setup claude
 
@@ -1165,12 +1230,12 @@ Usage: `hack setup claude [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
-| `--global` | boolean | false | Use global (user) scope instead of project scope |
-| `--check` | boolean | false | Check whether integration is installed |
-| `--remove` | boolean | false | Remove integration files/config |
+| Flag                 | Type    | Default | Description                                      |
+| -------------------- | ------- | ------- | ------------------------------------------------ |
+| `-p`, `--path <dir>` | string  | -       | Run against a repo path (overrides cwd search)   |
+| `--global`           | boolean | false   | Use global (user) scope instead of project scope |
+| `--check`            | boolean | false   | Check whether integration is installed           |
+| `--remove`           | boolean | false   | Remove integration files/config                  |
 
 #### hack setup codex
 
@@ -1178,12 +1243,12 @@ Usage: `hack setup codex [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
-| `--global` | boolean | false | Use global (user) scope instead of project scope |
-| `--check` | boolean | false | Check whether integration is installed |
-| `--remove` | boolean | false | Remove integration files/config |
+| Flag                 | Type    | Default | Description                                      |
+| -------------------- | ------- | ------- | ------------------------------------------------ |
+| `-p`, `--path <dir>` | string  | -       | Run against a repo path (overrides cwd search)   |
+| `--global`           | boolean | false   | Use global (user) scope instead of project scope |
+| `--check`            | boolean | false   | Check whether integration is installed           |
+| `--remove`           | boolean | false   | Remove integration files/config                  |
 
 #### hack setup agents
 
@@ -1191,14 +1256,14 @@ Usage: `hack setup agents [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
-| `--all` | boolean | false | Target all supported docs |
-| `--agents-md` | boolean | false | Target AGENTS.md |
-| `--claude-md` | boolean | false | Target CLAUDE.md |
-| `--check` | boolean | false | Check whether integration is installed |
-| `--remove` | boolean | false | Remove integration files/config |
+| Flag                 | Type    | Default | Description                                    |
+| -------------------- | ------- | ------- | ---------------------------------------------- |
+| `-p`, `--path <dir>` | string  | -       | Run against a repo path (overrides cwd search) |
+| `--all`              | boolean | false   | Target all supported docs                      |
+| `--agents-md`        | boolean | false   | Target AGENTS.md                               |
+| `--claude-md`        | boolean | false   | Target CLAUDE.md                               |
+| `--check`            | boolean | false   | Check whether integration is installed         |
+| `--remove`           | boolean | false   | Remove integration files/config                |
 
 #### hack setup sync
 
@@ -1206,13 +1271,13 @@ Usage: `hack setup sync [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
-| `--global` | boolean | false | Target global (user) scope only |
-| `--all-scopes` | boolean | false | Target both project and global (user) scopes |
-| `--check` | boolean | false | Check whether integrations are installed |
-| `--remove` | boolean | false | Remove generated integration files/config |
+| Flag                 | Type    | Default | Description                                    |
+| -------------------- | ------- | ------- | ---------------------------------------------- |
+| `-p`, `--path <dir>` | string  | -       | Run against a repo path (overrides cwd search) |
+| `--global`           | boolean | false   | Target global (user) scope only                |
+| `--all-scopes`       | boolean | false   | Target both project and global (user) scopes   |
+| `--check`            | boolean | false   | Check whether integrations are installed       |
+| `--remove`           | boolean | false   | Remove generated integration files/config      |
 
 Automatic guardrail:
 
@@ -1225,16 +1290,16 @@ Usage: `hack setup mcp [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
-| `--global` | boolean | false | Use global (user) scope instead of project scope |
-| `--all` | boolean | false | Target all supported clients |
-| `--cursor` | boolean | false | Target Cursor integration |
-| `--claude` | boolean | false | Target Claude integration |
-| `--codex` | boolean | false | Target Codex integration |
-| `--check` | boolean | false | Check whether integration is installed |
-| `--remove` | boolean | false | Remove integration files/config |
+| Flag                 | Type    | Default | Description                                      |
+| -------------------- | ------- | ------- | ------------------------------------------------ |
+| `-p`, `--path <dir>` | string  | -       | Run against a repo path (overrides cwd search)   |
+| `--global`           | boolean | false   | Use global (user) scope instead of project scope |
+| `--all`              | boolean | false   | Target all supported clients                     |
+| `--cursor`           | boolean | false   | Target Cursor integration                        |
+| `--claude`           | boolean | false   | Target Claude integration                        |
+| `--codex`            | boolean | false   | Target Codex integration                         |
+| `--check`            | boolean | false   | Check whether integration is installed           |
+| `--remove`           | boolean | false   | Remove integration files/config                  |
 
 ### hack agent
 
@@ -1242,11 +1307,11 @@ Usage: `hack agent <subcommand>`
 
 Subcommands:
 
-| Subcommand | Summary |
-| --- | --- |
-| `prime` | Print agent primer text |
+| Subcommand | Summary                         |
+| ---------- | ------------------------------- |
+| `prime`    | Print agent primer text         |
 | `patterns` | Print agent init patterns guide |
-| `init` | Print agent init prompt |
+| `init`     | Print agent init prompt         |
 
 #### hack agent init
 
@@ -1254,10 +1319,10 @@ Usage: `hack agent init [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
-| `-c`, `--client <cursor|claude|codex|print>` | string | - | Open init prompt in an agent client (or print) |
+| Flag                    | Type   | Default | Description                                    |
+| ----------------------- | ------ | ------- | ---------------------------------------------- |
+| `-p`, `--path <dir>`    | string | -       | Run against a repo path (overrides cwd search) |
+| `-c`, `--client <cursor \| claude \| codex \| print>` | string | - | Open init prompt in an agent client (or print) |
 
 ### hack mcp
 
@@ -1265,11 +1330,11 @@ Usage: `hack mcp <subcommand>`
 
 Subcommands:
 
-| Subcommand | Summary |
-| --- | --- |
-| `serve` | Run the MCP server over stdio |
-| `install` | Install MCP config for supported clients |
-| `print` | Print MCP config snippets |
+| Subcommand | Summary                                  |
+| ---------- | ---------------------------------------- |
+| `serve`    | Run the MCP server over stdio            |
+| `install`  | Install MCP config for supported clients |
+| `print`    | Print MCP config snippets                |
 
 #### hack mcp install
 
@@ -1277,17 +1342,17 @@ Usage: `hack mcp install [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `--scope <user|project>` | string | `user` | Write MCP config to user or project scope |
-| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
-| `--all` | boolean | false | Target all supported clients |
-| `--cursor` | boolean | false | Target Cursor MCP config |
-| `--claude` | boolean | false | Target Claude CLI MCP config |
-| `--codex` | boolean | false | Target Codex MCP config |
-| `--docs` | boolean | false | Update AGENTS.md and CLAUDE.md with hack usage |
-| `--agents-md` | boolean | false | Update AGENTS.md with hack usage |
-| `--claude-md` | boolean | false | Update CLAUDE.md with hack usage |
+| Flag                 | Type   | Default | Description                                    |
+| -------------------- | ------ | ------- | ---------------------------------------------- |
+| `--scope <user \| project>` | string | `user` | Write MCP config to user or project scope |
+| `-p`, `--path <dir>` | string    | -       | Run against a repo path (overrides cwd search) |
+| `--all`              | boolean   | false   | Target all supported clients                   |
+| `--cursor`           | boolean   | false   | Target Cursor MCP config                       |
+| `--claude`           | boolean   | false   | Target Claude CLI MCP config                   |
+| `--codex`            | boolean   | false   | Target Codex MCP config                        |
+| `--docs`             | boolean   | false   | Update AGENTS.md and CLAUDE.md with hack usage |
+| `--agents-md`        | boolean   | false   | Update AGENTS.md with hack usage               |
+| `--claude-md`        | boolean   | false   | Update CLAUDE.md with hack usage               |
 
 Notes:
 
@@ -1300,14 +1365,14 @@ Usage: `hack mcp print [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `--scope <user|project>` | string | `user` | Print MCP config for user or project scope |
-| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
-| `--all` | boolean | false | Target all supported clients |
-| `--cursor` | boolean | false | Target Cursor MCP config |
-| `--claude` | boolean | false | Target Claude CLI MCP config |
-| `--codex` | boolean | false | Target Codex MCP config |
+| Flag                 | Type   | Default | Description                                    |
+| -------------------- | ------ | ------- | ---------------------------------------------- |
+| `--scope <user \| project>` | string | `user` | Print MCP config for user or project scope |
+| `-p`, `--path <dir>` | string    | -       | Run against a repo path (overrides cwd search) |
+| `--all`              | boolean   | false   | Target all supported clients                   |
+| `--cursor`           | boolean   | false   | Target Cursor MCP config                       |
+| `--claude`           | boolean   | false   | Target Claude CLI MCP config                   |
+| `--codex`            | boolean   | false   | Target Codex MCP config                        |
 
 ## Diagnostics commands
 
@@ -1346,17 +1411,17 @@ Usage: `hack daemon <subcommand>`
 
 Subcommands:
 
-| Subcommand | Summary |
-| --- | --- |
-| `start` | Start hackd (local daemon) |
-| `stop` | Stop hackd |
-| `restart` | Restart hackd |
-| `status` | Show hackd status |
-| `metrics` | Show hackd metrics |
-| `logs` | Show hackd logs |
-| `clear` | Clear stale hackd pid/socket files |
-| `install` | Install hackd as a launchd service (macOS) |
-| `uninstall` | Uninstall hackd launchd service (macOS) |
+| Subcommand  | Summary                                    |
+| ----------- | ------------------------------------------ |
+| `start`     | Start hackd (local daemon)                 |
+| `stop`      | Stop hackd                                 |
+| `restart`   | Restart hackd                              |
+| `status`    | Show hackd status                          |
+| `metrics`   | Show hackd metrics                         |
+| `logs`      | Show hackd logs                            |
+| `clear`     | Clear stale hackd pid/socket files         |
+| `install`   | Install hackd as a launchd service (macOS) |
+| `uninstall` | Uninstall hackd launchd service (macOS)    |
 
 Autostart + self-heal behavior:
 
@@ -1373,9 +1438,9 @@ Usage: `hack daemon start [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `--foreground` | boolean | false | Run hackd in the foreground (debug) |
+| Flag           | Type    | Default | Description                         |
+| -------------- | ------- | ------- | ----------------------------------- |
+| `--foreground` | boolean | false   | Run hackd in the foreground (debug) |
 
 #### hack daemon status
 
@@ -1383,9 +1448,9 @@ Usage: `hack daemon status [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `--json` | boolean | false | Output JSON (machine-readable, includes launchd info on macOS) |
+| Flag     | Type    | Default | Description                                                    |
+| -------- | ------- | ------- | -------------------------------------------------------------- |
+| `--json` | boolean | false   | Output JSON (machine-readable, includes launchd info on macOS) |
 
 #### hack daemon logs
 
@@ -1393,35 +1458,32 @@ Usage: `hack daemon logs [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `--tail <n>` | number | 200 | Tail last N log lines |
+| Flag         | Type   | Default | Description           |
+| ------------ | ------ | ------- | --------------------- |
+| `--tail <n>` | number | 200     | Tail last N log lines |
 
 #### hack daemon install
 
 Usage: `hack daemon install [options]`
 
-Installs hackd as a launchd service on macOS. The daemon will be managed by launchd
-and can optionally start automatically on login.
+Installs hackd as a launchd service on macOS. The daemon will be managed by launchd and can optionally start automatically on login.
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `--run-at-load` | boolean | true | Start hackd automatically on login |
-| `--no-run-at-load` | boolean | - | Do not start hackd automatically on login |
-| `--gui-only` | boolean | true | Only run in GUI sessions (Aqua) |
-| `--no-gui-only` | boolean | - | Run in all session types (including SSH) |
+| Flag               | Type    | Default | Description                               |
+| ------------------ | ------- | ------- | ----------------------------------------- |
+| `--run-at-load`    | boolean | true    | Start hackd automatically on login        |
+| `--no-run-at-load` | boolean | -       | Do not start hackd automatically on login |
+| `--gui-only`       | boolean | true    | Only run in GUI sessions (Aqua)           |
+| `--no-gui-only`    | boolean | -       | Run in all session types (including SSH)  |
 
-The service uses the label `dance.hack.hackd` and writes its plist to
-`~/Library/LaunchAgents/dance.hack.hackd.plist`.
+The service uses the label `dance.hack.hackd` and writes its plist to `~/Library/LaunchAgents/dance.hack.hackd.plist`.
 
 #### hack daemon uninstall
 
 Usage: `hack daemon uninstall`
 
-Uninstalls the hackd launchd service on macOS. Removes the plist and unloads
-the service from launchd.
+Uninstalls the hackd launchd service on macOS. Removes the plist and unloads the service from launchd.
 
 ### hack log-pipe
 
@@ -1431,8 +1493,8 @@ Options:
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--format <auto|docker-compose|plain>` | string | `auto` | How to parse incoming lines from stdin |
-| `--stream <stdout|stderr>` | string | `stdout` | Treat stdin as stdout or stderr |
+| `--format <auto \| docker-compose \| plain>` | string | `auto` | How to parse incoming lines from stdin |
+| `--stream <stdout \| stderr>` | string | `stdout` | Treat stdin as stdout or stderr |
 
 ### hack help
 
@@ -1440,9 +1502,9 @@ Usage: `hack help [path...]`
 
 Arguments:
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `path` | string[] | no | Command path to show help for (e.g. `global logs`) |
+| Name   | Type     | Required | Description                                        |
+| ------ | -------- | -------- | -------------------------------------------------- |
+| `path` | string[] | no       | Command path to show help for (e.g. `global logs`) |
 
 ### hack update
 
@@ -1450,12 +1512,12 @@ Usage: `hack update [options]`
 
 Options:
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `--check` | boolean | false | Check for updates (do not install) |
-| `--yes` | boolean | false | Apply update without prompting |
-| `--tag <tag>` | string | - | Update to a specific release tag (e.g. v1.4.0) |
-| `--json` | boolean | false | Output JSON (machine-readable) |
+| Flag          | Type    | Default | Description                                    |
+| ------------- | ------- | ------- | ---------------------------------------------- |
+| `--check`     | boolean | false   | Check for updates (do not install)             |
+| `--yes`       | boolean | false   | Apply update without prompting                 |
+| `--tag <tag>` | string  | -       | Update to a specific release tag (e.g. v1.4.0) |
+| `--json`      | boolean | false   | Output JSON (machine-readable)                 |
 
 ### hack version
 
@@ -1469,23 +1531,23 @@ Usage: `hack secrets <subcommand>`
 
 Subcommands:
 
-| Subcommand | Summary |
-| --- | --- |
-| `set` | Store a secret |
-| `get` | Print a secret (exit 1 if missing) |
-| `delete` | Delete a stored secret |
+| Subcommand | Summary                            |
+| ---------- | ---------------------------------- |
+| `set`      | Store a secret                     |
+| `get`      | Print a secret (exit 1 if missing) |
+| `delete`   | Delete a stored secret             |
 
 Options (all subcommands):
 
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
+| Flag                  | Type   | Default    | Description                       |
+| --------------------- | ------ | ---------- | --------------------------------- |
 | `--service <service>` | string | `hack-cli` | Override Bun.secrets service name |
 
 Arguments (set/get/delete):
 
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `name` | string | no | Secret name (prompted if omitted) |
+| Name   | Type   | Required | Description                       |
+| ------ | ------ | -------- | --------------------------------- |
+| `name` | string | no       | Secret name (prompted if omitted) |
 
 ## Fun
 
@@ -1497,5 +1559,5 @@ Options:
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--variant <cut|mash|cycle|random>` | string | `cycle` | Animation variant |
-| `--loop` | boolean | true | Loop until Ctrl+C |
+| `--variant <cut \| mash \| cycle \| random>` | string | `cycle` | Animation variant |
+| `--loop`        | boolean | true    | Loop until Ctrl+C |

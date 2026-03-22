@@ -129,6 +129,7 @@ Tip: use `--body-stdin` for multi-line markdown.
 - The extension reads events, materializes tickets in-memory, and renders `list/show` outputs.
 - Ticket writes automatically commit and push to the tickets ref when git sync is enabled and a remote exists.
 - `sync` normalizes the event logs, commits, and pushes the tickets ref.
+- The next-step normalized entity model is documented in `docs/guides/tickets-normalization.md`.
 
 ### Storage layout
 

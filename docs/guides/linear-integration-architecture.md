@@ -35,6 +35,10 @@ Synced tickets always carry explicit ownership and lineage metadata:
 
 This guarantees filtering by local-only, Linear-only, or mixed sets without ambiguous state.
 
+The normalized replacement for these flat fields is defined in `docs/guides/tickets-normalization.md`
+and `src/control-plane/extensions/tickets/normalized-model.ts`. New sync/storage work should prefer
+that entity boundary over adding more `external*` fields to `TicketSummary`.
+
 ## Sync Mapping
 
 1. Status:

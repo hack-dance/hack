@@ -388,11 +388,11 @@ Docs: `docs/supervisor.md`.
 
 ## Docs
 
-Start here:
-- `docs/README.md` (index)
-- `docs/architecture.md`
-- `docs/gateway.md`
-- `docs/extensions.md`
+Docs are split into three paths:
+- `docs/README.md` - hub
+- `docs/core.md` - default local product story
+- `docs/beta.md` - remote and control-plane workflows
+- `docs/reference.md` - extensions, commands, and API reference
 
 ## Agent setup (CLI-first)
 

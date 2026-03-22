@@ -3,6 +3,10 @@
 This reference mirrors the CLI spec in `src/cli/spec.ts`.
 Run `hack help` or `hack help <command>` for interactive help.
 
+This is the full command reference, including beta and extension surfaces.
+If you are new to `hack`, start with [Core docs](core.md) and come back here when you need
+command-level detail.
+
 ## Conventions
 
 - Commands that accept both `--path` and `--project` treat them as mutually exclusive.

@@ -25,3 +25,7 @@ Note:
 - Inside containers, `localhost` points at the container itself. Update any `localhost:PORT` references to:
   - HTTP services via `https://*.hack` hostnames (matching your Caddy labels)
   - non-HTTP services via Compose service hostnames (e.g. `db`, `redis`)
+
+When the local path is working and you intentionally want remote execution or gateway exposure, move
+to [Beta workflows](../beta.md). For full command lookup and extension docs, use
+[Extensions & reference](../reference.md).

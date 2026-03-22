@@ -4,6 +4,9 @@ The gateway exposes a small, authenticated HTTP/WS surface for remote orchestrat
 designed for structured workflows (jobs + log streaming + shells) and keeps write access
 opt-in with explicit guardrails.
 
+This is reference for the beta remote surface. Use [Beta workflows](beta.md) for the guided path
+and [Core docs](core.md) for the default local product story.
+
 > ⚠️ Experimental: remote exposure steps are still being validated end-to-end.
 
 ## Security model (read this first)

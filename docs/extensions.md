@@ -3,6 +3,10 @@
 This doc defines the extension surface area for `hack` and how extension commands are authored,
 configured, and dispatched.
 
+This is reference material, not the default onboarding path.
+Start with [Core docs](core.md) if you are learning `hack`, or use [Beta workflows](beta.md) if
+you are intentionally enabling remote/control-plane features.
+
 ## Quick start (one command)
 
 If you just want remote access working, start here:

@@ -2904,9 +2904,8 @@ type LinearDeliverySummary = {
 function resolveTicketAuthority(input: {
   readonly ticket: TicketSummary;
 }): "hack" | "linear" {
-  const owner = input.ticket.owner.trim().toLowerCase();
   const source = input.ticket.source.trim().toLowerCase();
-  if (owner === "linear" || source === "linear") {
+  if (source === "linear") {
     return "linear";
   }
   return "hack";
@@ -2925,21 +2924,6 @@ function normalizeBodyForConflictComparison(input: {
 
 function normalizeCommentBody(input: { readonly body: string }): string {
   return input.body.trim().replaceAll("\r\n", "\n");
-}
-
-function normalizeProjectValue(input: {
-  readonly projectId?: string;
-  readonly projectName?: string;
-}): TicketMetadataValue | undefined {
-  const projectId = readOptionalString(input.projectId);
-  const projectName = readOptionalString(input.projectName);
-  if (!(projectId || projectName)) {
-    return undefined;
-  }
-  return {
-    ...(projectId ? { projectId } : {}),
-    ...(projectName ? { projectName } : {}),
-  };
 }
 
 function detectAuthoritativeFieldConflicts(input: {
@@ -2980,34 +2964,20 @@ function detectAuthoritativeFieldConflicts(input: {
     });
   }
 
-  if (input.ticket.status !== input.remoteProjection.status) {
+  const lossyBlockedProjection =
+    input.authority === "hack" &&
+    input.ticket.status === "blocked" &&
+    input.remoteProjection.status === "in_progress";
+  if (
+    !lossyBlockedProjection &&
+    input.ticket.status !== input.remoteProjection.status
+  ) {
     conflicts.push({
       field: "status",
       authority: input.authority,
       summary: `Authoritative ${input.authority} status diverged from the other side.`,
       localValue: input.ticket.status,
       remoteValue: input.remoteProjection.status,
-    });
-  }
-
-  const localProject = normalizeProjectValue({
-    projectId: input.ticket.projectId,
-    projectName: input.ticket.projectName,
-  });
-  const remoteProject = normalizeProjectValue({
-    projectId: input.issue.projectId,
-    projectName: input.issue.projectName,
-  });
-  if (
-    JSON.stringify(localProject ?? null) !==
-    JSON.stringify(remoteProject ?? null)
-  ) {
-    conflicts.push({
-      field: "project",
-      authority: input.authority,
-      summary: `Authoritative ${input.authority} project routing diverged from the other side.`,
-      ...(localProject !== undefined ? { localValue: localProject } : {}),
-      ...(remoteProject !== undefined ? { remoteValue: remoteProject } : {}),
     });
   }
 
@@ -8330,6 +8300,7 @@ export const __testOnly = {
   resolveProjectLinearBinding,
   resolveProjectPullTargets,
   resolveOAuthBrokerRuntimeConfig,
+  resolveTicketAuthority,
   resolveTicketAssigneeForLinear,
   parseSetupArgs,
   parseStatusArgs,

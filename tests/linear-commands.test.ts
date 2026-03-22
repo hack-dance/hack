@@ -797,8 +797,88 @@ test("detectAuthoritativeFieldConflicts reports divergence for hack-owned ticket
     "title",
     "body",
     "status",
-    "project",
   ]);
+});
+
+test("detectAuthoritativeFieldConflicts treats hack blocked as compatible with linear started", () => {
+  const conflicts = __testOnly.detectAuthoritativeFieldConflicts({
+    authority: "hack",
+    ticket: {
+      ticketId: "T-00001",
+      title: "Local title",
+      body: "Local body",
+      status: "blocked",
+      createdAt: "2026-03-05T10:00:00.000Z",
+      updatedAt: "2026-03-05T10:00:00.000Z",
+      dependsOn: [],
+      blocks: [],
+      owner: "hack",
+      source: "hack",
+      tags: [],
+      projectId: "proj-local",
+      projectName: "Local Project",
+    },
+    issue: {
+      id: "issue-1",
+      identifier: "ENG-123",
+      title: "Local title",
+      description: "Local body",
+      url: "https://linear.app/issue/ENG-123",
+      state: {
+        id: "state-1",
+        name: "Started",
+        type: "started",
+      },
+      teamId: "team-1",
+      projectId: "proj-remote",
+      projectName: "Remote Project",
+      labels: [],
+    },
+    remoteProjection: {
+      body: "Local body\n\n---\n\nLinear Issue: ENG-123\n\nLinear URL: https://linear.app/issue/ENG-123",
+      status: "in_progress",
+    },
+  });
+
+  expect(conflicts).toHaveLength(0);
+});
+
+test("resolveTicketAuthority follows source instead of owner", () => {
+  expect(
+    __testOnly.resolveTicketAuthority({
+      ticket: {
+        ticketId: "T-00001",
+        title: "Local title",
+        body: "Local body",
+        status: "open",
+        createdAt: "2026-03-05T10:00:00.000Z",
+        updatedAt: "2026-03-05T10:00:00.000Z",
+        dependsOn: [],
+        blocks: [],
+        owner: "linear",
+        source: "hack",
+        tags: [],
+      },
+    })
+  ).toBe("hack");
+
+  expect(
+    __testOnly.resolveTicketAuthority({
+      ticket: {
+        ticketId: "T-00002",
+        title: "Remote title",
+        body: "Remote body",
+        status: "open",
+        createdAt: "2026-03-05T10:00:00.000Z",
+        updatedAt: "2026-03-05T10:00:00.000Z",
+        dependsOn: [],
+        blocks: [],
+        owner: "hack",
+        source: "linear",
+        tags: [],
+      },
+    })
+  ).toBe("linear");
 });
 
 test("selectLinearCommentsToAppend keeps unmatched remote ids in FIFO order", () => {
@@ -1088,9 +1168,9 @@ test("syncIssueFromLinearToTicket preserves hack authority, appends comments, an
   }
 
   expect(result.commentsPulled).toBe(1);
-  expect(result.conflictsRecorded).toBe(4);
+  expect(result.conflictsRecorded).toBe(3);
   expect(appendedBodies).toEqual(["Fresh remote note"]);
-  expect(conflicts).toEqual(["title", "body", "status", "project"]);
+  expect(conflicts).toEqual(["title", "body", "status"]);
   expect(checkpoints).toEqual(["linear_to_hack"]);
   expect(updatedTickets).toHaveLength(1);
   expect(updatedTickets[0]?.title).toBeUndefined();

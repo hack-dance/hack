@@ -2,12 +2,15 @@
 
 This architecture keeps hack tickets lightweight while supporting bidirectional sync with Linear.
 
+The detailed field, authority, and conflict rules now live in
+`docs/plans/2026-03-22-linear-normalized-sync-semantics-design.md`.
+
 ## Goals
 
 1. Support multiple Linear accounts/profiles.
 2. Bind each hack project to a default Linear profile + project/team.
 3. Keep sync manual by default (`sync-issue`, `sync-project`) before enabling autosync.
-4. Preserve source-of-truth metadata (`owner`, `source`, `external*`, `tags`) on every synced ticket.
+4. Preserve normalized provenance metadata (`owner`, `source`, `external*`, `tags`) on every synced ticket.
 5. Support dependency translation (Linear parent/sub-issue -> hack `dependsOn`).
 
 ## Surfaces
@@ -28,8 +31,8 @@ This architecture keeps hack tickets lightweight while supporting bidirectional 
 
 Synced tickets always carry explicit ownership and lineage metadata:
 
-1. `owner`: `hack` | `linear` (or both mode for selection during bulk sync).
-2. `source`: original system (`hack` or `linear`).
+1. `source`: immutable origin system (`hack` or `linear`); this is the authority signal.
+2. `owner`: current working-side affinity (`hack` or `linear`); useful for selection and review, but not authority.
 3. `tags`: optional label/category parity (when label sync enabled).
 4. `externalSystem`, `externalId`, `externalKey`, `externalUrl`, `externalProjectId`, `externalProjectName`, `externalTeamId`.
 
@@ -41,10 +44,14 @@ This guarantees filtering by local-only, Linear-only, or mixed sets without ambi
    - Linear `completed`/`canceled` -> hack `done`
    - Linear `started` -> hack `in_progress`
    - Linear `unstarted` -> hack `open`
+   - Hack `blocked` projects to the nearest Linear `started` state and should be treated as a lossy compatible mapping, not a perpetual conflict.
 2. Dependencies:
-   - Linear parent/sub-issue links map to hack `dependsOn` when dependency sync is enabled.
+   - Linear parent/sub-issue links map to the primary hack `dependsOn` entry when dependency sync is enabled.
 3. Labels:
    - Optional (`sync.labels=false` by default) to keep tickets lightweight until needed.
+4. Authority:
+   - `source` decides whether Hack or Linear owns authoritative fields after link.
+   - `owner` does not override `source`.
 
 ## Config
 

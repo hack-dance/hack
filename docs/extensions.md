@@ -273,6 +273,57 @@ Notes:
 - macOS desktop shows read-only system Git identity (host-level inherited Git/gh context) separately from remote OAuth/App accounts to keep local gateway identity and remote auth routing boundaries explicit.
 - `auth.hack` and `auth.hack.gy` are routed by global Caddy to the daemon auth listener (`127.0.0.1:7790` by default), so this endpoint can also host future provider callbacks/hooks.
 
+Workflow scope:
+- Current shipped GitHub workflow support is intentionally narrow:
+  - auth/profile connection and selection
+  - PR create/update via `hack x github pr-upsert`
+- The first-class GitHub workflow model for this milestone is explicitly bounded to:
+  - review intake and review decision
+  - PR update and readiness management
+  - PR-level conversation comments
+  - PR-adjacent repo handoff actions
+- The initial set is outcome-based rather than command-based so CLI, desktop, and agent surfaces can share the same product boundary.
+- Until those additional flows land, this section should not be read as claiming those commands already exist.
+
+Initial supported set:
+1. Review intake for a relevant PR
+2. Review decision submission with a summary body
+3. PR creation/update plus draft-ready state changes
+4. Top-level PR comments
+5. Read-only repo-context handoff actions tied to a PR
+
+Workflow definitions and success criteria:
+- Review intake and review decision
+  - Outcome: identify a PR needing action, inspect summary state, and submit `approve`, `comment`, or `request_changes`.
+  - Success: a reviewer can identify a PR that needs action and submit a decision from Hack.
+- PR update and readiness management
+  - Outcome: create or update a PR, keep title/body/base accurate, and move between draft and ready states.
+  - Success: an author can create or correct PR state, including draft and ready transitions, from Hack.
+- Conversation comments
+  - Outcome: leave top-level PR discussion comments without doing a full review submission.
+  - Success: a user can leave a contextual PR comment without switching to GitHub web.
+- PR-adjacent repo handoff actions
+  - Outcome: move from PR context to local repo/branch context without manually reconstructing refs.
+  - Success: a user can move from PR context to local repo context without manual copy-paste of refs.
+
+Explicitly out of the initial GitHub scope:
+- inline diff review comments and thread resolution
+- labels, assignees, milestones, and project edits
+- merge, merge queue, auto-merge, and rebase controls
+- rerunning GitHub Actions jobs
+- GitHub Issues, Projects, Discussions, releases, or repo admin surfaces
+
+Recommended implementation order:
+1. shared PR/review read models
+2. review decision submission
+3. PR metadata update plus draft/ready transitions
+4. standalone PR comment creation
+5. repo-context handoff actions
+
+Detailed design and sequencing:
+- `docs/plans/2026-03-13-github-first-class-workflows-design.md`
+- `docs/plans/2026-03-13-github-first-class-workflows-plan.md`
+
 ### Linear extension (`hack x linear`)
 
 Linear integration supports multiple auth profiles, project-level binding, and manual sync in both

@@ -45,7 +45,7 @@ If you are new to Hack, scan the CLI in this order:
 | `hack branch` | Manage branch aliases for a project | Core workflows |
 | `hack config` | Read/write hack.config.json values | Core workflows |
 | `hack auth` | Manage Hack account sign-in | Collaboration & integrations |
-| `hack linear` | Linear project routing, connection status, and ticket sync | Collaboration & integrations |
+| `hack linear` | Linear account connection, issue sync, and project artifact management | Collaboration & integrations |
 | `hack env` | Share project env contracts and store local secrets | Collaboration & integrations |
 | `hack session` | Keep persistent work sessions for projects and agents | Collaboration & integrations |
 | `hack ssh` | Show SSH details for reaching this machine and its sessions | Collaboration & integrations |
@@ -791,6 +791,13 @@ Usage: `hack linear <args...>`
 `hack linear` is a convenience alias for the Linear extension (`hack x linear ...`).
 Run `hack linear` with no args to see available subcommands. Use `hack linear status` to check the
 active Linear profile, repo route, and available next steps.
+
+Examples:
+
+- `hack linear documents list|pull|plan|apply`
+- `hack linear milestones list|pull|plan|apply`
+- `hack linear status-updates list|pull|plan|publish`
+- `hack linear status-updates publish --path .hack/linear/projects/<project-id>/status-updates/drafts/<yyyy-mm-dd>-<slug>.md`
 
 ## Internal commands
 

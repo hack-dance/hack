@@ -68,6 +68,51 @@ export type LinearIssue = {
   readonly parentIdentifier?: string;
 };
 
+export type LinearProjectDocument = {
+  readonly id: string;
+  readonly title: string;
+  readonly content?: string;
+  readonly url?: string;
+  readonly slugId?: string;
+  readonly sortOrder?: number;
+  readonly icon?: string;
+  readonly projectId?: string;
+  readonly projectName?: string;
+  readonly archived: boolean;
+  readonly createdAt?: string;
+  readonly updatedAt?: string;
+};
+
+export type LinearProjectMilestone = {
+  readonly id: string;
+  readonly title: string;
+  readonly description?: string;
+  readonly sortOrder?: number;
+  readonly status?: string;
+  readonly targetDate?: string;
+  readonly projectId?: string;
+  readonly projectName?: string;
+  readonly archived: boolean;
+  readonly createdAt?: string;
+  readonly updatedAt?: string;
+};
+
+export type LinearProjectUpdate = {
+  readonly id: string;
+  readonly body: string;
+  readonly health?: string;
+  readonly url?: string;
+  readonly slugId?: string;
+  readonly projectId?: string;
+  readonly projectName?: string;
+  readonly userId?: string;
+  readonly userName?: string;
+  readonly userDisplayName?: string;
+  readonly userEmail?: string;
+  readonly createdAt: string;
+  readonly updatedAt?: string;
+};
+
 type LinearGraphQlError = {
   readonly message: string;
 };
@@ -134,6 +179,53 @@ export type LinearClient = {
     readonly first?: number;
     readonly after?: string;
   }) => Promise<LinearRequestResult<LinearProjectIssuePage>>;
+  readonly listProjectDocuments: (input: {
+    readonly projectId: string;
+    readonly first?: number;
+  }) => Promise<LinearRequestResult<readonly LinearProjectDocument[]>>;
+  readonly createProjectDocument: (input: {
+    readonly projectId: string;
+    readonly title: string;
+    readonly content?: string;
+    readonly icon?: string;
+    readonly sortOrder?: number;
+  }) => Promise<LinearRequestResult<LinearProjectDocument>>;
+  readonly updateProjectDocument: (input: {
+    readonly documentId: string;
+    readonly title?: string;
+    readonly content?: string;
+    readonly icon?: string;
+    readonly sortOrder?: number;
+  }) => Promise<LinearRequestResult<LinearProjectDocument>>;
+  readonly listProjectMilestones: (input: {
+    readonly projectId: string;
+    readonly first?: number;
+  }) => Promise<LinearRequestResult<readonly LinearProjectMilestone[]>>;
+  readonly createProjectMilestone: (input: {
+    readonly projectId: string;
+    readonly title: string;
+    readonly description?: string;
+    readonly targetDate?: string;
+    readonly sortOrder?: number;
+  }) => Promise<LinearRequestResult<LinearProjectMilestone>>;
+  readonly updateProjectMilestone: (input: {
+    readonly milestoneId: string;
+    readonly title?: string;
+    readonly description?: string;
+    readonly targetDate?: string;
+    readonly sortOrder?: number;
+    readonly status?: string;
+  }) => Promise<LinearRequestResult<LinearProjectMilestone>>;
+  readonly listProjectUpdates: (input: {
+    readonly projectId: string;
+    readonly first?: number;
+  }) => Promise<LinearRequestResult<readonly LinearProjectUpdate[]>>;
+  readonly createProjectUpdate: (input: {
+    readonly projectId: string;
+    readonly body: string;
+    readonly health?: string;
+    readonly isDiffHidden?: boolean;
+  }) => Promise<LinearRequestResult<LinearProjectUpdate>>;
   readonly listTeamStates: (input: {
     readonly teamId: string;
   }) => Promise<LinearRequestResult<readonly LinearWorkflowState[]>>;
@@ -581,6 +673,420 @@ export function createLinearClient(input: {
       };
     },
 
+    listProjectDocuments: async (input) => {
+      const projectId = input.projectId.trim();
+      if (!projectId) {
+        return {
+          ok: false,
+          status: 400,
+          error: "Missing Linear project id.",
+        };
+      }
+      const first = normalizePositiveInt({
+        value: input.first,
+        fallback: DEFAULT_PAGE_SIZE,
+      });
+      const result = await request<{
+        readonly project?: unknown;
+      }>({
+        query: [
+          "query LinearProjectDocuments($projectId: String!, $first: Int!) {",
+          "  project(id: $projectId) {",
+          "    documents(first: $first) {",
+          "      nodes {",
+          documentFieldsSelection({ indent: "        " }),
+          "      }",
+          "    }",
+          "  }",
+          "}",
+        ].join("\n"),
+        variables: { projectId, first },
+      });
+      if (!result.ok) {
+        return result;
+      }
+      return {
+        ok: true,
+        data: parseProjectDocuments(result.data.project),
+      };
+    },
+
+    createProjectDocument: async (input) => {
+      const projectId = input.projectId.trim();
+      const title = input.title.trim();
+      if (!(projectId && title)) {
+        return {
+          ok: false,
+          status: 400,
+          error:
+            "Linear project document creation requires projectId and title.",
+        };
+      }
+      const mutationInput: Record<string, unknown> = {
+        projectId,
+        title,
+      };
+      if (input.content !== undefined) {
+        mutationInput.content = input.content;
+      }
+      if (input.icon !== undefined) {
+        mutationInput.icon = input.icon;
+      }
+      if (input.sortOrder !== undefined) {
+        mutationInput.sortOrder = input.sortOrder;
+      }
+
+      const result = await request<{
+        readonly documentCreate?: unknown;
+      }>({
+        query: [
+          "mutation LinearDocumentCreate($input: DocumentCreateInput!) {",
+          "  documentCreate(input: $input) {",
+          "    success",
+          "    document {",
+          documentFieldsSelection({ indent: "      " }),
+          "    }",
+          "  }",
+          "}",
+        ].join("\n"),
+        variables: {
+          input: mutationInput,
+        },
+      });
+      if (!result.ok) {
+        return result;
+      }
+      const document = parseDocumentMutation(result.data.documentCreate);
+      if (!document) {
+        return {
+          ok: false,
+          status: 500,
+          error: "Linear documentCreate payload missing document data.",
+        };
+      }
+      return {
+        ok: true,
+        data: document,
+      };
+    },
+
+    updateProjectDocument: async (input) => {
+      const documentId = input.documentId.trim();
+      if (!documentId) {
+        return {
+          ok: false,
+          status: 400,
+          error: "Missing Linear document id.",
+        };
+      }
+      const mutationInput: Record<string, unknown> = {};
+      if (input.title !== undefined) {
+        mutationInput.title = input.title;
+      }
+      if (input.content !== undefined) {
+        mutationInput.content = input.content;
+      }
+      if (input.icon !== undefined) {
+        mutationInput.icon = input.icon;
+      }
+      if (input.sortOrder !== undefined) {
+        mutationInput.sortOrder = input.sortOrder;
+      }
+
+      const result = await request<{
+        readonly documentUpdate?: unknown;
+      }>({
+        query: [
+          "mutation LinearDocumentUpdate($id: String!, $input: DocumentUpdateInput!) {",
+          "  documentUpdate(id: $id, input: $input) {",
+          "    success",
+          "    document {",
+          documentFieldsSelection({ indent: "      " }),
+          "    }",
+          "  }",
+          "}",
+        ].join("\n"),
+        variables: {
+          id: documentId,
+          input: mutationInput,
+        },
+      });
+      if (!result.ok) {
+        return result;
+      }
+      const document = parseDocumentMutation(result.data.documentUpdate);
+      if (!document) {
+        return {
+          ok: false,
+          status: 500,
+          error: "Linear documentUpdate payload missing document data.",
+        };
+      }
+      return {
+        ok: true,
+        data: document,
+      };
+    },
+
+    listProjectMilestones: async (input) => {
+      const projectId = input.projectId.trim();
+      if (!projectId) {
+        return {
+          ok: false,
+          status: 400,
+          error: "Missing Linear project id.",
+        };
+      }
+      const first = normalizePositiveInt({
+        value: input.first,
+        fallback: DEFAULT_PAGE_SIZE,
+      });
+      const result = await request<{
+        readonly project?: unknown;
+      }>({
+        query: [
+          "query LinearProjectMilestones($projectId: String!, $first: Int!) {",
+          "  project(id: $projectId) {",
+          "    projectMilestones(first: $first) {",
+          "      nodes {",
+          projectMilestoneFieldsSelection({ indent: "        " }),
+          "      }",
+          "    }",
+          "  }",
+          "}",
+        ].join("\n"),
+        variables: { projectId, first },
+      });
+      if (!result.ok) {
+        return result;
+      }
+      return {
+        ok: true,
+        data: parseProjectMilestones(result.data.project),
+      };
+    },
+
+    createProjectMilestone: async (input) => {
+      const projectId = input.projectId.trim();
+      const name = input.title.trim();
+      if (!(projectId && name)) {
+        return {
+          ok: false,
+          status: 400,
+          error:
+            "Linear project milestone creation requires projectId and title.",
+        };
+      }
+      const mutationInput: Record<string, unknown> = {
+        projectId,
+        name,
+      };
+      if (input.description !== undefined) {
+        mutationInput.description = input.description;
+      }
+      if (input.targetDate !== undefined) {
+        mutationInput.targetDate = input.targetDate;
+      }
+      if (input.sortOrder !== undefined) {
+        mutationInput.sortOrder = input.sortOrder;
+      }
+
+      const result = await request<{
+        readonly projectMilestoneCreate?: unknown;
+      }>({
+        query: [
+          "mutation LinearProjectMilestoneCreate($input: ProjectMilestoneCreateInput!) {",
+          "  projectMilestoneCreate(input: $input) {",
+          "    success",
+          "    projectMilestone {",
+          projectMilestoneFieldsSelection({ indent: "      " }),
+          "    }",
+          "  }",
+          "}",
+        ].join("\n"),
+        variables: {
+          input: mutationInput,
+        },
+      });
+      if (!result.ok) {
+        return result;
+      }
+      const milestone = parseProjectMilestoneMutation(
+        result.data.projectMilestoneCreate
+      );
+      if (!milestone) {
+        return {
+          ok: false,
+          status: 500,
+          error:
+            "Linear projectMilestoneCreate payload missing milestone data.",
+        };
+      }
+      return {
+        ok: true,
+        data: milestone,
+      };
+    },
+
+    updateProjectMilestone: async (input) => {
+      const milestoneId = input.milestoneId.trim();
+      if (!milestoneId) {
+        return {
+          ok: false,
+          status: 400,
+          error: "Missing Linear project milestone id.",
+        };
+      }
+      const mutationInput: Record<string, unknown> = {};
+      if (input.title !== undefined) {
+        mutationInput.name = input.title;
+      }
+      if (input.description !== undefined) {
+        mutationInput.description = input.description;
+      }
+      if (input.targetDate !== undefined) {
+        mutationInput.targetDate = input.targetDate;
+      }
+      if (input.sortOrder !== undefined) {
+        mutationInput.sortOrder = input.sortOrder;
+      }
+      if (input.status !== undefined) {
+        mutationInput.status = input.status;
+      }
+
+      const result = await request<{
+        readonly projectMilestoneUpdate?: unknown;
+      }>({
+        query: [
+          "mutation LinearProjectMilestoneUpdate($id: String!, $input: ProjectMilestoneUpdateInput!) {",
+          "  projectMilestoneUpdate(id: $id, input: $input) {",
+          "    success",
+          "    projectMilestone {",
+          projectMilestoneFieldsSelection({ indent: "      " }),
+          "    }",
+          "  }",
+          "}",
+        ].join("\n"),
+        variables: {
+          id: milestoneId,
+          input: mutationInput,
+        },
+      });
+      if (!result.ok) {
+        return result;
+      }
+      const milestone = parseProjectMilestoneMutation(
+        result.data.projectMilestoneUpdate
+      );
+      if (!milestone) {
+        return {
+          ok: false,
+          status: 500,
+          error:
+            "Linear projectMilestoneUpdate payload missing milestone data.",
+        };
+      }
+      return {
+        ok: true,
+        data: milestone,
+      };
+    },
+
+    listProjectUpdates: async (input) => {
+      const projectId = input.projectId.trim();
+      if (!projectId) {
+        return {
+          ok: false,
+          status: 400,
+          error: "Missing Linear project id.",
+        };
+      }
+      const first = normalizePositiveInt({
+        value: input.first,
+        fallback: DEFAULT_PAGE_SIZE,
+      });
+      const result = await request<{
+        readonly project?: unknown;
+      }>({
+        query: [
+          "query LinearProjectUpdates($projectId: String!, $first: Int!) {",
+          "  project(id: $projectId) {",
+          "    projectUpdates(first: $first) {",
+          "      nodes {",
+          projectUpdateFieldsSelection({ indent: "        " }),
+          "      }",
+          "    }",
+          "  }",
+          "}",
+        ].join("\n"),
+        variables: { projectId, first },
+      });
+      if (!result.ok) {
+        return result;
+      }
+      return {
+        ok: true,
+        data: parseProjectUpdates(result.data.project),
+      };
+    },
+
+    createProjectUpdate: async (input) => {
+      const projectId = input.projectId.trim();
+      const body = input.body.trim();
+      if (!(projectId && body)) {
+        return {
+          ok: false,
+          status: 400,
+          error: "Linear project update creation requires projectId and body.",
+        };
+      }
+      const mutationInput: Record<string, unknown> = {
+        projectId,
+        body,
+      };
+      if (input.health !== undefined) {
+        mutationInput.health = input.health;
+      }
+      if (input.isDiffHidden !== undefined) {
+        mutationInput.isDiffHidden = input.isDiffHidden;
+      }
+
+      const result = await request<{
+        readonly projectUpdateCreate?: unknown;
+      }>({
+        query: [
+          "mutation LinearProjectUpdateCreate($input: ProjectUpdateCreateInput!) {",
+          "  projectUpdateCreate(input: $input) {",
+          "    success",
+          "    projectUpdate {",
+          projectUpdateFieldsSelection({ indent: "      " }),
+          "    }",
+          "  }",
+          "}",
+        ].join("\n"),
+        variables: {
+          input: mutationInput,
+        },
+      });
+      if (!result.ok) {
+        return result;
+      }
+      const update = parseProjectUpdateMutation(
+        result.data.projectUpdateCreate
+      );
+      if (!update) {
+        return {
+          ok: false,
+          status: 500,
+          error: "Linear projectUpdateCreate payload missing update data.",
+        };
+      }
+      return {
+        ok: true,
+        data: update,
+      };
+    },
+
     listTeamStates: async ({ teamId }) => {
       const id = teamId.trim();
       if (!id) {
@@ -779,6 +1285,66 @@ export function createLinearClient(input: {
       };
     },
   };
+}
+
+function documentFieldsSelection(input: { readonly indent: string }): string {
+  return [
+    `${input.indent}id`,
+    `${input.indent}title`,
+    `${input.indent}content`,
+    `${input.indent}url`,
+    `${input.indent}slugId`,
+    `${input.indent}sortOrder`,
+    `${input.indent}icon`,
+    `${input.indent}trashed`,
+    `${input.indent}createdAt`,
+    `${input.indent}updatedAt`,
+    `${input.indent}project {`,
+    `${input.indent}  id`,
+    `${input.indent}  name`,
+    `${input.indent}}`,
+  ].join("\n");
+}
+
+function projectMilestoneFieldsSelection(input: {
+  readonly indent: string;
+}): string {
+  return [
+    `${input.indent}id`,
+    `${input.indent}name`,
+    `${input.indent}description`,
+    `${input.indent}sortOrder`,
+    `${input.indent}status`,
+    `${input.indent}targetDate`,
+    `${input.indent}archivedAt`,
+    `${input.indent}createdAt`,
+    `${input.indent}updatedAt`,
+    `${input.indent}project {`,
+    `${input.indent}  id`,
+    `${input.indent}  name`,
+    `${input.indent}}`,
+  ].join("\n");
+}
+
+function projectUpdateFieldsSelection(input: {
+  readonly indent: string;
+}): string {
+  return [
+    `${input.indent}id`,
+    `${input.indent}body`,
+    `${input.indent}health`,
+    `${input.indent}url`,
+    `${input.indent}slugId`,
+    `${input.indent}createdAt`,
+    `${input.indent}updatedAt`,
+    `${input.indent}project {`,
+    `${input.indent}  id`,
+    `${input.indent}  name`,
+    `${input.indent}}`,
+    `${input.indent}user {`,
+    userFieldsSelection({ indent: `${input.indent}  ` }),
+    `${input.indent}}`,
+  ].join("\n");
 }
 
 function issueFieldsQuery(input: {
@@ -1175,6 +1741,205 @@ function parseCommentMutationComment(value: unknown): LinearComment | null {
     return null;
   }
   return parseComment(value.comment);
+}
+
+function parseProjectDocuments(value: unknown): LinearProjectDocument[] {
+  if (!isRecord(value)) {
+    return [];
+  }
+  const documents = isRecord(value.documents) ? value.documents : null;
+  const nodes = Array.isArray(documents?.nodes) ? documents.nodes : [];
+  const out: LinearProjectDocument[] = [];
+  for (const node of nodes) {
+    const parsed = parseProjectDocument(node);
+    if (!parsed) {
+      continue;
+    }
+    out.push(parsed);
+  }
+  return out;
+}
+
+function parseProjectDocument(value: unknown): LinearProjectDocument | null {
+  if (!(isRecord(value) && typeof value.id === "string")) {
+    return null;
+  }
+  if (typeof value.title !== "string") {
+    return null;
+  }
+  const project = isRecord(value.project) ? value.project : null;
+  return {
+    id: value.id,
+    title: value.title,
+    ...(typeof value.content === "string" ? { content: value.content } : {}),
+    ...(typeof value.url === "string" ? { url: value.url } : {}),
+    ...(typeof value.slugId === "string" ? { slugId: value.slugId } : {}),
+    ...(typeof value.sortOrder === "number"
+      ? { sortOrder: value.sortOrder }
+      : {}),
+    ...(typeof value.icon === "string" ? { icon: value.icon } : {}),
+    ...parseEntityProjectFields(project),
+    archived: value.trashed === true,
+    ...(typeof value.createdAt === "string"
+      ? { createdAt: value.createdAt }
+      : {}),
+    ...(typeof value.updatedAt === "string"
+      ? { updatedAt: value.updatedAt }
+      : {}),
+  };
+}
+
+function parseDocumentMutation(value: unknown): LinearProjectDocument | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const success = value.success;
+  if (typeof success === "boolean" && !success) {
+    return null;
+  }
+  return parseProjectDocument(value.document);
+}
+
+function parseProjectMilestones(value: unknown): LinearProjectMilestone[] {
+  if (!isRecord(value)) {
+    return [];
+  }
+  const milestones = isRecord(value.projectMilestones)
+    ? value.projectMilestones
+    : null;
+  const nodes = Array.isArray(milestones?.nodes) ? milestones.nodes : [];
+  const out: LinearProjectMilestone[] = [];
+  for (const node of nodes) {
+    const parsed = parseProjectMilestone(node);
+    if (!parsed) {
+      continue;
+    }
+    out.push(parsed);
+  }
+  return out;
+}
+
+function parseProjectMilestone(value: unknown): LinearProjectMilestone | null {
+  if (!(isRecord(value) && typeof value.id === "string")) {
+    return null;
+  }
+  if (typeof value.name !== "string") {
+    return null;
+  }
+  const project = isRecord(value.project) ? value.project : null;
+  return {
+    id: value.id,
+    title: value.name,
+    ...(typeof value.description === "string"
+      ? { description: value.description }
+      : {}),
+    ...(typeof value.sortOrder === "number"
+      ? { sortOrder: value.sortOrder }
+      : {}),
+    ...(typeof value.status === "string" ? { status: value.status } : {}),
+    ...(typeof value.targetDate === "string"
+      ? { targetDate: value.targetDate }
+      : {}),
+    ...parseEntityProjectFields(project),
+    archived: typeof value.archivedAt === "string",
+    ...(typeof value.createdAt === "string"
+      ? { createdAt: value.createdAt }
+      : {}),
+    ...(typeof value.updatedAt === "string"
+      ? { updatedAt: value.updatedAt }
+      : {}),
+  };
+}
+
+function parseProjectMilestoneMutation(
+  value: unknown
+): LinearProjectMilestone | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const success = value.success;
+  if (typeof success === "boolean" && !success) {
+    return null;
+  }
+  return parseProjectMilestone(value.projectMilestone);
+}
+
+function parseProjectUpdates(value: unknown): LinearProjectUpdate[] {
+  if (!isRecord(value)) {
+    return [];
+  }
+  const updates = isRecord(value.projectUpdates) ? value.projectUpdates : null;
+  const nodes = Array.isArray(updates?.nodes) ? updates.nodes : [];
+  const out: LinearProjectUpdate[] = [];
+  for (const node of nodes) {
+    const parsed = parseProjectUpdate(node);
+    if (!parsed) {
+      continue;
+    }
+    out.push(parsed);
+  }
+  return out;
+}
+
+function parseProjectUpdate(value: unknown): LinearProjectUpdate | null {
+  if (!(isRecord(value) && typeof value.id === "string")) {
+    return null;
+  }
+  if (
+    !(typeof value.body === "string" && typeof value.createdAt === "string")
+  ) {
+    return null;
+  }
+  const project = isRecord(value.project) ? value.project : null;
+  const user = parseUser(value.user);
+  return {
+    id: value.id,
+    body: value.body,
+    ...(typeof value.health === "string" ? { health: value.health } : {}),
+    ...(typeof value.url === "string" ? { url: value.url } : {}),
+    ...(typeof value.slugId === "string" ? { slugId: value.slugId } : {}),
+    ...parseEntityProjectFields(project),
+    ...(user
+      ? {
+          userId: user.id,
+          ...(typeof user.name === "string" ? { userName: user.name } : {}),
+          ...(typeof user.displayName === "string"
+            ? { userDisplayName: user.displayName }
+            : {}),
+          ...(typeof user.email === "string" ? { userEmail: user.email } : {}),
+        }
+      : {}),
+    createdAt: value.createdAt,
+    ...(typeof value.updatedAt === "string"
+      ? { updatedAt: value.updatedAt }
+      : {}),
+  };
+}
+
+function parseProjectUpdateMutation(
+  value: unknown
+): LinearProjectUpdate | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const success = value.success;
+  if (typeof success === "boolean" && !success) {
+    return null;
+  }
+  return parseProjectUpdate(value.projectUpdate);
+}
+
+function parseEntityProjectFields(value: Record<string, unknown> | null): {
+  readonly projectId?: string;
+  readonly projectName?: string;
+} {
+  if (!(value && typeof value.id === "string")) {
+    return {};
+  }
+  return {
+    projectId: value.id,
+    ...(typeof value.name === "string" ? { projectName: value.name } : {}),
+  };
 }
 
 function parseIssueBase(value: Record<string, unknown>): {

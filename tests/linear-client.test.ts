@@ -544,3 +544,491 @@ test("updateIssue forwards assigneeId when provided", async () => {
   });
   expect(result.data?.assigneeId).toBe("user_123");
 });
+
+test("listProjectDocuments returns project-scoped documents", async () => {
+  let requestBody: {
+    readonly query?: unknown;
+    readonly variables?: unknown;
+  } | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body)) as {
+      readonly query?: unknown;
+      readonly variables?: unknown;
+    };
+    return new Response(
+      JSON.stringify({
+        data: {
+          project: {
+            documents: {
+              nodes: [
+                {
+                  id: "doc_123",
+                  title: "Launch plan",
+                  content: "# Launch plan",
+                  url: "https://linear.app/docs/doc_123",
+                  slugId: "launch-plan",
+                  sortOrder: 42,
+                  icon: "rocket",
+                  trashed: false,
+                  updatedAt: "2026-03-14T10:00:00.000Z",
+                  project: {
+                    id: "project_123",
+                    name: "Linear dogfood",
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+      { status: 200 }
+    );
+  }) as typeof fetch;
+
+  const client = createLinearClient({ token: "linear-token" });
+  const result = await client.listProjectDocuments({
+    projectId: "project_123",
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  expect(
+    String((requestBody as { readonly query?: unknown } | null)?.query ?? "")
+  ).toContain("documents(first: $first)");
+  expect(
+    (requestBody as { readonly variables?: unknown } | null)?.variables
+  ).toEqual({
+    projectId: "project_123",
+    first: 50,
+  });
+  expect(result.data).toEqual([
+    {
+      id: "doc_123",
+      title: "Launch plan",
+      content: "# Launch plan",
+      url: "https://linear.app/docs/doc_123",
+      slugId: "launch-plan",
+      sortOrder: 42,
+      icon: "rocket",
+      projectId: "project_123",
+      projectName: "Linear dogfood",
+      archived: false,
+      updatedAt: "2026-03-14T10:00:00.000Z",
+    },
+  ]);
+});
+
+test("createProjectDocument sends documentCreate mutation for a project", async () => {
+  let requestBody: {
+    readonly query?: unknown;
+    readonly variables?: unknown;
+  } | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body)) as {
+      readonly query?: unknown;
+      readonly variables?: unknown;
+    };
+    return new Response(
+      JSON.stringify({
+        data: {
+          documentCreate: {
+            success: true,
+            document: {
+              id: "doc_123",
+              title: "Launch plan",
+              content: "# Launch plan",
+              slugId: "launch-plan",
+              sortOrder: 1,
+              icon: "rocket",
+              trashed: false,
+              project: {
+                id: "project_123",
+                name: "Linear dogfood",
+              },
+            },
+          },
+        },
+      }),
+      { status: 200 }
+    );
+  }) as typeof fetch;
+
+  const client = createLinearClient({ token: "linear-token" });
+  const result = await client.createProjectDocument({
+    projectId: "project_123",
+    title: "Launch plan",
+    content: "# Launch plan",
+    icon: "rocket",
+    sortOrder: 1,
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  expect(
+    String((requestBody as { readonly query?: unknown } | null)?.query ?? "")
+  ).toContain("mutation LinearDocumentCreate");
+  expect(
+    (requestBody as { readonly variables?: unknown } | null)?.variables
+  ).toEqual({
+    input: {
+      projectId: "project_123",
+      title: "Launch plan",
+      content: "# Launch plan",
+      icon: "rocket",
+      sortOrder: 1,
+    },
+  });
+  expect(result.data).toMatchObject({
+    id: "doc_123",
+    projectId: "project_123",
+    projectName: "Linear dogfood",
+    archived: false,
+  });
+});
+
+test("updateProjectDocument sends documentUpdate mutation for a managed document", async () => {
+  let requestBody: {
+    readonly query?: unknown;
+    readonly variables?: unknown;
+  } | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body)) as {
+      readonly query?: unknown;
+      readonly variables?: unknown;
+    };
+    return new Response(
+      JSON.stringify({
+        data: {
+          documentUpdate: {
+            success: true,
+            document: {
+              id: "doc_123",
+              title: "Launch plan v2",
+              content: "# Launch plan v2",
+              slugId: "launch-plan",
+              sortOrder: 2,
+              icon: "rocket",
+              trashed: false,
+              project: {
+                id: "project_123",
+                name: "Linear dogfood",
+              },
+            },
+          },
+        },
+      }),
+      { status: 200 }
+    );
+  }) as typeof fetch;
+
+  const client = createLinearClient({ token: "linear-token" });
+  const result = await client.updateProjectDocument({
+    documentId: "doc_123",
+    title: "Launch plan v2",
+    content: "# Launch plan v2",
+    sortOrder: 2,
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  expect(
+    String((requestBody as { readonly query?: unknown } | null)?.query ?? "")
+  ).toContain("mutation LinearDocumentUpdate");
+  expect(
+    (requestBody as { readonly variables?: unknown } | null)?.variables
+  ).toEqual({
+    id: "doc_123",
+    input: {
+      title: "Launch plan v2",
+      content: "# Launch plan v2",
+      sortOrder: 2,
+    },
+  });
+  expect(result.data.title).toBe("Launch plan v2");
+});
+
+test("listProjectMilestones returns structured milestones", async () => {
+  let requestBody: {
+    readonly query?: unknown;
+    readonly variables?: unknown;
+  } | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body)) as {
+      readonly query?: unknown;
+      readonly variables?: unknown;
+    };
+    return new Response(
+      JSON.stringify({
+        data: {
+          project: {
+            projectMilestones: {
+              nodes: [
+                {
+                  id: "milestone_123",
+                  name: "Private beta",
+                  description: "Ship the beta cohort",
+                  sortOrder: 7,
+                  status: "pending",
+                  targetDate: "2026-04-01",
+                  archivedAt: null,
+                  updatedAt: "2026-03-14T10:00:00.000Z",
+                  project: {
+                    id: "project_123",
+                    name: "Linear dogfood",
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+      { status: 200 }
+    );
+  }) as typeof fetch;
+
+  const client = createLinearClient({ token: "linear-token" });
+  const result = await client.listProjectMilestones({
+    projectId: "project_123",
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  expect(
+    String((requestBody as { readonly query?: unknown } | null)?.query ?? "")
+  ).toContain("projectMilestones(first: $first)");
+  expect(result.data).toEqual([
+    {
+      id: "milestone_123",
+      title: "Private beta",
+      description: "Ship the beta cohort",
+      sortOrder: 7,
+      status: "pending",
+      targetDate: "2026-04-01",
+      projectId: "project_123",
+      projectName: "Linear dogfood",
+      archived: false,
+      updatedAt: "2026-03-14T10:00:00.000Z",
+    },
+  ]);
+});
+
+test("createProjectMilestone sends projectMilestoneCreate mutation", async () => {
+  let requestBody: {
+    readonly query?: unknown;
+    readonly variables?: unknown;
+  } | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body)) as {
+      readonly query?: unknown;
+      readonly variables?: unknown;
+    };
+    return new Response(
+      JSON.stringify({
+        data: {
+          projectMilestoneCreate: {
+            success: true,
+            projectMilestone: {
+              id: "milestone_123",
+              name: "Private beta",
+              description: "Ship the beta cohort",
+              sortOrder: 7,
+              status: "pending",
+              targetDate: "2026-04-01",
+              archivedAt: null,
+              project: {
+                id: "project_123",
+                name: "Linear dogfood",
+              },
+            },
+          },
+        },
+      }),
+      { status: 200 }
+    );
+  }) as typeof fetch;
+
+  const client = createLinearClient({ token: "linear-token" });
+  const result = await client.createProjectMilestone({
+    projectId: "project_123",
+    title: "Private beta",
+    description: "Ship the beta cohort",
+    sortOrder: 7,
+    targetDate: "2026-04-01",
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  expect(
+    String((requestBody as { readonly query?: unknown } | null)?.query ?? "")
+  ).toContain("mutation LinearProjectMilestoneCreate");
+  expect(
+    (requestBody as { readonly variables?: unknown } | null)?.variables
+  ).toEqual({
+    input: {
+      projectId: "project_123",
+      name: "Private beta",
+      description: "Ship the beta cohort",
+      sortOrder: 7,
+      targetDate: "2026-04-01",
+    },
+  });
+  expect(result.data.title).toBe("Private beta");
+});
+
+test("listProjectUpdates returns project updates with health", async () => {
+  let requestBody: {
+    readonly query?: unknown;
+    readonly variables?: unknown;
+  } | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body)) as {
+      readonly query?: unknown;
+      readonly variables?: unknown;
+    };
+    return new Response(
+      JSON.stringify({
+        data: {
+          project: {
+            projectUpdates: {
+              nodes: [
+                {
+                  id: "update_123",
+                  body: "Still on track for dogfooding.",
+                  health: "onTrack",
+                  slugId: "weekly-update",
+                  createdAt: "2026-03-14T10:00:00.000Z",
+                  updatedAt: "2026-03-14T10:15:00.000Z",
+                  url: "https://linear.app/project/update_123",
+                  user: {
+                    id: "user_123",
+                    name: "Alice Example",
+                    displayName: "Alice",
+                    email: "alice@example.com",
+                  },
+                  project: {
+                    id: "project_123",
+                    name: "Linear dogfood",
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+      { status: 200 }
+    );
+  }) as typeof fetch;
+
+  const client = createLinearClient({ token: "linear-token" });
+  const result = await client.listProjectUpdates({
+    projectId: "project_123",
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  expect(
+    String((requestBody as { readonly query?: unknown } | null)?.query ?? "")
+  ).toContain("projectUpdates(first: $first)");
+  expect(result.data).toEqual([
+    {
+      id: "update_123",
+      body: "Still on track for dogfooding.",
+      health: "onTrack",
+      slugId: "weekly-update",
+      createdAt: "2026-03-14T10:00:00.000Z",
+      updatedAt: "2026-03-14T10:15:00.000Z",
+      url: "https://linear.app/project/update_123",
+      projectId: "project_123",
+      projectName: "Linear dogfood",
+      userId: "user_123",
+      userName: "Alice Example",
+      userDisplayName: "Alice",
+      userEmail: "alice@example.com",
+    },
+  ]);
+});
+
+test("createProjectUpdate sends projectUpdateCreate mutation", async () => {
+  let requestBody: {
+    readonly query?: unknown;
+    readonly variables?: unknown;
+  } | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body)) as {
+      readonly query?: unknown;
+      readonly variables?: unknown;
+    };
+    return new Response(
+      JSON.stringify({
+        data: {
+          projectUpdateCreate: {
+            success: true,
+            projectUpdate: {
+              id: "update_123",
+              body: "Still on track for dogfooding.",
+              health: "onTrack",
+              slugId: "weekly-update",
+              createdAt: "2026-03-14T10:00:00.000Z",
+              updatedAt: "2026-03-14T10:15:00.000Z",
+              project: {
+                id: "project_123",
+                name: "Linear dogfood",
+              },
+              user: {
+                id: "user_123",
+                displayName: "Alice",
+              },
+            },
+          },
+        },
+      }),
+      { status: 200 }
+    );
+  }) as typeof fetch;
+
+  const client = createLinearClient({ token: "linear-token" });
+  const result = await client.createProjectUpdate({
+    projectId: "project_123",
+    body: "Still on track for dogfooding.",
+    health: "onTrack",
+    isDiffHidden: true,
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  expect(
+    String((requestBody as { readonly query?: unknown } | null)?.query ?? "")
+  ).toContain("mutation LinearProjectUpdateCreate");
+  expect(
+    (requestBody as { readonly variables?: unknown } | null)?.variables
+  ).toEqual({
+    input: {
+      projectId: "project_123",
+      body: "Still on track for dogfooding.",
+      health: "onTrack",
+      isDiffHidden: true,
+    },
+  });
+  expect(result.data.userDisplayName).toBe("Alice");
+});

@@ -69,3 +69,58 @@ This guarantees filtering by local-only, Linear-only, or mixed sets without ambi
 1. Phase 1 (current): manual sync only, explicit one-off operations.
 2. Phase 2: webhook-driven candidate updates (still gated/manual apply).
 3. Phase 3: selective autosync per project/profile with conflict policies.
+4. Phase 4: repo-managed project documents, milestones, and status updates.
+
+## Project Artifact Layer
+
+Hack now extends the existing project binding model with repo-managed project artifacts:
+
+- documents
+- milestones
+- status updates
+
+These artifacts do not live in `hack.config.json` blobs or direct one-shot CLI flags. They live in
+a dedicated repo tree under `.hack/linear/projects/<project-id>/` and use explicit `pull`, `plan`,
+and `apply`/`publish` workflows.
+
+### Command surface
+
+- `hack linear documents list|pull|plan|apply`
+- `hack linear milestones list|pull|plan|apply`
+- `hack linear status-updates list|pull|plan|publish`
+
+### Target selection
+
+Project artifact commands share the same targeting flags:
+
+- `--profile`
+- `--project-id`
+- `--project-name`
+- `--team-id`
+- `--path`
+- `--json`
+
+Resolution rules:
+
+1. `--project-id` wins when provided.
+2. Otherwise, Hack first tries to match `--project-name` and `--team-id` against the repo's bound
+   project plus any additional linked projects.
+3. If no bound project matches, Hack queries Linear projects for the selected profile and resolves a
+   unique match by `--project-name` and optional `--team-id`.
+4. If multiple projects match, the command fails and requires `--project-id`.
+5. If no explicit targeting flags are present, Hack uses the repo's default bound Linear project.
+
+### Sync rules
+
+- `list` only reads remote state.
+- `pull` writes repo-managed files from remote state.
+- `plan` shows create/update/noop/remote-only work without mutating Linear.
+- `apply` is only valid for upsertable artifacts: documents and milestones.
+- `publish` is only valid for append-only status updates.
+- Local file removal never archives or deletes remote artifacts implicitly.
+- Status updates are immutable once published; drafts move from `drafts/` to `published/` after a
+  successful publish.
+
+Design + implementation details:
+- `docs/plans/2026-03-14-linear-project-artifacts-design.md`
+- `docs/plans/2026-03-14-linear-project-artifacts-plan.md`

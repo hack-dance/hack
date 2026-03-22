@@ -334,6 +334,306 @@ test("resolveProjectPullTargets includes default and additional bound projects",
   ]);
 });
 
+test("buildLinearProjectManagementSummary reports connected routing and capabilities", () => {
+  const summary = __testOnly.buildLinearProjectManagementSummary({
+    status: {
+      extensionId: "dance.hack.linear",
+      selectedProfile: "work",
+      selectedSource: "project_routing",
+      defaultProfile: "work",
+      selectedMissing: false,
+      authRef: "linear.api.work",
+      service: "hack-linear-auth",
+      tokenEnvFallback: "HACK_LINEAR_API_TOKEN",
+      apiUrl: "https://api.linear.app/graphql",
+      accountId: "user-1",
+      accountName: "Work User",
+      accountEmail: "work@example.com",
+      tokenResolved: true,
+      tokenSource: "keychain",
+      tokenExpiresAt: null,
+      error: null,
+      profileError: null,
+      ok: true,
+    },
+    binding: {
+      profileId: "work",
+      projectId: "proj_default",
+      projectName: "Default",
+      teamId: "team_default",
+      additionalProjects: [
+        {
+          projectId: "proj_extra",
+          projectName: "Extra",
+          teamId: "team_extra",
+        },
+      ],
+    },
+  });
+
+  expect(summary).toMatchObject({
+    activeProfile: "work",
+    connected: true,
+    connectionLabel: "Connected as Work User",
+    routingSummary:
+      "This repo routes Linear sync to Default (proj_default) in team team_default.",
+    capabilities: [
+      "Sync tickets for the bound Linear project",
+      "Pull issues from 1 linked Linear project",
+    ],
+    repair: null,
+  });
+  expect(summary.nextSteps).toContain(
+    "Run `hack linear sync-project --from linear`."
+  );
+});
+
+test("buildLinearProjectManagementSummary prefers the selected status profile over repo binding", () => {
+  const summary = __testOnly.buildLinearProjectManagementSummary({
+    status: {
+      extensionId: "dance.hack.linear",
+      selectedProfile: "ops",
+      selectedSource: "command_flags",
+      defaultProfile: "work",
+      selectedMissing: false,
+      authRef: "linear.api.ops",
+      service: "hack-linear-auth",
+      tokenEnvFallback: "HACK_LINEAR_API_TOKEN",
+      apiUrl: "https://api.linear.app/graphql",
+      accountId: "user-2",
+      accountName: "Ops User",
+      accountEmail: "ops@example.com",
+      tokenResolved: false,
+      tokenSource: null,
+      tokenExpiresAt: null,
+      error: 'Missing Linear token for profile "ops".',
+      profileError: null,
+      ok: false,
+    },
+    binding: {
+      profileId: "work",
+      projectId: "proj_default",
+      projectName: "Default",
+      teamId: "team_default",
+      additionalProjects: [],
+    },
+  });
+
+  expect(summary.activeProfile).toBe("ops");
+  expect(summary.repair?.command).toBe("hack linear connect --profile ops");
+});
+
+test("buildLinearProjectManagementSummary points missing local access at connect repair", () => {
+  const summary = __testOnly.buildLinearProjectManagementSummary({
+    status: {
+      extensionId: "dance.hack.linear",
+      selectedProfile: "work",
+      selectedSource: "command_flags",
+      defaultProfile: "work",
+      selectedMissing: false,
+      authRef: "linear.api.work",
+      service: "hack-linear-auth",
+      tokenEnvFallback: "HACK_LINEAR_API_TOKEN",
+      apiUrl: "https://api.linear.app/graphql",
+      accountId: "user-1",
+      accountName: "Work User",
+      accountEmail: "work@example.com",
+      tokenResolved: false,
+      tokenSource: null,
+      tokenExpiresAt: null,
+      error: 'Missing Linear token for profile "work".',
+      profileError: null,
+      ok: false,
+    },
+    binding: {
+      profileId: "work",
+      projectId: "proj_default",
+      projectName: "Default",
+      teamId: "team_default",
+      additionalProjects: [],
+    },
+  });
+
+  expect(summary).toMatchObject({
+    activeProfile: "work",
+    connected: false,
+    repair: {
+      reason: "Local Linear access is missing for the active profile.",
+      command: "hack linear connect --profile work",
+    },
+  });
+  expect(summary.nextSteps).toContain(
+    "Run `hack linear connect --profile work`."
+  );
+});
+
+test("buildLinearProjectManagementSummary points broker auth failures at hack auth login", () => {
+  const summary = __testOnly.buildLinearProjectManagementSummary({
+    status: {
+      extensionId: "dance.hack.linear",
+      selectedProfile: "work",
+      selectedSource: "command_flags",
+      defaultProfile: "work",
+      selectedMissing: false,
+      authRef: "linear.api.work",
+      service: "hack-linear-auth",
+      tokenEnvFallback: "HACK_LINEAR_API_TOKEN",
+      apiUrl: "https://api.linear.app/graphql",
+      accountId: null,
+      accountName: null,
+      accountEmail: null,
+      tokenResolved: false,
+      tokenSource: null,
+      tokenExpiresAt: null,
+      error:
+        'Linear broker management token expired for profile "work". Run `hack auth login` for broker-owned access, or reconnect this Linear profile to refresh its saved broker token.',
+      profileError: null,
+      ok: false,
+    },
+    binding: {
+      profileId: "work",
+      projectId: "proj_default",
+      projectName: "Default",
+      teamId: "team_default",
+      additionalProjects: [],
+    },
+  });
+
+  expect(summary.repair).toEqual({
+    reason: "Hack account login is required for broker-owned Linear access.",
+    command: "hack auth login",
+  });
+  expect(summary.nextSteps).toEqual(["Run `hack auth login`."]);
+});
+
+test("buildLinearProjectManagementSummary points invalid profile bindings at setup repair", () => {
+  const summary = __testOnly.buildLinearProjectManagementSummary({
+    status: {
+      extensionId: "dance.hack.linear",
+      selectedProfile: "missing",
+      selectedSource: "project_routing",
+      defaultProfile: "work",
+      selectedMissing: true,
+      authRef: "linear.api.missing",
+      service: "hack-linear-auth",
+      tokenEnvFallback: "HACK_LINEAR_API_TOKEN",
+      apiUrl: "https://api.linear.app/graphql",
+      accountId: null,
+      accountName: null,
+      accountEmail: null,
+      tokenResolved: false,
+      tokenSource: null,
+      tokenExpiresAt: null,
+      error: null,
+      profileError: 'Linear profile "missing" was not found.',
+      ok: false,
+    },
+    binding: {
+      profileId: "missing",
+      projectId: "proj_default",
+      projectName: "Default",
+      teamId: "team_default",
+      additionalProjects: [],
+    },
+  });
+
+  expect(summary.repair).toEqual({
+    reason: "The active Linear profile binding is invalid.",
+    command: "hack linear setup --profile missing",
+  });
+  expect(summary.nextSteps).toEqual([
+    "Run `hack linear setup --profile missing`.",
+  ]);
+});
+
+test("buildLinearSetupSummary explains partial repo readiness", () => {
+  const summary = __testOnly.buildLinearSetupSummary({
+    profileId: "work",
+    binding: {
+      profileId: "work",
+      additionalProjects: [],
+    },
+    status: {
+      extensionId: "dance.hack.linear",
+      selectedProfile: "work",
+      selectedSource: "project_routing",
+      defaultProfile: "work",
+      selectedMissing: false,
+      authRef: "linear.api.work",
+      service: "hack-linear-auth",
+      tokenEnvFallback: "HACK_LINEAR_API_TOKEN",
+      apiUrl: "https://api.linear.app/graphql",
+      accountId: "user-1",
+      accountName: "Work User",
+      accountEmail: "work@example.com",
+      tokenResolved: true,
+      tokenSource: "keychain",
+      tokenExpiresAt: null,
+      error: null,
+      profileError: null,
+      ok: true,
+    },
+  });
+
+  expect(summary).toMatchObject({
+    ready: false,
+    activeProfile: "work",
+    connected: true,
+    routeLabel: "No default Linear project is bound to this repo yet.",
+  });
+  expect(summary.nextSteps).toEqual([
+    "Run `hack linear project-bind --profile work --project-id <linear-project-id>`.",
+  ]);
+});
+
+test("buildLinearProjectBindSummary explains default route and linked project scope", () => {
+  const summary = __testOnly.buildLinearProjectBindSummary({
+    binding: {
+      profileId: "work",
+      projectId: "proj_default",
+      projectName: "Default",
+      teamId: "team_default",
+      additionalProjects: [
+        {
+          projectId: "proj_extra",
+          projectName: "Extra",
+          teamId: "team_extra",
+        },
+      ],
+    },
+  });
+
+  expect(summary).toEqual({
+    activeProfile: "work",
+    routeLabel:
+      "This repo now uses Default (proj_default) in team team_default as its default Linear route.",
+    linkedProjectsLabel:
+      "1 linked project remains in scope: Extra (proj_extra).",
+    nextSteps: [
+      "Run `hack linear status` to review active capabilities.",
+      "Run `hack linear sync-project --from linear` to sync the default route.",
+    ],
+  });
+});
+
+test("buildLinearProjectBindSummary avoids sync guidance when no default route exists", () => {
+  const summary = __testOnly.buildLinearProjectBindSummary({
+    binding: {
+      additionalProjects: [],
+    },
+  });
+
+  expect(summary).toEqual({
+    activeProfile: "default",
+    routeLabel: "This repo no longer has a default Linear route.",
+    linkedProjectsLabel: null,
+    nextSteps: [
+      "Run `hack linear project-bind --profile default --project-id <linear-project-id>` to bind a default route.",
+      "Run `hack linear status` to review what is still connected.",
+    ],
+  });
+});
+
 test("resolveProjectPullTargets keeps per-project profile overrides for linked projects", () => {
   const targets = __testOnly.resolveProjectPullTargets({
     binding: {

@@ -1,7 +1,6 @@
 ## System overview
- 
-`hack` is a Bun CLI that writes per-project Compose files under `.hack/` and manages a machine-wide
-proxy, DNS helpers, and logging stack under `~/.hack/`.
+
+`hack` is a Bun CLI that writes per-project Compose files under `.hack/` and manages a machine-wide proxy, DNS helpers, and logging stack under `~/.hack/`.
 
 - **Caddy** (docker-proxy) routes `*.hack` based on container labels.
 - **CoreDNS** resolves `*.hack` inside containers to the Caddy IP, with `extra_hosts` mappings for resolver compatibility.
@@ -68,7 +67,6 @@ graph LR
     - `.internal/extra-hosts.json` (user-managed extra_hosts merged into the override)
     - `.branch/compose.<branch>.override.yml` (branch builds)
 
-
 ## Internal DNS + TLS (containers)
 
 When `internal.dns` / `internal.tls` are enabled, `hack up` writes a Compose override that:
@@ -79,8 +77,7 @@ When `internal.dns` / `internal.tls` are enabled, `hack up` writes a Compose ove
 - injects `extra_hosts` mappings for `*.hack` → current Caddy IP (for runtimes that ignore custom DNS)
 - merges any repo-local `.hack/.internal/extra-hosts.json` entries (for host tunnels / dynamic domains)
 
-This lets containers use the same `https://*.hack` hostnames as the host machine. If Caddy’s IP changes,
-`hack status`, `hack doctor`, and the TUI will warn; `hack restart` refreshes the mapping.
+This lets containers use the same `https://*.hack` hostnames as the host machine. If Caddy’s IP changes, `hack status`, `hack doctor`, and the TUI will warn; `hack restart` refreshes the mapping.
 
 ```mermaid
 graph LR
@@ -89,7 +86,7 @@ graph LR
   Service -->|"HTTPS request"| Caddy["Caddy docker-proxy"]
   Caddy -->|"Routes by labels"| Upstream["Service upstream"]
 ```
- 
+
 ## Project env + secrets
 
 Projects can declare a shareable env contract (no values) and safely inject secrets into compose:
@@ -98,17 +95,13 @@ Projects can declare a shareable env contract (no values) and safely inject secr
 - Plain values: `.hack/.env` (gitignored, per-project)
 - Secrets: OS keychain via `Bun.secrets` (namespaced per project)
 
-At runtime, hack generates `.hack/.internal/compose.env.override.yml` containing `${KEY}` placeholders
-for the contract variables and invokes `docker compose` with a process environment that includes the
-resolved values (including keychain secrets).
+At runtime, hack generates `.hack/.internal/compose.env.override.yml` containing `${KEY}` placeholders for the contract variables and invokes `docker compose` with a process environment that includes the resolved values (including keychain secrets).
 
 See `docs/env.md` for the full contract format and CLI/API surface.
 
 ## Project lifecycle hooks + host processes
 
-Projects can run host-side hooks around `hack up/down` and start managed host processes (auth steps,
-local proxies/tunnels). Processes are started inside a mux session (tmux or zellij) so they have a
-stable home and can be torn down on `hack down`.
+Projects can run host-side hooks around `hack up/down` and start managed host processes (auth steps, local proxies/tunnels). Processes are started inside a mux session (tmux or zellij) so they have a stable home and can be torn down on `hack down`.
 
 See `docs/lifecycle.md` for config and behavior.
 
@@ -149,6 +142,7 @@ sequenceDiagram
 NDJSON streaming (`hack logs --json`) emits `start`, `log`, and `end` events for MCP/TUI consumers.
 
 Retention:
+
 - Loki retention is set in the global Loki config (`~/.hack/logging/loki.yaml`), default `168h` in the template.
 - Per-project overrides live in `hack.config.json` under `logs.retention_period` and apply when `hack down` prunes logs.
 
@@ -165,8 +159,7 @@ Note: the daemon does not proxy logs yet; `hack logs` still talks directly to Do
 
 ## Daemon (hackd)
 
-`hackd` is an optional local daemon that watches Docker events and maintains a cached view of running
-containers. It serves a small local API over a Unix socket at `~/.hack/daemon/hackd.sock` and powers:
+`hackd` is an optional local daemon that watches Docker events and maintains a cached view of running containers. It serves a small local API over a Unix socket at `~/.hack/daemon/hackd.sock` and powers:
 
 - `hack projects --json`
 - `hack ps --json`
@@ -175,12 +168,12 @@ containers. It serves a small local API over a Unix socket at `~/.hack/daemon/ha
 If the daemon is not running (or version-mismatched), the CLI falls back to direct Docker calls.
 
 Runtime health:
-- The daemon treats the container runtime as ephemeral; it fingerprints the engine (socket + engine id)
-  and detects resets.
-- When the runtime is unavailable, cached state is retained but marked stale; API responses include
-  `runtime_*` metadata and project `status` becomes `unknown`.
+
+- The daemon treats the container runtime as ephemeral; it fingerprints the engine (socket + engine id) and detects resets.
+- When the runtime is unavailable, cached state is retained but marked stale; API responses include `runtime_*` metadata and project `status` becomes `unknown`.
 
 Why optional:
+
 - The CLI must keep working with zero background processes.
 - Not all users need cached JSON (especially if they only use interactive commands).
 - It stays off in minimal or constrained environments, but is available when you want faster status.
@@ -196,11 +189,11 @@ graph LR
 
 ## Control plane + extensions
 
-The control plane keeps the core CLI minimal while adding features as extensions. `hackd` loads
-extension manifests and exposes their APIs; the CLI dispatches extension commands via `hack x`.
+The control plane keeps the core CLI minimal while adding features as extensions. `hackd` loads extension manifests and exposes their APIs; the CLI dispatches extension commands via `hack x`.
 
 - **Gateway**: optional HTTP/WS access to `hackd` (localhost by default).
 - **Supervisor**: job execution + streaming for agents.
+- **Tickets**: git-backed append-only journal storage with a planned rebuildable local SQLite projection for fast reads and sync indexing.
 
 ```mermaid
 graph LR
@@ -216,11 +209,13 @@ graph LR
 ### Gateway API + remote workflows
 
 The gateway exposes:
+
 - `GET /v1/projects` with `project_id` for remote workflow routing
 - job execution + streaming (`/control-plane/projects/:id/jobs`)
 - PTY-backed shells (`/control-plane/projects/:id/shells`, WS stream)
 
 Current gateway routing:
+
 - One gateway instance is active per machine (global config).
 - Projects opt in with `controlPlane.gateway.enabled` in their project config.
 - Remote clients route by `project_id` in the API paths.

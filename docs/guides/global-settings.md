@@ -1,5 +1,8 @@
 # Global settings
 
+This page is part of [Extensions & reference](../reference.md).
+For the default local product story, start with [Core docs](../core.md).
+
 Global settings live at `~/.hack/hack.config.json`. Use the CLI instead of editing by hand:
 
 ```bash

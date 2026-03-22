@@ -1,5 +1,9 @@
 # Create an extension
 
+This page is part of [Extensions & reference](../reference.md).
+Start with [Core docs](../core.md) if you are learning `hack`, or use [Beta workflows](../beta.md)
+if you are here because of remote/control-plane features.
+
 Extensions add commands and configuration without bloating the core CLI.
 
 ## Layout (current)

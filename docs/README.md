@@ -46,6 +46,7 @@ This section is easy to find, but it does not lead the product story.
 - New to `hack`: [Core docs](core.md)
 - Ready for remote workflows: [Beta workflows](beta.md)
 - Looking for command or API details: [Extensions & reference](reference.md)
+- Need the bucket definitions: [Docs information architecture](docs-ia.md)
 
 ## Repo notes
 

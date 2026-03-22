@@ -28,3 +28,4 @@ do not compete with the default `hack` onboarding path.
 
 - If you are setting up or learning `hack`, start with [Core docs](core.md)
 - If you are intentionally enabling remote execution or exposure, go to [Beta workflows](beta.md)
+- If you need the section definitions themselves, see [Docs information architecture](docs-ia.md)

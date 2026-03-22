@@ -132,17 +132,22 @@ Tip: use `--body-stdin` for multi-line markdown.
 
 ### Storage layout
 
-In your project repo:
+Local tickets state under your project:
 
-- `.hack/tickets/events/events-YYYY-MM.jsonl` — event log segments (UTC month)
 - `.hack/tickets/git/bare.git` — a bare repo used to manage the tickets ref
 - `.hack/tickets/git/worktree` — a worktree used for reading/writing ticket data
+- `.hack/tickets/git/worktree/.hack/tickets/events/events-YYYY-MM.jsonl` — local checkout of the durable event log
+
+Path inside the tickets ref:
+
+- `.hack/tickets/events/events-YYYY-MM.jsonl` — portable event log segments (UTC month)
 
 ### Durability and portability
 
 The durable portable layer is the event log in the tickets ref.
 
-- `.hack/tickets/events/*.jsonl` is the source of truth
+- inside the ref, `.hack/tickets/events/*.jsonl` is the source of truth
+- locally, those files are materialized under `.hack/tickets/git/worktree/.hack/tickets/events/*.jsonl`
 - `list`, `show`, and related views are rebuilt by replaying the event log
 - deleting local projection state must not lose ticket history
 

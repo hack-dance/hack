@@ -4,7 +4,7 @@
 
 Tickets already rely on git as the durable transport layer:
 
-- the canonical ticket history is an append-only event log stored under `.hack/tickets/events`
+- the canonical ticket history is an append-only event log stored at `.hack/tickets/events` inside the tickets ref
 - sync uses a dedicated tickets ref, hidden by default as `refs/hack/tickets`
 - the local store rebuilds ticket summaries, comments, review notes, checkpoints, and conflicts by replaying the event log
 
@@ -50,7 +50,7 @@ The tickets ref remains the canonical portable payload. It should contain only d
   - migration markers when needed
 - durable artifacts that cannot be recreated from the journal alone
 
-For the current implementation, the journal is the existing monthly JSONL event log under `.hack/tickets/events/events-YYYY-MM.jsonl`.
+For the current implementation, the journal is the existing monthly JSONL event log at `.hack/tickets/events/events-YYYY-MM.jsonl` inside the tickets ref, materialized locally under `.hack/tickets/git/worktree/.hack/tickets/events/events-YYYY-MM.jsonl`.
 
 For the normalized model, the journal may move or be segmented differently, but it keeps the same contract:
 
@@ -187,7 +187,7 @@ The existing inspect and repair workflow already points in this direction by det
 
 ### From current event logs
 
-Existing `.hack/tickets/events/*.jsonl` files remain valid durable journal input during migration.
+Existing `.hack/tickets/events/*.jsonl` files inside the tickets ref remain valid durable journal input during migration.
 
 If the normalized model introduces a different journal layout, migration must:
 

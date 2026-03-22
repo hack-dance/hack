@@ -144,6 +144,14 @@ The adopted storage model keeps git portability as the primary constraint:
 
 Until the SQLite projection lands in code, reads still materialize from JSONL directly. The detailed projection design lives in [`docs/plans/2026-03-14-hack-tickets-sqlite-journal-design.md`](../plans/2026-03-14-hack-tickets-sqlite-journal-design.md).
 
+### Sync guarantees
+
+- Log normalization dedupes repeated raw events by `eventId`.
+- Normalized logs are ordered by `ts`, then `eventId`, so every machine folds the same log in the same order.
+- When adding external sync adapters, treat `eventId` as transport dedupe only. The logical external change also needs a deterministic operation identity so repeated deliveries and multi-machine replays collapse safely.
+- If two systems disagree on a shared field, record an explicit sync conflict instead of silently overwriting one side.
+- Detailed design guidance for normalized external sync lives in `docs/plans/2026-03-14-tickets-normalized-sync-idempotency-design.md`.
+
 ### Storage layout
 
 In your project repo:

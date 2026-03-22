@@ -1,5 +1,9 @@
 # Run remote supervisor jobs
 
+This is a beta workflow.
+Start with [Core docs](../core.md) if you are new to `hack`, and use [Beta workflows](../beta.md)
+for the rest of the remote path.
+
 Use the gateway API to run commands and stream logs remotely.
 
 ## Prereqs

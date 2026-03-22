@@ -1,5 +1,9 @@
 # Railway Node Bootstrap Guide
 
+This is a beta workflow.
+Start with [Core docs](../core.md) if you are new to `hack`, and use [Beta workflows](../beta.md)
+for the rest of the remote path.
+
 Use this guide to register a Railway-hosted runtime as a `hack` remote node.
 
 If this is your first remote node, start with [Remote node quickstart](remote-node-quickstart.md) for core concepts.

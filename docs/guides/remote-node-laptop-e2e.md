@@ -1,5 +1,9 @@
 # Run laptop-to-laptop node pairing e2e
 
+This is a beta workflow.
+Start with [Core docs](../core.md) if you are new to `hack`, and use [Beta workflows](../beta.md)
+for the rest of the remote path.
+
 This guide is the full validation run for two Macs:
 1. Controller Mac (host mode)
 2. Remote MacBook node

@@ -1,5 +1,9 @@
 # Expose the gateway with Tailscale
 
+This is a beta workflow.
+Start with [Core docs](../core.md) if you are new to `hack`, and use [Beta workflows](../beta.md)
+for the rest of the remote path.
+
 Use this guide when you want private tailnet-only access to `hack` gateway endpoints.
 
 Tailscale is recommended for:

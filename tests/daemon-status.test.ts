@@ -104,7 +104,8 @@ test("buildDaemonRepairMessage points stale state to daemon clear", () => {
     processRunning: false,
     socketExists: true,
     logExists: true,
-    apiOk: false,
+    apiReachable: false,
+    apiCompatible: false,
   });
 
   const message = buildDaemonRepairMessage({
@@ -123,7 +124,8 @@ test("buildDaemonRepairMessage calls out launchd crashes and restart guidance", 
     processRunning: false,
     socketExists: false,
     logExists: true,
-    apiOk: false,
+    apiReachable: false,
+    apiCompatible: false,
   });
 
   const message = buildDaemonRepairMessage({
@@ -149,7 +151,8 @@ test("buildDaemonRepairMessage tells Docker Desktop users to start Docker first"
     processRunning: false,
     socketExists: false,
     logExists: false,
-    apiOk: false,
+    apiReachable: false,
+    apiCompatible: false,
   });
 
   const message = buildDaemonRepairMessage({

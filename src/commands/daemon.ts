@@ -20,6 +20,7 @@ import { type DaemonPaths, resolveDaemonPaths } from "../daemon/paths.ts";
 import { removeFileIfExists, waitForProcessExit } from "../daemon/process.ts";
 import { runDaemon } from "../daemon/server.ts";
 import {
+  buildDaemonRepairMessage,
   buildDaemonStatusReport,
   type DaemonStatusReport,
   readDaemonStatus,
@@ -27,6 +28,10 @@ import {
 import { updateGlobalConfig } from "../lib/config.ts";
 import { pathExists, readTextFile } from "../lib/fs.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
+import {
+  buildDockerStatusProbe,
+  detectDockerBackend,
+} from "../lib/runtime-guidance.ts";
 import { logger } from "../ui/logger.ts";
 
 const optForeground = defineOption({
@@ -309,6 +314,8 @@ async function handleDaemonStatus({
     apiCompatible: api.compatible,
   });
   const launchdStatus = await resolveLaunchdStatus({ paths });
+  const dockerBackend = await detectDockerBackend();
+  const dockerStatus = await buildDockerStatusProbe();
 
   if (args.options.json) {
     outputDaemonStatusJson({
@@ -322,6 +329,8 @@ async function handleDaemonStatus({
   return reportDaemonStatus({
     report,
     launchdStatus,
+    dockerBackendName: dockerBackend?.name ?? null,
+    dockerReachable: dockerStatus.reachable,
   });
 }
 
@@ -386,6 +395,8 @@ function outputDaemonStatusJson(opts: {
 function reportDaemonStatus(opts: {
   readonly report: DaemonStatusReport;
   readonly launchdStatus: LaunchdServiceStatus | null;
+  readonly dockerBackendName: string | null;
+  readonly dockerReachable: boolean;
 }): number {
   const { report, launchdStatus } = opts;
   if (report.status === "running") {
@@ -412,9 +423,12 @@ function reportDaemonStatus(opts: {
   }
 
   logger.warn({
-    message: report.stale
-      ? `hackd stopped (stale state detected; run \`${report.nextStep}\`)`
-      : "hackd is not running",
+    message: buildDaemonRepairMessage({
+      report,
+      launchdStatus,
+      dockerBackendName: opts.dockerBackendName,
+      dockerReachable: opts.dockerReachable,
+    }),
   });
   logLaunchdStatus({ launchdStatus, running: false });
   return 1;

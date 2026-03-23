@@ -1,5 +1,4 @@
 import { afterEach, expect, test } from "bun:test";
-import { homedir } from "node:os";
 import { resolve } from "node:path";
 
 import { resolveGlobalConfigPath } from "@lib/config-paths.ts";
@@ -27,7 +26,7 @@ test("resolveGlobalConfigPath prefers HOME when no explicit override is set", ()
   process.env.HOME = "/tmp/hack-home";
 
   expect(resolveGlobalConfigPath()).toBe(
-    resolve(homedir(), GLOBAL_HACK_DIR_NAME, GLOBAL_CONFIG_FILENAME)
+    resolve("/tmp/hack-home", GLOBAL_HACK_DIR_NAME, GLOBAL_CONFIG_FILENAME)
   );
 });
 

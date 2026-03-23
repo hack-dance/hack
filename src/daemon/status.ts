@@ -34,6 +34,14 @@ export interface DaemonStatusReport {
   readonly nextStep: string | null;
 }
 
+type DaemonRepairLaunchdStatus = {
+  readonly installed: boolean;
+  readonly loaded: boolean;
+  readonly running: boolean;
+  readonly pid: number | null;
+  readonly exitStatus: number | null;
+};
+
 export async function readDaemonStatus({
   paths,
 }: {
@@ -165,4 +173,70 @@ export function buildDaemonStatusReport(opts: {
     issue: null,
     nextStep: "hack daemon start",
   };
+}
+
+export function buildDaemonRepairMessage(opts: {
+  readonly report: DaemonStatusReport;
+  readonly launchdStatus: DaemonRepairLaunchdStatus | null;
+  readonly dockerBackendName: string | null;
+  readonly dockerReachable: boolean;
+}): string {
+  if (opts.report.status === "running") {
+    return `hackd running (pid ${opts.report.pid ?? "unknown"})`;
+  }
+
+  if (opts.report.status === "starting") {
+    return `hackd starting (pid ${
+      opts.report.pid ?? "unknown"
+    }): API not responding yet | If this persists, check: hack daemon logs --tail 200`;
+  }
+
+  if (opts.report.stale) {
+    return "hackd stopped with stale local state | Run: hack daemon clear | Then run: hack daemon start";
+  }
+
+  const crashExitStatus = opts.launchdStatus?.loaded
+    ? opts.launchdStatus.exitStatus
+    : null;
+  const startCommand =
+    opts.launchdStatus?.loaded || crashExitStatus !== null
+      ? "hack daemon restart"
+      : "hack daemon start";
+  const segments = ["hackd is not running"];
+
+  if (crashExitStatus !== null && crashExitStatus !== 0) {
+    segments.push(`launchd last exit status ${crashExitStatus}`);
+  }
+
+  if (!opts.dockerReachable) {
+    segments.push(
+      buildDockerStartHint({ backendName: opts.dockerBackendName })
+    );
+  }
+
+  segments.push(`Run: ${startCommand}`);
+
+  if (crashExitStatus !== null && crashExitStatus !== 0) {
+    segments.push("Then check: hack daemon logs --tail 200");
+  }
+
+  return segments.join(" | ");
+}
+
+function buildDockerStartHint(opts: {
+  readonly backendName: string | null;
+}): string {
+  if (opts.backendName === "Docker Desktop") {
+    return "Start Docker Desktop";
+  }
+
+  if (opts.backendName === "OrbStack") {
+    return "Start OrbStack";
+  }
+
+  if (opts.backendName === "Docker (systemd)") {
+    return "Start the Docker system service";
+  }
+
+  return "Start Docker";
 }

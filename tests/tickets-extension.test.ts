@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect } from "bun:test";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { createTicketsStore } from "../src/control-plane/extensions/tickets/store.ts";
@@ -622,7 +622,10 @@ async function runAllowFail(opts: {
     stdout: "pipe",
     stderr: "pipe",
     stdin: "ignore",
-    env: process.env,
+    env: {
+      ...process.env,
+      HOME: homedir(),
+    },
   });
 
   const stdout = await new Response(proc.stdout).text();

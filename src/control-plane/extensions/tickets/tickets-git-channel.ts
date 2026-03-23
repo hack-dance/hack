@@ -1574,7 +1574,9 @@ function isHiddenRefRejected(message: string): boolean {
 function isGitIndexLockError(message: string): boolean {
   const normalized = message.toLowerCase();
   return (
-    normalized.includes("index.lock") && normalized.includes("file exists")
+    (normalized.includes("index.lock") && normalized.includes("file exists")) ||
+    normalized.includes("unable to write new index file") ||
+    (normalized.includes("could not lock") && normalized.includes("index"))
   );
 }
 

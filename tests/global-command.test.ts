@@ -232,8 +232,16 @@ test(
   async () => {
     const gumPath = join(tempDir!, GLOBAL_HACK_DIR_NAME, "bin", "gum");
     const mutagenPath = join(tempDir!, GLOBAL_HACK_DIR_NAME, "bin", "mutagen");
+    const mutagenAgentBundlePath = join(
+      tempDir!,
+      GLOBAL_HACK_DIR_NAME,
+      "libexec",
+      "mutagen-agents.tar.gz"
+    );
     await writeExecutable(gumPath);
     await writeExecutable(mutagenPath);
+    await mkdir(dirname(mutagenAgentBundlePath), { recursive: true });
+    await writeFile(mutagenAgentBundlePath, "stub");
     const { runCli } = await import("../src/cli/run.ts");
     const code = await runCli(["global", "install"]);
     expect(code).toBe(0);

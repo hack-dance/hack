@@ -7,7 +7,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   createNormalizedTicket,
@@ -1080,7 +1080,10 @@ async function runAllowFail(opts: {
     stdout: "pipe",
     stderr: "pipe",
     stdin: "ignore",
-    env: process.env,
+    env: {
+      ...process.env,
+      HOME: homedir(),
+    },
   });
 
   const stdout = await new Response(proc.stdout).text();

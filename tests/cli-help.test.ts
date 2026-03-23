@@ -21,7 +21,7 @@ test("root help leads with core promises and separates core from beta surfaces",
     /hack remote\s+Beta: guided remote access and gateway helpers/
   );
   expect(help).toMatch(
-    /hack tickets(?: \[args\.\.\.\])?\s+Track repo-local work in git-backed tickets/
+    /hack tickets(?: \[args\.\.\.\])?\s+Track repo-local work without leaving git/
   );
   expect(help).toMatch(
     /hack projects\s+Show all projects \(registry \+ running docker compose\)/

@@ -10,11 +10,20 @@ visit the beta and reference surfaces you actually need.
 - [Initialize a project](guides/init-project.md)
 - [CLI reference](cli.md)
 - [Env & secrets](env.md)
+- [Architecture](architecture.md)
 - [Sessions](sessions.md)
 - [Lifecycle](lifecycle.md)
+- [Gateway overview](gateway.md)
+- [Gateway API](gateway-api.md)
+- [Supervisor](supervisor.md)
+- [Extensions](extensions.md)
+- [Control-plane SDK](sdk.md)
 - [Global settings](guides/global-settings.md)
 - [Prerequisite detection matrix](guides/prerequisite-detection-matrix.md)
-- [Architecture](architecture.md)
+
+Admin model reference:
+- [Architecture](architecture.md) for local-only vs broker-mediated admin boundaries.
+- [Env & secrets](env.md) for env ownership, sharing modes, and secret custody.
 
 ## Integrations & collaboration
 
@@ -24,7 +33,6 @@ visit the beta and reference surfaces you actually need.
 
 ## Beta workflows
 
-- [Gateway (Beta)](gateway.md)
 - [Remote node quickstart (Beta)](guides/remote-node-quickstart.md)
 - [Remote node runtime container (Beta)](guides/remote-node-container.md)
 - [Remote node on Railway (Beta)](guides/remote-node-railway.md)
@@ -38,11 +46,8 @@ visit the beta and reference surfaces you actually need.
 ## Extensions & reference
 
 - [Extensions & SDK reference](extensions.md)
-- [Gateway API (Beta)](gateway-api.md)
-- [Supervisor (Beta)](supervisor.md)
 - [Gateway auth-broker bootstrap](guides/auth-broker-neon-bootstrap.md)
 - [Create a new extension](guides/create-extension.md)
-- [Control-plane SDK](sdk.md)
 
 ## Architecture & research
 

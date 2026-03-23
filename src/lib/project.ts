@@ -129,9 +129,26 @@ export interface ProjectConfig {
   readonly internal?: ProjectInternalConfig;
   readonly sessions?: ProjectSessionsConfig;
   readonly lifecycle?: ProjectLifecycleConfig;
+  readonly ownership: ProjectOwnershipConfig;
   readonly configPath?: string;
   readonly parseError?: string;
 }
+
+export type ProjectOwnershipMode = "local" | "shared";
+export type ProjectOwnershipOwnerType = "user" | "team" | "organization";
+export type ProjectOwnershipManager = "local" | "broker";
+
+export interface ProjectOwnershipConfig {
+  readonly mode: ProjectOwnershipMode;
+  readonly ownerType: ProjectOwnershipOwnerType;
+  readonly ownerId: string | null;
+  readonly managedBy: ProjectOwnershipManager;
+}
+
+type ParsedProjectOwnership = {
+  readonly ownership: ProjectOwnershipConfig;
+  readonly parseError?: string;
+};
 
 export interface ProjectSessionsConfig {
   /**
@@ -268,7 +285,9 @@ export async function readProjectConfig(
     return parseProjectConfigToml({ text: tomlText, path: tomlPath });
   }
 
-  return {};
+  return {
+    ownership: defaultProjectOwnership(),
+  };
 }
 
 function parseProjectConfigJson(opts: {
@@ -280,7 +299,11 @@ function parseProjectConfigJson(opts: {
     parsed = JSON.parse(opts.text);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Invalid JSON";
-    return { parseError: message, configPath: opts.path };
+    return {
+      parseError: message,
+      configPath: opts.path,
+      ownership: defaultProjectOwnership(),
+    };
   }
   return parseProjectConfigRecord(parsed, opts.path);
 }
@@ -294,14 +317,22 @@ function parseProjectConfigToml(opts: {
     parsed = Bun.TOML.parse(opts.text);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Invalid TOML";
-    return { parseError: message, configPath: opts.path };
+    return {
+      parseError: message,
+      configPath: opts.path,
+      ownership: defaultProjectOwnership(),
+    };
   }
   return parseProjectConfigRecord(parsed, opts.path);
 }
 
 function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
   if (!isRecord(value)) {
-    return { configPath: path };
+    return {
+      configPath: path,
+      parseError: "Project config root must be an object.",
+      ownership: defaultProjectOwnership(),
+    };
   }
 
   const name = getString(value, "name");
@@ -316,6 +347,7 @@ function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
     lifecycle: lifecycleBase,
     startup,
   });
+  const parsedOwnership = parseProjectOwnership(value.ownership);
 
   return {
     ...(name ? { name } : {}),
@@ -325,8 +357,130 @@ function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
     ...(internal ? { internal } : {}),
     ...(sessions ? { sessions } : {}),
     ...(lifecycle ? { lifecycle } : {}),
+    ownership: parsedOwnership.ownership,
+    ...(parsedOwnership.parseError
+      ? { parseError: parsedOwnership.parseError }
+      : {}),
     configPath: path,
   };
+}
+
+export function defaultProjectOwnership(): ProjectOwnershipConfig {
+  return {
+    mode: "local",
+    ownerType: "user",
+    ownerId: null,
+    managedBy: "local",
+  };
+}
+
+function parseProjectOwnership(value: unknown): ParsedProjectOwnership {
+  if (value === undefined) {
+    return { ownership: defaultProjectOwnership() };
+  }
+  if (!isRecord(value)) {
+    return {
+      ownership: defaultProjectOwnership(),
+      parseError: "Project ownership must be an object.",
+    };
+  }
+
+  const modeValue = value.mode;
+  const mode = parseProjectOwnershipMode(
+    typeof modeValue === "string" ? modeValue : undefined
+  );
+  if (modeValue !== undefined && mode === undefined) {
+    return {
+      ownership: defaultProjectOwnership(),
+      parseError: "Project ownership.mode must be 'local' or 'shared'.",
+    };
+  }
+  if (modeValue === undefined) {
+    if (value.owner_type !== undefined || value.owner_id !== undefined) {
+      return {
+        ownership: defaultProjectOwnership(),
+        parseError:
+          "Project ownership.mode is required when ownership.owner_type or ownership.owner_id is set.",
+      };
+    }
+    return { ownership: defaultProjectOwnership() };
+  }
+  if (mode === "local") {
+    return { ownership: defaultProjectOwnership() };
+  }
+
+  const ownerTypeValue = value.owner_type;
+  const ownerType = parseProjectOwnershipOwnerType(
+    typeof ownerTypeValue === "string" ? ownerTypeValue : undefined
+  );
+  if (ownerType === undefined) {
+    return {
+      ownership: defaultProjectOwnership(),
+      parseError:
+        "Project ownership.owner_type must be 'user', 'team', or 'organization'.",
+    };
+  }
+  if (ownerType === "user") {
+    return {
+      ownership: defaultProjectOwnership(),
+      parseError:
+        "Project shared ownership.owner_type must be 'team' or 'organization'.",
+    };
+  }
+
+  const ownerIdValue = value.owner_id;
+  if (
+    ownerIdValue !== undefined &&
+    ownerIdValue !== null &&
+    typeof ownerIdValue !== "string"
+  ) {
+    return {
+      ownership: defaultProjectOwnership(),
+      parseError: "Project ownership.owner_id must be a string when provided.",
+    };
+  }
+  const ownerId = normalizeProjectOwnerId(ownerIdValue);
+  if (ownerId === null) {
+    return {
+      ownership: defaultProjectOwnership(),
+      parseError:
+        "Project shared ownership.owner_id must be a non-empty string.",
+    };
+  }
+
+  return {
+    ownership: {
+      mode: "shared",
+      ownerType,
+      ownerId,
+      managedBy: "broker",
+    },
+  };
+}
+
+function parseProjectOwnershipMode(
+  value: string | undefined
+): ProjectOwnershipMode | undefined {
+  if (value === "local" || value === "shared") {
+    return value;
+  }
+  return undefined;
+}
+
+function parseProjectOwnershipOwnerType(
+  value: string | undefined
+): ProjectOwnershipOwnerType | undefined {
+  if (value === "user" || value === "team" || value === "organization") {
+    return value;
+  }
+  return undefined;
+}
+
+function normalizeProjectOwnerId(
+  value: string | null | undefined
+): string | null {
+  const trimmed = value?.trim() ?? "";
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 function parseStartupEntries(

@@ -391,6 +391,15 @@ async function renderProjectDetails(opts: {
   if (p.projectDir) {
     meta.push(["Project dir", p.projectDir]);
   }
+  if (p.ownership) {
+    meta.push([
+      "Ownership",
+      `${p.ownership.mode}:${p.ownership.ownerType}${
+        p.ownership.ownerId ? `:${p.ownership.ownerId}` : ""
+      }`,
+    ]);
+    meta.push(["Managed by", p.ownership.managedBy]);
+  }
   const mappedIp = await readInternalExtraHostsIp({ projectDir: p.projectDir });
   const caddySummary = formatCaddySummary({ caddyIp: opts.caddyIp, mappedIp });
   if (caddySummary) {
@@ -564,6 +573,21 @@ async function renderProjectMeta(opts: {
 }): Promise<void> {
   await display.section("Meta");
 
+  const ownershipEntries: Array<readonly [string, string]> = opts.meta.ownership
+    ? [
+        ["Ownership mode", opts.meta.ownership.mode],
+        ["Owner type", opts.meta.ownership.ownerType],
+        ["Owner id", opts.meta.ownership.ownerId ?? ""],
+        ["Managed by", opts.meta.ownership.managedBy],
+      ]
+    : [["Ownership", "unavailable"]];
+  if (opts.meta.configError) {
+    ownershipEntries.push(["Config error", opts.meta.configError]);
+  }
+
+  await display.kv({
+    entries: ownershipEntries,
+  });
   await renderGitMeta({ git: opts.meta.git });
   await renderGitWorktrees({ worktrees: opts.meta.git.worktrees });
   await renderSessionsMeta({ sessions: opts.meta.sessions.sessions });

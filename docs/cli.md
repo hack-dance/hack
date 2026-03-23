@@ -25,6 +25,22 @@ If you are new to Hack, scan the CLI in this order:
 - `--profile` accepts comma-separated compose profiles.
 - Options marked repeatable can be passed multiple times.
 
+## Local vs broker-mediated administration
+
+This reference documents the commands that exist today. Hack stays local-first by default.
+
+- Local runtime and project operations do not require Hack account auth.
+- Shared administration is a separate trust boundary.
+- If an operation would mutate shared identity, membership, project ownership, access grants, or shared
+  secret custody, it should be broker-mediated and authenticated rather than silently falling back to a
+  local write.
+
+Current practical rule:
+- `hack up`, `hack down`, `hack logs`, `hack session`, `hack tickets`, and local `hack env` operations are
+  local-first surfaces.
+- The teams-and-organizations admin model is defined in `docs/architecture.md` and `docs/env.md` until the
+  corresponding shared-admin command surfaces land.
+
 ## Top-level commands
 
 | Command | Summary | Group |
@@ -43,6 +59,7 @@ If you are new to Hack, scan the CLI in this order:
 | `hack open` | Open a URL for the project (default: https://<project>.hack) | Core workflows |
 | `hack tui` | Open the project TUI (services + logs) | Core workflows |
 | `hack branch` | Manage branch aliases for a project | Core workflows |
+| `hack project` | Inspect or manage project metadata | Project |
 | `hack config` | Read/write hack.config.json values | Core workflows |
 | `hack auth` | Manage Hack account sign-in | Collaboration & integrations |
 | `hack linear` | Linear account connection, issue sync, and project artifact management | Collaboration & integrations |
@@ -208,6 +225,33 @@ Options:
 | `--oauth` | boolean | false | Enable OAuth-safe alias host |
 | `--oauth-tld <tld>` | string | `gy` | OAuth alias TLD override |
 | `--no-discovery` | boolean | false | Skip discovery and generate a minimal compose |
+
+### hack project
+
+Usage: `hack project [options]`
+
+Subcommands:
+
+| Subcommand | Summary |
+| --- | --- |
+| `owner` | Inspect or manage project ownership |
+
+#### hack project owner show
+
+Usage: `hack project owner show [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
+| `--project <name>` | string | - | Target a registered project by name |
+| `--json` | boolean | false | Output JSON (machine-readable) |
+
+Notes:
+
+- This is a read-only ownership inspection surface.
+- If the project config cannot be parsed, the command fails instead of guessing a local owner.
 
 ### hack up
 
@@ -611,6 +655,13 @@ Options:
 ### hack env
 
 Usage: `hack env <subcommand>`
+
+Notes:
+
+- The current `hack env` surface is local-first.
+- `hack env set` and `hack env unset` manage local project env state and configured local secret backends.
+- Shared env grants, value custody, and rotation are planned as explicit broker-mediated flows rather than
+  implicit extensions of local env commands.
 
 Subcommands:
 

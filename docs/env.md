@@ -2,6 +2,25 @@
 
 hack supports a project-scoped env contract (shareable, no values) plus safe secret storage for local development.
 
+## Ownership and sharing policy
+
+Env management is separate from project ownership. A project can be shared while its env values remain
+local-only.
+
+### Sharing modes
+
+- `local_only`: contract and values stay on the local machine
+- `shared_metadata_only`: env contract metadata is shared, but values remain local
+- `shared_values`: encrypted values are broker-mediated and access-controlled
+
+### Secure-by-default rules
+
+- New projects start with local-only env custody.
+- Sharing a project must not silently share env values.
+- Project access does not automatically grant env value access.
+- Team membership does not automatically grant env administration.
+- Shared value disclosure must be checked independently from project access.
+
 ## Files and storage
 
 - `.hack/hack.env.json` (committed): declares env vars, required vs optional, per-service scope, and where values should come from.
@@ -108,6 +127,11 @@ When you run `hack up`, `hack restart`, or `hack run`, hack:
 Security posture:
 - Secret values are never written into `.hack/` YAML files.
 - Plain env values live in `.hack/.env` (expected to be gitignored in most repos).
+
+Planned shared-admin direction:
+- keep `hack env set` and `hack env unset` local by default
+- require explicit broker-mediated flows for shared env grants, rotation, and encrypted value custody
+- keep metadata sharing and value sharing as separate policy choices
 
 ## Remote node secret behavior
 

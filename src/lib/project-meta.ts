@@ -9,6 +9,8 @@ import { pathExists, readTextFile } from "./fs.ts";
 import { isRecord } from "./guards.ts";
 import type { HackEnvSource } from "./hack-env.ts";
 import { resolveHackEnv } from "./hack-env.ts";
+import type { ProjectOwnershipConfig } from "./project.ts";
+import { readProjectConfig } from "./project.ts";
 import { exec } from "./shell.ts";
 
 export type GitWorktreeMeta = {
@@ -71,6 +73,8 @@ export type ComposeBuildMeta = {
 };
 
 export type ProjectMeta = {
+  readonly ownership: ProjectOwnershipConfig | null;
+  readonly configError: string | null;
   readonly git: GitMeta;
   readonly hackBranches: HackBranchesMeta;
   readonly env: EnvMeta;
@@ -84,18 +88,29 @@ export async function resolveProjectMeta(opts: {
   readonly projectDir: string;
   readonly composeFile: string;
 }): Promise<ProjectMeta> {
-  const [git, hackBranches, env, sessions, composeBuild] = await Promise.all([
-    resolveGitMeta({ repoRoot: opts.repoRoot }),
-    resolveHackBranchesMeta({ projectDir: opts.projectDir }),
-    resolveEnvMeta({
-      projectDir: opts.projectDir,
-      projectName: opts.projectName,
-    }),
-    resolveSessionsMeta({ projectName: opts.projectName }),
-    resolveComposeBuildMeta({ composeFile: opts.composeFile }),
-  ]);
+  const [config, git, hackBranches, env, sessions, composeBuild] =
+    await Promise.all([
+      readProjectConfig({
+        projectRoot: opts.repoRoot,
+        projectDirName: ".hack",
+        projectDir: opts.projectDir,
+        composeFile: opts.composeFile,
+        envFile: resolve(opts.projectDir, "hack.env.json"),
+        configFile: resolve(opts.projectDir, "hack.config.json"),
+      }),
+      resolveGitMeta({ repoRoot: opts.repoRoot }),
+      resolveHackBranchesMeta({ projectDir: opts.projectDir }),
+      resolveEnvMeta({
+        projectDir: opts.projectDir,
+        projectName: opts.projectName,
+      }),
+      resolveSessionsMeta({ projectName: opts.projectName }),
+      resolveComposeBuildMeta({ composeFile: opts.composeFile }),
+    ]);
 
   return {
+    ownership: config.parseError ? null : config.ownership,
+    configError: config.parseError ?? null,
     git,
     hackBranches,
     env,

@@ -76,3 +76,14 @@ test("linear command metadata advertises project artifact workflows", () => {
     "hack linear status-updates list|pull|plan|publish"
   );
 });
+
+test("resolveCommand finds nested project owner show command", () => {
+  const resolved = resolveCommand(CLI_SPEC, ["project", "owner", "show"]);
+  expect(resolved.command?.name).toBe("show");
+  expect(resolved.path.map((command) => command.name)).toEqual([
+    "project",
+    "owner",
+    "show",
+  ]);
+  expect(resolved.remainingPositionals).toEqual([]);
+});

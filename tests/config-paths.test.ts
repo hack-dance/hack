@@ -2,11 +2,8 @@ import { afterEach, expect, test } from "bun:test";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 
-import {
-  GLOBAL_CONFIG_FILENAME,
-  GLOBAL_HACK_DIR_NAME,
-} from "../src/constants.ts";
-import { resolveGlobalConfigPath } from "../src/lib/config-paths.ts";
+import { resolveGlobalConfigPath } from "@lib/config-paths.ts";
+import { GLOBAL_CONFIG_FILENAME, GLOBAL_HACK_DIR_NAME } from "@/constants.ts";
 
 const originalHome = process.env.HOME;
 const originalGlobalConfigPath = process.env.HACK_GLOBAL_CONFIG_PATH;

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { resolveConfig } from "../src/config.ts";
+import { resolveConfig } from "@/config.ts";
 
 type EnvMap = Record<string, string | undefined>;
 

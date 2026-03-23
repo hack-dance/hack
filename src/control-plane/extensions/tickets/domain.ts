@@ -1,3 +1,4 @@
+import type { TicketDocument } from "./documents.ts";
 import {
   buildLegacyDescriptionDocument,
   getActiveTicketDescription,
@@ -123,8 +124,6 @@ export type TicketFieldVersion = {
   readonly recordedAt: string;
   readonly value?: TicketMetadataValue;
 };
-
-export type { TicketDocument, TicketDocumentKind, TicketDocumentRole };
 
 export type TicketFieldState = {
   readonly field: string;

@@ -5,6 +5,11 @@
     "target": "ESNext",
     "module": "Preserve",
     "moduleResolution": "bundler",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"],
+      "@tests/*": ["tests/*"]
+    },
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "verbatimModuleSyntax": true,

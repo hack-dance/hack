@@ -93,7 +93,7 @@ test("resolveCommand finds crash-capture command", () => {
 test("linear command metadata advertises project artifact workflows", () => {
   const resolved = resolveCommand(CLI_SPEC, ["linear"]);
   expect(resolved.command?.summary).toBe(
-    "Linear account connection, issue sync, and project artifact management"
+    "Connect Linear and sync repo work with Linear projects/issues"
   );
   expect(resolved.command?.description).toContain(
     "hack linear documents list|pull|plan|apply"
@@ -116,7 +116,6 @@ test("resolveCommand finds nested project owner show command", () => {
   ]);
   expect(resolved.remainingPositionals).toEqual([]);
 });
-
 test("resolveCommand exposes org, team, and auth invite command paths", () => {
   const orgResolved = resolveCommand(CLI_SPEC, ["org", "member", "invite"]);
   expect(orgResolved.command?.name).toBe("invite");

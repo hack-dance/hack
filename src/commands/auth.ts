@@ -87,7 +87,6 @@ const invitesSpec = defineCommand({
   positionals: [] as const,
   subcommands: [] as const,
 } as const);
-
 const inviteAcceptSpec = defineCommand({
   name: "accept",
   summary: "Accept a pending invitation and activate membership",

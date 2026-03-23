@@ -722,7 +722,7 @@ export function getCommandPrerequisiteContracts(input: {
 }): readonly CommandPrerequisiteContract[] {
   const command = normalizePrerequisiteCommand({ command: input.command });
   return COMMAND_PREREQUISITE_CONTRACTS.filter((contract) =>
-    contract.commands.includes(command)
+    contract.commands.some((candidate) => candidate === command)
   );
 }
 

@@ -12,7 +12,7 @@ import {
 } from "../../../lib/config.ts";
 import { isRecord } from "../../../lib/guards.ts";
 import { openUrl } from "../../../lib/os.ts";
-import { display } from "../../../ui/display.ts";
+import { type DisplayCell, display } from "../../../ui/display.ts";
 import {
   findTicketRemoteLink,
   normalizeTicketFieldName,
@@ -2579,6 +2579,8 @@ type LinearSyncClient = Pick<
   | "getIssueByIdentifier"
   | "getProject"
   | "listIssueComments"
+  | "listProjects"
+  | "listProjectsPage"
   | "listProjectDocuments"
   | "listProjectIssuesPage"
   | "listProjectMilestones"
@@ -2593,6 +2595,8 @@ type LinearSyncClient = Pick<
 
 type ProjectArtifactLinearClient = Pick<
   ReturnType<typeof createLinearClient>,
+  | "listProjectsPage"
+  | "listProjects"
   | "createProjectDocument"
   | "createProjectMilestone"
   | "createProjectUpdate"
@@ -3228,7 +3232,12 @@ async function runProjectArtifactCommand(input: {
     }
 
     const draftArtifacts = localArtifacts.data.filter(
-      (artifact) =>
+      (
+        artifact
+      ): artifact is Extract<
+        LocalLinearProjectArtifact,
+        { readonly kind: "linear-project-status-update" }
+      > =>
         artifact.kind === "linear-project-status-update" &&
         isDraftStatusUpdatePath({ path: artifact.path })
     );
@@ -3897,10 +3906,10 @@ async function renderProjectArtifactCommandPayload(input: {
     entries: [
       ["profile", input.payload.profileId],
       ["project_id", input.payload.projectId],
-      ...Object.entries(input.payload.summary ?? {}).map(([key, value]) => [
-        key,
-        String(value),
-      ]),
+      ...Object.entries(input.payload.summary ?? {}).map(
+        ([key, value]) =>
+          [key, String(value)] as const satisfies readonly [string, DisplayCell]
+      ),
     ],
   });
 }
@@ -4133,13 +4142,13 @@ function removeLinearAssigneeMapping(input: {
   return { removed, mappings: next };
 }
 
-type RecordedSyncConflict = {
+interface RecordedSyncConflict {
   readonly field: string;
-  readonly authority: "hack" | "linear";
+  readonly authority: "hack" | "linear" | "review_required";
   readonly summary: string;
   readonly localValue?: TicketMetadataValue;
   readonly remoteValue?: TicketMetadataValue;
-};
+}
 
 type SyncTicketFromLinearSuccess = {
   readonly ok: true;
@@ -4238,6 +4247,10 @@ function detectAuthoritativeFieldConflicts(input: {
   const conflicts: RecordedSyncConflict[] = [];
   const authorityLabel =
     input.authority === "review_required" ? "review-required" : input.authority;
+  const localLinearRemote = findTicketRemoteLink({
+    ticket: input.ticket,
+    provider: "linear",
+  });
   const localTitle = input.ticket.title.trim();
   const remoteTitle = input.issue.title.trim();
   if (localTitle !== remoteTitle) {
@@ -4277,8 +4290,8 @@ function detectAuthoritativeFieldConflicts(input: {
   }
 
   const localProject = normalizeProjectValue({
-    projectId: input.ticket.projectId,
-    projectName: input.ticket.projectName,
+    projectId: input.ticket.projectId ?? localLinearRemote?.projectId,
+    projectName: input.ticket.projectName ?? localLinearRemote?.projectName,
   });
   const remoteProject = normalizeProjectValue({
     projectId: input.issue.projectId,
@@ -7380,7 +7393,7 @@ async function resolveProjectArtifactTarget(input: {
   readonly projectId?: string;
   readonly projectName?: string;
   readonly teamId?: string;
-  readonly linear: Pick<ProjectArtifactRuntime["linear"], "listProjects">;
+  readonly linear: Pick<ProjectArtifactRuntime["linear"], "listProjectsPage">;
 }): Promise<
   | {
       readonly ok: true;
@@ -7429,26 +7442,44 @@ async function resolveProjectArtifactTarget(input: {
     };
   }
 
-  const projects = await input.linear.listProjects({
-    first: DEFAULT_PROJECT_SYNC_LIMIT,
-  });
-  if (!projects.ok) {
-    return {
-      ok: false,
-      error: projects.error,
-    };
-  }
+  const matches: Array<{
+    readonly id: string;
+    readonly name: string;
+    readonly teamId: string;
+  }> = [];
+  let after: string | undefined;
+  let hasNextPage = true;
+  while (hasNextPage) {
+    const page = await input.linear.listProjectsPage({
+      first: DEFAULT_PROJECT_SYNC_LIMIT,
+      ...(after ? { after } : {}),
+    });
+    if (!page.ok) {
+      return {
+        ok: false,
+        error: page.error,
+      };
+    }
 
-  const matches = projects.data.filter((project) =>
-    projectArtifactTargetMatchesSelector({
-      target: {
-        projectId: project.id,
-        projectName: project.name,
-        teamId: project.teamId,
-      },
-      selector,
-    })
-  );
+    matches.push(
+      ...page.data.projects.filter((project) =>
+        projectArtifactTargetMatchesSelector({
+          target: {
+            projectId: project.id,
+            projectName: project.name,
+            teamId: project.teamId,
+          },
+          selector,
+        })
+      )
+    );
+
+    hasNextPage = page.data.hasNextPage;
+    after = page.data.endCursor;
+    if (matches.length > 1) {
+      break;
+    }
+  }
   if (matches.length === 0) {
     return {
       ok: false,

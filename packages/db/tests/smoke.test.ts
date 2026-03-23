@@ -1,13 +1,13 @@
 import { expect, test } from "bun:test";
 
-import { createDbClient } from "../src/client.ts";
+import { createDbClient } from "@/client.ts";
 import {
   githubConnections,
   linearAssigneeMappings,
   linearConnections,
   linearSyncSubscriptions,
   linearWebhookEvents,
-} from "../src/schema/core.ts";
+} from "@/schema/core.ts";
 
 test("db package exports createDbClient", () => {
   expect(typeof createDbClient).toBe("function");

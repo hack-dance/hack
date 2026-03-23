@@ -1,3 +1,4 @@
+import type { TicketDocument } from "./documents.ts";
 import {
   buildLegacyDescriptionDocument,
   getActiveTicketDescription,
@@ -7,6 +8,12 @@ import {
   normalizeTicketFieldName,
   projectRemoteLinkToCompatibilityFields,
 } from "./provenance.ts";
+
+export type {
+  TicketDocument,
+  TicketDocumentKind,
+  TicketDocumentRole,
+} from "./documents.ts";
 
 export type TicketStatus = "open" | "in_progress" | "blocked" | "done";
 
@@ -118,15 +125,9 @@ export type TicketFieldVersion = {
   readonly value?: TicketMetadataValue;
 };
 
-export type {
-  TicketDocument,
-  TicketDocumentKind,
-  TicketDocumentRole,
-} from "./documents.ts";
-
 export type TicketFieldState = {
   readonly field: string;
-  readonly authority: string;
+  readonly authority: TicketFieldAuthority;
   readonly conflictIds: readonly string[];
 };
 

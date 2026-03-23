@@ -22,6 +22,67 @@ afterEach(async () => {
   tempDir = null;
 });
 
+type SyncTicketDetail = Awaited<
+  ReturnType<
+    Parameters<
+      typeof __testOnly.syncIssueFromLinearToTicket
+    >[0]["runtime"]["tickets"]["getTicketDetail"]
+  >
+>;
+
+type ProjectArtifactLinearClient = Parameters<
+  typeof __testOnly.runProjectArtifactCommand
+>[0]["runtime"]["linear"];
+
+function createEmptyTicketDetail(
+  overrides: Partial<SyncTicketDetail> = {}
+): SyncTicketDetail {
+  return {
+    ticket: null,
+    events: [],
+    documents: [],
+    comments: [],
+    reviewNotes: [],
+    syncCheckpoints: [],
+    conflicts: [],
+    ...overrides,
+  };
+}
+
+function createProjectArtifactLinearClient(
+  overrides: Partial<ProjectArtifactLinearClient> = {}
+): ProjectArtifactLinearClient {
+  return {
+    listProjects: async () => ({ ok: true as const, data: [] }),
+    listProjectsPage: async () => ({
+      ok: true as const,
+      data: {
+        projects: [],
+        hasNextPage: false,
+      },
+    }),
+    listProjectDocuments: async () => ({ ok: true as const, data: [] }),
+    createProjectDocument: async () => {
+      throw new Error("createProjectDocument should not be called");
+    },
+    updateProjectDocument: async () => {
+      throw new Error("updateProjectDocument should not be called");
+    },
+    listProjectMilestones: async () => ({ ok: true as const, data: [] }),
+    createProjectMilestone: async () => {
+      throw new Error("createProjectMilestone should not be called");
+    },
+    updateProjectMilestone: async () => {
+      throw new Error("updateProjectMilestone should not be called");
+    },
+    listProjectUpdates: async () => ({ ok: true as const, data: [] }),
+    createProjectUpdate: async () => {
+      throw new Error("createProjectUpdate should not be called");
+    },
+    ...overrides,
+  };
+}
+
 const minimalLinearBindingConfig = {
   routing: {
     mode: "existing_only",
@@ -734,7 +795,7 @@ test("resolveProjectArtifactTarget matches a bound project by explicit name and 
     projectName: "Operations",
     teamId: "team_ops",
     linear: {
-      listProjects: async () => {
+      listProjectsPage: async () => {
         throw new Error("should not look up remote projects");
       },
     },
@@ -761,26 +822,89 @@ test("resolveProjectArtifactTarget falls back to remote lookup for explicit proj
     projectName: "Roadmap",
     teamId: "team_strategy",
     linear: {
-      listProjects: async () => ({
+      listProjectsPage: async () => ({
         ok: true as const,
-        data: [
-          {
-            id: "proj_strategy",
-            name: "Roadmap",
-            teamId: "team_strategy",
-            teamKey: "STRAT",
-          },
-          {
-            id: "proj_other",
-            name: "Roadmap",
-            teamId: "team_other",
-            teamKey: "OPS",
-          },
-        ],
+        data: {
+          projects: [
+            {
+              id: "proj_strategy",
+              name: "Roadmap",
+              teamId: "team_strategy",
+              teamKey: "STRAT",
+            },
+            {
+              id: "proj_other",
+              name: "Roadmap",
+              teamId: "team_other",
+              teamKey: "OPS",
+            },
+          ],
+          hasNextPage: false,
+        },
       }),
     },
   });
 
+  expect(resolved).toEqual({
+    ok: true,
+    target: {
+      profileId: "work",
+      projectId: "proj_strategy",
+      projectName: "Roadmap",
+      teamId: "team_strategy",
+    },
+  });
+});
+
+test("resolveProjectArtifactTarget keeps paging remote projects until a later match is found", async () => {
+  const afterCalls: string[] = [];
+  const resolved = await __testOnly.resolveProjectArtifactTarget({
+    binding: {
+      profileId: "work",
+      additionalProjects: [],
+    },
+    profileId: "work",
+    projectName: "Roadmap",
+    teamId: "team_strategy",
+    linear: {
+      listProjectsPage: async (input) => {
+        afterCalls.push(input?.after ?? "");
+        if (!input?.after) {
+          return {
+            ok: true as const,
+            data: {
+              projects: [
+                {
+                  id: "proj_other",
+                  name: "Roadmap",
+                  teamId: "team_other",
+                  teamKey: "OPS",
+                },
+              ],
+              hasNextPage: true,
+              endCursor: "cursor-1",
+            },
+          };
+        }
+        return {
+          ok: true as const,
+          data: {
+            projects: [
+              {
+                id: "proj_strategy",
+                name: "Roadmap",
+                teamId: "team_strategy",
+                teamKey: "STRAT",
+              },
+            ],
+            hasNextPage: false,
+          },
+        };
+      },
+    },
+  });
+
+  expect(afterCalls).toEqual(["", "cursor-1"]);
   expect(resolved).toEqual({
     ok: true,
     target: {
@@ -1365,24 +1489,20 @@ test("syncIssueFromLinearToTicket preserves hack authority, appends comments, an
         throw new Error("createTicket should not be called");
       },
       getTicket: async () => null,
-      getTicketDetail: async () => ({
-        ticket: null,
-        events: [],
-        comments: [
-          {
-            commentId: "comment-1",
-            ticketId: "T-00001",
-            body: "Already synced",
-            source: "linear",
-            actor: "linear",
-            createdAt: "2026-03-05T10:00:00.000Z",
-            externalId: "linear-comment-1",
-          },
-        ],
-        reviewNotes: [],
-        syncCheckpoints: [],
-        conflicts: [],
-      }),
+      getTicketDetail: async () =>
+        createEmptyTicketDetail({
+          comments: [
+            {
+              commentId: "comment-1",
+              ticketId: "T-00001",
+              body: "Already synced",
+              source: "linear",
+              actor: "linear",
+              createdAt: "2026-03-05T10:00:00.000Z",
+              externalId: "linear-comment-1",
+            },
+          ],
+        }),
       appendComment: async (input: { readonly body: string }) => {
         appendedBodies.push(input.body);
         return {
@@ -1537,14 +1657,7 @@ test("syncIssueFromLinearToTicket records review-required conflicts for dual-hom
         throw new Error("createTicket should not be called");
       },
       getTicket: async () => null,
-      getTicketDetail: async () => ({
-        ticket: null,
-        events: [],
-        comments: [],
-        reviewNotes: [],
-        syncCheckpoints: [],
-        conflicts: [],
-      }),
+      getTicketDetail: async () => createEmptyTicketDetail(),
       appendComment: async () => ({
         ok: true as const,
         comment: {
@@ -1694,31 +1807,27 @@ test("syncTicketToLinearIssue pushes missing local comments and records a checkp
       }),
       updateTicket: async () => ({ ok: true as const }),
       listTickets: async () => [],
-      getTicketDetail: async () => ({
-        ticket: null,
-        events: [],
-        comments: [
-          {
-            commentId: "comment-1",
-            ticketId: "T-00001",
-            body: "Already remote",
-            source: "hack",
-            actor: "dio",
-            createdAt: "2026-03-05T10:00:00.000Z",
-          },
-          {
-            commentId: "comment-2",
-            ticketId: "T-00001",
-            body: "Push me",
-            source: "hack",
-            actor: "dio",
-            createdAt: "2026-03-05T10:01:00.000Z",
-          },
-        ],
-        reviewNotes: [],
-        syncCheckpoints: [],
-        conflicts: [],
-      }),
+      getTicketDetail: async () =>
+        createEmptyTicketDetail({
+          comments: [
+            {
+              commentId: "comment-1",
+              ticketId: "T-00001",
+              body: "Already remote",
+              source: "hack",
+              actor: "dio",
+              createdAt: "2026-03-05T10:00:00.000Z",
+            },
+            {
+              commentId: "comment-2",
+              ticketId: "T-00001",
+              body: "Push me",
+              source: "hack",
+              actor: "dio",
+              createdAt: "2026-03-05T10:01:00.000Z",
+            },
+          ],
+        }),
       linkCommentExternalId: async (input: {
         readonly commentId: string;
         readonly externalId: string;
@@ -1900,14 +2009,7 @@ test("syncTicketToLinearIssue reuses a linked Linear issue inferred from provena
       }),
       updateTicket: async () => ({ ok: true as const }),
       listTickets: async () => [],
-      getTicketDetail: async () => ({
-        ticket: null,
-        events: [],
-        comments: [],
-        reviewNotes: [],
-        syncCheckpoints: [],
-        conflicts: [],
-      }),
+      getTicketDetail: async () => createEmptyTicketDetail(),
       linkCommentExternalId: async () => ({ ok: true as const }),
       recordSyncCheckpoint: async () => ({
         ok: true as const,
@@ -1920,7 +2022,9 @@ test("syncTicketToLinearIssue reuses a linked Linear issue inferred from provena
           createdAt: "2026-03-05T10:10:00.000Z",
         },
       }),
-      recordSyncConflict: async () => ({ ok: true as const, conflict: null }),
+      recordSyncConflict: async () => {
+        throw new Error("recordSyncConflict should not be called");
+      },
     },
     linear: {
       getIssueById: async () => ({
@@ -2052,14 +2156,7 @@ test("syncTicketToLinearIssue preserves remote issue fields for review-required 
       }),
       updateTicket: async () => ({ ok: true as const }),
       listTickets: async () => [],
-      getTicketDetail: async () => ({
-        ticket: null,
-        events: [],
-        comments: [],
-        reviewNotes: [],
-        syncCheckpoints: [],
-        conflicts: [],
-      }),
+      getTicketDetail: async () => createEmptyTicketDetail(),
       linkCommentExternalId: async () => ({ ok: true as const }),
       recordSyncCheckpoint: async () => ({
         ok: true as const,
@@ -2252,27 +2349,23 @@ test("syncTicketToLinearIssue does not duplicate legacy body conflicts after fie
       }),
       updateTicket: async () => ({ ok: true as const }),
       listTickets: async () => [],
-      getTicketDetail: async () => ({
-        ticket: null,
-        events: [],
-        comments: [],
-        reviewNotes: [],
-        syncCheckpoints: [],
-        conflicts: [
-          {
-            conflictId: "conflict-body",
-            ticketId: "T-00006",
-            provider: "linear" as const,
-            field: "body",
-            status: "open" as const,
-            authority: "review_required" as const,
-            localValue: "Local body",
-            remoteValue: "Linear body",
-            createdAt: "2026-03-05T10:05:00.000Z",
-            updatedAt: "2026-03-05T10:05:00.000Z",
-          },
-        ],
-      }),
+      getTicketDetail: async () =>
+        createEmptyTicketDetail({
+          conflicts: [
+            {
+              conflictId: "conflict-body",
+              ticketId: "T-00006",
+              provider: "linear" as const,
+              field: "body",
+              status: "open" as const,
+              authority: "review_required" as const,
+              localValue: "Local body",
+              remoteValue: "Linear body",
+              createdAt: "2026-03-05T10:05:00.000Z",
+              updatedAt: "2026-03-05T10:05:00.000Z",
+            },
+          ],
+        }),
       linkCommentExternalId: async () => ({ ok: true as const }),
       recordSyncCheckpoint: async () => ({
         ok: true as const,
@@ -2443,16 +2536,9 @@ test("syncTicketToLinearIssue records a deterministic checkpoint idempotency key
       }),
       updateTicket: async () => ({ ok: true as const }),
       listTickets: async () => [],
-      getTicketDetail: async () => ({
-        ticket: null,
-        events: [],
-        comments: [],
-        reviewNotes: [],
-        syncCheckpoints: [],
-        conflicts: [],
-      }),
+      getTicketDetail: async () => createEmptyTicketDetail(),
       linkCommentExternalId: async () => ({ ok: true as const }),
-      recordSyncCheckpoint: async (input: Record<string, unknown>) => {
+      recordSyncCheckpoint: async (input: { readonly direction?: string }) => {
         checkpointInputs.push(input);
         return {
           ok: true as const,
@@ -2466,7 +2552,9 @@ test("syncTicketToLinearIssue records a deterministic checkpoint idempotency key
           },
         };
       },
-      recordSyncConflict: async () => ({ ok: true as const, conflict: null }),
+      recordSyncConflict: async () => {
+        throw new Error("recordSyncConflict should not be called");
+      },
     },
     linear: {
       getIssueById: async () => ({
@@ -2849,7 +2937,7 @@ test("runProjectArtifactCommand pulls project documents into repo state", async 
       profileId: "work",
       projectDir,
       projectId: "proj_123",
-      linear: {
+      linear: createProjectArtifactLinearClient({
         listProjectDocuments: async () => ({
           ok: true as const,
           data: [
@@ -2865,7 +2953,7 @@ test("runProjectArtifactCommand pulls project documents into repo state", async 
             },
           ],
         }),
-      },
+      }),
     },
   });
 
@@ -2875,14 +2963,18 @@ test("runProjectArtifactCommand pulls project documents into repo state", async 
   }
 
   expect(result.payload.changed).toBe(1);
-  expect(result.payload.writtenPaths).toEqual([
+  const writtenPaths = result.payload.writtenPaths;
+  expect(writtenPaths).toEqual([
     resolve(
       projectDir,
       ".hack/linear/projects/proj_123/documents/launch-plan.md"
     ),
   ]);
+  if (!writtenPaths) {
+    throw new Error("Expected writtenPaths for pull payload");
+  }
 
-  const file = await Bun.file(result.payload.writtenPaths[0] ?? "").text();
+  const file = await Bun.file(writtenPaths[0] ?? "").text();
   expect(file).toContain("kind: linear-project-document");
   expect(file).toContain("linearId: doc_123");
   expect(file).toContain("icon: rocket");
@@ -2904,7 +2996,7 @@ test("runProjectArtifactCommand pull refuses to overwrite unmanaged files", asyn
       profileId: "work",
       projectDir,
       projectId: "proj_123",
-      linear: {
+      linear: createProjectArtifactLinearClient({
         listProjectDocuments: async () => ({
           ok: true as const,
           data: [
@@ -2917,7 +3009,7 @@ test("runProjectArtifactCommand pull refuses to overwrite unmanaged files", asyn
             },
           ],
         }),
-      },
+      }),
     },
   });
 
@@ -2959,7 +3051,7 @@ archived: false
       profileId: "work",
       projectDir,
       projectId: "proj_123",
-      linear: {
+      linear: createProjectArtifactLinearClient({
         listProjectDocuments: async () => ({
           ok: true as const,
           data: [
@@ -2972,7 +3064,7 @@ archived: false
             },
           ],
         }),
-      },
+      }),
     },
   });
 
@@ -3040,7 +3132,7 @@ archived: false
       profileId: "work",
       projectDir,
       projectId: "proj_123",
-      linear: {
+      linear: createProjectArtifactLinearClient({
         listProjectDocuments: async () => ({
           ok: true as const,
           data: [
@@ -3067,7 +3159,7 @@ archived: false
             },
           ],
         }),
-      },
+      }),
     },
   });
 
@@ -3076,13 +3168,17 @@ archived: false
     return;
   }
 
-  expect(result.payload.summary).toEqual({
+  const summary = result.payload.summary;
+  expect(summary).toEqual({
     create: 1,
     update: 1,
     noop: 1,
     remoteOnly: 1,
     errors: 0,
   });
+  if (!summary) {
+    throw new Error("Expected summary for plan payload");
+  }
 });
 
 test("runProjectArtifactCommand plan fails on duplicate managed mappings", async () => {
@@ -3126,12 +3222,12 @@ archived: false
       profileId: "work",
       projectDir,
       projectId: "proj_123",
-      linear: {
+      linear: createProjectArtifactLinearClient({
         listProjectDocuments: async () => ({
           ok: true as const,
           data: [],
         }),
-      },
+      }),
     },
   });
 
@@ -3185,7 +3281,7 @@ archived: false
       profileId: "work",
       projectDir,
       projectId: "proj_123",
-      linear: {
+      linear: createProjectArtifactLinearClient({
         listProjectDocuments: async () => ({
           ok: true as const,
           data: [
@@ -3226,7 +3322,7 @@ archived: false
             },
           };
         },
-      },
+      }),
     },
   });
 
@@ -3237,8 +3333,12 @@ archived: false
 
   expect(createCalls).toEqual(["Create me"]);
   expect(updateCalls).toEqual(["doc_update:Update me"]);
-  expect(result.payload.summary.created).toBe(1);
-  expect(result.payload.summary.updated).toBe(1);
+  const applySummary = result.payload.summary;
+  if (!applySummary) {
+    throw new Error("Expected summary for apply payload");
+  }
+  expect(applySummary.created).toBe(1);
+  expect(applySummary.updated).toBe(1);
 
   const createdText = await Bun.file(
     resolve(documentsDir, "create-me.md")
@@ -3276,7 +3376,7 @@ archived: false
       profileId: "work",
       projectDir,
       projectId: "proj_123",
-      linear: {
+      linear: createProjectArtifactLinearClient({
         listProjectDocuments: async () => ({
           ok: true as const,
           data: [
@@ -3300,7 +3400,7 @@ archived: false
             updatedAt: "2026-03-15T10:00:00.000Z",
           },
         }),
-      },
+      }),
     },
   });
 
@@ -3342,7 +3442,7 @@ archived: false
       profileId: "work",
       projectDir,
       projectId: "proj_123",
-      linear: {
+      linear: createProjectArtifactLinearClient({
         listProjectDocuments: async () => ({
           ok: true as const,
           data: [
@@ -3358,7 +3458,7 @@ archived: false
         createProjectDocument: async () => {
           throw new Error("createProjectDocument should not be called");
         },
-      },
+      }),
     },
   });
 
@@ -3398,7 +3498,7 @@ archived: false
       profileId: "work",
       projectDir,
       projectId: "proj_123",
-      linear: {
+      linear: createProjectArtifactLinearClient({
         listProjectDocuments: async () => ({
           ok: true as const,
           data: [
@@ -3425,7 +3525,7 @@ archived: false
             },
           };
         },
-      },
+      }),
     },
   });
 
@@ -3446,7 +3546,7 @@ test("runProjectArtifactCommand pulls project milestones into repo state", async
       profileId: "work",
       projectDir,
       projectId: "proj_123",
-      linear: {
+      linear: createProjectArtifactLinearClient({
         listProjectMilestones: async () => ({
           ok: true as const,
           data: [
@@ -3462,7 +3562,7 @@ test("runProjectArtifactCommand pulls project milestones into repo state", async
             },
           ],
         }),
-      },
+      }),
     },
   });
 
@@ -3472,14 +3572,18 @@ test("runProjectArtifactCommand pulls project milestones into repo state", async
   }
 
   expect(result.payload.changed).toBe(1);
-  expect(result.payload.writtenPaths).toEqual([
+  const milestoneWrittenPaths = result.payload.writtenPaths;
+  expect(milestoneWrittenPaths).toEqual([
     resolve(
       projectDir,
       ".hack/linear/projects/proj_123/milestones/private-beta.md"
     ),
   ]);
+  if (!milestoneWrittenPaths) {
+    throw new Error("Expected writtenPaths for milestone pull payload");
+  }
 
-  const file = await Bun.file(result.payload.writtenPaths[0] ?? "").text();
+  const file = await Bun.file(milestoneWrittenPaths[0] ?? "").text();
   expect(file).toContain("kind: linear-project-milestone");
   expect(file).toContain("linearId: milestone_123");
   expect(file).toContain('targetDate: "2026-04-01"');
@@ -3532,7 +3636,7 @@ Prepare launch checklist.
       profileId: "work",
       projectDir,
       projectId: "proj_123",
-      linear: {
+      linear: createProjectArtifactLinearClient({
         listProjectMilestones: async () => ({
           ok: true as const,
           data: [
@@ -3583,7 +3687,7 @@ Prepare launch checklist.
             },
           };
         },
-      },
+      }),
     },
   });
 
@@ -3598,8 +3702,12 @@ Prepare launch checklist.
   expect(updateCalls).toEqual([
     "milestone_launch:Launch:Prepare launch checklist.\n:planned",
   ]);
-  expect(result.payload.summary.created).toBe(1);
-  expect(result.payload.summary.updated).toBe(1);
+  const milestoneSummary = result.payload.summary;
+  if (!milestoneSummary) {
+    throw new Error("Expected summary for milestone apply payload");
+  }
+  expect(milestoneSummary.created).toBe(1);
+  expect(milestoneSummary.updated).toBe(1);
 
   const createdText = await Bun.file(
     resolve(milestonesDir, "private-beta.md")
@@ -3646,7 +3754,7 @@ archived: false
       profileId: "work",
       projectDir,
       projectId: "proj_123",
-      linear: {
+      linear: createProjectArtifactLinearClient({
         listProjectMilestones: async () => ({
           ok: true as const,
           data: [
@@ -3675,7 +3783,7 @@ archived: false
             },
           };
         },
-      },
+      }),
     },
   });
 
@@ -3716,7 +3824,7 @@ Still on track for dogfooding.
       profileId: "work",
       projectDir,
       projectId: "proj_123",
-      linear: {
+      linear: createProjectArtifactLinearClient({
         createProjectUpdate: async ({ body, health }) => ({
           ok: true as const,
           data: {
@@ -3730,7 +3838,7 @@ Still on track for dogfooding.
             projectName: "Dogfood",
           },
         }),
-      },
+      }),
     },
   });
 
@@ -3739,8 +3847,13 @@ Still on track for dogfooding.
     return;
   }
 
-  expect(result.payload.summary.published).toBe(1);
-  expect(result.payload.movedPaths).toEqual([
+  const publishSummary = result.payload.summary;
+  const movedPaths = result.payload.movedPaths;
+  if (!(publishSummary && movedPaths)) {
+    throw new Error("Expected summary and movedPaths for publish payload");
+  }
+  expect(publishSummary.published).toBe(1);
+  expect(movedPaths).toEqual([
     {
       from: resolve(draftsDir, "2026-03-14-weekly.md"),
       to: resolve(
@@ -3750,9 +3863,7 @@ Still on track for dogfooding.
     },
   ]);
 
-  const publishedText = await Bun.file(
-    result.payload.movedPaths[0]?.to ?? ""
-  ).text();
+  const publishedText = await Bun.file(movedPaths[0]?.to ?? "").text();
   expect(publishedText).toContain("linearId: update_123");
   expect(publishedText).toContain('updatedAt: "2026-03-14T10:15:00.000Z"');
 });
@@ -3789,11 +3900,11 @@ Still on track for dogfooding.
       profileId: "work",
       projectDir,
       projectId: "proj_123",
-      linear: {
+      linear: createProjectArtifactLinearClient({
         createProjectUpdate: async () => {
           throw new Error("should not be called");
         },
-      },
+      }),
     },
   });
 

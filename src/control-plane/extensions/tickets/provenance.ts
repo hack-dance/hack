@@ -150,8 +150,12 @@ export function buildTicketRemoteLinks(input: {
     );
 
     if (trackedIndex >= 0) {
+      const trackedRemote = remotes[trackedIndex];
+      if (!trackedRemote) {
+        continue;
+      }
       remotes[trackedIndex] = mergeCheckpointRemote({
-        remote: remotes[trackedIndex],
+        remote: trackedRemote,
         checkpoint,
       });
       continue;
@@ -271,7 +275,8 @@ export function buildTicketFieldAuthorities(input: {
   readonly remotes: readonly TicketRemoteLink[];
   readonly conflicts?: readonly TicketSyncConflictCompatibility[];
 }): TicketFieldAuthorityEntry[] {
-  const defaultAuthority = input.remotes.length > 0 ? "remote" : "local";
+  const defaultAuthority: TicketFieldAuthority =
+    input.remotes.length > 0 ? "remote" : "local";
   const byField = new Map<string, TicketFieldAuthorityEntry>();
 
   for (const field of [
@@ -306,13 +311,31 @@ export function buildTicketFieldAuthorities(input: {
   for (const conflict of input.conflicts ?? []) {
     const field = normalizeTicketFieldName(conflict.field);
     const current = byField.get(field);
+    const authority = normalizeConflictAuthority({
+      authority: conflict.authority,
+    });
     byField.set(field, {
       field,
-      authority: conflict.authority ?? current?.authority ?? defaultAuthority,
+      authority: authority ?? current?.authority ?? defaultAuthority,
     });
   }
 
   return [...byField.values()];
+}
+
+function normalizeConflictAuthority(input: {
+  readonly authority?: string;
+}): TicketFieldAuthority | undefined {
+  if (
+    input.authority === "local" ||
+    input.authority === "remote" ||
+    input.authority === "append_only" ||
+    input.authority === "derived" ||
+    input.authority === "review_required"
+  ) {
+    return input.authority;
+  }
+  return undefined;
 }
 
 export function buildTicketFieldVersions(input: {

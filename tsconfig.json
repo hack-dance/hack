@@ -12,6 +12,17 @@
 
     // Bundler mode
     "moduleResolution": "bundler",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"],
+      "@commands/*": ["src/commands/*"],
+      "@control-plane/*": ["src/control-plane/*"],
+      "@daemon/*": ["src/daemon/*"],
+      "@lib/*": ["src/lib/*"],
+      "@scripts/*": ["scripts/*"],
+      "@tests/*": ["tests/*"],
+      "@ui/*": ["src/ui/*"]
+    },
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "verbatimModuleSyntax": true,

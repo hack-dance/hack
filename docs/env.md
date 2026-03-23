@@ -20,11 +20,35 @@ local-only.
 - Project access does not automatically grant env value access.
 - Team membership does not automatically grant env administration.
 - Shared value disclosure must be checked independently from project access.
+---
+
+## Trust model at a glance
+
+Hack currently has three env layers, and they should be understood separately:
+
+- Contract: `.hack/hack.env.json` defines what keys exist and how they should materialize locally.
+- Local values: `.hack/.env` is the usual plaintext file for `plain_env`, and `plain_env` falls back to the current process env when `.hack/.env` does not provide a value.
+- Local secrets: the configured secret backend stores secret values for keys that should not live in `.hack/.env`. In `cloud` mode today, this is still a local shim over encrypted-file storage, not a remote portable copy.
+
+Current status:
+
+- The contract is portable and safe to commit.
+- Local values and local secrets are not automatically portable across machines.
+- Remote env portability is a follow-on design, not the current default.
+
+Planned direction:
+
+- Portable env values will live in an immutable encrypted bundle artifact.
+- Bundle access will be controlled through explicit project-key sharing.
+- Applying a bundle will still write values back into `.hack/.env` and the configured local secret backend so existing runtime behavior stays intact.
+
+See `docs/plans/2026-03-13-env-portability-and-secret-management-design.md` for the full portable env and key-sharing model.
 
 ## Files and storage
 
 - `.hack/hack.env.json` (committed): declares env vars, required vs optional, per-service scope, and where values should come from.
-- `.hack/.env` (gitignored): stores non-secret values (`source: "plain_env"`).
+- `.hack/.env` (local plaintext file): stores non-secret values (`source: "plain_env"`). Most repos should gitignore it, but Hack does not currently enforce that.
+- `process.env` (ambient fallback): supplies `plain_env` values when `.hack/.env` is missing a key.
 - Configured secret backend (`controlPlane.secrets.backend`): stores secret values for `source: "keychain"` contract vars.
 
 ## Contract format (`.hack/hack.env.json`)
@@ -53,6 +77,7 @@ local-only.
 ```
 
 Fields:
+
 - `key`: uppercase snake-case env var name (e.g. `AWS_PROFILE`).
 - `required`: if true, `hack up/run/restart` fails when missing (for targeted services).
 - `source`:
@@ -65,6 +90,7 @@ Fields:
 
 - `hack env list [--json] [--show-secrets]`
   - shows contract + resolution state
+  - includes a storage summary for the committed contract, local `.hack/.env`, ambient `process.env` fallback, configured secret backend mode, and current portable-state status
   - exits `1` if required vars are missing
 - `hack env set KEY=VALUE`
   - writes to `.hack/.env`
@@ -78,6 +104,7 @@ Fields:
   - sets global backend strategy for multi-node/env secret storage
 
 Notes:
+
 - `hack env set` also supports interactive prompting when `KEY` or `VALUE` is omitted.
 - Keychain mode uses service name `hack-<projectName>` (project name from `.hack/hack.config.json`).
 - Encrypted-file mode uses `HACK_SECRETS_FILE_KEY` (if set) before keychain key lookup (`hack-secrets-backend/encrypted-file-key`).
@@ -108,6 +135,7 @@ Global config supports backend selection for secret portability:
 ```
 
 Fields:
+
 - `backend`: `keychain` | `encrypted_file` | `cloud`.
 - `allowEnvAuthRefs`: allow `env:VAR_NAME` auth/secret references for node/controller workflows.
 - `encryptedFile.path`: target path for encrypted local store mode.
@@ -125,8 +153,10 @@ When you run `hack up`, `hack restart`, or `hack run`, hack:
 4. Invokes `docker compose` with an environment that includes resolved values (including secret backend values).
 
 Security posture:
+
 - Secret values are never written into `.hack/` YAML files.
-- Plain env values live in `.hack/.env` (expected to be gitignored in most repos).
+- Plain env values typically live in `.hack/.env`, but Hack can also read them from the current process env for `plain_env` keys.
+- `.hack/.env` should be gitignored by the repo, but Hack does not currently enforce that invariant during `hack init`.
 
 Planned shared-admin direction:
 - keep `hack env set` and `hack env unset` local by default
@@ -136,16 +166,19 @@ Planned shared-admin direction:
 ## Remote node secret behavior
 
 Current behavior (today):
+
 - Node auth tokens and extension auth refs are stored through the configured secret backend.
 - `env:VAR_NAME` auth refs are allowed only when `controlPlane.secrets.allowEnvAuthRefs=true`.
 - Remote dispatch/workspace bootstrap does **not** automatically copy all host env values to remote nodes.
 
 Recommended setup:
+
 - Keep controller secrets in `keychain` or `encrypted_file` backend (not shell env).
 - Configure each remote node to use the same secret backend strategy where possible.
 - Use project env contract (`.hack/hack.env.json`) to make required keys explicit before runs.
 
 Planned direction:
+
 - Add an explicit host-to-node secret sync command with least-privilege scoping, encrypted payload delivery, and audit events per run.
 
 ## Daemon/gateway API (UI integration)

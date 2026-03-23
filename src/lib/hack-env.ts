@@ -7,6 +7,7 @@ import {
 import { parseDotEnv } from "./env.ts";
 import { readTextFile, writeTextFileIfChanged } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
+import type { SecretStoreDescriptor } from "./secret-store.ts";
 import { resolveSecretStore } from "./secret-store.ts";
 
 export const HACK_ENV_VERSION = 1 as const;
@@ -47,10 +48,40 @@ export type HackEnvResolveResult = {
   readonly contractPath: string;
   readonly contractExists: boolean;
   readonly contractParseError?: string;
+  readonly envPath: string;
+  readonly envExists: boolean;
   readonly contract: HackEnvContract;
+  readonly storage: HackEnvStorageSummary;
   readonly values: readonly HackEnvValueState[];
   readonly missingRequired: readonly HackEnvValueState[];
   readonly envForCompose: Readonly<Record<string, string>>;
+};
+
+export type HackEnvPortableStateSummary = {
+  readonly status: "not_configured";
+  readonly trustModel: "local_only";
+  readonly message: string;
+};
+
+export type HackEnvStorageSummary = {
+  readonly contract: {
+    readonly path: string;
+    readonly trustModel: "committed_no_values";
+  };
+  readonly localPlaintext: {
+    readonly path: string;
+    readonly exists: boolean;
+    readonly trustModel: "unenforced_plaintext_file";
+    readonly fallback: {
+      readonly enabled: true;
+      readonly source: "process_env";
+      readonly trustModel: "ambient_process_env";
+    };
+  };
+  readonly localSecrets: SecretStoreDescriptor & {
+    readonly trustModel: "local_secret_backend" | "local_secret_backend_shim";
+  };
+  readonly portableState: HackEnvPortableStateSummary;
 };
 
 export async function readHackEnvContract(opts: {
@@ -101,6 +132,7 @@ export async function resolveHackEnv(opts: {
 
   const envPath = resolve(opts.projectDir, PROJECT_ENV_FILENAME);
   const envText = await readTextFile(envPath);
+  const envExists = envText !== null;
   const dotenv = envText ? parseDotEnv(envText) : {};
 
   const envForCompose: Record<string, string> = {};
@@ -170,7 +202,38 @@ export async function resolveHackEnv(opts: {
     contractPath: read.path,
     contractExists: read.exists,
     ...(read.parseError ? { contractParseError: read.parseError } : {}),
+    envPath,
+    envExists,
     contract,
+    storage: {
+      contract: {
+        path: read.path,
+        trustModel: "committed_no_values",
+      },
+      localPlaintext: {
+        path: envPath,
+        exists: envExists,
+        trustModel: "unenforced_plaintext_file",
+        fallback: {
+          enabled: true,
+          source: "process_env",
+          trustModel: "ambient_process_env",
+        },
+      },
+      localSecrets: {
+        ...secretStore.descriptor,
+        trustModel:
+          secretStore.descriptor.mode === "shim"
+            ? "local_secret_backend_shim"
+            : "local_secret_backend",
+      },
+      portableState: {
+        status: "not_configured",
+        trustModel: "local_only",
+        message:
+          "Project env values are not portable across machines by default. Portable encrypted bundles are not configured yet.",
+      },
+    },
     values,
     missingRequired,
     envForCompose,

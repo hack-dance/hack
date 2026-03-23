@@ -358,7 +358,10 @@ async function resolveRefreshResult(opts: {
   readonly repairReason: string | null;
 }> {
   if (opts.runtimeResult.ok) {
-    return await resolveHealthyRefreshResult(opts);
+    return await resolveHealthyRefreshResult({
+      ...opts,
+      runtimeResult: opts.runtimeResult,
+    });
   }
   return {
     health: resolveUnavailableRefreshHealth({

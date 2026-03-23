@@ -54,12 +54,19 @@ export type RuntimeProject = {
   readonly isGlobal: boolean;
 };
 
-export type RuntimeProjectsResult = {
-  readonly ok: boolean;
-  readonly runtime: readonly RuntimeProject[];
-  readonly error: string | null;
-  readonly checkedAtMs: number;
-};
+export type RuntimeProjectsResult =
+  | {
+      readonly ok: true;
+      readonly runtime: readonly RuntimeProject[];
+      readonly error: null;
+      readonly checkedAtMs: number;
+    }
+  | {
+      readonly ok: false;
+      readonly runtime: readonly RuntimeProject[];
+      readonly error: string;
+      readonly checkedAtMs: number;
+    };
 
 type ContainerInspectData = {
   readonly labels: Record<string, string>;

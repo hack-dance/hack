@@ -1529,47 +1529,54 @@ function parseTicketDocumentOption(opts: {
   readonly index: number;
   readonly state: MutableTicketsArgs;
 }): ParseHandlerResult {
-  for (const [flag, kind, error] of [
-    [
-      "--kind",
-      (value: string) => (isTicketDocumentKind(value) ? value : null),
-      "Invalid --kind value. Expected description|spec|notes.",
-    ],
-    [
-      "--role",
-      (value: string) => (isTicketDocumentRole(value) ? value : null),
-      "Invalid --role value. Expected description|spec|notes|handoff.",
-    ],
-  ] as const) {
-    const consumed = consumeOptionValue({
-      args: opts.args,
-      index: opts.index,
-      flag,
-    });
-    if (!consumed.matched) {
-      continue;
-    }
-    if (consumed.error) {
+  const kindOption = consumeOptionValue({
+    args: opts.args,
+    index: opts.index,
+    flag: "--kind",
+  });
+  if (kindOption.matched) {
+    if (kindOption.error) {
       return {
         handled: true,
-        nextIndex: consumed.nextIndex,
-        error: consumed.error,
+        nextIndex: kindOption.nextIndex,
+        error: kindOption.error,
       };
     }
-    const value = kind(consumed.value ?? "");
-    if (!value) {
+    const kind = kindOption.value ?? "";
+    if (!isTicketDocumentKind(kind)) {
       return {
         handled: true,
-        nextIndex: consumed.nextIndex,
-        error,
+        nextIndex: kindOption.nextIndex,
+        error: "Invalid --kind value. Expected description|spec|notes.",
       };
     }
-    if (flag === "--kind") {
-      opts.state.kind = value;
-    } else {
-      opts.state.role = value;
+    opts.state.kind = kind;
+    return { handled: true, nextIndex: kindOption.nextIndex };
+  }
+
+  const roleOption = consumeOptionValue({
+    args: opts.args,
+    index: opts.index,
+    flag: "--role",
+  });
+  if (roleOption.matched) {
+    if (roleOption.error) {
+      return {
+        handled: true,
+        nextIndex: roleOption.nextIndex,
+        error: roleOption.error,
+      };
     }
-    return { handled: true, nextIndex: consumed.nextIndex };
+    const role = roleOption.value ?? "";
+    if (!isTicketDocumentRole(role)) {
+      return {
+        handled: true,
+        nextIndex: roleOption.nextIndex,
+        error: "Invalid --role value. Expected description|spec|notes|handoff.",
+      };
+    }
+    opts.state.role = role;
+    return { handled: true, nextIndex: roleOption.nextIndex };
   }
 
   return { handled: false, nextIndex: opts.index };

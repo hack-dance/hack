@@ -12,7 +12,7 @@ import {
 } from "../../../lib/config.ts";
 import { isRecord } from "../../../lib/guards.ts";
 import { openUrl } from "../../../lib/os.ts";
-import { display } from "../../../ui/display.ts";
+import { type DisplayCell, display } from "../../../ui/display.ts";
 import {
   findTicketRemoteLink,
   normalizeTicketFieldName,
@@ -2579,6 +2579,7 @@ type LinearSyncClient = Pick<
   | "getIssueByIdentifier"
   | "getProject"
   | "listIssueComments"
+  | "listProjects"
   | "listProjectDocuments"
   | "listProjectIssuesPage"
   | "listProjectMilestones"
@@ -2593,6 +2594,7 @@ type LinearSyncClient = Pick<
 
 type ProjectArtifactLinearClient = Pick<
   ReturnType<typeof createLinearClient>,
+  | "listProjects"
   | "createProjectDocument"
   | "createProjectMilestone"
   | "createProjectUpdate"
@@ -3228,7 +3230,12 @@ async function runProjectArtifactCommand(input: {
     }
 
     const draftArtifacts = localArtifacts.data.filter(
-      (artifact) =>
+      (
+        artifact
+      ): artifact is Extract<
+        LocalLinearProjectArtifact,
+        { readonly kind: "linear-project-status-update" }
+      > =>
         artifact.kind === "linear-project-status-update" &&
         isDraftStatusUpdatePath({ path: artifact.path })
     );
@@ -3897,10 +3904,10 @@ async function renderProjectArtifactCommandPayload(input: {
     entries: [
       ["profile", input.payload.profileId],
       ["project_id", input.payload.projectId],
-      ...Object.entries(input.payload.summary ?? {}).map(([key, value]) => [
-        key,
-        String(value),
-      ]),
+      ...Object.entries(input.payload.summary ?? {}).map(
+        ([key, value]) =>
+          [key, String(value)] as const satisfies readonly [string, DisplayCell]
+      ),
     ],
   });
 }
@@ -4135,7 +4142,7 @@ function removeLinearAssigneeMapping(input: {
 
 type RecordedSyncConflict = {
   readonly field: string;
-  readonly authority: "hack" | "linear";
+  readonly authority: "hack" | "linear" | "review_required";
   readonly summary: string;
   readonly localValue?: TicketMetadataValue;
   readonly remoteValue?: TicketMetadataValue;

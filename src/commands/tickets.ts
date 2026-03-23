@@ -14,7 +14,7 @@ import { logger } from "../ui/logger.ts";
  */
 const ticketsSpec = defineCommand({
   name: "tickets",
-  summary: "Track repo-local work in git-backed tickets",
+  summary: "Track repo-local work without leaving git",
   description: [
     "Usage:",
     "  hack tickets list",

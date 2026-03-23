@@ -683,7 +683,7 @@ async function resolveEnvValue(opts: {
 
 export const envCommand = defineCommand({
   name: "env",
-  summary: "Share project env contracts and store local secrets",
+  summary: "Set project env vars and local secrets",
   group: "Integrations",
   expandInRootHelp: true,
   options: [],

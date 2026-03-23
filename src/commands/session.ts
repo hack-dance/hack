@@ -906,7 +906,7 @@ async function streamTailOutput(opts: {
 
 export const sessionCommand = defineCommand({
   name: "session",
-  summary: "Keep persistent work sessions for projects and agents",
+  summary: "Keep reusable terminal workspaces alive",
   group: "Integrations",
   options: [],
   positionals: [],

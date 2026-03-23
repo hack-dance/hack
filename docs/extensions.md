@@ -367,6 +367,10 @@ Detailed design and sequencing live in:
 
 ### Linear extension (`hack x linear`)
 
+Use Linear when your team plans work there and you want repo work to stay connected to Linear projects
+or issues. It becomes relevant when a repo should map to a Linear project or when you want manual sync
+between Linear and repo-local tickets.
+
 Linear integration supports multiple auth profiles, project-level binding, and manual sync in both directions between Linear issues and hack tickets.
 
 Quick start:
@@ -605,6 +609,10 @@ Notes:
 - `ip` defaults to `-4` when no args are provided.
 
 ### Tickets extension (`hack x tickets`)
+
+Use tickets when you want lightweight work tracking that stays with the repo and is easy for agents or
+small teams to update. It becomes relevant as soon as you want to capture follow-up work without
+depending on a separate tracker.
 
 A lightweight, git-backed ticket log stored in `.hack/tickets/` and syncable via a dedicated git ref (`refs/hack/tickets` hidden by default).
 

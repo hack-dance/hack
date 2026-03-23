@@ -5,6 +5,27 @@ This directory is organized around the product story instead of the implementati
 If you are new to Hack, start with the core path first, then move into integrations, then only
 visit the beta and reference surfaces you actually need.
 
+## Adjacent capabilities at a glance
+
+These docs cover a few capabilities that usually appear right after the core `init/up/open/logs` loop.
+You do not need all of them to start using `hack`.
+
+- **GitHub**: Connect GitHub when you want `hack` to help open or update pull requests from the same
+  workflow you use locally. Relevant once your local branch is ready to share or review. Start in
+  [`guides/github-workflows.md`](guides/github-workflows.md).
+- **Linear**: Connect Linear when your team tracks delivery there and you want project or issue sync
+  tied to the repo. Relevant when a repo should map cleanly to a Linear project or issue workflow.
+  Start in [`guides/linear-integration-architecture.md`](guides/linear-integration-architecture.md).
+- **Tickets**: Use tickets for lightweight repo-local work tracking that stays close to the code and is
+  easy for agents to update. Relevant when you want task tracking without depending on an external
+  tracker. Start in [`guides/tickets.md`](guides/tickets.md).
+- **Sessions**: Use sessions to keep terminal workspaces alive across SSH, restarts, and agent handoff.
+  Relevant when you want persistent shells instead of recreating project context each time. Start in
+  [`sessions.md`](sessions.md).
+- **Env**: Use env to declare which local config and secrets a project actually needs. Relevant when
+  teammates, automation, or remote runs need a repeatable way to resolve project settings. Start in
+  [`env.md`](env.md).
+
 ## Core workflows
 
 - [Initialize a project](guides/init-project.md)

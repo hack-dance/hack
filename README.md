@@ -167,6 +167,31 @@ Docs:
 - [CLI reference](docs/cli.md)
 - [GitHub workflows](docs/guides/github-workflows.md)
 
+## Adjacent capabilities at a glance
+
+Not every repo needs every `hack` capability on day one. These are the common adjacent tools people run
+into after `hack init`, `hack up`, and `hack open` are already working:
+
+- **GitHub**: Connect GitHub when you want `hack` to help with pull requests and branch handoff from the
+  same place you run local work. It becomes relevant once you are ready to open, update, or share PRs.
+  Docs: [`docs/guides/github-workflows.md`](docs/guides/github-workflows.md)
+- **Linear**: Connect Linear when your team plans work there and you want Hack to bridge repo work with
+  project and issue tracking. It becomes relevant when a repo maps to a Linear project or when you want
+  sync between Linear issues and repo-local work. Docs:
+  [`docs/guides/linear-integration-architecture.md`](docs/guides/linear-integration-architecture.md)
+- **Tickets**: Use tickets when you want lightweight task tracking that stays with the repo and works
+  well for solo work, small teams, or agents. It becomes relevant as soon as you want to capture work
+  items without pushing everyone into a separate tracker. Docs:
+  [`docs/guides/tickets.md`](docs/guides/tickets.md)
+- **Sessions**: Use sessions when you want a terminal workspace you can come back to, share over SSH,
+  or hand off to an agent without rebuilding context. It becomes relevant when you keep long-running
+  shells, multiple projects, or multiple branches alive at once. Docs:
+  [`docs/sessions.md`](docs/sessions.md)
+- **Env**: Use env when a project needs local configuration like API keys, database URLs, or per-service
+  settings that should be explicit instead of tribal knowledge. It becomes relevant as soon as `hack up`,
+  `hack run`, or remote workflows depend on values that should not be hardcoded into the repo. Docs:
+  [`docs/env.md`](docs/env.md)
+
 ## Supporting Capabilities
 
 ### Sessions

@@ -25,6 +25,24 @@ If you are new to Hack, scan the CLI in this order:
 - `--profile` accepts comma-separated compose profiles.
 - Options marked repeatable can be passed multiple times.
 
+## Adjacent capabilities
+
+These commands usually matter after the basic `hack init` / `hack up` / `hack open` loop is already
+working. You do not need all of them for every repo.
+
+- **GitHub**: Use `hack x github` when you want `hack` to help with connected-account setup and pull
+  request workflows. It becomes relevant once a branch is ready to open, update, or hand off for
+  review.
+- **Linear**: Use `hack linear` when repo work should stay connected to Linear issues or projects. It
+  becomes relevant when the repo maps to a Linear workflow and you want sync without leaving the CLI.
+- **Tickets**: Use `hack tickets` when you want lightweight repo-local work tracking that stays in git.
+  It becomes relevant as soon as you want to capture follow-up work without depending on an external
+  tracker.
+- **Sessions**: Use `hack session` when you want a reusable terminal workspace you can return to or hand
+  off. It becomes relevant when you keep long-running shells, agent runs, or SSH workspaces alive.
+- **Env**: Use `hack env` when a project needs explicit local config or secrets. It becomes relevant as
+  soon as `hack up`, `hack run`, or remote workflows depend on values that should not be hardcoded.
+
 ## Local vs broker-mediated administration
 
 This reference documents the commands that exist today. Hack stays local-first by default.
@@ -65,11 +83,11 @@ Current practical rule:
 | `hack project` | Inspect or manage project metadata | Project |
 | `hack config` | Read/write hack.config.json values | Core workflows |
 | `hack auth` | Manage Hack account sign-in | Collaboration & integrations |
-| `hack linear` | Linear account connection, issue sync, and project artifact management | Collaboration & integrations |
-| `hack env` | Share project env contracts and store local secrets | Collaboration & integrations |
-| `hack session` | Keep persistent work sessions for projects and agents | Collaboration & integrations |
+| `hack linear` | Connect Linear and sync repo work with Linear projects/issues | Collaboration & integrations |
+| `hack env` | Set project env vars and local secrets | Collaboration & integrations |
+| `hack session` | Keep reusable terminal workspaces alive | Collaboration & integrations |
 | `hack ssh` | Show SSH details for reaching this machine and its sessions | Collaboration & integrations |
-| `hack tickets` | Track repo-local work in git-backed tickets | Collaboration & integrations |
+| `hack tickets` | Track repo-local work without leaving git | Collaboration & integrations |
 | `hack internal` | Manage hack-managed internal overrides | Internal |
 | `hack gateway` | Beta: manage the remote control plane entrypoint | Beta workflows |
 | `hack node` | Beta: manage remote execution nodes | Beta workflows |

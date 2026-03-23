@@ -134,12 +134,46 @@ Tip: use `--body-stdin` for multi-line markdown.
 
 ### Storage layout
 
-In your project repo:
+Local tickets state under your project:
 
 - `.hack/tickets/events/events-YYYY-MM.jsonl` — event log segments (UTC month)
 - `.hack/tickets/projection.sqlite` — local SQLite projection cache rebuilt from the journal
 - `.hack/tickets/git/bare.git` — a bare repo used to manage the tickets ref
 - `.hack/tickets/git/worktree` — a worktree used for reading/writing ticket data
+- `.hack/tickets/git/worktree/.hack/tickets/events/events-YYYY-MM.jsonl` — local checkout of the durable event log
+
+Path inside the tickets ref:
+
+- `.hack/tickets/events/events-YYYY-MM.jsonl` — portable event log segments (UTC month)
+
+### Durability and portability
+
+The durable portable layer is the event log in the tickets ref.
+
+- inside the ref, `.hack/tickets/events/*.jsonl` is the source of truth
+- locally, those files are materialized under `.hack/tickets/git/worktree/.hack/tickets/events/*.jsonl`
+- `list`, `show`, and related views are rebuilt by replaying the event log
+- deleting local projection state must not lose ticket history
+
+Rebuildable local state includes:
+
+- `.hack/tickets/git/bare.git`
+- `.hack/tickets/git/worktree`
+- `.hack/tickets/create.lock`
+
+These paths exist to coordinate sync and local writes. They can be recreated from the repo and the tickets ref.
+
+### Hidden refs and legacy branch compatibility
+
+By default, tickets sync to the hidden ref `refs/hack/tickets`.
+
+Compatibility rules:
+
+- the CLI fetches the hidden ref first
+- if the hidden ref is missing, it falls back to the legacy branch ref `refs/heads/hack/tickets`
+- when legacy ref data is imported, event logs are deduped by `eventId` and normalized before the next push
+
+If your remote rejects hidden refs, set `controlPlane.tickets.git.refMode` to `heads` and use `refs/heads/hack/tickets` instead.
 
 Portability rules:
 

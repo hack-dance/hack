@@ -2580,6 +2580,7 @@ type LinearSyncClient = Pick<
   | "getProject"
   | "listIssueComments"
   | "listProjects"
+  | "listProjectsPage"
   | "listProjectDocuments"
   | "listProjectIssuesPage"
   | "listProjectMilestones"

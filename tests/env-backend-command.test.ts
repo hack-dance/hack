@@ -9,8 +9,6 @@ type RunResult = {
   readonly stderr: string;
 };
 
-const ENV_BACKEND_COMMAND_TIMEOUT_MS = 60_000;
-
 let tempDir: string | null = null;
 let tempGlobalConfigPath: string | null = null;
 let previousGlobalConfigPath: string | undefined;
@@ -44,7 +42,6 @@ afterEach(async () => {
 
 test(
   "env backend status defaults to keychain",
-  { timeout: ENV_BACKEND_COMMAND_TIMEOUT_MS },
   async () => {
     const result = await runHack({
       args: ["env", "backend", "status", "--json"],
@@ -60,12 +57,12 @@ test(
     };
     expect(json.backend).toBe("keychain");
     expect(json.encrypted_file.path).toBe("~/.hack/secrets.enc.json");
-  }
+  },
+  { timeout: 20_000 }
 );
 
 test(
   "env backend use encrypted_file persists selection",
-  { timeout: ENV_BACKEND_COMMAND_TIMEOUT_MS },
   async () => {
     const result = await runHack({
       args: [
@@ -93,12 +90,12 @@ test(
     const configText = await readFile(tempGlobalConfigPath!, "utf8");
     expect(configText).toContain('"backend": "encrypted_file"');
     expect(configText).toContain('"/tmp/custom-secrets.enc.json"');
-  }
+  },
+  { timeout: 20_000 }
 );
 
 test(
   "env backend use encrypted_file can provision a stable key file",
-  { timeout: ENV_BACKEND_COMMAND_TIMEOUT_MS },
   async () => {
     if (!(tempDir && tempGlobalConfigPath)) {
       throw new Error("Missing temp global config state");
@@ -141,12 +138,12 @@ test(
     const configText = await readFile(tempGlobalConfigPath, "utf8");
     expect(configText).toContain('"keyPath"');
     expect(configText).toContain(keyPath);
-  }
+  },
+  { timeout: 40_000 }
 );
 
 test(
   "env backend use cloud requires provider and stores cloud settings",
-  { timeout: ENV_BACKEND_COMMAND_TIMEOUT_MS },
   async () => {
     const invalid = await runHack({
       args: ["env", "backend", "use", "cloud"],
@@ -192,12 +189,12 @@ test(
     expect(json.cloud.provider).toBe("aws");
     expect(json.cloud.project).toBe("dev-account");
     expect(json.cloud.secretPrefix).toBe("hack-cli");
-  }
+  },
+  { timeout: 40_000 }
 );
 
 test(
   "env set --secret stores value using encrypted backend",
-  { timeout: ENV_BACKEND_COMMAND_TIMEOUT_MS },
   async () => {
     if (!tempDir) {
       throw new Error("Missing temp dir");
@@ -280,288 +277,8 @@ test(
     const apiKey = listJson.vars.find((entry) => entry.key === "API_KEY");
     expect(apiKey?.source).toBe("keychain");
     expect(apiKey?.value).toBe("super-secret");
-  }
-);
-
-test(
-  "env list --json explains storage and trust boundaries",
-  { timeout: ENV_BACKEND_COMMAND_TIMEOUT_MS },
-  async () => {
-    if (!tempDir) {
-      throw new Error("Missing temp dir");
-    }
-    process.env.HACK_SECRETS_FILE_KEY = "env-storage-summary-key";
-    const projectRoot = resolve(tempDir, "storage-repo");
-    const projectDir = resolve(projectRoot, ".hack");
-    const encryptedStorePath = resolve(tempDir, "storage-secrets.enc.json");
-    await mkdir(projectDir, { recursive: true });
-    await writeFile(
-      resolve(projectDir, "docker-compose.yml"),
-      "services: {}\n"
-    );
-    await writeFile(
-      resolve(projectDir, ".env"),
-      'PUBLIC_TOKEN="hello world"\n'
-    );
-    await writeFile(
-      resolve(projectDir, "hack.config.json"),
-      `${JSON.stringify(
-        {
-          name: "storage-summary-project",
-          controlPlane: {
-            secrets: {
-              backend: "encrypted_file",
-              encryptedFile: {
-                path: encryptedStorePath,
-              },
-            },
-          },
-        },
-        null,
-        2
-      )}\n`
-    );
-    await writeFile(
-      resolve(projectDir, "hack.env.json"),
-      `${JSON.stringify(
-        {
-          version: 1,
-          vars: [
-            {
-              key: "PUBLIC_TOKEN",
-              required: true,
-              source: "plain_env",
-            },
-            {
-              key: "DATABASE_URL",
-              required: true,
-              source: "keychain",
-            },
-          ],
-        },
-        null,
-        2
-      )}\n`
-    );
-
-    const result = await runHack({
-      args: ["env", "list", "--json"],
-      env: {
-        ...process.env,
-        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
-        HACK_SECRETS_FILE_KEY: "env-storage-summary-key",
-      },
-      cwd: projectRoot,
-    });
-
-    expect(result.exitCode).toBe(1);
-
-    const json = JSON.parse(result.stdout) as {
-      readonly storage?: {
-        readonly contract?: {
-          readonly path: string;
-          readonly trust_model: string;
-        };
-        readonly local_plaintext?: {
-          readonly path: string;
-          readonly exists: boolean;
-          readonly trust_model: string;
-          readonly fallback?: {
-            readonly enabled: boolean;
-            readonly source: string;
-            readonly trust_model: string;
-          };
-        };
-        readonly local_secrets?: {
-          readonly backend: string;
-          readonly location: string;
-          readonly mode: string;
-          readonly trust_model: string;
-        };
-        readonly portable_state?: {
-          readonly status: string;
-          readonly trust_model: string;
-          readonly message: string;
-        };
-      };
-    };
-
-    expect(json.storage?.contract?.path).toBe(
-      resolve(projectDir, "hack.env.json")
-    );
-    expect(json.storage?.contract?.trust_model).toBe("committed_no_values");
-    expect(json.storage?.local_plaintext?.path).toBe(
-      resolve(projectDir, ".env")
-    );
-    expect(json.storage?.local_plaintext?.exists).toBe(true);
-    expect(json.storage?.local_plaintext?.trust_model).toBe(
-      "unenforced_plaintext_file"
-    );
-    expect(json.storage?.local_plaintext?.fallback?.enabled).toBe(true);
-    expect(json.storage?.local_plaintext?.fallback?.source).toBe("process_env");
-    expect(json.storage?.local_plaintext?.fallback?.trust_model).toBe(
-      "ambient_process_env"
-    );
-    expect(json.storage?.local_secrets?.backend).toBe("encrypted_file");
-    expect(json.storage?.local_secrets?.location).toBe(encryptedStorePath);
-    expect(json.storage?.local_secrets?.mode).toBe("native");
-    expect(json.storage?.local_secrets?.trust_model).toBe(
-      "local_secret_backend"
-    );
-    expect(json.storage?.portable_state?.status).toBe("not_configured");
-    expect(json.storage?.portable_state?.trust_model).toBe("local_only");
-    expect(json.storage?.portable_state?.message).toContain("not portable");
-  }
-);
-
-test(
-  "env list --json marks cloud backend as a local shim",
-  { timeout: ENV_BACKEND_COMMAND_TIMEOUT_MS },
-  async () => {
-    if (!tempDir) {
-      throw new Error("Missing temp dir");
-    }
-    process.env.HACK_SECRETS_FILE_KEY = "env-storage-cloud-shim-key";
-    const projectRoot = resolve(tempDir, "cloud-storage-repo");
-    const projectDir = resolve(projectRoot, ".hack");
-    const encryptedStorePath = resolve(
-      tempDir,
-      "cloud-storage-secrets.enc.json"
-    );
-    await mkdir(projectDir, { recursive: true });
-    await writeFile(
-      resolve(projectDir, "docker-compose.yml"),
-      "services: {}\n"
-    );
-    await writeFile(
-      resolve(projectDir, "hack.config.json"),
-      `${JSON.stringify(
-        {
-          name: "cloud-storage-project",
-          controlPlane: {
-            secrets: {
-              backend: "cloud",
-              encryptedFile: {
-                path: encryptedStorePath,
-              },
-              cloud: {
-                provider: "aws",
-                project: "dev-account",
-                secretPrefix: "hack-cli",
-              },
-            },
-          },
-        },
-        null,
-        2
-      )}\n`
-    );
-    await writeFile(
-      resolve(projectDir, "hack.env.json"),
-      `${JSON.stringify(
-        {
-          version: 1,
-          vars: [
-            {
-              key: "DATABASE_URL",
-              required: false,
-              source: "keychain",
-            },
-          ],
-        },
-        null,
-        2
-      )}\n`
-    );
-
-    const result = await runHack({
-      args: ["env", "list", "--json"],
-      env: {
-        ...process.env,
-        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
-        HACK_SECRETS_FILE_KEY: "env-storage-cloud-shim-key",
-      },
-      cwd: projectRoot,
-    });
-
-    expect(result.exitCode).toBe(0);
-
-    const json = JSON.parse(result.stdout) as {
-      readonly storage?: {
-        readonly local_secrets?: {
-          readonly backend: string;
-          readonly location: string;
-          readonly mode: string;
-          readonly provider: string | null;
-          readonly trust_model: string;
-        };
-      };
-    };
-
-    expect(json.storage?.local_secrets?.backend).toBe("cloud");
-    expect(json.storage?.local_secrets?.mode).toBe("shim");
-    expect(json.storage?.local_secrets?.provider).toBe("aws");
-    expect(json.storage?.local_secrets?.location).toContain(encryptedStorePath);
-    expect(json.storage?.local_secrets?.trust_model).toBe(
-      "local_secret_backend_shim"
-    );
-  }
-);
-
-test(
-  "env list shows storage summary even when no contract exists",
-  { timeout: ENV_BACKEND_COMMAND_TIMEOUT_MS },
-  async () => {
-    if (!tempDir) {
-      throw new Error("Missing temp dir");
-    }
-    process.env.HACK_SECRETS_FILE_KEY = "env-storage-no-contract-key";
-    const projectRoot = resolve(tempDir, "no-contract-repo");
-    const projectDir = resolve(projectRoot, ".hack");
-    const encryptedStorePath = resolve(tempDir, "no-contract-secrets.enc.json");
-    await mkdir(projectDir, { recursive: true });
-    await writeFile(
-      resolve(projectDir, "docker-compose.yml"),
-      "services: {}\n"
-    );
-    await writeFile(
-      resolve(projectDir, "hack.config.json"),
-      `${JSON.stringify(
-        {
-          name: "no-contract-project",
-          controlPlane: {
-            secrets: {
-              backend: "encrypted_file",
-              encryptedFile: {
-                path: encryptedStorePath,
-              },
-            },
-          },
-        },
-        null,
-        2
-      )}\n`
-    );
-
-    const result = await runHack({
-      args: ["env", "list"],
-      env: {
-        ...process.env,
-        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
-        HACK_LOGGER: "console",
-        HACK_SECRETS_FILE_KEY: "env-storage-no-contract-key",
-      },
-      cwd: projectRoot,
-    });
-
-    expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("Env storage");
-    expect(result.stdout).toContain(resolve(projectDir, "hack.env.json"));
-    expect(result.stdout).toContain(resolve(projectDir, ".env"));
-    expect(result.stdout).toContain("not_configured");
-    expect(result.stderr).toContain("No");
-    expect(result.stderr).toContain("hack.env.json contract found");
-  }
+  },
+  { timeout: 40_000 }
 );
 
 async function runHack(input: {

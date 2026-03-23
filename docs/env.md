@@ -86,6 +86,86 @@ Fields:
 - `services`: `null` (or omitted) means all services; otherwise a list of Compose service names.
 - `description`: optional, for humans/UI.
 
+## Portable managed artifact
+
+Portable env management uses three layers:
+
+- `.hack/hack.env.json`: committed declaration contract for keys, required flags, service scope, and descriptions
+- `PortableProjectEnvArtifactV1`: canonical managed-value artifact for portability, import/export, and future remote publish/apply flows
+- local compatibility storage: `.hack/.env` for plaintext values plus the configured secret backend for secret values
+
+The managed artifact is intentionally separate from `.hack/hack.env.json`. The contract remains safe to commit. The managed artifact carries actual values plus intent metadata and should be encrypted as a whole when stored outside the local machine.
+
+Suggested import/export filename:
+
+- `.hack/hack.env.managed.json`
+- schema URL: `https://schemas.hack/hack.env.managed.schema.json`
+
+Artifact shape:
+
+```json
+{
+  "$schema": "https://schemas.hack/hack.env.managed.schema.json",
+  "version": 1,
+  "environment": "default",
+  "metadata": {
+    "description": "Shared dev environment for Hack App",
+    "updatedAt": "2026-03-13T18:00:00Z",
+    "updatedBy": "cli",
+    "source": "hack-cli"
+  },
+  "entries": [
+    {
+      "key": "AWS_REGION",
+      "value": {
+        "kind": "plaintext",
+        "text": "us-east-1"
+      },
+      "required": true,
+      "services": ["api"],
+      "description": "AWS region used by the API"
+    },
+    {
+      "key": "DATABASE_URL",
+      "value": {
+        "kind": "secret",
+        "text": "postgres://..."
+      },
+      "required": true,
+      "services": ["api", "worker"],
+      "description": "Primary application database"
+    }
+  ]
+}
+```
+
+Managed artifact rules:
+
+- `entries[].value.kind` distinguishes logical plaintext from logical secrets
+- `entries[].value.text` is the canonical string value before outer-envelope encryption
+- duplicate keys and unsorted entry lists are parser and writer invariants; the JSON Schema documents the contract but cannot enforce those constraints on its own
+- `services` belongs in the managed artifact because portability must preserve service intent outside the originating machine
+- `metadata` captures human and CLI/Desktop provenance, not machine-local backend details
+- the artifact must not store local absolute paths, keychain service names, backend provider configuration, or runtime resolution history such as `resolvedFrom`
+
+Local compatibility rules:
+
+- `.hack/.env` contains only plaintext values
+- the configured secret backend contains only secret values keyed by env var name
+- neither compatibility target stores descriptions, service scope, timestamps, or actor metadata
+- compatibility targets are derived outputs and may be regenerated from the managed artifact at any time
+
+Planned CLI behavior when a managed artifact is active:
+
+1. Reads validate artifact keys against the normalized `.hack/hack.env.json` contract when present. Current contract parsing is looser than the published schema, so artifact-aware commands should surface drift instead of assuming strict schema parity.
+2. Reads report artifact intent, local materialization state, and drift between them.
+3. `hack env set` mutates the canonical artifact first, then materializes the entry to `.hack/.env` or the configured secret backend based on `value.kind`.
+4. If an entry changes kind, Hack removes stale local state from the old compatibility target before writing the new one.
+
+This behavior is design intent for the managed artifact workflow; it is not fully implemented by the current CLI yet.
+
+See [docs/plans/2026-03-13-portable-project-env-artifact-schema-design.md](plans/2026-03-13-portable-project-env-artifact-schema-design.md) for the full design rationale and implementation boundary.
+
 ## CLI
 
 - `hack env list [--json] [--show-secrets]`
@@ -180,6 +260,7 @@ Recommended setup:
 Planned direction:
 
 - Add an explicit host-to-node secret sync command with least-privilege scoping, encrypted payload delivery, and audit events per run.
+- Keep the committed contract (`.hack/hack.env.json`) separate from the future portable managed-values artifact. See `docs/plans/2026-03-13-portable-project-env-artifact-schema-design.md`.
 
 ## Daemon/gateway API (UI integration)
 

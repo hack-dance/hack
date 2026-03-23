@@ -73,3 +73,59 @@ test("resolvePushRefForCheckoutRef keeps hidden ref when checkout came from hidd
 
   expect(pushRef).toBe("refs/hack/tickets");
 });
+
+test("resolveLocalCheckoutFallback blocks stale local fallback when fetch failure must be surfaced", () => {
+  const result = __testOnly.resolveLocalCheckoutFallback({
+    fetchFailure: "git fetch failed: origin unavailable",
+    allowFetchFailureFallback: false,
+    preferredTrackingRef: "refs/remotes/origin/__legacy__/hack/tickets",
+    remoteRef: "refs/hack/tickets",
+    legacyTrackingRef: "refs/remotes/origin/__legacy__/hack/tickets",
+    legacyRemoteRef: "refs/heads/hack/tickets",
+  });
+
+  expect(result).toEqual({
+    ok: false,
+    error: "git fetch failed: origin unavailable",
+  });
+});
+
+test("resolveLocalCheckoutFallback preserves the legacy push ref when local fallback is allowed", () => {
+  const result = __testOnly.resolveLocalCheckoutFallback({
+    fetchFailure: "git fetch failed: origin unavailable",
+    allowFetchFailureFallback: true,
+    preferredTrackingRef: "refs/remotes/origin/__legacy__/hack/tickets",
+    remoteRef: "refs/hack/tickets",
+    legacyTrackingRef: "refs/remotes/origin/__legacy__/hack/tickets",
+    legacyRemoteRef: "refs/heads/hack/tickets",
+  });
+
+  expect(result).toEqual({
+    ok: true,
+    pushRef: "refs/heads/hack/tickets",
+  });
+});
+
+test("resolveLegacyImportFetchResult surfaces non-missing legacy fetch failures", () => {
+  const result = __testOnly.resolveLegacyImportFetchResult({
+    missing: false,
+    error: "fatal: remote transport failed",
+  });
+
+  expect(result).toEqual({
+    ok: false,
+    error: "git fetch failed: fatal: remote transport failed",
+  });
+});
+
+test("resolveLegacyImportFetchResult ignores missing legacy refs", () => {
+  const result = __testOnly.resolveLegacyImportFetchResult({
+    missing: true,
+    error: "fatal: couldn't find remote ref refs/heads/hack/tickets",
+  });
+
+  expect(result).toEqual({
+    ok: true,
+    imported: false,
+  });
+});

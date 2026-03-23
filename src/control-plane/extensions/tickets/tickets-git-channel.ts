@@ -341,118 +341,167 @@ export function createGitTicketsChannel(opts: {
     return await fetchRemoteRefToTracking(ref, trackingRef);
   };
 
-  const checkoutHead = async (input: {
-    readonly remoteUrl: string | null;
+  const checkoutBranchFromRef = async (input: {
+    readonly checkoutRef: string;
   }): Promise<
     | { readonly ok: true; readonly pushRef: string }
     | { readonly ok: false; readonly error: string }
   > => {
-    await rm(worktreeDir, { recursive: true, force: true });
-    await mkdir(worktreeDir, { recursive: true });
-
-    if (input.remoteUrl) {
-      let canCheckoutRemote = false;
-      let checkoutRef = `origin/${branch}`;
-
-      const fetched = await fetchRemoteRef(remoteRef);
-      if (fetched.ok) {
-        canCheckoutRemote = true;
-        if (legacyRemoteRef && legacyTrackingRef) {
-          const legacyFetch = await fetchRemoteRefToTracking(
-            legacyRemoteRef,
-            legacyTrackingRef
-          );
-          if (!(legacyFetch.ok || legacyFetch.missing)) {
-            return {
-              ok: false,
-              error: `git fetch failed: ${legacyFetch.error}`,
-            };
-          }
-        }
-      } else if (fetched.missing && legacyRemoteRef) {
-        const legacyFetch = legacyTrackingRef
-          ? await fetchRemoteRefToTracking(legacyRemoteRef, legacyTrackingRef)
-          : await fetchRemoteRef(legacyRemoteRef);
-        if (legacyFetch.ok) {
-          canCheckoutRemote = true;
-          if (legacyTrackingRef) {
-            checkoutRef = legacyTrackingRef;
-          }
-        } else if (!legacyFetch.missing) {
-          return { ok: false, error: `git fetch failed: ${legacyFetch.error}` };
-        }
-      } else if (!fetched.missing) {
-        return { ok: false, error: `git fetch failed: ${fetched.error}` };
-      }
-
-      if (canCheckoutRemote) {
-        const rev = await runGitDir({
-          args: ["rev-parse", "--verify", checkoutRef],
-        });
-        if (rev.ok) {
-          const checkout = await runGitDir({
-            args: ["checkout", "-B", branch, rev.stdout.trim()],
-          });
-          if (!checkout.ok) {
-            return {
-              ok: false,
-              error: `git checkout failed: ${checkout.stderr.trim()}`,
-            };
-          }
-
-          const reset = await runGitDir({ args: ["reset", "--hard"] });
-          if (!reset.ok) {
-            return {
-              ok: false,
-              error: `git reset failed: ${reset.stderr.trim()}`,
-            };
-          }
-
-          return {
-            ok: true,
-            pushRef: resolvePushRefForCheckout({ checkoutRef }),
-          };
-        }
-      }
-    }
-
-    const localRef = await runGitDir({
-      args: ["rev-parse", "--verify", branch],
+    const rev = await runGitDir({
+      args: ["rev-parse", "--verify", input.checkoutRef],
     });
-    if (!localRef.ok) {
-      const orphan = await runGitDir({
-        args: ["checkout", "--orphan", branch],
-      });
-      if (!orphan.ok) {
-        return {
-          ok: false,
-          error: `git checkout --orphan failed: ${orphan.stderr.trim()}`,
-        };
-      }
-
-      await mkdir(resolve(worktreeDir, ".hack/tickets"), { recursive: true });
-      await Bun.write(
-        resolve(worktreeDir, ".hack/tickets/README.md"),
-        "Tickets ref for hack-cli\n"
-      );
-
-      const added = await runGitDir({ args: ["add", "-A"] });
-      if (!added.ok) {
-        return { ok: false, error: `git add failed: ${added.stderr.trim()}` };
-      }
-      const committed = await runGitDir({
-        args: ["commit", "-m", "init tickets"],
-      });
-      if (!committed.ok) {
-        return {
-          ok: false,
-          error: `git commit failed: ${committed.stderr.trim()}`,
-        };
-      }
-
-      return { ok: true, pushRef: remoteRef };
+    if (!rev.ok) {
+      return { ok: false, error: "" };
     }
 
+    const checkout = await runGitDir({
+      args: ["checkout", "-B", branch, rev.stdout.trim()],
+    });
+    if (!checkout.ok) {
+      return {
+        ok: false,
+        error: `git checkout failed: ${checkout.stderr.trim()}`,
+      };
+    }
+
+    const reset = await runGitDir({ args: ["reset", "--hard"] });
+    if (!reset.ok) {
+      return {
+        ok: false,
+        error: `git reset failed: ${reset.stderr.trim()}`,
+      };
+    }
+
+    return {
+      ok: true,
+      pushRef: resolvePushRefForCheckout({ checkoutRef: input.checkoutRef }),
+    };
+  };
+
+  const resolveRemoteCheckoutPlan = async (input: {
+    readonly remoteUrl: string | null;
+  }): Promise<{
+    readonly checkoutRef?: string;
+    readonly fetchFailure: string | null;
+    readonly allowFetchFailureFallback: boolean;
+  }> => {
+    if (!input.remoteUrl) {
+      return { fetchFailure: null, allowFetchFailureFallback: true };
+    }
+
+    const fetched = await fetchRemoteRef(remoteRef);
+    if (fetched.ok) {
+      const fetchFailure =
+        legacyRemoteRef && legacyTrackingRef
+          ? await resolveLegacyFetchFailure({
+              ref: legacyRemoteRef,
+              trackingRef: legacyTrackingRef,
+            })
+          : null;
+      return {
+        checkoutRef: `origin/${branch}`,
+        fetchFailure,
+        allowFetchFailureFallback: false,
+      };
+    }
+
+    if (fetched.missing) {
+      return legacyRemoteRef
+        ? await resolveLegacyRemoteCheckoutPlan()
+        : { fetchFailure: null, allowFetchFailureFallback: true };
+    }
+
+    return {
+      fetchFailure: `git fetch failed: ${fetched.error}`,
+      allowFetchFailureFallback: true,
+    };
+  };
+
+  const resolveLegacyFetchFailure = async (input: {
+    readonly ref: string;
+    readonly trackingRef: string;
+  }): Promise<string | null> => {
+    const legacyFetch = await fetchRemoteRefToTracking(
+      input.ref,
+      input.trackingRef
+    );
+    if (legacyFetch.ok || legacyFetch.missing) {
+      return null;
+    }
+    return `git fetch failed: ${legacyFetch.error}`;
+  };
+
+  const resolveLegacyRemoteCheckoutPlan = async (): Promise<{
+    readonly checkoutRef?: string;
+    readonly fetchFailure: string | null;
+    readonly allowFetchFailureFallback: boolean;
+  }> => {
+    if (!legacyRemoteRef) {
+      return { fetchFailure: null, allowFetchFailureFallback: true };
+    }
+
+    const legacyFetch = legacyTrackingRef
+      ? await fetchRemoteRefToTracking(legacyRemoteRef, legacyTrackingRef)
+      : await fetchRemoteRef(legacyRemoteRef);
+    if (legacyFetch.ok) {
+      return {
+        checkoutRef: legacyTrackingRef ?? `origin/${branch}`,
+        fetchFailure: null,
+        allowFetchFailureFallback: true,
+      };
+    }
+    if (legacyFetch.missing) {
+      return { fetchFailure: null, allowFetchFailureFallback: true };
+    }
+    return {
+      fetchFailure: `git fetch failed: ${legacyFetch.error}`,
+      allowFetchFailureFallback: false,
+    };
+  };
+
+  const initializeOrphanTicketsBranch = async (): Promise<
+    | { readonly ok: true; readonly pushRef: string }
+    | { readonly ok: false; readonly error: string }
+  > => {
+    const orphan = await runGitDir({
+      args: ["checkout", "--orphan", branch],
+    });
+    if (!orphan.ok) {
+      return {
+        ok: false,
+        error: `git checkout --orphan failed: ${orphan.stderr.trim()}`,
+      };
+    }
+
+    await mkdir(resolve(worktreeDir, ".hack/tickets"), { recursive: true });
+    await Bun.write(
+      resolve(worktreeDir, ".hack/tickets/README.md"),
+      "Tickets ref for hack-cli\n"
+    );
+
+    const added = await runGitDir({ args: ["add", "-A"] });
+    if (!added.ok) {
+      return { ok: false, error: `git add failed: ${added.stderr.trim()}` };
+    }
+    const committed = await runGitDir({
+      args: ["commit", "-m", "init tickets"],
+    });
+    if (!committed.ok) {
+      return {
+        ok: false,
+        error: `git commit failed: ${committed.stderr.trim()}`,
+      };
+    }
+
+    return { ok: true, pushRef: remoteRef };
+  };
+
+  const checkoutLocalBranch = async (input: {
+    readonly pushRef: string;
+  }): Promise<
+    | { readonly ok: true; readonly pushRef: string }
+    | { readonly ok: false; readonly error: string }
+  > => {
     const checkout = await runGitDir({ args: ["checkout", branch] });
     if (!checkout.ok) {
       return {
@@ -466,7 +515,57 @@ export function createGitTicketsChannel(opts: {
       return { ok: false, error: `git reset failed: ${reset.stderr.trim()}` };
     }
 
-    return { ok: true, pushRef: remoteRef };
+    return { ok: true, pushRef: input.pushRef };
+  };
+
+  const checkoutHead = async (input: {
+    readonly remoteUrl: string | null;
+    readonly allowFetchFailureFallback: boolean;
+  }): Promise<
+    | { readonly ok: true; readonly pushRef: string }
+    | { readonly ok: false; readonly error: string }
+  > => {
+    await rm(worktreeDir, { recursive: true, force: true });
+    await mkdir(worktreeDir, { recursive: true });
+
+    const remotePlan = await resolveRemoteCheckoutPlan(input);
+    if (remotePlan.checkoutRef) {
+      const remoteCheckout = await checkoutBranchFromRef({
+        checkoutRef: remotePlan.checkoutRef,
+      });
+      if (remoteCheckout.ok) {
+        return remoteCheckout;
+      }
+      if (remoteCheckout.error) {
+        return remoteCheckout;
+      }
+    }
+
+    const localRef = await runGitDir({
+      args: ["rev-parse", "--verify", branch],
+    });
+    if (!localRef.ok) {
+      if (remotePlan.fetchFailure) {
+        return { ok: false, error: remotePlan.fetchFailure };
+      }
+      return await initializeOrphanTicketsBranch();
+    }
+
+    const preferredTrackingRef = await resolvePreferredTrackingRef();
+    const localFallback = resolveLocalCheckoutFallback({
+      fetchFailure: remotePlan.fetchFailure,
+      allowFetchFailureFallback:
+        input.allowFetchFailureFallback && remotePlan.allowFetchFailureFallback,
+      preferredTrackingRef,
+      remoteRef,
+      legacyTrackingRef,
+      legacyRemoteRef,
+    });
+    if (!localFallback.ok) {
+      return localFallback;
+    }
+
+    return await checkoutLocalBranch({ pushRef: localFallback.pushRef });
   };
 
   const mergeLegacyRefIntoCurrentBranch = async (input: {
@@ -484,63 +583,31 @@ export function createGitTicketsChannel(opts: {
       legacyTrackingRef
     );
     if (!fetched.ok) {
-      if (fetched.missing) {
-        return { ok: true, imported: false };
-      }
-      return { ok: false, error: `git fetch failed: ${fetched.error}` };
+      return resolveLegacyImportFetchResult({
+        missing: fetched.missing,
+        error: fetched.error,
+      });
     }
 
-    const listed = await runGitDir({
-      args: [
-        "ls-tree",
-        "-r",
-        "--name-only",
-        legacyTrackingRef,
-        ".hack/tickets/events",
-      ],
+    const legacyPaths = await listLegacyEventPaths({
+      runGitDir,
+      legacyTrackingRef,
     });
-    if (!listed.ok) {
-      return {
-        ok: false,
-        error: `git ls-tree failed: ${listed.stderr.trim() || listed.stdout.trim()}`,
-      };
+    if (!legacyPaths.ok) {
+      return legacyPaths;
     }
 
-    let imported = false;
-    const legacyPaths = listed.stdout
-      .split("\n")
-      .map((path) => path.trim())
-      .filter((path) => path.startsWith(".hack/tickets/events/"));
-
-    for (const relativePath of legacyPaths) {
-      const shown = await runGitDir({
-        args: ["show", `${legacyTrackingRef}:${relativePath}`],
-      });
-      if (!shown.ok) {
-        return {
-          ok: false,
-          error: `git show failed: ${shown.stderr.trim() || shown.stdout.trim()}`,
-        };
-      }
-
-      const targetPath = resolve(worktreeDir, relativePath);
-      const existing = await Bun.file(targetPath)
-        .text()
-        .catch(() => "");
-      const merged = mergeTicketEventLogs({
-        existing,
-        incoming: shown.stdout,
-      });
-      if (merged === existing) {
-        continue;
-      }
-
-      await mkdir(dirname(targetPath), { recursive: true });
-      await Bun.write(targetPath, merged);
-      imported = true;
+    const imported = await importLegacyEventPaths({
+      legacyPaths: legacyPaths.paths,
+      legacyTrackingRef,
+      runGitDir,
+      worktreeDir,
+    });
+    if (!imported.ok) {
+      return imported;
     }
 
-    if (!imported) {
+    if (!imported.imported) {
       return { ok: true, imported: false };
     }
 
@@ -552,7 +619,9 @@ export function createGitTicketsChannel(opts: {
     return { ok: true, imported: true };
   };
 
-  const ensureCheckedOut = async (): Promise<
+  const ensureCheckedOut = async (input: {
+    readonly allowFetchFailureFallback: boolean;
+  }): Promise<
     | {
         readonly ok: true;
         readonly remoteUrl: string | null;
@@ -582,7 +651,10 @@ export function createGitTicketsChannel(opts: {
       return { ok: true, remoteUrl, pushRef };
     }
 
-    const checkedOut = await checkoutHead({ remoteUrl });
+    const checkedOut = await checkoutHead({
+      remoteUrl,
+      allowFetchFailureFallback: input.allowFetchFailureFallback,
+    });
     if (!checkedOut.ok) {
       return checkedOut;
     }
@@ -614,47 +686,23 @@ export function createGitTicketsChannel(opts: {
       recursive: true,
     });
 
-    const grouped = new Map<string, Record<string, unknown>[]>();
-    for (const ev of input.events) {
-      const ts =
-        typeof ev.ts === "number"
-          ? (ev.ts as number)
-          : Math.floor(Date.now() / 1000);
-      const path = resolveEventsPath(ts);
-      const list = grouped.get(path) ?? [];
-      list.push(ev);
-      grouped.set(path, list);
-    }
+    const grouped = groupEventsByPath({
+      events: input.events,
+      resolveEventsPath,
+    });
 
     for (const [path, events] of grouped) {
       const existing = await Bun.file(path)
         .text()
         .catch(() => "");
-      const existingIds = new Set<string>();
-      for (const line of existing.split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed) {
-          continue;
-        }
-        const parsed = safeJsonParse(trimmed);
-        if (isRecord(parsed) && typeof parsed.eventId === "string") {
-          existingIds.add(parsed.eventId);
-        }
-      }
-
-      const lines: string[] = [];
-      for (const ev of events) {
-        const id = typeof ev.eventId === "string" ? ev.eventId : "";
-        if (!id || existingIds.has(id)) {
-          continue;
-        }
-        lines.push(stableStringify(ev));
-      }
+      const existingIds = collectEventIds(existing);
+      const lines = serializeNewEvents({
+        events,
+        existingIds,
+      });
 
       if (lines.length > 0) {
-        const prefix =
-          existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
-        await Bun.write(path, `${existing}${prefix}${lines.join("\n")}\n`);
+        await Bun.write(path, appendJsonLines({ existing, lines }));
       }
     }
 
@@ -670,55 +718,17 @@ export function createGitTicketsChannel(opts: {
     { readonly ok: true } | { readonly ok: false; readonly error: string }
   > => {
     const eventsDir = resolve(worktreeDir, ".hack/tickets/events");
-    let files: string[] = [];
-    try {
-      files = (await readdir(eventsDir)).filter((f) => f.endsWith(".jsonl"));
-    } catch {
+    const files = await listJsonlFiles(eventsDir);
+    if (!files) {
       return { ok: true };
     }
 
-    for (const file of files.sort()) {
+    for (const file of files) {
       const path = resolve(eventsDir, file);
       const text = await Bun.file(path)
         .text()
         .catch(() => "");
-      const parsed: Record<string, unknown>[] = [];
-      const seen = new Set<string>();
-
-      for (const line of text.split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed) {
-          continue;
-        }
-        const value = safeJsonParse(trimmed);
-        if (!isRecord(value)) {
-          continue;
-        }
-        const eventId = typeof value.eventId === "string" ? value.eventId : "";
-        const ts = typeof value.ts === "number" ? value.ts : Number.NaN;
-        if (!(eventId && Number.isFinite(ts))) {
-          continue;
-        }
-        if (seen.has(eventId)) {
-          continue;
-        }
-        seen.add(eventId);
-        parsed.push(value);
-      }
-
-      parsed.sort((a, b) => {
-        const aTs = typeof a.ts === "number" ? (a.ts as number) : 0;
-        const bTs = typeof b.ts === "number" ? (b.ts as number) : 0;
-        if (aTs !== bTs) {
-          return aTs - bTs;
-        }
-        const aId = typeof a.eventId === "string" ? (a.eventId as string) : "";
-        const bId = typeof b.eventId === "string" ? (b.eventId as string) : "";
-        return aId.localeCompare(bId);
-      });
-
-      const next = parsed.map((ev) => stableStringify(ev)).join("\n");
-      const normalized = next.length > 0 ? `${next}\n` : "";
+      const normalized = normalizeEventLogText(text);
       if (normalized !== text) {
         await Bun.write(path, normalized);
       }
@@ -765,35 +775,44 @@ export function createGitTicketsChannel(opts: {
       return { ok: true, didPush: false };
     }
 
-    const push = await runGitDir({
-      args: ["push", "origin", `${localBranchRef}:${input.pushRef}`],
+    const push = await pushTicketsRef({
+      runGitDir,
+      localBranchRef,
+      pushRef: input.pushRef,
     });
     if (push.ok) {
       return { ok: true, didPush: true };
     }
 
-    const pushMessage = `${push.stderr}\n${push.stdout}`.trim();
-    if (refMode === "hidden" && isHiddenRefRejected(pushMessage)) {
+    const pushError = buildPushFailureMessage({
+      message: `${push.stderr}\n${push.stdout}`.trim(),
+      refMode,
+    });
+    if (pushError.rejectedHiddenRef) {
       return {
         ok: false,
-        error: `git push failed: ${pushMessage}\nRemote rejected hidden refs. Set controlPlane.tickets.git.refMode to "heads" to use a branch ref.`,
+        error: pushError.message,
       };
     }
 
     opts.logger.warn({
-      message: `git push failed, retrying after fetch: ${pushMessage}`,
+      message: `git push failed, retrying after fetch: ${pushError.message}`,
     });
 
-    const checkedOut = await checkoutHead({ remoteUrl: input.remoteUrl });
+    const checkedOut = await checkoutHead({
+      remoteUrl: input.remoteUrl,
+      allowFetchFailureFallback: false,
+    });
     if (!checkedOut.ok) {
       return checkedOut;
     }
 
-    if (input.pendingEvents && input.pendingEvents.length > 0) {
-      const wrote = await writeEvents({ events: input.pendingEvents });
-      if (!wrote.ok) {
-        return wrote;
-      }
+    const wrote = await writePendingEventsIfAny({
+      pendingEvents: input.pendingEvents,
+      writeEvents,
+    });
+    if (!wrote.ok) {
+      return wrote;
     }
 
     const committed = await commitAll("tickets: retry");
@@ -801,18 +820,23 @@ export function createGitTicketsChannel(opts: {
       return committed;
     }
 
-    const retry = await runGitDir({
-      args: ["push", "origin", `${localBranchRef}:${checkedOut.pushRef}`],
+    const retry = await pushTicketsRef({
+      runGitDir,
+      localBranchRef,
+      pushRef: checkedOut.pushRef,
     });
     if (!retry.ok) {
-      const retryMessage = `${retry.stderr}\n${retry.stdout}`.trim();
-      if (refMode === "hidden" && isHiddenRefRejected(retryMessage)) {
+      const retryError = buildPushFailureMessage({
+        message: `${retry.stderr}\n${retry.stdout}`.trim(),
+        refMode,
+      });
+      if (retryError.rejectedHiddenRef) {
         return {
           ok: false,
-          error: `git push failed: ${retryMessage}\nRemote rejected hidden refs. Set controlPlane.tickets.git.refMode to "heads" to use a branch ref.`,
+          error: retryError.message,
         };
       }
-      return { ok: false, error: `git push failed: ${retryMessage}` };
+      return { ok: false, error: retryError.message };
     }
 
     return { ok: true, didPush: true };
@@ -902,7 +926,9 @@ export function createGitTicketsChannel(opts: {
   };
 
   const inspect = async (): Promise<TicketsGitInspectResult> => {
-    const checkedOut = await ensureCheckedOut();
+    const checkedOut = await ensureCheckedOut({
+      allowFetchFailureFallback: true,
+    });
     if (!checkedOut.ok) {
       return checkedOut;
     }
@@ -951,7 +977,9 @@ export function createGitTicketsChannel(opts: {
   const repair = async (input: {
     readonly pruneLegacyRef: boolean;
   }): Promise<TicketsGitRepairResult> => {
-    const checkedOut = await ensureCheckedOut();
+    const checkedOut = await ensureCheckedOut({
+      allowFetchFailureFallback: false,
+    });
     if (!checkedOut.ok) {
       return checkedOut;
     }
@@ -995,31 +1023,20 @@ export function createGitTicketsChannel(opts: {
       return pushed;
     }
 
-    let didPruneLegacy = false;
-    let pruneError: string | undefined;
-
-    if (input.pruneLegacyRef && legacyRemoteRef && checkedOut.remoteUrl) {
-      const prunedLegacy = await runGitDir({
-        args: ["push", "origin", `:${legacyRemoteRef}`],
-      });
-      if (prunedLegacy.ok) {
-        didPruneLegacy = true;
-        if (legacyTrackingRef) {
-          await runGitDir({
-            args: ["update-ref", "-d", legacyTrackingRef],
-          });
-        }
-      } else {
-        pruneError = `${prunedLegacy.stderr}\n${prunedLegacy.stdout}`.trim();
-      }
-    }
+    const pruneResult = await pruneLegacyRemoteRef({
+      pruneLegacyRef: input.pruneLegacyRef,
+      legacyRemoteRef,
+      legacyTrackingRef,
+      remoteUrl: checkedOut.remoteUrl,
+      runGitDir,
+    });
 
     return {
       ok: true,
       didCommit: committed.didCommit,
       didPush: pushed.didPush,
-      didPruneLegacy,
-      ...(pruneError ? { pruneError } : {}),
+      didPruneLegacy: pruneResult.didPruneLegacy,
+      ...(pruneResult.pruneError ? { pruneError: pruneResult.pruneError } : {}),
     };
   };
 
@@ -1028,7 +1045,9 @@ export function createGitTicketsChannel(opts: {
   }): Promise<
     { readonly ok: true } | { readonly ok: false; readonly error: string }
   > => {
-    const checkedOut = await ensureCheckedOut();
+    const checkedOut = await ensureCheckedOut({
+      allowFetchFailureFallback: false,
+    });
     if (!checkedOut.ok) {
       return checkedOut;
     }
@@ -1065,7 +1084,9 @@ export function createGitTicketsChannel(opts: {
       }
     | { readonly ok: false; readonly error: string }
   > => {
-    const checkedOut = await ensureCheckedOut();
+    const checkedOut = await ensureCheckedOut({
+      allowFetchFailureFallback: false,
+    });
     if (!checkedOut.ok) {
       return checkedOut;
     }
@@ -1099,7 +1120,9 @@ export function createGitTicketsChannel(opts: {
 
   return {
     ensureCheckedOut: async () => {
-      const checkedOut = await ensureCheckedOut();
+      const checkedOut = await ensureCheckedOut({
+        allowFetchFailureFallback: true,
+      });
       if (!checkedOut.ok) {
         throw new Error(checkedOut.error);
       }
@@ -1176,45 +1199,325 @@ function mergeTicketEventLogs(input: {
   readonly existing: string;
   readonly incoming: string;
 }): string {
-  const parsed: Record<string, unknown>[] = [];
-  const seen = new Set<string>();
+  return appendJsonLines({
+    existing: "",
+    lines: collectNormalizedEventLines([input.existing, input.incoming]),
+  });
+}
 
-  for (const text of [input.existing, input.incoming]) {
-    for (const line of text.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed) {
-        continue;
-      }
-      const value = safeJsonParse(trimmed);
-      if (!isRecord(value)) {
-        continue;
-      }
-      const eventId = typeof value.eventId === "string" ? value.eventId : "";
-      const ts = typeof value.ts === "number" ? value.ts : Number.NaN;
-      if (!(eventId && Number.isFinite(ts))) {
-        continue;
-      }
-      if (seen.has(eventId)) {
-        continue;
-      }
-      seen.add(eventId);
-      parsed.push(value);
-    }
+async function listLegacyEventPaths(input: {
+  readonly runGitDir: (input: { readonly args: readonly string[] }) => Promise<{
+    readonly ok: boolean;
+    readonly stdout: string;
+    readonly stderr: string;
+  }>;
+  readonly legacyTrackingRef: string;
+}): Promise<
+  | { readonly ok: true; readonly paths: string[] }
+  | { readonly ok: false; readonly error: string }
+> {
+  const listed = await input.runGitDir({
+    args: [
+      "ls-tree",
+      "-r",
+      "--name-only",
+      input.legacyTrackingRef,
+      ".hack/tickets/events",
+    ],
+  });
+  if (!listed.ok) {
+    return {
+      ok: false,
+      error: `git ls-tree failed: ${listed.stderr.trim() || listed.stdout.trim()}`,
+    };
   }
 
-  parsed.sort((a, b) => {
-    const aTs = typeof a.ts === "number" ? (a.ts as number) : 0;
-    const bTs = typeof b.ts === "number" ? (b.ts as number) : 0;
-    if (aTs !== bTs) {
-      return aTs - bTs;
-    }
-    const aId = typeof a.eventId === "string" ? (a.eventId as string) : "";
-    const bId = typeof b.eventId === "string" ? (b.eventId as string) : "";
-    return aId.localeCompare(bId);
-  });
+  return {
+    ok: true,
+    paths: listed.stdout
+      .split("\n")
+      .map((path) => path.trim())
+      .filter((path) => path.startsWith(".hack/tickets/events/")),
+  };
+}
 
-  const next = parsed.map((event) => stableStringify(event)).join("\n");
-  return next ? `${next}\n` : "";
+async function importLegacyEventPaths(input: {
+  readonly legacyPaths: readonly string[];
+  readonly legacyTrackingRef: string;
+  readonly runGitDir: (input: { readonly args: readonly string[] }) => Promise<{
+    readonly ok: boolean;
+    readonly stdout: string;
+    readonly stderr: string;
+  }>;
+  readonly worktreeDir: string;
+}): Promise<
+  | { readonly ok: true; readonly imported: boolean }
+  | { readonly ok: false; readonly error: string }
+> {
+  let imported = false;
+
+  for (const relativePath of input.legacyPaths) {
+    const shown = await input.runGitDir({
+      args: ["show", `${input.legacyTrackingRef}:${relativePath}`],
+    });
+    if (!shown.ok) {
+      return {
+        ok: false,
+        error: `git show failed: ${shown.stderr.trim() || shown.stdout.trim()}`,
+      };
+    }
+
+    const targetPath = resolve(input.worktreeDir, relativePath);
+    const existing = await Bun.file(targetPath)
+      .text()
+      .catch(() => "");
+    const merged = mergeTicketEventLogs({
+      existing,
+      incoming: shown.stdout,
+    });
+    if (merged === existing) {
+      continue;
+    }
+
+    await mkdir(dirname(targetPath), { recursive: true });
+    await Bun.write(targetPath, merged);
+    imported = true;
+  }
+
+  return { ok: true, imported };
+}
+
+async function pushTicketsRef(input: {
+  readonly runGitDir: (input: { readonly args: readonly string[] }) => Promise<{
+    readonly ok: boolean;
+    readonly stdout: string;
+    readonly stderr: string;
+  }>;
+  readonly localBranchRef: string;
+  readonly pushRef: string;
+}): Promise<{
+  readonly ok: boolean;
+  readonly stdout: string;
+  readonly stderr: string;
+}> {
+  return await input.runGitDir({
+    args: ["push", "origin", `${input.localBranchRef}:${input.pushRef}`],
+  });
+}
+
+async function writePendingEventsIfAny(input: {
+  readonly pendingEvents?: readonly Record<string, unknown>[];
+  readonly writeEvents: (input: {
+    readonly events: readonly Record<string, unknown>[];
+  }) => Promise<
+    { readonly ok: true } | { readonly ok: false; readonly error: string }
+  >;
+}): Promise<
+  { readonly ok: true } | { readonly ok: false; readonly error: string }
+> {
+  if (!(input.pendingEvents && input.pendingEvents.length > 0)) {
+    return { ok: true };
+  }
+  return await input.writeEvents({ events: input.pendingEvents });
+}
+
+function buildPushFailureMessage(input: {
+  readonly message: string;
+  readonly refMode: TicketsGitRefMode;
+}): {
+  readonly message: string;
+  readonly rejectedHiddenRef: boolean;
+} {
+  if (input.refMode === "hidden" && isHiddenRefRejected(input.message)) {
+    return {
+      message: `git push failed: ${input.message}\nRemote rejected hidden refs. Set controlPlane.tickets.git.refMode to "heads" to use a branch ref.`,
+      rejectedHiddenRef: true,
+    };
+  }
+
+  return {
+    message: `git push failed: ${input.message}`,
+    rejectedHiddenRef: false,
+  };
+}
+
+async function pruneLegacyRemoteRef(input: {
+  readonly pruneLegacyRef: boolean;
+  readonly legacyRemoteRef: string | null;
+  readonly legacyTrackingRef: string | null;
+  readonly remoteUrl: string | null;
+  readonly runGitDir: (input: { readonly args: readonly string[] }) => Promise<{
+    readonly ok: boolean;
+    readonly stdout: string;
+    readonly stderr: string;
+  }>;
+}): Promise<{
+  readonly didPruneLegacy: boolean;
+  readonly pruneError?: string;
+}> {
+  if (!(input.pruneLegacyRef && input.legacyRemoteRef && input.remoteUrl)) {
+    return { didPruneLegacy: false };
+  }
+
+  const prunedLegacy = await input.runGitDir({
+    args: ["push", "origin", `:${input.legacyRemoteRef}`],
+  });
+  if (!prunedLegacy.ok) {
+    return {
+      didPruneLegacy: false,
+      pruneError: `${prunedLegacy.stderr}\n${prunedLegacy.stdout}`.trim(),
+    };
+  }
+
+  if (input.legacyTrackingRef) {
+    await input.runGitDir({
+      args: ["update-ref", "-d", input.legacyTrackingRef],
+    });
+  }
+
+  return { didPruneLegacy: true };
+}
+
+async function listJsonlFiles(eventsDir: string): Promise<string[] | null> {
+  try {
+    return (await readdir(eventsDir))
+      .filter((f) => f.endsWith(".jsonl"))
+      .sort();
+  } catch {
+    return null;
+  }
+}
+
+function groupEventsByPath(input: {
+  readonly events: readonly Record<string, unknown>[];
+  readonly resolveEventsPath: (tsSeconds: number) => string;
+}): Map<string, Record<string, unknown>[]> {
+  const grouped = new Map<string, Record<string, unknown>[]>();
+  for (const event of input.events) {
+    const ts =
+      typeof event.ts === "number"
+        ? (event.ts as number)
+        : Math.floor(Date.now() / 1000);
+    const path = input.resolveEventsPath(ts);
+    const list = grouped.get(path) ?? [];
+    list.push(event);
+    grouped.set(path, list);
+  }
+  return grouped;
+}
+
+function collectEventIds(text: string): Set<string> {
+  const ids = new Set<string>();
+  for (const line of text.split("\n")) {
+    const value = parseTicketEventLine(line);
+    if (value && typeof value.eventId === "string") {
+      ids.add(value.eventId);
+    }
+  }
+  return ids;
+}
+
+function serializeNewEvents(input: {
+  readonly events: readonly Record<string, unknown>[];
+  readonly existingIds: ReadonlySet<string>;
+}): string[] {
+  const lines: string[] = [];
+  for (const event of input.events) {
+    const id = typeof event.eventId === "string" ? event.eventId : "";
+    if (!id || input.existingIds.has(id)) {
+      continue;
+    }
+    lines.push(stableStringify(event));
+  }
+  return lines;
+}
+
+function appendJsonLines(input: {
+  readonly existing: string;
+  readonly lines: readonly string[];
+}): string {
+  if (input.lines.length === 0) {
+    return input.existing;
+  }
+  const prefix =
+    input.existing.length > 0 && !input.existing.endsWith("\n") ? "\n" : "";
+  return `${input.existing}${prefix}${input.lines.join("\n")}\n`;
+}
+
+function normalizeEventLogText(text: string): string {
+  const lines = collectNormalizedEventLines([text]);
+  return lines.length > 0 ? `${lines.join("\n")}\n` : "";
+}
+
+function collectNormalizedEventLines(texts: readonly string[]): string[] {
+  const events = collectUniqueTicketEvents(texts);
+  return events.map((event) => stableStringify(event));
+}
+
+function collectUniqueTicketEvents(
+  texts: readonly string[]
+): Record<string, unknown>[] {
+  const events: Record<string, unknown>[] = [];
+  const seen = new Set<string>();
+  for (const text of texts) {
+    appendUniqueTicketEvents({
+      text,
+      seen,
+      events,
+    });
+  }
+  events.sort(compareTicketEvents);
+  return events;
+}
+
+function appendUniqueTicketEvents(input: {
+  readonly text: string;
+  readonly seen: Set<string>;
+  readonly events: Record<string, unknown>[];
+}): void {
+  for (const line of input.text.split("\n")) {
+    const event = parseTicketEventLine(line);
+    if (!event) {
+      continue;
+    }
+    const eventId = event.eventId as string;
+    if (input.seen.has(eventId)) {
+      continue;
+    }
+    input.seen.add(eventId);
+    input.events.push(event);
+  }
+}
+
+function parseTicketEventLine(line: string): Record<string, unknown> | null {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const value = safeJsonParse(trimmed);
+  if (!isRecord(value)) {
+    return null;
+  }
+  const eventId = typeof value.eventId === "string" ? value.eventId : "";
+  const ts = typeof value.ts === "number" ? value.ts : Number.NaN;
+  if (!(eventId && Number.isFinite(ts))) {
+    return null;
+  }
+  return value;
+}
+
+function compareTicketEvents(
+  a: Record<string, unknown>,
+  b: Record<string, unknown>
+): number {
+  const aTs = typeof a.ts === "number" ? (a.ts as number) : 0;
+  const bTs = typeof b.ts === "number" ? (b.ts as number) : 0;
+  if (aTs !== bTs) {
+    return aTs - bTs;
+  }
+  const aId = typeof a.eventId === "string" ? (a.eventId as string) : "";
+  const bId = typeof b.eventId === "string" ? (b.eventId as string) : "";
+  return aId.localeCompare(bId);
 }
 
 function isRetryableTrackingRefLockFailure(input: {
@@ -1279,8 +1582,54 @@ function isGitIndexLockError(message: string): boolean {
 
 export const __testOnly = {
   mergeTicketEventLogs,
+  resolveLegacyImportFetchResult,
+  resolveLocalCheckoutFallback,
   resolvePushRefForCheckoutRef,
 };
+
+function resolveLegacyImportFetchResult(input: {
+  readonly missing: boolean;
+  readonly error: string;
+}):
+  | { readonly ok: true; readonly imported: false }
+  | { readonly ok: false; readonly error: string } {
+  if (input.missing) {
+    return { ok: true, imported: false };
+  }
+  return {
+    ok: false,
+    error: `git fetch failed: ${input.error}`,
+  };
+}
+
+function resolveLocalCheckoutFallback(input: {
+  readonly fetchFailure: string | null;
+  readonly allowFetchFailureFallback: boolean;
+  readonly preferredTrackingRef: string | null;
+  readonly remoteRef: string;
+  readonly legacyTrackingRef?: string | null;
+  readonly legacyRemoteRef?: string | null;
+}):
+  | { readonly ok: true; readonly pushRef: string }
+  | { readonly ok: false; readonly error: string } {
+  if (input.fetchFailure && !input.allowFetchFailureFallback) {
+    return { ok: false, error: input.fetchFailure };
+  }
+
+  if (!input.preferredTrackingRef) {
+    return { ok: true, pushRef: input.remoteRef };
+  }
+
+  return {
+    ok: true,
+    pushRef: resolvePushRefForCheckoutRef({
+      checkoutRef: input.preferredTrackingRef,
+      remoteRef: input.remoteRef,
+      legacyTrackingRef: input.legacyTrackingRef,
+      legacyRemoteRef: input.legacyRemoteRef,
+    }),
+  };
+}
 
 function resolvePushRefForCheckoutRef(input: {
   readonly checkoutRef: string;

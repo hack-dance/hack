@@ -53,6 +53,7 @@ Admin model reference:
 
 - [Agent-native runtime landscape](agent-native-runtime-landscape.md)
 - [Agent-native runtime provider capabilities](agent-native-runtime-provider-capabilities.md)
+- [Agent-native runtime requirements](plans/2026-03-22-agent-native-runtime-requirements-design.md)
 
 ## Quick diagnostics
 

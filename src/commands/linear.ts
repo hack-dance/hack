@@ -23,7 +23,7 @@ const linearSpec = defineCommand({
     "  hack linear oauth-connect --profile work --set-default",
     "  hack linear project-bind --project-id <linear-project-id>",
     "  hack linear sync-issue --from linear --issue ENG-123",
-    "  hack linear sync-issue --from hack --ticket T-00001",
+    "  hack linear sync-issue --from hack --ticket T-AB12CD34EF",
     "  hack linear sync-project --from linear --project-id <linear-project-id>",
     "  hack linear documents list|pull|plan|apply",
     "  hack linear milestones list|pull|plan|apply",

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import {
   mkdir,
   mkdtemp,
@@ -18,41 +18,21 @@ import {
   findTicketRemoteLink,
 } from "../src/control-plane/extensions/tickets/provenance.ts";
 import { createTicketsStore } from "../src/control-plane/extensions/tickets/store.ts";
-import { readControlPlaneConfig } from "../src/control-plane/sdk/config.ts";
+import { createGitTicketsChannel } from "../src/control-plane/extensions/tickets/tickets-git-channel.ts";
+import { createDefaultControlPlaneConfig } from "../src/control-plane/sdk/config.ts";
 
-const originalGlobalConfigPath = process.env.HACK_GLOBAL_CONFIG_PATH;
 const logger = {
   info: (_input: { message: string }) => {},
   warn: (_input: { message: string }) => {},
 };
 
-let tempGlobalConfigPath: string | null = null;
 let tempRoots: string[] = [];
-
-beforeEach(() => {
-  tempGlobalConfigPath = join(
-    tmpdir(),
-    `hack-global-config-${Date.now()}-${Math.random()}.json`
-  );
-  process.env.HACK_GLOBAL_CONFIG_PATH = tempGlobalConfigPath;
-});
 
 afterEach(async () => {
   for (const root of tempRoots) {
     await rm(root, { recursive: true, force: true });
   }
   tempRoots = [];
-
-  if (tempGlobalConfigPath) {
-    await rm(tempGlobalConfigPath, { force: true });
-    tempGlobalConfigPath = null;
-  }
-
-  if (originalGlobalConfigPath === undefined) {
-    process.env.HACK_GLOBAL_CONFIG_PATH = undefined;
-  } else {
-    process.env.HACK_GLOBAL_CONFIG_PATH = originalGlobalConfigPath;
-  }
 });
 
 test("tickets store materializes assignee, review notes, comments, checkpoints, and conflicts", async () => {
@@ -355,6 +335,80 @@ test("tickets store recovers from a stale tickets bare repo index.lock", async (
 
   const tickets = await store.listTickets();
   expect(tickets.map((ticket) => ticket.title)).toContain("Stale lock ticket");
+}, 20_000);
+
+test("tickets store creates non-sequential ids and keeps them unique under concurrent creates", async () => {
+  const projectRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-concurrent-create-",
+  });
+  const store = await createStore({ projectRoot });
+
+  const results = await Promise.all(
+    Array.from({ length: 16 }, (_value, index) =>
+      store.createTicket({
+        title: `Concurrent ticket ${index + 1}`,
+        owner: "hack",
+        source: "hack",
+        actor: `creator-${index}@hack`,
+      })
+    )
+  );
+
+  if (!results.every((result) => result.ok)) {
+    throw new Error(JSON.stringify(results, null, 2));
+  }
+
+  const ticketIds = results.flatMap((result) =>
+    result.ok ? [result.ticket.ticketId] : []
+  );
+  expect(ticketIds).toHaveLength(16);
+  expect(new Set(ticketIds).size).toBe(ticketIds.length);
+
+  for (const ticketId of ticketIds) {
+    expect(ticketId).toMatch(/^T-[0-9A-Z]{10}$/);
+    expect(ticketId).not.toMatch(/^T-\d{5}$/);
+  }
+}, 20_000);
+
+test("tickets store continues to read and update legacy sequential ids", async () => {
+  const projectRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-legacy-id-",
+  });
+  const store = await createStore({ projectRoot });
+  const git = createGitTicketsChannel({
+    projectRoot,
+    config: createDefaultControlPlaneConfig().tickets.git,
+    logger,
+  });
+
+  const legacyEvent = {
+    actor: "creator@hack",
+    eventId: "legacy-ticket-created",
+    payload: {
+      owner: "hack",
+      source: "hack",
+      title: "Legacy sequential ticket",
+    },
+    ticketId: "T-00001",
+    ts: 1_762_000_000,
+    tsIso: "2025-11-04T00:00:00.000Z",
+    type: "ticket.created",
+  };
+  const appended = await git.appendEvents({ events: [legacyEvent] });
+  expect(appended.ok).toBe(true);
+
+  const ticket = await store.getTicket({ ticketId: "T-00001" });
+  expect(ticket?.title).toBe("Legacy sequential ticket");
+
+  const updated = await store.updateTicket({
+    ticketId: "T-00001",
+    title: "Legacy sequential ticket updated",
+    actor: "updater@hack",
+  });
+  expect(updated.ok).toBe(true);
+
+  const updatedTicket = await store.getTicket({ ticketId: "T-00001" });
+  expect(updatedTicket?.title).toBe("Legacy sequential ticket updated");
 }, 20_000);
 
 test("tickets store writes normalized journal envelope metadata and ignores duplicate idempotency keys", async () => {
@@ -971,12 +1025,9 @@ test("ticket provenance infers a remote provider from source metadata when exter
 });
 
 async function createStore(opts: { readonly projectRoot: string }) {
-  const configResult = await readControlPlaneConfig({
-    projectDir: join(opts.projectRoot, ".hack"),
-  });
   return createTicketsStore({
     projectRoot: opts.projectRoot,
-    controlPlaneConfig: configResult.config,
+    controlPlaneConfig: createDefaultControlPlaneConfig(),
     logger,
   });
 }

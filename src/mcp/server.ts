@@ -929,7 +929,10 @@ function registerTools(opts: { readonly server: McpServer }): void {
           .string()
           .describe("Linear issue identifier (e.g. ENG-123)")
           .optional(),
-        ticket: z.string().describe("Hack ticket id (e.g. T-00001)").optional(),
+        ticket: z
+          .string()
+          .describe("Hack ticket id (e.g. T-AB12CD34EF)")
+          .optional(),
         ...linearCommonInput,
         projectId: z.string().describe("Linear project id override").optional(),
         teamId: z.string().describe("Linear team id override").optional(),

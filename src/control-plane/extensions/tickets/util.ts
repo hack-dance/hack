@@ -1,6 +1,11 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 const DIGITS_ONLY_PATTERN = /^\d+$/;
+const LEGACY_TICKET_ID_PATTERN = /^T-(\d+)$/i;
+const RANDOM_TICKET_ID_PATTERN = /^T-([0-9A-Z]{10})$/i;
+const RANDOM_TICKET_ID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+const RANDOM_TICKET_ID_PREFIX_ALPHABET = "ABCDEFGHJKMNPQRSTVWXYZ";
+const RANDOM_TICKET_ID_LENGTH = 10;
 
 export function unixSeconds(): number {
   return Math.floor(Date.now() / 1000);
@@ -20,15 +25,27 @@ export function formatTicketId(n: number): string {
 
 export function parseTicketNumber(ticketId: string): number | null {
   const trimmed = ticketId.trim();
-  if (!trimmed.startsWith("T-")) {
+  const match = LEGACY_TICKET_ID_PATTERN.exec(trimmed);
+  if (!match) {
     return null;
   }
-  const rest = trimmed.slice(2);
-  const n = Number(rest);
+  const n = Number(match[1]);
   if (!Number.isFinite(n)) {
     return null;
   }
   return Math.trunc(n);
+}
+
+export function generateTicketId(): string {
+  const prefix = generateRandomTicketIdChunk({
+    alphabet: RANDOM_TICKET_ID_PREFIX_ALPHABET,
+    length: 1,
+  });
+  const suffix = generateRandomTicketIdChunk({
+    alphabet: RANDOM_TICKET_ID_ALPHABET,
+    length: RANDOM_TICKET_ID_LENGTH - prefix.length,
+  });
+  return `T-${prefix}${suffix}`;
 }
 
 export function normalizeTicketRef(input: string): string | null {
@@ -43,12 +60,30 @@ export function normalizeTicketRef(input: string): string | null {
   const upper = raw.toUpperCase();
   if (upper.startsWith("T-")) {
     const n = parseTicketNumber(upper);
-    return n === null ? null : formatTicketId(n);
+    if (n !== null) {
+      return formatTicketId(n);
+    }
+    return RANDOM_TICKET_ID_PATTERN.test(upper) ? upper : null;
   }
   if (DIGITS_ONLY_PATTERN.test(raw)) {
     return formatTicketId(Number(raw));
   }
   return null;
+}
+
+export function compareTicketIds(left: string, right: string): number {
+  const leftNumber = parseTicketNumber(left);
+  const rightNumber = parseTicketNumber(right);
+  if (leftNumber !== null && rightNumber !== null) {
+    return leftNumber - rightNumber;
+  }
+  if (leftNumber !== null) {
+    return -1;
+  }
+  if (rightNumber !== null) {
+    return 1;
+  }
+  return left.localeCompare(right);
 }
 
 export function normalizeTicketRefs(inputs: readonly string[]): string[] {
@@ -62,14 +97,7 @@ export function normalizeTicketRefs(inputs: readonly string[]): string[] {
     seen.add(normalized);
     out.push(normalized);
   }
-  out.sort((a, b) => {
-    const an = parseTicketNumber(a) ?? 0;
-    const bn = parseTicketNumber(b) ?? 0;
-    if (an !== bn) {
-      return an - bn;
-    }
-    return a.localeCompare(b);
-  });
+  out.sort(compareTicketIds);
   return out;
 }
 
@@ -94,4 +122,21 @@ function stableSort(value: unknown): unknown {
     return out;
   }
   return value;
+}
+
+function generateRandomTicketIdChunk(input: {
+  readonly alphabet: string;
+  readonly length: number;
+}): string {
+  let chunkText = "";
+  while (chunkText.length < input.length) {
+    const chunk = randomBytes(input.length);
+    for (const byte of chunk) {
+      chunkText += input.alphabet[byte % input.alphabet.length] ?? "";
+      if (chunkText.length === input.length) {
+        break;
+      }
+    }
+  }
+  return chunkText;
 }

@@ -1,4 +1,5 @@
-import { mkdir, readdir, rm, stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, open, readdir, rm, stat, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import { isRecord } from "../../../lib/guards.ts";
@@ -7,6 +8,10 @@ import { stableStringify } from "./util.ts";
 
 const REFS_HEADS_PREFIX_PATTERN = /^refs\/heads\//;
 const REFS_PREFIX_PATTERN = /^refs\//;
+const DEFAULT_MUTATION_LOCK_HEARTBEAT_MS = 1000;
+const DEFAULT_MUTATION_LOCK_RETRY_MS = 100;
+const DEFAULT_MUTATION_LOCK_STALE_MS = 30_000;
+const DEFAULT_MUTATION_LOCK_TIMEOUT_MS = 30_000;
 
 export type TicketsGitChannel = {
   readonly ensureCheckedOut: () => Promise<string>;
@@ -14,6 +19,19 @@ export type TicketsGitChannel = {
     readonly events: readonly Record<string, unknown>[];
   }) => Promise<
     { readonly ok: true } | { readonly ok: false; readonly error: string }
+  >;
+  readonly appendPreparedEvents: <T>(input: {
+    readonly prepare: (root: string) => Promise<
+      | {
+          readonly ok: true;
+          readonly events: readonly Record<string, unknown>[];
+          readonly result: T;
+        }
+      | { readonly ok: false; readonly error: string }
+    >;
+  }) => Promise<
+    | { readonly ok: true; readonly result: T }
+    | { readonly ok: false; readonly error: string }
   >;
   readonly inspect: () => Promise<TicketsGitInspectResult>;
   readonly repair: (input: {
@@ -81,6 +99,12 @@ export function createGitTicketsChannel(opts: {
     info: (input: { message: string }) => void;
     warn: (input: { message: string }) => void;
   };
+  readonly testOverrides?: {
+    readonly mutationLockHeartbeatMs?: number;
+    readonly mutationLockRetryMs?: number;
+    readonly mutationLockStaleMs?: number;
+    readonly mutationLockTimeoutMs?: number;
+  };
 }): TicketsGitChannel {
   const ticketsDir = resolve(opts.projectRoot, ".hack/tickets");
   const gitDir = resolve(ticketsDir, "git");
@@ -100,6 +124,17 @@ export function createGitTicketsChannel(opts: {
     : null;
   const remoteName = gitEnabled ? (opts.config.remote ?? "origin").trim() : "";
   const bareIndexLockPath = resolve(bareDir, "index.lock");
+  const mutationLockPath = resolve(gitDir, ".mutation.lock");
+  const mutationLockHeartbeatMs =
+    opts.testOverrides?.mutationLockHeartbeatMs ??
+    DEFAULT_MUTATION_LOCK_HEARTBEAT_MS;
+  const mutationLockRetryMs =
+    opts.testOverrides?.mutationLockRetryMs ?? DEFAULT_MUTATION_LOCK_RETRY_MS;
+  const mutationLockStaleMs =
+    opts.testOverrides?.mutationLockStaleMs ?? DEFAULT_MUTATION_LOCK_STALE_MS;
+  const mutationLockTimeoutMs =
+    opts.testOverrides?.mutationLockTimeoutMs ??
+    DEFAULT_MUTATION_LOCK_TIMEOUT_MS;
 
   const resolvePushRefForCheckout = (input: {
     readonly checkoutRef: string;
@@ -179,6 +214,131 @@ export function createGitTicketsChannel(opts: {
   const ensureDirs = async () => {
     await mkdir(gitDir, { recursive: true });
     await mkdir(worktreeDir, { recursive: true });
+  };
+
+  type MutationLockHandle = {
+    readonly ownerToken: string;
+    readonly heartbeatTimer: ReturnType<typeof setInterval>;
+  };
+
+  const withMutationLock = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const lockHandle = await acquireMutationLock();
+    try {
+      return await fn();
+    } finally {
+      await releaseMutationLock(lockHandle);
+    }
+  };
+
+  const readMutationLockOwner = async (): Promise<string | null> => {
+    const ownerToken = (
+      await Bun.file(mutationLockPath)
+        .text()
+        .catch(() => "")
+    )
+      .split("\n")[0]
+      ?.trim();
+    return ownerToken ? ownerToken : null;
+  };
+
+  const writeMutationLockOwner = async (ownerToken: string): Promise<void> => {
+    await Bun.write(mutationLockPath, `${ownerToken}\n`);
+  };
+
+  const refreshMutationLock = async (
+    input: Pick<MutationLockHandle, "ownerToken">
+  ): Promise<void> => {
+    if ((await readMutationLockOwner()) !== input.ownerToken) {
+      return;
+    }
+    await writeMutationLockOwner(input.ownerToken);
+  };
+
+  const isMutationLockStale = async (): Promise<boolean> => {
+    try {
+      const info = await stat(mutationLockPath);
+      return Date.now() - info.mtimeMs > mutationLockStaleMs;
+    } catch {
+      return false;
+    }
+  };
+
+  const clearStaleMutationLock = async (): Promise<void> => {
+    const ownerToken = await readMutationLockOwner();
+    if (!ownerToken) {
+      await unlink(mutationLockPath).catch(() => undefined);
+      return;
+    }
+    if (!(await isMutationLockStale())) {
+      return;
+    }
+    if ((await readMutationLockOwner()) !== ownerToken) {
+      return;
+    }
+    await unlink(mutationLockPath).catch(() => undefined);
+  };
+
+  const startMutationLockHeartbeat = (
+    ownerToken: string
+  ): MutationLockHandle["heartbeatTimer"] => {
+    const heartbeatTimer = setInterval(() => {
+      void refreshMutationLock({ ownerToken });
+    }, mutationLockHeartbeatMs);
+    heartbeatTimer.unref?.();
+    return heartbeatTimer;
+  };
+
+  const tryAcquireMutationLock =
+    async (): Promise<MutationLockHandle | null> => {
+      const ownerToken = randomUUID();
+      try {
+        const file = await open(mutationLockPath, "wx");
+        await file.writeFile(`${ownerToken}\n`);
+        await file.close();
+        return {
+          ownerToken,
+          heartbeatTimer: startMutationLockHeartbeat(ownerToken),
+        };
+      } catch (error: unknown) {
+        const code =
+          typeof error === "object" && error !== null && "code" in error
+            ? (error as { code?: string }).code
+            : undefined;
+        if (code === "EEXIST") {
+          return null;
+        }
+        throw error;
+      }
+    };
+
+  const acquireMutationLock = async (): Promise<MutationLockHandle> => {
+    await mkdir(dirname(mutationLockPath), { recursive: true });
+    const start = Date.now();
+
+    while (true) {
+      const lockHandle = await tryAcquireMutationLock();
+      if (lockHandle) {
+        return lockHandle;
+      }
+      if (await isMutationLockStale()) {
+        await clearStaleMutationLock();
+        continue;
+      }
+      if (Date.now() - start > mutationLockTimeoutMs) {
+        throw new Error("Timed out waiting for tickets git mutation lock");
+      }
+      await Bun.sleep(mutationLockRetryMs);
+    }
+  };
+
+  const releaseMutationLock = async (
+    input: MutationLockHandle
+  ): Promise<void> => {
+    clearInterval(input.heartbeatTimer);
+    if ((await readMutationLockOwner()) !== input.ownerToken) {
+      return;
+    }
+    await unlink(mutationLockPath).catch(() => undefined);
   };
 
   const ensureBareRepo = async () => {
@@ -791,6 +951,9 @@ export function createGitTicketsChannel(opts: {
     readonly remoteUrl: string | null;
     readonly pushRef: string;
     readonly pendingEvents?: readonly Record<string, unknown>[];
+    readonly replayPendingEvents?: () => Promise<
+      { readonly ok: true } | { readonly ok: false; readonly error: string }
+    >;
   }): Promise<
     | { readonly ok: true; readonly didPush: boolean }
     | { readonly ok: false; readonly error: string }
@@ -816,11 +979,18 @@ export function createGitTicketsChannel(opts: {
       return checkedOut;
     }
 
-    const rewrote = await rewritePendingEventsAfterCheckout({
-      pendingEvents: input.pendingEvents,
-    });
-    if (!rewrote.ok) {
-      return rewrote;
+    if (input.replayPendingEvents) {
+      const replayed = await input.replayPendingEvents();
+      if (!replayed.ok) {
+        return replayed;
+      }
+    } else {
+      const rewrote = await rewritePendingEventsAfterCheckout({
+        pendingEvents: input.pendingEvents,
+      });
+      if (!rewrote.ok) {
+        return rewrote;
+      }
     }
 
     const committed = await commitAll("tickets: retry");
@@ -965,64 +1135,66 @@ export function createGitTicketsChannel(opts: {
   const repair = async (input: {
     readonly pruneLegacyRef: boolean;
   }): Promise<TicketsGitRepairResult> => {
-    const checkedOut = await ensureCheckedOut();
-    if (!checkedOut.ok) {
-      return checkedOut;
-    }
+    return await withMutationLock(async () => {
+      const checkedOut = await ensureCheckedOut();
+      if (!checkedOut.ok) {
+        return checkedOut;
+      }
 
-    const repairBranch = `${branch}-repair`;
-    const orphan = await runGitDir({
-      args: ["checkout", "--orphan", repairBranch],
-    });
-    if (!orphan.ok) {
+      const repairBranch = `${branch}-repair`;
+      const orphan = await runGitDir({
+        args: ["checkout", "--orphan", repairBranch],
+      });
+      if (!orphan.ok) {
+        return {
+          ok: false,
+          error: `git checkout --orphan failed: ${orphan.stderr.trim()}`,
+        };
+      }
+
+      const pruned = await pruneWorktreeToTickets();
+      if (!pruned.ok) {
+        return pruned;
+      }
+
+      const renamed = await runGitDir({
+        args: ["branch", "-M", repairBranch, branch],
+      });
+      if (!renamed.ok) {
+        return {
+          ok: false,
+          error: `git branch -M failed: ${renamed.stderr.trim()}`,
+        };
+      }
+
+      const committed = await commitAll("tickets: repair");
+      if (!committed.ok) {
+        return committed;
+      }
+
+      const pushed = await pushWithRetry({
+        remoteUrl: checkedOut.remoteUrl,
+        pushRef: checkedOut.pushRef,
+      });
+      if (!pushed.ok) {
+        return pushed;
+      }
+
+      const prunedLegacy = await pruneLegacyRemoteRefIfRequested({
+        pruneLegacyRef: input.pruneLegacyRef,
+        remoteUrl: checkedOut.remoteUrl,
+      });
+
       return {
-        ok: false,
-        error: `git checkout --orphan failed: ${orphan.stderr.trim()}`,
+        ok: true,
+        didCommit: committed.didCommit,
+        didPush: pushed.didPush,
+        didPruneLegacy: prunedLegacy.didPruneLegacy,
+        ...(prunedLegacy.pruneError
+          ? { pruneError: prunedLegacy.pruneError }
+          : {}),
       };
-    }
-
-    const pruned = await pruneWorktreeToTickets();
-    if (!pruned.ok) {
-      return pruned;
-    }
-
-    const renamed = await runGitDir({
-      args: ["branch", "-M", repairBranch, branch],
     });
-    if (!renamed.ok) {
-      return {
-        ok: false,
-        error: `git branch -M failed: ${renamed.stderr.trim()}`,
-      };
-    }
-
-    const committed = await commitAll("tickets: repair");
-    if (!committed.ok) {
-      return committed;
-    }
-
-    const pushed = await pushWithRetry({
-      remoteUrl: checkedOut.remoteUrl,
-      pushRef: checkedOut.pushRef,
-    });
-    if (!pushed.ok) {
-      return pushed;
-    }
-
-    const prunedLegacy = await pruneLegacyRemoteRefIfRequested({
-      pruneLegacyRef: input.pruneLegacyRef,
-      remoteUrl: checkedOut.remoteUrl,
-    });
-
-    return {
-      ok: true,
-      didCommit: committed.didCommit,
-      didPush: pushed.didPush,
-      didPruneLegacy: prunedLegacy.didPruneLegacy,
-      ...(prunedLegacy.pruneError
-        ? { pruneError: prunedLegacy.pruneError }
-        : {}),
-    };
   };
 
   const appendEvents = async (input: {
@@ -1030,31 +1202,89 @@ export function createGitTicketsChannel(opts: {
   }): Promise<
     { readonly ok: true } | { readonly ok: false; readonly error: string }
   > => {
-    const checkedOut = await ensureCheckedOut();
-    if (!checkedOut.ok) {
-      return checkedOut;
-    }
+    return await withMutationLock(async () => {
+      const checkedOut = await ensureCheckedOut();
+      if (!checkedOut.ok) {
+        return checkedOut;
+      }
 
-    const wrote = await writeEvents({ events: input.events });
-    if (!wrote.ok) {
-      return wrote;
-    }
+      const wrote = await writeEvents({ events: input.events });
+      if (!wrote.ok) {
+        return wrote;
+      }
 
-    const committed = await commitAll("tickets: append events");
-    if (!committed.ok) {
-      return committed;
-    }
+      const committed = await commitAll("tickets: append events");
+      if (!committed.ok) {
+        return committed;
+      }
 
-    const pushed = await pushWithRetry({
-      remoteUrl: checkedOut.remoteUrl,
-      pushRef: checkedOut.pushRef,
-      pendingEvents: input.events,
+      const pushed = await pushWithRetry({
+        remoteUrl: checkedOut.remoteUrl,
+        pushRef: checkedOut.pushRef,
+        pendingEvents: input.events,
+      });
+      if (!pushed.ok) {
+        return pushed;
+      }
+
+      return { ok: true };
     });
-    if (!pushed.ok) {
-      return pushed;
-    }
+  };
 
-    return { ok: true };
+  const appendPreparedEvents = async <T>(input: {
+    readonly prepare: (root: string) => Promise<
+      | {
+          readonly ok: true;
+          readonly events: readonly Record<string, unknown>[];
+          readonly result: T;
+        }
+      | { readonly ok: false; readonly error: string }
+    >;
+  }): Promise<
+    | { readonly ok: true; readonly result: T }
+    | { readonly ok: false; readonly error: string }
+  > => {
+    return await withMutationLock(async () => {
+      const checkedOut = await ensureCheckedOut();
+      if (!checkedOut.ok) {
+        return checkedOut;
+      }
+
+      const prepared = await input.prepare(worktreeDir);
+      if (!prepared.ok) {
+        return prepared;
+      }
+
+      let preparedResult = prepared.result;
+
+      const wrote = await writeEvents({ events: prepared.events });
+      if (!wrote.ok) {
+        return wrote;
+      }
+
+      const committed = await commitAll("tickets: append events");
+      if (!committed.ok) {
+        return committed;
+      }
+
+      const pushed = await pushWithRetry({
+        remoteUrl: checkedOut.remoteUrl,
+        pushRef: checkedOut.pushRef,
+        replayPendingEvents: async () => {
+          const replayed = await input.prepare(worktreeDir);
+          if (!replayed.ok) {
+            return replayed;
+          }
+          preparedResult = replayed.result;
+          return await writeEvents({ events: replayed.events });
+        },
+      });
+      if (!pushed.ok) {
+        return pushed;
+      }
+
+      return { ok: true, result: preparedResult };
+    });
   };
 
   const sync = async (): Promise<
@@ -1067,36 +1297,38 @@ export function createGitTicketsChannel(opts: {
       }
     | { readonly ok: false; readonly error: string }
   > => {
-    const checkedOut = await ensureCheckedOut();
-    if (!checkedOut.ok) {
-      return checkedOut;
-    }
+    return await withMutationLock(async () => {
+      const checkedOut = await ensureCheckedOut();
+      if (!checkedOut.ok) {
+        return checkedOut;
+      }
 
-    const normalized = await normalizeLogs();
-    if (!normalized.ok) {
-      return normalized;
-    }
+      const normalized = await normalizeLogs();
+      if (!normalized.ok) {
+        return normalized;
+      }
 
-    const committed = await commitAll("tickets: sync");
-    if (!committed.ok) {
-      return committed;
-    }
+      const committed = await commitAll("tickets: sync");
+      if (!committed.ok) {
+        return committed;
+      }
 
-    const pushed = await pushWithRetry({
-      remoteUrl: checkedOut.remoteUrl,
-      pushRef: checkedOut.pushRef,
+      const pushed = await pushWithRetry({
+        remoteUrl: checkedOut.remoteUrl,
+        pushRef: checkedOut.pushRef,
+      });
+      if (!pushed.ok) {
+        return pushed;
+      }
+
+      return {
+        ok: true,
+        branch,
+        ...(checkedOut.remoteUrl ? { remote: remoteName } : {}),
+        didCommit: committed.didCommit,
+        didPush: pushed.didPush,
+      };
     });
-    if (!pushed.ok) {
-      return pushed;
-    }
-
-    return {
-      ok: true,
-      branch,
-      ...(checkedOut.remoteUrl ? { remote: remoteName } : {}),
-      didCommit: committed.didCommit,
-      didPush: pushed.didPush,
-    };
   };
 
   return {
@@ -1108,6 +1340,7 @@ export function createGitTicketsChannel(opts: {
       return worktreeDir;
     },
     appendEvents,
+    appendPreparedEvents,
     inspect,
     repair,
     sync,
@@ -1346,6 +1579,7 @@ function isGitIndexLockError(message: string): boolean {
 }
 
 export const __testOnly = {
+  createGitTicketsChannel,
   mergeTicketEventLogs,
   resolvePushRefForCheckoutRef,
   resolveLocalCheckoutFallback,

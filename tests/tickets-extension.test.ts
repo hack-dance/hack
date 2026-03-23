@@ -74,7 +74,34 @@ testIntegration(
     const createdJson = JSON.parse(created.stdout) as {
       ticket: { ticketId: string };
     };
-    expect(createdJson.ticket.ticketId).toMatch(/^T-\d{5}$/);
+    expect(createdJson.ticket.ticketId).toMatch(/^T-[0-9A-Z]{10}$/);
+
+    const updated = await runHack({
+      cwd: projectDir,
+      args: [
+        "tickets",
+        "update",
+        createdJson.ticket.ticketId,
+        "--title",
+        "Updated ticket title",
+        "--json",
+      ],
+    });
+    const updatedJson = JSON.parse(updated.stdout) as { ok: boolean };
+    expect(updatedJson.ok).toBe(true);
+
+    const status = await runHack({
+      cwd: projectDir,
+      args: [
+        "tickets",
+        "status",
+        createdJson.ticket.ticketId,
+        "in_progress",
+        "--json",
+      ],
+    });
+    const statusJson = JSON.parse(status.stdout) as { ok: boolean };
+    expect(statusJson.ok).toBe(true);
 
     const afterHead = (
       await run({
@@ -89,20 +116,23 @@ testIntegration(
       args: ["tickets", "list", "--json"],
     });
     const listJson = JSON.parse(listed.stdout) as {
-      tickets: { ticketId: string; title: string }[];
+      tickets: { ticketId: string; title: string; status: string }[];
     };
     expect(listJson.tickets.length).toBe(1);
-    expect(listJson.tickets[0]?.title).toBe("First ticket");
+    expect(listJson.tickets[0]?.title).toBe("Updated ticket title");
+    expect(listJson.tickets[0]?.status).toBe("in_progress");
 
     const shown = await runHack({
       cwd: projectDir,
       args: ["tickets", "show", createdJson.ticket.ticketId, "--json"],
     });
     const showJson = JSON.parse(shown.stdout) as {
-      ticket: { ticketId: string; title: string };
+      ticket: { ticketId: string; title: string; status: string };
       events: { type: string }[];
     };
     expect(showJson.ticket.ticketId).toBe(createdJson.ticket.ticketId);
+    expect(showJson.ticket.title).toBe("Updated ticket title");
+    expect(showJson.ticket.status).toBe("in_progress");
     expect(showJson.events.some((e) => e.type === "ticket.created")).toBe(true);
 
     const showRef = await runAllowFail({

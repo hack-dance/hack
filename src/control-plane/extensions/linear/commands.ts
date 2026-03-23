@@ -1275,7 +1275,7 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
       const ticketInput = parsed.value.ticketId;
       if (!ticketInput) {
         ctx.logger.error({
-          message: "Missing --ticket <T-00001> for --from hack.",
+          message: "Missing --ticket <ticket-id> for --from hack.",
         });
         return 1;
       }

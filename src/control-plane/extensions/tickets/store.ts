@@ -22,9 +22,9 @@ import {
 import { createTicketsSqliteProjection } from "./sqlite-projection.ts";
 import { createGitTicketsChannel } from "./tickets-git-channel.ts";
 import {
-  formatTicketId,
+  compareTicketIds,
+  generateTicketId,
   normalizeTicketRefs,
-  parseTicketNumber,
   unixSeconds,
 } from "./util.ts";
 
@@ -233,6 +233,8 @@ type SyncConflictBuildResult =
     }
   | { readonly ok: false; readonly error: string };
 
+const MAX_TICKET_ID_ALLOCATION_ATTEMPTS = 32;
+
 function normalizeTicketSummaryCompatibility(input: {
   readonly ticket: TicketSummary;
 }): TicketSummary {
@@ -248,6 +250,7 @@ export function createTicketsStore(opts: {
   readonly projectId?: string;
   readonly projectName?: string;
   readonly controlPlaneConfig: ControlPlaneConfig;
+  readonly generateTicketId?: () => string;
   readonly logger: {
     info: (input: { message: string }) => void;
     warn: (input: { message: string }) => void;
@@ -402,6 +405,7 @@ export function createTicketsStore(opts: {
   const projection = createTicketsSqliteProjection({
     projectRoot: opts.projectRoot,
   });
+  const allocateTicketId = opts.generateTicketId ?? generateTicketId;
   let eventSequence = 0;
 
   const resolveActor = (override?: string): string => {
@@ -560,11 +564,13 @@ export function createTicketsStore(opts: {
     readonly tickets: Iterable<TicketSummary>;
   }): TicketSummary[] => {
     const out = [...input.tickets];
-    out.sort(
-      (a, b) =>
-        (parseTicketNumber(a.ticketId) ?? 0) -
-        (parseTicketNumber(b.ticketId) ?? 0)
-    );
+    out.sort((left, right) => {
+      const createdAt = left.createdAt.localeCompare(right.createdAt);
+      if (createdAt !== 0) {
+        return createdAt;
+      }
+      return compareTicketIds(left.ticketId, right.ticketId);
+    });
     return out;
   };
 
@@ -659,18 +665,6 @@ export function createTicketsStore(opts: {
     );
   };
 
-  const computeNextTicketId = async (): Promise<string> => {
-    const { snapshot } = await loadStoreContext();
-    let max = 0;
-    for (const ticket of snapshot.tickets) {
-      const n = parseTicketNumber(ticket.ticketId);
-      if (n !== null && n > max) {
-        max = n;
-      }
-    }
-    return formatTicketId(max + 1);
-  };
-
   const setStatus = async (input: {
     readonly ticketId: string;
     readonly status: TicketStatus;
@@ -739,7 +733,6 @@ export function createTicketsStore(opts: {
 
   return {
     createTicket: async (input) => {
-      const ticketId = await computeNextTicketId();
       const metadata = normalizeTicketMetadata({
         dependsOn: input.dependsOn,
         blocks: input.blocks,
@@ -766,27 +759,66 @@ export function createTicketsStore(opts: {
         payload,
         metadata,
       });
-      const event = buildEvent({
-        ticketId,
-        type: "ticket.created",
-        payload,
-        actor: input.actor,
-      });
+      const wrote = await git.appendPreparedEvents({
+        prepare: async (root) => {
+          const events = await readAllEventsFromRoot({ root });
+          const snapshot = materializeSnapshotFromEvents({ events });
 
-      const wrote = await appendEventsAndRefresh({ events: [event] });
+          let ticketId: string | null = null;
+          for (
+            let attempt = 0;
+            attempt < MAX_TICKET_ID_ALLOCATION_ATTEMPTS;
+            attempt += 1
+          ) {
+            const candidate = allocateTicketId();
+            if (!snapshot.tickets.has(candidate)) {
+              ticketId = candidate;
+              break;
+            }
+          }
+
+          if (!ticketId) {
+            return {
+              ok: false,
+              error: "Failed to allocate a unique ticket id.",
+            };
+          }
+
+          const event = buildEvent({
+            ticketId,
+            type: "ticket.created",
+            payload,
+            actor: input.actor,
+          });
+
+          return {
+            ok: true,
+            events: [event],
+            result: {
+              event,
+              ticketId,
+            },
+          } as const;
+        },
+      });
       if (!wrote.ok) {
         return wrote;
+      }
+
+      const rebuilt = await rebuildProjectionFromJournal();
+      if (!rebuilt.ok) {
+        return rebuilt;
       }
 
       return {
         ok: true,
         ticket: buildTicketSummary({
-          ticketId,
+          ticketId: wrote.result.ticketId,
           title: input.title,
           ...(input.body ? { body: input.body } : {}),
           status: "open",
-          createdAt: event.tsIso,
-          updatedAt: event.tsIso,
+          createdAt: wrote.result.event.tsIso,
+          updatedAt: wrote.result.event.tsIso,
           metadata,
           projectId: opts.projectId,
           projectName: opts.projectName,

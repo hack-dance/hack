@@ -16,6 +16,7 @@ import { linearCommand } from "../commands/linear.ts";
 import { logPipeCommand } from "../commands/log-pipe.ts";
 import { mcpCommand } from "../commands/mcp.ts";
 import { nodeCommand } from "../commands/node.ts";
+import { orgCommand } from "../commands/org.ts";
 import {
   downCommand,
   initCommand,
@@ -26,12 +27,14 @@ import {
   runCommand,
   upCommand,
 } from "../commands/project.ts";
+import { projectCommand } from "../commands/project-admin.ts";
 import { projectsCommand, statusCommand } from "../commands/projects.ts";
 import { remoteCommand } from "../commands/remote.ts";
 import { secretsCommand } from "../commands/secrets.ts";
 import { sessionCommand } from "../commands/session.ts";
 import { setupCommand } from "../commands/setup.ts";
 import { sshCommand } from "../commands/ssh.ts";
+import { teamCommand } from "../commands/team.ts";
 import { theCommand } from "../commands/the.ts";
 import { ticketsCommand } from "../commands/tickets.ts";
 import { tuiCommand } from "../commands/tui.ts";
@@ -50,15 +53,22 @@ const packageJson = pkg as unknown as PackageJsonType;
 export const CLI_SPEC = defineCli({
   name: "hack",
   version: packageJson.version,
-  summary:
-    "run multiple local projects concurrently (network isolation + https://*.hack)",
+  summary: "Local development without the port-collision tax",
+  highlights: [
+    "Run multiple repos or branches at the same time without port conflicts.",
+    "Give every project a stable HTTPS URL like https://myapp.hack.",
+    "Keep env, sessions, tickets, and integrations close to the repo.",
+  ] as const,
   globalOptions: [],
   commands: [
     globalCommand,
     authCommand,
+    orgCommand,
+    teamCommand,
     statusCommand,
     usageCommand,
     projectsCommand,
+    projectCommand,
     initCommand,
     upCommand,
     downCommand,

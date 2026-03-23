@@ -8,11 +8,14 @@ import {
   PROJECT_ENV_FILENAME,
 } from "../constants.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
+import { parseSessionBase } from "../mux/session-names.ts";
 import { pathExists, readTextFile } from "./fs.ts";
 import { isRecord } from "./guards.ts";
 import {
+  type ProjectConfig,
   type ProjectLifecycleCommand,
   type ProjectLifecycleProcess,
+  type ProjectOwnershipConfig,
   readProjectConfig,
 } from "./project.ts";
 import type { RegisteredProject } from "./projects-registry.ts";
@@ -76,6 +79,7 @@ export type ProjectView = {
   readonly devHost: string | null;
   readonly repoRoot: string | null;
   readonly projectDir: string | null;
+  readonly ownership: ProjectOwnershipConfig | null;
   readonly definedServices: readonly string[] | null;
   readonly extensionsEnabled: readonly string[] | null;
   readonly features: readonly string[] | null;
@@ -259,11 +263,12 @@ async function buildRegisteredProjectView(opts: {
         projectDir: opts.registration.projectDir,
       })
     : null;
-  const lifecycle = projectDirOk
-    ? await resolveProjectLifecycleView({
+  const config = projectDirOk
+    ? await readRegisteredProjectConfig({
         registration: opts.registration,
       })
     : null;
+  const lifecycle = resolveProjectLifecycleView({ config });
 
   return {
     projectId: opts.registration.id,
@@ -271,6 +276,7 @@ async function buildRegisteredProjectView(opts: {
     devHost: opts.registration.devHost ?? null,
     repoRoot: opts.registration.repoRoot,
     projectDir: opts.registration.projectDir,
+    ownership: config && !config.parseError ? config.ownership : null,
     definedServices,
     extensionsEnabled: extensions?.enabled ?? null,
     features: extensions?.features ?? null,
@@ -301,6 +307,7 @@ function buildUnregisteredProjectView(opts: {
     devHost: null,
     repoRoot: null,
     projectDir: null,
+    ownership: null,
     definedServices: null,
     extensionsEnabled: null,
     features: null,
@@ -325,6 +332,14 @@ export function serializeProjectView(
     dev_host: view.devHost ?? null,
     repo_root: view.repoRoot ?? null,
     project_dir: view.projectDir ?? null,
+    ownership: view.ownership
+      ? {
+          mode: view.ownership.mode,
+          owner_type: view.ownership.ownerType,
+          owner_id: view.ownership.ownerId,
+          managed_by: view.ownership.managedBy,
+        }
+      : null,
     defined_services: view.definedServices ?? null,
     extensions_enabled: view.extensionsEnabled ?? null,
     features: view.features ?? null,
@@ -388,10 +403,10 @@ export function serializeProjectView(
   };
 }
 
-async function resolveProjectLifecycleView(opts: {
+async function readRegisteredProjectConfig(opts: {
   readonly registration: RegisteredProject;
-}): Promise<ProjectLifecycleView | null> {
-  const config = await readProjectConfig({
+}): Promise<ProjectConfig> {
+  return await readProjectConfig({
     projectRoot: opts.registration.repoRoot,
     projectDirName: opts.registration.projectDirName,
     projectDir: opts.registration.projectDir,
@@ -402,7 +417,12 @@ async function resolveProjectLifecycleView(opts: {
     envFile: resolve(opts.registration.projectDir, PROJECT_ENV_FILENAME),
     configFile: resolve(opts.registration.projectDir, PROJECT_CONFIG_FILENAME),
   });
-  const lifecycle = config.lifecycle;
+}
+
+function resolveProjectLifecycleView(opts: {
+  readonly config: ProjectConfig | null;
+}): ProjectLifecycleView | null {
+  const lifecycle = opts.config?.lifecycle;
   if (!lifecycle) {
     return null;
   }
@@ -581,16 +601,20 @@ function matchesHackSessionName(opts: {
   readonly sessionName: string;
   readonly projectName: string;
 }): boolean {
-  const [sessionBase] = opts.sessionName.split(":");
   const normalizedProject = normalizeSessionToken(opts.projectName);
-  const normalizedSessionBase = normalizeSessionToken(sessionBase ?? "");
-  if (normalizedProject.length === 0 || normalizedSessionBase.length === 0) {
+  const primaryBase = parseSessionBase({ name: opts.sessionName });
+  const legacyBase = opts.sessionName.split(":")[0] ?? "";
+  const normalizedBases = [primaryBase, legacyBase]
+    .map((value) => normalizeSessionToken(value))
+    .filter((value) => value.length > 0);
+  if (normalizedProject.length === 0 || normalizedBases.length === 0) {
     return false;
   }
   return (
     opts.sessionName === opts.projectName ||
+    opts.sessionName.startsWith(`${opts.projectName}--`) ||
     opts.sessionName.startsWith(`${opts.projectName}:`) ||
-    normalizedSessionBase === normalizedProject
+    normalizedBases.includes(normalizedProject)
   );
 }
 

@@ -4,9 +4,6 @@ import { confirm, isCancel, note, spinner } from "@clack/prompts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
 
-/** Regex to split strings on whitespace. */
-const WHITESPACE_PATTERN = /\s+/;
-
 import {
   optFollow,
   optJson,
@@ -40,6 +37,7 @@ import {
   GLOBAL_LOGGING_COMPOSE_FILENAME,
   GLOBAL_LOGGING_DIR_NAME,
   GLOBAL_LOKI_CONFIG_FILENAME,
+  GLOBAL_MANAGED_ENV_SCHEMA_FILENAME,
   GLOBAL_SCHEMAS_DIR_NAME,
 } from "../constants.ts";
 import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config.ts";
@@ -82,12 +80,16 @@ import {
   renderProjectBranchesSchemaJson,
   renderProjectConfigSchemaJson,
   renderProjectEnvSchemaJson,
+  renderProjectManagedEnvSchemaJson,
 } from "../templates.ts";
 import { display } from "../ui/display.ts";
 import { dockerComposeLogsPretty } from "../ui/docker-logs.ts";
 import { ensureBundledGumInstalled } from "../ui/gum.ts";
 import { logger } from "../ui/logger.ts";
 import { resolvePreferredHostDnsTarget } from "./doctor-utils.ts";
+
+/** Regex to split strings on whitespace. */
+const WHITESPACE_PATTERN = /\s+/;
 
 const globalLogsOptions = [optFollow, optNoFollow, optTail, optPretty] as const;
 const globalLogsPositionals = [{ name: "service", required: false }] as const;
@@ -283,6 +285,7 @@ function getGlobalPaths() {
     grafanaDashboard: resolve(loggingDir, GLOBAL_GRAFANA_DASHBOARD_FILENAME),
     configSchema: resolve(schemasDir, GLOBAL_CONFIG_SCHEMA_FILENAME),
     envSchema: resolve(schemasDir, GLOBAL_ENV_SCHEMA_FILENAME),
+    managedEnvSchema: resolve(schemasDir, GLOBAL_MANAGED_ENV_SCHEMA_FILENAME),
     branchesSchema: resolve(schemasDir, GLOBAL_BRANCHES_SCHEMA_FILENAME),
   };
 }
@@ -606,6 +609,10 @@ async function globalInstall(): Promise<number> {
   await writeWithPromptIfDifferent(
     paths.envSchema,
     renderProjectEnvSchemaJson()
+  );
+  await writeWithPromptIfDifferent(
+    paths.managedEnvSchema,
+    renderProjectManagedEnvSchemaJson()
   );
   await writeWithPromptIfDifferent(
     paths.branchesSchema,

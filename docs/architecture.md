@@ -177,8 +177,11 @@ If the daemon is not running (or version-mismatched), the CLI falls back to dire
 Runtime health:
 - The daemon treats the container runtime as ephemeral; it fingerprints the engine (socket + engine id)
   and detects resets.
+- On reset detection, hackd performs one bounded cache refresh to stabilize its view before asking the
+  user to repair anything manually.
 - When the runtime is unavailable, cached state is retained but marked stale; API responses include
-  `runtime_*` metadata and project `status` becomes `unknown`.
+  `runtime_*` metadata, including what changed, what hackd repaired, and the next step when manual
+  recovery is still required. Project `status` becomes `unknown`.
 
 Why optional:
 - The CLI must keep working with zero background processes.

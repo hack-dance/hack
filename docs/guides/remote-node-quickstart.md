@@ -1,6 +1,12 @@
-# Remote Node Quickstart
+# Remote Node Quickstart (Beta)
+
+This is a beta workflow.
+Start with [Core docs](../core.md) if you are new to `hack`, and use [Beta workflows](../beta.md)
+for the rest of the remote path.
 
 Use this guide to connect one remote machine as a `hack` execution node and run a project on it.
+
+> Beta: multi-node execution is still being validated and is not part of the core local-dev path.
 
 ## What you need
 
@@ -8,6 +14,9 @@ Use this guide to connect one remote machine as a `hack` execution node and run 
 2. A remote machine with `hack` installed.
 3. SSH access from host to remote (`user@host`).
 4. A reachable gateway endpoint on the remote (`http://<host>:7788` or tailnet URL).
+
+GitHub is optional here. You only need it if the repo is private on GitHub and the remote machine
+cannot already clone it with its own credentials.
 
 ## Step 1: prepare the remote machine
 
@@ -70,6 +79,15 @@ hack dispatch run \
   -- "pwd"
 ```
 
+If this project is a private GitHub repo and the remote node cannot clone it directly, connect
+GitHub on the controller first:
+
+```bash
+hack x github oauth-connect --profile work --set-default
+```
+
+See [GitHub workflows](github-workflows.md) for the full optional-vs-required breakdown.
+
 Optional remote check:
 
 ```bash
@@ -102,3 +120,6 @@ You can do the same flow in Hack Desktop:
 4. Local project URL fails after remote dispatch (`https://<project>.hack`):
    - run `hack node routes status` then `hack node routes repair`.
    - if global proxy is down, run `hack global up` and retry.
+5. Remote bootstrap fails on a private GitHub repo:
+   - connect GitHub on the controller so Hack can retry clone with controller credentials.
+   - run `hack x github oauth-connect --profile work --set-default` and retry.

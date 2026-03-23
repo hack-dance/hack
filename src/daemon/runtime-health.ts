@@ -13,13 +13,18 @@ export type RuntimeIdentityResult =
   | { readonly ok: true; readonly identity: RuntimeIdentity }
   | { readonly ok: false; readonly error: string };
 
-export type RuntimeResetReason =
-  | "docker_host_changed"
-  | "socket_path_changed"
-  | "socket_inode_changed"
-  | "engine_id_changed"
-  | "engine_name_changed"
-  | "engine_version_changed";
+export type RuntimeDriftField =
+  | "docker_host"
+  | "socket_path"
+  | "socket_inode"
+  | "engine_id"
+  | "engine_name"
+  | "engine_version";
+
+export type RuntimeDrift = {
+  readonly changed: readonly RuntimeDriftField[];
+  readonly summary: string | null;
+};
 
 export async function readRuntimeIdentity(opts?: {
   readonly env?: Record<string, string | undefined>;
@@ -55,48 +60,43 @@ export function buildRuntimeFingerprint(opts: {
       ? String(opts.identity.socketInode)
       : "none";
   const engineId = opts.identity.engineId ?? "unknown";
-  const engineName = opts.identity.engineName ?? "unknown";
-  const engineVersion = opts.identity.engineVersion ?? "unknown";
-  return [
-    dockerHost,
-    socketPath,
-    socketInode,
-    engineId,
-    engineName,
-    engineVersion,
-  ].join("|");
+  return [dockerHost, socketPath, socketInode, engineId].join("|");
 }
 
-export function describeRuntimeReset(opts: {
-  readonly previous: RuntimeIdentity;
-  readonly next: RuntimeIdentity;
-}): {
-  readonly reasons: readonly RuntimeResetReason[];
-  readonly summary: string | null;
-} {
-  const reasons: RuntimeResetReason[] = [];
-  if (opts.previous.dockerHost !== opts.next.dockerHost) {
-    reasons.push("docker_host_changed");
+export function detectRuntimeDrift(opts: {
+  readonly previous: RuntimeIdentity | null;
+  readonly current: RuntimeIdentity;
+}): RuntimeDrift {
+  if (!opts.previous) {
+    return {
+      changed: [],
+      summary: null,
+    };
   }
-  if (opts.previous.socketPath !== opts.next.socketPath) {
-    reasons.push("socket_path_changed");
+
+  const changed: RuntimeDriftField[] = [];
+  if (opts.previous.dockerHost !== opts.current.dockerHost) {
+    changed.push("docker_host");
   }
-  if (opts.previous.socketInode !== opts.next.socketInode) {
-    reasons.push("socket_inode_changed");
+  if (opts.previous.socketPath !== opts.current.socketPath) {
+    changed.push("socket_path");
   }
-  if (opts.previous.engineId !== opts.next.engineId) {
-    reasons.push("engine_id_changed");
+  if (opts.previous.socketInode !== opts.current.socketInode) {
+    changed.push("socket_inode");
   }
-  if (opts.previous.engineName !== opts.next.engineName) {
-    reasons.push("engine_name_changed");
+  if (opts.previous.engineId !== opts.current.engineId) {
+    changed.push("engine_id");
   }
-  if (opts.previous.engineVersion !== opts.next.engineVersion) {
-    reasons.push("engine_version_changed");
+  if (opts.previous.engineName !== opts.current.engineName) {
+    changed.push("engine_name");
+  }
+  if (opts.previous.engineVersion !== opts.current.engineVersion) {
+    changed.push("engine_version");
   }
 
   return {
-    reasons,
-    summary: reasons.length > 0 ? reasons.join(", ") : null,
+    changed,
+    summary: changed.length > 0 ? summarizeRuntimeDrift({ changed }) : null,
   };
 }
 
@@ -219,3 +219,19 @@ function formatDockerError(opts: {
   }
   return `docker info failed (exit ${opts.exitCode})`;
 }
+
+function summarizeRuntimeDrift(opts: {
+  readonly changed: readonly RuntimeDriftField[];
+}): string {
+  const labels = opts.changed.map((field) => runtimeDriftLabels[field]);
+  return `${labels.join(", ")} changed`;
+}
+
+const runtimeDriftLabels: Record<RuntimeDriftField, string> = {
+  docker_host: "docker host",
+  socket_path: "socket path",
+  socket_inode: "socket inode",
+  engine_id: "engine id",
+  engine_name: "engine name",
+  engine_version: "engine version",
+};

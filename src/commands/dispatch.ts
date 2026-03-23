@@ -211,8 +211,8 @@ const logsPositionals = [{ name: "runId", required: true }] as const;
 
 const dispatchSpec = defineCommand({
   name: "dispatch",
-  summary: "Dispatch branch-scoped jobs to remote nodes",
-  group: "Extensions",
+  summary: "Beta: run branch-scoped jobs on remote nodes",
+  group: "Beta",
   options: [],
   positionals: [],
   subcommands: [],
@@ -221,7 +221,7 @@ const dispatchSpec = defineCommand({
 const runSpec = defineCommand({
   name: "run",
   summary: "Dispatch a command to a node workspace",
-  group: "Extensions",
+  group: "Beta",
   options: runOptions,
   positionals: runPositionals,
   subcommands: [],
@@ -230,7 +230,7 @@ const runSpec = defineCommand({
 const statusSpec = defineCommand({
   name: "status",
   summary: "Show dispatched run status",
-  group: "Extensions",
+  group: "Beta",
   options: statusOptions,
   positionals: statusPositionals,
   subcommands: [],
@@ -239,7 +239,7 @@ const statusSpec = defineCommand({
 const logsSpec = defineCommand({
   name: "logs",
   summary: "Show or follow persisted/remote run logs",
-  group: "Extensions",
+  group: "Beta",
   options: logsOptions,
   positionals: logsPositionals,
   subcommands: [],

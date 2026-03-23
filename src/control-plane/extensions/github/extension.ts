@@ -7,7 +7,8 @@ export const GITHUB_EXTENSION: ExtensionDefinition = {
     version: "0.1.0",
     scopes: ["global", "project"],
     cliNamespace: "github",
-    summary: "GitHub App SCM integration for dispatch and PR automation",
+    summary:
+      "Optional GitHub capability for PR automation and private repo bootstrap",
   },
   commands: GITHUB_COMMANDS,
 };

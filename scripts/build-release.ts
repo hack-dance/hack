@@ -7,6 +7,7 @@ import {
   renderProjectBranchesSchemaJson,
   renderProjectConfigSchemaJson,
   renderProjectEnvSchemaJson,
+  renderProjectManagedEnvSchemaJson,
 } from "../src/templates.ts";
 
 interface BuildArgs {
@@ -108,6 +109,10 @@ async function main({ args }: { readonly args: BuildArgs }): Promise<number> {
   await Bun.write(
     resolve(schemasDir, "hack.env.schema.json"),
     renderProjectEnvSchemaJson()
+  );
+  await Bun.write(
+    resolve(schemasDir, "hack.env.managed.schema.json"),
+    renderProjectManagedEnvSchemaJson()
   );
   await Bun.write(
     resolve(schemasDir, "hack.branches.schema.json"),

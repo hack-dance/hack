@@ -3530,7 +3530,7 @@ private struct LinearExtensionSettingsView: View {
   }
 
   private var linearSyncPolicySummary: String {
-    "Authority follows ticket origin. Origin-owned fields such as title, body, status, and project binding stay authoritative on the side that created the ticket, while assignees, labels, dependencies, and sub-issue links are best-effort mergeable when enabled. Comments are append-only and synced in FIFO order rather than edited in place."
+    "Authority follows ticket origin. Origin-owned fields such as title, body, and status stay authoritative on the side that created the ticket. Linear linkage metadata refreshes from Linear, while Hack project placement stays local. Assignees, labels, dependencies, and sub-issue links are best-effort mergeable when enabled. Comments are append-only and synced in FIFO order rather than edited in place."
   }
 
   private var linearSyncReviewSummary: String {

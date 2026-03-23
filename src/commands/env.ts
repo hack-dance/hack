@@ -12,6 +12,7 @@ import { optJson, optPath, optProject } from "../cli/options.ts";
 import { PROJECT_ENV_FILENAME } from "../constants.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
+import type { HackEnvStorageSummary } from "../lib/hack-env.ts";
 import {
   removeDotEnvKey,
   resolveHackEnv,
@@ -242,6 +243,7 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
       `${JSON.stringify(
         {
           project: projectName,
+          storage: serializeEnvStorageForJson({ storage: resolved.storage }),
           vars: resolved.values.map((v) => ({
             key: v.key,
             required: v.required,
@@ -262,12 +264,40 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
     return resolved.missingRequired.length > 0 ? 1 : 0;
   }
 
+  await display.kv({
+    title: "Env storage",
+    entries: [
+      [
+        "contract",
+        `${resolved.storage.contract.path} (committed contract, no values)`,
+      ],
+      [
+        "local_plaintext",
+        `${resolved.storage.localPlaintext.path} (${resolved.storage.localPlaintext.exists ? "present" : "missing"} plaintext file for plain_env, gitignore not enforced)`,
+      ],
+      [
+        "local_fallback",
+        `${resolved.storage.localPlaintext.fallback.source} (used when .env does not provide a plain_env value)`,
+      ],
+      [
+        "local_secrets",
+        `${formatSecretStoreDescriptor({ descriptor: resolved.storage.localSecrets })} (${resolved.storage.localSecrets.mode === "shim" ? "local secret backend shim" : "local secret backend"})`,
+      ],
+      [
+        "portable_state",
+        `${resolved.storage.portableState.status}: ${resolved.storage.portableState.message}`,
+      ],
+    ],
+  });
+
   if (resolved.contract.vars.length === 0) {
     logger.info({
       message: `No ${project.projectDir}/hack.env.json contract found (or it has no vars).`,
     });
     return 0;
   }
+
+  await display.section("Resolved env vars");
 
   for (const v of resolved.values) {
     const value =
@@ -291,6 +321,39 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
 
   return 0;
 };
+
+function serializeEnvStorageForJson(input: {
+  readonly storage: HackEnvStorageSummary;
+}) {
+  return {
+    contract: {
+      path: input.storage.contract.path,
+      trust_model: input.storage.contract.trustModel,
+    },
+    local_plaintext: {
+      path: input.storage.localPlaintext.path,
+      exists: input.storage.localPlaintext.exists,
+      trust_model: input.storage.localPlaintext.trustModel,
+      fallback: {
+        enabled: input.storage.localPlaintext.fallback.enabled,
+        source: input.storage.localPlaintext.fallback.source,
+        trust_model: input.storage.localPlaintext.fallback.trustModel,
+      },
+    },
+    local_secrets: {
+      backend: input.storage.localSecrets.backend,
+      location: input.storage.localSecrets.location,
+      mode: input.storage.localSecrets.mode,
+      provider: input.storage.localSecrets.provider ?? null,
+      trust_model: input.storage.localSecrets.trustModel,
+    },
+    portable_state: {
+      status: input.storage.portableState.status,
+      trust_model: input.storage.portableState.trustModel,
+      message: input.storage.portableState.message,
+    },
+  };
+}
 
 const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
   ctx,
@@ -620,8 +683,8 @@ async function resolveEnvValue(opts: {
 
 export const envCommand = defineCommand({
   name: "env",
-  summary: "Manage project environment variables and secrets",
-  group: "Project",
+  summary: "Set project env vars and local secrets",
+  group: "Integrations",
   expandInRootHelp: true,
   options: [],
   positionals: [],

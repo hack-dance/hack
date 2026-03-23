@@ -14,7 +14,7 @@ import { logger } from "../ui/logger.ts";
  */
 const ticketsSpec = defineCommand({
   name: "tickets",
-  summary: "Git-backed ticket management",
+  summary: "Track repo-local work without leaving git",
   description: [
     "Usage:",
     "  hack tickets list",
@@ -28,7 +28,7 @@ const ticketsSpec = defineCommand({
     "",
     "Alias for `hack x tickets <command>`. Requires extension enabled.",
   ].join("\n"),
-  group: "Project",
+  group: "Integrations",
   options: [],
   positionals: [{ name: "args", required: false, multiple: true }],
   subcommands: [],

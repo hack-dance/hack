@@ -253,6 +253,10 @@ async function runProjects(opts: {
   readonly meta: boolean;
   readonly json: boolean;
 }): Promise<number> {
+  const daemonRuntimeMeta = opts.json
+    ? null
+    : await readDaemonRuntimeRecoveryMeta();
+
   if (opts.json) {
     const daemon = await requestDaemonJson({
       path: "/v1/projects",
@@ -289,35 +293,22 @@ async function runProjects(opts: {
     ? await buildMetaByProjectName({ views })
     : new Map<string, ProjectMeta>();
   if (opts.json) {
-    const runtimeMeta = formatRuntimeMeta({ runtime });
-    const payload = {
-      generated_at: new Date().toISOString(),
+    outputProjectsJson({
       filter: opts.filter,
-      include_global: opts.includeGlobal,
-      include_unregistered: opts.includeUnregistered,
-      include_meta: opts.meta,
-      runtime_ok: runtimeMeta.ok,
-      runtime_error: runtimeMeta.error,
-      runtime_checked_at: runtimeMeta.checkedAt,
-      runtime_last_ok_at: runtimeMeta.lastOkAt,
-      runtime_reset_at: runtimeMeta.lastResetAt,
-      runtime_reset_count: runtimeMeta.resetCount,
-      projects: views.map((view) => ({
-        ...serializeProjectView(view),
-        ...(opts.meta ? { meta: metaByName.get(view.name) ?? null } : {}),
-      })),
-    };
-    process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+      includeGlobal: opts.includeGlobal,
+      includeUnregistered: opts.includeUnregistered,
+      includeMeta: opts.meta,
+      runtime,
+      views,
+      metaByName,
+    });
     return 0;
   }
 
-  if (!runtime.ok) {
-    await display.panel({
-      title: "Runtime unavailable",
-      tone: "warn",
-      lines: [runtime.error ?? "Docker runtime is not responding."],
-    });
-  }
+  await renderRuntimeNotices({
+    runtime,
+    daemonRuntimeMeta,
+  });
 
   if (views.length === 0) {
     await display.panel({
@@ -368,6 +359,80 @@ async function runProjects(opts: {
   return 0;
 }
 
+type RuntimeRecoveryMeta = {
+  readonly resetCount: number;
+  readonly lastResetSummary: string | null;
+  readonly lastRepairAction: string | null;
+  readonly lastRepairOutcome: "stabilized" | "manual_action_required" | null;
+  readonly nextStep: string | null;
+};
+
+type RuntimeRecoveryNotice = {
+  readonly title: string;
+  readonly tone: "info" | "warn";
+  readonly lines: readonly string[];
+};
+
+function outputProjectsJson(opts: {
+  readonly filter: string | null;
+  readonly includeGlobal: boolean;
+  readonly includeUnregistered: boolean;
+  readonly includeMeta: boolean;
+  readonly runtime: Awaited<ReturnType<typeof readRuntimeProjects>>;
+  readonly views: readonly ProjectView[];
+  readonly metaByName: ReadonlyMap<string, ProjectMeta>;
+}): void {
+  const runtimeMeta = formatRuntimeMeta({ runtime: opts.runtime });
+  const payload = {
+    generated_at: new Date().toISOString(),
+    filter: opts.filter,
+    include_global: opts.includeGlobal,
+    include_unregistered: opts.includeUnregistered,
+    include_meta: opts.includeMeta,
+    runtime_ok: runtimeMeta.ok,
+    runtime_error: runtimeMeta.error,
+    runtime_checked_at: runtimeMeta.checkedAt,
+    runtime_last_ok_at: runtimeMeta.lastOkAt,
+    runtime_reset_at: runtimeMeta.lastResetAt,
+    runtime_reset_count: runtimeMeta.resetCount,
+    runtime_reset_summary: runtimeMeta.lastResetSummary,
+    runtime_reset_changes: runtimeMeta.lastResetChanges,
+    runtime_last_repair_at: runtimeMeta.lastRepairAt,
+    runtime_repair_action: runtimeMeta.lastRepairAction,
+    runtime_repair_outcome: runtimeMeta.lastRepairOutcome,
+    runtime_next_step: runtimeMeta.nextStep,
+    projects: opts.views.map((view) => ({
+      ...serializeProjectView(view),
+      ...(opts.includeMeta
+        ? { meta: opts.metaByName.get(view.name) ?? null }
+        : {}),
+    })),
+  };
+  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+}
+
+async function renderRuntimeNotices(opts: {
+  readonly runtime: Awaited<ReturnType<typeof readRuntimeProjects>>;
+  readonly daemonRuntimeMeta: RuntimeRecoveryMeta | null;
+}): Promise<void> {
+  if (!opts.runtime.ok) {
+    await display.panel({
+      title: "Runtime unavailable",
+      tone: "warn",
+      lines: [opts.runtime.error ?? "Docker runtime is not responding."],
+    });
+  }
+
+  const runtimeRecoveryNotice = buildRuntimeRecoveryNotice({
+    runtimeMeta: opts.daemonRuntimeMeta,
+  });
+  if (!runtimeRecoveryNotice) {
+    return;
+  }
+
+  await display.panel(runtimeRecoveryNotice);
+}
+
 async function renderProjectDetails(opts: {
   readonly project: ProjectView;
   readonly caddyIp: string | null;
@@ -390,6 +455,15 @@ async function renderProjectDetails(opts: {
   }
   if (p.projectDir) {
     meta.push(["Project dir", p.projectDir]);
+  }
+  if (p.ownership) {
+    meta.push([
+      "Ownership",
+      `${p.ownership.mode}:${p.ownership.ownerType}${
+        p.ownership.ownerId ? `:${p.ownership.ownerId}` : ""
+      }`,
+    ]);
+    meta.push(["Managed by", p.ownership.managedBy]);
   }
   const mappedIp = await readInternalExtraHostsIp({ projectDir: p.projectDir });
   const caddySummary = formatCaddySummary({ caddyIp: opts.caddyIp, mappedIp });
@@ -564,6 +638,21 @@ async function renderProjectMeta(opts: {
 }): Promise<void> {
   await display.section("Meta");
 
+  const ownershipEntries: Array<readonly [string, string]> = opts.meta.ownership
+    ? [
+        ["Ownership mode", opts.meta.ownership.mode],
+        ["Owner type", opts.meta.ownership.ownerType],
+        ["Owner id", opts.meta.ownership.ownerId ?? ""],
+        ["Managed by", opts.meta.ownership.managedBy],
+      ]
+    : [["Ownership", "unavailable"]];
+  if (opts.meta.configError) {
+    ownershipEntries.push(["Config error", opts.meta.configError]);
+  }
+
+  await display.kv({
+    entries: ownershipEntries,
+  });
   await renderGitMeta({ git: opts.meta.git });
   await renderGitWorktrees({ worktrees: opts.meta.git.worktrees });
   await renderSessionsMeta({ sessions: opts.meta.sessions.sessions });
@@ -746,6 +835,97 @@ function summarizeServiceState(opts: {
   return "mixed";
 }
 
+async function readDaemonRuntimeRecoveryMeta(): Promise<RuntimeRecoveryMeta | null> {
+  const metrics = await requestDaemonJson({
+    path: "/v1/metrics",
+    autoStart: false,
+  });
+  if (!(metrics?.ok && metrics.json)) {
+    return null;
+  }
+  return parseDaemonRuntimeRecoveryMeta({ json: metrics.json });
+}
+
+function parseDaemonRuntimeRecoveryMeta(opts: {
+  readonly json: Record<string, unknown>;
+}): RuntimeRecoveryMeta | null {
+  const resetCount = readNumberField({
+    json: opts.json,
+    key: "runtime_reset_count",
+  });
+  const lastResetSummary = readStringField({
+    json: opts.json,
+    key: "runtime_reset_summary",
+  });
+  const lastRepairAction = readStringField({
+    json: opts.json,
+    key: "runtime_repair_action",
+  });
+  const lastRepairOutcome = readRepairOutcomeField({
+    json: opts.json,
+    key: "runtime_repair_outcome",
+  });
+  const nextStep = readStringField({
+    json: opts.json,
+    key: "runtime_next_step",
+  });
+
+  if (
+    resetCount === 0 &&
+    lastResetSummary === null &&
+    lastRepairAction === null &&
+    lastRepairOutcome === null &&
+    nextStep === null
+  ) {
+    return null;
+  }
+
+  return {
+    resetCount,
+    lastResetSummary,
+    lastRepairAction,
+    lastRepairOutcome,
+    nextStep,
+  };
+}
+
+function buildRuntimeRecoveryNotice(opts: {
+  readonly runtimeMeta: RuntimeRecoveryMeta | null;
+}): RuntimeRecoveryNotice | null {
+  if (!opts.runtimeMeta) {
+    return null;
+  }
+
+  const lines: string[] = [];
+  if (opts.runtimeMeta.lastResetSummary) {
+    const count =
+      opts.runtimeMeta.resetCount > 0
+        ? `#${opts.runtimeMeta.resetCount}`
+        : "detected";
+    lines.push(`Detected reset ${count}: ${opts.runtimeMeta.lastResetSummary}`);
+  }
+  if (opts.runtimeMeta.lastRepairAction && opts.runtimeMeta.lastRepairOutcome) {
+    lines.push(
+      `hackd repair: ${opts.runtimeMeta.lastRepairAction} -> ${opts.runtimeMeta.lastRepairOutcome}`
+    );
+  }
+  if (opts.runtimeMeta.nextStep) {
+    lines.push(`Next step: ${opts.runtimeMeta.nextStep}`);
+  }
+  if (lines.length === 0) {
+    return null;
+  }
+
+  return {
+    title: "Runtime reset detected",
+    tone:
+      opts.runtimeMeta.lastRepairOutcome === "manual_action_required"
+        ? "warn"
+        : "info",
+    lines,
+  };
+}
+
 function formatRuntimeMeta(opts: {
   readonly runtime: Awaited<ReturnType<typeof readRuntimeProjects>>;
 }): {
@@ -755,6 +935,12 @@ function formatRuntimeMeta(opts: {
   readonly lastOkAt: string | null;
   readonly lastResetAt: string | null;
   readonly resetCount: number;
+  readonly lastResetSummary: string | null;
+  readonly lastResetChanges: readonly string[];
+  readonly lastRepairAt: string | null;
+  readonly lastRepairAction: string | null;
+  readonly lastRepairOutcome: "stabilized" | "manual_action_required" | null;
+  readonly nextStep: string | null;
 } {
   const checkedAt = new Date(opts.runtime.checkedAtMs).toISOString();
   return {
@@ -764,12 +950,52 @@ function formatRuntimeMeta(opts: {
     lastOkAt: opts.runtime.ok ? checkedAt : null,
     lastResetAt: null,
     resetCount: 0,
+    lastResetSummary: null,
+    lastResetChanges: [],
+    lastRepairAt: null,
+    lastRepairAction: null,
+    lastRepairOutcome: null,
+    nextStep: null,
   };
 }
 
 function sanitizeName(value: string): string {
   return value.trim().toLowerCase();
 }
+
+function readNumberField(opts: {
+  readonly json: Record<string, unknown>;
+  readonly key: string;
+}): number {
+  const value = opts.json[opts.key];
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function readStringField(opts: {
+  readonly json: Record<string, unknown>;
+  readonly key: string;
+}): string | null {
+  const value = opts.json[opts.key];
+  if (typeof value !== "string") {
+    return null;
+  }
+  return value.length > 0 ? value : null;
+}
+
+function readRepairOutcomeField(opts: {
+  readonly json: Record<string, unknown>;
+  readonly key: string;
+}): "stabilized" | "manual_action_required" | null {
+  const value = opts.json[opts.key];
+  return value === "stabilized" || value === "manual_action_required"
+    ? value
+    : null;
+}
+
+export const __testOnlyProjectsCommand = {
+  buildRuntimeRecoveryNotice,
+  parseDaemonRuntimeRecoveryMeta,
+};
 
 type MissingRegistryEntry = {
   readonly project: RegisteredProject;

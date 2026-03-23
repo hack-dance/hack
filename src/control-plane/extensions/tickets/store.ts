@@ -1,15 +1,30 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readdir, stat, unlink } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { hostname } from "node:os";
 import { resolve } from "node:path";
 
 import { isRecord } from "../../../lib/guards.ts";
 import type { ControlPlaneConfig } from "../../sdk/config.ts";
+import {
+  buildLegacyDescriptionDocument,
+  buildTicketDocument,
+  getActiveTicketDescription,
+  isTicketDocumentKind,
+  isTicketDocumentRole,
+  type TicketDocument,
+  type TicketDocumentKind,
+  type TicketDocumentRole,
+} from "./documents.ts";
+import {
+  createNormalizedTicket,
+  projectNormalizedTicketSummary,
+} from "./domain.ts";
+import { createTicketsSqliteProjection } from "./sqlite-projection.ts";
 import { createGitTicketsChannel } from "./tickets-git-channel.ts";
 import {
-  formatTicketId,
+  compareTicketIds,
+  generateTicketId,
   normalizeTicketRefs,
-  parseTicketNumber,
   unixSeconds,
 } from "./util.ts";
 
@@ -106,9 +121,18 @@ export type TicketSyncConflict = {
 
 export type TicketEvent = {
   readonly eventId: string;
+  readonly schemaVersion: number;
   readonly ts: number;
   readonly tsIso: string;
+  readonly eventType: string;
+  readonly occurredAt: string;
+  readonly recordedAt: string;
   readonly actor: string;
+  readonly sourceSystem: string;
+  readonly sourceOperation: string;
+  readonly idempotencyKey: string;
+  readonly causationId?: string;
+  readonly correlationId?: string;
   readonly orderKey?: string;
   readonly projectId?: string;
   readonly projectName?: string;
@@ -120,6 +144,7 @@ export type TicketEvent = {
 export type TicketStoreSnapshot = {
   readonly tickets: readonly TicketSummary[];
   readonly eventsByTicket: ReadonlyMap<string, readonly TicketEvent[]>;
+  readonly documentsByTicket: ReadonlyMap<string, readonly TicketDocument[]>;
   readonly commentsByTicket: ReadonlyMap<string, readonly TicketComment[]>;
   readonly reviewNotesByTicket: ReadonlyMap<
     string,
@@ -139,67 +164,6 @@ type CreateTicketResult =
   | { readonly ok: true; readonly ticket: TicketSummary }
   | { readonly ok: false; readonly error: string };
 
-type TicketCreateInput = {
-  readonly title: string;
-  readonly body?: string;
-  readonly dependsOn?: readonly string[];
-  readonly blocks?: readonly string[];
-  readonly owner?: string;
-  readonly source?: string;
-  readonly assignee?: string;
-  readonly tags?: readonly string[];
-  readonly externalSystem?: string;
-  readonly externalId?: string;
-  readonly externalKey?: string;
-  readonly externalUrl?: string;
-  readonly externalProjectId?: string;
-  readonly externalProjectName?: string;
-  readonly externalTeamId?: string;
-  readonly actor?: string;
-};
-
-type TicketUpdateInput = {
-  readonly ticketId: string;
-  readonly title?: string;
-  readonly body?: string;
-  readonly dependsOn?: readonly string[];
-  readonly blocks?: readonly string[];
-  readonly owner?: string;
-  readonly source?: string;
-  readonly assignee?: string;
-  readonly tags?: readonly string[];
-  readonly externalSystem?: string;
-  readonly externalId?: string;
-  readonly externalKey?: string;
-  readonly externalUrl?: string;
-  readonly externalProjectId?: string;
-  readonly externalProjectName?: string;
-  readonly externalTeamId?: string;
-  readonly actor?: string;
-};
-
-type TicketCheckpointInput = {
-  readonly ticketId: string;
-  readonly provider: string;
-  readonly profileId?: string;
-  readonly direction?: string;
-  readonly remoteCursor?: string;
-  readonly remoteUpdatedAt?: string;
-  readonly localUpdatedAt?: string;
-  readonly actor?: string;
-};
-
-type TicketConflictInput = {
-  readonly ticketId: string;
-  readonly provider: string;
-  readonly field: string;
-  readonly authority?: string;
-  readonly summary?: string;
-  readonly localValue?: TicketMetadataValue;
-  readonly remoteValue?: TicketMetadataValue;
-  readonly actor?: string;
-};
-
 type SyncResult =
   | {
       readonly ok: true;
@@ -212,28 +176,123 @@ type SyncResult =
 
 type MaterializedTicketState = {
   readonly tickets: Map<string, TicketSummary>;
+  readonly documentsByTicket: Map<string, TicketDocument[]>;
   readonly commentsByTicket: Map<string, TicketComment[]>;
   readonly reviewNotesByTicket: Map<string, TicketReviewNote[]>;
   readonly syncCheckpointsByTicket: Map<string, TicketSyncCheckpoint[]>;
   readonly conflictsByTicket: Map<string, TicketSyncConflict[]>;
 };
 
+type TicketStoreContext = {
+  readonly events: readonly TicketEvent[];
+  readonly snapshot: TicketStoreSnapshot;
+};
+
+type NormalizedTicketMetadata = {
+  readonly dependsOn: readonly string[];
+  readonly blocks: readonly string[];
+  readonly owner: string;
+  readonly source: string;
+  readonly assignee?: string;
+  readonly tags: readonly string[];
+  readonly externalSystem?: string;
+  readonly externalId?: string;
+  readonly externalKey?: string;
+  readonly externalUrl?: string;
+  readonly externalProjectId?: string;
+  readonly externalProjectName?: string;
+  readonly externalTeamId?: string;
+};
+
+type TicketUpdatePayloadResult =
+  | {
+      readonly ok: true;
+      readonly payload: Record<string, unknown>;
+      readonly documentContent?: string;
+    }
+  | { readonly ok: false; readonly error: string };
+
+type SyncCheckpointBuildResult =
+  | {
+      readonly ok: true;
+      readonly checkpointId: string;
+      readonly provider: string;
+      readonly payload: Record<string, unknown>;
+      readonly checkpoint: TicketSyncCheckpoint;
+    }
+  | { readonly ok: false; readonly error: string };
+
+type SyncConflictBuildResult =
+  | {
+      readonly ok: true;
+      readonly conflictId: string;
+      readonly provider: string;
+      readonly field: string;
+      readonly payload: Record<string, unknown>;
+      readonly conflict: Omit<TicketSyncConflict, "createdAt" | "updatedAt">;
+    }
+  | { readonly ok: false; readonly error: string };
+
+const MAX_TICKET_ID_ALLOCATION_ATTEMPTS = 32;
+
+function normalizeTicketSummaryCompatibility(input: {
+  readonly ticket: TicketSummary;
+}): TicketSummary {
+  return projectNormalizedTicketSummary({
+    ticket: createNormalizedTicket({
+      ticket: input.ticket,
+    }),
+  });
+}
+
 export function createTicketsStore(opts: {
   readonly projectRoot: string;
   readonly projectId?: string;
   readonly projectName?: string;
   readonly controlPlaneConfig: ControlPlaneConfig;
+  readonly generateTicketId?: () => string;
   readonly logger: {
     info: (input: { message: string }) => void;
     warn: (input: { message: string }) => void;
   };
 }): {
-  readonly createTicket: (
-    input: TicketCreateInput
-  ) => Promise<CreateTicketResult>;
-  readonly updateTicket: (
-    input: TicketUpdateInput
-  ) => Promise<
+  readonly createTicket: (input: {
+    readonly title: string;
+    readonly body?: string;
+    readonly dependsOn?: readonly string[];
+    readonly blocks?: readonly string[];
+    readonly owner?: string;
+    readonly source?: string;
+    readonly assignee?: string;
+    readonly tags?: readonly string[];
+    readonly externalSystem?: string;
+    readonly externalId?: string;
+    readonly externalKey?: string;
+    readonly externalUrl?: string;
+    readonly externalProjectId?: string;
+    readonly externalProjectName?: string;
+    readonly externalTeamId?: string;
+    readonly actor?: string;
+  }) => Promise<CreateTicketResult>;
+  readonly updateTicket: (input: {
+    readonly ticketId: string;
+    readonly title?: string;
+    readonly body?: string;
+    readonly dependsOn?: readonly string[];
+    readonly blocks?: readonly string[];
+    readonly owner?: string;
+    readonly source?: string;
+    readonly assignee?: string;
+    readonly tags?: readonly string[];
+    readonly externalSystem?: string;
+    readonly externalId?: string;
+    readonly externalKey?: string;
+    readonly externalUrl?: string;
+    readonly externalProjectId?: string;
+    readonly externalProjectName?: string;
+    readonly externalTeamId?: string;
+    readonly actor?: string;
+  }) => Promise<
     { readonly ok: true } | { readonly ok: false; readonly error: string }
   >;
   readonly listTickets: () => Promise<readonly TicketSummary[]>;
@@ -246,6 +305,7 @@ export function createTicketsStore(opts: {
   readonly getTicketDetail: (input: { readonly ticketId: string }) => Promise<{
     readonly ticket: TicketSummary | null;
     readonly events: readonly TicketEvent[];
+    readonly documents: readonly TicketDocument[];
     readonly comments: readonly TicketComment[];
     readonly reviewNotes: readonly TicketReviewNote[];
     readonly syncCheckpoints: readonly TicketSyncCheckpoint[];
@@ -271,6 +331,16 @@ export function createTicketsStore(opts: {
     | { readonly ok: true; readonly reviewNote: TicketReviewNote }
     | { readonly ok: false; readonly error: string }
   >;
+  readonly appendDocument: (input: {
+    readonly ticketId: string;
+    readonly kind: TicketDocumentKind;
+    readonly role?: TicketDocumentRole;
+    readonly content: string;
+    readonly actor?: string;
+  }) => Promise<
+    | { readonly ok: true; readonly document: TicketDocument }
+    | { readonly ok: false; readonly error: string }
+  >;
   readonly linkCommentExternalId: (input: {
     readonly ticketId: string;
     readonly commentId: string;
@@ -280,15 +350,31 @@ export function createTicketsStore(opts: {
   }) => Promise<
     { readonly ok: true } | { readonly ok: false; readonly error: string }
   >;
-  readonly recordSyncCheckpoint: (
-    input: TicketCheckpointInput
-  ) => Promise<
+  readonly recordSyncCheckpoint: (input: {
+    readonly ticketId: string;
+    readonly provider: string;
+    readonly profileId?: string;
+    readonly direction?: string;
+    readonly remoteCursor?: string;
+    readonly remoteUpdatedAt?: string;
+    readonly localUpdatedAt?: string;
+    readonly idempotencyKey?: string;
+    readonly actor?: string;
+  }) => Promise<
     | { readonly ok: true; readonly checkpoint: TicketSyncCheckpoint }
     | { readonly ok: false; readonly error: string }
   >;
-  readonly recordSyncConflict: (
-    input: TicketConflictInput
-  ) => Promise<
+  readonly recordSyncConflict: (input: {
+    readonly ticketId: string;
+    readonly provider: string;
+    readonly field: string;
+    readonly authority?: string;
+    readonly summary?: string;
+    readonly localValue?: TicketMetadataValue;
+    readonly remoteValue?: TicketMetadataValue;
+    readonly idempotencyKey?: string;
+    readonly actor?: string;
+  }) => Promise<
     | { readonly ok: true; readonly conflict: TicketSyncConflict }
     | { readonly ok: false; readonly error: string }
   >;
@@ -316,12 +402,11 @@ export function createTicketsStore(opts: {
     config: opts.controlPlaneConfig.tickets.git,
     logger: opts.logger,
   });
-  const ticketsRoot = resolve(opts.projectRoot, ".hack/tickets");
-  const createLockPath = resolve(ticketsRoot, "create.lock");
+  const projection = createTicketsSqliteProjection({
+    projectRoot: opts.projectRoot,
+  });
+  const allocateTicketId = opts.generateTicketId ?? generateTicketId;
   let eventSequence = 0;
-  const CREATE_LOCK_RETRY_MS = 50;
-  const CREATE_LOCK_STALE_MS = 30_000;
-  const CREATE_LOCK_TIMEOUT_MS = 10_000;
 
   const resolveActor = (override?: string): string => {
     const trimmed = (override ?? "").trim();
@@ -337,15 +422,32 @@ export function createTicketsStore(opts: {
     readonly type: string;
     readonly payload: Record<string, unknown>;
     readonly actor?: string;
+    readonly occurredAt?: string;
+    readonly sourceSystem?: string;
+    readonly sourceOperation?: string;
+    readonly idempotencyKey?: string;
+    readonly causationId?: string;
+    readonly correlationId?: string;
   }): TicketEvent => {
     const ts = unixSeconds();
+    const recordedAt = new Date(ts * 1000).toISOString();
+    const eventId = randomUUID();
     const orderKey = `${Date.now()}-${String(eventSequence).padStart(6, "0")}`;
     eventSequence += 1;
     return {
-      eventId: randomUUID(),
+      eventId,
+      schemaVersion: 1,
       ts,
-      tsIso: new Date(ts * 1000).toISOString(),
+      tsIso: recordedAt,
+      eventType: input.type,
+      occurredAt: input.occurredAt ?? recordedAt,
+      recordedAt,
       actor: resolveActor(input.actor),
+      sourceSystem: input.sourceSystem ?? "hack",
+      sourceOperation: input.sourceOperation ?? "local_command",
+      idempotencyKey: input.idempotencyKey ?? eventId,
+      ...(input.causationId ? { causationId: input.causationId } : {}),
+      ...(input.correlationId ? { correlationId: input.correlationId } : {}),
       orderKey,
       ...(opts.projectId ? { projectId: opts.projectId } : {}),
       ...(opts.projectName ? { projectName: opts.projectName } : {}),
@@ -355,9 +457,10 @@ export function createTicketsStore(opts: {
     };
   };
 
-  const readAllEvents = async (): Promise<readonly TicketEvent[]> => {
-    const root = await git.ensureCheckedOut();
-    const eventsDir = resolve(root, ".hack/tickets/events");
+  const readAllEventsFromRoot = async (input: {
+    readonly root: string;
+  }): Promise<readonly TicketEvent[]> => {
+    const eventsDir = resolve(input.root, ".hack/tickets/events");
 
     let entries: string[] = [];
     try {
@@ -367,6 +470,8 @@ export function createTicketsStore(opts: {
     }
 
     const events: TicketEvent[] = [];
+    const seenEventIds = new Set<string>();
+    const seenIdempotencyKeys = new Set<string>();
     for (const filename of entries.sort()) {
       const path = resolve(eventsDir, filename);
       const text = await Bun.file(path)
@@ -379,13 +484,27 @@ export function createTicketsStore(opts: {
         }
         const parsed = safeJsonParse(trimmed);
         const event = parseEvent(parsed);
-        if (event) {
-          events.push(event);
+        if (!event || seenEventIds.has(event.eventId)) {
+          continue;
         }
+        if (seenIdempotencyKeys.has(event.idempotencyKey)) {
+          continue;
+        }
+        seenEventIds.add(event.eventId);
+        seenIdempotencyKeys.add(event.idempotencyKey);
+        events.push(event);
       }
     }
 
     events.sort((a, b) => {
+      if (a.ticketId === b.ticketId && a.type !== b.type) {
+        if (a.type === "ticket.created") {
+          return -1;
+        }
+        if (b.type === "ticket.created") {
+          return 1;
+        }
+      }
       if (a.ts !== b.ts) {
         return a.ts - b.ts;
       }
@@ -397,15 +516,11 @@ export function createTicketsStore(opts: {
     return events;
   };
 
-  const materializeTickets = async (): Promise<Map<string, TicketSummary>> => {
-    const events = await readAllEvents();
-    return materializeSnapshotFromEvents({ events }).tickets;
-  };
-
   const materializeSnapshotFromEvents = (input: {
     readonly events: readonly TicketEvent[];
   }): MaterializedTicketState => {
     const tickets = new Map<string, TicketSummary>();
+    const documentsByTicket = new Map<string, TicketDocument[]>();
     const commentsByTicket = new Map<string, TicketComment[]>();
     const reviewNotesByTicket = new Map<string, TicketReviewNote[]>();
     const syncCheckpointsByTicket = new Map<string, TicketSyncCheckpoint[]>();
@@ -414,6 +529,7 @@ export function createTicketsStore(opts: {
     for (const event of input.events) {
       applyTicketEvent({
         tickets,
+        documentsByTicket,
         commentsByTicket,
         reviewNotesByTicket,
         syncCheckpointsByTicket,
@@ -424,6 +540,7 @@ export function createTicketsStore(opts: {
 
     return {
       tickets: applyDerivedBlocks(tickets),
+      documentsByTicket,
       commentsByTicket,
       reviewNotesByTicket,
       syncCheckpointsByTicket,
@@ -447,89 +564,105 @@ export function createTicketsStore(opts: {
     readonly tickets: Iterable<TicketSummary>;
   }): TicketSummary[] => {
     const out = [...input.tickets];
-    out.sort(
-      (a, b) =>
-        (parseTicketNumber(a.ticketId) ?? 0) -
-        (parseTicketNumber(b.ticketId) ?? 0)
-    );
+    out.sort((left, right) => {
+      const createdAt = left.createdAt.localeCompare(right.createdAt);
+      if (createdAt !== 0) {
+        return createdAt;
+      }
+      return compareTicketIds(left.ticketId, right.ticketId);
+    });
     return out;
   };
 
-  const computeNextTicketId = async (): Promise<string> => {
-    const events = await readAllEvents();
-    const snapshot = materializeSnapshotFromEvents({ events });
-    let max = 0;
-    for (const ticketId of snapshot.tickets.keys()) {
-      const n = parseTicketNumber(ticketId);
-      if (n !== null && n > max) {
-        max = n;
+  const buildStoreSnapshot = (input: {
+    readonly events: readonly TicketEvent[];
+    readonly materialized: MaterializedTicketState;
+  }): TicketStoreSnapshot => {
+    return {
+      tickets: sortTickets({ tickets: input.materialized.tickets.values() }),
+      eventsByTicket: groupEventsByTicket({ events: input.events }),
+      documentsByTicket: input.materialized.documentsByTicket,
+      commentsByTicket: input.materialized.commentsByTicket,
+      reviewNotesByTicket: input.materialized.reviewNotesByTicket,
+      syncCheckpointsByTicket: input.materialized.syncCheckpointsByTicket,
+      conflictsByTicket: input.materialized.conflictsByTicket,
+    };
+  };
+
+  const rebuildProjectionFromJournal = async (): Promise<
+    | { readonly ok: true; readonly context: TicketStoreContext }
+    | {
+        readonly ok: false;
+        readonly error: string;
       }
-    }
-    return formatTicketId(max + 1);
-  };
-
-  const readErrorCode = (error: unknown): string | undefined => {
-    return typeof error === "object" && error !== null && "code" in error
-      ? (error as { readonly code?: string }).code
-      : undefined;
-  };
-
-  const removeCreateLockFile = async (): Promise<void> => {
+  > => {
     try {
-      await unlink(createLockPath);
+      const root = await git.ensureCheckedOut();
+      const events = await readAllEventsFromRoot({ root });
+      const materialized = materializeSnapshotFromEvents({ events });
+      const snapshot = buildStoreSnapshot({ events, materialized });
+      const journalSignature = await projection.computeJournalSignature({
+        ticketsRoot: root,
+      });
+      await projection.replaceSnapshot({
+        journalSignature,
+        snapshot,
+      });
+      return {
+        ok: true,
+        context: {
+          events,
+          snapshot,
+        },
+      };
     } catch (error: unknown) {
-      if (readErrorCode(error) !== "ENOENT") {
-        throw error;
-      }
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Failed to rebuild tickets sqlite projection";
+      return {
+        ok: false,
+        error: message,
+      };
     }
   };
 
-  const withCreateLock = async <T>(fn: () => Promise<T>): Promise<T> => {
-    await acquireCreateLock();
-    try {
-      return await fn();
-    } finally {
-      await releaseCreateLock();
+  const loadStoreContext = async (): Promise<TicketStoreContext> => {
+    const root = await git.ensureCheckedOut();
+    const journalSignature = await projection.computeJournalSignature({
+      ticketsRoot: root,
+    });
+    const persisted = await projection.readSnapshot({
+      journalSignature,
+    });
+    if (persisted) {
+      const events = [...persisted.eventsByTicket.values()].flat();
+      return {
+        events,
+        snapshot: persisted,
+      };
     }
+
+    const rebuilt = await rebuildProjectionFromJournal();
+    if (rebuilt.ok) {
+      return rebuilt.context;
+    }
+
+    const events = await readAllEventsFromRoot({ root });
+    const materialized = materializeSnapshotFromEvents({ events });
+    return {
+      events,
+      snapshot: buildStoreSnapshot({ events, materialized }),
+    };
   };
 
-  const acquireCreateLock = async (): Promise<void> => {
-    await mkdir(ticketsRoot, { recursive: true });
-    const start = Date.now();
-
-    while (true) {
-      try {
-        const file = await open(createLockPath, "wx");
-        await file.writeFile(`${process.pid}\n`);
-        await file.close();
-        return;
-      } catch (error: unknown) {
-        if (readErrorCode(error) !== "EEXIST") {
-          throw error;
-        }
-        if (await isCreateLockStale()) {
-          await removeCreateLockFile();
-          continue;
-        }
-        if (Date.now() - start > CREATE_LOCK_TIMEOUT_MS) {
-          throw new Error("Timed out waiting for tickets create lock");
-        }
-        await sleep(CREATE_LOCK_RETRY_MS);
-      }
-    }
-  };
-
-  const releaseCreateLock = async (): Promise<void> => {
-    await removeCreateLockFile();
-  };
-
-  const isCreateLockStale = async (): Promise<boolean> => {
-    try {
-      const info = await stat(createLockPath);
-      return Date.now() - info.mtimeMs > CREATE_LOCK_STALE_MS;
-    } catch {
-      return false;
-    }
+  const materializeTickets = async (): Promise<Map<string, TicketSummary>> => {
+    const context = await loadStoreContext();
+    return new Map(
+      context.snapshot.tickets.map(
+        (ticket) => [ticket.ticketId, ticket] as const
+      )
+    );
   };
 
   const setStatus = async (input: {
@@ -552,84 +685,215 @@ export function createTicketsStore(opts: {
       actor: input.actor,
     });
 
-    return await git.appendEvents({ events: [event] });
+    const wrote = await git.appendEvents({ events: [event] });
+    if (!wrote.ok) {
+      return wrote;
+    }
+
+    const rebuilt = await rebuildProjectionFromJournal();
+    if (!rebuilt.ok) {
+      return rebuilt;
+    }
+
+    return { ok: true };
+  };
+
+  const appendEventsAndRefresh = async (input: {
+    readonly events: readonly TicketEvent[];
+  }): Promise<
+    { readonly ok: true } | { readonly ok: false; readonly error: string }
+  > => {
+    const context = await loadStoreContext();
+    const seenIdempotencyKeys = new Set(
+      context.events.map((event) => event.idempotencyKey)
+    );
+    const pendingEvents = input.events.filter((event) => {
+      if (seenIdempotencyKeys.has(event.idempotencyKey)) {
+        return false;
+      }
+      seenIdempotencyKeys.add(event.idempotencyKey);
+      return true;
+    });
+    if (pendingEvents.length === 0) {
+      return { ok: true };
+    }
+
+    const wrote = await git.appendEvents({ events: pendingEvents });
+    if (!wrote.ok) {
+      return wrote;
+    }
+
+    const rebuilt = await rebuildProjectionFromJournal();
+    if (!rebuilt.ok) {
+      return rebuilt;
+    }
+
+    return { ok: true };
   };
 
   return {
-    createTicket: async (input) =>
-      await withCreateLock(async () => {
-        const ticketId = await computeNextTicketId();
-        const metadata = normalizeTicketMetadata({ input });
-        const event = buildEvent({
-          ticketId,
-          type: "ticket.created",
-          payload: buildCreatedTicketPayload({ input, metadata }),
-          actor: input.actor,
-        });
+    createTicket: async (input) => {
+      const metadata = normalizeTicketMetadata({
+        dependsOn: input.dependsOn,
+        blocks: input.blocks,
+        owner: input.owner,
+        source: input.source,
+        assignee: input.assignee,
+        tags: input.tags,
+        externalSystem: input.externalSystem,
+        externalId: input.externalId,
+        externalKey: input.externalKey,
+        externalUrl: input.externalUrl,
+        externalProjectId: input.externalProjectId,
+        externalProjectName: input.externalProjectName,
+        externalTeamId: input.externalTeamId,
+        ownerFallback: "hack",
+        sourceFallback: "hack",
+      });
+      const payload: Record<string, unknown> = {
+        title: input.title,
+        ...(input.body ? { body: input.body } : {}),
+        status: "open",
+      };
+      appendTicketMetadataPayload({
+        payload,
+        metadata,
+      });
+      const wrote = await git.appendPreparedEvents({
+        prepare: async (root) => {
+          const events = await readAllEventsFromRoot({ root });
+          const snapshot = materializeSnapshotFromEvents({ events });
 
-        const wrote = await git.appendEvents({ events: [event] });
-        if (!wrote.ok) {
-          return wrote;
-        }
+          let ticketId: string | null = null;
+          for (
+            let attempt = 0;
+            attempt < MAX_TICKET_ID_ALLOCATION_ATTEMPTS;
+            attempt += 1
+          ) {
+            const candidate = allocateTicketId();
+            if (!snapshot.tickets.has(candidate)) {
+              ticketId = candidate;
+              break;
+            }
+          }
 
-        return {
-          ok: true,
-          ticket: buildCreatedTicketSummary({
+          if (!ticketId) {
+            return {
+              ok: false,
+              error: "Failed to allocate a unique ticket id.",
+            };
+          }
+
+          const event = buildEvent({
             ticketId,
-            input,
-            metadata,
-            createdAt: event.tsIso,
-            projectId: opts.projectId,
-            projectName: opts.projectName,
-          }),
-        };
-      }),
+            type: "ticket.created",
+            payload,
+            actor: input.actor,
+          });
+
+          return {
+            ok: true,
+            events: [event],
+            result: {
+              event,
+              ticketId,
+            },
+          } as const;
+        },
+      });
+      if (!wrote.ok) {
+        return wrote;
+      }
+
+      const rebuilt = await rebuildProjectionFromJournal();
+      if (!rebuilt.ok) {
+        return rebuilt;
+      }
+
+      return {
+        ok: true,
+        ticket: buildTicketSummary({
+          ticketId: wrote.result.ticketId,
+          title: input.title,
+          ...(input.body ? { body: input.body } : {}),
+          status: "open",
+          createdAt: wrote.result.event.tsIso,
+          updatedAt: wrote.result.event.tsIso,
+          metadata,
+          projectId: opts.projectId,
+          projectName: opts.projectName,
+        }),
+      };
+    },
 
     updateTicket: async (input) => {
       const tickets = await materializeTickets();
-      const current = tickets.get(input.ticketId);
-      if (!current) {
+      if (!tickets.has(input.ticketId)) {
         return { ok: false, error: `Ticket not found: ${input.ticketId}` };
       }
 
-      const payload = buildTicketUpdatePayload({ input });
-      if (!payload.ok) {
-        return payload;
+      const updatePayload = buildTicketUpdatePayload(input);
+      if (!updatePayload.ok) {
+        return updatePayload;
       }
 
-      const event = buildEvent({
-        ticketId: input.ticketId,
-        type: "ticket.updated",
-        payload: payload.value,
-        actor: input.actor,
-      });
+      const events: TicketEvent[] = [];
+      if (updatePayload.documentContent) {
+        events.push(
+          buildDocumentRecordedEvent({
+            buildEvent,
+            ticketId: input.ticketId,
+            actor: input.actor,
+            documentId: randomUUID(),
+            kind: "description",
+            content: updatePayload.documentContent,
+          })
+        );
+      }
 
-      return await git.appendEvents({ events: [event] });
+      if (Object.keys(updatePayload.payload).length > 0) {
+        events.push(
+          buildEvent({
+            ticketId: input.ticketId,
+            type: "ticket.updated",
+            payload: updatePayload.payload,
+            actor: input.actor,
+          })
+        );
+      }
+
+      if (events.length === 0) {
+        return { ok: false, error: "No updates provided." };
+      }
+
+      return await appendEventsAndRefresh({ events });
     },
 
     listTickets: async () => {
-      const events = await readAllEvents();
-      const snapshot = materializeSnapshotFromEvents({ events });
-      return sortTickets({ tickets: snapshot.tickets.values() });
+      const { snapshot } = await loadStoreContext();
+      return snapshot.tickets;
     },
 
     getTicket: async ({ ticketId }) => {
-      const events = await readAllEvents();
-      const snapshot = materializeSnapshotFromEvents({ events });
-      return snapshot.tickets.get(ticketId) ?? null;
+      const { snapshot } = await loadStoreContext();
+      return (
+        snapshot.tickets.find((ticket) => ticket.ticketId === ticketId) ?? null
+      );
     },
 
     listEvents: async ({ ticketId }) => {
-      const events = await readAllEvents();
-      return events.filter((event) => event.ticketId === ticketId);
+      const { snapshot } = await loadStoreContext();
+      return snapshot.eventsByTicket.get(ticketId) ?? [];
     },
 
     getTicketDetail: async ({ ticketId }) => {
-      const events = await readAllEvents();
-      const snapshot = materializeSnapshotFromEvents({ events });
+      const { snapshot } = await loadStoreContext();
       return {
-        ticket: snapshot.tickets.get(ticketId) ?? null,
-        events: events.filter((event) => event.ticketId === ticketId),
+        ticket:
+          snapshot.tickets.find((ticket) => ticket.ticketId === ticketId) ??
+          null,
+        events: snapshot.eventsByTicket.get(ticketId) ?? [],
+        documents: snapshot.documentsByTicket.get(ticketId) ?? [],
         comments: snapshot.commentsByTicket.get(ticketId) ?? [],
         reviewNotes: snapshot.reviewNotesByTicket.get(ticketId) ?? [],
         syncCheckpoints: snapshot.syncCheckpointsByTicket.get(ticketId) ?? [],
@@ -673,7 +937,7 @@ export function createTicketsStore(opts: {
         actor: input.actor,
       });
 
-      const wrote = await git.appendEvents({ events: [event] });
+      const wrote = await appendEventsAndRefresh({ events: [event] });
       if (!wrote.ok) {
         return wrote;
       }
@@ -719,7 +983,7 @@ export function createTicketsStore(opts: {
         actor: input.actor,
       });
 
-      const wrote = await git.appendEvents({ events: [event] });
+      const wrote = await appendEventsAndRefresh({ events: [event] });
       if (!wrote.ok) {
         return wrote;
       }
@@ -737,9 +1001,51 @@ export function createTicketsStore(opts: {
       };
     },
 
+    appendDocument: async (input) => {
+      const tickets = await materializeTickets();
+      if (!tickets.has(input.ticketId)) {
+        return { ok: false, error: `Ticket not found: ${input.ticketId}` };
+      }
+
+      const content = input.content.trimEnd();
+      if (!content.trim()) {
+        return { ok: false, error: "Document content cannot be empty." };
+      }
+
+      const documentId = randomUUID();
+      const event = buildEvent({
+        ticketId: input.ticketId,
+        type: "ticket.document_recorded",
+        payload: {
+          documentId,
+          kind: input.kind,
+          ...(input.role ? { role: input.role } : {}),
+          content,
+        },
+        actor: input.actor,
+      });
+
+      const wrote = await appendEventsAndRefresh({ events: [event] });
+      if (!wrote.ok) {
+        return wrote;
+      }
+
+      return {
+        ok: true,
+        document: buildTicketDocument({
+          documentId,
+          ticketId: input.ticketId,
+          kind: input.kind,
+          ...(input.role ? { role: input.role } : {}),
+          content,
+          createdAt: event.tsIso,
+          updatedAt: event.tsIso,
+        }),
+      };
+    },
+
     linkCommentExternalId: async (input) => {
-      const detail = await readAllEvents();
-      const snapshot = materializeSnapshotFromEvents({ events: detail });
+      const { snapshot } = await loadStoreContext();
       const comments = snapshot.commentsByTicket.get(input.ticketId) ?? [];
       const current = comments.find(
         (comment) => comment.commentId === input.commentId
@@ -768,7 +1074,7 @@ export function createTicketsStore(opts: {
         actor: input.actor,
       });
 
-      return await git.appendEvents({ events: [event] });
+      return await appendEventsAndRefresh({ events: [event] });
     },
 
     recordSyncCheckpoint: async (input) => {
@@ -777,18 +1083,21 @@ export function createTicketsStore(opts: {
         return { ok: false, error: `Ticket not found: ${input.ticketId}` };
       }
 
-      const checkpoint = buildSyncCheckpointRecord({ input });
+      const checkpoint = buildSyncCheckpointResult(input);
       if (!checkpoint.ok) {
         return checkpoint;
       }
       const event = buildEvent({
         ticketId: input.ticketId,
         type: "ticket.sync_checkpoint_recorded",
-        payload: checkpoint.value.payload,
+        payload: checkpoint.payload,
+        ...(input.idempotencyKey
+          ? { idempotencyKey: input.idempotencyKey }
+          : {}),
         actor: input.actor,
       });
 
-      const wrote = await git.appendEvents({ events: [event] });
+      const wrote = await appendEventsAndRefresh({ events: [event] });
       if (!wrote.ok) {
         return wrote;
       }
@@ -796,24 +1105,7 @@ export function createTicketsStore(opts: {
       return {
         ok: true,
         checkpoint: {
-          checkpointId: checkpoint.value.checkpointId,
-          ticketId: input.ticketId,
-          provider: checkpoint.value.provider,
-          ...(checkpoint.value.profileId
-            ? { profileId: checkpoint.value.profileId }
-            : {}),
-          ...(checkpoint.value.direction
-            ? { direction: checkpoint.value.direction }
-            : {}),
-          ...(checkpoint.value.remoteCursor
-            ? { remoteCursor: checkpoint.value.remoteCursor }
-            : {}),
-          ...(checkpoint.value.remoteUpdatedAt
-            ? { remoteUpdatedAt: checkpoint.value.remoteUpdatedAt }
-            : {}),
-          ...(checkpoint.value.localUpdatedAt
-            ? { localUpdatedAt: checkpoint.value.localUpdatedAt }
-            : {}),
+          ...checkpoint.checkpoint,
           actor: event.actor,
           createdAt: event.tsIso,
         },
@@ -826,18 +1118,21 @@ export function createTicketsStore(opts: {
         return { ok: false, error: `Ticket not found: ${input.ticketId}` };
       }
 
-      const conflict = buildSyncConflictRecord({ input });
+      const conflict = buildSyncConflictResult(input);
       if (!conflict.ok) {
         return conflict;
       }
       const event = buildEvent({
         ticketId: input.ticketId,
         type: "ticket.sync_conflict_recorded",
-        payload: conflict.value.payload,
+        payload: conflict.payload,
+        ...(input.idempotencyKey
+          ? { idempotencyKey: input.idempotencyKey }
+          : {}),
         actor: input.actor,
       });
 
-      const wrote = await git.appendEvents({ events: [event] });
+      const wrote = await appendEventsAndRefresh({ events: [event] });
       if (!wrote.ok) {
         return wrote;
       }
@@ -845,23 +1140,7 @@ export function createTicketsStore(opts: {
       return {
         ok: true,
         conflict: {
-          conflictId: conflict.value.conflictId,
-          ticketId: input.ticketId,
-          provider: conflict.value.provider,
-          field: conflict.value.field,
-          status: "open",
-          ...(conflict.value.authority
-            ? { authority: conflict.value.authority }
-            : {}),
-          ...(conflict.value.summary
-            ? { summary: conflict.value.summary }
-            : {}),
-          ...(conflict.value.localValue !== undefined
-            ? { localValue: conflict.value.localValue }
-            : {}),
-          ...(conflict.value.remoteValue !== undefined
-            ? { remoteValue: conflict.value.remoteValue }
-            : {}),
+          ...conflict.conflict,
           createdAt: event.tsIso,
           updatedAt: event.tsIso,
         },
@@ -869,8 +1148,7 @@ export function createTicketsStore(opts: {
     },
 
     resolveSyncConflict: async (input) => {
-      const detail = await readAllEvents();
-      const snapshot = materializeSnapshotFromEvents({ events: detail });
+      const { snapshot } = await loadStoreContext();
       const conflicts = snapshot.conflictsByTicket.get(input.ticketId) ?? [];
       const current = conflicts.find(
         (conflict) => conflict.conflictId === input.conflictId
@@ -893,20 +1171,12 @@ export function createTicketsStore(opts: {
         actor: input.actor,
       });
 
-      return await git.appendEvents({ events: [event] });
+      return await appendEventsAndRefresh({ events: [event] });
     },
 
     readSnapshot: async () => {
-      const events = await readAllEvents();
-      const snapshot = materializeSnapshotFromEvents({ events });
-      return {
-        tickets: sortTickets({ tickets: snapshot.tickets.values() }),
-        eventsByTicket: groupEventsByTicket({ events }),
-        commentsByTicket: snapshot.commentsByTicket,
-        reviewNotesByTicket: snapshot.reviewNotesByTicket,
-        syncCheckpointsByTicket: snapshot.syncCheckpointsByTicket,
-        conflictsByTicket: snapshot.conflictsByTicket,
-      };
+      const { snapshot } = await loadStoreContext();
+      return snapshot;
     },
 
     sync: async () => {
@@ -917,384 +1187,9 @@ export function createTicketsStore(opts: {
   };
 }
 
-type TicketMetadata = {
-  readonly dependsOn: readonly string[];
-  readonly blocks: readonly string[];
-  readonly owner: string;
-  readonly source: string;
-  readonly assignee?: string;
-  readonly tags: readonly string[];
-  readonly externalSystem?: string;
-  readonly externalId?: string;
-  readonly externalKey?: string;
-  readonly externalUrl?: string;
-  readonly externalProjectId?: string;
-  readonly externalProjectName?: string;
-  readonly externalTeamId?: string;
-};
-
-function normalizeTicketMetadata(input: {
-  readonly input: TicketCreateInput;
-}): TicketMetadata {
-  return {
-    dependsOn: normalizeTicketRefs(input.input.dependsOn ?? []),
-    blocks: normalizeTicketRefs(input.input.blocks ?? []),
-    owner: normalizeOwnerOrSource({
-      value: input.input.owner,
-      fallback: "hack",
-    }),
-    source: normalizeOwnerOrSource({
-      value: input.input.source,
-      fallback: "hack",
-    }),
-    ...(normalizeOptionalMetadataString({
-      value: input.input.assignee,
-    })
-      ? {
-          assignee: normalizeOptionalMetadataString({
-            value: input.input.assignee,
-          }),
-        }
-      : {}),
-    tags: normalizeTags(input.input.tags ?? []),
-    ...buildOptionalTicketMetadataFields({ input: input.input }),
-  };
-}
-
-function buildOptionalTicketMetadataFields(input: {
-  readonly input: Pick<
-    TicketCreateInput,
-    | "externalSystem"
-    | "externalId"
-    | "externalKey"
-    | "externalUrl"
-    | "externalProjectId"
-    | "externalProjectName"
-    | "externalTeamId"
-  >;
-}): Omit<TicketMetadata, "dependsOn" | "blocks" | "owner" | "source" | "tags"> {
-  const metadataEntries = [
-    ["externalSystem", input.input.externalSystem],
-    ["externalId", input.input.externalId],
-    ["externalKey", input.input.externalKey],
-    ["externalUrl", input.input.externalUrl],
-    ["externalProjectId", input.input.externalProjectId],
-    ["externalProjectName", input.input.externalProjectName],
-    ["externalTeamId", input.input.externalTeamId],
-  ] as const;
-  const metadata: Record<string, string> = {};
-  for (const [key, value] of metadataEntries) {
-    const normalized = normalizeOptionalMetadataString({ value });
-    if (normalized) {
-      metadata[key] = normalized;
-    }
-  }
-  return metadata;
-}
-
-function buildCreatedTicketPayload(input: {
-  readonly input: TicketCreateInput;
-  readonly metadata: TicketMetadata;
-}): Record<string, unknown> {
-  return {
-    title: input.input.title,
-    ...(input.input.body ? { body: input.input.body } : {}),
-    ...(input.metadata.dependsOn.length > 0
-      ? { dependsOn: input.metadata.dependsOn }
-      : {}),
-    ...(input.metadata.blocks.length > 0
-      ? { blocks: input.metadata.blocks }
-      : {}),
-    owner: input.metadata.owner,
-    source: input.metadata.source,
-    ...(input.metadata.assignee ? { assignee: input.metadata.assignee } : {}),
-    ...(input.metadata.tags.length > 0 ? { tags: input.metadata.tags } : {}),
-    ...buildOptionalMetadataPayload({ metadata: input.metadata }),
-    status: "open",
-  };
-}
-
-function buildOptionalMetadataPayload(input: {
-  readonly metadata: Pick<
-    TicketMetadata,
-    | "externalSystem"
-    | "externalId"
-    | "externalKey"
-    | "externalUrl"
-    | "externalProjectId"
-    | "externalProjectName"
-    | "externalTeamId"
-  >;
-}): Record<string, unknown> {
-  const optionalFields = [
-    ["externalSystem", input.metadata.externalSystem],
-    ["externalId", input.metadata.externalId],
-    ["externalKey", input.metadata.externalKey],
-    ["externalUrl", input.metadata.externalUrl],
-    ["externalProjectId", input.metadata.externalProjectId],
-    ["externalProjectName", input.metadata.externalProjectName],
-    ["externalTeamId", input.metadata.externalTeamId],
-  ] as const;
-  const payload: Record<string, unknown> = {};
-  for (const [key, value] of optionalFields) {
-    if (value) {
-      payload[key] = value;
-    }
-  }
-  return payload;
-}
-
-function buildCreatedTicketSummary(input: {
-  readonly ticketId: string;
-  readonly input: TicketCreateInput;
-  readonly metadata: TicketMetadata;
-  readonly createdAt: string;
-  readonly projectId?: string;
-  readonly projectName?: string;
-}): TicketSummary {
-  return {
-    ticketId: input.ticketId,
-    title: input.input.title,
-    ...(input.input.body ? { body: input.input.body } : {}),
-    status: "open",
-    createdAt: input.createdAt,
-    updatedAt: input.createdAt,
-    dependsOn: input.metadata.dependsOn,
-    blocks: input.metadata.blocks,
-    owner: input.metadata.owner,
-    source: input.metadata.source,
-    ...(input.metadata.assignee ? { assignee: input.metadata.assignee } : {}),
-    tags: input.metadata.tags,
-    ...buildOptionalMetadataPayload({ metadata: input.metadata }),
-    ...(input.projectId ? { projectId: input.projectId } : {}),
-    ...(input.projectName ? { projectName: input.projectName } : {}),
-  };
-}
-
-function buildTicketUpdatePayload(input: {
-  readonly input: TicketUpdateInput;
-}):
-  | { readonly ok: true; readonly value: Record<string, unknown> }
-  | { readonly ok: false; readonly error: string } {
-  const payload: Record<string, unknown> = {};
-  if (input.input.title !== undefined) {
-    const title = input.input.title.trim();
-    if (!title) {
-      return { ok: false, error: "Title cannot be empty." };
-    }
-    payload.title = title;
-  }
-  if (input.input.body !== undefined) {
-    payload.body = input.input.body;
-  }
-
-  const dependencyUpdates = [
-    ["dependsOn", input.input.dependsOn],
-    ["blocks", input.input.blocks],
-  ] as const;
-  for (const [key, value] of dependencyUpdates) {
-    if (value !== undefined) {
-      payload[key] = normalizeTicketRefs(value);
-    }
-  }
-
-  const ownerUpdates = [
-    ["owner", input.input.owner],
-    ["source", input.input.source],
-  ] as const;
-  for (const [key, value] of ownerUpdates) {
-    if (value !== undefined) {
-      payload[key] = normalizeOwnerOrSource({
-        value,
-        fallback: "hack",
-      });
-    }
-  }
-
-  if (input.input.assignee !== undefined) {
-    payload.assignee =
-      normalizeOptionalMetadataString({
-        value: input.input.assignee,
-      }) ?? null;
-  }
-  if (input.input.tags !== undefined) {
-    payload.tags = normalizeTags(input.input.tags);
-  }
-
-  const metadataUpdates = [
-    ["externalSystem", input.input.externalSystem],
-    ["externalId", input.input.externalId],
-    ["externalKey", input.input.externalKey],
-    ["externalUrl", input.input.externalUrl],
-    ["externalProjectId", input.input.externalProjectId],
-    ["externalProjectName", input.input.externalProjectName],
-    ["externalTeamId", input.input.externalTeamId],
-  ] as const;
-  for (const [key, value] of metadataUpdates) {
-    if (value !== undefined) {
-      payload[key] = normalizeOptionalMetadataString({ value });
-    }
-  }
-
-  return Object.keys(payload).length > 0
-    ? { ok: true, value: payload }
-    : { ok: false, error: "No updates provided." };
-}
-
-function readRequiredMetadataString(input: {
-  readonly value: string | undefined;
-  readonly error: string;
-}):
-  | { readonly ok: true; readonly value: string }
-  | { readonly ok: false; readonly error: string } {
-  const normalized = normalizeOptionalMetadataString({ value: input.value });
-  return normalized
-    ? { ok: true, value: normalized }
-    : { ok: false, error: input.error };
-}
-
-function buildSyncCheckpointRecord(input: {
-  readonly input: TicketCheckpointInput;
-}):
-  | {
-      readonly ok: true;
-      readonly value: {
-        readonly checkpointId: string;
-        readonly provider: string;
-        readonly profileId?: string;
-        readonly direction?: string;
-        readonly remoteCursor?: string;
-        readonly remoteUpdatedAt?: string;
-        readonly localUpdatedAt?: string;
-        readonly payload: Record<string, unknown>;
-      };
-    }
-  | { readonly ok: false; readonly error: string } {
-  const provider = readRequiredMetadataString({
-    value: input.input.provider,
-    error: "Provider is required.",
-  });
-  if (!provider.ok) {
-    return provider;
-  }
-
-  const checkpointId = randomUUID();
-  const profileId = normalizeOptionalMetadataString({
-    value: input.input.profileId,
-  });
-  const direction = normalizeOptionalMetadataString({
-    value: input.input.direction,
-  });
-  const remoteCursor = normalizeOptionalMetadataString({
-    value: input.input.remoteCursor,
-  });
-  const remoteUpdatedAt = normalizeOptionalMetadataString({
-    value: input.input.remoteUpdatedAt,
-  });
-  const localUpdatedAt = normalizeOptionalMetadataString({
-    value: input.input.localUpdatedAt,
-  });
-
-  return {
-    ok: true,
-    value: {
-      checkpointId,
-      provider: provider.value,
-      ...(profileId ? { profileId } : {}),
-      ...(direction ? { direction } : {}),
-      ...(remoteCursor ? { remoteCursor } : {}),
-      ...(remoteUpdatedAt ? { remoteUpdatedAt } : {}),
-      ...(localUpdatedAt ? { localUpdatedAt } : {}),
-      payload: {
-        checkpointId,
-        provider: provider.value,
-        ...(profileId ? { profileId } : {}),
-        ...(direction ? { direction } : {}),
-        ...(remoteCursor ? { remoteCursor } : {}),
-        ...(remoteUpdatedAt ? { remoteUpdatedAt } : {}),
-        ...(localUpdatedAt ? { localUpdatedAt } : {}),
-      },
-    },
-  };
-}
-
-function buildSyncConflictRecord(input: {
-  readonly input: TicketConflictInput;
-}):
-  | {
-      readonly ok: true;
-      readonly value: {
-        readonly conflictId: string;
-        readonly provider: string;
-        readonly field: string;
-        readonly authority?: string;
-        readonly summary?: string;
-        readonly localValue?: TicketMetadataValue;
-        readonly remoteValue?: TicketMetadataValue;
-        readonly payload: Record<string, unknown>;
-      };
-    }
-  | { readonly ok: false; readonly error: string } {
-  const provider = readRequiredMetadataString({
-    value: input.input.provider,
-    error: "Provider is required.",
-  });
-  if (!provider.ok) {
-    return provider;
-  }
-  const field = readRequiredMetadataString({
-    value: input.input.field,
-    error: "Field is required.",
-  });
-  if (!field.ok) {
-    return field;
-  }
-
-  const conflictId = randomUUID();
-  const authority = normalizeOptionalMetadataString({
-    value: input.input.authority,
-  });
-  const summary = normalizeOptionalMetadataString({
-    value: input.input.summary,
-  });
-
-  return {
-    ok: true,
-    value: {
-      conflictId,
-      provider: provider.value,
-      field: field.value,
-      ...(authority ? { authority } : {}),
-      ...(summary ? { summary } : {}),
-      ...(input.input.localValue !== undefined
-        ? { localValue: input.input.localValue }
-        : {}),
-      ...(input.input.remoteValue !== undefined
-        ? { remoteValue: input.input.remoteValue }
-        : {}),
-      payload: {
-        conflictId,
-        provider: provider.value,
-        field: field.value,
-        ...(authority ? { authority } : {}),
-        ...(summary ? { summary } : {}),
-        ...(input.input.localValue !== undefined
-          ? { localValue: input.input.localValue }
-          : {}),
-        ...(input.input.remoteValue !== undefined
-          ? { remoteValue: input.input.remoteValue }
-          : {}),
-      },
-    },
-  };
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function applyTicketEvent(input: {
   readonly tickets: Map<string, TicketSummary>;
+  readonly documentsByTicket: Map<string, TicketDocument[]>;
   readonly commentsByTicket: Map<string, TicketComment[]>;
   readonly reviewNotesByTicket: Map<string, TicketReviewNote[]>;
   readonly syncCheckpointsByTicket: Map<string, TicketSyncCheckpoint[]>;
@@ -1305,6 +1200,7 @@ function applyTicketEvent(input: {
     case "ticket.created": {
       applyTicketCreatedEvent({
         tickets: input.tickets,
+        documentsByTicket: input.documentsByTicket,
         event: input.event,
       });
       break;
@@ -1319,6 +1215,15 @@ function applyTicketEvent(input: {
     case "ticket.updated": {
       applyTicketUpdatedEvent({
         tickets: input.tickets,
+        documentsByTicket: input.documentsByTicket,
+        event: input.event,
+      });
+      break;
+    }
+    case "ticket.document_recorded": {
+      applyTicketDocumentRecordedEvent({
+        tickets: input.tickets,
+        documentsByTicket: input.documentsByTicket,
         event: input.event,
       });
       break;
@@ -1377,6 +1282,7 @@ function applyTicketEvent(input: {
 
 function applyTicketCreatedEvent(input: {
   readonly tickets: Map<string, TicketSummary>;
+  readonly documentsByTicket: Map<string, TicketDocument[]>;
   readonly event: TicketEvent;
 }): void {
   const title =
@@ -1427,31 +1333,50 @@ function applyTicketCreatedEvent(input: {
     value: input.event.payload.externalTeamId,
   });
 
-  input.tickets.set(input.event.ticketId, {
-    ticketId: input.event.ticketId,
-    title,
-    body,
-    status: "open",
-    createdAt: input.event.tsIso,
-    updatedAt: input.event.tsIso,
-    dependsOn,
-    blocks,
-    owner,
-    source,
-    ...(assignee ? { assignee } : {}),
-    tags,
-    ...(externalSystem ? { externalSystem } : {}),
-    ...(externalId ? { externalId } : {}),
-    ...(externalKey ? { externalKey } : {}),
-    ...(externalUrl ? { externalUrl } : {}),
-    ...(externalProjectId ? { externalProjectId } : {}),
-    ...(externalProjectName ? { externalProjectName } : {}),
-    ...(externalTeamId ? { externalTeamId } : {}),
-    ...(input.event.projectId ? { projectId: input.event.projectId } : {}),
-    ...(input.event.projectName
-      ? { projectName: input.event.projectName }
-      : {}),
-  });
+  input.tickets.set(
+    input.event.ticketId,
+    normalizeTicketSummaryCompatibility({
+      ticket: {
+        ticketId: input.event.ticketId,
+        title,
+        body,
+        status: "open",
+        createdAt: input.event.tsIso,
+        updatedAt: input.event.tsIso,
+        dependsOn,
+        blocks,
+        owner,
+        source,
+        ...(assignee ? { assignee } : {}),
+        tags,
+        ...(externalSystem ? { externalSystem } : {}),
+        ...(externalId ? { externalId } : {}),
+        ...(externalKey ? { externalKey } : {}),
+        ...(externalUrl ? { externalUrl } : {}),
+        ...(externalProjectId ? { externalProjectId } : {}),
+        ...(externalProjectName ? { externalProjectName } : {}),
+        ...(externalTeamId ? { externalTeamId } : {}),
+        ...(input.event.projectId ? { projectId: input.event.projectId } : {}),
+        ...(input.event.projectName
+          ? { projectName: input.event.projectName }
+          : {}),
+      },
+    })
+  );
+
+  if (body) {
+    appendMapValue({
+      map: input.documentsByTicket,
+      key: input.event.ticketId,
+      value: buildLegacyDescriptionDocument({
+        eventId: input.event.eventId,
+        ticketId: input.event.ticketId,
+        content: body,
+        createdAt: input.event.tsIso,
+        updatedAt: input.event.tsIso,
+      }),
+    });
+  }
 }
 
 function applyTicketStatusChangedEvent(input: {
@@ -1468,15 +1393,21 @@ function applyTicketStatusChangedEvent(input: {
     return;
   }
 
-  input.tickets.set(input.event.ticketId, {
-    ...current,
-    status,
-    updatedAt: input.event.tsIso,
-  });
+  input.tickets.set(
+    input.event.ticketId,
+    normalizeTicketSummaryCompatibility({
+      ticket: {
+        ...current,
+        status,
+        updatedAt: input.event.tsIso,
+      },
+    })
+  );
 }
 
 function applyTicketUpdatedEvent(input: {
   readonly tickets: Map<string, TicketSummary>;
+  readonly documentsByTicket: Map<string, TicketDocument[]>;
   readonly event: TicketEvent;
 }): void {
   const current = input.tickets.get(input.event.ticketId);
@@ -1544,111 +1475,141 @@ function applyTicketUpdatedEvent(input: {
     payload: input.event.payload,
     key: "externalTeamId",
   });
-
-  input.tickets.set(input.event.ticketId, {
+  const next = {
     ...current,
-    ...buildTicketSummaryPatchFromEvent({
-      current,
-      title,
-      body,
-      dependsOn,
-      blocks,
-      owner,
-      source,
-      assignee,
-      tags,
-      externalSystem,
-      externalId,
-      externalKey,
-      externalUrl,
-      externalProjectId,
-      externalProjectName,
-      externalTeamId,
-    }),
+    updatedAt: input.event.tsIso,
+  };
+
+  applyUpdateValue(title, (value) => {
+    next.title = value;
+  });
+  applyUpdateValue(body, (value) => {
+    next.body = value;
+  });
+  applyUpdateValue(dependsOn, (value) => {
+    next.dependsOn = value;
+  });
+  applyUpdateValue(blocks, (value) => {
+    next.blocks = value;
+  });
+  applyOptionalMetadataUpdate(owner, (value) => {
+    next.owner = normalizeOwnerOrSource({
+      value,
+      fallback: current.owner,
+    });
+  });
+  applyOptionalMetadataUpdate(source, (value) => {
+    next.source = normalizeOwnerOrSource({
+      value,
+      fallback: current.source,
+    });
+  });
+  applyOptionalMetadataUpdate(assignee, (value) => {
+    next.assignee = value;
+  });
+  applyUpdateValue(tags, (value) => {
+    next.tags = value;
+  });
+  applyOptionalMetadataUpdate(externalSystem, (value) => {
+    next.externalSystem = value;
+  });
+  applyOptionalMetadataUpdate(externalId, (value) => {
+    next.externalId = value;
+  });
+  applyOptionalMetadataUpdate(externalKey, (value) => {
+    next.externalKey = value;
+  });
+  applyOptionalMetadataUpdate(externalUrl, (value) => {
+    next.externalUrl = value;
+  });
+  applyOptionalMetadataUpdate(externalProjectId, (value) => {
+    next.externalProjectId = value;
+  });
+  applyOptionalMetadataUpdate(externalProjectName, (value) => {
+    next.externalProjectName = value;
+  });
+  applyOptionalMetadataUpdate(externalTeamId, (value) => {
+    next.externalTeamId = value;
+  });
+
+  input.tickets.set(
+    input.event.ticketId,
+    normalizeTicketSummaryCompatibility({
+      ticket: next,
+    })
+  );
+
+  if (body !== undefined) {
+    appendMapValue({
+      map: input.documentsByTicket,
+      key: input.event.ticketId,
+      value: buildLegacyDescriptionDocument({
+        eventId: input.event.eventId,
+        ticketId: input.event.ticketId,
+        content: body,
+        createdAt: input.event.tsIso,
+        updatedAt: input.event.tsIso,
+      }),
+    });
+  }
+}
+
+function applyTicketDocumentRecordedEvent(input: {
+  readonly tickets: Map<string, TicketSummary>;
+  readonly documentsByTicket: Map<string, TicketDocument[]>;
+  readonly event: TicketEvent;
+}): void {
+  const current = input.tickets.get(input.event.ticketId);
+  if (!current) {
+    return;
+  }
+
+  const kindValue = readOptionalStringPayload({
+    value: input.event.payload.kind,
+  });
+  const content = readOptionalTextPayload({
+    value: input.event.payload.content,
+  });
+  if (!(kindValue && content && isTicketDocumentKind(kindValue))) {
+    return;
+  }
+
+  const roleValue = readOptionalStringPayload({
+    value: input.event.payload.role,
+  });
+  const role =
+    roleValue && isTicketDocumentRole(roleValue) ? roleValue : undefined;
+
+  const document = buildTicketDocument({
+    documentId:
+      readOptionalStringPayload({ value: input.event.payload.documentId }) ??
+      input.event.eventId,
+    ticketId: input.event.ticketId,
+    kind: kindValue,
+    ...(role ? { role } : {}),
+    content,
+    createdAt: input.event.tsIso,
     updatedAt: input.event.tsIso,
   });
-}
 
-function buildTicketSummaryPatchFromEvent(input: {
-  readonly current: TicketSummary;
-  readonly title: string | undefined;
-  readonly body: string | undefined;
-  readonly dependsOn: readonly string[] | null;
-  readonly blocks: readonly string[] | null;
-  readonly owner: string | null;
-  readonly source: string | null;
-  readonly assignee: string | null;
-  readonly tags: readonly string[] | null;
-  readonly externalSystem: string | null;
-  readonly externalId: string | null;
-  readonly externalKey: string | null;
-  readonly externalUrl: string | null;
-  readonly externalProjectId: string | null;
-  readonly externalProjectName: string | null;
-  readonly externalTeamId: string | null;
-}): Partial<TicketSummary> {
-  return {
-    ...(input.title ? { title: input.title } : {}),
-    ...(input.body !== undefined ? { body: input.body } : {}),
-    ...(input.dependsOn !== null ? { dependsOn: input.dependsOn } : {}),
-    ...(input.blocks !== null ? { blocks: input.blocks } : {}),
-    ...(input.owner !== null
-      ? {
-          owner: normalizeOwnerOrSource({
-            value: input.owner,
-            fallback: input.current.owner,
-          }),
-        }
-      : {}),
-    ...(input.source !== null
-      ? {
-          source: normalizeOwnerOrSource({
-            value: input.source,
-            fallback: input.current.source,
-          }),
-        }
-      : {}),
-    ...(input.assignee !== null
-      ? { assignee: input.assignee || undefined }
-      : {}),
-    ...(input.tags !== null ? { tags: input.tags } : {}),
-    ...buildOptionalSummaryPatch({
-      externalSystem: input.externalSystem,
-      externalId: input.externalId,
-      externalKey: input.externalKey,
-      externalUrl: input.externalUrl,
-      externalProjectId: input.externalProjectId,
-      externalProjectName: input.externalProjectName,
-      externalTeamId: input.externalTeamId,
-    }),
-  };
-}
+  appendMapValue({
+    map: input.documentsByTicket,
+    key: input.event.ticketId,
+    value: document,
+  });
 
-function buildOptionalSummaryPatch(input: {
-  readonly externalSystem: string | null;
-  readonly externalId: string | null;
-  readonly externalKey: string | null;
-  readonly externalUrl: string | null;
-  readonly externalProjectId: string | null;
-  readonly externalProjectName: string | null;
-  readonly externalTeamId: string | null;
-}): Partial<TicketSummary> {
-  const optionalFields = [
-    ["externalSystem", input.externalSystem],
-    ["externalId", input.externalId],
-    ["externalKey", input.externalKey],
-    ["externalUrl", input.externalUrl],
-    ["externalProjectId", input.externalProjectId],
-    ["externalProjectName", input.externalProjectName],
-    ["externalTeamId", input.externalTeamId],
-  ] as const;
-  const patch: Record<string, string | undefined> = {};
-  for (const [key, value] of optionalFields) {
-    if (value !== null) {
-      patch[key] = value || undefined;
-    }
-  }
-  return patch;
+  const documents = input.documentsByTicket.get(input.event.ticketId) ?? [];
+  const activeDescription = getActiveTicketDescription({ documents });
+  input.tickets.set(
+    input.event.ticketId,
+    normalizeTicketSummaryCompatibility({
+      ticket: {
+        ...current,
+        ...(activeDescription ? { body: activeDescription.content } : {}),
+        updatedAt: input.event.tsIso,
+      },
+    })
+  );
 }
 
 function applyTicketCommentAppendedEvent(input: {
@@ -1661,10 +1622,10 @@ function applyTicketCommentAppendedEvent(input: {
   }
 
   const body =
-    readOptionalStringPayload({
+    readOptionalTextPayload({
       value: input.event.payload.body,
     }) ??
-    readOptionalStringPayload({
+    readOptionalTextPayload({
       value: input.event.payload.markdown,
     });
   if (!body) {
@@ -1744,8 +1705,8 @@ function applyTicketReviewNoteAppendedEvent(input: {
   }
 
   const body =
-    readOptionalStringPayload({ value: input.event.payload.body }) ??
-    readOptionalStringPayload({ value: input.event.payload.markdown });
+    readOptionalTextPayload({ value: input.event.payload.body }) ??
+    readOptionalTextPayload({ value: input.event.payload.markdown });
   if (!body) {
     return;
   }
@@ -2084,6 +2045,15 @@ function readOptionalStringPayload(input: {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+function readOptionalTextPayload(input: {
+  readonly value: unknown;
+}): string | undefined {
+  if (typeof input.value !== "string") {
+    return undefined;
+  }
+  return input.value.trim().length > 0 ? input.value : undefined;
+}
+
 function normalizeOwnerOrSource(input: {
   readonly value: string | undefined;
   readonly fallback: string;
@@ -2122,17 +2092,507 @@ function safeJsonParse(text: string): unknown {
   }
 }
 
+function normalizeTicketMetadata(input: {
+  readonly dependsOn?: readonly string[];
+  readonly blocks?: readonly string[];
+  readonly owner?: string;
+  readonly source?: string;
+  readonly assignee?: string;
+  readonly tags?: readonly string[];
+  readonly externalSystem?: string;
+  readonly externalId?: string;
+  readonly externalKey?: string;
+  readonly externalUrl?: string;
+  readonly externalProjectId?: string;
+  readonly externalProjectName?: string;
+  readonly externalTeamId?: string;
+  readonly ownerFallback: string;
+  readonly sourceFallback: string;
+}): NormalizedTicketMetadata {
+  const assignee = normalizeOptionalMetadataString({
+    value: input.assignee,
+  });
+  return {
+    dependsOn: normalizeTicketRefs(input.dependsOn ?? []),
+    blocks: normalizeTicketRefs(input.blocks ?? []),
+    owner: normalizeOwnerOrSource({
+      value: input.owner,
+      fallback: input.ownerFallback,
+    }),
+    source: normalizeOwnerOrSource({
+      value: input.source,
+      fallback: input.sourceFallback,
+    }),
+    ...(assignee ? { assignee } : {}),
+    tags: normalizeTags(input.tags ?? []),
+    ...readOptionalMetadataFields(input),
+  };
+}
+
+function readOptionalMetadataFields(input: {
+  readonly externalSystem?: string;
+  readonly externalId?: string;
+  readonly externalKey?: string;
+  readonly externalUrl?: string;
+  readonly externalProjectId?: string;
+  readonly externalProjectName?: string;
+  readonly externalTeamId?: string;
+}): Partial<NormalizedTicketMetadata> {
+  const externalSystem = normalizeOptionalMetadataString({
+    value: input.externalSystem,
+  });
+  const externalId = normalizeOptionalMetadataString({
+    value: input.externalId,
+  });
+  const externalKey = normalizeOptionalMetadataString({
+    value: input.externalKey,
+  });
+  const externalUrl = normalizeOptionalMetadataString({
+    value: input.externalUrl,
+  });
+  const externalProjectId = normalizeOptionalMetadataString({
+    value: input.externalProjectId,
+  });
+  const externalProjectName = normalizeOptionalMetadataString({
+    value: input.externalProjectName,
+  });
+  const externalTeamId = normalizeOptionalMetadataString({
+    value: input.externalTeamId,
+  });
+
+  return {
+    ...(externalSystem ? { externalSystem } : {}),
+    ...(externalId ? { externalId } : {}),
+    ...(externalKey ? { externalKey } : {}),
+    ...(externalUrl ? { externalUrl } : {}),
+    ...(externalProjectId ? { externalProjectId } : {}),
+    ...(externalProjectName ? { externalProjectName } : {}),
+    ...(externalTeamId ? { externalTeamId } : {}),
+  };
+}
+
+function buildTicketSummary(input: {
+  readonly ticketId: string;
+  readonly title: string;
+  readonly body?: string;
+  readonly status: TicketStatus;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly metadata: NormalizedTicketMetadata;
+  readonly projectId?: string;
+  readonly projectName?: string;
+}): TicketSummary {
+  return normalizeTicketSummaryCompatibility({
+    ticket: {
+      ticketId: input.ticketId,
+      title: input.title,
+      ...(input.body ? { body: input.body } : {}),
+      status: input.status,
+      createdAt: input.createdAt,
+      updatedAt: input.updatedAt,
+      dependsOn: input.metadata.dependsOn,
+      blocks: input.metadata.blocks,
+      owner: input.metadata.owner,
+      source: input.metadata.source,
+      ...(input.metadata.assignee ? { assignee: input.metadata.assignee } : {}),
+      tags: input.metadata.tags,
+      ...(input.metadata.externalSystem
+        ? { externalSystem: input.metadata.externalSystem }
+        : {}),
+      ...(input.metadata.externalId
+        ? { externalId: input.metadata.externalId }
+        : {}),
+      ...(input.metadata.externalKey
+        ? { externalKey: input.metadata.externalKey }
+        : {}),
+      ...(input.metadata.externalUrl
+        ? { externalUrl: input.metadata.externalUrl }
+        : {}),
+      ...(input.metadata.externalProjectId
+        ? { externalProjectId: input.metadata.externalProjectId }
+        : {}),
+      ...(input.metadata.externalProjectName
+        ? { externalProjectName: input.metadata.externalProjectName }
+        : {}),
+      ...(input.metadata.externalTeamId
+        ? { externalTeamId: input.metadata.externalTeamId }
+        : {}),
+      ...(input.projectId ? { projectId: input.projectId } : {}),
+      ...(input.projectName ? { projectName: input.projectName } : {}),
+    },
+  });
+}
+
+function appendTicketMetadataPayload(input: {
+  readonly payload: Record<string, unknown>;
+  readonly metadata: NormalizedTicketMetadata;
+}): void {
+  if (input.metadata.dependsOn.length > 0) {
+    input.payload.dependsOn = input.metadata.dependsOn;
+  }
+  if (input.metadata.blocks.length > 0) {
+    input.payload.blocks = input.metadata.blocks;
+  }
+  input.payload.owner = input.metadata.owner;
+  input.payload.source = input.metadata.source;
+  if (input.metadata.assignee) {
+    input.payload.assignee = input.metadata.assignee;
+  }
+  if (input.metadata.tags.length > 0) {
+    input.payload.tags = input.metadata.tags;
+  }
+  appendOptionalStringFields({
+    target: input.payload,
+    entries: [
+      ["externalSystem", input.metadata.externalSystem],
+      ["externalId", input.metadata.externalId],
+      ["externalKey", input.metadata.externalKey],
+      ["externalUrl", input.metadata.externalUrl],
+      ["externalProjectId", input.metadata.externalProjectId],
+      ["externalProjectName", input.metadata.externalProjectName],
+      ["externalTeamId", input.metadata.externalTeamId],
+    ],
+  });
+}
+
+function appendOptionalStringFields(input: {
+  readonly target: Record<string, unknown>;
+  readonly entries: readonly (readonly [string, string | undefined])[];
+}): void {
+  for (const [key, value] of input.entries) {
+    if (value) {
+      input.target[key] = value;
+    }
+  }
+}
+
+function buildTicketUpdatePayload(input: {
+  readonly title?: string;
+  readonly body?: string;
+  readonly dependsOn?: readonly string[];
+  readonly blocks?: readonly string[];
+  readonly owner?: string;
+  readonly source?: string;
+  readonly assignee?: string;
+  readonly tags?: readonly string[];
+  readonly externalSystem?: string;
+  readonly externalId?: string;
+  readonly externalKey?: string;
+  readonly externalUrl?: string;
+  readonly externalProjectId?: string;
+  readonly externalProjectName?: string;
+  readonly externalTeamId?: string;
+}): TicketUpdatePayloadResult {
+  const payload: Record<string, unknown> = {};
+  let documentContent: string | undefined;
+
+  if (input.title !== undefined) {
+    const title = input.title.trim();
+    if (!title) {
+      return { ok: false, error: "Title cannot be empty." };
+    }
+    payload.title = title;
+  }
+
+  if (input.body !== undefined) {
+    documentContent = input.body.trimEnd();
+    if (!documentContent) {
+      return { ok: false, error: "Body cannot be empty." };
+    }
+  }
+
+  appendUpdateField(payload, "dependsOn", () =>
+    input.dependsOn === undefined
+      ? undefined
+      : normalizeTicketRefs(input.dependsOn)
+  );
+  appendUpdateField(payload, "blocks", () =>
+    input.blocks === undefined ? undefined : normalizeTicketRefs(input.blocks)
+  );
+  appendUpdateField(payload, "owner", () =>
+    input.owner === undefined
+      ? undefined
+      : normalizeOwnerOrSource({
+          value: input.owner,
+          fallback: "hack",
+        })
+  );
+  appendUpdateField(payload, "source", () =>
+    input.source === undefined
+      ? undefined
+      : normalizeOwnerOrSource({
+          value: input.source,
+          fallback: "hack",
+        })
+  );
+  appendUpdateField(payload, "assignee", () =>
+    input.assignee === undefined
+      ? undefined
+      : (normalizeOptionalMetadataString({
+          value: input.assignee,
+        }) ?? null)
+  );
+  appendUpdateField(payload, "tags", () =>
+    input.tags === undefined ? undefined : normalizeTags(input.tags)
+  );
+
+  for (const key of [
+    "externalSystem",
+    "externalId",
+    "externalKey",
+    "externalUrl",
+    "externalProjectId",
+    "externalProjectName",
+    "externalTeamId",
+  ] as const) {
+    appendUpdateField(payload, key, () => {
+      const value = input[key];
+      if (value === undefined) {
+        return undefined;
+      }
+      return normalizeOptionalMetadataString({
+        value,
+      });
+    });
+  }
+
+  return { ok: true, payload, ...(documentContent ? { documentContent } : {}) };
+}
+
+function appendUpdateField(
+  payload: Record<string, unknown>,
+  key: string,
+  resolveValue: () => unknown
+): void {
+  const value = resolveValue();
+  if (value !== undefined) {
+    payload[key] = value;
+  }
+}
+
+function readStringField(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function readOptionalStringField(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function applyUpdateValue<T>(
+  value: T | null | undefined,
+  apply: (value: T) => void
+): void {
+  if (value !== null && value !== undefined) {
+    apply(value);
+  }
+}
+
+function applyOptionalMetadataUpdate(
+  value: string | null,
+  apply: (value: string | undefined) => void
+): void {
+  if (value !== null) {
+    apply(value || undefined);
+  }
+}
+
+function buildDocumentRecordedEvent(input: {
+  readonly buildEvent: (input: {
+    readonly ticketId: string;
+    readonly type: string;
+    readonly payload: Record<string, unknown>;
+    readonly actor?: string;
+    readonly occurredAt?: string;
+    readonly sourceSystem?: string;
+    readonly sourceOperation?: string;
+    readonly idempotencyKey?: string;
+    readonly causationId?: string;
+    readonly correlationId?: string;
+  }) => TicketEvent;
+  readonly ticketId: string;
+  readonly actor?: string;
+  readonly documentId: string;
+  readonly kind: TicketDocumentKind;
+  readonly role?: TicketDocumentRole;
+  readonly content: string;
+}): TicketEvent {
+  return input.buildEvent({
+    ticketId: input.ticketId,
+    type: "ticket.document_recorded",
+    payload: {
+      documentId: input.documentId,
+      kind: input.kind,
+      ...(input.role ? { role: input.role } : {}),
+      content: input.content,
+    },
+    actor: input.actor,
+  });
+}
+
+function buildSyncCheckpointResult(input: {
+  readonly ticketId: string;
+  readonly provider: string;
+  readonly profileId?: string;
+  readonly direction?: string;
+  readonly remoteCursor?: string;
+  readonly remoteUpdatedAt?: string;
+  readonly localUpdatedAt?: string;
+}): SyncCheckpointBuildResult {
+  const provider = normalizeOptionalMetadataString({
+    value: input.provider,
+  });
+  if (!provider) {
+    return { ok: false, error: "Provider is required." };
+  }
+
+  const checkpointId = randomUUID();
+  const profileId = normalizeOptionalMetadataString({
+    value: input.profileId,
+  });
+  const direction = normalizeOptionalMetadataString({
+    value: input.direction,
+  });
+  const remoteCursor = normalizeOptionalMetadataString({
+    value: input.remoteCursor,
+  });
+  const remoteUpdatedAt = normalizeOptionalMetadataString({
+    value: input.remoteUpdatedAt,
+  });
+  const localUpdatedAt = normalizeOptionalMetadataString({
+    value: input.localUpdatedAt,
+  });
+  const payload: Record<string, unknown> = {
+    checkpointId,
+    provider,
+  };
+  appendOptionalStringFields({
+    target: payload,
+    entries: [
+      ["profileId", profileId],
+      ["direction", direction],
+      ["remoteCursor", remoteCursor],
+      ["remoteUpdatedAt", remoteUpdatedAt],
+      ["localUpdatedAt", localUpdatedAt],
+    ],
+  });
+
+  return {
+    ok: true,
+    checkpointId,
+    provider,
+    payload,
+    checkpoint: {
+      checkpointId,
+      ticketId: input.ticketId,
+      provider,
+      ...(profileId ? { profileId } : {}),
+      ...(direction ? { direction } : {}),
+      ...(remoteCursor ? { remoteCursor } : {}),
+      ...(remoteUpdatedAt ? { remoteUpdatedAt } : {}),
+      ...(localUpdatedAt ? { localUpdatedAt } : {}),
+      actor: "",
+      createdAt: "",
+    },
+  };
+}
+
+function buildSyncConflictResult(input: {
+  readonly ticketId: string;
+  readonly provider: string;
+  readonly field: string;
+  readonly authority?: string;
+  readonly summary?: string;
+  readonly localValue?: TicketMetadataValue;
+  readonly remoteValue?: TicketMetadataValue;
+}): SyncConflictBuildResult {
+  const provider = normalizeOptionalMetadataString({
+    value: input.provider,
+  });
+  if (!provider) {
+    return { ok: false, error: "Provider is required." };
+  }
+  const field = normalizeOptionalMetadataString({
+    value: input.field,
+  });
+  if (!field) {
+    return { ok: false, error: "Field is required." };
+  }
+
+  const conflictId = randomUUID();
+  const authority = normalizeOptionalMetadataString({
+    value: input.authority,
+  });
+  const summary = normalizeOptionalMetadataString({
+    value: input.summary,
+  });
+  const payload: Record<string, unknown> = {
+    conflictId,
+    provider,
+    field,
+  };
+  appendOptionalStringFields({
+    target: payload,
+    entries: [
+      ["authority", authority],
+      ["summary", summary],
+    ],
+  });
+  if (input.localValue !== undefined) {
+    payload.localValue = input.localValue;
+  }
+  if (input.remoteValue !== undefined) {
+    payload.remoteValue = input.remoteValue;
+  }
+
+  return {
+    ok: true,
+    conflictId,
+    provider,
+    field,
+    payload,
+    conflict: {
+      conflictId,
+      ticketId: input.ticketId,
+      provider,
+      field,
+      status: "open",
+      ...(authority ? { authority } : {}),
+      ...(summary ? { summary } : {}),
+      ...(input.localValue !== undefined
+        ? { localValue: input.localValue }
+        : {}),
+      ...(input.remoteValue !== undefined
+        ? { remoteValue: input.remoteValue }
+        : {}),
+    },
+  };
+}
+
 function parseEvent(value: unknown): TicketEvent | null {
   if (!isRecord(value)) {
     return null;
   }
-  const eventId = typeof value.eventId === "string" ? value.eventId : "";
+  const eventId = readStringField(value.eventId);
+  const schemaVersion =
+    typeof value.schemaVersion === "number" ? value.schemaVersion : 0;
   const ts = typeof value.ts === "number" ? value.ts : Number.NaN;
-  const actor = typeof value.actor === "string" ? value.actor : "";
-  const orderKey =
-    typeof value.orderKey === "string" ? value.orderKey : undefined;
-  const ticketId = typeof value.ticketId === "string" ? value.ticketId : "";
-  const type = typeof value.type === "string" ? value.type : "";
+  const tsIso = new Date(ts * 1000).toISOString();
+  const actor = readStringField(value.actor);
+  const eventTypeCandidate = readOptionalStringField(value.eventType);
+  const typeCandidate = readOptionalStringField(value.type);
+  const eventType = eventTypeCandidate ?? typeCandidate ?? "";
+  const occurredAt = readOptionalStringField(value.occurredAt) ?? tsIso;
+  const recordedAt = readOptionalStringField(value.recordedAt) ?? tsIso;
+  const orderKey = readOptionalStringField(value.orderKey);
+  const sourceSystem = readOptionalStringField(value.sourceSystem) ?? "hack";
+  const sourceOperation =
+    readOptionalStringField(value.sourceOperation) ?? eventType;
+  const idempotencyKey =
+    readOptionalStringField(value.idempotencyKey) ?? eventId;
+  const causationId = readOptionalStringField(value.causationId);
+  const correlationId = readOptionalStringField(value.correlationId);
+  const ticketId = readStringField(value.ticketId);
+  const type = typeCandidate ?? eventType;
   const payload = isRecord(value.payload)
     ? (value.payload as Record<string, unknown>)
     : null;
@@ -2143,16 +2603,23 @@ function parseEvent(value: unknown): TicketEvent | null {
     return null;
   }
 
-  const projectId =
-    typeof value.projectId === "string" ? value.projectId : undefined;
-  const projectName =
-    typeof value.projectName === "string" ? value.projectName : undefined;
+  const projectId = readOptionalStringField(value.projectId);
+  const projectName = readOptionalStringField(value.projectName);
 
   return {
     eventId,
+    schemaVersion,
     ts,
-    tsIso: new Date(ts * 1000).toISOString(),
+    tsIso,
+    eventType,
+    occurredAt,
+    recordedAt,
     actor,
+    sourceSystem,
+    sourceOperation,
+    idempotencyKey,
+    ...(causationId ? { causationId } : {}),
+    ...(correlationId ? { correlationId } : {}),
     ...(orderKey ? { orderKey } : {}),
     ...(projectId ? { projectId } : {}),
     ...(projectName ? { projectName } : {}),

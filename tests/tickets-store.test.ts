@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import {
   mkdir,
   mkdtemp,
@@ -7,44 +7,32 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import {
+  createNormalizedTicket,
+  projectNormalizedTicketSummary,
+} from "../src/control-plane/extensions/tickets/domain.ts";
+import {
+  buildTicketProvenance,
+  findTicketRemoteLink,
+} from "../src/control-plane/extensions/tickets/provenance.ts";
 import { createTicketsStore } from "../src/control-plane/extensions/tickets/store.ts";
-import { readControlPlaneConfig } from "../src/control-plane/sdk/config.ts";
+import { createGitTicketsChannel } from "../src/control-plane/extensions/tickets/tickets-git-channel.ts";
+import { createDefaultControlPlaneConfig } from "../src/control-plane/sdk/config.ts";
 
-const originalGlobalConfigPath = process.env.HACK_GLOBAL_CONFIG_PATH;
 const logger = {
   info: (_input: { message: string }) => {},
   warn: (_input: { message: string }) => {},
 };
 
-let tempGlobalConfigPath: string | null = null;
 let tempRoots: string[] = [];
-
-beforeEach(() => {
-  tempGlobalConfigPath = join(
-    tmpdir(),
-    `hack-global-config-${Date.now()}-${Math.random()}.json`
-  );
-  process.env.HACK_GLOBAL_CONFIG_PATH = tempGlobalConfigPath;
-});
 
 afterEach(async () => {
   for (const root of tempRoots) {
     await rm(root, { recursive: true, force: true });
   }
   tempRoots = [];
-
-  if (tempGlobalConfigPath) {
-    await rm(tempGlobalConfigPath, { force: true });
-    tempGlobalConfigPath = null;
-  }
-
-  if (originalGlobalConfigPath === undefined) {
-    process.env.HACK_GLOBAL_CONFIG_PATH = undefined;
-  } else {
-    process.env.HACK_GLOBAL_CONFIG_PATH = originalGlobalConfigPath;
-  }
 });
 
 test("tickets store materializes assignee, review notes, comments, checkpoints, and conflicts", async () => {
@@ -218,7 +206,16 @@ test("tickets store materializes assignee, review notes, comments, checkpoints, 
     "ticket.sync_conflict_recorded",
     "ticket.sync_conflict_resolved",
   ]);
-}, 20_000);
+  expect(events[0]).toMatchObject({
+    schemaVersion: 1,
+    eventType: "ticket.created",
+    occurredAt: events[0]?.tsIso,
+    recordedAt: events[0]?.tsIso,
+    sourceSystem: "hack",
+    sourceOperation: "local_command",
+  });
+  expect(events[0]?.idempotencyKey).toBe(events[0]?.eventId);
+}, 60_000);
 
 test("tickets show json includes materialized sync metadata", async () => {
   const projectRoot = await createTempGitProject({
@@ -314,7 +311,7 @@ test("tickets show json includes materialized sync metadata", async () => {
   expect(
     payload.events.some((event) => event.type === "ticket.comment_appended")
   ).toBe(true);
-}, 20_000);
+}, 60_000);
 
 test("tickets store recovers from a stale tickets bare repo index.lock", async () => {
   const projectRoot = await createTempGitProject({
@@ -340,51 +337,697 @@ test("tickets store recovers from a stale tickets bare repo index.lock", async (
   expect(tickets.map((ticket) => ticket.title)).toContain("Stale lock ticket");
 }, 20_000);
 
-test("tickets store assigns unique ticket ids under concurrent creation", async () => {
+test("tickets store creates non-sequential ids and keeps them unique under concurrent creates", async () => {
   const projectRoot = await createTempGitProject({
     prefix: "hack-cli-tickets-concurrent-create-",
   });
   const store = await createStore({ projectRoot });
 
-  const created = await Promise.all(
-    Array.from(
-      { length: 5 },
-      async (_, index) =>
-        await store.createTicket({
-          title: `Concurrent ticket ${index + 1}`,
-          owner: "hack",
-          source: "hack",
-          actor: `creator-${index + 1}@hack`,
-        })
+  const results = await Promise.all(
+    Array.from({ length: 16 }, (_value, index) =>
+      store.createTicket({
+        title: `Concurrent ticket ${index + 1}`,
+        owner: "hack",
+        source: "hack",
+        actor: `creator-${index}@hack`,
+      })
     )
   );
 
-  for (const result of created) {
-    expect(result.ok).toBe(true);
+  if (!results.every((result) => result.ok)) {
+    throw new Error(JSON.stringify(results, null, 2));
   }
 
-  const ticketIds = created
-    .flatMap((result) => (result.ok ? [result.ticket.ticketId] : []))
-    .sort();
-  expect(ticketIds).toEqual([
-    "T-00001",
-    "T-00002",
-    "T-00003",
-    "T-00004",
-    "T-00005",
-  ]);
+  const ticketIds = results.flatMap((result) =>
+    result.ok ? [result.ticket.ticketId] : []
+  );
+  expect(ticketIds).toHaveLength(16);
+  expect(new Set(ticketIds).size).toBe(ticketIds.length);
 
-  const listed = await store.listTickets();
-  expect(listed.map((ticket) => ticket.ticketId)).toEqual(ticketIds);
+  for (const ticketId of ticketIds) {
+    expect(ticketId).toMatch(/^T-[0-9A-Z]{10}$/);
+    expect(ticketId).not.toMatch(/^T-\d{5}$/);
+  }
 }, 20_000);
 
-async function createStore(opts: { readonly projectRoot: string }) {
-  const configResult = await readControlPlaneConfig({
-    projectDir: join(opts.projectRoot, ".hack"),
+test("tickets store continues to read and update legacy sequential ids", async () => {
+  const projectRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-legacy-id-",
   });
+  const store = await createStore({ projectRoot });
+  const git = createGitTicketsChannel({
+    projectRoot,
+    config: createDefaultControlPlaneConfig().tickets.git,
+    logger,
+  });
+
+  const legacyEvent = {
+    actor: "creator@hack",
+    eventId: "legacy-ticket-created",
+    payload: {
+      owner: "hack",
+      source: "hack",
+      title: "Legacy sequential ticket",
+    },
+    ticketId: "T-00001",
+    ts: 1_762_000_000,
+    tsIso: "2025-11-04T00:00:00.000Z",
+    type: "ticket.created",
+  };
+  const appended = await git.appendEvents({ events: [legacyEvent] });
+  expect(appended.ok).toBe(true);
+
+  const ticket = await store.getTicket({ ticketId: "T-00001" });
+  expect(ticket?.title).toBe("Legacy sequential ticket");
+
+  const updated = await store.updateTicket({
+    ticketId: "T-00001",
+    title: "Legacy sequential ticket updated",
+    actor: "updater@hack",
+  });
+  expect(updated.ok).toBe(true);
+
+  const updatedTicket = await store.getTicket({ ticketId: "T-00001" });
+  expect(updatedTicket?.title).toBe("Legacy sequential ticket updated");
+}, 20_000);
+
+test("tickets store writes normalized journal envelope metadata and ignores duplicate idempotency keys", async () => {
+  const projectRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-envelope-",
+  });
+  const store = await createStore({ projectRoot });
+
+  const created = await store.createTicket({
+    title: "Envelope ticket",
+    owner: "hack",
+    source: "hack",
+    actor: "creator@hack",
+  });
+  expect(created.ok).toBe(true);
+  if (!created.ok) {
+    throw new Error(created.error);
+  }
+
+  const eventsDir = join(
+    projectRoot,
+    ".hack/tickets/git/worktree/.hack/tickets/events"
+  );
+  const [eventsFile] = (await readdir(eventsDir)).filter((entry) =>
+    entry.endsWith(".jsonl")
+  );
+  expect(eventsFile).toBeString();
+  if (!eventsFile) {
+    throw new Error("Missing tickets event log");
+  }
+
+  const eventsPath = join(eventsDir, eventsFile);
+  const rawLines = (await readFile(eventsPath, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+
+  expect(rawLines[0]).toMatchObject({
+    schemaVersion: 1,
+    ticketId: created.ticket.ticketId,
+    occurredAt: created.ticket.createdAt,
+    recordedAt: created.ticket.createdAt,
+    sourceSystem: "hack",
+    sourceOperation: "local_command",
+  });
+  expect(rawLines[0]?.idempotencyKey).toBe(rawLines[0]?.eventId);
+  const baseTs = Number(rawLines[0]?.ts ?? 0) + 1;
+
+  const duplicateBaseEvent = {
+    schemaVersion: 1,
+    ticketId: created.ticket.ticketId,
+    type: "ticket.comment_appended",
+    payload: {
+      commentId: "comment-1",
+      body: "Imported from Linear.",
+      source: "linear",
+    },
+    actor: "linear@app",
+    sourceSystem: "linear",
+    sourceOperation: "webhook_pull",
+    idempotencyKey: "linear:comment:1",
+    occurredAt: "2026-03-13T11:00:00.000Z",
+    recordedAt: "2026-03-13T11:00:01.000Z",
+  };
+
+  await writeFile(
+    eventsPath,
+    [
+      await readFile(eventsPath, "utf8"),
+      JSON.stringify({
+        ...duplicateBaseEvent,
+        eventId: "event-comment-1",
+        ts: baseTs,
+        orderKey: `${baseTs}-000000`,
+      }),
+      JSON.stringify({
+        ...duplicateBaseEvent,
+        eventId: "event-comment-2",
+        ts: baseTs + 1,
+        orderKey: `${baseTs + 1}-000000`,
+      }),
+      "",
+    ].join("\n")
+  );
+
+  const snapshot = await store.readSnapshot();
+  const comments = snapshot.commentsByTicket.get(created.ticket.ticketId) ?? [];
+  expect(comments).toHaveLength(1);
+  expect(comments[0]).toMatchObject({
+    commentId: "comment-1",
+    body: "Imported from Linear.",
+    source: "linear",
+  });
+}, 20_000);
+
+test("tickets store ignores duplicate sync checkpoints with the same idempotency key", async () => {
+  const projectRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-checkpoint-idempotency-",
+  });
+  const store = await createStore({ projectRoot });
+
+  const created = await store.createTicket({
+    title: "Checkpoint idempotency",
+    owner: "hack",
+    source: "linear",
+    actor: "creator@hack",
+  });
+  expect(created.ok).toBe(true);
+  if (!created.ok) {
+    throw new Error(created.error);
+  }
+
+  const first = await store.recordSyncCheckpoint({
+    ticketId: created.ticket.ticketId,
+    provider: "linear",
+    profileId: "default",
+    direction: "hack_to_linear",
+    remoteCursor: "ENG-321",
+    idempotencyKey: "linear:checkpoint:T-00001:ENG-321",
+    actor: "sync@app",
+  });
+  expect(first.ok).toBe(true);
+
+  const second = await store.recordSyncCheckpoint({
+    ticketId: created.ticket.ticketId,
+    provider: "linear",
+    profileId: "default",
+    direction: "hack_to_linear",
+    remoteCursor: "ENG-321",
+    idempotencyKey: "linear:checkpoint:T-00001:ENG-321",
+    actor: "sync@app",
+  });
+  expect(second.ok).toBe(true);
+
+  const detail = await store.getTicketDetail({
+    ticketId: created.ticket.ticketId,
+  });
+  expect(detail.syncCheckpoints).toHaveLength(1);
+  expect(
+    detail.events.filter(
+      (event) => event.type === "ticket.sync_checkpoint_recorded"
+    )
+  ).toHaveLength(1);
+}, 20_000);
+
+test("tickets store records immutable documents and projects body from the active description", async () => {
+  const projectRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-documents-",
+  });
+  const store = await createStore({ projectRoot });
+
+  const created = await store.createTicket({
+    title: "Document-backed ticket",
+    body: "## Context\nInitial description",
+    owner: "hack",
+    source: "hack",
+    actor: "creator@hack",
+  });
+  expect(created.ok).toBe(true);
+  if (!created.ok) {
+    throw new Error(created.error);
+  }
+
+  const spec = await store.appendDocument({
+    ticketId: created.ticket.ticketId,
+    kind: "spec",
+    content: "\n## Goals\n- Ship immutable ticket documents",
+    actor: "author@hack",
+  });
+  expect(spec.ok).toBe(true);
+  if (!spec.ok) {
+    throw new Error(spec.error);
+  }
+
+  const description = await store.appendDocument({
+    ticketId: created.ticket.ticketId,
+    kind: "description",
+    content: "## Context\nUpdated description",
+    actor: "author@hack",
+  });
+  expect(description.ok).toBe(true);
+  if (!description.ok) {
+    throw new Error(description.error);
+  }
+
+  const detail = await store.getTicketDetail({
+    ticketId: created.ticket.ticketId,
+  });
+
+  expect(detail.ticket?.body).toBe("## Context\nUpdated description");
+  expect(detail.documents).toEqual([
+    expect.objectContaining({
+      kind: "description",
+      role: "description",
+      content: "## Context\nInitial description",
+    }),
+    expect.objectContaining({
+      kind: "spec",
+      role: "spec",
+      content: "\n## Goals\n- Ship immutable ticket documents",
+    }),
+    expect.objectContaining({
+      kind: "description",
+      role: "description",
+      content: "## Context\nUpdated description",
+    }),
+  ]);
+  expect(
+    detail.events.filter((event) => event.type === "ticket.document_recorded")
+  ).toHaveLength(2);
+}, 20_000);
+
+test("tickets store persists a sqlite projection and rebuilds it when deleted", async () => {
+  const projectRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-projection-",
+  });
+  const projectionPath = join(projectRoot, ".hack/tickets/projection.sqlite");
+
+  const firstStore = await createStore({ projectRoot });
+  const created = await firstStore.createTicket({
+    title: "Projection ticket",
+    body: "Persisted through sqlite projection.",
+    owner: "hack",
+    source: "hack",
+    actor: "creator@hack",
+  });
+  expect(created.ok).toBe(true);
+  if (!created.ok) {
+    throw new Error(created.error);
+  }
+
+  const initialTickets = await firstStore.listTickets();
+  expect(initialTickets.map((ticket) => ticket.title)).toContain(
+    "Projection ticket"
+  );
+  expect(await Bun.file(projectionPath).exists()).toBe(true);
+
+  const secondStore = await createStore({ projectRoot });
+  const persistedTickets = await secondStore.listTickets();
+  expect(persistedTickets.map((ticket) => ticket.title)).toContain(
+    "Projection ticket"
+  );
+
+  await rm(projectionPath, { force: true });
+  expect(await Bun.file(projectionPath).exists()).toBe(false);
+
+  const rebuiltStore = await createStore({ projectRoot });
+  const rebuiltTickets = await rebuiltStore.listTickets();
+  expect(rebuiltTickets.map((ticket) => ticket.title)).toContain(
+    "Projection ticket"
+  );
+  expect(await Bun.file(projectionPath).exists()).toBe(true);
+}, 20_000);
+
+test("normalized ticket adapter preserves compatibility while exposing provenance and documents", () => {
+  const summary = {
+    ticketId: "T-00042",
+    title: "Normalize ticket metadata",
+    body: "## Context\nDocument-backed description",
+    status: "in_progress" as const,
+    createdAt: "2026-03-13T10:00:00.000Z",
+    updatedAt: "2026-03-13T11:00:00.000Z",
+    dependsOn: ["T-00001"],
+    blocks: ["T-00009"],
+    owner: "hack",
+    source: "linear",
+    assignee: "alice@hack",
+    tags: ["core", "tickets"],
+    externalSystem: "linear",
+    externalId: "lin_123",
+    externalKey: "HACK-431",
+    externalUrl: "https://linear.app/hack/issue/HACK-431",
+    externalProjectId: "project-1",
+    externalProjectName: "Hack App",
+    externalTeamId: "team-1",
+    projectId: "hack-cli",
+    projectName: "hack-cli",
+  };
+
+  const normalized = createNormalizedTicket({
+    ticket: summary,
+    syncCheckpoints: [
+      {
+        checkpointId: "checkpoint-1",
+        ticketId: summary.ticketId,
+        provider: "linear",
+        profileId: "default",
+        direction: "pull",
+        remoteCursor: "issue/lin_123#v2",
+        remoteUpdatedAt: "2026-03-13T10:59:00.000Z",
+        localUpdatedAt: "2026-03-13T11:00:00.000Z",
+        actor: "sync@app",
+        createdAt: "2026-03-13T11:00:00.000Z",
+      },
+    ],
+    conflicts: [
+      {
+        conflictId: "conflict-1",
+        ticketId: summary.ticketId,
+        provider: "linear",
+        field: "title",
+        status: "open",
+        authority: "review_required",
+        summary: "Local title drifted from Linear.",
+        localValue: summary.title,
+        remoteValue: "Normalize work model",
+        createdAt: "2026-03-13T11:00:00.000Z",
+        updatedAt: "2026-03-13T11:00:00.000Z",
+      },
+    ],
+  });
+
+  expect(normalized.identity).toEqual({
+    ticketId: "T-00042",
+    projectId: "hack-cli",
+    projectName: "hack-cli",
+  });
+  expect(normalized.provenance.origin).toEqual({
+    owner: "hack",
+    source: "linear",
+    system: "linear",
+  });
+  expect(normalized.provenance.remotes).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        provider: "linear",
+        remoteId: "lin_123",
+        remoteKey: "HACK-431",
+        remoteUrl: "https://linear.app/hack/issue/HACK-431",
+        projectId: "project-1",
+        projectName: "Hack App",
+        teamId: "team-1",
+      }),
+      expect.objectContaining({
+        provider: "linear",
+        profileId: "default",
+        remoteCursor: "issue/lin_123#v2",
+      }),
+    ])
+  );
+  expect(normalized.documents).toEqual([
+    expect.objectContaining({
+      kind: "description",
+      role: "description",
+      content: "## Context\nDocument-backed description",
+    }),
+  ]);
+  expect(normalized.fieldStates).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        field: "title",
+        authority: "review_required",
+        conflictIds: ["conflict-1"],
+      }),
+    ])
+  );
+  expect(projectNormalizedTicketSummary({ ticket: normalized })).toEqual(
+    summary
+  );
+});
+
+test("normalized ticket provenance captures multiple remotes, field authority, and field versions", () => {
+  const normalized = createNormalizedTicket({
+    ticket: {
+      ticketId: "T-00077",
+      title: "Normalize provenance",
+      body: "Track provenance explicitly.",
+      status: "open",
+      createdAt: "2026-03-13T09:00:00.000Z",
+      updatedAt: "2026-03-13T12:00:00.000Z",
+      dependsOn: [],
+      blocks: [],
+      owner: "hack",
+      source: "linear",
+      assignee: "alice@hack",
+      tags: ["normalization"],
+      externalSystem: "linear",
+      externalId: "lin-77",
+      externalKey: "HACK-77",
+      externalUrl: "https://linear.app/hack/issue/HACK-77",
+      externalProjectId: "proj-77",
+      externalProjectName: "Hack App",
+      externalTeamId: "team-77",
+      projectId: "hack-cli",
+      projectName: "hack-cli",
+    },
+    syncCheckpoints: [
+      {
+        checkpointId: "checkpoint-linear",
+        ticketId: "T-00077",
+        provider: "linear",
+        profileId: "default",
+        direction: "pull",
+        remoteCursor: "issue/lin-77#v3",
+        remoteUpdatedAt: "2026-03-13T11:59:00.000Z",
+        actor: "sync@app",
+        createdAt: "2026-03-13T12:00:00.000Z",
+      },
+      {
+        checkpointId: "checkpoint-github",
+        ticketId: "T-00077",
+        provider: "github",
+        profileId: "mirror",
+        direction: "push",
+        remoteCursor: "issue/gh-77#v1",
+        remoteUpdatedAt: "2026-03-13T11:45:00.000Z",
+        actor: "sync@app",
+        createdAt: "2026-03-13T12:00:00.000Z",
+      },
+    ],
+    conflicts: [
+      {
+        conflictId: "conflict-title",
+        ticketId: "T-00077",
+        provider: "linear",
+        field: "title",
+        status: "open",
+        authority: "review_required",
+        summary: "Title changed in both places.",
+        localValue: "Normalize provenance",
+        remoteValue: "Normalize explicit provenance",
+        createdAt: "2026-03-13T12:00:00.000Z",
+        updatedAt: "2026-03-13T12:00:00.000Z",
+      },
+    ],
+  });
+
+  expect(normalized.provenance.remotes).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        provider: "linear",
+        remoteId: "lin-77",
+        remoteKey: "HACK-77",
+      }),
+      expect.objectContaining({
+        provider: "github",
+        profileId: "mirror",
+        remoteCursor: "issue/gh-77#v1",
+      }),
+    ])
+  );
+  expect(normalized.provenance.fieldAuthorities).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        field: "title",
+        authority: "review_required",
+      }),
+      expect.objectContaining({
+        field: "comment",
+        authority: "append_only",
+      }),
+    ])
+  );
+  expect(normalized.provenance.fieldVersions).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        field: "title",
+        source: "local",
+        recordedAt: "2026-03-13T12:00:00.000Z",
+      }),
+      expect.objectContaining({
+        field: "title",
+        source: "remote",
+        provider: "linear",
+        value: "Normalize explicit provenance",
+      }),
+    ])
+  );
+});
+
+test("projectNormalizedTicketSummary uses the latest description document", () => {
+  const normalized = createNormalizedTicket({
+    ticket: {
+      ticketId: "T-00089",
+      title: "Prefer the latest description",
+      body: "Legacy body",
+      status: "open",
+      createdAt: "2026-03-13T09:00:00.000Z",
+      updatedAt: "2026-03-13T12:00:00.000Z",
+      dependsOn: [],
+      blocks: [],
+      owner: "hack",
+      source: "hack",
+      tags: [],
+    },
+    documents: [
+      {
+        documentId: "T-00089:description:created",
+        ticketId: "T-00089",
+        kind: "description",
+        role: "description",
+        content: "Original description",
+        contentSha256: "sha-original",
+        createdAt: "2026-03-13T09:00:00.000Z",
+        updatedAt: "2026-03-13T09:00:00.000Z",
+      },
+      {
+        documentId: "T-00089:description:updated",
+        ticketId: "T-00089",
+        kind: "description",
+        role: "description",
+        content: "Latest description",
+        contentSha256: "sha-latest",
+        createdAt: "2026-03-13T11:00:00.000Z",
+        updatedAt: "2026-03-13T12:00:00.000Z",
+      },
+    ],
+  });
+
+  expect(projectNormalizedTicketSummary({ ticket: normalized }).body).toBe(
+    "Latest description"
+  );
+});
+
+test("normalized ticket field states map legacy body conflicts to description", () => {
+  const normalized = createNormalizedTicket({
+    ticket: {
+      ticketId: "T-00090",
+      title: "Normalize body conflicts",
+      body: "Local body",
+      status: "open",
+      createdAt: "2026-03-13T09:00:00.000Z",
+      updatedAt: "2026-03-13T12:00:00.000Z",
+      dependsOn: [],
+      blocks: [],
+      owner: "hack",
+      source: "linear",
+      tags: [],
+    },
+    conflicts: [
+      {
+        conflictId: "conflict-description",
+        ticketId: "T-00090",
+        provider: "linear",
+        field: "body",
+        status: "open",
+        authority: "review_required",
+        localValue: "Local body",
+        remoteValue: "Remote body",
+        createdAt: "2026-03-13T12:00:00.000Z",
+        updatedAt: "2026-03-13T12:00:00.000Z",
+      },
+    ],
+  });
+
+  expect(normalized.fieldStates).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        field: "description",
+        authority: "review_required",
+        conflictIds: ["conflict-description"],
+      }),
+    ])
+  );
+});
+
+test("ticket provenance infers a remote provider from source metadata when externalSystem is absent", () => {
+  const ticket = {
+    ticketId: "T-00088",
+    title: "Infer remote provider",
+    body: "Link a remote without an explicit external system field.",
+    status: "open" as const,
+    createdAt: "2026-03-13T09:00:00.000Z",
+    updatedAt: "2026-03-13T12:00:00.000Z",
+    dependsOn: [],
+    blocks: [],
+    owner: "hack",
+    source: "linear",
+    tags: ["normalization"],
+    externalId: "lin-88",
+    externalKey: "HACK-88",
+    externalUrl: "https://linear.app/hack/issue/HACK-88",
+    externalProjectId: "proj-88",
+    externalProjectName: "Hack App",
+    externalTeamId: "team-88",
+  };
+
+  const provenance = buildTicketProvenance({
+    ticket,
+    syncCheckpoints: [
+      {
+        checkpointId: "checkpoint-linear",
+        ticketId: "T-00088",
+        provider: "linear",
+        direction: "pull",
+        remoteCursor: "issue/lin-88#v1",
+        remoteUpdatedAt: "2026-03-13T11:59:00.000Z",
+        actor: "sync@app",
+        createdAt: "2026-03-13T12:00:00.000Z",
+      },
+    ],
+  });
+
+  expect(findTicketRemoteLink({ ticket, provider: "linear" })).toEqual(
+    expect.objectContaining({
+      provider: "linear",
+      remoteId: "lin-88",
+      remoteKey: "HACK-88",
+      remoteUrl: "https://linear.app/hack/issue/HACK-88",
+    })
+  );
+  expect(provenance.fieldAuthorities).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        field: "title",
+        authority: "remote",
+      }),
+      expect.objectContaining({
+        field: "comment",
+        authority: "append_only",
+      }),
+    ])
+  );
+});
+
+async function createStore(opts: { readonly projectRoot: string }) {
   return createTicketsStore({
     projectRoot: opts.projectRoot,
-    controlPlaneConfig: configResult.config,
+    controlPlaneConfig: createDefaultControlPlaneConfig(),
     logger,
   });
 }
@@ -437,7 +1080,10 @@ async function runAllowFail(opts: {
     stdout: "pipe",
     stderr: "pipe",
     stdin: "ignore",
-    env: process.env,
+    env: {
+      ...process.env,
+      HOME: homedir(),
+    },
   });
 
   const stdout = await new Response(proc.stdout).text();

@@ -185,6 +185,72 @@ test("buildProjectViews includes defined services and runtime status", async () 
   });
 });
 
+test("buildProjectViews includes explicit project ownership metadata", async () => {
+  const alpha = await createProject({
+    name: "alpha",
+    services: ["api"],
+    configJson: JSON.stringify(
+      {
+        ownership: {
+          mode: "shared",
+          owner_type: "team",
+          owner_id: "team_alpha",
+        },
+      },
+      null,
+      2
+    ),
+  });
+
+  const views = await buildProjectViews({
+    registryProjects: [alpha],
+    runtime: [],
+    runtimeOk: true,
+    filter: null,
+    includeUnregistered: false,
+    muxSessions: [],
+  });
+
+  const alphaView = views.find((view) => view.name === "alpha");
+  expect(alphaView?.ownership).toEqual({
+    mode: "shared",
+    ownerType: "team",
+    ownerId: "team_alpha",
+    managedBy: "broker",
+  });
+
+  const serialized = alphaView ? serializeProjectView(alphaView) : null;
+  expect(serialized?.ownership).toEqual({
+    mode: "shared",
+    owner_type: "team",
+    owner_id: "team_alpha",
+    managed_by: "broker",
+  });
+});
+
+test("buildProjectViews omits ownership when config parsing fails", async () => {
+  const alpha = await createProject({
+    name: "alpha",
+    services: ["api"],
+    configJson: "{ invalid json",
+  });
+
+  const views = await buildProjectViews({
+    registryProjects: [alpha],
+    runtime: [],
+    runtimeOk: true,
+    filter: null,
+    includeUnregistered: false,
+    muxSessions: [],
+  });
+
+  const alphaView = views.find((view) => view.name === "alpha");
+  expect(alphaView?.ownership).toBeNull();
+
+  const serialized = alphaView ? serializeProjectView(alphaView) : null;
+  expect(serialized?.ownership).toBeNull();
+});
+
 test("buildProjectViews includes lifecycle and startup summaries", async () => {
   const lifecycleConfig = JSON.stringify(
     {
@@ -308,7 +374,7 @@ test("buildProjectViews includes matching project sessions from tmux", async () 
         createdAt: 1_735_000_000,
       },
       {
-        name: "alpha:agent-1",
+        name: "alpha--agent-1",
         backend: "tmux",
         attached: false,
         path: join(alpha.repoRoot, "apps"),
@@ -337,7 +403,7 @@ test("buildProjectViews includes matching project sessions from tmux", async () 
   const alphaView = views.find((view) => view.name === "alpha");
   expect(alphaView?.sessions.map((session) => session.name)).toEqual([
     "alpha",
-    "alpha:agent-1",
+    "alpha--agent-1",
     "manual-scratch",
   ]);
   expect(alphaView?.sessions.map((session) => session.source)).toEqual([
@@ -400,7 +466,7 @@ test("buildProjectViews includes zellij sessions when session name matches proje
     includeUnregistered: false,
     muxSessions: [
       {
-        name: "alpha:research",
+        name: "alpha--research",
         backend: "zellij",
         attached: false,
         path: null,
@@ -412,7 +478,7 @@ test("buildProjectViews includes zellij sessions when session name matches proje
 
   const alphaView = views.find((view) => view.name === "alpha");
   expect(alphaView?.sessions.map((session) => session.name)).toEqual([
-    "alpha:research",
+    "alpha--research",
   ]);
   expect(alphaView?.sessions.map((session) => session.backend)).toEqual([
     "zellij",

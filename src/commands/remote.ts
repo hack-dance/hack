@@ -146,8 +146,8 @@ const setupOptions = [optPath, optProject, optQr, optNoQr, optYes] as const;
 
 const remoteSpec = defineCommand({
   name: "remote",
-  summary: "Remote workflow helpers",
-  group: "Extensions",
+  summary: "Beta: guided remote access and gateway helpers",
+  group: "Beta",
   options: remoteOptions,
   positionals: [],
   subcommands: [],
@@ -156,7 +156,7 @@ const remoteSpec = defineCommand({
 const setupSpec = defineCommand({
   name: "setup",
   summary: "Run the guided gateway setup",
-  group: "Extensions",
+  group: "Beta",
   options: setupOptions,
   positionals: [],
   subcommands: [],
@@ -165,7 +165,7 @@ const setupSpec = defineCommand({
 const statusSpec = defineCommand({
   name: "status",
   summary: "Show remote/gateway status",
-  group: "Extensions",
+  group: "Beta",
   options: remoteOptions,
   positionals: [],
   subcommands: [],
@@ -174,7 +174,7 @@ const statusSpec = defineCommand({
 const monitorSpec = defineCommand({
   name: "monitor",
   summary: "Open a remote status TUI",
-  group: "Extensions",
+  group: "Beta",
   options: remoteOptions,
   positionals: [],
   subcommands: [],
@@ -183,7 +183,7 @@ const monitorSpec = defineCommand({
 const qrSpec = defineCommand({
   name: "qr",
   summary: "Print a QR payload for remote access",
-  group: "Extensions",
+  group: "Beta",
   options: qrOptions,
   positionals: [],
   subcommands: [],

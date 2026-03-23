@@ -44,22 +44,24 @@ export async function requestDaemonJson(opts: {
   readonly method?: "GET" | "POST";
   readonly body?: Record<string, unknown>;
   readonly allowIncompatible?: boolean;
+  readonly autoStart?: boolean;
 }): Promise<DaemonJsonResponse | null> {
+  const autoStart = opts.autoStart ?? true;
   const paths = resolveDaemonPaths({});
-  const status = await readDaemonStatus({ paths });
-  if (!status.running) {
-    const started = await ensureDaemonReady({ paths });
-    if (!(started || status.socketExists)) {
-      return null;
-    }
+  const daemonReady = await ensureDaemonSocketReady({
+    paths,
+    autoStart,
+  });
+  if (!daemonReady) {
+    return null;
   }
 
   if (!opts.allowIncompatible) {
-    const probe = await probeDaemonApi({
+    const compatible = await isDaemonCompatible({
       socketPath: paths.socketPath,
       timeoutMs: opts.timeoutMs,
     });
-    if (!probe.compatible) {
+    if (!compatible) {
       return null;
     }
   }
@@ -72,36 +74,16 @@ export async function requestDaemonJson(opts: {
     body: opts.body,
     timeoutMs: opts.timeoutMs ?? 1000,
   });
-  if (!raw) {
-    const restarted = await ensureDaemonReady({ paths });
-    if (!restarted) {
-      return null;
-    }
-    const retry = await requestDaemonRaw({
-      socketPath: paths.socketPath,
-      method: opts.method ?? "GET",
-      path: opts.path,
-      query: opts.query,
-      body: opts.body,
-      timeoutMs: opts.timeoutMs ?? 1000,
-    });
-    if (!retry) {
-      return null;
-    }
-    const retryJson = safeJsonParse({ text: retry.body });
-    return {
-      ok: retry.statusCode >= 200 && retry.statusCode < 300,
-      status: retry.statusCode,
-      json: retryJson,
-    };
-  }
-
-  const json = safeJsonParse({ text: raw.body });
-  return {
-    ok: raw.statusCode >= 200 && raw.statusCode < 300,
-    status: raw.statusCode,
-    json,
-  };
+  return await resolveDaemonJsonResponse({
+    raw,
+    autoStart,
+    paths,
+    method: opts.method ?? "GET",
+    path: opts.path,
+    query: opts.query,
+    body: opts.body,
+    timeoutMs: opts.timeoutMs ?? 1000,
+  });
 }
 
 /**
@@ -154,6 +136,49 @@ async function ensureDaemonReady(opts: {
   }
 
   return false;
+}
+
+async function ensureDaemonSocketReady(opts: {
+  readonly paths: ReturnType<typeof resolveDaemonPaths>;
+  readonly autoStart: boolean;
+}): Promise<boolean> {
+  const status = await readDaemonStatus({ paths: opts.paths });
+  if (status.socketExists) {
+    return true;
+  }
+  if (!opts.autoStart) {
+    return false;
+  }
+  return await ensureDaemonReady({ paths: opts.paths });
+}
+
+export async function probeDaemonApi(opts: {
+  readonly socketPath: string;
+  readonly timeoutMs?: number;
+}): Promise<DaemonApiProbe> {
+  const raw = await requestDaemonRaw({
+    socketPath: opts.socketPath,
+    method: "GET",
+    path: "/v1/status",
+    timeoutMs: opts.timeoutMs ?? 1000,
+  });
+  if (!raw) {
+    return {
+      reachable: false,
+      compatible: false,
+      version: null,
+    };
+  }
+
+  const json = safeJsonParse({
+    text: raw.body,
+  });
+  const version = json ? json.version : null;
+  return {
+    reachable: true,
+    compatible: typeof version === "string" && version === packageJson.version,
+    version: typeof version === "string" ? version : null,
+  };
 }
 
 /**
@@ -225,10 +250,10 @@ async function waitForDaemonSocket(opts: {
   return finalStatus.socketExists;
 }
 
-export async function probeDaemonApi(opts: {
+async function isDaemonCompatible(opts: {
   readonly socketPath: string;
   readonly timeoutMs?: number;
-}): Promise<DaemonApiProbe> {
+}): Promise<boolean> {
   const raw = await requestDaemonRaw({
     socketPath: opts.socketPath,
     method: "GET",
@@ -236,19 +261,11 @@ export async function probeDaemonApi(opts: {
     timeoutMs: opts.timeoutMs ?? 1000,
   });
   if (!raw) {
-    return {
-      reachable: false,
-      compatible: false,
-      version: null,
-    };
+    return false;
   }
   const json = safeJsonParse({ text: raw.body });
   const version = json ? json.version : null;
-  return {
-    reachable: true,
-    compatible: typeof version === "string" && version === packageJson.version,
-    version: typeof version === "string" ? version : null,
-  };
+  return typeof version === "string" && version === packageJson.version;
 }
 
 async function requestDaemonRaw(opts: {
@@ -288,6 +305,52 @@ async function requestDaemonRaw(opts: {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function resolveDaemonJsonResponse(opts: {
+  readonly raw: { readonly statusCode: number; readonly body: string } | null;
+  readonly autoStart: boolean;
+  readonly paths: ReturnType<typeof resolveDaemonPaths>;
+  readonly method: "GET" | "POST";
+  readonly path: string;
+  readonly query?: Record<string, string | boolean | null>;
+  readonly body?: Record<string, unknown>;
+  readonly timeoutMs: number;
+}): Promise<DaemonJsonResponse | null> {
+  if (opts.raw) {
+    return buildDaemonJsonResponse({ raw: opts.raw });
+  }
+  if (!opts.autoStart) {
+    return null;
+  }
+
+  const restarted = await ensureDaemonReady({ paths: opts.paths });
+  if (!restarted) {
+    return null;
+  }
+  const retry = await requestDaemonRaw({
+    socketPath: opts.paths.socketPath,
+    method: opts.method,
+    path: opts.path,
+    query: opts.query,
+    body: opts.body,
+    timeoutMs: opts.timeoutMs,
+  });
+  if (!retry) {
+    return null;
+  }
+  return buildDaemonJsonResponse({ raw: retry });
+}
+
+function buildDaemonJsonResponse(opts: {
+  readonly raw: { readonly statusCode: number; readonly body: string };
+}): DaemonJsonResponse {
+  const json = safeJsonParse({ text: opts.raw.body });
+  return {
+    ok: opts.raw.statusCode >= 200 && opts.raw.statusCode < 300,
+    status: opts.raw.statusCode,
+    json,
+  };
 }
 
 function buildQueryString(opts: {

@@ -1,4 +1,5 @@
-import { mkdir, readdir, rm, stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, open, readdir, rm, stat, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import { isRecord } from "../../../lib/guards.ts";
@@ -7,6 +8,10 @@ import { stableStringify } from "./util.ts";
 
 const REFS_HEADS_PREFIX_PATTERN = /^refs\/heads\//;
 const REFS_PREFIX_PATTERN = /^refs\//;
+const DEFAULT_MUTATION_LOCK_HEARTBEAT_MS = 1000;
+const DEFAULT_MUTATION_LOCK_RETRY_MS = 100;
+const DEFAULT_MUTATION_LOCK_STALE_MS = 30_000;
+const DEFAULT_MUTATION_LOCK_TIMEOUT_MS = 30_000;
 
 export type TicketsGitChannel = {
   readonly ensureCheckedOut: () => Promise<string>;
@@ -14,6 +19,19 @@ export type TicketsGitChannel = {
     readonly events: readonly Record<string, unknown>[];
   }) => Promise<
     { readonly ok: true } | { readonly ok: false; readonly error: string }
+  >;
+  readonly appendPreparedEvents: <T>(input: {
+    readonly prepare: (root: string) => Promise<
+      | {
+          readonly ok: true;
+          readonly events: readonly Record<string, unknown>[];
+          readonly result: T;
+        }
+      | { readonly ok: false; readonly error: string }
+    >;
+  }) => Promise<
+    | { readonly ok: true; readonly result: T }
+    | { readonly ok: false; readonly error: string }
   >;
   readonly inspect: () => Promise<TicketsGitInspectResult>;
   readonly repair: (input: {
@@ -59,12 +77,33 @@ export type TicketsGitRepairResult =
     }
   | { readonly ok: false; readonly error: string };
 
+type ParsedJournalEvent = {
+  readonly eventId: string;
+  readonly idempotencyKey: string;
+  readonly ts: number;
+  readonly value: Record<string, unknown>;
+};
+
+type PushAttemptResult =
+  | { readonly ok: true; readonly didPush: boolean }
+  | {
+      readonly ok: false;
+      readonly error: string;
+      readonly hiddenRefRejected?: boolean;
+    };
+
 export function createGitTicketsChannel(opts: {
   readonly projectRoot: string;
   readonly config: TicketsGitConfig;
   readonly logger: {
     info: (input: { message: string }) => void;
     warn: (input: { message: string }) => void;
+  };
+  readonly testOverrides?: {
+    readonly mutationLockHeartbeatMs?: number;
+    readonly mutationLockRetryMs?: number;
+    readonly mutationLockStaleMs?: number;
+    readonly mutationLockTimeoutMs?: number;
   };
 }): TicketsGitChannel {
   const ticketsDir = resolve(opts.projectRoot, ".hack/tickets");
@@ -85,6 +124,17 @@ export function createGitTicketsChannel(opts: {
     : null;
   const remoteName = gitEnabled ? (opts.config.remote ?? "origin").trim() : "";
   const bareIndexLockPath = resolve(bareDir, "index.lock");
+  const mutationLockPath = resolve(gitDir, ".mutation.lock");
+  const mutationLockHeartbeatMs =
+    opts.testOverrides?.mutationLockHeartbeatMs ??
+    DEFAULT_MUTATION_LOCK_HEARTBEAT_MS;
+  const mutationLockRetryMs =
+    opts.testOverrides?.mutationLockRetryMs ?? DEFAULT_MUTATION_LOCK_RETRY_MS;
+  const mutationLockStaleMs =
+    opts.testOverrides?.mutationLockStaleMs ?? DEFAULT_MUTATION_LOCK_STALE_MS;
+  const mutationLockTimeoutMs =
+    opts.testOverrides?.mutationLockTimeoutMs ??
+    DEFAULT_MUTATION_LOCK_TIMEOUT_MS;
 
   const resolvePushRefForCheckout = (input: {
     readonly checkoutRef: string;
@@ -164,6 +214,131 @@ export function createGitTicketsChannel(opts: {
   const ensureDirs = async () => {
     await mkdir(gitDir, { recursive: true });
     await mkdir(worktreeDir, { recursive: true });
+  };
+
+  type MutationLockHandle = {
+    readonly ownerToken: string;
+    readonly heartbeatTimer: ReturnType<typeof setInterval>;
+  };
+
+  const withMutationLock = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const lockHandle = await acquireMutationLock();
+    try {
+      return await fn();
+    } finally {
+      await releaseMutationLock(lockHandle);
+    }
+  };
+
+  const readMutationLockOwner = async (): Promise<string | null> => {
+    const ownerToken = (
+      await Bun.file(mutationLockPath)
+        .text()
+        .catch(() => "")
+    )
+      .split("\n")[0]
+      ?.trim();
+    return ownerToken ? ownerToken : null;
+  };
+
+  const writeMutationLockOwner = async (ownerToken: string): Promise<void> => {
+    await Bun.write(mutationLockPath, `${ownerToken}\n`);
+  };
+
+  const refreshMutationLock = async (
+    input: Pick<MutationLockHandle, "ownerToken">
+  ): Promise<void> => {
+    if ((await readMutationLockOwner()) !== input.ownerToken) {
+      return;
+    }
+    await writeMutationLockOwner(input.ownerToken);
+  };
+
+  const isMutationLockStale = async (): Promise<boolean> => {
+    try {
+      const info = await stat(mutationLockPath);
+      return Date.now() - info.mtimeMs > mutationLockStaleMs;
+    } catch {
+      return false;
+    }
+  };
+
+  const clearStaleMutationLock = async (): Promise<void> => {
+    const ownerToken = await readMutationLockOwner();
+    if (!ownerToken) {
+      await unlink(mutationLockPath).catch(() => undefined);
+      return;
+    }
+    if (!(await isMutationLockStale())) {
+      return;
+    }
+    if ((await readMutationLockOwner()) !== ownerToken) {
+      return;
+    }
+    await unlink(mutationLockPath).catch(() => undefined);
+  };
+
+  const startMutationLockHeartbeat = (
+    ownerToken: string
+  ): MutationLockHandle["heartbeatTimer"] => {
+    const heartbeatTimer = setInterval(() => {
+      void refreshMutationLock({ ownerToken });
+    }, mutationLockHeartbeatMs);
+    heartbeatTimer.unref?.();
+    return heartbeatTimer;
+  };
+
+  const tryAcquireMutationLock =
+    async (): Promise<MutationLockHandle | null> => {
+      const ownerToken = randomUUID();
+      try {
+        const file = await open(mutationLockPath, "wx");
+        await file.writeFile(`${ownerToken}\n`);
+        await file.close();
+        return {
+          ownerToken,
+          heartbeatTimer: startMutationLockHeartbeat(ownerToken),
+        };
+      } catch (error: unknown) {
+        const code =
+          typeof error === "object" && error !== null && "code" in error
+            ? (error as { code?: string }).code
+            : undefined;
+        if (code === "EEXIST") {
+          return null;
+        }
+        throw error;
+      }
+    };
+
+  const acquireMutationLock = async (): Promise<MutationLockHandle> => {
+    await mkdir(dirname(mutationLockPath), { recursive: true });
+    const start = Date.now();
+
+    while (true) {
+      const lockHandle = await tryAcquireMutationLock();
+      if (lockHandle) {
+        return lockHandle;
+      }
+      if (await isMutationLockStale()) {
+        await clearStaleMutationLock();
+        continue;
+      }
+      if (Date.now() - start > mutationLockTimeoutMs) {
+        throw new Error("Timed out waiting for tickets git mutation lock");
+      }
+      await Bun.sleep(mutationLockRetryMs);
+    }
+  };
+
+  const releaseMutationLock = async (
+    input: MutationLockHandle
+  ): Promise<void> => {
+    clearInterval(input.heartbeatTimer);
+    if ((await readMutationLockOwner()) !== input.ownerToken) {
+      return;
+    }
+    await unlink(mutationLockPath).catch(() => undefined);
   };
 
   const ensureBareRepo = async () => {
@@ -339,6 +514,72 @@ export function createGitTicketsChannel(opts: {
     | { readonly ok: false; readonly error: string; readonly missing: boolean }
   > => {
     return await fetchRemoteRefToTracking(ref, trackingRef);
+  };
+
+  const buildHiddenRefPushError = (message: string): PushAttemptResult => {
+    return {
+      ok: false,
+      error: `git push failed: ${message}\nRemote rejected hidden refs. Set controlPlane.tickets.git.refMode to "heads" to use a branch ref.`,
+      hiddenRefRejected: true,
+    };
+  };
+
+  const pushCurrentBranch = async (input: {
+    readonly pushRef: string;
+  }): Promise<PushAttemptResult> => {
+    const push = await runGitDir({
+      args: ["push", "origin", `${localBranchRef}:${input.pushRef}`],
+    });
+    if (push.ok) {
+      return { ok: true, didPush: true };
+    }
+
+    const message = `${push.stderr}\n${push.stdout}`.trim();
+    if (refMode === "hidden" && isHiddenRefRejected(message)) {
+      return buildHiddenRefPushError(message);
+    }
+    return { ok: false, error: `git push failed: ${message}` };
+  };
+
+  const rewritePendingEventsAfterCheckout = async (input: {
+    readonly pendingEvents?: readonly Record<string, unknown>[];
+  }): Promise<
+    { readonly ok: true } | { readonly ok: false; readonly error: string }
+  > => {
+    if (!(input.pendingEvents && input.pendingEvents.length > 0)) {
+      return { ok: true };
+    }
+    return await writeEvents({ events: input.pendingEvents });
+  };
+
+  const pruneLegacyRemoteRefIfRequested = async (input: {
+    readonly pruneLegacyRef: boolean;
+    readonly remoteUrl: string | null;
+  }): Promise<{
+    readonly didPruneLegacy: boolean;
+    readonly pruneError?: string;
+  }> => {
+    if (!(input.pruneLegacyRef && legacyRemoteRef && input.remoteUrl)) {
+      return { didPruneLegacy: false };
+    }
+
+    const prunedLegacy = await runGitDir({
+      args: ["push", "origin", `:${legacyRemoteRef}`],
+    });
+    if (!prunedLegacy.ok) {
+      return {
+        didPruneLegacy: false,
+        pruneError: `${prunedLegacy.stderr}\n${prunedLegacy.stdout}`.trim(),
+      };
+    }
+
+    if (legacyTrackingRef) {
+      await runGitDir({
+        args: ["update-ref", "-d", legacyTrackingRef],
+      });
+    }
+
+    return { didPruneLegacy: true };
   };
 
   const checkoutHead = async (input: {
@@ -630,26 +871,10 @@ export function createGitTicketsChannel(opts: {
       const existing = await Bun.file(path)
         .text()
         .catch(() => "");
-      const existingIds = new Set<string>();
-      for (const line of existing.split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed) {
-          continue;
-        }
-        const parsed = safeJsonParse(trimmed);
-        if (isRecord(parsed) && typeof parsed.eventId === "string") {
-          existingIds.add(parsed.eventId);
-        }
-      }
-
-      const lines: string[] = [];
-      for (const ev of events) {
-        const id = typeof ev.eventId === "string" ? ev.eventId : "";
-        if (!id || existingIds.has(id)) {
-          continue;
-        }
-        lines.push(stableStringify(ev));
-      }
+      const lines = collectPendingSerializedEvents({
+        existingText: existing,
+        incomingEvents: events,
+      });
 
       if (lines.length > 0) {
         const prefix =
@@ -682,42 +907,11 @@ export function createGitTicketsChannel(opts: {
       const text = await Bun.file(path)
         .text()
         .catch(() => "");
-      const parsed: Record<string, unknown>[] = [];
-      const seen = new Set<string>();
-
-      for (const line of text.split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed) {
-          continue;
-        }
-        const value = safeJsonParse(trimmed);
-        if (!isRecord(value)) {
-          continue;
-        }
-        const eventId = typeof value.eventId === "string" ? value.eventId : "";
-        const ts = typeof value.ts === "number" ? value.ts : Number.NaN;
-        if (!(eventId && Number.isFinite(ts))) {
-          continue;
-        }
-        if (seen.has(eventId)) {
-          continue;
-        }
-        seen.add(eventId);
-        parsed.push(value);
-      }
-
-      parsed.sort((a, b) => {
-        const aTs = typeof a.ts === "number" ? (a.ts as number) : 0;
-        const bTs = typeof b.ts === "number" ? (b.ts as number) : 0;
-        if (aTs !== bTs) {
-          return aTs - bTs;
-        }
-        const aId = typeof a.eventId === "string" ? (a.eventId as string) : "";
-        const bId = typeof b.eventId === "string" ? (b.eventId as string) : "";
-        return aId.localeCompare(bId);
-      });
-
-      const next = parsed.map((ev) => stableStringify(ev)).join("\n");
+      const next = collectUniqueJournalEvents({
+        texts: [text],
+      })
+        .map((event) => stableStringify(event.value))
+        .join("\n");
       const normalized = next.length > 0 ? `${next}\n` : "";
       if (normalized !== text) {
         await Bun.write(path, normalized);
@@ -757,6 +951,9 @@ export function createGitTicketsChannel(opts: {
     readonly remoteUrl: string | null;
     readonly pushRef: string;
     readonly pendingEvents?: readonly Record<string, unknown>[];
+    readonly replayPendingEvents?: () => Promise<
+      { readonly ok: true } | { readonly ok: false; readonly error: string }
+    >;
   }): Promise<
     | { readonly ok: true; readonly didPush: boolean }
     | { readonly ok: false; readonly error: string }
@@ -765,23 +962,16 @@ export function createGitTicketsChannel(opts: {
       return { ok: true, didPush: false };
     }
 
-    const push = await runGitDir({
-      args: ["push", "origin", `${localBranchRef}:${input.pushRef}`],
-    });
+    const push = await pushCurrentBranch({ pushRef: input.pushRef });
     if (push.ok) {
-      return { ok: true, didPush: true };
+      return push;
     }
-
-    const pushMessage = `${push.stderr}\n${push.stdout}`.trim();
-    if (refMode === "hidden" && isHiddenRefRejected(pushMessage)) {
-      return {
-        ok: false,
-        error: `git push failed: ${pushMessage}\nRemote rejected hidden refs. Set controlPlane.tickets.git.refMode to "heads" to use a branch ref.`,
-      };
+    if (push.hiddenRefRejected) {
+      return push;
     }
 
     opts.logger.warn({
-      message: `git push failed, retrying after fetch: ${pushMessage}`,
+      message: `git push failed, retrying after fetch: ${push.error.replace("git push failed: ", "")}`,
     });
 
     const checkedOut = await checkoutHead({ remoteUrl: input.remoteUrl });
@@ -789,10 +979,17 @@ export function createGitTicketsChannel(opts: {
       return checkedOut;
     }
 
-    if (input.pendingEvents && input.pendingEvents.length > 0) {
-      const wrote = await writeEvents({ events: input.pendingEvents });
-      if (!wrote.ok) {
-        return wrote;
+    if (input.replayPendingEvents) {
+      const replayed = await input.replayPendingEvents();
+      if (!replayed.ok) {
+        return replayed;
+      }
+    } else {
+      const rewrote = await rewritePendingEventsAfterCheckout({
+        pendingEvents: input.pendingEvents,
+      });
+      if (!rewrote.ok) {
+        return rewrote;
       }
     }
 
@@ -801,21 +998,8 @@ export function createGitTicketsChannel(opts: {
       return committed;
     }
 
-    const retry = await runGitDir({
-      args: ["push", "origin", `${localBranchRef}:${checkedOut.pushRef}`],
-    });
-    if (!retry.ok) {
-      const retryMessage = `${retry.stderr}\n${retry.stdout}`.trim();
-      if (refMode === "hidden" && isHiddenRefRejected(retryMessage)) {
-        return {
-          ok: false,
-          error: `git push failed: ${retryMessage}\nRemote rejected hidden refs. Set controlPlane.tickets.git.refMode to "heads" to use a branch ref.`,
-        };
-      }
-      return { ok: false, error: `git push failed: ${retryMessage}` };
-    }
-
-    return { ok: true, didPush: true };
+    const retry = await pushCurrentBranch({ pushRef: checkedOut.pushRef });
+    return retry;
   };
 
   const listTrackedPaths = async (): Promise<
@@ -951,76 +1135,66 @@ export function createGitTicketsChannel(opts: {
   const repair = async (input: {
     readonly pruneLegacyRef: boolean;
   }): Promise<TicketsGitRepairResult> => {
-    const checkedOut = await ensureCheckedOut();
-    if (!checkedOut.ok) {
-      return checkedOut;
-    }
-
-    const repairBranch = `${branch}-repair`;
-    const orphan = await runGitDir({
-      args: ["checkout", "--orphan", repairBranch],
-    });
-    if (!orphan.ok) {
-      return {
-        ok: false,
-        error: `git checkout --orphan failed: ${orphan.stderr.trim()}`,
-      };
-    }
-
-    const pruned = await pruneWorktreeToTickets();
-    if (!pruned.ok) {
-      return pruned;
-    }
-
-    const renamed = await runGitDir({
-      args: ["branch", "-M", repairBranch, branch],
-    });
-    if (!renamed.ok) {
-      return {
-        ok: false,
-        error: `git branch -M failed: ${renamed.stderr.trim()}`,
-      };
-    }
-
-    const committed = await commitAll("tickets: repair");
-    if (!committed.ok) {
-      return committed;
-    }
-
-    const pushed = await pushWithRetry({
-      remoteUrl: checkedOut.remoteUrl,
-      pushRef: checkedOut.pushRef,
-    });
-    if (!pushed.ok) {
-      return pushed;
-    }
-
-    let didPruneLegacy = false;
-    let pruneError: string | undefined;
-
-    if (input.pruneLegacyRef && legacyRemoteRef && checkedOut.remoteUrl) {
-      const prunedLegacy = await runGitDir({
-        args: ["push", "origin", `:${legacyRemoteRef}`],
-      });
-      if (prunedLegacy.ok) {
-        didPruneLegacy = true;
-        if (legacyTrackingRef) {
-          await runGitDir({
-            args: ["update-ref", "-d", legacyTrackingRef],
-          });
-        }
-      } else {
-        pruneError = `${prunedLegacy.stderr}\n${prunedLegacy.stdout}`.trim();
+    return await withMutationLock(async () => {
+      const checkedOut = await ensureCheckedOut();
+      if (!checkedOut.ok) {
+        return checkedOut;
       }
-    }
 
-    return {
-      ok: true,
-      didCommit: committed.didCommit,
-      didPush: pushed.didPush,
-      didPruneLegacy,
-      ...(pruneError ? { pruneError } : {}),
-    };
+      const repairBranch = `${branch}-repair`;
+      const orphan = await runGitDir({
+        args: ["checkout", "--orphan", repairBranch],
+      });
+      if (!orphan.ok) {
+        return {
+          ok: false,
+          error: `git checkout --orphan failed: ${orphan.stderr.trim()}`,
+        };
+      }
+
+      const pruned = await pruneWorktreeToTickets();
+      if (!pruned.ok) {
+        return pruned;
+      }
+
+      const renamed = await runGitDir({
+        args: ["branch", "-M", repairBranch, branch],
+      });
+      if (!renamed.ok) {
+        return {
+          ok: false,
+          error: `git branch -M failed: ${renamed.stderr.trim()}`,
+        };
+      }
+
+      const committed = await commitAll("tickets: repair");
+      if (!committed.ok) {
+        return committed;
+      }
+
+      const pushed = await pushWithRetry({
+        remoteUrl: checkedOut.remoteUrl,
+        pushRef: checkedOut.pushRef,
+      });
+      if (!pushed.ok) {
+        return pushed;
+      }
+
+      const prunedLegacy = await pruneLegacyRemoteRefIfRequested({
+        pruneLegacyRef: input.pruneLegacyRef,
+        remoteUrl: checkedOut.remoteUrl,
+      });
+
+      return {
+        ok: true,
+        didCommit: committed.didCommit,
+        didPush: pushed.didPush,
+        didPruneLegacy: prunedLegacy.didPruneLegacy,
+        ...(prunedLegacy.pruneError
+          ? { pruneError: prunedLegacy.pruneError }
+          : {}),
+      };
+    });
   };
 
   const appendEvents = async (input: {
@@ -1028,31 +1202,89 @@ export function createGitTicketsChannel(opts: {
   }): Promise<
     { readonly ok: true } | { readonly ok: false; readonly error: string }
   > => {
-    const checkedOut = await ensureCheckedOut();
-    if (!checkedOut.ok) {
-      return checkedOut;
-    }
+    return await withMutationLock(async () => {
+      const checkedOut = await ensureCheckedOut();
+      if (!checkedOut.ok) {
+        return checkedOut;
+      }
 
-    const wrote = await writeEvents({ events: input.events });
-    if (!wrote.ok) {
-      return wrote;
-    }
+      const wrote = await writeEvents({ events: input.events });
+      if (!wrote.ok) {
+        return wrote;
+      }
 
-    const committed = await commitAll("tickets: append events");
-    if (!committed.ok) {
-      return committed;
-    }
+      const committed = await commitAll("tickets: append events");
+      if (!committed.ok) {
+        return committed;
+      }
 
-    const pushed = await pushWithRetry({
-      remoteUrl: checkedOut.remoteUrl,
-      pushRef: checkedOut.pushRef,
-      pendingEvents: input.events,
+      const pushed = await pushWithRetry({
+        remoteUrl: checkedOut.remoteUrl,
+        pushRef: checkedOut.pushRef,
+        pendingEvents: input.events,
+      });
+      if (!pushed.ok) {
+        return pushed;
+      }
+
+      return { ok: true };
     });
-    if (!pushed.ok) {
-      return pushed;
-    }
+  };
 
-    return { ok: true };
+  const appendPreparedEvents = async <T>(input: {
+    readonly prepare: (root: string) => Promise<
+      | {
+          readonly ok: true;
+          readonly events: readonly Record<string, unknown>[];
+          readonly result: T;
+        }
+      | { readonly ok: false; readonly error: string }
+    >;
+  }): Promise<
+    | { readonly ok: true; readonly result: T }
+    | { readonly ok: false; readonly error: string }
+  > => {
+    return await withMutationLock(async () => {
+      const checkedOut = await ensureCheckedOut();
+      if (!checkedOut.ok) {
+        return checkedOut;
+      }
+
+      const prepared = await input.prepare(worktreeDir);
+      if (!prepared.ok) {
+        return prepared;
+      }
+
+      let preparedResult = prepared.result;
+
+      const wrote = await writeEvents({ events: prepared.events });
+      if (!wrote.ok) {
+        return wrote;
+      }
+
+      const committed = await commitAll("tickets: append events");
+      if (!committed.ok) {
+        return committed;
+      }
+
+      const pushed = await pushWithRetry({
+        remoteUrl: checkedOut.remoteUrl,
+        pushRef: checkedOut.pushRef,
+        replayPendingEvents: async () => {
+          const replayed = await input.prepare(worktreeDir);
+          if (!replayed.ok) {
+            return replayed;
+          }
+          preparedResult = replayed.result;
+          return await writeEvents({ events: replayed.events });
+        },
+      });
+      if (!pushed.ok) {
+        return pushed;
+      }
+
+      return { ok: true, result: preparedResult };
+    });
   };
 
   const sync = async (): Promise<
@@ -1065,36 +1297,38 @@ export function createGitTicketsChannel(opts: {
       }
     | { readonly ok: false; readonly error: string }
   > => {
-    const checkedOut = await ensureCheckedOut();
-    if (!checkedOut.ok) {
-      return checkedOut;
-    }
+    return await withMutationLock(async () => {
+      const checkedOut = await ensureCheckedOut();
+      if (!checkedOut.ok) {
+        return checkedOut;
+      }
 
-    const normalized = await normalizeLogs();
-    if (!normalized.ok) {
-      return normalized;
-    }
+      const normalized = await normalizeLogs();
+      if (!normalized.ok) {
+        return normalized;
+      }
 
-    const committed = await commitAll("tickets: sync");
-    if (!committed.ok) {
-      return committed;
-    }
+      const committed = await commitAll("tickets: sync");
+      if (!committed.ok) {
+        return committed;
+      }
 
-    const pushed = await pushWithRetry({
-      remoteUrl: checkedOut.remoteUrl,
-      pushRef: checkedOut.pushRef,
+      const pushed = await pushWithRetry({
+        remoteUrl: checkedOut.remoteUrl,
+        pushRef: checkedOut.pushRef,
+      });
+      if (!pushed.ok) {
+        return pushed;
+      }
+
+      return {
+        ok: true,
+        branch,
+        ...(checkedOut.remoteUrl ? { remote: remoteName } : {}),
+        didCommit: committed.didCommit,
+        didPush: pushed.didPush,
+      };
     });
-    if (!pushed.ok) {
-      return pushed;
-    }
-
-    return {
-      ok: true,
-      branch,
-      ...(checkedOut.remoteUrl ? { remote: remoteName } : {}),
-      didCommit: committed.didCommit,
-      didPush: pushed.didPush,
-    };
   };
 
   return {
@@ -1106,6 +1340,7 @@ export function createGitTicketsChannel(opts: {
       return worktreeDir;
     },
     appendEvents,
+    appendPreparedEvents,
     inspect,
     repair,
     sync,
@@ -1176,45 +1411,111 @@ function mergeTicketEventLogs(input: {
   readonly existing: string;
   readonly incoming: string;
 }): string {
-  const parsed: Record<string, unknown>[] = [];
-  const seen = new Set<string>();
+  const next = collectUniqueJournalEvents({
+    texts: [input.existing, input.incoming],
+  })
+    .map((event) => stableStringify(event.value))
+    .join("\n");
+  return next ? `${next}\n` : "";
+}
 
-  for (const text of [input.existing, input.incoming]) {
+function collectPendingSerializedEvents(input: {
+  readonly existingText: string;
+  readonly incomingEvents: readonly Record<string, unknown>[];
+}): string[] {
+  const existingEvents = collectUniqueJournalEvents({
+    texts: [input.existingText],
+  });
+  const existingIds = new Set(existingEvents.map((event) => event.eventId));
+  const existingIdempotencyKeys = new Set(
+    existingEvents.map((event) => event.idempotencyKey)
+  );
+  const pendingIdempotencyKeys = new Set<string>();
+  const lines: string[] = [];
+
+  for (const event of input.incomingEvents) {
+    const parsed = parseJournalEvent(event);
+    if (!parsed) {
+      continue;
+    }
+    if (
+      existingIds.has(parsed.eventId) ||
+      existingIdempotencyKeys.has(parsed.idempotencyKey) ||
+      pendingIdempotencyKeys.has(parsed.idempotencyKey)
+    ) {
+      continue;
+    }
+    pendingIdempotencyKeys.add(parsed.idempotencyKey);
+    lines.push(stableStringify(event));
+  }
+
+  return lines;
+}
+
+function collectUniqueJournalEvents(input: {
+  readonly texts: readonly string[];
+}): ParsedJournalEvent[] {
+  const parsed: ParsedJournalEvent[] = [];
+  const seen = new Set<string>();
+  const seenIdempotencyKeys = new Set<string>();
+
+  for (const text of input.texts) {
     for (const line of text.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed) {
+      const event = parseJournalEventLine(line);
+      if (!event) {
         continue;
       }
-      const value = safeJsonParse(trimmed);
-      if (!isRecord(value)) {
+      if (
+        seen.has(event.eventId) ||
+        seenIdempotencyKeys.has(event.idempotencyKey)
+      ) {
         continue;
       }
-      const eventId = typeof value.eventId === "string" ? value.eventId : "";
-      const ts = typeof value.ts === "number" ? value.ts : Number.NaN;
-      if (!(eventId && Number.isFinite(ts))) {
-        continue;
-      }
-      if (seen.has(eventId)) {
-        continue;
-      }
-      seen.add(eventId);
-      parsed.push(value);
+      seen.add(event.eventId);
+      seenIdempotencyKeys.add(event.idempotencyKey);
+      parsed.push(event);
     }
   }
 
-  parsed.sort((a, b) => {
-    const aTs = typeof a.ts === "number" ? (a.ts as number) : 0;
-    const bTs = typeof b.ts === "number" ? (b.ts as number) : 0;
-    if (aTs !== bTs) {
-      return aTs - bTs;
-    }
-    const aId = typeof a.eventId === "string" ? (a.eventId as string) : "";
-    const bId = typeof b.eventId === "string" ? (b.eventId as string) : "";
-    return aId.localeCompare(bId);
-  });
+  parsed.sort(compareParsedJournalEvents);
+  return parsed;
+}
 
-  const next = parsed.map((event) => stableStringify(event)).join("\n");
-  return next ? `${next}\n` : "";
+function parseJournalEventLine(line: string): ParsedJournalEvent | null {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return null;
+  }
+  return parseJournalEvent(safeJsonParse(trimmed));
+}
+
+function parseJournalEvent(value: unknown): ParsedJournalEvent | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const eventId = typeof value.eventId === "string" ? value.eventId : "";
+  const idempotencyKey =
+    typeof value.idempotencyKey === "string" ? value.idempotencyKey : eventId;
+  const ts = typeof value.ts === "number" ? value.ts : Number.NaN;
+  if (!(eventId && Number.isFinite(ts))) {
+    return null;
+  }
+  return {
+    eventId,
+    idempotencyKey,
+    ts,
+    value,
+  };
+}
+
+function compareParsedJournalEvents(
+  left: ParsedJournalEvent,
+  right: ParsedJournalEvent
+): number {
+  if (left.ts !== right.ts) {
+    return left.ts - right.ts;
+  }
+  return left.eventId.localeCompare(right.eventId);
 }
 
 function isRetryableTrackingRefLockFailure(input: {
@@ -1273,13 +1574,18 @@ function isHiddenRefRejected(message: string): boolean {
 function isGitIndexLockError(message: string): boolean {
   const normalized = message.toLowerCase();
   return (
-    normalized.includes("index.lock") && normalized.includes("file exists")
+    (normalized.includes("index.lock") && normalized.includes("file exists")) ||
+    normalized.includes("unable to write new index file") ||
+    (normalized.includes("could not lock") && normalized.includes("index"))
   );
 }
 
 export const __testOnly = {
+  createGitTicketsChannel,
   mergeTicketEventLogs,
   resolvePushRefForCheckoutRef,
+  resolveLocalCheckoutFallback,
+  resolveLegacyImportFetchResult,
 };
 
 function resolvePushRefForCheckoutRef(input: {
@@ -1296,4 +1602,40 @@ function resolvePushRefForCheckoutRef(input: {
     return input.legacyRemoteRef;
   }
   return input.remoteRef;
+}
+
+function resolveLocalCheckoutFallback(input: {
+  readonly fetchFailure: string;
+  readonly allowFetchFailureFallback: boolean;
+  readonly preferredTrackingRef: string;
+  readonly remoteRef: string;
+  readonly legacyTrackingRef?: string | null;
+  readonly legacyRemoteRef?: string | null;
+}):
+  | { readonly ok: true; readonly pushRef: string }
+  | { readonly ok: false; readonly error: string } {
+  if (!input.allowFetchFailureFallback) {
+    return { ok: false, error: input.fetchFailure };
+  }
+  return {
+    ok: true,
+    pushRef: resolvePushRefForCheckoutRef({
+      checkoutRef: input.preferredTrackingRef,
+      remoteRef: input.remoteRef,
+      legacyTrackingRef: input.legacyTrackingRef,
+      legacyRemoteRef: input.legacyRemoteRef,
+    }),
+  };
+}
+
+function resolveLegacyImportFetchResult(input: {
+  readonly missing: boolean;
+  readonly error: string;
+}):
+  | { readonly ok: true; readonly imported: false }
+  | { readonly ok: false; readonly error: string } {
+  if (input.missing) {
+    return { ok: true, imported: false };
+  }
+  return { ok: false, error: `git fetch failed: ${input.error}` };
 }

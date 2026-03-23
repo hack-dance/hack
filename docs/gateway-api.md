@@ -4,6 +4,9 @@ The gateway exposes a small, authenticated HTTP/WS surface for remote orchestrat
 designed for structured workflows (jobs + log streaming + shells) and keeps write access
 opt-in with explicit guardrails.
 
+This is reference for the beta remote surface. Use [Beta workflows](beta.md) for the guided path
+and [Core docs](core.md) for the default local product story.
+
 > ⚠️ Experimental: remote exposure steps are still being validated end-to-end.
 
 ## Security model (read this first)
@@ -204,11 +207,11 @@ Base URL: `http://127.0.0.1:7788` (or your tunnel URL)
 | GET | `/v1/metrics` | no | Cache + stream metrics |
 | GET | `/v1/projects` | no | Gateway-enabled projects + runtime snapshot |
 | GET | `/v1/ps` | no | Compose project container list |
-| GET | `/v1/sessions` | no | List mux sessions (tmux/zellij) |
-| POST | `/v1/sessions` | yes | Create mux session |
-| GET | `/v1/sessions/:id` | no | Get session details |
-| POST | `/v1/sessions/:id/stop` | yes | Stop (kill) session |
-| POST | `/v1/sessions/:id/exec` | yes | Execute command in session |
+| GET | `/v1/sessions` | no | List persistent mux-backed workspaces |
+| POST | `/v1/sessions` | yes | Create persistent mux-backed workspace |
+| GET | `/v1/sessions/:id` | no | Get workspace details |
+| POST | `/v1/sessions/:id/stop` | yes | Stop (kill) workspace |
+| POST | `/v1/sessions/:id/exec` | yes | Execute command in workspace |
 | POST | `/v1/sessions/:id/input` | yes | Send raw keystrokes |
 | GET | `/v1/env` | no | Env contract + resolution state (values redacted) |
 | POST | `/v1/env/set` | yes | Set env (.hack/.env) or secret (keychain) |
@@ -222,7 +225,7 @@ Base URL: `http://127.0.0.1:7788` (or your tunnel URL)
 | GET | `/control-plane/projects/:projectId/shells/:shellId` | no | Fetch shell |
 | WS | `/control-plane/projects/:projectId/shells/:shellId/stream` | yes | Stream shell PTY |
 
-> **Sessions API**: For detailed sessions endpoint documentation, see [Sessions](sessions.md#daemon-sessions-api).
+> **Sessions API**: For detailed persistent workspace endpoint documentation, see [Sessions](sessions.md#daemon-sessions-api).
 >
 > **Env API**: For contract format and env endpoints, see [Env & secrets](env.md#daemongateway-api-ui-integration).
 

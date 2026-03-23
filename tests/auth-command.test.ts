@@ -512,6 +512,134 @@ test("auth status json includes a next step when login is required", async () =>
   expect(payload.nextStep).toContain("hack auth login");
 });
 
+test("auth invites lists pending invitations via the broker", async () => {
+  await writeStoredTokenEnvelope({
+    token: "hack-session-token",
+    expiresAt: "2099-03-06T19:00:00.000Z",
+  });
+
+  fetchImpl = async (input) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+    if (url === "https://auth.hack.broker/v1/auth/invitations") {
+      return Response.json({
+        ok: true,
+        invitations: [
+          {
+            id: "invite_123",
+            scope: "organization",
+            state: "pending",
+          },
+        ],
+      });
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  const result = await runCliWithCapturedIo({
+    argv: ["auth", "invites", "--json"],
+  });
+
+  expect(result.exitCode).toBe(0);
+  expect(fetchCalls[0]?.url).toBe(
+    "https://auth.hack.broker/v1/auth/invitations"
+  );
+  expect(fetchCalls[0]?.init?.method).toBe("GET");
+  expect(fetchCalls[0]?.init?.headers).toMatchObject({
+    authorization: "Bearer hack-session-token",
+  });
+  const payload = JSON.parse(result.stdout) as {
+    readonly invitations?: ReadonlyArray<{ readonly id?: string }>;
+  };
+  expect(payload.invitations?.[0]?.id).toBe("invite_123");
+});
+
+test("auth invite accept posts an activation request to the broker", async () => {
+  await writeStoredTokenEnvelope({
+    token: "hack-session-token",
+    expiresAt: "2099-03-06T19:00:00.000Z",
+  });
+
+  fetchImpl = async (input) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+    if (
+      url === "https://auth.hack.broker/v1/auth/invitations/invite_123/accept"
+    ) {
+      return Response.json({
+        ok: true,
+        membership: {
+          state: "active",
+        },
+      });
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  const result = await runCliWithCapturedIo({
+    argv: ["auth", "invite", "accept", "invite_123", "--json"],
+  });
+
+  expect(result.exitCode).toBe(0);
+  expect(fetchCalls[0]?.url).toBe(
+    "https://auth.hack.broker/v1/auth/invitations/invite_123/accept"
+  );
+  expect(fetchCalls[0]?.init?.method).toBe("POST");
+  const payload = JSON.parse(result.stdout) as {
+    readonly membership?: { readonly state?: string };
+  };
+  expect(payload.membership?.state).toBe("active");
+});
+
+test("auth invite decline posts a removal request to the broker", async () => {
+  await writeStoredTokenEnvelope({
+    token: "hack-session-token",
+    expiresAt: "2099-03-06T19:00:00.000Z",
+  });
+
+  fetchImpl = async (input) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+    if (
+      url === "https://auth.hack.broker/v1/auth/invitations/invite_123/decline"
+    ) {
+      return Response.json({
+        ok: true,
+        membership: {
+          state: "removed",
+        },
+      });
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  const result = await runCliWithCapturedIo({
+    argv: ["auth", "invite", "decline", "invite_123", "--json"],
+  });
+
+  expect(result.exitCode).toBe(0);
+  expect(fetchCalls[0]?.url).toBe(
+    "https://auth.hack.broker/v1/auth/invitations/invite_123/decline"
+  );
+  expect(fetchCalls[0]?.init?.method).toBe("POST");
+  const payload = JSON.parse(result.stdout) as {
+    readonly membership?: { readonly state?: string };
+  };
+  expect(payload.membership?.state).toBe("removed");
+});
+
 type CapturedRunResult = {
   readonly exitCode: number;
   readonly stdout: string;

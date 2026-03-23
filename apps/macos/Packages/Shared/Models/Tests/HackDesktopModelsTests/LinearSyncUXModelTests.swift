@@ -37,7 +37,8 @@ final class LinearSyncUXModelTests: XCTestCase {
     XCTAssertEqual(ticket.linearSyncAuthority, .hack)
     XCTAssertTrue(ticket.linearSyncUXState.isLinkedToLinear)
     XCTAssertNil(ticket.linearSyncUXState.reviewHint)
-    XCTAssertTrue(ticket.linearSyncUXState.shortGuidance.contains("Hack controls title, body, status, and project."))
+    XCTAssertTrue(ticket.linearSyncUXState.shortGuidance.contains("Hack controls title, body, and status."))
+    XCTAssertTrue(ticket.linearSyncUXState.shortGuidance.contains("Hack project placement stays local."))
   }
 
   func testLinearOriginTicketIsLinearAuthoritative() {
@@ -52,7 +53,8 @@ final class LinearSyncUXModelTests: XCTestCase {
     XCTAssertEqual(ticket.linearSyncAuthority, .linear)
     XCTAssertTrue(ticket.linearSyncUXState.isLinkedToLinear)
     XCTAssertNil(ticket.linearSyncUXState.reviewHint)
-    XCTAssertTrue(ticket.linearSyncUXState.shortGuidance.contains("Linear controls title, body, status, and project."))
+    XCTAssertTrue(ticket.linearSyncUXState.shortGuidance.contains("Linear controls title, body, and status."))
+    XCTAssertTrue(ticket.linearSyncUXState.shortGuidance.contains("Hack project placement stays local."))
   }
 
   func testLinkedLinearTicketWithMismatchedOwnershipNeedsReviewHint() {

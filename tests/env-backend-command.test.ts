@@ -40,223 +40,246 @@ afterEach(async () => {
   }
 });
 
-test("env backend status defaults to keychain", async () => {
-  const result = await runHack({
-    args: ["env", "backend", "status", "--json"],
-    env: {
-      ...process.env,
-      HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
-    },
-  });
-  expect(result.exitCode).toBe(0);
-  const json = JSON.parse(result.stdout) as {
-    readonly backend: string;
-    readonly encrypted_file: { readonly path: string };
-  };
-  expect(json.backend).toBe("keychain");
-  expect(json.encrypted_file.path).toBe("~/.hack/secrets.enc.json");
-});
-
-test("env backend use encrypted_file persists selection", async () => {
-  const result = await runHack({
-    args: [
-      "env",
-      "backend",
-      "use",
-      "encrypted_file",
-      "--store-path",
-      "/tmp/custom-secrets.enc.json",
-      "--json",
-    ],
-    env: {
-      ...process.env,
-      HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
-    },
-  });
-  expect(result.exitCode).toBe(0);
-  const json = JSON.parse(result.stdout) as {
-    readonly backend: string;
-    readonly encrypted_file: { readonly path: string };
-  };
-  expect(json.backend).toBe("encrypted_file");
-  expect(json.encrypted_file.path).toBe("/tmp/custom-secrets.enc.json");
-
-  const configText = await readFile(tempGlobalConfigPath!, "utf8");
-  expect(configText).toContain('"backend": "encrypted_file"');
-  expect(configText).toContain('"/tmp/custom-secrets.enc.json"');
-});
-
-test("env backend use encrypted_file can provision a stable key file", async () => {
-  if (!(tempDir && tempGlobalConfigPath)) {
-    throw new Error("Missing temp global config state");
-  }
-
-  const keyPath = resolve(tempDir, "secrets-file.key");
-  const result = await runHack({
-    args: [
-      "env",
-      "backend",
-      "use",
-      "encrypted_file",
-      "--store-path",
-      "/tmp/custom-secrets.enc.json",
-      "--key-path",
-      keyPath,
-      "--provision-key",
-      "--json",
-    ],
-    env: {
-      ...process.env,
-      HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath,
-    },
-  });
-  expect(result.exitCode).toBe(0);
-
-  const json = JSON.parse(result.stdout) as {
-    readonly backend: string;
-    readonly encrypted_file: {
-      readonly path: string;
-      readonly keyPath?: string;
+test(
+  "env backend status defaults to keychain",
+  async () => {
+    const result = await runHack({
+      args: ["env", "backend", "status", "--json"],
+      env: {
+        ...process.env,
+        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
+      },
+    });
+    expect(result.exitCode).toBe(0);
+    const json = JSON.parse(result.stdout) as {
+      readonly backend: string;
+      readonly encrypted_file: { readonly path: string };
     };
-  };
-  expect(json.backend).toBe("encrypted_file");
-  expect(json.encrypted_file.keyPath).toBe(keyPath);
+    expect(json.backend).toBe("keychain");
+    expect(json.encrypted_file.path).toBe("~/.hack/secrets.enc.json");
+  },
+  { timeout: 20_000 }
+);
 
-  const keyText = await readFile(keyPath, "utf8");
-  expect(keyText.trim().length).toBeGreaterThan(10);
-
-  const configText = await readFile(tempGlobalConfigPath, "utf8");
-  expect(configText).toContain('"keyPath"');
-  expect(configText).toContain(keyPath);
-});
-
-test("env backend use cloud requires provider and stores cloud settings", async () => {
-  const invalid = await runHack({
-    args: ["env", "backend", "use", "cloud"],
-    env: {
-      ...process.env,
-      HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
-    },
-  });
-  expect(invalid.exitCode).toBe(1);
-  expect(`${invalid.stdout}\n${invalid.stderr}`).toContain(
-    "Cloud backend requires --provider"
-  );
-
-  const valid = await runHack({
-    args: [
-      "env",
-      "backend",
-      "use",
-      "cloud",
-      "--provider",
-      "aws",
-      "--secret-project",
-      "dev-account",
-      "--secret-prefix",
-      "hack-cli",
-      "--json",
-    ],
-    env: {
-      ...process.env,
-      HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
-    },
-  });
-  expect(valid.exitCode).toBe(0);
-  const json = JSON.parse(valid.stdout) as {
-    readonly backend: string;
-    readonly cloud: {
-      readonly provider?: string;
-      readonly project?: string;
-      readonly secretPrefix: string;
+test(
+  "env backend use encrypted_file persists selection",
+  async () => {
+    const result = await runHack({
+      args: [
+        "env",
+        "backend",
+        "use",
+        "encrypted_file",
+        "--store-path",
+        "/tmp/custom-secrets.enc.json",
+        "--json",
+      ],
+      env: {
+        ...process.env,
+        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
+      },
+    });
+    expect(result.exitCode).toBe(0);
+    const json = JSON.parse(result.stdout) as {
+      readonly backend: string;
+      readonly encrypted_file: { readonly path: string };
     };
-  };
-  expect(json.backend).toBe("cloud");
-  expect(json.cloud.provider).toBe("aws");
-  expect(json.cloud.project).toBe("dev-account");
-  expect(json.cloud.secretPrefix).toBe("hack-cli");
-});
+    expect(json.backend).toBe("encrypted_file");
+    expect(json.encrypted_file.path).toBe("/tmp/custom-secrets.enc.json");
 
-test("env set --secret stores value using encrypted backend", async () => {
-  if (!tempDir) {
-    throw new Error("Missing temp dir");
-  }
-  process.env.HACK_SECRETS_FILE_KEY = "env-backend-command-key";
-  const projectRoot = resolve(tempDir, "repo");
-  const projectDir = resolve(projectRoot, ".hack");
-  await mkdir(projectDir, { recursive: true });
-  await writeFile(resolve(projectDir, "docker-compose.yml"), "services: {}\n");
-  await writeFile(
-    resolve(projectDir, "hack.config.json"),
-    `${JSON.stringify(
-      {
-        name: "env-backend-project",
-        controlPlane: {
-          secrets: {
-            backend: "encrypted_file",
-            encryptedFile: {
-              path: resolve(tempDir, "secrets.enc.json"),
+    const configText = await readFile(tempGlobalConfigPath!, "utf8");
+    expect(configText).toContain('"backend": "encrypted_file"');
+    expect(configText).toContain('"/tmp/custom-secrets.enc.json"');
+  },
+  { timeout: 20_000 }
+);
+
+test(
+  "env backend use encrypted_file can provision a stable key file",
+  async () => {
+    if (!(tempDir && tempGlobalConfigPath)) {
+      throw new Error("Missing temp global config state");
+    }
+
+    const keyPath = resolve(tempDir, "secrets-file.key");
+    const result = await runHack({
+      args: [
+        "env",
+        "backend",
+        "use",
+        "encrypted_file",
+        "--store-path",
+        "/tmp/custom-secrets.enc.json",
+        "--key-path",
+        keyPath,
+        "--provision-key",
+        "--json",
+      ],
+      env: {
+        ...process.env,
+        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath,
+      },
+    });
+    expect(result.exitCode).toBe(0);
+
+    const json = JSON.parse(result.stdout) as {
+      readonly backend: string;
+      readonly encrypted_file: {
+        readonly path: string;
+        readonly keyPath?: string;
+      };
+    };
+    expect(json.backend).toBe("encrypted_file");
+    expect(json.encrypted_file.keyPath).toBe(keyPath);
+
+    const keyText = await readFile(keyPath, "utf8");
+    expect(keyText.trim().length).toBeGreaterThan(10);
+
+    const configText = await readFile(tempGlobalConfigPath, "utf8");
+    expect(configText).toContain('"keyPath"');
+    expect(configText).toContain(keyPath);
+  },
+  { timeout: 40_000 }
+);
+
+test(
+  "env backend use cloud requires provider and stores cloud settings",
+  async () => {
+    const invalid = await runHack({
+      args: ["env", "backend", "use", "cloud"],
+      env: {
+        ...process.env,
+        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
+      },
+    });
+    expect(invalid.exitCode).toBe(1);
+    expect(`${invalid.stdout}\n${invalid.stderr}`).toContain(
+      "Cloud backend requires --provider"
+    );
+
+    const valid = await runHack({
+      args: [
+        "env",
+        "backend",
+        "use",
+        "cloud",
+        "--provider",
+        "aws",
+        "--secret-project",
+        "dev-account",
+        "--secret-prefix",
+        "hack-cli",
+        "--json",
+      ],
+      env: {
+        ...process.env,
+        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
+      },
+    });
+    expect(valid.exitCode).toBe(0);
+    const json = JSON.parse(valid.stdout) as {
+      readonly backend: string;
+      readonly cloud: {
+        readonly provider?: string;
+        readonly project?: string;
+        readonly secretPrefix: string;
+      };
+    };
+    expect(json.backend).toBe("cloud");
+    expect(json.cloud.provider).toBe("aws");
+    expect(json.cloud.project).toBe("dev-account");
+    expect(json.cloud.secretPrefix).toBe("hack-cli");
+  },
+  { timeout: 40_000 }
+);
+
+test(
+  "env set --secret stores value using encrypted backend",
+  async () => {
+    if (!tempDir) {
+      throw new Error("Missing temp dir");
+    }
+    process.env.HACK_SECRETS_FILE_KEY = "env-backend-command-key";
+    const projectRoot = resolve(tempDir, "repo");
+    const projectDir = resolve(projectRoot, ".hack");
+    await mkdir(projectDir, { recursive: true });
+    await writeFile(
+      resolve(projectDir, "docker-compose.yml"),
+      "services: {}\n"
+    );
+    await writeFile(
+      resolve(projectDir, "hack.config.json"),
+      `${JSON.stringify(
+        {
+          name: "env-backend-project",
+          controlPlane: {
+            secrets: {
+              backend: "encrypted_file",
+              encryptedFile: {
+                path: resolve(tempDir, "secrets.enc.json"),
+              },
             },
           },
         },
-      },
-      null,
-      2
-    )}\n`
-  );
-  await writeFile(
-    resolve(projectDir, "hack.env.json"),
-    `${JSON.stringify(
-      {
-        version: 1,
-        vars: [
-          {
-            key: "API_KEY",
-            required: false,
-            source: "keychain",
-          },
-        ],
-      },
-      null,
-      2
-    )}\n`
-  );
+        null,
+        2
+      )}\n`
+    );
+    await writeFile(
+      resolve(projectDir, "hack.env.json"),
+      `${JSON.stringify(
+        {
+          version: 1,
+          vars: [
+            {
+              key: "API_KEY",
+              required: false,
+              source: "keychain",
+            },
+          ],
+        },
+        null,
+        2
+      )}\n`
+    );
 
-  const setResult = await runHack({
-    args: ["env", "set", "--secret", "API_KEY=super-secret"],
-    env: {
-      ...process.env,
-      HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
-      HACK_SECRETS_FILE_KEY: "env-backend-command-key",
-    },
-    cwd: projectRoot,
-  });
-  expect(setResult.exitCode).toBe(0);
-  expect(`${setResult.stdout}\n${setResult.stderr}`).toContain(
-    "encrypted_file"
-  );
+    const setResult = await runHack({
+      args: ["env", "set", "--secret", "API_KEY=super-secret"],
+      env: {
+        ...process.env,
+        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
+        HACK_SECRETS_FILE_KEY: "env-backend-command-key",
+      },
+      cwd: projectRoot,
+    });
+    expect(setResult.exitCode).toBe(0);
+    expect(`${setResult.stdout}\n${setResult.stderr}`).toContain(
+      "encrypted_file"
+    );
 
-  const listResult = await runHack({
-    args: ["env", "list", "--show-secrets", "--json"],
-    env: {
-      ...process.env,
-      HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
-      HACK_SECRETS_FILE_KEY: "env-backend-command-key",
-    },
-    cwd: projectRoot,
-  });
-  expect(listResult.exitCode).toBe(0);
-  const listJson = JSON.parse(listResult.stdout) as {
-    readonly vars: ReadonlyArray<{
-      readonly key: string;
-      readonly value: string | null;
-      readonly source: string;
-    }>;
-  };
-  const apiKey = listJson.vars.find((entry) => entry.key === "API_KEY");
-  expect(apiKey?.source).toBe("keychain");
-  expect(apiKey?.value).toBe("super-secret");
-});
+    const listResult = await runHack({
+      args: ["env", "list", "--show-secrets", "--json"],
+      env: {
+        ...process.env,
+        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
+        HACK_SECRETS_FILE_KEY: "env-backend-command-key",
+      },
+      cwd: projectRoot,
+    });
+    expect(listResult.exitCode).toBe(0);
+    const listJson = JSON.parse(listResult.stdout) as {
+      readonly vars: ReadonlyArray<{
+        readonly key: string;
+        readonly value: string | null;
+        readonly source: string;
+      }>;
+    };
+    const apiKey = listJson.vars.find((entry) => entry.key === "API_KEY");
+    expect(apiKey?.source).toBe("keychain");
+    expect(apiKey?.value).toBe("super-secret");
+  },
+  { timeout: 40_000 }
+);
 
 async function runHack(input: {
   readonly args: readonly string[];

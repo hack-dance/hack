@@ -12,6 +12,12 @@ import {
   upsertTicketsAgentDocs,
 } from "./agent-docs.ts";
 import {
+  isTicketDocumentKind,
+  isTicketDocumentRole,
+  type TicketDocumentKind,
+  type TicketDocumentRole,
+} from "./documents.ts";
+import {
   checkTicketsRepoState,
   ensureTicketsGitignore,
   type TicketsRepoGitignoreFixStatus,
@@ -687,6 +693,91 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
     },
   },
   {
+    name: "document",
+    summary: "Append an immutable ticket document",
+    scope: "project",
+    handler: async ({ ctx, args }) => {
+      if (!ctx.project) {
+        ctx.logger.error({ message: "No project found. Run inside a repo." });
+        return 1;
+      }
+
+      const parsed = parseTicketsArgs({ args });
+      if (!parsed.ok) {
+        ctx.logger.error({ message: parsed.error });
+        return 1;
+      }
+
+      const ticketId = (parsed.value.rest[0] ?? "").trim();
+      if (!ticketId) {
+        ctx.logger.error({
+          message:
+            'Usage: hack x tickets document <ticket-id> --kind <description|spec|notes> [--role <description|spec|notes|handoff>] [--body "..."] [--body-file <path>] [--body-stdin] [--json]',
+        });
+        return 1;
+      }
+      if (!parsed.value.kind) {
+        ctx.logger.error({
+          message:
+            "Document kind is required. Use --kind <description|spec|notes>.",
+        });
+        return 1;
+      }
+
+      const body = await resolveTicketBody({
+        body: parsed.value.body,
+        bodyFile: parsed.value.bodyFile,
+        bodyStdin: parsed.value.bodyStdin,
+      });
+      if (!body) {
+        ctx.logger.error({
+          message:
+            "Document body is required. Use --body, --body-file, or --body-stdin.",
+        });
+        return 1;
+      }
+
+      await maybeEnsureTicketsSetup({ ctx, json: parsed.value.json });
+
+      const store = createTicketsStore({
+        projectRoot: ctx.project.projectRoot,
+        projectId: ctx.projectId,
+        projectName: ctx.projectName,
+        controlPlaneConfig: ctx.controlPlaneConfig,
+        logger: ctx.logger,
+      });
+
+      const appended = await store.appendDocument({
+        ticketId,
+        kind: parsed.value.kind,
+        ...(parsed.value.role ? { role: parsed.value.role } : {}),
+        content: body,
+        actor: parsed.value.actor,
+      });
+      if (!appended.ok) {
+        ctx.logger.error({ message: appended.error });
+        return 1;
+      }
+
+      if (parsed.value.json) {
+        process.stdout.write(
+          `${JSON.stringify({ document: appended.document }, null, 2)}\n`
+        );
+        return 0;
+      }
+
+      await display.panel({
+        title: "Ticket document",
+        tone: "success",
+        lines: [
+          `${ticketId} ${appended.document.role} document appended`,
+          appended.document.content,
+        ],
+      });
+      return 0;
+    },
+  },
+  {
     name: "list",
     summary: "List tickets",
     scope: "project",
@@ -794,7 +885,8 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
     summary: "Show a ticket",
     scope: "project",
     handler: async ({ ctx, args }) => {
-      if (!ctx.project) {
+      const project = ctx.project;
+      if (!project) {
         ctx.logger.error({ message: "No project found. Run inside a repo." });
         return 1;
       }
@@ -814,7 +906,7 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
       await maybeEnsureTicketsSetup({ ctx, json: parsed.value.json });
 
       const store = createTicketsStore({
-        projectRoot: ctx.project.projectRoot,
+        projectRoot: project.projectRoot,
         projectId: ctx.projectId,
         projectName: ctx.projectName,
         controlPlaneConfig: ctx.controlPlaneConfig,
@@ -828,122 +920,9 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
         return 1;
       }
 
-      if (parsed.value.json) {
-        process.stdout.write(
-          `${JSON.stringify(
-            {
-              ticket,
-              comments: detail.comments,
-              reviewNotes: detail.reviewNotes,
-              syncCheckpoints: detail.syncCheckpoints,
-              conflicts: detail.conflicts,
-              events: detail.events,
-            },
-            null,
-            2
-          )}\n`
-        );
-        return 0;
-      }
-
-      await display.kv({
-        title: `Ticket ${ticket.ticketId}`,
-        entries: [
-          ["title", ticket.title],
-          ["status", ticket.status],
-          ["owner", ticket.owner],
-          ["source", ticket.source],
-          ["assignee", ticket.assignee ?? ""],
-          ["tags", ticket.tags.join(", ")],
-          ["external_system", ticket.externalSystem ?? ""],
-          ["external_id", ticket.externalId ?? ""],
-          ["external_key", ticket.externalKey ?? ""],
-          ["external_url", ticket.externalUrl ?? ""],
-          ["external_project_id", ticket.externalProjectId ?? ""],
-          ["external_project_name", ticket.externalProjectName ?? ""],
-          ["external_team_id", ticket.externalTeamId ?? ""],
-          ["depends_on", ticket.dependsOn.join(", ")],
-          ["blocks", ticket.blocks.join(", ")],
-          ["created_at", ticket.createdAt],
-          ["updated_at", ticket.updatedAt],
-          ["project_id", ticket.projectId ?? ""],
-          ["project_name", ticket.projectName ?? ""],
-        ],
-      });
-
-      if (ticket.body) {
-        await display.panel({
-          title: "Body",
-          tone: "info",
-          lines: ticket.body.split("\n"),
-        });
-      }
-
-      if (detail.comments.length > 0) {
-        await display.table({
-          columns: ["comment_id", "source", "actor", "created_at", "body"],
-          rows: detail.comments.map((comment) => [
-            comment.commentId,
-            comment.source,
-            comment.actor,
-            comment.createdAt,
-            comment.body,
-          ]),
-        });
-      }
-
-      if (detail.reviewNotes.length > 0) {
-        await display.table({
-          columns: ["note_id", "actor", "created_at", "context", "body"],
-          rows: detail.reviewNotes.map((reviewNote) => [
-            reviewNote.noteId,
-            reviewNote.actor,
-            reviewNote.createdAt,
-            reviewNote.context ?? "",
-            reviewNote.body,
-          ]),
-        });
-      }
-
-      if (detail.syncCheckpoints.length > 0) {
-        await display.table({
-          columns: [
-            "checkpoint_id",
-            "provider",
-            "profile",
-            "direction",
-            "cursor",
-          ],
-          rows: detail.syncCheckpoints.map((checkpoint) => [
-            checkpoint.checkpointId,
-            checkpoint.provider,
-            checkpoint.profileId ?? "",
-            checkpoint.direction ?? "",
-            checkpoint.remoteCursor ?? "",
-          ]),
-        });
-      }
-
-      if (detail.conflicts.length > 0) {
-        await display.table({
-          columns: ["conflict_id", "field", "status", "provider", "resolution"],
-          rows: detail.conflicts.map((conflict) => [
-            conflict.conflictId,
-            conflict.field,
-            conflict.status,
-            conflict.provider,
-            conflict.resolution ?? "",
-          ]),
-        });
-      }
-
-      await display.table({
-        columns: ["ts", "type", "event_id"],
-        rows: detail.events.map((event) => [
-          event.tsIso,
-          event.type,
-          event.eventId,
-        ]),
+      await renderTicketDetail({
+        detail,
+        json: parsed.value.json,
       });
       return 0;
     },
@@ -1153,6 +1132,8 @@ type TicketsArgs = {
   readonly body?: string;
   readonly bodyFile?: string;
   readonly bodyStdin: boolean;
+  readonly kind?: TicketDocumentKind;
+  readonly role?: TicketDocumentRole;
   readonly dependsOn: readonly string[];
   readonly blocks: readonly string[];
   readonly clearDependsOn: boolean;
@@ -1202,327 +1183,153 @@ type TicketsSetupParseResult =
   | { readonly ok: true; readonly value: TicketsSetupArgs }
   | { readonly ok: false; readonly error: string };
 
+type MutableTicketsArgs = {
+  title?: string;
+  body?: string;
+  bodyFile?: string;
+  bodyStdin: boolean;
+  kind?: TicketDocumentKind;
+  role?: TicketDocumentRole;
+  dependsOn: string[];
+  blocks: string[];
+  clearDependsOn: boolean;
+  clearBlocks: boolean;
+  owner?: string;
+  source?: string;
+  assignee?: string;
+  clearAssignee: boolean;
+  tags: string[];
+  clearTags: boolean;
+  externalSystem?: string;
+  externalId?: string;
+  externalKey?: string;
+  externalUrl?: string;
+  externalProjectId?: string;
+  externalProjectName?: string;
+  externalTeamId?: string;
+  actor?: string;
+  json: boolean;
+  rest: string[];
+};
+
+type MutableResolveConflictArgs = {
+  conflictId?: string;
+  resolution?: TicketSyncConflictResolution;
+  summary?: string;
+  actor?: string;
+  json: boolean;
+  rest: string[];
+};
+
+type MutableTicketsSetupArgs = {
+  agents: boolean;
+  claude: boolean;
+  all: boolean;
+  global: boolean;
+  check: boolean;
+  remove: boolean;
+  json: boolean;
+};
+
+type TicketsSetupNeeds = {
+  readonly needsGitignore: boolean;
+  readonly needsUntrack: boolean;
+  readonly needsSkill: boolean;
+  readonly needsDocs: boolean;
+};
+
+type TicketDetailResult = Awaited<
+  ReturnType<ReturnType<typeof createTicketsStore>["getTicketDetail"]>
+>;
+
+type TicketsGitHealthSummary = {
+  readonly hasRefDivergence: boolean;
+  readonly hasLegacyRef: boolean;
+  readonly legacyRef?: string;
+  readonly hasNonTicketFiles: boolean;
+  readonly nonTicketPaths: readonly string[];
+  readonly remoteRefOid?: string;
+  readonly legacyRefOid?: string;
+};
+
+type TicketsRepairSummary = {
+  readonly didCommit: boolean;
+  readonly didPush: boolean;
+  readonly pruneError?: string;
+};
+
+type ParseHandlerResult = {
+  readonly handled: boolean;
+  readonly nextIndex: number;
+  readonly error?: string;
+};
+
+type ConsumedOptionValue =
+  | { readonly matched: false }
+  | {
+      readonly matched: true;
+      readonly nextIndex: number;
+      readonly value?: string;
+      readonly error?: string;
+    };
+
+type TicketsSetupTokenResult =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly error: string };
+
 function parseTicketsArgs(opts: {
   readonly args: readonly string[];
 }): TicketsParseResult {
-  const rest: string[] = [];
-  let title: string | undefined;
-  let body: string | undefined;
-  let bodyFile: string | undefined;
-  let bodyStdin = false;
-  const dependsOn: string[] = [];
-  const blocks: string[] = [];
-  let clearDependsOn = false;
-  let clearBlocks = false;
-  let owner: string | undefined;
-  let source: string | undefined;
-  let assignee: string | undefined;
-  let clearAssignee = false;
-  const tags: string[] = [];
-  let clearTags = false;
-  let externalSystem: string | undefined;
-  let externalId: string | undefined;
-  let externalKey: string | undefined;
-  let externalUrl: string | undefined;
-  let externalProjectId: string | undefined;
-  let externalProjectName: string | undefined;
-  let externalTeamId: string | undefined;
-  let actor: string | undefined;
-  let json = false;
-
-  const takeValue = (
-    _flag: string,
-    value: string | undefined
-  ): string | null => {
-    if (!value || value.startsWith("-")) {
-      return null;
-    }
-    return value;
+  const state: MutableTicketsArgs = {
+    bodyStdin: false,
+    dependsOn: [],
+    blocks: [],
+    clearDependsOn: false,
+    clearBlocks: false,
+    clearAssignee: false,
+    tags: [],
+    clearTags: false,
+    json: false,
+    rest: [],
   };
 
   for (let i = 0; i < opts.args.length; i += 1) {
     const token = opts.args[i] ?? "";
 
     if (token === "--") {
-      rest.push(...opts.args.slice(i + 1));
+      state.rest.push(...opts.args.slice(i + 1));
       break;
     }
 
     if (token === "--json") {
-      json = true;
+      state.json = true;
       continue;
     }
-
-    if (token.startsWith("--title=")) {
-      title = token.slice("--title=".length);
-      continue;
-    }
-
-    if (token === "--title") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--title requires a value." };
+    const handlers = [
+      parseTicketContentOption,
+      parseTicketDocumentOption,
+      parseTicketRelationshipOption,
+      parseTicketIdentityOption,
+      parseTicketTagOption,
+      parseTicketExternalOption,
+    ] as const;
+    let handled = false;
+    for (const handler of handlers) {
+      const result = handler({
+        args: opts.args,
+        index: i,
+        state,
+      });
+      if (result.error) {
+        return { ok: false, error: result.error };
       }
-      title = value;
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("--body=")) {
-      body = token.slice("--body=".length);
-      continue;
-    }
-
-    if (token === "--body") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--body requires a value." };
+      if (result.handled) {
+        i = result.nextIndex;
+        handled = true;
+        break;
       }
-      body = value;
-      i += 1;
-      continue;
     }
-
-    if (token.startsWith("--body-file=")) {
-      bodyFile = token.slice("--body-file=".length);
-      continue;
-    }
-
-    if (token === "--body-file") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--body-file requires a value." };
-      }
-      bodyFile = value;
-      i += 1;
-      continue;
-    }
-
-    if (token === "--body-stdin") {
-      bodyStdin = true;
-      continue;
-    }
-
-    if (token === "--clear-depends-on") {
-      clearDependsOn = true;
-      continue;
-    }
-
-    if (token === "--clear-blocks") {
-      clearBlocks = true;
-      continue;
-    }
-    if (token === "--clear-tags") {
-      clearTags = true;
-      continue;
-    }
-    if (token === "--clear-assignee") {
-      clearAssignee = true;
-      continue;
-    }
-
-    if (token.startsWith("--depends-on=")) {
-      dependsOn.push(...splitTicketRefs(token.slice("--depends-on=".length)));
-      continue;
-    }
-
-    if (token === "--depends-on") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--depends-on requires a value." };
-      }
-      dependsOn.push(...splitTicketRefs(value));
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("--blocks=")) {
-      blocks.push(...splitTicketRefs(token.slice("--blocks=".length)));
-      continue;
-    }
-
-    if (token === "--blocks") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--blocks requires a value." };
-      }
-      blocks.push(...splitTicketRefs(value));
-      i += 1;
-      continue;
-    }
-
-    if (token.startsWith("--actor=")) {
-      actor = token.slice("--actor=".length);
-      continue;
-    }
-
-    if (token.startsWith("--owner=")) {
-      owner = token.slice("--owner=".length);
-      continue;
-    }
-    if (token === "--owner") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--owner requires a value." };
-      }
-      owner = value;
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--source=")) {
-      source = token.slice("--source=".length);
-      continue;
-    }
-    if (token === "--source") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--source requires a value." };
-      }
-      source = value;
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--assignee=")) {
-      assignee = token.slice("--assignee=".length);
-      continue;
-    }
-    if (token === "--assignee") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--assignee requires a value." };
-      }
-      assignee = value;
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--tags=")) {
-      tags.push(...splitTags(token.slice("--tags=".length)));
-      continue;
-    }
-    if (token === "--tags") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--tags requires a value." };
-      }
-      tags.push(...splitTags(value));
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--tag=")) {
-      tags.push(token.slice("--tag=".length));
-      continue;
-    }
-    if (token === "--tag") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--tag requires a value." };
-      }
-      tags.push(value);
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--external-system=")) {
-      externalSystem = token.slice("--external-system=".length);
-      continue;
-    }
-    if (token === "--external-system") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--external-system requires a value." };
-      }
-      externalSystem = value;
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--external-id=")) {
-      externalId = token.slice("--external-id=".length);
-      continue;
-    }
-    if (token === "--external-id") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--external-id requires a value." };
-      }
-      externalId = value;
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--external-key=")) {
-      externalKey = token.slice("--external-key=".length);
-      continue;
-    }
-    if (token === "--external-key") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--external-key requires a value." };
-      }
-      externalKey = value;
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--external-url=")) {
-      externalUrl = token.slice("--external-url=".length);
-      continue;
-    }
-    if (token === "--external-url") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--external-url requires a value." };
-      }
-      externalUrl = value;
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--external-project-id=")) {
-      externalProjectId = token.slice("--external-project-id=".length);
-      continue;
-    }
-    if (token === "--external-project-id") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--external-project-id requires a value." };
-      }
-      externalProjectId = value;
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--external-project-name=")) {
-      externalProjectName = token.slice("--external-project-name=".length);
-      continue;
-    }
-    if (token === "--external-project-name") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return {
-          ok: false,
-          error: "--external-project-name requires a value.",
-        };
-      }
-      externalProjectName = value;
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--external-team-id=")) {
-      externalTeamId = token.slice("--external-team-id=".length);
-      continue;
-    }
-    if (token === "--external-team-id") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--external-team-id requires a value." };
-      }
-      externalTeamId = value;
-      i += 1;
-      continue;
-    }
-
-    if (token === "--actor") {
-      const value = takeValue(token, opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--actor requires a value." };
-      }
-      actor = value;
-      i += 1;
+    if (handled) {
       continue;
     }
 
@@ -1530,37 +1337,12 @@ function parseTicketsArgs(opts: {
       return { ok: false, error: `Unknown option: ${token}` };
     }
 
-    rest.push(token);
+    state.rest.push(token);
   }
 
   return {
     ok: true,
-    value: {
-      ...(title ? { title } : {}),
-      ...(body ? { body } : {}),
-      ...(bodyFile ? { bodyFile } : {}),
-      bodyStdin,
-      dependsOn,
-      blocks,
-      clearDependsOn,
-      clearBlocks,
-      ...(owner ? { owner } : {}),
-      ...(source ? { source } : {}),
-      ...(assignee !== undefined ? { assignee } : {}),
-      clearAssignee,
-      tags: normalizeTags(tags),
-      clearTags,
-      ...(externalSystem !== undefined ? { externalSystem } : {}),
-      ...(externalId !== undefined ? { externalId } : {}),
-      ...(externalKey !== undefined ? { externalKey } : {}),
-      ...(externalUrl !== undefined ? { externalUrl } : {}),
-      ...(externalProjectId !== undefined ? { externalProjectId } : {}),
-      ...(externalProjectName !== undefined ? { externalProjectName } : {}),
-      ...(externalTeamId !== undefined ? { externalTeamId } : {}),
-      ...(actor ? { actor } : {}),
-      json,
-      rest,
-    },
+    value: finalizeTicketsArgs(state),
   };
 }
 
@@ -1569,110 +1351,45 @@ function parseResolveConflictArgs(opts: {
 }):
   | { readonly ok: true; readonly value: ResolveConflictArgs }
   | { readonly ok: false; readonly error: string } {
-  const rest: string[] = [];
-  let conflictId: string | undefined;
-  let resolution: TicketSyncConflictResolution | undefined;
-  let summary: string | undefined;
-  let actor: string | undefined;
-  let json = false;
-
-  const takeValue = (value: string | undefined): string | null => {
-    if (!value || value.startsWith("-")) {
-      return null;
-    }
-    return value;
+  const state: MutableResolveConflictArgs = {
+    json: false,
+    rest: [],
   };
 
   for (let i = 0; i < opts.args.length; i += 1) {
     const token = opts.args[i] ?? "";
     if (token === "--") {
-      rest.push(...opts.args.slice(i + 1));
+      state.rest.push(...opts.args.slice(i + 1));
       break;
     }
     if (token === "--json") {
-      json = true;
+      state.json = true;
       continue;
     }
-    if (token.startsWith("--conflict-id=")) {
-      conflictId = token.slice("--conflict-id=".length);
+
+    const result = parseResolveConflictOption({
+      args: opts.args,
+      index: i,
+      state,
+    });
+    if (result.error) {
+      return { ok: false, error: result.error };
+    }
+    if (result.handled) {
+      i = result.nextIndex;
       continue;
     }
-    if (token === "--conflict-id") {
-      const value = takeValue(opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--conflict-id requires a value." };
-      }
-      conflictId = value;
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--resolution=")) {
-      const parsedResolution = parseConflictResolutionValue({
-        value: token.slice("--resolution=".length),
-      });
-      if (!parsedResolution) {
-        return {
-          ok: false,
-          error:
-            "Invalid --resolution value. Expected accept_local|accept_remote|merged|ignore.",
-        };
-      }
-      resolution = parsedResolution;
-      continue;
-    }
-    if (token === "--resolution") {
-      const value = takeValue(opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--resolution requires a value." };
-      }
-      const parsedResolution = parseConflictResolutionValue({ value });
-      if (!parsedResolution) {
-        return {
-          ok: false,
-          error:
-            "Invalid --resolution value. Expected accept_local|accept_remote|merged|ignore.",
-        };
-      }
-      resolution = parsedResolution;
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--summary=")) {
-      summary = token.slice("--summary=".length);
-      continue;
-    }
-    if (token === "--summary") {
-      const value = takeValue(opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--summary requires a value." };
-      }
-      summary = value;
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--actor=")) {
-      actor = token.slice("--actor=".length);
-      continue;
-    }
-    if (token === "--actor") {
-      const value = takeValue(opts.args[i + 1]);
-      if (!value) {
-        return { ok: false, error: "--actor requires a value." };
-      }
-      actor = value;
-      i += 1;
-      continue;
-    }
+
     if (token.startsWith("-")) {
       return { ok: false, error: `Unknown option: ${token}` };
     }
-    rest.push(token);
+    state.rest.push(token);
   }
 
-  if (!conflictId) {
+  if (!state.conflictId) {
     return { ok: false, error: "Missing --conflict-id <ID>." };
   }
-  if (!resolution) {
+  if (!state.resolution) {
     return {
       ok: false,
       error: "Missing --resolution <accept_local|accept_remote|merged|ignore>.",
@@ -1682,14 +1399,421 @@ function parseResolveConflictArgs(opts: {
   return {
     ok: true,
     value: {
-      conflictId,
-      resolution,
-      ...(summary !== undefined ? { summary } : {}),
-      ...(actor ? { actor } : {}),
-      json,
-      rest,
+      conflictId: state.conflictId,
+      resolution: state.resolution,
+      ...(state.summary !== undefined ? { summary: state.summary } : {}),
+      ...(state.actor ? { actor: state.actor } : {}),
+      json: state.json,
+      rest: state.rest,
     },
   };
+}
+
+function finalizeTicketsArgs(state: MutableTicketsArgs): TicketsArgs {
+  return {
+    ...(state.title ? { title: state.title } : {}),
+    ...(state.body ? { body: state.body } : {}),
+    ...(state.bodyFile ? { bodyFile: state.bodyFile } : {}),
+    bodyStdin: state.bodyStdin,
+    ...(state.kind ? { kind: state.kind } : {}),
+    ...(state.role ? { role: state.role } : {}),
+    dependsOn: state.dependsOn,
+    blocks: state.blocks,
+    clearDependsOn: state.clearDependsOn,
+    clearBlocks: state.clearBlocks,
+    ...(state.owner ? { owner: state.owner } : {}),
+    ...(state.source ? { source: state.source } : {}),
+    ...(state.assignee !== undefined ? { assignee: state.assignee } : {}),
+    clearAssignee: state.clearAssignee,
+    tags: normalizeTags(state.tags),
+    clearTags: state.clearTags,
+    ...(state.externalSystem !== undefined
+      ? { externalSystem: state.externalSystem }
+      : {}),
+    ...(state.externalId !== undefined ? { externalId: state.externalId } : {}),
+    ...(state.externalKey !== undefined
+      ? { externalKey: state.externalKey }
+      : {}),
+    ...(state.externalUrl !== undefined
+      ? { externalUrl: state.externalUrl }
+      : {}),
+    ...(state.externalProjectId !== undefined
+      ? { externalProjectId: state.externalProjectId }
+      : {}),
+    ...(state.externalProjectName !== undefined
+      ? { externalProjectName: state.externalProjectName }
+      : {}),
+    ...(state.externalTeamId !== undefined
+      ? { externalTeamId: state.externalTeamId }
+      : {}),
+    ...(state.actor ? { actor: state.actor } : {}),
+    json: state.json,
+    rest: state.rest,
+  };
+}
+
+function consumeOptionValue(opts: {
+  readonly args: readonly string[];
+  readonly index: number;
+  readonly flag: string;
+}): ConsumedOptionValue {
+  const token = opts.args[opts.index] ?? "";
+  if (token.startsWith(`${opts.flag}=`)) {
+    return {
+      matched: true,
+      nextIndex: opts.index,
+      value: token.slice(opts.flag.length + 1),
+    };
+  }
+  if (token !== opts.flag) {
+    return { matched: false };
+  }
+  const value = opts.args[opts.index + 1];
+  if (!value || value.startsWith("-")) {
+    return {
+      matched: true,
+      nextIndex: opts.index,
+      error: `${opts.flag} requires a value.`,
+    };
+  }
+  return {
+    matched: true,
+    nextIndex: opts.index + 1,
+    value,
+  };
+}
+
+function parseTicketContentOption(opts: {
+  readonly args: readonly string[];
+  readonly index: number;
+  readonly state: MutableTicketsArgs;
+}): ParseHandlerResult {
+  const bodyStdinToken = opts.args[opts.index];
+  if (bodyStdinToken === "--body-stdin") {
+    opts.state.bodyStdin = true;
+    return { handled: true, nextIndex: opts.index };
+  }
+
+  for (const [flag, assign] of [
+    ["--title", (value: string | undefined) => (opts.state.title = value)],
+    ["--body", (value: string | undefined) => (opts.state.body = value)],
+    [
+      "--body-file",
+      (value: string | undefined) => (opts.state.bodyFile = value),
+    ],
+  ] as const) {
+    const consumed = consumeOptionValue({
+      args: opts.args,
+      index: opts.index,
+      flag,
+    });
+    if (!consumed.matched) {
+      continue;
+    }
+    if (consumed.error) {
+      return {
+        handled: true,
+        nextIndex: consumed.nextIndex,
+        error: consumed.error,
+      };
+    }
+    assign(consumed.value);
+    return { handled: true, nextIndex: consumed.nextIndex };
+  }
+
+  return { handled: false, nextIndex: opts.index };
+}
+
+function parseTicketDocumentOption(opts: {
+  readonly args: readonly string[];
+  readonly index: number;
+  readonly state: MutableTicketsArgs;
+}): ParseHandlerResult {
+  for (const [flag, kind, error] of [
+    [
+      "--kind",
+      (value: string) => (isTicketDocumentKind(value) ? value : null),
+      "Invalid --kind value. Expected description|spec|notes.",
+    ],
+    [
+      "--role",
+      (value: string) => (isTicketDocumentRole(value) ? value : null),
+      "Invalid --role value. Expected description|spec|notes|handoff.",
+    ],
+  ] as const) {
+    const consumed = consumeOptionValue({
+      args: opts.args,
+      index: opts.index,
+      flag,
+    });
+    if (!consumed.matched) {
+      continue;
+    }
+    if (consumed.error) {
+      return {
+        handled: true,
+        nextIndex: consumed.nextIndex,
+        error: consumed.error,
+      };
+    }
+    const value = kind(consumed.value ?? "");
+    if (!value) {
+      return {
+        handled: true,
+        nextIndex: consumed.nextIndex,
+        error,
+      };
+    }
+    if (flag === "--kind") {
+      opts.state.kind = value;
+    } else {
+      opts.state.role = value;
+    }
+    return { handled: true, nextIndex: consumed.nextIndex };
+  }
+
+  return { handled: false, nextIndex: opts.index };
+}
+
+function parseTicketRelationshipOption(opts: {
+  readonly args: readonly string[];
+  readonly index: number;
+  readonly state: MutableTicketsArgs;
+}): ParseHandlerResult {
+  const token = opts.args[opts.index] ?? "";
+  switch (token) {
+    case "--clear-depends-on":
+      opts.state.clearDependsOn = true;
+      return { handled: true, nextIndex: opts.index };
+    case "--clear-blocks":
+      opts.state.clearBlocks = true;
+      return { handled: true, nextIndex: opts.index };
+    case "--clear-tags":
+      opts.state.clearTags = true;
+      return { handled: true, nextIndex: opts.index };
+    case "--clear-assignee":
+      opts.state.clearAssignee = true;
+      return { handled: true, nextIndex: opts.index };
+    default:
+      break;
+  }
+
+  for (const [flag, assign] of [
+    [
+      "--depends-on",
+      (value: string) => opts.state.dependsOn.push(...splitTicketRefs(value)),
+    ],
+    [
+      "--blocks",
+      (value: string) => opts.state.blocks.push(...splitTicketRefs(value)),
+    ],
+  ] as const) {
+    const consumed = consumeOptionValue({
+      args: opts.args,
+      index: opts.index,
+      flag,
+    });
+    if (!consumed.matched) {
+      continue;
+    }
+    if (consumed.error) {
+      return {
+        handled: true,
+        nextIndex: consumed.nextIndex,
+        error: consumed.error,
+      };
+    }
+    assign(consumed.value ?? "");
+    return { handled: true, nextIndex: consumed.nextIndex };
+  }
+
+  return { handled: false, nextIndex: opts.index };
+}
+
+function parseTicketIdentityOption(opts: {
+  readonly args: readonly string[];
+  readonly index: number;
+  readonly state: MutableTicketsArgs;
+}): ParseHandlerResult {
+  for (const [flag, assign] of [
+    ["--actor", (value: string | undefined) => (opts.state.actor = value)],
+    ["--owner", (value: string | undefined) => (opts.state.owner = value)],
+    ["--source", (value: string | undefined) => (opts.state.source = value)],
+    [
+      "--assignee",
+      (value: string | undefined) => (opts.state.assignee = value),
+    ],
+  ] as const) {
+    const consumed = consumeOptionValue({
+      args: opts.args,
+      index: opts.index,
+      flag,
+    });
+    if (!consumed.matched) {
+      continue;
+    }
+    if (consumed.error) {
+      return {
+        handled: true,
+        nextIndex: consumed.nextIndex,
+        error: consumed.error,
+      };
+    }
+    assign(consumed.value);
+    return { handled: true, nextIndex: consumed.nextIndex };
+  }
+
+  return { handled: false, nextIndex: opts.index };
+}
+
+function parseTicketTagOption(opts: {
+  readonly args: readonly string[];
+  readonly index: number;
+  readonly state: MutableTicketsArgs;
+}): ParseHandlerResult {
+  for (const [flag, split] of [
+    ["--tags", splitTags],
+    ["--tag", (value: string) => [value]],
+  ] as const) {
+    const consumed = consumeOptionValue({
+      args: opts.args,
+      index: opts.index,
+      flag,
+    });
+    if (!consumed.matched) {
+      continue;
+    }
+    if (consumed.error) {
+      return {
+        handled: true,
+        nextIndex: consumed.nextIndex,
+        error: consumed.error,
+      };
+    }
+    opts.state.tags.push(...split(consumed.value ?? ""));
+    return { handled: true, nextIndex: consumed.nextIndex };
+  }
+
+  return { handled: false, nextIndex: opts.index };
+}
+
+function parseTicketExternalOption(opts: {
+  readonly args: readonly string[];
+  readonly index: number;
+  readonly state: MutableTicketsArgs;
+}): ParseHandlerResult {
+  for (const [flag, assign] of [
+    [
+      "--external-system",
+      (value: string | undefined) => (opts.state.externalSystem = value),
+    ],
+    [
+      "--external-id",
+      (value: string | undefined) => (opts.state.externalId = value),
+    ],
+    [
+      "--external-key",
+      (value: string | undefined) => (opts.state.externalKey = value),
+    ],
+    [
+      "--external-url",
+      (value: string | undefined) => (opts.state.externalUrl = value),
+    ],
+    [
+      "--external-project-id",
+      (value: string | undefined) => (opts.state.externalProjectId = value),
+    ],
+    [
+      "--external-project-name",
+      (value: string | undefined) => (opts.state.externalProjectName = value),
+    ],
+    [
+      "--external-team-id",
+      (value: string | undefined) => (opts.state.externalTeamId = value),
+    ],
+  ] as const) {
+    const consumed = consumeOptionValue({
+      args: opts.args,
+      index: opts.index,
+      flag,
+    });
+    if (!consumed.matched) {
+      continue;
+    }
+    if (consumed.error) {
+      return {
+        handled: true,
+        nextIndex: consumed.nextIndex,
+        error: consumed.error,
+      };
+    }
+    assign(consumed.value);
+    return { handled: true, nextIndex: consumed.nextIndex };
+  }
+
+  return { handled: false, nextIndex: opts.index };
+}
+
+function parseResolveConflictOption(opts: {
+  readonly args: readonly string[];
+  readonly index: number;
+  readonly state: MutableResolveConflictArgs;
+}): ParseHandlerResult {
+  for (const [flag, assign] of [
+    [
+      "--conflict-id",
+      (value: string | undefined) => (opts.state.conflictId = value),
+    ],
+    ["--summary", (value: string | undefined) => (opts.state.summary = value)],
+    ["--actor", (value: string | undefined) => (opts.state.actor = value)],
+  ] as const) {
+    const consumed = consumeOptionValue({
+      args: opts.args,
+      index: opts.index,
+      flag,
+    });
+    if (!consumed.matched) {
+      continue;
+    }
+    if (consumed.error) {
+      return {
+        handled: true,
+        nextIndex: consumed.nextIndex,
+        error: consumed.error,
+      };
+    }
+    assign(consumed.value);
+    return { handled: true, nextIndex: consumed.nextIndex };
+  }
+
+  const resolution = consumeOptionValue({
+    args: opts.args,
+    index: opts.index,
+    flag: "--resolution",
+  });
+  if (!resolution.matched) {
+    return { handled: false, nextIndex: opts.index };
+  }
+  if (resolution.error) {
+    return {
+      handled: true,
+      nextIndex: resolution.nextIndex,
+      error: resolution.error,
+    };
+  }
+  const parsedResolution = parseConflictResolutionValue({
+    value: resolution.value ?? "",
+  });
+  if (!parsedResolution) {
+    return {
+      handled: true,
+      nextIndex: resolution.nextIndex,
+      error:
+        "Invalid --resolution value. Expected accept_local|accept_remote|merged|ignore.",
+    };
+  }
+  opts.state.resolution = parsedResolution;
+  return { handled: true, nextIndex: resolution.nextIndex };
 }
 
 async function resolveTicketBody(opts: {
@@ -1800,6 +1924,154 @@ function resolveTicketRefs(opts: {
   return { ok: true, refs: normalizeTicketRefs(normalized) };
 }
 
+async function renderTicketDetail(opts: {
+  readonly detail: TicketDetailResult;
+  readonly json: boolean;
+}): Promise<void> {
+  if (opts.json) {
+    writeTicketDetailJson({ detail: opts.detail });
+    return;
+  }
+
+  await displayTicketDetailSections({ detail: opts.detail });
+}
+
+function writeTicketDetailJson(opts: {
+  readonly detail: TicketDetailResult;
+}): void {
+  process.stdout.write(
+    `${JSON.stringify(
+      {
+        ticket: opts.detail.ticket,
+        documents: opts.detail.documents,
+        comments: opts.detail.comments,
+        reviewNotes: opts.detail.reviewNotes,
+        syncCheckpoints: opts.detail.syncCheckpoints,
+        conflicts: opts.detail.conflicts,
+        events: opts.detail.events,
+      },
+      null,
+      2
+    )}\n`
+  );
+}
+
+async function displayTicketDetailSections(opts: {
+  readonly detail: TicketDetailResult;
+}): Promise<void> {
+  const { detail } = opts;
+  const ticket = detail.ticket;
+  if (!ticket) {
+    return;
+  }
+
+  await display.kv({
+    title: `Ticket ${ticket.ticketId}`,
+    entries: [
+      ["title", ticket.title],
+      ["status", ticket.status],
+      ["owner", ticket.owner],
+      ["source", ticket.source],
+      ["assignee", ticket.assignee ?? ""],
+      ["tags", ticket.tags.join(", ")],
+      ["external_system", ticket.externalSystem ?? ""],
+      ["external_id", ticket.externalId ?? ""],
+      ["external_key", ticket.externalKey ?? ""],
+      ["external_url", ticket.externalUrl ?? ""],
+      ["external_project_id", ticket.externalProjectId ?? ""],
+      ["external_project_name", ticket.externalProjectName ?? ""],
+      ["external_team_id", ticket.externalTeamId ?? ""],
+      ["depends_on", ticket.dependsOn.join(", ")],
+      ["blocks", ticket.blocks.join(", ")],
+      ["created_at", ticket.createdAt],
+      ["updated_at", ticket.updatedAt],
+      ["project_id", ticket.projectId ?? ""],
+      ["project_name", ticket.projectName ?? ""],
+    ],
+  });
+
+  if (ticket.body) {
+    await display.panel({
+      title: "Body",
+      tone: "info",
+      lines: ticket.body.split("\n"),
+    });
+  }
+
+  if (detail.documents.length > 0) {
+    await display.table({
+      columns: ["document_id", "kind", "role", "updated_at"],
+      rows: detail.documents.map((document) => [
+        document.documentId,
+        document.kind,
+        document.role,
+        document.updatedAt,
+      ]),
+    });
+  }
+
+  if (detail.comments.length > 0) {
+    await display.table({
+      columns: ["comment_id", "source", "actor", "created_at", "body"],
+      rows: detail.comments.map((comment) => [
+        comment.commentId,
+        comment.source,
+        comment.actor,
+        comment.createdAt,
+        comment.body,
+      ]),
+    });
+  }
+
+  if (detail.reviewNotes.length > 0) {
+    await display.table({
+      columns: ["note_id", "actor", "created_at", "context", "body"],
+      rows: detail.reviewNotes.map((reviewNote) => [
+        reviewNote.noteId,
+        reviewNote.actor,
+        reviewNote.createdAt,
+        reviewNote.context ?? "",
+        reviewNote.body,
+      ]),
+    });
+  }
+
+  if (detail.syncCheckpoints.length > 0) {
+    await display.table({
+      columns: ["checkpoint_id", "provider", "profile", "direction", "cursor"],
+      rows: detail.syncCheckpoints.map((checkpoint) => [
+        checkpoint.checkpointId,
+        checkpoint.provider,
+        checkpoint.profileId ?? "",
+        checkpoint.direction ?? "",
+        checkpoint.remoteCursor ?? "",
+      ]),
+    });
+  }
+
+  if (detail.conflicts.length > 0) {
+    await display.table({
+      columns: ["conflict_id", "field", "status", "provider", "resolution"],
+      rows: detail.conflicts.map((conflict) => [
+        conflict.conflictId,
+        conflict.field,
+        conflict.status,
+        conflict.provider,
+        conflict.resolution ?? "",
+      ]),
+    });
+  }
+
+  await display.table({
+    columns: ["ts", "type", "event_id"],
+    rows: detail.events.map((event) => [
+      event.tsIso,
+      event.type,
+      event.eventId,
+    ]),
+  });
+}
+
 async function maybeEnsureTicketsSetup(opts: {
   readonly ctx: ExtensionCommandContext;
   readonly json: boolean;
@@ -1820,28 +2092,13 @@ async function maybeEnsureTicketsSetup(opts: {
     targets: ["agents", "claude"],
   });
 
-  const needsGitignore = repoState.gitignore.status === "missing";
-  const needsUntrack = repoState.tracked.status === "tracked";
-  const needsSkill = skill.status === "missing" || skill.status === "error";
-  const needsDocs = docs.some(
-    (doc) => doc.status === "missing" || doc.status === "error"
-  );
-
-  if (!(needsGitignore || needsUntrack || needsSkill || needsDocs)) {
+  const needs = getTicketsSetupNeeds({ repoState, skill, docs });
+  if (!hasIncompleteTicketsSetup({ needs })) {
     return;
   }
 
   if (!(isTty() && isGumAvailable())) {
-    const notices: string[] = [];
-    if (needsGitignore) {
-      notices.push("add .hack/tickets/ to .gitignore");
-    }
-    if (needsUntrack) {
-      notices.push("untrack .hack/tickets from main branch");
-    }
-    if (needsSkill || needsDocs) {
-      notices.push("run tickets setup");
-    }
+    const notices = buildTicketsSetupNotices({ needs });
     if (notices.length > 0) {
       opts.ctx.logger.warn({
         message: `Tickets setup incomplete: ${notices.join("; ")}.`,
@@ -1858,38 +2115,7 @@ async function maybeEnsureTicketsSetup(opts: {
     return;
   }
 
-  const lines: string[] = [];
-
-  if (needsGitignore) {
-    const gitignore = await ensureTicketsGitignore({ projectRoot });
-    lines.push(`repo.gitignore: ${gitignore.status} (${gitignore.path})`);
-  }
-
-  if (needsUntrack) {
-    const untrack = await untrackTicketsRepo({ projectRoot });
-    lines.push(
-      `repo.tracking: ${untrack.status}${untrack.message ? ` (${untrack.message})` : ""}`
-    );
-  }
-
-  if (needsSkill) {
-    const installed = await installTicketsSkill({
-      scope: "project",
-      projectRoot,
-    });
-    lines.push(`skill: ${installed.status} (${installed.path})`);
-  }
-
-  if (needsDocs) {
-    const updatedDocs = await upsertTicketsAgentDocs({
-      projectRoot,
-      targets: ["agents", "claude"],
-    });
-    lines.push(
-      ...updatedDocs.map((doc) => `${doc.target}: ${doc.status} (${doc.path})`)
-    );
-  }
-
+  const lines = await repairTicketsSetup({ projectRoot, needs });
   if (lines.length > 0) {
     await display.panel({
       title: "Tickets setup",
@@ -1947,16 +2173,7 @@ async function maybeEnsureTicketsGitHealth(opts: {
     return;
   }
 
-  const reasons: string[] = [];
-  if (health.hasRefDivergence) {
-    reasons.push("hidden ref diverges from legacy branch");
-  }
-  if (health.hasLegacyRef && health.legacyRef) {
-    reasons.push(`legacy ref ${health.legacyRef}`);
-  }
-  if (health.hasNonTicketFiles) {
-    reasons.push("non-ticket files in tickets ref");
-  }
+  const reasons = buildTicketsGitHealthReasons({ health });
 
   if (!(isTty() && isGumAvailable())) {
     opts.ctx.logger.warn({
@@ -1973,14 +2190,7 @@ async function maybeEnsureTicketsGitHealth(opts: {
     return;
   }
 
-  let pruneLegacyRef = false;
-  if (health.hasLegacyRef && health.legacyRef) {
-    const prune = await gumConfirm({
-      prompt: `Remove legacy ref ${health.legacyRef} from the remote?`,
-      default: true,
-    });
-    pruneLegacyRef = prune.ok && prune.value;
-  }
+  const pruneLegacyRef = await confirmLegacyRefPrune({ health });
 
   const repaired = await channel.repair({ pruneLegacyRef });
   if (!repaired.ok) {
@@ -1992,34 +2202,11 @@ async function maybeEnsureTicketsGitHealth(opts: {
     return;
   }
 
-  const lines: string[] = [];
-  if (health.hasNonTicketFiles) {
-    const sample = health.nonTicketPaths.slice(0, 5);
-    const extra = health.nonTicketPaths.length - sample.length;
-    lines.push(`non-ticket files: ${health.nonTicketPaths.length}`);
-    if (sample.length > 0) {
-      lines.push(
-        `sample: ${sample.join(", ")}${extra > 0 ? ` (+${extra} more)` : ""}`
-      );
-    }
-  }
-  if (health.hasLegacyRef && health.legacyRef) {
-    lines.push(
-      `legacy ref: ${health.legacyRef} ${pruneLegacyRef ? "pruned" : "left intact"}`
-    );
-  }
-  if (health.hasRefDivergence) {
-    lines.push(
-      `ref divergence: ${
-        health.remoteRefOid?.slice(0, 8) ?? "missing"
-      } vs ${health.legacyRefOid?.slice(0, 8) ?? "missing"}`
-    );
-  }
-  lines.push(`commit: ${repaired.didCommit ? "created" : "noop"}`);
-  lines.push(`push: ${repaired.didPush ? "pushed" : "skipped"}`);
-  if (repaired.pruneError) {
-    lines.push(`legacy prune error: ${repaired.pruneError}`);
-  }
+  const lines = buildTicketsRepairLines({
+    health,
+    repaired,
+    pruneLegacyRef,
+  });
 
   await display.panel({
     title: "Tickets repair",
@@ -2028,72 +2215,236 @@ async function maybeEnsureTicketsGitHealth(opts: {
   });
 }
 
+function getTicketsSetupNeeds(opts: {
+  readonly repoState: Awaited<ReturnType<typeof checkTicketsRepoState>>;
+  readonly skill: Awaited<ReturnType<typeof checkTicketsSkill>>;
+  readonly docs: readonly TicketsAgentDocCheckResult[];
+}): TicketsSetupNeeds {
+  return {
+    needsGitignore: opts.repoState.gitignore.status === "missing",
+    needsUntrack: opts.repoState.tracked.status === "tracked",
+    needsSkill:
+      opts.skill.status === "missing" || opts.skill.status === "error",
+    needsDocs: opts.docs.some(
+      (doc) => doc.status === "missing" || doc.status === "error"
+    ),
+  };
+}
+
+function hasIncompleteTicketsSetup(opts: {
+  readonly needs: TicketsSetupNeeds;
+}): boolean {
+  return (
+    opts.needs.needsGitignore ||
+    opts.needs.needsUntrack ||
+    opts.needs.needsSkill ||
+    opts.needs.needsDocs
+  );
+}
+
+function buildTicketsSetupNotices(opts: {
+  readonly needs: TicketsSetupNeeds;
+}): string[] {
+  const notices: string[] = [];
+  if (opts.needs.needsGitignore) {
+    notices.push("add .hack/tickets/ to .gitignore");
+  }
+  if (opts.needs.needsUntrack) {
+    notices.push("untrack .hack/tickets from main branch");
+  }
+  if (opts.needs.needsSkill || opts.needs.needsDocs) {
+    notices.push("run tickets setup");
+  }
+  return notices;
+}
+
+async function repairTicketsSetup(opts: {
+  readonly projectRoot: string;
+  readonly needs: TicketsSetupNeeds;
+}): Promise<string[]> {
+  const lines: string[] = [];
+
+  if (opts.needs.needsGitignore) {
+    const gitignore = await ensureTicketsGitignore({
+      projectRoot: opts.projectRoot,
+    });
+    lines.push(`repo.gitignore: ${gitignore.status} (${gitignore.path})`);
+  }
+
+  if (opts.needs.needsUntrack) {
+    const untrack = await untrackTicketsRepo({ projectRoot: opts.projectRoot });
+    lines.push(
+      `repo.tracking: ${untrack.status}${untrack.message ? ` (${untrack.message})` : ""}`
+    );
+  }
+
+  if (opts.needs.needsSkill) {
+    const installed = await installTicketsSkill({
+      scope: "project",
+      projectRoot: opts.projectRoot,
+    });
+    lines.push(`skill: ${installed.status} (${installed.path})`);
+  }
+
+  if (opts.needs.needsDocs) {
+    const updatedDocs = await upsertTicketsAgentDocs({
+      projectRoot: opts.projectRoot,
+      targets: ["agents", "claude"],
+    });
+    lines.push(
+      ...updatedDocs.map((doc) => `${doc.target}: ${doc.status} (${doc.path})`)
+    );
+  }
+
+  return lines;
+}
+
+function buildTicketsGitHealthReasons(opts: {
+  readonly health: TicketsGitHealthSummary;
+}): string[] {
+  const reasons: string[] = [];
+  if (opts.health.hasRefDivergence) {
+    reasons.push("hidden ref diverges from legacy branch");
+  }
+  if (opts.health.hasLegacyRef && opts.health.legacyRef) {
+    reasons.push(`legacy ref ${opts.health.legacyRef}`);
+  }
+  if (opts.health.hasNonTicketFiles) {
+    reasons.push("non-ticket files in tickets ref");
+  }
+  return reasons;
+}
+
+async function confirmLegacyRefPrune(opts: {
+  readonly health: TicketsGitHealthSummary;
+}): Promise<boolean> {
+  if (!(opts.health.hasLegacyRef && opts.health.legacyRef)) {
+    return false;
+  }
+
+  const prune = await gumConfirm({
+    prompt: `Remove legacy ref ${opts.health.legacyRef} from the remote?`,
+    default: true,
+  });
+  return prune.ok && prune.value;
+}
+
+function buildTicketsRepairLines(opts: {
+  readonly health: TicketsGitHealthSummary;
+  readonly repaired: TicketsRepairSummary;
+  readonly pruneLegacyRef: boolean;
+}): string[] {
+  const lines: string[] = [];
+  if (opts.health.hasNonTicketFiles) {
+    const sample = opts.health.nonTicketPaths.slice(0, 5);
+    const extra = opts.health.nonTicketPaths.length - sample.length;
+    lines.push(`non-ticket files: ${opts.health.nonTicketPaths.length}`);
+    if (sample.length > 0) {
+      lines.push(
+        `sample: ${sample.join(", ")}${extra > 0 ? ` (+${extra} more)` : ""}`
+      );
+    }
+  }
+  if (opts.health.hasLegacyRef && opts.health.legacyRef) {
+    lines.push(
+      `legacy ref: ${opts.health.legacyRef} ${
+        opts.pruneLegacyRef ? "pruned" : "left intact"
+      }`
+    );
+  }
+  if (opts.health.hasRefDivergence) {
+    lines.push(
+      `ref divergence: ${
+        opts.health.remoteRefOid?.slice(0, 8) ?? "missing"
+      } vs ${opts.health.legacyRefOid?.slice(0, 8) ?? "missing"}`
+    );
+  }
+  lines.push(`commit: ${opts.repaired.didCommit ? "created" : "noop"}`);
+  lines.push(`push: ${opts.repaired.didPush ? "pushed" : "skipped"}`);
+  if (opts.repaired.pruneError) {
+    lines.push(`legacy prune error: ${opts.repaired.pruneError}`);
+  }
+  return lines;
+}
+
 function parseTicketsSetupArgs(opts: {
   readonly args: readonly string[];
 }): TicketsSetupParseResult {
-  let agents = false;
-  let claude = false;
-  let all = false;
-  let global = false;
-  let check = false;
-  let remove = false;
-  let json = false;
+  const state: MutableTicketsSetupArgs = {
+    agents: false,
+    claude: false,
+    all: false,
+    global: false,
+    check: false,
+    remove: false,
+    json: false,
+  };
 
   for (const token of opts.args) {
-    if (token === "--agents" || token === "--agents-md") {
-      agents = true;
-      continue;
+    const applied = applyTicketsSetupToken({ token, state });
+    if (!applied.ok) {
+      return applied;
     }
-
-    if (token === "--claude" || token === "--claude-md") {
-      claude = true;
-      continue;
-    }
-
-    if (token === "--all") {
-      all = true;
-      continue;
-    }
-
-    if (token === "--global") {
-      global = true;
-      continue;
-    }
-
-    if (token === "--check") {
-      check = true;
-      continue;
-    }
-
-    if (token === "--remove") {
-      remove = true;
-      continue;
-    }
-
-    if (token === "--json") {
-      json = true;
-      continue;
-    }
-
-    if (token === "--help" || token === "help") {
-      return {
-        ok: false,
-        error:
-          "Usage: hack x tickets setup [--agents|--claude|--all] [--global] [--check|--remove] [--json]",
-      };
-    }
-
-    return { ok: false, error: `Unknown option: ${token}` };
   }
 
-  if (check && remove) {
+  if (state.check && state.remove) {
     return { ok: false, error: "--check and --remove are mutually exclusive." };
   }
 
   return {
     ok: true,
-    value: { agents, claude, all, global, check, remove, json },
+    value: state,
   };
+}
+
+function applyTicketsSetupToken(opts: {
+  readonly token: string;
+  readonly state: MutableTicketsSetupArgs;
+}): TicketsSetupTokenResult {
+  if (opts.token === "--agents" || opts.token === "--agents-md") {
+    opts.state.agents = true;
+    return { ok: true };
+  }
+
+  if (opts.token === "--claude" || opts.token === "--claude-md") {
+    opts.state.claude = true;
+    return { ok: true };
+  }
+
+  if (opts.token === "--all") {
+    opts.state.all = true;
+    return { ok: true };
+  }
+
+  if (opts.token === "--global") {
+    opts.state.global = true;
+    return { ok: true };
+  }
+
+  if (opts.token === "--check") {
+    opts.state.check = true;
+    return { ok: true };
+  }
+
+  if (opts.token === "--remove") {
+    opts.state.remove = true;
+    return { ok: true };
+  }
+
+  if (opts.token === "--json") {
+    opts.state.json = true;
+    return { ok: true };
+  }
+
+  if (opts.token === "--help" || opts.token === "help") {
+    return {
+      ok: false,
+      error:
+        "Usage: hack x tickets setup [--agents|--claude|--all] [--global] [--check|--remove] [--json]",
+    };
+  }
+
+  return { ok: false, error: `Unknown option: ${opts.token}` };
 }
 
 /**

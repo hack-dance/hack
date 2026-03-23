@@ -1,5 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { mkdir, rm } from "node:fs/promises";
 import { hostname } from "node:os";
+import { dirname } from "node:path";
 
 import { secrets } from "bun";
 
@@ -11,6 +13,11 @@ import {
 import { isRecord } from "../../../lib/guards.ts";
 import { openUrl } from "../../../lib/os.ts";
 import { display } from "../../../ui/display.ts";
+import {
+  findTicketRemoteLink,
+  normalizeTicketFieldName,
+  projectRemoteLinkToCompatibilityFields,
+} from "../tickets/provenance.ts";
 import {
   createTicketsStore,
   type TicketComment,
@@ -34,10 +41,25 @@ import {
   createLinearClient,
   type LinearComment,
   type LinearIssue,
+  type LinearProjectDocument,
+  type LinearProjectMilestone,
+  type LinearProjectUpdate,
   type LinearUser,
   type LinearWorkflowState,
   type LinearWorkflowStateType,
 } from "./client.ts";
+import {
+  type LinearProjectArtifactFamily,
+  type LinearProjectArtifactSnapshot,
+  type LocalLinearProjectArtifact,
+  loadLocalLinearProjectArtifacts,
+  materializeLocalLinearProjectArtifact,
+  parseLinearProjectArtifactFile,
+  planLinearProjectArtifactChanges,
+  resolveLinearProjectArtifactPath,
+  serializeLinearProjectArtifactFile,
+  slugifyLinearProjectArtifactTitle,
+} from "./project-artifacts.ts";
 
 const EXTENSION_ID = "dance.hack.linear";
 const DEFAULT_OAUTH_AUTHORIZE_URL = "https://linear.app/oauth/authorize";
@@ -57,12 +79,13 @@ const OAUTH_TIMEOUT_MS = 5 * 60 * 1000;
 const OAUTH_POLL_INTERVAL_MS = 1000;
 const DEFAULT_PROJECT_SYNC_LIMIT = 100;
 const DEFAULT_DELIVERY_LIST_LIMIT = 50;
+const MARKDOWN_HEADING_PREFIX_REGEX = /^#+\s*/;
 const TRAILING_SLASH_REGEX = /\/+$/;
 
 export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
   {
     name: "setup",
-    summary: "Enable Linear extension and wire project defaults",
+    summary: "Set the active Linear profile and repo project route",
     scope: "project",
     allowWhenDisabled: true,
     handler: async ({ ctx, args }) => {
@@ -80,58 +103,46 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
         projectDir: ctx.project.projectDir,
       });
 
-      if (parsed.value.profileId) {
-        await updateProjectConfig({
-          projectDir: ctx.project.projectDir,
-          path: "controlPlane.routing.overrides.linear.profile",
-          value: parsed.value.profileId,
-        });
-      }
-      if (parsed.value.projectId) {
-        await updateProjectConfig({
-          projectDir: ctx.project.projectDir,
-          path: "controlPlane.routing.overrides.linear.projectId",
-          value: parsed.value.projectId,
-        });
-      }
-      if (parsed.value.projectName !== undefined) {
-        await updateProjectConfig({
-          projectDir: ctx.project.projectDir,
-          path: "controlPlane.routing.overrides.linear.projectName",
-          value: parsed.value.projectName,
-        });
-      }
-      if (parsed.value.teamId !== undefined) {
-        await updateProjectConfig({
-          projectDir: ctx.project.projectDir,
-          path: "controlPlane.routing.overrides.linear.teamId",
-          value: parsed.value.teamId,
-        });
-      }
+      const existingBinding = resolveProjectLinearBinding({
+        controlPlaneConfig: ctx.controlPlaneConfig,
+      });
+      await persistLinearSetupOverrides({
+        projectDir: ctx.project.projectDir,
+        parsed: parsed.value,
+      });
 
-      const payload = {
-        ok: true,
-        extension: EXTENSION_ID,
-        projectProfile: parsed.value.profileId ?? null,
-        projectId: parsed.value.projectId ?? null,
-        projectName: parsed.value.projectName ?? null,
-        teamId: parsed.value.teamId ?? null,
-      };
+      const binding = resolveLinearSetupBinding({
+        parsed: parsed.value,
+        existingBinding,
+      });
+      const status = await resolveLinearStatusPayload({
+        controlPlaneConfig: ctx.controlPlaneConfig,
+        profileId: binding.profileId,
+      });
+      const summary = buildLinearProjectManagementSummary({
+        status,
+        binding,
+      });
+      const setupSummary = buildLinearSetupSummary({
+        profileId: parsed.value.profileId,
+        binding,
+        status,
+      });
+      const payload = buildLinearSetupPayload({
+        binding,
+        status,
+        summary,
+        setupSummary,
+      });
 
       if (parsed.value.json) {
         process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
         return 0;
       }
 
-      await display.kv({
-        title: "Linear setup",
-        entries: [
-          ["extension", EXTENSION_ID],
-          ["project_profile", parsed.value.profileId ?? ""],
-          ["linear_project_id", parsed.value.projectId ?? ""],
-          ["linear_project_name", parsed.value.projectName ?? ""],
-          ["linear_team_id", parsed.value.teamId ?? ""],
-        ],
+      await renderLinearSetupPanel({
+        summary,
+        setupSummary,
       });
       return 0;
     },
@@ -302,7 +313,7 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
   },
   {
     name: "status",
-    summary: "Show Linear profile/config resolution and token status",
+    summary: "Show the active Linear profile, repo route, and next steps",
     scope: "global",
     allowWhenDisabled: true,
     handler: async ({ ctx, args }) =>
@@ -750,7 +761,7 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
   },
   {
     name: "project-bind",
-    summary: "Bind current hack project to a default Linear profile/project",
+    summary: "Bind this repo to its default Linear project route",
     scope: "project",
     allowWhenDisabled: true,
     handler: async ({ ctx, args }) => {
@@ -784,22 +795,25 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
         const payload = buildProjectBindingPayload({
           binding: existingBinding,
         });
+        const summary = buildLinearProjectBindSummary({
+          binding: existingBinding,
+        });
         if (parsed.value.json) {
-          process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+          process.stdout.write(
+            `${JSON.stringify({ ...payload, summary }, null, 2)}\n`
+          );
         } else {
-          await display.kv({
+          await display.panel({
             title: "Linear project binding",
-            entries: [
-              ["profile", payload.profileId ?? ""],
-              ["project_id", payload.projectId ?? ""],
-              ["project_name", payload.projectName ?? ""],
-              ["team_id", payload.teamId ?? ""],
-              [
-                "additional_projects",
-                payload.additionalProjects
-                  .map((project) => project.projectId)
-                  .join(", "),
-              ],
+            tone: payload.projectId ? "info" : "warn",
+            lines: [
+              `Active profile: ${summary.activeProfile}`,
+              `Route: ${summary.routeLabel}`,
+              ...(summary.linkedProjectsLabel
+                ? [summary.linkedProjectsLabel]
+                : []),
+              "Next:",
+              ...summary.nextSteps.map((step) => `- ${step}`),
             ],
           });
         }
@@ -837,14 +851,22 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
           binding: { additionalProjects: [] },
           cleared: true,
         });
+        const summary = buildLinearProjectBindSummary({
+          binding: { additionalProjects: [] },
+        });
         if (parsed.value.json) {
-          process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+          process.stdout.write(
+            `${JSON.stringify({ ...payload, summary }, null, 2)}\n`
+          );
         } else {
           await display.panel({
             title: "Linear project binding",
             tone: "success",
             lines: [
-              "Cleared project-level Linear routing overrides, including additional synced projects.",
+              "Cleared this repo's Linear routing overrides, including linked projects.",
+              `Route: ${summary.routeLabel}`,
+              "Next:",
+              "- Run `hack linear status` to review what is still connected.",
             ],
           });
         }
@@ -919,23 +941,35 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
           }),
         },
       });
+      const summary = buildLinearProjectBindSummary({
+        binding: {
+          ...(boundProfile ? { profileId: boundProfile } : {}),
+          projectId,
+          projectName: resolvedTeamAndName.projectName,
+          teamId: resolvedTeamAndName.teamId,
+          additionalProjects: removeAdditionalProjectBinding({
+            existing: existingBinding.additionalProjects,
+            projectId,
+          }),
+        },
+      });
 
       if (parsed.value.json) {
-        process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+        process.stdout.write(
+          `${JSON.stringify({ ...payload, summary }, null, 2)}\n`
+        );
       } else {
-        await display.kv({
+        await display.panel({
           title: "Linear project binding",
-          entries: [
-            ["profile", payload.profileId ?? ""],
-            ["project_id", payload.projectId],
-            ["project_name", payload.projectName],
-            ["team_id", payload.teamId],
-            [
-              "additional_projects",
-              payload.additionalProjects
-                .map((project) => project.projectId)
-                .join(", "),
-            ],
+          tone: "success",
+          lines: [
+            `Active profile: ${summary.activeProfile}`,
+            `Route: ${summary.routeLabel}`,
+            ...(summary.linkedProjectsLabel
+              ? [summary.linkedProjectsLabel]
+              : []),
+            "Next:",
+            ...summary.nextSteps.map((step) => `- ${step}`),
           ],
         });
       }
@@ -1136,6 +1170,45 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
     },
   },
   {
+    name: "documents",
+    summary:
+      "List, pull, plan, and apply Hack-managed Linear project documents",
+    scope: "project",
+    allowWhenDisabled: true,
+    handler: async ({ ctx, args }) =>
+      await handleProjectArtifactFamilyCommand({
+        ctx,
+        args,
+        family: "documents",
+      }),
+  },
+  {
+    name: "milestones",
+    summary:
+      "List, pull, plan, and apply Hack-managed Linear project milestones",
+    scope: "project",
+    allowWhenDisabled: true,
+    handler: async ({ ctx, args }) =>
+      await handleProjectArtifactFamilyCommand({
+        ctx,
+        args,
+        family: "milestones",
+      }),
+  },
+  {
+    name: "status-updates",
+    summary:
+      "List, pull, plan, and publish Hack-managed Linear project status updates",
+    scope: "project",
+    allowWhenDisabled: true,
+    handler: async ({ ctx, args }) =>
+      await handleProjectArtifactFamilyCommand({
+        ctx,
+        args,
+        family: "status-updates",
+      }),
+  },
+  {
     name: "sync-issue",
     summary:
       "One-off manual sync for a single issue/ticket in either direction",
@@ -1202,7 +1275,7 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
       const ticketInput = parsed.value.ticketId;
       if (!ticketInput) {
         ctx.logger.error({
-          message: "Missing --ticket <T-00001> for --from hack.",
+          message: "Missing --ticket <ticket-id> for --from hack.",
         });
         return 1;
       }
@@ -1984,7 +2057,7 @@ async function handleLinearStatusCommand(input: {
     return 1;
   }
 
-  const payload = await resolveLinearStatusPayload({
+  const payload = await resolveLinearStatusCommandPayload({
     controlPlaneConfig: input.ctx.controlPlaneConfig,
     profileId: parsed.value.profileId,
   });
@@ -2020,6 +2093,11 @@ type LinearStatusPayload = {
   readonly error: string | null;
   readonly profileError: string | null;
   readonly ok: boolean;
+};
+
+type LinearStatusCommandPayload = LinearStatusPayload & {
+  readonly projectBinding: ReturnType<typeof buildProjectBindingPayload>;
+  readonly summary: LinearProjectManagementSummary;
 };
 
 async function resolveLinearStatusPayload(input: {
@@ -2072,28 +2150,72 @@ async function resolveLinearStatusPayload(input: {
   };
 }
 
+async function resolveLinearStatusCommandPayload(input: {
+  readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
+  readonly profileId?: string;
+}): Promise<LinearStatusCommandPayload> {
+  const status = await resolveLinearStatusPayload(input);
+  const projectBinding = buildProjectBindingPayload({
+    binding: resolveProjectLinearBinding({
+      controlPlaneConfig: input.controlPlaneConfig,
+    }),
+  });
+  const summary = buildLinearProjectManagementSummary({
+    status,
+    binding: {
+      ...(projectBinding.profileId
+        ? { profileId: projectBinding.profileId }
+        : {}),
+      ...(projectBinding.projectId
+        ? { projectId: projectBinding.projectId }
+        : {}),
+      ...(projectBinding.projectName
+        ? { projectName: projectBinding.projectName }
+        : {}),
+      ...(projectBinding.teamId ? { teamId: projectBinding.teamId } : {}),
+      additionalProjects: projectBinding.additionalProjects,
+    },
+  });
+  return {
+    ...status,
+    projectBinding,
+    summary,
+  };
+}
+
 async function renderLinearStatusPayload(input: {
-  readonly payload: LinearStatusPayload;
+  readonly payload: LinearStatusCommandPayload;
   readonly logger: ExtensionCommandContext["logger"];
 }): Promise<void> {
-  await display.kv({
+  const lines = [
+    `Active profile: ${input.payload.summary.activeProfile}`,
+    `Connection: ${input.payload.summary.connectionLabel}`,
+    `Route: ${input.payload.summary.routingSummary}`,
+    ...(input.payload.summary.linkedProjectsLabel
+      ? [input.payload.summary.linkedProjectsLabel]
+      : []),
+    ...(input.payload.summary.capabilities.length > 0
+      ? [
+          "Capabilities:",
+          ...input.payload.summary.capabilities.map(
+            (capability) => `- ${capability}`
+          ),
+        ]
+      : []),
+    ...(input.payload.summary.repair
+      ? [
+          `Repair: ${input.payload.summary.repair.reason}`,
+          `Run: ${input.payload.summary.repair.command}`,
+        ]
+      : []),
+    ...(input.payload.summary.nextSteps.length > 0
+      ? ["Next:", ...input.payload.summary.nextSteps.map((step) => `- ${step}`)]
+      : []),
+  ];
+  await display.panel({
     title: "Linear status",
-    entries: [
-      ["selected_profile", input.payload.selectedProfile],
-      ["selected_source", input.payload.selectedSource],
-      ["default_profile", input.payload.defaultProfile],
-      ["selected_missing", input.payload.selectedMissing ? "yes" : "no"],
-      ["auth_ref", input.payload.authRef],
-      ["service", input.payload.service],
-      ["token_env_fallback", input.payload.tokenEnvFallback],
-      ["api_url", input.payload.apiUrl],
-      ["account_id", input.payload.accountId ?? ""],
-      ["account_name", input.payload.accountName ?? ""],
-      ["account_email", input.payload.accountEmail ?? ""],
-      ["token_resolved", input.payload.tokenResolved ? "yes" : "no"],
-      ["token_source", input.payload.tokenSource ?? ""],
-      ["token_expires_at", input.payload.tokenExpiresAt ?? ""],
-    ],
+    tone: input.payload.ok ? "info" : "warn",
+    lines,
   });
   if (input.payload.profileError) {
     input.logger.warn({ message: input.payload.profileError });
@@ -2450,16 +2572,43 @@ type LinearSyncClient = Pick<
   ReturnType<typeof createLinearClient>,
   | "createComment"
   | "createIssue"
+  | "createProjectDocument"
+  | "createProjectMilestone"
+  | "createProjectUpdate"
   | "getIssueById"
   | "getIssueByIdentifier"
   | "getProject"
   | "listIssueComments"
+  | "listProjectDocuments"
   | "listProjectIssuesPage"
+  | "listProjectMilestones"
+  | "listProjectUpdates"
   | "listTeamLabels"
   | "listTeamStates"
   | "listTeamUsers"
+  | "updateProjectDocument"
+  | "updateProjectMilestone"
   | "updateIssue"
 >;
+
+type ProjectArtifactLinearClient = Pick<
+  ReturnType<typeof createLinearClient>,
+  | "createProjectDocument"
+  | "createProjectMilestone"
+  | "createProjectUpdate"
+  | "listProjectDocuments"
+  | "listProjectMilestones"
+  | "listProjectUpdates"
+  | "updateProjectDocument"
+  | "updateProjectMilestone"
+>;
+
+type ProjectArtifactRuntime = {
+  readonly linear: ProjectArtifactLinearClient;
+  readonly profileId: string;
+  readonly projectDir: string;
+  readonly projectId: string;
+};
 
 type SyncRuntime = {
   readonly tickets: TicketSyncStore;
@@ -2495,6 +2644,32 @@ type RunAutosyncArgs = {
   limit?: number;
   syncLabels?: boolean;
   json: boolean;
+};
+
+type ProjectArtifactArgsBase = {
+  verb: string;
+  profileId?: string;
+  projectId?: string;
+  projectName?: string;
+  teamId?: string;
+  path?: string;
+  json: boolean;
+};
+
+type ProjectDocumentsVerb = "list" | "pull" | "plan" | "apply";
+type ProjectMilestonesVerb = ProjectDocumentsVerb;
+type ProjectStatusUpdatesVerb = "list" | "pull" | "plan" | "publish";
+
+type ProjectDocumentsArgs = Omit<ProjectArtifactArgsBase, "verb"> & {
+  verb: ProjectDocumentsVerb;
+};
+
+type ProjectMilestonesArgs = Omit<ProjectArtifactArgsBase, "verb"> & {
+  verb: ProjectMilestonesVerb;
+};
+
+type ProjectStatusUpdatesArgs = Omit<ProjectArtifactArgsBase, "verb"> & {
+  verb: ProjectStatusUpdatesVerb;
 };
 
 type ApplyDeliveryArgs = {
@@ -2664,6 +2839,1109 @@ async function createSyncRuntime(input: {
       }),
     },
   };
+}
+
+type ProjectArtifactCommandPayload = {
+  readonly artifacts?: readonly LinearProjectArtifactSnapshot[];
+  readonly changed?: number;
+  readonly errors?: readonly string[];
+  readonly family: LinearProjectArtifactFamily;
+  readonly movedPaths?: readonly {
+    readonly from: string;
+    readonly to: string;
+  }[];
+  readonly operation: "apply" | "list" | "plan" | "publish" | "pull";
+  readonly profileId: string;
+  readonly projectId: string;
+  readonly summary?: Record<string, number>;
+  readonly writtenPaths?: readonly string[];
+};
+
+async function handleProjectArtifactFamilyCommand(input: {
+  readonly ctx: ExtensionCommandContext;
+  readonly args: readonly string[];
+  readonly family: LinearProjectArtifactFamily;
+}): Promise<number> {
+  if (!input.ctx.project) {
+    input.ctx.logger.error({ message: "No project found. Run inside a repo." });
+    return 1;
+  }
+
+  const parsed = parseProjectArtifactFamilyArgs({
+    family: input.family,
+    args: input.args,
+  });
+  if (!parsed.ok) {
+    input.ctx.logger.error({ message: parsed.error });
+    return 1;
+  }
+
+  const binding = resolveProjectLinearBinding({
+    controlPlaneConfig: input.ctx.controlPlaneConfig,
+  });
+  const boundTarget = resolveBoundProjectArtifactTarget({
+    binding,
+    projectId: parsed.value.projectId,
+    projectName: parsed.value.projectName,
+    teamId: parsed.value.teamId,
+  });
+  if (!boundTarget.ok) {
+    input.ctx.logger.error({ message: boundTarget.error });
+    return 1;
+  }
+
+  const runtime = await createSyncRuntime({
+    ctx: input.ctx,
+    profileId:
+      parsed.value.profileId ??
+      boundTarget.target?.profileId ??
+      binding.profileId,
+  });
+  if (!runtime.ok) {
+    input.ctx.logger.error({ message: runtime.error });
+    return 1;
+  }
+
+  const selectedTarget = await resolveProjectArtifactTarget({
+    binding,
+    profileId: runtime.value.profileId,
+    projectId: parsed.value.projectId,
+    projectName: parsed.value.projectName,
+    teamId: parsed.value.teamId,
+    linear: runtime.value.linear,
+  });
+  if (!selectedTarget.ok) {
+    input.ctx.logger.error({
+      message: selectedTarget.error,
+    });
+    return 1;
+  }
+
+  const result = await runProjectArtifactCommand({
+    family: input.family,
+    verb: parsed.value.verb,
+    path: parsed.value.path,
+    runtime: {
+      linear: runtime.value.linear,
+      profileId: runtime.value.profileId,
+      projectDir: input.ctx.project.projectDir,
+      projectId: selectedTarget.target.projectId,
+    },
+  });
+  if (!result.ok) {
+    input.ctx.logger.error({ message: result.error });
+    return 1;
+  }
+
+  if (parsed.value.json) {
+    process.stdout.write(`${JSON.stringify(result.payload, null, 2)}\n`);
+    return 0;
+  }
+
+  await renderProjectArtifactCommandPayload({
+    payload: result.payload,
+  });
+  return 0;
+}
+
+function parseProjectArtifactFamilyArgs(input: {
+  readonly family: LinearProjectArtifactFamily;
+  readonly args: readonly string[];
+}):
+  | {
+      readonly ok: true;
+      readonly value:
+        | ProjectDocumentsArgs
+        | ProjectMilestonesArgs
+        | ProjectStatusUpdatesArgs;
+    }
+  | { readonly ok: false; readonly error: string } {
+  if (input.family === "documents") {
+    return parseProjectDocumentsArgs({ args: input.args });
+  }
+  if (input.family === "milestones") {
+    return parseProjectMilestonesArgs({ args: input.args });
+  }
+  return parseProjectStatusUpdatesArgs({ args: input.args });
+}
+
+async function runProjectArtifactCommand(input: {
+  readonly family: LinearProjectArtifactFamily;
+  readonly verb:
+    | ProjectDocumentsVerb
+    | ProjectMilestonesVerb
+    | ProjectStatusUpdatesVerb;
+  readonly runtime: ProjectArtifactRuntime;
+  readonly path?: string;
+}): Promise<
+  | { readonly ok: true; readonly payload: ProjectArtifactCommandPayload }
+  | { readonly ok: false; readonly error: string }
+> {
+  try {
+    if (input.verb === "list") {
+      const artifacts = await listRemoteProjectArtifacts({
+        family: input.family,
+        runtime: input.runtime,
+      });
+      if (!artifacts.ok) {
+        return artifacts;
+      }
+      return {
+        ok: true,
+        payload: {
+          operation: "list",
+          family: input.family,
+          profileId: input.runtime.profileId,
+          projectId: input.runtime.projectId,
+          artifacts: artifacts.data,
+        },
+      };
+    }
+
+    if (input.verb === "pull") {
+      const artifacts = await listRemoteProjectArtifacts({
+        family: input.family,
+        runtime: input.runtime,
+      });
+      if (!artifacts.ok) {
+        return artifacts;
+      }
+
+      const localArtifacts = await loadManagedProjectArtifacts({
+        family: input.family,
+        ignoreParseErrors: true,
+        runtime: input.runtime,
+      });
+      if (!localArtifacts.ok) {
+        return localArtifacts;
+      }
+
+      const localByLinearId = new Map(
+        localArtifacts.data
+          .filter((artifact) => artifact.linearId)
+          .map((artifact) => [artifact.linearId as string, artifact])
+      );
+
+      let changed = 0;
+      const writtenPaths: string[] = [];
+      for (const artifact of artifacts.data) {
+        const canonicalArtifact = materializeLocalLinearProjectArtifact({
+          projectDir: input.runtime.projectDir,
+          artifact,
+          ...(input.family === "status-updates"
+            ? { statusUpdateState: "published" as const }
+            : {}),
+        });
+        const existingManagedArtifact = artifact.linearId
+          ? localByLinearId.get(artifact.linearId)
+          : undefined;
+        const wrote = await writeManagedProjectArtifactToCanonicalPath({
+          artifact: canonicalArtifact,
+          ...(existingManagedArtifact
+            ? { previousPath: existingManagedArtifact.path }
+            : {}),
+        });
+        if (!wrote) {
+          continue;
+        }
+        changed += 1;
+        writtenPaths.push(canonicalArtifact.path);
+      }
+
+      return {
+        ok: true,
+        payload: {
+          operation: "pull",
+          family: input.family,
+          profileId: input.runtime.profileId,
+          projectId: input.runtime.projectId,
+          changed,
+          writtenPaths,
+        },
+      };
+    }
+
+    if (input.verb === "plan") {
+      const remoteArtifacts = await listRemoteProjectArtifacts({
+        family: input.family,
+        runtime: input.runtime,
+      });
+      if (!remoteArtifacts.ok) {
+        return remoteArtifacts;
+      }
+      const localArtifacts = await loadManagedProjectArtifacts({
+        family: input.family,
+        runtime: input.runtime,
+        path: input.path,
+      });
+      if (!localArtifacts.ok) {
+        return localArtifacts;
+      }
+
+      const plan = planLinearProjectArtifactChanges({
+        localArtifacts: localArtifacts.data,
+        remoteArtifacts: remoteArtifacts.data,
+      });
+      if (plan.errors.length > 0) {
+        return {
+          ok: false,
+          error: plan.errors.join("\n"),
+        };
+      }
+      return {
+        ok: true,
+        payload: {
+          operation: "plan",
+          family: input.family,
+          profileId: input.runtime.profileId,
+          projectId: input.runtime.projectId,
+          errors: plan.errors,
+          summary: {
+            create: plan.create.length,
+            update: plan.update.length,
+            noop: plan.noop.length,
+            remoteOnly: plan.remoteOnly.length,
+            errors: plan.errors.length,
+          },
+        },
+      };
+    }
+
+    if (input.verb === "apply") {
+      if (input.family === "status-updates") {
+        return {
+          ok: false,
+          error:
+            "Status updates are append-only. Use `hack linear status-updates publish` instead.",
+        };
+      }
+
+      const remoteArtifacts = await listRemoteProjectArtifacts({
+        family: input.family,
+        runtime: input.runtime,
+      });
+      if (!remoteArtifacts.ok) {
+        return remoteArtifacts;
+      }
+      const localArtifacts = await loadManagedProjectArtifacts({
+        family: input.family,
+        runtime: input.runtime,
+        path: input.path,
+      });
+      if (!localArtifacts.ok) {
+        return localArtifacts;
+      }
+
+      const plan = planLinearProjectArtifactChanges({
+        localArtifacts: localArtifacts.data,
+        remoteArtifacts: remoteArtifacts.data,
+      });
+      if (plan.errors.length > 0) {
+        return {
+          ok: false,
+          error: plan.errors.join("\n"),
+        };
+      }
+
+      const writtenPaths: string[] = [];
+      for (const artifact of plan.create) {
+        const saved = await applyManagedProjectArtifactCreate({
+          family: input.family,
+          runtime: input.runtime,
+          artifact,
+        });
+        if (!saved.ok) {
+          return saved;
+        }
+        const wrote = await writeManagedProjectArtifactToCanonicalPath({
+          artifact: materializeLocalLinearProjectArtifact({
+            projectDir: input.runtime.projectDir,
+            artifact: saved.data,
+          }),
+          previousPath: artifact.path,
+        });
+        if (wrote) {
+          writtenPaths.push(
+            resolveLinearProjectArtifactPath({
+              projectDir: input.runtime.projectDir,
+              artifact: saved.data,
+            })
+          );
+        }
+      }
+
+      for (const entry of plan.update) {
+        const saved = await applyManagedProjectArtifactUpdate({
+          family: input.family,
+          runtime: input.runtime,
+          artifact: entry.local,
+        });
+        if (!saved.ok) {
+          return saved;
+        }
+        const nextArtifact = materializeLocalLinearProjectArtifact({
+          projectDir: input.runtime.projectDir,
+          artifact: saved.data,
+        });
+        const wrote = await writeManagedProjectArtifactToCanonicalPath({
+          artifact: nextArtifact,
+          previousPath: entry.local.path,
+        });
+        if (wrote) {
+          writtenPaths.push(nextArtifact.path);
+        }
+      }
+
+      return {
+        ok: true,
+        payload: {
+          operation: "apply",
+          family: input.family,
+          profileId: input.runtime.profileId,
+          projectId: input.runtime.projectId,
+          writtenPaths,
+          summary: {
+            created: plan.create.length,
+            updated: plan.update.length,
+            noop: plan.noop.length,
+            remoteOnly: plan.remoteOnly.length,
+            errors: 0,
+          },
+        },
+      };
+    }
+
+    if (input.family !== "status-updates") {
+      return {
+        ok: false,
+        error: `Invalid ${input.family} verb: ${input.verb}.`,
+      };
+    }
+
+    const localArtifacts = await loadManagedProjectArtifacts({
+      family: input.family,
+      runtime: input.runtime,
+      path: input.path,
+    });
+    if (!localArtifacts.ok) {
+      return localArtifacts;
+    }
+
+    const draftArtifacts = localArtifacts.data.filter(
+      (artifact) =>
+        artifact.kind === "linear-project-status-update" &&
+        isDraftStatusUpdatePath({ path: artifact.path })
+    );
+    const alreadyPublishedDraft = draftArtifacts.find(
+      (artifact) => artifact.linearId
+    );
+    if (alreadyPublishedDraft) {
+      return {
+        ok: false,
+        error:
+          "Publish requires a draft status update without a linearId. Remove the linearId or move the file to published/ first.",
+      };
+    }
+
+    const drafts = draftArtifacts.filter((artifact) => !artifact.linearId);
+
+    const movedPaths: Array<{ from: string; to: string }> = [];
+    for (const artifact of drafts) {
+      const published = await publishManagedProjectStatusUpdate({
+        runtime: input.runtime,
+        artifact,
+      });
+      if (!published.ok) {
+        return published;
+      }
+      movedPaths.push({
+        from: artifact.path,
+        to: published.data.path,
+      });
+    }
+
+    return {
+      ok: true,
+      payload: {
+        operation: "publish",
+        family: input.family,
+        profileId: input.runtime.profileId,
+        projectId: input.runtime.projectId,
+        movedPaths,
+        summary: {
+          published: movedPaths.length,
+        },
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+async function listRemoteProjectArtifacts(input: {
+  readonly family: LinearProjectArtifactFamily;
+  readonly runtime: ProjectArtifactRuntime;
+}): Promise<
+  | {
+      readonly ok: true;
+      readonly data: readonly LinearProjectArtifactSnapshot[];
+    }
+  | { readonly ok: false; readonly error: string }
+> {
+  if (input.family === "documents") {
+    const documents = await input.runtime.linear.listProjectDocuments({
+      projectId: input.runtime.projectId,
+    });
+    if (!documents.ok) {
+      return {
+        ok: false,
+        error: documents.error,
+      };
+    }
+    return {
+      ok: true,
+      data: documents.data.map((document) =>
+        projectDocumentToArtifactSnapshot({
+          document,
+          projectId: input.runtime.projectId,
+        })
+      ),
+    };
+  }
+
+  if (input.family === "milestones") {
+    const milestones = await input.runtime.linear.listProjectMilestones({
+      projectId: input.runtime.projectId,
+    });
+    if (!milestones.ok) {
+      return {
+        ok: false,
+        error: milestones.error,
+      };
+    }
+    return {
+      ok: true,
+      data: milestones.data.map((milestone) =>
+        projectMilestoneToArtifactSnapshot({
+          milestone,
+          projectId: input.runtime.projectId,
+        })
+      ),
+    };
+  }
+
+  const updates = await input.runtime.linear.listProjectUpdates({
+    projectId: input.runtime.projectId,
+  });
+  if (!updates.ok) {
+    return {
+      ok: false,
+      error: updates.error,
+    };
+  }
+  return {
+    ok: true,
+    data: updates.data.map((update) =>
+      projectUpdateToArtifactSnapshot({
+        update,
+        projectId: input.runtime.projectId,
+      })
+    ),
+  };
+}
+
+async function loadManagedProjectArtifacts(input: {
+  readonly family: LinearProjectArtifactFamily;
+  readonly runtime: ProjectArtifactRuntime;
+  readonly path?: string;
+  readonly ignoreParseErrors?: boolean;
+}): Promise<
+  | { readonly ok: true; readonly data: readonly LocalLinearProjectArtifact[] }
+  | { readonly ok: false; readonly error: string }
+> {
+  try {
+    return {
+      ok: true,
+      data: await loadLocalLinearProjectArtifacts({
+        family: input.family,
+        ...(input.ignoreParseErrors !== undefined
+          ? { ignoreParseErrors: input.ignoreParseErrors }
+          : {}),
+        linearProjectId: input.runtime.projectId,
+        path: input.path,
+        projectDir: input.runtime.projectDir,
+      }),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+async function applyManagedProjectArtifactCreate(input: {
+  readonly family: "documents" | "milestones";
+  readonly runtime: ProjectArtifactRuntime;
+  readonly artifact: LocalLinearProjectArtifact;
+}): Promise<
+  | { readonly ok: true; readonly data: LinearProjectArtifactSnapshot }
+  | { readonly ok: false; readonly error: string }
+> {
+  if (input.family === "documents") {
+    if (input.artifact.kind !== "linear-project-document") {
+      return {
+        ok: false,
+        error: `Expected a document artifact at ${input.artifact.path}.`,
+      };
+    }
+    const created = await input.runtime.linear.createProjectDocument({
+      projectId: input.runtime.projectId,
+      title: input.artifact.title,
+      content: input.artifact.body,
+      ...(input.artifact.icon ? { icon: input.artifact.icon } : {}),
+      ...(input.artifact.sortOrder !== undefined
+        ? { sortOrder: input.artifact.sortOrder }
+        : {}),
+    });
+    if (!created.ok) {
+      return {
+        ok: false,
+        error: created.error,
+      };
+    }
+    return {
+      ok: true,
+      data: projectDocumentToArtifactSnapshot({
+        document: created.data,
+        projectId: input.runtime.projectId,
+      }),
+    };
+  }
+
+  if (input.artifact.kind !== "linear-project-milestone") {
+    return {
+      ok: false,
+      error: `Expected a milestone artifact at ${input.artifact.path}.`,
+    };
+  }
+  const created = await input.runtime.linear.createProjectMilestone({
+    projectId: input.runtime.projectId,
+    title: input.artifact.title,
+    description: input.artifact.body,
+    ...(input.artifact.targetDate
+      ? { targetDate: input.artifact.targetDate }
+      : {}),
+    ...(input.artifact.sortOrder !== undefined
+      ? { sortOrder: input.artifact.sortOrder }
+      : {}),
+  });
+  if (!created.ok) {
+    return {
+      ok: false,
+      error: created.error,
+    };
+  }
+  return {
+    ok: true,
+    data: projectMilestoneToArtifactSnapshot({
+      milestone: created.data,
+      projectId: input.runtime.projectId,
+    }),
+  };
+}
+
+async function applyManagedProjectArtifactUpdate(input: {
+  readonly family: "documents" | "milestones";
+  readonly runtime: ProjectArtifactRuntime;
+  readonly artifact: LocalLinearProjectArtifact;
+}): Promise<
+  | { readonly ok: true; readonly data: LinearProjectArtifactSnapshot }
+  | { readonly ok: false; readonly error: string }
+> {
+  if (input.family === "documents") {
+    if (
+      input.artifact.kind !== "linear-project-document" ||
+      !input.artifact.linearId
+    ) {
+      return {
+        ok: false,
+        error: `Expected a managed document with linearId at ${input.artifact.path}.`,
+      };
+    }
+    const updated = await input.runtime.linear.updateProjectDocument({
+      documentId: input.artifact.linearId,
+      title: input.artifact.title,
+      content: input.artifact.body,
+      ...(input.artifact.icon ? { icon: input.artifact.icon } : {}),
+      ...(input.artifact.sortOrder !== undefined
+        ? { sortOrder: input.artifact.sortOrder }
+        : {}),
+    });
+    if (!updated.ok) {
+      return {
+        ok: false,
+        error: updated.error,
+      };
+    }
+    return {
+      ok: true,
+      data: projectDocumentToArtifactSnapshot({
+        document: updated.data,
+        projectId: input.runtime.projectId,
+      }),
+    };
+  }
+
+  if (
+    input.artifact.kind !== "linear-project-milestone" ||
+    !input.artifact.linearId
+  ) {
+    return {
+      ok: false,
+      error: `Expected a managed milestone with linearId at ${input.artifact.path}.`,
+    };
+  }
+  const updated = await input.runtime.linear.updateProjectMilestone({
+    milestoneId: input.artifact.linearId,
+    title: input.artifact.title,
+    description: input.artifact.body,
+    ...(input.artifact.targetDate
+      ? { targetDate: input.artifact.targetDate }
+      : {}),
+    ...(input.artifact.sortOrder !== undefined
+      ? { sortOrder: input.artifact.sortOrder }
+      : {}),
+    ...(input.artifact.state ? { status: input.artifact.state } : {}),
+  });
+  if (!updated.ok) {
+    return {
+      ok: false,
+      error: updated.error,
+    };
+  }
+  return {
+    ok: true,
+    data: projectMilestoneToArtifactSnapshot({
+      milestone: updated.data,
+      projectId: input.runtime.projectId,
+    }),
+  };
+}
+
+async function publishManagedProjectStatusUpdate(input: {
+  readonly runtime: ProjectArtifactRuntime;
+  readonly artifact: Extract<
+    LocalLinearProjectArtifact,
+    { readonly kind: "linear-project-status-update" }
+  >;
+}): Promise<
+  | {
+      readonly ok: true;
+      readonly data: Extract<
+        LocalLinearProjectArtifact,
+        { readonly kind: "linear-project-status-update" }
+      >;
+    }
+  | { readonly ok: false; readonly error: string }
+> {
+  const created = await input.runtime.linear.createProjectUpdate({
+    projectId: input.runtime.projectId,
+    body: input.artifact.body,
+    ...(input.artifact.health ? { health: input.artifact.health } : {}),
+  });
+  if (!created.ok) {
+    return {
+      ok: false,
+      error: created.error,
+    };
+  }
+
+  const nextArtifact = {
+    ...projectUpdateToArtifactSnapshot({
+      update: created.data,
+      projectId: input.runtime.projectId,
+      fallbackDate: input.artifact.date,
+      fallbackSlug: input.artifact.slug,
+      fallbackTitle: input.artifact.title,
+    }),
+    path: resolveLinearProjectArtifactPath({
+      projectDir: input.runtime.projectDir,
+      artifact: {
+        ...projectUpdateToArtifactSnapshot({
+          update: created.data,
+          projectId: input.runtime.projectId,
+          fallbackDate: input.artifact.date,
+          fallbackSlug: input.artifact.slug,
+          fallbackTitle: input.artifact.title,
+        }),
+      },
+      statusUpdateState: "published",
+    }),
+  } satisfies Extract<
+    LocalLinearProjectArtifact,
+    { readonly kind: "linear-project-status-update" }
+  >;
+
+  await writeLocalLinearProjectArtifact({
+    artifact: nextArtifact,
+  });
+  if (input.artifact.path !== nextArtifact.path) {
+    await removeFileIfExists({
+      path: input.artifact.path,
+    });
+  }
+
+  return {
+    ok: true,
+    data: nextArtifact,
+  };
+}
+
+function projectDocumentToArtifactSnapshot(input: {
+  readonly document: LinearProjectDocument;
+  readonly projectId: string;
+}): Extract<
+  LinearProjectArtifactSnapshot,
+  { readonly kind: "linear-project-document" }
+> {
+  return {
+    kind: "linear-project-document",
+    linearProjectId: input.document.projectId ?? input.projectId,
+    title: input.document.title,
+    linearId: input.document.id,
+    ...(input.document.slugId ? { slug: input.document.slugId } : {}),
+    archived: input.document.archived,
+    ...(input.document.updatedAt
+      ? { updatedAt: input.document.updatedAt }
+      : {}),
+    body: input.document.content ?? "",
+    ...(input.document.sortOrder !== undefined
+      ? { sortOrder: input.document.sortOrder }
+      : {}),
+    ...(input.document.icon ? { icon: input.document.icon } : {}),
+  };
+}
+
+function projectMilestoneToArtifactSnapshot(input: {
+  readonly milestone: LinearProjectMilestone;
+  readonly projectId: string;
+}): Extract<
+  LinearProjectArtifactSnapshot,
+  { readonly kind: "linear-project-milestone" }
+> {
+  return {
+    kind: "linear-project-milestone",
+    linearProjectId: input.milestone.projectId ?? input.projectId,
+    title: input.milestone.title,
+    linearId: input.milestone.id,
+    slug: slugifyLinearProjectArtifactTitle({
+      title: input.milestone.title,
+    }),
+    archived: input.milestone.archived,
+    ...(input.milestone.updatedAt
+      ? { updatedAt: input.milestone.updatedAt }
+      : {}),
+    body: input.milestone.description ?? "",
+    ...(input.milestone.targetDate
+      ? { targetDate: input.milestone.targetDate }
+      : {}),
+    ...(input.milestone.status ? { state: input.milestone.status } : {}),
+    ...(input.milestone.sortOrder !== undefined
+      ? { sortOrder: input.milestone.sortOrder }
+      : {}),
+  };
+}
+
+function projectUpdateToArtifactSnapshot(input: {
+  readonly update: LinearProjectUpdate;
+  readonly projectId: string;
+  readonly fallbackDate?: string;
+  readonly fallbackSlug?: string;
+  readonly fallbackTitle?: string;
+}): Extract<
+  LinearProjectArtifactSnapshot,
+  { readonly kind: "linear-project-status-update" }
+> {
+  const date =
+    input.fallbackDate ?? input.update.createdAt.slice(0, 10) ?? undefined;
+  const title =
+    input.fallbackTitle ??
+    readProjectUpdateHeading({ body: input.update.body }) ??
+    humanizeArtifactSlug({
+      slug: input.fallbackSlug ?? input.update.slugId,
+    }) ??
+    (date ? `Status update ${date}` : "Status update");
+  const slug =
+    input.fallbackSlug ??
+    input.update.slugId ??
+    slugifyLinearProjectArtifactTitle({
+      title,
+    });
+
+  return {
+    kind: "linear-project-status-update",
+    linearProjectId: input.update.projectId ?? input.projectId,
+    title,
+    linearId: input.update.id,
+    slug,
+    archived: false,
+    ...(input.update.updatedAt ? { updatedAt: input.update.updatedAt } : {}),
+    body: input.update.body,
+    ...(date ? { date } : {}),
+    ...(input.update.health ? { health: input.update.health } : {}),
+  };
+}
+
+function readProjectUpdateHeading(input: {
+  readonly body: string;
+}): string | null {
+  for (const line of input.body.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    if (trimmed.startsWith("#")) {
+      const heading = trimmed.replace(MARKDOWN_HEADING_PREFIX_REGEX, "").trim();
+      return heading || null;
+    }
+    break;
+  }
+  return null;
+}
+
+function humanizeArtifactSlug(input: {
+  readonly slug?: string;
+}): string | null {
+  const slug = input.slug?.trim();
+  if (!slug) {
+    return null;
+  }
+  return slug
+    .split(/[-_]+/g)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+async function writeLocalLinearProjectArtifact(input: {
+  readonly artifact: LocalLinearProjectArtifact;
+}): Promise<boolean> {
+  const text = serializeLinearProjectArtifactFile({
+    artifact: input.artifact,
+  });
+  const existing = await readFileIfExists({
+    path: input.artifact.path,
+  });
+  if (existing === text) {
+    return false;
+  }
+  await mkdir(dirname(input.artifact.path), { recursive: true });
+  await Bun.write(input.artifact.path, text);
+  return true;
+}
+
+async function writeManagedProjectArtifactToCanonicalPath(input: {
+  readonly artifact: LocalLinearProjectArtifact;
+  readonly previousPath?: string;
+}): Promise<boolean> {
+  await assertManagedArtifactPathWritable({
+    artifact: input.artifact,
+    ...(input.previousPath ? { previousPath: input.previousPath } : {}),
+  });
+  const wrote = await writeLocalLinearProjectArtifact({
+    artifact: input.artifact,
+  });
+  if (
+    input.previousPath &&
+    input.previousPath !== input.artifact.path &&
+    (wrote || (await Bun.file(input.artifact.path).exists()))
+  ) {
+    await removeFileIfExists({
+      path: input.previousPath,
+    });
+  }
+  return wrote;
+}
+
+async function assertManagedArtifactPathWritable(input: {
+  readonly artifact: LocalLinearProjectArtifact;
+  readonly previousPath?: string;
+}): Promise<void> {
+  const existingText = await readFileIfExists({
+    path: input.artifact.path,
+  });
+  if (existingText === null) {
+    return;
+  }
+
+  if (input.previousPath && input.previousPath === input.artifact.path) {
+    return;
+  }
+
+  const parsedExisting = parseExistingManagedArtifactAtPath({
+    path: input.artifact.path,
+    text: existingText,
+  });
+  if (!parsedExisting) {
+    throw new Error(
+      `Refusing to overwrite unmanaged file: ${input.artifact.path}`
+    );
+  }
+
+  if (
+    parsedExisting.kind !== input.artifact.kind ||
+    parsedExisting.linearProjectId !== input.artifact.linearProjectId ||
+    parsedExisting.linearId !== input.artifact.linearId
+  ) {
+    throw new Error(
+      `Refusing to overwrite managed file for a different artifact: ${input.artifact.path}`
+    );
+  }
+}
+
+function parseExistingManagedArtifactAtPath(input: {
+  readonly path: string;
+  readonly text: string;
+}): LocalLinearProjectArtifact | null {
+  try {
+    return parseLinearProjectArtifactFile({
+      filePath: input.path,
+      text: input.text,
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function readFileIfExists(input: {
+  readonly path: string;
+}): Promise<string | null> {
+  const file = Bun.file(input.path);
+  if (!(await file.exists())) {
+    return null;
+  }
+  return await file.text();
+}
+
+async function removeFileIfExists(input: {
+  readonly path: string;
+}): Promise<void> {
+  await rm(input.path, { force: true });
+}
+
+function isDraftStatusUpdatePath(input: { readonly path: string }): boolean {
+  return input.path.replaceAll("\\", "/").includes("/status-updates/drafts/");
+}
+
+async function renderProjectArtifactCommandPayload(input: {
+  readonly payload: ProjectArtifactCommandPayload;
+}): Promise<void> {
+  const title = `Linear ${input.payload.family}`;
+  if (input.payload.operation === "list") {
+    const artifacts = input.payload.artifacts ?? [];
+    await display.kv({
+      title,
+      entries: [
+        ["profile", input.payload.profileId],
+        ["project_id", input.payload.projectId],
+        ["count", String(artifacts.length)],
+      ],
+    });
+    if (artifacts.length === 0) {
+      return;
+    }
+    await display.table({
+      columns: listProjectArtifactColumns({
+        family: input.payload.family,
+      }),
+      rows: artifacts.map((artifact) =>
+        listProjectArtifactRow({
+          artifact,
+        })
+      ),
+    });
+    return;
+  }
+
+  if (input.payload.operation === "pull") {
+    await display.kv({
+      title: `${title} pulled`,
+      entries: [
+        ["profile", input.payload.profileId],
+        ["project_id", input.payload.projectId],
+        ["changed", String(input.payload.changed ?? 0)],
+        ["written", String(input.payload.writtenPaths?.length ?? 0)],
+      ],
+    });
+    return;
+  }
+
+  if (input.payload.operation === "publish") {
+    await display.kv({
+      title: `${title} published`,
+      entries: [
+        ["profile", input.payload.profileId],
+        ["project_id", input.payload.projectId],
+        ["published", String(input.payload.summary?.published ?? 0)],
+      ],
+    });
+    return;
+  }
+
+  await display.kv({
+    title: `${title} ${input.payload.operation}`,
+    entries: [
+      ["profile", input.payload.profileId],
+      ["project_id", input.payload.projectId],
+      ...Object.entries(input.payload.summary ?? {}).map(([key, value]) => [
+        key,
+        String(value),
+      ]),
+    ],
+  });
+}
+
+function listProjectArtifactColumns(input: {
+  readonly family: LinearProjectArtifactFamily;
+}): string[] {
+  if (input.family === "documents") {
+    return ["Document ID", "Title", "Slug", "Updated At"];
+  }
+  if (input.family === "milestones") {
+    return ["Milestone ID", "Title", "Target Date", "State"];
+  }
+  return ["Update ID", "Title", "Date", "Health"];
+}
+
+function listProjectArtifactRow(input: {
+  readonly artifact: LinearProjectArtifactSnapshot;
+}): string[] {
+  if (input.artifact.kind === "linear-project-document") {
+    return [
+      input.artifact.linearId ?? "",
+      input.artifact.title,
+      input.artifact.slug ?? "",
+      input.artifact.updatedAt ?? "",
+    ];
+  }
+  if (input.artifact.kind === "linear-project-milestone") {
+    return [
+      input.artifact.linearId ?? "",
+      input.artifact.title,
+      input.artifact.targetDate ?? "",
+      input.artifact.state ?? "",
+    ];
+  }
+  return [
+    input.artifact.linearId ?? "",
+    input.artifact.title,
+    input.artifact.date ?? "",
+    input.artifact.health ?? "",
+  ];
 }
 
 function resolveSelectedLinearProfileId(input: {
@@ -2903,9 +4181,15 @@ type LinearDeliverySummary = {
 
 function resolveTicketAuthority(input: {
   readonly ticket: TicketSummary;
-}): "hack" | "linear" {
+}): "hack" | "linear" | "review_required" {
   const owner = input.ticket.owner.trim().toLowerCase();
   const source = input.ticket.source.trim().toLowerCase();
+  if (
+    (owner === "linear" && source !== "linear") ||
+    (source === "linear" && owner !== "linear")
+  ) {
+    return "review_required";
+  }
   if (owner === "linear" || source === "linear") {
     return "linear";
   }
@@ -2943,7 +4227,7 @@ function normalizeProjectValue(input: {
 }
 
 function detectAuthoritativeFieldConflicts(input: {
-  readonly authority: "hack" | "linear";
+  readonly authority: "hack" | "linear" | "review_required";
   readonly ticket: TicketSummary;
   readonly issue: LinearIssue;
   readonly remoteProjection: Pick<
@@ -2952,13 +4236,15 @@ function detectAuthoritativeFieldConflicts(input: {
   >;
 }): readonly RecordedSyncConflict[] {
   const conflicts: RecordedSyncConflict[] = [];
+  const authorityLabel =
+    input.authority === "review_required" ? "review-required" : input.authority;
   const localTitle = input.ticket.title.trim();
   const remoteTitle = input.issue.title.trim();
   if (localTitle !== remoteTitle) {
     conflicts.push({
       field: "title",
       authority: input.authority,
-      summary: `Authoritative ${input.authority} title diverged from the other side.`,
+      summary: `Authoritative ${authorityLabel} title diverged from the other side.`,
       localValue: localTitle,
       remoteValue: remoteTitle,
     });
@@ -2972,9 +4258,9 @@ function detectAuthoritativeFieldConflicts(input: {
   });
   if (localBody !== remoteBody) {
     conflicts.push({
-      field: "body",
+      field: normalizeTicketFieldName("body"),
       authority: input.authority,
-      summary: `Authoritative ${input.authority} body diverged from the other side.`,
+      summary: `Authoritative ${authorityLabel} body diverged from the other side.`,
       localValue: localBody,
       remoteValue: remoteBody,
     });
@@ -2984,7 +4270,7 @@ function detectAuthoritativeFieldConflicts(input: {
     conflicts.push({
       field: "status",
       authority: input.authority,
-      summary: `Authoritative ${input.authority} status diverged from the other side.`,
+      summary: `Authoritative ${authorityLabel} status diverged from the other side.`,
       localValue: input.ticket.status,
       remoteValue: input.remoteProjection.status,
     });
@@ -3005,7 +4291,7 @@ function detectAuthoritativeFieldConflicts(input: {
     conflicts.push({
       field: "project",
       authority: input.authority,
-      summary: `Authoritative ${input.authority} project routing diverged from the other side.`,
+      summary: `Authoritative ${authorityLabel} project routing diverged from the other side.`,
       ...(localProject !== undefined ? { localValue: localProject } : {}),
       ...(remoteProject !== undefined ? { remoteValue: remoteProject } : {}),
     });
@@ -3176,10 +4462,56 @@ function buildConflictDedupKey(input: {
   readonly remoteValue?: TicketMetadataValue;
 }): string {
   return [
-    input.field,
+    normalizeTicketFieldName(input.field),
     JSON.stringify(input.localValue ?? null),
     JSON.stringify(input.remoteValue ?? null),
   ].join("|");
+}
+
+function buildLinearCheckpointIdempotencyKey(input: {
+  readonly ticketId: string;
+  readonly profileId: string;
+  readonly direction: string;
+  readonly issue: LinearIssue;
+}): string {
+  const fingerprint = createHash("sha256")
+    .update(
+      JSON.stringify({
+        issueId: input.issue.id,
+        identifier: input.issue.identifier,
+        title: input.issue.title,
+        description: input.issue.description ?? null,
+        stateId: input.issue.state.id,
+        teamId: input.issue.teamId,
+        projectId: input.issue.projectId ?? null,
+        assigneeId: input.issue.assigneeId ?? null,
+        labels: input.issue.labels.map((label) => label.id).sort(),
+      })
+    )
+    .digest("hex")
+    .slice(0, 16);
+
+  return `linear:checkpoint:${input.ticketId}:${input.profileId}:${input.direction}:${fingerprint}`;
+}
+
+function buildLinearConflictIdempotencyKey(input: {
+  readonly ticketId: string;
+  readonly conflict: RecordedSyncConflict;
+}): string {
+  const fingerprint = createHash("sha256")
+    .update(
+      JSON.stringify({
+        field: normalizeTicketFieldName(input.conflict.field),
+        authority: input.conflict.authority ?? null,
+        summary: input.conflict.summary ?? null,
+        localValue: input.conflict.localValue ?? null,
+        remoteValue: input.conflict.remoteValue ?? null,
+      })
+    )
+    .digest("hex")
+    .slice(0, 16);
+
+  return `linear:conflict:${input.ticketId}:${fingerprint}`;
 }
 
 async function recordAuthoritativeConflicts(input: {
@@ -3224,6 +4556,10 @@ async function recordAuthoritativeConflicts(input: {
       field: conflict.field,
       authority: conflict.authority,
       summary: conflict.summary,
+      idempotencyKey: buildLinearConflictIdempotencyKey({
+        ticketId: input.ticketId,
+        conflict,
+      }),
       ...(conflict.localValue !== undefined
         ? { localValue: conflict.localValue }
         : {}),
@@ -3345,6 +4681,12 @@ async function recordLinearSyncCheckpoint(input: {
     direction: input.direction,
     remoteCursor: input.issue.identifier,
     localUpdatedAt: new Date().toISOString(),
+    idempotencyKey: buildLinearCheckpointIdempotencyKey({
+      ticketId: input.ticketId,
+      profileId: input.profileId,
+      direction: input.direction,
+      issue: input.issue,
+    }),
   });
   if (!checkpoint.ok) {
     return { ok: false, error: checkpoint.error };
@@ -3744,25 +5086,25 @@ async function syncTicketToLinearIssue(input: {
     return { ok: false, error: recordedConflicts.error };
   }
 
-  const effectiveFields =
-    authority === "linear" && existingIssue.issue
-      ? {
-          ...fields.value,
-          title: existingIssue.issue.title,
-          description: existingIssue.issue.description ?? "",
-          ...(existingIssue.issue.assigneeId
-            ? { assigneeId: existingIssue.issue.assigneeId }
-            : {}),
-          ...(input.syncToggles.statuses
-            ? { stateId: existingIssue.issue.state.id }
-            : {}),
-        }
-      : fields.value;
+  const preserveRemoteIssueFields = authority !== "hack" && existingIssue.issue;
 
-  const effectiveProjectId =
-    authority === "linear" && existingIssue.issue
-      ? existingIssue.issue.projectId
-      : target.value.projectId;
+  const effectiveFields = preserveRemoteIssueFields
+    ? {
+        ...fields.value,
+        title: existingIssue.issue.title,
+        description: existingIssue.issue.description ?? "",
+        ...(existingIssue.issue.assigneeId
+          ? { assigneeId: existingIssue.issue.assigneeId }
+          : {}),
+        ...(input.syncToggles.statuses
+          ? { stateId: existingIssue.issue.state.id }
+          : {}),
+      }
+    : fields.value;
+
+  const effectiveProjectId = preserveRemoteIssueFields
+    ? existingIssue.issue.projectId
+    : target.value.projectId;
 
   const syncedIssue = await upsertLinearIssueForTicketSync({
     runtime: input.runtime,
@@ -3780,13 +5122,17 @@ async function syncTicketToLinearIssue(input: {
 
   const updated = await input.runtime.tickets.updateTicket({
     ticketId: ticket.ticketId,
-    externalSystem: "linear",
-    externalId: syncedIssue.data.id,
-    externalKey: syncedIssue.data.identifier,
-    externalUrl: syncedIssue.data.url,
-    externalProjectId: syncedIssue.data.projectId,
-    externalProjectName: syncedIssue.data.projectName,
-    externalTeamId: syncedIssue.data.teamId,
+    ...projectRemoteLinkToCompatibilityFields({
+      remote: {
+        provider: "linear",
+        remoteId: syncedIssue.data.id,
+        remoteKey: syncedIssue.data.identifier,
+        remoteUrl: syncedIssue.data.url,
+        projectId: syncedIssue.data.projectId,
+        projectName: syncedIssue.data.projectName,
+        teamId: syncedIssue.data.teamId,
+      },
+    }),
   });
   if (!updated.ok) {
     return { ok: false, error: updated.error };
@@ -3841,15 +5187,19 @@ async function resolveLinearTargetForTicketSync(input: {
     }
   | { readonly ok: false; readonly error: string }
 > {
+  const linearRemote = findTicketRemoteLink({
+    ticket: input.ticket,
+    provider: "linear",
+  });
   let projectId =
     input.explicitProjectId ??
     input.existingIssue?.projectId ??
-    input.ticket.externalProjectId ??
+    linearRemote?.projectId ??
     input.runtime.projectBinding.projectId;
   let teamId =
     input.explicitTeamId ??
     input.existingIssue?.teamId ??
-    input.ticket.externalTeamId ??
+    linearRemote?.teamId ??
     input.runtime.projectBinding.teamId;
 
   if (!(teamId || !projectId)) {
@@ -4724,7 +6074,7 @@ async function applyLinearIssueToExistingTicket(input: {
   readonly existingTicket: TicketSummary;
   readonly projection: TicketProjectionFromLinearIssue;
   readonly syncToggles: SyncToggles;
-  readonly authority: "hack" | "linear";
+  readonly authority: "hack" | "linear" | "review_required";
   readonly conflictsRecorded: number;
 }): Promise<
   SyncTicketFromLinearSuccess | { readonly ok: false; readonly error: string }
@@ -4743,13 +6093,17 @@ async function applyLinearIssueToExistingTicket(input: {
     ...(input.projection.dependsOn !== undefined
       ? { dependsOn: input.projection.dependsOn }
       : {}),
-    externalSystem: "linear",
-    externalId: input.issue.id,
-    externalKey: input.issue.identifier,
-    externalUrl: input.issue.url,
-    externalProjectId: input.issue.projectId,
-    externalProjectName: input.issue.projectName,
-    externalTeamId: input.issue.teamId,
+    ...projectRemoteLinkToCompatibilityFields({
+      remote: {
+        provider: "linear",
+        remoteId: input.issue.id,
+        remoteKey: input.issue.identifier,
+        remoteUrl: input.issue.url,
+        projectId: input.issue.projectId,
+        projectName: input.issue.projectName,
+        teamId: input.issue.teamId,
+      },
+    }),
   });
   if (!updated.ok) {
     return { ok: false, error: updated.error };
@@ -4817,13 +6171,17 @@ async function createTicketFromLinearIssueProjection(input: {
     ...(input.projection.dependsOn !== undefined
       ? { dependsOn: input.projection.dependsOn }
       : {}),
-    externalSystem: "linear",
-    externalId: input.issue.id,
-    externalKey: input.issue.identifier,
-    externalUrl: input.issue.url,
-    externalProjectId: input.issue.projectId,
-    externalProjectName: input.issue.projectName,
-    externalTeamId: input.issue.teamId,
+    ...projectRemoteLinkToCompatibilityFields({
+      remote: {
+        provider: "linear",
+        remoteId: input.issue.id,
+        remoteKey: input.issue.identifier,
+        remoteUrl: input.issue.url,
+        projectId: input.issue.projectId,
+        projectName: input.issue.projectName,
+        teamId: input.issue.teamId,
+      },
+    }),
   });
   if (!created.ok) {
     return created;
@@ -4880,14 +6238,18 @@ async function buildLinearDependencyIndex(input: {
   const byLinearId = new Map<string, string>();
   const byLinearIdentifier = new Map<string, string>();
   for (const ticket of tickets) {
-    if (ticket.externalSystem !== "linear") {
+    const linearRemote = findTicketRemoteLink({
+      ticket,
+      provider: "linear",
+    });
+    if (!linearRemote) {
       continue;
     }
-    if (ticket.externalId) {
-      byLinearId.set(ticket.externalId, ticket.ticketId);
+    if (linearRemote.remoteId) {
+      byLinearId.set(linearRemote.remoteId, ticket.ticketId);
     }
-    if (ticket.externalKey) {
-      byLinearIdentifier.set(ticket.externalKey, ticket.ticketId);
+    if (linearRemote.remoteKey) {
+      byLinearIdentifier.set(linearRemote.remoteKey, ticket.ticketId);
     }
   }
   return {
@@ -4908,12 +6270,16 @@ async function resolveLinkedLinearIssue(input: {
   | { readonly ok: true; readonly issue: LinearIssue | null }
   | { readonly ok: false; readonly error: string }
 > {
-  if (input.ticket.externalSystem !== "linear") {
+  const linearRemote = findTicketRemoteLink({
+    ticket: input.ticket,
+    provider: "linear",
+  });
+  if (!linearRemote) {
     return { ok: true, issue: null };
   }
-  if (input.ticket.externalId) {
+  if (linearRemote.remoteId) {
     const byId = await input.runtime.linear.getIssueById({
-      issueId: input.ticket.externalId,
+      issueId: linearRemote.remoteId,
     });
     if (!byId.ok) {
       return { ok: false, error: byId.error };
@@ -4922,9 +6288,9 @@ async function resolveLinkedLinearIssue(input: {
       return { ok: true, issue: byId.data };
     }
   }
-  if (input.ticket.externalKey) {
+  if (linearRemote.remoteKey) {
     const byKey = await input.runtime.linear.getIssueByIdentifier({
-      identifier: input.ticket.externalKey,
+      identifier: linearRemote.remoteKey,
     });
     if (!byKey.ok) {
       return { ok: false, error: byKey.error };
@@ -5029,8 +6395,12 @@ async function resolveLinearParentIssueId(input: {
   if (!parentTicket) {
     return { ok: true };
   }
-  if (parentTicket.externalSystem === "linear" && parentTicket.externalId) {
-    return { ok: true, value: parentTicket.externalId };
+  const linearRemote = findTicketRemoteLink({
+    ticket: parentTicket,
+    provider: "linear",
+  });
+  if (linearRemote?.remoteId) {
+    return { ok: true, value: linearRemote.remoteId };
   }
   return { ok: true };
 }
@@ -5058,15 +6428,19 @@ function isLinearLinkedTicket(input: {
   readonly ticket: TicketSummary;
   readonly issue: LinearIssue;
 }): boolean {
-  if (input.ticket.externalSystem !== "linear") {
+  const linearRemote = findTicketRemoteLink({
+    ticket: input.ticket,
+    provider: "linear",
+  });
+  if (!linearRemote) {
     return false;
   }
-  if (input.ticket.externalId && input.ticket.externalId === input.issue.id) {
+  if (linearRemote.remoteId && linearRemote.remoteId === input.issue.id) {
     return true;
   }
   if (
-    input.ticket.externalKey &&
-    input.ticket.externalKey === input.issue.identifier
+    linearRemote.remoteKey &&
+    linearRemote.remoteKey === input.issue.identifier
   ) {
     return true;
   }
@@ -5237,6 +6611,170 @@ type ResolvedLinearProjectBinding = {
   readonly additionalProjects: readonly LinearProjectBindingTarget[];
 };
 
+type LinearRepairAction = {
+  readonly reason: string;
+  readonly command: string;
+};
+
+type LinearProjectManagementSummary = {
+  readonly activeProfile: string;
+  readonly connected: boolean;
+  readonly connectionLabel: string;
+  readonly routingSummary: string;
+  readonly linkedProjectsLabel: string | null;
+  readonly capabilities: readonly string[];
+  readonly repair: LinearRepairAction | null;
+  readonly nextSteps: readonly string[];
+};
+
+type LinearSetupSummary = {
+  readonly ready: boolean;
+  readonly activeProfile: string;
+  readonly connected: boolean;
+  readonly routeLabel: string;
+  readonly nextSteps: readonly string[];
+};
+
+type LinearProjectBindSummary = {
+  readonly activeProfile: string;
+  readonly routeLabel: string;
+  readonly linkedProjectsLabel: string | null;
+  readonly nextSteps: readonly string[];
+};
+
+async function persistLinearSetupOverrides(input: {
+  readonly projectDir: string;
+  readonly parsed: SetupArgs;
+}): Promise<void> {
+  if (input.parsed.profileId) {
+    await updateProjectConfig({
+      projectDir: input.projectDir,
+      path: "controlPlane.routing.overrides.linear.profile",
+      value: input.parsed.profileId,
+    });
+  }
+  if (input.parsed.projectId) {
+    await updateProjectConfig({
+      projectDir: input.projectDir,
+      path: "controlPlane.routing.overrides.linear.projectId",
+      value: input.parsed.projectId,
+    });
+  }
+  if (input.parsed.projectName !== undefined) {
+    await updateProjectConfig({
+      projectDir: input.projectDir,
+      path: "controlPlane.routing.overrides.linear.projectName",
+      value: input.parsed.projectName,
+    });
+  }
+  if (input.parsed.teamId !== undefined) {
+    await updateProjectConfig({
+      projectDir: input.projectDir,
+      path: "controlPlane.routing.overrides.linear.teamId",
+      value: input.parsed.teamId,
+    });
+  }
+}
+
+function resolveLinearSetupBinding(input: {
+  readonly parsed: SetupArgs;
+  readonly existingBinding: ResolvedLinearProjectBinding;
+}): ResolvedLinearProjectBinding {
+  const effectiveProfileId =
+    input.parsed.profileId ?? input.existingBinding.profileId;
+  const effectiveProjectId =
+    input.parsed.projectId ?? input.existingBinding.projectId;
+  const effectiveProjectName =
+    input.parsed.projectName !== undefined
+      ? input.parsed.projectName || undefined
+      : input.existingBinding.projectName;
+  const effectiveTeamId =
+    input.parsed.teamId !== undefined
+      ? input.parsed.teamId || undefined
+      : input.existingBinding.teamId;
+
+  return {
+    ...(effectiveProfileId ? { profileId: effectiveProfileId } : {}),
+    ...(effectiveProjectId ? { projectId: effectiveProjectId } : {}),
+    ...(effectiveProjectName ? { projectName: effectiveProjectName } : {}),
+    ...(effectiveTeamId ? { teamId: effectiveTeamId } : {}),
+    additionalProjects: input.existingBinding.additionalProjects,
+  };
+}
+
+function buildLinearSetupPayload(input: {
+  readonly binding: ResolvedLinearProjectBinding;
+  readonly status: LinearStatusPayload;
+  readonly summary: LinearProjectManagementSummary;
+  readonly setupSummary: LinearSetupSummary;
+}): {
+  readonly ok: boolean;
+  readonly extension: string;
+  readonly projectProfile: string | null;
+  readonly projectId: string | null;
+  readonly projectName: string | null;
+  readonly teamId: string | null;
+  readonly connected: boolean;
+  readonly connectionLabel: string;
+  readonly routingSummary: string;
+  readonly capabilities: readonly string[];
+  readonly repair: LinearRepairAction | null;
+  readonly ready: boolean;
+  readonly nextSteps: readonly string[];
+} {
+  return {
+    ok: input.status.ok,
+    extension: EXTENSION_ID,
+    projectProfile: input.binding.profileId ?? null,
+    projectId: input.binding.projectId ?? null,
+    projectName: input.binding.projectName ?? null,
+    teamId: input.binding.teamId ?? null,
+    connected: input.summary.connected,
+    connectionLabel: input.summary.connectionLabel,
+    routingSummary: input.summary.routingSummary,
+    capabilities: input.summary.capabilities,
+    repair: input.summary.repair,
+    ready: input.setupSummary.ready,
+    nextSteps: input.setupSummary.nextSteps,
+  };
+}
+
+async function renderLinearSetupPanel(input: {
+  readonly summary: LinearProjectManagementSummary;
+  readonly setupSummary: LinearSetupSummary;
+}): Promise<void> {
+  await display.panel({
+    title: "Linear setup",
+    tone: input.setupSummary.ready ? "success" : "info",
+    lines: [
+      `Extension: ${EXTENSION_ID}`,
+      `Active profile: ${input.setupSummary.activeProfile}`,
+      `Connection: ${input.summary.connectionLabel}`,
+      `Route: ${input.setupSummary.routeLabel}`,
+      ...(input.summary.linkedProjectsLabel
+        ? [input.summary.linkedProjectsLabel]
+        : []),
+      ...(input.summary.capabilities.length > 0
+        ? [
+            "Capabilities:",
+            ...input.summary.capabilities.map(
+              (capability) => `- ${capability}`
+            ),
+          ]
+        : []),
+      ...(input.summary.repair
+        ? [
+            `Repair: ${input.summary.repair.reason}`,
+            `Run: ${input.summary.repair.command}`,
+          ]
+        : []),
+      ...(input.setupSummary.nextSteps.length > 0
+        ? ["Next:", ...input.setupSummary.nextSteps.map((step) => `- ${step}`)]
+        : []),
+    ],
+  });
+}
+
 function resolveProjectLinearBinding(input: {
   readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
 }): ResolvedLinearProjectBinding {
@@ -5402,6 +6940,266 @@ function buildProjectBindingPayload(input: {
   };
 }
 
+function pluralize(input: {
+  readonly count: number;
+  readonly singular: string;
+  readonly plural?: string;
+}): string {
+  if (input.count === 1) {
+    return input.singular;
+  }
+  return input.plural ?? `${input.singular}s`;
+}
+
+function formatLinearProjectTarget(input: {
+  readonly projectId: string;
+  readonly projectName?: string;
+  readonly teamId?: string;
+}): string {
+  const projectLabel = input.projectName
+    ? `${input.projectName} (${input.projectId})`
+    : input.projectId;
+  return input.teamId
+    ? `${projectLabel} in team ${input.teamId}`
+    : projectLabel;
+}
+
+function resolveLinearConnectionLabel(input: {
+  readonly activeProfile: string;
+  readonly connected: boolean;
+  readonly status: LinearStatusPayload;
+}): string {
+  if (input.connected) {
+    if (input.status.accountName) {
+      return `Connected as ${input.status.accountName}`;
+    }
+    if (input.status.accountEmail) {
+      return `Connected as ${input.status.accountEmail}`;
+    }
+    return "Connected";
+  }
+  if (input.status.selectedMissing) {
+    return `Profile "${input.activeProfile}" is selected but not configured`;
+  }
+  return "Not connected";
+}
+
+function buildLinearRoutingSummary(input: {
+  readonly binding: ResolvedLinearProjectBinding;
+}): string {
+  if (!input.binding.projectId) {
+    return "This repo does not have a default Linear project route yet.";
+  }
+  return `This repo routes Linear sync to ${formatLinearProjectTarget({
+    projectId: input.binding.projectId,
+    projectName: input.binding.projectName,
+    teamId: input.binding.teamId,
+  })}.`;
+}
+
+function buildLinkedProjectsLabel(input: {
+  readonly binding: ResolvedLinearProjectBinding;
+}): string | null {
+  const linkedProjectsCount = input.binding.additionalProjects.length;
+  if (linkedProjectsCount === 0) {
+    return null;
+  }
+  return `${linkedProjectsCount} linked ${pluralize({
+    count: linkedProjectsCount,
+    singular: "project",
+  })}: ${input.binding.additionalProjects
+    .map((project) =>
+      formatLinearProjectTarget({
+        projectId: project.projectId,
+        projectName: project.projectName,
+        teamId: project.teamId,
+      })
+    )
+    .join(", ")}.`;
+}
+
+function resolveLinearRepairAction(input: {
+  readonly activeProfile: string;
+  readonly connected: boolean;
+  readonly status: LinearStatusPayload;
+}): LinearRepairAction | null {
+  if (input.status.selectedMissing || input.status.profileError) {
+    return {
+      reason: "The active Linear profile binding is invalid.",
+      command: `hack linear setup --profile ${input.activeProfile}`,
+    };
+  }
+  if (input.status.error?.includes("hack auth login")) {
+    return {
+      reason: "Hack account login is required for broker-owned Linear access.",
+      command: "hack auth login",
+    };
+  }
+  if (!input.connected) {
+    return {
+      reason: "Local Linear access is missing for the active profile.",
+      command: `hack linear connect --profile ${input.activeProfile}`,
+    };
+  }
+  return null;
+}
+
+function buildLinearCapabilities(input: {
+  readonly connected: boolean;
+  readonly binding: ResolvedLinearProjectBinding;
+}): readonly string[] {
+  const capabilities: string[] = [];
+  if (input.connected && input.binding.projectId) {
+    capabilities.push("Sync tickets for the bound Linear project");
+  }
+  if (input.connected && input.binding.additionalProjects.length > 0) {
+    capabilities.push(
+      `Pull issues from ${input.binding.additionalProjects.length} linked Linear ${pluralize(
+        {
+          count: input.binding.additionalProjects.length,
+          singular: "project",
+        }
+      )}`
+    );
+  }
+  if (input.connected && !input.binding.projectId) {
+    capabilities.push("Bind this repo to a Linear project before project sync");
+  }
+  if (!input.connected && input.binding.projectId) {
+    capabilities.push("Repair local Linear access for the active profile");
+  }
+  return capabilities;
+}
+
+function buildLinearNextSteps(input: {
+  readonly repair: LinearRepairAction | null;
+  readonly binding: ResolvedLinearProjectBinding;
+  readonly activeProfile: string;
+}): readonly string[] {
+  if (input.repair) {
+    return [`Run \`${input.repair.command}\`.`];
+  }
+  if (input.binding.projectId) {
+    return ["Run `hack linear sync-project --from linear`."];
+  }
+  return [
+    `Run \`hack linear project-bind --profile ${input.activeProfile} --project-id <linear-project-id>\`.`,
+  ];
+}
+
+function buildLinearProjectManagementSummary(input: {
+  readonly status: LinearStatusPayload;
+  readonly binding: ResolvedLinearProjectBinding;
+}): LinearProjectManagementSummary {
+  const activeProfile =
+    input.status.selectedProfile ?? input.binding.profileId ?? "default";
+  const connected = input.status.tokenResolved;
+  const connectionLabel = resolveLinearConnectionLabel({
+    activeProfile,
+    connected,
+    status: input.status,
+  });
+  const routingSummary = buildLinearRoutingSummary({
+    binding: input.binding,
+  });
+  const linkedProjectsLabel = buildLinkedProjectsLabel({
+    binding: input.binding,
+  });
+  const repair = resolveLinearRepairAction({
+    activeProfile,
+    connected,
+    status: input.status,
+  });
+  const capabilities = buildLinearCapabilities({
+    connected,
+    binding: input.binding,
+  });
+  const nextSteps = buildLinearNextSteps({
+    repair,
+    binding: input.binding,
+    activeProfile,
+  });
+
+  return {
+    activeProfile,
+    connected,
+    connectionLabel,
+    routingSummary,
+    linkedProjectsLabel,
+    capabilities,
+    repair,
+    nextSteps,
+  };
+}
+
+function buildLinearSetupSummary(input: {
+  readonly profileId?: string;
+  readonly binding: ResolvedLinearProjectBinding;
+  readonly status: LinearStatusPayload;
+}): LinearSetupSummary {
+  const projectSummary = buildLinearProjectManagementSummary({
+    status: input.status,
+    binding: input.binding,
+  });
+  return {
+    ready: projectSummary.connected && Boolean(input.binding.projectId),
+    activeProfile:
+      input.profileId ??
+      input.binding.profileId ??
+      input.status.selectedProfile,
+    connected: projectSummary.connected,
+    routeLabel: input.binding.projectId
+      ? projectSummary.routingSummary
+      : "No default Linear project is bound to this repo yet.",
+    nextSteps: input.binding.projectId
+      ? ["Run `hack linear status` to confirm the active route."]
+      : [
+          `Run \`hack linear project-bind --profile ${projectSummary.activeProfile} --project-id <linear-project-id>\`.`,
+        ],
+  };
+}
+
+function buildLinearProjectBindSummary(input: {
+  readonly binding: ResolvedLinearProjectBinding;
+}): LinearProjectBindSummary {
+  const routeLabel = input.binding.projectId
+    ? `This repo now uses ${formatLinearProjectTarget({
+        projectId: input.binding.projectId,
+        projectName: input.binding.projectName,
+        teamId: input.binding.teamId,
+      })} as its default Linear route.`
+    : "This repo no longer has a default Linear route.";
+  const linkedProjectsCount = input.binding.additionalProjects.length;
+  const linkedProjectsLabel =
+    linkedProjectsCount > 0
+      ? `${linkedProjectsCount} linked ${pluralize({
+          count: linkedProjectsCount,
+          singular: "project",
+        })} remains in scope: ${input.binding.additionalProjects
+          .map((project) =>
+            formatLinearProjectTarget({
+              projectId: project.projectId,
+              projectName: project.projectName,
+            })
+          )
+          .join(", ")}.`
+      : null;
+  return {
+    activeProfile: input.binding.profileId ?? "default",
+    routeLabel,
+    linkedProjectsLabel,
+    nextSteps: input.binding.projectId
+      ? [
+          "Run `hack linear status` to review active capabilities.",
+          "Run `hack linear sync-project --from linear` to sync the default route.",
+        ]
+      : [
+          `Run \`hack linear project-bind --profile ${input.binding.profileId ?? "default"} --project-id <linear-project-id>\` to bind a default route.`,
+          "Run `hack linear status` to review what is still connected.",
+        ],
+  };
+}
+
 function resolveProjectPullTargets(input: {
   readonly binding: ResolvedLinearProjectBinding;
   readonly explicitProjectId?: string;
@@ -5464,6 +7262,297 @@ function findProjectBindingTarget(input: {
       (target) => target.projectId.toLowerCase() === normalizedProjectId
     ) ?? null
   );
+}
+
+function resolveBoundProjectArtifactTarget(input: {
+  readonly binding: ResolvedLinearProjectBinding;
+  readonly projectId?: string;
+  readonly projectName?: string;
+  readonly teamId?: string;
+}):
+  | { readonly ok: true; readonly target: LinearProjectBindingTarget | null }
+  | { readonly ok: false; readonly error: string } {
+  const projectId = readOptionalString(input.projectId);
+  const projectName = readOptionalString(input.projectName);
+  const teamId = readOptionalString(input.teamId);
+
+  if (projectId) {
+    const target = findProjectBindingTarget({
+      binding: input.binding,
+      projectId,
+    });
+    return {
+      ok: true,
+      target: target
+        ? applyExplicitProjectArtifactOverrides({
+            target,
+            projectName,
+            teamId,
+          })
+        : null,
+    };
+  }
+
+  const selector = createProjectArtifactSelector({
+    projectName,
+    teamId,
+  });
+  if (!selector) {
+    return {
+      ok: true,
+      target: buildDefaultProjectBindingTarget({
+        binding: input.binding,
+      }),
+    };
+  }
+
+  const candidates = findBoundProjectArtifactTargetsBySelector({
+    binding: input.binding,
+    selector,
+  });
+  if (candidates.length === 0) {
+    return { ok: true, target: null };
+  }
+  if (candidates.length > 1) {
+    return {
+      ok: false,
+      error: describeAmbiguousProjectArtifactTarget({
+        projectName,
+        teamId,
+        source: "bound",
+      }),
+    };
+  }
+  return {
+    ok: true,
+    target: candidates[0] ?? null,
+  };
+}
+
+function applyExplicitProjectArtifactOverrides(input: {
+  readonly target: LinearProjectBindingTarget;
+  readonly projectName?: string;
+  readonly teamId?: string;
+}): LinearProjectBindingTarget {
+  return {
+    ...input.target,
+    ...(input.projectName ? { projectName: input.projectName } : {}),
+    ...(input.teamId ? { teamId: input.teamId } : {}),
+  };
+}
+
+function buildDefaultProjectBindingTarget(input: {
+  readonly binding: ResolvedLinearProjectBinding;
+}): LinearProjectBindingTarget | null {
+  if (!input.binding.projectId) {
+    return null;
+  }
+  return {
+    projectId: input.binding.projectId,
+    ...(input.binding.projectName
+      ? { projectName: input.binding.projectName }
+      : {}),
+    ...(input.binding.teamId ? { teamId: input.binding.teamId } : {}),
+    ...(input.binding.profileId ? { profileId: input.binding.profileId } : {}),
+  };
+}
+
+function findBoundProjectArtifactTargetsBySelector(input: {
+  readonly binding: ResolvedLinearProjectBinding;
+  readonly selector: {
+    readonly projectName?: string;
+    readonly teamId?: string;
+  };
+}): readonly LinearProjectBindingTarget[] {
+  return resolveProjectPullTargets({
+    binding: input.binding,
+  }).filter((target) =>
+    projectArtifactTargetMatchesSelector({
+      target,
+      selector: input.selector,
+    })
+  );
+}
+
+async function resolveProjectArtifactTarget(input: {
+  readonly binding: ResolvedLinearProjectBinding;
+  readonly profileId: string;
+  readonly projectId?: string;
+  readonly projectName?: string;
+  readonly teamId?: string;
+  readonly linear: Pick<ProjectArtifactRuntime["linear"], "listProjects">;
+}): Promise<
+  | {
+      readonly ok: true;
+      readonly target: LinearProjectBindingTarget;
+    }
+  | { readonly ok: false; readonly error: string }
+> {
+  const boundTarget = resolveBoundProjectArtifactTarget(input);
+  if (!boundTarget.ok) {
+    return boundTarget;
+  }
+  if (boundTarget.target) {
+    return {
+      ok: true,
+      target: {
+        ...boundTarget.target,
+        profileId: boundTarget.target.profileId ?? input.profileId,
+      },
+    };
+  }
+
+  const projectId = readOptionalString(input.projectId);
+  const projectName = readOptionalString(input.projectName);
+  const teamId = readOptionalString(input.teamId);
+  if (projectId) {
+    return {
+      ok: true,
+      target: {
+        projectId,
+        profileId: input.profileId,
+        ...(projectName ? { projectName } : {}),
+        ...(teamId ? { teamId } : {}),
+      },
+    };
+  }
+
+  const selector = createProjectArtifactSelector({
+    projectName,
+    teamId,
+  });
+  if (!selector) {
+    return {
+      ok: false,
+      error:
+        "Missing project id. Pass --project-id, bind a default project, or add additional linked projects first.",
+    };
+  }
+
+  const projects = await input.linear.listProjects({
+    first: DEFAULT_PROJECT_SYNC_LIMIT,
+  });
+  if (!projects.ok) {
+    return {
+      ok: false,
+      error: projects.error,
+    };
+  }
+
+  const matches = projects.data.filter((project) =>
+    projectArtifactTargetMatchesSelector({
+      target: {
+        projectId: project.id,
+        projectName: project.name,
+        teamId: project.teamId,
+      },
+      selector,
+    })
+  );
+  if (matches.length === 0) {
+    return {
+      ok: false,
+      error: describeMissingProjectArtifactTarget({
+        projectName,
+        teamId,
+      }),
+    };
+  }
+  if (matches.length > 1) {
+    return {
+      ok: false,
+      error: describeAmbiguousProjectArtifactTarget({
+        projectName,
+        teamId,
+        source: "remote",
+      }),
+    };
+  }
+
+  const match = matches[0];
+  if (!match) {
+    return {
+      ok: false,
+      error: describeMissingProjectArtifactTarget({
+        projectName,
+        teamId,
+      }),
+    };
+  }
+  return {
+    ok: true,
+    target: {
+      profileId: input.profileId,
+      projectId: match.id,
+      projectName: match.name,
+      teamId: match.teamId,
+    },
+  };
+}
+
+function createProjectArtifactSelector(input: {
+  readonly projectName?: string;
+  readonly teamId?: string;
+}): { readonly projectName?: string; readonly teamId?: string } | null {
+  const projectName = readOptionalString(input.projectName);
+  const teamId = readOptionalString(input.teamId);
+  if (!(projectName || teamId)) {
+    return null;
+  }
+  return {
+    ...(projectName ? { projectName: projectName.toLowerCase() } : {}),
+    ...(teamId ? { teamId: teamId.toLowerCase() } : {}),
+  };
+}
+
+function projectArtifactTargetMatchesSelector(input: {
+  readonly target: Pick<
+    LinearProjectBindingTarget,
+    "projectName" | "teamId" | "projectId"
+  >;
+  readonly selector: {
+    readonly projectName?: string;
+    readonly teamId?: string;
+  };
+}): boolean {
+  if (
+    input.selector.projectName &&
+    readOptionalString(input.target.projectName)?.toLowerCase() !==
+      input.selector.projectName
+  ) {
+    return false;
+  }
+  if (
+    input.selector.teamId &&
+    readOptionalString(input.target.teamId)?.toLowerCase() !==
+      input.selector.teamId
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function describeAmbiguousProjectArtifactTarget(input: {
+  readonly projectName?: string;
+  readonly teamId?: string;
+  readonly source: "bound" | "remote";
+}): string {
+  const parts = [
+    input.projectName ? `project name "${input.projectName}"` : null,
+    input.teamId ? `team id "${input.teamId}"` : null,
+  ].filter((part): part is string => Boolean(part));
+  return `Multiple ${input.source} Linear projects match ${parts.join(" and ")}. Pass --project-id to disambiguate.`;
+}
+
+function describeMissingProjectArtifactTarget(input: {
+  readonly projectName?: string;
+  readonly teamId?: string;
+}): string {
+  const parts = [
+    input.projectName ? `project name "${input.projectName}"` : null,
+    input.teamId ? `team id "${input.teamId}"` : null,
+  ].filter((part): part is string => Boolean(part));
+  return `No Linear project matches ${parts.join(" and ")}. Pass --project-id or update the project binding.`;
 }
 
 async function resolveProjectBindingDetails(input: {
@@ -8260,6 +10349,100 @@ function parseRunAutosyncArgs(input: {
   return { ok: true, value };
 }
 
+function parseProjectDocumentsArgs(input: {
+  readonly args: readonly string[];
+}):
+  | { readonly ok: true; readonly value: ProjectDocumentsArgs }
+  | { readonly ok: false; readonly error: string } {
+  return parseProjectArtifactArgs({
+    args: input.args,
+    allowedVerbs: ["list", "pull", "plan", "apply"],
+  }) as
+    | { readonly ok: true; readonly value: ProjectDocumentsArgs }
+    | { readonly ok: false; readonly error: string };
+}
+
+function parseProjectMilestonesArgs(input: {
+  readonly args: readonly string[];
+}):
+  | { readonly ok: true; readonly value: ProjectMilestonesArgs }
+  | { readonly ok: false; readonly error: string } {
+  return parseProjectArtifactArgs({
+    args: input.args,
+    allowedVerbs: ["list", "pull", "plan", "apply"],
+  }) as
+    | { readonly ok: true; readonly value: ProjectMilestonesArgs }
+    | { readonly ok: false; readonly error: string };
+}
+
+function parseProjectStatusUpdatesArgs(input: {
+  readonly args: readonly string[];
+}):
+  | { readonly ok: true; readonly value: ProjectStatusUpdatesArgs }
+  | { readonly ok: false; readonly error: string } {
+  return parseProjectArtifactArgs({
+    args: input.args,
+    allowedVerbs: ["list", "pull", "plan", "publish"],
+  }) as
+    | { readonly ok: true; readonly value: ProjectStatusUpdatesArgs }
+    | { readonly ok: false; readonly error: string };
+}
+
+function parseProjectArtifactArgs<TVerb extends string>(input: {
+  readonly args: readonly string[];
+  readonly allowedVerbs: readonly TVerb[];
+}):
+  | {
+      readonly ok: true;
+      readonly value: ProjectArtifactArgsBase & { readonly verb: TVerb };
+    }
+  | { readonly ok: false; readonly error: string } {
+  const first = readOptionalString(input.args[0]);
+  if (!first) {
+    return {
+      ok: false,
+      error: `Missing verb. Expected ${input.allowedVerbs.join("|")}.`,
+    };
+  }
+  if (!input.allowedVerbs.includes(first as TVerb)) {
+    return {
+      ok: false,
+      error: `Invalid verb: ${first}. Expected ${input.allowedVerbs.join("|")}.`,
+    };
+  }
+
+  const value: ProjectArtifactArgsBase & { readonly verb: TVerb } = {
+    verb: first as TVerb,
+    json: false,
+  };
+  const remainingArgs = input.args.slice(1);
+  for (let i = 0; i < remainingArgs.length; i += 1) {
+    const token = remainingArgs[i] ?? "";
+    if (token === "--json") {
+      value.json = true;
+      continue;
+    }
+    const handled = assignKeyValueFlag({
+      token,
+      args: remainingArgs,
+      index: i,
+      out: value,
+      keys: {
+        profile: "profileId",
+        "project-id": "projectId",
+        "project-name": "projectName",
+        "team-id": "teamId",
+        path: "path",
+      },
+    });
+    if (!handled.ok) {
+      return { ok: false, error: handled.error };
+    }
+    i = handled.nextIndex;
+  }
+  return { ok: true, value };
+}
+
 function assignKeyValueFlag<T extends Record<string, unknown>>(input: {
   readonly token: string;
   readonly args: readonly string[];
@@ -8309,6 +10492,9 @@ function normalizeOAuthActor(value: string | undefined): "user" | "app" | null {
 }
 
 export const __testOnly = {
+  buildLinearProjectBindSummary,
+  buildLinearProjectManagementSummary,
+  buildLinearSetupSummary,
   buildOAuthArgsFromConnectArgs,
   detectAuthoritativeFieldConflicts,
   findProjectBindingTarget,
@@ -8322,11 +10508,15 @@ export const __testOnly = {
   parseOAuthConnectArgs,
   parseSeedLocalAccessArgs,
   parseRunAutosyncArgs,
+  parseProjectDocumentsArgs,
+  parseProjectMilestonesArgs,
+  parseProjectStatusUpdatesArgs,
   parseProjectBindArgs,
   parseProjectLinkArgs,
   parseProjectsArgs,
   parseRemoveAssigneeMappingArgs,
   parseRemoveAutosyncSubscriptionArgs,
+  runProjectArtifactCommand,
   resolveProjectLinearBinding,
   resolveProjectPullTargets,
   resolveOAuthBrokerRuntimeConfig,
@@ -8337,6 +10527,7 @@ export const __testOnly = {
   parseSyncProjectArgs,
   parseUpsertAssigneeMappingArgs,
   parseUpsertAutosyncSubscriptionArgs,
+  resolveProjectArtifactTarget,
   selectLinearCommentsToAppend,
   selectTicketCommentsToPush,
   shouldFallbackConnectToOAuth,

@@ -1,8 +1,14 @@
-# Run laptop-to-laptop node pairing e2e
+# Run laptop-to-laptop node pairing e2e (Beta)
+
+This is a beta workflow.
+Start with [Core docs](../core.md) if you are new to `hack`, and use [Beta workflows](../beta.md)
+for the rest of the remote path.
 
 This guide is the full validation run for two Macs:
 1. Controller Mac (host mode)
 2. Remote MacBook node
+
+> Beta: laptop-to-laptop multi-node flows are still being validated and are not part of the core local-dev path.
 
 It validates pairing, remote routing, workspace mapping, mutagen sync, and dispatch execution.
 
@@ -128,6 +134,10 @@ Expected:
 4. Route bridge diagnostics/repair are available on controller via `hack node routes status` and `hack node routes repair`.
 
 ### Private repo bootstrap behavior (default, no manual copy)
+
+GitHub is optional for public repos or for private repos when the remote machine already has working
+Git credentials. It becomes required only when Hack needs to supply controller-side credentials for
+private GitHub clone fallback.
 
 Workspace bootstrap now uses this order automatically:
 1. Attempt clone with the remote machine's existing Git credentials.

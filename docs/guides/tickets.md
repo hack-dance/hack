@@ -1,5 +1,8 @@
 # Tickets (git-backed)
 
+This page is part of [Extensions & reference](../reference.md).
+If you are learning the core local product flow, start with [Core docs](../core.md).
+
 The tickets extension is a lightweight, git-backed ticket log intended for small teams and solo dev.
 It stores events in a dedicated git ref (`refs/hack/tickets` by default, hidden from branch lists) so
 ticket history is versioned and syncable without requiring an external service.
@@ -126,17 +129,62 @@ Tip: use `--body-stdin` for multi-line markdown.
 ## How it works
 
 - Ticket history is an append-only event log (`ticket.created`, etc.) stored as monthly JSONL files.
-- The extension reads events, materializes tickets in-memory, and renders `list/show` outputs.
+- Each event carries a normalized journal envelope (`eventId`, schema version, occurrence/recording times, source metadata, and idempotency key).
+- The journal is the portable source of truth for tickets.
+- The extension projects journal state into a local SQLite cache for durable reads and rebuilds that cache automatically when it is missing or stale.
 - Ticket writes automatically commit and push to the tickets ref when git sync is enabled and a remote exists.
 - `sync` normalizes the event logs, commits, and pushes the tickets ref.
 
 ### Storage layout
 
-In your project repo:
+Local tickets state under your project:
 
 - `.hack/tickets/events/events-YYYY-MM.jsonl` — event log segments (UTC month)
+- `.hack/tickets/projection.sqlite` — local SQLite projection cache rebuilt from the journal
 - `.hack/tickets/git/bare.git` — a bare repo used to manage the tickets ref
 - `.hack/tickets/git/worktree` — a worktree used for reading/writing ticket data
+- `.hack/tickets/git/worktree/.hack/tickets/events/events-YYYY-MM.jsonl` — local checkout of the durable event log
+
+Path inside the tickets ref:
+
+- `.hack/tickets/events/events-YYYY-MM.jsonl` — portable event log segments (UTC month)
+
+### Durability and portability
+
+The durable portable layer is the event log in the tickets ref.
+
+- inside the ref, `.hack/tickets/events/*.jsonl` is the source of truth
+- locally, those files are materialized under `.hack/tickets/git/worktree/.hack/tickets/events/*.jsonl`
+- `list`, `show`, and related views are rebuilt by replaying the event log
+- deleting local projection state must not lose ticket history
+
+Rebuildable local state includes:
+
+- `.hack/tickets/git/bare.git`
+- `.hack/tickets/git/worktree`
+- `.hack/tickets/create.lock`
+
+These paths exist to coordinate sync and local writes. They can be recreated from the repo and the tickets ref.
+
+### Hidden refs and legacy branch compatibility
+
+By default, tickets sync to the hidden ref `refs/hack/tickets`.
+
+Compatibility rules:
+
+- the CLI fetches the hidden ref first
+- if the hidden ref is missing, it falls back to the legacy branch ref `refs/heads/hack/tickets`
+- when legacy ref data is imported, event logs are deduped by `eventId` and normalized before the next push
+
+If your remote rejects hidden refs, set `controlPlane.tickets.git.refMode` to `heads` and use `refs/heads/hack/tickets` instead.
+
+Portability rules:
+
+- Only the journal under `.hack/tickets/events/` is portable ticket state.
+- The hidden ref stores only the journal tree; it does not include `projection.sqlite` or other local cache files.
+- After `hack x tickets sync`, the checked-out tickets worktree materializes that journal under `.hack/tickets/git/worktree/.hack/tickets/events/`.
+- The SQLite projection is local-only and can be deleted safely.
+- After sync or clone, peers rebuild `.hack/tickets/projection.sqlite` from the journal on first read.
 
 ## Configuration
 

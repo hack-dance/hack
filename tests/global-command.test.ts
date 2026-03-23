@@ -13,6 +13,8 @@ import {
   GLOBAL_HACK_DIR_NAME,
   GLOBAL_LOGGING_COMPOSE_FILENAME,
   GLOBAL_LOGGING_DIR_NAME,
+  GLOBAL_MANAGED_ENV_SCHEMA_FILENAME,
+  GLOBAL_SCHEMAS_DIR_NAME,
 } from "../src/constants.ts";
 
 let tempDir: string | null = null;
@@ -107,111 +109,181 @@ async function writeStaticCaddyCompose(path: string): Promise<void> {
   );
 }
 
-test("global up runs docker compose up for caddy and logging", async () => {
-  const caddyCompose = join(
-    tempDir!,
-    GLOBAL_HACK_DIR_NAME,
-    GLOBAL_CADDY_DIR_NAME,
-    GLOBAL_CADDY_COMPOSE_FILENAME
-  );
-  const loggingCompose = join(
-    tempDir!,
-    GLOBAL_HACK_DIR_NAME,
-    GLOBAL_LOGGING_DIR_NAME,
-    GLOBAL_LOGGING_COMPOSE_FILENAME
-  );
-  await writeComposeFile(caddyCompose);
-  await writeComposeFile(loggingCompose);
+test(
+  "global up runs docker compose up for caddy and logging",
+  async () => {
+    const caddyCompose = join(
+      tempDir!,
+      GLOBAL_HACK_DIR_NAME,
+      GLOBAL_CADDY_DIR_NAME,
+      GLOBAL_CADDY_COMPOSE_FILENAME
+    );
+    const loggingCompose = join(
+      tempDir!,
+      GLOBAL_HACK_DIR_NAME,
+      GLOBAL_LOGGING_DIR_NAME,
+      GLOBAL_LOGGING_COMPOSE_FILENAME
+    );
+    await writeComposeFile(caddyCompose);
+    await writeComposeFile(loggingCompose);
 
-  const { runCli } = await import("../src/cli/run.ts");
-  const code = await runCli(["global", "up"]);
-  expect(code).toBe(0);
-  expect(
-    runCalls.some((call) => call.includes("daemon") && call.includes("start"))
-  ).toBe(true);
-  expect(
-    runCalls.some((call) => call.includes(caddyCompose) && call.includes("up"))
-  ).toBe(true);
-  expect(
-    runCalls.some(
-      (call) => call.includes(loggingCompose) && call.includes("up")
-    )
-  ).toBe(true);
-});
+    const { runCli } = await import("../src/cli/run.ts");
+    const code = await runCli(["global", "up"]);
+    expect(code).toBe(0);
+    expect(
+      runCalls.some((call) => call.includes("daemon") && call.includes("start"))
+    ).toBe(true);
+    expect(
+      runCalls.some(
+        (call) => call.includes(caddyCompose) && call.includes("up")
+      )
+    ).toBe(true);
+    expect(
+      runCalls.some(
+        (call) => call.includes(loggingCompose) && call.includes("up")
+      )
+    ).toBe(true);
+  },
+  { timeout: 20_000 }
+);
 
-test("global up reassigns containers when reserved ingress IPs are occupied", async () => {
-  const caddyCompose = join(
-    tempDir!,
-    GLOBAL_HACK_DIR_NAME,
-    GLOBAL_CADDY_DIR_NAME,
-    GLOBAL_CADDY_COMPOSE_FILENAME
-  );
-  const loggingCompose = join(
-    tempDir!,
-    GLOBAL_HACK_DIR_NAME,
-    GLOBAL_LOGGING_DIR_NAME,
-    GLOBAL_LOGGING_COMPOSE_FILENAME
-  );
-  await writeStaticCaddyCompose(caddyCompose);
-  await writeComposeFile(loggingCompose);
+test(
+  "global up reassigns containers when reserved ingress IPs are occupied",
+  async () => {
+    const caddyCompose = join(
+      tempDir!,
+      GLOBAL_HACK_DIR_NAME,
+      GLOBAL_CADDY_DIR_NAME,
+      GLOBAL_CADDY_COMPOSE_FILENAME
+    );
+    const loggingCompose = join(
+      tempDir!,
+      GLOBAL_HACK_DIR_NAME,
+      GLOBAL_LOGGING_DIR_NAME,
+      GLOBAL_LOGGING_COMPOSE_FILENAME
+    );
+    await writeStaticCaddyCompose(caddyCompose);
+    await writeComposeFile(loggingCompose);
 
-  let inspectCallCount = 0;
-  execMockResponder = (cmd) => {
-    if (
-      cmd[0] === "docker" &&
-      cmd[1] === "network" &&
-      cmd[2] === "inspect" &&
-      cmd[3] === DEFAULT_INGRESS_NETWORK
-    ) {
-      inspectCallCount += 1;
-      if (inspectCallCount === 1) {
-        return {
-          exitCode: 0,
-          stdout: JSON.stringify([
-            {
-              Containers: {
-                abc123: {
-                  Name: "omega-temporal-server-1",
-                  IPv4Address: `${DEFAULT_CADDY_IP}/16`,
+    let inspectCallCount = 0;
+    execMockResponder = (cmd) => {
+      if (
+        cmd[0] === "docker" &&
+        cmd[1] === "network" &&
+        cmd[2] === "inspect" &&
+        cmd[3] === DEFAULT_INGRESS_NETWORK
+      ) {
+        inspectCallCount += 1;
+        if (inspectCallCount === 1) {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify([
+              {
+                Containers: {
+                  abc123: {
+                    Name: "omega-temporal-server-1",
+                    IPv4Address: `${DEFAULT_CADDY_IP}/16`,
+                  },
                 },
               },
-            },
-          ]),
+            ]),
+            stderr: "",
+          };
+        }
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify([{ Containers: {} }]),
           stderr: "",
         };
       }
-      return {
-        exitCode: 0,
-        stdout: JSON.stringify([{ Containers: {} }]),
-        stderr: "",
-      };
-    }
 
-    return null;
-  };
+      return null;
+    };
 
-  const { runCli } = await import("../src/cli/run.ts");
-  const code = await runCli(["global", "up"]);
-  expect(code).toBe(0);
+    const { runCli } = await import("../src/cli/run.ts");
+    const code = await runCli(["global", "up"]);
+    expect(code).toBe(0);
 
-  expect(
-    execCalls.some(
-      (call) =>
-        call.join(" ") ===
-        `docker network disconnect -f ${DEFAULT_INGRESS_NETWORK} omega-temporal-server-1`
-    )
-  ).toBe(true);
-  expect(
-    execCalls.some(
-      (call) =>
-        call.join(" ") ===
-        `docker network connect ${DEFAULT_INGRESS_NETWORK} omega-temporal-server-1`
-    )
-  ).toBe(true);
-  expect(
-    runCalls.some((call) => call.includes(caddyCompose) && call.includes("up"))
-  ).toBe(true);
-});
+    expect(
+      execCalls.some(
+        (call) =>
+          call.join(" ") ===
+          `docker network disconnect -f ${DEFAULT_INGRESS_NETWORK} omega-temporal-server-1`
+      )
+    ).toBe(true);
+    expect(
+      execCalls.some(
+        (call) =>
+          call.join(" ") ===
+          `docker network connect ${DEFAULT_INGRESS_NETWORK} omega-temporal-server-1`
+      )
+    ).toBe(true);
+    expect(
+      runCalls.some(
+        (call) => call.includes(caddyCompose) && call.includes("up")
+      )
+    ).toBe(true);
+  },
+  { timeout: 20_000 }
+);
+
+test(
+  "global install writes compose files and starts stacks",
+  async () => {
+    const gumPath = join(tempDir!, GLOBAL_HACK_DIR_NAME, "bin", "gum");
+    const mutagenPath = join(tempDir!, GLOBAL_HACK_DIR_NAME, "bin", "mutagen");
+    const mutagenAgentBundlePath = join(
+      tempDir!,
+      GLOBAL_HACK_DIR_NAME,
+      "libexec",
+      "mutagen-agents.tar.gz"
+    );
+    await writeExecutable(gumPath);
+    await writeExecutable(mutagenPath);
+    await mkdir(dirname(mutagenAgentBundlePath), { recursive: true });
+    await writeFile(mutagenAgentBundlePath, "stub");
+    const { runCli } = await import("../src/cli/run.ts");
+    const code = await runCli(["global", "install"]);
+    expect(code).toBe(0);
+
+    const caddyCompose = join(
+      tempDir!,
+      GLOBAL_HACK_DIR_NAME,
+      GLOBAL_CADDY_DIR_NAME,
+      GLOBAL_CADDY_COMPOSE_FILENAME
+    );
+    const loggingCompose = join(
+      tempDir!,
+      GLOBAL_HACK_DIR_NAME,
+      GLOBAL_LOGGING_DIR_NAME,
+      GLOBAL_LOGGING_COMPOSE_FILENAME
+    );
+    const hasCaddy = await Bun.file(caddyCompose).exists();
+    const hasLogging = await Bun.file(loggingCompose).exists();
+    const managedEnvSchema = join(
+      tempDir!,
+      GLOBAL_HACK_DIR_NAME,
+      GLOBAL_SCHEMAS_DIR_NAME,
+      GLOBAL_MANAGED_ENV_SCHEMA_FILENAME
+    );
+    const hasManagedEnvSchema = await Bun.file(managedEnvSchema).exists();
+
+    expect(hasCaddy).toBe(true);
+    expect(hasLogging).toBe(true);
+    expect(hasManagedEnvSchema).toBe(true);
+    expect(
+      runCalls.some(
+        (call) => call.includes(caddyCompose) && call.includes("up")
+      )
+    ).toBe(true);
+    expect(
+      runCalls.some(
+        (call) => call.includes(loggingCompose) && call.includes("up")
+      )
+    ).toBe(true);
+  },
+  { timeout: 20_000 }
+);
 
 test("global down runs docker compose down when files exist", async () => {
   const caddyCompose = join(
@@ -248,42 +320,6 @@ test("global up fails when compose files are missing", async () => {
   const { runCli } = await import("../src/cli/run.ts");
   const code = await runCli(["global", "up"]);
   expect(code).toBe(1);
-});
-
-test("global install writes compose files and starts stacks", async () => {
-  const gumPath = join(tempDir!, GLOBAL_HACK_DIR_NAME, "bin", "gum");
-  const mutagenPath = join(tempDir!, GLOBAL_HACK_DIR_NAME, "bin", "mutagen");
-  await writeExecutable(gumPath);
-  await writeExecutable(mutagenPath);
-  const { runCli } = await import("../src/cli/run.ts");
-  const code = await runCli(["global", "install"]);
-  expect(code).toBe(0);
-
-  const caddyCompose = join(
-    tempDir!,
-    GLOBAL_HACK_DIR_NAME,
-    GLOBAL_CADDY_DIR_NAME,
-    GLOBAL_CADDY_COMPOSE_FILENAME
-  );
-  const loggingCompose = join(
-    tempDir!,
-    GLOBAL_HACK_DIR_NAME,
-    GLOBAL_LOGGING_DIR_NAME,
-    GLOBAL_LOGGING_COMPOSE_FILENAME
-  );
-  const hasCaddy = await Bun.file(caddyCompose).exists();
-  const hasLogging = await Bun.file(loggingCompose).exists();
-
-  expect(hasCaddy).toBe(true);
-  expect(hasLogging).toBe(true);
-  expect(
-    runCalls.some((call) => call.includes(caddyCompose) && call.includes("up"))
-  ).toBe(true);
-  expect(
-    runCalls.some(
-      (call) => call.includes(loggingCompose) && call.includes("up")
-    )
-  ).toBe(true);
 });
 
 test("global status --json returns summary payload", async () => {

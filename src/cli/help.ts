@@ -80,6 +80,14 @@ function renderRootHelp(cli: CliSpec): string {
   lines.push(`  ${cli.name} <command> [options]`);
   lines.push("");
 
+  if (cli.highlights && cli.highlights.length > 0) {
+    lines.push("Core promises:");
+    for (const [index, highlight] of cli.highlights.entries()) {
+      lines.push(`  ${index + 1}. ${highlight}`);
+    }
+    lines.push("");
+  }
+
   const grouped = groupRootEntries(cli);
   for (const group of groupsInOrder()) {
     const entries = grouped.get(group);
@@ -120,6 +128,15 @@ function renderRootHelpMarkdown(cli: CliSpec): string {
   lines.push(`${cli.name} <command> [options]`);
   lines.push("```");
   lines.push("");
+
+  if (cli.highlights && cli.highlights.length > 0) {
+    lines.push("### Core promises");
+    lines.push("");
+    for (const highlight of cli.highlights) {
+      lines.push(`1. ${mdEscape(highlight)}`);
+    }
+    lines.push("");
+  }
 
   const grouped = groupRootEntries(cli);
   for (const group of groupsInOrder()) {
@@ -168,6 +185,11 @@ function groupRootEntries(cli: CliSpec): Map<CliGroup, RootEntry[]> {
 
   for (const cmd of cli.commands) {
     if (cmd.expandInRootHelp && cmd.subcommands.length > 0) {
+      push(cmd.group, {
+        group: cmd.group,
+        invocation: buildInvocation(cli.name, [cmd.name], cmd),
+        summary: cmd.summary,
+      });
       for (const sub of cmd.subcommands) {
         const invocation = buildInvocation(cli.name, [cmd.name, sub.name], sub);
         push(cmd.group, { group: cmd.group, invocation, summary: sub.summary });
@@ -200,8 +222,13 @@ function renderCommandHelp(
   lines.push(`${invocation} — ${command.summary}`);
   lines.push("");
   lines.push("Usage:");
-  lines.push(`  ${invocation} [options]`);
+  lines.push(`  ${renderCommandUsage(invocation, command)}`);
   lines.push("");
+
+  if (command.group === "Beta") {
+    lines.push("Status: Beta workflow");
+    lines.push("");
+  }
 
   if (command.description) {
     lines.push(command.description);
@@ -249,9 +276,14 @@ function renderCommandHelpMarkdown(
   lines.push("### Usage");
   lines.push("");
   lines.push("```bash");
-  lines.push(`${invocation} [options]`);
+  lines.push(renderCommandUsage(invocation, command));
   lines.push("```");
   lines.push("");
+
+  if (command.group === "Beta") {
+    lines.push("> Status: Beta workflow.");
+    lines.push("");
+  }
 
   if (command.description) {
     lines.push(mdEscape(command.description));
@@ -290,6 +322,16 @@ function renderCommandHelpMarkdown(
   }
 
   return lines.join("\n");
+}
+
+function renderCommandUsage(
+  invocation: string,
+  command: AnyCommandSpec
+): string {
+  const hasSubcommands = command.subcommands.length > 0;
+  return hasSubcommands
+    ? `${invocation} <subcommand> [options]`
+    : `${invocation} [options]`;
 }
 
 function buildInvocation(
@@ -393,6 +435,8 @@ function groupsInOrder(): readonly CliGroup[] {
   return [
     "Global",
     "Project",
+    "Integrations",
+    "Beta",
     "Extensions",
     "Agents",
     "Diagnostics",
@@ -405,8 +449,10 @@ function groupLabel(group: CliGroup): string {
   return (
     {
       Global: "Global commands",
-      Project: "Project commands",
-      Extensions: "Extensions",
+      Project: "Core workflows",
+      Integrations: "Collaboration & integrations",
+      Beta: "Beta workflows",
+      Extensions: "Extension commands",
       Agents: "Agent integrations",
       Diagnostics: "Diagnostics",
       Secrets: "Secrets",

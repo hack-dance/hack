@@ -14,9 +14,9 @@ import {
 } from "../lib/runtime-projects.ts";
 import {
   buildRuntimeFingerprint,
-  describeRuntimeReset,
+  detectRuntimeDrift,
+  type RuntimeDriftField,
   type RuntimeIdentity,
-  type RuntimeResetReason,
   readRuntimeIdentity,
 } from "./runtime-health.ts";
 
@@ -29,8 +29,13 @@ export type RuntimeHealth = {
   readonly resetCount: number;
   readonly fingerprint: string | null;
   readonly identity: RuntimeIdentity | null;
-  readonly lastResetReasons: readonly RuntimeResetReason[];
+  readonly lastResetChanges: readonly RuntimeDriftField[];
   readonly lastResetSummary: string | null;
+  readonly lastRepairAtMs: number | null;
+  readonly lastRepairAction: string | null;
+  readonly lastRepairOutcome: "stabilized" | "manual_action_required" | null;
+  readonly nextStep: string | null;
+  readonly resetFromNonEmptyRuntime: boolean;
 };
 
 export type RuntimeSnapshot = {
@@ -51,8 +56,15 @@ export type ProjectsPayload = {
   readonly runtime_last_ok_at: string | null;
   readonly runtime_reset_at: string | null;
   readonly runtime_reset_count: number;
-  readonly runtime_reset_reasons: readonly RuntimeResetReason[];
   readonly runtime_reset_summary: string | null;
+  readonly runtime_reset_changes: readonly RuntimeDriftField[];
+  readonly runtime_last_repair_at: string | null;
+  readonly runtime_repair_action: string | null;
+  readonly runtime_repair_outcome:
+    | "stabilized"
+    | "manual_action_required"
+    | null;
+  readonly runtime_next_step: string | null;
   readonly projects: readonly Record<string, unknown>[];
 };
 
@@ -73,8 +85,15 @@ export type PsPayload = {
   readonly runtime_last_ok_at: string | null;
   readonly runtime_reset_at: string | null;
   readonly runtime_reset_count: number;
-  readonly runtime_reset_reasons: readonly RuntimeResetReason[];
   readonly runtime_reset_summary: string | null;
+  readonly runtime_reset_changes: readonly RuntimeDriftField[];
+  readonly runtime_last_repair_at: string | null;
+  readonly runtime_repair_action: string | null;
+  readonly runtime_repair_outcome:
+    | "stabilized"
+    | "manual_action_required"
+    | null;
+  readonly runtime_next_step: string | null;
   readonly items: readonly PsItem[];
 };
 
@@ -114,7 +133,7 @@ export function createRuntimeCache(opts: {
 
   let snapshot: RuntimeSnapshot | null = null;
   let refreshTask: Promise<void> | null = null;
-  let pending = false;
+  let pendingReason: string | null = null;
   let health: RuntimeHealth = {
     ok: false,
     error: "runtime_not_checked",
@@ -124,8 +143,13 @@ export function createRuntimeCache(opts: {
     resetCount: 0,
     fingerprint: null,
     identity: null,
-    lastResetReasons: [],
+    lastResetChanges: [],
     lastResetSummary: null,
+    lastRepairAtMs: null,
+    lastRepairAction: null,
+    lastRepairOutcome: null,
+    nextStep: null,
+    resetFromNonEmptyRuntime: false,
   };
 
   const refresh = async ({
@@ -134,68 +158,29 @@ export function createRuntimeCache(opts: {
     readonly reason: string;
   }): Promise<void> => {
     if (refreshTask) {
-      pending = true;
+      queueRefresh({ reason: `pending:${reason}`, priority: "normal" });
       await refreshTask;
       return;
     }
 
     refreshTask = (async () => {
       const checkedAtMs = Date.now();
+      const previousSnapshot = snapshot;
       const runtimeResult = await readRuntimeProjects({ includeGlobal: true });
-      let nextHealth: RuntimeHealth = {
-        ...health,
+      const refreshed = await resolveRefreshResult({
         checkedAtMs,
-      };
-
-      if (runtimeResult.ok) {
-        const identityResult = await readRuntimeIdentity();
-        let fingerprint = health.fingerprint;
-        let resetCount = health.resetCount;
-        let lastResetAtMs = health.lastResetAtMs;
-        let identity = health.identity;
-        let lastResetReasons = health.lastResetReasons;
-        let lastResetSummary = health.lastResetSummary;
-        if (identityResult.ok) {
-          identity = identityResult.identity;
-          fingerprint = buildRuntimeFingerprint({
-            identity: identityResult.identity,
-          });
-          if (
-            health.fingerprint &&
-            fingerprint !== health.fingerprint &&
-            health.identity
-          ) {
-            const described = describeRuntimeReset({
-              previous: health.identity,
-              next: identityResult.identity,
-            });
-            resetCount += 1;
-            lastResetAtMs = checkedAtMs;
-            lastResetReasons = described.reasons;
-            lastResetSummary = described.summary;
-          }
-        }
-        nextHealth = {
-          ...nextHealth,
-          ok: true,
-          error: null,
-          lastOkAtMs: checkedAtMs,
-          fingerprint,
-          identity,
-          resetCount,
-          lastResetAtMs,
-          lastResetReasons,
-          lastResetSummary,
-        };
-      } else {
-        nextHealth = {
-          ...nextHealth,
-          ok: false,
-          error: runtimeResult.error ?? "runtime_unavailable",
-        };
+        currentHealth: health,
+        previousSnapshot,
+        reason,
+        runtimeResult,
+      });
+      health = refreshed.health;
+      if (refreshed.repairReason) {
+        queueRefresh({
+          reason: refreshed.repairReason,
+          priority: "repair",
+        });
       }
-
-      health = nextHealth;
 
       if (runtimeResult.ok) {
         await autoRegisterRuntimeHackProjects({
@@ -220,9 +205,10 @@ export function createRuntimeCache(opts: {
     await refreshTask;
     refreshTask = null;
 
-    if (pending) {
-      pending = false;
-      await refresh({ reason: `pending:${reason}` });
+    if (pendingReason) {
+      const queuedReason = pendingReason;
+      pendingReason = null;
+      await refresh({ reason: queuedReason });
     }
   };
 
@@ -293,8 +279,12 @@ export function createRuntimeCache(opts: {
       runtime_last_ok_at: runtimeMeta.lastOkAt,
       runtime_reset_at: runtimeMeta.lastResetAt,
       runtime_reset_count: runtimeMeta.resetCount,
-      runtime_reset_reasons: runtimeMeta.lastResetReasons,
       runtime_reset_summary: runtimeMeta.lastResetSummary,
+      runtime_reset_changes: runtimeMeta.lastResetChanges,
+      runtime_last_repair_at: runtimeMeta.lastRepairAt,
+      runtime_repair_action: runtimeMeta.lastRepairAction,
+      runtime_repair_outcome: runtimeMeta.lastRepairOutcome,
+      runtime_next_step: runtimeMeta.nextStep,
       projects: views.map((view, i) => ({
         ...deps.serializeProjectView(view),
         ...(includeMeta ? { meta: metas[i] ?? null } : {}),
@@ -328,17 +318,233 @@ export function createRuntimeCache(opts: {
       runtime_last_ok_at: runtimeMeta.lastOkAt,
       runtime_reset_at: runtimeMeta.lastResetAt,
       runtime_reset_count: runtimeMeta.resetCount,
-      runtime_reset_reasons: runtimeMeta.lastResetReasons,
       runtime_reset_summary: runtimeMeta.lastResetSummary,
+      runtime_reset_changes: runtimeMeta.lastResetChanges,
+      runtime_last_repair_at: runtimeMeta.lastRepairAt,
+      runtime_repair_action: runtimeMeta.lastRepairAction,
+      runtime_repair_outcome: runtimeMeta.lastRepairOutcome,
+      runtime_next_step: runtimeMeta.nextStep,
       items,
     };
   };
+
+  function queueRefresh(opts: {
+    readonly reason: string;
+    readonly priority: "normal" | "repair";
+  }): void {
+    if (opts.priority === "repair") {
+      pendingReason = opts.reason;
+      return;
+    }
+    pendingReason ??= opts.reason;
+  }
 
   return {
     refresh,
     getProjectsPayload,
     getPsPayload,
     getSnapshot: () => snapshot,
+  };
+}
+
+async function resolveRefreshResult(opts: {
+  readonly checkedAtMs: number;
+  readonly currentHealth: RuntimeHealth;
+  readonly previousSnapshot: RuntimeSnapshot | null;
+  readonly reason: string;
+  readonly runtimeResult: Awaited<ReturnType<typeof readRuntimeProjects>>;
+}): Promise<{
+  readonly health: RuntimeHealth;
+  readonly repairReason: string | null;
+}> {
+  if (opts.runtimeResult.ok) {
+    return await resolveHealthyRefreshResult(opts);
+  }
+  return {
+    health: resolveUnavailableRefreshHealth({
+      checkedAtMs: opts.checkedAtMs,
+      currentHealth: opts.currentHealth,
+      reason: opts.reason,
+      runtimeError: opts.runtimeResult.error ?? "runtime_unavailable",
+    }),
+    repairReason: null,
+  };
+}
+
+async function resolveHealthyRefreshResult(opts: {
+  readonly checkedAtMs: number;
+  readonly currentHealth: RuntimeHealth;
+  readonly previousSnapshot: RuntimeSnapshot | null;
+  readonly reason: string;
+  readonly runtimeResult: Extract<
+    Awaited<ReturnType<typeof readRuntimeProjects>>,
+    { readonly ok: true }
+  >;
+}): Promise<{
+  readonly health: RuntimeHealth;
+  readonly repairReason: string | null;
+}> {
+  const identityResult = await readRuntimeIdentity();
+  const nextHealth = {
+    ...opts.currentHealth,
+    ok: true,
+    error: null,
+    checkedAtMs: opts.checkedAtMs,
+    lastOkAtMs: opts.checkedAtMs,
+  } satisfies RuntimeHealth;
+  if (!identityResult.ok) {
+    return {
+      health: nextHealth,
+      repairReason: null,
+    };
+  }
+
+  const identity = identityResult.identity;
+  const fingerprint = buildRuntimeFingerprint({ identity });
+  const drift = detectRuntimeDrift({
+    previous: opts.currentHealth.identity,
+    current: identity,
+  });
+  const resetDetected =
+    opts.currentHealth.fingerprint !== null &&
+    fingerprint !== opts.currentHealth.fingerprint;
+  if (resetDetected) {
+    return resolveResetRefreshHealth({
+      ...opts,
+      drift,
+      fingerprint,
+      identity,
+    });
+  }
+  if (isAutoRepairReason({ reason: opts.reason })) {
+    return {
+      health: resolveStableAutoRepairHealth({
+        ...opts,
+        fingerprint,
+        identity,
+      }),
+      repairReason: null,
+    };
+  }
+  return {
+    health: {
+      ...nextHealth,
+      fingerprint,
+      identity,
+    },
+    repairReason: null,
+  };
+}
+
+function resolveResetRefreshHealth(opts: {
+  readonly checkedAtMs: number;
+  readonly currentHealth: RuntimeHealth;
+  readonly previousSnapshot: RuntimeSnapshot | null;
+  readonly reason: string;
+  readonly runtimeResult: Extract<
+    Awaited<ReturnType<typeof readRuntimeProjects>>,
+    { readonly ok: true }
+  >;
+  readonly drift: ReturnType<typeof detectRuntimeDrift>;
+  readonly fingerprint: string;
+  readonly identity: RuntimeIdentity;
+}): {
+  readonly health: RuntimeHealth;
+  readonly repairReason: string | null;
+} {
+  const resetFromNonEmptyRuntime =
+    countRuntimeContainers({
+      runtime: opts.previousSnapshot?.runtime ?? [],
+    }) > 0;
+  const health = {
+    ...opts.currentHealth,
+    ok: true,
+    error: null,
+    checkedAtMs: opts.checkedAtMs,
+    lastOkAtMs: opts.checkedAtMs,
+    fingerprint: opts.fingerprint,
+    identity: opts.identity,
+    resetCount: opts.currentHealth.resetCount + 1,
+    lastResetAtMs: opts.checkedAtMs,
+    lastResetChanges: opts.drift.changed,
+    lastResetSummary: opts.drift.summary,
+    lastRepairAtMs: opts.checkedAtMs,
+    lastRepairAction: "refresh_runtime_snapshot",
+    lastRepairOutcome: isAutoRepairReason({ reason: opts.reason })
+      ? "manual_action_required"
+      : null,
+    nextStep: isAutoRepairReason({ reason: opts.reason })
+      ? describeRepairGuidance({
+          hadRuntimeBeforeReset: resetFromNonEmptyRuntime,
+          runtime: opts.runtimeResult.runtime,
+          reason: "still_resetting",
+        })
+      : null,
+    resetFromNonEmptyRuntime,
+  } satisfies RuntimeHealth;
+  return {
+    health,
+    repairReason: isAutoRepairReason({ reason: opts.reason })
+      ? null
+      : `auto-repair:${opts.reason}`,
+  };
+}
+
+function resolveStableAutoRepairHealth(opts: {
+  readonly checkedAtMs: number;
+  readonly currentHealth: RuntimeHealth;
+  readonly runtimeResult: Extract<
+    Awaited<ReturnType<typeof readRuntimeProjects>>,
+    { readonly ok: true }
+  >;
+  readonly fingerprint: string;
+  readonly identity: RuntimeIdentity;
+}): RuntimeHealth {
+  const nextStep = describeRepairGuidance({
+    hadRuntimeBeforeReset: opts.currentHealth.resetFromNonEmptyRuntime,
+    runtime: opts.runtimeResult.runtime,
+    reason: "post_reset",
+  });
+  return {
+    ...opts.currentHealth,
+    ok: true,
+    error: null,
+    checkedAtMs: opts.checkedAtMs,
+    lastOkAtMs: opts.checkedAtMs,
+    fingerprint: opts.fingerprint,
+    identity: opts.identity,
+    lastRepairAtMs: opts.checkedAtMs,
+    lastRepairAction: "refresh_runtime_snapshot",
+    lastRepairOutcome: nextStep ? "manual_action_required" : "stabilized",
+    nextStep,
+  };
+}
+
+function resolveUnavailableRefreshHealth(opts: {
+  readonly checkedAtMs: number;
+  readonly currentHealth: RuntimeHealth;
+  readonly reason: string;
+  readonly runtimeError: string;
+}): RuntimeHealth {
+  const nextHealth = {
+    ...opts.currentHealth,
+    ok: false,
+    error: opts.runtimeError,
+    checkedAtMs: opts.checkedAtMs,
+  } satisfies RuntimeHealth;
+  if (!isAutoRepairReason({ reason: opts.reason })) {
+    return nextHealth;
+  }
+  return {
+    ...nextHealth,
+    lastRepairAtMs: opts.checkedAtMs,
+    lastRepairAction: "refresh_runtime_snapshot",
+    lastRepairOutcome: "manual_action_required",
+    nextStep: describeRepairGuidance({
+      hadRuntimeBeforeReset: opts.currentHealth.resetFromNonEmptyRuntime,
+      runtime: [],
+      reason: "runtime_unavailable",
+    }),
   };
 }
 
@@ -408,12 +614,17 @@ function serializeRuntimeHealth(opts: { readonly health: RuntimeHealth }): {
   readonly lastOkAt: string | null;
   readonly lastResetAt: string | null;
   readonly resetCount: number;
-  readonly lastResetReasons: readonly RuntimeResetReason[];
   readonly lastResetSummary: string | null;
+  readonly lastResetChanges: readonly RuntimeDriftField[];
+  readonly lastRepairAt: string | null;
+  readonly lastRepairAction: string | null;
+  readonly lastRepairOutcome: "stabilized" | "manual_action_required" | null;
+  readonly nextStep: string | null;
 } {
   const checkedAt = toIso({ ms: opts.health.checkedAtMs });
   const lastOkAt = toIso({ ms: opts.health.lastOkAtMs });
   const lastResetAt = toIso({ ms: opts.health.lastResetAtMs });
+  const lastRepairAt = toIso({ ms: opts.health.lastRepairAtMs });
   return {
     ok: opts.health.ok,
     error: opts.health.error,
@@ -421,8 +632,12 @@ function serializeRuntimeHealth(opts: { readonly health: RuntimeHealth }): {
     lastOkAt,
     lastResetAt,
     resetCount: opts.health.resetCount,
-    lastResetReasons: opts.health.lastResetReasons,
     lastResetSummary: opts.health.lastResetSummary,
+    lastResetChanges: opts.health.lastResetChanges,
+    lastRepairAt,
+    lastRepairAction: opts.health.lastRepairAction,
+    lastRepairOutcome: opts.health.lastRepairOutcome,
+    nextStep: opts.health.nextStep,
   };
 }
 
@@ -431,4 +646,42 @@ function toIso(opts: { readonly ms: number | null }): string | null {
     return null;
   }
   return new Date(opts.ms).toISOString();
+}
+
+function isAutoRepairReason(opts: { readonly reason: string }): boolean {
+  return opts.reason.startsWith("auto-repair:");
+}
+
+function describeRepairGuidance(opts: {
+  readonly hadRuntimeBeforeReset: boolean;
+  readonly runtime: readonly RuntimeProject[];
+  readonly reason: "post_reset" | "runtime_unavailable" | "still_resetting";
+}): string | null {
+  const currentContainers = countRuntimeContainers({ runtime: opts.runtime });
+
+  if (opts.reason === "runtime_unavailable") {
+    return "Docker is still unavailable. Run `hack doctor` and retry your command.";
+  }
+
+  if (currentContainers === 0 && opts.hadRuntimeBeforeReset) {
+    return "Docker restarted and cleared previously detected project containers. Restart affected projects with `hack up`.";
+  }
+
+  if (opts.reason === "still_resetting") {
+    return "Docker runtime identity is still changing. Run `hack doctor` and retry your command.";
+  }
+
+  return null;
+}
+
+function countRuntimeContainers(opts: {
+  readonly runtime: readonly RuntimeProject[];
+}): number {
+  let count = 0;
+  for (const project of opts.runtime) {
+    for (const service of project.services.values()) {
+      count += service.containers.length;
+    }
+  }
+  return count;
 }

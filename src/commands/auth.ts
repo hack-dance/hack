@@ -1,6 +1,7 @@
 import type { CommandHandlerFor } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
 import { optJson } from "../cli/options.ts";
+import { requestHackAuthBroker } from "../lib/auth-broker-client.ts";
 import {
   deleteHackAuthSession,
   fetchHackAuthMe,
@@ -41,7 +42,7 @@ const optRedirect = defineOption({
 const loginSpec = defineCommand({
   name: "login",
   summary: "Open a browser and sign in to Hack auth",
-  group: "Global",
+  group: "Integrations",
   options: [optJson, optNoOpen, optBrokerUrl, optRedirect] as const,
   positionals: [] as const,
   subcommands: [] as const,
@@ -50,7 +51,7 @@ const loginSpec = defineCommand({
 const logoutSpec = defineCommand({
   name: "logout",
   summary: "Clear the locally stored Hack auth session",
-  group: "Global",
+  group: "Integrations",
   options: [optJson] as const,
   positionals: [] as const,
   subcommands: [] as const,
@@ -59,7 +60,7 @@ const logoutSpec = defineCommand({
 const statusSpec = defineCommand({
   name: "status",
   summary: "Show whether Hack auth is configured locally",
-  group: "Global",
+  group: "Integrations",
   options: [optJson, optBrokerUrl] as const,
   positionals: [] as const,
   subcommands: [] as const,
@@ -68,17 +69,65 @@ const statusSpec = defineCommand({
 const whoamiSpec = defineCommand({
   name: "whoami",
   summary: "Resolve the current Hack auth identity via the broker",
-  group: "Global",
+  group: "Integrations",
   options: [optJson, optBrokerUrl] as const,
   positionals: [] as const,
   subcommands: [] as const,
 } as const);
 
+const inviteIdPositionals = [{ name: "inviteId", required: true }] as const;
+
+const invitesSpec = defineCommand({
+  name: "invites",
+  summary: "List pending invitations for the authenticated user",
+  description:
+    "Recipient-side membership lifecycle entry point. Lists pending org and team invites so the authenticated user can accept or decline them explicitly.",
+  group: "Global",
+  options: [optJson, optBrokerUrl] as const,
+  positionals: [] as const,
+  subcommands: [] as const,
+} as const);
+const inviteAcceptSpec = defineCommand({
+  name: "accept",
+  summary: "Accept a pending invitation and activate membership",
+  description:
+    "Moves a pending org or team invite to active membership for the authenticated user.",
+  group: "Global",
+  options: [optJson, optBrokerUrl] as const,
+  positionals: inviteIdPositionals,
+  subcommands: [] as const,
+} as const);
+
+const inviteDeclineSpec = defineCommand({
+  name: "decline",
+  summary: "Decline a pending invitation and mark it removed",
+  description:
+    "Moves a pending org or team invite to the removed audit state for the authenticated user.",
+  group: "Global",
+  options: [optJson, optBrokerUrl] as const,
+  positionals: inviteIdPositionals,
+  subcommands: [] as const,
+} as const);
+
+const inviteSpec = defineCommand({
+  name: "invite",
+  summary: "Act on a specific invitation",
+  description:
+    "Recipient-side invitation actions. Acceptance and decline stay under auth so admins cannot implicitly activate access for someone else.",
+  group: "Global",
+  options: [] as const,
+  positionals: [] as const,
+  subcommands: [
+    withHandler(inviteAcceptSpec, handleAuthInviteAccept),
+    withHandler(inviteDeclineSpec, handleAuthInviteDecline),
+  ] as const,
+} as const);
+
 export const authCommand = defineCommand({
   name: "auth",
-  summary: "Manage Hack auth sessions",
-  group: "Global",
-  expandInRootHelp: true,
+  summary: "Manage Hack account sign-in",
+  group: "Integrations",
+  expandInRootHelp: false,
   options: [] as const,
   positionals: [] as const,
   subcommands: [
@@ -86,6 +135,8 @@ export const authCommand = defineCommand({
     withHandler(logoutSpec, handleAuthLogout),
     withHandler(statusSpec, handleAuthStatus),
     withHandler(whoamiSpec, handleAuthWhoami),
+    withHandler(invitesSpec, handleAuthInvites),
+    inviteSpec,
   ] as const,
 } as const);
 
@@ -93,6 +144,9 @@ type LoginSpec = typeof loginSpec;
 type LogoutSpec = typeof logoutSpec;
 type StatusSpec = typeof statusSpec;
 type WhoamiSpec = typeof whoamiSpec;
+type InvitesSpec = typeof invitesSpec;
+type InviteAcceptSpec = typeof inviteAcceptSpec;
+type InviteDeclineSpec = typeof inviteDeclineSpec;
 
 async function handleAuthLogin({
   args,
@@ -344,6 +398,98 @@ async function handleAuthWhoami({
       ...me.value,
       brokerBaseUrl,
       ...(stored.expiresAt ? { expiresAt: stored.expiresAt } : {}),
+    },
+  });
+}
+
+async function handleAuthInvites({
+  args,
+}: Parameters<CommandHandlerFor<InvitesSpec>>[0]): Promise<number> {
+  const response = await requestHackAuthBroker({
+    path: "/v1/auth/invitations",
+    brokerUrl: args.options.brokerUrl,
+  });
+  if (!response.ok) {
+    return writeFailure({
+      json: args.options.json === true,
+      error: response.error,
+      payload: {
+        brokerBaseUrl: response.brokerBaseUrl,
+        loginRequired: response.loginRequired,
+      },
+    });
+  }
+
+  const invitations = Array.isArray(response.value.invitations)
+    ? response.value.invitations
+    : [];
+  return writeSuccess({
+    json: args.options.json === true,
+    human:
+      invitations.length > 0
+        ? `Found ${invitations.length} pending Hack auth invitation${invitations.length === 1 ? "" : "s"}.`
+        : "No pending Hack auth invitations.",
+    payload: {
+      ...response.value,
+      brokerBaseUrl: response.brokerBaseUrl,
+    },
+  });
+}
+
+async function handleAuthInviteAccept({
+  args,
+}: Parameters<CommandHandlerFor<InviteAcceptSpec>>[0]): Promise<number> {
+  const response = await requestHackAuthBroker({
+    path: `/v1/auth/invitations/${encodeURIComponent(args.positionals.inviteId)}/accept`,
+    method: "POST",
+    brokerUrl: args.options.brokerUrl,
+  });
+  if (!response.ok) {
+    return writeFailure({
+      json: args.options.json === true,
+      error: response.error,
+      payload: {
+        brokerBaseUrl: response.brokerBaseUrl,
+        loginRequired: response.loginRequired,
+      },
+    });
+  }
+
+  return writeSuccess({
+    json: args.options.json === true,
+    human: "Invitation accepted.",
+    payload: {
+      ...response.value,
+      brokerBaseUrl: response.brokerBaseUrl,
+    },
+  });
+}
+
+async function handleAuthInviteDecline({
+  args,
+}: Parameters<CommandHandlerFor<InviteDeclineSpec>>[0]): Promise<number> {
+  const response = await requestHackAuthBroker({
+    path: `/v1/auth/invitations/${encodeURIComponent(args.positionals.inviteId)}/decline`,
+    method: "POST",
+    brokerUrl: args.options.brokerUrl,
+  });
+  if (!response.ok) {
+    return writeFailure({
+      json: args.options.json === true,
+      error: response.error,
+      payload: {
+        brokerBaseUrl: response.brokerBaseUrl,
+        loginRequired: response.loginRequired,
+      },
+    });
+  }
+
+  return writeSuccess({
+    json: args.options.json === true,
+    human: "Invitation declined.",
+    payload: {
+      ...response.value,
+      brokerBaseUrl: response.brokerBaseUrl,
     },
   });
 }

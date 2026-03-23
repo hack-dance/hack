@@ -261,14 +261,13 @@ testIntegration(
 );
 
 testIntegration(
-  "tickets extension: list and show fall back to local tickets ref when origin fetch fails",
+  "tickets extension: cli rebuilds sqlite projection after local deletion",
   { timeout: 60_000 },
   async () => {
     const root = await mkdirTempDir({
-      prefix: "hack-cli-tickets-offline-read-",
+      prefix: "hack-cli-tickets-projection-e2e-",
     });
     const projectDir = join(root, "project");
-    const remoteDir = join(root, "remote.git");
 
     await mkdir(projectDir, { recursive: true });
     await copyDir({
@@ -288,15 +287,55 @@ testIntegration(
     await run({ cwd: projectDir, cmd: ["git", "add", "-A"] });
     await run({ cwd: projectDir, cmd: ["git", "commit", "-m", "init"] });
 
-    await run({ cwd: root, cmd: ["git", "init", "--bare", remoteDir] });
+    const created = await runHack({
+      cwd: projectDir,
+      args: ["tickets", "create", "--title", "Projection lifecycle", "--json"],
+    });
+    const createdJson = JSON.parse(created.stdout) as {
+      ticket: { ticketId: string };
+    };
+
+    const projectionPath = join(projectDir, ".hack/tickets/projection.sqlite");
+    expect(await Bun.file(projectionPath).exists()).toBe(true);
+
+    await rm(projectionPath, { force: true });
+    expect(await Bun.file(projectionPath).exists()).toBe(false);
+
+    const shown = await runHack({
+      cwd: projectDir,
+      args: ["tickets", "show", createdJson.ticket.ticketId, "--json"],
+    });
+    expect(shown.exitCode).toBe(0);
+    expect(await Bun.file(projectionPath).exists()).toBe(true);
+
+    await rm(root, { recursive: true, force: true });
+  }
+);
+
+testIntegration(
+  "tickets extension: document command appends spec docs and updates the active description",
+  { timeout: 60_000 },
+  async () => {
+    const root = await mkdirTempDir({ prefix: "hack-cli-tickets-docs-e2e-" });
+    const projectDir = join(root, "project");
+
+    await mkdir(projectDir, { recursive: true });
+    await copyDir({
+      from: resolve(import.meta.dir, "../examples/tickets"),
+      to: projectDir,
+    });
+
+    await run({ cwd: projectDir, cmd: ["git", "init"] });
     await run({
       cwd: projectDir,
-      cmd: ["git", "remote", "add", "origin", remoteDir],
+      cmd: ["git", "config", "user.email", "tests@hack"],
     });
     await run({
       cwd: projectDir,
-      cmd: ["git", "push", "-u", "origin", "HEAD:main"],
+      cmd: ["git", "config", "user.name", "hack-cli-tests"],
     });
+    await run({ cwd: projectDir, cmd: ["git", "add", "-A"] });
+    await run({ cwd: projectDir, cmd: ["git", "commit", "-m", "init"] });
 
     const created = await runHack({
       cwd: projectDir,
@@ -304,67 +343,222 @@ testIntegration(
         "tickets",
         "create",
         "--title",
-        "Offline-readable ticket",
+        "Document lifecycle",
+        "--body",
+        "## Context\nInitial description",
         "--json",
       ],
     });
-    expect(created.exitCode).toBe(0);
+    const createdJson = JSON.parse(created.stdout) as {
+      ticket: { ticketId: string };
+    };
+    const ticketId = createdJson.ticket.ticketId;
+
+    const spec = await runHack({
+      cwd: projectDir,
+      args: [
+        "tickets",
+        "document",
+        ticketId,
+        "--kind",
+        "spec",
+        "--body",
+        "## Goals\n- Add spec support",
+        "--json",
+      ],
+    });
+    const specJson = JSON.parse(spec.stdout) as {
+      document: { kind: string; role: string };
+    };
+    expect(specJson.document.kind).toBe("spec");
+    expect(specJson.document.role).toBe("spec");
+
+    const description = await runHack({
+      cwd: projectDir,
+      args: [
+        "tickets",
+        "document",
+        ticketId,
+        "--kind",
+        "description",
+        "--body",
+        "## Context\nUpdated description",
+        "--json",
+      ],
+    });
+    const descriptionJson = JSON.parse(description.stdout) as {
+      document: { kind: string; content: string };
+    };
+    expect(descriptionJson.document.kind).toBe("description");
+    expect(descriptionJson.document.content).toBe(
+      "## Context\nUpdated description"
+    );
+
+    const shown = await runHack({
+      cwd: projectDir,
+      args: ["tickets", "show", ticketId, "--json"],
+    });
+    const showJson = JSON.parse(shown.stdout) as {
+      ticket: { body?: string };
+      documents: Array<{ kind: string; role: string; content: string }>;
+    };
+    expect(showJson.ticket.body).toBe("## Context\nUpdated description");
+    expect(showJson.documents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "description",
+          role: "description",
+          content: "## Context\nInitial description",
+        }),
+        expect.objectContaining({
+          kind: "spec",
+          role: "spec",
+          content: "## Goals\n- Add spec support",
+        }),
+        expect.objectContaining({
+          kind: "description",
+          role: "description",
+          content: "## Context\nUpdated description",
+        }),
+      ])
+    );
+
+    await rm(root, { recursive: true, force: true });
+  }
+);
+
+testIntegration(
+  "tickets extension: hidden ref sync transports only the journal and peers rebuild projection state locally",
+  { timeout: 60_000 },
+  async () => {
+    const root = await mkdirTempDir({
+      prefix: "hack-cli-tickets-portability-e2e-",
+    });
+    const authorDir = join(root, "author");
+    const peerDir = join(root, "peer");
+    const remoteDir = join(root, "remote.git");
+
+    await mkdir(authorDir, { recursive: true });
+    await copyDir({
+      from: resolve(import.meta.dir, "../examples/tickets"),
+      to: authorDir,
+    });
+
+    await run({ cwd: authorDir, cmd: ["git", "init"] });
+    await run({
+      cwd: authorDir,
+      cmd: ["git", "config", "user.email", "tests@hack"],
+    });
+    await run({
+      cwd: authorDir,
+      cmd: ["git", "config", "user.name", "hack-cli-tests"],
+    });
+    await run({ cwd: authorDir, cmd: ["git", "add", "-A"] });
+    await run({ cwd: authorDir, cmd: ["git", "commit", "-m", "init"] });
+
+    await run({ cwd: root, cmd: ["git", "init", "--bare", remoteDir] });
+    await run({
+      cwd: authorDir,
+      cmd: ["git", "remote", "add", "origin", remoteDir],
+    });
+    await run({
+      cwd: authorDir,
+      cmd: ["git", "push", "-u", "origin", "HEAD:main"],
+    });
+
+    const created = await runHack({
+      cwd: authorDir,
+      args: ["tickets", "create", "--title", "Portable journal", "--json"],
+    });
     const createdJson = JSON.parse(created.stdout) as {
       ticket: { ticketId: string };
     };
 
-    await run({
-      cwd: projectDir,
+    const remoteTree = await run({
+      cwd: root,
       cmd: [
         "git",
-        "remote",
-        "set-url",
-        "origin",
-        join(root, "missing-remote.git"),
+        `--git-dir=${remoteDir}`,
+        "ls-tree",
+        "-r",
+        "--name-only",
+        "refs/hack/tickets",
       ],
     });
-
-    const listed = await runAllowFail({
-      cwd: projectDir,
-      cmd: [
-        "bun",
-        resolve(import.meta.dir, "../index.ts"),
-        "tickets",
-        "list",
-        "--json",
-      ],
-    });
-    expect(listed.exitCode).toBe(0);
-    const listJson = JSON.parse(listed.stdout) as {
-      tickets: { ticketId: string; title: string }[];
-    };
+    const remotePaths = remoteTree.stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
     expect(
-      listJson.tickets.some(
-        (ticket) =>
-          ticket.ticketId === createdJson.ticket.ticketId &&
-          ticket.title === "Offline-readable ticket"
+      remotePaths.some((path) =>
+        path.startsWith(".hack/tickets/events/events-")
       )
     ).toBe(true);
+    expect(remotePaths).not.toContain(".hack/tickets/projection.sqlite");
 
-    const shown = await runAllowFail({
-      cwd: projectDir,
-      cmd: [
-        "bun",
-        resolve(import.meta.dir, "../index.ts"),
-        "tickets",
-        "show",
-        createdJson.ticket.ticketId,
-        "--json",
-      ],
+    await mkdir(peerDir, { recursive: true });
+    await copyDir({
+      from: resolve(import.meta.dir, "../examples/tickets"),
+      to: peerDir,
+    });
+    await run({ cwd: peerDir, cmd: ["git", "init"] });
+    await run({
+      cwd: peerDir,
+      cmd: ["git", "config", "user.email", "tests@hack"],
+    });
+    await run({
+      cwd: peerDir,
+      cmd: ["git", "config", "user.name", "hack-cli-tests"],
+    });
+    await run({ cwd: peerDir, cmd: ["git", "add", "-A"] });
+    await run({ cwd: peerDir, cmd: ["git", "commit", "-m", "init"] });
+    await run({
+      cwd: peerDir,
+      cmd: ["git", "remote", "add", "origin", remoteDir],
+    });
+
+    const synced = await runHack({
+      cwd: peerDir,
+      args: ["tickets", "sync", "--json"],
+    });
+    expect(synced.exitCode).toBe(0);
+
+    const shown = await runHack({
+      cwd: peerDir,
+      args: ["tickets", "show", createdJson.ticket.ticketId, "--json"],
     });
     expect(shown.exitCode).toBe(0);
-    const showJson = JSON.parse(shown.stdout) as {
-      ticket: { ticketId: string; title: string };
-    };
-    expect(showJson.ticket).toMatchObject({
-      ticketId: createdJson.ticket.ticketId,
-      title: "Offline-readable ticket",
+
+    const eventsDir = join(
+      peerDir,
+      ".hack/tickets/git/worktree/.hack/tickets/events"
+    );
+    const eventFiles = (await readdir(eventsDir))
+      .filter((entry) => entry.endsWith(".jsonl"))
+      .sort();
+    expect(eventFiles.length).toBeGreaterThan(0);
+    const journalBeforeDeletion = await readFile(
+      join(eventsDir, eventFiles[0] ?? ""),
+      "utf8"
+    );
+
+    const projectionPath = join(peerDir, ".hack/tickets/projection.sqlite");
+    expect(await Bun.file(projectionPath).exists()).toBe(true);
+    await rm(projectionPath, { force: true });
+    expect(await Bun.file(projectionPath).exists()).toBe(false);
+
+    const rebuilt = await runHack({
+      cwd: peerDir,
+      args: ["tickets", "list", "--json"],
     });
+    expect(rebuilt.exitCode).toBe(0);
+    expect(await Bun.file(projectionPath).exists()).toBe(true);
+
+    const journalAfterDeletion = await readFile(
+      join(eventsDir, eventFiles[0] ?? ""),
+      "utf8"
+    );
+    expect(journalAfterDeletion).toBe(journalBeforeDeletion);
 
     await rm(root, { recursive: true, force: true });
   }

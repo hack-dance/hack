@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 const DIGITS_ONLY_PATTERN = /^\d+$/;
 
 export function unixSeconds(): number {
@@ -73,6 +75,10 @@ export function normalizeTicketRefs(inputs: readonly string[]): string[] {
 
 export function stableStringify(value: unknown): string {
   return JSON.stringify(stableSort(value));
+}
+
+export function sha256Hex(input: { readonly value: string }): string {
+  return createHash("sha256").update(input.value).digest("hex");
 }
 
 function stableSort(value: unknown): unknown {

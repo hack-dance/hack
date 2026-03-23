@@ -14,6 +14,11 @@ import { isRecord } from "../../../lib/guards.ts";
 import { openUrl } from "../../../lib/os.ts";
 import { display } from "../../../ui/display.ts";
 import {
+  findTicketRemoteLink,
+  normalizeTicketFieldName,
+  projectRemoteLinkToCompatibilityFields,
+} from "../tickets/provenance.ts";
+import {
   createTicketsStore,
   type TicketComment,
   type TicketMetadataValue,
@@ -4176,9 +4181,15 @@ type LinearDeliverySummary = {
 
 function resolveTicketAuthority(input: {
   readonly ticket: TicketSummary;
-}): "hack" | "linear" {
+}): "hack" | "linear" | "review_required" {
   const owner = input.ticket.owner.trim().toLowerCase();
   const source = input.ticket.source.trim().toLowerCase();
+  if (
+    (owner === "linear" && source !== "linear") ||
+    (source === "linear" && owner !== "linear")
+  ) {
+    return "review_required";
+  }
   if (owner === "linear" || source === "linear") {
     return "linear";
   }
@@ -4216,7 +4227,7 @@ function normalizeProjectValue(input: {
 }
 
 function detectAuthoritativeFieldConflicts(input: {
-  readonly authority: "hack" | "linear";
+  readonly authority: "hack" | "linear" | "review_required";
   readonly ticket: TicketSummary;
   readonly issue: LinearIssue;
   readonly remoteProjection: Pick<
@@ -4225,13 +4236,15 @@ function detectAuthoritativeFieldConflicts(input: {
   >;
 }): readonly RecordedSyncConflict[] {
   const conflicts: RecordedSyncConflict[] = [];
+  const authorityLabel =
+    input.authority === "review_required" ? "review-required" : input.authority;
   const localTitle = input.ticket.title.trim();
   const remoteTitle = input.issue.title.trim();
   if (localTitle !== remoteTitle) {
     conflicts.push({
       field: "title",
       authority: input.authority,
-      summary: `Authoritative ${input.authority} title diverged from the other side.`,
+      summary: `Authoritative ${authorityLabel} title diverged from the other side.`,
       localValue: localTitle,
       remoteValue: remoteTitle,
     });
@@ -4245,9 +4258,9 @@ function detectAuthoritativeFieldConflicts(input: {
   });
   if (localBody !== remoteBody) {
     conflicts.push({
-      field: "body",
+      field: normalizeTicketFieldName("body"),
       authority: input.authority,
-      summary: `Authoritative ${input.authority} body diverged from the other side.`,
+      summary: `Authoritative ${authorityLabel} body diverged from the other side.`,
       localValue: localBody,
       remoteValue: remoteBody,
     });
@@ -4257,7 +4270,7 @@ function detectAuthoritativeFieldConflicts(input: {
     conflicts.push({
       field: "status",
       authority: input.authority,
-      summary: `Authoritative ${input.authority} status diverged from the other side.`,
+      summary: `Authoritative ${authorityLabel} status diverged from the other side.`,
       localValue: input.ticket.status,
       remoteValue: input.remoteProjection.status,
     });
@@ -4278,7 +4291,7 @@ function detectAuthoritativeFieldConflicts(input: {
     conflicts.push({
       field: "project",
       authority: input.authority,
-      summary: `Authoritative ${input.authority} project routing diverged from the other side.`,
+      summary: `Authoritative ${authorityLabel} project routing diverged from the other side.`,
       ...(localProject !== undefined ? { localValue: localProject } : {}),
       ...(remoteProject !== undefined ? { remoteValue: remoteProject } : {}),
     });
@@ -4449,10 +4462,56 @@ function buildConflictDedupKey(input: {
   readonly remoteValue?: TicketMetadataValue;
 }): string {
   return [
-    input.field,
+    normalizeTicketFieldName(input.field),
     JSON.stringify(input.localValue ?? null),
     JSON.stringify(input.remoteValue ?? null),
   ].join("|");
+}
+
+function buildLinearCheckpointIdempotencyKey(input: {
+  readonly ticketId: string;
+  readonly profileId: string;
+  readonly direction: string;
+  readonly issue: LinearIssue;
+}): string {
+  const fingerprint = createHash("sha256")
+    .update(
+      JSON.stringify({
+        issueId: input.issue.id,
+        identifier: input.issue.identifier,
+        title: input.issue.title,
+        description: input.issue.description ?? null,
+        stateId: input.issue.state.id,
+        teamId: input.issue.teamId,
+        projectId: input.issue.projectId ?? null,
+        assigneeId: input.issue.assigneeId ?? null,
+        labels: input.issue.labels.map((label) => label.id).sort(),
+      })
+    )
+    .digest("hex")
+    .slice(0, 16);
+
+  return `linear:checkpoint:${input.ticketId}:${input.profileId}:${input.direction}:${fingerprint}`;
+}
+
+function buildLinearConflictIdempotencyKey(input: {
+  readonly ticketId: string;
+  readonly conflict: RecordedSyncConflict;
+}): string {
+  const fingerprint = createHash("sha256")
+    .update(
+      JSON.stringify({
+        field: normalizeTicketFieldName(input.conflict.field),
+        authority: input.conflict.authority ?? null,
+        summary: input.conflict.summary ?? null,
+        localValue: input.conflict.localValue ?? null,
+        remoteValue: input.conflict.remoteValue ?? null,
+      })
+    )
+    .digest("hex")
+    .slice(0, 16);
+
+  return `linear:conflict:${input.ticketId}:${fingerprint}`;
 }
 
 async function recordAuthoritativeConflicts(input: {
@@ -4497,6 +4556,10 @@ async function recordAuthoritativeConflicts(input: {
       field: conflict.field,
       authority: conflict.authority,
       summary: conflict.summary,
+      idempotencyKey: buildLinearConflictIdempotencyKey({
+        ticketId: input.ticketId,
+        conflict,
+      }),
       ...(conflict.localValue !== undefined
         ? { localValue: conflict.localValue }
         : {}),
@@ -4618,6 +4681,12 @@ async function recordLinearSyncCheckpoint(input: {
     direction: input.direction,
     remoteCursor: input.issue.identifier,
     localUpdatedAt: new Date().toISOString(),
+    idempotencyKey: buildLinearCheckpointIdempotencyKey({
+      ticketId: input.ticketId,
+      profileId: input.profileId,
+      direction: input.direction,
+      issue: input.issue,
+    }),
   });
   if (!checkpoint.ok) {
     return { ok: false, error: checkpoint.error };
@@ -5017,25 +5086,25 @@ async function syncTicketToLinearIssue(input: {
     return { ok: false, error: recordedConflicts.error };
   }
 
-  const effectiveFields =
-    authority === "linear" && existingIssue.issue
-      ? {
-          ...fields.value,
-          title: existingIssue.issue.title,
-          description: existingIssue.issue.description ?? "",
-          ...(existingIssue.issue.assigneeId
-            ? { assigneeId: existingIssue.issue.assigneeId }
-            : {}),
-          ...(input.syncToggles.statuses
-            ? { stateId: existingIssue.issue.state.id }
-            : {}),
-        }
-      : fields.value;
+  const preserveRemoteIssueFields = authority !== "hack" && existingIssue.issue;
 
-  const effectiveProjectId =
-    authority === "linear" && existingIssue.issue
-      ? existingIssue.issue.projectId
-      : target.value.projectId;
+  const effectiveFields = preserveRemoteIssueFields
+    ? {
+        ...fields.value,
+        title: existingIssue.issue.title,
+        description: existingIssue.issue.description ?? "",
+        ...(existingIssue.issue.assigneeId
+          ? { assigneeId: existingIssue.issue.assigneeId }
+          : {}),
+        ...(input.syncToggles.statuses
+          ? { stateId: existingIssue.issue.state.id }
+          : {}),
+      }
+    : fields.value;
+
+  const effectiveProjectId = preserveRemoteIssueFields
+    ? existingIssue.issue.projectId
+    : target.value.projectId;
 
   const syncedIssue = await upsertLinearIssueForTicketSync({
     runtime: input.runtime,
@@ -5053,13 +5122,17 @@ async function syncTicketToLinearIssue(input: {
 
   const updated = await input.runtime.tickets.updateTicket({
     ticketId: ticket.ticketId,
-    externalSystem: "linear",
-    externalId: syncedIssue.data.id,
-    externalKey: syncedIssue.data.identifier,
-    externalUrl: syncedIssue.data.url,
-    externalProjectId: syncedIssue.data.projectId,
-    externalProjectName: syncedIssue.data.projectName,
-    externalTeamId: syncedIssue.data.teamId,
+    ...projectRemoteLinkToCompatibilityFields({
+      remote: {
+        provider: "linear",
+        remoteId: syncedIssue.data.id,
+        remoteKey: syncedIssue.data.identifier,
+        remoteUrl: syncedIssue.data.url,
+        projectId: syncedIssue.data.projectId,
+        projectName: syncedIssue.data.projectName,
+        teamId: syncedIssue.data.teamId,
+      },
+    }),
   });
   if (!updated.ok) {
     return { ok: false, error: updated.error };
@@ -5114,15 +5187,19 @@ async function resolveLinearTargetForTicketSync(input: {
     }
   | { readonly ok: false; readonly error: string }
 > {
+  const linearRemote = findTicketRemoteLink({
+    ticket: input.ticket,
+    provider: "linear",
+  });
   let projectId =
     input.explicitProjectId ??
     input.existingIssue?.projectId ??
-    input.ticket.externalProjectId ??
+    linearRemote?.projectId ??
     input.runtime.projectBinding.projectId;
   let teamId =
     input.explicitTeamId ??
     input.existingIssue?.teamId ??
-    input.ticket.externalTeamId ??
+    linearRemote?.teamId ??
     input.runtime.projectBinding.teamId;
 
   if (!(teamId || !projectId)) {
@@ -5997,7 +6074,7 @@ async function applyLinearIssueToExistingTicket(input: {
   readonly existingTicket: TicketSummary;
   readonly projection: TicketProjectionFromLinearIssue;
   readonly syncToggles: SyncToggles;
-  readonly authority: "hack" | "linear";
+  readonly authority: "hack" | "linear" | "review_required";
   readonly conflictsRecorded: number;
 }): Promise<
   SyncTicketFromLinearSuccess | { readonly ok: false; readonly error: string }
@@ -6016,13 +6093,17 @@ async function applyLinearIssueToExistingTicket(input: {
     ...(input.projection.dependsOn !== undefined
       ? { dependsOn: input.projection.dependsOn }
       : {}),
-    externalSystem: "linear",
-    externalId: input.issue.id,
-    externalKey: input.issue.identifier,
-    externalUrl: input.issue.url,
-    externalProjectId: input.issue.projectId,
-    externalProjectName: input.issue.projectName,
-    externalTeamId: input.issue.teamId,
+    ...projectRemoteLinkToCompatibilityFields({
+      remote: {
+        provider: "linear",
+        remoteId: input.issue.id,
+        remoteKey: input.issue.identifier,
+        remoteUrl: input.issue.url,
+        projectId: input.issue.projectId,
+        projectName: input.issue.projectName,
+        teamId: input.issue.teamId,
+      },
+    }),
   });
   if (!updated.ok) {
     return { ok: false, error: updated.error };
@@ -6090,13 +6171,17 @@ async function createTicketFromLinearIssueProjection(input: {
     ...(input.projection.dependsOn !== undefined
       ? { dependsOn: input.projection.dependsOn }
       : {}),
-    externalSystem: "linear",
-    externalId: input.issue.id,
-    externalKey: input.issue.identifier,
-    externalUrl: input.issue.url,
-    externalProjectId: input.issue.projectId,
-    externalProjectName: input.issue.projectName,
-    externalTeamId: input.issue.teamId,
+    ...projectRemoteLinkToCompatibilityFields({
+      remote: {
+        provider: "linear",
+        remoteId: input.issue.id,
+        remoteKey: input.issue.identifier,
+        remoteUrl: input.issue.url,
+        projectId: input.issue.projectId,
+        projectName: input.issue.projectName,
+        teamId: input.issue.teamId,
+      },
+    }),
   });
   if (!created.ok) {
     return created;
@@ -6153,14 +6238,18 @@ async function buildLinearDependencyIndex(input: {
   const byLinearId = new Map<string, string>();
   const byLinearIdentifier = new Map<string, string>();
   for (const ticket of tickets) {
-    if (ticket.externalSystem !== "linear") {
+    const linearRemote = findTicketRemoteLink({
+      ticket,
+      provider: "linear",
+    });
+    if (!linearRemote) {
       continue;
     }
-    if (ticket.externalId) {
-      byLinearId.set(ticket.externalId, ticket.ticketId);
+    if (linearRemote.remoteId) {
+      byLinearId.set(linearRemote.remoteId, ticket.ticketId);
     }
-    if (ticket.externalKey) {
-      byLinearIdentifier.set(ticket.externalKey, ticket.ticketId);
+    if (linearRemote.remoteKey) {
+      byLinearIdentifier.set(linearRemote.remoteKey, ticket.ticketId);
     }
   }
   return {
@@ -6181,12 +6270,16 @@ async function resolveLinkedLinearIssue(input: {
   | { readonly ok: true; readonly issue: LinearIssue | null }
   | { readonly ok: false; readonly error: string }
 > {
-  if (input.ticket.externalSystem !== "linear") {
+  const linearRemote = findTicketRemoteLink({
+    ticket: input.ticket,
+    provider: "linear",
+  });
+  if (!linearRemote) {
     return { ok: true, issue: null };
   }
-  if (input.ticket.externalId) {
+  if (linearRemote.remoteId) {
     const byId = await input.runtime.linear.getIssueById({
-      issueId: input.ticket.externalId,
+      issueId: linearRemote.remoteId,
     });
     if (!byId.ok) {
       return { ok: false, error: byId.error };
@@ -6195,9 +6288,9 @@ async function resolveLinkedLinearIssue(input: {
       return { ok: true, issue: byId.data };
     }
   }
-  if (input.ticket.externalKey) {
+  if (linearRemote.remoteKey) {
     const byKey = await input.runtime.linear.getIssueByIdentifier({
-      identifier: input.ticket.externalKey,
+      identifier: linearRemote.remoteKey,
     });
     if (!byKey.ok) {
       return { ok: false, error: byKey.error };
@@ -6302,8 +6395,12 @@ async function resolveLinearParentIssueId(input: {
   if (!parentTicket) {
     return { ok: true };
   }
-  if (parentTicket.externalSystem === "linear" && parentTicket.externalId) {
-    return { ok: true, value: parentTicket.externalId };
+  const linearRemote = findTicketRemoteLink({
+    ticket: parentTicket,
+    provider: "linear",
+  });
+  if (linearRemote?.remoteId) {
+    return { ok: true, value: linearRemote.remoteId };
   }
   return { ok: true };
 }
@@ -6331,15 +6428,19 @@ function isLinearLinkedTicket(input: {
   readonly ticket: TicketSummary;
   readonly issue: LinearIssue;
 }): boolean {
-  if (input.ticket.externalSystem !== "linear") {
+  const linearRemote = findTicketRemoteLink({
+    ticket: input.ticket,
+    provider: "linear",
+  });
+  if (!linearRemote) {
     return false;
   }
-  if (input.ticket.externalId && input.ticket.externalId === input.issue.id) {
+  if (linearRemote.remoteId && linearRemote.remoteId === input.issue.id) {
     return true;
   }
   if (
-    input.ticket.externalKey &&
-    input.ticket.externalKey === input.issue.identifier
+    linearRemote.remoteKey &&
+    linearRemote.remoteKey === input.issue.identifier
   ) {
     return true;
   }

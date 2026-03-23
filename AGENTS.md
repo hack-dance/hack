@@ -38,6 +38,19 @@ TypeScript (strict). Runtimes: Bun 1.3+, Node 23. Prettier: 2 spaces, no semicol
 Always default to useing named paramaters in functions eg myFunction({ ctx, other }) vs myFunction(ctx, other)
 Never use any types and always default to leveraging generics and smart types to sensure the best possible tpye inference across the project.
 
+## Commits And Releases
+
+- Use Conventional Commits for every commit you author in this repo.
+- Format commits as `<type>(<scope>): <summary>` when a scope is useful, or `<type>: <summary>` when it is not.
+- Prefer these types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `build`, `ci`, `perf`, `revert`.
+- Use `feat` for user-facing capability changes that should trigger a feature release signal.
+- Use `fix` for behavior corrections, regressions, and release-blocking repairs.
+- Use `build` or `ci` for release pipeline, packaging, notarization, versioning, or workflow-only changes.
+- Do not use vague commit subjects like `update stuff`, `misc fixes`, or `wip`.
+- If a change is breaking, mark it explicitly with `!` in the type or scope position and include a `BREAKING CHANGE:` footer explaining the migration impact.
+- If work lands through a squash merge, the PR title must also follow Conventional Commits so release automation can classify it correctly.
+- Before pushing or merging, make sure the final commit history or squash title still preserves the intended release signal.
+
 <!-- hack:tickets:start -->
 ## Tickets (git-backed)
 

@@ -2187,9 +2187,16 @@ async function renderLinearStatusPayload(input: {
   readonly payload: LinearStatusCommandPayload;
   readonly logger: ExtensionCommandContext["logger"];
 }): Promise<void> {
+  const bindingSummary = describeLinearBindingState({
+    binding: input.payload.projectBinding,
+  });
   const lines = [
     `Active profile: ${input.payload.summary.activeProfile}`,
     `Connection: ${input.payload.summary.connectionLabel}`,
+    `Repo binding profile: ${bindingSummary.profile}`,
+    `Default project: ${bindingSummary.project}`,
+    `Default team: ${bindingSummary.team}`,
+    `Linked projects: ${bindingSummary.linkedProjects}`,
     `Route: ${input.payload.summary.routingSummary}`,
     ...(input.payload.summary.linkedProjectsLabel
       ? [input.payload.summary.linkedProjectsLabel]
@@ -5230,8 +5237,7 @@ async function resolveLinearTargetForTicketSync(input: {
   if (!teamId) {
     return {
       ok: false,
-      error:
-        "Cannot resolve Linear team for ticket sync. Pass --team-id or bind a project with `hack x linear project-bind`.",
+      error: `Cannot resolve Linear team for ticket sync. Active route project: ${projectId ?? "(none)"}. Pass --team-id, or bind a default project/team with \`hack linear project-bind --project-id <linear-project-id> --team-id <linear-team-id>\`.`,
     };
   }
 
@@ -7010,6 +7016,33 @@ function buildLinearRoutingSummary(input: {
   })}.`;
 }
 
+function describeLinearBindingState(input: {
+  readonly binding:
+    | ResolvedLinearProjectBinding
+    | LinearStatusCommandPayload["projectBinding"];
+}): {
+  readonly profile: string;
+  readonly project: string;
+  readonly team: string;
+  readonly linkedProjects: string;
+} {
+  const defaultProject = input.binding.projectId
+    ? formatLinearProjectTarget({
+        projectId: input.binding.projectId,
+        ...(input.binding.projectName
+          ? { projectName: input.binding.projectName }
+          : {}),
+        ...(input.binding.teamId ? { teamId: input.binding.teamId } : {}),
+      })
+    : "(none)";
+  return {
+    profile: readOptionalString(input.binding.profileId) ?? "(none)",
+    project: defaultProject,
+    team: readOptionalString(input.binding.teamId) ?? "(none)",
+    linkedProjects: String(input.binding.additionalProjects.length),
+  };
+}
+
 function buildLinkedProjectsLabel(input: {
   readonly binding: ResolvedLinearProjectBinding;
 }): string | null {
@@ -7572,7 +7605,7 @@ function describeAmbiguousProjectArtifactTarget(input: {
     input.projectName ? `project name "${input.projectName}"` : null,
     input.teamId ? `team id "${input.teamId}"` : null,
   ].filter((part): part is string => Boolean(part));
-  return `Multiple ${input.source} Linear projects match ${parts.join(" and ")}. Pass --project-id to disambiguate.`;
+  return `Multiple ${input.source} Linear projects match ${parts.join(" and ")}. Pass --project-id to disambiguate, then confirm the repo route with \`hack linear status\`.`;
 }
 
 function describeMissingProjectArtifactTarget(input: {
@@ -7583,7 +7616,7 @@ function describeMissingProjectArtifactTarget(input: {
     input.projectName ? `project name "${input.projectName}"` : null,
     input.teamId ? `team id "${input.teamId}"` : null,
   ].filter((part): part is string => Boolean(part));
-  return `No Linear project matches ${parts.join(" and ")}. Pass --project-id or update the project binding.`;
+  return `No Linear project matches ${parts.join(" and ")}. Pass --project-id, run \`hack linear projects\` to inspect available projects, or update the repo binding with \`hack linear project-bind --project-id <linear-project-id>\`.`;
 }
 
 async function resolveProjectBindingDetails(input: {

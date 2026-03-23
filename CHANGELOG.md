@@ -1,3 +1,8 @@
+## <small>1.19.1 (2026-03-23)</small>
+
+* Merge pull request #24 from hack-dance/fix/macos-ghostty-vt-latest ([2546af4](https://github.com/hack-dance/hack/commit/2546af4)), closes [#24](https://github.com/hack-dance/hack/issues/24)
+* fix(macos): support latest ghostty vt stream api ([8c13dc0](https://github.com/hack-dance/hack/commit/8c13dc0))
+
 ## 1.19.0 (2026-03-23)
 
 * Fix daemon status CI regressions ([cf8236c](https://github.com/hack-dance/hack/commit/cf8236c))

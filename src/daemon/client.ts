@@ -31,6 +31,12 @@ export type DaemonJsonResponse = {
   readonly json: Record<string, unknown> | null;
 };
 
+export type DaemonApiProbe = {
+  readonly reachable: boolean;
+  readonly compatible: boolean;
+  readonly version: string | null;
+};
+
 export async function requestDaemonJson(opts: {
   readonly path: string;
   readonly query?: Record<string, string | boolean | null>;
@@ -144,6 +150,35 @@ async function ensureDaemonSocketReady(opts: {
     return false;
   }
   return await ensureDaemonReady({ paths: opts.paths });
+}
+
+export async function probeDaemonApi(opts: {
+  readonly socketPath: string;
+  readonly timeoutMs?: number;
+}): Promise<DaemonApiProbe> {
+  const raw = await requestDaemonRaw({
+    socketPath: opts.socketPath,
+    method: "GET",
+    path: "/v1/status",
+    timeoutMs: opts.timeoutMs ?? 1000,
+  });
+  if (!raw) {
+    return {
+      reachable: false,
+      compatible: false,
+      version: null,
+    };
+  }
+
+  const json = safeJsonParse({
+    text: raw.body,
+  });
+  const version = json ? json.version : null;
+  return {
+    reachable: true,
+    compatible: typeof version === "string" && version === packageJson.version,
+    version: typeof version === "string" ? version : null,
+  };
 }
 
 /**

@@ -1348,6 +1348,8 @@ function isGitIndexLockError(message: string): boolean {
 export const __testOnly = {
   mergeTicketEventLogs,
   resolvePushRefForCheckoutRef,
+  resolveLocalCheckoutFallback,
+  resolveLegacyImportFetchResult,
 };
 
 function resolvePushRefForCheckoutRef(input: {
@@ -1364,4 +1366,40 @@ function resolvePushRefForCheckoutRef(input: {
     return input.legacyRemoteRef;
   }
   return input.remoteRef;
+}
+
+function resolveLocalCheckoutFallback(input: {
+  readonly fetchFailure: string;
+  readonly allowFetchFailureFallback: boolean;
+  readonly preferredTrackingRef: string;
+  readonly remoteRef: string;
+  readonly legacyTrackingRef?: string | null;
+  readonly legacyRemoteRef?: string | null;
+}):
+  | { readonly ok: true; readonly pushRef: string }
+  | { readonly ok: false; readonly error: string } {
+  if (!input.allowFetchFailureFallback) {
+    return { ok: false, error: input.fetchFailure };
+  }
+  return {
+    ok: true,
+    pushRef: resolvePushRefForCheckoutRef({
+      checkoutRef: input.preferredTrackingRef,
+      remoteRef: input.remoteRef,
+      legacyTrackingRef: input.legacyTrackingRef,
+      legacyRemoteRef: input.legacyRemoteRef,
+    }),
+  };
+}
+
+function resolveLegacyImportFetchResult(input: {
+  readonly missing: boolean;
+  readonly error: string;
+}):
+  | { readonly ok: true; readonly imported: false }
+  | { readonly ok: false; readonly error: string } {
+  if (input.missing) {
+    return { ok: true, imported: false };
+  }
+  return { ok: false, error: `git fetch failed: ${input.error}` };
 }

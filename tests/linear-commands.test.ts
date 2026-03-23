@@ -54,6 +54,13 @@ function createProjectArtifactLinearClient(
 ): ProjectArtifactLinearClient {
   return {
     listProjects: async () => ({ ok: true as const, data: [] }),
+    listProjectsPage: async () => ({
+      ok: true as const,
+      data: {
+        projects: [],
+        hasNextPage: false,
+      },
+    }),
     listProjectDocuments: async () => ({ ok: true as const, data: [] }),
     createProjectDocument: async () => {
       throw new Error("createProjectDocument should not be called");
@@ -788,7 +795,7 @@ test("resolveProjectArtifactTarget matches a bound project by explicit name and 
     projectName: "Operations",
     teamId: "team_ops",
     linear: {
-      listProjects: async () => {
+      listProjectsPage: async () => {
         throw new Error("should not look up remote projects");
       },
     },
@@ -815,26 +822,89 @@ test("resolveProjectArtifactTarget falls back to remote lookup for explicit proj
     projectName: "Roadmap",
     teamId: "team_strategy",
     linear: {
-      listProjects: async () => ({
+      listProjectsPage: async () => ({
         ok: true as const,
-        data: [
-          {
-            id: "proj_strategy",
-            name: "Roadmap",
-            teamId: "team_strategy",
-            teamKey: "STRAT",
-          },
-          {
-            id: "proj_other",
-            name: "Roadmap",
-            teamId: "team_other",
-            teamKey: "OPS",
-          },
-        ],
+        data: {
+          projects: [
+            {
+              id: "proj_strategy",
+              name: "Roadmap",
+              teamId: "team_strategy",
+              teamKey: "STRAT",
+            },
+            {
+              id: "proj_other",
+              name: "Roadmap",
+              teamId: "team_other",
+              teamKey: "OPS",
+            },
+          ],
+          hasNextPage: false,
+        },
       }),
     },
   });
 
+  expect(resolved).toEqual({
+    ok: true,
+    target: {
+      profileId: "work",
+      projectId: "proj_strategy",
+      projectName: "Roadmap",
+      teamId: "team_strategy",
+    },
+  });
+});
+
+test("resolveProjectArtifactTarget keeps paging remote projects until a later match is found", async () => {
+  const afterCalls: string[] = [];
+  const resolved = await __testOnly.resolveProjectArtifactTarget({
+    binding: {
+      profileId: "work",
+      additionalProjects: [],
+    },
+    profileId: "work",
+    projectName: "Roadmap",
+    teamId: "team_strategy",
+    linear: {
+      listProjectsPage: async (input) => {
+        afterCalls.push(input?.after ?? "");
+        if (!input?.after) {
+          return {
+            ok: true as const,
+            data: {
+              projects: [
+                {
+                  id: "proj_other",
+                  name: "Roadmap",
+                  teamId: "team_other",
+                  teamKey: "OPS",
+                },
+              ],
+              hasNextPage: true,
+              endCursor: "cursor-1",
+            },
+          };
+        }
+        return {
+          ok: true as const,
+          data: {
+            projects: [
+              {
+                id: "proj_strategy",
+                name: "Roadmap",
+                teamId: "team_strategy",
+                teamKey: "STRAT",
+              },
+            ],
+            hasNextPage: false,
+          },
+        };
+      },
+    },
+  });
+
+  expect(afterCalls).toEqual(["", "cursor-1"]);
   expect(resolved).toEqual({
     ok: true,
     target: {

@@ -137,6 +137,10 @@ test("listProjects queries the top-level projects connection", async () => {
       JSON.stringify({
         data: {
           projects: {
+            pageInfo: {
+              hasNextPage: false,
+              endCursor: null,
+            },
             nodes: [
               {
                 id: "project_123",
@@ -169,7 +173,7 @@ test("listProjects queries the top-level projects connection", async () => {
 
   expect(
     String((requestBody as { readonly query?: unknown } | null)?.query ?? "")
-  ).toContain("projects(first: $first)");
+  ).toContain("projects(first: $first, after: $after)");
   expect(
     String((requestBody as { readonly query?: unknown } | null)?.query ?? "")
   ).not.toContain("viewer {");

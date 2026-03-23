@@ -2594,6 +2594,7 @@ type LinearSyncClient = Pick<
 
 type ProjectArtifactLinearClient = Pick<
   ReturnType<typeof createLinearClient>,
+  | "listProjectsPage"
   | "listProjects"
   | "createProjectDocument"
   | "createProjectMilestone"
@@ -4140,13 +4141,13 @@ function removeLinearAssigneeMapping(input: {
   return { removed, mappings: next };
 }
 
-type RecordedSyncConflict = {
+interface RecordedSyncConflict {
   readonly field: string;
   readonly authority: "hack" | "linear" | "review_required";
   readonly summary: string;
   readonly localValue?: TicketMetadataValue;
   readonly remoteValue?: TicketMetadataValue;
-};
+}
 
 type SyncTicketFromLinearSuccess = {
   readonly ok: true;
@@ -7391,7 +7392,7 @@ async function resolveProjectArtifactTarget(input: {
   readonly projectId?: string;
   readonly projectName?: string;
   readonly teamId?: string;
-  readonly linear: Pick<ProjectArtifactRuntime["linear"], "listProjects">;
+  readonly linear: Pick<ProjectArtifactRuntime["linear"], "listProjectsPage">;
 }): Promise<
   | {
       readonly ok: true;
@@ -7440,26 +7441,44 @@ async function resolveProjectArtifactTarget(input: {
     };
   }
 
-  const projects = await input.linear.listProjects({
-    first: DEFAULT_PROJECT_SYNC_LIMIT,
-  });
-  if (!projects.ok) {
-    return {
-      ok: false,
-      error: projects.error,
-    };
-  }
+  const matches: Array<{
+    readonly id: string;
+    readonly name: string;
+    readonly teamId: string;
+  }> = [];
+  let after: string | undefined;
+  let hasNextPage = true;
+  while (hasNextPage) {
+    const page = await input.linear.listProjectsPage({
+      first: DEFAULT_PROJECT_SYNC_LIMIT,
+      ...(after ? { after } : {}),
+    });
+    if (!page.ok) {
+      return {
+        ok: false,
+        error: page.error,
+      };
+    }
 
-  const matches = projects.data.filter((project) =>
-    projectArtifactTargetMatchesSelector({
-      target: {
-        projectId: project.id,
-        projectName: project.name,
-        teamId: project.teamId,
-      },
-      selector,
-    })
-  );
+    matches.push(
+      ...page.data.projects.filter((project) =>
+        projectArtifactTargetMatchesSelector({
+          target: {
+            projectId: project.id,
+            projectName: project.name,
+            teamId: project.teamId,
+          },
+          selector,
+        })
+      )
+    );
+
+    hasNextPage = page.data.hasNextPage;
+    after = page.data.endCursor;
+    if (matches.length > 1) {
+      break;
+    }
+  }
   if (matches.length === 0) {
     return {
       ok: false,

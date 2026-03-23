@@ -285,6 +285,17 @@ Behavior:
 - require explicit regeneration of all active key-share records
 - keep prior project-key lineage in audit metadata
 
+### Operator decision matrix
+
+The CLI and broker should treat these as different intents, not synonyms:
+
+| Situation | Correct action | Why |
+| --- | --- | --- |
+| The underlying secret changed | Value rotation | The trust anchor can stay the same while publishing a new immutable value snapshot |
+| A teammate left or a new teammate joined | Share rotation | Membership changed, but the current project key may still be trusted |
+| A device was stolen, an owner key may be compromised, or the operator wants a hard trust reset | Project-key rotation | The trust anchor itself must change |
+| A user lost local key material but another valid recovery path remains | Recovery / share reissue | Access must be restored without forcing unnecessary secret churn |
+
 ### Recovery policy
 
 Hack should not silently escrow plaintext secrets. Recovery must be explicit.
@@ -304,6 +315,67 @@ Unsafe behavior to reject:
 - deleting the last active owner share with no recovery path
 - rotating the project key while leaving no valid recipient or backup
 - revoking the last usable recovery share without an explicit forced override
+
+### Lost-key handling flows
+
+The design needs to distinguish between `lost access` and `compromised access`.
+
+#### Case 1: Lost local machine, trusted recovery still exists
+
+Expected flow:
+
+1. authenticate as an authorized owner or designated recovery recipient
+2. unwrap the current project key through the remaining recovery path
+3. re-apply the latest active portable bundle to new local compatibility storage
+4. reissue recipient shares for replacement devices as needed
+
+This should be logged as recovery, not as key compromise. Values and bundle history stay intact.
+
+#### Case 2: Recipient lost local key material
+
+Expected flow:
+
+1. verify that the recipient is still entitled to access
+2. mint a fresh wrapped project-key share for that recipient
+3. preserve existing bundle versions and project-key lineage
+
+This is basically share repair. It should not force value rotation or project-key rotation on its own.
+
+#### Case 3: Owner or project key suspected compromised
+
+Expected flow:
+
+1. rotate the project key
+2. re-wrap the latest active bundle keys to the new project key
+3. regenerate all active recipient and recovery shares
+4. record the superseded key lineage and reason in audit metadata
+
+If an operator cannot prove which recipient or device was affected, assume compromise and require project-key rotation instead of share repair.
+
+#### Case 4: No valid recovery path remains
+
+Expected flow:
+
+1. block normal revoke or rotate actions that would strand the project
+2. require explicit break-glass override semantics for destructive changes
+3. present a user-facing message that portable recovery is no longer possible without recreating authority
+
+The system should fail closed here. Hack must not pretend that remote recovery is available when no wrapped recovery authority exists.
+
+### Recovery package expectations
+
+An encrypted recovery package is an allowed recovery path, but it must stay metadata-rich enough to be usable later.
+
+Minimum metadata:
+
+- project binding identifier
+- project key identifier
+- creation timestamp
+- creating actor
+- encryption method / wrapping scheme identifier
+- optional human description supplied by the operator
+
+The package must not be treated as silent escrow. Operators should create it deliberately, store it deliberately, and understand that losing every recovery package plus every valid owner share means portable recovery is no longer possible.
 
 ## `.env` Compatibility And Backend UX
 

@@ -194,6 +194,7 @@ Add coverage for:
 - recovery package export metadata
 - preventing deletion of the last recovery path
 - preventing revocation of the last owner share without force
+- lost-key recovery versus compromised-key rotation handling
 
 **Step 2: Run test to verify it fails**
 
@@ -201,7 +202,7 @@ Run: `bun test --cwd services/auth-broker tests/index.test.ts && bun test tests/
 
 **Step 3: Write minimal implementation**
 
-Implement separate commands for value rotation, share changes, and project-key rotation, plus explicit recovery-path validation before destructive actions are allowed.
+Implement separate commands for value rotation, share changes, and project-key rotation, plus explicit recovery-path validation before destructive actions are allowed. Make the operator flow distinguish lost-key recovery/share reissue from compromised-key rotation.
 
 **Step 4: Run test to verify it passes**
 

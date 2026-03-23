@@ -10,6 +10,7 @@ import { optJson, optPretty } from "../cli/options.ts";
 import type { RegisteredProject } from "../lib/projects-registry.ts";
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
 import { exec, run } from "../lib/shell.ts";
+import { buildSessionName } from "../mux/session-names.ts";
 import { logger } from "../ui/logger.ts";
 import {
   buildSessionPanesEndEvent,
@@ -225,6 +226,7 @@ type TailArgs = CommandArgs<
  *
  * Uses clack prompts with grouped options for sessions and projects.
  */
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: explicit CLI branching keeps command UX behavior stable.
 async function handleSessionPicker(): Promise<number> {
   const sessions = await listTmuxSessions();
   const registry = await readProjectsRegistry();
@@ -323,7 +325,11 @@ async function handleSessionPicker(): Promise<number> {
         message: `Session '${name}' is attached elsewhere`,
         options: [
           { value: "attach", label: "Attach", hint: "detaches other clients" },
-          { value: "new", label: "Create new", hint: `${name}:${nextNum}` },
+          {
+            value: "new",
+            label: "Create new",
+            hint: buildSessionName({ base: name, suffix: String(nextNum) }),
+          },
         ],
       });
 
@@ -338,7 +344,7 @@ async function handleSessionPicker(): Promise<number> {
         );
         const cwd = project?.repoRoot ?? session.path ?? process.cwd();
         return await createAndAttachSession({
-          name: `${name}:${nextNum}`,
+          name: buildSessionName({ base: name, suffix: String(nextNum) }),
           cwd,
         });
       }
@@ -420,98 +426,126 @@ const handleStart = async ({
   readonly args: StartArgs;
 }): Promise<number> => {
   const projectNameOrPath = args.positionals.project;
-  const forceNew = args.options.new === true;
-  const runUp = args.options.up === true;
-  const customName = args.options.name;
-  const detach = args.options.detach === true;
-
-  // Find project
   const registry = await readProjectsRegistry();
-  const projects = registry.projects;
-  let project = projectNameOrPath
-    ? projects.find(
-        (p: RegisteredProject) =>
-          p.name === projectNameOrPath ||
-          p.projectDir === resolve(projectNameOrPath)
-      )
-    : null;
-
-  if (!project && projectNameOrPath) {
-    // Try as path
-    const resolvedPath = resolve(projectNameOrPath);
-    project = projects.find(
-      (p: RegisteredProject) => p.projectDir === resolvedPath
-    );
-  }
-
+  const project = resolveProjectForSessionStart({
+    projects: registry.projects,
+    projectNameOrPath,
+  });
   if (!project) {
     if (projectNameOrPath) {
       logger.error({ message: `Project not found: ${projectNameOrPath}` });
-    } else {
-      logger.error({
-        message: "No project specified. Use: hack session start <project>",
-      });
+      return 1;
     }
+    logger.error({
+      message: "No project specified. Use: hack session start <project>",
+    });
     return 1;
   }
 
-  const baseName = project.name;
-  let sessionName = baseName;
+  return await startOrAttachSession({
+    project,
+    args,
+    sessions: await listTmuxSessions(),
+  });
+};
 
-  if (forceNew || customName) {
-    if (customName) {
-      sessionName = `${baseName}:${customName}`;
-    } else {
-      // Find next available number
-      const sessions = await listTmuxSessions();
-      const existing = sessions.filter(
-        (s) => s.name === baseName || s.name.startsWith(`${baseName}:`)
-      );
-      if (existing.length > 0) {
-        let n = 2;
-        while (existing.some((s) => s.name === `${baseName}:${n}`)) {
-          n++;
-        }
-        sessionName = `${baseName}:${n}`;
-      }
-    }
-  } else {
-    // Check if session exists
-    const sessions = await listTmuxSessions();
-    const existing = sessions.find((s) => s.name === baseName);
-    if (existing) {
-      if (detach) {
-        logger.info({ message: `Session ready: ${baseName}` });
-      } else {
-        logger.info({ message: `Attaching to existing session: ${baseName}` });
-      }
-      if (runUp) {
-        await runHackUp(project.projectDir);
-      }
-      if (detach) {
-        return 0;
-      }
-      return await attachToSession(baseName);
-    }
+function resolveProjectForSessionStart(opts: {
+  readonly projects: readonly RegisteredProject[];
+  readonly projectNameOrPath: string | undefined;
+}): RegisteredProject | null {
+  if (!opts.projectNameOrPath) {
+    return null;
   }
 
-  // Run hack up if requested
+  const input = opts.projectNameOrPath;
+  const normalizedPath = resolve(input);
+  const project =
+    opts.projects.find(
+      (p: RegisteredProject) =>
+        p.name === input ||
+        p.projectDir === input ||
+        p.projectDir === normalizedPath
+    ) ?? null;
+
+  return project;
+}
+
+function buildSessionNameForStart(opts: {
+  readonly baseName: string;
+  readonly sessions: readonly TmuxSession[];
+  readonly forceNew: boolean;
+  readonly customSuffix?: string;
+}): string | null {
+  const hasCustomSuffix = opts.customSuffix !== undefined;
+  if (!(opts.forceNew || hasCustomSuffix)) {
+    const exists = opts.sessions.find((s) => s.name === opts.baseName);
+    if (exists) {
+      return null;
+    }
+    return opts.baseName;
+  }
+
+  if (hasCustomSuffix) {
+    return buildSessionName({
+      base: opts.baseName,
+      suffix: opts.customSuffix,
+    });
+  }
+
+  const existing = opts.sessions.filter(
+    (s) => s.name === opts.baseName || s.name.startsWith(`${opts.baseName}:`)
+  );
+  let n = 2;
+  while (existing.some((s) => s.name === `${opts.baseName}:${n}`)) {
+    n++;
+  }
+  return buildSessionName({
+    base: opts.baseName,
+    suffix: String(n),
+  });
+}
+
+async function startOrAttachSession(opts: {
+  readonly project: RegisteredProject;
+  readonly args: StartArgs;
+  readonly sessions: readonly TmuxSession[];
+}): Promise<number> {
+  const sessionName = buildSessionNameForStart({
+    baseName: opts.project.name,
+    sessions: opts.sessions,
+    forceNew: opts.args.options.new === true,
+    customSuffix: opts.args.options.name,
+  });
+  const runUp = opts.args.options.up === true;
+  const detach = opts.args.options.detach === true;
+
+  if (sessionName === null) {
+    if (runUp) {
+      await runHackUp(opts.project.projectDir);
+    }
+    if (detach) {
+      logger.info({ message: `Session ready: ${opts.project.name}` });
+      return 0;
+    }
+    return await attachToSession(opts.project.name);
+  }
+
   if (runUp) {
-    await runHackUp(project.repoRoot);
+    await runHackUp(opts.project.repoRoot);
   }
 
-  // Use repoRoot (project root), not projectDir (.hack/)
   if (detach) {
     return await createSessionDetached({
       name: sessionName,
-      cwd: project.repoRoot,
+      cwd: opts.project.repoRoot,
     });
   }
+
   return await createAndAttachSession({
     name: sessionName,
-    cwd: project.repoRoot,
+    cwd: opts.project.repoRoot,
   });
-};
+}
 
 const handleStop = async ({
   args,
@@ -698,44 +732,38 @@ const handleTail = async ({
   readonly ctx: CliContext;
   readonly args: TailArgs;
 }): Promise<number> => {
-  const sessionName = args.positionals.session;
-  const target =
-    args.options.target ?? (await resolveActiveTarget(sessionName));
-  const lines = args.options.lines ?? 200;
-  const intervalMs = args.options.intervalMs ?? 500;
-  const maxMs = args.options.maxMs ?? 5000;
-  const pretty = args.options.pretty === true;
-  const json = args.options.json === true || !pretty;
+  const opts = await buildTailArgs({
+    sessionName: args.positionals.session,
+    options: args.options,
+  });
 
-  if (json && pretty) {
+  if (opts.json && opts.pretty) {
     process.stderr.write("Cannot combine --json with --pretty.\n");
     return 1;
   }
 
-  const context = {
-    session: sessionName,
-    target,
-    lines,
-    follow: true,
-    intervalMs,
-    maxMs,
-  };
-
-  if (json) {
+  if (opts.json) {
     writeSessionStreamEvent({
-      event: buildSessionStreamStartEvent({ context }),
+      event: buildSessionStreamStartEvent({ context: opts.context }),
     });
   }
 
-  const initial = await capturePane({ target, lines });
+  const initial = await capturePane({ target: opts.target, lines: opts.lines });
   if (initial.exitCode !== 0) {
-    const message = initial.stderr || `Failed to capture ${sessionName}`;
-    if (json) {
+    const message =
+      initial.stderr || `Failed to capture ${opts.context.session}`;
+    if (opts.json) {
       writeSessionStreamEvent({
-        event: buildSessionStreamErrorEvent({ context, message }),
+        event: buildSessionStreamErrorEvent({
+          context: opts.context,
+          message,
+        }),
       });
       writeSessionStreamEvent({
-        event: buildSessionStreamEndEvent({ context, reason: "error" }),
+        event: buildSessionStreamEndEvent({
+          context: opts.context,
+          reason: "error",
+        }),
       });
     } else {
       console.error(message);
@@ -743,21 +771,103 @@ const handleTail = async ({
     return 1;
   }
 
-  let lastOutput = initial.stdout;
+  return await streamTailOutput({
+    context: opts.context,
+    target: opts.target,
+    lines: opts.lines,
+    json: opts.json,
+    initial,
+  });
+};
+
+async function buildTailArgs(opts: {
+  readonly sessionName: string;
+  readonly options: TailArgs["options"];
+}): Promise<{
+  readonly target: string;
+  readonly lines: number;
+  readonly intervalMs: number;
+  readonly maxMs: number;
+  readonly pretty: boolean;
+  readonly json: boolean;
+  readonly context: {
+    readonly session: string;
+    readonly target: string;
+    readonly lines: number;
+    readonly follow: boolean;
+    readonly intervalMs: number;
+    readonly maxMs: number;
+  };
+}> {
+  const target =
+    opts.options.target ?? (await resolveActiveTarget(opts.sessionName));
+  const lines = opts.options.lines ?? 200;
+  const intervalMs = opts.options.intervalMs ?? 500;
+  const maxMs = opts.options.maxMs ?? 5000;
+  const pretty = opts.options.pretty === true;
+  const json = opts.options.json === true || !pretty;
+
+  return {
+    target,
+    lines,
+    intervalMs,
+    maxMs,
+    pretty,
+    json,
+    context: {
+      session: opts.sessionName,
+      target,
+      lines,
+      follow: true,
+      intervalMs,
+      maxMs,
+    },
+  };
+}
+
+async function streamTailOutput(opts: {
+  readonly context: {
+    readonly session: string;
+    readonly target: string;
+    readonly lines: number;
+    readonly follow: boolean;
+    readonly intervalMs: number;
+    readonly maxMs: number;
+  };
+  readonly lines: number;
+  readonly target: string;
+  readonly json: boolean;
+  readonly initial: {
+    readonly exitCode: number;
+    readonly stdout: string;
+    readonly stderr: string;
+  };
+}): Promise<number> {
+  let lastOutput = opts.initial.stdout;
   const start = Date.now();
 
-  while (Date.now() - start < maxMs) {
-    await delay(intervalMs);
+  while (Date.now() - start < opts.context.maxMs) {
+    await delay(opts.context.intervalMs);
 
-    const result = await capturePane({ target, lines });
+    const result = await capturePane({
+      target: opts.target,
+      lines: opts.lines,
+    });
     if (result.exitCode !== 0) {
-      const message = result.stderr || `Failed to capture ${sessionName}`;
-      if (json) {
+      const message =
+        result.stderr || `Failed to capture ${opts.context.session}`;
+      if (opts.json) {
         writeSessionStreamEvent({
-          event: buildSessionStreamErrorEvent({ context, message }),
+          event: buildSessionStreamErrorEvent({
+            context: opts.context,
+            message,
+          }),
         });
         writeSessionStreamEvent({
-          event: buildSessionStreamEndEvent({ context, reason: "error" }),
+          event: buildSessionStreamEndEvent({
+            context: opts.context,
+            reason: "error",
+          }),
         });
       } else {
         console.error(message);
@@ -768,10 +878,10 @@ const handleTail = async ({
     const nextOutput = result.stdout;
     const suffix = diffNewLines({ previous: lastOutput, next: nextOutput });
     if (suffix) {
-      if (json) {
+      if (opts.json) {
         for (const line of splitLines(suffix)) {
           writeSessionStreamEvent({
-            event: buildSessionStreamLogEvent({ context, line }),
+            event: buildSessionStreamLogEvent({ context: opts.context, line }),
           });
         }
       } else {
@@ -782,14 +892,17 @@ const handleTail = async ({
     lastOutput = nextOutput;
   }
 
-  if (json) {
+  if (opts.json) {
     writeSessionStreamEvent({
-      event: buildSessionStreamEndEvent({ context, reason: "timeout" }),
+      event: buildSessionStreamEndEvent({
+        context: opts.context,
+        reason: "timeout",
+      }),
     });
   }
 
   return 0;
-};
+}
 
 export const sessionCommand = defineCommand({
   name: "session",

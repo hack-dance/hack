@@ -125,7 +125,7 @@ import {
   resolveDefaultBackendName,
   resolveMux,
 } from "../mux/mux-resolver.ts";
-import { buildSessionName } from "../mux/session-names.ts";
+import { buildLifecycleSessionName } from "../mux/session-names.ts";
 import {
   renderProjectConfigJson,
   renderProjectEnvContractJson,
@@ -947,8 +947,7 @@ function resolveLifecycleSessionName(opts: {
   readonly projectName: string;
   readonly branch: string | null;
 }): string {
-  const suffix = opts.branch ? `lifecycle-${opts.branch}` : "lifecycle";
-  return buildSessionName({ base: opts.projectName, suffix });
+  return buildLifecycleSessionName(opts);
 }
 
 function resolveLifecycleCwd(opts: {
@@ -1983,29 +1982,39 @@ function parseComposeServiceNetworkNames(value: unknown): readonly string[] {
   if (!isRecord(value)) {
     return [];
   }
+
   const networks = value.networks;
   if (Array.isArray(networks)) {
     const out: string[] = [];
     for (const entry of networks) {
-      if (typeof entry === "string" && entry.trim().length > 0) {
-        out.push(entry.trim());
-      } else if (isRecord(entry)) {
-        for (const key of Object.keys(entry)) {
-          const trimmed = key.trim();
-          if (trimmed.length > 0) {
-            out.push(trimmed);
-          }
-        }
+      const names = parseComposeNetworkEntry(entry);
+      for (const name of names) {
+        out.push(name);
       }
     }
     return out;
   }
-  if (isRecord(networks)) {
-    return Object.keys(networks)
-      .map((entry) => entry.trim())
-      .filter((entry) => entry.length > 0);
+
+  if (!isRecord(networks)) {
+    return [];
   }
-  return [];
+
+  return Object.keys(networks)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
+function parseComposeNetworkEntry(value: unknown): readonly string[] {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? [trimmed] : [];
+  }
+  if (!isRecord(value)) {
+    return [];
+  }
+  return Object.keys(value)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
 }
 
 async function readComposeCaddyHosts(

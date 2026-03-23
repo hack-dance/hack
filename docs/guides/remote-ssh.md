@@ -1,6 +1,9 @@
-# Expose the gateway over SSH (Beta)
+# Expose the gateway over SSH
 
-> Beta: SSH gateway exposure is part of the remote control plane beta.
+This is a beta workflow.
+Start with [Core docs](../core.md) if you are new to `hack`, and use [Beta workflows](../beta.md)
+for the rest of the remote path.
+
 > ⚠️ Experimental: this guide has not been validated end-to-end yet. Use with caution and report issues.
 
 Use SSH port-forwarding when you want quick, ad-hoc access without extra tooling.

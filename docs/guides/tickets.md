@@ -1,5 +1,8 @@
 # Tickets (git-backed)
 
+This page is part of [Extensions & reference](../reference.md).
+If you are learning the core local product flow, start with [Core docs](../core.md).
+
 The tickets extension is a lightweight, git-backed ticket log intended for small teams and solo dev.
 It stores events in a dedicated git ref (`refs/hack/tickets` by default, hidden from branch lists) so
 ticket history is versioned and syncable without requiring an external service.

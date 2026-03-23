@@ -1,5 +1,9 @@
 # Remote Node Quickstart (Beta)
 
+This is a beta workflow.
+Start with [Core docs](../core.md) if you are new to `hack`, and use [Beta workflows](../beta.md)
+for the rest of the remote path.
+
 Use this guide to connect one remote machine as a `hack` execution node and run a project on it.
 
 > Beta: multi-node execution is still being validated and is not part of the core local-dev path.

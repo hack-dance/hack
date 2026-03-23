@@ -5,6 +5,10 @@ This is the lower-level reference for extension commands, SDK surfaces, and exte
 If you want the plain-language product overview first, read [integrations.md](integrations.md)
 before this page.
 
+This is reference material, not the default onboarding path.
+Start with [Core docs](core.md) if you are learning `hack`, or use [Beta workflows](beta.md) if
+you are intentionally enabling remote/control-plane features.
+
 ## Quick start (one command)
 
 If you just want remote access working, start here:

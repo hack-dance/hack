@@ -1,10 +1,12 @@
-# Gateway API (Beta)
+# Gateway API (hackd HTTP/WS)
 
 The gateway exposes a small, authenticated HTTP/WS surface for remote orchestration. It is
 designed for structured workflows (jobs + log streaming + shells) and keeps write access
 opt-in with explicit guardrails.
 
-> Beta: this API belongs to the remote control plane, which is still beta.
+This is reference for the beta remote surface. Use [Beta workflows](beta.md) for the guided path
+and [Core docs](core.md) for the default local product story.
+
 > ⚠️ Experimental: remote exposure steps are still being validated end-to-end.
 
 ## Security model (read this first)
@@ -326,12 +328,6 @@ Response:
 | `runtime_last_ok_at` | string or null | Last successful runtime check |
 | `runtime_reset_at` | string or null | Last detected runtime reset |
 | `runtime_reset_count` | number | Runtime reset counter |
-| `runtime_reset_summary` | string or null | Summary of what changed during the most recent reset |
-| `runtime_reset_changes` | string[] | Machine-readable reset drift fields |
-| `runtime_last_repair_at` | string or null | Last bounded auto-repair attempt timestamp |
-| `runtime_repair_action` | string or null | Last auto-repair action hackd attempted |
-| `runtime_repair_outcome` | string or null | `stabilized` or `manual_action_required` |
-| `runtime_next_step` | string or null | Guided next step when auto-repair cannot finish safely |
 
 ### GET /v1/projects
 
@@ -365,12 +361,6 @@ Response:
 | `runtime_last_ok_at` | string or null | Last successful runtime check |
 | `runtime_reset_at` | string or null | Last detected runtime reset |
 | `runtime_reset_count` | number | Runtime reset counter |
-| `runtime_reset_summary` | string or null | Summary of what changed during the most recent reset |
-| `runtime_reset_changes` | string[] | Machine-readable reset drift fields |
-| `runtime_last_repair_at` | string or null | Last bounded auto-repair attempt timestamp |
-| `runtime_repair_action` | string or null | Last auto-repair action hackd attempted |
-| `runtime_repair_outcome` | string or null | `stabilized` or `manual_action_required` |
-| `runtime_next_step` | string or null | Guided next step when auto-repair cannot finish safely |
 | `projects` | ProjectView[] | Gateway-enabled projects only |
 
 ### GET /v1/ps
@@ -398,12 +388,6 @@ Response:
 | `runtime_last_ok_at` | string or null | Last successful runtime check |
 | `runtime_reset_at` | string or null | Last detected runtime reset |
 | `runtime_reset_count` | number | Runtime reset counter |
-| `runtime_reset_summary` | string or null | Summary of what changed during the most recent reset |
-| `runtime_reset_changes` | string[] | Machine-readable reset drift fields |
-| `runtime_last_repair_at` | string or null | Last bounded auto-repair attempt timestamp |
-| `runtime_repair_action` | string or null | Last auto-repair action hackd attempted |
-| `runtime_repair_outcome` | string or null | `stabilized` or `manual_action_required` |
-| `runtime_next_step` | string or null | Guided next step when auto-repair cannot finish safely |
 | `items` | PsItem[] | `docker compose ps` style rows |
 
 ### POST /control-plane/projects/:projectId/jobs

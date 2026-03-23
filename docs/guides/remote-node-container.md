@@ -1,5 +1,9 @@
 # Remote Node Runtime Container (Beta)
 
+This is a beta workflow.
+Start with [Core docs](../core.md) if you are new to `hack`, and use [Beta workflows](../beta.md)
+for the rest of the remote path.
+
 Use the published node-runtime container to spin up a remote node with minimal host setup.
 
 > Beta: multi-node execution is still being validated and is not part of the core local-dev path.

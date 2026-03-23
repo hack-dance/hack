@@ -281,21 +281,12 @@ hack open logs
 
 ## Documentation
 
-Start here:
+Docs are split into three paths:
 
-- [Docs index](docs/README.md)
-- [CLI reference](docs/cli.md)
-- [Architecture](docs/architecture.md)
-- [Env and secrets](docs/env.md)
-- [Sessions](docs/sessions.md)
-- [Extensions](docs/extensions.md)
-
-Common guides:
-
-- [Initialize a project](docs/guides/init-project.md)
-- [Tickets guide](docs/guides/tickets.md)
-- [Remote node quickstart](docs/guides/remote-node-quickstart.md)
-- [Global settings](docs/guides/global-settings.md)
+- [Docs hub](docs/README.md)
+- [Core docs](docs/core.md) for the default local product story
+- [Beta workflows](docs/beta.md) for remote and control-plane flows
+- [Extensions & reference](docs/reference.md) for commands, APIs, and integrations
 
 ## Develop From Source
 

@@ -18,6 +18,10 @@ If you are new to Hack, scan the CLI in this order:
 4. `Beta workflows` for remote control plane and multi-node execution
 5. `Extension commands` when you need the lower-level namespace surface
 
+This is the full command reference, including beta and extension surfaces.
+If you are new to `hack`, start with [Core docs](core.md) and come back here when you need
+command-level detail.
+
 ## Conventions
 
 - Commands that accept both `--path` and `--project` treat them as mutually exclusive.

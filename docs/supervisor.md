@@ -1,10 +1,12 @@
-# Supervisor (Beta)
+# Supervisor (jobs + shells)
 
 The supervisor is the execution engine behind remote workflows. It can run commands as jobs,
 stream logs/events, and host PTY-backed shells. The CLI exposes it locally via `hack x supervisor`
 and remotely through the gateway API.
 
-> Beta: supervisor is part of Hack's remote workflow surface, not the core getting-started path.
+This page documents a beta-adjacent execution surface.
+Use [Beta workflows](beta.md) for the guided remote path and [Extensions & reference](reference.md)
+for the rest of the command and API material.
 
 ## Local usage
 

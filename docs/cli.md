@@ -46,6 +46,8 @@ working. You do not need all of them for every repo.
   off. It becomes relevant when you keep long-running shells, agent runs, or SSH workspaces alive.
 - **Env**: Use `hack env` when a project needs explicit local config or secrets. It becomes relevant as
   soon as `hack up`, `hack run`, or remote workflows depend on values that should not be hardcoded.
+  The command reports which values are plaintext-compatible via `.hack/.env`, which values use the
+  configured secret backend, and whether the current mode is still machine-local.
 
 ## Local vs broker-mediated administration
 

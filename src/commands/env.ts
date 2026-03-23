@@ -162,6 +162,126 @@ const SECRET_BACKEND_VALUES = ["keychain", "encrypted_file", "cloud"] as const;
 const CLOUD_PROVIDER_VALUES = ["aws", "gcp", "azure", "vault"] as const;
 const ENCRYPTED_FILE_KEY_ENV = "HACK_SECRETS_FILE_KEY";
 
+function describeLocalSecretsForDisplay(input: {
+  readonly storage: HackEnvStorageSummary["localSecrets"];
+}): string {
+  const descriptor = formatSecretStoreDescriptor({
+    descriptor: input.storage,
+  });
+  if (input.storage.backend === "keychain") {
+    return `${descriptor} (encrypted by the OS keychain; machine-local secret storage)`;
+  }
+  if (input.storage.backend === "encrypted_file") {
+    return `${descriptor} (encrypted local file; machine-local secret storage)`;
+  }
+  return `${descriptor} (cloud shim today; values still land in a local encrypted file until provider-native transport ships)`;
+}
+
+function describePortableStateForDisplay(input: {
+  readonly storage: HackEnvStorageSummary["portableState"];
+}): string {
+  return `${input.storage.status} (${input.storage.trustModel}) — ${input.storage.message}`;
+}
+
+function describeBackendTrustStatus(input: {
+  readonly backend: (typeof SECRET_BACKEND_VALUES)[number];
+  readonly provider?: string | null;
+}): {
+  readonly storageMode: string;
+  readonly trustModel: string;
+  readonly portability: string;
+} {
+  if (input.backend === "keychain") {
+    return {
+      storageMode: "Encrypted OS-managed secret storage",
+      trustModel: "Machine-local secret custody",
+      portability: "Not portable by default; values stay on this machine",
+    };
+  }
+  if (input.backend === "encrypted_file") {
+    return {
+      storageMode: "Encrypted local file storage",
+      trustModel: "Machine-local secret custody",
+      portability:
+        "Not portable by default; copy and key-sharing are explicit user actions",
+    };
+  }
+  const providerLabel = input.provider?.trim() || "provider";
+  return {
+    storageMode: `Provider-targeted shim (${providerLabel}) backed by a local encrypted file today`,
+    trustModel: "Machine-local secret custody with provider-intent metadata",
+    portability:
+      "Not remotely portable yet; current cloud mode validates backend intent rather than publishing values off-machine",
+  };
+}
+
+function isSecretBackend(
+  value: string
+): value is (typeof SECRET_BACKEND_VALUES)[number] {
+  return SECRET_BACKEND_VALUES.includes(
+    value as (typeof SECRET_BACKEND_VALUES)[number]
+  );
+}
+
+function isCloudProvider(
+  value: string
+): value is (typeof CLOUD_PROVIDER_VALUES)[number] {
+  return CLOUD_PROVIDER_VALUES.includes(
+    value as (typeof CLOUD_PROVIDER_VALUES)[number]
+  );
+}
+
+async function persistBackendSelection(input: {
+  readonly backend: (typeof SECRET_BACKEND_VALUES)[number];
+  readonly storePath?: string;
+  readonly keyPath?: string;
+  readonly provider?: string;
+  readonly secretProject?: string;
+  readonly secretPrefix?: string;
+}): Promise<void> {
+  await updateGlobalConfig({
+    path: "controlPlane.secrets.backend",
+    value: input.backend,
+  });
+
+  if (input.backend === "encrypted_file" && input.storePath) {
+    await updateGlobalConfig({
+      path: "controlPlane.secrets.encryptedFile.path",
+      value: input.storePath,
+    });
+  }
+
+  if (input.backend === "encrypted_file" && input.keyPath) {
+    await updateGlobalConfig({
+      path: "controlPlane.secrets.encryptedFile.keyPath",
+      value: input.keyPath,
+    });
+  }
+
+  if (input.backend !== "cloud" || !input.provider) {
+    return;
+  }
+
+  await updateGlobalConfig({
+    path: "controlPlane.secrets.cloud.provider",
+    value: input.provider,
+  });
+
+  if (input.secretProject) {
+    await updateGlobalConfig({
+      path: "controlPlane.secrets.cloud.project",
+      value: input.secretProject,
+    });
+  }
+
+  if (input.secretPrefix) {
+    await updateGlobalConfig({
+      path: "controlPlane.secrets.cloud.secretPrefix",
+      value: input.secretPrefix,
+    });
+  }
+}
+
 async function resolveProjectForEnv(opts: {
   readonly ctx: CliContext;
   readonly pathOpt: string | undefined;
@@ -269,23 +389,31 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
     entries: [
       [
         "contract",
-        `${resolved.storage.contract.path} (committed contract, no values)`,
+        `${resolved.storage.contract.path} (committed metadata only; no values are stored here)`,
       ],
       [
         "local_plaintext",
-        `${resolved.storage.localPlaintext.path} (${resolved.storage.localPlaintext.exists ? "present" : "missing"} plaintext file for plain_env, gitignore not enforced)`,
+        `${resolved.storage.localPlaintext.path} (${resolved.storage.localPlaintext.exists ? "present" : "missing"} plaintext compatibility file for plain_env; existing .env-style workflows still work and gitignore is recommended but not enforced)`,
       ],
       [
         "local_fallback",
-        `${resolved.storage.localPlaintext.fallback.source} (used when .env does not provide a plain_env value)`,
+        `${resolved.storage.localPlaintext.fallback.source} (ambient plaintext fallback when .hack/.env does not provide a plain_env value)`,
       ],
       [
         "local_secrets",
-        `${formatSecretStoreDescriptor({ descriptor: resolved.storage.localSecrets })} (${resolved.storage.localSecrets.mode === "shim" ? "local secret backend shim" : "local secret backend"})`,
+        describeLocalSecretsForDisplay({
+          storage: resolved.storage.localSecrets,
+        }),
+      ],
+      [
+        "compatibility_mode",
+        "Plaintext values materialize to .hack/.env. Secret values materialize to the configured secret backend. This preserves current local runtime behavior while portable env stays opt-in.",
       ],
       [
         "portable_state",
-        `${resolved.storage.portableState.status}: ${resolved.storage.portableState.message}`,
+        describePortableStateForDisplay({
+          storage: resolved.storage.portableState,
+        }),
       ],
     ],
   });
@@ -351,6 +479,12 @@ function serializeEnvStorageForJson(input: {
       status: input.storage.portableState.status,
       trust_model: input.storage.portableState.trustModel,
       message: input.storage.portableState.message,
+    },
+    compatibility_mode: {
+      plaintext_target: input.storage.localPlaintext.path,
+      secret_backend: input.storage.localSecrets.backend,
+      summary:
+        "Plaintext values materialize to .hack/.env and secret values materialize to the configured secret backend.",
     },
   };
 }
@@ -441,6 +575,10 @@ const handleEnvBackendStatus: CommandHandlerFor<
 > = async ({ args }): Promise<number> => {
   const controlPlane = await readControlPlaneConfig({});
   const secretsConfig = controlPlane.config.secrets;
+  const backendStatus = describeBackendTrustStatus({
+    backend: secretsConfig.backend,
+    provider: secretsConfig.cloud.provider ?? null,
+  });
   if (args.options.json) {
     process.stdout.write(
       `${JSON.stringify(
@@ -450,6 +588,13 @@ const handleEnvBackendStatus: CommandHandlerFor<
           encrypted_file: secretsConfig.encryptedFile,
           encrypted_file_key_env: ENCRYPTED_FILE_KEY_ENV,
           cloud: secretsConfig.cloud,
+          status: {
+            storage_mode: backendStatus.storageMode,
+            trust_model: backendStatus.trustModel,
+            portability: backendStatus.portability,
+            plaintext_compatibility:
+              "Secret keys use this backend, while non-secret .env-compatible values still live in .hack/.env.",
+          },
         },
         null,
         2
@@ -472,6 +617,13 @@ const handleEnvBackendStatus: CommandHandlerFor<
       ["cloud_provider", secretsConfig.cloud.provider ?? ""],
       ["cloud_project", secretsConfig.cloud.project ?? ""],
       ["cloud_secret_prefix", secretsConfig.cloud.secretPrefix],
+      ["storage_mode", backendStatus.storageMode],
+      ["trust_model", backendStatus.trustModel],
+      ["portability", backendStatus.portability],
+      [
+        "plaintext_compatibility",
+        "Non-secret values remain .env-compatible via .hack/.env.",
+      ],
     ],
   });
   return 0;
@@ -481,70 +633,33 @@ const handleEnvBackendUse: CommandHandlerFor<typeof backendUseSpec> = async ({
   args,
 }): Promise<number> => {
   const backend = args.positionals.backend.trim();
-  if (
-    !SECRET_BACKEND_VALUES.includes(
-      backend as (typeof SECRET_BACKEND_VALUES)[number]
-    )
-  ) {
+  if (!isSecretBackend(backend)) {
     throw new CliUsageError(
       `Invalid backend "${backend}". Expected one of: ${SECRET_BACKEND_VALUES.join(", ")}`
     );
   }
 
   const providerRaw = args.options.provider?.trim();
-  if (
-    providerRaw &&
-    !CLOUD_PROVIDER_VALUES.includes(
-      providerRaw as (typeof CLOUD_PROVIDER_VALUES)[number]
-    )
-  ) {
+  if (providerRaw && !isCloudProvider(providerRaw)) {
     throw new CliUsageError(
       `Invalid --provider "${providerRaw}". Expected one of: ${CLOUD_PROVIDER_VALUES.join(", ")}`
     );
   }
 
-  await updateGlobalConfig({
-    path: "controlPlane.secrets.backend",
-    value: backend,
+  if (backend === "cloud" && !providerRaw) {
+    throw new CliUsageError(
+      "Cloud backend requires --provider <aws|gcp|azure|vault>."
+    );
+  }
+
+  await persistBackendSelection({
+    backend,
+    storePath: args.options.storePath?.trim() || undefined,
+    keyPath: args.options.keyPath?.trim() || undefined,
+    provider: providerRaw,
+    secretProject: args.options.secretProject?.trim() || undefined,
+    secretPrefix: args.options.secretPrefix?.trim() || undefined,
   });
-
-  if (backend === "encrypted_file" && args.options.storePath?.trim()) {
-    await updateGlobalConfig({
-      path: "controlPlane.secrets.encryptedFile.path",
-      value: args.options.storePath.trim(),
-    });
-  }
-
-  if (backend === "encrypted_file" && args.options.keyPath?.trim()) {
-    await updateGlobalConfig({
-      path: "controlPlane.secrets.encryptedFile.keyPath",
-      value: args.options.keyPath.trim(),
-    });
-  }
-
-  if (backend === "cloud") {
-    if (!providerRaw) {
-      throw new CliUsageError(
-        "Cloud backend requires --provider <aws|gcp|azure|vault>."
-      );
-    }
-    await updateGlobalConfig({
-      path: "controlPlane.secrets.cloud.provider",
-      value: providerRaw,
-    });
-    if (args.options.secretProject?.trim()) {
-      await updateGlobalConfig({
-        path: "controlPlane.secrets.cloud.project",
-        value: args.options.secretProject.trim(),
-      });
-    }
-    if (args.options.secretPrefix?.trim()) {
-      await updateGlobalConfig({
-        path: "controlPlane.secrets.cloud.secretPrefix",
-        value: args.options.secretPrefix.trim(),
-      });
-    }
-  }
 
   const controlPlane = await readControlPlaneConfig({});
   const secretsConfig = controlPlane.config.secrets;

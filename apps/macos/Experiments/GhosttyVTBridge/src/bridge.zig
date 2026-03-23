@@ -85,10 +85,19 @@ export fn hack_ghostty_vt_resize(handle: ?*TerminalHandle, cols: u32, rows: u32)
     handle.?.terminal.resize(handle.?.alloc, cols_u16, rows_u16) catch {};
 }
 
+fn nextSliceCompat(handle: *TerminalHandle, bytes: []const u8) void {
+    const return_type = @typeInfo(@TypeOf(ghostty_vt.ReadonlyStream.nextSlice)).@"fn".return_type.?;
+    if (comptime return_type == void) {
+        handle.stream.nextSlice(bytes);
+    } else {
+        handle.stream.nextSlice(bytes) catch {};
+    }
+}
+
 export fn hack_ghostty_vt_feed(handle: ?*TerminalHandle, bytes: [*]const u8, len: usize) void {
     if (handle == null) return;
     if (len == 0) return;
-    _ = handle.?.stream.nextSlice(bytes[0..len]) catch {};
+    nextSliceCompat(handle.?, bytes[0..len]);
 }
 
 fn scrollViewportCompat(handle: *TerminalHandle, behavior: ghostty_vt.Terminal.ScrollViewport) void {

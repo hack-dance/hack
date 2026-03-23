@@ -2,27 +2,25 @@ import * as p from "@clack/prompts";
 import qrcode from "qrcode-terminal";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
-import { exec, run } from "../lib/shell.ts";
+import { findProjectContext, type ProjectContext } from "../lib/project.ts";
+import { run } from "../lib/shell.ts";
 import {
   buildDirectSshCommand,
   buildTailscaleSshCommand,
   validateTailscaleSetup,
 } from "../lib/tailscale.ts";
+import type { MuxBackendName, MuxSession } from "../mux/mux-backend.ts";
+import {
+  listMuxSessions,
+  resolveDefaultBackendName,
+  resolveMux,
+} from "../mux/mux-resolver.ts";
 
 /** Connection method: Tailscale or direct SSH */
 type ConnectionMethod = "tailscale" | "direct";
 
 /** Valid session name pattern: alphanumeric, dash, underscore, or dot */
 const SESSION_NAME_PATTERN = /^[\w.-]+$/;
-
-/**
- * Parsed tmux session info.
- */
-interface TmuxSession {
-  readonly name: string;
-  readonly attached: boolean;
-  readonly path: string | null;
-}
 
 const optHost = defineOption({
   name: "host",
@@ -65,11 +63,17 @@ const optPort = defineOption({
 
 const sshSpec = defineCommand({
   name: "ssh",
-  summary: "Show SSH details for reaching this machine and its sessions",
-  group: "Integrations",
+  summary: "Show SSH connection info for remote access to this machine",
+  group: "Project",
+  description:
+    "Show SSH connection info for this machine and optionally connect to a persistent workspace. Existing workspaces reuse their current mux backend, and newly created workspaces use the configured default backend.",
   options: [optHost, optUser, optTailscale, optDirect, optPort],
   positionals: [
-    { name: "session", description: "Session to connect to", required: false },
+    {
+      name: "workspace",
+      description: "Workspace to connect to",
+      required: false,
+    },
   ],
   subcommands: [],
 } as const);
@@ -130,44 +134,69 @@ async function handleSsh(opts: {
   qrcode.generate(sshUri, { small: true });
   console.log("");
 
-  // Step 4: Show active sessions
-  const sessions = await listTmuxSessions();
+  // Step 4: Show active workspaces
+  const projectContext = await resolveCurrentProjectContext();
+  const sessions = await listWorkspaceSessions({ project: projectContext });
 
   if (sessions.length > 0) {
     const sessionList = sessions
-      .map((s) => `  • ${s.name}${s.attached ? " (attached)" : ""}`)
+      .map(
+        (s) =>
+          `  • ${s.name} [${s.backend}]${s.attached === true ? " (attached)" : ""}`
+      )
       .join("\n");
-    p.log.info(`Active tmux sessions:\n${sessionList}`);
+    p.log.info(`Active workspaces:\n${sessionList}`);
   } else {
-    p.log.info("No active tmux sessions");
+    p.log.info("No active workspaces");
   }
 
   // Step 5: Ask what to do
-  const sessionArg = args.positionals.session;
+  const workspaceArg = args.positionals.workspace;
 
-  if (sessionArg) {
-    if (!SESSION_NAME_PATTERN.test(sessionArg)) {
+  if (workspaceArg) {
+    if (!SESSION_NAME_PATTERN.test(workspaceArg)) {
       p.log.error(
-        "Invalid session name (only letters, numbers, dashes, underscores, or dots)"
+        "Invalid workspace name (only letters, numbers, dashes, underscores, or dots)"
       );
       return 1;
     }
-    // Direct connect to specified session
+    // Direct connect to specified workspace
+    const backend = await resolveWorkspaceBackendForSsh({
+      workspaceName: workspaceArg,
+      project: projectContext,
+      sessions,
+    });
+    if (!backend) {
+      p.log.error(
+        "No session mux backend available. Install tmux or zellij, or set sessions.mux to auto|tmux|zellij."
+      );
+      return 1;
+    }
     return await connectToSession({
+      backend,
       hostname,
       user,
       port,
-      sessionName: sessionArg,
+      sessionName: workspaceArg,
     });
   }
 
-  const sessionName = await resolveSessionNameToConnect({ sessions });
-  if (!sessionName) {
+  const selection = await resolveSessionNameToConnect({
+    project: projectContext,
+    sessions,
+  });
+  if (!selection) {
     p.outro("Copy the SSH command above to connect from other devices");
     return 0;
   }
 
-  return await connectToSession({ hostname, user, port, sessionName });
+  return await connectToSession({
+    backend: selection.backend,
+    hostname,
+    user,
+    port,
+    sessionName: selection.sessionName,
+  });
 }
 
 async function resolveConnection(opts: {
@@ -272,9 +301,49 @@ async function resolveDirectHost(opts: {
   return hostInput.trim();
 }
 
+async function resolveCurrentProjectContext(): Promise<ProjectContext | null> {
+  return await findProjectContext(process.cwd());
+}
+
+async function listWorkspaceSessions(opts: {
+  readonly project: ProjectContext | null;
+}): Promise<readonly MuxSession[]> {
+  const mux = await resolveMux({ project: opts.project });
+  return await listMuxSessions({
+    mode: mux.mode,
+    backends: mux.backends,
+  });
+}
+
+async function resolveDefaultWorkspaceBackend(opts: {
+  readonly project: ProjectContext | null;
+}): Promise<MuxBackendName | null> {
+  const mux = await resolveMux({ project: opts.project });
+  return resolveDefaultBackendName({
+    mode: mux.mode,
+    backends: mux.backends,
+  });
+}
+
+async function resolveWorkspaceBackendForSsh(opts: {
+  readonly workspaceName: string;
+  readonly project: ProjectContext | null;
+  readonly sessions: readonly MuxSession[];
+}): Promise<MuxBackendName | null> {
+  return (
+    opts.sessions.find((session) => session.name === opts.workspaceName)
+      ?.backend ??
+    (await resolveDefaultWorkspaceBackend({ project: opts.project }))
+  );
+}
+
 async function resolveSessionNameToConnect(opts: {
-  readonly sessions: readonly TmuxSession[];
-}): Promise<string | null> {
+  readonly project: ProjectContext | null;
+  readonly sessions: readonly MuxSession[];
+}): Promise<{
+  readonly backend: MuxBackendName;
+  readonly sessionName: string;
+} | null> {
   const action = await p.select({
     message: "What would you like to do?",
     options: [
@@ -285,8 +354,8 @@ async function resolveSessionNameToConnect(opts: {
       },
       {
         value: "connect" as const,
-        label: "Connect to session",
-        hint: "SSH into a tmux session",
+        label: "Connect to workspace",
+        hint: "SSH into a persistent workspace",
       },
     ],
   });
@@ -299,13 +368,13 @@ async function resolveSessionNameToConnect(opts: {
     ...opts.sessions.map((s) => ({
       value: s.name,
       label: s.name,
-      hint: s.attached ? "attached" : undefined,
+      hint: s.attached === true ? `${s.backend} attached` : s.backend,
     })),
-    { value: "__new__", label: "Create new session" },
+    { value: "__new__", label: "Create new workspace" },
   ];
 
   const selectedSession = await p.select({
-    message: "Select session",
+    message: "Select workspace",
     options: sessionOptions,
   });
 
@@ -314,11 +383,22 @@ async function resolveSessionNameToConnect(opts: {
   }
 
   if (selectedSession !== "__new__") {
-    return selectedSession;
+    const backend = await resolveWorkspaceBackendForSsh({
+      workspaceName: selectedSession,
+      project: opts.project,
+      sessions: opts.sessions,
+    });
+    if (!backend) {
+      p.log.error(
+        "No session mux backend available. Install tmux or zellij, or set sessions.mux to auto|tmux|zellij."
+      );
+      return null;
+    }
+    return { backend, sessionName: selectedSession };
   }
 
   const name = await p.text({
-    message: "Session name",
+    message: "Workspace name",
     placeholder: "main",
     defaultValue: "main",
     validate: (value) => {
@@ -333,7 +413,17 @@ async function resolveSessionNameToConnect(opts: {
     return null;
   }
 
-  return (name || "main").trim();
+  const backend = await resolveDefaultWorkspaceBackend({
+    project: opts.project,
+  });
+  if (!backend) {
+    p.log.error(
+      "No session mux backend available. Install tmux or zellij, or set sessions.mux to auto|tmux|zellij."
+    );
+    return null;
+  }
+
+  return { backend, sessionName: (name || "main").trim() };
 }
 
 /**
@@ -403,9 +493,10 @@ async function setupTailscale(): Promise<
 }
 
 /**
- * Connect to a tmux session via SSH.
+ * Connect to a workspace via SSH.
  */
 async function connectToSession(opts: {
+  readonly backend: MuxBackendName;
   readonly hostname: string;
   readonly user?: string;
   readonly port?: number;
@@ -414,19 +505,18 @@ async function connectToSession(opts: {
   const sessionName = opts.sessionName.trim();
   if (!SESSION_NAME_PATTERN.test(sessionName)) {
     p.log.error(
-      "Invalid session name (only letters, numbers, dashes, underscores, or dots)"
+      "Invalid workspace name (only letters, numbers, dashes, underscores, or dots)"
     );
     return 1;
   }
 
-  p.log.step(`Connecting to ${sessionName}...`);
+  p.log.step(`Connecting to workspace ${sessionName}...`);
   console.log("");
 
-  // Use login shell to ensure PATH includes homebrew etc.
-  // -d detaches other clients to avoid size conflicts from different terminals
-  const quotedSessionName = shellQuote({ value: sessionName });
-  const tmuxInnerCommand = `tmux attach -d -t ${quotedSessionName} 2>/dev/null || tmux new -s ${quotedSessionName}`;
-  const tmuxCmd = `$SHELL -l -c ${shellQuote({ value: tmuxInnerCommand })}`;
+  const attachCommand = buildWorkspaceAttachShellCommand({
+    backend: opts.backend,
+    workspaceName: sessionName,
+  });
 
   const sshArgs = [
     "ssh",
@@ -434,70 +524,29 @@ async function connectToSession(opts: {
     ...(opts.user ? ["-l", opts.user] : []),
     opts.hostname,
     "-t",
-    tmuxCmd,
+    `$SHELL -l -c ${shellQuote({ value: attachCommand })}`,
   ];
 
   return await run(sshArgs, { stdin: "inherit" });
+}
+
+function buildWorkspaceAttachShellCommand(opts: {
+  readonly backend: MuxBackendName;
+  readonly workspaceName: string;
+}): string {
+  const quotedSessionName = shellQuote({ value: opts.workspaceName });
+  if (opts.backend === "zellij") {
+    return `zellij attach ${quotedSessionName} 2>/dev/null || zellij attach --create ${quotedSessionName}`;
+  }
+  return `tmux attach -d -t ${quotedSessionName} 2>/dev/null || tmux new -s ${quotedSessionName}`;
 }
 
 function shellQuote(opts: { readonly value: string }): string {
   return `'${opts.value.split("'").join(`'"'"'`)}'`;
 }
 
-/**
- * List all tmux sessions.
- */
-async function listTmuxSessions(): Promise<TmuxSession[]> {
-  const separator = "|||HACK_SESSION_FIELD|||";
-  const format = [
-    "#{session_name}",
-    "#{session_attached}",
-    "#{session_path}",
-  ].join(separator);
-  const result = await exec(["tmux", "list-sessions", "-F", format], {
-    stdin: "ignore",
-  });
-
-  if (result.exitCode !== 0) {
-    return [];
-  }
-
-  const sessions: TmuxSession[] = [];
-  for (const line of result.stdout.split("\n")) {
-    if (!line.trim()) {
-      continue;
-    }
-    const fields = parseTmuxSessionFields(line, separator, 3);
-    if (!fields) {
-      continue;
-    }
-    const [name, attached, path] = fields;
-    if (name) {
-      sessions.push({
-        name,
-        attached: attached === "1",
-        path: path || null,
-      });
-    }
-  }
-
-  return sessions;
-}
-
-function parseTmuxSessionFields(
-  line: string,
-  separator: string,
-  expectedCount: number
-): readonly string[] | null {
-  const bySeparator = line.split(separator);
-  if (bySeparator.length === expectedCount) {
-    return bySeparator;
-  }
-  const byTab = line.split("\t");
-  if (byTab.length === expectedCount) {
-    return byTab;
-  }
-  return null;
-}
-
 export const sshCommand = withHandler(sshSpec, handleSsh);
+
+export const __testOnlySshCommand = {
+  buildWorkspaceAttachShellCommand,
+};

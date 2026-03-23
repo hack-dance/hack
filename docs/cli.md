@@ -89,8 +89,8 @@ Current practical rule:
 | `hack auth` | Manage Hack account sign-in | Collaboration & integrations |
 | `hack linear` | Connect Linear and sync repo work with Linear projects/issues | Collaboration & integrations |
 | `hack env` | Set project env vars and local secrets | Collaboration & integrations |
-| `hack session` | Keep reusable terminal workspaces alive | Collaboration & integrations |
-| `hack ssh` | Show SSH details for reaching this machine and its sessions | Collaboration & integrations |
+| `hack session` | Manage persistent project workspaces with tmux-first onboarding | Collaboration & integrations |
+| `hack ssh` | Show SSH connection info for remote access to this machine | Collaboration & integrations |
 | `hack tickets` | Track repo-local work without leaving git | Collaboration & integrations |
 | `hack internal` | Manage hack-managed internal overrides | Internal |
 | `hack gateway` | Beta: manage the remote control plane entrypoint | Beta workflows |

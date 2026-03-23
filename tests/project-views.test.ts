@@ -374,7 +374,7 @@ test("buildProjectViews includes matching project sessions from tmux", async () 
         createdAt: 1_735_000_000,
       },
       {
-        name: "alpha:agent-1",
+        name: "alpha--agent-1",
         backend: "tmux",
         attached: false,
         path: join(alpha.repoRoot, "apps"),
@@ -403,7 +403,7 @@ test("buildProjectViews includes matching project sessions from tmux", async () 
   const alphaView = views.find((view) => view.name === "alpha");
   expect(alphaView?.sessions.map((session) => session.name)).toEqual([
     "alpha",
-    "alpha:agent-1",
+    "alpha--agent-1",
     "manual-scratch",
   ]);
   expect(alphaView?.sessions.map((session) => session.source)).toEqual([
@@ -466,7 +466,7 @@ test("buildProjectViews includes zellij sessions when session name matches proje
     includeUnregistered: false,
     muxSessions: [
       {
-        name: "alpha:research",
+        name: "alpha--research",
         backend: "zellij",
         attached: false,
         path: null,
@@ -478,7 +478,7 @@ test("buildProjectViews includes zellij sessions when session name matches proje
 
   const alphaView = views.find((view) => view.name === "alpha");
   expect(alphaView?.sessions.map((session) => session.name)).toEqual([
-    "alpha:research",
+    "alpha--research",
   ]);
   expect(alphaView?.sessions.map((session) => session.backend)).toEqual([
     "zellij",

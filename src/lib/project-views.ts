@@ -8,6 +8,7 @@ import {
   PROJECT_ENV_FILENAME,
 } from "../constants.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
+import { parseSessionBase } from "../mux/session-names.ts";
 import { pathExists, readTextFile } from "./fs.ts";
 import { isRecord } from "./guards.ts";
 import {
@@ -600,16 +601,20 @@ function matchesHackSessionName(opts: {
   readonly sessionName: string;
   readonly projectName: string;
 }): boolean {
-  const [sessionBase] = opts.sessionName.split(":");
   const normalizedProject = normalizeSessionToken(opts.projectName);
-  const normalizedSessionBase = normalizeSessionToken(sessionBase ?? "");
-  if (normalizedProject.length === 0 || normalizedSessionBase.length === 0) {
+  const primaryBase = parseSessionBase({ name: opts.sessionName });
+  const legacyBase = opts.sessionName.split(":")[0] ?? "";
+  const normalizedBases = [primaryBase, legacyBase]
+    .map((value) => normalizeSessionToken(value))
+    .filter((value) => value.length > 0);
+  if (normalizedProject.length === 0 || normalizedBases.length === 0) {
     return false;
   }
   return (
     opts.sessionName === opts.projectName ||
+    opts.sessionName.startsWith(`${opts.projectName}--`) ||
     opts.sessionName.startsWith(`${opts.projectName}:`) ||
-    normalizedSessionBase === normalizedProject
+    normalizedBases.includes(normalizedProject)
   );
 }
 

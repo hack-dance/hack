@@ -169,7 +169,7 @@ type SetupMultiLogResult = {
 
 const tmuxSpec = defineCommand({
   name: "tmux",
-  summary: "Configure tmux keybinding for hack session picker",
+  summary: "Install the recommended tmux binding for hack workspaces",
   group: "Agents",
   options: setupTmuxOptions,
   positionals: [],
@@ -372,7 +372,9 @@ async function removeTmuxIntegration(): Promise<number> {
 }
 
 async function installTmuxIntegration(): Promise<number> {
-  logger.info({ message: "Setting up tmux integration for hack sessions..." });
+  logger.info({
+    message: "Setting up the recommended tmux integration for hack sessions...",
+  });
 
   const paths = await resolveTmuxConfigPaths();
   const selectedConfig = await resolveTmuxConfigToEdit({
@@ -396,7 +398,7 @@ async function installTmuxIntegration(): Promise<number> {
 
   // Ask about keybinding
   const keyChoice = await select({
-    message: "Add keybinding for hack session picker?",
+    message: "Add the recommended tmux binding for `hack session`?",
     options: [
       { value: "s", label: "Yes, use prefix + s (recommended)" },
       { value: "S", label: "Yes, use prefix + S (capital S)" },

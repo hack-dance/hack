@@ -202,7 +202,7 @@ Most formatting and common issues are automatically fixed by Biome. Run `bun x u
 <!-- hack:agent-docs:start -->
 ## hack CLI (local dev + MCP)
 
-Use `hack` as the single interface for local runtime orchestration (compose, DNS/TLS, logs, sessions).
+Use `hack` as the single interface for local runtime orchestration (compose, DNS/TLS, logs, persistent project workspaces).
 
 Operating rules:
 - Prefer `hack` over raw `docker` / `docker compose` for project workflows.
@@ -270,12 +270,12 @@ Lifecycle + startup:
 - Use `lifecycle.up.before` for pre-start hooks and `lifecycle.processes` for long-running host tasks.
 - Inspect lifecycle status via `hack projects --details` and stream via `hack logs <service-or-process>`.
 
-Sessions (mux-managed):
-- Picker: `hack session`
-- Start/attach: `hack session start <project>`
-- Force isolated agent session: `hack session start <project> --new --name agent-1`
-- Execute in session: `hack session exec <session> "<command>"`
-- Stop session: `hack session stop <session>`
+Workspaces (mux-managed):
+- Picker: `hack session` for persistent project workspaces.
+- Reuse/create: `hack session start <project>`
+- Force isolated agent workspace: `hack session start <project> --new --name agent-1` (`<project>--agent-1`).
+- Execute in workspace: `hack session exec <workspace> "<command>"`
+- Stop workspace: `hack session stop <workspace>`
 
 Tickets (git-backed):
 - Create: `hack tickets create --title "..." --body-stdin`

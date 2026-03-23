@@ -1,3 +1,9 @@
+## 1.19.0 (2026-03-23)
+
+* Fix daemon status CI regressions ([cf8236c](https://github.com/hack-dance/hack/commit/cf8236c))
+* Merge pull request #23 from hack-dance/symphony/HACK-434-program-runtime-sessions-and-remote-beta-ha ([572ab26](https://github.com/hack-dance/hack/commit/572ab26)), closes [#23](https://github.com/hack-dance/hack/issues/23)
+* feat: harden runtime session and remote beta flows ([f2140de](https://github.com/hack-dance/hack/commit/f2140de))
+
 ## 1.18.0 (2026-03-23)
 
 * Add markdown-backed ticket documents design ([16c49fc](https://github.com/hack-dance/hack/commit/16c49fc))

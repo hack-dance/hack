@@ -4245,6 +4245,10 @@ function detectAuthoritativeFieldConflicts(input: {
   const conflicts: RecordedSyncConflict[] = [];
   const authorityLabel =
     input.authority === "review_required" ? "review-required" : input.authority;
+  const localLinearRemote = findTicketRemoteLink({
+    ticket: input.ticket,
+    provider: "linear",
+  });
   const localTitle = input.ticket.title.trim();
   const remoteTitle = input.issue.title.trim();
   if (localTitle !== remoteTitle) {
@@ -4284,8 +4288,8 @@ function detectAuthoritativeFieldConflicts(input: {
   }
 
   const localProject = normalizeProjectValue({
-    projectId: input.ticket.projectId,
-    projectName: input.ticket.projectName,
+    projectId: input.ticket.projectId ?? localLinearRemote?.projectId,
+    projectName: input.ticket.projectName ?? localLinearRemote?.projectName,
   });
   const remoteProject = normalizeProjectValue({
     projectId: input.issue.projectId,

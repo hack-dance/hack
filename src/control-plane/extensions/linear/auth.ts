@@ -262,12 +262,24 @@ export function resolveLinearAuthSettingsResult(input: {
       availableProfileIds.length > 0
         ? availableProfileIds.join(", ")
         : "(none configured)";
+    const fixLabel = (() => {
+      if (selected.selectedProfileSource === "command_flags") {
+        return `Use one of the available profiles with \`--profile <id>\`, or run \`hack linear connect --profile ${selected.selectedProfileId}\` to create it.`;
+      }
+      if (selected.selectedProfileSource === "project_routing") {
+        return `Update the repo route with \`hack linear setup --profile <id>\` or connect the missing profile with \`hack linear connect --profile ${selected.selectedProfileId}\`.`;
+      }
+      if (selected.selectedProfileSource === "global_default") {
+        return `Switch the global default with \`hack linear use --profile <id>\` or connect the missing profile with \`hack linear connect --profile ${selected.selectedProfileId}\`.`;
+      }
+      return `Connect a profile with \`hack linear connect --profile ${selected.selectedProfileId}\` or choose one with \`hack linear use --profile <id>\`.`;
+    })();
     return {
       ok: false,
       selectedProfileId: selected.selectedProfileId,
       selectedProfileSource: selected.selectedProfileSource,
       availableProfileIds,
-      error: `Linear profile "${selected.selectedProfileId}" (${sourceLabel}) was not found. Available profiles: ${availableLabel}.`,
+      error: `Linear profile "${selected.selectedProfileId}" (${sourceLabel}) was not found. Available profiles: ${availableLabel}. ${fixLabel}`,
     };
   }
 

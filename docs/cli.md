@@ -1601,6 +1601,9 @@ Scope note for `--pr`:
 - It does not imply broader GitHub workflow support such as review submission, standalone PR comments, merge actions, or repo-admin actions.
 - The broader first-class GitHub workflow model lives in the GitHub extension docs and `docs/plans/2026-03-13-github-first-class-workflows-design.md`, and is intentionally sequenced beyond the current `--pr` path.
 
+`--pr` requires GitHub auth to resolve for the selected profile. Set that up with
+`hack x github oauth-connect` or `hack x github connect` before using PR automation.
+
 #### hack dispatch status
 
 Usage: `hack dispatch status <run-id> [--json]`

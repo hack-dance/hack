@@ -165,6 +165,7 @@ Docs:
 
 - [Initialize a project](docs/guides/init-project.md)
 - [CLI reference](docs/cli.md)
+- [GitHub workflows](docs/guides/github-workflows.md)
 
 ## Supporting Capabilities
 
@@ -194,6 +195,7 @@ Integrations make the core promises more usable without changing what Hack is.
 - Agent integrations via `hack setup`
 - MCP for no-shell clients via `hack mcp`
 - Linear as a ticket-normalization extension, not the center of the product
+- GitHub when you want PR automation, PR updates, and private-repo bootstrap help
 
 If your agent has shell access, prefer the CLI. Use MCP only when shell access is unavailable.
 

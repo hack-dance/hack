@@ -28,6 +28,7 @@ Admin model reference:
 ## Integrations & collaboration
 
 - [Integrations overview](integrations.md)
+- [GitHub workflows](guides/github-workflows.md)
 - [Tickets (git-backed)](guides/tickets.md)
 - [Linear integration architecture](guides/linear-integration-architecture.md)
 

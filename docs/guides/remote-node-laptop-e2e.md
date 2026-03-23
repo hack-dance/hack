@@ -131,6 +131,10 @@ Expected:
 
 ### Private repo bootstrap behavior (default, no manual copy)
 
+GitHub is optional for public repos or for private repos when the remote machine already has working
+Git credentials. It becomes required only when Hack needs to supply controller-side credentials for
+private GitHub clone fallback.
+
 Workspace bootstrap now uses this order automatically:
 1. Attempt clone with the remote machine's existing Git credentials.
 2. If clone fails and origin is GitHub, retry with controller GitHub token auth (from `hack x github connect` or `HACK_GITHUB_APP_TOKEN`).

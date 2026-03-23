@@ -4,9 +4,20 @@ import { basename, resolve } from "node:path";
 import type { CommandHandlerFor } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
 import { optPath } from "../cli/options.ts";
+import {
+  DEFAULT_INGRESS_NETWORK,
+  DEFAULT_LOGGING_NETWORK,
+} from "../constants.ts";
 import { findProjectContext, readProjectConfig } from "../lib/project.ts";
 import { exec } from "../lib/shell.ts";
 import { display } from "../ui/display.ts";
+import {
+  buildDoctorRecoveryGuidance,
+  buildRecoveryNextSteps,
+  buildRecoveryWorkflowLines,
+  type DoctorRecoveryGuidance,
+  type RecoveryCheckResult,
+} from "./recovery-guidance.ts";
 
 const DEFAULT_LOG_WINDOW = "45m";
 const DEFAULT_DOCKER_LOG_LINES = 300;
@@ -49,6 +60,17 @@ type CaptureCommandResult = {
   readonly exitCode: number;
   readonly file: string;
   readonly bytes: number;
+};
+
+type CrashCaptureSummary = {
+  readonly captureRoot: string;
+  readonly projectRoot: string | null;
+  readonly commandCount: number;
+  readonly failureCount: number;
+  readonly failedCommands: readonly string[];
+  readonly errors: readonly string[];
+  readonly recovery: DoctorRecoveryGuidance;
+  readonly nextSteps: readonly string[];
 };
 
 type CaptureMetadata = {
@@ -169,6 +191,27 @@ const handleCrashCapture: CommandHandlerFor<typeof crashCaptureSpec> = async ({
     },
   });
 
+  const summary = await buildCrashCaptureSummary({
+    captureRoot,
+    projectRoot: project?.projectRoot ?? null,
+    results,
+    errors,
+  });
+  await writeJsonFile({
+    path: resolve(captureRoot, "summary.json"),
+    value: summary,
+  });
+  await Bun.write(
+    resolve(captureRoot, "README.txt"),
+    renderCrashCaptureReadme({
+      captureRoot,
+      projectRoot: project?.projectRoot ?? null,
+      recovery: summary.recovery,
+      failedCommands: summary.failedCommands,
+    }),
+    { createPath: true }
+  );
+
   await display.kv({
     title: "Crash capture complete",
     entries: [
@@ -254,12 +297,17 @@ async function resolveComposeProject(input: {
   }
 }
 
-function buildBaseCaptureCommands(input: {
+export function buildBaseCaptureCommands(input: {
   readonly projectRoot: string | null;
   readonly logWindow: string;
 }): readonly CaptureCommandSpec[] {
   const projectCommands: CaptureCommandSpec[] = input.projectRoot
     ? [
+        {
+          name: "hack_doctor_project",
+          cmd: ["hack", "doctor", "--path", input.projectRoot],
+          optional: true,
+        },
         {
           name: "hack_ps_project",
           cmd: ["hack", "ps", "--json", "--path", input.projectRoot],
@@ -330,11 +378,36 @@ function buildBaseCaptureCommands(input: {
       optional: true,
     },
     {
+      name: "hack_daemon_logs",
+      cmd: ["hack", "daemon", "logs", "--no-follow"],
+      optional: true,
+    },
+    {
+      name: "hack_global_status",
+      cmd: ["hack", "global", "status", "--json"],
+      optional: true,
+    },
+    {
+      name: "hack_global_logs_caddy",
+      cmd: ["hack", "global", "logs", "caddy", "--no-follow", "--tail", "200"],
+      optional: true,
+    },
+    {
+      name: `docker_network_inspect_${DEFAULT_INGRESS_NETWORK}`,
+      cmd: ["docker", "network", "inspect", DEFAULT_INGRESS_NETWORK],
+      optional: true,
+    },
+    {
+      name: `docker_network_inspect_${DEFAULT_LOGGING_NETWORK}`,
+      cmd: ["docker", "network", "inspect", DEFAULT_LOGGING_NETWORK],
+      optional: true,
+    },
+    {
       name: "ps_orbstack_processes",
       cmd: [
         "/bin/sh",
         "-lc",
-        "ps -Ao pid,ppid,etime,command | rg -i 'orbstack|vz|docker'",
+        "ps -Ao pid,ppid,etime,command | grep -iE 'orbstack|vz|docker' || true",
       ],
       optional: true,
     },
@@ -473,4 +546,394 @@ async function writeJsonFile(input: {
   await Bun.write(input.path, `${JSON.stringify(input.value, null, 2)}\n`, {
     createPath: true,
   });
+}
+
+export async function buildCrashCaptureSummary(input: {
+  readonly captureRoot: string;
+  readonly projectRoot: string | null;
+  readonly results: readonly CaptureCommandResult[];
+  readonly errors: readonly string[];
+}): Promise<CrashCaptureSummary> {
+  const failedCommands = input.results
+    .filter((result) => result.exitCode !== 0)
+    .map((result) => result.name);
+  const recovery = buildDoctorRecoveryGuidance({
+    results: await inferRecoveryCheckResults({ results: input.results }),
+  });
+
+  return {
+    captureRoot: input.captureRoot,
+    projectRoot: input.projectRoot,
+    commandCount: input.results.length,
+    failureCount: failedCommands.length,
+    failedCommands,
+    errors: input.errors,
+    recovery,
+    nextSteps: buildRecoveryNextSteps({
+      guidance: recovery,
+      projectRoot: input.projectRoot,
+      includeClassifyStep: true,
+    }),
+  };
+}
+
+async function inferRecoveryCheckResults(input: {
+  readonly results: readonly CaptureCommandResult[];
+}): Promise<readonly RecoveryCheckResult[]> {
+  const inferred: RecoveryCheckResult[] = [];
+  const seen = new Set<string>();
+
+  for (const result of input.results) {
+    if (!shouldInferRecoveryFromResult({ result })) {
+      continue;
+    }
+
+    const checkResults = await inferRecoveryCheckResult({ result });
+    for (const checkResult of checkResults) {
+      pushRecoveryCheckResult({
+        target: inferred,
+        seen,
+        result: checkResult,
+      });
+    }
+  }
+
+  return inferred;
+}
+
+async function inferRecoveryCheckResult(input: {
+  readonly result: CaptureCommandResult;
+}): Promise<readonly RecoveryCheckResult[]> {
+  const inferred: RecoveryCheckResult[] = [];
+  const seen = new Set<string>();
+  const output = await readCaptureOutput({
+    path: input.result.file,
+  });
+
+  if (output) {
+    pushRecoveryCheckResults({
+      target: inferred,
+      seen,
+      results: inferRecoveryCheckResultsFromOutput({ output }),
+    });
+
+    if (input.result.name === "hack_global_status") {
+      pushRecoveryCheckResults({
+        target: inferred,
+        seen,
+        results: inferRecoveryCheckResultsFromGlobalStatus({ output }),
+      });
+    }
+  }
+
+  if (
+    input.result.name === "hack_global_status" &&
+    input.result.exitCode !== 0 &&
+    inferred.length === 0
+  ) {
+    pushRecoveryCheckResult({
+      target: inferred,
+      seen,
+      result: buildRecoveryFollowUpResult({
+        name: "hack global status",
+        logFile: "hack_global_status.log",
+      }),
+    });
+  }
+
+  if (
+    input.result.name === "hack_daemon_status" &&
+    input.result.exitCode !== 0 &&
+    inferred.length === 0
+  ) {
+    pushRecoveryCheckResult({
+      target: inferred,
+      seen,
+      result: buildRecoveryFollowUpResult({
+        name: "hack daemon status",
+        logFile: "hack_daemon_status.log",
+      }),
+    });
+  }
+
+  if (
+    input.result.name === "hack_doctor_project" &&
+    input.result.exitCode !== 0 &&
+    inferred.length === 0
+  ) {
+    pushRecoveryCheckResult({
+      target: inferred,
+      seen,
+      result: buildRecoveryFollowUpResult({
+        name: "doctor",
+        logFile: "hack_doctor_project.log",
+      }),
+    });
+  }
+
+  return inferred;
+}
+
+async function readCaptureOutput(input: {
+  readonly path: string;
+}): Promise<string | null> {
+  try {
+    return await Bun.file(input.path).text();
+  } catch {
+    return null;
+  }
+}
+
+function shouldInferRecoveryFromResult(input: {
+  readonly result: CaptureCommandResult;
+}): boolean {
+  if (
+    input.result.name === "hack_doctor_project" ||
+    input.result.name === "hack_global_status"
+  ) {
+    return true;
+  }
+
+  return input.result.exitCode !== 0;
+}
+
+function inferRecoveryCheckResultsFromOutput(input: {
+  readonly output: string;
+}): readonly RecoveryCheckResult[] {
+  const inferred: RecoveryCheckResult[] = [];
+
+  if (input.output.includes("hack global up")) {
+    inferred.push({
+      name: "proxy ports",
+      status: "warn",
+      message: "Captured recovery guidance (run: hack global up)",
+    });
+  }
+
+  if (input.output.includes("hack restart")) {
+    inferred.push({
+      name: "caddy hosts",
+      status: "warn",
+      message: "Captured recovery guidance (run: hack restart)",
+    });
+  }
+
+  if (input.output.includes("hack daemon clear")) {
+    inferred.push({
+      name: "daemon",
+      status: "warn",
+      message: "Captured daemon status failure (run: hack daemon clear)",
+    });
+  } else if (input.output.includes("hack daemon start")) {
+    inferred.push({
+      name: "daemon",
+      status: "warn",
+      message: "Captured daemon status failure (run: hack daemon start)",
+    });
+  }
+
+  if (input.output.includes("hack doctor --fix")) {
+    inferred.push({
+      name: "coredns forwarding",
+      status: "warn",
+      message:
+        "Captured configuration repair guidance (run: hack doctor --fix)",
+    });
+  }
+
+  for (const item of extractManualFollowUpItems({ output: input.output })) {
+    const followUp = parseManualFollowUpItem({ item });
+    inferred.push({
+      name: followUp.name,
+      status: "warn",
+      message: followUp.message,
+    });
+  }
+
+  return inferred;
+}
+
+function inferRecoveryCheckResultsFromGlobalStatus(input: {
+  readonly output: string;
+}): readonly RecoveryCheckResult[] {
+  const payload = extractJsonStdoutPayload({ output: input.output });
+  if (!payload || isGlobalStatusHealthy(payload)) {
+    return [];
+  }
+
+  return [
+    {
+      name: "global status",
+      status: "warn",
+      message:
+        "Captured global status reports unhealthy global runtime (run: hack global up)",
+    },
+  ];
+}
+
+function extractManualFollowUpItems(input: {
+  readonly output: string;
+}): readonly string[] {
+  const lines = input.output.split("\n");
+  const items: string[] = [];
+  let inManualFollowUp = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    if (trimmed === "Manual follow-up:") {
+      inManualFollowUp = true;
+      continue;
+    }
+
+    if (!inManualFollowUp) {
+      continue;
+    }
+
+    if (trimmed.length === 0) {
+      break;
+    }
+
+    if (trimmed.endsWith(":") && !trimmed.startsWith("- ")) {
+      break;
+    }
+
+    if (trimmed.startsWith("- ")) {
+      items.push(trimmed.slice(2));
+    }
+  }
+
+  return items;
+}
+
+function parseManualFollowUpItem(input: { readonly item: string }): {
+  readonly name: string;
+  readonly message: string;
+} {
+  const separatorIndex = input.item.indexOf(": ");
+  if (separatorIndex === -1) {
+    return {
+      name: "doctor follow-up",
+      message: input.item,
+    };
+  }
+
+  return {
+    name: input.item.slice(0, separatorIndex),
+    message: input.item.slice(separatorIndex + 2),
+  };
+}
+
+function extractJsonStdoutPayload(input: {
+  readonly output: string;
+}): unknown | null {
+  const stdoutMarker = "## stdout\n";
+  const stdoutIndex = input.output.indexOf(stdoutMarker);
+  if (stdoutIndex === -1) {
+    return null;
+  }
+
+  const contentStart = stdoutIndex + stdoutMarker.length;
+  const stderrIndex = input.output.indexOf("\n\n## stderr", contentStart);
+  const rawJson =
+    stderrIndex === -1
+      ? input.output.slice(contentStart)
+      : input.output.slice(contentStart, stderrIndex);
+  const text = rawJson.trim();
+  if (text.length === 0) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function isGlobalStatusHealthy(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object") {
+    return true;
+  }
+
+  const summary = Reflect.get(payload, "summary");
+  if (!summary || typeof summary !== "object") {
+    return true;
+  }
+
+  return Reflect.get(summary, "ok") === true;
+}
+
+function buildRecoveryFollowUpResult(input: {
+  readonly name: string;
+  readonly logFile: string;
+}): RecoveryCheckResult {
+  return {
+    name: input.name,
+    status: "warn",
+    message: `Review ${input.logFile} for detailed recovery guidance`,
+  };
+}
+
+function pushRecoveryCheckResults(input: {
+  readonly target: RecoveryCheckResult[];
+  readonly seen: Set<string>;
+  readonly results: readonly RecoveryCheckResult[];
+}): void {
+  for (const result of input.results) {
+    pushRecoveryCheckResult({
+      target: input.target,
+      seen: input.seen,
+      result,
+    });
+  }
+}
+
+function pushRecoveryCheckResult(input: {
+  readonly target: RecoveryCheckResult[];
+  readonly seen: Set<string>;
+  readonly result: RecoveryCheckResult;
+}): void {
+  const key = `${input.result.name}\u0000${input.result.message}`;
+  if (input.seen.has(key)) {
+    return;
+  }
+
+  input.seen.add(key);
+  input.target.push(input.result);
+}
+
+export function renderCrashCaptureReadme(input: {
+  readonly captureRoot: string;
+  readonly projectRoot: string | null;
+  readonly recovery: DoctorRecoveryGuidance;
+  readonly failedCommands: readonly string[];
+}): string {
+  const projectRoot = input.projectRoot ?? "<repo>";
+  const failedCommands =
+    input.failedCommands.length > 0
+      ? input.failedCommands.map((command) => `- ${command}`)
+      : ["- none"];
+
+  return [
+    "Crash capture bundle",
+    "",
+    `Location: ${input.captureRoot}`,
+    `Project root: ${projectRoot}`,
+    "",
+    "Read in this order:",
+    "- summary.json",
+    "- commands.json",
+    "- *.log command captures",
+    "",
+    "Failed commands:",
+    ...failedCommands,
+    "",
+    "Suggested recovery flow:",
+    ...buildRecoveryWorkflowLines({
+      guidance: input.recovery,
+      projectRoot: input.projectRoot,
+      includeClassifyStep: true,
+    }),
+  ].join("\n");
 }

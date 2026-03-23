@@ -1,34 +1,11 @@
 import { afterAll, beforeEach, expect, mock, test } from "bun:test";
 
-const statusQueue: Array<{
-  readonly running: boolean;
-  readonly pid: number | null;
-  readonly socketExists: boolean;
-  readonly logExists: boolean;
-}> = [];
-const execCalls: string[][] = [];
+const readControlPlaneConfigMock = mock(async () => {
+  throw new Error("should not attempt daemon autostart");
+});
 
 mock.module("../src/control-plane/sdk/config.ts", () => ({
-  readControlPlaneConfig: async () => ({
-    config: {
-      tickets: {
-        git: {
-          enabled: true,
-          branch: "hack/tickets",
-          remote: "origin",
-          forceBareClone: false,
-          refMode: "hidden",
-        },
-      },
-      daemon: {
-        autoStart: true,
-        launchd: {
-          runAtLoad: true,
-          guiSessionOnly: true,
-        },
-      },
-    },
-  }),
+  readControlPlaneConfig: readControlPlaneConfigMock,
 }));
 
 mock.module("../src/lib/hack-cli.ts", () => ({
@@ -39,10 +16,11 @@ mock.module("../src/lib/hack-cli.ts", () => ({
 }));
 
 mock.module("../src/lib/shell.ts", () => ({
-  exec: async (cmd: readonly string[]) => {
-    execCalls.push([...cmd]);
-    return { exitCode: 0, stdout: "", stderr: "" };
-  },
+  exec: async () => ({
+    exitCode: 0,
+    stdout: "",
+    stderr: "",
+  }),
 }));
 
 mock.module("../src/daemon/launchd.ts", () => ({
@@ -53,7 +31,7 @@ mock.module("../src/daemon/launchd.ts", () => ({
     pid: null,
     exitStatus: null,
   }),
-  installLaunchdService: async () => ({ ok: true, alreadyInstalled: false }),
+  installLaunchdService: async () => ({ ok: true }),
   kickstartLaunchdService: async () => ({ ok: true }),
 }));
 
@@ -67,74 +45,34 @@ mock.module("../src/daemon/paths.ts", () => ({
   }),
 }));
 
-mock.module("../src/daemon/status.ts", () => ({
-  readDaemonStatus: async () =>
-    statusQueue.shift() ?? {
-      running: true,
-      pid: 456,
-      socketExists: true,
-      logExists: true,
-    },
+const readDaemonStatusMock = mock(async () => ({
+  running: false,
+  pid: null,
+  socketExists: false,
+  logExists: false,
 }));
 
-const originalFetch = globalThis.fetch;
+mock.module("../src/daemon/status.ts", () => ({
+  readDaemonStatus: readDaemonStatusMock,
+}));
 
 import { requestDaemonJson } from "../src/daemon/client.ts";
 
 beforeEach(() => {
-  statusQueue.length = 0;
-  execCalls.length = 0;
-  globalThis.fetch = originalFetch;
+  readControlPlaneConfigMock.mockClear();
+  readDaemonStatusMock.mockClear();
 });
 
 afterAll(() => {
-  globalThis.fetch = originalFetch;
   mock.restore();
 });
 
-test("requestDaemonJson auto-repairs stale daemon state before retrying", async () => {
-  statusQueue.push(
-    {
-      running: false,
-      pid: 123,
-      socketExists: true,
-      logExists: false,
-    },
-    {
-      running: true,
-      pid: 456,
-      socketExists: true,
-      logExists: true,
-    }
-  );
-
-  const responses = [
-    new Response(JSON.stringify({ status: "ok", version: "1.17.1" }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    }),
-    new Response(JSON.stringify({ status: "ok", projects: [] }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    }),
-  ];
-
-  globalThis.fetch = (async () => {
-    const next = responses.shift();
-    if (!next) {
-      throw new Error("unexpected fetch");
-    }
-    return next;
-  }) as unknown as typeof globalThis.fetch;
-
+test("requestDaemonJson skips daemon autostart when autoStart is false", async () => {
   const response = await requestDaemonJson({
-    path: "/v1/projects",
+    path: "/v1/metrics",
+    autoStart: false,
   });
 
-  expect(execCalls).toEqual(
-    process.platform === "darwin" ? [] : [["hack", "daemon", "start"]]
-  );
-  expect(response).not.toBeNull();
-  expect(response?.ok).toBe(true);
-  expect(response?.json).toEqual({ status: "ok", projects: [] });
+  expect(response).toBeNull();
+  expect(readControlPlaneConfigMock).not.toHaveBeenCalled();
 });

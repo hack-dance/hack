@@ -326,6 +326,12 @@ Response:
 | `runtime_last_ok_at` | string or null | Last successful runtime check |
 | `runtime_reset_at` | string or null | Last detected runtime reset |
 | `runtime_reset_count` | number | Runtime reset counter |
+| `runtime_reset_summary` | string or null | Summary of what changed during the most recent reset |
+| `runtime_reset_changes` | string[] | Machine-readable reset drift fields |
+| `runtime_last_repair_at` | string or null | Last bounded auto-repair attempt timestamp |
+| `runtime_repair_action` | string or null | Last auto-repair action hackd attempted |
+| `runtime_repair_outcome` | string or null | `stabilized` or `manual_action_required` |
+| `runtime_next_step` | string or null | Guided next step when auto-repair cannot finish safely |
 
 ### GET /v1/projects
 
@@ -359,6 +365,12 @@ Response:
 | `runtime_last_ok_at` | string or null | Last successful runtime check |
 | `runtime_reset_at` | string or null | Last detected runtime reset |
 | `runtime_reset_count` | number | Runtime reset counter |
+| `runtime_reset_summary` | string or null | Summary of what changed during the most recent reset |
+| `runtime_reset_changes` | string[] | Machine-readable reset drift fields |
+| `runtime_last_repair_at` | string or null | Last bounded auto-repair attempt timestamp |
+| `runtime_repair_action` | string or null | Last auto-repair action hackd attempted |
+| `runtime_repair_outcome` | string or null | `stabilized` or `manual_action_required` |
+| `runtime_next_step` | string or null | Guided next step when auto-repair cannot finish safely |
 | `projects` | ProjectView[] | Gateway-enabled projects only |
 
 ### GET /v1/ps
@@ -386,6 +398,12 @@ Response:
 | `runtime_last_ok_at` | string or null | Last successful runtime check |
 | `runtime_reset_at` | string or null | Last detected runtime reset |
 | `runtime_reset_count` | number | Runtime reset counter |
+| `runtime_reset_summary` | string or null | Summary of what changed during the most recent reset |
+| `runtime_reset_changes` | string[] | Machine-readable reset drift fields |
+| `runtime_last_repair_at` | string or null | Last bounded auto-repair attempt timestamp |
+| `runtime_repair_action` | string or null | Last auto-repair action hackd attempted |
+| `runtime_repair_outcome` | string or null | `stabilized` or `manual_action_required` |
+| `runtime_next_step` | string or null | Guided next step when auto-repair cannot finish safely |
 | `items` | PsItem[] | `docker compose ps` style rows |
 
 ### POST /control-plane/projects/:projectId/jobs

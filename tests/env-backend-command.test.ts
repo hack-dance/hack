@@ -54,9 +54,18 @@ test(
     const json = JSON.parse(result.stdout) as {
       readonly backend: string;
       readonly encrypted_file: { readonly path: string };
+      readonly status: {
+        readonly storage_mode: string;
+        readonly trust_model: string;
+        readonly portability: string;
+        readonly plaintext_compatibility: string;
+      };
     };
     expect(json.backend).toBe("keychain");
     expect(json.encrypted_file.path).toBe("~/.hack/secrets.enc.json");
+    expect(json.status.storage_mode).toContain("Encrypted OS-managed");
+    expect(json.status.trust_model).toBe("Machine-local secret custody");
+    expect(json.status.plaintext_compatibility).toContain(".hack/.env");
   },
   { timeout: 20_000 }
 );
@@ -272,11 +281,172 @@ test(
         readonly key: string;
         readonly value: string | null;
         readonly source: string;
+        readonly storage: {
+          readonly kind: string;
+          readonly backend: string;
+          readonly location: string;
+          readonly mode: string;
+        };
       }>;
     };
     const apiKey = listJson.vars.find((entry) => entry.key === "API_KEY");
     expect(apiKey?.source).toBe("keychain");
+    expect(apiKey?.storage.kind).toBe("secret");
+    expect(apiKey?.storage.backend).toBe("encrypted_file");
+    expect(apiKey?.storage.mode).toBe("native");
     expect(apiKey?.value).toBe("super-secret");
+
+    const listTextResult = await runHack({
+      args: ["env", "list", "--show-secrets"],
+      env: {
+        ...process.env,
+        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
+        HACK_SECRETS_FILE_KEY: "env-backend-command-key",
+      },
+      cwd: projectRoot,
+    });
+    expect(listTextResult.exitCode).toBe(0);
+    expect(listTextResult.stdout).toContain("API_KEY\toptional\tkeychain\t");
+    expect(listTextResult.stdout).toContain("secret:encrypted_file");
+  },
+  { timeout: 40_000 }
+);
+
+test(
+  "env list json exposes compatibility mode and local-only portable status",
+  async () => {
+    if (!tempDir) {
+      throw new Error("Missing temp dir");
+    }
+    process.env.HACK_SECRETS_FILE_KEY = "env-backend-command-key";
+    const projectRoot = resolve(tempDir, "repo-list");
+    const projectDir = resolve(projectRoot, ".hack");
+    await mkdir(projectDir, { recursive: true });
+    await writeFile(
+      resolve(projectDir, "docker-compose.yml"),
+      "services: {}\n"
+    );
+    await writeFile(
+      resolve(projectDir, "hack.config.json"),
+      `${JSON.stringify(
+        {
+          name: "env-list-project",
+          controlPlane: {
+            secrets: {
+              backend: "cloud",
+              encryptedFile: {
+                path: resolve(tempDir, "cloud-shim.enc.json"),
+              },
+              cloud: {
+                provider: "aws",
+                project: "dev-account",
+                secretPrefix: "hack",
+              },
+            },
+          },
+        },
+        null,
+        2
+      )}\n`
+    );
+    await writeFile(
+      resolve(projectDir, "hack.env.json"),
+      `${JSON.stringify(
+        {
+          version: 1,
+          vars: [
+            {
+              key: "PUBLIC_URL",
+              required: true,
+              source: "plain_env",
+            },
+            {
+              key: "DATABASE_URL",
+              required: true,
+              source: "keychain",
+            },
+          ],
+        },
+        null,
+        2
+      )}\n`
+    );
+    await writeFile(
+      resolve(projectDir, ".env"),
+      "PUBLIC_URL=https://example.test\n"
+    );
+
+    const result = await runHack({
+      args: ["env", "list", "--json"],
+      env: {
+        ...process.env,
+        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
+        HACK_SECRETS_FILE_KEY: "env-backend-command-key",
+      },
+      cwd: projectRoot,
+    });
+    expect(result.exitCode).toBe(1);
+
+    const json = JSON.parse(result.stdout) as {
+      readonly storage: {
+        readonly local_plaintext: {
+          readonly path: string;
+          readonly exists: boolean;
+        };
+        readonly local_secrets: {
+          readonly backend: string;
+          readonly mode: string;
+          readonly trust_model: string;
+        };
+        readonly portable_state: {
+          readonly status: string;
+          readonly trust_model: string;
+          readonly message: string;
+        };
+        readonly compatibility_mode: {
+          readonly plaintext_target: string;
+          readonly secret_backend: string;
+          readonly summary: string;
+        };
+      };
+      readonly vars: ReadonlyArray<{
+        readonly key: string;
+        readonly storage: {
+          readonly kind: string;
+          readonly backend: string;
+          readonly location: string;
+          readonly mode: string;
+        };
+      }>;
+      readonly missing_required: readonly string[];
+    };
+
+    expect(json.storage.local_plaintext.exists).toBe(true);
+    expect(json.storage.compatibility_mode.plaintext_target).toContain(
+      ".hack/.env"
+    );
+    expect(json.storage.compatibility_mode.secret_backend).toBe("cloud");
+    expect(json.storage.compatibility_mode.summary).toContain(
+      "configured secret backend"
+    );
+    expect(json.storage.local_secrets.mode).toBe("shim");
+    expect(json.storage.local_secrets.trust_model).toBe(
+      "local_secret_backend_shim"
+    );
+    expect(json.storage.portable_state.status).toBe("not_configured");
+    expect(json.storage.portable_state.trust_model).toBe("local_only");
+    expect(json.storage.portable_state.message).toContain(
+      "not portable across machines"
+    );
+    const publicUrl = json.vars.find((entry) => entry.key === "PUBLIC_URL");
+    const databaseUrl = json.vars.find((entry) => entry.key === "DATABASE_URL");
+    expect(publicUrl?.storage.kind).toBe("plaintext");
+    expect(publicUrl?.storage.backend).toBe("dotenv");
+    expect(publicUrl?.storage.location).toContain(".hack/.env");
+    expect(databaseUrl?.storage.kind).toBe("secret");
+    expect(databaseUrl?.storage.backend).toBe("cloud");
+    expect(databaseUrl?.storage.mode).toBe("shim");
+    expect(json.missing_required).toContain("DATABASE_URL");
   },
   { timeout: 40_000 }
 );

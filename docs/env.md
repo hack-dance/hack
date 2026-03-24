@@ -36,6 +36,13 @@ Current status:
 - Local values and local secrets are not automatically portable across machines.
 - Remote env portability is a follow-on design, not the current default.
 
+Compatibility plan:
+
+- Keep `.hack/.env` as the local plaintext compatibility target for non-secret values so existing `.env`-style developer workflows remain viable.
+- Keep the configured secret backend as the local compatibility target for secret values instead of flattening secrets into `.hack/.env`.
+- Make `hack env` report both the compatibility targets and the current trust model explicitly, rather than implying portability from backend names alone.
+- Treat portable env as an additive canonical layer that can materialize back into `.hack/.env` and the configured secret backend, not as a replacement for local runtime injection.
+
 Planned direction:
 
 - Portable env values will live in an immutable encrypted bundle artifact.
@@ -289,7 +296,7 @@ The eventual CLI and desktop UX should explain which state the operator is in:
 
 - `hack env list [--json] [--show-secrets]`
   - shows contract + resolution state
-  - includes a storage summary for the committed contract, local `.hack/.env`, ambient `process.env` fallback, configured secret backend mode, and current portable-state status
+  - includes a storage summary for the committed contract, local `.hack/.env`, ambient `process.env` fallback, configured secret backend mode, compatibility materialization targets, and current portable-state status
   - exits `1` if required vars are missing
 - `hack env set KEY=VALUE`
   - writes to `.hack/.env`
@@ -298,7 +305,7 @@ The eventual CLI and desktop UX should explain which state the operator is in:
 - `hack env unset KEY`
   - removes from `.hack/.env` and deletes the secret backend entry (best-effort)
 - `hack env backend status [--json]`
-  - shows configured global backend strategy (`controlPlane.secrets`)
+  - shows configured global backend strategy (`controlPlane.secrets`) plus storage-mode, trust-model, portability, and `.env` compatibility guidance
 - `hack env backend use <keychain|encrypted_file|cloud> [--store-path <path>] [--provider <aws|gcp|azure|vault>] [--secret-project <id>] [--secret-prefix <prefix>]`
   - sets global backend strategy for multi-node/env secret storage
 
@@ -309,6 +316,13 @@ Notes:
 - Encrypted-file mode uses `HACK_SECRETS_FILE_KEY` (if set) before keychain key lookup (`hack-secrets-backend/encrypted-file-key`).
 - If you keep getting macOS keychain prompts in encrypted-file mode, set `HACK_SECRETS_FILE_KEY` in your shell/`.env.local` and restart `hackd`.
 - `cloud` mode currently uses provider-scoped shim storage to validate adapter contracts before provider-native transports land.
+
+Recommended user-facing language:
+
+- **Plaintext** means a value that can live in `.hack/.env` for local compatibility and may also fall back from `process.env`.
+- **Encrypted** means a value stored through the configured secret backend, such as OS keychain or encrypted-file storage.
+- **Cloud backend** currently means provider-targeted intent with local encrypted custody today, not automatic remote publication of decryptable project env values.
+- **Portable env not configured** means local workflows still work, but values remain machine-local until explicit encrypted bundle flows are introduced and activated.
 
 ## Backend Strategy Contract (`controlPlane.secrets`)
 

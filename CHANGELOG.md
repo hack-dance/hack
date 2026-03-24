@@ -1,3 +1,12 @@
+## <small>1.21.3 (2026-03-24)</small>
+
+* fix(env): support multiline values and project-relative secret paths ([78d0860](https://github.com/hack-dance/hack/commit/78d0860))
+* Merge branch 'main' into codex/define-env-key-rotation-and-recovery-flows-16o779 ([1dee32d](https://github.com/hack-dance/hack/commit/1dee32d))
+* Merge branch 'main' into codex/define-env-key-rotation-and-recovery-flows-16o779 ([edf8091](https://github.com/hack-dance/hack/commit/edf8091))
+* Merge branch 'main' into codex/define-env-key-rotation-and-recovery-flows-16o779 ([401ef6a](https://github.com/hack-dance/hack/commit/401ef6a))
+* Merge pull request #29 from hack-dance/codex/define-env-key-rotation-and-recovery-flows-16o779 ([408f664](https://github.com/hack-dance/hack/commit/408f664)), closes [#29](https://github.com/hack-dance/hack/issues/29)
+* docs: clarify portable env recovery flows ([5bb98db](https://github.com/hack-dance/hack/commit/5bb98db))
+
 ## <small>1.21.2 (2026-03-24)</small>
 
 * Merge branch 'main' into codex/linear-mention-hack-462-preserve-.env-compatibility-whil-6icfe6 ([7e821e4](https://github.com/hack-dance/hack/commit/7e821e4))

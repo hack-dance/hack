@@ -531,6 +531,10 @@ test("tickets store ignores duplicate sync checkpoints with the same idempotency
     actor: "sync@app",
   });
   expect(first.ok).toBe(true);
+  if (!first.ok) {
+    throw new Error(first.error);
+  }
+  expect(first.recorded).toBe(true);
 
   const second = await store.recordSyncCheckpoint({
     ticketId: created.ticket.ticketId,
@@ -542,6 +546,10 @@ test("tickets store ignores duplicate sync checkpoints with the same idempotency
     actor: "sync@app",
   });
   expect(second.ok).toBe(true);
+  if (!second.ok) {
+    throw new Error(second.error);
+  }
+  expect(second.recorded).toBe(false);
 
   const detail = await store.getTicketDetail({
     ticketId: created.ticket.ticketId,

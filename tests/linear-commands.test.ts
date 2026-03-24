@@ -1812,6 +1812,125 @@ test("syncIssueFromLinearToTicket records review-required conflicts for dual-hom
   expect(updatedTickets[0]?.source).toBeUndefined();
 });
 
+test("syncIssueFromLinearToTicket reports noop when the local store deduplicates a rerun", async () => {
+  const updatedTickets: Record<string, unknown>[] = [];
+  const statusChanges: string[] = [];
+
+  const runtime = {
+    profileId: "default",
+    apiUrl: "https://api.linear.app/graphql",
+    projectBinding: {
+      additionalProjects: [],
+    },
+    tickets: {
+      listTickets: async () => [
+        {
+          ticketId: "T-00007",
+          title: "Linear title",
+          body: "Linear body",
+          status: "done" as const,
+          createdAt: "2026-03-05T10:00:00.000Z",
+          updatedAt: "2026-03-05T10:00:00.000Z",
+          dependsOn: [],
+          blocks: [],
+          owner: "linear",
+          source: "linear",
+          assignee: "Remote Owner",
+          tags: [],
+          externalSystem: "linear",
+          externalId: "issue-7",
+          externalKey: "ENG-777",
+          externalUrl: "https://linear.app/issue/ENG-777",
+          externalProjectId: "proj-remote",
+          externalProjectName: "Remote Project",
+          externalTeamId: "team-1",
+        },
+      ],
+      updateTicket: async (input: Record<string, unknown>) => {
+        updatedTickets.push(input);
+        return { ok: true as const, changed: false };
+      },
+      setStatus: async (input: { readonly status: string }) => {
+        statusChanges.push(input.status);
+        return { ok: true as const, changed: false };
+      },
+      createTicket: async () => {
+        throw new Error("createTicket should not be called");
+      },
+      getTicket: async () => null,
+      getTicketDetail: async () => createEmptyTicketDetail(),
+      appendComment: async () => {
+        throw new Error("appendComment should not be called");
+      },
+      recordSyncCheckpoint: async () => ({
+        ok: true as const,
+        recorded: false,
+        checkpoint: {
+          checkpointId: "checkpoint-7",
+          ticketId: "T-00007",
+          provider: "linear",
+          direction: "linear_to_hack",
+          actor: "test",
+          createdAt: "2026-03-05T10:10:00.000Z",
+        },
+      }),
+      recordSyncConflict: async () => {
+        throw new Error("recordSyncConflict should not be called");
+      },
+    },
+    linear: {
+      getIssueById: async () => ({ ok: true as const, data: null }),
+      getIssueByIdentifier: async () => ({
+        ok: true as const,
+        data: {
+          id: "issue-7",
+          identifier: "ENG-777",
+          title: "Linear title",
+          description: "Linear body",
+          url: "https://linear.app/issue/ENG-777",
+          state: {
+            id: "state-7",
+            name: "Done",
+            type: "completed" as const,
+          },
+          teamId: "team-1",
+          projectId: "proj-remote",
+          projectName: "Remote Project",
+          assigneeDisplayName: "Remote Owner",
+          labels: [],
+        },
+      }),
+      listIssueComments: async () => ({
+        ok: true as const,
+        data: [],
+      }),
+    },
+  };
+
+  const result = await __testOnly.syncIssueFromLinearToTicket({
+    runtime,
+    issueIdentifier: "ENG-777",
+    syncToggles: {
+      labels: false,
+      statuses: true,
+      dependencies: false,
+      projects: true,
+    },
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  expect(result.operation).toBe("noop");
+  expect(result.commentsPulled).toBe(0);
+  expect(result.conflictsRecorded).toBe(0);
+  expect(result.checkpointRecorded).toBe(false);
+  expect(updatedTickets).toHaveLength(1);
+  expect(statusChanges).toEqual(["done"]);
+});
+
 test("syncTicketToLinearIssue pushes missing local comments and records a checkpoint", async () => {
   const pushedBodies: string[] = [];
   const checkpoints: string[] = [];
@@ -2711,6 +2830,7 @@ test("runProjectLinearAutosync syncs issue and project deliveries, then applies 
   const issueSyncCalls: Array<{ issueIdentifier?: string; issueId?: string }> =
     [];
   const projectSyncCalls: string[][] = [];
+  const syncSteps: string[] = [];
 
   const result = await __testOnly.runProjectLinearAutosync({
     binding: {
@@ -2789,6 +2909,7 @@ test("runProjectLinearAutosync syncs issue and project deliveries, then applies 
         },
       }),
       syncIssue: async ({ delivery }) => {
+        syncSteps.push(`sync-issue:${delivery.id}`);
         issueSyncCalls.push({
           issueIdentifier: delivery.issueIdentifier,
           issueId: delivery.issueId,
@@ -2804,6 +2925,7 @@ test("runProjectLinearAutosync syncs issue and project deliveries, then applies 
         };
       },
       syncProject: async ({ projectIds }) => {
+        syncSteps.push(`sync-project:${projectIds.join(",")}`);
         projectSyncCalls.push([...projectIds]);
         return {
           ok: true as const,
@@ -2816,7 +2938,12 @@ test("runProjectLinearAutosync syncs issue and project deliveries, then applies 
           checkpointsRecorded: 3,
         };
       },
+      syncLocalState: async ({ deliveryIds }) => {
+        syncSteps.push(`sync-local:${deliveryIds.join(",")}`);
+        return { ok: true as const };
+      },
       applyDelivery: async ({ deliveryId }) => {
+        syncSteps.push(`apply:${deliveryId}`);
         appliedDeliveryIds.push(deliveryId);
         return {
           ok: true as const,
@@ -2843,6 +2970,13 @@ test("runProjectLinearAutosync syncs issue and project deliveries, then applies 
   ]);
   expect(projectSyncCalls).toEqual([["proj-default"]]);
   expect(appliedDeliveryIds).toEqual(["delivery-issue", "delivery-project"]);
+  expect(syncSteps).toEqual([
+    "sync-issue:delivery-issue",
+    "sync-project:proj-default",
+    "sync-local:delivery-issue,delivery-project",
+    "apply:delivery-issue",
+    "apply:delivery-project",
+  ]);
   expect(result.subscribedRoutes).toBe(1);
   expect(result.processedDeliveries).toBe(2);
   expect(result.appliedDeliveries).toBe(2);
@@ -2852,6 +2986,137 @@ test("runProjectLinearAutosync syncs issue and project deliveries, then applies 
   expect(result.updated).toBe(3);
   expect(result.commentsPulled).toBe(5);
   expect(result.checkpointsRecorded).toBe(4);
+});
+
+test("runProjectLinearAutosync leaves deliveries pending when local sync fails", async () => {
+  const appliedDeliveryIds: string[] = [];
+  const syncLocalCalls: string[][] = [];
+
+  const result = await __testOnly.runProjectLinearAutosync({
+    binding: {
+      profileId: "work",
+      projectId: "proj-default",
+      projectName: "Default",
+      teamId: "team-default",
+      additionalProjects: [],
+    },
+    syncToggles: {
+      labels: false,
+      statuses: true,
+      dependencies: true,
+      projects: true,
+    },
+    deps: {
+      createRuntime: async ({ profileId }) => ({
+        ok: true as const,
+        value: {
+          profileId: profileId ?? "work",
+        },
+      }),
+      listSubscriptions: async ({ profileId, projectId }) => ({
+        ok: true as const,
+        data: {
+          profileId,
+          subscriptions: [
+            {
+              id: "sub-default",
+              profileId,
+              projectId,
+              teamId: "team-default",
+              mode: "auto_apply" as const,
+              status: "active" as const,
+            },
+          ],
+        },
+      }),
+      listDeliveries: async ({ profileId, projectId }) => ({
+        ok: true as const,
+        data: {
+          profileId,
+          status: "pending",
+          deliveries: [
+            {
+              id: "delivery-issue",
+              status: "pending",
+              profileId,
+              projectId,
+              teamId: "team-default",
+              issueIdentifier: "ENG-101",
+            },
+            {
+              id: "delivery-project",
+              status: "pending",
+              profileId,
+              projectId,
+              teamId: "team-default",
+            },
+          ],
+        },
+      }),
+      syncIssue: async ({ delivery }) => ({
+        ok: true as const,
+        operation: "noop" as const,
+        ticketId: "T-00101",
+        issueIdentifier: delivery.issueIdentifier ?? "ENG-101",
+        commentsPulled: 0,
+        conflictsRecorded: 0,
+        checkpointRecorded: false,
+      }),
+      syncProject: async ({ projectIds }) => ({
+        ok: true as const,
+        projectIds,
+        processed: 0,
+        created: 0,
+        updated: 0,
+        commentsPulled: 0,
+        conflictsRecorded: 0,
+        checkpointsRecorded: 0,
+      }),
+      syncLocalState: async ({ deliveryIds }) => {
+        syncLocalCalls.push([...deliveryIds]);
+        return {
+          ok: false as const,
+          error: "git sync failed",
+        };
+      },
+      applyDelivery: async ({ deliveryId }) => {
+        appliedDeliveryIds.push(deliveryId);
+        return {
+          ok: true as const,
+          data: {
+            deliveryId,
+            status: "applied",
+          },
+        };
+      },
+      claimedBy: "local-test-runner",
+    },
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  expect(syncLocalCalls).toEqual([["delivery-issue", "delivery-project"]]);
+  expect(appliedDeliveryIds).toEqual([]);
+  expect(result.appliedDeliveries).toBe(0);
+  expect(result.failedDeliveries).toBe(2);
+  expect(result.deliveries).toEqual([
+    expect.objectContaining({
+      deliveryId: "delivery-issue",
+      mode: "issue",
+      status: "failed",
+      ticketId: "T-00101",
+      reason: "git sync failed",
+    }),
+    expect.objectContaining({
+      deliveryId: "delivery-project",
+      mode: "project",
+      status: "failed",
+      reason: "git sync failed",
+    }),
+  ]);
 });
 
 test("parseProjectDocumentsArgs parses verb and shared routing flags", () => {

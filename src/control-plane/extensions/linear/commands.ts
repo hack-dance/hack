@@ -1586,6 +1586,13 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
               limit,
               syncToggles,
             }),
+          syncLocalState: async ({ runtime }) => {
+            const synced = await (runtime as SyncRuntime).tickets.sync();
+            if (!synced.ok) {
+              return { ok: false as const, error: synced.error };
+            }
+            return { ok: true as const };
+          },
           applyDelivery: async ({ profileId, deliveryId, claimedBy }) =>
             await applyLinearDelivery({
               controlPlaneConfig: ctx.controlPlaneConfig,
@@ -4170,7 +4177,7 @@ interface RecordedSyncConflict {
 
 type SyncTicketFromLinearSuccess = {
   readonly ok: true;
-  readonly operation: "created" | "updated";
+  readonly operation: "created" | "updated" | "noop";
   readonly ticketId: string;
   readonly issueIdentifier: string;
   readonly commentsPulled: number;
@@ -4722,7 +4729,7 @@ async function recordLinearSyncCheckpoint(input: {
   if (!checkpoint.ok) {
     return { ok: false, error: checkpoint.error };
   }
-  return { ok: true, checkpointRecorded: true };
+  return { ok: true, checkpointRecorded: checkpoint.recorded ?? true };
 }
 
 async function resolveTicketAssigneeForLinear(input: {
@@ -4883,6 +4890,32 @@ type LinearAutosyncRunSuccess = {
   readonly deliveries: readonly LinearAutosyncRunDeliveryOutcome[];
 };
 
+function buildLinearAutosyncRunDeliveryOutcome(input: {
+  readonly delivery: LinearDeliverySummary;
+  readonly profileId: string;
+  readonly mode: "issue" | "project";
+  readonly status: "applied" | "skipped" | "failed";
+  readonly ticketId?: string;
+  readonly reason?: string;
+}): LinearAutosyncRunDeliveryOutcome {
+  return {
+    deliveryId: input.delivery.id,
+    profileId: input.profileId,
+    ...(input.delivery.projectId
+      ? { projectId: input.delivery.projectId }
+      : {}),
+    ...(input.delivery.teamId ? { teamId: input.delivery.teamId } : {}),
+    ...(input.delivery.issueId ? { issueId: input.delivery.issueId } : {}),
+    ...(input.delivery.issueIdentifier
+      ? { issueIdentifier: input.delivery.issueIdentifier }
+      : {}),
+    mode: input.mode,
+    status: input.status,
+    ...(input.ticketId ? { ticketId: input.ticketId } : {}),
+    ...(input.reason ? { reason: input.reason } : {}),
+  };
+}
+
 type LinearAutosyncSubscriptionSummary = {
   readonly id: string;
   readonly profileId: string;
@@ -4955,6 +4988,15 @@ type ProjectLinearAutosyncDeps<TRuntime> = {
         readonly checkpointsRecorded: number;
       }
     | { readonly ok: false; readonly error: string }
+  >;
+  readonly syncLocalState: (input: {
+    readonly runtime: TRuntime;
+    readonly profileId: string;
+    readonly projectId: string;
+    readonly teamId?: string;
+    readonly deliveryIds: readonly string[];
+  }) => Promise<
+    { readonly ok: true } | { readonly ok: false; readonly error: string }
   >;
   readonly applyDelivery: (input: {
     readonly profileId: string;
@@ -5565,6 +5607,11 @@ async function runProjectLinearAutosync<TRuntime>(input: {
 
     const issueDeliveryGroups = new Map<string, LinearDeliverySummary[]>();
     const projectDeliveries: LinearDeliverySummary[] = [];
+    const readyToApply: Array<{
+      readonly delivery: LinearDeliverySummary;
+      readonly mode: "issue" | "project";
+      readonly ticketId?: string;
+    }> = [];
     for (const delivery of listedDeliveries.data.deliveries) {
       const issueIdentifier = readOptionalString(delivery.issueIdentifier);
       const issueId = readOptionalString(delivery.issueId);
@@ -5594,88 +5641,35 @@ async function runProjectLinearAutosync<TRuntime>(input: {
       if (!synced.ok) {
         failedDeliveries += groupedDeliveries.length;
         deliveries.push(
-          ...groupedDeliveries.map((groupedDelivery) => ({
-            deliveryId: groupedDelivery.id,
-            profileId,
-            ...(groupedDelivery.projectId
-              ? { projectId: groupedDelivery.projectId }
-              : {}),
-            ...(groupedDelivery.teamId
-              ? { teamId: groupedDelivery.teamId }
-              : {}),
-            ...(groupedDelivery.issueId
-              ? { issueId: groupedDelivery.issueId }
-              : {}),
-            ...(groupedDelivery.issueIdentifier
-              ? { issueIdentifier: groupedDelivery.issueIdentifier }
-              : {}),
-            mode: "issue" as const,
-            status: "failed" as const,
-            reason: synced.error,
-          }))
+          ...groupedDeliveries.map((groupedDelivery) =>
+            buildLinearAutosyncRunDeliveryOutcome({
+              delivery: groupedDelivery,
+              profileId,
+              mode: "issue",
+              status: "failed",
+              reason: synced.error,
+            })
+          )
         );
         continue;
       }
 
       if (synced.operation === "created") {
         created += 1;
-      } else {
+      } else if (synced.operation === "updated") {
         updated += 1;
       }
       commentsPulled += synced.commentsPulled;
       conflictsRecorded += synced.conflictsRecorded;
       checkpointsRecorded += synced.checkpointRecorded ? 1 : 0;
       syncedProjectIds.add(target.projectId);
-
-      for (const groupedDelivery of groupedDeliveries) {
-        const applied = await input.deps.applyDelivery({
-          profileId,
-          deliveryId: groupedDelivery.id,
-          ...(input.deps.claimedBy ? { claimedBy: input.deps.claimedBy } : {}),
-        });
-        if (!applied.ok) {
-          failedDeliveries += 1;
-          deliveries.push({
-            deliveryId: groupedDelivery.id,
-            profileId,
-            ...(groupedDelivery.projectId
-              ? { projectId: groupedDelivery.projectId }
-              : {}),
-            ...(groupedDelivery.teamId
-              ? { teamId: groupedDelivery.teamId }
-              : {}),
-            ...(groupedDelivery.issueId
-              ? { issueId: groupedDelivery.issueId }
-              : {}),
-            ...(groupedDelivery.issueIdentifier
-              ? { issueIdentifier: groupedDelivery.issueIdentifier }
-              : {}),
-            mode: "issue",
-            status: "failed",
-            ticketId: synced.ticketId,
-            reason: applied.error,
-          });
-          continue;
-        }
-        appliedDeliveries += 1;
-        deliveries.push({
-          deliveryId: groupedDelivery.id,
-          profileId,
-          ...(groupedDelivery.projectId
-            ? { projectId: groupedDelivery.projectId }
-            : {}),
-          ...(groupedDelivery.teamId ? { teamId: groupedDelivery.teamId } : {}),
-          ...(groupedDelivery.issueId
-            ? { issueId: groupedDelivery.issueId }
-            : {}),
-          ...(groupedDelivery.issueIdentifier
-            ? { issueIdentifier: groupedDelivery.issueIdentifier }
-            : {}),
-          mode: "issue",
-          status: "applied",
+      readyToApply.push(
+        ...groupedDeliveries.map((groupedDelivery) => ({
+          delivery: groupedDelivery,
+          mode: "issue" as const,
           ticketId: synced.ticketId,
-        });
-      }
+        }))
+      );
     }
 
     if (projectDeliveries.length > 0) {
@@ -5695,51 +5689,88 @@ async function runProjectLinearAutosync<TRuntime>(input: {
         for (const projectId of synced.projectIds) {
           syncedProjectIds.add(projectId);
         }
-        for (const delivery of projectDeliveries) {
-          const applied = await input.deps.applyDelivery({
-            profileId,
-            deliveryId: delivery.id,
-            ...(input.deps.claimedBy
-              ? { claimedBy: input.deps.claimedBy }
-              : {}),
-          });
-          if (!applied.ok) {
-            failedDeliveries += 1;
-            deliveries.push({
-              deliveryId: delivery.id,
-              profileId,
-              ...(delivery.projectId ? { projectId: delivery.projectId } : {}),
-              ...(delivery.teamId ? { teamId: delivery.teamId } : {}),
-              mode: "project",
-              status: "failed",
-              reason: applied.error,
-            });
-            continue;
-          }
-          appliedDeliveries += 1;
-          deliveries.push({
-            deliveryId: delivery.id,
-            profileId,
-            ...(delivery.projectId ? { projectId: delivery.projectId } : {}),
-            ...(delivery.teamId ? { teamId: delivery.teamId } : {}),
-            mode: "project",
-            status: "applied",
-          });
-        }
       } else {
         failedDeliveries += projectDeliveries.length;
         deliveries.push(
+          ...projectDeliveries.map((delivery) =>
+            buildLinearAutosyncRunDeliveryOutcome({
+              delivery,
+              profileId,
+              mode: "project",
+              status: "failed",
+              reason: synced.error,
+            })
+          )
+        );
+      }
+      if (synced.ok) {
+        readyToApply.push(
           ...projectDeliveries.map((delivery) => ({
-            deliveryId: delivery.id,
-            profileId,
-            ...(delivery.projectId ? { projectId: delivery.projectId } : {}),
-            ...(delivery.teamId ? { teamId: delivery.teamId } : {}),
+            delivery,
             mode: "project" as const,
-            status: "failed" as const,
-            reason: synced.error,
           }))
         );
       }
+    }
+
+    if (readyToApply.length === 0) {
+      continue;
+    }
+
+    const localSync = await input.deps.syncLocalState({
+      runtime: runtime.value,
+      profileId,
+      projectId: target.projectId,
+      ...(effectiveTeamId ? { teamId: effectiveTeamId } : {}),
+      deliveryIds: readyToApply.map((item) => item.delivery.id),
+    });
+    if (!localSync.ok) {
+      failedDeliveries += readyToApply.length;
+      deliveries.push(
+        ...readyToApply.map((item) =>
+          buildLinearAutosyncRunDeliveryOutcome({
+            delivery: item.delivery,
+            profileId,
+            mode: item.mode,
+            status: "failed",
+            ...(item.ticketId ? { ticketId: item.ticketId } : {}),
+            reason: localSync.error,
+          })
+        )
+      );
+      continue;
+    }
+
+    for (const item of readyToApply) {
+      const applied = await input.deps.applyDelivery({
+        profileId,
+        deliveryId: item.delivery.id,
+        ...(input.deps.claimedBy ? { claimedBy: input.deps.claimedBy } : {}),
+      });
+      if (!applied.ok) {
+        failedDeliveries += 1;
+        deliveries.push(
+          buildLinearAutosyncRunDeliveryOutcome({
+            delivery: item.delivery,
+            profileId,
+            mode: item.mode,
+            status: "failed",
+            ...(item.ticketId ? { ticketId: item.ticketId } : {}),
+            reason: applied.error,
+          })
+        );
+        continue;
+      }
+      appliedDeliveries += 1;
+      deliveries.push(
+        buildLinearAutosyncRunDeliveryOutcome({
+          delivery: item.delivery,
+          profileId,
+          mode: item.mode,
+          status: "applied",
+          ...(item.ticketId ? { ticketId: item.ticketId } : {}),
+        })
+      );
     }
   }
 
@@ -5857,7 +5888,7 @@ async function upsertLinearProjectIssuesToTickets(input: {
     }
     if (synced.operation === "created") {
       created += 1;
-    } else {
+    } else if (synced.operation === "updated") {
       updated += 1;
     }
     commentsPulled += synced.commentsPulled;
@@ -5963,7 +5994,7 @@ async function syncProjectFromTicketsToLinear(input: {
     }
     if (synced.operation === "created") {
       created += 1;
-    } else {
+    } else if (synced.operation === "updated") {
       updated += 1;
     }
     commentsPushed += synced.commentsPushed;
@@ -6138,7 +6169,9 @@ async function applyLinearIssueToExistingTicket(input: {
   if (!updated.ok) {
     return { ok: false, error: updated.error };
   }
+  const ticketChanged = updated.changed ?? true;
 
+  let statusChanged = false;
   if (input.authority === "linear" && input.syncToggles.statuses) {
     const setStatus = await input.runtime.tickets.setStatus({
       ticketId: input.existingTicket.ticketId,
@@ -6147,6 +6180,7 @@ async function applyLinearIssueToExistingTicket(input: {
     if (!setStatus.ok) {
       return { ok: false, error: setStatus.error };
     }
+    statusChanged = setStatus.changed ?? true;
   }
 
   const pulledComments = await pullLinearCommentsToTicket({
@@ -6168,15 +6202,24 @@ async function applyLinearIssueToExistingTicket(input: {
   if (!checkpoint.ok) {
     return { ok: false, error: checkpoint.error };
   }
+  const checkpointRecorded = checkpoint.checkpointRecorded;
+  const operation =
+    ticketChanged ||
+    statusChanged ||
+    pulledComments.commentsPulled > 0 ||
+    input.conflictsRecorded > 0 ||
+    checkpointRecorded
+      ? "updated"
+      : "noop";
 
   return {
     ok: true,
-    operation: "updated",
+    operation,
     ticketId: input.existingTicket.ticketId,
     issueIdentifier: input.issue.identifier,
     commentsPulled: pulledComments.commentsPulled,
     conflictsRecorded: input.conflictsRecorded,
-    checkpointRecorded: checkpoint.checkpointRecorded,
+    checkpointRecorded,
   };
 }
 

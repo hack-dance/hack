@@ -293,7 +293,8 @@ export function createTicketsStore(opts: {
     readonly externalTeamId?: string;
     readonly actor?: string;
   }) => Promise<
-    { readonly ok: true } | { readonly ok: false; readonly error: string }
+    | { readonly ok: true; readonly changed?: boolean }
+    | { readonly ok: false; readonly error: string }
   >;
   readonly listTickets: () => Promise<readonly TicketSummary[]>;
   readonly getTicket: (input: {
@@ -361,7 +362,11 @@ export function createTicketsStore(opts: {
     readonly idempotencyKey?: string;
     readonly actor?: string;
   }) => Promise<
-    | { readonly ok: true; readonly checkpoint: TicketSyncCheckpoint }
+    | {
+        readonly ok: true;
+        readonly checkpoint: TicketSyncCheckpoint;
+        readonly recorded?: boolean;
+      }
     | { readonly ok: false; readonly error: string }
   >;
   readonly recordSyncConflict: (input: {
@@ -393,7 +398,8 @@ export function createTicketsStore(opts: {
     readonly status: TicketStatus;
     readonly actor?: string;
   }) => Promise<
-    { readonly ok: true } | { readonly ok: false; readonly error: string }
+    | { readonly ok: true; readonly changed?: boolean }
+    | { readonly ok: false; readonly error: string }
   >;
   readonly sync: () => Promise<SyncResult>;
 } {
@@ -670,12 +676,16 @@ export function createTicketsStore(opts: {
     readonly status: TicketStatus;
     readonly actor?: string;
   }): Promise<
-    { readonly ok: true } | { readonly ok: false; readonly error: string }
+    | { readonly ok: true; readonly changed?: boolean }
+    | { readonly ok: false; readonly error: string }
   > => {
     const tickets = await materializeTickets();
     const current = tickets.get(input.ticketId);
     if (!current) {
       return { ok: false, error: `Ticket not found: ${input.ticketId}` };
+    }
+    if (current.status === input.status) {
+      return { ok: true, changed: false };
     }
 
     const event = buildEvent({
@@ -695,13 +705,14 @@ export function createTicketsStore(opts: {
       return rebuilt;
     }
 
-    return { ok: true };
+    return { ok: true, changed: true };
   };
 
   const appendEventsAndRefresh = async (input: {
     readonly events: readonly TicketEvent[];
   }): Promise<
-    { readonly ok: true } | { readonly ok: false; readonly error: string }
+    | { readonly ok: true; readonly appendedCount: number }
+    | { readonly ok: false; readonly error: string }
   > => {
     const context = await loadStoreContext();
     const seenIdempotencyKeys = new Set(
@@ -715,7 +726,7 @@ export function createTicketsStore(opts: {
       return true;
     });
     if (pendingEvents.length === 0) {
-      return { ok: true };
+      return { ok: true, appendedCount: 0 };
     }
 
     const wrote = await git.appendEvents({ events: pendingEvents });
@@ -728,7 +739,7 @@ export function createTicketsStore(opts: {
       return rebuilt;
     }
 
-    return { ok: true };
+    return { ok: true, appendedCount: pendingEvents.length };
   };
 
   return {
@@ -828,7 +839,8 @@ export function createTicketsStore(opts: {
 
     updateTicket: async (input) => {
       const tickets = await materializeTickets();
-      if (!tickets.has(input.ticketId)) {
+      const current = tickets.get(input.ticketId);
+      if (!current) {
         return { ok: false, error: `Ticket not found: ${input.ticketId}` };
       }
 
@@ -836,9 +848,14 @@ export function createTicketsStore(opts: {
       if (!updatePayload.ok) {
         return updatePayload;
       }
+      const nextUpdate = filterTicketUpdatePayloadAgainstCurrent({
+        current,
+        payload: updatePayload.payload,
+        documentContent: updatePayload.documentContent,
+      });
 
       const events: TicketEvent[] = [];
-      if (updatePayload.documentContent) {
+      if (nextUpdate.documentContent) {
         events.push(
           buildDocumentRecordedEvent({
             buildEvent,
@@ -846,27 +863,32 @@ export function createTicketsStore(opts: {
             actor: input.actor,
             documentId: randomUUID(),
             kind: "description",
-            content: updatePayload.documentContent,
+            content: nextUpdate.documentContent,
           })
         );
       }
 
-      if (Object.keys(updatePayload.payload).length > 0) {
+      if (Object.keys(nextUpdate.payload).length > 0) {
         events.push(
           buildEvent({
             ticketId: input.ticketId,
             type: "ticket.updated",
-            payload: updatePayload.payload,
+            payload: nextUpdate.payload,
             actor: input.actor,
           })
         );
       }
 
       if (events.length === 0) {
-        return { ok: false, error: "No updates provided." };
+        return { ok: true, changed: false };
       }
 
-      return await appendEventsAndRefresh({ events });
+      const wrote = await appendEventsAndRefresh({ events });
+      if (!wrote.ok) {
+        return wrote;
+      }
+
+      return { ok: true, changed: wrote.appendedCount > 0 };
     },
 
     listTickets: async () => {
@@ -948,6 +970,7 @@ export function createTicketsStore(opts: {
           commentId,
           ticketId: input.ticketId,
           body,
+          recorded: wrote.appendedCount > 0,
           source,
           actor: event.actor,
           createdAt: event.tsIso,
@@ -1104,6 +1127,7 @@ export function createTicketsStore(opts: {
 
       return {
         ok: true,
+        recorded: wrote.appendedCount > 0,
         checkpoint: {
           ...checkpoint.checkpoint,
           actor: event.actor,
@@ -2357,6 +2381,38 @@ function buildTicketUpdatePayload(input: {
   }
 
   return { ok: true, payload, ...(documentContent ? { documentContent } : {}) };
+}
+
+function filterTicketUpdatePayloadAgainstCurrent(input: {
+  readonly current: TicketSummary;
+  readonly payload: Record<string, unknown>;
+  readonly documentContent?: string;
+}): {
+  readonly payload: Record<string, unknown>;
+  readonly documentContent?: string;
+} {
+  const currentRecord = input.current as Record<string, unknown>;
+  const payload = Object.fromEntries(
+    Object.entries(input.payload).filter(([key, value]) => {
+      const currentValue = currentRecord[key];
+      return (
+        JSON.stringify(currentValue ?? null) !== JSON.stringify(value ?? null)
+      );
+    })
+  );
+  const currentBody =
+    typeof input.current.body === "string"
+      ? input.current.body.trimEnd()
+      : undefined;
+  const documentContent =
+    input.documentContent !== undefined && currentBody === input.documentContent
+      ? undefined
+      : input.documentContent;
+
+  return {
+    payload,
+    ...(documentContent ? { documentContent } : {}),
+  };
 }
 
 function appendUpdateField(

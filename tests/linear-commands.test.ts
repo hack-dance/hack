@@ -3135,6 +3135,64 @@ archived: false
   expect(await Bun.file(oldPath).exists()).toBe(false);
 });
 
+test("runProjectArtifactCommand pull ignores legacy .hack/.hack/linear files and writes the canonical path", async () => {
+  const projectDir = ensureTempDir();
+  const legacyDocumentsDir = resolve(
+    projectDir,
+    ".hack/.hack/linear/projects/proj_123/documents"
+  );
+  await mkdir(legacyDocumentsDir, { recursive: true });
+  const legacyPath = resolve(legacyDocumentsDir, "legacy-plan.md");
+  const legacyText = `---
+kind: linear-project-document
+linearProjectId: proj_123
+title: Legacy plan
+linearId: doc_123
+slug: legacy-plan
+archived: false
+---
+# Legacy plan
+`;
+  await writeFile(legacyPath, legacyText);
+
+  const result = await __testOnly.runProjectArtifactCommand({
+    family: "documents",
+    verb: "pull",
+    runtime: {
+      profileId: "work",
+      projectDir,
+      projectId: "proj_123",
+      linear: createProjectArtifactLinearClient({
+        listProjectDocuments: async () => ({
+          ok: true as const,
+          data: [
+            {
+              id: "doc_123",
+              title: "Launch plan",
+              content: "# Launch plan\n",
+              slugId: "launch-plan",
+              archived: false,
+            },
+          ],
+        }),
+      }),
+    },
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  const canonicalPath = resolve(
+    projectDir,
+    ".hack/linear/projects/proj_123/documents/launch-plan.md"
+  );
+  expect(result.payload.writtenPaths).toEqual([canonicalPath]);
+  expect(await Bun.file(canonicalPath).exists()).toBe(true);
+  expect(await Bun.file(legacyPath).text()).toBe(legacyText);
+});
+
 test("runProjectArtifactCommand plans create update noop and remote-only documents", async () => {
   const projectDir = ensureTempDir();
   const documentsDir = resolve(
@@ -3293,6 +3351,52 @@ archived: false
   }
 
   expect(result.error).toContain('Duplicate local linearId "doc_dup"');
+});
+
+test("runProjectArtifactCommand plan rejects legacy .hack/.hack/linear paths", async () => {
+  const projectDir = ensureTempDir();
+  const legacyDocumentsDir = resolve(
+    projectDir,
+    ".hack/.hack/linear/projects/proj_123/documents"
+  );
+  await mkdir(legacyDocumentsDir, { recursive: true });
+  const legacyPath = resolve(legacyDocumentsDir, "legacy-plan.md");
+  const legacyText = `---
+kind: linear-project-document
+linearProjectId: proj_123
+title: Legacy plan
+linearId: doc_123
+slug: legacy-plan
+archived: false
+---
+# Legacy plan
+`;
+  await writeFile(legacyPath, legacyText);
+
+  const result = await __testOnly.runProjectArtifactCommand({
+    family: "documents",
+    verb: "plan",
+    path: ".hack/.hack/linear/projects/proj_123/documents",
+    runtime: {
+      profileId: "work",
+      projectDir,
+      projectId: "proj_123",
+      linear: createProjectArtifactLinearClient({
+        listProjectDocuments: async () => ({
+          ok: true as const,
+          data: [],
+        }),
+      }),
+    },
+  });
+
+  expect(result.ok).toBe(false);
+  if (result.ok) {
+    return;
+  }
+
+  expect(result.error).toContain(".hack/.hack/linear");
+  expect(await Bun.file(legacyPath).text()).toBe(legacyText);
 });
 
 test("runProjectArtifactCommand applies document upserts and writes back linear ids", async () => {
@@ -3972,6 +4076,51 @@ Still on track for dogfooding.
   expect(result.error).toContain(
     "Publish requires a draft status update without a linearId"
   );
+});
+
+test("runProjectArtifactCommand publish rejects legacy .hack/.hack/linear draft paths", async () => {
+  const projectDir = ensureTempDir();
+  const legacyDraftPath = resolve(
+    projectDir,
+    ".hack/.hack/linear/projects/proj_123/status-updates/drafts/2026-03-14-weekly.md"
+  );
+  const draftText = `---
+kind: linear-project-status-update
+linearProjectId: proj_123
+title: Weekly update
+slug: weekly
+archived: false
+date: 2026-03-14
+health: onTrack
+---
+Still on track for dogfooding.
+`;
+  await mkdir(resolve(legacyDraftPath, ".."), { recursive: true });
+  await writeFile(legacyDraftPath, draftText);
+
+  const result = await __testOnly.runProjectArtifactCommand({
+    family: "status-updates",
+    verb: "publish",
+    path: ".hack/.hack/linear/projects/proj_123/status-updates/drafts/2026-03-14-weekly.md",
+    runtime: {
+      profileId: "work",
+      projectDir,
+      projectId: "proj_123",
+      linear: createProjectArtifactLinearClient({
+        createProjectUpdate: async () => {
+          throw new Error("createProjectUpdate should not be called");
+        },
+      }),
+    },
+  });
+
+  expect(result.ok).toBe(false);
+  if (result.ok) {
+    return;
+  }
+
+  expect(result.error).toContain(".hack/.hack/linear");
+  expect(await Bun.file(legacyDraftPath).text()).toBe(draftText);
 });
 
 function ensureTempDir(): string {

@@ -1,5 +1,5 @@
 import { readdir, stat } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { YAML } from "bun";
 
 import { isRecord } from "../../../lib/guards.ts";
@@ -71,6 +71,8 @@ const YAML_COLON_SPACE_PATTERN = /:\s/;
 const YAML_PLAIN_SAFE_PATTERN = /^[A-Za-z_./][A-Za-z0-9_./ -]*$/;
 const YAML_SPECIAL_CHARACTER_PATTERN = /[\n\r[\]{}&,*!|>'"%@`]/;
 const YAML_RESERVED_LITERAL_PATTERN = /^(?:true|false|null|~)$/i;
+const LEGACY_LINEAR_ARTIFACT_ROOT = ".hack/.hack/linear";
+const CANONICAL_LINEAR_ARTIFACT_ROOT = ".hack/linear";
 
 /** Resolve the repo-backed root for all managed artifacts of a bound Linear project. */
 export const resolveLinearProjectArtifactsRoot = ({
@@ -477,19 +479,67 @@ const resolveArtifactInputPath = ({
   if (!candidate) {
     return null;
   }
+  const familyRoot = resolveLinearProjectArtifactsFamilyRoot({
+    projectDir,
+    linearProjectId,
+    family,
+  });
+  let resolvedPath = resolve(familyRoot, candidate);
   if (isAbsolute(candidate)) {
-    return candidate;
+    resolvedPath = resolve(candidate);
+  } else if (candidate.startsWith(".hack/")) {
+    resolvedPath = resolve(projectDir, candidate);
   }
-  if (candidate.startsWith(".hack/")) {
-    return resolve(projectDir, candidate);
+  assertCanonicalArtifactInputPath({
+    linearProjectId,
+    projectDir,
+    path: resolvedPath,
+  });
+  return resolvedPath;
+};
+
+const assertCanonicalArtifactInputPath = ({
+  projectDir,
+  linearProjectId,
+  path,
+}: {
+  readonly projectDir: string;
+  readonly linearProjectId: string;
+  readonly path: string;
+}): void => {
+  const resolvedProjectDir = resolve(projectDir);
+  const legacyRoot = resolve(resolvedProjectDir, LEGACY_LINEAR_ARTIFACT_ROOT);
+  if (isPathInsideRoot({ root: legacyRoot, path })) {
+    throw new Error(
+      [
+        `Legacy Linear artifact paths under ${LEGACY_LINEAR_ARTIFACT_ROOT} are not authoritative.`,
+        `Move managed files into ${CANONICAL_LINEAR_ARTIFACT_ROOT}/projects/${linearProjectId}/... and retry.`,
+        "Legacy files were left untouched.",
+      ].join(" ")
+    );
   }
-  return resolve(
-    resolveLinearProjectArtifactsFamilyRoot({
-      projectDir,
-      linearProjectId,
-      family,
-    }),
-    candidate
+  const canonicalProjectRoot = resolveLinearProjectArtifactsRoot({
+    projectDir: resolvedProjectDir,
+    linearProjectId,
+  });
+  if (!isPathInsideRoot({ root: canonicalProjectRoot, path })) {
+    throw new Error(
+      `Linear artifact paths must stay under ${canonicalProjectRoot}. Received ${path}.`
+    );
+  }
+};
+
+const isPathInsideRoot = ({
+  root,
+  path,
+}: {
+  readonly root: string;
+  readonly path: string;
+}): boolean => {
+  const relativePath = relative(root, path);
+  return (
+    relativePath === "" ||
+    !(relativePath.startsWith("..") || isAbsolute(relativePath))
   );
 };
 

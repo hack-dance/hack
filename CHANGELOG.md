@@ -1,3 +1,9 @@
+## <small>1.21.2 (2026-03-24)</small>
+
+* Merge branch 'main' into codex/linear-mention-hack-462-preserve-.env-compatibility-whil-6icfe6 ([7e821e4](https://github.com/hack-dance/hack/commit/7e821e4))
+* Merge pull request #30 from hack-dance/codex/linear-mention-hack-462-preserve-.env-compatibility-whi ([028313c](https://github.com/hack-dance/hack/commit/028313c)), closes [#30](https://github.com/hack-dance/hack/issues/30)
+* fix(env): keep source column in list output ([ba310d9](https://github.com/hack-dance/hack/commit/ba310d9))
+
 ## <small>1.21.1 (2026-03-24)</small>
 
 * Merge branch 'main' into codex/fix-authorization-bypass-for-team-management ([3c4eee5](https://github.com/hack-dance/hack/commit/3c4eee5))

@@ -1,3 +1,9 @@
+## <small>1.21.1 (2026-03-24)</small>
+
+* Merge branch 'main' into codex/fix-authorization-bypass-for-team-management ([3c4eee5](https://github.com/hack-dance/hack/commit/3c4eee5))
+* Merge pull request #25 from hack-dance/codex/fix-authorization-bypass-for-team-management ([4e0a5fd](https://github.com/hack-dance/hack/commit/4e0a5fd)), closes [#25](https://github.com/hack-dance/hack/issues/25)
+* fix(auth): restore team-scoped authorization ([5622392](https://github.com/hack-dance/hack/commit/5622392))
+
 ## 1.21.0 (2026-03-24)
 
 * feat(release): publish codex slim installer ([b0451e0](https://github.com/hack-dance/hack/commit/b0451e0))

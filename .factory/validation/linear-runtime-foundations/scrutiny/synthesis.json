@@ -1,0 +1,67 @@
+{
+  "milestone": "linear-runtime-foundations",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "bun run test",
+      "exitCode": 0
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "bun run typecheck",
+      "exitCode": 0
+    },
+    "lint": {
+      "passed": true,
+      "command": "bun run check",
+      "exitCode": 0
+    }
+  },
+  "reviewsSummary": {
+    "total": 5,
+    "passed": 5,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "nonBlockingIssues": [
+    {
+      "featureId": "validation-harness-hardening",
+      "file": "services/auth-broker/tests/config.test.ts",
+      "line": 157,
+      "severity": "non_blocking",
+      "description": "The new regression still relies on ambient repo-root dotenv state to exercise the root-env-fallback disable path, so that hardening behavior is not yet covered with fully deterministic fallback contents."
+    }
+  ],
+  "appliedUpdates": [
+    {
+      "target": "library",
+      "description": "Documented the auth-broker test-isolation helper and `HACK_AUTH_BROKER_DISABLE_ROOT_ENV_FALLBACK` hermetic-test flag in `.factory/library/environment.md`.",
+      "sourceFeature": "validation-harness-hardening"
+    }
+  ],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": ".factory/skills/control-plane-worker/SKILL.md",
+      "suggestion": "Allow baseline-hardening features to continue after capturing an expected failing baseline, as long as the worker records the failing evidence before fixing it.",
+      "evidence": "The `validation-harness-hardening` review found the worker had to deviate from the generic baseline-validation rule because the feature itself was assigned to fix the known red baseline.",
+      "isSystemic": false
+    },
+    {
+      "target": ".factory/skills/control-plane-worker/SKILL.md",
+      "suggestion": "Document a verification fallback for GitHub auth-path changes when the current repo config does not enable the GitHub extension, so workers can still produce deterministic proof without pretending the repo-bound CLI exercised the changed path.",
+      "evidence": "The `provider-unattended-auth-paths` review found this repo only enables Linear in `.hack/hack.config.json`, so the worker had to use a direct resolver smoke instead of the nominal repo-bound GitHub status flow.",
+      "isSystemic": false
+    },
+    {
+      "target": ".factory/skills/control-plane-worker/SKILL.md",
+      "suggestion": "Either document a safe repo-bound Linear failure-injection / rerun-dedupe verification path or explicitly allow deterministic regression tests when no safe manual hook exists.",
+      "evidence": "The `linear-sync-failure-order-and-idempotency` review found the mission contract expects forced local-sync failure and repeated-sync manual evidence, but `.factory/services.yaml` only documents `linear_status` and `repo_linear_smoke` commands.",
+      "isSystemic": false
+    }
+  ],
+  "rejectedObservations": [],
+  "previousRound": null
+}

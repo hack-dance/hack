@@ -1,0 +1,15 @@
+{
+  "featureId": "linear-artifact-root-hardening",
+  "reviewedAt": "2026-03-24T23:10:00Z",
+  "commitId": "8c8d352bc0c3bbe1cf1322e2253bfae2d1ae27ec",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Pass. The feature hardens artifact-path resolution in `src/control-plane/extensions/linear/project-artifacts.ts` so explicit artifact inputs are normalized, rejected when they target the legacy `.hack/.hack/linear` tree, and constrained to the canonical `.hack/linear/projects/<project-id>` root. The command regressions in `tests/linear-commands.test.ts` cover the required legacy-path behaviors for pull, plan, and publish, while existing managed-write guards continue to preserve unmanaged local files.",
+    "issues": []
+  },
+  "sharedStateObservations": [],
+  "addressesFailureFrom": null,
+  "summary": "Reviewed the feature handoff, transcript skeleton, skill guidance, mission shared-state files, and commit `8c8d352bc0c3bbe1cf1322e2253bfae2d1ae27ec`. I found the implementation consistent with the feature description and VAL-LINEAR-005: canonical `.hack/linear` remains authoritative, legacy `.hack/.hack/linear` inputs fail closed, and unmanaged local files are still protected from overwrite."
+}

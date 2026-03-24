@@ -1,0 +1,15 @@
+{
+  "featureId": "linear-tracking-foundation-and-freeze-set",
+  "reviewedAt": "2026-03-24T22:49:17Z",
+  "commitId": "c0cbd2c65e15c8de8d8b7c6b328e42fe5fedb289",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Pass. The feature covers the requested Linear tracking foundation work: `linear-closeout-scope.json` freezes the mission closeout inventory with the open-at-start and mission-created issue sets, the repo-bound status-update draft records that frozen scope, and `src/control-plane/extensions/linear/commands.ts` now routes project artifact families through the repo root so canonical `.hack/linear/projects/<project-id>/...` paths are used instead of the legacy `.hack/.hack/linear` tree. The added regression in `tests/linear-commands.test.ts` protects the root-resolution fix, while existing project-artifact tests continue to cover pull/apply/publish behavior for documents, milestones, and status updates.",
+    "issues": []
+  },
+  "sharedStateObservations": [],
+  "addressesFailureFrom": null,
+  "summary": "Reviewed the feature entry, mission guidance, worker transcript skeleton, handoff, skill file, shared-state files, and commit `c0cbd2c65e15c8de8d8b7c6b328e42fe5fedb289`. I found the implementation consistent with the feature description and expected behavior: the optional web-control-plane Linear hierarchy is captured in the frozen closeout inventory and status draft, and repo-bound project artifact commands now target the canonical `.hack/linear` path without requiring manual hidden-ref repair steps."
+}

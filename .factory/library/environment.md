@@ -31,6 +31,12 @@ Workers should extend existing env handling rather than introducing parallel sec
 - The local machine currently has Bun available, but the installed version may lag the version declared in `package.json`; prefer repo commands and keep validation evidence concrete.
 - Use `./dist/hack` for repo-bound CLI behavior after build; use global `hack` only for runtime orchestration.
 
+## Auth-Broker Test Isolation
+
+- Bun loads repo-root `.env` / `.env.local`, so auth-broker tests should clear broker-related env before asserting defaults or failure guidance.
+- `services/auth-broker/tests/test-env.ts` provides `installAuthBrokerEnvIsolation()` for suites and `withIsolatedAuthBrokerEnv()` for per-test overrides.
+- Those helpers set `HACK_AUTH_BROKER_DISABLE_ROOT_ENV_FALLBACK=true`, which disables `services/auth-broker/src/config.ts` fallback reads from repo-root `.env.local` and `.env` so config tests stay hermetic.
+
 ## Trusted-Origin Inventory
 
 Use one explicit allowlist model for auth/session flows:

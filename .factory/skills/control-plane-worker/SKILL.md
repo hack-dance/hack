@@ -30,6 +30,7 @@ Use this skill for features that primarily touch:
 5. If the feature touches Linear project/state behavior, use repo-bound `./dist/hack linear ...` flows to verify the effect and record the exact commands/results. Do not rely on manual remote edits as the primary proof.
 6. Capture any blockers, discovered issues, or scope mismatches immediately. If a feature needs new credentials, unavailable infrastructure, or a change that would violate CLI optionality/auth ownership, return to the orchestrator instead of guessing.
 7. Stop any processes you started and produce a detailed handoff with exact commands, observations, tests added, and remaining issues.
+8. If `bun run check` succeeds and only re-surfaces the known warning-only complexity diagnostics already documented in mission `AGENTS.md`, do not return to the orchestrator for that reason and do not record them as new discovered issues unless your feature directly worsened the warned files.
 
 ## Example Handoff
 

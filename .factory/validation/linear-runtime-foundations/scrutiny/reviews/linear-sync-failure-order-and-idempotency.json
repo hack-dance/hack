@@ -1,0 +1,21 @@
+{
+  "featureId": "linear-sync-failure-order-and-idempotency",
+  "reviewedAt": "2026-03-24T22:50:03.575907Z",
+  "commitId": "27f1b5ec62f9b232a59d0cfd01a286ec9949811a",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Reviewed the worker transcript skeleton, handoff, and commit 27f1b5ec across `src/control-plane/extensions/linear/commands.ts`, `src/control-plane/extensions/tickets/store.ts`, and the added regressions. The implementation matches the feature intent: autosync now defers delivery application until the local ticket sync succeeds, existing-ticket Linear syncs can return `noop` when reruns dedupe cleanly, and the tickets store now reports actual `changed`/`recorded` signals so duplicate reruns do not churn status/checkpoint state.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The mission currently lacks a documented repo-bound way to force a local-sync failure or a deduped rerun during `hack linear` verification, so workers cannot fully satisfy the manual VAL-LINEAR-006/007 proof path with repo-bound commands alone.",
+      "evidence": "`/Users/hack/dev/hack-dance/hack/.factory/skills/control-plane-worker/SKILL.md:30` requires repo-bound `./dist/hack linear ...` verification for Linear state behavior; `/Users/hack/dev/hack-dance/hack/.factory/services.yaml:14-15` only documents `linear_status` and `repo_linear_smoke`; `/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/validation-contract.md:23-29` expects forced failure and repeated-sync evidence; the handoff `skillFeedback` records the worker's justified deviation to deterministic regression tests because no safe built-in hook exists."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass. I found the ordering/idempotency changes coherent with VAL-LINEAR-006 and VAL-LINEAR-007, and the targeted regressions cover the new pending-on-local-sync-failure and rerun-dedupe paths. The only notable gap is shared-state/process support: mission instructions demand repo-bound manual proof for failure injection, but the current skill/services surface does not document a safe way to do that."
+}

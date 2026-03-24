@@ -1,0 +1,33 @@
+{
+  "featureId": "validation-harness-hardening",
+  "reviewedAt": "2026-03-24T22:51:15Z",
+  "commitId": "b8cdfeb13bcce26ba9b20390f6a13e060672d30c",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Reviewed the mission feature metadata, worker handoff, transcript skeleton, shared-state files, and commit `b8cdfeb13bcce26ba9b20390f6a13e060672d30c`. The implementation materially improves the validation harness: auth-broker suites now clear broker-relevant env before each run, `resolveConfig()` can skip repo-root dotenv fallback for hermetic tests, and `.factory/services.yaml` supplies the broker/Linear smoke commands the mission expected. I did find one non-blocking validation gap in the new regression coverage for the root-env fallback disable path.",
+    "issues": [
+      {
+        "file": "services/auth-broker/tests/config.test.ts",
+        "line": 157,
+        "severity": "non_blocking",
+        "description": "The new \"ignores ambient repo env while resolving defaults\" regression only mutates `process.env`; it never injects deterministic fallback dotenv contents, so the `readFirstEnv()` / `HACK_AUTH_BROKER_DISABLE_ROOT_ENV_FALLBACK` path in `services/auth-broker/src/config.ts` is covered only if the local repo root happens to contain matching Linear vars. That leaves the core root-env-fallback hardening indirectly tested instead of fully hermetic."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The mission's baseline-validation guidance needs an explicit carveout for hardening features that are assigned to fix a known red baseline. This worker correctly continued after capturing the failing baseline, but had to mark `followedProcedure=false` to do so.",
+      "evidence": "The transcript skeleton for session `5d5cd285-1d46-4454-b230-7e968cada6c4` shows an initial `bun run test` before implementation, and the handoff's `skillFeedback` records a deviation at step `1.3 Baseline Validation` with a suggested change to allow baseline-hardening features to proceed after documenting the expected failure."
+    },
+    {
+      "area": "knowledge",
+      "observation": "The new auth-broker test hermeticity pattern is not yet captured in shared library notes, so future workers may need to rediscover the dedicated helper and disable flag by reading source.",
+      "evidence": "`services/auth-broker/tests/test-env.ts:5-120` introduces the reusable isolation helper and `services/auth-broker/src/config.ts:57-391` adds `HACK_AUTH_BROKER_DISABLE_ROOT_ENV_FALLBACK`, but `.factory/library/environment.md:16-41` documents broker runtime inputs without mentioning this validation-isolation mechanism."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass with one non-blocking test-coverage gap. The feature meaningfully hardens auth-broker env isolation and adds the expected shared smoke commands, but the new config regression still relies on ambient repo-root dotenv state to exercise the fallback-disable path instead of testing that behavior deterministically."
+}

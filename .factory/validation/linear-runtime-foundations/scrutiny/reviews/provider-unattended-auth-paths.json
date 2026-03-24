@@ -1,0 +1,21 @@
+{
+  "featureId": "provider-unattended-auth-paths",
+  "reviewedAt": "2026-03-24T22:49:15Z",
+  "commitId": "c6dda1c2ee145c9908d77cfa61c7cf37de3e810c",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Reviewed the worker handoff, transcript skeleton, validation evidence, and commit `c6dda1c2ee145c9908d77cfa61c7cf37de3e810c`. The implementation correctly makes Linear and GitHub env-only resolution fail closed instead of falling back to keychain access, preserves the existing refresh-and-persist flow for rotated credentials, and updates Linear repair guidance so env-only failures no longer masquerade as broker-login problems. The added regression coverage and manual verification evidence match the feature's expected behavior and validation-contract assertions.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The `control-plane-worker` skill does not document a fallback verification path for GitHub auth work when the repo config does not enable the GitHub extension, even though this mission's repo only enables Linear. The worker had to deviate from the nominal repo-bound CLI verification flow and use a direct resolver smoke instead.",
+      "evidence": ".factory/skills/control-plane-worker/SKILL.md asks for repo-bound CLI validation; `.hack/hack.config.json` enables `dance.hack.linear` but not `dance.hack.github`; the handoff for session `2ee36f93-aded-43b5-9ba5-8be4edb1dac6` records `skillFeedback.followedProcedure=false` and explains that repo-bound GitHub status could not exercise the changed auth path."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass. The reviewed diff cleanly hardens unattended provider auth for the claimed Linear and GitHub flows, and the validation evidence is consistent with the feature contract. I did note one shared-state gap: the worker skill should explain the GitHub verification fallback needed when the project config does not enable the GitHub extension."
+}

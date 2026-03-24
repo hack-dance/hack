@@ -54,6 +54,8 @@ const TRAILING_SLASH_PATTERN = /\/$/;
 const TRAILING_PATH_SLASHES_PATTERN = /\/+$/;
 const GITHUB_SCOPE_SPLIT_PATTERN = /[,\s]+/;
 const NEWLINE_SPLIT_PATTERN = /\r?\n/;
+const ROOT_ENV_FALLBACK_DISABLED_ENV =
+  "HACK_AUTH_BROKER_DISABLE_ROOT_ENV_FALLBACK";
 const ROOT_ENV_FALLBACK_FILES = [
   resolve(import.meta.dir, "../../..", ".env.local"),
   resolve(import.meta.dir, "../../..", ".env"),
@@ -355,6 +357,9 @@ function readFirstEnv(keys: readonly string[]): string | undefined {
     if (value !== undefined) {
       return value;
     }
+  }
+  if (parseBoolean(process.env[ROOT_ENV_FALLBACK_DISABLED_ENV]) === true) {
+    return undefined;
   }
   const fallback = resolveRootEnvFallback();
   for (const key of keys) {

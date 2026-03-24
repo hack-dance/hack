@@ -4,6 +4,7 @@ import type { BetterAuthRuntime } from "../src/better-auth.ts";
 import { FlowStore } from "../src/flow-store.ts";
 import { createAuthBrokerApp } from "../src/index.ts";
 import { hasBetterAuthProfileAccess } from "../src/modules/better-auth/session.ts";
+import { installAuthBrokerEnvIsolation } from "./test-env.ts";
 
 type BetterAuthAuth = NonNullable<BetterAuthRuntime["auth"]>;
 type BetterAuthSession = Awaited<
@@ -23,6 +24,8 @@ type SessionStartFlowResponse = {
     }>;
   };
 };
+
+installAuthBrokerEnvIsolation();
 
 function createTestConfig() {
   return {

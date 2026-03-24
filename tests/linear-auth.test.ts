@@ -158,3 +158,31 @@ test("resolveLinearToken refreshes expired stored credentials via auth broker", 
   expect(parsed.refreshToken).toBe("fresh_refresh_token");
   expect(parsed.refreshTokenExpiresAt).toBe("2026-04-06T12:00:00.000Z");
 });
+
+test("resolveLinearToken can prefer env-only resolution to avoid keychain access", async () => {
+  const config = createControlPlaneConfig();
+
+  const resolved = await resolveLinearToken({
+    controlPlaneConfig: config,
+    env: {
+      HACK_LINEAR_API_TOKEN: "env_linear_token",
+      HACK_LINEAR_PREFER_ENV_TOKEN_ONLY: "true",
+    },
+    store: {
+      get: async () => {
+        throw new Error("keychain should not be read");
+      },
+      set: async () => {
+        throw new Error("keychain should not be written");
+      },
+      delete: async () => false,
+    },
+  });
+
+  expect(resolved.ok).toBe(true);
+  if (!resolved.ok) {
+    return;
+  }
+  expect(resolved.token).toBe("env_linear_token");
+  expect(resolved.source).toBe("env");
+});

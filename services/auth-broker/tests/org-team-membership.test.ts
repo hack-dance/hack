@@ -3,11 +3,14 @@ import { describe, expect, test } from "bun:test";
 import type { BetterAuthRuntime } from "../src/better-auth.ts";
 import { createAuthBrokerApp } from "../src/index.ts";
 import { InMemoryOrgTeamsStore } from "../src/modules/orgs/service.ts";
+import { installAuthBrokerEnvIsolation } from "./test-env.ts";
 
 type BetterAuthAuth = NonNullable<BetterAuthRuntime["auth"]>;
 type BetterAuthSession = Awaited<
   ReturnType<BetterAuthAuth["api"]["getSession"]>
 >;
+
+installAuthBrokerEnvIsolation();
 
 function createTestConfig() {
   return {

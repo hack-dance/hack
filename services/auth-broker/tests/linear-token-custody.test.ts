@@ -13,11 +13,14 @@ import {
   createFlow,
   handleLinearCallback,
 } from "../src/modules/linear-oauth/service.ts";
+import { installAuthBrokerEnvIsolation } from "./test-env.ts";
 
 type BetterAuthAuth = NonNullable<BetterAuthRuntime["auth"]>;
 type BetterAuthSession = Awaited<
   ReturnType<BetterAuthAuth["api"]["getSession"]>
 >;
+
+installAuthBrokerEnvIsolation();
 
 function createTestConfig(): BrokerConfig {
   return {

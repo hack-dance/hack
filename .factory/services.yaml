@@ -1,0 +1,29 @@
+commands:
+  install: bun install
+  build: bun run build
+  typecheck: bun run typecheck
+  check: bun run check
+  test: bun run test
+  auth_test: bun run auth:test
+  auth_targeted_test: bun test ./services/auth-broker/tests/config.test.ts ./services/auth-broker/tests/index.test.ts
+  db_test: bun run db:test
+  auth_broker_smoke: curl -sf http://127.0.0.1:8080/health
+  runtime_up: hack up -d
+  runtime_ps: hack ps --json
+  runtime_open: hack open --json
+  linear_status: ./dist/hack linear status --json
+  repo_linear_smoke: bun run build && ./dist/hack linear status --json
+
+services:
+  auth-broker-local:
+    start: PORT=8080 HOST=127.0.0.1 AUTH_BROKER_PUBLIC_BASE_URL=http://127.0.0.1:8080 bun run auth:start
+    stop: lsof -ti tcp:8080 | xargs kill
+    healthcheck: curl -sf http://127.0.0.1:8080/health
+    port: 8080
+    depends_on: []
+
+  hack-stack:
+    start: hack up -d
+    stop: hack down
+    healthcheck: hack ps --json
+    depends_on: []

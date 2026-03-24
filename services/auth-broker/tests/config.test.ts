@@ -1,30 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
 import { resolveConfig } from "@/config.ts";
+import {
+  installAuthBrokerEnvIsolation,
+  withIsolatedAuthBrokerEnv,
+} from "./test-env.ts";
 
-type EnvMap = Record<string, string | undefined>;
-
-const ENV_KEYS = [
-  "AUTH_BROKER_PUBLIC_BASE_URL",
-  "GITHUB_CLIENT_ID",
-  "GITHUB_CLIENT_SECRET",
-  "GITHUB_SCOPES",
-  "HACK_LINEAR_CLIENT_ID",
-  "HACK_LINEAR_SECRET",
-  "HACK_LINEAR_DEVELOPER_APP_TOKEN",
-  "HACK_LINEAR_OAUTH_ACTOR",
-  "HACK_LINEAR_WEBHOOK_SECRET",
-  "HACK_LINEAR_SCOPES",
-  "HACK_LINEAR_REDIRECT_URI",
-  "HACK_LINEAR_WEBHOOK_PATH",
-  "LINEAR_OAUTH_ACTOR",
-  "LINEAR_CLIENT_ID",
-  "LINEAR_CLIENT_SECRET",
-  "LINEAR_WEBHOOK_SIGNING_SECRET",
-  "FLOW_STORE_PATH",
-  "BETTER_AUTH_GITHUB_AUTO_PROVISION_USERS",
-  "BETTER_AUTH_LINEAR_AUTO_PROVISION_USERS",
-] as const;
+installAuthBrokerEnvIsolation();
 
 describe("auth broker config", () => {
   test("normalizes configured GitHub scopes", () => {
@@ -171,38 +153,48 @@ describe("auth broker config", () => {
       }
     );
   });
+
+  test("ignores ambient repo env while resolving defaults", () => {
+    const previousRedirectUri = process.env.HACK_LINEAR_REDIRECT_URI;
+    const previousLegacyClientId = process.env.LINEAR_CLIENT_ID;
+    process.env.HACK_LINEAR_REDIRECT_URI =
+      "https://auth.hack.broker/linear/callback";
+    process.env.LINEAR_CLIENT_ID = "ambient-linear-client";
+
+    try {
+      withEnv(
+        {
+          GITHUB_CLIENT_ID: "test-client-id",
+          GITHUB_CLIENT_SECRET: "test-client-secret",
+          HACK_LINEAR_CLIENT_ID: "isolated-linear-client",
+          HACK_LINEAR_SECRET: "isolated-linear-secret",
+        },
+        () => {
+          const config = resolveConfig();
+          expect(config.linearClientId).toBe("isolated-linear-client");
+          expect(config.linearRedirectUri).toBe(
+            "http://127.0.0.1:8080/linear/callback"
+          );
+        }
+      );
+    } finally {
+      if (previousRedirectUri === undefined) {
+        process.env.HACK_LINEAR_REDIRECT_URI = undefined;
+      } else {
+        process.env.HACK_LINEAR_REDIRECT_URI = previousRedirectUri;
+      }
+      if (previousLegacyClientId === undefined) {
+        process.env.LINEAR_CLIENT_ID = undefined;
+      } else {
+        process.env.LINEAR_CLIENT_ID = previousLegacyClientId;
+      }
+    }
+  });
 });
 
-function withEnv(overrides: EnvMap, run: () => void): void {
-  const snapshot = new Map<string, string | undefined>();
-  for (const key of ENV_KEYS) {
-    snapshot.set(key, process.env[key]);
-  }
-  for (const [key, value] of Object.entries(overrides)) {
-    setEnvKey({
-      key,
-      value,
-    });
-  }
-  try {
-    run();
-  } finally {
-    for (const key of ENV_KEYS) {
-      setEnvKey({
-        key,
-        value: snapshot.get(key),
-      });
-    }
-  }
-}
-
-function setEnvKey(input: {
-  readonly key: string;
-  readonly value: string | undefined;
-}): void {
-  if (input.value === undefined) {
-    delete process.env[input.key];
-    return;
-  }
-  process.env[input.key] = input.value;
+function withEnv(
+  overrides: Record<string, string | undefined>,
+  run: () => void
+): void {
+  withIsolatedAuthBrokerEnv(overrides, run);
 }

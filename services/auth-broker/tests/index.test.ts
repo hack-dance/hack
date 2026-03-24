@@ -18,6 +18,7 @@ import {
   type LinearSyncStore,
   materializeLinearWebhookDelivery,
 } from "../src/modules/linear-sync-store/service.ts";
+import { installAuthBrokerEnvIsolation } from "./test-env.ts";
 
 type BetterAuthDb = NonNullable<BetterAuthRuntime["db"]>;
 type BetterAuthAuth = NonNullable<BetterAuthRuntime["auth"]>;
@@ -49,6 +50,8 @@ type SessionStartFlowResponse = {
     readonly provider?: string;
   };
 };
+
+installAuthBrokerEnvIsolation();
 
 function createBetterAuthDb(
   rows: readonly Record<string, unknown>[]

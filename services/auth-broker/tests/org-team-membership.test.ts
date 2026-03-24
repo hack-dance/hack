@@ -249,7 +249,7 @@ describe("org and team membership broker routes", () => {
     expect(listMembersResponse.status).toBe(404);
   });
 
-  test("active org members can administer teams without direct team membership", async () => {
+  test("active org members cannot administer teams without direct team membership", async () => {
     const store = new InMemoryOrgTeamsStore();
     const ownerApp = createAuthBrokerApp({
       config: createTestConfig(),
@@ -300,27 +300,27 @@ describe("org and team membership broker routes", () => {
       })
     );
 
-    const orgAdminApp = createAuthBrokerApp({
+    const orgMemberApp = createAuthBrokerApp({
       config: createTestConfig(),
       betterAuthRuntime: createBetterAuthRuntimeWithSession(
         createSession({
           userId: "user-456",
-          email: "org-admin@example.com",
+          email: "org-member@example.com",
         })
       ),
       orgTeamsStore: store,
     });
 
-    const listTeamsResponse = await orgAdminApp.handle(
+    const listTeamsResponse = await orgMemberApp.handle(
       new Request("http://localhost/v1/auth/teams?org=hack")
     );
     expect(listTeamsResponse.status).toBe(200);
     const listedTeams = (await listTeamsResponse.json()) as {
       readonly teams?: ReadonlyArray<{ readonly slug?: string }>;
     };
-    expect(listedTeams.teams?.map((team) => team.slug)).toEqual(["cli"]);
+    expect(listedTeams.teams).toEqual([]);
 
-    const addTeamMemberResponse = await orgAdminApp.handle(
+    const addTeamMemberResponse = await orgMemberApp.handle(
       new Request("http://localhost/v1/auth/teams/cli/members/add", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -330,15 +330,7 @@ describe("org and team membership broker routes", () => {
         }),
       })
     );
-    expect(addTeamMemberResponse.status).toBe(200);
-    const addedMembership = (await addTeamMemberResponse.json()) as {
-      readonly membership?: {
-        readonly scope?: string;
-        readonly state?: string;
-      };
-    };
-    expect(addedMembership.membership?.scope).toBe("team");
-    expect(addedMembership.membership?.state).toBe("active");
+    expect(addTeamMemberResponse.status).toBe(404);
   });
 
   test("team membership changes require an active parent org membership", async () => {

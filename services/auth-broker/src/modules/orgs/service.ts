@@ -233,15 +233,6 @@ export class InMemoryOrgTeamsStore implements OrgTeamsStore {
     readonly orgKey: string | null;
     readonly actorUserId: string;
   }): MaybePromise<readonly TeamRecord[]> {
-    const allowedOrgIds = new Set(
-      [...this.activeMemberships.values()]
-        .filter(
-          (membership) =>
-            membership.scope === "organization" &&
-            membership.userId === input.actorUserId
-        )
-        .map((membership) => membership.organizationId)
-    );
     const organization = input.orgKey
       ? this.findOrganization({ orgKey: input.orgKey })
       : null;
@@ -249,7 +240,12 @@ export class InMemoryOrgTeamsStore implements OrgTeamsStore {
       if (organization && team.organizationId !== organization.id) {
         return false;
       }
-      return allowedOrgIds.has(team.organizationId);
+      return [...this.activeMemberships.values()].some(
+        (membership) =>
+          membership.scope === "team" &&
+          membership.teamId === team.id &&
+          membership.userId === input.actorUserId
+      );
     });
   }
 
@@ -267,8 +263,8 @@ export class InMemoryOrgTeamsStore implements OrgTeamsStore {
     }
     const allowed = [...this.activeMemberships.values()].some(
       (membership) =>
-        membership.scope === "organization" &&
-        membership.organizationId === team.organizationId &&
+        membership.scope === "team" &&
+        membership.teamId === team.id &&
         membership.userId === input.actorUserId
     );
     return allowed ? team : null;

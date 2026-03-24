@@ -4,8 +4,7 @@ hack supports a project-scoped env contract (shareable, no values) plus safe sec
 
 ## Ownership and sharing policy
 
-Env management is separate from project ownership. A project can be shared while its env values remain
-local-only.
+Env management is separate from project ownership. A project can be shared while its env values remain local-only.
 
 ### Sharing modes
 
@@ -20,6 +19,7 @@ local-only.
 - Project access does not automatically grant env value access.
 - Team membership does not automatically grant env administration.
 - Shared value disclosure must be checked independently from project access.
+
 ---
 
 ## Trust model at a glance
@@ -239,9 +239,12 @@ Security posture:
 - `.hack/.env` should be gitignored by the repo, but Hack does not currently enforce that invariant during `hack init`.
 
 Planned shared-admin direction:
+
 - keep `hack env set` and `hack env unset` local by default
 - require explicit broker-mediated flows for shared env grants, rotation, and encrypted value custody
 - keep metadata sharing and value sharing as separate policy choices
+- make project-key rotation additive until cutover by re-wrapping active bundle keys to a staged replacement key before retiring the current key
+- require at least one explicit recovery path, and warn that losing every share plus every recovery package makes old portable env values unrecoverable
 
 ## Remote node secret behavior
 

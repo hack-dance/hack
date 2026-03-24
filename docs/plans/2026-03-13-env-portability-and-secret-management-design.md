@@ -280,10 +280,27 @@ Use when the project key itself is suspected compromised or when the owner wants
 
 Behavior:
 
-- mint a new project key
-- re-wrap the latest active bundle keys to the new project key
-- require explicit regeneration of all active key-share records
-- keep prior project-key lineage in audit metadata
+- mint a replacement project key in a staged state
+- decrypt each active bundle key with the current project key and immediately re-encrypt that bundle key to the staged replacement key
+- verify that every active bundle version now has both a readable old wrapping record and a readable staged wrapping record before cutover
+- regenerate all active key-share records from the staged replacement key before promoting it
+- promote the replacement project key only after share regeneration and wrapping verification both succeed
+- keep prior project-key lineage in audit metadata so operators can prove which key version protected which bundle generation
+
+Required rotation sequence:
+
+1. Freeze destructive share changes for the project while rotation is in progress.
+2. Load the current project key through a currently valid owner, admin, or recovery path.
+3. For each active bundle version, unwrap the bundle key with the current project key and re-wrap it with the staged replacement key.
+4. Generate replacement share envelopes for every intended post-rotation recipient and validate that at least one recovery path still works against the staged key.
+5. Present a pre-cutover summary that shows:
+   - how many bundle versions were re-wrapped
+   - which recipients will retain access after cutover
+   - which recovery path satisfies the last-resort recovery rule
+6. Commit cutover by marking the replacement key current and marking the previous key retired.
+7. Revoke use of the retired key for new unwrap operations, while preserving audit metadata for historical reads and incident review.
+
+The critical safety rule is that rotation is additive until cutover. Hack must not destroy the only readable wrapping record first and then hope the replacement path succeeds later.
 
 ### Recovery policy
 
@@ -299,11 +316,43 @@ Allowed recovery paths:
 - a second admin/owner key share
 - a designated recovery recipient created manually
 
+Recovery package rules:
+
+- the exported package must contain encrypted project-key material plus the metadata needed to identify the protected project binding and bundle lineage
+- the export must stay encrypted at rest; Hack should never describe it as a plaintext backup
+- export UX must tell the operator where the package was written, whether it replaces an older package, and that losing both the live shares and the package makes recovery impossible
+- import UX must require explicit confirmation that the operator is restoring authority for the specific project binding identified by the package metadata
+
+Intentional recovery guidance:
+
+- recommend maintaining at least two independent recovery paths before enabling shared portable env management for important projects
+- treat a second admin share and an encrypted offline recovery package as different failure domains, not substitutes for the same failure mode
+- show recovery-path health in normal status output so operators can repair gaps before starting rotation, revocation, or device migration
+
 Unsafe behavior to reject:
 
 - deleting the last active owner share with no recovery path
 - rotating the project key while leaving no valid recipient or backup
 - revoking the last usable recovery share without an explicit forced override
+
+### Lost-key handling
+
+Lost-key behavior must be explicit in both docs and product copy.
+
+Rules:
+
+- if no active owner/admin share and no valid recovery package remain, Hack must treat portable ciphertext as permanently unreadable
+- the broker may continue storing encrypted bundles and metadata, but it must not imply that storage alone is enough for recovery
+- operators may still inspect non-secret metadata such as bundle ids, timestamps, recipient records, and audit history after key loss
+- any UX that offers reset or re-bootstrap must say clearly that it creates a new project key lineage and does not recover old secret values
+
+Required operator-facing copy themes:
+
+- "lost all keys" means secret values are gone unless a documented recovery path still exists
+- "restore from recovery package" means recovering access to the existing project key lineage
+- "reset portable env" means abandoning unreadable ciphertext and starting a new lineage with fresh secrets
+
+The product should prefer blunt failure messages over optimistic language here. Preventing a false assumption of recoverability is more important than making the error feel softer.
 
 ## `.env` Compatibility And Backend UX
 

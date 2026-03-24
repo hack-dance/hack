@@ -12,6 +12,7 @@ Testing surface findings, required tools, and validation concurrency for this mi
 - Primary tools: `./dist/hack`, repo-local Bun commands, global `hack` for runtime orchestration only.
 - Use for: auth status, Linear sync/status, tickets, env, runtime/session flows, project ownership/admin parity.
 - Notes: prefer repo-bound CLI validation (`./dist/hack`) after a build so command behavior matches the current branch.
+- Notes: repo-bound GitHub CLI validation currently needs a temporary global-config overlay that enables `dance.hack.github`, because the project config only enables `dance.hack.linear` and `dance.hack.tickets`.
 
 ### Broker / HTTP surface
 - Primary tools: `curl`, declared local service commands from `.factory/services.yaml`, and later hack-managed routed hosts.
@@ -41,6 +42,7 @@ Testing surface findings, required tools, and validation concurrency for this mi
 
 - `services/auth-broker` config/auth verification has env-sensitive paths that can produce weak signals until hardened.
 - The repo does not yet have a real `apps/web` runtime or hack-managed local web host; milestone 2 must establish that path before meaningful browser validation can pass.
+- Detached-worktree `./dist/hack linear sync-project --from linear` runs can hit hidden-ref `refs/hack/tickets` push rejections; for isolated validation, prefer repo-bound `documents|milestones|status-updates pull` plus focused Linear sync regressions unless you intentionally want to exercise remote ticket-ref writes.
 
 ## Flow Validator Guidance: CLI surface
 

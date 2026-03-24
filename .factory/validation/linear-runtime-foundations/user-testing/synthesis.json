@@ -1,0 +1,31 @@
+{
+  "milestone": "linear-runtime-foundations",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 8,
+    "passed": 8,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-LINEAR-001",
+    "VAL-LINEAR-002",
+    "VAL-LINEAR-003",
+    "VAL-LINEAR-004",
+    "VAL-INTEGRATION-001",
+    "VAL-LINEAR-005",
+    "VAL-LINEAR-006",
+    "VAL-LINEAR-007"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [
+    {
+      "target": "user-testing.md",
+      "description": "Added flow-validator isolation guidance for CLI and broker surfaces plus notes about GitHub extension overlay needs and detached-worktree sync-project hidden-ref push behavior.",
+      "source": "setup"
+    }
+  ],
+  "previousRound": null
+}

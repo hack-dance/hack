@@ -67,6 +67,10 @@ import {
 import { touchBranchUsage } from "../lib/branches.ts";
 import { parseDurationMs } from "../lib/duration.ts";
 import {
+  isSlimExecutionMode,
+  renderSlimModeUnavailableMessage,
+} from "../lib/execution-mode.ts";
+import {
   ensureDir,
   ensureGitignoreEntry,
   pathExists,
@@ -5095,6 +5099,17 @@ async function runLogsWithLoki(opts: {
   readonly since: string | undefined;
   readonly until: string | undefined;
 }): Promise<number> {
+  if (isSlimExecutionMode()) {
+    process.stderr.write(
+      `${renderSlimModeUnavailableMessage({
+        feature: "Loki-backed project logs",
+        alternative:
+          "Use `hack logs --compose` when a Docker-backed compose runtime is available.",
+      })}\n`
+    );
+    return 1;
+  }
+
   if (!opts.lokiReachable) {
     process.stderr.write(`Loki is not reachable at ${opts.baseUrl}.\n`);
     process.stderr.write(

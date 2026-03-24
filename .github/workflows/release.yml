@@ -121,6 +121,8 @@ jobs:
           files=(
             "dist/release/hack-${RELEASE_VERSION}-install.sh"
             "dist/release/hack-install.sh"
+            "dist/release/hack-${RELEASE_VERSION}-codex-install.sh"
+            "dist/release/hack-codex-install.sh"
           )
           for file in "${files[@]}"; do
             if [ ! -f "${file}" ]; then

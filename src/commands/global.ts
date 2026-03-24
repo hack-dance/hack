@@ -49,6 +49,10 @@ import { isProcessRunning } from "../daemon/process.ts";
 import { readDaemonStatus } from "../daemon/status.ts";
 import { resolveGlobalConfigPath } from "../lib/config-paths.ts";
 import {
+  isSlimExecutionMode,
+  renderSlimModeUnavailableMessage,
+} from "../lib/execution-mode.ts";
+import {
   ensureDir,
   pathExists,
   readTextFile,
@@ -359,6 +363,23 @@ function muxInstallCommand(opts: {
   return `install ${opts.provider} with your package manager`;
 }
 
+function failIfSlimMode(opts: {
+  readonly feature: string;
+  readonly alternative?: string;
+}): number | null {
+  if (!isSlimExecutionMode()) {
+    return null;
+  }
+
+  process.stderr.write(
+    `${renderSlimModeUnavailableMessage({
+      feature: opts.feature,
+      alternative: opts.alternative,
+    })}\n`
+  );
+  return 1;
+}
+
 async function warnIfSessionsMuxUnavailable(): Promise<void> {
   const mode = await resolveSessionsMuxMode({ project: null });
   const tmuxPath = findExecutableInPath("tmux");
@@ -448,6 +469,15 @@ function networkHasSubnet(raw: string, subnet: string): boolean {
 }
 
 async function globalInstall(): Promise<number> {
+  const slimExit = failIfSlimMode({
+    feature: "hack global install",
+    alternative:
+      "Use `bash scripts/install-codex-slim.sh` for managed Codex or CI environments.",
+  });
+  if (slimExit !== null) {
+    return slimExit;
+  }
+
   const s = spinner();
   s.start("Ensuring gum…");
   const gum = await ensureBundledGumInstalled();
@@ -617,6 +647,13 @@ async function globalInstall(): Promise<number> {
 }
 
 async function globalLogsReset(): Promise<number> {
+  const slimExit = failIfSlimMode({
+    feature: "hack global logs-reset",
+  });
+  if (slimExit !== null) {
+    return slimExit;
+  }
+
   await ensureDockerRunning();
   const paths = getGlobalPaths();
 
@@ -688,6 +725,13 @@ async function writeWithPromptIfDifferent(
 }
 
 export async function globalUp(): Promise<number> {
+  const slimExit = failIfSlimMode({
+    feature: "hack global up",
+  });
+  if (slimExit !== null) {
+    return slimExit;
+  }
+
   await ensureDockerRunning();
   if (isMac()) {
     await ensureMacDnsmasqRunning();
@@ -1186,6 +1230,13 @@ function trimShellError(opts: { readonly text: string }): string {
 }
 
 async function globalDown(): Promise<number> {
+  const slimExit = failIfSlimMode({
+    feature: "hack global down",
+  });
+  if (slimExit !== null) {
+    return slimExit;
+  }
+
   await ensureDockerRunning();
   const paths = getGlobalPaths();
 
@@ -1236,6 +1287,13 @@ async function handleGlobalStatus({
 }
 
 async function globalStatus(opts: { readonly json: boolean }): Promise<number> {
+  const slimExit = failIfSlimMode({
+    feature: "hack global status",
+  });
+  if (slimExit !== null) {
+    return slimExit;
+  }
+
   await ensureDockerRunning();
   const paths = getGlobalPaths();
 
@@ -1978,6 +2036,13 @@ function buildGatewayUrl(opts: {
 }
 
 async function globalTrust(): Promise<number> {
+  const slimExit = failIfSlimMode({
+    feature: "hack global trust",
+  });
+  if (slimExit !== null) {
+    return slimExit;
+  }
+
   if (!isMac()) {
     logger.warn({
       message: "Trust is only implemented for macOS (System keychain).",
@@ -1997,6 +2062,13 @@ async function handleGlobalCa({
   readonly ctx: CliContext;
   readonly args: GlobalCaArgs;
 }): Promise<number> {
+  const slimExit = failIfSlimMode({
+    feature: "hack global ca",
+  });
+  if (slimExit !== null) {
+    return slimExit;
+  }
+
   await ensureDockerRunning();
   const certPath = await exportCaddyLocalCaCert();
   if (!certPath) {
@@ -2020,6 +2092,13 @@ async function handleGlobalCert({
   readonly ctx: CliContext;
   readonly args: GlobalCertArgs;
 }): Promise<number> {
+  const slimExit = failIfSlimMode({
+    feature: "hack global cert",
+  });
+  if (slimExit !== null) {
+    return slimExit;
+  }
+
   let mkcertPath = await findExecutableInPath("mkcert");
   if (!mkcertPath && isMac()) {
     await ensureMacMkcert();
@@ -2093,6 +2172,13 @@ async function handleGlobalLogs({
   readonly ctx: CliContext;
   readonly args: GlobalLogsArgs;
 }): Promise<number> {
+  const slimExit = failIfSlimMode({
+    feature: "hack global logs",
+  });
+  if (slimExit !== null) {
+    return slimExit;
+  }
+
   await ensureDockerRunning();
   const service = (args.positionals.service ?? "caddy").toLowerCase();
   const follow = !args.options.noFollow;

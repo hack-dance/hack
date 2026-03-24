@@ -1,3 +1,8 @@
+## 1.22.0 (2026-03-24)
+
+* feat(env): add env overlays and doctor migration checks ([844d431](https://github.com/hack-dance/hack/commit/844d431))
+* feat(env): bundle plain env values in backend ([d7b87dd](https://github.com/hack-dance/hack/commit/d7b87dd))
+
 ## <small>1.21.3 (2026-03-24)</small>
 
 * fix(env): support multiline values and project-relative secret paths ([78d0860](https://github.com/hack-dance/hack/commit/78d0860))

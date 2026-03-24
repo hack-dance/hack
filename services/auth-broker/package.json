@@ -1,6 +1,6 @@
 {
   "name": "@hack/auth-broker",
-  "version": "1.21.3",
+  "version": "1.22.0",
   "private": true,
   "type": "module",
   "scripts": {

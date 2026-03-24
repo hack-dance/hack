@@ -48,6 +48,8 @@ Planned direction:
 - Portable env values will live in an immutable encrypted bundle artifact.
 - Bundle access will be controlled through explicit project-key sharing.
 - Applying a bundle will still write values back into `.hack/.env` and the configured local secret backend so existing runtime behavior stays intact.
+- Key lifecycle operations will stay split into value rotation, share rotation, and project-key rotation so operators can change trust without accidentally rewriting secrets.
+- Portable env projects will need an explicit recovery path before the last owner or recovery share can be removed.
 
 See `docs/plans/2026-03-13-env-portability-and-secret-management-design.md` for the full portable env and key-sharing model.
 
@@ -172,6 +174,123 @@ Planned CLI behavior when a managed artifact is active:
 This behavior is design intent for the managed artifact workflow; it is not fully implemented by the current CLI yet.
 
 See [docs/plans/2026-03-13-portable-project-env-artifact-schema-design.md](plans/2026-03-13-portable-project-env-artifact-schema-design.md) for the full design rationale and implementation boundary.
+
+## Planned portable key lifecycle flows
+
+Portable env management needs distinct operator flows because the actor intent is different in each case:
+
+| Operator goal | Planned flow | Expected crypto effect | Expected operator impact |
+| --- | --- | --- | --- |
+| Change one or more env values | Value rotation | New immutable bundle version and new bundle key | Recipients keep the same project key access unless the operator also changes sharing |
+| Add or remove recipients | Share rotation | Update wrapped project-key shares only | Existing bundle contents stay unchanged |
+| Restore access after losing local key material while another recovery path still exists | Recovery / share repair | Reissue wrapped project-key access without changing the project key | Values and active bundle versions stay unchanged |
+| Recover from suspected key compromise or re-anchor trust | Project-key rotation | Mint a new project key and re-wrap active bundle keys | Every active recipient share must be regenerated and reapproved |
+
+### Value rotation
+
+Use value rotation when the secret itself changed, such as a new API token or database password.
+
+Planned rules:
+
+- publish a new bundle version instead of mutating an old one
+- mint a fresh bundle key for the new version
+- keep project-key lineage stable unless the operator separately requests project-key rotation
+- preserve audit metadata linking the new bundle to the superseded version
+
+### Share rotation
+
+Use share rotation when the set of people or teams with access changed, but the underlying values do not need to change.
+
+Planned rules:
+
+- add or revoke recipient-specific key-share records
+- do not rewrite bundle ciphertext just because membership changed
+- do not require republishing values unless the operator explicitly wants a clean post-change snapshot
+- treat revocation as preventing fresh unwrap operations, not as proof that an old local copy was erased
+
+### Recovery / share repair
+
+Use recovery or share repair when the underlying values still look trustworthy, but a user or device lost local key material and another valid recovery path still exists.
+
+Planned rules:
+
+- verify that the requesting actor is still entitled to access
+- mint a fresh wrapped project-key share for the recovering actor or replacement device
+- leave bundle versions and project-key lineage unchanged
+- escalate to full project-key rotation if the missing device or actor is now considered untrusted
+
+### Project-key rotation
+
+Use project-key rotation when the project key may be compromised, when a prior owner device is no longer trusted, or when the owner wants a stronger trust reset than share updates alone provide.
+
+Planned rules:
+
+- mint a new project key with a new durable key identifier
+- re-wrap the latest active bundle keys to that new project key
+- require every still-valid recipient share to be recreated against the new project key
+- record lineage so audit logs can explain which key superseded which predecessor
+
+## Recovery and lost-key handling
+
+Hack should not rely on silent plaintext escrow. Recovery must stay explicit, operator-visible, and auditable.
+
+### Required recovery guardrail
+
+Before portable env custody can become the only authority, there must be at least one recovery path:
+
+- an encrypted recovery package exported by the owner
+- a second owner or admin share
+- a designated recovery recipient share created on purpose
+
+If no recovery path remains, Hack should block destructive actions unless the operator uses an explicit forced override.
+
+### Lost-key situations
+
+#### 1. Lost local machine, but another trusted recovery path exists
+
+Planned recovery behavior:
+
+- authenticate as the same Hack owner or another authorized recovery holder
+- unwrap the active project key through the remaining recovery path
+- re-apply the portable bundle into fresh local compatibility storage
+- mint replacement recipient shares for any devices or operators that should keep access
+
+This is a recovery event, not a value rotation event. The secrets stay the same unless compromise is suspected.
+
+#### 2. A recipient loses their local key material
+
+Planned recovery behavior:
+
+- leave bundle versions unchanged
+- reissue that recipient's wrapped project-key share after authorization checks
+- require a full project-key rotation only if the old recipient device is considered untrusted or compromised
+
+#### 3. The project key may be compromised
+
+Planned recovery behavior:
+
+- stop treating simple share reissue as sufficient
+- require project-key rotation
+- regenerate all active recipient and recovery shares from the new key
+- preserve old-key lineage in audit history
+
+#### 4. The final recovery path would be removed
+
+Planned handling:
+
+- reject deleting the last owner or recovery share during normal operations
+- reject project-key rotation that would leave no valid recipient or recovery package
+- require a loud, explicit forced override for destructive break-glass actions and emit an audit event
+
+### UX expectations
+
+The eventual CLI and desktop UX should explain which state the operator is in:
+
+- `Rotate values`: secret contents changed
+- `Update access`: recipients changed
+- `Rotate project key`: trust anchor changed or may be compromised
+- `Recover access`: local key material was lost but a valid recovery path still exists
+- `Reconnect or recreate secrets`: no valid recovery path remains, so operator action must happen outside the portable recovery flow
 
 ## CLI
 

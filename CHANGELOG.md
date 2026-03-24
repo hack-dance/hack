@@ -1,3 +1,7 @@
+## 1.21.0 (2026-03-24)
+
+* feat(release): publish codex slim installer ([b0451e0](https://github.com/hack-dance/hack/commit/b0451e0))
+
 ## 1.20.0 (2026-03-24)
 
 * feat(codex): add slim install path for managed containers ([38f6b78](https://github.com/hack-dance/hack/commit/38f6b78))

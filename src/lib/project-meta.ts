@@ -43,7 +43,12 @@ export type EnvVarMeta = {
   readonly source: HackEnvSource;
   readonly services: readonly string[] | null;
   readonly description?: string;
-  readonly resolvedFrom: "dotenv" | "process" | "keychain" | null;
+  readonly resolvedFrom:
+    | "dotenv"
+    | "process"
+    | "keychain"
+    | "portable_backend"
+    | null;
   readonly hasValue: boolean;
 };
 

@@ -19,6 +19,15 @@ export const optProject = defineOption({
     "Target a registered project by name (from ~/.hack/projects.json)",
 } as const);
 
+export const optEnv = defineOption({
+  name: "env",
+  type: "string",
+  long: "--env",
+  valueHint: "<name|base>",
+  description:
+    "Apply an optional env overlay by name (use 'base' to bypass overlays)",
+} as const);
+
 export const optBranch = defineOption({
   name: "branch",
   type: "string",

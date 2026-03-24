@@ -73,12 +73,14 @@ export async function resolveSecretStore(input: {
   if (secretsConfig.backend === "encrypted_file") {
     return await createEncryptedFileSecretStore({
       projectName: input.projectName,
+      projectDir: input.projectDir,
       secretsConfig,
     });
   }
   if (secretsConfig.backend === "cloud") {
     return await createCloudSecretStore({
       projectName: input.projectName,
+      projectDir: input.projectDir,
       secretsConfig,
     });
   }
@@ -132,15 +134,18 @@ function createKeychainSecretStore(input: {
 
 async function createEncryptedFileSecretStore(input: {
   readonly projectName: string;
+  readonly projectDir?: string;
   readonly secretsConfig: SecretsConfig;
 }): Promise<SecretStore> {
   const filePath = resolveConfiguredPath({
     path: input.secretsConfig.encryptedFile.path,
+    projectDir: input.projectDir,
   });
   const keyPath = resolveConfiguredPath({
     path:
       input.secretsConfig.encryptedFile.keyPath ??
       DEFAULT_ENCRYPTED_FILE_KEY_PATH,
+    projectDir: input.projectDir,
   });
   const encryptionKey = (
     await resolveEncryptedFileKeyMaterial({
@@ -159,6 +164,7 @@ async function createEncryptedFileSecretStore(input: {
 
 async function createCloudSecretStore(input: {
   readonly projectName: string;
+  readonly projectDir?: string;
   readonly secretsConfig: SecretsConfig;
 }): Promise<SecretStore> {
   const provider = input.secretsConfig.cloud.provider;
@@ -189,6 +195,7 @@ async function createCloudSecretStore(input: {
 async function createCloudProviderAdapter(input: {
   readonly provider: CloudSecretProvider;
   readonly projectName: string;
+  readonly projectDir?: string;
   readonly secretsConfig: SecretsConfig;
 }): Promise<
   Pick<SecretStore, "get" | "set" | "delete"> & { readonly location: string }
@@ -197,6 +204,7 @@ async function createCloudProviderAdapter(input: {
     return await createCloudShimAdapter({
       provider: input.provider,
       projectName: input.projectName,
+      projectDir: input.projectDir,
       secretsConfig: input.secretsConfig,
     });
   }
@@ -204,6 +212,7 @@ async function createCloudProviderAdapter(input: {
     return await createCloudShimAdapter({
       provider: input.provider,
       projectName: input.projectName,
+      projectDir: input.projectDir,
       secretsConfig: input.secretsConfig,
     });
   }
@@ -211,12 +220,14 @@ async function createCloudProviderAdapter(input: {
     return await createCloudShimAdapter({
       provider: input.provider,
       projectName: input.projectName,
+      projectDir: input.projectDir,
       secretsConfig: input.secretsConfig,
     });
   }
   return await createCloudShimAdapter({
     provider: input.provider,
     projectName: input.projectName,
+    projectDir: input.projectDir,
     secretsConfig: input.secretsConfig,
   });
 }
@@ -224,6 +235,7 @@ async function createCloudProviderAdapter(input: {
 async function createCloudShimAdapter(input: {
   readonly provider: CloudSecretProvider;
   readonly projectName: string;
+  readonly projectDir?: string;
   readonly secretsConfig: SecretsConfig;
 }): Promise<
   Pick<SecretStore, "get" | "set" | "delete"> & { readonly location: string }
@@ -232,11 +244,13 @@ async function createCloudShimAdapter(input: {
   const prefix = input.secretsConfig.cloud.secretPrefix.trim() || "hack";
   const filePath = resolveConfiguredPath({
     path: input.secretsConfig.encryptedFile.path,
+    projectDir: input.projectDir,
   });
   const keyPath = resolveConfiguredPath({
     path:
       input.secretsConfig.encryptedFile.keyPath ??
       DEFAULT_ENCRYPTED_FILE_KEY_PATH,
+    projectDir: input.projectDir,
   });
   const encryptionKey = (
     await resolveEncryptedFileKeyMaterial({
@@ -342,7 +356,10 @@ function resolveSecretServiceName(input: {
   return `hack-${input.projectName}`;
 }
 
-function resolveConfiguredPath(input: { readonly path: string }): string {
+function resolveConfiguredPath(input: {
+  readonly path: string;
+  readonly projectDir?: string;
+}): string {
   const raw = input.path.trim();
   const home = (process.env.HOME ?? "").trim();
   if (raw === "~") {
@@ -354,22 +371,28 @@ function resolveConfiguredPath(input: { readonly path: string }): string {
   if (raw.startsWith("/")) {
     return raw;
   }
+  if (input.projectDir) {
+    return resolve(input.projectDir, "..", raw);
+  }
   return resolve(home, raw);
 }
 
 export async function provisionEncryptedFileKey(input: {
   readonly keyPath?: string;
   readonly storePath?: string;
+  readonly projectDir?: string;
 }): Promise<{
   readonly keyPath: string;
   readonly source: "env" | "file" | "keychain" | "generated";
 }> {
   const keyPath = resolveConfiguredPath({
     path: input.keyPath ?? DEFAULT_ENCRYPTED_FILE_KEY_PATH,
+    projectDir: input.projectDir,
   });
   const storePath = input.storePath
     ? resolveConfiguredPath({
         path: input.storePath,
+        projectDir: input.projectDir,
       })
     : undefined;
   const resolved = await resolveEncryptedFileKeyMaterial({

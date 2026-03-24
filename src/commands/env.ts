@@ -8,8 +8,7 @@ import {
   defineOption,
   withHandler,
 } from "../cli/command.ts";
-import { optJson, optPath, optProject } from "../cli/options.ts";
-import { PROJECT_ENV_FILENAME } from "../constants.ts";
+import { optEnv, optJson, optPath, optProject } from "../cli/options.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
 import type {
@@ -17,7 +16,10 @@ import type {
   HackEnvValueState,
 } from "../lib/hack-env.ts";
 import {
+  readHackEnvRuntimeConfig,
   removeDotEnvKey,
+  resolveEnvFilePath,
+  resolveEnvSecretKey,
   resolveHackEnv,
   upsertDotEnvValue,
 } from "../lib/hack-env.ts";
@@ -25,6 +27,7 @@ import type { ProjectContext } from "../lib/project.ts";
 import {
   defaultProjectSlugFromPath,
   findProjectContext,
+  parseEnvConfigSelection,
   readProjectConfig,
   sanitizeProjectSlug,
 } from "../lib/project.ts";
@@ -55,7 +58,7 @@ const listSpec = defineCommand({
   name: "list",
   summary: "List env contract vars and resolution state",
   group: "Project",
-  options: [optPath, optProject, optJson, optShowSecrets],
+  options: [optPath, optProject, optEnv, optJson, optShowSecrets],
   positionals: [],
   subcommands: [],
 } as const);
@@ -64,7 +67,7 @@ const setSpec = defineCommand({
   name: "set",
   summary: "Set an env value (.hack/.env or keychain)",
   group: "Project",
-  options: [optPath, optProject, optSecret],
+  options: [optPath, optProject, optEnv, optSecret],
   positionals: [{ name: "spec", required: false }],
   subcommands: [],
 } as const);
@@ -73,7 +76,7 @@ const unsetSpec = defineCommand({
   name: "unset",
   summary: "Unset an env value (.hack/.env and keychain)",
   group: "Project",
-  options: [optPath, optProject],
+  options: [optPath, optProject, optEnv],
   positionals: [{ name: "key", required: false }],
   subcommands: [],
 } as const);
@@ -210,6 +213,16 @@ function describeValueStorageForJson(input: {
     } as const;
   }
 
+  if (input.value.resolvedFrom === "portable_backend") {
+    return {
+      kind: "plaintext",
+      backend: input.storage.localSecrets.backend,
+      location: input.storage.localSecrets.location,
+      mode: input.storage.localSecrets.mode,
+      trust_model: input.storage.localSecrets.trustModel,
+    } as const;
+  }
+
   return {
     kind: "plaintext",
     backend: "dotenv",
@@ -237,6 +250,17 @@ function describeValueStorageForDisplay(input: {
 
   if (storage.backend === "process_env") {
     return "plaintext:process_env";
+  }
+
+  if (input.value.resolvedFrom === "portable_backend") {
+    const providerSuffix =
+      input.storage.localSecrets.backend === "cloud" &&
+      input.storage.localSecrets.provider
+        ? `:${input.storage.localSecrets.provider}`
+        : "";
+    const modeSuffix =
+      input.storage.localSecrets.mode === "shim" ? " [shim]" : "";
+    return `plaintext:${input.storage.localSecrets.backend}${providerSuffix}${modeSuffix} [bundle]`;
   }
 
   return "plaintext:.hack/.env";
@@ -381,6 +405,16 @@ async function resolveProjectName(project: ProjectContext): Promise<string> {
   return sanitizeProjectSlug(raw.length > 0 ? raw : derived);
 }
 
+function resolveRequestedEnvName(input: {
+  readonly envOption: string | undefined;
+}): string | null | undefined {
+  const envName = parseEnvConfigSelection(input.envOption);
+  if (input.envOption !== undefined && envName === undefined) {
+    throw new CliUsageError("Invalid --env value.");
+  }
+  return envName;
+}
+
 async function resolveConfiguredSecretStore(input: {
   readonly project: ProjectContext;
   readonly projectName: string;
@@ -411,10 +445,14 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
   const projectName = await resolveProjectName(project);
   const showSecrets = args.options.showSecrets === true;
   const json = args.options.json === true;
+  const envName = resolveRequestedEnvName({
+    envOption: args.options.env,
+  });
 
   const resolved = await resolveHackEnv({
     projectDir: project.projectDir,
     projectName,
+    envName,
   });
 
   if (json) {
@@ -422,6 +460,13 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
       `${JSON.stringify(
         {
           project: projectName,
+          env_selection: {
+            requested: resolved.envSelection.requestedEnv,
+            default: resolved.envSelection.defaultEnv,
+            effective: resolved.envSelection.effectiveEnv,
+            overlay_path: resolved.envSelection.overlayPath,
+            overlay_exists: resolved.envSelection.overlayExists,
+          },
           storage: serializeEnvStorageForJson({ storage: resolved.storage }),
           vars: resolved.values.map((v) => ({
             key: v.key,
@@ -450,6 +495,12 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
   await display.kv({
     title: "Env storage",
     entries: [
+      [
+        "env_selection",
+        resolved.envSelection.effectiveEnv
+          ? `${resolved.envSelection.effectiveEnv} (base .hack/.env overlaid by ${resolved.envSelection.overlayPath})`
+          : "base (.hack/.env only)",
+      ],
       [
         "contract",
         `${resolved.storage.contract.path} (committed metadata only; no values are stored here)`,
@@ -530,6 +581,7 @@ function serializeEnvStorageForJson(input: {
       path: input.storage.localPlaintext.path,
       exists: input.storage.localPlaintext.exists,
       trust_model: input.storage.localPlaintext.trustModel,
+      mirrored_to_backend: input.storage.localPlaintext.mirroredToBackend,
       fallback: {
         enabled: input.storage.localPlaintext.fallback.enabled,
         source: input.storage.localPlaintext.fallback.source,
@@ -551,8 +603,11 @@ function serializeEnvStorageForJson(input: {
     compatibility_mode: {
       plaintext_target: input.storage.localPlaintext.path,
       secret_backend: input.storage.localSecrets.backend,
-      summary:
-        "Plaintext values materialize to .hack/.env and secret values materialize to the configured secret backend.",
+      plaintext_mirrored_to_backend:
+        input.storage.localPlaintext.mirroredToBackend,
+      summary: input.storage.localPlaintext.mirroredToBackend
+        ? "Plaintext values are bundled in the configured backend and materialize to .hack/.env for compatibility."
+        : "Plaintext values materialize to .hack/.env and secret values materialize to the configured secret backend.",
     },
   };
 }
@@ -568,6 +623,12 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
   });
   const projectName = await resolveProjectName(project);
   const storeSecret = args.options.secret === true;
+  const runtimeConfig = await readHackEnvRuntimeConfig({
+    projectDir: project.projectDir,
+  });
+  const envName = resolveRequestedEnvName({
+    envOption: args.options.env,
+  });
 
   const spec = (args.positionals.spec ?? "").trim();
   const [keyFromSpec, valueFromSpec] = parseKeyValueSpec(spec);
@@ -581,17 +642,45 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
 
   if (storeSecret) {
     const store = await resolveConfiguredSecretStore({ project, projectName });
-    await store.set({ key, value });
+    await store.set({
+      key: resolveEnvSecretKey({ key, envName }),
+      value,
+    });
     logger.success({
-      message: `Stored secret "${key}" in ${formatSecretStoreDescriptor({ descriptor: store.descriptor })}`,
+      message: `Stored secret "${key}" in ${formatSecretStoreDescriptor({ descriptor: store.descriptor })}${envName ? ` (env ${envName})` : ""}`,
     });
     return 0;
   }
 
-  const envFile = resolve(project.projectDir, PROJECT_ENV_FILENAME);
-  const result = await upsertDotEnvValue({ envFile, key, value });
+  const envFile = resolveEnvFilePath({
+    projectDir: project.projectDir,
+    envName,
+  });
+  const [result, mirroredToBackend] = await Promise.all([
+    upsertDotEnvValue({ envFile, key, value }),
+    runtimeConfig.storePlaintextInBackend
+      ? resolveConfiguredSecretStore({ project, projectName }).then(
+          async (store) => {
+            await store.set({
+              key: resolveEnvSecretKey({ key, envName }),
+              value,
+            });
+            return formatSecretStoreDescriptor({
+              descriptor: store.descriptor,
+            });
+          }
+        )
+      : Promise.resolve<string | null>(null),
+  ]);
   logger.success({
-    message: result.changed ? `Updated ${envFile}` : "No changes needed.",
+    message: [
+      result.changed ? `Updated ${envFile}` : `No changes needed in ${envFile}`,
+      mirroredToBackend
+        ? `Mirrored portable plaintext to ${mirroredToBackend}`
+        : null,
+    ]
+      .filter((value) => typeof value === "string")
+      .join(" • "),
   });
   return 0;
 };
@@ -607,11 +696,14 @@ const handleEnvUnset: CommandHandlerFor<typeof unsetSpec> = async ({
   });
   const projectName = await resolveProjectName(project);
   const store = await resolveConfiguredSecretStore({ project, projectName });
+  const envName = resolveRequestedEnvName({
+    envOption: args.options.env,
+  });
 
   const key = await resolveEnvKey({ key: (args.positionals.key ?? "").trim() });
 
   const ok = await confirm({
-    message: `Unset "${key}" from ${project.projectDir}/.env and ${formatSecretStoreDescriptor({ descriptor: store.descriptor })}?`,
+    message: `Unset "${key}" from ${resolveEnvFilePath({ projectDir: project.projectDir, envName })} and ${formatSecretStoreDescriptor({ descriptor: store.descriptor })}${envName ? ` (env ${envName})` : ""}?`,
     initialValue: true,
   });
   if (isCancel(ok)) {
@@ -621,10 +713,15 @@ const handleEnvUnset: CommandHandlerFor<typeof unsetSpec> = async ({
     return 0;
   }
 
-  const envFile = resolve(project.projectDir, PROJECT_ENV_FILENAME);
+  const envFile = resolveEnvFilePath({
+    projectDir: project.projectDir,
+    envName,
+  });
   const [dotenvResult, secretDeleted] = await Promise.all([
     removeDotEnvKey({ envFile, key }),
-    store.delete({ key }),
+    store.delete({
+      key: resolveEnvSecretKey({ key, envName }),
+    }),
   ]);
 
   logger.success({
@@ -640,8 +737,11 @@ const handleEnvUnset: CommandHandlerFor<typeof unsetSpec> = async ({
 
 const handleEnvBackendStatus: CommandHandlerFor<
   typeof backendStatusSpec
-> = async ({ args }): Promise<number> => {
-  const controlPlane = await readControlPlaneConfig({});
+> = async ({ ctx, args }): Promise<number> => {
+  const project = await findProjectContext(ctx.cwd);
+  const controlPlane = await readControlPlaneConfig({
+    ...(project ? { projectDir: project.projectDir } : {}),
+  });
   const secretsConfig = controlPlane.config.secrets;
   const backendStatus = describeBackendTrustStatus({
     backend: secretsConfig.backend,
@@ -653,6 +753,7 @@ const handleEnvBackendStatus: CommandHandlerFor<
         {
           backend: secretsConfig.backend,
           allow_env_auth_refs: secretsConfig.allowEnvAuthRefs,
+          store_plaintext_in_backend: secretsConfig.storePlaintextInBackend,
           encrypted_file: secretsConfig.encryptedFile,
           encrypted_file_key_env: ENCRYPTED_FILE_KEY_ENV,
           cloud: secretsConfig.cloud,
@@ -660,8 +761,9 @@ const handleEnvBackendStatus: CommandHandlerFor<
             storage_mode: backendStatus.storageMode,
             trust_model: backendStatus.trustModel,
             portability: backendStatus.portability,
-            plaintext_compatibility:
-              "Secret keys use this backend, while non-secret .env-compatible values still live in .hack/.env.",
+            plaintext_compatibility: secretsConfig.storePlaintextInBackend
+              ? "Secret keys and plain env values are both bundled in this backend, while .hack/.env remains a compatibility output."
+              : "Secret keys use this backend, while non-secret .env-compatible values still live in .hack/.env.",
           },
         },
         null,
@@ -679,6 +781,10 @@ const handleEnvBackendStatus: CommandHandlerFor<
         "allow_env_auth_refs",
         secretsConfig.allowEnvAuthRefs ? "true" : "false",
       ],
+      [
+        "store_plaintext_in_backend",
+        secretsConfig.storePlaintextInBackend ? "true" : "false",
+      ],
       ["encrypted_file_path", secretsConfig.encryptedFile.path],
       ["encrypted_file_key_path", secretsConfig.encryptedFile.keyPath],
       ["encrypted_file_key_env", ENCRYPTED_FILE_KEY_ENV],
@@ -690,7 +796,9 @@ const handleEnvBackendStatus: CommandHandlerFor<
       ["portability", backendStatus.portability],
       [
         "plaintext_compatibility",
-        "Non-secret values remain .env-compatible via .hack/.env.",
+        secretsConfig.storePlaintextInBackend
+          ? "Plain env values are bundled in the backend and still materialize to .hack/.env."
+          : "Non-secret values remain .env-compatible via .hack/.env.",
       ],
     ],
   });
@@ -747,6 +855,7 @@ const handleEnvBackendUse: CommandHandlerFor<typeof backendUseSpec> = async ({
         {
           backend: secretsConfig.backend,
           allow_env_auth_refs: secretsConfig.allowEnvAuthRefs,
+          store_plaintext_in_backend: secretsConfig.storePlaintextInBackend,
           encrypted_file: secretsConfig.encryptedFile,
           encrypted_file_key_env: ENCRYPTED_FILE_KEY_ENV,
           encrypted_file_key_provisioned: provisionedKey,

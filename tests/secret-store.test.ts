@@ -1,8 +1,18 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveSecretStore } from "../src/lib/secret-store.ts";
+import {
+  provisionEncryptedFileKey,
+  resolveSecretStore,
+} from "../src/lib/secret-store.ts";
 
 let tempDir: string | null = null;
 let previousHome: string | undefined;
@@ -164,6 +174,64 @@ test("encrypted_file backend reads key material from configured keyPath when env
     key: "API_TOKEN",
   });
   expect(resolved).toBe("stable-key-value");
+});
+
+test("project config resolves encrypted_file paths relative to the repo root", async () => {
+  if (!tempDir) {
+    throw new Error("Missing temp dir");
+  }
+  process.env.HACK_SECRETS_FILE_KEY = undefined;
+  const projectRoot = join(tempDir, "repo");
+  const projectDir = join(projectRoot, ".hack");
+  const storePath = join(projectRoot, ".hack-secrets.enc.json");
+  const keyPath = join(projectRoot, ".hack-secrets-file.key");
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(
+    join(tempDir, "hack.config.json"),
+    `${JSON.stringify({}, null, 2)}\n`
+  );
+  await writeFile(
+    join(projectDir, "hack.config.json"),
+    `${JSON.stringify(
+      {
+        name: "repo-app",
+        controlPlane: {
+          secrets: {
+            backend: "encrypted_file",
+            encryptedFile: {
+              path: ".hack-secrets.enc.json",
+              keyPath: ".hack-secrets-file.key",
+            },
+          },
+        },
+      },
+      null,
+      2
+    )}\n`
+  );
+
+  const store = await resolveSecretStore({
+    projectName: "repo-app",
+    projectDir,
+  });
+  expect(store.descriptor.backend).toBe("encrypted_file");
+  expect(store.descriptor.location).toBe(storePath);
+
+  await store.set({
+    key: "API_TOKEN",
+    value: "repo-relative-secret",
+  });
+
+  expect(await store.get({ key: "API_TOKEN" })).toBe("repo-relative-secret");
+  await access(storePath);
+
+  const provisioned = await provisionEncryptedFileKey({
+    projectDir,
+    storePath: ".hack-secrets.enc.json",
+    keyPath: ".hack-secrets-file.key",
+  });
+  expect(provisioned.keyPath).toBe(keyPath);
+  await access(keyPath);
 });
 
 async function writeGlobalConfig(input: {

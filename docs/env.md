@@ -30,6 +30,14 @@ Hack currently has three env layers, and they should be understood separately:
 - Local values: `.hack/.env` is the usual plaintext file for `plain_env`, and `plain_env` falls back to the current process env when `.hack/.env` does not provide a value.
 - Local secrets: the configured secret backend stores secret values for keys that should not live in `.hack/.env`. In `cloud` mode today, this is still a local shim over encrypted-file storage, not a remote portable copy.
 
+Opt-in portable bundle mode:
+
+- Set `controlPlane.secrets.storePlaintextInBackend=true` in project config when you want `plain_env` values mirrored into the configured backend alongside secret values.
+- In that mode, the backend copy becomes the portable source of truth and `.hack/.env` becomes a compatibility materialization target.
+- This works best with the repo-relative `encrypted_file` backend, because the encrypted file plus key can move with the repo onboarding flow.
+- Optional env overlays can then be selected with `--env=<name>`, which layers `.hack/.env.<name>` and backend-scoped values on top of the base `.hack/.env` values.
+- Projects can set `defaultEnvConfig` (or `default_env_config`) in `.hack/hack.config.json` so `hack up`, `hack env`, and related commands automatically use that overlay unless `--env=base` is passed.
+
 Current status:
 
 - The contract is portable and safe to commit.
@@ -56,9 +64,39 @@ See `docs/plans/2026-03-13-env-portability-and-secret-management-design.md` for 
 ## Files and storage
 
 - `.hack/hack.env.json` (committed): declares env vars, required vs optional, per-service scope, and where values should come from.
-- `.hack/.env` (local plaintext file): stores non-secret values (`source: "plain_env"`). Most repos should gitignore it, but Hack does not currently enforce that.
+- `.hack/.env` (local plaintext file): stores non-secret values (`source: "plain_env"`). Most repos should gitignore it, but Hack does not currently enforce that. When `controlPlane.secrets.storePlaintextInBackend=true`, this file is a derived compatibility output rather than the canonical portable copy.
 - `process.env` (ambient fallback): supplies `plain_env` values when `.hack/.env` is missing a key.
 - Configured secret backend (`controlPlane.secrets.backend`): stores secret values for `source: "keychain"` contract vars.
+
+## Env overlay model
+
+Hack now supports a Pulumi-like overlay convention without changing the base contract file:
+
+- Base contract: `.hack/hack.env.json`
+- Base plaintext compatibility file: `.hack/.env`
+- Optional overlay plaintext compatibility file: `.hack/.env.<env>`
+- Optional overlay selection: `hack ... --env=qa`
+- Optional project default: `"defaultEnvConfig": "qa"` in `.hack/hack.config.json`
+
+Resolution order:
+
+1. selected overlay value (`--env=qa` or `defaultEnvConfig`)
+2. base value
+3. `process.env` fallback for `plain_env`
+
+Secret-backed overlay values are stored in the configured backend under env-scoped keys, so one encrypted backend can carry base plus multiple overlays together.
+
+Use `--env=base` to bypass the configured default overlay and operate on the base env only.
+
+## Migrating older repos
+
+For older repos that only used `.hack/.env`:
+
+1. Keep `.hack/hack.env.json` as the base contract.
+2. Enable `controlPlane.secrets.storePlaintextInBackend=true`.
+3. Re-save existing values with `hack env set KEY=VALUE` so plaintext values are mirrored into the portable backend bundle.
+4. Add overlay-specific values with `hack env set --env=qa KEY=VALUE` or `hack env set --env=prod KEY=VALUE`.
+5. Run `hack doctor` to confirm whether the repo is still on legacy local-only plaintext mode or is using bundled base/overlay envs.
 
 ## Contract format (`.hack/hack.env.json`)
 
@@ -300,12 +338,13 @@ The eventual CLI and desktop UX should explain which state the operator is in:
   - exits `1` if required vars are missing
 - `hack env set KEY=VALUE`
   - writes to `.hack/.env`
+  - if `controlPlane.secrets.storePlaintextInBackend=true`, also mirrors plaintext into the configured backend bundle
 - `hack env set --secret KEY=VALUE`
   - stores in the configured secret backend (`keychain` | `encrypted_file` | `cloud`)
 - `hack env unset KEY`
   - removes from `.hack/.env` and deletes the secret backend entry (best-effort)
 - `hack env backend status [--json]`
-  - shows configured global backend strategy (`controlPlane.secrets`) plus storage-mode, trust-model, portability, and `.env` compatibility guidance
+  - shows the effective backend strategy (`controlPlane.secrets`) for the current project when run inside a repo, otherwise the global default
 - `hack env backend use <keychain|encrypted_file|cloud> [--store-path <path>] [--provider <aws|gcp|azure|vault>] [--secret-project <id>] [--secret-prefix <prefix>]`
   - sets global backend strategy for multi-node/env secret storage
 
@@ -319,7 +358,7 @@ Notes:
 
 Recommended user-facing language:
 
-- **Plaintext** means a value that can live in `.hack/.env` for local compatibility and may also fall back from `process.env`.
+- **Plaintext** means a value that can live in `.hack/.env` for local compatibility and may also fall back from `process.env`. In backend-bundle mode, the same logical plaintext value is also mirrored into the configured backend.
 - **Encrypted** means a value stored through the configured secret backend, such as OS keychain or encrypted-file storage.
 - **Cloud backend** currently means provider-targeted intent with local encrypted custody today, not automatic remote publication of decryptable project env values.
 - **Portable env not configured** means local workflows still work, but values remain machine-local until explicit encrypted bundle flows are introduced and activated.

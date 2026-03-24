@@ -2935,7 +2935,9 @@ async function handleProjectArtifactFamilyCommand(input: {
     runtime: {
       linear: runtime.value.linear,
       profileId: runtime.value.profileId,
-      projectDir: input.ctx.project.projectDir,
+      projectDir: resolveProjectArtifactRepoRoot({
+        project: input.ctx.project,
+      }),
       projectId: selectedTarget.target.projectId,
     },
   });
@@ -2953,6 +2955,15 @@ async function handleProjectArtifactFamilyCommand(input: {
     payload: result.payload,
   });
   return 0;
+}
+
+function resolveProjectArtifactRepoRoot(input: {
+  readonly project: ExtensionCommandContext["project"];
+}): string {
+  if (!input.project) {
+    throw new Error("Project context is required for project artifacts.");
+  }
+  return input.project.projectRoot;
 }
 
 function parseProjectArtifactFamilyArgs(input: {
@@ -10610,6 +10621,7 @@ export const __testOnly = {
   parseProjectsArgs,
   parseRemoveAssigneeMappingArgs,
   parseRemoveAutosyncSubscriptionArgs,
+  resolveProjectArtifactRepoRoot,
   runProjectArtifactCommand,
   resolveProjectLinearBinding,
   resolveProjectPullTargets,

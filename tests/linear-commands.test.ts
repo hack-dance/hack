@@ -8,6 +8,7 @@ import {
   __testOnly,
   LINEAR_COMMANDS,
 } from "../src/control-plane/extensions/linear/commands.ts";
+import type { ProjectContext } from "../src/lib/project.ts";
 
 let tempDir: string | null = null;
 
@@ -2934,6 +2935,19 @@ test("parseProjectStatusUpdatesArgs parses publish verbs", () => {
     path: ".hack/linear/projects/proj_123/status-updates/drafts/2026-03-14-weekly.md",
     json: false,
   });
+});
+
+test("resolveProjectArtifactRepoRoot uses the repo root instead of the .hack config directory", () => {
+  const project: ProjectContext = {
+    projectRoot: "/repo",
+    projectDirName: ".hack",
+    projectDir: "/repo/.hack",
+    composeFile: "/repo/.hack/docker-compose.yml",
+    envFile: "/repo/.hack/.env",
+    configFile: "/repo/.hack/hack.config.json",
+  };
+
+  expect(__testOnly.resolveProjectArtifactRepoRoot({ project })).toBe("/repo");
 });
 
 test("parseProjectDocumentsArgs rejects archive until destructive flows are implemented", () => {

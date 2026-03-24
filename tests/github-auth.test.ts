@@ -128,6 +128,7 @@ function createControlPlaneConfig(overrides?: {
     secrets: {
       backend: "keychain",
       allowEnvAuthRefs: true,
+      storePlaintextInBackend: false,
       encryptedFile: {
         path: "~/.hack/secrets.enc.json",
         keyPath: "~/.hack/secrets-file.key",

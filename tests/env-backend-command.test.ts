@@ -528,6 +528,115 @@ test(
   { timeout: 40_000 }
 );
 
+test(
+  "env set can bundle plain_env values into encrypted backend for portability",
+  async () => {
+    if (!tempDir) {
+      throw new Error("Missing temp dir");
+    }
+    process.env.HACK_SECRETS_FILE_KEY = "env-backend-command-key";
+    const projectRoot = resolve(tempDir, "repo-bundled");
+    const projectDir = resolve(projectRoot, ".hack");
+    const storePath = resolve(projectRoot, ".hack-secrets.enc.json");
+    await mkdir(projectDir, { recursive: true });
+    await writeFile(
+      resolve(projectDir, "docker-compose.yml"),
+      "services: {}\n"
+    );
+    await writeFile(
+      resolve(projectDir, "hack.config.json"),
+      `${JSON.stringify(
+        {
+          name: "env-bundled-project",
+          controlPlane: {
+            secrets: {
+              backend: "encrypted_file",
+              storePlaintextInBackend: true,
+              encryptedFile: {
+                path: storePath,
+              },
+            },
+          },
+        },
+        null,
+        2
+      )}\n`
+    );
+    await writeFile(
+      resolve(projectDir, "hack.env.json"),
+      `${JSON.stringify(
+        {
+          version: 1,
+          vars: [
+            {
+              key: "PUBLIC_URL",
+              required: true,
+              source: "plain_env",
+            },
+          ],
+        },
+        null,
+        2
+      )}\n`
+    );
+
+    const setResult = await runHack({
+      args: ["env", "set", "PUBLIC_URL=https://example.test"],
+      env: {
+        ...process.env,
+        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
+        HACK_SECRETS_FILE_KEY: "env-backend-command-key",
+      },
+      cwd: projectRoot,
+    });
+    expect(setResult.exitCode).toBe(0);
+    expect(`${setResult.stdout}\n${setResult.stderr}`).toContain(
+      "Mirrored portable plaintext"
+    );
+
+    const envText = await readFile(resolve(projectDir, ".env"), "utf8");
+    expect(envText).toContain("PUBLIC_URL=");
+
+    await rm(resolve(projectDir, ".env"), { force: true });
+
+    const listResult = await runHack({
+      args: ["env", "list", "--json", "--show-secrets"],
+      env: {
+        ...process.env,
+        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
+        HACK_SECRETS_FILE_KEY: "env-backend-command-key",
+      },
+      cwd: projectRoot,
+    });
+    expect(listResult.exitCode).toBe(0);
+    const listJson = JSON.parse(listResult.stdout) as {
+      readonly storage: {
+        readonly local_plaintext: {
+          readonly mirrored_to_backend: boolean;
+        };
+        readonly portable_state: {
+          readonly status: string;
+        };
+      };
+      readonly vars: ReadonlyArray<{
+        readonly key: string;
+        readonly resolved_from: string | null;
+        readonly value: string | null;
+        readonly storage: {
+          readonly backend: string;
+        };
+      }>;
+    };
+    expect(listJson.storage.local_plaintext.mirrored_to_backend).toBe(true);
+    expect(listJson.storage.portable_state.status).toBe("backend_bundle");
+    const publicUrl = listJson.vars.find((entry) => entry.key === "PUBLIC_URL");
+    expect(publicUrl?.resolved_from).toBe("portable_backend");
+    expect(publicUrl?.storage.backend).toBe("encrypted_file");
+    expect(publicUrl?.value).toBe("https://example.test");
+  },
+  { timeout: 40_000 }
+);
+
 async function runHack(input: {
   readonly args: readonly string[];
   readonly env: NodeJS.ProcessEnv;

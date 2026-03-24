@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { PROJECT_ENV_FILENAME } from "../../constants.ts";
 import { isRecord } from "../../lib/guards.ts";
 import {
+  readHackEnvRuntimeConfig,
   removeDotEnvKey,
   resolveHackEnv,
   upsertDotEnvValue,
@@ -27,7 +28,12 @@ export type EnvValueState = {
   readonly source: "plain_env" | "keychain";
   readonly services: readonly string[] | null;
   readonly description?: string;
-  readonly resolvedFrom: "dotenv" | "process" | "keychain" | null;
+  readonly resolvedFrom:
+    | "dotenv"
+    | "process"
+    | "keychain"
+    | "portable_backend"
+    | null;
   readonly hasValue: boolean;
 };
 
@@ -197,6 +203,9 @@ async function handleSetEnv(opts: {
     projectName: registration.name,
     projectDir: project.projectDir,
   });
+  const runtimeConfig = await readHackEnvRuntimeConfig({
+    projectDir: project.projectDir,
+  });
 
   const secret = parsed.value.secret === true;
   if (secret) {
@@ -234,6 +243,26 @@ async function handleSetEnv(opts: {
     key: parsed.value.key,
     value: parsed.value.value,
   });
+  if (runtimeConfig.storePlaintextInBackend) {
+    try {
+      await secretStore.set({
+        key: parsed.value.key,
+        value: parsed.value.value,
+      });
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : "Secret backend error";
+      return jsonResponse(
+        {
+          error: "secret_store_error",
+          message,
+          backend: secretStore.descriptor.backend,
+          location: secretStore.descriptor.location,
+        },
+        500
+      );
+    }
+  }
   return jsonResponse({ status: "ok", stored: "dotenv" }, 200);
 }
 

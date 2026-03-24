@@ -4,6 +4,7 @@ import {
   PROJECT_ENV_CONTRACT_FILENAME,
   PROJECT_ENV_FILENAME,
 } from "../constants.ts";
+import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { parseDotEnv, serializeDotEnv } from "./env.ts";
 import { readTextFile, writeTextFileIfChanged } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
@@ -41,7 +42,12 @@ export type HackEnvValueState = {
   readonly source: HackEnvSource;
   readonly services: readonly string[] | null;
   readonly value: string | null;
-  readonly resolvedFrom: "dotenv" | "process" | "keychain" | null;
+  readonly resolvedFrom:
+    | "dotenv"
+    | "process"
+    | "keychain"
+    | "portable_backend"
+    | null;
 };
 
 export type HackEnvResolveResult = {
@@ -58,8 +64,8 @@ export type HackEnvResolveResult = {
 };
 
 export type HackEnvPortableStateSummary = {
-  readonly status: "not_configured";
-  readonly trustModel: "local_only";
+  readonly status: "not_configured" | "backend_bundle";
+  readonly trustModel: "local_only" | "encrypted_backend_bundle";
   readonly message: string;
 };
 
@@ -72,6 +78,7 @@ export type HackEnvStorageSummary = {
     readonly path: string;
     readonly exists: boolean;
     readonly trustModel: "unenforced_plaintext_file";
+    readonly mirroredToBackend: boolean;
     readonly fallback: {
       readonly enabled: true;
       readonly source: "process_env";
@@ -125,6 +132,9 @@ export async function resolveHackEnv(opts: {
 }): Promise<HackEnvResolveResult> {
   const read = await readHackEnvContract({ projectDir: opts.projectDir });
   const contract = read.contract;
+  const runtimeConfig = await readHackEnvRuntimeConfig({
+    projectDir: opts.projectDir,
+  });
   const secretStore = await resolveSecretStore({
     projectName: opts.projectName,
     projectDir: opts.projectDir,
@@ -157,6 +167,27 @@ export async function resolveHackEnv(opts: {
         envForCompose[key] = value;
       }
       continue;
+    }
+
+    if (runtimeConfig.storePlaintextInBackend) {
+      const fromPortableBackend = await secretStore.get({
+        key,
+      });
+      if (
+        typeof fromPortableBackend === "string" &&
+        fromPortableBackend.length > 0
+      ) {
+        values.push({
+          key,
+          required: v.required,
+          source: v.source,
+          services: v.services,
+          value: fromPortableBackend,
+          resolvedFrom: "portable_backend",
+        });
+        envForCompose[key] = fromPortableBackend;
+        continue;
+      }
     }
 
     const fromDotenv = dotenv[key];
@@ -214,6 +245,7 @@ export async function resolveHackEnv(opts: {
         path: envPath,
         exists: envExists,
         trustModel: "unenforced_plaintext_file",
+        mirroredToBackend: runtimeConfig.storePlaintextInBackend,
         fallback: {
           enabled: true,
           source: "process_env",
@@ -228,15 +260,35 @@ export async function resolveHackEnv(opts: {
             : "local_secret_backend",
       },
       portableState: {
-        status: "not_configured",
-        trustModel: "local_only",
-        message:
-          "Project env values are not portable across machines by default. Portable encrypted bundles are not configured yet.",
+        ...describePortableState({
+          storePlaintextInBackend: runtimeConfig.storePlaintextInBackend,
+          localSecrets: {
+            ...secretStore.descriptor,
+            trustModel:
+              secretStore.descriptor.mode === "shim"
+                ? "local_secret_backend_shim"
+                : "local_secret_backend",
+          },
+        }),
       },
     },
     values,
     missingRequired,
     envForCompose,
+  };
+}
+
+export async function readHackEnvRuntimeConfig(opts: {
+  readonly projectDir: string;
+}): Promise<{
+  readonly storePlaintextInBackend: boolean;
+}> {
+  const controlPlane = await readControlPlaneConfig({
+    projectDir: opts.projectDir,
+  });
+  return {
+    storePlaintextInBackend:
+      controlPlane.config.secrets.storePlaintextInBackend,
   };
 }
 
@@ -354,4 +406,43 @@ function serializeDotEnvStable(env: Record<string, string>): string {
     }
   }
   return serializeDotEnv(sortedEnv);
+}
+
+function describePortableState(input: {
+  readonly storePlaintextInBackend: boolean;
+  readonly localSecrets: HackEnvStorageSummary["localSecrets"];
+}): HackEnvPortableStateSummary {
+  if (!input.storePlaintextInBackend) {
+    return {
+      status: "not_configured",
+      trustModel: "local_only",
+      message:
+        "Project env values are not portable across machines by default. Portable encrypted bundles are not configured yet.",
+    };
+  }
+
+  if (input.localSecrets.backend === "encrypted_file") {
+    return {
+      status: "backend_bundle",
+      trustModel: "encrypted_backend_bundle",
+      message:
+        "Plaintext and secret env values are bundled in the encrypted backend. Share the encrypted file and key to move the full env set across machines.",
+    };
+  }
+
+  if (input.localSecrets.backend === "cloud") {
+    return {
+      status: "backend_bundle",
+      trustModel: "encrypted_backend_bundle",
+      message:
+        "Plaintext and secret env values are bundled in the backend, but cloud mode still uses a local encrypted-file shim today.",
+    };
+  }
+
+  return {
+    status: "backend_bundle",
+    trustModel: "local_only",
+    message:
+      "Plaintext and secret env values are bundled in the keychain backend, but that backend remains machine-local.",
+  };
 }

@@ -252,6 +252,7 @@ const SecretsCloudConfigSchema = z.object({
 const SecretsConfigInputSchema = z.object({
   backend: SecretsBackendSchema.optional(),
   allowEnvAuthRefs: z.boolean().optional(),
+  storePlaintextInBackend: z.boolean().optional(),
   encryptedFile: SecretsEncryptedFileConfigInputSchema.optional(),
   cloud: SecretsCloudConfigInputSchema.optional(),
 });
@@ -259,6 +260,7 @@ const SecretsConfigInputSchema = z.object({
 const SecretsConfigSchema = z.object({
   backend: SecretsBackendSchema.default("keychain"),
   allowEnvAuthRefs: z.boolean().default(true),
+  storePlaintextInBackend: z.boolean().default(false),
   encryptedFile: SecretsEncryptedFileConfigSchema.default(
     SecretsEncryptedFileConfigSchema.parse({})
   ),

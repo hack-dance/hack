@@ -621,6 +621,38 @@ export function renderProjectConfigSchemaJson(): string {
               offlineAfterMs: { type: "number" },
             },
           },
+          secrets: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              backend: {
+                type: "string",
+                enum: ["keychain", "encrypted_file", "cloud"],
+              },
+              allowEnvAuthRefs: { type: "boolean" },
+              storePlaintextInBackend: { type: "boolean" },
+              encryptedFile: {
+                type: "object",
+                additionalProperties: true,
+                properties: {
+                  path: { type: "string" },
+                  keyPath: { type: "string" },
+                },
+              },
+              cloud: {
+                type: "object",
+                additionalProperties: true,
+                properties: {
+                  provider: {
+                    type: "string",
+                    enum: ["aws", "gcp", "azure", "vault"],
+                  },
+                  project: { type: "string" },
+                  secretPrefix: { type: "string" },
+                },
+              },
+            },
+          },
           nodeId: { type: "string" },
         },
       },

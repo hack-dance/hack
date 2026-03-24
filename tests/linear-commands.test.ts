@@ -586,6 +586,48 @@ test("buildLinearProjectManagementSummary points broker auth failures at hack au
   expect(summary.nextSteps).toEqual(["Run `hack auth login`."]);
 });
 
+test("buildLinearProjectManagementSummary points env-only failures at env repair", () => {
+  const summary = __testOnly.buildLinearProjectManagementSummary({
+    status: {
+      extensionId: "dance.hack.linear",
+      selectedProfile: "work",
+      selectedSource: "command_flags",
+      defaultProfile: "work",
+      selectedMissing: false,
+      authRef: "linear.api.work",
+      service: "hack-linear-auth",
+      tokenEnvFallback: "HACK_LINEAR_API_TOKEN",
+      apiUrl: "https://api.linear.app/graphql",
+      accountId: null,
+      accountName: null,
+      accountEmail: null,
+      tokenResolved: false,
+      tokenSource: null,
+      tokenExpiresAt: null,
+      error:
+        'Missing Linear token for profile "work" while HACK_LINEAR_PREFER_ENV_TOKEN_ONLY=true. Set HACK_LINEAR_API_TOKEN, or unset HACK_LINEAR_PREFER_ENV_TOKEN_ONLY to allow saved local access.',
+      profileError: null,
+      ok: false,
+    },
+    binding: {
+      profileId: "work",
+      projectId: "proj_default",
+      projectName: "Default",
+      teamId: "team_default",
+      additionalProjects: [],
+    },
+  });
+
+  expect(summary.repair).toEqual({
+    reason:
+      "Env-only Linear access is enabled but the token env var is missing.",
+    command: "export HACK_LINEAR_API_TOKEN=<linear-token>",
+  });
+  expect(summary.nextSteps).toEqual([
+    "Run `export HACK_LINEAR_API_TOKEN=<linear-token>`.",
+  ]);
+});
+
 test("buildLinearProjectManagementSummary points invalid profile bindings at setup repair", () => {
   const summary = __testOnly.buildLinearProjectManagementSummary({
     status: {

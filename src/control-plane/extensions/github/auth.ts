@@ -8,6 +8,8 @@ import type { ControlPlaneConfig } from "../../sdk/config.ts";
 const GITHUB_EXTENSION_ID = "dance.hack.github";
 const DEFAULT_GITHUB_PROFILE_ID = "default";
 const DEFAULT_GITHUB_TOKEN_ENV = "HACK_GITHUB_APP_TOKEN";
+const DEFAULT_GITHUB_PREFER_ENV_TOKEN_ONLY_ENV =
+  "HACK_GITHUB_PREFER_ENV_TOKEN_ONLY";
 const DEFAULT_GITHUB_PRIVATE_KEY_ENV = "HACK_GITHUB_APP_PRIVATE_KEY";
 const DEFAULT_GITHUB_AUTH_REF = "github.app.default";
 const GITHUB_SECRET_SERVICE = "hack-github-auth";
@@ -356,8 +358,11 @@ export async function resolveGitHubAppToken(input: {
   const store = input.store ?? DEFAULT_SECRET_STORE;
   const nowMs = input.nowMs ?? Date.now();
   const envToken = (env[settings.tokenEnv] ?? "").trim();
+  const preferEnvTokenOnly =
+    input.preferEnvTokenOnly ??
+    parseOptionalBooleanFlag(env[DEFAULT_GITHUB_PREFER_ENV_TOKEN_ONLY_ENV]);
 
-  if (input.preferEnvTokenOnly) {
+  if (preferEnvTokenOnly) {
     if (envToken.length > 0) {
       return {
         ok: true,
@@ -372,7 +377,7 @@ export async function resolveGitHubAppToken(input: {
     }
     return {
       ok: false,
-      error: `Missing GitHub token for profile "${profileId}". Store one with \`hack x github connect --profile ${profileId}\`, or set ${settings.tokenEnv}.`,
+      error: `Missing GitHub token for profile "${profileId}" while ${DEFAULT_GITHUB_PREFER_ENV_TOKEN_ONLY_ENV}=true. Set ${settings.tokenEnv}, or unset ${DEFAULT_GITHUB_PREFER_ENV_TOKEN_ONLY_ENV} to allow saved local access.`,
       tokenEnv: settings.tokenEnv,
       authRef: settings.authRef,
       service: settings.service,
@@ -1085,4 +1090,30 @@ function parseGitHubApiError(input: {
     return null;
   }
   return input.payload.message;
+}
+
+function parseOptionalBooleanFlag(
+  value: string | undefined
+): boolean | undefined {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) {
+    return undefined;
+  }
+  if (
+    normalized === "1" ||
+    normalized === "true" ||
+    normalized === "yes" ||
+    normalized === "on"
+  ) {
+    return true;
+  }
+  if (
+    normalized === "0" ||
+    normalized === "false" ||
+    normalized === "no" ||
+    normalized === "off"
+  ) {
+    return false;
+  }
+  return undefined;
 }

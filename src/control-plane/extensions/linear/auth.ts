@@ -410,7 +410,7 @@ function buildEnvOnlyLinearTokenError(input: {
 }): Extract<LinearTokenResolution, { readonly ok: false }> {
   return {
     ok: false,
-    error: `Missing Linear token for profile "${input.settings.profileId}". Set ${input.settings.tokenEnv} or disable HACK_LINEAR_PREFER_ENV_TOKEN_ONLY.`,
+    error: `Missing Linear token for profile "${input.settings.profileId}" while HACK_LINEAR_PREFER_ENV_TOKEN_ONLY=true. Set ${input.settings.tokenEnv}, or unset HACK_LINEAR_PREFER_ENV_TOKEN_ONLY to allow saved local access.`,
     tokenEnv: input.settings.tokenEnv,
     authRef: input.settings.authRef,
     service: input.settings.service,

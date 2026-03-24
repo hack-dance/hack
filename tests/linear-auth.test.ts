@@ -186,3 +186,33 @@ test("resolveLinearToken can prefer env-only resolution to avoid keychain access
   expect(resolved.token).toBe("env_linear_token");
   expect(resolved.source).toBe("env");
 });
+
+test("resolveLinearToken fails closed in env-only mode when the env token is missing", async () => {
+  const config = createControlPlaneConfig();
+
+  let keychainReadCount = 0;
+  const resolved = await resolveLinearToken({
+    controlPlaneConfig: config,
+    env: {
+      HACK_LINEAR_PREFER_ENV_TOKEN_ONLY: "true",
+    },
+    store: {
+      get: async () => {
+        keychainReadCount += 1;
+        throw new Error("keychain should not be read");
+      },
+      set: async () => {
+        throw new Error("keychain should not be written");
+      },
+      delete: async () => false,
+    },
+  });
+
+  expect(keychainReadCount).toBe(0);
+  expect(resolved.ok).toBe(false);
+  if (resolved.ok) {
+    return;
+  }
+  expect(resolved.error).toContain("HACK_LINEAR_API_TOKEN");
+  expect(resolved.error).toContain("HACK_LINEAR_PREFER_ENV_TOKEN_ONLY");
+});

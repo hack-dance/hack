@@ -7064,6 +7064,17 @@ function buildLinkedProjectsLabel(input: {
     .join(", ")}.`;
 }
 
+function isEnvOnlyLinearTokenError(input: {
+  readonly error: string | null;
+  readonly tokenEnvFallback?: string;
+}): boolean {
+  const error = input.error?.trim() ?? "";
+  return (
+    error.includes("HACK_LINEAR_PREFER_ENV_TOKEN_ONLY") &&
+    (!input.tokenEnvFallback || error.includes(input.tokenEnvFallback))
+  );
+}
+
 function resolveLinearRepairAction(input: {
   readonly activeProfile: string;
   readonly connected: boolean;
@@ -7079,6 +7090,18 @@ function resolveLinearRepairAction(input: {
     return {
       reason: "Hack account login is required for broker-owned Linear access.",
       command: "hack auth login",
+    };
+  }
+  if (
+    isEnvOnlyLinearTokenError({
+      error: input.status.error,
+      tokenEnvFallback: input.status.tokenEnvFallback,
+    })
+  ) {
+    return {
+      reason:
+        "Env-only Linear access is enabled but the token env var is missing.",
+      command: `export ${input.status.tokenEnvFallback}=<linear-token>`,
     };
   }
   if (!input.connected) {
@@ -7900,6 +7923,13 @@ function shouldAttemptLinearBrokerLocalAccessSeed(input: {
   readonly error: string;
 }): boolean {
   const error = input.error.trim();
+  if (
+    isEnvOnlyLinearTokenError({
+      error,
+    })
+  ) {
+    return false;
+  }
   return (
     error.startsWith("Missing Linear token") ||
     error.includes("linear_local_access_unavailable") ||

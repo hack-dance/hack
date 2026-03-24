@@ -371,6 +371,75 @@ test("resolveGitHubAppToken can skip keychain lookup in env-only mode", async ()
   expect(resolved.token).toBe("env-token");
 });
 
+test("resolveGitHubAppToken honors HACK_GITHUB_PREFER_ENV_TOKEN_ONLY without keychain lookup", async () => {
+  const config = createControlPlaneConfig({
+    tokenEnv: "GH_TOKEN",
+    authRef: "github.app.default",
+    service: "hack-github-test",
+  });
+
+  let keychainReadCount = 0;
+  const store: SecretStore = {
+    get: async () => {
+      keychainReadCount += 1;
+      throw new Error("store.get should not be called in env-only mode");
+    },
+    set: async () => {},
+    delete: async () => false,
+  };
+
+  const resolved = await resolveGitHubAppToken({
+    controlPlaneConfig: config,
+    env: {
+      GH_TOKEN: "env-token",
+      HACK_GITHUB_PREFER_ENV_TOKEN_ONLY: "true",
+    },
+    store,
+  });
+
+  expect(keychainReadCount).toBe(0);
+  expect(resolved.ok).toBe(true);
+  if (!resolved.ok) {
+    return;
+  }
+  expect(resolved.source).toBe("env");
+  expect(resolved.token).toBe("env-token");
+});
+
+test("resolveGitHubAppToken fails closed in env-only mode when the env token is missing", async () => {
+  const config = createControlPlaneConfig({
+    tokenEnv: "GH_TOKEN",
+    authRef: "github.app.default",
+    service: "hack-github-test",
+  });
+
+  let keychainReadCount = 0;
+  const store: SecretStore = {
+    get: async () => {
+      keychainReadCount += 1;
+      throw new Error("store.get should not be called in env-only mode");
+    },
+    set: async () => {},
+    delete: async () => false,
+  };
+
+  const resolved = await resolveGitHubAppToken({
+    controlPlaneConfig: config,
+    env: {
+      HACK_GITHUB_PREFER_ENV_TOKEN_ONLY: "true",
+    },
+    store,
+  });
+
+  expect(keychainReadCount).toBe(0);
+  expect(resolved.ok).toBe(false);
+  if (resolved.ok) {
+    return;
+  }
+  expect(resolved.error).toContain("GH_TOKEN");
+  expect(resolved.error).toContain("HACK_GITHUB_PREFER_ENV_TOKEN_ONLY");
+});
+
 test("resolveGitHubAppToken returns a clear error when token is missing", async () => {
   const config = createControlPlaneConfig({
     tokenEnv: "GH_TOKEN",

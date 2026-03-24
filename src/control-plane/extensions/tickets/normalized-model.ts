@@ -223,6 +223,7 @@ export const normalizeLegacyTicketSummary = (
     id: input.ticket.projectId,
     name: input.ticket.projectName,
   });
+  const assignee = normalizeOptionalString(input.ticket.assignee);
 
   const normalized: NormalizedTicketEntity = {
     schemaVersion: NORMALIZED_TICKET_SCHEMA_VERSION,
@@ -232,9 +233,7 @@ export const normalizeLegacyTicketSummary = (
       title: input.ticket.title.trim(),
       ...(input.ticket.body !== undefined ? { body: input.ticket.body } : {}),
       status: input.ticket.status,
-      ...(normalizeOptionalString(input.ticket.assignee)
-        ? { assignee: input.ticket.assignee.trim() }
-        : {}),
+      ...(assignee ? { assignee } : {}),
       ...(project ? { project } : {}),
       tags: normalizeStringList(input.ticket.tags),
       relationships: {
@@ -588,9 +587,8 @@ const parseNormalizedTicketEntity = (
     Array.isArray(provenanceRecord.links),
     "normalized ticket links must be an array"
   );
-  const links = provenanceRecord.links.map((link) =>
-    parseNormalizedTicketLink(link)
-  );
+  const linksInput = provenanceRecord.links as readonly unknown[];
+  const links = linksInput.map((link) => parseNormalizedTicketLink(link));
   const linkIds = new Set<string>();
   const originLinks: NormalizedTicketLink[] = [];
   for (const link of links) {
@@ -730,7 +728,8 @@ const parseNormalizedTicketLink = (input: unknown): NormalizedTicketLink => {
     "normalized ticket remote containers must be an array"
   );
   const containerKeys = new Set<string>();
-  for (const container of remoteRecord.containers) {
+  const containers = remoteRecord.containers as readonly unknown[];
+  for (const container of containers) {
     const containerRecord = asRecord(container, "normalized ticket container");
     assertValue(
       (TICKET_LINK_CONTAINER_KINDS as readonly string[]).includes(
@@ -795,7 +794,7 @@ const parseTicketAuthorityRule = (
       assertNonEmptyString(winnerRecord.linkId, `${label} winner linkId`);
       if (linkIds) {
         assertValue(
-          linkIds.has(winnerRecord.linkId),
+          linkIds.has(winnerRecord.linkId as string),
           `${label} winner linkId must reference an existing link`
         );
       }
@@ -836,28 +835,29 @@ const assertTicketSchemaValue = (input: unknown, label: string): void => {
 const assertStringList = (input: unknown, label: string): void => {
   assertValue(Array.isArray(input), `${label} must be an array`);
   const seen = new Set<string>();
-  for (const [index, value] of input.entries()) {
+  const values = input as readonly unknown[];
+  for (const [index, value] of values.entries()) {
     assertNonEmptyString(value, `${label}[${index}]`);
     assertValue(!seen.has(value), `${label} must not contain duplicates`);
     seen.add(value);
   }
 };
 
-const assertTicketStatus = (input: unknown): asserts input is TicketStatus => {
+function assertTicketStatus(input: unknown): asserts input is TicketStatus {
   assertValue(
     (TICKET_STATUSES as readonly string[]).includes(String(input)),
     "ticket status must be open, in_progress, blocked, or done"
   );
-};
+}
 
-const assertExternalTicketSystem = (
+function assertExternalTicketSystem(
   input: unknown
-): asserts input is ExternalTicketSystem => {
+): asserts input is ExternalTicketSystem {
   assertValue(
     (EXTERNAL_TICKET_SYSTEMS as readonly string[]).includes(String(input)),
     "external ticket system must be linear, github, or asana"
   );
-};
+}
 
 const assertIsoTimestamp = (input: unknown, label: string): void => {
   assertNonEmptyString(input, label);
@@ -876,14 +876,17 @@ const assertUrl = (input: unknown, label: string): void => {
   }
 };
 
-const assertString = (input: unknown, label: string): void => {
+function assertString(input: unknown, label: string): asserts input is string {
   assertValue(typeof input === "string", `${label} must be a string`);
-};
+}
 
-const assertNonEmptyString = (input: unknown, label: string): void => {
+function assertNonEmptyString(
+  input: unknown,
+  label: string
+): asserts input is string {
   assertString(input, label);
   assertValue(input.trim().length > 0, `${label} must be a non-empty string`);
-};
+}
 
 const asRecord = (input: unknown, label: string): Record<string, unknown> => {
   assertValue(

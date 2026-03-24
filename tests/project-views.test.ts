@@ -422,6 +422,46 @@ test("buildProjectViews includes matching project sessions from tmux", async () 
   expect(serializedSessions?.[0]?.source).toBe("hack");
 });
 
+test("buildProjectViews treats double-dash and legacy colon hack sessions as project sessions", async () => {
+  const alpha = await createProject({ name: "alpha", services: ["api"] });
+
+  const views = await buildProjectViews({
+    registryProjects: [alpha],
+    runtime: [],
+    runtimeOk: true,
+    filter: null,
+    includeUnregistered: false,
+    muxSessions: [
+      {
+        name: "alpha--agent-1",
+        backend: "tmux",
+        attached: false,
+        path: null,
+        windows: 1,
+        createdAt: 1_735_000_100,
+      },
+      {
+        name: "alpha:agent-legacy",
+        backend: "tmux",
+        attached: false,
+        path: null,
+        windows: 1,
+        createdAt: 1_735_000_101,
+      },
+    ],
+  });
+
+  const alphaView = views.find((view) => view.name === "alpha");
+  expect(alphaView?.sessions.map((session) => session.name)).toEqual([
+    "alpha--agent-1",
+    "alpha:agent-legacy",
+  ]);
+  expect(alphaView?.sessions.map((session) => session.source)).toEqual([
+    "hack",
+    "hack",
+  ]);
+});
+
 test("buildProjectViews matches tmux sessions when path is a symlink to repo root", async () => {
   const alpha = await createProject({ name: "alpha", services: ["api"] });
   if (!tempDir) {

@@ -12,7 +12,7 @@ import {
 } from "../../../lib/config.ts";
 import { isRecord } from "../../../lib/guards.ts";
 import { openUrl } from "../../../lib/os.ts";
-import { display } from "../../../ui/display.ts";
+import { type DisplayCell, display } from "../../../ui/display.ts";
 import {
   findTicketRemoteLink,
   normalizeTicketFieldName,
@@ -2187,9 +2187,16 @@ async function renderLinearStatusPayload(input: {
   readonly payload: LinearStatusCommandPayload;
   readonly logger: ExtensionCommandContext["logger"];
 }): Promise<void> {
+  const bindingSummary = describeLinearBindingState({
+    binding: input.payload.projectBinding,
+  });
   const lines = [
     `Active profile: ${input.payload.summary.activeProfile}`,
     `Connection: ${input.payload.summary.connectionLabel}`,
+    `Repo binding profile: ${bindingSummary.profile}`,
+    `Default project: ${bindingSummary.project}`,
+    `Default team: ${bindingSummary.team}`,
+    `Linked projects: ${bindingSummary.linkedProjects}`,
     `Route: ${input.payload.summary.routingSummary}`,
     ...(input.payload.summary.linkedProjectsLabel
       ? [input.payload.summary.linkedProjectsLabel]
@@ -2579,6 +2586,8 @@ type LinearSyncClient = Pick<
   | "getIssueByIdentifier"
   | "getProject"
   | "listIssueComments"
+  | "listProjects"
+  | "listProjectsPage"
   | "listProjectDocuments"
   | "listProjectIssuesPage"
   | "listProjectMilestones"
@@ -2593,6 +2602,8 @@ type LinearSyncClient = Pick<
 
 type ProjectArtifactLinearClient = Pick<
   ReturnType<typeof createLinearClient>,
+  | "listProjectsPage"
+  | "listProjects"
   | "createProjectDocument"
   | "createProjectMilestone"
   | "createProjectUpdate"
@@ -3228,7 +3239,12 @@ async function runProjectArtifactCommand(input: {
     }
 
     const draftArtifacts = localArtifacts.data.filter(
-      (artifact) =>
+      (
+        artifact
+      ): artifact is Extract<
+        LocalLinearProjectArtifact,
+        { readonly kind: "linear-project-status-update" }
+      > =>
         artifact.kind === "linear-project-status-update" &&
         isDraftStatusUpdatePath({ path: artifact.path })
     );
@@ -3897,10 +3913,10 @@ async function renderProjectArtifactCommandPayload(input: {
     entries: [
       ["profile", input.payload.profileId],
       ["project_id", input.payload.projectId],
-      ...Object.entries(input.payload.summary ?? {}).map(([key, value]) => [
-        key,
-        String(value),
-      ]),
+      ...Object.entries(input.payload.summary ?? {}).map(
+        ([key, value]) =>
+          [key, String(value)] as const satisfies readonly [string, DisplayCell]
+      ),
     ],
   });
 }
@@ -4133,13 +4149,13 @@ function removeLinearAssigneeMapping(input: {
   return { removed, mappings: next };
 }
 
-type RecordedSyncConflict = {
+interface RecordedSyncConflict {
   readonly field: string;
-  readonly authority: "hack" | "linear";
+  readonly authority: "hack" | "linear" | "review_required";
   readonly summary: string;
   readonly localValue?: TicketMetadataValue;
   readonly remoteValue?: TicketMetadataValue;
-};
+}
 
 type SyncTicketFromLinearSuccess = {
   readonly ok: true;
@@ -4238,6 +4254,10 @@ function detectAuthoritativeFieldConflicts(input: {
   const conflicts: RecordedSyncConflict[] = [];
   const authorityLabel =
     input.authority === "review_required" ? "review-required" : input.authority;
+  const localLinearRemote = findTicketRemoteLink({
+    ticket: input.ticket,
+    provider: "linear",
+  });
   const localTitle = input.ticket.title.trim();
   const remoteTitle = input.issue.title.trim();
   if (localTitle !== remoteTitle) {
@@ -4277,8 +4297,8 @@ function detectAuthoritativeFieldConflicts(input: {
   }
 
   const localProject = normalizeProjectValue({
-    projectId: input.ticket.projectId,
-    projectName: input.ticket.projectName,
+    projectId: input.ticket.projectId ?? localLinearRemote?.projectId,
+    projectName: input.ticket.projectName ?? localLinearRemote?.projectName,
   });
   const remoteProject = normalizeProjectValue({
     projectId: input.issue.projectId,
@@ -5217,8 +5237,7 @@ async function resolveLinearTargetForTicketSync(input: {
   if (!teamId) {
     return {
       ok: false,
-      error:
-        "Cannot resolve Linear team for ticket sync. Pass --team-id or bind a project with `hack x linear project-bind`.",
+      error: `Cannot resolve Linear team for ticket sync. Active route project: ${projectId ?? "(none)"}. Pass --team-id, or bind a default project/team with \`hack linear project-bind --project-id <linear-project-id> --team-id <linear-team-id>\`.`,
     };
   }
 
@@ -6997,6 +7016,33 @@ function buildLinearRoutingSummary(input: {
   })}.`;
 }
 
+function describeLinearBindingState(input: {
+  readonly binding:
+    | ResolvedLinearProjectBinding
+    | LinearStatusCommandPayload["projectBinding"];
+}): {
+  readonly profile: string;
+  readonly project: string;
+  readonly team: string;
+  readonly linkedProjects: string;
+} {
+  const defaultProject = input.binding.projectId
+    ? formatLinearProjectTarget({
+        projectId: input.binding.projectId,
+        ...(input.binding.projectName
+          ? { projectName: input.binding.projectName }
+          : {}),
+        ...(input.binding.teamId ? { teamId: input.binding.teamId } : {}),
+      })
+    : "(none)";
+  return {
+    profile: readOptionalString(input.binding.profileId) ?? "(none)",
+    project: defaultProject,
+    team: readOptionalString(input.binding.teamId) ?? "(none)",
+    linkedProjects: String(input.binding.additionalProjects.length),
+  };
+}
+
 function buildLinkedProjectsLabel(input: {
   readonly binding: ResolvedLinearProjectBinding;
 }): string | null {
@@ -7380,7 +7426,7 @@ async function resolveProjectArtifactTarget(input: {
   readonly projectId?: string;
   readonly projectName?: string;
   readonly teamId?: string;
-  readonly linear: Pick<ProjectArtifactRuntime["linear"], "listProjects">;
+  readonly linear: Pick<ProjectArtifactRuntime["linear"], "listProjectsPage">;
 }): Promise<
   | {
       readonly ok: true;
@@ -7429,26 +7475,44 @@ async function resolveProjectArtifactTarget(input: {
     };
   }
 
-  const projects = await input.linear.listProjects({
-    first: DEFAULT_PROJECT_SYNC_LIMIT,
-  });
-  if (!projects.ok) {
-    return {
-      ok: false,
-      error: projects.error,
-    };
-  }
+  const matches: Array<{
+    readonly id: string;
+    readonly name: string;
+    readonly teamId: string;
+  }> = [];
+  let after: string | undefined;
+  let hasNextPage = true;
+  while (hasNextPage) {
+    const page = await input.linear.listProjectsPage({
+      first: DEFAULT_PROJECT_SYNC_LIMIT,
+      ...(after ? { after } : {}),
+    });
+    if (!page.ok) {
+      return {
+        ok: false,
+        error: page.error,
+      };
+    }
 
-  const matches = projects.data.filter((project) =>
-    projectArtifactTargetMatchesSelector({
-      target: {
-        projectId: project.id,
-        projectName: project.name,
-        teamId: project.teamId,
-      },
-      selector,
-    })
-  );
+    matches.push(
+      ...page.data.projects.filter((project) =>
+        projectArtifactTargetMatchesSelector({
+          target: {
+            projectId: project.id,
+            projectName: project.name,
+            teamId: project.teamId,
+          },
+          selector,
+        })
+      )
+    );
+
+    hasNextPage = page.data.hasNextPage;
+    after = page.data.endCursor;
+    if (matches.length > 1) {
+      break;
+    }
+  }
   if (matches.length === 0) {
     return {
       ok: false,
@@ -7541,7 +7605,7 @@ function describeAmbiguousProjectArtifactTarget(input: {
     input.projectName ? `project name "${input.projectName}"` : null,
     input.teamId ? `team id "${input.teamId}"` : null,
   ].filter((part): part is string => Boolean(part));
-  return `Multiple ${input.source} Linear projects match ${parts.join(" and ")}. Pass --project-id to disambiguate.`;
+  return `Multiple ${input.source} Linear projects match ${parts.join(" and ")}. Pass --project-id to disambiguate, then confirm the repo route with \`hack linear status\`.`;
 }
 
 function describeMissingProjectArtifactTarget(input: {
@@ -7552,7 +7616,7 @@ function describeMissingProjectArtifactTarget(input: {
     input.projectName ? `project name "${input.projectName}"` : null,
     input.teamId ? `team id "${input.teamId}"` : null,
   ].filter((part): part is string => Boolean(part));
-  return `No Linear project matches ${parts.join(" and ")}. Pass --project-id or update the project binding.`;
+  return `No Linear project matches ${parts.join(" and ")}. Pass --project-id, run \`hack linear projects\` to inspect available projects, or update the repo binding with \`hack linear project-bind --project-id <linear-project-id>\`.`;
 }
 
 async function resolveProjectBindingDetails(input: {

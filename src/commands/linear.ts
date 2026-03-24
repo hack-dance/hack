@@ -183,6 +183,16 @@ async function renderHelp(input: {
     });
     return;
   }
+  await display.panel({
+    title: "Linear routing model",
+    tone: "info",
+    lines: [
+      "Profiles are global Linear auth identities.",
+      "Repos can bind a default Linear project route plus optional linked projects.",
+      "When you omit --profile, Hack prefers the repo binding first and then the global default profile.",
+      "Use `hack linear status` to see the active profile, default project, team, linked projects, and recovery steps.",
+    ],
+  });
   await display.table({
     columns: ["Command", "Summary"],
     rows: input.commands.map((cmd) => [`hack linear ${cmd.name}`, cmd.summary]),

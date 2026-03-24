@@ -109,7 +109,7 @@ export const parseLinearProjectArtifactFile = ({
     throw new Error(`Missing YAML frontmatter in ${filePath}`);
   }
 
-  const parsed = YAML.parse(match[1]) as unknown;
+  const parsed = YAML.parse(match[1] ?? "") as unknown;
   if (!isRecord(parsed)) {
     throw new Error(`Invalid YAML frontmatter in ${filePath}`);
   }

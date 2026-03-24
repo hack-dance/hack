@@ -208,6 +208,7 @@ test("mutation lock heartbeat prevents overlapping prepared mutations past stale
       branch: "hack/tickets",
       refMode: "hidden",
       remote: "",
+      forceBareClone: false,
     },
     logger: {
       info: (_input: { message: string }) => {},

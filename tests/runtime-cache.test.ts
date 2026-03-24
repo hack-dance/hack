@@ -177,6 +177,7 @@ test("getProjectsPayload keeps working when resolveProjectMeta fails for one pro
     branchRuntime: [],
     sessions: [],
     lifecycle: null,
+    ownership: null,
     kind: "registered",
     status: "unknown",
   });
@@ -211,6 +212,8 @@ test("getProjectsPayload keeps working when resolveProjectMeta fails for one pro
           },
           sessions: { sessions: [] },
           composeBuild: { services: [] },
+          ownership: null,
+          configError: null,
         };
         return meta;
       },

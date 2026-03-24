@@ -133,6 +133,12 @@ type LinearProjectIssuePage = {
   readonly endCursor?: string;
 };
 
+type LinearProjectsPage = {
+  readonly projects: readonly LinearProject[];
+  readonly hasNextPage: boolean;
+  readonly endCursor?: string;
+};
+
 export type LinearClient = {
   readonly getViewer: () => Promise<
     LinearRequestResult<{
@@ -145,6 +151,10 @@ export type LinearClient = {
   readonly listProjects: (input?: {
     readonly first?: number;
   }) => Promise<LinearRequestResult<readonly LinearProject[]>>;
+  readonly listProjectsPage: (input?: {
+    readonly first?: number;
+    readonly after?: string;
+  }) => Promise<LinearRequestResult<LinearProjectsPage>>;
   readonly getProject: (input: {
     readonly projectId: string;
   }) => Promise<LinearRequestResult<LinearProject | null>>;
@@ -306,6 +316,70 @@ export function createLinearClient(input: {
     };
   };
 
+  async function listProjectsPage(
+    input: { readonly first?: number; readonly after?: string } = {}
+  ): Promise<LinearRequestResult<LinearProjectsPage>> {
+    const first = normalizePositiveInt({
+      value: input.first,
+      fallback: DEFAULT_PAGE_SIZE,
+    });
+    const after = input.after?.trim();
+    const result = await request<{
+      readonly projects?: unknown;
+    }>({
+      query: [
+        "query LinearProjects($first: Int!, $after: String) {",
+        "  projects(first: $first, after: $after) {",
+        "    pageInfo {",
+        "      hasNextPage",
+        "      endCursor",
+        "    }",
+        "    nodes {",
+        "      id",
+        "      name",
+        "      teams {",
+        "        nodes {",
+        "          id",
+        "          key",
+        "          name",
+        "        }",
+        "      }",
+        "    }",
+        "  }",
+        "}",
+      ].join("\n"),
+      variables: {
+        first,
+        ...(after ? { after } : {}),
+      },
+    });
+    if (!result.ok) {
+      return result;
+    }
+    const projects = parseProjectsPage(result.data.projects);
+    if (!projects) {
+      return {
+        ok: false,
+        status: 500,
+        error: "Linear projects payload missing pagination metadata.",
+      };
+    }
+    return { ok: true, data: projects };
+  }
+
+  async function listProjects(
+    input: { readonly first?: number } = {}
+  ): Promise<LinearRequestResult<readonly LinearProject[]>> {
+    const page = await listProjectsPage(input);
+    if (!page.ok) {
+      return page;
+    }
+    return {
+      ok: true,
+      data: page.data.projects,
+    };
+  }
+
   return {
     getViewer: async () => {
       const result = await request<{
@@ -339,39 +413,8 @@ export function createLinearClient(input: {
       };
     },
 
-    listProjects: async (input = {}) => {
-      const first = normalizePositiveInt({
-        value: input.first,
-        fallback: DEFAULT_PAGE_SIZE,
-      });
-      const result = await request<{
-        readonly projects?: unknown;
-      }>({
-        query: [
-          "query LinearProjects($first: Int!) {",
-          "  projects(first: $first) {",
-          "    nodes {",
-          "      id",
-          "      name",
-          "      teams {",
-          "        nodes {",
-          "          id",
-          "          key",
-          "          name",
-          "        }",
-          "      }",
-          "    }",
-          "  }",
-          "}",
-        ].join("\n"),
-        variables: { first },
-      });
-      if (!result.ok) {
-        return result;
-      }
-      const projects = parseProjectsConnection(result.data.projects);
-      return { ok: true, data: projects };
-    },
+    listProjects,
+    listProjectsPage,
 
     getProject: async ({ projectId }) => {
       const id = projectId.trim();
@@ -1451,11 +1494,15 @@ function parseViewer(value: unknown): {
   };
 }
 
-function parseProjectsConnection(value: unknown): LinearProject[] {
+function parseProjectsPage(value: unknown): LinearProjectsPage | null {
   if (!isRecord(value)) {
-    return [];
+    return null;
   }
   const nodes = Array.isArray(value.nodes) ? value.nodes : [];
+  const pageInfo = isRecord(value.pageInfo) ? value.pageInfo : null;
+  if (!(pageInfo && typeof pageInfo.hasNextPage === "boolean")) {
+    return null;
+  }
   const out: LinearProject[] = [];
   for (const node of nodes) {
     const parsed = parseProject(node);
@@ -1464,7 +1511,13 @@ function parseProjectsConnection(value: unknown): LinearProject[] {
     }
     out.push(parsed);
   }
-  return out;
+  return {
+    projects: out,
+    hasNextPage: pageInfo.hasNextPage,
+    ...(typeof pageInfo.endCursor === "string"
+      ? { endCursor: pageInfo.endCursor }
+      : {}),
+  };
 }
 
 function parseUser(value: unknown): LinearUser | null {

@@ -12,6 +12,7 @@ local model instead of replacing it.
 - [Run laptop-to-laptop node pairing e2e](guides/remote-node-laptop-e2e.md)
 - [Bootstrap a remote node on Railway](guides/remote-node-railway.md)
 - [Run a remote node via container image](guides/remote-node-container.md)
+- [Use Hack in managed Codex containers](guides/codex-managed-environments.md)
 - [Expose the gateway over SSH](guides/remote-ssh.md)
 - [Expose the gateway with Cloudflare](guides/remote-cloudflare.md)
 - [Expose the gateway with Tailscale](guides/remote-tailscale.md)

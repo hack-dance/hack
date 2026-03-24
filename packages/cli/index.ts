@@ -1,4 +1,4 @@
-import { runCli as runCliImpl } from "../../src/cli/run.ts";
+import { runCli as runCliImpl } from "@/cli/run.ts";
 
 /**
  * Canonical CLI entrypoint for workspace package consumers.

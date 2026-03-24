@@ -49,6 +49,10 @@ import { isProcessRunning } from "../daemon/process.ts";
 import { readDaemonStatus } from "../daemon/status.ts";
 import { resolveGlobalConfigPath } from "../lib/config-paths.ts";
 import {
+  isSlimExecutionMode,
+  renderSlimModeUnavailableMessage,
+} from "../lib/execution-mode.ts";
+import {
   ensureDir,
   pathExists,
   readTextFile,
@@ -66,6 +70,10 @@ import {
   reconcileRemoteCaddyRoutesStack,
   stopRemoteCaddyRoutesStack,
 } from "../lib/remote-caddy-routes.ts";
+import {
+  detectDockerBackend,
+  formatDockerConnectionGuidance,
+} from "../lib/runtime-guidance.ts";
 import { exec, execOrThrow, findExecutableInPath, run } from "../lib/shell.ts";
 import { resolveSessionsMuxMode } from "../mux/mux-config.ts";
 import {
@@ -299,7 +307,12 @@ async function ensureDockerRunning(): Promise<void> {
   const backend = await detectDockerBackend();
   if (!backend) {
     throw new Error(
-      "Docker does not seem to be running and no Docker backend was detected.\nInstall Docker Desktop or OrbStack, then retry."
+      formatDockerConnectionGuidance({
+        backend,
+        failureText:
+          "Docker does not seem to be running and no Docker backend was detected.",
+        retryCommand: "hack global install",
+      })
     );
   }
 
@@ -326,50 +339,6 @@ async function ensureDockerRunning(): Promise<void> {
 
   logger.success({ message: `${backend.name} is running` });
 }
-
-type DockerBackend = {
-  readonly name: string;
-  readonly startCommand: readonly string[];
-};
-
-/**
- * Detects the installed Docker backend on macOS (OrbStack, Docker Desktop)
- * or checks for the docker socket on Linux.
- */
-async function detectDockerBackend(): Promise<DockerBackend | null> {
-  if (isMac()) {
-    if (await pathExists("/Applications/OrbStack.app")) {
-      const hasOrbctl = await findExecutableInPath("orbctl");
-      return {
-        name: "OrbStack",
-        startCommand: hasOrbctl
-          ? ["orbctl", "start"]
-          : ["open", "-a", "OrbStack"],
-      };
-    }
-    if (await pathExists("/Applications/Docker.app")) {
-      return {
-        name: "Docker Desktop",
-        startCommand: ["open", "-a", "Docker"],
-      };
-    }
-    return null;
-  }
-
-  const hasDocker = await findExecutableInPath("docker");
-  if (hasDocker) {
-    const hasSystemctl = await findExecutableInPath("systemctl");
-    if (hasSystemctl) {
-      return {
-        name: "Docker (systemd)",
-        startCommand: ["sudo", "systemctl", "start", "docker"],
-      };
-    }
-  }
-
-  return null;
-}
-
 async function waitForDocker(opts: {
   readonly timeoutMs: number;
   readonly intervalMs: number;
@@ -392,6 +361,23 @@ function muxInstallCommand(opts: {
     return `brew install ${opts.provider}`;
   }
   return `install ${opts.provider} with your package manager`;
+}
+
+function failIfSlimMode(opts: {
+  readonly feature: string;
+  readonly alternative?: string;
+}): number | null {
+  if (!isSlimExecutionMode()) {
+    return null;
+  }
+
+  process.stderr.write(
+    `${renderSlimModeUnavailableMessage({
+      feature: opts.feature,
+      alternative: opts.alternative,
+    })}\n`
+  );
+  return 1;
 }
 
 async function warnIfSessionsMuxUnavailable(): Promise<void> {
@@ -483,6 +469,15 @@ function networkHasSubnet(raw: string, subnet: string): boolean {
 }
 
 async function globalInstall(): Promise<number> {
+  const slimExit = failIfSlimMode({
+    feature: "hack global install",
+    alternative:
+      "Use `bash scripts/install-codex-slim.sh` for managed Codex or CI environments.",
+  });
+  if (slimExit !== null) {
+    return slimExit;
+  }
+
   const s = spinner();
   s.start("Ensuring gum…");
   const gum = await ensureBundledGumInstalled();
@@ -652,6 +647,13 @@ async function globalInstall(): Promise<number> {
 }
 
 async function globalLogsReset(): Promise<number> {
+  const slimExit = failIfSlimMode({
+    feature: "hack global logs-reset",
+  });
+  if (slimExit !== null) {
+    return slimExit;
+  }
+
   await ensureDockerRunning();
   const paths = getGlobalPaths();
 
@@ -723,6 +725,13 @@ async function writeWithPromptIfDifferent(
 }
 
 export async function globalUp(): Promise<number> {
+  const slimExit = failIfSlimMode({
+    feature: "hack global up",
+  });
+  if (slimExit !== null) {
+    return slimExit;
+  }
+
   await ensureDockerRunning();
   if (isMac()) {
     await ensureMacDnsmasqRunning();
@@ -1221,6 +1230,13 @@ function trimShellError(opts: { readonly text: string }): string {
 }
 
 async function globalDown(): Promise<number> {
+  const slimExit = failIfSlimMode({
+    feature: "hack global down",
+  });
+  if (slimExit !== null) {
+    return slimExit;
+  }
+
   await ensureDockerRunning();
   const paths = getGlobalPaths();
 
@@ -1271,6 +1287,13 @@ async function handleGlobalStatus({
 }
 
 async function globalStatus(opts: { readonly json: boolean }): Promise<number> {
+  const slimExit = failIfSlimMode({
+    feature: "hack global status",
+  });
+  if (slimExit !== null) {
+    return slimExit;
+  }
+
   await ensureDockerRunning();
   const paths = getGlobalPaths();
 
@@ -2013,6 +2036,13 @@ function buildGatewayUrl(opts: {
 }
 
 async function globalTrust(): Promise<number> {
+  const slimExit = failIfSlimMode({
+    feature: "hack global trust",
+  });
+  if (slimExit !== null) {
+    return slimExit;
+  }
+
   if (!isMac()) {
     logger.warn({
       message: "Trust is only implemented for macOS (System keychain).",
@@ -2032,6 +2062,13 @@ async function handleGlobalCa({
   readonly ctx: CliContext;
   readonly args: GlobalCaArgs;
 }): Promise<number> {
+  const slimExit = failIfSlimMode({
+    feature: "hack global ca",
+  });
+  if (slimExit !== null) {
+    return slimExit;
+  }
+
   await ensureDockerRunning();
   const certPath = await exportCaddyLocalCaCert();
   if (!certPath) {
@@ -2055,6 +2092,13 @@ async function handleGlobalCert({
   readonly ctx: CliContext;
   readonly args: GlobalCertArgs;
 }): Promise<number> {
+  const slimExit = failIfSlimMode({
+    feature: "hack global cert",
+  });
+  if (slimExit !== null) {
+    return slimExit;
+  }
+
   let mkcertPath = await findExecutableInPath("mkcert");
   if (!mkcertPath && isMac()) {
     await ensureMacMkcert();
@@ -2128,6 +2172,13 @@ async function handleGlobalLogs({
   readonly ctx: CliContext;
   readonly args: GlobalLogsArgs;
 }): Promise<number> {
+  const slimExit = failIfSlimMode({
+    feature: "hack global logs",
+  });
+  if (slimExit !== null) {
+    return slimExit;
+  }
+
   await ensureDockerRunning();
   const service = (args.positionals.service ?? "caddy").toLowerCase();
   const follow = !args.options.noFollow;

@@ -41,3 +41,18 @@ Testing surface findings, required tools, and validation concurrency for this mi
 
 - `services/auth-broker` config/auth verification has env-sensitive paths that can produce weak signals until hardened.
 - The repo does not yet have a real `apps/web` runtime or hack-managed local web host; milestone 2 must establish that path before meaningful browser validation can pass.
+
+## Flow Validator Guidance: CLI surface
+
+- Use repo-root `/Users/hack/dev/hack-dance/hack` and prefer `./dist/hack` after a local `bun run build`.
+- Stay repo-bound: do not use the globally installed `hack` binary for product behavior except runtime orchestration commands explicitly assigned by the coordinator.
+- Treat `.hack/linear/**` as managed output. Do not delete unmanaged scratch files and do not create or validate against `.hack/.hack/linear/**`.
+- For env-only auth assertions, set explicit process env in the command invocation rather than mutating shell startup files.
+- Because CLI assertions in this milestone share repo-local Linear artifacts and profile state, validators for this surface must run serialized unless given a separate working copy.
+
+## Flow Validator Guidance: Broker / local HTTP surface
+
+- The only local broker instance for this milestone is `http://127.0.0.1:8080`.
+- Use `curl -sf http://127.0.0.1:8080/health` before any broker-dependent assertion and treat a failed health check as a blocker.
+- Route broker-dependent CLI smokes through `HACK_AUTH_BROKER_URL=http://127.0.0.1:8080` so refresh behavior is exercised against the local validator-owned broker.
+- Do not bind additional fixed ports or start a second broker instance unless the coordinator gives a separate port and evidence directory.

@@ -25,15 +25,18 @@ It is designed to skip machine-level Hack surfaces:
 
 This mode is intentionally not a substitute for a full local workstation setup.
 
-## Install from a cloned repo
+## Install from a release
 
-Run this in your managed Codex setup script after Bun is available:
+Run this in your managed Codex setup script:
 
 ```bash
-bash scripts/install-codex-slim.sh
+curl -fsSL \
+  https://github.com/hack-dance/hack/releases/latest/download/hack-codex-install.sh \
+  | bash
 ```
 
-The script installs a repo-local `hack` wrapper into `~/.local/bin/hack` and sets the wrapper defaults to:
+The installer downloads the latest Hack release tarball, installs the binary into `~/.hack/bin`,
+and writes a thin `hack` wrapper with these defaults:
 
 - `HACK_EXECUTION_MODE=codex`
 - `HACK_DAEMON_DISABLE_DOCKER_EVENTS=1`
@@ -48,7 +51,9 @@ mise install bun@1.3.5
 export PATH="$HOME/.local/share/mise/shims:$PATH"
 
 bun install
-bash scripts/install-codex-slim.sh
+curl -fsSL \
+  https://github.com/hack-dance/hack/releases/latest/download/hack-codex-install.sh \
+  | bash
 ```
 
 ## Recommended maintenance script
@@ -57,6 +62,13 @@ bash scripts/install-codex-slim.sh
 set -euo pipefail
 
 export PATH="$HOME/.local/share/mise/shims:$PATH"
+bun install --frozen-lockfile || bun install
+```
+
+If you are developing inside the Hack repo itself, the repo-local helpers are still available:
+
+```bash
+bash scripts/install-codex-slim.sh
 bash scripts/maintain-codex-slim.sh
 ```
 

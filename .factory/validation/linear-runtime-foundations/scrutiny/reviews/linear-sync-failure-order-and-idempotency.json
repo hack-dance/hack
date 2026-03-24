@@ -13,7 +13,7 @@
     {
       "area": "skills",
       "observation": "The mission currently lacks a documented repo-bound way to force a local-sync failure or a deduped rerun during `hack linear` verification, so workers cannot fully satisfy the manual VAL-LINEAR-006/007 proof path with repo-bound commands alone.",
-      "evidence": "`/Users/hack/dev/hack-dance/hack/.factory/skills/control-plane-worker/SKILL.md:30` requires repo-bound `./dist/hack linear ...` verification for Linear state behavior; `/Users/hack/dev/hack-dance/hack/.factory/services.yaml:14-15` only documents `linear_status` and `repo_linear_smoke`; `/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/validation-contract.md:23-29` expects forced failure and repeated-sync evidence; the handoff `skillFeedback` records the worker's justified deviation to deterministic regression tests because no safe built-in hook exists."
+      "evidence": "`.factory/skills/control-plane-worker/SKILL.md:30` requires repo-bound `./dist/hack linear ...` verification for Linear state behavior; `.factory/services.yaml:14-15` only documents `linear_status` and `repo_linear_smoke`; `<mission-dir>/validation-contract.md:23-29` expects forced failure and repeated-sync evidence; the handoff `skillFeedback` records the worker's justified deviation to deterministic regression tests because no safe built-in hook exists."
     }
   ],
   "addressesFailureFrom": null,

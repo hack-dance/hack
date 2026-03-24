@@ -7,12 +7,12 @@
       "status": "pass",
       "reason": "Repo-bound `./dist/hack linear documents|milestones|status-updates pull` used only the canonical `.hack/linear/projects/7a3c8adf-ede5-4d3a-8779-9c32695c76bf/...` tree in the isolated worktree, left the unmanaged sentinel intact, and did not create or mutate the legacy `.hack/.hack/linear` sentinel tree.",
       "evidence": [
-        "/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/evidence/linear-runtime-foundations/artifacts-and-sync/canonical-tree-before.json",
-        "/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/evidence/linear-runtime-foundations/artifacts-and-sync/canonical-tree-after.json",
-        "/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/evidence/linear-runtime-foundations/artifacts-and-sync/legacy-tree-before.json",
-        "/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/evidence/linear-runtime-foundations/artifacts-and-sync/legacy-tree-after.json",
-        "/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/evidence/linear-runtime-foundations/artifacts-and-sync/sentinel-summary.json",
-        "/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/evidence/linear-runtime-foundations/artifacts-and-sync/pull-run-log.json"
+        "<mission-dir>/evidence/linear-runtime-foundations/artifacts-and-sync/canonical-tree-before.json",
+        "<mission-dir>/evidence/linear-runtime-foundations/artifacts-and-sync/canonical-tree-after.json",
+        "<mission-dir>/evidence/linear-runtime-foundations/artifacts-and-sync/legacy-tree-before.json",
+        "<mission-dir>/evidence/linear-runtime-foundations/artifacts-and-sync/legacy-tree-after.json",
+        "<mission-dir>/evidence/linear-runtime-foundations/artifacts-and-sync/sentinel-summary.json",
+        "<mission-dir>/evidence/linear-runtime-foundations/artifacts-and-sync/pull-run-log.json"
       ]
     },
     {
@@ -20,7 +20,7 @@
       "status": "pass",
       "reason": "The focused Linear regression suite passed `runProjectLinearAutosync leaves deliveries pending when local sync fails`, which directly exercises the user-visible apply-order behavior; the live broker currently reported zero pending deliveries, so there was no safe real pending delivery to consume in the isolated worktree.",
       "evidence": [
-        "/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/evidence/linear-runtime-foundations/artifacts-and-sync/targeted-linear-tests.txt"
+        "<mission-dir>/evidence/linear-runtime-foundations/artifacts-and-sync/targeted-linear-tests.txt"
       ]
     },
     {
@@ -28,9 +28,9 @@
       "status": "pass",
       "reason": "Repeated repo-bound `documents pull`, `milestones pull`, and `status-updates pull` runs all reported `changed 0` / `written 0` on the same bound project, while the focused Linear suite passed the autosync dedupe regressions, so repeated sync/reconciliation stayed idempotent without duplicate local artifact churn.",
       "evidence": [
-        "/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/evidence/linear-runtime-foundations/artifacts-and-sync/pull-run-log.json",
-        "/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/evidence/linear-runtime-foundations/artifacts-and-sync/git-status-after-pulls.txt",
-        "/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/evidence/linear-runtime-foundations/artifacts-and-sync/targeted-linear-tests.txt"
+        "<mission-dir>/evidence/linear-runtime-foundations/artifacts-and-sync/pull-run-log.json",
+        "<mission-dir>/evidence/linear-runtime-foundations/artifacts-and-sync/git-status-after-pulls.txt",
+        "<mission-dir>/evidence/linear-runtime-foundations/artifacts-and-sync/targeted-linear-tests.txt"
       ]
     }
   ],
@@ -41,27 +41,27 @@
   "blockers": [],
   "commands": [
     {
-      "command": "cd /Users/hack/dev/hack-dance/hack-ut-artifacts && bun install && bun run build",
+      "command": "cd <isolated-worktree:hack-ut-artifacts> && bun install && bun run build",
       "exitCode": 0,
       "observation": "Built an isolated CLI worktree for artifact validation."
     },
     {
-      "command": "cd /Users/hack/dev/hack-dance/hack-ut-artifacts && ./dist/hack linear documents pull",
+      "command": "cd <isolated-worktree:hack-ut-artifacts> && ./dist/hack linear documents pull",
       "exitCode": 0,
       "observation": "Both pull runs reported `changed 0` and `written 0` for the bound project."
     },
     {
-      "command": "cd /Users/hack/dev/hack-dance/hack-ut-artifacts && ./dist/hack linear milestones pull",
+      "command": "cd <isolated-worktree:hack-ut-artifacts> && ./dist/hack linear milestones pull",
       "exitCode": 0,
       "observation": "Both pull runs reported `changed 0` and `written 0` for the bound project."
     },
     {
-      "command": "cd /Users/hack/dev/hack-dance/hack-ut-artifacts && ./dist/hack linear status-updates pull",
+      "command": "cd <isolated-worktree:hack-ut-artifacts> && ./dist/hack linear status-updates pull",
       "exitCode": 0,
       "observation": "Both pull runs reported `changed 0` and `written 0` for the bound project."
     },
     {
-      "command": "cd /Users/hack/dev/hack-dance/hack-ut-artifacts && bun test ./tests/linear-commands.test.ts ./tests/linear-project-artifacts.test.ts",
+      "command": "cd <isolated-worktree:hack-ut-artifacts> && bun test ./tests/linear-commands.test.ts ./tests/linear-project-artifacts.test.ts",
       "exitCode": 0,
       "observation": "Focused Linear suite passed 92 tests including legacy-path rejection, pending-delivery behavior on local sync failure, and autosync idempotency regressions."
     }

@@ -7,8 +7,8 @@
       "status": "pass",
       "reason": "With HACK_LINEAR_PREFER_ENV_TOKEN_ONLY=true and HACK_LINEAR_API_TOKEN set, repo-bound `./dist/hack linear status --json` exited 0 and reported `tokenResolved: true` with `tokenSource: \"env\"`.",
       "evidence": [
-        "/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/evidence/linear-runtime-foundations/auth-and-integration/linear-env-only-success.json",
-        "/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/evidence/linear-runtime-foundations/auth-and-integration/targeted-auth-tests.txt"
+        "<mission-dir>/evidence/linear-runtime-foundations/auth-and-integration/linear-env-only-success.json",
+        "<mission-dir>/evidence/linear-runtime-foundations/auth-and-integration/targeted-auth-tests.txt"
       ]
     },
     {
@@ -16,8 +16,8 @@
       "status": "pass",
       "reason": "With HACK_LINEAR_PREFER_ENV_TOKEN_ONLY=true and no env token, `./dist/hack linear status --json` failed closed with explicit `export HACK_LINEAR_API_TOKEN=<linear-token>` repair guidance and no local-token fallback.",
       "evidence": [
-        "/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/evidence/linear-runtime-foundations/auth-and-integration/linear-env-only-missing.json",
-        "/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/evidence/linear-runtime-foundations/auth-and-integration/targeted-auth-tests.txt"
+        "<mission-dir>/evidence/linear-runtime-foundations/auth-and-integration/linear-env-only-missing.json",
+        "<mission-dir>/evidence/linear-runtime-foundations/auth-and-integration/targeted-auth-tests.txt"
       ]
     },
     {
@@ -25,9 +25,9 @@
       "status": "pass",
       "reason": "Against the local broker, the first repo-bound `./dist/hack linear status --json` returned `tokenSource: \"refreshed\"` with a new expiry, and the immediate second run returned `tokenSource: \"keychain\"` with the same expiry, confirming automatic refresh plus persisted rotated metadata.",
       "evidence": [
-        "/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/evidence/linear-runtime-foundations/auth-and-integration/linear-real-status.json",
-        "/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/evidence/linear-runtime-foundations/auth-and-integration/linear-real-status-second.json",
-        "/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/evidence/linear-runtime-foundations/auth-and-integration/targeted-auth-tests.txt"
+        "<mission-dir>/evidence/linear-runtime-foundations/auth-and-integration/linear-real-status.json",
+        "<mission-dir>/evidence/linear-runtime-foundations/auth-and-integration/linear-real-status-second.json",
+        "<mission-dir>/evidence/linear-runtime-foundations/auth-and-integration/targeted-auth-tests.txt"
       ]
     },
     {
@@ -35,10 +35,10 @@
       "status": "pass",
       "reason": "Broker-owned repair and local-token repair diverged correctly: `linear seed-local-access --json` told the user to run `hack auth login`, while broken local status told the user to run `hack linear connect --profile default` (and env-only failure pointed at exporting HACK_LINEAR_API_TOKEN).",
       "evidence": [
-        "/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/evidence/linear-runtime-foundations/auth-and-integration/linear-broker-auth-missing.json",
-        "/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/evidence/linear-runtime-foundations/auth-and-integration/linear-local-token-missing.json",
-        "/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/evidence/linear-runtime-foundations/auth-and-integration/linear-env-only-missing.json",
-        "/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/evidence/linear-runtime-foundations/auth-and-integration/targeted-auth-tests.txt"
+        "<mission-dir>/evidence/linear-runtime-foundations/auth-and-integration/linear-broker-auth-missing.json",
+        "<mission-dir>/evidence/linear-runtime-foundations/auth-and-integration/linear-local-token-missing.json",
+        "<mission-dir>/evidence/linear-runtime-foundations/auth-and-integration/linear-env-only-missing.json",
+        "<mission-dir>/evidence/linear-runtime-foundations/auth-and-integration/targeted-auth-tests.txt"
       ]
     },
     {
@@ -46,9 +46,9 @@
       "status": "pass",
       "reason": "With a temp global config enabling the GitHub extension, repo-bound `./dist/hack x github status --json` reported `mode: \"token\"` and `tokenSource: \"env\"` in env-only mode, while the missing-token path failed closed with explicit env repair guidance; the targeted auth suite also passed the GitHub refresh regressions.",
       "evidence": [
-        "/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/evidence/linear-runtime-foundations/auth-and-integration/github-env-only-success.json",
-        "/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/evidence/linear-runtime-foundations/auth-and-integration/github-env-only-missing.json",
-        "/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/evidence/linear-runtime-foundations/auth-and-integration/targeted-auth-tests.txt"
+        "<mission-dir>/evidence/linear-runtime-foundations/auth-and-integration/github-env-only-success.json",
+        "<mission-dir>/evidence/linear-runtime-foundations/auth-and-integration/github-env-only-missing.json",
+        "<mission-dir>/evidence/linear-runtime-foundations/auth-and-integration/targeted-auth-tests.txt"
       ]
     }
   ],
@@ -64,62 +64,62 @@
       "observation": "Local broker health check returned `{\"ok\":true,...}` before broker-dependent smokes."
     },
     {
-      "command": "cd /Users/hack/dev/hack-dance/hack-ut-auth && bun install",
+      "command": "cd <isolated-worktree:hack-ut-auth> && bun install",
       "exitCode": 0,
       "observation": "Installed the isolated working copy dependencies so the focused auth suites could run."
     },
     {
-      "command": "cd /Users/hack/dev/hack-dance/hack-ut-auth && bun run build",
+      "command": "cd <isolated-worktree:hack-ut-auth> && bun run build",
       "exitCode": 0,
       "observation": "Built `./dist/hack` in the isolated working copy for repo-bound CLI validation."
     },
     {
-      "command": "cd /Users/hack/dev/hack-dance/hack-ut-auth && bun test ./tests/linear-auth.test.ts ./tests/linear-commands.test.ts ./tests/prerequisites-matrix.test.ts ./tests/github-auth.test.ts",
+      "command": "cd <isolated-worktree:hack-ut-auth> && bun test ./tests/linear-auth.test.ts ./tests/linear-commands.test.ts ./tests/prerequisites-matrix.test.ts ./tests/github-auth.test.ts",
       "exitCode": 0,
       "observation": "Focused auth/prerequisite coverage passed with 114 passing tests and 0 failures."
     },
     {
-      "command": "HOME=/tmp/hack-ut-auth-flow/linear-env-success/home HACK_GLOBAL_CONFIG_PATH=/tmp/hack-ut-auth-flow/linear-env-success/global-config.json HACK_SECRETS_FILE_KEY=<redacted> HACK_LINEAR_PREFER_ENV_TOKEN_ONLY=true HACK_LINEAR_API_TOKEN=env_linear_smoke_token ./dist/hack linear status --json",
+      "command": "HOME=<tmp>/hack-ut-auth-flow/linear-env-success/home HACK_GLOBAL_CONFIG_PATH=<tmp>/hack-ut-auth-flow/linear-env-success/global-config.json HACK_SECRETS_FILE_KEY=<redacted> HACK_LINEAR_PREFER_ENV_TOKEN_ONLY=true HACK_LINEAR_API_TOKEN=env_linear_smoke_token ./dist/hack linear status --json",
       "exitCode": 0,
       "observation": "Returned `tokenResolved: true` and `tokenSource: \"env\"`."
     },
     {
-      "command": "HOME=/tmp/hack-ut-auth-flow/linear-env-missing/home HACK_GLOBAL_CONFIG_PATH=/tmp/hack-ut-auth-flow/linear-env-missing/global-config.json HACK_SECRETS_FILE_KEY=<redacted> HACK_LINEAR_PREFER_ENV_TOKEN_ONLY=true ./dist/hack linear status --json",
+      "command": "HOME=<tmp>/hack-ut-auth-flow/linear-env-missing/home HACK_GLOBAL_CONFIG_PATH=<tmp>/hack-ut-auth-flow/linear-env-missing/global-config.json HACK_SECRETS_FILE_KEY=<redacted> HACK_LINEAR_PREFER_ENV_TOKEN_ONLY=true ./dist/hack linear status --json",
       "exitCode": 1,
       "observation": "Failed closed with explicit `export HACK_LINEAR_API_TOKEN=<linear-token>` guidance."
     },
     {
-      "command": "HOME=/tmp/hack-ut-auth-flow/linear-local-missing/home HACK_GLOBAL_CONFIG_PATH=/tmp/hack-ut-auth-flow/linear-local-missing/global-config.json HACK_SECRETS_FILE_KEY=<redacted> ./dist/hack linear status --json",
+      "command": "HOME=<tmp>/hack-ut-auth-flow/linear-local-missing/home HACK_GLOBAL_CONFIG_PATH=<tmp>/hack-ut-auth-flow/linear-local-missing/global-config.json HACK_SECRETS_FILE_KEY=<redacted> ./dist/hack linear status --json",
       "exitCode": 1,
       "observation": "Reported local-token repair guidance: `hack linear connect --profile default`."
     },
     {
-      "command": "HOME=/tmp/hack-ut-auth-flow/linear-broker-missing/home HACK_GLOBAL_CONFIG_PATH=/tmp/hack-ut-auth-flow/linear-broker-missing/global-config.json HACK_SECRETS_FILE_KEY=<redacted> HACK_AUTH_BROKER_URL=http://127.0.0.1:8080 ./dist/hack linear seed-local-access --json",
+      "command": "HOME=<tmp>/hack-ut-auth-flow/linear-broker-missing/home HACK_GLOBAL_CONFIG_PATH=<tmp>/hack-ut-auth-flow/linear-broker-missing/global-config.json HACK_SECRETS_FILE_KEY=<redacted> HACK_AUTH_BROKER_URL=http://127.0.0.1:8080 ./dist/hack linear seed-local-access --json",
       "exitCode": 1,
       "observation": "Reported broker-owned repair guidance: `hack auth login`."
     },
     {
-      "command": "HOME=/tmp/hack-ut-auth-flow/linear-refresh-cli/home HACK_GLOBAL_CONFIG_PATH=/tmp/hack-ut-auth-flow/linear-refresh-cli/global-config.json HACK_SECRETS_FILE_KEY=<redacted> ./dist/hack linear connect --profile default --token <redacted> --refresh-token <redacted> --token-expires-at 2020-01-01T00:00:00.000Z",
+      "command": "HOME=<tmp>/hack-ut-auth-flow/linear-refresh-cli/home HACK_GLOBAL_CONFIG_PATH=<tmp>/hack-ut-auth-flow/linear-refresh-cli/global-config.json HACK_SECRETS_FILE_KEY=<redacted> ./dist/hack linear connect --profile default --token <redacted> --refresh-token <redacted> --token-expires-at 2020-01-01T00:00:00.000Z",
       "exitCode": 1,
       "observation": "The isolated refresh-staging attempt was blocked by macOS secret-store authorization cancellation (`code: -60006`)."
     },
     {
-      "command": "cd /Users/hack/dev/hack-dance/hack-ut-auth && HACK_AUTH_BROKER_URL=http://127.0.0.1:8080 ./dist/hack linear status --json",
+      "command": "cd <isolated-worktree:hack-ut-auth> && HACK_AUTH_BROKER_URL=http://127.0.0.1:8080 ./dist/hack linear status --json",
       "exitCode": 0,
       "observation": "Against the stored real profile, the first run returned `tokenSource: \"refreshed\"` and a new `tokenExpiresAt`."
     },
     {
-      "command": "cd /Users/hack/dev/hack-dance/hack-ut-auth && HACK_AUTH_BROKER_URL=http://127.0.0.1:8080 ./dist/hack linear status --json",
+      "command": "cd <isolated-worktree:hack-ut-auth> && HACK_AUTH_BROKER_URL=http://127.0.0.1:8080 ./dist/hack linear status --json",
       "exitCode": 0,
       "observation": "The immediate second run returned `tokenSource: \"keychain\"` with the same expiry, confirming persistence."
     },
     {
-      "command": "HOME=/tmp/hack-ut-auth-flow/github-env-success/home HACK_GLOBAL_CONFIG_PATH=/tmp/hack-ut-auth-flow/github-env-success/global-config.json HACK_SECRETS_FILE_KEY=<redacted> HACK_GITHUB_PREFER_ENV_TOKEN_ONLY=true HACK_GITHUB_APP_TOKEN=env_github_smoke_token ./dist/hack x github status --json",
+      "command": "HOME=<tmp>/hack-ut-auth-flow/github-env-success/home HACK_GLOBAL_CONFIG_PATH=<tmp>/hack-ut-auth-flow/github-env-success/global-config.json HACK_SECRETS_FILE_KEY=<redacted> HACK_GITHUB_PREFER_ENV_TOKEN_ONLY=true HACK_GITHUB_APP_TOKEN=env_github_smoke_token ./dist/hack x github status --json",
       "exitCode": 0,
       "observation": "Returned `mode: \"token\"`, `tokenResolved: true`, and `tokenSource: \"env\"`."
     },
     {
-      "command": "HOME=/tmp/hack-ut-auth-flow/github-env-missing/home HACK_GLOBAL_CONFIG_PATH=/tmp/hack-ut-auth-flow/github-env-missing/global-config.json HACK_SECRETS_FILE_KEY=<redacted> HACK_GITHUB_PREFER_ENV_TOKEN_ONLY=true ./dist/hack x github status --json",
+      "command": "HOME=<tmp>/hack-ut-auth-flow/github-env-missing/home HACK_GLOBAL_CONFIG_PATH=<tmp>/hack-ut-auth-flow/github-env-missing/global-config.json HACK_SECRETS_FILE_KEY=<redacted> HACK_GITHUB_PREFER_ENV_TOKEN_ONLY=true ./dist/hack x github status --json",
       "exitCode": 1,
       "observation": "Failed closed with explicit `HACK_GITHUB_APP_TOKEN` repair guidance."
     }

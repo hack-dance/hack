@@ -46,10 +46,11 @@ Testing surface findings, required tools, and validation concurrency for this mi
 
 ## Flow Validator Guidance: CLI surface
 
-- Use repo-root `/Users/hack/dev/hack-dance/hack` and prefer `./dist/hack` after a local `bun run build`.
+- Use the current repo root (for example `<repo>`) and prefer `./dist/hack` after a local `bun run build`.
 - Stay repo-bound: do not use the globally installed `hack` binary for product behavior except runtime orchestration commands explicitly assigned by the coordinator.
 - Treat `.hack/linear/**` as managed output. Do not delete unmanaged scratch files and do not create or validate against `.hack/.hack/linear/**`.
 - For env-only auth assertions, set explicit process env in the command invocation rather than mutating shell startup files.
+- When committing validation evidence, replace local absolute paths with placeholders such as `<repo>`, `<isolated-worktree:...>`, `<mission-dir>`, and `<tmp>`.
 - Because CLI assertions in this milestone share repo-local Linear artifacts and profile state, validators for this surface must run serialized unless given a separate working copy.
 
 ## Flow Validator Guidance: Broker / local HTTP surface

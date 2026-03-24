@@ -1,3 +1,21 @@
+## <small>1.21.1 (2026-03-24)</small>
+
+* Merge branch 'main' into codex/fix-authorization-bypass-for-team-management ([3c4eee5](https://github.com/hack-dance/hack/commit/3c4eee5))
+* Merge pull request #25 from hack-dance/codex/fix-authorization-bypass-for-team-management ([4e0a5fd](https://github.com/hack-dance/hack/commit/4e0a5fd)), closes [#25](https://github.com/hack-dance/hack/issues/25)
+* fix(auth): restore team-scoped authorization ([5622392](https://github.com/hack-dance/hack/commit/5622392))
+
+## 1.21.0 (2026-03-24)
+
+* feat(release): publish codex slim installer ([b0451e0](https://github.com/hack-dance/hack/commit/b0451e0))
+
+## 1.20.0 (2026-03-24)
+
+* feat(codex): add slim install path for managed containers ([38f6b78](https://github.com/hack-dance/hack/commit/38f6b78))
+* improve linear routing status output ([64574f1](https://github.com/hack-dance/hack/commit/64574f1))
+* Merge branch 'main' into codex/linear-mention-hack-444-improve-status,-error,-and-help-ou ([7c08dd5](https://github.com/hack-dance/hack/commit/7c08dd5))
+* Merge pull request #26 from hack-dance/codex/linear-mention-hack-444-improve-status,-error,-and-help ([b88c8b7](https://github.com/hack-dance/hack/commit/b88c8b7)), closes [#26](https://github.com/hack-dance/hack/issues/26)
+* docs(agents): require conventional commits for release flow ([4a929c3](https://github.com/hack-dance/hack/commit/4a929c3))
+
 ## <small>1.19.1 (2026-03-23)</small>
 
 * Merge pull request #24 from hack-dance/fix/macos-ghostty-vt-latest ([2546af4](https://github.com/hack-dance/hack/commit/2546af4)), closes [#24](https://github.com/hack-dance/hack/issues/24)

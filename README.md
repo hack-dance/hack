@@ -102,6 +102,16 @@ curl -fsSL \
   | bash
 ```
 
+Managed Codex or CI container:
+
+```bash
+curl -fsSL \
+  https://github.com/hack-dance/hack/releases/latest/download/hack-codex-install.sh \
+  | bash
+```
+
+This slim install path skips `hack global install`, Caddy/CoreDNS, and Loki/Grafana.
+
 CLI + desktop app:
 
 - Download the latest DMG from [GitHub Releases](https://github.com/hack-dance/hack/releases/latest)

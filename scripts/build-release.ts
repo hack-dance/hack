@@ -141,6 +141,10 @@ async function main({ args }: { readonly args: BuildArgs }): Promise<number> {
   await Bun.write(installScriptPath, renderInstallScript());
   await chmodExecutable({ path: installScriptPath });
 
+  const slimInstallScriptPath = resolve(releaseDir, "install-codex-slim.sh");
+  await Bun.write(slimInstallScriptPath, renderCodexSlimInstallScript());
+  await chmodExecutable({ path: slimInstallScriptPath });
+
   const checksumPath = resolve(releaseDir, "SHA256SUMS");
   await Bun.write(checksumPath, await renderChecksums({ root: releaseDir }));
 
@@ -163,6 +167,18 @@ async function main({ args }: { readonly args: BuildArgs }): Promise<number> {
   await chmodExecutable({ path: downloadScriptPath });
   await chmodExecutable({ path: downloadScriptAltPath });
 
+  const slimDownloadScriptName = `hack-${version}-codex-install.sh`;
+  const slimDownloadScriptPath = resolve(releaseRoot, slimDownloadScriptName);
+  const slimDownloadScriptAltPath = resolve(
+    releaseRoot,
+    "hack-codex-install.sh"
+  );
+  const slimDownloadScript = renderDownloadCodexSlimInstallScript();
+  await Bun.write(slimDownloadScriptPath, slimDownloadScript);
+  await Bun.write(slimDownloadScriptAltPath, slimDownloadScript);
+  await chmodExecutable({ path: slimDownloadScriptPath });
+  await chmodExecutable({ path: slimDownloadScriptAltPath });
+
   process.stdout.write(
     `${[
       "Release prepared:",
@@ -170,6 +186,8 @@ async function main({ args }: { readonly args: BuildArgs }): Promise<number> {
       `  Tarball: ${tarballPath}`,
       `  Install script: ${downloadScriptPath}`,
       `  Install script (latest): ${downloadScriptAltPath}`,
+      `  Slim install script: ${slimDownloadScriptPath}`,
+      `  Slim install script (latest): ${slimDownloadScriptAltPath}`,
     ].join("\n")}\n`
   );
   return 0;
@@ -430,6 +448,54 @@ function renderInstallScript(): string {
   ].join("\n");
 }
 
+function renderCodexSlimInstallScript(): string {
+  return [
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    "",
+    'ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+    'INSTALL_BIN="${HACK_INSTALL_BIN:-$HOME/.hack/bin}"',
+    'INSTALL_ASSETS="${HACK_INSTALL_ASSETS:-$HOME/.hack/assets}"',
+    'ASSETS_DIR="$ROOT/assets"',
+    'BINARIES_DIR="$ROOT/binaries"',
+    'REAL_BIN="$INSTALL_BIN/hack-real"',
+    'WRAPPER_BIN="$INSTALL_BIN/hack"',
+    "",
+    'mkdir -p "$INSTALL_BIN" "$INSTALL_ASSETS"',
+    'cp "$ROOT/hack" "$REAL_BIN"',
+    'chmod +x "$REAL_BIN"',
+    "",
+    'if [ -d "$ASSETS_DIR" ]; then',
+    '  mkdir -p "$INSTALL_ASSETS"',
+    '  cp -R "$ASSETS_DIR/." "$INSTALL_ASSETS"',
+    "fi",
+    "",
+    'if [ -d "$BINARIES_DIR" ]; then',
+    '  mkdir -p "$INSTALL_ASSETS/binaries"',
+    '  cp -R "$BINARIES_DIR/." "$INSTALL_ASSETS/binaries"',
+    "fi",
+    "",
+    "{",
+    `  printf '%s\\n' '#!/usr/bin/env bash' 'set -euo pipefail'`,
+    `  printf '%s\\n' 'export HACK_EXECUTION_MODE="\${HACK_EXECUTION_MODE:-codex}"'`,
+    `  printf '%s\\n' 'export HACK_DAEMON_DISABLE_DOCKER_EVENTS="\${HACK_DAEMON_DISABLE_DOCKER_EVENTS:-1}"'`,
+    `  printf '%s\\n' 'export HACK_SETUP_SYNC_MODE="\${HACK_SETUP_SYNC_MODE:-warn}"'`,
+    `  printf 'export HACK_ASSETS_DIR="\${HACK_ASSETS_DIR:-%s}"\\n' "$INSTALL_ASSETS"`,
+    `  printf 'exec "%s" "$@"\\n' "$REAL_BIN"`,
+    '} > "$WRAPPER_BIN"',
+    'chmod +x "$WRAPPER_BIN"',
+    "",
+    'echo "Installed slim hack wrapper to $WRAPPER_BIN"',
+    'echo "Installed real hack binary to $REAL_BIN"',
+    'if [[ ":$PATH:" != *":$INSTALL_BIN:"* ]]; then',
+    '  echo "Add $INSTALL_BIN to PATH if needed:"',
+    '  echo "  export PATH=\\"$INSTALL_BIN:\\$PATH\\""',
+    "fi",
+    'echo "Slim mode defaults: HACK_EXECUTION_MODE=${HACK_EXECUTION_MODE:-codex}, HACK_DAEMON_DISABLE_DOCKER_EVENTS=1"',
+    "",
+  ].join("\n");
+}
+
 function renderDownloadInstallScript(): string {
   return [
     "#!/usr/bin/env bash",
@@ -489,6 +555,69 @@ function renderDownloadInstallScript(): string {
     "fi",
     "",
     'bash "$INSTALL_DIR/install.sh"',
+    "",
+  ].join("\n");
+}
+
+function renderDownloadCodexSlimInstallScript(): string {
+  return [
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    "",
+    'REPO_OWNER="hack-dance"',
+    'REPO_NAME="hack"',
+    'REPO="$REPO_OWNER/$REPO_NAME"',
+    'API_URL="https://api.github.com/repos/$REPO/releases/latest"',
+    'BASE_URL="${HACK_RELEASE_BASE_URL:-https://github.com/$REPO/releases/download}"',
+    "",
+    'if [ -n "${HACK_INSTALL_TAG:-}" ]; then',
+    '  TAG="$HACK_INSTALL_TAG"',
+    'elif [ -n "${HACK_INSTALL_VERSION:-}" ]; then',
+    '  TAG="v$HACK_INSTALL_VERSION"',
+    "else",
+    '  TAG=$(curl -fsSL "$API_URL" | sed -n \'s/.*"tag_name": "\\([^"]*\\)".*/\\1/p\' | head -n1)',
+    "fi",
+    "",
+    'if [ -z "$TAG" ]; then',
+    '  echo "Failed to resolve release tag."',
+    "  exit 1",
+    "fi",
+    "",
+    'VERSION="${TAG#v}"',
+    "OS=\"$(uname -s | tr '[:upper:]' '[:lower:]')\"",
+    'ARCH="$(uname -m)"',
+    'if [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; then',
+    '  ARCH="x86_64"',
+    'elif [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then',
+    '  ARCH="arm64"',
+    "else",
+    '  echo "Unsupported architecture: $ARCH"',
+    "  exit 1",
+    "fi",
+    "",
+    'if [ "$OS" != "darwin" ] && [ "$OS" != "linux" ]; then',
+    '  echo "Unsupported OS: $OS"',
+    "  exit 1",
+    "fi",
+    "",
+    'TARBALL="hack-$VERSION-$OS-$ARCH.tar.gz"',
+    'URL="$BASE_URL/$TAG/$TARBALL"',
+    "",
+    "tmpdir=$(mktemp -d)",
+    'cleanup() { rm -rf "$tmpdir"; }',
+    "trap cleanup EXIT",
+    "",
+    'echo "Downloading $URL"',
+    'curl -fsSL "$URL" -o "$tmpdir/$TARBALL"',
+    'tar -xzf "$tmpdir/$TARBALL" -C "$tmpdir"',
+    "",
+    'INSTALL_DIR="$tmpdir/hack-$VERSION-release"',
+    'if [ ! -d "$INSTALL_DIR" ]; then',
+    '  echo "Missing release directory: $INSTALL_DIR"',
+    "  exit 1",
+    "fi",
+    "",
+    'bash "$INSTALL_DIR/install-codex-slim.sh"',
     "",
   ].join("\n");
 }

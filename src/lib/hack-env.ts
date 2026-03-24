@@ -4,7 +4,7 @@ import {
   PROJECT_ENV_CONTRACT_FILENAME,
   PROJECT_ENV_FILENAME,
 } from "../constants.ts";
-import { parseDotEnv } from "./env.ts";
+import { parseDotEnv, serializeDotEnv } from "./env.ts";
 import { readTextFile, writeTextFileIfChanged } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
 import type { SecretStoreDescriptor } from "./secret-store.ts";
@@ -346,22 +346,12 @@ function parseHackEnvVar(value: unknown): HackEnvVar | null {
 }
 
 function serializeDotEnvStable(env: Record<string, string>): string {
-  const lines: string[] = [];
+  const sortedEnv: Record<string, string> = {};
   for (const key of Object.keys(env).sort((a, b) => a.localeCompare(b))) {
     const value = env[key];
-    if (typeof value !== "string") {
-      continue;
+    if (typeof value === "string") {
+      sortedEnv[key] = value;
     }
-    lines.push(`${key}=${escapeEnvValue(value)}`);
   }
-  return `${lines.join("\n")}\n`;
-}
-
-function escapeEnvValue(value: string): string {
-  const needsQuotes =
-    value.includes(" ") || value.includes("\n") || value.includes('"');
-  if (!needsQuotes) {
-    return value;
-  }
-  return `"${value.replaceAll('"', '\\"')}"`;
+  return serializeDotEnv(sortedEnv);
 }

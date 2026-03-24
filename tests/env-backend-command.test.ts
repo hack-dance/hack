@@ -451,6 +451,83 @@ test(
   { timeout: 40_000 }
 );
 
+test(
+  "env set preserves multiline plain_env values through .env round-trip",
+  async () => {
+    if (!tempDir) {
+      throw new Error("Missing temp dir");
+    }
+    const projectRoot = resolve(tempDir, "repo");
+    const projectDir = resolve(projectRoot, ".hack");
+    const multilineValue = [
+      "-----BEGIN PUBLIC KEY-----",
+      String.raw`line\with\backslashes+plus`,
+      'line"with"quotes',
+      "-----END PUBLIC KEY-----",
+    ].join("\n");
+    await mkdir(projectDir, { recursive: true });
+    await writeFile(
+      resolve(projectDir, "docker-compose.yml"),
+      "services: {}\n"
+    );
+    await writeFile(
+      resolve(projectDir, "hack.env.json"),
+      `${JSON.stringify(
+        {
+          version: 1,
+          vars: [
+            {
+              key: "PUBLIC_CERT",
+              required: false,
+              source: "plain_env",
+            },
+          ],
+        },
+        null,
+        2
+      )}\n`
+    );
+
+    const setResult = await runHack({
+      args: ["env", "set", `PUBLIC_CERT=${multilineValue}`],
+      env: {
+        ...process.env,
+        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
+      },
+      cwd: projectRoot,
+    });
+    expect(setResult.exitCode).toBe(0);
+
+    const envText = await readFile(resolve(projectDir, ".env"), "utf8");
+    expect(envText).toContain("PUBLIC_CERT=");
+    expect(envText).toContain("\\\\");
+    expect(envText).toContain('\\"');
+
+    const listResult = await runHack({
+      args: ["env", "list", "--show-secrets", "--json"],
+      env: {
+        ...process.env,
+        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
+      },
+      cwd: projectRoot,
+    });
+    expect(listResult.exitCode).toBe(0);
+    const listJson = JSON.parse(listResult.stdout) as {
+      readonly vars: ReadonlyArray<{
+        readonly key: string;
+        readonly value: string | null;
+        readonly source: string;
+      }>;
+    };
+    const publicCert = listJson.vars.find(
+      (entry) => entry.key === "PUBLIC_CERT"
+    );
+    expect(publicCert?.source).toBe("plain_env");
+    expect(publicCert?.value).toBe(multilineValue);
+  },
+  { timeout: 40_000 }
+);
+
 async function runHack(input: {
   readonly args: readonly string[];
   readonly env: NodeJS.ProcessEnv;

@@ -7,6 +7,12 @@
 * Merge pull request #29 from hack-dance/codex/define-env-key-rotation-and-recovery-flows-16o779 ([408f664](https://github.com/hack-dance/hack/commit/408f664)), closes [#29](https://github.com/hack-dance/hack/issues/29)
 * docs: clarify portable env recovery flows ([5bb98db](https://github.com/hack-dance/hack/commit/5bb98db))
 
+## Next
+
+* feat(env): add `--env=<name>` overlays on top of the base `.hack/hack.env.json` contract and `.hack/.env` compatibility file
+* feat(env): allow project defaults via `defaultEnvConfig` / `default_env_config`
+* feat(doctor): warn when repos are still on legacy local-only plaintext env mode instead of the bundled portable backend flow
+
 ## <small>1.21.2 (2026-03-24)</small>
 
 * Merge branch 'main' into codex/linear-mention-hack-462-preserve-.env-compatibility-whil-6icfe6 ([7e821e4](https://github.com/hack-dance/hack/commit/7e821e4))

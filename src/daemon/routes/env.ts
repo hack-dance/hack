@@ -1,13 +1,13 @@
-import { resolve } from "node:path";
-
-import { PROJECT_ENV_FILENAME } from "../../constants.ts";
 import { isRecord } from "../../lib/guards.ts";
 import {
   readHackEnvRuntimeConfig,
   removeDotEnvKey,
+  resolveEnvFilePath,
+  resolveEnvSecretKey,
   resolveHackEnv,
   upsertDotEnvValue,
 } from "../../lib/hack-env.ts";
+import { parseEnvConfigSelection } from "../../lib/project.ts";
 import type { RegisteredProject } from "../../lib/projects-registry.ts";
 import {
   readProjectsRegistry,
@@ -64,6 +64,7 @@ export type EnvGetResponse = {
 type EnvSetBody = {
   readonly project?: string;
   readonly projectId?: string;
+  readonly env?: string | null;
   readonly key: string;
   readonly value: string;
   readonly secret?: boolean;
@@ -72,6 +73,7 @@ type EnvSetBody = {
 type EnvUnsetBody = {
   readonly project?: string;
   readonly projectId?: string;
+  readonly env?: string | null;
   readonly key: string;
 };
 
@@ -116,6 +118,12 @@ async function handleGetEnv(opts: { readonly url: URL }): Promise<Response> {
   const projectName = normalizeQueryParam({
     value: opts.url.searchParams.get("project"),
   });
+  const envName = resolveRequestedEnvName({
+    value: opts.url.searchParams.get("env"),
+  });
+  if (envName === undefined && opts.url.searchParams.has("env")) {
+    return jsonResponse({ error: "invalid_env" }, 400);
+  }
 
   const resolvedProject = await resolveProjectFromParams({
     projectId,
@@ -129,6 +137,7 @@ async function handleGetEnv(opts: { readonly url: URL }): Promise<Response> {
   const resolved = await resolveHackEnv({
     projectDir: project.projectDir,
     projectName: registration.name,
+    envName,
   });
 
   const valuesByKey = new Map(resolved.values.map((v) => [v.key, v] as const));
@@ -211,7 +220,10 @@ async function handleSetEnv(opts: {
   if (secret) {
     try {
       await secretStore.set({
-        key: parsed.value.key,
+        key: resolveEnvSecretKey({
+          key: parsed.value.key,
+          envName: parsed.value.env,
+        }),
         value: parsed.value.value,
       });
     } catch (error: unknown) {
@@ -237,7 +249,10 @@ async function handleSetEnv(opts: {
     );
   }
 
-  const envFile = resolve(project.projectDir, PROJECT_ENV_FILENAME);
+  const envFile = resolveEnvFilePath({
+    projectDir: project.projectDir,
+    envName: parsed.value.env,
+  });
   await upsertDotEnvValue({
     envFile,
     key: parsed.value.key,
@@ -246,7 +261,10 @@ async function handleSetEnv(opts: {
   if (runtimeConfig.storePlaintextInBackend) {
     try {
       await secretStore.set({
-        key: parsed.value.key,
+        key: resolveEnvSecretKey({
+          key: parsed.value.key,
+          envName: parsed.value.env,
+        }),
         value: parsed.value.value,
       });
     } catch (error: unknown) {
@@ -293,7 +311,10 @@ async function handleUnsetEnv(opts: {
     projectDir: project.projectDir,
   });
 
-  const envFile = resolve(project.projectDir, PROJECT_ENV_FILENAME);
+  const envFile = resolveEnvFilePath({
+    projectDir: project.projectDir,
+    envName: parsed.value.env,
+  });
   const dotenvResult = await removeDotEnvKey({
     envFile,
     key: parsed.value.key,
@@ -301,7 +322,10 @@ async function handleUnsetEnv(opts: {
   let secretDeleted: boolean | null = null;
   try {
     secretDeleted = await secretStore.delete({
-      key: parsed.value.key,
+      key: resolveEnvSecretKey({
+        key: parsed.value.key,
+        envName: parsed.value.env,
+      }),
     });
   } catch {
     secretDeleted = null;
@@ -377,6 +401,12 @@ function parseEnvSetBody(
     typeof body.project === "string" ? body.project.trim() : undefined;
   const projectId =
     typeof body.projectId === "string" ? body.projectId.trim() : undefined;
+  const env = resolveRequestedEnvName({
+    value: typeof body.env === "string" ? body.env : null,
+  });
+  if (typeof body.env === "string" && env === undefined) {
+    return { ok: false, error: "invalid_env" };
+  }
   const secret = body.secret === true ? true : undefined;
 
   return {
@@ -384,6 +414,7 @@ function parseEnvSetBody(
     value: {
       ...(project && project.length > 0 ? { project } : {}),
       ...(projectId && projectId.length > 0 ? { projectId } : {}),
+      ...(env !== undefined ? { env } : {}),
       key: trimmedKey,
       value,
       ...(secret ? { secret } : {}),
@@ -407,15 +438,31 @@ function parseEnvUnsetBody(
     typeof body.project === "string" ? body.project.trim() : undefined;
   const projectId =
     typeof body.projectId === "string" ? body.projectId.trim() : undefined;
+  const env = resolveRequestedEnvName({
+    value: typeof body.env === "string" ? body.env : null,
+  });
+  if (typeof body.env === "string" && env === undefined) {
+    return { ok: false, error: "invalid_env" };
+  }
 
   return {
     ok: true,
     value: {
       ...(project && project.length > 0 ? { project } : {}),
       ...(projectId && projectId.length > 0 ? { projectId } : {}),
+      ...(env !== undefined ? { env } : {}),
       key: trimmedKey,
     },
   };
+}
+
+function resolveRequestedEnvName(opts: {
+  readonly value: string | null;
+}): string | null | undefined {
+  if (opts.value === null) {
+    return undefined;
+  }
+  return parseEnvConfigSelection(opts.value);
 }
 
 function normalizeQueryParam(opts: {

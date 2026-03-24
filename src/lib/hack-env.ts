@@ -8,6 +8,7 @@ import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { parseDotEnv, serializeDotEnv } from "./env.ts";
 import { readTextFile, writeTextFileIfChanged } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
+import { readProjectDefaultEnvConfig } from "./project.ts";
 import type { SecretStoreDescriptor } from "./secret-store.ts";
 import { resolveSecretStore } from "./secret-store.ts";
 
@@ -56,11 +57,20 @@ export type HackEnvResolveResult = {
   readonly contractParseError?: string;
   readonly envPath: string;
   readonly envExists: boolean;
+  readonly envSelection: HackEnvSelection;
   readonly contract: HackEnvContract;
   readonly storage: HackEnvStorageSummary;
   readonly values: readonly HackEnvValueState[];
   readonly missingRequired: readonly HackEnvValueState[];
   readonly envForCompose: Readonly<Record<string, string>>;
+};
+
+export type HackEnvSelection = {
+  readonly requestedEnv: string | null;
+  readonly defaultEnv: string | null;
+  readonly effectiveEnv: string | null;
+  readonly overlayPath: string | null;
+  readonly overlayExists: boolean;
 };
 
 export type HackEnvPortableStateSummary = {
@@ -129,11 +139,16 @@ export async function readHackEnvContract(opts: {
 export async function resolveHackEnv(opts: {
   readonly projectDir: string;
   readonly projectName: string;
+  readonly envName?: string | null;
 }): Promise<HackEnvResolveResult> {
   const read = await readHackEnvContract({ projectDir: opts.projectDir });
   const contract = read.contract;
   const runtimeConfig = await readHackEnvRuntimeConfig({
     projectDir: opts.projectDir,
+  });
+  const envSelection = await resolveHackEnvSelection({
+    projectDir: opts.projectDir,
+    envName: opts.envName,
   });
   const secretStore = await resolveSecretStore({
     projectName: opts.projectName,
@@ -143,89 +158,28 @@ export async function resolveHackEnv(opts: {
   const envPath = resolve(opts.projectDir, PROJECT_ENV_FILENAME);
   const envText = await readTextFile(envPath);
   const envExists = envText !== null;
-  const dotenv = envText ? parseDotEnv(envText) : {};
+  const baseDotenv = envText ? parseDotEnv(envText) : {};
+  const overlayText =
+    envSelection.overlayPath === null
+      ? null
+      : await readTextFile(envSelection.overlayPath);
+  const overlayDotenv = overlayText ? parseDotEnv(overlayText) : {};
 
   const envForCompose: Record<string, string> = {};
   const values: HackEnvValueState[] = [];
-  for (const v of contract.vars) {
-    const key = v.key;
-
-    if (v.source === "keychain") {
-      const value = await secretStore.get({
-        key,
-      });
-      const resolvedFrom = value === null ? null : "keychain";
-      values.push({
-        key,
-        required: v.required,
-        source: v.source,
-        services: v.services,
-        value,
-        resolvedFrom,
-      });
-      if (value !== null) {
-        envForCompose[key] = value;
-      }
-      continue;
-    }
-
-    if (runtimeConfig.storePlaintextInBackend) {
-      const fromPortableBackend = await secretStore.get({
-        key,
-      });
-      if (
-        typeof fromPortableBackend === "string" &&
-        fromPortableBackend.length > 0
-      ) {
-        values.push({
-          key,
-          required: v.required,
-          source: v.source,
-          services: v.services,
-          value: fromPortableBackend,
-          resolvedFrom: "portable_backend",
-        });
-        envForCompose[key] = fromPortableBackend;
-        continue;
-      }
-    }
-
-    const fromDotenv = dotenv[key];
-    if (typeof fromDotenv === "string" && fromDotenv.length > 0) {
-      values.push({
-        key,
-        required: v.required,
-        source: v.source,
-        services: v.services,
-        value: fromDotenv,
-        resolvedFrom: "dotenv",
-      });
-      envForCompose[key] = fromDotenv;
-      continue;
-    }
-
-    const fromProcess = process.env[key];
-    if (typeof fromProcess === "string" && fromProcess.length > 0) {
-      values.push({
-        key,
-        required: v.required,
-        source: v.source,
-        services: v.services,
-        value: fromProcess,
-        resolvedFrom: "process",
-      });
-      envForCompose[key] = fromProcess;
-      continue;
-    }
-
-    values.push({
-      key,
-      required: v.required,
-      source: v.source,
-      services: v.services,
-      value: null,
-      resolvedFrom: null,
+  for (const contractVar of contract.vars) {
+    const valueState = await resolveHackEnvValueState({
+      contractVar,
+      storePlaintextInBackend: runtimeConfig.storePlaintextInBackend,
+      effectiveEnvName: envSelection.effectiveEnv,
+      baseDotenv,
+      overlayDotenv,
+      secretStore,
     });
+    values.push(valueState);
+    if (valueState.value !== null) {
+      envForCompose[valueState.key] = valueState.value;
+    }
   }
 
   const missingRequired = values.filter((v) => v.required && v.value === null);
@@ -235,6 +189,7 @@ export async function resolveHackEnv(opts: {
     ...(read.parseError ? { contractParseError: read.parseError } : {}),
     envPath,
     envExists,
+    envSelection,
     contract,
     storage: {
       contract: {
@@ -290,6 +245,26 @@ export async function readHackEnvRuntimeConfig(opts: {
     storePlaintextInBackend:
       controlPlane.config.secrets.storePlaintextInBackend,
   };
+}
+
+export function resolveEnvFilePath(opts: {
+  readonly projectDir: string;
+  readonly envName?: string | null;
+}): string {
+  const envName = opts.envName?.trim() ?? "";
+  const fileName =
+    envName.length > 0
+      ? `${PROJECT_ENV_FILENAME}.${envName}`
+      : PROJECT_ENV_FILENAME;
+  return resolve(opts.projectDir, fileName);
+}
+
+export function resolveEnvSecretKey(opts: {
+  readonly key: string;
+  readonly envName?: string | null;
+}): string {
+  const envName = opts.envName?.trim() ?? "";
+  return envName.length > 0 ? `env.${envName}.${opts.key}` : opts.key;
 }
 
 export async function upsertDotEnvValue(opts: {
@@ -444,5 +419,173 @@ function describePortableState(input: {
     trustModel: "local_only",
     message:
       "Plaintext and secret env values are bundled in the keychain backend, but that backend remains machine-local.",
+  };
+}
+
+async function resolveHackEnvSelection(opts: {
+  readonly projectDir: string;
+  readonly envName?: string | null;
+}): Promise<HackEnvSelection> {
+  const requestedEnv = opts.envName === undefined ? undefined : opts.envName;
+  const defaultEnv = await readProjectDefaultEnvConfig({
+    projectDir: opts.projectDir,
+  });
+  const effectiveEnv = requestedEnv === undefined ? defaultEnv : requestedEnv;
+  const overlayPath =
+    effectiveEnv === null
+      ? null
+      : resolveEnvFilePath({
+          projectDir: opts.projectDir,
+          envName: effectiveEnv,
+        });
+  const overlayExists =
+    overlayPath === null ? false : (await readTextFile(overlayPath)) !== null;
+
+  return {
+    requestedEnv: requestedEnv ?? null,
+    defaultEnv,
+    effectiveEnv,
+    overlayPath,
+    overlayExists,
+  };
+}
+
+async function resolveSecretValue(opts: {
+  readonly secretStore: {
+    readonly get: (input: { readonly key: string }) => Promise<string | null>;
+  };
+  readonly key: string;
+  readonly envName?: string | null;
+}): Promise<string | null> {
+  if (opts.envName) {
+    const overlayValue = await opts.secretStore.get({
+      key: resolveEnvSecretKey({
+        key: opts.key,
+        envName: opts.envName,
+      }),
+    });
+    if (typeof overlayValue === "string" && overlayValue.length > 0) {
+      return overlayValue;
+    }
+  }
+
+  return await opts.secretStore.get({ key: opts.key });
+}
+
+async function resolveHackEnvValueState(opts: {
+  readonly contractVar: HackEnvVar;
+  readonly storePlaintextInBackend: boolean;
+  readonly effectiveEnvName: string | null;
+  readonly baseDotenv: Readonly<Record<string, string>>;
+  readonly overlayDotenv: Readonly<Record<string, string>>;
+  readonly secretStore: {
+    readonly get: (input: { readonly key: string }) => Promise<string | null>;
+  };
+}): Promise<HackEnvValueState> {
+  if (opts.contractVar.source === "keychain") {
+    return await resolveSecretBackedValueState({
+      contractVar: opts.contractVar,
+      secretStore: opts.secretStore,
+      envName: opts.effectiveEnvName,
+    });
+  }
+
+  return await resolvePlaintextValueState({
+    contractVar: opts.contractVar,
+    storePlaintextInBackend: opts.storePlaintextInBackend,
+    envName: opts.effectiveEnvName,
+    baseDotenv: opts.baseDotenv,
+    overlayDotenv: opts.overlayDotenv,
+    secretStore: opts.secretStore,
+  });
+}
+
+async function resolveSecretBackedValueState(opts: {
+  readonly contractVar: HackEnvVar;
+  readonly secretStore: {
+    readonly get: (input: { readonly key: string }) => Promise<string | null>;
+  };
+  readonly envName: string | null;
+}): Promise<HackEnvValueState> {
+  const value = await resolveSecretValue({
+    secretStore: opts.secretStore,
+    key: opts.contractVar.key,
+    envName: opts.envName,
+  });
+  return {
+    key: opts.contractVar.key,
+    required: opts.contractVar.required,
+    source: opts.contractVar.source,
+    services: opts.contractVar.services,
+    value,
+    resolvedFrom: value === null ? null : "keychain",
+  };
+}
+
+async function resolvePlaintextValueState(opts: {
+  readonly contractVar: HackEnvVar;
+  readonly storePlaintextInBackend: boolean;
+  readonly envName: string | null;
+  readonly baseDotenv: Readonly<Record<string, string>>;
+  readonly overlayDotenv: Readonly<Record<string, string>>;
+  readonly secretStore: {
+    readonly get: (input: { readonly key: string }) => Promise<string | null>;
+  };
+}): Promise<HackEnvValueState> {
+  if (opts.storePlaintextInBackend) {
+    const fromPortableBackend = await resolveSecretValue({
+      secretStore: opts.secretStore,
+      key: opts.contractVar.key,
+      envName: opts.envName,
+    });
+    if (
+      typeof fromPortableBackend === "string" &&
+      fromPortableBackend.length > 0
+    ) {
+      return {
+        key: opts.contractVar.key,
+        required: opts.contractVar.required,
+        source: opts.contractVar.source,
+        services: opts.contractVar.services,
+        value: fromPortableBackend,
+        resolvedFrom: "portable_backend",
+      };
+    }
+  }
+
+  const fromDotenv =
+    opts.overlayDotenv[opts.contractVar.key] ??
+    opts.baseDotenv[opts.contractVar.key] ??
+    null;
+  if (typeof fromDotenv === "string" && fromDotenv.length > 0) {
+    return {
+      key: opts.contractVar.key,
+      required: opts.contractVar.required,
+      source: opts.contractVar.source,
+      services: opts.contractVar.services,
+      value: fromDotenv,
+      resolvedFrom: "dotenv",
+    };
+  }
+
+  const fromProcess = process.env[opts.contractVar.key];
+  if (typeof fromProcess === "string" && fromProcess.length > 0) {
+    return {
+      key: opts.contractVar.key,
+      required: opts.contractVar.required,
+      source: opts.contractVar.source,
+      services: opts.contractVar.services,
+      value: fromProcess,
+      resolvedFrom: "process",
+    };
+  }
+
+  return {
+    key: opts.contractVar.key,
+    required: opts.contractVar.required,
+    source: opts.contractVar.source,
+    services: opts.contractVar.services,
+    value: null,
+    resolvedFrom: null,
   };
 }

@@ -8,8 +8,7 @@ import {
   defineOption,
   withHandler,
 } from "../cli/command.ts";
-import { optJson, optPath, optProject } from "../cli/options.ts";
-import { PROJECT_ENV_FILENAME } from "../constants.ts";
+import { optEnv, optJson, optPath, optProject } from "../cli/options.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
 import type {
@@ -19,6 +18,8 @@ import type {
 import {
   readHackEnvRuntimeConfig,
   removeDotEnvKey,
+  resolveEnvFilePath,
+  resolveEnvSecretKey,
   resolveHackEnv,
   upsertDotEnvValue,
 } from "../lib/hack-env.ts";
@@ -26,6 +27,7 @@ import type { ProjectContext } from "../lib/project.ts";
 import {
   defaultProjectSlugFromPath,
   findProjectContext,
+  parseEnvConfigSelection,
   readProjectConfig,
   sanitizeProjectSlug,
 } from "../lib/project.ts";
@@ -56,7 +58,7 @@ const listSpec = defineCommand({
   name: "list",
   summary: "List env contract vars and resolution state",
   group: "Project",
-  options: [optPath, optProject, optJson, optShowSecrets],
+  options: [optPath, optProject, optEnv, optJson, optShowSecrets],
   positionals: [],
   subcommands: [],
 } as const);
@@ -65,7 +67,7 @@ const setSpec = defineCommand({
   name: "set",
   summary: "Set an env value (.hack/.env or keychain)",
   group: "Project",
-  options: [optPath, optProject, optSecret],
+  options: [optPath, optProject, optEnv, optSecret],
   positionals: [{ name: "spec", required: false }],
   subcommands: [],
 } as const);
@@ -74,7 +76,7 @@ const unsetSpec = defineCommand({
   name: "unset",
   summary: "Unset an env value (.hack/.env and keychain)",
   group: "Project",
-  options: [optPath, optProject],
+  options: [optPath, optProject, optEnv],
   positionals: [{ name: "key", required: false }],
   subcommands: [],
 } as const);
@@ -403,6 +405,16 @@ async function resolveProjectName(project: ProjectContext): Promise<string> {
   return sanitizeProjectSlug(raw.length > 0 ? raw : derived);
 }
 
+function resolveRequestedEnvName(input: {
+  readonly envOption: string | undefined;
+}): string | null | undefined {
+  const envName = parseEnvConfigSelection(input.envOption);
+  if (input.envOption !== undefined && envName === undefined) {
+    throw new CliUsageError("Invalid --env value.");
+  }
+  return envName;
+}
+
 async function resolveConfiguredSecretStore(input: {
   readonly project: ProjectContext;
   readonly projectName: string;
@@ -433,10 +445,14 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
   const projectName = await resolveProjectName(project);
   const showSecrets = args.options.showSecrets === true;
   const json = args.options.json === true;
+  const envName = resolveRequestedEnvName({
+    envOption: args.options.env,
+  });
 
   const resolved = await resolveHackEnv({
     projectDir: project.projectDir,
     projectName,
+    envName,
   });
 
   if (json) {
@@ -444,6 +460,13 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
       `${JSON.stringify(
         {
           project: projectName,
+          env_selection: {
+            requested: resolved.envSelection.requestedEnv,
+            default: resolved.envSelection.defaultEnv,
+            effective: resolved.envSelection.effectiveEnv,
+            overlay_path: resolved.envSelection.overlayPath,
+            overlay_exists: resolved.envSelection.overlayExists,
+          },
           storage: serializeEnvStorageForJson({ storage: resolved.storage }),
           vars: resolved.values.map((v) => ({
             key: v.key,
@@ -472,6 +495,12 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
   await display.kv({
     title: "Env storage",
     entries: [
+      [
+        "env_selection",
+        resolved.envSelection.effectiveEnv
+          ? `${resolved.envSelection.effectiveEnv} (base .hack/.env overlaid by ${resolved.envSelection.overlayPath})`
+          : "base (.hack/.env only)",
+      ],
       [
         "contract",
         `${resolved.storage.contract.path} (committed metadata only; no values are stored here)`,
@@ -597,6 +626,9 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
   const runtimeConfig = await readHackEnvRuntimeConfig({
     projectDir: project.projectDir,
   });
+  const envName = resolveRequestedEnvName({
+    envOption: args.options.env,
+  });
 
   const spec = (args.positionals.spec ?? "").trim();
   const [keyFromSpec, valueFromSpec] = parseKeyValueSpec(spec);
@@ -610,20 +642,29 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
 
   if (storeSecret) {
     const store = await resolveConfiguredSecretStore({ project, projectName });
-    await store.set({ key, value });
+    await store.set({
+      key: resolveEnvSecretKey({ key, envName }),
+      value,
+    });
     logger.success({
-      message: `Stored secret "${key}" in ${formatSecretStoreDescriptor({ descriptor: store.descriptor })}`,
+      message: `Stored secret "${key}" in ${formatSecretStoreDescriptor({ descriptor: store.descriptor })}${envName ? ` (env ${envName})` : ""}`,
     });
     return 0;
   }
 
-  const envFile = resolve(project.projectDir, PROJECT_ENV_FILENAME);
+  const envFile = resolveEnvFilePath({
+    projectDir: project.projectDir,
+    envName,
+  });
   const [result, mirroredToBackend] = await Promise.all([
     upsertDotEnvValue({ envFile, key, value }),
     runtimeConfig.storePlaintextInBackend
       ? resolveConfiguredSecretStore({ project, projectName }).then(
           async (store) => {
-            await store.set({ key, value });
+            await store.set({
+              key: resolveEnvSecretKey({ key, envName }),
+              value,
+            });
             return formatSecretStoreDescriptor({
               descriptor: store.descriptor,
             });
@@ -655,11 +696,14 @@ const handleEnvUnset: CommandHandlerFor<typeof unsetSpec> = async ({
   });
   const projectName = await resolveProjectName(project);
   const store = await resolveConfiguredSecretStore({ project, projectName });
+  const envName = resolveRequestedEnvName({
+    envOption: args.options.env,
+  });
 
   const key = await resolveEnvKey({ key: (args.positionals.key ?? "").trim() });
 
   const ok = await confirm({
-    message: `Unset "${key}" from ${project.projectDir}/.env and ${formatSecretStoreDescriptor({ descriptor: store.descriptor })}?`,
+    message: `Unset "${key}" from ${resolveEnvFilePath({ projectDir: project.projectDir, envName })} and ${formatSecretStoreDescriptor({ descriptor: store.descriptor })}${envName ? ` (env ${envName})` : ""}?`,
     initialValue: true,
   });
   if (isCancel(ok)) {
@@ -669,10 +713,15 @@ const handleEnvUnset: CommandHandlerFor<typeof unsetSpec> = async ({
     return 0;
   }
 
-  const envFile = resolve(project.projectDir, PROJECT_ENV_FILENAME);
+  const envFile = resolveEnvFilePath({
+    projectDir: project.projectDir,
+    envName,
+  });
   const [dotenvResult, secretDeleted] = await Promise.all([
     removeDotEnvKey({ envFile, key }),
-    store.delete({ key }),
+    store.delete({
+      key: resolveEnvSecretKey({ key, envName }),
+    }),
   ]);
 
   logger.success({

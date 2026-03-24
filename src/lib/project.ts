@@ -88,6 +88,39 @@ export function sanitizeProjectSlug(input: string): string {
   return collapsed.length > 0 ? collapsed : "project";
 }
 
+export function normalizeEnvConfigName(input: string): string | null {
+  const normalized = input
+    .trim()
+    .toLowerCase()
+    .replaceAll("_", "-")
+    .replaceAll(" ", "-")
+    .replaceAll("/", "-")
+    .replaceAll(/[^a-z0-9-]/g, "")
+    .replaceAll(/-+/g, "-")
+    .replaceAll(/^-|-$/g, "");
+  return normalized.length > 0 ? normalized : null;
+}
+
+export function parseEnvConfigSelection(
+  input: string | undefined
+): string | null | undefined {
+  if (input === undefined) {
+    return undefined;
+  }
+
+  const trimmed = input.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  const lowered = trimmed.toLowerCase();
+  if (lowered === "base" || lowered === "default" || lowered === "none") {
+    return null;
+  }
+
+  return normalizeEnvConfigName(trimmed);
+}
+
 export function sanitizeBranchSlug(input: string): string {
   const trimmed = input.trim().toLowerCase();
   const replaced = trimmed
@@ -121,9 +154,24 @@ export async function readProjectDevHost(
   return typeof host === "string" && host.length > 0 ? host : null;
 }
 
+export async function readProjectDefaultEnvConfig(opts: {
+  readonly projectDir: string;
+}): Promise<string | null> {
+  const config = await readProjectConfig({
+    projectRoot: opts.projectDir,
+    projectDirName: HACK_PROJECT_DIR_PRIMARY,
+    projectDir: opts.projectDir,
+    composeFile: resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME),
+    envFile: resolve(opts.projectDir, PROJECT_ENV_FILENAME),
+    configFile: resolve(opts.projectDir, PROJECT_CONFIG_FILENAME),
+  });
+  return config.defaultEnvConfig ?? null;
+}
+
 export interface ProjectConfig {
   readonly name?: string;
   readonly devHost?: string;
+  readonly defaultEnvConfig?: string;
   readonly logs?: ProjectLogsConfig;
   readonly oauth?: ProjectOauthConfig;
   readonly internal?: ProjectInternalConfig;
@@ -337,6 +385,9 @@ function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
 
   const name = getString(value, "name");
   const devHost = getString(value, "dev_host");
+  const defaultEnvConfigRaw =
+    getString(value, "defaultEnvConfig") ??
+    getString(value, "default_env_config");
   const logs = parseLogsConfig(getRecord(value, "logs"));
   const oauth = parseOauthConfig(getRecord(value, "oauth"));
   const internal = parseInternalConfig(getRecord(value, "internal"));
@@ -348,19 +399,30 @@ function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
     startup,
   });
   const parsedOwnership = parseProjectOwnership(value.ownership);
+  const defaultEnvConfig =
+    typeof defaultEnvConfigRaw === "string"
+      ? normalizeEnvConfigName(defaultEnvConfigRaw)
+      : null;
+  const parseErrors = [
+    ...(defaultEnvConfigRaw && defaultEnvConfig === null
+      ? [
+          "Project defaultEnvConfig/default_env_config must be a non-empty env name.",
+        ]
+      : []),
+    ...(parsedOwnership.parseError ? [parsedOwnership.parseError] : []),
+  ];
 
   return {
     ...(name ? { name } : {}),
     ...(devHost ? { devHost } : {}),
+    ...(defaultEnvConfig ? { defaultEnvConfig } : {}),
     ...(logs ? { logs } : {}),
     ...(oauth ? { oauth } : {}),
     ...(internal ? { internal } : {}),
     ...(sessions ? { sessions } : {}),
     ...(lifecycle ? { lifecycle } : {}),
     ownership: parsedOwnership.ownership,
-    ...(parsedOwnership.parseError
-      ? { parseError: parsedOwnership.parseError }
-      : {}),
+    ...(parseErrors.length > 0 ? { parseError: parseErrors.join(" ") } : {}),
     configPath: path,
   };
 }

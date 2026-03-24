@@ -363,6 +363,8 @@ export function renderProjectConfigSchemaJson(): string {
       $schema: { type: "string" },
       name: { type: "string" },
       dev_host: { type: "string" },
+      defaultEnvConfig: { type: "string" },
+      default_env_config: { type: "string" },
       logs: {
         type: "object",
         additionalProperties: true,

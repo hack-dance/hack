@@ -21,6 +21,7 @@ import {
   GLOBAL_LOGGING_COMPOSE_FILENAME,
   GLOBAL_LOGGING_DIR_NAME,
   HACK_PROJECT_DIR_PRIMARY,
+  PROJECT_ENV_CONTRACT_FILENAME,
 } from "../constants.ts";
 import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config.ts";
 import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts";
@@ -42,6 +43,7 @@ import {
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
+import { resolveEnvFilePath } from "../lib/hack-env.ts";
 import {
   ensureBundledMutagenInstalled,
   getManagedMutagenAgentBundlePath,
@@ -352,6 +354,9 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
       await runCheck(s, "DEV_HOST", () => checkDevHost({ startDir }))
     );
     results.push(
+      await runCheck(s, "env mode", () => checkProjectEnvMode({ startDir }))
+    );
+    results.push(
       await runCheck(
         s,
         "caddy hosts",
@@ -369,6 +374,12 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   } else {
     results.push({
       name: "DEV_HOST",
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+      durationMs: 0,
+    });
+    results.push({
+      name: "env mode",
       status: "warn",
       message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
       durationMs: 0,
@@ -1439,6 +1450,84 @@ async function checkProjectTicketsGitHealth({
     name: "tickets git",
     status: "warn",
     message: `${problems.join("; ")} (run: hack doctor --fix)`,
+  };
+}
+
+async function checkProjectEnvMode({
+  startDir,
+}: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const ctx = await findProjectContext(startDir);
+  if (!ctx) {
+    return {
+      name: "env mode",
+      status: "warn",
+      message: `Missing ${HACK_PROJECT_DIR_PRIMARY}/ (run 'hack init' in a repo)`,
+    };
+  }
+
+  const cfg = await readProjectConfig(ctx);
+  const configPath = cfg.configPath ?? ctx.configFile;
+  if (cfg.parseError) {
+    return {
+      name: "env mode",
+      status: "warn",
+      message: `Invalid ${configPath}: ${cfg.parseError}`,
+    };
+  }
+
+  const contractPath = resolve(ctx.projectDir, PROJECT_ENV_CONTRACT_FILENAME);
+  const contractExists = await pathExists(contractPath);
+  if (!contractExists) {
+    return {
+      name: "env mode",
+      status: "warn",
+      message: `Missing ${contractPath}`,
+    };
+  }
+
+  const controlPlane = await readControlPlaneConfig({
+    projectDir: ctx.projectDir,
+  });
+  if (controlPlane.parseError) {
+    return {
+      name: "env mode",
+      status: "warn",
+      message: controlPlane.parseError,
+    };
+  }
+
+  const storePlaintextInBackend =
+    controlPlane.config.secrets.storePlaintextInBackend;
+  if (!storePlaintextInBackend) {
+    return {
+      name: "env mode",
+      status: "warn",
+      message:
+        "Portable plaintext bundling is disabled. Legacy .hack/.env values stay machine-local until controlPlane.secrets.storePlaintextInBackend=true and values are re-saved with hack env set.",
+    };
+  }
+
+  if (!cfg.defaultEnvConfig) {
+    return {
+      name: "env mode",
+      status: "ok",
+      message: "Base env only (.hack/.env + bundled backend)",
+    };
+  }
+
+  const overlayPath = resolveEnvFilePath({
+    projectDir: ctx.projectDir,
+    envName: cfg.defaultEnvConfig,
+  });
+  const overlayExists = await pathExists(overlayPath);
+  return {
+    name: "env mode",
+    status: overlayExists ? "ok" : "warn",
+    message: overlayExists
+      ? `defaultEnvConfig=${cfg.defaultEnvConfig} overlays ${overlayPath} on top of .hack/.env`
+      : `defaultEnvConfig=${cfg.defaultEnvConfig} is set, but ${overlayPath} does not exist yet; base env will still apply`,
   };
 }
 

@@ -25,6 +25,7 @@ import {
 import {
   optBranch,
   optDetach,
+  optEnv,
   optFollow,
   optJson,
   optNoFollow,
@@ -102,6 +103,7 @@ import {
   findRepoRootForInit,
   type ProjectLifecycleCommand,
   type ProjectLifecycleProcess,
+  parseEnvConfigSelection,
   readProjectConfig,
   readProjectDevHost,
   resolveProjectOauthTld,
@@ -230,6 +232,7 @@ const initOptions = [
 const upOptions = [
   optPath,
   optProject,
+  optEnv,
   optBranch,
   optDetach,
   optProfile,
@@ -238,6 +241,7 @@ const upOptions = [
 const downOptions = [
   optPath,
   optProject,
+  optEnv,
   optBranch,
   optProfile,
   optTarget,
@@ -245,6 +249,7 @@ const downOptions = [
 const restartOptions = [
   optPath,
   optProject,
+  optEnv,
   optBranch,
   optProfile,
   optTarget,
@@ -266,6 +271,7 @@ const optWorkdir = defineOption({
 const runOptions = [
   optPath,
   optProject,
+  optEnv,
   optBranch,
   optWorkdir,
   optProfile,
@@ -427,6 +433,16 @@ export const openCommand = withHandler(openSpec, handleOpen);
 
 function resolveStartDir(ctx: CliContext, pathOpt: string | undefined): string {
   return pathOpt ? resolve(ctx.cwd, pathOpt) : ctx.cwd;
+}
+
+function resolveRequestedEnvName(input: {
+  readonly envOption: string | undefined;
+}): string | null | undefined {
+  const envName = parseEnvConfigSelection(input.envOption);
+  if (input.envOption !== undefined && envName === undefined) {
+    throw new CliUsageError("Invalid --env value.");
+  }
+  return envName;
 }
 
 async function resolveProjectForArgs(opts: {
@@ -792,6 +808,7 @@ async function resolveComposeEnvOverrides(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly projectName: string;
   readonly targetServices: readonly string[];
+  readonly envName?: string | null;
 }): Promise<{
   readonly composeFiles: readonly string[];
   readonly env: Readonly<Record<string, string>>;
@@ -799,6 +816,7 @@ async function resolveComposeEnvOverrides(opts: {
   const resolved = await resolveHackEnv({
     projectDir: opts.project.projectDir,
     projectName: opts.projectName,
+    envName: opts.envName,
   });
 
   if (resolved.contractParseError) {
@@ -4146,9 +4164,13 @@ function buildRemoteLifecycleCommand(opts: {
   readonly action: RemoteLifecycleAction;
   readonly branch: string | null;
   readonly profiles: readonly string[];
+  readonly envName?: string | null;
   readonly detach?: boolean;
 }): readonly string[] {
   const args = [opts.action, "--target", "local"] as string[];
+  if (opts.envName) {
+    args.push("--env", opts.envName);
+  }
   if (opts.branch) {
     args.push("--branch", opts.branch);
   }
@@ -4169,6 +4191,7 @@ async function runRemoteLifecycleCommand(opts: {
   readonly action: RemoteLifecycleAction;
   readonly branch: string | null;
   readonly profiles: readonly string[];
+  readonly envName?: string | null;
   readonly requestedTarget: string | undefined;
   readonly detach?: boolean;
 }): Promise<number | null> {
@@ -4188,6 +4211,7 @@ async function runRemoteLifecycleCommand(opts: {
     action: opts.action,
     branch: opts.branch,
     profiles: opts.profiles,
+    envName: opts.envName,
     detach: opts.detach,
   });
   const invocation = await resolveHackInvocation();
@@ -4230,6 +4254,9 @@ async function handleUp({
     throw error;
   }
   const detach = args.options.detach;
+  const envName = resolveRequestedEnvName({
+    envOption: args.options.env,
+  });
   const branch = resolveBranchSlug(args.options.branch);
   const profiles = parseCsvList(args.options.profile);
 
@@ -4239,6 +4266,7 @@ async function handleUp({
     action: "up",
     branch,
     profiles,
+    envName,
     requestedTarget: args.options.target,
     detach,
   });
@@ -4287,6 +4315,7 @@ async function handleUp({
     project,
     projectName,
     targetServices,
+    envName,
   });
   const composeFilesWithEnv = [
     ...composeFilesWithInternal,
@@ -4391,6 +4420,9 @@ async function handleDown({
     pathOpt: args.options.path,
     projectOpt: args.options.project,
   });
+  const envName = resolveRequestedEnvName({
+    envOption: args.options.env,
+  });
   const branch = resolveBranchSlug(args.options.branch);
   const profiles = parseCsvList(args.options.profile);
 
@@ -4400,6 +4432,7 @@ async function handleDown({
     action: "down",
     branch,
     profiles,
+    envName,
     requestedTarget: args.options.target,
   });
   if (remoteDownCode !== null) {
@@ -4424,6 +4457,7 @@ async function handleDown({
   const envResolved = await resolveHackEnv({
     projectDir: project.projectDir,
     projectName,
+    envName,
   });
   if (envResolved.contractParseError) {
     logger.warn({
@@ -4553,6 +4587,7 @@ async function runRestartUpPhase(opts: {
   readonly lifecycleComposeProject: string;
   readonly profiles: readonly string[];
   readonly branch: string | null;
+  readonly envName?: string | null;
 }): Promise<number> {
   await maybeSyncOauthAliasesInCompose({ project: opts.project });
 
@@ -4590,6 +4625,7 @@ async function runRestartUpPhase(opts: {
     project: opts.project,
     projectName: opts.projectName,
     targetServices,
+    envName: opts.envName,
   });
   const composeFilesWithEnv = [
     ...composeFilesWithInternal,
@@ -4658,6 +4694,9 @@ async function handleRestart({
     pathOpt: args.options.path,
     projectOpt: args.options.project,
   });
+  const envName = resolveRequestedEnvName({
+    envOption: args.options.env,
+  });
   const branch = resolveBranchSlug(args.options.branch);
   const profiles = parseCsvList(args.options.profile);
 
@@ -4667,6 +4706,7 @@ async function handleRestart({
     action: "restart",
     branch,
     profiles,
+    envName,
     requestedTarget: args.options.target,
   });
   if (remoteRestartCode !== null) {
@@ -4691,6 +4731,7 @@ async function handleRestart({
   const envResolved = await resolveHackEnv({
     projectDir: project.projectDir,
     projectName,
+    envName,
   });
   if (envResolved.contractParseError) {
     logger.warn({
@@ -4720,6 +4761,7 @@ async function handleRestart({
     lifecycleComposeProject,
     profiles,
     branch,
+    envName,
   });
 }
 
@@ -4921,6 +4963,9 @@ async function handleRun({
     projectOpt: args.options.project,
   });
   const branch = resolveBranchSlug(args.options.branch);
+  const envName = resolveRequestedEnvName({
+    envOption: args.options.env,
+  });
 
   await touchBranchUsageIfNeeded({ project, branch });
   const service = (args.positionals.service ?? "").trim();
@@ -4961,6 +5006,7 @@ async function handleRun({
     project,
     projectName,
     targetServices: [service],
+    envName,
   });
   const composeFilesWithEnv = [...composeFiles, ...envOverrides.composeFiles];
   return await composeRuntimeBackend.run({

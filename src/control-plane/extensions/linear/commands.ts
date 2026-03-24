@@ -2579,6 +2579,7 @@ type TicketSyncStore = Pick<
   | "recordSyncCheckpoint"
   | "recordSyncConflict"
   | "setStatus"
+  | "sync"
   | "updateTicket"
 >;
 

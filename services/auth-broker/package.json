@@ -13,6 +13,7 @@
     "auth:migrate": "bunx @better-auth/cli@latest migrate --config src/better-auth.ts"
   },
   "dependencies": {
+    "@hack/auth-contract": "workspace:*",
     "@better-auth/drizzle-adapter": "^1.5.4",
     "@neondatabase/serverless": "^1.0.2",
     "better-auth": "^1.5.4",

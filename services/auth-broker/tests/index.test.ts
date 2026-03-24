@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
 
+import {
+  createBetterAuthProviderMetadata,
+  createSharedBetterAuthContract,
+} from "@hack/auth-contract";
+
 import type { BetterAuthRuntime } from "../src/better-auth.ts";
 import { FlowStore } from "../src/flow-store.ts";
 import { createAuthBrokerApp } from "../src/index.ts";
@@ -69,12 +74,12 @@ function createBetterAuthRuntimeWithSession(
   return {
     enabled: true,
     ...(db ? { db } : {}),
-    socialProviders: [{ id: "github", label: "GitHub" }],
-    accountLinkingPolicy: {
-      requireVerifiedEmail: true,
-      allowDifferentEmails: false,
-      trustedProviders: [],
-    },
+    contract: createSharedBetterAuthContract({
+      socialProviders: [{ id: "github", label: "GitHub" }],
+      publicBaseUrl: createTestConfig().publicBaseUrl,
+      localDevHost: "hack-cli.hack",
+      trustedOrigins: ["https://hack-cli-preview.vercel.app"],
+    }),
     auth: {
       api: {
         getSession: async () => session,
@@ -348,6 +353,12 @@ describe("auth broker github flow routes", () => {
   });
 
   test("providers route includes better-auth shell metadata", async () => {
+    const expectedContract = createSharedBetterAuthContract({
+      socialProviders: [{ id: "github", label: "GitHub" }],
+      publicBaseUrl: createTestConfig().publicBaseUrl,
+      localDevHost: "hack-cli.hack",
+      trustedOrigins: ["https://hack-cli-preview.vercel.app"],
+    });
     const app = createAuthBrokerApp({
       config: createTestConfig(),
       flowStore: new FlowStore(),
@@ -372,26 +383,23 @@ describe("auth broker github flow routes", () => {
         readonly accountLinkingPolicy?: {
           readonly requireVerifiedEmail: boolean;
           readonly allowDifferentEmails: boolean;
+          readonly trustedProviders: readonly string[];
         };
+        readonly trustedOrigins?: readonly string[];
       }>;
     };
     const betterAuthProvider = payload.providers.find(
       (provider) => provider.id === "better-auth"
     );
-    expect(betterAuthProvider).toBeDefined();
-    expect(betterAuthProvider?.shellPath).toBe("/auth");
-    expect(betterAuthProvider?.accountPath).toBe("/auth/account");
-    expect(betterAuthProvider?.sessionStartPath).toBe("/v1/auth/session/start");
-    expect(betterAuthProvider?.mePath).toBe("/v1/auth/me");
-    expect(betterAuthProvider?.socialProviders).toEqual([
-      {
-        id: "github",
-        label: "GitHub",
-      },
-    ]);
-    expect(betterAuthProvider?.accountLinkingPolicy).toMatchObject({
-      requireVerifiedEmail: true,
-      allowDifferentEmails: false,
+    expect(betterAuthProvider).toEqual(
+      createBetterAuthProviderMetadata({
+        enabled: true,
+        contract: expectedContract,
+      })
+    );
+    expect(betterAuthProvider?.socialProviders).not.toContainEqual({
+      id: "google",
+      label: "Google",
     });
   });
 

@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 
+import { DEFAULT_BETTER_AUTH_ACCOUNT_LINKING_POLICY } from "@hack/auth-contract";
 import { Elysia, t } from "elysia";
 
 import type {
@@ -470,18 +471,15 @@ export function createBetterAuthShellPlugin({
 function getSocialProviders(input: {
   readonly runtime: BetterAuthRuntime;
 }): readonly BetterAuthSocialProvider[] {
-  return input.runtime.socialProviders ?? [];
+  return input.runtime.contract?.socialProviders ?? [];
 }
 
 function getAccountLinkingPolicy(input: {
   readonly runtime: BetterAuthRuntime;
 }): BetterAuthAccountLinkingPolicy {
   return (
-    input.runtime.accountLinkingPolicy ?? {
-      requireVerifiedEmail: true,
-      allowDifferentEmails: false,
-      trustedProviders: [],
-    }
+    input.runtime.contract?.accountLinkingPolicy ??
+    DEFAULT_BETTER_AUTH_ACCOUNT_LINKING_POLICY
   );
 }
 

@@ -1,3 +1,12 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+import {
+  createSharedBetterAuthContract,
+  resolveBetterAuthSocialProviderOptions,
+  resolveBetterAuthSocialProviders,
+  type SharedBetterAuthContract,
+} from "@hack/auth-contract";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { organization as organizationPlugin } from "better-auth/plugins";
@@ -6,20 +15,14 @@ import { z } from "zod";
 import { authBrokerSchema } from "./db/schema.ts";
 import { createDbClient } from "./db.ts";
 
+export type {
+  BetterAuthAccountLinkingPolicy,
+  BetterAuthSocialProvider,
+} from "@hack/auth-contract";
+
 type BetterAuthInstance = ReturnType<typeof betterAuth>;
 type AuthBrokerDbClient = ReturnType<typeof createDbClient>;
 type BetterAuthEnv = z.infer<typeof betterAuthEnvSchema>;
-
-export type BetterAuthSocialProvider = {
-  readonly id: string;
-  readonly label: string;
-};
-
-export type BetterAuthAccountLinkingPolicy = {
-  readonly requireVerifiedEmail: boolean;
-  readonly allowDifferentEmails: boolean;
-  readonly trustedProviders: readonly string[];
-};
 
 type BetterAuthRuntime = {
   readonly enabled: boolean;
@@ -27,14 +30,20 @@ type BetterAuthRuntime = {
   readonly auth?: BetterAuthInstance;
   readonly db?: AuthBrokerDbClient;
   readonly ready?: Promise<void>;
-  readonly socialProviders?: readonly BetterAuthSocialProvider[];
-  readonly accountLinkingPolicy?: BetterAuthAccountLinkingPolicy;
+  readonly contract?: SharedBetterAuthContract;
 };
+
+const HACK_CONFIG_PATH = resolve(
+  import.meta.dir,
+  "../../..",
+  ".hack/hack.config.json"
+);
 
 const betterAuthEnvSchema = z.object({
   DATABASE_URL: z.string().min(1).optional(),
   BETTER_AUTH_SECRET: z.string().min(1).optional(),
   BETTER_AUTH_URL: z.string().url().optional(),
+  AUTH_BROKER_PUBLIC_BASE_URL: z.string().url().optional(),
   BETTER_AUTH_TRUSTED_ORIGINS: z.string().optional(),
   BETTER_AUTH_GITHUB_CLIENT_ID: z.string().min(1).optional(),
   BETTER_AUTH_GITHUB_CLIENT_SECRET: z.string().min(1).optional(),
@@ -54,21 +63,41 @@ const betterAuthEnvSchema = z.object({
  */
 export function createBetterAuthRuntimeFromEnv(): BetterAuthRuntime {
   const env = readBetterAuthEnv();
+  const socialProviders = resolveBetterAuthSocialProviders({
+    betterAuthGitHubClientId: env.BETTER_AUTH_GITHUB_CLIENT_ID,
+    betterAuthGitHubClientSecret: env.BETTER_AUTH_GITHUB_CLIENT_SECRET,
+    githubClientId: env.GITHUB_CLIENT_ID,
+    githubClientSecret: env.GITHUB_CLIENT_SECRET,
+    betterAuthGoogleClientId: env.BETTER_AUTH_GOOGLE_CLIENT_ID,
+    betterAuthGoogleClientSecret: env.BETTER_AUTH_GOOGLE_CLIENT_SECRET,
+    googleClientId: env.GOOGLE_CLIENT_ID,
+    googleClientSecret: env.GOOGLE_CLIENT_SECRET,
+  });
+  const socialProviderOptions = resolveBetterAuthSocialProviderOptions({
+    betterAuthGitHubClientId: env.BETTER_AUTH_GITHUB_CLIENT_ID,
+    betterAuthGitHubClientSecret: env.BETTER_AUTH_GITHUB_CLIENT_SECRET,
+    githubClientId: env.GITHUB_CLIENT_ID,
+    githubClientSecret: env.GITHUB_CLIENT_SECRET,
+    betterAuthGoogleClientId: env.BETTER_AUTH_GOOGLE_CLIENT_ID,
+    betterAuthGoogleClientSecret: env.BETTER_AUTH_GOOGLE_CLIENT_SECRET,
+    googleClientId: env.GOOGLE_CLIENT_ID,
+    googleClientSecret: env.GOOGLE_CLIENT_SECRET,
+  });
+  const contract = createSharedBetterAuthContract({
+    socialProviders,
+    authBaseUrl: env.BETTER_AUTH_URL,
+    publicBaseUrl: env.AUTH_BROKER_PUBLIC_BASE_URL,
+    localDevHost: resolveLocalHackDevHost(),
+    trustedOrigins: env.BETTER_AUTH_TRUSTED_ORIGINS,
+  });
   const requiredConfig = resolveBetterAuthRequiredConfig(env);
   if (!requiredConfig.ok) {
     return {
       enabled: false,
       reason: requiredConfig.reason,
+      contract,
     };
   }
-
-  const trustedOrigins = parseCsv(env.BETTER_AUTH_TRUSTED_ORIGINS);
-  const socialProviderConfig = resolveBetterAuthSocialProviderConfig(env);
-  const accountLinkingPolicy = {
-    requireVerifiedEmail: true,
-    allowDifferentEmails: false,
-    trustedProviders: [],
-  } as const satisfies BetterAuthAccountLinkingPolicy;
   const db = createDbClient({ databaseUrl: requiredConfig.databaseUrl });
   const ready = ensureBetterAuthTables({ db });
 
@@ -79,20 +108,23 @@ export function createBetterAuthRuntimeFromEnv(): BetterAuthRuntime {
     }),
     secret: requiredConfig.authSecret,
     ...(env.BETTER_AUTH_URL ? { baseURL: env.BETTER_AUTH_URL } : {}),
-    ...(trustedOrigins.length > 0 ? { trustedOrigins } : {}),
+    ...(contract.trustedOrigins.length > 0
+      ? { trustedOrigins: [...contract.trustedOrigins] }
+      : {}),
     emailAndPassword: {
       enabled: true,
     },
     account: {
       accountLinking: {
         enabled: true,
-        allowDifferentEmails: accountLinkingPolicy.allowDifferentEmails,
-        trustedProviders: [...accountLinkingPolicy.trustedProviders],
+        allowDifferentEmails:
+          contract.accountLinkingPolicy.allowDifferentEmails,
+        trustedProviders: [...contract.accountLinkingPolicy.trustedProviders],
       },
     },
-    ...(socialProviderConfig.providerOptions
+    ...(socialProviderOptions
       ? {
-          socialProviders: socialProviderConfig.providerOptions,
+          socialProviders: socialProviderOptions,
         }
       : {}),
     plugins: [
@@ -115,8 +147,7 @@ export function createBetterAuthRuntimeFromEnv(): BetterAuthRuntime {
     auth: auth as unknown as BetterAuthInstance,
     db,
     ready,
-    socialProviders: socialProviderConfig.socialProviders,
-    accountLinkingPolicy,
+    contract,
   };
 }
 
@@ -134,6 +165,7 @@ function readBetterAuthEnv(): BetterAuthEnv {
     BETTER_AUTH_SECRET:
       process.env.BETTER_AUTH_SECRET ?? process.env.AUTH_SECRET,
     BETTER_AUTH_URL: process.env.BETTER_AUTH_URL,
+    AUTH_BROKER_PUBLIC_BASE_URL: process.env.AUTH_BROKER_PUBLIC_BASE_URL,
     BETTER_AUTH_TRUSTED_ORIGINS: process.env.BETTER_AUTH_TRUSTED_ORIGINS,
     BETTER_AUTH_GITHUB_CLIENT_ID: process.env.BETTER_AUTH_GITHUB_CLIENT_ID,
     BETTER_AUTH_GITHUB_CLIENT_SECRET:
@@ -177,65 +209,24 @@ function resolveBetterAuthRequiredConfig(env: BetterAuthEnv):
   };
 }
 
-function resolveBetterAuthSocialProviderConfig(env: BetterAuthEnv): {
-  readonly socialProviders: readonly BetterAuthSocialProvider[];
-  readonly providerOptions: {
-    readonly github?: {
-      readonly clientId: string;
-      readonly clientSecret: string;
-    };
-    readonly google?: {
-      readonly clientId: string;
-      readonly clientSecret: string;
-    };
-  } | null;
-} {
-  const resolvedGitHubClientId =
-    env.BETTER_AUTH_GITHUB_CLIENT_ID ?? env.GITHUB_CLIENT_ID;
-  const resolvedGitHubClientSecret =
-    env.BETTER_AUTH_GITHUB_CLIENT_SECRET ?? env.GITHUB_CLIENT_SECRET;
-  const resolvedGoogleClientId =
-    env.BETTER_AUTH_GOOGLE_CLIENT_ID ?? env.GOOGLE_CLIENT_ID;
-  const resolvedGoogleClientSecret =
-    env.BETTER_AUTH_GOOGLE_CLIENT_SECRET ?? env.GOOGLE_CLIENT_SECRET;
-  const providerOptions = {
-    ...(resolvedGitHubClientId && resolvedGitHubClientSecret
-      ? {
-          github: {
-            clientId: resolvedGitHubClientId,
-            clientSecret: resolvedGitHubClientSecret,
-          },
-        }
-      : {}),
-    ...(resolvedGoogleClientId && resolvedGoogleClientSecret
-      ? {
-          google: {
-            clientId: resolvedGoogleClientId,
-            clientSecret: resolvedGoogleClientSecret,
-          },
-        }
-      : {}),
-  };
-  const socialProviders = [
-    ...(providerOptions.github ? [{ id: "github", label: "GitHub" }] : []),
-    ...(providerOptions.google ? [{ id: "google", label: "Google" }] : []),
-  ] as const satisfies readonly BetterAuthSocialProvider[];
-
-  return {
-    socialProviders,
-    providerOptions:
-      Object.keys(providerOptions).length > 0 ? providerOptions : null,
-  };
+function resolveLocalHackDevHost(): string | undefined {
+  const config = readHackConfig();
+  const devHost = isRecord(config) ? config.dev_host : undefined;
+  return typeof devHost === "string" && devHost.trim().length > 0
+    ? devHost.trim()
+    : undefined;
 }
 
-function parseCsv(value: string | undefined): string[] {
-  if (!value) {
-    return [];
+function readHackConfig(): unknown {
+  try {
+    return JSON.parse(readFileSync(HACK_CONFIG_PATH, "utf8"));
+  } catch {
+    return null;
   }
-  return value
-    .split(",")
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
 }
 
 async function ensureBetterAuthTables(input: {

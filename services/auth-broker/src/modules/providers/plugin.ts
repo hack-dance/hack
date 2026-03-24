@@ -1,3 +1,7 @@
+import {
+  createBetterAuthProviderMetadata,
+  createSharedBetterAuthContract,
+} from "@hack/auth-contract";
 import { Elysia } from "elysia";
 
 import type { BetterAuthRuntime } from "../../better-auth.ts";
@@ -23,24 +27,18 @@ export function createProvidersPlugin({
       runtime: betterAuthRuntime,
       request,
     });
+    const betterAuthProvider = createBetterAuthProviderMetadata({
+      enabled: betterAuthRuntime.enabled,
+      contract:
+        betterAuthRuntime.contract ??
+        createSharedBetterAuthContract({
+          socialProviders: [],
+          publicBaseUrl: config.publicBaseUrl,
+        }),
+    });
     return {
       providers: [
-        {
-          id: "better-auth",
-          enabled: betterAuthRuntime.enabled,
-          mode: "session",
-          basePath: "/api/auth",
-          shellPath: "/auth",
-          accountPath: "/auth/account",
-          sessionStartPath: "/v1/auth/session/start",
-          mePath: "/v1/auth/me",
-          socialProviders: betterAuthRuntime.socialProviders ?? [],
-          accountLinkingPolicy: betterAuthRuntime.accountLinkingPolicy ?? {
-            requireVerifiedEmail: true,
-            allowDifferentEmails: false,
-            trustedProviders: [],
-          },
-        },
+        betterAuthProvider,
         {
           id: "github",
           enabled: true,

@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
+import { createSharedBetterAuthContract } from "@hack/auth-contract";
+
 import type { BetterAuthRuntime } from "../src/better-auth.ts";
 import type { BrokerConfig } from "../src/config.ts";
 import { FlowStore } from "../src/flow-store.ts";
@@ -59,12 +61,12 @@ function createBetterAuthRuntimeWithSession(
 ): BetterAuthRuntime {
   return {
     enabled: true,
-    socialProviders: [{ id: "github", label: "GitHub" }],
-    accountLinkingPolicy: {
-      requireVerifiedEmail: true,
-      allowDifferentEmails: false,
-      trustedProviders: [],
-    },
+    contract: createSharedBetterAuthContract({
+      socialProviders: [{ id: "github", label: "GitHub" }],
+      publicBaseUrl: createTestConfig().publicBaseUrl,
+      localDevHost: "hack-cli.hack",
+      trustedOrigins: ["https://hack-cli-preview.vercel.app"],
+    }),
     auth: {
       api: {
         getSession: async () => session,

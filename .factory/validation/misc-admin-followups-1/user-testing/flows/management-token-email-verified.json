@@ -1,0 +1,72 @@
+{
+  "testedAt": "2026-03-25T18:36:19Z",
+  "surface": "Broker / local HTTP surface (routed auth broker)",
+  "toolsUsed": ["curl", "bun", "bun test", "python3"],
+  "isolation": {
+    "namespace": "ut-misc-admin-1774463778-55657",
+    "email": "ut-misc-admin-1774463778-55657@example.com",
+    "managementTokenFingerprintSha256": "ca58d3d5e1e227d8e9aa8bcec23912d84f865ab9447dadf224eeedbb3e1e9a78"
+  },
+  "assertionResults": [],
+  "nonContractChecks": [
+    {
+      "id": "management-token-email-verified-hydration-followup",
+      "status": "pass",
+      "reason": "The same live management token fingerprint resolved /v1/auth/me with emailVerified=false before the durable Better Auth user row changed and with emailVerified=true after the durable row was updated to email_verified=true.",
+      "evidence": [
+        "<mission-dir>/evidence/misc-admin-followups-1/management-token-email-verified/signup.json",
+        "<mission-dir>/evidence/misc-admin-followups-1/management-token-email-verified/claim.json",
+        "<mission-dir>/evidence/misc-admin-followups-1/management-token-email-verified/me-before-update.json",
+        "<mission-dir>/evidence/misc-admin-followups-1/management-token-email-verified/update.json",
+        "<mission-dir>/evidence/misc-admin-followups-1/management-token-email-verified/me-after-update.json",
+        "<mission-dir>/evidence/misc-admin-followups-1/management-token-email-verified/result-summary.json",
+        "<mission-dir>/evidence/misc-admin-followups-1/management-token-email-verified/automated-corroboration.txt"
+      ]
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "commands": [
+    {
+      "command": "curl -ksS -c <mission-dir>/evidence/.../cookies.txt -H content-type:application/json -X POST https://auth.hack-cli.hack/api/auth/sign-up/email --data ...",
+      "exitCode": 0,
+      "observation": "Created a disposable Better Auth user with emailVerified=false and received a browser session cookie on the routed broker host."
+    },
+    {
+      "command": "curl -ksS https://auth.hack-cli.hack/v1/auth/session/start?redirect=https%3A%2F%2Fhack-cli.hack%2Faccount",
+      "exitCode": 0,
+      "observation": "Started a live session handoff flow and received a flowId, deviceCode, authorizeUrl, and pollUrl."
+    },
+    {
+      "command": "curl -ksS -b <mission-dir>/evidence/.../cookies.txt -c <mission-dir>/evidence/.../cookies.txt https://auth.hack-cli.hack/auth/account?bridge=1&flowId=<flowId>&deviceCode=<deviceCode>&redirect=https%3A%2F%2Fhack-cli.hack%2Faccount",
+      "exitCode": 0,
+      "observation": "Completed the bridged account flow with the authenticated browser session and received a 200 HTML response plus a hack_web_broker_session cookie."
+    },
+    {
+      "command": "curl -ksS https://auth.hack-cli.hack/v1/auth/session/flows/<flowId>?deviceCode=<deviceCode>&claim=1",
+      "exitCode": 0,
+      "observation": "Claimed the completed flow and received a managementToken whose claimed accountEmailVerified value remained false."
+    },
+    {
+      "command": "curl -ksS -H authorization:\"Bearer <managementToken>\" https://auth.hack-cli.hack/v1/auth/me",
+      "exitCode": 0,
+      "observation": "Before any durable-user update, the same management token resolved the disposable account with user.emailVerified=false."
+    },
+    {
+      "command": "cd <repo>/services/auth-broker && TEST_EMAIL=<email> bun -e \"import { neon } from \"@neondatabase/serverless\"; ... update \"user\" set email_verified = true ...\"",
+      "exitCode": 0,
+      "observation": "Updated the durable Better Auth user row for the disposable account so email_verified became true after the management token had already been minted."
+    },
+    {
+      "command": "curl -ksS -H authorization:\"Bearer <managementToken>\" https://auth.hack-cli.hack/v1/auth/me",
+      "exitCode": 0,
+      "observation": "Using the same management token after the durable update, /v1/auth/me still authenticated the same user and now returned user.emailVerified=true."
+    },
+    {
+      "command": "cd <repo> && bun test ./services/auth-broker/tests/session-auth.test.ts",
+      "exitCode": 0,
+      "observation": "The focused session-auth regression suite passed and corroborated the management-token hydration behavior in automation."
+    }
+  ],
+  "summary": "Non-contract smoke passed. This milestone had no validation-contract assertions mapped through fulfills, so the routed broker management-token hydration follow-up was validated as a user-surface smoke instead."
+}

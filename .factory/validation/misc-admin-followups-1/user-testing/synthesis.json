@@ -1,0 +1,28 @@
+{
+  "milestone": "misc-admin-followups-1",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 0,
+    "passed": 0,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [],
+  "previousRound": null,
+  "selection": {
+    "mappedAssertions": [],
+    "reason": "No completed implementation features in this milestone declared validation-contract assertion IDs in fulfills, so user testing ran as a non-contract routed-broker smoke for management-token-email-verified-hydration-followup."
+  },
+  "nonContractChecks": [
+    {
+      "id": "management-token-email-verified-hydration-followup",
+      "status": "pass",
+      "reason": "A live routed-broker flow showed the same claimed management token returning /v1/auth/me with emailVerified=false before the durable Better Auth user row changed and emailVerified=true after the durable row was updated.",
+      "flowReport": ".factory/validation/misc-admin-followups-1/user-testing/flows/management-token-email-verified.json"
+    }
+  ]
+}

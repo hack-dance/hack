@@ -1,0 +1,55 @@
+{
+  "milestone": "misc-integration-followups-1",
+  "round": 1,
+  "status": "fail",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "bun run test",
+      "exitCode": 0
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "bun run typecheck",
+      "exitCode": 0
+    },
+    "lint": {
+      "passed": true,
+      "command": "bun run check",
+      "exitCode": 0
+    }
+  },
+  "reviewsSummary": {
+    "total": 1,
+    "passed": 0,
+    "failed": 1,
+    "failedFeatures": ["durable-project-scope-db-regression-followup"]
+  },
+  "blockingIssues": [
+    {
+      "featureId": "durable-project-scope-db-regression-followup",
+      "file": "services/auth-broker/tests/project-admin.test.ts",
+      "line": 143,
+      "severity": "blocking",
+      "description": "The new `createMockProjectDb()` harness turns the claimed durable-store coverage into an in-memory simulation. Because `execute()` is stubbed to always return `{ rows: [] }` and only a narrow `insert/select` subset is implemented before `DbProjectStore` is constructed, the tests never exercise the real durable Neon/Drizzle path, table setup, or query execution semantics that this feature was supposed to verify."
+    }
+  ],
+  "nonBlockingIssues": [],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "scrutiny-validator skill",
+      "suggestion": "Either provide the `scrutiny-feature-reviewer` subagent referenced by the skill or document an approved fallback reviewer droid so scrutiny runs do not fail at the reviewer-spawn step in environments where that subagent is unavailable.",
+      "evidence": "This scrutiny run attempted to spawn `scrutiny-feature-reviewer` exactly as the active skill requires, but the Task tool reported `Droid configuration not found for subagent: scrutiny-feature-reviewer`. The run had to fall back to the available `verification-auditor` droid to complete review coverage.",
+      "isSystemic": true
+    },
+    {
+      "target": ".factory/skills/control-plane-worker/SKILL.md",
+      "suggestion": "When a feature claims durable-store or database-backed parity coverage, require proof against a real durable backend (or an explicitly documented limitation) instead of accepting Drizzle AST or in-memory fakes as durable-path verification.",
+      "evidence": "The failed review for `durable-project-scope-db-regression-followup` found that its new `DbProjectStore` regressions use `createMockProjectDb()` plus query-chunk parsing helpers in `services/auth-broker/tests/project-admin.test.ts:89-192`, so the claimed durable-path coverage never exercises the real durable backend.",
+      "isSystemic": false
+    }
+  ],
+  "rejectedObservations": [],
+  "previousRound": null
+}

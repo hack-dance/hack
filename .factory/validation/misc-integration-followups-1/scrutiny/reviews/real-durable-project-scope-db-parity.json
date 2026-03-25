@@ -1,0 +1,21 @@
+{
+  "featureId": "real-durable-project-scope-db-parity",
+  "reviewedAt": "2026-03-25T23:50:13Z",
+  "commitId": "e6a8f46f074cce2402472cf20609eac56405c097",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Reviewed the fix feature manifest, prior failed review, both feature handoffs, the fix transcript skeleton for session `d196eb87-a251-4065-9f8c-b7650f576445`, and commits `11fc91e8887f35f5d8fb6fbbb8629bec3695a269` and `e6a8f46f074cce2402472cf20609eac56405c097`. The fix removes the in-memory `createMockProjectDb()` harness and replaces it with a temp-directory `drizzle-orm/pglite` database helper, so the durable `DbProjectStore` regressions now execute real table creation, insert/select/query semantics, and persisted reload behavior for the scoped list/detail/register paths.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "The shared project-admin verification note does not yet capture the real durable-store regression pattern. It currently documents runtime/token parity details only, so future workers could still miss that durable `DbProjectStore` parity should use a real backend helper such as the new temp-dir PGlite setup instead of an in-memory shim.",
+      "evidence": "`.factory/library/project-admin-scope-verification.md` contains only runtime and token notes, while the fixed durable helper now lives in `services/auth-broker/tests/project-admin.test.ts:27-56` and backs the parity regressions at `services/auth-broker/tests/project-admin.test.ts:903-1254`."
+    }
+  ],
+  "addressesFailureFrom": ".factory/validation/misc-integration-followups-1/scrutiny/reviews/durable-project-scope-db-regression-followup.json",
+  "summary": "Pass. The fix fully addresses the prior blocking review: the fake `createMockProjectDb()` harness is gone, the durable parity tests now run through a real PGlite-backed `DbProjectStore` with schema setup and persistence coverage, and the original scoped visibility plus `project_scope_forbidden` regressions remain covered against the real backend."
+}

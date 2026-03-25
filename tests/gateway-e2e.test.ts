@@ -6,7 +6,10 @@ import {
   createGatewayToken,
   revokeGatewayToken,
 } from "../src/control-plane/extensions/gateway/tokens.ts";
-import { evaluateGatewayRouteAccess } from "../src/daemon/control-plane-route-validation.ts";
+import {
+  evaluateGatewayRouteAccess,
+  validateRawRequestTargetPath,
+} from "../src/daemon/control-plane-route-validation.ts";
 import { resolveDaemonPaths } from "../src/daemon/paths.ts";
 import { readDaemonStatus } from "../src/daemon/status.ts";
 import { resolveGlobalConfigPath } from "../src/lib/config-paths.ts";
@@ -21,6 +24,25 @@ const runTest = shouldRun ? test : test.skip;
 
 describe("gateway control-plane guard evaluation", () => {
   const projectId = "abc123def456";
+
+  test("raw traversal is rejected before guard evaluation while encoded paths stay routable", () => {
+    expect(
+      validateRawRequestTargetPath({
+        requestTarget: `/control-plane/projects/${projectId}/../v1/status`,
+      })
+    ).toEqual({
+      ok: false,
+      status: 400,
+      error: "malformed_path",
+    });
+
+    expect(
+      validateRawRequestTargetPath({
+        requestTarget:
+          "/control-plane/projects/abc123def456%2F..%2F..%2Fv1%2Fstatus/jobs",
+      })
+    ).toEqual({ ok: true });
+  });
 
   test("read routes remain available while writes are disabled", () => {
     const result = evaluateGatewayRouteAccess({

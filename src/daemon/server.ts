@@ -33,6 +33,10 @@ import {
 import { createDaemonLogger } from "./logger.ts";
 import type { DaemonPaths } from "./paths.ts";
 import { removeFileIfExists, writeDaemonPid } from "./process.ts";
+import {
+  type RequestTargetProxy,
+  startRequestTargetProxy,
+} from "./request-target-proxy.ts";
 import { handleAuthRoutes } from "./routes/auth.ts";
 import { handleEnvRoutes } from "./routes/env.ts";
 import { handleNodeRoutes } from "./routes/node.ts";
@@ -163,6 +167,13 @@ export async function runDaemon({
     supervisor,
     shells,
   };
+  const daemonInternalSocketPath = resolve(paths.root, "hackd.internal.sock");
+  const gatewayInternalSocketPath = resolve(
+    paths.root,
+    "gateway.internal.sock"
+  );
+  await removeFileIfExists({ path: daemonInternalSocketPath });
+  await removeFileIfExists({ path: gatewayInternalSocketPath });
 
   const websocketHandlers = {
     open: (ws: ServerWebSocket<unknown>) => {
@@ -227,8 +238,9 @@ export async function runDaemon({
   };
 
   let server: ReturnType<typeof Bun.serve>;
+  let daemonProxy: RequestTargetProxy | null = null;
   server = Bun.serve({
-    unix: paths.socketPath,
+    unix: daemonInternalSocketPath,
     fetch: (req) =>
       handleRequest({
         req,
@@ -237,13 +249,23 @@ export async function runDaemon({
       }),
     websocket: websocketHandlers,
   });
+  try {
+    daemonProxy = await startRequestTargetProxy({
+      listen: { unix: paths.socketPath },
+      target: { unix: daemonInternalSocketPath },
+    });
+  } catch (error) {
+    server.stop();
+    await removeFileIfExists({ path: daemonInternalSocketPath });
+    throw error;
+  }
 
   let gatewayServer: ReturnType<typeof Bun.serve> | null = null;
+  let gatewayProxy: RequestTargetProxy | null = null;
   if (gatewayResolution.config.enabled) {
     try {
       gatewayServer = Bun.serve({
-        hostname: gatewayResolution.config.bind,
-        port: gatewayResolution.config.port,
+        unix: gatewayInternalSocketPath,
         fetch: (req) => {
           if (!gatewayServer) {
             return jsonResponse({ error: "gateway_uninitialized" }, 500);
@@ -259,6 +281,13 @@ export async function runDaemon({
         },
         websocket: websocketHandlers,
       });
+      gatewayProxy = await startRequestTargetProxy({
+        listen: {
+          host: gatewayResolution.config.bind,
+          port: gatewayResolution.config.port,
+        },
+        target: { unix: gatewayInternalSocketPath },
+      });
       logger.info({
         message: `Gateway listening on ${gatewayResolution.config.bind}:${gatewayResolution.config.port}`,
       });
@@ -266,6 +295,10 @@ export async function runDaemon({
         message: `Gateway projects enabled: ${gatewayResolution.enabledProjects.length}`,
       });
     } catch (error: unknown) {
+      gatewayServer?.stop();
+      gatewayServer = null;
+      gatewayProxy = null;
+      await removeFileIfExists({ path: gatewayInternalSocketPath });
       const message = error instanceof Error ? error.message : String(error);
       logger.error({ message: `Failed to start gateway: ${message}` });
     }
@@ -308,9 +341,13 @@ export async function runDaemon({
   const shutdown = async ({ reason }: { readonly reason: string }) => {
     logger.warn({ message: `Shutting down hackd (${reason})` });
     watcher.stop();
+    await daemonProxy?.close();
+    await gatewayProxy?.close();
     server.stop();
     gatewayServer?.stop();
     authServer?.stop();
+    await removeFileIfExists({ path: daemonInternalSocketPath });
+    await removeFileIfExists({ path: gatewayInternalSocketPath });
     await removeFileIfExists({ path: paths.socketPath });
     await removeFileIfExists({ path: paths.pidPath });
     process.exit(0);

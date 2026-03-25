@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { execSync } from "node:child_process";
 
-import { validateControlPlaneRouteTarget } from "../src/daemon/control-plane-route-validation.ts";
+import {
+  validateControlPlaneRouteTarget,
+  validateRawRequestTargetPath,
+} from "../src/daemon/control-plane-route-validation.ts";
 import { handleSessionRoutes } from "../src/daemon/routes/sessions.ts";
 
 /**
@@ -52,6 +55,41 @@ async function parseResponse(
 }
 
 describe("control-plane route validation", () => {
+  test("rejects raw dot-segment traversal before normalized routing", () => {
+    expect(
+      validateRawRequestTargetPath({
+        requestTarget: "/control-plane/projects/abc123def456/../v1/status",
+      })
+    ).toEqual({
+      ok: false,
+      status: 400,
+      error: "malformed_path",
+    });
+
+    expect(
+      validateRawRequestTargetPath({
+        requestTarget: "/v1/sessions/./test-session",
+      })
+    ).toEqual({
+      ok: false,
+      status: 400,
+      error: "malformed_path",
+    });
+
+    expect(
+      validateRawRequestTargetPath({
+        requestTarget:
+          "/control-plane/projects/abc123def456%2F..%2F..%2Fv1%2Fstatus/jobs",
+      })
+    ).toEqual({ ok: true });
+
+    expect(
+      validateRawRequestTargetPath({
+        requestTarget: "/v1/sessions/test-session",
+      })
+    ).toEqual({ ok: true });
+  });
+
   test("rejects malformed project identifiers before routing", () => {
     const result = validateControlPlaneRouteTarget({
       url: new URL("http://localhost/control-plane/projects/not-valid/jobs"),

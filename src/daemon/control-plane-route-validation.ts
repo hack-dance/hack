@@ -1,6 +1,9 @@
 const PROJECT_ID_PATTERN = /^[a-f0-9]{12}$/;
 const RUNTIME_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const RAW_DOT_SEGMENT_PATTERN = /^(?:\.|\.\.)$/;
+const ABSOLUTE_REQUEST_TARGET_PATTERN =
+  /^(?:https?):\/\/[^/?#]+(?<path>\/[^?#]*)?(?:[?#].*)?$/i;
 
 export type ControlPlaneRouteTarget = {
   readonly projectId: string | null;
@@ -18,6 +21,14 @@ export type ControlPlaneRouteValidationResult =
         | "invalid_project_id"
         | "invalid_job_id"
         | "invalid_shell_id";
+    };
+
+export type RawRequestTargetValidationResult =
+  | { readonly ok: true }
+  | {
+      readonly ok: false;
+      readonly status: 400;
+      readonly error: "malformed_path";
     };
 
 export type GatewayRouteAccessResult =
@@ -93,6 +104,24 @@ export function validateControlPlaneRouteTarget(opts: {
   };
 }
 
+export function validateRawRequestTargetPath(opts: {
+  readonly requestTarget: string;
+}): RawRequestTargetValidationResult {
+  const pathname = extractRawRequestTargetPathname({
+    requestTarget: opts.requestTarget,
+  });
+  if (!pathname) {
+    return { ok: true };
+  }
+  const hasDotSegment = pathname
+    .split("/")
+    .some((segment) => RAW_DOT_SEGMENT_PATTERN.test(segment));
+  if (hasDotSegment) {
+    return { ok: false, status: 400, error: "malformed_path" };
+  }
+  return { ok: true };
+}
+
 export function evaluateGatewayRouteAccess(opts: {
   readonly method: string;
   readonly url: URL;
@@ -128,4 +157,36 @@ export function evaluateGatewayRouteAccess(opts: {
 function isGatewayReadOnlyMethod(opts: { readonly method: string }): boolean {
   const method = opts.method.toUpperCase();
   return method === "GET" || method === "HEAD";
+}
+
+function extractRawRequestTargetPathname(opts: {
+  readonly requestTarget: string;
+}): string | null {
+  const trimmed = opts.requestTarget.trim();
+  if (trimmed.length === 0 || trimmed === "*") {
+    return null;
+  }
+  if (trimmed.startsWith("/")) {
+    return stripRequestTargetQueryAndFragment({ requestTarget: trimmed });
+  }
+  const absoluteFormMatch = ABSOLUTE_REQUEST_TARGET_PATTERN.exec(trimmed);
+  if (!absoluteFormMatch) {
+    return null;
+  }
+  return absoluteFormMatch.groups?.path ?? "/";
+}
+
+function stripRequestTargetQueryAndFragment(opts: {
+  readonly requestTarget: string;
+}): string {
+  const queryIndex = opts.requestTarget.indexOf("?");
+  const fragmentIndex = opts.requestTarget.indexOf("#");
+  const endIndexCandidates = [queryIndex, fragmentIndex].filter(
+    (index) => index >= 0
+  );
+  const endIndex =
+    endIndexCandidates.length > 0
+      ? Math.min(...endIndexCandidates)
+      : opts.requestTarget.length;
+  return opts.requestTarget.slice(0, endIndex);
 }

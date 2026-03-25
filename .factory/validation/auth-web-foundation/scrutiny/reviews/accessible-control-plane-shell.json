@@ -1,0 +1,21 @@
+{
+  "featureId": "accessible-control-plane-shell",
+  "reviewedAt": "2026-03-25T03:17:59Z",
+  "commitId": "aa018e38f96f18f5fef805e1b97df7c304a5052e",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Reviewed the feature entry, mission guidance, worker transcript skeleton, handoff, shared-state docs, and commit `aa018e38f96f18f5fef805e1b97df7c304a5052e`, then spot-checked the landed slice in a clean detached worktree with `bun run --cwd apps/web typecheck` and `bun test apps/web`. The diff stays tightly scoped to `apps/web`, replaces the placeholder scaffold with a semantic browser-visible shell, and the combined automated plus browser evidence is strong enough to support VAL-AUTH-008. I did not find a blocking correctness, regression, or scope-control issue in the landed shell slice.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "The shared web-control-plane guidance still states accessibility expectations only at a principle level, but this feature established a more concrete shell contract that later browser slices are likely to inherit.",
+      "evidence": "`.factory/library/web-control-plane.md:19,23-24,30` stays generic, while `apps/web/src/components/control-plane-shell.tsx:38,79,102,127,172` now defines the concrete skip-link, labeled-section-nav, main-region, and guardrails foundation."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass. The feature lands the intended accessible browser-visible shell, keeps the diff scoped to `apps/web`, and has credible proof for semantic landmarks, keyboard navigation, visible focus treatment, and reduced-motion-safe behavior. Shared-state follow-up: capture the concrete shell contract in `.factory/library/web-control-plane.md` so later web slices inherit the same foundation."
+}

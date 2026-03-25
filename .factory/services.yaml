@@ -14,6 +14,9 @@ commands:
   runtime_open_auth: hack open auth --json
   runtime_web_smoke: curl -ksSf https://hack-cli.hack
   runtime_auth_routed_smoke: curl -ksSf https://auth.hack-cli.hack/health
+  runtime_stack_routed_healthcheck: hack ps --json && curl -ksSf https://hack-cli.hack && curl -ksSf https://auth.hack-cli.hack/health
+  runtime_auth_provider_metadata_smoke: curl -ksSf https://auth.hack-cli.hack/v1/auth/providers
+  runtime_auth_legacy_shell_headers: curl -ksSI https://auth.hack-cli.hack/auth
   linear_status: ./dist/hack linear status --json
   repo_linear_smoke: bun run build && ./dist/hack linear status --json
 

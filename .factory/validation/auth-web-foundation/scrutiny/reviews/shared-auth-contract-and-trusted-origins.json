@@ -1,0 +1,45 @@
+{
+  "featureId": "shared-auth-contract-and-trusted-origins",
+  "reviewedAt": "2026-03-25T02:56:56Z",
+  "commitId": "1a3a2f5a856f30e6cf94239fd8a70539e1e98851",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "Reviewed the feature handoff, transcript skeleton, skill instructions, shared-state docs, and commit `1a3a2f5a856f30e6cf94239fd8a70539e1e98851`. The new `@hack/auth-contract` package and the broker metadata wiring are directionally correct, but the implementation still misses two milestone-critical behaviors: broker return-url enforcement does not honor wildcard trusted-origin patterns, and the web surface does not treat broker-disabled Better Auth metadata as authoritative. The diff also bundles one unrelated Linear typing fix into this auth-scoped feature.",
+    "issues": [
+      {
+        "file": "services/auth-broker/src/modules/better-auth/shell-plugin.ts",
+        "line": 1614,
+        "severity": "blocking",
+        "description": "`normalizeSafeReturnUrl()` still uses `input.trustedOrigins.includes(candidate.origin)` instead of the wildcard-aware matcher introduced in `@hack/auth-contract`. The shared contract and its tests explicitly allow patterns like `https://*.hack-cli.hack` and `https://*.hack-cloud.test` (`packages/auth-contract/tests/shared-auth-contract.test.ts:62-109`), but the broker handoff routes will reject those allowed origins because `candidate.origin` never exactly equals the wildcard entry. That means the feature does not actually satisfy VAL-AUTH-002 for routed local subdomains or deploy-preview wildcard origins."
+      },
+      {
+        "file": "apps/web/src/components/auth-entrypoint.tsx",
+        "line": 99,
+        "severity": "blocking",
+        "description": "The web surface does not make broker metadata authoritative for disabled Better Auth state. `AuthEntrypoint` only replaces its boot-time `providers`/`trustedOrigins` when `betterAuthProvider.enabled` is true, so if the broker reports Better Auth disabled it keeps rendering the env-derived startup contract from lines 63-65. `/api/auth/social` then revalidates redirects against `getWebAuthConfig().contract.trustedOrigins` instead of broker metadata (`apps/web/app/api/auth/social/route.ts:28-33`). This leaves the web sign-in surface able to present or trust auth choices that the broker has already disabled, which falls short of VAL-AUTH-001's requirement that broker and web resolve the same enabled and disabled providers from one shared contract."
+      },
+      {
+        "file": "src/control-plane/extensions/linear/commands.ts",
+        "line": 2582,
+        "severity": "non_blocking",
+        "description": "This auth-scoped feature commit also widens the Linear `TicketSyncStore` type with `sync`. The fix is harmless, but it is unrelated to the feature contract and makes the change set harder to review and roll back cleanly."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "services",
+      "observation": "The mission's declared service catalog still has no `apps/web` runtime or web-auth smoke command, so web-side auth behavior is being verified with ad-hoc scripts instead of a reusable service definition.",
+      "evidence": "`.factory/services.yaml` only defines `auth-broker-local` and `hack-stack`; the transcript skeleton for worker session `00a432db-f75b-4fdf-8881-35c8db422d98` shows an `Execute` step that writes and runs `<tmp>/shared-auth-contract-check.ts` to inspect the broker/web auth contract manually."
+    },
+    {
+      "area": "knowledge",
+      "observation": "The durable environment notes still do not record the web-auth env variables that now shape the shared contract and trusted-origin model.",
+      "evidence": "`.factory/library/environment.md:16-25` and `:40-43` describe trusted-origin inputs only generically, while `apps/web/src/lib/auth-config.ts:22-23,39,95-96` depends on concrete vars such as `NEXT_PUBLIC_HACK_WEB_APP_BASE_URL`, `HACK_AUTH_BROKER_INTERNAL_URL`, and `HACK_LOCAL_DEV_HOST`."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Fail. The shared auth package extraction is a good start, but the landed feature still rejects allowed wildcard trusted origins in broker handoff flows and does not make broker-disabled auth metadata authoritative on the web surface. I also noted reusable shared-state gaps around web auth service commands and environment documentation."
+}

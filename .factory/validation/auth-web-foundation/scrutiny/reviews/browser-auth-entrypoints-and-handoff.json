@@ -1,0 +1,39 @@
+{
+  "featureId": "browser-auth-entrypoints-and-handoff",
+  "reviewedAt": "2026-03-25T03:22:10Z",
+  "commitId": "e604a6653888b7bf8655b44e0012750a4da77a37",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "Reviewed the feature entry, mission guidance, worker transcript skeleton, handoff, and commit `e604a6653888b7bf8655b44e0012750a4da77a37`, then spot-checked the landed slice in the current tree (these files are unchanged after the feature commit) and ran a targeted in-memory broker repro for wildcard return URLs. The diff stays within the feature allowlist and does move the primary auth pages into `apps/web`, but it still misses two milestone-critical behaviors: wildcard trusted origins are not honored in the broker handoff redirects introduced here, and the new web auth surface does not treat broker provider metadata as authoritative when Better Auth is disabled or its trusted-origin set changes. The existing tests and browser checks are mostly happy-path and do not cover either negative case.",
+    "issues": [
+      {
+        "file": "services/auth-broker/src/modules/better-auth/shell-plugin.ts",
+        "line": 1614,
+        "severity": "blocking",
+        "description": "The feature adds trusted-origin handling to `normalizeSafeReturnUrl()`, but the broker still checks `input.trustedOrigins.includes(candidate.origin)` instead of the wildcard-aware matcher in `@hack/auth-contract`. The shared contract explicitly allows patterns like `https://*.hack-cli.hack`, `https://*.hack-cli.hack.gy`, and `https://*.hack-cloud.test` (`packages/auth-contract/src/index.ts:224-229`, `packages/auth-contract/tests/shared-auth-contract.test.ts:62-123`), yet `/v1/auth/session/start`, `/auth`, and `/auth/account` will silently drop those return targets because `candidate.origin` never exactly equals the wildcard entry. I reproduced this by instantiating `createAuthBrokerApp()` with a wildcard-trusting contract and requesting `/auth?redirect=https://foo.hack-cli.hack/welcome`; the broker returned `302 Location: http://localhost:3000/auth` with the redirect stripped. That means the feature still fails VAL-AUTH-003/VAL-AUTH-002 behavior for routed local subdomains and other wildcard-authorized browser handoffs."
+      },
+      {
+        "file": "apps/web/src/components/auth-entrypoint.tsx",
+        "line": 99,
+        "severity": "blocking",
+        "description": "The browser-owned auth UI does not make broker metadata authoritative. `AuthEntrypoint` only replaces its boot-time provider/trusted-origin state when `/api/auth/providers` reports `better-auth` as enabled (`apps/web/src/components/auth-entrypoint.tsx:96-103`), so if the broker reports Better Auth disabled the page keeps rendering the env-derived provider contract instead of the broker-disabled state. On top of that, the server-side social start route revalidates redirects against `config.contract.trustedOrigins` from process env (`apps/web/app/api/auth/social/route.ts:28-33`) rather than broker metadata. This lets the web entrypoint advertise or accept stale auth settings after the broker has disabled Better Auth or narrowed trusted origins, which breaks the intended single-source-of-truth handoff behavior and leaves the happy-path browser proof overstating what was actually verified."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "services",
+      "observation": "The shared services manifest still lacks reusable routed auth validation commands for provider metadata and legacy auth redirect/handoff checks, so this feature's reviewers and workers fall back to ad-hoc curl commands for milestone-critical auth assertions.",
+      "evidence": "`.factory/services.yaml:10-16` only defines generic health/open smokes (`auth_broker_smoke`, `runtime_open`, `runtime_open_auth`, `runtime_web_smoke`, `runtime_auth_routed_smoke`), while the feature handoff at `<mission-dir>/handoffs/2026-03-25T02-34-38-232Z__browser-auth-entrypoints-and-handoff__2f61d466-32e2-45f9-9232-52cb147b5a40.json` had to record one-off checks against `/v1/auth/providers`, `/auth`, and `/auth/account?...`."
+    },
+    {
+      "area": "skills",
+      "observation": "The `web-control-plane-worker` skill emphasizes happy-path end-to-end browser checks, but it does not make disabled-provider and trusted-origin negative checks explicit for auth-entrypoint slices, which made the current green validation path easier to overtrust.",
+      "evidence": "`.factory/skills/web-control-plane-worker/SKILL.md:30-31` asks workers to exercise each changed flow and cover loading/error states, and the example handoff at `:39-47,81-82` focuses on happy-path provider parity and identity continuity. This feature's landed tests mirror that shape and contain no disabled-provider or wildcard trusted-origin regression case."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Fail. The feature successfully moves sign-in/account routes into `apps/web` and retires the broker HTML shell as the primary UX, but it still drops wildcard-authorized return targets in broker handoff redirects and lets the web surface rely on stale env-derived auth metadata when the broker disables or narrows Better Auth settings. Shared-state follow-up: add reusable routed auth smoke commands to `.factory/services.yaml` and tighten the web auth worker skill so negative auth-contract checks are required for this class of feature."
+}

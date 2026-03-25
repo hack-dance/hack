@@ -25,6 +25,17 @@ The broker already depends on environment such as:
 
 Workers should extend existing env handling rather than introducing parallel secret/config channels.
 
+## Web Auth Runtime Inputs
+
+`apps/web/src/lib/auth-config.ts` currently derives the browser auth contract from:
+- app base URL: `NEXT_PUBLIC_HACK_WEB_APP_BASE_URL`, `HACK_WEB_APP_BASE_URL`, `NEXT_PUBLIC_APP_BASE_URL`, `APP_BASE_URL`
+- broker public base URL: `NEXT_PUBLIC_HACK_AUTH_BROKER_URL`, `HACK_AUTH_BROKER_URL`, `AUTH_BROKER_PUBLIC_BASE_URL`
+- broker internal/proxy base URL: `HACK_AUTH_BROKER_INTERNAL_URL`, `AUTH_BROKER_INTERNAL_URL`
+- trusted origins: `BETTER_AUTH_TRUSTED_ORIGINS`
+- local routed-host inference override: `HACK_LOCAL_DEV_HOST`, `NEXT_PUBLIC_HACK_LOCAL_DEV_HOST`
+
+When verifying provider parity or browser handoff behavior, prefer these variables over introducing app-specific aliases outside the shared auth-config path.
+
 ## Tooling Notes
 
 - Bun is the canonical runtime and validator path for this repo.

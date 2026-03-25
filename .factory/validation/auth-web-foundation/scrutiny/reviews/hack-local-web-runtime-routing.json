@@ -1,0 +1,21 @@
+{
+  "featureId": "hack-local-web-runtime-routing",
+  "reviewedAt": "2026-03-25T03:12:37Z",
+  "commitId": "4f56eff3fea719b4b72869fc2ada1627cc3522bf",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Reviewed the feature metadata, mission guidance, worker handoff, transcript skeleton, shared-state files, and commit `4f56eff3fea719b4b72869fc2ada1627cc3522bf`. The diff stays tightly in scope: it wires `.hack/docker-compose.yml` for routed `web` and `auth-broker` services, adds reusable routed-runtime commands to `.factory/services.yaml`, and adds a regression test that locks the compose shape. I did not find a blocking correctness or scope issue in the landed runtime-routing slice.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "services",
+      "observation": "The routed runtime checks were added only as standalone commands, while the canonical `hack-stack` service healthcheck still stops at `hack ps --json`. Future workers following the shared service manifest can therefore get a false-positive 'healthy' result even if the routed `web` or `auth-broker` hosts are broken.",
+      "evidence": "`.factory/services.yaml:15-16` adds `runtime_web_smoke` and `runtime_auth_routed_smoke`, but `.factory/services.yaml:28-31` keeps `services.hack-stack.healthcheck` as `hack ps --json`. `.factory/library/user-testing.md:18` tells workers to rely on declared local service commands from `.factory/services.yaml` during validation."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass. The feature lands the intended hack-managed runtime wiring for the new web and broker surfaces without expanding scope beyond the runtime slice. The only notable follow-up is a shared-state gap: the reusable routed HTTP smokes are documented, but the canonical `hack-stack` healthcheck still only checks container status rather than routed host readiness."
+}

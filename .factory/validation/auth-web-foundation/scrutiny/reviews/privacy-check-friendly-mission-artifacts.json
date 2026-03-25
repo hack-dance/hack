@@ -1,0 +1,21 @@
+{
+  "featureId": "privacy-check-friendly-mission-artifacts",
+  "reviewedAt": "2026-03-25T03:02:12Z",
+  "commitId": "8471e31845e5c43da274881dfa2887239560237b",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Reviewed the worker transcript skeleton, handoff, and commit `8471e31845e5c43da274881dfa2887239560237b` across `.factory/library/user-testing.md`, the sanitized `linear-runtime-foundations` validation artifacts, `scripts/privacy-check.ts`, `src/lib/privacy-check.ts`, and `tests/privacy-check.test.ts`. The implementation matches the feature intent: it removes the tracked workstation-path leaks that were breaking repo-wide `bun run check`, hardens `privacy-check` so tracked mission artifacts under `.factory/library/**` and `.factory/validation/**` also fail on raw temp-path leaks, and adds regression coverage that keeps the committed mission artifacts clean.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "Sanitized-path guidance is still explicit for validator evidence but not for scrutiny review evidence, so later review outputs can still emit raw temp paths even though `privacy-check` will now catch them once tracked.",
+      "evidence": "<mission-dir>/AGENTS.md:28 requires sanitized committed mission artifacts, `.factory/library/user-testing.md:53` adds concrete placeholder guidance for validation evidence, but `.factory/validation/auth-web-foundation/scrutiny/reviews/shared-auth-contract-and-trusted-origins.json:35` still records `<tmp>/shared-auth-contract-check.ts` in review evidence."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass. The feature neutralized the tracked `.factory` path leaks that were breaking repo-wide `bun run check`, added a reusable privacy-check helper plus regression tests, and tightened mission-artifact scanning so future tracked validation artifacts fail closed on raw temp paths. The remaining gap is shared-state guidance: scrutiny review outputs are not yet explicitly told to sanitize temp-path evidence, so later review drafts can still contain raw `<tmp>` strings before the check catches them."
+}

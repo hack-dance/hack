@@ -1,0 +1,33 @@
+{
+  "featureId": "durable-org-team-store-defaults",
+  "reviewedAt": "2026-03-25T03:25:50Z",
+  "commitId": "b7138f3493ac1ec2811aec77983e1c8e291b4fe4",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "Reviewed the feature entry, mission guidance, worker transcript skeleton, handoff, and commit `b7138f3493ac1ec2811aec77983e1c8e291b4fe4`, then spot-checked the landed auth-broker slice and ran an independent negative-path repro against the current tree. The feature does land a real DB-backed `DbOrgTeamsStore`, adds dedicated broker tables, and the repo's checked-in `.env` makes the happy-path runtime durable. But the shipped default wiring still silently falls back to `InMemoryOrgTeamsStore` whenever `DATABASE_URL` is absent, so the feature does not yet satisfy VAL-AUTH-004's requirement that org/team storage be durable by default or explicitly report dev-only ephemeral mode. The committed tests and handoff only prove the configured-database path and therefore overstate what was actually verified.",
+    "issues": [
+      {
+        "file": "services/auth-broker/src/app.ts",
+        "line": 221,
+        "severity": "blocking",
+        "description": "The new default-store factory still returns `InMemoryOrgTeamsStore` with no explicit warning or fail-closed signal when `DATABASE_URL` is missing (`services/auth-broker/src/app.ts:221-233`). That leaves a reachable default mode where org/team admin state is silently ephemeral, which conflicts with VAL-AUTH-004's 'durable by default or explicitly report dev-only in-memory mode' contract and undermines VAL-AUTH-005 outside the repo's seeded env. I confirmed the current commit still instantiates the in-memory store when `DATABASE_URL` is cleared (`bun -e ...` => `{\\\"constructor\\\":\\\"InMemoryOrgTeamsStore\\\",\\\"inMemory\\\":true}`), and a fresh default-wired broker instance then loses a just-created org with no explicit error (`{\\\"createStatus\\\":200,\\\"listStatus\\\":200,\\\"organizations\\\":[],\\\"explicitError\\\":null}`)."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "The shared architecture note now codifies a weaker persistence rule than the milestone requires by blessing DB-backed org/team storage only 'whenever `DATABASE_URL` is available' instead of preserving the stronger durable-by-default / explicit-dev-only boundary.",
+      "evidence": "`.factory/library/architecture.md:24-25` says shared org/team state must be durable by default or explicitly surfaced as dev-only if still in-memory, but `:37` was updated to say the default auth-broker wiring uses the DB-backed store only when `DATABASE_URL` is available."
+    },
+    {
+      "area": "services",
+      "observation": "The shared validation catalog still has no reusable command for org/team restart-persistence or missing-`DATABASE_URL` negative-path checks, so milestone-critical durability assertions remain dependent on ad-hoc scripts and reviewer spot checks.",
+      "evidence": "`.factory/services.yaml` only exposes generic auth test/smoke commands (`auth_test`, `auth_targeted_test`, `auth_broker_smoke`, routed runtime smokes), while the worker handoff at `<mission-dir>/handoffs/2026-03-25T02-48-01-277Z__durable-org-team-store-defaults__c063e985-876b-4a05-89b8-15aa413104af.json` had to rely on a one-off restart script and still did not cover the default no-DB fallback."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Fail. The feature adds durable broker-backed org/team tables and the configured runtime path persists across restart, but the shipped default wiring still silently reverts to in-memory storage when `DATABASE_URL` is absent, so durability is not guaranteed by default and no explicit dev-only mode is reported. Shared-state follow-up: align the architecture note with the milestone rule and add reusable service-level durability checks for restart and missing-DB negative paths."
+}

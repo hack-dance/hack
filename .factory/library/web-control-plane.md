@@ -24,6 +24,19 @@ Guidance specific to the optional `apps/web` control plane.
 - Preserve semantic structure, labels, focus states, and keyboard navigation.
 - Do not hide critical state transitions behind animation.
 
+## Current Shell Contract
+
+The first shipped shell in `apps/web/src/components/control-plane-shell.tsx` establishes concrete foundation rules for later slices:
+- keep a skip link that targets the main region
+- use a labeled section nav (`aria-label="Control plane sections"`)
+- keep the primary content in a focusable `main` region with explicit section ids
+- preserve visible `focus-visible` outlines and `motion-reduce` fallbacks on interactive surfaces
+- treat auth, admin, and integration flows as future slices instead of implying they already landed
+
+## Testing Quirk
+
+- `bunfig.toml` pins Bun tests to `./tests`, so workspace-targeted coverage may need a root shim file (for example `tests/apps/web.test.ts`) that imports package-local tests when workers need `bun test apps/web` to execute package assertions from the repo root.
+
 ## Runtime Constraint
 
 - Local web validation should run through hack-managed routing once the web runtime is declared.

@@ -1,0 +1,39 @@
+{
+  "featureId": "apps-web-workspace-scaffold",
+  "reviewedAt": "2026-03-25T03:07:38Z",
+  "commitId": "a62855194941b9f4b25f71654cd00b6d721732b3",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "Reviewed the feature handoff, transcript skeleton, skill instructions, shared-state docs, and commit `a62855194941b9f4b25f71654cd00b6d721732b3`. The slice does establish `apps/web` as a tracked workspace package with placeholder routes and tests, but it still misses the feature's reproducibility bar because the committed typecheck path depends on an ignored generated Next artifact that is not part of the scaffold. The diff also pulls in unused auth/UI/shadcn setup that goes beyond the stated minimal placeholder scope.",
+    "issues": [
+      {
+        "file": "apps/web/next-env.d.ts",
+        "line": 3,
+        "severity": "blocking",
+        "description": "The committed scaffold imports `./.next/dev/types/routes.d.ts`, but `.gitignore:35-36` explicitly ignores `.next/**` and the reviewed commit does not track any `.next` files. Because `apps/web/package.json:10` runs plain `bunx tsc -p tsconfig.json --noEmit`, a clean checkout of this feature cannot satisfy the promised reproducible `typecheck` task without first generating local Next artifacts by hand. That violates the feature contract that Bun/Turbo discover the new package without ad-hoc local setup."
+      },
+      {
+        "file": "apps/web/package.json",
+        "line": 15,
+        "severity": "non_blocking",
+        "description": "This minimal scaffold slice also adds later-scope auth/UI setup that the reviewed tree never uses: `@hack/auth-contract`, `@radix-ui/react-slot`, `class-variance-authority`, `lucide-react`, and `motion` (`apps/web/package.json:15-20`), plus `apps/web/components.json:2` and `apps/web/src/lib/utils.ts:4`. `git grep` against commit `a62855194941b9f4b25f71654cd00b6d721732b3` only finds those entries at their definitions, so the feature expands the lockfile and review surface with unused scaffolding beyond the stated 'minimal bootable placeholder routes' scope."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The `web-control-plane-worker` skill is too rigid for pre-runtime scaffold slices: it makes `hack open --json` plus `agent-browser` mandatory for every `apps/web` feature even when the mission docs say the routed web host does not exist yet.",
+      "evidence": "`.factory/skills/web-control-plane-worker/SKILL.md:20,30` requires `agent-browser` and a routed host for every `apps/web` change, while `.factory/library/user-testing.md:44` says the repo does not yet have a real `apps/web` runtime or hack-managed local web host. The reviewed handoff at `<mission-dir>/handoffs/2026-03-25T01-44-32-084Z__apps-web-workspace-scaffold__2251d323-f90e-4490-8a4a-48b7732c3d1b.json` records `skillFeedback.followedProcedure=false` and explains that this scaffold slice had to validate via tests plus stash/worktree inspection instead."
+    },
+    {
+      "area": "knowledge",
+      "observation": "The repo's Bun test-root constraint and the required root-shim pattern for workspace-filtered tests are still undocumented in shared state.",
+      "evidence": "`bunfig.toml:1-2` forces Bun tests under `./tests`, and this feature had to add `tests/apps/web.test.ts:1-2` solely to make `bun test apps/web` reach the package-local tests. A search across `.factory/**` found no existing documentation for this pattern."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Fail. The scaffold is directionally right, but its committed `typecheck` path still depends on an ignored generated `.next` file, so the new workspace is not yet reproducible from a clean checkout. I also noted non-blocking scope creep from unused auth/UI scaffolding and shared-state gaps in the web worker skill and Bun test-root documentation."
+}

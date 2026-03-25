@@ -10,6 +10,7 @@ import {
   resolveGitHubAuthSettingsResult,
   type SecretStore,
   saveGitHubAppToken,
+  summarizeGitHubReadiness,
 } from "../src/control-plane/extensions/github/auth.ts";
 import type { ControlPlaneConfig } from "../src/control-plane/sdk/config.ts";
 
@@ -650,4 +651,133 @@ test("resolveGitHubAppToken returns refresh error when token is expired and no f
     return;
   }
   expect(resolved.error).toContain("is expired and refresh failed");
+});
+
+test("summarizeGitHubReadiness reports missing routed profiles with repair guidance", () => {
+  const config = createControlPlaneConfig({
+    defaultProfile: "default",
+    profiles: {
+      default: {
+        authRef: "github.app.default",
+        service: "hack-github-default",
+      },
+    },
+    projectGitHubProfile: "missing",
+  });
+
+  const settings = resolveGitHubAuthSettings({
+    controlPlaneConfig: config,
+  });
+  const settingsResult = resolveGitHubAuthSettingsResult({
+    controlPlaneConfig: config,
+  });
+
+  const summary = summarizeGitHubReadiness({
+    controlPlaneConfig: config,
+    settings,
+    settingsResult,
+    token: {
+      ok: false,
+      error: 'GitHub profile "missing" was not found.',
+      tokenEnv: settings.tokenEnv,
+      authRef: settings.authRef,
+      service: settings.service,
+      profileId: settings.profileId,
+      profileSource: settings.profileSource,
+    },
+  });
+
+  expect(summary.ready).toBe(false);
+  expect(summary.issues).toContain("missing_profile");
+  expect(
+    summary.repairGuidance.some(
+      (guidance) => guidance.issue === "missing_profile"
+    )
+  ).toBe(true);
+  expect(summary.repairGuidance[0]?.action).toContain(
+    "hack x github connect --profile missing"
+  );
+});
+
+test("summarizeGitHubReadiness reports missing tokens with env-aware guidance", async () => {
+  const config = createControlPlaneConfig({
+    tokenEnv: "GH_TOKEN",
+    authRef: "github.app.default",
+    service: "hack-github-test",
+  });
+  const memory = createMemoryStore();
+  const settings = resolveGitHubAuthSettings({
+    controlPlaneConfig: config,
+  });
+  const settingsResult = resolveGitHubAuthSettingsResult({
+    controlPlaneConfig: config,
+  });
+  const token = await resolveGitHubAppToken({
+    controlPlaneConfig: config,
+    env: {},
+    store: memory.store,
+  });
+
+  const summary = summarizeGitHubReadiness({
+    controlPlaneConfig: config,
+    settings,
+    settingsResult,
+    token,
+  });
+
+  expect(summary.ready).toBe(false);
+  expect(summary.issues).toContain("missing_token");
+  expect(summary.installation.state).toBe("not_required");
+  expect(
+    summary.repairGuidance.some(
+      (guidance) => guidance.issue === "missing_token"
+    )
+  ).toBe(true);
+  expect(summary.repairGuidance[0]?.action).toContain("GH_TOKEN");
+});
+
+test("summarizeGitHubReadiness keeps app-mode profiles incomplete until installation is configured", async () => {
+  const config = createControlPlaneConfig({
+    tokenEnv: "GH_TOKEN",
+    defaultProfile: "work",
+    profiles: {
+      work: {
+        authRef: "github.app.work",
+        service: "hack-github-work",
+        appId: "12345",
+        mode: "app",
+      },
+    },
+  });
+  const memory = createMemoryStore();
+  const settings = resolveGitHubAuthSettings({
+    controlPlaneConfig: config,
+  });
+  const settingsResult = resolveGitHubAuthSettingsResult({
+    controlPlaneConfig: config,
+  });
+  const token = await resolveGitHubAppToken({
+    controlPlaneConfig: config,
+    env: {
+      GH_TOKEN: "env-token",
+    },
+    store: memory.store,
+  });
+
+  const summary = summarizeGitHubReadiness({
+    controlPlaneConfig: config,
+    settings,
+    settingsResult,
+    token,
+  });
+
+  expect(summary.ready).toBe(false);
+  expect(summary.issues).toContain("missing_installation");
+  expect(summary.installation.required).toBe(true);
+  expect(summary.installation.state).toBe("missing");
+  expect(
+    summary.repairGuidance.some(
+      (guidance) => guidance.issue === "missing_installation"
+    )
+  ).toBe(true);
 });

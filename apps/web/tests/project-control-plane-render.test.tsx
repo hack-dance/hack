@@ -4,6 +4,46 @@ import { renderToStaticMarkup } from "react-dom/server";
 import ControlPlaneShell from "../src/components/control-plane-shell";
 import type { AccountShellContext } from "../src/lib/account-shell";
 
+const githubManagement = {
+  extensionEnabled: true,
+  selectedProfile: "work",
+  selectedSource: "project_routing",
+  defaultProfile: "work",
+  projectOverride: "work",
+  selectedMissing: false,
+  mode: "token",
+  authRef: "github.app.work",
+  service: "hack-github-work",
+  tokenEnvFallback: "HACK_GITHUB_APP_TOKEN",
+  apiBaseUrl: "https://api.github.com",
+  accountLogin: "hack-dance",
+  tokenResolved: true,
+  tokenSource: "env",
+  profiles: [
+    {
+      id: "work",
+      isDefault: true,
+      mode: "token",
+      authRef: "github.app.work",
+      service: "hack-github-work",
+      accountLogin: "hack-dance",
+    },
+  ],
+  readiness: {
+    ready: true,
+    state: "ready",
+    summary: "Ready for project GitHub workflows.",
+    detail: "Project routing resolves a usable GitHub profile.",
+    issues: [],
+    installation: {
+      required: false,
+      state: "not_required",
+    },
+    repairGuidance: [],
+  },
+  statusCommand: "./dist/hack x github status --json",
+} as const;
+
 const authenticatedContext = {
   authenticated: true,
   accessControlMode: "better_auth_team_owned",
@@ -124,6 +164,7 @@ test("account shell renders project registration and access controls", () => {
         title: "Project registered",
         body: "Hack stored the durable project registration.",
       }}
+      githubManagement={githubManagement}
       returnToPath="/account"
       signInHref="/auth?redirect=%2Faccount"
     />

@@ -15,6 +15,7 @@ import {
   resolveGitHubAuthSettings,
   resolveGitHubAuthSettingsResult,
   saveGitHubAppToken,
+  summarizeGitHubReadiness,
 } from "./auth.ts";
 import {
   createGitHubAppClient,
@@ -74,6 +75,17 @@ type GitHubStatusPayload = {
   readonly tokenResolved: boolean;
   readonly tokenSource?: string;
   readonly tokenExpiresAt?: string;
+  readonly ready: boolean;
+  readonly readiness: "ready" | "needs_attention";
+  readonly readinessSummary: string;
+  readonly readinessDetail: string;
+  readonly repairIssues: readonly string[];
+  readonly installationState: "configured" | "missing" | "not_required";
+  readonly repairGuidance: readonly {
+    readonly issue: string;
+    readonly title: string;
+    readonly action: string;
+  }[];
   readonly profileError?: string;
   readonly error?: string;
 };
@@ -1299,6 +1311,7 @@ async function handleGitHubStatusCommand(input: {
     allowProjectOverride,
   });
   const payload = buildGitHubStatusPayload({
+    controlPlaneConfig: input.controlPlaneConfig,
     settings,
     settingsResult,
     token,
@@ -1688,12 +1701,21 @@ async function renderGitHubStatusDisplay(input: {
 }
 
 function buildGitHubStatusPayload(input: {
+  readonly controlPlaneConfig: Parameters<
+    typeof resolveGitHubAuthSettings
+  >[0]["controlPlaneConfig"];
   readonly settings: ReturnType<typeof resolveGitHubAuthSettings>;
   readonly settingsResult: ReturnType<typeof resolveGitHubAuthSettingsResult>;
   readonly token: Awaited<ReturnType<typeof resolveGitHubAppToken>>;
   readonly defaultProfileId: string;
   readonly accountSnapshot: GitHubAccountSnapshot;
 }): GitHubStatusPayload {
+  const readiness = summarizeGitHubReadiness({
+    controlPlaneConfig: input.controlPlaneConfig,
+    settings: input.settings,
+    settingsResult: input.settingsResult,
+    token: input.token,
+  });
   const accountLogin =
     input.accountSnapshot.accountLogin ?? input.settings.accountLogin;
   const accountName =
@@ -1725,6 +1747,13 @@ function buildGitHubStatusPayload(input: {
     ...(input.token.ok && input.token.expiresAt
       ? { tokenExpiresAt: input.token.expiresAt }
       : {}),
+    ready: readiness.ready,
+    readiness: readiness.state,
+    readinessSummary: readiness.summary,
+    readinessDetail: readiness.detail,
+    repairIssues: readiness.issues,
+    installationState: readiness.installation.state,
+    repairGuidance: readiness.repairGuidance,
     ...(input.settingsResult.ok
       ? {}
       : { profileError: input.settingsResult.error }),
@@ -1832,6 +1861,7 @@ function parseRepoArg(input: { readonly raw: string }): GitHubRepoRef | null {
 }
 
 export const __testOnly = {
+  buildGitHubStatusPayload,
   buildGitHubProfilesPayload,
   parseProfilesArgs,
   parseStatusArgs,

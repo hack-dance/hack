@@ -10,6 +10,7 @@ import {
   shellSummary,
   shellTitle,
 } from "@/src/lib/control-plane-shell";
+import type { GitHubManagementState } from "@/src/lib/github-management";
 import { cn } from "@/src/lib/utils";
 
 const interactiveSurfaceClassName = cn(
@@ -26,6 +27,7 @@ const focusLinkClassName = cn(
 
 type ControlPlaneShellProps = {
   readonly account?: AccountShellContext;
+  readonly githubManagement: GitHubManagementState;
   readonly feedback?: AccountControlPlaneFeedback | null;
   readonly returnToPath: string;
   readonly signInHref?: string;
@@ -42,6 +44,7 @@ const fallbackAccountContext = {
 
 export default function ControlPlaneShell({
   account = fallbackAccountContext,
+  githubManagement,
   feedback = null,
   returnToPath,
   signInHref = "/auth?redirect=%2F",
@@ -234,6 +237,7 @@ export default function ControlPlaneShell({
           <AccountControlPlaneSections
             account={account}
             feedback={feedback}
+            githubManagement={githubManagement}
             returnToPath={returnToPath}
           />
 

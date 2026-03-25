@@ -77,6 +77,37 @@ export type GitHubAuthSettingsResult =
       readonly error: string;
     };
 
+export type GitHubReadinessIssue =
+  | "extension_disabled"
+  | "missing_profile"
+  | "missing_token"
+  | "missing_installation";
+
+export type GitHubInstallationReadinessState =
+  | "configured"
+  | "missing"
+  | "not_required";
+
+export type GitHubReadinessGuidance = {
+  readonly issue: GitHubReadinessIssue;
+  readonly title: string;
+  readonly action: string;
+};
+
+export type GitHubReadinessSummary = {
+  readonly ready: boolean;
+  readonly state: "ready" | "needs_attention";
+  readonly summary: string;
+  readonly detail: string;
+  readonly issues: readonly GitHubReadinessIssue[];
+  readonly installation: {
+    readonly required: boolean;
+    readonly state: GitHubInstallationReadinessState;
+    readonly selectedInstallationId?: string;
+  };
+  readonly repairGuidance: readonly GitHubReadinessGuidance[];
+};
+
 type GitHubProfileSettings = {
   readonly profileId: string;
   readonly tokenEnv: string;
@@ -312,6 +343,94 @@ export function resolveGitHubAuthSettingsResult(input: {
   };
 }
 
+export function isGitHubExtensionEnabled(input: {
+  readonly controlPlaneConfig: ControlPlaneConfig;
+}): boolean {
+  const extension = input.controlPlaneConfig.extensions?.[GITHUB_EXTENSION_ID];
+  return isRecord(extension) && extension.enabled === true;
+}
+
+export function summarizeGitHubReadiness(input: {
+  readonly controlPlaneConfig: ControlPlaneConfig;
+  readonly settings: GitHubAuthSettings;
+  readonly settingsResult: GitHubAuthSettingsResult;
+  readonly token: GitHubTokenResolution;
+}): GitHubReadinessSummary {
+  const extensionEnabled = isGitHubExtensionEnabled({
+    controlPlaneConfig: input.controlPlaneConfig,
+  });
+  const installationRequired = input.settings.mode === "app";
+  const installationConfigured = Boolean(input.settings.installationId);
+  const issues: GitHubReadinessIssue[] = [];
+  let installationState: GitHubInstallationReadinessState = "not_required";
+
+  if (installationRequired) {
+    installationState = installationConfigured ? "configured" : "missing";
+  }
+
+  if (!extensionEnabled) {
+    issues.push("extension_disabled");
+  }
+  if (!input.settingsResult.ok) {
+    issues.push("missing_profile");
+  }
+  if (!input.token.ok) {
+    issues.push("missing_token");
+  }
+  if (installationRequired && !installationConfigured) {
+    issues.push("missing_installation");
+  }
+
+  const ready = issues.length === 0;
+  if (ready) {
+    return {
+      ready: true,
+      state: "ready",
+      summary: "Ready for project GitHub workflows.",
+      detail: installationRequired
+        ? `Project routing resolves the "${input.settings.profileId}" profile with a usable token and installation ${input.settings.installationId}.`
+        : `Project routing resolves the "${input.settings.profileId}" profile with usable token access.`,
+      issues: [],
+      installation: {
+        required: installationRequired,
+        state: installationState,
+        ...(input.settings.installationId
+          ? { selectedInstallationId: input.settings.installationId }
+          : {}),
+      },
+      repairGuidance: [],
+    };
+  }
+
+  const repairGuidance = buildGitHubReadinessGuidance({
+    issues,
+    settings: input.settings,
+    token: input.token,
+  });
+  const primaryIssue = issues[0] ?? "missing_token";
+
+  return {
+    ready: false,
+    state: "needs_attention",
+    summary: "GitHub needs repair before this repo can rely on it.",
+    detail: describePrimaryGitHubIssue({
+      issue: primaryIssue,
+      settingsResult: input.settingsResult,
+      token: input.token,
+      settings: input.settings,
+    }),
+    issues,
+    installation: {
+      required: installationRequired,
+      state: installationState,
+      ...(input.settings.installationId
+        ? { selectedInstallationId: input.settings.installationId }
+        : {}),
+    },
+    repairGuidance,
+  };
+}
+
 /**
  * Resolve a GitHub token using keychain first, then environment fallback.
  */
@@ -477,6 +596,80 @@ export async function resolveGitHubAppToken(input: {
     profileId,
     profileSource: settings.profileSource,
   };
+}
+
+function buildGitHubReadinessGuidance(input: {
+  readonly issues: readonly GitHubReadinessIssue[];
+  readonly settings: GitHubAuthSettings;
+  readonly token: GitHubTokenResolution;
+}): readonly GitHubReadinessGuidance[] {
+  const guidance: GitHubReadinessGuidance[] = [];
+  const tokenError = input.token.ok ? "" : input.token.error;
+
+  for (const issue of input.issues) {
+    if (issue === "extension_disabled") {
+      guidance.push({
+        issue,
+        title: "Enable the project GitHub extension",
+        action:
+          'Set `controlPlane.extensions["dance.hack.github"].enabled` to `true` in `.hack/hack.config.json` so repo-bound GitHub status and repair flows use the real auth resolver.',
+      });
+      continue;
+    }
+
+    if (issue === "missing_profile") {
+      guidance.push({
+        issue,
+        title: "Select a real GitHub profile",
+        action: `Create or reconnect the "${input.settings.profileId}" profile with \`hack x github connect --profile ${input.settings.profileId}\`, or update \`controlPlane.routing.overrides.github.profile\` to point at an existing profile.`,
+      });
+      continue;
+    }
+
+    if (issue === "missing_token") {
+      guidance.push({
+        issue,
+        title: "Restore usable GitHub auth",
+        action: tokenError.includes(DEFAULT_GITHUB_PREFER_ENV_TOKEN_ONLY_ENV)
+          ? `Set ${input.settings.tokenEnv} for the "${input.settings.profileId}" profile, or unset ${DEFAULT_GITHUB_PREFER_ENV_TOKEN_ONLY_ENV} to allow saved local access again.`
+          : `Run \`hack x github connect --profile ${input.settings.profileId}\` to store a token, or set ${input.settings.tokenEnv} for unattended access.`,
+      });
+      continue;
+    }
+
+    guidance.push({
+      issue,
+      title: "Attach an installation to this profile",
+      action: `Re-run \`hack x github connect --profile ${input.settings.profileId} --app-id ${input.settings.appId ?? "<app-id>"} --installation-id <installation-id>\`, or use \`hack x github oauth-connect --profile ${input.settings.profileId} --installation-id <installation-id>\` if the profile should stay token-backed.`,
+    });
+  }
+
+  return guidance;
+}
+
+function describePrimaryGitHubIssue(input: {
+  readonly issue: GitHubReadinessIssue;
+  readonly settingsResult: GitHubAuthSettingsResult;
+  readonly token: GitHubTokenResolution;
+  readonly settings: GitHubAuthSettings;
+}): string {
+  if (input.issue === "extension_disabled") {
+    return "The repo has not enabled the GitHub extension yet, so project-bound status cannot rely on the real GitHub auth path.";
+  }
+
+  if (input.issue === "missing_profile") {
+    return input.settingsResult.ok
+      ? `The selected GitHub profile "${input.settings.profileId}" is unavailable.`
+      : input.settingsResult.error;
+  }
+
+  if (input.issue === "missing_installation") {
+    return `The "${input.settings.profileId}" profile is in app mode, but no installation is configured for the current project routing context.`;
+  }
+
+  return input.token.ok
+    ? `The "${input.settings.profileId}" profile does not currently resolve usable GitHub access.`
+    : input.token.error;
 }
 
 /**

@@ -32,6 +32,11 @@ export const shellNavigationItems = [
     description: "Register shared projects and manage explicit project access.",
   },
   {
+    href: "#github",
+    label: "GitHub",
+    description: "Inspect routed GitHub readiness and repair guidance.",
+  },
+  {
     href: "#invitations",
     label: "Invitations",
     description: "Accept or decline pending invites for this account.",

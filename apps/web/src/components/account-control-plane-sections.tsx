@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import type { AccountControlPlaneFeedback } from "@/src/lib/account-control-plane";
 import { buildAccountControlPlanePath } from "@/src/lib/account-control-plane";
 import type { AccountShellContext } from "@/src/lib/account-shell";
+import type { GitHubManagementState } from "@/src/lib/github-management";
 import { cn } from "@/src/lib/utils";
 
 const sectionSurfaceClassName = cn(
@@ -29,12 +30,14 @@ const fieldClassName = cn(
 
 type AccountControlPlaneSectionsProps = {
   readonly account: AccountShellContext;
+  readonly githubManagement: GitHubManagementState;
   readonly feedback?: AccountControlPlaneFeedback | null;
   readonly returnToPath: string;
 };
 
 export default function AccountControlPlaneSections({
   account,
+  githubManagement,
   feedback = null,
   returnToPath,
 }: AccountControlPlaneSectionsProps) {
@@ -106,6 +109,8 @@ export default function AccountControlPlaneSections({
 
       <ProjectsSection account={account} returnToPath={returnToPath} />
 
+      <GitHubSection githubManagement={githubManagement} />
+
       <section className="space-y-4" id="invitations">
         <div className="space-y-2">
           <h2 className="font-semibold text-2xl text-white">Invitations</h2>
@@ -123,6 +128,191 @@ export default function AccountControlPlaneSections({
         />
       </section>
     </>
+  );
+}
+
+function GitHubSection(input: {
+  readonly githubManagement: GitHubManagementState;
+}) {
+  const githubManagement = input.githubManagement;
+  const selectedProfile = githubManagement.selectedProfile;
+  const selectedAccount =
+    githubManagement.accountName ??
+    githubManagement.accountLogin ??
+    "Not resolved";
+  const installationSummary = describeGitHubInstallation({
+    githubManagement,
+  });
+
+  return (
+    <section className="space-y-4" id="github">
+      <div className="space-y-2">
+        <h2 className="font-semibold text-2xl text-white">GitHub</h2>
+        <p className="max-w-3xl text-sm text-white/70 leading-7">
+          Repo-bound GitHub status stays honest about routing, profile
+          selection, installation context, and repair steps instead of marking
+          partial configuration as healthy.
+        </p>
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+        <section
+          className={cn(sectionSurfaceClassName, "space-y-6 p-6 sm:p-7")}
+        >
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="space-y-2">
+              <p className="font-medium text-sky-100 text-sm">
+                {githubManagement.readiness.ready ? "Ready" : "Needs repair"}
+              </p>
+              <h3 className="font-medium text-white text-xl">
+                {githubManagement.readiness.summary}
+              </h3>
+              <p className="max-w-3xl text-sm text-white/70 leading-6">
+                {githubManagement.readiness.detail}
+              </p>
+            </div>
+            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-white/70 text-xs uppercase tracking-[0.18em]">
+              {githubManagement.readiness.state.replaceAll("_", " ")}
+            </span>
+          </div>
+
+          <dl className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <ProjectDetailCard label="Active profile">
+              {selectedProfile}
+            </ProjectDetailCard>
+            <ProjectDetailCard label="Routing source">
+              {githubManagement.selectedSource}
+            </ProjectDetailCard>
+            <ProjectDetailCard label="Mode">
+              {githubManagement.mode}
+            </ProjectDetailCard>
+            <ProjectDetailCard label="Installation">
+              {installationSummary}
+            </ProjectDetailCard>
+            <ProjectDetailCard label="GitHub account">
+              {selectedAccount}
+            </ProjectDetailCard>
+            <ProjectDetailCard label="Token source">
+              {githubManagement.tokenResolved
+                ? (githubManagement.tokenSource ?? "resolved")
+                : "not resolved"}
+            </ProjectDetailCard>
+          </dl>
+
+          <div className="grid gap-3 rounded-2xl border border-white/10 bg-white/5 p-4">
+            <p className="font-medium text-sm text-white">
+              Repo-bound status command
+            </p>
+            <code className="rounded-2xl bg-slate-950/70 px-4 py-3 text-sm text-white/85">
+              {githubManagement.statusCommand}
+            </code>
+            <p className="text-sm text-white/65 leading-6">
+              Compare this UI with the same repo-bound status payload the CLI
+              uses for GitHub routing checks.
+            </p>
+          </div>
+
+          {githubManagement.readiness.repairGuidance.length > 0 ? (
+            <section className="grid gap-3 rounded-2xl border border-amber-300/20 bg-amber-500/10 p-4">
+              <p className="font-medium text-amber-100 text-sm">
+                Repair guidance
+              </p>
+              <ul className="grid gap-3">
+                {githubManagement.readiness.repairGuidance.map((guidance) => (
+                  <li
+                    className="rounded-2xl border border-white/10 bg-slate-950/35 p-4"
+                    key={`${guidance.issue}-${guidance.title}`}
+                  >
+                    <p className="font-medium text-white">{guidance.title}</p>
+                    <p className="mt-2 text-sm text-white/75 leading-6">
+                      {guidance.action}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
+        </section>
+
+        <section
+          className={cn(sectionSurfaceClassName, "space-y-4 p-6 sm:p-7")}
+        >
+          <div className="space-y-2">
+            <h3 className="font-medium text-white text-xl">
+              Available profiles
+            </h3>
+            <p className="text-sm text-white/70 leading-6">
+              The routed project profile, default profile, and saved GitHub
+              account metadata all stay visible so repair work can target the
+              correct configuration quickly.
+            </p>
+          </div>
+
+          <div className="grid gap-3">
+            <ProjectDetailCard label="Default profile">
+              {githubManagement.defaultProfile}
+            </ProjectDetailCard>
+            <ProjectDetailCard label="Project override">
+              {githubManagement.projectOverride ?? "No project override"}
+            </ProjectDetailCard>
+            <ProjectDetailCard label="Extension enabled">
+              {githubManagement.extensionEnabled ? "yes" : "no"}
+            </ProjectDetailCard>
+          </div>
+
+          {githubManagement.profiles.length > 0 ? (
+            <ul className="grid gap-3">
+              {githubManagement.profiles.map((profile) => {
+                const selected =
+                  profile.id === githubManagement.selectedProfile;
+                let profileStateLabel = "saved";
+                if (selected) {
+                  profileStateLabel = "active";
+                } else if (profile.isDefault) {
+                  profileStateLabel = "default";
+                }
+                return (
+                  <li
+                    className={cn(
+                      "rounded-2xl border p-4",
+                      selected
+                        ? "border-sky-300/35 bg-sky-300/10"
+                        : "border-white/10 bg-slate-950/35"
+                    )}
+                    key={profile.id}
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="space-y-2">
+                        <p className="font-medium text-white">{profile.id}</p>
+                        <p className="text-sm text-white/70 leading-6">
+                          {profile.mode} •{" "}
+                          {profile.accountLogin ?? "No account snapshot"}
+                        </p>
+                      </div>
+                      <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-white/70 text-xs uppercase tracking-[0.18em]">
+                        {profileStateLabel}
+                      </span>
+                    </div>
+                    <dl className="mt-4 grid gap-3 md:grid-cols-2">
+                      <ProjectDetailCard label="Auth ref">
+                        {profile.authRef}
+                      </ProjectDetailCard>
+                      <ProjectDetailCard label="Installation">
+                        {profile.installationId ?? "Not selected"}
+                      </ProjectDetailCard>
+                    </dl>
+                  </li>
+                );
+              })}
+            </ul>
+          ) : (
+            <p className="text-sm text-white/70 leading-6">
+              No GitHub profiles are configured for this repo yet.
+            </p>
+          )}
+        </section>
+      </div>
+    </section>
   );
 }
 
@@ -1244,6 +1434,18 @@ function ProjectDetailCard(input: {
       <dd className="mt-2 text-sm text-white/80 leading-6">{input.children}</dd>
     </div>
   );
+}
+
+function describeGitHubInstallation(input: {
+  readonly githubManagement: GitHubManagementState;
+}) {
+  if (input.githubManagement.readiness.installation.state === "configured") {
+    return input.githubManagement.installationId ?? "Configured";
+  }
+  if (input.githubManagement.readiness.installation.state === "missing") {
+    return "Missing installation";
+  }
+  return "Not required in token mode";
 }
 
 function InvitationsCard(input: {

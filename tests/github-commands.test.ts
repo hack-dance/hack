@@ -76,4 +76,65 @@ describe("github profile payload rendering", () => {
       ],
     });
   });
+
+  test("buildGitHubStatusPayload keeps app profiles unhealthy until installation context is configured", () => {
+    const payload = __testOnly.buildGitHubStatusPayload({
+      settings: {
+        profileId: "work",
+        profileSource: "project_routing",
+        tokenEnv: "GH_TOKEN",
+        authRef: "github.app.work",
+        service: "hack-github-work",
+        appId: "12345",
+        privateKeyEnv: "GH_APP_PRIVATE_KEY",
+        apiBaseUrl: "https://api.github.com",
+        mode: "app",
+      },
+      settingsResult: {
+        ok: true,
+        settings: {
+          profileId: "work",
+          profileSource: "project_routing",
+          tokenEnv: "GH_TOKEN",
+          authRef: "github.app.work",
+          service: "hack-github-work",
+          appId: "12345",
+          privateKeyEnv: "GH_APP_PRIVATE_KEY",
+          apiBaseUrl: "https://api.github.com",
+          mode: "app",
+        },
+        availableProfileIds: ["work"],
+      },
+      token: {
+        ok: true,
+        token: "env-token",
+        source: "env",
+        tokenEnv: "GH_TOKEN",
+        authRef: "github.app.work",
+        service: "hack-github-work",
+        profileId: "work",
+        profileSource: "project_routing",
+      },
+      defaultProfileId: "work",
+      accountSnapshot: {
+        accountLogin: "octocat-work",
+      },
+      controlPlaneConfig: {
+        extensions: {
+          "dance.hack.github": {
+            enabled: true,
+            config: {},
+          },
+        },
+      },
+    });
+
+    expect(payload).toMatchObject({
+      selectedProfile: "work",
+      ready: false,
+      readiness: "needs_attention",
+      installationState: "missing",
+    });
+    expect(payload.repairIssues).toContain("missing_installation");
+  });
 });

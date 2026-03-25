@@ -75,7 +75,7 @@ test("readControlPlaneConfig reads controlPlane overrides", async () => {
   );
 });
 
-test("readControlPlaneConfig keeps gateway enable project-scoped and uses global-only settings", async () => {
+test("readControlPlaneConfig keeps gateway enable project-scoped and allows project GitHub overrides", async () => {
   if (!tempGlobalConfig) {
     throw new Error("Missing global config path");
   }
@@ -144,9 +144,12 @@ test("readControlPlaneConfig keeps gateway enable project-scoped and uses global
   expect(
     result.config.extensions["dance.hack.cloudflare"]?.config?.hostname
   ).toBe("gateway.example.com");
-  expect(result.config.extensions["dance.hack.github"]?.enabled).toBe(true);
+  expect(result.config.extensions["dance.hack.github"]?.enabled).toBe(false);
   expect(result.config.extensions["dance.hack.github"]?.config?.authRef).toBe(
-    "github.app.default"
+    "project-override"
+  );
+  expect(result.config.extensions["dance.hack.github"]?.config?.tokenEnv).toBe(
+    "HACK_GITHUB_APP_TOKEN"
   );
 });
 

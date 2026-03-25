@@ -4,6 +4,52 @@ import { renderToStaticMarkup } from "react-dom/server";
 import ControlPlaneShell from "../src/components/control-plane-shell";
 import type { AccountShellContext } from "../src/lib/account-shell";
 
+const githubManagement = {
+  extensionEnabled: true,
+  selectedProfile: "work",
+  selectedSource: "project_routing",
+  defaultProfile: "work",
+  projectOverride: "work",
+  selectedMissing: false,
+  mode: "app",
+  authRef: "github.app.work",
+  service: "hack-github-work",
+  tokenEnvFallback: "HACK_GITHUB_APP_TOKEN",
+  apiBaseUrl: "https://api.github.com",
+  accountLogin: "hack-dance",
+  accountName: "Hack Dance",
+  tokenResolved: true,
+  tokenSource: "keychain",
+  installationId: "12345",
+  profiles: [
+    {
+      id: "work",
+      isDefault: true,
+      mode: "app",
+      authRef: "github.app.work",
+      service: "hack-github-work",
+      appId: "app_12345",
+      installationId: "12345",
+      accountLogin: "hack-dance",
+      accountName: "Hack Dance",
+    },
+  ],
+  readiness: {
+    ready: true,
+    state: "ready",
+    summary: "Ready for project GitHub workflows.",
+    detail:
+      "Project routing resolves a usable profile, token, and installation context.",
+    issues: [],
+    installation: {
+      required: true,
+      state: "configured",
+    },
+    repairGuidance: [],
+  },
+  statusCommand: "./dist/hack x github status --json",
+} as const;
+
 const authenticatedContext = {
   authenticated: true,
   accessControlMode: "better_auth_team_owned",
@@ -186,6 +232,7 @@ test("account shell renders the active user, org admin controls, and invite acti
         title: "Organization created",
         body: "Hack created the org and made you the initial active member.",
       }}
+      githubManagement={githubManagement}
       returnToPath="/account"
       signInHref="/auth?redirect=%2Faccount"
     />
@@ -198,6 +245,10 @@ test("account shell renders the active user, org admin controls, and invite acti
   expect(markup).toContain("Infra");
   expect(markup).toContain("better_auth_team_owned");
   expect(markup).toContain("hack auth status --json");
+  expect(markup).toContain("GitHub");
+  expect(markup).toContain("Ready for project GitHub workflows.");
+  expect(markup).toContain("project_routing");
+  expect(markup).toContain("12345");
   expect(markup).toContain("Visible organizations");
   expect(markup).toContain("Create organization");
   expect(markup).toContain("Teams");
@@ -214,6 +265,7 @@ test("account shell fails closed with a sign-in path when no active context is a
   const markup = renderToStaticMarkup(
     <ControlPlaneShell
       account={{ authenticated: false }}
+      githubManagement={githubManagement}
       returnToPath="/account"
       signInHref="/auth?redirect=%2Faccount"
     />

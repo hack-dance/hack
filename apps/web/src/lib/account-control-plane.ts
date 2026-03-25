@@ -9,6 +9,15 @@ export type AccountOrganizationRecord = {
   readonly updatedAt: string;
 };
 
+export type AccountTeamRecord = {
+  readonly id: string;
+  readonly slug: string;
+  readonly name: string;
+  readonly organizationId: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+};
+
 export type AccountMembershipRecord = {
   readonly id: string;
   readonly scope: "organization" | "team";
@@ -40,6 +49,11 @@ export type AccountControlPlaneData = {
   readonly organizations: readonly AccountOrganizationRecord[];
   readonly selectedOrganization: AccountOrganizationRecord | null;
   readonly selectedOrganizationMemberships: readonly AccountMembershipRecord[];
+  readonly requestedTeamKey: string | null;
+  readonly selectedTeamVisible: boolean;
+  readonly teams: readonly AccountTeamRecord[];
+  readonly selectedTeam: AccountTeamRecord | null;
+  readonly selectedTeamMemberships: readonly AccountMembershipRecord[];
   readonly incomingInvitations: readonly AccountInvitationRecord[];
 };
 
@@ -56,14 +70,112 @@ type BrokerFetch = (
 
 const INTERNAL_CONTROL_PLANE_ORIGIN = "https://hack-control-plane.local";
 
+const controlPlaneNoticeFeedback = {
+  org_created: {
+    tone: "success",
+    title: "Organization created",
+    body: "Hack created the organization and made you the initial active member.",
+  },
+  org_member_invited: {
+    tone: "success",
+    title: "Pending invite sent",
+    body: "The invite stays pending until the intended recipient accepts or declines it.",
+  },
+  org_member_removed: {
+    tone: "success",
+    title: "Access revoked",
+    body: "Hack removed the selected membership or pending invite cleanly.",
+  },
+  team_created: {
+    tone: "success",
+    title: "Team created",
+    body: "Hack created the team inside the selected parent organization and kept the scope explicit.",
+  },
+  team_member_invited: {
+    tone: "success",
+    title: "Team invite sent",
+    body: "Hack kept the team membership change scoped to the selected parent organization and team.",
+  },
+  team_member_removed: {
+    tone: "success",
+    title: "Team access revoked",
+    body: "Hack removed the selected team membership without changing parent organization membership.",
+  },
+  invite_accepted: {
+    tone: "success",
+    title: "Invitation accepted",
+    body: "Hack activated the shared organization access for this account.",
+  },
+  invite_declined: {
+    tone: "success",
+    title: "Invitation declined",
+    body: "Hack removed the pending invitation without granting access.",
+  },
+} as const satisfies Record<string, AccountControlPlaneFeedback>;
+
+const controlPlaneErrorFeedback = {
+  auth_required: {
+    tone: "danger",
+    title: "Sign in required",
+    body: "Sign in again before managing organizations or invitations.",
+  },
+  org_create_failed: {
+    tone: "danger",
+    title: "Could not create the organization",
+    body: "Hack could not create the organization. Check the broker response and try again.",
+  },
+  org_member_invite_failed: {
+    tone: "danger",
+    title: "Could not send the invite",
+    body: "Hack could not create the pending invite. Verify the target email and try again.",
+  },
+  org_member_remove_failed: {
+    tone: "danger",
+    title: "Could not revoke access",
+    body: "Hack could not revoke the selected access. Refresh the page and try again.",
+  },
+  team_create_failed: {
+    tone: "danger",
+    title: "Could not create the team",
+    body: "Hack could not create the selected team inside the current organization. Verify the org scope and try again.",
+  },
+  team_member_invite_failed: {
+    tone: "danger",
+    title: "Could not send the team invite",
+    body: "Hack could not create the team-scoped invite. Verify the org, team, and recipient, then try again.",
+  },
+  team_member_remove_failed: {
+    tone: "danger",
+    title: "Could not revoke team access",
+    body: "Hack could not remove the selected team membership. Refresh the page and try again.",
+  },
+  team_member_requires_active_org_membership: {
+    tone: "danger",
+    title: "Parent org membership required",
+    body: "Only active parent-org members can receive team-scoped access. Grant or restore org membership before inviting this user to the team.",
+  },
+  invite_accept_failed: {
+    tone: "danger",
+    title: "Could not accept the invitation",
+    body: "Hack could not confirm this invitation for the current account.",
+  },
+  invite_decline_failed: {
+    tone: "danger",
+    title: "Could not decline the invitation",
+    body: "Hack could not decline this invitation for the current account.",
+  },
+} as const satisfies Record<string, AccountControlPlaneFeedback>;
+
 export async function loadAccountControlPlaneData(input: {
   readonly authBrokerProxyBaseUrl: string;
   readonly token: string;
   readonly selectedOrganizationKey?: string | null;
+  readonly selectedTeamKey?: string | null;
   readonly fetchImplementation?: BrokerFetch;
 }): Promise<AccountControlPlaneData> {
   const fetchImplementation = input.fetchImplementation ?? fetch;
   const requestedOrganizationKey = normalizeText(input.selectedOrganizationKey);
+  const requestedTeamKey = normalizeText(input.selectedTeamKey);
   const [organizations, incomingInvitations] = await Promise.all([
     fetchOrganizations({
       authBrokerProxyBaseUrl: input.authBrokerProxyBaseUrl,
@@ -89,11 +201,16 @@ export async function loadAccountControlPlaneData(input: {
       organizations,
       selectedOrganization: null,
       selectedOrganizationMemberships: [],
+      requestedTeamKey,
+      selectedTeamVisible: !requestedTeamKey,
+      teams: [],
+      selectedTeam: null,
+      selectedTeamMemberships: [],
       incomingInvitations,
     };
   }
 
-  const [selectedOrganization, selectedOrganizationMemberships] =
+  const [selectedOrganization, selectedOrganizationMemberships, teams] =
     await Promise.all([
       fetchSelectedOrganization({
         authBrokerProxyBaseUrl: input.authBrokerProxyBaseUrl,
@@ -108,7 +225,51 @@ export async function loadAccountControlPlaneData(input: {
         token: input.token,
         fetchImplementation,
       }),
+      fetchTeams({
+        authBrokerProxyBaseUrl: input.authBrokerProxyBaseUrl,
+        organizationKey: selectedOrganizationCandidate.slug,
+        token: input.token,
+        fetchImplementation,
+      }),
     ]);
+
+  const selectedTeamCandidate = resolveSelectedTeam({
+    teams,
+    requestedTeamKey,
+  });
+  if (!selectedTeamCandidate) {
+    return {
+      requestedOrganizationKey,
+      selectedOrganizationVisible: true,
+      organizations,
+      selectedOrganization,
+      selectedOrganizationMemberships,
+      requestedTeamKey,
+      selectedTeamVisible: !requestedTeamKey,
+      teams,
+      selectedTeam: null,
+      selectedTeamMemberships: [],
+      incomingInvitations,
+    };
+  }
+
+  const [selectedTeam, selectedTeamMemberships] = await Promise.all([
+    fetchSelectedTeam({
+      authBrokerProxyBaseUrl: input.authBrokerProxyBaseUrl,
+      organizationKey: selectedOrganizationCandidate.slug,
+      teamKey: selectedTeamCandidate.slug,
+      token: input.token,
+      fallbackTeam: selectedTeamCandidate,
+      fetchImplementation,
+    }),
+    fetchTeamMemberships({
+      authBrokerProxyBaseUrl: input.authBrokerProxyBaseUrl,
+      organizationKey: selectedOrganizationCandidate.slug,
+      teamKey: selectedTeamCandidate.slug,
+      token: input.token,
+      fetchImplementation,
+    }),
+  ]);
 
   return {
     requestedOrganizationKey,
@@ -116,6 +277,11 @@ export async function loadAccountControlPlaneData(input: {
     organizations,
     selectedOrganization,
     selectedOrganizationMemberships,
+    requestedTeamKey,
+    selectedTeamVisible: true,
+    teams,
+    selectedTeam,
+    selectedTeamMemberships,
     incomingInvitations,
   };
 }
@@ -125,86 +291,29 @@ export function resolveAccountControlPlaneFeedback(input: {
   readonly error?: string | null;
   readonly requestedOrganizationKey?: string | null;
   readonly selectedOrganizationVisible?: boolean;
+  readonly requestedTeamKey?: string | null;
+  readonly selectedTeamVisible?: boolean;
 }): AccountControlPlaneFeedback | null {
   const notice = normalizeText(input.notice);
-  if (notice === "org_created") {
-    return {
-      tone: "success",
-      title: "Organization created",
-      body: "Hack created the organization and made you the initial active member.",
-    };
-  }
-  if (notice === "org_member_invited") {
-    return {
-      tone: "success",
-      title: "Pending invite sent",
-      body: "The invite stays pending until the intended recipient accepts or declines it.",
-    };
-  }
-  if (notice === "org_member_removed") {
-    return {
-      tone: "success",
-      title: "Access revoked",
-      body: "Hack removed the selected membership or pending invite cleanly.",
-    };
-  }
-  if (notice === "invite_accepted") {
-    return {
-      tone: "success",
-      title: "Invitation accepted",
-      body: "Hack activated the shared organization access for this account.",
-    };
-  }
-  if (notice === "invite_declined") {
-    return {
-      tone: "success",
-      title: "Invitation declined",
-      body: "Hack removed the pending invitation without granting access.",
-    };
+  if (notice) {
+    const feedback = readMappedFeedback({
+      feedbackByKey: controlPlaneNoticeFeedback,
+      key: notice,
+    });
+    if (feedback) {
+      return feedback;
+    }
   }
 
   const error = normalizeText(input.error);
-  if (error === "auth_required") {
-    return {
-      tone: "danger",
-      title: "Sign in required",
-      body: "Sign in again before managing organizations or invitations.",
-    };
-  }
-  if (error === "org_create_failed") {
-    return {
-      tone: "danger",
-      title: "Could not create the organization",
-      body: "Hack could not create the organization. Check the broker response and try again.",
-    };
-  }
-  if (error === "org_member_invite_failed") {
-    return {
-      tone: "danger",
-      title: "Could not send the invite",
-      body: "Hack could not create the pending invite. Verify the target email and try again.",
-    };
-  }
-  if (error === "org_member_remove_failed") {
-    return {
-      tone: "danger",
-      title: "Could not revoke access",
-      body: "Hack could not revoke the selected access. Refresh the page and try again.",
-    };
-  }
-  if (error === "invite_accept_failed") {
-    return {
-      tone: "danger",
-      title: "Could not accept the invitation",
-      body: "Hack could not confirm this invitation for the current account.",
-    };
-  }
-  if (error === "invite_decline_failed") {
-    return {
-      tone: "danger",
-      title: "Could not decline the invitation",
-      body: "Hack could not decline this invitation for the current account.",
-    };
+  if (error) {
+    const feedback = readMappedFeedback({
+      feedbackByKey: controlPlaneErrorFeedback,
+      key: error,
+    });
+    if (feedback) {
+      return feedback;
+    }
   }
 
   const requestedOrganizationKey = normalizeText(
@@ -218,6 +327,19 @@ export function resolveAccountControlPlaneFeedback(input: {
     };
   }
 
+  const requestedTeamKey = normalizeText(input.requestedTeamKey);
+  if (
+    requestedTeamKey &&
+    input.selectedOrganizationVisible !== false &&
+    input.selectedTeamVisible === false
+  ) {
+    return {
+      tone: "info",
+      title: "Team not visible",
+      body: "The requested team is not visible to the current account inside the selected organization. Team-scoped resources stay hidden until this account belongs to the team directly.",
+    };
+  }
+
   return null;
 }
 
@@ -226,6 +348,7 @@ export function buildAccountControlPlanePath(input: {
   readonly notice?: string | null;
   readonly error?: string | null;
   readonly org?: string | null;
+  readonly team?: string | null;
 }): string {
   const redirectTo = normalizeAccountRedirectPath({
     value: input.redirectTo,
@@ -238,6 +361,15 @@ export function buildAccountControlPlanePath(input: {
   const org = normalizeText(input.org);
   if (org) {
     url.searchParams.set("org", org);
+  } else {
+    url.searchParams.delete("org");
+  }
+
+  const team = org ? normalizeText(input.team) : null;
+  if (team) {
+    url.searchParams.set("team", team);
+  } else {
+    url.searchParams.delete("team");
   }
 
   const notice = normalizeText(input.notice);
@@ -388,6 +520,60 @@ async function fetchOrganizationMemberships(input: {
   return normalizeMemberships(payload?.memberships);
 }
 
+async function fetchTeams(input: {
+  readonly authBrokerProxyBaseUrl: string;
+  readonly organizationKey: string;
+  readonly token: string;
+  readonly fetchImplementation: BrokerFetch;
+}): Promise<readonly AccountTeamRecord[]> {
+  const payload = await fetchBrokerPayload<{
+    readonly teams?: readonly unknown[];
+  }>({
+    authBrokerProxyBaseUrl: input.authBrokerProxyBaseUrl,
+    token: input.token,
+    path: `/v1/auth/teams?org=${encodeURIComponent(input.organizationKey)}`,
+    fetchImplementation: input.fetchImplementation,
+  });
+  return normalizeTeams(payload?.teams);
+}
+
+async function fetchSelectedTeam(input: {
+  readonly authBrokerProxyBaseUrl: string;
+  readonly organizationKey: string;
+  readonly teamKey: string;
+  readonly token: string;
+  readonly fallbackTeam: AccountTeamRecord;
+  readonly fetchImplementation: BrokerFetch;
+}): Promise<AccountTeamRecord> {
+  const payload = await fetchBrokerPayload<{
+    readonly team?: unknown;
+  }>({
+    authBrokerProxyBaseUrl: input.authBrokerProxyBaseUrl,
+    token: input.token,
+    path: `/v1/auth/teams/${encodeURIComponent(input.teamKey)}?org=${encodeURIComponent(input.organizationKey)}`,
+    fetchImplementation: input.fetchImplementation,
+  });
+  return normalizeTeam(payload?.team) ?? input.fallbackTeam;
+}
+
+async function fetchTeamMemberships(input: {
+  readonly authBrokerProxyBaseUrl: string;
+  readonly organizationKey: string;
+  readonly teamKey: string;
+  readonly token: string;
+  readonly fetchImplementation: BrokerFetch;
+}): Promise<readonly AccountMembershipRecord[]> {
+  const payload = await fetchBrokerPayload<{
+    readonly memberships?: readonly unknown[];
+  }>({
+    authBrokerProxyBaseUrl: input.authBrokerProxyBaseUrl,
+    token: input.token,
+    path: `/v1/auth/teams/${encodeURIComponent(input.teamKey)}/members?org=${encodeURIComponent(input.organizationKey)}`,
+    fetchImplementation: input.fetchImplementation,
+  });
+  return normalizeMemberships(payload?.memberships);
+}
+
 async function fetchBrokerPayload<T>(input: {
   readonly authBrokerProxyBaseUrl: string;
   readonly token: string;
@@ -430,6 +616,23 @@ function resolveSelectedOrganization(input: {
   );
 }
 
+function resolveSelectedTeam(input: {
+  readonly teams: readonly AccountTeamRecord[];
+  readonly requestedTeamKey: string | null;
+}): AccountTeamRecord | null {
+  if (!input.requestedTeamKey) {
+    return input.teams[0] ?? null;
+  }
+  return (
+    input.teams.find((team) => {
+      return (
+        team.slug === input.requestedTeamKey ||
+        team.id === input.requestedTeamKey
+      );
+    }) ?? null
+  );
+}
+
 function normalizeOrganizations(
   value: readonly unknown[] | undefined
 ): readonly AccountOrganizationRecord[] {
@@ -438,6 +641,14 @@ function normalizeOrganizations(
     .filter((organization): organization is AccountOrganizationRecord =>
       Boolean(organization)
     );
+}
+
+function normalizeTeams(
+  value: readonly unknown[] | undefined
+): readonly AccountTeamRecord[] {
+  return (value ?? [])
+    .map((team) => normalizeTeam(team))
+    .filter((team): team is AccountTeamRecord => Boolean(team));
 }
 
 function normalizeOrganization(
@@ -461,6 +672,32 @@ function normalizeOrganization(
     id,
     slug,
     name,
+    createdAt,
+    updatedAt,
+  };
+}
+
+function normalizeTeam(value: unknown): AccountTeamRecord | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const id = normalizeText(value.id);
+  const slug = normalizeText(value.slug);
+  const name = normalizeText(value.name);
+  const organizationId = normalizeText(value.organizationId);
+  const createdAt = normalizeText(value.createdAt);
+  const updatedAt = normalizeText(value.updatedAt);
+
+  if (!(id && slug && name && organizationId && createdAt && updatedAt)) {
+    return null;
+  }
+
+  return {
+    id,
+    slug,
+    name,
+    organizationId,
     createdAt,
     updatedAt,
   };
@@ -601,6 +838,17 @@ function normalizeStringArray(value: unknown): readonly string[] {
 function normalizeText(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0
     ? value.trim()
+    : null;
+}
+
+function readMappedFeedback<
+  TFeedbackByKey extends Record<string, AccountControlPlaneFeedback>,
+>(input: {
+  readonly feedbackByKey: TFeedbackByKey;
+  readonly key: string;
+}): AccountControlPlaneFeedback | null {
+  return input.key in input.feedbackByKey
+    ? input.feedbackByKey[input.key as keyof TFeedbackByKey]
     : null;
 }
 

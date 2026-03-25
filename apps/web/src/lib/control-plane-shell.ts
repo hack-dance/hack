@@ -22,6 +22,11 @@ export const shellNavigationItems = [
     description: "Create orgs and manage caller-scoped shared access.",
   },
   {
+    href: "#teams",
+    label: "Teams",
+    description: "Manage explicit parent-org team scope and memberships.",
+  },
+  {
     href: "#invitations",
     label: "Invitations",
     description: "Accept or decline pending invites for this account.",

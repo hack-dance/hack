@@ -16,15 +16,21 @@ export default async function AccountShellPage(input: {
 }) {
   const searchParams = (await input.searchParams) ?? {};
   const requestedOrganizationKey = readSearchParam(searchParams.org);
+  const requestedTeamKey = readSearchParam(searchParams.team);
   const account = await getAccountShellContext({
     selectedOrganizationKey: requestedOrganizationKey,
+    selectedTeamKey: requestedTeamKey,
   });
   const feedback = resolveAccountControlPlaneFeedback({
     notice: readSearchParam(searchParams.notice),
     error: readSearchParam(searchParams.error),
     requestedOrganizationKey,
+    requestedTeamKey,
     selectedOrganizationVisible: account.authenticated
       ? account.selectedOrganizationVisible
+      : true,
+    selectedTeamVisible: account.authenticated
+      ? account.selectedTeamVisible
       : true,
   });
   const returnToPath = buildAccountControlPlanePath({
@@ -32,6 +38,9 @@ export default async function AccountShellPage(input: {
     org:
       requestedOrganizationKey ??
       (account.authenticated ? account.selectedOrganization?.slug : null),
+    team:
+      requestedTeamKey ??
+      (account.authenticated ? account.selectedTeam?.slug : null),
   });
 
   return (

@@ -23,7 +23,9 @@ const authenticatedContext = {
   shellPath: "/auth",
   accountPath: "/auth/account",
   requestedOrganizationKey: "hack-org",
+  requestedTeamKey: "infra",
   selectedOrganizationVisible: true,
+  selectedTeamVisible: true,
   organizations: [
     {
       id: "org_123",
@@ -33,6 +35,24 @@ const authenticatedContext = {
       updatedAt: "2026-03-25T00:00:00.000Z",
     },
   ],
+  teams: [
+    {
+      id: "team_123",
+      slug: "infra",
+      name: "Infra",
+      organizationId: "org_123",
+      createdAt: "2026-03-25T00:00:00.000Z",
+      updatedAt: "2026-03-25T00:00:00.000Z",
+    },
+  ],
+  selectedTeam: {
+    id: "team_123",
+    slug: "infra",
+    name: "Infra",
+    organizationId: "org_123",
+    createdAt: "2026-03-25T00:00:00.000Z",
+    updatedAt: "2026-03-25T00:00:00.000Z",
+  },
   selectedOrganization: {
     id: "org_123",
     slug: "hack-org",
@@ -62,6 +82,32 @@ const authenticatedContext = {
       userId: null,
       email: "person@example.com",
       target: "person@example.com",
+      createdAt: "2026-03-25T00:00:00.000Z",
+      updatedAt: "2026-03-25T00:00:00.000Z",
+    },
+  ],
+  selectedTeamMemberships: [
+    {
+      id: "membership_789",
+      scope: "team",
+      state: "active",
+      organizationId: "org_123",
+      teamId: "team_123",
+      userId: "user_123",
+      email: "hack@example.com",
+      target: "user_123",
+      createdAt: "2026-03-25T00:00:00.000Z",
+      updatedAt: "2026-03-25T00:00:00.000Z",
+    },
+    {
+      id: "membership_790",
+      scope: "team",
+      state: "active",
+      organizationId: "org_123",
+      teamId: "team_123",
+      userId: "user_456",
+      email: "person@example.com",
+      target: "user_456",
       createdAt: "2026-03-25T00:00:00.000Z",
       updatedAt: "2026-03-25T00:00:00.000Z",
     },
@@ -104,6 +150,10 @@ test("account shell renders the active user, org admin controls, and invite acti
   expect(markup).toContain("hack auth status --json");
   expect(markup).toContain("Visible organizations");
   expect(markup).toContain("Create organization");
+  expect(markup).toContain("Teams");
+  expect(markup).toContain("Create team");
+  expect(markup).toContain("Visible teams");
+  expect(markup).toContain("Members keep their parent organization access");
   expect(markup).toContain("person@example.com");
   expect(markup).toContain("Pending recipient action");
   expect(markup).toContain("Accept invite");

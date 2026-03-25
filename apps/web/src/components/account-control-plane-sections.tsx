@@ -40,9 +40,13 @@ export default function AccountControlPlaneSections({
   const selectedOrganizationKey = account.authenticated
     ? (account.selectedOrganization?.slug ?? account.requestedOrganizationKey)
     : null;
+  const selectedTeamKey = account.authenticated
+    ? (account.selectedTeam?.slug ?? account.requestedTeamKey)
+    : null;
   const scopedReturnPath = buildAccountControlPlanePath({
     redirectTo: returnToPath,
     org: selectedOrganizationKey,
+    team: selectedTeamKey,
   });
   const baseReturnPath = buildAccountControlPlanePath({
     redirectTo: returnToPath,
@@ -91,6 +95,8 @@ export default function AccountControlPlaneSections({
           />
         </div>
       </section>
+
+      <TeamsSection account={account} returnToPath={returnToPath} />
 
       <section className="space-y-4" id="invitations">
         <div className="space-y-2">
@@ -296,7 +302,8 @@ function SelectedOrganizationDetail(input: {
         <p className="text-sm text-white/70 leading-6">
           Pending access stays pending until the intended principal accepts or
           declines it. Admin-side revoke uses the same broker route for pending
-          and active org membership.
+          and active org membership, while team-specific revoke stays scoped to
+          the selected team below.
         </p>
       </div>
 
@@ -384,7 +391,7 @@ function SelectedOrganizationDetail(input: {
                           <input
                             name="target"
                             type="hidden"
-                            value={targetLabel}
+                            value={membershipTargetValue({ membership })}
                           />
                           <button
                             className={secondaryActionClassName}
@@ -404,6 +411,362 @@ function SelectedOrganizationDetail(input: {
           ) : (
             <p className="text-sm text-white/70 leading-6">
               No actionable memberships are visible for this organization yet.
+            </p>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function TeamsSection(input: {
+  readonly account: AccountShellContext;
+  readonly returnToPath: string;
+}) {
+  if (!input.account.authenticated) {
+    return (
+      <section className="space-y-4" id="teams">
+        <div className="space-y-2">
+          <h2 className="font-semibold text-2xl text-white">Teams</h2>
+          <p className="max-w-3xl text-sm text-white/70 leading-7">
+            Sign in to manage explicit parent-org team scope from the browser
+            control plane.
+          </p>
+        </div>
+
+        <section className={cn(sectionSurfaceClassName, "p-6 sm:p-7")}>
+          <p className="text-sm text-white/70 leading-6">
+            Team creation and membership changes stay hidden until this account
+            has a signed-in broker session.
+          </p>
+        </section>
+      </section>
+    );
+  }
+
+  const selectedOrganization = input.account.selectedOrganization;
+  if (!selectedOrganization) {
+    return (
+      <section className="space-y-4" id="teams">
+        <div className="space-y-2">
+          <h2 className="font-semibold text-2xl text-white">Teams</h2>
+          <p className="max-w-3xl text-sm text-white/70 leading-7">
+            Team creation and membership changes always require an explicit
+            parent organization scope.
+          </p>
+        </div>
+
+        <section className={cn(sectionSurfaceClassName, "p-6 sm:p-7")}>
+          <p className="text-sm text-white/70 leading-6">
+            Select a visible organization first. Hack only shows teams and
+            team-scoped resources when the current account belongs to them
+            directly.
+          </p>
+        </section>
+      </section>
+    );
+  }
+
+  const selectedTeam = input.account.selectedTeam;
+  const selectedTeamId = selectedTeam?.id ?? null;
+  const scopedReturnPath = buildAccountControlPlanePath({
+    redirectTo: input.returnToPath,
+    org: selectedOrganization.slug,
+    team: selectedTeam?.slug ?? input.account.requestedTeamKey,
+  });
+  const shouldShowVisibilityMessage = Boolean(
+    input.account.requestedTeamKey &&
+      !input.account.selectedTeamVisible &&
+      selectedOrganization
+  );
+
+  return (
+    <section className="space-y-4" id="teams">
+      <div className="space-y-2">
+        <h2 className="font-semibold text-2xl text-white">Teams</h2>
+        <p className="max-w-3xl text-sm text-white/70 leading-7">
+          Team creation and membership changes stay anchored to the explicit
+          parent organization{" "}
+          <code className="rounded bg-white/8 px-1.5 py-0.5 text-white text-xs">
+            {selectedOrganization.slug}
+          </code>
+          . Org-only members cannot administer or load team-scoped resources
+          until they join the team directly.
+        </p>
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]">
+        <CreateTeamCard
+          organizationSlug={selectedOrganization.slug}
+          returnToPath={scopedReturnPath}
+        />
+
+        <section className={cn(sectionSurfaceClassName, "p-6 sm:p-7")}>
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="space-y-2">
+              <h3 className="font-medium text-white text-xl">Visible teams</h3>
+              <p className="text-sm text-white/70 leading-6">
+                Hack only lists teams that the current account can use inside
+                the selected organization.
+              </p>
+            </div>
+            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-sm text-white/70">
+              {input.account.teams.length} visible
+            </span>
+          </div>
+
+          {input.account.teams.length > 0 ? (
+            <ul className="mt-6 grid gap-3">
+              {input.account.teams.map((team) => {
+                const selected = selectedTeamId === team.id;
+                return (
+                  <li key={team.id}>
+                    <a
+                      className={cn(
+                        "block rounded-2xl border px-4 py-4 transition duration-200 motion-reduce:transition-none",
+                        selected
+                          ? "border-sky-300/35 bg-sky-300/10"
+                          : "border-white/10 bg-slate-950/40 hover:bg-white/5",
+                        "focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-300 focus-visible:outline-offset-2"
+                      )}
+                      href={buildAccountControlPlanePath({
+                        redirectTo: input.returnToPath,
+                        org: selectedOrganization.slug,
+                        team: team.slug,
+                      })}
+                    >
+                      <span className="block font-medium text-white">
+                        {team.name}
+                      </span>
+                      <span className="mt-1 block text-sm text-white/60">
+                        {team.slug}
+                      </span>
+                    </a>
+                  </li>
+                );
+              })}
+            </ul>
+          ) : (
+            <p className="mt-6 text-sm text-white/70 leading-6">
+              No teams are visible for this organization yet. Create one above
+              or add this account to an existing team first.
+            </p>
+          )}
+
+          {selectedTeam ? (
+            <SelectedTeamDetail
+              account={input.account}
+              returnToPath={scopedReturnPath}
+            />
+          ) : null}
+
+          {shouldShowVisibilityMessage ? (
+            <div className="mt-6 rounded-2xl border border-sky-300/20 bg-sky-300/10 p-4">
+              <p className="font-medium text-sky-100 text-sm">
+                Requested team not visible
+              </p>
+              <p className="mt-2 text-sm text-white/75 leading-6">
+                This account cannot load the requested team because Hack only
+                exposes team-scoped resources to direct team members.
+              </p>
+            </div>
+          ) : null}
+        </section>
+      </div>
+    </section>
+  );
+}
+
+function CreateTeamCard(input: {
+  readonly organizationSlug: string;
+  readonly returnToPath: string;
+}) {
+  return (
+    <section className={cn(sectionSurfaceClassName, "p-6 sm:p-7")}>
+      <div className="space-y-2">
+        <h3 className="font-medium text-white text-xl">Create team</h3>
+        <p className="text-sm text-white/70 leading-6">
+          Every team stays nested under one explicit parent organization so the
+          scope never becomes ambiguous.
+        </p>
+      </div>
+
+      <form
+        action="/api/control-plane/teams"
+        className="mt-6 grid gap-4"
+        method="post"
+      >
+        <input name="redirectTo" type="hidden" value={input.returnToPath} />
+        <input name="org" type="hidden" value={input.organizationSlug} />
+
+        <label className="grid gap-2">
+          <span className="font-medium text-sm text-white/80">Slug</span>
+          <input
+            className={fieldClassName}
+            name="slug"
+            placeholder="infra"
+            required
+            type="text"
+          />
+        </label>
+
+        <label className="grid gap-2">
+          <span className="font-medium text-sm text-white/80">
+            Display name
+          </span>
+          <input
+            className={fieldClassName}
+            name="name"
+            placeholder="Infrastructure"
+            type="text"
+          />
+        </label>
+
+        <button className={actionClassName} type="submit">
+          Create team
+        </button>
+      </form>
+    </section>
+  );
+}
+
+function SelectedTeamDetail(input: {
+  readonly account: Extract<
+    AccountShellContext,
+    { readonly authenticated: true }
+  >;
+  readonly returnToPath: string;
+}) {
+  const selectedOrganization = input.account.selectedOrganization;
+  const selectedTeam = input.account.selectedTeam;
+  if (!(selectedOrganization && selectedTeam)) {
+    return null;
+  }
+
+  return (
+    <div className="mt-6 space-y-6 rounded-2xl border border-white/10 bg-slate-950/35 p-5">
+      <div className="space-y-2">
+        <p className="font-medium text-sky-100 text-sm">Team detail</p>
+        <h4 className="font-semibold text-2xl text-white">
+          {selectedTeam.name}
+        </h4>
+        <p className="text-sm text-white/70 leading-6">
+          Members keep their parent organization access when a team-specific
+          revoke happens. Team invites only succeed when the recipient already
+          has active access to{" "}
+          <code className="rounded bg-white/8 px-1.5 py-0.5 text-white text-xs">
+            {selectedOrganization.slug}
+          </code>
+          .
+        </p>
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+        <section className="grid gap-4 rounded-2xl border border-white/10 bg-white/5 p-4">
+          <h5 className="font-medium text-lg text-white">Invite member</h5>
+          <form
+            action={`/api/control-plane/teams/${encodeURIComponent(selectedTeam.slug)}/members/invite`}
+            className="grid gap-4"
+            method="post"
+          >
+            <input name="redirectTo" type="hidden" value={input.returnToPath} />
+            <input name="org" type="hidden" value={selectedOrganization.slug} />
+
+            <label className="grid gap-2">
+              <span className="font-medium text-sm text-white/80">
+                Recipient email
+              </span>
+              <input
+                className={fieldClassName}
+                name="target"
+                placeholder="person@example.com"
+                required
+                type="email"
+              />
+            </label>
+
+            <button className={actionClassName} type="submit">
+              Send team invite
+            </button>
+          </form>
+        </section>
+
+        <section className="grid gap-4 rounded-2xl border border-white/10 bg-white/5 p-4">
+          <div className="space-y-2">
+            <h5 className="font-medium text-lg text-white">
+              Members and revokes
+            </h5>
+            <p className="text-sm text-white/70 leading-6">
+              Team revoke stays team-scoped. Removing one of these entries does
+              not remove the member from the parent organization.
+            </p>
+          </div>
+
+          {input.account.selectedTeamMemberships.length > 0 ? (
+            <ul className="grid gap-3">
+              {input.account.selectedTeamMemberships.map((membership) => {
+                const isCurrentUser =
+                  membership.userId === input.account.user.id ||
+                  (membership.email &&
+                    membership.email === input.account.user.email);
+                const targetLabel = membership.email ?? membership.target;
+                return (
+                  <li
+                    className="rounded-2xl border border-white/10 bg-slate-950/35 p-4"
+                    key={membership.id}
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="space-y-2">
+                        <p className="font-medium text-white">{targetLabel}</p>
+                        <p className="text-sm text-white/70 leading-6">
+                          {describeTeamMembershipState({
+                            state: membership.state,
+                          })}
+                        </p>
+                      </div>
+                      <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-white/70 text-xs uppercase tracking-[0.18em]">
+                        {membership.state}
+                      </span>
+                    </div>
+
+                    {!isCurrentUser && membership.state !== "removed" ? (
+                      <form
+                        action={`/api/control-plane/teams/${encodeURIComponent(selectedTeam.slug)}/members/remove`}
+                        className="mt-4"
+                        method="post"
+                      >
+                        <input
+                          name="redirectTo"
+                          type="hidden"
+                          value={input.returnToPath}
+                        />
+                        <input
+                          name="org"
+                          type="hidden"
+                          value={selectedOrganization.slug}
+                        />
+                        <input
+                          name="target"
+                          type="hidden"
+                          value={membershipTargetValue({ membership })}
+                        />
+                        <button
+                          className={secondaryActionClassName}
+                          type="submit"
+                        >
+                          {membership.state === "pending"
+                            ? "Revoke invite"
+                            : "Remove member"}
+                        </button>
+                      </form>
+                    ) : null}
+                  </li>
+                );
+              })}
+            </ul>
+          ) : (
+            <p className="text-sm text-white/70 leading-6">
+              No direct team memberships are visible for this team yet.
             </p>
           )}
         </section>
@@ -498,4 +861,28 @@ function describeMembershipState(input: {
     return "Active org access";
   }
   return "Removed access";
+}
+
+function describeTeamMembershipState(input: {
+  readonly state: "pending" | "active" | "removed";
+}) {
+  if (input.state === "pending") {
+    return "Pending team invite";
+  }
+  if (input.state === "active") {
+    return "Active team access";
+  }
+  return "Removed team access";
+}
+
+function membershipTargetValue(input: {
+  readonly membership: {
+    readonly userId: string | null;
+    readonly email: string | null;
+    readonly target: string;
+  };
+}) {
+  return (
+    input.membership.userId ?? input.membership.email ?? input.membership.target
+  );
 }

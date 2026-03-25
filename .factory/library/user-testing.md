@@ -25,6 +25,13 @@ Testing surface findings, required tools, and validation concurrency for this mi
 - Notes: no shell-installed browser runner was found during dry run; browser user testing must rely on `agent-browser`.
 - Notes: `hack up -d` currently exposes the routed web host at `https://hack-cli.hack` and the broker host at `https://auth.hack-cli.hack`.
 - Notes: the live broker enables Better Auth email/password routes, so validator sessions can create authenticated broker cookies through `POST https://auth.hack-cli.hack/api/auth/sign-up/email` without depending on an external GitHub login.
+- Notes: for `agent-browser` web validation, a reliable local auth bootstrap is:
+  1. create a disposable account with `curl -c <cookiejar> -X POST https://auth.hack-cli.hack/api/auth/sign-up/email ...`
+  2. parse `__Secure-better-auth.session_token` from the cookie jar
+  3. in the browser session, open `https://auth.hack-cli.hack/health`
+  4. run `agent-browser --session <id> cookies set __Secure-better-auth.session_token <value>`
+  5. open `https://auth.hack-cli.hack/auth/account?bridge=1&redirect=https%3A%2F%2Fhack-cli.hack%2Faccount`
+  This mints the shared `hack_web_broker_session` cookie for `https://hack-cli.hack/account` without relying on GitHub OAuth.
 
 ## Validation Concurrency
 

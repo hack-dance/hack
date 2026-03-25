@@ -104,6 +104,12 @@ test("account control plane data loads visible org detail and incoming invitatio
           ],
         });
       }
+      if (url === "https://auth.hack-cli.hack/v1/auth/teams?org=hack") {
+        return Response.json({
+          ok: true,
+          teams: [],
+        });
+      }
       throw new Error(`Unexpected fetch URL: ${url}`);
     },
   });
@@ -130,6 +136,10 @@ test("account control plane data loads visible org detail and incoming invitatio
       authorization: "Bearer session-token",
       url: "https://auth.hack-cli.hack/v1/auth/orgs/hack/members",
     },
+    {
+      authorization: "Bearer session-token",
+      url: "https://auth.hack-cli.hack/v1/auth/teams?org=hack",
+    },
   ]);
   expect(data.organizations.map((organization) => organization.slug)).toEqual([
     "hack",
@@ -138,6 +148,9 @@ test("account control plane data loads visible org detail and incoming invitatio
   expect(data.selectedOrganizationVisible).toBe(true);
   expect(data.selectedOrganization?.slug).toBe("hack");
   expect(data.selectedOrganizationMemberships).toHaveLength(2);
+  expect(data.selectedTeamVisible).toBe(true);
+  expect(data.selectedTeam).toBeNull();
+  expect(data.selectedTeamMemberships).toEqual([]);
   expect(data.incomingInvitations[0]?.id).toBe("invite_123");
 });
 
@@ -182,6 +195,247 @@ test("account control plane data fails closed when the requested org is not visi
   expect(data.selectedOrganizationVisible).toBe(false);
   expect(data.selectedOrganization).toBeNull();
   expect(data.selectedOrganizationMemberships).toEqual([]);
+  expect(data.selectedTeamVisible).toBe(true);
+  expect(data.selectedTeam).toBeNull();
+  expect(data.selectedTeamMemberships).toEqual([]);
+});
+
+test("account control plane data loads visible team detail with explicit org scope", async () => {
+  const calls: Array<{
+    readonly url: string;
+    readonly authorization: string | null;
+  }> = [];
+
+  const data = await loadAccountControlPlaneData({
+    authBrokerProxyBaseUrl: "https://auth.hack-cli.hack",
+    token: "session-token",
+    selectedOrganizationKey: "hack",
+    selectedTeamKey: "cli",
+    fetchImplementation: (input, init) => {
+      const url = resolveFetchUrl(input);
+      calls.push({
+        url,
+        authorization: readAuthorizationHeader(init),
+      });
+      if (url === "https://auth.hack-cli.hack/v1/auth/orgs") {
+        return Response.json({
+          ok: true,
+          organizations: [
+            {
+              id: "org_123",
+              slug: "hack",
+              name: "Hack Org",
+              createdAt: "2026-03-25T00:00:00.000Z",
+              updatedAt: "2026-03-25T00:00:00.000Z",
+            },
+          ],
+        });
+      }
+      if (url === "https://auth.hack-cli.hack/v1/auth/invitations") {
+        return Response.json({
+          ok: true,
+          invitations: [],
+        });
+      }
+      if (url === "https://auth.hack-cli.hack/v1/auth/orgs/hack") {
+        return Response.json({
+          ok: true,
+          organization: {
+            id: "org_123",
+            slug: "hack",
+            name: "Hack Org",
+            createdAt: "2026-03-25T00:00:00.000Z",
+            updatedAt: "2026-03-25T00:00:00.000Z",
+          },
+        });
+      }
+      if (url === "https://auth.hack-cli.hack/v1/auth/orgs/hack/members") {
+        return Response.json({
+          ok: true,
+          memberships: [],
+        });
+      }
+      if (url === "https://auth.hack-cli.hack/v1/auth/teams?org=hack") {
+        return Response.json({
+          ok: true,
+          teams: [
+            {
+              id: "team_123",
+              slug: "cli",
+              name: "CLI",
+              organizationId: "org_123",
+              createdAt: "2026-03-25T00:00:00.000Z",
+              updatedAt: "2026-03-25T00:00:00.000Z",
+            },
+            {
+              id: "team_456",
+              slug: "infra",
+              name: "Infra",
+              organizationId: "org_123",
+              createdAt: "2026-03-25T00:00:00.000Z",
+              updatedAt: "2026-03-25T00:00:00.000Z",
+            },
+          ],
+        });
+      }
+      if (url === "https://auth.hack-cli.hack/v1/auth/teams/cli?org=hack") {
+        return Response.json({
+          ok: true,
+          team: {
+            id: "team_123",
+            slug: "cli",
+            name: "CLI",
+            organizationId: "org_123",
+            createdAt: "2026-03-25T00:00:00.000Z",
+            updatedAt: "2026-03-25T00:00:00.000Z",
+          },
+        });
+      }
+      if (
+        url === "https://auth.hack-cli.hack/v1/auth/teams/cli/members?org=hack"
+      ) {
+        return Response.json({
+          ok: true,
+          memberships: [
+            {
+              id: "membership_123",
+              scope: "team",
+              state: "active",
+              organizationId: "org_123",
+              teamId: "team_123",
+              userId: "user_123",
+              email: "hack@example.com",
+              target: "user_123",
+              createdAt: "2026-03-25T00:00:00.000Z",
+              updatedAt: "2026-03-25T00:00:00.000Z",
+            },
+          ],
+        });
+      }
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    },
+  });
+
+  expect(
+    calls.map(({ authorization, url }) => ({
+      authorization,
+      url,
+    }))
+  ).toEqual([
+    {
+      authorization: "Bearer session-token",
+      url: "https://auth.hack-cli.hack/v1/auth/orgs",
+    },
+    {
+      authorization: "Bearer session-token",
+      url: "https://auth.hack-cli.hack/v1/auth/invitations",
+    },
+    {
+      authorization: "Bearer session-token",
+      url: "https://auth.hack-cli.hack/v1/auth/orgs/hack",
+    },
+    {
+      authorization: "Bearer session-token",
+      url: "https://auth.hack-cli.hack/v1/auth/orgs/hack/members",
+    },
+    {
+      authorization: "Bearer session-token",
+      url: "https://auth.hack-cli.hack/v1/auth/teams?org=hack",
+    },
+    {
+      authorization: "Bearer session-token",
+      url: "https://auth.hack-cli.hack/v1/auth/teams/cli?org=hack",
+    },
+    {
+      authorization: "Bearer session-token",
+      url: "https://auth.hack-cli.hack/v1/auth/teams/cli/members?org=hack",
+    },
+  ]);
+  expect(data.teams.map((team) => team.slug)).toEqual(["cli", "infra"]);
+  expect(data.selectedTeamVisible).toBe(true);
+  expect(data.selectedTeam?.slug).toBe("cli");
+  expect(data.selectedTeamMemberships).toHaveLength(1);
+});
+
+test("account control plane data fails closed when the requested team is not visible", async () => {
+  const calls: string[] = [];
+
+  const data = await loadAccountControlPlaneData({
+    authBrokerProxyBaseUrl: "https://auth.hack-cli.hack",
+    token: "session-token",
+    selectedOrganizationKey: "hack",
+    selectedTeamKey: "secret-team",
+    fetchImplementation: (input) => {
+      const url = resolveFetchUrl(input);
+      calls.push(url);
+      if (url === "https://auth.hack-cli.hack/v1/auth/orgs") {
+        return Response.json({
+          ok: true,
+          organizations: [
+            {
+              id: "org_123",
+              slug: "hack",
+              name: "Hack Org",
+              createdAt: "2026-03-25T00:00:00.000Z",
+              updatedAt: "2026-03-25T00:00:00.000Z",
+            },
+          ],
+        });
+      }
+      if (url === "https://auth.hack-cli.hack/v1/auth/invitations") {
+        return Response.json({
+          ok: true,
+          invitations: [],
+        });
+      }
+      if (url === "https://auth.hack-cli.hack/v1/auth/orgs/hack") {
+        return Response.json({
+          ok: true,
+          organization: {
+            id: "org_123",
+            slug: "hack",
+            name: "Hack Org",
+            createdAt: "2026-03-25T00:00:00.000Z",
+            updatedAt: "2026-03-25T00:00:00.000Z",
+          },
+        });
+      }
+      if (url === "https://auth.hack-cli.hack/v1/auth/orgs/hack/members") {
+        return Response.json({
+          ok: true,
+          memberships: [],
+        });
+      }
+      if (url === "https://auth.hack-cli.hack/v1/auth/teams?org=hack") {
+        return Response.json({
+          ok: true,
+          teams: [
+            {
+              id: "team_123",
+              slug: "cli",
+              name: "CLI",
+              organizationId: "org_123",
+              createdAt: "2026-03-25T00:00:00.000Z",
+              updatedAt: "2026-03-25T00:00:00.000Z",
+            },
+          ],
+        });
+      }
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    },
+  });
+
+  expect(calls).toEqual([
+    "https://auth.hack-cli.hack/v1/auth/orgs",
+    "https://auth.hack-cli.hack/v1/auth/invitations",
+    "https://auth.hack-cli.hack/v1/auth/orgs/hack",
+    "https://auth.hack-cli.hack/v1/auth/orgs/hack/members",
+    "https://auth.hack-cli.hack/v1/auth/teams?org=hack",
+  ]);
+  expect(data.selectedOrganizationVisible).toBe(true);
+  expect(data.selectedTeamVisible).toBe(false);
+  expect(data.selectedTeam).toBeNull();
+  expect(data.selectedTeamMemberships).toEqual([]);
 });
 
 test("account control plane feedback resolves success and scoped visibility messages", () => {
@@ -203,16 +457,37 @@ test("account control plane feedback resolves success and scoped visibility mess
     tone: "info",
     title: "Organization not visible",
   });
+
+  expect(
+    resolveAccountControlPlaneFeedback({
+      requestedTeamKey: "secret-team",
+      selectedOrganizationVisible: true,
+      selectedTeamVisible: false,
+    })
+  ).toMatchObject({
+    tone: "info",
+    title: "Team not visible",
+  });
+
+  expect(
+    resolveAccountControlPlaneFeedback({
+      error: "team_member_requires_active_org_membership",
+    })
+  ).toMatchObject({
+    tone: "danger",
+    title: "Parent org membership required",
+  });
 });
 
 test("account control plane paths stay internal while preserving org selection", () => {
   expect(
     buildAccountControlPlanePath({
       redirectTo: "/account?notice=old",
-      notice: "org_created",
+      notice: "team_created",
       org: "hack",
+      team: "cli",
     })
-  ).toBe("/account?org=hack&notice=org_created");
+  ).toBe("/account?org=hack&team=cli&notice=team_created");
 
   expect(
     buildAccountControlPlanePath({

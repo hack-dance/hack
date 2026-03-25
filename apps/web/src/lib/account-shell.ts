@@ -47,6 +47,8 @@ export type AccountShellContext =
       readonly accountPath: string;
       readonly requestedOrganizationKey: string | null;
       readonly selectedOrganizationVisible: boolean;
+      readonly requestedTeamKey: string | null;
+      readonly selectedTeamVisible: boolean;
       readonly organizations: Awaited<
         ReturnType<typeof loadAccountControlPlaneData>
       >["organizations"];
@@ -56,6 +58,15 @@ export type AccountShellContext =
       readonly selectedOrganizationMemberships: Awaited<
         ReturnType<typeof loadAccountControlPlaneData>
       >["selectedOrganizationMemberships"];
+      readonly teams: Awaited<
+        ReturnType<typeof loadAccountControlPlaneData>
+      >["teams"];
+      readonly selectedTeam: Awaited<
+        ReturnType<typeof loadAccountControlPlaneData>
+      >["selectedTeam"];
+      readonly selectedTeamMemberships: Awaited<
+        ReturnType<typeof loadAccountControlPlaneData>
+      >["selectedTeamMemberships"];
       readonly incomingInvitations: Awaited<
         ReturnType<typeof loadAccountControlPlaneData>
       >["incomingInvitations"];
@@ -76,6 +87,7 @@ export function buildAccountShellSignInHref(input: {
 
 export async function getAccountShellContext(input?: {
   readonly selectedOrganizationKey?: string | null;
+  readonly selectedTeamKey?: string | null;
 }): Promise<AccountShellContext> {
   const cookieStore = await cookies();
   const token = cookieStore
@@ -112,6 +124,7 @@ export async function getAccountShellContext(input?: {
       authBrokerProxyBaseUrl: config.authBrokerProxyBaseUrl,
       token,
       selectedOrganizationKey: input?.selectedOrganizationKey,
+      selectedTeamKey: input?.selectedTeamKey,
     });
 
     return {
@@ -128,10 +141,15 @@ export async function getAccountShellContext(input?: {
       accountPath: normalizeText(payload.accountPath) ?? "/auth/account",
       requestedOrganizationKey: controlPlaneData.requestedOrganizationKey,
       selectedOrganizationVisible: controlPlaneData.selectedOrganizationVisible,
+      requestedTeamKey: controlPlaneData.requestedTeamKey,
+      selectedTeamVisible: controlPlaneData.selectedTeamVisible,
       organizations: controlPlaneData.organizations,
       selectedOrganization: controlPlaneData.selectedOrganization,
       selectedOrganizationMemberships:
         controlPlaneData.selectedOrganizationMemberships,
+      teams: controlPlaneData.teams,
+      selectedTeam: controlPlaneData.selectedTeam,
+      selectedTeamMemberships: controlPlaneData.selectedTeamMemberships,
       incomingInvitations: controlPlaneData.incomingInvitations,
     };
   } catch {

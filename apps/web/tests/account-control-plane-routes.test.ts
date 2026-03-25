@@ -7,6 +7,9 @@ import { POST as declineInvitation } from "../app/api/control-plane/invitations/
 import { POST as inviteOrgMember } from "../app/api/control-plane/orgs/[org]/members/invite/route";
 import { POST as removeOrgMember } from "../app/api/control-plane/orgs/[org]/members/remove/route";
 import { POST as createOrganization } from "../app/api/control-plane/orgs/route";
+import { POST as inviteTeamMember } from "../app/api/control-plane/teams/[team]/members/invite/route";
+import { POST as removeTeamMember } from "../app/api/control-plane/teams/[team]/members/remove/route";
+import { POST as createTeam } from "../app/api/control-plane/teams/route";
 
 const originalFetch = globalThis.fetch;
 const originalEnv = {
@@ -168,6 +171,179 @@ test("remove org member route reports broker failures through the account shell"
 
   expect(response.headers.get("location")).toBe(
     "/account?org=hack&error=org_member_remove_failed"
+  );
+});
+
+test("create team route forwards the broker mutation with explicit org scope", async () => {
+  process.env.NEXT_PUBLIC_HACK_WEB_APP_BASE_URL = "https://hack-cli.hack";
+  process.env.NEXT_PUBLIC_HACK_AUTH_BROKER_URL = "https://auth.hack-cli.hack";
+  process.env.HACK_AUTH_BROKER_INTERNAL_URL = "https://auth.hack-cli.hack";
+
+  let body: Record<string, unknown> | undefined;
+  let authorization: string | null = null;
+  setMockFetch((_input, init) => {
+    body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    authorization = readAuthorizationHeader(init);
+
+    return Response.json({
+      ok: true,
+      team: {
+        slug: "cli",
+      },
+    });
+  });
+
+  const formData = new FormData();
+  formData.set("org", "hack");
+  formData.set("slug", "cli");
+  formData.set("name", "CLI");
+  formData.set("redirectTo", "/account?org=hack");
+
+  const response = await createTeam(
+    new Request("https://hack-cli.hack/api/control-plane/teams", {
+      method: "POST",
+      headers: {
+        cookie: `${HACK_WEB_BROKER_SESSION_COOKIE_NAME}=session-token`,
+      },
+      body: formData,
+    }) as NextRequest
+  );
+
+  expect(response.headers.get("location")).toBe(
+    "/account?org=hack&team=cli&notice=team_created"
+  );
+  expect(String(authorization)).toBe("Bearer session-token");
+  expect(body).toEqual({
+    org: "hack",
+    slug: "cli",
+    name: "CLI",
+  });
+});
+
+test("invite team member route keeps explicit org and team scope", async () => {
+  process.env.NEXT_PUBLIC_HACK_WEB_APP_BASE_URL = "https://hack-cli.hack";
+  process.env.NEXT_PUBLIC_HACK_AUTH_BROKER_URL = "https://auth.hack-cli.hack";
+  process.env.HACK_AUTH_BROKER_INTERNAL_URL = "https://auth.hack-cli.hack";
+
+  let requestUrl = "";
+  let body: Record<string, unknown> | undefined;
+  setMockFetch((input, init) => {
+    requestUrl = resolveFetchUrl(input);
+    body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return Response.json({ ok: true });
+  });
+
+  const formData = new FormData();
+  formData.set("org", "hack");
+  formData.set("target", "person@example.com");
+  formData.set("redirectTo", "/account?org=hack&team=cli");
+
+  const response = await inviteTeamMember(
+    new Request(
+      "https://hack-cli.hack/api/control-plane/teams/cli/members/invite",
+      {
+        method: "POST",
+        headers: {
+          cookie: `${HACK_WEB_BROKER_SESSION_COOKIE_NAME}=session-token`,
+        },
+        body: formData,
+      }
+    ) as NextRequest,
+    { params: Promise.resolve({ team: "cli" }) }
+  );
+
+  expect(requestUrl).toBe(
+    "https://auth.hack-cli.hack/v1/auth/teams/cli/members/invite"
+  );
+  expect(body).toEqual({
+    org: "hack",
+    target: "person@example.com",
+  });
+  expect(response.headers.get("location")).toBe(
+    "/account?org=hack&team=cli&notice=team_member_invited"
+  );
+});
+
+test("invite team member route reports parent-org membership requirements through the account shell", async () => {
+  process.env.NEXT_PUBLIC_HACK_WEB_APP_BASE_URL = "https://hack-cli.hack";
+  process.env.NEXT_PUBLIC_HACK_AUTH_BROKER_URL = "https://auth.hack-cli.hack";
+  process.env.HACK_AUTH_BROKER_INTERNAL_URL = "https://auth.hack-cli.hack";
+
+  setMockFetch(() =>
+    Response.json(
+      {
+        ok: false,
+        error: "team_member_requires_active_org_membership",
+      },
+      { status: 409 }
+    )
+  );
+
+  const formData = new FormData();
+  formData.set("org", "hack");
+  formData.set("target", "person@example.com");
+  formData.set("redirectTo", "/account?org=hack&team=cli");
+
+  const response = await inviteTeamMember(
+    new Request(
+      "https://hack-cli.hack/api/control-plane/teams/cli/members/invite",
+      {
+        method: "POST",
+        headers: {
+          cookie: `${HACK_WEB_BROKER_SESSION_COOKIE_NAME}=session-token`,
+        },
+        body: formData,
+      }
+    ) as NextRequest,
+    { params: Promise.resolve({ team: "cli" }) }
+  );
+
+  expect(response.headers.get("location")).toBe(
+    "/account?org=hack&team=cli&error=team_member_requires_active_org_membership"
+  );
+});
+
+test("remove team member route preserves explicit org and team selection", async () => {
+  process.env.NEXT_PUBLIC_HACK_WEB_APP_BASE_URL = "https://hack-cli.hack";
+  process.env.NEXT_PUBLIC_HACK_AUTH_BROKER_URL = "https://auth.hack-cli.hack";
+  process.env.HACK_AUTH_BROKER_INTERNAL_URL = "https://auth.hack-cli.hack";
+
+  let requestUrl = "";
+  let body: Record<string, unknown> | undefined;
+  setMockFetch((input, init) => {
+    requestUrl = resolveFetchUrl(input);
+    body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return Response.json({ ok: true });
+  });
+
+  const formData = new FormData();
+  formData.set("org", "hack");
+  formData.set("target", "person@example.com");
+  formData.set("redirectTo", "/account?org=hack&team=cli");
+
+  const response = await removeTeamMember(
+    new Request(
+      "https://hack-cli.hack/api/control-plane/teams/cli/members/remove",
+      {
+        method: "POST",
+        headers: {
+          cookie: `${HACK_WEB_BROKER_SESSION_COOKIE_NAME}=session-token`,
+        },
+        body: formData,
+      }
+    ) as NextRequest,
+    { params: Promise.resolve({ team: "cli" }) }
+  );
+
+  expect(requestUrl).toBe(
+    "https://auth.hack-cli.hack/v1/auth/teams/cli/members/remove"
+  );
+  expect(body).toEqual({
+    org: "hack",
+    target: "person@example.com",
+  });
+  expect(response.headers.get("location")).toBe(
+    "/account?org=hack&team=cli&notice=team_member_removed"
   );
 });
 

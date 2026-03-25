@@ -2,8 +2,10 @@ import { randomBytes, randomUUID } from "node:crypto";
 
 import {
   DEFAULT_BETTER_AUTH_ACCOUNT_LINKING_POLICY,
+  HACK_WEB_BROKER_SESSION_COOKIE_NAME,
   isTrustedAuthOrigin,
 } from "@hack/auth-contract";
+import { eq } from "drizzle-orm";
 import { Elysia, t } from "elysia";
 
 import type {
@@ -13,12 +15,18 @@ import type {
 } from "../../better-auth.ts";
 import { ensureBetterAuthRuntimeReady } from "../../better-auth.ts";
 import type { BrokerConfig } from "../../config.ts";
+import {
+  organization as betterAuthOrganization,
+  team as betterAuthTeam,
+  user as betterAuthUser,
+} from "../../db/schema.ts";
 import { type FlowStore, hashDeviceCode } from "../../flow-store.ts";
 import { issueBrokerManagementToken } from "./management-token.ts";
 import { resolveBetterAuthSession } from "./session.ts";
 
 const SESSION_FLOW_PROFILE_ID = "session";
 const SAFE_RETURN_PROTOCOLS = new Set(["hack:", "hack-dev:"]);
+const IP_ADDRESS_PATTERN = /^[\d.:]+$/;
 
 const BetterAuthShellModel = {
   startQuery: t.Object({
@@ -246,30 +254,40 @@ export function createBetterAuthShellPlugin({
         runtime,
         request,
       });
-      const browserSession = toBrowserSessionUser({
+      const sessionUser = await hydrateBrowserSessionUser({
+        runtime,
         session: rawSession,
+        fallbackSession: resolvedSession.session,
       });
-      const activeOrganization = extractNamedEntity({
-        session: rawSession,
+      const activeOrganization = await hydrateNamedEntity({
+        runtime,
+        current: extractNamedEntity({
+          session: rawSession,
+          kind: "organization",
+          fallbackId: resolvedSession.session?.organizationId ?? null,
+        }),
         kind: "organization",
-        fallbackId: resolvedSession.session?.organizationId ?? null,
       });
-      const activeTeam = extractNamedEntity({
-        session: rawSession,
+      const activeTeam = await hydrateNamedEntity({
+        runtime,
+        current: extractNamedEntity({
+          session: rawSession,
+          kind: "team",
+          fallbackId: resolvedSession.session?.teamId ?? null,
+        }),
         kind: "team",
-        fallbackId: resolvedSession.session?.teamId ?? null,
       });
       return {
         ok: true,
         authenticated: Boolean(resolvedSession.session),
         accessControlMode: resolvedSession.accessControlMode,
         session: resolvedSession.session,
-        user: browserSession
+        user: sessionUser
           ? {
-              id: browserSession.id,
-              email: browserSession.email,
-              name: browserSession.name,
-              emailVerified: browserSession.emailVerified,
+              id: sessionUser.id,
+              email: sessionUser.email,
+              name: sessionUser.name,
+              emailVerified: sessionUser.emailVerified,
             }
           : null,
         activeOrganization,
@@ -371,7 +389,10 @@ export function createBetterAuthShellPlugin({
           runtime,
           request,
         });
-        const browserSession = toBrowserSessionUser({ session: rawSession });
+        const browserSession = toBrowserSessionUser({
+          session: rawSession,
+          fallbackSession: resolvedSession.session,
+        });
         const lifecycle = maybeCompleteSessionFlow({
           config,
           flowStore,
@@ -379,6 +400,11 @@ export function createBetterAuthShellPlugin({
           flowId: query.flowId,
           deviceCode: query.deviceCode,
           returnUrl,
+        });
+        const webSessionCookie = buildWebBrokerSessionCookie({
+          browserSession,
+          webAppBaseUrl,
+          requestUrl: request.url,
         });
         return renderHtmlPage({
           title: "Hack account",
@@ -421,6 +447,13 @@ export function createBetterAuthShellPlugin({
             : renderLifecycleAutoReturnScript({
                 lifecycle,
               }) || undefined,
+          ...(webSessionCookie
+            ? {
+                headers: {
+                  "set-cookie": webSessionCookie,
+                },
+              }
+            : {}),
         });
       },
       {
@@ -549,29 +582,191 @@ function maybeCompleteSessionFlow(input: {
 
 function toBrowserSessionUser(input: {
   readonly session: unknown;
+  readonly fallbackSession?: Awaited<
+    ReturnType<typeof resolveBetterAuthSession>
+  >["session"];
 }): BrowserSessionUser | null {
   const record = readRecord(input.session);
   const user = readRecord(record?.user);
-  if (!user) {
-    return null;
-  }
-  const userId = normalizeText(user.id);
+  const userId =
+    normalizeText(user?.id) ?? normalizeText(input.fallbackSession?.userId);
   if (!userId) {
     return null;
   }
   const sessionRecord = readRecord(record?.session);
   return {
     id: userId,
-    email: normalizeText(user.email),
-    emailVerified: user.emailVerified === true,
-    name: normalizeText(user.name),
+    email:
+      normalizeText(user?.email) ?? normalizeText(input.fallbackSession?.email),
+    emailVerified: user?.emailVerified === true,
+    name:
+      normalizeText(user?.name) ?? normalizeText(input.fallbackSession?.name),
     organizationId:
       normalizeText(sessionRecord?.activeOrganizationId) ??
+      normalizeText(input.fallbackSession?.organizationId) ??
       normalizeText(record?.activeOrganizationId),
     teamId:
       normalizeText(sessionRecord?.activeTeamId) ??
+      normalizeText(input.fallbackSession?.teamId) ??
       normalizeText(record?.activeTeamId),
   };
+}
+
+async function hydrateBrowserSessionUser(input: {
+  readonly runtime: BetterAuthRuntime;
+  readonly session: unknown;
+  readonly fallbackSession?: Awaited<
+    ReturnType<typeof resolveBetterAuthSession>
+  >["session"];
+}): Promise<BrowserSessionUser | null> {
+  const current = toBrowserSessionUser({
+    session: input.session,
+    fallbackSession: input.fallbackSession,
+  });
+  const userId = current?.id ?? normalizeText(input.fallbackSession?.userId);
+  if (!userId) {
+    return null;
+  }
+  if (
+    current?.email &&
+    current.name &&
+    typeof current.emailVerified === "boolean"
+  ) {
+    return current;
+  }
+
+  const storedUser = await readUserRecord({
+    runtime: input.runtime,
+    userId,
+  });
+  if (!storedUser) {
+    return current;
+  }
+
+  return {
+    id: current?.id ?? storedUser.id,
+    email: current?.email ?? storedUser.email,
+    emailVerified: current?.emailVerified ?? storedUser.emailVerified,
+    name: current?.name ?? storedUser.name,
+    organizationId:
+      current?.organizationId ??
+      normalizeText(input.fallbackSession?.organizationId),
+    teamId: current?.teamId ?? normalizeText(input.fallbackSession?.teamId),
+  };
+}
+
+async function hydrateNamedEntity(input: {
+  readonly runtime: BetterAuthRuntime;
+  readonly current: {
+    readonly id: string;
+    readonly name: string | null;
+  } | null;
+  readonly kind: "organization" | "team";
+}): Promise<{ readonly id: string; readonly name: string | null } | null> {
+  if (!(input.current && !input.current.name)) {
+    return input.current;
+  }
+
+  const storedEntity =
+    input.kind === "organization"
+      ? await readOrganizationRecord({
+          runtime: input.runtime,
+          organizationId: input.current.id,
+        })
+      : await readTeamRecord({
+          runtime: input.runtime,
+          teamId: input.current.id,
+        });
+  if (!storedEntity) {
+    return input.current;
+  }
+
+  return {
+    id: input.current.id,
+    name: storedEntity.name,
+  };
+}
+
+async function readUserRecord(input: {
+  readonly runtime: BetterAuthRuntime;
+  readonly userId: string;
+}): Promise<{
+  readonly id: string;
+  readonly email: string | null;
+  readonly emailVerified: boolean;
+  readonly name: string | null;
+} | null> {
+  const db = input.runtime.db;
+  if (!db) {
+    return null;
+  }
+
+  const [record] = await db
+    .select({
+      id: betterAuthUser.id,
+      email: betterAuthUser.email,
+      emailVerified: betterAuthUser.emailVerified,
+      name: betterAuthUser.name,
+    })
+    .from(betterAuthUser)
+    .where(eq(betterAuthUser.id, input.userId))
+    .limit(1);
+  if (!record?.id) {
+    return null;
+  }
+
+  return {
+    id: record.id,
+    email: normalizeText(record.email),
+    emailVerified: record.emailVerified === true,
+    name: normalizeText(record.name),
+  };
+}
+
+async function readOrganizationRecord(input: {
+  readonly runtime: BetterAuthRuntime;
+  readonly organizationId: string;
+}): Promise<{ readonly name: string | null } | null> {
+  const db = input.runtime.db;
+  if (!db) {
+    return null;
+  }
+
+  const [record] = await db
+    .select({
+      name: betterAuthOrganization.name,
+    })
+    .from(betterAuthOrganization)
+    .where(eq(betterAuthOrganization.id, input.organizationId))
+    .limit(1);
+  return record
+    ? {
+        name: normalizeText(record.name),
+      }
+    : null;
+}
+
+async function readTeamRecord(input: {
+  readonly runtime: BetterAuthRuntime;
+  readonly teamId: string;
+}): Promise<{ readonly name: string | null } | null> {
+  const db = input.runtime.db;
+  if (!db) {
+    return null;
+  }
+
+  const [record] = await db
+    .select({
+      name: betterAuthTeam.name,
+    })
+    .from(betterAuthTeam)
+    .where(eq(betterAuthTeam.id, input.teamId))
+    .limit(1);
+  return record
+    ? {
+        name: normalizeText(record.name),
+      }
+    : null;
 }
 
 function extractNamedEntity(input: {
@@ -1049,6 +1244,7 @@ function renderHtmlPage(input: {
   readonly subtitle?: string;
   readonly body: string;
   readonly script?: string;
+  readonly headers?: Record<string, string>;
 }): Response {
   return new Response(
     `<!doctype html>
@@ -1531,9 +1727,117 @@ function renderHtmlPage(input: {
       status: 200,
       headers: {
         "content-type": "text/html; charset=utf-8",
+        ...(input.headers ?? {}),
       },
     }
   );
+}
+
+function buildWebBrokerSessionCookie(input: {
+  readonly browserSession: BrowserSessionUser | null;
+  readonly webAppBaseUrl: string;
+  readonly requestUrl: string;
+}): string | null {
+  const cookieTarget = resolveCookieTarget({
+    requestUrl: input.requestUrl,
+    webAppBaseUrl: input.webAppBaseUrl,
+  });
+
+  if (!cookieTarget) {
+    return null;
+  }
+
+  if (!input.browserSession) {
+    return serializeCookie({
+      name: HACK_WEB_BROKER_SESSION_COOKIE_NAME,
+      value: "",
+      secure: cookieTarget.secure,
+      domain: cookieTarget.domain,
+      maxAge: 0,
+    });
+  }
+
+  const managementToken = issueBrokerManagementToken({
+    userId: input.browserSession.id,
+    organizationId: input.browserSession.organizationId,
+    teamId: input.browserSession.teamId,
+  });
+  if (!managementToken?.token) {
+    return null;
+  }
+
+  const expiresAt = managementToken.expiresAt
+    ? new Date(managementToken.expiresAt)
+    : null;
+  const maxAge =
+    expiresAt && Number.isFinite(expiresAt.getTime())
+      ? Math.max(1, Math.floor((expiresAt.getTime() - Date.now()) / 1000))
+      : 120;
+
+  return serializeCookie({
+    name: HACK_WEB_BROKER_SESSION_COOKIE_NAME,
+    value: managementToken.token,
+    secure: cookieTarget.secure,
+    domain: cookieTarget.domain,
+    maxAge,
+    expiresAt,
+  });
+}
+
+function resolveCookieTarget(input: {
+  readonly requestUrl: string;
+  readonly webAppBaseUrl: string;
+}): {
+  readonly domain: string | null;
+  readonly secure: boolean;
+} | null {
+  try {
+    const requestHost = new URL(input.requestUrl).hostname;
+    const webAppUrl = new URL(input.webAppBaseUrl);
+    const webHost = webAppUrl.hostname;
+    if (!(requestHost === webHost || requestHost.endsWith(`.${webHost}`))) {
+      return null;
+    }
+
+    return {
+      secure: webAppUrl.protocol === "https:",
+      domain: resolveCookieDomain({ host: webHost }),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function resolveCookieDomain(input: { readonly host: string }): string | null {
+  const host = input.host.trim();
+  if (!host || host === "localhost" || isIpAddress({ value: host })) {
+    return null;
+  }
+  return host;
+}
+
+function isIpAddress(input: { readonly value: string }): boolean {
+  return IP_ADDRESS_PATTERN.test(input.value);
+}
+
+function serializeCookie(input: {
+  readonly name: string;
+  readonly value: string;
+  readonly secure: boolean;
+  readonly domain: string | null;
+  readonly maxAge: number;
+  readonly expiresAt?: Date | null;
+}): string {
+  return [
+    `${input.name}=${encodeURIComponent(input.value)}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+    ...(input.secure ? ["Secure"] : []),
+    ...(input.domain ? [`Domain=${input.domain}`] : []),
+    `Max-Age=${input.maxAge}`,
+    `Expires=${(input.expiresAt ?? new Date(0)).toUTCString()}`,
+  ].join("; ");
 }
 
 function buildAuthShellUrl(input: {

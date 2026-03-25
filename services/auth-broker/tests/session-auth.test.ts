@@ -1,11 +1,19 @@
 import { describe, expect, test } from "bun:test";
 
-import { createSharedBetterAuthContract } from "@hack/auth-contract";
+import {
+  createSharedBetterAuthContract,
+  HACK_WEB_BROKER_SESSION_COOKIE_NAME,
+} from "@hack/auth-contract";
 
 import type {
   BetterAuthRuntime,
   BetterAuthSocialProvider,
 } from "../src/better-auth.ts";
+import {
+  organization as betterAuthOrganization,
+  team as betterAuthTeam,
+  user as betterAuthUser,
+} from "../src/db/schema.ts";
 import { FlowStore } from "../src/flow-store.ts";
 import { createAuthBrokerApp } from "../src/index.ts";
 import { hasBetterAuthProfileAccess } from "../src/modules/better-auth/session.ts";
@@ -67,6 +75,23 @@ function createBetterAuthRuntimeWithSession(
   input?: {
     readonly socialProviders?: readonly BetterAuthSocialProvider[];
     readonly trustedOrigins?: readonly string[];
+    readonly getSession?: (
+      value: Parameters<BetterAuthAuth["api"]["getSession"]>[0]
+    ) => Promise<BetterAuthSession>;
+    readonly storedUser?: {
+      readonly id: string;
+      readonly email: string;
+      readonly emailVerified: boolean;
+      readonly name: string;
+    } | null;
+    readonly storedOrganization?: {
+      readonly id: string;
+      readonly name: string;
+    } | null;
+    readonly storedTeam?: {
+      readonly id: string;
+      readonly name: string;
+    } | null;
   }
 ): BetterAuthRuntime {
   return {
@@ -83,9 +108,41 @@ function createBetterAuthRuntimeWithSession(
     }),
     auth: {
       api: {
-        getSession: async () => session,
+        getSession: input?.getSession ?? (() => Promise.resolve(session)),
       },
     } as unknown as BetterAuthAuth["api"],
+    ...(input?.storedUser || input?.storedOrganization || input?.storedTeam
+      ? {
+          db: {
+            select: () => ({
+              from: (table: unknown) => ({
+                where: () => ({
+                  limit: () => {
+                    if (table === betterAuthUser) {
+                      return Promise.resolve(
+                        input.storedUser ? [input.storedUser] : []
+                      );
+                    }
+                    if (table === betterAuthOrganization) {
+                      return Promise.resolve(
+                        input.storedOrganization
+                          ? [input.storedOrganization]
+                          : []
+                      );
+                    }
+                    if (table === betterAuthTeam) {
+                      return Promise.resolve(
+                        input.storedTeam ? [input.storedTeam] : []
+                      );
+                    }
+                    return Promise.resolve([]);
+                  },
+                }),
+              }),
+            }),
+          } as unknown as BetterAuthRuntime["db"],
+        }
+      : {}),
   } as unknown as BetterAuthRuntime;
 }
 
@@ -441,5 +498,173 @@ describe("broker Hack session auth flow", () => {
         expect(html).toContain("window.setTimeout");
       }
     );
+  });
+
+  test("auth account page sets a shared web session cookie for the account shell", async () => {
+    await withManagementTokenSecret(
+      "session-auth-web-cookie-secret",
+      async () => {
+        const session = {
+          user: {
+            id: "user-cookie",
+            email: "cookie@example.com",
+            emailVerified: true,
+            name: "Cookie User",
+          },
+          session: {
+            id: "sess-cookie",
+            userId: "user-cookie",
+            token: "session-token",
+            activeOrganizationId: "org-cookie",
+            activeTeamId: "team-cookie",
+            createdAt: new Date(),
+            updatedAt: new Date(),
+            expiresAt: new Date(Date.now() + 60_000),
+          },
+        } as unknown as BetterAuthSession;
+
+        const app = createAuthBrokerApp({
+          config: {
+            ...createTestConfig(),
+            publicBaseUrl: "https://auth.hack-cli.hack",
+            webAppBaseUrl: "https://hack-cli.hack",
+          },
+          flowStore: new FlowStore(),
+          betterAuthRuntime: createBetterAuthRuntimeWithSession(session),
+        });
+
+        const response = await app.handle(
+          new Request("https://auth.hack-cli.hack/auth/account?bridge=1")
+        );
+
+        const cookieHeader = response.headers.get("set-cookie");
+        expect(cookieHeader).toContain(
+          `${HACK_WEB_BROKER_SESSION_COOKIE_NAME}=`
+        );
+        expect(cookieHeader).toContain("Domain=hack-cli.hack");
+        expect(cookieHeader).toContain("HttpOnly");
+        expect(cookieHeader).toContain("SameSite=Lax");
+        expect(cookieHeader).toContain("Secure");
+      }
+    );
+  });
+
+  test("management-token /v1/auth/me hydrates user and scoped names from durable Better Auth records", async () => {
+    await withManagementTokenSecret("session-auth-hydrate-secret", async () => {
+      const session = {
+        user: {
+          id: "user-hydrated",
+          email: "hydrated@example.com",
+          emailVerified: true,
+          name: "Hydrated User",
+        },
+        session: {
+          id: "sess-hydrated",
+          userId: "user-hydrated",
+          token: "session-token",
+          activeOrganizationId: "org-hydrated",
+          activeTeamId: "team-hydrated",
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          expiresAt: new Date(Date.now() + 60_000),
+        },
+      } as unknown as BetterAuthSession;
+
+      const app = createAuthBrokerApp({
+        config: createTestConfig(),
+        flowStore: new FlowStore(),
+        betterAuthRuntime: createBetterAuthRuntimeWithSession(session, {
+          getSession: (value) => {
+            const headers =
+              value &&
+              typeof value === "object" &&
+              "headers" in value &&
+              value.headers instanceof Headers
+                ? value.headers
+                : null;
+            return Promise.resolve(
+              headers?.get("authorization") ? null : session
+            );
+          },
+          storedUser: {
+            id: "user-hydrated",
+            email: "hydrated@example.com",
+            emailVerified: true,
+            name: "Hydrated User",
+          },
+          storedOrganization: {
+            id: "org-hydrated",
+            name: "Hydrated Org",
+          },
+          storedTeam: {
+            id: "team-hydrated",
+            name: "Hydrated Team",
+          },
+        }),
+      });
+
+      const startResponse = await app.handle(
+        new Request("http://localhost/v1/auth/session/start")
+      );
+      const startPayload = (
+        (await startResponse.json()) as SessionStartFlowResponse
+      ).flow;
+
+      await app.handle(
+        new Request(
+          `http://localhost/auth/account?bridge=1&flowId=${encodeURIComponent(
+            startPayload.flowId
+          )}&deviceCode=${encodeURIComponent(startPayload.deviceCode)}`
+        )
+      );
+
+      const pollResponse = await app.handle(
+        new Request(
+          `${startPayload.pollUrl}?deviceCode=${encodeURIComponent(startPayload.deviceCode)}&claim=1`
+        )
+      );
+      const pollPayload = (await pollResponse.json()) as {
+        readonly ok: true;
+        readonly status: {
+          readonly status: string;
+          readonly managementToken?: string;
+        };
+      };
+
+      const meResponse = await app.handle(
+        new Request("http://localhost/v1/auth/me", {
+          headers: {
+            authorization: `Bearer ${pollPayload.status.managementToken ?? ""}`,
+          },
+        })
+      );
+      const mePayload = (await meResponse.json()) as {
+        readonly ok: true;
+        readonly user: {
+          readonly email: string | null;
+          readonly name: string | null;
+        } | null;
+        readonly activeOrganization: {
+          readonly id: string;
+          readonly name: string | null;
+        } | null;
+        readonly activeTeam: {
+          readonly id: string;
+          readonly name: string | null;
+        } | null;
+      };
+
+      expect(mePayload.ok).toBe(true);
+      expect(mePayload.user?.email).toBe("hydrated@example.com");
+      expect(mePayload.user?.name).toBe("Hydrated User");
+      expect(mePayload.activeOrganization).toEqual({
+        id: "org-hydrated",
+        name: "Hydrated Org",
+      });
+      expect(mePayload.activeTeam).toEqual({
+        id: "team-hydrated",
+        name: "Hydrated Team",
+      });
+    });
   });
 });

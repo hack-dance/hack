@@ -2,25 +2,24 @@ import type { Metadata } from "next";
 
 export const appMetadata: Metadata = {
   title: "Hack control plane",
-  description:
-    "An accessible browser shell for the optional Hack control plane.",
+  description: "A signed-in browser shell for the optional Hack control plane.",
 };
 
-export const shellTitle = "Accessible control-plane shell";
+export const shellTitle = "Hack account shell";
 
 export const shellSummary =
-  "A calm browser-visible frame that keeps Hack's CLI-first workflow intact while future auth, admin, and integration slices land behind the same routed host.";
+  "A calm signed-in shell that keeps the browser, broker current-user APIs, and CLI auth status aligned on the same Hack identity and active org/team context.";
 
 export const shellNavigationItems = [
   {
-    href: "#overview",
-    label: "Overview",
-    description: "What the shell owns right now.",
+    href: "#account-context",
+    label: "Account context",
+    description: "The active user, org, and team that Hack resolved.",
   },
   {
     href: "#foundations",
     label: "Foundations",
-    description: "Accessible patterns ready for later slices.",
+    description: "How the signed-in shell preserves parity and accessibility.",
   },
   {
     href: "#guardrails",
@@ -49,14 +48,14 @@ export const shellPrinciples = [
 
 export const shellHighlights = [
   {
-    title: "Routed local host",
+    title: "Context parity",
     description:
-      "The shell lives on the Hack-managed host so later browser flows can reuse the same stable entrypoint.",
+      "The shell renders the same signed-in identity and active org/team context that the broker and CLI already resolve.",
   },
   {
-    title: "Neutral shared frame",
+    title: "Deep-link continuity",
     description:
-      "The layout leaves room for future auth, admin, and integration slices without claiming those flows today.",
+      "Browser-owned sign-in can return to a trusted in-app destination instead of dropping the user on a dead-end handoff page.",
   },
   {
     title: "Visible focus treatment",
@@ -66,7 +65,7 @@ export const shellHighlights = [
 ] as const;
 
 export const shellGuardrails = [
-  "Browser-owned auth entrypoints remain quarantined for the dedicated auth handoff feature.",
-  "Shared admin and integration flows stay broker-backed and CLI-accessible until their slices land.",
-  "Reduced-motion support is treated as a contract, not a cosmetic follow-up.",
+  "CLI auth remains optional and authoritative even when the browser shell is unavailable.",
+  "Browser-owned sign-in continues to flow through the shared broker-backed auth/session APIs.",
+  "Reduced-motion support and visible focus are treated as product contracts, not cosmetic follow-ups.",
 ] as const;

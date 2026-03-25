@@ -1,4 +1,5 @@
 import { ArrowRight, Compass, Keyboard, ShieldCheck } from "lucide-react";
+import type { AccountShellContext } from "@/src/lib/account-shell";
 import {
   shellGuardrails,
   shellHighlights,
@@ -21,7 +22,28 @@ const focusLinkClassName = cn(
   "focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-300 focus-visible:outline-offset-2"
 );
 
-export default function ControlPlaneShell() {
+type ControlPlaneShellProps = {
+  readonly account?: AccountShellContext;
+  readonly signInHref?: string;
+};
+
+type AuthenticatedAccount = Extract<
+  AccountShellContext,
+  { readonly authenticated: true }
+>;
+
+const fallbackAccountContext = {
+  authenticated: false,
+} as const satisfies AccountShellContext;
+
+export default function ControlPlaneShell({
+  account = fallbackAccountContext,
+  signInHref = "/auth?redirect=%2F",
+}: ControlPlaneShellProps) {
+  const identityLabel = account.authenticated
+    ? formatIdentityLabel({ account })
+    : null;
+
   return (
     <div className="relative isolate min-h-screen overflow-hidden">
       <div
@@ -46,7 +68,7 @@ export default function ControlPlaneShell() {
             <div className="max-w-3xl space-y-4">
               <span className="inline-flex items-center gap-2 rounded-full border border-sky-300/20 bg-sky-300/10 px-3 py-1 text-sky-100 text-sm">
                 <Compass aria-hidden="true" className="size-4" />
-                Hack control plane
+                {account.authenticated ? "Hack account" : "Hack control plane"}
               </span>
               <div className="space-y-3">
                 <h1 className="font-semibold text-4xl text-white tracking-tight sm:text-5xl">
@@ -129,16 +151,78 @@ export default function ControlPlaneShell() {
         >
           <section
             className={cn(interactiveSurfaceClassName, "p-6 sm:p-7")}
-            id="overview"
+            id="account-context"
           >
-            <h2 className="font-semibold text-2xl text-white">Overview</h2>
-            <p className="mt-4 max-w-3xl text-sm text-white/75 leading-7">
-              This first browser-visible shell establishes the frame that future
-              signed-in and shared-management experiences will inherit. It is
-              intentionally useful on its own without pretending that auth
-              ownership, project administration, or integrations have landed
-              here yet.
-            </p>
+            {account.authenticated ? (
+              <div className="space-y-6">
+                <div className="space-y-3">
+                  <p className="font-medium text-sky-100 text-sm">
+                    Signed in context
+                  </p>
+                  <div className="space-y-2">
+                    <h2 className="font-semibold text-2xl text-white">
+                      {identityLabel}
+                    </h2>
+                    <p className="max-w-3xl text-sm text-white/75 leading-7">
+                      This account shell mirrors the broker current-user payload
+                      and the same org/team context that{" "}
+                      <code className="rounded bg-white/8 px-1.5 py-0.5 text-white text-xs">
+                        hack auth status --json
+                      </code>{" "}
+                      resolves locally.
+                    </p>
+                  </div>
+                </div>
+
+                <dl className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                  <ContextCard
+                    label="Email"
+                    value={account.user.email ?? "Not provided"}
+                  />
+                  <ContextCard
+                    label="Organization"
+                    value={formatNamedEntity({
+                      entity: account.activeOrganization,
+                      emptyLabel: "No active organization",
+                    })}
+                  />
+                  <ContextCard
+                    label="Team"
+                    value={formatNamedEntity({
+                      entity: account.activeTeam,
+                      emptyLabel: "No active team",
+                    })}
+                  />
+                  <ContextCard
+                    label="Access mode"
+                    value={account.accessControlMode ?? "Unknown"}
+                  />
+                </dl>
+
+                <div className="flex flex-wrap gap-3">
+                  <a className={focusLinkClassName} href={account.shellPath}>
+                    Open browser sign-in
+                  </a>
+                  <a className={focusLinkClassName} href={account.accountPath}>
+                    View handoff status
+                  </a>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <h2 className="font-semibold text-2xl text-white">
+                  Sign in to load your Hack account context
+                </h2>
+                <p className="max-w-3xl text-sm text-white/75 leading-7">
+                  Open the browser-owned sign-in entrypoint and Hack will return
+                  to this shell with the same identity, org, and team context
+                  that the broker and CLI expose.
+                </p>
+                <a className={focusLinkClassName} href={signInHref}>
+                  Continue to sign in
+                </a>
+              </div>
+            )}
           </section>
 
           <section className="space-y-4" id="foundations">
@@ -186,4 +270,37 @@ export default function ControlPlaneShell() {
       </div>
     </div>
   );
+}
+
+function ContextCard(input: {
+  readonly label: string;
+  readonly value: string;
+}) {
+  return (
+    <div className={cn(interactiveSurfaceClassName, "space-y-2 p-4")}>
+      <dt className="font-medium text-sky-100 text-sm">{input.label}</dt>
+      <dd className="text-sm text-white/80 leading-6">{input.value}</dd>
+    </div>
+  );
+}
+
+function formatIdentityLabel(input: {
+  readonly account: AuthenticatedAccount;
+}): string {
+  return (
+    input.account.user.name ?? input.account.user.email ?? input.account.user.id
+  );
+}
+
+function formatNamedEntity(input: {
+  readonly entity:
+    | AuthenticatedAccount["activeOrganization"]
+    | AuthenticatedAccount["activeTeam"];
+  readonly emptyLabel: string;
+}): string {
+  if (!input.entity) {
+    return input.emptyLabel;
+  }
+
+  return input.entity.name ?? input.entity.id;
 }

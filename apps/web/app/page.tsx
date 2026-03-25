@@ -1,5 +1,5 @@
-import ControlPlaneShell from "@/src/components/control-plane-shell";
+import AccountShellPage from "@/src/components/account-shell-page";
 
 export default function HomePage() {
-  return <ControlPlaneShell />;
+  return <AccountShellPage returnToPath="/" />;
 }

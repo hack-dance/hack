@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   buildBrokerAccountBridgeUrl,
   normalizeAppReturnUrl,
+  shouldAutoNavigateToReturnUrl,
 } from "../src/lib/auth-handoff";
 
 describe("web auth handoff helpers", () => {
@@ -48,5 +49,23 @@ describe("web auth handoff helpers", () => {
         trustedOrigins,
       })
     ).toBeNull();
+  });
+
+  test("shouldAutoNavigateToReturnUrl keeps trusted web deep links auto-returnable", () => {
+    expect(
+      shouldAutoNavigateToReturnUrl({
+        value: "hack://auth/complete",
+      })
+    ).toBe(true);
+    expect(
+      shouldAutoNavigateToReturnUrl({
+        value: "https://hack-cli.hack/account",
+      })
+    ).toBe(true);
+    expect(
+      shouldAutoNavigateToReturnUrl({
+        value: "https://hack-cli-preview.vercel.app/account",
+      })
+    ).toBe(true);
   });
 });

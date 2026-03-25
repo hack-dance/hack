@@ -99,6 +99,8 @@ export const SHARED_BETTER_AUTH_PATHS = {
   mePath: "/v1/auth/me",
 } as const satisfies BetterAuthPublicPaths;
 
+export const HACK_WEB_BROKER_SESSION_COOKIE_NAME = "hack_web_broker_session";
+
 export const DEFAULT_BETTER_AUTH_ACCOUNT_LINKING_POLICY = {
   requireVerifiedEmail: true,
   allowDifferentEmails: false,

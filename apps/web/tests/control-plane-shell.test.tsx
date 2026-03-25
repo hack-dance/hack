@@ -10,9 +10,9 @@ import {
 
 test("control plane shell metadata describes the accessible foundation", () => {
   expect(appMetadata.title).toBe("Hack control plane");
-  expect(appMetadata.description).toContain("accessible browser shell");
+  expect(appMetadata.description).toContain("signed-in browser shell");
   expect(shellNavigationItems.map(({ href }) => href)).toEqual([
-    "#overview",
+    "#account-context",
     "#foundations",
     "#guardrails",
   ]);
@@ -32,6 +32,7 @@ test("control plane shell renders landmarks and keyboard navigation affordances"
   expect(markup).toContain('id="main-content"');
   expect(markup).toContain("<aside");
   expect(markup).toContain("Keyboard ready");
+  expect(markup).toContain("Sign in to load your Hack account context");
 });
 
 test("control plane shell keeps visible focus and reduced-motion contracts explicit", async () => {
@@ -51,5 +52,5 @@ test("root route keeps the shared shell wired to the home page", async () => {
     new URL("../app/page.tsx", import.meta.url)
   ).text();
 
-  expect(pageSource).toContain("ControlPlaneShell");
+  expect(pageSource).toContain("AccountShellPage");
 });

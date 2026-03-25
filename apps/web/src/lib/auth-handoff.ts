@@ -41,7 +41,12 @@ export function shouldAutoNavigateToReturnUrl(input: {
     return false;
   }
   try {
-    return SAFE_RETURN_PROTOCOLS.has(new URL(input.value).protocol);
+    const protocol = new URL(input.value).protocol;
+    return (
+      SAFE_RETURN_PROTOCOLS.has(protocol) ||
+      protocol === "http:" ||
+      protocol === "https:"
+    );
   } catch {
     return false;
   }

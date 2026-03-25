@@ -19,6 +19,7 @@ type BetterAuthAuth = NonNullable<BetterAuthRuntime["auth"]>;
 type BetterAuthSession = Awaited<
   ReturnType<BetterAuthAuth["api"]["getSession"]>
 >;
+type AuthBrokerApp = ReturnType<typeof createAuthBrokerApp>;
 
 installAuthBrokerEnvIsolation();
 
@@ -142,6 +143,141 @@ function createSession(input?: {
       expiresAt: new Date(Date.now() + 60_000),
     },
   } as unknown as BetterAuthSession;
+}
+
+function createOrgTeamsTestApp(input: {
+  readonly store: InMemoryOrgTeamsStore;
+  readonly session?: BetterAuthSession;
+}): AuthBrokerApp {
+  return createAuthBrokerApp({
+    config: createTestConfig(),
+    betterAuthRuntime: createBetterAuthRuntimeWithSession(
+      input.session ?? createSession()
+    ),
+    orgTeamsStore: input.store,
+  });
+}
+
+async function handleJsonRequest(input: {
+  readonly app: AuthBrokerApp;
+  readonly path: string;
+  readonly method?: "GET" | "POST";
+  readonly body?: unknown;
+}): Promise<Response> {
+  const hasBody = typeof input.body !== "undefined";
+  return await input.app.handle(
+    new Request(`http://localhost${input.path}`, {
+      method: input.method ?? "GET",
+      headers: hasBody ? { "content-type": "application/json" } : undefined,
+      body: hasBody ? JSON.stringify(input.body) : undefined,
+    })
+  );
+}
+
+async function inviteMemberAndGetId(input: {
+  readonly app: AuthBrokerApp;
+  readonly path: string;
+  readonly body: unknown;
+}): Promise<string> {
+  const response = await handleJsonRequest({
+    app: input.app,
+    method: "POST",
+    path: input.path,
+    body: input.body,
+  });
+  if (response.status !== 200) {
+    throw new Error(
+      `Expected invite request to succeed, received ${response.status}.`
+    );
+  }
+  const payload = (await response.json()) as {
+    readonly invitation?: { readonly id?: string };
+  };
+  const inviteId = payload.invitation?.id;
+  if (!inviteId) {
+    throw new Error("Expected invite id.");
+  }
+  return inviteId;
+}
+
+async function acceptInvitation(input: {
+  readonly app: AuthBrokerApp;
+  readonly inviteId: string;
+}): Promise<void> {
+  const response = await handleJsonRequest({
+    app: input.app,
+    method: "POST",
+    path: `/v1/auth/invitations/${input.inviteId}/accept`,
+  });
+  if (response.status !== 200) {
+    throw new Error(
+      `Expected invitation acceptance to succeed, received ${response.status}.`
+    );
+  }
+  const payload = (await response.json()) as {
+    readonly membership?: { readonly state?: string };
+  };
+  if (payload.membership?.state !== "active") {
+    throw new Error("Expected invitation acceptance to activate membership.");
+  }
+}
+
+async function seedAcceptedOrgAndTeamMember(input: {
+  readonly memberUserId: string;
+  readonly memberEmail: string;
+}): Promise<{
+  readonly ownerApp: AuthBrokerApp;
+  readonly memberApp: AuthBrokerApp;
+}> {
+  const store = new InMemoryOrgTeamsStore();
+  const ownerApp = createOrgTeamsTestApp({ store });
+  const memberApp = createOrgTeamsTestApp({
+    store,
+    session: createSession({
+      userId: input.memberUserId,
+      email: input.memberEmail,
+    }),
+  });
+
+  const createOrgResponse = await handleJsonRequest({
+    app: ownerApp,
+    method: "POST",
+    path: "/v1/auth/orgs",
+    body: { slug: "hack", name: "Hack" },
+  });
+  if (createOrgResponse.status !== 200) {
+    throw new Error(
+      `Expected org creation to succeed, received ${createOrgResponse.status}.`
+    );
+  }
+
+  const createTeamResponse = await handleJsonRequest({
+    app: ownerApp,
+    method: "POST",
+    path: "/v1/auth/teams",
+    body: { slug: "cli", org: "hack", name: "CLI" },
+  });
+  if (createTeamResponse.status !== 200) {
+    throw new Error(
+      `Expected team creation to succeed, received ${createTeamResponse.status}.`
+    );
+  }
+
+  const orgInviteId = await inviteMemberAndGetId({
+    app: ownerApp,
+    path: "/v1/auth/orgs/hack/members/invite",
+    body: { target: input.memberEmail },
+  });
+  await acceptInvitation({ app: memberApp, inviteId: orgInviteId });
+
+  const teamInviteId = await inviteMemberAndGetId({
+    app: ownerApp,
+    path: "/v1/auth/teams/cli/members/invite",
+    body: { org: "hack", target: input.memberEmail },
+  });
+  await acceptInvitation({ app: memberApp, inviteId: teamInviteId });
+
+  return { ownerApp, memberApp };
 }
 
 describe("org and team membership broker routes", () => {
@@ -542,5 +678,96 @@ describe("org and team membership broker routes", () => {
       readonly membership?: { readonly state?: string };
     };
     expect(declined.membership?.state).toBe("removed");
+  });
+  test("accepted org members can be removed by email and immediately lose org and team access", async () => {
+    const { ownerApp, memberApp } = await seedAcceptedOrgAndTeamMember({
+      memberUserId: "user-recipient",
+      memberEmail: "person@example.com",
+    });
+
+    const teamBeforeRemovalResponse = await handleJsonRequest({
+      app: memberApp,
+      path: "/v1/auth/teams/cli?org=hack",
+    });
+    expect(teamBeforeRemovalResponse.status).toBe(200);
+
+    const createTeamBeforeRemovalResponse = await handleJsonRequest({
+      app: memberApp,
+      method: "POST",
+      path: "/v1/auth/teams",
+      body: { slug: "docs", org: "hack", name: "Docs" },
+    });
+    expect(createTeamBeforeRemovalResponse.status).toBe(200);
+
+    const removeResponse = await handleJsonRequest({
+      app: ownerApp,
+      method: "POST",
+      path: "/v1/auth/orgs/hack/members/remove",
+      body: { target: "person@example.com" },
+    });
+    expect(removeResponse.status).toBe(200);
+    const removed = (await removeResponse.json()) as {
+      readonly membership?: {
+        readonly state?: string;
+        readonly target?: string;
+        readonly email?: string | null;
+      };
+    };
+    expect(removed.membership?.state).toBe("removed");
+    expect(removed.membership?.target).toBe("user-recipient");
+    expect(removed.membership?.email).toBe("person@example.com");
+
+    const createTeamAfterRemovalResponse = await handleJsonRequest({
+      app: memberApp,
+      method: "POST",
+      path: "/v1/auth/teams",
+      body: { slug: "support", org: "hack", name: "Support" },
+    });
+    expect(createTeamAfterRemovalResponse.status).toBe(404);
+
+    const teamAfterRemovalResponse = await handleJsonRequest({
+      app: memberApp,
+      path: "/v1/auth/teams/cli?org=hack",
+    });
+    expect(teamAfterRemovalResponse.status).toBe(404);
+  });
+
+  test("accepted team members can still be removed by user id while keeping parent org access", async () => {
+    const { ownerApp, memberApp } = await seedAcceptedOrgAndTeamMember({
+      memberUserId: "user-teammate",
+      memberEmail: "teammate@example.com",
+    });
+
+    const removeResponse = await handleJsonRequest({
+      app: ownerApp,
+      method: "POST",
+      path: "/v1/auth/teams/cli/members/remove",
+      body: { org: "hack", target: "user-teammate" },
+    });
+    expect(removeResponse.status).toBe(200);
+    const removed = (await removeResponse.json()) as {
+      readonly membership?: {
+        readonly state?: string;
+        readonly target?: string;
+        readonly email?: string | null;
+      };
+    };
+    expect(removed.membership?.state).toBe("removed");
+    expect(removed.membership?.target).toBe("user-teammate");
+    expect(removed.membership?.email).toBe("teammate@example.com");
+
+    const teamAfterRemovalResponse = await handleJsonRequest({
+      app: memberApp,
+      path: "/v1/auth/teams/cli?org=hack",
+    });
+    expect(teamAfterRemovalResponse.status).toBe(404);
+
+    const createTeamAfterRemovalResponse = await handleJsonRequest({
+      app: memberApp,
+      method: "POST",
+      path: "/v1/auth/teams",
+      body: { slug: "design", org: "hack", name: "Design" },
+    });
+    expect(createTeamAfterRemovalResponse.status).toBe(200);
   });
 });

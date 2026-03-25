@@ -638,11 +638,12 @@ export class InMemoryOrgTeamsStore implements OrgTeamsStore {
     readonly target: string;
   }): MembershipRecord | null {
     for (const [key, membership] of this.activeMemberships.entries()) {
+      const membershipEmail = membership.email?.trim() ?? "";
       if (
         membership.scope !== input.scope ||
         membership.organizationId !== input.organizationId ||
         membership.teamId !== input.teamId ||
-        membership.target !== input.target
+        (membership.target !== input.target && membershipEmail !== input.target)
       ) {
         continue;
       }

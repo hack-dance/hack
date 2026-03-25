@@ -829,12 +829,10 @@ export class DbOrgTeamsStore implements OrgTeamsStore {
               eq(orgAdminMemberships.scope, input.scope),
               eq(orgAdminMemberships.organizationId, input.organizationId),
               eq(orgAdminMemberships.teamId, input.teamId),
-              eq(orgAdminMemberships.state, "active"),
-              eq(orgAdminMemberships.target, input.target)
+              eq(orgAdminMemberships.state, "active")
             )
           )
           .orderBy(asc(orgAdminMemberships.createdAt))
-          .limit(1)
       : await this.db
           .select()
           .from(orgAdminMemberships)
@@ -843,13 +841,14 @@ export class DbOrgTeamsStore implements OrgTeamsStore {
               eq(orgAdminMemberships.scope, input.scope),
               eq(orgAdminMemberships.organizationId, input.organizationId),
               isNull(orgAdminMemberships.teamId),
-              eq(orgAdminMemberships.state, "active"),
-              eq(orgAdminMemberships.target, input.target)
+              eq(orgAdminMemberships.state, "active")
             )
           )
-          .orderBy(asc(orgAdminMemberships.createdAt))
-          .limit(1);
-    const membership = memberships[0];
+          .orderBy(asc(orgAdminMemberships.createdAt));
+    const membership = memberships.find((row) => {
+      const membershipEmail = normalizeOptionalText(row.email) ?? "";
+      return row.target === input.target || membershipEmail === input.target;
+    });
     if (!membership) {
       return null;
     }
@@ -910,16 +909,19 @@ export class DbOrgTeamsStore implements OrgTeamsStore {
         and(
           eq(orgAdminMemberships.scope, "team"),
           eq(orgAdminMemberships.state, "active"),
-          eq(orgAdminMemberships.organizationId, input.organizationId),
-          or(
-            eq(orgAdminMemberships.target, input.target),
-            eq(orgAdminMemberships.email, input.target)
-          )
+          eq(orgAdminMemberships.organizationId, input.organizationId)
         )
       )
       .orderBy(asc(orgAdminMemberships.createdAt));
 
     for (const membership of memberships) {
+      const membershipEmail = normalizeOptionalText(membership.email) ?? "";
+      if (
+        membership.target !== input.target &&
+        membershipEmail !== input.target
+      ) {
+        continue;
+      }
       await this.db
         .delete(orgAdminMemberships)
         .where(eq(orgAdminMemberships.id, membership.id));

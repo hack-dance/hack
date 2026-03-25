@@ -20,7 +20,7 @@
     {
       "area": "skills",
       "observation": "The shared worker procedure does not carry forward the mission rule that user-facing web changes must be validated with `agent-browser`, so this feature was marked as having followed procedure even though the web proof was only a routed-page curl/text scrape.",
-      "evidence": "/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/AGENTS.md:37-40 requires `agent-browser` for user-facing web changes, but /Users/hack/dev/hack-dance/hack/.factory/skills/control-plane-worker/SKILL.md:26-35 only mentions repo-bound CLI and curl/API validation. The handoff at /Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/handoffs/2026-03-25T20-45-12-081Z__mission-linear-closeout-audit__bb0ea5c3-15c5-4977-915c-955c0f0f83cc.json:16-19 records curl-based web verification, and the transcript skeleton for session bb0ea5c3-15c5-4977-915c-955c0f0f83cc contains no `agent-browser` invocation."
+      "evidence": "<mission-dir>/AGENTS.md:37-40 requires `agent-browser` for user-facing web changes, but <repo>/.factory/skills/control-plane-worker/SKILL.md:26-35 only mentions repo-bound CLI and curl/API validation. The handoff at <mission-dir>/handoffs/2026-03-25T20-45-12-081Z__mission-linear-closeout-audit__bb0ea5c3-15c5-4977-915c-955c0f0f83cc.json:16-19 records curl-based web verification, and the transcript skeleton for session bb0ea5c3-15c5-4977-915c-955c0f0f83cc contains no `agent-browser` invocation."
     }
   ],
   "addressesFailureFrom": null,

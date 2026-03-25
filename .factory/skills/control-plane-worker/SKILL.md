@@ -18,6 +18,7 @@ Use this skill for features that primarily touch:
 
 ## Required Skills
 
+- `agent-browser` — invoke when a control-plane feature changes visible web surfaces or when mission/user-testing guidance requires browser proof for user-facing behavior owned by this worker type.
 - `hack-cli` — invoke when the feature touches `.hack/**`, runtime orchestration, gateway/session flows, tickets, or any `hack up/ps/open/down` verification.
 - `linear` — invoke when the feature changes repo-bound Linear project sync, status-update publishing, artifact layout, or mission closeout behavior.
 
@@ -30,10 +31,11 @@ Use this skill for features that primarily touch:
    - If the assigned feature is explicitly about fixing a known red baseline, capture the failing baseline evidence once, then continue the repair work and rerun the gate before handoff.
    - If repo-bound GitHub CLI routes cannot reach the changed auth code because `dance.hack.github` is not enabled in project config yet, use a direct resolver or similarly narrow deterministic smoke and record why the repo-bound path was unavailable.
    - If no safe repo-bound hook exists to force a failure mode (for example local-sync failure injection), deterministic regression tests are acceptable proof as long as you explain why a live manual repro would mutate real project state.
-5. If the feature touches Linear project/state behavior, use repo-bound `./dist/hack linear ...` flows to verify the effect and record the exact commands/results. Do not rely on manual remote edits as the primary proof.
-6. Capture any blockers, discovered issues, or scope mismatches immediately. If a feature needs new credentials, unavailable infrastructure, or a change that would violate CLI optionality/auth ownership, return to the orchestrator instead of guessing.
-7. Stop any processes you started and produce a detailed handoff with exact commands, observations, tests added, and remaining issues.
-8. If `bun run check` succeeds and only re-surfaces the known warning-only complexity diagnostics already documented in mission `AGENTS.md`, do not return to the orchestrator for that reason and do not record them as new discovered issues unless your feature directly worsened the warned files.
+5. If the feature touches Linear project/state behavior, use repo-bound `./dist/hack linear ...` flows to verify the effect and record the exact commands/results. Do not rely on manual remote edits as the primary proof. For keychainless or broker-seeded auth work, `tokenSource: "broker"` alone is not sufficient proof: capture a stronger negative signal showing the broker path avoided local secret/keychain reads, or fail closed with explicit guidance instead of claiming success.
+6. If the feature changes user-facing web behavior even though the primary code lives outside `apps/web`, run `agent-browser` against the routed host unless the change is strictly non-visual. If the visible behavior cannot be exercised in-browser, record a justified deviation and pair it with the strongest available CLI/API proof.
+7. Capture any blockers, discovered issues, or scope mismatches immediately. If a feature needs new credentials, unavailable infrastructure, or a change that would violate CLI optionality/auth ownership, return to the orchestrator instead of guessing.
+8. Stop any processes you started and produce a detailed handoff with exact commands, observations, tests added, and remaining issues.
+9. If `bun run check` succeeds and only re-surfaces the known warning-only complexity diagnostics already documented in mission `AGENTS.md`, do not return to the orchestrator for that reason and do not record them as new discovered issues unless your feature directly worsened the warned files.
 
 ## Example Handoff
 

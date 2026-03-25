@@ -24,7 +24,7 @@
         "file": ".factory/validation/misc-admin-followups-1/scrutiny/reviews/management-token-email-verified-hydration-followup.json",
         "line": 1,
         "severity": "non_blocking",
-        "description": "This env-scoped feature commit also edits an existing scrutiny review from a different milestone, replacing a concrete `/tmp/...` path in previously-written evidence with a placeholder form. The change is harmless, but it is unrelated to env trust/custody status and makes the feature diff less isolated than it should be."
+        "description": "This env-scoped feature commit also edits an existing scrutiny review from a different milestone, replacing a concrete `<tmp>/...` path in previously-written evidence with a placeholder form. The change is harmless, but it is unrelated to env trust/custody status and makes the feature diff less isolated than it should be."
       }
     ]
   },
@@ -32,7 +32,7 @@
     {
       "area": "skills",
       "observation": "The `web-control-plane-worker` procedure requires `hack-cli` and `linear`, but those skill identifiers were not actually available in the worker session that implemented this feature.",
-      "evidence": "`.factory/skills/web-control-plane-worker/SKILL.md:18-22` marks `agent-browser`, `hack-cli`, and `linear` as required skills, while the worker handoff records `followedProcedure: false` because the session only had `mission-worker-base`, `web-control-plane-worker`, and `agent-browser` available (`/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/handoffs/2026-03-25T19-04-30-994Z__env-trust-custody-status-surfaces__c0272eea-adcb-4e18-ba65-feb34a62e592.json:107-116`)."
+      "evidence": "`.factory/skills/web-control-plane-worker/SKILL.md:18-22` marks `agent-browser`, `hack-cli`, and `linear` as required skills, while the worker handoff records `followedProcedure: false` because the session only had `mission-worker-base`, `web-control-plane-worker`, and `agent-browser` available (`<mission-dir>/handoffs/2026-03-25T19-04-30-994Z__env-trust-custody-status-surfaces__c0272eea-adcb-4e18-ba65-feb34a62e592.json:107-116`)."
     },
     {
       "area": "knowledge",
@@ -42,7 +42,7 @@
     {
       "area": "services",
       "observation": "The mission service/command catalog still lacks reusable env-status smokes even though VAL-ENV-001 expects CLI JSON and env-endpoint evidence.",
-      "evidence": "`.factory/services.yaml` has no env-related command entries, while the validation contract requires `hack env ... --json` plus env-status endpoint evidence (`/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/validation-contract.md`, VAL-ENV-001) and the worker handoff had to record raw `./dist/hack env list --json` / `./dist/hack env backend status --json` commands manually."
+      "evidence": "`.factory/services.yaml` has no env-related command entries, while the validation contract requires `hack env ... --json` plus env-status endpoint evidence (`<mission-dir>/validation-contract.md`, VAL-ENV-001) and the worker handoff had to record raw `./dist/hack env list --json` / `./dist/hack env backend status --json` commands manually."
     }
   ],
   "addressesFailureFrom": null,

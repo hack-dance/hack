@@ -1,0 +1,33 @@
+{
+  "featureId": "cli-optionality-and-offline-env-regression",
+  "reviewedAt": "2026-03-25T20:51:53Z",
+  "commitId": "3cffa2a0120f299f4ad39dcd0e4ad245eaff745f",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "Reviewed the feature entry, VAL-CROSS-001 / VAL-CROSS-005 contract, worker handoff and transcript skeleton, shared-state docs, and commit `3cffa2a0120f299f4ad39dcd0e4ad245eaff745f`. The diff adds useful outage regressions for offline env secret/plaintext flows and repo-local tickets, plus a small `apps/web` seam so env fallback state can be unit-tested directly. But the landed proof is narrower than the feature contract: it exercises env and tickets optionality, yet never validates sessions or repo-local project operations under web-outage conditions, so the feature does not fully satisfy the CLI-optional-by-default claim in VAL-CROSS-001.",
+    "issues": [
+      {
+        "file": "tests/tickets-extension.test.ts",
+        "line": 28,
+        "severity": "blocking",
+        "description": "The new outage coverage in this feature is limited to env/tickets paths (`tests/tickets-extension.test.ts:28-161`, `tests/env-backend-command.test.ts:218-344`, `tests/daemon-env.test.ts:192-231`) plus a web-side env fallback seam (`apps/web/tests/env-management.test.ts:247-262`). The handoff evidence is similarly scoped to `hack up`, `hack down`, `env list`, secret env set/list, `tickets list`, and a broker-backed `linear connections` failure (`handoffs/2026-03-25T20-13-38-132Z__cli-optionality-and-offline-env-regression__7131da61-12f2-4c54-a8c8-678abaa28a80.json:31-61`). There is still no outage-mode regression or manual proof for sessions or repo-local project operations, even though the feature's expected behavior says \"Critical local CLI workflows still work when apps/web is unavailable\" (`features.json:1593`) and VAL-CROSS-001 explicitly calls out `hack up`, sessions, tickets, env, and local project operations (`validation-contract.md:154`). As landed, the feature proves env/tickets optionality but not the full CLI optionality regression it claims to complete."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The `web-control-plane-worker` skill still treats `agent-browser` verification as mandatory for `apps/web` user-flow changes, but this feature landed a web-visible fallback/state slice with only unit tests and CLI/curl checks. The procedure needs either an explicit carve-out for non-visual/test-seam web changes or a requirement to record this as a justified deviation instead of marking the run as having fully followed procedure.",
+      "evidence": "`.factory/skills/web-control-plane-worker/SKILL.md:20,30-31` requires `agent-browser` for `apps/web` user flows, while the transcript skeleton for worker session `7131da61-12f2-4c54-a8c8-678abaa28a80` shows `hack-cli` plus CLI/curl verification commands but no `agent-browser`, and the handoff verification block only lists `bun test`, `bun run typecheck`, `hack up/down`, `curl`, `env list`, `tickets list`, and `linear connections`."
+    },
+    {
+      "area": "services",
+      "observation": "The shared service manifest still lacks a reusable outage-mode optionality smoke covering the full VAL-CROSS-001 matrix, so workers fall back to ad-hoc shell chains and partial manual proof.",
+      "evidence": "`.factory/services.yaml:12-26` exposes generic runtime/status commands (`runtime_up`, `runtime_open`, `runtime_stack_routed_healthcheck`, `linear_status`, etc.) but nothing that exercises browser/web outage plus session/env/tickets/project-command behavior. The feature handoff therefore relied on bespoke chained commands at `handoffs/2026-03-25T20-13-38-132Z__cli-optionality-and-offline-env-regression__7131da61-12f2-4c54-a8c8-678abaa28a80.json:31-61`, and those commands still stopped short of sessions/project-operation coverage."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Fail. The feature adds real outage regressions for offline env and local tickets flows, but it does not actually prove the full CLI optionality contract because sessions and repo-local project operations never receive outage-mode coverage or manual validation. I also noted shared-state gaps around browser-verification guidance and reusable outage smoke commands."
+}

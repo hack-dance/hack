@@ -1,0 +1,21 @@
+{
+  "featureId": "auth-broker-root-fallback-deterministic-regression",
+  "reviewedAt": "2026-03-25T20:49:46Z",
+  "commitId": "d8c60aca51f7c910b89da5a24987eb21dddaff16",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Reviewed the feature entry, validation contract, worker handoff, transcript skeleton, shared-state files, and commit `d8c60aca51f7c910b89da5a24987eb21dddaff16`. The implementation satisfies the stated behavior: `services/auth-broker/src/config.ts` now exposes a deterministic test-only fallback injection hook, `services/auth-broker/tests/test-env.ts` resets that hook alongside the existing env-isolation helper, and `services/auth-broker/tests/config.test.ts` proves injected repo-root fallback dotenv values are used only when fallback is enabled and are ignored once `HACK_AUTH_BROKER_DISABLE_ROOT_ENV_FALLBACK=true` is set. This removes the prior dependence on ambient repo-root dotenv state. The feature has no direct `fulfills` assertions in `validation-contract.md`, and I did not find blocking or non-blocking code issues in the shipped change.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "Shared env-hardening notes document the baseline auth-broker env-isolation helpers, but they do not yet mention the new deterministic root-fallback injection helper that this feature introduced for config regressions.",
+      "evidence": "`.factory/library/environment.md:46-50` documents `installAuthBrokerEnvIsolation()` and `withIsolatedAuthBrokerEnv()` plus the disable flag, while `services/auth-broker/tests/test-env.ts:139-150` adds `withAuthBrokerRootEnvFallback()` and `services/auth-broker/src/config.ts:70-85` adds `configureRootEnvFallbackForTests()` for deterministic repo-root fallback contents."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass. The feature delivers the intended deterministic auth-broker regression for the root-env fallback disable path and no code defects were found; the only follow-up observation is that the new fallback-injection helper is not yet reflected in shared library notes."
+}

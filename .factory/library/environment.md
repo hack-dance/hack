@@ -42,12 +42,25 @@ When verifying provider parity or browser handoff behavior, prefer these variabl
 - The local machine currently has Bun available, but the installed version may lag the version declared in `package.json`; prefer repo commands and keep validation evidence concrete.
 - Use `./dist/hack` for repo-bound CLI behavior after build; use global `hack` only for runtime orchestration.
 - Repo-external Bun smoke scripts are a poor fit for monorepo validation here: if a smoke needs workspace imports such as `@hack/auth-contract`, keep the script under the repo root or use an existing repo-resident entrypoint instead of generating it under `/tmp`.
+- Bun/WHATWG URL parsing normalizes dot segments before most handlers inspect `req.url` or `URL.pathname`; security-sensitive route validation that needs to reject raw traversal attempts cannot rely on normalized pathname checks alone.
 
 ## Auth-Broker Test Isolation
 
 - Bun loads repo-root `.env` / `.env.local`, so auth-broker tests should clear broker-related env before asserting defaults or failure guidance.
 - `services/auth-broker/tests/test-env.ts` provides `installAuthBrokerEnvIsolation()` for suites and `withIsolatedAuthBrokerEnv()` for per-test overrides.
 - Those helpers set `HACK_AUTH_BROKER_DISABLE_ROOT_ENV_FALLBACK=true`, which disables `services/auth-broker/src/config.ts` fallback reads from repo-root `.env.local` and `.env` so config tests stay hermetic.
+- Use `withAuthBrokerRootEnvFallback()` plus `configureRootEnvFallbackForTests()` when a regression needs deterministic fake repo-root dotenv contents without depending on ambient checkout state.
+
+## Env Status Taxonomy
+
+- `trust_model` answers whether env state is local-only, plaintext-compatible, or broker/shared.
+- `custody` answers who currently holds the sensitive material (for example local secret backend vs broker-managed).
+- `portability` answers whether the current representation can move safely across machines.
+- `shared_state` is the cross-surface summary used by CLI/API/web status views; treat unknown or command-error states explicitly instead of relabeling them as local-only.
+
+## Secret Storage Notes
+
+- `HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK=true` disables encrypted-file fallback to keychain-backed material; use it when recovery tests must prove there is no silent downgrade to local keychain access.
 
 ## Trusted-Origin Inventory
 

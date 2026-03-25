@@ -1,0 +1,50 @@
+{
+  "featureId": "env-trust-custody-status-surfaces",
+  "reviewedAt": "2026-03-25T20:51:33Z",
+  "commitId": "fc7b1033acc0781830a84c605f1ac19da3c964a2",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "Reviewed the feature manifest, VAL-ENV-001 contract, worker handoff, transcript skeleton for session `c0272eea-adcb-4e18-ba65-feb34a62e592`, the `web-control-plane-worker` skill, mission shared-state docs, and commit `fc7b1033acc0781830a84c605f1ac19da3c964a2`. The new `src/lib/hack-env-status.ts` helper does centralize CLI/API/backend trust-custody-portability classification and the targeted tests cover local-only versus portable-bundle cases. However, the shipped web slice only surfaces aggregate/backend cards and drops the per-variable storage payload that CLI and API now expose, so the browser still cannot tell a user whether a specific env key is local plaintext, secret-backed, or portable/shared. The fallback web state also labels command-failure as `local_only`, which weakens the honesty requirement for degraded states, and the commit carries one unrelated scrutiny-review text edit outside this feature scope.",
+    "issues": [
+      {
+        "file": "apps/web/src/lib/env-management.ts",
+        "line": 113,
+        "severity": "blocking",
+        "description": "The web implementation drops the per-value env classification that the feature manifest says users should be able to inspect. `EnvManagementState` only keeps aggregate/backend/storage-surface summaries, `buildEnvManagementState()` discards `input.list.vars` instead of normalizing it (`apps/web/src/lib/env-management.ts:73,113-156,191-245`), and `EnvSection` therefore renders only aggregate cards (`apps/web/src/components/account-control-plane-sections.tsx:154-287`). In contrast, both CLI and API now expose per-key storage/classification data (`src/commands/env.ts:431-446`, `src/daemon/routes/env.ts:76,184-224`). As shipped, the web surface cannot tell the user whether a specific env value is local plaintext, secret-backed, or portable/shared, so the feature does not fully satisfy the expected behavior for cross-surface parity."
+      },
+      {
+        "file": "apps/web/src/lib/env-management.ts",
+        "line": 249,
+        "severity": "non_blocking",
+        "description": "The failure fallback hard-codes `sharedState: \"local_only\"` (and the same local-only classification on backend/local/portable sub-sections) when the repo-bound env commands are unavailable (`apps/web/src/lib/env-management.ts:249-323`). `EnvSection` renders that label directly as the badge and the shared-state card (`apps/web/src/components/account-control-plane-sections.tsx:154-205`), and the regression suite explicitly locks that behavior in (`apps/web/tests/env-management.test.ts:255-263`). That means an unavailable/error state is still presented as `local_only` instead of an explicit unknown/unavailable state, which is misleading but confined to degraded-command paths."
+      },
+      {
+        "file": ".factory/validation/misc-admin-followups-1/scrutiny/reviews/management-token-email-verified-hydration-followup.json",
+        "line": 1,
+        "severity": "non_blocking",
+        "description": "This env-scoped feature commit also edits an existing scrutiny review from a different milestone, replacing a concrete `/tmp/...` path in previously-written evidence with a placeholder form. The change is harmless, but it is unrelated to env trust/custody status and makes the feature diff less isolated than it should be."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The `web-control-plane-worker` procedure requires `hack-cli` and `linear`, but those skill identifiers were not actually available in the worker session that implemented this feature.",
+      "evidence": "`.factory/skills/web-control-plane-worker/SKILL.md:18-22` marks `agent-browser`, `hack-cli`, and `linear` as required skills, while the worker handoff records `followedProcedure: false` because the session only had `mission-worker-base`, `web-control-plane-worker`, and `agent-browser` available (`/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/handoffs/2026-03-25T19-04-30-994Z__env-trust-custody-status-surfaces__c0272eea-adcb-4e18-ba65-feb34a62e592.json:107-116`)."
+    },
+    {
+      "area": "knowledge",
+      "observation": "Mission library docs still do not record the new env classification taxonomy or the meanings of `trust_model`, `custody`, `portability`, and `shared_state`, so future workers have to reverse-engineer the vocabulary from code.",
+      "evidence": "`.factory/library/environment.md:1-59` documents env/runtime inputs and trusted-origin notes but has no matches for the new status vocabulary, while `src/lib/hack-env-status.ts:3-20,312-452` now defines the canonical shared-state enum and the classification values surfaced by CLI/API/web."
+    },
+    {
+      "area": "services",
+      "observation": "The mission service/command catalog still lacks reusable env-status smokes even though VAL-ENV-001 expects CLI JSON and env-endpoint evidence.",
+      "evidence": "`.factory/services.yaml` has no env-related command entries, while the validation contract requires `hack env ... --json` plus env-status endpoint evidence (`/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/validation-contract.md`, VAL-ENV-001) and the worker handoff had to record raw `./dist/hack env list --json` / `./dist/hack env backend status --json` commands manually."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Fail. CLI and daemon status classification are in much better shape, but the browser slice still drops per-variable env storage/classification data and therefore does not give the same value-level trust/custody visibility that CLI and API now expose. I also noted a degraded-state honesty issue on web fallback plus shared-state gaps around unavailable required skills, missing env-classification docs, and absent reusable env-status service commands."
+}

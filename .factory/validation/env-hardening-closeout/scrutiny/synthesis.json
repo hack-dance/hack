@@ -1,0 +1,141 @@
+{
+  "milestone": "env-hardening-closeout",
+  "round": 1,
+  "status": "fail",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "bun run test",
+      "exitCode": 0
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "bun run typecheck",
+      "exitCode": 0
+    },
+    "lint": {
+      "passed": true,
+      "command": "bun run check",
+      "exitCode": 0
+    }
+  },
+  "reviewsSummary": {
+    "total": 7,
+    "passed": 2,
+    "failed": 5,
+    "failedFeatures": [
+      "linear-keychainless-credential-path",
+      "env-trust-custody-status-surfaces",
+      "gateway-read-write-guards-and-session-validation",
+      "cli-optionality-and-offline-env-regression",
+      "mission-linear-closeout-audit"
+    ]
+  },
+  "blockingIssues": [
+    {
+      "featureId": "linear-keychainless-credential-path",
+      "file": "src/control-plane/extensions/linear/auth.ts",
+      "line": 697,
+      "severity": "blocking",
+      "description": "The broker-seeded Linear auth path still reads locally stored secret-backed credentials (and may fall back to the generic Hack auth session) before it can mint a broker-backed token, so repo-bound Linear commands can still hit the blocking macOS keychain path despite reporting `tokenSource: \"broker\"`."
+    },
+    {
+      "featureId": "env-trust-custody-status-surfaces",
+      "file": "apps/web/src/lib/env-management.ts",
+      "line": 113,
+      "severity": "blocking",
+      "description": "The web env-management slice discards per-variable classification data and only renders aggregate cards, so users still cannot see whether a specific env key is local plaintext, secret-backed, or portable/shared even though CLI and API now expose that value-level status."
+    },
+    {
+      "featureId": "gateway-read-write-guards-and-session-validation",
+      "file": "src/daemon/server.ts",
+      "line": 540,
+      "severity": "blocking",
+      "description": "Gateway and daemon route validation still runs on normalized `URL.pathname`, so raw dot-segment traversal requests can collapse into unrelated daemon routes instead of being rejected as malformed before routing."
+    },
+    {
+      "featureId": "cli-optionality-and-offline-env-regression",
+      "file": "tests/tickets-extension.test.ts",
+      "line": 28,
+      "severity": "blocking",
+      "description": "The outage-mode proof only covers env and tickets paths; it never validates sessions or repo-local project operations even though VAL-CROSS-001 explicitly includes them, so the claimed CLI-optional-by-default regression remains incomplete."
+    },
+    {
+      "featureId": "mission-linear-closeout-audit",
+      "file": "src/control-plane/extensions/linear/commands.ts",
+      "line": 2293,
+      "severity": "blocking",
+      "description": "Mission closeout evidence is tied to the generic `latestPublished` status update metadata rather than a closeout-specific artifact, so any later unrelated publish can silently overwrite the closeout trail surfaced in CLI and web views."
+    }
+  ],
+  "nonBlockingIssues": [
+    {
+      "featureId": "env-trust-custody-status-surfaces",
+      "file": "apps/web/src/lib/env-management.ts",
+      "line": 249,
+      "severity": "non_blocking",
+      "description": "When repo-bound env commands fail, the web fallback labels the degraded state as `local_only` instead of surfacing an explicit unknown or unavailable state."
+    },
+    {
+      "featureId": "env-trust-custody-status-surfaces",
+      "file": ".factory/validation/misc-admin-followups-1/scrutiny/reviews/management-token-email-verified-hydration-followup.json",
+      "line": 1,
+      "severity": "non_blocking",
+      "description": "The feature commit also edited an unrelated scrutiny review file from another milestone, which is harmless but makes the feature diff less isolated."
+    },
+    {
+      "featureId": "secret-storage-enforcement-and-recovery",
+      "file": "src/lib/hack-env.ts",
+      "line": 267,
+      "severity": "non_blocking",
+      "description": "Mutation-source validation still fails open when `hack.env.json` is malformed because parse failures degrade to the default contract, allowing a secret-backed key to bypass the new fail-closed guard in that edge case."
+    },
+    {
+      "featureId": "gateway-read-write-guards-and-session-validation",
+      "file": "tests/gateway-client.test.ts",
+      "line": 194,
+      "severity": "non_blocking",
+      "description": "Regression coverage adds encoded-segment and invalid-id cases but still does not exercise raw dot-segment traversal requests on the server side."
+    }
+  ],
+  "appliedUpdates": [
+    {
+      "target": "services.yaml",
+      "description": "Added reusable env-status commands (`env_list_json`, `env_backend_status_json`, and `env_status_smoke`) to `.factory/services.yaml` so future validators can gather VAL-ENV-001 CLI evidence without ad-hoc shell history.",
+      "sourceFeature": "env-trust-custody-status-surfaces"
+    },
+    {
+      "target": "library",
+      "description": "Updated `.factory/library/environment.md` to document Bun dot-segment URL normalization, the deterministic auth-broker root-env fallback helper, the env trust/custody/portability/shared-state taxonomy, and the `HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK` knob.",
+      "sourceFeature": "auth-broker-root-fallback-deterministic-regression; env-trust-custody-status-surfaces; secret-storage-enforcement-and-recovery; gateway-read-write-guards-and-session-validation"
+    }
+  ],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": ".factory/skills/control-plane-worker/SKILL.md",
+      "suggestion": "For Linear auth-path hardening work, explicitly warn that `./dist/hack linear status --json` reporting `tokenSource: \"broker\"` is not sufficient proof of a keychainless flow; require verification that the broker authorization path itself avoids local secret/keychain reads or capture a stronger negative signal.",
+      "evidence": "The `linear-keychainless-credential-path` review found that the worker treated `tokenSource=broker` as proof of success even though `src/control-plane/extensions/linear/auth.ts` still reads local secret-backed state before broker seeding can happen.",
+      "isSystemic": true
+    },
+    {
+      "target": ".factory/skills/web-control-plane-worker/SKILL.md",
+      "suggestion": "Bring the required-skill section in sync with the actual available skill inventory, or document an explicit fallback when helper skills like `hack-cli` and `linear` are not installed in the worker session.",
+      "evidence": "The `env-trust-custody-status-surfaces` worker handoff had to mark procedure deviations because the skill required `hack-cli` and `linear`, but those skill IDs were not actually available in the session.",
+      "isSystemic": true
+    },
+    {
+      "target": ".factory/skills/web-control-plane-worker/SKILL.md",
+      "suggestion": "Clarify when `agent-browser` is mandatory for web-visible slices that mainly add fallback state or non-visual seams, and require workers to record a justified deviation when they validate such changes only with unit tests plus CLI/curl proof.",
+      "evidence": "The `cli-optionality-and-offline-env-regression` review found a web-visible env fallback seam shipped without any `agent-browser` run, but the current skill language still reads as an unconditional browser-validation requirement for `apps/web` user-flow changes.",
+      "isSystemic": true
+    },
+    {
+      "target": ".factory/skills/control-plane-worker/SKILL.md",
+      "suggestion": "Carry forward the mission rule that user-facing web changes owned by control-plane workers still need `agent-browser` validation, rather than allowing curl/text scraping alone to count as complete proof.",
+      "evidence": "The `mission-linear-closeout-audit` review found a web-visible closeout surface was validated only with routed-page curl/text output because the current control-plane-worker skill mentions CLI and curl/API checks but not the mission's browser-validation requirement.",
+      "isSystemic": true
+    }
+  ],
+  "rejectedObservations": [],
+  "previousRound": null
+}

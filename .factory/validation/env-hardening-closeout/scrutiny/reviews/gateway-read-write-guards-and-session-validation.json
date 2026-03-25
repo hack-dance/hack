@@ -1,0 +1,34 @@
+{
+  "featureId": "gateway-read-write-guards-and-session-validation",
+  "reviewedAt": "2026-03-25T20:51:57Z",
+  "commitId": "ac475f3724261ee5e35e472d2b3eacce1311700c",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "Reviewed the feature entry, VAL-ENV-005 and VAL-ENV-006, the worker handoff and transcript skeleton, the control-plane-worker skill, shared-state files, and commit `ac475f3724261ee5e35e472d2b3eacce1311700c`. The write-guard portion is directionally correct: `evaluateGatewayRouteAccess()` keeps read routes available when writes are disabled, preserves distinct `project_disabled` / `writes_disabled` / `write_scope_required` denials, and the SDK/CLI now percent-encode project, job, and shell path segments. However, the fail-closed routing requirement is still not met for raw malformed paths. The daemon/gateway handlers validate `URL.pathname` only after Bun has already normalized dot segments out of `req.url`, so traversal-style wrapped requests can still collapse into unrelated daemon routes instead of being rejected before routing. That means the shipped change does not fully satisfy the expected behavior that malformed runtime/session access is rejected before command routing and cannot escape the intended scope.",
+    "issues": [
+      {
+        "file": "src/daemon/server.ts",
+        "line": 540,
+        "severity": "blocking",
+        "description": "Gateway and daemon routing both start from `new URL(opts.req.url)`, and `validateControlPlaneRouteTarget()` then inspects the normalized `pathname` (`src/daemon/control-plane-route-validation.ts:40`). In Bun, dot segments are collapsed before this point, so a raw request such as `/control-plane/projects/abc123def456/jobs/../../../../v1/sessions` becomes `/v1/sessions` before validation. The request is therefore treated as an unrelated daemon route instead of being rejected as malformed, so wrapped runtime access can still route outside the intended project scope. The same normalization blind spot also undermines session-route validation because `handleSessionRoutes()` likewise splits the normalized pathname (`src/daemon/routes/sessions.ts:78-99`)."
+      },
+      {
+        "file": "tests/gateway-client.test.ts",
+        "line": 194,
+        "severity": "non_blocking",
+        "description": "The new regression coverage stops at client-side percent-encoding and simple invalid-id cases. There is no server-side regression for raw dot-segment traversal, so the remaining normalized-URL escape path was never exercised. `tests/daemon-sessions.test.ts:67-84` and `tests/gateway-e2e.test.ts:25-69` likewise cover `not-a-uuid` and explicit guard statuses, but not raw `../` path collapse."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "The mission's shared Bun/tooling notes do not call out that Bun/WHATWG request URLs normalize dot segments before handlers inspect `req.url`. For security-sensitive route validation, that omission makes it easy to write pathname-only checks that miss raw traversal attempts.",
+      "evidence": "`.factory/library/environment.md:39-44` documents Bun tooling usage but not URL normalization behavior, while the reviewed implementation relies on normalized path inspection in `src/daemon/server.ts:540` and `src/daemon/control-plane-route-validation.ts:40`."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Fail. I reviewed the feature entry, validation contract, worker handoff/transcript, skill instructions, shared-state files, and commit diff. The explicit read/write guard behavior looks correct, but the feature still fails closed incompletely: Bun normalizes raw dot-segment paths before the new validator runs, so malformed wrapped control-plane or session paths can still collapse into other daemon routes instead of being rejected up front. I also noted a shared-state knowledge gap around Bun URL normalization that likely contributed to the miss."
+}

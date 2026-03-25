@@ -1,0 +1,28 @@
+{
+  "featureId": "mission-linear-closeout-audit",
+  "reviewedAt": "2026-03-25T20:51:54Z",
+  "commitId": "fbe575b460bbd6cdaa945746d9b3e1be088e7f18",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "Fail. The commit does reconcile the frozen scope to 13/13 resolved in the current repo state and it now surfaces corrupt delivery-audit artifacts explicitly in both the CLI and web UI. However, the closeout trail is not durably anchored to the actual mission closeout artifact: the closeout payload simply reuses whatever status update is currently the latest published project update, so any later non-closeout publish will silently relabel the mission closeout evidence across both surfaces.",
+    "issues": [
+      {
+        "file": "src/control-plane/extensions/linear/commands.ts",
+        "line": 2293,
+        "severity": "blocking",
+        "description": "`loadLinearProjectCloseoutAudit()` is fed `latestPublishedPath/title/At` from `audit.statusUpdates.latestPublished`, which is just the most recent published project update rather than a closeout-specific artifact. That means a later unrelated status-update publish will make the closeout section point at the wrong evidence file/title, so the feature does not reliably preserve an auditable mission closeout trail even though `.hack/linear/projects/7a3c8adf-ede5-4d3a-8779-9c32695c76bf/status-updates/published/2026-03-25-mission-closeout-audit.md` exists today."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The shared worker procedure does not carry forward the mission rule that user-facing web changes must be validated with `agent-browser`, so this feature was marked as having followed procedure even though the web proof was only a routed-page curl/text scrape.",
+      "evidence": "/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/AGENTS.md:37-40 requires `agent-browser` for user-facing web changes, but /Users/hack/dev/hack-dance/hack/.factory/skills/control-plane-worker/SKILL.md:26-35 only mentions repo-bound CLI and curl/API validation. The handoff at /Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/handoffs/2026-03-25T20-45-12-081Z__mission-linear-closeout-audit__bb0ea5c3-15c5-4977-915c-955c0f0f83cc.json:16-19 records curl-based web verification, and the transcript skeleton for session bb0ea5c3-15c5-4977-915c-955c0f0f83cc contains no `agent-browser` invocation."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Fail. The current repo state and tests prove the frozen 13-ticket mission scope now resolves to zero unresolved items and corrupt delivery-audit artifacts are surfaced explicitly, but the implementation still ties closeout evidence to the generic `latestPublished` status update instead of a closeout-specific artifact. That leaves the mission closeout trail vulnerable to being silently overwritten in both CLI and web status views after any later publish."
+}

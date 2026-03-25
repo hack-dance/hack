@@ -23,6 +23,9 @@ commands:
   repo_github_smoke: bun run build && ./dist/hack x github status --json
   linear_status: ./dist/hack linear status --json
   repo_linear_smoke: bun run build && ./dist/hack linear status --json
+  env_list_json: ./dist/hack env list --json
+  env_backend_status_json: ./dist/hack env backend status --json
+  env_status_smoke: ./dist/hack env list --json && ./dist/hack env backend status --json
   project_owner_routed_scope_status: HACK_AUTH_BROKER_URL=https://auth.hack-cli.hack bun ./index.ts project owner show --json
 
 services:

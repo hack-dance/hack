@@ -65,7 +65,7 @@
       "observation": "Following the browser handoff status link with the claimed management-token cookie landed the same browser session on https://hack-cli.hack/account and rendered the signed-in account shell."
     },
     {
-      "command": "HOME=<tmp>/home HACK_GLOBAL_CONFIG_PATH=<tmp>/global-config.json HACK_SECRETS_FILE_KEY=<redacted> HACK_AUTH_BROKER_URL=https://auth.hack-cli.hack /Users/hack/dev/hack-dance/hack/dist/hack auth status --json && ... auth whoami --json && ... auth invites --json",
+      "command": "HOME=<tmp>/home HACK_GLOBAL_CONFIG_PATH=<tmp>/global-config.json HACK_SECRETS_FILE_KEY=<redacted> HACK_AUTH_BROKER_URL=https://auth.hack-cli.hack <repo>/dist/hack auth status --json && ... auth whoami --json && ... auth invites --json",
       "observation": "The isolated CLI session resolved the same authenticated user and empty invitations state as the broker responses."
     },
     {

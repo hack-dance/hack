@@ -84,6 +84,12 @@ const missionLocalTempRoots = [
   "/var/folders/",
   "/private/var/folders/",
 ];
+const missionArtifactSanitizedTempRootPatterns = [
+  /\/private\/tmp(?=\/)/g,
+  /\/tmp(?=\/)/g,
+  /\/private\/var\/folders(?=\/)/g,
+  /\/var\/folders(?=\/)/g,
+] as const;
 
 /**
  * Determines whether a file path should be excluded from textual privacy checks.
@@ -161,6 +167,31 @@ export function collectPrivacyFindings(input: {
   }
 
   return findings;
+}
+
+/**
+ * Replaces workstation-specific roots in committed mission artifacts with stable placeholders while
+ * preserving the meaningful path suffixes that make the evidence understandable.
+ */
+export function sanitizeCommittedMissionArtifactText(input: {
+  readonly text: string;
+  readonly repoRoot?: string;
+  readonly missionDir?: string;
+}): string {
+  let sanitized = replaceLiteralText({
+    text: input.text,
+    needle: input.repoRoot,
+    replacement: "<repo>",
+  });
+  sanitized = replaceLiteralText({
+    text: sanitized,
+    needle: input.missionDir,
+    replacement: "<mission-dir>",
+  });
+  for (const pattern of missionArtifactSanitizedTempRootPatterns) {
+    sanitized = sanitized.replace(pattern, "<tmp>");
+  }
+  return sanitized;
 }
 
 function scanSshPrivateIp(input: {
@@ -254,4 +285,15 @@ function scanMissionLocalTempPath(input: {
 
 function isMissionArtifactFile(input: { readonly filePath: string }): boolean {
   return missionArtifactRoots.some((root) => input.filePath.startsWith(root));
+}
+
+function replaceLiteralText(input: {
+  readonly text: string;
+  readonly needle?: string;
+  readonly replacement: string;
+}): string {
+  if (!input.needle || input.needle.length === 0) {
+    return input.text;
+  }
+  return input.text.replaceAll(input.needle, input.replacement);
 }

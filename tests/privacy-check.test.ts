@@ -5,10 +5,13 @@ import { resolve } from "node:path";
 
 import {
   collectPrivacyFindings,
+  sanitizeCommittedMissionArtifactText,
   shouldSkipPrivacyCheckFile,
 } from "../src/lib/privacy-check.ts";
 
 const repoRoot = resolve(import.meta.dir, "..");
+const missionDir =
+  "/Users/test-user/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599";
 
 test("collectPrivacyFindings flags mission artifact temp paths", () => {
   const findings = collectPrivacyFindings({
@@ -29,6 +32,51 @@ test("collectPrivacyFindings ignores temp paths outside mission artifacts", () =
       content: "Use /tmp/demo for a temporary working directory in examples.",
     })
   ).toEqual([]);
+});
+
+test("sanitizeCommittedMissionArtifactText keeps admin evidence while removing local roots", () => {
+  const sanitized = sanitizeCommittedMissionArtifactText({
+    text: JSON.stringify(
+      {
+        addressesFailureFrom: `${repoRoot}/.factory/validation/admin-control-plane/scrutiny/reviews/account-shell-context-parity.json`,
+        commands: [
+          `HOME=/tmp/admin-shell/home HACK_GLOBAL_CONFIG_PATH=/tmp/admin-shell/global-config.json ${repoRoot}/dist/hack auth status --json`,
+          "python3 /tmp/ut-admin-resources-43ecf94098e7/admin_flow.py stage1",
+          `${missionDir}/evidence/admin-control-plane/admin-resources/account-before-revoke.annotated.png`,
+        ],
+      },
+      null,
+      2
+    ),
+    repoRoot,
+    missionDir,
+  });
+
+  expect(sanitized).toContain(
+    '"addressesFailureFrom": "<repo>/.factory/validation/admin-control-plane/scrutiny/reviews/account-shell-context-parity.json"'
+  );
+  expect(sanitized).toContain(
+    '"HOME=<tmp>/admin-shell/home HACK_GLOBAL_CONFIG_PATH=<tmp>/admin-shell/global-config.json <repo>/dist/hack auth status --json"'
+  );
+  expect(sanitized).toContain(
+    '"python3 <tmp>/ut-admin-resources-43ecf94098e7/admin_flow.py stage1"'
+  );
+  expect(sanitized).toContain(
+    '"<mission-dir>/evidence/admin-control-plane/admin-resources/account-before-revoke.annotated.png"'
+  );
+  expect(
+    collectPrivacyFindings({
+      filePath: ".factory/validation/admin-control-plane/demo.json",
+      content: sanitized,
+    })
+  ).toEqual([]);
+  expect(
+    sanitizeCommittedMissionArtifactText({
+      text: sanitized,
+      repoRoot,
+      missionDir,
+    })
+  ).toBe(sanitized);
 });
 
 test("tracked mission artifacts stay free of raw local absolute paths", () => {

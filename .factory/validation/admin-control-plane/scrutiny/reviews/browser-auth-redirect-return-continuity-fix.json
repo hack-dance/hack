@@ -17,6 +17,6 @@
     ]
   },
   "sharedStateObservations": [],
-  "addressesFailureFrom": "/Users/hack/dev/hack-dance/hack/.factory/validation/admin-control-plane/scrutiny/reviews/account-shell-context-parity.json",
+  "addressesFailureFrom": "<repo>/.factory/validation/admin-control-plane/scrutiny/reviews/account-shell-context-parity.json",
   "summary": "Pass. The fix closes the prior blocking auth-return continuity failure by letting `/auth/account` immediately auto-return trusted browser-owned redirects once the shared broker session is already established. No new blocking issues surfaced, but the previously identified non-blocking broker `emailVerified` parity bug still remains."
 }

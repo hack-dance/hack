@@ -79,7 +79,7 @@
   "blockers": [],
   "commands": [
     {
-      "command": "python3 /tmp/ut-admin-resources-43ecf94098e7/admin_flow.py stage1",
+      "command": "python3 <tmp>/ut-admin-resources-43ecf94098e7/admin_flow.py stage1",
       "observation": "Created isolated owner/orgmember/teammember/cascade/outsider/decliner identities, created the org and explicit team-scoped project, exercised invite accept and decline flows, validated explicit org requirement for team creation, granted project access, and claimed a management token for browser and CLI parity."
     },
     {
@@ -87,7 +87,7 @@
       "observation": "Captured the signed-in owner account shell with the selected org/team/project visible, a pending org invite rendered in the browser, and an explicit project access grant visible before revoke."
     },
     {
-      "command": "python3 /tmp/ut-admin-resources-43ecf94098e7/admin_flow.py stage2",
+      "command": "python3 <tmp>/ut-admin-resources-43ecf94098e7/admin_flow.py stage2",
       "observation": "Revoked the pending org invite, verified accept-after-revoke failure, removed a team member while preserving parent-org access, removed a second member from the parent org to prove team-membership cascade, and revoked the explicit project access grant so the viewer project list returned empty again."
     },
     {

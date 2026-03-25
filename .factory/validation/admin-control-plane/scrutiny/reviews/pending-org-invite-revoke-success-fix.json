@@ -10,6 +10,6 @@
     "issues": []
   },
   "sharedStateObservations": [],
-  "addressesFailureFrom": "/Users/hack/dev/hack-dance/hack/.factory/validation/admin-control-plane/scrutiny/reviews/org-admin-and-invite-lifecycle.json",
+  "addressesFailureFrom": "<repo>/.factory/validation/admin-control-plane/scrutiny/reviews/org-admin-and-invite-lifecycle.json",
   "summary": "Pass: the rerun closes the original missing pending-org-invite revoke proof at the broker, web route/data, and browser-evidence layers, with no new issues identified."
 }

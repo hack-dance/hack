@@ -10,6 +10,6 @@
     "issues": []
   },
   "sharedStateObservations": [],
-  "addressesFailureFrom": "/Users/hack/dev/hack-dance/hack/.factory/validation/admin-control-plane/scrutiny/reviews/project-registration-ownership-and-access-admin.json",
+  "addressesFailureFrom": "<repo>/.factory/validation/admin-control-plane/scrutiny/reviews/project-registration-ownership-and-access-admin.json",
   "summary": "Pass. The fix addresses the prior blocking parity bug by surfacing broker ownership for named default-local repos and adds the missing regression that proves the CLI now emits both broker registration data and an explicit shared/local conflict for that case."
 }

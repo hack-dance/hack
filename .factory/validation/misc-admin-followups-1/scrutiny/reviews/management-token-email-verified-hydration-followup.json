@@ -1,0 +1,21 @@
+{
+  "featureId": "management-token-email-verified-hydration-followup",
+  "reviewedAt": "2026-03-25T18:19:40Z",
+  "commitId": "e88b63d71cad503a7e9c91e91eb5f0510c7f23d6",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Reviewed the feature manifest, mission guidance, worker handoff, transcript skeleton for session `42b3ca7d-3d31-43c8-8a0b-28a1900063ef`, the `control-plane-worker` skill, and commit `e88b63d71cad503a7e9c91e91eb5f0510c7f23d6`. The fix directly addresses the previously recorded non-blocking gap: `BrokerBetterAuthSession` now carries nullable `emailVerified` state through both browser-session and management-token resolution (`services/auth-broker/src/modules/better-auth/session.ts:15,103,123,270-297`), and `/v1/auth/me` hydration now keeps verification unresolved until either the raw session or the durable user record provides it (`services/auth-broker/src/modules/better-auth/shell-plugin.ts:595-672`). The updated regression now asserts `emailVerified: true` on the management-token durable-user path alongside the existing user and scoped-name hydration checks (`services/auth-broker/tests/session-auth.test.ts:738-854`). I did not find any remaining correctness issues in the scoped management-token hydration path.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "Repo-external temporary Bun smoke scripts are a poor fit for this monorepo because workspace imports do not resolve from `/tmp`, but that pitfall is not captured in the shared worker guidance.",
+      "evidence": "The transcript skeleton for session `42b3ca7d-3d31-43c8-8a0b-28a1900063ef` shows a failed verification attempt with `tmp_script=$(mktemp /tmp/management-token-me-XXXXXX.ts) && bun \"$tmp_script\"` returning `Cannot find module '@hack/auth-contract' from '/private/tmp/management-token-me-x2WGnl.ts'`. `.factory/skills/control-plane-worker/SKILL.md` allows deterministic smokes but does not note that repo-local scripts or repo-resident entrypoints are needed when Bun must resolve workspace aliases."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass. The feature closes the remaining non-blocking management-token `/v1/auth/me` `emailVerified` hydration gap and adds regression coverage for the durable-user path. I noted one minor shared-state gap around using `/tmp` Bun scripts with workspace imports in this repo."
+}

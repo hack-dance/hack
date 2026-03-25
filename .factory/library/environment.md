@@ -41,6 +41,7 @@ When verifying provider parity or browser handoff behavior, prefer these variabl
 - Bun is the canonical runtime and validator path for this repo.
 - The local machine currently has Bun available, but the installed version may lag the version declared in `package.json`; prefer repo commands and keep validation evidence concrete.
 - Use `./dist/hack` for repo-bound CLI behavior after build; use global `hack` only for runtime orchestration.
+- Repo-external Bun smoke scripts are a poor fit for monorepo validation here: if a smoke needs workspace imports such as `@hack/auth-contract`, keep the script under the repo root or use an existing repo-resident entrypoint instead of generating it under `/tmp`.
 
 ## Auth-Broker Test Isolation
 

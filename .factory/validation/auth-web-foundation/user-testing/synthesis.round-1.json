@@ -1,0 +1,36 @@
+{
+  "milestone": "auth-web-foundation",
+  "round": 1,
+  "status": "fail",
+  "assertionsSummary": {
+    "total": 9,
+    "passed": 8,
+    "failed": 1,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-LINEAR-008",
+    "VAL-AUTH-001",
+    "VAL-AUTH-002",
+    "VAL-AUTH-003",
+    "VAL-AUTH-004",
+    "VAL-AUTH-005",
+    "VAL-AUTH-007",
+    "VAL-AUTH-008"
+  ],
+  "failedAssertions": [
+    {
+      "id": "VAL-AUTH-006",
+      "reason": "Live revoke paths fail for accepted org/team memberships when the owner targets the recipient email, so removed users retain org/team access and can continue mutating shared admin resources."
+    }
+  ],
+  "blockedAssertions": [],
+  "appliedUpdates": [
+    {
+      "target": "user-testing.md",
+      "description": "Added routed web-host details, the Better Auth email/password validation path, and explicit flow-validator guidance for the web surface.",
+      "source": "setup"
+    }
+  ],
+  "previousRound": null
+}

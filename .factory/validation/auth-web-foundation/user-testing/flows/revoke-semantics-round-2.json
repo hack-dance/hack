@@ -1,0 +1,47 @@
+{
+  "testedAt": "2026-03-25T05:21:21Z",
+  "surface": "Broker / local HTTP surface (routed auth broker)",
+  "toolsUsed": ["curl", "python3", "bun test"],
+  "isolation": {
+    "namespace": "ut-r2-1774416081",
+    "orgSlug": "ut-r2-1774416081-org",
+    "teamSlug": "ut-r2-1774416081-team",
+    "emails": {
+      "owner": "ut-r2-1774416081.owner@example.com",
+      "org_member": "ut-r2-1774416081.orgmember@example.com",
+      "team_member": "ut-r2-1774416081.teammember@example.com",
+      "outsider": "ut-r2-1774416081.outsider@example.com"
+    }
+  },
+  "assertionResults": [
+    {
+      "id": "VAL-AUTH-006",
+      "status": "pass",
+      "reason": "Live routed-broker checks passed: owner invited users by recipient email, recipients accepted, outsider and org-only unauthorized checks failed closed, team-member removal by recipient email returned 200 with removed target normalized to accepted user id `mMm68hWqbKffGpwhCx03JoZiYJSEZDs0`, team read/mutate access then failed closed, and the removed team member still had parent-org read access (`200`). Org-member removal by recipient email returned 200 with removed target normalized to accepted user id `QgbRSC3MkQ2enV37LufRtpCHP48bmLrS`, after which org read and org-scoped mutate access failed closed immediately.",
+      "evidence": [
+        "<mission-dir>/evidence/auth-web-foundation/revoke-semantics-round-2/live-results.json",
+        "<mission-dir>/evidence/auth-web-foundation/revoke-semantics-round-2/automated-corroboration.txt"
+      ]
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "commands": [
+    {
+      "command": "curl -ksSf \"https://auth.hack-cli.hack/health\"",
+      "exitCode": 0,
+      "observation": "The routed broker health check returned ok before exercising the revoke flow."
+    },
+    {
+      "command": "python3 - <<'PY' ... revoke live flow ... PY",
+      "exitCode": 0,
+      "observation": "Created isolated owner/org-member/team-member/outsider users, exercised invite acceptance, verified fail-closed outsider/org-only behavior, and confirmed immediate email-target revocation for accepted team and org memberships."
+    },
+    {
+      "command": "cd \"/Users/hack/dev/hack-dance/hack\" && bun test \"./services/auth-broker/tests/org-team-membership.test.ts\" > \"<mission-dir>/evidence/auth-web-foundation/revoke-semantics-round-2/automated-corroboration.txt\" 2>&1",
+      "exitCode": 0,
+      "observation": "The focused org/team membership suite passed, including the accepted org-member removal-by-email regression coverage."
+    }
+  ],
+  "summary": "Tested 1 assertion: 1 passed, 0 failed, 0 blocked."
+}

@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 
 import "./globals.css";
 
-import { appMetadata } from "@/src/lib/workspace-scaffold";
+import { appMetadata } from "@/src/lib/control-plane-shell";
 
 export const metadata = appMetadata;
 

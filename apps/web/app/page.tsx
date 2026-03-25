@@ -1,5 +1,5 @@
-import WorkspaceScaffoldPage from "@/src/components/workspace-scaffold-page";
+import ControlPlaneShell from "@/src/components/control-plane-shell";
 
 export default function HomePage() {
-  return <WorkspaceScaffoldPage />;
+  return <ControlPlaneShell />;
 }

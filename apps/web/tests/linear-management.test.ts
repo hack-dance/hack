@@ -577,6 +577,7 @@ test("linear management section renders durable publish and delivery audit state
             path: ".hack/linear/projects/proj_default/status-updates/published/2026-03-14-weekly.md",
           },
         },
+        deliveryCorruption: null,
         delivery: {
           path: ".hack/linear/projects/proj_default/delivery-audit.json",
           profileId: "work",
@@ -606,6 +607,41 @@ test("linear management section renders durable publish and delivery audit state
               status: "failed",
               projectId: "proj_default",
               reason: "git sync failed",
+            },
+          ],
+        },
+        closeout: {
+          path: ".hack/linear/projects/proj_default/closeout-scope.json",
+          totalItems: 3,
+          resolvedCount: 3,
+          unresolvedCount: 0,
+          latestPublishedPath:
+            ".hack/linear/projects/proj_default/status-updates/published/2026-03-25-closeout.md",
+          latestPublishedTitle: "Mission closeout audit",
+          latestPublishedAt: "2026-03-25T12:00:00.000Z",
+          deliveryAuditPath:
+            ".hack/linear/projects/proj_default/delivery-audit.json",
+          deliveryAuditState: "available",
+          entries: [
+            {
+              ticketId: "T-00001",
+              externalKey: "HACK-457",
+              title: "Foundational ticket",
+              status: "done",
+            },
+            {
+              ticketId: "T-00002",
+              externalKey: "HACK-560",
+              title: "Shared auth and web foundation",
+              parentExternalKey: "HACK-559",
+              status: "done",
+            },
+            {
+              ticketId: "T-00003",
+              externalKey: "HACK-563",
+              title: "Env status, CLI optionality, and closeout",
+              parentExternalKey: "HACK-559",
+              status: "done",
             },
           ],
         },
@@ -647,7 +683,115 @@ test("linear management section renders durable publish and delivery audit state
   expect(markup).toContain("processed 3");
   expect(markup).toContain("failed 1");
   expect(markup).toContain("git sync failed");
+  expect(markup).toContain("Mission closeout");
+  expect(markup).toContain(
+    "All frozen mission-scoped Linear tickets now resolve to done"
+  );
+  expect(markup).toContain(
+    ".hack/linear/projects/proj_default/closeout-scope.json"
+  );
   expect(markup).toContain(
     ".hack/linear/projects/proj_default/delivery-audit.json"
   );
+});
+
+test("linear management section surfaces corrupt delivery audit guidance", () => {
+  const state = buildLinearManagementState({
+    status: {
+      extensionId: "dance.hack.linear",
+      selectedProfile: "work",
+      selectedSource: "project_routing",
+      defaultProfile: "default",
+      selectedMissing: false,
+      authRef: "linear.api.work",
+      service: "hack-linear-work",
+      tokenEnvFallback: "HACK_LINEAR_API_TOKEN",
+      apiUrl: "https://api.linear.app/graphql",
+      accountId: "lin-user-1",
+      accountName: "Hack User",
+      accountEmail: "hack@example.com",
+      tokenResolved: true,
+      tokenSource: "broker",
+      tokenExpiresAt: null,
+      error: null,
+      profileError: null,
+      ok: true,
+      projectBinding: {
+        ok: true,
+        profileId: "work",
+        projectId: "proj_default",
+        projectName: "Default",
+        teamId: "team_default",
+        additionalProjects: [],
+      },
+      summary: {
+        activeProfile: "work",
+        connected: true,
+        connectionLabel: "Connected as Hack User",
+        routingSummary:
+          "This repo routes Linear sync to Default (proj_default) in team team_default.",
+        linkedProjectsLabel: null,
+        capabilities: ["Publish repo-bound status updates"],
+        repair: null,
+        nextSteps: ["Run `hack linear status-updates publish`."],
+      },
+      audit: {
+        statusUpdates: {
+          draftCount: 0,
+          publishedCount: 1,
+          latestPublished: {
+            title: "Mission closeout audit",
+            linearId: "update_999",
+            publishedAt: "2026-03-25T12:00:00.000Z",
+            updatedAt: "2026-03-25T12:00:00.000Z",
+            path: ".hack/linear/projects/proj_default/status-updates/published/2026-03-25-closeout.md",
+          },
+        },
+        deliveryCorruption: {
+          path: ".hack/linear/projects/proj_default/delivery-audit.json",
+          message: "Delivery audit JSON is malformed.",
+          recovery:
+            "Remove or repair .hack/linear/projects/proj_default/delivery-audit.json, then rerun `hack linear run-autosync --json` to regenerate the audit from repo-bound sync state.",
+        },
+        delivery: null,
+        closeout: {
+          path: ".hack/linear/projects/proj_default/closeout-scope.json",
+          totalItems: 1,
+          resolvedCount: 0,
+          unresolvedCount: 1,
+          latestPublishedPath:
+            ".hack/linear/projects/proj_default/status-updates/published/2026-03-25-closeout.md",
+          latestPublishedTitle: "Mission closeout audit",
+          latestPublishedAt: "2026-03-25T12:00:00.000Z",
+          deliveryAuditPath:
+            ".hack/linear/projects/proj_default/delivery-audit.json",
+          deliveryAuditState: "corrupt",
+          entries: [
+            {
+              ticketId: "T-00003",
+              externalKey: "HACK-563",
+              title: "Env status, CLI optionality, and closeout",
+              parentExternalKey: "HACK-559",
+              status: "open",
+            },
+          ],
+        },
+      },
+    },
+    profiles: null,
+    connections: {
+      accessControlMode: "better_auth_team_owned",
+      connections: [],
+    },
+    canInspectHackConnection: true,
+  });
+
+  const markup = renderToStaticMarkup(
+    LinearManagementSection({ linearManagement: state })
+  );
+
+  expect(markup).toContain("Delivery audit is corrupt");
+  expect(markup).toContain("Delivery audit JSON is malformed.");
+  expect(markup).toContain("hack linear run-autosync --json");
+  expect(markup).toContain("Current status: open");
 });

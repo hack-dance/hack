@@ -61,171 +61,184 @@ export default function LinearManagementSection(input: {
       ) : null}
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
-        <section
-          className={cn(sectionSurfaceClassName, "space-y-6 p-6 sm:p-7")}
-        >
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div className="space-y-2">
-              <p className="font-medium text-sky-100 text-sm">
-                {linearManagement.hackConnection.connected &&
-                linearManagement.localAccess.ready
-                  ? "Ready"
-                  : "Needs attention"}
-              </p>
-              <h3 className="font-medium text-white text-xl">
-                {linearManagement.hackConnection.summary}
-              </h3>
-              <p className="max-w-3xl text-sm text-white/70 leading-6">
-                {linearManagement.hackConnection.detail}
-              </p>
-            </div>
-            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-white/70 text-xs uppercase tracking-[0.18em]">
-              {linearManagement.summary.connected
-                ? "local ready"
-                : "local repair"}
-            </span>
-          </div>
-
-          <dl className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            <DetailCard label="Active profile">
-              {linearManagement.selectedProfile}
-            </DetailCard>
-            <DetailCard label="Routing source">
-              {linearManagement.selectedSource}
-            </DetailCard>
-            <DetailCard label="Connected on Hack">
-              {hackConnectionLabel}
-            </DetailCard>
-            <DetailCard label="Local access">{localAccessLabel}</DetailCard>
-            <DetailCard label="Hack owner">
-              {linearManagement.hackConnection.ownerLabel ?? "No Hack owner"}
-            </DetailCard>
-            <DetailCard label="Connected account">
-              {linearManagement.hackConnection.accountLabel}
-            </DetailCard>
-          </dl>
-
-          <div className="grid gap-3 rounded-2xl border border-white/10 bg-white/5 p-4">
-            <p className="font-medium text-sm text-white">
-              Repo-bound status commands
-            </p>
-            <code className={codeClassName}>
-              {linearManagement.statusCommand}
-            </code>
-            <code className={codeClassName}>
-              {linearManagement.connectionsCommand}
-            </code>
-            <p className="text-sm text-white/65 leading-6">
-              Compare the browser view with the same repo-bound status and
-              connection payloads the CLI exposes for this machine.
-            </p>
-          </div>
-
-          {linearManagement.summary.capabilities.length > 0 ? (
-            <section className="grid gap-3 rounded-2xl border border-white/10 bg-white/5 p-4">
-              <p className="font-medium text-sm text-white">Available now</p>
-              <ul className="grid gap-3 text-sm text-white/75 leading-6">
-                {linearManagement.summary.capabilities.map((capability) => (
-                  <li key={capability}>{capability}</li>
-                ))}
-              </ul>
-            </section>
-          ) : null}
-
-          {linearManagement.repair ? (
-            <section className="grid gap-3 rounded-2xl border border-amber-300/20 bg-amber-500/10 p-4">
-              <p className="font-medium text-amber-100 text-sm">
-                {linearManagement.repair.title}
-              </p>
-              <p className="text-sm text-white/75 leading-6">
-                {linearManagement.repair.reason}
-              </p>
-              <code className={codeClassName}>
-                {linearManagement.repair.command}
-              </code>
-            </section>
-          ) : null}
-        </section>
-
-        <section
-          className={cn(sectionSurfaceClassName, "space-y-6 p-6 sm:p-7")}
-        >
-          <div className="space-y-2">
-            <h3 className="font-medium text-white text-xl">
-              Binding visibility
-            </h3>
-            <p className="text-sm text-white/70 leading-6">
-              The default route and additional linked projects stay visible
-              without duplication so the current repo routing context remains
-              explicit.
-            </p>
-          </div>
-
-          <dl className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            <DetailCard label="Repo route profile">
-              {linearManagement.projectBinding.profileId ??
-                "No repo profile override"}
-            </DetailCard>
-            <DetailCard label="Default route">
-              {linearManagement.projectBinding.defaultProject?.label ??
-                "No default Linear route"}
-            </DetailCard>
-            <DetailCard label="Additional linked projects">
-              {String(
-                linearManagement.projectBinding.additionalProjects.length
-              )}
-            </DetailCard>
-          </dl>
-
-          {linearManagement.projectBinding.additionalProjects.length > 0 ? (
-            <ul className="grid gap-3">
-              {linearManagement.projectBinding.additionalProjects.map(
-                (project) => (
-                  <li
-                    className="rounded-2xl border border-white/10 bg-slate-950/35 p-4"
-                    key={project.projectId}
-                  >
-                    <p className="font-medium text-white">{project.label}</p>
-                  </li>
-                )
-              )}
-            </ul>
-          ) : (
-            <p className="text-sm text-white/70 leading-6">
-              No additional linked projects are in scope for this repo right
-              now.
-            </p>
-          )}
-
-          <div className="space-y-3 rounded-2xl border border-white/10 bg-white/5 p-4">
-            <div className="space-y-2">
-              <p className="font-medium text-sm text-white">
-                Available profiles
-              </p>
-              <p className="text-sm text-white/70 leading-6">
-                Keep the default profile, project override, and saved profile
-                metadata visible so repairs target the right route quickly.
-              </p>
-            </div>
-
-            <dl className="grid gap-3 md:grid-cols-3">
-              <DetailCard label="Default profile">
-                {linearManagement.defaultProfile}
-              </DetailCard>
-              <DetailCard label="Project override">
-                {linearManagement.projectOverride ?? "No project override"}
-              </DetailCard>
-              <DetailCard label="Extension enabled">
-                {linearManagement.extensionEnabled ? "yes" : "no"}
-              </DetailCard>
-            </dl>
-
-            <LinearProfilesList linearManagement={linearManagement} />
-          </div>
-
-          <RepoAuditSection audit={linearManagement.audit} />
-        </section>
+        <LinearOverviewSection
+          hackConnectionLabel={hackConnectionLabel}
+          linearManagement={linearManagement}
+          localAccessLabel={localAccessLabel}
+        />
+        <LinearBindingSection linearManagement={linearManagement} />
       </div>
+    </section>
+  );
+}
+
+function LinearOverviewSection(input: {
+  readonly linearManagement: LinearManagementState;
+  readonly localAccessLabel: string;
+  readonly hackConnectionLabel: string;
+}) {
+  const readinessLabel =
+    input.linearManagement.hackConnection.connected &&
+    input.linearManagement.localAccess.ready
+      ? "Ready"
+      : "Needs attention";
+  const localStatusLabel = input.linearManagement.summary.connected
+    ? "local ready"
+    : "local repair";
+
+  return (
+    <section className={cn(sectionSurfaceClassName, "space-y-6 p-6 sm:p-7")}>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="space-y-2">
+          <p className="font-medium text-sky-100 text-sm">{readinessLabel}</p>
+          <h3 className="font-medium text-white text-xl">
+            {input.linearManagement.hackConnection.summary}
+          </h3>
+          <p className="max-w-3xl text-sm text-white/70 leading-6">
+            {input.linearManagement.hackConnection.detail}
+          </p>
+        </div>
+        <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-white/70 text-xs uppercase tracking-[0.18em]">
+          {localStatusLabel}
+        </span>
+      </div>
+
+      <dl className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        <DetailCard label="Active profile">
+          {input.linearManagement.selectedProfile}
+        </DetailCard>
+        <DetailCard label="Routing source">
+          {input.linearManagement.selectedSource}
+        </DetailCard>
+        <DetailCard label="Connected on Hack">
+          {input.hackConnectionLabel}
+        </DetailCard>
+        <DetailCard label="Local access">{input.localAccessLabel}</DetailCard>
+        <DetailCard label="Hack owner">
+          {input.linearManagement.hackConnection.ownerLabel ?? "No Hack owner"}
+        </DetailCard>
+        <DetailCard label="Connected account">
+          {input.linearManagement.hackConnection.accountLabel}
+        </DetailCard>
+      </dl>
+
+      <div className="grid gap-3 rounded-2xl border border-white/10 bg-white/5 p-4">
+        <p className="font-medium text-sm text-white">
+          Repo-bound status commands
+        </p>
+        <code className={codeClassName}>
+          {input.linearManagement.statusCommand}
+        </code>
+        <code className={codeClassName}>
+          {input.linearManagement.connectionsCommand}
+        </code>
+        <p className="text-sm text-white/65 leading-6">
+          Compare the browser view with the same repo-bound status and
+          connection payloads the CLI exposes for this machine.
+        </p>
+      </div>
+
+      {input.linearManagement.summary.capabilities.length > 0 ? (
+        <section className="grid gap-3 rounded-2xl border border-white/10 bg-white/5 p-4">
+          <p className="font-medium text-sm text-white">Available now</p>
+          <ul className="grid gap-3 text-sm text-white/75 leading-6">
+            {input.linearManagement.summary.capabilities.map((capability) => (
+              <li key={capability}>{capability}</li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {input.linearManagement.repair ? (
+        <section className="grid gap-3 rounded-2xl border border-amber-300/20 bg-amber-500/10 p-4">
+          <p className="font-medium text-amber-100 text-sm">
+            {input.linearManagement.repair.title}
+          </p>
+          <p className="text-sm text-white/75 leading-6">
+            {input.linearManagement.repair.reason}
+          </p>
+          <code className={codeClassName}>
+            {input.linearManagement.repair.command}
+          </code>
+        </section>
+      ) : null}
+    </section>
+  );
+}
+
+function LinearBindingSection(input: {
+  readonly linearManagement: LinearManagementState;
+}) {
+  return (
+    <section className={cn(sectionSurfaceClassName, "space-y-6 p-6 sm:p-7")}>
+      <div className="space-y-2">
+        <h3 className="font-medium text-white text-xl">Binding visibility</h3>
+        <p className="text-sm text-white/70 leading-6">
+          The default route and additional linked projects stay visible without
+          duplication so the current repo routing context remains explicit.
+        </p>
+      </div>
+
+      <dl className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        <DetailCard label="Repo route profile">
+          {input.linearManagement.projectBinding.profileId ??
+            "No repo profile override"}
+        </DetailCard>
+        <DetailCard label="Default route">
+          {input.linearManagement.projectBinding.defaultProject?.label ??
+            "No default Linear route"}
+        </DetailCard>
+        <DetailCard label="Additional linked projects">
+          {String(
+            input.linearManagement.projectBinding.additionalProjects.length
+          )}
+        </DetailCard>
+      </dl>
+
+      {input.linearManagement.projectBinding.additionalProjects.length > 0 ? (
+        <ul className="grid gap-3">
+          {input.linearManagement.projectBinding.additionalProjects.map(
+            (project) => (
+              <li
+                className="rounded-2xl border border-white/10 bg-slate-950/35 p-4"
+                key={project.projectId}
+              >
+                <p className="font-medium text-white">{project.label}</p>
+              </li>
+            )
+          )}
+        </ul>
+      ) : (
+        <p className="text-sm text-white/70 leading-6">
+          No additional linked projects are in scope for this repo right now.
+        </p>
+      )}
+
+      <div className="space-y-3 rounded-2xl border border-white/10 bg-white/5 p-4">
+        <div className="space-y-2">
+          <p className="font-medium text-sm text-white">Available profiles</p>
+          <p className="text-sm text-white/70 leading-6">
+            Keep the default profile, project override, and saved profile
+            metadata visible so repairs target the right route quickly.
+          </p>
+        </div>
+
+        <dl className="grid gap-3 md:grid-cols-3">
+          <DetailCard label="Default profile">
+            {input.linearManagement.defaultProfile}
+          </DetailCard>
+          <DetailCard label="Project override">
+            {input.linearManagement.projectOverride ?? "No project override"}
+          </DetailCard>
+          <DetailCard label="Extension enabled">
+            {input.linearManagement.extensionEnabled ? "yes" : "no"}
+          </DetailCard>
+        </dl>
+
+        <LinearProfilesList linearManagement={input.linearManagement} />
+      </div>
+
+      <RepoAuditSection audit={input.linearManagement.audit} />
     </section>
   );
 }
@@ -291,6 +304,8 @@ function RepoAuditSection(input: {
 }) {
   const latestPublished = input.audit?.statusUpdates.latestPublished ?? null;
   const deliveryAudit = input.audit?.delivery ?? null;
+  const deliveryCorruption = input.audit?.deliveryCorruption ?? null;
+  const closeout = input.audit?.closeout ?? null;
   const draftCount = input.audit?.statusUpdates.draftCount ?? 0;
   const draftLabel = `${draftCount} draft${draftCount === 1 ? "" : "s"} still waiting to publish`;
 
@@ -304,12 +319,16 @@ function RepoAuditSection(input: {
         </p>
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-2">
+      <div className="grid gap-4 xl:grid-cols-3">
         <PublishedStatusUpdateAuditCard
           draftLabel={draftLabel}
           latestPublished={latestPublished}
         />
-        <DeliveryAuditCard deliveryAudit={deliveryAudit} />
+        <DeliveryAuditCard
+          deliveryAudit={deliveryAudit}
+          deliveryCorruption={deliveryCorruption}
+        />
+        <CloseoutAuditCard closeout={closeout} />
       </div>
     </section>
   );
@@ -361,61 +380,153 @@ function DeliveryAuditCard(input: {
   readonly deliveryAudit: NonNullable<
     LinearManagementState["audit"]
   >["delivery"];
+  readonly deliveryCorruption: NonNullable<
+    LinearManagementState["audit"]
+  >["deliveryCorruption"];
 }) {
+  if (input.deliveryCorruption) {
+    return (
+      <section className="space-y-3 rounded-2xl border border-white/10 bg-slate-950/35 p-4">
+        <p className="font-medium text-sm text-white">
+          Latest delivery reconciliation
+        </p>
+        <p className="font-medium text-rose-100">Delivery audit is corrupt</p>
+        <p className="text-sm text-white/70 leading-6">
+          {input.deliveryCorruption.message}
+        </p>
+        <code className={codeClassName}>{input.deliveryCorruption.path}</code>
+        <p className="text-amber-100 text-sm leading-6">
+          {input.deliveryCorruption.recovery}
+        </p>
+      </section>
+    );
+  }
+
+  if (!input.deliveryAudit) {
+    return (
+      <section className="space-y-3 rounded-2xl border border-white/10 bg-slate-950/35 p-4">
+        <p className="font-medium text-sm text-white">
+          Latest delivery reconciliation
+        </p>
+        <p className="text-sm text-white/70 leading-6">
+          No durable delivery audit is recorded yet. Run the repo-bound autosync
+          flow to capture processed, applied, and failed counts.
+        </p>
+      </section>
+    );
+  }
+
   return (
     <section className="space-y-3 rounded-2xl border border-white/10 bg-slate-950/35 p-4">
       <p className="font-medium text-sm text-white">
         Latest delivery reconciliation
       </p>
-      {input.deliveryAudit ? (
-        <>
-          <div className="grid gap-3 md:grid-cols-2">
-            <DetailCard label="Processed">
-              {`processed ${input.deliveryAudit.processedDeliveries}`}
-            </DetailCard>
-            <DetailCard label="Applied">
-              {`applied ${input.deliveryAudit.appliedDeliveries}`}
-            </DetailCard>
-            <DetailCard label="Failed">
-              {`failed ${input.deliveryAudit.failedDeliveries}`}
-            </DetailCard>
-            <DetailCard label="Updated">
-              {input.deliveryAudit.updatedAt}
-            </DetailCard>
-          </div>
-          {input.deliveryAudit.deliveries.length > 0 ? (
-            <ul className="grid gap-3">
-              {input.deliveryAudit.deliveries.map((delivery) => (
-                <li
-                  className="rounded-2xl border border-white/10 bg-white/5 p-3"
-                  key={delivery.deliveryId}
-                >
-                  <p className="font-medium text-sm text-white">
-                    {delivery.deliveryId}
-                  </p>
-                  <p className="text-sm text-white/70 leading-6">
-                    {delivery.mode} · {delivery.status}
-                    {delivery.issueIdentifier
-                      ? ` · ${delivery.issueIdentifier}`
-                      : ""}
-                  </p>
-                  {delivery.reason ? (
-                    <p className="text-amber-100 text-sm leading-6">
-                      {delivery.reason}
-                    </p>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-          <code className={codeClassName}>{input.deliveryAudit.path}</code>
-        </>
-      ) : (
+      <div className="grid gap-3 md:grid-cols-2">
+        <DetailCard label="Processed">
+          {`processed ${input.deliveryAudit.processedDeliveries}`}
+        </DetailCard>
+        <DetailCard label="Applied">
+          {`applied ${input.deliveryAudit.appliedDeliveries}`}
+        </DetailCard>
+        <DetailCard label="Failed">
+          {`failed ${input.deliveryAudit.failedDeliveries}`}
+        </DetailCard>
+        <DetailCard label="Updated">{input.deliveryAudit.updatedAt}</DetailCard>
+      </div>
+      {input.deliveryAudit.deliveries.length > 0 ? (
+        <ul className="grid gap-3">
+          {input.deliveryAudit.deliveries.map((delivery) => (
+            <li
+              className="rounded-2xl border border-white/10 bg-white/5 p-3"
+              key={delivery.deliveryId}
+            >
+              <p className="font-medium text-sm text-white">
+                {delivery.deliveryId}
+              </p>
+              <p className="text-sm text-white/70 leading-6">
+                {delivery.mode} · {delivery.status}
+                {delivery.issueIdentifier
+                  ? ` · ${delivery.issueIdentifier}`
+                  : ""}
+              </p>
+              {delivery.reason ? (
+                <p className="text-amber-100 text-sm leading-6">
+                  {delivery.reason}
+                </p>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      <code className={codeClassName}>{input.deliveryAudit.path}</code>
+    </section>
+  );
+}
+
+function CloseoutAuditCard(input: {
+  readonly closeout: NonNullable<LinearManagementState["audit"]>["closeout"];
+}) {
+  if (!input.closeout) {
+    return (
+      <section className="space-y-3 rounded-2xl border border-white/10 bg-slate-950/35 p-4">
+        <p className="font-medium text-sm text-white">Mission closeout</p>
         <p className="text-sm text-white/70 leading-6">
-          No durable delivery audit is recorded yet. Run the repo-bound autosync
-          flow to capture processed, applied, and failed counts.
+          No repo-bound closeout scope is recorded yet for this Linear project.
+        </p>
+      </section>
+    );
+  }
+
+  const unresolvedEntries = input.closeout.entries.filter(
+    (entry) => entry.status !== "done"
+  );
+
+  return (
+    <section className="space-y-3 rounded-2xl border border-white/10 bg-slate-950/35 p-4">
+      <p className="font-medium text-sm text-white">Mission closeout</p>
+      <p className="text-sm text-white/70 leading-6">
+        Track the frozen mission scope against repo-bound synced ticket status
+        so the browser and CLI report the same unresolved count.
+      </p>
+      <div className="grid gap-3 md:grid-cols-2">
+        <DetailCard label="Resolved">
+          {`${input.closeout.resolvedCount}/${input.closeout.totalItems}`}
+        </DetailCard>
+        <DetailCard label="Unresolved">
+          {String(input.closeout.unresolvedCount)}
+        </DetailCard>
+      </div>
+      {unresolvedEntries.length > 0 ? (
+        <ul className="grid gap-3">
+          {unresolvedEntries.map((entry) => (
+            <li
+              className="rounded-2xl border border-amber-300/20 bg-amber-500/10 p-3"
+              key={entry.ticketId}
+            >
+              <p className="font-medium text-sm text-white">
+                {entry.externalKey ?? entry.ticketId}
+              </p>
+              <p className="text-sm text-white/70 leading-6">{entry.title}</p>
+              <p className="text-amber-100 text-sm leading-6">
+                Current status: {entry.status}
+              </p>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-emerald-100 text-sm leading-6">
+          All frozen mission-scoped Linear tickets now resolve to done from the
+          repo-bound synced ticket store.
         </p>
       )}
+      <code className={codeClassName}>{input.closeout.path}</code>
+      <p className="text-sm text-white/65 leading-6">
+        Latest published evidence:{" "}
+        {input.closeout.latestPublishedTitle ?? "No published closeout update"}
+      </p>
+      <p className="text-sm text-white/65 leading-6">
+        Delivery audit state: {input.closeout.deliveryAuditState}
+      </p>
     </section>
   );
 }

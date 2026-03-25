@@ -105,6 +105,11 @@ type LinearStatusCommandPayload = {
         readonly health?: string;
       } | null;
     };
+    readonly deliveryCorruption: {
+      readonly path: string;
+      readonly message: string;
+      readonly recovery: string;
+    } | null;
     readonly delivery: {
       readonly path: string;
       readonly projectId?: string;
@@ -131,6 +136,32 @@ type LinearStatusCommandPayload = {
         readonly issueIdentifier?: string;
         readonly ticketId?: string;
         readonly reason?: string;
+      }[];
+    } | null;
+    readonly closeout: {
+      readonly path: string;
+      readonly totalItems: number;
+      readonly resolvedCount: number;
+      readonly unresolvedCount: number;
+      readonly latestPublishedPath?: string;
+      readonly latestPublishedTitle?: string;
+      readonly latestPublishedAt?: string;
+      readonly deliveryAuditPath?: string;
+      readonly deliveryAuditState: "available" | "missing" | "corrupt";
+      readonly entries: readonly {
+        readonly ticketId: string;
+        readonly externalId?: string;
+        readonly externalKey?: string;
+        readonly title: string;
+        readonly parentExternalKey?: string;
+        readonly status:
+          | "open"
+          | "in_progress"
+          | "blocked"
+          | "done"
+          | "missing";
+        readonly currentTitle?: string;
+        readonly currentUpdatedAt?: string;
       }[];
     } | null;
   } | null;

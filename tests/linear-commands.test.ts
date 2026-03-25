@@ -7,6 +7,7 @@ import {
   writeLinearProjectDeliveryAudit,
 } from "../src/control-plane/extensions/linear/audit.ts";
 import { resolveLinearToken } from "../src/control-plane/extensions/linear/auth.ts";
+import { loadLinearProjectCloseoutAudit } from "../src/control-plane/extensions/linear/closeout.ts";
 import {
   __testOnly,
   LINEAR_COMMANDS,
@@ -4603,6 +4604,7 @@ Still on track for dogfooding.
 
   expect(audit.statusUpdates.publishedCount).toBe(1);
   expect(audit.statusUpdates.draftCount).toBe(1);
+  expect(audit.deliveryCorruption).toBeNull();
   expect(audit.statusUpdates.latestPublished).toMatchObject({
     title: "Weekly update",
     linearId: "update_123",
@@ -4625,6 +4627,138 @@ Still on track for dogfooding.
       deliveryId: "delivery-project",
       status: "failed",
       reason: "git sync failed",
+    }),
+  ]);
+});
+
+test("loadLinearProjectAuditState surfaces corrupt delivery audit guidance", async () => {
+  const projectDir = ensureTempDir();
+  const auditPath = resolve(
+    projectDir,
+    ".hack/linear/projects/proj_123/delivery-audit.json"
+  );
+  await mkdir(resolve(auditPath, ".."), { recursive: true });
+  await writeFile(auditPath, "{ invalid json\n");
+
+  const audit = await loadLinearProjectAuditState({
+    projectDir,
+    linearProjectId: "proj_123",
+  });
+
+  expect(audit.delivery).toBeNull();
+  expect(audit.deliveryCorruption).toMatchObject({
+    path: ".hack/linear/projects/proj_123/delivery-audit.json",
+    message: "Delivery audit JSON is malformed.",
+  });
+  expect(audit.deliveryCorruption?.recovery).toContain(
+    "hack linear run-autosync --json"
+  );
+});
+
+test("loadLinearProjectCloseoutAudit reconciles frozen scope against repo-bound ticket status", async () => {
+  const projectDir = ensureTempDir();
+  const closeoutPath = resolve(
+    projectDir,
+    ".hack/linear/projects/proj_123/closeout-scope.json"
+  );
+  await mkdir(resolve(closeoutPath, ".."), { recursive: true });
+  await writeFile(
+    closeoutPath,
+    `${JSON.stringify(
+      {
+        openedAtStart: [
+          {
+            ticketId: "T-00001",
+            externalKey: "HACK-457",
+            title: "Foundational ticket",
+          },
+        ],
+        missionCreated: [
+          {
+            ticketId: "T-SCOPE-560",
+            externalKey: "HACK-560",
+            title: "Mission child",
+            parentExternalKey: "HACK-559",
+          },
+          {
+            ticketId: "T-SCOPE-563",
+            externalKey: "HACK-563",
+            title: "Closeout ticket",
+            parentExternalKey: "HACK-559",
+          },
+        ],
+      },
+      null,
+      2
+    )}\n`
+  );
+
+  const audit = await loadLinearProjectCloseoutAudit({
+    projectDir,
+    linearProjectId: "proj_123",
+    tickets: [
+      {
+        ticketId: "T-00001",
+        title: "Foundational ticket",
+        status: "done",
+        createdAt: "2026-03-24T00:00:00.000Z",
+        updatedAt: "2026-03-25T00:00:00.000Z",
+        dependsOn: [],
+        blocks: [],
+        owner: "linear",
+        source: "linear",
+        tags: [],
+        externalSystem: "linear",
+        externalId: "issue-457",
+        externalKey: "HACK-457",
+      },
+      {
+        ticketId: "T-ALT-560",
+        title: "Mission child",
+        status: "open",
+        createdAt: "2026-03-24T00:00:00.000Z",
+        updatedAt: "2026-03-25T01:00:00.000Z",
+        dependsOn: [],
+        blocks: [],
+        owner: "hack",
+        source: "hack",
+        tags: [],
+        externalSystem: "linear",
+        externalId: "issue-560",
+        externalKey: "HACK-560",
+      },
+    ],
+    latestPublishedPath:
+      ".hack/linear/projects/proj_123/status-updates/published/2026-03-25-closeout.md",
+    latestPublishedTitle: "Mission closeout audit",
+    latestPublishedAt: "2026-03-25T12:00:00.000Z",
+    deliveryAuditPath: ".hack/linear/projects/proj_123/delivery-audit.json",
+    deliveryAuditState: "available",
+  });
+
+  expect(audit).toMatchObject({
+    path: ".hack/linear/projects/proj_123/closeout-scope.json",
+    totalItems: 3,
+    resolvedCount: 1,
+    unresolvedCount: 2,
+    latestPublishedTitle: "Mission closeout audit",
+    deliveryAuditState: "available",
+  });
+  expect(audit?.entries).toEqual([
+    expect.objectContaining({
+      ticketId: "T-00001",
+      externalKey: "HACK-457",
+      status: "done",
+    }),
+    expect.objectContaining({
+      ticketId: "T-SCOPE-560",
+      externalKey: "HACK-560",
+      status: "open",
+    }),
+    expect.objectContaining({
+      ticketId: "T-SCOPE-563",
+      externalKey: "HACK-563",
+      status: "missing",
     }),
   ]);
 });

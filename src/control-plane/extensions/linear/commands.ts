@@ -57,6 +57,7 @@ import {
   type LinearWorkflowState,
   type LinearWorkflowStateType,
 } from "./client.ts";
+import { loadLinearProjectCloseoutAudit } from "./closeout.ts";
 import {
   type LinearProjectArtifactFamily,
   type LinearProjectArtifactSnapshot,
@@ -2167,9 +2168,13 @@ type LinearStatusPayload = {
 type LinearStatusCommandPayload = LinearStatusPayload & {
   readonly projectBinding: ReturnType<typeof buildProjectBindingPayload>;
   readonly summary: LinearProjectManagementSummary;
-  readonly audit: Awaited<
-    ReturnType<typeof loadLinearProjectAuditState>
-  > | null;
+  readonly audit:
+    | (Awaited<ReturnType<typeof loadLinearProjectAuditState>> & {
+        readonly closeout: Awaited<
+          ReturnType<typeof loadLinearProjectCloseoutAudit>
+        >;
+      })
+    | null;
   readonly sharedProjectScope: SharedProjectScopeSummary | null;
 };
 
@@ -2263,11 +2268,51 @@ async function resolveLinearStatusCommandPayload(input: {
           linearProjectId: projectBinding.projectId,
         })
       : null;
+  let closeoutDeliveryAuditState: "available" | "missing" | "corrupt" =
+    "missing";
+  if (audit?.deliveryCorruption) {
+    closeoutDeliveryAuditState = "corrupt";
+  } else if (audit?.delivery) {
+    closeoutDeliveryAuditState = "available";
+  }
+  const closeout =
+    input.projectDir && projectBinding.projectId
+      ? await loadLinearProjectCloseoutAudit({
+          projectDir: input.projectDir,
+          linearProjectId: projectBinding.projectId,
+          tickets: input.controlPlaneConfig.tickets?.git
+            ? await createTicketsStore({
+                projectRoot: input.projectDir,
+                controlPlaneConfig: input.controlPlaneConfig,
+                logger: {
+                  info: () => undefined,
+                  warn: () => undefined,
+                },
+              }).listTickets()
+            : [],
+          latestPublishedPath:
+            audit?.statusUpdates.latestPublished?.path ?? null,
+          latestPublishedTitle:
+            audit?.statusUpdates.latestPublished?.title ?? null,
+          latestPublishedAt:
+            audit?.statusUpdates.latestPublished?.publishedAt ??
+            audit?.statusUpdates.latestPublished?.updatedAt ??
+            null,
+          deliveryAuditPath:
+            audit?.delivery?.path ?? audit?.deliveryCorruption?.path ?? null,
+          deliveryAuditState: closeoutDeliveryAuditState,
+        })
+      : null;
   return {
     ...status,
     projectBinding,
     summary,
-    audit,
+    audit: audit
+      ? {
+          ...audit,
+          closeout,
+        }
+      : null,
     sharedProjectScope,
   };
 }
@@ -2279,6 +2324,19 @@ async function renderLinearStatusPayload(input: {
   const bindingSummary = describeLinearBindingState({
     binding: input.payload.projectBinding,
   });
+  let deliveryAuditLines: string[] = [];
+  if (input.payload.audit?.deliveryCorruption) {
+    deliveryAuditLines = [
+      `- Delivery reconciliation: corrupt (${input.payload.audit.deliveryCorruption.message})`,
+      `- Delivery audit file: ${input.payload.audit.deliveryCorruption.path}`,
+      `- Recovery: ${input.payload.audit.deliveryCorruption.recovery}`,
+    ];
+  } else if (input.payload.audit?.delivery) {
+    deliveryAuditLines = [
+      `- Delivery reconciliation: processed ${input.payload.audit.delivery.processedDeliveries}, applied ${input.payload.audit.delivery.appliedDeliveries}, failed ${input.payload.audit.delivery.failedDeliveries}`,
+      `- Delivery audit file: ${input.payload.audit.delivery.path}`,
+    ];
+  }
   const lines = [
     `Active profile: ${input.payload.summary.activeProfile}`,
     `Connection: ${input.payload.summary.connectionLabel}`,
@@ -2323,10 +2381,19 @@ async function renderLinearStatusPayload(input: {
                 `- Published metadata: ${input.payload.audit.statusUpdates.latestPublished.publishedAt ?? input.payload.audit.statusUpdates.latestPublished.updatedAt ?? input.payload.audit.statusUpdates.latestPublished.path}`,
               ]
             : []),
-          ...(input.payload.audit.delivery
+          ...deliveryAuditLines,
+          ...(input.payload.audit.closeout
             ? [
-                `- Delivery reconciliation: processed ${input.payload.audit.delivery.processedDeliveries}, applied ${input.payload.audit.delivery.appliedDeliveries}, failed ${input.payload.audit.delivery.failedDeliveries}`,
-                `- Delivery audit file: ${input.payload.audit.delivery.path}`,
+                `- Mission closeout: ${input.payload.audit.closeout.resolvedCount}/${input.payload.audit.closeout.totalItems} resolved, ${input.payload.audit.closeout.unresolvedCount} unresolved`,
+                `- Closeout scope file: ${input.payload.audit.closeout.path}`,
+                ...(input.payload.audit.closeout.unresolvedCount > 0
+                  ? [
+                      `- Remaining tickets: ${input.payload.audit.closeout.entries
+                        .filter((entry) => entry.status !== "done")
+                        .map((entry) => entry.externalKey ?? entry.ticketId)
+                        .join(", ")}`,
+                    ]
+                  : []),
               ]
             : []),
         ]

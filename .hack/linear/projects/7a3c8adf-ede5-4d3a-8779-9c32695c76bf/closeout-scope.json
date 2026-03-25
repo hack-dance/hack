@@ -1,0 +1,110 @@
+{
+  "projectId": "7a3c8adf-ede5-4d3a-8779-9c32695c76bf",
+  "projectName": "Hack",
+  "teamId": "e0aedec9-5273-446f-b975-aa4cd1525900",
+  "profileId": "default",
+  "definition": "All Hack-project Linear issues open at mission start plus mission-created optional-web-control-plane issues.",
+  "seedStatus": "opened_at_start_and_mission_created_seeded",
+  "openedAtStart": [
+    {
+      "ticketId": "T-J780JQ2VK0",
+      "externalId": "91c16d6b-deda-47d7-af5a-e7acf2cafdaf",
+      "externalKey": "HACK-457",
+      "title": "Dogfood the Hack App Linear project through Hack-native planning and sync flows",
+      "status": "open"
+    },
+    {
+      "ticketId": "T-Y4QFAGYKC7",
+      "externalId": "eb96b169-35da-45cf-a9f6-9a708ab4c487",
+      "externalKey": "HACK-458",
+      "title": "Improve autosync, webhook delivery, and operator visibility for Linear sync",
+      "status": "open"
+    },
+    {
+      "ticketId": "T-W2TT0YH7FV",
+      "externalId": "d7d02527-1f29-4a5e-bf17-1405dc758208",
+      "externalKey": "HACK-463",
+      "title": "Harden the Docker Desktop primary path and remove fragile Orbstack assumptions",
+      "status": "open"
+    },
+    {
+      "ticketId": "T-NFZAWEKT5K",
+      "externalId": "ec38378c-e36a-416f-a6fc-9241b27b3376",
+      "externalKey": "HACK-470",
+      "title": "Connect team and organization administration to env sharing and project ownership",
+      "status": "open"
+    },
+    {
+      "ticketId": "T-WGZTQTDWQ4",
+      "externalId": "3d55ffdb-ed82-4d59-b6b0-af4796cf5d64",
+      "externalKey": "HACK-471",
+      "title": "Separate local-only versus broker or cloud-mediated admin operations",
+      "status": "open"
+    },
+    {
+      "ticketId": "T-HT0JHXX1QA",
+      "externalId": "b0cb66e7-925d-488d-8da0-cff1052f4a01",
+      "externalKey": "HACK-474",
+      "title": "Define the proposed runtime architecture, interfaces, and build-versus-borrow boundaries",
+      "status": "open"
+    },
+    {
+      "ticketId": "T-Q7XAWDR8JZ",
+      "externalId": "9566c8fc-bd3e-42b8-a3c9-55a81fe1f394",
+      "externalKey": "HACK-475",
+      "title": "Produce a separation plan so runtime R&D informs but does not block the current hardening roadmap",
+      "status": "open"
+    },
+    {
+      "ticketId": "T-RMCRX5CBCY",
+      "externalId": "6bb84e91-1cb3-4765-9407-1fc988900999",
+      "externalKey": "HACK-558",
+      "title": "Support multiline env values in Hack plaintext env workflow",
+      "status": "open"
+    }
+  ],
+  "missionCreated": [
+    {
+      "ticketId": "T-XQ0VTXW5AJ",
+      "externalId": "12c1576b-2366-400e-b5be-3853f984854a",
+      "externalKey": "HACK-559",
+      "title": "Optional web control plane delivery tracker",
+      "parentExternalKey": null,
+      "status": "open"
+    },
+    {
+      "ticketId": "T-M9H3R81H2G",
+      "externalId": "98a94392-fb4e-4d1d-a0fc-05eb7b2b228c",
+      "externalKey": "HACK-560",
+      "title": "Optional web control plane: shared auth and web foundation",
+      "parentExternalKey": "HACK-559",
+      "status": "open"
+    },
+    {
+      "ticketId": "T-CBZE19TVEP",
+      "externalId": "ee0156d8-e883-4b11-b29e-750cc86993e3",
+      "externalKey": "HACK-561",
+      "title": "Optional web control plane: org, team, and project administration",
+      "parentExternalKey": "HACK-559",
+      "status": "open"
+    },
+    {
+      "ticketId": "T-W5ZGW8M3QF",
+      "externalId": "cb5ae6b0-2160-46bd-9eda-3404207decda",
+      "externalKey": "HACK-562",
+      "title": "Optional web control plane: GitHub and Linear integration management",
+      "parentExternalKey": "HACK-559",
+      "status": "open"
+    },
+    {
+      "ticketId": "T-DP0Q3VKTTJ",
+      "externalId": "47788fd6-65ee-4fe6-8eec-55ca5063bee3",
+      "externalKey": "HACK-563",
+      "title": "Optional web control plane: env status, CLI optionality, and closeout",
+      "parentExternalKey": "HACK-559",
+      "status": "open"
+    }
+  ],
+  "seededAt": "2026-03-24T21:42:00Z",
+  "missionCreatedAt": "2026-03-24T21:53:30Z"
+}

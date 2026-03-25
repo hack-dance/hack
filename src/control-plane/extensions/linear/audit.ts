@@ -52,6 +52,12 @@ export type LinearProjectDeliveryAudit = LinearProjectDeliveryAuditRecord & {
   readonly path: string;
 };
 
+export type LinearProjectDeliveryAuditCorruption = {
+  readonly path: string;
+  readonly message: string;
+  readonly recovery: string;
+};
+
 export type LinearProjectStatusUpdateAudit = {
   readonly draftCount: number;
   readonly publishedCount: number;
@@ -62,15 +68,18 @@ export type LinearProjectStatusUpdateAudit = {
 export type LinearProjectAuditState = {
   readonly statusUpdates: LinearProjectStatusUpdateAudit;
   readonly delivery: LinearProjectDeliveryAudit | null;
+  readonly deliveryCorruption: LinearProjectDeliveryAuditCorruption | null;
 };
 
 export async function loadLinearProjectAuditState(input: {
   readonly projectDir: string;
   readonly linearProjectId: string;
 }): Promise<LinearProjectAuditState> {
+  const delivery = await readLinearProjectDeliveryAudit(input);
   return {
     statusUpdates: await loadLinearProjectStatusUpdateAudit(input),
-    delivery: await readLinearProjectDeliveryAudit(input),
+    delivery: delivery.audit,
+    deliveryCorruption: delivery.corruption,
   };
 }
 
@@ -142,24 +151,49 @@ async function loadLinearProjectStatusUpdateAudit(input: {
 async function readLinearProjectDeliveryAudit(input: {
   readonly projectDir: string;
   readonly linearProjectId: string;
-}): Promise<LinearProjectDeliveryAudit | null> {
+}): Promise<{
+  readonly audit: LinearProjectDeliveryAudit | null;
+  readonly corruption: LinearProjectDeliveryAuditCorruption | null;
+}> {
   const path = resolveLinearProjectDeliveryAuditPath(input);
   const file = Bun.file(path);
   if (!(await file.exists())) {
-    return null;
+    return {
+      audit: null,
+      corruption: null,
+    };
   }
+
+  const value = await file.json().catch(() => INVALID_JSON_AUDIT_SENTINEL);
   const parsed = parseLinearProjectDeliveryAuditRecord({
-    value: await file.json().catch(() => null),
+    value,
   });
   if (!parsed) {
-    return null;
-  }
-  return {
-    ...parsed,
-    path: toRepoRelativePath({
+    const repoRelativePath = toRepoRelativePath({
       projectDir: input.projectDir,
       path,
-    }),
+    });
+    return {
+      audit: null,
+      corruption: {
+        path: repoRelativePath,
+        message:
+          value === INVALID_JSON_AUDIT_SENTINEL
+            ? "Delivery audit JSON is malformed."
+            : "Delivery audit is missing required fields.",
+        recovery: `Remove or repair ${repoRelativePath}, then rerun \`hack linear run-autosync --json\` to regenerate the audit from repo-bound sync state.`,
+      },
+    };
+  }
+  return {
+    audit: {
+      ...parsed,
+      path: toRepoRelativePath({
+        projectDir: input.projectDir,
+        path,
+      }),
+    },
+    corruption: null,
   };
 }
 
@@ -333,3 +367,7 @@ function readOptionalString(value: unknown): string | null {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object";
 }
+
+const INVALID_JSON_AUDIT_SENTINEL = Symbol(
+  "invalid-linear-delivery-audit-json"
+);

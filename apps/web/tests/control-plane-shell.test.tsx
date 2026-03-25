@@ -14,6 +14,7 @@ test("control plane shell metadata describes the accessible foundation", () => {
   expect(shellNavigationItems.map(({ href }) => href)).toEqual([
     "#account-context",
     "#organizations",
+    "#teams",
     "#invitations",
     "#foundations",
     "#guardrails",
@@ -36,6 +37,7 @@ test("control plane shell renders landmarks and keyboard navigation affordances"
   expect(markup).toContain("Keyboard ready");
   expect(markup).toContain("Sign in to load your Hack account context");
   expect(markup).toContain("Organizations");
+  expect(markup).toContain("Teams");
   expect(markup).toContain("Invitations");
 });
 

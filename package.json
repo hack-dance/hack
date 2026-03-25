@@ -5,6 +5,7 @@
   "module": "index.ts",
   "type": "module",
   "workspaces": [
+    "apps/*",
     "services/*",
     "packages/*"
   ],

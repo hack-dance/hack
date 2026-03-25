@@ -32,6 +32,8 @@ hackdance.*.private-key.pem
 # caches
 .eslintcache
 .cache
+.next/
+**/.next/
 .turbo/
 **/.turbo/
 *.tsbuildinfo

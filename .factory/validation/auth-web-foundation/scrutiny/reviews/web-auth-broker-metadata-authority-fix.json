@@ -1,0 +1,15 @@
+{
+  "featureId": "web-auth-broker-metadata-authority-fix",
+  "reviewedAt": "2026-03-25T04:02:41Z",
+  "commitId": "3dba6a080c141ecbb8770336fb4b16b981b50f63",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Reviewed the feature metadata, mission guidance, prior failing reviews, transcript skeleton, handoff, and commit `3dba6a080c141ecbb8770336fb4b16b981b50f63`. This fix resolves the prior web-surface blocker: both auth entrypoint pages now server-render from authoritative broker Better Auth metadata (`apps/web/app/auth/page.tsx:12-23`, `apps/web/app/auth/account/page.tsx:12-23`), the shared auth config fetches broker provider metadata and fails closed when that metadata is unavailable (`apps/web/src/lib/auth-config.ts:76-151,184-209`), the client entrypoint refresh clears providers when Better Auth is disabled while adopting broker trusted origins (`apps/web/src/components/auth-entrypoint.tsx:102-105`), and the social-start proxy rejects disabled providers plus normalizes redirects against broker trusted origins instead of env-derived defaults (`apps/web/app/api/auth/social/route.ts:29-56`). The updated regression tests cover the previously missing disabled-provider and narrowed-trusted-origin cases (`apps/web/tests/auth-entrypoints.test.tsx:99-191`). I did not find any remaining code issues in this feature relative to the broker-authoritative metadata failure it was meant to fix.",
+    "issues": []
+  },
+  "sharedStateObservations": [],
+  "addressesFailureFrom": "<repo-root>/.factory/validation/auth-web-foundation/scrutiny/reviews/shared-auth-contract-and-trusted-origins.json ; <repo-root>/.factory/validation/auth-web-foundation/scrutiny/reviews/browser-auth-entrypoints-and-handoff.json",
+  "summary": "Pass. The fix makes broker Better Auth metadata authoritative across the web auth entrypoints and social-start proxy, fails closed when broker metadata cannot be confirmed, and adds regression coverage for the disabled-provider and narrowed-trusted-origin cases that caused the earlier blocking finding."
+}

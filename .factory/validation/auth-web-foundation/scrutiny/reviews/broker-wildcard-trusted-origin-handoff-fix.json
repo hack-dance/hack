@@ -1,0 +1,21 @@
+{
+  "featureId": "broker-wildcard-trusted-origin-handoff-fix",
+  "reviewedAt": "2026-03-25T04:02:58Z",
+  "commitId": "31ff4980593beae8089e5596249b1ae6dffd5533",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Reviewed the fix feature entry, the round-one synthesis, both prior blocking reviews, the worker transcript skeleton, the worker handoff, the landed broker code, and commit `31ff4980593beae8089e5596249b1ae6dffd5533`. The fix adequately resolves the original wildcard trusted-origin blocker in the broker handoff path: `normalizeSafeReturnUrl()` now delegates wildcard checks to the shared `isTrustedAuthOrigin()` matcher from `@hack/auth-contract`, and that helper is used by all broker-owned handoff entrypoints that previously depended on the exact-origin rule (`/v1/auth/session/start`, `/auth`, and `/auth/account`). The added regressions cover a trusted Hack wildcard return, a trusted preview wildcard return, and fail-closed stripping of an untrusted origin, so the broker side is now aligned with the shared contract without expanding scope into the separate web metadata-authority fix.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "services",
+      "observation": "The shared service catalog still lacks a reusable broker handoff redirect smoke for trusted-wildcard versus untrusted-origin behavior, so this fix had to verify the milestone-critical redirect decision with a one-off Bun script instead of a named shared command.",
+      "evidence": "`.factory/services.yaml:16-19` defines routed auth health/provider/header smokes but no redirect-normalization smoke, while `<mission-dir>/handoffs/2026-03-25T03-44-09-206Z__broker-wildcard-trusted-origin-handoff-fix__c2304591-78dd-42f2-9155-e8f885d0b365.json:36-38` records a one-off `bun -e` broker handoff check for trusted wildcard returns and an untrusted origin."
+    }
+  ],
+  "addressesFailureFrom": ".factory/validation/auth-web-foundation/scrutiny/reviews/shared-auth-contract-and-trusted-origins.json; .factory/validation/auth-web-foundation/scrutiny/reviews/browser-auth-entrypoints-and-handoff.json",
+  "summary": "Pass. This fix closes the broker-side wildcard trusted-origin blocker by switching handoff redirect normalization to the shared wildcard-aware matcher and by adding broker regressions for trusted wildcard and fail-closed untrusted redirects. Shared-state follow-up: add a reusable broker handoff redirect smoke command to `.factory/services.yaml`."
+}

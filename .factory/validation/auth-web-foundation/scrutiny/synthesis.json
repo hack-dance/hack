@@ -1,7 +1,7 @@
 {
   "milestone": "auth-web-foundation",
-  "round": 1,
-  "status": "fail",
+  "round": 2,
+  "status": "pass",
   "validatorsRun": {
     "test": {
       "passed": true,
@@ -20,121 +20,39 @@
     }
   },
   "reviewsSummary": {
-    "total": 7,
-    "passed": 3,
-    "failed": 4,
-    "failedFeatures": [
-      "shared-auth-contract-and-trusted-origins",
-      "apps-web-workspace-scaffold",
-      "browser-auth-entrypoints-and-handoff",
-      "durable-org-team-store-defaults"
-    ]
+    "total": 4,
+    "passed": 4,
+    "failed": 0,
+    "failedFeatures": []
   },
-  "blockingIssues": [
-    {
-      "featureId": "shared-auth-contract-and-trusted-origins",
-      "sourceFeatures": [
-        "shared-auth-contract-and-trusted-origins",
-        "browser-auth-entrypoints-and-handoff"
-      ],
-      "file": "services/auth-broker/src/modules/better-auth/shell-plugin.ts",
-      "line": 1614,
-      "severity": "blocking",
-      "description": "Broker handoff redirect normalization still uses exact origin matching instead of the wildcard-aware shared auth contract matcher, so wildcard trusted origins such as `https://*.hack-cli.hack`, `https://*.hack-cli.hack.gy`, and deploy-preview patterns are rejected in both the shared-auth-contract and browser-auth handoff slices."
-    },
-    {
-      "featureId": "shared-auth-contract-and-trusted-origins",
-      "sourceFeatures": [
-        "shared-auth-contract-and-trusted-origins",
-        "browser-auth-entrypoints-and-handoff"
-      ],
-      "file": "apps/web/src/components/auth-entrypoint.tsx",
-      "line": 99,
-      "severity": "blocking",
-      "description": "The `apps/web` auth surface does not make broker provider metadata authoritative when Better Auth is disabled or its trusted-origin set changes, so the browser entrypoints can continue rendering or validating stale env-derived auth configuration."
-    },
-    {
-      "featureId": "apps-web-workspace-scaffold",
-      "file": "apps/web/next-env.d.ts",
-      "line": 3,
-      "severity": "blocking",
-      "description": "The scaffold typecheck path still depends on the ignored generated file `apps/web/.next/dev/types/routes.d.ts`, so `apps/web` is not reproducible from a clean checkout without ad-hoc local artifact generation."
-    },
-    {
-      "featureId": "durable-org-team-store-defaults",
-      "file": "services/auth-broker/src/app.ts",
-      "line": 221,
-      "severity": "blocking",
-      "description": "The default org/team store wiring still silently falls back to `InMemoryOrgTeamsStore` when `DATABASE_URL` is absent, so org/team admin state is not durable by default and the broker does not explicitly surface a dev-only in-memory mode."
-    }
-  ],
-  "nonBlockingIssues": [
-    {
-      "featureId": "shared-auth-contract-and-trusted-origins",
-      "file": "src/control-plane/extensions/linear/commands.ts",
-      "line": 2582,
-      "severity": "non_blocking",
-      "description": "The auth-scoped feature commit also bundled an unrelated Linear typing fix, which makes the slice harder to review and roll back cleanly."
-    },
-    {
-      "featureId": "apps-web-workspace-scaffold",
-      "file": "apps/web/package.json",
-      "line": 15,
-      "severity": "non_blocking",
-      "description": "The scaffold commit also pulled in unused auth/UI dependencies and shadcn scaffolding beyond the stated minimal placeholder route scope."
-    }
-  ],
+  "blockingIssues": [],
+  "nonBlockingIssues": [],
   "appliedUpdates": [
     {
       "target": "services.yaml",
-      "description": "Added reusable routed stack and auth smoke commands (`runtime_stack_routed_healthcheck`, `runtime_auth_provider_metadata_smoke`, and `runtime_auth_legacy_shell_headers`) to `.factory/services.yaml`.",
-      "sourceFeature": "browser-auth-entrypoints-and-handoff"
+      "description": "Added reusable targeted auth-broker commands (`auth_wildcard_handoff_targeted_test` and `auth_org_team_store_mode_targeted_test`) to `.factory/services.yaml` so the rerun issues have named validation hooks instead of handoff-only commands.",
+      "sourceFeature": "broker-wildcard-trusted-origin-handoff-fix; durable-org-team-default-mode-hardening"
     },
     {
       "target": "library",
-      "description": "Documented the concrete `apps/web` auth env inputs and shared auth-config aliases in `.factory/library/environment.md`.",
-      "sourceFeature": "shared-auth-contract-and-trusted-origins"
-    },
-    {
-      "target": "library",
-      "description": "Documented the concrete control-plane shell contract in `.factory/library/web-control-plane.md`.",
-      "sourceFeature": "accessible-control-plane-shell"
-    },
-    {
-      "target": "library",
-      "description": "Documented the Bun test-root root-shim pattern needed for `bun test apps/web` in `.factory/library/web-control-plane.md`.",
-      "sourceFeature": "apps-web-workspace-scaffold"
+      "description": "Updated `.factory/library/architecture.md` to record that auth-broker startup now reports the org/team store mode, with missing `DATABASE_URL` explicitly surfaced as development-only in-memory mode and durable initialization failing closed.",
+      "sourceFeature": "durable-org-team-default-mode-hardening"
     }
   ],
   "suggestedGuidanceUpdates": [
     {
       "target": ".factory/skills/web-control-plane-worker/SKILL.md",
-      "suggestion": "Allow scaffold-only `apps/web` slices to validate without routed-host `agent-browser` checks when the mission explicitly says the web runtime is not declared yet, as long as the worker records the reason and uses package-local tests plus structural verification instead.",
-      "evidence": "The `apps-web-workspace-scaffold` review found the current skill forced a deviation because the routed host did not exist yet, but the feature still had a legitimate verification path through package-local tests and stash/worktree inspection.",
+      "suggestion": "Explicitly carve out non-UI `apps/web` scaffold, typecheck, and validation-only fixes from the default routed-host `agent-browser` verification procedure.",
+      "evidence": "The `apps-web-scaffold-reproducible-typecheck-fix` worker legitimately completed a non-UI scaffold/typecheck fix with file/test/typecheck verification only, yet the current skill still reads as though routed-host browser verification is always expected for `apps/web` work.",
       "isSystemic": false
     },
     {
-      "target": ".factory/skills/web-control-plane-worker/SKILL.md",
-      "suggestion": "Require auth-entrypoint features to cover disabled-provider and trusted-origin negative cases in addition to happy-path browser auth checks.",
-      "evidence": "Both `shared-auth-contract-and-trusted-origins` and `browser-auth-entrypoints-and-handoff` passed happy-path validation while still missing wildcard trusted-origin enforcement and broker-authoritative disabled-provider behavior.",
-      "isSystemic": true
-    },
-    {
-      "target": "scrutiny-validator",
-      "suggestion": "Require scrutiny review evidence to sanitize workstation-specific paths with `<repo-root>`, `<mission-dir>`, and `<tmp>` placeholders before writing review JSON files.",
-      "evidence": "The `privacy-check-friendly-mission-artifacts` review found later scrutiny review drafts still recorded raw temp or mission-local absolute paths until they were sanitized during synthesis closeout.",
+      "target": "mission-worker-base",
+      "suggestion": "Sanitize absolute repo, mission, and temp paths in handoff verification commands before calling `EndFeatureRun`, using placeholders such as `<repo-root>`, `<mission-dir>`, and `<tmp>`.",
+      "evidence": "The `apps-web-scaffold-reproducible-typecheck-fix` handoff still embedded workstation-specific absolute paths in verification commands despite mission guidance already requiring repo-relative or sanitized path forms, which suggests the writeback path needs stronger procedural enforcement.",
       "isSystemic": true
     }
   ],
-  "rejectedObservations": [
-    {
-      "observation": "Rewrite `.factory/library/architecture.md` now to restate the durable-by-default org/team persistence rule.",
-      "reason": "Rejected because the current shipped code still falls back to in-memory storage without `DATABASE_URL`; changing the architecture note immediately would misrepresent the actual behavior until the blocking durability bug is fixed."
-    },
-    {
-      "observation": "Overwrite `services.hack-stack.healthcheck` to include routed-host smokes.",
-      "reason": "Rejected for now because scrutiny triage only applies additive `services.yaml` updates; a new routed healthcheck command was added instead of mutating the existing shared service definition."
-    }
-  ],
-  "previousRound": null
+  "rejectedObservations": [],
+  "previousRound": ".factory/validation/auth-web-foundation/scrutiny/synthesis.round-1.json"
 }

@@ -6,6 +6,8 @@ commands:
   test: bun run test
   auth_test: bun run auth:test
   auth_targeted_test: bun test ./services/auth-broker/tests/config.test.ts ./services/auth-broker/tests/index.test.ts
+  auth_wildcard_handoff_targeted_test: bun test ./services/auth-broker/tests/index.test.ts ./services/auth-broker/tests/session-auth.test.ts
+  auth_org_team_store_mode_targeted_test: bun test ./services/auth-broker/tests/index.test.ts ./services/auth-broker/tests/org-team-membership.test.ts
   db_test: bun run db:test
   auth_broker_smoke: curl -sf http://127.0.0.1:8080/health
   runtime_up: hack up -d

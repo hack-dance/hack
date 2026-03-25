@@ -1,0 +1,26 @@
+{
+  "featureId": "apps-web-scaffold-reproducible-typecheck-fix",
+  "reviewedAt": "2026-03-25T04:02:22Z",
+  "commitId": "eeb981b882eb16679c6920276e53229473abd50d",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Reviewed the fix feature contract, prior failed review, worker handoff, transcript skeleton, shared-state docs, and commit `eeb981b882eb16679c6920276e53229473abd50d`. The patch removes the committed `.next` route-type references from `apps/web/next-env.d.ts` and `apps/web/tsconfig.json`, adds a regression that keeps those typecheck inputs free of `.next/` references, and repairs the root `bun test apps/web` shim to import the still-present package tests after `workspace-scaffold.test.tsx` was removed. A search across committed `apps/web` sources found no remaining `.next/` references outside the regression assertions, so the original clean-checkout typecheck dependency is adequately removed while both requested validation loops remain intact.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The `web-control-plane-worker` skill still reads like routed-host browser verification is part of the standard procedure for `apps/web` work, but this non-UI scaffold/typecheck fix completed without any runtime or `agent-browser` step and still reported `followedProcedure: true`. The skill should explicitly carve out non-UI scaffold/validation fixes so future workers do not have to infer that the browser steps are optional.",
+      "evidence": "<repo-root>/.factory/skills/web-control-plane-worker/SKILL.md:3,20,30 describes browser-facing slices and routed-host `agent-browser` verification, while <mission-dir>/worker-transcripts.jsonl:17 for session `c7b93ac9-6269-46b1-aa41-6dc96ed9417d` shows only file/test/typecheck work and no `hack open --json` or `agent-browser` tool use; the paired handoff at <mission-dir>/handoffs/2026-03-25T03-39-50-887Z__apps-web-scaffold-reproducible-typecheck-fix__c7b93ac9-6269-46b1-aa41-6dc96ed9417d.json:57-58 still marks `followedProcedure` true."
+    },
+    {
+      "area": "conventions",
+      "observation": "Mission guidance already requires sanitized or repo-relative paths in committed mission artifacts, but the reviewed fix handoff still embeds workstation-specific absolute repo paths in its recorded verification commands. Closeout tooling or templates likely need stronger enforcement.",
+      "evidence": "<mission-dir>/AGENTS.md:28 forbids committing workstation-specific absolute paths, but <mission-dir>/handoffs/2026-03-25T03-39-50-887Z__apps-web-scaffold-reproducible-typecheck-fix__c7b93ac9-6269-46b1-aa41-6dc96ed9417d.json:21,31,36,41 records commands with absolute `<repo-root>` paths."
+    }
+  ],
+  "addressesFailureFrom": ".factory/validation/auth-web-foundation/scrutiny/reviews/apps-web-workspace-scaffold.json",
+  "summary": "Pass. This fix removes the scaffold's committed `.next` route-type dependency, adds regression coverage to keep typecheck inputs clean-checkout safe, and restores the root `bun test apps/web` shim to committed package tests. I also noted two shared-state follow-ups: the web worker skill still reads as browser-mandatory for non-UI `apps/web` fixes, and handoff artifacts still need stronger path sanitization enforcement."
+}

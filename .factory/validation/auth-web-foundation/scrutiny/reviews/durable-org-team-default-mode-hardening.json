@@ -1,0 +1,26 @@
+{
+  "featureId": "durable-org-team-default-mode-hardening",
+  "reviewedAt": "2026-03-25T04:02:18Z",
+  "commitId": "1c2e90e90f4aab67160a540cd877eb1558c9fe7e",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Reviewed the fix feature entry, the prior blocking review, the round-one synthesis, the worker transcript skeleton, the worker handoff, the landed source, and commit `1c2e90e90f4aab67160a540cd877eb1558c9fe7e`. The fix addresses the original blocker: `resolveDefaultOrgTeamsStore` now returns explicit durable-vs-dev-only mode metadata, durable initialization failures throw instead of silently falling back to memory, and `services/auth-broker/src/index.ts` emits startup output that reports the selected mode. Updated tests cover the no-`DATABASE_URL` path, the durable path, and the fail-closed durable-init path, so the prior silent in-memory fallback is no longer present in the shipped default startup path.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "The shared architecture note still captures only the `DATABASE_URL`-present half of the org/team persistence story, but not the new runtime contract that missing `DATABASE_URL` is an explicitly surfaced development-only mode with startup output. Future reviewers must rediscover that behavior from source/tests rather than shared state.",
+      "evidence": "`.factory/library/architecture.md:24-25,37` describes durable-by-default persistence and DB-backed wiring when `DATABASE_URL` is available, while `services/auth-broker/src/index.ts:10-17,32-34` now makes the selected mode part of startup output."
+    },
+    {
+      "area": "services",
+      "observation": "The shared service catalog still lacks a reusable auth-broker command for the missing-`DATABASE_URL` negative-path smoke this fix had to verify manually, so the explicit dev-only-mode check remains handoff-specific instead of reusable validation infrastructure.",
+      "evidence": "`.factory/services.yaml:10,24-27` defines only a generic local auth-broker smoke/start path, while `<mission-dir>/handoffs/2026-03-25T03-58-46-613Z__durable-org-team-default-mode-hardening__cbdd325b-4369-42e5-b4f7-6e4c140b0c50.json:31-38` records separate manual startup commands for with/without `DATABASE_URL` to verify the feature."
+    }
+  ],
+  "addressesFailureFrom": ".factory/validation/auth-web-foundation/scrutiny/reviews/durable-org-team-store-defaults.json",
+  "summary": "Pass. The fix resolves the original blocker by removing the silent durable-init fallback, explicitly labeling the no-`DATABASE_URL` path as development-only in-memory mode, and surfacing that mode in both tests and runtime startup output. Shared-state follow-up: document the startup-mode contract and add a reusable negative-path broker smoke command."
+}

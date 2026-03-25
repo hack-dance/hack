@@ -69,7 +69,7 @@ export type LinearTokenResolution =
   | {
       readonly ok: true;
       readonly token: string;
-      readonly source: "keychain" | "env" | "refreshed";
+      readonly source: "broker" | "keychain" | "env" | "refreshed";
       readonly tokenEnv: string;
       readonly authRef: string;
       readonly service: string;
@@ -294,7 +294,7 @@ export function resolveLinearAuthSettingsResult(input: {
 }
 
 /**
- * Resolve a Linear API token using keychain first, then env fallback.
+ * Resolve a Linear API token while preferring non-interactive env access first.
  */
 export async function resolveLinearToken(input: {
   readonly controlPlaneConfig: ControlPlaneConfig;
@@ -339,6 +339,14 @@ export async function resolveLinearToken(input: {
     );
   }
 
+  const envResolution = createEnvLinearTokenResolution({
+    settings,
+    token: envToken,
+  });
+  if (envResolution) {
+    return envResolution;
+  }
+
   const storedResolution = await resolveLinearTokenFromStore({
     settings,
     store,
@@ -347,14 +355,6 @@ export async function resolveLinearToken(input: {
   });
   if (storedResolution.resolution) {
     return storedResolution.resolution;
-  }
-
-  const envResolution = createEnvLinearTokenResolution({
-    settings,
-    token: envToken,
-  });
-  if (envResolution) {
-    return envResolution;
   }
 
   return buildMissingLinearTokenError({

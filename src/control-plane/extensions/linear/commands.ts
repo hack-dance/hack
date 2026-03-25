@@ -37,6 +37,7 @@ import {
 } from "./audit.ts";
 import {
   deleteLinearToken,
+  type LinearTokenResolution,
   listLinearAuthProfiles,
   readStoredLinearTokenEnvelope,
   resolveLinearAuthSettings,
@@ -89,6 +90,17 @@ const DEFAULT_PROJECT_SYNC_LIMIT = 100;
 const DEFAULT_DELIVERY_LIST_LIMIT = 50;
 const MARKDOWN_HEADING_PREFIX_REGEX = /^#+\s*/;
 const TRAILING_SLASH_REGEX = /\/+$/;
+
+const EMPTY_LINEAR_SECRET_STORE = {
+  get: async () => null,
+  set: async () => undefined,
+  delete: async () => false,
+} as const;
+
+type SuccessfulLinearTokenResolution = Extract<
+  LinearTokenResolution,
+  { readonly ok: true }
+>;
 
 export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
   {
@@ -8068,10 +8080,72 @@ async function resolveLinearTokenWithBrokerRefresh(input: {
   readonly profileId?: string;
   readonly allowProjectOverride?: boolean;
 }): Promise<Awaited<ReturnType<typeof resolveLinearToken>>> {
+  return await resolveLinearTokenWithBrokerRefreshInternal(input);
+}
+
+async function resolveLinearTokenWithBrokerRefreshInternal(input: {
+  readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
+  readonly profileId?: string;
+  readonly allowProjectOverride?: boolean;
+  readonly resolveToken?: typeof resolveLinearToken;
+  readonly resolveBrokerSeedToken?: (input: {
+    readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
+    readonly profileId?: string;
+  }) => Promise<
+    | {
+        readonly ok: true;
+        readonly resolution: SuccessfulLinearTokenResolution;
+      }
+    | {
+        readonly ok: false;
+        readonly error: string;
+      }
+  >;
+  readonly syncLocalAccessToBroker?: typeof syncLinearLocalAccessToBroker;
+}): Promise<Awaited<ReturnType<typeof resolveLinearToken>>> {
   const brokerConfig = resolveOAuthBrokerRuntimeConfig({
     controlPlaneConfig: input.controlPlaneConfig,
   });
-  const resolved = await resolveLinearToken({
+  const resolveToken = input.resolveToken ?? resolveLinearToken;
+  const resolveBrokerSeedToken =
+    input.resolveBrokerSeedToken ?? resolveLinearTokenFromBrokerSeed;
+  const syncLocalAccessToBrokerImpl =
+    input.syncLocalAccessToBroker ?? syncLinearLocalAccessToBroker;
+  const prefersBrokerSeedBeforeKeychain = shouldPreferBrokerSeedBeforeKeychain({
+    controlPlaneConfig: input.controlPlaneConfig,
+  });
+
+  if (prefersBrokerSeedBeforeKeychain) {
+    const envOrGuidance = await resolveToken({
+      controlPlaneConfig: input.controlPlaneConfig,
+      ...(input.profileId ? { profileId: input.profileId } : {}),
+      allowProjectOverride: input.allowProjectOverride,
+      refreshConfig: {
+        baseUrl: brokerConfig.baseUrl,
+      },
+      store: EMPTY_LINEAR_SECRET_STORE,
+    });
+    if (envOrGuidance.ok) {
+      return envOrGuidance;
+    }
+    if (
+      !shouldAttemptLinearBrokerLocalAccessSeed({
+        error: envOrGuidance.error,
+      })
+    ) {
+      return envOrGuidance;
+    }
+
+    const seeded = await resolveBrokerSeedToken({
+      controlPlaneConfig: input.controlPlaneConfig,
+      ...(input.profileId ? { profileId: input.profileId } : {}),
+    });
+    if (seeded.ok) {
+      return seeded.resolution;
+    }
+  }
+
+  const resolved = await resolveToken({
     controlPlaneConfig: input.controlPlaneConfig,
     ...(input.profileId ? { profileId: input.profileId } : {}),
     allowProjectOverride: input.allowProjectOverride,
@@ -8081,7 +8155,7 @@ async function resolveLinearTokenWithBrokerRefresh(input: {
   });
   if (resolved.ok) {
     if (resolved.source === "refreshed") {
-      await syncLinearLocalAccessToBroker({
+      await syncLocalAccessToBrokerImpl({
         controlPlaneConfig: input.controlPlaneConfig,
         profileId: resolved.profileId,
       });
@@ -8097,7 +8171,7 @@ async function resolveLinearTokenWithBrokerRefresh(input: {
     return resolved;
   }
 
-  const seeded = await seedLinearLocalAccessFromBroker({
+  const seeded = await resolveBrokerSeedToken({
     controlPlaneConfig: input.controlPlaneConfig,
     ...(input.profileId ? { profileId: input.profileId } : {}),
   });
@@ -8105,14 +8179,59 @@ async function resolveLinearTokenWithBrokerRefresh(input: {
     return resolved;
   }
 
-  return await resolveLinearToken({
+  return seeded.resolution;
+}
+
+function shouldPreferBrokerSeedBeforeKeychain(input: {
+  readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
+}): boolean {
+  const secretsConfig = isRecord(input.controlPlaneConfig.secrets)
+    ? input.controlPlaneConfig.secrets
+    : null;
+  const backend = readOptionalString(secretsConfig?.backend) ?? "keychain";
+  return backend === "keychain";
+}
+
+async function resolveLinearTokenFromBrokerSeed(input: {
+  readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
+  readonly profileId?: string;
+}): Promise<
+  | {
+      readonly ok: true;
+      readonly resolution: SuccessfulLinearTokenResolution;
+    }
+  | {
+      readonly ok: false;
+      readonly error: string;
+    }
+> {
+  const seeded = await requestLinearLocalAccessSeedFromBroker(input);
+  if (!seeded.ok) {
+    return seeded;
+  }
+
+  const settings = resolveLinearAuthSettings({
     controlPlaneConfig: input.controlPlaneConfig,
-    ...(input.profileId ? { profileId: input.profileId } : {}),
-    allowProjectOverride: input.allowProjectOverride,
-    refreshConfig: {
-      baseUrl: brokerConfig.baseUrl,
-    },
+    profileId: seeded.payload.seed.profileId,
+    allowProjectOverride: false,
   });
+
+  return {
+    ok: true,
+    resolution: {
+      ok: true,
+      token: seeded.payload.seed.token,
+      source: "broker",
+      tokenEnv: settings.tokenEnv,
+      authRef: settings.authRef,
+      service: settings.service,
+      profileId: settings.profileId,
+      profileSource: settings.profileSource,
+      ...(seeded.payload.seed.tokenExpiresAt
+        ? { expiresAt: seeded.payload.seed.tokenExpiresAt }
+        : {}),
+    },
+  };
 }
 
 function shouldAttemptLinearBrokerLocalAccessSeed(input: {
@@ -8456,6 +8575,65 @@ async function seedLinearLocalAccessFromBroker(input: {
   | { readonly ok: true; readonly data: SeededLinearLocalAccessResult }
   | { readonly ok: false; readonly error: string }
 > {
+  const seeded = await requestLinearLocalAccessSeedFromBroker({
+    controlPlaneConfig: input.controlPlaneConfig,
+    profileId: input.profileId,
+  });
+  if (!seeded.ok) {
+    return seeded;
+  }
+
+  const payload = seeded.payload;
+  const settings = resolveLinearAuthSettings({
+    controlPlaneConfig: input.controlPlaneConfig,
+    profileId: payload.seed.profileId,
+    allowProjectOverride: false,
+  });
+  await saveLinearToken({
+    controlPlaneConfig: input.controlPlaneConfig,
+    profileId: payload.seed.profileId,
+    allowProjectOverride: false,
+    token: payload.seed.token,
+    ...(payload.seed.tokenExpiresAt
+      ? { expiresAt: payload.seed.tokenExpiresAt }
+      : {}),
+    ...(payload.seed.refreshToken
+      ? { refreshToken: payload.seed.refreshToken }
+      : {}),
+    ...(payload.seed.refreshTokenExpiresAt
+      ? { refreshTokenExpiresAt: payload.seed.refreshTokenExpiresAt }
+      : {}),
+  });
+  await persistLinearProfileDefaults({
+    profileId: payload.seed.profileId,
+    tokenEnv: settings.tokenEnv,
+    authRef: settings.authRef,
+    service: settings.service,
+    apiUrl: settings.apiUrl,
+    accountName: payload.seed.accountName ?? undefined,
+    accountEmail: payload.seed.accountEmail ?? undefined,
+    setAsDefault: input.setDefault ?? false,
+  });
+
+  return {
+    ok: true,
+    data: {
+      profileId: payload.seed.profileId,
+      accountName: payload.seed.accountName,
+      accountEmail: payload.seed.accountEmail,
+      refreshed: payload.seed.refreshed,
+      setDefault: input.setDefault ?? false,
+    },
+  };
+}
+
+async function requestLinearLocalAccessSeedFromBroker(input: {
+  readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
+  readonly profileId?: string;
+}): Promise<
+  | { readonly ok: true; readonly payload: BrokerSeedLocalAccessPayload }
+  | { readonly ok: false; readonly error: string }
+> {
   const profileId = resolveSelectedLinearProfileId({
     controlPlaneConfig: input.controlPlaneConfig,
     profileId: input.profileId,
@@ -8504,47 +8682,9 @@ async function seedLinearLocalAccessFromBroker(input: {
       error: "Linear local access seed payload was invalid.",
     };
   }
-
-  const settings = resolveLinearAuthSettings({
-    controlPlaneConfig: input.controlPlaneConfig,
-    profileId: payload.seed.profileId,
-    allowProjectOverride: false,
-  });
-  await saveLinearToken({
-    controlPlaneConfig: input.controlPlaneConfig,
-    profileId: payload.seed.profileId,
-    allowProjectOverride: false,
-    token: payload.seed.token,
-    ...(payload.seed.tokenExpiresAt
-      ? { expiresAt: payload.seed.tokenExpiresAt }
-      : {}),
-    ...(payload.seed.refreshToken
-      ? { refreshToken: payload.seed.refreshToken }
-      : {}),
-    ...(payload.seed.refreshTokenExpiresAt
-      ? { refreshTokenExpiresAt: payload.seed.refreshTokenExpiresAt }
-      : {}),
-  });
-  await persistLinearProfileDefaults({
-    profileId: payload.seed.profileId,
-    tokenEnv: settings.tokenEnv,
-    authRef: settings.authRef,
-    service: settings.service,
-    apiUrl: settings.apiUrl,
-    accountName: payload.seed.accountName ?? undefined,
-    accountEmail: payload.seed.accountEmail ?? undefined,
-    setAsDefault: input.setDefault ?? false,
-  });
-
   return {
     ok: true,
-    data: {
-      profileId: payload.seed.profileId,
-      accountName: payload.seed.accountName,
-      accountEmail: payload.seed.accountEmail,
-      refreshed: payload.seed.refreshed,
-      setDefault: input.setDefault ?? false,
-    },
+    payload,
   };
 }
 
@@ -10811,6 +10951,7 @@ export const __testOnly = {
   resolveProjectLinearBinding,
   resolveProjectPullTargets,
   resolveOAuthBrokerRuntimeConfig,
+  resolveLinearTokenWithBrokerRefreshInternal,
   resolveTicketAssigneeForLinear,
   parseSetupArgs,
   parseStatusArgs,

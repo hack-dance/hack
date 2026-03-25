@@ -187,6 +187,33 @@ test("resolveLinearToken can prefer env-only resolution to avoid keychain access
   expect(resolved.source).toBe("env");
 });
 
+test("resolveLinearToken prefers env tokens before touching saved local access", async () => {
+  const config = createControlPlaneConfig();
+
+  const resolved = await resolveLinearToken({
+    controlPlaneConfig: config,
+    env: {
+      HACK_LINEAR_API_TOKEN: "env_linear_token",
+    },
+    store: {
+      get: async () => {
+        throw new Error("saved local access should not be read");
+      },
+      set: async () => {
+        throw new Error("saved local access should not be written");
+      },
+      delete: async () => false,
+    },
+  });
+
+  expect(resolved.ok).toBe(true);
+  if (!resolved.ok) {
+    return;
+  }
+  expect(resolved.token).toBe("env_linear_token");
+  expect(resolved.source).toBe("env");
+});
+
 test("resolveLinearToken fails closed in env-only mode when the env token is missing", async () => {
   const config = createControlPlaneConfig();
 

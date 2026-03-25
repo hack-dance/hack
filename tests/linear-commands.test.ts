@@ -1316,6 +1316,75 @@ test("resolveLinearToken keeps local token setup ungated", async () => {
   expect(result.error).not.toContain("hack auth login");
 });
 
+test("resolveLinearTokenWithBrokerRefresh prefers broker-seeded shared access before keychain fallback", async () => {
+  const controlPlaneConfig = {
+    secrets: {
+      backend: "keychain",
+    },
+    extensions: {
+      "dance.hack.linear": {
+        enabled: true,
+        config: {
+          profiles: {
+            work: {
+              authRef: "linear.api.work",
+              service: "hack-linear-work",
+              tokenEnv: "HACK_LINEAR_WORK_TOKEN",
+            },
+          },
+          defaultProfile: "work",
+        },
+      },
+    },
+  } as Parameters<
+    typeof __testOnly.resolveLinearTokenWithBrokerRefreshInternal
+  >[0]["controlPlaneConfig"];
+  const resolutionPaths: string[] = [];
+
+  const result = await __testOnly.resolveLinearTokenWithBrokerRefreshInternal({
+    controlPlaneConfig,
+    profileId: "work",
+    resolveToken: async (input) => {
+      resolutionPaths.push(
+        input.store ? "without_saved_local_access" : "saved_local_access"
+      );
+      return {
+        ok: false,
+        error: 'Missing Linear token for profile "work".',
+        tokenEnv: "HACK_LINEAR_WORK_TOKEN",
+        authRef: "linear.api.work",
+        service: "hack-linear-work",
+        profileId: "work",
+        profileSource: "command_flags",
+      };
+    },
+    resolveBrokerSeedToken: async () => ({
+      ok: true,
+      resolution: {
+        ok: true,
+        token: "broker-token",
+        source: "broker",
+        tokenEnv: "HACK_LINEAR_WORK_TOKEN",
+        authRef: "linear.api.work",
+        service: "hack-linear-work",
+        profileId: "work",
+        profileSource: "command_flags",
+      },
+    }),
+    syncLocalAccessToBroker: async () => {
+      throw new Error("refreshed local access should not be synced");
+    },
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+
+  expect(result.source).toBe("broker");
+  expect(resolutionPaths).toEqual(["without_saved_local_access"]);
+});
+
 test("parseUpsertAssigneeMappingArgs requires a local assignee and remote target", () => {
   const parsed = __testOnly.parseUpsertAssigneeMappingArgs({
     args: ["--profile", "work", "--local-assignee", "alice@hack"],

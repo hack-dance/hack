@@ -1,4 +1,6 @@
 import { ArrowRight, Compass, Keyboard, ShieldCheck } from "lucide-react";
+import AccountControlPlaneSections from "@/src/components/account-control-plane-sections";
+import type { AccountControlPlaneFeedback } from "@/src/lib/account-control-plane";
 import type { AccountShellContext } from "@/src/lib/account-shell";
 import {
   shellGuardrails,
@@ -24,6 +26,8 @@ const focusLinkClassName = cn(
 
 type ControlPlaneShellProps = {
   readonly account?: AccountShellContext;
+  readonly feedback?: AccountControlPlaneFeedback | null;
+  readonly returnToPath: string;
   readonly signInHref?: string;
 };
 
@@ -38,6 +42,8 @@ const fallbackAccountContext = {
 
 export default function ControlPlaneShell({
   account = fallbackAccountContext,
+  feedback = null,
+  returnToPath,
   signInHref = "/auth?redirect=%2F",
 }: ControlPlaneShellProps) {
   const identityLabel = account.authenticated
@@ -224,6 +230,12 @@ export default function ControlPlaneShell({
               </div>
             )}
           </section>
+
+          <AccountControlPlaneSections
+            account={account}
+            feedback={feedback}
+            returnToPath={returnToPath}
+          />
 
           <section className="space-y-4" id="foundations">
             <div className="space-y-2">

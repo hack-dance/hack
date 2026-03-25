@@ -22,7 +22,10 @@ import {
 } from "../../db/schema.ts";
 import { type FlowStore, hashDeviceCode } from "../../flow-store.ts";
 import { issueBrokerManagementToken } from "./management-token.ts";
-import { resolveBetterAuthSession } from "./session.ts";
+import {
+  type BrokerBetterAuthSession,
+  resolveBetterAuthSession,
+} from "./session.ts";
 
 const SESSION_FLOW_PROFILE_ID = "session";
 const SAFE_RETURN_PROTOCOLS = new Set(["hack:", "hack-dev:"]);
@@ -437,6 +440,11 @@ export function createBetterAuthShellPlugin({
                     returnUrl,
                   }),
                   mode: "link",
+                }),
+                renderBridgeSessionAutoReturnScript({
+                  session: resolvedSession.session,
+                  lifecycle,
+                  returnUrl,
                 }),
                 renderLifecycleAutoReturnScript({
                   lifecycle,
@@ -992,6 +1000,38 @@ window.requestAnimationFrame(() => {
   }
   window.setTimeout(() => {
     window.location.assign(${JSON.stringify(input.lifecycle.returnUrl)});
+  }, 180);
+});
+`;
+}
+
+function renderBridgeSessionAutoReturnScript(input: {
+  readonly session: BrokerBetterAuthSession | null;
+  readonly lifecycle: SessionFlowLifecycle;
+  readonly returnUrl: string | null;
+}): string {
+  if (!input.session) {
+    return "";
+  }
+
+  const lifecycleAlreadyHandlesReturn =
+    input.lifecycle.state === "ready" || input.lifecycle.state === "claimed";
+  if (
+    lifecycleAlreadyHandlesReturn ||
+    !shouldAutoReturn({
+      returnUrl: input.returnUrl,
+    })
+  ) {
+    return "";
+  }
+
+  return `
+window.requestAnimationFrame(() => {
+  if (authStatus) {
+    authStatus.textContent = "Returning to Hack…";
+  }
+  window.setTimeout(() => {
+    window.location.assign(${JSON.stringify(input.returnUrl)});
   }, 180);
 });
 `;

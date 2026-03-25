@@ -1,7 +1,10 @@
+import { eq } from "drizzle-orm";
+
 import {
   type BetterAuthRuntime,
   ensureBetterAuthRuntimeReady,
 } from "../../better-auth.ts";
+import { user as betterAuthUser } from "../../db/schema.ts";
 import { verifyBrokerManagementToken } from "./management-token.ts";
 
 const AUTHORIZATION_BEARER_PATTERN = /^Bearer\s+(.+)$/i;
@@ -61,9 +64,10 @@ export async function resolveBetterAuthSession(input: {
   });
   const resolvedSession =
     (session?.user?.id ? toResolvedSession({ session }) : null) ??
-    resolveManagementTokenSession({
+    (await resolveManagementTokenSession({
+      runtime: input.runtime,
       request: input.request,
-    });
+    }));
   const accessControlMode = resolveAccessControlMode({
     session: resolvedSession,
   });
@@ -74,9 +78,10 @@ export async function resolveBetterAuthSession(input: {
   };
 }
 
-function resolveManagementTokenSession(input: {
+async function resolveManagementTokenSession(input: {
+  readonly runtime: BetterAuthRuntime;
   readonly request: Request;
-}): BrokerBetterAuthSession | null {
+}): Promise<BrokerBetterAuthSession | null> {
   const token = readBearerToken({
     authorizationHeader: input.request.headers.get("authorization"),
   });
@@ -87,10 +92,14 @@ function resolveManagementTokenSession(input: {
   if (!verification.ok) {
     return null;
   }
+  const user = await readUserRecord({
+    runtime: input.runtime,
+    userId: verification.claims.sub,
+  });
   return {
     userId: verification.claims.sub,
-    email: null,
-    name: null,
+    email: user?.email ?? null,
+    name: user?.name ?? null,
     organizationId: verification.claims.organizationId ?? null,
     teamId: verification.claims.teamId ?? null,
     managementTokenProfileId: verification.claims.profileId ?? null,
@@ -244,6 +253,40 @@ function normalizeOptionalString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0
     ? value.trim()
     : null;
+}
+
+async function readUserRecord(input: {
+  readonly runtime: BetterAuthRuntime;
+  readonly userId: string;
+}): Promise<{
+  readonly email: string | null;
+  readonly name: string | null;
+} | null> {
+  const db = input.runtime.db;
+  const userId = normalizeOptionalString(input.userId);
+  if (!(db && userId)) {
+    return null;
+  }
+  if (!("select" in db) || typeof db.select !== "function") {
+    return null;
+  }
+
+  const [record] = await db
+    .select({
+      email: betterAuthUser.email,
+      name: betterAuthUser.name,
+    })
+    .from(betterAuthUser)
+    .where(eq(betterAuthUser.id, userId))
+    .limit(1);
+  if (!record) {
+    return null;
+  }
+
+  return {
+    email: normalizeOptionalString(record.email),
+    name: normalizeOptionalString(record.name),
+  };
 }
 
 function readBearerToken(input: {

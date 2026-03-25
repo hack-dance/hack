@@ -13,6 +13,8 @@ test("control plane shell metadata describes the accessible foundation", () => {
   expect(appMetadata.description).toContain("signed-in browser shell");
   expect(shellNavigationItems.map(({ href }) => href)).toEqual([
     "#account-context",
+    "#organizations",
+    "#invitations",
     "#foundations",
     "#guardrails",
   ]);
@@ -24,7 +26,7 @@ test("control plane shell metadata describes the accessible foundation", () => {
 });
 
 test("control plane shell renders landmarks and keyboard navigation affordances", () => {
-  const markup = renderToStaticMarkup(<ControlPlaneShell />);
+  const markup = renderToStaticMarkup(<ControlPlaneShell returnToPath="/" />);
 
   expect(markup).toContain("Skip to main content");
   expect(markup).toContain('href="#main-content"');
@@ -33,10 +35,12 @@ test("control plane shell renders landmarks and keyboard navigation affordances"
   expect(markup).toContain("<aside");
   expect(markup).toContain("Keyboard ready");
   expect(markup).toContain("Sign in to load your Hack account context");
+  expect(markup).toContain("Organizations");
+  expect(markup).toContain("Invitations");
 });
 
 test("control plane shell keeps visible focus and reduced-motion contracts explicit", async () => {
-  const markup = renderToStaticMarkup(<ControlPlaneShell />);
+  const markup = renderToStaticMarkup(<ControlPlaneShell returnToPath="/" />);
   const globalCss = await Bun.file(
     new URL("../app/globals.css", import.meta.url)
   ).text();

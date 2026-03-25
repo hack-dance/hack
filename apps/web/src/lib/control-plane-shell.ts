@@ -8,13 +8,23 @@ export const appMetadata: Metadata = {
 export const shellTitle = "Hack account shell";
 
 export const shellSummary =
-  "A calm signed-in shell that keeps the browser, broker current-user APIs, and CLI auth status aligned on the same Hack identity and active org/team context.";
+  "A calm signed-in shell that keeps the browser, broker current-user APIs, org admin flows, and CLI auth status aligned on the same Hack identity and active org/team context.";
 
 export const shellNavigationItems = [
   {
     href: "#account-context",
     label: "Account context",
     description: "The active user, org, and team that Hack resolved.",
+  },
+  {
+    href: "#organizations",
+    label: "Organizations",
+    description: "Create orgs and manage caller-scoped shared access.",
+  },
+  {
+    href: "#invitations",
+    label: "Invitations",
+    description: "Accept or decline pending invites for this account.",
   },
   {
     href: "#foundations",

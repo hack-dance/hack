@@ -1,6 +1,7 @@
 import { HACK_WEB_BROKER_SESSION_COOKIE_NAME } from "@hack/auth-contract";
 import { cookies } from "next/headers";
 
+import { loadAccountControlPlaneData } from "./account-control-plane";
 import { getWebAuthConfig } from "./auth-config";
 
 type NamedEntity = {
@@ -44,6 +45,20 @@ export type AccountShellContext =
       readonly activeTeam: NamedEntity | null;
       readonly shellPath: string;
       readonly accountPath: string;
+      readonly requestedOrganizationKey: string | null;
+      readonly selectedOrganizationVisible: boolean;
+      readonly organizations: Awaited<
+        ReturnType<typeof loadAccountControlPlaneData>
+      >["organizations"];
+      readonly selectedOrganization: Awaited<
+        ReturnType<typeof loadAccountControlPlaneData>
+      >["selectedOrganization"];
+      readonly selectedOrganizationMemberships: Awaited<
+        ReturnType<typeof loadAccountControlPlaneData>
+      >["selectedOrganizationMemberships"];
+      readonly incomingInvitations: Awaited<
+        ReturnType<typeof loadAccountControlPlaneData>
+      >["incomingInvitations"];
     }
   | {
       readonly authenticated: false;
@@ -59,7 +74,9 @@ export function buildAccountShellSignInHref(input: {
   return `/auth?${searchParams.toString()}`;
 }
 
-export async function getAccountShellContext(): Promise<AccountShellContext> {
+export async function getAccountShellContext(input?: {
+  readonly selectedOrganizationKey?: string | null;
+}): Promise<AccountShellContext> {
   const cookieStore = await cookies();
   const token = cookieStore
     .get(HACK_WEB_BROKER_SESSION_COOKIE_NAME)
@@ -91,6 +108,12 @@ export async function getAccountShellContext(): Promise<AccountShellContext> {
       return { authenticated: false };
     }
 
+    const controlPlaneData = await loadAccountControlPlaneData({
+      authBrokerProxyBaseUrl: config.authBrokerProxyBaseUrl,
+      token,
+      selectedOrganizationKey: input?.selectedOrganizationKey,
+    });
+
     return {
       authenticated: true,
       accessControlMode: normalizeText(payload.accessControlMode),
@@ -103,6 +126,13 @@ export async function getAccountShellContext(): Promise<AccountShellContext> {
       activeTeam: toNamedEntity(payload.activeTeam),
       shellPath: normalizeText(payload.shellPath) ?? "/auth",
       accountPath: normalizeText(payload.accountPath) ?? "/auth/account",
+      requestedOrganizationKey: controlPlaneData.requestedOrganizationKey,
+      selectedOrganizationVisible: controlPlaneData.selectedOrganizationVisible,
+      organizations: controlPlaneData.organizations,
+      selectedOrganization: controlPlaneData.selectedOrganization,
+      selectedOrganizationMemberships:
+        controlPlaneData.selectedOrganizationMemberships,
+      incomingInvitations: controlPlaneData.incomingInvitations,
     };
   } catch {
     return { authenticated: false };

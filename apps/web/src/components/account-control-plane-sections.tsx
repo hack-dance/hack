@@ -1,0 +1,501 @@
+import type { AccountControlPlaneFeedback } from "@/src/lib/account-control-plane";
+import { buildAccountControlPlanePath } from "@/src/lib/account-control-plane";
+import type { AccountShellContext } from "@/src/lib/account-shell";
+import { cn } from "@/src/lib/utils";
+
+const sectionSurfaceClassName = cn(
+  "rounded-3xl border border-white/10 bg-white/[0.04] shadow-[0_24px_80px_rgba(15,23,42,0.24)]",
+  "transition duration-200 motion-safe:hover:-translate-y-0.5 motion-reduce:transform-none motion-reduce:transition-none",
+  "focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-300 focus-visible:outline-offset-2"
+);
+
+const actionClassName = cn(
+  "inline-flex min-h-10 items-center justify-center rounded-full border border-sky-300/30 bg-sky-300 px-4 py-2 font-medium text-slate-950 text-sm",
+  "transition duration-200 hover:-translate-y-0.5 motion-reduce:transform-none motion-reduce:transition-none",
+  "focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-300 focus-visible:outline-offset-2"
+);
+
+const secondaryActionClassName = cn(
+  "inline-flex min-h-10 items-center justify-center rounded-full border border-white/15 bg-white/5 px-4 py-2 font-medium text-sm text-white/85",
+  "transition duration-200 hover:bg-white/10 motion-reduce:transition-none",
+  "focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-300 focus-visible:outline-offset-2"
+);
+
+const fieldClassName = cn(
+  "w-full rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3 text-sm text-white placeholder:text-white/35",
+  "focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-300 focus-visible:outline-offset-2"
+);
+
+type AccountControlPlaneSectionsProps = {
+  readonly account: AccountShellContext;
+  readonly feedback?: AccountControlPlaneFeedback | null;
+  readonly returnToPath: string;
+};
+
+export default function AccountControlPlaneSections({
+  account,
+  feedback = null,
+  returnToPath,
+}: AccountControlPlaneSectionsProps) {
+  const selectedOrganizationKey = account.authenticated
+    ? (account.selectedOrganization?.slug ?? account.requestedOrganizationKey)
+    : null;
+  const scopedReturnPath = buildAccountControlPlanePath({
+    redirectTo: returnToPath,
+    org: selectedOrganizationKey,
+  });
+  const baseReturnPath = buildAccountControlPlanePath({
+    redirectTo: returnToPath,
+  });
+
+  return (
+    <>
+      {feedback ? (
+        <section
+          className={cn(
+            sectionSurfaceClassName,
+            "p-6 sm:p-7",
+            feedback.tone === "success" &&
+              "border-emerald-300/30 bg-emerald-500/10",
+            feedback.tone === "danger" && "border-rose-300/30 bg-rose-500/10",
+            feedback.tone === "info" && "border-sky-300/30 bg-sky-500/10"
+          )}
+          role={feedback.tone === "danger" ? "alert" : "status"}
+        >
+          <p className="font-medium text-sky-100 text-sm">{feedback.title}</p>
+          <p className="mt-3 max-w-3xl text-sm text-white/80 leading-6">
+            {feedback.body}
+          </p>
+        </section>
+      ) : null}
+
+      <section className="space-y-4" id="organizations">
+        <div className="space-y-2">
+          <h2 className="font-semibold text-2xl text-white">Organizations</h2>
+          <p className="max-w-3xl text-sm text-white/70 leading-7">
+            Create shared organizations, keep list and detail views scoped to
+            the current caller, and manage org invites without changing the
+            broker-backed lifecycle semantics.
+          </p>
+        </div>
+
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]">
+          <CreateOrganizationCard
+            authenticated={account.authenticated}
+            returnToPath={baseReturnPath}
+          />
+          <OrganizationsCard
+            account={account}
+            returnToPath={returnToPath}
+            scopedReturnPath={scopedReturnPath}
+          />
+        </div>
+      </section>
+
+      <section className="space-y-4" id="invitations">
+        <div className="space-y-2">
+          <h2 className="font-semibold text-2xl text-white">Invitations</h2>
+          <p className="max-w-3xl text-sm text-white/70 leading-7">
+            Only the intended recipient sees accept and decline actions. Pending
+            invites remain non-active until this account responds.
+          </p>
+        </div>
+
+        <InvitationsCard
+          account={account}
+          returnToPath={buildAccountControlPlanePath({
+            redirectTo: returnToPath,
+          })}
+        />
+      </section>
+    </>
+  );
+}
+
+function CreateOrganizationCard(input: {
+  readonly authenticated: boolean;
+  readonly returnToPath: string;
+}) {
+  return (
+    <section className={cn(sectionSurfaceClassName, "p-6 sm:p-7")}>
+      <div className="space-y-2">
+        <h3 className="font-medium text-white text-xl">Create organization</h3>
+        <p className="text-sm text-white/70 leading-6">
+          New organizations immediately make the creator the first active member
+          visible in the shared admin surface.
+        </p>
+      </div>
+
+      {input.authenticated ? (
+        <form
+          action="/api/control-plane/orgs"
+          className="mt-6 grid gap-4"
+          method="post"
+        >
+          <input name="redirectTo" type="hidden" value={input.returnToPath} />
+
+          <label className="grid gap-2">
+            <span className="font-medium text-sm text-white/80">Slug</span>
+            <input
+              className={fieldClassName}
+              name="slug"
+              placeholder="hack-org"
+              required
+              type="text"
+            />
+          </label>
+
+          <label className="grid gap-2">
+            <span className="font-medium text-sm text-white/80">
+              Display name
+            </span>
+            <input
+              className={fieldClassName}
+              name="name"
+              placeholder="Hack Org"
+              type="text"
+            />
+          </label>
+
+          <button className={actionClassName} type="submit">
+            Create organization
+          </button>
+        </form>
+      ) : (
+        <p className="mt-6 text-sm text-white/70 leading-6">
+          Sign in first to create shared organizations from the browser control
+          plane.
+        </p>
+      )}
+    </section>
+  );
+}
+
+function OrganizationsCard(input: {
+  readonly account: AccountShellContext;
+  readonly returnToPath: string;
+  readonly scopedReturnPath: string;
+}) {
+  if (!input.account.authenticated) {
+    return (
+      <section className={cn(sectionSurfaceClassName, "p-6 sm:p-7")}>
+        <h3 className="font-medium text-white text-xl">
+          Visible organizations
+        </h3>
+        <p className="mt-3 text-sm text-white/70 leading-6">
+          Sign in to view the organizations and shared members available to the
+          current caller.
+        </p>
+      </section>
+    );
+  }
+
+  const selectedOrganization = input.account.selectedOrganization;
+  const selectedOrganizationId = selectedOrganization?.id ?? null;
+  const shouldShowVisibilityMessage = Boolean(
+    input.account.requestedOrganizationKey &&
+      !input.account.selectedOrganizationVisible &&
+      !selectedOrganization
+  );
+
+  return (
+    <section className={cn(sectionSurfaceClassName, "p-6 sm:p-7")}>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="space-y-2">
+          <h3 className="font-medium text-white text-xl">
+            Visible organizations
+          </h3>
+          <p className="text-sm text-white/70 leading-6">
+            The broker returns only organizations visible to this account, and
+            the detail panel below stays scoped to that same set.
+          </p>
+        </div>
+        <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-sm text-white/70">
+          {input.account.organizations.length} visible
+        </span>
+      </div>
+
+      {input.account.organizations.length > 0 ? (
+        <ul className="mt-6 grid gap-3">
+          {input.account.organizations.map((organization) => {
+            const selected = selectedOrganizationId === organization.id;
+            return (
+              <li key={organization.id}>
+                <a
+                  className={cn(
+                    "block rounded-2xl border px-4 py-4 transition duration-200 motion-reduce:transition-none",
+                    selected
+                      ? "border-sky-300/35 bg-sky-300/10"
+                      : "border-white/10 bg-slate-950/40 hover:bg-white/5",
+                    "focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-300 focus-visible:outline-offset-2"
+                  )}
+                  href={buildAccountControlPlanePath({
+                    redirectTo: input.returnToPath,
+                    org: organization.slug,
+                  })}
+                >
+                  <span className="block font-medium text-white">
+                    {organization.name}
+                  </span>
+                  <span className="mt-1 block text-sm text-white/60">
+                    {organization.slug}
+                  </span>
+                </a>
+              </li>
+            );
+          })}
+        </ul>
+      ) : (
+        <p className="mt-6 text-sm text-white/70 leading-6">
+          No shared organizations are visible yet. Create one above or accept an
+          invitation from another admin.
+        </p>
+      )}
+
+      {selectedOrganization ? (
+        <SelectedOrganizationDetail
+          account={input.account}
+          returnToPath={input.scopedReturnPath}
+        />
+      ) : null}
+
+      {shouldShowVisibilityMessage ? (
+        <div className="mt-6 rounded-2xl border border-sky-300/20 bg-sky-300/10 p-4">
+          <p className="font-medium text-sky-100 text-sm">
+            Requested organization not visible
+          </p>
+          <p className="mt-2 text-sm text-white/75 leading-6">
+            This account cannot load the requested organization detail because
+            it is not part of the caller-scoped org list.
+          </p>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function SelectedOrganizationDetail(input: {
+  readonly account: Extract<
+    AccountShellContext,
+    { readonly authenticated: true }
+  >;
+  readonly returnToPath: string;
+}) {
+  const selectedOrganization = input.account.selectedOrganization;
+  if (!selectedOrganization) {
+    return null;
+  }
+
+  return (
+    <div className="mt-6 space-y-6 rounded-2xl border border-white/10 bg-slate-950/35 p-5">
+      <div className="space-y-2">
+        <p className="font-medium text-sky-100 text-sm">Organization detail</p>
+        <h4 className="font-semibold text-2xl text-white">
+          {selectedOrganization.name}
+        </h4>
+        <p className="text-sm text-white/70 leading-6">
+          Pending access stays pending until the intended principal accepts or
+          declines it. Admin-side revoke uses the same broker route for pending
+          and active org membership.
+        </p>
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+        <section className="grid gap-4 rounded-2xl border border-white/10 bg-white/5 p-4">
+          <h5 className="font-medium text-lg text-white">Invite member</h5>
+          <form
+            action={`/api/control-plane/orgs/${encodeURIComponent(selectedOrganization.slug)}/members/invite`}
+            className="grid gap-4"
+            method="post"
+          >
+            <input name="redirectTo" type="hidden" value={input.returnToPath} />
+
+            <label className="grid gap-2">
+              <span className="font-medium text-sm text-white/80">
+                Recipient email
+              </span>
+              <input
+                className={fieldClassName}
+                name="target"
+                placeholder="person@example.com"
+                required
+                type="email"
+              />
+            </label>
+
+            <button className={actionClassName} type="submit">
+              Send pending invite
+            </button>
+          </form>
+        </section>
+
+        <section className="grid gap-4 rounded-2xl border border-white/10 bg-white/5 p-4">
+          <div className="space-y-2">
+            <h5 className="font-medium text-lg text-white">
+              Members and invites
+            </h5>
+            <p className="text-sm text-white/70 leading-6">
+              Active members can manage the org. Pending recipients must accept
+              or decline before access becomes active.
+            </p>
+          </div>
+
+          {input.account.selectedOrganizationMemberships.length > 0 ? (
+            <ul className="grid gap-3">
+              {input.account.selectedOrganizationMemberships.map(
+                (membership) => {
+                  const isCurrentUser =
+                    membership.userId === input.account.user.id ||
+                    (membership.email &&
+                      membership.email === input.account.user.email);
+                  const targetLabel = membership.email ?? membership.target;
+                  return (
+                    <li
+                      className="rounded-2xl border border-white/10 bg-slate-950/35 p-4"
+                      key={membership.id}
+                    >
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="space-y-2">
+                          <p className="font-medium text-white">
+                            {targetLabel}
+                          </p>
+                          <p className="text-sm text-white/70 leading-6">
+                            {describeMembershipState({
+                              state: membership.state,
+                            })}
+                          </p>
+                        </div>
+                        <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-white/70 text-xs uppercase tracking-[0.18em]">
+                          {membership.state}
+                        </span>
+                      </div>
+
+                      {!isCurrentUser && membership.state !== "removed" ? (
+                        <form
+                          action={`/api/control-plane/orgs/${encodeURIComponent(selectedOrganization.slug)}/members/remove`}
+                          className="mt-4"
+                          method="post"
+                        >
+                          <input
+                            name="redirectTo"
+                            type="hidden"
+                            value={input.returnToPath}
+                          />
+                          <input
+                            name="target"
+                            type="hidden"
+                            value={targetLabel}
+                          />
+                          <button
+                            className={secondaryActionClassName}
+                            type="submit"
+                          >
+                            {membership.state === "pending"
+                              ? "Revoke invite"
+                              : "Remove member"}
+                          </button>
+                        </form>
+                      ) : null}
+                    </li>
+                  );
+                }
+              )}
+            </ul>
+          ) : (
+            <p className="text-sm text-white/70 leading-6">
+              No actionable memberships are visible for this organization yet.
+            </p>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function InvitationsCard(input: {
+  readonly account: AccountShellContext;
+  readonly returnToPath: string;
+}) {
+  if (!input.account.authenticated) {
+    return (
+      <section className={cn(sectionSurfaceClassName, "p-6 sm:p-7")}>
+        <p className="text-sm text-white/70 leading-6">
+          Sign in to review invitations that are specifically pending for the
+          current account email address.
+        </p>
+      </section>
+    );
+  }
+
+  const incomingInvitations = input.account.incomingInvitations;
+
+  return (
+    <section className={cn(sectionSurfaceClassName, "p-6 sm:p-7")}>
+      {incomingInvitations.length > 0 ? (
+        <ul className="grid gap-3">
+          {incomingInvitations.map((invitation) => (
+            <li
+              className="rounded-2xl border border-white/10 bg-slate-950/35 p-4"
+              key={invitation.id}
+            >
+              <div className="space-y-2">
+                <p className="font-medium text-white">{invitation.email}</p>
+                <p className="text-sm text-white/70 leading-6">
+                  Pending {invitation.scope} invite for organization{" "}
+                  <code className="rounded bg-white/8 px-1.5 py-0.5 text-white text-xs">
+                    {invitation.organizationId}
+                  </code>
+                </p>
+              </div>
+
+              <div className="mt-4 flex flex-wrap gap-3">
+                <form
+                  action={`/api/control-plane/invitations/${encodeURIComponent(invitation.id)}/accept`}
+                  method="post"
+                >
+                  <input
+                    name="redirectTo"
+                    type="hidden"
+                    value={input.returnToPath}
+                  />
+                  <button className={actionClassName} type="submit">
+                    Accept invite
+                  </button>
+                </form>
+                <form
+                  action={`/api/control-plane/invitations/${encodeURIComponent(invitation.id)}/decline`}
+                  method="post"
+                >
+                  <input
+                    name="redirectTo"
+                    type="hidden"
+                    value={input.returnToPath}
+                  />
+                  <button className={secondaryActionClassName} type="submit">
+                    Decline invite
+                  </button>
+                </form>
+              </div>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-sm text-white/70 leading-6">
+          No invitations are pending for this account right now.
+        </p>
+      )}
+    </section>
+  );
+}
+
+function describeMembershipState(input: {
+  readonly state: "pending" | "active" | "removed";
+}) {
+  if (input.state === "pending") {
+    return "Pending recipient action";
+  }
+  if (input.state === "active") {
+    return "Active org access";
+  }
+  return "Removed access";
+}

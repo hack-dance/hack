@@ -16,7 +16,9 @@ import {
 } from "../src/db/schema.ts";
 import { FlowStore } from "../src/flow-store.ts";
 import { createAuthBrokerApp } from "../src/index.ts";
+import { issueBrokerManagementToken } from "../src/modules/better-auth/management-token.ts";
 import { hasBetterAuthProfileAccess } from "../src/modules/better-auth/session.ts";
+import { InMemoryOrgTeamsStore } from "../src/modules/orgs/service.ts";
 import { installAuthBrokerEnvIsolation } from "./test-env.ts";
 
 type BetterAuthAuth = NonNullable<BetterAuthRuntime["auth"]>;
@@ -144,6 +146,28 @@ function createBetterAuthRuntimeWithSession(
         }
       : {}),
   } as unknown as BetterAuthRuntime;
+}
+
+async function handleJsonRequest(input: {
+  readonly app: ReturnType<typeof createAuthBrokerApp>;
+  readonly path: string;
+  readonly method?: "GET" | "POST";
+  readonly headers?: Record<string, string>;
+  readonly body?: unknown;
+}): Promise<Response> {
+  const hasBody = typeof input.body !== "undefined";
+  return await input.app.handle(
+    new Request(`http://localhost${input.path}`, {
+      method: input.method ?? "GET",
+      headers: hasBody
+        ? {
+            "content-type": "application/json",
+            ...input.headers,
+          }
+        : input.headers,
+      body: hasBody ? JSON.stringify(input.body) : undefined,
+    })
+  );
 }
 
 async function withManagementTokenSecret<T>(
@@ -500,6 +524,49 @@ describe("broker Hack session auth flow", () => {
     );
   });
 
+  test("auth account page auto-returns to the routed web app when bridge redirect is supplied without a device flow", async () => {
+    const session = {
+      user: {
+        id: "user-routed-web",
+        email: "routed-web@example.com",
+        emailVerified: true,
+        name: "Routed Web User",
+      },
+      session: {
+        id: "sess-routed-web",
+        userId: "user-routed-web",
+        token: "session-token",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        expiresAt: new Date(Date.now() + 60_000),
+      },
+    } as unknown as BetterAuthSession;
+
+    const app = createAuthBrokerApp({
+      config: {
+        ...createTestConfig(),
+        publicBaseUrl: "https://auth.hack-cli.hack",
+        webAppBaseUrl: "https://hack-cli.hack",
+      },
+      flowStore: new FlowStore(),
+      betterAuthRuntime: createBetterAuthRuntimeWithSession(session),
+    });
+
+    const response = await app.handle(
+      new Request(
+        `https://auth.hack-cli.hack/auth/account?bridge=1&redirect=${encodeURIComponent(
+          "https://hack-cli.hack/account?org=hack"
+        )}`
+      )
+    );
+    const html = await response.text();
+
+    expect(html).toContain("Signed in to Hack.");
+    expect(html).toContain("https://hack-cli.hack/account?org=hack");
+    expect(html).toContain("Returning to Hack");
+    expect(html).toContain("window.setTimeout");
+  });
+
   test("auth account page sets a shared web session cookie for the account shell", async () => {
     await withManagementTokenSecret(
       "session-auth-web-cookie-secret",
@@ -547,6 +614,123 @@ describe("broker Hack session auth flow", () => {
         expect(cookieHeader).toContain("Secure");
       }
     );
+  });
+
+  test("management-token invitation list hydrates the recipient email from durable Better Auth records", async () => {
+    await withManagementTokenSecret("session-auth-invites-secret", async () => {
+      const ownerSession = {
+        user: {
+          id: "user-owner",
+          email: "owner@example.com",
+          emailVerified: true,
+          name: "Owner User",
+        },
+        session: {
+          id: "sess-owner",
+          userId: "user-owner",
+          token: "session-token",
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          expiresAt: new Date(Date.now() + 60_000),
+        },
+      } as unknown as BetterAuthSession;
+      const recipientSession = {
+        user: {
+          id: "user-invitee",
+          email: "invitee@example.com",
+          emailVerified: true,
+          name: "Invitee User",
+        },
+        session: {
+          id: "sess-invitee",
+          userId: "user-invitee",
+          token: "recipient-session-token",
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          expiresAt: new Date(Date.now() + 60_000),
+        },
+      } as unknown as BetterAuthSession;
+      const store = new InMemoryOrgTeamsStore();
+      const app = createAuthBrokerApp({
+        config: createTestConfig(),
+        flowStore: new FlowStore(),
+        betterAuthRuntime: createBetterAuthRuntimeWithSession(
+          recipientSession,
+          {
+            getSession: (value) => {
+              const headers =
+                value &&
+                typeof value === "object" &&
+                "headers" in value &&
+                value.headers instanceof Headers
+                  ? value.headers
+                  : null;
+              return Promise.resolve(
+                headers?.get("authorization") ? null : ownerSession
+              );
+            },
+            storedUser: {
+              id: "user-invitee",
+              email: "invitee@example.com",
+              emailVerified: true,
+              name: "Invitee User",
+            },
+          }
+        ),
+        orgTeamsStore: store,
+      });
+
+      const createOrganizationResponse = await handleJsonRequest({
+        app,
+        method: "POST",
+        path: "/v1/auth/orgs",
+        body: {
+          slug: "hack",
+          name: "Hack",
+        },
+      });
+      expect(createOrganizationResponse.status).toBe(200);
+
+      const inviteResponse = await handleJsonRequest({
+        app,
+        method: "POST",
+        path: "/v1/auth/orgs/hack/members/invite",
+        body: {
+          target: "invitee@example.com",
+        },
+      });
+      expect(inviteResponse.status).toBe(200);
+
+      const managementToken = issueBrokerManagementToken({
+        userId: "user-invitee",
+      });
+      expect(managementToken?.token).toBeTruthy();
+
+      const invitationsResponse = await handleJsonRequest({
+        app,
+        path: "/v1/auth/invitations",
+        headers: {
+          authorization: `Bearer ${managementToken?.token ?? ""}`,
+        },
+      });
+      expect(invitationsResponse.status).toBe(200);
+
+      const invitationsPayload = (await invitationsResponse.json()) as {
+        readonly ok: boolean;
+        readonly invitations?: ReadonlyArray<{
+          readonly email?: string | null;
+          readonly scope?: "organization" | "team";
+          readonly status?: string;
+        }>;
+      };
+      expect(invitationsPayload.ok).toBe(true);
+      expect(invitationsPayload.invitations).toHaveLength(1);
+      expect(invitationsPayload.invitations?.[0]).toMatchObject({
+        email: "invitee@example.com",
+        scope: "organization",
+        status: "pending",
+      });
+    });
   });
 
   test("management-token /v1/auth/me hydrates user and scoped names from durable Better Auth records", async () => {

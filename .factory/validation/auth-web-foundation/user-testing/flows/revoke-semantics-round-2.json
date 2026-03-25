@@ -38,7 +38,7 @@
       "observation": "Created isolated owner/org-member/team-member/outsider users, exercised invite acceptance, verified fail-closed outsider/org-only behavior, and confirmed immediate email-target revocation for accepted team and org memberships."
     },
     {
-      "command": "cd \"/Users/hack/dev/hack-dance/hack\" && bun test \"./services/auth-broker/tests/org-team-membership.test.ts\" > \"<mission-dir>/evidence/auth-web-foundation/revoke-semantics-round-2/automated-corroboration.txt\" 2>&1",
+      "command": "cd \"<repo>\" && bun test \"./services/auth-broker/tests/org-team-membership.test.ts\" > \"<mission-dir>/evidence/auth-web-foundation/revoke-semantics-round-2/automated-corroboration.txt\" 2>&1",
       "exitCode": 0,
       "observation": "The focused org/team membership suite passed, including the accepted org-member removal-by-email regression coverage."
     }

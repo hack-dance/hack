@@ -1,7 +1,7 @@
 {
   "milestone": "env-hardening-closeout",
-  "round": 2,
-  "status": "fail",
+  "round": 3,
+  "status": "pass",
   "validatorsRun": {
     "test": {
       "passed": true,
@@ -20,68 +20,14 @@
     }
   },
   "reviewsSummary": {
-    "total": 5,
-    "passed": 4,
-    "failed": 1,
-    "failedFeatures": ["daemon-raw-path-traversal-rejection-fix"]
+    "total": 1,
+    "passed": 1,
+    "failed": 0,
+    "failedFeatures": []
   },
-  "blockingIssues": [
-    {
-      "featureId": "daemon-raw-path-traversal-rejection-fix",
-      "sourceFeatures": [
-        "gateway-read-write-guards-and-session-validation",
-        "daemon-raw-path-traversal-rejection-fix"
-      ],
-      "file": "src/daemon/request-target-proxy.ts",
-      "line": 81,
-      "severity": "blocking",
-      "description": "The raw-path traversal fix only validates the first HTTP request on each TCP connection before converting the socket into an uninspected pipe, so a keep-alive or pipelined follow-up request can still deliver raw dot-segment traversal that Bun normalizes and routes without pre-routing rejection."
-    }
-  ],
-  "nonBlockingIssues": [
-    {
-      "featureId": "daemon-raw-path-traversal-rejection-fix",
-      "file": "tests/daemon-sessions.test.ts",
-      "line": 57,
-      "severity": "non_blocking",
-      "description": "The new regressions exercise the raw-path validator directly but still do not cover the actual proxy transport or multi-request connection reuse, which is how the one-request-only blind spot shipped."
-    }
-  ],
-  "appliedUpdates": [
-    {
-      "target": "services.yaml",
-      "description": "Added `linear_broker_env_status` to `.factory/services.yaml` so reruns have a named env-backed broker-auth Linear smoke instead of ad-hoc inline commands when proving keychainless broker seeding.",
-      "sourceFeature": "linear-broker-seed-auth-without-local-secret-read"
-    },
-    {
-      "target": "library",
-      "description": "Updated `.factory/library/environment.md` to document env-backed Hack auth session variables for deterministic broker-auth verification and the broker-down outage-proof recipe using `HACK_AUTH_BROKER_URL=http://127.0.0.1:9` with `HACK_SETUP_SYNC_MODE=off`.",
-      "sourceFeature": "linear-broker-seed-auth-without-local-secret-read; cli-offline-optionality-matrix-completion"
-    }
-  ],
-  "suggestedGuidanceUpdates": [
-    {
-      "target": ".factory/skills/control-plane-worker/SKILL.md",
-      "suggestion": "Document isolated temp-HOME foreground-daemon smoke validation as an allowed pattern for daemon-socket hardening so workers can verify raw request-target behavior without mutating shared daemon state.",
-      "evidence": "The `daemon-raw-path-traversal-rejection-fix` worker had to deviate from the stated runtime procedure and use an isolated temp-HOME `bun index.ts daemon start --foreground` smoke to verify daemon request-target handling safely.",
-      "isSystemic": false
-    },
-    {
-      "target": ".factory/skills/control-plane-worker/SKILL.md",
-      "suggestion": "Require `agent-browser` proof or an explicit recorded deviation whenever control-plane workers change rendered web UI, even if the primary code lives outside `apps/web`.",
-      "evidence": "Both `mission-linear-closeout-audit` and `linear-closeout-evidence-artifact-anchor-fix` changed visible Linear management UI without any `agent-browser` run or justified deviation, despite mission guidance requiring browser validation for user-facing web behavior.",
-      "isSystemic": true
-    }
-  ],
-  "rejectedObservations": [
-    {
-      "observation": "Add a reusable routed validation command for fixture-backed env-management browser states immediately.",
-      "reason": "Rejected for now because the current gap is runtime/fixture orchestration, not a missing additive shell alias in `.factory/services.yaml`; a correct fix needs deliberate routed test-state setup rather than another ad-hoc command."
-    },
-    {
-      "observation": "Add a single shared outage-mode command that covers every CLI optionality case.",
-      "reason": "Rejected for now because the reviewed outage proof still depends on repo-specific setup and multi-step session lifecycle state; encoding it as one global command would be brittle without a clearer reusable harness."
-    }
-  ],
-  "previousRound": ".factory/validation/env-hardening-closeout/scrutiny/synthesis.round-1.json"
+  "blockingIssues": [],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [],
+  "rejectedObservations": [],
+  "previousRound": ".factory/validation/env-hardening-closeout/scrutiny/synthesis.round-2.json"
 }

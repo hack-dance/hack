@@ -1,0 +1,15 @@
+{
+  "featureId": "daemon-proxy-multi-request-raw-target-validation",
+  "reviewedAt": "2026-03-25T22:26:54Z",
+  "commitId": "375f3e7e97b9c965bdf2800aa19bf39e156c9390",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "I reviewed the prior failed review, both feature entries, both handoffs, both commit diffs (`a2350a80e9fe2b8a362c4a95be6a2ce0a2c1c936` and `375f3e7e97b9c965bdf2800aa19bf39e156c9390`), the fix feature's transcript skeleton, the current proxy implementation, the shared control-plane-worker skill, mission guidance, `.factory/services.yaml`, and `.factory/library/*` context. The original failure was that `src/daemon/request-target-proxy.ts` only inspected the first request line on each TCP connection before switching to blind piping. The fix replaces that one-shot gate with incremental HTTP parsing that keeps buffering client requests, validates every request target before forwarding upstream, tracks pending responses so pipelined invalid follow-up requests are rejected in order, and preserves upgrade/tunnel handoff behavior after a `101` response. The new transport-level regressions in `tests/daemon-sessions.test.ts` cover the exact blind spot from the prior review: pipelined traversal after a benign request, keep-alive traversal after a prior benign response, and benign keep-alive reuse. Within the stated feature scope, the fix adequately closes the prior bypass on reused and pipelined daemon/gateway connections.",
+    "issues": []
+  },
+  "sharedStateObservations": [],
+  "addressesFailureFrom": ".factory/validation/env-hardening-closeout/scrutiny/reviews/daemon-raw-path-traversal-rejection-fix.json",
+  "summary": "Pass. The fix addresses the original blocking review finding by validating every proxied HTTP request target on reused and pipelined connections, and the added raw-socket regressions directly prove the previously missed follow-up-request bypass is now closed while benign keep-alive reuse still works."
+}

@@ -2,10 +2,15 @@ import { describe, expect, test } from "bun:test";
 
 import { createSharedBetterAuthContract } from "@hack/auth-contract";
 
+import { createDefaultOrgTeamsStore } from "../src/app.ts";
 import type { BetterAuthRuntime } from "../src/better-auth.ts";
 import { createAuthBrokerApp } from "../src/index.ts";
+import { DbOrgTeamsStore } from "../src/modules/orgs/db-store.ts";
 import { InMemoryOrgTeamsStore } from "../src/modules/orgs/service.ts";
-import { installAuthBrokerEnvIsolation } from "./test-env.ts";
+import {
+  installAuthBrokerEnvIsolation,
+  withIsolatedAuthBrokerEnv,
+} from "./test-env.ts";
 
 type BetterAuthAuth = NonNullable<BetterAuthRuntime["auth"]>;
 type BetterAuthSession = Awaited<
@@ -13,6 +18,18 @@ type BetterAuthSession = Awaited<
 >;
 
 installAuthBrokerEnvIsolation();
+
+test("default org/team store uses durable database storage when DATABASE_URL is configured", () => {
+  withIsolatedAuthBrokerEnv(
+    {
+      DATABASE_URL: "postgresql://user:pass@example.com/hack",
+    },
+    () => {
+      const store = createDefaultOrgTeamsStore();
+      expect(store).toBeInstanceOf(DbOrgTeamsStore);
+    }
+  );
+});
 
 function createTestConfig() {
   return {

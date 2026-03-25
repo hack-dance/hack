@@ -34,5 +34,6 @@ Architectural decisions and patterns discovered during mission planning.
 ## Durable Persistence Targets
 
 - Better Auth-owned tables and broker-specific auth persistence currently live under `services/auth-broker/src/db/schema.ts`.
+- Org/team admin state now persists in broker-owned `org_admin_*` tables under `services/auth-broker/src/db/schema.ts`, and the default auth-broker wiring uses the DB-backed store whenever `DATABASE_URL` is available.
 - Shared control-plane tables currently live under `packages/db/src/schema/core.ts`, with migrations/verification through `bun run db:generate`, `bun run db:migrate`, and `bun run db:push`.
 - Workers may extract shared durable contracts, but they must keep one concrete Neon + Drizzle-backed persistence path and document any migration boundary changes in code/tests.

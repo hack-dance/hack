@@ -216,6 +216,112 @@ export const teamMember = pgTable(
   })
 );
 
+export const orgAdminOrganizations = pgTable(
+  "org_admin_organizations",
+  {
+    id: text("id").primaryKey(),
+    slug: text("slug").notNull(),
+    name: text("name").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    slugIndex: index("org_admin_organizations_slug_idx").on(table.slug),
+  })
+);
+
+export const orgAdminTeams = pgTable(
+  "org_admin_teams",
+  {
+    id: text("id").primaryKey(),
+    slug: text("slug").notNull(),
+    name: text("name").notNull(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => orgAdminOrganizations.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    organizationIdIndex: index("org_admin_teams_organization_id_idx").on(
+      table.organizationId
+    ),
+    slugIndex: index("org_admin_teams_slug_idx").on(table.slug),
+  })
+);
+
+export const orgAdminMemberships = pgTable(
+  "org_admin_memberships",
+  {
+    id: text("id").primaryKey(),
+    scope: text("scope").notNull(),
+    state: text("state").notNull(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => orgAdminOrganizations.id, { onDelete: "cascade" }),
+    teamId: text("team_id").references(() => orgAdminTeams.id, {
+      onDelete: "cascade",
+    }),
+    userId: text("user_id"),
+    email: text("email"),
+    target: text("target").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    organizationIdIndex: index("org_admin_memberships_organization_id_idx").on(
+      table.organizationId
+    ),
+    teamIdIndex: index("org_admin_memberships_team_id_idx").on(table.teamId),
+    userIdIndex: index("org_admin_memberships_user_id_idx").on(table.userId),
+    targetIndex: index("org_admin_memberships_target_idx").on(table.target),
+    stateIndex: index("org_admin_memberships_state_idx").on(table.state),
+  })
+);
+
+export const orgAdminInvitations = pgTable(
+  "org_admin_invitations",
+  {
+    id: text("id").primaryKey(),
+    scope: text("scope").notNull(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => orgAdminOrganizations.id, { onDelete: "cascade" }),
+    teamId: text("team_id").references(() => orgAdminTeams.id, {
+      onDelete: "cascade",
+    }),
+    email: text("email").notNull(),
+    status: text("status").notNull().default("pending"),
+    teamTargetsJson: text("team_targets_json").notNull().default("[]"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    organizationIdIndex: index("org_admin_invitations_organization_id_idx").on(
+      table.organizationId
+    ),
+    teamIdIndex: index("org_admin_invitations_team_id_idx").on(table.teamId),
+    emailIndex: index("org_admin_invitations_email_idx").on(table.email),
+    statusIndex: index("org_admin_invitations_status_idx").on(table.status),
+  })
+);
+
 export const linearConnections = pgTable("linear_connections", {
   id: uuid("id").defaultRandom().primaryKey(),
   connectionKey: text("connection_key").notNull().unique(),
@@ -304,6 +410,10 @@ export const betterAuthSchema = {
 
 export const authBrokerSchema = {
   ...betterAuthSchema,
+  orgAdminOrganizations,
+  orgAdminTeams,
+  orgAdminMemberships,
+  orgAdminInvitations,
   linearConnections,
   linearWebhookEvents,
   linearSyncSubscriptions,

@@ -30,6 +30,7 @@ import {
   InMemoryLinearSyncStore,
   type LinearSyncStore,
 } from "./modules/linear-sync-store/service.ts";
+import { createOrgTeamsStoreFromDb } from "./modules/orgs/db-store.ts";
 import { createOrgsPlugin } from "./modules/orgs/plugin.ts";
 import {
   InMemoryOrgTeamsStore,
@@ -217,8 +218,20 @@ function createDefaultLinearAutosyncStore(): LinearAutosyncStore {
   }
 }
 
-function createDefaultOrgTeamsStore(): OrgTeamsStore {
-  return new InMemoryOrgTeamsStore();
+export function createDefaultOrgTeamsStore(input?: {
+  readonly databaseUrl?: string;
+}): OrgTeamsStore {
+  const databaseUrl = input?.databaseUrl ?? process.env.DATABASE_URL;
+  if (!databaseUrl) {
+    return new InMemoryOrgTeamsStore();
+  }
+  try {
+    return createOrgTeamsStoreFromDb({
+      databaseUrl,
+    });
+  } catch {
+    return new InMemoryOrgTeamsStore();
+  }
 }
 
 /**

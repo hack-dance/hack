@@ -215,7 +215,7 @@ test(
 );
 
 test(
-  "env set --secret stores value using encrypted backend",
+  "env set --secret stores value using encrypted backend even when broker auth is unavailable",
   async () => {
     if (!tempDir) {
       throw new Error("Missing temp dir");
@@ -268,6 +268,7 @@ test(
       args: ["env", "set", "--secret", "API_KEY=super-secret"],
       env: {
         ...process.env,
+        HACK_AUTH_BROKER_URL: "http://127.0.0.1:9",
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-backend-command-key",
       },
@@ -287,6 +288,7 @@ test(
       args: ["env", "list", "--show-secrets", "--json"],
       env: {
         ...process.env,
+        HACK_AUTH_BROKER_URL: "http://127.0.0.1:9",
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-backend-command-key",
       },
@@ -317,6 +319,7 @@ test(
       args: ["env", "list", "--json"],
       env: {
         ...process.env,
+        HACK_AUTH_BROKER_URL: "http://127.0.0.1:9",
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-backend-command-key",
       },
@@ -337,6 +340,7 @@ test(
       args: ["env", "list", "--show-secrets"],
       env: {
         ...process.env,
+        HACK_AUTH_BROKER_URL: "http://127.0.0.1:9",
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-backend-command-key",
       },

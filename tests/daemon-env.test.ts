@@ -189,37 +189,47 @@ describe("handleEnvRoutes", () => {
     });
   });
 
-  test("POST /v1/env/set writes to .hack/.env and shows as resolved", async () => {
-    const setReq = mockRequest({
-      method: "POST",
-      path: "/v1/env/set",
-      body: { project: "env-test", key: "FOO", value: "bar" },
-    });
-    const setUrl = new URL(setReq.url);
-    const setRes = await handleEnvRoutes({ req: setReq, url: setUrl });
-    expect(setRes).not.toBeNull();
-    expect(setRes?.status).toBe(200);
+  test("POST /v1/env/set writes to .hack/.env and shows as resolved when broker auth is unavailable", async () => {
+    const previousAuthBrokerUrl = process.env.HACK_AUTH_BROKER_URL;
+    process.env.HACK_AUTH_BROKER_URL = "http://127.0.0.1:9";
+    try {
+      const setReq = mockRequest({
+        method: "POST",
+        path: "/v1/env/set",
+        body: { project: "env-test", key: "FOO", value: "bar" },
+      });
+      const setUrl = new URL(setReq.url);
+      const setRes = await handleEnvRoutes({ req: setReq, url: setUrl });
+      expect(setRes).not.toBeNull();
+      expect(setRes?.status).toBe(200);
 
-    const getReq = mockRequest({
-      method: "GET",
-      path: "/v1/env?project=env-test",
-    });
-    const getUrl = new URL(getReq.url);
-    const getRes = await handleEnvRoutes({ req: getReq, url: getUrl });
-    expect(getRes).not.toBeNull();
-    expect(getRes?.status).toBe(200);
-    const body = await parseResponse(getRes!);
-    const values = Array.isArray(body?.values)
-      ? (body?.values as unknown[])
-      : [];
-    const foo = values.find(
-      (v) =>
-        typeof v === "object" &&
-        v !== null &&
-        (v as Record<string, unknown>).key === "FOO"
-    ) as Record<string, unknown> | undefined;
-    expect(foo?.hasValue).toBe(true);
-    expect(foo?.resolvedFrom).toBe("dotenv");
+      const getReq = mockRequest({
+        method: "GET",
+        path: "/v1/env?project=env-test",
+      });
+      const getUrl = new URL(getReq.url);
+      const getRes = await handleEnvRoutes({ req: getReq, url: getUrl });
+      expect(getRes).not.toBeNull();
+      expect(getRes?.status).toBe(200);
+      const body = await parseResponse(getRes!);
+      const values = Array.isArray(body?.values)
+        ? (body?.values as unknown[])
+        : [];
+      const foo = values.find(
+        (v) =>
+          typeof v === "object" &&
+          v !== null &&
+          (v as Record<string, unknown>).key === "FOO"
+      ) as Record<string, unknown> | undefined;
+      expect(foo?.hasValue).toBe(true);
+      expect(foo?.resolvedFrom).toBe("dotenv");
+    } finally {
+      if (previousAuthBrokerUrl === undefined) {
+        Reflect.deleteProperty(process.env, "HACK_AUTH_BROKER_URL");
+      } else {
+        process.env.HACK_AUTH_BROKER_URL = previousAuthBrokerUrl;
+      }
+    }
   });
 
   test("POST /v1/env/unset clears .hack/.env and shows as missing", async () => {

@@ -25,129 +25,141 @@ afterEach(() => {
 });
 
 testIntegration(
-  "tickets extension: create/list/show with isolated git ref",
+  "tickets extension: create/list/show with isolated git ref stays local-first when broker auth is unavailable",
   { timeout: 60_000 },
   async () => {
+    const previousAuthBrokerUrl = process.env.HACK_AUTH_BROKER_URL;
+    process.env.HACK_AUTH_BROKER_URL = "http://127.0.0.1:9";
+
     const root = await mkdirTempDir({ prefix: "hack-cli-tickets-e2e-" });
     const projectDir = join(root, "project");
     const remoteDir = join(root, "remote.git");
+    try {
+      await mkdir(projectDir, { recursive: true });
+      await copyDir({
+        from: resolve(import.meta.dir, "../examples/tickets"),
+        to: projectDir,
+      });
 
-    await mkdir(projectDir, { recursive: true });
-    await copyDir({
-      from: resolve(import.meta.dir, "../examples/tickets"),
-      to: projectDir,
-    });
-
-    await run({ cwd: projectDir, cmd: ["git", "init"] });
-    await run({
-      cwd: projectDir,
-      cmd: ["git", "config", "user.email", "tests@hack"],
-    });
-    await run({
-      cwd: projectDir,
-      cmd: ["git", "config", "user.name", "hack-cli-tests"],
-    });
-    await run({ cwd: projectDir, cmd: ["git", "add", "-A"] });
-    await run({ cwd: projectDir, cmd: ["git", "commit", "-m", "init"] });
-
-    await run({ cwd: root, cmd: ["git", "init", "--bare", remoteDir] });
-    await run({
-      cwd: projectDir,
-      cmd: ["git", "remote", "add", "origin", remoteDir],
-    });
-    await run({
-      cwd: projectDir,
-      cmd: ["git", "push", "-u", "origin", "HEAD:main"],
-    });
-
-    const beforeHead = (
+      await run({ cwd: projectDir, cmd: ["git", "init"] });
       await run({
         cwd: projectDir,
-        cmd: ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-      })
-    ).stdout.trim();
-
-    const created = await runHack({
-      cwd: projectDir,
-      args: ["tickets", "create", "--title", "First ticket", "--json"],
-    });
-    const createdJson = JSON.parse(created.stdout) as {
-      ticket: { ticketId: string };
-    };
-    expect(createdJson.ticket.ticketId).toMatch(/^T-[0-9A-Z]{10}$/);
-
-    const updated = await runHack({
-      cwd: projectDir,
-      args: [
-        "tickets",
-        "update",
-        createdJson.ticket.ticketId,
-        "--title",
-        "Updated ticket title",
-        "--json",
-      ],
-    });
-    const updatedJson = JSON.parse(updated.stdout) as { ok: boolean };
-    expect(updatedJson.ok).toBe(true);
-
-    const status = await runHack({
-      cwd: projectDir,
-      args: [
-        "tickets",
-        "status",
-        createdJson.ticket.ticketId,
-        "in_progress",
-        "--json",
-      ],
-    });
-    const statusJson = JSON.parse(status.stdout) as { ok: boolean };
-    expect(statusJson.ok).toBe(true);
-
-    const afterHead = (
+        cmd: ["git", "config", "user.email", "tests@hack"],
+      });
       await run({
         cwd: projectDir,
-        cmd: ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-      })
-    ).stdout.trim();
-    expect(afterHead).toBe(beforeHead);
+        cmd: ["git", "config", "user.name", "hack-cli-tests"],
+      });
+      await run({ cwd: projectDir, cmd: ["git", "add", "-A"] });
+      await run({ cwd: projectDir, cmd: ["git", "commit", "-m", "init"] });
 
-    const listed = await runHack({
-      cwd: projectDir,
-      args: ["tickets", "list", "--json"],
-    });
-    const listJson = JSON.parse(listed.stdout) as {
-      tickets: { ticketId: string; title: string; status: string }[];
-    };
-    expect(listJson.tickets.length).toBe(1);
-    expect(listJson.tickets[0]?.title).toBe("Updated ticket title");
-    expect(listJson.tickets[0]?.status).toBe("in_progress");
+      await run({ cwd: root, cmd: ["git", "init", "--bare", remoteDir] });
+      await run({
+        cwd: projectDir,
+        cmd: ["git", "remote", "add", "origin", remoteDir],
+      });
+      await run({
+        cwd: projectDir,
+        cmd: ["git", "push", "-u", "origin", "HEAD:main"],
+      });
 
-    const shown = await runHack({
-      cwd: projectDir,
-      args: ["tickets", "show", createdJson.ticket.ticketId, "--json"],
-    });
-    const showJson = JSON.parse(shown.stdout) as {
-      ticket: { ticketId: string; title: string; status: string };
-      events: { type: string }[];
-    };
-    expect(showJson.ticket.ticketId).toBe(createdJson.ticket.ticketId);
-    expect(showJson.ticket.title).toBe("Updated ticket title");
-    expect(showJson.ticket.status).toBe("in_progress");
-    expect(showJson.events.some((e) => e.type === "ticket.created")).toBe(true);
+      const beforeHead = (
+        await run({
+          cwd: projectDir,
+          cmd: ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        })
+      ).stdout.trim();
 
-    const showRef = await runAllowFail({
-      cwd: root,
-      cmd: [
-        "git",
-        `--git-dir=${remoteDir}`,
-        "show-ref",
-        "--verify",
-        "refs/hack/tickets",
-      ],
-    });
-    expect(showRef.exitCode).toBe(0);
+      const created = await runHack({
+        cwd: projectDir,
+        args: ["tickets", "create", "--title", "First ticket", "--json"],
+      });
+      const createdJson = JSON.parse(created.stdout) as {
+        ticket: { ticketId: string };
+      };
+      expect(createdJson.ticket.ticketId).toMatch(/^T-[0-9A-Z]{10}$/);
 
-    await rm(root, { recursive: true, force: true });
+      const updated = await runHack({
+        cwd: projectDir,
+        args: [
+          "tickets",
+          "update",
+          createdJson.ticket.ticketId,
+          "--title",
+          "Updated ticket title",
+          "--json",
+        ],
+      });
+      const updatedJson = JSON.parse(updated.stdout) as { ok: boolean };
+      expect(updatedJson.ok).toBe(true);
+
+      const status = await runHack({
+        cwd: projectDir,
+        args: [
+          "tickets",
+          "status",
+          createdJson.ticket.ticketId,
+          "in_progress",
+          "--json",
+        ],
+      });
+      const statusJson = JSON.parse(status.stdout) as { ok: boolean };
+      expect(statusJson.ok).toBe(true);
+
+      const afterHead = (
+        await run({
+          cwd: projectDir,
+          cmd: ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        })
+      ).stdout.trim();
+      expect(afterHead).toBe(beforeHead);
+
+      const listed = await runHack({
+        cwd: projectDir,
+        args: ["tickets", "list", "--json"],
+      });
+      const listJson = JSON.parse(listed.stdout) as {
+        tickets: { ticketId: string; title: string; status: string }[];
+      };
+      expect(listJson.tickets.length).toBe(1);
+      expect(listJson.tickets[0]?.title).toBe("Updated ticket title");
+      expect(listJson.tickets[0]?.status).toBe("in_progress");
+
+      const shown = await runHack({
+        cwd: projectDir,
+        args: ["tickets", "show", createdJson.ticket.ticketId, "--json"],
+      });
+      const showJson = JSON.parse(shown.stdout) as {
+        ticket: { ticketId: string; title: string; status: string };
+        events: { type: string }[];
+      };
+      expect(showJson.ticket.ticketId).toBe(createdJson.ticket.ticketId);
+      expect(showJson.ticket.title).toBe("Updated ticket title");
+      expect(showJson.ticket.status).toBe("in_progress");
+      expect(showJson.events.some((e) => e.type === "ticket.created")).toBe(
+        true
+      );
+
+      const showRef = await runAllowFail({
+        cwd: root,
+        cmd: [
+          "git",
+          `--git-dir=${remoteDir}`,
+          "show-ref",
+          "--verify",
+          "refs/hack/tickets",
+        ],
+      });
+      expect(showRef.exitCode).toBe(0);
+    } finally {
+      if (previousAuthBrokerUrl === undefined) {
+        Reflect.deleteProperty(process.env, "HACK_AUTH_BROKER_URL");
+      } else {
+        process.env.HACK_AUTH_BROKER_URL = previousAuthBrokerUrl;
+      }
+
+      await rm(root, { recursive: true, force: true });
+    }
   }
 );
 

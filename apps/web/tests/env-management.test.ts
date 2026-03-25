@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 
-import { buildEnvManagementState } from "../src/lib/env-management";
+import {
+  buildEnvManagementState,
+  loadEnvManagementState,
+} from "../src/lib/env-management";
 
 test("env management keeps local-only plaintext-compatible state distinct from broker-managed env", () => {
   const state = buildEnvManagementState({
@@ -239,4 +242,23 @@ test("env management surfaces portable encrypted bundles without implying broker
   expect(state.backend.status.portability).toContain("not broker-managed");
   expect(state.missingRequired).toEqual(["DATABASE_URL"]);
   expect(state.envSelectionLabel).toContain("qa");
+});
+
+test("env management falls back to local-only unavailable state when repo-bound env commands fail", async () => {
+  const state = await loadEnvManagementState({
+    runCommandImplementation: async () => ({
+      payload: null,
+      output: "env command unavailable while apps/web is offline",
+    }),
+  });
+
+  expect(state.ready).toBe(false);
+  expect(state.status.summary).toBe("Env status unavailable");
+  expect(state.status.sharedState).toBe("local_only");
+  expect(state.status.detail).toBe(
+    "env command unavailable while apps/web is offline"
+  );
+  expect(state.backend.classification.sharedState).toBe("local_only");
+  expect(state.statusCommand).toBe("./dist/hack env list --json");
+  expect(state.backendCommand).toBe("./dist/hack env backend status --json");
 });

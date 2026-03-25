@@ -103,6 +103,13 @@ type EnvClassification = {
   readonly sharedState: string;
 };
 
+type CommandRunner = <TPayload>(input: {
+  readonly args: readonly string[];
+}) => Promise<{
+  readonly payload: TPayload | null;
+  readonly output: string;
+}>;
+
 export type EnvManagementState = {
   readonly ready: boolean;
   readonly envSelectionLabel: string;
@@ -148,12 +155,16 @@ export type EnvManagementState = {
   readonly backendCommand: string;
 };
 
-export async function loadEnvManagementState(): Promise<EnvManagementState> {
+export async function loadEnvManagementState(input?: {
+  readonly runCommandImplementation?: CommandRunner;
+}): Promise<EnvManagementState> {
+  const runCommandImplementation =
+    input?.runCommandImplementation ?? runEnvJsonCommand;
   const [listResult, backendResult] = await Promise.all([
-    runEnvJsonCommand<EnvListCommandPayload>({
+    runCommandImplementation<EnvListCommandPayload>({
       args: RUNTIME_STATUS_ARGS,
     }),
-    runEnvJsonCommand<EnvBackendCommandPayload>({
+    runCommandImplementation<EnvBackendCommandPayload>({
       args: RUNTIME_BACKEND_ARGS,
     }),
   ]);

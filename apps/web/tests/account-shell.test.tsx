@@ -526,6 +526,9 @@ test("account shell fails closed with a sign-in path when no active context is a
 
   expect(markup).toContain("Sign in to load your Hack account context");
   expect(markup).toContain('href="/auth?redirect=%2Faccount"');
+  expect(markup).toContain("Env");
+  expect(markup).toContain("./dist/hack env list --json");
+  expect(markup).toContain("./dist/hack env backend status --json");
   expect(markup).toContain(
     "Sign in to compare Hack-owned access with local Linear access."
   );

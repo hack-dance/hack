@@ -1,0 +1,128 @@
+{
+  "groupId": "integration-management-surface",
+  "testedAt": "2026-03-25T18:05:35.106678Z",
+  "isolation": {
+    "appUrl": "https://hack-cli.hack",
+    "authUrl": "https://auth.hack-cli.hack",
+    "repoRoot": "<repo>",
+    "browserSession": "7e41e1b149ce__u1 (closed)",
+    "accountEmail": "integration-surface-1774461414@example.com",
+    "selectedOrganization": "int-org-1774461509",
+    "selectedTeam": "int-team-1774461509",
+    "cliAuthStore": "<tmp>/integration-management-surface-auth/isolated-home"
+  },
+  "toolsUsed": ["bun run build", "./dist/hack", "curl", "agent-browser"],
+  "assertionResults": [
+    {
+      "id": "VAL-INTEGRATION-002",
+      "status": "pass",
+      "reason": "GitHub stayed mode-aware and unready: the repo-bound env-only CLI status remained `needs_attention` with missing-token repair guidance, while the browser account page overlaid shared-scope denial instead of ever surfacing a false ready state for the hidden `hack-cli` project.",
+      "evidence": [
+        "integration-management/integration-management-surface/VAL-INTEGRATION-002-003-github-hidden-scope.png",
+        "integration-management/integration-management-surface/account-hidden-scope-text.txt",
+        "integration-management/integration-management-surface/cli-github-status-env-only.json",
+        "integration-management/integration-management-surface/cli-github-profiles.json",
+        "integration-management/integration-management-surface/browser-errors.txt"
+      ]
+    },
+    {
+      "id": "VAL-INTEGRATION-003",
+      "status": "pass",
+      "reason": "The GitHub surface exposed the active profile (`default`), routing source (`implicit_default`), token mode, installation state (`not required`), and explicit repair actions for both missing token access and refreshing hidden shared scope.",
+      "evidence": [
+        "integration-management/integration-management-surface/VAL-INTEGRATION-002-003-github-hidden-scope.png",
+        "integration-management/integration-management-surface/account-hidden-scope-text.txt",
+        "integration-management/integration-management-surface/cli-github-status-env-only.json",
+        "integration-management/integration-management-surface/cli-github-profiles.json"
+      ]
+    },
+    {
+      "id": "VAL-INTEGRATION-004",
+      "status": "pass",
+      "reason": "Linear clearly separated machine-local usability from broker-backed/shared visibility: the disposable session had no visible broker connection and no local env token, so the browser showed `Connected on Hack: not connected`, `Local access: needs repair`, hid the connected account by scope, and pointed repair at `hack auth login` for the hidden shared project path.",
+      "evidence": [
+        "integration-management/integration-management-surface/VAL-INTEGRATION-004-005-006-linear-hidden-scope.png",
+        "integration-management/integration-management-surface/account-hidden-scope-text.txt",
+        "integration-management/integration-management-surface/cli-linear-status-env-only.json",
+        "integration-management/integration-management-surface/cli-linear-connections.json",
+        "integration-management/integration-management-surface/browser-errors.txt"
+      ]
+    },
+    {
+      "id": "VAL-INTEGRATION-005",
+      "status": "pass",
+      "reason": "The Linear binding view stayed accurate and deduplicated: browser and CLI both showed the active `default` profile, the same default Hack project binding, zero additional linked projects, and no duplicate project entries.",
+      "evidence": [
+        "integration-management/integration-management-surface/VAL-INTEGRATION-004-005-006-linear-hidden-scope.png",
+        "integration-management/integration-management-surface/account-hidden-scope-text.txt",
+        "integration-management/integration-management-surface/cli-linear-status-env-only.json",
+        "integration-management/integration-management-surface/cli-linear-profiles.json"
+      ]
+    },
+    {
+      "id": "VAL-INTEGRATION-006",
+      "status": "pass",
+      "reason": "Status-update publishing and delivery reconciliation remained auditable across CLI, browser, and repo files: the browser mirrored the latest published update metadata and the `processed/applied/failed` counts from repo-bound Linear status, and the copied published markdown plus `delivery-audit.json` matched those values exactly.",
+      "evidence": [
+        "integration-management/integration-management-surface/VAL-INTEGRATION-004-005-006-linear-hidden-scope.png",
+        "integration-management/integration-management-surface/account-hidden-scope-text.txt",
+        "integration-management/integration-management-surface/cli-linear-status-env-only.json",
+        "integration-management/integration-management-surface/delivery-audit.json",
+        "integration-management/integration-management-surface/latest-published-status-update.md"
+      ]
+    },
+    {
+      "id": "VAL-CROSS-003",
+      "status": "pass",
+      "reason": "The disposable account's shared-scope visibility stayed fail-closed across surfaces: broker APIs returned no visible projects and `project_not_found` for `hack-cli`, the browser defaulted to the only visible org/team and clamped both integration sections to `Shared project scope denied for hack-cli`, and the matching isolated CLI session never inferred usable shared ownership or integration access for that hidden project.",
+      "evidence": [
+        "integration-management/integration-management-surface/VAL-CROSS-003-account-hidden-scope.png",
+        "integration-management/integration-management-surface/account-hidden-scope-text.txt",
+        "integration-management/integration-management-surface/api-auth-me.json",
+        "integration-management/integration-management-surface/api-projects.json",
+        "integration-management/integration-management-surface/api-project-hack-cli.json",
+        "integration-management/integration-management-surface/cli-auth-status.json",
+        "integration-management/integration-management-surface/cli-org-list.json",
+        "integration-management/integration-management-surface/cli-team-list.json",
+        "integration-management/integration-management-surface/cli-github-status-env-only.json",
+        "integration-management/integration-management-surface/cli-linear-status-env-only.json"
+      ]
+    }
+  ],
+  "frictions": [
+    {
+      "description": "Shell TLS trust for the routed local hosts was not configured for non-browser tools, so curl checks required `-k` and the isolated CLI evidence used `NODE_TLS_REJECT_UNAUTHORIZED=0` with the routed auth host.",
+      "resolved": true,
+      "resolution": "Used the already-running routed hosts with explicit insecure-local transport flags instead of mutating global trust settings.",
+      "affectedAssertions": [
+        "VAL-INTEGRATION-002",
+        "VAL-INTEGRATION-003",
+        "VAL-INTEGRATION-004",
+        "VAL-INTEGRATION-005",
+        "VAL-INTEGRATION-006",
+        "VAL-CROSS-003"
+      ]
+    },
+    {
+      "description": "The mission guidance pointed at `http://127.0.0.1:8080`, but that broker endpoint was unreachable from this worker.",
+      "resolved": true,
+      "resolution": "Fell back to the routed auth host `https://auth.hack-cli.hack`, which served the same broker/auth APIs successfully for curl, browser bridge, and isolated CLI checks.",
+      "affectedAssertions": ["VAL-INTEGRATION-004", "VAL-CROSS-003"]
+    },
+    {
+      "description": "`agent-browser network requests` did not retain the already-settled server-rendered page load, so browser-side request capture came back empty after navigation settled.",
+      "resolved": true,
+      "resolution": "Used direct `curl` captures against the broker APIs for request/response evidence and kept the browser evidence focused on rendered UI plus console cleanliness.",
+      "affectedAssertions": [
+        "VAL-INTEGRATION-002",
+        "VAL-INTEGRATION-003",
+        "VAL-INTEGRATION-004",
+        "VAL-INTEGRATION-005",
+        "VAL-INTEGRATION-006",
+        "VAL-CROSS-003"
+      ]
+    }
+  ],
+  "blockers": [],
+  "summary": "Tested 6 assigned assertions and all 6 passed. The hidden-scope disposable account proved that the browser integration surfaces fail closed against broker project visibility while still exposing accurate GitHub/Linear routing, repair, binding, and repo audit details from the repo-bound CLI state."
+}

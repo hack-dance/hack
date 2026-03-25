@@ -66,9 +66,10 @@ Testing surface findings, required tools, and validation concurrency for this mi
 
 ## Flow Validator Guidance: Broker / local HTTP surface
 
-- The only local broker instance for this milestone is `http://127.0.0.1:8080`.
-- Use `curl -sf http://127.0.0.1:8080/health` before any broker-dependent assertion and treat a failed health check as a blocker.
-- Route broker-dependent CLI smokes through `HACK_AUTH_BROKER_URL=http://127.0.0.1:8080` so refresh behavior is exercised against the local validator-owned broker.
+- Use `http://127.0.0.1:8080` only when you intentionally start the standalone `auth-broker-local` service from `.factory/services.yaml`.
+- When the hack-managed stack is already up, prefer the routed broker host `https://auth.hack-cli.hack` for broker/API evidence and browser auth bridging.
+- For routed-host shell checks, use `curl -k` and set `NODE_TLS_REJECT_UNAUTHORIZED=0` for isolated CLI/curl probes unless local trust has already been configured outside the validator session.
+- Treat a failed health check on both `http://127.0.0.1:8080/health` and `https://auth.hack-cli.hack/health` as a blocker before continuing with broker-dependent assertions.
 - Do not bind additional fixed ports or start a second broker instance unless the coordinator gives a separate port and evidence directory.
 
 ## Flow Validator Guidance: Web surface

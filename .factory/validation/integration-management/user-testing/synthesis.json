@@ -1,0 +1,29 @@
+{
+  "milestone": "integration-management",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 6,
+    "passed": 6,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-INTEGRATION-002",
+    "VAL-INTEGRATION-003",
+    "VAL-INTEGRATION-004",
+    "VAL-INTEGRATION-005",
+    "VAL-INTEGRATION-006",
+    "VAL-CROSS-003"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [
+    {
+      "target": "user-testing.md",
+      "description": "Clarified that integration-management broker/API validators should prefer the routed auth host when the hack-managed stack is already up, and documented the local TLS trust workaround for shell-based checks.",
+      "source": "flow-report"
+    }
+  ],
+  "previousRound": null
+}

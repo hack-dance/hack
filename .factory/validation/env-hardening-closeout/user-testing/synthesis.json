@@ -1,0 +1,38 @@
+{
+  "milestone": "env-hardening-closeout",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 10,
+    "passed": 10,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-ENV-001",
+    "VAL-ENV-002",
+    "VAL-ENV-003",
+    "VAL-ENV-004",
+    "VAL-ENV-005",
+    "VAL-ENV-006",
+    "VAL-ENV-007",
+    "VAL-CROSS-001",
+    "VAL-CROSS-004",
+    "VAL-CROSS-005"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [
+    {
+      "target": "user-testing.md",
+      "description": "Documented that daemon/gateway raw-path validation must use an isolated repo-built daemon instead of the shared 127.0.0.1:7788 listener because the shared installed hackd can be stale relative to the current branch.",
+      "source": "flow-report"
+    },
+    {
+      "target": "user-testing.md",
+      "description": "Documented isolated offline CLI validator setup: keep projects.json beside HACK_GLOBAL_CONFIG_PATH and unset TMUX while setting TMUX_TMPDIR so session/status flows stay inside the temp validation namespace.",
+      "source": "flow-report"
+    }
+  ],
+  "previousRound": null
+}

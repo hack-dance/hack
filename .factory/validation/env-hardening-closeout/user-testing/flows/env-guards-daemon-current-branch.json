@@ -1,0 +1,90 @@
+{
+  "groupId": "env-guards-daemon-current-branch",
+  "testedAt": "2026-03-25T22:57:37.725241Z",
+  "isolation": {
+    "repoRoot": "<repo>",
+    "missionDir": "<mission-dir>",
+    "evidenceDir": "<mission-dir>/evidence/env-hardening-closeout/env-guards-daemon-current-branch",
+    "reportPath": "<repo>/.factory/validation/env-hardening-closeout/user-testing/flows/env-guards-daemon-current-branch.json",
+    "tempRoot": "<tmp>",
+    "tempHome": "<tmp>/home",
+    "tempGlobalConfigPath": "<tmp>/global/hack.config.json",
+    "daemonSocketPath": "<tmp>/home/.hack/daemon/hackd.sock",
+    "gatewayBaseUrl": "http://127.0.0.1:17788",
+    "projectId": "75915219714b",
+    "daemonEntryPoint": "bun <repo>/index.ts daemon start --foreground",
+    "priorSuspectSharedGatewayBaseUrl": "http://127.0.0.1:7788"
+  },
+  "toolsUsed": ["bun", "curl", "python3"],
+  "assertionResults": [
+    {
+      "id": "VAL-ENV-006",
+      "status": "pass",
+      "reason": "The isolated current-branch daemon returned explicit errors for malformed and missing session targets (401 missing_token, 400 invalid_name, 404 session_not_found) and the raw gateway-wrapped dot-segment traversal probe returned 400 malformed_path instead of routing to /v1/sessions. This shows the current branch behaves correctly and the earlier 127.0.0.1:7788 result was stale shared-gateway evidence, not a current-branch failure.",
+      "evidence": [
+        "env-hardening-closeout/env-guards-daemon-current-branch/VAL-ENV-006-daemon-log.txt",
+        "env-hardening-closeout/env-guards-daemon-current-branch/VAL-ENV-006-daemon-status.json",
+        "env-hardening-closeout/env-guards-daemon-current-branch/VAL-ENV-006-missing-token-control-plane.json",
+        "env-hardening-closeout/env-guards-daemon-current-branch/VAL-ENV-006-session-invalid-id.json",
+        "env-hardening-closeout/env-guards-daemon-current-branch/VAL-ENV-006-session-not-found.json",
+        "env-hardening-closeout/env-guards-daemon-current-branch/VAL-ENV-006-malformed-traversal.json",
+        "env-hardening-closeout/env-guards-daemon-current-branch/VAL-ENV-006-targeted-tests.txt",
+        "env-hardening-closeout/env-guards-daemon-current-branch/VAL-ENV-006-commands.txt"
+      ]
+    }
+  ],
+  "frictions": [
+    {
+      "description": "A first isolated daemon launch under the default macOS temp path exceeded the UNIX socket pathname limit.",
+      "resolved": true,
+      "resolution": "Switched the validator to a shorter /tmp-backed HOME so the current-branch daemon socket path stayed within system limits.",
+      "affectedAssertions": ["VAL-ENV-006"],
+      "evidence": [
+        "env-hardening-closeout/env-guards-daemon-current-branch/VAL-ENV-006-daemon-log.txt"
+      ]
+    },
+    {
+      "description": "The isolated daemon reported the optional auth server port 7790 was already in use by another process.",
+      "resolved": true,
+      "resolution": "Continued with direct daemon-socket and gateway probes because VAL-ENV-006 only exercises session/runtime and control-plane route guards, which were live on the isolated socket and gateway port.",
+      "affectedAssertions": ["VAL-ENV-006"],
+      "evidence": [
+        "env-hardening-closeout/env-guards-daemon-current-branch/VAL-ENV-006-daemon-log.txt"
+      ]
+    }
+  ],
+  "blockers": [],
+  "commands": [
+    {
+      "command": "curl --unix-socket <tmp>/home/.hack/daemon/hackd.sock http://daemon/v1/status",
+      "exitCode": 0,
+      "observation": "The isolated current-branch daemon socket responded 200, confirming probes hit the temp-HOME daemon rather than the shared global gateway."
+    },
+    {
+      "command": "curl http://127.0.0.1:17788/control-plane/projects/75915219714b/jobs",
+      "exitCode": 0,
+      "observation": "Unauthenticated control-plane access returned 401 with explicit missing_token guidance."
+    },
+    {
+      "command": "curl --unix-socket <tmp>/home/.hack/daemon/hackd.sock http://daemon/v1/sessions/bad.name",
+      "exitCode": 0,
+      "observation": "Malformed session identifiers stayed explicit with 400 invalid_name validation."
+    },
+    {
+      "command": "curl --unix-socket <tmp>/home/.hack/daemon/hackd.sock http://daemon/v1/sessions/does-not-exist",
+      "exitCode": 0,
+      "observation": "Missing session targets returned 404 session_not_found instead of falling through to another route."
+    },
+    {
+      "command": "curl --path-as-is -H \"Authorization: Bearer <read-token>\" http://127.0.0.1:17788/control-plane/projects/75915219714b/jobs/../../../../v1/sessions",
+      "exitCode": 0,
+      "observation": "The raw dot-segment traversal probe returned 400 with malformed_path on the isolated current-branch daemon gateway."
+    },
+    {
+      "command": "bun test <repo>/tests/daemon-sessions.test.ts <repo>/tests/gateway-e2e.test.ts",
+      "exitCode": 0,
+      "observation": "Focused daemon and gateway regression tests were rerun to support the live probe results."
+    }
+  ],
+  "summary": "Tested 1 assertion: VAL-ENV-006 passed on an isolated current-branch daemon. The temp-HOME daemon and non-shared gateway returned explicit missing_token, invalid_name, and session_not_found errors, and the raw traversal probe returned malformed_path, so the earlier 200 response from the shared 127.0.0.1:7788 gateway was stale evidence from the wrong daemon surface."
+}

@@ -1,0 +1,165 @@
+{
+  "groupId": "cli-offline-optionality",
+  "testedAt": "2026-03-25T23:10:32.741925Z",
+  "isolation": {
+    "repoRoot": "<repo>",
+    "missionDir": "<mission-dir>",
+    "evidenceDir": "<mission-dir>/evidence/env-hardening-closeout/cli-offline-optionality",
+    "reportPath": "<repo>/.factory/validation/env-hardening-closeout/user-testing/flows/cli-offline-optionality.json",
+    "tempRoot": "<tmp>",
+    "tempHome": "<tmp>/home",
+    "tempGlobalConfigPath": "<tmp>/cli-state/global-config.json",
+    "tempProjectsRegistryPath": "<tmp>/cli-state/projects.json",
+    "tmuxTmpDir": "<tmp>/tmux",
+    "projectRoot": "<tmp>/project",
+    "projectName": "tickets-example",
+    "workspaceName": "tickets-example--outage-proof",
+    "brokerBaseUrl": "http://127.0.0.1:9",
+    "setupSyncMode": "off",
+    "repoBoundBinary": "<repo>/dist/hack"
+  },
+  "toolsUsed": ["<repo>/dist/hack", "bun test", "curl", "git", "python3"],
+  "assertionResults": [
+    {
+      "id": "VAL-CROSS-001",
+      "status": "pass",
+      "reason": "With the broker/web URL pointed at an unreachable local address, repo-bound session list/start/stop, status --project, project owner show, and tickets create/list all succeeded from the CLI in an isolated temp repo. The broker-owned `hack auth login` flow alone failed closed with explicit `/v1/auth/session/start` availability guidance.",
+      "evidence": [
+        "env-hardening-closeout/cli-offline-optionality/VAL-CROSS-001-outage-check.txt",
+        "env-hardening-closeout/cli-offline-optionality/VAL-CROSS-001-session-list-initial.txt",
+        "env-hardening-closeout/cli-offline-optionality/VAL-CROSS-001-session-start.txt",
+        "env-hardening-closeout/cli-offline-optionality/VAL-CROSS-001-session-list-after-start.txt",
+        "env-hardening-closeout/cli-offline-optionality/VAL-CROSS-001-status-project.txt",
+        "env-hardening-closeout/cli-offline-optionality/VAL-CROSS-001-project-owner-show.txt",
+        "env-hardening-closeout/cli-offline-optionality/VAL-CROSS-001-tickets-create.txt",
+        "env-hardening-closeout/cli-offline-optionality/VAL-CROSS-001-tickets-list.txt",
+        "env-hardening-closeout/cli-offline-optionality/VAL-CROSS-001-auth-login-failure.txt",
+        "env-hardening-closeout/cli-offline-optionality/VAL-CROSS-001-session-stop.txt",
+        "env-hardening-closeout/cli-offline-optionality/cli-offline-optionality-focused-tests.txt"
+      ]
+    },
+    {
+      "id": "VAL-CROSS-005",
+      "status": "pass",
+      "reason": "Offline repo-bound `hack env` flows remained local-first: plaintext writes stayed in `.hack/.env`, secret writes used the configured encrypted_file backend, `env list --show-secrets --json` reported `trust_model: local_only` plus `portable_state.status: not_configured`, and default JSON output still redacted the secret. The dead broker URL therefore did not make env management web-only, while shared/broker state stayed explicitly distinguished instead of implied.",
+      "evidence": [
+        "env-hardening-closeout/cli-offline-optionality/VAL-CROSS-001-outage-check.txt",
+        "env-hardening-closeout/cli-offline-optionality/VAL-CROSS-005-env-set-plain.txt",
+        "env-hardening-closeout/cli-offline-optionality/VAL-CROSS-005-env-set-secret.txt",
+        "env-hardening-closeout/cli-offline-optionality/VAL-CROSS-005-env-list-show-secrets.txt",
+        "env-hardening-closeout/cli-offline-optionality/VAL-CROSS-005-env-list-redacted.txt",
+        "env-hardening-closeout/cli-offline-optionality/VAL-CROSS-005-dotenv-snapshot.txt",
+        "env-hardening-closeout/cli-offline-optionality/cli-offline-optionality-focused-tests.txt"
+      ]
+    }
+  ],
+  "frictions": [
+    {
+      "description": "Inside the parent tmux shell, `hack session list` initially targeted the shared tmux server instead of an isolated validator session namespace.",
+      "resolved": true,
+      "resolution": "Unset `TMUX` for the validation commands and pinned `TMUX_TMPDIR=<tmp>/tmux`, which made `session list/start/stop` operate only on the isolated workspace set.",
+      "affectedAssertions": ["VAL-CROSS-001"],
+      "evidence": [
+        "env-hardening-closeout/cli-offline-optionality/cli-offline-optionality-isolation.json"
+      ]
+    },
+    {
+      "description": "When `HACK_GLOBAL_CONFIG_PATH` is set, the CLI reads `projects.json` from the config directory rather than from `HOME/.hack`, which is easy to miss during isolated session/status validation.",
+      "resolved": true,
+      "resolution": "Wrote the temp project registry to `<tmp>/cli-state/projects.json` next to `<tmp>/cli-state/global-config.json` so `session start` and `status --project` resolved the temp repo correctly.",
+      "affectedAssertions": ["VAL-CROSS-001"],
+      "evidence": [
+        "env-hardening-closeout/cli-offline-optionality/cli-offline-optionality-isolation.json"
+      ]
+    }
+  ],
+  "blockers": [],
+  "commands": [
+    {
+      "command": "curl --max-time 2 http://127.0.0.1:9/health",
+      "exitCode": 7,
+      "observation": "Connection failed as expected, confirming the simulated broker/web outage surface was unreachable."
+    },
+    {
+      "command": "HOME=<tmp>/home HACK_GLOBAL_CONFIG_PATH=<tmp>/cli-state/global-config.json HACK_SECRETS_FILE_KEY=<redacted-key> HACK_AUTH_BROKER_URL=http://127.0.0.1:9 HACK_SETUP_SYNC_MODE=off TMUX_TMPDIR=<tmp>/tmux <repo>/dist/hack session list",
+      "exitCode": 0,
+      "observation": "The isolated tmux workspace inventory was still usable offline and reported no active workspaces."
+    },
+    {
+      "command": "HOME=<tmp>/home HACK_GLOBAL_CONFIG_PATH=<tmp>/cli-state/global-config.json HACK_SECRETS_FILE_KEY=<redacted-key> HACK_AUTH_BROKER_URL=http://127.0.0.1:9 HACK_SETUP_SYNC_MODE=off TMUX_TMPDIR=<tmp>/tmux <repo>/dist/hack session start tickets-example --detach --name outage-proof",
+      "exitCode": 0,
+      "observation": "Created the isolated tmux workspace `tickets-example--outage-proof` without broker access."
+    },
+    {
+      "command": "HOME=<tmp>/home HACK_GLOBAL_CONFIG_PATH=<tmp>/cli-state/global-config.json HACK_SECRETS_FILE_KEY=<redacted-key> HACK_AUTH_BROKER_URL=http://127.0.0.1:9 HACK_SETUP_SYNC_MODE=off TMUX_TMPDIR=<tmp>/tmux <repo>/dist/hack status --project tickets-example --json",
+      "exitCode": 0,
+      "observation": "Resolved the registered project locally with local ownership and stopped runtime state while the broker URL remained unreachable."
+    },
+    {
+      "command": "HOME=<tmp>/home HACK_GLOBAL_CONFIG_PATH=<tmp>/cli-state/global-config.json HACK_SECRETS_FILE_KEY=<redacted-key> HACK_AUTH_BROKER_URL=http://127.0.0.1:9 HACK_SETUP_SYNC_MODE=off TMUX_TMPDIR=<tmp>/tmux <repo>/dist/hack project owner show --path <tmp>/project --json",
+      "exitCode": 0,
+      "observation": "Reported explicit local ownership for the temp project instead of making the operation web-only."
+    },
+    {
+      "command": "HOME=<tmp>/home HACK_GLOBAL_CONFIG_PATH=<tmp>/cli-state/global-config.json HACK_SECRETS_FILE_KEY=<redacted-key> HACK_AUTH_BROKER_URL=http://127.0.0.1:9 HACK_SETUP_SYNC_MODE=off TMUX_TMPDIR=<tmp>/tmux <repo>/dist/hack tickets create --title \"Offline outage ticket\" --json",
+      "exitCode": 0,
+      "observation": "Created a repo-local ticket offline in the isolated git repo."
+    },
+    {
+      "command": "HOME=<tmp>/home HACK_GLOBAL_CONFIG_PATH=<tmp>/cli-state/global-config.json HACK_SECRETS_FILE_KEY=<redacted-key> HACK_AUTH_BROKER_URL=http://127.0.0.1:9 HACK_SETUP_SYNC_MODE=off TMUX_TMPDIR=<tmp>/tmux <repo>/dist/hack tickets list --json",
+      "exitCode": 0,
+      "observation": "Listed the newly created ticket offline from the repo-local ticket store."
+    },
+    {
+      "command": "HOME=<tmp>/home HACK_GLOBAL_CONFIG_PATH=<tmp>/cli-state/global-config.json HACK_SECRETS_FILE_KEY=<redacted-key> HACK_AUTH_BROKER_URL=http://127.0.0.1:9 HACK_SETUP_SYNC_MODE=off TMUX_TMPDIR=<tmp>/tmux <repo>/dist/hack auth login",
+      "exitCode": 1,
+      "observation": "The broker-owned auth flow failed closed with explicit `/v1/auth/session/start` availability guidance."
+    },
+    {
+      "command": "HOME=<tmp>/home HACK_GLOBAL_CONFIG_PATH=<tmp>/cli-state/global-config.json HACK_SECRETS_FILE_KEY=<redacted-key> HACK_AUTH_BROKER_URL=http://127.0.0.1:9 HACK_SETUP_SYNC_MODE=off TMUX_TMPDIR=<tmp>/tmux <repo>/dist/hack session stop tickets-example--outage-proof",
+      "exitCode": 0,
+      "observation": "Stopped the isolated workspace `tickets-example--outage-proof` cleanly."
+    },
+    {
+      "command": "HOME=<tmp>/home HACK_GLOBAL_CONFIG_PATH=<tmp>/cli-state/global-config.json HACK_SECRETS_FILE_KEY=<redacted-key> HACK_AUTH_BROKER_URL=http://127.0.0.1:9 HACK_SETUP_SYNC_MODE=off TMUX_TMPDIR=<tmp>/tmux <repo>/dist/hack env set PUBLIC_URL=https://example.test",
+      "exitCode": 0,
+      "observation": "Wrote the plaintext compatibility value to `.hack/.env` offline."
+    },
+    {
+      "command": "HOME=<tmp>/home HACK_GLOBAL_CONFIG_PATH=<tmp>/cli-state/global-config.json HACK_SECRETS_FILE_KEY=<redacted-key> HACK_AUTH_BROKER_URL=http://127.0.0.1:9 HACK_SETUP_SYNC_MODE=off TMUX_TMPDIR=<tmp>/tmux <repo>/dist/hack env set --secret API_KEY=<redacted-secret>",
+      "exitCode": 0,
+      "observation": "Stored the secret value in the configured encrypted_file backend while the broker URL was dead."
+    },
+    {
+      "command": "HOME=<tmp>/home HACK_GLOBAL_CONFIG_PATH=<tmp>/cli-state/global-config.json HACK_SECRETS_FILE_KEY=<redacted-key> HACK_AUTH_BROKER_URL=http://127.0.0.1:9 HACK_SETUP_SYNC_MODE=off TMUX_TMPDIR=<tmp>/tmux <repo>/dist/hack env list --show-secrets --json",
+      "exitCode": 0,
+      "observation": "Reported explicit local-only/plaintext-compatible env status, encrypted_file secret storage, and not_configured portable/shared state."
+    },
+    {
+      "command": "HOME=<tmp>/home HACK_GLOBAL_CONFIG_PATH=<tmp>/cli-state/global-config.json HACK_SECRETS_FILE_KEY=<redacted-key> HACK_AUTH_BROKER_URL=http://127.0.0.1:9 HACK_SETUP_SYNC_MODE=off TMUX_TMPDIR=<tmp>/tmux <repo>/dist/hack env list --json",
+      "exitCode": 0,
+      "observation": "Kept the secret redacted in default JSON output while preserving the local-only classification metadata."
+    },
+    {
+      "command": "bun test <repo>/tests/cli-offline-optionality-matrix.test.ts --test-name-pattern \"session list stays usable|session start and stop stay local-first|project owner show keeps local ownership|status --json still resolves\"",
+      "exitCode": 0,
+      "observation": "Focused outage-matrix regressions for session and project local-first behavior passed."
+    },
+    {
+      "command": "bun test <repo>/tests/env-backend-command.test.ts --test-name-pattern \"env set --secret stores value using encrypted backend even when broker auth is unavailable|env list json exposes compatibility mode and local-only portable status\"",
+      "exitCode": 0,
+      "observation": "Focused offline env regressions passed."
+    },
+    {
+      "command": "bun test <repo>/tests/tickets-extension.test.ts --test-name-pattern \"local-first when broker auth is unavailable\"",
+      "exitCode": 0,
+      "observation": "Focused repo-local tickets outage regression passed."
+    },
+    {
+      "command": "bun test <repo>/tests/auth-command.test.ts --test-name-pattern \"auth login reports a helpful error when broker session start is unavailable\"",
+      "exitCode": 0,
+      "observation": "Focused broker-unavailable auth guidance regression passed."
+    }
+  ],
+  "summary": "Tested 2 assertions: VAL-CROSS-001 pass, VAL-CROSS-005 pass. Local session/tickets/project/env workflows all stayed usable with the broker/web URL pointed at an unreachable local address, and the broker-owned auth path failed with explicit availability guidance instead of forcing those local-first flows through the web surface."
+}

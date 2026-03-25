@@ -1,0 +1,115 @@
+{
+  "surface": "web-env-linear-state",
+  "toolsUsed": ["agent-browser", "curl", "./dist/hack", "bun test", "python3"],
+  "assertionResults": [
+    {
+      "id": "VAL-ENV-001",
+      "status": "pass",
+      "reason": "Repo-bound CLI JSON, the authenticated local GET /v1/env endpoint, and the browser Env section all reported the same machine-readable classification: trust_model `local_only`, custody `machine_local`, portability `local_only`, and shared_state `plaintext_compatible`. The backend remained a local keychain secret backend with portable_state `not_configured`, and the browser explicitly warned that plaintext-compatible/local-only env must not be treated as broker-managed shared portable state.",
+      "evidence": [
+        "env-hardening-closeout/web-env-linear-state/env-list.json",
+        "env-hardening-closeout/web-env-linear-state/env-backend-status.json",
+        "env-hardening-closeout/web-env-linear-state/env-http-response.json",
+        "env-hardening-closeout/web-env-linear-state/cli-http-parity-summary.json",
+        "env-hardening-closeout/web-env-linear-state/env-targeted-tests.txt",
+        "env-hardening-closeout/web-env-linear-state/env-section.text.txt",
+        "env-hardening-closeout/web-env-linear-state/env-section-focused.annotated.png",
+        "env-hardening-closeout/web-env-linear-state/browser-errors.txt"
+      ]
+    },
+    {
+      "id": "VAL-ENV-007",
+      "status": "pass",
+      "reason": "The frozen mission issue inventory remained explicit in the seeded mission and repo scope files, and the current repo-bound Linear audit reconciled that scope to 13/13 resolved with 0 unresolved items. The published closeout artifact was `Mission closeout audit`, the delivery audit stayed available with 0 conflicts recorded, and the browser Linear section surfaced the same `Resolved 13/13`, `Unresolved 0`, delivery-audit path, and closeout evidence path.",
+      "evidence": [
+        "env-hardening-closeout/web-env-linear-state/mission-closeout-scope.json",
+        "env-hardening-closeout/web-env-linear-state/repo-closeout-scope.json",
+        "env-hardening-closeout/web-env-linear-state/linear-status-pass-1.json",
+        "env-hardening-closeout/web-env-linear-state/mission-closeout-audit.md",
+        "env-hardening-closeout/web-env-linear-state/mission-freeze-baseline.md",
+        "env-hardening-closeout/web-env-linear-state/delivery-audit.json",
+        "env-hardening-closeout/web-env-linear-state/linear-section.text.txt",
+        "env-hardening-closeout/web-env-linear-state/linear-section-focused.annotated.png",
+        "env-hardening-closeout/web-env-linear-state/browser-errors.txt"
+      ]
+    },
+    {
+      "id": "VAL-CROSS-004",
+      "status": "pass",
+      "reason": "Two consecutive `./dist/hack linear status --json` runs returned the same repair guidance, default route, latest published status update, delivery audit, and closeout payload even though broker-owned Linear access is currently not connected. The browser Linear section showed the same not-connected repair state, the same repo-bound route to Hack, the same `Mission closeout audit` artifact, and the same delivery/closeout counts, while targeted Linear regressions covering publish/delivery/closeout retry behavior and closeout-specific evidence anchoring passed cleanly.",
+      "evidence": [
+        "env-hardening-closeout/web-env-linear-state/linear-status-pass-1.json",
+        "env-hardening-closeout/web-env-linear-state/linear-status-pass-2.json",
+        "env-hardening-closeout/web-env-linear-state/cli-http-parity-summary.json",
+        "env-hardening-closeout/web-env-linear-state/browser-cli-parity-summary.json",
+        "env-hardening-closeout/web-env-linear-state/linear-targeted-tests.txt",
+        "env-hardening-closeout/web-env-linear-state/linear-section.text.txt",
+        "env-hardening-closeout/web-env-linear-state/linear-section-focused.annotated.png",
+        "env-hardening-closeout/web-env-linear-state/mission-closeout-audit.md",
+        "env-hardening-closeout/web-env-linear-state/delivery-audit.json",
+        "env-hardening-closeout/web-env-linear-state/browser-errors.txt"
+      ]
+    }
+  ],
+  "frictions": [
+    {
+      "description": "The routed `/account` page emitted a React hydration-mismatch console error during browser validation.",
+      "resolved": false,
+      "resolution": "The rendered Env and Linear sections still matched the CLI/API evidence, so validation proceeded, but the console error remains a browser-surface defect.",
+      "affectedAssertions": ["VAL-ENV-001", "VAL-ENV-007", "VAL-CROSS-004"],
+      "evidence": [
+        "env-hardening-closeout/web-env-linear-state/browser-errors.txt"
+      ]
+    },
+    {
+      "description": "agent-browser did not capture network request entries for the routed account page during this local validation flow.",
+      "resolved": true,
+      "resolution": "Used direct curl/CLI outputs plus extracted browser section text to confirm the same env and Linear state instead of relying on the empty request log.",
+      "affectedAssertions": ["VAL-ENV-001", "VAL-ENV-007", "VAL-CROSS-004"],
+      "evidence": [
+        "env-hardening-closeout/web-env-linear-state/browser-network-requests.txt",
+        "env-hardening-closeout/web-env-linear-state/env-http-response.json",
+        "env-hardening-closeout/web-env-linear-state/linear-status-pass-1.json"
+      ]
+    }
+  ],
+  "blockers": [],
+  "commands": [
+    {
+      "command": "<repo>/dist/hack env list --json && <repo>/dist/hack env backend status --json",
+      "exitCode": 0,
+      "observation": "Both repo-bound env commands succeeded and consistently classified the current env state as local_only/plaintext_compatible with local keychain-backed secret custody and no portable bundle configured."
+    },
+    {
+      "command": "<repo>/dist/hack x gateway token-create --scope read --json && curl -H \"Authorization: Bearer <read-gateway-token>\" http://127.0.0.1:7788/v1/env?project=hack-cli && <repo>/dist/hack x gateway token-revoke <token-id> --json",
+      "exitCode": 0,
+      "observation": "A temporary local read token let the validator fetch the daemon env HTTP payload, which matched the CLI classification and was revoked immediately after capture."
+    },
+    {
+      "command": "bun test tests/env-backend-command.test.ts tests/daemon-env.test.ts apps/web/tests/env-management.test.ts",
+      "exitCode": 0,
+      "observation": "Targeted env regressions passed 20/20 tests, including env backend status JSON, daemon /v1/env responses, plaintext compatibility, and portable-state handling."
+    },
+    {
+      "command": "curl -ksS -c <tmp>/cookies/better-auth.cookies.txt -b <tmp>/cookies/better-auth.cookies.txt -H \"origin: https://auth.hack-cli.hack\" -H \"referer: https://auth.hack-cli.hack/\" -H \"content-type: application/json\" -X POST https://auth.hack-cli.hack/api/auth/sign-up/email --data ...",
+      "exitCode": 0,
+      "observation": "Created a disposable Better Auth email/password account and isolated its session cookie jar under the assigned evidence directory."
+    },
+    {
+      "command": "agent-browser --session web-env-linear-state open https://auth.hack-cli.hack/health && cookies set __Secure-better-auth.session_token <redacted> && open https://auth.hack-cli.hack/auth/account?bridge=1&redirect=https%3A%2F%2Fhack-cli.hack%2Faccount",
+      "exitCode": 0,
+      "observation": "Bootstrapped the dedicated browser session into the routed account page and captured full-page plus section-level env/Linear evidence for the isolated disposable account."
+    },
+    {
+      "command": "<repo>/dist/hack linear status --json (run twice)",
+      "exitCode": 1,
+      "observation": "Both runs reported the same repo-bound Linear routing/audit state and the same repair guidance (`hack auth login`) while still surfacing identical latestPublished, delivery, and closeout payloads with 0 unresolved items."
+    },
+    {
+      "command": "bun test tests/linear-commands.test.ts apps/web/tests/linear-management.test.ts",
+      "exitCode": 0,
+      "observation": "Targeted Linear regressions passed 89/89 tests, including publish/delivery reconciliation, closeout-specific evidence anchoring, and retry/idempotency behavior."
+    }
+  ],
+  "summary": "Passed 3/3 assertions. Env trust/custody/portability stayed honest across CLI, HTTP, and browser surfaces; the frozen mission Linear scope resolved to 13/13 done with zero unresolved items; and repeated repo-bound Linear status plus the browser Linear section remained consistent and auditable on retry. Setup friction: the routed account page logged a hydration-mismatch console error, and agent-browser captured no request log entries for this SSR flow."
+}

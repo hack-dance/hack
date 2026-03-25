@@ -13,12 +13,15 @@ Testing surface findings, required tools, and validation concurrency for this mi
 - Use for: auth status, Linear sync/status, tickets, env, runtime/session flows, project ownership/admin parity.
 - Notes: prefer repo-bound CLI validation (`./dist/hack`) after a build so command behavior matches the current branch.
 - Notes: repo-bound GitHub CLI validation can use the project config directly because `.hack/hack.config.json` now enables `dance.hack.github` alongside the Linear and tickets extensions.
+- Notes: for isolated outage-mode CLI validation, if `HACK_GLOBAL_CONFIG_PATH` points at a temp config file, place the matching `projects.json` beside that config file (not under `HOME/.hack`) so `status --project` and session/project commands resolve the temp registry correctly.
+- Notes: for isolated `hack session` validation inside another tmux session, unset `TMUX` and set `TMUX_TMPDIR` to a temp directory so the validator does not accidentally target the parent shell's shared tmux server.
 
 ### Broker / HTTP surface
 - Primary tools: `curl`, declared local service commands from `.factory/services.yaml`, and later hack-managed routed hosts.
 - Use for: broker health, auth/session APIs, org/team/project admin APIs, integration-management APIs, env/gateway endpoints.
 - Notes: early mission work should harden env-sensitive auth-broker tests so these checks are trustworthy.
 
+- Notes: for daemon/gateway request-target hardening, do not treat the shared listener on `127.0.0.1:7788` as authoritative for current-branch validation. Use an isolated temp-HOME repo-built daemon (`bun <repo>/index.ts daemon start --foreground`) with its own temp global config and gateway port or unix socket so the probe hits the current branch instead of any stale installed `hackd`.
 ### Web surface
 - Primary tools: `agent-browser` against the routed host returned by `hack open --json` once `apps/web` exists.
 - Use for: sign-in/account UX, org/team/project admin, GitHub/Linear management, env/status views, outage-mode optionality checks.
@@ -71,6 +74,7 @@ Testing surface findings, required tools, and validation concurrency for this mi
 - For routed-host shell checks, use `curl -k` and set `NODE_TLS_REJECT_UNAUTHORIZED=0` for isolated CLI/curl probes unless local trust has already been configured outside the validator session.
 - Treat a failed health check on both `http://127.0.0.1:8080/health` and `https://auth.hack-cli.hack/health` as a blocker before continuing with broker-dependent assertions.
 - Do not bind additional fixed ports or start a second broker instance unless the coordinator gives a separate port and evidence directory.
+- For daemon/gateway raw-path validation, prefer an isolated repo-built daemon with a temp HOME and temp global config. If you need live gateway proof, allocate a non-shared temp port and probe that daemon rather than the shared machine-global listener on `127.0.0.1:7788`.
 
 ## Flow Validator Guidance: Web surface
 

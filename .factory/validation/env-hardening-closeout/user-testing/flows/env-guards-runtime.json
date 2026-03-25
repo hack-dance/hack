@@ -1,0 +1,136 @@
+{
+  "groupId": "env-guards-runtime",
+  "testedAt": "2026-03-25T22:48:56.086438Z",
+  "isolation": {
+    "repoRoot": "<repo>",
+    "missionDir": "<mission-dir>",
+    "evidenceDir": "<mission-dir>/evidence/env-hardening-closeout/env-guards-runtime",
+    "cliBinary": "<repo>/dist/hack",
+    "gatewayBaseUrl": "http://127.0.0.1:7788",
+    "routedAppUrl": "https://hack-cli.hack",
+    "routedAuthUrl": "https://auth.hack-cli.hack",
+    "tempRoot": "<tmp>",
+    "tempHome": "<tmp>/home",
+    "tempGlobalConfigPath": "<tmp>/global/hack.config.json",
+    "gatewayProjectId": "75915219714b"
+  },
+  "toolsUsed": ["./dist/hack", "curl", "bun test", "python3"],
+  "assertionResults": [
+    {
+      "id": "VAL-ENV-002",
+      "status": "pass",
+      "reason": "In an isolated encrypted_file-backed temp project, writing API_KEY with --secret stored the value only in the configured secret backend. The default env list surface redacted the value as *** , a sanitized show-secrets summary still resolved the key from encrypted_file native secret storage, and the compatibility .hack/.env file stayed free of the written secret bytes.",
+      "evidence": [
+        "env-hardening-closeout/env-guards-runtime/VAL-ENV-002-set-secret.txt",
+        "env-hardening-closeout/env-guards-runtime/VAL-ENV-002-list-redacted.json",
+        "env-hardening-closeout/env-guards-runtime/VAL-ENV-002-show-secrets-summary.json",
+        "env-hardening-closeout/env-guards-runtime/VAL-ENV-002-storage-summary.json",
+        "env-hardening-closeout/env-guards-runtime/env-guards-targeted-tests.txt"
+      ]
+    },
+    {
+      "id": "VAL-ENV-003",
+      "status": "pass",
+      "reason": "A plain env write to SECRET_TOKEN in a contract that declared source keychain failed with an explicit repair hint to use --secret. Neither the plaintext-compatible .hack/.env file nor the encrypted backend artifact received the rejected secret value.",
+      "evidence": [
+        "env-hardening-closeout/env-guards-runtime/VAL-ENV-003-mismatch.txt",
+        "env-hardening-closeout/env-guards-runtime/VAL-ENV-003-storage-summary.json",
+        "env-hardening-closeout/env-guards-runtime/env-guards-targeted-tests.txt"
+      ]
+    },
+    {
+      "id": "VAL-ENV-004",
+      "status": "pass",
+      "reason": "With existing encrypted secret data but missing key material, the isolated env list command failed closed with explicit HACK_SECRETS_FILE_KEY recovery guidance and the message that it will not fall back to plaintext .hack/.env. The probe deliberately supplied both a plaintext fallback file and an ambient SECRET_TOKEN env var, and neither was used.",
+      "evidence": [
+        "env-hardening-closeout/env-guards-runtime/VAL-ENV-004-missing-key.txt",
+        "env-hardening-closeout/env-guards-runtime/VAL-ENV-004-storage-summary.json",
+        "env-hardening-closeout/env-guards-runtime/env-guards-targeted-tests.txt"
+      ]
+    },
+    {
+      "id": "VAL-ENV-005",
+      "status": "pass",
+      "reason": "The live gateway kept read access available while writes were disabled: GET job listing for the routed hack-cli project returned 200 with a read token. Write attempts then failed closed with explicit responses for each reachable guard in the shared runtime: unauthenticated POST returned 401 missing_token, POST to the enabled project returned 403 writes_disabled, and POST to an unenabled project returned 403 project_disabled. The targeted gateway regressions still cover the separate write_scope_required branch that the shared write-disabled runtime masks live.",
+      "evidence": [
+        "env-hardening-closeout/env-guards-runtime/VAL-ENV-005-read-route.json",
+        "env-hardening-closeout/env-guards-runtime/VAL-ENV-005-missing-token-write.json",
+        "env-hardening-closeout/env-guards-runtime/VAL-ENV-005-writes-disabled.json",
+        "env-hardening-closeout/env-guards-runtime/VAL-ENV-005-project-disabled.json",
+        "env-hardening-closeout/env-guards-runtime/env-guards-targeted-tests.txt"
+      ]
+    },
+    {
+      "id": "VAL-ENV-006",
+      "status": "fail",
+      "reason": "Unauthorized and invalid session/runtime requests were explicit (401 missing_token for unauthenticated control-plane access, 400 invalid_name for an invalid session id, and 404 session_not_found for a missing session). But the malformed wrapped-target requirement still fails live: a read-token request to /control-plane/projects/75915219714b/jobs/../../../../v1/sessions using curl --path-as-is returned 200 with session data instead of 400 malformed_path, so malformed gateway-wrapped access can still escape into unrelated session routes.",
+      "evidence": [
+        "env-hardening-closeout/env-guards-runtime/VAL-ENV-006-missing-token-control-plane.json",
+        "env-hardening-closeout/env-guards-runtime/VAL-ENV-006-session-invalid-id.json",
+        "env-hardening-closeout/env-guards-runtime/VAL-ENV-006-session-not-found.json",
+        "env-hardening-closeout/env-guards-runtime/VAL-ENV-006-malformed-traversal.json",
+        "env-hardening-closeout/env-guards-runtime/env-guards-targeted-tests.txt"
+      ]
+    }
+  ],
+  "frictions": [
+    {
+      "description": "Gateway writes are disabled in the shared runtime, so live probes could capture missing_token, project_disabled, and writes_disabled directly but not the separate write_scope_required branch without changing shared gateway settings.",
+      "resolved": true,
+      "resolution": "Kept the validator non-disruptive and used the targeted gateway regression output as supporting evidence for the explicit write_scope_required branch.",
+      "affectedAssertions": ["VAL-ENV-005"],
+      "evidence": [
+        "env-hardening-closeout/env-guards-runtime/env-guards-targeted-tests.txt"
+      ]
+    },
+    {
+      "description": "The targeted gateway/session tests passed even though the live raw traversal request still misrouted to /v1/sessions.",
+      "resolved": true,
+      "resolution": "Used a direct curl --path-as-is probe and saved a sanitized response summary to capture the live failure instead of relying on the optimistic automated harness alone.",
+      "affectedAssertions": ["VAL-ENV-006"],
+      "evidence": [
+        "env-hardening-closeout/env-guards-runtime/VAL-ENV-006-malformed-traversal.json",
+        "env-hardening-closeout/env-guards-runtime/env-guards-targeted-tests.txt"
+      ]
+    }
+  ],
+  "blockers": [],
+  "commands": [
+    {
+      "command": "<repo>/dist/hack env set --secret API_KEY=<redacted> && <repo>/dist/hack env list --json",
+      "exitCode": 0,
+      "observation": "In an isolated encrypted_file-backed temp project, the secret write succeeded, default list output redacted API_KEY as *** , and the compatibility .hack/.env file stayed free of the written secret."
+    },
+    {
+      "command": "<repo>/dist/hack env set SECRET_TOKEN=<redacted>",
+      "exitCode": 1,
+      "observation": "The wrong-source plaintext write was rejected with repair guidance to use --secret, and no plaintext-compatible file or encrypted store artifact received the rejected secret."
+    },
+    {
+      "command": "SECRET_TOKEN=<redacted> HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK=true <repo>/dist/hack env list --json",
+      "exitCode": 1,
+      "observation": "With a missing encrypted-file key plus both plaintext and ambient fallback values present, the command failed closed with explicit HACK_SECRETS_FILE_KEY recovery guidance and refused to fall back to .hack/.env."
+    },
+    {
+      "command": "curl -X GET -H \"Authorization: Bearer <read-gateway-token>\" http://127.0.0.1:7788/control-plane/projects/75915219714b/jobs && curl -X POST ...",
+      "exitCode": 0,
+      "observation": "The live gateway kept GET job listing available with a read token while explicit write denials stayed fail-closed as missing_token (401), writes_disabled (403), and project_disabled (403)."
+    },
+    {
+      "command": "curl --path-as-is -H \"Authorization: Bearer <read-gateway-token>\" http://127.0.0.1:7788/control-plane/projects/75915219714b/jobs/../../../../v1/sessions",
+      "exitCode": 0,
+      "observation": "The raw traversal probe reached the live daemon and returned a session listing instead of a malformed_path error, so malformed wrapped targets still escape into unrelated session routes."
+    },
+    {
+      "command": "<repo>/dist/hack x gateway token-create --scope read --json && <repo>/dist/hack x gateway token-revoke <token-id> --json",
+      "exitCode": 0,
+      "observation": "Temporary gateway access used an explicitly scoped read token that was revoked immediately after the probes."
+    },
+    {
+      "command": "bun test <repo>/tests/env-backend-command.test.ts <repo>/tests/daemon-env.test.ts <repo>/tests/secret-store.test.ts <repo>/tests/gateway-e2e.test.ts <repo>/tests/daemon-sessions.test.ts",
+      "exitCode": 0,
+      "observation": "Targeted env, gateway, secret-store, and session regression files passed (with the two networked gateway e2e cases skipped), so the automated coverage still claims the guard logic is green even though the live malformed traversal probe failed."
+    }
+  ],
+  "summary": "Tested 5 assertions: 4 passed and 1 failed. Secret custody, source-mismatch rejection, missing-key recovery guidance, and the live gateway read/write guards behaved as required in isolated CLI and HTTP probes. VAL-ENV-006 failed because a raw traversal path still returned 200 session data instead of malformed_path, even though the surrounding unauthorized and invalid-id checks stayed explicit."
+}

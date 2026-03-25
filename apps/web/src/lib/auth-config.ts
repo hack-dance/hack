@@ -1,4 +1,6 @@
 import {
+  type BetterAuthProviderMetadata,
+  createBetterAuthProviderMetadata,
   createSharedBetterAuthContract,
   resolveBetterAuthSocialProviders,
   type SharedBetterAuthContract,
@@ -13,6 +15,11 @@ export type WebAuthConfig = {
   readonly authBrokerBaseUrl: string;
   readonly authBrokerProxyBaseUrl: string;
   readonly contract: SharedBetterAuthContract;
+};
+
+export type AuthoritativeWebAuthConfig = WebAuthConfig & {
+  readonly betterAuth: BetterAuthProviderMetadata;
+  readonly betterAuthSource: "broker" | "fail_closed";
 };
 
 export function getWebAuthConfig(): WebAuthConfig {
@@ -66,6 +73,17 @@ export function getWebAuthConfig(): WebAuthConfig {
   };
 }
 
+export async function getAuthoritativeWebAuthConfig(): Promise<AuthoritativeWebAuthConfig> {
+  const config = getWebAuthConfig();
+  const betterAuth = await resolveBrokerBetterAuthMetadata({ config });
+
+  return {
+    ...config,
+    betterAuth: betterAuth.metadata,
+    betterAuthSource: betterAuth.source,
+  };
+}
+
 function readFirstDefinedValue(
   values: readonly (string | undefined)[]
 ): string | undefined {
@@ -88,6 +106,61 @@ function normalizeAbsoluteUrl(value: string | undefined): string | null {
   }
 }
 
+async function resolveBrokerBetterAuthMetadata(input: {
+  readonly config: WebAuthConfig;
+}): Promise<{
+  readonly metadata: BetterAuthProviderMetadata;
+  readonly source: "broker" | "fail_closed";
+}> {
+  const fallbackMetadata = createFailClosedBetterAuthMetadata({
+    appBaseUrl: input.config.appBaseUrl,
+    authBrokerBaseUrl: input.config.authBrokerBaseUrl,
+  });
+
+  try {
+    const response = await fetch(
+      `${input.config.authBrokerProxyBaseUrl}/v1/auth/providers`,
+      {
+        headers: {
+          accept: "application/json",
+        },
+        cache: "no-store",
+      }
+    );
+    if (!response.ok) {
+      return {
+        metadata: fallbackMetadata,
+        source: "fail_closed",
+      };
+    }
+
+    const payload = (await response.json()) as {
+      readonly providers?: readonly BetterAuthProviderMetadata[];
+    };
+    const betterAuthProvider = payload.providers?.find(
+      (provider) => provider.id === "better-auth"
+    );
+    if (!betterAuthProvider) {
+      return {
+        metadata: fallbackMetadata,
+        source: "fail_closed",
+      };
+    }
+
+    return {
+      metadata: normalizeBrokerBetterAuthMetadata({
+        metadata: betterAuthProvider,
+      }),
+      source: "broker",
+    };
+  } catch {
+    return {
+      metadata: fallbackMetadata,
+      source: "fail_closed",
+    };
+  }
+}
+
 function resolveLocalDevHost(input: {
   readonly appBaseUrl: string;
 }): string | undefined {
@@ -106,4 +179,39 @@ function resolveLocalDevHost(input: {
   } catch {
     return undefined;
   }
+}
+
+function createFailClosedBetterAuthMetadata(input: {
+  readonly appBaseUrl: string;
+  readonly authBrokerBaseUrl: string;
+}): BetterAuthProviderMetadata {
+  return {
+    ...createBetterAuthProviderMetadata({
+      enabled: false,
+      contract: createSharedBetterAuthContract({
+        socialProviders: [],
+        authBaseUrl: input.authBrokerBaseUrl,
+        publicBaseUrl: input.appBaseUrl,
+      }),
+    }),
+    trustedOrigins: [],
+  };
+}
+
+function normalizeBrokerBetterAuthMetadata(input: {
+  readonly metadata: BetterAuthProviderMetadata;
+}): BetterAuthProviderMetadata {
+  return {
+    ...input.metadata,
+    socialProviders: input.metadata.enabled
+      ? [...input.metadata.socialProviders]
+      : [],
+    accountLinkingPolicy: {
+      ...input.metadata.accountLinkingPolicy,
+      trustedProviders: [
+        ...input.metadata.accountLinkingPolicy.trustedProviders,
+      ],
+    },
+    trustedOrigins: [...input.metadata.trustedOrigins],
+  };
 }

@@ -96,10 +96,12 @@ export function AuthEntrypoint({
         const betterAuthProvider = payload.providers?.find(
           (provider) => provider.id === "better-auth"
         );
-        if (!(active && betterAuthProvider?.enabled)) {
+        if (!(active && betterAuthProvider)) {
           return;
         }
-        setResolvedProviders(betterAuthProvider.socialProviders);
+        setResolvedProviders(
+          betterAuthProvider.enabled ? betterAuthProvider.socialProviders : []
+        );
         setResolvedTrustedOrigins(betterAuthProvider.trustedOrigins);
       } catch {
         // Keep the boot-time provider contract when the broker metadata endpoint is unavailable.

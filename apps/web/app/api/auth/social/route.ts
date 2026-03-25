@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 
-import { getWebAuthConfig } from "@/src/lib/auth-config";
+import { getAuthoritativeWebAuthConfig } from "@/src/lib/auth-config";
 import {
   buildBrokerAccountBridgeUrl,
   normalizeAppReturnUrl,
@@ -25,11 +25,35 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const config = getWebAuthConfig();
+  const config = await getAuthoritativeWebAuthConfig();
+  if (config.betterAuthSource === "fail_closed") {
+    return NextResponse.json(
+      {
+        error: "auth_metadata_unavailable",
+        message:
+          "Hack could not confirm the broker auth metadata for this sign-in flow.",
+      },
+      { status: 503 }
+    );
+  }
+  if (
+    !config.betterAuth.socialProviders.some(
+      (socialProvider) => socialProvider.id === provider
+    )
+  ) {
+    return NextResponse.json(
+      {
+        error: "provider_unavailable",
+        message:
+          "This sign-in provider is currently unavailable in the broker metadata.",
+      },
+      { status: 400 }
+    );
+  }
   const finalReturnUrl = normalizeAppReturnUrl({
     value: body?.redirect,
     appBaseUrl: config.appBaseUrl,
-    trustedOrigins: config.contract.trustedOrigins,
+    trustedOrigins: config.betterAuth.trustedOrigins,
   });
   const callbackUrl = buildBrokerAccountBridgeUrl({
     authBrokerBaseUrl: config.authBrokerBaseUrl,

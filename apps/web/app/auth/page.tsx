@@ -1,5 +1,5 @@
 import { AuthEntrypoint } from "@/src/components/auth-entrypoint";
-import { getWebAuthConfig } from "@/src/lib/auth-config";
+import { getAuthoritativeWebAuthConfig } from "@/src/lib/auth-config";
 
 type SearchParams = Promise<Record<string, string | string[] | undefined>>;
 
@@ -9,7 +9,7 @@ export default async function AuthPage({
   readonly searchParams?: SearchParams;
 }) {
   const params = (await searchParams) ?? {};
-  const config = getWebAuthConfig();
+  const config = await getAuthoritativeWebAuthConfig();
 
   return (
     <AuthEntrypoint
@@ -18,9 +18,9 @@ export default async function AuthPage({
       deviceCode={readSearchParam(params.deviceCode)}
       flowId={readSearchParam(params.flowId)}
       mode="sign-in"
-      providers={config.contract.socialProviders}
+      providers={config.betterAuth.socialProviders}
       redirect={readSearchParam(params.redirect)}
-      trustedOrigins={config.contract.trustedOrigins}
+      trustedOrigins={config.betterAuth.trustedOrigins}
     />
   );
 }

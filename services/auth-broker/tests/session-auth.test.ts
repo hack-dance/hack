@@ -37,6 +37,7 @@ function createTestConfig() {
     port: 0,
     host: "127.0.0.1",
     publicBaseUrl: "http://127.0.0.1:8080",
+    webAppBaseUrl: "http://localhost:3000",
     flowStorePath: ".data/test-oauth-flows.json",
     githubClientId: "test-client-id",
     githubClientSecret: "test-client-secret",
@@ -207,17 +208,13 @@ describe("broker Hack session auth flow", () => {
         (await startResponse.json()) as SessionStartFlowResponse
       ).flow;
 
-      const completeResponse = await app.handle(
-        new Request(startPayload.authorizeUrl)
+      const accountResponse = await app.handle(
+        new Request(
+          `http://localhost/auth/account?bridge=1&flowId=${encodeURIComponent(
+            startPayload.flowId
+          )}&deviceCode=${encodeURIComponent(startPayload.deviceCode)}`
+        )
       );
-      expect(completeResponse.status).toBe(302);
-      const completeLocation = completeResponse.headers.get("location");
-      expect(completeLocation).toBeTruthy();
-      if (!completeLocation) {
-        return;
-      }
-
-      const accountResponse = await app.handle(new Request(completeLocation));
       expect(accountResponse.status).toBe(200);
       const completeHtml = await accountResponse.text();
       expect(completeHtml).toContain("Connected to this Mac.");
@@ -320,18 +317,15 @@ describe("broker Hack session auth flow", () => {
       const startPayload = (
         (await startResponse.json()) as SessionStartFlowResponse
       ).flow;
-      const completeResponse = await app.handle(
-        new Request(startPayload.authorizeUrl)
+      const accountResponse = await app.handle(
+        new Request(
+          `http://localhost/auth/account?bridge=1&flowId=${encodeURIComponent(
+            startPayload.flowId
+          )}&deviceCode=${encodeURIComponent(
+            startPayload.deviceCode
+          )}&redirect=${encodeURIComponent("hack://auth/complete")}`
+        )
       );
-      const accountLocation = completeResponse.headers.get("location");
-      expect(accountLocation).toContain(
-        "redirect=hack%3A%2F%2Fauth%2Fcomplete"
-      );
-      if (!accountLocation) {
-        return;
-      }
-
-      const accountResponse = await app.handle(new Request(accountLocation));
       const html = await accountResponse.text();
       expect(html).toContain("Open Hack");
       expect(html).toContain("hack://auth/complete");
@@ -372,18 +366,15 @@ describe("broker Hack session auth flow", () => {
     const startPayload = (
       (await startResponse.json()) as SessionStartFlowResponse
     ).flow;
-    const completeResponse = await app.handle(
-      new Request(startPayload.authorizeUrl)
+    const accountResponse = await app.handle(
+      new Request(
+        `http://localhost/auth/account?bridge=1&flowId=${encodeURIComponent(
+          startPayload.flowId
+        )}&deviceCode=${encodeURIComponent(
+          startPayload.deviceCode
+        )}&redirect=${encodeURIComponent("hack-dev://auth/complete")}`
+      )
     );
-    const accountLocation = completeResponse.headers.get("location");
-    expect(accountLocation).toContain(
-      "redirect=hack-dev%3A%2F%2Fauth%2Fcomplete"
-    );
-    if (!accountLocation) {
-      return;
-    }
-
-    const accountResponse = await app.handle(new Request(accountLocation));
     const html = await accountResponse.text();
     expect(html).toContain(">HACK<");
     expect(html).toContain("Signed in to Hack.");

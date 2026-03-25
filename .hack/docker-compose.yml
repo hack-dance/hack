@@ -25,6 +25,7 @@ services:
       WATCHPACK_POLLING: "true"
       HACK_WEB_APP_BASE_URL: https://hack-cli.hack
       HACK_AUTH_BROKER_URL: https://auth.hack-cli.hack
+      HACK_AUTH_BROKER_INTERNAL_URL: http://auth-broker:8080
       NEXT_PUBLIC_HACK_WEB_APP_BASE_URL: https://hack-cli.hack
       NEXT_PUBLIC_HACK_AUTH_BROKER_URL: https://auth.hack-cli.hack
       BETTER_AUTH_TRUSTED_ORIGINS: https://hack-cli.hack,https://hack-cli.hack.gy

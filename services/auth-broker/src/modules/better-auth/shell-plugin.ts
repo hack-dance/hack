@@ -36,6 +36,7 @@ const BetterAuthShellModel = {
     redirect: t.Optional(t.String()),
   }),
   accountPageQuery: t.Object({
+    bridge: t.Optional(t.String()),
     flowId: t.Optional(t.String()),
     deviceCode: t.Optional(t.String()),
     redirect: t.Optional(t.String()),
@@ -97,6 +98,7 @@ export function createBetterAuthShellPlugin({
   runtime,
   flowStore,
 }: CreateBetterAuthShellPluginOptions) {
+  const webAppBaseUrl = config.webAppBaseUrl ?? config.publicBaseUrl;
   return new Elysia({
     name: "hack-auth-broker.better-auth.shell",
   })
@@ -140,9 +142,11 @@ export function createBetterAuthShellPlugin({
         const returnUrl = normalizeSafeReturnUrl({
           value: query.redirect,
           publicBaseUrl: config.publicBaseUrl,
+          webAppBaseUrl,
+          trustedOrigins: runtime.contract?.trustedOrigins ?? [],
         });
         const authorizeUrl = buildAuthShellUrl({
-          publicBaseUrl: config.publicBaseUrl,
+          baseUrl: webAppBaseUrl,
           flowId,
           deviceCode,
           ...(requestedProviderId ? { providerId: requestedProviderId } : {}),
@@ -275,90 +279,23 @@ export function createBetterAuthShellPlugin({
     })
     .get(
       "/auth",
-      async ({ query, request }) => {
-        const socialProviders = getSocialProviders({ runtime });
+      ({ query }) => {
         const returnUrl = normalizeSafeReturnUrl({
           value: query.redirect,
           publicBaseUrl: config.publicBaseUrl,
+          webAppBaseUrl,
+          trustedOrigins: runtime.contract?.trustedOrigins ?? [],
         });
-        if (!(runtime.enabled && runtime.auth)) {
-          return renderHtmlPage({
-            title: "Hack auth unavailable",
-            heading: "Hack auth unavailable",
-            subtitle: "Shared Hack sign-in is not available right now.",
-            body: renderStateCard({
-              eyebrow: "Auth unavailable",
-              title: "Hack auth is not configured",
-              body:
-                runtime.reason ??
-                "The auth broker is missing Better Auth configuration.",
-              tone: "muted",
-            }),
-          });
-        }
-        try {
-          await ensureBetterAuthRuntimeReady(runtime);
-        } catch (error) {
-          return renderHtmlPage({
-            title: "Hack auth unavailable",
-            heading: "Hack auth unavailable",
-            subtitle: "Shared Hack sign-in is not available right now.",
-            body: renderLifecycleMessage({
-              eyebrow: "Unavailable",
-              title: "Auth storage is unavailable",
-              body: escapeHtml(
-                error instanceof Error ? error.message : String(error)
-              ),
-              tone: "danger",
-            }),
-          });
-        }
-
-        const preferredProviderId = normalizeProviderId({
-          value: query.provider,
-          providers: socialProviders,
-        });
-        const resolvedSession = await resolveBetterAuthSession({
-          runtime,
-          request,
-        });
-        if (resolvedSession.session) {
-          return Response.redirect(
-            buildAccountPageUrl({
-              publicBaseUrl: config.publicBaseUrl,
-              flowId: query.flowId,
-              deviceCode: query.deviceCode,
-              returnUrl,
-            }),
-            302
-          );
-        }
-
-        const callbackUrl = buildAccountPageUrl({
-          publicBaseUrl: config.publicBaseUrl,
-          flowId: query.flowId,
-          deviceCode: query.deviceCode,
-          returnUrl,
-        });
-        const authLanding = buildAuthLandingPresentation({
-          socialProviders,
-          preferredProviderId,
-          callbackUrl,
-          flowId: query.flowId,
-          deviceCode: query.deviceCode,
-        });
-        return renderHtmlPage({
-          title: "Hack auth",
-          brand: "HACK",
-          theme: "handoff",
-          heading: authLanding.heading,
-          subtitle: authLanding.subtitle,
-          body: authLanding.body,
-          script: renderProviderActionScript({
-            callbackUrl,
-            mode: "sign-in",
+        return Response.redirect(
+          buildAuthShellUrl({
+            baseUrl: webAppBaseUrl,
+            flowId: query.flowId,
+            deviceCode: query.deviceCode,
+            providerId: query.provider,
+            ...(returnUrl ? { returnUrl } : {}),
           }),
-        });
+          302
+        );
       },
       {
         query: BetterAuthShellModel.authPageQuery,
@@ -367,10 +304,29 @@ export function createBetterAuthShellPlugin({
     .get(
       "/auth/account",
       async ({ query, request }) => {
+        if (!isTruthy(query.bridge)) {
+          const returnUrl = normalizeSafeReturnUrl({
+            value: query.redirect,
+            publicBaseUrl: config.publicBaseUrl,
+            webAppBaseUrl,
+            trustedOrigins: runtime.contract?.trustedOrigins ?? [],
+          });
+          return Response.redirect(
+            buildAccountPageUrl({
+              baseUrl: webAppBaseUrl,
+              flowId: query.flowId,
+              deviceCode: query.deviceCode,
+              returnUrl,
+            }),
+            302
+          );
+        }
         const socialProviders = getSocialProviders({ runtime });
         const returnUrl = normalizeSafeReturnUrl({
           value: query.redirect,
           publicBaseUrl: config.publicBaseUrl,
+          webAppBaseUrl,
+          trustedOrigins: runtime.contract?.trustedOrigins ?? [],
         });
         if (!(runtime.enabled && runtime.auth)) {
           return renderHtmlPage({
@@ -434,7 +390,8 @@ export function createBetterAuthShellPlugin({
             socialProviders,
             lifecycle,
             accountPageUrl: buildAccountPageUrl({
-              publicBaseUrl: config.publicBaseUrl,
+              baseUrl: config.publicBaseUrl,
+              bridge: true,
               flowId: query.flowId,
               deviceCode: query.deviceCode,
               returnUrl,
@@ -444,7 +401,8 @@ export function createBetterAuthShellPlugin({
             ? [
                 renderProviderActionScript({
                   callbackUrl: buildAccountPageUrl({
-                    publicBaseUrl: config.publicBaseUrl,
+                    baseUrl: config.publicBaseUrl,
+                    bridge: true,
                     flowId: query.flowId,
                     deviceCode: query.deviceCode,
                     returnUrl,
@@ -822,7 +780,7 @@ function renderLifecycleAutoReturnScript(input: {
   if (
     (input.lifecycle.state !== "ready" &&
       input.lifecycle.state !== "claimed") ||
-    !shouldAutoReturnToDesktop({
+    !shouldAutoReturn({
       returnUrl: input.lifecycle.returnUrl,
     })
   ) {
@@ -841,7 +799,7 @@ window.requestAnimationFrame(() => {
 `;
 }
 
-function buildAuthLandingPresentation(input: {
+function _buildAuthLandingPresentation(input: {
   readonly socialProviders: readonly BetterAuthSocialProvider[];
   readonly preferredProviderId: string | null;
   readonly callbackUrl: string;
@@ -1576,13 +1534,13 @@ function renderHtmlPage(input: {
 }
 
 function buildAuthShellUrl(input: {
-  readonly publicBaseUrl: string;
+  readonly baseUrl: string;
   readonly flowId?: string;
   readonly deviceCode?: string;
   readonly providerId?: string;
   readonly returnUrl?: string;
 }): string {
-  const url = new URL("/auth", resolvePageBaseUrl(input.publicBaseUrl));
+  const url = new URL("/auth", resolvePageBaseUrl(input.baseUrl));
   if (input.flowId) {
     url.searchParams.set("flowId", input.flowId);
   }
@@ -1599,12 +1557,16 @@ function buildAuthShellUrl(input: {
 }
 
 function buildAccountPageUrl(input: {
-  readonly publicBaseUrl: string;
+  readonly baseUrl: string;
+  readonly bridge?: boolean;
   readonly flowId?: string;
   readonly deviceCode?: string;
   readonly returnUrl?: string | null;
 }): string {
-  const url = new URL("/auth/account", resolvePageBaseUrl(input.publicBaseUrl));
+  const url = new URL("/auth/account", resolvePageBaseUrl(input.baseUrl));
+  if (input.bridge) {
+    url.searchParams.set("bridge", "1");
+  }
   if (input.flowId) {
     url.searchParams.set("flowId", input.flowId);
   }
@@ -1632,6 +1594,8 @@ function normalizeProviderId(input: {
 function normalizeSafeReturnUrl(input: {
   readonly value?: string;
   readonly publicBaseUrl: string;
+  readonly webAppBaseUrl: string;
+  readonly trustedOrigins: readonly string[];
 }): string | null {
   const value = normalizeText(input.value);
   if (!value) {
@@ -1643,13 +1607,19 @@ function normalizeSafeReturnUrl(input: {
       return candidate.toString();
     }
     const baseOrigin = new URL(input.publicBaseUrl).origin;
-    return candidate.origin === baseOrigin ? candidate.toString() : null;
+    const webOrigin = new URL(input.webAppBaseUrl).origin;
+    if (candidate.origin === baseOrigin || candidate.origin === webOrigin) {
+      return candidate.toString();
+    }
+    return input.trustedOrigins.includes(candidate.origin)
+      ? candidate.toString()
+      : null;
   } catch {
     return null;
   }
 }
 
-function shouldAutoReturnToDesktop(input: {
+function shouldAutoReturn(input: {
   readonly returnUrl: string | null;
 }): boolean {
   if (!input.returnUrl) {
@@ -1657,7 +1627,11 @@ function shouldAutoReturnToDesktop(input: {
   }
   try {
     const candidate = new URL(input.returnUrl);
-    return SAFE_RETURN_PROTOCOLS.has(candidate.protocol);
+    return (
+      SAFE_RETURN_PROTOCOLS.has(candidate.protocol) ||
+      candidate.protocol === "http:" ||
+      candidate.protocol === "https:"
+    );
   } catch {
     return false;
   }

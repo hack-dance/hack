@@ -5,6 +5,7 @@ export type BrokerConfig = {
   readonly port: number;
   readonly host: string;
   readonly publicBaseUrl: string;
+  readonly webAppBaseUrl?: string;
   readonly flowStorePath: string;
   readonly providerTokenEncryptionKey?: string;
   readonly githubClientId: string;
@@ -80,6 +81,8 @@ export function resolveConfig(): BrokerConfig {
     port: parsePort(process.env.PORT) ?? DEFAULT_PORT,
     host: normalizeString(process.env.HOST) ?? DEFAULT_HOST,
     publicBaseUrl,
+    webAppBaseUrl:
+      normalizeUrl(process.env.HACK_WEB_APP_BASE_URL) ?? publicBaseUrl,
     flowStorePath:
       normalizeString(process.env.FLOW_STORE_PATH) ?? DEFAULT_FLOW_STORE_PATH,
     providerTokenEncryptionKey:

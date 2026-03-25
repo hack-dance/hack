@@ -45,3 +45,134 @@ a {
     transition-duration: 0.01ms !important;
   }
 }
+
+.auth-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 2rem 1rem;
+}
+
+.auth-card {
+  width: min(36rem, 100%);
+  display: grid;
+  gap: 1rem;
+  padding: 1.5rem;
+  border: 1px solid rgba(148, 163, 184, 0.26);
+  border-radius: 1.5rem;
+  background: rgba(15, 23, 42, 0.88);
+  box-shadow: 0 24px 60px rgba(2, 6, 23, 0.32);
+  backdrop-filter: blur(14px);
+}
+
+.auth-eyebrow {
+  margin: 0;
+  font-size: 0.85rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: rgba(191, 219, 254, 0.86);
+}
+
+.auth-card h1 {
+  margin: 0;
+  font-size: clamp(2rem, 5vw, 2.6rem);
+  line-height: 1.05;
+}
+
+.auth-copy,
+.auth-panel p,
+.auth-status {
+  margin: 0;
+  color: rgba(226, 232, 240, 0.76);
+  line-height: 1.6;
+}
+
+.auth-panel {
+  display: grid;
+  gap: 0.5rem;
+  padding: 1rem;
+  border-radius: 1rem;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(15, 23, 42, 0.68);
+}
+
+.auth-panel h2 {
+  margin: 0;
+  font-size: 1rem;
+  color: #f8fafc;
+}
+
+.auth-panel-muted {
+  background: rgba(15, 23, 42, 0.54);
+}
+
+.auth-panel-info {
+  background: rgba(14, 116, 144, 0.26);
+  border-color: rgba(56, 189, 248, 0.34);
+}
+
+.auth-panel-success {
+  background: rgba(21, 128, 61, 0.22);
+  border-color: rgba(74, 222, 128, 0.34);
+}
+
+.auth-panel-danger {
+  background: rgba(153, 27, 27, 0.26);
+  border-color: rgba(248, 113, 113, 0.34);
+}
+
+.auth-actions {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.auth-button {
+  appearance: none;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 0.9rem 1.1rem;
+  font: inherit;
+  font-weight: 600;
+  background: #38bdf8;
+  color: #020617;
+  cursor: pointer;
+}
+
+.auth-button:hover:not(:disabled),
+.auth-link:hover {
+  transform: translateY(-1px);
+}
+
+.auth-button:disabled {
+  opacity: 0.72;
+  cursor: progress;
+}
+
+.auth-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.5rem;
+  padding: 0.65rem 0.9rem;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(15, 23, 42, 0.8);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.auth-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.auth-status {
+  min-height: 1.5rem;
+}
+
+.auth-button:focus-visible,
+.auth-link:focus-visible {
+  outline: 3px solid rgba(56, 189, 248, 0.45);
+  outline-offset: 2px;
+}

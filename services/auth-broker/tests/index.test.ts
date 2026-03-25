@@ -134,6 +134,7 @@ function createTestConfig() {
     port: 0,
     host: "127.0.0.1",
     publicBaseUrl: "http://127.0.0.1:8080",
+    webAppBaseUrl: "http://localhost:3000",
     flowStorePath: ".data/test-oauth-flows.json",
     providerTokenEncryptionKey: "linear-token-custody-test-key",
     githubClientId: "test-client-id",
@@ -418,7 +419,9 @@ describe("auth broker github flow routes", () => {
     expect(response.status).toBe(200);
     const payload = (await response.json()) as SessionStartFlowResponse;
     expect(payload.ok).toBe(true);
-    expect(payload.flow.authorizeUrl).toContain("/auth?");
+    expect(payload.flow.authorizeUrl).toStartWith(
+      "http://localhost:3000/auth?"
+    );
     expect(payload.flow.authorizeUrl).toContain("provider=github");
     expect(payload.flow.authorizeUrl).toContain(
       "redirect=hack%3A%2F%2Fauth%2Fcomplete"
@@ -432,7 +435,7 @@ describe("auth broker github flow routes", () => {
     expect(payload.flow.provider).toBe("github");
   });
 
-  test("auth page renders provider-driven sign-in surface", async () => {
+  test("legacy auth page redirects to the web sign-in route", async () => {
     const app = createAuthBrokerApp({
       config: createTestConfig(),
       flowStore: new FlowStore(),
@@ -444,16 +447,29 @@ describe("auth broker github flow routes", () => {
         "http://localhost/auth?provider=github&flowId=test-flow&deviceCode=test-device"
       )
     );
-    expect(response.status).toBe(200);
-    const html = await response.text();
-    expect(html).toContain(">HACK<");
-    expect(html).toContain("Linked to this Mac.");
-    expect(html).toContain("Continue with GitHub");
-    expect(html).not.toContain("finish setup in Hack Desktop");
-    expect(html).not.toContain("<summary>Details</summary>");
-    expect(html).not.toContain("Redirecting to GitHub");
-    expect(html).not.toContain("If nothing happens");
-    expect(html).toContain("/api/auth/sign-in/social");
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe(
+      "http://localhost:3000/auth?flowId=test-flow&deviceCode=test-device&provider=github"
+    );
+  });
+
+  test("legacy account page redirects to the web account route unless explicitly bridged", async () => {
+    const app = createAuthBrokerApp({
+      config: createTestConfig(),
+      flowStore: new FlowStore(),
+      betterAuthRuntime: createBetterAuthRuntimeWithSession(null),
+    });
+
+    const response = await app.handle(
+      new Request(
+        "http://localhost/auth/account?flowId=test-flow&deviceCode=test-device&redirect=hack%3A%2F%2Fauth%2Fcomplete"
+      )
+    );
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe(
+      "http://localhost:3000/auth/account?flowId=test-flow&deviceCode=test-device&redirect=hack%3A%2F%2Fauth%2Fcomplete"
+    );
   });
 
   test("account page completes session flow and claimed token resolves /v1/auth/me", async () => {
@@ -501,7 +517,7 @@ describe("auth broker github flow routes", () => {
 
       const accountResponse = await app.handle(
         new Request(
-          `http://localhost/auth/account?flowId=${encodeURIComponent(
+          `http://localhost/auth/account?bridge=1&flowId=${encodeURIComponent(
             startPayload.flow.flowId
           )}&deviceCode=${encodeURIComponent(
             startPayload.flow.deviceCode

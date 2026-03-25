@@ -142,7 +142,7 @@ test("auth login opens browser, claims token, and stores the auth session", asyn
         flow: {
           flowId: "flow-123",
           authorizeUrl:
-            "https://auth.hack.broker/auth?flowId=flow-123&deviceCode=device-123",
+            "https://app.hack.broker/auth?flowId=flow-123&deviceCode=device-123",
           deviceCode: "device-123",
           pollUrl: "https://auth.hack.broker/v1/auth/session/flows/flow-123",
           expiresAt: "2099-03-06T18:00:00.000Z",
@@ -199,7 +199,7 @@ test("auth login opens browser, claims token, and stores the auth session", asyn
 
   expect(result.exitCode).toBe(0);
   expect(openUrlCalls).toEqual([
-    "https://auth.hack.broker/auth?flowId=flow-123&deviceCode=device-123",
+    "https://app.hack.broker/auth?flowId=flow-123&deviceCode=device-123",
   ]);
   expect(fetchCalls.map((call) => call.url)).toEqual([
     "https://auth.hack.broker/v1/auth/session/start",
@@ -256,7 +256,7 @@ test("auth login forwards a desktop return URL to the broker session start route
         flow: {
           flowId: "flow-redirect",
           authorizeUrl:
-            "https://auth.hack.broker/auth?flowId=flow-redirect&deviceCode=device-redirect&redirect=hack%3A%2F%2Fauth%2Fcomplete",
+            "https://app.hack.broker/auth?flowId=flow-redirect&deviceCode=device-redirect&redirect=hack%3A%2F%2Fauth%2Fcomplete",
           deviceCode: "device-redirect",
           pollUrl:
             "https://auth.hack.broker/v1/auth/session/flows/flow-redirect",
@@ -297,7 +297,7 @@ test("auth login forwards a desktop return URL to the broker session start route
     "https://auth.hack.broker/v1/auth/me",
   ]);
   expect(openUrlCalls).toEqual([
-    "https://auth.hack.broker/auth?flowId=flow-redirect&deviceCode=device-redirect&redirect=hack%3A%2F%2Fauth%2Fcomplete",
+    "https://app.hack.broker/auth?flowId=flow-redirect&deviceCode=device-redirect&redirect=hack%3A%2F%2Fauth%2Fcomplete",
   ]);
 });
 

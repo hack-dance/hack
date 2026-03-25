@@ -569,12 +569,12 @@ test("linear management section renders durable publish and delivery audit state
           draftCount: 1,
           publishedCount: 2,
           latestPublished: {
-            title: "Weekly update",
+            title: "Post-closeout weekly update",
             linearId: "update_123",
-            date: "2026-03-14",
-            publishedAt: "2026-03-14T10:00:00.000Z",
-            updatedAt: "2026-03-14T10:15:00.000Z",
-            path: ".hack/linear/projects/proj_default/status-updates/published/2026-03-14-weekly.md",
+            date: "2026-03-26",
+            publishedAt: "2026-03-26T10:00:00.000Z",
+            updatedAt: "2026-03-26T10:15:00.000Z",
+            path: ".hack/linear/projects/proj_default/status-updates/published/2026-03-26-weekly.md",
           },
         },
         deliveryCorruption: null,
@@ -677,7 +677,7 @@ test("linear management section renders durable publish and delivery audit state
 
   expect(markup).toContain("Repo audit trail");
   expect(markup).toContain("Latest published status update");
-  expect(markup).toContain("Weekly update");
+  expect(markup).toContain("Post-closeout weekly update");
   expect(markup).toContain("1 draft still waiting to publish");
   expect(markup).toContain("Latest delivery reconciliation");
   expect(markup).toContain("processed 3");
@@ -692,6 +692,11 @@ test("linear management section renders durable publish and delivery audit state
   );
   expect(markup).toContain(
     ".hack/linear/projects/proj_default/delivery-audit.json"
+  );
+  expect(markup).toContain("Published closeout evidence");
+  expect(markup).toContain("Mission closeout audit");
+  expect(markup).toContain(
+    ".hack/linear/projects/proj_default/status-updates/published/2026-03-25-closeout.md"
   );
 });
 

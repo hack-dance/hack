@@ -2290,14 +2290,6 @@ async function resolveLinearStatusCommandPayload(input: {
                 },
               }).listTickets()
             : [],
-          latestPublishedPath:
-            audit?.statusUpdates.latestPublished?.path ?? null,
-          latestPublishedTitle:
-            audit?.statusUpdates.latestPublished?.title ?? null,
-          latestPublishedAt:
-            audit?.statusUpdates.latestPublished?.publishedAt ??
-            audit?.statusUpdates.latestPublished?.updatedAt ??
-            null,
           deliveryAuditPath:
             audit?.delivery?.path ?? audit?.deliveryCorruption?.path ?? null,
           deliveryAuditState: closeoutDeliveryAuditState,
@@ -2386,6 +2378,16 @@ async function renderLinearStatusPayload(input: {
             ? [
                 `- Mission closeout: ${input.payload.audit.closeout.resolvedCount}/${input.payload.audit.closeout.totalItems} resolved, ${input.payload.audit.closeout.unresolvedCount} unresolved`,
                 `- Closeout scope file: ${input.payload.audit.closeout.path}`,
+                ...(input.payload.audit.closeout.latestPublishedTitle
+                  ? [
+                      `- Closeout evidence: ${input.payload.audit.closeout.latestPublishedTitle}`,
+                      ...(input.payload.audit.closeout.latestPublishedPath
+                        ? [
+                            `- Closeout evidence file: ${input.payload.audit.closeout.latestPublishedPath}`,
+                          ]
+                        : []),
+                    ]
+                  : ["- Closeout evidence: unavailable"]),
                 ...(input.payload.audit.closeout.unresolvedCount > 0
                   ? [
                       `- Remaining tickets: ${input.payload.audit.closeout.entries

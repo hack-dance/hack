@@ -521,9 +521,14 @@ function CloseoutAuditCard(input: {
       )}
       <code className={codeClassName}>{input.closeout.path}</code>
       <p className="text-sm text-white/65 leading-6">
-        Latest published evidence:{" "}
-        {input.closeout.latestPublishedTitle ?? "No published closeout update"}
+        Published closeout evidence:{" "}
+        {input.closeout.latestPublishedTitle ?? "Unavailable"}
       </p>
+      {input.closeout.latestPublishedPath ? (
+        <code className={codeClassName}>
+          {input.closeout.latestPublishedPath}
+        </code>
+      ) : null}
       <p className="text-sm text-white/65 leading-6">
         Delivery audit state: {input.closeout.deliveryAuditState}
       </p>

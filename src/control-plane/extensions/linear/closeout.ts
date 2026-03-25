@@ -1,7 +1,11 @@
 import { relative, resolve } from "node:path";
 
 import type { TicketStatus, TicketSummary } from "../tickets/store.ts";
-import { resolveLinearProjectArtifactsRoot } from "./project-artifacts.ts";
+import {
+  type LocalLinearProjectArtifact,
+  loadLocalLinearProjectArtifacts,
+  resolveLinearProjectArtifactsRoot,
+} from "./project-artifacts.ts";
 
 export type LinearProjectCloseoutScopeEntry = {
   readonly ticketId: string;
@@ -57,9 +61,6 @@ export async function loadLinearProjectCloseoutAudit(input: {
   readonly projectDir: string;
   readonly linearProjectId: string;
   readonly tickets: readonly TicketSummary[];
-  readonly latestPublishedPath?: string | null;
-  readonly latestPublishedTitle?: string | null;
-  readonly latestPublishedAt?: string | null;
   readonly deliveryAuditPath?: string | null;
   readonly deliveryAuditState: LinearProjectCloseoutAudit["deliveryAuditState"];
 }): Promise<LinearProjectCloseoutAudit | null> {
@@ -106,6 +107,10 @@ export async function loadLinearProjectCloseoutAudit(input: {
   const resolvedCount = entries.filter(
     (entry) => entry.status === "done"
   ).length;
+  const publishedEvidence = await resolveCloseoutPublishedEvidence({
+    projectDir: input.projectDir,
+    linearProjectId: input.linearProjectId,
+  });
 
   return {
     path: toRepoRelativePath({
@@ -116,14 +121,14 @@ export async function loadLinearProjectCloseoutAudit(input: {
     resolvedCount,
     unresolvedCount: entries.length - resolvedCount,
     entries,
-    ...(input.latestPublishedPath
-      ? { latestPublishedPath: input.latestPublishedPath }
-      : {}),
-    ...(input.latestPublishedTitle
-      ? { latestPublishedTitle: input.latestPublishedTitle }
-      : {}),
-    ...(input.latestPublishedAt
-      ? { latestPublishedAt: input.latestPublishedAt }
+    ...(publishedEvidence
+      ? {
+          latestPublishedPath: publishedEvidence.path,
+          latestPublishedTitle: publishedEvidence.title,
+          ...(publishedEvidence.at
+            ? { latestPublishedAt: publishedEvidence.at }
+            : {}),
+        }
       : {}),
     ...(input.deliveryAuditPath
       ? { deliveryAuditPath: input.deliveryAuditPath }
@@ -211,4 +216,113 @@ function readOptionalString(value: unknown): string | null {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object";
+}
+
+const CLOSEOUT_STATUS_UPDATE_SLUG = "mission-closeout-audit";
+const CLOSEOUT_STATUS_UPDATE_TITLE = "mission closeout audit";
+
+async function resolveCloseoutPublishedEvidence(input: {
+  readonly projectDir: string;
+  readonly linearProjectId: string;
+}): Promise<{
+  readonly path: string;
+  readonly title: string;
+  readonly at?: string;
+} | null> {
+  const closeoutArtifacts = (
+    await loadLocalLinearProjectArtifacts({
+      projectDir: input.projectDir,
+      linearProjectId: input.linearProjectId,
+      family: "status-updates",
+      ignoreParseErrors: true,
+    })
+  )
+    .filter(
+      (
+        artifact
+      ): artifact is Extract<
+        LocalLinearProjectArtifact,
+        { readonly kind: "linear-project-status-update" }
+      > => artifact.kind === "linear-project-status-update"
+    )
+    .filter((artifact) =>
+      isPublishedStatusUpdateArtifact({ path: artifact.path })
+    )
+    .filter((artifact) => isCloseoutStatusUpdateArtifact({ artifact }))
+    .sort(compareCloseoutArtifacts);
+  const artifact = closeoutArtifacts[0] ?? null;
+  if (!artifact) {
+    return null;
+  }
+  const publishedEvidenceAt = artifact.publishedAt ?? artifact.updatedAt;
+
+  return {
+    path: toRepoRelativePath({
+      projectDir: input.projectDir,
+      path: artifact.path,
+    }),
+    title: artifact.title,
+    ...(publishedEvidenceAt ? { at: publishedEvidenceAt } : {}),
+  };
+}
+
+function isPublishedStatusUpdateArtifact(input: {
+  readonly path: string;
+}): boolean {
+  return input.path
+    .replaceAll("\\", "/")
+    .includes("/status-updates/published/");
+}
+
+function isCloseoutStatusUpdateArtifact(input: {
+  readonly artifact: Extract<
+    LocalLinearProjectArtifact,
+    { readonly kind: "linear-project-status-update" }
+  >;
+}): boolean {
+  const normalizedPath = input.artifact.path
+    .replaceAll("\\", "/")
+    .toLowerCase();
+  const normalizedSlug = input.artifact.slug?.trim().toLowerCase();
+  const normalizedTitle = input.artifact.title.trim().toLowerCase();
+
+  return (
+    normalizedSlug === CLOSEOUT_STATUS_UPDATE_SLUG ||
+    normalizedTitle === CLOSEOUT_STATUS_UPDATE_TITLE ||
+    normalizedPath.endsWith(`${CLOSEOUT_STATUS_UPDATE_SLUG}.md`)
+  );
+}
+
+function compareCloseoutArtifacts(
+  left: Extract<
+    LocalLinearProjectArtifact,
+    { readonly kind: "linear-project-status-update" }
+  >,
+  right: Extract<
+    LocalLinearProjectArtifact,
+    { readonly kind: "linear-project-status-update" }
+  >
+): number {
+  return (
+    compareOptionalTextDesc(
+      left.publishedAt ?? left.updatedAt ?? left.date,
+      right.publishedAt ?? right.updatedAt ?? right.date
+    ) || left.title.localeCompare(right.title)
+  );
+}
+
+function compareOptionalTextDesc(
+  left: string | undefined,
+  right: string | undefined
+): number {
+  if (left && right) {
+    return right.localeCompare(left);
+  }
+  if (right) {
+    return 1;
+  }
+  if (left) {
+    return -1;
+  }
+  return 0;
 }

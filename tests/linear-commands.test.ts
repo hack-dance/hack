@@ -4732,7 +4732,12 @@ test("loadLinearProjectCloseoutAudit reconciles frozen scope against repo-bound 
     projectDir,
     ".hack/linear/projects/proj_123/closeout-scope.json"
   );
+  const publishedUpdatesDir = resolve(
+    projectDir,
+    ".hack/linear/projects/proj_123/status-updates/published"
+  );
   await mkdir(resolve(closeoutPath, ".."), { recursive: true });
+  await mkdir(publishedUpdatesDir, { recursive: true });
   await writeFile(
     closeoutPath,
     `${JSON.stringify(
@@ -4762,6 +4767,40 @@ test("loadLinearProjectCloseoutAudit reconciles frozen scope against repo-bound 
       null,
       2
     )}\n`
+  );
+  await writeFile(
+    resolve(publishedUpdatesDir, "2026-03-25-mission-closeout-audit.md"),
+    `---
+kind: linear-project-status-update
+linearProjectId: proj_123
+title: Mission closeout audit
+slug: mission-closeout-audit
+linearId: update_closeout
+archived: false
+date: 2026-03-25
+updatedAt: 2026-03-25T12:15:00.000Z
+publishedAt: 2026-03-25T12:00:00.000Z
+health: onTrack
+---
+Captured the frozen mission scope closeout evidence.
+`
+  );
+  await writeFile(
+    resolve(publishedUpdatesDir, "2026-03-26-weekly-update.md"),
+    `---
+kind: linear-project-status-update
+linearProjectId: proj_123
+title: Weekly update
+slug: weekly-update
+linearId: update_weekly
+archived: false
+date: 2026-03-26
+updatedAt: 2026-03-26T12:15:00.000Z
+publishedAt: 2026-03-26T12:00:00.000Z
+health: onTrack
+---
+This newer unrelated publish should not replace closeout evidence.
+`
   );
 
   const audit = await loadLinearProjectCloseoutAudit({
@@ -4799,10 +4838,6 @@ test("loadLinearProjectCloseoutAudit reconciles frozen scope against repo-bound 
         externalKey: "HACK-560",
       },
     ],
-    latestPublishedPath:
-      ".hack/linear/projects/proj_123/status-updates/published/2026-03-25-closeout.md",
-    latestPublishedTitle: "Mission closeout audit",
-    latestPublishedAt: "2026-03-25T12:00:00.000Z",
     deliveryAuditPath: ".hack/linear/projects/proj_123/delivery-audit.json",
     deliveryAuditState: "available",
   });
@@ -4812,7 +4847,10 @@ test("loadLinearProjectCloseoutAudit reconciles frozen scope against repo-bound 
     totalItems: 3,
     resolvedCount: 1,
     unresolvedCount: 2,
+    latestPublishedPath:
+      ".hack/linear/projects/proj_123/status-updates/published/2026-03-25-mission-closeout-audit.md",
     latestPublishedTitle: "Mission closeout audit",
+    latestPublishedAt: "2026-03-25T12:00:00.000Z",
     deliveryAuditState: "available",
   });
   expect(audit?.entries).toEqual([
@@ -4832,6 +4870,66 @@ test("loadLinearProjectCloseoutAudit reconciles frozen scope against repo-bound 
       status: "missing",
     }),
   ]);
+});
+
+test("loadLinearProjectCloseoutAudit leaves published evidence empty when no closeout-specific artifact exists", async () => {
+  const projectDir = ensureTempDir();
+  const closeoutPath = resolve(
+    projectDir,
+    ".hack/linear/projects/proj_123/closeout-scope.json"
+  );
+  const publishedUpdatesDir = resolve(
+    projectDir,
+    ".hack/linear/projects/proj_123/status-updates/published"
+  );
+  await mkdir(resolve(closeoutPath, ".."), { recursive: true });
+  await mkdir(publishedUpdatesDir, { recursive: true });
+  await writeFile(
+    closeoutPath,
+    `${JSON.stringify(
+      {
+        openedAtStart: [
+          {
+            ticketId: "T-00001",
+            externalKey: "HACK-457",
+            title: "Foundational ticket",
+          },
+        ],
+        missionCreated: [],
+      },
+      null,
+      2
+    )}\n`
+  );
+  await writeFile(
+    resolve(publishedUpdatesDir, "2026-03-26-weekly-update.md"),
+    `---
+kind: linear-project-status-update
+linearProjectId: proj_123
+title: Weekly update
+slug: weekly-update
+linearId: update_weekly
+archived: false
+date: 2026-03-26
+updatedAt: 2026-03-26T12:15:00.000Z
+publishedAt: 2026-03-26T12:00:00.000Z
+health: onTrack
+---
+This unrelated publish should not appear as closeout evidence.
+`
+  );
+
+  const audit = await loadLinearProjectCloseoutAudit({
+    projectDir,
+    linearProjectId: "proj_123",
+    tickets: [],
+    deliveryAuditState: "missing",
+  });
+
+  expect(audit).not.toBeNull();
+  expect(audit?.latestPublishedPath).toBeUndefined();
+  expect(audit?.latestPublishedTitle).toBeUndefined();
+  expect(audit?.latestPublishedAt).toBeUndefined();
 });
 
 test("runProjectArtifactCommand publish fails for drafts that already have a remote id", async () => {

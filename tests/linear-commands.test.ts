@@ -672,6 +672,63 @@ test("buildLinearProjectManagementSummary points invalid profile bindings at set
   ]);
 });
 
+test("buildLinearProjectManagementSummary prefers explicit shared scope denial guidance", () => {
+  const summary = __testOnly.buildLinearProjectManagementSummary({
+    status: {
+      extensionId: "dance.hack.linear",
+      selectedProfile: "work",
+      selectedSource: "project_routing",
+      defaultProfile: "work",
+      selectedMissing: false,
+      authRef: "linear.api.work",
+      service: "hack-linear-auth",
+      tokenEnvFallback: "HACK_LINEAR_API_TOKEN",
+      apiUrl: "https://api.linear.app/graphql",
+      accountId: "user-1",
+      accountName: "Work User",
+      accountEmail: "work@example.com",
+      tokenResolved: true,
+      tokenSource: "env",
+      tokenExpiresAt: null,
+      error: null,
+      profileError: null,
+      ok: true,
+    },
+    binding: {
+      profileId: "work",
+      projectId: "proj_default",
+      projectName: "Default",
+      teamId: "team_default",
+      additionalProjects: [],
+    },
+    sharedProjectScope: {
+      state: "shared_hidden",
+      mutable: false,
+      summary: "Shared project scope denied for hack-cli.",
+      detail:
+        "The current org/team context does not expose the shared project registration for this repo.",
+      projectSlug: "hack-cli",
+      currentAccessRole: null,
+      ownerType: "team",
+      ownerId: "team_123",
+      ownerSlug: "infra",
+      ownerName: "Infra",
+    },
+  });
+
+  expect(summary.repair).toEqual({
+    reason:
+      "The current org/team context does not expose the shared project registration for this repo.",
+    command: "hack auth login",
+  });
+  expect(summary.capabilities).toContain(
+    "Switch back to a visible shared org/team scope before mutating broker-managed Linear resources"
+  );
+  expect(summary.nextSteps).toEqual([
+    "Switch to a visible shared org/team context, then run `hack auth login`.",
+  ]);
+});
+
 test("buildLinearSetupSummary explains partial repo readiness", () => {
   const summary = __testOnly.buildLinearSetupSummary({
     profileId: "work",

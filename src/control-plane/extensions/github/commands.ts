@@ -3,6 +3,10 @@ import { secrets } from "bun";
 
 import { updateGlobalConfig } from "../../../lib/config.ts";
 import { isRecord } from "../../../lib/guards.ts";
+import {
+  resolveSharedProjectScope,
+  type SharedProjectScopeSummary,
+} from "../../../lib/integration-project-scope.ts";
 import { exec, findExecutableInPath, run } from "../../../lib/shell.ts";
 import { display } from "../../../ui/display.ts";
 import type { ExtensionCommand } from "../types.ts";
@@ -86,6 +90,7 @@ type GitHubStatusPayload = {
     readonly title: string;
     readonly action: string;
   }[];
+  readonly sharedProjectScope?: SharedProjectScopeSummary;
   readonly profileError?: string;
   readonly error?: string;
 };
@@ -242,6 +247,7 @@ export const GITHUB_COMMANDS: readonly ExtensionCommand[] = [
     handler: async ({ ctx, args }) =>
       await handleGitHubStatusCommand({
         controlPlaneConfig: ctx.controlPlaneConfig,
+        cwd: ctx.cwd,
         logger: ctx.logger,
         args,
       }),
@@ -1272,6 +1278,7 @@ async function handleGitHubStatusCommand(input: {
   readonly controlPlaneConfig: Parameters<
     typeof resolveGitHubAuthSettings
   >[0]["controlPlaneConfig"];
+  readonly cwd: string;
   readonly logger: GitHubCommandLogger;
   readonly args: readonly string[];
 }): Promise<number> {
@@ -1310,6 +1317,9 @@ async function handleGitHubStatusCommand(input: {
       : {}),
     allowProjectOverride,
   });
+  const sharedProjectScope = await resolveSharedProjectScope({
+    cwd: input.cwd,
+  });
   const payload = buildGitHubStatusPayload({
     controlPlaneConfig: input.controlPlaneConfig,
     settings,
@@ -1317,6 +1327,7 @@ async function handleGitHubStatusCommand(input: {
     token,
     defaultProfileId: catalog.defaultProfileId,
     accountSnapshot: resolvedAccountSnapshot,
+    sharedProjectScope,
   });
   if (parsed.value.json) {
     process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
@@ -1695,6 +1706,15 @@ async function renderGitHubStatusDisplay(input: {
       ...(input.payload.error
         ? ([["error", input.payload.error]] as const)
         : []),
+      ...(input.payload.sharedProjectScope
+        ? ([
+            ["shared_project_scope", input.payload.sharedProjectScope.summary],
+            [
+              "shared_project_scope_detail",
+              input.payload.sharedProjectScope.detail,
+            ],
+          ] as const)
+        : []),
     ],
   });
   await renderGitHubProfilesTable({ catalog: input.catalog });
@@ -1709,6 +1729,7 @@ function buildGitHubStatusPayload(input: {
   readonly token: Awaited<ReturnType<typeof resolveGitHubAppToken>>;
   readonly defaultProfileId: string;
   readonly accountSnapshot: GitHubAccountSnapshot;
+  readonly sharedProjectScope?: SharedProjectScopeSummary | null;
 }): GitHubStatusPayload {
   const readiness = summarizeGitHubReadiness({
     controlPlaneConfig: input.controlPlaneConfig,
@@ -1716,6 +1737,16 @@ function buildGitHubStatusPayload(input: {
     settingsResult: input.settingsResult,
     token: input.token,
   });
+  const sharedScopeIssue = resolveGitHubSharedScopeIssue({
+    sharedProjectScope: input.sharedProjectScope ?? null,
+  });
+  const ready = sharedScopeIssue ? false : readiness.ready;
+  const readinessSummary = sharedScopeIssue
+    ? (input.sharedProjectScope?.summary ?? readiness.summary)
+    : readiness.summary;
+  const readinessDetail = sharedScopeIssue
+    ? (input.sharedProjectScope?.detail ?? readiness.detail)
+    : readiness.detail;
   const accountLogin =
     input.accountSnapshot.accountLogin ?? input.settings.accountLogin;
   const accountName =
@@ -1747,17 +1778,48 @@ function buildGitHubStatusPayload(input: {
     ...(input.token.ok && input.token.expiresAt
       ? { tokenExpiresAt: input.token.expiresAt }
       : {}),
-    ready: readiness.ready,
-    readiness: readiness.state,
-    readinessSummary: readiness.summary,
-    readinessDetail: readiness.detail,
-    repairIssues: readiness.issues,
+    ready,
+    readiness: ready ? "ready" : "needs_attention",
+    readinessSummary,
+    readinessDetail,
+    repairIssues: sharedScopeIssue
+      ? [...readiness.issues, sharedScopeIssue.issue]
+      : readiness.issues,
     installationState: readiness.installation.state,
-    repairGuidance: readiness.repairGuidance,
+    repairGuidance: sharedScopeIssue
+      ? [...readiness.repairGuidance, sharedScopeIssue.guidance]
+      : readiness.repairGuidance,
+    ...(input.sharedProjectScope
+      ? { sharedProjectScope: input.sharedProjectScope }
+      : {}),
     ...(input.settingsResult.ok
       ? {}
       : { profileError: input.settingsResult.error }),
     ...(input.token.ok ? {} : { error: input.token.error }),
+  };
+}
+
+function resolveGitHubSharedScopeIssue(input: {
+  readonly sharedProjectScope: SharedProjectScopeSummary | null;
+}): {
+  readonly issue: "shared_scope_hidden";
+  readonly guidance: {
+    readonly issue: "shared_scope_hidden";
+    readonly title: string;
+    readonly action: string;
+  };
+} | null {
+  if (input.sharedProjectScope?.state !== "shared_hidden") {
+    return null;
+  }
+  return {
+    issue: "shared_scope_hidden",
+    guidance: {
+      issue: "shared_scope_hidden",
+      title: "Refresh the shared project scope",
+      action:
+        "Switch back to a visible shared org/team context, then run `hack auth login` so repo-bound GitHub status can confirm the active shared project scope.",
+    },
   };
 }
 

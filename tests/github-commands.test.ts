@@ -137,4 +137,83 @@ describe("github profile payload rendering", () => {
     });
     expect(payload.repairIssues).toContain("missing_installation");
   });
+
+  test("buildGitHubStatusPayload surfaces shared scope denial for the active project", () => {
+    const payload = __testOnly.buildGitHubStatusPayload({
+      settings: {
+        profileId: "work",
+        profileSource: "project_routing",
+        tokenEnv: "GH_TOKEN",
+        authRef: "github.app.work",
+        service: "hack-github-work",
+        apiBaseUrl: "https://api.github.com",
+        mode: "token",
+      },
+      settingsResult: {
+        ok: true,
+        settings: {
+          profileId: "work",
+          profileSource: "project_routing",
+          tokenEnv: "GH_TOKEN",
+          authRef: "github.app.work",
+          service: "hack-github-work",
+          apiBaseUrl: "https://api.github.com",
+          mode: "token",
+        },
+        availableProfileIds: ["work"],
+      },
+      token: {
+        ok: true,
+        token: "env-token",
+        source: "env",
+        tokenEnv: "GH_TOKEN",
+        authRef: "github.app.work",
+        service: "hack-github-work",
+        profileId: "work",
+        profileSource: "project_routing",
+      },
+      defaultProfileId: "work",
+      accountSnapshot: {
+        accountLogin: "octocat-work",
+      },
+      sharedProjectScope: {
+        state: "shared_hidden",
+        mutable: false,
+        summary: "Shared project scope denied for hack-cli.",
+        detail:
+          "The current org/team context does not expose the shared project registration for this repo.",
+        projectSlug: "hack-cli",
+        currentAccessRole: null,
+        ownerType: "team",
+        ownerId: "team_123",
+        ownerSlug: "infra",
+        ownerName: "Infra",
+      },
+      controlPlaneConfig: {
+        extensions: {
+          "dance.hack.github": {
+            enabled: true,
+            config: {},
+          },
+        },
+      },
+    });
+
+    expect(payload.ready).toBe(false);
+    expect(payload.readiness).toBe("needs_attention");
+    expect(payload.repairIssues).toContain("shared_scope_hidden");
+    expect(payload.sharedProjectScope).toEqual({
+      state: "shared_hidden",
+      mutable: false,
+      summary: "Shared project scope denied for hack-cli.",
+      detail:
+        "The current org/team context does not expose the shared project registration for this repo.",
+      projectSlug: "hack-cli",
+      currentAccessRole: null,
+      ownerType: "team",
+      ownerId: "team_123",
+      ownerSlug: "infra",
+      ownerName: "Infra",
+    });
+  });
 });

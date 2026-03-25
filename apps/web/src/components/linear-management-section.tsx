@@ -1,3 +1,4 @@
+import type { AccountControlPlaneFeedback } from "@/src/lib/account-control-plane";
 import type { LinearManagementState } from "@/src/lib/linear-management";
 import { cn } from "@/src/lib/utils";
 
@@ -12,6 +13,7 @@ const codeClassName =
 
 export default function LinearManagementSection(input: {
   readonly linearManagement: LinearManagementState;
+  readonly scopeFeedback?: AccountControlPlaneFeedback | null;
 }) {
   const { linearManagement } = input;
   const localAccessLabel = linearManagement.localAccess.ready
@@ -34,6 +36,29 @@ export default function LinearManagementSection(input: {
           active failure mode without hiding the current routing context.
         </p>
       </div>
+
+      {input.scopeFeedback ? (
+        <section
+          className={cn(
+            sectionSurfaceClassName,
+            "p-5",
+            input.scopeFeedback.tone === "success" &&
+              "border-emerald-300/30 bg-emerald-500/10",
+            input.scopeFeedback.tone === "danger" &&
+              "border-rose-300/30 bg-rose-500/10",
+            input.scopeFeedback.tone === "info" &&
+              "border-sky-300/30 bg-sky-500/10"
+          )}
+          role={input.scopeFeedback.tone === "danger" ? "alert" : "status"}
+        >
+          <p className="font-medium text-sky-100 text-sm">
+            {input.scopeFeedback.title}
+          </p>
+          <p className="mt-3 text-sm text-white/80 leading-6">
+            {input.scopeFeedback.body}
+          </p>
+        </section>
+      ) : null}
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
         <section

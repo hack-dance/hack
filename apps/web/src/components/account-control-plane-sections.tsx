@@ -45,6 +45,9 @@ export default function AccountControlPlaneSections({
   feedback = null,
   returnToPath,
 }: AccountControlPlaneSectionsProps) {
+  const integrationScopeFeedback = resolveSharedIntegrationScopeFeedback({
+    account,
+  });
   const selectedOrganizationKey = account.authenticated
     ? (account.selectedOrganization?.slug ?? account.requestedOrganizationKey)
     : null;
@@ -113,9 +116,15 @@ export default function AccountControlPlaneSections({
 
       <ProjectsSection account={account} returnToPath={returnToPath} />
 
-      <GitHubSection githubManagement={githubManagement} />
+      <GitHubSection
+        githubManagement={githubManagement}
+        scopeFeedback={integrationScopeFeedback}
+      />
 
-      <LinearManagementSection linearManagement={linearManagement} />
+      <LinearManagementSection
+        linearManagement={linearManagement}
+        scopeFeedback={integrationScopeFeedback}
+      />
 
       <section className="space-y-4" id="invitations">
         <div className="space-y-2">
@@ -139,6 +148,7 @@ export default function AccountControlPlaneSections({
 
 function GitHubSection(input: {
   readonly githubManagement: GitHubManagementState;
+  readonly scopeFeedback: AccountControlPlaneFeedback | null;
 }) {
   const githubManagement = input.githubManagement;
   const selectedProfile = githubManagement.selectedProfile;
@@ -160,6 +170,10 @@ function GitHubSection(input: {
           partial configuration as healthy.
         </p>
       </div>
+
+      {input.scopeFeedback ? (
+        <IntegrationScopeCard feedback={input.scopeFeedback} />
+      ) : null}
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
         <section
@@ -1588,6 +1602,80 @@ function InvitationsCard(input: {
       )}
     </section>
   );
+}
+
+function IntegrationScopeCard(input: {
+  readonly feedback: AccountControlPlaneFeedback;
+}) {
+  return (
+    <section
+      className={cn(
+        sectionSurfaceClassName,
+        "p-5",
+        input.feedback.tone === "success" &&
+          "border-emerald-300/30 bg-emerald-500/10",
+        input.feedback.tone === "danger" && "border-rose-300/30 bg-rose-500/10",
+        input.feedback.tone === "info" && "border-sky-300/30 bg-sky-500/10"
+      )}
+      role={input.feedback.tone === "danger" ? "alert" : "status"}
+    >
+      <p className="font-medium text-sky-100 text-sm">{input.feedback.title}</p>
+      <p className="mt-3 text-sm text-white/80 leading-6">
+        {input.feedback.body}
+      </p>
+    </section>
+  );
+}
+
+function resolveSharedIntegrationScopeFeedback(input: {
+  readonly account: AccountShellContext;
+}): AccountControlPlaneFeedback | null {
+  if (!input.account.authenticated) {
+    return null;
+  }
+
+  if (
+    input.account.requestedProjectKey &&
+    input.account.selectedProjectVisible === false &&
+    !input.account.selectedProject
+  ) {
+    return {
+      tone: "danger",
+      title: "Shared project scope denied",
+      body: "The current org/team context does not expose the requested shared project. Switch back to a visible shared scope before treating GitHub or Linear state as broker-managed for this repo.",
+    };
+  }
+
+  const selectedProject = input.account.selectedProject;
+  if (!selectedProject) {
+    return {
+      tone: "info",
+      title: "No visible project scope",
+      body: "Select or register a visible project before comparing shared GitHub and Linear scope with the active org/team context.",
+    };
+  }
+
+  if (selectedProject.ownership.mode === "local") {
+    return {
+      tone: "info",
+      title: "Local project scope",
+      body: "This repo currently uses local project ownership, so GitHub and Linear readiness here reflects repo-local state instead of shared org/team broker scope.",
+    };
+  }
+
+  if (selectedProject.currentAccessRole === "viewer") {
+    return {
+      tone: "info",
+      title: "Read-only shared project scope",
+      body: "The active org/team can inspect shared integration state for this project, but broker-managed mutations stay blocked while the current access role remains viewer.",
+    };
+  }
+
+  return {
+    tone: "success",
+    title: "Shared project scope active",
+    body: "The active org/team can inspect and manage shared GitHub and Linear state for the selected project without crossing tenant boundaries.",
+  };
 }
 
 function filterOrganizationsByActiveScope(input: {

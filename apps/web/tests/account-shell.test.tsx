@@ -388,3 +388,27 @@ test("account shell fails closed with a sign-in path when no active context is a
     "Sign in to compare Hack-owned access with local Linear access."
   );
 });
+
+test("account shell surfaces shared integration scope denial when the requested project is hidden", () => {
+  const markup = renderToStaticMarkup(
+    <ControlPlaneShell
+      account={{
+        ...authenticatedContext,
+        requestedProjectKey: "ops-console",
+        selectedProjectVisible: false,
+        projects: [],
+        selectedProject: null,
+        selectedProjectAccess: [],
+      }}
+      githubManagement={githubManagement}
+      linearManagement={linearManagement}
+      returnToPath="/account"
+      signInHref="/auth?redirect=%2Faccount"
+    />
+  );
+
+  expect(markup).toContain("Shared project scope denied");
+  expect(markup).toContain(
+    "The current org/team context does not expose the requested shared project."
+  );
+});

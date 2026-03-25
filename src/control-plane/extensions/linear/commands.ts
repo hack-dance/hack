@@ -11,6 +11,10 @@ import {
   updateProjectConfigBatch,
 } from "../../../lib/config.ts";
 import { isRecord } from "../../../lib/guards.ts";
+import {
+  resolveSharedProjectScope,
+  type SharedProjectScopeSummary,
+} from "../../../lib/integration-project-scope.ts";
 import { openUrl } from "../../../lib/os.ts";
 import { type DisplayCell, display } from "../../../ui/display.ts";
 import {
@@ -2154,6 +2158,7 @@ type LinearStatusCommandPayload = LinearStatusPayload & {
   readonly audit: Awaited<
     ReturnType<typeof loadLinearProjectAuditState>
   > | null;
+  readonly sharedProjectScope: SharedProjectScopeSummary | null;
 };
 
 async function resolveLinearStatusPayload(input: {
@@ -2212,6 +2217,11 @@ async function resolveLinearStatusCommandPayload(input: {
   readonly projectDir?: string;
 }): Promise<LinearStatusCommandPayload> {
   const status = await resolveLinearStatusPayload(input);
+  const sharedProjectScope = input.projectDir
+    ? await resolveSharedProjectScope({
+        cwd: input.projectDir,
+      })
+    : null;
   const projectBinding = buildProjectBindingPayload({
     binding: resolveProjectLinearBinding({
       controlPlaneConfig: input.controlPlaneConfig,
@@ -2232,6 +2242,7 @@ async function resolveLinearStatusCommandPayload(input: {
       ...(projectBinding.teamId ? { teamId: projectBinding.teamId } : {}),
       additionalProjects: projectBinding.additionalProjects,
     },
+    sharedProjectScope,
   });
   const audit =
     input.projectDir && projectBinding.projectId
@@ -2245,6 +2256,7 @@ async function resolveLinearStatusCommandPayload(input: {
     projectBinding,
     summary,
     audit,
+    sharedProjectScope,
   };
 }
 
@@ -2258,6 +2270,12 @@ async function renderLinearStatusPayload(input: {
   const lines = [
     `Active profile: ${input.payload.summary.activeProfile}`,
     `Connection: ${input.payload.summary.connectionLabel}`,
+    ...(input.payload.sharedProjectScope
+      ? [
+          `Shared project scope: ${input.payload.sharedProjectScope.summary}`,
+          `Shared project scope detail: ${input.payload.sharedProjectScope.detail}`,
+        ]
+      : []),
     `Repo binding profile: ${bindingSummary.profile}`,
     `Default project: ${bindingSummary.project}`,
     `Default team: ${bindingSummary.team}`,
@@ -7234,7 +7252,14 @@ function resolveLinearRepairAction(input: {
   readonly activeProfile: string;
   readonly connected: boolean;
   readonly status: LinearStatusPayload;
+  readonly sharedProjectScope?: SharedProjectScopeSummary | null;
 }): LinearRepairAction | null {
+  if (input.sharedProjectScope?.state === "shared_hidden") {
+    return {
+      reason: input.sharedProjectScope.detail,
+      command: "hack auth login",
+    };
+  }
   if (input.status.selectedMissing || input.status.profileError) {
     return {
       reason: "The active Linear profile binding is invalid.",
@@ -7271,7 +7296,13 @@ function resolveLinearRepairAction(input: {
 function buildLinearCapabilities(input: {
   readonly connected: boolean;
   readonly binding: ResolvedLinearProjectBinding;
+  readonly sharedProjectScope?: SharedProjectScopeSummary | null;
 }): readonly string[] {
+  if (input.sharedProjectScope?.state === "shared_hidden") {
+    return [
+      "Switch back to a visible shared org/team scope before mutating broker-managed Linear resources",
+    ];
+  }
   const capabilities: string[] = [];
   if (input.connected && input.binding.projectId) {
     capabilities.push("Sync tickets for the bound Linear project");
@@ -7299,7 +7330,13 @@ function buildLinearNextSteps(input: {
   readonly repair: LinearRepairAction | null;
   readonly binding: ResolvedLinearProjectBinding;
   readonly activeProfile: string;
+  readonly sharedProjectScope?: SharedProjectScopeSummary | null;
 }): readonly string[] {
+  if (input.sharedProjectScope?.state === "shared_hidden") {
+    return [
+      "Switch to a visible shared org/team context, then run `hack auth login`.",
+    ];
+  }
   if (input.repair) {
     return [`Run \`${input.repair.command}\`.`];
   }
@@ -7314,6 +7351,7 @@ function buildLinearNextSteps(input: {
 function buildLinearProjectManagementSummary(input: {
   readonly status: LinearStatusPayload;
   readonly binding: ResolvedLinearProjectBinding;
+  readonly sharedProjectScope?: SharedProjectScopeSummary | null;
 }): LinearProjectManagementSummary {
   const activeProfile =
     input.status.selectedProfile ?? input.binding.profileId ?? "default";
@@ -7333,15 +7371,18 @@ function buildLinearProjectManagementSummary(input: {
     activeProfile,
     connected,
     status: input.status,
+    sharedProjectScope: input.sharedProjectScope,
   });
   const capabilities = buildLinearCapabilities({
     connected,
     binding: input.binding,
+    sharedProjectScope: input.sharedProjectScope,
   });
   const nextSteps = buildLinearNextSteps({
     repair,
     binding: input.binding,
     activeProfile,
+    sharedProjectScope: input.sharedProjectScope,
   });
 
   return {

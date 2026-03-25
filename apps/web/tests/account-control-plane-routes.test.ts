@@ -137,6 +137,57 @@ test("invite org member route keeps org scope and redirect context", async () =>
   );
 });
 
+test("remove org member route revokes pending invites and keeps org scope", async () => {
+  process.env.NEXT_PUBLIC_HACK_WEB_APP_BASE_URL = "https://hack-cli.hack";
+  process.env.NEXT_PUBLIC_HACK_AUTH_BROKER_URL = "https://auth.hack-cli.hack";
+  process.env.HACK_AUTH_BROKER_INTERNAL_URL = "https://auth.hack-cli.hack";
+
+  let requestUrl = "";
+  let body: Record<string, unknown> | undefined;
+  let authorization: string | null = null;
+  setMockFetch((input, init) => {
+    requestUrl = resolveFetchUrl(input);
+    body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    authorization = readAuthorizationHeader(init);
+    return Response.json({
+      ok: true,
+      membership: {
+        state: "removed",
+        target: "person@example.com",
+      },
+    });
+  });
+
+  const formData = new FormData();
+  formData.set("target", "person@example.com");
+  formData.set("redirectTo", "/account?org=hack");
+
+  const response = await removeOrgMember(
+    new Request(
+      "https://hack-cli.hack/api/control-plane/orgs/hack/members/remove",
+      {
+        method: "POST",
+        headers: {
+          cookie: `${HACK_WEB_BROKER_SESSION_COOKIE_NAME}=session-token`,
+        },
+        body: formData,
+      }
+    ) as NextRequest,
+    { params: Promise.resolve({ org: "hack" }) }
+  );
+
+  expect(requestUrl).toBe(
+    "https://auth.hack-cli.hack/v1/auth/orgs/hack/members/remove"
+  );
+  expect(String(authorization)).toBe("Bearer session-token");
+  expect(body).toEqual({
+    target: "person@example.com",
+  });
+  expect(response.headers.get("location")).toBe(
+    "/account?org=hack&notice=org_member_removed"
+  );
+});
+
 test("remove org member route reports broker failures through the account shell", async () => {
   process.env.NEXT_PUBLIC_HACK_WEB_APP_BASE_URL = "https://hack-cli.hack";
   process.env.NEXT_PUBLIC_HACK_AUTH_BROKER_URL = "https://auth.hack-cli.hack";

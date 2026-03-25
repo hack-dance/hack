@@ -164,6 +164,91 @@ test("account control plane data loads visible org detail and incoming invitatio
   expect(data.incomingInvitations[0]?.id).toBe("invite_123");
 });
 
+test("account control plane data drops revoked pending org invites from admin and recipient views", async () => {
+  const data = await loadAccountControlPlaneData({
+    authBrokerProxyBaseUrl: "https://auth.hack-cli.hack",
+    token: "session-token",
+    selectedOrganizationKey: "hack",
+    fetchImplementation: (input) => {
+      const url = resolveFetchUrl(input);
+      if (url === "https://auth.hack-cli.hack/v1/auth/orgs") {
+        return Response.json({
+          ok: true,
+          organizations: [
+            {
+              id: "org_123",
+              slug: "hack",
+              name: "Hack Org",
+              createdAt: "2026-03-25T00:00:00.000Z",
+              updatedAt: "2026-03-25T00:00:00.000Z",
+            },
+          ],
+        });
+      }
+      if (url === "https://auth.hack-cli.hack/v1/auth/invitations") {
+        return Response.json({
+          ok: true,
+          invitations: [],
+        });
+      }
+      if (url === "https://auth.hack-cli.hack/v1/auth/projects") {
+        return Response.json({
+          ok: true,
+          projects: [],
+        });
+      }
+      if (url === "https://auth.hack-cli.hack/v1/auth/orgs/hack") {
+        return Response.json({
+          ok: true,
+          organization: {
+            id: "org_123",
+            slug: "hack",
+            name: "Hack Org",
+            createdAt: "2026-03-25T00:00:00.000Z",
+            updatedAt: "2026-03-25T00:00:00.000Z",
+          },
+        });
+      }
+      if (url === "https://auth.hack-cli.hack/v1/auth/orgs/hack/members") {
+        return Response.json({
+          ok: true,
+          memberships: [
+            {
+              id: "membership_123",
+              scope: "organization",
+              state: "active",
+              organizationId: "org_123",
+              teamId: null,
+              userId: "user_123",
+              email: "hack@example.com",
+              target: "user_123",
+              createdAt: "2026-03-25T00:00:00.000Z",
+              updatedAt: "2026-03-25T00:00:00.000Z",
+            },
+          ],
+        });
+      }
+      if (url === "https://auth.hack-cli.hack/v1/auth/teams?org=hack") {
+        return Response.json({
+          ok: true,
+          teams: [],
+        });
+      }
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    },
+  });
+
+  expect(data.selectedOrganizationVisible).toBe(true);
+  expect(data.selectedOrganizationMemberships).toEqual([
+    expect.objectContaining({
+      id: "membership_123",
+      state: "active",
+      target: "user_123",
+    }),
+  ]);
+  expect(data.incomingInvitations).toEqual([]);
+});
+
 test("account control plane data fails closed when the requested org is not visible", async () => {
   const calls: string[] = [];
 

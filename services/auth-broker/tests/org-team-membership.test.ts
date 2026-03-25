@@ -679,6 +679,142 @@ describe("org and team membership broker routes", () => {
     };
     expect(declined.membership?.state).toBe("removed");
   });
+
+  test("pending org invites can be revoked before acceptance and disappear for admins and recipients", async () => {
+    const store = new InMemoryOrgTeamsStore();
+    const ownerApp = createOrgTeamsTestApp({ store });
+    const recipientApp = createOrgTeamsTestApp({
+      store,
+      session: createSession({
+        userId: "user-456",
+        email: "person@example.com",
+      }),
+    });
+
+    const createOrgResponse = await handleJsonRequest({
+      app: ownerApp,
+      method: "POST",
+      path: "/v1/auth/orgs",
+      body: {
+        slug: "hack",
+        name: "Hack",
+      },
+    });
+    expect(createOrgResponse.status).toBe(200);
+
+    const inviteId = await inviteMemberAndGetId({
+      app: ownerApp,
+      path: "/v1/auth/orgs/hack/members/invite",
+      body: {
+        target: "person@example.com",
+      },
+    });
+
+    const adminMembersBeforeRevoke = await handleJsonRequest({
+      app: ownerApp,
+      path: "/v1/auth/orgs/hack/members",
+    });
+    expect(adminMembersBeforeRevoke.status).toBe(200);
+    const adminMembersBeforePayload =
+      (await adminMembersBeforeRevoke.json()) as {
+        readonly memberships?: ReadonlyArray<{
+          readonly id?: string;
+          readonly state?: string;
+        }>;
+      };
+    expect(adminMembersBeforePayload.memberships).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: inviteId,
+          state: "pending",
+        }),
+      ])
+    );
+
+    const recipientInvitationsBeforeRevoke = await handleJsonRequest({
+      app: recipientApp,
+      path: "/v1/auth/invitations",
+    });
+    expect(recipientInvitationsBeforeRevoke.status).toBe(200);
+    const recipientInvitationsBeforePayload =
+      (await recipientInvitationsBeforeRevoke.json()) as {
+        readonly invitations?: ReadonlyArray<{
+          readonly id?: string;
+        }>;
+      };
+    expect(
+      recipientInvitationsBeforePayload.invitations?.map((invitation) => {
+        return invitation.id;
+      })
+    ).toEqual([inviteId]);
+
+    const removeResponse = await handleJsonRequest({
+      app: ownerApp,
+      method: "POST",
+      path: "/v1/auth/orgs/hack/members/remove",
+      body: {
+        target: "person@example.com",
+      },
+    });
+    expect(removeResponse.status).toBe(200);
+    const removed = (await removeResponse.json()) as {
+      readonly membership?: {
+        readonly state?: string;
+        readonly target?: string;
+        readonly email?: string | null;
+      };
+    };
+    expect(removed.membership?.state).toBe("removed");
+    expect(removed.membership?.target).toBe("person@example.com");
+    expect(removed.membership?.email).toBe("person@example.com");
+
+    const adminMembersAfterRevoke = await handleJsonRequest({
+      app: ownerApp,
+      path: "/v1/auth/orgs/hack/members",
+    });
+    expect(adminMembersAfterRevoke.status).toBe(200);
+    const adminMembersAfterPayload = (await adminMembersAfterRevoke.json()) as {
+      readonly memberships?: ReadonlyArray<{
+        readonly id?: string;
+        readonly state?: string;
+      }>;
+    };
+    expect(adminMembersAfterPayload.memberships).toEqual(
+      expect.not.arrayContaining([
+        expect.objectContaining({
+          id: inviteId,
+        }),
+      ])
+    );
+    expect(adminMembersAfterPayload.memberships).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          state: "active",
+        }),
+      ])
+    );
+
+    const recipientInvitationsAfterRevoke = await handleJsonRequest({
+      app: recipientApp,
+      path: "/v1/auth/invitations",
+    });
+    expect(recipientInvitationsAfterRevoke.status).toBe(200);
+    const recipientInvitationsAfterPayload =
+      (await recipientInvitationsAfterRevoke.json()) as {
+        readonly invitations?: ReadonlyArray<{
+          readonly id?: string;
+        }>;
+      };
+    expect(recipientInvitationsAfterPayload.invitations).toEqual([]);
+
+    const acceptAfterRevokeResponse = await handleJsonRequest({
+      app: recipientApp,
+      method: "POST",
+      path: `/v1/auth/invitations/${inviteId}/accept`,
+    });
+    expect(acceptAfterRevokeResponse.status).toBe(404);
+  });
+
   test("accepted org members can be removed by email and immediately lose org and team access", async () => {
     const { ownerApp, memberApp } = await seedAcceptedOrgAndTeamMember({
       memberUserId: "user-recipient",

@@ -7,6 +7,7 @@ import {
   buildAccountShellSignInHref,
   getAccountShellContext,
 } from "@/src/lib/account-shell";
+import { resolveBrowserSharedProjectScope } from "@/src/lib/browser-shared-project-scope";
 import { loadGitHubManagementState } from "@/src/lib/github-management";
 import { loadLinearManagementState } from "@/src/lib/linear-management";
 
@@ -20,14 +21,21 @@ export default async function AccountShellPage(input: {
   const requestedOrganizationKey = readSearchParam(searchParams.org);
   const requestedTeamKey = readSearchParam(searchParams.team);
   const requestedProjectKey = readSearchParam(searchParams.project);
-  const [account, githubManagement, linearManagement] = await Promise.all([
-    getAccountShellContext({
-      selectedOrganizationKey: requestedOrganizationKey,
-      selectedTeamKey: requestedTeamKey,
-      selectedProjectKey: requestedProjectKey,
+  const account = await getAccountShellContext({
+    selectedOrganizationKey: requestedOrganizationKey,
+    selectedTeamKey: requestedTeamKey,
+    selectedProjectKey: requestedProjectKey,
+  });
+  const browserSharedProjectScope = resolveBrowserSharedProjectScope({
+    account,
+  });
+  const [githubManagement, linearManagement] = await Promise.all([
+    loadGitHubManagementState({
+      browserSharedProjectScope,
     }),
-    loadGitHubManagementState(),
-    loadLinearManagementState(),
+    loadLinearManagementState({
+      browserSharedProjectScope,
+    }),
   ]);
   const feedback = resolveAccountControlPlaneFeedback({
     notice: readSearchParam(searchParams.notice),

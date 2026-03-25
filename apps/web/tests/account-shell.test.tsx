@@ -3,6 +3,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import ControlPlaneShell from "../src/components/control-plane-shell";
 import type { AccountShellContext } from "../src/lib/account-shell";
+import type { BrowserSharedProjectScopeSummary } from "../src/lib/browser-shared-project-scope";
+import { buildGitHubManagementState } from "../src/lib/github-management";
 
 const githubManagement = {
   extensionEnabled: true,
@@ -152,6 +154,66 @@ const signedOutLinearManagement = {
     detail:
       "Hack only exposes broker-owned Linear connections for the current browser account session.",
   },
+} as const;
+
+const hiddenBrowserSharedProjectScope = {
+  state: "shared_hidden",
+  mutable: false,
+  summary: "Shared project scope denied for hack-cli.",
+  detail:
+    "The active team Infra does not expose the shared project registration for this repo.",
+  projectSlug: "hack-cli",
+  currentAccessRole: null,
+  ownerType: "team",
+  ownerId: "team_123",
+  ownerSlug: "infra",
+  ownerName: "Infra",
+} as const satisfies BrowserSharedProjectScopeSummary;
+
+const visibleBrowserSharedProjectScope = {
+  state: "shared_visible",
+  mutable: true,
+  summary: "Shared project scope is active for hack-cli.",
+  detail:
+    "The active team Infra can manage shared integration resources for this repo.",
+  projectSlug: "hack-cli",
+  currentAccessRole: "owner",
+  ownerType: "team",
+  ownerId: "team_123",
+  ownerSlug: "infra",
+  ownerName: "Infra",
+} as const satisfies BrowserSharedProjectScopeSummary;
+
+const githubProfilesPayload = {
+  projectOverride: "work",
+  selectedMissing: false,
+  profiles: githubManagement.profiles,
+} as const;
+
+const githubStatusPayload = {
+  extensionId: "dance.hack.github",
+  selectedProfile: "work",
+  selectedSource: "project_routing",
+  defaultProfile: "work",
+  authRef: "github.app.work",
+  service: "hack-github-work",
+  tokenEnvFallback: "HACK_GITHUB_APP_TOKEN",
+  mode: "app",
+  apiBaseUrl: "https://api.github.com",
+  accountLogin: "hack-dance",
+  accountName: "Hack Dance",
+  accountId: "github_user_123",
+  installationId: "12345",
+  tokenResolved: true,
+  tokenSource: "env",
+  ready: true,
+  readiness: "ready",
+  readinessSummary: "Ready for project GitHub workflows.",
+  readinessDetail:
+    'Project routing resolves the "work" profile with a usable token and installation 12345.',
+  repairIssues: [],
+  installationState: "configured",
+  repairGuidance: [],
 } as const;
 
 const authenticatedContext = {
@@ -326,6 +388,86 @@ const authenticatedContext = {
     },
   ],
 } as const satisfies AccountShellContext;
+
+test("github management state fails closed when the browser shared project scope is hidden", () => {
+  const state = buildGitHubManagementState({
+    status: githubStatusPayload,
+    profiles: githubProfilesPayload,
+    browserSharedProjectScope: hiddenBrowserSharedProjectScope,
+  });
+
+  expect(state.readiness.ready).toBe(false);
+  expect(state.readiness.summary).toBe(
+    "Shared project scope denied for hack-cli."
+  );
+  expect(state.readiness.detail).toBe(
+    "The active team Infra does not expose the shared project registration for this repo."
+  );
+  expect(state.readiness.issues).toContain("shared_scope_hidden");
+  expect(state.readiness.repairGuidance).toContainEqual({
+    issue: "shared_scope_hidden",
+    title: "Refresh the shared project scope",
+    action:
+      "Switch back to a visible shared org/team context, then run `hack auth login` so repo-bound GitHub status can confirm the active shared project scope.",
+  });
+});
+
+test("github management state keeps provider readiness when the browser shared project scope is visible", () => {
+  const state = buildGitHubManagementState({
+    status: {
+      ...githubStatusPayload,
+      ready: false,
+      readiness: "needs_attention",
+      readinessSummary: hiddenBrowserSharedProjectScope.summary,
+      readinessDetail: hiddenBrowserSharedProjectScope.detail,
+      repairIssues: ["shared_scope_hidden"],
+      repairGuidance: [
+        {
+          issue: "shared_scope_hidden",
+          title: "Refresh the shared project scope",
+          action:
+            "Switch back to a visible shared org/team context, then run `hack auth login` so repo-bound GitHub status can confirm the active shared project scope.",
+        },
+      ],
+      sharedProjectScope: hiddenBrowserSharedProjectScope,
+    },
+    profiles: githubProfilesPayload,
+    browserSharedProjectScope: visibleBrowserSharedProjectScope,
+  });
+
+  expect(state.readiness.ready).toBe(true);
+  expect(state.readiness.summary).toBe("Ready for project GitHub workflows.");
+  expect(state.readiness.detail).toContain(
+    'Project routing resolves the "work" profile'
+  );
+  expect(state.readiness.issues).toEqual([]);
+});
+
+test("github management state derives extensionEnabled from readiness issues instead of the extension id", () => {
+  const state = buildGitHubManagementState({
+    status: {
+      ...githubStatusPayload,
+      ready: false,
+      readiness: "needs_attention",
+      readinessSummary: "GitHub needs repair before this repo can rely on it.",
+      readinessDetail:
+        "The repo has not enabled the GitHub extension yet, so project-bound status cannot rely on the real GitHub auth path.",
+      repairIssues: ["extension_disabled"],
+      repairGuidance: [
+        {
+          issue: "extension_disabled",
+          title: "Enable the project GitHub extension",
+          action:
+            'Set `controlPlane.extensions["dance.hack.github"].enabled` to `true` in `.hack/hack.config.json` so repo-bound GitHub status and repair flows use the real auth resolver.',
+        },
+      ],
+    },
+    profiles: githubProfilesPayload,
+  });
+
+  expect(state.extensionEnabled).toBe(false);
+  expect(state.readiness.issues).toEqual(["extension_disabled"]);
+});
 
 test("account shell renders the active user, org admin controls, and invite actions", () => {
   const markup = renderToStaticMarkup(

@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import LinearManagementSection from "../src/components/linear-management-section";
+import type { BrowserSharedProjectScopeSummary } from "../src/lib/browser-shared-project-scope";
 import {
   buildLinearCommandEnvironment,
   buildLinearManagementState,
@@ -24,9 +25,39 @@ test("linear management command environment prefers env-only token lookup unless
   });
 });
 
+const hiddenBrowserSharedProjectScope = {
+  state: "shared_hidden",
+  mutable: false,
+  summary: "Shared project scope denied for hack-cli.",
+  detail:
+    "The active team Infra does not expose the shared project registration for this repo.",
+  projectSlug: "hack-cli",
+  currentAccessRole: null,
+  ownerType: "team",
+  ownerId: "team_123",
+  ownerSlug: "infra",
+  ownerName: "Infra",
+} as const satisfies BrowserSharedProjectScopeSummary;
+
+const visibleBrowserSharedProjectScope = {
+  state: "shared_visible",
+  mutable: true,
+  summary: "Shared project scope is active for hack-cli.",
+  detail:
+    "The active team Infra can manage shared integration resources for this repo.",
+  projectSlug: "hack-cli",
+  currentAccessRole: "owner",
+  ownerType: "team",
+  ownerId: "team_123",
+  ownerSlug: "infra",
+  ownerName: "Infra",
+} as const satisfies BrowserSharedProjectScopeSummary;
+
 function buildEnvOnlyRepairManagementState(input: {
   readonly includeHackConnection: boolean;
   readonly localAccessAvailable?: boolean;
+  readonly browserSharedProjectScope?: BrowserSharedProjectScopeSummary | null;
+  readonly statusSharedProjectScope?: BrowserSharedProjectScopeSummary | null;
 }) {
   return buildLinearManagementState({
     status: {
@@ -74,6 +105,9 @@ function buildEnvOnlyRepairManagementState(input: {
           "Run `export HACK_LINEAR_API_TOKEN=<linear-token>`.",
         ] as const,
       },
+      ...(input.statusSharedProjectScope
+        ? { sharedProjectScope: input.statusSharedProjectScope }
+        : {}),
     },
     profiles: {
       defaultProfileId: "default",
@@ -118,6 +152,9 @@ function buildEnvOnlyRepairManagementState(input: {
         : [],
     },
     canInspectHackConnection: true,
+    ...(input.browserSharedProjectScope
+      ? { browserSharedProjectScope: input.browserSharedProjectScope }
+      : {}),
   });
 }
 test("linear management state prefers seeded local repair when Hack already holds local access", () => {
@@ -364,6 +401,121 @@ test("linear management state keeps env-token repair when Hack does not own the 
     includeHackConnection: false,
   });
 
+  expect(state.repair).toEqual({
+    title: "Set the env token",
+    reason:
+      "Env-only Linear access is enabled but the token env var is missing.",
+    command: "export HACK_LINEAR_API_TOKEN=<linear-token>",
+  });
+});
+
+test("linear management state fails closed when the browser shared project scope is hidden", () => {
+  const state = buildLinearManagementState({
+    status: {
+      extensionId: "dance.hack.linear",
+      selectedProfile: "work",
+      selectedSource: "project_routing",
+      defaultProfile: "default",
+      selectedMissing: false,
+      authRef: "linear.api.work",
+      service: "hack-linear-work",
+      tokenEnvFallback: "HACK_LINEAR_API_TOKEN",
+      apiUrl: "https://api.linear.app/graphql",
+      accountId: "lin-user-1",
+      accountName: "Hack User",
+      accountEmail: "hack@example.com",
+      tokenResolved: true,
+      tokenSource: "env",
+      tokenExpiresAt: null,
+      error: null,
+      profileError: null,
+      ok: true,
+      projectBinding: {
+        ok: true,
+        profileId: "work",
+        projectId: "proj_default",
+        projectName: "Default",
+        teamId: "team_default",
+        additionalProjects: [],
+      },
+      summary: {
+        activeProfile: "work",
+        connected: true,
+        connectionLabel: "Connected as Hack User",
+        routingSummary:
+          "This repo routes Linear sync to Default (proj_default) in team team_default.",
+        linkedProjectsLabel: null,
+        capabilities: ["Sync tickets for the bound Linear project"],
+        repair: null,
+        nextSteps: ["Run `hack linear sync-project --from linear`."],
+      },
+    },
+    profiles: {
+      defaultProfileId: "default",
+      selectedProfileId: "work",
+      selectedProfileSource: "project_routing",
+      selectedProfileMissing: false,
+      profiles: [
+        {
+          id: "work",
+          isDefault: false,
+          authRef: "linear.api.work",
+          service: "hack-linear-work",
+          tokenEnv: "HACK_LINEAR_WORK_TOKEN",
+          apiUrl: "https://api.linear.app/graphql",
+          accountName: "Hack User",
+        },
+      ],
+    },
+    connections: {
+      accessControlMode: "better_auth_team_owned",
+      connections: [
+        {
+          id: "connection_123",
+          profileId: "work",
+          accountId: "lin-user-1",
+          accountName: "Hack User",
+          accountEmail: "hack@example.com",
+          authRef: "linear.api.work",
+          betterAuthUserId: "user-123",
+          betterAuthOrganizationId: "org-123",
+          betterAuthTeamId: "team-123",
+          organizationId: "lin-org-1",
+          teamId: "lin-team-1",
+          localAccessAvailable: true,
+          metadata: {},
+          createdAt: "2026-03-25T00:00:00.000Z",
+          updatedAt: "2026-03-25T00:00:00.000Z",
+        },
+      ],
+    },
+    canInspectHackConnection: true,
+    browserSharedProjectScope: hiddenBrowserSharedProjectScope,
+  });
+
+  expect(state.summary.connected).toBe(false);
+  expect(state.summary.connectionLabel).toBe("Scope denied");
+  expect(state.hackConnection.summary).toBe(
+    "Shared project scope denied for hack-cli."
+  );
+  expect(state.localAccess.ready).toBe(false);
+  expect(state.repair).toEqual({
+    title: "Refresh Hack account access",
+    reason:
+      "The active team Infra does not expose the shared project registration for this repo.",
+    command: "hack auth login",
+  });
+});
+
+test("linear management state keeps provider repair details when the browser shared project scope is visible", () => {
+  const state = buildEnvOnlyRepairManagementState({
+    includeHackConnection: false,
+    browserSharedProjectScope: visibleBrowserSharedProjectScope,
+    statusSharedProjectScope: hiddenBrowserSharedProjectScope,
+  });
+
+  expect(state.summary.connected).toBe(false);
+  expect(state.summary.connectionLabel).toBe("Not connected");
   expect(state.repair).toEqual({
     title: "Set the env token",
     reason:

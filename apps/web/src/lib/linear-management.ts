@@ -3,8 +3,8 @@ import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { HACK_WEB_BROKER_SESSION_COOKIE_NAME } from "@hack/auth-contract";
 import { cookies } from "next/headers";
-
 import { getWebAuthConfig } from "./auth-config";
+import type { BrowserSharedProjectScopeSummary } from "./browser-shared-project-scope";
 
 const REPO_ROOT = resolve(process.cwd(), "../..");
 const STATUS_COMMAND = "./dist/hack linear status --json";
@@ -79,6 +79,7 @@ type LinearStatusCommandPayload = {
     readonly repair: LinearRepairAction | null;
     readonly nextSteps: readonly string[];
   };
+  readonly sharedProjectScope?: BrowserSharedProjectScopeSummary | null;
   readonly audit?: {
     readonly statusUpdates: {
       readonly draftCount: number;
@@ -230,6 +231,7 @@ export type LinearManagementState = {
   } | null;
   readonly accessControlMode?: string;
   readonly audit: LinearStatusCommandPayload["audit"];
+  readonly sharedProjectScope?: BrowserSharedProjectScopeSummary | null;
   readonly statusCommand: string;
   readonly profilesCommand: string;
   readonly connectionsCommand: string;
@@ -240,6 +242,7 @@ export async function loadLinearManagementState(input?: {
   readonly authBrokerProxyBaseUrl?: string;
   readonly fetchImplementation?: typeof fetch;
   readonly runCommandImplementation?: CommandRunner;
+  readonly browserSharedProjectScope?: BrowserSharedProjectScopeSummary | null;
 }): Promise<LinearManagementState> {
   const runCommandImplementation =
     input?.runCommandImplementation ?? runLinearJsonCommand;
@@ -279,6 +282,7 @@ export async function loadLinearManagementState(input?: {
     connections: connectionsResult.payload,
     canInspectHackConnection: Boolean(token),
     connectionsLoaded: connectionsResult.loaded,
+    browserSharedProjectScope: input?.browserSharedProjectScope ?? null,
   });
 }
 
@@ -288,9 +292,17 @@ export function buildLinearManagementState(input: {
   readonly connections?: BrokerListConnectionsPayload | null;
   readonly canInspectHackConnection: boolean;
   readonly connectionsLoaded?: boolean;
+  readonly browserSharedProjectScope?: BrowserSharedProjectScopeSummary | null;
 }): LinearManagementState {
+  const effectiveSharedProjectScope =
+    input.browserSharedProjectScope ?? input.status.sharedProjectScope ?? null;
   const binding = normalizeLinearBinding({
     binding: input.status.projectBinding,
+  });
+  const summary = buildLinearSummary({
+    status: input.status,
+    binding,
+    sharedProjectScope: effectiveSharedProjectScope,
   });
   const selectedConnection =
     input.connections?.connections.find((connection) => {
@@ -305,13 +317,14 @@ export function buildLinearManagementState(input: {
     connectionsLoaded: input.connectionsLoaded ?? Boolean(input.connections),
     selectedConnection,
     tokenResolved: input.status.tokenResolved,
+    sharedProjectScope: effectiveSharedProjectScope,
   });
   const repair = buildLinearRepairState({
     activeProfile: input.status.selectedProfile,
     canInspectHackConnection: input.canInspectHackConnection,
     connectionsLoaded: input.connectionsLoaded ?? Boolean(input.connections),
     selectedConnection,
-    summaryRepair: input.status.summary.repair,
+    summaryRepair: summary.repair,
     tokenEnvFallback: input.status.tokenEnvFallback,
     tokenResolved: input.status.tokenResolved,
   });
@@ -330,43 +343,26 @@ export function buildLinearManagementState(input: {
     service: input.status.service,
     tokenEnvFallback: input.status.tokenEnvFallback,
     apiUrl: input.status.apiUrl,
-    ...(input.status.accountId ? { accountId: input.status.accountId } : {}),
-    ...(input.status.accountName
-      ? { accountName: input.status.accountName }
-      : {}),
-    ...(input.status.accountEmail
-      ? { accountEmail: input.status.accountEmail }
-      : {}),
-    tokenResolved: input.status.tokenResolved,
-    ...(input.status.tokenSource
-      ? { tokenSource: input.status.tokenSource }
-      : {}),
-    ...(input.status.tokenExpiresAt
-      ? { tokenExpiresAt: input.status.tokenExpiresAt }
-      : {}),
-    ...(input.status.profileError
-      ? { profileError: input.status.profileError }
-      : {}),
-    ...(input.status.error ? { error: input.status.error } : {}),
+    ...pickLinearIdentityFields({ status: input.status }),
+    ...pickLinearTokenFields({ status: input.status }),
+    ...pickLinearErrorFields({ status: input.status }),
     profiles: input.profiles?.profiles ?? [],
     projectBinding: binding,
-    summary: input.status.summary,
+    summary,
     hackConnection,
-    localAccess: {
-      ready: input.status.tokenResolved,
-      summary: input.status.tokenResolved
-        ? `Local Linear access is ready on this machine${input.status.tokenSource ? ` via ${input.status.tokenSource}` : ""}.`
-        : "Local Linear access needs repair on this machine.",
-      detail:
-        repair?.reason ??
-        input.status.error ??
-        "The active profile resolved a usable local token.",
-    },
+    localAccess: buildLinearLocalAccessState({
+      status: input.status,
+      repair,
+      sharedProjectScope: effectiveSharedProjectScope,
+    }),
     repair,
     ...(input.connections?.accessControlMode
       ? { accessControlMode: input.connections.accessControlMode }
       : {}),
     audit: input.status.audit ?? null,
+    ...(effectiveSharedProjectScope
+      ? { sharedProjectScope: effectiveSharedProjectScope }
+      : {}),
     statusCommand: STATUS_COMMAND,
     profilesCommand: PROFILES_COMMAND,
     connectionsCommand: CONNECTIONS_COMMAND,
@@ -515,7 +511,22 @@ function buildHackConnectionState(input: {
   readonly connectionsLoaded: boolean;
   readonly selectedConnection: LinearConnectionSummary | null;
   readonly tokenResolved: boolean;
+  readonly sharedProjectScope: BrowserSharedProjectScopeSummary | null;
 }): LinearManagementState["hackConnection"] {
+  if (input.sharedProjectScope?.state === "shared_hidden") {
+    return {
+      inspectable: input.canInspectHackConnection,
+      loaded: input.connectionsLoaded,
+      connected: false,
+      localAccessAvailable: false,
+      accessibleConnectionCount: 0,
+      ownerLabel: null,
+      accountLabel: "Hidden by scope",
+      summary: input.sharedProjectScope.summary,
+      detail: input.sharedProjectScope.detail,
+    };
+  }
+
   if (!input.canInspectHackConnection) {
     return {
       inspectable: false,
@@ -579,6 +590,127 @@ function buildHackConnectionState(input: {
       ? "Protected local access is stored on Hack and can be reseeded onto this machine if needed."
       : "Hack knows this profile, but it cannot reseed protected local access onto this machine yet.",
   };
+}
+
+function buildLinearSummary(input: {
+  readonly status: LinearStatusCommandPayload;
+  readonly binding: LinearManagementState["projectBinding"];
+  readonly sharedProjectScope: BrowserSharedProjectScopeSummary | null;
+}): LinearManagementState["summary"] {
+  const activeProfile =
+    input.status.selectedProfile ?? input.binding.profileId ?? "default";
+  const connected =
+    input.sharedProjectScope?.state === "shared_hidden"
+      ? false
+      : input.status.tokenResolved;
+  const repair = resolveLinearRepairAction({
+    activeProfile,
+    connected,
+    status: input.status,
+    sharedProjectScope: input.sharedProjectScope,
+  });
+
+  return {
+    activeProfile,
+    connected,
+    connectionLabel: resolveLinearConnectionLabel({
+      activeProfile,
+      connected,
+      status: input.status,
+      sharedProjectScope: input.sharedProjectScope,
+    }),
+    routingSummary: buildLinearRoutingSummary({
+      binding: input.binding,
+    }),
+    linkedProjectsLabel: buildLinkedProjectsLabel({
+      binding: input.binding,
+    }),
+    capabilities: buildLinearCapabilities({
+      connected,
+      binding: input.binding,
+      sharedProjectScope: input.sharedProjectScope,
+    }),
+    repair,
+    nextSteps: buildLinearNextSteps({
+      repair,
+      binding: input.binding,
+      activeProfile,
+      sharedProjectScope: input.sharedProjectScope,
+    }),
+  };
+}
+
+function buildLinearLocalAccessState(input: {
+  readonly status: LinearStatusCommandPayload;
+  readonly repair: LinearManagementState["repair"];
+  readonly sharedProjectScope: BrowserSharedProjectScopeSummary | null;
+}): LinearManagementState["localAccess"] {
+  if (input.sharedProjectScope?.state === "shared_hidden") {
+    return {
+      ready: false,
+      summary: input.sharedProjectScope.summary,
+      detail: input.sharedProjectScope.detail,
+    };
+  }
+
+  return {
+    ready: input.status.tokenResolved,
+    summary: input.status.tokenResolved
+      ? `Local Linear access is ready on this machine${input.status.tokenSource ? ` via ${input.status.tokenSource}` : ""}.`
+      : "Local Linear access needs repair on this machine.",
+    detail:
+      input.repair?.reason ??
+      input.status.error ??
+      "The active profile resolved a usable local token.",
+  };
+}
+
+function resolveLinearConnectionLabel(input: {
+  readonly activeProfile: string;
+  readonly connected: boolean;
+  readonly status: LinearStatusCommandPayload;
+  readonly sharedProjectScope: BrowserSharedProjectScopeSummary | null;
+}): string {
+  if (input.sharedProjectScope?.state === "shared_hidden") {
+    return "Scope denied";
+  }
+  if (input.connected) {
+    if (input.status.accountName) {
+      return `Connected as ${input.status.accountName}`;
+    }
+    if (input.status.accountEmail) {
+      return `Connected as ${input.status.accountEmail}`;
+    }
+    return "Connected";
+  }
+  if (input.status.selectedMissing) {
+    return `Profile "${input.activeProfile}" is selected but not configured`;
+  }
+  return "Not connected";
+}
+
+function buildLinearRoutingSummary(input: {
+  readonly binding: LinearManagementState["projectBinding"];
+}): string {
+  if (!input.binding.defaultProject) {
+    return "This repo does not have a default Linear project route yet.";
+  }
+  return `This repo routes Linear sync to ${input.binding.defaultProject.label}.`;
+}
+
+function buildLinkedProjectsLabel(input: {
+  readonly binding: LinearManagementState["projectBinding"];
+}): string | null {
+  const linkedProjectsCount = input.binding.additionalProjects.length;
+  if (linkedProjectsCount === 0) {
+    return null;
+  }
+  return `${linkedProjectsCount} linked ${pluralize({
+    count: linkedProjectsCount,
+    singular: "project",
+  })}: ${input.binding.additionalProjects
+    .map((project) => project.label)
+    .join(", ")}.`;
 }
 
 function buildLinearRepairState(input: {
@@ -661,6 +793,167 @@ function describeRepairTitle(input: { readonly command: string }): string {
     return "Connect Linear for this profile";
   }
   return "Repair the active Linear state";
+}
+
+function isEnvOnlyLinearTokenError(input: {
+  readonly error: string | null;
+  readonly tokenEnvFallback?: string;
+}): boolean {
+  const error = input.error?.trim() ?? "";
+  return (
+    error.includes("HACK_LINEAR_PREFER_ENV_TOKEN_ONLY") &&
+    (!input.tokenEnvFallback || error.includes(input.tokenEnvFallback))
+  );
+}
+
+function resolveLinearRepairAction(input: {
+  readonly activeProfile: string;
+  readonly connected: boolean;
+  readonly status: LinearStatusCommandPayload;
+  readonly sharedProjectScope: BrowserSharedProjectScopeSummary | null;
+}): LinearRepairAction | null {
+  if (input.sharedProjectScope?.state === "shared_hidden") {
+    return {
+      reason: input.sharedProjectScope.detail,
+      command: "hack auth login",
+    };
+  }
+  if (input.status.selectedMissing || input.status.profileError) {
+    return {
+      reason: "The active Linear profile binding is invalid.",
+      command: `hack linear setup --profile ${input.activeProfile}`,
+    };
+  }
+  if (input.status.error?.includes("hack auth login")) {
+    return {
+      reason: "Hack account login is required for broker-owned Linear access.",
+      command: "hack auth login",
+    };
+  }
+  if (
+    isEnvOnlyLinearTokenError({
+      error: input.status.error,
+      tokenEnvFallback: input.status.tokenEnvFallback,
+    })
+  ) {
+    return {
+      reason:
+        "Env-only Linear access is enabled but the token env var is missing.",
+      command: `export ${input.status.tokenEnvFallback}=<linear-token>`,
+    };
+  }
+  if (!input.connected) {
+    return {
+      reason: "Local Linear access is missing for the active profile.",
+      command: `hack linear connect --profile ${input.activeProfile}`,
+    };
+  }
+  return null;
+}
+
+function buildLinearCapabilities(input: {
+  readonly connected: boolean;
+  readonly binding: LinearManagementState["projectBinding"];
+  readonly sharedProjectScope: BrowserSharedProjectScopeSummary | null;
+}): readonly string[] {
+  if (input.sharedProjectScope?.state === "shared_hidden") {
+    return [
+      "Switch back to a visible shared org/team scope before mutating broker-managed Linear resources",
+    ];
+  }
+
+  const capabilities: string[] = [];
+  if (input.connected && input.binding.defaultProject) {
+    capabilities.push("Sync tickets for the bound Linear project");
+  }
+  if (input.connected && input.binding.additionalProjects.length > 0) {
+    capabilities.push(
+      `Pull issues from ${input.binding.additionalProjects.length} linked Linear ${pluralize(
+        {
+          count: input.binding.additionalProjects.length,
+          singular: "project",
+        }
+      )}`
+    );
+  }
+  if (input.connected && !input.binding.defaultProject) {
+    capabilities.push("Bind this repo to a Linear project before project sync");
+  }
+  if (!input.connected && input.binding.defaultProject) {
+    capabilities.push("Repair local Linear access for the active profile");
+  }
+  return capabilities;
+}
+
+function buildLinearNextSteps(input: {
+  readonly repair: LinearRepairAction | null;
+  readonly binding: LinearManagementState["projectBinding"];
+  readonly activeProfile: string;
+  readonly sharedProjectScope: BrowserSharedProjectScopeSummary | null;
+}): readonly string[] {
+  if (input.sharedProjectScope?.state === "shared_hidden") {
+    return [
+      "Switch to a visible shared org/team context, then run `hack auth login`.",
+    ];
+  }
+  if (input.repair) {
+    return [`Run \`${input.repair.command}\`.`];
+  }
+  if (input.binding.defaultProject) {
+    return ["Run `hack linear sync-project --from linear`."];
+  }
+  return [
+    `Run \`hack linear project-bind --profile ${input.activeProfile} --project-id <linear-project-id>\`.`,
+  ];
+}
+
+function pluralize(input: {
+  readonly count: number;
+  readonly singular: string;
+}): string {
+  return input.count === 1 ? input.singular : `${input.singular}s`;
+}
+
+function pickLinearIdentityFields(input: {
+  readonly status: LinearStatusCommandPayload;
+}): Pick<LinearManagementState, "accountEmail" | "accountId" | "accountName"> {
+  return {
+    ...(input.status.accountId ? { accountId: input.status.accountId } : {}),
+    ...(input.status.accountName
+      ? { accountName: input.status.accountName }
+      : {}),
+    ...(input.status.accountEmail
+      ? { accountEmail: input.status.accountEmail }
+      : {}),
+  };
+}
+
+function pickLinearTokenFields(input: {
+  readonly status: LinearStatusCommandPayload;
+}): Pick<
+  LinearManagementState,
+  "tokenExpiresAt" | "tokenResolved" | "tokenSource"
+> {
+  return {
+    tokenResolved: input.status.tokenResolved,
+    ...(input.status.tokenSource
+      ? { tokenSource: input.status.tokenSource }
+      : {}),
+    ...(input.status.tokenExpiresAt
+      ? { tokenExpiresAt: input.status.tokenExpiresAt }
+      : {}),
+  };
+}
+
+function pickLinearErrorFields(input: {
+  readonly status: LinearStatusCommandPayload;
+}): Pick<LinearManagementState, "error" | "profileError"> {
+  return {
+    ...(input.status.profileError
+      ? { profileError: input.status.profileError }
+      : {}),
+    ...(input.status.error ? { error: input.status.error } : {}),
+  };
 }
 
 function describeConnectionOwner(input: LinearConnectionSummary): string {

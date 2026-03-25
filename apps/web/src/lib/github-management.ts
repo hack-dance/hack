@@ -2,6 +2,8 @@ import { execFile } from "node:child_process";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 
+import type { BrowserSharedProjectScopeSummary } from "./browser-shared-project-scope";
+
 const REPO_ROOT = resolve(process.cwd(), "../..");
 const STATUS_COMMAND = "./dist/hack x github status --json";
 const RUNTIME_STATUS_ARGS = [
@@ -24,7 +26,8 @@ type GitHubRepairIssue =
   | "extension_disabled"
   | "missing_profile"
   | "missing_token"
-  | "missing_installation";
+  | "missing_installation"
+  | "shared_scope_hidden";
 
 type GitHubReadinessSummary = {
   readonly ready: boolean;
@@ -72,6 +75,7 @@ type GitHubStatusCommandPayload = {
     readonly title: string;
     readonly action: string;
   }[];
+  readonly sharedProjectScope?: BrowserSharedProjectScopeSummary | null;
   readonly profileError?: string;
   readonly error?: string;
 };
@@ -127,10 +131,13 @@ export type GitHubManagementState = {
     readonly accountId?: string;
   }[];
   readonly readiness: GitHubReadinessSummary;
+  readonly sharedProjectScope?: BrowserSharedProjectScopeSummary | null;
   readonly statusCommand: string;
 };
 
-export async function loadGitHubManagementState(): Promise<GitHubManagementState> {
+export async function loadGitHubManagementState(input?: {
+  readonly browserSharedProjectScope?: BrowserSharedProjectScopeSummary | null;
+}): Promise<GitHubManagementState> {
   const [statusResult, profilesResult] = await Promise.all([
     runGitHubJsonCommand<GitHubStatusCommandPayload>({
       args: RUNTIME_STATUS_ARGS,
@@ -146,61 +153,47 @@ export async function loadGitHubManagementState(): Promise<GitHubManagementState
     });
   }
 
+  return buildGitHubManagementState({
+    status: statusResult.payload,
+    profiles: profilesResult.payload,
+    browserSharedProjectScope: input?.browserSharedProjectScope ?? null,
+  });
+}
+
+export function buildGitHubManagementState(input: {
+  readonly status: GitHubStatusCommandPayload;
+  readonly profiles?: GitHubProfilesCommandPayload | null;
+  readonly browserSharedProjectScope?: BrowserSharedProjectScopeSummary | null;
+}): GitHubManagementState {
+  const effectiveSharedProjectScope =
+    input.browserSharedProjectScope ?? input.status.sharedProjectScope ?? null;
+  const readinessState = buildGitHubReadinessState({
+    status: input.status,
+    sharedProjectScope: effectiveSharedProjectScope,
+  });
+
   return {
-    extensionEnabled: statusResult.payload.extensionId === "dance.hack.github",
-    selectedProfile: statusResult.payload.selectedProfile,
-    selectedSource: statusResult.payload.selectedSource,
-    defaultProfile: statusResult.payload.defaultProfile,
-    ...(profilesResult.payload?.projectOverride
-      ? { projectOverride: profilesResult.payload.projectOverride }
+    extensionEnabled: readinessState.extensionEnabled,
+    selectedProfile: input.status.selectedProfile,
+    selectedSource: input.status.selectedSource,
+    defaultProfile: input.status.defaultProfile,
+    ...(input.profiles?.projectOverride
+      ? { projectOverride: input.profiles.projectOverride }
       : {}),
-    selectedMissing: profilesResult.payload?.selectedMissing ?? false,
-    mode: statusResult.payload.mode,
-    authRef: statusResult.payload.authRef,
-    service: statusResult.payload.service,
-    tokenEnvFallback: statusResult.payload.tokenEnvFallback,
-    apiBaseUrl: statusResult.payload.apiBaseUrl,
-    ...(statusResult.payload.accountLogin
-      ? { accountLogin: statusResult.payload.accountLogin }
+    selectedMissing: input.profiles?.selectedMissing ?? false,
+    mode: input.status.mode,
+    authRef: input.status.authRef,
+    service: input.status.service,
+    tokenEnvFallback: input.status.tokenEnvFallback,
+    apiBaseUrl: input.status.apiBaseUrl,
+    ...pickGitHubIdentityFields({ status: input.status }),
+    ...pickGitHubTokenFields({ status: input.status }),
+    ...pickGitHubErrorFields({ status: input.status }),
+    profiles: input.profiles?.profiles ?? [],
+    readiness: readinessState.readiness,
+    ...(effectiveSharedProjectScope
+      ? { sharedProjectScope: effectiveSharedProjectScope }
       : {}),
-    ...(statusResult.payload.accountName
-      ? { accountName: statusResult.payload.accountName }
-      : {}),
-    ...(statusResult.payload.accountId
-      ? { accountId: statusResult.payload.accountId }
-      : {}),
-    ...(statusResult.payload.installationId
-      ? { installationId: statusResult.payload.installationId }
-      : {}),
-    tokenResolved: statusResult.payload.tokenResolved,
-    ...(statusResult.payload.tokenSource
-      ? { tokenSource: statusResult.payload.tokenSource }
-      : {}),
-    ...(statusResult.payload.tokenExpiresAt
-      ? { tokenExpiresAt: statusResult.payload.tokenExpiresAt }
-      : {}),
-    ...(statusResult.payload.profileError
-      ? { profileError: statusResult.payload.profileError }
-      : {}),
-    ...(statusResult.payload.error
-      ? { error: statusResult.payload.error }
-      : {}),
-    profiles: profilesResult.payload?.profiles ?? [],
-    readiness: {
-      ready: statusResult.payload.ready,
-      state: statusResult.payload.readiness,
-      summary: statusResult.payload.readinessSummary,
-      detail: statusResult.payload.readinessDetail,
-      issues: statusResult.payload.repairIssues,
-      installation: {
-        required: statusResult.payload.installationState !== "not_required",
-        state: statusResult.payload.installationState,
-        ...(statusResult.payload.installationId
-          ? { selectedInstallationId: statusResult.payload.installationId }
-          : {}),
-      },
-      repairGuidance: statusResult.payload.repairGuidance,
-    },
     statusCommand: STATUS_COMMAND,
   };
 }
@@ -304,5 +297,172 @@ function createFallbackGitHubManagementState(input: {
     },
     error: input.output || "GitHub status command did not return JSON.",
     statusCommand: STATUS_COMMAND,
+  };
+}
+
+function resolveGitHubInstallationState(input: {
+  readonly status: GitHubStatusCommandPayload;
+}): GitHubReadinessSummary["installation"]["state"] {
+  if (input.status.mode !== "app") {
+    return "not_required";
+  }
+  return input.status.installationId ? "configured" : "missing";
+}
+
+function buildGitHubReadinessState(input: {
+  readonly status: GitHubStatusCommandPayload;
+  readonly sharedProjectScope: BrowserSharedProjectScopeSummary | null;
+}): {
+  readonly extensionEnabled: boolean;
+  readonly readiness: GitHubReadinessSummary;
+} {
+  const providerIssues: GitHubRepairIssue[] = input.status.repairIssues.filter(
+    (issue): issue is GitHubRepairIssue => {
+      return issue !== "shared_scope_hidden";
+    }
+  );
+  const providerGuidance: GitHubReadinessSummary["repairGuidance"] =
+    input.status.repairGuidance.filter((guidance) => {
+      return guidance.issue !== "shared_scope_hidden";
+    });
+  const installationState = resolveGitHubInstallationState({
+    status: input.status,
+  });
+  const sharedScopeHidden = input.sharedProjectScope?.state === "shared_hidden";
+  const issues: GitHubRepairIssue[] = sharedScopeHidden
+    ? [...providerIssues, "shared_scope_hidden"]
+    : [...providerIssues];
+  const ready = issues.length === 0;
+  const repairGuidance: GitHubReadinessSummary["repairGuidance"] =
+    sharedScopeHidden
+      ? [...providerGuidance, createSharedScopeRepairGuidance()]
+      : providerGuidance;
+  let detail = describePrimaryGitHubIssue({
+    issue: issues[0] ?? "missing_token",
+    status: input.status,
+  });
+  let summary = "GitHub needs repair before this repo can rely on it.";
+
+  if (sharedScopeHidden && input.sharedProjectScope) {
+    summary = input.sharedProjectScope.summary;
+    detail = input.sharedProjectScope.detail;
+  } else if (ready) {
+    summary = "Ready for project GitHub workflows.";
+    detail = describeReadyGitHubDetail({
+      status: input.status,
+    });
+  }
+
+  return {
+    extensionEnabled: !providerIssues.includes("extension_disabled"),
+    readiness: {
+      ready,
+      state: ready ? "ready" : "needs_attention",
+      summary,
+      detail,
+      issues,
+      installation: {
+        required: installationState !== "not_required",
+        state: installationState,
+        ...(input.status.installationId
+          ? { selectedInstallationId: input.status.installationId }
+          : {}),
+      },
+      repairGuidance,
+    },
+  };
+}
+
+function pickGitHubIdentityFields(input: {
+  readonly status: GitHubStatusCommandPayload;
+}): Pick<
+  GitHubManagementState,
+  "accountId" | "accountLogin" | "accountName" | "installationId"
+> {
+  return {
+    ...(input.status.accountLogin
+      ? { accountLogin: input.status.accountLogin }
+      : {}),
+    ...(input.status.accountName
+      ? { accountName: input.status.accountName }
+      : {}),
+    ...(input.status.accountId ? { accountId: input.status.accountId } : {}),
+    ...(input.status.installationId
+      ? { installationId: input.status.installationId }
+      : {}),
+  };
+}
+
+function pickGitHubTokenFields(input: {
+  readonly status: GitHubStatusCommandPayload;
+}): Pick<
+  GitHubManagementState,
+  "tokenExpiresAt" | "tokenResolved" | "tokenSource"
+> {
+  return {
+    tokenResolved: input.status.tokenResolved,
+    ...(input.status.tokenSource
+      ? { tokenSource: input.status.tokenSource }
+      : {}),
+    ...(input.status.tokenExpiresAt
+      ? { tokenExpiresAt: input.status.tokenExpiresAt }
+      : {}),
+  };
+}
+
+function pickGitHubErrorFields(input: {
+  readonly status: GitHubStatusCommandPayload;
+}): Pick<GitHubManagementState, "error" | "profileError"> {
+  return {
+    ...(input.status.profileError
+      ? { profileError: input.status.profileError }
+      : {}),
+    ...(input.status.error ? { error: input.status.error } : {}),
+  };
+}
+
+function describeReadyGitHubDetail(input: {
+  readonly status: GitHubStatusCommandPayload;
+}): string {
+  if (input.status.mode === "app") {
+    return `Project routing resolves the "${input.status.selectedProfile}" profile with a usable token and installation ${input.status.installationId ?? "<installation-id>"}.`;
+  }
+  return `Project routing resolves the "${input.status.selectedProfile}" profile with usable token access.`;
+}
+
+function describePrimaryGitHubIssue(input: {
+  readonly issue: GitHubRepairIssue;
+  readonly status: GitHubStatusCommandPayload;
+}): string {
+  if (input.issue === "extension_disabled") {
+    return "The repo has not enabled the GitHub extension yet, so project-bound status cannot rely on the real GitHub auth path.";
+  }
+  if (input.issue === "missing_profile") {
+    return (
+      input.status.profileError ??
+      `The selected GitHub profile "${input.status.selectedProfile}" is unavailable.`
+    );
+  }
+  if (input.issue === "missing_installation") {
+    return `The "${input.status.selectedProfile}" profile is in app mode, but no installation is configured for the current project routing context.`;
+  }
+  if (input.issue === "shared_scope_hidden") {
+    return (
+      input.status.sharedProjectScope?.detail ??
+      "The current org/team context does not expose the shared project registration for this repo."
+    );
+  }
+  return (
+    input.status.error ??
+    `The "${input.status.selectedProfile}" profile does not currently resolve usable GitHub access.`
+  );
+}
+
+function createSharedScopeRepairGuidance(): GitHubReadinessSummary["repairGuidance"][number] {
+  return {
+    issue: "shared_scope_hidden",
+    title: "Refresh the shared project scope",
+    action:
+      "Switch back to a visible shared org/team context, then run `hack auth login` so repo-bound GitHub status can confirm the active shared project scope.",
   };
 }

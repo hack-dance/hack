@@ -23,6 +23,13 @@ import {
   resolveHackEnv,
   upsertDotEnvValue,
 } from "../lib/hack-env.ts";
+import {
+  describeBackendStrategyStatus,
+  describeEnvAggregateStatusForJson,
+  describeValueStorageForJson as describeValueStorageForJsonShape,
+  serializeEnvClassificationForJson,
+  serializeEnvStorageForJson as serializeEnvStorageForJsonShape,
+} from "../lib/hack-env-status.ts";
 import type { ProjectContext } from "../lib/project.ts";
 import {
   defaultProjectSlugFromPath,
@@ -193,43 +200,7 @@ function describeValueStorageForJson(input: {
   readonly value: Pick<HackEnvValueState, "source" | "resolvedFrom">;
   readonly storage: HackEnvStorageSummary;
 }) {
-  if (input.value.source === "keychain") {
-    return {
-      kind: "secret",
-      backend: input.storage.localSecrets.backend,
-      location: input.storage.localSecrets.location,
-      mode: input.storage.localSecrets.mode,
-      trust_model: input.storage.localSecrets.trustModel,
-    } as const;
-  }
-
-  if (input.value.resolvedFrom === "process") {
-    return {
-      kind: "plaintext",
-      backend: "process_env",
-      location: "process.env",
-      mode: "ambient",
-      trust_model: input.storage.localPlaintext.fallback.trustModel,
-    } as const;
-  }
-
-  if (input.value.resolvedFrom === "portable_backend") {
-    return {
-      kind: "plaintext",
-      backend: input.storage.localSecrets.backend,
-      location: input.storage.localSecrets.location,
-      mode: input.storage.localSecrets.mode,
-      trust_model: input.storage.localSecrets.trustModel,
-    } as const;
-  }
-
-  return {
-    kind: "plaintext",
-    backend: "dotenv",
-    location: input.storage.localPlaintext.path,
-    mode: input.storage.localPlaintext.exists ? "file" : "derived",
-    trust_model: input.storage.localPlaintext.trustModel,
-  } as const;
+  return describeValueStorageForJsonShape(input);
 }
 
 function describeValueStorageForDisplay(input: {
@@ -269,33 +240,9 @@ function describeValueStorageForDisplay(input: {
 function describeBackendTrustStatus(input: {
   readonly backend: (typeof SECRET_BACKEND_VALUES)[number];
   readonly provider?: string | null;
-}): {
-  readonly storageMode: string;
-  readonly trustModel: string;
-  readonly portability: string;
-} {
-  if (input.backend === "keychain") {
-    return {
-      storageMode: "Encrypted OS-managed secret storage",
-      trustModel: "Machine-local secret custody",
-      portability: "Not portable by default; values stay on this machine",
-    };
-  }
-  if (input.backend === "encrypted_file") {
-    return {
-      storageMode: "Encrypted local file storage",
-      trustModel: "Machine-local secret custody",
-      portability:
-        "Not portable by default; copy and key-sharing are explicit user actions",
-    };
-  }
-  const providerLabel = input.provider?.trim() || "provider";
-  return {
-    storageMode: `Provider-targeted shim (${providerLabel}) backed by a local encrypted file today`,
-    trustModel: "Machine-local secret custody with provider-intent metadata",
-    portability:
-      "Not remotely portable yet; current cloud mode validates backend intent rather than publishing values off-machine",
-  };
+  readonly storePlaintextInBackend: boolean;
+}) {
+  return describeBackendStrategyStatus(input);
 }
 
 function isSecretBackend(
@@ -467,6 +414,9 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
             overlay_path: resolved.envSelection.overlayPath,
             overlay_exists: resolved.envSelection.overlayExists,
           },
+          status: describeEnvAggregateStatusForJson({
+            storage: resolved.storage,
+          }),
           storage: serializeEnvStorageForJson({ storage: resolved.storage }),
           vars: resolved.values.map((v) => ({
             key: v.key,
@@ -572,44 +522,7 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
 function serializeEnvStorageForJson(input: {
   readonly storage: HackEnvStorageSummary;
 }) {
-  return {
-    contract: {
-      path: input.storage.contract.path,
-      trust_model: input.storage.contract.trustModel,
-    },
-    local_plaintext: {
-      path: input.storage.localPlaintext.path,
-      exists: input.storage.localPlaintext.exists,
-      trust_model: input.storage.localPlaintext.trustModel,
-      mirrored_to_backend: input.storage.localPlaintext.mirroredToBackend,
-      fallback: {
-        enabled: input.storage.localPlaintext.fallback.enabled,
-        source: input.storage.localPlaintext.fallback.source,
-        trust_model: input.storage.localPlaintext.fallback.trustModel,
-      },
-    },
-    local_secrets: {
-      backend: input.storage.localSecrets.backend,
-      location: input.storage.localSecrets.location,
-      mode: input.storage.localSecrets.mode,
-      provider: input.storage.localSecrets.provider ?? null,
-      trust_model: input.storage.localSecrets.trustModel,
-    },
-    portable_state: {
-      status: input.storage.portableState.status,
-      trust_model: input.storage.portableState.trustModel,
-      message: input.storage.portableState.message,
-    },
-    compatibility_mode: {
-      plaintext_target: input.storage.localPlaintext.path,
-      secret_backend: input.storage.localSecrets.backend,
-      plaintext_mirrored_to_backend:
-        input.storage.localPlaintext.mirroredToBackend,
-      summary: input.storage.localPlaintext.mirroredToBackend
-        ? "Plaintext values are bundled in the configured backend and materialize to .hack/.env for compatibility."
-        : "Plaintext values materialize to .hack/.env and secret values materialize to the configured secret backend.",
-    },
-  };
+  return serializeEnvStorageForJsonShape(input);
 }
 
 const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
@@ -746,6 +659,7 @@ const handleEnvBackendStatus: CommandHandlerFor<
   const backendStatus = describeBackendTrustStatus({
     backend: secretsConfig.backend,
     provider: secretsConfig.cloud.provider ?? null,
+    storePlaintextInBackend: secretsConfig.storePlaintextInBackend,
   });
   if (args.options.json) {
     process.stdout.write(
@@ -761,9 +675,10 @@ const handleEnvBackendStatus: CommandHandlerFor<
             storage_mode: backendStatus.storageMode,
             trust_model: backendStatus.trustModel,
             portability: backendStatus.portability,
-            plaintext_compatibility: secretsConfig.storePlaintextInBackend
-              ? "Secret keys and plain env values are both bundled in this backend, while .hack/.env remains a compatibility output."
-              : "Secret keys use this backend, while non-secret .env-compatible values still live in .hack/.env.",
+            plaintext_compatibility: backendStatus.plaintextCompatibility,
+            classification: serializeEnvClassificationForJson({
+              classification: backendStatus.classification,
+            }),
           },
         },
         null,
@@ -794,12 +709,7 @@ const handleEnvBackendStatus: CommandHandlerFor<
       ["storage_mode", backendStatus.storageMode],
       ["trust_model", backendStatus.trustModel],
       ["portability", backendStatus.portability],
-      [
-        "plaintext_compatibility",
-        secretsConfig.storePlaintextInBackend
-          ? "Plain env values are bundled in the backend and still materialize to .hack/.env."
-          : "Non-secret values remain .env-compatible via .hack/.env.",
-      ],
+      ["plaintext_compatibility", backendStatus.plaintextCompatibility],
     ],
   });
   return 0;

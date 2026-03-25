@@ -59,6 +59,12 @@ test(
         readonly trust_model: string;
         readonly portability: string;
         readonly plaintext_compatibility: string;
+        readonly classification: {
+          readonly trust_model: string;
+          readonly custody: string;
+          readonly portability: string;
+          readonly shared_state: string;
+        };
       };
     };
     expect(json.backend).toBe("keychain");
@@ -66,6 +72,12 @@ test(
     expect(json.status.storage_mode).toContain("Encrypted OS-managed");
     expect(json.status.trust_model).toBe("Machine-local secret custody");
     expect(json.status.plaintext_compatibility).toContain(".hack/.env");
+    expect(json.status.classification).toEqual({
+      trust_model: "local_secret_backend",
+      custody: "local_secret_backend",
+      portability: "local_only",
+      shared_state: "plaintext_compatible",
+    });
   },
   { timeout: 20_000 }
 );
@@ -388,20 +400,44 @@ test(
     expect(result.exitCode).toBe(1);
 
     const json = JSON.parse(result.stdout) as {
+      readonly status: {
+        readonly trust_model: string;
+        readonly custody: string;
+        readonly portability: string;
+        readonly shared_state: string;
+      };
       readonly storage: {
         readonly local_plaintext: {
           readonly path: string;
           readonly exists: boolean;
+          readonly classification: {
+            readonly trust_model: string;
+            readonly custody: string;
+            readonly portability: string;
+            readonly shared_state: string;
+          };
         };
         readonly local_secrets: {
           readonly backend: string;
           readonly mode: string;
           readonly trust_model: string;
+          readonly classification: {
+            readonly trust_model: string;
+            readonly custody: string;
+            readonly portability: string;
+            readonly shared_state: string;
+          };
         };
         readonly portable_state: {
           readonly status: string;
           readonly trust_model: string;
           readonly message: string;
+          readonly classification: {
+            readonly trust_model: string;
+            readonly custody: string;
+            readonly portability: string;
+            readonly shared_state: string;
+          };
         };
         readonly compatibility_mode: {
           readonly plaintext_target: string;
@@ -421,7 +457,19 @@ test(
       readonly missing_required: readonly string[];
     };
 
+    expect(json.status).toMatchObject({
+      trust_model: "local_only",
+      custody: "machine_local",
+      portability: "local_only",
+      shared_state: "plaintext_compatible",
+    });
     expect(json.storage.local_plaintext.exists).toBe(true);
+    expect(json.storage.local_plaintext.classification).toEqual({
+      trust_model: "unenforced_plaintext_file",
+      custody: "local_plaintext_file",
+      portability: "local_only",
+      shared_state: "plaintext_compatible",
+    });
     expect(json.storage.compatibility_mode.plaintext_target).toContain(
       ".hack/.env"
     );
@@ -433,11 +481,23 @@ test(
     expect(json.storage.local_secrets.trust_model).toBe(
       "local_secret_backend_shim"
     );
+    expect(json.storage.local_secrets.classification).toEqual({
+      trust_model: "local_secret_backend_shim",
+      custody: "local_secret_backend_shim",
+      portability: "local_only",
+      shared_state: "local_only",
+    });
     expect(json.storage.portable_state.status).toBe("not_configured");
     expect(json.storage.portable_state.trust_model).toBe("local_only");
     expect(json.storage.portable_state.message).toContain(
       "not portable across machines"
     );
+    expect(json.storage.portable_state.classification).toEqual({
+      trust_model: "local_only",
+      custody: "machine_local",
+      portability: "local_only",
+      shared_state: "plaintext_compatible",
+    });
     const publicUrl = json.vars.find((entry) => entry.key === "PUBLIC_URL");
     const databaseUrl = json.vars.find((entry) => entry.key === "DATABASE_URL");
     expect(publicUrl?.storage.kind).toBe("plaintext");

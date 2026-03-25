@@ -133,7 +133,48 @@ describe("handleEnvRoutes", () => {
     const body = await parseResponse(result!);
     expect(body?.project).toBeTruthy();
     expect(body?.contract).toBeTruthy();
+    expect(body?.status).toMatchObject({
+      trust_model: "local_only",
+      custody: "machine_local",
+      portability: "local_only",
+      shared_state: "plaintext_compatible",
+    });
+    expect(body?.storage).toMatchObject({
+      local_plaintext: {
+        classification: {
+          trust_model: "unenforced_plaintext_file",
+          custody: "local_plaintext_file",
+          portability: "local_only",
+          shared_state: "plaintext_compatible",
+        },
+      },
+      portable_state: {
+        classification: {
+          trust_model: "local_only",
+          custody: "machine_local",
+          portability: "local_only",
+          shared_state: "plaintext_compatible",
+        },
+      },
+    });
     expect(Array.isArray(body?.values)).toBe(true);
+    const values = Array.isArray(body?.values)
+      ? (body.values as unknown[])
+      : [];
+    const foo = values.find(
+      (value) =>
+        typeof value === "object" &&
+        value !== null &&
+        (value as Record<string, unknown>).key === "FOO"
+    ) as Record<string, unknown> | undefined;
+    expect(foo?.storage).toMatchObject({
+      classification: {
+        trust_model: "unenforced_plaintext_file",
+        custody: "local_plaintext_file",
+        portability: "local_only",
+        shared_state: "plaintext_compatible",
+      },
+    });
   });
 
   test("POST /v1/env/set writes to .hack/.env and shows as resolved", async () => {

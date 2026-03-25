@@ -7,6 +7,11 @@ import {
   resolveHackEnv,
   upsertDotEnvValue,
 } from "../../lib/hack-env.ts";
+import {
+  describeEnvAggregateStatusForJson,
+  describeValueStorageForJson,
+  serializeEnvStorageForJson,
+} from "../../lib/hack-env-status.ts";
 import { parseEnvConfigSelection } from "../../lib/project.ts";
 import type { RegisteredProject } from "../../lib/projects-registry.ts";
 import {
@@ -35,6 +40,7 @@ export type EnvValueState = {
     | "portable_backend"
     | null;
   readonly hasValue: boolean;
+  readonly storage: ReturnType<typeof describeValueStorageForJson>;
 };
 
 export type EnvGetResponse = {
@@ -57,6 +63,15 @@ export type EnvGetResponse = {
       readonly description?: string;
     }>;
   };
+  readonly envSelection: {
+    readonly requested: string | null;
+    readonly default: string | null;
+    readonly effective: string | null;
+    readonly overlayPath: string | null;
+    readonly overlayExists: boolean;
+  };
+  readonly status: ReturnType<typeof describeEnvAggregateStatusForJson>;
+  readonly storage: ReturnType<typeof serializeEnvStorageForJson>;
   readonly values: readonly EnvValueState[];
   readonly missingRequired: readonly string[];
 };
@@ -160,6 +175,13 @@ async function handleGetEnv(opts: { readonly url: URL }): Promise<Response> {
       ...(v.description ? { description: v.description } : {}),
       resolvedFrom: state?.resolvedFrom ?? null,
       hasValue: Boolean(state?.value),
+      storage: describeValueStorageForJson({
+        value: {
+          source: v.source,
+          resolvedFrom: state?.resolvedFrom ?? null,
+        },
+        storage: resolved.storage,
+      }),
     });
   }
 
@@ -179,6 +201,19 @@ async function handleGetEnv(opts: { readonly url: URL }): Promise<Response> {
       version: resolved.contract.version,
       vars: contractVars,
     },
+    envSelection: {
+      requested: resolved.envSelection.requestedEnv,
+      default: resolved.envSelection.defaultEnv,
+      effective: resolved.envSelection.effectiveEnv,
+      overlayPath: resolved.envSelection.overlayPath,
+      overlayExists: resolved.envSelection.overlayExists,
+    },
+    status: describeEnvAggregateStatusForJson({
+      storage: resolved.storage,
+    }),
+    storage: serializeEnvStorageForJson({
+      storage: resolved.storage,
+    }),
     values,
     missingRequired: resolved.missingRequired.map((v) => v.key),
   };

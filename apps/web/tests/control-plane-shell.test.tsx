@@ -121,6 +121,79 @@ const linearManagement = {
   connectionsCommand: "./dist/hack linear connections --json",
 } as const;
 
+const envManagement = {
+  ready: false,
+  envSelectionLabel: "base (.hack/.env only)",
+  missingRequired: ["DATABASE_URL"],
+  status: {
+    trustModel: "local_only",
+    custody: "machine_local",
+    portability: "local_only",
+    sharedState: "plaintext_compatible",
+    summary: "Local-only env with plaintext compatibility",
+    detail:
+      "Hack still materializes plain env values to .hack/.env for compatibility, and this repo is not using broker-managed shared env custody.",
+  },
+  backend: {
+    name: "encrypted_file",
+    classification: {
+      trustModel: "local_secret_backend",
+      custody: "local_secret_backend",
+      portability: "local_only",
+      sharedState: "plaintext_compatible",
+    },
+    status: {
+      storageMode: "Encrypted local file storage",
+      trustModel: "Machine-local secret custody",
+      portability:
+        "Not portable by default; copy and key-sharing are explicit user actions",
+      plaintextCompatibility:
+        "Secret keys use this backend, while non-secret .env-compatible values still live in .hack/.env.",
+    },
+  },
+  localPlaintext: {
+    path: "/repo/.hack/.env",
+    exists: true,
+    classification: {
+      trustModel: "unenforced_plaintext_file",
+      custody: "local_plaintext_file",
+      portability: "local_only",
+      sharedState: "plaintext_compatible",
+    },
+  },
+  localSecrets: {
+    backend: "encrypted_file",
+    location: "~/.hack/secrets.enc.json",
+    mode: "native",
+    provider: null,
+    classification: {
+      trustModel: "local_secret_backend",
+      custody: "local_secret_backend",
+      portability: "local_only",
+      sharedState: "local_only",
+    },
+  },
+  portableState: {
+    status: "not_configured",
+    message: "Portable encrypted bundles are not configured yet.",
+    classification: {
+      trustModel: "local_only",
+      custody: "machine_local",
+      portability: "local_only",
+      sharedState: "plaintext_compatible",
+    },
+  },
+  compatibilityMode: {
+    plaintextTarget: "/repo/.hack/.env",
+    secretBackend: "encrypted_file",
+    plaintextMirroredToBackend: false,
+    summary:
+      "Plaintext values materialize to .hack/.env and secret values materialize to the configured secret backend.",
+  },
+  statusCommand: "./dist/hack env list --json",
+  backendCommand: "./dist/hack env backend status --json",
+} as const;
+
 test("control plane shell metadata describes the accessible foundation", () => {
   expect(appMetadata.title).toBe("Hack control plane");
   expect(appMetadata.description).toContain("signed-in browser shell");
@@ -129,6 +202,7 @@ test("control plane shell metadata describes the accessible foundation", () => {
     "#organizations",
     "#teams",
     "#projects",
+    "#env",
     "#github",
     "#linear",
     "#invitations",
@@ -145,6 +219,7 @@ test("control plane shell metadata describes the accessible foundation", () => {
 test("control plane shell renders landmarks and keyboard navigation affordances", () => {
   const markup = renderToStaticMarkup(
     <ControlPlaneShell
+      envManagement={envManagement}
       githubManagement={githubManagement}
       linearManagement={linearManagement}
       returnToPath="/"
@@ -161,6 +236,7 @@ test("control plane shell renders landmarks and keyboard navigation affordances"
   expect(markup).toContain("Organizations");
   expect(markup).toContain("Teams");
   expect(markup).toContain("Projects");
+  expect(markup).toContain("Env");
   expect(markup).toContain("GitHub");
   expect(markup).toContain("Linear");
   expect(markup).toContain("Invitations");
@@ -169,6 +245,7 @@ test("control plane shell renders landmarks and keyboard navigation affordances"
 test("control plane shell keeps visible focus and reduced-motion contracts explicit", async () => {
   const markup = renderToStaticMarkup(
     <ControlPlaneShell
+      envManagement={envManagement}
       githubManagement={githubManagement}
       linearManagement={linearManagement}
       returnToPath="/"

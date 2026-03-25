@@ -8,6 +8,7 @@ import {
   getAccountShellContext,
 } from "@/src/lib/account-shell";
 import { resolveBrowserSharedProjectScope } from "@/src/lib/browser-shared-project-scope";
+import { loadEnvManagementState } from "@/src/lib/env-management";
 import { loadGitHubManagementState } from "@/src/lib/github-management";
 import { loadLinearManagementState } from "@/src/lib/linear-management";
 
@@ -29,14 +30,17 @@ export default async function AccountShellPage(input: {
   const browserSharedProjectScope = resolveBrowserSharedProjectScope({
     account,
   });
-  const [githubManagement, linearManagement] = await Promise.all([
-    loadGitHubManagementState({
-      browserSharedProjectScope,
-    }),
-    loadLinearManagementState({
-      browserSharedProjectScope,
-    }),
-  ]);
+  const [envManagement, githubManagement, linearManagement] = await Promise.all(
+    [
+      loadEnvManagementState(),
+      loadGitHubManagementState({
+        browserSharedProjectScope,
+      }),
+      loadLinearManagementState({
+        browserSharedProjectScope,
+      }),
+    ]
+  );
   const feedback = resolveAccountControlPlaneFeedback({
     notice: readSearchParam(searchParams.notice),
     error: readSearchParam(searchParams.error),
@@ -69,6 +73,7 @@ export default async function AccountShellPage(input: {
   return (
     <ControlPlaneShell
       account={account}
+      envManagement={envManagement}
       feedback={feedback}
       githubManagement={githubManagement}
       linearManagement={linearManagement}

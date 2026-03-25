@@ -3,6 +3,7 @@ import LinearManagementSection from "@/src/components/linear-management-section"
 import type { AccountControlPlaneFeedback } from "@/src/lib/account-control-plane";
 import { buildAccountControlPlanePath } from "@/src/lib/account-control-plane";
 import type { AccountShellContext } from "@/src/lib/account-shell";
+import type { EnvManagementState } from "@/src/lib/env-management";
 import type { GitHubManagementState } from "@/src/lib/github-management";
 import type { LinearManagementState } from "@/src/lib/linear-management";
 import { cn } from "@/src/lib/utils";
@@ -32,6 +33,7 @@ const fieldClassName = cn(
 
 type AccountControlPlaneSectionsProps = {
   readonly account: AccountShellContext;
+  readonly envManagement: EnvManagementState;
   readonly githubManagement: GitHubManagementState;
   readonly linearManagement: LinearManagementState;
   readonly feedback?: AccountControlPlaneFeedback | null;
@@ -40,6 +42,7 @@ type AccountControlPlaneSectionsProps = {
 
 export default function AccountControlPlaneSections({
   account,
+  envManagement,
   githubManagement,
   linearManagement,
   feedback = null,
@@ -116,6 +119,8 @@ export default function AccountControlPlaneSections({
 
       <ProjectsSection account={account} returnToPath={returnToPath} />
 
+      <EnvSection envManagement={envManagement} />
+
       <GitHubSection
         githubManagement={githubManagement}
         scopeFeedback={integrationScopeFeedback}
@@ -143,6 +148,156 @@ export default function AccountControlPlaneSections({
         />
       </section>
     </>
+  );
+}
+
+function EnvSection(input: { readonly envManagement: EnvManagementState }) {
+  const envManagement = input.envManagement;
+  const sharedStateLabel = formatEnvClassificationLabel({
+    value: envManagement.status.sharedState,
+  });
+  const missingRequiredCount = envManagement.missingRequired.length;
+
+  return (
+    <section className="space-y-4" id="env">
+      <div className="space-y-2">
+        <h2 className="font-semibold text-2xl text-white">Env</h2>
+        <p className="max-w-3xl text-sm text-white/70 leading-7">
+          Local env status stays explicit about trust model, custody, and
+          portability so plaintext-compatible or local-only values are not
+          mistaken for broker-managed shared env state.
+        </p>
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+        <section
+          className={cn(sectionSurfaceClassName, "space-y-6 p-6 sm:p-7")}
+        >
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="space-y-2">
+              <p className="font-medium text-sky-100 text-sm">Effective env</p>
+              <h3 className="font-medium text-white text-xl">
+                {envManagement.status.summary}
+              </h3>
+              <p className="max-w-3xl text-sm text-white/70 leading-6">
+                {envManagement.status.detail}
+              </p>
+            </div>
+            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-white/70 text-xs uppercase tracking-[0.18em]">
+              {sharedStateLabel}
+            </span>
+          </div>
+
+          <dl className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <ProjectDetailCard label="Env selection">
+              {envManagement.envSelectionLabel}
+            </ProjectDetailCard>
+            <ProjectDetailCard label="Trust model">
+              {envManagement.status.trustModel}
+            </ProjectDetailCard>
+            <ProjectDetailCard label="Custody">
+              {envManagement.status.custody}
+            </ProjectDetailCard>
+            <ProjectDetailCard label="Portability">
+              {envManagement.status.portability}
+            </ProjectDetailCard>
+            <ProjectDetailCard label="Shared state">
+              {envManagement.status.sharedState}
+            </ProjectDetailCard>
+            <ProjectDetailCard label="Missing required">
+              {missingRequiredCount > 0
+                ? `${missingRequiredCount} key${missingRequiredCount === 1 ? "" : "s"}`
+                : "None"}
+            </ProjectDetailCard>
+          </dl>
+
+          <div className="grid gap-3 rounded-2xl border border-white/10 bg-white/5 p-4">
+            <p className="font-medium text-sm text-white">
+              Repo-bound status commands
+            </p>
+            <code className="rounded-2xl bg-slate-950/70 px-4 py-3 text-sm text-white/85">
+              {envManagement.statusCommand}
+            </code>
+            <code className="rounded-2xl bg-slate-950/70 px-4 py-3 text-sm text-white/85">
+              {envManagement.backendCommand}
+            </code>
+            <p className="text-sm text-white/65 leading-6">
+              Compare these repo-bound CLI status payloads with the browser view
+              before treating local env as portable or shared.
+            </p>
+          </div>
+
+          {envManagement.missingRequired.length > 0 ? (
+            <div className="rounded-2xl border border-amber-300/20 bg-amber-500/10 p-4">
+              <p className="font-medium text-amber-100 text-sm">
+                Missing required env
+              </p>
+              <p className="mt-2 text-sm text-white/75 leading-6">
+                {envManagement.missingRequired.join(", ")}
+              </p>
+            </div>
+          ) : null}
+        </section>
+
+        <section
+          className={cn(sectionSurfaceClassName, "space-y-4 p-6 sm:p-7")}
+        >
+          <div className="space-y-2">
+            <h3 className="font-medium text-white text-xl">Storage surfaces</h3>
+            <p className="text-sm text-white/70 leading-6">
+              Each storage surface keeps its own machine-readable custody and
+              portability state so local compatibility never looks like shared
+              broker custody.
+            </p>
+          </div>
+
+          <dl className="grid gap-4">
+            <ProjectDetailCard label="Backend strategy">
+              {envManagement.backend.name}
+            </ProjectDetailCard>
+            <ProjectDetailCard label="Backend storage mode">
+              {envManagement.backend.status.storageMode}
+            </ProjectDetailCard>
+            <ProjectDetailCard label="Backend shared state">
+              {envManagement.backend.classification.sharedState}
+            </ProjectDetailCard>
+            <ProjectDetailCard label="Local plaintext">
+              {envManagement.localPlaintext.path}
+            </ProjectDetailCard>
+            <ProjectDetailCard label="Local plaintext custody">
+              {envManagement.localPlaintext.classification.custody}
+            </ProjectDetailCard>
+            <ProjectDetailCard label="Local secrets">
+              {`${envManagement.localSecrets.backend} (${envManagement.localSecrets.mode})`}
+            </ProjectDetailCard>
+            <ProjectDetailCard label="Local secret custody">
+              {envManagement.localSecrets.classification.custody}
+            </ProjectDetailCard>
+            <ProjectDetailCard label="Portable state">
+              {envManagement.portableState.status}
+            </ProjectDetailCard>
+            <ProjectDetailCard label="Portable shared state">
+              {envManagement.portableState.classification.sharedState}
+            </ProjectDetailCard>
+          </dl>
+
+          <div className="rounded-2xl border border-white/10 bg-slate-950/35 p-4">
+            <p className="font-medium text-white">Compatibility output</p>
+            <p className="mt-2 text-sm text-white/75 leading-6">
+              {envManagement.compatibilityMode.summary}
+            </p>
+            <dl className="mt-4 grid gap-3 md:grid-cols-2">
+              <ProjectDetailCard label="Plaintext target">
+                {envManagement.compatibilityMode.plaintextTarget}
+              </ProjectDetailCard>
+              <ProjectDetailCard label="Secret backend">
+                {envManagement.compatibilityMode.secretBackend}
+              </ProjectDetailCard>
+            </dl>
+          </div>
+        </section>
+      </div>
+    </section>
   );
 }
 
@@ -1514,6 +1669,10 @@ function ProjectDetailCard(input: {
       <dd className="mt-2 text-sm text-white/80 leading-6">{input.children}</dd>
     </div>
   );
+}
+
+function formatEnvClassificationLabel(input: { readonly value: string }) {
+  return input.value.replaceAll("_", " ");
 }
 
 function describeGitHubInstallation(input: {

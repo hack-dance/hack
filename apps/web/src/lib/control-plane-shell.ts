@@ -32,6 +32,12 @@ export const shellNavigationItems = [
     description: "Register shared projects and manage explicit project access.",
   },
   {
+    href: "#env",
+    label: "Env",
+    description:
+      "Inspect local-only, plaintext-compatible, and portable env status honestly.",
+  },
+  {
     href: "#github",
     label: "GitHub",
     description: "Inspect routed GitHub readiness and repair guidance.",

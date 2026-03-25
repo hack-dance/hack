@@ -7,3 +7,4 @@ import "../../apps/web/tests/project-control-plane-render.test.tsx";
 import "../../apps/web/tests/project-control-plane-routes.test.ts";
 import "../../apps/web/tests/project-control-plane.test.ts";
 import "../../apps/web/tests/linear-management.test.ts";
+import "../../apps/web/tests/env-management.test.ts";

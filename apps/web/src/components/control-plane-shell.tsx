@@ -10,6 +10,7 @@ import {
   shellSummary,
   shellTitle,
 } from "@/src/lib/control-plane-shell";
+import type { EnvManagementState } from "@/src/lib/env-management";
 import type { GitHubManagementState } from "@/src/lib/github-management";
 import type { LinearManagementState } from "@/src/lib/linear-management";
 import { cn } from "@/src/lib/utils";
@@ -28,6 +29,7 @@ const focusLinkClassName = cn(
 
 type ControlPlaneShellProps = {
   readonly account?: AccountShellContext;
+  readonly envManagement?: EnvManagementState;
   readonly githubManagement: GitHubManagementState;
   readonly linearManagement: LinearManagementState;
   readonly feedback?: AccountControlPlaneFeedback | null;
@@ -44,8 +46,79 @@ const fallbackAccountContext = {
   authenticated: false,
 } as const satisfies AccountShellContext;
 
+const fallbackEnvManagement = {
+  ready: false,
+  envSelectionLabel: "Unavailable",
+  missingRequired: [],
+  status: {
+    trustModel: "unknown",
+    custody: "unknown",
+    portability: "unknown",
+    sharedState: "local_only",
+    summary: "Env status unavailable",
+    detail:
+      "Hack could not resolve the repo-bound env status for this browser shell.",
+  },
+  backend: {
+    name: "unknown",
+    classification: {
+      trustModel: "unknown",
+      custody: "unknown",
+      portability: "unknown",
+      sharedState: "local_only",
+    },
+    status: {
+      storageMode: "Unavailable",
+      trustModel: "Unavailable",
+      portability: "Unavailable",
+      plaintextCompatibility: "Unavailable",
+    },
+  },
+  localPlaintext: {
+    path: ".hack/.env",
+    exists: false,
+    classification: {
+      trustModel: "unknown",
+      custody: "unknown",
+      portability: "unknown",
+      sharedState: "local_only",
+    },
+  },
+  localSecrets: {
+    backend: "unknown",
+    location: "Unavailable",
+    mode: "unknown",
+    provider: null,
+    classification: {
+      trustModel: "unknown",
+      custody: "unknown",
+      portability: "unknown",
+      sharedState: "local_only",
+    },
+  },
+  portableState: {
+    status: "unknown",
+    message: "Portable env status is unavailable.",
+    classification: {
+      trustModel: "unknown",
+      custody: "unknown",
+      portability: "unknown",
+      sharedState: "local_only",
+    },
+  },
+  compatibilityMode: {
+    plaintextTarget: ".hack/.env",
+    secretBackend: "unknown",
+    plaintextMirroredToBackend: false,
+    summary: "Env compatibility status is unavailable.",
+  },
+  statusCommand: "./dist/hack env list --json",
+  backendCommand: "./dist/hack env backend status --json",
+} as const satisfies EnvManagementState;
+
 export default function ControlPlaneShell({
   account = fallbackAccountContext,
+  envManagement = fallbackEnvManagement,
   githubManagement,
   linearManagement,
   feedback = null,
@@ -239,6 +312,7 @@ export default function ControlPlaneShell({
 
           <AccountControlPlaneSections
             account={account}
+            envManagement={envManagement}
             feedback={feedback}
             githubManagement={githubManagement}
             linearManagement={linearManagement}

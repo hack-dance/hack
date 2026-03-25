@@ -64,7 +64,7 @@ const handleOwnerShow: CommandHandlerFor<typeof ownerShowSpec> = async ({
       managed_by: config.ownership.managedBy,
     },
     ...(await resolveBrokerOwnershipView({
-      projectSlug: sanitizeProjectSlug(config.name ?? ""),
+      projectSlug: resolveProjectSlug(config.name),
       ownership: config.ownership,
     })),
   };
@@ -137,7 +137,7 @@ async function resolveProjectTarget(input: {
 }
 
 async function resolveBrokerOwnershipView(input: {
-  readonly projectSlug: string;
+  readonly projectSlug: string | null;
   readonly ownership: {
     readonly mode: "local" | "shared";
     readonly ownerType: "user" | "team" | "organization";
@@ -145,7 +145,7 @@ async function resolveBrokerOwnershipView(input: {
     readonly managedBy: "local" | "broker";
   };
 }) {
-  if (!(input.ownership.mode === "shared" && input.projectSlug.length > 0)) {
+  if (!input.projectSlug) {
     return {};
   }
 
@@ -193,6 +193,14 @@ async function resolveBrokerOwnershipView(input: {
     broker_registration: brokerRegistration,
     ...(conflict ? { conflict } : {}),
   };
+}
+
+function resolveProjectSlug(value: string | undefined): string | null {
+  const trimmed = value?.trim() ?? "";
+  if (trimmed.length === 0) {
+    return null;
+  }
+  return sanitizeProjectSlug(trimmed);
 }
 
 function normalizeBrokerProject(value: unknown) {

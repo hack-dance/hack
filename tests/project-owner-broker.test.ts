@@ -184,6 +184,92 @@ test("project owner show includes broker registration when a shared project is v
   });
 });
 
+test("project owner show surfaces broker registration when local ownership stays default local", async () => {
+  const projectRoot = await createHackProject({
+    config: {
+      name: "hack-cli",
+    },
+  });
+  await saveHackAuthSession({
+    session: {
+      token: "session-token",
+    },
+  });
+
+  globalThis.fetch = (async (input) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+    if (url === "https://auth.hack-cli.hack/v1/auth/projects/hack-cli") {
+      return Response.json({
+        ok: true,
+        project: {
+          id: "project_123",
+          slug: "hack-cli",
+          name: "Hack CLI",
+          currentAccessRole: "owner",
+          ownership: {
+            mode: "shared",
+            ownerType: "organization",
+            ownerId: "org_123",
+            ownerSlug: "hack",
+            ownerName: "Hack Org",
+            managedBy: "broker",
+          },
+          createdAt: "2026-03-25T00:00:00.000Z",
+          updatedAt: "2026-03-25T00:00:00.000Z",
+        },
+        access: [],
+      });
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  }) as typeof globalThis.fetch;
+
+  const result = await runCliWithCapturedOutput([
+    "project",
+    "owner",
+    "show",
+    "--path",
+    projectRoot,
+    "--json",
+  ]);
+
+  expect(result.exitCode).toBe(0);
+  expect(result.stderr.trim()).toBe("");
+  expect(JSON.parse(result.stdout)).toEqual({
+    project_root: projectRoot,
+    ownership: {
+      mode: "local",
+      owner_type: "user",
+      owner_id: null,
+      managed_by: "local",
+    },
+    broker_registration: {
+      id: "project_123",
+      slug: "hack-cli",
+      name: "Hack CLI",
+      current_access_role: "owner",
+      ownership: {
+        mode: "shared",
+        owner_type: "organization",
+        owner_id: "org_123",
+        owner_slug: "hack",
+        owner_name: "Hack Org",
+        managed_by: "broker",
+      },
+      access: [],
+    },
+    conflict: {
+      kind: "ownership_mismatch",
+      message:
+        "The local project ownership does not match the broker registration for this project.",
+    },
+  });
+});
+
 test("project owner show reports explicit conflict when local ownership disagrees with broker state", async () => {
   const projectRoot = await createHackProject({
     config: {

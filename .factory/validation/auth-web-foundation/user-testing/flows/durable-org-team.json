@@ -1,0 +1,58 @@
+{
+  "surface": "durable-org-team",
+  "toolsUsed": ["curl", "python3", "hack", "bun test"],
+  "assertionResults": [
+    {
+      "id": "VAL-AUTH-004",
+      "status": "pass",
+      "reason": "The live auth-broker startup log reported `org/team store: durable database-backed mode via DATABASE_URL` both before and after restart, rather than silently falling back to in-memory mode.",
+      "evidence": [
+        "<mission-dir>/evidence/auth-web-foundation/durable-org-team/auth-broker-restart.log",
+        "<mission-dir>/evidence/auth-web-foundation/durable-org-team/invite-flow-post-restart-summary.json"
+      ]
+    },
+    {
+      "id": "VAL-AUTH-005",
+      "status": "pass",
+      "reason": "After creating an org, a team, accepted org/team invitations, and one still-pending invite, `hack restart` brought the stack back with the same org and team visible to the owner, the pending invite still listed for the recipient, and the pending recipient could accept the invite after restart and immediately read the org.",
+      "evidence": [
+        "<mission-dir>/evidence/auth-web-foundation/durable-org-team/invite-flow-pre-restart-results.json",
+        "<mission-dir>/evidence/auth-web-foundation/durable-org-team/invite-flow-post-restart-results.json",
+        "<mission-dir>/evidence/auth-web-foundation/durable-org-team/invite-flow-post-restart-summary.json"
+      ]
+    },
+    {
+      "id": "VAL-AUTH-006",
+      "status": "fail",
+      "reason": "Unauthorized access failed closed for outsiders and org-only members, but revocation was not immediate in the live runtime. After invite acceptance, `POST /v1/auth/teams/{team}/members/remove` and `POST /v1/auth/orgs/{org}/members/remove` returned `team_membership_not_found` / `org_membership_not_found` when the owner targeted the recipient email, leaving the supposedly revoked users able to keep access; the org member could still create a new team in the org and the team user still saw the team after restart.",
+      "evidence": [
+        "<mission-dir>/evidence/auth-web-foundation/durable-org-team/invite-flow-pre-restart-results.json",
+        "<mission-dir>/evidence/auth-web-foundation/durable-org-team/invite-flow-post-restart-results.json"
+      ]
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "commands": [
+    {
+      "command": "python3 - <<'PY' ... invite-flow-pre-restart-results.json",
+      "exitCode": 0,
+      "observation": "Created real Better Auth users, exercised org creation, org/team invite acceptance, outsider denial, and pre-restart membership reads against the routed broker."
+    },
+    {
+      "command": "hack ps --json && curl -ksSf https://auth.hack-cli.hack/health && hack logs auth-broker --no-follow --tail 20",
+      "exitCode": 0,
+      "observation": "After the earlier restart completed, the routed broker health check returned ok and the recent log excerpt again reported `org/team store: durable database-backed mode via DATABASE_URL`."
+    },
+    {
+      "command": "python3 - <<'PY' ... invite-flow-post-restart-results.json",
+      "exitCode": 0,
+      "observation": "Confirmed persisted org/team/invitation state after restart and accepted the pending invite successfully."
+    },
+    {
+      "command": "bun test ./services/auth-broker/tests/org-team-membership.test.ts",
+      "exitCode": 0,
+      "observation": "The focused suite passed the existing org/team membership route checks, which did not catch the live revoke-by-email regression uncovered during user testing."
+    }
+  ]
+}

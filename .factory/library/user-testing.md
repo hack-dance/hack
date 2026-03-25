@@ -23,6 +23,8 @@ Testing surface findings, required tools, and validation concurrency for this mi
 - Primary tools: `agent-browser` against the routed host returned by `hack open --json` once `apps/web` exists.
 - Use for: sign-in/account UX, org/team/project admin, GitHub/Linear management, env/status views, outage-mode optionality checks.
 - Notes: no shell-installed browser runner was found during dry run; browser user testing must rely on `agent-browser`.
+- Notes: `hack up -d` currently exposes the routed web host at `https://hack-cli.hack` and the broker host at `https://auth.hack-cli.hack`.
+- Notes: the live broker enables Better Auth email/password routes, so validator sessions can create authenticated broker cookies through `POST https://auth.hack-cli.hack/api/auth/sign-up/email` without depending on an external GitHub login.
 
 ## Validation Concurrency
 
@@ -59,3 +61,10 @@ Testing surface findings, required tools, and validation concurrency for this mi
 - Use `curl -sf http://127.0.0.1:8080/health` before any broker-dependent assertion and treat a failed health check as a blocker.
 - Route broker-dependent CLI smokes through `HACK_AUTH_BROKER_URL=http://127.0.0.1:8080` so refresh behavior is exercised against the local validator-owned broker.
 - Do not bind additional fixed ports or start a second broker instance unless the coordinator gives a separate port and evidence directory.
+
+## Flow Validator Guidance: Web surface
+
+- Use a single `agent-browser` session against the routed host `https://hack-cli.hack`; re-use the same session across `/`, `/auth`, and `/auth/account` instead of opening parallel browsers.
+- Re-snapshot after every navigation and always capture annotated screenshots for the shell, sign-in page, account page, and any redirect from `https://auth.hack-cli.hack/auth*`.
+- Keep browser validation read-mostly: avoid mutating shared org/team state from the browser because this milestone only ships the shell and auth entrypoints, while durable org/team mutations are better exercised through isolated broker API cookies.
+- When an authenticated broker session is required, create it through the real Better Auth email/password API on `https://auth.hack-cli.hack/api/auth/sign-up/email`, store cookies in an isolated temp directory, and treat those cookies as the isolation boundary for the corresponding API checks.

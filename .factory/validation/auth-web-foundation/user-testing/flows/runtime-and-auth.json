@@ -1,0 +1,127 @@
+{
+  "surface": "runtime-and-auth",
+  "toolsUsed": [
+    "hack",
+    "curl",
+    "agent-browser",
+    "python3",
+    "bun test",
+    "bunx turbo"
+  ],
+  "assertionResults": [
+    {
+      "id": "VAL-LINEAR-008",
+      "status": "pass",
+      "reason": "The repo-local hack runtime started the declared `web` and `auth-broker` services, `hack ps --json` showed both containers running, `hack open --json` returned `https://hack-cli.hack`, and routed health checks succeeded for `https://auth.hack-cli.hack/health`.",
+      "evidence": [
+        "<mission-dir>/evidence/auth-web-foundation/runtime-and-auth/hack-ps.json",
+        "<mission-dir>/evidence/auth-web-foundation/runtime-and-auth/hack-open.json",
+        "<mission-dir>/evidence/auth-web-foundation/runtime-and-auth/broker-health.json"
+      ]
+    },
+    {
+      "id": "VAL-AUTH-001",
+      "status": "pass",
+      "reason": "The broker `GET /v1/auth/providers` and web `GET /api/auth/providers` endpoints returned the same Better Auth provider contract: enabled state `true`, the same GitHub social provider, identical trusted origins, and matching account-linking policy.",
+      "evidence": [
+        "<mission-dir>/evidence/auth-web-foundation/runtime-and-auth/broker-providers.json",
+        "<mission-dir>/evidence/auth-web-foundation/runtime-and-auth/web-providers.json",
+        "<mission-dir>/evidence/auth-web-foundation/runtime-and-auth/provider-parity-summary.json"
+      ]
+    },
+    {
+      "id": "VAL-AUTH-002",
+      "status": "pass",
+      "reason": "A broker session-start flow preserved the trusted redirect `https://hack-cli.hack/auth/account` in the returned authorize URL, while the untrusted redirect `https://example.com/evil` was stripped from the authorize URL entirely. The web social-start route also returned a provider URL while keeping broker-trusted origins authoritative.",
+      "evidence": [
+        "<mission-dir>/evidence/auth-web-foundation/runtime-and-auth/trusted-redirect-allowed.json",
+        "<mission-dir>/evidence/auth-web-foundation/runtime-and-auth/trusted-redirect-rejected.json"
+      ]
+    },
+    {
+      "id": "VAL-AUTH-003",
+      "status": "pass",
+      "reason": "The broker legacy HTML entrypoints no longer own the auth UX: visiting `https://auth.hack-cli.hack/auth` and `/auth/account` ended at `https://hack-cli.hack/auth...`, browser screenshots showed the sign-in and account pages in `apps/web`, and the bridged account flow produced a management token that authenticated `GET /v1/auth/me`.",
+      "evidence": [
+        "<mission-dir>/evidence/auth-web-foundation/runtime-and-auth/auth-redirect-root.json",
+        "<mission-dir>/evidence/auth-web-foundation/runtime-and-auth/auth-redirect-account.json",
+        "<mission-dir>/evidence/auth-web-foundation/runtime-and-auth/web-auth.annotated.png",
+        "<mission-dir>/evidence/auth-web-foundation/runtime-and-auth/web-auth-account.annotated.png",
+        "<mission-dir>/evidence/auth-web-foundation/runtime-and-auth/session-handoff.json"
+      ]
+    },
+    {
+      "id": "VAL-AUTH-007",
+      "status": "pass",
+      "reason": "The repo root workspace graph includes `apps/*`, `apps/web/package.json` declares `@hack/web`, `bunx turbo run typecheck --filter=@hack/web` executed successfully through Turbo, and the app booted on the hack-managed routed host `https://hack-cli.hack`.",
+      "evidence": [
+        "<mission-dir>/evidence/auth-web-foundation/runtime-and-auth/hack-ps.json",
+        "<mission-dir>/evidence/auth-web-foundation/runtime-and-auth/hack-open.json",
+        "<mission-dir>/evidence/auth-web-foundation/runtime-and-auth/web-home.html"
+      ]
+    },
+    {
+      "id": "VAL-AUTH-008",
+      "status": "pass",
+      "reason": "The browser-visible shell exposed a skip link and keyboard navigation targets in the snapshot, annotated screenshots showed semantic shell sections and auth entrypoints, a reduced-motion screenshot was captured after forcing reduced motion, and browser console errors remained empty.",
+      "evidence": [
+        "<mission-dir>/evidence/auth-web-foundation/runtime-and-auth/shell-home.snapshot.txt",
+        "<mission-dir>/evidence/auth-web-foundation/runtime-and-auth/shell-home.annotated.png",
+        "<mission-dir>/evidence/auth-web-foundation/runtime-and-auth/shell-home-reduced-motion.annotated.png",
+        "<mission-dir>/evidence/auth-web-foundation/runtime-and-auth/web-auth.annotated.png",
+        "<mission-dir>/evidence/auth-web-foundation/runtime-and-auth/browser-errors.txt"
+      ]
+    }
+  ],
+  "frictions": [
+    "The prescribed `user-testing-flow-validator` Task subagent is unavailable in this environment (`Droid configuration not found`), so the flow report was written manually after running the real user-surface checks directly."
+  ],
+  "blockers": [],
+  "commands": [
+    {
+      "command": "hack up -d",
+      "exitCode": 0,
+      "observation": "Started the hack-managed stack with `web` and `auth-broker` services."
+    },
+    {
+      "command": "hack ps --json && hack open --json",
+      "exitCode": 0,
+      "observation": "Reported both `auth-broker` and `web` running and exposed `https://hack-cli.hack` as the routed app URL."
+    },
+    {
+      "command": "curl -ksSf https://auth.hack-cli.hack/health && curl -ksSf https://auth.hack-cli.hack/v1/auth/providers && curl -ksSf https://hack-cli.hack/api/auth/providers",
+      "exitCode": 0,
+      "observation": "Confirmed broker health and fetched matching broker/web Better Auth metadata payloads."
+    },
+    {
+      "command": "curl -ksS \"https://auth.hack-cli.hack/v1/auth/session/start?provider=github&redirect=https%3A%2F%2Fhack-cli.hack%2Fauth%2Faccount\" && curl -ksS \"https://auth.hack-cli.hack/v1/auth/session/start?provider=github&redirect=https%3A%2F%2Fexample.com%2Fevil\"",
+      "exitCode": 0,
+      "observation": "The trusted redirect stayed in the returned authorize URL while the untrusted redirect was stripped."
+    },
+    {
+      "command": "curl -ksS -H \"content-type: application/json\" -X POST https://hack-cli.hack/api/auth/social ...",
+      "exitCode": 0,
+      "observation": "The web auth start route returned a provider URL for both happy-path and untrusted-redirect requests while deferring trust decisions to broker metadata."
+    },
+    {
+      "command": "agent-browser --session \"1de1bd26fc65\" open https://hack-cli.hack ... screenshot --annotate",
+      "exitCode": 0,
+      "observation": "Captured annotated screenshots for the shell, sign-in page, redirected broker auth page, account page, and reduced-motion shell view."
+    },
+    {
+      "command": "bun test ./apps/web/tests/auth-entrypoints.test.tsx ./apps/web/tests/auth-handoff.test.ts ./services/auth-broker/tests/index.test.ts ./services/auth-broker/tests/session-auth.test.ts ./services/auth-broker/tests/org-team-membership.test.ts",
+      "exitCode": 0,
+      "observation": "Focused milestone suites passed 86 tests covering auth entrypoints, handoff helpers, provider parity, trusted origin handling, redirects, and org/team route contracts."
+    },
+    {
+      "command": "bunx turbo run typecheck --filter=@hack/web",
+      "exitCode": 0,
+      "observation": "Turbo resolved `@hack/web` in the workspace graph and completed typecheck successfully."
+    },
+    {
+      "command": "bun test apps/web",
+      "exitCode": 0,
+      "observation": "The full `apps/web` package suite passed 13 tests, including the clean-checkout safety check, auth entrypoints, handoff helpers, and accessible shell coverage."
+    }
+  ]
+}

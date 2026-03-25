@@ -2,7 +2,10 @@ import { describe, expect, test } from "bun:test";
 
 import { createSharedBetterAuthContract } from "@hack/auth-contract";
 
-import { createDefaultOrgTeamsStore } from "../src/app.ts";
+import {
+  createDefaultOrgTeamsStore,
+  resolveDefaultOrgTeamsStore,
+} from "../src/app.ts";
 import type { BetterAuthRuntime } from "../src/better-auth.ts";
 import { createAuthBrokerApp } from "../src/index.ts";
 import { DbOrgTeamsStore } from "../src/modules/orgs/db-store.ts";
@@ -19,14 +22,50 @@ type BetterAuthSession = Awaited<
 
 installAuthBrokerEnvIsolation();
 
+test("default org/team store makes development-only in-memory mode explicit when DATABASE_URL is not configured", () => {
+  withIsolatedAuthBrokerEnv(
+    {
+      DATABASE_URL: undefined,
+    },
+    () => {
+      const { mode, store } = resolveDefaultOrgTeamsStore();
+      expect(store).toBeInstanceOf(InMemoryOrgTeamsStore);
+      expect(mode.kind).toBe("in_memory_dev_only");
+      expect(mode.startupMessage).toContain("development-only in-memory mode");
+      expect(mode.startupMessage).toContain("DATABASE_URL is not configured");
+    }
+  );
+});
+
 test("default org/team store uses durable database storage when DATABASE_URL is configured", () => {
   withIsolatedAuthBrokerEnv(
     {
       DATABASE_URL: "postgresql://user:pass@example.com/hack",
     },
     () => {
-      const store = createDefaultOrgTeamsStore();
+      const { mode, store } = resolveDefaultOrgTeamsStore();
       expect(store).toBeInstanceOf(DbOrgTeamsStore);
+      expect(mode.kind).toBe("durable_database");
+      expect(mode.startupMessage).toContain("durable database-backed mode");
+    }
+  );
+});
+
+test("default org/team store does not silently fall back to in-memory when durable setup fails", () => {
+  withIsolatedAuthBrokerEnv(
+    {
+      DATABASE_URL: "postgresql://user:pass@example.com/hack",
+    },
+    () => {
+      expect(() =>
+        createDefaultOrgTeamsStore({
+          createDbStore() {
+            throw new Error("boom");
+          },
+        })
+      ).toThrow(
+        "Failed to initialize durable org/team store from DATABASE_URL."
+      );
     }
   );
 });

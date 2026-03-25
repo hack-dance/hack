@@ -49,6 +49,25 @@ export type CreateAuthBrokerAppOptions = {
   readonly orgTeamsStore?: OrgTeamsStore;
 };
 
+export type DefaultOrgTeamsStoreMode =
+  | {
+      readonly kind: "durable_database";
+      readonly startupMessage: string;
+    }
+  | {
+      readonly kind: "in_memory_dev_only";
+      readonly startupMessage: string;
+    };
+
+type CreateDbOrgTeamsStore = (input: {
+  readonly databaseUrl: string;
+}) => OrgTeamsStore;
+
+const DURABLE_ORG_TEAMS_STORE_STARTUP_MESSAGE =
+  "[auth-broker] org/team store: durable database-backed mode via DATABASE_URL";
+const IN_MEMORY_ORG_TEAMS_STORE_STARTUP_MESSAGE =
+  "[auth-broker] org/team store: development-only in-memory mode because DATABASE_URL is not configured";
+
 /**
  * Build auth-broker HTTP app from composable feature plugins.
  */
@@ -71,7 +90,8 @@ export function createAuthBrokerApp({
     externalLinearConnectionStore ?? createDefaultLinearConnectionStore();
   const linearAutosyncStore =
     externalLinearAutosyncStore ?? createDefaultLinearAutosyncStore();
-  const orgTeamsStore = externalOrgTeamsStore ?? createDefaultOrgTeamsStore();
+  const orgTeamsStore =
+    externalOrgTeamsStore ?? resolveDefaultOrgTeamsStore().store;
   let flowSweepTimer: ReturnType<typeof setInterval> | null = null;
 
   return new Elysia({
@@ -220,18 +240,57 @@ function createDefaultLinearAutosyncStore(): LinearAutosyncStore {
 
 export function createDefaultOrgTeamsStore(input?: {
   readonly databaseUrl?: string;
+  readonly createDbStore?: CreateDbOrgTeamsStore;
 }): OrgTeamsStore {
-  const databaseUrl = input?.databaseUrl ?? process.env.DATABASE_URL;
+  return resolveDefaultOrgTeamsStore(input).store;
+}
+
+export function resolveDefaultOrgTeamsStore(input?: {
+  readonly databaseUrl?: string;
+  readonly createDbStore?: CreateDbOrgTeamsStore;
+}): {
+  readonly store: OrgTeamsStore;
+  readonly mode: DefaultOrgTeamsStoreMode;
+} {
+  const databaseUrl = normalizeOptionalText({
+    value: input?.databaseUrl ?? process.env.DATABASE_URL,
+  });
   if (!databaseUrl) {
-    return new InMemoryOrgTeamsStore();
+    return {
+      store: new InMemoryOrgTeamsStore(),
+      mode: {
+        kind: "in_memory_dev_only",
+        startupMessage: IN_MEMORY_ORG_TEAMS_STORE_STARTUP_MESSAGE,
+      },
+    };
   }
+
+  const createDbStore = input?.createDbStore ?? createOrgTeamsStoreFromDb;
   try {
-    return createOrgTeamsStoreFromDb({
-      databaseUrl,
-    });
-  } catch {
-    return new InMemoryOrgTeamsStore();
+    return {
+      store: createDbStore({
+        databaseUrl,
+      }),
+      mode: {
+        kind: "durable_database",
+        startupMessage: DURABLE_ORG_TEAMS_STORE_STARTUP_MESSAGE,
+      },
+    };
+  } catch (error) {
+    throw new Error(
+      "Failed to initialize durable org/team store from DATABASE_URL.",
+      {
+        cause: error,
+      }
+    );
   }
+}
+
+function normalizeOptionalText(input: {
+  readonly value: string | null | undefined;
+}): string | undefined {
+  const normalized = input.value?.trim();
+  return normalized ? normalized : undefined;
 }
 
 /**

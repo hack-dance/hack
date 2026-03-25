@@ -6,9 +6,13 @@ import {
   createSharedBetterAuthContract,
 } from "@hack/auth-contract";
 
+import { resolveDefaultOrgTeamsStore } from "../src/app.ts";
 import type { BetterAuthRuntime } from "../src/better-auth.ts";
 import { FlowStore } from "../src/flow-store.ts";
-import { createAuthBrokerApp } from "../src/index.ts";
+import {
+  createAuthBrokerApp,
+  formatAuthBrokerStartupMessages,
+} from "../src/index.ts";
 import { issueBrokerManagementToken } from "../src/modules/better-auth/management-token.ts";
 import {
   InMemoryLinearAutosyncStore,
@@ -57,6 +61,19 @@ type SessionStartFlowResponse = {
 };
 
 installAuthBrokerEnvIsolation();
+
+test("startup output makes the dev-only org/team fallback explicit", () => {
+  const { mode } = resolveDefaultOrgTeamsStore({
+    databaseUrl: undefined,
+  });
+  const output = formatAuthBrokerStartupMessages({
+    config: createTestConfig(),
+    orgTeamsStoreMode: mode,
+  });
+  expect(output).toContain("[auth-broker] listening on 127.0.0.1:0");
+  expect(output).toContain("development-only in-memory mode");
+  expect(output).toContain("DATABASE_URL is not configured");
+});
 
 function createBetterAuthDb(
   rows: readonly Record<string, unknown>[]

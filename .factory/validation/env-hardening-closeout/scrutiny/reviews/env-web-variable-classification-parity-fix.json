@@ -1,0 +1,21 @@
+{
+  "featureId": "env-web-variable-classification-parity-fix",
+  "reviewedAt": "2026-03-25T22:04:31Z",
+  "commitId": "2183dfa407c319fb6cb3f56d72e797e85d0e9bd4",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Reviewed the fix feature manifest, the original failed feature manifest and review, both worker handoffs, both transcript skeletons, mission guidance, the `web-control-plane-worker` skill, shared-state docs, and commits `fc7b1033acc0781830a84c605f1ac19da3c964a2` and `2183dfa407c319fb6cb3f56d72e797e85d0e9bd4`. The original blocking issue is resolved. The web loader now preserves per-variable repo-bound env payloads and normalizes declared source, resolved source, storage kind/backend, and classification into `variables` (`apps/web/src/lib/env-management.ts:282-285,424-436`), the account shell now renders those fields in a dedicated key-level status section (`apps/web/src/components/account-control-plane-sections.tsx:303-353`), and degraded command fallback now reports explicit `unavailable` state instead of collapsing to `local_only` in both the loader and shell fallback (`apps/web/src/lib/env-management.ts:303-348`, `apps/web/src/components/control-plane-shell.tsx:49-117`). Regression coverage now locks the restored parity and the unavailable fallback (`apps/web/tests/env-management.test.ts:167-178,322-345`, `apps/web/tests/account-shell.test.tsx:650-657`). I did not find a remaining correctness issue in the originally failing area.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "services",
+      "observation": "There is still no declared, repeatable service/command path for fixture-backed browser verification of repo-bound env status states, so the worker had to improvise temporary localhost `apps/web` servers outside the routed Hack stack to prove the per-key and forced-failure UI states.",
+      "evidence": "The fix handoff records a deviation to two temporary localhost `apps/web` dev servers because the routed stack had no configured env keys (`/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/handoffs/2026-03-25T21-27-51-873Z__env-web-variable-classification-parity-fix__7699d784-439a-411a-83eb-425b12273a73.json:80-82`), while `.factory/services.yaml:13-18,32-40` only declares routed Hack-stack commands plus the standalone auth broker and `.factory/library/web-control-plane.md:42-43` still says local web validation should run through hack-managed routing against the routed host."
+    }
+  ],
+  "addressesFailureFrom": "env-trust-custody-status-surfaces",
+  "summary": "Pass. The fix closes the original blocking gap by carrying per-variable env classification into the web state, rendering key-level status in the account shell, and surfacing an explicit unavailable fallback instead of misleading `local_only` status. I noted one shared-state gap: fixture-backed browser verification for repo-bound env UI still lacks a declared routed validation path, so workers are improvising temporary localhost servers."
+}

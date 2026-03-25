@@ -1,0 +1,21 @@
+{
+  "featureId": "linear-closeout-evidence-artifact-anchor-fix",
+  "reviewedAt": "2026-03-25T22:03:12Z",
+  "commitId": "97560ddccacb082b520738ed56e34898ec355161",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Pass. The original blocking issue is resolved: closeout evidence is no longer inherited from the generic latest published status update. `loadLinearProjectCloseoutAudit()` now discovers a dedicated closeout artifact from repo-bound published status-update files, `resolveLinearStatusCommandPayload()` stops piping generic `audit.statusUpdates.latestPublished` metadata into closeout state, and both CLI/web surfaces render the anchored closeout evidence separately from the ordinary latest published update. The added regressions cover the exact failure mode from the prior review by proving a newer unrelated publish does not replace closeout evidence and that evidence stays empty when no closeout-specific artifact exists.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The shared control-plane worker procedure still is not being enforced for visible web changes. Both the original failed feature and this fix changed the rendered Linear management UI, but neither worker session invoked `agent-browser` or recorded a justified deviation even though mission guidance and the skill require browser proof for user-facing web behavior.",
+      "evidence": "Mission AGENTS: /Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/AGENTS.md:39. Skill: /Users/hack/dev/hack-dance/hack/.factory/skills/control-plane-worker/SKILL.md:21 and :35. Transcript skeleton summaries for sessions bb0ea5c3-15c5-4977-915c-955c0f0f83cc and bd6f6672-c73b-4f16-a4e4-850af728c613 contain web tests/curl-based checks but no `agent-browser` invocation. The original handoff used a routed-page scrape (`curl https://hack-cli.hack/account`), and the fix handoff lists only tests plus a Bun simulation while both handoffs mark `skillFeedback.followedProcedure` true."
+    }
+  ],
+  "addressesFailureFrom": "mission-linear-closeout-audit",
+  "summary": "Pass. Reviewing the original failed feature together with fix commit `97560dd` shows the blocking closeout-evidence overwrite bug is fixed: closeout evidence is now anchored to the dedicated published closeout artifact and remains stable even after later unrelated publishes. No remaining code defects were found in the scoped fix, though the worker procedure/shared-state gap around required `agent-browser` proof for UI changes still remains."
+}

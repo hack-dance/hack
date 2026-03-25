@@ -25,6 +25,12 @@ The broker already depends on environment such as:
 
 Workers should extend existing env handling rather than introducing parallel secret/config channels.
 
+Repo-bound broker-auth verification can also use:
+- `HACK_AUTH_SESSION_TOKEN`
+- `HACK_AUTH_SESSION_EXPIRES_AT`
+
+These let repo-bound CLI flows prove an authenticated broker session without reading stored local secret or keychain-backed auth state first. Use them when validating keychainless broker-seeded Linear flows.
+
 ## Web Auth Runtime Inputs
 
 `apps/web/src/lib/auth-config.ts` currently derives the browser auth contract from:
@@ -43,6 +49,8 @@ When verifying provider parity or browser handoff behavior, prefer these variabl
 - Use `./dist/hack` for repo-bound CLI behavior after build; use global `hack` only for runtime orchestration.
 - Repo-external Bun smoke scripts are a poor fit for monorepo validation here: if a smoke needs workspace imports such as `@hack/auth-contract`, keep the script under the repo root or use an existing repo-resident entrypoint instead of generating it under `/tmp`.
 - Bun/WHATWG URL parsing normalizes dot segments before most handlers inspect `req.url` or `URL.pathname`; security-sensitive route validation that needs to reject raw traversal attempts cannot rely on normalized pathname checks alone.
+
+For outage-mode proofs of repo-local CLI fallback behavior, point broker traffic at a dead local address with `HACK_AUTH_BROKER_URL=http://127.0.0.1:9` and set `HACK_SETUP_SYNC_MODE=off` so setup-sync noise does not mask the intended offline signal.
 
 ## Auth-Broker Test Isolation
 

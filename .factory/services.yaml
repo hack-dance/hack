@@ -22,6 +22,7 @@ commands:
   github_status: ./dist/hack x github status --json
   repo_github_smoke: bun run build && ./dist/hack x github status --json
   linear_status: ./dist/hack linear status --json
+  linear_broker_env_status: 'HACK_AUTH_SESSION_TOKEN="${HACK_AUTH_SESSION_TOKEN:?set HACK_AUTH_SESSION_TOKEN}" HACK_AUTH_SESSION_EXPIRES_AT="${HACK_AUTH_SESSION_EXPIRES_AT:-2099-01-01T00:00:00.000Z}" ./dist/hack linear status --json'
   repo_linear_smoke: bun run build && ./dist/hack linear status --json
   env_list_json: ./dist/hack env list --json
   env_backend_status_json: ./dist/hack env backend status --json

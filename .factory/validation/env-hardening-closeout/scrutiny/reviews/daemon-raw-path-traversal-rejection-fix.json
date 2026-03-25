@@ -1,0 +1,34 @@
+{
+  "featureId": "daemon-raw-path-traversal-rejection-fix",
+  "reviewedAt": "2026-03-25T22:03:59Z",
+  "commitId": "a2350a80e9fe2b8a362c4a95be6a2ce0a2c1c936",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "I reviewed the prior failed feature review, both feature entries, both handoffs, transcript skeleton summaries for the original and fix worker sessions, the control-plane-worker skill, shared-state files, and commits `ac475f3724261ee5e35e472d2b3eacce1311700c` and `a2350a80e9fe2b8a362c4a95be6a2ce0a2c1c936`. The fix does address the original single-request blind spot by moving raw-path screening ahead of Bun URL normalization, and it preserves the prior invalid-id and gateway write-guard behavior on the covered paths. However, the original blocking requirement is still not fully met: the new proxy validates only the first request line seen on each TCP connection, then turns the socket into an uninspected byte pipe. A client can therefore send a benign first request and then reuse the same keep-alive connection\u2014or pipeline a second request already present in the buffered bytes\u2014to deliver a raw `.` or `..` target that Bun will normalize and route without the new pre-normalization rejection. Because malformed traversal is still not rejected for every daemon/gateway request target before routing, the original failure is not fully resolved.",
+    "issues": [
+      {
+        "file": "src/daemon/request-target-proxy.ts",
+        "line": 81,
+        "severity": "blocking",
+        "description": "`handleProxyConnection()` only inspects data until it sees the first request line, sets `inspectionComplete = true`, removes the `data` listener, and then pipes the entire socket through to Bun (`inspectionComplete` at lines 81-91 and `clientSocket.off/pipes` at lines 113-125). That means only the first HTTP request on a connection is screened. A client can send an innocuous first request and then send a second raw traversal request on the same keep-alive connection\u2014or include a second request in the already-buffered bytes written at line 123\u2014and that later request reaches Bun without `validateRawRequestTargetPath()` ever running. The fix therefore still allows raw traversal requests to bypass pre-routing rejection on reused/pipelined connections."
+      },
+      {
+        "file": "tests/daemon-sessions.test.ts",
+        "line": 57,
+        "severity": "non_blocking",
+        "description": "The regression tests added for the fix exercise `validateRawRequestTargetPath()` directly, and `tests/gateway-e2e.test.ts:25` does the same for gateway behavior, but neither test suite covers the actual proxy transport or multi-request connection reuse. That gap is why the one-request-only proxy behavior in `src/daemon/request-target-proxy.ts` was able to ship unnoticed."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The `control-plane-worker` skill does not currently document isolated temp-HOME foreground daemon smokes as an acceptable verification pattern for daemon-socket hardening. The worker had to deviate from the stated runtime-verification procedure to avoid mutating shared daemon state, and the handoff explicitly called out that gap.",
+      "evidence": "`.factory/skills/control-plane-worker/SKILL.md:21-23,30-33` focus runtime verification on `hack up/ps/open/down` and generic HTTP checks; the fix handoff's `skillFeedback` says `followedProcedure: false` because the worker instead used an isolated temp-HOME `bun index.ts daemon start --foreground` smoke for this daemon request-target fix."
+    }
+  ],
+  "addressesFailureFrom": "gateway-read-write-guards-and-session-validation",
+  "summary": "Fail. The fix improves on the original review finding by screening the first raw request target before Bun normalizes it, but the new proxy only validates the first request per TCP connection. Raw traversal can still slip through on keep-alive or pipelined follow-up requests, so the original blocking issue is not fully resolved yet."
+}

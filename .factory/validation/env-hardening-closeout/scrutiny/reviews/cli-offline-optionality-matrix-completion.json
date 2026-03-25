@@ -1,0 +1,26 @@
+{
+  "featureId": "cli-offline-optionality-matrix-completion",
+  "reviewedAt": "2026-03-25T22:03:52Z",
+  "commitId": "6b44795477961ce3883031a1b39f4eebc64a484b",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Reviewed the prior failing review, the mission feature entries and validation contract, both handoffs, the fix transcript skeleton, the relevant worker skills, and commits `3cffa2a0120f299f4ad39dcd0e4ad245eaff745f` and `6b44795477961ce3883031a1b39f4eebc64a484b`. The original failure was real: commit `3cffa2a0120f299f4ad39dcd0e4ad245eaff745f` only proved outage-mode env and tickets flows plus a browser-down smoke, leaving the `sessions` and `local project operations` cells from `validation-contract.md:154` uncovered. The fix commit closes that gap with `tests/cli-offline-optionality-matrix.test.ts`, which adds explicit outage regressions for session list (`:91`), tmux-backed session start/stop (`:108`), `project owner show --json` local fallback plus broker guidance (`:163`), and `status --project --json` local resolution (`:206`). The fix handoff also pairs those tests with repo-bound `./dist/hack` smokes for `session start/list/stop`, `project owner show`, `status --project`, and a broker-managed `org list` failure path (`handoffs/2026-03-25T21-52-20-680Z__cli-offline-optionality-matrix-completion__270ce489-f513-484f-b58a-f29fbac737b2.json:31-56`). Combined with the original feature's browser/web-down plus env/tickets proof (`handoffs/2026-03-25T20-13-38-132Z__cli-optionality-and-offline-env-regression__7131da61-12f2-4c54-a8c8-678abaa28a80.json:41-61`), the blocking outage-matrix omission is resolved.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "services",
+      "observation": "The shared service manifest still has no reusable outage-mode CLI optionality smoke for the full VAL-CROSS-001 matrix, so workers continue to assemble bespoke broker-down command chains for sessions and repo-local project/status verification.",
+      "evidence": "`.factory/services.yaml:13-29` defines generic runtime/env helpers plus only a routed-scope `project_owner_routed_scope_status` command. The fix handoff still had to record ad-hoc outage commands for `session start`, `session list`, `project owner show --path`, `status --project hack-cli --json`, `org list --json`, and `session stop` at `handoffs/2026-03-25T21-52-20-680Z__cli-offline-optionality-matrix-completion__270ce489-f513-484f-b58a-f29fbac737b2.json:31-56`."
+    },
+    {
+      "area": "knowledge",
+      "observation": "The repo library documents routed-scope project-admin verification but not the offline proof recipe the worker used here, especially the need to force a dead broker URL and disable setup sync noise while validating repo-local fallback behavior.",
+      "evidence": "`.factory/library/project-admin-scope-verification.md:1-3` only documents the routed-host recipe with `HACK_AUTH_BROKER_URL=https://auth.hack-cli.hack`, and `.factory/library/environment.md:32,39-63` lists env knobs but not outage-mode guidance. The fix handoff relied on `HACK_AUTH_BROKER_URL=\"http://127.0.0.1:9\" HACK_SETUP_SYNC_MODE=off ...` for every manual outage smoke at `handoffs/2026-03-25T21-52-20-680Z__cli-offline-optionality-matrix-completion__270ce489-f513-484f-b58a-f29fbac737b2.json:31-56`."
+    }
+  ],
+  "addressesFailureFrom": "cli-optionality-and-offline-env-regression",
+  "summary": "Pass. Reviewing the original failed feature together with this fix shows the prior blocking gap is closed: outage-mode proof now includes sessions plus repo-local project/status operations, and the combined original+fix evidence covers env, tickets, sessions, and repo-local project workflows while broker-managed actions still fail with explicit guidance."
+}

@@ -26,7 +26,7 @@
     {
       "area": "skills",
       "observation": "`web-control-plane-worker` does not document an approved verification path for integration slices whose routed local runtime intentionally lacks live provider credentials. The worker had to deviate from the skill and render a temporary HTML harness with a real `gh auth token` to verify the healthy GitHub state.",
-      "evidence": "Skill step 5-6 in `.factory/skills/web-control-plane-worker/SKILL.md:30-31` only describes routed-host `agent-browser` verification. The handoff records `skillFeedback.followedProcedure: false` plus the deviation to `file:///tmp/github-management-healthy.html` in `.../handoffs/2026-03-25T10-31-49-095Z__github-management-readiness-and-repair-ui__bd2c4f81-0de7-4b60-a59f-f5f4a822337d.json:57-58,82-91`."
+      "evidence": "Skill step 5-6 in `.factory/skills/web-control-plane-worker/SKILL.md:30-31` only describes routed-host `agent-browser` verification. The handoff records `skillFeedback.followedProcedure: false` plus the deviation to `file://<tmp>/github-management-healthy.html` in `.../handoffs/2026-03-25T10-31-49-095Z__github-management-readiness-and-repair-ui__bd2c4f81-0de7-4b60-a59f-f5f4a822337d.json:57-58,82-91`."
     },
     {
       "area": "services",

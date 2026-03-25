@@ -7,9 +7,9 @@
     "evidenceDir": "<mission-dir>/evidence/env-hardening-closeout/env-guards-daemon-current-branch",
     "reportPath": "<repo>/.factory/validation/env-hardening-closeout/user-testing/flows/env-guards-daemon-current-branch.json",
     "tempRoot": "<tmp>",
-    "tempHome": "<tmp>/home",
-    "tempGlobalConfigPath": "<tmp>/global/hack.config.json",
-    "daemonSocketPath": "<tmp>/home/.hack/daemon/hackd.sock",
+    "tempHome": "<tmp-home>",
+    "tempGlobalConfigPath": "<tmp-global-config>",
+    "daemonSocketPath": "<tmp-daemon-sock>",
     "gatewayBaseUrl": "http://127.0.0.1:17788",
     "projectId": "75915219714b",
     "daemonEntryPoint": "bun <repo>/index.ts daemon start --foreground",
@@ -56,7 +56,7 @@
   "blockers": [],
   "commands": [
     {
-      "command": "curl --unix-socket <tmp>/home/.hack/daemon/hackd.sock http://daemon/v1/status",
+      "command": "curl --unix-socket <tmp-daemon-sock> http://daemon/v1/status",
       "exitCode": 0,
       "observation": "The isolated current-branch daemon socket responded 200, confirming probes hit the temp-HOME daemon rather than the shared global gateway."
     },
@@ -66,12 +66,12 @@
       "observation": "Unauthenticated control-plane access returned 401 with explicit missing_token guidance."
     },
     {
-      "command": "curl --unix-socket <tmp>/home/.hack/daemon/hackd.sock http://daemon/v1/sessions/bad.name",
+      "command": "curl --unix-socket <tmp-daemon-sock> http://daemon/v1/sessions/bad.name",
       "exitCode": 0,
       "observation": "Malformed session identifiers stayed explicit with 400 invalid_name validation."
     },
     {
-      "command": "curl --unix-socket <tmp>/home/.hack/daemon/hackd.sock http://daemon/v1/sessions/does-not-exist",
+      "command": "curl --unix-socket <tmp-daemon-sock> http://daemon/v1/sessions/does-not-exist",
       "exitCode": 0,
       "observation": "Missing session targets returned 404 session_not_found instead of falling through to another route."
     },

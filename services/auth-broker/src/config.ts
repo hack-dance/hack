@@ -62,6 +62,28 @@ const ROOT_ENV_FALLBACK_FILES = [
   resolve(import.meta.dir, "../../..", ".env"),
 ] as const;
 let cachedRootEnvFallback: Map<string, string> | null = null;
+let rootEnvFallbackOverride: Map<string, string> | undefined;
+
+/**
+ * Test hook for supplying deterministic repo-root dotenv fallback contents.
+ */
+export function configureRootEnvFallbackForTests(input?: {
+  readonly values?: Readonly<Record<string, string | undefined>>;
+}): void {
+  cachedRootEnvFallback = null;
+  if (!input?.values) {
+    rootEnvFallbackOverride = undefined;
+    return;
+  }
+  const values = new Map<string, string>();
+  for (const [key, value] of Object.entries(input.values)) {
+    if (value === undefined) {
+      continue;
+    }
+    values.set(key, value);
+  }
+  rootEnvFallbackOverride = values;
+}
 
 /**
  * Resolve auth broker runtime config from environment variables.
@@ -375,6 +397,9 @@ function readFirstEnv(keys: readonly string[]): string | undefined {
 }
 
 function resolveRootEnvFallback(): Map<string, string> {
+  if (rootEnvFallbackOverride) {
+    return rootEnvFallbackOverride;
+  }
   if (cachedRootEnvFallback) {
     return cachedRootEnvFallback;
   }

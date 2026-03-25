@@ -1,5 +1,7 @@
 import { afterEach, beforeEach } from "bun:test";
 
+import { configureRootEnvFallbackForTests } from "@/config.ts";
+
 type EnvMap = Record<string, string | undefined>;
 
 const AUTH_BROKER_ENV_KEYS = [
@@ -106,9 +108,11 @@ export function installAuthBrokerEnvIsolation(): void {
     snapshot = snapshotAuthBrokerEnv();
     clearAuthBrokerEnv();
     process.env.HACK_AUTH_BROKER_DISABLE_ROOT_ENV_FALLBACK = "true";
+    configureRootEnvFallbackForTests();
   });
 
   afterEach(() => {
+    configureRootEnvFallbackForTests();
     restoreAuthBrokerEnv(snapshot);
   });
 }
@@ -126,5 +130,22 @@ export function withIsolatedAuthBrokerEnv(
     run();
   } finally {
     restoreAuthBrokerEnv(snapshot);
+  }
+}
+
+/**
+ * Run a sync block with deterministic repo-root dotenv fallback contents.
+ */
+export function withAuthBrokerRootEnvFallback(input: {
+  readonly values: EnvMap;
+  readonly run: () => void;
+}): void {
+  configureRootEnvFallbackForTests({
+    values: input.values,
+  });
+  try {
+    input.run();
+  } finally {
+    configureRootEnvFallbackForTests();
   }
 }

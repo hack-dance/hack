@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { resolveConfig } from "@/config.ts";
 import {
   installAuthBrokerEnvIsolation,
+  withAuthBrokerRootEnvFallback,
   withIsolatedAuthBrokerEnv,
 } from "./test-env.ts";
 
@@ -189,6 +190,57 @@ describe("auth broker config", () => {
         process.env.LINEAR_CLIENT_ID = previousLegacyClientId;
       }
     }
+  });
+
+  test("ignores injected root fallback dotenv contents when root fallback is disabled", () => {
+    withEnv(
+      {
+        GITHUB_CLIENT_ID: "test-client-id",
+        GITHUB_CLIENT_SECRET: "test-client-secret",
+      },
+      () => {
+        const previousDisableRootFallback =
+          process.env.HACK_AUTH_BROKER_DISABLE_ROOT_ENV_FALLBACK;
+
+        withAuthBrokerRootEnvFallback({
+          values: {
+            LINEAR_CLIENT_ID: "fallback-linear-client",
+            HACK_LINEAR_REDIRECT_URI:
+              "https://fallback.example/linear/callback",
+          },
+          run: () => {
+            try {
+              process.env.HACK_AUTH_BROKER_DISABLE_ROOT_ENV_FALLBACK =
+                undefined;
+
+              const fallbackEnabledConfig = resolveConfig();
+              expect(fallbackEnabledConfig.linearClientId).toBe(
+                "fallback-linear-client"
+              );
+              expect(fallbackEnabledConfig.linearRedirectUri).toBe(
+                "https://fallback.example/linear/callback"
+              );
+
+              process.env.HACK_AUTH_BROKER_DISABLE_ROOT_ENV_FALLBACK = "true";
+
+              const fallbackDisabledConfig = resolveConfig();
+              expect(fallbackDisabledConfig.linearClientId).toBeUndefined();
+              expect(fallbackDisabledConfig.linearRedirectUri).toBe(
+                "http://127.0.0.1:8080/linear/callback"
+              );
+            } finally {
+              if (previousDisableRootFallback === undefined) {
+                process.env.HACK_AUTH_BROKER_DISABLE_ROOT_ENV_FALLBACK =
+                  undefined;
+              } else {
+                process.env.HACK_AUTH_BROKER_DISABLE_ROOT_ENV_FALLBACK =
+                  previousDisableRootFallback;
+              }
+            }
+          },
+        });
+      }
+    );
   });
 });
 

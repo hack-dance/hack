@@ -32,6 +32,7 @@ Testing surface findings, required tools, and validation concurrency for this mi
   4. run `agent-browser --session <id> cookies set __Secure-better-auth.session_token <value>`
   5. open `https://auth.hack-cli.hack/auth/account?bridge=1&redirect=https%3A%2F%2Fhack-cli.hack%2Faccount`
   This mints the shared `hack_web_broker_session` cookie for `https://hack-cli.hack/account` without relying on GitHub OAuth.
+- Notes: that bridge-cookie bootstrap is not enough to validate browser-owned auth return flows by itself. When a feature claims post-login deep-link continuity, also start from a real browser-owned entry such as `https://hack-cli.hack/auth?redirect=https%3A%2F%2Fhack-cli.hack%2Faccount` and confirm the user is returned to the requested trusted destination after sign-in.
 
 ## Validation Concurrency
 

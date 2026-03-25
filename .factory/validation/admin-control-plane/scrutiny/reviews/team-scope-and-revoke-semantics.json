@@ -1,0 +1,26 @@
+{
+  "featureId": "team-scope-and-revoke-semantics",
+  "reviewedAt": "2026-03-25T08:17:33Z",
+  "commitId": "437a0859b01313d00356d0fefff8d182733e1ae8",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "I reviewed the mission feature entry (`features.json`), the fulfilled assertions in `validation-contract.md` (`VAL-ADMIN-004` and `VAL-ADMIN-005`), the worker handoff/transcript for session `1bb42e94-5e3a-43db-aa04-e91a750eef7f`, and the landed web diff in commit `437a0859b01313d00356d0fefff8d182733e1ae8`. The implementation keeps team create/invite/remove routes explicitly org-scoped (`apps/web/app/api/control-plane/teams/route.ts`, `apps/web/app/api/control-plane/teams/[team]/members/{invite,remove}/route.ts`), fails closed when a requested team is not visible (`apps/web/src/lib/account-control-plane.ts:444-453`, `apps/web/src/components/account-control-plane-sections.tsx:571-578`), and presents revoke copy that preserves parent-org membership (`apps/web/src/components/account-control-plane-sections.tsx:641-706`). I also reran the focused feature suite on the current tree; all 33 targeted tests passed across broker, CLI, and web surfaces.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "services",
+      "observation": "The feature’s core authorization/revoke semantics are still enforced by shared auth-broker behavior rather than the web layer alone; the landed web diff mostly exposes existing broker guarantees through the account shell.",
+      "evidence": "`services/auth-broker/tests/org-team-membership.test.ts:449`, `:533`, and `:735` cover org-only denial, active-parent-org requirements, and team-only revoke preserving org membership; the web wrapper tests at `apps/web/tests/account-control-plane-routes.test.ts:177`, `:223`, and `:306` confirm the browser routes preserve explicit `org`/`team` scope when calling those shared broker endpoints."
+    },
+    {
+      "area": "library",
+      "observation": "This feature also changed shared validator guidance by recording a reusable Better Auth browser-bootstrap flow, so later browser validation now depends on shared library state introduced alongside the feature.",
+      "evidence": "Commit `437a0859b01313d00356d0fefff8d182733e1ae8` modifies `.factory/library/user-testing.md`; the current file documents the reusable auth bootstrap at `.factory/library/user-testing.md:22-33`, and the worker handoff explicitly calls out that writeback."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass. The landed feature matches the mission contract for explicit org-scoped team management and team-only revoke semantics, and the current tree still proves those behaviors with a clean rerun of the focused 33-test suite plus coherent web/account-shell code paths."
+}

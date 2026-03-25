@@ -1,0 +1,39 @@
+{
+  "featureId": "project-registration-ownership-and-access-admin",
+  "reviewedAt": "2026-03-25T08:18:41Z",
+  "commitId": "cfb63f05ab9dceec6af54f997e1a23440e75215c",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The commit lands a substantial broker-backed project admin surface across auth-broker, web, and CLI, but the shipped CLI parity story is incomplete. I reproduced that a repo left on the default local ownership config still prints only local ownership after a broker-side shared registration, because the new CLI broker lookup is gated behind an already-shared local config. That means the browser registration flow described in the feature contract cannot be reliably compared with repo-bound CLI output, and shared/local conflicts can remain hidden.",
+    "issues": [
+      {
+        "file": "src/commands/project-admin.ts",
+        "line": 148,
+        "severity": "blocking",
+        "description": "`resolveBrokerOwnershipView` returns early unless the local repo config already says `ownership.mode === \"shared\"`. In practice, registering a project through the new browser control-plane flow does not update `.hack/hack.config.json`, so a default-local repo still reports only local ownership in `hack project owner show --json` even when the broker has a shared registration for the same slug. I reproduced this with a repo-local CLI smoke using a default-local config plus a mocked broker response: the command emitted only `{ ownership: { mode: \"local\", ... } }` and no `broker_registration` or conflict payload."
+      },
+      {
+        "file": "tests/project-owner-broker.test.ts",
+        "line": 75,
+        "severity": "non_blocking",
+        "description": "The new CLI regression coverage only exercises repositories whose local config is already marked shared, so it never checks the default-local repo + broker-registration path that the feature's own manual verification step depends on. That missing negative check is why the CLI/local mismatch above shipped unnoticed."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "services",
+      "observation": "Project visibility is now coupled directly to the existing org/team admin store: the auth-broker wires the project store from the same `orgTeamsStore`, and project access/owner resolution derives visibility from `listOrganizations` and `listTeams`. Regressions in org/team durability or membership scoping will now change which projects appear visible/owned.",
+      "evidence": "services/auth-broker/src/app.ts:119-123,203-206; services/auth-broker/src/modules/projects/service.ts:508-553"
+    },
+    {
+      "area": "skills",
+      "observation": "The recorded worker verification does not satisfy the feature's own manual acceptance step. The contract required using agent-browser to register/administer a project and compare with repo-bound CLI ownership output, but the handoff only captured opening the unauthenticated shell, seeing the Projects nav link, and clicking `#projects`.",
+      "evidence": "<mission-dir>/features.json:1104; <mission-dir>/handoffs/2026-03-25T08-07-41-566Z__project-registration-ownership-and-access-admin__067a03f1-12e1-4936-9e32-4186c0e1159a.json:41-71"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Fail. Durable broker-side project registration/access work landed, but the repo-bound CLI does not reliably surface broker state from the default local-config path, so VAL-ADMIN-006's CLI/web parity claim is not fully met, and the captured manual verification evidence is weaker than the feature contract requires."
+}

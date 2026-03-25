@@ -1,0 +1,39 @@
+{
+  "featureId": "org-admin-and-invite-lifecycle",
+  "reviewedAt": "2026-03-25T08:18:46Z",
+  "commitId": "838603405b77efa6398eb6105408d19e2941b3b4",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "I reviewed the feature entry in `features.json`, the relevant validation assertions in `validation-contract.md`, the worker transcript skeleton plus handoff for session `76399c88-5190-408e-8dca-777b2372be64`, the landed commit `838603405b77efa6398eb6105408d19e2941b3b4`, and reran the focused auth-broker/web tests named in the feature. The implementation and tests do prove org creation, caller-scoped visibility, and recipient-scoped accept/decline behavior, but they do not actually prove the required admin-side revoke path for a pending organization invite. Because VAL-ADMIN-003 explicitly requires clean revoke/cancel semantics, I cannot sign this feature off as fully verified.",
+    "issues": [
+      {
+        "file": "services/auth-broker/tests/org-team-membership.test.ts",
+        "line": 682,
+        "severity": "blocking",
+        "description": "The broker suite proves removal of accepted org members and pending team members, but it never exercises a successful revoke of a pending organization invite. That leaves the canonical API proof for the VAL-ADMIN-003 admin-cancel path missing."
+      },
+      {
+        "file": "apps/web/tests/account-control-plane-routes.test.ts",
+        "line": 140,
+        "severity": "blocking",
+        "description": "The web control-plane route tests only cover the org-member remove failure redirect, not the success path for revoking a pending org invite. The recorded manual run in `.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/handoffs/2026-03-25T07-15-43-098Z__org-admin-and-invite-lifecycle__76399c88-5190-408e-8dca-777b2372be64.json` shows the `Revoke invite` action rendering but never being completed, so the browser-facing revoke flow is still unproven."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "services",
+      "observation": "This feature was not isolated to org-admin UI code; it changed shared auth-broker session behavior by hydrating management-token sessions from Better Auth user records and by issuing/using the bridged web session cookie on `/auth/account`.",
+      "evidence": "services/auth-broker/src/modules/better-auth/session.ts:66-105,258-302; services/auth-broker/src/modules/better-auth/shell-plugin.ts:407-461,1008-1033,1776-1845"
+    },
+    {
+      "area": "library",
+      "observation": "The feature established `account-control-plane` as a shared web control-plane surface that later milestone work extended for teams and projects, so org/invite regressions now share files with subsequent admin features.",
+      "evidence": "apps/web/src/lib/account-control-plane.ts:78-91,253-390,601-670; apps/web/src/components/account-control-plane-sections.tsx:109-124,291-425,430-1311"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "The landed code looks coherent and the rerun focused tests are green, but the evidence set does not fully satisfy the feature contract because pending org-invite revoke is not directly verified at either the broker or browser-facing web layer."
+}

@@ -1,0 +1,34 @@
+{
+  "featureId": "account-shell-context-parity",
+  "reviewedAt": "2026-03-25T08:13:32Z",
+  "commitId": "3ef4de25c8a2113bc9c211855bcfd5308a23ad42",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "Reviewed the mission feature entry plus VAL-ADMIN-001 and VAL-CROSS-002, the worker handoff and transcript skeleton for session `7725bf08-513d-43be-896d-bfdadb25e781`, the `web-control-plane-worker` skill, and commit `3ef4de25c8a2113bc9c211855bcfd5308a23ad42`. The slice does land the signed-in account shell on `/` and `/account`, threads broker-backed current-user data into the web shell, and adds broker hydration for management-token `/v1/auth/me` calls. However, one milestone-critical path is still broken: browser-originated sign-in with a trusted deep-link return target does not actually navigate back to that requested destination after login, because the web `/auth/account` page only auto-returns when a CLI/device flow is present. I also found a smaller parity bug in the new management-token hydration logic: verified users can still come back from `/v1/auth/me` as `emailVerified: false` when the request is authenticated by the shared web-session cookie or CLI token. The tests and handoff checks cover broker bridge parity and happy-path shell rendering, but they do not exercise the direct `/auth?redirect=...` browser flow or assert the hydrated verification flag.",
+    "issues": [
+      {
+        "file": "apps/web/src/components/auth-entrypoint.tsx",
+        "line": 77,
+        "severity": "blocking",
+        "description": "The feature's signed-out shell sends users into browser-owned sign-in with `/auth?redirect=<target>` (`apps/web/src/lib/account-shell.ts:89-95`), and the social-start route always wraps that final target inside a broker callback built by `buildBrokerAccountBridgeUrl()` (`apps/web/app/api/auth/social/route.ts:53-76`, `apps/web/src/lib/auth-handoff.ts:55-88`). But `AuthEntrypoint` only enters a `ready`/`claimed` state when `flowId` and `deviceCode` exist (`apps/web/src/components/auth-entrypoint.tsx:76-79,118-150`), and its auto-navigation effect only runs for those states (`175-187`). A normal browser sign-in started from `/auth?redirect=...` has no device-flow context, so after the broker returns the browser to `/auth/account?redirect=<final>`, the page falls through to the idle \"No linked handoff is active\" state (`490-493`) instead of returning to the requested deep link. That leaves the trusted post-login return behavior incomplete for the exact browser-owned path this feature was supposed to ship, so expectedBehavior item 3 and VAL-CROSS-002 are not fully met."
+      },
+      {
+        "file": "services/auth-broker/src/modules/better-auth/shell-plugin.ts",
+        "line": 639,
+        "severity": "non_blocking",
+        "description": "The new management-token hydration path can still misreport verified users as unverified. `toBrowserSessionUser()` derives `emailVerified` only from the raw Better Auth browser session (`services/auth-broker/src/modules/better-auth/shell-plugin.ts:606-613`), so management-token requests start with `emailVerified: false` even when `resolveManagementTokenSession()` has already loaded the durable user record. `hydrateBrowserSessionUser()` then short-circuits as soon as email and name are present and `typeof current.emailVerified === \"boolean\"` (`639-643`), which prevents the stored `emailVerified` value from being applied at `655-657`. The added management-token regression at `services/auth-broker/tests/session-auth.test.ts:736-844` checks hydrated email/name/org/team but never asserts `emailVerified`, so this stale false value slips through. The current shell does not render verification state yet, so this is not release-blocking for the visible account shell, but it does leave `/v1/auth/me` parity incomplete for management-token callers."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The shared web-validation guidance currently steers reviewers toward minting a broker bridge cookie and then checking `/`, `/account`, and `/auth`, but it does not explicitly require exercising the browser-originated `/auth?redirect=...` return path that this feature was supposed to preserve.",
+      "evidence": "`.factory/skills/web-control-plane-worker/SKILL.md:30-31` says to exercise each changed user flow end-to-end, but its auth-specific callout only mentions disabled-provider and trusted-origin negative cases. `.factory/library/user-testing.md:28-34,74-77` documents a reliable bootstrap that opens `https://auth.hack-cli.hack/auth/account?bridge=1&redirect=...` to mint the shared shell cookie. The worker handoff mirrored that guidance and only reports checks for broker bridge, `/`, `/account`, and `/auth` (`<mission-dir>/handoffs/2026-03-25T06-36-12-762Z__account-shell-context-parity__7725bf08-513d-43be-896d-bfdadb25e781.json:52-61`), which is how the broken direct browser-return path escaped review."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Fail. The account shell and management-token current-user bridge landed, but a browser-owned sign-in started from `/auth?redirect=...` still dead-ends on the web handoff page instead of returning to the requested trusted destination. I also found a smaller parity bug where management-token `/v1/auth/me` responses can report `emailVerified: false` for verified users."
+}

@@ -1,0 +1,31 @@
+{
+  "featureId": "team-shell-navigation-regression-fix",
+  "reviewedAt": "2026-03-25T08:17:07Z",
+  "commitId": "bca62c22696cc721075c87964e96d656923f535f",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "The feature entry is narrowly scoped to repairing a stale shell regression, and commit `bca62c22696cc721075c87964e96d656923f535f` stays within that scope by only adding the missing `#teams` and `Teams` expectations in `apps/web/tests/control-plane-shell.test.tsx` (`:17`, `:41`). Those assertions match the shipped shell contract in `apps/web/src/lib/control-plane-shell.ts` (`:25-26`) and the rendered Teams sections in `apps/web/src/components/account-control-plane-sections.tsx` (`:436`, `:458`, `:492`). The worker transcript/handoff shows a trustworthy loop: captured the red baseline first, then reran the focused shell suite, repo-wide `bun run test`, `typecheck`, `check`, and routed browser validation. I independently reran `bun test <repo-root>/apps/web/tests/control-plane-shell.test.tsx` and `bun run test`; both passed on the current tree.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "library",
+      "observation": "This fix depends on `apps/web/src/lib/control-plane-shell.ts` being the shared navigation source of truth for both the test and rendered shell, so the change correctly repaired drift rather than changing product behavior.",
+      "evidence": "`apps/web/src/lib/control-plane-shell.ts:25-26` defines the `#teams` / `Teams` nav item; the reviewed commit only aligned `apps/web/tests/control-plane-shell.test.tsx:17` and `:41` to that existing contract."
+    },
+    {
+      "area": "library",
+      "observation": "The same shell test file is shared with later admin slices, so the current tree contains additional navigation assertions beyond this feature's commit.",
+      "evidence": "`git log -- apps/web/tests/control-plane-shell.test.tsx` shows `cfb63f0 feat(admin): add durable project registration control plane` after `bca62c2`; current `apps/web/tests/control-plane-shell.test.tsx:18` and `:42` now also assert `#projects` / `Projects`."
+    },
+    {
+      "area": "services",
+      "observation": "The recorded verification did not rely only on static markup; it exercised the shared routed `web` and `auth-broker` services, which makes the proof stronger for a shell-navigation regression.",
+      "evidence": "The handoff records `hack --path <repo-root> up -d`, `open --json`, `ps --json && curl -ksSf https://hack-cli.hack && curl -ksSf https://auth.hack-cli.hack/health`, browser checks for visible `Teams`, and `hack ... down`."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass. The landed change is tightly scoped, matches the pre-existing Teams UI contract, and the worker's verification path is credible; independent reruns of the focused shell suite and repo-wide test baseline are green on the current tree."
+}

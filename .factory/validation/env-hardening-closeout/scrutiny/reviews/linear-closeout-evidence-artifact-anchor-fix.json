@@ -13,7 +13,7 @@
     {
       "area": "skills",
       "observation": "The shared control-plane worker procedure still is not being enforced for visible web changes. Both the original failed feature and this fix changed the rendered Linear management UI, but neither worker session invoked `agent-browser` or recorded a justified deviation even though mission guidance and the skill require browser proof for user-facing web behavior.",
-      "evidence": "Mission AGENTS: /Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/AGENTS.md:39. Skill: /Users/hack/dev/hack-dance/hack/.factory/skills/control-plane-worker/SKILL.md:21 and :35. Transcript skeleton summaries for sessions bb0ea5c3-15c5-4977-915c-955c0f0f83cc and bd6f6672-c73b-4f16-a4e4-850af728c613 contain web tests/curl-based checks but no `agent-browser` invocation. The original handoff used a routed-page scrape (`curl https://hack-cli.hack/account`), and the fix handoff lists only tests plus a Bun simulation while both handoffs mark `skillFeedback.followedProcedure` true."
+      "evidence": "Mission AGENTS: <mission-dir>/AGENTS.md:39. Skill: <repo>/.factory/skills/control-plane-worker/SKILL.md:21 and :35. Transcript skeleton summaries for sessions bb0ea5c3-15c5-4977-915c-955c0f0f83cc and bd6f6672-c73b-4f16-a4e4-850af728c613 contain web tests/curl-based checks but no `agent-browser` invocation. The original handoff used a routed-page scrape (`curl https://hack-cli.hack/account`), and the fix handoff lists only tests plus a Bun simulation while both handoffs mark `skillFeedback.followedProcedure` true."
     }
   ],
   "addressesFailureFrom": "mission-linear-closeout-audit",

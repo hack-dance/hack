@@ -13,7 +13,7 @@
     {
       "area": "services",
       "observation": "There is still no declared, repeatable service/command path for fixture-backed browser verification of repo-bound env status states, so the worker had to improvise temporary localhost `apps/web` servers outside the routed Hack stack to prove the per-key and forced-failure UI states.",
-      "evidence": "The fix handoff records a deviation to two temporary localhost `apps/web` dev servers because the routed stack had no configured env keys (`/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/handoffs/2026-03-25T21-27-51-873Z__env-web-variable-classification-parity-fix__7699d784-439a-411a-83eb-425b12273a73.json:80-82`), while `.factory/services.yaml:13-18,32-40` only declares routed Hack-stack commands plus the standalone auth broker and `.factory/library/web-control-plane.md:42-43` still says local web validation should run through hack-managed routing against the routed host."
+      "evidence": "The fix handoff records a deviation to two temporary localhost `apps/web` dev servers because the routed stack had no configured env keys (`<mission-dir>/handoffs/2026-03-25T21-27-51-873Z__env-web-variable-classification-parity-fix__7699d784-439a-411a-83eb-425b12273a73.json:80-82`), while `.factory/services.yaml:13-18,32-40` only declares routed Hack-stack commands plus the standalone auth broker and `.factory/library/web-control-plane.md:42-43` still says local web validation should run through hack-managed routing against the routed host."
     }
   ],
   "addressesFailureFrom": "env-trust-custody-status-surfaces",

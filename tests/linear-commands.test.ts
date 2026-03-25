@@ -2,7 +2,10 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-
+import {
+  loadLinearProjectAuditState,
+  writeLinearProjectDeliveryAudit,
+} from "../src/control-plane/extensions/linear/audit.ts";
 import { resolveLinearToken } from "../src/control-plane/extensions/linear/auth.ts";
 import {
   __testOnly,
@@ -3215,6 +3218,99 @@ test("resolveProjectArtifactRepoRoot uses the repo root instead of the .hack con
   expect(__testOnly.resolveProjectArtifactRepoRoot({ project })).toBe("/repo");
 });
 
+test("linear status command reads audit artifacts from the repo root instead of .hack", async () => {
+  const projectRoot = ensureTempDir();
+  const project: ProjectContext = {
+    projectRoot,
+    projectDirName: ".hack",
+    projectDir: resolve(projectRoot, ".hack"),
+    composeFile: resolve(projectRoot, ".hack/docker-compose.yml"),
+    envFile: resolve(projectRoot, ".hack/.env"),
+    configFile: resolve(projectRoot, ".hack/hack.config.json"),
+  };
+  const draftsDir = resolve(
+    projectRoot,
+    ".hack/linear/projects/proj_default/status-updates/drafts"
+  );
+  await mkdir(draftsDir, { recursive: true });
+  await writeFile(
+    resolve(draftsDir, "2026-03-21-next.md"),
+    `---
+kind: linear-project-status-update
+linearProjectId: proj_default
+title: Next update
+slug: next
+archived: false
+date: 2026-03-21
+health: atRisk
+---
+Needs a little more polish.
+`
+  );
+
+  const statusCommand = LINEAR_COMMANDS.find(
+    (command) => command.name === "status"
+  );
+  if (!statusCommand) {
+    throw new Error("Expected Linear status command to exist");
+  }
+
+  const logger = {
+    debug() {},
+    info() {},
+    warn() {},
+    error() {},
+    success() {},
+    step() {},
+  };
+  const originalPreferEnvOnly = process.env.HACK_LINEAR_PREFER_ENV_TOKEN_ONLY;
+  let stdout = "";
+  const originalStdoutWrite = process.stdout.write;
+  process.env.HACK_LINEAR_PREFER_ENV_TOKEN_ONLY = "true";
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    stdout +=
+      typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    return true;
+  }) as typeof process.stdout.write;
+
+  try {
+    const exitCode = await statusCommand.handler({
+      ctx: {
+        cwd: projectRoot,
+        logger,
+        project,
+        controlPlaneConfig: minimalLinearBindingConfig as Parameters<
+          typeof __testOnly.resolveProjectLinearBinding
+        >[0]["controlPlaneConfig"],
+      },
+      args: ["--json"],
+    });
+
+    expect(exitCode).toBe(1);
+  } finally {
+    process.stdout.write = originalStdoutWrite;
+    if (originalPreferEnvOnly === undefined) {
+      process.env.HACK_LINEAR_PREFER_ENV_TOKEN_ONLY = undefined;
+    } else {
+      process.env.HACK_LINEAR_PREFER_ENV_TOKEN_ONLY = originalPreferEnvOnly;
+    }
+  }
+
+  const payload = JSON.parse(stdout) as {
+    readonly audit: {
+      readonly statusUpdates: {
+        readonly draftCount: number;
+        readonly drafts: readonly { readonly path: string }[];
+      };
+    } | null;
+  };
+
+  expect(payload.audit?.statusUpdates.draftCount).toBe(1);
+  expect(payload.audit?.statusUpdates.drafts[0]?.path).toBe(
+    ".hack/linear/projects/proj_default/status-updates/drafts/2026-03-21-next.md"
+  );
+});
+
 test("parseProjectDocumentsArgs rejects archive until destructive flows are implemented", () => {
   const parsed = __testOnly.parseProjectDocumentsArgs({
     args: ["archive"],
@@ -4290,7 +4386,121 @@ Still on track for dogfooding.
 
   const publishedText = await Bun.file(movedPaths[0]?.to ?? "").text();
   expect(publishedText).toContain("linearId: update_123");
+  expect(publishedText).toContain('publishedAt: "2026-03-14T10:00:00.000Z"');
   expect(publishedText).toContain('updatedAt: "2026-03-14T10:15:00.000Z"');
+});
+
+test("loadLinearProjectAuditState summarizes published status updates and delivery reconciliation", async () => {
+  const projectDir = ensureTempDir();
+  const draftsDir = resolve(
+    projectDir,
+    ".hack/linear/projects/proj_123/status-updates/drafts"
+  );
+  const publishedDir = resolve(
+    projectDir,
+    ".hack/linear/projects/proj_123/status-updates/published"
+  );
+  await mkdir(draftsDir, { recursive: true });
+  await mkdir(publishedDir, { recursive: true });
+  await writeFile(
+    resolve(draftsDir, "2026-03-21-next.md"),
+    `---
+kind: linear-project-status-update
+linearProjectId: proj_123
+title: Next update
+slug: next
+archived: false
+date: 2026-03-21
+health: atRisk
+---
+Needs a little more polish.
+`
+  );
+  await writeFile(
+    resolve(publishedDir, "2026-03-14-weekly.md"),
+    `---
+kind: linear-project-status-update
+linearProjectId: proj_123
+title: Weekly update
+linearId: update_123
+slug: weekly
+archived: false
+updatedAt: 2026-03-14T10:15:00.000Z
+date: 2026-03-14
+publishedAt: 2026-03-14T10:00:00.000Z
+health: onTrack
+---
+Still on track for dogfooding.
+`
+  );
+  await writeLinearProjectDeliveryAudit({
+    projectDir,
+    audit: {
+      projectId: "proj_123",
+      projectIds: ["proj_123"],
+      profileId: "work",
+      updatedAt: "2026-03-25T02:30:00.000Z",
+      processedDeliveries: 2,
+      appliedDeliveries: 1,
+      failedDeliveries: 1,
+      skippedDeliveries: 0,
+      created: 1,
+      updated: 1,
+      commentsPulled: 0,
+      conflictsRecorded: 0,
+      checkpointsRecorded: 1,
+      deliveries: [
+        {
+          deliveryId: "delivery-issue",
+          profileId: "work",
+          issueIdentifier: "ENG-101",
+          mode: "issue",
+          status: "applied",
+          ticketId: "T-00001",
+        },
+        {
+          deliveryId: "delivery-project",
+          profileId: "work",
+          projectId: "proj_123",
+          mode: "project",
+          status: "failed",
+          reason: "git sync failed",
+        },
+      ],
+    },
+  });
+
+  const audit = await loadLinearProjectAuditState({
+    projectDir,
+    linearProjectId: "proj_123",
+  });
+
+  expect(audit.statusUpdates.publishedCount).toBe(1);
+  expect(audit.statusUpdates.draftCount).toBe(1);
+  expect(audit.statusUpdates.latestPublished).toMatchObject({
+    title: "Weekly update",
+    linearId: "update_123",
+    publishedAt: "2026-03-14T10:00:00.000Z",
+    path: ".hack/linear/projects/proj_123/status-updates/published/2026-03-14-weekly.md",
+  });
+  expect(audit.delivery).toMatchObject({
+    path: ".hack/linear/projects/proj_123/delivery-audit.json",
+    profileId: "work",
+    processedDeliveries: 2,
+    appliedDeliveries: 1,
+    failedDeliveries: 1,
+  });
+  expect(audit.delivery?.deliveries).toEqual([
+    expect.objectContaining({
+      deliveryId: "delivery-issue",
+      status: "applied",
+    }),
+    expect.objectContaining({
+      deliveryId: "delivery-project",
+      status: "failed",
+      reason: "git sync failed",
+    }),
+  ]);
 });
 
 test("runProjectArtifactCommand publish fails for drafts that already have a remote id", async () => {

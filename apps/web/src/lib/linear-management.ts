@@ -79,6 +79,60 @@ type LinearStatusCommandPayload = {
     readonly repair: LinearRepairAction | null;
     readonly nextSteps: readonly string[];
   };
+  readonly audit?: {
+    readonly statusUpdates: {
+      readonly draftCount: number;
+      readonly publishedCount: number;
+      readonly drafts?: readonly {
+        readonly title: string;
+        readonly path: string;
+        readonly state: "draft" | "published";
+        readonly linearId?: string;
+        readonly date?: string;
+        readonly publishedAt?: string;
+        readonly updatedAt?: string;
+        readonly health?: string;
+      }[];
+      readonly latestPublished: {
+        readonly title: string;
+        readonly path: string;
+        readonly state?: "draft" | "published";
+        readonly linearId?: string;
+        readonly date?: string;
+        readonly publishedAt?: string;
+        readonly updatedAt?: string;
+        readonly health?: string;
+      } | null;
+    };
+    readonly delivery: {
+      readonly path: string;
+      readonly projectId?: string;
+      readonly projectIds?: readonly string[];
+      readonly profileId: string;
+      readonly updatedAt: string;
+      readonly processedDeliveries: number;
+      readonly appliedDeliveries: number;
+      readonly failedDeliveries: number;
+      readonly skippedDeliveries: number;
+      readonly created: number;
+      readonly updated: number;
+      readonly commentsPulled: number;
+      readonly conflictsRecorded: number;
+      readonly checkpointsRecorded: number;
+      readonly deliveries: readonly {
+        readonly deliveryId: string;
+        readonly profileId: string;
+        readonly mode: "issue" | "project";
+        readonly status: "applied" | "failed" | "skipped";
+        readonly projectId?: string;
+        readonly teamId?: string;
+        readonly issueId?: string;
+        readonly issueIdentifier?: string;
+        readonly ticketId?: string;
+        readonly reason?: string;
+      }[];
+    } | null;
+  } | null;
 };
 
 type LinearProfilesPayload = {
@@ -175,6 +229,7 @@ export type LinearManagementState = {
     readonly command: string;
   } | null;
   readonly accessControlMode?: string;
+  readonly audit: LinearStatusCommandPayload["audit"];
   readonly statusCommand: string;
   readonly profilesCommand: string;
   readonly connectionsCommand: string;
@@ -310,6 +365,7 @@ export function buildLinearManagementState(input: {
     ...(input.connections?.accessControlMode
       ? { accessControlMode: input.connections.accessControlMode }
       : {}),
+    audit: input.status.audit ?? null,
     statusCommand: STATUS_COMMAND,
     profilesCommand: PROFILES_COMMAND,
     connectionsCommand: CONNECTIONS_COMMAND,
@@ -731,6 +787,7 @@ function createFallbackLinearManagementState(input: {
       reason: repairReason,
       command: STATUS_COMMAND,
     },
+    audit: null,
     statusCommand: STATUS_COMMAND,
     profilesCommand: PROFILES_COMMAND,
     connectionsCommand: CONNECTIONS_COMMAND,

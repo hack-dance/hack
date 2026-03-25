@@ -28,6 +28,10 @@ import {
 import { normalizeTicketRef } from "../tickets/util.ts";
 import type { ExtensionCommand, ExtensionCommandContext } from "../types.ts";
 import {
+  loadLinearProjectAuditState,
+  writeLinearProjectDeliveryAudit,
+} from "./audit.ts";
+import {
   deleteLinearToken,
   listLinearAuthProfiles,
   readStoredLinearTokenEnvelope,
@@ -1533,10 +1537,11 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
         return 1;
       }
 
+      const binding = resolveProjectLinearBinding({
+        controlPlaneConfig: ctx.controlPlaneConfig,
+      });
       const result = await runProjectLinearAutosync({
-        binding: resolveProjectLinearBinding({
-          controlPlaneConfig: ctx.controlPlaneConfig,
-        }),
+        binding,
         profileId: parsed.value.profileId,
         projectId: parsed.value.projectId,
         teamId: parsed.value.teamId,
@@ -1606,6 +1611,40 @@ export const LINEAR_COMMANDS: readonly ExtensionCommand[] = [
       if (!result.ok) {
         ctx.logger.error({ message: result.error });
         return 1;
+      }
+
+      const auditProjectIds = resolveLinearAutosyncAuditProjectIds({
+        binding,
+        projectId: parsed.value.projectId,
+        result,
+      });
+      const auditProfileId =
+        parsed.value.profileId ??
+        binding.profileId ??
+        result.deliveries[0]?.profileId ??
+        "default";
+      for (const projectId of auditProjectIds) {
+        await writeLinearProjectDeliveryAudit({
+          projectDir: resolveProjectArtifactRepoRoot({
+            project: ctx.project,
+          }),
+          audit: {
+            projectId,
+            projectIds: auditProjectIds,
+            profileId: auditProfileId,
+            updatedAt: new Date().toISOString(),
+            processedDeliveries: result.processedDeliveries,
+            appliedDeliveries: result.appliedDeliveries,
+            failedDeliveries: result.failedDeliveries,
+            skippedDeliveries: result.skippedDeliveries,
+            created: result.created,
+            updated: result.updated,
+            commentsPulled: result.commentsPulled,
+            conflictsRecorded: result.conflictsRecorded,
+            checkpointsRecorded: result.checkpointsRecorded,
+            deliveries: result.deliveries,
+          },
+        });
       }
 
       if (parsed.value.json) {
@@ -2067,6 +2106,13 @@ async function handleLinearStatusCommand(input: {
   const payload = await resolveLinearStatusCommandPayload({
     controlPlaneConfig: input.ctx.controlPlaneConfig,
     profileId: parsed.value.profileId,
+    ...(input.ctx.project
+      ? {
+          projectDir: resolveProjectArtifactRepoRoot({
+            project: input.ctx.project,
+          }),
+        }
+      : {}),
   });
 
   if (parsed.value.json) {
@@ -2105,6 +2151,9 @@ type LinearStatusPayload = {
 type LinearStatusCommandPayload = LinearStatusPayload & {
   readonly projectBinding: ReturnType<typeof buildProjectBindingPayload>;
   readonly summary: LinearProjectManagementSummary;
+  readonly audit: Awaited<
+    ReturnType<typeof loadLinearProjectAuditState>
+  > | null;
 };
 
 async function resolveLinearStatusPayload(input: {
@@ -2160,6 +2209,7 @@ async function resolveLinearStatusPayload(input: {
 async function resolveLinearStatusCommandPayload(input: {
   readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
   readonly profileId?: string;
+  readonly projectDir?: string;
 }): Promise<LinearStatusCommandPayload> {
   const status = await resolveLinearStatusPayload(input);
   const projectBinding = buildProjectBindingPayload({
@@ -2183,10 +2233,18 @@ async function resolveLinearStatusCommandPayload(input: {
       additionalProjects: projectBinding.additionalProjects,
     },
   });
+  const audit =
+    input.projectDir && projectBinding.projectId
+      ? await loadLinearProjectAuditState({
+          projectDir: input.projectDir,
+          linearProjectId: projectBinding.projectId,
+        })
+      : null;
   return {
     ...status,
     projectBinding,
     summary,
+    audit,
   };
 }
 
@@ -2224,6 +2282,24 @@ async function renderLinearStatusPayload(input: {
       : []),
     ...(input.payload.summary.nextSteps.length > 0
       ? ["Next:", ...input.payload.summary.nextSteps.map((step) => `- ${step}`)]
+      : []),
+    ...(input.payload.audit
+      ? [
+          "Audit:",
+          `- Status updates: ${input.payload.audit.statusUpdates.publishedCount} published, ${input.payload.audit.statusUpdates.draftCount} drafts waiting`,
+          ...(input.payload.audit.statusUpdates.latestPublished
+            ? [
+                `- Latest published update: ${input.payload.audit.statusUpdates.latestPublished.title} (${input.payload.audit.statusUpdates.latestPublished.linearId ?? "pending_remote_id"})`,
+                `- Published metadata: ${input.payload.audit.statusUpdates.latestPublished.publishedAt ?? input.payload.audit.statusUpdates.latestPublished.updatedAt ?? input.payload.audit.statusUpdates.latestPublished.path}`,
+              ]
+            : []),
+          ...(input.payload.audit.delivery
+            ? [
+                `- Delivery reconciliation: processed ${input.payload.audit.delivery.processedDeliveries}, applied ${input.payload.audit.delivery.appliedDeliveries}, failed ${input.payload.audit.delivery.failedDeliveries}`,
+                `- Delivery audit file: ${input.payload.audit.delivery.path}`,
+              ]
+            : []),
+        ]
       : []),
   ];
   await display.panel({
@@ -3724,6 +3800,7 @@ function projectUpdateToArtifactSnapshot(input: {
     linearId: input.update.id,
     slug,
     archived: false,
+    publishedAt: input.update.createdAt,
     ...(input.update.updatedAt ? { updatedAt: input.update.updatedAt } : {}),
     body: input.update.body,
     ...(date ? { date } : {}),
@@ -3760,6 +3837,29 @@ function humanizeArtifactSlug(input: {
     .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
+}
+
+function resolveLinearAutosyncAuditProjectIds(input: {
+  readonly binding: ReturnType<typeof resolveProjectLinearBinding>;
+  readonly projectId?: string;
+  readonly result: LinearAutosyncRunSuccess;
+}): string[] {
+  const projectIds = new Set<string>();
+  if (input.projectId) {
+    projectIds.add(input.projectId);
+  }
+  if (input.binding.projectId) {
+    projectIds.add(input.binding.projectId);
+  }
+  for (const projectId of input.result.projectIds) {
+    projectIds.add(projectId);
+  }
+  for (const delivery of input.result.deliveries) {
+    if (delivery.projectId) {
+      projectIds.add(delivery.projectId);
+    }
+  }
+  return [...projectIds];
 }
 
 async function writeLocalLinearProjectArtifact(input: {

@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
+import { renderToStaticMarkup } from "react-dom/server";
 
+import LinearManagementSection from "../src/components/linear-management-section";
 import {
   buildLinearCommandEnvironment,
   buildLinearManagementState,
@@ -231,4 +233,132 @@ test("linear management state offers a Hack claim repair when local access works
       "This machine can use Linear, but Hack does not have a broker-owned connection for the active profile yet.",
     command: "hack linear connect --profile work",
   });
+});
+
+test("linear management section renders durable publish and delivery audit state", () => {
+  const state = buildLinearManagementState({
+    status: {
+      extensionId: "dance.hack.linear",
+      selectedProfile: "work",
+      selectedSource: "project_routing",
+      defaultProfile: "default",
+      selectedMissing: false,
+      authRef: "linear.api.work",
+      service: "hack-linear-work",
+      tokenEnvFallback: "HACK_LINEAR_API_TOKEN",
+      apiUrl: "https://api.linear.app/graphql",
+      accountId: "lin-user-1",
+      accountName: "Hack User",
+      accountEmail: "hack@example.com",
+      tokenResolved: true,
+      tokenSource: "keychain",
+      tokenExpiresAt: null,
+      error: null,
+      profileError: null,
+      ok: true,
+      projectBinding: {
+        ok: true,
+        profileId: "work",
+        projectId: "proj_default",
+        projectName: "Default",
+        teamId: "team_default",
+        additionalProjects: [],
+      },
+      summary: {
+        activeProfile: "work",
+        connected: true,
+        connectionLabel: "Connected as Hack User",
+        routingSummary:
+          "This repo routes Linear sync to Default (proj_default) in team team_default.",
+        linkedProjectsLabel: null,
+        capabilities: ["Publish repo-bound status updates"],
+        repair: null,
+        nextSteps: ["Run `hack linear status-updates publish`."],
+      },
+      audit: {
+        statusUpdates: {
+          draftCount: 1,
+          publishedCount: 2,
+          latestPublished: {
+            title: "Weekly update",
+            linearId: "update_123",
+            date: "2026-03-14",
+            publishedAt: "2026-03-14T10:00:00.000Z",
+            updatedAt: "2026-03-14T10:15:00.000Z",
+            path: ".hack/linear/projects/proj_default/status-updates/published/2026-03-14-weekly.md",
+          },
+        },
+        delivery: {
+          path: ".hack/linear/projects/proj_default/delivery-audit.json",
+          profileId: "work",
+          updatedAt: "2026-03-25T02:30:00.000Z",
+          processedDeliveries: 3,
+          appliedDeliveries: 2,
+          failedDeliveries: 1,
+          skippedDeliveries: 0,
+          created: 1,
+          updated: 2,
+          commentsPulled: 0,
+          conflictsRecorded: 0,
+          checkpointsRecorded: 2,
+          deliveries: [
+            {
+              deliveryId: "delivery-issue",
+              profileId: "work",
+              mode: "issue",
+              status: "applied",
+              issueIdentifier: "ENG-101",
+              ticketId: "T-00001",
+            },
+            {
+              deliveryId: "delivery-project",
+              profileId: "work",
+              mode: "project",
+              status: "failed",
+              projectId: "proj_default",
+              reason: "git sync failed",
+            },
+          ],
+        },
+      },
+    },
+    profiles: {
+      defaultProfileId: "default",
+      selectedProfileId: "work",
+      selectedProfileSource: "project_routing",
+      selectedProfileMissing: false,
+      profiles: [
+        {
+          id: "work",
+          isDefault: false,
+          authRef: "linear.api.work",
+          service: "hack-linear-work",
+          tokenEnv: "HACK_LINEAR_WORK_TOKEN",
+          apiUrl: "https://api.linear.app/graphql",
+          accountName: "Hack User",
+        },
+      ],
+    },
+    connections: {
+      accessControlMode: "better_auth_team_owned",
+      connections: [],
+    },
+    canInspectHackConnection: true,
+  });
+
+  const markup = renderToStaticMarkup(
+    LinearManagementSection({ linearManagement: state })
+  );
+
+  expect(markup).toContain("Repo audit trail");
+  expect(markup).toContain("Latest published status update");
+  expect(markup).toContain("Weekly update");
+  expect(markup).toContain("1 draft still waiting to publish");
+  expect(markup).toContain("Latest delivery reconciliation");
+  expect(markup).toContain("processed 3");
+  expect(markup).toContain("failed 1");
+  expect(markup).toContain("git sync failed");
+  expect(markup).toContain(
+    ".hack/linear/projects/proj_default/delivery-audit.json"
+  );
 });

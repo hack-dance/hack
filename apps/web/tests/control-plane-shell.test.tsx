@@ -115,6 +115,7 @@ const linearManagement = {
     command: "hack linear seed-local-access --profile work",
   },
   accessControlMode: "better_auth_team_owned",
+  audit: null,
   statusCommand: "./dist/hack linear status --json",
   profilesCommand: "./dist/hack linear profiles --json",
   connectionsCommand: "./dist/hack linear connections --json",

@@ -42,6 +42,7 @@ export type LinearProjectArtifactSnapshot =
   | (LinearProjectArtifactBase & {
       readonly kind: "linear-project-status-update";
       readonly date?: string;
+      readonly publishedAt?: string;
       readonly health?: string;
       readonly linkedMilestoneIds?: readonly string[];
     });
@@ -170,6 +171,9 @@ export const parseLinearProjectArtifactFile = ({
   return {
     ...base,
     ...(typeof parsed.date === "string" ? { date: parsed.date } : {}),
+    ...(typeof parsed.publishedAt === "string"
+      ? { publishedAt: parsed.publishedAt }
+      : {}),
     ...(typeof parsed.health === "string" ? { health: parsed.health } : {}),
     ...(Array.isArray(parsed.linkedMilestoneIds)
       ? {
@@ -706,6 +710,14 @@ const serializeStatusUpdateFrontmatter = ({
       serializeFrontmatterValue({ key: "date", value: artifact.date })
     );
   }
+  if (artifact.publishedAt) {
+    lines.push(
+      serializeFrontmatterValue({
+        key: "publishedAt",
+        value: artifact.publishedAt,
+      })
+    );
+  }
   if (artifact.health) {
     lines.push(
       serializeFrontmatterValue({ key: "health", value: artifact.health })
@@ -929,6 +941,7 @@ const normalizeArtifactForComparison = ({
   return {
     ...base,
     date: artifact.date,
+    publishedAt: artifact.publishedAt,
     health: artifact.health,
     linkedMilestoneIds: artifact.linkedMilestoneIds,
   };

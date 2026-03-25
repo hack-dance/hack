@@ -101,6 +101,40 @@ Still on track for dogfooding.
   });
 });
 
+test("parseLinearProjectArtifactFile parses published status update metadata", () => {
+  const artifact = parseLinearProjectArtifactFile({
+    filePath:
+      "/repo/.hack/linear/projects/proj_123/status-updates/published/2026-03-14-weekly.md",
+    text: `---
+kind: linear-project-status-update
+linearProjectId: proj_123
+title: Weekly update
+linearId: update_123
+slug: weekly
+archived: false
+updatedAt: 2026-03-14T10:15:00.000Z
+date: 2026-03-14
+publishedAt: 2026-03-14T10:00:00.000Z
+health: onTrack
+---
+Still on track for dogfooding.
+`,
+  });
+
+  expect(artifact).toMatchObject({
+    kind: "linear-project-status-update",
+    linearProjectId: "proj_123",
+    title: "Weekly update",
+    linearId: "update_123",
+    slug: "weekly",
+    date: "2026-03-14",
+    publishedAt: "2026-03-14T10:00:00.000Z",
+    updatedAt: "2026-03-14T10:15:00.000Z",
+    health: "onTrack",
+    body: "Still on track for dogfooding.\n",
+  });
+});
+
 test("resolveLinearProjectArtifactsRoot uses the bound project id", () => {
   const root = resolveLinearProjectArtifactsRoot({
     projectDir: "/repo",
@@ -293,6 +327,7 @@ test("serializeLinearProjectArtifactFile writes stable frontmatter", () => {
       linearId: "update_123",
       slug: "weekly",
       date: "2026-03-14",
+      publishedAt: "2026-03-14T10:00:00.000Z",
       health: "onTrack",
       linkedMilestoneIds: ["milestone_123"],
       body: "Still on track for dogfooding.\n",
@@ -309,6 +344,7 @@ linearId: update_123
 slug: weekly
 archived: false
 date: "2026-03-14"
+publishedAt: "2026-03-14T10:00:00.000Z"
 health: onTrack
 linkedMilestoneIds:
   - milestone_123

@@ -195,61 +195,202 @@ export default function LinearManagementSection(input: {
               </DetailCard>
             </dl>
 
-            {linearManagement.profiles.length > 0 ? (
-              <ul className="grid gap-3">
-                {linearManagement.profiles.map((profile) => {
-                  const selected =
-                    profile.id === linearManagement.selectedProfile;
-                  let profileStateLabel = "saved";
-                  if (selected) {
-                    profileStateLabel = "active";
-                  } else if (profile.isDefault) {
-                    profileStateLabel = "default";
-                  }
-                  return (
-                    <li
-                      className={cn(
-                        "rounded-2xl border p-4",
-                        selected
-                          ? "border-sky-300/35 bg-sky-300/10"
-                          : "border-white/10 bg-slate-950/35"
-                      )}
-                      key={profile.id}
-                    >
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div className="space-y-2">
-                          <p className="font-medium text-white">{profile.id}</p>
-                          <p className="text-sm text-white/70 leading-6">
-                            {profile.accountName ??
-                              profile.accountEmail ??
-                              profile.accountId ??
-                              "No account snapshot"}
-                          </p>
-                        </div>
-                        <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-white/70 text-xs uppercase tracking-[0.18em]">
-                          {profileStateLabel}
-                        </span>
-                      </div>
-                      <dl className="mt-4 grid gap-3 md:grid-cols-2">
-                        <DetailCard label="Auth ref">
-                          {profile.authRef}
-                        </DetailCard>
-                        <DetailCard label="Token env">
-                          {profile.tokenEnv}
-                        </DetailCard>
-                      </dl>
-                    </li>
-                  );
-                })}
-              </ul>
-            ) : (
-              <p className="text-sm text-white/70 leading-6">
-                No Linear profiles are configured for this repo yet.
-              </p>
-            )}
+            <LinearProfilesList linearManagement={linearManagement} />
           </div>
+
+          <RepoAuditSection audit={linearManagement.audit} />
         </section>
       </div>
+    </section>
+  );
+}
+
+function LinearProfilesList(input: {
+  readonly linearManagement: LinearManagementState;
+}) {
+  if (input.linearManagement.profiles.length === 0) {
+    return (
+      <p className="text-sm text-white/70 leading-6">
+        No Linear profiles are configured for this repo yet.
+      </p>
+    );
+  }
+
+  return (
+    <ul className="grid gap-3">
+      {input.linearManagement.profiles.map((profile) => {
+        const selected = profile.id === input.linearManagement.selectedProfile;
+        let profileStateLabel = "saved";
+        if (selected) {
+          profileStateLabel = "active";
+        } else if (profile.isDefault) {
+          profileStateLabel = "default";
+        }
+        return (
+          <li
+            className={cn(
+              "rounded-2xl border p-4",
+              selected
+                ? "border-sky-300/35 bg-sky-300/10"
+                : "border-white/10 bg-slate-950/35"
+            )}
+            key={profile.id}
+          >
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="space-y-2">
+                <p className="font-medium text-white">{profile.id}</p>
+                <p className="text-sm text-white/70 leading-6">
+                  {profile.accountName ??
+                    profile.accountEmail ??
+                    profile.accountId ??
+                    "No account snapshot"}
+                </p>
+              </div>
+              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-white/70 text-xs uppercase tracking-[0.18em]">
+                {profileStateLabel}
+              </span>
+            </div>
+            <dl className="mt-4 grid gap-3 md:grid-cols-2">
+              <DetailCard label="Auth ref">{profile.authRef}</DetailCard>
+              <DetailCard label="Token env">{profile.tokenEnv}</DetailCard>
+            </dl>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function RepoAuditSection(input: {
+  readonly audit: LinearManagementState["audit"];
+}) {
+  const latestPublished = input.audit?.statusUpdates.latestPublished ?? null;
+  const deliveryAudit = input.audit?.delivery ?? null;
+  const draftCount = input.audit?.statusUpdates.draftCount ?? 0;
+  const draftLabel = `${draftCount} draft${draftCount === 1 ? "" : "s"} still waiting to publish`;
+
+  return (
+    <section className="space-y-4 rounded-2xl border border-white/10 bg-white/5 p-4">
+      <div className="space-y-2">
+        <h4 className="font-medium text-lg text-white">Repo audit trail</h4>
+        <p className="text-sm text-white/70 leading-6">
+          Keep publish metadata and the latest delivery reconciliation visible
+          from the same repo-bound state the CLI reports.
+        </p>
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-2">
+        <PublishedStatusUpdateAuditCard
+          draftLabel={draftLabel}
+          latestPublished={latestPublished}
+        />
+        <DeliveryAuditCard deliveryAudit={deliveryAudit} />
+      </div>
+    </section>
+  );
+}
+
+function PublishedStatusUpdateAuditCard(input: {
+  readonly draftLabel: string;
+  readonly latestPublished:
+    | NonNullable<
+        LinearManagementState["audit"]
+      >["statusUpdates"]["latestPublished"]
+    | null;
+}) {
+  return (
+    <section className="space-y-3 rounded-2xl border border-white/10 bg-slate-950/35 p-4">
+      <p className="font-medium text-sm text-white">
+        Latest published status update
+      </p>
+      {input.latestPublished ? (
+        <>
+          <p className="font-medium text-white">
+            {input.latestPublished.title}
+          </p>
+          <dl className="grid gap-3 md:grid-cols-2">
+            <DetailCard label="Remote identity">
+              {input.latestPublished.linearId ?? "Pending remote identity"}
+            </DetailCard>
+            <DetailCard label="Published metadata">
+              {input.latestPublished.publishedAt ??
+                input.latestPublished.updatedAt ??
+                input.latestPublished.path}
+            </DetailCard>
+          </dl>
+          <p className="text-sm text-white/65 leading-6">
+            {input.latestPublished.path}
+          </p>
+        </>
+      ) : (
+        <p className="text-sm text-white/70 leading-6">
+          No published repo-bound status updates are recorded yet.
+        </p>
+      )}
+      <p className="text-sm text-white/70 leading-6">{input.draftLabel}</p>
+    </section>
+  );
+}
+
+function DeliveryAuditCard(input: {
+  readonly deliveryAudit: NonNullable<
+    LinearManagementState["audit"]
+  >["delivery"];
+}) {
+  return (
+    <section className="space-y-3 rounded-2xl border border-white/10 bg-slate-950/35 p-4">
+      <p className="font-medium text-sm text-white">
+        Latest delivery reconciliation
+      </p>
+      {input.deliveryAudit ? (
+        <>
+          <div className="grid gap-3 md:grid-cols-2">
+            <DetailCard label="Processed">
+              {`processed ${input.deliveryAudit.processedDeliveries}`}
+            </DetailCard>
+            <DetailCard label="Applied">
+              {`applied ${input.deliveryAudit.appliedDeliveries}`}
+            </DetailCard>
+            <DetailCard label="Failed">
+              {`failed ${input.deliveryAudit.failedDeliveries}`}
+            </DetailCard>
+            <DetailCard label="Updated">
+              {input.deliveryAudit.updatedAt}
+            </DetailCard>
+          </div>
+          {input.deliveryAudit.deliveries.length > 0 ? (
+            <ul className="grid gap-3">
+              {input.deliveryAudit.deliveries.map((delivery) => (
+                <li
+                  className="rounded-2xl border border-white/10 bg-white/5 p-3"
+                  key={delivery.deliveryId}
+                >
+                  <p className="font-medium text-sm text-white">
+                    {delivery.deliveryId}
+                  </p>
+                  <p className="text-sm text-white/70 leading-6">
+                    {delivery.mode} · {delivery.status}
+                    {delivery.issueIdentifier
+                      ? ` · ${delivery.issueIdentifier}`
+                      : ""}
+                  </p>
+                  {delivery.reason ? (
+                    <p className="text-amber-100 text-sm leading-6">
+                      {delivery.reason}
+                    </p>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          <code className={codeClassName}>{input.deliveryAudit.path}</code>
+        </>
+      ) : (
+        <p className="text-sm text-white/70 leading-6">
+          No durable delivery audit is recorded yet. Run the repo-bound autosync
+          flow to capture processed, applied, and failed counts.
+        </p>
+      )}
     </section>
   );
 }

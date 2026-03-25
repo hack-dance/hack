@@ -3,15 +3,212 @@ import { describe, expect, test } from "bun:test";
 import { createSharedBetterAuthContract } from "@hack/auth-contract";
 
 import type { BetterAuthRuntime } from "../src/better-auth.ts";
+import {
+  projectAdminAccessGrants,
+  projectAdminProjects,
+} from "../src/db/schema.ts";
+import type { createDbClient } from "../src/db.ts";
 import { createAuthBrokerApp } from "../src/index.ts";
 import { InMemoryOrgTeamsStore } from "../src/modules/orgs/service.ts";
-import { InMemoryProjectStore } from "../src/modules/projects/service.ts";
+import { DbProjectStore } from "../src/modules/projects/db-store.ts";
+import {
+  InMemoryProjectStore,
+  type ProjectStore,
+} from "../src/modules/projects/service.ts";
 
 type BetterAuthAuth = NonNullable<BetterAuthRuntime["auth"]>;
 type BetterAuthSession = Awaited<
   ReturnType<BetterAuthAuth["api"]["getSession"]>
 >;
 type AuthBrokerApp = ReturnType<typeof createAuthBrokerApp>;
+type DbClient = ReturnType<typeof createDbClient>;
+type ProjectAdminProjectRow = typeof projectAdminProjects.$inferSelect;
+type ProjectAdminAccessGrantRow = typeof projectAdminAccessGrants.$inferSelect;
+
+type MockSqlExpression = {
+  readonly queryChunks: readonly unknown[];
+};
+
+type MockTableRow = Record<string, unknown>;
+
+type MockSelectResult<Row extends MockTableRow> = Promise<readonly Row[]> & {
+  where(condition: unknown): MockSelectResult<Row>;
+  orderBy(order: unknown): MockSelectResult<Row>;
+  limit(count: number): MockSelectResult<Row>;
+};
+
+function createMockSelectQuery<Row extends MockTableRow>(input: {
+  readonly rows: readonly Row[];
+  readonly columnMap: ReadonlyMap<unknown, keyof Row>;
+}): MockSelectResult<Row> {
+  let resultRows: readonly Row[] = [...input.rows];
+
+  const query = Promise.resolve().then(
+    () => resultRows
+  ) as MockSelectResult<Row>;
+
+  query.where = (condition: unknown) => {
+    const equality = readMockSqlEquality(condition);
+    if (!equality) {
+      return query;
+    }
+    const property = input.columnMap.get(equality.column);
+    if (!property) {
+      return query;
+    }
+    resultRows = resultRows.filter((row) => {
+      return row[property] === equality.value;
+    });
+    return query;
+  };
+  query.orderBy = (order: unknown) => {
+    const direction = readMockSqlDirection(order);
+    if (!direction) {
+      return query;
+    }
+    const property = input.columnMap.get(direction.column);
+    if (!property) {
+      return query;
+    }
+    const multiplier = direction.direction === "desc" ? -1 : 1;
+    resultRows = [...resultRows].sort((left, right) => {
+      const leftValue = String(left[property] ?? "");
+      const rightValue = String(right[property] ?? "");
+      return leftValue.localeCompare(rightValue) * multiplier;
+    });
+    return query;
+  };
+  query.limit = (count: number) => {
+    resultRows = resultRows.slice(0, count);
+    return query;
+  };
+
+  return query;
+}
+
+function readMockSqlEquality(
+  value: unknown
+): { readonly column: unknown; readonly value: unknown } | null {
+  if (!(value && typeof value === "object" && "queryChunks" in value)) {
+    return null;
+  }
+  const queryChunks = (value as MockSqlExpression).queryChunks;
+  const column = queryChunks[1];
+  const parameter = queryChunks[3];
+  if (!(parameter && typeof parameter === "object" && "value" in parameter)) {
+    return null;
+  }
+  return {
+    column,
+    value: (parameter as { readonly value: unknown }).value,
+  };
+}
+
+function readMockSqlDirection(value: unknown): {
+  readonly column: unknown;
+  readonly direction: "asc" | "desc";
+} | null {
+  if (!(value && typeof value === "object" && "queryChunks" in value)) {
+    return null;
+  }
+  const queryChunks = (value as MockSqlExpression).queryChunks;
+  const column = queryChunks[1];
+  const directionChunk = queryChunks[2];
+  if (
+    !(
+      directionChunk &&
+      typeof directionChunk === "object" &&
+      "value" in directionChunk
+    )
+  ) {
+    return null;
+  }
+  const rawDirection = (
+    directionChunk as {
+      readonly value: readonly string[];
+    }
+  ).value
+    .join("")
+    .trim()
+    .toLowerCase();
+  if (rawDirection !== "asc" && rawDirection !== "desc") {
+    return null;
+  }
+  return {
+    column,
+    direction: rawDirection,
+  };
+}
+
+function createMockProjectDb(): DbClient {
+  const projects: ProjectAdminProjectRow[] = [];
+  const accessGrants: ProjectAdminAccessGrantRow[] = [];
+  const projectColumnMap = new Map<unknown, keyof ProjectAdminProjectRow>([
+    [projectAdminProjects.id, "id"],
+    [projectAdminProjects.slug, "slug"],
+  ]);
+  const accessGrantColumnMap = new Map<
+    unknown,
+    keyof ProjectAdminAccessGrantRow
+  >([
+    [projectAdminAccessGrants.id, "id"],
+    [projectAdminAccessGrants.projectId, "projectId"],
+    [projectAdminAccessGrants.subjectSlug, "subjectSlug"],
+  ]);
+
+  return {
+    execute: async () => ({ rows: [] }),
+    insert(table: unknown) {
+      return {
+        values(value: unknown) {
+          return {
+            returning() {
+              if (table === projectAdminProjects) {
+                const row = value as ProjectAdminProjectRow;
+                projects.push(row);
+                return Promise.resolve([row]);
+              }
+              if (table === projectAdminAccessGrants) {
+                const row = value as ProjectAdminAccessGrantRow;
+                accessGrants.push(row);
+                return Promise.resolve([row]);
+              }
+              throw new Error("Unsupported mock insert table.");
+            },
+          };
+        },
+      };
+    },
+    select() {
+      return {
+        from(table: unknown) {
+          if (table === projectAdminProjects) {
+            return createMockSelectQuery({
+              rows: projects,
+              columnMap: projectColumnMap,
+            });
+          }
+          if (table === projectAdminAccessGrants) {
+            return createMockSelectQuery({
+              rows: accessGrants,
+              columnMap: accessGrantColumnMap,
+            });
+          }
+          throw new Error("Unsupported mock select table.");
+        },
+      };
+    },
+  } as unknown as DbClient;
+}
+
+function createDbBackedProjectStore(input: {
+  readonly orgStore: InMemoryOrgTeamsStore;
+}): ProjectStore {
+  return new DbProjectStore({
+    orgStore: input.orgStore,
+    db: createMockProjectDb(),
+  });
+}
 
 function createTestConfig() {
   return {
@@ -89,7 +286,7 @@ function createSession(input?: {
 
 function createProjectTestApp(input: {
   readonly orgStore: InMemoryOrgTeamsStore;
-  readonly projectStore: InMemoryProjectStore;
+  readonly projectStore: ProjectStore;
   readonly session?: BetterAuthSession;
 }): AuthBrokerApp {
   return createAuthBrokerApp({
@@ -831,6 +1028,308 @@ describe("project registration and access broker routes", () => {
     if (!hackOrganizationId) {
       throw new Error("Expected scoped organization id.");
     }
+    const scopedApp = createProjectTestApp({
+      orgStore,
+      projectStore,
+      session: createSession({
+        userId: "owner-user",
+        email: "owner@example.com",
+        activeOrganizationId: hackOrganizationId,
+      }),
+    });
+
+    const response = await registerProjectForTest({
+      app: scopedApp,
+      slug: "ops-console",
+      name: "Ops Console",
+      mode: "organization",
+      org: "ops",
+    });
+    expect(response.status).toBe(403);
+    const payload = (await response.json()) as {
+      readonly ok?: boolean;
+      readonly error?: string;
+    };
+    expect(payload.ok).toBe(false);
+    expect(payload.error).toBe("project_scope_forbidden");
+  });
+
+  test("durable project store keeps active team scope visibility aligned with the in-memory store", async () => {
+    const orgStore = new InMemoryOrgTeamsStore();
+    const projectStore = createDbBackedProjectStore({
+      orgStore,
+    });
+    const setupApp = createProjectTestApp({
+      orgStore,
+      projectStore,
+      session: createSession({
+        userId: "owner-user",
+        email: "owner@example.com",
+      }),
+    });
+
+    await createOrganization({
+      app: setupApp,
+      slug: "hack",
+      name: "Hack",
+    });
+    await createOrganization({
+      app: setupApp,
+      slug: "ops",
+      name: "Ops",
+    });
+    await createTeam({
+      app: setupApp,
+      org: "hack",
+      slug: "cli",
+      name: "CLI",
+    });
+    await createTeam({
+      app: setupApp,
+      org: "ops",
+      slug: "ops",
+      name: "Ops Team",
+    });
+
+    const organizationsResponse = await handleJsonRequest({
+      app: setupApp,
+      path: "/v1/auth/orgs",
+    });
+    const organizationsPayload = (await organizationsResponse.json()) as {
+      readonly organizations?: Array<{
+        readonly id?: string;
+        readonly slug?: string;
+      }>;
+    };
+    const hackOrganizationId = organizationsPayload.organizations?.find(
+      (organization) => organization.slug === "hack"
+    )?.id;
+
+    const teamsResponse = await handleJsonRequest({
+      app: setupApp,
+      path: "/v1/auth/teams?org=hack",
+    });
+    const teamsPayload = (await teamsResponse.json()) as {
+      readonly teams?: Array<{
+        readonly id?: string;
+        readonly slug?: string;
+      }>;
+    };
+    const cliTeamId = teamsPayload.teams?.find(
+      (team) => team.slug === "cli"
+    )?.id;
+    if (!(hackOrganizationId && cliTeamId)) {
+      throw new Error("Expected durable scoped org/team ids.");
+    }
+
+    const scopedApp = createProjectTestApp({
+      orgStore,
+      projectStore,
+      session: createSession({
+        userId: "owner-user",
+        email: "owner@example.com",
+        activeOrganizationId: hackOrganizationId,
+        activeTeamId: cliTeamId,
+      }),
+    });
+
+    await registerProjectForTest({
+      app: setupApp,
+      slug: "local-tooling",
+      name: "Local Tooling",
+      mode: "local",
+    });
+    await registerProjectForTest({
+      app: setupApp,
+      slug: "shared-hack",
+      name: "Shared Hack",
+      mode: "organization",
+      org: "hack",
+    });
+    await registerProjectForTest({
+      app: setupApp,
+      slug: "cli-console",
+      name: "CLI Console",
+      mode: "team",
+      org: "hack",
+      team: "cli",
+    });
+    await registerProjectForTest({
+      app: setupApp,
+      slug: "ops-shared",
+      name: "Ops Shared",
+      mode: "organization",
+      org: "ops",
+    });
+    await registerProjectForTest({
+      app: setupApp,
+      slug: "ops-console",
+      name: "Ops Console",
+      mode: "team",
+      org: "ops",
+      team: "ops",
+    });
+
+    const response = await handleJsonRequest({
+      app: scopedApp,
+      path: "/v1/auth/projects",
+    });
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as {
+      readonly projects?: Array<{
+        readonly slug?: string;
+      }>;
+    };
+
+    expect(payload.projects?.map((project) => project.slug)).toEqual([
+      "cli-console",
+      "local-tooling",
+      "shared-hack",
+    ]);
+  });
+
+  test("durable project store returns project_scope_forbidden when scoped detail access hides a shared project", async () => {
+    const orgStore = new InMemoryOrgTeamsStore();
+    const projectStore = createDbBackedProjectStore({
+      orgStore,
+    });
+    const setupApp = createProjectTestApp({
+      orgStore,
+      projectStore,
+      session: createSession({
+        userId: "owner-user",
+        email: "owner@example.com",
+      }),
+    });
+
+    await createOrganization({
+      app: setupApp,
+      slug: "hack",
+      name: "Hack",
+    });
+    await createOrganization({
+      app: setupApp,
+      slug: "ops",
+      name: "Ops",
+    });
+    await createTeam({
+      app: setupApp,
+      org: "hack",
+      slug: "cli",
+      name: "CLI",
+    });
+    await createTeam({
+      app: setupApp,
+      org: "ops",
+      slug: "ops",
+      name: "Ops Team",
+    });
+
+    const organizationsResponse = await handleJsonRequest({
+      app: setupApp,
+      path: "/v1/auth/orgs",
+    });
+    const organizationsPayload = (await organizationsResponse.json()) as {
+      readonly organizations?: Array<{
+        readonly id?: string;
+        readonly slug?: string;
+      }>;
+    };
+    const hackOrganizationId = organizationsPayload.organizations?.find(
+      (organization) => organization.slug === "hack"
+    )?.id;
+    const teamsResponse = await handleJsonRequest({
+      app: setupApp,
+      path: "/v1/auth/teams?org=hack",
+    });
+    const teamsPayload = (await teamsResponse.json()) as {
+      readonly teams?: Array<{
+        readonly id?: string;
+        readonly slug?: string;
+      }>;
+    };
+    const cliTeamId = teamsPayload.teams?.find(
+      (team) => team.slug === "cli"
+    )?.id;
+    if (!(hackOrganizationId && cliTeamId)) {
+      throw new Error("Expected durable scoped org/team ids.");
+    }
+
+    const scopedApp = createProjectTestApp({
+      orgStore,
+      projectStore,
+      session: createSession({
+        userId: "owner-user",
+        email: "owner@example.com",
+        activeOrganizationId: hackOrganizationId,
+        activeTeamId: cliTeamId,
+      }),
+    });
+
+    await registerProjectForTest({
+      app: setupApp,
+      slug: "ops-console",
+      name: "Ops Console",
+      mode: "team",
+      org: "ops",
+      team: "ops",
+    });
+
+    const response = await handleJsonRequest({
+      app: scopedApp,
+      path: "/v1/auth/projects/ops-console",
+    });
+    expect(response.status).toBe(403);
+    const payload = (await response.json()) as {
+      readonly ok?: boolean;
+      readonly error?: string;
+    };
+    expect(payload.ok).toBe(false);
+    expect(payload.error).toBe("project_scope_forbidden");
+  });
+
+  test("durable project store rejects shared registration outside the active org scope", async () => {
+    const orgStore = new InMemoryOrgTeamsStore();
+    const projectStore = createDbBackedProjectStore({
+      orgStore,
+    });
+    const setupApp = createProjectTestApp({
+      orgStore,
+      projectStore,
+      session: createSession({
+        userId: "owner-user",
+        email: "owner@example.com",
+      }),
+    });
+
+    await createOrganization({
+      app: setupApp,
+      slug: "hack",
+      name: "Hack",
+    });
+    await createOrganization({
+      app: setupApp,
+      slug: "ops",
+      name: "Ops",
+    });
+
+    const organizationsResponse = await handleJsonRequest({
+      app: setupApp,
+      path: "/v1/auth/orgs",
+    });
+    const organizationsPayload = (await organizationsResponse.json()) as {
+      readonly organizations?: Array<{
+        readonly id?: string;
+        readonly slug?: string;
+      }>;
+    };
+    const hackOrganizationId = organizationsPayload.organizations?.find(
+      (organization) => organization.slug === "hack"
+    )?.id;
+    if (!hackOrganizationId) {
+      throw new Error("Expected durable scoped organization id.");
+    }
+
     const scopedApp = createProjectTestApp({
       orgStore,
       projectStore,

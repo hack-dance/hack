@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { execSync } from "node:child_process";
 
+import { validateControlPlaneRouteTarget } from "../src/daemon/control-plane-route-validation.ts";
 import { handleSessionRoutes } from "../src/daemon/routes/sessions.ts";
 
 /**
@@ -49,6 +50,44 @@ async function parseResponse(
     return null;
   }
 }
+
+describe("control-plane route validation", () => {
+  test("rejects malformed project identifiers before routing", () => {
+    const result = validateControlPlaneRouteTarget({
+      url: new URL("http://localhost/control-plane/projects/not-valid/jobs"),
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      status: 400,
+      error: "invalid_project_id",
+    });
+  });
+
+  test("rejects malformed runtime identifiers before routing", () => {
+    const invalidJob = validateControlPlaneRouteTarget({
+      url: new URL(
+        "http://localhost/control-plane/projects/abc123def456/jobs/not-a-uuid"
+      ),
+    });
+    expect(invalidJob).toEqual({
+      ok: false,
+      status: 400,
+      error: "invalid_job_id",
+    });
+
+    const invalidShell = validateControlPlaneRouteTarget({
+      url: new URL(
+        "http://localhost/control-plane/projects/abc123def456/shells/not-a-uuid/stream"
+      ),
+    });
+    expect(invalidShell).toEqual({
+      ok: false,
+      status: 400,
+      error: "invalid_shell_id",
+    });
+  });
+});
 
 describe.skipIf(!hasTmux)("handleSessionRoutes", () => {
   describe("route matching", () => {

@@ -190,4 +190,37 @@ describe("gateway client error parsing", () => {
       },
     });
   });
+
+  test("encodes control-plane path segments before issuing requests", async () => {
+    const captured = { pathname: "" };
+    installFetchMock({
+      mock: async (input) => {
+        const url =
+          typeof input === "string"
+            ? new URL(input)
+            : input instanceof URL
+              ? input
+              : new URL(input.url);
+        captured.pathname = url.pathname;
+        return new Response(JSON.stringify({ jobs: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const client = createGatewayClient({
+      baseUrl: "http://127.0.0.1:7788",
+      token: "test-token",
+      timeoutMs: 500,
+    });
+    const response = await client.listJobs({
+      projectId: "abc123def456/../../v1/status",
+    });
+
+    expect(response.ok).toBe(true);
+    expect(captured.pathname).toBe(
+      "/control-plane/projects/abc123def456%2F..%2F..%2Fv1%2Fstatus/jobs"
+    );
+  });
 });

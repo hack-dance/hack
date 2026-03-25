@@ -243,7 +243,7 @@ export const SUPERVISOR_COMMANDS: readonly ExtensionCommand[] = [
       }
 
       const cancelled = await requestDaemonJson({
-        path: `/control-plane/projects/${projectResult.projectId}/jobs/${jobId}/cancel`,
+        path: `/control-plane/projects/${encodeURIComponent(projectResult.projectId)}/jobs/${encodeURIComponent(jobId)}/cancel`,
         method: "POST",
       });
       if (!cancelled) {
@@ -1665,7 +1665,7 @@ async function createJob(opts: {
 }): Promise<JobCreateResult> {
   if (opts.projectId) {
     const response = await requestDaemonJson({
-      path: `/control-plane/projects/${opts.projectId}/jobs`,
+      path: `/control-plane/projects/${encodeURIComponent(opts.projectId)}/jobs`,
       method: "POST",
       body: {
         runner: opts.runner,
@@ -1707,7 +1707,7 @@ async function listJobs(opts: {
 }): Promise<readonly JobMeta[]> {
   if (opts.projectId) {
     const response = await requestDaemonJson({
-      path: `/control-plane/projects/${opts.projectId}/jobs`,
+      path: `/control-plane/projects/${encodeURIComponent(opts.projectId)}/jobs`,
     });
     if (response?.ok && response.json && Array.isArray(response.json.jobs)) {
       return response.json.jobs as JobMeta[];
@@ -1725,7 +1725,7 @@ async function getJob(opts: {
 }): Promise<JobMeta | null> {
   if (opts.projectId) {
     const response = await requestDaemonJson({
-      path: `/control-plane/projects/${opts.projectId}/jobs/${opts.jobId}`,
+      path: `/control-plane/projects/${encodeURIComponent(opts.projectId)}/jobs/${encodeURIComponent(opts.jobId)}`,
     });
     if (response?.ok && response.json && isRecordWithJob(response.json.job)) {
       return response.json.job;

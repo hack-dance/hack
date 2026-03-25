@@ -480,7 +480,7 @@ export function createGatewayClient(opts: GatewayClientOptions): GatewayClient {
   }): Promise<GatewayResponse<GatewayJobListResponse>> =>
     await requestJson({
       method: "GET",
-      path: `/control-plane/projects/${opts.projectId}/jobs`,
+      path: `/control-plane/projects/${encodeRouteSegment(opts.projectId)}/jobs`,
       parse: parseJobList,
     });
 
@@ -490,7 +490,7 @@ export function createGatewayClient(opts: GatewayClientOptions): GatewayClient {
   }): Promise<GatewayResponse<GatewayJobResponse>> =>
     await requestJson({
       method: "GET",
-      path: `/control-plane/projects/${opts.projectId}/jobs/${opts.jobId}`,
+      path: `/control-plane/projects/${encodeRouteSegment(opts.projectId)}/jobs/${encodeRouteSegment(opts.jobId)}`,
       parse: parseJob,
     });
 
@@ -503,7 +503,7 @@ export function createGatewayClient(opts: GatewayClientOptions): GatewayClient {
   }): Promise<GatewayResponse<GatewayJobResponse>> =>
     await requestJson({
       method: "POST",
-      path: `/control-plane/projects/${opts.projectId}/jobs`,
+      path: `/control-plane/projects/${encodeRouteSegment(opts.projectId)}/jobs`,
       body: {
         runner: opts.runner ?? "generic",
         command: opts.command,
@@ -519,7 +519,7 @@ export function createGatewayClient(opts: GatewayClientOptions): GatewayClient {
   }): Promise<GatewayResponse<GatewayCancelResponse>> =>
     await requestJson({
       method: "POST",
-      path: `/control-plane/projects/${opts.projectId}/jobs/${opts.jobId}/cancel`,
+      path: `/control-plane/projects/${encodeRouteSegment(opts.projectId)}/jobs/${encodeRouteSegment(opts.jobId)}/cancel`,
       parse: parseCancel,
     });
 
@@ -533,7 +533,7 @@ export function createGatewayClient(opts: GatewayClientOptions): GatewayClient {
   }): Promise<GatewayResponse<GatewayShellResponse>> =>
     await requestJson({
       method: "POST",
-      path: `/control-plane/projects/${opts.projectId}/shells`,
+      path: `/control-plane/projects/${encodeRouteSegment(opts.projectId)}/shells`,
       body: {
         ...(opts.shell ? { shell: opts.shell } : {}),
         ...(opts.cwd ? { cwd: opts.cwd } : {}),
@@ -550,7 +550,7 @@ export function createGatewayClient(opts: GatewayClientOptions): GatewayClient {
   }): Promise<GatewayResponse<GatewayShellResponse>> =>
     await requestJson({
       method: "GET",
-      path: `/control-plane/projects/${opts.projectId}/shells/${opts.shellId}`,
+      path: `/control-plane/projects/${encodeRouteSegment(opts.projectId)}/shells/${encodeRouteSegment(opts.shellId)}`,
       parse: parseShell,
     });
 
@@ -674,7 +674,7 @@ export function createGatewayClient(opts: GatewayClientOptions): GatewayClient {
   }): WebSocket => {
     const url = buildWebSocketUrl({
       baseUrl,
-      path: `/control-plane/projects/${opts.projectId}/jobs/${opts.jobId}/stream`,
+      path: `/control-plane/projects/${encodeRouteSegment(opts.projectId)}/jobs/${encodeRouteSegment(opts.jobId)}/stream`,
       token,
     });
     return new WebSocket(url);
@@ -686,7 +686,7 @@ export function createGatewayClient(opts: GatewayClientOptions): GatewayClient {
   }): WebSocket => {
     const url = buildWebSocketUrl({
       baseUrl,
-      path: `/control-plane/projects/${opts.projectId}/shells/${opts.shellId}/stream`,
+      path: `/control-plane/projects/${encodeRouteSegment(opts.projectId)}/shells/${encodeRouteSegment(opts.shellId)}/stream`,
       token,
     });
     return new WebSocket(url);
@@ -751,6 +751,10 @@ function buildWebSocketUrl(opts: {
     url.searchParams.set("token", opts.token);
   }
   return url.toString();
+}
+
+function encodeRouteSegment(value: string): string {
+  return encodeURIComponent(value);
 }
 
 function safeJsonParse(opts: { readonly text: string }): unknown {

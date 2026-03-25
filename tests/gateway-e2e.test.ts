@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { resolveGatewayConfig } from "../src/control-plane/extensions/gateway/config.ts";
@@ -6,6 +6,7 @@ import {
   createGatewayToken,
   revokeGatewayToken,
 } from "../src/control-plane/extensions/gateway/tokens.ts";
+import { evaluateGatewayRouteAccess } from "../src/daemon/control-plane-route-validation.ts";
 import { resolveDaemonPaths } from "../src/daemon/paths.ts";
 import { readDaemonStatus } from "../src/daemon/status.ts";
 import { resolveGlobalConfigPath } from "../src/lib/config-paths.ts";
@@ -17,6 +18,63 @@ import { shouldRunNetwork } from "./helpers/ci.ts";
 
 const shouldRun = process.env.HACK_GATEWAY_E2E === "1" && shouldRunNetwork;
 const runTest = shouldRun ? test : test.skip;
+
+describe("gateway control-plane guard evaluation", () => {
+  const projectId = "abc123def456";
+
+  test("read routes remain available while writes are disabled", () => {
+    const result = evaluateGatewayRouteAccess({
+      method: "GET",
+      url: new URL(`http://localhost/control-plane/projects/${projectId}/jobs`),
+      allowWrites: false,
+      enabledProjectIds: new Set([projectId]),
+      scope: "read",
+    });
+
+    expect(result).toEqual({ ok: true, projectId });
+  });
+
+  test("project-disabled and write-auth denials stay explicit", () => {
+    const projectDisabled = evaluateGatewayRouteAccess({
+      method: "POST",
+      url: new URL(`http://localhost/control-plane/projects/${projectId}/jobs`),
+      allowWrites: true,
+      enabledProjectIds: new Set<string>(),
+      scope: "write",
+    });
+    expect(projectDisabled).toEqual({
+      ok: false,
+      status: 403,
+      error: "project_disabled",
+    });
+
+    const writesDisabled = evaluateGatewayRouteAccess({
+      method: "POST",
+      url: new URL(`http://localhost/control-plane/projects/${projectId}/jobs`),
+      allowWrites: false,
+      enabledProjectIds: new Set([projectId]),
+      scope: "write",
+    });
+    expect(writesDisabled).toEqual({
+      ok: false,
+      status: 403,
+      error: "writes_disabled",
+    });
+
+    const writeScopeRequired = evaluateGatewayRouteAccess({
+      method: "POST",
+      url: new URL(`http://localhost/control-plane/projects/${projectId}/jobs`),
+      allowWrites: true,
+      enabledProjectIds: new Set([projectId]),
+      scope: "read",
+    });
+    expect(writeScopeRequired).toEqual({
+      ok: false,
+      status: 403,
+      error: "write_scope_required",
+    });
+  });
+});
 
 interface GatewayE2eContext {
   readonly baseUrl: string;

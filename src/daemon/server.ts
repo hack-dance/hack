@@ -23,6 +23,10 @@ import type { ControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { ensureDir } from "../lib/fs.ts";
 import { resolveRegisteredProjectById } from "../lib/projects-registry.ts";
 import {
+  evaluateGatewayRouteAccess,
+  validateControlPlaneRouteTarget,
+} from "./control-plane-route-validation.ts";
+import {
   type DockerEventWatcher,
   startDockerEventWatcher,
 } from "./docker-events.ts";
@@ -570,9 +574,28 @@ async function handleGatewayRequest(opts: {
     return response;
   }
 
-  const isReadOnly = isGatewayReadOnlyMethod({ method: opts.req.method });
-  const isShellStream = isGatewayShellStreamRequest({ url });
-  const gatewayProjectId = resolveGatewayProjectId({ url });
+  const routeTarget = validateControlPlaneRouteTarget({ url });
+  if (!routeTarget.ok) {
+    const response = jsonResponse(
+      { error: routeTarget.error },
+      routeTarget.status
+    );
+    void appendGatewayAuditEntry({
+      rootDir: opts.gatewayRoot,
+      entry: {
+        ts: new Date().toISOString(),
+        tokenId: auth.tokenId,
+        method: opts.req.method,
+        path: auditPath,
+        status: routeTarget.status,
+        ...(remoteAddress ? { remoteAddress } : {}),
+        ...(userAgent ? { userAgent } : {}),
+      },
+    });
+    return response;
+  }
+
+  const gatewayProjectId = routeTarget.target.projectId;
 
   if (gatewayProjectId && !enabledProjectIds.has(gatewayProjectId)) {
     const refreshed = await resolveGatewayConfig();
@@ -581,9 +604,18 @@ async function handleGatewayRequest(opts: {
     );
   }
 
-  if (gatewayProjectId && !enabledProjectIds.has(gatewayProjectId)) {
-    const status = 403;
-    const response = jsonResponse({ error: "project_disabled" }, status);
+  const gatewayAccess = evaluateGatewayRouteAccess({
+    method: opts.req.method,
+    url,
+    allowWrites: opts.gatewayConfig.allowWrites,
+    enabledProjectIds,
+    scope: auth.scope,
+  });
+  if (!gatewayAccess.ok) {
+    const response = jsonResponse(
+      { error: gatewayAccess.error },
+      gatewayAccess.status
+    );
     void appendGatewayAuditEntry({
       rootDir: opts.gatewayRoot,
       entry: {
@@ -591,79 +623,7 @@ async function handleGatewayRequest(opts: {
         tokenId: auth.tokenId,
         method: opts.req.method,
         path: auditPath,
-        status,
-        ...(remoteAddress ? { remoteAddress } : {}),
-        ...(userAgent ? { userAgent } : {}),
-      },
-    });
-    return response;
-  }
-
-  if (!(opts.gatewayConfig.allowWrites || isReadOnly)) {
-    const status = 403;
-    const response = jsonResponse({ error: "writes_disabled" }, status);
-    void appendGatewayAuditEntry({
-      rootDir: opts.gatewayRoot,
-      entry: {
-        ts: new Date().toISOString(),
-        tokenId: auth.tokenId,
-        method: opts.req.method,
-        path: auditPath,
-        status,
-        ...(remoteAddress ? { remoteAddress } : {}),
-        ...(userAgent ? { userAgent } : {}),
-      },
-    });
-    return response;
-  }
-
-  if (!isReadOnly && auth.scope !== "write") {
-    const status = 403;
-    const response = jsonResponse({ error: "write_scope_required" }, status);
-    void appendGatewayAuditEntry({
-      rootDir: opts.gatewayRoot,
-      entry: {
-        ts: new Date().toISOString(),
-        tokenId: auth.tokenId,
-        method: opts.req.method,
-        path: auditPath,
-        status,
-        ...(remoteAddress ? { remoteAddress } : {}),
-        ...(userAgent ? { userAgent } : {}),
-      },
-    });
-    return response;
-  }
-
-  if (isShellStream && !opts.gatewayConfig.allowWrites) {
-    const status = 403;
-    const response = jsonResponse({ error: "writes_disabled" }, status);
-    void appendGatewayAuditEntry({
-      rootDir: opts.gatewayRoot,
-      entry: {
-        ts: new Date().toISOString(),
-        tokenId: auth.tokenId,
-        method: opts.req.method,
-        path: auditPath,
-        status,
-        ...(remoteAddress ? { remoteAddress } : {}),
-        ...(userAgent ? { userAgent } : {}),
-      },
-    });
-    return response;
-  }
-
-  if (isShellStream && auth.scope !== "write") {
-    const status = 403;
-    const response = jsonResponse({ error: "write_scope_required" }, status);
-    void appendGatewayAuditEntry({
-      rootDir: opts.gatewayRoot,
-      entry: {
-        ts: new Date().toISOString(),
-        tokenId: auth.tokenId,
-        method: opts.req.method,
-        path: auditPath,
-        status,
+        status: gatewayAccess.status,
         ...(remoteAddress ? { remoteAddress } : {}),
         ...(userAgent ? { userAgent } : {}),
       },
@@ -751,7 +711,12 @@ async function handleControlPlaneRequest(opts: {
     return jsonResponse({ error: "not_found" }, 404);
   }
 
-  const projectId = segments[2];
+  const routeTarget = validateControlPlaneRouteTarget({ url: opts.url });
+  if (!routeTarget.ok) {
+    return jsonResponse({ error: routeTarget.error }, routeTarget.status);
+  }
+
+  const projectId = routeTarget.target.projectId;
   if (!projectId) {
     return jsonResponse({ error: "missing_project_id" }, 400);
   }
@@ -766,7 +731,7 @@ async function handleControlPlaneRequest(opts: {
       return jsonResponse({ error: "upgrade_required" }, 426);
     }
 
-    const jobId = segments[4];
+    const jobId = routeTarget.target.jobId ?? segments[4];
     const upgraded = opts.server.upgrade(opts.req, {
       data: {
         kind: "job",
@@ -812,7 +777,7 @@ async function handleControlPlaneRequest(opts: {
   }
 
   if (segments[3] === "jobs" && segments[4]) {
-    const jobId = segments[4];
+    const jobId = routeTarget.target.jobId ?? segments[4];
     if (segments[5] === "cancel") {
       if (opts.req.method !== "POST") {
         return jsonResponse({ error: "method_not_allowed" }, 405);
@@ -848,7 +813,7 @@ async function handleControlPlaneRequest(opts: {
       return jsonResponse({ error: "upgrade_required" }, 426);
     }
 
-    const shellId = segments[4];
+    const shellId = routeTarget.target.shellId ?? segments[4];
     const shell = opts.shells.getShell({ shellId });
     if (
       !shell ||
@@ -914,7 +879,7 @@ async function handleControlPlaneRequest(opts: {
   }
 
   if (segments[3] === "shells" && segments[4] && segments.length === 5) {
-    const shellId = segments[4];
+    const shellId = routeTarget.target.shellId ?? segments[4];
     if (opts.req.method !== "GET") {
       return jsonResponse({ error: "method_not_allowed" }, 405);
     }
@@ -1566,28 +1531,4 @@ function normalizeQueryParam(opts: {
 }): string | null {
   const trimmed = opts.value?.trim();
   return trimmed && trimmed.length > 0 ? trimmed : null;
-}
-
-function isGatewayReadOnlyMethod(opts: { readonly method: string }): boolean {
-  const method = opts.method.toUpperCase();
-  return method === "GET" || method === "HEAD";
-}
-
-function isGatewayShellStreamRequest(opts: { readonly url: URL }): boolean {
-  const segments = opts.url.pathname.split("/").filter(Boolean);
-  return (
-    segments[0] === "control-plane" &&
-    segments[1] === "projects" &&
-    segments[3] === "shells" &&
-    segments[5] === "stream"
-  );
-}
-
-function resolveGatewayProjectId(opts: { readonly url: URL }): string | null {
-  const segments = opts.url.pathname.split("/").filter(Boolean);
-  if (segments[0] !== "control-plane" || segments[1] !== "projects") {
-    return null;
-  }
-  const projectId = segments[2];
-  return projectId ? projectId : null;
 }

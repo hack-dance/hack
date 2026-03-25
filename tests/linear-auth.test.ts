@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import {
+  resolveLinearBrokerManagementToken,
   resolveLinearToken,
   type SecretStore,
   saveLinearToken,
@@ -242,4 +243,78 @@ test("resolveLinearToken fails closed in env-only mode when the env token is mis
   }
   expect(resolved.error).toContain("HACK_LINEAR_API_TOKEN");
   expect(resolved.error).toContain("HACK_LINEAR_PREFER_ENV_TOKEN_ONLY");
+});
+
+test("resolveLinearBrokerManagementToken uses env-backed broker auth without reading local secret state", async () => {
+  const config = createControlPlaneConfig();
+  let keychainReadCount = 0;
+  let hackSessionReadCount = 0;
+
+  const resolved = await resolveLinearBrokerManagementToken({
+    controlPlaneConfig: config,
+    allowStoredFallback: false,
+    env: {
+      HACK_AUTH_SESSION_TOKEN: "broker_management_token",
+      HACK_AUTH_SESSION_EXPIRES_AT: "2026-03-06T12:00:00.000Z",
+    },
+    nowMs: Date.parse("2026-03-05T12:00:00.000Z"),
+    store: {
+      get: async () => {
+        keychainReadCount += 1;
+        throw new Error("profile secret envelope should not be read");
+      },
+      set: async () => {
+        throw new Error("profile secret envelope should not be written");
+      },
+      delete: async () => false,
+    },
+    loadHackSession: async () => {
+      hackSessionReadCount += 1;
+      throw new Error("generic Hack auth session should not be read");
+    },
+  });
+
+  expect(keychainReadCount).toBe(0);
+  expect(hackSessionReadCount).toBe(0);
+  expect(resolved.ok).toBe(true);
+  if (!resolved.ok) {
+    return;
+  }
+  expect(resolved.managementToken).toBe("broker_management_token");
+  expect(resolved.managementTokenExpiresAt).toBe("2026-03-06T12:00:00.000Z");
+});
+
+test("resolveLinearBrokerManagementToken fails closed without env-backed broker auth when stored fallback is disabled", async () => {
+  const config = createControlPlaneConfig();
+  let keychainReadCount = 0;
+  let hackSessionReadCount = 0;
+
+  const resolved = await resolveLinearBrokerManagementToken({
+    controlPlaneConfig: config,
+    allowStoredFallback: false,
+    env: {},
+    store: {
+      get: async () => {
+        keychainReadCount += 1;
+        throw new Error("profile secret envelope should not be read");
+      },
+      set: async () => {
+        throw new Error("profile secret envelope should not be written");
+      },
+      delete: async () => false,
+    },
+    loadHackSession: async () => {
+      hackSessionReadCount += 1;
+      throw new Error("generic Hack auth session should not be read");
+    },
+  });
+
+  expect(keychainReadCount).toBe(0);
+  expect(hackSessionReadCount).toBe(0);
+  expect(resolved.ok).toBe(false);
+  if (resolved.ok) {
+    return;
+  }
+  expect(resolved.error).toContain("hack auth login");
+  expect(resolved.error).not.toContain("reconnect this Linear profile");
 });

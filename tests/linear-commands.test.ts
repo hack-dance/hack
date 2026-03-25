@@ -1341,6 +1341,7 @@ test("resolveLinearTokenWithBrokerRefresh prefers broker-seeded shared access be
     typeof __testOnly.resolveLinearTokenWithBrokerRefreshInternal
   >[0]["controlPlaneConfig"];
   const resolutionPaths: string[] = [];
+  const brokerSeedAuthModes: boolean[] = [];
 
   const result = await __testOnly.resolveLinearTokenWithBrokerRefreshInternal({
     controlPlaneConfig,
@@ -1359,19 +1360,22 @@ test("resolveLinearTokenWithBrokerRefresh prefers broker-seeded shared access be
         profileSource: "command_flags",
       };
     },
-    resolveBrokerSeedToken: async () => ({
-      ok: true,
-      resolution: {
+    resolveBrokerSeedToken: async (input) => {
+      brokerSeedAuthModes.push(input.allowStoredBrokerAuth === true);
+      return {
         ok: true,
-        token: "broker-token",
-        source: "broker",
-        tokenEnv: "HACK_LINEAR_WORK_TOKEN",
-        authRef: "linear.api.work",
-        service: "hack-linear-work",
-        profileId: "work",
-        profileSource: "command_flags",
-      },
-    }),
+        resolution: {
+          ok: true,
+          token: "broker-token",
+          source: "broker",
+          tokenEnv: "HACK_LINEAR_WORK_TOKEN",
+          authRef: "linear.api.work",
+          service: "hack-linear-work",
+          profileId: "work",
+          profileSource: "command_flags",
+        },
+      };
+    },
     syncLocalAccessToBroker: async () => {
       throw new Error("refreshed local access should not be synced");
     },
@@ -1384,6 +1388,73 @@ test("resolveLinearTokenWithBrokerRefresh prefers broker-seeded shared access be
 
   expect(result.source).toBe("broker");
   expect(resolutionPaths).toEqual(["without_saved_local_access"]);
+  expect(brokerSeedAuthModes).toEqual([false]);
+});
+
+test("resolveLinearTokenWithBrokerRefresh fails closed with hack auth login guidance when broker auth is unavailable", async () => {
+  const controlPlaneConfig = {
+    secrets: {
+      backend: "keychain",
+    },
+    extensions: {
+      "dance.hack.linear": {
+        enabled: true,
+        config: {
+          profiles: {
+            work: {
+              authRef: "linear.api.work",
+              service: "hack-linear-work",
+              tokenEnv: "HACK_LINEAR_WORK_TOKEN",
+            },
+          },
+          defaultProfile: "work",
+        },
+      },
+    },
+  } as Parameters<
+    typeof __testOnly.resolveLinearTokenWithBrokerRefreshInternal
+  >[0]["controlPlaneConfig"];
+  const resolutionPaths: string[] = [];
+  const brokerSeedAuthModes: boolean[] = [];
+
+  const result = await __testOnly.resolveLinearTokenWithBrokerRefreshInternal({
+    controlPlaneConfig,
+    profileId: "work",
+    resolveToken: async (input) => {
+      resolutionPaths.push(
+        input.store ? "without_saved_local_access" : "saved_local_access"
+      );
+      return {
+        ok: false,
+        error: 'Missing Linear token for profile "work".',
+        tokenEnv: "HACK_LINEAR_WORK_TOKEN",
+        authRef: "linear.api.work",
+        service: "hack-linear-work",
+        profileId: "work",
+        profileSource: "command_flags",
+      };
+    },
+    resolveBrokerSeedToken: async (input) => {
+      brokerSeedAuthModes.push(input.allowStoredBrokerAuth === true);
+      return {
+        ok: false,
+        error:
+          'Linear broker access for profile "work" requires Hack account login. Run `hack auth login` and retry.',
+      };
+    },
+    syncLocalAccessToBroker: async () => {
+      throw new Error("saved local access should not be synced");
+    },
+  });
+
+  expect(result.ok).toBe(false);
+  if (result.ok) {
+    return;
+  }
+
+  expect(result.error).toContain("hack auth login");
+  expect(resolutionPaths).toEqual(["without_saved_local_access"]);
+  expect(brokerSeedAuthModes).toEqual([false]);
 });
 
 test("parseUpsertAssigneeMappingArgs requires a local assignee and remote target", () => {

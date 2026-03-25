@@ -8158,6 +8158,7 @@ async function resolveLinearTokenWithBrokerRefreshInternal(input: {
   readonly resolveBrokerSeedToken?: (input: {
     readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
     readonly profileId?: string;
+    readonly allowStoredBrokerAuth?: boolean;
   }) => Promise<
     | {
         readonly ok: true;
@@ -8206,10 +8207,20 @@ async function resolveLinearTokenWithBrokerRefreshInternal(input: {
     const seeded = await resolveBrokerSeedToken({
       controlPlaneConfig: input.controlPlaneConfig,
       ...(input.profileId ? { profileId: input.profileId } : {}),
+      allowStoredBrokerAuth: false,
     });
     if (seeded.ok) {
       return seeded.resolution;
     }
+    return {
+      ok: false,
+      error: seeded.error,
+      tokenEnv: envOrGuidance.tokenEnv,
+      authRef: envOrGuidance.authRef,
+      service: envOrGuidance.service,
+      profileId: envOrGuidance.profileId,
+      profileSource: envOrGuidance.profileSource,
+    };
   }
 
   const resolved = await resolveToken({
@@ -8262,6 +8273,7 @@ function shouldPreferBrokerSeedBeforeKeychain(input: {
 async function resolveLinearTokenFromBrokerSeed(input: {
   readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
   readonly profileId?: string;
+  readonly allowStoredBrokerAuth?: boolean;
 }): Promise<
   | {
       readonly ok: true;
@@ -8697,6 +8709,7 @@ async function seedLinearLocalAccessFromBroker(input: {
 async function requestLinearLocalAccessSeedFromBroker(input: {
   readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
   readonly profileId?: string;
+  readonly allowStoredBrokerAuth?: boolean;
 }): Promise<
   | { readonly ok: true; readonly payload: BrokerSeedLocalAccessPayload }
   | { readonly ok: false; readonly error: string }
@@ -8708,6 +8721,7 @@ async function requestLinearLocalAccessSeedFromBroker(input: {
   const brokerAuth = await resolveLinearBrokerAuthorization({
     controlPlaneConfig: input.controlPlaneConfig,
     profileId,
+    allowStoredBrokerAuth: input.allowStoredBrokerAuth,
   });
   if (!brokerAuth.ok) {
     return brokerAuth;
@@ -9147,6 +9161,7 @@ async function removeLinearAutosyncSubscription(input: {
 async function resolveLinearBrokerAuthorization(input: {
   readonly controlPlaneConfig: ExtensionCommandContext["controlPlaneConfig"];
   readonly profileId?: string;
+  readonly allowStoredBrokerAuth?: boolean;
 }): Promise<
   | {
       readonly ok: true;
@@ -9163,6 +9178,7 @@ async function resolveLinearBrokerAuthorization(input: {
     controlPlaneConfig: input.controlPlaneConfig,
     profileId,
     allowProjectOverride: false,
+    allowStoredFallback: input.allowStoredBrokerAuth,
   });
   if (!management.ok) {
     return {

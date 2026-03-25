@@ -10,6 +10,8 @@ const DEFAULT_LINEAR_TOKEN_ENV = "HACK_LINEAR_API_TOKEN";
 const DEFAULT_LINEAR_AUTH_REF = "linear.api.default";
 const DEFAULT_LINEAR_SECRET_SERVICE = "hack-linear-auth";
 const DEFAULT_LINEAR_API_URL = "https://api.linear.app/graphql";
+const HACK_AUTH_SESSION_TOKEN_ENV = "HACK_AUTH_SESSION_TOKEN";
+const HACK_AUTH_SESSION_EXPIRES_AT_ENV = "HACK_AUTH_SESSION_EXPIRES_AT";
 const TRAILING_SLASH_REGEX = /\/+$/;
 
 export type LinearProfileSelectionSource =
@@ -670,6 +672,10 @@ export async function resolveLinearBrokerManagementToken(input: {
   readonly authRef?: string;
   readonly service?: string;
   readonly store?: SecretStore;
+  readonly env?: Record<string, string | undefined>;
+  readonly allowStoredFallback?: boolean;
+  readonly loadHackSession?: typeof loadHackAuthSession;
+  readonly nowMs?: number;
 }): Promise<
   | {
       readonly ok: true;
@@ -694,6 +700,38 @@ export async function resolveLinearBrokerManagementToken(input: {
   });
   const authRef = (input.authRef ?? settings.authRef).trim();
   const service = (input.service ?? settings.service).trim();
+  const env = input.env ?? process.env;
+  const nowMs = input.nowMs ?? Date.now();
+  const envManagementToken = resolveEnvLinearBrokerManagementToken({
+    env,
+    nowMs,
+  });
+  if (envManagementToken) {
+    return {
+      ok: true,
+      managementToken: envManagementToken.managementToken,
+      ...(envManagementToken.managementTokenExpiresAt
+        ? {
+            managementTokenExpiresAt:
+              envManagementToken.managementTokenExpiresAt,
+          }
+        : {}),
+      profileId: settings.profileId,
+      authRef,
+      service,
+    };
+  }
+  if (input.allowStoredFallback === false) {
+    return {
+      ok: false,
+      error: buildHackAuthLoginRequiredError({
+        profileId: settings.profileId,
+      }),
+      profileId: settings.profileId,
+      authRef,
+      service,
+    };
+  }
   const store = input.store ?? DEFAULT_SECRET_STORE;
   const stored = await store.get({
     service,
@@ -707,6 +745,7 @@ export async function resolveLinearBrokerManagementToken(input: {
       authRef,
       service,
       error: `Linear broker management token is missing for profile "${settings.profileId}". Run \`hack auth login\` for broker-owned access, or reconnect this Linear profile if its saved broker token is stale.`,
+      loadHackSession: input.loadHackSession,
     });
   }
   if (
@@ -720,6 +759,7 @@ export async function resolveLinearBrokerManagementToken(input: {
       authRef,
       service,
       error: `Linear broker management token expired for profile "${settings.profileId}". Run \`hack auth login\` for broker-owned access, or reconnect this Linear profile to refresh its saved broker token.`,
+      loadHackSession: input.loadHackSession,
     });
   }
   return {
@@ -739,6 +779,7 @@ async function resolveFallbackLinearBrokerManagementToken(input: {
   readonly authRef: string;
   readonly service: string;
   readonly error: string;
+  readonly loadHackSession?: typeof loadHackAuthSession;
 }): Promise<
   | {
       readonly ok: true;
@@ -756,7 +797,8 @@ async function resolveFallbackLinearBrokerManagementToken(input: {
       readonly service: string;
     }
 > {
-  const genericHackSession = await loadHackAuthSession().catch(() => null);
+  const loadHackSession = input.loadHackSession ?? loadHackAuthSession;
+  const genericHackSession = await loadHackSession().catch(() => null);
   const genericManagementToken = genericHackSession?.token?.trim() ?? "";
   if (!genericManagementToken) {
     return {
@@ -778,6 +820,48 @@ async function resolveFallbackLinearBrokerManagementToken(input: {
     authRef: input.authRef,
     service: input.service,
   };
+}
+
+function resolveEnvLinearBrokerManagementToken(input: {
+  readonly env: Record<string, string | undefined>;
+  readonly nowMs: number;
+}): {
+  readonly managementToken: string;
+  readonly managementTokenExpiresAt?: string;
+} | null {
+  const managementToken = input.env[HACK_AUTH_SESSION_TOKEN_ENV]?.trim() ?? "";
+  if (!managementToken) {
+    return null;
+  }
+  const managementTokenExpiresAt =
+    input.env[HACK_AUTH_SESSION_EXPIRES_AT_ENV]?.trim() ?? "";
+  if (
+    managementTokenExpiresAt &&
+    hasExpiredTimestamp({
+      value: managementTokenExpiresAt,
+      nowMs: input.nowMs,
+    })
+  ) {
+    return null;
+  }
+  return {
+    managementToken,
+    ...(managementTokenExpiresAt ? { managementTokenExpiresAt } : {}),
+  };
+}
+
+function buildHackAuthLoginRequiredError(input: {
+  readonly profileId: string;
+}): string {
+  return `Linear broker access for profile "${input.profileId}" requires Hack account login. Run \`hack auth login\` and retry.`;
+}
+
+function hasExpiredTimestamp(input: {
+  readonly value: string;
+  readonly nowMs: number;
+}): boolean {
+  const parsedMs = Date.parse(input.value);
+  return Number.isFinite(parsedMs) && parsedMs <= input.nowMs;
 }
 
 /**

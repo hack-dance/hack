@@ -1,0 +1,77 @@
+{
+  "surface": "account-shell-auth",
+  "toolsUsed": ["agent-browser", "curl", "./dist/hack", "bun", "python3"],
+  "assertionResults": [
+    {
+      "id": "VAL-ADMIN-001",
+      "status": "pass",
+      "reason": "The browser handoff landed on https://hack-cli.hack/account and rendered the signed-in account shell for UT Admin Shell. Broker /v1/auth/me returned the same userId/email/name for both the browser session cookie and the claimed management token, and isolated CLI auth status/whoami JSON matched the same identity with no active org or team. After clearing cookies, /account failed closed to a shell with only a Continue to sign in action instead of stale identity data.",
+      "evidence": [
+        "admin-control-plane/account-shell-auth/VAL-ADMIN-001-account-shell.annotated.png",
+        "admin-control-plane/account-shell-auth/VAL-ADMIN-001-account-shell.snapshot.txt",
+        "admin-control-plane/account-shell-auth/VAL-ADMIN-001-current-url.txt",
+        "admin-control-plane/account-shell-auth/broker-current-user-browser-session.json",
+        "admin-control-plane/account-shell-auth/broker-current-user-management-token.json",
+        "admin-control-plane/account-shell-auth/cli-auth-status.json",
+        "admin-control-plane/account-shell-auth/cli-auth-whoami.json",
+        "admin-control-plane/account-shell-auth/VAL-ADMIN-001-signed-out.annotated.png",
+        "admin-control-plane/account-shell-auth/VAL-ADMIN-001-signed-out.snapshot.txt"
+      ]
+    },
+    {
+      "id": "VAL-CROSS-002",
+      "status": "pass",
+      "reason": "The broker session-start flow issued a browser-owned authorizeUrl on https://hack-cli.hack/auth with a trusted redirect to https://hack-cli.hack/account. In the browser session, /auth?redirect=%2Faccount rendered the sign-in surface; after establishing the same authenticated identity through the claimed broker management token and following View browser handoff status, the browser landed on /account. Broker current-user and protected invitations routes both returned authenticated continuity for the same identity.",
+      "evidence": [
+        "admin-control-plane/account-shell-auth/auth-bootstrap.json",
+        "admin-control-plane/account-shell-auth/session-start.json",
+        "admin-control-plane/account-shell-auth/VAL-CROSS-002-auth-entrypoint.annotated.png",
+        "admin-control-plane/account-shell-auth/VAL-CROSS-002-auth-entrypoint.snapshot.txt",
+        "admin-control-plane/account-shell-auth/flow-claim.json",
+        "admin-control-plane/account-shell-auth/VAL-ADMIN-001-account-shell.annotated.png",
+        "admin-control-plane/account-shell-auth/broker-current-user-management-token.json",
+        "admin-control-plane/account-shell-auth/broker-invitations-management-token.json",
+        "admin-control-plane/account-shell-auth/cli-auth-status.json"
+      ]
+    }
+  ],
+  "frictions": [
+    {
+      "description": "agent-browser did not capture request entries for this local redirect flow after the handoff, even though the browser transition succeeded.",
+      "resolved": true,
+      "resolution": "Used direct HTTP response evidence from session-start, flow-claim, /v1/auth/me, and /v1/auth/invitations instead of relying on the empty browser-network-requests log.",
+      "affectedAssertions": ["VAL-ADMIN-001", "VAL-CROSS-002"],
+      "evidence": [
+        "admin-control-plane/account-shell-auth/browser-network-requests.txt"
+      ]
+    }
+  ],
+  "blockers": [],
+  "commands": [
+    {
+      "command": "curl -ksS -c <tmp>/better-auth.cookies.txt -b <tmp>/better-auth.cookies.txt -H 'origin: https://auth.hack-cli.hack' -H 'referer: https://auth.hack-cli.hack/' -H 'content-type: application/json' -X POST https://auth.hack-cli.hack/api/auth/sign-up/email ... || curl -ksS ... /api/auth/sign-in/email ...",
+      "observation": "Reused the isolated disposable account ut-admin-shell-43ecf94098e7.owner@example.com through the real Better Auth email/password API and stored the authenticated browser cookie jar."
+    },
+    {
+      "command": "curl -ksS https://auth.hack-cli.hack/v1/auth/session/start?redirect=https%3A%2F%2Fhack-cli.hack%2Faccount && curl -ksS -b <tmp>/better-auth.cookies.txt <bridge-url> && curl -ksS -b <tmp>/better-auth.cookies.txt https://auth.hack-cli.hack/v1/auth/session/flows/<flowId>?deviceCode=<deviceCode>&claim=1",
+      "observation": "Started a trusted /account browser handoff, completed the broker bridge for the same signed-in user, and claimed a management token for CLI parity checks."
+    },
+    {
+      "command": "agent-browser --session 43ecf94098e7__u1 open https://hack-cli.hack/auth?redirect=%2Faccount && screenshot --annotate .../VAL-CROSS-002-auth-entrypoint.annotated.png && snapshot -i",
+      "observation": "Captured the browser-owned auth entrypoint showing Continue with GitHub plus the View browser handoff status link for the requested /account redirect."
+    },
+    {
+      "command": "agent-browser --session 43ecf94098e7__u1 cookies set hack_web_broker_session <redacted> && click @e2 && wait --url **/account && screenshot --annotate .../VAL-ADMIN-001-account-shell.annotated.png",
+      "observation": "Following the browser handoff status link with the claimed management-token cookie landed the same browser session on https://hack-cli.hack/account and rendered the signed-in account shell."
+    },
+    {
+      "command": "HOME=<tmp>/home HACK_GLOBAL_CONFIG_PATH=<tmp>/global-config.json HACK_SECRETS_FILE_KEY=<redacted> HACK_AUTH_BROKER_URL=https://auth.hack-cli.hack /Users/hack/dev/hack-dance/hack/dist/hack auth status --json && ... auth whoami --json && ... auth invites --json",
+      "observation": "The isolated CLI session resolved the same authenticated user and empty invitations state as the broker responses."
+    },
+    {
+      "command": "agent-browser --session 43ecf94098e7__u1 cookies clear && open https://hack-cli.hack/account && snapshot -i",
+      "observation": "With cookies cleared, /account failed closed and exposed only a Continue to sign in action instead of stale identity context."
+    }
+  ],
+  "summary": "Passed 2/2 assertions. The browser-owned auth route for /account, broker current-user/protected-route responses, and isolated CLI auth status all agreed on the same UT Admin Shell identity and no active org/team context."
+}

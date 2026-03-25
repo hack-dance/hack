@@ -1,0 +1,24 @@
+{
+  "milestone": "admin-control-plane",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 7,
+    "passed": 7,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-ADMIN-001",
+    "VAL-ADMIN-002",
+    "VAL-ADMIN-003",
+    "VAL-ADMIN-004",
+    "VAL-ADMIN-005",
+    "VAL-ADMIN-006",
+    "VAL-CROSS-002"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [],
+  "previousRound": null
+}

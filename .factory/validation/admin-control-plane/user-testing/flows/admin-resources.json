@@ -1,0 +1,103 @@
+{
+  "surface": "admin-resources",
+  "toolsUsed": [
+    "python3",
+    "curl-equivalent broker HTTP via urllib",
+    "agent-browser",
+    "./dist/hack",
+    "bun"
+  ],
+  "assertionResults": [
+    {
+      "id": "VAL-ADMIN-002",
+      "status": "pass",
+      "reason": "A fresh owner account created `ut-admin-org-43ecf94098e7-r4` successfully, the broker made the creator the initial active organization member immediately, the owner org list returned exactly that visible org for the isolated account, the outsider org list was empty, and the browser account shell rendered the selected organization and its active members under the Organizations section.",
+      "evidence": [
+        "admin-control-plane/admin-resources/api-stage1.json",
+        "admin-control-plane/admin-resources/account-before-revoke.annotated.png",
+        "admin-control-plane/admin-resources/account-before-revoke.snapshot.txt"
+      ]
+    },
+    {
+      "id": "VAL-ADMIN-003",
+      "status": "pass",
+      "reason": "Recipient-controlled invite behavior held through the live broker and web shell state: a wrong-principal accept attempt on the orgmember invite returned `invitation_not_found`, the intended orgmember accepted successfully, a second invitee declined successfully, a pending outsider invite remained visible as pending in the browser and API before revoke, owner-side revoke returned `removed`, the outsider invitation list became empty, and accept-after-revoke failed with `invitation_not_found`.",
+      "evidence": [
+        "admin-control-plane/admin-resources/api-stage1.json",
+        "admin-control-plane/admin-resources/api-stage2.json",
+        "admin-control-plane/admin-resources/account-before-revoke.annotated.png",
+        "admin-control-plane/admin-resources/account-after-revoke.annotated.png"
+      ]
+    },
+    {
+      "id": "VAL-ADMIN-004",
+      "status": "pass",
+      "reason": "Team scope stayed explicitly tied to the parent org: creating a team without `org` failed validation (`422`), creating `ut-admin-team-43ecf94098e7-r4` with `org=ut-admin-org-43ecf94098e7-r4` succeeded, an org-only member received `team_not_found` when loading the team, and removing the cascade user from the parent org immediately made both team reads and org-scoped team creation fail with `team_not_found`/`org_not_found`.",
+      "evidence": [
+        "admin-control-plane/admin-resources/api-stage1.json",
+        "admin-control-plane/admin-resources/api-stage2.json",
+        "admin-control-plane/admin-resources/account-before-revoke.annotated.png",
+        "admin-control-plane/admin-resources/account-after-revoke.annotated.png"
+      ]
+    },
+    {
+      "id": "VAL-ADMIN-005",
+      "status": "pass",
+      "reason": "Team-only revoke preserved parent-org membership: the team member could load the selected team before removal, owner-side team removal by recipient email returned `removed`, the same team read failed with `team_not_found` afterward, and the removed user could still create a new team in the same parent organization (`200`), proving org membership remained active.",
+      "evidence": [
+        "admin-control-plane/admin-resources/api-stage2.json",
+        "admin-control-plane/admin-resources/account-after-revoke.annotated.png"
+      ]
+    },
+    {
+      "id": "VAL-ADMIN-006",
+      "status": "pass",
+      "reason": "Project registration and access control remained explicit and durable across browser, broker, and CLI surfaces. The owner registered `ut-admin-project-43ecf94098e7-r4` as a shared team-owned project, the browser rendered the project detail and explicit access grant before revoke and no grants after revoke, broker APIs showed the orgmember receiving viewer access only while the grant existed, and isolated repo-bound CLI `project owner show --json` on a temp repo with the same project name surfaced local ownership, the durable broker registration, and an explicit `ownership_mismatch` conflict instead of hiding broker state.",
+      "evidence": [
+        "admin-control-plane/admin-resources/api-stage1.json",
+        "admin-control-plane/admin-resources/api-stage2.json",
+        "admin-control-plane/admin-resources/account-before-revoke.annotated.png",
+        "admin-control-plane/admin-resources/account-after-revoke.annotated.png",
+        "admin-control-plane/admin-resources/cli-project-owner-show.json"
+      ]
+    }
+  ],
+  "frictions": [
+    {
+      "description": "The dedicated `user-testing-flow-validator` Task droid was unavailable for this second flow group, so the validator executed the live user-flow checks directly while preserving the same evidence/report format.",
+      "resolved": true,
+      "resolution": "Ran the owner browser surface, broker HTTP checks, and repo-bound CLI parity checks manually and wrote the flow report directly.",
+      "affectedAssertions": [
+        "VAL-ADMIN-002",
+        "VAL-ADMIN-003",
+        "VAL-ADMIN-004",
+        "VAL-ADMIN-005",
+        "VAL-ADMIN-006"
+      ]
+    }
+  ],
+  "blockers": [],
+  "commands": [
+    {
+      "command": "python3 /tmp/ut-admin-resources-43ecf94098e7/admin_flow.py stage1",
+      "observation": "Created isolated owner/orgmember/teammember/cascade/outsider/decliner identities, created the org and explicit team-scoped project, exercised invite accept and decline flows, validated explicit org requirement for team creation, granted project access, and claimed a management token for browser and CLI parity."
+    },
+    {
+      "command": "agent-browser --session 43ecf94098e7__u2 open https://hack-cli.hack ... screenshot --annotate <mission-dir>/evidence/admin-control-plane/admin-resources/account-before-revoke.annotated.png",
+      "observation": "Captured the signed-in owner account shell with the selected org/team/project visible, a pending org invite rendered in the browser, and an explicit project access grant visible before revoke."
+    },
+    {
+      "command": "python3 /tmp/ut-admin-resources-43ecf94098e7/admin_flow.py stage2",
+      "observation": "Revoked the pending org invite, verified accept-after-revoke failure, removed a team member while preserving parent-org access, removed a second member from the parent org to prove team-membership cascade, and revoked the explicit project access grant so the viewer project list returned empty again."
+    },
+    {
+      "command": "HOME=<tmp>/home HACK_GLOBAL_CONFIG_PATH=<tmp>/global-config.json HACK_SECRETS_FILE_KEY=<redacted> bun -e 'saveHackAuthSession(...)' && ./dist/hack project owner show --path <tmp>/project-repo --json",
+      "observation": "Stored the claimed management token in an isolated CLI session and confirmed repo-bound `project owner show --json` exposed both the default local ownership and the shared broker registration with an explicit ownership-mismatch conflict for the same project slug."
+    },
+    {
+      "command": "agent-browser --session 43ecf94098e7__u2 open https://hack-cli.hack/account?org=ut-admin-org-43ecf94098e7-r4&team=ut-admin-team-43ecf94098e7-r4&project=ut-admin-project-43ecf94098e7-r4 ... screenshot --annotate <mission-dir>/evidence/admin-control-plane/admin-resources/account-after-revoke.annotated.png && close",
+      "observation": "Captured the post-revoke owner shell with the pending invite removed, the team member list reduced, and the project detail showing no explicit grants remaining; browser errors stayed empty and console output only showed React DevTools/HMR development logs."
+    }
+  ],
+  "summary": "Passed 5/5 assertions. The live owner browser flow, broker APIs, and isolated repo-bound CLI parity checks all confirmed the admin-control-plane org, invite, team-scope, revoke, and project-admin behaviors for the isolated r4 dataset."
+}

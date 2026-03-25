@@ -208,6 +208,7 @@ describe("broker Hack session auth flow", () => {
         session: {
           userId: "user-123",
           email: null,
+          emailVerified: null,
           name: null,
           organizationId: null,
           teamId: null,
@@ -222,6 +223,7 @@ describe("broker Hack session auth flow", () => {
         session: {
           userId: "user-123",
           email: null,
+          emailVerified: null,
           name: null,
           organizationId: null,
           teamId: null,
@@ -733,7 +735,7 @@ describe("broker Hack session auth flow", () => {
     });
   });
 
-  test("management-token /v1/auth/me hydrates user and scoped names from durable Better Auth records", async () => {
+  test("management-token /v1/auth/me hydrates emailVerified, user, and scoped names from durable Better Auth records", async () => {
     await withManagementTokenSecret("session-auth-hydrate-secret", async () => {
       const session = {
         user: {
@@ -826,6 +828,7 @@ describe("broker Hack session auth flow", () => {
         readonly ok: true;
         readonly user: {
           readonly email: string | null;
+          readonly emailVerified: boolean;
           readonly name: string | null;
         } | null;
         readonly activeOrganization: {
@@ -840,6 +843,7 @@ describe("broker Hack session auth flow", () => {
 
       expect(mePayload.ok).toBe(true);
       expect(mePayload.user?.email).toBe("hydrated@example.com");
+      expect(mePayload.user?.emailVerified).toBe(true);
       expect(mePayload.user?.name).toBe("Hydrated User");
       expect(mePayload.activeOrganization).toEqual({
         id: "org-hydrated",

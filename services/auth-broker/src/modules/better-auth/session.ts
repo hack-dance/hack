@@ -12,6 +12,7 @@ const AUTHORIZATION_BEARER_PATTERN = /^Bearer\s+(.+)$/i;
 export type BrokerBetterAuthSession = {
   readonly userId: string;
   readonly email: string | null;
+  readonly emailVerified: boolean | null;
   readonly name: string | null;
   readonly organizationId: string | null;
   readonly teamId: string | null;
@@ -99,6 +100,7 @@ async function resolveManagementTokenSession(input: {
   return {
     userId: verification.claims.sub,
     email: user?.email ?? null,
+    emailVerified: user?.emailVerified ?? null,
     name: user?.name ?? null,
     organizationId: verification.claims.organizationId ?? null,
     teamId: verification.claims.teamId ?? null,
@@ -118,6 +120,7 @@ function toResolvedSession(input: {
   return {
     userId: input.session.user.id,
     email: normalizeOptionalString(input.session.user.email),
+    emailVerified: readOptionalBoolean(input.session.user.emailVerified),
     name: normalizeOptionalString(input.session.user.name),
     organizationId: extractBetterAuthOrganizationId(input.session),
     teamId: extractBetterAuthTeamId(input.session),
@@ -255,11 +258,16 @@ function normalizeOptionalString(value: unknown): string | null {
     : null;
 }
 
+function readOptionalBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
 async function readUserRecord(input: {
   readonly runtime: BetterAuthRuntime;
   readonly userId: string;
 }): Promise<{
   readonly email: string | null;
+  readonly emailVerified: boolean;
   readonly name: string | null;
 } | null> {
   const db = input.runtime.db;
@@ -274,6 +282,7 @@ async function readUserRecord(input: {
   const [record] = await db
     .select({
       email: betterAuthUser.email,
+      emailVerified: betterAuthUser.emailVerified,
       name: betterAuthUser.name,
     })
     .from(betterAuthUser)
@@ -285,6 +294,7 @@ async function readUserRecord(input: {
 
   return {
     email: normalizeOptionalString(record.email),
+    emailVerified: record.emailVerified === true,
     name: normalizeOptionalString(record.name),
   };
 }

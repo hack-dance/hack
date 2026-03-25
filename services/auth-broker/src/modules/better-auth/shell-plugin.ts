@@ -72,6 +72,10 @@ type BrowserSessionUser = {
   readonly teamId: string | null;
 };
 
+type BrowserSessionUserCandidate = Omit<BrowserSessionUser, "emailVerified"> & {
+  readonly emailVerified: boolean | null;
+};
+
 type SessionFlowLifecycle =
   | {
       readonly state: "none";
@@ -488,7 +492,7 @@ function getAccountLinkingPolicy(input: {
 function maybeCompleteSessionFlow(input: {
   readonly config: BrokerConfig;
   readonly flowStore: FlowStore;
-  readonly browserSession: BrowserSessionUser | null;
+  readonly browserSession: BrowserSessionUserCandidate | null;
   readonly flowId?: string;
   readonly deviceCode?: string;
   readonly returnUrl: string | null;
@@ -574,7 +578,7 @@ function maybeCompleteSessionFlow(input: {
       accountId: input.browserSession.id,
       accountName: input.browserSession.name ?? undefined,
       accountEmail: input.browserSession.email ?? undefined,
-      accountEmailVerified: input.browserSession.emailVerified,
+      accountEmailVerified: input.browserSession.emailVerified ?? false,
       betterAuthUserId: input.browserSession.id,
     },
     managementToken: managementToken?.token,
@@ -593,7 +597,7 @@ function toBrowserSessionUser(input: {
   readonly fallbackSession?: Awaited<
     ReturnType<typeof resolveBetterAuthSession>
   >["session"];
-}): BrowserSessionUser | null {
+}): BrowserSessionUserCandidate | null {
   const record = readRecord(input.session);
   const user = readRecord(record?.user);
   const userId =
@@ -606,7 +610,10 @@ function toBrowserSessionUser(input: {
     id: userId,
     email:
       normalizeText(user?.email) ?? normalizeText(input.fallbackSession?.email),
-    emailVerified: user?.emailVerified === true,
+    emailVerified:
+      readOptionalBoolean(user?.emailVerified) ??
+      input.fallbackSession?.emailVerified ??
+      null,
     name:
       normalizeText(user?.name) ?? normalizeText(input.fallbackSession?.name),
     organizationId:
@@ -640,7 +647,10 @@ async function hydrateBrowserSessionUser(input: {
     current.name &&
     typeof current.emailVerified === "boolean"
   ) {
-    return current;
+    return {
+      ...current,
+      emailVerified: current.emailVerified,
+    };
   }
 
   const storedUser = await readUserRecord({
@@ -648,7 +658,12 @@ async function hydrateBrowserSessionUser(input: {
     userId,
   });
   if (!storedUser) {
-    return current;
+    return current
+      ? {
+          ...current,
+          emailVerified: current.emailVerified ?? false,
+        }
+      : null;
   }
 
   return {
@@ -1774,7 +1789,7 @@ function renderHtmlPage(input: {
 }
 
 function buildWebBrokerSessionCookie(input: {
-  readonly browserSession: BrowserSessionUser | null;
+  readonly browserSession: BrowserSessionUserCandidate | null;
   readonly webAppBaseUrl: string;
   readonly requestUrl: string;
 }): string | null {
@@ -2020,6 +2035,10 @@ function normalizeText(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0
     ? value.trim()
     : null;
+}
+
+function readOptionalBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
 }
 
 function readRecord(value: unknown): Record<string, unknown> | null {

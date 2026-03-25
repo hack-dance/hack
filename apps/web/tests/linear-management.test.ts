@@ -24,6 +24,102 @@ test("linear management command environment prefers env-only token lookup unless
   });
 });
 
+function buildEnvOnlyRepairManagementState(input: {
+  readonly includeHackConnection: boolean;
+  readonly localAccessAvailable?: boolean;
+}) {
+  return buildLinearManagementState({
+    status: {
+      extensionId: "dance.hack.linear",
+      selectedProfile: "work",
+      selectedSource: "project_routing",
+      defaultProfile: "default",
+      selectedMissing: false,
+      authRef: "linear.api.work",
+      service: "hack-linear-work",
+      tokenEnvFallback: "HACK_LINEAR_API_TOKEN",
+      apiUrl: "https://api.linear.app/graphql",
+      accountId: null,
+      accountName: null,
+      accountEmail: null,
+      tokenResolved: false,
+      tokenSource: null,
+      tokenExpiresAt: null,
+      error:
+        'Missing Linear token for profile "work" while HACK_LINEAR_PREFER_ENV_TOKEN_ONLY=true. Set HACK_LINEAR_API_TOKEN, or unset HACK_LINEAR_PREFER_ENV_TOKEN_ONLY to allow saved local access.',
+      profileError: null,
+      ok: false,
+      projectBinding: {
+        ok: true,
+        profileId: "work",
+        projectId: "proj_default",
+        projectName: "Default",
+        teamId: "team_default",
+        additionalProjects: [],
+      },
+      summary: {
+        activeProfile: "work",
+        connected: false,
+        connectionLabel: "Not connected",
+        routingSummary:
+          "This repo routes Linear sync to Default (proj_default) in team team_default.",
+        linkedProjectsLabel: null,
+        capabilities: ["Repair local Linear access for the active profile"],
+        repair: {
+          reason:
+            "Env-only Linear access is enabled but the token env var is missing.",
+          command: "export HACK_LINEAR_API_TOKEN=<linear-token>",
+        },
+        nextSteps: [
+          "Run `export HACK_LINEAR_API_TOKEN=<linear-token>`.",
+        ] as const,
+      },
+    },
+    profiles: {
+      defaultProfileId: "default",
+      selectedProfileId: "work",
+      selectedProfileSource: "project_routing",
+      selectedProfileMissing: false,
+      projectProfileOverride: "work",
+      profiles: [
+        {
+          id: "work",
+          isDefault: false,
+          authRef: "linear.api.work",
+          service: "hack-linear-work",
+          tokenEnv: "HACK_LINEAR_WORK_TOKEN",
+          apiUrl: "https://api.linear.app/graphql",
+          accountName: "Hack User",
+        },
+      ],
+    },
+    connections: {
+      accessControlMode: "better_auth_team_owned",
+      connections: input.includeHackConnection
+        ? [
+            {
+              id: "connection_123",
+              profileId: "work",
+              accountId: "lin-user-1",
+              accountName: "Hack User",
+              accountEmail: "hack@example.com",
+              authRef: "linear.api.work",
+              betterAuthUserId: "user-123",
+              betterAuthOrganizationId: "org-123",
+              betterAuthTeamId: "team-123",
+              organizationId: "lin-org-1",
+              teamId: "lin-team-1",
+              localAccessAvailable: input.localAccessAvailable ?? false,
+              metadata: {},
+              createdAt: "2026-03-25T00:00:00.000Z",
+              updatedAt: "2026-03-25T00:00:00.000Z",
+            },
+          ]
+        : [],
+    },
+    canInspectHackConnection: true,
+  });
+}
 test("linear management state prefers seeded local repair when Hack already holds local access", () => {
   const state = buildLinearManagementState({
     status: {
@@ -232,6 +328,47 @@ test("linear management state offers a Hack claim repair when local access works
     reason:
       "This machine can use Linear, but Hack does not have a broker-owned connection for the active profile yet.",
     command: "hack linear connect --profile work",
+  });
+});
+
+test("linear management state prefers Hack reseed over env-only repair when Hack already holds local access", () => {
+  const state = buildEnvOnlyRepairManagementState({
+    includeHackConnection: true,
+    localAccessAvailable: true,
+  });
+
+  expect(state.repair).toEqual({
+    title: "Seed local access from Hack",
+    reason:
+      "Hack already has protected local access for this profile; reseed it on this machine instead of reconnecting.",
+    command: "hack linear seed-local-access --profile work",
+  });
+});
+
+test("linear management state prefers reconnect over env-only repair when Hack owns the profile without reseedable local access", () => {
+  const state = buildEnvOnlyRepairManagementState({
+    includeHackConnection: true,
+    localAccessAvailable: false,
+  });
+
+  expect(state.repair).toEqual({
+    title: "Reconnect local Linear access",
+    reason:
+      "Hack already knows this profile, but this machine still needs fresh protected local access stored locally.",
+    command: "hack linear connect --profile work",
+  });
+});
+
+test("linear management state keeps env-token repair when Hack does not own the active profile", () => {
+  const state = buildEnvOnlyRepairManagementState({
+    includeHackConnection: false,
+  });
+
+  expect(state.repair).toEqual({
+    title: "Set the env token",
+    reason:
+      "Env-only Linear access is enabled but the token env var is missing.",
+    command: "export HACK_LINEAR_API_TOKEN=<linear-token>",
   });
 });
 

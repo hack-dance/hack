@@ -312,6 +312,7 @@ export function buildLinearManagementState(input: {
     connectionsLoaded: input.connectionsLoaded ?? Boolean(input.connections),
     selectedConnection,
     summaryRepair: input.status.summary.repair,
+    tokenEnvFallback: input.status.tokenEnvFallback,
     tokenResolved: input.status.tokenResolved,
   });
 
@@ -586,8 +587,12 @@ function buildLinearRepairState(input: {
   readonly connectionsLoaded: boolean;
   readonly selectedConnection: LinearConnectionSummary | null;
   readonly summaryRepair: LinearRepairAction | null;
+  readonly tokenEnvFallback: string;
   readonly tokenResolved: boolean;
 }): LinearManagementState["repair"] {
+  const reconnectCommand = `hack linear connect --profile ${input.activeProfile}`;
+  const envOnlyRepairCommand = `export ${input.tokenEnvFallback}=<linear-token>`;
+
   if (
     input.canInspectHackConnection &&
     input.connectionsLoaded &&
@@ -598,7 +603,7 @@ function buildLinearRepairState(input: {
       title: "Connect this profile on Hack",
       reason:
         "This machine can use Linear, but Hack does not have a broker-owned connection for the active profile yet.",
-      command: `hack linear connect --profile ${input.activeProfile}`,
+      command: reconnectCommand,
     };
   }
 
@@ -607,8 +612,8 @@ function buildLinearRepairState(input: {
   }
 
   if (
-    input.summaryRepair.command ===
-      `hack linear connect --profile ${input.activeProfile}` &&
+    (input.summaryRepair.command === reconnectCommand ||
+      input.summaryRepair.command === envOnlyRepairCommand) &&
     input.selectedConnection?.localAccessAvailable
   ) {
     return {
@@ -620,8 +625,8 @@ function buildLinearRepairState(input: {
   }
 
   if (
-    input.summaryRepair.command ===
-      `hack linear connect --profile ${input.activeProfile}` &&
+    (input.summaryRepair.command === reconnectCommand ||
+      input.summaryRepair.command === envOnlyRepairCommand) &&
     input.selectedConnection &&
     !input.selectedConnection.localAccessAvailable
   ) {
@@ -629,7 +634,7 @@ function buildLinearRepairState(input: {
       title: "Reconnect local Linear access",
       reason:
         "Hack already knows this profile, but this machine still needs fresh protected local access stored locally.",
-      command: input.summaryRepair.command,
+      command: reconnectCommand,
     };
   }
 

@@ -1,13 +1,14 @@
 ---
 kind: linear-project-status-update
-linearProjectId: 7a3c8adf-ede5-4d3a-8779-9c32695c76bf
+linearProjectId: "7a3c8adf-ede5-4d3a-8779-9c32695c76bf"
 title: Mission freeze for optional web control plane
+linearId: "5c842fc1-164f-4f1e-b4bf-d7305ca1133b"
 slug: mission-freeze-optional-web-control-plane
 archived: false
+updatedAt: "2026-03-25T15:08:58.123Z"
 date: "2026-03-24"
+publishedAt: "2026-03-25T15:08:58.123Z"
 health: onTrack
-linkedMilestoneIds:
-  - ab9a91c4-9de7-47fe-82f7-542ea8237684
 ---
 ## Summary
 

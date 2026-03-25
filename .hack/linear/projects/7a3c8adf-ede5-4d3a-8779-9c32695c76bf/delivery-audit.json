@@ -1,0 +1,16 @@
+{
+  "projectId": "7a3c8adf-ede5-4d3a-8779-9c32695c76bf",
+  "projectIds": ["7a3c8adf-ede5-4d3a-8779-9c32695c76bf"],
+  "profileId": "default",
+  "updatedAt": "2026-03-25T15:09:02.519Z",
+  "processedDeliveries": 0,
+  "appliedDeliveries": 0,
+  "failedDeliveries": 0,
+  "skippedDeliveries": 0,
+  "created": 0,
+  "updated": 0,
+  "commentsPulled": 0,
+  "conflictsRecorded": 0,
+  "checkpointsRecorded": 0,
+  "deliveries": []
+}

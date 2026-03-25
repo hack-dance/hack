@@ -61,6 +61,12 @@ test("account control plane data loads visible org detail and incoming invitatio
           ],
         });
       }
+      if (url === "https://auth.hack-cli.hack/v1/auth/projects") {
+        return Response.json({
+          ok: true,
+          projects: [],
+        });
+      }
       if (url === "https://auth.hack-cli.hack/v1/auth/orgs/hack") {
         return Response.json({
           ok: true,
@@ -130,6 +136,10 @@ test("account control plane data loads visible org detail and incoming invitatio
     },
     {
       authorization: "Bearer session-token",
+      url: "https://auth.hack-cli.hack/v1/auth/projects",
+    },
+    {
+      authorization: "Bearer session-token",
       url: "https://auth.hack-cli.hack/v1/auth/orgs/hack",
     },
     {
@@ -184,6 +194,12 @@ test("account control plane data fails closed when the requested org is not visi
           invitations: [],
         });
       }
+      if (url === "https://auth.hack-cli.hack/v1/auth/projects") {
+        return Response.json({
+          ok: true,
+          projects: [],
+        });
+      }
       throw new Error(`Unexpected fetch URL: ${url}`);
     },
   });
@@ -191,6 +207,7 @@ test("account control plane data fails closed when the requested org is not visi
   expect(calls).toEqual([
     "https://auth.hack-cli.hack/v1/auth/orgs",
     "https://auth.hack-cli.hack/v1/auth/invitations",
+    "https://auth.hack-cli.hack/v1/auth/projects",
   ]);
   expect(data.selectedOrganizationVisible).toBe(false);
   expect(data.selectedOrganization).toBeNull();
@@ -235,6 +252,12 @@ test("account control plane data loads visible team detail with explicit org sco
         return Response.json({
           ok: true,
           invitations: [],
+        });
+      }
+      if (url === "https://auth.hack-cli.hack/v1/auth/projects") {
+        return Response.json({
+          ok: true,
+          projects: [],
         });
       }
       if (url === "https://auth.hack-cli.hack/v1/auth/orgs/hack") {
@@ -332,6 +355,10 @@ test("account control plane data loads visible team detail with explicit org sco
     },
     {
       authorization: "Bearer session-token",
+      url: "https://auth.hack-cli.hack/v1/auth/projects",
+    },
+    {
+      authorization: "Bearer session-token",
       url: "https://auth.hack-cli.hack/v1/auth/orgs/hack",
     },
     {
@@ -388,6 +415,12 @@ test("account control plane data fails closed when the requested team is not vis
           invitations: [],
         });
       }
+      if (url === "https://auth.hack-cli.hack/v1/auth/projects") {
+        return Response.json({
+          ok: true,
+          projects: [],
+        });
+      }
       if (url === "https://auth.hack-cli.hack/v1/auth/orgs/hack") {
         return Response.json({
           ok: true,
@@ -428,6 +461,7 @@ test("account control plane data fails closed when the requested team is not vis
   expect(calls).toEqual([
     "https://auth.hack-cli.hack/v1/auth/orgs",
     "https://auth.hack-cli.hack/v1/auth/invitations",
+    "https://auth.hack-cli.hack/v1/auth/projects",
     "https://auth.hack-cli.hack/v1/auth/orgs/hack",
     "https://auth.hack-cli.hack/v1/auth/orgs/hack/members",
     "https://auth.hack-cli.hack/v1/auth/teams?org=hack",

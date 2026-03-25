@@ -6,7 +6,10 @@ import {
   createSharedBetterAuthContract,
 } from "@hack/auth-contract";
 
-import { resolveDefaultOrgTeamsStore } from "../src/app.ts";
+import {
+  resolveDefaultOrgTeamsStore,
+  resolveDefaultProjectStore,
+} from "../src/app.ts";
 import type { BetterAuthRuntime } from "../src/better-auth.ts";
 import { FlowStore } from "../src/flow-store.ts";
 import {
@@ -63,12 +66,17 @@ type SessionStartFlowResponse = {
 installAuthBrokerEnvIsolation();
 
 test("startup output makes the dev-only org/team fallback explicit", () => {
-  const { mode } = resolveDefaultOrgTeamsStore({
+  const orgTeamsStore = resolveDefaultOrgTeamsStore({
     databaseUrl: undefined,
+  });
+  const projectStore = resolveDefaultProjectStore({
+    databaseUrl: undefined,
+    orgStore: orgTeamsStore.store,
   });
   const output = formatAuthBrokerStartupMessages({
     config: createTestConfig(),
-    orgTeamsStoreMode: mode,
+    orgTeamsStoreMode: orgTeamsStore.mode,
+    projectStoreMode: projectStore.mode,
   });
   expect(output).toContain("[auth-broker] listening on 127.0.0.1:0");
   expect(output).toContain("development-only in-memory mode");

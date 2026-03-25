@@ -27,6 +27,11 @@ export const shellNavigationItems = [
     description: "Manage explicit parent-org team scope and memberships.",
   },
   {
+    href: "#projects",
+    label: "Projects",
+    description: "Register shared projects and manage explicit project access.",
+  },
+  {
     href: "#invitations",
     label: "Invitations",
     description: "Accept or decline pending invites for this account.",

@@ -43,6 +43,38 @@ export type AccountInvitationRecord = {
   readonly updatedAt: string;
 };
 
+export type AccountProjectOwnershipRecord = {
+  readonly mode: "local" | "shared";
+  readonly ownerType: "user" | "organization" | "team";
+  readonly ownerId: string | null;
+  readonly ownerSlug: string | null;
+  readonly ownerName: string | null;
+  readonly managedBy: "local" | "broker";
+};
+
+export type AccountProjectRecord = {
+  readonly id: string;
+  readonly slug: string;
+  readonly name: string;
+  readonly ownership: AccountProjectOwnershipRecord;
+  readonly currentAccessRole: "viewer" | "admin" | "owner";
+  readonly createdAt: string;
+  readonly updatedAt: string;
+};
+
+export type AccountProjectAccessGrantRecord = {
+  readonly id: string;
+  readonly scope: "organization" | "team";
+  readonly role: "viewer" | "admin";
+  readonly subjectId: string;
+  readonly subjectSlug: string;
+  readonly subjectName: string;
+  readonly organizationId: string;
+  readonly teamId: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+};
+
 export type AccountControlPlaneData = {
   readonly requestedOrganizationKey: string | null;
   readonly selectedOrganizationVisible: boolean;
@@ -55,6 +87,11 @@ export type AccountControlPlaneData = {
   readonly selectedTeam: AccountTeamRecord | null;
   readonly selectedTeamMemberships: readonly AccountMembershipRecord[];
   readonly incomingInvitations: readonly AccountInvitationRecord[];
+  readonly requestedProjectKey: string | null;
+  readonly selectedProjectVisible: boolean;
+  readonly projects: readonly AccountProjectRecord[];
+  readonly selectedProject: AccountProjectRecord | null;
+  readonly selectedProjectAccess: readonly AccountProjectAccessGrantRecord[];
 };
 
 export type AccountControlPlaneFeedback = {
@@ -111,6 +148,21 @@ const controlPlaneNoticeFeedback = {
     title: "Invitation declined",
     body: "Hack removed the pending invitation without granting access.",
   },
+  project_registered: {
+    tone: "success",
+    title: "Project registered",
+    body: "Hack stored the durable shared project registration and kept its ownership scope explicit.",
+  },
+  project_access_granted: {
+    tone: "success",
+    title: "Project access granted",
+    body: "Hack stored the explicit project access grant without inferring stale org or team ownership.",
+  },
+  project_access_revoked: {
+    tone: "success",
+    title: "Project access revoked",
+    body: "Hack removed the selected project access grant while preserving the remaining shared ownership metadata.",
+  },
 } as const satisfies Record<string, AccountControlPlaneFeedback>;
 
 const controlPlaneErrorFeedback = {
@@ -164,6 +216,26 @@ const controlPlaneErrorFeedback = {
     title: "Could not decline the invitation",
     body: "Hack could not decline this invitation for the current account.",
   },
+  project_registration_conflict: {
+    tone: "danger",
+    title: "Project ownership conflict",
+    body: "Hack found an existing durable registration for this slug with different ownership. Resolve the conflict explicitly before reusing the project key.",
+  },
+  project_register_failed: {
+    tone: "danger",
+    title: "Could not register the project",
+    body: "Hack could not store the project registration. Verify the selected owner scope and try again.",
+  },
+  project_access_grant_failed: {
+    tone: "danger",
+    title: "Could not grant project access",
+    body: "Hack could not store the selected project access grant. Verify the shared scope and try again.",
+  },
+  project_access_revoke_failed: {
+    tone: "danger",
+    title: "Could not revoke project access",
+    body: "Hack could not remove the selected project access grant. Refresh the page and try again.",
+  },
 } as const satisfies Record<string, AccountControlPlaneFeedback>;
 
 export async function loadAccountControlPlaneData(input: {
@@ -171,12 +243,14 @@ export async function loadAccountControlPlaneData(input: {
   readonly token: string;
   readonly selectedOrganizationKey?: string | null;
   readonly selectedTeamKey?: string | null;
+  readonly selectedProjectKey?: string | null;
   readonly fetchImplementation?: BrokerFetch;
 }): Promise<AccountControlPlaneData> {
   const fetchImplementation = input.fetchImplementation ?? fetch;
   const requestedOrganizationKey = normalizeText(input.selectedOrganizationKey);
   const requestedTeamKey = normalizeText(input.selectedTeamKey);
-  const [organizations, incomingInvitations] = await Promise.all([
+  const requestedProjectKey = normalizeText(input.selectedProjectKey);
+  const [organizations, incomingInvitations, projects] = await Promise.all([
     fetchOrganizations({
       authBrokerProxyBaseUrl: input.authBrokerProxyBaseUrl,
       token: input.token,
@@ -187,7 +261,24 @@ export async function loadAccountControlPlaneData(input: {
       token: input.token,
       fetchImplementation,
     }),
+    fetchProjects({
+      authBrokerProxyBaseUrl: input.authBrokerProxyBaseUrl,
+      token: input.token,
+      fetchImplementation,
+    }),
   ]);
+  const selectedProjectCandidate = resolveSelectedProject({
+    projects,
+    requestedProjectKey,
+  });
+  const selectedProjectAccess = selectedProjectCandidate
+    ? await fetchProjectAccess({
+        authBrokerProxyBaseUrl: input.authBrokerProxyBaseUrl,
+        projectKey: selectedProjectCandidate.slug,
+        token: input.token,
+        fetchImplementation,
+      })
+    : [];
 
   const selectedOrganizationCandidate = resolveSelectedOrganization({
     organizations,
@@ -207,6 +298,13 @@ export async function loadAccountControlPlaneData(input: {
       selectedTeam: null,
       selectedTeamMemberships: [],
       incomingInvitations,
+      requestedProjectKey,
+      selectedProjectVisible: selectedProjectCandidate
+        ? true
+        : !requestedProjectKey,
+      projects,
+      selectedProject: selectedProjectCandidate,
+      selectedProjectAccess,
     };
   }
 
@@ -250,6 +348,13 @@ export async function loadAccountControlPlaneData(input: {
       selectedTeam: null,
       selectedTeamMemberships: [],
       incomingInvitations,
+      requestedProjectKey,
+      selectedProjectVisible: selectedProjectCandidate
+        ? true
+        : !requestedProjectKey,
+      projects,
+      selectedProject: selectedProjectCandidate,
+      selectedProjectAccess,
     };
   }
 
@@ -283,6 +388,13 @@ export async function loadAccountControlPlaneData(input: {
     selectedTeam,
     selectedTeamMemberships,
     incomingInvitations,
+    requestedProjectKey,
+    selectedProjectVisible: selectedProjectCandidate
+      ? true
+      : !requestedProjectKey,
+    projects,
+    selectedProject: selectedProjectCandidate,
+    selectedProjectAccess,
   };
 }
 
@@ -293,6 +405,8 @@ export function resolveAccountControlPlaneFeedback(input: {
   readonly selectedOrganizationVisible?: boolean;
   readonly requestedTeamKey?: string | null;
   readonly selectedTeamVisible?: boolean;
+  readonly requestedProjectKey?: string | null;
+  readonly selectedProjectVisible?: boolean;
 }): AccountControlPlaneFeedback | null {
   const notice = normalizeText(input.notice);
   if (notice) {
@@ -340,6 +454,15 @@ export function resolveAccountControlPlaneFeedback(input: {
     };
   }
 
+  const requestedProjectKey = normalizeText(input.requestedProjectKey);
+  if (requestedProjectKey && input.selectedProjectVisible === false) {
+    return {
+      tone: "info",
+      title: "Project not visible",
+      body: "The requested project is not visible to the current account. Shared project access stays scoped to explicit durable grants.",
+    };
+  }
+
   return null;
 }
 
@@ -349,6 +472,7 @@ export function buildAccountControlPlanePath(input: {
   readonly error?: string | null;
   readonly org?: string | null;
   readonly team?: string | null;
+  readonly project?: string | null;
 }): string {
   const redirectTo = normalizeAccountRedirectPath({
     value: input.redirectTo,
@@ -370,6 +494,13 @@ export function buildAccountControlPlanePath(input: {
     url.searchParams.set("team", team);
   } else {
     url.searchParams.delete("team");
+  }
+
+  const project = normalizeText(input.project);
+  if (project) {
+    url.searchParams.set("project", project);
+  } else {
+    url.searchParams.delete("project");
   }
 
   const notice = normalizeText(input.notice);
@@ -481,6 +612,39 @@ async function fetchIncomingInvitations(input: {
     fetchImplementation: input.fetchImplementation,
   });
   return normalizeInvitations(payload?.invitations);
+}
+
+async function fetchProjects(input: {
+  readonly authBrokerProxyBaseUrl: string;
+  readonly token: string;
+  readonly fetchImplementation: BrokerFetch;
+}): Promise<readonly AccountProjectRecord[]> {
+  const payload = await fetchBrokerPayload<{
+    readonly projects?: readonly unknown[];
+  }>({
+    authBrokerProxyBaseUrl: input.authBrokerProxyBaseUrl,
+    token: input.token,
+    path: "/v1/auth/projects",
+    fetchImplementation: input.fetchImplementation,
+  });
+  return normalizeProjects(payload?.projects);
+}
+
+async function fetchProjectAccess(input: {
+  readonly authBrokerProxyBaseUrl: string;
+  readonly projectKey: string;
+  readonly token: string;
+  readonly fetchImplementation: BrokerFetch;
+}): Promise<readonly AccountProjectAccessGrantRecord[]> {
+  const payload = await fetchBrokerPayload<{
+    readonly access?: readonly unknown[];
+  }>({
+    authBrokerProxyBaseUrl: input.authBrokerProxyBaseUrl,
+    token: input.token,
+    path: `/v1/auth/projects/${encodeURIComponent(input.projectKey)}/access`,
+    fetchImplementation: input.fetchImplementation,
+  });
+  return normalizeProjectAccess(payload?.access);
 }
 
 async function fetchSelectedOrganization(input: {
@@ -633,6 +797,23 @@ function resolveSelectedTeam(input: {
   );
 }
 
+function resolveSelectedProject(input: {
+  readonly projects: readonly AccountProjectRecord[];
+  readonly requestedProjectKey: string | null;
+}): AccountProjectRecord | null {
+  if (!input.requestedProjectKey) {
+    return input.projects[0] ?? null;
+  }
+  return (
+    input.projects.find((project) => {
+      return (
+        project.slug === input.requestedProjectKey ||
+        project.id === input.requestedProjectKey
+      );
+    }) ?? null
+  );
+}
+
 function normalizeOrganizations(
   value: readonly unknown[] | undefined
 ): readonly AccountOrganizationRecord[] {
@@ -649,6 +830,14 @@ function normalizeTeams(
   return (value ?? [])
     .map((team) => normalizeTeam(team))
     .filter((team): team is AccountTeamRecord => Boolean(team));
+}
+
+function normalizeProjects(
+  value: readonly unknown[] | undefined
+): readonly AccountProjectRecord[] {
+  return (value ?? [])
+    .map((project) => normalizeProject(project))
+    .filter((project): project is AccountProjectRecord => Boolean(project));
 }
 
 function normalizeOrganization(
@@ -698,6 +887,44 @@ function normalizeTeam(value: unknown): AccountTeamRecord | null {
     slug,
     name,
     organizationId,
+    createdAt,
+    updatedAt,
+  };
+}
+
+function normalizeProject(value: unknown): AccountProjectRecord | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const id = normalizeText(value.id);
+  const slug = normalizeText(value.slug);
+  const name = normalizeText(value.name);
+  const createdAt = normalizeText(value.createdAt);
+  const updatedAt = normalizeText(value.updatedAt);
+  const currentAccessRole = normalizeProjectAccessRole(value.currentAccessRole);
+  const ownership = normalizeProjectOwnership(value.ownership);
+
+  if (
+    !(
+      id &&
+      slug &&
+      name &&
+      createdAt &&
+      updatedAt &&
+      currentAccessRole &&
+      ownership
+    )
+  ) {
+    return null;
+  }
+
+  return {
+    id,
+    slug,
+    name,
+    currentAccessRole,
+    ownership,
     createdAt,
     updatedAt,
   };
@@ -754,6 +981,16 @@ function normalizeMembership(value: unknown): AccountMembershipRecord | null {
   };
 }
 
+function normalizeProjectAccess(
+  value: readonly unknown[] | undefined
+): readonly AccountProjectAccessGrantRecord[] {
+  return (value ?? [])
+    .map((grant) => normalizeProjectAccessGrant(grant))
+    .filter((grant): grant is AccountProjectAccessGrantRecord =>
+      Boolean(grant)
+    );
+}
+
 function normalizeInvitations(
   value: readonly unknown[] | undefined
 ): readonly AccountInvitationRecord[] {
@@ -804,6 +1041,75 @@ function normalizeInvitation(value: unknown): AccountInvitationRecord | null {
   };
 }
 
+function normalizeProjectOwnership(
+  value: unknown
+): AccountProjectOwnershipRecord | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const mode = normalizeProjectOwnershipMode(value.mode);
+  const ownerType = normalizeProjectOwnerType(value.ownerType);
+  const managedBy = normalizeProjectOwnershipManager(value.managedBy);
+  if (!(mode && ownerType && managedBy)) {
+    return null;
+  }
+  return {
+    mode,
+    ownerType,
+    ownerId: normalizeText(value.ownerId),
+    ownerSlug: normalizeText(value.ownerSlug),
+    ownerName: normalizeText(value.ownerName),
+    managedBy,
+  };
+}
+
+function normalizeProjectAccessGrant(
+  value: unknown
+): AccountProjectAccessGrantRecord | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const id = normalizeText(value.id);
+  const scope = normalizeMembershipScope(value.scope);
+  const role = normalizeProjectGrantRole(value.role);
+  const subjectId = normalizeText(value.subjectId);
+  const subjectSlug = normalizeText(value.subjectSlug);
+  const subjectName = normalizeText(value.subjectName);
+  const organizationId = normalizeText(value.organizationId);
+  const createdAt = normalizeText(value.createdAt);
+  const updatedAt = normalizeText(value.updatedAt);
+
+  if (
+    !(
+      id &&
+      scope &&
+      role &&
+      subjectId &&
+      subjectSlug &&
+      subjectName &&
+      organizationId &&
+      createdAt &&
+      updatedAt
+    )
+  ) {
+    return null;
+  }
+
+  return {
+    id,
+    scope,
+    role,
+    subjectId,
+    subjectSlug,
+    subjectName,
+    organizationId,
+    teamId: normalizeText(value.teamId),
+    createdAt,
+    updatedAt,
+  };
+}
+
 function normalizeMembershipScope(
   value: unknown
 ): "organization" | "team" | null {
@@ -824,6 +1130,38 @@ function normalizeInvitationStatus(
   return value === "pending" || value === "accepted" || value === "removed"
     ? value
     : null;
+}
+
+function normalizeProjectOwnershipMode(
+  value: unknown
+): "local" | "shared" | null {
+  return value === "local" || value === "shared" ? value : null;
+}
+
+function normalizeProjectOwnerType(
+  value: unknown
+): "user" | "organization" | "team" | null {
+  return value === "user" || value === "organization" || value === "team"
+    ? value
+    : null;
+}
+
+function normalizeProjectOwnershipManager(
+  value: unknown
+): "local" | "broker" | null {
+  return value === "local" || value === "broker" ? value : null;
+}
+
+function normalizeProjectAccessRole(
+  value: unknown
+): "viewer" | "admin" | "owner" | null {
+  return value === "viewer" || value === "admin" || value === "owner"
+    ? value
+    : null;
+}
+
+function normalizeProjectGrantRole(value: unknown): "viewer" | "admin" | null {
+  return value === "viewer" || value === "admin" ? value : null;
 }
 
 function normalizeStringArray(value: unknown): readonly string[] {

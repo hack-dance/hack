@@ -15,6 +15,7 @@ test("control plane shell metadata describes the accessible foundation", () => {
     "#account-context",
     "#organizations",
     "#teams",
+    "#projects",
     "#invitations",
     "#foundations",
     "#guardrails",
@@ -38,6 +39,7 @@ test("control plane shell renders landmarks and keyboard navigation affordances"
   expect(markup).toContain("Sign in to load your Hack account context");
   expect(markup).toContain("Organizations");
   expect(markup).toContain("Teams");
+  expect(markup).toContain("Projects");
   expect(markup).toContain("Invitations");
 });
 

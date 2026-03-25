@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type { AccountControlPlaneFeedback } from "@/src/lib/account-control-plane";
 import { buildAccountControlPlanePath } from "@/src/lib/account-control-plane";
 import type { AccountShellContext } from "@/src/lib/account-shell";
@@ -43,10 +44,14 @@ export default function AccountControlPlaneSections({
   const selectedTeamKey = account.authenticated
     ? (account.selectedTeam?.slug ?? account.requestedTeamKey)
     : null;
+  const selectedProjectKey = account.authenticated
+    ? (account.selectedProject?.slug ?? account.requestedProjectKey)
+    : null;
   const scopedReturnPath = buildAccountControlPlanePath({
     redirectTo: returnToPath,
     org: selectedOrganizationKey,
     team: selectedTeamKey,
+    project: selectedProjectKey,
   });
   const baseReturnPath = buildAccountControlPlanePath({
     redirectTo: returnToPath,
@@ -64,6 +69,7 @@ export default function AccountControlPlaneSections({
             feedback.tone === "danger" && "border-rose-300/30 bg-rose-500/10",
             feedback.tone === "info" && "border-sky-300/30 bg-sky-500/10"
           )}
+          data-feedback-key={feedback.title.toLowerCase().replaceAll(" ", "_")}
           role={feedback.tone === "danger" ? "alert" : "status"}
         >
           <p className="font-medium text-sky-100 text-sm">{feedback.title}</p>
@@ -97,6 +103,8 @@ export default function AccountControlPlaneSections({
       </section>
 
       <TeamsSection account={account} returnToPath={returnToPath} />
+
+      <ProjectsSection account={account} returnToPath={returnToPath} />
 
       <section className="space-y-4" id="invitations">
         <div className="space-y-2">
@@ -771,6 +779,469 @@ function SelectedTeamDetail(input: {
           )}
         </section>
       </div>
+    </div>
+  );
+}
+
+function ProjectsSection(input: {
+  readonly account: AccountShellContext;
+  readonly returnToPath: string;
+}) {
+  if (!input.account.authenticated) {
+    return (
+      <section className="space-y-4" id="projects">
+        <div className="space-y-2">
+          <h2 className="font-semibold text-2xl text-white">Projects</h2>
+          <p className="max-w-3xl text-sm text-white/70 leading-7">
+            Sign in to register shared projects and review caller-scoped access
+            grants from the browser control plane.
+          </p>
+        </div>
+
+        <section className={cn(sectionSurfaceClassName, "p-6 sm:p-7")}>
+          <p className="text-sm text-white/70 leading-6">
+            Shared project ownership and access controls stay hidden until this
+            account has a signed-in broker session.
+          </p>
+        </section>
+      </section>
+    );
+  }
+
+  const account: Extract<
+    AccountShellContext,
+    { readonly authenticated: true }
+  > = input.account;
+  const selectedProject = account.selectedProject;
+  const scopedReturnPath = buildAccountControlPlanePath({
+    redirectTo: input.returnToPath,
+    org: account.selectedOrganization?.slug ?? account.requestedOrganizationKey,
+    team: account.selectedTeam?.slug ?? account.requestedTeamKey,
+    project: selectedProject?.slug ?? account.requestedProjectKey,
+  });
+  const shouldShowVisibilityMessage = Boolean(
+    account.requestedProjectKey &&
+      !account.selectedProjectVisible &&
+      !selectedProject
+  );
+
+  return (
+    <section className="space-y-4" id="projects">
+      <div className="space-y-2">
+        <h2 className="font-semibold text-2xl text-white">Projects</h2>
+        <p className="max-w-3xl text-sm text-white/70 leading-7">
+          Register projects with explicit local or shared ownership and keep
+          durable access grants visible from the same caller-scoped browser
+          surface.
+        </p>
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]">
+        <RegisterProjectCard
+          account={account}
+          returnToPath={scopedReturnPath}
+        />
+
+        <section className={cn(sectionSurfaceClassName, "p-6 sm:p-7")}>
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="space-y-2">
+              <h3 className="font-medium text-white text-xl">
+                Visible projects
+              </h3>
+              <p className="text-sm text-white/70 leading-6">
+                Hack only lists projects the current account can see through
+                durable ownership or explicit project access grants.
+              </p>
+            </div>
+            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-sm text-white/70">
+              {account.projects.length} visible
+            </span>
+          </div>
+
+          {account.projects.length > 0 ? (
+            <ul className="mt-6 grid gap-3">
+              {account.projects.map((project) => {
+                const selected = selectedProject?.id === project.id;
+                return (
+                  <li key={project.id}>
+                    <a
+                      className={cn(
+                        "block rounded-2xl border px-4 py-4 transition duration-200 motion-reduce:transition-none",
+                        selected
+                          ? "border-sky-300/35 bg-sky-300/10"
+                          : "border-white/10 bg-slate-950/40 hover:bg-white/5",
+                        "focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-300 focus-visible:outline-offset-2"
+                      )}
+                      href={buildAccountControlPlanePath({
+                        redirectTo: input.returnToPath,
+                        org:
+                          account.selectedOrganization?.slug ??
+                          account.requestedOrganizationKey,
+                        team:
+                          account.selectedTeam?.slug ??
+                          account.requestedTeamKey,
+                        project: project.slug,
+                      })}
+                    >
+                      <span className="block font-medium text-white">
+                        {project.name}
+                      </span>
+                      <span className="mt-1 block text-sm text-white/60">
+                        {project.slug}
+                      </span>
+                      <span className="mt-2 block text-white/55 text-xs uppercase tracking-[0.18em]">
+                        {project.ownership.mode} • {project.currentAccessRole}
+                      </span>
+                    </a>
+                  </li>
+                );
+              })}
+            </ul>
+          ) : (
+            <p className="mt-6 text-sm text-white/70 leading-6">
+              No projects are visible yet. Register one with explicit local or
+              shared ownership, or wait for an admin to grant this account
+              access.
+            </p>
+          )}
+
+          {selectedProject ? (
+            <SelectedProjectDetail
+              account={account}
+              returnToPath={scopedReturnPath}
+            />
+          ) : null}
+
+          {shouldShowVisibilityMessage ? (
+            <div className="mt-6 rounded-2xl border border-sky-300/20 bg-sky-300/10 p-4">
+              <p className="font-medium text-sky-100 text-sm">
+                Requested project not visible
+              </p>
+              <p className="mt-2 text-sm text-white/75 leading-6">
+                This account cannot load the requested project because Hack only
+                exposes shared projects through durable ownership or explicit
+                access grants.
+              </p>
+            </div>
+          ) : null}
+        </section>
+      </div>
+    </section>
+  );
+}
+
+function RegisterProjectCard(input: {
+  readonly account: Extract<
+    AccountShellContext,
+    { readonly authenticated: true }
+  >;
+  readonly returnToPath: string;
+}) {
+  const selectedOrganizationSlug =
+    input.account.selectedOrganization?.slug ?? "";
+  const selectedTeamSlug = input.account.selectedTeam?.slug ?? "";
+
+  return (
+    <section className={cn(sectionSurfaceClassName, "p-6 sm:p-7")}>
+      <div className="space-y-2">
+        <h3 className="font-medium text-white text-xl">Register project</h3>
+        <p className="text-sm text-white/70 leading-6">
+          Shared registrations stay durable in the broker, while local mode
+          remains explicit so CLI and web can report the same ownership state.
+        </p>
+      </div>
+
+      <form
+        action="/api/control-plane/projects"
+        className="mt-6 grid gap-4"
+        method="post"
+      >
+        <input name="redirectTo" type="hidden" value={input.returnToPath} />
+
+        <label className="grid gap-2">
+          <span className="font-medium text-sm text-white/80">Slug</span>
+          <input
+            className={fieldClassName}
+            name="slug"
+            placeholder="hack-cli"
+            required
+            type="text"
+          />
+        </label>
+
+        <label className="grid gap-2">
+          <span className="font-medium text-sm text-white/80">
+            Display name
+          </span>
+          <input
+            className={fieldClassName}
+            name="name"
+            placeholder="Hack CLI"
+            type="text"
+          />
+        </label>
+
+        <label className="grid gap-2">
+          <span className="font-medium text-sm text-white/80">
+            Ownership mode
+          </span>
+          <select className={fieldClassName} defaultValue="team" name="mode">
+            <option value="local">Local</option>
+            <option value="organization">Organization</option>
+            <option value="team">Team</option>
+          </select>
+        </label>
+
+        <label className="grid gap-2">
+          <span className="font-medium text-sm text-white/80">
+            Organization
+          </span>
+          <select
+            className={fieldClassName}
+            defaultValue={selectedOrganizationSlug}
+            name="org"
+          >
+            <option value="">No organization</option>
+            {input.account.organizations.map((organization) => (
+              <option key={organization.id} value={organization.slug}>
+                {organization.name}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="grid gap-2">
+          <span className="font-medium text-sm text-white/80">Team</span>
+          <select
+            className={fieldClassName}
+            defaultValue={selectedTeamSlug}
+            name="team"
+          >
+            <option value="">No team</option>
+            {input.account.teams.map((team) => (
+              <option key={team.id} value={team.slug}>
+                {team.name}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <button className={actionClassName} type="submit">
+          Register project
+        </button>
+      </form>
+    </section>
+  );
+}
+
+function SelectedProjectDetail(input: {
+  readonly account: Extract<
+    AccountShellContext,
+    { readonly authenticated: true }
+  >;
+  readonly returnToPath: string;
+}) {
+  const selectedProject = input.account.selectedProject;
+  if (!selectedProject) {
+    return null;
+  }
+
+  return (
+    <div className="mt-6 space-y-6 rounded-2xl border border-white/10 bg-slate-950/35 p-5">
+      <div className="space-y-2">
+        <p className="font-medium text-sky-100 text-sm">Project detail</p>
+        <h4 className="font-semibold text-2xl text-white">
+          {selectedProject.name}
+        </h4>
+        <p className="text-sm text-white/70 leading-6">
+          Ownership remains explicit:{" "}
+          <span className="font-medium text-white">
+            {selectedProject.ownership.mode}
+          </span>{" "}
+          managed by{" "}
+          <span className="font-medium text-white">
+            {selectedProject.ownership.ownerName ??
+              selectedProject.ownership.ownerSlug ??
+              selectedProject.ownership.ownerType}
+          </span>
+          .
+        </p>
+      </div>
+
+      <dl className="grid gap-4 md:grid-cols-3">
+        <ProjectDetailCard label="Ownership">
+          {selectedProject.ownership.mode}
+        </ProjectDetailCard>
+        <ProjectDetailCard label="Owner">
+          {selectedProject.ownership.ownerName ??
+            selectedProject.ownership.ownerSlug ??
+            selectedProject.ownership.ownerType}
+        </ProjectDetailCard>
+        <ProjectDetailCard label="Current role">
+          {selectedProject.currentAccessRole}
+        </ProjectDetailCard>
+      </dl>
+
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+        <section className="grid gap-4 rounded-2xl border border-white/10 bg-white/5 p-4">
+          <h5 className="font-medium text-lg text-white">Explicit access</h5>
+          <form
+            action={`/api/control-plane/projects/${encodeURIComponent(selectedProject.slug)}/access/grant`}
+            className="grid gap-4"
+            method="post"
+          >
+            <input name="redirectTo" type="hidden" value={input.returnToPath} />
+
+            <label className="grid gap-2">
+              <span className="font-medium text-sm text-white/80">
+                Grant organization access
+              </span>
+              <select className={fieldClassName} name="org">
+                <option value="">Choose organization</option>
+                {input.account.organizations.map((organization) => (
+                  <option key={organization.id} value={organization.slug}>
+                    {organization.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <input name="scope" type="hidden" value="organization" />
+            <label className="grid gap-2">
+              <span className="font-medium text-sm text-white/80">Role</span>
+              <select
+                className={fieldClassName}
+                defaultValue="viewer"
+                name="role"
+              >
+                <option value="viewer">Viewer</option>
+                <option value="admin">Admin</option>
+              </select>
+            </label>
+            <button className={secondaryActionClassName} type="submit">
+              Grant organization access
+            </button>
+          </form>
+
+          <form
+            action={`/api/control-plane/projects/${encodeURIComponent(selectedProject.slug)}/access/grant`}
+            className="grid gap-4"
+            method="post"
+          >
+            <input name="redirectTo" type="hidden" value={input.returnToPath} />
+            <input name="scope" type="hidden" value="team" />
+            <label className="grid gap-2">
+              <span className="font-medium text-sm text-white/80">
+                Grant team access
+              </span>
+              <select className={fieldClassName} name="team">
+                <option value="">Choose team</option>
+                {input.account.teams.map((team) => (
+                  <option key={team.id} value={team.slug}>
+                    {team.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="grid gap-2">
+              <span className="font-medium text-sm text-white/80">
+                Parent organization
+              </span>
+              <select
+                className={fieldClassName}
+                defaultValue={input.account.selectedOrganization?.slug ?? ""}
+                name="org"
+              >
+                <option value="">Choose organization</option>
+                {input.account.organizations.map((organization) => (
+                  <option key={organization.id} value={organization.slug}>
+                    {organization.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="grid gap-2">
+              <span className="font-medium text-sm text-white/80">Role</span>
+              <select
+                className={fieldClassName}
+                defaultValue="viewer"
+                name="role"
+              >
+                <option value="viewer">Viewer</option>
+                <option value="admin">Admin</option>
+              </select>
+            </label>
+            <button className={secondaryActionClassName} type="submit">
+              Grant team access
+            </button>
+          </form>
+        </section>
+
+        <section className="grid gap-4 rounded-2xl border border-white/10 bg-white/5 p-4">
+          <div className="space-y-2">
+            <h5 className="font-medium text-lg text-white">Access grants</h5>
+            <p className="text-sm text-white/70 leading-6">
+              Shared project access remains explicit and removable per grant.
+            </p>
+          </div>
+
+          {input.account.selectedProjectAccess.length > 0 ? (
+            <ul className="grid gap-3">
+              {input.account.selectedProjectAccess.map((grant) => (
+                <li
+                  className="rounded-2xl border border-white/10 bg-slate-950/35 p-4"
+                  key={grant.id}
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="space-y-2">
+                      <p className="font-medium text-white">
+                        {grant.subjectName}
+                      </p>
+                      <p className="text-sm text-white/70 leading-6">
+                        {grant.scope} • {grant.role}
+                      </p>
+                    </div>
+                    <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-white/70 text-xs uppercase tracking-[0.18em]">
+                      {grant.subjectSlug}
+                    </span>
+                  </div>
+
+                  <form
+                    action={`/api/control-plane/projects/${encodeURIComponent(selectedProject.slug)}/access/revoke`}
+                    className="mt-4"
+                    method="post"
+                  >
+                    <input
+                      name="redirectTo"
+                      type="hidden"
+                      value={input.returnToPath}
+                    />
+                    <input name="grantId" type="hidden" value={grant.id} />
+                    <button className={secondaryActionClassName} type="submit">
+                      Revoke access
+                    </button>
+                  </form>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-white/70 leading-6">
+              No explicit grants are visible for this project yet.
+            </p>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function ProjectDetailCard(input: {
+  readonly label: string;
+  readonly children: ReactNode;
+}) {
+  return (
+    <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+      <dt className="font-medium text-sky-100 text-sm">{input.label}</dt>
+      <dd className="mt-2 text-sm text-white/80 leading-6">{input.children}</dd>
     </div>
   );
 }

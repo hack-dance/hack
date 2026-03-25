@@ -49,6 +49,8 @@ export type AccountShellContext =
       readonly selectedOrganizationVisible: boolean;
       readonly requestedTeamKey: string | null;
       readonly selectedTeamVisible: boolean;
+      readonly requestedProjectKey: string | null;
+      readonly selectedProjectVisible: boolean;
       readonly organizations: Awaited<
         ReturnType<typeof loadAccountControlPlaneData>
       >["organizations"];
@@ -70,6 +72,15 @@ export type AccountShellContext =
       readonly incomingInvitations: Awaited<
         ReturnType<typeof loadAccountControlPlaneData>
       >["incomingInvitations"];
+      readonly projects: Awaited<
+        ReturnType<typeof loadAccountControlPlaneData>
+      >["projects"];
+      readonly selectedProject: Awaited<
+        ReturnType<typeof loadAccountControlPlaneData>
+      >["selectedProject"];
+      readonly selectedProjectAccess: Awaited<
+        ReturnType<typeof loadAccountControlPlaneData>
+      >["selectedProjectAccess"];
     }
   | {
       readonly authenticated: false;
@@ -88,6 +99,7 @@ export function buildAccountShellSignInHref(input: {
 export async function getAccountShellContext(input?: {
   readonly selectedOrganizationKey?: string | null;
   readonly selectedTeamKey?: string | null;
+  readonly selectedProjectKey?: string | null;
 }): Promise<AccountShellContext> {
   const cookieStore = await cookies();
   const token = cookieStore
@@ -125,6 +137,7 @@ export async function getAccountShellContext(input?: {
       token,
       selectedOrganizationKey: input?.selectedOrganizationKey,
       selectedTeamKey: input?.selectedTeamKey,
+      selectedProjectKey: input?.selectedProjectKey,
     });
 
     return {
@@ -143,6 +156,8 @@ export async function getAccountShellContext(input?: {
       selectedOrganizationVisible: controlPlaneData.selectedOrganizationVisible,
       requestedTeamKey: controlPlaneData.requestedTeamKey,
       selectedTeamVisible: controlPlaneData.selectedTeamVisible,
+      requestedProjectKey: controlPlaneData.requestedProjectKey,
+      selectedProjectVisible: controlPlaneData.selectedProjectVisible,
       organizations: controlPlaneData.organizations,
       selectedOrganization: controlPlaneData.selectedOrganization,
       selectedOrganizationMemberships:
@@ -151,6 +166,9 @@ export async function getAccountShellContext(input?: {
       selectedTeam: controlPlaneData.selectedTeam,
       selectedTeamMemberships: controlPlaneData.selectedTeamMemberships,
       incomingInvitations: controlPlaneData.incomingInvitations,
+      projects: controlPlaneData.projects,
+      selectedProject: controlPlaneData.selectedProject,
+      selectedProjectAccess: controlPlaneData.selectedProjectAccess,
     };
   } catch {
     return { authenticated: false };

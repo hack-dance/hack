@@ -322,6 +322,69 @@ export const orgAdminInvitations = pgTable(
   })
 );
 
+export const projectAdminProjects = pgTable(
+  "project_admin_projects",
+  {
+    id: text("id").primaryKey(),
+    slug: text("slug").notNull(),
+    name: text("name").notNull(),
+    ownershipMode: text("ownership_mode").notNull(),
+    ownerType: text("owner_type").notNull(),
+    ownerId: text("owner_id"),
+    ownerSlug: text("owner_slug"),
+    ownerName: text("owner_name"),
+    managedBy: text("managed_by").notNull(),
+    createdByUserId: text("created_by_user_id").notNull(),
+    createdByEmail: text("created_by_email"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    slugIndex: uniqueIndex("project_admin_projects_slug_idx").on(table.slug),
+    ownerIdIndex: index("project_admin_projects_owner_id_idx").on(
+      table.ownerId
+    ),
+    createdByUserIdIndex: index(
+      "project_admin_projects_created_by_user_id_idx"
+    ).on(table.createdByUserId),
+  })
+);
+
+export const projectAdminAccessGrants = pgTable(
+  "project_admin_access_grants",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projectAdminProjects.id, { onDelete: "cascade" }),
+    scope: text("scope").notNull(),
+    role: text("role").notNull(),
+    subjectId: text("subject_id").notNull(),
+    subjectSlug: text("subject_slug").notNull(),
+    subjectName: text("subject_name").notNull(),
+    organizationId: text("organization_id").notNull(),
+    teamId: text("team_id"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    projectIdIndex: index("project_admin_access_grants_project_id_idx").on(
+      table.projectId
+    ),
+    subjectIdIndex: index("project_admin_access_grants_subject_id_idx").on(
+      table.subjectId
+    ),
+  })
+);
+
 export const linearConnections = pgTable("linear_connections", {
   id: uuid("id").defaultRandom().primaryKey(),
   connectionKey: text("connection_key").notNull().unique(),
@@ -414,6 +477,8 @@ export const authBrokerSchema = {
   orgAdminTeams,
   orgAdminMemberships,
   orgAdminInvitations,
+  projectAdminProjects,
+  projectAdminAccessGrants,
   linearConnections,
   linearWebhookEvents,
   linearSyncSubscriptions,

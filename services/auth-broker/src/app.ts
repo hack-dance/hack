@@ -36,6 +36,12 @@ import {
   InMemoryOrgTeamsStore,
   type OrgTeamsStore,
 } from "./modules/orgs/service.ts";
+import { createProjectStoreFromDb } from "./modules/projects/db-store.ts";
+import { createProjectsPlugin } from "./modules/projects/plugin.ts";
+import {
+  InMemoryProjectStore,
+  type ProjectStore,
+} from "./modules/projects/service.ts";
 import { createProvidersPlugin } from "./modules/providers/plugin.ts";
 import { createSharedMiddlewarePlugin } from "./plugins/shared-middleware.ts";
 
@@ -47,6 +53,7 @@ export type CreateAuthBrokerAppOptions = {
   readonly linearConnectionStore?: LinearConnectionStore;
   readonly linearAutosyncStore?: LinearAutosyncStore;
   readonly orgTeamsStore?: OrgTeamsStore;
+  readonly projectStore?: ProjectStore;
 };
 
 export type DefaultOrgTeamsStoreMode =
@@ -62,11 +69,29 @@ export type DefaultOrgTeamsStoreMode =
 type CreateDbOrgTeamsStore = (input: {
   readonly databaseUrl: string;
 }) => OrgTeamsStore;
+type CreateDbProjectStore = (input: {
+  readonly databaseUrl: string;
+  readonly orgStore: OrgTeamsStore;
+}) => ProjectStore;
 
 const DURABLE_ORG_TEAMS_STORE_STARTUP_MESSAGE =
   "[auth-broker] org/team store: durable database-backed mode via DATABASE_URL";
 const IN_MEMORY_ORG_TEAMS_STORE_STARTUP_MESSAGE =
   "[auth-broker] org/team store: development-only in-memory mode because DATABASE_URL is not configured";
+const DURABLE_PROJECT_STORE_STARTUP_MESSAGE =
+  "[auth-broker] project store: durable database-backed mode via DATABASE_URL";
+const IN_MEMORY_PROJECT_STORE_STARTUP_MESSAGE =
+  "[auth-broker] project store: development-only in-memory mode because DATABASE_URL is not configured";
+
+export type DefaultProjectStoreMode =
+  | {
+      readonly kind: "durable_database";
+      readonly startupMessage: string;
+    }
+  | {
+      readonly kind: "in_memory_dev_only";
+      readonly startupMessage: string;
+    };
 
 /**
  * Build auth-broker HTTP app from composable feature plugins.
@@ -79,6 +104,7 @@ export function createAuthBrokerApp({
   linearConnectionStore: externalLinearConnectionStore,
   linearAutosyncStore: externalLinearAutosyncStore,
   orgTeamsStore: externalOrgTeamsStore,
+  projectStore: externalProjectStore,
 }: CreateAuthBrokerAppOptions) {
   const flowStore =
     externalStore ?? new FlowStore({ filePath: config.flowStorePath });
@@ -92,6 +118,11 @@ export function createAuthBrokerApp({
     externalLinearAutosyncStore ?? createDefaultLinearAutosyncStore();
   const orgTeamsStore =
     externalOrgTeamsStore ?? resolveDefaultOrgTeamsStore().store;
+  const projectStore =
+    externalProjectStore ??
+    resolveDefaultProjectStore({
+      orgStore: orgTeamsStore,
+    }).store;
   let flowSweepTimer: ReturnType<typeof setInterval> | null = null;
 
   return new Elysia({
@@ -165,6 +196,12 @@ export function createAuthBrokerApp({
     .use(
       createOrgsPlugin({
         store: orgTeamsStore,
+        betterAuthRuntime,
+      })
+    )
+    .use(
+      createProjectsPlugin({
+        projectStore,
         betterAuthRuntime,
       })
     )
@@ -243,6 +280,59 @@ export function createDefaultOrgTeamsStore(input?: {
   readonly createDbStore?: CreateDbOrgTeamsStore;
 }): OrgTeamsStore {
   return resolveDefaultOrgTeamsStore(input).store;
+}
+
+export function createDefaultProjectStore(input: {
+  readonly orgStore: OrgTeamsStore;
+  readonly databaseUrl?: string;
+  readonly createDbStore?: CreateDbProjectStore;
+}): ProjectStore {
+  return resolveDefaultProjectStore(input).store;
+}
+
+export function resolveDefaultProjectStore(input: {
+  readonly orgStore: OrgTeamsStore;
+  readonly databaseUrl?: string;
+  readonly createDbStore?: CreateDbProjectStore;
+}): {
+  readonly store: ProjectStore;
+  readonly mode: DefaultProjectStoreMode;
+} {
+  const databaseUrl = normalizeOptionalText({
+    value: input.databaseUrl ?? process.env.DATABASE_URL,
+  });
+  if (!databaseUrl) {
+    return {
+      store: new InMemoryProjectStore({
+        orgStore: input.orgStore,
+      }),
+      mode: {
+        kind: "in_memory_dev_only",
+        startupMessage: IN_MEMORY_PROJECT_STORE_STARTUP_MESSAGE,
+      },
+    };
+  }
+
+  const createDbStore = input.createDbStore ?? createProjectStoreFromDb;
+  try {
+    return {
+      store: createDbStore({
+        databaseUrl,
+        orgStore: input.orgStore,
+      }),
+      mode: {
+        kind: "durable_database",
+        startupMessage: DURABLE_PROJECT_STORE_STARTUP_MESSAGE,
+      },
+    };
+  } catch (error) {
+    throw new Error(
+      "Failed to initialize durable project store from DATABASE_URL.",
+      {
+        cause: error,
+      }
+    );
+  }
 }
 
 export function resolveDefaultOrgTeamsStore(input?: {

@@ -37,6 +37,12 @@ export const shellNavigationItems = [
     description: "Inspect routed GitHub readiness and repair guidance.",
   },
   {
+    href: "#linear",
+    label: "Linear",
+    description:
+      "Compare Hack-owned Linear access, local usability, and repo binding.",
+  },
+  {
     href: "#invitations",
     label: "Invitations",
     description: "Accept or decline pending invites for this account.",

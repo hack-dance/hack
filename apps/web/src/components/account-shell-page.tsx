@@ -8,6 +8,7 @@ import {
   getAccountShellContext,
 } from "@/src/lib/account-shell";
 import { loadGitHubManagementState } from "@/src/lib/github-management";
+import { loadLinearManagementState } from "@/src/lib/linear-management";
 
 export default async function AccountShellPage(input: {
   readonly returnToPath: string;
@@ -19,13 +20,14 @@ export default async function AccountShellPage(input: {
   const requestedOrganizationKey = readSearchParam(searchParams.org);
   const requestedTeamKey = readSearchParam(searchParams.team);
   const requestedProjectKey = readSearchParam(searchParams.project);
-  const [account, githubManagement] = await Promise.all([
+  const [account, githubManagement, linearManagement] = await Promise.all([
     getAccountShellContext({
       selectedOrganizationKey: requestedOrganizationKey,
       selectedTeamKey: requestedTeamKey,
       selectedProjectKey: requestedProjectKey,
     }),
     loadGitHubManagementState(),
+    loadLinearManagementState(),
   ]);
   const feedback = resolveAccountControlPlaneFeedback({
     notice: readSearchParam(searchParams.notice),
@@ -61,6 +63,7 @@ export default async function AccountShellPage(input: {
       account={account}
       feedback={feedback}
       githubManagement={githubManagement}
+      linearManagement={linearManagement}
       returnToPath={input.returnToPath}
       signInHref={buildAccountShellSignInHref({
         returnToPath,

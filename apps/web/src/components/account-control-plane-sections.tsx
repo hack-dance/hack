@@ -1,8 +1,10 @@
 import type { ReactNode } from "react";
+import LinearManagementSection from "@/src/components/linear-management-section";
 import type { AccountControlPlaneFeedback } from "@/src/lib/account-control-plane";
 import { buildAccountControlPlanePath } from "@/src/lib/account-control-plane";
 import type { AccountShellContext } from "@/src/lib/account-shell";
 import type { GitHubManagementState } from "@/src/lib/github-management";
+import type { LinearManagementState } from "@/src/lib/linear-management";
 import { cn } from "@/src/lib/utils";
 
 const sectionSurfaceClassName = cn(
@@ -31,6 +33,7 @@ const fieldClassName = cn(
 type AccountControlPlaneSectionsProps = {
   readonly account: AccountShellContext;
   readonly githubManagement: GitHubManagementState;
+  readonly linearManagement: LinearManagementState;
   readonly feedback?: AccountControlPlaneFeedback | null;
   readonly returnToPath: string;
 };
@@ -38,6 +41,7 @@ type AccountControlPlaneSectionsProps = {
 export default function AccountControlPlaneSections({
   account,
   githubManagement,
+  linearManagement,
   feedback = null,
   returnToPath,
 }: AccountControlPlaneSectionsProps) {
@@ -110,6 +114,8 @@ export default function AccountControlPlaneSections({
       <ProjectsSection account={account} returnToPath={returnToPath} />
 
       <GitHubSection githubManagement={githubManagement} />
+
+      <LinearManagementSection linearManagement={linearManagement} />
 
       <section className="space-y-4" id="invitations">
         <div className="space-y-2">

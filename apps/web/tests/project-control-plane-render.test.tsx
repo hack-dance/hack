@@ -44,6 +44,87 @@ const githubManagement = {
   statusCommand: "./dist/hack x github status --json",
 } as const;
 
+const linearManagement = {
+  extensionEnabled: true,
+  selectedProfile: "work",
+  selectedSource: "project_routing",
+  defaultProfile: "work",
+  projectOverride: "work",
+  selectedMissing: false,
+  authRef: "linear.api.work",
+  service: "hack-linear-work",
+  tokenEnvFallback: "HACK_LINEAR_API_TOKEN",
+  apiUrl: "https://api.linear.app/graphql",
+  accountName: "Hack User",
+  tokenResolved: true,
+  tokenSource: "keychain",
+  profiles: [
+    {
+      id: "work",
+      isDefault: true,
+      authRef: "linear.api.work",
+      service: "hack-linear-work",
+      tokenEnv: "HACK_LINEAR_API_TOKEN",
+      apiUrl: "https://api.linear.app/graphql",
+      accountName: "Hack User",
+    },
+  ],
+  projectBinding: {
+    profileId: "work",
+    defaultProject: {
+      projectId: "proj_default",
+      projectName: "Default",
+      teamId: "team_default",
+      label: "Default (proj_default) in team team_default",
+    },
+    additionalProjects: [
+      {
+        projectId: "proj_extra",
+        projectName: "Extra",
+        teamId: "team_extra",
+        label: "Extra (proj_extra) in team team_extra",
+      },
+    ],
+  },
+  summary: {
+    activeProfile: "work",
+    connected: true,
+    connectionLabel: "Connected as Hack User",
+    routingSummary:
+      "This repo routes Linear sync to Default (proj_default) in team team_default.",
+    linkedProjectsLabel:
+      "1 linked project: Extra (proj_extra) in team team_extra.",
+    capabilities: [
+      "Sync tickets for the bound Linear project",
+      "Pull issues from 1 linked Linear project",
+    ],
+    repair: null,
+    nextSteps: ["Run `hack linear sync-project --from linear`."],
+  },
+  hackConnection: {
+    inspectable: true,
+    loaded: true,
+    connected: true,
+    localAccessAvailable: true,
+    accessibleConnectionCount: 1,
+    ownerLabel: "team:team_123",
+    accountLabel: "Hack User",
+    summary: 'Hack has a broker-owned Linear connection for profile "work".',
+    detail:
+      "Protected local access is stored on Hack and can be reseeded onto this machine if needed.",
+  },
+  localAccess: {
+    ready: true,
+    summary: "Local Linear access is ready on this machine.",
+    detail: "The active profile resolved a usable local token.",
+  },
+  repair: null,
+  accessControlMode: "better_auth_team_owned",
+  statusCommand: "./dist/hack linear status --json",
+  profilesCommand: "./dist/hack linear profiles --json",
+  connectionsCommand: "./dist/hack linear connections --json",
+} as const;
+
 const authenticatedContext = {
   authenticated: true,
   accessControlMode: "better_auth_team_owned",
@@ -165,6 +246,7 @@ test("account shell renders project registration and access controls", () => {
         body: "Hack stored the durable project registration.",
       }}
       githubManagement={githubManagement}
+      linearManagement={linearManagement}
       returnToPath="/account"
       signInHref="/auth?redirect=%2Faccount"
     />
@@ -179,5 +261,9 @@ test("account shell renders project registration and access controls", () => {
   expect(markup).toContain("Explicit access");
   expect(markup).toContain("Grant organization access");
   expect(markup).toContain("Grant team access");
+  expect(markup).toContain("Linear");
+  expect(markup).toContain("Default route");
+  expect(markup).toContain("Additional linked projects");
+  expect(markup).toContain("Extra (proj_extra) in team team_extra");
   expect(markup).toContain("project_registered");
 });

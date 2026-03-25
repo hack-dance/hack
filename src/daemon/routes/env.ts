@@ -256,6 +256,17 @@ async function handleSetEnv(opts: {
     attemptedSource: secret ? "keychain" : "plain_env",
   });
   if (!sourceValidation.ok) {
+    if (sourceValidation.kind === "contract_parse_error") {
+      return jsonResponse(
+        {
+          error: "contract_parse_error",
+          message: sourceValidation.message,
+          contractPath: sourceValidation.contractPath,
+          parseError: sourceValidation.parseError,
+        },
+        409
+      );
+    }
     return jsonResponse(
       {
         error: "contract_source_mismatch",

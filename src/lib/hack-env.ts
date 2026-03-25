@@ -22,6 +22,14 @@ export type HackEnvMutationSourceValidationResult =
     }
   | {
       readonly ok: false;
+      readonly kind: "contract_parse_error";
+      readonly contractPath: string;
+      readonly parseError: string;
+      readonly message: string;
+    }
+  | {
+      readonly ok: false;
+      readonly kind: "source_mismatch";
       readonly contractPath: string;
       readonly expectedSource: HackEnvSource;
       readonly attemptedSource: HackEnvSource;
@@ -265,6 +273,19 @@ export async function validateHackEnvMutationSource(input: {
   readonly attemptedSource: HackEnvSource;
 }): Promise<HackEnvMutationSourceValidationResult> {
   const contract = await readHackEnvContract({ projectDir: input.projectDir });
+  if (contract.exists && contract.parseError) {
+    return {
+      ok: false,
+      kind: "contract_parse_error",
+      contractPath: contract.path,
+      parseError: contract.parseError,
+      message: buildHackEnvMalformedContractMessage({
+        key: input.key,
+        contractPath: contract.path,
+        parseError: contract.parseError,
+      }),
+    };
+  }
   const contractVar =
     contract.contract.vars.find((entry) => entry.key === input.key) ?? null;
   if (!contractVar || contractVar.source === input.attemptedSource) {
@@ -273,6 +294,7 @@ export async function validateHackEnvMutationSource(input: {
 
   return {
     ok: false,
+    kind: "source_mismatch",
     contractPath: contract.path,
     expectedSource: contractVar.source,
     attemptedSource: input.attemptedSource,
@@ -432,6 +454,14 @@ function buildHackEnvMutationSourceMismatchMessage(input: {
   }
 
   return `Env key "${input.key}" is declared as source "plain_env" in ${input.contractPath}. Use "hack env set ${input.key}=…" or update the contract source before writing. Hack will not write this key through the secret backend until the contract source changes.`;
+}
+
+function buildHackEnvMalformedContractMessage(input: {
+  readonly key: string;
+  readonly contractPath: string;
+  readonly parseError: string;
+}): string {
+  return `Env contract ${input.contractPath} is malformed (${input.parseError}). Fix or remove the contract file before writing "${input.key}". Hack will not fall back to the default contract while mutation-source validation cannot trust the declared storage rules.`;
 }
 
 function describePortableState(input: {

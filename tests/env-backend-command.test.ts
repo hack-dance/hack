@@ -424,6 +424,97 @@ test(
 );
 
 test(
+  "env set fails closed when hack.env.json is malformed",
+  async () => {
+    if (!tempDir) {
+      throw new Error("Missing temp dir");
+    }
+    const projectRoot = resolve(tempDir, "repo-malformed-contract");
+    const projectDir = resolve(projectRoot, ".hack");
+    await mkdir(projectDir, { recursive: true });
+    await writeFile(
+      resolve(projectDir, "docker-compose.yml"),
+      "services: {}\n"
+    );
+    await writeFile(
+      resolve(projectDir, "hack.config.json"),
+      `${JSON.stringify(
+        {
+          name: "env-malformed-contract-project",
+          controlPlane: {
+            secrets: {
+              backend: "encrypted_file",
+              encryptedFile: {
+                path: resolve(tempDir, "malformed-contract.enc.json"),
+              },
+            },
+          },
+        },
+        null,
+        2
+      )}\n`
+    );
+    await writeFile(
+      resolve(projectDir, "hack.env.json"),
+      '{"version":1,"vars":[{"key":"SECRET_TOKEN","source":"keychain"}\n'
+    );
+
+    const result = await runHack({
+      args: ["env", "set", "SECRET_TOKEN=super-secret"],
+      env: {
+        ...process.env,
+        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
+      },
+      cwd: projectRoot,
+    });
+    expect(result.exitCode).toBe(1);
+    expect(`${result.stdout}\n${result.stderr}`).toContain("hack.env.json");
+    expect(`${result.stdout}\n${result.stderr}`).toContain("malformed");
+    expect(`${result.stdout}\n${result.stderr}`).toContain(
+      "Fix or remove the contract file"
+    );
+    const envText = await readFile(resolve(projectDir, ".env"), "utf8").catch(
+      () => ""
+    );
+    expect(envText).not.toContain("super-secret");
+  },
+  { timeout: 40_000 }
+);
+
+test(
+  "env set still allows plaintext writes when hack.env.json is absent",
+  async () => {
+    if (!tempDir) {
+      throw new Error("Missing temp dir");
+    }
+    const projectRoot = resolve(tempDir, "repo-no-contract");
+    const projectDir = resolve(projectRoot, ".hack");
+    await mkdir(projectDir, { recursive: true });
+    await writeFile(
+      resolve(projectDir, "docker-compose.yml"),
+      "services: {}\n"
+    );
+    await writeFile(
+      resolve(projectDir, "hack.config.json"),
+      `${JSON.stringify({ name: "env-no-contract-project" }, null, 2)}\n`
+    );
+
+    const result = await runHack({
+      args: ["env", "set", "SECRET_TOKEN=plain-value"],
+      env: {
+        ...process.env,
+        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
+      },
+      cwd: projectRoot,
+    });
+    expect(result.exitCode).toBe(0);
+    const envText = await readFile(resolve(projectDir, ".env"), "utf8");
+    expect(envText).toContain("SECRET_TOKEN=plain-value");
+  },
+  { timeout: 40_000 }
+);
+
+test(
   "env list reports missing encrypted key recovery guidance without a stack trace",
   async () => {
     if (!tempDir) {

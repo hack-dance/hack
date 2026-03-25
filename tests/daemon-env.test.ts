@@ -395,6 +395,40 @@ describe("handleEnvRoutes", () => {
     expect(envText).not.toContain("plaintext-secret");
   });
 
+  test("malformed hack.env.json fails closed before plaintext writes", async () => {
+    await writeTextFileIfChanged(
+      resolve(repoRoot, ".hack", PROJECT_ENV_CONTRACT_FILENAME),
+      '{"version":1,"vars":[{"key":"SECRET_TOKEN","source":"keychain"}\n'
+    );
+
+    const setReq = mockRequest({
+      method: "POST",
+      path: "/v1/env/set",
+      body: {
+        project: "env-test",
+        key: "SECRET_TOKEN",
+        value: "plaintext-secret",
+      },
+    });
+    const setRes = await handleEnvRoutes({
+      req: setReq,
+      url: new URL(setReq.url),
+    });
+    expect(setRes).not.toBeNull();
+    expect(setRes?.status).toBe(409);
+    const setBody = await parseResponse(setRes!);
+    expect(setBody?.error).toBe("contract_parse_error");
+    expect(String(setBody?.message)).toContain("hack.env.json");
+    expect(String(setBody?.message)).toContain(
+      "Fix or remove the contract file"
+    );
+    const envText = await readFile(
+      resolve(repoRoot, ".hack", ".env"),
+      "utf8"
+    ).catch(() => "");
+    expect(envText).not.toContain("plaintext-secret");
+  });
+
   test("missing encrypted key material returns recovery guidance instead of throwing", async () => {
     const keyPath = resolve(tempDir, "missing-secrets-file.key");
     const storePath = resolve(tempDir, "missing-secrets.enc.json");

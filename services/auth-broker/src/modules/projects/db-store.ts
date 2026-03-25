@@ -6,7 +6,11 @@ import {
   projectAdminProjects,
 } from "../../db/schema.ts";
 import { createDbClient } from "../../db.ts";
-import type { OrgTeamsStore } from "../orgs/service.ts";
+import type {
+  OrganizationRecord,
+  OrgTeamsStore,
+  TeamRecord,
+} from "../orgs/service.ts";
 import type {
   ProjectAccessGrantRecord,
   ProjectAccessMutationResult,
@@ -19,6 +23,25 @@ import type {
 } from "./service.ts";
 
 type DbClient = ReturnType<typeof createDbClient>;
+
+type VisibilityContext = {
+  readonly organizations: readonly OrganizationRecord[];
+  readonly teams: readonly TeamRecord[];
+  readonly scopedOrganizations: readonly OrganizationRecord[];
+  readonly scopedTeams: readonly TeamRecord[];
+  readonly organizationIds: ReadonlySet<string>;
+  readonly teamIds: ReadonlySet<string>;
+  readonly scopedOrganizationIds: ReadonlySet<string>;
+  readonly scopedTeamIds: ReadonlySet<string>;
+  readonly hasActiveScope: boolean;
+};
+
+type ProjectAccessState = {
+  readonly project: typeof projectAdminProjects.$inferSelect | null;
+  readonly scopedRole: ProjectAccessRole | null;
+  readonly broadRole: ProjectAccessRole | null;
+  readonly visibility: VisibilityContext;
+};
 
 export class DbProjectStore implements ProjectStore {
   private readonly db: DbClient;
@@ -49,6 +72,8 @@ export class DbProjectStore implements ProjectStore {
     readonly teamKey?: string | null;
     readonly actorUserId: string;
     readonly actorEmail: string | null;
+    readonly activeOrganizationId?: string | null;
+    readonly activeTeamId?: string | null;
   }): Promise<RegisterProjectResult> {
     await this.ensureTables();
     const slug = normalizeProjectSlug(input.slug);
@@ -60,12 +85,16 @@ export class DbProjectStore implements ProjectStore {
       input.actorUserId,
       "actor user id"
     );
-    const desiredOwnership = await resolveDesiredOwnership({
+    const visibility = await this.resolveVisibilityContext({
       actorUserId,
+      activeOrganizationId: input.activeOrganizationId,
+      activeTeamId: input.activeTeamId,
+    });
+    const desiredOwnership = await resolveDesiredOwnership({
       mode: input.mode,
       orgKey: input.orgKey,
       teamKey: input.teamKey,
-      orgStore: this.orgStore,
+      visibility,
     });
     if (!desiredOwnership.ok) {
       return desiredOwnership;
@@ -102,15 +131,25 @@ export class DbProjectStore implements ProjectStore {
         project: await this.toProjectRecord({
           project: created,
           actorUserId,
+          visibility,
         }),
       };
     }
 
-    const actorRole = await this.resolveCurrentAccessRole({
-      project: existing,
+    const actorState = await this.resolveProjectAccessState({
+      projectKey: existing.slug,
       actorUserId,
+      activeOrganizationId: input.activeOrganizationId,
+      activeTeamId: input.activeTeamId,
     });
+    const actorRole = actorState.scopedRole;
     if (!(actorRole === "owner" || actorRole === "admin")) {
+      if (actorState.broadRole) {
+        return {
+          ok: false,
+          error: "project_scope_forbidden",
+        };
+      }
       return {
         ok: false,
         error: "project_registration_conflict",
@@ -159,18 +198,26 @@ export class DbProjectStore implements ProjectStore {
       project: await this.toProjectRecord({
         project: updated,
         actorUserId,
+        visibility,
       }),
     };
   }
 
   async listProjects(input: {
     readonly actorUserId: string;
+    readonly activeOrganizationId?: string | null;
+    readonly activeTeamId?: string | null;
   }): Promise<readonly ProjectRecord[]> {
     await this.ensureTables();
     const actorUserId = normalizeRequiredText(
       input.actorUserId,
       "actor user id"
     );
+    const visibility = await this.resolveVisibilityContext({
+      actorUserId,
+      activeOrganizationId: input.activeOrganizationId,
+      activeTeamId: input.activeTeamId,
+    });
     const rows = await this.db
       .select()
       .from(projectAdminProjects)
@@ -180,6 +227,7 @@ export class DbProjectStore implements ProjectStore {
         const role = await this.resolveCurrentAccessRole({
           project: row,
           actorUserId,
+          visibility,
         });
         if (!role) {
           return null;
@@ -198,53 +246,52 @@ export class DbProjectStore implements ProjectStore {
   async getProject(input: {
     readonly projectKey: string;
     readonly actorUserId: string;
+    readonly activeOrganizationId?: string | null;
+    readonly activeTeamId?: string | null;
   }): Promise<ProjectRecord | null> {
     await this.ensureTables();
-    const actorUserId = normalizeRequiredText(
-      input.actorUserId,
-      "actor user id"
-    );
-    const project = await this.readProjectByKey(input.projectKey);
-    if (!project) {
-      return null;
-    }
-    const role = await this.resolveCurrentAccessRole({
-      project,
-      actorUserId,
-    });
-    if (!role) {
+    const state = await this.resolveProjectAccessState(input);
+    if (!(state.project && state.scopedRole)) {
       return null;
     }
     return toProjectRecord({
-      project,
-      currentAccessRole: role,
+      project: state.project,
+      currentAccessRole: state.scopedRole,
     });
+  }
+
+  async getProjectVisibility(input: {
+    readonly projectKey: string;
+    readonly actorUserId: string;
+    readonly activeOrganizationId?: string | null;
+    readonly activeTeamId?: string | null;
+  }): Promise<"visible" | "scope_forbidden" | "not_found"> {
+    await this.ensureTables();
+    const state = await this.resolveProjectAccessState(input);
+    if (state.scopedRole) {
+      return "visible";
+    }
+    if (state.broadRole) {
+      return "scope_forbidden";
+    }
+    return "not_found";
   }
 
   async listAccess(input: {
     readonly projectKey: string;
     readonly actorUserId: string;
+    readonly activeOrganizationId?: string | null;
+    readonly activeTeamId?: string | null;
   }): Promise<readonly ProjectAccessGrantRecord[] | null> {
     await this.ensureTables();
-    const actorUserId = normalizeRequiredText(
-      input.actorUserId,
-      "actor user id"
-    );
-    const project = await this.readProjectByKey(input.projectKey);
-    if (!project) {
-      return null;
-    }
-    const role = await this.resolveCurrentAccessRole({
-      project,
-      actorUserId,
-    });
-    if (!role) {
+    const state = await this.resolveProjectAccessState(input);
+    if (!(state.project && state.scopedRole)) {
       return null;
     }
     const rows = await this.db
       .select()
       .from(projectAdminAccessGrants)
-      .where(eq(projectAdminAccessGrants.projectId, project.id))
+      .where(eq(projectAdminAccessGrants.projectId, state.project.id))
       .orderBy(asc(projectAdminAccessGrants.subjectSlug));
     return rows.map((row) => toProjectAccessGrantRecord({ row }));
   }
@@ -256,23 +303,39 @@ export class DbProjectStore implements ProjectStore {
     readonly role: Exclude<ProjectAccessRole, "owner">;
     readonly orgKey?: string | null;
     readonly teamKey?: string | null;
+    readonly activeOrganizationId?: string | null;
+    readonly activeTeamId?: string | null;
   }): Promise<ProjectAccessMutationResult> {
     await this.ensureTables();
     const actorUserId = normalizeRequiredText(
       input.actorUserId,
       "actor user id"
     );
-    const project = await this.readProjectByKey(input.projectKey);
-    if (!project) {
+    const visibility = await this.resolveVisibilityContext({
+      actorUserId,
+      activeOrganizationId: input.activeOrganizationId,
+      activeTeamId: input.activeTeamId,
+    });
+    const state = await this.resolveProjectAccessState({
+      projectKey: input.projectKey,
+      actorUserId,
+      activeOrganizationId: input.activeOrganizationId,
+      activeTeamId: input.activeTeamId,
+    });
+    if (!state.project) {
       return {
         ok: false,
         error: "project_not_found",
       };
     }
-    const actorRole = await this.resolveCurrentAccessRole({
-      project,
-      actorUserId,
-    });
+    const project = state.project;
+    const actorRole = state.scopedRole;
+    if (!actorRole && state.broadRole) {
+      return {
+        ok: false,
+        error: "project_scope_forbidden",
+      };
+    }
     if (!(actorRole === "owner" || actorRole === "admin")) {
       return {
         ok: false,
@@ -287,16 +350,23 @@ export class DbProjectStore implements ProjectStore {
     }
 
     const subject = await resolveAccessSubject({
-      actorUserId,
       scope: input.scope,
       orgKey: input.orgKey,
       teamKey: input.teamKey,
-      orgStore: this.orgStore,
+      visibility,
     });
     if (!subject) {
       return {
         ok: false,
-        error: "project_access_target_not_visible",
+        error:
+          resolveAccessSubjectVisibility({
+            scope: input.scope,
+            orgKey: input.orgKey,
+            teamKey: input.teamKey,
+            visibility,
+          }) === "scope_forbidden"
+            ? "project_scope_forbidden"
+            : "project_access_target_not_visible",
       };
     }
     if (
@@ -375,23 +445,34 @@ export class DbProjectStore implements ProjectStore {
     readonly projectKey: string;
     readonly actorUserId: string;
     readonly grantId: string;
+    readonly activeOrganizationId?: string | null;
+    readonly activeTeamId?: string | null;
   }): Promise<ProjectAccessMutationResult> {
     await this.ensureTables();
     const actorUserId = normalizeRequiredText(
       input.actorUserId,
       "actor user id"
     );
-    const project = await this.readProjectByKey(input.projectKey);
-    if (!project) {
+    const state = await this.resolveProjectAccessState({
+      projectKey: input.projectKey,
+      actorUserId,
+      activeOrganizationId: input.activeOrganizationId,
+      activeTeamId: input.activeTeamId,
+    });
+    if (!state.project) {
       return {
         ok: false,
         error: "project_not_found",
       };
     }
-    const actorRole = await this.resolveCurrentAccessRole({
-      project,
-      actorUserId,
-    });
+    const project = state.project;
+    const actorRole = state.scopedRole;
+    if (!actorRole && state.broadRole) {
+      return {
+        ok: false,
+        error: "project_scope_forbidden",
+      };
+    }
     if (!(actorRole === "owner" || actorRole === "admin")) {
       return {
         ok: false,
@@ -447,11 +528,13 @@ export class DbProjectStore implements ProjectStore {
   private async toProjectRecord(input: {
     readonly project: typeof projectAdminProjects.$inferSelect;
     readonly actorUserId: string;
+    readonly visibility?: VisibilityContext;
   }): Promise<ProjectRecord> {
     const currentAccessRole =
       (await this.resolveCurrentAccessRole({
         project: input.project,
         actorUserId: input.actorUserId,
+        ...(input.visibility ? { visibility: input.visibility } : {}),
       })) ?? "viewer";
     return toProjectRecord({
       project: input.project,
@@ -462,6 +545,7 @@ export class DbProjectStore implements ProjectStore {
   private async resolveCurrentAccessRole(input: {
     readonly project: typeof projectAdminProjects.$inferSelect;
     readonly actorUserId: string;
+    readonly visibility?: VisibilityContext;
   }): Promise<ProjectAccessRole | null> {
     const actorUserId = normalizeOptionalText(input.actorUserId);
     if (!actorUserId) {
@@ -474,18 +558,19 @@ export class DbProjectStore implements ProjectStore {
       return "owner";
     }
 
-    const visibility = await resolveVisibilityContext({
-      actorUserId,
-      orgStore: this.orgStore,
-    });
+    const visibility =
+      input.visibility ??
+      (await this.resolveVisibilityContext({
+        actorUserId,
+      }));
     if (input.project.ownershipMode === "shared") {
       const ownerVisible =
         (input.project.ownerType === "organization" &&
           input.project.ownerId &&
-          visibility.organizationIds.has(input.project.ownerId)) ||
+          visibility.scopedOrganizationIds.has(input.project.ownerId)) ||
         (input.project.ownerType === "team" &&
           input.project.ownerId &&
-          visibility.teamIds.has(input.project.ownerId));
+          visibility.scopedTeamIds.has(input.project.ownerId));
       if (ownerVisible) {
         return "owner";
       }
@@ -499,8 +584,9 @@ export class DbProjectStore implements ProjectStore {
     for (const grant of grants) {
       const visible =
         (grant.scope === "organization" &&
-          visibility.organizationIds.has(grant.subjectId)) ||
-        (grant.scope === "team" && visibility.teamIds.has(grant.subjectId));
+          visibility.scopedOrganizationIds.has(grant.subjectId)) ||
+        (grant.scope === "team" &&
+          visibility.scopedTeamIds.has(grant.subjectId));
       if (!visible) {
         continue;
       }
@@ -512,6 +598,109 @@ export class DbProjectStore implements ProjectStore {
       }
     }
     return bestRole;
+  }
+
+  private async resolveVisibilityContext(input: {
+    readonly actorUserId: string;
+    readonly activeOrganizationId?: string | null;
+    readonly activeTeamId?: string | null;
+  }): Promise<VisibilityContext> {
+    const [organizations, teams] = await Promise.all([
+      this.orgStore.listOrganizations({
+        actorUserId: input.actorUserId,
+      }),
+      this.orgStore.listTeams({
+        actorUserId: input.actorUserId,
+        orgKey: null,
+      }),
+    ]);
+    const organizationIds = new Set(
+      organizations.map((organization) => organization.id)
+    );
+    const teamIds = new Set(teams.map((team) => team.id));
+    const activeTeamId = normalizeOptionalText(input.activeTeamId);
+    const activeOrganizationId = normalizeOptionalText(
+      input.activeOrganizationId
+    );
+    const activeTeam = activeTeamId
+      ? (teams.find((team) => team.id === activeTeamId) ?? null)
+      : null;
+    const hasActiveScope = Boolean(activeTeam || activeOrganizationId);
+    let scopedOrganizations = organizations;
+    if (activeTeam) {
+      scopedOrganizations = organizations.filter(
+        (organization) => organization.id === activeTeam.organizationId
+      );
+    } else if (activeOrganizationId) {
+      scopedOrganizations = organizations.filter(
+        (organization) => organization.id === activeOrganizationId
+      );
+    }
+    let scopedTeams = teams;
+    if (activeTeam) {
+      scopedTeams = [activeTeam];
+    } else if (activeOrganizationId) {
+      scopedTeams = teams.filter(
+        (team) => team.organizationId === activeOrganizationId
+      );
+    }
+    return {
+      organizations,
+      teams,
+      scopedOrganizations,
+      scopedTeams,
+      organizationIds,
+      teamIds,
+      scopedOrganizationIds: new Set(
+        scopedOrganizations.map((organization) => organization.id)
+      ),
+      scopedTeamIds: new Set(scopedTeams.map((team) => team.id)),
+      hasActiveScope,
+    };
+  }
+
+  private async resolveProjectAccessState(input: {
+    readonly projectKey: string;
+    readonly actorUserId: string;
+    readonly activeOrganizationId?: string | null;
+    readonly activeTeamId?: string | null;
+  }): Promise<ProjectAccessState> {
+    const actorUserId = normalizeRequiredText(
+      input.actorUserId,
+      "actor user id"
+    );
+    const project = await this.readProjectByKey(input.projectKey);
+    const visibility = await this.resolveVisibilityContext({
+      actorUserId,
+      activeOrganizationId: input.activeOrganizationId,
+      activeTeamId: input.activeTeamId,
+    });
+    if (!project) {
+      return {
+        project: null,
+        scopedRole: null,
+        broadRole: null,
+        visibility,
+      };
+    }
+    const scopedRole = await this.resolveCurrentAccessRole({
+      project,
+      actorUserId,
+      visibility,
+    });
+    const broadRole = visibility.hasActiveScope
+      ? await this.resolveCurrentAccessRole({
+          project,
+          actorUserId,
+          visibility: expandVisibilityScope(visibility),
+        })
+      : scopedRole;
+    return {
+      project,
+      scopedRole,
+      broadRole,
+      visibility,
+    };
   }
 }
 
@@ -600,22 +789,23 @@ export async function ensureProjectAdminTables(input: {
   `);
 }
 
-async function resolveDesiredOwnership(input: {
-  readonly actorUserId: string;
+function resolveDesiredOwnership(input: {
   readonly mode: "local" | "organization" | "team";
   readonly orgKey?: string | null;
   readonly teamKey?: string | null;
-  readonly orgStore: OrgTeamsStore;
-}): Promise<
+  readonly visibility: VisibilityContext;
+}):
   | {
       readonly ok: true;
       readonly ownership: ProjectOwnershipRecord;
     }
   | {
       readonly ok: false;
-      readonly error: "project_owner_required" | "project_owner_not_visible";
-    }
-> {
+      readonly error:
+        | "project_owner_required"
+        | "project_owner_not_visible"
+        | "project_scope_forbidden";
+    } {
   if (input.mode === "local") {
     return {
       ok: true,
@@ -630,14 +820,20 @@ async function resolveDesiredOwnership(input: {
         error: "project_owner_required",
       };
     }
-    const organization = await input.orgStore.getOrganization({
-      orgKey: organizationKey,
-      actorUserId: input.actorUserId,
+    const organization = resolveOrganizationByKey({
+      key: organizationKey,
+      organizations: input.visibility.scopedOrganizations,
     });
     if (!organization) {
       return {
         ok: false,
-        error: "project_owner_not_visible",
+        error:
+          resolveOrganizationByKey({
+            key: organizationKey,
+            organizations: input.visibility.organizations,
+          }) && input.visibility.hasActiveScope
+            ? "project_scope_forbidden"
+            : "project_owner_not_visible",
       };
     }
     return {
@@ -661,15 +857,24 @@ async function resolveDesiredOwnership(input: {
       error: "project_owner_required",
     };
   }
-  const team = await input.orgStore.getTeam({
+  const team = resolveTeamByKey({
+    organizationKey: orgKey,
     teamKey,
-    orgKey,
-    actorUserId: input.actorUserId,
+    teams: input.visibility.scopedTeams,
+    organizations: input.visibility.scopedOrganizations,
   });
   if (!team) {
     return {
       ok: false,
-      error: "project_owner_not_visible",
+      error:
+        resolveTeamByKey({
+          organizationKey: orgKey,
+          teamKey,
+          teams: input.visibility.teams,
+          organizations: input.visibility.organizations,
+        }) && input.visibility.hasActiveScope
+          ? "project_scope_forbidden"
+          : "project_owner_not_visible",
     };
   }
   return {
@@ -685,28 +890,27 @@ async function resolveDesiredOwnership(input: {
   };
 }
 
-async function resolveAccessSubject(input: {
-  readonly actorUserId: string;
+function resolveAccessSubject(input: {
   readonly scope: ProjectAccessScope;
   readonly orgKey?: string | null;
   readonly teamKey?: string | null;
-  readonly orgStore: OrgTeamsStore;
-}): Promise<{
+  readonly visibility: VisibilityContext;
+}): {
   readonly scope: ProjectAccessScope;
   readonly subjectId: string;
   readonly subjectSlug: string;
   readonly subjectName: string;
   readonly organizationId: string;
   readonly teamId: string | null;
-} | null> {
+} | null {
   if (input.scope === "organization") {
     const organizationKey = normalizeOptionalText(input.orgKey);
     if (!organizationKey) {
       return null;
     }
-    const organization = await input.orgStore.getOrganization({
-      orgKey: organizationKey,
-      actorUserId: input.actorUserId,
+    const organization = resolveOrganizationByKey({
+      key: organizationKey,
+      organizations: input.visibility.scopedOrganizations,
     });
     if (!organization) {
       return null;
@@ -726,10 +930,11 @@ async function resolveAccessSubject(input: {
   if (!(organizationKey && teamKey)) {
     return null;
   }
-  const team = await input.orgStore.getTeam({
+  const team = resolveTeamByKey({
+    organizationKey,
     teamKey,
-    orgKey: organizationKey,
-    actorUserId: input.actorUserId,
+    teams: input.visibility.scopedTeams,
+    organizations: input.visibility.scopedOrganizations,
   });
   if (!team) {
     return null;
@@ -744,24 +949,86 @@ async function resolveAccessSubject(input: {
   };
 }
 
-async function resolveVisibilityContext(input: {
-  readonly actorUserId: string;
-  readonly orgStore: OrgTeamsStore;
-}) {
-  const [organizations, teams] = await Promise.all([
-    input.orgStore.listOrganizations({
-      actorUserId: input.actorUserId,
-    }),
-    input.orgStore.listTeams({
-      actorUserId: input.actorUserId,
-      orgKey: null,
-    }),
-  ]);
+function resolveAccessSubjectVisibility(input: {
+  readonly scope: ProjectAccessScope;
+  readonly orgKey?: string | null;
+  readonly teamKey?: string | null;
+  readonly visibility: VisibilityContext;
+}): "not_visible" | "scope_forbidden" {
+  if (!input.visibility.hasActiveScope) {
+    return "not_visible";
+  }
+  if (input.scope === "organization") {
+    const organizationKey = normalizeOptionalText(input.orgKey);
+    if (!organizationKey) {
+      return "not_visible";
+    }
+    return resolveOrganizationByKey({
+      key: organizationKey,
+      organizations: input.visibility.organizations,
+    })
+      ? "scope_forbidden"
+      : "not_visible";
+  }
+  const organizationKey = normalizeOptionalText(input.orgKey);
+  const teamKey = normalizeOptionalText(input.teamKey);
+  if (!(organizationKey && teamKey)) {
+    return "not_visible";
+  }
+  return resolveTeamByKey({
+    organizationKey,
+    teamKey,
+    teams: input.visibility.teams,
+    organizations: input.visibility.organizations,
+  })
+    ? "scope_forbidden"
+    : "not_visible";
+}
+
+function resolveOrganizationByKey(input: {
+  readonly key: string;
+  readonly organizations: readonly OrganizationRecord[];
+}): OrganizationRecord | null {
+  return (
+    input.organizations.find((organization) => {
+      return organization.id === input.key || organization.slug === input.key;
+    }) ?? null
+  );
+}
+
+function resolveTeamByKey(input: {
+  readonly organizationKey: string;
+  readonly teamKey: string;
+  readonly teams: readonly TeamRecord[];
+  readonly organizations: readonly OrganizationRecord[];
+}): TeamRecord | null {
+  const organization = resolveOrganizationByKey({
+    key: input.organizationKey,
+    organizations: input.organizations,
+  });
+  if (!organization) {
+    return null;
+  }
+  return (
+    input.teams.find((team) => {
+      return (
+        team.organizationId === organization.id &&
+        (team.id === input.teamKey || team.slug === input.teamKey)
+      );
+    }) ?? null
+  );
+}
+
+function expandVisibilityScope(
+  visibility: VisibilityContext
+): VisibilityContext {
   return {
-    organizationIds: new Set(
-      organizations.map((organization) => organization.id)
-    ),
-    teamIds: new Set(teams.map((team) => team.id)),
+    ...visibility,
+    scopedOrganizations: visibility.organizations,
+    scopedTeams: visibility.teams,
+    scopedOrganizationIds: visibility.organizationIds,
+    scopedTeamIds: visibility.teamIds,
+    hasActiveScope: false,
   };
 }
 

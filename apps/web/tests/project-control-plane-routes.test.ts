@@ -159,6 +159,43 @@ test("revoke project access route reports broker failures through the account sh
   );
 });
 
+test("register project route preserves scoped selection when the broker rejects the active org or team context", async () => {
+  process.env.NEXT_PUBLIC_HACK_WEB_APP_BASE_URL = "https://hack-cli.hack";
+  process.env.NEXT_PUBLIC_HACK_AUTH_BROKER_URL = "https://auth.hack-cli.hack";
+  process.env.HACK_AUTH_BROKER_INTERNAL_URL = "https://auth.hack-cli.hack";
+
+  setMockFetch(() =>
+    Response.json(
+      {
+        ok: false,
+        error: "project_scope_forbidden",
+      },
+      { status: 403 }
+    )
+  );
+
+  const formData = new FormData();
+  formData.set("slug", "ops-console");
+  formData.set("name", "Ops Console");
+  formData.set("mode", "organization");
+  formData.set("org", "ops");
+  formData.set("redirectTo", "/account?org=hack&team=cli");
+
+  const response = await registerProject(
+    new Request("https://hack-cli.hack/api/control-plane/projects", {
+      method: "POST",
+      headers: {
+        cookie: `${HACK_WEB_BROKER_SESSION_COOKIE_NAME}=session-token`,
+      },
+      body: formData,
+    }) as NextRequest
+  );
+
+  expect(response.headers.get("location")).toBe(
+    "/account?org=ops&team=cli&project=ops-console&error=project_scope_forbidden"
+  );
+});
+
 function setMockFetch(
   handler: (
     input: string | URL | Request,

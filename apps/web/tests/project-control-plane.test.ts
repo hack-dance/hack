@@ -196,6 +196,15 @@ test("project control plane feedback resolves project notices and hidden-project
 
   expect(
     resolveAccountControlPlaneFeedback({
+      error: "project_scope_forbidden",
+    })
+  ).toMatchObject({
+    tone: "danger",
+    title: "Active scope required",
+  });
+
+  expect(
+    resolveAccountControlPlaneFeedback({
       requestedProjectKey: "secret-project",
       selectedProjectVisible: false,
     })

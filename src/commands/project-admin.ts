@@ -85,6 +85,7 @@ const handleOwnerShow: CommandHandlerFor<typeof ownerShowSpec> = async ({
         "Broker registration",
         payload.broker_registration ? payload.broker_registration.slug : "",
       ],
+      ["Broker error", payload.broker_error?.message ?? ""],
       ["Conflict", payload.conflict?.message ?? ""],
     ],
   });
@@ -153,7 +154,12 @@ async function resolveBrokerOwnershipView(input: {
     path: `/v1/auth/projects/${encodeURIComponent(input.projectSlug)}`,
   });
   if (!response.ok) {
-    return {};
+    return {
+      broker_error: {
+        message: response.error,
+        login_required: response.loginRequired,
+      },
+    };
   }
 
   const project = normalizeBrokerProject(response.value.project);

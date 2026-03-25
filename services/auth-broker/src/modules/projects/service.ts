@@ -55,6 +55,7 @@ export type RegisterProjectResult =
       readonly error:
         | "project_owner_required"
         | "project_owner_not_visible"
+        | "project_scope_forbidden"
         | "project_registration_conflict";
       readonly existing?: ProjectRecord;
       readonly incoming?: {
@@ -74,6 +75,7 @@ export type ProjectAccessMutationResult =
       readonly ok: false;
       readonly error:
         | "project_not_found"
+        | "project_scope_forbidden"
         | "project_access_forbidden"
         | "project_access_target_not_visible"
         | "project_access_conflict"
@@ -81,40 +83,63 @@ export type ProjectAccessMutationResult =
         | "project_access_local_mode";
     };
 
+type ActiveProjectScopeInput = {
+  readonly activeOrganizationId?: string | null;
+  readonly activeTeamId?: string | null;
+};
+
 export type ProjectStore = {
-  readonly registerProject: (input: {
-    readonly slug: string;
-    readonly name?: string;
-    readonly mode: "local" | "organization" | "team";
-    readonly orgKey?: string | null;
-    readonly teamKey?: string | null;
-    readonly actorUserId: string;
-    readonly actorEmail: string | null;
-  }) => Promise<RegisterProjectResult>;
-  readonly listProjects: (input: {
-    readonly actorUserId: string;
-  }) => Promise<readonly ProjectRecord[]>;
-  readonly getProject: (input: {
-    readonly projectKey: string;
-    readonly actorUserId: string;
-  }) => Promise<ProjectRecord | null>;
-  readonly listAccess: (input: {
-    readonly projectKey: string;
-    readonly actorUserId: string;
-  }) => Promise<readonly ProjectAccessGrantRecord[] | null>;
-  readonly grantAccess: (input: {
-    readonly projectKey: string;
-    readonly actorUserId: string;
-    readonly scope: ProjectAccessScope;
-    readonly role: Exclude<ProjectAccessRole, "owner">;
-    readonly orgKey?: string | null;
-    readonly teamKey?: string | null;
-  }) => Promise<ProjectAccessMutationResult>;
-  readonly revokeAccess: (input: {
-    readonly projectKey: string;
-    readonly actorUserId: string;
-    readonly grantId: string;
-  }) => Promise<ProjectAccessMutationResult>;
+  readonly registerProject: (
+    input: {
+      readonly slug: string;
+      readonly name?: string;
+      readonly mode: "local" | "organization" | "team";
+      readonly orgKey?: string | null;
+      readonly teamKey?: string | null;
+      readonly actorUserId: string;
+      readonly actorEmail: string | null;
+    } & ActiveProjectScopeInput
+  ) => Promise<RegisterProjectResult>;
+  readonly listProjects: (
+    input: {
+      readonly actorUserId: string;
+    } & ActiveProjectScopeInput
+  ) => Promise<readonly ProjectRecord[]>;
+  readonly getProject: (
+    input: {
+      readonly projectKey: string;
+      readonly actorUserId: string;
+    } & ActiveProjectScopeInput
+  ) => Promise<ProjectRecord | null>;
+  readonly getProjectVisibility: (
+    input: {
+      readonly projectKey: string;
+      readonly actorUserId: string;
+    } & ActiveProjectScopeInput
+  ) => Promise<"visible" | "scope_forbidden" | "not_found">;
+  readonly listAccess: (
+    input: {
+      readonly projectKey: string;
+      readonly actorUserId: string;
+    } & ActiveProjectScopeInput
+  ) => Promise<readonly ProjectAccessGrantRecord[] | null>;
+  readonly grantAccess: (
+    input: {
+      readonly projectKey: string;
+      readonly actorUserId: string;
+      readonly scope: ProjectAccessScope;
+      readonly role: Exclude<ProjectAccessRole, "owner">;
+      readonly orgKey?: string | null;
+      readonly teamKey?: string | null;
+    } & ActiveProjectScopeInput
+  ) => Promise<ProjectAccessMutationResult>;
+  readonly revokeAccess: (
+    input: {
+      readonly projectKey: string;
+      readonly actorUserId: string;
+      readonly grantId: string;
+    } & ActiveProjectScopeInput
+  ) => Promise<ProjectAccessMutationResult>;
 };
 
 type StoredProject = {
@@ -145,8 +170,20 @@ type StoredAccessGrant = {
 type VisibilityContext = {
   readonly organizations: readonly OrganizationRecord[];
   readonly teams: readonly TeamRecord[];
+  readonly scopedOrganizations: readonly OrganizationRecord[];
+  readonly scopedTeams: readonly TeamRecord[];
   readonly organizationIds: ReadonlySet<string>;
   readonly teamIds: ReadonlySet<string>;
+  readonly scopedOrganizationIds: ReadonlySet<string>;
+  readonly scopedTeamIds: ReadonlySet<string>;
+  readonly hasActiveScope: boolean;
+};
+
+type ProjectAccessState = {
+  readonly project: StoredProject | null;
+  readonly scopedRole: ProjectAccessRole | null;
+  readonly broadRole: ProjectAccessRole | null;
+  readonly visibility: VisibilityContext;
 };
 
 export class InMemoryProjectStore implements ProjectStore {
@@ -172,6 +209,8 @@ export class InMemoryProjectStore implements ProjectStore {
     readonly teamKey?: string | null;
     readonly actorUserId: string;
     readonly actorEmail: string | null;
+    readonly activeOrganizationId?: string | null;
+    readonly activeTeamId?: string | null;
   }): Promise<RegisterProjectResult> {
     const slug = normalizeProjectSlug(input.slug);
     const name = normalizeProjectName({
@@ -179,12 +218,16 @@ export class InMemoryProjectStore implements ProjectStore {
       value: input.name,
     });
     const actorUserId = normalizeRequiredText(input.actorUserId);
-    const desiredOwnership = await resolveDesiredOwnership({
+    const visibility = await this.resolveVisibilityContext({
       actorUserId,
+      activeOrganizationId: input.activeOrganizationId,
+      activeTeamId: input.activeTeamId,
+    });
+    const desiredOwnership = await resolveDesiredOwnership({
       mode: input.mode,
       orgKey: input.orgKey,
       teamKey: input.teamKey,
-      orgStore: this.orgStore,
+      visibility,
     });
     if (!desiredOwnership.ok) {
       return desiredOwnership;
@@ -211,15 +254,25 @@ export class InMemoryProjectStore implements ProjectStore {
         project: await this.toProjectRecord({
           project,
           actorUserId,
+          visibility,
         }),
       };
     }
 
-    const actorRole = await this.resolveCurrentAccessRole({
-      project: existing,
+    const actorState = await this.resolveProjectAccessState({
+      projectKey: existing.slug,
       actorUserId,
+      activeOrganizationId: input.activeOrganizationId,
+      activeTeamId: input.activeTeamId,
     });
+    const actorRole = actorState.scopedRole;
     if (!(actorRole === "owner" || actorRole === "admin")) {
+      if (actorState.broadRole) {
+        return {
+          ok: false,
+          error: "project_scope_forbidden",
+        };
+      }
       return {
         ok: false,
         error: "project_registration_conflict",
@@ -256,19 +309,28 @@ export class InMemoryProjectStore implements ProjectStore {
       project: await this.toProjectRecord({
         project: nextProject,
         actorUserId,
+        visibility,
       }),
     };
   }
 
   async listProjects(input: {
     readonly actorUserId: string;
+    readonly activeOrganizationId?: string | null;
+    readonly activeTeamId?: string | null;
   }): Promise<readonly ProjectRecord[]> {
     const actorUserId = normalizeRequiredText(input.actorUserId);
+    const visibility = await this.resolveVisibilityContext({
+      actorUserId,
+      activeOrganizationId: input.activeOrganizationId,
+      activeTeamId: input.activeTeamId,
+    });
     const visible = await Promise.all(
       [...this.projectsById.values()].map(async (project) => {
         const role = await this.resolveCurrentAccessRole({
           project,
           actorUserId,
+          visibility,
         });
         if (!role) {
           return null;
@@ -287,43 +349,47 @@ export class InMemoryProjectStore implements ProjectStore {
   async getProject(input: {
     readonly projectKey: string;
     readonly actorUserId: string;
+    readonly activeOrganizationId?: string | null;
+    readonly activeTeamId?: string | null;
   }): Promise<ProjectRecord | null> {
-    const actorUserId = normalizeRequiredText(input.actorUserId);
-    const project = this.readProjectByKey(input.projectKey);
-    if (!project) {
-      return null;
-    }
-    const role = await this.resolveCurrentAccessRole({
-      project,
-      actorUserId,
-    });
-    if (!role) {
+    const state = await this.resolveProjectAccessState(input);
+    if (!(state.project && state.scopedRole)) {
       return null;
     }
     return toProjectRecord({
-      project,
-      currentAccessRole: role,
+      project: state.project,
+      currentAccessRole: state.scopedRole,
     });
+  }
+
+  async getProjectVisibility(input: {
+    readonly projectKey: string;
+    readonly actorUserId: string;
+    readonly activeOrganizationId?: string | null;
+    readonly activeTeamId?: string | null;
+  }): Promise<"visible" | "scope_forbidden" | "not_found"> {
+    const state = await this.resolveProjectAccessState(input);
+    if (state.scopedRole) {
+      return "visible";
+    }
+    if (state.broadRole) {
+      return "scope_forbidden";
+    }
+    return "not_found";
   }
 
   async listAccess(input: {
     readonly projectKey: string;
     readonly actorUserId: string;
+    readonly activeOrganizationId?: string | null;
+    readonly activeTeamId?: string | null;
   }): Promise<readonly ProjectAccessGrantRecord[] | null> {
-    const actorUserId = normalizeRequiredText(input.actorUserId);
-    const project = this.readProjectByKey(input.projectKey);
-    if (!project) {
-      return null;
-    }
-    const role = await this.resolveCurrentAccessRole({
-      project,
-      actorUserId,
-    });
-    if (!role) {
+    const state = await this.resolveProjectAccessState(input);
+    if (!(state.project && state.scopedRole)) {
       return null;
     }
     const grants = [
-      ...(this.grantsByProjectId.get(project.id)?.values() ?? []),
+      ...(this.grantsByProjectId.get(state.project.id)?.values() ?? []),
     ];
     return grants
       .map((grant) => toProjectAccessGrantRecord({ grant }))
@@ -337,19 +403,35 @@ export class InMemoryProjectStore implements ProjectStore {
     readonly role: Exclude<ProjectAccessRole, "owner">;
     readonly orgKey?: string | null;
     readonly teamKey?: string | null;
+    readonly activeOrganizationId?: string | null;
+    readonly activeTeamId?: string | null;
   }): Promise<ProjectAccessMutationResult> {
     const actorUserId = normalizeRequiredText(input.actorUserId);
-    const project = this.readProjectByKey(input.projectKey);
-    if (!project) {
+    const visibility = await this.resolveVisibilityContext({
+      actorUserId,
+      activeOrganizationId: input.activeOrganizationId,
+      activeTeamId: input.activeTeamId,
+    });
+    const state = await this.resolveProjectAccessState({
+      projectKey: input.projectKey,
+      actorUserId,
+      activeOrganizationId: input.activeOrganizationId,
+      activeTeamId: input.activeTeamId,
+    });
+    if (!state.project) {
       return {
         ok: false,
         error: "project_not_found",
       };
     }
-    const actorRole = await this.resolveCurrentAccessRole({
-      project,
-      actorUserId,
-    });
+    const project = state.project;
+    const actorRole = state.scopedRole;
+    if (!actorRole && state.broadRole) {
+      return {
+        ok: false,
+        error: "project_scope_forbidden",
+      };
+    }
     if (!(actorRole === "owner" || actorRole === "admin")) {
       return {
         ok: false,
@@ -364,16 +446,23 @@ export class InMemoryProjectStore implements ProjectStore {
     }
 
     const subject = await resolveAccessSubject({
-      actorUserId,
       scope: input.scope,
       orgKey: input.orgKey,
       teamKey: input.teamKey,
-      orgStore: this.orgStore,
+      visibility,
     });
     if (!subject) {
       return {
         ok: false,
-        error: "project_access_target_not_visible",
+        error:
+          resolveAccessSubjectVisibility({
+            scope: input.scope,
+            orgKey: input.orgKey,
+            teamKey: input.teamKey,
+            visibility,
+          }) === "scope_forbidden"
+            ? "project_scope_forbidden"
+            : "project_access_target_not_visible",
       };
     }
     if (
@@ -423,19 +512,30 @@ export class InMemoryProjectStore implements ProjectStore {
     readonly projectKey: string;
     readonly actorUserId: string;
     readonly grantId: string;
+    readonly activeOrganizationId?: string | null;
+    readonly activeTeamId?: string | null;
   }): Promise<ProjectAccessMutationResult> {
     const actorUserId = normalizeRequiredText(input.actorUserId);
-    const project = this.readProjectByKey(input.projectKey);
-    if (!project) {
+    const state = await this.resolveProjectAccessState({
+      projectKey: input.projectKey,
+      actorUserId,
+      activeOrganizationId: input.activeOrganizationId,
+      activeTeamId: input.activeTeamId,
+    });
+    if (!state.project) {
       return {
         ok: false,
         error: "project_not_found",
       };
     }
-    const actorRole = await this.resolveCurrentAccessRole({
-      project,
-      actorUserId,
-    });
+    const project = state.project;
+    const actorRole = state.scopedRole;
+    if (!actorRole && state.broadRole) {
+      return {
+        ok: false,
+        error: "project_scope_forbidden",
+      };
+    }
     if (!(actorRole === "owner" || actorRole === "admin")) {
       return {
         ok: false,
@@ -478,11 +578,13 @@ export class InMemoryProjectStore implements ProjectStore {
   private async toProjectRecord(input: {
     readonly project: StoredProject;
     readonly actorUserId: string;
+    readonly visibility?: VisibilityContext;
   }): Promise<ProjectRecord> {
     const currentAccessRole =
       (await this.resolveCurrentAccessRole({
         project: input.project,
         actorUserId: input.actorUserId,
+        ...(input.visibility ? { visibility: input.visibility } : {}),
       })) ?? "viewer";
     return toProjectRecord({
       project: input.project,
@@ -493,6 +595,7 @@ export class InMemoryProjectStore implements ProjectStore {
   private async resolveCurrentAccessRole(input: {
     readonly project: StoredProject;
     readonly actorUserId: string;
+    readonly visibility?: VisibilityContext;
   }): Promise<ProjectAccessRole | null> {
     const actorUserId = normalizeOptionalText(input.actorUserId);
     if (!actorUserId) {
@@ -505,17 +608,21 @@ export class InMemoryProjectStore implements ProjectStore {
       return "owner";
     }
 
-    const visibility = await this.resolveVisibilityContext({
-      actorUserId,
-    });
+    const visibility =
+      input.visibility ??
+      (await this.resolveVisibilityContext({
+        actorUserId,
+      }));
     if (input.project.ownership.mode === "shared") {
       const ownerVisible =
         (input.project.ownership.ownerType === "organization" &&
           input.project.ownership.ownerId &&
-          visibility.organizationIds.has(input.project.ownership.ownerId)) ||
+          visibility.scopedOrganizationIds.has(
+            input.project.ownership.ownerId
+          )) ||
         (input.project.ownership.ownerType === "team" &&
           input.project.ownership.ownerId &&
-          visibility.teamIds.has(input.project.ownership.ownerId));
+          visibility.scopedTeamIds.has(input.project.ownership.ownerId));
       if (ownerVisible) {
         return "owner";
       }
@@ -528,8 +635,9 @@ export class InMemoryProjectStore implements ProjectStore {
     for (const grant of grants) {
       const visible =
         (grant.scope === "organization" &&
-          visibility.organizationIds.has(grant.subjectId)) ||
-        (grant.scope === "team" && visibility.teamIds.has(grant.subjectId));
+          visibility.scopedOrganizationIds.has(grant.subjectId)) ||
+        (grant.scope === "team" &&
+          visibility.scopedTeamIds.has(grant.subjectId));
       if (!visible) {
         continue;
       }
@@ -545,6 +653,8 @@ export class InMemoryProjectStore implements ProjectStore {
 
   private async resolveVisibilityContext(input: {
     readonly actorUserId: string;
+    readonly activeOrganizationId?: string | null;
+    readonly activeTeamId?: string | null;
   }): Promise<VisibilityContext> {
     const [organizations, teams] = await Promise.all([
       this.orgStore.listOrganizations({
@@ -555,33 +665,117 @@ export class InMemoryProjectStore implements ProjectStore {
         orgKey: null,
       }),
     ]);
+    const organizationIds = new Set(
+      organizations.map((organization) => organization.id)
+    );
+    const teamIds = new Set(teams.map((team) => team.id));
+    const activeTeamId = normalizeOptionalText(input.activeTeamId);
+    const activeOrganizationId = normalizeOptionalText(
+      input.activeOrganizationId
+    );
+    const activeTeam = activeTeamId
+      ? (teams.find((team) => team.id === activeTeamId) ?? null)
+      : null;
+    const hasActiveScope = Boolean(activeTeam || activeOrganizationId);
+    let scopedOrganizations = organizations;
+    if (activeTeam) {
+      scopedOrganizations = organizations.filter(
+        (organization) => organization.id === activeTeam.organizationId
+      );
+    } else if (activeOrganizationId) {
+      scopedOrganizations = organizations.filter(
+        (organization) => organization.id === activeOrganizationId
+      );
+    }
+    let scopedTeams = teams;
+    if (activeTeam) {
+      scopedTeams = [activeTeam];
+    } else if (activeOrganizationId) {
+      scopedTeams = teams.filter(
+        (team) => team.organizationId === activeOrganizationId
+      );
+    }
     return {
       organizations,
       teams,
-      organizationIds: new Set(
-        organizations.map((organization) => organization.id)
+      scopedOrganizations,
+      scopedTeams,
+      organizationIds,
+      teamIds,
+      scopedOrganizationIds: new Set(
+        scopedOrganizations.map((organization) => organization.id)
       ),
-      teamIds: new Set(teams.map((team) => team.id)),
+      scopedTeamIds: new Set(scopedTeams.map((team) => team.id)),
+      hasActiveScope,
+    };
+  }
+
+  private async resolveProjectAccessState(input: {
+    readonly projectKey: string;
+    readonly actorUserId: string;
+    readonly activeOrganizationId?: string | null;
+    readonly activeTeamId?: string | null;
+  }): Promise<ProjectAccessState> {
+    const actorUserId = normalizeRequiredText(input.actorUserId);
+    const project = this.readProjectByKey(input.projectKey);
+    const visibility = await this.resolveVisibilityContext({
+      actorUserId,
+      activeOrganizationId: input.activeOrganizationId,
+      activeTeamId: input.activeTeamId,
+    });
+    if (!project) {
+      return {
+        project: null,
+        scopedRole: null,
+        broadRole: null,
+        visibility,
+      };
+    }
+    const scopedRole = await this.resolveCurrentAccessRole({
+      project,
+      actorUserId,
+      visibility,
+    });
+    const broadRole = visibility.hasActiveScope
+      ? await this.resolveCurrentAccessRole({
+          project,
+          actorUserId,
+          visibility: {
+            ...visibility,
+            scopedOrganizations: visibility.organizations,
+            scopedTeams: visibility.teams,
+            scopedOrganizationIds: visibility.organizationIds,
+            scopedTeamIds: visibility.teamIds,
+            hasActiveScope: false,
+          },
+        })
+      : scopedRole;
+    return {
+      project,
+      scopedRole,
+      broadRole,
+      visibility,
     };
   }
 }
 
-async function resolveDesiredOwnership(input: {
-  readonly actorUserId: string;
+function resolveDesiredOwnership(input: {
   readonly mode: "local" | "organization" | "team";
   readonly orgKey?: string | null;
   readonly teamKey?: string | null;
-  readonly orgStore: OrgTeamsStore;
-}): Promise<
+  readonly visibility: VisibilityContext;
+}):
   | {
       readonly ok: true;
       readonly ownership: ProjectOwnershipRecord;
     }
   | {
       readonly ok: false;
-      readonly error: "project_owner_required" | "project_owner_not_visible";
-    }
-> {
+      readonly error:
+        | "project_owner_required"
+        | "project_owner_not_visible"
+        | "project_scope_forbidden";
+    } {
   if (input.mode === "local") {
     return {
       ok: true,
@@ -596,14 +790,20 @@ async function resolveDesiredOwnership(input: {
         error: "project_owner_required",
       };
     }
-    const organization = await input.orgStore.getOrganization({
-      orgKey: organizationKey,
-      actorUserId: input.actorUserId,
+    const organization = resolveOrganizationByKey({
+      key: organizationKey,
+      organizations: input.visibility.scopedOrganizations,
     });
     if (!organization) {
       return {
         ok: false,
-        error: "project_owner_not_visible",
+        error:
+          resolveOrganizationByKey({
+            key: organizationKey,
+            organizations: input.visibility.organizations,
+          }) && input.visibility.hasActiveScope
+            ? "project_scope_forbidden"
+            : "project_owner_not_visible",
       };
     }
     return {
@@ -627,15 +827,24 @@ async function resolveDesiredOwnership(input: {
       error: "project_owner_required",
     };
   }
-  const team = await input.orgStore.getTeam({
+  const team = resolveTeamByKey({
+    organizationKey: orgKey,
     teamKey,
-    orgKey,
-    actorUserId: input.actorUserId,
+    teams: input.visibility.scopedTeams,
+    organizations: input.visibility.scopedOrganizations,
   });
   if (!team) {
     return {
       ok: false,
-      error: "project_owner_not_visible",
+      error:
+        resolveTeamByKey({
+          organizationKey: orgKey,
+          teamKey,
+          teams: input.visibility.teams,
+          organizations: input.visibility.organizations,
+        }) && input.visibility.hasActiveScope
+          ? "project_scope_forbidden"
+          : "project_owner_not_visible",
     };
   }
   return {
@@ -651,28 +860,27 @@ async function resolveDesiredOwnership(input: {
   };
 }
 
-async function resolveAccessSubject(input: {
-  readonly actorUserId: string;
+function resolveAccessSubject(input: {
   readonly scope: ProjectAccessScope;
   readonly orgKey?: string | null;
   readonly teamKey?: string | null;
-  readonly orgStore: OrgTeamsStore;
-}): Promise<{
+  readonly visibility: VisibilityContext;
+}): {
   readonly scope: ProjectAccessScope;
   readonly subjectId: string;
   readonly subjectSlug: string;
   readonly subjectName: string;
   readonly organizationId: string;
   readonly teamId: string | null;
-} | null> {
+} | null {
   if (input.scope === "organization") {
     const organizationKey = normalizeOptionalText(input.orgKey);
     if (!organizationKey) {
       return null;
     }
-    const organization = await input.orgStore.getOrganization({
-      orgKey: organizationKey,
-      actorUserId: input.actorUserId,
+    const organization = resolveOrganizationByKey({
+      key: organizationKey,
+      organizations: input.visibility.scopedOrganizations,
     });
     if (!organization) {
       return null;
@@ -692,10 +900,11 @@ async function resolveAccessSubject(input: {
   if (!(organizationKey && teamKey)) {
     return null;
   }
-  const team = await input.orgStore.getTeam({
+  const team = resolveTeamByKey({
+    organizationKey,
     teamKey,
-    orgKey: organizationKey,
-    actorUserId: input.actorUserId,
+    teams: input.visibility.scopedTeams,
+    organizations: input.visibility.scopedOrganizations,
   });
   if (!team) {
     return null;
@@ -708,6 +917,76 @@ async function resolveAccessSubject(input: {
     organizationId: team.organizationId,
     teamId: team.id,
   };
+}
+
+function resolveAccessSubjectVisibility(input: {
+  readonly scope: ProjectAccessScope;
+  readonly orgKey?: string | null;
+  readonly teamKey?: string | null;
+  readonly visibility: VisibilityContext;
+}): "not_visible" | "scope_forbidden" {
+  if (!input.visibility.hasActiveScope) {
+    return "not_visible";
+  }
+  if (input.scope === "organization") {
+    const organizationKey = normalizeOptionalText(input.orgKey);
+    if (!organizationKey) {
+      return "not_visible";
+    }
+    return resolveOrganizationByKey({
+      key: organizationKey,
+      organizations: input.visibility.organizations,
+    })
+      ? "scope_forbidden"
+      : "not_visible";
+  }
+  const organizationKey = normalizeOptionalText(input.orgKey);
+  const teamKey = normalizeOptionalText(input.teamKey);
+  if (!(organizationKey && teamKey)) {
+    return "not_visible";
+  }
+  return resolveTeamByKey({
+    organizationKey,
+    teamKey,
+    teams: input.visibility.teams,
+    organizations: input.visibility.organizations,
+  })
+    ? "scope_forbidden"
+    : "not_visible";
+}
+
+function resolveOrganizationByKey(input: {
+  readonly key: string;
+  readonly organizations: readonly OrganizationRecord[];
+}): OrganizationRecord | null {
+  return (
+    input.organizations.find((organization) => {
+      return organization.id === input.key || organization.slug === input.key;
+    }) ?? null
+  );
+}
+
+function resolveTeamByKey(input: {
+  readonly organizationKey: string;
+  readonly teamKey: string;
+  readonly teams: readonly TeamRecord[];
+  readonly organizations: readonly OrganizationRecord[];
+}): TeamRecord | null {
+  const organization = resolveOrganizationByKey({
+    key: input.organizationKey,
+    organizations: input.organizations,
+  });
+  if (!organization) {
+    return null;
+  }
+  return (
+    input.teams.find((team) => {
+      return (
+        team.organizationId === organization.id &&
+        (team.id === input.teamKey || team.slug === input.teamKey)
+      );
+    }) ?? null
+  );
 }
 
 function toProjectRecord(input: {

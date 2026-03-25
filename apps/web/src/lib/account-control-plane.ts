@@ -221,6 +221,11 @@ const controlPlaneErrorFeedback = {
     title: "Project ownership conflict",
     body: "Hack found an existing durable registration for this slug with different ownership. Resolve the conflict explicitly before reusing the project key.",
   },
+  project_scope_forbidden: {
+    tone: "danger",
+    title: "Active scope required",
+    body: "The current Hack org or team context does not allow this shared project change. Switch the active scope before retrying the shared project action.",
+  },
   project_register_failed: {
     tone: "danger",
     title: "Could not register the project",

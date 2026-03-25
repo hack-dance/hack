@@ -76,16 +76,22 @@ export async function POST(request: NextRequest) {
     response
   )) as RegisterProjectResponse | null;
   if (!response.ok) {
+    let error:
+      | "project_registration_conflict"
+      | "project_scope_forbidden"
+      | "project_register_failed" = "project_register_failed";
+    if (payload?.error === "project_registration_conflict") {
+      error = "project_registration_conflict";
+    } else if (payload?.error === "project_scope_forbidden") {
+      error = "project_scope_forbidden";
+    }
     return redirectToPath(
       buildAccountControlPlanePath({
         redirectTo,
         org: org ?? redirectSelection.org,
         team: team ?? redirectSelection.team,
         project: slug,
-        error:
-          payload?.error === "project_registration_conflict"
-            ? "project_registration_conflict"
-            : "project_register_failed",
+        error,
       })
     );
   }

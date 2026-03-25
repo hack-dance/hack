@@ -201,6 +201,28 @@ async function inviteAndAcceptOrganizationMember(input: {
   }
 }
 
+async function registerProjectForTest(input: {
+  readonly app: AuthBrokerApp;
+  readonly slug: string;
+  readonly name: string;
+  readonly mode: "local" | "organization" | "team";
+  readonly org?: string;
+  readonly team?: string;
+}): Promise<Response> {
+  return await handleJsonRequest({
+    app: input.app,
+    method: "POST",
+    path: "/v1/auth/projects",
+    body: {
+      slug: input.slug,
+      name: input.name,
+      mode: input.mode,
+      ...(input.org ? { org: input.org } : {}),
+      ...(input.team ? { team: input.team } : {}),
+    },
+  });
+}
+
 describe("project registration and access broker routes", () => {
   test("shared project registration persists explicit ownership and owner access", async () => {
     const orgStore = new InMemoryOrgTeamsStore();
@@ -534,5 +556,304 @@ describe("project registration and access broker routes", () => {
       readonly projects?: readonly unknown[];
     };
     expect(hiddenAgainPayload.projects).toEqual([]);
+  });
+
+  test("active team scope only lists local, org-owned, and matching team-owned projects", async () => {
+    const orgStore = new InMemoryOrgTeamsStore();
+    const projectStore = new InMemoryProjectStore({
+      orgStore,
+    });
+    const setupApp = createProjectTestApp({
+      orgStore,
+      projectStore,
+      session: createSession({
+        userId: "owner-user",
+        email: "owner@example.com",
+      }),
+    });
+
+    await createOrganization({
+      app: setupApp,
+      slug: "hack",
+      name: "Hack",
+    });
+    await createOrganization({
+      app: setupApp,
+      slug: "ops",
+      name: "Ops",
+    });
+    await createTeam({
+      app: setupApp,
+      org: "hack",
+      slug: "cli",
+      name: "CLI",
+    });
+    await createTeam({
+      app: setupApp,
+      org: "ops",
+      slug: "ops",
+      name: "Ops Team",
+    });
+
+    const organizationsResponse = await handleJsonRequest({
+      app: setupApp,
+      path: "/v1/auth/orgs",
+    });
+    const organizationsPayload = (await organizationsResponse.json()) as {
+      readonly organizations?: Array<{
+        readonly id?: string;
+        readonly slug?: string;
+      }>;
+    };
+    const hackOrganizationId = organizationsPayload.organizations?.find(
+      (organization) => organization.slug === "hack"
+    )?.id;
+    expect(hackOrganizationId).toBeTruthy();
+
+    const teamsResponse = await handleJsonRequest({
+      app: setupApp,
+      path: "/v1/auth/teams?org=hack",
+    });
+    const teamsPayload = (await teamsResponse.json()) as {
+      readonly teams?: Array<{
+        readonly id?: string;
+        readonly slug?: string;
+      }>;
+    };
+    const cliTeamId = teamsPayload.teams?.find(
+      (team) => team.slug === "cli"
+    )?.id;
+    expect(cliTeamId).toBeTruthy();
+    if (!(hackOrganizationId && cliTeamId)) {
+      throw new Error("Expected scoped org/team ids.");
+    }
+
+    const scopedApp = createProjectTestApp({
+      orgStore,
+      projectStore,
+      session: createSession({
+        userId: "owner-user",
+        email: "owner@example.com",
+        activeOrganizationId: hackOrganizationId,
+        activeTeamId: cliTeamId,
+      }),
+    });
+
+    await registerProjectForTest({
+      app: setupApp,
+      slug: "local-tooling",
+      name: "Local Tooling",
+      mode: "local",
+    });
+    await registerProjectForTest({
+      app: setupApp,
+      slug: "shared-hack",
+      name: "Shared Hack",
+      mode: "organization",
+      org: "hack",
+    });
+    await registerProjectForTest({
+      app: setupApp,
+      slug: "cli-console",
+      name: "CLI Console",
+      mode: "team",
+      org: "hack",
+      team: "cli",
+    });
+    await registerProjectForTest({
+      app: setupApp,
+      slug: "ops-shared",
+      name: "Ops Shared",
+      mode: "organization",
+      org: "ops",
+    });
+    await registerProjectForTest({
+      app: setupApp,
+      slug: "ops-console",
+      name: "Ops Console",
+      mode: "team",
+      org: "ops",
+      team: "ops",
+    });
+
+    const response = await handleJsonRequest({
+      app: scopedApp,
+      path: "/v1/auth/projects",
+    });
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as {
+      readonly projects?: Array<{
+        readonly slug?: string;
+      }>;
+    };
+
+    expect(payload.projects?.map((project) => project.slug)).toEqual([
+      "cli-console",
+      "local-tooling",
+      "shared-hack",
+    ]);
+  });
+
+  test("project detail returns explicit scope denial when the active context hides an otherwise visible shared project", async () => {
+    const orgStore = new InMemoryOrgTeamsStore();
+    const projectStore = new InMemoryProjectStore({
+      orgStore,
+    });
+    const setupApp = createProjectTestApp({
+      orgStore,
+      projectStore,
+      session: createSession({
+        userId: "owner-user",
+        email: "owner@example.com",
+      }),
+    });
+
+    await createOrganization({
+      app: setupApp,
+      slug: "hack",
+      name: "Hack",
+    });
+    await createOrganization({
+      app: setupApp,
+      slug: "ops",
+      name: "Ops",
+    });
+    await createTeam({
+      app: setupApp,
+      org: "hack",
+      slug: "cli",
+      name: "CLI",
+    });
+    await createTeam({
+      app: setupApp,
+      org: "ops",
+      slug: "ops",
+      name: "Ops Team",
+    });
+    const organizationsResponse = await handleJsonRequest({
+      app: setupApp,
+      path: "/v1/auth/orgs",
+    });
+    const organizationsPayload = (await organizationsResponse.json()) as {
+      readonly organizations?: Array<{
+        readonly id?: string;
+        readonly slug?: string;
+      }>;
+    };
+    const hackOrganizationId = organizationsPayload.organizations?.find(
+      (organization) => organization.slug === "hack"
+    )?.id;
+    const teamsResponse = await handleJsonRequest({
+      app: setupApp,
+      path: "/v1/auth/teams?org=hack",
+    });
+    const teamsPayload = (await teamsResponse.json()) as {
+      readonly teams?: Array<{
+        readonly id?: string;
+        readonly slug?: string;
+      }>;
+    };
+    const cliTeamId = teamsPayload.teams?.find(
+      (team) => team.slug === "cli"
+    )?.id;
+    if (!(hackOrganizationId && cliTeamId)) {
+      throw new Error("Expected scoped org/team ids.");
+    }
+    const scopedApp = createProjectTestApp({
+      orgStore,
+      projectStore,
+      session: createSession({
+        userId: "owner-user",
+        email: "owner@example.com",
+        activeOrganizationId: hackOrganizationId,
+        activeTeamId: cliTeamId,
+      }),
+    });
+    await registerProjectForTest({
+      app: setupApp,
+      slug: "ops-console",
+      name: "Ops Console",
+      mode: "team",
+      org: "ops",
+      team: "ops",
+    });
+
+    const response = await handleJsonRequest({
+      app: scopedApp,
+      path: "/v1/auth/projects/ops-console",
+    });
+    expect(response.status).toBe(403);
+    const payload = (await response.json()) as {
+      readonly ok?: boolean;
+      readonly error?: string;
+    };
+    expect(payload.ok).toBe(false);
+    expect(payload.error).toBe("project_scope_forbidden");
+  });
+
+  test("project registration rejects shared ownership outside the active org or team scope", async () => {
+    const orgStore = new InMemoryOrgTeamsStore();
+    const projectStore = new InMemoryProjectStore({
+      orgStore,
+    });
+    const setupApp = createProjectTestApp({
+      orgStore,
+      projectStore,
+      session: createSession({
+        userId: "owner-user",
+        email: "owner@example.com",
+      }),
+    });
+
+    await createOrganization({
+      app: setupApp,
+      slug: "hack",
+      name: "Hack",
+    });
+    await createOrganization({
+      app: setupApp,
+      slug: "ops",
+      name: "Ops",
+    });
+    const organizationsResponse = await handleJsonRequest({
+      app: setupApp,
+      path: "/v1/auth/orgs",
+    });
+    const organizationsPayload = (await organizationsResponse.json()) as {
+      readonly organizations?: Array<{
+        readonly id?: string;
+        readonly slug?: string;
+      }>;
+    };
+    const hackOrganizationId = organizationsPayload.organizations?.find(
+      (organization) => organization.slug === "hack"
+    )?.id;
+    if (!hackOrganizationId) {
+      throw new Error("Expected scoped organization id.");
+    }
+    const scopedApp = createProjectTestApp({
+      orgStore,
+      projectStore,
+      session: createSession({
+        userId: "owner-user",
+        email: "owner@example.com",
+        activeOrganizationId: hackOrganizationId,
+      }),
+    });
+
+    const response = await registerProjectForTest({
+      app: scopedApp,
+      slug: "ops-console",
+      name: "Ops Console",
+      mode: "organization",
+      org: "ops",
+    });
+    expect(response.status).toBe(403);
+    const payload = (await response.json()) as {
+      readonly ok?: boolean;
+      readonly error?: string;
+    };
+    expect(payload.ok).toBe(false);
+    expect(payload.error).toBe("project_scope_forbidden");
   });
 });

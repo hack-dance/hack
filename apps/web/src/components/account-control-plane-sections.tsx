@@ -1133,9 +1133,22 @@ function RegisterProjectCard(input: {
   >;
   readonly returnToPath: string;
 }) {
+  const scopedOrganizations = filterOrganizationsByActiveScope({
+    account: input.account,
+  });
+  const scopedTeams = filterTeamsByActiveScope({
+    account: input.account,
+  });
   const selectedOrganizationSlug =
-    input.account.selectedOrganization?.slug ?? "";
-  const selectedTeamSlug = input.account.selectedTeam?.slug ?? "";
+    scopedOrganizations[0]?.slug ??
+    input.account.selectedOrganization?.slug ??
+    "";
+  const selectedTeamSlug =
+    scopedTeams[0]?.slug ?? input.account.selectedTeam?.slug ?? "";
+  const defaultMode = resolveDefaultProjectOwnershipMode({
+    organizations: scopedOrganizations,
+    teams: scopedTeams,
+  });
 
   return (
     <section className={cn(sectionSurfaceClassName, "p-6 sm:p-7")}>
@@ -1144,6 +1157,10 @@ function RegisterProjectCard(input: {
         <p className="text-sm text-white/70 leading-6">
           Shared registrations stay durable in the broker, while local mode
           remains explicit so CLI and web can report the same ownership state.
+        </p>
+        <p className="text-sm text-white/60 leading-6">
+          Shared ownership choices follow the active Hack scope:{" "}
+          {describeSharedProjectScope({ account: input.account })}.
         </p>
       </div>
 
@@ -1181,10 +1198,21 @@ function RegisterProjectCard(input: {
           <span className="font-medium text-sm text-white/80">
             Ownership mode
           </span>
-          <select className={fieldClassName} defaultValue="team" name="mode">
+          <select
+            className={fieldClassName}
+            defaultValue={defaultMode}
+            name="mode"
+          >
             <option value="local">Local</option>
-            <option value="organization">Organization</option>
-            <option value="team">Team</option>
+            <option
+              disabled={scopedOrganizations.length === 0}
+              value="organization"
+            >
+              Organization
+            </option>
+            <option disabled={scopedTeams.length === 0} value="team">
+              Team
+            </option>
           </select>
         </label>
 
@@ -1198,7 +1226,7 @@ function RegisterProjectCard(input: {
             name="org"
           >
             <option value="">No organization</option>
-            {input.account.organizations.map((organization) => (
+            {scopedOrganizations.map((organization) => (
               <option key={organization.id} value={organization.slug}>
                 {organization.name}
               </option>
@@ -1214,7 +1242,7 @@ function RegisterProjectCard(input: {
             name="team"
           >
             <option value="">No team</option>
-            {input.account.teams.map((team) => (
+            {scopedTeams.map((team) => (
               <option key={team.id} value={team.slug}>
                 {team.name}
               </option>
@@ -1241,6 +1269,15 @@ function SelectedProjectDetail(input: {
   if (!selectedProject) {
     return null;
   }
+  const scopedOrganizations = filterOrganizationsByActiveScope({
+    account: input.account,
+  });
+  const scopedTeams = filterTeamsByActiveScope({
+    account: input.account,
+  });
+  const organizationGrantDisabled = scopedOrganizations.length === 0;
+  const teamGrantDisabled =
+    scopedOrganizations.length === 0 || scopedTeams.length === 0;
 
   return (
     <div className="mt-6 space-y-6 rounded-2xl border border-white/10 bg-slate-950/35 p-5">
@@ -1281,6 +1318,10 @@ function SelectedProjectDetail(input: {
       <div className="grid gap-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
         <section className="grid gap-4 rounded-2xl border border-white/10 bg-white/5 p-4">
           <h5 className="font-medium text-lg text-white">Explicit access</h5>
+          <p className="text-sm text-white/70 leading-6">
+            Shared grant targets follow the active Hack scope:{" "}
+            {describeSharedProjectScope({ account: input.account })}.
+          </p>
           <form
             action={`/api/control-plane/projects/${encodeURIComponent(selectedProject.slug)}/access/grant`}
             className="grid gap-4"
@@ -1292,9 +1333,13 @@ function SelectedProjectDetail(input: {
               <span className="font-medium text-sm text-white/80">
                 Grant organization access
               </span>
-              <select className={fieldClassName} name="org">
+              <select
+                className={fieldClassName}
+                disabled={organizationGrantDisabled}
+                name="org"
+              >
                 <option value="">Choose organization</option>
-                {input.account.organizations.map((organization) => (
+                {scopedOrganizations.map((organization) => (
                   <option key={organization.id} value={organization.slug}>
                     {organization.name}
                   </option>
@@ -1307,13 +1352,18 @@ function SelectedProjectDetail(input: {
               <select
                 className={fieldClassName}
                 defaultValue="viewer"
+                disabled={organizationGrantDisabled}
                 name="role"
               >
                 <option value="viewer">Viewer</option>
                 <option value="admin">Admin</option>
               </select>
             </label>
-            <button className={secondaryActionClassName} type="submit">
+            <button
+              className={secondaryActionClassName}
+              disabled={organizationGrantDisabled}
+              type="submit"
+            >
               Grant organization access
             </button>
           </form>
@@ -1329,9 +1379,13 @@ function SelectedProjectDetail(input: {
               <span className="font-medium text-sm text-white/80">
                 Grant team access
               </span>
-              <select className={fieldClassName} name="team">
+              <select
+                className={fieldClassName}
+                disabled={teamGrantDisabled}
+                name="team"
+              >
                 <option value="">Choose team</option>
-                {input.account.teams.map((team) => (
+                {scopedTeams.map((team) => (
                   <option key={team.id} value={team.slug}>
                     {team.name}
                   </option>
@@ -1344,11 +1398,12 @@ function SelectedProjectDetail(input: {
               </span>
               <select
                 className={fieldClassName}
-                defaultValue={input.account.selectedOrganization?.slug ?? ""}
+                defaultValue={scopedOrganizations[0]?.slug ?? ""}
+                disabled={teamGrantDisabled}
                 name="org"
               >
                 <option value="">Choose organization</option>
-                {input.account.organizations.map((organization) => (
+                {scopedOrganizations.map((organization) => (
                   <option key={organization.id} value={organization.slug}>
                     {organization.name}
                   </option>
@@ -1360,13 +1415,18 @@ function SelectedProjectDetail(input: {
               <select
                 className={fieldClassName}
                 defaultValue="viewer"
+                disabled={teamGrantDisabled}
                 name="role"
               >
                 <option value="viewer">Viewer</option>
                 <option value="admin">Admin</option>
               </select>
             </label>
-            <button className={secondaryActionClassName} type="submit">
+            <button
+              className={secondaryActionClassName}
+              disabled={teamGrantDisabled}
+              type="submit"
+            >
               Grant team access
             </button>
           </form>
@@ -1528,6 +1588,62 @@ function InvitationsCard(input: {
       )}
     </section>
   );
+}
+
+function filterOrganizationsByActiveScope(input: {
+  readonly account: Extract<
+    AccountShellContext,
+    { readonly authenticated: true }
+  >;
+}) {
+  const activeOrganizationId = input.account.activeOrganization?.id ?? null;
+  if (!activeOrganizationId) {
+    return input.account.organizations;
+  }
+  return input.account.organizations.filter((organization) => {
+    return organization.id === activeOrganizationId;
+  });
+}
+
+function filterTeamsByActiveScope(input: {
+  readonly account: Extract<
+    AccountShellContext,
+    { readonly authenticated: true }
+  >;
+}) {
+  const activeTeamId = input.account.activeTeam?.id ?? null;
+  if (activeTeamId) {
+    return input.account.teams.filter((team) => team.id === activeTeamId);
+  }
+  return [];
+}
+
+function resolveDefaultProjectOwnershipMode(input: {
+  readonly organizations: readonly { readonly id: string }[];
+  readonly teams: readonly { readonly id: string }[];
+}): "local" | "organization" | "team" {
+  if (input.teams.length > 0) {
+    return "team";
+  }
+  if (input.organizations.length > 0) {
+    return "organization";
+  }
+  return "local";
+}
+
+function describeSharedProjectScope(input: {
+  readonly account: Extract<
+    AccountShellContext,
+    { readonly authenticated: true }
+  >;
+}) {
+  if (input.account.activeTeam?.name) {
+    return `${input.account.activeTeam.name} team inside ${input.account.activeOrganization?.name ?? "the active organization"}`;
+  }
+  if (input.account.activeOrganization?.name) {
+    return `${input.account.activeOrganization.name} organization`;
+  }
+  return "local user context";
 }
 
 function describeMembershipState(input: {

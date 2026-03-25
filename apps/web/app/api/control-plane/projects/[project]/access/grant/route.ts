@@ -121,7 +121,7 @@ function normalizeBrokerProjectError(
   error: string | null | undefined,
   fallback: string
 ) {
-  return error === "project_access_grant_failed" ? error : fallback;
+  return error === "project_scope_forbidden" ? error : fallback;
 }
 
 function redirectToPath(path: string) {

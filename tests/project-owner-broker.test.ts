@@ -361,6 +361,69 @@ test("project owner show reports explicit conflict when local ownership disagree
   });
 });
 
+test("project owner show surfaces broker scope denial explicitly", async () => {
+  const projectRoot = await createHackProject({
+    config: {
+      name: "hack-cli",
+      ownership: {
+        mode: "shared",
+        owner_type: "team",
+        owner_id: "team_123",
+      },
+    },
+  });
+  await saveHackAuthSession({
+    session: {
+      token: "session-token",
+    },
+  });
+
+  globalThis.fetch = (async (input) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+    if (url === "https://auth.hack-cli.hack/v1/auth/projects/hack-cli") {
+      return Response.json(
+        {
+          ok: false,
+          error: "project_scope_forbidden",
+        },
+        { status: 403 }
+      );
+    }
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  }) as typeof globalThis.fetch;
+
+  const result = await runCliWithCapturedOutput([
+    "project",
+    "owner",
+    "show",
+    "--path",
+    projectRoot,
+    "--json",
+  ]);
+
+  expect(result.exitCode).toBe(0);
+  expect(result.stderr.trim()).toBe("");
+  expect(JSON.parse(result.stdout)).toEqual({
+    project_root: projectRoot,
+    ownership: {
+      mode: "shared",
+      owner_type: "team",
+      owner_id: "team_123",
+      managed_by: "broker",
+    },
+    broker_error: {
+      message:
+        "Hack auth broker rejected /v1/auth/projects/hack-cli (HTTP 403): project_scope_forbidden",
+      login_required: false,
+    },
+  });
+});
+
 async function createHackProject(input: {
   readonly config: Record<string, unknown>;
 }): Promise<string> {

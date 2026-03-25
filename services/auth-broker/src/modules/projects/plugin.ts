@@ -22,6 +22,8 @@ export function createProjectsPlugin(input: {
       }
       const projects = await input.projectStore.listProjects({
         actorUserId: session.userId,
+        activeOrganizationId: session.organizationId,
+        activeTeamId: session.teamId,
       });
       return { ok: true, projects } as const;
     })
@@ -44,6 +46,8 @@ export function createProjectsPlugin(input: {
           teamKey: normalizeOptionalString(body.team),
           actorUserId: session.userId,
           actorEmail: session.email,
+          activeOrganizationId: session.organizationId,
+          activeTeamId: session.teamId,
         });
         if (result.ok) {
           return {
@@ -52,8 +56,9 @@ export function createProjectsPlugin(input: {
             project: result.project,
           } as const;
         }
-        set.status =
-          result.error === "project_registration_conflict" ? 409 : 400;
+        set.status = resolveProjectMutationStatus({
+          error: result.error,
+        });
         return {
           ok: false,
           error: result.error,
@@ -90,13 +95,30 @@ export function createProjectsPlugin(input: {
           input.projectStore.getProject({
             projectKey: params.project,
             actorUserId: session.userId,
+            activeOrganizationId: session.organizationId,
+            activeTeamId: session.teamId,
           }),
           input.projectStore.listAccess({
             projectKey: params.project,
             actorUserId: session.userId,
+            activeOrganizationId: session.organizationId,
+            activeTeamId: session.teamId,
           }),
         ]);
         if (!(project && access)) {
+          const visibility = await input.projectStore.getProjectVisibility({
+            projectKey: params.project,
+            actorUserId: session.userId,
+            activeOrganizationId: session.organizationId,
+            activeTeamId: session.teamId,
+          });
+          if (visibility === "scope_forbidden") {
+            set.status = 403;
+            return {
+              ok: false,
+              error: "project_scope_forbidden",
+            } as const;
+          }
           set.status = 404;
           return {
             ok: false,
@@ -125,8 +147,23 @@ export function createProjectsPlugin(input: {
         const access = await input.projectStore.listAccess({
           projectKey: params.project,
           actorUserId: session.userId,
+          activeOrganizationId: session.organizationId,
+          activeTeamId: session.teamId,
         });
         if (!access) {
+          const visibility = await input.projectStore.getProjectVisibility({
+            projectKey: params.project,
+            actorUserId: session.userId,
+            activeOrganizationId: session.organizationId,
+            activeTeamId: session.teamId,
+          });
+          if (visibility === "scope_forbidden") {
+            set.status = 403;
+            return {
+              ok: false,
+              error: "project_scope_forbidden",
+            } as const;
+          }
           set.status = 404;
           return {
             ok: false,
@@ -159,6 +196,8 @@ export function createProjectsPlugin(input: {
           role: body.role,
           orgKey: normalizeOptionalString(body.org),
           teamKey: normalizeOptionalString(body.team),
+          activeOrganizationId: session.organizationId,
+          activeTeamId: session.teamId,
         });
         if (result.ok) {
           return {
@@ -202,6 +241,8 @@ export function createProjectsPlugin(input: {
           projectKey: params.project,
           actorUserId: session.userId,
           grantId: body.grantId,
+          activeOrganizationId: session.organizationId,
+          activeTeamId: session.teamId,
         });
         if (result.ok) {
           return {
@@ -250,11 +291,13 @@ function resolveProjectMutationStatus(input: { readonly error: string }) {
     case "project_not_found":
     case "project_access_grant_not_found":
       return 404;
+    case "project_scope_forbidden":
     case "project_access_forbidden":
       return 403;
     case "project_access_target_not_visible":
     case "project_access_conflict":
     case "project_access_local_mode":
+    case "project_registration_conflict":
       return 409;
     default:
       return 400;

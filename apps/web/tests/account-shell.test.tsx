@@ -156,6 +156,142 @@ const signedOutLinearManagement = {
   },
 } as const;
 
+const envManagement = {
+  ready: false,
+  envSelectionLabel: "base (.hack/.env only)",
+  missingRequired: ["DATABASE_URL"],
+  status: {
+    trustModel: "local_only",
+    custody: "machine_local",
+    portability: "local_only",
+    sharedState: "plaintext_compatible",
+    summary: "Local-only env with plaintext compatibility",
+    detail:
+      "Hack still materializes plain env values to .hack/.env for compatibility, and this repo is not using broker-managed shared env custody.",
+  },
+  backend: {
+    name: "encrypted_file",
+    classification: {
+      trustModel: "local_secret_backend",
+      custody: "local_secret_backend",
+      portability: "local_only",
+      sharedState: "plaintext_compatible",
+    },
+    status: {
+      storageMode: "Encrypted local file storage",
+      trustModel: "Machine-local secret custody",
+      portability:
+        "Not portable by default; copy and key-sharing are explicit user actions",
+      plaintextCompatibility:
+        "Secret keys use this backend, while non-secret .env-compatible values still live in .hack/.env.",
+    },
+  },
+  localPlaintext: {
+    path: "/repo/.hack/.env",
+    exists: true,
+    classification: {
+      trustModel: "unenforced_plaintext_file",
+      custody: "local_plaintext_file",
+      portability: "local_only",
+      sharedState: "plaintext_compatible",
+    },
+  },
+  localSecrets: {
+    backend: "encrypted_file",
+    location: "~/.hack/secrets.enc.json",
+    mode: "native",
+    provider: null,
+    classification: {
+      trustModel: "local_secret_backend",
+      custody: "local_secret_backend",
+      portability: "local_only",
+      sharedState: "local_only",
+    },
+  },
+  portableState: {
+    status: "backend_bundle",
+    message:
+      "Plaintext and secret env values are bundled in the encrypted backend.",
+    classification: {
+      trustModel: "encrypted_backend_bundle",
+      custody: "portable_encrypted_bundle",
+      portability: "portable_encrypted_bundle",
+      sharedState: "portable_bundle",
+    },
+  },
+  compatibilityMode: {
+    plaintextTarget: "/repo/.hack/.env",
+    secretBackend: "encrypted_file",
+    plaintextMirroredToBackend: true,
+    summary:
+      "Plaintext values are bundled in the configured backend and materialize to .hack/.env for compatibility.",
+  },
+  variables: [
+    {
+      key: "PUBLIC_URL",
+      required: true,
+      source: "plain_env",
+      resolvedSource: "dotenv",
+      services: ["web"],
+      storage: {
+        kind: "plaintext",
+        backend: "dotenv",
+        location: "/repo/.hack/.env",
+        mode: "file",
+        trustModel: "unenforced_plaintext_file",
+        classification: {
+          trustModel: "unenforced_plaintext_file",
+          custody: "local_plaintext_file",
+          portability: "local_only",
+          sharedState: "plaintext_compatible",
+        },
+      },
+    },
+    {
+      key: "API_KEY",
+      required: false,
+      source: "keychain",
+      resolvedSource: "keychain",
+      services: ["auth"],
+      storage: {
+        kind: "secret",
+        backend: "encrypted_file",
+        location: "~/.hack/secrets.enc.json",
+        mode: "native",
+        trustModel: "local_secret_backend",
+        classification: {
+          trustModel: "local_secret_backend",
+          custody: "local_secret_backend",
+          portability: "local_only",
+          sharedState: "local_only",
+        },
+      },
+    },
+    {
+      key: "PORTABLE_TOKEN",
+      required: false,
+      source: "plain_env",
+      resolvedSource: "portable_backend",
+      services: ["worker"],
+      storage: {
+        kind: "plaintext",
+        backend: "encrypted_file",
+        location: "/repo/.hack-secrets.enc.json",
+        mode: "native",
+        trustModel: "encrypted_backend_bundle",
+        classification: {
+          trustModel: "encrypted_backend_bundle",
+          custody: "portable_encrypted_bundle",
+          portability: "portable_encrypted_bundle",
+          sharedState: "portable_bundle",
+        },
+      },
+    },
+  ],
+  statusCommand: "./dist/hack env list --json",
+  backendCommand: "./dist/hack env backend status --json",
+} as const;
+
 const hiddenBrowserSharedProjectScope = {
   state: "shared_hidden",
   mutable: false,
@@ -473,6 +609,7 @@ test("account shell renders the active user, org admin controls, and invite acti
   const markup = renderToStaticMarkup(
     <ControlPlaneShell
       account={authenticatedContext}
+      envManagement={envManagement}
       feedback={{
         tone: "success",
         title: "Organization created",
@@ -510,6 +647,14 @@ test("account shell renders the active user, org admin controls, and invite acti
   expect(markup).toContain("person@example.com");
   expect(markup).toContain("Pending recipient action");
   expect(markup).toContain("Accept invite");
+  expect(markup).toContain("Key-level status");
+  expect(markup).toContain("PUBLIC_URL");
+  expect(markup).toContain("API_KEY");
+  expect(markup).toContain("PORTABLE_TOKEN");
+  expect(markup).toContain("local_plaintext_file");
+  expect(markup).toContain("local_secret_backend");
+  expect(markup).toContain("portable_bundle");
+  expect(markup).toContain("portable_backend");
   expect(markup).toContain("Organization created");
 });
 

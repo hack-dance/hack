@@ -297,6 +297,72 @@ function EnvSection(input: { readonly envManagement: EnvManagementState }) {
           </div>
         </section>
       </div>
+
+      <section className={cn(sectionSurfaceClassName, "space-y-4 p-6 sm:p-7")}>
+        <div className="space-y-2">
+          <h3 className="font-medium text-white text-xl">Key-level status</h3>
+          <p className="text-sm text-white/70 leading-6">
+            Each repo-bound env key keeps its declared source, resolved source,
+            storage kind/backend, and classification so the browser can
+            distinguish local plaintext, secret-backed, and portable/shared
+            values without exposing raw secrets.
+          </p>
+        </div>
+
+        {envManagement.variables.length > 0 ? (
+          <ul className="grid gap-3">
+            {envManagement.variables.map((variable) => (
+              <li
+                className="rounded-2xl border border-white/10 bg-slate-950/35 p-4"
+                key={variable.key}
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="space-y-2">
+                    <p className="font-medium text-white">{variable.key}</p>
+                    <p className="text-sm text-white/70 leading-6">
+                      {formatEnvVariableStorageLabel({
+                        variable,
+                      })}
+                    </p>
+                  </div>
+                  <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-white/70 text-xs uppercase tracking-[0.18em]">
+                    {variable.required ? "required" : "optional"}
+                  </span>
+                </div>
+
+                <dl className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                  <ProjectDetailCard label="Declared source">
+                    {variable.source}
+                  </ProjectDetailCard>
+                  <ProjectDetailCard label="Resolved from">
+                    {variable.resolvedSource ?? "unresolved"}
+                  </ProjectDetailCard>
+                  <ProjectDetailCard label="Storage">
+                    {formatEnvVariableStorageLabel({
+                      variable,
+                    })}
+                  </ProjectDetailCard>
+                  <ProjectDetailCard label="Trust model">
+                    {variable.storage.trustModel}
+                  </ProjectDetailCard>
+                  <ProjectDetailCard label="Custody">
+                    {variable.storage.classification.custody}
+                  </ProjectDetailCard>
+                  <ProjectDetailCard label="Shared state">
+                    {variable.storage.classification.sharedState}
+                  </ProjectDetailCard>
+                </dl>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-sm text-white/70 leading-6">
+            {envManagement.status.sharedState === "unavailable"
+              ? "Repo-bound env key status is unavailable until Hack can run the env status commands again."
+              : "No repo-bound env keys were returned for this project."}
+          </p>
+        )}
+      </section>
     </section>
   );
 }
@@ -1673,6 +1739,12 @@ function ProjectDetailCard(input: {
 
 function formatEnvClassificationLabel(input: { readonly value: string }) {
   return input.value.replaceAll("_", " ");
+}
+
+function formatEnvVariableStorageLabel(input: {
+  readonly variable: EnvManagementState["variables"][number];
+}) {
+  return `${input.variable.storage.kind} • ${input.variable.storage.backend}`;
 }
 
 function describeGitHubInstallation(input: {

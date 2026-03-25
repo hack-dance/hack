@@ -22,6 +22,25 @@ type EnvClassificationPayload = {
   readonly shared_state: string;
 };
 
+type EnvValueStoragePayload = {
+  readonly kind: string;
+  readonly backend: string;
+  readonly location: string;
+  readonly mode: string;
+  readonly trust_model: string;
+  readonly classification: EnvClassificationPayload;
+};
+
+type EnvVariablePayload = {
+  readonly key: string;
+  readonly required: boolean;
+  readonly source: string;
+  readonly services: readonly string[] | null;
+  readonly resolved_from: string | null;
+  readonly storage: EnvValueStoragePayload;
+  readonly value?: string | null;
+};
+
 type EnvListCommandPayload = {
   readonly project?: string;
   readonly env_selection: {
@@ -70,7 +89,7 @@ type EnvListCommandPayload = {
       readonly summary: string;
     };
   };
-  readonly vars?: readonly unknown[];
+  readonly vars?: readonly EnvVariablePayload[];
   readonly missing_required: readonly string[];
 };
 
@@ -101,6 +120,24 @@ type EnvClassification = {
   readonly custody: string;
   readonly portability: string;
   readonly sharedState: string;
+};
+
+type EnvVariableStorage = {
+  readonly kind: string;
+  readonly backend: string;
+  readonly location: string;
+  readonly mode: string;
+  readonly trustModel: string;
+  readonly classification: EnvClassification;
+};
+
+export type EnvVariableState = {
+  readonly key: string;
+  readonly required: boolean;
+  readonly source: string;
+  readonly resolvedSource: string | null;
+  readonly services: readonly string[] | null;
+  readonly storage: EnvVariableStorage;
 };
 
 type CommandRunner = <TPayload>(input: {
@@ -151,6 +188,7 @@ export type EnvManagementState = {
     readonly plaintextMirroredToBackend: boolean;
     readonly summary: string;
   };
+  readonly variables: readonly EnvVariableState[];
   readonly statusCommand: string;
   readonly backendCommand: string;
 };
@@ -241,6 +279,11 @@ export function buildEnvManagementState(input: {
         input.list.storage.compatibility_mode.plaintext_mirrored_to_backend,
       summary: input.list.storage.compatibility_mode.summary,
     },
+    variables: (input.list.vars ?? []).map((variable) =>
+      normalizeEnvVariable({
+        variable,
+      })
+    ),
     statusCommand: STATUS_COMMAND,
     backendCommand: BACKEND_COMMAND,
   };
@@ -253,27 +296,25 @@ function createFallbackEnvManagementState(input: {
     input.output.trim().length > 0
       ? input.output.trim()
       : "Hack could not read the local env status commands for this repo.";
+  const unavailableClassification = {
+    trustModel: "unavailable",
+    custody: "unavailable",
+    portability: "unavailable",
+    sharedState: "unavailable",
+  } as const;
 
   return {
     ready: false,
     envSelectionLabel: "Unavailable",
     missingRequired: [],
     status: {
-      trustModel: "unknown",
-      custody: "unknown",
-      portability: "unknown",
-      sharedState: "local_only",
+      ...unavailableClassification,
       summary: "Env status unavailable",
       detail,
     },
     backend: {
       name: "unknown",
-      classification: {
-        trustModel: "unknown",
-        custody: "unknown",
-        portability: "unknown",
-        sharedState: "local_only",
-      },
+      classification: unavailableClassification,
       status: {
         storageMode: "Unavailable",
         trustModel: "Unavailable",
@@ -284,34 +325,19 @@ function createFallbackEnvManagementState(input: {
     localPlaintext: {
       path: ".hack/.env",
       exists: false,
-      classification: {
-        trustModel: "unknown",
-        custody: "unknown",
-        portability: "unknown",
-        sharedState: "local_only",
-      },
+      classification: unavailableClassification,
     },
     localSecrets: {
       backend: "unknown",
       location: "Unavailable",
       mode: "unknown",
       provider: null,
-      classification: {
-        trustModel: "unknown",
-        custody: "unknown",
-        portability: "unknown",
-        sharedState: "local_only",
-      },
+      classification: unavailableClassification,
     },
     portableState: {
       status: "unknown",
       message: "Portable env status is unavailable.",
-      classification: {
-        trustModel: "unknown",
-        custody: "unknown",
-        portability: "unknown",
-        sharedState: "local_only",
-      },
+      classification: unavailableClassification,
     },
     compatibilityMode: {
       plaintextTarget: ".hack/.env",
@@ -319,6 +345,7 @@ function createFallbackEnvManagementState(input: {
       plaintextMirroredToBackend: false,
       summary: "Env compatibility status is unavailable.",
     },
+    variables: [],
     statusCommand: STATUS_COMMAND,
     backendCommand: BACKEND_COMMAND,
   };
@@ -387,6 +414,28 @@ function normalizeClassification(
     custody: input.custody,
     portability: input.portability,
     sharedState: input.shared_state,
+  };
+}
+
+function normalizeEnvVariable(input: {
+  readonly variable: EnvVariablePayload;
+}): EnvVariableState {
+  return {
+    key: input.variable.key,
+    required: input.variable.required,
+    source: input.variable.source,
+    resolvedSource: input.variable.resolved_from,
+    services: input.variable.services,
+    storage: {
+      kind: input.variable.storage.kind,
+      backend: input.variable.storage.backend,
+      location: input.variable.storage.location,
+      mode: input.variable.storage.mode,
+      trustModel: input.variable.storage.trust_model,
+      classification: normalizeClassification(
+        input.variable.storage.classification
+      ),
+    },
   };
 }
 

@@ -190,6 +190,48 @@ const envManagement = {
     summary:
       "Plaintext values materialize to .hack/.env and secret values materialize to the configured secret backend.",
   },
+  variables: [
+    {
+      key: "PUBLIC_URL",
+      required: true,
+      source: "plain_env",
+      resolvedSource: "dotenv",
+      services: ["web"],
+      storage: {
+        kind: "plaintext",
+        backend: "dotenv",
+        location: "/repo/.hack/.env",
+        mode: "file",
+        trustModel: "unenforced_plaintext_file",
+        classification: {
+          trustModel: "unenforced_plaintext_file",
+          custody: "local_plaintext_file",
+          portability: "local_only",
+          sharedState: "plaintext_compatible",
+        },
+      },
+    },
+    {
+      key: "API_KEY",
+      required: false,
+      source: "keychain",
+      resolvedSource: "keychain",
+      services: ["auth"],
+      storage: {
+        kind: "secret",
+        backend: "encrypted_file",
+        location: "~/.hack/secrets.enc.json",
+        mode: "native",
+        trustModel: "local_secret_backend",
+        classification: {
+          trustModel: "local_secret_backend",
+          custody: "local_secret_backend",
+          portability: "local_only",
+          sharedState: "local_only",
+        },
+      },
+    },
+  ],
   statusCommand: "./dist/hack env list --json",
   backendCommand: "./dist/hack env backend status --json",
 } as const;
@@ -237,6 +279,9 @@ test("control plane shell renders landmarks and keyboard navigation affordances"
   expect(markup).toContain("Teams");
   expect(markup).toContain("Projects");
   expect(markup).toContain("Env");
+  expect(markup).toContain("Key-level status");
+  expect(markup).toContain("PUBLIC_URL");
+  expect(markup).toContain("API_KEY");
   expect(markup).toContain("GitHub");
   expect(markup).toContain("Linear");
   expect(markup).toContain("Invitations");

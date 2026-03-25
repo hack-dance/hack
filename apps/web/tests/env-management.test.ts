@@ -81,7 +81,50 @@ test("env management keeps local-only plaintext-compatible state distinct from b
             "Plaintext values materialize to .hack/.env and secret values materialize to the configured secret backend.",
         },
       },
-      vars: [],
+      vars: [
+        {
+          key: "PUBLIC_URL",
+          required: true,
+          source: "plain_env",
+          services: ["web"],
+          resolved_from: "dotenv",
+          value: "https://hack-cli.hack",
+          storage: {
+            kind: "plaintext",
+            backend: "dotenv",
+            location: "/repo/.hack/.env",
+            mode: "file",
+            trust_model: "unenforced_plaintext_file",
+            classification: {
+              trust_model: "unenforced_plaintext_file",
+              custody: "local_plaintext_file",
+              portability: "local_only",
+              shared_state: "plaintext_compatible",
+            },
+          },
+        },
+        {
+          key: "API_KEY",
+          required: false,
+          source: "keychain",
+          services: ["auth"],
+          resolved_from: "keychain",
+          value: "***",
+          storage: {
+            kind: "secret",
+            backend: "encrypted_file",
+            location: "~/.hack/secrets.enc.json",
+            mode: "native",
+            trust_model: "local_secret_backend",
+            classification: {
+              trust_model: "local_secret_backend",
+              custody: "local_secret_backend",
+              portability: "local_only",
+              shared_state: "local_only",
+            },
+          },
+        },
+      ],
       missing_required: [],
     },
     backend: {
@@ -121,6 +164,18 @@ test("env management keeps local-only plaintext-compatible state distinct from b
   expect(state.localPlaintext.classification.custody).toBe(
     "local_plaintext_file"
   );
+  expect(state.variables).toHaveLength(2);
+  const publicUrl = state.variables.find((entry) => entry.key === "PUBLIC_URL");
+  expect(publicUrl?.storage.kind).toBe("plaintext");
+  expect(publicUrl?.storage.backend).toBe("dotenv");
+  expect(publicUrl?.storage.classification.custody).toBe(
+    "local_plaintext_file"
+  );
+  const apiKey = state.variables.find((entry) => entry.key === "API_KEY");
+  expect(apiKey?.source).toBe("keychain");
+  expect(apiKey?.resolvedSource).toBe("keychain");
+  expect(apiKey?.storage.kind).toBe("secret");
+  expect(apiKey?.storage.classification.sharedState).toBe("local_only");
   expect(state.portableState.classification.sharedState).not.toBe(
     "broker_managed"
   );
@@ -203,7 +258,29 @@ test("env management surfaces portable encrypted bundles without implying broker
             "Plaintext values are bundled in the configured backend and materialize to .hack/.env for compatibility.",
         },
       },
-      vars: [],
+      vars: [
+        {
+          key: "PORTABLE_TOKEN",
+          required: false,
+          source: "plain_env",
+          services: ["api"],
+          resolved_from: "portable_backend",
+          value: "***",
+          storage: {
+            kind: "plaintext",
+            backend: "encrypted_file",
+            location: "/repo/.hack-secrets.enc.json",
+            mode: "native",
+            trust_model: "encrypted_backend_bundle",
+            classification: {
+              trust_model: "encrypted_backend_bundle",
+              custody: "portable_encrypted_bundle",
+              portability: "portable_encrypted_bundle",
+              shared_state: "portable_bundle",
+            },
+          },
+        },
+      ],
       missing_required: ["DATABASE_URL"],
     },
     backend: {
@@ -242,9 +319,16 @@ test("env management surfaces portable encrypted bundles without implying broker
   expect(state.backend.status.portability).toContain("not broker-managed");
   expect(state.missingRequired).toEqual(["DATABASE_URL"]);
   expect(state.envSelectionLabel).toContain("qa");
+  expect(state.variables).toHaveLength(1);
+  expect(state.variables[0]?.key).toBe("PORTABLE_TOKEN");
+  expect(state.variables[0]?.resolvedSource).toBe("portable_backend");
+  expect(state.variables[0]?.storage.backend).toBe("encrypted_file");
+  expect(state.variables[0]?.storage.classification.sharedState).toBe(
+    "portable_bundle"
+  );
 });
 
-test("env management falls back to local-only unavailable state when repo-bound env commands fail", async () => {
+test("env management falls back to an explicit unavailable state when repo-bound env commands fail", async () => {
   const state = await loadEnvManagementState({
     runCommandImplementation: async () => ({
       payload: null,
@@ -254,11 +338,12 @@ test("env management falls back to local-only unavailable state when repo-bound 
 
   expect(state.ready).toBe(false);
   expect(state.status.summary).toBe("Env status unavailable");
-  expect(state.status.sharedState).toBe("local_only");
+  expect(state.status.sharedState).toBe("unavailable");
   expect(state.status.detail).toBe(
     "env command unavailable while apps/web is offline"
   );
-  expect(state.backend.classification.sharedState).toBe("local_only");
+  expect(state.backend.classification.sharedState).toBe("unavailable");
+  expect(state.variables).toEqual([]);
   expect(state.statusCommand).toBe("./dist/hack env list --json");
   expect(state.backendCommand).toBe("./dist/hack env backend status --json");
 });

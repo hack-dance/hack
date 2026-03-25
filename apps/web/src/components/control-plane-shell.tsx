@@ -51,10 +51,10 @@ const fallbackEnvManagement = {
   envSelectionLabel: "Unavailable",
   missingRequired: [],
   status: {
-    trustModel: "unknown",
-    custody: "unknown",
-    portability: "unknown",
-    sharedState: "local_only",
+    trustModel: "unavailable",
+    custody: "unavailable",
+    portability: "unavailable",
+    sharedState: "unavailable",
     summary: "Env status unavailable",
     detail:
       "Hack could not resolve the repo-bound env status for this browser shell.",
@@ -62,10 +62,10 @@ const fallbackEnvManagement = {
   backend: {
     name: "unknown",
     classification: {
-      trustModel: "unknown",
-      custody: "unknown",
-      portability: "unknown",
-      sharedState: "local_only",
+      trustModel: "unavailable",
+      custody: "unavailable",
+      portability: "unavailable",
+      sharedState: "unavailable",
     },
     status: {
       storageMode: "Unavailable",
@@ -78,10 +78,10 @@ const fallbackEnvManagement = {
     path: ".hack/.env",
     exists: false,
     classification: {
-      trustModel: "unknown",
-      custody: "unknown",
-      portability: "unknown",
-      sharedState: "local_only",
+      trustModel: "unavailable",
+      custody: "unavailable",
+      portability: "unavailable",
+      sharedState: "unavailable",
     },
   },
   localSecrets: {
@@ -90,20 +90,20 @@ const fallbackEnvManagement = {
     mode: "unknown",
     provider: null,
     classification: {
-      trustModel: "unknown",
-      custody: "unknown",
-      portability: "unknown",
-      sharedState: "local_only",
+      trustModel: "unavailable",
+      custody: "unavailable",
+      portability: "unavailable",
+      sharedState: "unavailable",
     },
   },
   portableState: {
     status: "unknown",
     message: "Portable env status is unavailable.",
     classification: {
-      trustModel: "unknown",
-      custody: "unknown",
-      portability: "unknown",
-      sharedState: "local_only",
+      trustModel: "unavailable",
+      custody: "unavailable",
+      portability: "unavailable",
+      sharedState: "unavailable",
     },
   },
   compatibilityMode: {
@@ -112,6 +112,7 @@ const fallbackEnvManagement = {
     plaintextMirroredToBackend: false,
     summary: "Env compatibility status is unavailable.",
   },
+  variables: [],
   statusCommand: "./dist/hack env list --json",
   backendCommand: "./dist/hack env backend status --json",
 } as const satisfies EnvManagementState;

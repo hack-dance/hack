@@ -11,6 +11,9 @@ commands:
   runtime_up: hack up -d
   runtime_ps: hack ps --json
   runtime_open: hack open --json
+  runtime_open_auth: hack open auth --json
+  runtime_web_smoke: curl -ksSf https://hack-cli.hack
+  runtime_auth_routed_smoke: curl -ksSf https://auth.hack-cli.hack/health
   linear_status: ./dist/hack linear status --json
   repo_linear_smoke: bun run build && ./dist/hack linear status --json
 

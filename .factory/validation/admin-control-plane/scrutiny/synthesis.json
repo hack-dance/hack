@@ -1,7 +1,7 @@
 {
   "milestone": "admin-control-plane",
-  "round": 1,
-  "status": "fail",
+  "round": 2,
+  "status": "pass",
   "validatorsRun": {
     "test": {
       "passed": true,
@@ -20,97 +20,28 @@
     }
   },
   "reviewsSummary": {
-    "total": 5,
-    "passed": 2,
-    "failed": 3,
-    "failedFeatures": [
-      "account-shell-context-parity",
-      "org-admin-and-invite-lifecycle",
-      "project-registration-ownership-and-access-admin"
+    "total": 3,
+    "passed": 3,
+    "failed": 0,
+    "failedFeatures": [],
+    "reviewedFixFeatures": [
+      "browser-auth-redirect-return-continuity-fix",
+      "pending-org-invite-revoke-success-fix",
+      "default-local-project-owner-broker-parity-fix"
     ]
   },
-  "blockingIssues": [
-    {
-      "featureId": "account-shell-context-parity",
-      "file": "apps/web/src/components/auth-entrypoint.tsx",
-      "line": 77,
-      "severity": "blocking",
-      "description": "Browser-originated sign-in started from `/auth?redirect=...` never auto-returns to the requested trusted destination because the web auth entrypoint only auto-navigates when device-flow handoff state exists."
-    },
-    {
-      "featureId": "org-admin-and-invite-lifecycle",
-      "file": "services/auth-broker/tests/org-team-membership.test.ts",
-      "line": 682,
-      "severity": "blocking",
-      "description": "The milestone contract requires admins to revoke/cancel pending org invites cleanly, but the landed broker and web evidence never proves a successful pending org-invite revoke path."
-    },
-    {
-      "featureId": "project-registration-ownership-and-access-admin",
-      "file": "src/commands/project-admin.ts",
-      "line": 148,
-      "severity": "blocking",
-      "description": "Repo-bound CLI ownership output ignores broker registrations unless local config already says `ownership.mode === \"shared\"`, so a default-local repo can disagree with the new web project registration state and hide shared/local conflicts."
-    }
-  ],
+  "blockingIssues": [],
   "nonBlockingIssues": [
     {
-      "featureId": "account-shell-context-parity",
+      "featureId": "browser-auth-redirect-return-continuity-fix",
       "file": "services/auth-broker/src/modules/better-auth/shell-plugin.ts",
-      "line": 639,
+      "line": 641,
       "severity": "non_blocking",
-      "description": "Management-token `/v1/auth/me` hydration can still leave verified users with `emailVerified: false` because the durable user record does not override the initial false boolean."
-    },
-    {
-      "featureId": "project-registration-ownership-and-access-admin",
-      "file": "tests/project-owner-broker.test.ts",
-      "line": 75,
-      "severity": "non_blocking",
-      "description": "CLI regression coverage only exercises already-shared local configs, so it misses the default-local repo plus broker-registration case that exposed the parity bug."
+      "description": "The previously identified `/v1/auth/me` hydration bug for `emailVerified` remains unresolved for management-token callers because durable user state still does not override the fallback false boolean."
     }
   ],
-  "appliedUpdates": [
-    {
-      "target": "library",
-      "description": "Updated `.factory/library/user-testing.md` to record that bridge-cookie bootstrap is not enough for browser-owned auth validation; auth/account slices must also exercise a real `/auth?redirect=...` browser flow to prove post-login deep-link return behavior.",
-      "sourceFeature": "account-shell-context-parity"
-    },
-    {
-      "target": "library",
-      "description": "Updated `.factory/library/architecture.md` to document that broker-backed project registration visibility and access resolution now depend on org/team membership scope in the shared auth-broker store.",
-      "sourceFeature": "project-registration-ownership-and-access-admin"
-    }
-  ],
-  "suggestedGuidanceUpdates": [
-    {
-      "target": ".factory/skills/web-control-plane-worker/SKILL.md",
-      "suggestion": "For auth/account handoff features, require an end-to-end browser-originated `/auth?redirect=...` validation in addition to any bridge-cookie bootstrap, so deep-link return paths are proven instead of inferred.",
-      "evidence": "The `account-shell-context-parity` review found that opening `/auth/account?bridge=1&redirect=...` successfully minted the shared shell cookie, but the actual browser-owned sign-in path from `/auth?redirect=...` still dead-ended on the handoff page because no device-flow state existed.",
-      "isSystemic": true
-    },
-    {
-      "target": ".factory/skills/web-control-plane-worker/SKILL.md",
-      "suggestion": "When a feature contract requires browser and CLI parity, require handoff evidence of the specific browser mutation plus repo-bound CLI comparison rather than generic navigation screenshots.",
-      "evidence": "The `project-registration-ownership-and-access-admin` feature contract required using agent-browser to register/administer a project and compare the result with repo-bound CLI ownership output, but the handoff only captured opening the unauthenticated shell and clicking the Projects nav link, which allowed the CLI parity bug to ship.",
-      "isSystemic": true
-    }
-  ],
-  "rejectedObservations": [
-    {
-      "observation": "Org-admin sharedState observation that the feature also changed auth-broker session hydration and bridged web-session cookie behavior.",
-      "reason": "Rejected as a synthesis update because it is a descriptive scope note about landed code, not a missing services/library/skill artifact."
-    },
-    {
-      "observation": "Team-scope observation that the feature already wrote reusable Better Auth browser-bootstrap guidance into `.factory/library/user-testing.md`.",
-      "reason": "Rejected as a new update because the guidance is already documented in the library and did not need another writeback."
-    },
-    {
-      "observation": "Team-shell regression observation that later commits added `Projects` nav assertions to the same shell test file.",
-      "reason": "Rejected because it is feature-history context rather than durable shared-state guidance."
-    },
-    {
-      "observation": "Team-shell regression observation that routed runtime verification was stronger than a static-markup-only check.",
-      "reason": "Rejected because `.factory/services.yaml` already contains the routed runtime commands used for that validation, so there was no additive services manifest change to apply."
-    }
-  ],
-  "previousRound": null
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [],
+  "rejectedObservations": [],
+  "previousRound": ".factory/validation/admin-control-plane/scrutiny/synthesis.round-1.json"
 }

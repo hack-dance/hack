@@ -1,0 +1,15 @@
+{
+  "featureId": "default-local-project-owner-broker-parity-fix",
+  "reviewedAt": "2026-03-25T09:07:47Z",
+  "commitId": "463939bbb945320c2035bb45779a64a572a92ced",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "I reviewed the feature entry and prior failed review, the fix handoff plus transcript skeleton for worker session `40954a2a-339b-4362-b7b9-e1d99fef44ac`, and both relevant commits: the original feature commit `cfb63f05ab9dceec6af54f997e1a23440e75215c` and the fix commit `463939bbb945320c2035bb45779a64a572a92ced`. The original blocker was that `hack project owner show --json` only queried broker ownership when the local repo already declared shared ownership. This fix removes that gate by resolving a real project slug from `config.name` and querying broker state whenever a named repo is inspected (`src/commands/project-admin.ts:67,148,198`). The added regression in `tests/project-owner-broker.test.ts:187` now covers the missing default-local repo plus broker-registration path and asserts the expected `broker_registration` payload together with the explicit `ownership_mismatch` conflict. Within the scoped CLI parity fix, I did not find any remaining blocking or non-blocking issues.",
+    "issues": []
+  },
+  "sharedStateObservations": [],
+  "addressesFailureFrom": "/Users/hack/dev/hack-dance/hack/.factory/validation/admin-control-plane/scrutiny/reviews/project-registration-ownership-and-access-admin.json",
+  "summary": "Pass. The fix addresses the prior blocking parity bug by surfacing broker ownership for named default-local repos and adds the missing regression that proves the CLI now emits both broker registration data and an explicit shared/local conflict for that case."
+}

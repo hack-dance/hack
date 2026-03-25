@@ -1,0 +1,15 @@
+{
+  "featureId": "pending-org-invite-revoke-success-fix",
+  "reviewedAt": "2026-03-25T09:07:30Z",
+  "commitId": "2d97dbb1ace78419c1d451c6df5d03e8f0d3054e",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "I reviewed the feature entry and validation contract, the prior failed review, the original feature handoff/commit `838603405b77efa6398eb6105408d19e2941b3b4`, the fix handoff/commit `2d97dbb1ace78419c1d451c6df5d03e8f0d3054e`, and the fix transcript skeleton for session `dbc2f5d1-89f3-4067-852c-74b6bae017bf`. This rerun directly addresses both prior blockers: `services/auth-broker/tests/org-team-membership.test.ts:683` now proves successful admin revoke of a pending org invite plus the post-revoke recipient and accept-after-revoke behavior, and `apps/web/tests/account-control-plane-routes.test.ts:140` adds the missing web-route success regression while `apps/web/tests/account-control-plane.test.ts:167` covers the post-revoke account data shape. The fix handoff/transcript also show completed routed-browser verification for admin-side revoke success and recipient-side non-actionability after revoke. I did not find new blocking or non-blocking issues in the landed fix.",
+    "issues": []
+  },
+  "sharedStateObservations": [],
+  "addressesFailureFrom": "/Users/hack/dev/hack-dance/hack/.factory/validation/admin-control-plane/scrutiny/reviews/org-admin-and-invite-lifecycle.json",
+  "summary": "Pass: the rerun closes the original missing pending-org-invite revoke proof at the broker, web route/data, and browser-evidence layers, with no new issues identified."
+}

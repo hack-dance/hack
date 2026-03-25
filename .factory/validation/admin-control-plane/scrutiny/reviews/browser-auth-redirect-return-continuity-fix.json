@@ -1,0 +1,22 @@
+{
+  "featureId": "browser-auth-redirect-return-continuity-fix",
+  "reviewedAt": "2026-03-25T09:07:43Z",
+  "commitId": "addb63c698c1bcbb0834e15fadbe786d0161a72d",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Reviewed the fix feature entry, prior failed review `account-shell-context-parity.json`, both worker handoffs and transcript skeletons, the `web-control-plane-worker` skill, and commits `addb63c698c1bcbb0834e15fadbe786d0161a72d` and `3ef4de25c8a2113bc9c211855bcfd5308a23ad42`. The fix directly addresses the prior blocking gap: the web `/auth/account` route now checks whether the shared `hack_web_broker_session` already authenticates against broker `/v1/auth/me` (`apps/web/app/auth/account/page.tsx:17-31`, `apps/web/src/lib/browser-auth-session.ts:14-51`), and `AuthEntrypoint` now initializes account-mode flows as `ready` when a trusted redirect is present and that browser session is already authenticated (`apps/web/src/components/auth-entrypoint.tsx:77-98,175-187`, `apps/web/src/lib/auth-handoff.ts:5-21`). That closes the dead-end identified in the prior review for browser-owned `/auth?redirect=...` sign-in while preserving the existing device-flow polling path and fail-closed redirect normalization. The updated web tests cover the new ready-state behavior (`apps/web/tests/auth-entrypoints.test.tsx:100-116`, `apps/web/tests/auth-handoff.test.ts:73-94`). I did not find any new blocking regressions in the scoped fix. One previously noted non-blocking broker parity issue remains unresolved.",
+    "issues": [
+      {
+        "file": "services/auth-broker/src/modules/better-auth/shell-plugin.ts",
+        "line": 641,
+        "severity": "non_blocking",
+        "description": "The pre-existing `/v1/auth/me` hydration bug for `emailVerified` is still present. `toBrowserSessionUser()` still derives `emailVerified` only from the raw Better Auth session payload (`609`), and `hydrateBrowserSessionUser()` still returns early once email and name are present because `typeof current.emailVerified === \"boolean\"` is always true (`641`), preventing durable user state from correcting a fallback `false` value (`657`). The fix commit never touches this broker path, and the regression added at `services/auth-broker/tests/session-auth.test.ts:736` still asserts email/name/org/team but not `emailVerified`, so verified management-token callers can still be reported as unverified."
+      }
+    ]
+  },
+  "sharedStateObservations": [],
+  "addressesFailureFrom": "/Users/hack/dev/hack-dance/hack/.factory/validation/admin-control-plane/scrutiny/reviews/account-shell-context-parity.json",
+  "summary": "Pass. The fix closes the prior blocking auth-return continuity failure by letting `/auth/account` immediately auto-return trusted browser-owned redirects once the shared broker session is already established. No new blocking issues surfaced, but the previously identified non-blocking broker `emailVerified` parity bug still remains."
+}

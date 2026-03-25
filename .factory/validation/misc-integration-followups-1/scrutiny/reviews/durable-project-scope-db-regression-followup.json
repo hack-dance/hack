@@ -1,0 +1,28 @@
+{
+  "featureId": "durable-project-scope-db-regression-followup",
+  "reviewedAt": "2026-03-25T23:30:11Z",
+  "commitId": "11fc91e8887f35f5d8fb6fbbb8629bec3695a269",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "Reviewed the feature manifest, worker handoff, transcript skeleton for session `15fa3ec3-f381-412f-a26a-7374e7245d49`, and commit `11fc91e8887f35f5d8fb6fbbb8629bec3695a269`. The added regressions do cover the scoped project-admin behaviors at the route level, but the supposed durable-store coverage is implemented through a hand-rolled fake database rather than the real durable backend path. `createMockProjectDb()` stubs `execute()` to always return `{ rows: [] }` and only implements narrow in-memory `insert`/`select` behavior before `createDbBackedProjectStore()` injects that fake into `DbProjectStore`, so the new tests cannot catch durable-backend regressions in schema setup or actual query execution semantics.",
+    "issues": [
+      {
+        "file": "services/auth-broker/tests/project-admin.test.ts",
+        "line": 143,
+        "severity": "blocking",
+        "description": "The new `createMockProjectDb()` harness turns the claimed durable-store coverage into an in-memory simulation. Because `execute()` is stubbed to always return `{ rows: [] }` and only a narrow `insert/select` subset is implemented before `DbProjectStore` is constructed, the tests never exercise the real durable Neon/Drizzle path, table setup, or query execution semantics that this feature was supposed to verify."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "guidance",
+      "observation": "Durable-store follow-up work currently lacks a reusable real-backend verification pattern, which makes it easy for workers to substitute Drizzle AST or in-memory fakes while still claiming durable-path coverage.",
+      "evidence": "The committed test file introduces `createMockProjectDb()` and query-chunk parsing helpers (`services/auth-broker/tests/project-admin.test.ts:89-192`) instead of wiring `DbProjectStore` to an actual durable backend. The worker handoff also describes the change as a `deterministic mock database harness` rather than a live durable-store proof."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Fail. The feature adds route-level regressions, but its new `DbProjectStore` tests rely on a fake in-memory database harness, so the claimed durable-backend parity is not actually verified."
+}

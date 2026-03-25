@@ -1,0 +1,21 @@
+{
+  "featureId": "linear-env-only-repair-guidance-parity-fix",
+  "reviewedAt": "2026-03-25T17:46:21Z",
+  "commitId": "eadbcb2adad5d6d6de1dd3f38e57f90adced0572",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Pass. This fix directly addresses the prior blocking issue by teaching `buildLinearRepairState()` to treat the routed loader's env-only `export ...=<linear-token>` summary the same way it already treated `hack linear connect --profile ...` when Hack can inspect a broker-owned connection. The new regressions cover the three relevant branches: Hack-owned reseedable access, Hack-owned reconnect-only access, and the no-Hack-connection fallback, so the routed Linear section now upgrades Hack-owned local-repair states to the expected reseed/reconnect guidance without regressing the generic env-token path.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "Protected routed-page verification now has at least two viable auth bootstraps, but the shared docs only describe the Better Auth sign-up plus bridge-cookie path. This fix instead minted a scoped broker management token and set `hack_web_broker_session` directly in the browser session. If that shortcut is intended to be reusable, it should be documented or explicitly discouraged so future workers do not have to rediscover it ad hoc.",
+      "evidence": ".factory/library/user-testing.md:27-35,78 documents only the sign-up/email plus bridge-cookie bootstrap, and .factory/skills/web-control-plane-worker/SKILL.md:31 points workers there for protected integration pages. In contrast, <mission-dir>/handoffs/2026-03-25T17-22-15-543Z__linear-env-only-repair-guidance-parity-fix__a31e597e-0cf3-48ce-ac59-7756b4e91dc8.json:36,58 shows this feature issuing `issueBrokerManagementToken(...)` and setting `hack_web_broker_session` directly for browser verification."
+    }
+  ],
+  "addressesFailureFrom": ".factory/validation/integration-management/scrutiny/reviews/linear-management-state-and-binding-ui.json",
+  "summary": "Pass. I reviewed the original failure and the fix commit together, and the new env-only remapping closes the prior gap: when the routed loader is forced into env-only Linear status, Hack-owned local-repair states now surface reseed or reconnect actions instead of generic env-token guidance. I did not find new code defects in the fix itself, but I noted one shared-state knowledge gap around the undocumented direct `hack_web_broker_session` bootstrap used for protected routed-browser verification."
+}

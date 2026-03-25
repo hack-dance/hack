@@ -1,0 +1,15 @@
+{
+  "featureId": "browser-scoped-integration-loader-parity-fix",
+  "reviewedAt": "2026-03-25T17:46:56Z",
+  "commitId": "045fa1a8e244bdca1d7a7476eafdeb7c18d55f2d",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "This fix closes the prior blocking gap. `apps/web/src/components/account-shell-page.tsx` now derives a browser-scoped shared-project summary from the resolved account context and passes it into both management loaders, so the routed account shell no longer renders GitHub or Linear readiness/repair state straight from machine-global CLI scope. The new `browser-shared-project-scope` helper establishes the effective `local_only`/`shared_visible`/`shared_hidden` state, `buildGitHubManagementState()` uses that effective scope to rebuild readiness plus the extension-enabled indicator from real repair issues, and `buildLinearManagementState()` applies the same scoped overlay to connection, local-access, repair, and capability state. The updated web regressions cover the exact prior failure mode on both providers as well as the visible-scope override path, so the fix now satisfies the VAL-CROSS-003 parity requirement that the original feature missed.",
+    "issues": []
+  },
+  "sharedStateObservations": [],
+  "addressesFailureFrom": ".factory/validation/integration-management/scrutiny/reviews/shared-scope-consistency-across-admin-and-integrations.json",
+  "summary": "Pass. I reviewed the original failed feature and this fix together using the prior fail report, both handoffs, both transcript skeletons, and both relevant commit diffs. The original blocker is addressed: the account-shell GitHub and Linear loaders now honor the active browser scope and fail closed for hidden shared-project states without regressing visible-scope provider details. I did not find new blocking or non-blocking issues in the fix, and I did not identify any additional shared-state gaps that need follow-up from this review."
+}

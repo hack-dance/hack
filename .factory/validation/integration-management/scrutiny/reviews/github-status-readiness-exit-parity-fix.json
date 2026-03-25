@@ -1,0 +1,21 @@
+{
+  "featureId": "github-status-readiness-exit-parity-fix",
+  "reviewedAt": "2026-03-25T17:45:47.516789Z",
+  "commitId": "20c6e33e0073af4510d7bfc5047f9debfcb7dd8f",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "This fix resolves the prior blocking defect. `handleGitHubStatusCommand()` now returns success only when the emitted GitHub readiness payload is actually `ready: true`, so repo-bound status exit semantics match the shipped readiness contract instead of treating resolved profile/token state as sufficient. The added regression smokes in `tests/github-commands.test.ts` cover both the previously broken unhealthy app-profile case and the healthy ready path, and the existing readiness-payload coverage still exercises shared-scope-denied states.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "The shared user-testing library still describes GitHub CLI validation as requiring a temporary global-config overlay because the project config only enables Linear and tickets, but the project config now enables `dance.hack.github`. That note is stale and can mislead later workers or validators about the current repo-bound GitHub setup.",
+      "evidence": ".factory/library/user-testing.md:15 states the project config only enables `dance.hack.linear` and `dance.hack.tickets`, while `.hack/hack.config.json:7-13` now includes `dance.hack.github` as an enabled extension."
+    }
+  ],
+  "addressesFailureFrom": ".factory/validation/integration-management/scrutiny/reviews/github-management-readiness-and-repair-ui.json",
+  "summary": "Pass. I reviewed the original failed feature and the follow-up fix together, including both handoffs, both transcript skeletons, the prior fail report, and the relevant commit diffs. The original blocking issue is fixed: repo-bound `github status` now exits according to `payload.ready`, so unhealthy readiness states no longer slip through as exit 0. I did not find new blocking or non-blocking code issues in the fix; the only follow-up I noted is a stale GitHub validation note in `.factory/library/user-testing.md`."
+}

@@ -1,7 +1,7 @@
 {
   "milestone": "integration-management",
-  "round": 1,
-  "status": "fail",
+  "round": 2,
+  "status": "pass",
   "validatorsRun": {
     "test": {
       "passed": true,
@@ -20,100 +20,20 @@
     }
   },
   "reviewsSummary": {
-    "total": 7,
-    "passed": 4,
-    "failed": 3,
-    "failedFeatures": [
-      "github-management-readiness-and-repair-ui",
-      "linear-management-state-and-binding-ui",
-      "shared-scope-consistency-across-admin-and-integrations"
-    ]
+    "total": 3,
+    "passed": 3,
+    "failed": 0,
+    "failedFeatures": []
   },
-  "blockingIssues": [
-    {
-      "featureId": "github-management-readiness-and-repair-ui",
-      "file": "src/control-plane/extensions/github/commands.ts",
-      "line": 1337,
-      "severity": "blocking",
-      "description": "`handleGitHubStatusCommand()` still exits 0 whenever the selected profile resolves and a token is present, even when the new readiness contract marks the profile unhealthy (for example, app mode without an installation context), so repo-bound GitHub status smokes can still treat a broken configuration as healthy."
-    },
-    {
-      "featureId": "linear-management-state-and-binding-ui",
-      "file": "apps/web/src/lib/linear-management.ts",
-      "line": 554,
-      "severity": "blocking",
-      "description": "The routed web loader forces env-only Linear status by default, but `buildLinearRepairState()` only upgrades `hack linear connect --profile ...` summaries into Hack-aware reseed/reconnect actions, so the shipped web UI can still recommend a generic env-token fix for Hack-owned local-repair states."
-    },
-    {
-      "featureId": "shared-scope-consistency-across-admin-and-integrations",
-      "file": "apps/web/src/components/account-shell-page.tsx",
-      "line": 23,
-      "severity": "blocking",
-      "description": "The account shell scopes only the browser-derived account context, then loads GitHub and Linear management state from machine-global repo-bound CLI commands with no org/team-scoped inputs, so the web management payloads can disagree with the active browser scope required by `VAL-CROSS-003`."
-    }
-  ],
-  "nonBlockingIssues": [
-    {
-      "featureId": "github-management-readiness-and-repair-ui",
-      "file": "apps/web/src/lib/github-management.ts",
-      "line": 150,
-      "severity": "non_blocking",
-      "description": "The web GitHub loader infers `extensionEnabled` from a constant payload field, so extension-disabled states can still render `Extension enabled: yes` if the status command returns JSON."
-    },
-    {
-      "featureId": "linear-audit-state-implementation",
-      "file": "src/control-plane/extensions/linear/audit.ts",
-      "line": 152,
-      "severity": "non_blocking",
-      "description": "Malformed repo audit artifacts are silently treated as missing state, which can weaken the auditability story by hiding persisted corruption behind a `no audit recorded yet` presentation."
-    },
-    {
-      "featureId": "shared-project-admin-scope-consistency",
-      "file": "services/auth-broker/tests/project-admin.test.ts",
-      "line": 90,
-      "severity": "non_blocking",
-      "description": "The new scoped visibility regressions exercise only `InMemoryProjectStore`, so the durable `DbProjectStore` path that ships when `DATABASE_URL` is set remains unverified for the new scope behavior."
-    },
-    {
-      "featureId": "shared-scope-consistency-across-admin-and-integrations",
-      "file": "apps/web/src/lib/github-management.ts",
-      "line": 23,
-      "severity": "non_blocking",
-      "description": "The typed web GitHub loader contract still omits the new `shared_scope_hidden` repair issue, so future UI handling is not forced to account for the newly surfaced scope denial state."
-    }
-  ],
+  "blockingIssues": [],
   "appliedUpdates": [
     {
-      "target": "services.yaml",
-      "description": "Added reusable `github_status`, `repo_github_smoke`, and `project_owner_routed_scope_status` commands to `.factory/services.yaml` so GitHub readiness and routed project-owner scope parity checks no longer depend on ad-hoc handoff command strings.",
-      "sourceFeature": "github-management-readiness-and-repair-ui; shared-project-admin-scope-consistency; shared-scope-consistency-across-admin-and-integrations"
-    },
-    {
       "target": "library",
-      "description": "Updated `.factory/library/linear.md` to record the repo-root (`project.projectRoot`) artifact-resolution rule for canonical `.hack/linear/projects/<project-id>/...` paths and the extra `./dist/hack auth login` prerequisite that can be needed for broker-backed Linear inspection even when `linear status --json` already works.",
-      "sourceFeature": "linear-audit-state-implementation; linear-live-audit-parity-proof"
+      "description": "Updated `.factory/library/user-testing.md` to reflect that repo-bound GitHub validation now uses the project config directly and to record the alternate direct `hack_web_broker_session` bootstrap for protected routed-page inspection when browser-owned auth continuity is not the thing under test.",
+      "sourceFeature": "github-status-readiness-exit-parity-fix; linear-env-only-repair-guidance-parity-fix"
     }
   ],
-  "suggestedGuidanceUpdates": [
-    {
-      "target": ".factory/skills/web-control-plane-worker/SKILL.md",
-      "suggestion": "Document the authenticated routed-browser bootstrap for integration-management slices, and define an approved fallback proof path when the routed local runtime intentionally lacks live provider credentials so workers do not substitute temporary HTML harnesses for the primary verification loop.",
-      "evidence": "Both `github-management-readiness-and-repair-ui` and `linear-management-state-and-binding-ui` relied on temporary HTML harnesses for healthy-state verification because the current skill only describes routed-host `agent-browser` checks and does not point workers to the documented authenticated browser bootstrap or an accepted credential-limited fallback.",
-      "isSystemic": true
-    },
-    {
-      "target": ".factory/skills/web-control-plane-worker/SKILL.md",
-      "suggestion": "When `apps/web` loaders shell out to repo-bound CLI state, explicitly require workers to bridge those loaders to the active browser org/team session and to run scoped CLI parity checks (including routed-broker overrides such as `HACK_AUTH_BROKER_URL=https://auth.hack-cli.hack` when applicable) instead of relying on machine-global process environment.",
-      "evidence": "`shared-project-admin-scope-consistency` had to document the routed-broker override separately, and `shared-scope-consistency-across-admin-and-integrations` still shipped machine-global GitHub/Linear management loaders because the skill does not currently call out this browser-scope-to-CLI parity requirement.",
-      "isSystemic": true
-    },
-    {
-      "target": ".factory/skills/scrutiny-feature-reviewer/SKILL.md",
-      "suggestion": "Add explicit placeholder and sanitizer rules for review JSON evidence so scrutiny reviews follow the same sanitized-path conventions already required for validation artifacts.",
-      "evidence": "`admin-validation-artifact-privacy-sanitization` had to clean previously committed scrutiny review files after absolute local paths leaked into review artifacts, and the current reviewer guidance still does not mention placeholder usage even though mission artifacts are required to stay privacy-check safe.",
-      "isSystemic": true
-    }
-  ],
+  "suggestedGuidanceUpdates": [],
   "rejectedObservations": [],
-  "previousRound": null
+  "previousRound": ".factory/validation/integration-management/scrutiny/synthesis.round-1.json"
 }

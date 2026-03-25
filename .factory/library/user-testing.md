@@ -12,7 +12,7 @@ Testing surface findings, required tools, and validation concurrency for this mi
 - Primary tools: `./dist/hack`, repo-local Bun commands, global `hack` for runtime orchestration only.
 - Use for: auth status, Linear sync/status, tickets, env, runtime/session flows, project ownership/admin parity.
 - Notes: prefer repo-bound CLI validation (`./dist/hack`) after a build so command behavior matches the current branch.
-- Notes: repo-bound GitHub CLI validation currently needs a temporary global-config overlay that enables `dance.hack.github`, because the project config only enables `dance.hack.linear` and `dance.hack.tickets`.
+- Notes: repo-bound GitHub CLI validation can use the project config directly because `.hack/hack.config.json` now enables `dance.hack.github` alongside the Linear and tickets extensions.
 
 ### Broker / HTTP surface
 - Primary tools: `curl`, declared local service commands from `.factory/services.yaml`, and later hack-managed routed hosts.
@@ -32,6 +32,7 @@ Testing surface findings, required tools, and validation concurrency for this mi
   4. run `agent-browser --session <id> cookies set __Secure-better-auth.session_token <value>`
   5. open `https://auth.hack-cli.hack/auth/account?bridge=1&redirect=https%3A%2F%2Fhack-cli.hack%2Faccount`
   This mints the shared `hack_web_broker_session` cookie for `https://hack-cli.hack/account` without relying on GitHub OAuth.
+- Notes: for protected routed-page verification that does not need to prove browser-owned sign-in continuity, an alternate bootstrap is to mint a scoped broker management token, set `hack_web_broker_session` directly in the browser session, and then open the protected `https://hack-cli.hack/...` route. Use this only for state inspection or scoped management-page checks; it is not evidence for browser-owned auth return flows.
 - Notes: that bridge-cookie bootstrap is not enough to validate browser-owned auth return flows by itself. When a feature claims post-login deep-link continuity, also start from a real browser-owned entry such as `https://hack-cli.hack/auth?redirect=https%3A%2F%2Fhack-cli.hack%2Faccount` and confirm the user is returned to the requested trusted destination after sign-in.
 
 ## Validation Concurrency

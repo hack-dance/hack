@@ -8,6 +8,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import {
   normalizeAppReturnUrl,
+  resolveInitialAuthFlowKind,
   shouldAutoNavigateToReturnUrl,
 } from "../lib/auth-handoff";
 
@@ -20,6 +21,7 @@ type AuthEntrypointProps = {
   readonly flowId?: string;
   readonly deviceCode?: string;
   readonly redirect?: string;
+  readonly browserSessionAuthenticated?: boolean;
 };
 
 type ActionState =
@@ -59,6 +61,7 @@ export function AuthEntrypoint({
   flowId,
   deviceCode,
   redirect,
+  browserSessionAuthenticated = false,
 }: AuthEntrypointProps) {
   const [resolvedProviders, setResolvedProviders] = useState(providers);
   const [resolvedTrustedOrigins, setResolvedTrustedOrigins] =
@@ -74,9 +77,22 @@ export function AuthEntrypoint({
   );
   const [actionState, setActionState] = useState<ActionState>({ kind: "idle" });
   const [flowState, setFlowState] = useState<FlowState>(
-    mode === "account" && flowId && deviceCode
-      ? { kind: "polling" }
-      : { kind: "idle" }
+    (() => {
+      const initialFlowKind = resolveInitialAuthFlowKind({
+        mode,
+        flowId,
+        deviceCode,
+        redirect: normalizedRedirect,
+        browserSessionAuthenticated,
+      });
+      if (initialFlowKind === "polling") {
+        return { kind: "polling" };
+      }
+      if (initialFlowKind === "ready") {
+        return { kind: "ready" };
+      }
+      return { kind: "idle" };
+    })()
   );
 
   useEffect(() => {

@@ -2,6 +2,25 @@ import { isTrustedAuthOrigin } from "@hack/auth-contract";
 
 const SAFE_RETURN_PROTOCOLS = new Set(["hack:", "hack-dev:"]);
 
+export function resolveInitialAuthFlowKind(input: {
+  readonly mode: "sign-in" | "account";
+  readonly flowId?: string | null;
+  readonly deviceCode?: string | null;
+  readonly redirect?: string | null;
+  readonly browserSessionAuthenticated?: boolean;
+}): "idle" | "polling" | "ready" {
+  if (input.mode !== "account") {
+    return "idle";
+  }
+  if (input.flowId && input.deviceCode) {
+    return "polling";
+  }
+  if (input.browserSessionAuthenticated && input.redirect) {
+    return "ready";
+  }
+  return "idle";
+}
+
 export function normalizeAppReturnUrl(input: {
   readonly value?: string | null;
   readonly appBaseUrl: string;

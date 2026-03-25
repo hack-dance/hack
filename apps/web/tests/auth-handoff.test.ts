@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   buildBrokerAccountBridgeUrl,
   normalizeAppReturnUrl,
+  resolveInitialAuthFlowKind,
   shouldAutoNavigateToReturnUrl,
 } from "../src/lib/auth-handoff";
 
@@ -67,5 +68,31 @@ describe("web auth handoff helpers", () => {
         value: "https://hack-cli-preview.vercel.app/account",
       })
     ).toBe(true);
+  });
+
+  test("resolveInitialAuthFlowKind auto-confirms browser-owned account redirects after the web session cookie is set", () => {
+    expect(
+      resolveInitialAuthFlowKind({
+        mode: "account",
+        browserSessionAuthenticated: true,
+        redirect: "https://hack-cli.hack/account?org=hack",
+      })
+    ).toBe("ready");
+    expect(
+      resolveInitialAuthFlowKind({
+        mode: "account",
+        browserSessionAuthenticated: true,
+        redirect: null,
+      })
+    ).toBe("idle");
+    expect(
+      resolveInitialAuthFlowKind({
+        mode: "account",
+        flowId: "flow-123",
+        deviceCode: "device-123",
+        browserSessionAuthenticated: true,
+        redirect: "https://hack-cli.hack/account?org=hack",
+      })
+    ).toBe("polling");
   });
 });

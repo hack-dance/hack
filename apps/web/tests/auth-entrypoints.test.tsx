@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { POST as startSocialSignIn } from "../app/api/auth/social/route";
 import AuthAccountPage from "../app/auth/account/page";
 import AuthPage from "../app/auth/page";
+import { AuthEntrypoint } from "../src/components/auth-entrypoint";
 
 const originalEnv = {
   NEXT_PUBLIC_HACK_WEB_APP_BASE_URL:
@@ -93,6 +94,26 @@ test("account route renders browser handoff status in apps/web", async () => {
   expect(markup).toContain("Open the broker backend");
   expect(markup).toContain(
     'href="/auth?flowId=flow-123&amp;deviceCode=device-123&amp;redirect=hack%3A%2F%2Fauth%2Fcomplete"'
+  );
+});
+
+test("account entrypoint renders a ready return state for browser-owned redirects once the web session exists", () => {
+  const markup = renderToStaticMarkup(
+    <AuthEntrypoint
+      appBaseUrl="https://hack-cli.hack"
+      authBrokerBaseUrl="https://auth.hack-cli.hack"
+      browserSessionAuthenticated
+      mode="account"
+      providers={[{ id: "github", label: "GitHub" }]}
+      redirect="/account?org=hack"
+      trustedOrigins={["https://hack-cli.hack"]}
+    />
+  );
+
+  expect(markup).toContain("Browser handoff confirmed");
+  expect(markup).toContain("Returning to Hack…");
+  expect(markup).toContain(
+    'href="/auth?redirect=https%3A%2F%2Fhack-cli.hack%2Faccount%3Forg%3Dhack"'
   );
 });
 

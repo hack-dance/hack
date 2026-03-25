@@ -6,6 +6,7 @@ import {
   resolveEnvSecretKey,
   resolveHackEnv,
   upsertDotEnvValue,
+  validateHackEnvMutationSource,
 } from "../../lib/hack-env.ts";
 import {
   describeEnvAggregateStatusForJson,
@@ -149,11 +150,16 @@ async function handleGetEnv(opts: { readonly url: URL }): Promise<Response> {
   }
 
   const { project, registration } = resolvedProject.value;
-  const resolved = await resolveHackEnv({
-    projectDir: project.projectDir,
-    projectName: registration.name,
-    envName,
-  });
+  let resolved: Awaited<ReturnType<typeof resolveHackEnv>>;
+  try {
+    resolved = await resolveHackEnv({
+      projectDir: project.projectDir,
+      projectName: registration.name,
+      envName,
+    });
+  } catch (error: unknown) {
+    return secretStoreUnavailableResponse({ error });
+  }
 
   const valuesByKey = new Map(resolved.values.map((v) => [v.key, v] as const));
   const contractVars = resolved.contract.vars.map((v) => ({
@@ -243,16 +249,38 @@ async function handleSetEnv(opts: {
   }
 
   const { project, registration } = resolvedProject.value;
-  const secretStore = await resolveSecretStore({
-    projectName: registration.name,
+  const secret = parsed.value.secret === true;
+  const sourceValidation = await validateHackEnvMutationSource({
     projectDir: project.projectDir,
+    key: parsed.value.key,
+    attemptedSource: secret ? "keychain" : "plain_env",
   });
+  if (!sourceValidation.ok) {
+    return jsonResponse(
+      {
+        error: "contract_source_mismatch",
+        message: sourceValidation.message,
+        contractPath: sourceValidation.contractPath,
+        expectedSource: sourceValidation.expectedSource,
+        attemptedSource: sourceValidation.attemptedSource,
+      },
+      409
+    );
+  }
+
   const runtimeConfig = await readHackEnvRuntimeConfig({
     projectDir: project.projectDir,
   });
-
-  const secret = parsed.value.secret === true;
   if (secret) {
+    let secretStore: Awaited<ReturnType<typeof resolveSecretStore>>;
+    try {
+      secretStore = await resolveSecretStore({
+        projectName: registration.name,
+        projectDir: project.projectDir,
+      });
+    } catch (error: unknown) {
+      return secretStoreUnavailableResponse({ error });
+    }
     try {
       await secretStore.set({
         key: resolveEnvSecretKey({
@@ -294,6 +322,15 @@ async function handleSetEnv(opts: {
     value: parsed.value.value,
   });
   if (runtimeConfig.storePlaintextInBackend) {
+    let secretStore: Awaited<ReturnType<typeof resolveSecretStore>>;
+    try {
+      secretStore = await resolveSecretStore({
+        projectName: registration.name,
+        projectDir: project.projectDir,
+      });
+    } catch (error: unknown) {
+      return secretStoreUnavailableResponse({ error });
+    }
     try {
       await secretStore.set({
         key: resolveEnvSecretKey({
@@ -341,10 +378,15 @@ async function handleUnsetEnv(opts: {
   }
 
   const { project, registration } = resolvedProject.value;
-  const secretStore = await resolveSecretStore({
-    projectName: registration.name,
-    projectDir: project.projectDir,
-  });
+  let secretStore: Awaited<ReturnType<typeof resolveSecretStore>>;
+  try {
+    secretStore = await resolveSecretStore({
+      projectName: registration.name,
+      projectDir: project.projectDir,
+    });
+  } catch (error: unknown) {
+    return secretStoreUnavailableResponse({ error });
+  }
 
   const envFile = resolveEnvFilePath({
     projectDir: project.projectDir,
@@ -527,4 +569,20 @@ function jsonResponse(body: Record<string, unknown>, status = 200): Response {
       "content-length": `${Buffer.byteLength(payload)}`,
     },
   });
+}
+
+function secretStoreUnavailableResponse(input: {
+  readonly error: unknown;
+}): Response {
+  const message =
+    input.error instanceof Error
+      ? input.error.message
+      : "Secret backend is unavailable.";
+  return jsonResponse(
+    {
+      error: "secret_store_unavailable",
+      message,
+    },
+    503
+  );
 }

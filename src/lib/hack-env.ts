@@ -16,6 +16,18 @@ export const HACK_ENV_VERSION = 1 as const;
 
 export type HackEnvSource = "plain_env" | "keychain";
 
+export type HackEnvMutationSourceValidationResult =
+  | {
+      readonly ok: true;
+    }
+  | {
+      readonly ok: false;
+      readonly contractPath: string;
+      readonly expectedSource: HackEnvSource;
+      readonly attemptedSource: HackEnvSource;
+      readonly message: string;
+    };
+
 export type HackEnvVar = {
   readonly key: string;
   readonly required: boolean;
@@ -247,6 +259,32 @@ export async function readHackEnvRuntimeConfig(opts: {
   };
 }
 
+export async function validateHackEnvMutationSource(input: {
+  readonly projectDir: string;
+  readonly key: string;
+  readonly attemptedSource: HackEnvSource;
+}): Promise<HackEnvMutationSourceValidationResult> {
+  const contract = await readHackEnvContract({ projectDir: input.projectDir });
+  const contractVar =
+    contract.contract.vars.find((entry) => entry.key === input.key) ?? null;
+  if (!contractVar || contractVar.source === input.attemptedSource) {
+    return { ok: true };
+  }
+
+  return {
+    ok: false,
+    contractPath: contract.path,
+    expectedSource: contractVar.source,
+    attemptedSource: input.attemptedSource,
+    message: buildHackEnvMutationSourceMismatchMessage({
+      key: input.key,
+      contractPath: contract.path,
+      expectedSource: contractVar.source,
+      attemptedSource: input.attemptedSource,
+    }),
+  };
+}
+
 export function resolveEnvFilePath(opts: {
   readonly projectDir: string;
   readonly envName?: string | null;
@@ -381,6 +419,19 @@ function serializeDotEnvStable(env: Record<string, string>): string {
     }
   }
   return serializeDotEnv(sortedEnv);
+}
+
+function buildHackEnvMutationSourceMismatchMessage(input: {
+  readonly key: string;
+  readonly contractPath: string;
+  readonly expectedSource: HackEnvSource;
+  readonly attemptedSource: HackEnvSource;
+}): string {
+  if (input.expectedSource === "keychain") {
+    return `Env key "${input.key}" is declared as source "keychain" in ${input.contractPath}. Use "hack env set --secret ${input.key}=…" or update the contract source before writing. Hack will not write this key to plaintext compatibility storage.`;
+  }
+
+  return `Env key "${input.key}" is declared as source "plain_env" in ${input.contractPath}. Use "hack env set ${input.key}=…" or update the contract source before writing. Hack will not write this key through the secret backend until the contract source changes.`;
 }
 
 function describePortableState(input: {

@@ -16,6 +16,8 @@ import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { ensureDir, readTextFile } from "./fs.ts";
 
 const ENCRYPTED_FILE_KEY_ENV = "HACK_SECRETS_FILE_KEY";
+const DISABLE_ENCRYPTED_FILE_KEYCHAIN_FALLBACK_ENV =
+  "HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK";
 const DEFAULT_ENCRYPTED_FILE_KEY_PATH = "~/.hack/secrets-file.key";
 const ENCRYPTED_FILE_KEY_SERVICE = "hack-secrets-backend";
 const ENCRYPTED_FILE_KEY_NAME = "encrypted-file-key";
@@ -444,6 +446,19 @@ async function resolveEncryptedFileKeyMaterial(input?: {
       };
     }
   }
+
+  if (
+    isTruthyEnvFlag(process.env[DISABLE_ENCRYPTED_FILE_KEYCHAIN_FALLBACK_ENV])
+  ) {
+    throw new Error(
+      buildEncryptedBackendKeyRecoveryMessage({
+        keyPath: configuredKeyPath,
+        storePath: input?.storePath,
+        reason: "keychain_disabled",
+      })
+    );
+  }
+
   if (cachedEncryptedFileKey) {
     if (input?.persistResolvedKey && input.keyPath) {
       await writeEncryptedFileKey({
@@ -479,7 +494,11 @@ async function resolveEncryptedFileKeyMaterial(input?: {
   const nowMs = Date.now();
   if (nowMs < encryptedFileKeyFailureCooldownUntilMs) {
     throw new Error(
-      `Encrypted backend key access is cooling down after a failed keychain lookup. Set ${ENCRYPTED_FILE_KEY_ENV} to bypass keychain prompts.`
+      buildEncryptedBackendKeyRecoveryMessage({
+        keyPath: configuredKeyPath,
+        storePath: input?.storePath,
+        reason: "cooldown",
+      })
     );
   }
 
@@ -495,7 +514,11 @@ async function resolveEncryptedFileKeyMaterial(input?: {
     encryptedFileKeyFailureCooldownUntilMs =
       Date.now() + ENCRYPTED_FILE_KEY_FAILURE_COOLDOWN_MS;
     throw new Error(
-      `Failed to access encrypted backend key in keychain service "${ENCRYPTED_FILE_KEY_SERVICE}". Set ${ENCRYPTED_FILE_KEY_ENV} to bypass keychain prompts.`
+      buildEncryptedBackendKeyRecoveryMessage({
+        keyPath: configuredKeyPath,
+        storePath: input?.storePath,
+        reason: "keychain_access_failed",
+      })
     );
   }
   if (existing) {
@@ -515,7 +538,11 @@ async function resolveEncryptedFileKeyMaterial(input?: {
 
   if (configuredKeyPath) {
     throw new Error(
-      `Missing encrypted backend key. Provision ${configuredKeyPath} or set ${ENCRYPTED_FILE_KEY_ENV}.`
+      buildEncryptedBackendKeyRecoveryMessage({
+        keyPath: configuredKeyPath,
+        storePath: input?.storePath,
+        reason: "missing",
+      })
     );
   }
 
@@ -530,7 +557,11 @@ async function resolveEncryptedFileKeyMaterial(input?: {
     encryptedFileKeyFailureCooldownUntilMs =
       Date.now() + ENCRYPTED_FILE_KEY_FAILURE_COOLDOWN_MS;
     throw new Error(
-      `Missing encrypted backend key. Set ${ENCRYPTED_FILE_KEY_ENV} or configure keychain access for service "${ENCRYPTED_FILE_KEY_SERVICE}".`
+      buildEncryptedBackendKeyRecoveryMessage({
+        keyPath: configuredKeyPath,
+        storePath: input?.storePath,
+        reason: "keychain_access_failed",
+      })
     );
   }
   cachedEncryptedFileKey = generated;
@@ -717,4 +748,43 @@ function decryptStore(input: {
 
 function deriveEncryptionKey(input: { readonly source: string }): Buffer {
   return createHash("sha256").update(input.source, "utf8").digest();
+}
+
+function buildEncryptedBackendKeyRecoveryMessage(input: {
+  readonly keyPath: string | undefined;
+  readonly storePath?: string;
+  readonly reason:
+    | "cooldown"
+    | "keychain_access_failed"
+    | "keychain_disabled"
+    | "missing";
+}): string {
+  const location = input.storePath ? ` for ${input.storePath}` : "";
+  const recovery = input.keyPath
+    ? `Provision ${input.keyPath} or set ${ENCRYPTED_FILE_KEY_ENV}.`
+    : `Set ${ENCRYPTED_FILE_KEY_ENV}.`;
+
+  if (input.reason === "cooldown") {
+    return `Encrypted backend key access is cooling down after a failed keychain lookup${location}. ${recovery} Hack will not fall back to plaintext .hack/.env or ambient process env.`;
+  }
+
+  if (input.reason === "keychain_access_failed") {
+    return `Failed to access encrypted backend key in keychain service "${ENCRYPTED_FILE_KEY_SERVICE}"${location}. ${recovery} Hack will not fall back to plaintext .hack/.env or ambient process env.`;
+  }
+
+  if (input.reason === "keychain_disabled") {
+    return `Missing encrypted backend key${location}. Keychain fallback is disabled by ${DISABLE_ENCRYPTED_FILE_KEYCHAIN_FALLBACK_ENV}. ${recovery} Hack will not fall back to plaintext .hack/.env or ambient process env.`;
+  }
+
+  return `Missing encrypted backend key${location}. ${recovery} Hack will not fall back to plaintext .hack/.env or ambient process env.`;
+}
+
+function isTruthyEnvFlag(value: string | undefined): boolean {
+  const normalized = (value ?? "").trim().toLowerCase();
+  return (
+    normalized === "1" ||
+    normalized === "true" ||
+    normalized === "yes" ||
+    normalized === "on"
+  );
 }

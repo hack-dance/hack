@@ -18,12 +18,15 @@ let tempDir: string | null = null;
 let previousHome: string | undefined;
 let previousGlobalConfigPath: string | undefined;
 let previousSecretsKey: string | undefined;
+let previousDisableKeychainFallback: string | undefined;
 
 beforeEach(async () => {
   tempDir = await mkdtemp(join(tmpdir(), "hack-secret-store-"));
   previousHome = process.env.HOME;
   previousGlobalConfigPath = process.env.HACK_GLOBAL_CONFIG_PATH;
   previousSecretsKey = process.env.HACK_SECRETS_FILE_KEY;
+  previousDisableKeychainFallback =
+    process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK;
   process.env.HOME = tempDir;
   process.env.HACK_GLOBAL_CONFIG_PATH = join(tempDir, "hack.config.json");
 });
@@ -43,6 +46,12 @@ afterEach(async () => {
     process.env.HACK_SECRETS_FILE_KEY = previousSecretsKey;
   } else {
     process.env.HACK_SECRETS_FILE_KEY = undefined;
+  }
+  if (previousDisableKeychainFallback !== undefined) {
+    process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK =
+      previousDisableKeychainFallback;
+  } else {
+    process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = undefined;
   }
 });
 
@@ -232,6 +241,59 @@ test("project config resolves encrypted_file paths relative to the repo root", a
   });
   expect(provisioned.keyPath).toBe(keyPath);
   await access(keyPath);
+});
+
+test("encrypted_file backend returns recovery guidance when key material is missing", async () => {
+  if (!tempDir) {
+    throw new Error("Missing temp dir");
+  }
+  process.env.HACK_SECRETS_FILE_KEY = undefined;
+  process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "true";
+  const projectRoot = join(tempDir, "repo-missing-key");
+  const projectDir = join(projectRoot, ".hack");
+  const storePath = join(projectRoot, ".hack-secrets.enc.json");
+  const keyPath = join(projectRoot, ".hack-secrets-file.key");
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(
+    join(tempDir, "hack.config.json"),
+    `${JSON.stringify({}, null, 2)}\n`
+  );
+  await writeFile(
+    join(projectDir, "hack.config.json"),
+    `${JSON.stringify(
+      {
+        name: "repo-missing-key",
+        controlPlane: {
+          secrets: {
+            backend: "encrypted_file",
+            encryptedFile: {
+              path: ".hack-secrets.enc.json",
+              keyPath: ".hack-secrets-file.key",
+            },
+          },
+        },
+      },
+      null,
+      2
+    )}\n`
+  );
+  await writeFile(storePath, '{"ciphertext":"existing"}\n');
+
+  await expect(
+    resolveSecretStore({
+      projectName: "repo-missing-key",
+      projectDir,
+    })
+  ).rejects.toThrow("Missing encrypted backend key");
+  await expect(
+    resolveSecretStore({
+      projectName: "repo-missing-key",
+      projectDir,
+    })
+  ).rejects.toThrow("will not fall back to plaintext .hack/.env");
+  const persisted = await readFile(storePath, "utf8");
+  expect(persisted).toContain('"ciphertext"');
+  await expect(access(keyPath)).rejects.toThrow();
 });
 
 async function writeGlobalConfig(input: {

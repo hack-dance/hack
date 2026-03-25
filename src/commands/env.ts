@@ -22,6 +22,7 @@ import {
   resolveEnvSecretKey,
   resolveHackEnv,
   upsertDotEnvValue,
+  validateHackEnvMutationSource,
 } from "../lib/hack-env.ts";
 import {
   describeBackendStrategyStatus,
@@ -396,11 +397,20 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
     envOption: args.options.env,
   });
 
-  const resolved = await resolveHackEnv({
-    projectDir: project.projectDir,
-    projectName,
-    envName,
-  });
+  let resolved: Awaited<ReturnType<typeof resolveHackEnv>>;
+  try {
+    resolved = await resolveHackEnv({
+      projectDir: project.projectDir,
+      projectName,
+      envName,
+    });
+  } catch (error: unknown) {
+    logger.error({
+      message:
+        error instanceof Error ? error.message : "Unable to resolve env state.",
+    });
+    return 1;
+  }
 
   if (json) {
     process.stdout.write(
@@ -547,6 +557,16 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
   const [keyFromSpec, valueFromSpec] = parseKeyValueSpec(spec);
 
   const key = await resolveEnvKey({ key: keyFromSpec });
+  const mutationSource = storeSecret ? "keychain" : "plain_env";
+  const sourceValidation = await validateHackEnvMutationSource({
+    projectDir: project.projectDir,
+    key,
+    attemptedSource: mutationSource,
+  });
+  if (!sourceValidation.ok) {
+    logger.error({ message: sourceValidation.message });
+    return 1;
+  }
   const value = await resolveEnvValue({
     key,
     value: valueFromSpec,

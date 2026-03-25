@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -43,6 +43,7 @@ describe("handleEnvRoutes", () => {
   let repoRoot: string;
   let originalConfigPath: string | undefined;
   let originalSecretsKey: string | undefined;
+  let originalDisableKeychainFallback: string | undefined;
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "hack-test-env-"));
@@ -50,6 +51,8 @@ describe("handleEnvRoutes", () => {
     // Isolate ~/.hack state by pointing the global config path to a temp dir.
     originalConfigPath = process.env.HACK_GLOBAL_CONFIG_PATH;
     originalSecretsKey = process.env.HACK_SECRETS_FILE_KEY;
+    originalDisableKeychainFallback =
+      process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK;
     process.env.HACK_GLOBAL_CONFIG_PATH = join(tempDir, "hack.config.json");
 
     repoRoot = join(tempDir, "repo");
@@ -100,6 +103,15 @@ describe("handleEnvRoutes", () => {
       process.env.HACK_SECRETS_FILE_KEY = originalSecretsKey;
     } else {
       Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
+    }
+    if (originalDisableKeychainFallback !== undefined) {
+      process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK =
+        originalDisableKeychainFallback;
+    } else {
+      Reflect.deleteProperty(
+        process.env,
+        "HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK"
+      );
     }
     await rm(tempDir, { recursive: true, force: true });
   });
@@ -319,6 +331,7 @@ describe("handleEnvRoutes", () => {
     ) as Record<string, unknown> | undefined;
     expect(secret?.hasValue).toBe(true);
     expect(secret?.resolvedFrom).toBe("keychain");
+    expect(secret).not.toHaveProperty("value");
 
     const unsetReq = mockRequest({
       method: "POST",
@@ -332,5 +345,95 @@ describe("handleEnvRoutes", () => {
     const unsetBody = await parseResponse(unsetRes!);
     expect(unsetBody?.backend).toBe("encrypted_file");
     expect(unsetBody?.secretDeleted).toBe(true);
+  });
+
+  test("secret-contract plaintext writes fail closed before touching .hack/.env", async () => {
+    await writeTextFileIfChanged(
+      resolve(repoRoot, ".hack", PROJECT_ENV_CONTRACT_FILENAME),
+      `${JSON.stringify(
+        {
+          version: 1,
+          vars: [{ key: "SECRET_TOKEN", required: false, source: "keychain" }],
+        },
+        null,
+        2
+      )}\n`
+    );
+
+    const setReq = mockRequest({
+      method: "POST",
+      path: "/v1/env/set",
+      body: {
+        project: "env-test",
+        key: "SECRET_TOKEN",
+        value: "plaintext-secret",
+      },
+    });
+    const setRes = await handleEnvRoutes({
+      req: setReq,
+      url: new URL(setReq.url),
+    });
+    expect(setRes).not.toBeNull();
+    expect(setRes?.status).toBe(409);
+    const setBody = await parseResponse(setRes!);
+    expect(setBody?.error).toBe("contract_source_mismatch");
+    expect(setBody?.message).toBeTruthy();
+    const envText = await readFile(
+      resolve(repoRoot, ".hack", ".env"),
+      "utf8"
+    ).catch(() => "");
+    expect(envText).not.toContain("plaintext-secret");
+  });
+
+  test("missing encrypted key material returns recovery guidance instead of throwing", async () => {
+    const keyPath = resolve(tempDir, "missing-secrets-file.key");
+    const storePath = resolve(tempDir, "missing-secrets.enc.json");
+    await writeTextFileIfChanged(
+      resolve(repoRoot, ".hack", PROJECT_CONFIG_FILENAME),
+      `${JSON.stringify(
+        {
+          name: "env-test",
+          controlPlane: {
+            secrets: {
+              backend: "encrypted_file",
+              encryptedFile: {
+                path: storePath,
+                keyPath,
+              },
+            },
+          },
+        },
+        null,
+        2
+      )}\n`
+    );
+    await writeTextFileIfChanged(
+      resolve(repoRoot, ".hack", PROJECT_ENV_CONTRACT_FILENAME),
+      `${JSON.stringify(
+        {
+          version: 1,
+          vars: [{ key: "SECRET_TOKEN", required: false, source: "keychain" }],
+        },
+        null,
+        2
+      )}\n`
+    );
+    await writeFile(storePath, '{"ciphertext":"existing"}\n');
+    process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "true";
+
+    const req = mockRequest({
+      method: "GET",
+      path: "/v1/env?project=env-test",
+    });
+    const res = await handleEnvRoutes({ req, url: new URL(req.url) });
+    expect(res).not.toBeNull();
+    expect(res?.status).toBe(503);
+    const body = await parseResponse(res!);
+    expect(body?.error).toBe("secret_store_unavailable");
+    expect(body?.message).toBeTruthy();
+    expect(String(body?.message)).toContain("HACK_SECRETS_FILE_KEY");
+    expect(String(body?.message)).toContain(
+      "will not fall back to plaintext .hack/.env"
+    );
   });
 });

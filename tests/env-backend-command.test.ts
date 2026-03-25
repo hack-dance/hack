@@ -277,6 +277,11 @@ test(
     expect(`${setResult.stdout}\n${setResult.stderr}`).toContain(
       "encrypted_file"
     );
+    const plaintextCompatibility = await readFile(
+      resolve(projectDir, ".env"),
+      "utf8"
+    ).catch(() => "");
+    expect(plaintextCompatibility).not.toContain("super-secret");
 
     const listResult = await runHack({
       args: ["env", "list", "--show-secrets", "--json"],
@@ -308,6 +313,26 @@ test(
     expect(apiKey?.storage.mode).toBe("native");
     expect(apiKey?.value).toBe("super-secret");
 
+    const redactedListResult = await runHack({
+      args: ["env", "list", "--json"],
+      env: {
+        ...process.env,
+        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
+        HACK_SECRETS_FILE_KEY: "env-backend-command-key",
+      },
+      cwd: projectRoot,
+    });
+    expect(redactedListResult.exitCode).toBe(0);
+    const redactedListJson = JSON.parse(redactedListResult.stdout) as {
+      readonly vars: ReadonlyArray<{
+        readonly key: string;
+        readonly value: string | null;
+      }>;
+    };
+    expect(
+      redactedListJson.vars.find((entry) => entry.key === "API_KEY")?.value
+    ).toBe("***");
+
     const listTextResult = await runHack({
       args: ["env", "list", "--show-secrets"],
       env: {
@@ -320,6 +345,152 @@ test(
     expect(listTextResult.exitCode).toBe(0);
     expect(listTextResult.stdout).toContain("API_KEY\toptional\tkeychain\t");
     expect(listTextResult.stdout).toContain("secret:encrypted_file");
+  },
+  { timeout: 40_000 }
+);
+
+test(
+  "env set rejects plaintext writes for keychain contract keys",
+  async () => {
+    if (!tempDir) {
+      throw new Error("Missing temp dir");
+    }
+    const projectRoot = resolve(tempDir, "repo-secret-mismatch");
+    const projectDir = resolve(projectRoot, ".hack");
+    await mkdir(projectDir, { recursive: true });
+    await writeFile(
+      resolve(projectDir, "docker-compose.yml"),
+      "services: {}\n"
+    );
+    await writeFile(
+      resolve(projectDir, "hack.config.json"),
+      `${JSON.stringify(
+        {
+          name: "env-secret-mismatch-project",
+          controlPlane: {
+            secrets: {
+              backend: "encrypted_file",
+              encryptedFile: {
+                path: resolve(tempDir, "secret-mismatch.enc.json"),
+              },
+            },
+          },
+        },
+        null,
+        2
+      )}\n`
+    );
+    await writeFile(
+      resolve(projectDir, "hack.env.json"),
+      `${JSON.stringify(
+        {
+          version: 1,
+          vars: [
+            {
+              key: "SECRET_TOKEN",
+              required: false,
+              source: "keychain",
+            },
+          ],
+        },
+        null,
+        2
+      )}\n`
+    );
+
+    const result = await runHack({
+      args: ["env", "set", "SECRET_TOKEN=super-secret"],
+      env: {
+        ...process.env,
+        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
+      },
+      cwd: projectRoot,
+    });
+    expect(result.exitCode).toBe(1);
+    expect(`${result.stdout}\n${result.stderr}`).toContain(
+      'declared as source "keychain"'
+    );
+    expect(`${result.stdout}\n${result.stderr}`).toContain("--secret");
+    const envText = await readFile(resolve(projectDir, ".env"), "utf8").catch(
+      () => ""
+    );
+    expect(envText).not.toContain("super-secret");
+  },
+  { timeout: 40_000 }
+);
+
+test(
+  "env list reports missing encrypted key recovery guidance without a stack trace",
+  async () => {
+    if (!tempDir) {
+      throw new Error("Missing temp dir");
+    }
+    const projectRoot = resolve(tempDir, "repo-missing-key");
+    const projectDir = resolve(projectRoot, ".hack");
+    const keyPath = resolve(tempDir, "missing-secrets-file.key");
+    const storePath = resolve(tempDir, "missing-secrets.enc.json");
+    await mkdir(projectDir, { recursive: true });
+    await writeFile(
+      resolve(projectDir, "docker-compose.yml"),
+      "services: {}\n"
+    );
+    await writeFile(
+      resolve(projectDir, "hack.config.json"),
+      `${JSON.stringify(
+        {
+          name: "env-missing-key-project",
+          controlPlane: {
+            secrets: {
+              backend: "encrypted_file",
+              encryptedFile: {
+                path: storePath,
+                keyPath,
+              },
+            },
+          },
+        },
+        null,
+        2
+      )}\n`
+    );
+    await writeFile(
+      resolve(projectDir, "hack.env.json"),
+      `${JSON.stringify(
+        {
+          version: 1,
+          vars: [
+            {
+              key: "SECRET_TOKEN",
+              required: false,
+              source: "keychain",
+            },
+          ],
+        },
+        null,
+        2
+      )}\n`
+    );
+    await writeFile(storePath, '{"ciphertext":"existing"}\n');
+
+    const result = await runHack({
+      args: ["env", "list", "--json"],
+      env: {
+        ...process.env,
+        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
+        HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK: "true",
+      },
+      cwd: projectRoot,
+    });
+    expect(result.exitCode).toBe(1);
+    expect(`${result.stdout}\n${result.stderr}`).toContain(
+      "Missing encrypted backend key"
+    );
+    expect(`${result.stdout}\n${result.stderr}`).toContain(
+      "will not fall back to plaintext .hack/.env"
+    );
+    expect(`${result.stdout}\n${result.stderr}`).not.toContain(
+      "resolveEncryptedFileKeyMaterial"
+    );
   },
   { timeout: 40_000 }
 );

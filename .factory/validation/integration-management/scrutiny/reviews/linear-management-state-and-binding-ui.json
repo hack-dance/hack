@@ -1,0 +1,28 @@
+{
+  "featureId": "linear-management-state-and-binding-ui",
+  "reviewedAt": "2026-03-25T16:49:40Z",
+  "commitId": "da97d4ea01557f31904abef1b4fb61f87ddf4327",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The slice stays within the allowlisted web files and it does land the requested Linear section, Hack-vs-local state projection, and deduplicated binding visibility. `normalizeLinearBinding()` correctly removes duplicate linked projects, and the account shell wiring makes the new section visible in the intended places. I am failing the review because the routed web loader always runs Linear status in env-only mode, but the repair-state rewrite only special-cases `hack linear connect --profile ...`. In the normal browser runtime that leaves Hack-owned/machine-broken states stuck on the generic env-token repair instead of surfacing the promised seed/reconnect guidance, so VAL-INTEGRATION-004 is not fully met.",
+    "issues": [
+      {
+        "file": "apps/web/src/lib/linear-management.ts",
+        "line": 554,
+        "severity": "blocking",
+        "description": "`buildLinearCommandEnvironment()` forces the routed web loader into `HACK_LINEAR_PREFER_ENV_TOKEN_ONLY=true` by default (`apps/web/src/lib/linear-management.ts:325-326`), and the canonical CLI summary under that mode is an env-token repair (`tests/linear-commands.test.ts:593-631`). But `buildLinearRepairState()` only upgrades `hack linear connect --profile ...` into the Hack-aware `seed-local-access` / reconnect actions (`apps/web/src/lib/linear-management.ts:554-576`). As a result, when Hack already owns the profile and can reseed local access, the actual routed app will still surface `export HACK_LINEAR_API_TOKEN=<linear-token>` instead of the correct Hack-owned repair path. The added regression at `apps/web/tests/linear-management.test.ts:25-84` misses this because it models the seeded-local-access case with a `hack linear connect --profile work` summary that is inconsistent with the feature's own env-only runtime. That breaks the contract to expose the current failure mode accurately in the web UI."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The web control-plane skill still does not steer workers toward the documented authenticated browser bootstrap for integration-management slices, so a worker can claim end-to-end verification while only checking the broken routed state and rendering the healthy state in a temporary HTML harness. That gap likely helped this repair-state mismatch escape review.",
+      "evidence": "`.factory/skills/web-control-plane-worker/SKILL.md:20,30-31` requires end-to-end `agent-browser` verification for changed UI flows, while `.factory/library/user-testing.md:28-33` already documents the bridge-cookie bootstrap for authenticated routed checks. This feature's handoff used the routed app only for the broken state (`.../handoffs/2026-03-25T11-32-09-746Z__linear-management-state-and-binding-ui__70792f84-c6d7-4fc5-8a2b-211914543432.json:68`) and verified the healthy state via a temporary HTML render instead (`...json:80`)."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Fail. The feature's binding dedupe and UI wiring look good, but the shipped repair-state logic does not survive the feature's own env-only browser execution model, so the Linear section can recommend the wrong fix for Hack-owned connections that need local repair. I also noted a skill-guidance gap around authenticated routed-browser verification for integration slices."
+}

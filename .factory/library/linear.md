@@ -17,11 +17,13 @@ Repo-bound Linear project and artifact guidance for this mission.
 
 - Use `.hack/linear/projects/<project-id>/...` as the only authoritative repo path.
 - Treat `.hack/.hack/linear/**` as legacy bug fallout that must be neutralized by mission work.
+- In command code, resolve that artifact tree from the repo root (`project.projectRoot`), not from `project.projectDir` (`.hack`), or audit/status reads will drift back into the wrong path.
 
 ## Tracking Expectations
 
 - Keep repo-bound Linear project state current while working, especially for features that touch project sync, status updates, or closeout.
 - Prefer repo-bound `./dist/hack linear ...` commands over manual remote edits when verifying project/status behavior.
+- Broker-backed inspection commands such as `./dist/hack linear connections --json` or `./dist/hack linear subscriptions --json` can still require a fresh `./dist/hack auth login` even when `./dist/hack linear status --json` already works from local token-backed access.
 - Preserve an auditable frozen closeout scope: all Hack-project Linear issues open at mission start plus mission-created optional-web-control-plane work.
 
 ## Frozen Closeout Inventory

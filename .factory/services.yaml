@@ -19,8 +19,11 @@ commands:
   runtime_stack_routed_healthcheck: hack ps --json && curl -ksSf https://hack-cli.hack && curl -ksSf https://auth.hack-cli.hack/health
   runtime_auth_provider_metadata_smoke: curl -ksSf https://auth.hack-cli.hack/v1/auth/providers
   runtime_auth_legacy_shell_headers: curl -ksSI https://auth.hack-cli.hack/auth
+  github_status: ./dist/hack x github status --json
+  repo_github_smoke: bun run build && ./dist/hack x github status --json
   linear_status: ./dist/hack linear status --json
   repo_linear_smoke: bun run build && ./dist/hack linear status --json
+  project_owner_routed_scope_status: HACK_AUTH_BROKER_URL=https://auth.hack-cli.hack bun ./index.ts project owner show --json
 
 services:
   auth-broker-local:

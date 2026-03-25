@@ -1,0 +1,28 @@
+{
+  "featureId": "linear-audit-state-implementation",
+  "reviewedAt": "2026-03-25T16:47:56Z",
+  "commitId": "865fc54fcdb438b299383b14b80feec33fd840be",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Pass with one non-blocking concern. The landed slice covers the requested implementation work: published status-update metadata now round-trips through project artifacts (`src/control-plane/extensions/linear/project-artifacts.ts:43-47,172-177,713-718,942-945`; `tests/linear-project-artifacts.test.ts:104-133,321-349`), repo-bound audit loading/writing is centralized in `src/control-plane/extensions/linear/audit.ts:67-95,166-220`, autosync persists durable delivery-audit summaries and `linear status` exposes them from the canonical repo root (`src/control-plane/extensions/linear/commands.ts:1539-1663,2122-2265,2275-2331`; `tests/linear-commands.test.ts:3347-3438,4519-4627`), and the existing web Linear section threads through the same audit block (`apps/web/src/lib/linear-management.ts:238-282,285-372`; `apps/web/src/components/linear-management-section.tsx:289-419`; `apps/web/tests/linear-management.test.ts:238-365`). The transcript skeleton and handoff also stay within the feature contract: no live publish/autosync mutation was added to product code, and verification focused on tests plus non-mutating CLI/web parity checks. I did not find any blocking issues.",
+    "issues": [
+      {
+        "file": "src/control-plane/extensions/linear/audit.ts",
+        "line": 152,
+        "severity": "non_blocking",
+        "description": "Corrupted repo audit artifacts are silently treated as missing state. `loadLinearProjectStatusUpdateAudit` opts into `ignoreParseErrors: true` (line 110) and `readLinearProjectDeliveryAudit` swallows JSON parse failures with `file.json().catch(() => null)` before returning `null`, so `linear status --json` and the web section can fall back to \"no audit recorded yet\" instead of surfacing that the persisted audit trail is malformed. That weakens the feature's auditability story even though happy-path validation should still pass."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "Shared Linear guidance captures the canonical `.hack/linear/projects/<project-id>/...` tree, but it does not record the implementation-critical rule that command code must resolve that tree from `project.projectRoot` rather than `project.projectDir` (`.hack`). The worker had to discover and fix that distinction during this feature.",
+      "evidence": "<repo>/.factory/library/linear.md:16-19 documents the canonical artifact root but not the repo-root helper requirement; `src/control-plane/extensions/linear/commands.ts:1643-1646,2125-2129,3052-3054,3074-3079` now route audit/status/project-artifact paths through `resolveProjectArtifactRepoRoot`; `tests/linear-commands.test.ts:3334-3438` adds the regression proving the prior `.hack`-root behavior was wrong."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Reviewed the feature contract, mission guidance, worker transcript skeleton, handoff, shared-state files, and commit `865fc54fcdb438b299383b14b80feec33fd840be`. The feature appears to meet its contract and likely fulfill its intended validation assertions: published status-update metadata is persisted in canonical artifacts, autosync writes durable delivery-audit summaries, `./dist/hack linear status --json` exposes the audit payload from the repo root, and the web Linear management surface consumes the same audit slice. No blocking issues found; one non-blocking code issue is that malformed audit artifacts are silently hidden, and one shared-state follow-up is to document the repo-root-vs-`.hack` artifact-resolution rule in shared Linear guidance."
+}

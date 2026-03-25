@@ -1,0 +1,21 @@
+{
+  "featureId": "admin-validation-artifact-privacy-sanitization",
+  "reviewedAt": "2026-03-25T16:47:46Z",
+  "commitId": "43645b63a3aebe8051ab632837589ba712961d4a",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Reviewed the feature manifest entry, worker handoff, transcript skeleton, `control-plane-worker` skill, and landed commit `43645b63a3aebe8051ab632837589ba712961d4a`. The implementation matches the contract: the diff sanitizes the leaking `.factory/validation/admin-control-plane/**` review and flow artifacts with stable placeholders, adds `sanitizeCommittedMissionArtifactText()` plus mission-artifact temp-path handling in `src/lib/privacy-check.ts:87-193,266-284`, adds a targeted cleanup helper at `scripts/sanitize-mission-artifacts.ts:1-29`, and extends `tests/privacy-check.test.ts:16-100` with regression coverage for sanitizer behavior and tracked mission artifacts. Read-only inspection of the current admin-control-plane artifacts found no remaining raw `/Users`, `/tmp`, or related local temp roots, so the landed change likely fulfills the worker's recorded `bun run check` and `bun run typecheck` validation results. I did not find blocking or non-blocking code issues in the scoped fix.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "Placeholder guidance is still explicit for validator evidence but not for scrutiny-review authors, so future review JSON can reintroduce raw local paths until privacy-check catches them after the fact. This feature had to sanitize prior scrutiny review files rather than relying on an already-documented review-time convention.",
+      "evidence": "<mission-dir>/AGENTS.md:29 requires sanitized committed mission artifacts; `.factory/library/user-testing.md:63` documents placeholder usage for validation evidence; `.factory/validation/auth-web-foundation/scrutiny/reviews/privacy-check-friendly-mission-artifacts.json:15-16` had already flagged the same scrutiny-guidance gap; and a repo-wide search for `sanitize|<tmp>|<repo>|privacy-check` under `.factory/skills/` returned no matches."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass. The feature meets its contract: the reviewed admin validation artifacts were sanitized, the landed helper/script/test coverage supports keeping them privacy-check safe, and I found no blocking or non-blocking code review issues. The remaining gap is shared-state guidance for scrutiny reviewers, who still lack explicit placeholder/sanitizer instructions."
+}

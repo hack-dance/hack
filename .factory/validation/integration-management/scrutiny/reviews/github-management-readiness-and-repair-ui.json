@@ -1,0 +1,39 @@
+{
+  "featureId": "github-management-readiness-and-repair-ui",
+  "reviewedAt": "2026-03-25T16:48:27.828975Z",
+  "commitId": "91e5e743e0abbe99e2156ce41917c7661de0edb9",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The slice mostly covers the requested UI/status contract: it enables the project GitHub extension, adds mode-aware readiness metadata to the GitHub status payload, and surfaces routing/profile/install/repair details in the account shell. I am failing the review because the repo-bound `github status` command still exits successfully for some `ready: false` states, so partially configured app-mode GitHub access can still pass status smokes even though the new payload/UI marks it unhealthy.",
+    "issues": [
+      {
+        "file": "src/control-plane/extensions/github/commands.ts",
+        "line": 1337,
+        "severity": "blocking",
+        "description": "`handleGitHubStatusCommand()` still returns success whenever the selected profile resolves and a token is present (`settingsResult.ok && token.ok`), but the new readiness contract now has additional unhealthy states. `tests/github-commands.test.ts:80-138` explicitly proves app-mode profiles with no installation context produce `ready: false` / `installationState: \"missing\"`; despite that, this handler exits 0. That means repo-bound GitHub status smokes can still pass a partially configured app/install profile, which contradicts the feature goal of not treating unusable GitHub access as healthy."
+      },
+      {
+        "file": "apps/web/src/lib/github-management.ts",
+        "line": 150,
+        "severity": "non_blocking",
+        "description": "The web loader derives `extensionEnabled` from `statusResult.payload.extensionId === \"dance.hack.github\"`, but `buildGitHubStatusPayload()` always emits that constant (`src/control-plane/extensions/github/commands.ts:1756`). If the extension is disabled yet the status command still returns JSON, the account shell will render `Extension enabled: yes` (`apps/web/src/components/account-control-plane-sections.tsx:278`) while the readiness state simultaneously tells the user to enable the extension."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "`web-control-plane-worker` does not document an approved verification path for integration slices whose routed local runtime intentionally lacks live provider credentials. The worker had to deviate from the skill and render a temporary HTML harness with a real `gh auth token` to verify the healthy GitHub state.",
+      "evidence": "Skill step 5-6 in `.factory/skills/web-control-plane-worker/SKILL.md:30-31` only describes routed-host `agent-browser` verification. The handoff records `skillFeedback.followedProcedure: false` plus the deviation to `file:///tmp/github-management-healthy.html` in `.../handoffs/2026-03-25T10-31-49-095Z__github-management-readiness-and-repair-ui__bd2c4f81-0de7-4b60-a59f-f5f4a822337d.json:57-58,82-91`."
+    },
+    {
+      "area": "services",
+      "observation": "The services manifest has repo-bound Linear smoke commands but no equivalent declared GitHub status/smoke commands, even though this feature and its handoff depend on `./dist/hack x github status --json` (with and without env-token injection) as the canonical readiness parity check.",
+      "evidence": "`.factory/services.yaml:22-23` defines `linear_status` / `repo_linear_smoke` but nothing for GitHub. The handoff verification for this feature includes `./dist/hack x github status --json` and `HACK_GITHUB_APP_TOKEN=\"$(gh auth token)\" HACK_GITHUB_PREFER_ENV_TOKEN_ONLY=true ./dist/hack x github status --json`."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Mostly good UI/status work, but not fully shippable as reviewed: the new readiness model does not yet control the repo-bound GitHub status command's exit code, so unhealthy app-mode configurations can still pass command-level smokes. I also noted a smaller UI-state inconsistency for extension-disabled cases and two shared-state gaps around skill guidance and services manifest coverage."
+}

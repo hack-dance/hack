@@ -1,0 +1,33 @@
+{
+  "featureId": "shared-project-admin-scope-consistency",
+  "reviewedAt": "2026-03-25T16:45:00Z",
+  "commitId": "5e778046e66591c0017934714fc1d83797f8a71f",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "The feature lands the intended scope checks across the broker plugin/store, the web control-plane routes and UI, and the repo-bound CLI ownership output. The commit explicitly distinguishes hidden-vs-missing projects with `project_scope_forbidden`, threads the active org/team into broker calls, and adds focused regressions for the new deny/visibility flows.",
+    "issues": [
+      {
+        "file": "services/auth-broker/tests/project-admin.test.ts",
+        "line": 90,
+        "severity": "non_blocking",
+        "description": "The production scope logic now also lives in `DbProjectStore`, but this regression suite only builds `createProjectTestApp` around `InMemoryProjectStore`, so the durable database-backed path that ships when `DATABASE_URL` is set is still unverified for the new scoped visibility and `project_scope_forbidden` behavior."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The `web-control-plane-worker` skill still tells workers to compare web changes with repo-bound CLI output, but it does not mention that local parity checks against the routed auth broker need `HACK_AUTH_BROKER_URL=https://auth.hack-cli.hack`. This feature had to record that requirement separately in the library and in handoff feedback.",
+      "evidence": ".factory/skills/web-control-plane-worker/SKILL.md:31 expects repo-bound CLI parity checks; .factory/library/project-admin-scope-verification.md:3 documents the missing `HACK_AUTH_BROKER_URL=https://auth.hack-cli.hack` requirement; the feature handoff verification command also needed that override for `project owner show`."
+    },
+    {
+      "area": "services",
+      "observation": "The services manifest exposes runtime and Linear status helpers but still lacks a reusable project-owner parity command for local routed-broker verification, so workers fall back to ad-hoc CLI invocations when this contract requires browser/CLI scope parity.",
+      "evidence": ".factory/services.yaml:15-23 includes `runtime_open_auth`, `linear_status`, and `repo_linear_smoke`, but no equivalent `project owner show` helper; the handoff's verification section uses an inline `HACK_AUTH_BROKER_URL=\"https://auth.hack-cli.hack\" bun ./index.ts project owner show ...` command instead."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass. The landed code appears to satisfy the feature contract and its likely validation assertions: active org/team scope is threaded through broker project APIs, hidden shared projects now fail closed with explicit `project_scope_forbidden` responses, the web account shell preserves scoped denial feedback, and `project owner show` surfaces broker denial details instead of silently dropping them. I found one non-blocking gap: the durable `DbProjectStore` path changed substantially but the added regression coverage still exercises only the in-memory store."
+}

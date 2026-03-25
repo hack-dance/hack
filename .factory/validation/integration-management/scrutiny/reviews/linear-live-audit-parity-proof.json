@@ -1,0 +1,21 @@
+{
+  "featureId": "linear-live-audit-parity-proof",
+  "reviewedAt": "2026-03-25T16:46:48Z",
+  "commitId": "5e6c94f80e5322be37cb59dd0318603cb79fa608",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Pass. This is a proof-only feature, and the landed commit stays tightly scoped to the minimum repo-bound artifacts needed for the live parity proof: it publishes the frozen mission status update into `.hack/linear/projects/7a3c8adf-ede5-4d3a-8779-9c32695c76bf/status-updates/published/2026-03-24-mission-freeze-optional-web-control-plane.md:1` and records the matching zero-count delivery reconciliation in `.hack/linear/projects/7a3c8adf-ede5-4d3a-8779-9c32695c76bf/delivery-audit.json:1`. Those are the exact artifact families the existing audit loader and web UI read for parity (`src/control-plane/extensions/linear/audit.ts:57-59,86,136-138,243-245`; `apps/web/src/components/linear-management-section.tsx:292,331-347,374-380`). The worker handoff and transcript skeleton also show the required live comparison against `./dist/hack linear status --json` and the routed Linear web section, plus only the allowed publish/autosync mutations when the artifacts were initially missing. I did not find any blocking or non-blocking issues in the scoped proof.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "Repo-bound Linear parity proof can require a fresh `./dist/hack auth login` before broker-backed `./dist/hack linear connections --json` or `./dist/hack linear subscriptions --json` become readable, even when `./dist/hack linear status --json` already works through local keychain-backed access. That local-vs-broker auth split is not documented in the current web-control-plane worker skill or the shared Linear library note.",
+      "evidence": "<missionDir>/handoffs/2026-03-25T15-16-19-564Z__linear-live-audit-parity-proof__78c6767c-353e-4169-94df-26fa63a6130f.json:38-43,99-107 shows broker-backed inspection was blocked until Hack auth was refreshed and the worker requested a skill update; <repo>/.factory/skills/web-control-plane-worker/SKILL.md:30-31 and <repo>/.factory/library/linear.md:23-24 require repo-bound parity verification but do not mention the extra auth-refresh prerequisite."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Reviewed the feature contract, mission guidance, worker transcript skeleton, handoff, shared-state files, and commit `5e6c94f80e5322be37cb59dd0318603cb79fa608`. The feature appears to meet its contract and likely satisfies VAL-INTEGRATION-006: the commit captures only the minimal repo-bound publish/autosync artifacts needed for the live proof, and those artifacts align with the existing CLI/web audit surfaces for published-update metadata plus processed/applied/failed delivery counts. No code-review issues found; one non-blocking shared-state follow-up is to document the extra `./dist/hack auth login` refresh sometimes needed for broker-backed Linear inspection."
+}

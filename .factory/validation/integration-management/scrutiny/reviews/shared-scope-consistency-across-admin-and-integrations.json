@@ -1,0 +1,39 @@
+{
+  "featureId": "shared-scope-consistency-across-admin-and-integrations",
+  "reviewedAt": "2026-03-25T16:49:32.027965Z",
+  "commitId": "1fa5150b0d77ff01e9c2bad3de8e8815a320b2f9",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The CLI-side payload changes and focused tests cover hidden shared-scope messaging, but the web account shell still does not bind its GitHub/Linear management loaders to the active browser org/team context. That means the new scope cards can disagree with the underlying management payloads, so the feature does not fully satisfy VAL-CROSS-003's web/CLI parity requirement.",
+    "issues": [
+      {
+        "file": "apps/web/src/components/account-shell-page.tsx",
+        "line": 23,
+        "severity": "blocking",
+        "description": "AccountShellPage scopes only getAccountShellContext to the requested org/team/project, then calls loadGitHubManagementState() and loadLinearManagementState() with no browser-scoped inputs. Those loaders shell out to repo-bound CLI status commands using process-global environment (apps/web/src/lib/github-management.ts:133-220 and apps/web/src/lib/linear-management.ts:243-268,386-396), so the page can render a browser-derived \"Shared project scope denied\" card while the GitHub/Linear readiness payloads still reflect the machine-global CLI session. That leaves the web view able to disagree with the active org/team context that VAL-CROSS-003 requires."
+      },
+      {
+        "file": "apps/web/src/lib/github-management.ts",
+        "line": 23,
+        "severity": "non_blocking",
+        "description": "The web GitHub loader's typed contract still limits repair issues/guidance to extension_disabled|missing_profile|missing_token|missing_installation, but src/control-plane/extensions/github/commands.ts now emits shared_scope_hidden as well. The current UI mostly renders these values as opaque strings, so this does not break immediately, but the stale union means future web handling will not be forced to account for the new shared-scope repair state."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The web-control-plane-worker skill tells workers to verify browser/CLI parity, but it does not warn that Next server loaders which shell out to repo-bound CLI commands must be explicitly bridged to the active browser session/scope. That gap likely contributed to this feature landing a browser-only scope card instead of true scoped loader parity.",
+      "evidence": ".factory/skills/web-control-plane-worker/SKILL.md step 6 requires parity checks; apps/web/src/components/account-shell-page.tsx:23-30 loads GitHub/Linear management without scoped inputs; apps/web/src/lib/github-management.ts:133-220 and apps/web/src/lib/linear-management.ts:243-268,386-396 still run CLI status from process-global env."
+    },
+    {
+      "area": "services",
+      "observation": ".factory/services.yaml exposes reusable Linear status commands but does not provide equivalent repo-bound GitHub or project-owner shared-scope parity commands, so this feature's verification relied on ad-hoc command strings from the handoff instead of a shared mission manifest entry.",
+      "evidence": ".factory/services.yaml defines linear_status and repo_linear_smoke but no matching github/project-owner parity command; the handoff verification for commit 1fa5150b0d77ff01e9c2bad3de8e8815a320b2f9 used custom ./dist/hack x github status --json and ./dist/hack project owner show --json runs."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Review failed. The landed CLI/test work improves shared-scope messaging, but the web account shell still derives GitHub/Linear management state from machine-global CLI status instead of the active browser org/team context, so the feature likely falls short of the cross-surface scope-consistency contract."
+}

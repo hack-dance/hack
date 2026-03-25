@@ -1334,7 +1334,7 @@ async function handleGitHubStatusCommand(input: {
   } else {
     await renderGitHubStatusDisplay({ payload, catalog });
   }
-  return settingsResult.ok && token.ok ? 0 : 1;
+  return payload.ready ? 0 : 1;
 }
 
 function resolveGhExecutable(input: {

@@ -1,6 +1,117 @@
 import { describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 
 import { __testOnly } from "../src/control-plane/extensions/github/commands.ts";
+
+async function writeJson(path: string, value: unknown): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function createGitHubRepoConfig(input: {
+  readonly mode: "token" | "app";
+  readonly installationId?: string;
+}) {
+  return {
+    name: "github-status-fixture",
+    controlPlane: {
+      extensions: {
+        "dance.hack.github": {
+          enabled: true,
+          config: {
+            defaultProfile: "default",
+            profiles: {
+              default: {
+                tokenEnv: "HACK_GITHUB_APP_TOKEN",
+                authRef: "github.default",
+                service: "hack-github",
+                apiBaseUrl: "https://api.github.com",
+                mode: input.mode,
+                accountLogin: "octocat",
+                ...(input.mode === "app" ? { appId: "12345" } : {}),
+                ...(input.installationId
+                  ? { installationId: input.installationId }
+                  : {}),
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
+function extractJsonPayload(stdout: string): string {
+  const trimmed = stdout.trim();
+  const objectStart = trimmed.indexOf("{");
+  if (objectStart === -1) {
+    throw new Error(`Expected JSON payload in stdout, got: ${stdout}`);
+  }
+  return trimmed.slice(objectStart);
+}
+
+async function runGitHubStatusCommand(input: {
+  readonly repoConfig: ReturnType<typeof createGitHubRepoConfig>;
+}) {
+  const tempDir = await mkdtemp(join(tmpdir(), "hack-github-status-"));
+  const repoRoot = join(tempDir, "repo");
+  try {
+    await writeJson(
+      join(repoRoot, ".hack", "hack.config.json"),
+      input.repoConfig
+    );
+    await writeFile(
+      join(repoRoot, ".hack", "docker-compose.yml"),
+      "services: {}\n"
+    );
+    await writeFile(join(repoRoot, ".hack", ".env"), "");
+    const proc = Bun.spawn(
+      [
+        "bun",
+        resolve(import.meta.dir, "../index.ts"),
+        "x",
+        "github",
+        "status",
+        "--json",
+      ],
+      {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          CI: "1",
+          FORCE_COLOR: "0",
+          HACK_GITHUB_APP_TOKEN: "env-github-smoke-token",
+          HACK_GITHUB_PREFER_ENV_TOKEN_ONLY: "true",
+          HACK_SETUP_SYNC_MODE: "off",
+          HOME: tempDir,
+          NO_COLOR: "1",
+        },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+
+    return {
+      exitCode,
+      stderr,
+      payload: JSON.parse(extractJsonPayload(stdout)) as {
+        readonly ready: boolean;
+        readonly installationState: "configured" | "missing" | "not_required";
+        readonly repairIssues: readonly string[];
+      },
+    };
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+}
 
 describe("github command parsing", () => {
   test("parseStatusArgs accepts --json and --profile in either order", () => {
@@ -215,5 +326,34 @@ describe("github profile payload rendering", () => {
       ownerSlug: "infra",
       ownerName: "Infra",
     });
+  });
+});
+
+describe("github status exit semantics", () => {
+  test("repo-bound github status exits non-zero when the readiness payload is unhealthy", async () => {
+    const result = await runGitHubStatusCommand({
+      repoConfig: createGitHubRepoConfig({
+        mode: "app",
+      }),
+    });
+
+    expect(result.payload.ready).toBe(false);
+    expect(result.payload.installationState).toBe("missing");
+    expect(result.payload.repairIssues).toContain("missing_installation");
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).not.toContain("Missing GitHub token");
+  });
+
+  test("repo-bound github status exits zero when the readiness payload is ready", async () => {
+    const result = await runGitHubStatusCommand({
+      repoConfig: createGitHubRepoConfig({
+        mode: "app",
+        installationId: "98765",
+      }),
+    });
+
+    expect(result.payload.ready).toBe(true);
+    expect(result.payload.installationState).toBe("configured");
+    expect(result.exitCode).toBe(0);
   });
 });

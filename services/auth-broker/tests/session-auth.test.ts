@@ -66,6 +66,7 @@ function createBetterAuthRuntimeWithSession(
   session: BetterAuthSession,
   input?: {
     readonly socialProviders?: readonly BetterAuthSocialProvider[];
+    readonly trustedOrigins?: readonly string[];
   }
 ): BetterAuthRuntime {
   return {
@@ -76,7 +77,9 @@ function createBetterAuthRuntimeWithSession(
       ],
       publicBaseUrl: createTestConfig().publicBaseUrl,
       localDevHost: "hack-cli.hack",
-      trustedOrigins: ["https://hack-cli-preview.vercel.app"],
+      trustedOrigins: input?.trustedOrigins ?? [
+        "https://hack-cli-preview.vercel.app",
+      ],
     }),
     auth: {
       api: {
@@ -380,5 +383,63 @@ describe("broker Hack session auth flow", () => {
     expect(html).toContain("Signed in to Hack.");
     expect(html).toContain("hack-dev://auth/complete");
     expect(html).not.toContain("Session not found");
+  });
+
+  test("auth account page auto-returns to trusted wildcard web origins from the shared contract", async () => {
+    await withManagementTokenSecret(
+      "session-auth-web-return-secret",
+      async () => {
+        const trustedReturnUrl = "https://preview.hack-cloud.test/auth/return";
+        const session = {
+          user: {
+            id: "user-web",
+            email: "web@example.com",
+            emailVerified: true,
+            name: "Web User",
+          },
+          session: {
+            id: "sess-web",
+            userId: "user-web",
+            token: "session-token",
+            createdAt: new Date(),
+            updatedAt: new Date(),
+            expiresAt: new Date(Date.now() + 60_000),
+          },
+        } as unknown as BetterAuthSession;
+
+        const app = createAuthBrokerApp({
+          config: createTestConfig(),
+          flowStore: new FlowStore(),
+          betterAuthRuntime: createBetterAuthRuntimeWithSession(session, {
+            trustedOrigins: ["https://*.hack-cloud.test"],
+          }),
+        });
+
+        const startResponse = await app.handle(
+          new Request(
+            `http://localhost/v1/auth/session/start?redirect=${encodeURIComponent(
+              trustedReturnUrl
+            )}`
+          )
+        );
+        const startPayload = (
+          (await startResponse.json()) as SessionStartFlowResponse
+        ).flow;
+        const accountResponse = await app.handle(
+          new Request(
+            `http://localhost/auth/account?bridge=1&flowId=${encodeURIComponent(
+              startPayload.flowId
+            )}&deviceCode=${encodeURIComponent(
+              startPayload.deviceCode
+            )}&redirect=${encodeURIComponent(trustedReturnUrl)}`
+          )
+        );
+        const html = await accountResponse.text();
+        expect(html).toContain("Connected to this Mac.");
+        expect(html).toContain(trustedReturnUrl);
+        expect(html).toContain("Returning to Hack");
+        expect(html).toContain("window.setTimeout");
+      }
+    );
   });
 });

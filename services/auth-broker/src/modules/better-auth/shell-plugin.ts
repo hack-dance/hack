@@ -1,6 +1,9 @@
 import { randomBytes, randomUUID } from "node:crypto";
 
-import { DEFAULT_BETTER_AUTH_ACCOUNT_LINKING_POLICY } from "@hack/auth-contract";
+import {
+  DEFAULT_BETTER_AUTH_ACCOUNT_LINKING_POLICY,
+  isTrustedAuthOrigin,
+} from "@hack/auth-contract";
 import { Elysia, t } from "elysia";
 
 import type {
@@ -1611,7 +1614,10 @@ function normalizeSafeReturnUrl(input: {
     if (candidate.origin === baseOrigin || candidate.origin === webOrigin) {
       return candidate.toString();
     }
-    return input.trustedOrigins.includes(candidate.origin)
+    return isTrustedAuthOrigin({
+      origin: candidate.origin,
+      trustedOrigins: input.trustedOrigins,
+    })
       ? candidate.toString()
       : null;
   } catch {

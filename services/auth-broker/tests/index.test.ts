@@ -435,7 +435,37 @@ describe("auth broker github flow routes", () => {
     expect(payload.flow.provider).toBe("github");
   });
 
-  test("legacy auth page redirects to the web sign-in route", async () => {
+  test("legacy auth page redirects to the web sign-in route and preserves trusted wildcard returns", async () => {
+    const app = createAuthBrokerApp({
+      config: createTestConfig(),
+      flowStore: new FlowStore(),
+      betterAuthRuntime: createBetterAuthRuntimeWithSession(null),
+    });
+    const trustedReturnUrl = "https://preview.hack-cli.hack.gy/welcome";
+
+    const response = await app.handle(
+      new Request(
+        `http://localhost/auth?provider=github&flowId=test-flow&deviceCode=test-device&redirect=${encodeURIComponent(
+          trustedReturnUrl
+        )}`
+      )
+    );
+    expect(response.status).toBe(302);
+    const location = response.headers.get("location");
+    expect(location).toBeTruthy();
+    if (!location) {
+      return;
+    }
+    const redirectTarget = new URL(location);
+    expect(redirectTarget.origin).toBe("http://localhost:3000");
+    expect(redirectTarget.pathname).toBe("/auth");
+    expect(redirectTarget.searchParams.get("flowId")).toBe("test-flow");
+    expect(redirectTarget.searchParams.get("deviceCode")).toBe("test-device");
+    expect(redirectTarget.searchParams.get("provider")).toBe("github");
+    expect(redirectTarget.searchParams.get("redirect")).toBe(trustedReturnUrl);
+  });
+
+  test("legacy auth page strips untrusted redirect origins", async () => {
     const app = createAuthBrokerApp({
       config: createTestConfig(),
       flowStore: new FlowStore(),
@@ -444,13 +474,19 @@ describe("auth broker github flow routes", () => {
 
     const response = await app.handle(
       new Request(
-        "http://localhost/auth?provider=github&flowId=test-flow&deviceCode=test-device"
+        `http://localhost/auth?provider=github&flowId=test-flow&deviceCode=test-device&redirect=${encodeURIComponent(
+          "https://evil.example.com/welcome"
+        )}`
       )
     );
     expect(response.status).toBe(302);
-    expect(response.headers.get("location")).toBe(
-      "http://localhost:3000/auth?flowId=test-flow&deviceCode=test-device&provider=github"
-    );
+    const location = response.headers.get("location");
+    expect(location).toBeTruthy();
+    if (!location) {
+      return;
+    }
+    const redirectTarget = new URL(location);
+    expect(redirectTarget.searchParams.get("redirect")).toBeNull();
   });
 
   test("legacy account page redirects to the web account route unless explicitly bridged", async () => {

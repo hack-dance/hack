@@ -24,12 +24,13 @@ Use this skill for features that primarily touch:
 ## Work Procedure
 
 1. Read the assigned feature, `mission.md`, mission `AGENTS.md`, `.factory/services.yaml`, and relevant `.factory/library/*.md` files. Identify the exact user-visible flows and assertions this feature completes.
-2. Write the failing tests first. Cover the smallest meaningful mix of component, route, integration, or contract tests needed for the slice before editing implementation.
-3. Implement the smallest coherent vertical slice across `apps/web` and any supporting broker/shared modules it truly needs. Preserve browser-owned auth UX, durable shared state, and CLI optionality.
-4. Start the local runtime with Hack-managed commands or the declared services manifest, then use `hack open --json` to determine the routed host. Use `agent-browser` to exercise each changed user flow end-to-end.
-5. Verify not only the happy path but also loading/error/repair states. For navigation and shell work, include keyboard navigation and reduced-motion checks. For integration/admin flows, verify the visible state against the underlying broker or CLI output when the feature requires parity.
-6. Run focused tests, then the smallest meaningful `typecheck`/`check` commands for the touched surfaces. Stop any runtime processes or watchers you started.
-7. If the feature depends on missing backend contracts, missing runtime wiring, or a requirement that would make the web app mandatory for local workflows, return to the orchestrator with a concrete blocker report.
+2. If the feature starts from a pre-existing mixed-scope dirty tree or stash snapshot, inventory the candidate files first. Recover or keep dirty only the feature-owned allowlist, keep later-scope files quarantined, and never stage generated `apps/web/.next/**`, `.turbo/**`, `node_modules/**`, or `tsconfig.tsbuildinfo`.
+3. Write the failing tests first. Cover the smallest meaningful mix of component, route, integration, or contract tests needed for the slice before editing implementation.
+4. Implement the smallest coherent vertical slice across `apps/web` and any supporting broker/shared modules it truly needs. Preserve browser-owned auth UX, durable shared state, and CLI optionality.
+5. Start the local runtime with Hack-managed commands or the declared services manifest, then use `hack open --json` to determine the routed host. Use `agent-browser` to exercise each changed user flow end-to-end.
+6. Verify not only the happy path but also loading/error/repair states. For navigation and shell work, include keyboard navigation and reduced-motion checks. For integration/admin flows, verify the visible state against the underlying broker or CLI output when the feature requires parity.
+7. Run focused tests, then the smallest meaningful `typecheck`/`check` commands for the touched surfaces. Stop any runtime processes or watchers you started.
+8. If the feature depends on missing backend contracts, missing runtime wiring, or a requirement that would make the web app mandatory for local workflows, return to the orchestrator with a concrete blocker report.
 
 ## Example Handoff
 
@@ -103,3 +104,4 @@ Use this skill for features that primarily touch:
 - The local runtime cannot expose a stable routed host for browser verification.
 - The UI slice cannot be completed without violating CLI optionality or auth ownership rules.
 - Browser verification reveals a wider architectural mismatch that should be decomposed into a follow-up backend/platform feature first.
+- The pre-existing dirty tree or stash snapshot cannot be isolated into a feature-owned allowlist without risking cross-feature contamination.

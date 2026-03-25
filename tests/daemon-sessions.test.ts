@@ -1,10 +1,20 @@
 import { describe, expect, test } from "bun:test";
 import { execSync } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import {
+  createConnection,
+  createServer,
+  type Server,
+  type Socket,
+} from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   validateControlPlaneRouteTarget,
   validateRawRequestTargetPath,
 } from "../src/daemon/control-plane-route-validation.ts";
+import { startRequestTargetProxy } from "../src/daemon/request-target-proxy.ts";
 import { handleSessionRoutes } from "../src/daemon/routes/sessions.ts";
 
 /**
@@ -52,6 +62,282 @@ async function parseResponse(
   } catch {
     return null;
   }
+}
+
+type TestHttpServer = {
+  readonly requestTargets: string[];
+  close(): Promise<void>;
+};
+
+type RawHttpClient = {
+  send(request: string): void;
+  readResponse(): Promise<string>;
+  close(): Promise<void>;
+};
+
+async function createRequestTargetProxyTestContext(): Promise<{
+  readonly client: RawHttpClient;
+  readonly requestTargets: string[];
+  close(): Promise<void>;
+}> {
+  const root = await mkdtemp(join(tmpdir(), "hack-request-target-proxy-"));
+  const upstreamSocketPath = join(root, "upstream.sock");
+  const proxySocketPath = join(root, "proxy.sock");
+  const upstreamServer = await startTestHttpServer({
+    socketPath: upstreamSocketPath,
+  });
+  const proxy = await startRequestTargetProxy({
+    listen: { unix: proxySocketPath },
+    target: { unix: upstreamSocketPath },
+  });
+  const client = await connectRawHttpClient({ socketPath: proxySocketPath });
+
+  return {
+    client,
+    requestTargets: upstreamServer.requestTargets,
+    close: async () => {
+      await client.close();
+      await proxy.close();
+      await upstreamServer.close();
+      await rm(root, { recursive: true, force: true });
+    },
+  };
+}
+
+async function startTestHttpServer(opts: {
+  readonly socketPath: string;
+}): Promise<TestHttpServer> {
+  const requestTargets: string[] = [];
+  const sockets = new Set<Socket>();
+  const server = createServer((socket) => {
+    sockets.add(socket);
+    let buffered = Buffer.alloc(0);
+    socket.on("close", () => {
+      sockets.delete(socket);
+    });
+    socket.on("data", (chunk) => {
+      buffered = Buffer.concat([buffered, chunk]);
+      while (true) {
+        const message = consumeHttpMessage({ buffered });
+        if (!message) {
+          return;
+        }
+        buffered = message.remaining;
+        requestTargets.push(message.requestTarget);
+        const shouldClose = hasConnectionCloseHeader({
+          message: message.rawMessage,
+        });
+        const body = JSON.stringify({
+          requestTarget: message.requestTarget,
+        });
+        socket.write(
+          `HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}\r\nconnection: ${shouldClose ? "close" : "keep-alive"}\r\n\r\n${body}`
+        );
+        if (shouldClose) {
+          socket.end();
+          return;
+        }
+      }
+    });
+  });
+
+  await listenUnixServer({
+    server,
+    socketPath: opts.socketPath,
+  });
+
+  return {
+    requestTargets,
+    close: async () => {
+      for (const socket of sockets) {
+        socket.destroy();
+      }
+      await closeNetServer({ server });
+      await rm(opts.socketPath, { force: true });
+    },
+  };
+}
+
+async function connectRawHttpClient(opts: {
+  readonly socketPath: string;
+}): Promise<RawHttpClient> {
+  const socket = await new Promise<Socket>((resolve, reject) => {
+    const client = createConnection({ path: opts.socketPath });
+    client.once("connect", () => resolve(client));
+    client.once("error", reject);
+  });
+
+  let buffered = Buffer.alloc(0);
+  let ended = false;
+  let socketError: Error | null = null;
+  const waiters = new Set<() => void>();
+
+  const notifyWaiters = () => {
+    for (const waiter of waiters) {
+      waiter();
+    }
+  };
+
+  socket.on("data", (chunk) => {
+    buffered = Buffer.concat([buffered, chunk]);
+    notifyWaiters();
+  });
+  socket.on("end", () => {
+    ended = true;
+    notifyWaiters();
+  });
+  socket.on("close", () => {
+    ended = true;
+    notifyWaiters();
+  });
+  socket.on("error", (error) => {
+    socketError = error;
+    notifyWaiters();
+  });
+
+  return {
+    send(request) {
+      socket.write(request);
+    },
+    readResponse: async () =>
+      await new Promise((resolve, reject) => {
+        const check = () => {
+          if (socketError) {
+            cleanup();
+            reject(socketError);
+            return;
+          }
+          const response = consumeHttpResponse({ buffered });
+          if (response) {
+            buffered = response.remaining;
+            cleanup();
+            resolve(response.rawMessage);
+            return;
+          }
+          if (ended) {
+            cleanup();
+            reject(
+              new Error("socket closed before a full HTTP response arrived")
+            );
+          }
+        };
+
+        const cleanup = () => {
+          waiters.delete(check);
+        };
+
+        waiters.add(check);
+        check();
+      }),
+    close: async () => {
+      if (socket.destroyed) {
+        return;
+      }
+      await new Promise<void>((resolve) => {
+        socket.once("close", () => resolve());
+        socket.end();
+      });
+    },
+  };
+}
+
+function serializeGetRequest(opts: {
+  readonly path: string;
+  readonly connection: "keep-alive" | "close";
+}): string {
+  return `GET ${opts.path} HTTP/1.1\r\nHost: localhost\r\nConnection: ${opts.connection}\r\n\r\n`;
+}
+
+function consumeHttpMessage(opts: { readonly buffered: Buffer }): {
+  readonly rawMessage: string;
+  readonly requestTarget: string;
+  readonly remaining: Buffer;
+} | null {
+  const headerEnd = opts.buffered.indexOf("\r\n\r\n");
+  if (headerEnd < 0) {
+    return null;
+  }
+  const messageEnd = headerEnd + 4;
+  const rawMessage = opts.buffered.subarray(0, messageEnd).toString("latin1");
+  const [requestLine] = rawMessage.split("\r\n");
+  const requestTarget = extractRequestTargetFromLine({ requestLine });
+  return {
+    rawMessage,
+    requestTarget,
+    remaining: opts.buffered.subarray(messageEnd),
+  };
+}
+
+function consumeHttpResponse(opts: {
+  readonly buffered: Buffer;
+}): { readonly rawMessage: string; readonly remaining: Buffer } | null {
+  const headerEnd = opts.buffered.indexOf("\r\n\r\n");
+  if (headerEnd < 0) {
+    return null;
+  }
+  const headersText = opts.buffered.subarray(0, headerEnd).toString("latin1");
+  const contentLength = parseContentLength({ headersText });
+  const messageEnd = headerEnd + 4 + contentLength;
+  if (opts.buffered.length < messageEnd) {
+    return null;
+  }
+  return {
+    rawMessage: opts.buffered.subarray(0, messageEnd).toString("latin1"),
+    remaining: opts.buffered.subarray(messageEnd),
+  };
+}
+
+function parseContentLength(opts: { readonly headersText: string }): number {
+  const match = /\r\ncontent-length:\s*(\d+)/i.exec(`\r\n${opts.headersText}`);
+  return match ? Number.parseInt(match[1] ?? "0", 10) : 0;
+}
+
+function hasConnectionCloseHeader(opts: { readonly message: string }): boolean {
+  return /\r\nconnection:\s*close\r\n/i.test(`\r\n${opts.message}`);
+}
+
+function extractRequestTargetFromLine(opts: {
+  readonly requestLine: string;
+}): string {
+  const [, requestTarget] = opts.requestLine.split(" ");
+  if (!requestTarget) {
+    throw new Error(`Invalid request line: ${opts.requestLine}`);
+  }
+  return requestTarget;
+}
+
+async function listenUnixServer(opts: {
+  readonly server: Server;
+  readonly socketPath: string;
+}): Promise<void> {
+  await rm(opts.socketPath, { force: true });
+  await new Promise<void>((resolve, reject) => {
+    const handleError = (error: Error) => {
+      opts.server.off("listening", handleListening);
+      reject(error);
+    };
+    const handleListening = () => {
+      opts.server.off("error", handleError);
+      resolve();
+    };
+    opts.server.once("error", handleError);
+    opts.server.once("listening", handleListening);
+    opts.server.listen(opts.socketPath);
+  });
+}
+
+async function closeNetServer(opts: {
+  readonly server: Server;
+}): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    opts.server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
 }
 
 describe("control-plane route validation", () => {
@@ -124,6 +410,88 @@ describe("control-plane route validation", () => {
       status: 400,
       error: "invalid_shell_id",
     });
+  });
+});
+
+describe("request target proxy", () => {
+  test("rejects pipelined traversal after a benign request", async () => {
+    const context = await createRequestTargetProxyTestContext();
+
+    try {
+      context.client.send(
+        `${serializeGetRequest({ path: "/v1/status", connection: "keep-alive" })}${serializeGetRequest({ path: "/v1/sessions/../escape", connection: "close" })}`
+      );
+
+      const firstResponse = await context.client.readResponse();
+      expect(firstResponse).toContain("HTTP/1.1 200 OK");
+      expect(firstResponse).toContain(`"requestTarget":"/v1/status"`);
+
+      const secondResponse = await context.client.readResponse();
+      expect(secondResponse).toContain("HTTP/1.1 400 Bad Request");
+      expect(secondResponse).toContain(`"error":"malformed_path"`);
+      expect(context.requestTargets).toEqual(["/v1/status"]);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("rejects keep-alive traversal after a prior benign response", async () => {
+    const context = await createRequestTargetProxyTestContext();
+
+    try {
+      context.client.send(
+        serializeGetRequest({ path: "/v1/status", connection: "keep-alive" })
+      );
+
+      const firstResponse = await context.client.readResponse();
+      expect(firstResponse).toContain("HTTP/1.1 200 OK");
+      expect(firstResponse).toContain(`"requestTarget":"/v1/status"`);
+
+      context.client.send(
+        serializeGetRequest({
+          path: "/v1/sessions/./escape",
+          connection: "close",
+        })
+      );
+
+      const secondResponse = await context.client.readResponse();
+      expect(secondResponse).toContain("HTTP/1.1 400 Bad Request");
+      expect(secondResponse).toContain(`"error":"malformed_path"`);
+      expect(context.requestTargets).toEqual(["/v1/status"]);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("keeps benign keep-alive reuse working", async () => {
+    const context = await createRequestTargetProxyTestContext();
+
+    try {
+      context.client.send(
+        serializeGetRequest({ path: "/v1/status", connection: "keep-alive" })
+      );
+      const firstResponse = await context.client.readResponse();
+      expect(firstResponse).toContain("HTTP/1.1 200 OK");
+      expect(firstResponse).toContain(`"requestTarget":"/v1/status"`);
+
+      context.client.send(
+        serializeGetRequest({
+          path: "/v1/sessions/test-session",
+          connection: "close",
+        })
+      );
+      const secondResponse = await context.client.readResponse();
+      expect(secondResponse).toContain("HTTP/1.1 200 OK");
+      expect(secondResponse).toContain(
+        `"requestTarget":"/v1/sessions/test-session"`
+      );
+      expect(context.requestTargets).toEqual([
+        "/v1/status",
+        "/v1/sessions/test-session",
+      ]);
+    } finally {
+      await context.close();
+    }
   });
 });
 

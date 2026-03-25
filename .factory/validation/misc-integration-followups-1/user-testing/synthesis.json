@@ -1,0 +1,21 @@
+{
+  "milestone": "misc-integration-followups-1",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 0,
+    "passed": 0,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [],
+  "previousRound": null,
+  "selection": {
+    "mappedAssertions": [],
+    "reason": "No completed implementation features in this milestone declared validation-contract assertion IDs in fulfills, and the completed follow-up work only hardened durable project-admin regression coverage rather than changing a user-facing flow."
+  },
+  "nonContractChecks": []
+}

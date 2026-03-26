@@ -1,0 +1,28 @@
+{
+  "featureId": "account-shell-cold-bootstrap-hydration-fix",
+  "reviewedAt": "2026-03-26T02:37:01Z",
+  "commitId": "8d5503905c398a8fce6485c599e116c6bca9ba22",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "Reviewed the fix feature metadata, transcript skeleton, handoff, the original failed review, the completed original feature diff (`e0f843c271ebbd255ba47b624c01f1cff2ddc84f`), and the fix diff (`8d5503905c398a8fce6485c599e116c6bca9ba22`). The prior blocking populated-audit gap is now closed: `apps/web/tests/account-shell.test.tsx` and `apps/web/tests/linear-management.test.ts` both render the routed populated Linear audit fixture and assert description-list semantics for the delivery and closeout cards. The remaining problem is the new cold-bootstrap regression coverage: the fix adds the crucial page-level Suspense boundary in `apps/web/app/account/page.tsx`, but the added `apps/web/tests/account-shell-hydration.test.tsx` suite never renders that route or otherwise proves the boundary participates in the first authenticated bootstrap render. It only checks the route cache exports, the standalone loading shell, and isolated `ControlPlaneShell` hydration. That leaves the route-level first-render agreement dependent on the manual browser run rather than on an automated guard that would fail if the page-level bootstrap fix regressed.",
+    "issues": [
+      {
+        "file": "apps/web/tests/account-shell-hydration.test.tsx",
+        "line": 175,
+        "severity": "blocking",
+        "description": "The new regression suite does not actually exercise the cold bootstrap fix in `apps/web/app/account/page.tsx:15-20`. At `apps/web/tests/account-shell-hydration.test.tsx:175-216` it only asserts `dynamic`/`fetchCache`, renders `AccountShellLoading` by itself, and hydrates `ControlPlaneShell` with identical server/client props. Reverting the page-level `<Suspense fallback={<AccountShellLoading />}>` would still leave this file green, so the automated coverage does not strongly prove that the first authenticated `/account` server render and first client render still agree on the real cold bootstrap path."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The shared web-control-plane skill still does not explicitly tell workers to inspect the first bridge-cookie load before any reload, even though the original account-shell handoff identified that a warmed reload can mask the failure. This fix wrote a dedicated library note for the nuance instead of the base skill carrying it.",
+      "evidence": "The original feature handoff `handoffs/2026-03-26T01-39-20-599Z__account-shell-hydration-console-error-followup__606830c3-e58b-4ee7-add8-e20e921b9b5a.json` suggested adding this guidance; `.factory/skills/web-control-plane-worker/SKILL.md:31` mentions bridge-cookie bootstrap coverage but not a pre-reload console/error check, while `.factory/library/account-shell-hydration.md:3-6` now documents that first-load-specific proof path."
+    }
+  ],
+  "addressesFailureFrom": ".factory/validation/misc-web-followups-1/scrutiny/reviews/account-shell-hydration-console-error-followup.json",
+  "summary": "Fail. The earlier populated Linear audit-semantic coverage is now in place, but the new cold-bootstrap tests still do not exercise the actual page-level Suspense bootstrap fix, so the fix remains under-proven by automated regression coverage."
+}

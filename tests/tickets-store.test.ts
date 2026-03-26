@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import {
   mkdir,
   mkdtemp,
@@ -26,13 +26,31 @@ const logger = {
   warn: (_input: { message: string }) => {},
 };
 
+const originalHome = process.env.HOME;
+let tempHome: string | null = null;
 let tempRoots: string[] = [];
+
+beforeEach(async () => {
+  tempHome = await mkdtemp(join(tmpdir(), "hack-tickets-store-home-"));
+  process.env.HOME = tempHome;
+});
 
 afterEach(async () => {
   for (const root of tempRoots) {
     await rm(root, { recursive: true, force: true });
   }
   tempRoots = [];
+
+  if (tempHome) {
+    await rm(tempHome, { recursive: true, force: true });
+  }
+  tempHome = null;
+
+  if (originalHome === undefined) {
+    process.env.HOME = undefined;
+  } else {
+    process.env.HOME = originalHome;
+  }
 });
 
 test("tickets store materializes assignee, review notes, comments, checkpoints, and conflicts", async () => {
@@ -1090,7 +1108,7 @@ async function runAllowFail(opts: {
     stdin: "ignore",
     env: {
       ...process.env,
-      HOME: homedir(),
+      HOME: process.env.HOME ?? homedir(),
     },
   });
 

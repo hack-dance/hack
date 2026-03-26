@@ -163,9 +163,10 @@ async function connectRawHttpClient(opts: {
   readonly socketPath: string;
 }): Promise<RawHttpClient> {
   const socket = await new Promise<Socket>((resolve, reject) => {
-    const client = createConnection({ path: opts.socketPath });
-    client.once("connect", () => resolve(client));
-    client.once("error", reject);
+    const client = createConnection({ path: opts.socketPath }, () =>
+      resolve(client)
+    );
+    client.on("error", reject);
   });
 
   let buffered: Buffer<ArrayBufferLike> = Buffer.alloc(0);
@@ -234,10 +235,9 @@ async function connectRawHttpClient(opts: {
       if (socket.destroyed) {
         return;
       }
-      await new Promise<void>((resolve) => {
-        socket.once("close", () => resolve());
-        socket.end();
-      });
+      const closed = once(socket as never, "close").then(() => undefined);
+      socket.end();
+      await closed;
     },
   };
 }

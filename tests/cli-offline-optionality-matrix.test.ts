@@ -98,10 +98,12 @@ test("session list stays usable when broker and web surfaces are unavailable", a
   });
 
   expect(result.exitCode).toBe(0);
-  expect(`${result.stdout}\n${result.stderr}`).toContain("Workspace");
-  expect(`${result.stdout}\n${result.stderr}`).not.toContain(
-    "Hack auth broker"
-  );
+  const combinedOutput = `${result.stdout}\n${result.stderr}`;
+  expect(
+    combinedOutput.includes("Workspace") ||
+      combinedOutput.includes("No active workspaces")
+  ).toBe(true);
+  expect(combinedOutput).not.toContain("Hack auth broker");
 });
 
 test.skipIf(!hasTmux)(

@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, expect } from "bun:test";
-import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -8,15 +15,27 @@ import { readControlPlaneConfig } from "../src/control-plane/sdk/config.ts";
 import { testIntegration } from "./helpers/ci.ts";
 
 const originalGlobalConfigPath = process.env.HACK_GLOBAL_CONFIG_PATH;
+const originalHome = process.env.HOME;
+let tempHome: string | null = null;
 
-beforeEach(() => {
-  process.env.HACK_GLOBAL_CONFIG_PATH = join(
-    tmpdir(),
-    `hack-global-config-${Date.now()}-${Math.random()}.json`
-  );
+beforeEach(async () => {
+  tempHome = await mkdtemp(join(tmpdir(), "hack-tickets-home-"));
+  process.env.HOME = tempHome;
+  process.env.HACK_GLOBAL_CONFIG_PATH = join(tempHome, "hack.config.json");
 });
 
-afterEach(() => {
+afterEach(async () => {
+  if (tempHome) {
+    await rm(tempHome, { recursive: true, force: true });
+  }
+  tempHome = null;
+
+  if (originalHome === undefined) {
+    process.env.HOME = undefined;
+  } else {
+    process.env.HOME = originalHome;
+  }
+
   if (originalGlobalConfigPath === undefined) {
     process.env.HACK_GLOBAL_CONFIG_PATH = undefined;
   } else {
@@ -636,7 +655,7 @@ async function runAllowFail(opts: {
     stdin: "ignore",
     env: {
       ...process.env,
-      HOME: homedir(),
+      HOME: process.env.HOME ?? homedir(),
     },
   });
 

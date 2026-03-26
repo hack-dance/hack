@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
@@ -112,10 +113,16 @@ describe("fzf", () => {
       if (process.platform === "darwin") {
         return;
       }
-      const result = await ensureBundledFzfInstalled();
-      expect(result.ok).toBe(false);
-      if (!result.ok) {
-        expect(result.reason).toBe("unsupported-platform");
+      const homeDir = await mkdtemp(join(tmpdir(), "hack-fzf-home-"));
+      try {
+        process.env.HOME = homeDir;
+        const result = await ensureBundledFzfInstalled();
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          expect(result.reason).toBe("unsupported-platform");
+        }
+      } finally {
+        await rm(homeDir, { recursive: true, force: true });
       }
     });
   });

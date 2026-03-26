@@ -141,7 +141,17 @@ test(
     expect(runtimeDownCalls).toHaveLength(1);
     expect(runtimeUpCalls).toHaveLength(1);
 
-    const upEnv = runtimeUpCalls[0].env as Record<string, string>;
+    const upCall = runtimeUpCalls[0];
+    if (!upCall) {
+      throw new Error("Missing runtime up call");
+    }
+
+    const upEnvRaw = upCall.env;
+    if (!upEnvRaw || typeof upEnvRaw !== "object") {
+      throw new Error("Missing runtime up env");
+    }
+
+    const upEnv = upEnvRaw as Record<string, string>;
 
     expect(upEnv.DATABASE_URL).toBe(
       "mysql://docker@host.docker.internal:3306/docker"

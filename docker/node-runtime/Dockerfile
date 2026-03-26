@@ -4,6 +4,9 @@ FROM oven/bun:1.3.9 AS hack-build
 
 WORKDIR /src
 COPY package.json bun.lock bunfig.toml tsconfig.json index.ts ./
+# Keep the install context aligned with root workspaces so frozen lockfile
+# validation sees the same workspace graph as the checked-in repository.
+COPY apps ./apps
 COPY packages ./packages
 COPY services ./services
 COPY src ./src

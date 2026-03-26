@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-
 import { __testOnly } from "../src/control-plane/extensions/github/commands.ts";
+import { createDefaultControlPlaneConfig } from "../src/control-plane/sdk/config.ts";
 
 async function writeJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
@@ -38,6 +38,20 @@ function createGitHubRepoConfig(input: {
             },
           },
         },
+      },
+    },
+  };
+}
+
+function createGitHubStatusControlPlaneConfig() {
+  const defaults = createDefaultControlPlaneConfig();
+  return {
+    ...defaults,
+    extensions: {
+      ...defaults.extensions,
+      "dance.hack.github": {
+        enabled: true,
+        config: {},
       },
     },
   };
@@ -230,14 +244,7 @@ describe("github profile payload rendering", () => {
       accountSnapshot: {
         accountLogin: "octocat-work",
       },
-      controlPlaneConfig: {
-        extensions: {
-          "dance.hack.github": {
-            enabled: true,
-            config: {},
-          },
-        },
-      },
+      controlPlaneConfig: createGitHubStatusControlPlaneConfig(),
     });
 
     expect(payload).toMatchObject({
@@ -257,6 +264,7 @@ describe("github profile payload rendering", () => {
         tokenEnv: "GH_TOKEN",
         authRef: "github.app.work",
         service: "hack-github-work",
+        privateKeyEnv: "GH_APP_PRIVATE_KEY",
         apiBaseUrl: "https://api.github.com",
         mode: "token",
       },
@@ -268,6 +276,7 @@ describe("github profile payload rendering", () => {
           tokenEnv: "GH_TOKEN",
           authRef: "github.app.work",
           service: "hack-github-work",
+          privateKeyEnv: "GH_APP_PRIVATE_KEY",
           apiBaseUrl: "https://api.github.com",
           mode: "token",
         },
@@ -300,14 +309,7 @@ describe("github profile payload rendering", () => {
         ownerSlug: "infra",
         ownerName: "Infra",
       },
-      controlPlaneConfig: {
-        extensions: {
-          "dance.hack.github": {
-            enabled: true,
-            config: {},
-          },
-        },
-      },
+      controlPlaneConfig: createGitHubStatusControlPlaneConfig(),
     });
 
     expect(payload.ready).toBe(false);

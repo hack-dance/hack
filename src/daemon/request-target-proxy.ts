@@ -12,6 +12,7 @@ import { removeFileIfExists } from "./process.ts";
 const REQUEST_LINE_TERMINATOR = "\r\n";
 const HEADER_TERMINATOR = "\r\n\r\n";
 const BAD_REQUEST_STATUS_LINE = "HTTP/1.1 400 Bad Request";
+type BinaryBuffer = Buffer<ArrayBufferLike>;
 
 type ProxyListenTarget =
   | { readonly unix: string }
@@ -84,9 +85,9 @@ function handleProxyConnection(opts: {
   let awaitingUpgradeResponse = false;
   let pendingReject = false;
   let rejectSent = false;
-  let clientBuffer = Buffer.alloc(0);
-  let upstreamBuffer = Buffer.alloc(0);
-  const pendingUpstreamWrites: Buffer[] = [];
+  let clientBuffer: BinaryBuffer = Buffer.alloc(0);
+  let upstreamBuffer: BinaryBuffer = Buffer.alloc(0);
+  const pendingUpstreamWrites: BinaryBuffer[] = [];
   const pendingResponses: ForwardedRequest[] = [];
 
   const destroyUpstream = () => {
@@ -265,7 +266,7 @@ function handleProxyConnection(opts: {
     }
   };
 
-  const onClientData = (chunk: Buffer) => {
+  const onClientData = (chunk: BinaryBuffer) => {
     if (pendingReject) {
       return;
     }
@@ -278,7 +279,7 @@ function handleProxyConnection(opts: {
     processClientBuffer();
   };
 
-  const onUpstreamData = (chunk: Buffer) => {
+  const onUpstreamData = (chunk: BinaryBuffer) => {
     if (tunnelEstablished) {
       opts.clientSocket.write(chunk);
       return;
@@ -309,22 +310,22 @@ type ForwardedRequest = {
 };
 
 type ParsedHttpRequest = {
-  readonly rawMessage: Buffer;
-  readonly remaining: Buffer;
+  readonly rawMessage: BinaryBuffer;
+  readonly remaining: BinaryBuffer;
   readonly requestTarget: string | null;
   readonly method: string;
   readonly upgradeRequested: boolean;
 };
 
 type ParsedHttpResponse = {
-  readonly rawMessage: Buffer;
-  readonly remaining: Buffer;
+  readonly rawMessage: BinaryBuffer;
+  readonly remaining: BinaryBuffer;
   readonly dequeuesRequest: boolean;
   readonly upgradeEstablished: boolean;
 };
 
 function consumeHttpRequestMessage(opts: {
-  readonly buffered: Buffer;
+  readonly buffered: BinaryBuffer;
 }): ParsedHttpRequest | null {
   const headerEnd = opts.buffered.indexOf(HEADER_TERMINATOR);
   if (headerEnd < 0) {
@@ -359,7 +360,7 @@ function consumeHttpRequestMessage(opts: {
 }
 
 function consumeHttpResponseMessage(opts: {
-  readonly buffered: Buffer;
+  readonly buffered: BinaryBuffer;
   readonly request: ForwardedRequest;
 }): ParsedHttpResponse | null {
   const headerEnd = opts.buffered.indexOf(HEADER_TERMINATOR);
@@ -406,7 +407,7 @@ function consumeHttpResponseMessage(opts: {
 }
 
 function resolveHttpMessageEnd(opts: {
-  readonly buffered: Buffer;
+  readonly buffered: BinaryBuffer;
   readonly bodyStart: number;
   readonly headers: ReadonlyMap<string, string>;
   readonly bodyless: boolean;

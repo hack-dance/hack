@@ -1190,9 +1190,11 @@ function readMappedFeedback<
   readonly feedbackByKey: TFeedbackByKey;
   readonly key: string;
 }): AccountControlPlaneFeedback | null {
-  return input.key in input.feedbackByKey
-    ? input.feedbackByKey[input.key as keyof TFeedbackByKey]
-    : null;
+  return (
+    (input.key in input.feedbackByKey
+      ? input.feedbackByKey[input.key as keyof TFeedbackByKey]
+      : null) ?? null
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

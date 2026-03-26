@@ -507,11 +507,14 @@ export async function runHackTui({ project }: HackTuiOptions): Promise<number> {
       readonly field: InputRenderable | SelectRenderable;
       readonly frame: BoxRenderable;
     }) => {
-      opts.field.on(RenderableEvents.FOCUSED, () => {
+      const field = opts.field as {
+        on(eventName: string | symbol, listener: () => void): unknown;
+      };
+      field.on(RenderableEvents.FOCUSED, () => {
         opts.frame.borderColor = searchFieldFocusBorderColor;
         opts.frame.requestRender();
       });
-      opts.field.on(RenderableEvents.BLURRED, () => {
+      field.on(RenderableEvents.BLURRED, () => {
         opts.frame.borderColor = searchFieldBorderColor;
         opts.frame.requestRender();
       });

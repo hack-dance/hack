@@ -55,6 +55,10 @@ const handleOwnerShow: CommandHandlerFor<typeof ownerShowSpec> = async ({
     const configPath = config.configPath ?? project.configFile;
     throw new Error(`Failed to parse ${configPath}: ${config.parseError}`);
   }
+  const brokerView = await resolveBrokerOwnershipView({
+    projectSlug: resolveProjectSlug(config.name),
+    ownership: config.ownership,
+  });
   const payload = {
     project_root: project.projectRoot,
     ownership: {
@@ -63,10 +67,7 @@ const handleOwnerShow: CommandHandlerFor<typeof ownerShowSpec> = async ({
       owner_id: config.ownership.ownerId,
       managed_by: config.ownership.managedBy,
     },
-    ...(await resolveBrokerOwnershipView({
-      projectSlug: resolveProjectSlug(config.name),
-      ownership: config.ownership,
-    })),
+    ...brokerView,
   };
 
   if (args.options.json === true) {
@@ -145,7 +146,42 @@ async function resolveBrokerOwnershipView(input: {
     readonly ownerId: string | null;
     readonly managedBy: "local" | "broker";
   };
-}) {
+}): Promise<{
+  readonly broker_registration?: {
+    readonly id: string;
+    readonly slug: string;
+    readonly name: string;
+    readonly current_access_role: "viewer" | "admin" | "owner";
+    readonly ownership: {
+      readonly mode: "local" | "shared";
+      readonly owner_type: "user" | "team" | "organization";
+      readonly owner_id: string | null;
+      readonly owner_slug: string | null;
+      readonly owner_name: string | null;
+      readonly managed_by: "local" | "broker";
+    };
+    readonly access: readonly {
+      readonly id: string;
+      readonly scope: string;
+      readonly role: string;
+      readonly subject_id: string;
+      readonly subject_slug: string;
+      readonly subject_name: string;
+      readonly organization_id: string;
+      readonly team_id: string | null;
+      readonly created_at: string;
+      readonly updated_at: string;
+    }[];
+  };
+  readonly broker_error?: {
+    readonly message: string;
+    readonly login_required: boolean;
+  };
+  readonly conflict?: {
+    readonly kind: "ownership_mismatch";
+    readonly message: string;
+  };
+}> {
   if (!input.projectSlug) {
     return {};
   }
@@ -189,7 +225,7 @@ async function resolveBrokerOwnershipView(input: {
     input.ownership.ownerId !== project.ownership.ownerId ||
     input.ownership.mode !== project.ownership.mode
       ? {
-          kind: "ownership_mismatch",
+          kind: "ownership_mismatch" as const,
           message:
             "The local project ownership does not match the broker registration for this project.",
         }

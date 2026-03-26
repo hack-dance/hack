@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { execSync } from "node:child_process";
+import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import {
   createConnection,
@@ -111,11 +112,11 @@ async function startTestHttpServer(opts: {
   const sockets = new Set<Socket>();
   const server = createServer((socket) => {
     sockets.add(socket);
-    let buffered = Buffer.alloc(0);
+    let buffered: Buffer<ArrayBufferLike> = Buffer.alloc(0);
     socket.on("close", () => {
       sockets.delete(socket);
     });
-    socket.on("data", (chunk) => {
+    socket.on("data", (chunk: Buffer<ArrayBufferLike>) => {
       buffered = Buffer.concat([buffered, chunk]);
       while (true) {
         const message = consumeHttpMessage({ buffered });
@@ -167,7 +168,7 @@ async function connectRawHttpClient(opts: {
     client.once("error", reject);
   });
 
-  let buffered = Buffer.alloc(0);
+  let buffered: Buffer<ArrayBufferLike> = Buffer.alloc(0);
   let ended = false;
   let socketError: Error | null = null;
   const waiters = new Set<() => void>();
@@ -178,7 +179,7 @@ async function connectRawHttpClient(opts: {
     }
   };
 
-  socket.on("data", (chunk) => {
+  socket.on("data", (chunk: Buffer<ArrayBufferLike>) => {
     buffered = Buffer.concat([buffered, chunk]);
     notifyWaiters();
   });
@@ -248,10 +249,12 @@ function serializeGetRequest(opts: {
   return `GET ${opts.path} HTTP/1.1\r\nHost: localhost\r\nConnection: ${opts.connection}\r\n\r\n`;
 }
 
-function consumeHttpMessage(opts: { readonly buffered: Buffer }): {
+function consumeHttpMessage(opts: {
+  readonly buffered: Buffer<ArrayBufferLike>;
+}): {
   readonly rawMessage: string;
   readonly requestTarget: string;
-  readonly remaining: Buffer;
+  readonly remaining: Buffer<ArrayBufferLike>;
 } | null {
   const headerEnd = opts.buffered.indexOf("\r\n\r\n");
   if (headerEnd < 0) {
@@ -259,7 +262,7 @@ function consumeHttpMessage(opts: { readonly buffered: Buffer }): {
   }
   const messageEnd = headerEnd + 4;
   const rawMessage = opts.buffered.subarray(0, messageEnd).toString("latin1");
-  const [requestLine] = rawMessage.split("\r\n");
+  const requestLine = rawMessage.split("\r\n")[0] ?? "";
   const requestTarget = extractRequestTargetFromLine({ requestLine });
   return {
     rawMessage,
@@ -269,8 +272,11 @@ function consumeHttpMessage(opts: { readonly buffered: Buffer }): {
 }
 
 function consumeHttpResponse(opts: {
-  readonly buffered: Buffer;
-}): { readonly rawMessage: string; readonly remaining: Buffer } | null {
+  readonly buffered: Buffer<ArrayBufferLike>;
+}): {
+  readonly rawMessage: string;
+  readonly remaining: Buffer<ArrayBufferLike>;
+} | null {
   const headerEnd = opts.buffered.indexOf("\r\n\r\n");
   if (headerEnd < 0) {
     return null;
@@ -311,19 +317,12 @@ async function listenUnixServer(opts: {
   readonly socketPath: string;
 }): Promise<void> {
   await rm(opts.socketPath, { force: true });
-  await new Promise<void>((resolve, reject) => {
-    const handleError = (error: Error) => {
-      opts.server.off("listening", handleListening);
-      reject(error);
-    };
-    const handleListening = () => {
-      opts.server.off("error", handleError);
-      resolve();
-    };
-    opts.server.once("error", handleError);
-    opts.server.once("listening", handleListening);
-    opts.server.listen(opts.socketPath);
-  });
+  const listeningPromise = once(opts.server as never, "listening");
+  const errorPromise = once(opts.server as never, "error").then(([error]) =>
+    Promise.reject(error)
+  );
+  opts.server.listen(opts.socketPath);
+  await Promise.race([listeningPromise, errorPromise]);
 }
 
 async function closeNetServer(opts: {

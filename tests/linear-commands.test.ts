@@ -12,6 +12,7 @@ import {
   __testOnly,
   LINEAR_COMMANDS,
 } from "../src/control-plane/extensions/linear/commands.ts";
+import { createDefaultControlPlaneConfig } from "../src/control-plane/sdk/config.ts";
 import type { ProjectContext } from "../src/lib/project.ts";
 
 let tempDir: string | null = null;
@@ -124,6 +125,33 @@ const minimalLinearBindingConfig = {
 } as unknown as Parameters<
   typeof __testOnly.resolveProjectLinearBinding
 >[0]["controlPlaneConfig"];
+
+function createLinearTokenRefreshControlPlaneConfig() {
+  const defaults = createDefaultControlPlaneConfig();
+  return {
+    ...defaults,
+    secrets: {
+      ...defaults.secrets,
+      backend: "keychain" as const,
+    },
+    extensions: {
+      ...defaults.extensions,
+      "dance.hack.linear": {
+        enabled: true,
+        config: {
+          profiles: {
+            work: {
+              authRef: "linear.api.work",
+              service: "hack-linear-work",
+              tokenEnv: "HACK_LINEAR_WORK_TOKEN",
+            },
+          },
+          defaultProfile: "work",
+        },
+      },
+    },
+  };
+}
 
 test("parseSetupArgs parses project binding flags", () => {
   const parsed = __testOnly.parseSetupArgs({
@@ -1318,28 +1346,7 @@ test("resolveLinearToken keeps local token setup ungated", async () => {
 });
 
 test("resolveLinearTokenWithBrokerRefresh prefers broker-seeded shared access before keychain fallback", async () => {
-  const controlPlaneConfig = {
-    secrets: {
-      backend: "keychain",
-    },
-    extensions: {
-      "dance.hack.linear": {
-        enabled: true,
-        config: {
-          profiles: {
-            work: {
-              authRef: "linear.api.work",
-              service: "hack-linear-work",
-              tokenEnv: "HACK_LINEAR_WORK_TOKEN",
-            },
-          },
-          defaultProfile: "work",
-        },
-      },
-    },
-  } as Parameters<
-    typeof __testOnly.resolveLinearTokenWithBrokerRefreshInternal
-  >[0]["controlPlaneConfig"];
+  const controlPlaneConfig = createLinearTokenRefreshControlPlaneConfig();
   const resolutionPaths: string[] = [];
   const brokerSeedAuthModes: boolean[] = [];
 
@@ -1392,28 +1399,7 @@ test("resolveLinearTokenWithBrokerRefresh prefers broker-seeded shared access be
 });
 
 test("resolveLinearTokenWithBrokerRefresh fails closed with hack auth login guidance when broker auth is unavailable", async () => {
-  const controlPlaneConfig = {
-    secrets: {
-      backend: "keychain",
-    },
-    extensions: {
-      "dance.hack.linear": {
-        enabled: true,
-        config: {
-          profiles: {
-            work: {
-              authRef: "linear.api.work",
-              service: "hack-linear-work",
-              tokenEnv: "HACK_LINEAR_WORK_TOKEN",
-            },
-          },
-          defaultProfile: "work",
-        },
-      },
-    },
-  } as Parameters<
-    typeof __testOnly.resolveLinearTokenWithBrokerRefreshInternal
-  >[0]["controlPlaneConfig"];
+  const controlPlaneConfig = createLinearTokenRefreshControlPlaneConfig();
   const resolutionPaths: string[] = [];
   const brokerSeedAuthModes: boolean[] = [];
 

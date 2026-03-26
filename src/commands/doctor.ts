@@ -940,6 +940,12 @@ async function queryDnsRecord(opts: {
 
   return await new Promise<string | null>((resolve) => {
     const socket = createSocket("udp4");
+    const eventfulSocket = socket as typeof socket & {
+      on(
+        eventName: "message",
+        listener: (msg: Buffer<ArrayBufferLike>) => void
+      ): typeof socket;
+    };
 
     const finish = (value: string | null) => {
       try {
@@ -952,7 +958,7 @@ async function queryDnsRecord(opts: {
 
     const timeout = setTimeout(() => finish(null), opts.timeoutMs);
 
-    socket.on("message", (msg: Buffer) => {
+    eventfulSocket.on("message", (msg) => {
       clearTimeout(timeout);
       finish(
         parseDnsResponse({ msg, expectedId: id, recordType: opts.recordType })

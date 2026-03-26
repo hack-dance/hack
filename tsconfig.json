@@ -3,7 +3,7 @@
   "exclude": ["examples", "apps", "node_modules", "dist"],
   "compilerOptions": {
     // Environment setup & latest features
-    "lib": ["ESNext"],
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
     "target": "ESNext",
     "module": "Preserve",
     "moduleDetection": "force",
@@ -14,6 +14,7 @@
     "moduleResolution": "bundler",
     "baseUrl": ".",
     "paths": {
+      "@/src/*": ["apps/web/src/*"],
       "@/*": ["src/*"],
       "@commands/*": ["src/commands/*"],
       "@control-plane/*": ["src/control-plane/*"],

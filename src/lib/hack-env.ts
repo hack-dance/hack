@@ -469,7 +469,8 @@ function parseHackEnvVar(input: {
       error: 'Field "source" must be "plain_env" or "keychain" when provided.',
     };
   }
-  const source = sourceRaw ?? "plain_env";
+  const source: HackEnvSource =
+    sourceRaw === "keychain" ? "keychain" : "plain_env";
 
   const servicesRaw = input.value.services;
   if (

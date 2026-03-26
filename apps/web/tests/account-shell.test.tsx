@@ -677,6 +677,7 @@ test("account shell fails closed with a sign-in path when no active context is a
   expect(markup).toContain(
     "Sign in to compare Hack-owned access with local Linear access."
   );
+  expect(findDescriptionListViolations({ markup })).toEqual([]);
 });
 
 test("account shell surfaces shared integration scope denial when the requested project is hidden", () => {
@@ -702,3 +703,33 @@ test("account shell surfaces shared integration scope denial when the requested 
     "The current org/team context does not expose the requested shared project."
   );
 });
+
+function findDescriptionListViolations(input: {
+  readonly markup: string;
+}): string[] {
+  const tagPattern = /<\/?(dl|dt|dd)\b[^>]*>/g;
+  const violations: string[] = [];
+  const stack: string[] = [];
+
+  for (const match of input.markup.matchAll(tagPattern)) {
+    const [tag] = match;
+    const normalizedTag = tag.startsWith("</")
+      ? tag.slice(2, 4)
+      : tag.slice(1, 3);
+
+    if (normalizedTag === "dl") {
+      if (tag.startsWith("</")) {
+        stack.pop();
+      } else {
+        stack.push("dl");
+      }
+      continue;
+    }
+
+    if (stack.length === 0) {
+      violations.push(tag);
+    }
+  }
+
+  return violations;
+}

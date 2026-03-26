@@ -489,7 +489,7 @@ function GitHubSection(input: {
             </p>
           </div>
 
-          <div className="grid gap-3">
+          <dl className="grid gap-3">
             <ProjectDetailCard label="Default profile">
               {githubManagement.defaultProfile}
             </ProjectDetailCard>
@@ -499,7 +499,7 @@ function GitHubSection(input: {
             <ProjectDetailCard label="Extension enabled">
               {githubManagement.extensionEnabled ? "yes" : "no"}
             </ProjectDetailCard>
-          </div>
+          </dl>
 
           {githubManagement.profiles.length > 0 ? (
             <ul className="grid gap-3">

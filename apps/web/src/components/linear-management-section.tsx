@@ -421,7 +421,7 @@ function DeliveryAuditCard(input: {
       <p className="font-medium text-sm text-white">
         Latest delivery reconciliation
       </p>
-      <div className="grid gap-3 md:grid-cols-2">
+      <dl className="grid gap-3 md:grid-cols-2">
         <DetailCard label="Processed">
           {`processed ${input.deliveryAudit.processedDeliveries}`}
         </DetailCard>
@@ -432,7 +432,7 @@ function DeliveryAuditCard(input: {
           {`failed ${input.deliveryAudit.failedDeliveries}`}
         </DetailCard>
         <DetailCard label="Updated">{input.deliveryAudit.updatedAt}</DetailCard>
-      </div>
+      </dl>
       {input.deliveryAudit.deliveries.length > 0 ? (
         <ul className="grid gap-3">
           {input.deliveryAudit.deliveries.map((delivery) => (
@@ -488,14 +488,14 @@ function CloseoutAuditCard(input: {
         Track the frozen mission scope against repo-bound synced ticket status
         so the browser and CLI report the same unresolved count.
       </p>
-      <div className="grid gap-3 md:grid-cols-2">
+      <dl className="grid gap-3 md:grid-cols-2">
         <DetailCard label="Resolved">
           {`${input.closeout.resolvedCount}/${input.closeout.totalItems}`}
         </DetailCard>
         <DetailCard label="Unresolved">
           {String(input.closeout.unresolvedCount)}
         </DetailCard>
-      </div>
+      </dl>
       {unresolvedEntries.length > 0 ? (
         <ul className="grid gap-3">
           {unresolvedEntries.map((entry) => (

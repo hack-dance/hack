@@ -3,6 +3,7 @@ import { Glob } from "bun";
 const isolatedTestPaths = [
   "tests/node-workspace-bootstrap.test.ts",
   "tests/nodes-registry.test.ts",
+  "tests/daemon-sessions.test.ts",
 ] as const;
 const maxConcurrencyArg = "--max-concurrency=1";
 
@@ -57,6 +58,9 @@ function testLabel(opts: { readonly testPath: string }): string {
   }
   if (opts.testPath === "tests/nodes-registry.test.ts") {
     return "nodes registry auth";
+  }
+  if (opts.testPath === "tests/daemon-sessions.test.ts") {
+    return "daemon sessions";
   }
   return opts.testPath;
 }

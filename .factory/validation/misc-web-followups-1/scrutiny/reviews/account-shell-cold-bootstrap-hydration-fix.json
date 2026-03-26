@@ -1,28 +1,21 @@
 {
   "featureId": "account-shell-cold-bootstrap-hydration-fix",
-  "reviewedAt": "2026-03-26T02:37:01Z",
-  "commitId": "8d5503905c398a8fce6485c599e116c6bca9ba22",
+  "reviewedAt": "2026-03-26T02:56:51Z",
+  "commitId": "bbccb9843843cb19b45879526b18f8b80c01b08b",
   "transcriptSkeletonReviewed": true,
   "diffReviewed": true,
-  "status": "fail",
+  "status": "pass",
   "codeReview": {
-    "summary": "Reviewed the fix feature metadata, transcript skeleton, handoff, the original failed review, the completed original feature diff (`e0f843c271ebbd255ba47b624c01f1cff2ddc84f`), and the fix diff (`8d5503905c398a8fce6485c599e116c6bca9ba22`). The prior blocking populated-audit gap is now closed: `apps/web/tests/account-shell.test.tsx` and `apps/web/tests/linear-management.test.ts` both render the routed populated Linear audit fixture and assert description-list semantics for the delivery and closeout cards. The remaining problem is the new cold-bootstrap regression coverage: the fix adds the crucial page-level Suspense boundary in `apps/web/app/account/page.tsx`, but the added `apps/web/tests/account-shell-hydration.test.tsx` suite never renders that route or otherwise proves the boundary participates in the first authenticated bootstrap render. It only checks the route cache exports, the standalone loading shell, and isolated `ControlPlaneShell` hydration. That leaves the route-level first-render agreement dependent on the manual browser run rather than on an automated guard that would fail if the page-level bootstrap fix regressed.",
-    "issues": [
-      {
-        "file": "apps/web/tests/account-shell-hydration.test.tsx",
-        "line": 175,
-        "severity": "blocking",
-        "description": "The new regression suite does not actually exercise the cold bootstrap fix in `apps/web/app/account/page.tsx:15-20`. At `apps/web/tests/account-shell-hydration.test.tsx:175-216` it only asserts `dynamic`/`fetchCache`, renders `AccountShellLoading` by itself, and hydrates `ControlPlaneShell` with identical server/client props. Reverting the page-level `<Suspense fallback={<AccountShellLoading />}>` would still leave this file green, so the automated coverage does not strongly prove that the first authenticated `/account` server render and first client render still agree on the real cold bootstrap path."
-      }
-    ]
+    "summary": "Reviewed the feature metadata, handoff, transcript skeleton, skill, commit `bbccb9843843cb19b45879526b18f8b80c01b08b`, and current HEAD for the `/account` route and hydration tests. The change stays tightly scoped to `apps/web/tests/account-shell-hydration.test.tsx` and closes the prior blocking gap: the new regression now renders the real `apps/web/app/account/page.tsx` route with an unresolved bootstrap, asserts that the route export is the page-level `Suspense` boundary, and proves the actual `AccountShellLoading` fallback markup (including the skip link and `#main-content` region) is what the route emits while `AccountShellPage` is suspended. Together with the unchanged route implementation in `apps/web/app/account/page.tsx`, the existing cold-hydration shell test, and the worker's routed first-load browser evidence, the feature satisfies its stated route-level proof and verification expectations without expanding scope.",
+    "issues": []
   },
   "sharedStateObservations": [
     {
       "area": "skills",
-      "observation": "The shared web-control-plane skill still does not explicitly tell workers to inspect the first bridge-cookie load before any reload, even though the original account-shell handoff identified that a warmed reload can mask the failure. This fix wrote a dedicated library note for the nuance instead of the base skill carrying it.",
-      "evidence": "The original feature handoff `handoffs/2026-03-26T01-39-20-599Z__account-shell-hydration-console-error-followup__606830c3-e58b-4ee7-add8-e20e921b9b5a.json` suggested adding this guidance; `.factory/skills/web-control-plane-worker/SKILL.md:31` mentions bridge-cookie bootstrap coverage but not a pre-reload console/error check, while `.factory/library/account-shell-hydration.md:3-6` now documents that first-load-specific proof path."
+      "observation": "The `web-control-plane-worker` skill requires failure-first testing, but this feature's transcript does not show an explicit failing targeted run before the patch while the handoff still marks the procedure as fully followed. The skill guidance itself is sound; the gap is that the worker/handoff rubric does not force workers to record concrete failure-first evidence.",
+      "evidence": "`.factory/skills/web-control-plane-worker/SKILL.md:28` says to write the failing tests first. `worker-transcripts.jsonl:91` shows the sequence reaching `ApplyPatch` before the first targeted `bun test ./apps/web/tests/account-shell-hydration.test.tsx`, and `handoffs/2026-03-26T02-51-02-782Z__account-shell-cold-bootstrap-hydration-fix__5ad19969-e092-44a8-8687-a12c500ec34f.json` reports `skillFeedback.followedProcedure: true` with no deviation recorded."
     }
   ],
-  "addressesFailureFrom": ".factory/validation/misc-web-followups-1/scrutiny/reviews/account-shell-hydration-console-error-followup.json",
-  "summary": "Fail. The earlier populated Linear audit-semantic coverage is now in place, but the new cold-bootstrap tests still do not exercise the actual page-level Suspense bootstrap fix, so the fix remains under-proven by automated regression coverage."
+  "addressesFailureFrom": null,
+  "summary": "Pass. The feature is appropriately scoped and now adds the missing automated route-level guard for the real `/account` Suspense fallback, with no blocking correctness, regression, scope, or verification issues found."
 }

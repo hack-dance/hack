@@ -1,0 +1,49 @@
+{
+  "milestone": "misc-web-followups-1",
+  "round": 3,
+  "status": "fail",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "bun run test",
+      "exitCode": 0
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "bun run typecheck",
+      "exitCode": 0
+    },
+    "lint": {
+      "passed": true,
+      "command": "bun run check",
+      "exitCode": 0
+    }
+  },
+  "reviewsSummary": {
+    "total": 1,
+    "passed": 0,
+    "failed": 1,
+    "failedFeatures": ["account-shell-cold-bootstrap-hydration-fix"]
+  },
+  "blockingIssues": [
+    {
+      "featureId": "account-shell-cold-bootstrap-hydration-fix",
+      "file": "apps/web/tests/account-shell-hydration.test.tsx",
+      "line": 175,
+      "severity": "blocking",
+      "description": "The new regression suite does not actually exercise the cold bootstrap fix in `apps/web/app/account/page.tsx:15-20`. It only asserts route cache exports, renders `AccountShellLoading` by itself, and hydrates `ControlPlaneShell` with identical props, so reverting the page-level `<Suspense fallback={<AccountShellLoading />}>` could still leave the automated suite green."
+    }
+  ],
+  "nonBlockingIssues": [],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": ".factory/skills/web-control-plane-worker/SKILL.md",
+      "suggestion": "Explicitly require browser verification for cold authenticated account-shell fixes to inspect the first bridge-cookie load before any reload and to pair that manual check with automated coverage that exercises the real routed page boundary rather than only isolated shell hydration.",
+      "evidence": "The original failed follow-up handoff and the new fix review both identified that warmed reloads can mask the issue. The current skill mentions bridge-cookie bootstrap coverage but does not tell workers to inspect the first unreloaded load or to ensure route-level automation covers the actual `/account` page boundary.",
+      "isSystemic": true
+    }
+  ],
+  "rejectedObservations": [],
+  "previousRound": ".factory/validation/misc-web-followups-1/scrutiny/synthesis.round-2.json"
+}

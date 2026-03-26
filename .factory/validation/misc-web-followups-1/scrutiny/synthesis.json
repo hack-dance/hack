@@ -1,7 +1,7 @@
 {
   "milestone": "misc-web-followups-1",
-  "round": 3,
-  "status": "fail",
+  "round": 4,
+  "status": "pass",
   "validatorsRun": {
     "test": {
       "passed": true,
@@ -21,29 +21,22 @@
   },
   "reviewsSummary": {
     "total": 1,
-    "passed": 0,
-    "failed": 1,
-    "failedFeatures": ["account-shell-cold-bootstrap-hydration-fix"]
+    "passed": 1,
+    "failed": 0,
+    "failedFeatures": [],
+    "reviewedFixFeatures": ["account-shell-cold-bootstrap-hydration-fix"]
   },
-  "blockingIssues": [
-    {
-      "featureId": "account-shell-cold-bootstrap-hydration-fix",
-      "file": "apps/web/tests/account-shell-hydration.test.tsx",
-      "line": 175,
-      "severity": "blocking",
-      "description": "The new regression suite does not actually exercise the cold bootstrap fix in `apps/web/app/account/page.tsx:15-20`. It only asserts route cache exports, renders `AccountShellLoading` by itself, and hydrates `ControlPlaneShell` with identical props, so reverting the page-level `<Suspense fallback={<AccountShellLoading />}>` could still leave the automated suite green."
-    }
-  ],
+  "blockingIssues": [],
   "nonBlockingIssues": [],
   "appliedUpdates": [],
   "suggestedGuidanceUpdates": [
     {
       "target": ".factory/skills/web-control-plane-worker/SKILL.md",
-      "suggestion": "Explicitly require browser verification for cold authenticated account-shell fixes to inspect the first bridge-cookie load before any reload and to pair that manual check with automated coverage that exercises the real routed page boundary rather than only isolated shell hydration.",
-      "evidence": "The original failed follow-up handoff and the new fix review both identified that warmed reloads can mask the issue. The current skill mentions bridge-cookie bootstrap coverage but does not tell workers to inspect the first unreloaded load or to ensure route-level automation covers the actual `/account` page boundary.",
+      "suggestion": "Require workers who claim failure-first testing to record the exact failing targeted validator or browser signal observed before the patch, or explicitly note when they are relying on previously captured failure evidence instead.",
+      "evidence": "The current rerun fixed the blocking `/account` route-level Suspense coverage issue, but `worker-transcripts.jsonl:91` shows the patch was applied before the first targeted `bun test ./apps/web/tests/account-shell-hydration.test.tsx` run while the handoff still marked `skillFeedback.followedProcedure: true`. That suggests the skill/handoff rubric should require concrete failure-first evidence instead of relying on self-reporting alone.",
       "isSystemic": true
     }
   ],
   "rejectedObservations": [],
-  "previousRound": ".factory/validation/misc-web-followups-1/scrutiny/synthesis.round-2.json"
+  "previousRound": ".factory/validation/misc-web-followups-1/scrutiny/synthesis.round-3.json"
 }

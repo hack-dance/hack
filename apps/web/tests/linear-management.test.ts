@@ -7,6 +7,11 @@ import {
   buildLinearCommandEnvironment,
   buildLinearManagementState,
 } from "../src/lib/linear-management";
+import {
+  findDescriptionListViolations,
+  hasDescriptionListEntry,
+  routedAccountPopulatedLinearManagement,
+} from "./linear-audit-fixtures";
 
 test("linear management command environment prefers env-only token lookup unless explicitly overridden", () => {
   expect(buildLinearCommandEnvironment({ env: {} })).toMatchObject({
@@ -525,179 +530,70 @@ test("linear management state keeps provider repair details when the browser sha
 });
 
 test("linear management section renders durable publish and delivery audit state", () => {
-  const state = buildLinearManagementState({
-    status: {
-      extensionId: "dance.hack.linear",
-      selectedProfile: "work",
-      selectedSource: "project_routing",
-      defaultProfile: "default",
-      selectedMissing: false,
-      authRef: "linear.api.work",
-      service: "hack-linear-work",
-      tokenEnvFallback: "HACK_LINEAR_API_TOKEN",
-      apiUrl: "https://api.linear.app/graphql",
-      accountId: "lin-user-1",
-      accountName: "Hack User",
-      accountEmail: "hack@example.com",
-      tokenResolved: true,
-      tokenSource: "keychain",
-      tokenExpiresAt: null,
-      error: null,
-      profileError: null,
-      ok: true,
-      projectBinding: {
-        ok: true,
-        profileId: "work",
-        projectId: "proj_default",
-        projectName: "Default",
-        teamId: "team_default",
-        additionalProjects: [],
-      },
-      summary: {
-        activeProfile: "work",
-        connected: true,
-        connectionLabel: "Connected as Hack User",
-        routingSummary:
-          "This repo routes Linear sync to Default (proj_default) in team team_default.",
-        linkedProjectsLabel: null,
-        capabilities: ["Publish repo-bound status updates"],
-        repair: null,
-        nextSteps: ["Run `hack linear status-updates publish`."],
-      },
-      audit: {
-        statusUpdates: {
-          draftCount: 1,
-          publishedCount: 2,
-          latestPublished: {
-            title: "Post-closeout weekly update",
-            linearId: "update_123",
-            date: "2026-03-26",
-            publishedAt: "2026-03-26T10:00:00.000Z",
-            updatedAt: "2026-03-26T10:15:00.000Z",
-            path: ".hack/linear/projects/proj_default/status-updates/published/2026-03-26-weekly.md",
-          },
-        },
-        deliveryCorruption: null,
-        delivery: {
-          path: ".hack/linear/projects/proj_default/delivery-audit.json",
-          profileId: "work",
-          updatedAt: "2026-03-25T02:30:00.000Z",
-          processedDeliveries: 3,
-          appliedDeliveries: 2,
-          failedDeliveries: 1,
-          skippedDeliveries: 0,
-          created: 1,
-          updated: 2,
-          commentsPulled: 0,
-          conflictsRecorded: 0,
-          checkpointsRecorded: 2,
-          deliveries: [
-            {
-              deliveryId: "delivery-issue",
-              profileId: "work",
-              mode: "issue",
-              status: "applied",
-              issueIdentifier: "ENG-101",
-              ticketId: "T-00001",
-            },
-            {
-              deliveryId: "delivery-project",
-              profileId: "work",
-              mode: "project",
-              status: "failed",
-              projectId: "proj_default",
-              reason: "git sync failed",
-            },
-          ],
-        },
-        closeout: {
-          path: ".hack/linear/projects/proj_default/closeout-scope.json",
-          totalItems: 3,
-          resolvedCount: 3,
-          unresolvedCount: 0,
-          latestPublishedPath:
-            ".hack/linear/projects/proj_default/status-updates/published/2026-03-25-closeout.md",
-          latestPublishedTitle: "Mission closeout audit",
-          latestPublishedAt: "2026-03-25T12:00:00.000Z",
-          deliveryAuditPath:
-            ".hack/linear/projects/proj_default/delivery-audit.json",
-          deliveryAuditState: "available",
-          entries: [
-            {
-              ticketId: "T-00001",
-              externalKey: "HACK-457",
-              title: "Foundational ticket",
-              status: "done",
-            },
-            {
-              ticketId: "T-00002",
-              externalKey: "HACK-560",
-              title: "Shared auth and web foundation",
-              parentExternalKey: "HACK-559",
-              status: "done",
-            },
-            {
-              ticketId: "T-00003",
-              externalKey: "HACK-563",
-              title: "Env status, CLI optionality, and closeout",
-              parentExternalKey: "HACK-559",
-              status: "done",
-            },
-          ],
-        },
-      },
-    },
-    profiles: {
-      defaultProfileId: "default",
-      selectedProfileId: "work",
-      selectedProfileSource: "project_routing",
-      selectedProfileMissing: false,
-      profiles: [
-        {
-          id: "work",
-          isDefault: false,
-          authRef: "linear.api.work",
-          service: "hack-linear-work",
-          tokenEnv: "HACK_LINEAR_WORK_TOKEN",
-          apiUrl: "https://api.linear.app/graphql",
-          accountName: "Hack User",
-        },
-      ],
-    },
-    connections: {
-      accessControlMode: "better_auth_team_owned",
-      connections: [],
-    },
-    canInspectHackConnection: true,
-  });
-
   const markup = renderToStaticMarkup(
-    LinearManagementSection({ linearManagement: state })
+    LinearManagementSection({
+      linearManagement: routedAccountPopulatedLinearManagement,
+    })
   );
 
   expect(markup).toContain("Repo audit trail");
   expect(markup).toContain("Latest published status update");
-  expect(markup).toContain("Post-closeout weekly update");
-  expect(markup).toContain("1 draft still waiting to publish");
+  expect(markup).toContain("Mission closeout audit");
+  expect(markup).toContain("0 drafts still waiting to publish");
   expect(markup).toContain("Latest delivery reconciliation");
-  expect(markup).toContain("processed 3");
-  expect(markup).toContain("failed 1");
-  expect(markup).toContain("git sync failed");
+  expect(markup).toContain("processed 0");
+  expect(markup).toContain("failed 0");
   expect(markup).toContain("Mission closeout");
   expect(markup).toContain(
     "All frozen mission-scoped Linear tickets now resolve to done"
   );
   expect(markup).toContain(
-    ".hack/linear/projects/proj_default/closeout-scope.json"
+    ".hack/linear/projects/7a3c8adf-ede5-4d3a-8779-9c32695c76bf/closeout-scope.json"
   );
   expect(markup).toContain(
-    ".hack/linear/projects/proj_default/delivery-audit.json"
+    ".hack/linear/projects/7a3c8adf-ede5-4d3a-8779-9c32695c76bf/delivery-audit.json"
   );
   expect(markup).toContain("Published closeout evidence");
   expect(markup).toContain("Mission closeout audit");
   expect(markup).toContain(
-    ".hack/linear/projects/proj_default/status-updates/published/2026-03-25-closeout.md"
+    ".hack/linear/projects/7a3c8adf-ede5-4d3a-8779-9c32695c76bf/status-updates/published/2026-03-25-mission-closeout-audit.md"
   );
+  expect(findDescriptionListViolations({ markup })).toEqual([]);
+  expect(
+    hasDescriptionListEntry({
+      markup,
+      label: "Processed",
+      value: "processed 0",
+    })
+  ).toBe(true);
+  expect(
+    hasDescriptionListEntry({
+      markup,
+      label: "Applied",
+      value: "applied 0",
+    })
+  ).toBe(true);
+  expect(
+    hasDescriptionListEntry({
+      markup,
+      label: "Failed",
+      value: "failed 0",
+    })
+  ).toBe(true);
+  expect(
+    hasDescriptionListEntry({
+      markup,
+      label: "Resolved",
+      value: "13/13",
+    })
+  ).toBe(true);
+  expect(
+    hasDescriptionListEntry({
+      markup,
+      label: "Unresolved",
+      value: "0",
+    })
+  ).toBe(true);
 });
 
 test("linear management section surfaces corrupt delivery audit guidance", () => {

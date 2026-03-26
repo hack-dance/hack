@@ -5,6 +5,10 @@ import ControlPlaneShell from "../src/components/control-plane-shell";
 import type { AccountShellContext } from "../src/lib/account-shell";
 import type { BrowserSharedProjectScopeSummary } from "../src/lib/browser-shared-project-scope";
 import { buildGitHubManagementState } from "../src/lib/github-management";
+import {
+  findDescriptionListViolations,
+  routedAccountPopulatedLinearManagement,
+} from "./linear-audit-fixtures";
 
 const githubManagement = {
   extensionEnabled: true,
@@ -658,6 +662,28 @@ test("account shell renders the active user, org admin controls, and invite acti
   expect(markup).toContain("Organization created");
 });
 
+test("account shell keeps the populated routed Linear audit path inside description lists", () => {
+  const markup = renderToStaticMarkup(
+    <ControlPlaneShell
+      account={authenticatedContext}
+      envManagement={envManagement}
+      githubManagement={githubManagement}
+      linearManagement={routedAccountPopulatedLinearManagement}
+      returnToPath="/account"
+      signInHref="/auth?redirect=%2Faccount"
+    />
+  );
+
+  expect(markup).toContain("Mission closeout audit");
+  expect(markup).toContain("Latest delivery reconciliation");
+  expect(markup).toContain("processed 0");
+  expect(markup).toContain("13/13");
+  expect(markup).toContain(
+    ".hack/linear/projects/7a3c8adf-ede5-4d3a-8779-9c32695c76bf/closeout-scope.json"
+  );
+  expect(findDescriptionListViolations({ markup })).toEqual([]);
+});
+
 test("account shell fails closed with a sign-in path when no active context is available", () => {
   const markup = renderToStaticMarkup(
     <ControlPlaneShell
@@ -703,33 +729,3 @@ test("account shell surfaces shared integration scope denial when the requested 
     "The current org/team context does not expose the requested shared project."
   );
 });
-
-function findDescriptionListViolations(input: {
-  readonly markup: string;
-}): string[] {
-  const tagPattern = /<\/?(dl|dt|dd)\b[^>]*>/g;
-  const violations: string[] = [];
-  const stack: string[] = [];
-
-  for (const match of input.markup.matchAll(tagPattern)) {
-    const [tag] = match;
-    const normalizedTag = tag.startsWith("</")
-      ? tag.slice(2, 4)
-      : tag.slice(1, 3);
-
-    if (normalizedTag === "dl") {
-      if (tag.startsWith("</")) {
-        stack.pop();
-      } else {
-        stack.push("dl");
-      }
-      continue;
-    }
-
-    if (stack.length === 0) {
-      violations.push(tag);
-    }
-  }
-
-  return violations;
-}

@@ -90,6 +90,10 @@ const missionArtifactSanitizedTempRootPatterns = [
   /\/private\/var\/folders(?=\/)/g,
   /\/var\/folders(?=\/)/g,
 ] as const;
+const missionArtifactSanitizedTempHomePattern =
+  /<tmp>(?:\/[^<>"'\s]+)*\/home(?=(?:\/|["'\s]|$))/g;
+const missionArtifactSanitizedDaemonSocketPattern =
+  /<tmp>(?:\/[^<>"'\s]+)*\/home\/\.hack\/daemon\/hackd\.sock/g;
 
 /**
  * Determines whether a file path should be excluded from textual privacy checks.
@@ -191,6 +195,14 @@ export function sanitizeCommittedMissionArtifactText(input: {
   for (const pattern of missionArtifactSanitizedTempRootPatterns) {
     sanitized = sanitized.replace(pattern, "<tmp>");
   }
+  sanitized = sanitized.replace(
+    missionArtifactSanitizedDaemonSocketPattern,
+    "<tmp-daemon-sock>"
+  );
+  sanitized = sanitized.replace(
+    missionArtifactSanitizedTempHomePattern,
+    "<tmp-home>"
+  );
   return sanitized;
 }
 

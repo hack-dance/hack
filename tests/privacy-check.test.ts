@@ -56,7 +56,7 @@ test("sanitizeCommittedMissionArtifactText keeps admin evidence while removing l
     '"addressesFailureFrom": "<repo>/.factory/validation/admin-control-plane/scrutiny/reviews/account-shell-context-parity.json"'
   );
   expect(sanitized).toContain(
-    '"HOME=<tmp>/admin-shell/home HACK_GLOBAL_CONFIG_PATH=<tmp>/admin-shell/global-config.json <repo>/dist/hack auth status --json"'
+    '"HOME=<tmp-home> HACK_GLOBAL_CONFIG_PATH=<tmp>/admin-shell/global-config.json <repo>/dist/hack auth status --json"'
   );
   expect(sanitized).toContain(
     '"python3 <tmp>/ut-admin-resources-43ecf94098e7/admin_flow.py stage1"'
@@ -77,6 +77,37 @@ test("sanitizeCommittedMissionArtifactText keeps admin evidence while removing l
       missionDir,
     })
   ).toBe(sanitized);
+});
+
+test("sanitizeCommittedMissionArtifactText normalizes daemon temp-home placeholders", () => {
+  const rawTempHome = "/private/var/folders/zz/abc123/T/home";
+  const sanitized = sanitizeCommittedMissionArtifactText({
+    text: JSON.stringify(
+      {
+        isolation: {
+          tempHome: rawTempHome,
+          daemonSocket: `${rawTempHome}/.hack/daemon/hackd.sock`,
+        },
+        command: `HOME=${rawTempHome} HACK_GLOBAL_CONFIG_PATH=/tmp/daemon-check/global-config.json bun <repo>/index.ts daemon start --foreground`,
+      },
+      null,
+      2
+    ),
+    repoRoot,
+    missionDir,
+  });
+
+  expect(sanitized).toContain('"tempHome": "<tmp-home>"');
+  expect(sanitized).toContain('"daemonSocket": "<tmp-daemon-sock>"');
+  expect(sanitized).toContain(
+    '"HOME=<tmp-home> HACK_GLOBAL_CONFIG_PATH=<tmp>/daemon-check/global-config.json bun <repo>/index.ts daemon start --foreground"'
+  );
+  expect(
+    collectPrivacyFindings({
+      filePath: ".factory/validation/misc-env-followups-1/demo.json",
+      content: sanitized,
+    })
+  ).toEqual([]);
 });
 
 test("tracked mission artifacts stay free of raw local absolute paths", () => {

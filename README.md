@@ -201,6 +201,10 @@ into after `hack init`, `hack up`, and `hack open` are already working:
   settings that should be explicit instead of tribal knowledge. It becomes relevant as soon as `hack up`,
   `hack run`, or remote workflows depend on values that should not be hardcoded into the repo. Docs:
   [`docs/env.md`](docs/env.md)
+- **Browser control plane**: Use the routed account surface when you want browser-based visibility into
+  auth context, org/team/project administration, integration status, and env management without giving
+  up CLI parity. It becomes relevant after `hack up` and `hack open` are already working and you want a
+  local web UI at `https://<project>.hack/account` alongside the existing repo-bound CLI flows.
 
 ## Supporting Capabilities
 

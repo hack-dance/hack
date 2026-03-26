@@ -1,27 +1,14 @@
-import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-
-const runtimeUpCalls: Record<string, unknown>[] = [];
-const runtimeDownCalls: Record<string, unknown>[] = [];
-
-mock.module("../src/backends/runtime-backend.ts", () => ({
-  composeRuntimeBackend: {
-    name: "compose",
-    up: async (opts: Record<string, unknown>) => {
-      runtimeUpCalls.push(opts);
-      return 0;
-    },
-    down: async (opts: Record<string, unknown>) => {
-      runtimeDownCalls.push(opts);
-      return 0;
-    },
-    psJson: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
-    ps: async () => 0,
-    run: async () => 0,
-  },
-}));
 
 type CapturedRunResult = {
   readonly exitCode: number;
@@ -32,15 +19,17 @@ type CapturedRunResult = {
 let tempDir: string | null = null;
 let originalSetupSyncMode: string | undefined;
 let originalLogger: string | undefined;
+let originalPath: string | undefined;
+let originalDockerLogPath: string | undefined;
 
 beforeEach(async () => {
   tempDir = await mkdtemp(join(tmpdir(), "hack-restart-env-"));
   originalSetupSyncMode = process.env.HACK_SETUP_SYNC_MODE;
   originalLogger = process.env.HACK_LOGGER;
+  originalPath = process.env.PATH;
+  originalDockerLogPath = process.env.HACK_TEST_DOCKER_LOG;
   process.env.HACK_SETUP_SYNC_MODE = "off";
   process.env.HACK_LOGGER = "console";
-  runtimeUpCalls.length = 0;
-  runtimeDownCalls.length = 0;
 });
 
 afterEach(async () => {
@@ -58,10 +47,16 @@ afterEach(async () => {
   } else {
     process.env.HACK_LOGGER = undefined;
   }
-});
-
-afterAll(() => {
-  mock.restore();
+  if (originalPath !== undefined) {
+    process.env.PATH = originalPath;
+  } else {
+    process.env.PATH = undefined;
+  }
+  if (originalDockerLogPath !== undefined) {
+    process.env.HACK_TEST_DOCKER_LOG = originalDockerLogPath;
+  } else {
+    process.env.HACK_TEST_DOCKER_LOG = undefined;
+  }
 });
 
 test(
@@ -74,8 +69,11 @@ test(
     const projectRoot = resolve(tempDir, "repo");
     const projectDir = resolve(projectRoot, ".hack");
     const internalDir = resolve(projectDir, ".internal");
+    const fakeBinDir = resolve(tempDir, "fake-bin");
+    const dockerLogPath = resolve(tempDir, "docker.log");
 
     await mkdir(internalDir, { recursive: true });
+    await mkdir(fakeBinDir, { recursive: true });
     await writeFile(
       resolve(projectDir, "docker-compose.yml"),
       `${[
@@ -130,6 +128,18 @@ test(
         2
       )}\n`
     );
+    const fakeDockerPath = resolve(fakeBinDir, "docker");
+    await writeFile(
+      fakeDockerPath,
+      `${[
+        "#!/bin/sh",
+        'printf \'args:%s\\nDATABASE_URL:%s\\n---\\n\' "$*" "$DATABASE_URL" >> "$HACK_TEST_DOCKER_LOG"',
+        "exit 0",
+      ].join("\n")}\n`
+    );
+    await chmod(fakeDockerPath, 0o755);
+    process.env.PATH = `${fakeBinDir}:${originalPath ?? ""}`;
+    process.env.HACK_TEST_DOCKER_LOG = dockerLogPath;
 
     const result = await runCliWithCapturedOutput([
       "restart",
@@ -138,23 +148,21 @@ test(
     ]);
 
     expect(result.exitCode).toBe(0);
-    expect(runtimeDownCalls).toHaveLength(1);
-    expect(runtimeUpCalls).toHaveLength(1);
+    const dockerLog = await readFile(dockerLogPath, "utf8");
+    const invocations = dockerLog
+      .split("---\n")
+      .map((chunk) => chunk.trim())
+      .filter((chunk) => chunk.length > 0);
 
-    const upCall = runtimeUpCalls[0];
-    if (!upCall) {
-      throw new Error("Missing runtime up call");
-    }
-
-    const upEnvRaw = upCall.env;
-    if (!upEnvRaw || typeof upEnvRaw !== "object") {
-      throw new Error("Missing runtime up env");
-    }
-
-    const upEnv = upEnvRaw as Record<string, string>;
-
-    expect(upEnv.DATABASE_URL).toBe(
-      "mysql://docker@host.docker.internal:3306/docker"
+    expect(invocations.length).toBeGreaterThan(0);
+    const upInvocation = invocations.find((chunk) => chunk.includes(" up"));
+    expect(upInvocation).toBeDefined();
+    expect(upInvocation).toContain("args:compose -f");
+    expect(upInvocation).toContain(
+      "DATABASE_URL:mysql://docker@host.docker.internal:3306/docker"
+    );
+    expect(dockerLog).not.toContain(
+      "DATABASE_URL:mysql://base@127.0.0.1:3306/base"
     );
   },
   { timeout: 20_000 }

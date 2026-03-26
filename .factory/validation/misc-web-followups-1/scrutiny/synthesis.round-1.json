@@ -1,0 +1,53 @@
+{
+  "milestone": "misc-web-followups-1",
+  "round": 1,
+  "status": "fail",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "bun run test",
+      "exitCode": 0
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "bun run typecheck",
+      "exitCode": 0
+    },
+    "lint": {
+      "passed": true,
+      "command": "bun run check",
+      "exitCode": 0
+    }
+  },
+  "reviewsSummary": {
+    "total": 2,
+    "passed": 1,
+    "failed": 1,
+    "failedFeatures": ["account-shell-hydration-console-error-followup"]
+  },
+  "blockingIssues": [
+    {
+      "featureId": "account-shell-hydration-console-error-followup",
+      "file": "apps/web/tests/account-shell.test.tsx",
+      "line": 661,
+      "severity": "blocking",
+      "description": "The new regression only exercises the signed-out shell while the shared Linear fixture still keeps `audit: null`, so it never renders the populated delivery/closeout audit cards from the original `/account` validation flow and leaves the real audited path unguarded."
+    }
+  ],
+  "nonBlockingIssues": [],
+  "appliedUpdates": [
+    {
+      "target": "library",
+      "description": "Documented the approved `<tmp-home>` and `<tmp-daemon-sock>` placeholders for committed mission-artifact sanitization evidence.",
+      "sourceFeature": "misc-env-validation-artifact-privacy-sanitization-followup"
+    },
+    {
+      "target": "library",
+      "description": "Documented that account-shell regressions touching the Linear section should reference the validated routed `/account` audit state instead of relying only on `audit: null` fixtures.",
+      "sourceFeature": "account-shell-hydration-console-error-followup"
+    }
+  ],
+  "suggestedGuidanceUpdates": [],
+  "rejectedObservations": [],
+  "previousRound": null
+}

@@ -1,28 +1,28 @@
 {
   "featureId": "account-shell-hydration-console-error-followup",
-  "reviewedAt": "2026-03-26T01:04:13Z",
+  "reviewedAt": "2026-03-26T01:19:21Z",
   "commitId": "f31995614069acf3aa7fd90c01bd16a3a9d04e64",
   "transcriptSkeletonReviewed": true,
   "diffReviewed": true,
   "status": "fail",
   "codeReview": {
-    "summary": "Reviewed the feature entry, mission guidance, worker handoff, transcript skeleton for session `824eff39-8c58-421f-a3cc-a18ff5e48012`, the `web-control-plane-worker` skill, shared-state docs, and commit `f31995614069acf3aa7fd90c01bd16a3a9d04e64`. The markup changes in `account-control-plane-sections.tsx` and `linear-management-section.tsx` are directionally correct and align with the browser proof in the handoff, but the new regression does not cover the populated Linear audit state that the original `/account` hydration follow-up came from. The only new semantic assertion runs on a signed-out fixture, while the test fixture still keeps `linearManagement.audit` null, so it never renders the delivery/closeout cards that env-hardening user testing explicitly exercised on the affected route. That leaves the actual audited Linear path unguarded, so the feature does not yet fully satisfy the expected regression-coverage requirement.",
+    "summary": "Re-reviewed the feature entry, mission guidance, prior scrutiny context, the session `16db9c85-5f40-42d4-ba20-53ebbda077a9` handoff/transcript skeleton, the `web-control-plane-worker` skill, and current HEAD for `apps/web` tests/components. The component-side fix from `f31995614069acf3aa7fd90c01bd16a3a9d04e64` is still present and correctly wraps the affected audit/detail cards in `dl` containers, but no later code change has added structural regression coverage for the populated Linear audit-card path. `apps/web/tests/account-shell.test.tsx` still runs `findDescriptionListViolations` only against the signed-out `audit: null` shell, and `apps/web/tests/linear-management.test.ts` still checks populated audit content without asserting description-list semantics. Because the validated routed `/account` flow that originally logged the hydration error included populated delivery and closeout audit cards, the prior blocking coverage gap still stands on current HEAD.",
     "issues": [
       {
         "file": "apps/web/tests/account-shell.test.tsx",
         "line": 661,
         "severity": "blocking",
-        "description": "The new `findDescriptionListViolations` assertion only runs in the signed-out shell test (`apps/web/tests/account-shell.test.tsx:661-680`), and the shared Linear fixture still sets `audit: null` (`apps/web/tests/account-shell.test.tsx:136`). Env-hardening evidence for this follow-up explicitly covered a routed `/account` state with populated delivery and closeout audit data (`.factory/validation/env-hardening-closeout/user-testing/flows/web-env-linear-state.json:23,39`), which is where the changed `DeliveryAuditCard`/`CloseoutAuditCard` markup matters. Because the regression never renders that audited state, a future `dt`/`dd` regression in the real Linear audit path would still pass tests."
+        "description": "The only structural regression assertion for this follow-up still lives in the signed-out shell test (`apps/web/tests/account-shell.test.tsx:661-680`), while the shared fixture keeps `linearManagement.audit` null (`apps/web/tests/account-shell.test.tsx:136`). That means the account-shell suite never renders the populated delivery/closeout audit cards from the routed `/account` validation evidence in `.factory/validation/env-hardening-closeout/user-testing/flows/web-env-linear-state.json`, so the real audited path remains unguarded."
+      },
+      {
+        "file": "apps/web/tests/linear-management.test.ts",
+        "line": 527,
+        "severity": "blocking",
+        "description": "Current populated-audit coverage still verifies only rendered text (`Repo audit trail`, `Latest delivery reconciliation`, `Mission closeout audit`, etc. at `apps/web/tests/linear-management.test.ts:678-697`) and never checks `dl`/`dt`/`dd` structure. A future regression that reintroduces invalid description-list markup inside `DeliveryAuditCard` or `CloseoutAuditCard` would therefore still pass the populated-audit test."
       }
     ]
   },
-  "sharedStateObservations": [
-    {
-      "area": "knowledge",
-      "observation": "The mission's durable record of the populated `/account` Linear audit state lives in the env-hardening validation artifact, but the shared library docs do not surface that state as a reusable account-shell fixture or follow-up note. That makes it easy for later work to regression-test only `audit: null` shells even when the real routed proof included delivery/closeout cards.",
-      "evidence": "`.factory/validation/env-hardening-closeout/user-testing/flows/web-env-linear-state.json:23,39` documents the routed browser state with delivery/closeout evidence, while `.factory/library/web-control-plane.md` and `.factory/library/user-testing.md` only give general shell/bootstrap guidance; the landed test fixture remains `audit: null` in `apps/web/tests/account-shell.test.tsx:136`."
-    }
-  ],
+  "sharedStateObservations": [],
   "addressesFailureFrom": null,
-  "summary": "Fail. The markup fix itself looks correct, but the landed regression does not exercise the populated Linear delivery/closeout audit state from the original `/account` validation flow, so the feature's regression coverage is incomplete. Wrote this review report to `.factory/validation/misc-web-followups-1/scrutiny/reviews/account-shell-hydration-console-error-followup.json`."
+  "summary": "Fail. Current HEAD still does not add structural regression coverage for the populated Linear delivery/closeout audit-card state from the original routed `/account` hydration report, so the prior blocking issue remains unresolved."
 }

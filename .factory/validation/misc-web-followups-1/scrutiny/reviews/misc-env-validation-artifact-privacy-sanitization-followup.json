@@ -13,7 +13,7 @@
     {
       "area": "knowledge",
       "observation": "The mission's validation-evidence placeholder guidance still does not document the now-approved daemon-specific placeholders `<tmp-home>` and `<tmp-daemon-sock>`. This feature had to infer and normalize those forms in code/artifacts even though the shared guidance only names the older generic placeholders.",
-      "evidence": "`/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/AGENTS.md:29` requires sanitized committed mission artifacts, `.factory/library/user-testing.md:67` still lists placeholders such as `<repo>`, `<isolated-worktree:...>`, `<mission-dir>`, and `<tmp>`, while this feature hard-codes `<tmp-daemon-sock>` and `<tmp-home>` in `src/lib/privacy-check.ts:199-204` and the tracked validation artifacts already rely on them at `.factory/validation/env-hardening-closeout/user-testing/flows/env-guards-daemon-current-branch.json:10-12` and `.factory/validation/misc-env-followups-1/user-testing/flows/malformed-env-contract-cli-daemon.json:9-16`."
+      "evidence": "`<mission-dir>/AGENTS.md:29` requires sanitized committed mission artifacts, `.factory/library/user-testing.md:67` still lists placeholders such as `<repo>`, `<isolated-worktree:...>`, `<mission-dir>`, and `<tmp>`, while this feature hard-codes `<tmp-daemon-sock>` and `<tmp-home>` in `src/lib/privacy-check.ts:199-204` and the tracked validation artifacts already rely on them at `.factory/validation/env-hardening-closeout/user-testing/flows/env-guards-daemon-current-branch.json:10-12` and `.factory/validation/misc-env-followups-1/user-testing/flows/malformed-env-contract-cli-daemon.json:9-16`."
     }
   ],
   "addressesFailureFrom": null,

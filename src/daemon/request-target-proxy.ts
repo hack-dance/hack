@@ -14,7 +14,7 @@ const HEADER_TERMINATOR = "\r\n\r\n";
 const BAD_REQUEST_STATUS_LINE = "HTTP/1.1 400 Bad Request";
 type BinaryBuffer = Buffer<ArrayBufferLike>;
 
-type ProxyListenTarget =
+export type ProxyListenTarget =
   | { readonly unix: string }
   | { readonly host: string; readonly port: number };
 
@@ -30,6 +30,7 @@ type EventfulServer = Server & {
 };
 
 export interface RequestTargetProxy {
+  readonly listen: ProxyListenTarget;
   close(): Promise<void>;
 }
 
@@ -61,8 +62,13 @@ export async function startRequestTargetProxy(opts: {
     server,
     listen: opts.listen,
   });
+  const effectiveListen = resolveEffectiveListenTarget({
+    server,
+    requestedListen: opts.listen,
+  });
 
   return {
+    listen: effectiveListen,
     close: async () => {
       for (const socket of activeSockets) {
         socket.destroy();
@@ -72,6 +78,25 @@ export async function startRequestTargetProxy(opts: {
         await removeFileIfExists({ path: opts.listen.unix });
       }
     },
+  };
+}
+
+function resolveEffectiveListenTarget(opts: {
+  readonly server: Server;
+  readonly requestedListen: ProxyListenTarget;
+}): ProxyListenTarget {
+  if ("unix" in opts.requestedListen) {
+    return opts.requestedListen;
+  }
+
+  const address = opts.server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Request target proxy did not expose a TCP listen address");
+  }
+
+  return {
+    host: address.address,
+    port: address.port,
   };
 }
 

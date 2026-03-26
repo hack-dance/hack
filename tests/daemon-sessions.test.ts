@@ -1,15 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { execSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
 import {
   createConnection,
   createServer,
   type Server,
   type Socket,
 } from "node:net";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 import {
   validateControlPlaneRouteTarget,
@@ -67,6 +64,10 @@ async function parseResponse(
 
 type TestHttpServer = {
   readonly requestTargets: string[];
+  readonly target: {
+    readonly host: string;
+    readonly port: number;
+  };
   close(): Promise<void>;
 };
 
@@ -81,17 +82,21 @@ async function createRequestTargetProxyTestContext(): Promise<{
   readonly requestTargets: string[];
   close(): Promise<void>;
 }> {
-  const root = await mkdtemp(join(tmpdir(), "hack-request-target-proxy-"));
-  const upstreamSocketPath = join(root, "upstream.sock");
-  const proxySocketPath = join(root, "proxy.sock");
   const upstreamServer = await startTestHttpServer({
-    socketPath: upstreamSocketPath,
+    host: "127.0.0.1",
+    port: 0,
   });
   const proxy = await startRequestTargetProxy({
-    listen: { unix: proxySocketPath },
-    target: { unix: upstreamSocketPath },
+    listen: { host: "127.0.0.1", port: 0 },
+    target: upstreamServer.target,
   });
-  const client = await connectRawHttpClient({ socketPath: proxySocketPath });
+  if (!("host" in proxy.listen)) {
+    throw new Error("Expected request target proxy to listen on TCP");
+  }
+  const client = await connectRawHttpClient({
+    host: proxy.listen.host,
+    port: proxy.listen.port,
+  });
 
   return {
     client,
@@ -100,13 +105,13 @@ async function createRequestTargetProxyTestContext(): Promise<{
       await client.close();
       await proxy.close();
       await upstreamServer.close();
-      await rm(root, { recursive: true, force: true });
     },
   };
 }
 
 async function startTestHttpServer(opts: {
-  readonly socketPath: string;
+  readonly host: string;
+  readonly port: number;
 }): Promise<TestHttpServer> {
   const requestTargets: string[] = [];
   const sockets = new Set<Socket>();
@@ -142,28 +147,33 @@ async function startTestHttpServer(opts: {
     });
   });
 
-  await listenUnixServer({
+  const port = await listenTcpServer({
     server,
-    socketPath: opts.socketPath,
+    host: opts.host,
+    port: opts.port,
   });
 
   return {
     requestTargets,
+    target: {
+      host: opts.host,
+      port,
+    },
     close: async () => {
       for (const socket of sockets) {
         socket.destroy();
       }
       await closeNetServer({ server });
-      await rm(opts.socketPath, { force: true });
     },
   };
 }
 
 async function connectRawHttpClient(opts: {
-  readonly socketPath: string;
+  readonly host: string;
+  readonly port: number;
 }): Promise<RawHttpClient> {
   const socket = await new Promise<Socket>((resolve, reject) => {
-    const client = createConnection({ path: opts.socketPath }, () =>
+    const client = createConnection({ host: opts.host, port: opts.port }, () =>
       resolve(client)
     );
     client.on("error", reject);
@@ -312,17 +322,22 @@ function extractRequestTargetFromLine(opts: {
   return requestTarget;
 }
 
-async function listenUnixServer(opts: {
+async function listenTcpServer(opts: {
   readonly server: Server;
-  readonly socketPath: string;
-}): Promise<void> {
-  await rm(opts.socketPath, { force: true });
+  readonly host: string;
+  readonly port: number;
+}): Promise<number> {
   const listeningPromise = once(opts.server as never, "listening");
   const errorPromise = once(opts.server as never, "error").then(([error]) =>
     Promise.reject(error)
   );
-  opts.server.listen(opts.socketPath);
+  opts.server.listen(opts.port, opts.host);
   await Promise.race([listeningPromise, errorPromise]);
+  const address = opts.server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Expected TCP server address after listen");
+  }
+  return address.port;
 }
 
 async function closeNetServer(opts: {

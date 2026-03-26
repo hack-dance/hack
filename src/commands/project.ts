@@ -4834,7 +4834,7 @@ async function handleRestart({
   });
 }
 
-async function resolveStoredRuntimeEnvName(opts: {
+export async function resolveStoredRuntimeEnvName(opts: {
   readonly requestedEnvName: string | null | undefined;
   readonly projectDir: string;
   readonly composeProject: string;

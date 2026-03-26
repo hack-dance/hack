@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
+import { type ReactElement, type ReactNode, Suspense } from "react";
 import { hydrateRoot } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 
@@ -175,6 +176,24 @@ const githubManagement = {
 test("account page forces a fresh server render for cold authenticated bootstraps", () => {
   expect(accountPageModule.dynamic).toBe("force-dynamic");
   expect(accountPageModule.fetchCache).toBe("force-no-store");
+});
+
+test("account page route keeps the page-level loading fallback around the async shell bootstrap", () => {
+  const routeElement = accountPageModule.default({
+    searchParams: new Promise<Record<string, string | string[] | undefined>>(
+      (_resolve) => void _resolve
+    ),
+  }) as ReactElement<{ readonly fallback: ReactNode }>;
+  const routeMarkup = renderToString(routeElement);
+
+  expect(routeElement.type).toBe(Suspense);
+  expect(renderToString(routeElement.props.fallback)).toContain(
+    "Loading account context"
+  );
+  expect(routeMarkup).toContain("Loading account context");
+  expect(routeMarkup).toContain('href="#main-content"');
+  expect(routeMarkup).toContain('id="main-content"');
+  expect(routeMarkup).not.toContain("Mission closeout audit");
 });
 
 test("account shell loading fallback keeps a focusable main region", () => {

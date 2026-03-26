@@ -482,6 +482,77 @@ test(
 );
 
 test(
+  "env set fails closed when hack.env.json has semantically invalid var metadata",
+  async () => {
+    if (!tempDir) {
+      throw new Error("Missing temp dir");
+    }
+    const projectRoot = resolve(tempDir, "repo-invalid-contract-shape");
+    const projectDir = resolve(projectRoot, ".hack");
+    await mkdir(projectDir, { recursive: true });
+    await writeFile(
+      resolve(projectDir, "docker-compose.yml"),
+      "services: {}\n"
+    );
+    await writeFile(
+      resolve(projectDir, "hack.config.json"),
+      `${JSON.stringify(
+        {
+          name: "env-invalid-contract-shape-project",
+          controlPlane: {
+            secrets: {
+              backend: "encrypted_file",
+              encryptedFile: {
+                path: resolve(tempDir, "invalid-contract-shape.enc.json"),
+              },
+            },
+          },
+        },
+        null,
+        2
+      )}\n`
+    );
+    await writeFile(
+      resolve(projectDir, "hack.env.json"),
+      `${JSON.stringify(
+        {
+          version: 1,
+          vars: [
+            {
+              key: "SECRET_TOKEN",
+              required: false,
+              source: 5,
+            },
+          ],
+        },
+        null,
+        2
+      )}\n`
+    );
+
+    const result = await runHack({
+      args: ["env", "set", "SECRET_TOKEN=super-secret"],
+      env: {
+        ...process.env,
+        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
+      },
+      cwd: projectRoot,
+    });
+    expect(result.exitCode).toBe(1);
+    expect(`${result.stdout}\n${result.stderr}`).toContain("hack.env.json");
+    expect(`${result.stdout}\n${result.stderr}`).toContain("malformed");
+    expect(`${result.stdout}\n${result.stderr}`).toContain(
+      "Fix or remove the contract file"
+    );
+    const envText = await readFile(resolve(projectDir, ".env"), "utf8").catch(
+      () => ""
+    );
+    expect(envText).not.toContain("super-secret");
+  },
+  { timeout: 40_000 }
+);
+
+test(
   "env set still allows plaintext writes when hack.env.json is absent",
   async () => {
     if (!tempDir) {

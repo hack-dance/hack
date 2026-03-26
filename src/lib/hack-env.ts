@@ -13,6 +13,7 @@ import type { SecretStoreDescriptor } from "./secret-store.ts";
 import { resolveSecretStore } from "./secret-store.ts";
 
 export const HACK_ENV_VERSION = 1 as const;
+const HACK_ENV_KEY_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
 
 export type HackEnvSource = "plain_env" | "keychain";
 
@@ -56,6 +57,26 @@ export type HackEnvReadResult = {
   readonly contract: HackEnvContract;
   readonly parseError?: string;
 };
+
+type HackEnvContractParseResult =
+  | {
+      readonly ok: true;
+      readonly contract: HackEnvContract;
+    }
+  | {
+      readonly ok: false;
+      readonly error: string;
+    };
+
+type HackEnvVarParseResult =
+  | {
+      readonly ok: true;
+      readonly value: HackEnvVar;
+    }
+  | {
+      readonly ok: false;
+      readonly error: string;
+    };
 
 export type HackEnvValueState = {
   readonly key: string;
@@ -144,16 +165,16 @@ export async function readHackEnvContract(opts: {
   }
 
   const contract = parseHackEnvContract(parsed);
-  if (!contract) {
+  if (!contract.ok) {
     return {
       path,
       exists: true,
       contract: defaultHackEnvContract(),
-      parseError: "Invalid hack.env.json format",
+      parseError: contract.error,
     };
   }
 
-  return { path, exists: true, contract };
+  return { path, exists: true, contract: contract.contract };
 }
 
 export async function resolveHackEnv(opts: {
@@ -371,64 +392,136 @@ function defaultHackEnvContract(): HackEnvContract {
   return { version: HACK_ENV_VERSION, vars: [] };
 }
 
-function parseHackEnvContract(value: unknown): HackEnvContract | null {
+function parseHackEnvContract(value: unknown): HackEnvContractParseResult {
   if (!isRecord(value)) {
-    return null;
+    return { ok: false, error: "Contract root must be an object." };
+  }
+  if ("$schema" in value && typeof value.$schema !== "string") {
+    return { ok: false, error: 'Field "$schema" must be a string.' };
   }
   const versionRaw = value.version;
   const version = typeof versionRaw === "number" ? versionRaw : null;
   if (version !== HACK_ENV_VERSION) {
-    return null;
+    return {
+      ok: false,
+      error: `Field "version" must be ${HACK_ENV_VERSION}.`,
+    };
   }
 
   const varsRaw = value.vars;
   if (!Array.isArray(varsRaw)) {
-    return null;
+    return { ok: false, error: 'Field "vars" must be an array.' };
   }
 
   const vars: HackEnvVar[] = [];
-  for (const entry of varsRaw) {
-    const parsed = parseHackEnvVar(entry);
-    if (parsed) {
-      vars.push(parsed);
+  for (const [index, entry] of varsRaw.entries()) {
+    const parsed = parseHackEnvVar({ value: entry });
+    if (!parsed.ok) {
+      return {
+        ok: false,
+        error: `Field "vars[${index}]" is invalid: ${parsed.error}`,
+      };
     }
+    vars.push(parsed.value);
   }
 
   return {
-    $schema: getString(value, "$schema") ?? undefined,
-    version: HACK_ENV_VERSION,
-    vars,
+    ok: true,
+    contract: {
+      $schema: getString(value, "$schema") ?? undefined,
+      version: HACK_ENV_VERSION,
+      vars,
+    },
   };
 }
 
-function parseHackEnvVar(value: unknown): HackEnvVar | null {
-  if (!isRecord(value)) {
-    return null;
+function parseHackEnvVar(input: {
+  readonly value: unknown;
+}): HackEnvVarParseResult {
+  if (!isRecord(input.value)) {
+    return { ok: false, error: "Expected an object." };
   }
-  const key = getString(value, "key");
-  if (!key) {
-    return null;
+  const key = getString(input.value, "key");
+  if (!(key && HACK_ENV_KEY_PATTERN.test(key))) {
+    return {
+      ok: false,
+      error:
+        'Field "key" must be an uppercase snake-case env var name (for example "DATABASE_URL").',
+    };
   }
-  const required = value.required === true;
-  const sourceRaw = getString(value, "source") ?? "plain_env";
-  const source: HackEnvSource =
-    sourceRaw === "keychain" ? "keychain" : "plain_env";
 
-  const servicesRaw = value.services;
-  const services = Array.isArray(servicesRaw)
-    ? servicesRaw
-        .map((v) => (typeof v === "string" ? v.trim() : ""))
-        .filter((v) => v.length > 0)
-    : null;
+  if ("required" in input.value && typeof input.value.required !== "boolean") {
+    return {
+      ok: false,
+      error: 'Field "required" must be a boolean when provided.',
+    };
+  }
+  const required = input.value.required === true;
 
-  const description = getString(value, "description") ?? undefined;
+  const sourceRaw = getString(input.value, "source");
+  if (
+    "source" in input.value &&
+    sourceRaw !== "plain_env" &&
+    sourceRaw !== "keychain"
+  ) {
+    return {
+      ok: false,
+      error: 'Field "source" must be "plain_env" or "keychain" when provided.',
+    };
+  }
+  const source = sourceRaw ?? "plain_env";
+
+  const servicesRaw = input.value.services;
+  if (
+    servicesRaw !== undefined &&
+    servicesRaw !== null &&
+    !Array.isArray(servicesRaw)
+  ) {
+    return {
+      ok: false,
+      error:
+        'Field "services" must be null or an array of non-empty strings when provided.',
+    };
+  }
+  let services: readonly string[] | null = null;
+  if (Array.isArray(servicesRaw)) {
+    const parsedServices: string[] = [];
+    for (const [index, service] of servicesRaw.entries()) {
+      if (
+        typeof service !== "string" ||
+        service.length === 0 ||
+        service.trim() !== service
+      ) {
+        return {
+          ok: false,
+          error: `Field "services[${index}]" must be a non-empty string without surrounding whitespace.`,
+        };
+      }
+      parsedServices.push(service);
+    }
+    services = parsedServices;
+  }
+
+  if (
+    "description" in input.value &&
+    typeof input.value.description !== "string"
+  ) {
+    return {
+      ok: false,
+      error: 'Field "description" must be a string when provided.',
+    };
+  }
+  const description = getString(input.value, "description");
 
   return {
-    key,
-    required,
-    source,
-    services,
-    ...(description ? { description } : {}),
+    ok: true,
+    value: {
+      key,
+      required,
+      source,
+      services,
+      ...(description !== undefined ? { description } : {}),
+    },
   };
 }
 

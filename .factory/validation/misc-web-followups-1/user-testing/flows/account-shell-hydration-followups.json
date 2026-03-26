@@ -1,0 +1,57 @@
+{
+  "testedAt": "2026-03-26T03:09:17.916764Z",
+  "surface": "Web surface (routed authenticated /account bootstrap)",
+  "toolsUsed": ["agent-browser", "curl", "bun test", "python3"],
+  "assertionResults": [],
+  "nonContractChecks": [
+    {
+      "id": "account-shell-hydration-followups",
+      "status": "pass",
+      "reason": "From a fresh browser session bootstrapped through the routed Better Auth broker, the first authenticated load reached https://hack-cli.hack/account without captured browser errors. The rendered page still showed the populated Linear repo audit trail, including Latest delivery reconciliation, Mission closeout audit, Resolved 13/13, Unresolved 0, and Delivery audit state available. Targeted account-shell and linear-management tests also passed and corroborated the hydrated populated-audit path.",
+      "evidence": [
+        "misc-web-followups-1/account-shell-hydration-followups/auth-bootstrap-summary.json",
+        "misc-web-followups-1/account-shell-hydration-followups/current-url.txt",
+        "misc-web-followups-1/account-shell-hydration-followups/account-shell-page.full.png",
+        "misc-web-followups-1/account-shell-hydration-followups/account-shell-page.annotated.png",
+        "misc-web-followups-1/account-shell-hydration-followups/account-shell-page.snapshot.txt",
+        "misc-web-followups-1/account-shell-hydration-followups/browser-dom-summary.json",
+        "misc-web-followups-1/account-shell-hydration-followups/browser-errors-summary.txt",
+        "misc-web-followups-1/account-shell-hydration-followups/browser-console-summary.txt",
+        "misc-web-followups-1/account-shell-hydration-followups/browser-network-summary.txt",
+        "misc-web-followups-1/account-shell-hydration-followups/targeted-tests.txt"
+      ]
+    }
+  ],
+  "frictions": [
+    {
+      "description": "agent-browser did not capture request entries for the routed /account SSR flow in this session.",
+      "resolved": true,
+      "resolution": "Used URL capture, screenshots, DOM text extraction, and targeted automated tests instead of relying on the empty request log.",
+      "affectedAssertions": ["account-shell-hydration-followups"]
+    }
+  ],
+  "blockers": [],
+  "commands": [
+    {
+      "command": "curl -ksSf https://hack-cli.hack && curl -ksSf https://auth.hack-cli.hack/health && curl -ksS -c <tmp>/better-auth.cookies.txt -b <tmp>/better-auth.cookies.txt -H \"origin: https://auth.hack-cli.hack\" -H \"referer: https://auth.hack-cli.hack/\" -H \"content-type: application/json\" -X POST https://auth.hack-cli.hack/api/auth/sign-up/email --data ...",
+      "exitCode": 0,
+      "observation": "Both routed hosts were healthy, and a disposable Better Auth email/password account was created successfully for the isolated browser validation flow."
+    },
+    {
+      "command": "agent-browser --session 9991632b18a0__u1 open https://auth.hack-cli.hack/health && agent-browser --session 9991632b18a0__u1 cookies set __Secure-better-auth.session_token <redacted> && agent-browser --session 9991632b18a0__u1 open https://auth.hack-cli.hack/auth/account?bridge=1&redirect=https%3A%2F%2Fhack-cli.hack%2Faccount && agent-browser --session 9991632b18a0__u1 screenshot --full <mission-dir>/evidence/.../account-shell-page.full.png && agent-browser --session 9991632b18a0__u1 errors",
+      "exitCode": 0,
+      "observation": "The fresh authenticated browser session landed on https://hack-cli.hack/account, produced no captured browser errors, and rendered the populated account shell with the Linear repo audit trail visible."
+    },
+    {
+      "command": "agent-browser --session 9991632b18a0__u1 eval --stdin ... > <mission-dir>/evidence/.../browser-dom-summary.json",
+      "exitCode": 0,
+      "observation": "DOM extraction confirmed Latest delivery reconciliation, Mission closeout audit, Mission closeout, Resolved 13/13, Unresolved 0, and Delivery audit state available on the rendered page."
+    },
+    {
+      "command": "cd <repo> && bun test ./apps/web/tests/account-shell-hydration.test.tsx ./apps/web/tests/account-shell.test.tsx ./apps/web/tests/linear-management.test.ts",
+      "exitCode": 0,
+      "observation": "All 21 targeted tests passed, including the cold authenticated hydration regression and the populated routed Linear audit path coverage."
+    }
+  ],
+  "summary": "Non-contract check passed. A fresh authenticated routed /account load showed no captured hydration or console errors, and the populated Linear delivery plus closeout audit UI still rendered."
+}

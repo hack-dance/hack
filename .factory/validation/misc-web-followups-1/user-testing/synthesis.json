@@ -1,0 +1,28 @@
+{
+  "milestone": "misc-web-followups-1",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 0,
+    "passed": 0,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [],
+  "previousRound": null,
+  "selection": {
+    "mappedAssertions": [],
+    "reason": "No completed implementation features in this milestone declared validation-contract assertion IDs in fulfills, so user testing ran as a non-contract routed /account hydration and populated Linear audit smoke for the web follow-up fixes."
+  },
+  "nonContractChecks": [
+    {
+      "id": "account-shell-hydration-followups",
+      "status": "pass",
+      "reason": "From a fresh browser session bootstrapped through the routed Better Auth broker, the first authenticated load reached https://hack-cli.hack/account without captured browser errors. The rendered page still showed the populated Linear repo audit trail, including Latest delivery reconciliation, Mission closeout audit, Resolved 13/13, Unresolved 0, and Delivery audit state available. Targeted account-shell and linear-management tests also passed and corroborated the hydrated populated-audit path.",
+      "flowReport": ".factory/validation/misc-web-followups-1/user-testing/flows/account-shell-hydration-followups.json"
+    }
+  ]
+}

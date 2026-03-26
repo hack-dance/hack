@@ -1,0 +1,28 @@
+{
+  "milestone": "misc-env-followups-1",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 0,
+    "passed": 0,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [],
+  "previousRound": null,
+  "selection": {
+    "mappedAssertions": [],
+    "reason": "No completed implementation features in this milestone declared validation-contract assertion IDs in fulfills, so user testing ran as a non-contract CLI and isolated-daemon smoke for malformed-hack-env-contract-fail-closed-followup."
+  },
+  "nonContractChecks": [
+    {
+      "id": "malformed-hack-env-contract-fail-closed-followup",
+      "status": "pass",
+      "reason": "After rebuilding the repo-bound CLI binary, both the real CLI env-set path and an isolated current-branch daemon POST /v1/env/set failed closed for broken-JSON and semantically invalid hack.env.json contracts, returned explicit malformed-contract guidance, and kept plaintext secrets out of .hack/.env.",
+      "flowReport": ".factory/validation/misc-env-followups-1/user-testing/flows/malformed-env-contract-cli-daemon.json"
+    }
+  ]
+}

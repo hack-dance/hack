@@ -1,0 +1,98 @@
+{
+  "groupId": "malformed-env-contract-cli-daemon",
+  "testedAt": "2026-03-26T00:30:54.008771Z",
+  "isolation": {
+    "repoRoot": "<repo>",
+    "missionDir": "<mission-dir>",
+    "tempRoot": "<tmp>",
+    "tempProjectRoot": "<tmp>/project",
+    "tempHome": "<tmp>/home",
+    "tempGlobalConfigPath": "<tmp>/cli-state/global-config.json",
+    "tempProjectsRegistryPath": "<tmp>/cli-state/projects.json",
+    "tempTmuxDir": "<tmp>/tmux",
+    "evidenceDir": "<mission-dir>/evidence/misc-env-followups-1/malformed-env-contract-cli-daemon",
+    "cliBinary": "<repo>/dist/hack",
+    "daemonCommand": "HOME=<tmp>/home HACK_GLOBAL_CONFIG_PATH=<tmp>/cli-state/global-config.json bun <repo>/index.ts daemon start --foreground",
+    "daemonSocket": "<tmp>/home/.hack/daemon/hackd.sock",
+    "projectName": "env-followups-user-test",
+    "projectId": "920c0e16535f"
+  },
+  "toolsUsed": [
+    "<repo>/dist/hack",
+    "bun <repo>/index.ts daemon start --foreground",
+    "curl",
+    "bun test",
+    "python3"
+  ],
+  "assertions": [
+    {
+      "id": "malformed-hack-env-contract-fail-closed-followup",
+      "title": "Malformed hack.env.json env mutation paths fail closed across CLI and daemon surfaces",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run repo-bound CLI plaintext env mutation against broken JSON contract",
+          "expected": "Command fails closed with malformed-contract guidance and plaintext secret stays out of .hack/.env",
+          "observed": "exit 1; hack.env.json=True; fix/remove=True; malformed=True; .env contains secret=False"
+        },
+        {
+          "action": "Run repo-bound CLI plaintext env mutation against JSON-valid semantically invalid var metadata",
+          "expected": "Command fails closed with malformed-contract guidance and plaintext secret stays out of .hack/.env",
+          "observed": "exit 1; hack.env.json=True; fix/remove=True; malformed=True; .env contains secret=False"
+        },
+        {
+          "action": "Start isolated current-branch daemon and POST /v1/env/set via unix socket against broken JSON contract",
+          "expected": "Route returns 409 malformed-contract guidance and plaintext secret stays out of .hack/.env",
+          "observed": "curl exit 0; http 409; hack.env.json=True; fix/remove=True; malformed=True; .env contains secret=False"
+        },
+        {
+          "action": "POST /v1/env/set via the isolated daemon against JSON-valid semantically invalid var metadata",
+          "expected": "Route returns 409 malformed-contract guidance and plaintext secret stays out of .hack/.env",
+          "observed": "curl exit 0; http 409; hack.env.json=True; fix/remove=True; malformed=True; .env contains secret=False"
+        },
+        {
+          "action": "Run targeted automated corroboration for env command and daemon route regressions",
+          "expected": "Specified bun test files pass",
+          "observed": "bun test exit 0"
+        }
+      ],
+      "evidence": {
+        "files": [
+          "misc-env-followups-1/malformed-env-contract-cli-daemon/cli-broken-json.txt",
+          "misc-env-followups-1/malformed-env-contract-cli-daemon/cli-broken-json-env-check.json",
+          "misc-env-followups-1/malformed-env-contract-cli-daemon/cli-semantic-invalid.txt",
+          "misc-env-followups-1/malformed-env-contract-cli-daemon/cli-semantic-invalid-env-check.json",
+          "misc-env-followups-1/malformed-env-contract-cli-daemon/daemon-readiness.json",
+          "misc-env-followups-1/malformed-env-contract-cli-daemon/daemon-broken-json.json",
+          "misc-env-followups-1/malformed-env-contract-cli-daemon/daemon-broken-json-env-check.json",
+          "misc-env-followups-1/malformed-env-contract-cli-daemon/daemon-semantic-invalid.json",
+          "misc-env-followups-1/malformed-env-contract-cli-daemon/daemon-semantic-invalid-env-check.json",
+          "misc-env-followups-1/malformed-env-contract-cli-daemon/daemon-session.log",
+          "misc-env-followups-1/malformed-env-contract-cli-daemon/daemon-stop-check.json",
+          "misc-env-followups-1/malformed-env-contract-cli-daemon/targeted-env-tests.txt"
+        ],
+        "consoleErrors": "not applicable (CLI and local HTTP validation)",
+        "network": "POST /v1/env/set over isolated unix socket returned 409 for both malformed classes"
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [
+    {
+      "description": "The previously built <repo>/dist/hack binary was stale and initially allowed plaintext writes for both malformed-contract CLI probes until the repo-local build was refreshed.",
+      "resolved": true,
+      "resolution": "Ran bun run build to regenerate <repo>/dist/hack from the current branch, then reran the CLI smoke against the rebuilt binary.",
+      "affectedAssertions": [
+        "malformed-hack-env-contract-fail-closed-followup"
+      ],
+      "evidence": [
+        "misc-env-followups-1/malformed-env-contract-cli-daemon/cli-broken-json-prebuild-stale.txt",
+        "misc-env-followups-1/malformed-env-contract-cli-daemon/cli-semantic-invalid-prebuild-stale.txt",
+        "misc-env-followups-1/malformed-env-contract-cli-daemon/cli-broken-json.txt",
+        "misc-env-followups-1/malformed-env-contract-cli-daemon/cli-semantic-invalid.txt"
+      ]
+    }
+  ],
+  "blockers": [],
+  "summary": "Non-contract smoke passed: rebuilt <repo>/dist/hack and the isolated current-branch daemon both failed closed for broken JSON and semantically invalid JSON-valid contracts, returned malformed-contract guidance mentioning hack.env.json plus \u201cFix or remove the contract file\u201d, kept the attempted plaintext secrets out of .hack/.env, and the targeted bun tests exited 0."
+}

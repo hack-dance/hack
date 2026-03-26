@@ -84,7 +84,17 @@ Resolution order:
 2. base value
 3. `process.env` fallback for `plain_env`
 
+For `plain_env` keys in bundled mode (`storePlaintextInBackend=true`), Hack resolves the selected overlay layer before the base layer regardless of whether the selected value comes from the bundled backend or `.hack/.env.<env>`. This keeps manual overlay files usable as compatibility overrides on top of bundled base values.
+
+Plaintext overlay files only participate for `plain_env` contract vars. If a key is declared as `source: "keychain"`, set the overlay value with `hack env set --env=<name> --secret KEY=VALUE` so Hack can resolve the env-scoped secret from the configured backend at runtime.
+
 Secret-backed overlay values are stored in the configured backend under env-scoped keys, so one encrypted backend can carry base plus multiple overlays together.
+
+Inspection:
+
+- `hack env list --env=<name>` shows the resolved overlay state and warns when a selected plaintext overlay file contains keys declared as `source: "keychain"`.
+- `hack env list --env=<name> --show-secrets` prints secret values in plaintext when you explicitly need to audit the selected overlay.
+- `hack doctor` checks the configured default overlay and warns if `.hack/.env.<name>` contains plaintext entries for secret-backed contract vars that Hack will ignore at runtime.
 
 Use `--env=base` to bypass the configured default overlay and operate on the base env only.
 

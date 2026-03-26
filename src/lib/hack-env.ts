@@ -103,6 +103,7 @@ export type HackEnvResolveResult = {
   readonly storage: HackEnvStorageSummary;
   readonly values: readonly HackEnvValueState[];
   readonly missingRequired: readonly HackEnvValueState[];
+  readonly warnings: readonly HackEnvWarning[];
   readonly envForCompose: Readonly<Record<string, string>>;
 };
 
@@ -112,6 +113,14 @@ export type HackEnvSelection = {
   readonly effectiveEnv: string | null;
   readonly overlayPath: string | null;
   readonly overlayExists: boolean;
+};
+
+export type HackEnvWarning = {
+  readonly kind: "overlay_plaintext_ignored_for_secret_contract";
+  readonly key: string;
+  readonly overlayPath: string;
+  readonly services: readonly string[] | null;
+  readonly message: string;
 };
 
 export type HackEnvPortableStateSummary = {
@@ -205,6 +214,11 @@ export async function resolveHackEnv(opts: {
       ? null
       : await readTextFile(envSelection.overlayPath);
   const overlayDotenv = overlayText ? parseDotEnv(overlayText) : {};
+  const warnings = collectOverlayPlaintextWarnings({
+    contract,
+    overlayPath: envSelection.overlayPath,
+    overlayDotenv,
+  });
 
   const envForCompose: Record<string, string> = {};
   const values: HackEnvValueState[] = [];
@@ -270,8 +284,31 @@ export async function resolveHackEnv(opts: {
     },
     values,
     missingRequired,
+    warnings,
     envForCompose,
   };
+}
+
+export async function inspectHackEnvOverlayWarnings(opts: {
+  readonly projectDir: string;
+  readonly envName?: string | null;
+}): Promise<readonly HackEnvWarning[]> {
+  const read = await readHackEnvContract({ projectDir: opts.projectDir });
+  const overlayPath =
+    opts.envName === null
+      ? null
+      : resolveEnvFilePath({
+          projectDir: opts.projectDir,
+          envName: opts.envName,
+        });
+  const overlayText =
+    overlayPath === null ? null : await readTextFile(overlayPath);
+  const overlayDotenv = overlayText ? parseDotEnv(overlayText) : {};
+  return collectOverlayPlaintextWarnings({
+    contract: read.contract,
+    overlayPath,
+    overlayDotenv,
+  });
 }
 
 export async function readHackEnvRuntimeConfig(opts: {
@@ -597,6 +634,47 @@ function describePortableState(input: {
   };
 }
 
+function collectOverlayPlaintextWarnings(input: {
+  readonly contract: HackEnvContract;
+  readonly overlayPath: string | null;
+  readonly overlayDotenv: Readonly<Record<string, string>>;
+}): HackEnvWarning[] {
+  if (input.overlayPath === null) {
+    return [];
+  }
+
+  const varsByKey = new Map(
+    input.contract.vars.map((contractVar) => [contractVar.key, contractVar])
+  );
+  const warnings: HackEnvWarning[] = [];
+
+  for (const key of Object.keys(input.overlayDotenv).sort()) {
+    const contractVar = varsByKey.get(key);
+    if (contractVar?.source !== "keychain") {
+      continue;
+    }
+    const overlayName = resolveOverlayNameFromPath({
+      overlayPath: input.overlayPath,
+    });
+    warnings.push({
+      kind: "overlay_plaintext_ignored_for_secret_contract",
+      key,
+      overlayPath: input.overlayPath,
+      services: contractVar.services,
+      message: `Selected overlay ${input.overlayPath} contains plaintext ${key}, but ${key} is declared as source "keychain" in .hack/hack.env.json. That plaintext overlay value is ignored. Use "hack env set --env ${overlayName} --secret ${key}=…" instead.`,
+    });
+  }
+
+  return warnings;
+}
+
+function resolveOverlayNameFromPath(input: {
+  readonly overlayPath: string;
+}): string {
+  const suffix = input.overlayPath.split(`${PROJECT_ENV_FILENAME}.`)[1] ?? "";
+  return suffix.trim() || "<env>";
+}
+
 async function resolveHackEnvSelection(opts: {
   readonly projectDir: string;
   readonly envName?: string | null;
@@ -707,38 +785,67 @@ async function resolvePlaintextValueState(opts: {
     readonly get: (input: { readonly key: string }) => Promise<string | null>;
   };
 }): Promise<HackEnvValueState> {
-  if (opts.storePlaintextInBackend) {
-    const fromPortableBackend = await resolveSecretValue({
-      secretStore: opts.secretStore,
-      key: opts.contractVar.key,
-      envName: opts.envName,
+  if (opts.storePlaintextInBackend && opts.envName) {
+    const fromOverlayPortableBackend = await opts.secretStore.get({
+      key: resolveEnvSecretKey({
+        key: opts.contractVar.key,
+        envName: opts.envName,
+      }),
     });
     if (
-      typeof fromPortableBackend === "string" &&
-      fromPortableBackend.length > 0
+      typeof fromOverlayPortableBackend === "string" &&
+      fromOverlayPortableBackend.length > 0
     ) {
       return {
         key: opts.contractVar.key,
         required: opts.contractVar.required,
         source: opts.contractVar.source,
         services: opts.contractVar.services,
-        value: fromPortableBackend,
+        value: fromOverlayPortableBackend,
         resolvedFrom: "portable_backend",
       };
     }
   }
 
-  const fromDotenv =
-    opts.overlayDotenv[opts.contractVar.key] ??
-    opts.baseDotenv[opts.contractVar.key] ??
-    null;
-  if (typeof fromDotenv === "string" && fromDotenv.length > 0) {
+  const fromOverlayDotenv = opts.overlayDotenv[opts.contractVar.key] ?? null;
+  if (typeof fromOverlayDotenv === "string" && fromOverlayDotenv.length > 0) {
     return {
       key: opts.contractVar.key,
       required: opts.contractVar.required,
       source: opts.contractVar.source,
       services: opts.contractVar.services,
-      value: fromDotenv,
+      value: fromOverlayDotenv,
+      resolvedFrom: "dotenv",
+    };
+  }
+
+  if (opts.storePlaintextInBackend) {
+    const fromBasePortableBackend = await opts.secretStore.get({
+      key: opts.contractVar.key,
+    });
+    if (
+      typeof fromBasePortableBackend === "string" &&
+      fromBasePortableBackend.length > 0
+    ) {
+      return {
+        key: opts.contractVar.key,
+        required: opts.contractVar.required,
+        source: opts.contractVar.source,
+        services: opts.contractVar.services,
+        value: fromBasePortableBackend,
+        resolvedFrom: "portable_backend",
+      };
+    }
+  }
+
+  const fromBaseDotenv = opts.baseDotenv[opts.contractVar.key] ?? null;
+  if (typeof fromBaseDotenv === "string" && fromBaseDotenv.length > 0) {
+    return {
+      key: opts.contractVar.key,
+      required: opts.contractVar.required,
+      source: opts.contractVar.source,
+      services: opts.contractVar.services,
+      value: fromBaseDotenv,
       resolvedFrom: "dotenv",
     };
   }

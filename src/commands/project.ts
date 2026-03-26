@@ -825,6 +825,18 @@ async function resolveComposeEnvOverrides(opts: {
     });
   }
 
+  for (const warning of resolved.warnings) {
+    if (
+      !isEnvVarRelevantToServices({
+        services: opts.targetServices,
+        varServices: warning.services,
+      })
+    ) {
+      continue;
+    }
+    logger.warn({ message: warning.message });
+  }
+
   if (resolved.contract.vars.length === 0) {
     return { composeFiles: [], env: {} };
   }

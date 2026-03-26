@@ -43,7 +43,10 @@ import {
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
-import { resolveEnvFilePath } from "../lib/hack-env.ts";
+import {
+  inspectHackEnvOverlayWarnings,
+  resolveEnvFilePath,
+} from "../lib/hack-env.ts";
 import {
   ensureBundledMutagenInstalled,
   getManagedMutagenAgentBundlePath,
@@ -355,6 +358,11 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     );
     results.push(
       await runCheck(s, "env mode", () => checkProjectEnvMode({ startDir }))
+    );
+    results.push(
+      await runCheck(s, "env overlay warnings", () =>
+        checkProjectEnvOverlayWarnings({ startDir })
+      )
     );
     results.push(
       await runCheck(
@@ -1534,6 +1542,57 @@ async function checkProjectEnvMode({
     message: overlayExists
       ? `defaultEnvConfig=${cfg.defaultEnvConfig} overlays ${overlayPath} on top of .hack/.env`
       : `defaultEnvConfig=${cfg.defaultEnvConfig} is set, but ${overlayPath} does not exist yet; base env will still apply`,
+  };
+}
+
+async function checkProjectEnvOverlayWarnings({
+  startDir,
+}: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const ctx = await findProjectContext(startDir);
+  if (!ctx) {
+    return {
+      name: "env overlay warnings",
+      status: "warn",
+      message: "No project detected",
+    };
+  }
+
+  const cfg = await readProjectConfig(ctx);
+  if (cfg.parseError) {
+    return {
+      name: "env overlay warnings",
+      status: "warn",
+      message: cfg.parseError,
+    };
+  }
+
+  if (!cfg.defaultEnvConfig) {
+    return {
+      name: "env overlay warnings",
+      status: "ok",
+      message: "No default overlay selected",
+    };
+  }
+
+  const warnings = await inspectHackEnvOverlayWarnings({
+    projectDir: ctx.projectDir,
+    envName: cfg.defaultEnvConfig,
+  });
+  if (warnings.length === 0) {
+    return {
+      name: "env overlay warnings",
+      status: "ok",
+      message: `No ignored plaintext secret entries detected in .hack/.env.${cfg.defaultEnvConfig}`,
+    };
+  }
+
+  const keys = warnings.map((warning) => warning.key).join(", ");
+  return {
+    name: "env overlay warnings",
+    status: "warn",
+    message: `defaultEnvConfig=${cfg.defaultEnvConfig} contains plaintext entries for secret-backed vars (${keys}). Those overlay values are ignored; use "hack env set --env ${cfg.defaultEnvConfig} --secret KEY=VALUE".`,
   };
 }
 

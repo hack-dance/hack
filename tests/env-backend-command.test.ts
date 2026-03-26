@@ -1259,6 +1259,186 @@ test(
   { timeout: 40_000 }
 );
 
+test(
+  "manual overlay .env files override bundled base plaintext values",
+  async () => {
+    if (!tempDir) {
+      throw new Error("Missing temp dir");
+    }
+    process.env.HACK_SECRETS_FILE_KEY = "env-overlay-manual-file-key";
+    const projectRoot = resolve(tempDir, "repo-overlay-manual-file");
+    const projectDir = resolve(projectRoot, ".hack");
+    const storePath = resolve(projectRoot, ".hack-secrets.enc.json");
+    await mkdir(projectDir, { recursive: true });
+    await writeFile(
+      resolve(projectDir, "docker-compose.yml"),
+      "services: {}\n"
+    );
+    await writeFile(
+      resolve(projectDir, "hack.config.json"),
+      `${JSON.stringify(
+        {
+          name: "env-overlay-manual-file-project",
+          controlPlane: {
+            secrets: {
+              backend: "encrypted_file",
+              storePlaintextInBackend: true,
+              encryptedFile: {
+                path: storePath,
+              },
+            },
+          },
+        },
+        null,
+        2
+      )}\n`
+    );
+    await writeFile(
+      resolve(projectDir, "hack.env.json"),
+      `${JSON.stringify(
+        {
+          version: 1,
+          vars: [
+            {
+              key: "PUBLIC_URL",
+              required: true,
+              source: "plain_env",
+            },
+          ],
+        },
+        null,
+        2
+      )}\n`
+    );
+
+    const baseSet = await runHack({
+      args: ["env", "set", "--env=base", "PUBLIC_URL=https://base.test"],
+      env: {
+        ...process.env,
+        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
+        HACK_SECRETS_FILE_KEY: "env-overlay-manual-file-key",
+      },
+      cwd: projectRoot,
+    });
+    expect(baseSet.exitCode).toBe(0);
+
+    await writeFile(
+      resolve(projectDir, ".env.qa"),
+      "PUBLIC_URL=https://qa-file.test\n"
+    );
+
+    const listResult = await runHack({
+      args: ["env", "list", "--json", "--show-secrets", "--env=qa"],
+      env: {
+        ...process.env,
+        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
+        HACK_SECRETS_FILE_KEY: "env-overlay-manual-file-key",
+      },
+      cwd: projectRoot,
+    });
+    expect(listResult.exitCode).toBe(0);
+    const listJson = JSON.parse(listResult.stdout) as {
+      readonly vars: ReadonlyArray<{
+        readonly key: string;
+        readonly resolved_from: string | null;
+        readonly value: string | null;
+      }>;
+    };
+    const publicUrl = listJson.vars.find((entry) => entry.key === "PUBLIC_URL");
+    expect(publicUrl?.resolved_from).toBe("dotenv");
+    expect(publicUrl?.value).toBe("https://qa-file.test");
+  },
+  { timeout: 40_000 }
+);
+
+test(
+  "env list reports ignored plaintext overlay entries for keychain vars",
+  async () => {
+    if (!tempDir) {
+      throw new Error("Missing temp dir");
+    }
+    process.env.HACK_SECRETS_FILE_KEY = "env-overlay-warning-key";
+    const projectRoot = resolve(tempDir, "repo-overlay-warning");
+    const projectDir = resolve(projectRoot, ".hack");
+    const storePath = resolve(projectRoot, ".hack-secrets.enc.json");
+    await mkdir(projectDir, { recursive: true });
+    await writeFile(
+      resolve(projectDir, "docker-compose.yml"),
+      "services: {}\n"
+    );
+    await writeFile(
+      resolve(projectDir, "hack.config.json"),
+      `${JSON.stringify(
+        {
+          name: "env-overlay-warning-project",
+          controlPlane: {
+            secrets: {
+              backend: "encrypted_file",
+              storePlaintextInBackend: true,
+              encryptedFile: {
+                path: storePath,
+              },
+            },
+          },
+        },
+        null,
+        2
+      )}\n`
+    );
+    await writeFile(
+      resolve(projectDir, "hack.env.json"),
+      `${JSON.stringify(
+        {
+          version: 1,
+          vars: [
+            {
+              key: "DATABASE_URL",
+              required: false,
+              source: "keychain",
+            },
+          ],
+        },
+        null,
+        2
+      )}\n`
+    );
+    await writeFile(
+      resolve(projectDir, ".env.qa"),
+      "DATABASE_URL=mysql://overlay.test/app\n"
+    );
+
+    const listResult = await runHack({
+      args: ["env", "list", "--json", "--env=qa"],
+      env: {
+        ...process.env,
+        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
+        HACK_SECRETS_FILE_KEY: "env-overlay-warning-key",
+      },
+      cwd: projectRoot,
+    });
+    expect(listResult.exitCode).toBe(0);
+    const listJson = JSON.parse(listResult.stdout) as {
+      readonly warnings: ReadonlyArray<{
+        readonly kind: string;
+        readonly key: string;
+        readonly overlay_path: string;
+        readonly message: string;
+      }>;
+    };
+    expect(listJson.warnings).toHaveLength(1);
+    expect(listJson.warnings[0]?.kind).toBe(
+      "overlay_plaintext_ignored_for_secret_contract"
+    );
+    expect(listJson.warnings[0]?.key).toBe("DATABASE_URL");
+    expect(listJson.warnings[0]?.overlay_path).toContain(".env.qa");
+    expect(listJson.warnings[0]?.message).toContain('source "keychain"');
+    expect(listJson.warnings[0]?.message).toContain(
+      "hack env set --env qa --secret DATABASE_URL"
+    );
+  },
+  { timeout: 40_000 }
+);
+
 async function runHack(input: {
   readonly args: readonly string[];
   readonly env: NodeJS.ProcessEnv;

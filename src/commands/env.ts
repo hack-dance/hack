@@ -397,86 +397,87 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
     envOption: args.options.env,
   });
 
-  let resolved: Awaited<ReturnType<typeof resolveHackEnv>>;
-  try {
-    resolved = await resolveHackEnv({
-      projectDir: project.projectDir,
+  const resolved = await loadResolvedEnvState({
+    projectDir: project.projectDir,
+    projectName,
+    envName,
+  });
+  if (resolved === null) {
+    return 1;
+  }
+
+  if (json) {
+    writeEnvListJson({
       projectName,
-      envName,
+      resolved,
+      showSecrets,
+    });
+    return resolved.missingRequired.length > 0 ? 1 : 0;
+  }
+
+  return await renderEnvListDisplay({
+    resolved,
+    projectDir: project.projectDir,
+    showSecrets,
+  });
+};
+
+function serializeEnvStorageForJson(input: {
+  readonly storage: HackEnvStorageSummary;
+}) {
+  return serializeEnvStorageForJsonShape(input);
+}
+
+async function loadResolvedEnvState(input: {
+  readonly projectDir: string;
+  readonly projectName: string;
+  readonly envName: string | null | undefined;
+}): Promise<Awaited<ReturnType<typeof resolveHackEnv>> | null> {
+  try {
+    return await resolveHackEnv({
+      projectDir: input.projectDir,
+      projectName: input.projectName,
+      envName: input.envName,
     });
   } catch (error: unknown) {
     logger.error({
       message:
         error instanceof Error ? error.message : "Unable to resolve env state.",
     });
-    return 1;
+    return null;
   }
+}
 
-  if (json) {
-    process.stdout.write(
-      `${JSON.stringify(
-        {
-          project: projectName,
-          env_selection: {
-            requested: resolved.envSelection.requestedEnv,
-            default: resolved.envSelection.defaultEnv,
-            effective: resolved.envSelection.effectiveEnv,
-            overlay_path: resolved.envSelection.overlayPath,
-            overlay_exists: resolved.envSelection.overlayExists,
-          },
-          status: describeEnvAggregateStatusForJson({
-            storage: resolved.storage,
-          }),
-          storage: serializeEnvStorageForJson({ storage: resolved.storage }),
-          vars: resolved.values.map((v) => ({
-            key: v.key,
-            required: v.required,
-            source: v.source,
-            storage: describeValueStorageForJson({
-              value: v,
-              storage: resolved.storage,
-            }),
-            services: v.services,
-            resolved_from: v.resolvedFrom,
-            value:
-              v.source === "keychain" && !showSecrets && v.value !== null
-                ? "***"
-                : v.value,
-          })),
-          missing_required: resolved.missingRequired.map((v) => v.key),
-        },
-        null,
-        2
-      )}\n`
-    );
-    return resolved.missingRequired.length > 0 ? 1 : 0;
-  }
-
+async function renderEnvListDisplay(input: {
+  readonly resolved: Awaited<ReturnType<typeof resolveHackEnv>>;
+  readonly projectDir: string;
+  readonly showSecrets: boolean;
+}): Promise<number> {
   await display.kv({
     title: "Env storage",
     entries: [
       [
         "env_selection",
-        resolved.envSelection.effectiveEnv
-          ? `${resolved.envSelection.effectiveEnv} (base .hack/.env overlaid by ${resolved.envSelection.overlayPath})`
+        input.resolved.envSelection.effectiveEnv
+          ? `${input.resolved.envSelection.effectiveEnv} (base .hack/.env overlaid by ${input.resolved.envSelection.overlayPath})`
           : "base (.hack/.env only)",
       ],
       [
         "contract",
-        `${resolved.storage.contract.path} (committed metadata only; no values are stored here)`,
+        `${input.resolved.storage.contract.path} (committed metadata only; no values are stored here)`,
       ],
       [
         "local_plaintext",
-        `${resolved.storage.localPlaintext.path} (${resolved.storage.localPlaintext.exists ? "present" : "missing"} plaintext compatibility file for plain_env; existing .env-style workflows still work and gitignore is recommended but not enforced)`,
+        `${input.resolved.storage.localPlaintext.path} (${input.resolved.storage.localPlaintext.exists ? "present" : "missing"} plaintext compatibility file for plain_env; existing .env-style workflows still work and gitignore is recommended but not enforced)`,
       ],
       [
         "local_fallback",
-        `${resolved.storage.localPlaintext.fallback.source} (ambient plaintext fallback when .hack/.env does not provide a plain_env value)`,
+        `${input.resolved.storage.localPlaintext.fallback.source} (ambient plaintext fallback when .hack/.env does not provide a plain_env value)`,
       ],
       [
         "local_secrets",
         describeLocalSecretsForDisplay({
-          storage: resolved.storage.localSecrets,
+          storage: input.resolved.storage.localSecrets,
         }),
       ],
       [
@@ -486,24 +487,25 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
       [
         "portable_state",
         describePortableStateForDisplay({
-          storage: resolved.storage.portableState,
+          storage: input.resolved.storage.portableState,
         }),
       ],
     ],
   });
 
-  if (resolved.contract.vars.length === 0) {
+  if (input.resolved.contract.vars.length === 0) {
     logger.info({
-      message: `No ${project.projectDir}/hack.env.json contract found (or it has no vars).`,
+      message: `No ${input.projectDir}/hack.env.json contract found (or it has no vars).`,
     });
     return 0;
   }
 
+  await printEnvWarnings({ warnings: input.resolved.warnings });
   await display.section("Resolved env vars");
 
-  for (const v of resolved.values) {
+  for (const v of input.resolved.values) {
     const value =
-      v.source === "keychain" && !showSecrets && v.value !== null
+      v.source === "keychain" && !input.showSecrets && v.value !== null
         ? "***"
         : (v.value ?? "");
     const required = v.required ? "required" : "optional";
@@ -511,7 +513,7 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
     const from = v.resolvedFrom ?? "missing";
     const storage = describeValueStorageForDisplay({
       value: v,
-      storage: resolved.storage,
+      storage: input.resolved.storage,
     });
     const services = v.services ? v.services.join(",") : "*";
     process.stdout.write(
@@ -519,20 +521,79 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
     );
   }
 
-  if (resolved.missingRequired.length > 0) {
+  if (input.resolved.missingRequired.length > 0) {
     logger.warn({
-      message: `Missing required env: ${resolved.missingRequired.map((v) => v.key).join(", ")}`,
+      message: `Missing required env: ${input.resolved.missingRequired.map((v) => v.key).join(", ")}`,
     });
     return 1;
   }
 
   return 0;
-};
+}
 
-function serializeEnvStorageForJson(input: {
-  readonly storage: HackEnvStorageSummary;
-}) {
-  return serializeEnvStorageForJsonShape(input);
+function writeEnvListJson(input: {
+  readonly projectName: string;
+  readonly resolved: Awaited<ReturnType<typeof resolveHackEnv>>;
+  readonly showSecrets: boolean;
+}): void {
+  process.stdout.write(
+    `${JSON.stringify(
+      {
+        project: input.projectName,
+        env_selection: {
+          requested: input.resolved.envSelection.requestedEnv,
+          default: input.resolved.envSelection.defaultEnv,
+          effective: input.resolved.envSelection.effectiveEnv,
+          overlay_path: input.resolved.envSelection.overlayPath,
+          overlay_exists: input.resolved.envSelection.overlayExists,
+        },
+        status: describeEnvAggregateStatusForJson({
+          storage: input.resolved.storage,
+        }),
+        storage: serializeEnvStorageForJson({
+          storage: input.resolved.storage,
+        }),
+        warnings: input.resolved.warnings.map((warning) => ({
+          kind: warning.kind,
+          key: warning.key,
+          overlay_path: warning.overlayPath,
+          services: warning.services,
+          message: warning.message,
+        })),
+        vars: input.resolved.values.map((v) => ({
+          key: v.key,
+          required: v.required,
+          source: v.source,
+          storage: describeValueStorageForJson({
+            value: v,
+            storage: input.resolved.storage,
+          }),
+          services: v.services,
+          resolved_from: v.resolvedFrom,
+          value:
+            v.source === "keychain" && !input.showSecrets && v.value !== null
+              ? "***"
+              : v.value,
+        })),
+        missing_required: input.resolved.missingRequired.map((v) => v.key),
+      },
+      null,
+      2
+    )}\n`
+  );
+}
+
+async function printEnvWarnings(input: {
+  readonly warnings: Awaited<ReturnType<typeof resolveHackEnv>>["warnings"];
+}): Promise<void> {
+  if (input.warnings.length === 0) {
+    return;
+  }
+
+  await display.section("Warnings");
+  for (const warning of input.warnings) {
+    logger.warn({ message: warning.message });
+  }
 }
 
 const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({

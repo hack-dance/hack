@@ -36,6 +36,7 @@ The first shipped shell in `apps/web/src/components/control-plane-shell.tsx` est
 ## Testing Quirk
 
 - `bunfig.toml` pins Bun tests to `./tests`, so workspace-targeted coverage may need a root shim file (for example `tests/apps/web.test.ts`) that imports package-local tests when workers need `bun test apps/web` to execute package assertions from the repo root.
+- The routed `/account` proof from `.factory/validation/env-hardening-closeout/user-testing/flows/web-env-linear-state.json` includes populated Linear delivery and closeout audit cards, so account-shell regressions that touch the Linear section should not rely only on `audit: null` fixtures.
 
 ## Runtime Constraint
 

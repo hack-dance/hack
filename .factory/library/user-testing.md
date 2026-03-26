@@ -65,6 +65,7 @@ Testing surface findings, required tools, and validation concurrency for this mi
 - Treat `.hack/linear/**` as managed output. Do not delete unmanaged scratch files and do not create or validate against `.hack/.hack/linear/**`.
 - For env-only auth assertions, set explicit process env in the command invocation rather than mutating shell startup files.
 - When committing validation evidence, replace local absolute paths with placeholders such as `<repo>`, `<isolated-worktree:...>`, `<mission-dir>`, and `<tmp>`.
+- For mission-artifact sanitization that touches temp-home or daemon socket paths, the approved placeholder forms are `<tmp-home>` and `<tmp-daemon-sock>` rather than embedding a home-like suffix under `<tmp>`.
 - Because CLI assertions in this milestone share repo-local Linear artifacts and profile state, validators for this surface must run serialized unless given a separate working copy.
 
 ## Flow Validator Guidance: Broker / local HTTP surface

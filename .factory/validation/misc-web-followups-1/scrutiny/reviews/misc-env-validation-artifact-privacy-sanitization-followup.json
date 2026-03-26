@@ -1,0 +1,21 @@
+{
+  "featureId": "misc-env-validation-artifact-privacy-sanitization-followup",
+  "reviewedAt": "2026-03-26T01:03:11Z",
+  "commitId": "65a42e8743f46134f3c8f6ef55cba05afca2df20",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Pass. I reviewed the feature entry, mission guidance, completed worker handoff, transcript skeleton for session `4bd8f940-11bd-45eb-88c5-49b6863535ae`, the `control-plane-worker` skill, and commit `65a42e8743f46134f3c8f6ef55cba05afca2df20`. The implementation matches the requested follow-up: the tracked misc-env validation artifact now uses approved daemon-isolation placeholders, `sanitizeCommittedMissionArtifactText()` normalizes temp-home and daemon-socket paths before committed mission artifacts are scanned, and the privacy-check regression suite covers the new placeholder normalization plus the repo-wide tracked-artifact sweep.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "The mission's validation-evidence placeholder guidance still does not document the now-approved daemon-specific placeholders `<tmp-home>` and `<tmp-daemon-sock>`. This feature had to infer and normalize those forms in code/artifacts even though the shared guidance only names the older generic placeholders.",
+      "evidence": "`/Users/hack/.factory/missions/a9640cd9-9c31-4920-b6d6-c9ce332fa599/AGENTS.md:29` requires sanitized committed mission artifacts, `.factory/library/user-testing.md:67` still lists placeholders such as `<repo>`, `<isolated-worktree:...>`, `<mission-dir>`, and `<tmp>`, while this feature hard-codes `<tmp-daemon-sock>` and `<tmp-home>` in `src/lib/privacy-check.ts:199-204` and the tracked validation artifacts already rely on them at `.factory/validation/env-hardening-closeout/user-testing/flows/env-guards-daemon-current-branch.json:10-12` and `.factory/validation/misc-env-followups-1/user-testing/flows/malformed-env-contract-cli-daemon.json:9-16`."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass. The follow-up fixes the remaining privacy-check blocker by replacing the tracked daemon socket placeholder with approved forms and by teaching mission-artifact sanitization to collapse temp-home and daemon-socket paths before privacy scanning. I found no blocking or non-blocking code issues in scope; the only remaining gap is shared-state documentation for the new placeholder forms."
+}

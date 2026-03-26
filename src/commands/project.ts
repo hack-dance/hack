@@ -112,6 +112,11 @@ import {
 } from "../lib/project.ts";
 import { resolveProjectExecutionTarget } from "../lib/project-execution.ts";
 import {
+  readProjectRuntimeStateEntry,
+  removeProjectRuntimeStateEntry,
+  upsertProjectRuntimeStateEntry,
+} from "../lib/project-runtime-state.ts";
+import {
   readProjectsRegistry,
   resolveRegisteredProjectByName,
   upsertProjectRegistration,
@@ -812,6 +817,7 @@ async function resolveComposeEnvOverrides(opts: {
 }): Promise<{
   readonly composeFiles: readonly string[];
   readonly env: Readonly<Record<string, string>>;
+  readonly effectiveEnvName: string | null;
 }> {
   const resolved = await resolveHackEnv({
     projectDir: opts.project.projectDir,
@@ -838,7 +844,11 @@ async function resolveComposeEnvOverrides(opts: {
   }
 
   if (resolved.contract.vars.length === 0) {
-    return { composeFiles: [], env: {} };
+    return {
+      composeFiles: [],
+      env: {},
+      effectiveEnvName: resolved.envSelection.effectiveEnv,
+    };
   }
 
   const missingRelevant = resolved.missingRequired.filter((v) =>
@@ -893,7 +903,11 @@ async function resolveComposeEnvOverrides(opts: {
   }
 
   if (Object.keys(overrideServices).length === 0) {
-    return { composeFiles: [], env: resolved.envForCompose };
+    return {
+      composeFiles: [],
+      env: resolved.envForCompose,
+      effectiveEnvName: resolved.envSelection.effectiveEnv,
+    };
   }
 
   const override = { services: overrideServices };
@@ -904,7 +918,11 @@ async function resolveComposeEnvOverrides(opts: {
   const overridePath = resolve(overrideDir, "compose.env.override.yml");
   await writeTextFileIfChanged(overridePath, text);
 
-  return { composeFiles: [overridePath], env: resolved.envForCompose };
+  return {
+    composeFiles: [overridePath],
+    env: resolved.envForCompose,
+    effectiveEnvName: resolved.envSelection.effectiveEnv,
+  };
 }
 
 async function maybePromptToFixMissingEnv(opts: {
@@ -4334,6 +4352,12 @@ async function handleUp({
     ...envOverrides.composeFiles,
   ];
 
+  await persistProjectRuntimeEnvSelection({
+    projectDir: project.projectDir,
+    composeProject: lifecycleComposeProject,
+    envName: envOverrides.effectiveEnvName,
+  });
+
   try {
     const lifecycleUp = await runLifecycleUpBeforeAndProcesses({
       title: "Lifecycle (up before)",
@@ -4370,6 +4394,10 @@ async function handleUp({
     env: envOverrides.env,
   });
   if (upCode !== 0) {
+    await removeProjectRuntimeStateEntry({
+      projectDir: project.projectDir,
+      composeProject: lifecycleComposeProject,
+    });
     return upCode;
   }
 
@@ -4466,10 +4494,15 @@ async function handleDown({
     projectName,
     branch,
   });
+  const effectiveEnvName = await resolveStoredRuntimeEnvName({
+    requestedEnvName: envName,
+    projectDir: project.projectDir,
+    composeProject: lifecycleComposeProject,
+  });
   const envResolved = await resolveHackEnv({
     projectDir: project.projectDir,
     projectName,
-    envName,
+    envName: effectiveEnvName,
   });
   if (envResolved.contractParseError) {
     logger.warn({
@@ -4515,6 +4548,10 @@ async function handleDown({
   if (code !== 0) {
     return code;
   }
+  await removeProjectRuntimeStateEntry({
+    projectDir: project.projectDir,
+    composeProject: lifecycleComposeProject,
+  });
   await maybeManageProjectLogsAfterDown({ project, branch });
 
   const afterCode = await runLifecycleCommands({
@@ -4644,6 +4681,12 @@ async function runRestartUpPhase(opts: {
     ...envOverrides.composeFiles,
   ];
 
+  await persistProjectRuntimeEnvSelection({
+    projectDir: opts.project.projectDir,
+    composeProject: opts.lifecycleComposeProject,
+    envName: envOverrides.effectiveEnvName,
+  });
+
   try {
     const lifecycleUp = await runLifecycleUpBeforeAndProcesses({
       title: "Lifecycle (restart up before)",
@@ -4680,6 +4723,10 @@ async function runRestartUpPhase(opts: {
     env: envOverrides.env,
   });
   if (upCode !== 0) {
+    await removeProjectRuntimeStateEntry({
+      projectDir: opts.project.projectDir,
+      composeProject: opts.lifecycleComposeProject,
+    });
     return upCode;
   }
 
@@ -4740,10 +4787,15 @@ async function handleRestart({
     projectName,
     branch,
   });
+  const effectiveEnvName = await resolveStoredRuntimeEnvName({
+    requestedEnvName: envName,
+    projectDir: project.projectDir,
+    composeProject: lifecycleComposeProject,
+  });
   const envResolved = await resolveHackEnv({
     projectDir: project.projectDir,
     projectName,
-    envName,
+    envName: effectiveEnvName,
   });
   if (envResolved.contractParseError) {
     logger.warn({
@@ -4765,6 +4817,11 @@ async function handleRestart({
     return downCode;
   }
 
+  await removeProjectRuntimeStateEntry({
+    projectDir: project.projectDir,
+    composeProject: lifecycleComposeProject,
+  });
+
   return await runRestartUpPhase({
     project,
     cfg,
@@ -4773,7 +4830,38 @@ async function handleRestart({
     lifecycleComposeProject,
     profiles,
     branch,
-    envName,
+    envName: effectiveEnvName,
+  });
+}
+
+async function resolveStoredRuntimeEnvName(opts: {
+  readonly requestedEnvName: string | null | undefined;
+  readonly projectDir: string;
+  readonly composeProject: string;
+}): Promise<string | null | undefined> {
+  if (opts.requestedEnvName !== undefined) {
+    return opts.requestedEnvName;
+  }
+
+  const state = await readProjectRuntimeStateEntry({
+    projectDir: opts.projectDir,
+    composeProject: opts.composeProject,
+  });
+  return state?.envName ?? undefined;
+}
+
+async function persistProjectRuntimeEnvSelection(opts: {
+  readonly projectDir: string;
+  readonly composeProject: string;
+  readonly envName: string | null;
+}): Promise<void> {
+  await upsertProjectRuntimeStateEntry({
+    projectDir: opts.projectDir,
+    entry: {
+      composeProject: opts.composeProject,
+      envName: opts.envName,
+      updatedAt: new Date().toISOString(),
+    },
   });
 }
 

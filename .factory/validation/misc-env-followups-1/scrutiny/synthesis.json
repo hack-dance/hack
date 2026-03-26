@@ -1,7 +1,7 @@
 {
   "milestone": "misc-env-followups-1",
-  "round": 1,
-  "status": "fail",
+  "round": 2,
+  "status": "pass",
   "validatorsRun": {
     "test": {
       "passed": true,
@@ -21,20 +21,14 @@
   },
   "reviewsSummary": {
     "total": 1,
-    "passed": 0,
-    "failed": 1,
-    "failedFeatures": ["malformed-hack-env-contract-fail-closed-followup"]
+    "passed": 1,
+    "failed": 0,
+    "failedFeatures": []
   },
-  "blockingIssues": [
-    {
-      "featureId": "malformed-hack-env-contract-fail-closed-followup",
-      "severity": "blocking",
-      "description": "JSON-valid malformed `.hack/hack.env.json` entries can still bypass mutation-source enforcement because the parser normalizes invalid var records instead of surfacing a malformed-contract error, so the feature only closes the broken-JSON path and does not fully fail closed."
-    }
-  ],
+  "blockingIssues": [],
   "nonBlockingIssues": [],
   "appliedUpdates": [],
   "suggestedGuidanceUpdates": [],
   "rejectedObservations": [],
-  "previousRound": null
+  "previousRound": ".factory/validation/misc-env-followups-1/scrutiny/synthesis.round-1.json"
 }

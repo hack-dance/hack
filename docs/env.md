@@ -4,8 +4,8 @@ Hack now uses repo-level env overlay files as the canonical project env model.
 
 The short version:
 
-- commit `hack.env.default.yaml`
-- optionally commit `hack.env.<overlay>.yaml`
+- commit `.hack/hack.env.default.yaml`
+- optionally commit `.hack/hack.env.<overlay>.yaml`
 - keep `.hack.secret.key` out of git, or provide `HACK_ENV_SECRET_KEY`
 - let `hack up`, `hack run`, `hack restart`, `hack env exec`, `hack env shell`, and env-aware session flows inject values directly at runtime
 - use `hack env materialize` only when you explicitly need a compatibility `.hack/.env`
@@ -14,8 +14,8 @@ The short version:
 
 Canonical env state lives at the repo root:
 
-- `hack.env.default.yaml`
-- `hack.env.<overlay>.yaml`
+- `.hack/hack.env.default.yaml`
+- `.hack/hack.env.<overlay>.yaml`
 
 Compatibility and local-only state still lives under `.hack/`:
 
@@ -28,7 +28,7 @@ Encryption key material is local-only by default:
 - `.hack.secret.key`
 - or `HACK_ENV_SECRET_KEY`
 
-`hack init` now scaffolds `hack.env.default.yaml` by default.
+`hack init` now scaffolds `.hack/hack.env.default.yaml` by default.
 
 ## File format
 
@@ -66,8 +66,8 @@ Plaintext values are written as scalars. Secret values are written as `{ secure:
 
 Hack resolves env in this order:
 
-1. load `hack.env.default.yaml`
-2. if `--env=<name>` is selected, load `hack.env.<name>.yaml`
+1. load `.hack/hack.env.default.yaml`
+2. if `--env=<name>` is selected, load `.hack/hack.env.<name>.yaml`
 3. merge `values.global`
 4. if a service scope is requested, merge `values.<service>` on top
 
@@ -83,7 +83,7 @@ Projects can set a default overlay in `.hack/hack.config.json`:
 }
 ```
 
-Use `--env=base` to bypass that default and read only `hack.env.default.yaml`.
+Use `--env=base` to bypass that default and read only `.hack/hack.env.default.yaml`.
 
 ## Runtime behavior
 
@@ -200,8 +200,8 @@ hack doctor --migrate-env-config
 
 That migrates the repo into:
 
-- `hack.env.default.yaml`
-- `hack.env.<overlay>.yaml`
+- `.hack/hack.env.default.yaml`
+- `.hack/hack.env.<overlay>.yaml`
 - `.hack.secret.key` when needed
 
 `hack doctor` also warns when a repo still depends on the old format.
@@ -220,8 +220,8 @@ If you are writing new docs or new project setup flows, document the YAML overla
 
 ## Recommended project policy
 
-- Commit `hack.env.default.yaml`
-- Commit `hack.env.<overlay>.yaml` when the overlay is team-shared
+- Commit `.hack/hack.env.default.yaml`
+- Commit `.hack/hack.env.<overlay>.yaml` when the overlay is team-shared
 - Never commit `.hack.secret.key`
 - Prefer `hack env add` over hand-editing encrypted values
 - Prefer direct runtime injection over materializing `.hack/.env`

@@ -132,7 +132,7 @@ async function createProject(): Promise<string> {
     )}\n`
   );
   await writeFile(
-    resolve(projectRoot, "hack.env.default.yaml"),
+    resolve(projectDir, "hack.env.default.yaml"),
     [
       "version: 1",
       "environment: default",
@@ -147,7 +147,7 @@ async function createProject(): Promise<string> {
     ].join("\n")
   );
   await writeFile(
-    resolve(projectRoot, "hack.env.qa.yaml"),
+    resolve(projectDir, "hack.env.qa.yaml"),
     [
       "version: 1",
       "environment: qa",

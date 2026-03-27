@@ -110,6 +110,7 @@ async function createProject(): Promise<string> {
 
   await setProjectEnvValue({
     projectRoot,
+    projectDir,
     envName: null,
     scope: "global",
     key: "GLOBAL_FLAG",
@@ -118,6 +119,7 @@ async function createProject(): Promise<string> {
   });
   await setProjectEnvValue({
     projectRoot,
+    projectDir,
     envName: null,
     scope: "api",
     key: "SERVICE_TOKEN",

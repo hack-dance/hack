@@ -1576,7 +1576,7 @@ async function checkProjectEnvMode({
 
   if (
     await projectEnvConfigExists({
-      projectRoot: ctx.projectRoot,
+      projectDir: ctx.projectDir,
     })
   ) {
     const defaultOverlay =
@@ -1596,7 +1596,7 @@ async function checkProjectEnvMode({
     return {
       name: "env mode",
       status: "warn",
-      message: `Missing ${contractPath} and no hack.env.default.yaml present`,
+      message: `Missing ${contractPath} and no .hack/hack.env.default.yaml present`,
     };
   }
 
@@ -1633,7 +1633,7 @@ async function checkProjectEnvOverlayWarnings({
 
   if (
     await projectEnvConfigExists({
-      projectRoot: ctx.projectRoot,
+      projectDir: ctx.projectDir,
     })
   ) {
     const serviceNames = await discoverComposeServiceNames({
@@ -1864,7 +1864,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
 
   if (
     await projectEnvConfigExists({
-      projectRoot: project.projectRoot,
+      projectDir: project.projectDir,
     })
   ) {
     note("Project already uses the new env config files.", "doctor");
@@ -1892,7 +1892,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
     [
       "Detected legacy project env files.",
       `- source: ${contractPath} and current local env state`,
-      `- target: ${resolve(project.projectRoot, "hack.env.default.yaml")}`,
+      `- target: ${resolve(project.projectDir, "hack.env.default.yaml")}`,
       "- runtime: direct env injection by default; .hack/.env becomes compatibility-only",
     ].join("\n"),
     "env migration"
@@ -1975,7 +1975,7 @@ export async function buildDoctorRemediationPlanLines(opts: {
 
   if (
     await projectEnvConfigExists({
-      projectRoot: project.projectRoot,
+      projectDir: project.projectDir,
     })
   ) {
     lines.push(

@@ -125,14 +125,14 @@ function defaultProjectEnvConfig(opts: {
 }
 
 export function resolveProjectEnvConfigPath(opts: {
-  readonly projectRoot: string;
+  readonly projectDir: string;
   readonly envName: string | null;
 }): string {
   if (opts.envName === null) {
-    return resolve(opts.projectRoot, PROJECT_ENV_CONFIG_DEFAULT_FILENAME);
+    return resolve(opts.projectDir, PROJECT_ENV_CONFIG_DEFAULT_FILENAME);
   }
   return resolve(
-    opts.projectRoot,
+    opts.projectDir,
     `${PROJECT_ENV_CONFIG_FILENAME_PREFIX}${opts.envName}${PROJECT_ENV_CONFIG_FILENAME_SUFFIX}`
   );
 }
@@ -150,17 +150,17 @@ function resolveProjectEnvStatePath(opts: {
 }
 
 export async function projectEnvConfigExists(opts: {
-  readonly projectRoot: string;
+  readonly projectDir: string;
 }): Promise<boolean> {
   const defaultPath = resolveProjectEnvConfigPath({
-    projectRoot: opts.projectRoot,
+    projectDir: opts.projectDir,
     envName: null,
   });
   if (await pathExists(defaultPath)) {
     return true;
   }
 
-  const entries = await readdir(opts.projectRoot, { withFileTypes: true });
+  const entries = await readdir(opts.projectDir, { withFileTypes: true });
   return entries.some((entry) => {
     if (!entry.isFile()) {
       return false;
@@ -176,9 +176,9 @@ export async function projectEnvConfigExists(opts: {
 }
 
 export async function listProjectEnvOverlayNames(opts: {
-  readonly projectRoot: string;
+  readonly projectDir: string;
 }): Promise<readonly string[]> {
-  const entries = await readdir(opts.projectRoot, { withFileTypes: true });
+  const entries = await readdir(opts.projectDir, { withFileTypes: true });
   return entries
     .filter((entry) => entry.isFile())
     .map((entry) => entry.name)
@@ -364,14 +364,14 @@ export async function resolveProjectEnvSelection(opts: {
   });
   const effectiveEnv = requestedEnv === undefined ? defaultEnv : requestedEnv;
   const defaultPath = resolveProjectEnvConfigPath({
-    projectRoot: opts.projectRoot,
+    projectDir: opts.projectDir,
     envName: null,
   });
   const overlayPath =
     effectiveEnv === null
       ? null
       : resolveProjectEnvConfigPath({
-          projectRoot: opts.projectRoot,
+          projectDir: opts.projectDir,
           envName: effectiveEnv,
         });
 
@@ -556,6 +556,7 @@ function decryptProjectEnvStoredValue(opts: {
 
 export async function setProjectEnvValue(opts: {
   readonly projectRoot: string;
+  readonly projectDir: string;
   readonly envName: string | null;
   readonly scope: string;
   readonly key: string;
@@ -572,7 +573,7 @@ export async function setProjectEnvValue(opts: {
   }
 
   const filePath = resolveProjectEnvConfigPath({
-    projectRoot: opts.projectRoot,
+    projectDir: opts.projectDir,
     envName: opts.envName,
   });
   const read = await readProjectEnvConfigFile({
@@ -631,13 +632,13 @@ export async function setProjectEnvValue(opts: {
 }
 
 export async function unsetProjectEnvValue(opts: {
-  readonly projectRoot: string;
+  readonly projectDir: string;
   readonly envName: string | null;
   readonly scope: string;
   readonly key: string;
 }): Promise<{ readonly changed: boolean; readonly filePath: string }> {
   const filePath = resolveProjectEnvConfigPath({
-    projectRoot: opts.projectRoot,
+    projectDir: opts.projectDir,
     envName: opts.envName,
   });
   const read = await readProjectEnvConfigFile({
@@ -937,7 +938,7 @@ export async function migrateLegacyProjectEnv(opts: {
     }),
   });
   const defaultPath = resolveProjectEnvConfigPath({
-    projectRoot: opts.projectRoot,
+    projectDir: opts.projectDir,
     envName: null,
   });
   if (
@@ -973,7 +974,7 @@ export async function migrateLegacyProjectEnv(opts: {
     }
 
     const overlayPath = resolveProjectEnvConfigPath({
-      projectRoot: opts.projectRoot,
+      projectDir: opts.projectDir,
       envName: overlayName,
     });
     if (

@@ -540,7 +540,7 @@ async function maybeMigrateLegacyProjectEnv(input: {
 }): Promise<boolean> {
   if (
     await projectEnvConfigExists({
-      projectRoot: input.project.projectRoot,
+      projectDir: input.project.projectDir,
     })
   ) {
     return false;
@@ -853,7 +853,7 @@ function buildModernEnvJsonPayload(input: {
       ...MODERN_ENV_STATUS_CLASSIFICATION,
       summary: "Project env config overlays",
       detail:
-        "Hack is reading canonical hack.env.default.yaml and optional hack.env.<overlay>.yaml files directly. Runtime injection is the default path; .hack/.env is only a manual compatibility output.",
+        "Hack is reading canonical .hack/hack.env.default.yaml and optional .hack/hack.env.<overlay>.yaml files directly. Runtime injection is the default path; .hack/.env is only a manual compatibility output.",
     },
     storage: {
       local_plaintext: {
@@ -881,7 +881,7 @@ function buildModernEnvJsonPayload(input: {
         status: "repo_overlay_files",
         trust_model: MODERN_ENV_STATUS_CLASSIFICATION.trust_model,
         message:
-          "Canonical values live in hack.env.default.yaml and optional overlay files. Share the decryption key out of band with .hack.secret.key or HACK_ENV_SECRET_KEY.",
+          "Canonical values live in .hack/hack.env.default.yaml and optional overlay files. Share the decryption key out of band with .hack.secret.key or HACK_ENV_SECRET_KEY.",
         classification: MODERN_ENV_STATUS_CLASSIFICATION,
       },
       compatibility_mode: {
@@ -1185,6 +1185,7 @@ const handleEnvAdd: CommandHandlerFor<typeof addSpec> = async ({
 
   const result = await setProjectEnvValue({
     projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
     envName: envName ?? null,
     scope: parsedTarget.scope,
     key: parsedTarget.key,
@@ -1221,7 +1222,7 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
   });
 
   const modernExists = await projectEnvConfigExists({
-    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
   });
   if (modernExists) {
     return await handleEnvAdd({
@@ -1419,7 +1420,7 @@ const handleEnvUnset: CommandHandlerFor<typeof unsetSpec> = async ({
   });
 
   const modernExists = await projectEnvConfigExists({
-    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
   });
   if (!modernExists) {
     const store = await resolveConfiguredSecretStore({ project, projectName });
@@ -1477,7 +1478,7 @@ const handleEnvUnset: CommandHandlerFor<typeof unsetSpec> = async ({
   }
 
   const result = await unsetProjectEnvValue({
-    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
     envName: envName ?? null,
     scope: parsedTarget.scope,
     key: parsedTarget.key,

@@ -327,7 +327,7 @@ async function resolveModernEnvMeta(opts: {
 }): Promise<EnvMeta | null> {
   if (
     !(await projectEnvConfigExists({
-      projectRoot: opts.projectRoot,
+      projectDir: opts.projectDir,
     }))
   ) {
     return null;

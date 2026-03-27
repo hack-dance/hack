@@ -99,6 +99,7 @@ test("setProjectEnvValue creates project key, gitignore entry, and service-scope
 
   await setProjectEnvValue({
     projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
     envName: null,
     scope: "api",
     key: "SERVICE_TOKEN",
@@ -107,6 +108,7 @@ test("setProjectEnvValue creates project key, gitignore entry, and service-scope
   });
   await setProjectEnvValue({
     projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
     envName: "qa",
     scope: "global",
     key: "API_BASE_URL",
@@ -139,6 +141,7 @@ test("materializeProjectEnv writes selected service env without touching runtime
   const repo = await createRepo();
   await setProjectEnvValue({
     projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
     envName: null,
     scope: "global",
     key: "GLOBAL_FLAG",
@@ -147,6 +150,7 @@ test("materializeProjectEnv writes selected service env without touching runtime
   });
   await setProjectEnvValue({
     projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
     envName: null,
     scope: "api",
     key: "PORT",
@@ -176,6 +180,7 @@ test("resolveProjectEnvConfig falls back to HACK_ENV_SECRET_KEY when the key fil
 
   await setProjectEnvValue({
     projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
     envName: null,
     scope: "api",
     key: "SERVICE_TOKEN",

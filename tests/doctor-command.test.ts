@@ -32,7 +32,7 @@ async function createDoctorTestProject(opts: {
   }
   if (opts.modern) {
     await writeFile(
-      join(root, "hack.env.default.yaml"),
+      join(hackDir, "hack.env.default.yaml"),
       "version: 1\nenvironment: default\nsecretsprovider: project_key\nvalues:\n  global: {}\n"
     );
   }

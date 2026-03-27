@@ -94,7 +94,7 @@ graph LR
 
 Projects can declare shareable env overlays and safely inject secrets into compose:
 
-- Canonical env: `hack.env.default.yaml` plus optional `hack.env.<overlay>.yaml`
+- Canonical env: `.hack/hack.env.default.yaml` plus optional `.hack/hack.env.<overlay>.yaml`
 - Compatibility output: `.hack/.env` only when explicitly materialized
 - Secret key: `.hack.secret.key` locally, or `HACK_ENV_SECRET_KEY` in CI/managed environments
 

@@ -67,7 +67,7 @@ Docs:
 
 Hack separates shareable env structure from secret values so teams and agents can understand what a project needs without leaking sensitive material into git.
 
-- Commit `hack.env.default.yaml` and optional `hack.env.<overlay>.yaml`.
+- Commit `.hack/hack.env.default.yaml` and optional `.hack/hack.env.<overlay>.yaml`.
 - Keep `.hack.secret.key` out of git, or provide `HACK_ENV_SECRET_KEY` in CI.
 - Let Hack inject resolved env directly into runtime commands by default.
 - Materialize `.hack/.env` only when you explicitly need a compatibility file.

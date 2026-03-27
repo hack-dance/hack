@@ -941,7 +941,7 @@ async function maybeMigrateLegacySessionEnv(opts: {
 }): Promise<void> {
   if (
     await projectEnvConfigExists({
-      projectRoot: opts.project.projectRoot,
+      projectDir: opts.project.projectDir,
     })
   ) {
     return;

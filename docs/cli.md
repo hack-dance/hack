@@ -1565,7 +1565,7 @@ Usage: `hack env <subcommand>`
 Notes:
 
 - The current `hack env` surface is local-first.
-- The primary canonical format is `hack.env.default.yaml` plus optional `hack.env.<overlay>.yaml`.
+- The primary canonical format is `.hack/hack.env.default.yaml` plus optional `.hack/hack.env.<overlay>.yaml`.
 - `hack env add` is the primary write command; `hack env set` remains a compatibility alias.
 - Runtime injection is the default path. `hack env materialize` is manual.
 - Shared env grants, value custody, and rotation are planned as explicit broker-mediated flows rather than

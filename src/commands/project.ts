@@ -823,7 +823,7 @@ async function maybePromptLegacyProjectEnvMigration(opts: {
 }): Promise<boolean> {
   if (
     await projectEnvConfigExists({
-      projectRoot: opts.project.projectRoot,
+      projectDir: opts.project.projectDir,
     })
   ) {
     return false;
@@ -2873,7 +2873,7 @@ async function handleInit({
   );
 
   await writeTextFileIfChanged(
-    resolve(repoRoot, PROJECT_ENV_CONFIG_DEFAULT_FILENAME),
+    resolve(hackDir, PROJECT_ENV_CONFIG_DEFAULT_FILENAME),
     renderProjectEnvConfigYaml()
   );
 
@@ -2904,7 +2904,7 @@ async function handleInit({
       `Wrote: ${HACK_PROJECT_DIR_PRIMARY}/${PROJECT_COMPOSE_FILENAME}`,
       `Wrote: ${HACK_PROJECT_DIR_PRIMARY}/${PROJECT_CONFIG_FILENAME}`,
       `Wrote: ${HACK_PROJECT_DIR_PRIMARY}/README.md`,
-      `Wrote: ${PROJECT_ENV_CONFIG_DEFAULT_FILENAME}`,
+      `Wrote: ${HACK_PROJECT_DIR_PRIMARY}/${PROJECT_ENV_CONFIG_DEFAULT_FILENAME}`,
       "",
       "Next:",
       "  hack up",
@@ -3006,7 +3006,7 @@ async function handleInitAuto({
   );
 
   await writeTextFileIfChanged(
-    resolve(repoRoot, PROJECT_ENV_CONFIG_DEFAULT_FILENAME),
+    resolve(hackDir, PROJECT_ENV_CONFIG_DEFAULT_FILENAME),
     renderProjectEnvConfigYaml()
   );
 

@@ -36,7 +36,7 @@ TLS + valid-hostname constraints:
 - Alias hosts are still local-dev routes unless you add an external tunnel/remote ingress path.
 
 Project files (managed vs generated):
-- Source-of-truth files: `.hack/docker-compose.yml`, `.hack/hack.config.json`, `hack.env.default.yaml`, and optional `hack.env.<overlay>.yaml`.
+- Source-of-truth files: `.hack/docker-compose.yml`, `.hack/hack.config.json`, `.hack/hack.env.default.yaml`, and optional `.hack/hack.env.<overlay>.yaml`.
 - Local-only files: `.hack.secret.key`, optional `.hack/.env` compatibility output, `.hack/.env.state.json`, and `.hack/.internal/` (runtime/local machine state; keep gitignored).
 - Generated (do not hand-edit): `.hack/.internal/compose.override.yml`, `.hack/.internal/compose.env.override.yml`, `.hack/.branch/compose.<branch>.override.yml`.
 - Managed via CLI: `.hack/.internal/extra-hosts.json` (use `hack internal extra-hosts ...` commands).

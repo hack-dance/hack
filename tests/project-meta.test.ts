@@ -43,6 +43,7 @@ test("resolveProjectMeta reads modern env config repos without a legacy contract
 
   await setProjectEnvValue({
     projectRoot,
+    projectDir,
     envName: null,
     scope: "global",
     key: "GLOBAL_FLAG",
@@ -51,6 +52,7 @@ test("resolveProjectMeta reads modern env config repos without a legacy contract
   });
   await setProjectEnvValue({
     projectRoot,
+    projectDir,
     envName: null,
     scope: "api",
     key: "SERVICE_TOKEN",
@@ -66,7 +68,7 @@ test("resolveProjectMeta reads modern env config repos without a legacy contract
   });
 
   expect(meta.env.contractExists).toBe(true);
-  expect(meta.env.contractPath).toEndWith("hack.env.default.yaml");
+  expect(meta.env.contractPath).toEndWith(".hack/hack.env.default.yaml");
   expect(meta.env.contractParseError).toBeNull();
   expect(meta.env.missingRequired).toEqual([]);
   expect(meta.env.vars.some((value) => value.key === "GLOBAL_FLAG")).toBe(true);

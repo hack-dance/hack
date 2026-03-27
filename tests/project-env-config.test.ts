@@ -267,6 +267,13 @@ test("migrateLegacyProjectEnv converts legacy base and overlay values into new c
     materialize: false,
   });
   expect(migrated.legacyDetected).toBe(true);
+  expect(migrated.updatedProjectConfig).toBe(true);
+  expect(migrated.cleanupCandidates).toEqual([
+    resolve(repo.projectDir, PROJECT_ENV_FILENAME),
+    resolve(repo.projectDir, ".env.qa"),
+    resolve(repo.projectDir, PROJECT_ENV_CONTRACT_FILENAME),
+    resolve(repo.projectRoot, "legacy-secrets.enc.json"),
+  ]);
 
   const resolved = await resolveProjectEnvConfig({
     projectRoot: repo.projectRoot,
@@ -276,4 +283,12 @@ test("migrateLegacyProjectEnv converts legacy base and overlay values into new c
   });
   expect(resolved?.serviceEnv.api?.API_BASE_URL).toBe("https://qa.example.com");
   expect(resolved?.serviceEnv.api?.SERVICE_TOKEN).toBe("qa-secret");
+
+  const configText = await readFile(repo.configFile, "utf8");
+  const config = JSON.parse(configText) as Record<string, unknown>;
+  expect(config.defaultEnvConfig).toBeUndefined();
+  expect(config.env).toEqual({
+    defaultOverlay: "qa",
+  });
+  expect(config.controlPlane).toBeUndefined();
 });

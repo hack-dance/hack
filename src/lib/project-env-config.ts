@@ -4,13 +4,15 @@ import {
   createHash,
   randomBytes,
 } from "node:crypto";
-import { chmod, readdir } from "node:fs/promises";
+import { chmod, readdir, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { YAML } from "bun";
 import {
+  PROJECT_CONFIG_FILENAME,
   PROJECT_ENV_CONFIG_DEFAULT_FILENAME,
   PROJECT_ENV_CONFIG_FILENAME_PREFIX,
   PROJECT_ENV_CONFIG_FILENAME_SUFFIX,
+  PROJECT_ENV_CONTRACT_FILENAME,
   PROJECT_ENV_FILENAME,
   PROJECT_ENV_KEY_FILENAME,
   PROJECT_ENV_STATE_FILENAME,
@@ -896,10 +898,18 @@ export async function migrateLegacyProjectEnv(opts: {
   readonly wroteFiles: readonly string[];
   readonly migratedOverlays: readonly string[];
   readonly legacyDetected: boolean;
+  readonly updatedProjectConfig: boolean;
+  readonly cleanupCandidates: readonly string[];
 }> {
   const contract = await readHackEnvContract({ projectDir: opts.projectDir });
   if (!contract.exists) {
-    return { wroteFiles: [], migratedOverlays: [], legacyDetected: false };
+    return {
+      wroteFiles: [],
+      migratedOverlays: [],
+      legacyDetected: false,
+      updatedProjectConfig: false,
+      cleanupCandidates: [],
+    };
   }
 
   const baseResolved = await resolveHackEnv({
@@ -985,11 +995,39 @@ export async function migrateLegacyProjectEnv(opts: {
     });
   }
 
+  const configCleanup = await migrateLegacyProjectConfig({
+    projectRoot: opts.projectRoot,
+    projectDir: opts.projectDir,
+  });
+  const cleanupCandidates = await collectLegacyProjectEnvCleanupCandidates({
+    projectRoot: opts.projectRoot,
+    projectDir: opts.projectDir,
+    overlayNames,
+    materialize: opts.materialize,
+    configCleanupCandidates: configCleanup.cleanupCandidates,
+  });
+
   return {
     wroteFiles,
     migratedOverlays: overlayNames,
     legacyDetected: true,
+    updatedProjectConfig: configCleanup.changed,
+    cleanupCandidates,
   };
+}
+
+export async function removeLegacyProjectEnvArtifacts(opts: {
+  readonly paths: readonly string[];
+}): Promise<readonly string[]> {
+  const removed: string[] = [];
+  for (const path of opts.paths) {
+    if (!(await pathExists(path))) {
+      continue;
+    }
+    await rm(path, { recursive: false, force: true });
+    removed.push(path);
+  }
+  return removed;
 }
 
 async function discoverLegacyOverlayNames(opts: {
@@ -1084,6 +1122,311 @@ function buildMigratedValues(opts: {
   }
 
   return values;
+}
+
+async function collectLegacyProjectEnvCleanupCandidates(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly overlayNames: readonly string[];
+  readonly materialize: boolean;
+  readonly configCleanupCandidates: readonly string[];
+}): Promise<readonly string[]> {
+  const candidates = new Set<string>();
+  candidates.add(resolve(opts.projectDir, PROJECT_ENV_CONTRACT_FILENAME));
+  if (!opts.materialize) {
+    candidates.add(resolve(opts.projectDir, PROJECT_ENV_FILENAME));
+  }
+  for (const overlayName of opts.overlayNames) {
+    candidates.add(
+      resolve(opts.projectDir, `${PROJECT_ENV_FILENAME}.${overlayName}`)
+    );
+  }
+  for (const path of opts.configCleanupCandidates) {
+    candidates.add(path);
+  }
+
+  const existing: string[] = [];
+  for (const path of candidates) {
+    if (await pathExists(path)) {
+      existing.push(path);
+    }
+  }
+  return existing.sort((left, right) => left.localeCompare(right));
+}
+
+async function migrateLegacyProjectConfig(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): Promise<{
+  readonly changed: boolean;
+  readonly cleanupCandidates: readonly string[];
+}> {
+  const configPath = resolve(opts.projectDir, PROJECT_CONFIG_FILENAME);
+  const text = await readTextFile(configPath);
+  if (text === null) {
+    return { changed: false, cleanupCandidates: [] };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { changed: false, cleanupCandidates: [] };
+  }
+  if (!isRecord(parsed)) {
+    return { changed: false, cleanupCandidates: [] };
+  }
+
+  const topLevel = normalizeLegacyProjectTopLevelConfig({
+    parsed,
+    projectRoot: opts.projectRoot,
+  });
+
+  if (!topLevel.changed) {
+    return {
+      changed: false,
+      cleanupCandidates: topLevel.cleanupCandidates,
+    };
+  }
+
+  const nextText = `${JSON.stringify(topLevel.config, null, 2)}\n`;
+  const result = await writeTextFileIfChanged(configPath, nextText);
+  return {
+    changed: result.changed,
+    cleanupCandidates: topLevel.cleanupCandidates,
+  };
+}
+
+function normalizeLegacyProjectTopLevelConfig(opts: {
+  readonly parsed: Record<string, unknown>;
+  readonly projectRoot: string;
+}): {
+  readonly config: Record<string, unknown>;
+  readonly changed: boolean;
+  readonly cleanupCandidates: readonly string[];
+} {
+  const {
+    defaultEnvConfig,
+    env: envRaw,
+    controlPlane: controlPlaneRaw,
+    ...rest
+  } = opts.parsed;
+
+  let changed = false;
+  const config: Record<string, unknown> = { ...rest };
+
+  if (envRaw !== undefined) {
+    config.env = envRaw;
+  }
+
+  const defaultOverlay =
+    typeof defaultEnvConfig === "string" ? defaultEnvConfig : null;
+  if (defaultOverlay) {
+    config.env = normalizeLegacyProjectEnvOverlay({
+      envRaw,
+      defaultOverlay,
+    });
+    changed = true;
+  } else if (defaultEnvConfig !== undefined) {
+    changed = true;
+  }
+
+  const controlPlane = normalizeLegacyProjectControlPlaneConfig({
+    controlPlaneRaw,
+    projectRoot: opts.projectRoot,
+  });
+  if (controlPlane.value !== undefined) {
+    config.controlPlane = controlPlane.value;
+  }
+  if (controlPlane.changed) {
+    changed = true;
+  }
+
+  return {
+    config,
+    changed,
+    cleanupCandidates: controlPlane.cleanupCandidates,
+  };
+}
+
+function normalizeLegacyProjectEnvOverlay(opts: {
+  readonly envRaw: unknown;
+  readonly defaultOverlay: string;
+}): Record<string, unknown> {
+  const env = isRecord(opts.envRaw) ? { ...opts.envRaw } : {};
+  if (getString(env, "defaultOverlay") !== opts.defaultOverlay) {
+    env.defaultOverlay = opts.defaultOverlay;
+  }
+  return env;
+}
+
+function normalizeLegacyProjectControlPlaneConfig(opts: {
+  readonly controlPlaneRaw: unknown;
+  readonly projectRoot: string;
+}): {
+  readonly value: Record<string, unknown> | undefined;
+  readonly changed: boolean;
+  readonly cleanupCandidates: readonly string[];
+} {
+  if (!isRecord(opts.controlPlaneRaw)) {
+    return {
+      value: undefined,
+      changed: false,
+      cleanupCandidates: [],
+    };
+  }
+
+  const { secrets: secretsRaw, ...rest } = opts.controlPlaneRaw;
+  const secrets = normalizeLegacyProjectSecretsConfig({
+    secretsRaw,
+    projectRoot: opts.projectRoot,
+  });
+
+  const value: Record<string, unknown> = { ...rest };
+  if (secrets.value !== undefined) {
+    value.secrets = secrets.value;
+  }
+
+  return {
+    value: Object.keys(value).length > 0 ? value : undefined,
+    changed: secrets.changed,
+    cleanupCandidates: secrets.cleanupCandidates,
+  };
+}
+
+function normalizeLegacyProjectSecretsConfig(opts: {
+  readonly secretsRaw: unknown;
+  readonly projectRoot: string;
+}): {
+  readonly value: Record<string, unknown> | undefined;
+  readonly changed: boolean;
+  readonly cleanupCandidates: readonly string[];
+} {
+  if (!isRecord(opts.secretsRaw)) {
+    return {
+      value: undefined,
+      changed: false,
+      cleanupCandidates: [],
+    };
+  }
+
+  const cleanupCandidates = collectLegacyEncryptedBackendCleanupCandidates({
+    secretsRaw: opts.secretsRaw,
+    projectRoot: opts.projectRoot,
+  });
+
+  const backend = getString(opts.secretsRaw, "backend");
+  const allowEnvAuthRefs = opts.secretsRaw.allowEnvAuthRefs;
+  const cloud = normalizeLegacyProjectSecretsCloudConfig({
+    cloudRaw: opts.secretsRaw.cloud,
+  });
+
+  const value: Record<string, unknown> = {};
+  if (allowEnvAuthRefs === false) {
+    value.allowEnvAuthRefs = false;
+  }
+  if (backend === "cloud") {
+    value.backend = backend;
+  }
+  if (cloud !== undefined) {
+    value.cloud = cloud;
+  }
+
+  const changed =
+    "storePlaintextInBackend" in opts.secretsRaw ||
+    "encryptedFile" in opts.secretsRaw ||
+    backend === "encrypted_file" ||
+    allowEnvAuthRefs === true ||
+    (isRecord(opts.secretsRaw.cloud) && cloud === undefined);
+
+  return {
+    value: Object.keys(value).length > 0 ? value : undefined,
+    changed,
+    cleanupCandidates,
+  };
+}
+
+function normalizeLegacyProjectSecretsCloudConfig(opts: {
+  readonly cloudRaw: unknown;
+}): Record<string, unknown> | undefined {
+  if (!isRecord(opts.cloudRaw)) {
+    return undefined;
+  }
+
+  const cloudProvider = getString(opts.cloudRaw, "provider");
+  const cloudProject = getString(opts.cloudRaw, "project");
+  const cloudSecretPrefix = getString(opts.cloudRaw, "secretPrefix");
+  if (!(cloudProvider || cloudProject) && cloudSecretPrefix === "hack") {
+    return undefined;
+  }
+
+  return { ...opts.cloudRaw };
+}
+
+function collectLegacyEncryptedBackendCleanupCandidates(opts: {
+  readonly secretsRaw: Record<string, unknown>;
+  readonly projectRoot: string;
+}): readonly string[] {
+  const candidates = new Set<string>();
+  const encryptedFileRaw = opts.secretsRaw.encryptedFile;
+  if (!isRecord(encryptedFileRaw)) {
+    return [];
+  }
+
+  const pathValue = getString(encryptedFileRaw, "path");
+  const keyPathValue = getString(encryptedFileRaw, "keyPath");
+  if (pathValue) {
+    addProjectLocalCleanupCandidate({
+      projectRoot: opts.projectRoot,
+      path: resolveConfiguredProjectPath({
+        projectRoot: opts.projectRoot,
+        configuredPath: pathValue,
+      }),
+      target: candidates,
+    });
+  }
+  if (keyPathValue) {
+    addProjectLocalCleanupCandidate({
+      projectRoot: opts.projectRoot,
+      path: resolveConfiguredProjectPath({
+        projectRoot: opts.projectRoot,
+        configuredPath: keyPathValue,
+      }),
+      target: candidates,
+    });
+  }
+
+  return [...candidates].sort((left, right) => left.localeCompare(right));
+}
+
+function resolveConfiguredProjectPath(opts: {
+  readonly projectRoot: string;
+  readonly configuredPath: string;
+}): string {
+  const raw = opts.configuredPath.trim();
+  const home = (process.env.HOME ?? "").trim();
+  if (raw === "~") {
+    return home;
+  }
+  if (raw.startsWith("~/")) {
+    return resolve(home, raw.slice(2));
+  }
+  if (raw.startsWith("/")) {
+    return raw;
+  }
+  return resolve(opts.projectRoot, raw);
+}
+
+function addProjectLocalCleanupCandidate(opts: {
+  readonly projectRoot: string;
+  readonly path: string;
+  readonly target: Set<string>;
+}): void {
+  const projectRoot = resolve(opts.projectRoot);
+  const candidate = resolve(opts.path);
+  if (candidate === projectRoot || candidate.startsWith(`${projectRoot}/`)) {
+    opts.target.add(candidate);
+  }
 }
 
 export function parseProjectEnvTarget(input: {

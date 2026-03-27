@@ -60,6 +60,7 @@ import {
   discoverComposeServiceNames,
   migrateLegacyProjectEnv,
   projectEnvConfigExists,
+  removeLegacyProjectEnvArtifacts,
   resolveProjectEnvConfig,
 } from "../lib/project-env-config.ts";
 import { exec, findExecutableInPath, run } from "../lib/shell.ts";
@@ -1916,7 +1917,40 @@ async function maybeMigrateProjectEnvConfig(opts: {
     note("Legacy env migration found nothing to write.", "doctor");
     return;
   }
-  note(`Wrote ${migrated.wroteFiles.join(", ")}`, "doctor");
+  const migrationNotes = [`Wrote ${migrated.wroteFiles.join(", ")}`];
+  if (migrated.updatedProjectConfig) {
+    migrationNotes.push(
+      "Updated .hack/hack.config.json for the modern env format."
+    );
+  }
+  note(migrationNotes.join("\n"), "doctor");
+
+  if (migrated.cleanupCandidates.length === 0) {
+    return;
+  }
+
+  note(
+    [
+      "Legacy env artifacts still exist and can now be removed:",
+      ...migrated.cleanupCandidates.map((path) => `- ${path}`),
+    ].join("\n"),
+    "env cleanup"
+  );
+  const shouldCleanup = await confirmOrThrow({
+    message:
+      "Remove legacy env files and obsolete project env config entries now?",
+    initialValue: true,
+  });
+  if (!shouldCleanup) {
+    return;
+  }
+
+  const removed = await removeLegacyProjectEnvArtifacts({
+    paths: migrated.cleanupCandidates,
+  });
+  if (removed.length > 0) {
+    note(`Removed ${removed.join(", ")}`, "env cleanup");
+  }
 }
 
 export async function buildDoctorRemediationPlanLines(opts: {

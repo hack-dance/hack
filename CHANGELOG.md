@@ -1,3 +1,7 @@
+## <small>1.23.1 (2026-03-26)</small>
+
+* fix(build): include app workspaces in node runtime image ([f6bbaba](https://github.com/hack-dance/hack/commit/f6bbaba))
+
 ## 1.23.0 (2026-03-26)
 
 * fix: harden tests against HOME and socket env bleed ([b44def9](https://github.com/hack-dance/hack/commit/b44def9))

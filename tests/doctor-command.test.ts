@@ -1,10 +1,40 @@
 import { expect, test } from "bun:test";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
+import { buildDoctorRemediationPlanLines } from "../src/commands/doctor.ts";
 import {
   buildDoctorRecoveryGuidance,
   buildRecoveryNextSteps,
   buildRecoveryWorkflowLines,
 } from "../src/commands/recovery-guidance.ts";
+
+async function createDoctorTestProject(opts: {
+  readonly modern?: boolean;
+  readonly legacy?: boolean;
+}): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "hack-doctor-"));
+  const hackDir = join(root, ".hack");
+  await mkdir(hackDir, { recursive: true });
+  await writeFile(
+    join(hackDir, "docker-compose.yml"),
+    "services:\n  api:\n    image: alpine:3.19\n"
+  );
+  if (opts.legacy) {
+    await writeFile(
+      join(hackDir, "hack.env.json"),
+      '{"version":1,"vars":[]}\n'
+    );
+  }
+  if (opts.modern) {
+    await writeFile(
+      join(root, "hack.env.default.yaml"),
+      "version: 1\nenvironment: default\nsecretsprovider: project_key\nvalues:\n  global: {}\n"
+    );
+  }
+  return root;
+}
 
 test("doctor guidance distinguishes restartable proxy drift from deeper repair", () => {
   const guidance = buildDoctorRecoveryGuidance({
@@ -34,6 +64,42 @@ test("doctor guidance distinguishes restartable proxy drift from deeper repair",
   expect(guidance.configurationRepair).toEqual(["hack doctor --fix"]);
   expect(guidance.verify).toEqual(["hack doctor"]);
   expect(guidance.capture).toEqual(["hack crash-capture --path <repo>"]);
+});
+
+test("doctor remediation plan mentions env migration when requested for a legacy project", async () => {
+  const root = await createDoctorTestProject({ legacy: true });
+  try {
+    const lines = await buildDoctorRemediationPlanLines({
+      startDir: root,
+      migrateEnvConfig: true,
+    });
+
+    expect(lines).toEqual([
+      "1. Review and repair local network, CoreDNS, CA, and daemon drift where needed.",
+      "2. Repair tickets refs if the project repo needs it.",
+      "3. Prompt to migrate legacy env config (.hack/hack.env.json) to hack.env.*.yaml.",
+    ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("doctor remediation plan skips env migration when modern env files already exist", async () => {
+  const root = await createDoctorTestProject({ modern: true });
+  try {
+    const lines = await buildDoctorRemediationPlanLines({
+      startDir: root,
+      migrateEnvConfig: true,
+    });
+
+    expect(lines).toEqual([
+      "1. Review and repair local network, CoreDNS, CA, and daemon drift where needed.",
+      "2. Repair tickets refs if the project repo needs it.",
+      "3. Skip env migration because this project already uses hack.env.*.yaml.",
+    ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("doctor guidance keeps CoreDNS restartable outages out of doctor --fix", () => {

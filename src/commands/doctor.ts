@@ -1731,9 +1731,16 @@ async function runDoctorFix(opts: {
   readonly startDir: string;
   readonly migrateEnvConfig: boolean;
 }): Promise<void> {
+  const remediationPlan = await buildDoctorRemediationPlanLines({
+    startDir: opts.startDir,
+    migrateEnvConfig: opts.migrateEnvConfig,
+  });
+  note(remediationPlan.join("\n"), "doctor plan");
+
   const ok = await confirmOrThrow({
-    message:
-      "Attempt safe auto-remediations now? (network + CoreDNS + CA + tickets refs)",
+    message: opts.migrateEnvConfig
+      ? "Start guided remediation steps now? (includes env migration when applicable)"
+      : "Start guided remediation steps now?",
     initialValue: true,
   });
   if (!ok) {
@@ -1812,8 +1819,18 @@ async function maybeMigrateProjectEnvConfig(opts: {
   const serviceNames = await discoverComposeServiceNames({
     composeFile: project.composeFile,
   });
+  note(
+    [
+      "Detected legacy project env files.",
+      `- source: ${contractPath} and current local env state`,
+      `- target: ${resolve(project.projectRoot, "hack.env.default.yaml")}`,
+      "- runtime: direct env injection by default; .hack/.env becomes compatibility-only",
+    ].join("\n"),
+    "env migration"
+  );
   const shouldMigrate = await confirmOrThrow({
-    message: "Migrate legacy env config to the new Hack env files now?",
+    message:
+      "Migrate project env from .hack/hack.env.json/.hack/.env to hack.env.*.yaml now?",
     initialValue: true,
   });
   if (!shouldMigrate) {
@@ -1832,6 +1849,54 @@ async function maybeMigrateProjectEnvConfig(opts: {
     return;
   }
   note(`Wrote ${migrated.wroteFiles.join(", ")}`, "doctor");
+}
+
+export async function buildDoctorRemediationPlanLines(opts: {
+  readonly startDir: string;
+  readonly migrateEnvConfig: boolean;
+}): Promise<string[]> {
+  const lines = [
+    "1. Review and repair local network, CoreDNS, CA, and daemon drift where needed.",
+    "2. Repair tickets refs if the project repo needs it.",
+  ];
+  if (!opts.migrateEnvConfig) {
+    return lines;
+  }
+
+  const project = await findProjectContext(opts.startDir);
+  if (!project) {
+    lines.push(
+      "3. Skip env migration because no project was detected from this path."
+    );
+    return lines;
+  }
+
+  if (
+    await projectEnvConfigExists({
+      projectRoot: project.projectRoot,
+    })
+  ) {
+    lines.push(
+      "3. Skip env migration because this project already uses hack.env.*.yaml."
+    );
+    return lines;
+  }
+
+  const contractPath = resolve(
+    project.projectDir,
+    PROJECT_ENV_CONTRACT_FILENAME
+  );
+  if (await pathExists(contractPath)) {
+    lines.push(
+      "3. Prompt to migrate legacy env config (.hack/hack.env.json) to hack.env.*.yaml."
+    );
+    return lines;
+  }
+
+  lines.push(
+    "3. Skip env migration because no legacy project env config was found."
+  );
+  return lines;
 }
 
 async function maybeRepairProjectTicketsGitHealth(opts: {

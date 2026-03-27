@@ -243,6 +243,56 @@ test("session exec injects the selected env into the workspace command", async (
   });
 });
 
+test("session start accepts compose-compatible service scope names", async () => {
+  const projectRoot = await createProject();
+  const startCommand = findSubcommand("start");
+
+  const input = {
+    ctx: {
+      cwd: projectRoot,
+      cli: CLI_SPEC,
+    },
+    args: {
+      options: {
+        up: false,
+        new: false,
+        name: undefined,
+        detach: true,
+        env: "qa",
+        service: "api_worker.v2",
+      },
+      positionals: {
+        project: "session-env-test",
+      },
+      raw: {
+        argv: [
+          "--detach",
+          "--env",
+          "qa",
+          "--service",
+          "api_worker.v2",
+          "session-env-test",
+        ],
+        positionals: ["session-env-test"],
+      },
+    },
+  } as unknown as Parameters<typeof startCommand.handler>[0];
+
+  const exitCode = await startCommand.handler(input);
+
+  expect(exitCode).toBe(0);
+  expect(createSessionCalls).toHaveLength(1);
+  expect(createSessionCalls[0]).toEqual({
+    name: "session-env-test.env-qa.svc-api_worker.v2",
+    cwd: projectRoot,
+    env: {
+      API_BASE_URL: "https://qa.example.com",
+      GLOBAL_FLAG: "base",
+      SERVICE_TOKEN: "overlay-secret-v2",
+    },
+  });
+});
+
 type SessionSubcommandName =
   (typeof sessionCommand.subcommands)[number]["name"];
 type SessionSubcommand<N extends SessionSubcommandName> = Extract<
@@ -276,7 +326,7 @@ async function createProject(): Promise<string> {
 
   await writeFile(
     resolve(projectDir, PROJECT_COMPOSE_FILENAME),
-    "services:\n  api:\n    image: alpine:3.20\n"
+    "services:\n  api:\n    image: alpine:3.20\n  api_worker.v2:\n    image: alpine:3.20\n"
   );
   await writeFile(
     resolve(projectDir, PROJECT_CONFIG_FILENAME),
@@ -315,6 +365,15 @@ async function createProject(): Promise<string> {
     scope: "api",
     key: "SERVICE_TOKEN",
     value: "overlay-secret",
+    secret: false,
+  });
+  await setProjectEnvValue({
+    projectRoot,
+    projectDir,
+    envName: "qa",
+    scope: "api_worker.v2",
+    key: "SERVICE_TOKEN",
+    value: "overlay-secret-v2",
     secret: false,
   });
 

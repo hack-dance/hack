@@ -43,6 +43,7 @@ import {
   sanitizeProjectSlug,
 } from "../lib/project.ts";
 import {
+  assertValidProjectEnvScopeName,
   discoverComposeServiceNames,
   materializeProjectEnv,
   migrateLegacyProjectEnv,
@@ -695,11 +696,21 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
     envName,
   });
   if (modern) {
-    const selectedScope = (args.options.service?.trim() || "global").trim();
-    const envValues =
-      selectedScope === "global"
-        ? modern.globalEnv
-        : (modern.serviceEnv[selectedScope] ?? modern.globalEnv);
+    const selectedScope = (() => {
+      try {
+        return assertValidProjectEnvScopeName({
+          scopeName: args.options.service,
+        });
+      } catch (error: unknown) {
+        throw new CliUsageError(
+          error instanceof Error ? error.message : "Invalid env scope."
+        );
+      }
+    })();
+    const envValues = selectProjectEnvValues({
+      resolved: modern,
+      scopeName: selectedScope,
+    });
     const materialized = await readMaterializedProjectEnv({
       projectDir: project.projectDir,
     });

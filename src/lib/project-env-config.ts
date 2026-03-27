@@ -33,7 +33,7 @@ import { readProjectDefaultEnvConfig } from "./project.ts";
 const PROJECT_ENV_CONFIG_VERSION = 1 as const;
 const PROJECT_ENV_SECRETS_PROVIDER = "project_key" as const;
 const PROJECT_ENV_KEY_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
-const PROJECT_ENV_SCOPE_PATTERN = /^[a-z0-9-]+$/;
+const PROJECT_ENV_SCOPE_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
 const PROJECT_ENV_SECRET_PREFIX = "v1" as const;
 const PROJECT_ENV_ALGORITHM = "aes-256-gcm";
 const PROJECT_ENV_IV_BYTES = 12;
@@ -84,8 +84,10 @@ export function selectProjectEnvValues(opts: {
   readonly resolved: ProjectEnvResolvedConfig;
   readonly scopeName?: string | null;
 }): Record<string, string> {
-  const scopeName = opts.scopeName?.trim() ?? "";
-  if (scopeName.length === 0 || scopeName === "global") {
+  const scopeName = normalizeProjectEnvScopeName({
+    scopeName: opts.scopeName,
+  });
+  if (scopeName === "global") {
     return { ...opts.resolved.globalEnv };
   }
 
@@ -95,6 +97,34 @@ export function selectProjectEnvValues(opts: {
   }
 
   return { ...scoped };
+}
+
+export function isValidProjectEnvScopeName(opts: {
+  readonly scopeName: string;
+}): boolean {
+  return (
+    opts.scopeName === "global" ||
+    PROJECT_ENV_SCOPE_PATTERN.test(opts.scopeName)
+  );
+}
+
+export function normalizeProjectEnvScopeName(opts: {
+  readonly scopeName?: string | null;
+}): string {
+  const scopeName = opts.scopeName?.trim() ?? "";
+  return scopeName.length === 0 ? "global" : scopeName;
+}
+
+export function assertValidProjectEnvScopeName(opts: {
+  readonly scopeName?: string | null;
+}): string {
+  const scopeName = normalizeProjectEnvScopeName({
+    scopeName: opts.scopeName,
+  });
+  if (!isValidProjectEnvScopeName({ scopeName })) {
+    throw new Error(`Invalid env scope: ${scopeName}`);
+  }
+  return scopeName;
 }
 
 type ProjectEnvConfigReadResult = {
@@ -279,7 +309,7 @@ function parseProjectEnvConfig(opts: {
 
   const values: ProjectEnvValuesByScope = {};
   for (const [scope, scopeRaw] of Object.entries(valuesRaw)) {
-    if (!(scope === "global" || PROJECT_ENV_SCOPE_PATTERN.test(scope))) {
+    if (!isValidProjectEnvScopeName({ scopeName: scope })) {
       return {
         ok: false,
         error: `Invalid env scope: ${scope}`,
@@ -566,11 +596,9 @@ export async function setProjectEnvValue(opts: {
   if (!PROJECT_ENV_KEY_PATTERN.test(opts.key)) {
     throw new Error(`Invalid env key: ${opts.key}`);
   }
-  if (
-    !(opts.scope === "global" || PROJECT_ENV_SCOPE_PATTERN.test(opts.scope))
-  ) {
-    throw new Error(`Invalid env scope: ${opts.scope}`);
-  }
+  const scope = assertValidProjectEnvScopeName({
+    scopeName: opts.scope,
+  });
 
   const filePath = resolveProjectEnvConfigPath({
     projectDir: opts.projectDir,
@@ -586,8 +614,8 @@ export async function setProjectEnvValue(opts: {
 
   const nextValues: ProjectEnvValuesByScope = {
     ...read.config.values,
-    [opts.scope]: {
-      ...(read.config.values[opts.scope] ?? {}),
+    [scope]: {
+      ...(read.config.values[scope] ?? {}),
     },
   };
 
@@ -606,9 +634,9 @@ export async function setProjectEnvValue(opts: {
     };
   }
 
-  const nextScopeValues = nextValues[opts.scope] ?? {};
+  const nextScopeValues = nextValues[scope] ?? {};
   nextScopeValues[opts.key] = storedValue;
-  nextValues[opts.scope] = nextScopeValues;
+  nextValues[scope] = nextScopeValues;
   if (!("global" in nextValues)) {
     nextValues.global = {};
   }
@@ -625,7 +653,7 @@ export async function setProjectEnvValue(opts: {
   });
   return {
     filePath,
-    scope: opts.scope,
+    scope,
     createdKey,
     changed,
   };
@@ -708,10 +736,10 @@ export async function materializeProjectEnv(opts: {
     throw new Error("No project env config files found.");
   }
 
-  const selectedEnv =
-    opts.serviceName && opts.serviceName.length > 0
-      ? (resolved.serviceEnv[opts.serviceName] ?? resolved.globalEnv)
-      : resolved.globalEnv;
+  const selectedEnv = selectProjectEnvValues({
+    resolved,
+    scopeName: opts.serviceName,
+  });
   const envPath = resolve(opts.projectDir, PROJECT_ENV_FILENAME);
   const text = serializeDotEnv(selectedEnv);
   const changed = (await writeTextFileIfChanged(envPath, text)).changed;
@@ -1442,16 +1470,14 @@ export function parseProjectEnvTarget(input: {
     throw new Error("Env key is required.");
   }
 
-  const dotIndex = trimmed.indexOf(".");
+  const dotIndex = trimmed.lastIndexOf(".");
   if (dotIndex > 0) {
     if (input.scopeOverride) {
       throw new Error("Do not combine dotted scope syntax with --service.");
     }
     const scope = trimmed.slice(0, dotIndex).trim();
     const key = trimmed.slice(dotIndex + 1).trim();
-    if (!PROJECT_ENV_SCOPE_PATTERN.test(scope)) {
-      throw new Error(`Invalid env scope: ${scope}`);
-    }
+    assertValidProjectEnvScopeName({ scopeName: scope });
     if (!PROJECT_ENV_KEY_PATTERN.test(key)) {
       throw new Error(`Invalid env key: ${key}`);
     }
@@ -1462,7 +1488,9 @@ export function parseProjectEnvTarget(input: {
     throw new Error(`Invalid env key: ${trimmed}`);
   }
   return {
-    scope: input.scopeOverride?.trim() || "global",
+    scope: assertValidProjectEnvScopeName({
+      scopeName: input.scopeOverride,
+    }),
     key: trimmed,
   };
 }

@@ -25,6 +25,7 @@ import {
   readProjectConfig,
 } from "../lib/project.ts";
 import {
+  assertValidProjectEnvScopeName,
   discoverComposeServiceNames,
   migrateLegacyProjectEnv,
   projectEnvConfigExists,
@@ -141,8 +142,6 @@ const optMaxMs = defineOption({
   description: "Stop tailing after N milliseconds",
   defaultValue: "5000",
 } as const);
-
-const SESSION_SCOPE_PATTERN = /^[a-z0-9-]+$/;
 
 // Subcommand specs
 const listSpec = defineCommand({
@@ -890,14 +889,16 @@ function resolveRequestedEnvName(opts: {
 function resolveRequestedServiceName(opts: {
   readonly serviceOption: string | undefined;
 }): string | null {
-  const serviceName = opts.serviceOption?.trim() ?? "";
-  if (serviceName.length === 0) {
-    return null;
+  try {
+    const serviceName = assertValidProjectEnvScopeName({
+      scopeName: opts.serviceOption,
+    });
+    return serviceName === "global" ? null : serviceName;
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error ? error.message : "Invalid --service value.";
+    throw new CliUsageError(message);
   }
-  if (!(serviceName === "global" || SESSION_SCOPE_PATTERN.test(serviceName))) {
-    throw new CliUsageError(`Invalid --service value: ${serviceName}`);
-  }
-  return serviceName;
 }
 
 function buildScopedWorkspaceBaseName(opts: {

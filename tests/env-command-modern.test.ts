@@ -83,6 +83,22 @@ test("modern env list masks secret values by default", async () => {
   expect(jsonResult.stdout).toContain('"materialized_keys": []');
 });
 
+test("modern env list rejects unknown service scopes", async () => {
+  const projectRoot = await createProject();
+
+  const result = await runCliWithCapturedOutput([
+    "env",
+    "list",
+    "--path",
+    projectRoot,
+    "--service",
+    "typo_service",
+  ]);
+
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain("Unknown env scope: typo_service");
+});
+
 async function createProject(): Promise<string> {
   if (!tempDir) {
     throw new Error("Missing temp directory");

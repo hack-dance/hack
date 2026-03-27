@@ -20,8 +20,10 @@ import {
 import { upsertDotEnvValue } from "../src/lib/hack-env.ts";
 import { readProjectDefaultEnvConfig } from "../src/lib/project.ts";
 import {
+  assertValidProjectEnvScopeName,
   materializeProjectEnv,
   migrateLegacyProjectEnv,
+  parseProjectEnvTarget,
   resolveProjectEnvConfig,
   setProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
@@ -173,6 +175,45 @@ test("materializeProjectEnv writes selected service env without touching runtime
   );
   expect(envText).toContain("GLOBAL_FLAG=1");
   expect(envText).toContain("PORT=4000");
+});
+
+test("materializeProjectEnv rejects unknown service scopes", async () => {
+  const repo = await createRepo();
+  await setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "global",
+    key: "GLOBAL_FLAG",
+    value: "1",
+    secret: false,
+  });
+
+  await expect(
+    materializeProjectEnv({
+      projectRoot: repo.projectRoot,
+      projectDir: repo.projectDir,
+      envName: null,
+      serviceName: "typo_service",
+      serviceNames: ["api", "web"],
+    })
+  ).rejects.toThrow("Unknown env scope: typo_service");
+});
+
+test("project env scopes accept compose-compatible underscores and dots", () => {
+  expect(
+    assertValidProjectEnvScopeName({
+      scopeName: "api_worker.v2",
+    })
+  ).toBe("api_worker.v2");
+  expect(
+    parseProjectEnvTarget({
+      keyOrPath: "api_worker.v2.SERVICE_TOKEN",
+    })
+  ).toEqual({
+    scope: "api_worker.v2",
+    key: "SERVICE_TOKEN",
+  });
 });
 
 test("resolveProjectEnvConfig falls back to HACK_ENV_SECRET_KEY when the key file is missing", async () => {

@@ -447,6 +447,33 @@ export function createGitTicketsChannel(opts: {
     return null;
   };
 
+  const refreshRemoteTrackingRefs = async (input: {
+    readonly remoteUrl: string | null;
+  }): Promise<
+    { readonly ok: true } | { readonly ok: false; readonly error: string }
+  > => {
+    if (!input.remoteUrl) {
+      return { ok: true };
+    }
+
+    const hiddenFetch = await fetchRemoteRef(remoteRef);
+    if (!(hiddenFetch.ok || hiddenFetch.missing)) {
+      return { ok: false, error: `git fetch failed: ${hiddenFetch.error}` };
+    }
+
+    if (legacyRemoteRef && legacyTrackingRef) {
+      const legacyFetch = await fetchRemoteRefToTracking(
+        legacyRemoteRef,
+        legacyTrackingRef
+      );
+      if (!(legacyFetch.ok || legacyFetch.missing)) {
+        return { ok: false, error: `git fetch failed: ${legacyFetch.error}` };
+      }
+    }
+
+    return { ok: true };
+  };
+
   const hasAheadLocalBranchCommits = async (input: {
     readonly trackingRef: string | null;
   }): Promise<boolean> => {
@@ -817,6 +844,10 @@ export function createGitTicketsChannel(opts: {
     await ensureBareRepo();
     await ensureSparseCheckout();
     const { remoteUrl } = await ensureRemote();
+    const refreshed = await refreshRemoteTrackingRefs({ remoteUrl });
+    if (!refreshed.ok) {
+      return refreshed;
+    }
 
     if (await hasPendingWorktreeChanges()) {
       const pushRef =
@@ -1163,30 +1194,9 @@ export function createGitTicketsChannel(opts: {
         return checkedOut;
       }
 
-      const repairBranch = `${branch}-repair`;
-      const orphan = await runGitDir({
-        args: ["checkout", "--orphan", repairBranch],
-      });
-      if (!orphan.ok) {
-        return {
-          ok: false,
-          error: `git checkout --orphan failed: ${orphan.stderr.trim()}`,
-        };
-      }
-
       const pruned = await pruneWorktreeToTickets();
       if (!pruned.ok) {
         return pruned;
-      }
-
-      const renamed = await runGitDir({
-        args: ["branch", "-M", repairBranch, branch],
-      });
-      if (!renamed.ok) {
-        return {
-          ok: false,
-          error: `git branch -M failed: ${renamed.stderr.trim()}`,
-        };
       }
 
       const committed = await commitAll("tickets: repair");

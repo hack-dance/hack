@@ -11,6 +11,11 @@ import type { HackEnvSource } from "./hack-env.ts";
 import { resolveHackEnv } from "./hack-env.ts";
 import type { ProjectOwnershipConfig } from "./project.ts";
 import { readProjectConfig } from "./project.ts";
+import {
+  discoverComposeServiceNames,
+  projectEnvConfigExists,
+  resolveProjectEnvConfig,
+} from "./project-env-config.ts";
 import { exec } from "./shell.ts";
 
 export type GitWorktreeMeta = {
@@ -106,7 +111,9 @@ export async function resolveProjectMeta(opts: {
       resolveGitMeta({ repoRoot: opts.repoRoot }),
       resolveHackBranchesMeta({ projectDir: opts.projectDir }),
       resolveEnvMeta({
+        projectRoot: opts.repoRoot,
         projectDir: opts.projectDir,
+        composeFile: opts.composeFile,
         projectName: opts.projectName,
       }),
       resolveSessionsMeta({ projectName: opts.projectName }),
@@ -274,9 +281,16 @@ export async function resolveHackBranchesMeta(opts: {
 }
 
 export async function resolveEnvMeta(opts: {
+  readonly projectRoot: string;
   readonly projectDir: string;
+  readonly composeFile: string;
   readonly projectName: string;
 }): Promise<EnvMeta> {
+  const modernEnvMeta = await resolveModernEnvMeta(opts);
+  if (modernEnvMeta) {
+    return modernEnvMeta;
+  }
+
   const resolved = await resolveHackEnv({
     projectDir: opts.projectDir,
     projectName: opts.projectName,
@@ -304,6 +318,79 @@ export async function resolveEnvMeta(opts: {
     vars,
     missingRequired: resolved.missingRequired.map((v) => v.key),
   };
+}
+
+async function resolveModernEnvMeta(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly composeFile: string;
+}): Promise<EnvMeta | null> {
+  if (
+    !(await projectEnvConfigExists({
+      projectDir: opts.projectDir,
+    }))
+  ) {
+    return null;
+  }
+
+  const serviceNames = await discoverComposeServiceNames({
+    composeFile: opts.composeFile,
+  });
+  let resolved: Awaited<ReturnType<typeof resolveProjectEnvConfig>>;
+  try {
+    resolved = await resolveProjectEnvConfig({
+      projectRoot: opts.projectRoot,
+      projectDir: opts.projectDir,
+      envName: undefined,
+      serviceNames,
+    });
+  } catch (error: unknown) {
+    return {
+      contractPath: resolve(opts.projectDir, "hack.env.default.yaml"),
+      contractExists: true,
+      contractParseError:
+        error instanceof Error ? error.message : "Invalid modern env config.",
+      vars: [],
+      missingRequired: [],
+    };
+  }
+  if (!resolved) {
+    return null;
+  }
+
+  return {
+    contractPath: resolved.selection.defaultPath,
+    contractExists: true,
+    contractParseError: null,
+    vars: buildModernEnvMetaVars({ resolved }),
+    missingRequired: [],
+  };
+}
+
+function buildModernEnvMetaVars(opts: {
+  readonly resolved: NonNullable<
+    Awaited<ReturnType<typeof resolveProjectEnvConfig>>
+  >;
+}): EnvVarMeta[] {
+  const vars: EnvVarMeta[] = [];
+  for (const [scope, scopeValues] of Object.entries(
+    opts.resolved.merged.values
+  )) {
+    for (const [key, value] of Object.entries(scopeValues)) {
+      vars.push({
+        key,
+        required: false,
+        source:
+          isRecord(value) && typeof value.secure === "string"
+            ? "keychain"
+            : "plain_env",
+        services: scope === "global" ? null : [scope],
+        resolvedFrom: "portable_backend",
+        hasValue: true,
+      });
+    }
+  }
+  return vars;
 }
 
 export async function resolveSessionsMeta(opts: {

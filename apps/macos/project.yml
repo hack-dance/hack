@@ -28,10 +28,13 @@ targets:
       Release: Config/Release.xcconfig
     postBuildScripts:
       - name: Copy BundledCLI Resources
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(FULL_PRODUCT_NAME)/Contents/Resources/BundledCLI/.copy-complete
         script: |
           set -euo pipefail
           SRC="${PROJECT_DIR}/App/BundledCLI"
           DEST="${TARGET_BUILD_DIR}/${FULL_PRODUCT_NAME}/Contents/Resources/BundledCLI"
+          MARKER="${DEST}/.copy-complete"
 
           if [ ! -d "$SRC" ]; then
             echo "Missing BundledCLI dir: $SRC"
@@ -40,14 +43,20 @@ targets:
 
           mkdir -p "$DEST"
           ditto "$SRC" "$DEST"
+          touch "$MARKER"
       - name: Copy Ghostty VT Resources
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(FULL_PRODUCT_NAME)/Contents/Resources/ghostty/.copy-complete
         script: |
           set -euo pipefail
           SRC="${PROJECT_DIR}/App/GhosttyVT/ghostty"
           DEST="${TARGET_BUILD_DIR}/${FULL_PRODUCT_NAME}/Contents/Resources/ghostty"
+          MARKER="${DEST}/.copy-complete"
 
           if [ ! -d "$SRC" ]; then
             echo "No Ghostty VT resources to copy: $SRC"
+            mkdir -p "$DEST"
+            touch "$MARKER"
             exit 0
           fi
 
@@ -58,6 +67,7 @@ targets:
 
           mkdir -p "$DEST"
           ditto "$SRC" "$DEST"
+          touch "$MARKER"
     settings:
       base:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

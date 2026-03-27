@@ -12,6 +12,7 @@ const DEFAULT_MUTATION_LOCK_HEARTBEAT_MS = 1000;
 const DEFAULT_MUTATION_LOCK_RETRY_MS = 100;
 const DEFAULT_MUTATION_LOCK_STALE_MS = 30_000;
 const DEFAULT_MUTATION_LOCK_TIMEOUT_MS = 30_000;
+const MAX_PUSH_ATTEMPTS = 3;
 
 export type TicketsGitChannel = {
   readonly ensureCheckedOut: () => Promise<string>;
@@ -100,6 +101,10 @@ export function createGitTicketsChannel(opts: {
     warn: (input: { message: string }) => void;
   };
   readonly testOverrides?: {
+    readonly beforePushAttempt?: (input: {
+      readonly attempt: number;
+      readonly pushRef: string;
+    }) => Promise<void>;
     readonly mutationLockHeartbeatMs?: number;
     readonly mutationLockRetryMs?: number;
     readonly mutationLockStaleMs?: number;
@@ -442,6 +447,33 @@ export function createGitTicketsChannel(opts: {
     return null;
   };
 
+  const refreshRemoteTrackingRefs = async (input: {
+    readonly remoteUrl: string | null;
+  }): Promise<
+    { readonly ok: true } | { readonly ok: false; readonly error: string }
+  > => {
+    if (!input.remoteUrl) {
+      return { ok: true };
+    }
+
+    const hiddenFetch = await fetchRemoteRef(remoteRef);
+    if (!(hiddenFetch.ok || hiddenFetch.missing)) {
+      return { ok: false, error: `git fetch failed: ${hiddenFetch.error}` };
+    }
+
+    if (legacyRemoteRef && legacyTrackingRef) {
+      const legacyFetch = await fetchRemoteRefToTracking(
+        legacyRemoteRef,
+        legacyTrackingRef
+      );
+      if (!(legacyFetch.ok || legacyFetch.missing)) {
+        return { ok: false, error: `git fetch failed: ${legacyFetch.error}` };
+      }
+    }
+
+    return { ok: true };
+  };
+
   const hasAheadLocalBranchCommits = async (input: {
     readonly trackingRef: string | null;
   }): Promise<boolean> => {
@@ -476,6 +508,7 @@ export function createGitTicketsChannel(opts: {
     const fetchArgs = [
       "fetch",
       "--prune",
+      "--refmap=",
       "origin",
       `+${ref}:${destinationRef}`,
     ] as const;
@@ -526,7 +559,14 @@ export function createGitTicketsChannel(opts: {
 
   const pushCurrentBranch = async (input: {
     readonly pushRef: string;
+    readonly attempt: number;
   }): Promise<PushAttemptResult> => {
+    if (opts.testOverrides?.beforePushAttempt) {
+      await opts.testOverrides.beforePushAttempt({
+        attempt: input.attempt,
+        pushRef: input.pushRef,
+      });
+    }
     const push = await runGitDir({
       args: ["push", "origin", `${localBranchRef}:${input.pushRef}`],
     });
@@ -793,7 +833,9 @@ export function createGitTicketsChannel(opts: {
     return { ok: true, imported: true };
   };
 
-  const ensureCheckedOut = async (): Promise<
+  const ensureCheckedOut = async (input?: {
+    readonly forceFreshCheckout?: boolean;
+  }): Promise<
     | {
         readonly ok: true;
         readonly remoteUrl: string | null;
@@ -805,8 +847,15 @@ export function createGitTicketsChannel(opts: {
     await ensureBareRepo();
     await ensureSparseCheckout();
     const { remoteUrl } = await ensureRemote();
+    const refreshed = await refreshRemoteTrackingRefs({ remoteUrl });
+    if (!refreshed.ok) {
+      return refreshed;
+    }
 
-    if (await hasPendingWorktreeChanges()) {
+    if (
+      !(input?.forceFreshCheckout === true) &&
+      (await hasPendingWorktreeChanges())
+    ) {
       const pushRef =
         refMode === "hidden" && legacyRemoteRef ? legacyRemoteRef : remoteRef;
       return { ok: true, remoteUrl, pushRef };
@@ -814,7 +863,8 @@ export function createGitTicketsChannel(opts: {
 
     const preferredTrackingRef = await resolvePreferredTrackingRef();
     if (
-      await hasAheadLocalBranchCommits({ trackingRef: preferredTrackingRef })
+      !(input?.forceFreshCheckout === true) &&
+      (await hasAheadLocalBranchCommits({ trackingRef: preferredTrackingRef }))
     ) {
       const pushRef =
         preferredTrackingRef === legacyTrackingRef && legacyRemoteRef
@@ -962,44 +1012,54 @@ export function createGitTicketsChannel(opts: {
       return { ok: true, didPush: false };
     }
 
-    const push = await pushCurrentBranch({ pushRef: input.pushRef });
-    if (push.ok) {
-      return push;
-    }
-    if (push.hiddenRefRejected) {
-      return push;
-    }
-
-    opts.logger.warn({
-      message: `git push failed, retrying after fetch: ${push.error.replace("git push failed: ", "")}`,
-    });
-
-    const checkedOut = await checkoutHead({ remoteUrl: input.remoteUrl });
-    if (!checkedOut.ok) {
-      return checkedOut;
-    }
-
-    if (input.replayPendingEvents) {
-      const replayed = await input.replayPendingEvents();
-      if (!replayed.ok) {
-        return replayed;
-      }
-    } else {
-      const rewrote = await rewritePendingEventsAfterCheckout({
-        pendingEvents: input.pendingEvents,
+    let nextPushRef = input.pushRef;
+    for (let attempt = 1; attempt <= MAX_PUSH_ATTEMPTS; attempt += 1) {
+      const push = await pushCurrentBranch({
+        pushRef: nextPushRef,
+        attempt,
       });
-      if (!rewrote.ok) {
-        return rewrote;
+      if (push.ok) {
+        return push;
       }
+      if (push.hiddenRefRejected || attempt === MAX_PUSH_ATTEMPTS) {
+        return push;
+      }
+
+      opts.logger.warn({
+        message: `git push failed, retrying after fetch: ${push.error.replace("git push failed: ", "")}`,
+      });
+
+      const checkedOut = await checkoutHead({ remoteUrl: input.remoteUrl });
+      if (!checkedOut.ok) {
+        return checkedOut;
+      }
+
+      if (input.replayPendingEvents) {
+        const replayed = await input.replayPendingEvents();
+        if (!replayed.ok) {
+          return replayed;
+        }
+      } else {
+        const rewrote = await rewritePendingEventsAfterCheckout({
+          pendingEvents: input.pendingEvents,
+        });
+        if (!rewrote.ok) {
+          return rewrote;
+        }
+      }
+
+      const committed = await commitAll("tickets: retry");
+      if (!committed.ok) {
+        return committed;
+      }
+
+      nextPushRef = checkedOut.pushRef;
     }
 
-    const committed = await commitAll("tickets: retry");
-    if (!committed.ok) {
-      return committed;
-    }
-
-    const retry = await pushCurrentBranch({ pushRef: checkedOut.pushRef });
-    return retry;
+    return {
+      ok: false,
+      error: "git push failed after exhausting retry attempts",
+    };
   };
 
   const listTrackedPaths = async (): Promise<
@@ -1136,35 +1196,16 @@ export function createGitTicketsChannel(opts: {
     readonly pruneLegacyRef: boolean;
   }): Promise<TicketsGitRepairResult> => {
     return await withMutationLock(async () => {
-      const checkedOut = await ensureCheckedOut();
+      const checkedOut = await ensureCheckedOut({
+        forceFreshCheckout: true,
+      });
       if (!checkedOut.ok) {
         return checkedOut;
-      }
-
-      const repairBranch = `${branch}-repair`;
-      const orphan = await runGitDir({
-        args: ["checkout", "--orphan", repairBranch],
-      });
-      if (!orphan.ok) {
-        return {
-          ok: false,
-          error: `git checkout --orphan failed: ${orphan.stderr.trim()}`,
-        };
       }
 
       const pruned = await pruneWorktreeToTickets();
       if (!pruned.ok) {
         return pruned;
-      }
-
-      const renamed = await runGitDir({
-        args: ["branch", "-M", repairBranch, branch],
-      });
-      if (!renamed.ok) {
-        return {
-          ok: false,
-          error: `git branch -M failed: ${renamed.stderr.trim()}`,
-        };
       }
 
       const committed = await commitAll("tickets: repair");
@@ -1175,6 +1216,9 @@ export function createGitTicketsChannel(opts: {
       const pushed = await pushWithRetry({
         remoteUrl: checkedOut.remoteUrl,
         pushRef: checkedOut.pushRef,
+        replayPendingEvents: async () => {
+          return await pruneWorktreeToTickets();
+        },
       });
       if (!pushed.ok) {
         return pushed;

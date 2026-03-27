@@ -81,6 +81,12 @@ export const GLOBAL_GRAFANA_DASHBOARD_FILENAME =
 export const PROJECT_COMPOSE_FILENAME = "docker-compose.yml" as const;
 export const PROJECT_ENV_FILENAME = ".env" as const;
 export const PROJECT_ENV_CONTRACT_FILENAME = "hack.env.json" as const;
+export const PROJECT_ENV_CONFIG_DEFAULT_FILENAME =
+  "hack.env.default.yaml" as const;
+export const PROJECT_ENV_CONFIG_FILENAME_PREFIX = "hack.env." as const;
+export const PROJECT_ENV_CONFIG_FILENAME_SUFFIX = ".yaml" as const;
+export const PROJECT_ENV_KEY_FILENAME = ".hack.secret.key" as const;
+export const PROJECT_ENV_STATE_FILENAME = ".env.state.json" as const;
 export const PROJECT_CONFIG_FILENAME = "hack.config.json" as const;
 export const PROJECT_CONFIG_LEGACY_FILENAME = "hack.toml" as const;
 export const PROJECT_BRANCHES_FILENAME = "hack.branches.json" as const;

@@ -103,18 +103,37 @@ export async function readRuntimeProjects(opts: {
   readonly includeGlobal: boolean;
 }): Promise<RuntimeProjectsResult> {
   const checkedAtMs = Date.now();
-  const res = await exec(
-    [
-      "docker",
-      "ps",
-      "-a",
-      "--filter",
-      "label=com.docker.compose.project",
-      "--format",
-      "json",
-    ],
-    { stdin: "ignore" }
-  );
+  if (!findExecutableInPath("docker")) {
+    return {
+      ok: false,
+      runtime: [],
+      error: "docker is not installed or not on PATH",
+      checkedAtMs,
+    };
+  }
+
+  let res: Awaited<ReturnType<typeof exec>>;
+  try {
+    res = await exec(
+      [
+        "docker",
+        "ps",
+        "-a",
+        "--filter",
+        "label=com.docker.compose.project",
+        "--format",
+        "json",
+      ],
+      { stdin: "ignore" }
+    );
+  } catch (error: unknown) {
+    return {
+      ok: false,
+      runtime: [],
+      error: error instanceof Error ? error.message : "docker ps failed",
+      checkedAtMs,
+    };
+  }
   if (res.exitCode !== 0) {
     return {
       ok: false,

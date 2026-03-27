@@ -50,6 +50,7 @@ import {
   PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
   PROJECT_CONFIG_LEGACY_FILENAME,
+  PROJECT_ENV_CONFIG_DEFAULT_FILENAME,
   PROJECT_ENV_CONTRACT_FILENAME,
   PROJECT_ENV_FILENAME,
 } from "../constants.ts";
@@ -110,6 +111,12 @@ import {
   sanitizeBranchSlug,
   sanitizeProjectSlug,
 } from "../lib/project.ts";
+import {
+  discoverComposeServiceNames,
+  migrateLegacyProjectEnv,
+  projectEnvConfigExists,
+  resolveProjectEnvConfig,
+} from "../lib/project-env-config.ts";
 import { resolveProjectExecutionTarget } from "../lib/project-execution.ts";
 import {
   readProjectRuntimeStateEntry,
@@ -139,7 +146,7 @@ import {
 import { buildLifecycleSessionName } from "../mux/session-names.ts";
 import {
   renderProjectConfigJson,
-  renderProjectEnvContractJson,
+  renderProjectEnvConfigYaml,
 } from "../templates.ts";
 import { display } from "../ui/display.ts";
 import { readLinesFromStream } from "../ui/lines.ts";
@@ -809,6 +816,154 @@ function isEnvVarRelevantToServices(opts: {
   return opts.varServices.some((svc) => serviceSet.has(svc));
 }
 
+async function maybePromptLegacyProjectEnvMigration(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly projectName: string;
+  readonly serviceNames: readonly string[];
+}): Promise<boolean> {
+  if (
+    await projectEnvConfigExists({
+      projectDir: opts.project.projectDir,
+    })
+  ) {
+    return false;
+  }
+
+  const contractPath = resolve(
+    opts.project.projectDir,
+    PROJECT_ENV_CONTRACT_FILENAME
+  );
+  if (!(await pathExists(contractPath))) {
+    return false;
+  }
+
+  if (!(process.stdin.isTTY && process.stdout.isTTY)) {
+    logger.warn({
+      message:
+        "Legacy env format detected. Run `hack doctor --migrate-env-config` to upgrade to the new env config files.",
+    });
+    return false;
+  }
+
+  const shouldMigrate = await confirm({
+    message:
+      "Legacy env format detected. Migrate to the new Hack env config files now?",
+    initialValue: true,
+  });
+  if (isCancel(shouldMigrate)) {
+    throw new Error("Canceled");
+  }
+  if (!shouldMigrate) {
+    return false;
+  }
+
+  const migrated = await migrateLegacyProjectEnv({
+    projectRoot: opts.project.projectRoot,
+    projectDir: opts.project.projectDir,
+    projectName: opts.projectName,
+    serviceNames: opts.serviceNames,
+    materialize: false,
+  });
+  if (migrated.wroteFiles.length > 0) {
+    logger.info({
+      message: `Migrated env config: ${migrated.wroteFiles.join(", ")}`,
+    });
+  }
+  return migrated.legacyDetected;
+}
+
+async function resolveModernComposeEnvOverrides(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly targetServices: readonly string[];
+  readonly envName?: string | null;
+}): Promise<{
+  readonly composeFiles: readonly string[];
+  readonly env: Readonly<Record<string, string>>;
+  readonly effectiveEnvName: string | null;
+} | null> {
+  const modern = await resolveProjectEnvConfig({
+    projectRoot: opts.project.projectRoot,
+    projectDir: opts.project.projectDir,
+    envName: opts.envName,
+    serviceNames: opts.targetServices,
+  });
+  if (!modern) {
+    return null;
+  }
+
+  for (const scope of modern.unknownScopes) {
+    logger.warn({
+      message: `Env config scope "${scope}" does not match a known service in ${opts.project.composeFile}.`,
+    });
+  }
+
+  const overrideServices: Record<string, Record<string, unknown>> = {};
+  for (const service of opts.targetServices) {
+    const env = modern.serviceEnv[service] ?? modern.globalEnv;
+    if (Object.keys(env).length === 0) {
+      continue;
+    }
+    overrideServices[service] = { environment: env };
+  }
+
+  if (Object.keys(overrideServices).length === 0) {
+    return {
+      composeFiles: [],
+      env: modern.globalEnv,
+      effectiveEnvName: modern.selection.effectiveEnv,
+    };
+  }
+
+  const override = { services: overrideServices };
+  const yaml = YAML.stringify(override, null, 2);
+  const text = ensureTrailingNewline(cleanupYaml(yaml));
+  const overrideDir = resolve(opts.project.projectDir, ".internal");
+  await ensureDir(overrideDir);
+  const overridePath = resolve(overrideDir, "compose.env.override.yml");
+  await writeTextFileIfChanged(overridePath, text);
+  return {
+    composeFiles: [overridePath],
+    env: modern.globalEnv,
+    effectiveEnvName: modern.selection.effectiveEnv,
+  };
+}
+
+async function resolveLifecycleEnvForProject(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly projectName: string;
+  readonly envName?: string | null;
+}): Promise<Readonly<Record<string, string>>> {
+  const serviceNames = await discoverComposeServiceNames({
+    composeFile: opts.project.composeFile,
+  });
+  await maybePromptLegacyProjectEnvMigration({
+    project: opts.project,
+    projectName: opts.projectName,
+    serviceNames,
+  });
+  const modern = await resolveProjectEnvConfig({
+    projectRoot: opts.project.projectRoot,
+    projectDir: opts.project.projectDir,
+    envName: opts.envName,
+    serviceNames,
+  });
+  if (modern) {
+    return modern.globalEnv;
+  }
+
+  const envResolved = await resolveHackEnv({
+    projectDir: opts.project.projectDir,
+    projectName: opts.projectName,
+    envName: opts.envName,
+  });
+  if (envResolved.contractParseError) {
+    logger.warn({
+      message: `Failed to parse ${envResolved.contractPath}: ${envResolved.contractParseError}`,
+    });
+  }
+  return envResolved.envForCompose;
+}
+
 async function resolveComposeEnvOverrides(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly projectName: string;
@@ -819,29 +974,25 @@ async function resolveComposeEnvOverrides(opts: {
   readonly env: Readonly<Record<string, string>>;
   readonly effectiveEnvName: string | null;
 }> {
+  await maybePromptLegacyProjectEnvMigration({
+    project: opts.project,
+    projectName: opts.projectName,
+    serviceNames: opts.targetServices,
+  });
+  const modern = await resolveModernComposeEnvOverrides(opts);
+  if (modern) {
+    return modern;
+  }
+
   const resolved = await resolveHackEnv({
     projectDir: opts.project.projectDir,
     projectName: opts.projectName,
     envName: opts.envName,
   });
-
-  if (resolved.contractParseError) {
-    logger.warn({
-      message: `Failed to parse ${resolved.contractPath}: ${resolved.contractParseError}`,
-    });
-  }
-
-  for (const warning of resolved.warnings) {
-    if (
-      !isEnvVarRelevantToServices({
-        services: opts.targetServices,
-        varServices: warning.services,
-      })
-    ) {
-      continue;
-    }
-    logger.warn({ message: warning.message });
-  }
+  logRelevantLegacyEnvWarnings({
+    resolved,
+    targetServices: opts.targetServices,
+  });
 
   if (resolved.contract.vars.length === 0) {
     return {
@@ -851,33 +1002,14 @@ async function resolveComposeEnvOverrides(opts: {
     };
   }
 
-  const missingRelevant = resolved.missingRequired.filter((v) =>
-    isEnvVarRelevantToServices({
-      services: opts.targetServices,
-      varServices: v.services,
-    })
-  );
-
-  if (missingRelevant.length > 0) {
-    const fixed = await maybePromptToFixMissingEnv({
-      missing: missingRelevant,
-      envFile: resolve(opts.project.projectDir, PROJECT_ENV_FILENAME),
-      projectName: opts.projectName,
-      projectDir: opts.project.projectDir,
-    });
-    if (fixed) {
-      return await resolveComposeEnvOverrides(opts);
-    }
-
-    const keys = missingRelevant.map((v) => v.key).join(", ");
-    logger.error({
-      message: `Missing required env: ${keys}`,
-    });
-    logger.info({
-      message:
-        "Run: hack env set KEY=VALUE (or: hack env set --secret KEY=VALUE)",
-    });
-    throw new Error("Missing required env");
+  const shouldRetry = await maybeResolveMissingLegacyEnv({
+    resolved,
+    targetServices: opts.targetServices,
+    projectName: opts.projectName,
+    projectDir: opts.project.projectDir,
+  });
+  if (shouldRetry) {
+    return await resolveComposeEnvOverrides(opts);
   }
 
   const overrideServices: Record<string, Record<string, unknown>> = {};
@@ -923,6 +1055,66 @@ async function resolveComposeEnvOverrides(opts: {
     env: resolved.envForCompose,
     effectiveEnvName: resolved.envSelection.effectiveEnv,
   };
+}
+
+function logRelevantLegacyEnvWarnings(opts: {
+  readonly resolved: Awaited<ReturnType<typeof resolveHackEnv>>;
+  readonly targetServices: readonly string[];
+}): void {
+  if (opts.resolved.contractParseError) {
+    logger.warn({
+      message: `Failed to parse ${opts.resolved.contractPath}: ${opts.resolved.contractParseError}`,
+    });
+  }
+
+  for (const warning of opts.resolved.warnings) {
+    if (
+      !isEnvVarRelevantToServices({
+        services: opts.targetServices,
+        varServices: warning.services,
+      })
+    ) {
+      continue;
+    }
+    logger.warn({ message: warning.message });
+  }
+}
+
+async function maybeResolveMissingLegacyEnv(opts: {
+  readonly resolved: Awaited<ReturnType<typeof resolveHackEnv>>;
+  readonly targetServices: readonly string[];
+  readonly projectName: string;
+  readonly projectDir: string;
+}): Promise<boolean> {
+  const missingRelevant = opts.resolved.missingRequired.filter((value) =>
+    isEnvVarRelevantToServices({
+      services: opts.targetServices,
+      varServices: value.services,
+    })
+  );
+  if (missingRelevant.length === 0) {
+    return false;
+  }
+
+  const fixed = await maybePromptToFixMissingEnv({
+    missing: missingRelevant,
+    envFile: resolve(opts.projectDir, PROJECT_ENV_FILENAME),
+    projectName: opts.projectName,
+    projectDir: opts.projectDir,
+  });
+  if (fixed) {
+    return true;
+  }
+
+  const keys = missingRelevant.map((value) => value.key).join(", ");
+  logger.error({
+    message: `Missing required env: ${keys}`,
+  });
+  logger.info({
+    message:
+      "Run: hack env set KEY=VALUE (or: hack env set --secret KEY=VALUE)",
+  });
+  throw new Error("Missing required env");
 }
 
 async function maybePromptToFixMissingEnv(opts: {
@@ -2681,8 +2873,8 @@ async function handleInit({
   );
 
   await writeTextFileIfChanged(
-    resolve(hackDir, PROJECT_ENV_CONTRACT_FILENAME),
-    renderProjectEnvContractJson()
+    resolve(hackDir, PROJECT_ENV_CONFIG_DEFAULT_FILENAME),
+    renderProjectEnvConfigYaml()
   );
 
   const registration = await upsertProjectRegistration({
@@ -2712,6 +2904,7 @@ async function handleInit({
       `Wrote: ${HACK_PROJECT_DIR_PRIMARY}/${PROJECT_COMPOSE_FILENAME}`,
       `Wrote: ${HACK_PROJECT_DIR_PRIMARY}/${PROJECT_CONFIG_FILENAME}`,
       `Wrote: ${HACK_PROJECT_DIR_PRIMARY}/README.md`,
+      `Wrote: ${HACK_PROJECT_DIR_PRIMARY}/${PROJECT_ENV_CONFIG_DEFAULT_FILENAME}`,
       "",
       "Next:",
       "  hack up",
@@ -2813,8 +3006,8 @@ async function handleInitAuto({
   );
 
   await writeTextFileIfChanged(
-    resolve(hackDir, PROJECT_ENV_CONTRACT_FILENAME),
-    renderProjectEnvContractJson()
+    resolve(hackDir, PROJECT_ENV_CONFIG_DEFAULT_FILENAME),
+    renderProjectEnvConfigYaml()
   );
 
   const registration = await upsertProjectRegistration({
@@ -4499,22 +4692,17 @@ async function handleDown({
     projectDir: project.projectDir,
     composeProject: lifecycleComposeProject,
   });
-  const envResolved = await resolveHackEnv({
-    projectDir: project.projectDir,
+  const lifecycleEnv = await resolveLifecycleEnvForProject({
+    project,
     projectName,
     envName: effectiveEnvName,
   });
-  if (envResolved.contractParseError) {
-    logger.warn({
-      message: `Failed to parse ${envResolved.contractPath}: ${envResolved.contractParseError}`,
-    });
-  }
 
   const beforeCode = await runLifecycleCommands({
     title: "Lifecycle (down before)",
     commands: cfg.lifecycle?.down?.before,
     projectRoot: project.projectRoot,
-    env: envResolved.envForCompose,
+    env: lifecycleEnv,
     projectDir: project.projectDir,
     composeProject: lifecycleComposeProject,
   });
@@ -4558,7 +4746,7 @@ async function handleDown({
     title: "Lifecycle (down after)",
     commands: cfg.lifecycle?.down?.after,
     projectRoot: project.projectRoot,
-    env: envResolved.envForCompose,
+    env: lifecycleEnv,
     projectDir: project.projectDir,
     composeProject: lifecycleComposeProject,
   });
@@ -4792,16 +4980,11 @@ async function handleRestart({
     projectDir: project.projectDir,
     composeProject: lifecycleComposeProject,
   });
-  const envResolved = await resolveHackEnv({
-    projectDir: project.projectDir,
+  const lifecycleEnv = await resolveLifecycleEnvForProject({
+    project,
     projectName,
     envName: effectiveEnvName,
   });
-  if (envResolved.contractParseError) {
-    logger.warn({
-      message: `Failed to parse ${envResolved.contractPath}: ${envResolved.contractParseError}`,
-    });
-  }
 
   const downCode = await runRestartDownPhase({
     project,
@@ -4811,7 +4994,7 @@ async function handleRestart({
     lifecycleComposeProject,
     profiles,
     branch,
-    envForCompose: envResolved.envForCompose,
+    envForCompose: lifecycleEnv,
   });
   if (downCode !== 0) {
     return downCode;

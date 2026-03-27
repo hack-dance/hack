@@ -79,14 +79,11 @@ test("crash capture summary restores doctor recovery guidance from warning-only 
     expect(summary.failedCommands).toEqual([]);
     expect(summary.recovery.temporaryBreakage).toEqual(["hack restart"]);
     expect(summary.recovery.configurationRepair).toEqual(["hack doctor --fix"]);
-    expect(summary.recovery.followUp).toEqual([
-      "gateway tokens: No active tokens (run: hack x gateway token-create)",
-    ]);
+    expect(summary.recovery.followUp).toEqual([]);
     expect(summary.nextSteps).toEqual([
       "Run `hack doctor --path /tmp/demo` to classify restart versus repair work.",
       "Temporary breakage: `hack restart --path /tmp/demo`.",
       "Configuration repair: `hack doctor --fix --path /tmp/demo`.",
-      "Manual follow-up: gateway tokens: No active tokens (run: hack x gateway token-create)",
       "Verify with `hack doctor --path /tmp/demo`.",
       "If it still fails, run `hack crash-capture --path /tmp/demo` again after the next repro.",
     ]);

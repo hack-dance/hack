@@ -12,6 +12,25 @@ function parseIntOrNull(value: string | undefined): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function buildEnvInjectedCommand(opts: {
+  readonly command: string;
+  readonly env?: Readonly<Record<string, string>>;
+}): string {
+  if (!opts.env || Object.keys(opts.env).length === 0) {
+    return opts.command;
+  }
+
+  const assignments = Object.entries(opts.env)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}=${shellQuote(value)}`)
+    .join(" ");
+  return `env ${assignments} ${opts.command}`;
+}
+
 export function createTmuxBackend(): MuxBackend {
   const available = Boolean(findExecutableInPath("tmux"));
 
@@ -67,6 +86,7 @@ export function createTmuxBackend(): MuxBackend {
   const createSession = async (opts: {
     readonly name: string;
     readonly cwd?: string;
+    readonly env?: Readonly<Record<string, string>>;
   }): Promise<MuxSessionCreateResult> => {
     if (!available) {
       return { ok: false, error: "tmux_unavailable" };
@@ -75,6 +95,13 @@ export function createTmuxBackend(): MuxBackend {
     const args = ["tmux", "new-session", "-d", "-s", opts.name];
     if (opts.cwd) {
       args.push("-c", opts.cwd);
+    }
+    if (opts.env) {
+      for (const [key, value] of Object.entries(opts.env).sort(
+        ([left], [right]) => left.localeCompare(right)
+      )) {
+        args.push("-e", `${key}=${value}`);
+      }
     }
 
     const result = await exec(args, { stdin: "ignore" });
@@ -102,9 +129,20 @@ export function createTmuxBackend(): MuxBackend {
   const execInSession = async (opts: {
     readonly name: string;
     readonly command: string;
+    readonly env?: Readonly<Record<string, string>>;
   }): Promise<ExecResult> => {
     return await exec(
-      ["tmux", "send-keys", "-t", opts.name, opts.command, "Enter"],
+      [
+        "tmux",
+        "send-keys",
+        "-t",
+        opts.name,
+        buildEnvInjectedCommand({
+          command: opts.command,
+          env: opts.env,
+        }),
+        "Enter",
+      ],
       {
         stdin: "ignore",
       }

@@ -132,8 +132,8 @@ TLS + valid-hostname constraints:
 - Alias hosts are still local-dev routes unless you add an external tunnel/remote ingress path.
 
 Project files (managed vs generated):
-- Source-of-truth files: `.hack/docker-compose.yml`, `.hack/hack.config.json`, `.hack/hack.env.json` (if env contract is used).
-- Local-only files: `.hack/.env` and `.hack/.internal/` (runtime/local machine state; keep gitignored).
+- Source-of-truth files: `.hack/docker-compose.yml`, `.hack/hack.config.json`, `.hack/hack.env.default.yaml`, and optional `.hack/hack.env.<overlay>.yaml`.
+- Local-only files: `.hack.secret.key`, optional `.hack/.env` compatibility output, `.hack/.env.state.json`, and `.hack/.internal/` (runtime/local machine state; keep gitignored).
 - Generated (do not hand-edit): `.hack/.internal/compose.override.yml`, `.hack/.internal/compose.env.override.yml`, `.hack/.branch/compose.<branch>.override.yml`.
 - Managed via CLI: `.hack/.internal/extra-hosts.json` (use `hack internal extra-hosts ...` commands).
 - Lifecycle runtime files: `.hack/.internal/lifecycle/state.json`, `.hack/.internal/lifecycle/*.log`.
@@ -165,17 +165,23 @@ Lifecycle + startup:
 - Use `lifecycle.up.before` for pre-start hooks and `lifecycle.processes` for long-running host tasks.
 - Inspect lifecycle status via `hack projects --details` and stream via `hack logs <service-or-process>`.
 
-Workspaces (mux-managed):
+Workspaces (mux-managed, tmux-first by default):
 - Picker: `hack session` for persistent project workspaces.
 - Reuse/create: `hack session start <project>`
+- Env-scoped workspace: `hack session start <project> --env qa --service api --detach`
 - Force isolated agent workspace: `hack session start <project> --new --name agent-1` (`<project>--agent-1`).
 - Execute in workspace: `hack session exec <workspace> "<command>"`
+- Execute in workspace with injected env: `hack session exec <workspace> --env qa --service api "bun db:migrate"`
 - Stop workspace: `hack session stop <workspace>`
+
+Host-side env helpers:
+- One-off host command with injected env: `hack env exec --env qa --service api -- bun db:migrate`
+- Interactive host shell with injected env: `hack env shell --env qa --service api`
 
 Tickets (git-backed):
 - Create: `hack tickets create --title "..." --body-stdin`
-- List/show: `hack tickets list`, `hack tickets show T-00001`
-- Status/sync: `hack tickets status T-00001 in_progress`, `hack tickets sync`
+- List/show: `hack tickets list`, `hack tickets show T-AB12CD34EF`
+- Status/sync: `hack tickets status T-AB12CD34EF in_progress`, `hack tickets sync`
 
 Global infra:
 - Bootstrap once: `hack global install`

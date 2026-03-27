@@ -703,6 +703,20 @@ export function renderProjectEnvSchemaJson(): string {
   return `${JSON.stringify(schema, null, 2)}\n`;
 }
 
+export function renderProjectEnvConfigYaml(opts?: {
+  readonly environment?: string;
+}): string {
+  const environment = opts?.environment ?? "default";
+  return [
+    "version: 1",
+    `environment: ${environment}`,
+    "secretsprovider: project_key",
+    "values:",
+    "  global: {}",
+    "",
+  ].join("\n");
+}
+
 export function renderProjectManagedEnvSchemaJson(): string {
   const schema = {
     $schema: "https://json-schema.org/draft/2020-12/schema",

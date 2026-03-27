@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { confirm, isCancel, password, text } from "@clack/prompts";
+import { confirm, isCancel, password, select, text } from "@clack/prompts";
 
 import type { CliContext, CommandHandlerFor } from "../cli/command.ts";
 import {
@@ -11,16 +11,19 @@ import {
 import { optEnv, optJson, optPath, optProject } from "../cli/options.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
+import { isRecord } from "../lib/guards.ts";
 import type {
   HackEnvStorageSummary,
   HackEnvValueState,
 } from "../lib/hack-env.ts";
 import {
+  readHackEnvContract,
   readHackEnvRuntimeConfig,
   removeDotEnvKey,
   resolveEnvFilePath,
   resolveEnvSecretKey,
   resolveHackEnv,
+  selectHackEnvValues,
   upsertDotEnvValue,
   validateHackEnvMutationSource,
 } from "../lib/hack-env.ts";
@@ -39,12 +42,26 @@ import {
   readProjectConfig,
   sanitizeProjectSlug,
 } from "../lib/project.ts";
+import {
+  assertValidProjectEnvScopeName,
+  discoverComposeServiceNames,
+  materializeProjectEnv,
+  migrateLegacyProjectEnv,
+  parseProjectEnvTarget,
+  projectEnvConfigExists,
+  readMaterializedProjectEnv,
+  resolveProjectEnvConfig,
+  selectProjectEnvValues,
+  setProjectEnvValue,
+  unsetProjectEnvValue,
+} from "../lib/project-env-config.ts";
 import { resolveRegisteredProjectByName } from "../lib/projects-registry.ts";
 import {
   formatSecretStoreDescriptor,
   provisionEncryptedFileKey,
   resolveSecretStore,
 } from "../lib/secret-store.ts";
+import { run } from "../lib/shell.ts";
 import { display } from "../ui/display.ts";
 import { logger } from "../ui/logger.ts";
 
@@ -59,32 +76,106 @@ const optSecret = defineOption({
   name: "secret",
   type: "boolean",
   long: "--secret",
-  description: "Store value in configured secret backend instead of .hack/.env",
+  description: "Store value as an encrypted secure entry",
 } as const);
+
+const optService = defineOption({
+  name: "service",
+  type: "string",
+  long: "--service",
+  valueHint: "<global|service>",
+  description: "Target scope (global or a discovered service name)",
+} as const);
+
+const SECRET_MASK = "***";
+const MODERN_ENV_STATUS_CLASSIFICATION = {
+  trust_model: "repo_managed_env_config",
+  custody: "repo_tracked_env_config",
+  portability: "portable_with_out_of_band_key",
+  shared_state: "repo_managed_overlay",
+} as const;
+const MODERN_LOCAL_PLAINTEXT_CLASSIFICATION = {
+  trust_model: "compatibility_output",
+  custody: "local_plaintext_file",
+  portability: "local_only",
+  shared_state: "compatibility_only",
+} as const;
+const MODERN_LOCAL_SECRET_CLASSIFICATION = {
+  trust_model: "local_secret_key",
+  custody: "local_secret_key",
+  portability: "local_only",
+  shared_state: "local_only",
+} as const;
 
 const listSpec = defineCommand({
   name: "list",
-  summary: "List env contract vars and resolution state",
+  summary: "List resolved env values for the selected overlay",
   group: "Project",
-  options: [optPath, optProject, optEnv, optJson, optShowSecrets],
+  options: [optPath, optProject, optEnv, optJson, optShowSecrets, optService],
   positionals: [],
+  subcommands: [],
+} as const);
+
+const addSpec = defineCommand({
+  name: "add",
+  summary: "Add or update an env value",
+  group: "Project",
+  options: [optPath, optProject, optEnv, optSecret, optService],
+  positionals: [
+    { name: "key", required: false },
+    { name: "value", required: false },
+  ],
   subcommands: [],
 } as const);
 
 const setSpec = defineCommand({
   name: "set",
-  summary: "Set an env value (.hack/.env or keychain)",
+  summary: "Alias for env add",
   group: "Project",
-  options: [optPath, optProject, optEnv, optSecret],
-  positionals: [{ name: "spec", required: false }],
+  options: [optPath, optProject, optEnv, optSecret, optService],
+  positionals: [
+    { name: "key", required: false },
+    { name: "value", required: false },
+  ],
+  subcommands: [],
+} as const);
+
+const materializeSpec = defineCommand({
+  name: "materialize",
+  summary: "Write a compatibility .env file from the selected overlay",
+  group: "Project",
+  options: [optPath, optProject, optEnv, optService],
+  positionals: [],
+  subcommands: [],
+} as const);
+
+const execSpec = defineCommand({
+  name: "exec",
+  summary: "Run a host command with project env injected",
+  group: "Project",
+  description:
+    "Inject the selected Hack env overlay directly into a one-off host command without materializing .hack/.env.",
+  options: [optPath, optProject, optEnv, optService],
+  positionals: [{ name: "command", required: true, multiple: true }],
+  subcommands: [],
+} as const);
+
+const shellSpec = defineCommand({
+  name: "shell",
+  summary: "Open a host shell with project env injected",
+  group: "Project",
+  description:
+    "Start an interactive host shell with the selected Hack env overlay injected into the process environment.",
+  options: [optPath, optProject, optEnv, optService],
+  positionals: [],
   subcommands: [],
 } as const);
 
 const unsetSpec = defineCommand({
   name: "unset",
-  summary: "Unset an env value (.hack/.env and keychain)",
+  summary: "Remove an env value from the canonical config",
   group: "Project",
-  options: [optPath, optProject, optEnv],
+  options: [optPath, optProject, optEnv, optService],
   positionals: [{ name: "key", required: false }],
   subcommands: [],
 } as const);
@@ -381,6 +472,209 @@ async function resolveConfiguredSecretStore(input: {
   }
 }
 
+async function loadModernProjectEnv(input: {
+  readonly project: ProjectContext;
+  readonly envName: string | null | undefined;
+}): Promise<Awaited<ReturnType<typeof resolveProjectEnvConfig>>> {
+  const serviceNames = await discoverComposeServiceNames({
+    composeFile: input.project.composeFile,
+  });
+  return await resolveProjectEnvConfig({
+    projectRoot: input.project.projectRoot,
+    projectDir: input.project.projectDir,
+    envName: input.envName,
+    serviceNames,
+  });
+}
+
+async function resolveEnvInjection(input: {
+  readonly project: ProjectContext;
+  readonly projectName: string;
+  readonly envName: string | null | undefined;
+  readonly serviceName: string | null;
+}): Promise<{
+  readonly env: Record<string, string>;
+  readonly effectiveEnvName: string | null;
+}> {
+  await maybeMigrateLegacyProjectEnv({
+    project: input.project,
+    projectName: input.projectName,
+    reason: "runtime",
+  });
+
+  const modern = await loadModernProjectEnv({
+    project: input.project,
+    envName: input.envName,
+  });
+  if (modern) {
+    return {
+      env: selectProjectEnvValues({
+        resolved: modern,
+        scopeName: input.serviceName,
+      }),
+      effectiveEnvName: modern.selection.effectiveEnv,
+    };
+  }
+
+  const resolved = await loadResolvedEnvState({
+    projectDir: input.project.projectDir,
+    projectName: input.projectName,
+    envName: input.envName,
+  });
+  if (!resolved) {
+    throw new CliUsageError("Unable to resolve project env state.");
+  }
+
+  return {
+    env: selectHackEnvValues({
+      resolved,
+      serviceName: input.serviceName,
+    }),
+    effectiveEnvName: resolved.envSelection.effectiveEnv,
+  };
+}
+
+async function maybeMigrateLegacyProjectEnv(input: {
+  readonly project: ProjectContext;
+  readonly projectName: string;
+  readonly reason: "mutation" | "runtime";
+}): Promise<boolean> {
+  if (
+    await projectEnvConfigExists({
+      projectDir: input.project.projectDir,
+    })
+  ) {
+    return false;
+  }
+
+  const contract = await readHackEnvContract({
+    projectDir: input.project.projectDir,
+  });
+  if (!contract.exists) {
+    return false;
+  }
+
+  const serviceNames = await discoverComposeServiceNames({
+    composeFile: input.project.composeFile,
+  });
+
+  if (
+    process.stdin.isTTY &&
+    process.stdout.isTTY &&
+    input.reason === "runtime"
+  ) {
+    const ok = await confirm({
+      message:
+        "Legacy env format detected. Migrate to the new Hack env config files now?",
+      initialValue: true,
+    });
+    if (isCancel(ok)) {
+      throw new CliUsageError("Canceled.");
+    }
+    if (!ok) {
+      return false;
+    }
+  }
+
+  const migrated = await migrateLegacyProjectEnv({
+    projectRoot: input.project.projectRoot,
+    projectDir: input.project.projectDir,
+    projectName: input.projectName,
+    serviceNames,
+    materialize: false,
+  });
+  if (migrated.legacyDetected && migrated.wroteFiles.length > 0) {
+    logger.info({
+      message: `Migrated legacy env config to ${migrated.wroteFiles.join(", ")}`,
+    });
+  }
+  return migrated.legacyDetected;
+}
+
+async function promptForEnvAddInput(input: {
+  readonly project: ProjectContext;
+  readonly envName: string | null | undefined;
+}): Promise<{
+  readonly secret: boolean;
+  readonly scope: string;
+  readonly key: string;
+  readonly value: string;
+}> {
+  const secretChoice = await select({
+    message: "Value kind:",
+    options: [
+      { label: "Plaintext", value: "plain" },
+      { label: "Secret", value: "secret" },
+    ],
+  });
+  if (isCancel(secretChoice)) {
+    throw new CliUsageError("Canceled.");
+  }
+
+  const serviceNames = await discoverComposeServiceNames({
+    composeFile: input.project.composeFile,
+  });
+  const scopeChoice = await select({
+    message: "Target scope:",
+    options: [
+      { label: "global", value: "global" },
+      ...serviceNames.map((service) => ({
+        label: service,
+        value: service,
+      })),
+      { label: "custom scope", value: "__custom__" },
+    ],
+  });
+  if (isCancel(scopeChoice)) {
+    throw new CliUsageError("Canceled.");
+  }
+
+  let scope = scopeChoice;
+  if (scopeChoice === "__custom__") {
+    const customScope = await text({
+      message: "Custom scope name:",
+      validate: (value) =>
+        (value?.trim().length ?? 0) > 0 ? undefined : "Required",
+    });
+    if (isCancel(customScope)) {
+      throw new CliUsageError("Canceled.");
+    }
+    scope = customScope.trim();
+  }
+
+  const key = await text({
+    message: "Env key:",
+    validate: (value) =>
+      ENV_KEY_PATTERN.test(value?.trim() ?? "") ? undefined : "Invalid env key",
+  });
+  if (isCancel(key)) {
+    throw new CliUsageError("Canceled.");
+  }
+
+  const valuePrompt =
+    secretChoice === "secret"
+      ? await password({
+          message: "Secret value:",
+          validate: (value) =>
+            (value?.trim().length ?? 0) > 0 ? undefined : "Required",
+        })
+      : await text({
+          message: "Value:",
+          validate: (value) =>
+            (value?.trim().length ?? 0) > 0 ? undefined : "Required",
+        });
+  if (isCancel(valuePrompt)) {
+    throw new CliUsageError("Canceled.");
+  }
+
+  return {
+    secret: secretChoice === "secret",
+    scope,
+    key: key.trim(),
+    value: valuePrompt,
+  };
+}
+
 const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
   ctx,
   args,
@@ -396,6 +690,82 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
+
+  const modern = await loadModernProjectEnv({
+    project,
+    envName,
+  });
+  if (modern) {
+    const selectedScope = (() => {
+      try {
+        return assertValidProjectEnvScopeName({
+          scopeName: args.options.service,
+        });
+      } catch (error: unknown) {
+        throw new CliUsageError(
+          error instanceof Error ? error.message : "Invalid env scope."
+        );
+      }
+    })();
+    const envValues = selectProjectEnvValues({
+      resolved: modern,
+      scopeName: selectedScope,
+    });
+    const materialized = await readMaterializedProjectEnv({
+      projectDir: project.projectDir,
+    });
+    const materializedExists = Object.keys(materialized).length > 0;
+    if (json) {
+      process.stdout.write(
+        `${JSON.stringify(
+          buildModernEnvJsonPayload({
+            project,
+            projectName,
+            modern,
+            selectedScope,
+            envValues,
+            showSecrets,
+            materialized,
+            materializedExists,
+          }),
+          null,
+          2
+        )}\n`
+      );
+      return 0;
+    }
+
+    await display.kv({
+      title: "Env config",
+      entries: [
+        [
+          "env_selection",
+          modern.selection.effectiveEnv ?? "default (base only)",
+        ],
+        ["selected_scope", selectedScope],
+        ["files", modern.files.join(", ")],
+        [
+          "unknown_scopes",
+          modern.unknownScopes.length > 0
+            ? modern.unknownScopes.join(", ")
+            : "none",
+        ],
+      ],
+    });
+    await display.section("Resolved env vars");
+    for (const [key, value] of Object.entries(envValues)) {
+      process.stdout.write(
+        `${key}\t${selectedScope}\t${maskModernEnvValue({
+          modern,
+          scope: selectedScope,
+          key,
+          value,
+          showSecrets,
+        })}\n`
+      );
+    }
+    return 0;
+  }
 
   const resolved = await loadResolvedEnvState({
     projectDir: project.projectDir,
@@ -421,6 +791,190 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
     showSecrets,
   });
 };
+
+function maskModernEnvValue(input: {
+  readonly modern: NonNullable<
+    Awaited<ReturnType<typeof loadModernProjectEnv>>
+  >;
+  readonly scope: string;
+  readonly key: string;
+  readonly value: string;
+  readonly showSecrets: boolean;
+}): string {
+  if (input.showSecrets) {
+    return input.value;
+  }
+  if (
+    isModernSecretAtScope({
+      modern: input.modern,
+      scope: input.scope,
+      key: input.key,
+    })
+  ) {
+    return SECRET_MASK;
+  }
+  return input.value;
+}
+
+function isModernSecretAtScope(input: {
+  readonly modern: NonNullable<
+    Awaited<ReturnType<typeof loadModernProjectEnv>>
+  >;
+  readonly scope: string;
+  readonly key: string;
+}): boolean {
+  const scopedValue =
+    input.scope === "global"
+      ? undefined
+      : input.modern.merged.values[input.scope]?.[input.key];
+  if (scopedValue !== undefined) {
+    return isModernSecretStoredValue(scopedValue);
+  }
+  const globalValue = input.modern.merged.values.global?.[input.key];
+  return globalValue !== undefined && isModernSecretStoredValue(globalValue);
+}
+
+function isModernSecretStoredValue(value: unknown): boolean {
+  return isRecord(value) && typeof value.secure === "string";
+}
+
+function buildModernEnvJsonPayload(input: {
+  readonly project: ProjectContext;
+  readonly projectName: string;
+  readonly modern: NonNullable<
+    Awaited<ReturnType<typeof loadModernProjectEnv>>
+  >;
+  readonly selectedScope: string;
+  readonly envValues: Readonly<Record<string, string>>;
+  readonly showSecrets: boolean;
+  readonly materialized: Record<string, string>;
+  readonly materializedExists: boolean;
+}) {
+  return {
+    project: input.projectName,
+    env_selection: {
+      requested: input.modern.selection.requestedEnv,
+      default: input.modern.selection.defaultEnv,
+      effective: input.modern.selection.effectiveEnv,
+      overlay_path: input.modern.selection.overlayPath,
+      overlay_exists: input.modern.selection.overlayExists,
+    },
+    format: "project_env_config_v1",
+    status: {
+      ...MODERN_ENV_STATUS_CLASSIFICATION,
+      summary: "Project env config overlays",
+      detail:
+        "Hack is reading canonical .hack/hack.env.default.yaml and optional .hack/hack.env.<overlay>.yaml files directly. Runtime injection is the default path; .hack/.env is only a manual compatibility output.",
+    },
+    storage: {
+      local_plaintext: {
+        path: input.project.envFile,
+        exists: input.materializedExists,
+        trust_model: MODERN_LOCAL_PLAINTEXT_CLASSIFICATION.trust_model,
+        mirrored_to_backend: false,
+        fallback: {
+          enabled: false,
+          source: "none",
+          trust_model: "none",
+          classification: MODERN_LOCAL_PLAINTEXT_CLASSIFICATION,
+        },
+        classification: MODERN_LOCAL_PLAINTEXT_CLASSIFICATION,
+      },
+      local_secrets: {
+        backend: "project_key",
+        location: `${resolve(input.project.projectRoot, ".hack.secret.key")} or HACK_ENV_SECRET_KEY`,
+        mode: "file_or_env",
+        provider: null,
+        trust_model: MODERN_LOCAL_SECRET_CLASSIFICATION.trust_model,
+        classification: MODERN_LOCAL_SECRET_CLASSIFICATION,
+      },
+      portable_state: {
+        status: "repo_overlay_files",
+        trust_model: MODERN_ENV_STATUS_CLASSIFICATION.trust_model,
+        message:
+          "Canonical values live in .hack/hack.env.default.yaml and optional overlay files. Share the decryption key out of band with .hack.secret.key or HACK_ENV_SECRET_KEY.",
+        classification: MODERN_ENV_STATUS_CLASSIFICATION,
+      },
+      compatibility_mode: {
+        plaintext_target: input.project.envFile,
+        secret_backend: "project_key",
+        plaintext_mirrored_to_backend: false,
+        summary:
+          "Runtime injects env directly from hack.env.*.yaml by default; .hack/.env is only written by `hack env materialize`.",
+      },
+    },
+    files: input.modern.files,
+    scopes: input.modern.declaredScopes,
+    unknown_scopes: input.modern.unknownScopes,
+    selected_scope: input.selectedScope,
+    vars: Object.entries(input.envValues).map(([key, value]) => {
+      const resolvedValue = resolveModernStoredValue({
+        modern: input.modern,
+        scope: input.selectedScope,
+        key,
+      });
+      const secret = resolvedValue
+        ? isModernSecretStoredValue(resolvedValue.value)
+        : false;
+      const services =
+        resolvedValue?.scope && resolvedValue.scope !== "global"
+          ? [resolvedValue.scope]
+          : null;
+      return {
+        key,
+        required: false,
+        source: secret ? "keychain" : "plain_env",
+        services,
+        resolved_from: "project_env_config",
+        storage: {
+          kind: secret ? "secret" : "plaintext",
+          backend: "project_env_config",
+          location: input.modern.files.join(", "),
+          mode: "yaml",
+          trust_model: secret
+            ? MODERN_ENV_STATUS_CLASSIFICATION.trust_model
+            : MODERN_LOCAL_PLAINTEXT_CLASSIFICATION.trust_model,
+          classification: secret
+            ? MODERN_ENV_STATUS_CLASSIFICATION
+            : MODERN_LOCAL_PLAINTEXT_CLASSIFICATION,
+        },
+        value: maskModernEnvValue({
+          modern: input.modern,
+          scope: input.selectedScope,
+          key,
+          value,
+          showSecrets: input.showSecrets,
+        }),
+      };
+    }),
+    missing_required: [],
+    ...(input.showSecrets
+      ? { materialized: input.materialized }
+      : { materialized_keys: Object.keys(input.materialized).sort() }),
+  };
+}
+
+function resolveModernStoredValue(input: {
+  readonly modern: NonNullable<
+    Awaited<ReturnType<typeof loadModernProjectEnv>>
+  >;
+  readonly scope: string;
+  readonly key: string;
+}): { readonly scope: string; readonly value: unknown } | null {
+  if (input.scope !== "global") {
+    const scopedValue = input.modern.merged.values[input.scope]?.[input.key];
+    if (scopedValue !== undefined) {
+      return { scope: input.scope, value: scopedValue };
+    }
+  }
+
+  const globalValue = input.modern.merged.values.global?.[input.key];
+  if (globalValue !== undefined) {
+    return { scope: "global", value: globalValue };
+  }
+
+  return null;
+}
 
 function serializeEnvStorageForJson(input: {
   readonly storage: HackEnvStorageSummary;
@@ -596,6 +1150,74 @@ async function printEnvWarnings(input: {
   }
 }
 
+const handleEnvAdd: CommandHandlerFor<typeof addSpec> = async ({
+  ctx,
+  args,
+}): Promise<number> => {
+  const project = await resolveProjectForEnv({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+  });
+  const projectName = await resolveProjectName(project);
+  const envName = resolveRequestedEnvName({
+    envOption: args.options.env,
+  });
+  await maybeMigrateLegacyProjectEnv({
+    project,
+    projectName,
+    reason: "mutation",
+  });
+
+  const keyArg = args.positionals.key?.trim();
+  const valueArg = args.positionals.value;
+  const interactive = !(keyArg || valueArg);
+  const prompted = interactive
+    ? await promptForEnvAddInput({
+        project,
+        envName,
+      })
+    : null;
+
+  const parsedTarget = prompted
+    ? { scope: prompted.scope, key: prompted.key }
+    : parseProjectEnvTarget({
+        keyOrPath: keyArg ?? "",
+        scopeOverride: args.options.service,
+      });
+  const value = prompted
+    ? prompted.value
+    : await resolveEnvValue({
+        key: parsedTarget.key,
+        value: valueArg ?? null,
+        secret: args.options.secret === true,
+      });
+  const secret = prompted ? prompted.secret : args.options.secret === true;
+
+  const result = await setProjectEnvValue({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+    envName: envName ?? null,
+    scope: parsedTarget.scope,
+    key: parsedTarget.key,
+    value,
+    secret,
+  });
+
+  logger.success({
+    message: [
+      result.changed
+        ? `Updated ${result.filePath}`
+        : `No changes needed in ${result.filePath}`,
+      `scope=${result.scope}`,
+      result.createdKey ? "generated .hack.secret.key" : null,
+    ]
+      .filter((value): value is string => typeof value === "string")
+      .join(" • "),
+  });
+  return 0;
+};
+
 const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
   ctx,
   args,
@@ -606,17 +1228,35 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
     projectOpt: args.options.project,
   });
   const projectName = await resolveProjectName(project);
-  const storeSecret = args.options.secret === true;
-  const runtimeConfig = await readHackEnvRuntimeConfig({
-    projectDir: project.projectDir,
-  });
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
 
-  const spec = (args.positionals.spec ?? "").trim();
-  const [keyFromSpec, valueFromSpec] = parseKeyValueSpec(spec);
+  const modernExists = await projectEnvConfigExists({
+    projectDir: project.projectDir,
+  });
+  if (modernExists) {
+    return await handleEnvAdd({
+      ctx,
+      args: {
+        ...args,
+        positionals: {
+          key: args.positionals.key,
+          value: args.positionals.value,
+        },
+      } as never,
+    });
+  }
 
+  const storeSecret = args.options.secret === true;
+  const runtimeConfig = await readHackEnvRuntimeConfig({
+    projectDir: project.projectDir,
+  });
+  const rawKey = (args.positionals.key ?? "").trim();
+  const rawValue = args.positionals.value;
+  const [keyFromSpec, valueFromSpec] = parseKeyValueSpec(
+    rawValue === undefined ? rawKey : `${rawKey}=${rawValue}`
+  );
   const key = await resolveEnvKey({ key: keyFromSpec });
   const mutationSource = storeSecret ? "keychain" : "plain_env";
   const sourceValidation = await validateHackEnvMutationSource({
@@ -673,10 +1313,107 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
         ? `Mirrored portable plaintext to ${mirroredToBackend}`
         : null,
     ]
-      .filter((value) => typeof value === "string")
+      .filter((entry): entry is string => typeof entry === "string")
       .join(" • "),
   });
   return 0;
+};
+
+const handleEnvMaterialize: CommandHandlerFor<typeof materializeSpec> = async ({
+  ctx,
+  args,
+}): Promise<number> => {
+  const project = await resolveProjectForEnv({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+  });
+  const projectName = await resolveProjectName(project);
+  await maybeMigrateLegacyProjectEnv({
+    project,
+    projectName,
+    reason: "mutation",
+  });
+  const envName = resolveRequestedEnvName({
+    envOption: args.options.env,
+  });
+  const serviceNames = await discoverComposeServiceNames({
+    composeFile: project.composeFile,
+  });
+  const result = await materializeProjectEnv({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+    envName,
+    serviceName: args.options.service?.trim() || null,
+    serviceNames,
+  });
+  logger.success({
+    message: `${result.changed ? "Updated" : "No changes needed in"} ${result.envPath}`,
+  });
+  return 0;
+};
+
+function resolveInteractiveShellCommand(): readonly string[] {
+  const shellPath = process.env.SHELL?.trim() || "/bin/sh";
+  return [shellPath, "-l"];
+}
+
+const handleEnvExec: CommandHandlerFor<typeof execSpec> = async ({
+  ctx,
+  args,
+}): Promise<number> => {
+  const project = await resolveProjectForEnv({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+  });
+  const projectName = await resolveProjectName(project);
+  const envName = resolveRequestedEnvName({
+    envOption: args.options.env,
+  });
+  const command = args.positionals.command;
+  if (command.length === 0) {
+    throw new CliUsageError("Command is required.");
+  }
+
+  const envState = await resolveEnvInjection({
+    project,
+    projectName,
+    envName,
+    serviceName: args.options.service?.trim() || null,
+  });
+  return await run(command, {
+    cwd: project.projectRoot,
+    env: envState.env,
+    stdin: "inherit",
+  });
+};
+
+const handleEnvShell: CommandHandlerFor<typeof shellSpec> = async ({
+  ctx,
+  args,
+}): Promise<number> => {
+  const project = await resolveProjectForEnv({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+  });
+  const projectName = await resolveProjectName(project);
+  const envName = resolveRequestedEnvName({
+    envOption: args.options.env,
+  });
+  const envState = await resolveEnvInjection({
+    project,
+    projectName,
+    envName,
+    serviceName: args.options.service?.trim() || null,
+  });
+
+  return await run(resolveInteractiveShellCommand(), {
+    cwd: project.projectRoot,
+    env: envState.env,
+    stdin: "inherit",
+  });
 };
 
 const handleEnvUnset: CommandHandlerFor<typeof unsetSpec> = async ({
@@ -689,15 +1426,59 @@ const handleEnvUnset: CommandHandlerFor<typeof unsetSpec> = async ({
     projectOpt: args.options.project,
   });
   const projectName = await resolveProjectName(project);
-  const store = await resolveConfiguredSecretStore({ project, projectName });
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
 
-  const key = await resolveEnvKey({ key: (args.positionals.key ?? "").trim() });
+  const modernExists = await projectEnvConfigExists({
+    projectDir: project.projectDir,
+  });
+  if (!modernExists) {
+    const store = await resolveConfiguredSecretStore({ project, projectName });
+    const key = await resolveEnvKey({
+      key: (args.positionals.key ?? "").trim(),
+    });
+
+    const okLegacy = await confirm({
+      message: `Unset "${key}" from ${resolveEnvFilePath({ projectDir: project.projectDir, envName })} and ${formatSecretStoreDescriptor({ descriptor: store.descriptor })}${envName ? ` (env ${envName})` : ""}?`,
+      initialValue: true,
+    });
+    if (isCancel(okLegacy)) {
+      return 1;
+    }
+    if (!okLegacy) {
+      return 0;
+    }
+
+    const envFile = resolveEnvFilePath({
+      projectDir: project.projectDir,
+      envName,
+    });
+    const [dotenvResult, secretDeleted] = await Promise.all([
+      removeDotEnvKey({ envFile, key }),
+      store.delete({
+        key: resolveEnvSecretKey({ key, envName }),
+      }),
+    ]);
+
+    logger.success({
+      message: [
+        dotenvResult.changed ? `Updated ${envFile}` : `No ${key} in ${envFile}`,
+        secretDeleted
+          ? `Deleted from ${formatSecretStoreDescriptor({ descriptor: store.descriptor })}`
+          : "No secret entry",
+      ].join(" • "),
+    });
+    return 0;
+  }
+
+  const parsedTarget = parseProjectEnvTarget({
+    keyOrPath: (args.positionals.key ?? "").trim(),
+    scopeOverride: args.options.service,
+  });
 
   const ok = await confirm({
-    message: `Unset "${key}" from ${resolveEnvFilePath({ projectDir: project.projectDir, envName })} and ${formatSecretStoreDescriptor({ descriptor: store.descriptor })}${envName ? ` (env ${envName})` : ""}?`,
+    message: `Unset "${parsedTarget.key}" from ${parsedTarget.scope} in ${envName ?? "default"}?`,
     initialValue: true,
   });
   if (isCancel(ok)) {
@@ -707,24 +1488,17 @@ const handleEnvUnset: CommandHandlerFor<typeof unsetSpec> = async ({
     return 0;
   }
 
-  const envFile = resolveEnvFilePath({
+  const result = await unsetProjectEnvValue({
     projectDir: project.projectDir,
-    envName,
+    envName: envName ?? null,
+    scope: parsedTarget.scope,
+    key: parsedTarget.key,
   });
-  const [dotenvResult, secretDeleted] = await Promise.all([
-    removeDotEnvKey({ envFile, key }),
-    store.delete({
-      key: resolveEnvSecretKey({ key, envName }),
-    }),
-  ]);
 
   logger.success({
-    message: [
-      dotenvResult.changed ? `Updated ${envFile}` : `No ${key} in ${envFile}`,
-      secretDeleted
-        ? `Deleted from ${formatSecretStoreDescriptor({ descriptor: store.descriptor })}`
-        : "No secret entry",
-    ].join(" • "),
+    message: result.changed
+      ? `Updated ${result.filePath}`
+      : `No ${parsedTarget.scope}.${parsedTarget.key} entry to remove`,
   });
   return 0;
 };
@@ -973,7 +1747,11 @@ export const envCommand = defineCommand({
   positionals: [],
   subcommands: [
     withHandler(listSpec, handleEnvList),
+    withHandler(addSpec, handleEnvAdd),
     withHandler(setSpec, handleEnvSet),
+    withHandler(materializeSpec, handleEnvMaterialize),
+    withHandler(execSpec, handleEnvExec),
+    withHandler(shellSpec, handleEnvShell),
     withHandler(unsetSpec, handleEnvUnset),
     withHandler(
       defineCommand({

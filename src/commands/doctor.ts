@@ -43,10 +43,7 @@ import {
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
-import {
-  inspectHackEnvOverlayWarnings,
-  resolveEnvFilePath,
-} from "../lib/hack-env.ts";
+import { inspectHackEnvOverlayWarnings } from "../lib/hack-env.ts";
 import {
   ensureBundledMutagenInstalled,
   getManagedMutagenAgentBundlePath,
@@ -59,6 +56,16 @@ import {
   readProjectConfig,
   readProjectDevHost,
 } from "../lib/project.ts";
+import {
+  discoverComposeServiceNames,
+  inspectLegacyComposeEnvFileReferences,
+  type LegacyComposeEnvFileReference,
+  migrateLegacyProjectEnv,
+  projectEnvConfigExists,
+  removeLegacyProjectEnvArtifacts,
+  repairLegacyComposeEnvFileReferences,
+  resolveProjectEnvConfig,
+} from "../lib/project-env-config.ts";
 import { exec, findExecutableInPath, run } from "../lib/shell.ts";
 import { resolveSessionsMuxMode } from "../mux/mux-config.ts";
 import {
@@ -68,7 +75,6 @@ import {
 import { display } from "../ui/display.ts";
 import { getFzfPath } from "../ui/fzf.ts";
 import { getGumPath } from "../ui/gum.ts";
-import { isColorEnabled } from "../ui/terminal.ts";
 import {
   analyzeComposeNetworkHygiene,
   dnsmasqConfigHasDomain,
@@ -78,6 +84,7 @@ import {
 import {
   buildDoctorRecoveryGuidance,
   buildRecoveryWorkflowLines,
+  type RecoveryCheckResult,
 } from "./recovery-guidance.ts";
 
 type CheckStatus = "ok" | "warn" | "error";
@@ -108,7 +115,15 @@ const optFix = defineOption({
   description: "Attempt safe auto-remediations (network + CoreDNS + CA)",
 } as const);
 
-const doctorOptions = [optPath, optFix] as const;
+const optMigrateEnvConfig = defineOption({
+  name: "migrateEnvConfig",
+  type: "boolean",
+  long: "--migrate-env-config",
+  description:
+    "Migrate legacy hack.env.json/.env state to the new env config files",
+} as const);
+
+const doctorOptions = [optPath, optFix, optMigrateEnvConfig] as const;
 const doctorPositionals = [] as const;
 
 const doctorSpec = defineCommand({
@@ -121,11 +136,78 @@ const doctorSpec = defineCommand({
   subcommands: [],
 } as const);
 
+const DOCTOR_SUMMARY_GROUPS = [
+  {
+    title: "Dependencies",
+    checks: new Set([
+      "bun",
+      "docker",
+      "docker compose",
+      "brew (optional)",
+      "dnsmasq (optional)",
+      "mkcert (optional)",
+      "gum (optional)",
+      "fzf (optional)",
+      "tmux (sessions)",
+      "zellij (sessions)",
+      "mutagen",
+      "go (optional)",
+      "caddy (optional)",
+      "asdf (optional)",
+    ]),
+  },
+  {
+    title: "Runtime",
+    checks: new Set([
+      "docker daemon",
+      `network:${DEFAULT_INGRESS_NETWORK}`,
+      `network:${DEFAULT_LOGGING_NETWORK}`,
+      `network:${DEFAULT_INGRESS_NETWORK} subnet`,
+      "global files",
+      "daemon",
+      "gateway config",
+      "gateway tokens",
+      "grafana",
+      "proxy ports",
+      "caddy local ca",
+    ]),
+  },
+  {
+    title: "Resolver & DNS",
+    checks: new Set([
+      `resolver:${DEFAULT_PROJECT_TLD}`,
+      `resolver:${DEFAULT_OAUTH_ALIAS_ROOT}`,
+      `dnsmasq.conf:${DEFAULT_PROJECT_TLD}`,
+      `dnsmasq.conf:${DEFAULT_OAUTH_ALIAS_ROOT}`,
+      "dnsmasq:53",
+      `dns:${DEFAULT_PROJECT_TLD}`,
+      `dns:${DEFAULT_OAUTH_ALIAS_ROOT}`,
+      "coredns forwarding",
+      "caddy hosts",
+      "DEV_HOST",
+    ]),
+  },
+  {
+    title: "Project & env",
+    checks: new Set([
+      "project",
+      "compose networks",
+      "env mode",
+      "env overlay warnings",
+    ]),
+  },
+  {
+    title: "Sessions & tickets",
+    checks: new Set(["sessions mux", "tickets git"]),
+  },
+] as const;
+
 const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   args,
 }): Promise<number> => {
   const results: TimedCheckResult[] = [];
   const s = spinner();
+  s.start("Running doctor checks...");
 
   // Tools
   results.push(
@@ -400,14 +482,19 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     });
   }
 
+  s.stop(`Doctor checks complete (${results.length} checks)`);
+  await renderDoctorSummary(results);
   emitSlowChecksNote(results);
   renderMacNote();
   if (!args.options.fix) {
     await renderRecoveryGuidance(results);
   }
 
-  if (args.options.fix) {
-    await runDoctorFix({ startDir });
+  if (args.options.fix || args.options.migrateEnvConfig) {
+    await runDoctorFix({
+      startDir,
+      migrateEnvConfig: args.options.fix || args.options.migrateEnvConfig,
+    });
     note("Re-run: hack doctor", "doctor");
   }
 
@@ -1491,57 +1578,37 @@ async function checkProjectEnvMode({
     };
   }
 
+  if (
+    await projectEnvConfigExists({
+      projectDir: ctx.projectDir,
+    })
+  ) {
+    const defaultOverlay =
+      cfg.env?.defaultOverlay ?? cfg.defaultEnvConfig ?? null;
+    return {
+      name: "env mode",
+      status: "ok",
+      message: defaultOverlay
+        ? `Pulumi-style env config files enabled (default overlay: ${defaultOverlay})`
+        : "Pulumi-style env config files enabled (default overlay: none)",
+    };
+  }
+
   const contractPath = resolve(ctx.projectDir, PROJECT_ENV_CONTRACT_FILENAME);
   const contractExists = await pathExists(contractPath);
   if (!contractExists) {
     return {
       name: "env mode",
       status: "warn",
-      message: `Missing ${contractPath}`,
+      message: `Missing ${contractPath} and no .hack/hack.env.default.yaml present`,
     };
   }
 
-  const controlPlane = await readControlPlaneConfig({
-    projectDir: ctx.projectDir,
-  });
-  if (controlPlane.parseError) {
-    return {
-      name: "env mode",
-      status: "warn",
-      message: controlPlane.parseError,
-    };
-  }
-
-  const storePlaintextInBackend =
-    controlPlane.config.secrets.storePlaintextInBackend;
-  if (!storePlaintextInBackend) {
-    return {
-      name: "env mode",
-      status: "warn",
-      message:
-        "Portable plaintext bundling is disabled. Legacy .hack/.env values stay machine-local until controlPlane.secrets.storePlaintextInBackend=true and values are re-saved with hack env set.",
-    };
-  }
-
-  if (!cfg.defaultEnvConfig) {
-    return {
-      name: "env mode",
-      status: "ok",
-      message: "Base env only (.hack/.env + bundled backend)",
-    };
-  }
-
-  const overlayPath = resolveEnvFilePath({
-    projectDir: ctx.projectDir,
-    envName: cfg.defaultEnvConfig,
-  });
-  const overlayExists = await pathExists(overlayPath);
   return {
     name: "env mode",
-    status: overlayExists ? "ok" : "warn",
-    message: overlayExists
-      ? `defaultEnvConfig=${cfg.defaultEnvConfig} overlays ${overlayPath} on top of .hack/.env`
-      : `defaultEnvConfig=${cfg.defaultEnvConfig} is set, but ${overlayPath} does not exist yet; base env will still apply`,
+    status: "warn",
+    message:
+      "Legacy env format detected (.hack/hack.env.json). Run `hack doctor --migrate-env-config` to upgrade.",
   };
 }
 
@@ -1565,6 +1632,34 @@ async function checkProjectEnvOverlayWarnings({
       name: "env overlay warnings",
       status: "warn",
       message: cfg.parseError,
+    };
+  }
+
+  if (
+    await projectEnvConfigExists({
+      projectDir: ctx.projectDir,
+    })
+  ) {
+    const serviceNames = await discoverComposeServiceNames({
+      composeFile: ctx.composeFile,
+    });
+    const modern = await resolveProjectEnvConfig({
+      projectRoot: ctx.projectRoot,
+      projectDir: ctx.projectDir,
+      envName: undefined,
+      serviceNames,
+    });
+    if (!modern || modern.unknownScopes.length === 0) {
+      return {
+        name: "env overlay warnings",
+        status: "ok",
+        message: "No unknown service scopes detected in env config",
+      };
+    }
+    return {
+      name: "env overlay warnings",
+      status: "warn",
+      message: `Unknown env scopes: ${modern.unknownScopes.join(", ")}`,
     };
   }
 
@@ -1592,7 +1687,7 @@ async function checkProjectEnvOverlayWarnings({
   return {
     name: "env overlay warnings",
     status: "warn",
-    message: `defaultEnvConfig=${cfg.defaultEnvConfig} contains plaintext entries for secret-backed vars (${keys}). Those overlay values are ignored; use "hack env set --env ${cfg.defaultEnvConfig} --secret KEY=VALUE".`,
+    message: `defaultEnvConfig=${cfg.defaultEnvConfig} contains plaintext entries for secret-backed vars (${keys}). Those overlay values are ignored; use "hack doctor --migrate-env-config" or "hack env add --env ${cfg.defaultEnvConfig} --secret KEY VALUE".`,
   };
 }
 
@@ -1707,10 +1802,18 @@ async function readLegacyEnvDevHost(envFile: string): Promise<string | null> {
 
 async function runDoctorFix(opts: {
   readonly startDir: string;
+  readonly migrateEnvConfig: boolean;
 }): Promise<void> {
+  const remediationPlan = await buildDoctorRemediationPlanLines({
+    startDir: opts.startDir,
+    migrateEnvConfig: opts.migrateEnvConfig,
+  });
+  note(remediationPlan.join("\n"), "doctor plan");
+
   const ok = await confirmOrThrow({
-    message:
-      "Attempt safe auto-remediations now? (network + CoreDNS + CA + tickets refs)",
+    message: opts.migrateEnvConfig
+      ? "Start guided remediation steps now? (includes env migration when applicable)"
+      : "Start guided remediation steps now?",
     initialValue: true,
   });
   if (!ok) {
@@ -1750,6 +1853,272 @@ async function runDoctorFix(opts: {
   await maybeExportCaddyCaCert({ paths });
   await maybeMigrateDnsmasq();
   await maybeRepairProjectTicketsGitHealth({ startDir: opts.startDir });
+  if (opts.migrateEnvConfig) {
+    await maybeMigrateProjectEnvConfig({ startDir: opts.startDir });
+  }
+}
+
+async function maybeMigrateProjectEnvConfig(opts: {
+  readonly startDir: string;
+}): Promise<void> {
+  const project = await findProjectContext(opts.startDir);
+  if (!project) {
+    return;
+  }
+
+  if (
+    await projectEnvConfigExists({
+      projectDir: project.projectDir,
+    })
+  ) {
+    note("Project already uses the new env config files.", "doctor");
+    await maybeRepairModernProjectComposeEnvReferences({
+      composeFile: project.composeFile,
+      projectDir: project.projectDir,
+    });
+    return;
+  }
+
+  const contractPath = resolve(
+    project.projectDir,
+    PROJECT_ENV_CONTRACT_FILENAME
+  );
+  if (!(await pathExists(contractPath))) {
+    return;
+  }
+
+  const cfg = await readProjectConfig(project);
+  const projectName = (
+    cfg.name ??
+    project.projectRoot.split("/").at(-1) ??
+    "project"
+  ).trim();
+  const serviceNames = await discoverComposeServiceNames({
+    composeFile: project.composeFile,
+  });
+  note(
+    [
+      "Detected legacy project env files.",
+      `- source: ${contractPath} and current local env state`,
+      `- target: ${resolve(project.projectDir, "hack.env.default.yaml")}`,
+      "- runtime: direct env injection by default; .hack/.env becomes compatibility-only",
+    ].join("\n"),
+    "env migration"
+  );
+  const shouldMigrate = await confirmOrThrow({
+    message:
+      "Migrate project env from .hack/hack.env.json/.hack/.env to hack.env.*.yaml now?",
+    initialValue: true,
+  });
+  if (!shouldMigrate) {
+    return;
+  }
+
+  const migrated = await migrateLegacyProjectEnv({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+    projectName,
+    serviceNames,
+    materialize: false,
+  });
+  if (migrated.wroteFiles.length === 0) {
+    note("Legacy env migration found nothing to write.", "doctor");
+    return;
+  }
+  const migrationNotes = [`Wrote ${migrated.wroteFiles.join(", ")}`];
+  if (migrated.updatedProjectConfig) {
+    migrationNotes.push(
+      "Updated .hack/hack.config.json for the modern env format."
+    );
+  }
+  note(migrationNotes.join("\n"), "doctor");
+
+  let blockedCleanupCandidates = [...migrated.blockedCleanupCandidates];
+  if (migrated.composeEnvFileReferences.length > 0) {
+    note(
+      buildComposeEnvRepairNote({
+        references: migrated.composeEnvFileReferences,
+      }),
+      "compose env repair"
+    );
+    const shouldRepairCompose = await confirmOrThrow({
+      message:
+        "Remove legacy .hack/.env* env_file references from compose now?",
+      initialValue: true,
+    });
+    if (shouldRepairCompose) {
+      const repaired = await repairLegacyComposeEnvFileReferences({
+        composeFile: project.composeFile,
+        projectDir: project.projectDir,
+      });
+      if (repaired.changed) {
+        note(
+          [
+            `Updated ${project.composeFile}.`,
+            ...repaired.removed.map(
+              (reference) =>
+                `- ${reference.service}: removed env_file ${reference.configuredPath}`
+            ),
+          ].join("\n"),
+          "compose env repair"
+        );
+        blockedCleanupCandidates = [];
+      } else {
+        note(
+          "No compose env_file updates were needed; legacy compatibility files remain blocked from cleanup.",
+          "compose env repair"
+        );
+      }
+    } else {
+      note(
+        "Leaving legacy .hack/.env* files in place because compose still references them.",
+        "compose env repair"
+      );
+    }
+  }
+
+  const cleanupCandidates = [
+    ...migrated.cleanupCandidates,
+    ...blockedCleanupCandidates,
+  ].sort((left, right) => left.localeCompare(right));
+  if (cleanupCandidates.length === 0) {
+    return;
+  }
+
+  note(
+    [
+      "Legacy env artifacts still exist and can now be removed:",
+      ...cleanupCandidates.map((path) => `- ${path}`),
+    ].join("\n"),
+    "env cleanup"
+  );
+  const shouldCleanup = await confirmOrThrow({
+    message:
+      "Remove legacy env files and obsolete project env config entries now?",
+    initialValue: true,
+  });
+  if (!shouldCleanup) {
+    return;
+  }
+
+  const removed = await removeLegacyProjectEnvArtifacts({
+    paths: cleanupCandidates,
+  });
+  if (removed.length > 0) {
+    note(`Removed ${removed.join(", ")}`, "env cleanup");
+  }
+}
+
+function buildComposeEnvRepairNote(opts: {
+  readonly references: readonly LegacyComposeEnvFileReference[];
+}): string {
+  return [
+    "Compose still references legacy Hack compatibility env files:",
+    ...opts.references.map(
+      (reference) =>
+        `- ${reference.service}: ${reference.configuredPath} (${reference.resolvedPath})`
+    ),
+    "Hack now injects env directly at runtime by default, so these env_file entries should usually be removed.",
+  ].join("\n");
+}
+
+async function maybeRepairModernProjectComposeEnvReferences(opts: {
+  readonly composeFile: string;
+  readonly projectDir: string;
+}): Promise<void> {
+  const references = await inspectLegacyComposeEnvFileReferences({
+    composeFile: opts.composeFile,
+    projectDir: opts.projectDir,
+  });
+  if (references.length === 0) {
+    return;
+  }
+
+  note(
+    buildComposeEnvRepairNote({
+      references,
+    }),
+    "compose env repair"
+  );
+  const shouldRepairCompose = await confirmOrThrow({
+    message: "Remove legacy .hack/.env* env_file references from compose now?",
+    initialValue: true,
+  });
+  if (!shouldRepairCompose) {
+    note(
+      "Leaving legacy .hack/.env* files in place because compose still references them.",
+      "compose env repair"
+    );
+    return;
+  }
+
+  const repaired = await repairLegacyComposeEnvFileReferences({
+    composeFile: opts.composeFile,
+    projectDir: opts.projectDir,
+  });
+  if (!repaired.changed) {
+    note("No compose env_file updates were needed.", "compose env repair");
+    return;
+  }
+
+  note(
+    [
+      `Updated ${opts.composeFile}.`,
+      ...repaired.removed.map(
+        (reference) =>
+          `- ${reference.service}: removed env_file ${reference.configuredPath}`
+      ),
+    ].join("\n"),
+    "compose env repair"
+  );
+}
+
+export async function buildDoctorRemediationPlanLines(opts: {
+  readonly startDir: string;
+  readonly migrateEnvConfig: boolean;
+}): Promise<string[]> {
+  const lines = [
+    "1. Review and repair local network, CoreDNS, CA, and daemon drift where needed.",
+    "2. Repair tickets refs if the project repo needs it.",
+  ];
+  if (!opts.migrateEnvConfig) {
+    return lines;
+  }
+
+  const project = await findProjectContext(opts.startDir);
+  if (!project) {
+    lines.push(
+      "3. Skip env migration because no project was detected from this path."
+    );
+    return lines;
+  }
+
+  if (
+    await projectEnvConfigExists({
+      projectDir: project.projectDir,
+    })
+  ) {
+    lines.push(
+      "3. Skip env migration because this project already uses hack.env.*.yaml."
+    );
+    return lines;
+  }
+
+  const contractPath = resolve(
+    project.projectDir,
+    PROJECT_ENV_CONTRACT_FILENAME
+  );
+  if (await pathExists(contractPath)) {
+    lines.push(
+      "3. Prompt to migrate legacy env config (.hack/hack.env.json) to hack.env.*.yaml."
+    );
+    return lines;
+  }
+
+  lines.push(
+    "3. Skip env migration because no legacy project env config was found."
+  );
+  return lines;
 }
 
 async function maybeRepairProjectTicketsGitHealth(opts: {
@@ -2367,38 +2736,124 @@ async function renderRecoveryGuidance(
   });
 }
 
-function formatTimedResult(opts: {
-  readonly result: CheckResult;
-  readonly durationMs: number;
-}): string {
-  const enableColor = isColorEnabled();
+export function buildDoctorSummaryLines(input: {
+  readonly results: readonly RecoveryCheckResult[];
+}): readonly string[] {
+  const lines: string[] = [];
 
-  const RESET = "\x1b[0m";
-  const BOLD = "\x1b[1m";
-  const DIM = "\x1b[2m";
-  const GREEN = "\x1b[32m";
-  const YELLOW = "\x1b[33m";
-  const RED = "\x1b[31m";
+  for (const group of DOCTOR_SUMMARY_GROUPS) {
+    const members = input.results.filter((result) =>
+      group.checks.has(result.name)
+    );
+    if (members.length === 0) {
+      continue;
+    }
 
-  const color = (code: string, text: string) =>
-    enableColor ? `${code}${text}${RESET}` : text;
+    const issues = members.filter((result) => result.status !== "ok");
+    if (issues.length === 0) {
+      lines.push(`${group.title}: ok`);
+      continue;
+    }
 
-  let icon: string;
-  if (opts.result.status === "ok") {
-    icon = color(GREEN, "✓");
-  } else if (opts.result.status === "warn") {
-    icon = color(YELLOW, "!");
-  } else {
-    icon = color(RED, "✗");
+    const status = issues.some((result) => result.status === "error")
+      ? "error"
+      : "warn";
+    lines.push(
+      `${group.title}: ${status} - ${summarizeDoctorGroupIssues({
+        title: group.title,
+        issues,
+      })}`
+    );
   }
 
-  const name = enableColor
-    ? `${BOLD}${opts.result.name}${RESET}`
-    : opts.result.name;
-  const dur =
-    opts.durationMs >= 250 ? color(DIM, ` (${opts.durationMs}ms)`) : "";
+  const ungrouped = input.results.filter(
+    (result) =>
+      !DOCTOR_SUMMARY_GROUPS.some((group) => group.checks.has(result.name))
+  );
+  if (ungrouped.length > 0) {
+    const issues = ungrouped.filter((result) => result.status !== "ok");
+    lines.push(
+      issues.length === 0
+        ? "Other checks: ok"
+        : `Other checks: warn - ${summarizeDoctorIssues(issues)}`
+    );
+  }
 
-  return `${icon} ${name}: ${opts.result.message}${dur}`;
+  return lines;
+}
+
+async function renderDoctorSummary(
+  results: readonly TimedCheckResult[]
+): Promise<void> {
+  const summaryLines = buildDoctorSummaryLines({ results });
+  let tone: "error" | "warn" | "info" = "info";
+  if (results.some((result) => result.status === "error")) {
+    tone = "error";
+  } else if (results.some((result) => result.status === "warn")) {
+    tone = "warn";
+  }
+
+  await display.panel({
+    title: "Doctor summary",
+    tone,
+    lines: summaryLines,
+  });
+}
+
+function summarizeDoctorGroupIssues(input: {
+  readonly title: string;
+  readonly issues: readonly RecoveryCheckResult[];
+}): string {
+  if (input.title === "Dependencies") {
+    const optionalMissing = input.issues
+      .filter((result) => result.message === "Not found (optional)")
+      .map((result) => result.name.replace(" (optional)", ""));
+    const other = input.issues.filter(
+      (result) => result.message !== "Not found (optional)"
+    );
+
+    const parts: string[] = [];
+    if (optionalMissing.length > 0) {
+      parts.push(`optional missing: ${optionalMissing.join(", ")}`);
+    }
+    if (other.length > 0) {
+      parts.push(summarizeDoctorIssues(other));
+    }
+    return parts.join("; ");
+  }
+
+  return summarizeDoctorIssues(input.issues);
+}
+
+function summarizeDoctorIssues(issues: readonly RecoveryCheckResult[]): string {
+  const descriptions = issues.map((issue) => summarizeDoctorIssue(issue));
+  if (descriptions.length <= 2) {
+    return descriptions.join("; ");
+  }
+
+  return `${descriptions.slice(0, 2).join("; ")}; +${descriptions.length - 2} more`;
+}
+
+function summarizeDoctorIssue(issue: RecoveryCheckResult): string {
+  if (
+    issue.name === "env mode" &&
+    issue.message.includes("Legacy env format detected")
+  ) {
+    return "legacy env format detected";
+  }
+
+  if (
+    issue.name === "gateway tokens" &&
+    issue.message.includes("No active tokens")
+  ) {
+    return "no active gateway tokens";
+  }
+
+  if (issue.message === "Not found (optional)") {
+    return `${issue.name} missing`;
+  }
+
+  return `${issue.name}: ${issue.message}`;
 }
 
 function renderMacNote(): void {
@@ -2457,13 +2912,12 @@ async function canConnectTcp(opts: {
 // Keep macOS guidance at the end so it doesn't push other output off-screen.
 // (Called from the command handler.)
 async function runCheck(
-  s: ReturnType<typeof spinner>,
+  _s: ReturnType<typeof spinner>,
   name: string,
   fn: () => CheckResult | Promise<CheckResult>,
   opts?: { readonly timeoutMs?: number }
 ): Promise<TimedCheckResult> {
   const start = Date.now();
-  s.start(name);
   try {
     const res = opts?.timeoutMs
       ? await Promise.race([
@@ -2477,13 +2931,11 @@ async function runCheck(
         ])
       : await fn();
     const durationMs = Date.now() - start;
-    s.stop(formatTimedResult({ result: res, durationMs }));
     return { ...res, durationMs };
   } catch (err: unknown) {
     const durationMs = Date.now() - start;
     const message = err instanceof Error ? err.message : "Unknown error";
     const res: CheckResult = { name, status: "error", message };
-    s.stop(formatTimedResult({ result: res, durationMs }));
     return { ...res, durationMs };
   }
 }

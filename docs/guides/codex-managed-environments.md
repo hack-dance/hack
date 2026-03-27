@@ -77,8 +77,19 @@ bash scripts/maintain-codex-slim.sh
 - `hack tickets`
 - `hack linear`
 - `hack x github`
+- `hack env list`
+- `hack env exec`
+- `hack env shell`
 - repo-local docs, specs, and agent setup
 - command and config surfaces that do not require the machine-wide runtime stack
+
+If the repo uses the modern env overlay model, provide secret decryption material with
+`HACK_ENV_SECRET_KEY` instead of relying on a local `.hack.secret.key` file:
+
+```bash
+export HACK_ENV_SECRET_KEY="..."
+hack env exec --env qa --service api -- bun db:migrate
+```
 
 ## Not available in slim mode
 

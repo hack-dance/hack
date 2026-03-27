@@ -113,16 +113,19 @@ values.
 
 Use it when you want to:
 
-- declare what variables a project needs
-- keep plain values in `.hack/.env`
-- keep sensitive values in a secret backend
+- declare what variables and overlays a project needs
+- keep canonical env in committed `hack.env.*.yaml` files
+- keep the decryption key local via `.hack.secret.key` or `HACK_ENV_SECRET_KEY`
+- run host-side commands with injected env without hand-managing `.env` files
 
 Main surface:
 
 - `hack env list`
-- `hack env set`
+- `hack env add`
+- `hack env exec`
+- `hack env shell`
 - `hack env unset`
-- `hack env backend status`
+- `hack env materialize`
 
 Reference:
 

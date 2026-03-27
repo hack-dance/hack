@@ -47,6 +47,62 @@ test("resolveNextIsolatedWorkspaceName creates siblings from the project base", 
   ).toBe("alpha--4");
 });
 
+test("inferWorkspaceScopeSelection parses scoped workspace names", () => {
+  expect(
+    __testOnlySessionCommand.inferWorkspaceScopeSelection({
+      workspaceName: "alpha.env-qa.svc-api_worker.v2--2",
+    })
+  ).toEqual({
+    hasScopedSelection: true,
+    envName: "qa",
+    serviceName: "api_worker.v2",
+  });
+});
+
+test("inferWorkspaceScopeSelection treats env-base as the base overlay", () => {
+  expect(
+    __testOnlySessionCommand.inferWorkspaceScopeSelection({
+      workspaceName: "alpha.env-base--2",
+    })
+  ).toEqual({
+    hasScopedSelection: true,
+    envName: null,
+    serviceName: null,
+  });
+});
+
+test("resolveEffectiveWorkspaceScopeSelection preserves inferred scoped env", () => {
+  expect(
+    __testOnlySessionCommand.resolveEffectiveWorkspaceScopeSelection({
+      workspaceName: "alpha.env-qa.svc-api_worker.v2--2",
+      envOptionSpecified: false,
+      envName: undefined,
+      serviceOptionSpecified: false,
+      serviceName: null,
+    })
+  ).toEqual({
+    shouldInject: true,
+    envName: "qa",
+    serviceName: "api_worker.v2",
+  });
+});
+
+test("resolveEffectiveWorkspaceScopeSelection keeps base workspaces unscoped", () => {
+  expect(
+    __testOnlySessionCommand.resolveEffectiveWorkspaceScopeSelection({
+      workspaceName: "alpha--2",
+      envOptionSpecified: false,
+      envName: undefined,
+      serviceOptionSpecified: false,
+      serviceName: null,
+    })
+  ).toEqual({
+    shouldInject: false,
+    envName: undefined,
+    serviceName: null,
+  });
+});
+
 test("resolveRunUpCwd uses the repo root instead of the .hack directory", () => {
   expect(
     __testOnlySessionCommand.resolveRunUpCwd({

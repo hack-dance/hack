@@ -23,6 +23,25 @@ function pushUnique(target: string[], value: string): void {
   }
 }
 
+function isActionableRecoveryResult(result: RecoveryCheckResult): boolean {
+  if (result.status === "ok") {
+    return false;
+  }
+
+  if (result.message === "Not found (optional)") {
+    return false;
+  }
+
+  if (
+    result.name === "gateway tokens" &&
+    result.message.includes("No active tokens")
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
 export function buildDoctorRecoveryGuidance(input: {
   readonly results: readonly RecoveryCheckResult[];
 }): DoctorRecoveryGuidance {
@@ -31,7 +50,7 @@ export function buildDoctorRecoveryGuidance(input: {
   const followUp: string[] = [];
 
   for (const result of input.results) {
-    if (result.status === "ok") {
+    if (!isActionableRecoveryResult(result)) {
       continue;
     }
 

@@ -53,7 +53,7 @@ The goal is not to make every command fail earlier. The goal is to decide, in a 
 | `hack logs` | `docker_cli`, `docker_daemon`, `global_services` | guide, guide, warn | Default logs may fall back from Loki to compose logs |
 | `hack logs --loki`, `hack logs --query` | `global_services` | guide | Explicit Loki mode should not silently fall back |
 | `hack logs --compose` | `docker_cli`, `docker_daemon` | guide, guide | Explicit compose logs bypass Loki entirely, so only Docker availability matters |
-| `hack session`, `hack session list`, `hack session start`, `hack session attach`, `hack session exec`, `hack session stop`, `hack ssh` | `tmux_binary` | guide | The current session and session-aware SSH implementation is tmux-backed even when mux config exists elsewhere |
+| `hack session`, `hack session list`, `hack session start`, `hack session attach`, `hack session exec`, `hack session stop`, `hack ssh` | `mux_backend` | guide | Sessions require an available mux backend (`tmux` or `zellij`); tmux remains the richer default path |
 | `hack session panes`, `hack session capture`, `hack session tail`, `hack setup tmux` | `tmux_binary` | guide | tmux-only surfaces |
 | `hack x github status`, `hack x github profiles` | `github_profile`, `github_token` | warn, warn | Diagnostics should expose missing state instead of intercepting it |
 | `hack x github use` | `github_profile` | guide | Profile selection should redirect into setup when there is no resolvable target |

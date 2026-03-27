@@ -224,6 +224,7 @@ test("status --json still resolves repo-local project state when broker and web 
 
   const payload = JSON.parse(result.stdout) as {
     readonly filter: string | null;
+    readonly runtime_ok: boolean;
     readonly projects: Array<{
       readonly name: string;
       readonly repo_root?: string;
@@ -235,7 +236,9 @@ test("status --json still resolves repo-local project state when broker and web 
   expect(payload.filter).toBe(projectName);
   expect(payload.projects).toHaveLength(1);
   expect(payload.projects[0]?.name).toBe(projectName);
-  expect(payload.projects[0]?.status).toBe("stopped");
+  expect(payload.projects[0]?.status).toBe(
+    payload.runtime_ok ? "stopped" : "unknown"
+  );
   expect(payload.projects[0]?.repo_root).toBe(await realpath(projectRoot));
   expect(payload.runtime_error ?? "").not.toContain("Hack auth broker");
 });

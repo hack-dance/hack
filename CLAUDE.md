@@ -165,7 +165,7 @@ Lifecycle + startup:
 - Use `lifecycle.up.before` for pre-start hooks and `lifecycle.processes` for long-running host tasks.
 - Inspect lifecycle status via `hack projects --details` and stream via `hack logs <service-or-process>`.
 
-Workspaces (mux-managed):
+Workspaces (mux-managed, tmux-first by default):
 - Picker: `hack session` for persistent project workspaces.
 - Reuse/create: `hack session start <project>`
 - Force isolated agent workspace: `hack session start <project> --new --name agent-1` (`<project>--agent-1`).
@@ -174,8 +174,8 @@ Workspaces (mux-managed):
 
 Tickets (git-backed):
 - Create: `hack tickets create --title "..." --body-stdin`
-- List/show: `hack tickets list`, `hack tickets show T-00001`
-- Status/sync: `hack tickets status T-00001 in_progress`, `hack tickets sync`
+- List/show: `hack tickets list`, `hack tickets show T-AB12CD34EF`
+- Status/sync: `hack tickets status T-AB12CD34EF in_progress`, `hack tickets sync`
 
 Global infra:
 - Bootstrap once: `hack global install`

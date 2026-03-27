@@ -1,8 +1,8 @@
 ---
 name: hack-cli
 description: >
-  Use the hack CLI for local runtime orchestration (compose, DNS/TLS, logs, sessions, tickets) and agent setup.
-  Trigger when asked to run/start/stop services, inspect logs, manage lifecycle/session workflows, or update
+  Use the hack CLI for local runtime orchestration (compose, DNS/TLS, logs, persistent project workspaces, tickets) and agent setup.
+  Trigger when asked to run/start/stop services, inspect logs, manage lifecycle/workspace workflows, or update
   agent integrations. Prefer CLI over MCP when shell access is available.
 ---
 
@@ -100,19 +100,19 @@ Use branch instances to run parallel environments:
 - `hack logs --branch <name>`
 - `hack down --branch <name>`
 
-## Sessions
+## Workspaces
 
-- Picker: `hack session`
-- Start/attach: `hack session start <project>`
-- Isolated agent session: `hack session start <project> --new --name agent-1`
-- Exec: `hack session exec <session> "<command>"`
-- Stop: `hack session stop <session>`
+- Picker: `hack session` for persistent project workspaces.
+- Reuse/create: `hack session start <project>`
+- Isolated agent workspace: `hack session start <project> --new --name agent-1` (`<project>--agent-1`).
+- Exec in workspace: `hack session exec <workspace> "<command>"`
+- Stop workspace: `hack session stop <workspace>`
 
 ## Tickets
 
 - Create: `hack tickets create --title "..." --body-stdin`
-- List/show: `hack tickets list`, `hack tickets show T-00001`
-- Status/sync: `hack tickets status T-00001 in_progress`, `hack tickets sync`
+- List/show: `hack tickets list`, `hack tickets show T-AB12CD34EF`
+- Status/sync: `hack tickets status T-AB12CD34EF in_progress`, `hack tickets sync`
 
 ## Project Targeting
 

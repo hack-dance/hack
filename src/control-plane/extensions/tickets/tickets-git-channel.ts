@@ -508,6 +508,7 @@ export function createGitTicketsChannel(opts: {
     const fetchArgs = [
       "fetch",
       "--prune",
+      "--refmap=",
       "origin",
       `+${ref}:${destinationRef}`,
     ] as const;

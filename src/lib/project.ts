@@ -165,13 +165,16 @@ export async function readProjectDefaultEnvConfig(opts: {
     envFile: resolve(opts.projectDir, PROJECT_ENV_FILENAME),
     configFile: resolve(opts.projectDir, PROJECT_CONFIG_FILENAME),
   });
-  return config.defaultEnvConfig ?? null;
+  return config.env?.defaultOverlay ?? config.defaultEnvConfig ?? null;
 }
 
 export interface ProjectConfig {
   readonly name?: string;
   readonly devHost?: string;
   readonly defaultEnvConfig?: string;
+  readonly env?: {
+    readonly defaultOverlay?: string;
+  };
   readonly logs?: ProjectLogsConfig;
   readonly oauth?: ProjectOauthConfig;
   readonly internal?: ProjectInternalConfig;
@@ -385,9 +388,13 @@ function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
 
   const name = getString(value, "name");
   const devHost = getString(value, "dev_host");
+  const envConfig = getRecord(value, "env");
   const defaultEnvConfigRaw =
     getString(value, "defaultEnvConfig") ??
     getString(value, "default_env_config");
+  const envDefaultOverlayRaw =
+    (envConfig ? getString(envConfig, "defaultOverlay") : undefined) ??
+    (envConfig ? getString(envConfig, "default_overlay") : undefined);
   const logs = parseLogsConfig(getRecord(value, "logs"));
   const oauth = parseOauthConfig(getRecord(value, "oauth"));
   const internal = parseInternalConfig(getRecord(value, "internal"));
@@ -403,10 +410,19 @@ function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
     typeof defaultEnvConfigRaw === "string"
       ? normalizeEnvConfigName(defaultEnvConfigRaw)
       : null;
+  const envDefaultOverlay =
+    typeof envDefaultOverlayRaw === "string"
+      ? normalizeEnvConfigName(envDefaultOverlayRaw)
+      : null;
   const parseErrors = [
     ...(defaultEnvConfigRaw && defaultEnvConfig === null
       ? [
           "Project defaultEnvConfig/default_env_config must be a non-empty env name.",
+        ]
+      : []),
+    ...(envDefaultOverlayRaw && envDefaultOverlay === null
+      ? [
+          "Project env.defaultOverlay/default_overlay must be a non-empty env name.",
         ]
       : []),
     ...(parsedOwnership.parseError ? [parsedOwnership.parseError] : []),
@@ -416,6 +432,9 @@ function parseProjectConfigRecord(value: unknown, path: string): ProjectConfig {
     ...(name ? { name } : {}),
     ...(devHost ? { devHost } : {}),
     ...(defaultEnvConfig ? { defaultEnvConfig } : {}),
+    ...(envDefaultOverlay
+      ? { env: { defaultOverlay: envDefaultOverlay } }
+      : {}),
     ...(logs ? { logs } : {}),
     ...(oauth ? { oauth } : {}),
     ...(internal ? { internal } : {}),

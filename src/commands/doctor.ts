@@ -43,10 +43,7 @@ import {
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
-import {
-  inspectHackEnvOverlayWarnings,
-  resolveEnvFilePath,
-} from "../lib/hack-env.ts";
+import { inspectHackEnvOverlayWarnings } from "../lib/hack-env.ts";
 import {
   ensureBundledMutagenInstalled,
   getManagedMutagenAgentBundlePath,
@@ -59,6 +56,12 @@ import {
   readProjectConfig,
   readProjectDevHost,
 } from "../lib/project.ts";
+import {
+  discoverComposeServiceNames,
+  migrateLegacyProjectEnv,
+  projectEnvConfigExists,
+  resolveProjectEnvConfig,
+} from "../lib/project-env-config.ts";
 import { exec, findExecutableInPath, run } from "../lib/shell.ts";
 import { resolveSessionsMuxMode } from "../mux/mux-config.ts";
 import {
@@ -108,7 +111,15 @@ const optFix = defineOption({
   description: "Attempt safe auto-remediations (network + CoreDNS + CA)",
 } as const);
 
-const doctorOptions = [optPath, optFix] as const;
+const optMigrateEnvConfig = defineOption({
+  name: "migrateEnvConfig",
+  type: "boolean",
+  long: "--migrate-env-config",
+  description:
+    "Migrate legacy hack.env.json/.env state to the new env config files",
+} as const);
+
+const doctorOptions = [optPath, optFix, optMigrateEnvConfig] as const;
 const doctorPositionals = [] as const;
 
 const doctorSpec = defineCommand({
@@ -406,8 +417,11 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     await renderRecoveryGuidance(results);
   }
 
-  if (args.options.fix) {
-    await runDoctorFix({ startDir });
+  if (args.options.fix || args.options.migrateEnvConfig) {
+    await runDoctorFix({
+      startDir,
+      migrateEnvConfig: args.options.fix || args.options.migrateEnvConfig,
+    });
     note("Re-run: hack doctor", "doctor");
   }
 
@@ -1491,57 +1505,37 @@ async function checkProjectEnvMode({
     };
   }
 
+  if (
+    await projectEnvConfigExists({
+      projectRoot: ctx.projectRoot,
+    })
+  ) {
+    const defaultOverlay =
+      cfg.env?.defaultOverlay ?? cfg.defaultEnvConfig ?? null;
+    return {
+      name: "env mode",
+      status: "ok",
+      message: defaultOverlay
+        ? `Pulumi-style env config files enabled (default overlay: ${defaultOverlay})`
+        : "Pulumi-style env config files enabled (default overlay: none)",
+    };
+  }
+
   const contractPath = resolve(ctx.projectDir, PROJECT_ENV_CONTRACT_FILENAME);
   const contractExists = await pathExists(contractPath);
   if (!contractExists) {
     return {
       name: "env mode",
       status: "warn",
-      message: `Missing ${contractPath}`,
+      message: `Missing ${contractPath} and no hack.env.default.yaml present`,
     };
   }
 
-  const controlPlane = await readControlPlaneConfig({
-    projectDir: ctx.projectDir,
-  });
-  if (controlPlane.parseError) {
-    return {
-      name: "env mode",
-      status: "warn",
-      message: controlPlane.parseError,
-    };
-  }
-
-  const storePlaintextInBackend =
-    controlPlane.config.secrets.storePlaintextInBackend;
-  if (!storePlaintextInBackend) {
-    return {
-      name: "env mode",
-      status: "warn",
-      message:
-        "Portable plaintext bundling is disabled. Legacy .hack/.env values stay machine-local until controlPlane.secrets.storePlaintextInBackend=true and values are re-saved with hack env set.",
-    };
-  }
-
-  if (!cfg.defaultEnvConfig) {
-    return {
-      name: "env mode",
-      status: "ok",
-      message: "Base env only (.hack/.env + bundled backend)",
-    };
-  }
-
-  const overlayPath = resolveEnvFilePath({
-    projectDir: ctx.projectDir,
-    envName: cfg.defaultEnvConfig,
-  });
-  const overlayExists = await pathExists(overlayPath);
   return {
     name: "env mode",
-    status: overlayExists ? "ok" : "warn",
-    message: overlayExists
-      ? `defaultEnvConfig=${cfg.defaultEnvConfig} overlays ${overlayPath} on top of .hack/.env`
-      : `defaultEnvConfig=${cfg.defaultEnvConfig} is set, but ${overlayPath} does not exist yet; base env will still apply`,
+    status: "warn",
+    message:
+      "Legacy env format detected (.hack/hack.env.json). Run `hack doctor --migrate-env-config` to upgrade.",
   };
 }
 
@@ -1565,6 +1559,34 @@ async function checkProjectEnvOverlayWarnings({
       name: "env overlay warnings",
       status: "warn",
       message: cfg.parseError,
+    };
+  }
+
+  if (
+    await projectEnvConfigExists({
+      projectRoot: ctx.projectRoot,
+    })
+  ) {
+    const serviceNames = await discoverComposeServiceNames({
+      composeFile: ctx.composeFile,
+    });
+    const modern = await resolveProjectEnvConfig({
+      projectRoot: ctx.projectRoot,
+      projectDir: ctx.projectDir,
+      envName: undefined,
+      serviceNames,
+    });
+    if (!modern || modern.unknownScopes.length === 0) {
+      return {
+        name: "env overlay warnings",
+        status: "ok",
+        message: "No unknown service scopes detected in env config",
+      };
+    }
+    return {
+      name: "env overlay warnings",
+      status: "warn",
+      message: `Unknown env scopes: ${modern.unknownScopes.join(", ")}`,
     };
   }
 
@@ -1592,7 +1614,7 @@ async function checkProjectEnvOverlayWarnings({
   return {
     name: "env overlay warnings",
     status: "warn",
-    message: `defaultEnvConfig=${cfg.defaultEnvConfig} contains plaintext entries for secret-backed vars (${keys}). Those overlay values are ignored; use "hack env set --env ${cfg.defaultEnvConfig} --secret KEY=VALUE".`,
+    message: `defaultEnvConfig=${cfg.defaultEnvConfig} contains plaintext entries for secret-backed vars (${keys}). Those overlay values are ignored; use "hack doctor --migrate-env-config" or "hack env add --env ${cfg.defaultEnvConfig} --secret KEY VALUE".`,
   };
 }
 
@@ -1707,6 +1729,7 @@ async function readLegacyEnvDevHost(envFile: string): Promise<string | null> {
 
 async function runDoctorFix(opts: {
   readonly startDir: string;
+  readonly migrateEnvConfig: boolean;
 }): Promise<void> {
   const ok = await confirmOrThrow({
     message:
@@ -1750,6 +1773,65 @@ async function runDoctorFix(opts: {
   await maybeExportCaddyCaCert({ paths });
   await maybeMigrateDnsmasq();
   await maybeRepairProjectTicketsGitHealth({ startDir: opts.startDir });
+  if (opts.migrateEnvConfig) {
+    await maybeMigrateProjectEnvConfig({ startDir: opts.startDir });
+  }
+}
+
+async function maybeMigrateProjectEnvConfig(opts: {
+  readonly startDir: string;
+}): Promise<void> {
+  const project = await findProjectContext(opts.startDir);
+  if (!project) {
+    return;
+  }
+
+  if (
+    await projectEnvConfigExists({
+      projectRoot: project.projectRoot,
+    })
+  ) {
+    note("Project already uses the new env config files.", "doctor");
+    return;
+  }
+
+  const contractPath = resolve(
+    project.projectDir,
+    PROJECT_ENV_CONTRACT_FILENAME
+  );
+  if (!(await pathExists(contractPath))) {
+    return;
+  }
+
+  const cfg = await readProjectConfig(project);
+  const projectName = (
+    cfg.name ??
+    project.projectRoot.split("/").at(-1) ??
+    "project"
+  ).trim();
+  const serviceNames = await discoverComposeServiceNames({
+    composeFile: project.composeFile,
+  });
+  const shouldMigrate = await confirmOrThrow({
+    message: "Migrate legacy env config to the new Hack env files now?",
+    initialValue: true,
+  });
+  if (!shouldMigrate) {
+    return;
+  }
+
+  const migrated = await migrateLegacyProjectEnv({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+    projectName,
+    serviceNames,
+    materialize: false,
+  });
+  if (migrated.wroteFiles.length === 0) {
+    note("Legacy env migration found nothing to write.", "doctor");
+    return;
+  }
+  note(`Wrote ${migrated.wroteFiles.join(", ")}`, "doctor");
 }
 
 async function maybeRepairProjectTicketsGitHealth(opts: {

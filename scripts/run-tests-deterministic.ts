@@ -10,6 +10,7 @@ const isolatedTestPaths = [
   "tests/projects-registry.test.ts",
   "tests/project-run-command.test.ts",
   "tests/cli-offline-optionality-matrix.test.ts",
+  "tests/session-env-command.test.ts",
 ] as const;
 const maxConcurrencyArg = "--max-concurrency=1";
 
@@ -85,6 +86,9 @@ function testLabel(opts: { readonly testPath: string }): string {
   }
   if (opts.testPath === "tests/cli-offline-optionality-matrix.test.ts") {
     return "offline optionality matrix";
+  }
+  if (opts.testPath === "tests/session-env-command.test.ts") {
+    return "session env command";
   }
   return opts.testPath;
 }

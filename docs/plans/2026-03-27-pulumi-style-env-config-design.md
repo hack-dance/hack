@@ -109,8 +109,7 @@ Do not use JSON for v1:
 ```yaml
 version: 1
 environment: default
-secretsprovider: passphrase
-encryptionsalt: v1:ZoJ21kutoD4=:v1:iT1CNCAPsXXjCTMV:yOo1uLRN55GM4GI+MRe/x87NxiJfVQ==
+secretsprovider: project_key
 values:
   global:
     IS_LOCAL: "true"
@@ -135,8 +134,7 @@ values:
 
 - `version`: schema version. Start at `1`.
 - `environment`: overlay name. `default` for the base file, `qa` for `hack.env.qa.yaml`, and so on.
-- `secretsprovider`: how `secure` values are encrypted. Start with `passphrase`.
-- `encryptionsalt`: required when `secretsprovider=passphrase`.
+- `secretsprovider`: how `secure` values are encrypted. Start with `project_key`.
 - `values`: map of scopes to flat key-value env maps.
 
 ### Not In V1
@@ -185,6 +183,45 @@ In the new model:
 
 If future platform integrations still need OS-backed secret storage, that should be an optional secondary feature, not the primary user model.
 
+## Project Secret Key
+
+Start with a generated project-local key file instead of passphrase-first UX.
+
+Default location:
+
+- `.hack.secret.key`
+
+Rules:
+
+- generated automatically the first time a secret is added
+- stored at repo root by default
+- never committed
+- automatically appended to `.gitignore` if missing
+
+The first secret-writing flow should do all of this for the user:
+
+1. generate `.hack.secret.key` if absent
+2. verify `.gitignore` contains `.hack.secret.key`
+3. encrypt the secret value
+4. write the updated `hack.env.<overlay>.yaml`
+
+This is simpler than requiring passphrase setup before the user can store a secret.
+
+### Provider model
+
+V1 provider:
+
+- `secretsprovider: project_key`
+
+Future providers can be added later:
+
+- `passphrase`
+- `age`
+- cloud KMS
+- team-managed broker storage
+
+But the default local UX should be key-file based because it minimizes prompts and keeps the happy path simple.
+
 ## Materialization Tracking
 
 Hack should track whether `.hack/.env` is stale relative to the selected canonical config files.
@@ -221,9 +258,12 @@ This enables:
 - `hack env materialize --env=<name>`
 - `hack env materialize --service=<name>`
 - `hack env status`
-- `hack env set KEY=VALUE`
-- `hack env set --secret KEY=VALUE`
+- `hack env add`
+- `hack env add KEY VALUE`
+- `hack env add KEY VALUE --service=<name> --secret`
 - `hack env unset KEY`
+
+`hack env set` can remain as an alias for compatibility, but `add` should become the primary UX because it reads better in both flag-driven and interactive flows.
 
 ### Command semantics
 
@@ -240,13 +280,52 @@ This enables:
 - warns if the service name does not exist in the current project
 - writes a compatibility output for tooling that still expects a flat env file
 
-`hack env set`
+`hack env add`
 
 - updates the canonical YAML file, not `.hack/.env`
 - defaults to `hack.env.default.yaml`
 - supports `--env=<name>` to target an overlay file
 - supports `--service=<name>` to target `values.<name>`
+- supports `--secret` for encrypted values
 - does not materialize automatically
+
+Suggested non-interactive forms:
+
+```bash
+hack env add API_BASE_URL https://api.example.com
+hack env add SERVICE_TOKEN abc123 --service=public-api --secret
+hack env add global.API_BASE_URL https://api.example.com
+```
+
+Preferred parsing rules:
+
+- `hack env add KEY VALUE` targets `global` by default
+- `--service=<name>` overrides the target scope
+- dotted `global.KEY` or `api.KEY` syntax is accepted as a convenience form
+- if both dotted scope syntax and `--service` are provided, that is an error
+
+### Interactive add flow
+
+`hack env add` with no positional args should open an interactive flow using Clack.
+
+Recommended prompts:
+
+1. choose kind
+   - plaintext
+   - secret
+2. choose target service
+   - `global`
+   - discovered project services
+3. enter key name
+4. enter value
+5. confirm target file and overlay
+
+Behavior:
+
+- service choices should be discovered from the current project and shown directly
+- unknown service entry should still be possible through a manual fallback path
+- selecting `secret` should auto-generate `.hack.secret.key` if needed
+- the command should print exactly which file and scope changed
 
 `hack env status`
 
@@ -270,30 +349,42 @@ These commands should resolve and inject env directly from the canonical config:
 
 They should not auto-write `.hack/.env`.
 
+### Service discovery and validation
+
+Hack should maintain a discovered set of service names from the current project.
+
+Sources may include:
+
+- `.hack/docker-compose.yml`
+- other Hack-managed service definitions
+
+Validation behavior:
+
+- `global` is always valid
+- known services are valid
+- unknown scopes should warn in `hack env add`, `hack env status`, and `hack doctor`
+- startup should warn if an env file references unknown service scopes
+- warnings should not block users from creating scopes early for services that are about to be added
+
 ## Encryption Model
 
-Start with Pulumi-style passphrase encryption.
+Start with project-key encryption.
 
 V1 rules:
 
-- `secretsprovider: passphrase`
-- `encryptionsalt` stored in the committed env config file
-- `secure` values encrypted with a key derived from the passphrase plus the salt
-- passphrase is supplied interactively, through keychain integration, or from an explicit env var
+- `secretsprovider: project_key`
+- secret values are encrypted with `.hack.secret.key`
+- the key is generated automatically on first secret write
+- the key file is gitignored automatically if missing from `.gitignore`
 
-Why keep `encryptionsalt`:
+Why start with a project key:
 
-- it matches Pulumi’s mental model closely
-- it makes a committed encrypted file portable without a second committed encrypted bundle
-- it avoids the current extra file pair (`.hack-secrets.enc.json` + `.hack-secrets-file.key`) for the default UX
+- no initial passphrase ceremony
+- fewer prompts during normal CLI use
+- easier onboarding story for local-first projects
+- still portable when the key is shared intentionally out of band
 
-Future providers can be added later:
-
-- `age`
-- cloud KMS
-- team-managed broker storage
-
-But those should extend the same file format instead of forcing users back into multiple canonical artifacts.
+Future providers can be added later without changing the canonical file shape.
 
 ## Schema
 
@@ -305,7 +396,7 @@ Schema rules:
 
 - top-level object
 - required: `version`, `environment`, `secretsprovider`, `values`
-- `encryptionsalt` required when `secretsprovider=passphrase`
+- `secretsprovider` enum initially includes `project_key`
 - `values` must contain `global`
 - scope keys must be `global` or service-name-safe identifiers
 - each env key must match env-var-safe key syntax
@@ -342,6 +433,7 @@ Produce:
 - `hack.env.<overlay>.yaml` for each discovered overlay
 - optional `.hack/.env` if the operator asks for materialization during migration
 - `.hack/.env.state.json`
+- `.hack.secret.key` when migrated secrets need a new local encryption key
 
 ### Migration behavior
 
@@ -350,9 +442,10 @@ Produce:
 3. map repo-wide values into `values.global`
 4. map service-specific values into `values.<service>` when the legacy metadata makes that unambiguous
 5. convert secret-backed values into `secure:` entries
-5. write the new YAML files
-6. optionally materialize `.hack/.env`
-7. print a cleanup plan for deprecated files and config
+6. generate `.hack.secret.key` if secret values are present and no project key exists yet
+7. write the new YAML files
+8. optionally materialize `.hack/.env`
+9. print a cleanup plan for deprecated files and config
 
 ### Deprecated after migration
 
@@ -386,6 +479,7 @@ Project config may still help with:
 - service discovery hints when static detection is ambiguous
 - validation policy for unknown service scopes
 - choosing the default overlay
+- choosing a non-default project secret key path in advanced setups
 
 Those concerns either belong in the canonical env files or should stay out of the initial product.
 

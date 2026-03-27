@@ -107,6 +107,33 @@ export type HackEnvResolveResult = {
   readonly envForCompose: Readonly<Record<string, string>>;
 };
 
+export function selectHackEnvValues(opts: {
+  readonly resolved: HackEnvResolveResult;
+  readonly serviceName?: string | null;
+}): Record<string, string> {
+  const serviceName = opts.serviceName?.trim() ?? "";
+  const out: Record<string, string> = {};
+
+  for (const valueState of opts.resolved.values) {
+    if (valueState.value === null) {
+      continue;
+    }
+
+    const matchesService =
+      serviceName.length === 0
+        ? valueState.services === null
+        : valueState.services === null ||
+          valueState.services.includes(serviceName);
+    if (!matchesService) {
+      continue;
+    }
+
+    out[valueState.key] = valueState.value;
+  }
+
+  return out;
+}
+
 export type HackEnvSelection = {
   readonly requestedEnv: string | null;
   readonly defaultEnv: string | null;

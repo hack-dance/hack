@@ -5,6 +5,7 @@ Sessions are **persistent project workspaces**. They keep a repo-root shell aliv
 The guided default is **tmux**:
 - `hack session` opens a tmux-first interactive picker
 - `hack session start <project>` reuses the default project workspace unless you ask for an isolated one
+- `hack session start <project> --env qa --service api` creates a stable env-scoped workspace when you need a specific overlay
 - `hack setup tmux` installs the recommended popup binding so the picker is easy to reach from tmux
 
 Other mux backends still exist. `sessions.mux=auto` prefers tmux and falls back to zellij when tmux is unavailable, and you can explicitly set `sessions.mux=zellij` if that is your preferred backend. The interactive onboarding and pane tooling are tmux-first today.
@@ -18,6 +19,9 @@ hack session
 # Reuse the default workspace for a project, or create it if needed
 hack session start <project>
 
+# Create an env-scoped workspace for one overlay/service combination
+hack session start <project> --env qa --service api --detach
+
 # List active workspaces
 hack session list
 
@@ -26,6 +30,9 @@ hack session attach <workspace>
 
 # Queue a command in a running workspace
 hack session exec <workspace> "bun test"
+
+# Queue a command with injected env for that run
+hack session exec <workspace> --env qa --service api "bun db:migrate"
 
 # Stop a workspace
 hack session stop <workspace>
@@ -72,10 +79,14 @@ hack session start my-project --up
 
 # Create or reuse without attaching the current terminal
 hack session start my-project --detach
+
+# Create a stable env-scoped workspace
+hack session start my-project --env qa --service api --detach
 ```
 
 Default behavior is deliberate:
 - The first workspace for a project is just the project name, for example `my-project`
+- Passing `--env` or `--service` creates a stable scoped workspace name such as `my-project.env-qa.svc-api`
 - `--new` or `--name` creates an isolated workspace for a second agent, experiment, or review lane
 - `--detach` keeps the workspace alive for another tool or terminal to attach later
 
@@ -101,9 +112,14 @@ hack session exec my-project "bun test"
 
 # tmux: sends the command + Enter to the active pane
 # zellij: opens a new pane and runs the command because there is no active-pane equivalent
+
+# Inject a selected overlay/service into the queued command
+hack session exec my-project.env-qa.svc-api --env qa --service api "bun db:migrate"
 ```
 
 Use `exec` when you want to drive a persistent workspace from another terminal, script, or agent without attaching interactively first.
+
+If you pass `--env` or `--service`, Hack resolves the selected project env and injects it into the queued command without materializing `.hack/.env`.
 
 ### Listing panes (tmux only)
 

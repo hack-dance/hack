@@ -46,8 +46,9 @@ working. You do not need all of them for every repo.
   off. It becomes relevant when you keep long-running shells, agent runs, or SSH workspaces alive.
 - **Env**: Use `hack env` when a project needs explicit local config or secrets. It becomes relevant as
   soon as `hack up`, `hack run`, or remote workflows depend on values that should not be hardcoded.
-  The command reports which values are plaintext-compatible via `.hack/.env`, which values use the
-  configured secret backend, and whether the current mode is still machine-local.
+  The modern env model uses committed `hack.env.*.yaml` overlays, a local `.hack.secret.key` (or
+  `HACK_ENV_SECRET_KEY`), direct runtime injection by default, and optional manual `.hack/.env`
+  materialization for compatibility.
 
 ## Local vs broker-mediated administration
 
@@ -1564,18 +1565,24 @@ Usage: `hack env <subcommand>`
 Notes:
 
 - The current `hack env` surface is local-first.
-- `hack env set` and `hack env unset` manage local project env state and configured local secret backends.
+- The primary canonical format is `hack.env.default.yaml` plus optional `hack.env.<overlay>.yaml`.
+- `hack env add` is the primary write command; `hack env set` remains a compatibility alias.
+- Runtime injection is the default path. `hack env materialize` is manual.
 - Shared env grants, value custody, and rotation are planned as explicit broker-mediated flows rather than
   implicit extensions of local env commands.
 
 Subcommands:
 
-| Subcommand | Summary                                            |
-| ---------- | -------------------------------------------------- |
-| `list`     | List env contract vars and resolution state        |
-| `set`      | Set an env value (.hack/.env or secret backend)    |
-| `unset`    | Unset an env value (.hack/.env and secret backend) |
-| `backend`  | Manage env/secret backend strategy                 |
+| Subcommand | Summary |
+| ---------- | ------- |
+| `list` | List resolved env values for the selected overlay |
+| `add` | Add or update an env value |
+| `set` | Alias for `env add` |
+| `materialize` | Write a compatibility `.hack/.env` file |
+| `exec` | Run a host command with project env injected |
+| `shell` | Open a host shell with project env injected |
+| `unset` | Remove an env value from the canonical config |
+| `backend` | Manage env/secret backend strategy |
 
 #### hack env list
 
@@ -1587,14 +1594,16 @@ Options:
 | -------------------- | ------- | ------- | ------------------------------------------------- |
 | `-p`, `--path <dir>` | string  | -       | Run against a repo path (overrides cwd search)    |
 | `--project <name>`   | string  | -       | Target a registered project by name               |
+| `--env <name\|base>` | string  | -       | Apply an optional env overlay by name             |
+| `--service <name>`   | string  | -       | Resolve values for one service scope              |
 | `--json`             | boolean | false   | Output JSON (machine-readable)                    |
 | `--show-secrets`     | boolean | false   | Print secret values (secret backend) in plaintext |
 
-#### hack env set
+#### hack env add
 
-Usage: `hack env set [spec] [options]`
+Usage: `hack env add [key] [value] [options]`
 
-`spec` can be `KEY` or `KEY=VALUE`. If omitted, hack will prompt interactively.
+If `key` and `value` are omitted, hack opens an interactive prompt flow.
 
 Options:
 
@@ -1602,7 +1611,48 @@ Options:
 | --- | --- | --- | --- |
 | `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
 | `--project <name>` | string | - | Target a registered project by name |
-| `--secret` | boolean | false | Store value in configured secret backend instead of .hack/.env |
+| `--env <name\|base>` | string | - | Apply an optional env overlay by name |
+| `--service <name>` | string | - | Target one service scope instead of `global` |
+| `--secret` | boolean | false | Encrypt the value as a `secure:` entry |
+
+#### hack env materialize
+
+Usage: `hack env materialize [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
+| `--project <name>` | string | - | Target a registered project by name |
+| `--env <name\|base>` | string | - | Apply an optional env overlay by name |
+| `--service <name>` | string | - | Write the merged env for one service scope |
+
+#### hack env exec
+
+Usage: `hack env exec [options] <command...>`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
+| `--project <name>` | string | - | Target a registered project by name |
+| `--env <name\|base>` | string | - | Apply an optional env overlay by name |
+| `--service <name>` | string | - | Resolve values for one service scope |
+
+#### hack env shell
+
+Usage: `hack env shell [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
+| `--project <name>` | string | - | Target a registered project by name |
+| `--env <name\|base>` | string | - | Apply an optional env overlay by name |
+| `--service <name>` | string | - | Resolve values for one service scope |
 
 #### hack env unset
 
@@ -1610,10 +1660,12 @@ Usage: `hack env unset [key] [options]`
 
 Options:
 
-| Flag                 | Type   | Default | Description                                    |
-| -------------------- | ------ | ------- | ---------------------------------------------- |
-| `-p`, `--path <dir>` | string | -       | Run against a repo path (overrides cwd search) |
-| `--project <name>`   | string | -       | Target a registered project by name            |
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
+| `--project <name>` | string | - | Target a registered project by name |
+| `--env <name\|base>` | string | - | Apply an optional env overlay by name |
+| `--service <name>` | string | - | Target one service scope instead of `global` |
 
 #### hack env backend
 
@@ -1680,6 +1732,23 @@ Options:
 | `--up`            | boolean | false   | Run hack up -d before attaching               |
 | `--new`           | boolean | false   | Force create new session even if one exists   |
 | `--name <suffix>` | string  | -       | Custom suffix for new session (e.g., agent-1) |
+| `--detach`        | boolean | false   | Create or reuse the workspace without attaching |
+| `--env <name\|base>` | string | - | Apply an optional env overlay to the workspace |
+| `--service <name>` | string | - | Apply one service scope to the workspace env |
+
+When `--env` or `--service` is provided, Hack uses a stable scoped workspace name such as
+`my-project.env-qa.svc-api` instead of reusing the plain default workspace.
+
+#### hack session exec
+
+Usage: `hack session exec <workspace> <command> [options]`
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--env <name\|base>` | string | - | Inject an optional env overlay into the queued command |
+| `--service <name>` | string | - | Inject one service scope into the queued command |
 
 #### hack session panes
 

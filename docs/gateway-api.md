@@ -214,8 +214,8 @@ Base URL: `http://127.0.0.1:7788` (or your tunnel URL)
 | POST | `/v1/sessions/:id/exec` | yes | Execute command in workspace |
 | POST | `/v1/sessions/:id/input` | yes | Send raw keystrokes |
 | GET | `/v1/env` | no | Env contract + resolution state (values redacted) |
-| POST | `/v1/env/set` | yes | Set env (.hack/.env) or secret (keychain) |
-| POST | `/v1/env/unset` | yes | Unset env + keychain entry |
+| POST | `/v1/env/set` | yes | Legacy compatibility write path for `.hack/.env` and older secret backends |
+| POST | `/v1/env/unset` | yes | Legacy compatibility unset path for `.hack/.env` and older secret backends |
 | GET | `/control-plane/projects/:projectId/jobs` | no | List jobs |
 | POST | `/control-plane/projects/:projectId/jobs` | yes | Create job |
 | GET | `/control-plane/projects/:projectId/jobs/:jobId` | no | Fetch job |

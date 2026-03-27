@@ -46,6 +46,7 @@ export function createZellijBackend(): MuxBackend {
   const createSession = async (opts: {
     readonly name: string;
     readonly cwd?: string;
+    readonly env?: Readonly<Record<string, string>>;
   }): Promise<MuxSessionCreateResult> => {
     if (!available) {
       return { ok: false, error: "zellij_unavailable" };
@@ -57,7 +58,12 @@ export function createZellijBackend(): MuxBackend {
       {
         stdin: "ignore",
         cwd: opts.cwd,
-        env: opts.name ? { ZELLIJ_SESSION_NAME: opts.name } : undefined,
+        env: opts.name
+          ? {
+              ...(opts.env ?? {}),
+              ZELLIJ_SESSION_NAME: opts.name,
+            }
+          : opts.env,
       }
     );
 
@@ -87,11 +93,15 @@ export function createZellijBackend(): MuxBackend {
   const execInSession = async (opts: {
     readonly name: string;
     readonly command: string;
+    readonly env?: Readonly<Record<string, string>>;
   }): Promise<ExecResult> => {
     // `zellij run` requires an active session; set env to target the desired session.
     return await exec(["zellij", "run", "--", "sh", "-lc", opts.command], {
       stdin: "ignore",
-      env: { ZELLIJ_SESSION_NAME: opts.name },
+      env: {
+        ...(opts.env ?? {}),
+        ZELLIJ_SESSION_NAME: opts.name,
+      },
     });
   };
 

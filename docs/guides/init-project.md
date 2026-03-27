@@ -11,7 +11,7 @@ hack open
 
 Notes:
 - `hack init` writes `.hack/` files (Compose + config).
-- `hack init` also scaffolds a `.hack/hack.env.json` env contract (no values). See `docs/env.md`.
+- `hack init` also scaffolds `hack.env.default.yaml` at the repo root. See `docs/env.md`.
 - `hack up` starts the stack on an isolated network.
 - `hack open` resolves the routed URL via the global proxy.
 

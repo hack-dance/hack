@@ -5,9 +5,32 @@ import type {
   CommandArgs,
   CommandHandlerFor,
 } from "../cli/command.ts";
-import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
-import { optJson, optPretty } from "../cli/options.ts";
-import { findProjectContext, type ProjectContext } from "../lib/project.ts";
+import {
+  CliUsageError,
+  defineCommand,
+  defineOption,
+  withHandler,
+} from "../cli/command.ts";
+import { optEnv, optJson, optPretty } from "../cli/options.ts";
+import {
+  readHackEnvContract,
+  resolveHackEnv,
+  selectHackEnvValues,
+} from "../lib/hack-env.ts";
+import {
+  defaultProjectSlugFromPath,
+  findProjectContext,
+  type ProjectContext,
+  parseEnvConfigSelection,
+  readProjectConfig,
+} from "../lib/project.ts";
+import {
+  discoverComposeServiceNames,
+  migrateLegacyProjectEnv,
+  projectEnvConfigExists,
+  resolveProjectEnvConfig,
+  selectProjectEnvValues,
+} from "../lib/project-env-config.ts";
 import type { RegisteredProject } from "../lib/projects-registry.ts";
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
 import { exec, run } from "../lib/shell.ts";
@@ -76,6 +99,14 @@ const optDetach = defineOption({
     "Create or reuse the workspace without attaching (for GUI/non-TTY use)",
 } as const);
 
+const optService = defineOption({
+  name: "service",
+  type: "string",
+  long: "--service",
+  valueHint: "<global|service>",
+  description: "Inject env for the selected scope (global or a service name)",
+} as const);
+
 const optTarget = defineOption({
   name: "target",
   type: "string",
@@ -111,6 +142,8 @@ const optMaxMs = defineOption({
   defaultValue: "5000",
 } as const);
 
+const SESSION_SCOPE_PATTERN = /^[a-z0-9-]+$/;
+
 // Subcommand specs
 const listSpec = defineCommand({
   name: "list",
@@ -127,7 +160,7 @@ const startSpec = defineCommand({
   group: "Project",
   description:
     "Reuse the default project workspace when it already exists, or create an isolated long-running workspace with --new or --name. Use --detach when another tool should keep the workspace alive without attaching your terminal.",
-  options: [optUp, optNew, optName, optDetach],
+  options: [optUp, optNew, optName, optDetach, optEnv, optService],
   positionals: [
     { name: "project", description: "Project name or path", required: false },
   ],
@@ -164,7 +197,7 @@ const execSpec = defineCommand({
   group: "Project",
   description:
     "Queue a command in the workspace without opening a new interactive attach flow. Tmux sends it to the active pane; zellij opens a new pane for the command. This is useful for long-running agents, background checks, or remote follow-up work.",
-  options: [],
+  options: [optEnv, optService],
   positionals: [
     { name: "workspace", description: "Workspace name", required: true },
     {
@@ -348,7 +381,7 @@ async function handleSelectedSession(opts: {
     return await attachToSession(session);
   }
 
-  const baseName = resolveWorkspaceBaseName({ workspaceName: opts.name });
+  const baseName = resolveWorkspaceProjectKey({ workspaceName: opts.name });
   const nextWorkspaceName = resolveNextIsolatedWorkspaceName({
     workspaceName: opts.name,
     sessions: opts.sessions,
@@ -381,10 +414,19 @@ async function handleSelectedSession(opts: {
     });
     return 1;
   }
+  const projectEnv = projectContext
+    ? await resolveSessionInjectedEnv({
+        project: projectContext,
+        projectName: baseName,
+        envName: undefined,
+        serviceName: null,
+      })
+    : undefined;
   return await createAndAttachSession({
     backend: resolvedBackend.backend,
     name: nextWorkspaceName,
     cwd: project?.repoRoot ?? session.path ?? process.cwd(),
+    env: projectEnv,
   });
 }
 
@@ -411,11 +453,20 @@ async function handleSelectedProject(opts: {
     });
     return 1;
   }
+  const projectEnv = projectContext
+    ? await resolveSessionInjectedEnv({
+        project: projectContext,
+        projectName: project.name,
+        envName: undefined,
+        serviceName: null,
+      })
+    : undefined;
 
   return await createAndAttachSession({
     backend: resolvedBackend.backend,
     name: project.name,
     cwd: project.repoRoot,
+    env: projectEnv,
   });
 }
 
@@ -480,6 +531,7 @@ async function maybeReuseExistingWorkspace(opts: {
   readonly projectContext: ProjectContext | null;
   readonly detach: boolean;
   readonly runUp: boolean;
+  readonly envName: string | null | undefined;
   readonly forceNew: boolean;
   readonly customName: string | undefined;
 }): Promise<number | null> {
@@ -504,7 +556,10 @@ async function maybeReuseExistingWorkspace(opts: {
   }
 
   if (opts.runUp) {
-    await runHackUp(resolveRunUpCwd({ project: opts.project }));
+    await runHackUp({
+      projectPath: resolveRunUpCwd({ project: opts.project }),
+      envName: opts.envName,
+    });
   }
 
   if (opts.detach) {
@@ -807,12 +862,12 @@ function resolveWorkspaceProjectName(opts: {
   readonly workspaceName: string;
   readonly projects: readonly RegisteredProject[];
 }): string {
-  const workspaceBase = resolveWorkspaceBaseName({
+  const workspaceProjectKey = resolveWorkspaceProjectKey({
     workspaceName: opts.workspaceName,
   });
   const project =
     opts.projects.find((candidate) => candidate.name === opts.workspaceName) ??
-    opts.projects.find((candidate) => candidate.name === workspaceBase);
+    opts.projects.find((candidate) => candidate.name === workspaceProjectKey);
   return project?.name ?? "-";
 }
 
@@ -820,6 +875,161 @@ function resolveRunUpCwd(opts: {
   readonly project: RegisteredProject;
 }): string {
   return opts.project.repoRoot;
+}
+
+function resolveRequestedEnvName(opts: {
+  readonly envOption: string | undefined;
+}): string | null | undefined {
+  const envName = parseEnvConfigSelection(opts.envOption);
+  if (opts.envOption !== undefined && envName === undefined) {
+    throw new CliUsageError("Invalid --env value.");
+  }
+  return envName;
+}
+
+function resolveRequestedServiceName(opts: {
+  readonly serviceOption: string | undefined;
+}): string | null {
+  const serviceName = opts.serviceOption?.trim() ?? "";
+  if (serviceName.length === 0) {
+    return null;
+  }
+  if (!(serviceName === "global" || SESSION_SCOPE_PATTERN.test(serviceName))) {
+    throw new CliUsageError(`Invalid --service value: ${serviceName}`);
+  }
+  return serviceName;
+}
+
+function buildScopedWorkspaceBaseName(opts: {
+  readonly projectName: string;
+  readonly envOptionSpecified: boolean;
+  readonly envName: string | null | undefined;
+  readonly serviceName: string | null;
+}): string {
+  const suffixParts: string[] = [];
+  if (opts.envOptionSpecified) {
+    suffixParts.push(`env-${opts.envName ?? "base"}`);
+  }
+  if (opts.serviceName && opts.serviceName !== "global") {
+    suffixParts.push(`svc-${opts.serviceName}`);
+  }
+  if (suffixParts.length === 0) {
+    return opts.projectName;
+  }
+  return `${opts.projectName}.${suffixParts.join(".")}`;
+}
+
+function resolveWorkspaceProjectKey(opts: {
+  readonly workspaceName: string;
+}): string {
+  const baseName = resolveWorkspaceBaseName({
+    workspaceName: opts.workspaceName,
+  });
+  const dotIndex = baseName.indexOf(".");
+  return dotIndex >= 0 ? baseName.slice(0, dotIndex) : baseName;
+}
+
+async function resolveProjectName(project: ProjectContext): Promise<string> {
+  const cfg = await readProjectConfig(project);
+  const derived = defaultProjectSlugFromPath(project.projectRoot);
+  return (cfg.name ?? derived).trim() || derived;
+}
+
+async function maybeMigrateLegacySessionEnv(opts: {
+  readonly project: ProjectContext;
+  readonly projectName: string;
+}): Promise<void> {
+  if (
+    await projectEnvConfigExists({
+      projectRoot: opts.project.projectRoot,
+    })
+  ) {
+    return;
+  }
+
+  const contract = await readHackEnvContract({
+    projectDir: opts.project.projectDir,
+  });
+  if (!contract.exists) {
+    return;
+  }
+
+  const serviceNames = await discoverComposeServiceNames({
+    composeFile: opts.project.composeFile,
+  });
+  const migrated = await migrateLegacyProjectEnv({
+    projectRoot: opts.project.projectRoot,
+    projectDir: opts.project.projectDir,
+    projectName: opts.projectName,
+    serviceNames,
+    materialize: false,
+  });
+  if (migrated.wroteFiles.length > 0) {
+    logger.info({
+      message: `Migrated legacy env config to ${migrated.wroteFiles.join(", ")}`,
+    });
+  }
+}
+
+async function resolveSessionInjectedEnv(opts: {
+  readonly project: ProjectContext;
+  readonly projectName: string;
+  readonly envName: string | null | undefined;
+  readonly serviceName: string | null;
+}): Promise<Record<string, string>> {
+  await maybeMigrateLegacySessionEnv({
+    project: opts.project,
+    projectName: opts.projectName,
+  });
+
+  const serviceNames = await discoverComposeServiceNames({
+    composeFile: opts.project.composeFile,
+  });
+  const modern = await resolveProjectEnvConfig({
+    projectRoot: opts.project.projectRoot,
+    projectDir: opts.project.projectDir,
+    envName: opts.envName,
+    serviceNames,
+  });
+  if (modern) {
+    return selectProjectEnvValues({
+      resolved: modern,
+      scopeName: opts.serviceName,
+    });
+  }
+
+  const resolved = await resolveHackEnv({
+    projectDir: opts.project.projectDir,
+    projectName: opts.projectName,
+    envName: opts.envName,
+  });
+  return selectHackEnvValues({
+    resolved,
+    serviceName: opts.serviceName,
+  });
+}
+
+async function resolveProjectContextForWorkspace(opts: {
+  readonly workspaceName: string;
+}): Promise<ProjectContext | null> {
+  const workspaceProjectName = resolveWorkspaceProjectKey({
+    workspaceName: opts.workspaceName,
+  });
+  const registry = await readProjectsRegistry();
+  const registered = registry.projects.find(
+    (project) => project.name === workspaceProjectName
+  );
+  if (registered) {
+    return await findProjectContext(registered.repoRoot);
+  }
+
+  const currentProject = await resolveCurrentProjectContext();
+  if (!currentProject) {
+    return null;
+  }
+
+  const currentProjectName = await resolveProjectName(currentProject);
+  return currentProjectName === workspaceProjectName ? currentProject : null;
 }
 
 const handleList: CommandHandlerFor<
@@ -869,6 +1079,12 @@ const handleStart = async ({
   const customName = args.options.name;
   const detach = args.options.detach === true;
   const project = await resolveProjectForSessionStart({ projectNameOrPath });
+  const envName = resolveRequestedEnvName({
+    envOption: args.options.env,
+  });
+  const serviceName = resolveRequestedServiceName({
+    serviceOption: args.options.service,
+  });
 
   if (!project) {
     if (projectNameOrPath) {
@@ -881,14 +1097,30 @@ const handleStart = async ({
     return 1;
   }
 
-  const baseName = project.name;
+  const baseName = buildScopedWorkspaceBaseName({
+    projectName: project.name,
+    envOptionSpecified: args.options.env !== undefined,
+    envName,
+    serviceName,
+  });
   const projectContext = await findProjectContext(project.repoRoot);
+  if (!projectContext) {
+    logger.error({ message: `Project not found: ${project.repoRoot}` });
+    return 1;
+  }
+  const projectEnv = await resolveSessionInjectedEnv({
+    project: projectContext,
+    projectName: project.name,
+    envName,
+    serviceName,
+  });
   const reused = await maybeReuseExistingWorkspace({
     baseName,
     project,
     projectContext,
     detach,
     runUp,
+    envName,
     forceNew,
     customName,
   });
@@ -916,7 +1148,10 @@ const handleStart = async ({
 
   // Run hack up if requested
   if (runUp) {
-    await runHackUp(resolveRunUpCwd({ project }));
+    await runHackUp({
+      projectPath: resolveRunUpCwd({ project }),
+      envName,
+    });
   }
 
   // Use repoRoot (project root), not projectDir (.hack/)
@@ -925,12 +1160,14 @@ const handleStart = async ({
       backend: resolvedBackend.backend,
       name: sessionName,
       cwd: project.repoRoot,
+      env: projectEnv,
     });
   }
   return await createAndAttachSession({
     backend: resolvedBackend.backend,
     name: sessionName,
     cwd: project.repoRoot,
+    env: projectEnv,
   });
 };
 
@@ -1001,9 +1238,41 @@ const handleExec = async ({
     return 1;
   }
 
+  const workspaceProject = await resolveProjectContextForWorkspace({
+    workspaceName,
+  });
+  const projectName = workspaceProject
+    ? await resolveProjectName(workspaceProject)
+    : null;
+  const envName = resolveRequestedEnvName({
+    envOption: args.options.env,
+  });
+  const serviceName = resolveRequestedServiceName({
+    serviceOption: args.options.service,
+  });
+  if (
+    (args.options.env !== undefined || serviceName !== null) &&
+    !(workspaceProject && projectName)
+  ) {
+    logger.error({
+      message: `Unable to resolve project env for workspace: ${workspaceName}`,
+    });
+    return 1;
+  }
+  const injectedEnv =
+    workspaceProject && projectName
+      ? await resolveSessionInjectedEnv({
+          project: workspaceProject,
+          projectName,
+          envName,
+          serviceName,
+        })
+      : undefined;
+
   const result = await backend.execInSession({
     name: workspaceName,
     command,
+    env: injectedEnv,
   });
 
   if (result.exitCode !== 0) {
@@ -1318,11 +1587,13 @@ async function createAndAttachSession(opts: {
   readonly backend: MuxBackend;
   readonly name: string;
   readonly cwd: string;
+  readonly env?: Readonly<Record<string, string>>;
 }): Promise<number> {
   const createExitCode = await createSessionDetached({
     backend: opts.backend,
     name: opts.name,
     cwd: opts.cwd,
+    env: opts.env,
   });
 
   if (createExitCode !== 0) {
@@ -1339,10 +1610,12 @@ async function createSessionDetached(opts: {
   readonly backend: MuxBackend;
   readonly name: string;
   readonly cwd: string;
+  readonly env?: Readonly<Record<string, string>>;
 }): Promise<number> {
   const createResult = await opts.backend.createSession({
     name: opts.name,
     cwd: opts.cwd,
+    env: opts.env,
   });
   if (!createResult.ok) {
     logger.error({ message: `Failed to create workspace: ${opts.name}` });
@@ -1373,14 +1646,25 @@ async function attachToSession(opts: {
 /**
  * Run hack up -d in a project directory.
  */
-async function runHackUp(projectPath: string): Promise<void> {
-  logger.info({ message: `Running hack up -d in ${projectPath}...` });
-  await run(["hack", "up", "-d"], { cwd: projectPath, stdin: "inherit" });
+async function runHackUp(opts: {
+  readonly projectPath: string;
+  readonly envName: string | null | undefined;
+}): Promise<void> {
+  logger.info({ message: `Running hack up -d in ${opts.projectPath}...` });
+  const command = ["hack", "up", "-d"];
+  if (opts.envName === null) {
+    command.push("--env", "base");
+  } else if (typeof opts.envName === "string") {
+    command.push("--env", opts.envName);
+  }
+  await run(command, { cwd: opts.projectPath, stdin: "inherit" });
 }
 
 export const __testOnlySessionCommand = {
+  buildScopedWorkspaceBaseName,
   resolveNextIsolatedWorkspaceName,
   resolveWorkspaceBackendNameForCreate,
+  resolveWorkspaceProjectKey,
   resolveTmuxOnlyWorkspaceError,
   resolveRunUpCwd,
   resolveWorkspaceBackendName,

@@ -160,5 +160,5 @@ Notes:
 
 - For long-running setup commands, use either `lifecycle.processes` or `lifecycle.up.before` with `persistent: true`.
 - Keep non-persistent hooks short and deterministic.
-- Use `source: "keychain"` in the env contract for secrets and keep `.hack/.env` non-sensitive.
+- Store lifecycle secrets in `hack.env.*.yaml` as encrypted `secure:` values and prefer runtime injection over relying on `.hack/.env`.
 - If a hook requires interactive auth (e.g. browser-based SSO), it will still work; it runs with `stdin: inherit`.

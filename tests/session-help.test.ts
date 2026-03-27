@@ -19,6 +19,8 @@ test("hack session start help explains reuse and isolated workspace creation", (
   expect(help).toContain("create an isolated long-running workspace");
   expect(help).toContain("project--agent-1");
   expect(help).toContain("--detach");
+  expect(help).toContain("--env");
+  expect(help).toContain("--service");
 });
 
 test("hack session attach and exec help explain workspace-oriented flows", () => {
@@ -30,6 +32,8 @@ test("hack session attach and exec help explain workspace-oriented flows", () =>
   expect(execHelp).toContain("Queue a command in the workspace");
   expect(execHelp).toContain("zellij opens a new pane");
   expect(execHelp).toContain("long-running agents");
+  expect(execHelp).toContain("--env");
+  expect(execHelp).toContain("--service");
 });
 
 test("hack setup tmux help documents tmux-first onboarding", () => {

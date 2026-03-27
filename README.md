@@ -67,18 +67,19 @@ Docs:
 
 Hack separates shareable env structure from secret values so teams and agents can understand what a project needs without leaking sensitive material into git.
 
-- Commit an env contract in `.hack/hack.env.json`.
-- Keep plain local values in gitignored `.hack/.env`.
-- Store secrets in the OS keychain or another configured backend.
-- Resolve env requirements before `hack up`, `hack run`, or `hack restart`.
+- Commit `hack.env.default.yaml` and optional `hack.env.<overlay>.yaml`.
+- Keep `.hack.secret.key` out of git, or provide `HACK_ENV_SECRET_KEY` in CI.
+- Let Hack inject resolved env directly into runtime commands by default.
+- Materialize `.hack/.env` only when you explicitly need a compatibility file.
 
 Core commands:
 
 ```bash
 hack env list
-hack env set AWS_PROFILE=dev
-hack env set --secret DATABASE_URL=postgres://...
-hack env backend status
+hack env add AWS_PROFILE dev
+hack env add --secret DATABASE_URL postgres://...
+hack env exec --env qa --service api -- bun db:migrate
+hack env shell --env qa --service api
 ```
 
 Docs:
@@ -219,6 +220,7 @@ Sessions keep terminal work durable. They are not the headline promise, but they
 ```bash
 hack session
 hack session start my-project --up
+hack session start my-project --env qa --service api --detach
 hack session attach my-project
 hack session exec my-project "bun test"
 ```

@@ -92,17 +92,18 @@ graph LR
  
 ## Project env + secrets
 
-Projects can declare a shareable env contract (no values) and safely inject secrets into compose:
+Projects can declare shareable env overlays and safely inject secrets into compose:
 
-- Contract: `.hack/hack.env.json` (committed)
-- Plain values: `.hack/.env` (gitignored, per-project)
-- Secrets: OS keychain via `Bun.secrets` (namespaced per project)
+- Canonical env: `hack.env.default.yaml` plus optional `hack.env.<overlay>.yaml`
+- Compatibility output: `.hack/.env` only when explicitly materialized
+- Secret key: `.hack.secret.key` locally, or `HACK_ENV_SECRET_KEY` in CI/managed environments
 
-At runtime, hack generates `.hack/.internal/compose.env.override.yml` containing `${KEY}` placeholders
-for the contract variables and invokes `docker compose` with a process environment that includes the
-resolved values (including keychain secrets).
+At runtime, hack resolves the selected overlay and injects the effective env directly into compose and
+host-side command flows. For service-scoped values, hack still generates
+`.hack/.internal/compose.env.override.yml` so compose services get the right per-service environment
+without requiring `.hack/.env` to exist.
 
-See `docs/env.md` for the full contract format and CLI/API surface.
+See `docs/env.md` for the current env model and migration notes.
 
 ## Project lifecycle hooks + host processes
 

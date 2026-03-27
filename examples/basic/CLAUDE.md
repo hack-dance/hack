@@ -36,8 +36,8 @@ TLS + valid-hostname constraints:
 - Alias hosts are still local-dev routes unless you add an external tunnel/remote ingress path.
 
 Project files (managed vs generated):
-- Source-of-truth files: `.hack/docker-compose.yml`, `.hack/hack.config.json`, `.hack/hack.env.json` (if env contract is used).
-- Local-only files: `.hack/.env` and `.hack/.internal/` (runtime/local machine state; keep gitignored).
+- Source-of-truth files: `.hack/docker-compose.yml`, `.hack/hack.config.json`, `hack.env.default.yaml`, and optional `hack.env.<overlay>.yaml`.
+- Local-only files: `.hack.secret.key`, optional `.hack/.env` compatibility output, `.hack/.env.state.json`, and `.hack/.internal/` (runtime/local machine state; keep gitignored).
 - Generated (do not hand-edit): `.hack/.internal/compose.override.yml`, `.hack/.internal/compose.env.override.yml`, `.hack/.branch/compose.<branch>.override.yml`.
 - Managed via CLI: `.hack/.internal/extra-hosts.json` (use `hack internal extra-hosts ...` commands).
 - Lifecycle runtime files: `.hack/.internal/lifecycle/state.json`, `.hack/.internal/lifecycle/*.log`.
@@ -72,9 +72,15 @@ Lifecycle + startup:
 Sessions (mux-managed):
 - Picker: `hack session`
 - Start/attach: `hack session start <project>`
+- Env-scoped workspace: `hack session start <project> --env qa --service api --detach`
 - Force isolated agent session: `hack session start <project> --new --name agent-1`
 - Execute in session: `hack session exec <session> "<command>"`
+- Execute in session with injected env: `hack session exec <session> --env qa --service api "bun db:migrate"`
 - Stop session: `hack session stop <session>`
+
+Host-side env helpers:
+- One-off host command with injected env: `hack env exec --env qa --service api -- bun db:migrate`
+- Interactive host shell with injected env: `hack env shell --env qa --service api`
 
 Tickets (git-backed):
 - Create: `hack tickets create --title "..." --body-stdin`

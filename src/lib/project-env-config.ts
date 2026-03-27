@@ -78,6 +78,23 @@ export type ProjectEnvResolvedConfig = {
   readonly unknownScopes: readonly string[];
 };
 
+export function selectProjectEnvValues(opts: {
+  readonly resolved: ProjectEnvResolvedConfig;
+  readonly scopeName?: string | null;
+}): Record<string, string> {
+  const scopeName = opts.scopeName?.trim() ?? "";
+  if (scopeName.length === 0 || scopeName === "global") {
+    return { ...opts.resolved.globalEnv };
+  }
+
+  const scoped = opts.resolved.serviceEnv[scopeName];
+  if (!scoped) {
+    throw new Error(`Unknown env scope: ${scopeName}`);
+  }
+
+  return { ...scoped };
+}
+
 type ProjectEnvConfigReadResult = {
   readonly path: string;
   readonly exists: boolean;

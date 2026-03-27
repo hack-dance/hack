@@ -23,6 +23,7 @@ import {
   resolveEnvFilePath,
   resolveEnvSecretKey,
   resolveHackEnv,
+  selectHackEnvValues,
   upsertDotEnvValue,
   validateHackEnvMutationSource,
 } from "../lib/hack-env.ts";
@@ -49,6 +50,7 @@ import {
   projectEnvConfigExists,
   readMaterializedProjectEnv,
   resolveProjectEnvConfig,
+  selectProjectEnvValues,
   setProjectEnvValue,
   unsetProjectEnvValue,
 } from "../lib/project-env-config.ts";
@@ -58,6 +60,7 @@ import {
   provisionEncryptedFileKey,
   resolveSecretStore,
 } from "../lib/secret-store.ts";
+import { run } from "../lib/shell.ts";
 import { display } from "../ui/display.ts";
 import { logger } from "../ui/logger.ts";
 
@@ -140,6 +143,28 @@ const materializeSpec = defineCommand({
   name: "materialize",
   summary: "Write a compatibility .env file from the selected overlay",
   group: "Project",
+  options: [optPath, optProject, optEnv, optService],
+  positionals: [],
+  subcommands: [],
+} as const);
+
+const execSpec = defineCommand({
+  name: "exec",
+  summary: "Run a host command with project env injected",
+  group: "Project",
+  description:
+    "Inject the selected Hack env overlay directly into a one-off host command without materializing .hack/.env.",
+  options: [optPath, optProject, optEnv, optService],
+  positionals: [{ name: "command", required: true, multiple: true }],
+  subcommands: [],
+} as const);
+
+const shellSpec = defineCommand({
+  name: "shell",
+  summary: "Open a host shell with project env injected",
+  group: "Project",
+  description:
+    "Start an interactive host shell with the selected Hack env overlay injected into the process environment.",
   options: [optPath, optProject, optEnv, optService],
   positionals: [],
   subcommands: [],
@@ -459,6 +484,53 @@ async function loadModernProjectEnv(input: {
     envName: input.envName,
     serviceNames,
   });
+}
+
+async function resolveEnvInjection(input: {
+  readonly project: ProjectContext;
+  readonly projectName: string;
+  readonly envName: string | null | undefined;
+  readonly serviceName: string | null;
+}): Promise<{
+  readonly env: Record<string, string>;
+  readonly effectiveEnvName: string | null;
+}> {
+  await maybeMigrateLegacyProjectEnv({
+    project: input.project,
+    projectName: input.projectName,
+    reason: "runtime",
+  });
+
+  const modern = await loadModernProjectEnv({
+    project: input.project,
+    envName: input.envName,
+  });
+  if (modern) {
+    return {
+      env: selectProjectEnvValues({
+        resolved: modern,
+        scopeName: input.serviceName,
+      }),
+      effectiveEnvName: modern.selection.effectiveEnv,
+    };
+  }
+
+  const resolved = await loadResolvedEnvState({
+    projectDir: input.project.projectDir,
+    projectName: input.projectName,
+    envName: input.envName,
+  });
+  if (!resolved) {
+    throw new CliUsageError("Unable to resolve project env state.");
+  }
+
+  return {
+    env: selectHackEnvValues({
+      resolved,
+      serviceName: input.serviceName,
+    }),
+    effectiveEnvName: resolved.envSelection.effectiveEnv,
+  };
 }
 
 async function maybeMigrateLegacyProjectEnv(input: {
@@ -1269,6 +1341,69 @@ const handleEnvMaterialize: CommandHandlerFor<typeof materializeSpec> = async ({
   return 0;
 };
 
+function resolveInteractiveShellCommand(): readonly string[] {
+  const shellPath = process.env.SHELL?.trim() || "/bin/sh";
+  return [shellPath, "-l"];
+}
+
+const handleEnvExec: CommandHandlerFor<typeof execSpec> = async ({
+  ctx,
+  args,
+}): Promise<number> => {
+  const project = await resolveProjectForEnv({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+  });
+  const projectName = await resolveProjectName(project);
+  const envName = resolveRequestedEnvName({
+    envOption: args.options.env,
+  });
+  const command = args.positionals.command;
+  if (command.length === 0) {
+    throw new CliUsageError("Command is required.");
+  }
+
+  const envState = await resolveEnvInjection({
+    project,
+    projectName,
+    envName,
+    serviceName: args.options.service?.trim() || null,
+  });
+  return await run(command, {
+    cwd: project.projectRoot,
+    env: envState.env,
+    stdin: "inherit",
+  });
+};
+
+const handleEnvShell: CommandHandlerFor<typeof shellSpec> = async ({
+  ctx,
+  args,
+}): Promise<number> => {
+  const project = await resolveProjectForEnv({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+  });
+  const projectName = await resolveProjectName(project);
+  const envName = resolveRequestedEnvName({
+    envOption: args.options.env,
+  });
+  const envState = await resolveEnvInjection({
+    project,
+    projectName,
+    envName,
+    serviceName: args.options.service?.trim() || null,
+  });
+
+  return await run(resolveInteractiveShellCommand(), {
+    cwd: project.projectRoot,
+    env: envState.env,
+    stdin: "inherit",
+  });
+};
+
 const handleEnvUnset: CommandHandlerFor<typeof unsetSpec> = async ({
   ctx,
   args,
@@ -1603,6 +1738,8 @@ export const envCommand = defineCommand({
     withHandler(addSpec, handleEnvAdd),
     withHandler(setSpec, handleEnvSet),
     withHandler(materializeSpec, handleEnvMaterialize),
+    withHandler(execSpec, handleEnvExec),
+    withHandler(shellSpec, handleEnvShell),
     withHandler(unsetSpec, handleEnvUnset),
     withHandler(
       defineCommand({

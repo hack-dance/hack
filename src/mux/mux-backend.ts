@@ -23,12 +23,14 @@ export interface MuxBackend {
   createSession(opts: {
     readonly name: string;
     readonly cwd?: string;
+    readonly env?: Readonly<Record<string, string>>;
   }): Promise<MuxSessionCreateResult>;
   killSession(opts: { readonly name: string }): Promise<ExecResult>;
 
   execInSession(opts: {
     readonly name: string;
     readonly command: string;
+    readonly env?: Readonly<Record<string, string>>;
   }): Promise<ExecResult>;
   sendInput(opts: {
     readonly name: string;

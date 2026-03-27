@@ -336,12 +336,24 @@ async function resolveModernEnvMeta(opts: {
   const serviceNames = await discoverComposeServiceNames({
     composeFile: opts.composeFile,
   });
-  const resolved = await resolveProjectEnvConfig({
-    projectRoot: opts.projectRoot,
-    projectDir: opts.projectDir,
-    envName: undefined,
-    serviceNames,
-  });
+  let resolved: Awaited<ReturnType<typeof resolveProjectEnvConfig>>;
+  try {
+    resolved = await resolveProjectEnvConfig({
+      projectRoot: opts.projectRoot,
+      projectDir: opts.projectDir,
+      envName: undefined,
+      serviceNames,
+    });
+  } catch (error: unknown) {
+    return {
+      contractPath: resolve(opts.projectDir, "hack.env.default.yaml"),
+      contractExists: true,
+      contractParseError:
+        error instanceof Error ? error.message : "Invalid modern env config.",
+      vars: [],
+      missingRequired: [],
+    };
+  }
   if (!resolved) {
     return null;
   }

@@ -243,6 +243,59 @@ test("session exec injects the selected env into the workspace command", async (
   });
 });
 
+test("session exec preserves inferred scoped env when no flags are passed", async () => {
+  const projectRoot = await createProject();
+  const execCommand = findSubcommand("exec");
+  listedSessions = [
+    {
+      backend: "tmux",
+      name: "session-env-test.env-qa.svc-api_worker.v2",
+      attached: false,
+      path: projectRoot,
+      windows: 1,
+      createdAt: null,
+    },
+  ];
+
+  const input = {
+    ctx: {
+      cwd: projectRoot,
+      cli: CLI_SPEC,
+    },
+    args: {
+      options: {
+        env: undefined,
+        service: undefined,
+      },
+      positionals: {
+        workspace: "session-env-test.env-qa.svc-api_worker.v2",
+        command: "bun db:migrate",
+      },
+      raw: {
+        argv: ["session-env-test.env-qa.svc-api_worker.v2", "bun db:migrate"],
+        positionals: [
+          "session-env-test.env-qa.svc-api_worker.v2",
+          "bun db:migrate",
+        ],
+      },
+    },
+  } as unknown as Parameters<typeof execCommand.handler>[0];
+
+  const exitCode = await execCommand.handler(input);
+
+  expect(exitCode).toBe(0);
+  expect(execInSessionCalls).toHaveLength(1);
+  expect(execInSessionCalls[0]).toEqual({
+    name: "session-env-test.env-qa.svc-api_worker.v2",
+    command: "bun db:migrate",
+    env: {
+      API_BASE_URL: "https://qa.example.com",
+      GLOBAL_FLAG: "base",
+      SERVICE_TOKEN: "overlay-secret-v2",
+    },
+  });
+});
+
 test("session start accepts compose-compatible service scope names", async () => {
   const projectRoot = await createProject();
   const startCommand = findSubcommand("start");

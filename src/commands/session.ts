@@ -413,12 +413,15 @@ async function handleSelectedSession(opts: {
     });
     return 1;
   }
+  const inferredScope = inferWorkspaceScopeSelection({
+    workspaceName: opts.name,
+  });
   const projectEnv = projectContext
     ? await resolveSessionInjectedEnv({
         project: projectContext,
         projectName: baseName,
-        envName: undefined,
-        serviceName: null,
+        envName: inferredScope.envName,
+        serviceName: inferredScope.serviceName,
       })
     : undefined;
   return await createAndAttachSession({
@@ -930,6 +933,91 @@ function resolveWorkspaceProjectKey(opts: {
   return dotIndex >= 0 ? baseName.slice(0, dotIndex) : baseName;
 }
 
+function inferWorkspaceScopeSelection(opts: {
+  readonly workspaceName: string;
+}): {
+  readonly hasScopedSelection: boolean;
+  readonly envName: string | null | undefined;
+  readonly serviceName: string | null;
+} {
+  const baseName = resolveWorkspaceBaseName({
+    workspaceName: opts.workspaceName,
+  });
+  const projectKey = resolveWorkspaceProjectKey({
+    workspaceName: opts.workspaceName,
+  });
+  if (baseName === projectKey) {
+    return {
+      hasScopedSelection: false,
+      envName: undefined,
+      serviceName: null,
+    };
+  }
+
+  const suffix = baseName.startsWith(`${projectKey}.`)
+    ? baseName.slice(projectKey.length + 1)
+    : "";
+  if (suffix.length === 0) {
+    return {
+      hasScopedSelection: false,
+      envName: undefined,
+      serviceName: null,
+    };
+  }
+
+  const serviceMarker = suffix.indexOf(".svc-");
+  const startsWithService = suffix.startsWith("svc-");
+  let serviceName: string | null = null;
+  if (startsWithService) {
+    serviceName = suffix.slice("svc-".length);
+  } else if (serviceMarker >= 0) {
+    serviceName = suffix.slice(serviceMarker + ".svc-".length);
+  }
+  let envName: string | null | undefined;
+  if (suffix.startsWith("env-")) {
+    const rawEnv =
+      serviceMarker >= 0
+        ? suffix.slice("env-".length, serviceMarker)
+        : suffix.slice("env-".length);
+    envName = rawEnv === "base" ? null : rawEnv;
+  }
+
+  return {
+    hasScopedSelection: envName !== undefined || serviceName !== null,
+    envName,
+    serviceName,
+  };
+}
+
+function resolveEffectiveWorkspaceScopeSelection(opts: {
+  readonly workspaceName: string;
+  readonly envOptionSpecified: boolean;
+  readonly envName: string | null | undefined;
+  readonly serviceOptionSpecified: boolean;
+  readonly serviceName: string | null;
+}): {
+  readonly shouldInject: boolean;
+  readonly envName: string | null | undefined;
+  readonly serviceName: string | null;
+} {
+  const inferred = inferWorkspaceScopeSelection({
+    workspaceName: opts.workspaceName,
+  });
+  const envName = opts.envOptionSpecified ? opts.envName : inferred.envName;
+  const serviceName = opts.serviceOptionSpecified
+    ? opts.serviceName
+    : inferred.serviceName;
+
+  return {
+    shouldInject:
+      opts.envOptionSpecified ||
+      opts.serviceOptionSpecified ||
+      inferred.hasScopedSelection,
+    envName,
+    serviceName,
+  };
+}
+
 async function resolveProjectName(project: ProjectContext): Promise<string> {
   const cfg = await readProjectConfig(project);
   const derived = defaultProjectSlugFromPath(project.projectRoot);
@@ -1260,13 +1348,20 @@ const handleExec = async ({
     });
     return 1;
   }
+  const scopeSelection = resolveEffectiveWorkspaceScopeSelection({
+    workspaceName,
+    envOptionSpecified: args.options.env !== undefined,
+    envName,
+    serviceOptionSpecified: args.options.service !== undefined,
+    serviceName,
+  });
   const injectedEnv =
-    workspaceProject && projectName
+    workspaceProject && projectName && scopeSelection.shouldInject
       ? await resolveSessionInjectedEnv({
           project: workspaceProject,
           projectName,
-          envName,
-          serviceName,
+          envName: scopeSelection.envName,
+          serviceName: scopeSelection.serviceName,
         })
       : undefined;
 
@@ -1663,7 +1758,9 @@ async function runHackUp(opts: {
 
 export const __testOnlySessionCommand = {
   buildScopedWorkspaceBaseName,
+  inferWorkspaceScopeSelection,
   resolveNextIsolatedWorkspaceName,
+  resolveEffectiveWorkspaceScopeSelection,
   resolveWorkspaceBackendNameForCreate,
   resolveWorkspaceProjectKey,
   resolveTmuxOnlyWorkspaceError,

@@ -76,3 +76,45 @@ test("resolveProjectMeta reads modern env config repos without a legacy contract
     true
   );
 });
+
+test("resolveProjectMeta downgrades malformed modern env config to metadata parse errors", async () => {
+  const repoRoot = await mkdtemp(join(tmpdir(), "hack-project-meta-"));
+  tempDirs.add(repoRoot);
+
+  const projectRoot = resolve(repoRoot, "repo");
+  const projectDir = resolve(projectRoot, ".hack");
+  await mkdir(projectDir, { recursive: true });
+
+  const composeFile = resolve(projectDir, PROJECT_COMPOSE_FILENAME);
+  await writeFile(composeFile, "services:\n  api: {}\n");
+  await writeFile(
+    resolve(projectDir, PROJECT_CONFIG_FILENAME),
+    `${JSON.stringify(
+      {
+        name: "project-meta-bad-env",
+        dev_host: "project-meta-bad.hack",
+      },
+      null,
+      2
+    )}\n`
+  );
+  await writeFile(
+    resolve(projectDir, "hack.env.default.yaml"),
+    "version: 2\nenvironment: default\nsecretsprovider: project_key\nvalues: {}\n"
+  );
+
+  const meta = await resolveProjectMeta({
+    projectName: "project-meta-bad-env",
+    repoRoot: projectRoot,
+    projectDir,
+    composeFile,
+  });
+
+  expect(meta.env.contractExists).toBe(true);
+  expect(meta.env.contractPath).toEndWith(".hack/hack.env.default.yaml");
+  expect(meta.env.contractParseError).toContain(
+    "Env config version must be 1."
+  );
+  expect(meta.env.vars).toEqual([]);
+  expect(meta.env.missingRequired).toEqual([]);
+});

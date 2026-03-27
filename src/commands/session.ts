@@ -1340,7 +1340,7 @@ const handleExec = async ({
     serviceOption: args.options.service,
   });
   if (
-    (args.options.env !== undefined || serviceName !== null) &&
+    (args.options.env !== undefined || args.options.service !== undefined) &&
     !(workspaceProject && projectName)
   ) {
     logger.error({

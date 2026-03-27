@@ -712,7 +712,7 @@ export function renderProjectEnvConfigYaml(opts?: {
     `environment: ${environment}`,
     "secretsprovider: project_key",
     "values:",
-    "  global:",
+    "  global: {}",
     "",
   ].join("\n");
 }

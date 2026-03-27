@@ -296,6 +296,47 @@ test("session exec preserves inferred scoped env when no flags are passed", asyn
   });
 });
 
+test("session exec treats explicit --service global as an env injection request", async () => {
+  const projectRoot = await createProject();
+  const execCommand = findSubcommand("exec");
+  listedSessions = [
+    {
+      backend: "tmux",
+      name: "other-project",
+      attached: false,
+      path: projectRoot,
+      windows: 1,
+      createdAt: null,
+    },
+  ];
+
+  const input = {
+    ctx: {
+      cwd: projectRoot,
+      cli: CLI_SPEC,
+    },
+    args: {
+      options: {
+        env: undefined,
+        service: "global",
+      },
+      positionals: {
+        workspace: "other-project",
+        command: "bun db:migrate",
+      },
+      raw: {
+        argv: ["--service", "global", "other-project", "bun db:migrate"],
+        positionals: ["other-project", "bun db:migrate"],
+      },
+    },
+  } as unknown as Parameters<typeof execCommand.handler>[0];
+
+  const exitCode = await execCommand.handler(input);
+
+  expect(exitCode).toBe(1);
+  expect(execInSessionCalls).toHaveLength(0);
+});
+
 test("session start accepts compose-compatible service scope names", async () => {
   const projectRoot = await createProject();
   const startCommand = findSubcommand("start");

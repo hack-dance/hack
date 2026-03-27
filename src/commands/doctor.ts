@@ -58,6 +58,7 @@ import {
 } from "../lib/project.ts";
 import {
   discoverComposeServiceNames,
+  inspectLegacyComposeEnvFileReferences,
   type LegacyComposeEnvFileReference,
   migrateLegacyProjectEnv,
   projectEnvConfigExists,
@@ -1871,6 +1872,10 @@ async function maybeMigrateProjectEnvConfig(opts: {
     })
   ) {
     note("Project already uses the new env config files.", "doctor");
+    await maybeRepairModernProjectComposeEnvReferences({
+      composeFile: project.composeFile,
+      projectDir: project.projectDir,
+    });
     return;
   }
 
@@ -2015,6 +2020,57 @@ function buildComposeEnvRepairNote(opts: {
     ),
     "Hack now injects env directly at runtime by default, so these env_file entries should usually be removed.",
   ].join("\n");
+}
+
+async function maybeRepairModernProjectComposeEnvReferences(opts: {
+  readonly composeFile: string;
+  readonly projectDir: string;
+}): Promise<void> {
+  const references = await inspectLegacyComposeEnvFileReferences({
+    composeFile: opts.composeFile,
+    projectDir: opts.projectDir,
+  });
+  if (references.length === 0) {
+    return;
+  }
+
+  note(
+    buildComposeEnvRepairNote({
+      references,
+    }),
+    "compose env repair"
+  );
+  const shouldRepairCompose = await confirmOrThrow({
+    message: "Remove legacy .hack/.env* env_file references from compose now?",
+    initialValue: true,
+  });
+  if (!shouldRepairCompose) {
+    note(
+      "Leaving legacy .hack/.env* files in place because compose still references them.",
+      "compose env repair"
+    );
+    return;
+  }
+
+  const repaired = await repairLegacyComposeEnvFileReferences({
+    composeFile: opts.composeFile,
+    projectDir: opts.projectDir,
+  });
+  if (!repaired.changed) {
+    note("No compose env_file updates were needed.", "compose env repair");
+    return;
+  }
+
+  note(
+    [
+      `Updated ${opts.composeFile}.`,
+      ...repaired.removed.map(
+        (reference) =>
+          `- ${reference.service}: removed env_file ${reference.configuredPath}`
+      ),
+    ].join("\n"),
+    "compose env repair"
+  );
 }
 
 export async function buildDoctorRemediationPlanLines(opts: {

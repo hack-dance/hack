@@ -84,6 +84,24 @@ const optService = defineOption({
 } as const);
 
 const SECRET_MASK = "***";
+const MODERN_ENV_STATUS_CLASSIFICATION = {
+  trust_model: "repo_managed_env_config",
+  custody: "repo_tracked_env_config",
+  portability: "portable_with_out_of_band_key",
+  shared_state: "repo_managed_overlay",
+} as const;
+const MODERN_LOCAL_PLAINTEXT_CLASSIFICATION = {
+  trust_model: "compatibility_output",
+  custody: "local_plaintext_file",
+  portability: "local_only",
+  shared_state: "compatibility_only",
+} as const;
+const MODERN_LOCAL_SECRET_CLASSIFICATION = {
+  trust_model: "local_secret_key",
+  custody: "local_secret_key",
+  portability: "local_only",
+  shared_state: "local_only",
+} as const;
 
 const listSpec = defineCommand({
   name: "list",
@@ -613,37 +631,20 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
     const materialized = await readMaterializedProjectEnv({
       projectDir: project.projectDir,
     });
+    const materializedExists = Object.keys(materialized).length > 0;
     if (json) {
       process.stdout.write(
         `${JSON.stringify(
-          {
-            project: projectName,
-            env_selection: {
-              requested: modern.selection.requestedEnv,
-              default: modern.selection.defaultEnv,
-              effective: modern.selection.effectiveEnv,
-              overlay_path: modern.selection.overlayPath,
-              overlay_exists: modern.selection.overlayExists,
-            },
-            format: "project_env_config_v1",
-            files: modern.files,
-            scopes: modern.declaredScopes,
-            unknown_scopes: modern.unknownScopes,
-            selected_scope: selectedScope,
-            vars: Object.entries(envValues).map(([key, value]) => ({
-              key,
-              value: maskModernEnvValue({
-                modern,
-                scope: selectedScope,
-                key,
-                value,
-                showSecrets,
-              }),
-            })),
-            ...(showSecrets
-              ? { materialized }
-              : { materialized_keys: Object.keys(materialized).sort() }),
-          },
+          buildModernEnvJsonPayload({
+            project,
+            projectName,
+            modern,
+            selectedScope,
+            envValues,
+            showSecrets,
+            materialized,
+            materializedExists,
+          }),
           null,
           2
         )}\n`
@@ -752,6 +753,144 @@ function isModernSecretAtScope(input: {
 
 function isModernSecretStoredValue(value: unknown): boolean {
   return isRecord(value) && typeof value.secure === "string";
+}
+
+function buildModernEnvJsonPayload(input: {
+  readonly project: ProjectContext;
+  readonly projectName: string;
+  readonly modern: NonNullable<
+    Awaited<ReturnType<typeof loadModernProjectEnv>>
+  >;
+  readonly selectedScope: string;
+  readonly envValues: Readonly<Record<string, string>>;
+  readonly showSecrets: boolean;
+  readonly materialized: Record<string, string>;
+  readonly materializedExists: boolean;
+}) {
+  return {
+    project: input.projectName,
+    env_selection: {
+      requested: input.modern.selection.requestedEnv,
+      default: input.modern.selection.defaultEnv,
+      effective: input.modern.selection.effectiveEnv,
+      overlay_path: input.modern.selection.overlayPath,
+      overlay_exists: input.modern.selection.overlayExists,
+    },
+    format: "project_env_config_v1",
+    status: {
+      ...MODERN_ENV_STATUS_CLASSIFICATION,
+      summary: "Project env config overlays",
+      detail:
+        "Hack is reading canonical hack.env.default.yaml and optional hack.env.<overlay>.yaml files directly. Runtime injection is the default path; .hack/.env is only a manual compatibility output.",
+    },
+    storage: {
+      local_plaintext: {
+        path: input.project.envFile,
+        exists: input.materializedExists,
+        trust_model: MODERN_LOCAL_PLAINTEXT_CLASSIFICATION.trust_model,
+        mirrored_to_backend: false,
+        fallback: {
+          enabled: false,
+          source: "none",
+          trust_model: "none",
+          classification: MODERN_LOCAL_PLAINTEXT_CLASSIFICATION,
+        },
+        classification: MODERN_LOCAL_PLAINTEXT_CLASSIFICATION,
+      },
+      local_secrets: {
+        backend: "project_key",
+        location: `${resolve(input.project.projectRoot, ".hack.secret.key")} or HACK_ENV_SECRET_KEY`,
+        mode: "file_or_env",
+        provider: null,
+        trust_model: MODERN_LOCAL_SECRET_CLASSIFICATION.trust_model,
+        classification: MODERN_LOCAL_SECRET_CLASSIFICATION,
+      },
+      portable_state: {
+        status: "repo_overlay_files",
+        trust_model: MODERN_ENV_STATUS_CLASSIFICATION.trust_model,
+        message:
+          "Canonical values live in hack.env.default.yaml and optional overlay files. Share the decryption key out of band with .hack.secret.key or HACK_ENV_SECRET_KEY.",
+        classification: MODERN_ENV_STATUS_CLASSIFICATION,
+      },
+      compatibility_mode: {
+        plaintext_target: input.project.envFile,
+        secret_backend: "project_key",
+        plaintext_mirrored_to_backend: false,
+        summary:
+          "Runtime injects env directly from hack.env.*.yaml by default; .hack/.env is only written by `hack env materialize`.",
+      },
+    },
+    files: input.modern.files,
+    scopes: input.modern.declaredScopes,
+    unknown_scopes: input.modern.unknownScopes,
+    selected_scope: input.selectedScope,
+    vars: Object.entries(input.envValues).map(([key, value]) => {
+      const resolvedValue = resolveModernStoredValue({
+        modern: input.modern,
+        scope: input.selectedScope,
+        key,
+      });
+      const secret = resolvedValue
+        ? isModernSecretStoredValue(resolvedValue.value)
+        : false;
+      const services =
+        resolvedValue?.scope && resolvedValue.scope !== "global"
+          ? [resolvedValue.scope]
+          : null;
+      return {
+        key,
+        required: false,
+        source: secret ? "keychain" : "plain_env",
+        services,
+        resolved_from: "project_env_config",
+        storage: {
+          kind: secret ? "secret" : "plaintext",
+          backend: "project_env_config",
+          location: input.modern.files.join(", "),
+          mode: "yaml",
+          trust_model: secret
+            ? MODERN_ENV_STATUS_CLASSIFICATION.trust_model
+            : MODERN_LOCAL_PLAINTEXT_CLASSIFICATION.trust_model,
+          classification: secret
+            ? MODERN_ENV_STATUS_CLASSIFICATION
+            : MODERN_LOCAL_PLAINTEXT_CLASSIFICATION,
+        },
+        value: maskModernEnvValue({
+          modern: input.modern,
+          scope: input.selectedScope,
+          key,
+          value,
+          showSecrets: input.showSecrets,
+        }),
+      };
+    }),
+    missing_required: [],
+    ...(input.showSecrets
+      ? { materialized: input.materialized }
+      : { materialized_keys: Object.keys(input.materialized).sort() }),
+  };
+}
+
+function resolveModernStoredValue(input: {
+  readonly modern: NonNullable<
+    Awaited<ReturnType<typeof loadModernProjectEnv>>
+  >;
+  readonly scope: string;
+  readonly key: string;
+}): { readonly scope: string; readonly value: unknown } | null {
+  if (input.scope !== "global") {
+    const scopedValue = input.modern.merged.values[input.scope]?.[input.key];
+    if (scopedValue !== undefined) {
+      return { scope: input.scope, value: scopedValue };
+    }
+  }
+
+  const globalValue = input.modern.merged.values.global?.[input.key];
+  if (globalValue !== undefined) {
+    return { scope: "global", value: globalValue };
+  }
+
+  return null;
 }
 
 function serializeEnvStorageForJson(input: {

@@ -73,6 +73,9 @@ test("modern env list masks secret values by default", async () => {
     "--json",
   ]);
   expect(jsonResult.exitCode).toBe(0);
+  expect(jsonResult.stdout).toContain('"status": {');
+  expect(jsonResult.stdout).toContain('"storage": {');
+  expect(jsonResult.stdout).toContain('"backend": "project_key"');
   expect(jsonResult.stdout).toContain('"key": "SERVICE_TOKEN"');
   expect(jsonResult.stdout).toContain('"value": "***"');
   expect(jsonResult.stdout).not.toContain("super-secret-token");

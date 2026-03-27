@@ -347,3 +347,143 @@ test("env management falls back to an explicit unavailable state when repo-bound
   expect(state.statusCommand).toBe("./dist/hack env list --json");
   expect(state.backendCommand).toBe("./dist/hack env backend status --json");
 });
+
+test("env management accepts modern project env config payloads", () => {
+  const state = buildEnvManagementState({
+    list: {
+      project: "hack-cli",
+      env_selection: {
+        requested: "qa",
+        default: null,
+        effective: "qa",
+        overlay_path: "/repo/hack.env.qa.yaml",
+        overlay_exists: true,
+      },
+      status: {
+        trust_model: "repo_managed_env_config",
+        custody: "repo_tracked_env_config",
+        portability: "portable_with_out_of_band_key",
+        shared_state: "repo_managed_overlay",
+        summary: "Project env config overlays",
+        detail:
+          "Hack is reading canonical hack.env.default.yaml and optional hack.env.<overlay>.yaml files directly.",
+      },
+      storage: {
+        local_plaintext: {
+          path: "/repo/.hack/.env",
+          exists: false,
+          trust_model: "compatibility_output",
+          mirrored_to_backend: false,
+          fallback: {
+            enabled: false,
+            source: "none",
+            trust_model: "none",
+            classification: {
+              trust_model: "compatibility_output",
+              custody: "local_plaintext_file",
+              portability: "local_only",
+              shared_state: "compatibility_only",
+            },
+          },
+          classification: {
+            trust_model: "compatibility_output",
+            custody: "local_plaintext_file",
+            portability: "local_only",
+            shared_state: "compatibility_only",
+          },
+        },
+        local_secrets: {
+          backend: "project_key",
+          location: "/repo/.hack.secret.key or HACK_ENV_SECRET_KEY",
+          mode: "file_or_env",
+          provider: null,
+          trust_model: "local_secret_key",
+          classification: {
+            trust_model: "local_secret_key",
+            custody: "local_secret_key",
+            portability: "local_only",
+            shared_state: "local_only",
+          },
+        },
+        portable_state: {
+          status: "repo_overlay_files",
+          trust_model: "repo_managed_env_config",
+          message:
+            "Canonical values live in hack.env.default.yaml and optional overlay files.",
+          classification: {
+            trust_model: "repo_managed_env_config",
+            custody: "repo_tracked_env_config",
+            portability: "portable_with_out_of_band_key",
+            shared_state: "repo_managed_overlay",
+          },
+        },
+        compatibility_mode: {
+          plaintext_target: "/repo/.hack/.env",
+          secret_backend: "project_key",
+          plaintext_mirrored_to_backend: false,
+          summary:
+            "Runtime injects env directly from hack.env.*.yaml by default; .hack/.env is only written by `hack env materialize`.",
+        },
+      },
+      vars: [
+        {
+          key: "SERVICE_TOKEN",
+          required: false,
+          source: "keychain",
+          services: ["api"],
+          resolved_from: "project_env_config",
+          value: "***",
+          storage: {
+            kind: "secret",
+            backend: "project_env_config",
+            location: "/repo/hack.env.default.yaml, /repo/hack.env.qa.yaml",
+            mode: "yaml",
+            trust_model: "repo_managed_env_config",
+            classification: {
+              trust_model: "repo_managed_env_config",
+              custody: "repo_tracked_env_config",
+              portability: "portable_with_out_of_band_key",
+              shared_state: "repo_managed_overlay",
+            },
+          },
+        },
+      ],
+      missing_required: [],
+    },
+    backend: {
+      backend: "encrypted_file",
+      allow_env_auth_refs: false,
+      store_plaintext_in_backend: false,
+      encrypted_file: {
+        path: "~/.hack/secrets.enc.json",
+      },
+      encrypted_file_key_env: "HACK_SECRETS_FILE_KEY",
+      cloud: {
+        provider: null,
+        project: null,
+        secretPrefix: "hack",
+      },
+      status: {
+        storage_mode: "Encrypted local file storage",
+        trust_model: "Machine-local secret custody",
+        portability:
+          "Not portable by default; copy and key-sharing are explicit user actions",
+        plaintext_compatibility:
+          "Secret keys use this backend, while non-secret .env-compatible values still live in .hack/.env.",
+        classification: {
+          trust_model: "local_secret_backend",
+          custody: "local_secret_backend",
+          portability: "local_only",
+          shared_state: "plaintext_compatible",
+        },
+      },
+    },
+  });
+
+  expect(state.ready).toBe(true);
+  expect(state.status.sharedState).toBe("repo_managed_overlay");
+  expect(state.backend.name).toBe("encrypted_file");
+  expect(state.localSecrets.backend).toBe("project_key");
+  expect(state.envSelectionLabel).toContain("qa");
+  expect(state.variables[0]?.resolvedSource).toBe("project_env_config");
+});

@@ -4,6 +4,10 @@ const isolatedTestPaths = [
   "tests/node-workspace-bootstrap.test.ts",
   "tests/nodes-registry.test.ts",
   "tests/daemon-sessions.test.ts",
+  "tests/daemon-env.test.ts",
+  "tests/runtime-backend.test.ts",
+  "tests/projects-registry.test.ts",
+  "tests/project-run-command.test.ts",
 ] as const;
 const maxConcurrencyArg = "--max-concurrency=1";
 
@@ -61,6 +65,18 @@ function testLabel(opts: { readonly testPath: string }): string {
   }
   if (opts.testPath === "tests/daemon-sessions.test.ts") {
     return "daemon sessions";
+  }
+  if (opts.testPath === "tests/daemon-env.test.ts") {
+    return "daemon env routes";
+  }
+  if (opts.testPath === "tests/runtime-backend.test.ts") {
+    return "runtime backend";
+  }
+  if (opts.testPath === "tests/projects-registry.test.ts") {
+    return "projects registry";
+  }
+  if (opts.testPath === "tests/project-run-command.test.ts") {
+    return "project run command";
   }
   return opts.testPath;
 }

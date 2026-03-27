@@ -56,7 +56,7 @@ afterAll(() => {
 test("run applies modern env overlays to service-specific compose overrides", async () => {
   const projectRoot = await createProject();
 
-  const exitCode = await runCommand.handler({
+  const input = {
     ctx: {
       cwd: projectRoot,
       cli: CLI_SPEC,
@@ -79,7 +79,9 @@ test("run applies modern env overlays to service-specific compose overrides", as
         positionals: ["api", "printenv"],
       },
     },
-  });
+  } as unknown as Parameters<typeof runCommand.handler>[0];
+
+  const exitCode = await runCommand.handler(input);
 
   expect(exitCode).toBe(0);
   expect(runCalls).toHaveLength(1);

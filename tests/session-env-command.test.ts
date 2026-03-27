@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
+import type { CommandHandlerFor } from "../src/cli/command.ts";
 import { CLI_SPEC } from "../src/cli/spec.ts";
 import {
   PROJECT_COMPOSE_FILENAME,
@@ -139,7 +140,7 @@ test("session start creates an env-scoped workspace with injected env", async ()
   const projectRoot = await createProject();
   const startCommand = findSubcommand("start");
 
-  const exitCode = await startCommand.handler({
+  const input = {
     ctx: {
       cwd: projectRoot,
       cli: CLI_SPEC,
@@ -168,7 +169,9 @@ test("session start creates an env-scoped workspace with injected env", async ()
         positionals: ["session-env-test"],
       },
     },
-  });
+  } as unknown as Parameters<typeof startCommand.handler>[0];
+
+  const exitCode = await startCommand.handler(input);
 
   expect(exitCode).toBe(0);
   expect(createSessionCalls).toHaveLength(1);
@@ -197,7 +200,7 @@ test("session exec injects the selected env into the workspace command", async (
     },
   ];
 
-  const exitCode = await execCommand.handler({
+  const input = {
     ctx: {
       cwd: projectRoot,
       cli: CLI_SPEC,
@@ -223,7 +226,9 @@ test("session exec injects the selected env into the workspace command", async (
         positionals: ["session-env-test.env-qa.svc-api", "bun db:migrate"],
       },
     },
-  });
+  } as unknown as Parameters<typeof execCommand.handler>[0];
+
+  const exitCode = await execCommand.handler(input);
 
   expect(exitCode).toBe(0);
   expect(execInSessionCalls).toHaveLength(1);
@@ -238,14 +243,27 @@ test("session exec injects the selected env into the workspace command", async (
   });
 });
 
-function findSubcommand(name: string) {
+type SessionSubcommandName =
+  (typeof sessionCommand.subcommands)[number]["name"];
+type SessionSubcommand<N extends SessionSubcommandName> = Extract<
+  (typeof sessionCommand.subcommands)[number],
+  { readonly name: N }
+>;
+
+function findSubcommand<N extends SessionSubcommandName>(
+  name: N
+): SessionSubcommand<N> & {
+  readonly handler: CommandHandlerFor<SessionSubcommand<N>>;
+} {
   const command = sessionCommand.subcommands.find(
     (entry) => entry.name === name
   );
   if (!(command && "handler" in command)) {
     throw new Error(`Missing session subcommand: ${name}`);
   }
-  return command;
+  return command as SessionSubcommand<N> & {
+    readonly handler: CommandHandlerFor<SessionSubcommand<N>>;
+  };
 }
 
 async function createProject(): Promise<string> {

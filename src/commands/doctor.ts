@@ -81,6 +81,7 @@ import {
 import {
   buildDoctorRecoveryGuidance,
   buildRecoveryWorkflowLines,
+  type RecoveryCheckResult,
 } from "./recovery-guidance.ts";
 
 type CheckStatus = "ok" | "warn" | "error";

@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
+import type { CommandHandlerFor } from "../src/cli/command.ts";
 import { CLI_SPEC } from "../src/cli/spec.ts";
 import {
   PROJECT_COMPOSE_FILENAME,
@@ -54,7 +55,7 @@ test("env exec injects merged overlay env into one-off host commands", async () 
   const projectRoot = await createProject();
   const execCommand = findSubcommand("exec");
 
-  const exitCode = await execCommand.handler({
+  const input = {
     ctx: {
       cwd: projectRoot,
       cli: CLI_SPEC,
@@ -83,7 +84,9 @@ test("env exec injects merged overlay env into one-off host commands", async () 
         positionals: ["bun", "db:migrate"],
       },
     },
-  });
+  } as unknown as Parameters<typeof execCommand.handler>[0];
+
+  const exitCode = await execCommand.handler(input);
 
   expect(exitCode).toBe(0);
   expect(runCalls).toHaveLength(1);
@@ -103,7 +106,7 @@ test("env shell opens the current shell with injected project env", async () => 
   process.env.SHELL = "/bin/zsh";
   const shellCommand = findSubcommand("shell");
 
-  const exitCode = await shellCommand.handler({
+  const input = {
     ctx: {
       cwd: projectRoot,
       cli: CLI_SPEC,
@@ -121,7 +124,9 @@ test("env shell opens the current shell with injected project env", async () => 
         positionals: [],
       },
     },
-  });
+  } as unknown as Parameters<typeof shellCommand.handler>[0];
+
+  const exitCode = await shellCommand.handler(input);
 
   expect(exitCode).toBe(0);
   expect(runCalls).toHaveLength(1);
@@ -135,12 +140,24 @@ test("env shell opens the current shell with injected project env", async () => 
   });
 });
 
-function findSubcommand(name: string) {
+type EnvSubcommandName = (typeof envCommand.subcommands)[number]["name"];
+type EnvSubcommand<N extends EnvSubcommandName> = Extract<
+  (typeof envCommand.subcommands)[number],
+  { readonly name: N }
+>;
+
+function findSubcommand<N extends EnvSubcommandName>(
+  name: N
+): EnvSubcommand<N> & {
+  readonly handler: CommandHandlerFor<EnvSubcommand<N>>;
+} {
   const command = envCommand.subcommands.find((entry) => entry.name === name);
   if (!(command && "handler" in command)) {
     throw new Error(`Missing env subcommand: ${name}`);
   }
-  return command;
+  return command as EnvSubcommand<N> & {
+    readonly handler: CommandHandlerFor<EnvSubcommand<N>>;
+  };
 }
 
 async function createProject(): Promise<string> {

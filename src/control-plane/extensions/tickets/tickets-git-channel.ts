@@ -12,6 +12,7 @@ const DEFAULT_MUTATION_LOCK_HEARTBEAT_MS = 1000;
 const DEFAULT_MUTATION_LOCK_RETRY_MS = 100;
 const DEFAULT_MUTATION_LOCK_STALE_MS = 30_000;
 const DEFAULT_MUTATION_LOCK_TIMEOUT_MS = 30_000;
+const MAX_PUSH_ATTEMPTS = 3;
 
 export type TicketsGitChannel = {
   readonly ensureCheckedOut: () => Promise<string>;
@@ -973,50 +974,54 @@ export function createGitTicketsChannel(opts: {
       return { ok: true, didPush: false };
     }
 
-    const push = await pushCurrentBranch({
-      pushRef: input.pushRef,
-      attempt: 1,
-    });
-    if (push.ok) {
-      return push;
-    }
-    if (push.hiddenRefRejected) {
-      return push;
-    }
-
-    opts.logger.warn({
-      message: `git push failed, retrying after fetch: ${push.error.replace("git push failed: ", "")}`,
-    });
-
-    const checkedOut = await checkoutHead({ remoteUrl: input.remoteUrl });
-    if (!checkedOut.ok) {
-      return checkedOut;
-    }
-
-    if (input.replayPendingEvents) {
-      const replayed = await input.replayPendingEvents();
-      if (!replayed.ok) {
-        return replayed;
-      }
-    } else {
-      const rewrote = await rewritePendingEventsAfterCheckout({
-        pendingEvents: input.pendingEvents,
+    let nextPushRef = input.pushRef;
+    for (let attempt = 1; attempt <= MAX_PUSH_ATTEMPTS; attempt += 1) {
+      const push = await pushCurrentBranch({
+        pushRef: nextPushRef,
+        attempt,
       });
-      if (!rewrote.ok) {
-        return rewrote;
+      if (push.ok) {
+        return push;
       }
+      if (push.hiddenRefRejected || attempt === MAX_PUSH_ATTEMPTS) {
+        return push;
+      }
+
+      opts.logger.warn({
+        message: `git push failed, retrying after fetch: ${push.error.replace("git push failed: ", "")}`,
+      });
+
+      const checkedOut = await checkoutHead({ remoteUrl: input.remoteUrl });
+      if (!checkedOut.ok) {
+        return checkedOut;
+      }
+
+      if (input.replayPendingEvents) {
+        const replayed = await input.replayPendingEvents();
+        if (!replayed.ok) {
+          return replayed;
+        }
+      } else {
+        const rewrote = await rewritePendingEventsAfterCheckout({
+          pendingEvents: input.pendingEvents,
+        });
+        if (!rewrote.ok) {
+          return rewrote;
+        }
+      }
+
+      const committed = await commitAll("tickets: retry");
+      if (!committed.ok) {
+        return committed;
+      }
+
+      nextPushRef = checkedOut.pushRef;
     }
 
-    const committed = await commitAll("tickets: retry");
-    if (!committed.ok) {
-      return committed;
-    }
-
-    const retry = await pushCurrentBranch({
-      pushRef: checkedOut.pushRef,
-      attempt: 2,
-    });
-    return retry;
+    return {
+      ok: false,
+      error: "git push failed after exhausting retry attempts",
+    };
   };
 
   const listTrackedPaths = async (): Promise<

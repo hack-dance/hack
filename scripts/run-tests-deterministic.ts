@@ -6,6 +6,7 @@ const isolatedTestPaths = [
   "tests/daemon-sessions.test.ts",
   "tests/daemon-env.test.ts",
   "tests/runtime-backend.test.ts",
+  "tests/runtime-projects.test.ts",
   "tests/projects-registry.test.ts",
   "tests/project-run-command.test.ts",
   "tests/cli-offline-optionality-matrix.test.ts",
@@ -72,6 +73,9 @@ function testLabel(opts: { readonly testPath: string }): string {
   }
   if (opts.testPath === "tests/runtime-backend.test.ts") {
     return "runtime backend";
+  }
+  if (opts.testPath === "tests/runtime-projects.test.ts") {
+    return "runtime projects";
   }
   if (opts.testPath === "tests/projects-registry.test.ts") {
     return "projects registry";

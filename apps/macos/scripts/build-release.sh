@@ -82,13 +82,15 @@ xcodebuild archive \
   CODE_SIGN_STYLE=Manual \
   CODE_SIGN_IDENTITY="Developer ID Application" \
   DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+  OTHER_CODE_SIGN_FLAGS="--timestamp" \
   | xcbeautify 2>/dev/null || xcodebuild archive \
     -scheme "$SCHEME" \
     -configuration Release \
     -archivePath "$BUILD_DIR/HackDesktop.xcarchive" \
     CODE_SIGN_STYLE=Manual \
     CODE_SIGN_IDENTITY="Developer ID Application" \
-    DEVELOPMENT_TEAM="$APPLE_TEAM_ID"
+    DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+    OTHER_CODE_SIGN_FLAGS="--timestamp"
 
 success "Archive created"
 

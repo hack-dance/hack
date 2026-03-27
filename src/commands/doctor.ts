@@ -71,7 +71,6 @@ import {
 import { display } from "../ui/display.ts";
 import { getFzfPath } from "../ui/fzf.ts";
 import { getGumPath } from "../ui/gum.ts";
-import { isColorEnabled } from "../ui/terminal.ts";
 import {
   analyzeComposeNetworkHygiene,
   dnsmasqConfigHasDomain,
@@ -132,11 +131,78 @@ const doctorSpec = defineCommand({
   subcommands: [],
 } as const);
 
+const DOCTOR_SUMMARY_GROUPS = [
+  {
+    title: "Dependencies",
+    checks: new Set([
+      "bun",
+      "docker",
+      "docker compose",
+      "brew (optional)",
+      "dnsmasq (optional)",
+      "mkcert (optional)",
+      "gum (optional)",
+      "fzf (optional)",
+      "tmux (sessions)",
+      "zellij (sessions)",
+      "mutagen",
+      "go (optional)",
+      "caddy (optional)",
+      "asdf (optional)",
+    ]),
+  },
+  {
+    title: "Runtime",
+    checks: new Set([
+      "docker daemon",
+      `network:${DEFAULT_INGRESS_NETWORK}`,
+      `network:${DEFAULT_LOGGING_NETWORK}`,
+      `network:${DEFAULT_INGRESS_NETWORK} subnet`,
+      "global files",
+      "daemon",
+      "gateway config",
+      "gateway tokens",
+      "grafana",
+      "proxy ports",
+      "caddy local ca",
+    ]),
+  },
+  {
+    title: "Resolver & DNS",
+    checks: new Set([
+      `resolver:${DEFAULT_PROJECT_TLD}`,
+      `resolver:${DEFAULT_OAUTH_ALIAS_ROOT}`,
+      `dnsmasq.conf:${DEFAULT_PROJECT_TLD}`,
+      `dnsmasq.conf:${DEFAULT_OAUTH_ALIAS_ROOT}`,
+      "dnsmasq:53",
+      `dns:${DEFAULT_PROJECT_TLD}`,
+      `dns:${DEFAULT_OAUTH_ALIAS_ROOT}`,
+      "coredns forwarding",
+      "caddy hosts",
+      "DEV_HOST",
+    ]),
+  },
+  {
+    title: "Project & env",
+    checks: new Set([
+      "project",
+      "compose networks",
+      "env mode",
+      "env overlay warnings",
+    ]),
+  },
+  {
+    title: "Sessions & tickets",
+    checks: new Set(["sessions mux", "tickets git"]),
+  },
+] as const;
+
 const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   args,
 }): Promise<number> => {
   const results: TimedCheckResult[] = [];
   const s = spinner();
+  s.start("Running doctor checks...");
 
   // Tools
   results.push(
@@ -411,6 +477,8 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     });
   }
 
+  s.stop(`Doctor checks complete (${results.length} checks)`);
+  await renderDoctorSummary(results);
   emitSlowChecksNote(results);
   renderMacNote();
   if (!args.options.fix) {
@@ -2514,38 +2582,124 @@ async function renderRecoveryGuidance(
   });
 }
 
-function formatTimedResult(opts: {
-  readonly result: CheckResult;
-  readonly durationMs: number;
-}): string {
-  const enableColor = isColorEnabled();
+export function buildDoctorSummaryLines(input: {
+  readonly results: readonly RecoveryCheckResult[];
+}): readonly string[] {
+  const lines: string[] = [];
 
-  const RESET = "\x1b[0m";
-  const BOLD = "\x1b[1m";
-  const DIM = "\x1b[2m";
-  const GREEN = "\x1b[32m";
-  const YELLOW = "\x1b[33m";
-  const RED = "\x1b[31m";
+  for (const group of DOCTOR_SUMMARY_GROUPS) {
+    const members = input.results.filter((result) =>
+      group.checks.has(result.name)
+    );
+    if (members.length === 0) {
+      continue;
+    }
 
-  const color = (code: string, text: string) =>
-    enableColor ? `${code}${text}${RESET}` : text;
+    const issues = members.filter((result) => result.status !== "ok");
+    if (issues.length === 0) {
+      lines.push(`${group.title}: ok`);
+      continue;
+    }
 
-  let icon: string;
-  if (opts.result.status === "ok") {
-    icon = color(GREEN, "✓");
-  } else if (opts.result.status === "warn") {
-    icon = color(YELLOW, "!");
-  } else {
-    icon = color(RED, "✗");
+    const status = issues.some((result) => result.status === "error")
+      ? "error"
+      : "warn";
+    lines.push(
+      `${group.title}: ${status} - ${summarizeDoctorGroupIssues({
+        title: group.title,
+        issues,
+      })}`
+    );
   }
 
-  const name = enableColor
-    ? `${BOLD}${opts.result.name}${RESET}`
-    : opts.result.name;
-  const dur =
-    opts.durationMs >= 250 ? color(DIM, ` (${opts.durationMs}ms)`) : "";
+  const ungrouped = input.results.filter(
+    (result) =>
+      !DOCTOR_SUMMARY_GROUPS.some((group) => group.checks.has(result.name))
+  );
+  if (ungrouped.length > 0) {
+    const issues = ungrouped.filter((result) => result.status !== "ok");
+    lines.push(
+      issues.length === 0
+        ? "Other checks: ok"
+        : `Other checks: warn - ${summarizeDoctorIssues(issues)}`
+    );
+  }
 
-  return `${icon} ${name}: ${opts.result.message}${dur}`;
+  return lines;
+}
+
+async function renderDoctorSummary(
+  results: readonly TimedCheckResult[]
+): Promise<void> {
+  const summaryLines = buildDoctorSummaryLines({ results });
+  let tone: "error" | "warn" | "info" = "info";
+  if (results.some((result) => result.status === "error")) {
+    tone = "error";
+  } else if (results.some((result) => result.status === "warn")) {
+    tone = "warn";
+  }
+
+  await display.panel({
+    title: "Doctor summary",
+    tone,
+    lines: summaryLines,
+  });
+}
+
+function summarizeDoctorGroupIssues(input: {
+  readonly title: string;
+  readonly issues: readonly RecoveryCheckResult[];
+}): string {
+  if (input.title === "Dependencies") {
+    const optionalMissing = input.issues
+      .filter((result) => result.message === "Not found (optional)")
+      .map((result) => result.name.replace(" (optional)", ""));
+    const other = input.issues.filter(
+      (result) => result.message !== "Not found (optional)"
+    );
+
+    const parts: string[] = [];
+    if (optionalMissing.length > 0) {
+      parts.push(`optional missing: ${optionalMissing.join(", ")}`);
+    }
+    if (other.length > 0) {
+      parts.push(summarizeDoctorIssues(other));
+    }
+    return parts.join("; ");
+  }
+
+  return summarizeDoctorIssues(input.issues);
+}
+
+function summarizeDoctorIssues(issues: readonly RecoveryCheckResult[]): string {
+  const descriptions = issues.map((issue) => summarizeDoctorIssue(issue));
+  if (descriptions.length <= 2) {
+    return descriptions.join("; ");
+  }
+
+  return `${descriptions.slice(0, 2).join("; ")}; +${descriptions.length - 2} more`;
+}
+
+function summarizeDoctorIssue(issue: RecoveryCheckResult): string {
+  if (
+    issue.name === "env mode" &&
+    issue.message.includes("Legacy env format detected")
+  ) {
+    return "legacy env format detected";
+  }
+
+  if (
+    issue.name === "gateway tokens" &&
+    issue.message.includes("No active tokens")
+  ) {
+    return "no active gateway tokens";
+  }
+
+  if (issue.message === "Not found (optional)") {
+    return `${issue.name} missing`;
+  }
+
+  return `${issue.name}: ${issue.message}`;
 }
 
 function renderMacNote(): void {
@@ -2604,13 +2758,12 @@ async function canConnectTcp(opts: {
 // Keep macOS guidance at the end so it doesn't push other output off-screen.
 // (Called from the command handler.)
 async function runCheck(
-  s: ReturnType<typeof spinner>,
+  _s: ReturnType<typeof spinner>,
   name: string,
   fn: () => CheckResult | Promise<CheckResult>,
   opts?: { readonly timeoutMs?: number }
 ): Promise<TimedCheckResult> {
   const start = Date.now();
-  s.start(name);
   try {
     const res = opts?.timeoutMs
       ? await Promise.race([
@@ -2624,13 +2777,11 @@ async function runCheck(
         ])
       : await fn();
     const durationMs = Date.now() - start;
-    s.stop(formatTimedResult({ result: res, durationMs }));
     return { ...res, durationMs };
   } catch (err: unknown) {
     const durationMs = Date.now() - start;
     const message = err instanceof Error ? err.message : "Unknown error";
     const res: CheckResult = { name, status: "error", message };
-    s.stop(formatTimedResult({ result: res, durationMs }));
     return { ...res, durationMs };
   }
 }

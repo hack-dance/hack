@@ -3,7 +3,10 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { buildDoctorRemediationPlanLines } from "../src/commands/doctor.ts";
+import {
+  buildDoctorRemediationPlanLines,
+  buildDoctorSummaryLines,
+} from "../src/commands/doctor.ts";
 import {
   buildDoctorRecoveryGuidance,
   buildRecoveryNextSteps,
@@ -157,6 +160,32 @@ test("doctor guidance keeps unmatched failures as follow-up instead of guessing"
   const guidance = buildDoctorRecoveryGuidance({
     results: [
       {
+        name: "custom check",
+        status: "warn",
+        message: "Needs manual attention",
+      },
+    ],
+  });
+
+  expect(guidance.temporaryBreakage).toEqual([]);
+  expect(guidance.configurationRepair).toEqual([]);
+  expect(guidance.followUp).toEqual(["custom check: Needs manual attention"]);
+});
+
+test("doctor guidance ignores optional dependency noise and inactive gateway tokens", () => {
+  const guidance = buildDoctorRecoveryGuidance({
+    results: [
+      {
+        name: "caddy (optional)",
+        status: "warn",
+        message: "Not found (optional)",
+      },
+      {
+        name: "asdf (optional)",
+        status: "warn",
+        message: "Not found (optional)",
+      },
+      {
         name: "gateway tokens",
         status: "warn",
         message: "No active tokens (run: hack x gateway token-create)",
@@ -166,8 +195,41 @@ test("doctor guidance keeps unmatched failures as follow-up instead of guessing"
 
   expect(guidance.temporaryBreakage).toEqual([]);
   expect(guidance.configurationRepair).toEqual([]);
-  expect(guidance.followUp).toEqual([
-    "gateway tokens: No active tokens (run: hack x gateway token-create)",
+  expect(guidance.followUp).toEqual([]);
+});
+
+test("doctor summary groups detailed checks into concise sections", () => {
+  const lines = buildDoctorSummaryLines({
+    results: [
+      { name: "bun", status: "ok", message: "/usr/local/bin/bun" },
+      {
+        name: "caddy (optional)",
+        status: "warn",
+        message: "Not found (optional)",
+      },
+      { name: "docker daemon", status: "ok", message: "Docker is running" },
+      { name: "gateway tokens", status: "warn", message: "No active tokens" },
+      { name: "dns:hack", status: "ok", message: "logs.hack -> 127.0.0.1" },
+      {
+        name: "env mode",
+        status: "warn",
+        message:
+          "Legacy env format detected (.hack/hack.env.json). Run `hack doctor --migrate-env-config` to upgrade.",
+      },
+      {
+        name: "tickets git",
+        status: "ok",
+        message: "Healthy (refs/hack/tickets)",
+      },
+    ],
+  });
+
+  expect(lines).toEqual([
+    "Dependencies: warn - optional missing: caddy",
+    "Runtime: warn - no active gateway tokens",
+    "Resolver & DNS: ok",
+    "Project & env: warn - legacy env format detected",
+    "Sessions & tickets: ok",
   ]);
 });
 

@@ -339,6 +339,131 @@ test("resolveLegacyImportFetchResult ignores missing legacy refs", () => {
   });
 });
 
+test("repair reapplies cleanup after a non-fast-forward push retry", async () => {
+  const projectRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-git-repair-",
+  });
+  const remoteRoot = await mkdtemp(join(tmpdir(), "hack-cli-tickets-remote-"));
+  tempRoots.push(remoteRoot);
+  await run({ cwd: remoteRoot, cmd: ["git", "init", "--bare"] });
+  await run({
+    cwd: projectRoot,
+    cmd: ["git", "remote", "add", "origin", remoteRoot],
+  });
+
+  const remoteClone = await createTempGitProject({
+    prefix: "hack-cli-tickets-remote-clone-",
+  });
+  await run({
+    cwd: remoteClone,
+    cmd: ["git", "remote", "add", "origin", remoteRoot],
+  });
+
+  const channelWriter = __testOnly.createGitTicketsChannel({
+    projectRoot,
+    config: {
+      enabled: true,
+      branch: "hack/tickets",
+      refMode: "hidden",
+      remote: "origin",
+      forceBareClone: false,
+    },
+    logger: {
+      info: (_input: { message: string }) => {},
+      warn: (_input: { message: string }) => {},
+    },
+  });
+  const remoteWriter = __testOnly.createGitTicketsChannel({
+    projectRoot: remoteClone,
+    config: {
+      enabled: true,
+      branch: "hack/tickets",
+      refMode: "hidden",
+      remote: "origin",
+      forceBareClone: false,
+    },
+    logger: {
+      info: (_input: { message: string }) => {},
+      warn: (_input: { message: string }) => {},
+    },
+  });
+
+  const appendResult = await channelWriter.appendEvents({
+    events: [
+      createTicketEvent({
+        eventId: "event-1",
+        ticketId: "T-AAAAAAA111",
+        ts: 1,
+      }),
+    ],
+  });
+  expect(appendResult).toEqual({ ok: true });
+
+  const worktree = await channelWriter.ensureCheckedOut();
+  await writeFile(resolve(worktree, ".hack/notes.txt"), "legacy noise\n");
+
+  let remoteAdvanced = false;
+  const repairingChannel = __testOnly.createGitTicketsChannel({
+    projectRoot,
+    config: {
+      enabled: true,
+      branch: "hack/tickets",
+      refMode: "hidden",
+      remote: "origin",
+      forceBareClone: false,
+    },
+    logger: {
+      info: (_input: { message: string }) => {},
+      warn: (_input: { message: string }) => {},
+    },
+    testOverrides: {
+      beforePushAttempt: async ({ attempt }) => {
+        if (attempt !== 1 || remoteAdvanced) {
+          return;
+        }
+        remoteAdvanced = true;
+        const result = await remoteWriter.appendEvents({
+          events: [
+            createTicketEvent({
+              eventId: "event-2",
+              ticketId: "T-BBBBBBB222",
+              ts: 2,
+            }),
+          ],
+        });
+        expect(result).toEqual({ ok: true });
+      },
+    },
+  });
+
+  const repaired = await repairingChannel.repair({
+    pruneLegacyRef: false,
+  });
+  expect(repaired).toMatchObject({
+    ok: true,
+    didPush: true,
+  });
+
+  const listed = await runCapture({
+    cwd: remoteRoot,
+    cmd: ["git", "ls-tree", "-r", "--name-only", "refs/hack/tickets"],
+  });
+  expect(listed.stdout).toContain(".hack/tickets/README.md");
+  expect(listed.stdout).toContain(".hack/tickets/events/events-1970-01.jsonl");
+  expect(listed.stdout).not.toContain(".hack/notes.txt");
+
+  const eventsText = await runCapture({
+    cwd: remoteRoot,
+    cmd: [
+      "git",
+      "show",
+      "refs/hack/tickets:.hack/tickets/events/events-1970-01.jsonl",
+    ],
+  });
+  expect(eventsText.stdout).toContain('"eventId":"event-1"');
+  expect(eventsText.stdout).toContain('"eventId":"event-2"');
+});
+
 async function createTempGitProject(input: {
   readonly prefix: string;
 }): Promise<string> {
@@ -363,6 +488,22 @@ async function run(input: {
   readonly cwd: string;
   readonly cmd: readonly string[];
 }) {
+  const { exitCode, stderr, stdout } = await runCapture(input);
+  if (exitCode !== 0) {
+    throw new Error(
+      `Command failed (${exitCode}): ${input.cmd.join(" ")}\n${stderr || stdout}`
+    );
+  }
+}
+
+async function runCapture(input: {
+  readonly cwd: string;
+  readonly cmd: readonly string[];
+}): Promise<{
+  readonly exitCode: number;
+  readonly stdout: string;
+  readonly stderr: string;
+}> {
   const proc = Bun.spawn([...input.cmd], {
     cwd: input.cwd,
     env: process.env,
@@ -374,12 +515,29 @@ async function run(input: {
   const stdout = await new Response(proc.stdout).text();
   const stderr = await new Response(proc.stderr).text();
   const exitCode = await proc.exited;
+  return { exitCode, stdout, stderr };
+}
 
-  if (exitCode !== 0) {
-    throw new Error(
-      `Command failed (${exitCode}): ${input.cmd.join(" ")}\n${stderr || stdout}`
-    );
-  }
+function createTicketEvent(input: {
+  readonly eventId: string;
+  readonly ticketId: string;
+  readonly ts: number;
+}): Record<string, unknown> {
+  const iso = new Date(input.ts * 1000).toISOString();
+  return {
+    actor: "tests@hack",
+    eventId: input.eventId,
+    idempotencyKey: input.eventId,
+    occurredAt: iso,
+    payload: { title: input.eventId },
+    recordedAt: iso,
+    schemaVersion: 1,
+    sourceOperation: "test",
+    sourceSystem: "hack",
+    ticketId: input.ticketId,
+    ts: input.ts,
+    type: "ticket.created",
+  };
 }
 
 async function copyDir(input: {

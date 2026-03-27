@@ -21,9 +21,11 @@ import { upsertDotEnvValue } from "../src/lib/hack-env.ts";
 import { readProjectDefaultEnvConfig } from "../src/lib/project.ts";
 import {
   assertValidProjectEnvScopeName,
+  inspectLegacyComposeEnvFileReferences,
   materializeProjectEnv,
   migrateLegacyProjectEnv,
   parseProjectEnvTarget,
+  repairLegacyComposeEnvFileReferences,
   resolveProjectEnvConfig,
   setProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
@@ -337,4 +339,87 @@ test("migrateLegacyProjectEnv converts legacy base and overlay values into new c
     defaultOverlay: "qa",
   });
   expect(config.controlPlane).toBeUndefined();
+});
+
+test("migrateLegacyProjectEnv blocks cleanup for compose-referenced legacy env files and can repair compose", async () => {
+  const repo = await createRepo();
+  await writeFile(
+    repo.composeFile,
+    [
+      "services:",
+      "  db-ops:",
+      "    image: alpine:3.20",
+      "    env_file:",
+      "      - .env",
+      "      - ../.env.docker",
+      "      - path: .env.production",
+      "",
+    ].join("\n")
+  );
+  await writeFile(
+    resolve(repo.projectDir, PROJECT_ENV_CONTRACT_FILENAME),
+    `${JSON.stringify(
+      {
+        version: 1,
+        vars: [{ key: "API_BASE_URL", source: "plain_env" }],
+      },
+      null,
+      2
+    )}\n`
+  );
+  await upsertDotEnvValue({
+    envFile: resolve(repo.projectDir, PROJECT_ENV_FILENAME),
+    key: "API_BASE_URL",
+    value: "https://base.example.com",
+  });
+  await upsertDotEnvValue({
+    envFile: resolve(repo.projectDir, ".env.production"),
+    key: "API_BASE_URL",
+    value: "https://prod.example.com",
+  });
+
+  const migrated = await migrateLegacyProjectEnv({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    projectName: "project-env-test",
+    serviceNames: ["db-ops"],
+    materialize: false,
+  });
+  expect(migrated.composeEnvFileReferences).toEqual([
+    {
+      service: "db-ops",
+      configuredPath: ".env",
+      resolvedPath: resolve(repo.projectDir, PROJECT_ENV_FILENAME),
+    },
+    {
+      service: "db-ops",
+      configuredPath: ".env.production",
+      resolvedPath: resolve(repo.projectDir, ".env.production"),
+    },
+  ]);
+  expect(migrated.cleanupCandidates).toEqual([
+    resolve(repo.projectDir, PROJECT_ENV_CONTRACT_FILENAME),
+  ]);
+  expect(migrated.blockedCleanupCandidates).toEqual([
+    resolve(repo.projectDir, PROJECT_ENV_FILENAME),
+    resolve(repo.projectDir, ".env.production"),
+  ]);
+
+  const inspected = await inspectLegacyComposeEnvFileReferences({
+    composeFile: repo.composeFile,
+    projectDir: repo.projectDir,
+  });
+  expect(inspected).toEqual(migrated.composeEnvFileReferences);
+
+  const repaired = await repairLegacyComposeEnvFileReferences({
+    composeFile: repo.composeFile,
+    projectDir: repo.projectDir,
+  });
+  expect(repaired.changed).toBe(true);
+  expect(repaired.removed).toEqual(migrated.composeEnvFileReferences);
+
+  const composeText = await readFile(repo.composeFile, "utf8");
+  expect(composeText).not.toContain("- .env\n");
+  expect(composeText).not.toContain("path: .env.production");
+  expect(composeText).toContain("- ../.env.docker");
 });

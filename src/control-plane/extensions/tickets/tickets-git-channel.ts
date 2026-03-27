@@ -100,6 +100,10 @@ export function createGitTicketsChannel(opts: {
     warn: (input: { message: string }) => void;
   };
   readonly testOverrides?: {
+    readonly beforePushAttempt?: (input: {
+      readonly attempt: number;
+      readonly pushRef: string;
+    }) => Promise<void>;
     readonly mutationLockHeartbeatMs?: number;
     readonly mutationLockRetryMs?: number;
     readonly mutationLockStaleMs?: number;
@@ -526,7 +530,14 @@ export function createGitTicketsChannel(opts: {
 
   const pushCurrentBranch = async (input: {
     readonly pushRef: string;
+    readonly attempt: number;
   }): Promise<PushAttemptResult> => {
+    if (opts.testOverrides?.beforePushAttempt) {
+      await opts.testOverrides.beforePushAttempt({
+        attempt: input.attempt,
+        pushRef: input.pushRef,
+      });
+    }
     const push = await runGitDir({
       args: ["push", "origin", `${localBranchRef}:${input.pushRef}`],
     });
@@ -962,7 +973,10 @@ export function createGitTicketsChannel(opts: {
       return { ok: true, didPush: false };
     }
 
-    const push = await pushCurrentBranch({ pushRef: input.pushRef });
+    const push = await pushCurrentBranch({
+      pushRef: input.pushRef,
+      attempt: 1,
+    });
     if (push.ok) {
       return push;
     }
@@ -998,7 +1012,10 @@ export function createGitTicketsChannel(opts: {
       return committed;
     }
 
-    const retry = await pushCurrentBranch({ pushRef: checkedOut.pushRef });
+    const retry = await pushCurrentBranch({
+      pushRef: checkedOut.pushRef,
+      attempt: 2,
+    });
     return retry;
   };
 
@@ -1175,6 +1192,9 @@ export function createGitTicketsChannel(opts: {
       const pushed = await pushWithRetry({
         remoteUrl: checkedOut.remoteUrl,
         pushRef: checkedOut.pushRef,
+        replayPendingEvents: async () => {
+          return await pruneWorktreeToTickets();
+        },
       });
       if (!pushed.ok) {
         return pushed;

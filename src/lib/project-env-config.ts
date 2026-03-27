@@ -5,9 +5,10 @@ import {
   randomBytes,
 } from "node:crypto";
 import { chmod, readdir, rm } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { YAML } from "bun";
 import {
+  PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
   PROJECT_ENV_CONFIG_DEFAULT_FILENAME,
   PROJECT_ENV_CONFIG_FILENAME_PREFIX,
@@ -57,6 +58,12 @@ export type ProjectEnvConfig = {
   readonly environment: string;
   readonly secretsprovider: typeof PROJECT_ENV_SECRETS_PROVIDER;
   readonly values: ProjectEnvValuesByScope;
+};
+
+export type LegacyComposeEnvFileReference = {
+  readonly service: string;
+  readonly configuredPath: string;
+  readonly resolvedPath: string;
 };
 
 export type ProjectEnvSelection = {
@@ -896,18 +903,8 @@ function deriveProjectEnvKey(opts: { readonly keyText: string }): Buffer {
 export async function discoverComposeServiceNames(opts: {
   readonly composeFile: string;
 }): Promise<readonly string[]> {
-  const text = await readTextFile(opts.composeFile);
-  if (!text) {
-    return [];
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = YAML.parse(text);
-  } catch {
-    return [];
-  }
-  if (!isRecord(parsed)) {
+  const parsed = await readComposeFile({ composeFile: opts.composeFile });
+  if (!parsed) {
     return [];
   }
   const services = getRecord(parsed, "services");
@@ -915,6 +912,256 @@ export async function discoverComposeServiceNames(opts: {
     return [];
   }
   return Object.keys(services).sort((left, right) => left.localeCompare(right));
+}
+
+export async function inspectLegacyComposeEnvFileReferences(opts: {
+  readonly composeFile: string;
+  readonly projectDir: string;
+}): Promise<readonly LegacyComposeEnvFileReference[]> {
+  const parsed = await readComposeFile({ composeFile: opts.composeFile });
+  if (!parsed) {
+    return [];
+  }
+
+  const services = getRecord(parsed, "services");
+  if (!services) {
+    return [];
+  }
+
+  const composeDir = dirname(opts.composeFile);
+  const references: LegacyComposeEnvFileReference[] = [];
+  for (const [service, rawService] of Object.entries(services)) {
+    if (!isRecord(rawService)) {
+      continue;
+    }
+    for (const configuredPath of readComposeEnvFilePaths({
+      rawService,
+    })) {
+      const resolvedPath = resolve(composeDir, configuredPath);
+      if (
+        isLegacyProjectEnvFilePath({
+          projectDir: opts.projectDir,
+          candidatePath: resolvedPath,
+        })
+      ) {
+        references.push({
+          service,
+          configuredPath,
+          resolvedPath,
+        });
+      }
+    }
+  }
+
+  return references.sort((left, right) => {
+    const byService = left.service.localeCompare(right.service);
+    if (byService !== 0) {
+      return byService;
+    }
+    return left.configuredPath.localeCompare(right.configuredPath);
+  });
+}
+
+export async function repairLegacyComposeEnvFileReferences(opts: {
+  readonly composeFile: string;
+  readonly projectDir: string;
+}): Promise<{
+  readonly changed: boolean;
+  readonly removed: readonly LegacyComposeEnvFileReference[];
+}> {
+  const text = await readTextFile(opts.composeFile);
+  if (!text) {
+    return { changed: false, removed: [] };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = YAML.parse(text);
+  } catch {
+    return { changed: false, removed: [] };
+  }
+  if (!isRecord(parsed)) {
+    return { changed: false, removed: [] };
+  }
+
+  const services = getRecord(parsed, "services");
+  if (!services) {
+    return { changed: false, removed: [] };
+  }
+
+  const composeDir = dirname(opts.composeFile);
+  const removed: LegacyComposeEnvFileReference[] = [];
+  for (const [service, rawService] of Object.entries(services)) {
+    if (!(isRecord(rawService) && "env_file" in rawService)) {
+      continue;
+    }
+
+    const nextEnvFile = removeLegacyComposeEnvFileEntries({
+      service,
+      rawEnvFile: rawService.env_file,
+      composeDir,
+      projectDir: opts.projectDir,
+      removed,
+    });
+    if (nextEnvFile === undefined) {
+      rawService.env_file = undefined;
+      continue;
+    }
+    rawService.env_file = nextEnvFile;
+  }
+
+  if (removed.length === 0) {
+    return { changed: false, removed: [] };
+  }
+
+  const nextYaml = YAML.stringify(parsed, null, 2);
+  const nextText = nextYaml.endsWith("\n") ? nextYaml : `${nextYaml}\n`;
+  const result = await writeTextFileIfChanged(opts.composeFile, nextText);
+  return {
+    changed: result.changed,
+    removed: removed.sort((left, right) => {
+      const byService = left.service.localeCompare(right.service);
+      if (byService !== 0) {
+        return byService;
+      }
+      return left.configuredPath.localeCompare(right.configuredPath);
+    }),
+  };
+}
+
+async function readComposeFile(opts: {
+  readonly composeFile: string;
+}): Promise<Record<string, unknown> | null> {
+  const text = await readTextFile(opts.composeFile);
+  if (!text) {
+    return null;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = YAML.parse(text);
+  } catch {
+    return null;
+  }
+
+  return isRecord(parsed) ? parsed : null;
+}
+
+function readComposeEnvFilePaths(opts: {
+  readonly rawService: Record<string, unknown>;
+}): string[] {
+  const rawEnvFile = opts.rawService.env_file;
+  if (typeof rawEnvFile === "string") {
+    return [rawEnvFile];
+  }
+  if (!Array.isArray(rawEnvFile)) {
+    return [];
+  }
+
+  const paths: string[] = [];
+  for (const entry of rawEnvFile) {
+    if (typeof entry === "string") {
+      paths.push(entry);
+      continue;
+    }
+    if (isRecord(entry)) {
+      const pathValue = getString(entry, "path");
+      if (pathValue) {
+        paths.push(pathValue);
+      }
+    }
+  }
+  return paths;
+}
+
+function isLegacyProjectEnvFilePath(opts: {
+  readonly projectDir: string;
+  readonly candidatePath: string;
+}): boolean {
+  const normalizedProjectDir = resolve(opts.projectDir);
+  const normalizedCandidatePath = resolve(opts.candidatePath);
+  if (dirname(normalizedCandidatePath) !== normalizedProjectDir) {
+    return false;
+  }
+
+  const name = basename(normalizedCandidatePath);
+  return (
+    name === PROJECT_ENV_FILENAME || name.startsWith(`${PROJECT_ENV_FILENAME}.`)
+  );
+}
+
+function removeLegacyComposeEnvFileEntries(opts: {
+  readonly service: string;
+  readonly rawEnvFile: unknown;
+  readonly composeDir: string;
+  readonly projectDir: string;
+  readonly removed: LegacyComposeEnvFileReference[];
+}): unknown {
+  if (typeof opts.rawEnvFile === "string") {
+    const resolvedPath = resolve(opts.composeDir, opts.rawEnvFile);
+    if (
+      isLegacyProjectEnvFilePath({
+        projectDir: opts.projectDir,
+        candidatePath: resolvedPath,
+      })
+    ) {
+      opts.removed.push({
+        service: opts.service,
+        configuredPath: opts.rawEnvFile,
+        resolvedPath,
+      });
+      return undefined;
+    }
+    return opts.rawEnvFile;
+  }
+
+  if (!Array.isArray(opts.rawEnvFile)) {
+    return opts.rawEnvFile;
+  }
+
+  const kept: unknown[] = [];
+  for (const entry of opts.rawEnvFile) {
+    if (typeof entry === "string") {
+      const resolvedPath = resolve(opts.composeDir, entry);
+      if (
+        isLegacyProjectEnvFilePath({
+          projectDir: opts.projectDir,
+          candidatePath: resolvedPath,
+        })
+      ) {
+        opts.removed.push({
+          service: opts.service,
+          configuredPath: entry,
+          resolvedPath,
+        });
+        continue;
+      }
+      kept.push(entry);
+      continue;
+    }
+    if (isRecord(entry)) {
+      const pathValue = getString(entry, "path");
+      if (pathValue) {
+        const resolvedPath = resolve(opts.composeDir, pathValue);
+        if (
+          isLegacyProjectEnvFilePath({
+            projectDir: opts.projectDir,
+            candidatePath: resolvedPath,
+          })
+        ) {
+          opts.removed.push({
+            service: opts.service,
+            configuredPath: pathValue,
+            resolvedPath,
+          });
+          continue;
+        }
+      }
+    }
+    kept.push(entry);
+  }
+
+  return kept.length > 0 ? kept : undefined;
 }
 
 export async function migrateLegacyProjectEnv(opts: {
@@ -929,6 +1176,8 @@ export async function migrateLegacyProjectEnv(opts: {
   readonly legacyDetected: boolean;
   readonly updatedProjectConfig: boolean;
   readonly cleanupCandidates: readonly string[];
+  readonly blockedCleanupCandidates: readonly string[];
+  readonly composeEnvFileReferences: readonly LegacyComposeEnvFileReference[];
 }> {
   const contract = await readHackEnvContract({ projectDir: opts.projectDir });
   if (!contract.exists) {
@@ -938,6 +1187,8 @@ export async function migrateLegacyProjectEnv(opts: {
       legacyDetected: false,
       updatedProjectConfig: false,
       cleanupCandidates: [],
+      blockedCleanupCandidates: [],
+      composeEnvFileReferences: [],
     };
   }
 
@@ -1028,12 +1279,17 @@ export async function migrateLegacyProjectEnv(opts: {
     projectRoot: opts.projectRoot,
     projectDir: opts.projectDir,
   });
+  const composeEnvFileReferences = await inspectLegacyComposeEnvFileReferences({
+    composeFile: resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME),
+    projectDir: opts.projectDir,
+  });
   const cleanupCandidates = await collectLegacyProjectEnvCleanupCandidates({
     projectRoot: opts.projectRoot,
     projectDir: opts.projectDir,
     overlayNames,
     materialize: opts.materialize,
     configCleanupCandidates: configCleanup.cleanupCandidates,
+    composeEnvFileReferences,
   });
 
   return {
@@ -1041,7 +1297,9 @@ export async function migrateLegacyProjectEnv(opts: {
     migratedOverlays: overlayNames,
     legacyDetected: true,
     updatedProjectConfig: configCleanup.changed,
-    cleanupCandidates,
+    cleanupCandidates: cleanupCandidates.allowed,
+    blockedCleanupCandidates: cleanupCandidates.blocked,
+    composeEnvFileReferences,
   };
 }
 
@@ -1159,7 +1417,11 @@ async function collectLegacyProjectEnvCleanupCandidates(opts: {
   readonly overlayNames: readonly string[];
   readonly materialize: boolean;
   readonly configCleanupCandidates: readonly string[];
-}): Promise<readonly string[]> {
+  readonly composeEnvFileReferences: readonly LegacyComposeEnvFileReference[];
+}): Promise<{
+  readonly allowed: readonly string[];
+  readonly blocked: readonly string[];
+}> {
   const candidates = new Set<string>();
   candidates.add(resolve(opts.projectDir, PROJECT_ENV_CONTRACT_FILENAME));
   if (!opts.materialize) {
@@ -1174,13 +1436,24 @@ async function collectLegacyProjectEnvCleanupCandidates(opts: {
     candidates.add(path);
   }
 
-  const existing: string[] = [];
+  const blockedPaths = new Set(
+    opts.composeEnvFileReferences.map((reference) => reference.resolvedPath)
+  );
+  const allowed: string[] = [];
+  const blocked: string[] = [];
   for (const path of candidates) {
     if (await pathExists(path)) {
-      existing.push(path);
+      if (blockedPaths.has(path)) {
+        blocked.push(path);
+      } else {
+        allowed.push(path);
+      }
     }
   }
-  return existing.sort((left, right) => left.localeCompare(right));
+  return {
+    allowed: allowed.sort((left, right) => left.localeCompare(right)),
+    blocked: blocked.sort((left, right) => left.localeCompare(right)),
+  };
 }
 
 async function migrateLegacyProjectConfig(opts: {

@@ -58,9 +58,11 @@ import {
 } from "../lib/project.ts";
 import {
   discoverComposeServiceNames,
+  type LegacyComposeEnvFileReference,
   migrateLegacyProjectEnv,
   projectEnvConfigExists,
   removeLegacyProjectEnvArtifacts,
+  repairLegacyComposeEnvFileReferences,
   resolveProjectEnvConfig,
 } from "../lib/project-env-config.ts";
 import { exec, findExecutableInPath, run } from "../lib/shell.ts";
@@ -1926,14 +1928,62 @@ async function maybeMigrateProjectEnvConfig(opts: {
   }
   note(migrationNotes.join("\n"), "doctor");
 
-  if (migrated.cleanupCandidates.length === 0) {
+  let blockedCleanupCandidates = [...migrated.blockedCleanupCandidates];
+  if (migrated.composeEnvFileReferences.length > 0) {
+    note(
+      buildComposeEnvRepairNote({
+        references: migrated.composeEnvFileReferences,
+      }),
+      "compose env repair"
+    );
+    const shouldRepairCompose = await confirmOrThrow({
+      message:
+        "Remove legacy .hack/.env* env_file references from compose now?",
+      initialValue: true,
+    });
+    if (shouldRepairCompose) {
+      const repaired = await repairLegacyComposeEnvFileReferences({
+        composeFile: project.composeFile,
+        projectDir: project.projectDir,
+      });
+      if (repaired.changed) {
+        note(
+          [
+            `Updated ${project.composeFile}.`,
+            ...repaired.removed.map(
+              (reference) =>
+                `- ${reference.service}: removed env_file ${reference.configuredPath}`
+            ),
+          ].join("\n"),
+          "compose env repair"
+        );
+        blockedCleanupCandidates = [];
+      } else {
+        note(
+          "No compose env_file updates were needed; legacy compatibility files remain blocked from cleanup.",
+          "compose env repair"
+        );
+      }
+    } else {
+      note(
+        "Leaving legacy .hack/.env* files in place because compose still references them.",
+        "compose env repair"
+      );
+    }
+  }
+
+  const cleanupCandidates = [
+    ...migrated.cleanupCandidates,
+    ...blockedCleanupCandidates,
+  ].sort((left, right) => left.localeCompare(right));
+  if (cleanupCandidates.length === 0) {
     return;
   }
 
   note(
     [
       "Legacy env artifacts still exist and can now be removed:",
-      ...migrated.cleanupCandidates.map((path) => `- ${path}`),
+      ...cleanupCandidates.map((path) => `- ${path}`),
     ].join("\n"),
     "env cleanup"
   );
@@ -1947,11 +1997,24 @@ async function maybeMigrateProjectEnvConfig(opts: {
   }
 
   const removed = await removeLegacyProjectEnvArtifacts({
-    paths: migrated.cleanupCandidates,
+    paths: cleanupCandidates,
   });
   if (removed.length > 0) {
     note(`Removed ${removed.join(", ")}`, "env cleanup");
   }
+}
+
+function buildComposeEnvRepairNote(opts: {
+  readonly references: readonly LegacyComposeEnvFileReference[];
+}): string {
+  return [
+    "Compose still references legacy Hack compatibility env files:",
+    ...opts.references.map(
+      (reference) =>
+        `- ${reference.service}: ${reference.configuredPath} (${reference.resolvedPath})`
+    ),
+    "Hack now injects env directly at runtime by default, so these env_file entries should usually be removed.",
+  ].join("\n");
 }
 
 export async function buildDoctorRemediationPlanLines(opts: {

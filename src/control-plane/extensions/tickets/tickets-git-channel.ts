@@ -832,7 +832,9 @@ export function createGitTicketsChannel(opts: {
     return { ok: true, imported: true };
   };
 
-  const ensureCheckedOut = async (): Promise<
+  const ensureCheckedOut = async (input?: {
+    readonly forceFreshCheckout?: boolean;
+  }): Promise<
     | {
         readonly ok: true;
         readonly remoteUrl: string | null;
@@ -849,7 +851,10 @@ export function createGitTicketsChannel(opts: {
       return refreshed;
     }
 
-    if (await hasPendingWorktreeChanges()) {
+    if (
+      !(input?.forceFreshCheckout === true) &&
+      (await hasPendingWorktreeChanges())
+    ) {
       const pushRef =
         refMode === "hidden" && legacyRemoteRef ? legacyRemoteRef : remoteRef;
       return { ok: true, remoteUrl, pushRef };
@@ -857,7 +862,8 @@ export function createGitTicketsChannel(opts: {
 
     const preferredTrackingRef = await resolvePreferredTrackingRef();
     if (
-      await hasAheadLocalBranchCommits({ trackingRef: preferredTrackingRef })
+      !(input?.forceFreshCheckout === true) &&
+      (await hasAheadLocalBranchCommits({ trackingRef: preferredTrackingRef }))
     ) {
       const pushRef =
         preferredTrackingRef === legacyTrackingRef && legacyRemoteRef
@@ -1189,7 +1195,9 @@ export function createGitTicketsChannel(opts: {
     readonly pruneLegacyRef: boolean;
   }): Promise<TicketsGitRepairResult> => {
     return await withMutationLock(async () => {
-      const checkedOut = await ensureCheckedOut();
+      const checkedOut = await ensureCheckedOut({
+        forceFreshCheckout: true,
+      });
       if (!checkedOut.ok) {
         return checkedOut;
       }

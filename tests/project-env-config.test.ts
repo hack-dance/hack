@@ -1,5 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -28,6 +35,7 @@ afterEach(async () => {
   }
   tempDirs.clear();
   process.env.HACK_SECRETS_FILE_KEY = undefined;
+  process.env.HACK_ENV_SECRET_KEY = undefined;
 });
 
 async function createRepo(): Promise<{
@@ -161,6 +169,33 @@ test("materializeProjectEnv writes selected service env without touching runtime
   );
   expect(envText).toContain("GLOBAL_FLAG=1");
   expect(envText).toContain("PORT=4000");
+});
+
+test("resolveProjectEnvConfig falls back to HACK_ENV_SECRET_KEY when the key file is missing", async () => {
+  const repo = await createRepo();
+
+  await setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    envName: null,
+    scope: "api",
+    key: "SERVICE_TOKEN",
+    value: "super-secret-token",
+    secret: true,
+  });
+
+  const keyPath = resolve(repo.projectRoot, PROJECT_ENV_KEY_FILENAME);
+  const keyText = (await readFile(keyPath, "utf8")).trim();
+  await unlink(keyPath);
+  process.env.HACK_ENV_SECRET_KEY = keyText;
+
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    serviceNames: ["api", "web"],
+  });
+
+  expect(resolved?.serviceEnv.api?.SERVICE_TOKEN).toBe("super-secret-token");
 });
 
 test("migrateLegacyProjectEnv converts legacy base and overlay values into new config files", async () => {

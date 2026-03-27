@@ -35,6 +35,7 @@ const PROJECT_ENV_SCOPE_PATTERN = /^[a-z0-9-]+$/;
 const PROJECT_ENV_SECRET_PREFIX = "v1" as const;
 const PROJECT_ENV_ALGORITHM = "aes-256-gcm";
 const PROJECT_ENV_IV_BYTES = 12;
+const PROJECT_ENV_SECRET_KEY_ENV = "HACK_ENV_SECRET_KEY";
 
 type ProjectEnvScalar = string | number | boolean;
 
@@ -737,17 +738,26 @@ async function resolveProjectEnvKey(opts: {
 }): Promise<string | null> {
   const keyPath = resolveProjectEnvKeyPath({ projectRoot: opts.projectRoot });
   const text = await readTextFile(keyPath);
+  const envFallback = process.env[PROJECT_ENV_SECRET_KEY_ENV]?.trim() ?? "";
   if (text === null) {
+    if (envFallback.length > 0) {
+      return envFallback;
+    }
     if (opts.required) {
       throw new Error(
-        `Missing ${keyPath}. Run "hack env add --secret ..." to generate it or restore the key file.`
+        `Missing ${keyPath}. Run "hack env add --secret ..." to generate it, restore the key file, or set ${PROJECT_ENV_SECRET_KEY_ENV}.`
       );
     }
     return null;
   }
   const trimmed = text.trim();
   if (trimmed.length === 0) {
-    throw new Error(`Project env key file is empty: ${keyPath}`);
+    if (envFallback.length > 0) {
+      return envFallback;
+    }
+    throw new Error(
+      `Project env key file is empty: ${keyPath}. Set ${PROJECT_ENV_SECRET_KEY_ENV} or restore the key file.`
+    );
   }
   return trimmed;
 }

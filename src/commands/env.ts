@@ -11,6 +11,7 @@ import {
 import { optEnv, optJson, optPath, optProject } from "../cli/options.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
+import { isRecord } from "../lib/guards.ts";
 import type {
   HackEnvStorageSummary,
   HackEnvValueState,
@@ -81,6 +82,8 @@ const optService = defineOption({
   valueHint: "<global|service>",
   description: "Target scope (global or a discovered service name)",
 } as const);
+
+const SECRET_MASK = "***";
 
 const listSpec = defineCommand({
   name: "list",
@@ -607,6 +610,9 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
       selectedScope === "global"
         ? modern.globalEnv
         : (modern.serviceEnv[selectedScope] ?? modern.globalEnv);
+    const materialized = await readMaterializedProjectEnv({
+      projectDir: project.projectDir,
+    });
     if (json) {
       process.stdout.write(
         `${JSON.stringify(
@@ -626,11 +632,17 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
             selected_scope: selectedScope,
             vars: Object.entries(envValues).map(([key, value]) => ({
               key,
-              value: showSecrets ? value : value,
+              value: maskModernEnvValue({
+                modern,
+                scope: selectedScope,
+                key,
+                value,
+                showSecrets,
+              }),
             })),
-            materialized: await readMaterializedProjectEnv({
-              projectDir: project.projectDir,
-            }),
+            ...(showSecrets
+              ? { materialized }
+              : { materialized_keys: Object.keys(materialized).sort() }),
           },
           null,
           2
@@ -658,7 +670,15 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
     });
     await display.section("Resolved env vars");
     for (const [key, value] of Object.entries(envValues)) {
-      process.stdout.write(`${key}\t${selectedScope}\t${value}\n`);
+      process.stdout.write(
+        `${key}\t${selectedScope}\t${maskModernEnvValue({
+          modern,
+          scope: selectedScope,
+          key,
+          value,
+          showSecrets,
+        })}\n`
+      );
     }
     return 0;
   }
@@ -687,6 +707,52 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
     showSecrets,
   });
 };
+
+function maskModernEnvValue(input: {
+  readonly modern: NonNullable<
+    Awaited<ReturnType<typeof loadModernProjectEnv>>
+  >;
+  readonly scope: string;
+  readonly key: string;
+  readonly value: string;
+  readonly showSecrets: boolean;
+}): string {
+  if (input.showSecrets) {
+    return input.value;
+  }
+  if (
+    isModernSecretAtScope({
+      modern: input.modern,
+      scope: input.scope,
+      key: input.key,
+    })
+  ) {
+    return SECRET_MASK;
+  }
+  return input.value;
+}
+
+function isModernSecretAtScope(input: {
+  readonly modern: NonNullable<
+    Awaited<ReturnType<typeof loadModernProjectEnv>>
+  >;
+  readonly scope: string;
+  readonly key: string;
+}): boolean {
+  const scopedValue =
+    input.scope === "global"
+      ? undefined
+      : input.modern.merged.values[input.scope]?.[input.key];
+  if (scopedValue !== undefined) {
+    return isModernSecretStoredValue(scopedValue);
+  }
+  const globalValue = input.modern.merged.values.global?.[input.key];
+  return globalValue !== undefined && isModernSecretStoredValue(globalValue);
+}
+
+function isModernSecretStoredValue(value: unknown): boolean {
+  return isRecord(value) && typeof value.secure === "string";
+}
 
 function serializeEnvStorageForJson(input: {
   readonly storage: HackEnvStorageSummary;

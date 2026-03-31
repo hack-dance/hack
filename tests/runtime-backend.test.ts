@@ -123,3 +123,30 @@ test("composeRuntimeBackend.run supports workdir and args", async () => {
     "dev",
   ]);
 });
+
+test("composeRuntimeBackend.run can skip dependency startup", async () => {
+  await composeRuntimeBackend.run({
+    composeFiles: ["docker-compose.yml"],
+    composeProject: "proj",
+    profiles: [],
+    service: "api",
+    noDeps: true,
+    cmdArgs: ["bun", "--version"],
+    cwd: "/tmp",
+  });
+
+  expect(runCalls[0]).toEqual([
+    "docker",
+    "compose",
+    "-p",
+    "proj",
+    "-f",
+    "docker-compose.yml",
+    "run",
+    "--rm",
+    "--no-deps",
+    "api",
+    "bun",
+    "--version",
+  ]);
+});

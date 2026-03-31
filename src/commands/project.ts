@@ -5298,11 +5298,17 @@ async function handleRun({
     envName,
   });
   const composeFilesWithEnv = [...composeFiles, ...envOverrides.composeFiles];
+  const stackIsRunning =
+    (await readProjectRuntimeStateEntry({
+      projectDir: project.projectDir,
+      composeProject: composeProjectName ?? baseProjectName,
+    })) !== null;
   return await composeRuntimeBackend.run({
     composeFiles: composeFilesWithEnv,
     composeProject: composeProjectName,
     profiles,
     service,
+    noDeps: stackIsRunning,
     workdir: workdir.length > 0 ? workdir : undefined,
     cmdArgs,
     cwd: dirname(project.composeFile),

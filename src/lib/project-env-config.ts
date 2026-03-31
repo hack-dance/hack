@@ -499,15 +499,20 @@ export async function resolveProjectEnvConfig(opts: {
     values: merged.values.global ?? {},
     keyText,
   });
-  const hostEnv = resolveProjectEnvScopeValues({
-    values: merged.values[PROJECT_ENV_HOST_SCOPE] ?? {},
-    keyText,
-  });
 
   const declaredScopes = Object.keys(merged.values).sort((left, right) =>
     left.localeCompare(right)
   );
   const knownServiceSet = new Set(opts.serviceNames);
+  const hostScopeConflictsWithService = knownServiceSet.has(
+    PROJECT_ENV_HOST_SCOPE
+  );
+  const hostEnv = hostScopeConflictsWithService
+    ? {}
+    : resolveProjectEnvScopeValues({
+        values: merged.values[PROJECT_ENV_HOST_SCOPE] ?? {},
+        keyText,
+      });
   const unknownScopes = declaredScopes
     .filter((scope) => scope !== "global")
     .filter((scope) => scope !== PROJECT_ENV_HOST_SCOPE)

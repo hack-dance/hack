@@ -14,6 +14,7 @@ const runCalls: Array<{
   readonly env: Record<string, string> | undefined;
   readonly noDeps: boolean | undefined;
 }> = [];
+const psJsonByComposeProject = new Map<string, string>();
 const warnCalls: string[] = [];
 const tempDirs = new Set<string>();
 
@@ -22,9 +23,9 @@ mock.module("../src/backends/runtime-backend.ts", () => ({
     name: "compose",
     up: async () => 0,
     down: async () => 0,
-    psJson: async () => ({
+    psJson: async (opts: { readonly composeFiles: readonly string[] }) => ({
       exitCode: 0,
-      stdout: "",
+      stdout: psJsonByComposeProject.get(opts.composeFiles[0] ?? "") ?? "",
       stderr: "",
     }),
     ps: async () => 0,
@@ -60,6 +61,7 @@ const { runCommand } = await import("../src/commands/project.ts");
 
 afterEach(async () => {
   runCalls.length = 0;
+  psJsonByComposeProject.clear();
   warnCalls.length = 0;
   for (const tempDir of tempDirs) {
     await rm(tempDir, { recursive: true, force: true });
@@ -190,7 +192,7 @@ test("run does not warn about sibling service scopes in modern env configs", asy
 
 test("run skips dependency startup when the local stack is already up", async () => {
   const projectRoot = await createProject({
-    runtimeComposeProject: "project-run-env-test",
+    runningServices: ["api"],
   });
 
   const input = {
@@ -224,10 +226,47 @@ test("run skips dependency startup when the local stack is already up", async ()
   expect(runCalls[0]?.noDeps).toBe(true);
 });
 
+test("run keeps dependency startup when cached runtime state is stale", async () => {
+  const projectRoot = await createProject({
+    runtimeComposeProject: "project-run-env-test",
+  });
+
+  const input = {
+    ctx: {
+      cwd: projectRoot,
+      cli: CLI_SPEC,
+    },
+    args: {
+      options: {
+        path: projectRoot,
+        project: undefined,
+        env: undefined,
+        branch: undefined,
+        workdir: undefined,
+        profile: undefined,
+      },
+      positionals: {
+        service: "api",
+        cmd: ["printenv"],
+      },
+      raw: {
+        argv: ["--path", projectRoot, "api", "printenv"],
+        positionals: ["api", "printenv"],
+      },
+    },
+  } as unknown as Parameters<typeof runCommand.handler>[0];
+
+  const exitCode = await runCommand.handler(input);
+
+  expect(exitCode).toBe(0);
+  expect(runCalls[0]?.noDeps).toBe(false);
+});
+
 async function createProject(input?: {
   readonly services?: readonly string[];
   readonly defaultYaml?: string;
   readonly runtimeComposeProject?: string;
+  readonly runningServices?: readonly string[];
 }): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "hack-project-run-env-"));
   tempDirs.add(root);
@@ -244,6 +283,7 @@ async function createProject(input?: {
     resolve(projectDir, PROJECT_COMPOSE_FILENAME),
     `services:\n${composeServices}`
   );
+  const composeFile = resolve(projectDir, PROJECT_COMPOSE_FILENAME);
   await writeFile(
     resolve(projectDir, PROJECT_CONFIG_FILENAME),
     `${JSON.stringify(
@@ -274,6 +314,14 @@ async function createProject(input?: {
       )}\n`
     );
   }
+  const psLines =
+    input?.runningServices?.map((service) =>
+      JSON.stringify({
+        Service: service,
+        State: "running",
+      })
+    ) ?? [];
+  psJsonByComposeProject.set(composeFile, psLines.join("\n"));
   await writeFile(
     resolve(projectDir, "hack.env.default.yaml"),
     input?.defaultYaml ??

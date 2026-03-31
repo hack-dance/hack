@@ -5298,11 +5298,15 @@ async function handleRun({
     envName,
   });
   const composeFilesWithEnv = [...composeFiles, ...envOverrides.composeFiles];
-  const stackIsRunning =
-    (await readProjectRuntimeStateEntry({
-      projectDir: project.projectDir,
-      composeProject: composeProjectName ?? baseProjectName,
-    })) !== null;
+  const stackIsRunning = await resolveCanSkipRunDependencies({
+    composeFiles: composeFilesWithEnv,
+    composeProjectKey: composeProjectName ?? baseProjectName,
+    composeProject: composeProjectName,
+    project,
+    profiles,
+    requestedEnvName: envName,
+    service,
+  });
   return await composeRuntimeBackend.run({
     composeFiles: composeFilesWithEnv,
     composeProject: composeProjectName,
@@ -5313,6 +5317,45 @@ async function handleRun({
     cmdArgs,
     cwd: dirname(project.composeFile),
     env: envOverrides.env,
+  });
+}
+
+async function resolveCanSkipRunDependencies(opts: {
+  readonly composeFiles: readonly string[];
+  readonly composeProjectKey: string;
+  readonly composeProject: string | null;
+  readonly profiles: readonly string[];
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly requestedEnvName: string | null;
+  readonly service: string;
+}): Promise<boolean> {
+  const runtimeState = await readProjectRuntimeStateEntry({
+    projectDir: opts.project.projectDir,
+    composeProject: opts.composeProjectKey,
+  });
+  if (
+    opts.requestedEnvName !== null &&
+    runtimeState?.envName !== null &&
+    runtimeState?.envName !== opts.requestedEnvName
+  ) {
+    return false;
+  }
+
+  const psResult = await composeRuntimeBackend.psJson({
+    composeFiles: opts.composeFiles,
+    composeProject: opts.composeProject,
+    profiles: opts.profiles,
+    cwd: dirname(opts.project.composeFile),
+  });
+  if (psResult.exitCode !== 0) {
+    return false;
+  }
+
+  const runningServices = parseJsonLines(psResult.stdout);
+  return runningServices.some((entry) => {
+    const service = getString(entry, "Service")?.trim();
+    const state = getString(entry, "State")?.trim().toLowerCase();
+    return service === opts.service && state === "running";
   });
 }
 

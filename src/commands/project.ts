@@ -5333,11 +5333,7 @@ async function resolveCanSkipRunDependencies(opts: {
     projectDir: opts.project.projectDir,
     composeProject: opts.composeProjectKey,
   });
-  if (
-    opts.requestedEnvName !== null &&
-    runtimeState?.envName !== null &&
-    runtimeState?.envName !== opts.requestedEnvName
-  ) {
+  if (runtimeState && runtimeState.envName !== opts.requestedEnvName) {
     return false;
   }
 

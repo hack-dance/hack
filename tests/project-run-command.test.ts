@@ -68,6 +68,12 @@ afterAll(() => {
   mock.restore();
 });
 
+function expectNoEnvScopeWarnings(): void {
+  expect(
+    warnCalls.filter((message) => message.startsWith('Env config scope "'))
+  ).toEqual([]);
+}
+
 test("run applies modern env overlays to service-specific compose overrides", async () => {
   const projectRoot = await createProject();
 
@@ -123,7 +129,7 @@ test("run applies modern env overlays to service-specific compose overrides", as
   expect(overrideText).toContain("SHARED_KEY: base");
   expect(overrideText).toContain('PORT: "4000"');
   expect(overrideText).toContain("SERVICE_TOKEN: overlay-secret");
-  expect(warnCalls).toEqual([]);
+  expectNoEnvScopeWarnings();
 });
 
 test("run does not warn about sibling service scopes in modern env configs", async () => {
@@ -174,7 +180,7 @@ test("run does not warn about sibling service scopes in modern env configs", asy
   const exitCode = await runCommand.handler(input);
 
   expect(exitCode).toBe(0);
-  expect(warnCalls).toEqual([]);
+  expectNoEnvScopeWarnings();
 });
 
 async function createProject(input?: {

@@ -79,8 +79,12 @@ hack env list
 hack env add AWS_PROFILE dev
 hack env add --secret DATABASE_URL postgres://...
 hack env exec --env qa --service api -- bun db:migrate
+hack env exec --env qa --service api --target compose -- bun test
 hack env shell --env qa --service api
 ```
+
+`hack env exec` and `hack env shell` now default to a host-local env view for host commands. Use
+`--target compose` when you explicitly want the container-oriented addresses from the compose view.
 
 Docs:
 

@@ -1632,6 +1632,10 @@ Options:
 
 Usage: `hack env exec [options] <command...>`
 
+Runs a host command with injected env. Default target is `host`, which applies the host-local env
+view and any `host` scope overrides. Use `--target compose` to preserve the container-oriented
+compose view.
+
 Options:
 
 | Flag | Type | Default | Description |
@@ -1640,11 +1644,16 @@ Options:
 | `--project <name>` | string | - | Target a registered project by name |
 | `--env <name\|base>` | string | - | Apply an optional env overlay by name |
 | `--service <name>` | string | - | Resolve values for one service scope |
+| `--target <host\|compose>` | string | `host` | Host-local env view for host commands, or raw compose view |
 
 #### hack env shell
 
 Usage: `hack env shell [options]`
 
+Starts an interactive host shell with injected env. Default target is `host`, which applies the
+host-local env view and any `host` scope overrides. Use `--target compose` to preserve the
+container-oriented compose view.
+
 Options:
 
 | Flag | Type | Default | Description |
@@ -1653,6 +1662,7 @@ Options:
 | `--project <name>` | string | - | Target a registered project by name |
 | `--env <name\|base>` | string | - | Apply an optional env overlay by name |
 | `--service <name>` | string | - | Resolve values for one service scope |
+| `--target <host\|compose>` | string | `host` | Host-local env view for host commands, or raw compose view |
 
 #### hack env unset
 

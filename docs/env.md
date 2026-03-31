@@ -43,6 +43,7 @@ Each env file is YAML with:
 
 - `global`: values applied everywhere
 - `<service>`: values applied only for that compose service
+- `host`: optional overrides applied only to host-command injection (`hack env exec` / `hack env shell`)
 
 Example:
 
@@ -72,6 +73,7 @@ Hack resolves env in this order:
 4. if a service scope is requested, merge `values.<service>` on top
 
 Overlay values override default values. Service values override global values.
+Host-command injection applies `host` values last when the execution target is `host`.
 
 Projects can set a default overlay in `.hack/hack.config.json`:
 
@@ -103,6 +105,14 @@ Hack reads the canonical YAML files and injects the resolved env directly into:
 That means `.hack/.env` is no longer the primary runtime source of truth.
 
 `hack env materialize` is manual by design. Use it only when you need a compatibility file for an external tool that expects `.env` on disk.
+
+For host commands, `hack env exec` and `hack env shell` default to a host-local view. That means
+Hack prefers host-usable values when it can:
+
+- explicit `host` scope values override the normal `global` + `<service>` merge
+- common container-only hostnames such as `host.docker.internal` and compose service hosts are rewritten to `127.0.0.1`
+
+Use `--target compose` if you explicitly want the container-oriented compose view instead.
 
 ## Common commands
 
@@ -145,6 +155,7 @@ Run a host command with injected env:
 ```bash
 hack env exec -- bun db:migrate
 hack env exec --env qa --service api -- bun db:migrate
+hack env exec --env qa --service api --target compose -- bun test
 ```
 
 Open a host shell with injected env:
@@ -152,6 +163,22 @@ Open a host shell with injected env:
 ```bash
 hack env shell
 hack env shell --env qa --service api
+hack env shell --env qa --service api --target compose
+```
+
+Example with an explicit host override:
+
+```yaml
+version: 1
+environment: default
+secretsprovider: project_key
+values:
+  global:
+    DATABASE_URL:
+      secure: v1:...
+    REDISHOST: redis
+  host:
+    REDISHOST: "127.0.0.1"
 ```
 
 ## Sessions and env

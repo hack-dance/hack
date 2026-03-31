@@ -31,6 +31,7 @@ export interface RuntimePsOptions extends RuntimeBaseOptions {}
 
 export interface RuntimeRunOptions extends RuntimeBaseOptions {
   readonly service: string;
+  readonly noDeps?: boolean;
   readonly workdir?: string;
   readonly cmdArgs: readonly string[];
 }
@@ -110,6 +111,7 @@ export const composeRuntimeBackend: RuntimeBackend = {
       ...buildComposeArgs(opts),
       "run",
       "--rm",
+      ...(opts.noDeps ? ["--no-deps"] : []),
       ...(opts.workdir && opts.workdir.length > 0 ? ["-w", opts.workdir] : []),
       opts.service,
       ...(opts.cmdArgs.length > 0 ? opts.cmdArgs : []),

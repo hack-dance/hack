@@ -875,6 +875,7 @@ async function maybePromptLegacyProjectEnvMigration(opts: {
 async function resolveModernComposeEnvOverrides(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly targetServices: readonly string[];
+  readonly allServiceNames: readonly string[];
   readonly envName?: string | null;
 }): Promise<{
   readonly composeFiles: readonly string[];
@@ -885,7 +886,7 @@ async function resolveModernComposeEnvOverrides(opts: {
     projectRoot: opts.project.projectRoot,
     projectDir: opts.project.projectDir,
     envName: opts.envName,
-    serviceNames: opts.targetServices,
+    serviceNames: opts.allServiceNames,
   });
   if (!modern) {
     return null;
@@ -968,6 +969,7 @@ async function resolveComposeEnvOverrides(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly projectName: string;
   readonly targetServices: readonly string[];
+  readonly allServiceNames: readonly string[];
   readonly envName?: string | null;
 }): Promise<{
   readonly composeFiles: readonly string[];
@@ -977,7 +979,7 @@ async function resolveComposeEnvOverrides(opts: {
   await maybePromptLegacyProjectEnvMigration({
     project: opts.project,
     projectName: opts.projectName,
-    serviceNames: opts.targetServices,
+    serviceNames: opts.allServiceNames,
   });
   const modern = await resolveModernComposeEnvOverrides(opts);
   if (modern) {
@@ -4538,6 +4540,7 @@ async function handleUp({
     project,
     projectName,
     targetServices,
+    allServiceNames: targetServices,
     envName,
   });
   const composeFilesWithEnv = [
@@ -4862,6 +4865,7 @@ async function runRestartUpPhase(opts: {
     project: opts.project,
     projectName: opts.projectName,
     targetServices,
+    allServiceNames: targetServices,
     envName: opts.envName,
   });
   const composeFilesWithEnv = [
@@ -5285,22 +5289,73 @@ async function handleRun({
     : [project.composeFile];
 
   const projectName = sanitizeProjectSlug(baseProjectName);
+  const allServiceNames = await readComposeServiceNames(project.composeFile);
   const envOverrides = await resolveComposeEnvOverrides({
     project,
     projectName,
     targetServices: [service],
+    allServiceNames,
     envName,
   });
   const composeFilesWithEnv = [...composeFiles, ...envOverrides.composeFiles];
+  const stackIsRunning = await resolveCanSkipRunDependencies({
+    composeFiles: composeFilesWithEnv,
+    composeProjectKey: composeProjectName ?? baseProjectName,
+    composeProject: composeProjectName,
+    project,
+    profiles,
+    requestedEnvName: envName ?? null,
+    service,
+  });
   return await composeRuntimeBackend.run({
     composeFiles: composeFilesWithEnv,
     composeProject: composeProjectName,
     profiles,
     service,
+    noDeps: stackIsRunning,
     workdir: workdir.length > 0 ? workdir : undefined,
     cmdArgs,
     cwd: dirname(project.composeFile),
     env: envOverrides.env,
+  });
+}
+
+async function resolveCanSkipRunDependencies(opts: {
+  readonly composeFiles: readonly string[];
+  readonly composeProjectKey: string;
+  readonly composeProject: string | null;
+  readonly profiles: readonly string[];
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly requestedEnvName: string | null;
+  readonly service: string;
+}): Promise<boolean> {
+  const runtimeState = await readProjectRuntimeStateEntry({
+    projectDir: opts.project.projectDir,
+    composeProject: opts.composeProjectKey,
+  });
+  if (
+    opts.requestedEnvName !== null &&
+    runtimeState?.envName !== null &&
+    runtimeState?.envName !== opts.requestedEnvName
+  ) {
+    return false;
+  }
+
+  const psResult = await composeRuntimeBackend.psJson({
+    composeFiles: opts.composeFiles,
+    composeProject: opts.composeProject,
+    profiles: opts.profiles,
+    cwd: dirname(opts.project.composeFile),
+  });
+  if (psResult.exitCode !== 0) {
+    return false;
+  }
+
+  const runningServices = parseJsonLines(psResult.stdout);
+  return runningServices.some((entry) => {
+    const service = getString(entry, "Service")?.trim();
+    const state = getString(entry, "State")?.trim().toLowerCase();
+    return service === opts.service && state === "running";
   });
 }
 

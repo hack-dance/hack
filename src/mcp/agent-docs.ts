@@ -245,6 +245,7 @@ export function renderAgentDocsSnippet(): string {
     "",
     "Host-side env helpers:",
     "- One-off host command with injected env: `hack env exec --env qa --service api -- bun db:migrate`",
+    "- Host commands default to a host-local env view; use `--target compose` when you explicitly want container-oriented addresses.",
     "- Interactive host shell with injected env: `hack env shell --env qa --service api`",
     "",
     "Tickets (git-backed):",

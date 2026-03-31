@@ -27,6 +27,7 @@ import {
   parseProjectEnvTarget,
   repairLegacyComposeEnvFileReferences,
   resolveProjectEnvConfig,
+  selectProjectEnvValuesForExecutionTarget,
   setProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
 import { resolveSecretStore } from "../src/lib/secret-store.ts";
@@ -244,6 +245,104 @@ test("resolveProjectEnvConfig falls back to HACK_ENV_SECRET_KEY when the key fil
   });
 
   expect(resolved?.serviceEnv.api?.SERVICE_TOKEN).toBe("super-secret-token");
+});
+
+test("host target only applies explicit host overrides on top of service values", async () => {
+  const repo = await createRepo();
+
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    [
+      "version: 1",
+      "environment: default",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      '    DATABASE_URL: "mysql://global"',
+      '    SHARED_HOST: "redis"',
+      "  api:",
+      '    DATABASE_URL: "mysql://api"',
+      '    PORT: "3000"',
+      "  host:",
+      '    SHARED_HOST: "127.0.0.1"',
+      "",
+    ].join("\n")
+  );
+
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    serviceNames: ["api", "web"],
+  });
+
+  expect(resolved).not.toBeNull();
+  if (!resolved) {
+    throw new Error("Expected resolved env config.");
+  }
+
+  expect(
+    selectProjectEnvValuesForExecutionTarget({
+      resolved,
+      scopeName: "api",
+      target: "host",
+    })
+  ).toEqual({
+    DATABASE_URL: "mysql://api",
+    PORT: "3000",
+    SHARED_HOST: "127.0.0.1",
+  });
+});
+
+test("host service scopes keep their existing meaning when the repo has a host service", async () => {
+  const repo = await createRepo();
+
+  await writeFile(repo.composeFile, "services:\n  api: {}\n  host: {}\n");
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    [
+      "version: 1",
+      "environment: default",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      '    SHARED_HOST: "global"',
+      "  api:",
+      '    DATABASE_URL: "mysql://api"',
+      "  host:",
+      '    SHARED_HOST: "service-host"',
+      '    HOST_ONLY: "host-service-scope"',
+      "",
+    ].join("\n")
+  );
+
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    serviceNames: ["api", "host"],
+  });
+
+  expect(resolved).not.toBeNull();
+  if (!resolved) {
+    throw new Error("Expected resolved env config.");
+  }
+
+  expect(resolved.hostEnv).toEqual({});
+  expect(
+    selectProjectEnvValuesForExecutionTarget({
+      resolved,
+      scopeName: "api",
+      target: "host",
+    })
+  ).toEqual({
+    DATABASE_URL: "mysql://api",
+    SHARED_HOST: "global",
+  });
+  expect(resolved.serviceEnv.host).toEqual({
+    HOST_ONLY: "host-service-scope",
+    SHARED_HOST: "service-host",
+  });
 });
 
 test("migrateLegacyProjectEnv converts legacy base and overlay values into new config files", async () => {

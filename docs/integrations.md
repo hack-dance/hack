@@ -127,6 +127,9 @@ Main surface:
 - `hack env unset`
 - `hack env materialize`
 
+`hack env exec` and `hack env shell` default to a host-local env view for host-side commands. Use
+`--target compose` when you explicitly want the raw compose/container-oriented values.
+
 Reference:
 
 - [Env & secrets](env.md)

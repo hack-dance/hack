@@ -39,6 +39,7 @@ const PROJECT_ENV_SECRET_PREFIX = "v1" as const;
 const PROJECT_ENV_ALGORITHM = "aes-256-gcm";
 const PROJECT_ENV_IV_BYTES = 12;
 const PROJECT_ENV_SECRET_KEY_ENV = "HACK_ENV_SECRET_KEY";
+export const PROJECT_ENV_HOST_SCOPE = "host" as const;
 
 type ProjectEnvScalar = string | number | boolean;
 
@@ -80,6 +81,7 @@ export type ProjectEnvResolvedConfig = {
   readonly merged: ProjectEnvConfig;
   readonly files: readonly string[];
   readonly globalEnv: Readonly<Record<string, string>>;
+  readonly hostEnv: Readonly<Record<string, string>>;
   readonly serviceEnv: Readonly<
     Record<string, Readonly<Record<string, string>>>
   >;
@@ -104,6 +106,29 @@ export function selectProjectEnvValues(opts: {
   }
 
   return { ...scoped };
+}
+
+export function selectProjectEnvValuesForExecutionTarget(opts: {
+  readonly resolved: ProjectEnvResolvedConfig;
+  readonly scopeName?: string | null;
+  readonly target: "host" | "compose";
+}): Record<string, string> {
+  const selected = selectProjectEnvValues({
+    resolved: opts.resolved,
+    scopeName: opts.scopeName,
+  });
+  if (opts.target !== "host") {
+    return selected;
+  }
+
+  const hostOverrides = opts.resolved.hostEnv;
+  if (!hostOverrides) {
+    return selected;
+  }
+  return {
+    ...selected,
+    ...hostOverrides,
+  };
 }
 
 export function isValidProjectEnvScopeName(opts: {
@@ -479,8 +504,18 @@ export async function resolveProjectEnvConfig(opts: {
     left.localeCompare(right)
   );
   const knownServiceSet = new Set(opts.serviceNames);
+  const hostScopeConflictsWithService = knownServiceSet.has(
+    PROJECT_ENV_HOST_SCOPE
+  );
+  const hostEnv = hostScopeConflictsWithService
+    ? {}
+    : resolveProjectEnvScopeValues({
+        values: merged.values[PROJECT_ENV_HOST_SCOPE] ?? {},
+        keyText,
+      });
   const unknownScopes = declaredScopes
     .filter((scope) => scope !== "global")
+    .filter((scope) => scope !== PROJECT_ENV_HOST_SCOPE)
     .filter((scope) => !knownServiceSet.has(scope));
 
   const serviceSet = new Set<string>([
@@ -509,6 +544,7 @@ export async function resolveProjectEnvConfig(opts: {
     merged,
     files,
     globalEnv,
+    hostEnv,
     serviceEnv,
     declaredScopes,
     unknownScopes,

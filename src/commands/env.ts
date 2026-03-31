@@ -1,4 +1,5 @@
-import { resolve } from "node:path";
+import { homedir } from "node:os";
+import { dirname, relative, resolve } from "node:path";
 import { confirm, isCancel, password, select, text } from "@clack/prompts";
 
 import type { CliContext, CommandHandlerFor } from "../cli/command.ts";
@@ -11,6 +12,7 @@ import {
 import { optEnv, optJson, optPath, optProject } from "../cli/options.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
+import { resolveGlobalConfigPath } from "../lib/config-paths.ts";
 import { isRecord } from "../lib/guards.ts";
 import type {
   HackEnvStorageSummary,
@@ -52,6 +54,7 @@ import {
   readMaterializedProjectEnv,
   resolveProjectEnvConfig,
   selectProjectEnvValues,
+  selectProjectEnvValuesForExecutionTarget,
   setProjectEnvValue,
   unsetProjectEnvValue,
 } from "../lib/project-env-config.ts";
@@ -79,12 +82,33 @@ const optSecret = defineOption({
   description: "Store value as an encrypted secure entry",
 } as const);
 
+const DEFAULT_ENCRYPTED_FILE_STORE_PATH = "~/.hack/secrets.enc.json";
+const DEFAULT_ENCRYPTED_FILE_KEY_PATH = "~/.hack/secrets-file.key";
+const LEGACY_RELATIVE_ENCRYPTED_FILE_STORE_PATH = ".hack-secrets.enc.json";
+const LEGACY_RELATIVE_ENCRYPTED_FILE_KEY_PATH = ".hack-secrets-file.key";
+const HOST_ENV_TARGET_VALUES = ["host", "compose"] as const;
+const HOST_LOOPBACK = "127.0.0.1";
+const CONTAINER_ONLY_HOSTS = new Set(["host.docker.internal", "host-gateway"]);
+const HOST_KEY_PATTERN = /(?:^|_)?(HOST|HOSTNAME)$/;
+const URL_LIKE_KEY_PATTERN = /(?:^DATABASE_URL$|(?:^|_)(URL|URI|DSN)$)/;
+const URL_LIKE_VALUE_PATTERN =
+  /^(?<prefix>[a-z][a-z0-9+.-]*:\/\/(?:[^@/?#]+@)?)(?<host>[^:/?#]+)(?<suffix>.*)$/i;
+
 const optService = defineOption({
   name: "service",
   type: "string",
   long: "--service",
   valueHint: "<global|service>",
   description: "Target scope (global or a discovered service name)",
+} as const);
+
+const optTarget = defineOption({
+  name: "target",
+  type: "string",
+  long: "--target",
+  valueHint: "<host|compose>",
+  description:
+    "Env view for host commands (default: host rewrites container-oriented addresses for local host execution)",
 } as const);
 
 const SECRET_MASK = "***";
@@ -155,7 +179,7 @@ const execSpec = defineCommand({
   group: "Project",
   description:
     "Inject the selected Hack env overlay directly into a one-off host command without materializing .hack/.env.",
-  options: [optPath, optProject, optEnv, optService],
+  options: [optPath, optProject, optEnv, optService, optTarget],
   positionals: [{ name: "command", required: true, multiple: true }],
   subcommands: [],
 } as const);
@@ -166,7 +190,7 @@ const shellSpec = defineCommand({
   group: "Project",
   description:
     "Start an interactive host shell with the selected Hack env overlay injected into the process environment.",
-  options: [optPath, optProject, optEnv, optService],
+  options: [optPath, optProject, optEnv, optService, optTarget],
   positionals: [],
   subcommands: [],
 } as const);
@@ -369,14 +393,22 @@ async function persistBackendSelection(input: {
   if (input.backend === "encrypted_file" && input.storePath) {
     await updateGlobalConfig({
       path: "controlPlane.secrets.encryptedFile.path",
-      value: input.storePath,
+      value: normalizeGlobalEncryptedFileConfigPath({
+        configuredPath: input.storePath,
+        defaultPath: DEFAULT_ENCRYPTED_FILE_STORE_PATH,
+        legacyRelativePath: LEGACY_RELATIVE_ENCRYPTED_FILE_STORE_PATH,
+      }),
     });
   }
 
   if (input.backend === "encrypted_file" && input.keyPath) {
     await updateGlobalConfig({
       path: "controlPlane.secrets.encryptedFile.keyPath",
-      value: input.keyPath,
+      value: normalizeGlobalEncryptedFileConfigPath({
+        configuredPath: input.keyPath,
+        defaultPath: DEFAULT_ENCRYPTED_FILE_KEY_PATH,
+        legacyRelativePath: LEGACY_RELATIVE_ENCRYPTED_FILE_KEY_PATH,
+      }),
     });
   }
 
@@ -402,6 +434,31 @@ async function persistBackendSelection(input: {
       value: input.secretPrefix,
     });
   }
+}
+
+function normalizeGlobalEncryptedFileConfigPath(input: {
+  readonly configuredPath: string;
+  readonly defaultPath: string;
+  readonly legacyRelativePath: string;
+}): string {
+  const raw = input.configuredPath.trim();
+  if (raw.length === 0) {
+    return raw;
+  }
+  if (raw === input.legacyRelativePath) {
+    return input.defaultPath;
+  }
+  if (raw === "~" || raw.startsWith("~/") || raw.startsWith("/")) {
+    return raw;
+  }
+
+  const home = (process.env.HOME ?? homedir()).trim();
+  const globalConfigDir = dirname(resolveGlobalConfigPath());
+  const resolvedPath = resolve(globalConfigDir, raw);
+  if (home.length > 0 && resolvedPath.startsWith(`${home}/`)) {
+    return `~/${relative(home, resolvedPath)}`;
+  }
+  return resolvedPath;
 }
 
 async function resolveProjectForEnv(opts: {
@@ -492,6 +549,7 @@ async function resolveEnvInjection(input: {
   readonly projectName: string;
   readonly envName: string | null | undefined;
   readonly serviceName: string | null;
+  readonly target: (typeof HOST_ENV_TARGET_VALUES)[number];
 }): Promise<{
   readonly env: Record<string, string>;
   readonly effectiveEnvName: string | null;
@@ -507,10 +565,19 @@ async function resolveEnvInjection(input: {
     envName: input.envName,
   });
   if (modern) {
+    const serviceNames = await discoverComposeServiceNames({
+      composeFile: input.project.composeFile,
+    });
+    const env = selectProjectEnvValuesForExecutionTarget({
+      resolved: modern,
+      scopeName: input.serviceName,
+      target: input.target,
+    });
     return {
-      env: selectProjectEnvValues({
-        resolved: modern,
-        scopeName: input.serviceName,
+      env: adaptEnvForHostExecution({
+        env,
+        target: input.target,
+        serviceNames,
       }),
       effectiveEnvName: modern.selection.effectiveEnv,
     };
@@ -525,13 +592,121 @@ async function resolveEnvInjection(input: {
     throw new CliUsageError("Unable to resolve project env state.");
   }
 
+  const serviceNames = await discoverComposeServiceNames({
+    composeFile: input.project.composeFile,
+  });
   return {
-    env: selectHackEnvValues({
-      resolved,
-      serviceName: input.serviceName,
+    env: adaptEnvForHostExecution({
+      env: selectHackEnvValues({
+        resolved,
+        serviceName: input.serviceName,
+      }),
+      target: input.target,
+      serviceNames,
     }),
     effectiveEnvName: resolved.envSelection.effectiveEnv,
   };
+}
+
+function resolveHostEnvTarget(input: {
+  readonly targetOption: string | undefined;
+}): (typeof HOST_ENV_TARGET_VALUES)[number] {
+  const target = input.targetOption?.trim() || "host";
+  if (
+    HOST_ENV_TARGET_VALUES.includes(
+      target as (typeof HOST_ENV_TARGET_VALUES)[number]
+    )
+  ) {
+    return target as (typeof HOST_ENV_TARGET_VALUES)[number];
+  }
+  throw new CliUsageError(
+    `Invalid --target "${target}". Expected one of: ${HOST_ENV_TARGET_VALUES.join(", ")}`
+  );
+}
+
+function adaptEnvForHostExecution(input: {
+  readonly env: Readonly<Record<string, string>>;
+  readonly target: (typeof HOST_ENV_TARGET_VALUES)[number];
+  readonly serviceNames: readonly string[];
+}): Record<string, string> {
+  if (input.target !== "host") {
+    return { ...input.env };
+  }
+
+  const composeServiceNames = new Set(input.serviceNames);
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(input.env)) {
+    out[key] = rewriteEnvValueForHostExecution({
+      key,
+      value,
+      composeServiceNames,
+    });
+  }
+  return out;
+}
+
+function rewriteEnvValueForHostExecution(input: {
+  readonly key: string;
+  readonly value: string;
+  readonly composeServiceNames: ReadonlySet<string>;
+}): string {
+  const trimmedValue = input.value.trim();
+  if (HOST_KEY_PATTERN.test(input.key)) {
+    const rewrittenHost = rewriteHostTokenForHostExecution({
+      value: trimmedValue,
+      composeServiceNames: input.composeServiceNames,
+    });
+    if (rewrittenHost) {
+      return rewrittenHost;
+    }
+  }
+
+  if (URL_LIKE_KEY_PATTERN.test(input.key)) {
+    const rewrittenUrl = rewriteUrlLikeValueForHostExecution({
+      value: input.value,
+      composeServiceNames: input.composeServiceNames,
+    });
+    if (rewrittenUrl) {
+      return rewrittenUrl;
+    }
+  }
+
+  return input.value;
+}
+
+function rewriteHostTokenForHostExecution(input: {
+  readonly value: string;
+  readonly composeServiceNames: ReadonlySet<string>;
+}): string | null {
+  if (CONTAINER_ONLY_HOSTS.has(input.value)) {
+    return HOST_LOOPBACK;
+  }
+  if (input.composeServiceNames.has(input.value)) {
+    return HOST_LOOPBACK;
+  }
+  return null;
+}
+
+function rewriteUrlLikeValueForHostExecution(input: {
+  readonly value: string;
+  readonly composeServiceNames: ReadonlySet<string>;
+}): string | null {
+  const match = URL_LIKE_VALUE_PATTERN.exec(input.value);
+  const host = match?.groups?.host;
+  const prefix = match?.groups?.prefix;
+  const suffix = match?.groups?.suffix;
+  if (!(host && prefix && suffix !== undefined)) {
+    return null;
+  }
+
+  const rewrittenHost = rewriteHostTokenForHostExecution({
+    value: host,
+    composeServiceNames: input.composeServiceNames,
+  });
+  if (!rewrittenHost) {
+    return null;
+  }
+  return `${prefix}${rewrittenHost}${suffix}`;
 }
 
 async function maybeMigrateLegacyProjectEnv(input: {
@@ -1371,6 +1546,9 @@ const handleEnvExec: CommandHandlerFor<typeof execSpec> = async ({
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
+  const target = resolveHostEnvTarget({
+    targetOption: args.options.target,
+  });
   const command = args.positionals.command;
   if (command.length === 0) {
     throw new CliUsageError("Command is required.");
@@ -1381,6 +1559,7 @@ const handleEnvExec: CommandHandlerFor<typeof execSpec> = async ({
     projectName,
     envName,
     serviceName: args.options.service?.trim() || null,
+    target,
   });
   return await run(command, {
     cwd: project.projectRoot,
@@ -1402,11 +1581,15 @@ const handleEnvShell: CommandHandlerFor<typeof shellSpec> = async ({
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
+  const target = resolveHostEnvTarget({
+    targetOption: args.options.target,
+  });
   const envState = await resolveEnvInjection({
     project,
     projectName,
     envName,
     serviceName: args.options.service?.trim() || null,
+    target,
   });
 
   return await run(resolveInteractiveShellCommand(), {

@@ -89,7 +89,11 @@ If the repo uses the modern env overlay model, provide secret decryption materia
 ```bash
 export HACK_ENV_SECRET_KEY="..."
 hack env exec --env qa --service api -- bun db:migrate
+hack env exec --env qa --service api --target compose -- bun test
 ```
+
+`hack env exec` and `hack env shell` default to a host-local env view for host commands. Use
+`--target compose` when you explicitly want the container-oriented compose view instead.
 
 ## Not available in slim mode
 

@@ -1,3 +1,8 @@
+## <small>2.0.2 (2026-03-31)</small>
+
+* Merge pull request #35 from hack-dance/dimitri/fix-runtime-null-env-mismatch ([96a2818](https://github.com/hack-dance/hack/commit/96a2818)), closes [#35](https://github.com/hack-dance/hack/issues/35)
+* fix(runtime): treat null env as run mismatch ([3a0dd44](https://github.com/hack-dance/hack/commit/3a0dd44))
+
 ## <small>2.0.1 (2026-03-31)</small>
 
 * Merge branch 'main' into dimitri/web-local-dev-rough-edges ([a1419b2](https://github.com/hack-dance/hack/commit/a1419b2)), closes [dimitri/web-local-dev-rou#edges](https://github.com/dimitri/web-local-dev-rou/issues/edges)

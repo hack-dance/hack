@@ -5304,7 +5304,7 @@ async function handleRun({
     composeProject: composeProjectName,
     project,
     profiles,
-    requestedEnvName: envName ?? null,
+    effectiveEnvName: envOverrides.effectiveEnvName,
     service,
   });
   return await composeRuntimeBackend.run({
@@ -5326,14 +5326,14 @@ async function resolveCanSkipRunDependencies(opts: {
   readonly composeProject: string | null;
   readonly profiles: readonly string[];
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
-  readonly requestedEnvName: string | null;
+  readonly effectiveEnvName: string | null;
   readonly service: string;
 }): Promise<boolean> {
   const runtimeState = await readProjectRuntimeStateEntry({
     projectDir: opts.project.projectDir,
     composeProject: opts.composeProjectKey,
   });
-  if (runtimeState && runtimeState.envName !== opts.requestedEnvName) {
+  if (runtimeState && runtimeState.envName !== opts.effectiveEnvName) {
     return false;
   }
 

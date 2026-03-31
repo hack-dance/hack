@@ -299,11 +299,56 @@ test("run keeps dependency startup when the requested env differs from the live 
   expect(runCalls[0]?.noDeps).toBe(false);
 });
 
+test("run skips dependency startup when omitted env resolves to the live default overlay", async () => {
+  const projectRoot = await createProject({
+    config: {
+      env: {
+        defaultOverlay: "qa",
+      },
+    },
+    runtimeComposeProject: "project-run-env-test",
+    runtimeEnvName: "qa",
+    runningServices: ["api"],
+  });
+
+  const input = {
+    ctx: {
+      cwd: projectRoot,
+      cli: CLI_SPEC,
+    },
+    args: {
+      options: {
+        path: projectRoot,
+        project: undefined,
+        env: undefined,
+        branch: undefined,
+        workdir: undefined,
+        profile: undefined,
+      },
+      positionals: {
+        service: "api",
+        cmd: ["printenv"],
+      },
+      raw: {
+        argv: ["--path", projectRoot, "api", "printenv"],
+        positionals: ["api", "printenv"],
+      },
+    },
+  } as unknown as Parameters<typeof runCommand.handler>[0];
+
+  const exitCode = await runCommand.handler(input);
+
+  expect(exitCode).toBe(0);
+  expect(runCalls[0]?.noDeps).toBe(true);
+});
+
 async function createProject(input?: {
   readonly services?: readonly string[];
   readonly defaultYaml?: string;
   readonly runtimeComposeProject?: string;
+  readonly runtimeEnvName?: string | null;
   readonly runningServices?: readonly string[];
+  readonly config?: Record<string, unknown>;
 }): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "hack-project-run-env-"));
   tempDirs.add(root);
@@ -327,6 +372,7 @@ async function createProject(input?: {
       {
         name: "project-run-env-test",
         dev_host: "project-run-env.hack",
+        ...(input?.config ?? {}),
       },
       null,
       2
@@ -341,7 +387,7 @@ async function createProject(input?: {
           entries: [
             {
               composeProject: input.runtimeComposeProject,
-              envName: null,
+              envName: input.runtimeEnvName ?? null,
               updatedAt: "2026-03-31T00:00:00.000Z",
             },
           ],

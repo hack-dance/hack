@@ -5304,7 +5304,7 @@ async function handleRun({
     composeProject: composeProjectName,
     project,
     profiles,
-    requestedEnvName: envName,
+    requestedEnvName: envName ?? null,
     service,
   });
   return await composeRuntimeBackend.run({

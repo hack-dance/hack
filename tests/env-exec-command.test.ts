@@ -66,6 +66,7 @@ test("env exec injects merged overlay env into one-off host commands", async () 
         project: undefined,
         env: "qa",
         service: "api",
+        target: undefined,
       },
       positionals: {
         command: ["bun", "db:migrate"],
@@ -117,6 +118,7 @@ test("env shell opens the current shell with injected project env", async () => 
         project: undefined,
         env: "qa",
         service: undefined,
+        target: undefined,
       },
       positionals: {},
       raw: {
@@ -140,6 +142,106 @@ test("env shell opens the current shell with injected project env", async () => 
   });
 });
 
+test("env exec defaults to a host-local view for host-like env values", async () => {
+  const projectRoot = await createProject({
+    services: ["api", "redis"],
+    defaultYaml: [
+      "version: 1",
+      "environment: default",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      '    DATABASE_URL: "mysql://appuser:secret@host.docker.internal:3306/app?ssl={\\"rejectUnauthorized\\":false}"',
+      '    REDISHOST: "redis"',
+      "",
+    ].join("\n"),
+  });
+  const execCommand = findSubcommand("exec");
+
+  const input = {
+    ctx: {
+      cwd: projectRoot,
+      cli: CLI_SPEC,
+    },
+    args: {
+      options: {
+        path: projectRoot,
+        project: undefined,
+        env: undefined,
+        service: undefined,
+        target: undefined,
+      },
+      positionals: {
+        command: ["env"],
+      },
+      raw: {
+        argv: ["--path", projectRoot, "env"],
+        positionals: ["env"],
+      },
+    },
+  } as unknown as Parameters<typeof execCommand.handler>[0];
+
+  const exitCode = await execCommand.handler(input);
+
+  expect(exitCode).toBe(0);
+  expect(runCalls).toHaveLength(1);
+  expect(runCalls[0]?.env).toEqual({
+    DATABASE_URL:
+      'mysql://appuser:secret@127.0.0.1:3306/app?ssl={"rejectUnauthorized":false}',
+    REDISHOST: "127.0.0.1",
+  });
+});
+
+test("env exec can preserve the compose view when requested", async () => {
+  const projectRoot = await createProject({
+    services: ["api", "redis"],
+    defaultYaml: [
+      "version: 1",
+      "environment: default",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      '    DATABASE_URL: "mysql://appuser:secret@host.docker.internal:3306/app?ssl={\\"rejectUnauthorized\\":false}"',
+      '    REDISHOST: "redis"',
+      "",
+    ].join("\n"),
+  });
+  const execCommand = findSubcommand("exec");
+
+  const input = {
+    ctx: {
+      cwd: projectRoot,
+      cli: CLI_SPEC,
+    },
+    args: {
+      options: {
+        path: projectRoot,
+        project: undefined,
+        env: undefined,
+        service: undefined,
+        target: "compose",
+      },
+      positionals: {
+        command: ["env"],
+      },
+      raw: {
+        argv: ["--path", projectRoot, "--target", "compose", "env"],
+        positionals: ["env"],
+      },
+    },
+  } as unknown as Parameters<typeof execCommand.handler>[0];
+
+  const exitCode = await execCommand.handler(input);
+
+  expect(exitCode).toBe(0);
+  expect(runCalls).toHaveLength(1);
+  expect(runCalls[0]?.env).toEqual({
+    DATABASE_URL:
+      'mysql://appuser:secret@host.docker.internal:3306/app?ssl={"rejectUnauthorized":false}',
+    REDISHOST: "redis",
+  });
+});
+
 type EnvSubcommandName = (typeof envCommand.subcommands)[number]["name"];
 type EnvSubcommand<N extends EnvSubcommandName> = Extract<
   (typeof envCommand.subcommands)[number],
@@ -160,17 +262,37 @@ function findSubcommand<N extends EnvSubcommandName>(
   };
 }
 
-async function createProject(): Promise<string> {
+async function createProject(input?: {
+  readonly services?: readonly string[];
+  readonly defaultYaml?: string;
+}): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "hack-env-exec-"));
   tempDirs.add(root);
 
   const projectRoot = resolve(root, "repo");
   const projectDir = resolve(projectRoot, ".hack");
   await mkdir(projectDir, { recursive: true });
+  const services = input?.services ?? ["api"];
+  const composeServices = services
+    .map((service) => `  ${service}:\n    image: alpine:3.20\n`)
+    .join("");
 
   await writeFile(
     resolve(projectDir, PROJECT_COMPOSE_FILENAME),
-    "services:\n  api:\n    image: alpine:3.20\n"
+    `services:\n${composeServices}`
+  );
+  await writeFile(
+    resolve(projectDir, "hack.env.default.yaml"),
+    input?.defaultYaml ??
+      [
+        "version: 1",
+        "environment: default",
+        "secretsprovider: project_key",
+        "values:",
+        "  global:",
+        '    GLOBAL_FLAG: "base"',
+        "",
+      ].join("\n")
   );
   await writeFile(
     resolve(projectDir, PROJECT_CONFIG_FILENAME),
@@ -184,15 +306,6 @@ async function createProject(): Promise<string> {
     )}\n`
   );
 
-  await setProjectEnvValue({
-    projectRoot,
-    projectDir,
-    envName: null,
-    scope: "global",
-    key: "GLOBAL_FLAG",
-    value: "base",
-    secret: false,
-  });
   await setProjectEnvValue({
     projectRoot,
     projectDir,

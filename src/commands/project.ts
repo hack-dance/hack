@@ -875,6 +875,7 @@ async function maybePromptLegacyProjectEnvMigration(opts: {
 async function resolveModernComposeEnvOverrides(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly targetServices: readonly string[];
+  readonly allServiceNames: readonly string[];
   readonly envName?: string | null;
 }): Promise<{
   readonly composeFiles: readonly string[];
@@ -885,7 +886,7 @@ async function resolveModernComposeEnvOverrides(opts: {
     projectRoot: opts.project.projectRoot,
     projectDir: opts.project.projectDir,
     envName: opts.envName,
-    serviceNames: opts.targetServices,
+    serviceNames: opts.allServiceNames,
   });
   if (!modern) {
     return null;
@@ -968,6 +969,7 @@ async function resolveComposeEnvOverrides(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly projectName: string;
   readonly targetServices: readonly string[];
+  readonly allServiceNames: readonly string[];
   readonly envName?: string | null;
 }): Promise<{
   readonly composeFiles: readonly string[];
@@ -977,7 +979,7 @@ async function resolveComposeEnvOverrides(opts: {
   await maybePromptLegacyProjectEnvMigration({
     project: opts.project,
     projectName: opts.projectName,
-    serviceNames: opts.targetServices,
+    serviceNames: opts.allServiceNames,
   });
   const modern = await resolveModernComposeEnvOverrides(opts);
   if (modern) {
@@ -4538,6 +4540,7 @@ async function handleUp({
     project,
     projectName,
     targetServices,
+    allServiceNames: targetServices,
     envName,
   });
   const composeFilesWithEnv = [
@@ -4862,6 +4865,7 @@ async function runRestartUpPhase(opts: {
     project: opts.project,
     projectName: opts.projectName,
     targetServices,
+    allServiceNames: targetServices,
     envName: opts.envName,
   });
   const composeFilesWithEnv = [
@@ -5285,10 +5289,12 @@ async function handleRun({
     : [project.composeFile];
 
   const projectName = sanitizeProjectSlug(baseProjectName);
+  const allServiceNames = await readComposeServiceNames(project.composeFile);
   const envOverrides = await resolveComposeEnvOverrides({
     project,
     projectName,
     targetServices: [service],
+    allServiceNames,
     envName,
   });
   const composeFilesWithEnv = [...composeFiles, ...envOverrides.composeFiles];

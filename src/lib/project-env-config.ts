@@ -39,6 +39,7 @@ const PROJECT_ENV_SECRET_PREFIX = "v1" as const;
 const PROJECT_ENV_ALGORITHM = "aes-256-gcm";
 const PROJECT_ENV_IV_BYTES = 12;
 const PROJECT_ENV_SECRET_KEY_ENV = "HACK_ENV_SECRET_KEY";
+export const PROJECT_ENV_HOST_SCOPE = "host" as const;
 
 type ProjectEnvScalar = string | number | boolean;
 
@@ -104,6 +105,29 @@ export function selectProjectEnvValues(opts: {
   }
 
   return { ...scoped };
+}
+
+export function selectProjectEnvValuesForExecutionTarget(opts: {
+  readonly resolved: ProjectEnvResolvedConfig;
+  readonly scopeName?: string | null;
+  readonly target: "host" | "compose";
+}): Record<string, string> {
+  const selected = selectProjectEnvValues({
+    resolved: opts.resolved,
+    scopeName: opts.scopeName,
+  });
+  if (opts.target !== "host") {
+    return selected;
+  }
+
+  const hostOverrides = opts.resolved.serviceEnv[PROJECT_ENV_HOST_SCOPE];
+  if (!hostOverrides) {
+    return selected;
+  }
+  return {
+    ...selected,
+    ...hostOverrides,
+  };
 }
 
 export function isValidProjectEnvScopeName(opts: {
@@ -481,6 +505,7 @@ export async function resolveProjectEnvConfig(opts: {
   const knownServiceSet = new Set(opts.serviceNames);
   const unknownScopes = declaredScopes
     .filter((scope) => scope !== "global")
+    .filter((scope) => scope !== PROJECT_ENV_HOST_SCOPE)
     .filter((scope) => !knownServiceSet.has(scope));
 
   const serviceSet = new Set<string>([

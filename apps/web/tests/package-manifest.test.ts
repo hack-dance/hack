@@ -22,7 +22,7 @@ test("web package exposes reproducible workspace tasks", () => {
       build: "next build",
       check:
         "cd ../.. && bunx ultracite check apps/web/app apps/web/src apps/web/tests",
-      dev: "next dev",
+      dev: "next dev --webpack",
       start: "next start",
       test: "bun test",
       typecheck: "bunx tsc -p tsconfig.json --noEmit",
@@ -30,7 +30,8 @@ test("web package exposes reproducible workspace tasks", () => {
   );
 });
 
-test("web typecheck inputs stay clean-checkout safe", () => {
-  expect(nextEnvSource).not.toContain(".next/");
-  expect(tsconfigSource).not.toContain(".next/");
+test("web typecheck inputs stay stable for next-managed dev type generation", () => {
+  expect(nextEnvSource).toContain('import "./.next/dev/types/routes.d.ts";');
+  expect(tsconfigSource).toContain(".next/types/**/*.ts");
+  expect(tsconfigSource).toContain(".next/dev/types/**/*.ts");
 });

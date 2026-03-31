@@ -40,6 +40,10 @@ What to expect:
 This mode is still useful because it proves the web shell loads without a live
 broker session.
 
+The repo intentionally runs Next.js dev with Webpack instead of Turbopack in
+this workspace because the containerized local stack hit repeated Turbopack CPU
+feature panics under the default dev path.
+
 ## Mode 2: routed local stack with `hack`
 
 Prefer this mode for real UI spot checks.
@@ -116,8 +120,9 @@ contract used by the auth handoff.
 
 ### `next-env.d.ts` or `tsconfig.json` becomes dirty after a dev run
 
-Next.js may rewrite these files during local development. Keep the tracked files
-clean before committing.
+The tracked files now include the Next-managed typegen paths that dev expects.
+If they still become dirty, treat that as a version-skew or toolchain-change
+signal and inspect the exact rewrite before committing it.
 
 ## Shut down
 

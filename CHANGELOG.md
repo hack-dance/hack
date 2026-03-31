@@ -1,3 +1,17 @@
+## <small>2.0.1 (2026-03-31)</small>
+
+* Merge branch 'main' into dimitri/web-local-dev-rough-edges ([a1419b2](https://github.com/hack-dance/hack/commit/a1419b2)), closes [dimitri/web-local-dev-rou#edges](https://github.com/dimitri/web-local-dev-rou/issues/edges)
+* Merge pull request #34 from hack-dance/dimitri/web-local-dev-rough-edges ([fe6c409](https://github.com/hack-dance/hack/commit/fe6c409)), closes [#34](https://github.com/hack-dance/hack/issues/34) [hack-dance/dimitri/web-local-dev-rou#edges](https://github.com/hack-dance/dimitri/web-local-dev-rou/issues/edges)
+* fix(ci): stabilize secret scan and host env docs ([581ea34](https://github.com/hack-dance/hack/commit/581ea34))
+* fix(env): add host-local command resolution ([d54a6ed](https://github.com/hack-dance/hack/commit/d54a6ed))
+* fix(env): normalize encrypted backend key paths ([b65ee8e](https://github.com/hack-dance/hack/commit/b65ee8e))
+* fix(env): preserve service overrides for host target ([6aae113](https://github.com/hack-dance/hack/commit/6aae113))
+* fix(runtime): avoid run dependency collisions ([6d1fe09](https://github.com/hack-dance/hack/commit/6d1fe09))
+* fix(runtime): gate run no-deps on live state ([94c9785](https://github.com/hack-dance/hack/commit/94c9785))
+* fix(runtime): narrow run env selection type ([cc5d833](https://github.com/hack-dance/hack/commit/cc5d833))
+* fix(web): allow routed local dev origins ([82e706f](https://github.com/hack-dance/hack/commit/82e706f))
+* fix(web): stabilize local dev runtime ([28fe25b](https://github.com/hack-dance/hack/commit/28fe25b))
+
 ## 2.0.0 (2026-03-27)
 
 * fix(build): stabilize macOS release signing ([32dcea0](https://github.com/hack-dance/hack/commit/32dcea0))

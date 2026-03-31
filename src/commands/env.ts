@@ -1,4 +1,5 @@
-import { resolve } from "node:path";
+import { homedir } from "node:os";
+import { dirname, relative, resolve } from "node:path";
 import { confirm, isCancel, password, select, text } from "@clack/prompts";
 
 import type { CliContext, CommandHandlerFor } from "../cli/command.ts";
@@ -11,6 +12,7 @@ import {
 import { optEnv, optJson, optPath, optProject } from "../cli/options.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
+import { resolveGlobalConfigPath } from "../lib/config-paths.ts";
 import { isRecord } from "../lib/guards.ts";
 import type {
   HackEnvStorageSummary,
@@ -78,6 +80,11 @@ const optSecret = defineOption({
   long: "--secret",
   description: "Store value as an encrypted secure entry",
 } as const);
+
+const DEFAULT_ENCRYPTED_FILE_STORE_PATH = "~/.hack/secrets.enc.json";
+const DEFAULT_ENCRYPTED_FILE_KEY_PATH = "~/.hack/secrets-file.key";
+const LEGACY_RELATIVE_ENCRYPTED_FILE_STORE_PATH = ".hack-secrets.enc.json";
+const LEGACY_RELATIVE_ENCRYPTED_FILE_KEY_PATH = ".hack-secrets-file.key";
 
 const optService = defineOption({
   name: "service",
@@ -369,14 +376,22 @@ async function persistBackendSelection(input: {
   if (input.backend === "encrypted_file" && input.storePath) {
     await updateGlobalConfig({
       path: "controlPlane.secrets.encryptedFile.path",
-      value: input.storePath,
+      value: normalizeGlobalEncryptedFileConfigPath({
+        configuredPath: input.storePath,
+        defaultPath: DEFAULT_ENCRYPTED_FILE_STORE_PATH,
+        legacyRelativePath: LEGACY_RELATIVE_ENCRYPTED_FILE_STORE_PATH,
+      }),
     });
   }
 
   if (input.backend === "encrypted_file" && input.keyPath) {
     await updateGlobalConfig({
       path: "controlPlane.secrets.encryptedFile.keyPath",
-      value: input.keyPath,
+      value: normalizeGlobalEncryptedFileConfigPath({
+        configuredPath: input.keyPath,
+        defaultPath: DEFAULT_ENCRYPTED_FILE_KEY_PATH,
+        legacyRelativePath: LEGACY_RELATIVE_ENCRYPTED_FILE_KEY_PATH,
+      }),
     });
   }
 
@@ -402,6 +417,31 @@ async function persistBackendSelection(input: {
       value: input.secretPrefix,
     });
   }
+}
+
+function normalizeGlobalEncryptedFileConfigPath(input: {
+  readonly configuredPath: string;
+  readonly defaultPath: string;
+  readonly legacyRelativePath: string;
+}): string {
+  const raw = input.configuredPath.trim();
+  if (raw.length === 0) {
+    return raw;
+  }
+  if (raw === input.legacyRelativePath) {
+    return input.defaultPath;
+  }
+  if (raw === "~" || raw.startsWith("~/") || raw.startsWith("/")) {
+    return raw;
+  }
+
+  const home = (process.env.HOME ?? homedir()).trim();
+  const globalConfigDir = dirname(resolveGlobalConfigPath());
+  const resolvedPath = resolve(globalConfigDir, raw);
+  if (home.length > 0 && resolvedPath.startsWith(`${home}/`)) {
+    return `~/${relative(home, resolvedPath)}`;
+  }
+  return resolvedPath;
 }
 
 async function resolveProjectForEnv(opts: {

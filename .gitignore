@@ -28,6 +28,9 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 *.app-key.pem
 *.p8
 hackdance.*.private-key.pem
+.hack.secret.key
+.hack-secrets-file.key
+.hack-secrets.enc.json
 
 # caches
 .eslintcache

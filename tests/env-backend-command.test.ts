@@ -164,6 +164,52 @@ test(
 );
 
 test(
+  "env backend use encrypted_file normalizes legacy relative global secret paths",
+  async () => {
+    if (!tempGlobalConfigPath) {
+      throw new Error("Missing temp global config path");
+    }
+
+    const result = await runHack({
+      args: [
+        "env",
+        "backend",
+        "use",
+        "encrypted_file",
+        "--store-path",
+        ".hack-secrets.enc.json",
+        "--key-path",
+        ".hack-secrets-file.key",
+        "--json",
+      ],
+      env: {
+        ...process.env,
+        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath,
+      },
+    });
+    expect(result.exitCode).toBe(0);
+
+    const json = JSON.parse(result.stdout) as {
+      readonly backend: string;
+      readonly encrypted_file: {
+        readonly path: string;
+        readonly keyPath?: string;
+      };
+    };
+    expect(json.backend).toBe("encrypted_file");
+    expect(json.encrypted_file.path).toBe("~/.hack/secrets.enc.json");
+    expect(json.encrypted_file.keyPath).toBe("~/.hack/secrets-file.key");
+
+    const configText = await readFile(tempGlobalConfigPath, "utf8");
+    expect(configText).toContain('"path": "~/.hack/secrets.enc.json"');
+    expect(configText).toContain('"keyPath": "~/.hack/secrets-file.key"');
+    expect(configText).not.toContain(".hack-secrets.enc.json");
+    expect(configText).not.toContain(".hack-secrets-file.key");
+  },
+  { timeout: 20_000 }
+);
+
+test(
   "env backend use cloud requires provider and stores cloud settings",
   async () => {
     const invalid = await runHack({

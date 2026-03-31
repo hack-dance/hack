@@ -262,6 +262,43 @@ test("run keeps dependency startup when cached runtime state is stale", async ()
   expect(runCalls[0]?.noDeps).toBe(false);
 });
 
+test("run keeps dependency startup when the requested env differs from the live stack env", async () => {
+  const projectRoot = await createProject({
+    runtimeComposeProject: "project-run-env-test",
+    runningServices: ["api"],
+  });
+
+  const input = {
+    ctx: {
+      cwd: projectRoot,
+      cli: CLI_SPEC,
+    },
+    args: {
+      options: {
+        path: projectRoot,
+        project: undefined,
+        env: "qa",
+        branch: undefined,
+        workdir: undefined,
+        profile: undefined,
+      },
+      positionals: {
+        service: "api",
+        cmd: ["printenv"],
+      },
+      raw: {
+        argv: ["--path", projectRoot, "--env", "qa", "api", "printenv"],
+        positionals: ["api", "printenv"],
+      },
+    },
+  } as unknown as Parameters<typeof runCommand.handler>[0];
+
+  const exitCode = await runCommand.handler(input);
+
+  expect(exitCode).toBe(0);
+  expect(runCalls[0]?.noDeps).toBe(false);
+});
+
 async function createProject(input?: {
   readonly services?: readonly string[];
   readonly defaultYaml?: string;

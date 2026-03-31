@@ -1,3 +1,38 @@
+## 2.0.0 (2026-03-27)
+
+* fix(build): stabilize macOS release signing ([32dcea0](https://github.com/hack-dance/hack/commit/32dcea0))
+* fix(ci): stabilize env migration branch checks ([498d793](https://github.com/hack-dance/hack/commit/498d793))
+* fix(doctor): group checks and hide noisy follow-up ([e6f6ace](https://github.com/hack-dance/hack/commit/e6f6ace))
+* fix(doctor): make env migration prompts explicit ([b000438](https://github.com/hack-dance/hack/commit/b000438))
+* fix(doctor): repair compose env refs in modern projects ([1954903](https://github.com/hack-dance/hack/commit/1954903))
+* fix(doctor): repair legacy env cleanup and tickets retry ([1685328](https://github.com/hack-dance/hack/commit/1685328))
+* fix(env): clean legacy config during migration ([eac34d6](https://github.com/hack-dance/hack/commit/eac34d6))
+* fix(env): keep app and project metadata compatible ([7d6fe17](https://github.com/hack-dance/hack/commit/7d6fe17))
+* fix(env): keep init templates and session scope strict ([aee89ba](https://github.com/hack-dance/hack/commit/aee89ba))
+* fix(env): store canonical env configs under .hack ([f4ff398](https://github.com/hack-dance/hack/commit/f4ff398))
+* fix(env): support CI key fallback and mask modern secrets ([85e88f8](https://github.com/hack-dance/hack/commit/85e88f8))
+* fix(env): tighten scope validation for modern overlays ([27dd7c1](https://github.com/hack-dance/hack/commit/27dd7c1))
+* fix(runtime): degrade gracefully when docker is unavailable ([ad0d2f9](https://github.com/hack-dance/hack/commit/ad0d2f9))
+* fix(session): preserve scoped env injection semantics ([64e46e1](https://github.com/hack-dance/hack/commit/64e46e1))
+* fix(test): account for runtime-unavailable offline status ([0a0e5ab](https://github.com/hack-dance/hack/commit/0a0e5ab))
+* fix(test): isolate offline optionality matrix ([c93ae8a](https://github.com/hack-dance/hack/commit/c93ae8a))
+* fix(test): isolate session env suite from Bun mock bleed ([f7c9a2d](https://github.com/hack-dance/hack/commit/f7c9a2d))
+* fix(tickets): force fresh remote checkout during repair ([a58cff4](https://github.com/hack-dance/hack/commit/a58cff4))
+* fix(tickets): isolate hidden ref fetches from remote refmap ([dd649b7](https://github.com/hack-dance/hack/commit/dd649b7))
+* fix(tickets): repair against refreshed hidden refs ([c1c2498](https://github.com/hack-dance/hack/commit/c1c2498))
+* fix(tickets): retry non-fast-forward repair pushes ([2c6b5dc](https://github.com/hack-dance/hack/commit/2c6b5dc))
+* feat(env)!: adopt project env config overlays ([a986dfd](https://github.com/hack-dance/hack/commit/a986dfd))
+* feat(env)!: adopt yaml env overlays and injected session flows ([d933634](https://github.com/hack-dance/hack/commit/d933634))
+* Merge branch 'main' into feat/pulumi-style-env-config ([066c4cb](https://github.com/hack-dance/hack/commit/066c4cb))
+* Merge pull request #33 from hack-dance/feat/pulumi-style-env-config ([b064522](https://github.com/hack-dance/hack/commit/b064522)), closes [#33](https://github.com/hack-dance/hack/issues/33)
+* feat(env): redesign portability around Pulumi-style config ([02228a2](https://github.com/hack-dance/hack/commit/02228a2))
+* feat(env): refine interactive config and key bootstrapping ([bd99f6e](https://github.com/hack-dance/hack/commit/bd99f6e))
+
+
+### BREAKING CHANGE
+
+* project env configuration now uses hack.env.default.yaml and optional hack.env.<overlay>.yaml files as the canonical format. .hack/hack.env.json, backend-first secret flows, and .hack/.env as the default runtime source are legacy compatibility paths. Migrate older repos with hack doctor --migrate-env-config and use hack env add/materialize/exec/shell for the new workflow.
+
 ## <small>1.23.1 (2026-03-26)</small>
 
 * fix(build): include app workspaces in node runtime image ([f6bbaba](https://github.com/hack-dance/hack/commit/f6bbaba))

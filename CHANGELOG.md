@@ -1,3 +1,8 @@
+## <small>2.0.3 (2026-03-31)</small>
+
+* Merge pull request #36 from hack-dance/dimitri/fix-runtime-effective-env-match ([9068559](https://github.com/hack-dance/hack/commit/9068559)), closes [#36](https://github.com/hack-dance/hack/issues/36)
+* fix(runtime): match run env against effective overlay ([f45ae5e](https://github.com/hack-dance/hack/commit/f45ae5e))
+
 ## <small>2.0.2 (2026-03-31)</small>
 
 * Merge pull request #35 from hack-dance/dimitri/fix-runtime-null-env-mismatch ([96a2818](https://github.com/hack-dance/hack/commit/96a2818)), closes [#35](https://github.com/hack-dance/hack/issues/35)

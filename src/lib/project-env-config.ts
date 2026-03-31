@@ -81,6 +81,7 @@ export type ProjectEnvResolvedConfig = {
   readonly merged: ProjectEnvConfig;
   readonly files: readonly string[];
   readonly globalEnv: Readonly<Record<string, string>>;
+  readonly hostEnv: Readonly<Record<string, string>>;
   readonly serviceEnv: Readonly<
     Record<string, Readonly<Record<string, string>>>
   >;
@@ -120,7 +121,7 @@ export function selectProjectEnvValuesForExecutionTarget(opts: {
     return selected;
   }
 
-  const hostOverrides = opts.resolved.serviceEnv[PROJECT_ENV_HOST_SCOPE];
+  const hostOverrides = opts.resolved.hostEnv;
   if (!hostOverrides) {
     return selected;
   }
@@ -498,6 +499,10 @@ export async function resolveProjectEnvConfig(opts: {
     values: merged.values.global ?? {},
     keyText,
   });
+  const hostEnv = resolveProjectEnvScopeValues({
+    values: merged.values[PROJECT_ENV_HOST_SCOPE] ?? {},
+    keyText,
+  });
 
   const declaredScopes = Object.keys(merged.values).sort((left, right) =>
     left.localeCompare(right)
@@ -534,6 +539,7 @@ export async function resolveProjectEnvConfig(opts: {
     merged,
     files,
     globalEnv,
+    hostEnv,
     serviceEnv,
     declaredScopes,
     unknownScopes,

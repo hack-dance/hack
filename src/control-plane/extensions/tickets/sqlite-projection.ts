@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { mkdir, readdir } from "node:fs/promises";
+import { mkdir, readdir, stat } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import type { TicketDocument } from "./documents.ts";
@@ -65,12 +65,12 @@ export function createTicketsSqliteProjection(opts: {
 
     const files = await Promise.all(
       entries.map(async (entry) => {
-        const text = await Bun.file(resolve(eventsDir, entry))
-          .text()
-          .catch(() => "");
+        const filePath = resolve(eventsDir, entry);
+        const metadata = await stat(filePath).catch(() => null);
         return {
           entry,
-          text,
+          size: metadata?.size ?? -1,
+          mtimeMs: metadata ? Math.trunc(metadata.mtimeMs) : -1,
         };
       })
     );
@@ -79,7 +79,8 @@ export function createTicketsSqliteProjection(opts: {
       value: stableStringify(
         files.map((file) => ({
           entry: file.entry,
-          text: file.text,
+          size: file.size,
+          mtimeMs: file.mtimeMs,
         }))
       ),
     });

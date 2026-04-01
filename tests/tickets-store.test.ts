@@ -17,6 +17,7 @@ import {
   buildTicketProvenance,
   findTicketRemoteLink,
 } from "../src/control-plane/extensions/tickets/provenance.ts";
+import { createTicketsSqliteProjection } from "../src/control-plane/extensions/tickets/sqlite-projection.ts";
 import { createTicketsStore } from "../src/control-plane/extensions/tickets/store.ts";
 import { createGitTicketsChannel } from "../src/control-plane/extensions/tickets/tickets-git-channel.ts";
 import { createDefaultControlPlaneConfig } from "../src/control-plane/sdk/config.ts";
@@ -687,6 +688,30 @@ test("tickets store persists a sqlite projection and rebuilds it when deleted", 
     "Projection ticket"
   );
   expect(await Bun.file(projectionPath).exists()).toBe(true);
+}, 20_000);
+
+test("tickets sqlite projection signature tracks journal file metadata instead of reading full contents", async () => {
+  const projectRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-signature-",
+  });
+  const projection = createTicketsSqliteProjection({ projectRoot });
+  const eventsDir = resolve(projectRoot, ".hack/tickets/events");
+  const journalPath = resolve(eventsDir, "events-2026-04.jsonl");
+
+  await mkdir(eventsDir, { recursive: true });
+  await writeFile(journalPath, '{"ticketId":"T-ONE"}\n');
+
+  const initial = await projection.computeJournalSignature({
+    ticketsRoot: projectRoot,
+  });
+
+  await writeFile(journalPath, '{"ticketId":"T-ONE"}\n{"ticketId":"T-TWO"}\n');
+
+  const updated = await projection.computeJournalSignature({
+    ticketsRoot: projectRoot,
+  });
+
+  expect(updated).not.toBe(initial);
 }, 20_000);
 
 test("normalized ticket adapter preserves compatibility while exposing provenance and documents", () => {

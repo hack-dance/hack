@@ -85,6 +85,7 @@ import { resolveHackEnv, upsertDotEnvValue } from "../lib/hack-env.ts";
 import { parseJsonLines } from "../lib/json-lines.ts";
 import {
   appendLifecycleLogRecord,
+  type LifecycleStateEntry,
   readLifecycleState,
   removeLifecycleStateEntry,
   resolveLifecycleComposeProjectName,
@@ -1805,6 +1806,13 @@ async function stopLifecycleProcesses(opts: {
     projectName: opts.projectName,
     branch: opts.branch,
   });
+  const lifecycleEntries = await readLifecycleState({
+    projectDir: opts.project.projectDir,
+  });
+  const lifecycleEntry =
+    lifecycleEntries.find(
+      (entry) => entry.composeProject === opts.composeProject
+    ) ?? null;
 
   const backends = getMuxBackends();
   for (const backend of backends.values()) {
@@ -1815,6 +1823,12 @@ async function stopLifecycleProcesses(opts: {
     if (!sessions.some((s) => s.name === sessionName)) {
       continue;
     }
+    if (backend.name === "tmux") {
+      await interruptLifecycleTmuxProcesses({
+        sessionName,
+        lifecycleEntry,
+      });
+    }
     await backend.killSession({ name: sessionName });
   }
 
@@ -1822,6 +1836,31 @@ async function stopLifecycleProcesses(opts: {
     projectDir: opts.project.projectDir,
     composeProject: opts.composeProject,
   });
+}
+
+async function interruptLifecycleTmuxProcesses(opts: {
+  readonly sessionName: string;
+  readonly lifecycleEntry: LifecycleStateEntry | null;
+}): Promise<void> {
+  const processWindows = opts.lifecycleEntry?.processes ?? [];
+  if (processWindows.length === 0) {
+    return;
+  }
+
+  for (const processInfo of processWindows) {
+    await exec(
+      [
+        "tmux",
+        "send-keys",
+        "-t",
+        `${opts.sessionName}:${processInfo.windowName}`,
+        "C-c",
+      ],
+      { stdin: "ignore" }
+    );
+  }
+
+  await Bun.sleep(750);
 }
 
 function resolveLifecycleCommandServiceName(opts: {

@@ -127,6 +127,13 @@ test("resolveCommand exposes host exec path", () => {
   expect(resolved.remainingPositionals).toEqual(["bun", "test"]);
 });
 
+test("resolveCommand exposes project exec path", () => {
+  const resolved = resolveCommand(CLI_SPEC, ["exec", "api", "bun", "test"]);
+  expect(resolved.command?.name).toBe("exec");
+  expect(resolved.path.map((command) => command.name)).toEqual(["exec"]);
+  expect(resolved.remainingPositionals).toEqual(["api", "bun", "test"]);
+});
+
 test("resolveCommand exposes org, team, and auth invite command paths", () => {
   const orgResolved = resolveCommand(CLI_SPEC, ["org", "member", "invite"]);
   expect(orgResolved.command?.name).toBe("invite");

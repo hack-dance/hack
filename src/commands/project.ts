@@ -352,6 +352,7 @@ type DownArgs = CommandArgs<typeof downOptions, readonly []>;
 type RestartArgs = CommandArgs<typeof restartOptions, readonly []>;
 type PsArgs = CommandArgs<typeof psOptions, readonly []>;
 type RunArgs = CommandArgs<typeof runOptions, typeof runPositionals>;
+type ExecArgs = CommandArgs<typeof runOptions, typeof runPositionals>;
 type LogsArgs = CommandArgs<typeof logsOptions, typeof logsPositionals>;
 type OpenArgs = CommandArgs<typeof openOptions, typeof openPositionals>;
 
@@ -421,6 +422,18 @@ const runSpec = defineCommand({
 } as const);
 
 export const runCommand = withHandler(runSpec, handleRun);
+
+const execSpec = defineCommand({
+  name: "exec",
+  summary:
+    "Run a command in an already-running service container (docker compose exec)",
+  group: "Project",
+  options: runOptions,
+  positionals: runPositionals,
+  subcommands: [],
+} as const);
+
+export const execCommand = withHandler(execSpec, handleExec);
 
 const logsSpec = defineCommand({
   name: "logs",
@@ -4444,11 +4457,11 @@ function renderHackFolderReadme(opts: {
     "  REDIS_URL: redis://redis:6379",
     "```",
     "",
-    "If you need to run tools from your host machine, prefer `docker compose exec` to avoid host port conflicts:",
+    "If you need to run tools inside an already-running container, prefer `hack exec`:",
     "",
     "```bash",
-    "docker compose -f .hack/docker-compose.yml exec db psql -U postgres -d mydb",
-    "docker compose -f .hack/docker-compose.yml exec redis redis-cli",
+    "hack exec db -- psql -U postgres -d mydb",
+    "hack exec redis -- redis-cli",
     "```",
     "",
     "## Hostnames",
@@ -5597,6 +5610,99 @@ async function handleRun({
   });
 }
 
+async function handleExec({
+  ctx,
+  args,
+}: {
+  readonly ctx: CliContext;
+  readonly args: ExecArgs;
+}): Promise<number> {
+  const project = await resolveProjectForArgs({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+  });
+  const branch = resolveBranchSlug(args.options.branch);
+  const envName = resolveRequestedEnvName({
+    envOption: args.options.env,
+  });
+
+  await touchBranchUsageIfNeeded({ project, branch });
+  const service = (args.positionals.service ?? "").trim();
+  if (service.length === 0) {
+    throw new CliUsageError("Missing required argument: service");
+  }
+
+  const workdir = (args.options.workdir ?? "").trim();
+  const profiles = parseCsvList(args.options.profile);
+  const cmdArgs = args.positionals.cmd;
+  if (cmdArgs.length === 0) {
+    throw new CliUsageError("Command is required.");
+  }
+
+  const cfg = await readProjectConfig(project);
+  if (cfg.parseError) {
+    const configPath = cfg.configPath ?? project.configFile;
+    logger.warn({
+      message: `Failed to parse ${configPath}: ${cfg.parseError}`,
+    });
+  }
+
+  const baseProjectName = await resolveComposeProjectName({ project, cfg });
+  const composeProjectName = branch ? `${baseProjectName}--${branch}` : null;
+  const devHost = branch ? await resolveBranchDevHost({ project }) : null;
+  const aliasHost =
+    branch && devHost ? resolveBranchAliasHost({ devHost, cfg }) : null;
+  const internalOverride = await resolveInternalComposeOverride({
+    project,
+    cfg,
+    branch,
+    devHost,
+    aliasHost,
+  });
+  const composeFiles = internalOverride
+    ? [project.composeFile, internalOverride]
+    : [project.composeFile];
+
+  const projectName = sanitizeProjectSlug(baseProjectName);
+  const lifecycleComposeProject = resolveLifecycleComposeProjectName({
+    projectName,
+    branch,
+  });
+  const allServiceNames = await readComposeServiceNames(project.composeFile);
+  const envOverrides = await resolveComposeEnvOverrides({
+    project,
+    projectName,
+    targetServices: [service],
+    allServiceNames,
+    envName,
+  });
+  const composeFilesWithEnv = [...composeFiles, ...envOverrides.composeFiles];
+  const execReady = await resolveExecTargetReady({
+    composeFiles: composeFilesWithEnv,
+    composeProjectKey: lifecycleComposeProject,
+    composeProject: composeProjectName,
+    project,
+    profiles,
+    effectiveEnvName: envOverrides.effectiveEnvName,
+    service,
+  });
+  if (!execReady.ok) {
+    throw new CliUsageError(execReady.message);
+  }
+
+  return await composeRuntimeBackend.exec({
+    composeFiles: composeFilesWithEnv,
+    composeProject: composeProjectName,
+    profiles,
+    service,
+    workdir: workdir.length > 0 ? workdir : undefined,
+    cmdArgs,
+    cwd: dirname(project.composeFile),
+    env: envOverrides.env,
+  });
+}
+
 async function resolveCanSkipRunDependencies(opts: {
   readonly composeFiles: readonly string[];
   readonly composeProjectKey: string;
@@ -5630,6 +5736,60 @@ async function resolveCanSkipRunDependencies(opts: {
     const state = getString(entry, "State")?.trim().toLowerCase();
     return service === opts.service && state === "running";
   });
+}
+
+async function resolveExecTargetReady(opts: {
+  readonly composeFiles: readonly string[];
+  readonly composeProjectKey: string;
+  readonly composeProject: string | null;
+  readonly profiles: readonly string[];
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly effectiveEnvName: string | null;
+  readonly service: string;
+}): Promise<
+  { readonly ok: true } | { readonly ok: false; readonly message: string }
+> {
+  const runtimeState = await readProjectRuntimeStateEntry({
+    projectDir: opts.project.projectDir,
+    composeProject: opts.composeProjectKey,
+  });
+  if (runtimeState && runtimeState.envName !== opts.effectiveEnvName) {
+    const runningEnv = runtimeState.envName ?? "base";
+    const requestedEnv = opts.effectiveEnvName ?? "base";
+    return {
+      ok: false,
+      message: `The running stack uses env ${runningEnv}, but this exec request resolves to ${requestedEnv}. Restart the stack with the requested env or omit --env.`,
+    };
+  }
+
+  const psResult = await composeRuntimeBackend.psJson({
+    composeFiles: opts.composeFiles,
+    composeProject: opts.composeProject,
+    profiles: opts.profiles,
+    cwd: dirname(opts.project.composeFile),
+  });
+  if (psResult.exitCode !== 0) {
+    return {
+      ok: false,
+      message:
+        "Unable to inspect running services for this project. Start the stack with `hack up -d` before using `hack exec`.",
+    };
+  }
+
+  const runningServices = parseJsonLines(psResult.stdout);
+  const targetIsRunning = runningServices.some((entry) => {
+    const service = getString(entry, "Service")?.trim();
+    const state = getString(entry, "State")?.trim().toLowerCase();
+    return service === opts.service && state === "running";
+  });
+  if (!targetIsRunning) {
+    return {
+      ok: false,
+      message: `Service "${opts.service}" is not running. Start the stack with \`hack up -d\` or use \`hack run ${opts.service} ...\` for a one-off container.`,
+    };
+  }
+
+  return { ok: true };
 }
 
 function computeWantsLokiExplicit(opts: {

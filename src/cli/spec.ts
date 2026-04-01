@@ -7,7 +7,7 @@ import { crashCaptureCommand } from "../commands/crash-capture.ts";
 import { daemonCommand } from "../commands/daemon.ts";
 import { dispatchCommand } from "../commands/dispatch.ts";
 import { doctorCommand } from "../commands/doctor.ts";
-import { envCommand } from "../commands/env.ts";
+import { envCommand, hostCommand } from "../commands/env.ts";
 import { gatewayCommand } from "../commands/gateway.ts";
 import { globalCommand } from "../commands/global.ts";
 import { helpCommand } from "../commands/help.ts";
@@ -88,6 +88,7 @@ export const CLI_SPEC = defineCli({
     theCommand,
     secretsCommand,
     envCommand,
+    hostCommand,
     configCommand,
     mcpCommand,
     setupCommand,

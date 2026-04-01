@@ -293,8 +293,9 @@ Workspaces (mux-managed, tmux-first by default):
 - Stop workspace: `hack session stop <workspace>`
 
 Host-side env helpers:
-- One-off host command with injected env: `hack env exec --env qa --service api -- bun db:migrate`
-- Interactive host shell with injected env: `hack env shell --env qa --service api`
+- One-off host command with injected env: `hack host exec --env qa --scope api -- bun db:migrate`
+- `--scope` selects which env scope to inject; it does not move execution into that service container.
+- Interactive host shell with injected env: `hack host shell --env qa --scope api`
 
 Tickets (git-backed):
 - Create: `hack tickets create --title "..." --body-stdin`

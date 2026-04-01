@@ -116,6 +116,17 @@ test("resolveCommand finds nested project owner show command", () => {
   ]);
   expect(resolved.remainingPositionals).toEqual([]);
 });
+
+test("resolveCommand exposes host exec path", () => {
+  const resolved = resolveCommand(CLI_SPEC, ["host", "exec", "bun", "test"]);
+  expect(resolved.command?.name).toBe("exec");
+  expect(resolved.path.map((command) => command.name)).toEqual([
+    "host",
+    "exec",
+  ]);
+  expect(resolved.remainingPositionals).toEqual(["bun", "test"]);
+});
+
 test("resolveCommand exposes org, team, and auth invite command paths", () => {
   const orgResolved = resolveCommand(CLI_SPEC, ["org", "member", "invite"]);
   expect(orgResolved.command?.name).toBe("invite");

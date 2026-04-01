@@ -122,13 +122,17 @@ Main surface:
 
 - `hack env list`
 - `hack env add`
+- `hack host exec`
+- `hack host shell`
 - `hack env exec`
 - `hack env shell`
 - `hack env unset`
 - `hack env materialize`
 
-`hack env exec` and `hack env shell` default to a host-local env view for host-side commands. Use
-`--target compose` when you explicitly want the raw compose/container-oriented values.
+Prefer `hack host exec` and `hack host shell` when a command should run on your host machine but
+still needs Hack-resolved env. They default to a host-local env view and accept `--scope` when you
+want service-scoped values without running inside that container. Use `--target compose` when you
+explicitly want the raw compose/container-oriented values.
 
 Reference:
 

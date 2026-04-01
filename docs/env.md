@@ -97,6 +97,8 @@ Hack reads the canonical YAML files and injects the resolved env directly into:
 - `hack run`
 - `hack restart`
 - lifecycle host processes
+- `hack host exec`
+- `hack host shell`
 - `hack env exec`
 - `hack env shell`
 - `hack session start --env ... --service ...`
@@ -106,13 +108,22 @@ That means `.hack/.env` is no longer the primary runtime source of truth.
 
 `hack env materialize` is manual by design. Use it only when you need a compatibility file for an external tool that expects `.env` on disk.
 
-For host commands, `hack env exec` and `hack env shell` default to a host-local view. That means
-Hack prefers host-usable values when it can:
+For host commands, `hack host exec`, `hack host shell`, `hack env exec`, and `hack env shell`
+default to a host-local view. That means Hack prefers host-usable values when it can:
 
 - explicit `host` scope values override the normal `global` + `<service>` merge
 - common container-only hostnames such as `host.docker.internal` and compose service hosts are rewritten to `127.0.0.1`
 
 Use `--target compose` if you explicitly want the container-oriented compose view instead.
+
+## Choosing the right execution surface
+
+- `hack host exec` / `hack host shell`: run on your host machine with Hack-resolved env injected.
+- `hack run <service> ...`: run a one-off command in the compose network with an ephemeral service container.
+- `docker compose exec <service> ...`: run inside an already-running container when you specifically need that container's live filesystem or process context.
+
+For host execution, `--scope` means "which env scope should Hack inject", not "where should this run."
+For example, `hack host exec --scope api -- bun db:migrate` still runs on the host.
 
 ## Common commands
 
@@ -153,17 +164,17 @@ hack env materialize --env qa --service api
 Run a host command with injected env:
 
 ```bash
-hack env exec -- bun db:migrate
-hack env exec --env qa --service api -- bun db:migrate
-hack env exec --env qa --service api --target compose -- bun test
+hack host exec -- bun db:migrate
+hack host exec --env qa --scope api -- bun db:migrate
+hack host exec --env qa --scope api --target compose -- bun test
 ```
 
 Open a host shell with injected env:
 
 ```bash
-hack env shell
-hack env shell --env qa --service api
-hack env shell --env qa --service api --target compose
+hack host shell
+hack host shell --env qa --scope api
+hack host shell --env qa --scope api --target compose
 ```
 
 Example with an explicit host override:
@@ -252,7 +263,7 @@ If you are writing new docs or new project setup flows, document the YAML overla
 - Never commit `.hack.secret.key`
 - Prefer `hack env add` over hand-editing encrypted values
 - Prefer direct runtime injection over materializing `.hack/.env`
-- Use `hack env exec` or env-aware sessions for host-side scripts like migrations, generators, and admin tasks
+- Use `hack host exec` or env-aware sessions for host-side scripts like migrations, generators, and admin tasks
 
 ## Related docs
 

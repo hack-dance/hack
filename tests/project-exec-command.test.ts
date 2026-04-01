@@ -164,6 +164,45 @@ test("exec rejects env mismatch against the running stack", async () => {
   expect(execCalls).toHaveLength(0);
 });
 
+test("exec validates env mismatch against the lifecycle compose key", async () => {
+  const projectRoot = await createProject({
+    composeName: "Project_Exec_Test",
+    runningServices: ["api"],
+    runtimeComposeProject: "project-exec-test",
+    runtimeEnvName: null,
+  });
+
+  const input = {
+    ctx: {
+      cwd: projectRoot,
+      cli: CLI_SPEC,
+    },
+    args: {
+      options: {
+        path: projectRoot,
+        project: undefined,
+        env: "qa",
+        branch: undefined,
+        workdir: undefined,
+        profile: undefined,
+      },
+      positionals: {
+        service: "api",
+        cmd: ["bun", "test"],
+      },
+      raw: {
+        argv: ["--path", projectRoot, "--env", "qa", "api", "bun", "test"],
+        positionals: ["api", "bun", "test"],
+      },
+    },
+  } as unknown as Parameters<typeof execCommand.handler>[0];
+
+  await expect(execCommand.handler(input)).rejects.toThrow(
+    "The running stack uses env base, but this exec request resolves to qa."
+  );
+  expect(execCalls).toHaveLength(0);
+});
+
 test("exec rejects services that are not running", async () => {
   const projectRoot = await createProject({
     runningServices: ["worker"],
@@ -202,7 +241,9 @@ test("exec rejects services that are not running", async () => {
 });
 
 async function createProject(input?: {
+  readonly composeName?: string;
   readonly runningServices?: readonly string[];
+  readonly runtimeComposeProject?: string;
   readonly runtimeEnvName?: string | null;
 }): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "hack-project-exec-"));
@@ -216,6 +257,7 @@ async function createProject(input?: {
   await writeFile(
     resolve(projectDir, PROJECT_COMPOSE_FILENAME),
     [
+      ...(input?.composeName ? [`name: ${input.composeName}`] : []),
       "services:",
       "  api:",
       "    image: alpine:3.20",
@@ -271,7 +313,7 @@ async function createProject(input?: {
       {
         entries: [
           {
-            composeProject: "project-exec-test",
+            composeProject: input?.runtimeComposeProject ?? "project-exec-test",
             envName:
               input?.runtimeEnvName === undefined ? "qa" : input.runtimeEnvName,
             updatedAt: "2026-04-01T00:00:00.000Z",

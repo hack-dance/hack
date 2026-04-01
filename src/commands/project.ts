@@ -5388,6 +5388,10 @@ async function handleExec({
     : [project.composeFile];
 
   const projectName = sanitizeProjectSlug(baseProjectName);
+  const lifecycleComposeProject = resolveLifecycleComposeProjectName({
+    projectName,
+    branch,
+  });
   const allServiceNames = await readComposeServiceNames(project.composeFile);
   const envOverrides = await resolveComposeEnvOverrides({
     project,
@@ -5399,7 +5403,7 @@ async function handleExec({
   const composeFilesWithEnv = [...composeFiles, ...envOverrides.composeFiles];
   const execReady = await resolveExecTargetReady({
     composeFiles: composeFilesWithEnv,
-    composeProjectKey: composeProjectName ?? baseProjectName,
+    composeProjectKey: lifecycleComposeProject,
     composeProject: composeProjectName,
     project,
     profiles,

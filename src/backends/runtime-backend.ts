@@ -43,6 +43,10 @@ export interface RuntimeExecOptions extends RuntimeBaseOptions {
   readonly cmdArgs: readonly string[];
 }
 
+function shouldDisableExecTty(): boolean {
+  return !(process.stdin.isTTY === true && process.stdout.isTTY === true);
+}
+
 function buildComposeArgs(opts: RuntimeBaseOptions): string[] {
   return [
     "docker",
@@ -129,6 +133,7 @@ export const composeRuntimeBackend: RuntimeBackend = {
     const cmd = [
       ...buildComposeArgs(opts),
       "exec",
+      ...(shouldDisableExecTty() ? ["-T"] : []),
       ...(opts.workdir && opts.workdir.length > 0 ? ["-w", opts.workdir] : []),
       opts.service,
       ...(opts.cmdArgs.length > 0 ? opts.cmdArgs : []),

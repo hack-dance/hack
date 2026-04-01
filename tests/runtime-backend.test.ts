@@ -163,16 +163,43 @@ test("composeRuntimeBackend.run can skip dependency startup", async () => {
 });
 
 test("composeRuntimeBackend.exec supports workdir and args", async () => {
-  const composeRuntimeBackend = await loadComposeRuntimeBackend();
-  await composeRuntimeBackend.exec({
-    composeFiles: ["docker-compose.yml"],
-    composeProject: "proj",
-    profiles: [],
-    service: "api",
-    workdir: "/app",
-    cmdArgs: ["bun", "dev"],
-    cwd: "/tmp",
+  const stdinDescriptor = Object.getOwnPropertyDescriptor(
+    process.stdin,
+    "isTTY"
+  );
+  const stdoutDescriptor = Object.getOwnPropertyDescriptor(
+    process.stdout,
+    "isTTY"
+  );
+
+  Object.defineProperty(process.stdin, "isTTY", {
+    configurable: true,
+    value: true,
   });
+  Object.defineProperty(process.stdout, "isTTY", {
+    configurable: true,
+    value: true,
+  });
+
+  try {
+    const composeRuntimeBackend = await loadComposeRuntimeBackend();
+    await composeRuntimeBackend.exec({
+      composeFiles: ["docker-compose.yml"],
+      composeProject: "proj",
+      profiles: [],
+      service: "api",
+      workdir: "/app",
+      cmdArgs: ["bun", "dev"],
+      cwd: "/tmp",
+    });
+  } finally {
+    if (stdinDescriptor) {
+      Object.defineProperty(process.stdin, "isTTY", stdinDescriptor);
+    }
+    if (stdoutDescriptor) {
+      Object.defineProperty(process.stdout, "isTTY", stdoutDescriptor);
+    }
+  }
 
   expect(runCalls[0]).toEqual([
     "docker",
@@ -184,6 +211,59 @@ test("composeRuntimeBackend.exec supports workdir and args", async () => {
     "exec",
     "-w",
     "/app",
+    "api",
+    "bun",
+    "dev",
+  ]);
+});
+
+test("composeRuntimeBackend.exec disables TTY for non-interactive sessions", async () => {
+  const stdinDescriptor = Object.getOwnPropertyDescriptor(
+    process.stdin,
+    "isTTY"
+  );
+  const stdoutDescriptor = Object.getOwnPropertyDescriptor(
+    process.stdout,
+    "isTTY"
+  );
+
+  Object.defineProperty(process.stdin, "isTTY", {
+    configurable: true,
+    value: false,
+  });
+  Object.defineProperty(process.stdout, "isTTY", {
+    configurable: true,
+    value: false,
+  });
+
+  try {
+    const composeRuntimeBackend = await loadComposeRuntimeBackend();
+    await composeRuntimeBackend.exec({
+      composeFiles: ["docker-compose.yml"],
+      composeProject: "proj",
+      profiles: [],
+      service: "api",
+      cmdArgs: ["bun", "dev"],
+      cwd: "/tmp",
+    });
+  } finally {
+    if (stdinDescriptor) {
+      Object.defineProperty(process.stdin, "isTTY", stdinDescriptor);
+    }
+    if (stdoutDescriptor) {
+      Object.defineProperty(process.stdout, "isTTY", stdoutDescriptor);
+    }
+  }
+
+  expect(runCalls[0]).toEqual([
+    "docker",
+    "compose",
+    "-p",
+    "proj",
+    "-f",
+    "docker-compose.yml",
+    "exec",
+    "-T",
     "api",
     "bun",
     "dev",

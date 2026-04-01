@@ -1,3 +1,22 @@
+## 2.2.0 (2026-04-01)
+
+* Merge branch 'main' into dimitri/exec-command-surface ([e2eb7f6](https://github.com/hack-dance/hack/commit/e2eb7f6))
+* Merge branch 'main' into dimitri/exec-command-surface ([a068e7e](https://github.com/hack-dance/hack/commit/a068e7e))
+* Merge branch 'main' into dimitri/fix-lifecycle-and-tickets-speed ([0ce84f7](https://github.com/hack-dance/hack/commit/0ce84f7))
+* Merge branch 'main' into dimitri/fix-lifecycle-and-tickets-speed ([7a21672](https://github.com/hack-dance/hack/commit/7a21672))
+* Merge pull request #38 from hack-dance/dimitri/exec-command-surface ([56c2e9e](https://github.com/hack-dance/hack/commit/56c2e9e)), closes [#38](https://github.com/hack-dance/hack/issues/38)
+* Merge pull request #39 from hack-dance/dimitri/fix-lifecycle-and-tickets-speed ([2ad76b4](https://github.com/hack-dance/hack/commit/2ad76b4)), closes [#39](https://github.com/hack-dance/hack/issues/39)
+* fix(cli): harden lifecycle cleanup and isolate exec tests ([18904e0](https://github.com/hack-dance/hack/commit/18904e0))
+* fix(cli): harden lifecycle cleanup and local tickets reads ([a70f1a2](https://github.com/hack-dance/hack/commit/a70f1a2))
+* fix(cli): stop lifecycle tunnel leaks and speed tickets reads ([378f7ad](https://github.com/hack-dance/hack/commit/378f7ad))
+* fix(cli): tighten lifecycle shutdown and ticket refresh ([74bd742](https://github.com/hack-dance/hack/commit/74bd742))
+* fix(runtime): harden exec session checks ([9ee1d8d](https://github.com/hack-dance/hack/commit/9ee1d8d))
+* fix(tickets): fail fresh clone reads on remote fetch errors ([e1f728b](https://github.com/hack-dance/hack/commit/e1f728b))
+* fix(tickets): preserve projection freshness on reads ([645e370](https://github.com/hack-dance/hack/commit/645e370))
+* test(runtime): isolate exec command logger behavior ([382a84c](https://github.com/hack-dance/hack/commit/382a84c))
+* test(tickets): cover unreachable remote checkout recovery ([40fd6f2](https://github.com/hack-dance/hack/commit/40fd6f2))
+* feat(runtime): add exec command for live service containers ([e6a3a9e](https://github.com/hack-dance/hack/commit/e6a3a9e))
+
 ## 2.1.0 (2026-04-01)
 
 * Merge pull request #37 from hack-dance/dimitri/host-command-surface ([6fc4558](https://github.com/hack-dance/hack/commit/6fc4558)), closes [#37](https://github.com/hack-dance/hack/issues/37)

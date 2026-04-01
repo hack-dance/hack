@@ -1,3 +1,8 @@
+## <small>2.2.1 (2026-04-01)</small>
+
+* Merge pull request #40 from hack-dance/dimitri/fix-lifecycle-non-login-shell ([8a21daf](https://github.com/hack-dance/hack/commit/8a21daf)), closes [#40](https://github.com/hack-dance/hack/issues/40)
+* fix(cli): avoid login shells for lifecycle commands ([2963d46](https://github.com/hack-dance/hack/commit/2963d46))
+
 ## 2.2.0 (2026-04-01)
 
 * Merge branch 'main' into dimitri/exec-command-surface ([e2eb7f6](https://github.com/hack-dance/hack/commit/e2eb7f6))

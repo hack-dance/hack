@@ -5,6 +5,8 @@ import {
   readdir,
   readFile,
   rm,
+  stat,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -690,6 +692,47 @@ test("tickets store persists a sqlite projection and rebuilds it when deleted", 
   expect(await Bun.file(projectionPath).exists()).toBe(true);
 }, 20_000);
 
+test("tickets store hydrates remote tickets on a fresh clone without an explicit sync", async () => {
+  const remoteRoot = await mkdtemp(join(tmpdir(), "hack-cli-tickets-remote-"));
+  tempRoots.push(remoteRoot);
+  await run({ cwd: remoteRoot, cmd: ["git", "init", "--bare"] });
+
+  const writerRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-writer-",
+  });
+  await run({
+    cwd: writerRoot,
+    cmd: ["git", "remote", "add", "origin", remoteRoot],
+  });
+  const writerStore = await createStore({ projectRoot: writerRoot });
+
+  const created = await writerStore.createTicket({
+    title: "Remote hydration ticket",
+    body: "Should appear on a fresh clone read path.",
+    owner: "hack",
+    source: "hack",
+    actor: "creator@hack",
+  });
+  expect(created.ok).toBe(true);
+  if (!created.ok) {
+    throw new Error(created.error);
+  }
+
+  const readerRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-reader-",
+  });
+  await run({
+    cwd: readerRoot,
+    cmd: ["git", "remote", "add", "origin", remoteRoot],
+  });
+  const readerStore = await createStore({ projectRoot: readerRoot });
+
+  const tickets = await readerStore.listTickets();
+  expect(tickets.map((ticket) => ticket.title)).toContain(
+    "Remote hydration ticket"
+  );
+}, 20_000);
+
 test("tickets sqlite projection signature tracks journal file metadata instead of reading full contents", async () => {
   const projectRoot = await createTempGitProject({
     prefix: "hack-cli-tickets-signature-",
@@ -700,12 +743,21 @@ test("tickets sqlite projection signature tracks journal file metadata instead o
 
   await mkdir(eventsDir, { recursive: true });
   await writeFile(journalPath, '{"ticketId":"T-ONE"}\n');
+  const baseMtimeSeconds = 1_700_000_000;
+  await utimes(journalPath, baseMtimeSeconds + 0.123, baseMtimeSeconds + 0.123);
 
   const initial = await projection.computeJournalSignature({
     ticketsRoot: projectRoot,
   });
 
-  await writeFile(journalPath, '{"ticketId":"T-ONE"}\n{"ticketId":"T-TWO"}\n');
+  await writeFile(journalPath, '{"ticketId":"T-TWO"}\n');
+  await utimes(journalPath, baseMtimeSeconds + 0.789, baseMtimeSeconds + 0.789);
+
+  const updatedMetadata = await stat(journalPath);
+  expect(Math.trunc(updatedMetadata.mtimeMs)).toBe(
+    Math.trunc((baseMtimeSeconds + 0.789) * 1000)
+  );
+  expect(updatedMetadata.mtimeMs).not.toBe((baseMtimeSeconds + 0.123) * 1000);
 
   const updated = await projection.computeJournalSignature({
     ticketsRoot: projectRoot,

@@ -468,10 +468,6 @@ test("ensureCheckedOut can reuse the local tickets branch without refreshing rem
   const projectRoot = await createTempGitProject({
     prefix: "hack-cli-tickets-git-local-checkout-",
   });
-  await run({
-    cwd: projectRoot,
-    cmd: ["git", "remote", "add", "origin", "ssh://127.0.0.1:1/does-not-exist"],
-  });
 
   const channel = __testOnly.createGitTicketsChannel({
     projectRoot,
@@ -486,6 +482,18 @@ test("ensureCheckedOut can reuse the local tickets branch without refreshing rem
       info: (_input: { message: string }) => {},
       warn: (_input: { message: string }) => {},
     },
+  });
+
+  const initialWorktree = await channel.ensureCheckedOut({
+    refreshRemote: false,
+  });
+  expect(
+    await Bun.file(resolve(initialWorktree, ".hack/tickets/README.md")).text()
+  ).toContain("Tickets ref for hack-cli");
+
+  await run({
+    cwd: projectRoot,
+    cmd: ["git", "remote", "add", "origin", "ssh://127.0.0.1:1/does-not-exist"],
   });
 
   const worktree = await channel.ensureCheckedOut({ refreshRemote: false });

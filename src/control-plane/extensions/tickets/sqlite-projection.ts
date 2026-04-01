@@ -70,7 +70,7 @@ export function createTicketsSqliteProjection(opts: {
         return {
           entry,
           size: metadata?.size ?? -1,
-          mtimeMs: metadata ? Math.trunc(metadata.mtimeMs) : -1,
+          mtimeMs: metadata?.mtimeMs ?? -1,
         };
       })
     );

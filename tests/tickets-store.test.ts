@@ -781,6 +781,67 @@ test("tickets store does not poison a fresh clone after an unreachable first rem
   );
 }, 20_000);
 
+test("tickets store refreshes remote state before validating mutation targets", async () => {
+  const remoteRoot = await mkdtemp(join(tmpdir(), "hack-cli-tickets-remote-"));
+  tempRoots.push(remoteRoot);
+  await run({ cwd: remoteRoot, cmd: ["git", "init", "--bare"] });
+
+  const writerRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-writer-refresh-",
+  });
+  await run({
+    cwd: writerRoot,
+    cmd: ["git", "remote", "add", "origin", remoteRoot],
+  });
+  const writerStore = await createStore({ projectRoot: writerRoot });
+
+  const baseTicket = await writerStore.createTicket({
+    title: "Base ticket",
+    owner: "hack",
+    source: "hack",
+    actor: "creator@hack",
+  });
+  expect(baseTicket.ok).toBe(true);
+  if (!baseTicket.ok) {
+    throw new Error(baseTicket.error);
+  }
+
+  const readerRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-reader-refresh-",
+  });
+  await run({
+    cwd: readerRoot,
+    cmd: ["git", "remote", "add", "origin", remoteRoot],
+  });
+  const readerStore = await createStore({ projectRoot: readerRoot });
+
+  const initialTickets = await readerStore.listTickets();
+  expect(initialTickets.map((ticket) => ticket.title)).toContain("Base ticket");
+
+  const created = await writerStore.createTicket({
+    title: "Remote-only ticket",
+    owner: "hack",
+    source: "hack",
+    actor: "creator@hack",
+  });
+  expect(created.ok).toBe(true);
+  if (!created.ok) {
+    throw new Error(created.error);
+  }
+
+  const updated = await readerStore.setStatus({
+    ticketId: created.ticket.ticketId,
+    status: "in_progress",
+    actor: "reader@hack",
+  });
+  expect(updated).toEqual({ ok: true, changed: true });
+
+  const refreshed = await readerStore.getTicket({
+    ticketId: created.ticket.ticketId,
+  });
+  expect(refreshed?.status).toBe("in_progress");
+}, 20_000);
+
 test("tickets sqlite projection signature tracks journal file metadata instead of reading full contents", async () => {
   const projectRoot = await createTempGitProject({
     prefix: "hack-cli-tickets-signature-",

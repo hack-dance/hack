@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import {
   collectDescendantProcessGroupIds,
   parseProcessSnapshotOutput,
+  resolveLifecycleProcessGroupIdsForTmuxState,
 } from "../src/commands/project.ts";
 import { readLifecycleState } from "../src/lib/lifecycle-runtime.ts";
 
@@ -89,6 +90,36 @@ test("collectDescendantProcessGroupIds returns root and descendant groups once",
   });
 
   expect(groups).toEqual([100, 101, 103]);
+});
+
+test("resolveLifecycleProcessGroupIdsForTmuxState ignores stale persisted ids", () => {
+  const groups = resolveLifecycleProcessGroupIdsForTmuxState({
+    lifecycleEntry: {
+      composeProject: "event-agent",
+      projectName: "event-agent",
+      branch: "feature-cleanup",
+      sessionName: "event-agent--lifecycle-feature-cleanup",
+      backend: "tmux",
+      updatedAt: "2026-04-01T14:00:00.000Z",
+      processes: [
+        {
+          name: "proxy",
+          windowName: "proxy",
+          logPath: "/tmp/event-agent.log",
+          panePid: 99_999,
+          processGroupId: 99_999,
+        },
+      ],
+    },
+    panePidsByWindow: new Map([["proxy", [100]]]),
+    snapshot: [
+      { pid: 100, ppid: 1, processGroupId: 100 },
+      { pid: 101, ppid: 100, processGroupId: 101 },
+      { pid: 99_999, ppid: 1, processGroupId: 99_999 },
+    ],
+  });
+
+  expect(groups).toEqual([100, 101]);
 });
 
 async function createLifecycleProjectDir(): Promise<string> {

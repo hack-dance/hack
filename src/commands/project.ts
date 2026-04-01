@@ -2016,37 +2016,45 @@ export function collectDescendantProcessGroupIds(opts: {
   return [...groups].sort((left, right) => left - right);
 }
 
-async function resolveLifecycleProcessGroupIds(opts: {
-  readonly sessionName: string;
+export function resolveLifecycleProcessGroupIdsForTmuxState(opts: {
   readonly lifecycleEntry: LifecycleStateEntry | null;
-}): Promise<number[]> {
+  readonly panePidsByWindow: ReadonlyMap<string, readonly number[]>;
+  readonly snapshot: readonly ProcessSnapshotRow[];
+}): number[] {
   const rootPids = new Set<number>();
-  const processGroupIds = new Set<number>();
 
   for (const processInfo of opts.lifecycleEntry?.processes ?? []) {
-    if (processInfo.panePid) {
-      rootPids.add(processInfo.panePid);
-    }
-    if (processInfo.processGroupId) {
-      processGroupIds.add(processInfo.processGroupId);
-    }
-    for (const panePid of await readTmuxPanePids({
-      sessionName: opts.sessionName,
-      windowName: processInfo.windowName,
-    })) {
+    const currentPanePids =
+      opts.panePidsByWindow.get(processInfo.windowName) ?? [];
+    for (const panePid of currentPanePids) {
       rootPids.add(panePid);
     }
   }
 
-  const snapshot = await readProcessSnapshot();
-  for (const processGroupId of collectDescendantProcessGroupIds({
-    snapshot,
+  return collectDescendantProcessGroupIds({
+    snapshot: opts.snapshot,
     rootPids: [...rootPids],
-  })) {
-    processGroupIds.add(processGroupId);
+  });
+}
+
+async function resolveLifecycleProcessGroupIds(opts: {
+  readonly sessionName: string;
+  readonly lifecycleEntry: LifecycleStateEntry | null;
+}): Promise<number[]> {
+  const panePidsByWindow = new Map<string, readonly number[]>();
+  for (const processInfo of opts.lifecycleEntry?.processes ?? []) {
+    const panePids = await readTmuxPanePids({
+      sessionName: opts.sessionName,
+      windowName: processInfo.windowName,
+    });
+    panePidsByWindow.set(processInfo.windowName, panePids);
   }
 
-  return [...processGroupIds].sort((left, right) => left - right);
+  return resolveLifecycleProcessGroupIdsForTmuxState({
+    lifecycleEntry: opts.lifecycleEntry,
+    panePidsByWindow,
+    snapshot: await readProcessSnapshot(),
+  });
 }
 
 async function terminateLifecycleProcessGroups(opts: {

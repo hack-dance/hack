@@ -36,7 +36,7 @@ mock.module("../src/lib/shell.ts", () => ({
   },
 }));
 
-const { envCommand } = await import("../src/commands/env.ts");
+const { envCommand, hostCommand } = await import("../src/commands/env.ts");
 
 afterEach(async () => {
   runCalls.length = 0;
@@ -102,6 +102,57 @@ test("env exec injects merged overlay env into one-off host commands", async () 
   });
 });
 
+test("host exec injects scoped env into one-off host commands", async () => {
+  const projectRoot = await createProject();
+  const execCommand = findHostSubcommand("exec");
+
+  const input = {
+    ctx: {
+      cwd: projectRoot,
+      cli: CLI_SPEC,
+    },
+    args: {
+      options: {
+        path: projectRoot,
+        project: undefined,
+        env: "qa",
+        scope: "api",
+        target: undefined,
+      },
+      positionals: {
+        command: ["bun", "db:migrate"],
+      },
+      raw: {
+        argv: [
+          "--path",
+          projectRoot,
+          "--env",
+          "qa",
+          "--scope",
+          "api",
+          "bun",
+          "db:migrate",
+        ],
+        positionals: ["bun", "db:migrate"],
+      },
+    },
+  } as unknown as Parameters<typeof execCommand.handler>[0];
+
+  const exitCode = await execCommand.handler(input);
+
+  expect(exitCode).toBe(0);
+  expect(runCalls).toHaveLength(1);
+  expect(runCalls[0]).toEqual({
+    cmd: ["bun", "db:migrate"],
+    cwd: projectRoot,
+    env: {
+      API_BASE_URL: "https://qa.example.com",
+      GLOBAL_FLAG: "base",
+      SERVICE_TOKEN: "overlay-secret",
+    },
+  });
+});
+
 test("env shell opens the current shell with injected project env", async () => {
   const projectRoot = await createProject();
   process.env.SHELL = "/bin/zsh";
@@ -118,6 +169,46 @@ test("env shell opens the current shell with injected project env", async () => 
         project: undefined,
         env: "qa",
         service: undefined,
+        target: undefined,
+      },
+      positionals: {},
+      raw: {
+        argv: ["--path", projectRoot, "--env", "qa"],
+        positionals: [],
+      },
+    },
+  } as unknown as Parameters<typeof shellCommand.handler>[0];
+
+  const exitCode = await shellCommand.handler(input);
+
+  expect(exitCode).toBe(0);
+  expect(runCalls).toHaveLength(1);
+  expect(runCalls[0]).toEqual({
+    cmd: ["/bin/zsh", "-l"],
+    cwd: projectRoot,
+    env: {
+      API_BASE_URL: "https://qa.example.com",
+      GLOBAL_FLAG: "base",
+    },
+  });
+});
+
+test("host shell opens the current shell with injected project env", async () => {
+  const projectRoot = await createProject();
+  process.env.SHELL = "/bin/zsh";
+  const shellCommand = findHostSubcommand("shell");
+
+  const input = {
+    ctx: {
+      cwd: projectRoot,
+      cli: CLI_SPEC,
+    },
+    args: {
+      options: {
+        path: projectRoot,
+        project: undefined,
+        env: "qa",
+        scope: undefined,
         target: undefined,
       },
       positionals: {},
@@ -247,6 +338,11 @@ type EnvSubcommand<N extends EnvSubcommandName> = Extract<
   (typeof envCommand.subcommands)[number],
   { readonly name: N }
 >;
+type HostSubcommandName = (typeof hostCommand.subcommands)[number]["name"];
+type HostSubcommand<N extends HostSubcommandName> = Extract<
+  (typeof hostCommand.subcommands)[number],
+  { readonly name: N }
+>;
 
 function findSubcommand<N extends EnvSubcommandName>(
   name: N
@@ -259,6 +355,20 @@ function findSubcommand<N extends EnvSubcommandName>(
   }
   return command as EnvSubcommand<N> & {
     readonly handler: CommandHandlerFor<EnvSubcommand<N>>;
+  };
+}
+
+function findHostSubcommand<N extends HostSubcommandName>(
+  name: N
+): HostSubcommand<N> & {
+  readonly handler: CommandHandlerFor<HostSubcommand<N>>;
+} {
+  const command = hostCommand.subcommands.find((entry) => entry.name === name);
+  if (!(command && "handler" in command)) {
+    throw new Error(`Missing host subcommand: ${name}`);
+  }
+  return command as HostSubcommand<N> & {
+    readonly handler: CommandHandlerFor<HostSubcommand<N>>;
   };
 }
 

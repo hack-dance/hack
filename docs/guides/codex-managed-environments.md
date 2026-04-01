@@ -78,8 +78,8 @@ bash scripts/maintain-codex-slim.sh
 - `hack linear`
 - `hack x github`
 - `hack env list`
-- `hack env exec`
-- `hack env shell`
+- `hack host exec`
+- `hack host shell`
 - repo-local docs, specs, and agent setup
 - command and config surfaces that do not require the machine-wide runtime stack
 
@@ -88,11 +88,12 @@ If the repo uses the modern env overlay model, provide secret decryption materia
 
 ```bash
 export HACK_ENV_SECRET_KEY="..."
-hack env exec --env qa --service api -- bun db:migrate
-hack env exec --env qa --service api --target compose -- bun test
+hack host exec --env qa --scope api -- bun db:migrate
+hack host exec --env qa --scope api --target compose -- bun test
 ```
 
-`hack env exec` and `hack env shell` default to a host-local env view for host commands. Use
+`hack host exec` and `hack host shell` default to a host-local env view for host commands. Use
+`--scope` when you want service-scoped values without running inside that service container. Use
 `--target compose` when you explicitly want the container-oriented compose view instead.
 
 ## Not available in slim mode

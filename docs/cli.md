@@ -92,6 +92,7 @@ Current practical rule:
 | `hack auth` | Manage Hack account sign-in | Collaboration & integrations |
 | `hack linear` | Connect Linear and sync repo work with Linear projects/issues | Collaboration & integrations |
 | `hack env` | Set project env vars and local secrets | Collaboration & integrations |
+| `hack host` | Run host-side commands with project env injected | Collaboration & integrations |
 | `hack session` | Manage persistent project workspaces with tmux-first onboarding | Collaboration & integrations |
 | `hack ssh` | Show SSH connection info for remote access to this machine | Collaboration & integrations |
 | `hack tickets` | Track repo-local work without leaving git | Collaboration & integrations |
@@ -1662,6 +1663,61 @@ Options:
 | `--project <name>` | string | - | Target a registered project by name |
 | `--env <name\|base>` | string | - | Apply an optional env overlay by name |
 | `--service <name>` | string | - | Resolve values for one service scope |
+| `--target <host\|compose>` | string | `host` | Host-local env view for host commands, or raw compose view |
+
+### hack host
+
+Usage: `hack host <subcommand>`
+
+Use `hack host` when a command should run on the host machine, not inside the compose network, but
+still needs Hack-resolved env. `--scope` selects which env scope to inject; it does not choose a
+container execution target.
+
+If you need a one-off command in the compose network, use `hack run <service> ...` instead.
+If you need to run inside an already-running container, use `docker compose exec <service> ...`
+today.
+
+Subcommands:
+
+| Subcommand | Summary |
+| --- | --- |
+| `exec` | Run a host command with project env injected |
+| `shell` | Open a host shell with project env injected |
+
+#### hack host exec
+
+Usage: `hack host exec [options] <command...>`
+
+Runs a host command with injected env. Default target is `host`, which applies the host-local env
+view and any `host` scope overrides. Use `--target compose` to preserve the container-oriented
+compose view while still running on the host.
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
+| `--project <name>` | string | - | Target a registered project by name |
+| `--env <name\|base>` | string | - | Apply an optional env overlay by name |
+| `--scope <name>` | string | - | Resolve values for one env scope while still running on the host |
+| `--target <host\|compose>` | string | `host` | Host-local env view for host commands, or raw compose view |
+
+#### hack host shell
+
+Usage: `hack host shell [options]`
+
+Starts an interactive host shell with injected env. Default target is `host`, which applies the
+host-local env view and any `host` scope overrides. Use `--target compose` to preserve the
+container-oriented compose view while still running on the host.
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
+| `--project <name>` | string | - | Target a registered project by name |
+| `--env <name\|base>` | string | - | Apply an optional env overlay by name |
+| `--scope <name>` | string | - | Resolve values for one env scope while still running on the host |
 | `--target <host\|compose>` | string | `host` | Host-local env view for host commands, or raw compose view |
 
 #### hack env unset

@@ -15,7 +15,10 @@ const DEFAULT_MUTATION_LOCK_TIMEOUT_MS = 30_000;
 const MAX_PUSH_ATTEMPTS = 3;
 
 export type TicketsGitChannel = {
-  readonly ensureCheckedOut: () => Promise<string>;
+  readonly ensureCheckedOut: (input?: {
+    readonly forceFreshCheckout?: boolean;
+    readonly refreshRemote?: boolean;
+  }) => Promise<string>;
   readonly appendEvents: (input: {
     readonly events: readonly Record<string, unknown>[];
   }) => Promise<
@@ -835,6 +838,7 @@ export function createGitTicketsChannel(opts: {
 
   const ensureCheckedOut = async (input?: {
     readonly forceFreshCheckout?: boolean;
+    readonly refreshRemote?: boolean;
   }): Promise<
     | {
         readonly ok: true;
@@ -846,10 +850,17 @@ export function createGitTicketsChannel(opts: {
     await ensureDirs();
     await ensureBareRepo();
     await ensureSparseCheckout();
-    const { remoteUrl } = await ensureRemote();
-    const refreshed = await refreshRemoteTrackingRefs({ remoteUrl });
-    if (!refreshed.ok) {
-      return refreshed;
+    const refreshRemote = input?.refreshRemote !== false;
+    const remote = refreshRemote
+      ? await ensureRemote()
+      : { remoteUrl: null as string | null };
+    if (refreshRemote) {
+      const refreshed = await refreshRemoteTrackingRefs({
+        remoteUrl: remote.remoteUrl,
+      });
+      if (!refreshed.ok) {
+        return refreshed;
+      }
     }
 
     if (
@@ -858,7 +869,7 @@ export function createGitTicketsChannel(opts: {
     ) {
       const pushRef =
         refMode === "hidden" && legacyRemoteRef ? legacyRemoteRef : remoteRef;
-      return { ok: true, remoteUrl, pushRef };
+      return { ok: true, remoteUrl: remote.remoteUrl, pushRef };
     }
 
     const preferredTrackingRef = await resolvePreferredTrackingRef();
@@ -870,20 +881,26 @@ export function createGitTicketsChannel(opts: {
         preferredTrackingRef === legacyTrackingRef && legacyRemoteRef
           ? legacyRemoteRef
           : remoteRef;
-      return { ok: true, remoteUrl, pushRef };
+      return { ok: true, remoteUrl: remote.remoteUrl, pushRef };
     }
 
-    const checkedOut = await checkoutHead({ remoteUrl });
+    const checkedOut = await checkoutHead({ remoteUrl: remote.remoteUrl });
     if (!checkedOut.ok) {
       return checkedOut;
     }
 
-    const migratedLegacy = await mergeLegacyRefIntoCurrentBranch({ remoteUrl });
+    const migratedLegacy = await mergeLegacyRefIntoCurrentBranch({
+      remoteUrl: remote.remoteUrl,
+    });
     if (!migratedLegacy.ok) {
       return migratedLegacy;
     }
 
-    return { ok: true, remoteUrl, pushRef: checkedOut.pushRef };
+    return {
+      ok: true,
+      remoteUrl: remote.remoteUrl,
+      pushRef: checkedOut.pushRef,
+    };
   };
 
   const resolveEventsPath = (tsSeconds: number): string => {
@@ -1376,8 +1393,8 @@ export function createGitTicketsChannel(opts: {
   };
 
   return {
-    ensureCheckedOut: async () => {
-      const checkedOut = await ensureCheckedOut();
+    ensureCheckedOut: async (input) => {
+      const checkedOut = await ensureCheckedOut(input);
       if (!checkedOut.ok) {
         throw new Error(checkedOut.error);
       }

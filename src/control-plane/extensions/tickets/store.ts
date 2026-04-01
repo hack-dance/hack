@@ -603,7 +603,7 @@ export function createTicketsStore(opts: {
       }
   > => {
     try {
-      const root = await git.ensureCheckedOut();
+      const root = await git.ensureCheckedOut({ refreshRemote: false });
       const events = await readAllEventsFromRoot({ root });
       const materialized = materializeSnapshotFromEvents({ events });
       const snapshot = buildStoreSnapshot({ events, materialized });
@@ -634,7 +634,7 @@ export function createTicketsStore(opts: {
   };
 
   const loadStoreContext = async (): Promise<TicketStoreContext> => {
-    const root = await git.ensureCheckedOut();
+    const root = await git.ensureCheckedOut({ refreshRemote: false });
     const journalSignature = await projection.computeJournalSignature({
       ticketsRoot: root,
     });

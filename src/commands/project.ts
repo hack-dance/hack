@@ -169,6 +169,7 @@ const CADDY_LABEL_PATTERN = /^(\s*)caddy:\s*(.*)$/;
 
 /** Regex to check if a string starts with a URL scheme (e.g., "http://", "https://"). */
 const URL_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//;
+const WHITESPACE_PATTERN = /\s+/;
 
 const optManual = defineOption({
   name: "manual",
@@ -1699,6 +1700,8 @@ async function startLifecycleProcess(opts: {
   readonly name: string;
   readonly windowName: string;
   readonly logPath: string;
+  readonly panePid?: number;
+  readonly processGroupId?: number;
 }> {
   const windowNameRaw = sanitizeBranchSlug(opts.process.name);
   const windowName =
@@ -1739,6 +1742,15 @@ async function startLifecycleProcess(opts: {
         `Failed to start lifecycle process "${opts.process.name}": ${result.stderr.trim()}`
       );
     }
+    const panePids = await readTmuxPanePids({
+      sessionName: opts.sessionName,
+      windowName,
+    });
+    const panePid = panePids[0];
+    const processGroupId =
+      panePid !== undefined
+        ? await readProcessGroupIdForPid({ pid: panePid })
+        : null;
     await appendLifecycleLogRecord({
       projectDir: opts.projectDir,
       composeProject: opts.composeProject,
@@ -1753,6 +1765,8 @@ async function startLifecycleProcess(opts: {
       name: opts.process.name,
       windowName,
       logPath,
+      ...(panePid !== undefined ? { panePid } : {}),
+      ...(processGroupId ? { processGroupId } : {}),
     };
   }
 
@@ -1861,6 +1875,199 @@ async function interruptLifecycleTmuxProcesses(opts: {
   }
 
   await Bun.sleep(750);
+  await terminateLifecycleProcessGroups({
+    processGroupIds: await resolveLifecycleProcessGroupIds({
+      sessionName: opts.sessionName,
+      lifecycleEntry: opts.lifecycleEntry,
+    }),
+  });
+}
+
+type ProcessSnapshotRow = {
+  readonly pid: number;
+  readonly ppid: number;
+  readonly processGroupId: number;
+};
+
+async function readTmuxPanePids(opts: {
+  readonly sessionName: string;
+  readonly windowName: string;
+}): Promise<number[]> {
+  const result = await exec(
+    [
+      "tmux",
+      "list-panes",
+      "-t",
+      `${opts.sessionName}:${opts.windowName}`,
+      "-F",
+      "#{pane_pid}",
+    ],
+    { stdin: "ignore" }
+  );
+  if (result.exitCode !== 0) {
+    return [];
+  }
+  return result.stdout
+    .split("\n")
+    .map((line) => Number.parseInt(line.trim(), 10))
+    .filter((value) => Number.isInteger(value) && value > 0);
+}
+
+async function readProcessGroupIdForPid(opts: {
+  readonly pid: number;
+}): Promise<number | null> {
+  const result = await exec(["ps", "-o", "pgid=", "-p", String(opts.pid)], {
+    stdin: "ignore",
+  });
+  if (result.exitCode !== 0) {
+    return null;
+  }
+  const parsed = Number.parseInt(result.stdout.trim(), 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+async function readProcessSnapshot(): Promise<ProcessSnapshotRow[]> {
+  const result = await exec(["ps", "-axo", "pid=,ppid=,pgid="], {
+    stdin: "ignore",
+  });
+  if (result.exitCode !== 0) {
+    return [];
+  }
+  return parseProcessSnapshotOutput(result.stdout);
+}
+
+export function parseProcessSnapshotOutput(text: string): ProcessSnapshotRow[] {
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .flatMap((line) => {
+      const parts = line.split(WHITESPACE_PATTERN);
+      if (parts.length < 3) {
+        return [];
+      }
+      const pid = Number.parseInt(parts[0] ?? "", 10);
+      const ppid = Number.parseInt(parts[1] ?? "", 10);
+      const processGroupId = Number.parseInt(parts[2] ?? "", 10);
+      if (
+        !(
+          Number.isInteger(pid) &&
+          pid > 0 &&
+          Number.isInteger(ppid) &&
+          ppid >= 0 &&
+          Number.isInteger(processGroupId) &&
+          processGroupId > 0
+        )
+      ) {
+        return [];
+      }
+      return [{ pid, ppid, processGroupId }];
+    });
+}
+
+export function collectDescendantProcessGroupIds(opts: {
+  readonly snapshot: readonly ProcessSnapshotRow[];
+  readonly rootPids: readonly number[];
+}): number[] {
+  const processByParent = new Map<number, ProcessSnapshotRow[]>();
+  const groups = new Set<number>();
+  const queue = [...opts.rootPids];
+  const visited = new Set<number>();
+
+  for (const row of opts.snapshot) {
+    const siblings = processByParent.get(row.ppid) ?? [];
+    siblings.push(row);
+    processByParent.set(row.ppid, siblings);
+  }
+
+  while (queue.length > 0) {
+    const pid = queue.shift();
+    if (!(pid && pid > 0) || visited.has(pid)) {
+      continue;
+    }
+    visited.add(pid);
+
+    const current = opts.snapshot.find((row) => row.pid === pid);
+    if (current) {
+      groups.add(current.processGroupId);
+    }
+
+    for (const child of processByParent.get(pid) ?? []) {
+      groups.add(child.processGroupId);
+      if (!visited.has(child.pid)) {
+        queue.push(child.pid);
+      }
+    }
+  }
+
+  return [...groups].sort((left, right) => left - right);
+}
+
+async function resolveLifecycleProcessGroupIds(opts: {
+  readonly sessionName: string;
+  readonly lifecycleEntry: LifecycleStateEntry | null;
+}): Promise<number[]> {
+  const rootPids = new Set<number>();
+  const processGroupIds = new Set<number>();
+
+  for (const processInfo of opts.lifecycleEntry?.processes ?? []) {
+    if (processInfo.panePid) {
+      rootPids.add(processInfo.panePid);
+    }
+    if (processInfo.processGroupId) {
+      processGroupIds.add(processInfo.processGroupId);
+    }
+    for (const panePid of await readTmuxPanePids({
+      sessionName: opts.sessionName,
+      windowName: processInfo.windowName,
+    })) {
+      rootPids.add(panePid);
+    }
+  }
+
+  const snapshot = await readProcessSnapshot();
+  for (const processGroupId of collectDescendantProcessGroupIds({
+    snapshot,
+    rootPids: [...rootPids],
+  })) {
+    processGroupIds.add(processGroupId);
+  }
+
+  return [...processGroupIds].sort((left, right) => left - right);
+}
+
+async function terminateLifecycleProcessGroups(opts: {
+  readonly processGroupIds: readonly number[];
+}): Promise<void> {
+  const groups = [...new Set(opts.processGroupIds)].filter(
+    (processGroupId) => processGroupId > 1
+  );
+  if (groups.length === 0) {
+    return;
+  }
+
+  for (const processGroupId of groups) {
+    try {
+      process.kill(-processGroupId, "SIGTERM");
+    } catch {
+      // Ignore groups that already exited between snapshot and shutdown.
+    }
+  }
+
+  await Bun.sleep(500);
+
+  for (const processGroupId of groups) {
+    try {
+      process.kill(-processGroupId, 0);
+    } catch {
+      continue;
+    }
+    try {
+      process.kill(-processGroupId, "SIGKILL");
+    } catch {
+      // Ignore groups that exited after the SIGTERM grace period.
+    }
+  }
 }
 
 function resolveLifecycleCommandServiceName(opts: {
@@ -1881,13 +2088,44 @@ function wrapLifecyclePersistentCommand(opts: {
 }): string {
   const logPath = shellSingleQuote(opts.logPath);
   const service = shellSingleQuote(opts.serviceName);
+  const command = shellSingleQuote(opts.command);
   return [
     `HACK_LIFECYCLE_LOG=${logPath}`,
     `HACK_LIFECYCLE_SERVICE=${service}`,
-    `${opts.command} 2>&1 | while IFS= read -r line; do`,
-    "  printf '%s\\n' \"$line\"",
-    '  printf \'%s\\t%s\\tstdout\\t%s\\n\' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$HACK_LIFECYCLE_SERVICE" "$line" >> "$HACK_LIFECYCLE_LOG"',
-    "done",
+    `HACK_LIFECYCLE_COMMAND=${command}`,
+    `fifo="$(mktemp -u "\${TMPDIR:-/tmp}/hack-lifecycle.XXXXXX")"`,
+    'mkfifo "$fifo"',
+    "cleanup_lifecycle() {",
+    "  trap - EXIT INT TERM HUP",
+    `  if [ -n "\${cmd_pid:-}" ]; then`,
+    '    kill -TERM -- "-$cmd_pid" 2>/dev/null || kill "$cmd_pid" 2>/dev/null || true',
+    '    wait "$cmd_pid" 2>/dev/null || true',
+    "  fi",
+    `  if [ -n "\${reader_pid:-}" ]; then`,
+    '    wait "$reader_pid" 2>/dev/null || true',
+    "  fi",
+    '  rm -f "$fifo"',
+    "}",
+    'trap "cleanup_lifecycle; exit 130" INT TERM HUP',
+    'trap "cleanup_lifecycle" EXIT',
+    "( while IFS= read -r line; do",
+    '    printf "%s\\n" "$line"',
+    '    printf \'%s\\t%s\\tstdout\\t%s\\n\' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$HACK_LIFECYCLE_SERVICE" "$line" >> "$HACK_LIFECYCLE_LOG"',
+    '  done < "$fifo" ) &',
+    "reader_pid=$!",
+    "if command -v python3 >/dev/null 2>&1; then",
+    '  python3 -c \'import os, sys; os.setsid(); os.execvp("sh", ["sh", "-lc", sys.argv[1]])\' "$HACK_LIFECYCLE_COMMAND" >"$fifo" 2>&1 &',
+    "else",
+    '  sh -lc "$HACK_LIFECYCLE_COMMAND" >"$fifo" 2>&1 &',
+    "fi",
+    "cmd_pid=$!",
+    'wait "$cmd_pid"',
+    "cmd_status=$?",
+    'cmd_pid=""',
+    'wait "$reader_pid" 2>/dev/null || true',
+    'reader_pid=""',
+    'rm -f "$fifo"',
+    'exit "$cmd_status"',
   ].join("\n");
 }
 

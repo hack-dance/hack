@@ -464,6 +464,37 @@ test("repair reapplies cleanup after a non-fast-forward push retry", async () =>
   expect(eventsText.stdout).toContain('"eventId":"event-2"');
 });
 
+test("ensureCheckedOut can reuse the local tickets branch without refreshing remotes", async () => {
+  const projectRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-git-local-checkout-",
+  });
+  await run({
+    cwd: projectRoot,
+    cmd: ["git", "remote", "add", "origin", "ssh://127.0.0.1:1/does-not-exist"],
+  });
+
+  const channel = __testOnly.createGitTicketsChannel({
+    projectRoot,
+    config: {
+      enabled: true,
+      branch: "hack/tickets",
+      refMode: "hidden",
+      remote: "origin",
+      forceBareClone: false,
+    },
+    logger: {
+      info: (_input: { message: string }) => {},
+      warn: (_input: { message: string }) => {},
+    },
+  });
+
+  const worktree = await channel.ensureCheckedOut({ refreshRemote: false });
+
+  expect(
+    await Bun.file(resolve(worktree, ".hack/tickets/README.md")).text()
+  ).toContain("Tickets ref for hack-cli");
+});
+
 async function createTempGitProject(input: {
   readonly prefix: string;
 }): Promise<string> {

@@ -641,6 +641,7 @@ export function createGitTicketsChannel(opts: {
   > => {
     await rm(worktreeDir, { recursive: true, force: true });
     await mkdir(worktreeDir, { recursive: true });
+    const allowLocalFallback = input.allowRemoteFetchFailureFallback === true;
 
     if (input.remoteUrl) {
       let canCheckoutRemote = false;
@@ -674,7 +675,7 @@ export function createGitTicketsChannel(opts: {
           return { ok: false, error: `git fetch failed: ${legacyFetch.error}` };
         }
       } else if (!fetched.missing) {
-        if (input.allowRemoteFetchFailureFallback) {
+        if (allowLocalFallback) {
           opts.logger.warn({
             message: `tickets git fetch failed during checkout, falling back to local branch initialization: ${fetched.error}`,
           });

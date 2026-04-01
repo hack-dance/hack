@@ -11,6 +11,7 @@ export interface RuntimeBackend {
   psJson(opts: RuntimePsOptions): ReturnType<typeof exec>;
   ps(opts: RuntimePsOptions): Promise<number>;
   run(opts: RuntimeRunOptions): Promise<number>;
+  exec(opts: RuntimeExecOptions): Promise<number>;
 }
 
 export interface RuntimeBaseOptions {
@@ -34,6 +35,16 @@ export interface RuntimeRunOptions extends RuntimeBaseOptions {
   readonly noDeps?: boolean;
   readonly workdir?: string;
   readonly cmdArgs: readonly string[];
+}
+
+export interface RuntimeExecOptions extends RuntimeBaseOptions {
+  readonly service: string;
+  readonly workdir?: string;
+  readonly cmdArgs: readonly string[];
+}
+
+function shouldDisableExecTty(): boolean {
+  return !(process.stdin.isTTY === true && process.stdout.isTTY === true);
 }
 
 function buildComposeArgs(opts: RuntimeBaseOptions): string[] {
@@ -112,6 +123,17 @@ export const composeRuntimeBackend: RuntimeBackend = {
       "run",
       "--rm",
       ...(opts.noDeps ? ["--no-deps"] : []),
+      ...(opts.workdir && opts.workdir.length > 0 ? ["-w", opts.workdir] : []),
+      opts.service,
+      ...(opts.cmdArgs.length > 0 ? opts.cmdArgs : []),
+    ];
+    return await run(cmd, { cwd: opts.cwd, stdin: "inherit", env: opts.env });
+  },
+  async exec(opts) {
+    const cmd = [
+      ...buildComposeArgs(opts),
+      "exec",
+      ...(shouldDisableExecTty() ? ["-T"] : []),
       ...(opts.workdir && opts.workdir.length > 0 ? ["-w", opts.workdir] : []),
       opts.service,
       ...(opts.cmdArgs.length > 0 ? opts.cmdArgs : []),

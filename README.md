@@ -81,6 +81,7 @@ hack env add --secret DATABASE_URL postgres://...
 hack host exec --env qa --scope api -- bun db:migrate
 hack host exec --env qa --scope api --target compose -- bun test
 hack host shell --env qa --scope api
+hack exec api -- bun test
 ```
 
 `hack host exec` and `hack host shell` run on your host machine with Hack-resolved env injected.

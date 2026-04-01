@@ -120,7 +120,7 @@ Use `--target compose` if you explicitly want the container-oriented compose vie
 
 - `hack host exec` / `hack host shell`: run on your host machine with Hack-resolved env injected.
 - `hack run <service> ...`: run a one-off command in the compose network with an ephemeral service container.
-- `docker compose exec <service> ...`: run inside an already-running container when you specifically need that container's live filesystem or process context.
+- `hack exec <service> ...`: run inside an already-running container when you specifically need that container's live filesystem or process context.
 
 For host execution, `--scope` means "which env scope should Hack inject", not "where should this run."
 For example, `hack host exec --scope api -- bun db:migrate` still runs on the host.

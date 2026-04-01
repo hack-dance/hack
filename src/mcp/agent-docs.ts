@@ -248,6 +248,7 @@ export function renderAgentDocsSnippet(): string {
     "- Host commands default to a host-local env view; use `--target compose` when you explicitly want container-oriented addresses.",
     "- `--scope` selects which env scope to inject; it does not move execution into that service container.",
     "- Interactive host shell with injected env: `hack host shell --env qa --scope api`",
+    "- Run inside an already-running service container: `hack exec api -- bun test`",
     "",
     "Tickets (git-backed):",
     '- Create: `hack tickets create --title "..." --body-stdin`',

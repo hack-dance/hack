@@ -19,6 +19,7 @@ import { nodeCommand } from "../commands/node.ts";
 import { orgCommand } from "../commands/org.ts";
 import {
   downCommand,
+  execCommand,
   initCommand,
   logsCommand,
   openCommand,
@@ -76,6 +77,7 @@ export const CLI_SPEC = defineCli({
     psCommand,
     tuiCommand,
     runCommand,
+    execCommand,
     logsCommand,
     openCommand,
     branchCommand,

@@ -9,6 +9,8 @@ export type LifecycleStateProcess = {
   readonly name: string;
   readonly windowName: string;
   readonly logPath: string;
+  readonly panePid?: number;
+  readonly processGroupId?: number;
 };
 
 export type LifecycleStateEntry = {
@@ -250,11 +252,30 @@ function parseLifecycleStateProcess(
   if (!(name && windowName && logPath)) {
     return null;
   }
+  const panePid = parseLifecycleOptionalPositiveInteger(value.panePid);
+  const processGroupId = parseLifecycleOptionalPositiveInteger(
+    value.processGroupId
+  );
   return {
     name,
     windowName,
     logPath,
+    ...(panePid ? { panePid } : {}),
+    ...(processGroupId ? { processGroupId } : {}),
   };
+}
+
+function parseLifecycleOptionalPositiveInteger(value: unknown): number | null {
+  if (typeof value === "number" && Number.isInteger(value) && value > 0) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isInteger(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+  return null;
 }
 
 async function writeLifecycleStateFile(opts: {

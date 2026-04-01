@@ -464,6 +464,122 @@ test("repair reapplies cleanup after a non-fast-forward push retry", async () =>
   expect(eventsText.stdout).toContain('"eventId":"event-2"');
 });
 
+test("ensureCheckedOut can reuse the local tickets branch without refreshing remotes", async () => {
+  const projectRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-git-local-checkout-",
+  });
+
+  const channel = __testOnly.createGitTicketsChannel({
+    projectRoot,
+    config: {
+      enabled: true,
+      branch: "hack/tickets",
+      refMode: "hidden",
+      remote: "origin",
+      forceBareClone: false,
+    },
+    logger: {
+      info: (_input: { message: string }) => {},
+      warn: (_input: { message: string }) => {},
+    },
+  });
+
+  const initialWorktree = await channel.ensureCheckedOut({
+    refreshRemote: false,
+  });
+  expect(
+    await Bun.file(resolve(initialWorktree, ".hack/tickets/README.md")).text()
+  ).toContain("Tickets ref for hack-cli");
+
+  await run({
+    cwd: projectRoot,
+    cmd: ["git", "remote", "add", "origin", "ssh://127.0.0.1:1/does-not-exist"],
+  });
+
+  const worktree = await channel.ensureCheckedOut({ refreshRemote: false });
+
+  expect(
+    await Bun.file(resolve(worktree, ".hack/tickets/README.md")).text()
+  ).toContain("Tickets ref for hack-cli");
+});
+
+test("ensureCheckedOut does not poison a fresh clone after an unreachable first remote", async () => {
+  const remoteRoot = await mkdtemp(join(tmpdir(), "hack-cli-tickets-remote-"));
+  tempRoots.push(remoteRoot);
+  await run({ cwd: remoteRoot, cmd: ["git", "init", "--bare"] });
+
+  const writerRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-git-writer-recovery-",
+  });
+  await run({
+    cwd: writerRoot,
+    cmd: ["git", "remote", "add", "origin", remoteRoot],
+  });
+
+  const writerChannel = __testOnly.createGitTicketsChannel({
+    projectRoot: writerRoot,
+    config: {
+      enabled: true,
+      branch: "hack/tickets",
+      refMode: "hidden",
+      remote: "origin",
+      forceBareClone: false,
+    },
+    logger: {
+      info: (_input: { message: string }) => {},
+      warn: (_input: { message: string }) => {},
+    },
+  });
+  expect(
+    await writerChannel.appendEvents({
+      events: [
+        createTicketEvent({
+          eventId: "event-1",
+          ticketId: "T-AAAAAAA111",
+          ts: 1,
+        }),
+      ],
+    })
+  ).toEqual({ ok: true });
+
+  const readerRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-git-reader-recovery-",
+  });
+  await run({
+    cwd: readerRoot,
+    cmd: ["git", "remote", "add", "origin", "ssh://127.0.0.1:1/does-not-exist"],
+  });
+
+  const readerChannel = __testOnly.createGitTicketsChannel({
+    projectRoot: readerRoot,
+    config: {
+      enabled: true,
+      branch: "hack/tickets",
+      refMode: "hidden",
+      remote: "origin",
+      forceBareClone: false,
+    },
+    logger: {
+      info: (_input: { message: string }) => {},
+      warn: (_input: { message: string }) => {},
+    },
+  });
+
+  await expect(readerChannel.ensureCheckedOut()).rejects.toThrow();
+
+  await run({
+    cwd: readerRoot,
+    cmd: ["git", "remote", "set-url", "origin", remoteRoot],
+  });
+
+  const worktree = await readerChannel.ensureCheckedOut();
+  expect(
+    await Bun.file(
+      resolve(worktree, ".hack/tickets/events/events-1970-01.jsonl")
+    ).text()
+  ).toContain('"eventId":"event-1"');
+});
+
 async function createTempGitProject(input: {
   readonly prefix: string;
 }): Promise<string> {

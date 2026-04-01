@@ -15,7 +15,10 @@ const DEFAULT_MUTATION_LOCK_TIMEOUT_MS = 30_000;
 const MAX_PUSH_ATTEMPTS = 3;
 
 export type TicketsGitChannel = {
-  readonly ensureCheckedOut: () => Promise<string>;
+  readonly ensureCheckedOut: (input?: {
+    readonly forceFreshCheckout?: boolean;
+    readonly refreshRemote?: boolean;
+  }) => Promise<string>;
   readonly appendEvents: (input: {
     readonly events: readonly Record<string, unknown>[];
   }) => Promise<
@@ -447,6 +450,13 @@ export function createGitTicketsChannel(opts: {
     return null;
   };
 
+  const hasLocalTicketsBranch = async (): Promise<boolean> => {
+    const localBranch = await runGitDir({
+      args: ["rev-parse", "--verify", localBranchRef],
+    });
+    return localBranch.ok;
+  };
+
   const refreshRemoteTrackingRefs = async (input: {
     readonly remoteUrl: string | null;
   }): Promise<
@@ -623,6 +633,7 @@ export function createGitTicketsChannel(opts: {
   };
 
   const checkoutHead = async (input: {
+    readonly allowRemoteFetchFailureFallback?: boolean;
     readonly remoteUrl: string | null;
   }): Promise<
     | { readonly ok: true; readonly pushRef: string }
@@ -630,6 +641,7 @@ export function createGitTicketsChannel(opts: {
   > => {
     await rm(worktreeDir, { recursive: true, force: true });
     await mkdir(worktreeDir, { recursive: true });
+    const allowLocalFallback = input.allowRemoteFetchFailureFallback === true;
 
     if (input.remoteUrl) {
       let canCheckoutRemote = false;
@@ -663,7 +675,13 @@ export function createGitTicketsChannel(opts: {
           return { ok: false, error: `git fetch failed: ${legacyFetch.error}` };
         }
       } else if (!fetched.missing) {
-        return { ok: false, error: `git fetch failed: ${fetched.error}` };
+        if (allowLocalFallback) {
+          opts.logger.warn({
+            message: `tickets git fetch failed during checkout, falling back to local branch initialization: ${fetched.error}`,
+          });
+        } else {
+          return { ok: false, error: `git fetch failed: ${fetched.error}` };
+        }
       }
 
       if (canCheckoutRemote) {
@@ -698,7 +716,7 @@ export function createGitTicketsChannel(opts: {
     }
 
     const localRef = await runGitDir({
-      args: ["rev-parse", "--verify", branch],
+      args: ["rev-parse", "--verify", localBranchRef],
     });
     if (!localRef.ok) {
       const orphan = await runGitDir({
@@ -835,6 +853,7 @@ export function createGitTicketsChannel(opts: {
 
   const ensureCheckedOut = async (input?: {
     readonly forceFreshCheckout?: boolean;
+    readonly refreshRemote?: boolean;
   }): Promise<
     | {
         readonly ok: true;
@@ -846,10 +865,15 @@ export function createGitTicketsChannel(opts: {
     await ensureDirs();
     await ensureBareRepo();
     await ensureSparseCheckout();
-    const { remoteUrl } = await ensureRemote();
-    const refreshed = await refreshRemoteTrackingRefs({ remoteUrl });
-    if (!refreshed.ok) {
-      return refreshed;
+    const refreshRemote = input?.refreshRemote !== false;
+    const remote = await ensureRemote();
+    if (refreshRemote) {
+      const refreshed = await refreshRemoteTrackingRefs({
+        remoteUrl: remote.remoteUrl,
+      });
+      if (!refreshed.ok) {
+        return refreshed;
+      }
     }
 
     if (
@@ -858,7 +882,7 @@ export function createGitTicketsChannel(opts: {
     ) {
       const pushRef =
         refMode === "hidden" && legacyRemoteRef ? legacyRemoteRef : remoteRef;
-      return { ok: true, remoteUrl, pushRef };
+      return { ok: true, remoteUrl: remote.remoteUrl, pushRef };
     }
 
     const preferredTrackingRef = await resolvePreferredTrackingRef();
@@ -870,20 +894,33 @@ export function createGitTicketsChannel(opts: {
         preferredTrackingRef === legacyTrackingRef && legacyRemoteRef
           ? legacyRemoteRef
           : remoteRef;
-      return { ok: true, remoteUrl, pushRef };
+      return { ok: true, remoteUrl: remote.remoteUrl, pushRef };
     }
 
-    const checkedOut = await checkoutHead({ remoteUrl });
+    const hasLocalBranch = await hasLocalTicketsBranch();
+    const checkoutRemoteUrl =
+      refreshRemote || !hasLocalBranch ? remote.remoteUrl : null;
+
+    const checkedOut = await checkoutHead({
+      allowRemoteFetchFailureFallback: !refreshRemote && hasLocalBranch,
+      remoteUrl: checkoutRemoteUrl,
+    });
     if (!checkedOut.ok) {
       return checkedOut;
     }
 
-    const migratedLegacy = await mergeLegacyRefIntoCurrentBranch({ remoteUrl });
+    const migratedLegacy = await mergeLegacyRefIntoCurrentBranch({
+      remoteUrl: checkoutRemoteUrl,
+    });
     if (!migratedLegacy.ok) {
       return migratedLegacy;
     }
 
-    return { ok: true, remoteUrl, pushRef: checkedOut.pushRef };
+    return {
+      ok: true,
+      remoteUrl: remote.remoteUrl,
+      pushRef: checkedOut.pushRef,
+    };
   };
 
   const resolveEventsPath = (tsSeconds: number): string => {
@@ -1376,8 +1413,8 @@ export function createGitTicketsChannel(opts: {
   };
 
   return {
-    ensureCheckedOut: async () => {
-      const checkedOut = await ensureCheckedOut();
+    ensureCheckedOut: async (input) => {
+      const checkedOut = await ensureCheckedOut(input);
       if (!checkedOut.ok) {
         throw new Error(checkedOut.error);
       }

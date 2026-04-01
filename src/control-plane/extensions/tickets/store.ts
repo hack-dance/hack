@@ -603,7 +603,7 @@ export function createTicketsStore(opts: {
       }
   > => {
     try {
-      const root = await git.ensureCheckedOut();
+      const root = await git.ensureCheckedOut({ refreshRemote: false });
       const events = await readAllEventsFromRoot({ root });
       const materialized = materializeSnapshotFromEvents({ events });
       const snapshot = buildStoreSnapshot({ events, materialized });
@@ -633,8 +633,12 @@ export function createTicketsStore(opts: {
     }
   };
 
-  const loadStoreContext = async (): Promise<TicketStoreContext> => {
-    const root = await git.ensureCheckedOut();
+  const loadStoreContext = async (input?: {
+    readonly refreshRemote?: boolean;
+  }): Promise<TicketStoreContext> => {
+    const root = await git.ensureCheckedOut({
+      refreshRemote: input?.refreshRemote,
+    });
     const journalSignature = await projection.computeJournalSignature({
       ticketsRoot: root,
     });
@@ -662,8 +666,10 @@ export function createTicketsStore(opts: {
     };
   };
 
-  const materializeTickets = async (): Promise<Map<string, TicketSummary>> => {
-    const context = await loadStoreContext();
+  const materializeTickets = async (input?: {
+    readonly refreshRemote?: boolean;
+  }): Promise<Map<string, TicketSummary>> => {
+    const context = await loadStoreContext(input);
     return new Map(
       context.snapshot.tickets.map(
         (ticket) => [ticket.ticketId, ticket] as const
@@ -679,7 +685,7 @@ export function createTicketsStore(opts: {
     | { readonly ok: true; readonly changed?: boolean }
     | { readonly ok: false; readonly error: string }
   > => {
-    const tickets = await materializeTickets();
+    const tickets = await materializeTickets({ refreshRemote: true });
     const current = tickets.get(input.ticketId);
     if (!current) {
       return { ok: false, error: `Ticket not found: ${input.ticketId}` };
@@ -710,11 +716,14 @@ export function createTicketsStore(opts: {
 
   const appendEventsAndRefresh = async (input: {
     readonly events: readonly TicketEvent[];
+    readonly refreshRemote?: boolean;
   }): Promise<
     | { readonly ok: true; readonly appendedCount: number }
     | { readonly ok: false; readonly error: string }
   > => {
-    const context = await loadStoreContext();
+    const context = await loadStoreContext({
+      refreshRemote: input.refreshRemote,
+    });
     const seenIdempotencyKeys = new Set(
       context.events.map((event) => event.idempotencyKey)
     );
@@ -838,7 +847,7 @@ export function createTicketsStore(opts: {
     },
 
     updateTicket: async (input) => {
-      const tickets = await materializeTickets();
+      const tickets = await materializeTickets({ refreshRemote: true });
       const current = tickets.get(input.ticketId);
       if (!current) {
         return { ok: false, error: `Ticket not found: ${input.ticketId}` };
@@ -883,7 +892,10 @@ export function createTicketsStore(opts: {
         return { ok: true, changed: false };
       }
 
-      const wrote = await appendEventsAndRefresh({ events });
+      const wrote = await appendEventsAndRefresh({
+        events,
+        refreshRemote: true,
+      });
       if (!wrote.ok) {
         return wrote;
       }
@@ -924,7 +936,7 @@ export function createTicketsStore(opts: {
     },
 
     appendComment: async (input) => {
-      const tickets = await materializeTickets();
+      const tickets = await materializeTickets({ refreshRemote: true });
       const current = tickets.get(input.ticketId);
       if (!current) {
         return { ok: false, error: `Ticket not found: ${input.ticketId}` };
@@ -959,7 +971,10 @@ export function createTicketsStore(opts: {
         actor: input.actor,
       });
 
-      const wrote = await appendEventsAndRefresh({ events: [event] });
+      const wrote = await appendEventsAndRefresh({
+        events: [event],
+        refreshRemote: true,
+      });
       if (!wrote.ok) {
         return wrote;
       }
@@ -981,7 +996,7 @@ export function createTicketsStore(opts: {
     },
 
     appendReviewNote: async (input) => {
-      const tickets = await materializeTickets();
+      const tickets = await materializeTickets({ refreshRemote: true });
       if (!tickets.has(input.ticketId)) {
         return { ok: false, error: `Ticket not found: ${input.ticketId}` };
       }
@@ -1006,7 +1021,10 @@ export function createTicketsStore(opts: {
         actor: input.actor,
       });
 
-      const wrote = await appendEventsAndRefresh({ events: [event] });
+      const wrote = await appendEventsAndRefresh({
+        events: [event],
+        refreshRemote: true,
+      });
       if (!wrote.ok) {
         return wrote;
       }
@@ -1025,7 +1043,7 @@ export function createTicketsStore(opts: {
     },
 
     appendDocument: async (input) => {
-      const tickets = await materializeTickets();
+      const tickets = await materializeTickets({ refreshRemote: true });
       if (!tickets.has(input.ticketId)) {
         return { ok: false, error: `Ticket not found: ${input.ticketId}` };
       }
@@ -1048,7 +1066,10 @@ export function createTicketsStore(opts: {
         actor: input.actor,
       });
 
-      const wrote = await appendEventsAndRefresh({ events: [event] });
+      const wrote = await appendEventsAndRefresh({
+        events: [event],
+        refreshRemote: true,
+      });
       if (!wrote.ok) {
         return wrote;
       }
@@ -1068,7 +1089,7 @@ export function createTicketsStore(opts: {
     },
 
     linkCommentExternalId: async (input) => {
-      const { snapshot } = await loadStoreContext();
+      const { snapshot } = await loadStoreContext({ refreshRemote: true });
       const comments = snapshot.commentsByTicket.get(input.ticketId) ?? [];
       const current = comments.find(
         (comment) => comment.commentId === input.commentId
@@ -1097,11 +1118,14 @@ export function createTicketsStore(opts: {
         actor: input.actor,
       });
 
-      return await appendEventsAndRefresh({ events: [event] });
+      return await appendEventsAndRefresh({
+        events: [event],
+        refreshRemote: true,
+      });
     },
 
     recordSyncCheckpoint: async (input) => {
-      const tickets = await materializeTickets();
+      const tickets = await materializeTickets({ refreshRemote: true });
       if (!tickets.has(input.ticketId)) {
         return { ok: false, error: `Ticket not found: ${input.ticketId}` };
       }
@@ -1120,7 +1144,10 @@ export function createTicketsStore(opts: {
         actor: input.actor,
       });
 
-      const wrote = await appendEventsAndRefresh({ events: [event] });
+      const wrote = await appendEventsAndRefresh({
+        events: [event],
+        refreshRemote: true,
+      });
       if (!wrote.ok) {
         return wrote;
       }
@@ -1137,7 +1164,7 @@ export function createTicketsStore(opts: {
     },
 
     recordSyncConflict: async (input) => {
-      const tickets = await materializeTickets();
+      const tickets = await materializeTickets({ refreshRemote: true });
       if (!tickets.has(input.ticketId)) {
         return { ok: false, error: `Ticket not found: ${input.ticketId}` };
       }
@@ -1156,7 +1183,10 @@ export function createTicketsStore(opts: {
         actor: input.actor,
       });
 
-      const wrote = await appendEventsAndRefresh({ events: [event] });
+      const wrote = await appendEventsAndRefresh({
+        events: [event],
+        refreshRemote: true,
+      });
       if (!wrote.ok) {
         return wrote;
       }
@@ -1172,7 +1202,7 @@ export function createTicketsStore(opts: {
     },
 
     resolveSyncConflict: async (input) => {
-      const { snapshot } = await loadStoreContext();
+      const { snapshot } = await loadStoreContext({ refreshRemote: true });
       const conflicts = snapshot.conflictsByTicket.get(input.ticketId) ?? [];
       const current = conflicts.find(
         (conflict) => conflict.conflictId === input.conflictId
@@ -1195,7 +1225,10 @@ export function createTicketsStore(opts: {
         actor: input.actor,
       });
 
-      return await appendEventsAndRefresh({ events: [event] });
+      return await appendEventsAndRefresh({
+        events: [event],
+        refreshRemote: true,
+      });
     },
 
     readSnapshot: async () => {

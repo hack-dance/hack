@@ -5,6 +5,8 @@ import {
   readdir,
   readFile,
   rm,
+  stat,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -17,6 +19,7 @@ import {
   buildTicketProvenance,
   findTicketRemoteLink,
 } from "../src/control-plane/extensions/tickets/provenance.ts";
+import { createTicketsSqliteProjection } from "../src/control-plane/extensions/tickets/sqlite-projection.ts";
 import { createTicketsStore } from "../src/control-plane/extensions/tickets/store.ts";
 import { createGitTicketsChannel } from "../src/control-plane/extensions/tickets/tickets-git-channel.ts";
 import { createDefaultControlPlaneConfig } from "../src/control-plane/sdk/config.ts";
@@ -687,6 +690,189 @@ test("tickets store persists a sqlite projection and rebuilds it when deleted", 
     "Projection ticket"
   );
   expect(await Bun.file(projectionPath).exists()).toBe(true);
+}, 20_000);
+
+test("tickets store hydrates remote tickets on a fresh clone without an explicit sync", async () => {
+  const remoteRoot = await mkdtemp(join(tmpdir(), "hack-cli-tickets-remote-"));
+  tempRoots.push(remoteRoot);
+  await run({ cwd: remoteRoot, cmd: ["git", "init", "--bare"] });
+
+  const writerRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-writer-",
+  });
+  await run({
+    cwd: writerRoot,
+    cmd: ["git", "remote", "add", "origin", remoteRoot],
+  });
+  const writerStore = await createStore({ projectRoot: writerRoot });
+
+  const created = await writerStore.createTicket({
+    title: "Remote hydration ticket",
+    body: "Should appear on a fresh clone read path.",
+    owner: "hack",
+    source: "hack",
+    actor: "creator@hack",
+  });
+  expect(created.ok).toBe(true);
+  if (!created.ok) {
+    throw new Error(created.error);
+  }
+
+  const readerRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-reader-",
+  });
+  await run({
+    cwd: readerRoot,
+    cmd: ["git", "remote", "add", "origin", remoteRoot],
+  });
+  const readerStore = await createStore({ projectRoot: readerRoot });
+
+  const tickets = await readerStore.listTickets();
+  expect(tickets.map((ticket) => ticket.title)).toContain(
+    "Remote hydration ticket"
+  );
+}, 20_000);
+
+test("tickets store does not poison a fresh clone after an unreachable first remote", async () => {
+  const remoteRoot = await mkdtemp(join(tmpdir(), "hack-cli-tickets-remote-"));
+  tempRoots.push(remoteRoot);
+  await run({ cwd: remoteRoot, cmd: ["git", "init", "--bare"] });
+
+  const writerRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-writer-recovery-",
+  });
+  await run({
+    cwd: writerRoot,
+    cmd: ["git", "remote", "add", "origin", remoteRoot],
+  });
+  const writerStore = await createStore({ projectRoot: writerRoot });
+
+  const created = await writerStore.createTicket({
+    title: "Recovered remote hydration ticket",
+    body: "Should still load after the first remote error is fixed.",
+    owner: "hack",
+    source: "hack",
+    actor: "creator@hack",
+  });
+  expect(created.ok).toBe(true);
+  if (!created.ok) {
+    throw new Error(created.error);
+  }
+
+  const readerRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-reader-recovery-",
+  });
+  await run({
+    cwd: readerRoot,
+    cmd: ["git", "remote", "add", "origin", "ssh://127.0.0.1:1/does-not-exist"],
+  });
+  const readerStore = await createStore({ projectRoot: readerRoot });
+
+  await expect(readerStore.listTickets()).rejects.toThrow();
+
+  await run({
+    cwd: readerRoot,
+    cmd: ["git", "remote", "set-url", "origin", remoteRoot],
+  });
+
+  const tickets = await readerStore.listTickets();
+  expect(tickets.map((ticket) => ticket.title)).toContain(
+    "Recovered remote hydration ticket"
+  );
+}, 20_000);
+
+test("tickets store refreshes remote state before validating mutation targets", async () => {
+  const remoteRoot = await mkdtemp(join(tmpdir(), "hack-cli-tickets-remote-"));
+  tempRoots.push(remoteRoot);
+  await run({ cwd: remoteRoot, cmd: ["git", "init", "--bare"] });
+
+  const writerRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-writer-refresh-",
+  });
+  await run({
+    cwd: writerRoot,
+    cmd: ["git", "remote", "add", "origin", remoteRoot],
+  });
+  const writerStore = await createStore({ projectRoot: writerRoot });
+
+  const baseTicket = await writerStore.createTicket({
+    title: "Base ticket",
+    owner: "hack",
+    source: "hack",
+    actor: "creator@hack",
+  });
+  expect(baseTicket.ok).toBe(true);
+  if (!baseTicket.ok) {
+    throw new Error(baseTicket.error);
+  }
+
+  const readerRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-reader-refresh-",
+  });
+  await run({
+    cwd: readerRoot,
+    cmd: ["git", "remote", "add", "origin", remoteRoot],
+  });
+  const readerStore = await createStore({ projectRoot: readerRoot });
+
+  const initialTickets = await readerStore.listTickets();
+  expect(initialTickets.map((ticket) => ticket.title)).toContain("Base ticket");
+
+  const created = await writerStore.createTicket({
+    title: "Remote-only ticket",
+    owner: "hack",
+    source: "hack",
+    actor: "creator@hack",
+  });
+  expect(created.ok).toBe(true);
+  if (!created.ok) {
+    throw new Error(created.error);
+  }
+
+  const updated = await readerStore.setStatus({
+    ticketId: created.ticket.ticketId,
+    status: "in_progress",
+    actor: "reader@hack",
+  });
+  expect(updated).toEqual({ ok: true, changed: true });
+
+  const refreshed = await readerStore.getTicket({
+    ticketId: created.ticket.ticketId,
+  });
+  expect(refreshed?.status).toBe("in_progress");
+}, 20_000);
+
+test("tickets sqlite projection signature tracks journal file metadata instead of reading full contents", async () => {
+  const projectRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-signature-",
+  });
+  const projection = createTicketsSqliteProjection({ projectRoot });
+  const eventsDir = resolve(projectRoot, ".hack/tickets/events");
+  const journalPath = resolve(eventsDir, "events-2026-04.jsonl");
+
+  await mkdir(eventsDir, { recursive: true });
+  await writeFile(journalPath, '{"ticketId":"T-ONE"}\n');
+  const baseMtimeSeconds = 1_700_000_000;
+  await utimes(journalPath, baseMtimeSeconds + 0.123, baseMtimeSeconds + 0.123);
+
+  const initial = await projection.computeJournalSignature({
+    ticketsRoot: projectRoot,
+  });
+
+  await writeFile(journalPath, '{"ticketId":"T-TWO"}\n');
+  await utimes(journalPath, baseMtimeSeconds + 0.789, baseMtimeSeconds + 0.789);
+
+  const updatedMetadata = await stat(journalPath);
+  expect(Math.trunc(updatedMetadata.mtimeMs)).toBe(
+    Math.trunc((baseMtimeSeconds + 0.789) * 1000)
+  );
+  expect(updatedMetadata.mtimeMs).not.toBe((baseMtimeSeconds + 0.123) * 1000);
+
+  const updated = await projection.computeJournalSignature({
+    ticketsRoot: projectRoot,
+  });
+
+  expect(updated).not.toBe(initial);
 }, 20_000);
 
 test("normalized ticket adapter preserves compatibility while exposing provenance and documents", () => {

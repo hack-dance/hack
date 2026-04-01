@@ -733,6 +733,54 @@ test("tickets store hydrates remote tickets on a fresh clone without an explicit
   );
 }, 20_000);
 
+test("tickets store does not poison a fresh clone after an unreachable first remote", async () => {
+  const remoteRoot = await mkdtemp(join(tmpdir(), "hack-cli-tickets-remote-"));
+  tempRoots.push(remoteRoot);
+  await run({ cwd: remoteRoot, cmd: ["git", "init", "--bare"] });
+
+  const writerRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-writer-recovery-",
+  });
+  await run({
+    cwd: writerRoot,
+    cmd: ["git", "remote", "add", "origin", remoteRoot],
+  });
+  const writerStore = await createStore({ projectRoot: writerRoot });
+
+  const created = await writerStore.createTicket({
+    title: "Recovered remote hydration ticket",
+    body: "Should still load after the first remote error is fixed.",
+    owner: "hack",
+    source: "hack",
+    actor: "creator@hack",
+  });
+  expect(created.ok).toBe(true);
+  if (!created.ok) {
+    throw new Error(created.error);
+  }
+
+  const readerRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-reader-recovery-",
+  });
+  await run({
+    cwd: readerRoot,
+    cmd: ["git", "remote", "add", "origin", "ssh://127.0.0.1:1/does-not-exist"],
+  });
+  const readerStore = await createStore({ projectRoot: readerRoot });
+
+  await expect(readerStore.listTickets()).rejects.toThrow();
+
+  await run({
+    cwd: readerRoot,
+    cmd: ["git", "remote", "set-url", "origin", remoteRoot],
+  });
+
+  const tickets = await readerStore.listTickets();
+  expect(tickets.map((ticket) => ticket.title)).toContain(
+    "Recovered remote hydration ticket"
+  );
+}, 20_000);
+
 test("tickets sqlite projection signature tracks journal file metadata instead of reading full contents", async () => {
   const projectRoot = await createTempGitProject({
     prefix: "hack-cli-tickets-signature-",

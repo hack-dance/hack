@@ -896,13 +896,12 @@ export function createGitTicketsChannel(opts: {
       return { ok: true, remoteUrl: remote.remoteUrl, pushRef };
     }
 
+    const hasLocalBranch = await hasLocalTicketsBranch();
     const checkoutRemoteUrl =
-      refreshRemote || !(await hasLocalTicketsBranch())
-        ? remote.remoteUrl
-        : null;
+      refreshRemote || !hasLocalBranch ? remote.remoteUrl : null;
 
     const checkedOut = await checkoutHead({
-      allowRemoteFetchFailureFallback: !refreshRemote,
+      allowRemoteFetchFailureFallback: !refreshRemote && hasLocalBranch,
       remoteUrl: checkoutRemoteUrl,
     });
     if (!checkedOut.ok) {

@@ -7,6 +7,7 @@ import {
   collectDescendantProcessGroupIds,
   parseProcessSnapshotOutput,
   resolveLifecycleProcessGroupIdsForTmuxState,
+  wrapLifecyclePersistentCommand,
 } from "../src/commands/project.ts";
 import { readLifecycleState } from "../src/lib/lifecycle-runtime.ts";
 
@@ -120,6 +121,20 @@ test("resolveLifecycleProcessGroupIdsForTmuxState ignores stale persisted ids", 
   });
 
   expect(groups).toEqual([100, 101]);
+});
+
+test("wrapLifecyclePersistentCommand uses external kill for process-group cleanup", () => {
+  const script = wrapLifecyclePersistentCommand({
+    command: "bun run proxy",
+    logPath: "/tmp/event-agent.log",
+    serviceName: "proxy",
+  });
+
+  expect(script).toContain('/bin/kill -TERM -- "-$cmd_pid"');
+  expect(script).toContain('/usr/bin/kill -TERM -- "-$cmd_pid"');
+  expect(script).not.toContain(
+    'kill -TERM -- "-$cmd_pid" 2>/dev/null || kill "$cmd_pid" 2>/dev/null || true'
+  );
 });
 
 async function createLifecycleProjectDir(): Promise<string> {

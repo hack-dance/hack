@@ -9,6 +9,7 @@ const isolatedTestPaths = [
   "tests/runtime-projects.test.ts",
   "tests/projects-registry.test.ts",
   "tests/project-run-command.test.ts",
+  "tests/project-exec-command.test.ts",
   "tests/cli-offline-optionality-matrix.test.ts",
   "tests/session-env-command.test.ts",
 ] as const;
@@ -83,6 +84,9 @@ function testLabel(opts: { readonly testPath: string }): string {
   }
   if (opts.testPath === "tests/project-run-command.test.ts") {
     return "project run command";
+  }
+  if (opts.testPath === "tests/project-exec-command.test.ts") {
+    return "project exec command";
   }
   if (opts.testPath === "tests/cli-offline-optionality-matrix.test.ts") {
     return "offline optionality matrix";

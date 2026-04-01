@@ -2102,7 +2102,7 @@ function resolveLifecycleCommandServiceName(opts: {
   return `hook-${opts.index + 1}`;
 }
 
-function wrapLifecyclePersistentCommand(opts: {
+export function wrapLifecyclePersistentCommand(opts: {
   readonly command: string;
   readonly logPath: string;
   readonly serviceName: string;
@@ -2119,7 +2119,13 @@ function wrapLifecyclePersistentCommand(opts: {
     "cleanup_lifecycle() {",
     "  trap - EXIT INT TERM HUP",
     `  if [ -n "\${cmd_pid:-}" ]; then`,
-    '    kill -TERM -- "-$cmd_pid" 2>/dev/null || kill "$cmd_pid" 2>/dev/null || true',
+    "    if [ -x /bin/kill ]; then",
+    '      /bin/kill -TERM -- "-$cmd_pid" 2>/dev/null || /bin/kill "$cmd_pid" 2>/dev/null || true',
+    "    elif [ -x /usr/bin/kill ]; then",
+    '      /usr/bin/kill -TERM -- "-$cmd_pid" 2>/dev/null || /usr/bin/kill "$cmd_pid" 2>/dev/null || true',
+    "    else",
+    '      kill "$cmd_pid" 2>/dev/null || true',
+    "    fi",
     '    wait "$cmd_pid" 2>/dev/null || true',
     "  fi",
     `  if [ -n "\${reader_pid:-}" ]; then`,

@@ -137,6 +137,21 @@ test("wrapLifecyclePersistentCommand uses external kill for process-group cleanu
   );
 });
 
+test("wrapLifecyclePersistentCommand avoids login-shell execution", () => {
+  const script = wrapLifecyclePersistentCommand({
+    command: "bun run proxy",
+    logPath: "/tmp/event-agent.log",
+    serviceName: "proxy",
+  });
+
+  expect(script).toContain('os.execvp("sh", ["sh", "-c", sys.argv[1]])');
+  expect(script).toContain('sh -c "$HACK_LIFECYCLE_COMMAND" >"$fifo" 2>&1 &');
+  expect(script).not.toContain('os.execvp("sh", ["sh", "-lc", sys.argv[1]])');
+  expect(script).not.toContain(
+    'sh -lc "$HACK_LIFECYCLE_COMMAND" >"$fifo" 2>&1 &'
+  );
+});
+
 async function createLifecycleProjectDir(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "hack-lifecycle-processes-"));
   tempDirs.add(root);

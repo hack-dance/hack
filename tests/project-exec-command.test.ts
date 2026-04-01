@@ -47,17 +47,6 @@ mock.module("../src/backends/runtime-backend.ts", () => ({
   },
 }));
 
-mock.module("../src/ui/logger.ts", () => ({
-  logger: {
-    debug: () => {},
-    info: () => {},
-    warn: () => {},
-    error: () => {},
-    success: () => {},
-    step: () => {},
-  },
-}));
-
 const { execCommand } = await import("../src/commands/project.ts");
 
 afterEach(async () => {

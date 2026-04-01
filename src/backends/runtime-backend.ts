@@ -11,6 +11,7 @@ export interface RuntimeBackend {
   psJson(opts: RuntimePsOptions): ReturnType<typeof exec>;
   ps(opts: RuntimePsOptions): Promise<number>;
   run(opts: RuntimeRunOptions): Promise<number>;
+  exec(opts: RuntimeExecOptions): Promise<number>;
 }
 
 export interface RuntimeBaseOptions {
@@ -32,6 +33,12 @@ export interface RuntimePsOptions extends RuntimeBaseOptions {}
 export interface RuntimeRunOptions extends RuntimeBaseOptions {
   readonly service: string;
   readonly noDeps?: boolean;
+  readonly workdir?: string;
+  readonly cmdArgs: readonly string[];
+}
+
+export interface RuntimeExecOptions extends RuntimeBaseOptions {
+  readonly service: string;
   readonly workdir?: string;
   readonly cmdArgs: readonly string[];
 }
@@ -112,6 +119,16 @@ export const composeRuntimeBackend: RuntimeBackend = {
       "run",
       "--rm",
       ...(opts.noDeps ? ["--no-deps"] : []),
+      ...(opts.workdir && opts.workdir.length > 0 ? ["-w", opts.workdir] : []),
+      opts.service,
+      ...(opts.cmdArgs.length > 0 ? opts.cmdArgs : []),
+    ];
+    return await run(cmd, { cwd: opts.cwd, stdin: "inherit", env: opts.env });
+  },
+  async exec(opts) {
+    const cmd = [
+      ...buildComposeArgs(opts),
+      "exec",
       ...(opts.workdir && opts.workdir.length > 0 ? ["-w", opts.workdir] : []),
       opts.service,
       ...(opts.cmdArgs.length > 0 ? opts.cmdArgs : []),

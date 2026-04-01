@@ -84,6 +84,7 @@ Current practical rule:
 | `hack ps` | Show project status (docker compose ps) | Core workflows |
 | `hack logs` | Tail logs (compose by default; Loki for queries/history via --loki/--query) | Core workflows |
 | `hack run` | Run a one-off command in a service container (docker compose run --rm) | Core workflows |
+| `hack exec` | Run a command in an already-running service container (docker compose exec) | Core workflows |
 | `hack open` | Open a URL for the project (default: https://<project>.hack) | Core workflows |
 | `hack tui` | Open the project TUI (services + logs) | Core workflows |
 | `hack branch` | Manage branch aliases for a project | Core workflows |
@@ -1665,6 +1666,25 @@ Options:
 | `--service <name>` | string | - | Resolve values for one service scope |
 | `--target <host\|compose>` | string | `host` | Host-local env view for host commands, or raw compose view |
 
+### hack exec
+
+Usage: `hack exec <service> [-- <cmd...>] [options]`
+
+Runs a command in an already-running service container. Unlike `hack run`, this does not create a
+new one-off container or start dependencies. It targets the live container for the selected
+service, so the service must already be running.
+
+Options:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
+| `--project <name>` | string | - | Target a registered project by name |
+| `--env <name\|base>` | string | - | Validate against the selected env overlay before attaching to the live stack |
+| `--branch <name>` | string | - | Target a branch-specific running instance |
+| `--workdir <path>` | string | - | Working directory inside the container (docker compose exec -w) |
+| `--profile <csv>` | string | - | Compose profiles for service resolution |
+
 ### hack host
 
 Usage: `hack host <subcommand>`
@@ -1674,8 +1694,7 @@ still needs Hack-resolved env. `--scope` selects which env scope to inject; it d
 container execution target.
 
 If you need a one-off command in the compose network, use `hack run <service> ...` instead.
-If you need to run inside an already-running container, use `docker compose exec <service> ...`
-today.
+If you need to run inside an already-running container, use `hack exec <service> ...`.
 
 Subcommands:
 

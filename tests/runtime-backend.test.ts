@@ -20,7 +20,13 @@ mock.module("../src/lib/shell.ts", () => ({
   CommandError: class CommandError extends Error {},
 }));
 
-import { composeRuntimeBackend } from "../src/backends/runtime-backend.ts";
+async function loadComposeRuntimeBackend() {
+  return (
+    await import(
+      `../src/backends/runtime-backend.ts?test=${Date.now()}-${Math.random()}`
+    )
+  ).composeRuntimeBackend;
+}
 
 beforeEach(() => {
   runCalls.length = 0;
@@ -32,6 +38,7 @@ afterAll(() => {
 });
 
 test("composeRuntimeBackend.up builds compose args with profiles and detach", async () => {
+  const composeRuntimeBackend = await loadComposeRuntimeBackend();
   await composeRuntimeBackend.up({
     composeFiles: ["a.yml", "b.yml"],
     composeProject: "myproj",
@@ -57,6 +64,7 @@ test("composeRuntimeBackend.up builds compose args with profiles and detach", as
 });
 
 test("composeRuntimeBackend.down builds compose args", async () => {
+  const composeRuntimeBackend = await loadComposeRuntimeBackend();
   await composeRuntimeBackend.down({
     composeFiles: ["docker-compose.yml"],
     composeProject: null,
@@ -74,6 +82,7 @@ test("composeRuntimeBackend.down builds compose args", async () => {
 });
 
 test("composeRuntimeBackend.psJson uses exec with json format", async () => {
+  const composeRuntimeBackend = await loadComposeRuntimeBackend();
   await composeRuntimeBackend.psJson({
     composeFiles: ["docker-compose.yml"],
     composeProject: "proj",
@@ -97,6 +106,7 @@ test("composeRuntimeBackend.psJson uses exec with json format", async () => {
 });
 
 test("composeRuntimeBackend.run supports workdir and args", async () => {
+  const composeRuntimeBackend = await loadComposeRuntimeBackend();
   await composeRuntimeBackend.run({
     composeFiles: ["docker-compose.yml"],
     composeProject: "proj",
@@ -125,6 +135,7 @@ test("composeRuntimeBackend.run supports workdir and args", async () => {
 });
 
 test("composeRuntimeBackend.run can skip dependency startup", async () => {
+  const composeRuntimeBackend = await loadComposeRuntimeBackend();
   await composeRuntimeBackend.run({
     composeFiles: ["docker-compose.yml"],
     composeProject: "proj",
@@ -148,5 +159,33 @@ test("composeRuntimeBackend.run can skip dependency startup", async () => {
     "api",
     "bun",
     "--version",
+  ]);
+});
+
+test("composeRuntimeBackend.exec supports workdir and args", async () => {
+  const composeRuntimeBackend = await loadComposeRuntimeBackend();
+  await composeRuntimeBackend.exec({
+    composeFiles: ["docker-compose.yml"],
+    composeProject: "proj",
+    profiles: [],
+    service: "api",
+    workdir: "/app",
+    cmdArgs: ["bun", "dev"],
+    cwd: "/tmp",
+  });
+
+  expect(runCalls[0]).toEqual([
+    "docker",
+    "compose",
+    "-p",
+    "proj",
+    "-f",
+    "docker-compose.yml",
+    "exec",
+    "-w",
+    "/app",
+    "api",
+    "bun",
+    "dev",
   ]);
 });

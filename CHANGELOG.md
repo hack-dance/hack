@@ -1,3 +1,8 @@
+## 2.1.0 (2026-04-01)
+
+* Merge pull request #37 from hack-dance/dimitri/host-command-surface ([6fc4558](https://github.com/hack-dance/hack/commit/6fc4558)), closes [#37](https://github.com/hack-dance/hack/issues/37)
+* feat(host): add host command namespace for env-injected execution ([c9bb856](https://github.com/hack-dance/hack/commit/c9bb856))
+
 ## <small>2.0.3 (2026-03-31)</small>
 
 * Merge pull request #36 from hack-dance/dimitri/fix-runtime-effective-env-match ([9068559](https://github.com/hack-dance/hack/commit/9068559)), closes [#36](https://github.com/hack-dance/hack/issues/36)

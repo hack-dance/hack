@@ -102,6 +102,15 @@ const optService = defineOption({
   description: "Target scope (global or a discovered service name)",
 } as const);
 
+const optScope = defineOption({
+  name: "scope",
+  type: "string",
+  long: "--scope",
+  valueHint: "<global|service>",
+  description:
+    "Resolve values for one env scope while still running the command on the host",
+} as const);
+
 const optTarget = defineOption({
   name: "target",
   type: "string",
@@ -191,6 +200,28 @@ const shellSpec = defineCommand({
   description:
     "Start an interactive host shell with the selected Hack env overlay injected into the process environment.",
   options: [optPath, optProject, optEnv, optService, optTarget],
+  positionals: [],
+  subcommands: [],
+} as const);
+
+const hostExecSpec = defineCommand({
+  name: "exec",
+  summary: "Run a host command with project env injected",
+  group: "Project",
+  description:
+    "Run a one-off command on the host with the selected Hack env overlay injected. Use --scope when you want service-scoped values without running inside that service container.",
+  options: [optPath, optProject, optEnv, optScope, optTarget],
+  positionals: [{ name: "command", required: true, multiple: true }],
+  subcommands: [],
+} as const);
+
+const hostShellSpec = defineCommand({
+  name: "shell",
+  summary: "Open a host shell with project env injected",
+  group: "Project",
+  description:
+    "Start an interactive host shell with the selected Hack env overlay injected. Use --scope when you want service-scoped values without running inside that service container.",
+  options: [optPath, optProject, optEnv, optScope, optTarget],
   positionals: [],
   subcommands: [],
 } as const);
@@ -1533,24 +1564,41 @@ function resolveInteractiveShellCommand(): readonly string[] {
   return [shellPath, "-l"];
 }
 
-const handleEnvExec: CommandHandlerFor<typeof execSpec> = async ({
-  ctx,
-  args,
-}): Promise<number> => {
+function resolveExecutionScopeName(input: {
+  readonly scopeName?: string;
+  readonly serviceName?: string;
+}): string | null {
+  const scopeName = input.scopeName?.trim();
+  const serviceName = input.serviceName?.trim();
+  if (scopeName && serviceName) {
+    throw new CliUsageError("Use either --scope or --service, not both.");
+  }
+  return scopeName || serviceName || null;
+}
+
+async function runHostCommandWithInjectedEnv(input: {
+  readonly ctx: CliContext;
+  readonly pathOpt: string | undefined;
+  readonly projectOpt: string | undefined;
+  readonly envOpt: string | undefined;
+  readonly scopeName?: string;
+  readonly serviceName?: string;
+  readonly targetOpt: string | undefined;
+  readonly command: readonly string[];
+}): Promise<number> {
   const project = await resolveProjectForEnv({
-    ctx,
-    pathOpt: args.options.path,
-    projectOpt: args.options.project,
+    ctx: input.ctx,
+    pathOpt: input.pathOpt,
+    projectOpt: input.projectOpt,
   });
   const projectName = await resolveProjectName(project);
   const envName = resolveRequestedEnvName({
-    envOption: args.options.env,
+    envOption: input.envOpt,
   });
   const target = resolveHostEnvTarget({
-    targetOption: args.options.target,
+    targetOption: input.targetOpt,
   });
-  const command = args.positionals.command;
-  if (command.length === 0) {
+  if (input.command.length === 0) {
     throw new CliUsageError("Command is required.");
   }
 
@@ -1558,37 +1606,48 @@ const handleEnvExec: CommandHandlerFor<typeof execSpec> = async ({
     project,
     projectName,
     envName,
-    serviceName: args.options.service?.trim() || null,
+    serviceName: resolveExecutionScopeName({
+      scopeName: input.scopeName,
+      serviceName: input.serviceName,
+    }),
     target,
   });
-  return await run(command, {
+  return await run(input.command, {
     cwd: project.projectRoot,
     env: envState.env,
     stdin: "inherit",
   });
-};
+}
 
-const handleEnvShell: CommandHandlerFor<typeof shellSpec> = async ({
-  ctx,
-  args,
-}): Promise<number> => {
+async function openHostShellWithInjectedEnv(input: {
+  readonly ctx: CliContext;
+  readonly pathOpt: string | undefined;
+  readonly projectOpt: string | undefined;
+  readonly envOpt: string | undefined;
+  readonly scopeName?: string;
+  readonly serviceName?: string;
+  readonly targetOpt: string | undefined;
+}): Promise<number> {
   const project = await resolveProjectForEnv({
-    ctx,
-    pathOpt: args.options.path,
-    projectOpt: args.options.project,
+    ctx: input.ctx,
+    pathOpt: input.pathOpt,
+    projectOpt: input.projectOpt,
   });
   const projectName = await resolveProjectName(project);
   const envName = resolveRequestedEnvName({
-    envOption: args.options.env,
+    envOption: input.envOpt,
   });
   const target = resolveHostEnvTarget({
-    targetOption: args.options.target,
+    targetOption: input.targetOpt,
   });
   const envState = await resolveEnvInjection({
     project,
     projectName,
     envName,
-    serviceName: args.options.service?.trim() || null,
+    serviceName: resolveExecutionScopeName({
+      scopeName: input.scopeName,
+      serviceName: input.serviceName,
+    }),
     target,
   });
 
@@ -1596,6 +1655,64 @@ const handleEnvShell: CommandHandlerFor<typeof shellSpec> = async ({
     cwd: project.projectRoot,
     env: envState.env,
     stdin: "inherit",
+  });
+}
+
+const handleEnvExec: CommandHandlerFor<typeof execSpec> = async ({
+  ctx,
+  args,
+}): Promise<number> => {
+  return await runHostCommandWithInjectedEnv({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+    envOpt: args.options.env,
+    serviceName: args.options.service,
+    targetOpt: args.options.target,
+    command: args.positionals.command,
+  });
+};
+
+const handleEnvShell: CommandHandlerFor<typeof shellSpec> = async ({
+  ctx,
+  args,
+}): Promise<number> => {
+  return await openHostShellWithInjectedEnv({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+    envOpt: args.options.env,
+    serviceName: args.options.service,
+    targetOpt: args.options.target,
+  });
+};
+
+const handleHostExec: CommandHandlerFor<typeof hostExecSpec> = async ({
+  ctx,
+  args,
+}): Promise<number> => {
+  return await runHostCommandWithInjectedEnv({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+    envOpt: args.options.env,
+    scopeName: args.options.scope,
+    targetOpt: args.options.target,
+    command: args.positionals.command,
+  });
+};
+
+const handleHostShell: CommandHandlerFor<typeof hostShellSpec> = async ({
+  ctx,
+  args,
+}): Promise<number> => {
+  return await openHostShellWithInjectedEnv({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+    envOpt: args.options.env,
+    scopeName: args.options.scope,
+    targetOpt: args.options.target,
   });
 };
 
@@ -1956,5 +2073,20 @@ export const envCommand = defineCommand({
         return 0;
       }
     ),
+  ],
+} as const);
+
+export const hostCommand = defineCommand({
+  name: "host",
+  summary: "Run host-side commands with project env injected",
+  group: "Integrations",
+  expandInRootHelp: true,
+  description:
+    "Use hack host when a command should run on your host machine, not inside the compose network, but still needs Hack-resolved env and host-local rewrites.",
+  options: [],
+  positionals: [],
+  subcommands: [
+    withHandler(hostExecSpec, handleHostExec),
+    withHandler(hostShellSpec, handleHostShell),
   ],
 } as const);

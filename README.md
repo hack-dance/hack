@@ -78,13 +78,15 @@ Core commands:
 hack env list
 hack env add AWS_PROFILE dev
 hack env add --secret DATABASE_URL postgres://...
-hack env exec --env qa --service api -- bun db:migrate
-hack env exec --env qa --service api --target compose -- bun test
-hack env shell --env qa --service api
+hack host exec --env qa --scope api -- bun db:migrate
+hack host exec --env qa --scope api --target compose -- bun test
+hack host shell --env qa --scope api
 ```
 
-`hack env exec` and `hack env shell` now default to a host-local env view for host commands. Use
-`--target compose` when you explicitly want the container-oriented addresses from the compose view.
+`hack host exec` and `hack host shell` run on your host machine with Hack-resolved env injected.
+Use `--scope` when you want service-scoped values without running inside that service container.
+Use `--target compose` when you explicitly want the container-oriented addresses from the compose
+view instead of the default host-local rewrites.
 
 Docs:
 

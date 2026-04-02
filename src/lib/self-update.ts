@@ -9,10 +9,11 @@ import { execOrThrow } from "./shell.ts";
 
 const DEFAULT_REPO_OWNER = "hack-dance" as const;
 const DEFAULT_REPO_NAME = "hack" as const;
-const HOMEBREW_PREFIXES = [
-  "/opt/homebrew",
-  "/usr/local",
-  "/home/linuxbrew/.linuxbrew",
+const HOMEBREW_PREFIXES = ["/opt/homebrew", "/usr/local"] as const;
+const LINUXBREW_HOME_MARKERS = [
+  "/.linuxbrew/bin/hack",
+  "/.linuxbrew/Cellar/hack/",
+  "/.linuxbrew/opt/hack/",
 ] as const;
 
 export const DEV_WRAPPER_MARKER = "hack-cli local-dev shim" as const;
@@ -132,7 +133,9 @@ export function isHomebrewManagedHackPath(pathRaw: string): boolean {
       path.includes(`${prefix}/Cellar/hack/`) ||
       path.includes(`${prefix}/opt/hack/`)
     );
-  });
+  })
+    ? true
+    : LINUXBREW_HOME_MARKERS.some((marker) => path.includes(marker));
 }
 
 export async function detectHackInstall({

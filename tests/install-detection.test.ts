@@ -15,7 +15,10 @@ test("isHomebrewManagedHackPath detects common Homebrew hack locations", () => {
     isHomebrewManagedHackPath("/opt/homebrew/Cellar/hack/2.3.0/bin/hack")
   ).toBe(true);
   expect(isHomebrewManagedHackPath("/usr/local/opt/hack/bin/hack")).toBe(true);
-  expect(isHomebrewManagedHackPath("/Users/hack/.hack/bin/hack")).toBe(false);
+  expect(
+    isHomebrewManagedHackPath("/workspace/linuxbrew/.linuxbrew/bin/hack")
+  ).toBe(true);
+  expect(isHomebrewManagedHackPath("/tmp/hack/.hack/bin/hack")).toBe(false);
 });
 
 test("detectHackInstall classifies Homebrew symlink installs", async () => {

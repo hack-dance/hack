@@ -1,3 +1,10 @@
+## 2.3.0 (2026-04-02)
+
+* Merge pull request #41 from hack-dance/feat/global-install-recovery-setup ([9eea06d](https://github.com/hack-dance/hack/commit/9eea06d)), closes [#41](https://github.com/hack-dance/hack/issues/41)
+* fix(env): skip secret backend for empty legacy contracts ([67da0a6](https://github.com/hack-dance/hack/commit/67da0a6))
+* fix(global): preserve sudo fallback when stdout is redirected ([7038b5f](https://github.com/hack-dance/hack/commit/7038b5f))
+* feat(global): automate macOS recovery setup during install ([2da43bb](https://github.com/hack-dance/hack/commit/2da43bb))
+
 ## <small>2.2.1 (2026-04-01)</small>
 
 * Merge pull request #40 from hack-dance/dimitri/fix-lifecycle-non-login-shell ([8a21daf](https://github.com/hack-dance/hack/commit/8a21daf)), closes [#40](https://github.com/hack-dance/hack/issues/40)

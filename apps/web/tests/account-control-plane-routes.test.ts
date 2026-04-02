@@ -31,9 +31,10 @@ afterEach(() => {
 });
 
 test("create organization route forwards the broker mutation and redirects to the selected org", async () => {
-  process.env.NEXT_PUBLIC_HACK_WEB_APP_BASE_URL = "https://hack-cli.hack";
-  process.env.NEXT_PUBLIC_HACK_AUTH_BROKER_URL = "https://auth.hack-cli.hack";
-  process.env.HACK_AUTH_BROKER_INTERNAL_URL = "https://auth.hack-cli.hack";
+  process.env.NEXT_PUBLIC_HACK_WEB_APP_BASE_URL = "https://hack-cli.hack.gy";
+  process.env.NEXT_PUBLIC_HACK_AUTH_BROKER_URL =
+    "https://auth.hack-cli.hack.gy";
+  process.env.HACK_AUTH_BROKER_INTERNAL_URL = "https://auth.hack-cli.hack.gy";
 
   let body: Record<string, unknown> | undefined;
   let authorization: string | null = null;
@@ -75,16 +76,17 @@ test("create organization route forwards the broker mutation and redirects to th
 });
 
 test("create organization route redirects to sign-in when the browser session cookie is missing", async () => {
-  process.env.NEXT_PUBLIC_HACK_WEB_APP_BASE_URL = "https://hack-cli.hack";
-  process.env.NEXT_PUBLIC_HACK_AUTH_BROKER_URL = "https://auth.hack-cli.hack";
-  process.env.HACK_AUTH_BROKER_INTERNAL_URL = "https://auth.hack-cli.hack";
+  process.env.NEXT_PUBLIC_HACK_WEB_APP_BASE_URL = "https://hack-cli.hack.gy";
+  process.env.NEXT_PUBLIC_HACK_AUTH_BROKER_URL =
+    "https://auth.hack-cli.hack.gy";
+  process.env.HACK_AUTH_BROKER_INTERNAL_URL = "https://auth.hack-cli.hack.gy";
 
   const formData = new FormData();
   formData.set("slug", "hack");
   formData.set("redirectTo", "/account?org=hack");
 
   const response = await createOrganization(
-    new Request("https://hack-cli.hack/api/control-plane/orgs", {
+    new Request("https://hack-cli.hack.gy/api/control-plane/orgs", {
       method: "POST",
       body: formData,
     }) as NextRequest
@@ -96,9 +98,10 @@ test("create organization route redirects to sign-in when the browser session co
 });
 
 test("invite org member route keeps org scope and redirect context", async () => {
-  process.env.NEXT_PUBLIC_HACK_WEB_APP_BASE_URL = "https://hack-cli.hack";
-  process.env.NEXT_PUBLIC_HACK_AUTH_BROKER_URL = "https://auth.hack-cli.hack";
-  process.env.HACK_AUTH_BROKER_INTERNAL_URL = "https://auth.hack-cli.hack";
+  process.env.NEXT_PUBLIC_HACK_WEB_APP_BASE_URL = "https://hack-cli.hack.gy";
+  process.env.NEXT_PUBLIC_HACK_AUTH_BROKER_URL =
+    "https://auth.hack-cli.hack.gy";
+  process.env.HACK_AUTH_BROKER_INTERNAL_URL = "https://auth.hack-cli.hack.gy";
 
   let requestUrl = "";
   let body: Record<string, unknown> | undefined;
@@ -114,7 +117,7 @@ test("invite org member route keeps org scope and redirect context", async () =>
 
   const response = await inviteOrgMember(
     new Request(
-      "https://hack-cli.hack/api/control-plane/orgs/hack/members/invite",
+      "https://hack-cli.hack.gy/api/control-plane/orgs/hack/members/invite",
       {
         method: "POST",
         headers: {
@@ -127,7 +130,7 @@ test("invite org member route keeps org scope and redirect context", async () =>
   );
 
   expect(requestUrl).toBe(
-    "https://auth.hack-cli.hack/v1/auth/orgs/hack/members/invite"
+    "https://auth.hack-cli.hack.gy/v1/auth/orgs/hack/members/invite"
   );
   expect(body).toEqual({
     target: "person@example.com",
@@ -138,9 +141,10 @@ test("invite org member route keeps org scope and redirect context", async () =>
 });
 
 test("remove org member route revokes pending invites and keeps org scope", async () => {
-  process.env.NEXT_PUBLIC_HACK_WEB_APP_BASE_URL = "https://hack-cli.hack";
-  process.env.NEXT_PUBLIC_HACK_AUTH_BROKER_URL = "https://auth.hack-cli.hack";
-  process.env.HACK_AUTH_BROKER_INTERNAL_URL = "https://auth.hack-cli.hack";
+  process.env.NEXT_PUBLIC_HACK_WEB_APP_BASE_URL = "https://hack-cli.hack.gy";
+  process.env.NEXT_PUBLIC_HACK_AUTH_BROKER_URL =
+    "https://auth.hack-cli.hack.gy";
+  process.env.HACK_AUTH_BROKER_INTERNAL_URL = "https://auth.hack-cli.hack.gy";
 
   let requestUrl = "";
   let body: Record<string, unknown> | undefined;
@@ -164,7 +168,7 @@ test("remove org member route revokes pending invites and keeps org scope", asyn
 
   const response = await removeOrgMember(
     new Request(
-      "https://hack-cli.hack/api/control-plane/orgs/hack/members/remove",
+      "https://hack-cli.hack.gy/api/control-plane/orgs/hack/members/remove",
       {
         method: "POST",
         headers: {
@@ -177,7 +181,7 @@ test("remove org member route revokes pending invites and keeps org scope", asyn
   );
 
   expect(requestUrl).toBe(
-    "https://auth.hack-cli.hack/v1/auth/orgs/hack/members/remove"
+    "https://auth.hack-cli.hack.gy/v1/auth/orgs/hack/members/remove"
   );
   expect(String(authorization)).toBe("Bearer session-token");
   expect(body).toEqual({
@@ -189,9 +193,10 @@ test("remove org member route revokes pending invites and keeps org scope", asyn
 });
 
 test("remove org member route reports broker failures through the account shell", async () => {
-  process.env.NEXT_PUBLIC_HACK_WEB_APP_BASE_URL = "https://hack-cli.hack";
-  process.env.NEXT_PUBLIC_HACK_AUTH_BROKER_URL = "https://auth.hack-cli.hack";
-  process.env.HACK_AUTH_BROKER_INTERNAL_URL = "https://auth.hack-cli.hack";
+  process.env.NEXT_PUBLIC_HACK_WEB_APP_BASE_URL = "https://hack-cli.hack.gy";
+  process.env.NEXT_PUBLIC_HACK_AUTH_BROKER_URL =
+    "https://auth.hack-cli.hack.gy";
+  process.env.HACK_AUTH_BROKER_INTERNAL_URL = "https://auth.hack-cli.hack.gy";
 
   setMockFetch(() =>
     Response.json(
@@ -208,7 +213,7 @@ test("remove org member route reports broker failures through the account shell"
 
   const response = await removeOrgMember(
     new Request(
-      "https://hack-cli.hack/api/control-plane/orgs/hack/members/remove",
+      "https://hack-cli.hack.gy/api/control-plane/orgs/hack/members/remove",
       {
         method: "POST",
         headers: {
@@ -226,9 +231,10 @@ test("remove org member route reports broker failures through the account shell"
 });
 
 test("create team route forwards the broker mutation with explicit org scope", async () => {
-  process.env.NEXT_PUBLIC_HACK_WEB_APP_BASE_URL = "https://hack-cli.hack";
-  process.env.NEXT_PUBLIC_HACK_AUTH_BROKER_URL = "https://auth.hack-cli.hack";
-  process.env.HACK_AUTH_BROKER_INTERNAL_URL = "https://auth.hack-cli.hack";
+  process.env.NEXT_PUBLIC_HACK_WEB_APP_BASE_URL = "https://hack-cli.hack.gy";
+  process.env.NEXT_PUBLIC_HACK_AUTH_BROKER_URL =
+    "https://auth.hack-cli.hack.gy";
+  process.env.HACK_AUTH_BROKER_INTERNAL_URL = "https://auth.hack-cli.hack.gy";
 
   let body: Record<string, unknown> | undefined;
   let authorization: string | null = null;
@@ -251,7 +257,7 @@ test("create team route forwards the broker mutation with explicit org scope", a
   formData.set("redirectTo", "/account?org=hack");
 
   const response = await createTeam(
-    new Request("https://hack-cli.hack/api/control-plane/teams", {
+    new Request("https://hack-cli.hack.gy/api/control-plane/teams", {
       method: "POST",
       headers: {
         cookie: `${HACK_WEB_BROKER_SESSION_COOKIE_NAME}=session-token`,
@@ -272,9 +278,10 @@ test("create team route forwards the broker mutation with explicit org scope", a
 });
 
 test("invite team member route keeps explicit org and team scope", async () => {
-  process.env.NEXT_PUBLIC_HACK_WEB_APP_BASE_URL = "https://hack-cli.hack";
-  process.env.NEXT_PUBLIC_HACK_AUTH_BROKER_URL = "https://auth.hack-cli.hack";
-  process.env.HACK_AUTH_BROKER_INTERNAL_URL = "https://auth.hack-cli.hack";
+  process.env.NEXT_PUBLIC_HACK_WEB_APP_BASE_URL = "https://hack-cli.hack.gy";
+  process.env.NEXT_PUBLIC_HACK_AUTH_BROKER_URL =
+    "https://auth.hack-cli.hack.gy";
+  process.env.HACK_AUTH_BROKER_INTERNAL_URL = "https://auth.hack-cli.hack.gy";
 
   let requestUrl = "";
   let body: Record<string, unknown> | undefined;
@@ -291,7 +298,7 @@ test("invite team member route keeps explicit org and team scope", async () => {
 
   const response = await inviteTeamMember(
     new Request(
-      "https://hack-cli.hack/api/control-plane/teams/cli/members/invite",
+      "https://hack-cli.hack.gy/api/control-plane/teams/cli/members/invite",
       {
         method: "POST",
         headers: {
@@ -304,7 +311,7 @@ test("invite team member route keeps explicit org and team scope", async () => {
   );
 
   expect(requestUrl).toBe(
-    "https://auth.hack-cli.hack/v1/auth/teams/cli/members/invite"
+    "https://auth.hack-cli.hack.gy/v1/auth/teams/cli/members/invite"
   );
   expect(body).toEqual({
     org: "hack",
@@ -316,9 +323,10 @@ test("invite team member route keeps explicit org and team scope", async () => {
 });
 
 test("invite team member route reports parent-org membership requirements through the account shell", async () => {
-  process.env.NEXT_PUBLIC_HACK_WEB_APP_BASE_URL = "https://hack-cli.hack";
-  process.env.NEXT_PUBLIC_HACK_AUTH_BROKER_URL = "https://auth.hack-cli.hack";
-  process.env.HACK_AUTH_BROKER_INTERNAL_URL = "https://auth.hack-cli.hack";
+  process.env.NEXT_PUBLIC_HACK_WEB_APP_BASE_URL = "https://hack-cli.hack.gy";
+  process.env.NEXT_PUBLIC_HACK_AUTH_BROKER_URL =
+    "https://auth.hack-cli.hack.gy";
+  process.env.HACK_AUTH_BROKER_INTERNAL_URL = "https://auth.hack-cli.hack.gy";
 
   setMockFetch(() =>
     Response.json(
@@ -337,7 +345,7 @@ test("invite team member route reports parent-org membership requirements throug
 
   const response = await inviteTeamMember(
     new Request(
-      "https://hack-cli.hack/api/control-plane/teams/cli/members/invite",
+      "https://hack-cli.hack.gy/api/control-plane/teams/cli/members/invite",
       {
         method: "POST",
         headers: {
@@ -355,9 +363,10 @@ test("invite team member route reports parent-org membership requirements throug
 });
 
 test("remove team member route preserves explicit org and team selection", async () => {
-  process.env.NEXT_PUBLIC_HACK_WEB_APP_BASE_URL = "https://hack-cli.hack";
-  process.env.NEXT_PUBLIC_HACK_AUTH_BROKER_URL = "https://auth.hack-cli.hack";
-  process.env.HACK_AUTH_BROKER_INTERNAL_URL = "https://auth.hack-cli.hack";
+  process.env.NEXT_PUBLIC_HACK_WEB_APP_BASE_URL = "https://hack-cli.hack.gy";
+  process.env.NEXT_PUBLIC_HACK_AUTH_BROKER_URL =
+    "https://auth.hack-cli.hack.gy";
+  process.env.HACK_AUTH_BROKER_INTERNAL_URL = "https://auth.hack-cli.hack.gy";
 
   let requestUrl = "";
   let body: Record<string, unknown> | undefined;
@@ -374,7 +383,7 @@ test("remove team member route preserves explicit org and team selection", async
 
   const response = await removeTeamMember(
     new Request(
-      "https://hack-cli.hack/api/control-plane/teams/cli/members/remove",
+      "https://hack-cli.hack.gy/api/control-plane/teams/cli/members/remove",
       {
         method: "POST",
         headers: {
@@ -387,7 +396,7 @@ test("remove team member route preserves explicit org and team selection", async
   );
 
   expect(requestUrl).toBe(
-    "https://auth.hack-cli.hack/v1/auth/teams/cli/members/remove"
+    "https://auth.hack-cli.hack.gy/v1/auth/teams/cli/members/remove"
   );
   expect(body).toEqual({
     org: "hack",
@@ -399,9 +408,10 @@ test("remove team member route preserves explicit org and team selection", async
 });
 
 test("invitation routes forward recipient actions back to the broker", async () => {
-  process.env.NEXT_PUBLIC_HACK_WEB_APP_BASE_URL = "https://hack-cli.hack";
-  process.env.NEXT_PUBLIC_HACK_AUTH_BROKER_URL = "https://auth.hack-cli.hack";
-  process.env.HACK_AUTH_BROKER_INTERNAL_URL = "https://auth.hack-cli.hack";
+  process.env.NEXT_PUBLIC_HACK_WEB_APP_BASE_URL = "https://hack-cli.hack.gy";
+  process.env.NEXT_PUBLIC_HACK_AUTH_BROKER_URL =
+    "https://auth.hack-cli.hack.gy";
+  process.env.HACK_AUTH_BROKER_INTERNAL_URL = "https://auth.hack-cli.hack.gy";
 
   const requests: string[] = [];
   setMockFetch((input) => {
@@ -413,7 +423,7 @@ test("invitation routes forward recipient actions back to the broker", async () 
   acceptFormData.set("redirectTo", "/account");
   const acceptResponse = await acceptInvitation(
     new Request(
-      "https://hack-cli.hack/api/control-plane/invitations/invite_123/accept",
+      "https://hack-cli.hack.gy/api/control-plane/invitations/invite_123/accept",
       {
         method: "POST",
         headers: {
@@ -429,7 +439,7 @@ test("invitation routes forward recipient actions back to the broker", async () 
   declineFormData.set("redirectTo", "/account");
   const declineResponse = await declineInvitation(
     new Request(
-      "https://hack-cli.hack/api/control-plane/invitations/invite_123/decline",
+      "https://hack-cli.hack.gy/api/control-plane/invitations/invite_123/decline",
       {
         method: "POST",
         headers: {
@@ -442,8 +452,8 @@ test("invitation routes forward recipient actions back to the broker", async () 
   );
 
   expect(requests).toEqual([
-    "https://auth.hack-cli.hack/v1/auth/invitations/invite_123/accept",
-    "https://auth.hack-cli.hack/v1/auth/invitations/invite_123/decline",
+    "https://auth.hack-cli.hack.gy/v1/auth/invitations/invite_123/accept",
+    "https://auth.hack-cli.hack.gy/v1/auth/invitations/invite_123/decline",
   ]);
   expect(acceptResponse.headers.get("location")).toBe(
     "/account?notice=invite_accepted"

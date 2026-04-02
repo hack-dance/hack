@@ -25,7 +25,7 @@ test("web package exposes reproducible workspace tasks", () => {
       build: "next build",
       check:
         "cd ../.. && bunx ultracite check apps/web/app apps/web/src apps/web/tests",
-      dev: "next dev --webpack",
+      dev: "next dev",
       start: "next start",
       test: "bun test",
       typecheck: "bunx tsc -p tsconfig.json --noEmit",

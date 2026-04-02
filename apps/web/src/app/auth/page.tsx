@@ -23,15 +23,8 @@ export default async function AuthPage({
       providers={config.betterAuth.socialProviders}
       redirect={readSearchParam(params.redirect)}
       trustedOrigins={config.betterAuth.trustedOrigins}
-      variant={readAuthVariant(readSearchParam(params.variant))}
     />
   );
-}
-
-function readAuthVariant(
-  value: string | undefined
-): "sign-in" | "sign-up" | undefined {
-  return value === "sign-up" ? "sign-up" : undefined;
 }
 
 function readSearchParam(

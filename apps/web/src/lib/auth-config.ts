@@ -1,5 +1,7 @@
 import {
   type BetterAuthProviderMetadata,
+  type BetterAuthSocialProviderId,
+  buildBetterAuthProviderCallbackUrl,
   createBetterAuthProviderMetadata,
   createSharedBetterAuthContract,
   resolveBetterAuthSocialProviders,
@@ -84,6 +86,52 @@ export async function getAuthoritativeWebAuthConfig(): Promise<AuthoritativeWebA
   };
 }
 
+export function buildAuthBrokerProxyUrl(input: {
+  readonly authBrokerProxyBaseUrl: string;
+  readonly path: string;
+}): string {
+  return buildBrokerUrl({
+    baseUrl: input.authBrokerProxyBaseUrl,
+    path: input.path,
+  });
+}
+
+export function buildAuthBrokerPublicUrl(input: {
+  readonly authBrokerBaseUrl: string;
+  readonly path: string;
+}): string {
+  return buildBrokerUrl({
+    baseUrl: input.authBrokerBaseUrl,
+    path: input.path,
+  });
+}
+
+/**
+ * The broker's custom GitHub OAuth callback for Hack-owned browser/CLI flows.
+ * This is distinct from Better Auth's provider callback.
+ */
+export function buildBrokerGitHubCallbackUrl(input: {
+  readonly authBrokerBaseUrl: string;
+}): string {
+  return buildAuthBrokerPublicUrl({
+    authBrokerBaseUrl: input.authBrokerBaseUrl,
+    path: "/gh/callback",
+  });
+}
+
+/**
+ * Better Auth provider callbacks stay broker-owned under `/api/auth/callback/*`.
+ */
+export function buildBrokerBetterAuthProviderCallbackUrl(input: {
+  readonly authBrokerBaseUrl: string;
+  readonly providerId: BetterAuthSocialProviderId;
+}): string {
+  return buildBetterAuthProviderCallbackUrl({
+    authBaseUrl: input.authBrokerBaseUrl,
+    providerId: input.providerId,
+  });
+}
+
 function readFirstDefinedValue(
   values: readonly (string | undefined)[]
 ): string | undefined {
@@ -119,7 +167,10 @@ async function resolveBrokerBetterAuthMetadata(input: {
 
   try {
     const response = await fetch(
-      `${input.config.authBrokerProxyBaseUrl}/v1/auth/providers`,
+      buildAuthBrokerProxyUrl({
+        authBrokerProxyBaseUrl: input.config.authBrokerProxyBaseUrl,
+        path: "/v1/auth/providers",
+      }),
       {
         headers: {
           accept: "application/json",
@@ -159,6 +210,26 @@ async function resolveBrokerBetterAuthMetadata(input: {
       source: "fail_closed",
     };
   }
+}
+
+function buildBrokerUrl(input: {
+  readonly baseUrl: string;
+  readonly path: string;
+}): string {
+  return new URL(
+    trimLeadingSlash(input.path),
+    ensureTrailingSlash(input.baseUrl)
+  )
+    .toString()
+    .replace(TRAILING_SLASH_PATTERN, "");
+}
+
+function ensureTrailingSlash(value: string): string {
+  return value.endsWith("/") ? value : `${value}/`;
+}
+
+function trimLeadingSlash(value: string): string {
+  return value.startsWith("/") ? value.slice(1) : value;
 }
 
 function resolveLocalDevHost(input: {

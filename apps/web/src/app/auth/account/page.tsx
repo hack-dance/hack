@@ -1,6 +1,7 @@
 import { AuthEntrypoint } from "@/components/auth-entrypoint";
 import { getAuthoritativeWebAuthConfig } from "@/lib/auth-config";
 import { hasAuthenticatedBrowserSession } from "@/lib/browser-auth-session";
+import { redirect as navigate } from "@/lib/server-navigation";
 
 type SearchParams = Promise<Record<string, string | string[] | undefined>>;
 
@@ -15,9 +16,10 @@ export default async function AuthAccountPage({
   const deviceCode = readSearchParam(params.deviceCode);
   const redirect = readSearchParam(params.redirect);
   const browserSessionAuthenticated =
-    redirect && !(flowId && deviceCode)
-      ? await hasAuthenticatedBrowserSession()
-      : false;
+    flowId && deviceCode ? false : await hasAuthenticatedBrowserSession();
+  if (browserSessionAuthenticated && !(flowId && deviceCode) && !redirect) {
+    navigate("/account");
+  }
 
   return (
     <AuthEntrypoint

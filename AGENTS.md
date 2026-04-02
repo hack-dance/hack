@@ -358,3 +358,16 @@ Agent setup (CLI-first):
 - MCP (no-shell only): `hack setup mcp`
 - MCP install (explicit): `hack mcp install --all --scope project`
 <!-- hack:agent-docs:end -->
+
+## Learned User Preferences
+
+- Prefer Tailwind utilities and shadcn components for auth and similar UI instead of bespoke CSS class stacks such as `.auth-*` when utilities can express the same layout and states.
+- After substantive `apps/web` UI changes, verify in a real browser and check the console for runtime warnings.
+- When running shadcn CLI init or updates in `apps/web`, merge generated output with existing providers, registries, and project-specific styles rather than overwriting custom shell or auth wiring.
+
+## Learned Workspace Facts
+
+- Better Auth runs in `services/auth-broker`, not inside the Next app. Browser GitHub sign-in uses a `redirect_uri` on the **auth broker** host (for example `auth.<project>.hack.gy`), not on the primary web app host (`<project>.hack.gy`).
+- On the auth broker host this repo may use two GitHub callback paths: Better Auth at `/api/auth/callback/github` and the broker custom flow at `/gh/callback`. The GitHub OAuth app must allow the exact `redirect_uri` emitted in the live authorize request.
+- Keep `services/auth-broker` as the auth authority (sessions, provider callbacks, CLI-related flows); treat `apps/web` as browser UX and thin BFF/proxy. See `docs/guides/auth-broker-callbacks.md` for callback and handoff wording.
+- `apps/web` theme switching uses a small custom theme context plus layout bootstrap rather than `next-themes` `ThemeProvider`, to avoid Next.js 16 / React client warnings about `<script>` rendered inside client components.

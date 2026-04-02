@@ -1,21 +1,11 @@
 "use client";
 
-import {
-  BarChart3Icon,
-  BookOpenIcon,
-  BriefcaseIcon,
-  CreditCardIcon,
-  HelpCircleIcon,
-  KeyRoundIcon,
-  LayoutGridIcon,
-  PlugIcon,
-  SettingsIcon,
-  UsersIcon,
-} from "lucide-react";
+import { ArrowUpRightIcon } from "lucide-react";
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 
-import { LatestChange } from "@/components/leatest-change";
 import { Logo } from "@/components/logo";
+import { OrganizationSwitcher } from "@/components/organization-switcher";
 import {
   Sidebar,
   SidebarContent,
@@ -28,6 +18,8 @@ import {
   SidebarMenuItem,
   SidebarRail,
 } from "@/components/ui/sidebar";
+import { accountNavigationItems } from "@/lib/account-navigation";
+import type { AccountShellContext } from "@/lib/account-shell";
 import { cn } from "@/lib/utils";
 
 export type SidebarNavItem = {
@@ -42,79 +34,30 @@ type SidebarSection = {
   items: SidebarNavItem[];
 };
 
-const navSections: SidebarSection[] = [
-  {
-    label: "Product",
-    items: [
-      {
-        title: "Dashboard",
-        url: "/account",
-        icon: <LayoutGridIcon />,
-        isActive: true,
-      },
-      {
-        title: "Analytics",
-        url: "/account",
-        icon: <BarChart3Icon />,
-      },
-      {
-        title: "Projects",
-        url: "/account",
-        icon: <BriefcaseIcon />,
-      },
-    ],
-  },
-  {
-    label: "Workspace",
-    items: [
-      {
-        title: "Team",
-        url: "/account",
-        icon: <UsersIcon />,
-      },
-      {
-        title: "Integrations",
-        url: "/account",
-        icon: <PlugIcon />,
-      },
-      {
-        title: "API Keys",
-        url: "/account",
-        icon: <KeyRoundIcon />,
-      },
-    ],
-  },
-  {
-    label: "Administration",
-    items: [
-      {
-        title: "Settings",
-        url: "/account",
-        icon: <SettingsIcon />,
-      },
-      {
-        title: "Billing",
-        url: "/account",
-        icon: <CreditCardIcon />,
-      },
-    ],
-  },
-];
+type AuthenticatedAccount = Extract<
+  AccountShellContext,
+  { readonly authenticated: true }
+>;
 
 const footerNavLinks: SidebarNavItem[] = [
   {
-    title: "Help Center",
-    url: "https://github.com/hack-dance/hack",
-    icon: <HelpCircleIcon />,
-  },
-  {
     title: "Documentation",
     url: "https://github.com/hack-dance/hack",
-    icon: <BookOpenIcon />,
+    icon: <ArrowUpRightIcon />,
+  },
+  {
+    title: "GitHub",
+    url: "https://github.com/hack-dance/hack",
+    icon: <ArrowUpRightIcon />,
   },
 ];
 
-export function AppSidebar() {
+export function AppSidebar(input: { readonly account: AuthenticatedAccount }) {
+  const pathname = usePathname();
+  const navSections = buildNavSections({
+    pathname,
+  });
+
   return (
     <Sidebar
       className={cn(
@@ -158,7 +101,9 @@ export function AppSidebar() {
         ))}
       </SidebarContent>
       <SidebarFooter className="gap-0 p-0">
-        <LatestChange />
+        <div className="border-t p-2">
+          <OrganizationSwitcher account={input.account} />
+        </div>
         <SidebarMenu className="border-t p-2">
           {footerNavLinks.map((item) => (
             <SidebarMenuItem key={item.title}>
@@ -185,4 +130,23 @@ export function AppSidebar() {
       <SidebarRail />
     </Sidebar>
   );
+}
+
+function buildNavSections(input: {
+  readonly pathname: string;
+}): readonly SidebarSection[] {
+  return [
+    {
+      label: "Workspace",
+      items: accountNavigationItems.map((item) => ({
+        title: item.title,
+        url: item.href,
+        icon: <item.icon />,
+        isActive:
+          item.href === "/account"
+            ? input.pathname === "/account"
+            : input.pathname.startsWith(item.href),
+      })),
+    },
+  ];
 }

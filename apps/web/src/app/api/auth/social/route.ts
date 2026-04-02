@@ -2,7 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 
 import { getAuthoritativeWebAuthConfig } from "@/lib/auth-config";
 import {
-  buildBrokerAccountBridgeUrl,
+  buildBrokerBrowserStartUrl,
   normalizeAppReturnUrl,
 } from "@/lib/auth-handoff";
 
@@ -55,40 +55,26 @@ export async function POST(request: NextRequest) {
     appBaseUrl: config.appBaseUrl,
     trustedOrigins: config.betterAuth.trustedOrigins,
   });
-  const callbackUrl = buildBrokerAccountBridgeUrl({
+  const callbackUrl = buildBrokerBrowserStartUrl({
     authBrokerBaseUrl: config.authBrokerBaseUrl,
     appBaseUrl: config.appBaseUrl,
     flowId: normalizeString(body?.flowId),
     deviceCode: normalizeString(body?.deviceCode),
     finalReturnUrl,
+    providerId: provider,
   });
 
-  const response = await fetch(
-    `${config.authBrokerProxyBaseUrl}/api/auth/sign-in/social`,
+  return NextResponse.json(
     {
-      method: "POST",
+      ok: true,
+      url: callbackUrl,
+    },
+    {
       headers: {
-        accept: "application/json",
-        "content-type": "application/json",
+        "cache-control": "no-store",
       },
-      body: JSON.stringify({
-        provider,
-        callbackURL: callbackUrl,
-      }),
-      cache: "no-store",
     }
   );
-  const rawText = await response.text();
-
-  return new NextResponse(rawText, {
-    status: response.status,
-    headers: {
-      "cache-control": "no-store",
-      "content-type":
-        response.headers.get("content-type") ??
-        "application/json; charset=utf-8",
-    },
-  });
 }
 
 async function readJsonBody(request: NextRequest): Promise<unknown> {

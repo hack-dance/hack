@@ -1,11 +1,14 @@
 import { type NextRequest, NextResponse } from "next/server";
 
-import { getWebAuthConfig } from "@/lib/auth-config";
+import { buildAuthBrokerProxyUrl, getWebAuthConfig } from "@/lib/auth-config";
 
 export async function GET(_request: NextRequest) {
   const config = getWebAuthConfig();
   const response = await fetch(
-    `${config.authBrokerProxyBaseUrl}/v1/auth/providers`,
+    buildAuthBrokerProxyUrl({
+      authBrokerProxyBaseUrl: config.authBrokerProxyBaseUrl,
+      path: "/v1/auth/providers",
+    }),
     {
       headers: {
         accept: "application/json",

@@ -23,12 +23,6 @@ services:
     environment:
       CHOKIDAR_USEPOLLING: "true"
       WATCHPACK_POLLING: "true"
-      HACK_WEB_APP_BASE_URL: https://hack-cli.hack
-      HACK_AUTH_BROKER_URL: https://auth.hack-cli.hack
-      HACK_AUTH_BROKER_INTERNAL_URL: http://auth-broker:8080
-      NEXT_PUBLIC_HACK_WEB_APP_BASE_URL: https://hack-cli.hack
-      NEXT_PUBLIC_HACK_AUTH_BROKER_URL: https://auth.hack-cli.hack
-      BETTER_AUTH_TRUSTED_ORIGINS: https://hack-cli.hack,https://hack-cli.hack.gy
     labels:
       caddy: "hack-cli.hack, hack-cli.hack.gy"
       caddy.reverse_proxy: "{{upstreams 3000}}"
@@ -50,12 +44,6 @@ services:
     environment:
       PORT: "8080"
       HOST: "0.0.0.0"
-      AUTH_BROKER_PUBLIC_BASE_URL: https://auth.hack-cli.hack
-      BETTER_AUTH_URL: https://auth.hack-cli.hack
-      HACK_WEB_APP_BASE_URL: https://hack-cli.hack
-      BETTER_AUTH_TRUSTED_ORIGINS: https://hack-cli.hack,https://hack-cli.hack.gy
-      GITHUB_REDIRECT_URI: https://auth.hack-cli.hack/gh/callback
-      HACK_LINEAR_REDIRECT_URI: https://auth.hack-cli.hack/linear/callback
     labels:
       caddy: "auth.hack-cli.hack, auth.hack-cli.hack.gy"
       caddy.reverse_proxy: "{{upstreams 8080}}"

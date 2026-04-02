@@ -297,7 +297,7 @@ test("control plane shell keeps visible focus and reduced-motion contracts expli
     />
   );
   const globalCss = await Bun.file(
-    new URL("../src/app/globals.css", import.meta.url)
+    new URL("../src/styles/globals.css", import.meta.url)
   ).text();
 
   expect(markup).toContain("focus-visible:outline");

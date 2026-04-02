@@ -132,11 +132,6 @@ export default function ControlPlaneShell({
 
   return (
     <div className="relative isolate min-h-screen overflow-hidden">
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute inset-x-0 top-0 h-80 bg-[radial-gradient(circle_at_top,rgba(56,189,248,0.24),transparent_46%)]"
-      />
-
       <a
         className={cn(
           "absolute top-4 left-4 z-50 -translate-y-24 rounded-full bg-sky-300 px-4 py-2 font-medium text-slate-950 text-sm",

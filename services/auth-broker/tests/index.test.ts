@@ -533,7 +533,7 @@ describe("auth broker github flow routes", () => {
     );
   });
 
-  test("account page completes session flow and claimed token resolves /v1/auth/me", async () => {
+  test("browser complete route completes session flow and claimed token resolves /v1/auth/me", async () => {
     await withManagementTokenSecret("broker-session-secret", async () => {
       const flowStore = new FlowStore();
       const app = createAuthBrokerApp({
@@ -576,20 +576,25 @@ describe("auth broker github flow routes", () => {
       const startPayload =
         (await startResponse.json()) as SessionStartFlowResponse;
 
-      const accountResponse = await app.handle(
+      const completionResponse = await app.handle(
         new Request(
-          `http://localhost/auth/account?bridge=1&flowId=${encodeURIComponent(
-            startPayload.flow.flowId
-          )}&deviceCode=${encodeURIComponent(
-            startPayload.flow.deviceCode
-          )}&redirect=${encodeURIComponent("hack://desktop/open")}`
+          `http://localhost/v1/auth/session/browser/complete?redirect=${encodeURIComponent(
+            `http://localhost:3000/auth/account?flowId=${encodeURIComponent(
+              startPayload.flow.flowId
+            )}&deviceCode=${encodeURIComponent(
+              startPayload.flow.deviceCode
+            )}&redirect=${encodeURIComponent("hack://desktop/open")}`
+          )}`
         )
       );
-      expect(accountResponse.status).toBe(200);
-      const accountHtml = await accountResponse.text();
-      expect(accountHtml).toContain("Connected to this Mac.");
-      expect(accountHtml).toContain(">HACK<");
-      expect(accountHtml).toContain("Open Hack");
+      expect(completionResponse.status).toBe(302);
+      expect(completionResponse.headers.get("location")).toBe(
+        `http://localhost:3000/auth/account?flowId=${encodeURIComponent(
+          startPayload.flow.flowId
+        )}&deviceCode=${encodeURIComponent(
+          startPayload.flow.deviceCode
+        )}&redirect=${encodeURIComponent("hack://desktop/open")}`
+      );
 
       const claimResponse = await app.handle(
         new Request(

@@ -223,6 +223,10 @@ GitHub becomes required when:
 `Connect GitHub integration` is also separate from `Sign in to Hack with GitHub`. The first gives
 Hack a GitHub identity for GitHub-specific workflows. The second is only about Hack account auth.
 
+For the callback split between broker-owned GitHub OAuth, broker redirect
+endpoints, and Next-owned browser auth pages, see
+[Auth broker callbacks](guides/auth-broker-callbacks.md).
+
 For the workflow-first guide, see [GitHub workflows](guides/github-workflows.md).
 
 Fastest setup paths:

@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 
-import { getWebAuthConfig } from "@/lib/auth-config";
+import { buildAuthBrokerProxyUrl, getWebAuthConfig } from "@/lib/auth-config";
 
 export async function GET(
   request: NextRequest,
@@ -24,8 +24,10 @@ export async function GET(
 
   const config = getWebAuthConfig();
   const brokerUrl = new URL(
-    `/v1/auth/session/flows/${encodeURIComponent(flowId)}`,
-    `${config.authBrokerProxyBaseUrl}/`
+    buildAuthBrokerProxyUrl({
+      authBrokerProxyBaseUrl: config.authBrokerProxyBaseUrl,
+      path: `/v1/auth/session/flows/${encodeURIComponent(flowId)}`,
+    })
   );
   brokerUrl.searchParams.set("deviceCode", deviceCode);
 

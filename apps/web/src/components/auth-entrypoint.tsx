@@ -4,17 +4,12 @@ import type {
   BetterAuthProviderMetadata,
   BetterAuthSocialProvider,
 } from "@hack/auth-contract";
+import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 
+import { GitHubIcon } from "@/components/github-icon";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { CardDescription, CardFooter, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 
 import {
@@ -25,8 +20,6 @@ import {
 
 type AuthEntrypointProps = {
   readonly mode: "sign-in" | "account";
-  /** When `mode` is `sign-in`, chooses marketing copy (OAuth creates new users on first GitHub login). */
-  readonly variant?: "sign-in" | "sign-up";
   readonly providers: readonly BetterAuthSocialProvider[];
   readonly appBaseUrl: string;
   readonly authBrokerBaseUrl: string;
@@ -67,12 +60,70 @@ type SocialStartPayload = {
   readonly message?: string;
 };
 
+function renderGithubAuthBlock(input: {
+  readonly actionState: ActionState;
+  readonly githubOnlyGate: {
+    readonly body: string;
+    readonly title: string;
+  } | null;
+  readonly githubProvider: BetterAuthSocialProvider | undefined;
+  readonly onGithubClick: () => void;
+  readonly providerGate: {
+    readonly body: string;
+    readonly title: string;
+  } | null;
+}): ReactNode {
+  if (input.providerGate) {
+    return (
+      <section className={authPanelClassName("muted")}>
+        <h2 className="font-semibold text-foreground text-sm">
+          {input.providerGate.title}
+        </h2>
+        <p className="text-muted-foreground text-sm leading-relaxed">
+          {input.providerGate.body}
+        </p>
+      </section>
+    );
+  }
+  if (input.githubOnlyGate) {
+    return (
+      <section className={authPanelClassName("muted")}>
+        <h2 className="font-semibold text-foreground text-sm">
+          {input.githubOnlyGate.title}
+        </h2>
+        <p className="text-muted-foreground text-sm leading-relaxed">
+          {input.githubOnlyGate.body}
+        </p>
+      </section>
+    );
+  }
+  if (!input.githubProvider) {
+    return null;
+  }
+  const githubLoading =
+    input.actionState.kind === "loading" &&
+    input.actionState.providerId === "github";
+  return (
+    <Button
+      className="flex w-full items-center justify-center gap-2 py-6"
+      disabled={input.actionState.kind === "loading"}
+      onClick={input.onGithubClick}
+      type="button"
+      variant="outline"
+    >
+      <GitHubIcon className="size-5 shrink-0" />
+      <span className="font-medium text-sm">
+        {githubLoading ? "Opening GitHub…" : "Login with GitHub"}
+      </span>
+    </Button>
+  );
+}
+
 export function AuthEntrypoint({
   mode,
-  variant = "sign-in",
   providers,
   appBaseUrl,
-  authBrokerBaseUrl,
+  authBrokerBaseUrl: _authBrokerBaseUrl,
   trustedOrigins,
   betterAuthSource,
   betterAuthEnabled,
@@ -227,28 +278,14 @@ export function AuthEntrypoint({
   const hasFlowContext = Boolean(flowId && deviceCode);
   const summary = resolveSummary({
     mode,
-    variant: mode === "sign-in" ? variant : "sign-in",
     hasFlowContext,
-    authBrokerBaseUrl,
   });
   const flowStatus = resolveFlowStatus({
     flowState,
+    hasFlowContext,
     normalizedRedirect,
   });
   const signInHref = buildAuthPageHref({
-    page: "sign-in",
-    flowId,
-    deviceCode,
-    redirect: normalizedRedirect,
-  });
-  const signUpHref = buildAuthPageHref({
-    page: "sign-up",
-    flowId,
-    deviceCode,
-    redirect: normalizedRedirect,
-  });
-  const accountHref = buildAuthPageHref({
-    page: "account",
     flowId,
     deviceCode,
     redirect: normalizedRedirect,
@@ -300,22 +337,32 @@ export function AuthEntrypoint({
     betterAuthEnabled,
     providerCount: resolvedProviders.length,
   });
+  const githubProvider = resolvedProviders.find(
+    (provider) => provider.id === "github"
+  );
+  const githubOnlyGate =
+    !providerGate && resolvedProviders.length > 0 && !githubProvider
+      ? {
+          title: "GitHub sign-in only",
+          body: "This app uses GitHub OAuth. Enable GitHub in the broker’s social providers list.",
+        }
+      : null;
+  const hideGithubAuthBlock =
+    mode === "account" &&
+    (flowState.kind === "ready" || flowState.kind === "claimed");
 
   return (
     <main className="grid min-h-svh place-items-center bg-background px-4 py-10">
-      <Card className="w-full max-w-md border-border/80 shadow-sm" size="sm">
-        <CardHeader className="border-border border-b pb-4">
-          <p className="font-medium text-muted-foreground text-xs uppercase tracking-widest">
-            Hack
-          </p>
+      <div className="w-full max-w-md">
+        <div className="pb-4">
           <CardTitle className="font-semibold text-2xl tracking-tight">
             {summary.title}
           </CardTitle>
           <CardDescription className="text-pretty text-base leading-relaxed">
             {summary.body}
           </CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-4 pt-6">
+        </div>
+        <div className="flex flex-col gap-4 pt-6">
           {hasFlowContext ? (
             <section className={authPanelClassName("info")}>
               <h2 className="font-semibold text-foreground text-sm">
@@ -344,48 +391,15 @@ export function AuthEntrypoint({
             </section>
           ) : null}
 
-          {providerGate ? (
-            <section className={authPanelClassName("muted")}>
-              <h2 className="font-semibold text-foreground text-sm">
-                {providerGate.title}
-              </h2>
-              <p className="text-muted-foreground text-sm leading-relaxed">
-                {providerGate.body}
-              </p>
-            </section>
-          ) : (
-            <section className={authPanelClassName("neutral")}>
-              <h2 className="font-semibold text-foreground text-sm">
-                {mode === "account"
-                  ? "Continue with a provider"
-                  : "Continue with GitHub"}
-              </h2>
-              <div className="grid gap-2">
-                {resolvedProviders.map((provider) => {
-                  const loading =
-                    actionState.kind === "loading" &&
-                    actionState.providerId === provider.id;
-                  let buttonLabel = `Continue with ${provider.label}`;
-                  if (loading) {
-                    buttonLabel = `Opening ${provider.label}…`;
-                  } else if (variant === "sign-up") {
-                    buttonLabel = `Sign up with ${provider.label}`;
-                  }
-                  return (
-                    <Button
-                      className="w-full"
-                      disabled={actionState.kind === "loading"}
-                      key={provider.id}
-                      onClick={() => void handleProviderClick(provider.id)}
-                      type="button"
-                    >
-                      {buttonLabel}
-                    </Button>
-                  );
-                })}
-              </div>
-            </section>
-          )}
+          {hideGithubAuthBlock
+            ? null
+            : renderGithubAuthBlock({
+                actionState,
+                githubOnlyGate,
+                githubProvider,
+                onGithubClick: () => void handleProviderClick("github"),
+                providerGate,
+              })}
 
           <p
             aria-live="polite"
@@ -395,45 +409,28 @@ export function AuthEntrypoint({
               ? actionState.message
               : flowStatus.statusText}
           </p>
-        </CardContent>
-        <CardFooter className="flex flex-col items-stretch gap-3 border-border border-t pt-6">
-          <nav
-            aria-label="Hack auth navigation"
-            className="flex flex-wrap gap-2"
-          >
-            {mode === "sign-in" && variant === "sign-in" ? (
-              <Button asChild size="sm" variant="outline">
-                <a href={signUpHref}>Create an account</a>
-              </Button>
-            ) : null}
-            {mode === "sign-in" && variant === "sign-up" ? (
-              <Button asChild size="sm" variant="outline">
-                <a href={signInHref}>Sign in instead</a>
-              </Button>
-            ) : null}
-            {mode === "sign-in" ? (
-              <Button asChild size="sm" variant="outline">
-                <a href={accountHref}>Browser handoff status</a>
-              </Button>
-            ) : (
+        </div>
+        {mode === "account" ? (
+          <CardFooter className="flex flex-col items-stretch gap-3 border-border border-t pt-6">
+            <nav
+              aria-label="Hack auth navigation"
+              className="flex flex-wrap gap-2"
+            >
               <Button asChild size="sm" variant="outline">
                 <a href={signInHref}>Start another sign-in</a>
               </Button>
-            )}
-            <Button asChild size="sm" variant="ghost">
-              <a href={authBrokerBaseUrl} rel="noopener noreferrer">
-                Auth broker
-              </a>
-            </Button>
-            {normalizedRedirect &&
-            !shouldAutoNavigateToReturnUrl({ value: normalizedRedirect }) ? (
-              <Button asChild size="sm" variant="outline">
-                <a href={normalizedRedirect}>Return to app</a>
-              </Button>
-            ) : null}
-          </nav>
-        </CardFooter>
-      </Card>
+              {normalizedRedirect &&
+              !shouldAutoNavigateToReturnUrl({
+                value: normalizedRedirect,
+              }) ? (
+                <Button asChild size="sm" variant="outline">
+                  <a href={normalizedRedirect}>Return to app</a>
+                </Button>
+              ) : null}
+            </nav>
+          </CardFooter>
+        ) : null}
+      </div>
     </main>
   );
 }
@@ -481,41 +478,29 @@ function authPanelClassName(
 
 function resolveSummary(input: {
   readonly mode: "sign-in" | "account";
-  readonly variant: "sign-in" | "sign-up";
   readonly hasFlowContext: boolean;
-  readonly authBrokerBaseUrl: string;
 }): { readonly title: string; readonly body: string } {
   if (input.mode === "account") {
     return {
       title: "Finish your Hack browser handoff",
       body: input.hasFlowContext
         ? "Hack will poll the broker-backed session flow here while the browser completes sign-in."
-        : `Use this route to resume broker-backed auth handoff or continue account management via ${input.authBrokerBaseUrl}.`,
-    };
-  }
-  if (input.variant === "sign-up") {
-    return {
-      title: "Create your Hack account",
-      body: input.hasFlowContext
-        ? "This sign-up is linked to a Hack client flow. Continue with GitHub to finish provisioning."
-        : "Use GitHub to create your account. If you already use Hack, sign in instead.",
+        : "Use this route to complete browser sign-in and manage your Hack session.",
     };
   }
   return {
-    title: "Sign in to Hack",
+    title: "",
     body: input.hasFlowContext
-      ? "This sign-in request came from Hack. Continue with GitHub to finish the CLI and browser handoff."
-      : "Sign in with GitHub. Sessions are issued by the Hack auth broker.",
+      ? "This browser tab is linked to a Hack client flow. Authorize GitHub to finish the handoff."
+      : "",
   };
 }
 
 function buildAuthPageHref(input: {
-  readonly page: "sign-in" | "sign-up" | "account";
   readonly flowId?: string;
   readonly deviceCode?: string;
   readonly redirect: string | null;
 }): string {
-  const path = input.page === "account" ? "/auth/account" : "/auth";
   const searchParams = new URLSearchParams();
   if (input.flowId) {
     searchParams.set("flowId", input.flowId);
@@ -526,11 +511,8 @@ function buildAuthPageHref(input: {
   if (input.redirect) {
     searchParams.set("redirect", input.redirect);
   }
-  if (input.page === "sign-up") {
-    searchParams.set("variant", "sign-up");
-  }
   const query = searchParams.toString();
-  return query.length > 0 ? `${path}?${query}` : path;
+  return query.length > 0 ? `/auth?${query}` : "/auth";
 }
 
 function buildFlowStatusUrl(input: {
@@ -579,6 +561,7 @@ function createFlowErrorState(input: {
 
 function resolveFlowStatus(input: {
   readonly flowState: FlowState;
+  readonly hasFlowContext: boolean;
   readonly normalizedRedirect: string | null;
 }): {
   readonly title: string;
@@ -597,17 +580,28 @@ function resolveFlowStatus(input: {
     };
   }
   if (input.flowState.kind === "ready" || input.flowState.kind === "claimed") {
+    const title =
+      input.hasFlowContext || input.normalizedRedirect
+        ? "Browser handoff confirmed"
+        : "Signed in to Hack";
+    let body =
+      "Your browser session is active. You can close this tab or start another sign-in.";
+    if (input.normalizedRedirect) {
+      body =
+        "The broker established the session. Return to Hack when you are ready.";
+    } else if (input.hasFlowContext) {
+      body =
+        "The broker established the session. You can close this tab when you are done.";
+    }
     return {
-      title: "Browser handoff confirmed",
-      body: input.normalizedRedirect
-        ? "The broker established the session. Return to Hack when you are ready."
-        : "The broker established the session. You can close this tab when you are done.",
+      title,
+      body,
       tone: "success",
       statusText:
         input.normalizedRedirect &&
         shouldAutoNavigateToReturnUrl({ value: input.normalizedRedirect })
           ? "Returning to Hack…"
-          : "Broker-backed session confirmed.",
+          : title,
       ...(input.normalizedRedirect
         ? {
             href: input.normalizedRedirect,

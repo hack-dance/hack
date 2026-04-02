@@ -14,6 +14,7 @@ import {
 } from "../src/constants.ts";
 
 const runCalls: string[][] = [];
+let runResponder: ((cmd: readonly string[]) => number | null) | null = null;
 
 let tempDir: string | null = null;
 let originalHome: string | undefined;
@@ -88,7 +89,7 @@ mock.module("../src/lib/shell.ts", () => ({
   execOrThrow: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
   run: async (cmd: readonly string[]) => {
     runCalls.push([...cmd]);
-    return 0;
+    return runResponder?.(cmd) ?? 0;
   },
   findExecutableInPath: (name?: string) => {
     if (name === "hack") {
@@ -114,6 +115,7 @@ beforeEach(async () => {
   process.env.HOME = tempDir;
   process.env.HACK_LOGGER = "console";
   runCalls.length = 0;
+  runResponder = null;
   reachabilityByHost = {};
 });
 
@@ -261,4 +263,74 @@ test("global up tries passwordless sudo before prompting for dnsmasq recovery", 
     "restart",
     "dnsmasq",
   ]);
+});
+
+test("global up falls back to interactive sudo when stdin is tty but stdout is redirected", async () => {
+  const caddyCompose = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    GLOBAL_CADDY_COMPOSE_FILENAME
+  );
+  const loggingCompose = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_LOGGING_DIR_NAME,
+    GLOBAL_LOGGING_COMPOSE_FILENAME
+  );
+  await writeComposeFile(caddyCompose);
+  await writeComposeFile(loggingCompose);
+
+  const stdinDescriptor = Object.getOwnPropertyDescriptor(
+    process.stdin,
+    "isTTY"
+  );
+  const stdoutDescriptor = Object.getOwnPropertyDescriptor(
+    process.stdout,
+    "isTTY"
+  );
+  Object.defineProperty(process.stdin, "isTTY", {
+    configurable: true,
+    value: true,
+  });
+  Object.defineProperty(process.stdout, "isTTY", {
+    configurable: true,
+    value: false,
+  });
+  runResponder = (cmd) => {
+    if (
+      cmd.join(" ") ===
+      "sudo -n /opt/homebrew/bin/brew services restart dnsmasq"
+    ) {
+      return 1;
+    }
+    return 0;
+  };
+
+  try {
+    const { runCli } = await import("../src/cli/run.ts");
+    const code = await runCli(["global", "up"]);
+
+    expect(code).toBe(0);
+    expect(runCalls).toEqual(
+      expect.arrayContaining([
+        [
+          "sudo",
+          "-n",
+          "/opt/homebrew/bin/brew",
+          "services",
+          "restart",
+          "dnsmasq",
+        ],
+        ["sudo", "/opt/homebrew/bin/brew", "services", "restart", "dnsmasq"],
+      ])
+    );
+  } finally {
+    if (stdinDescriptor) {
+      Object.defineProperty(process.stdin, "isTTY", stdinDescriptor);
+    }
+    if (stdoutDescriptor) {
+      Object.defineProperty(process.stdout, "isTTY", stdoutDescriptor);
+    }
+  }
 });

@@ -1525,7 +1525,7 @@ async function runMacPrivilegedCommand(opts: {
 }
 
 function isInteractiveTerminal(): boolean {
-  return process.stdin.isTTY && process.stdout.isTTY;
+  return process.stdin.isTTY === true;
 }
 
 async function resolveBrewPath(): Promise<string | null> {
@@ -2848,7 +2848,7 @@ async function ensureMacDnsmasqRunning(): Promise<void> {
         : "dnsmasq is not started; starting it as root so it can bind :53",
   });
 
-  const interactive = process.stdin.isTTY && process.stdout.isTTY;
+  const interactive = isInteractiveTerminal();
   const exit = await runMacPrivilegedCommand({
     command: [brew, "services", "restart", "dnsmasq"],
     interactive,

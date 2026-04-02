@@ -15,14 +15,23 @@ export default async function AuthPage({
     <AuthEntrypoint
       appBaseUrl={config.appBaseUrl}
       authBrokerBaseUrl={config.authBrokerBaseUrl}
+      betterAuthEnabled={config.betterAuth.enabled}
+      betterAuthSource={config.betterAuthSource}
       deviceCode={readSearchParam(params.deviceCode)}
       flowId={readSearchParam(params.flowId)}
       mode="sign-in"
       providers={config.betterAuth.socialProviders}
       redirect={readSearchParam(params.redirect)}
       trustedOrigins={config.betterAuth.trustedOrigins}
+      variant={readAuthVariant(readSearchParam(params.variant))}
     />
   );
+}
+
+function readAuthVariant(
+  value: string | undefined
+): "sign-in" | "sign-up" | undefined {
+  return value === "sign-up" ? "sign-up" : undefined;
 }
 
 function readSearchParam(

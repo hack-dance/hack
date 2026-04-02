@@ -63,6 +63,8 @@ const betterAuthEnvSchema = z.object({
  */
 export function createBetterAuthRuntimeFromEnv(): BetterAuthRuntime {
   const env = readBetterAuthEnv();
+  const betterAuthBaseUrl =
+    env.BETTER_AUTH_URL ?? env.AUTH_BROKER_PUBLIC_BASE_URL;
   const socialProviders = resolveBetterAuthSocialProviders({
     betterAuthGitHubClientId: env.BETTER_AUTH_GITHUB_CLIENT_ID,
     betterAuthGitHubClientSecret: env.BETTER_AUTH_GITHUB_CLIENT_SECRET,
@@ -85,8 +87,11 @@ export function createBetterAuthRuntimeFromEnv(): BetterAuthRuntime {
   });
   const contract = createSharedBetterAuthContract({
     socialProviders,
-    authBaseUrl: env.BETTER_AUTH_URL,
-    publicBaseUrl: env.AUTH_BROKER_PUBLIC_BASE_URL,
+    authBaseUrl: betterAuthBaseUrl,
+    publicBaseUrl:
+      env.AUTH_BROKER_PUBLIC_BASE_URL ??
+      env.BETTER_AUTH_URL ??
+      betterAuthBaseUrl,
     localDevHost: resolveLocalHackDevHost(),
     trustedOrigins: env.BETTER_AUTH_TRUSTED_ORIGINS,
   });
@@ -107,7 +112,7 @@ export function createBetterAuthRuntimeFromEnv(): BetterAuthRuntime {
       schema: authBrokerSchema,
     }),
     secret: requiredConfig.authSecret,
-    ...(env.BETTER_AUTH_URL ? { baseURL: env.BETTER_AUTH_URL } : {}),
+    ...(betterAuthBaseUrl ? { baseURL: betterAuthBaseUrl } : {}),
     ...(contract.trustedOrigins.length > 0
       ? { trustedOrigins: [...contract.trustedOrigins] }
       : {}),

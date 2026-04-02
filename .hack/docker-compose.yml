@@ -51,8 +51,11 @@ services:
       PORT: "8080"
       HOST: "0.0.0.0"
       AUTH_BROKER_PUBLIC_BASE_URL: https://auth.hack-cli.hack
+      BETTER_AUTH_URL: https://auth.hack-cli.hack
       HACK_WEB_APP_BASE_URL: https://hack-cli.hack
       BETTER_AUTH_TRUSTED_ORIGINS: https://hack-cli.hack,https://hack-cli.hack.gy
+      GITHUB_REDIRECT_URI: https://auth.hack-cli.hack/gh/callback
+      HACK_LINEAR_REDIRECT_URI: https://auth.hack-cli.hack/linear/callback
     labels:
       caddy: "auth.hack-cli.hack, auth.hack-cli.hack.gy"
       caddy.reverse_proxy: "{{upstreams 8080}}"

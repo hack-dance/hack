@@ -91,7 +91,7 @@ test("account route renders browser handoff status in apps/web", async () => {
   expect(markup).toContain("Finish your Hack browser handoff");
   expect(markup).toContain("Waiting for the broker session");
   expect(markup).toContain("Continue with GitHub");
-  expect(markup).toContain("Open the broker backend");
+  expect(markup).toContain("Auth broker");
   expect(markup).toContain(
     'href="/auth?flowId=flow-123&amp;deviceCode=device-123&amp;redirect=hack%3A%2F%2Fauth%2Fcomplete"'
   );
@@ -102,6 +102,8 @@ test("account entrypoint renders a ready return state for browser-owned redirect
     <AuthEntrypoint
       appBaseUrl="https://hack-cli.hack"
       authBrokerBaseUrl="https://auth.hack-cli.hack"
+      betterAuthEnabled
+      betterAuthSource="broker"
       browserSessionAuthenticated
       mode="account"
       providers={[{ id: "github", label: "GitHub" }]}
@@ -136,7 +138,7 @@ test("sign-in route treats broker metadata as authoritative when Better Auth is 
     })
   );
 
-  expect(markup).toContain("Sign-in is unavailable");
+  expect(markup).toContain("Better Auth is not active");
   expect(markup).not.toContain("Continue with GitHub");
 });
 

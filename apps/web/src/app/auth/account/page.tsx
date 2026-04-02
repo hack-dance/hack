@@ -23,6 +23,8 @@ export default async function AuthAccountPage({
     <AuthEntrypoint
       appBaseUrl={config.appBaseUrl}
       authBrokerBaseUrl={config.authBrokerBaseUrl}
+      betterAuthEnabled={config.betterAuth.enabled}
+      betterAuthSource={config.betterAuthSource}
       browserSessionAuthenticated={browserSessionAuthenticated}
       deviceCode={deviceCode}
       flowId={flowId}

@@ -6,7 +6,11 @@ import { dirname, join, resolve } from "node:path";
 import {
   DEFAULT_CADDY_IP,
   DEFAULT_HOST_DNS_IP,
+  GLOBAL_CADDY_COMPOSE_FILENAME,
+  GLOBAL_CADDY_DIR_NAME,
   GLOBAL_HACK_DIR_NAME,
+  GLOBAL_LOGGING_COMPOSE_FILENAME,
+  GLOBAL_LOGGING_DIR_NAME,
 } from "../src/constants.ts";
 
 const runCalls: string[][] = [];
@@ -147,6 +151,11 @@ async function readDnsmasqConf(root: string): Promise<string> {
   return await Bun.file(dnsmasqConf).text();
 }
 
+async function writeComposeFile(path: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, "services: {}\n");
+}
+
 test("global install keeps container ip host dns when bridge ip is reachable", async () => {
   await prepareManagedTools(tempDir!);
   reachabilityByHost = {
@@ -160,6 +169,20 @@ test("global install keeps container ip host dns when bridge ip is reachable", a
   expect(code).toBe(0);
   expect(await readDnsmasqConf(tempDir!)).toContain(
     `address=/.hack/${DEFAULT_CADDY_IP}`
+  );
+  expect(runCalls).toEqual(
+    expect.arrayContaining([
+      ["sudo", "install", "-d", "-m", "0755", "/etc/sudoers.d"],
+      [
+        "sudo",
+        "install",
+        "-m",
+        "0440",
+        expect.stringContaining("dance.hack-dns-recovery.sudoers"),
+        "/etc/sudoers.d/dance.hack-dns-recovery",
+      ],
+      ["/usr/local/bin/hack", "daemon", "install"],
+    ])
   );
 });
 
@@ -177,4 +200,65 @@ test("global install falls back to localhost host dns when bridge ip is unreacha
   expect(await readDnsmasqConf(tempDir!)).toContain(
     `address=/.hack/${DEFAULT_HOST_DNS_IP}`
   );
+});
+
+test("global authorize installs passwordless dns recovery sudoers rule", async () => {
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "authorize"]);
+
+  expect(code).toBe(0);
+  expect(runCalls).toEqual(
+    expect.arrayContaining([
+      [
+        "/usr/bin/mock-bin",
+        "-cf",
+        expect.stringContaining("dance.hack-dns-recovery.sudoers"),
+      ],
+      ["sudo", "install", "-d", "-m", "0755", "/etc/sudoers.d"],
+      [
+        "sudo",
+        "install",
+        "-m",
+        "0440",
+        expect.stringContaining("dance.hack-dns-recovery.sudoers"),
+        "/etc/sudoers.d/dance.hack-dns-recovery",
+      ],
+      [
+        "sudo",
+        "/usr/bin/mock-bin",
+        "-cf",
+        "/etc/sudoers.d/dance.hack-dns-recovery",
+      ],
+    ])
+  );
+});
+
+test("global up tries passwordless sudo before prompting for dnsmasq recovery", async () => {
+  const caddyCompose = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    GLOBAL_CADDY_COMPOSE_FILENAME
+  );
+  const loggingCompose = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_LOGGING_DIR_NAME,
+    GLOBAL_LOGGING_COMPOSE_FILENAME
+  );
+  await writeComposeFile(caddyCompose);
+  await writeComposeFile(loggingCompose);
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "up"]);
+
+  expect(code).toBe(0);
+  expect(runCalls[0]).toEqual([
+    "sudo",
+    "-n",
+    "/opt/homebrew/bin/brew",
+    "services",
+    "restart",
+    "dnsmasq",
+  ]);
 });

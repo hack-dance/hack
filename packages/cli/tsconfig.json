@@ -5,6 +5,7 @@
     "../../apps",
     "../../dist",
     "../../node_modules",
-    "../../examples"
+    "../../examples",
+    "../../tests/apps"
   ]
 }

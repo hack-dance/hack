@@ -844,11 +844,6 @@ function renderMacDnsSudoers(opts: {
 }
 
 async function resolveCurrentUsername(): Promise<string | null> {
-  const envUser = process.env.USER?.trim();
-  if (envUser) {
-    return envUser;
-  }
-
   const whoami = await exec(["id", "-un"], { stdin: "ignore" });
   if (whoami.exitCode !== 0) {
     return null;

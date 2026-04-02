@@ -6,6 +6,9 @@ import type {
 } from "@hack/auth-contract";
 import { useEffect, useMemo, useState } from "react";
 
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
+
 import {
   normalizeAppReturnUrl,
   resolveInitialAuthFlowKind,
@@ -271,16 +274,35 @@ export function AuthEntrypoint({
   };
 
   return (
-    <main className="auth-page">
-      <section className="auth-card">
-        <p className="auth-eyebrow">Hack auth</p>
-        <h1>{summary.title}</h1>
-        <p className="auth-copy">{summary.body}</p>
+    <main
+      className={cn(
+        "grid min-h-svh place-items-center bg-background px-4 py-8",
+        "bg-[radial-gradient(ellipse_85%_55%_at_50%_-15%,oklch(0.72_0.14_230/0.14),transparent)]",
+        "dark:bg-[radial-gradient(ellipse_85%_55%_at_50%_-15%,oklch(0.55_0.14_230/0.2),transparent)]"
+      )}
+    >
+      <section
+        className={cn(
+          "w-full max-w-xl space-y-4 rounded-2xl border border-border bg-card/85 p-6 shadow-xl",
+          "backdrop-blur-md supports-backdrop-filter:bg-card/70"
+        )}
+      >
+        <p className="m-0 font-medium text-muted-foreground text-xs uppercase tracking-widest">
+          Hack auth
+        </p>
+        <h1 className="m-0 text-balance font-semibold text-3xl text-foreground tracking-tight md:text-4xl">
+          {summary.title}
+        </h1>
+        <p className="m-0 text-muted-foreground leading-relaxed">
+          {summary.body}
+        </p>
 
         {hasFlowContext ? (
-          <section className="auth-panel auth-panel-info">
-            <h2>Linked browser handoff</h2>
-            <p>
+          <section className={authPanelClassName("info")}>
+            <h2 className="m-0 font-semibold text-base text-foreground">
+              Linked browser handoff
+            </h2>
+            <p className="m-0 text-muted-foreground text-sm leading-relaxed">
               This tab is linked to a Hack client flow. Complete sign-in here to
               let the broker finish session establishment for the originating
               CLI or deep link.
@@ -289,32 +311,40 @@ export function AuthEntrypoint({
         ) : null}
 
         {mode === "account" ? (
-          <section className={`auth-panel auth-panel-${flowStatus.tone}`}>
-            <h2>{flowStatus.title}</h2>
-            <p>{flowStatus.body}</p>
+          <section className={authPanelClassName(flowStatus.tone)}>
+            <h2 className="m-0 font-semibold text-base text-foreground">
+              {flowStatus.title}
+            </h2>
+            <p className="m-0 text-muted-foreground text-sm leading-relaxed">
+              {flowStatus.body}
+            </p>
             {flowStatus.href ? (
-              <a className="auth-link" href={flowStatus.href}>
-                {flowStatus.label}
-              </a>
+              <Button
+                asChild
+                className="mt-1 w-fit rounded-full"
+                variant="outline"
+              >
+                <a href={flowStatus.href}>{flowStatus.label}</a>
+              </Button>
             ) : null}
           </section>
         ) : null}
 
         {resolvedProviders.length > 0 ? (
-          <section className="auth-panel auth-panel-neutral">
-            <h2>
+          <section className={authPanelClassName("neutral")}>
+            <h2 className="m-0 font-semibold text-base text-foreground">
               {mode === "account"
                 ? "Continue with a provider"
                 : "Choose a provider"}
             </h2>
-            <div className="auth-actions">
+            <div className="grid gap-3">
               {resolvedProviders.map((provider) => {
                 const loading =
                   actionState.kind === "loading" &&
                   actionState.providerId === provider.id;
                 return (
-                  <button
-                    className="auth-button"
+                  <Button
+                    className="h-11 rounded-full bg-sky-400 font-semibold text-slate-950 hover:bg-sky-400/90 dark:bg-sky-500 dark:text-slate-950 dark:hover:bg-sky-500/90"
                     disabled={actionState.kind === "loading"}
                     key={provider.id}
                     onClick={() => void handleProviderClick(provider.id)}
@@ -323,49 +353,84 @@ export function AuthEntrypoint({
                     {loading
                       ? `Opening ${provider.label}…`
                       : `Continue with ${provider.label}`}
-                  </button>
+                  </Button>
                 );
               })}
             </div>
           </section>
         ) : (
-          <section className="auth-panel auth-panel-muted">
-            <h2>Sign-in is unavailable</h2>
-            <p>
+          <section className={authPanelClassName("muted")}>
+            <h2 className="m-0 font-semibold text-base text-foreground">
+              Sign-in is unavailable
+            </h2>
+            <p className="m-0 text-muted-foreground text-sm leading-relaxed">
               No shared social providers are configured for this environment
               yet. Configure the broker providers and refresh this page.
             </p>
           </section>
         )}
 
-        <nav aria-label="Hack auth navigation" className="auth-nav">
+        <nav aria-label="Hack auth navigation" className="flex flex-wrap gap-2">
           {mode === "sign-in" ? (
-            <a className="auth-link" href={accountHref}>
-              View browser handoff status
-            </a>
+            <Button
+              asChild
+              className="rounded-full"
+              size="sm"
+              variant="outline"
+            >
+              <a href={accountHref}>View browser handoff status</a>
+            </Button>
           ) : (
-            <a className="auth-link" href={signInHref}>
-              Start another sign-in
-            </a>
+            <Button
+              asChild
+              className="rounded-full"
+              size="sm"
+              variant="outline"
+            >
+              <a href={signInHref}>Start another sign-in</a>
+            </Button>
           )}
-          <a className="auth-link" href={authBrokerBaseUrl}>
-            Open the broker backend
-          </a>
+          <Button asChild className="rounded-full" size="sm" variant="outline">
+            <a href={authBrokerBaseUrl}>Open the broker backend</a>
+          </Button>
           {normalizedRedirect &&
           !shouldAutoNavigateToReturnUrl({ value: normalizedRedirect }) ? (
-            <a className="auth-link" href={normalizedRedirect}>
-              Return to Hack
-            </a>
+            <Button
+              asChild
+              className="rounded-full"
+              size="sm"
+              variant="outline"
+            >
+              <a href={normalizedRedirect}>Return to Hack</a>
+            </Button>
           ) : null}
         </nav>
 
-        <p aria-live="polite" className="auth-status">
+        <p
+          aria-live="polite"
+          className="m-0 min-h-6 text-muted-foreground text-sm"
+        >
           {actionState.kind === "error"
             ? actionState.message
             : flowStatus.statusText}
         </p>
       </section>
     </main>
+  );
+}
+
+function authPanelClassName(
+  tone: "neutral" | "info" | "success" | "danger" | "muted"
+): string {
+  return cn(
+    "grid gap-2 rounded-xl border p-4",
+    tone === "neutral" && "border-border bg-muted/40",
+    tone === "info" &&
+      "border-sky-500/30 bg-sky-500/10 dark:border-sky-400/25 dark:bg-sky-400/10",
+    tone === "success" &&
+      "border-emerald-500/35 bg-emerald-500/10 dark:border-emerald-400/30 dark:bg-emerald-400/10",
+    tone === "danger" && "border-destructive/40 bg-destructive/10",
+    tone === "muted" && "border-border bg-muted/25"
   );
 }
 

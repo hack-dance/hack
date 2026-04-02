@@ -2,14 +2,14 @@ import { afterEach, expect, test } from "bun:test";
 import { HACK_WEB_BROKER_SESSION_COOKIE_NAME } from "@hack/auth-contract";
 import type { NextRequest } from "next/server";
 
-import { POST as acceptInvitation } from "../app/api/control-plane/invitations/[inviteId]/accept/route";
-import { POST as declineInvitation } from "../app/api/control-plane/invitations/[inviteId]/decline/route";
-import { POST as inviteOrgMember } from "../app/api/control-plane/orgs/[org]/members/invite/route";
-import { POST as removeOrgMember } from "../app/api/control-plane/orgs/[org]/members/remove/route";
-import { POST as createOrganization } from "../app/api/control-plane/orgs/route";
-import { POST as inviteTeamMember } from "../app/api/control-plane/teams/[team]/members/invite/route";
-import { POST as removeTeamMember } from "../app/api/control-plane/teams/[team]/members/remove/route";
-import { POST as createTeam } from "../app/api/control-plane/teams/route";
+import { POST as acceptInvitation } from "../src/app/api/control-plane/invitations/[inviteId]/accept/route";
+import { POST as declineInvitation } from "../src/app/api/control-plane/invitations/[inviteId]/decline/route";
+import { POST as inviteOrgMember } from "../src/app/api/control-plane/orgs/[org]/members/invite/route";
+import { POST as removeOrgMember } from "../src/app/api/control-plane/orgs/[org]/members/remove/route";
+import { POST as createOrganization } from "../src/app/api/control-plane/orgs/route";
+import { POST as inviteTeamMember } from "../src/app/api/control-plane/teams/[team]/members/invite/route";
+import { POST as removeTeamMember } from "../src/app/api/control-plane/teams/[team]/members/remove/route";
+import { POST as createTeam } from "../src/app/api/control-plane/teams/route";
 
 const originalFetch = globalThis.fetch;
 const originalEnv = {

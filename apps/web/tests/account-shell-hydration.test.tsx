@@ -4,7 +4,7 @@ import { type ReactElement, type ReactNode, Suspense } from "react";
 import { hydrateRoot } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 
-import * as accountPageModule from "../app/account/page";
+import * as accountPageModule from "../src/app/account/page";
 import AccountShellLoading from "../src/components/account-shell-loading";
 import ControlPlaneShell from "../src/components/control-plane-shell";
 import type { AccountShellContext } from "../src/lib/account-shell";

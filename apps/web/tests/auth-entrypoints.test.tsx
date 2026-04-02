@@ -3,9 +3,9 @@ import type { BetterAuthProviderMetadata } from "@hack/auth-contract";
 import type { NextRequest } from "next/server";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { POST as startSocialSignIn } from "../app/api/auth/social/route";
-import AuthAccountPage from "../app/auth/account/page";
-import AuthPage from "../app/auth/page";
+import { POST as startSocialSignIn } from "../src/app/api/auth/social/route";
+import AuthAccountPage from "../src/app/auth/account/page";
+import AuthPage from "../src/app/auth/page";
 import { AuthEntrypoint } from "../src/components/auth-entrypoint";
 
 const originalEnv = {

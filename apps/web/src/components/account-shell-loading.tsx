@@ -1,7 +1,7 @@
 import { Compass } from "lucide-react";
 
-import { shellSummary, shellTitle } from "@/src/lib/control-plane-shell";
-import { cn } from "@/src/lib/utils";
+import { shellSummary, shellTitle } from "@/lib/control-plane-shell";
+import { cn } from "@/lib/utils";
 
 const loadingSurfaceClassName = cn(
   "rounded-3xl border border-white/10 bg-white/[0.04] shadow-[0_24px_80px_rgba(15,23,42,0.24)]",

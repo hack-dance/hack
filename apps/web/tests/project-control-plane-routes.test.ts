@@ -2,9 +2,9 @@ import { afterEach, expect, test } from "bun:test";
 import { HACK_WEB_BROKER_SESSION_COOKIE_NAME } from "@hack/auth-contract";
 import type { NextRequest } from "next/server";
 
-import { POST as grantProjectAccess } from "../app/api/control-plane/projects/[project]/access/grant/route";
-import { POST as revokeProjectAccess } from "../app/api/control-plane/projects/[project]/access/revoke/route";
-import { POST as registerProject } from "../app/api/control-plane/projects/route";
+import { POST as grantProjectAccess } from "../src/app/api/control-plane/projects/[project]/access/grant/route";
+import { POST as revokeProjectAccess } from "../src/app/api/control-plane/projects/[project]/access/revoke/route";
+import { POST as registerProject } from "../src/app/api/control-plane/projects/route";
 
 const originalFetch = globalThis.fetch;
 const originalEnv = {

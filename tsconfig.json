@@ -14,7 +14,6 @@
     "moduleResolution": "bundler",
     "baseUrl": ".",
     "paths": {
-      "@/src/*": ["apps/web/src/*"],
       "@/*": ["src/*"],
       "@commands/*": ["src/commands/*"],
       "@control-plane/*": ["src/control-plane/*"],

@@ -1,7 +1,7 @@
 import { ArrowRight, Compass, Keyboard, ShieldCheck } from "lucide-react";
-import AccountControlPlaneSections from "@/src/components/account-control-plane-sections";
-import type { AccountControlPlaneFeedback } from "@/src/lib/account-control-plane";
-import type { AccountShellContext } from "@/src/lib/account-shell";
+import AccountControlPlaneSections from "@/components/account-control-plane-sections";
+import type { AccountControlPlaneFeedback } from "@/lib/account-control-plane";
+import type { AccountShellContext } from "@/lib/account-shell";
 import {
   shellGuardrails,
   shellHighlights,
@@ -9,11 +9,11 @@ import {
   shellPrinciples,
   shellSummary,
   shellTitle,
-} from "@/src/lib/control-plane-shell";
-import type { EnvManagementState } from "@/src/lib/env-management";
-import type { GitHubManagementState } from "@/src/lib/github-management";
-import type { LinearManagementState } from "@/src/lib/linear-management";
-import { cn } from "@/src/lib/utils";
+} from "@/lib/control-plane-shell";
+import type { EnvManagementState } from "@/lib/env-management";
+import type { GitHubManagementState } from "@/lib/github-management";
+import type { LinearManagementState } from "@/lib/linear-management";
+import { cn } from "@/lib/utils";
 
 const interactiveSurfaceClassName = cn(
   "rounded-3xl border border-white/10 bg-white/[0.04] shadow-[0_24px_80px_rgba(15,23,42,0.24)]",

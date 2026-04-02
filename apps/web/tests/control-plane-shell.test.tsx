@@ -297,7 +297,7 @@ test("control plane shell keeps visible focus and reduced-motion contracts expli
     />
   );
   const globalCss = await Bun.file(
-    new URL("../app/globals.css", import.meta.url)
+    new URL("../src/app/globals.css", import.meta.url)
   ).text();
 
   expect(markup).toContain("focus-visible:outline");
@@ -306,10 +306,12 @@ test("control plane shell keeps visible focus and reduced-motion contracts expli
   expect(globalCss).toContain("scroll-behavior: auto");
 });
 
-test("root route keeps the shared shell wired to the home page", async () => {
+test("root route keeps the marketing home page separate from the account shell", async () => {
   const pageSource = await Bun.file(
-    new URL("../app/page.tsx", import.meta.url)
+    new URL("../src/app/page.tsx", import.meta.url)
   ).text();
 
-  expect(pageSource).toContain("AccountShellPage");
+  expect(pageSource).toContain("MarketingChrome");
+  expect(pageSource).toContain("Logo");
+  expect(pageSource).not.toContain("AccountShellPage");
 });

@@ -150,3 +150,52 @@ jobs:
     with:
       tag: ${{ needs.create-release.outputs.tag }}
     secrets: inherit
+
+  update-homebrew-tap:
+    needs: [create-release, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Require tap push token
+        env:
+          TAP_TOKEN: ${{ secrets.RELEASE_PAT }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "Missing secret RELEASE_PAT"
+            exit 1
+          fi
+      - name: Checkout hack
+        uses: actions/checkout@v4
+      - name: Checkout tap repo
+        uses: actions/checkout@v4
+        with:
+          repository: hack-dance/homebrew-tap
+          token: ${{ secrets.RELEASE_PAT }}
+          ref: main
+          path: homebrew-tap
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: "1.3.9"
+      - name: Render formula
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bun run scripts/update-homebrew-tap.ts \
+            --tag="${{ needs.create-release.outputs.tag }}" \
+            --version="${{ needs.create-release.outputs.version }}" \
+            --tap-dir=homebrew-tap
+      - name: Commit and push tap update
+        working-directory: homebrew-tap
+        run: |
+          set -euo pipefail
+          git add Formula/hack.rb
+          if git diff --cached --quiet; then
+            echo "No Homebrew tap changes to push."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "build(hack): update formula to ${{ needs.create-release.outputs.tag }}"
+          git push origin HEAD:main

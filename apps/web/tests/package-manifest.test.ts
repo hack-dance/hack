@@ -5,6 +5,9 @@ type WebPackageManifest = {
   readonly scripts: Record<string, string>;
 };
 
+const NEXT_ROUTES_IMPORT_PATTERN =
+  /import ["']\.\/\.next\/(dev\/)?types\/routes\.d\.ts["'];/;
+
 const packageManifest = (await Bun.file(
   new URL("../package.json", import.meta.url)
 ).json()) as WebPackageManifest;
@@ -22,7 +25,7 @@ test("web package exposes reproducible workspace tasks", () => {
       build: "next build",
       check:
         "cd ../.. && bunx ultracite check apps/web/app apps/web/src apps/web/tests",
-      dev: "next dev --webpack",
+      dev: "next dev",
       start: "next start",
       test: "bun test",
       typecheck: "bunx tsc -p tsconfig.json --noEmit",
@@ -31,7 +34,7 @@ test("web package exposes reproducible workspace tasks", () => {
 });
 
 test("web typecheck inputs stay stable for next-managed dev type generation", () => {
-  expect(nextEnvSource).toContain('import "./.next/dev/types/routes.d.ts";');
+  expect(nextEnvSource).toMatch(NEXT_ROUTES_IMPORT_PATTERN);
   expect(tsconfigSource).toContain(".next/types/**/*.ts");
   expect(tsconfigSource).toContain(".next/dev/types/**/*.ts");
 });

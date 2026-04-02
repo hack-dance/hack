@@ -1,4 +1,4 @@
-import { access, lstat, rm } from "node:fs/promises";
+import { access, rm } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 
 import { confirm, isCancel } from "@clack/prompts";
@@ -12,9 +12,9 @@ import {
 } from "../lib/mutagen.ts";
 import {
   compareVersions,
+  detectHackInstall,
   downloadAndExtractRelease,
   installExtractedRelease,
-  isDevWrapperShimBytes,
   resolveGithubRelease,
   resolveUpdateTarget,
   selectCliTarballAsset,
@@ -53,7 +53,7 @@ const spec = defineCommand({
     "Downloads and installs the latest stable hack release from GitHub.",
     "",
     "Notes:",
-    "- Refuses to self-update when running from a local dev wrapper or symlink install.",
+    "- Refuses to self-update when running from a Homebrew install, local dev wrapper, or symlink install.",
     "- Updates the current hack binary and refreshes assets.",
   ].join("\n"),
   options,
@@ -330,50 +330,49 @@ async function resolveSelfUpdateBinaryPath(): Promise<
     return { ok: false, error: "Unable to resolve current hack binary path." };
   }
 
-  const stat = await lstat(candidate).catch(() => null);
-  if (!stat) {
+  const install = await detectHackInstall({ path: candidate });
+  if (install.status === "missing") {
     return { ok: false, error: `hack binary not found at: ${candidate}` };
   }
 
-  if (stat.isSymbolicLink()) {
+  if (install.kind === "homebrew") {
+    return {
+      ok: false,
+      error: [
+        "Refusing to self-update because hack is installed via Homebrew.",
+        install.linkTarget
+          ? `  ${install.path} -> ${install.linkTarget}`
+          : `  ${install.path}`,
+        "",
+        "Upgrade it with:",
+        "  brew update",
+        "  brew upgrade hack-dance/tap/hack",
+      ].join("\n"),
+    };
+  }
+
+  if (install.kind === "symlink") {
     return {
       ok: false,
       error: [
         "Refusing to self-update because hack is installed as a symlink.",
+        `  ${install.path} -> ${install.linkTarget}`,
         "",
-        "Install the release build into ~/.hack/bin using the installer script, then re-run:",
+        "Install the release build using the installer script, then re-run:",
         "  curl -fsSL https://github.com/hack-dance/hack/releases/latest/download/hack-install.sh | bash",
       ].join("\n"),
     };
   }
 
-  // Detect local dev shim installs (a bash wrapper script), but avoid false positives for compiled
-  // binaries (which embed the marker string in their own data segment).
-  const file = Bun.file(candidate);
-  const prefixBuf = await file
-    .slice(0, 2)
-    .arrayBuffer()
-    .catch(() => null);
-  if (prefixBuf) {
-    const prefix = new Uint8Array(prefixBuf);
-    const isShebang =
-      prefix.length === 2 && prefix[0] === 0x23 && prefix[1] === 0x21; // #!
-    if (isShebang) {
-      const headBuf = await file
-        .slice(0, 64 * 1024)
-        .arrayBuffer()
-        .catch(() => null);
-      if (headBuf && isDevWrapperShimBytes(new Uint8Array(headBuf))) {
-        return {
-          ok: false,
-          error: [
-            "Refusing to self-update because hack is a local-dev wrapper install.",
-            "",
-            "Install the release build into ~/.hack/bin, then re-run `hack update`.",
-          ].join("\n"),
-        };
-      }
-    }
+  if (install.kind === "dev-wrapper") {
+    return {
+      ok: false,
+      error: [
+        "Refusing to self-update because hack is a local-dev wrapper install.",
+        "",
+        "Install the release build with the installer script, then re-run `hack update`.",
+      ].join("\n"),
+    };
   }
 
   const writable = await access(candidate, 2).then(
@@ -387,7 +386,7 @@ async function resolveSelfUpdateBinaryPath(): Promise<
         "Refusing to self-update because the current hack binary is not writable:",
         `  ${candidate}`,
         "",
-        "Reinstall hack into ~/.hack/bin and ensure it is on your PATH, then re-run.",
+        "Reinstall hack with the release installer script and ensure it is on your PATH, then re-run.",
       ].join("\n"),
     };
   }

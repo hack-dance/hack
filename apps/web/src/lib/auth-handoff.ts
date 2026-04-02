@@ -15,7 +15,7 @@ export function resolveInitialAuthFlowKind(input: {
   if (input.flowId && input.deviceCode) {
     return "polling";
   }
-  if (input.browserSessionAuthenticated && input.redirect) {
+  if (input.browserSessionAuthenticated) {
     return "ready";
   }
   return "idle";
@@ -71,12 +71,13 @@ export function shouldAutoNavigateToReturnUrl(input: {
   }
 }
 
-export function buildBrokerAccountBridgeUrl(input: {
+export function buildBrokerBrowserStartUrl(input: {
   readonly authBrokerBaseUrl: string;
   readonly appBaseUrl: string;
   readonly flowId?: string | null;
   readonly deviceCode?: string | null;
   readonly finalReturnUrl?: string | null;
+  readonly providerId?: string | null;
 }): string {
   const appAccountUrl = new URL(
     "/auth/account",
@@ -92,19 +93,15 @@ export function buildBrokerAccountBridgeUrl(input: {
     appAccountUrl.searchParams.set("redirect", input.finalReturnUrl);
   }
 
-  const brokerAccountUrl = new URL(
-    "/auth/account",
+  const brokerStartUrl = new URL(
+    "/v1/auth/session/browser/start",
     ensureTrailingSlash(input.authBrokerBaseUrl)
   );
-  brokerAccountUrl.searchParams.set("bridge", "1");
-  if (input.flowId) {
-    brokerAccountUrl.searchParams.set("flowId", input.flowId);
+  if (input.providerId) {
+    brokerStartUrl.searchParams.set("provider", input.providerId);
   }
-  if (input.deviceCode) {
-    brokerAccountUrl.searchParams.set("deviceCode", input.deviceCode);
-  }
-  brokerAccountUrl.searchParams.set("redirect", appAccountUrl.toString());
-  return brokerAccountUrl.toString();
+  brokerStartUrl.searchParams.set("redirect", appAccountUrl.toString());
+  return brokerStartUrl.toString();
 }
 
 function ensureTrailingSlash(value: string): string {

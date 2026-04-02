@@ -1,7 +1,7 @@
 import { ArrowRight, Compass, Keyboard, ShieldCheck } from "lucide-react";
-import AccountControlPlaneSections from "@/src/components/account-control-plane-sections";
-import type { AccountControlPlaneFeedback } from "@/src/lib/account-control-plane";
-import type { AccountShellContext } from "@/src/lib/account-shell";
+import AccountControlPlaneSections from "@/components/account-control-plane-sections";
+import type { AccountControlPlaneFeedback } from "@/lib/account-control-plane";
+import type { AccountShellContext } from "@/lib/account-shell";
 import {
   shellGuardrails,
   shellHighlights,
@@ -9,11 +9,11 @@ import {
   shellPrinciples,
   shellSummary,
   shellTitle,
-} from "@/src/lib/control-plane-shell";
-import type { EnvManagementState } from "@/src/lib/env-management";
-import type { GitHubManagementState } from "@/src/lib/github-management";
-import type { LinearManagementState } from "@/src/lib/linear-management";
-import { cn } from "@/src/lib/utils";
+} from "@/lib/control-plane-shell";
+import type { EnvManagementState } from "@/lib/env-management";
+import type { GitHubManagementState } from "@/lib/github-management";
+import type { LinearManagementState } from "@/lib/linear-management";
+import { cn } from "@/lib/utils";
 
 const interactiveSurfaceClassName = cn(
   "rounded-3xl border border-white/10 bg-white/[0.04] shadow-[0_24px_80px_rgba(15,23,42,0.24)]",
@@ -132,11 +132,6 @@ export default function ControlPlaneShell({
 
   return (
     <div className="relative isolate min-h-screen overflow-hidden">
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute inset-x-0 top-0 h-80 bg-[radial-gradient(circle_at_top,rgba(56,189,248,0.24),transparent_46%)]"
-      />
-
       <a
         className={cn(
           "absolute top-4 left-4 z-50 -translate-y-24 rounded-full bg-sky-300 px-4 py-2 font-medium text-slate-950 text-sm",

@@ -19,7 +19,9 @@ let runResponder: ((cmd: readonly string[]) => number | null) | null = null;
 let tempDir: string | null = null;
 let originalHome: string | undefined;
 let originalLogger: string | undefined;
+let originalUser: string | undefined;
 let reachabilityByHost: Record<string, boolean> = {};
+let idUser = "mock-user";
 
 mock.module("@clack/prompts", () => ({
   access: async () => true,
@@ -83,6 +85,9 @@ mock.module("../src/lib/shell.ts", () => ({
     if (cmd[0] === "docker" && cmd[1] === "network" && cmd[2] === "inspect") {
       return { exitCode: 0, stdout: "[]", stderr: "" };
     }
+    if (cmd[0] === "id" && cmd[1] === "-un") {
+      return { exitCode: 0, stdout: `${idUser}\n`, stderr: "" };
+    }
 
     return { exitCode: 0, stdout: "", stderr: "" };
   },
@@ -111,12 +116,15 @@ mock.module("../src/lib/os.ts", () => ({
 beforeEach(async () => {
   originalHome = process.env.HOME;
   originalLogger = process.env.HACK_LOGGER;
+  originalUser = process.env.USER;
   tempDir = await mkdtemp(join(tmpdir(), "hack-global-macos-"));
   process.env.HOME = tempDir;
+  process.env.USER = "env-user";
   process.env.HACK_LOGGER = "console";
   runCalls.length = 0;
   runResponder = null;
   reachabilityByHost = {};
+  idUser = "mock-user";
 });
 
 afterEach(async () => {
@@ -125,6 +133,7 @@ afterEach(async () => {
     tempDir = null;
   }
   process.env.HOME = originalHome;
+  process.env.USER = originalUser;
   process.env.HACK_LOGGER = originalLogger;
 });
 
@@ -233,6 +242,25 @@ test("global authorize installs passwordless dns recovery sudoers rule", async (
       ],
     ])
   );
+});
+
+test("global authorize uses the OS account lookup instead of USER env", async () => {
+  idUser = "real-login-user";
+  process.env.USER = "spoofed-user";
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "authorize"]);
+
+  expect(code).toBe(0);
+  const sudoersPath = resolve(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    "tmp",
+    "dance.hack-dns-recovery.sudoers"
+  );
+  const sudoersText = await Bun.file(sudoersPath).text();
+  expect(sudoersText).toContain("real-login-user ALL = (root) NOPASSWD:");
+  expect(sudoersText).not.toContain("spoofed-user ALL = (root) NOPASSWD:");
 });
 
 test("global up tries passwordless sudo before prompting for dnsmasq recovery", async () => {

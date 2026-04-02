@@ -129,6 +129,18 @@ export function resolveConfig(): BrokerConfig {
   };
 }
 
+export function buildBrokerOAuthCallbackUrl(input: {
+  readonly publicBaseUrl: string;
+  readonly callbackPath: `/${string}`;
+}): string {
+  return new URL(
+    input.callbackPath.slice(1),
+    ensureTrailingSlash(input.publicBaseUrl)
+  )
+    .toString()
+    .replace(TRAILING_SLASH_PATTERN, "");
+}
+
 function normalizeRequiredEnv(key: string): string {
   const value = normalizeString(process.env[key]);
   if (!value) {
@@ -223,9 +235,15 @@ function resolveGitHubConfig(input: {
     githubApiBaseUrl:
       normalizeUrl(process.env.GITHUB_API_BASE_URL) ??
       DEFAULT_GITHUB_API_BASE_URL,
+    // This callback belongs to the broker's custom GitHub OAuth flow
+    // (`/gh/callback`). Better Auth browser social login uses the Better Auth
+    // base URL plus `/api/auth/callback/github`.
     githubRedirectUri:
       normalizeUrl(process.env.GITHUB_REDIRECT_URI) ??
-      `${input.publicBaseUrl}/gh/callback`,
+      buildBrokerOAuthCallbackUrl({
+        publicBaseUrl: input.publicBaseUrl,
+        callbackPath: "/gh/callback",
+      }),
   };
 }
 
@@ -284,7 +302,11 @@ function resolveLinearConfig(input: {
     linearRedirectUri:
       normalizeUrl(
         readFirstEnv(["HACK_LINEAR_REDIRECT_URI", "LINEAR_REDIRECT_URI"])
-      ) ?? `${input.publicBaseUrl}/linear/callback`,
+      ) ??
+      buildBrokerOAuthCallbackUrl({
+        publicBaseUrl: input.publicBaseUrl,
+        callbackPath: "/linear/callback",
+      }),
     linearWebhookPath:
       normalizePath(
         readFirstEnv(["HACK_LINEAR_WEBHOOK_PATH", "LINEAR_WEBHOOK_PATH"])
@@ -297,6 +319,10 @@ function resolveLinearConfig(input: {
         ])
       ) ?? undefined,
   };
+}
+
+function ensureTrailingSlash(value: string): string {
+  return value.endsWith("/") ? value : `${value}/`;
 }
 
 function normalizeLinearActor(

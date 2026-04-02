@@ -203,6 +203,25 @@ export function createWebAuthStartupConfig(
   };
 }
 
+/**
+ * Better Auth provider callbacks always live under the broker-owned Better Auth
+ * base URL, even when the browser UX itself is rendered by the Next app.
+ */
+export function buildBetterAuthProviderCallbackUrl(input: {
+  readonly authBaseUrl: string;
+  readonly providerId: BetterAuthSocialProviderId;
+}): string {
+  const authBaseUrl = normalizeAbsoluteUrlPreservingPath({
+    value: input.authBaseUrl,
+  });
+  return new URL(
+    `${SHARED_BETTER_AUTH_PATHS.basePath}/callback/${input.providerId}`,
+    ensureTrailingSlash({ value: authBaseUrl ?? input.authBaseUrl })
+  )
+    .toString()
+    .replace(TRAILING_SLASHES_PATTERN, "");
+}
+
 export function resolveTrustedAuthOrigins(input: {
   readonly authBaseUrl?: string;
   readonly publicBaseUrl?: string;
@@ -300,6 +319,10 @@ function resolveProviderCredentials(input: {
     : null;
 }
 
+function ensureTrailingSlash(input: { readonly value: string }): string {
+  return input.value.endsWith("/") ? input.value : `${input.value}/`;
+}
+
 function resolveConfiguredTrustedOrigins(input: {
   readonly trustedOrigins?: string | readonly string[];
 }): string[] {
@@ -353,6 +376,20 @@ function normalizeAbsoluteUrl(value: string | undefined): string | null {
   }
   try {
     return new URL(normalized).origin;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeAbsoluteUrlPreservingPath(input: {
+  readonly value: string;
+}): string | null {
+  const normalized = normalizeText(input.value);
+  if (!normalized) {
+    return null;
+  }
+  try {
+    return new URL(normalized).toString().replace(TRAILING_SLASHES_PATTERN, "");
   } catch {
     return null;
   }

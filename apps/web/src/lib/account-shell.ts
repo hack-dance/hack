@@ -2,7 +2,7 @@ import { HACK_WEB_BROKER_SESSION_COOKIE_NAME } from "@hack/auth-contract";
 import { cookies } from "next/headers";
 
 import { loadAccountControlPlaneData } from "./account-control-plane";
-import { getWebAuthConfig } from "./auth-config";
+import { buildAuthBrokerProxyUrl, getWebAuthConfig } from "./auth-config";
 
 type NamedEntity = {
   readonly id: string;
@@ -13,6 +13,7 @@ type AccountUser = {
   readonly id: string;
   readonly email: string | null;
   readonly name: string | null;
+  readonly image?: string | null;
 };
 
 type BrokerMePayload = {
@@ -23,6 +24,7 @@ type BrokerMePayload = {
     readonly id?: string | null;
     readonly email?: string | null;
     readonly name?: string | null;
+    readonly image?: string | null;
   } | null;
   readonly activeOrganization?: {
     readonly id?: string | null;
@@ -113,7 +115,10 @@ export async function getAccountShellContext(input?: {
 
   try {
     const response = await fetch(
-      `${config.authBrokerProxyBaseUrl}/v1/auth/me`,
+      buildAuthBrokerProxyUrl({
+        authBrokerProxyBaseUrl: config.authBrokerProxyBaseUrl,
+        path: "/v1/auth/me",
+      }),
       {
         headers: {
           accept: "application/json",
@@ -147,6 +152,7 @@ export async function getAccountShellContext(input?: {
         id: userId,
         email: normalizeText(payload.user?.email),
         name: normalizeText(payload.user?.name),
+        image: normalizeText(payload.user?.image),
       },
       activeOrganization: toNamedEntity(payload.activeOrganization),
       activeTeam: toNamedEntity(payload.activeTeam),

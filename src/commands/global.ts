@@ -44,6 +44,7 @@ import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config
 import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts";
 import type { ControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
+import { getLaunchdServiceStatus } from "../daemon/launchd.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { isProcessRunning } from "../daemon/process.ts";
 import { readDaemonStatus } from "../daemon/status.ts";
@@ -98,6 +99,8 @@ import { resolvePreferredHostDnsTarget } from "./doctor-utils.ts";
 
 /** Regex to split strings on whitespace. */
 const WHITESPACE_PATTERN = /\s+/;
+const MAC_DNS_SUDOERS_PATH = "/etc/sudoers.d/dance.hack-dns-recovery";
+const MAC_DNS_SUDOERS_TEMP_FILENAME = "dance.hack-dns-recovery.sudoers";
 
 const globalLogsOptions = [optFollow, optNoFollow, optTail, optPretty] as const;
 const globalLogsPositionals = [{ name: "service", required: false }] as const;
@@ -245,6 +248,15 @@ const globalLogsResetSpec = defineCommand({
   subcommands: [],
 } as const);
 
+const globalAuthorizeSpec = defineCommand({
+  name: "authorize",
+  summary: "Authorize passwordless DNS recovery commands on macOS",
+  group: "Global",
+  options: [],
+  positionals: [],
+  subcommands: [],
+} as const);
+
 export const globalCommand = defineCommand({
   ...globalSpec,
   subcommands: [
@@ -257,6 +269,7 @@ export const globalCommand = defineCommand({
     withHandler(globalCertSpec, handleGlobalCert),
     withHandler(globalTrustSpec, async () => await globalTrust()),
     withHandler(globalLogsResetSpec, async () => await globalLogsReset()),
+    withHandler(globalAuthorizeSpec, async () => await globalAuthorize()),
   ],
 } as const);
 
@@ -621,6 +634,7 @@ async function globalInstall(): Promise<number> {
     const hostDnsTarget = await resolvePreferredMacHostDnsTarget();
     await ensureMacHackDns({ targetIp: hostDnsTarget });
     await ensureMacTrustCaddyLocalCa();
+    await maybeOfferMacRecoverySetup();
   } else {
     logger.warn({
       message: "Skipping DNS bootstrap (only implemented for macOS for now).",
@@ -697,6 +711,213 @@ async function globalLogsReset(): Promise<number> {
     message: "Logs wiped (fresh volumes next time the stack starts)",
   });
   return 0;
+}
+
+async function globalAuthorize(): Promise<number> {
+  if (!isMac()) {
+    logger.warn({
+      message: "DNS authorization setup is only available on macOS",
+    });
+    return 1;
+  }
+
+  if (await pathExists(MAC_DNS_SUDOERS_PATH)) {
+    logger.info({
+      message: `${MAC_DNS_SUDOERS_PATH} already installed`,
+    });
+    return 0;
+  }
+
+  const brew = await findExecutableInPath("brew");
+  if (!brew) {
+    logger.error({
+      message: "Homebrew not found; cannot authorize dnsmasq recovery commands",
+    });
+    return 1;
+  }
+
+  const user = await resolveCurrentUsername();
+  if (!user) {
+    logger.error({ message: "Unable to determine the current macOS username" });
+    return 1;
+  }
+
+  const ok = await confirm({
+    message:
+      "Install a sudoers rule so Hack can restart dnsmasq and flush DNS cache without asking for your password during recovery?",
+    initialValue: true,
+  });
+  if (isCancel(ok)) {
+    throw new Error("Canceled");
+  }
+  if (!ok) {
+    logger.info({ message: "Skipped DNS authorization setup" });
+    return 0;
+  }
+
+  const tempDir = resolve(getGlobalPaths().root, "tmp");
+  await ensureDir(tempDir);
+  const tempPath = resolve(tempDir, MAC_DNS_SUDOERS_TEMP_FILENAME);
+  const sudoersText = renderMacDnsSudoers({
+    brewPath: brew,
+    user,
+  });
+  await Bun.write(tempPath, sudoersText);
+
+  const visudo = (await findExecutableInPath("visudo")) ?? "/usr/sbin/visudo";
+  const validateTempExit = await run([visudo, "-cf", tempPath], {
+    stdin: "ignore",
+  });
+  if (validateTempExit !== 0) {
+    logger.error({
+      message: `Refusing to install invalid sudoers content (visudo exit ${validateTempExit})`,
+    });
+    return 1;
+  }
+
+  logger.step({ message: "Installing DNS recovery sudoers rule…" });
+  const installDirExit = await run(
+    ["sudo", "install", "-d", "-m", "0755", "/etc/sudoers.d"],
+    {
+      stdin: "inherit",
+    }
+  );
+  if (installDirExit !== 0) {
+    logger.error({
+      message: `Failed to create /etc/sudoers.d (exit ${installDirExit})`,
+    });
+    return 1;
+  }
+
+  const installFileExit = await run(
+    ["sudo", "install", "-m", "0440", tempPath, MAC_DNS_SUDOERS_PATH],
+    {
+      stdin: "inherit",
+    }
+  );
+  if (installFileExit !== 0) {
+    logger.error({
+      message: `Failed to install ${MAC_DNS_SUDOERS_PATH} (exit ${installFileExit})`,
+    });
+    return 1;
+  }
+
+  const validateInstalledExit = await run(
+    ["sudo", visudo, "-cf", MAC_DNS_SUDOERS_PATH],
+    {
+      stdin: "inherit",
+    }
+  );
+  if (validateInstalledExit !== 0) {
+    logger.error({
+      message: `Installed sudoers rule failed validation (visudo exit ${validateInstalledExit})`,
+    });
+    return 1;
+  }
+
+  logger.success({
+    message: `Installed ${MAC_DNS_SUDOERS_PATH}`,
+  });
+  note(
+    [
+      "Authorized commands:",
+      `- sudo ${brew} services restart dnsmasq`,
+      `- sudo ${brew} services stop dnsmasq`,
+      "- sudo /usr/bin/dscacheutil -flushcache",
+      "- sudo /usr/bin/killall -HUP mDNSResponder",
+    ].join("\n"),
+    "DNS authorization"
+  );
+  return 0;
+}
+
+function renderMacDnsSudoers(opts: {
+  readonly brewPath: string;
+  readonly user: string;
+}): string {
+  return [
+    "# Managed by hack for local DNS recovery.",
+    "# Allows Hack to repair dnsmasq and macOS DNS cache without prompting.",
+    `${opts.user} ALL = (root) NOPASSWD: ${opts.brewPath} services restart dnsmasq, ${opts.brewPath} services stop dnsmasq, /usr/bin/dscacheutil -flushcache, /usr/bin/killall -HUP mDNSResponder`,
+    "",
+  ].join("\n");
+}
+
+async function resolveCurrentUsername(): Promise<string | null> {
+  const envUser = process.env.USER?.trim();
+  if (envUser) {
+    return envUser;
+  }
+
+  const whoami = await exec(["id", "-un"], { stdin: "ignore" });
+  if (whoami.exitCode !== 0) {
+    return null;
+  }
+  const user = whoami.stdout.trim();
+  return user.length > 0 ? user : null;
+}
+
+async function maybeOfferMacRecoverySetup(): Promise<void> {
+  await maybeOfferMacDnsRecoveryAuthorization();
+  await maybeOfferMacHackdLaunchdInstall();
+}
+
+async function maybeOfferMacDnsRecoveryAuthorization(): Promise<void> {
+  if (await pathExists(MAC_DNS_SUDOERS_PATH)) {
+    logger.info({
+      message: "Passwordless DNS recovery already configured",
+    });
+    return;
+  }
+
+  const exit = await globalAuthorize();
+  if (exit !== 0) {
+    logger.warn({
+      message:
+        "Skipping passwordless DNS recovery setup; future `hack global up` may still prompt for sudo.",
+    });
+  }
+}
+
+async function maybeOfferMacHackdLaunchdInstall(): Promise<void> {
+  const paths = resolveDaemonPaths({});
+  const launchdStatus = await getLaunchdServiceStatus({ paths });
+  if (launchdStatus.installed) {
+    logger.info({
+      message: "hackd launchd service already installed",
+    });
+    return;
+  }
+
+  const ok = await confirm({
+    message:
+      "Install hackd as a launchd service so it restarts automatically on login and daemon crashes?",
+    initialValue: true,
+  });
+  if (isCancel(ok)) {
+    throw new Error("Canceled");
+  }
+  if (!ok) {
+    logger.warn({
+      message:
+        "Skipping hackd launchd setup; daemon recovery will be less durable after login or local crashes.",
+    });
+    return;
+  }
+
+  const invocation = await resolveHackInvocation();
+  const exit = await run(
+    [invocation.bin, ...invocation.args, "daemon", "install"],
+    {
+      stdin: "inherit",
+    }
+  );
+  if (exit !== 0) {
+    logger.warn({
+      message:
+        "Failed to install hackd launchd service; run `hack daemon install` manually.",
+    });
+  }
 }
 
 async function writeWithPromptIfDifferent(
@@ -1267,14 +1488,83 @@ async function globalDown(): Promise<number> {
     }
     if (ok) {
       logger.step({ message: "Stopping dnsmasq (requires sudo)…" });
-      await run(["sudo", "brew", "services", "stop", "dnsmasq"], {
-        stdin: "inherit",
-      });
+      const brew = await resolveBrewPath();
+      if (brew) {
+        await runMacPrivilegedCommand({
+          command: [brew, "services", "stop", "dnsmasq"],
+          interactive: isInteractiveTerminal(),
+        });
+      } else {
+        logger.warn({
+          message: "Homebrew not found; skipping dnsmasq shutdown",
+        });
+      }
     }
   }
 
   logger.success({ message: "Global infra is down" });
   return 0;
+}
+
+async function runMacPrivilegedCommand(opts: {
+  readonly command: readonly string[];
+  readonly interactive: boolean;
+}): Promise<number> {
+  const silentExit = await run(["sudo", "-n", ...opts.command], {
+    stdin: "ignore",
+  });
+  if (silentExit === 0) {
+    return 0;
+  }
+  if (!opts.interactive) {
+    return silentExit;
+  }
+  return await run(["sudo", ...opts.command], {
+    stdin: "inherit",
+  });
+}
+
+function isInteractiveTerminal(): boolean {
+  return process.stdin.isTTY === true;
+}
+
+async function resolveBrewPath(): Promise<string | null> {
+  return await findExecutableInPath("brew");
+}
+
+async function restartMacDnsmasq(): Promise<void> {
+  const brew = await resolveBrewPath();
+  if (!brew) {
+    throw new Error("Homebrew not found; cannot restart dnsmasq");
+  }
+
+  const restartExit = await runMacPrivilegedCommand({
+    command: [brew, "services", "restart", "dnsmasq"],
+    interactive: isInteractiveTerminal(),
+  });
+  if (restartExit !== 0) {
+    throw new Error(
+      `sudo ${brew} services restart dnsmasq failed (exit ${restartExit})`
+    );
+  }
+}
+
+async function flushMacDnsCachePrivileged(): Promise<void> {
+  const flushExit = await runMacPrivilegedCommand({
+    command: ["/usr/bin/dscacheutil", "-flushcache"],
+    interactive: isInteractiveTerminal(),
+  });
+  if (flushExit !== 0) {
+    throw new Error(`sudo dscacheutil -flushcache failed (exit ${flushExit})`);
+  }
+
+  const hupExit = await runMacPrivilegedCommand({
+    command: ["/usr/bin/killall", "-HUP", "mDNSResponder"],
+    interactive: isInteractiveTerminal(),
+  });
+  if (hupExit !== 0) {
+    throw new Error(`sudo killall -HUP mDNSResponder failed (exit ${hupExit})`);
+  }
 }
 
 async function handleGlobalStatus({
@@ -2271,8 +2561,8 @@ async function ensureMacHackDns(opts: {
   const dnsmasqConf = resolve(brewPrefix, "etc", "dnsmasq.conf");
   await ensureDnsmasqHackAliases({ dnsmasqConf, targetIp: opts.targetIp });
   await ensureMacResolverFiles();
-  await restartDnsmasq();
-  await flushMacDnsCache();
+  await restartMacDnsmasq();
+  await flushMacDnsCachePrivileged();
   noteDnsConfigured({ dnsmasqConf, targetIp: opts.targetIp });
 }
 
@@ -2443,28 +2733,6 @@ async function maybeWriteResolver(opts: {
   logger.success({ message: `Wrote ${resolverPath}` });
 }
 
-async function restartDnsmasq(): Promise<void> {
-  // We run via sudo so dnsmasq can bind :53 (required for /etc/resolver/<tld>).
-  logger.step({ message: "Restarting dnsmasq (requires sudo)…" });
-  const restartExit = await run(
-    ["sudo", "brew", "services", "restart", "dnsmasq"],
-    {
-      stdin: "inherit",
-    }
-  );
-  if (restartExit !== 0) {
-    throw new Error(
-      `sudo brew services restart dnsmasq failed (exit ${restartExit})`
-    );
-  }
-}
-
-async function flushMacDnsCache(): Promise<void> {
-  logger.step({ message: "Flushing DNS cache…" });
-  await run(["sudo", "dscacheutil", "-flushcache"], { stdin: "inherit" });
-  await run(["sudo", "killall", "-HUP", "mDNSResponder"], { stdin: "inherit" });
-}
-
 function noteDnsConfigured(opts: {
   readonly dnsmasqConf: string;
   readonly targetIp: string;
@@ -2542,7 +2810,7 @@ async function canConnectTcp(opts: {
 }
 
 async function ensureMacDnsmasqRunning(): Promise<void> {
-  const brew = await findExecutableInPath("brew");
+  const brew = await resolveBrewPath();
   if (!brew) {
     return;
   }
@@ -2580,12 +2848,10 @@ async function ensureMacDnsmasqRunning(): Promise<void> {
         : "dnsmasq is not started; starting it as root so it can bind :53",
   });
 
-  const interactive = process.stdin.isTTY && process.stdout.isTTY;
-  const sudoCommand = interactive
-    ? ["sudo", "brew", "services", "restart", "dnsmasq"]
-    : ["sudo", "-n", "brew", "services", "restart", "dnsmasq"];
-  const exit = await run(sudoCommand, {
-    stdin: interactive ? "inherit" : "ignore",
+  const interactive = isInteractiveTerminal();
+  const exit = await runMacPrivilegedCommand({
+    command: [brew, "services", "restart", "dnsmasq"],
+    interactive,
   });
   if (exit !== 0) {
     logger.warn({

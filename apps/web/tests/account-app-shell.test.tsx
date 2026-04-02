@@ -95,6 +95,20 @@ test("sign-out route clears the shared browser session cookie", async () => {
   expect(response.headers.get("set-cookie")).toContain(
     "hack_web_broker_session="
   );
+  expect(response.headers.get("set-cookie")).toContain("Secure");
+  expect(response.headers.get("set-cookie")).toContain(
+    "Domain=hack-cli.hack.gy"
+  );
+});
+
+test("sign-out route mirrors local http cookie attributes", async () => {
+  const response = await signOutRoute(
+    new NextRequest("http://127.0.0.1:3000/api/auth/sign-out?redirect=%2Fauth")
+  );
+
+  expect(response.headers.get("location")).toBe("http://localhost:3000/auth");
+  expect(response.headers.get("set-cookie")).not.toContain("Secure");
+  expect(response.headers.get("set-cookie")).not.toContain("Domain=");
 });
 
 test("app sidebar renders the new navigation and org switcher trigger", async () => {

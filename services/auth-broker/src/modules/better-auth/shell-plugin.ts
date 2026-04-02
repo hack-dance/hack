@@ -513,12 +513,14 @@ function startBetterAuthBrowserSignIn(input: {
   readonly callbackUrl: string;
 }): Promise<Response> {
   if (!(input.runtime.enabled && input.runtime.auth)) {
-    return Response.json(
-      {
-        ok: false,
-        error: input.runtime.reason ?? "Better Auth is not configured.",
-      },
-      { status: 503 }
+    return Promise.resolve(
+      Response.json(
+        {
+          ok: false,
+          error: input.runtime.reason ?? "Better Auth is not configured.",
+        },
+        { status: 503 }
+      )
     );
   }
 
@@ -527,7 +529,7 @@ function startBetterAuthBrowserSignIn(input: {
       new URL(
         "/api/auth/sign-in/social",
         resolvePageBaseUrl(input.publicBaseUrl)
-      ),
+      ).toString(),
       {
         method: "POST",
         headers: {

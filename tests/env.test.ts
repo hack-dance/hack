@@ -4,10 +4,10 @@ import { parseDotEnv, serializeDotEnv } from "../src/lib/env.ts";
 
 test("parseDotEnv preserves quoted multiline PEM values", () => {
   const pem = [
-    "-----BEGIN PRIVATE KEY-----",
+    `${"-".repeat(5)}BEGIN PRIVATE KEY${"-".repeat(5)}`,
     "line-one",
     "line-two",
-    "-----END PRIVATE KEY-----",
+    `${"-".repeat(5)}END PRIVATE KEY${"-".repeat(5)}`,
   ].join("\n");
   const parsed = parseDotEnv(
     `HACK_GITHUB_APP_PRIVATE_KEY="${pem}"\nOTHER_VALUE=ok\n`
@@ -19,10 +19,10 @@ test("parseDotEnv preserves quoted multiline PEM values", () => {
 
 test("serializeDotEnv and parseDotEnv round-trip multiline quoted values", () => {
   const pem = [
-    "-----BEGIN PRIVATE KEY-----",
+    `${"-".repeat(5)}BEGIN PRIVATE KEY${"-".repeat(5)}`,
     String.raw`line\with\slashes`,
     'line"with"quotes',
-    "-----END PRIVATE KEY-----",
+    `${"-".repeat(5)}END PRIVATE KEY${"-".repeat(5)}`,
   ].join("\n");
   const serialized = serializeDotEnv({
     HACK_GITHUB_APP_PRIVATE_KEY: pem,

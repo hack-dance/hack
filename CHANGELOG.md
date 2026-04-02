@@ -1,3 +1,16 @@
+## 2.4.0 (2026-04-02)
+
+* Merge branch 'main' into feat/global-install-recovery-setup ([f854e22](https://github.com/hack-dance/hack/commit/f854e22))
+* Merge pull request #42 from hack-dance/feat/global-install-recovery-setup ([5496339](https://github.com/hack-dance/hack/commit/5496339)), closes [#42](https://github.com/hack-dance/hack/issues/42)
+* fix(auth): align broker auth pages and local config ([32af3cb](https://github.com/hack-dance/hack/commit/32af3cb))
+* fix(auth): restore broker CI and sign-out cookie parity ([1a31813](https://github.com/hack-dance/hack/commit/1a31813))
+* fix(cli): exclude app test aggregators from package typecheck ([619a8e9](https://github.com/hack-dance/hack/commit/619a8e9))
+* fix(global): resolve authorize user from os account ([8cb6580](https://github.com/hack-dance/hack/commit/8cb6580))
+* fix(update): use neutral homebrew path fixtures ([fa192b2](https://github.com/hack-dance/hack/commit/fa192b2))
+* feat: refresh web app and streamline install workflows ([939c2b2](https://github.com/hack-dance/hack/commit/939c2b2))
+* feat(web): expand account shell and broker auth flows ([87c1ebe](https://github.com/hack-dance/hack/commit/87c1ebe))
+* chore: remove tracked linear project artifacts ([6115502](https://github.com/hack-dance/hack/commit/6115502))
+
 ## 2.3.0 (2026-04-02)
 
 * Merge pull request #41 from hack-dance/feat/global-install-recovery-setup ([9eea06d](https://github.com/hack-dance/hack/commit/9eea06d)), closes [#41](https://github.com/hack-dance/hack/issues/41)

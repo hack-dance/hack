@@ -79,9 +79,13 @@ function expectNoEnvScopeWarnings(): void {
   ).toEqual([]);
 }
 
-test("run applies modern env overlays to service-specific compose overrides", async () => {
-  const projectRoot = await createProject();
-
+async function runPrintenv({
+  projectRoot,
+  envName,
+}: {
+  readonly projectRoot: string;
+  readonly envName?: string;
+}): Promise<number> {
   const input = {
     ctx: {
       cwd: projectRoot,
@@ -91,7 +95,7 @@ test("run applies modern env overlays to service-specific compose overrides", as
       options: {
         path: projectRoot,
         project: undefined,
-        env: "qa",
+        env: envName,
         branch: undefined,
         workdir: undefined,
         profile: undefined,
@@ -101,13 +105,20 @@ test("run applies modern env overlays to service-specific compose overrides", as
         cmd: ["printenv"],
       },
       raw: {
-        argv: ["--path", projectRoot, "--env", "qa", "api", "printenv"],
+        argv: envName
+          ? ["--path", projectRoot, "--env", envName, "api", "printenv"]
+          : ["--path", projectRoot, "api", "printenv"],
         positionals: ["api", "printenv"],
       },
     },
   } as unknown as Parameters<typeof runCommand.handler>[0];
 
-  const exitCode = await runCommand.handler(input);
+  return await runCommand.handler(input);
+}
+
+test("run applies modern env overlays to service-specific compose overrides", async () => {
+  const projectRoot = await createProject();
+  const exitCode = await runPrintenv({ projectRoot, envName: "qa" });
 
   expect(exitCode).toBe(0);
   expect(runCalls).toHaveLength(1);
@@ -158,189 +169,98 @@ test("run does not warn about sibling service scopes in modern env configs", asy
     ].join("\n"),
   });
 
-  const input = {
-    ctx: {
-      cwd: projectRoot,
-      cli: CLI_SPEC,
-    },
-    args: {
-      options: {
-        path: projectRoot,
-        project: undefined,
-        env: undefined,
-        branch: undefined,
-        workdir: undefined,
-        profile: undefined,
-      },
-      positionals: {
-        service: "api",
-        cmd: ["printenv"],
-      },
-      raw: {
-        argv: ["--path", projectRoot, "api", "printenv"],
-        positionals: ["api", "printenv"],
-      },
-    },
-  } as unknown as Parameters<typeof runCommand.handler>[0];
-
-  const exitCode = await runCommand.handler(input);
+  const exitCode = await runPrintenv({ projectRoot });
 
   expect(exitCode).toBe(0);
   expect(runCalls[0]?.noDeps).toBe(false);
   expectNoEnvScopeWarnings();
 });
 
-test("run skips dependency startup when the local stack is already up", async () => {
-  const projectRoot = await createProject({
-    runningServices: ["api"],
+const runDependencyScenarios = [
+  {
+    name: "skips dependency startup when the local base stack is already up",
+    createProjectInput: {
+      runningServices: ["api"],
+    },
+    envName: undefined,
+    expectedNoDeps: true,
+  },
+  {
+    name: "keeps dependency startup when runtime state exists but the target service is not running",
+    createProjectInput: {
+      runtimeComposeProject: "project-run-env-test",
+    },
+    envName: undefined,
+    expectedNoDeps: false,
+  },
+  {
+    name: "keeps dependency startup when the requested overlay differs from the live stack env",
+    createProjectInput: {
+      runtimeComposeProject: "project-run-env-test",
+      runningServices: ["api"],
+    },
+    envName: "qa",
+    expectedNoDeps: false,
+  },
+  {
+    name: "skips dependency startup when omitted env resolves to the live default overlay",
+    createProjectInput: {
+      config: {
+        env: {
+          defaultOverlay: "qa",
+        },
+      },
+      runtimeComposeProject: "project-run-env-test",
+      runtimeEnvName: "qa",
+      runningServices: ["api"],
+    },
+    envName: undefined,
+    expectedNoDeps: true,
+  },
+  {
+    name: "keeps dependency startup when explicit base bypasses a matching default overlay stack",
+    createProjectInput: {
+      config: {
+        env: {
+          defaultOverlay: "qa",
+        },
+      },
+      runtimeComposeProject: "project-run-env-test",
+      runtimeEnvName: "qa",
+      runningServices: ["api"],
+    },
+    envName: "base",
+    expectedNoDeps: false,
+  },
+  {
+    name: "keeps dependency startup when omitted env resolves to qa but the live stack recorded base",
+    createProjectInput: {
+      config: {
+        env: {
+          defaultOverlay: "qa",
+        },
+      },
+      runtimeComposeProject: "project-run-env-test",
+      runtimeEnvName: null,
+      runningServices: ["api"],
+    },
+    envName: undefined,
+    expectedNoDeps: false,
+  },
+] as const;
+
+for (const scenario of runDependencyScenarios) {
+  test(scenario.name, async () => {
+    const projectRoot = await createProject(scenario.createProjectInput);
+    const exitCode = await runPrintenv({
+      projectRoot,
+      envName: scenario.envName,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(runCalls[0]?.noDeps).toBe(scenario.expectedNoDeps);
   });
-
-  const input = {
-    ctx: {
-      cwd: projectRoot,
-      cli: CLI_SPEC,
-    },
-    args: {
-      options: {
-        path: projectRoot,
-        project: undefined,
-        env: undefined,
-        branch: undefined,
-        workdir: undefined,
-        profile: undefined,
-      },
-      positionals: {
-        service: "api",
-        cmd: ["printenv"],
-      },
-      raw: {
-        argv: ["--path", projectRoot, "api", "printenv"],
-        positionals: ["api", "printenv"],
-      },
-    },
-  } as unknown as Parameters<typeof runCommand.handler>[0];
-
-  const exitCode = await runCommand.handler(input);
-
-  expect(exitCode).toBe(0);
-  expect(runCalls[0]?.noDeps).toBe(true);
-});
-
-test("run keeps dependency startup when cached runtime state is stale", async () => {
-  const projectRoot = await createProject({
-    runtimeComposeProject: "project-run-env-test",
-  });
-
-  const input = {
-    ctx: {
-      cwd: projectRoot,
-      cli: CLI_SPEC,
-    },
-    args: {
-      options: {
-        path: projectRoot,
-        project: undefined,
-        env: undefined,
-        branch: undefined,
-        workdir: undefined,
-        profile: undefined,
-      },
-      positionals: {
-        service: "api",
-        cmd: ["printenv"],
-      },
-      raw: {
-        argv: ["--path", projectRoot, "api", "printenv"],
-        positionals: ["api", "printenv"],
-      },
-    },
-  } as unknown as Parameters<typeof runCommand.handler>[0];
-
-  const exitCode = await runCommand.handler(input);
-
-  expect(exitCode).toBe(0);
-  expect(runCalls[0]?.noDeps).toBe(false);
-});
-
-test("run keeps dependency startup when the requested env differs from the live stack env", async () => {
-  const projectRoot = await createProject({
-    runtimeComposeProject: "project-run-env-test",
-    runningServices: ["api"],
-  });
-
-  const input = {
-    ctx: {
-      cwd: projectRoot,
-      cli: CLI_SPEC,
-    },
-    args: {
-      options: {
-        path: projectRoot,
-        project: undefined,
-        env: "qa",
-        branch: undefined,
-        workdir: undefined,
-        profile: undefined,
-      },
-      positionals: {
-        service: "api",
-        cmd: ["printenv"],
-      },
-      raw: {
-        argv: ["--path", projectRoot, "--env", "qa", "api", "printenv"],
-        positionals: ["api", "printenv"],
-      },
-    },
-  } as unknown as Parameters<typeof runCommand.handler>[0];
-
-  const exitCode = await runCommand.handler(input);
-
-  expect(exitCode).toBe(0);
-  expect(runCalls[0]?.noDeps).toBe(false);
-});
-
-test("run skips dependency startup when omitted env resolves to the live default overlay", async () => {
-  const projectRoot = await createProject({
-    config: {
-      env: {
-        defaultOverlay: "qa",
-      },
-    },
-    runtimeComposeProject: "project-run-env-test",
-    runtimeEnvName: "qa",
-    runningServices: ["api"],
-  });
-
-  const input = {
-    ctx: {
-      cwd: projectRoot,
-      cli: CLI_SPEC,
-    },
-    args: {
-      options: {
-        path: projectRoot,
-        project: undefined,
-        env: undefined,
-        branch: undefined,
-        workdir: undefined,
-        profile: undefined,
-      },
-      positionals: {
-        service: "api",
-        cmd: ["printenv"],
-      },
-      raw: {
-        argv: ["--path", projectRoot, "api", "printenv"],
-        positionals: ["api", "printenv"],
-      },
-    },
-  } as unknown as Parameters<typeof runCommand.handler>[0];
-
-  const exitCode = await runCommand.handler(input);
-
-  expect(exitCode).toBe(0);
-  expect(runCalls[0]?.noDeps).toBe(true);
-});
+}
 
 async function createProject(input?: {
   readonly services?: readonly string[];

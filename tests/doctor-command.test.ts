@@ -78,7 +78,7 @@ test("doctor remediation plan mentions env migration when requested for a legacy
     });
 
     expect(lines).toEqual([
-      "1. Review and repair local network, CoreDNS, CA, and daemon drift where needed.",
+      "1. Review and repair local network, CoreDNS, CA, host TLS env, and daemon drift where needed.",
       "2. Repair tickets refs if the project repo needs it.",
       "3. Prompt to migrate legacy env config (.hack/hack.env.json) to hack.env.*.yaml.",
     ]);
@@ -96,7 +96,7 @@ test("doctor remediation plan skips env migration when modern env files already 
     });
 
     expect(lines).toEqual([
-      "1. Review and repair local network, CoreDNS, CA, and daemon drift where needed.",
+      "1. Review and repair local network, CoreDNS, CA, host TLS env, and daemon drift where needed.",
       "2. Repair tickets refs if the project repo needs it.",
       "3. Skip env migration because this project already uses hack.env.*.yaml.",
     ]);

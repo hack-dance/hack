@@ -2527,7 +2527,7 @@ Options:
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `-p`, `--path <dir>` | string | - | Run against a repo path (overrides cwd search) |
-| `--fix` | boolean | false | Attempt safe auto-remediations (network + CoreDNS + CA) |
+| `--fix` | boolean | false | Attempt safe auto-remediations (network + CoreDNS + CA + host TLS trust) |
 
 ### hack crash-capture
 

@@ -8,6 +8,16 @@ export const HACK_HOST_TRUST_BUNDLE_FILENAME =
   "caddy-host-trust-bundle.pem" as const;
 export const HACK_HOST_TRUST_ENV_FILENAME = "caddy-host-trust-env.sh" as const;
 
+interface HackHostTrustEnvironment {
+  readonly NODE_EXTRA_CA_CERTS: string;
+  readonly HACK_LOCAL_CA_CERT: string;
+  readonly SSL_CERT_FILE?: string;
+  readonly CURL_CA_BUNDLE?: string;
+  readonly REQUESTS_CA_BUNDLE?: string;
+  readonly GIT_SSL_CAINFO?: string;
+  readonly HACK_HOST_TRUST_BUNDLE?: string;
+}
+
 export function resolveHackLocalCaCertPath(input?: {
   readonly home?: string | null;
 }): string {
@@ -64,8 +74,8 @@ export function resolveHackHostTrustEnvScriptPath(input?: {
 export function buildHackHostTrustEnvironment(input: {
   readonly certPath: string;
   readonly bundlePath?: string | null;
-}): Record<string, string> {
-  const env: Record<string, string> = {
+}): HackHostTrustEnvironment {
+  const env: HackHostTrustEnvironment = {
     NODE_EXTRA_CA_CERTS: input.certPath,
     HACK_LOCAL_CA_CERT: input.certPath,
   };

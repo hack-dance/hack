@@ -94,12 +94,20 @@ export async function appendHackHostTrustEnvironment(
   }
 
   const bundlePath = await findHackHostTrustBundlePath();
+  const trustEnvironment = buildHackHostTrustEnvironment({
+    certPath,
+    bundlePath,
+  });
+
   return {
+    ...trustEnvironment,
     ...env,
-    ...buildHackHostTrustEnvironment({
-      certPath,
-      bundlePath,
-    }),
+    HACK_LOCAL_CA_CERT: trustEnvironment.HACK_LOCAL_CA_CERT,
+    ...(trustEnvironment.HACK_HOST_TRUST_BUNDLE
+      ? {
+          HACK_HOST_TRUST_BUNDLE: trustEnvironment.HACK_HOST_TRUST_BUNDLE,
+        }
+      : {}),
   };
 }
 

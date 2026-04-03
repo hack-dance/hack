@@ -184,6 +184,37 @@ test("mergeLifecycleCommandEnv appends local Hack CA trust for host processes", 
   });
 });
 
+test("mergeLifecycleCommandEnv preserves explicit TLS env values", async () => {
+  const homeRoot = await mkdtemp(join(tmpdir(), "hack-home-"));
+  tempDirs.add(homeRoot);
+  process.env.HOME = homeRoot;
+
+  const caDir = resolve(homeRoot, ".hack", "caddy", "pki");
+  await mkdir(caDir, { recursive: true });
+  await writeFile(resolve(caDir, "caddy-local-authority.crt"), "local-ca\n");
+  await writeFile(
+    resolve(caDir, "caddy-host-trust-bundle.pem"),
+    "system-ca\nlocal-ca\n"
+  );
+
+  const merged = await mergeLifecycleCommandEnv({
+    APP_ENV: "dev",
+    NODE_EXTRA_CA_CERTS: "/tmp/custom-extra.pem",
+    SSL_CERT_FILE: "/tmp/custom-bundle.pem",
+  });
+
+  expect(merged).toMatchObject({
+    APP_ENV: "dev",
+    CURL_CA_BUNDLE: resolve(caDir, "caddy-host-trust-bundle.pem"),
+    GIT_SSL_CAINFO: resolve(caDir, "caddy-host-trust-bundle.pem"),
+    HACK_HOST_TRUST_BUNDLE: resolve(caDir, "caddy-host-trust-bundle.pem"),
+    HACK_LOCAL_CA_CERT: resolve(caDir, "caddy-local-authority.crt"),
+    NODE_EXTRA_CA_CERTS: "/tmp/custom-extra.pem",
+    REQUESTS_CA_BUNDLE: resolve(caDir, "caddy-host-trust-bundle.pem"),
+    SSL_CERT_FILE: "/tmp/custom-bundle.pem",
+  });
+});
+
 async function createLifecycleProjectDir(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "hack-lifecycle-processes-"));
   tempDirs.add(root);

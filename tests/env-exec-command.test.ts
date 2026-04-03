@@ -660,6 +660,84 @@ test("env exec adds local Hack CA trust for host runtimes when available", async
   });
 });
 
+test("env exec preserves explicit TLS env values while adding Hack trust metadata", async () => {
+  const projectRoot = await createProject({
+    defaultYaml: [
+      "version: 1",
+      "environment: default",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      '    GLOBAL_FLAG: "base"',
+      '    NODE_EXTRA_CA_CERTS: "/tmp/custom-extra.pem"',
+      '    SSL_CERT_FILE: "/tmp/custom-bundle.pem"',
+      "",
+    ].join("\n"),
+  });
+  const homeRoot = await mkdtemp(join(tmpdir(), "hack-home-"));
+  tempDirs.add(homeRoot);
+  process.env.HOME = homeRoot;
+
+  const caDir = resolve(homeRoot, ".hack", "caddy", "pki");
+  await mkdir(caDir, { recursive: true });
+  await writeFile(resolve(caDir, "caddy-local-authority.crt"), "local-ca\n");
+  await writeFile(
+    resolve(caDir, "caddy-host-trust-bundle.pem"),
+    "system-ca\nlocal-ca\n"
+  );
+
+  const execCommand = findSubcommand("exec");
+  const input = {
+    ctx: {
+      cwd: projectRoot,
+      cli: CLI_SPEC,
+    },
+    args: {
+      options: {
+        path: projectRoot,
+        project: undefined,
+        env: "qa",
+        service: "api",
+        target: undefined,
+        shellCommand: undefined,
+      },
+      positionals: {
+        command: ["bun", "db:migrate"],
+      },
+      raw: {
+        argv: [
+          "--path",
+          projectRoot,
+          "--env",
+          "qa",
+          "--service",
+          "api",
+          "bun",
+          "db:migrate",
+        ],
+        positionals: ["bun", "db:migrate"],
+      },
+    },
+  } as unknown as Parameters<typeof execCommand.handler>[0];
+
+  const exitCode = await execCommand.handler(input);
+
+  expect(exitCode).toBe(0);
+  expect(runCalls).toHaveLength(1);
+  expect(runCalls[0]?.env).toEqual({
+    API_BASE_URL: "https://qa.example.com",
+    CURL_CA_BUNDLE: resolve(caDir, "caddy-host-trust-bundle.pem"),
+    GIT_SSL_CAINFO: resolve(caDir, "caddy-host-trust-bundle.pem"),
+    GLOBAL_FLAG: "base",
+    HACK_HOST_TRUST_BUNDLE: resolve(caDir, "caddy-host-trust-bundle.pem"),
+    HACK_LOCAL_CA_CERT: resolve(caDir, "caddy-local-authority.crt"),
+    NODE_EXTRA_CA_CERTS: "/tmp/custom-extra.pem",
+    REQUESTS_CA_BUNDLE: resolve(caDir, "caddy-host-trust-bundle.pem"),
+    SERVICE_TOKEN: "overlay-secret",
+    SSL_CERT_FILE: "/tmp/custom-bundle.pem",
+  });
+});
+
 type EnvSubcommandName = (typeof envCommand.subcommands)[number]["name"];
 type EnvSubcommand<N extends EnvSubcommandName> = Extract<
   (typeof envCommand.subcommands)[number],

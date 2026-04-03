@@ -36,6 +36,7 @@ import {
   serializeEnvClassificationForJson,
   serializeEnvStorageForJson as serializeEnvStorageForJsonShape,
 } from "../lib/hack-env-status.ts";
+import { appendHackHostTrustEnvironment } from "../lib/local-ca.ts";
 import type { ProjectContext } from "../lib/project.ts";
 import {
   defaultProjectSlugFromPath,
@@ -120,6 +121,15 @@ const optTarget = defineOption({
     "Env view for host commands (default: host rewrites container-oriented addresses for local host execution)",
 } as const);
 
+const optShellCommand = defineOption({
+  name: "shellCommand",
+  type: "string",
+  long: "--shell",
+  valueHint: "<command>",
+  description:
+    "Run a shell command string via /bin/sh -lc after env injection so `$VAR` expansion happens inside the child shell",
+} as const);
+
 const SECRET_MASK = "***";
 const MODERN_ENV_STATUS_CLASSIFICATION = {
   trust_model: "repo_managed_env_config",
@@ -187,9 +197,16 @@ const execSpec = defineCommand({
   summary: "Run a host command with project env injected",
   group: "Project",
   description:
-    "Inject the selected Hack env overlay directly into a one-off host command without materializing .hack/.env.",
-  options: [optPath, optProject, optEnv, optService, optTarget],
-  positionals: [{ name: "command", required: true, multiple: true }],
+    'Inject the selected Hack env overlay directly into a one-off host command without materializing .hack/.env. To inspect a value, prefer `printenv KEY` or `sh -lc \'printf "%s\\n" "$KEY"\'`; `echo $KEY` expands in your current shell before Hack injects env.',
+  options: [
+    optPath,
+    optProject,
+    optEnv,
+    optService,
+    optTarget,
+    optShellCommand,
+  ],
+  positionals: [{ name: "command", required: false, multiple: true }],
   subcommands: [],
 } as const);
 
@@ -209,9 +226,9 @@ const hostExecSpec = defineCommand({
   summary: "Run a host command with project env injected",
   group: "Project",
   description:
-    "Run a one-off command on the host with the selected Hack env overlay injected. Use --scope when you want service-scoped values without running inside that service container.",
-  options: [optPath, optProject, optEnv, optScope, optTarget],
-  positionals: [{ name: "command", required: true, multiple: true }],
+    'Run a one-off command on the host with the selected Hack env overlay injected. Use --scope when you want service-scoped values without running inside that service container. To inspect a value, prefer `printenv KEY` or `sh -lc \'printf "%s\\n" "$KEY"\'`; `echo $KEY` expands in your current shell before Hack injects env.',
+  options: [optPath, optProject, optEnv, optScope, optTarget, optShellCommand],
+  positionals: [{ name: "command", required: false, multiple: true }],
   subcommands: [],
 } as const);
 
@@ -605,7 +622,7 @@ async function resolveEnvInjection(input: {
       target: input.target,
     });
     return {
-      env: adaptEnvForHostExecution({
+      env: await adaptEnvForHostExecution({
         env,
         target: input.target,
         serviceNames,
@@ -627,7 +644,7 @@ async function resolveEnvInjection(input: {
     composeFile: input.project.composeFile,
   });
   return {
-    env: adaptEnvForHostExecution({
+    env: await adaptEnvForHostExecution({
       env: selectHackEnvValues({
         resolved,
         serviceName: input.serviceName,
@@ -659,21 +676,21 @@ function adaptEnvForHostExecution(input: {
   readonly env: Readonly<Record<string, string>>;
   readonly target: (typeof HOST_ENV_TARGET_VALUES)[number];
   readonly serviceNames: readonly string[];
-}): Record<string, string> {
-  if (input.target !== "host") {
-    return { ...input.env };
+}): Promise<Record<string, string>> {
+  if (input.target === "host") {
+    const composeServiceNames = new Set(input.serviceNames);
+    const out: Record<string, string> = {};
+    for (const [key, value] of Object.entries(input.env)) {
+      out[key] = rewriteEnvValueForHostExecution({
+        key,
+        value,
+        composeServiceNames,
+      });
+    }
+    return appendHackHostTrustEnvironment(out);
   }
 
-  const composeServiceNames = new Set(input.serviceNames);
-  const out: Record<string, string> = {};
-  for (const [key, value] of Object.entries(input.env)) {
-    out[key] = rewriteEnvValueForHostExecution({
-      key,
-      value,
-      composeServiceNames,
-    });
-  }
-  return out;
+  return appendHackHostTrustEnvironment(input.env);
 }
 
 function rewriteEnvValueForHostExecution(input: {
@@ -1564,6 +1581,12 @@ function resolveInteractiveShellCommand(): readonly string[] {
   return [shellPath, "-l"];
 }
 
+function resolveShellCommandCommand(input: {
+  readonly command: string;
+}): readonly string[] {
+  return ["/bin/sh", "-lc", input.command];
+}
+
 function resolveExecutionScopeName(input: {
   readonly scopeName?: string;
   readonly serviceName?: string;
@@ -1585,6 +1608,7 @@ async function runHostCommandWithInjectedEnv(input: {
   readonly serviceName?: string;
   readonly targetOpt: string | undefined;
   readonly command: readonly string[];
+  readonly shellCommandOpt?: string;
 }): Promise<number> {
   const project = await resolveProjectForEnv({
     ctx: input.ctx,
@@ -1598,7 +1622,12 @@ async function runHostCommandWithInjectedEnv(input: {
   const target = resolveHostEnvTarget({
     targetOption: input.targetOpt,
   });
-  if (input.command.length === 0) {
+  const shellCommand = input.shellCommandOpt?.trim();
+  const positionalCommand = input.command;
+  if (shellCommand && positionalCommand.length > 0) {
+    throw new CliUsageError("Use either <command...> or --shell, not both.");
+  }
+  if (!shellCommand && positionalCommand.length === 0) {
     throw new CliUsageError("Command is required.");
   }
 
@@ -1612,11 +1641,16 @@ async function runHostCommandWithInjectedEnv(input: {
     }),
     target,
   });
-  return await run(input.command, {
-    cwd: project.projectRoot,
-    env: envState.env,
-    stdin: "inherit",
-  });
+  return await run(
+    shellCommand
+      ? resolveShellCommandCommand({ command: shellCommand })
+      : positionalCommand,
+    {
+      cwd: project.projectRoot,
+      env: envState.env,
+      stdin: "inherit",
+    }
+  );
 }
 
 async function openHostShellWithInjectedEnv(input: {
@@ -1670,6 +1704,7 @@ const handleEnvExec: CommandHandlerFor<typeof execSpec> = async ({
     serviceName: args.options.service,
     targetOpt: args.options.target,
     command: args.positionals.command,
+    shellCommandOpt: args.options.shellCommand,
   });
 };
 
@@ -1699,6 +1734,7 @@ const handleHostExec: CommandHandlerFor<typeof hostExecSpec> = async ({
     scopeName: args.options.scope,
     targetOpt: args.options.target,
     command: args.positionals.command,
+    shellCommandOpt: args.options.shellCommand,
   });
 };
 

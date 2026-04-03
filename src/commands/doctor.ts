@@ -35,6 +35,7 @@ import {
   resolveGlobalCaddyIp,
 } from "../lib/caddy-hosts.ts";
 import { resolveGlobalConfigPath } from "../lib/config-paths.ts";
+import { checkMacHostTlsTrust } from "../lib/doctor-host-tls.ts";
 import { parseDotEnv } from "../lib/env.ts";
 import {
   ensureDir,
@@ -170,6 +171,7 @@ const DOCTOR_SUMMARY_GROUPS = [
       "grafana",
       "proxy ports",
       "caddy local ca",
+      "host tls trust",
     ]),
   },
   {
@@ -414,6 +416,13 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
       timeoutMs: 1500,
     })
   );
+  if (isMac()) {
+    results.push(
+      await runCheck(s, "host tls trust", () => checkMacHostTlsTrust(), {
+        timeoutMs: 1500,
+      })
+    );
+  }
 
   // Project (if in a repo or --path)
   const startDir = args.options.path
@@ -1851,6 +1860,7 @@ async function runDoctorFix(opts: {
 
   await maybeStartGlobalCaddyCompose({ paths });
   await maybeExportCaddyCaCert({ paths });
+  await maybeRepairMacHostTlsTrust();
   await maybeMigrateDnsmasq();
   await maybeRepairProjectTicketsGitHealth({ startDir: opts.startDir });
   if (opts.migrateEnvConfig) {
@@ -2078,7 +2088,7 @@ export async function buildDoctorRemediationPlanLines(opts: {
   readonly migrateEnvConfig: boolean;
 }): Promise<string[]> {
   const lines = [
-    "1. Review and repair local network, CoreDNS, CA, and daemon drift where needed.",
+    "1. Review and repair local network, CoreDNS, CA, host TLS env, and daemon drift where needed.",
     "2. Repair tickets refs if the project repo needs it.",
   ];
   if (!opts.migrateEnvConfig) {
@@ -2428,6 +2438,31 @@ async function maybeExportCaddyCaCert(opts: {
   }
 
   await exportCaddyLocalCaCert({ paths: opts.paths });
+}
+
+async function maybeRepairMacHostTlsTrust(): Promise<void> {
+  if (!isMac()) {
+    return;
+  }
+
+  const hostTlsTrust = await checkMacHostTlsTrust();
+  if (hostTlsTrust.status === "ok") {
+    return;
+  }
+
+  note(hostTlsTrust.message, "doctor");
+  const okRepair = await confirmOrThrow({
+    message:
+      "Repair macOS host TLS trust now? (Bun/Node/curl/git trust for https://*.hack)",
+    initialValue: true,
+  });
+  if (!okRepair) {
+    return;
+  }
+
+  await runHackSubcommand({
+    args: ["global", "trust"],
+  });
 }
 
 async function maybeMigrateDnsmasq(): Promise<void> {

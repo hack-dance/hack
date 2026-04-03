@@ -92,6 +92,7 @@ import {
   resolveLifecycleLogPath,
   upsertLifecycleStateEntry,
 } from "../lib/lifecycle-runtime.ts";
+import { appendHackHostTrustEnvironment } from "../lib/local-ca.ts";
 import {
   buildLogSelector,
   resolveShouldTryLoki,
@@ -1289,7 +1290,7 @@ async function runLifecycleCommands(opts: {
 
     const proc = Bun.spawn(["sh", "-c", cmd.command], {
       cwd,
-      env: mergeLifecycleCommandEnv(opts.env),
+      env: await mergeLifecycleCommandEnv(opts.env),
       stdin: "inherit",
       stdout: "pipe",
       stderr: "pipe",
@@ -2160,16 +2161,16 @@ function shellSingleQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-function mergeLifecycleCommandEnv(
+export async function mergeLifecycleCommandEnv(
   override: Readonly<Record<string, string>>
-): Record<string, string> {
+): Promise<Record<string, string>> {
   const base: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (typeof value === "string") {
       base[key] = value;
     }
   }
-  return { ...base, ...override };
+  return await appendHackHostTrustEnvironment({ ...base, ...override });
 }
 
 async function resolveBranchComposeFiles(opts: {

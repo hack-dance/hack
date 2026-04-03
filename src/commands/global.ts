@@ -3187,39 +3187,26 @@ async function writeMacHostTrustBundle(input: {
   readonly certPath: string;
 }): Promise<string | null> {
   const bundlePath = resolveHackHostTrustBundlePath();
-  const home = getHomeDir();
-  const loginKeychainPath = resolve(
-    home,
-    "Library",
-    "Keychains",
-    "login.keychain-db"
-  );
-  const keychainPaths = [
-    "/System/Library/Keychains/SystemRootCertificates.keychain",
-    "/Library/Keychains/System.keychain",
-    loginKeychainPath,
-  ];
+  const systemRootsKeychain =
+    "/System/Library/Keychains/SystemRootCertificates.keychain";
 
   const pemChunks: string[] = [];
-  for (const keychainPath of keychainPaths) {
-    if (!(await pathExists(keychainPath))) {
-      continue;
-    }
+  if (await pathExists(systemRootsKeychain)) {
     const result = await exec(
-      ["security", "find-certificate", "-a", "-p", keychainPath],
+      ["security", "find-certificate", "-a", "-p", systemRootsKeychain],
       {
         stdin: "ignore",
       }
     );
     if (result.exitCode !== 0) {
       logger.warn({
-        message: `Failed to export trust roots from ${keychainPath}; host bundle will skip it.`,
+        message: `Failed to export trust roots from ${systemRootsKeychain}; host bundle will skip it.`,
       });
-      continue;
-    }
-    const pemText = result.stdout.trim();
-    if (pemText.length > 0) {
-      pemChunks.push(pemText);
+    } else {
+      const pemText = result.stdout.trim();
+      if (pemText.length > 0) {
+        pemChunks.push(pemText);
+      }
     }
   }
 
@@ -3234,7 +3221,7 @@ async function writeMacHostTrustBundle(input: {
   if (pemChunks.length === 0) {
     logger.warn({
       message:
-        "No macOS keychain roots were exported for the host trust bundle; falling back to NODE_EXTRA_CA_CERTS only.",
+        "No macOS system trust roots were exported for the host trust bundle; falling back to NODE_EXTRA_CA_CERTS only.",
     });
     return null;
   }

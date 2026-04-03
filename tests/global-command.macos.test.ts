@@ -14,6 +14,7 @@ import {
 } from "../src/constants.ts";
 
 const runCalls: string[][] = [];
+const execCalls: string[][] = [];
 let runResponder: ((cmd: readonly string[]) => number | null) | null = null;
 let execMockResponder:
   | ((
@@ -120,6 +121,7 @@ mock.module("../src/lib/fs.ts", () => ({
 
 mock.module("../src/lib/shell.ts", () => ({
   exec: async (cmd: readonly string[]) => {
+    execCalls.push([...cmd]);
     const custom = execMockResponder?.(cmd) ?? null;
     if (custom) {
       return custom;
@@ -177,6 +179,7 @@ beforeEach(async () => {
   process.env.USER = "env-user";
   process.env.HACK_LOGGER = "console";
   runCalls.length = 0;
+  execCalls.length = 0;
   runResponder = null;
   execMockResponder = null;
   pathExistsOverrides = new Map([
@@ -508,6 +511,35 @@ test("global trust prepares host runtime trust env for future shells", async () 
   expect(await Bun.file(bundlePath).text()).toContain("LOCAL");
   expect(await Bun.file(bundlePath).text()).toContain("SYSTEM");
   expect(await Bun.file(envScriptPath).text()).toContain("NODE_EXTRA_CA_CERTS");
+  expect(execCalls).toEqual(
+    expect.arrayContaining([
+      [
+        "security",
+        "find-certificate",
+        "-a",
+        "-p",
+        "/System/Library/Keychains/SystemRootCertificates.keychain",
+      ],
+    ])
+  );
+  expect(execCalls).not.toEqual(
+    expect.arrayContaining([
+      expect.arrayContaining([
+        "security",
+        "find-certificate",
+        "-a",
+        "-p",
+        "/Library/Keychains/System.keychain",
+      ]),
+      expect.arrayContaining([
+        "security",
+        "find-certificate",
+        "-a",
+        "-p",
+        resolve(tempDir!, "Library", "Keychains", "login.keychain-db"),
+      ]),
+    ])
+  );
   expect(runCalls).toEqual(
     expect.arrayContaining([
       [

@@ -10,7 +10,10 @@ import { readTextFile, writeTextFileIfChanged } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
 import { readProjectDefaultEnvConfig } from "./project.ts";
 import type { SecretStoreDescriptor } from "./secret-store.ts";
-import { resolveSecretStore } from "./secret-store.ts";
+import {
+  resolveSecretStore,
+  resolveSecretStoreDescriptor,
+} from "./secret-store.ts";
 
 export const HACK_ENV_VERSION = 1 as const;
 const HACK_ENV_KEY_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
@@ -227,10 +230,6 @@ export async function resolveHackEnv(opts: {
     projectDir: opts.projectDir,
     envName: opts.envName,
   });
-  const secretStore = await resolveSecretStore({
-    projectName: opts.projectName,
-    projectDir: opts.projectDir,
-  });
 
   const envPath = resolve(opts.projectDir, PROJECT_ENV_FILENAME);
   const envText = await readTextFile(envPath);
@@ -246,6 +245,28 @@ export async function resolveHackEnv(opts: {
     overlayPath: envSelection.overlayPath,
     overlayDotenv,
   });
+  const needsSecretStore =
+    runtimeConfig.storePlaintextInBackend ||
+    contract.vars.some((contractVar) => contractVar.source === "keychain");
+  const secretStoreDescriptor = needsSecretStore
+    ? (
+        await resolveSecretStore({
+          projectName: opts.projectName,
+          projectDir: opts.projectDir,
+        })
+      ).descriptor
+    : await resolveSecretStoreDescriptor({
+        projectName: opts.projectName,
+        projectDir: opts.projectDir,
+      });
+  const secretStore = needsSecretStore
+    ? await resolveSecretStore({
+        projectName: opts.projectName,
+        projectDir: opts.projectDir,
+      })
+    : createUnusedSecretStore({
+        descriptor: secretStoreDescriptor,
+      });
 
   const envForCompose: Record<string, string> = {};
   const values: HackEnvValueState[] = [];
@@ -290,9 +311,9 @@ export async function resolveHackEnv(opts: {
         },
       },
       localSecrets: {
-        ...secretStore.descriptor,
+        ...secretStoreDescriptor,
         trustModel:
-          secretStore.descriptor.mode === "shim"
+          secretStoreDescriptor.mode === "shim"
             ? "local_secret_backend_shim"
             : "local_secret_backend",
       },
@@ -300,9 +321,9 @@ export async function resolveHackEnv(opts: {
         ...describePortableState({
           storePlaintextInBackend: runtimeConfig.storePlaintextInBackend,
           localSecrets: {
-            ...secretStore.descriptor,
+            ...secretStoreDescriptor,
             trustModel:
-              secretStore.descriptor.mode === "shim"
+              secretStoreDescriptor.mode === "shim"
                 ? "local_secret_backend_shim"
                 : "local_secret_backend",
           },
@@ -313,6 +334,18 @@ export async function resolveHackEnv(opts: {
     missingRequired,
     warnings,
     envForCompose,
+  };
+}
+
+function createUnusedSecretStore(opts: {
+  readonly descriptor: SecretStoreDescriptor;
+}): {
+  readonly descriptor: SecretStoreDescriptor;
+  readonly get: (input: { readonly key: string }) => Promise<string | null>;
+} {
+  return {
+    descriptor: opts.descriptor,
+    get: async (_input) => null,
   };
 }
 

@@ -1,10 +1,9 @@
 import { expect, test } from "bun:test";
 import { parseHTML } from "linkedom";
-import { type ReactElement, type ReactNode, Suspense } from "react";
 import { hydrateRoot } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 
-import * as accountPageModule from "../app/account/page";
+import * as accountPageModule from "../src/app/account/page";
 import AccountShellLoading from "../src/components/account-shell-loading";
 import ControlPlaneShell from "../src/components/control-plane-shell";
 import type { AccountShellContext } from "../src/lib/account-shell";
@@ -178,22 +177,8 @@ test("account page forces a fresh server render for cold authenticated bootstrap
   expect(accountPageModule.fetchCache).toBe("force-no-store");
 });
 
-test("account page route keeps the page-level loading fallback around the async shell bootstrap", () => {
-  const routeElement = accountPageModule.default({
-    searchParams: new Promise<Record<string, string | string[] | undefined>>(
-      (_resolve) => void _resolve
-    ),
-  }) as ReactElement<{ readonly fallback: ReactNode }>;
-  const routeMarkup = renderToString(routeElement);
-
-  expect(routeElement.type).toBe(Suspense);
-  expect(renderToString(routeElement.props.fallback)).toContain(
-    "Loading account context"
-  );
-  expect(routeMarkup).toContain("Loading account context");
-  expect(routeMarkup).toContain('href="#main-content"');
-  expect(routeMarkup).toContain('id="main-content"');
-  expect(routeMarkup).not.toContain("Mission closeout audit");
+test("account page route is async so the authenticated shell can resolve on the server", () => {
+  expect(accountPageModule.default.constructor.name).toBe("AsyncFunction");
 });
 
 test("account shell loading fallback keeps a focusable main region", () => {

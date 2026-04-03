@@ -1,16 +1,16 @@
-import ControlPlaneShell from "@/src/components/control-plane-shell";
+import ControlPlaneShell from "@/components/control-plane-shell";
 import {
   buildAccountControlPlanePath,
   resolveAccountControlPlaneFeedback,
-} from "@/src/lib/account-control-plane";
+} from "@/lib/account-control-plane";
 import {
   buildAccountShellSignInHref,
   getAccountShellContext,
-} from "@/src/lib/account-shell";
-import { resolveBrowserSharedProjectScope } from "@/src/lib/browser-shared-project-scope";
-import { loadEnvManagementState } from "@/src/lib/env-management";
-import { loadGitHubManagementState } from "@/src/lib/github-management";
-import { loadLinearManagementState } from "@/src/lib/linear-management";
+} from "@/lib/account-shell";
+import { resolveBrowserSharedProjectScope } from "@/lib/browser-shared-project-scope";
+import { loadEnvManagementState } from "@/lib/env-management";
+import { loadGitHubManagementState } from "@/lib/github-management";
+import { loadLinearManagementState } from "@/lib/linear-management";
 
 export default async function AccountShellPage(input: {
   readonly returnToPath: string;

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import {
+  buildBetterAuthProviderCallbackUrl,
   createSharedBetterAuthContract,
   resolveBetterAuthSocialProviderOptions,
   resolveBetterAuthSocialProviders,
@@ -63,6 +64,8 @@ const betterAuthEnvSchema = z.object({
  */
 export function createBetterAuthRuntimeFromEnv(): BetterAuthRuntime {
   const env = readBetterAuthEnv();
+  const betterAuthBaseUrl =
+    env.BETTER_AUTH_URL ?? env.AUTH_BROKER_PUBLIC_BASE_URL;
   const socialProviders = resolveBetterAuthSocialProviders({
     betterAuthGitHubClientId: env.BETTER_AUTH_GITHUB_CLIENT_ID,
     betterAuthGitHubClientSecret: env.BETTER_AUTH_GITHUB_CLIENT_SECRET,
@@ -85,8 +88,11 @@ export function createBetterAuthRuntimeFromEnv(): BetterAuthRuntime {
   });
   const contract = createSharedBetterAuthContract({
     socialProviders,
-    authBaseUrl: env.BETTER_AUTH_URL,
-    publicBaseUrl: env.AUTH_BROKER_PUBLIC_BASE_URL,
+    authBaseUrl: betterAuthBaseUrl,
+    publicBaseUrl:
+      env.AUTH_BROKER_PUBLIC_BASE_URL ??
+      env.BETTER_AUTH_URL ??
+      betterAuthBaseUrl,
     localDevHost: resolveLocalHackDevHost(),
     trustedOrigins: env.BETTER_AUTH_TRUSTED_ORIGINS,
   });
@@ -107,7 +113,7 @@ export function createBetterAuthRuntimeFromEnv(): BetterAuthRuntime {
       schema: authBrokerSchema,
     }),
     secret: requiredConfig.authSecret,
-    ...(env.BETTER_AUTH_URL ? { baseURL: env.BETTER_AUTH_URL } : {}),
+    ...(betterAuthBaseUrl ? { baseURL: betterAuthBaseUrl } : {}),
     ...(contract.trustedOrigins.length > 0
       ? { trustedOrigins: [...contract.trustedOrigins] }
       : {}),
@@ -122,6 +128,10 @@ export function createBetterAuthRuntimeFromEnv(): BetterAuthRuntime {
         trustedProviders: [...contract.accountLinkingPolicy.trustedProviders],
       },
     },
+    // Better Auth owns browser session callbacks under
+    // `${baseURL}/api/auth/callback/<provider>`, which is intentionally
+    // separate from the broker's custom `/gh/callback` flow for Hack-owned
+    // GitHub connection/session orchestration.
     ...(socialProviderOptions
       ? {
           socialProviders: socialProviderOptions,
@@ -149,6 +159,15 @@ export function createBetterAuthRuntimeFromEnv(): BetterAuthRuntime {
     ready,
     contract,
   };
+}
+
+export function resolveBetterAuthGitHubCallbackUrl(input: {
+  readonly betterAuthBaseUrl: string;
+}): string {
+  return buildBetterAuthProviderCallbackUrl({
+    authBaseUrl: input.betterAuthBaseUrl,
+    providerId: "github",
+  });
 }
 
 export type { BetterAuthRuntime };

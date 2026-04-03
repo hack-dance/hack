@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { resolveConfig } from "@/config.ts";
+import { buildBrokerOAuthCallbackUrl, resolveConfig } from "@/config.ts";
 import {
   installAuthBrokerEnvIsolation,
   withAuthBrokerRootEnvFallback,
@@ -34,6 +34,39 @@ describe("auth broker config", () => {
       () => {
         const config = resolveConfig();
         expect(config.githubScopes).toBe("read:user,user:email,read:org");
+      }
+    );
+  });
+
+  test("defaults the broker-owned GitHub callback to /gh/callback", () => {
+    withEnv(
+      {
+        GITHUB_CLIENT_ID: "test-client-id",
+        GITHUB_CLIENT_SECRET: "test-client-secret",
+        AUTH_BROKER_PUBLIC_BASE_URL: "https://auth.hack-cli.hack.gy",
+      },
+      () => {
+        const config = resolveConfig();
+        expect(config.githubRedirectUri).toBe(
+          "https://auth.hack-cli.hack.gy/gh/callback"
+        );
+      }
+    );
+  });
+
+  test("honors an explicit broker-owned GitHub callback override", () => {
+    withEnv(
+      {
+        GITHUB_CLIENT_ID: "test-client-id",
+        GITHUB_CLIENT_SECRET: "test-client-secret",
+        AUTH_BROKER_PUBLIC_BASE_URL: "https://auth.hack-cli.hack.gy",
+        GITHUB_REDIRECT_URI: "https://auth.example.test/gh/callback",
+      },
+      () => {
+        const config = resolveConfig();
+        expect(config.githubRedirectUri).toBe(
+          "https://auth.example.test/gh/callback"
+        );
       }
     );
   });
@@ -241,6 +274,15 @@ describe("auth broker config", () => {
         });
       }
     );
+  });
+
+  test("buildBrokerOAuthCallbackUrl keeps callback ownership on the broker host", () => {
+    expect(
+      buildBrokerOAuthCallbackUrl({
+        publicBaseUrl: "https://auth.hack-cli.hack.gy",
+        callbackPath: "/gh/callback",
+      })
+    ).toBe("https://auth.hack-cli.hack.gy/gh/callback");
   });
 });
 

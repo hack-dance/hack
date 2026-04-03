@@ -1,7 +1,7 @@
 import { HACK_WEB_BROKER_SESSION_COOKIE_NAME } from "@hack/auth-contract";
 import { cookies } from "next/headers";
 
-import { getWebAuthConfig } from "./auth-config";
+import { buildAuthBrokerProxyUrl, getWebAuthConfig } from "./auth-config";
 
 type BrokerMePayload = {
   readonly ok?: boolean;
@@ -37,7 +37,10 @@ export async function resolveAuthenticatedBrowserSession(input: {
 }): Promise<boolean> {
   try {
     const response = await (input.fetchImplementation ?? fetch)(
-      `${input.authBrokerProxyBaseUrl}/v1/auth/me`,
+      buildAuthBrokerProxyUrl({
+        authBrokerProxyBaseUrl: input.authBrokerProxyBaseUrl,
+        path: "/v1/auth/me",
+      }),
       {
         headers: {
           accept: "application/json",

@@ -14,6 +14,7 @@ export type BrokerBetterAuthSession = {
   readonly email: string | null;
   readonly emailVerified: boolean | null;
   readonly name: string | null;
+  readonly image: string | null;
   readonly organizationId: string | null;
   readonly teamId: string | null;
   readonly managementTokenProfileId: string | null;
@@ -102,6 +103,7 @@ async function resolveManagementTokenSession(input: {
     email: user?.email ?? null,
     emailVerified: user?.emailVerified ?? null,
     name: user?.name ?? null,
+    image: user?.image ?? null,
     organizationId: verification.claims.organizationId ?? null,
     teamId: verification.claims.teamId ?? null,
     managementTokenProfileId: verification.claims.profileId ?? null,
@@ -122,6 +124,7 @@ function toResolvedSession(input: {
     email: normalizeOptionalString(input.session.user.email),
     emailVerified: readOptionalBoolean(input.session.user.emailVerified),
     name: normalizeOptionalString(input.session.user.name),
+    image: normalizeOptionalString(input.session.user.image),
     organizationId: extractBetterAuthOrganizationId(input.session),
     teamId: extractBetterAuthTeamId(input.session),
     managementTokenProfileId: null,
@@ -268,6 +271,7 @@ async function readUserRecord(input: {
 }): Promise<{
   readonly email: string | null;
   readonly emailVerified: boolean;
+  readonly image: string | null;
   readonly name: string | null;
 } | null> {
   const db = input.runtime.db;
@@ -283,6 +287,7 @@ async function readUserRecord(input: {
     .select({
       email: betterAuthUser.email,
       emailVerified: betterAuthUser.emailVerified,
+      image: betterAuthUser.image,
       name: betterAuthUser.name,
     })
     .from(betterAuthUser)
@@ -295,6 +300,7 @@ async function readUserRecord(input: {
   return {
     email: normalizeOptionalString(record.email),
     emailVerified: record.emailVerified === true,
+    image: normalizeOptionalString(record.image),
     name: normalizeOptionalString(record.name),
   };
 }

@@ -89,6 +89,20 @@ export async function resolveSecretStore(input: {
   return createKeychainSecretStore({ projectName: input.projectName });
 }
 
+export async function resolveSecretStoreDescriptor(input: {
+  readonly projectName: string;
+  readonly projectDir?: string;
+}): Promise<SecretStoreDescriptor> {
+  const controlPlane = await readControlPlaneConfig({
+    ...(input.projectDir ? { projectDir: input.projectDir } : {}),
+  });
+  return describeSecretStoreDescriptor({
+    projectName: input.projectName,
+    projectDir: input.projectDir,
+    secretsConfig: controlPlane.config.secrets,
+  });
+}
+
 /**
  * Render a user-facing identifier for where secrets are stored.
  */
@@ -131,6 +145,46 @@ function createKeychainSecretStore(input: {
         service,
         name: key,
       }),
+  };
+}
+
+function describeSecretStoreDescriptor(input: {
+  readonly projectName: string;
+  readonly projectDir?: string;
+  readonly secretsConfig: SecretsConfig;
+}): SecretStoreDescriptor {
+  if (input.secretsConfig.backend === "encrypted_file") {
+    return {
+      backend: "encrypted_file",
+      location: resolveConfiguredPath({
+        path: input.secretsConfig.encryptedFile.path,
+        projectDir: input.projectDir,
+      }),
+      mode: "native",
+    };
+  }
+
+  if (input.secretsConfig.backend === "cloud") {
+    const project = input.secretsConfig.cloud.project?.trim() || "default";
+    const prefix = input.secretsConfig.cloud.secretPrefix.trim() || "hack";
+    const filePath = resolveConfiguredPath({
+      path: input.secretsConfig.encryptedFile.path,
+      projectDir: input.projectDir,
+    });
+    return {
+      backend: "cloud",
+      location: `${input.secretsConfig.cloud.provider ?? "unknown"}:${project}:${prefix}:${filePath}`,
+      mode: "shim",
+      ...(input.secretsConfig.cloud.provider
+        ? { provider: input.secretsConfig.cloud.provider }
+        : {}),
+    };
+  }
+
+  return {
+    backend: "keychain",
+    location: resolveSecretServiceName({ projectName: input.projectName }),
+    mode: "native",
   };
 }
 

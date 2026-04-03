@@ -80,6 +80,7 @@ function createBetterAuthRuntimeWithSession(
     readonly getSession?: (
       value: Parameters<BetterAuthAuth["api"]["getSession"]>[0]
     ) => Promise<BetterAuthSession>;
+    readonly handler?: (request: Request) => Promise<Response>;
     readonly storedUser?: {
       readonly id: string;
       readonly email: string;
@@ -112,7 +113,25 @@ function createBetterAuthRuntimeWithSession(
       api: {
         getSession: input?.getSession ?? (() => Promise.resolve(session)),
       },
-    } as unknown as BetterAuthAuth["api"],
+      handler:
+        input?.handler ??
+        (() =>
+          Promise.resolve(
+            Response.json(
+              {
+                url: "https://github.com/login/oauth/authorize?client_id=test",
+              },
+              {
+                headers: {
+                  location:
+                    "https://github.com/login/oauth/authorize?client_id=test",
+                  "set-cookie":
+                    "__Secure-better-auth.state=test; Path=/; HttpOnly; Secure; SameSite=Lax",
+                },
+              }
+            )
+          )),
+    } as unknown as BetterAuthAuth,
     ...(input?.storedUser || input?.storedOrganization || input?.storedTeam
       ? {
           db: {
@@ -210,6 +229,7 @@ describe("broker Hack session auth flow", () => {
           email: null,
           emailVerified: null,
           name: null,
+          image: null,
           organizationId: null,
           teamId: null,
           managementTokenProfileId: "work",
@@ -225,6 +245,7 @@ describe("broker Hack session auth flow", () => {
           email: null,
           emailVerified: null,
           name: null,
+          image: null,
           organizationId: null,
           teamId: null,
           managementTokenProfileId: "work",
@@ -260,7 +281,7 @@ describe("broker Hack session auth flow", () => {
     expect(payload.flow.authorizeUrl).toContain("/auth?");
   });
 
-  test("auth shell completes a session flow for an authenticated session", async () => {
+  test("browser complete route completes a session flow for an authenticated session", async () => {
     await withManagementTokenSecret("session-auth-test-secret", async () => {
       const session = {
         user: {
@@ -294,17 +315,24 @@ describe("broker Hack session auth flow", () => {
         (await startResponse.json()) as SessionStartFlowResponse
       ).flow;
 
-      const accountResponse = await app.handle(
+      const completionResponse = await app.handle(
         new Request(
-          `http://localhost/auth/account?bridge=1&flowId=${encodeURIComponent(
-            startPayload.flowId
-          )}&deviceCode=${encodeURIComponent(startPayload.deviceCode)}`
+          `http://localhost/v1/auth/session/browser/complete?redirect=${encodeURIComponent(
+            `http://localhost:3000/auth/account?flowId=${encodeURIComponent(
+              startPayload.flowId
+            )}&deviceCode=${encodeURIComponent(startPayload.deviceCode)}`
+          )}`
         )
       );
-      expect(accountResponse.status).toBe(200);
-      const completeHtml = await accountResponse.text();
-      expect(completeHtml).toContain("Connected to this Mac.");
-      expect(completeHtml).toContain(">HACK<");
+      expect(completionResponse.status).toBe(302);
+      expect(completionResponse.headers.get("location")).toBe(
+        `http://localhost:3000/auth/account?flowId=${encodeURIComponent(
+          startPayload.flowId
+        )}&deviceCode=${encodeURIComponent(startPayload.deviceCode)}`
+      );
+      expect(completionResponse.headers.get("set-cookie")).toContain(
+        `${HACK_WEB_BROKER_SESSION_COOKIE_NAME}=`
+      );
 
       const pollResponse = await app.handle(
         new Request(
@@ -368,7 +396,7 @@ describe("broker Hack session auth flow", () => {
     });
   });
 
-  test("auth account page auto-returns to the desktop app when a hack redirect is supplied", async () => {
+  test("browser complete route redirects back to the app account page for desktop handoff", async () => {
     await withManagementTokenSecret("session-auth-return-secret", async () => {
       const session = {
         user: {
@@ -403,24 +431,29 @@ describe("broker Hack session auth flow", () => {
       const startPayload = (
         (await startResponse.json()) as SessionStartFlowResponse
       ).flow;
-      const accountResponse = await app.handle(
+      const completionResponse = await app.handle(
         new Request(
-          `http://localhost/auth/account?bridge=1&flowId=${encodeURIComponent(
-            startPayload.flowId
-          )}&deviceCode=${encodeURIComponent(
-            startPayload.deviceCode
-          )}&redirect=${encodeURIComponent("hack://auth/complete")}`
+          `http://localhost/v1/auth/session/browser/complete?redirect=${encodeURIComponent(
+            `http://localhost:3000/auth/account?flowId=${encodeURIComponent(
+              startPayload.flowId
+            )}&deviceCode=${encodeURIComponent(
+              startPayload.deviceCode
+            )}&redirect=${encodeURIComponent("hack://auth/complete")}`
+          )}`
         )
       );
-      const html = await accountResponse.text();
-      expect(html).toContain("Open Hack");
-      expect(html).toContain("hack://auth/complete");
-      expect(html).toContain("Returning to Hack");
-      expect(html).toContain("window.setTimeout");
+      expect(completionResponse.status).toBe(302);
+      expect(completionResponse.headers.get("location")).toBe(
+        `http://localhost:3000/auth/account?flowId=${encodeURIComponent(
+          startPayload.flowId
+        )}&deviceCode=${encodeURIComponent(
+          startPayload.deviceCode
+        )}&redirect=${encodeURIComponent("hack://auth/complete")}`
+      );
     });
   });
 
-  test("auth account page accepts debug deep links and keeps the dark handoff shell", async () => {
+  test("browser complete route preserves debug deep links in the app return URL", async () => {
     const session = {
       user: {
         id: "user-debug",
@@ -452,23 +485,28 @@ describe("broker Hack session auth flow", () => {
     const startPayload = (
       (await startResponse.json()) as SessionStartFlowResponse
     ).flow;
-    const accountResponse = await app.handle(
+    const completionResponse = await app.handle(
       new Request(
-        `http://localhost/auth/account?bridge=1&flowId=${encodeURIComponent(
-          startPayload.flowId
-        )}&deviceCode=${encodeURIComponent(
-          startPayload.deviceCode
-        )}&redirect=${encodeURIComponent("hack-dev://auth/complete")}`
+        `http://localhost/v1/auth/session/browser/complete?redirect=${encodeURIComponent(
+          `http://localhost:3000/auth/account?flowId=${encodeURIComponent(
+            startPayload.flowId
+          )}&deviceCode=${encodeURIComponent(
+            startPayload.deviceCode
+          )}&redirect=${encodeURIComponent("hack-dev://auth/complete")}`
+        )}`
       )
     );
-    const html = await accountResponse.text();
-    expect(html).toContain(">HACK<");
-    expect(html).toContain("Signed in to Hack.");
-    expect(html).toContain("hack-dev://auth/complete");
-    expect(html).not.toContain("Session not found");
+    expect(completionResponse.status).toBe(302);
+    expect(completionResponse.headers.get("location")).toBe(
+      `http://localhost:3000/auth/account?flowId=${encodeURIComponent(
+        startPayload.flowId
+      )}&deviceCode=${encodeURIComponent(
+        startPayload.deviceCode
+      )}&redirect=${encodeURIComponent("hack-dev://auth/complete")}`
+    );
   });
 
-  test("auth account page auto-returns to trusted wildcard web origins from the shared contract", async () => {
+  test("browser complete route preserves trusted wildcard web returns in the app return URL", async () => {
     await withManagementTokenSecret(
       "session-auth-web-return-secret",
       async () => {
@@ -508,25 +546,30 @@ describe("broker Hack session auth flow", () => {
         const startPayload = (
           (await startResponse.json()) as SessionStartFlowResponse
         ).flow;
-        const accountResponse = await app.handle(
+        const completionResponse = await app.handle(
           new Request(
-            `http://localhost/auth/account?bridge=1&flowId=${encodeURIComponent(
-              startPayload.flowId
-            )}&deviceCode=${encodeURIComponent(
-              startPayload.deviceCode
-            )}&redirect=${encodeURIComponent(trustedReturnUrl)}`
+            `http://localhost/v1/auth/session/browser/complete?redirect=${encodeURIComponent(
+              `http://localhost:3000/auth/account?flowId=${encodeURIComponent(
+                startPayload.flowId
+              )}&deviceCode=${encodeURIComponent(
+                startPayload.deviceCode
+              )}&redirect=${encodeURIComponent(trustedReturnUrl)}`
+            )}`
           )
         );
-        const html = await accountResponse.text();
-        expect(html).toContain("Connected to this Mac.");
-        expect(html).toContain(trustedReturnUrl);
-        expect(html).toContain("Returning to Hack");
-        expect(html).toContain("window.setTimeout");
+        expect(completionResponse.status).toBe(302);
+        expect(completionResponse.headers.get("location")).toBe(
+          `http://localhost:3000/auth/account?flowId=${encodeURIComponent(
+            startPayload.flowId
+          )}&deviceCode=${encodeURIComponent(
+            startPayload.deviceCode
+          )}&redirect=${encodeURIComponent(trustedReturnUrl)}`
+        );
       }
     );
   });
 
-  test("auth account page auto-returns to the routed web app when bridge redirect is supplied without a device flow", async () => {
+  test("browser complete route redirects to routed web targets without a device flow", async () => {
     const session = {
       user: {
         id: "user-routed-web",
@@ -556,20 +599,45 @@ describe("broker Hack session auth flow", () => {
 
     const response = await app.handle(
       new Request(
-        `https://auth.hack-cli.hack/auth/account?bridge=1&redirect=${encodeURIComponent(
+        `https://auth.hack-cli.hack/v1/auth/session/browser/complete?redirect=${encodeURIComponent(
           "https://hack-cli.hack/account?org=hack"
         )}`
       )
     );
-    const html = await response.text();
-
-    expect(html).toContain("Signed in to Hack.");
-    expect(html).toContain("https://hack-cli.hack/account?org=hack");
-    expect(html).toContain("Returning to Hack");
-    expect(html).toContain("window.setTimeout");
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe(
+      "https://hack-cli.hack/account?org=hack"
+    );
   });
 
-  test("auth account page sets a shared web session cookie for the account shell", async () => {
+  test("browser start route redirects to the provider and forwards Better Auth state cookies", async () => {
+    const app = createAuthBrokerApp({
+      config: {
+        ...createTestConfig(),
+        publicBaseUrl: "https://auth.hack-cli.hack",
+        webAppBaseUrl: "https://hack-cli.hack",
+      },
+      flowStore: new FlowStore(),
+      betterAuthRuntime: createBetterAuthRuntimeWithSession(null),
+    });
+
+    const response = await app.handle(
+      new Request(
+        `https://auth.hack-cli.hack/v1/auth/session/browser/start?provider=github&redirect=${encodeURIComponent(
+          "https://hack-cli.hack/auth/account"
+        )}`
+      )
+    );
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toContain(
+      "https://github.com/login/oauth/authorize"
+    );
+    expect(response.headers.get("set-cookie")).toContain(
+      "__Secure-better-auth.state="
+    );
+  });
+
+  test("browser complete route sets a shared web session cookie for the app shell", async () => {
     await withManagementTokenSecret(
       "session-auth-web-cookie-secret",
       async () => {
@@ -603,7 +671,9 @@ describe("broker Hack session auth flow", () => {
         });
 
         const response = await app.handle(
-          new Request("https://auth.hack-cli.hack/auth/account?bridge=1")
+          new Request(
+            "https://auth.hack-cli.hack/v1/auth/session/browser/complete?redirect=https%3A%2F%2Fhack-cli.hack%2Fauth%2Faccount"
+          )
         );
 
         const cookieHeader = response.headers.get("set-cookie");
@@ -798,9 +868,11 @@ describe("broker Hack session auth flow", () => {
 
       await app.handle(
         new Request(
-          `http://localhost/auth/account?bridge=1&flowId=${encodeURIComponent(
-            startPayload.flowId
-          )}&deviceCode=${encodeURIComponent(startPayload.deviceCode)}`
+          `http://localhost/v1/auth/session/browser/complete?redirect=${encodeURIComponent(
+            `http://localhost:3000/auth/account?flowId=${encodeURIComponent(
+              startPayload.flowId
+            )}&deviceCode=${encodeURIComponent(startPayload.deviceCode)}`
+          )}`
         )
       );
 

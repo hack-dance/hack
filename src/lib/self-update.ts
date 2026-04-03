@@ -1,4 +1,4 @@
-import { mkdir, readdir, rename, rm } from "node:fs/promises";
+import { lstat, mkdir, readdir, readlink, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -9,6 +9,12 @@ import { execOrThrow } from "./shell.ts";
 
 const DEFAULT_REPO_OWNER = "hack-dance" as const;
 const DEFAULT_REPO_NAME = "hack" as const;
+const HOMEBREW_PREFIXES = ["/opt/homebrew", "/usr/local"] as const;
+const LINUXBREW_HOME_MARKERS = [
+  "/.linuxbrew/bin/hack",
+  "/.linuxbrew/Cellar/hack/",
+  "/.linuxbrew/opt/hack/",
+] as const;
 
 export const DEV_WRAPPER_MARKER = "hack-cli local-dev shim" as const;
 const DEV_WRAPPER_SHEBANG_PREFIX = "#!" as const;
@@ -87,6 +93,130 @@ export function isDevWrapperShimBytes(bytes: Uint8Array): boolean {
   const head = bytes.slice(0, Math.min(bytes.length, 64 * 1024));
   const text = new TextDecoder("utf-8", { fatal: false }).decode(head);
   return text.includes(DEV_WRAPPER_MARKER);
+}
+
+export type HackInstallState =
+  | { readonly status: "missing" }
+  | {
+      readonly status: "present";
+      readonly kind: "homebrew";
+      readonly path: string;
+      readonly linkTarget?: string;
+    }
+  | {
+      readonly status: "present";
+      readonly kind: "symlink";
+      readonly path: string;
+      readonly linkTarget: string;
+    }
+  | {
+      readonly status: "present";
+      readonly kind: "dev-wrapper";
+      readonly path: string;
+    }
+  | {
+      readonly status: "present";
+      readonly kind: "standalone";
+      readonly path: string;
+    };
+
+export function isHomebrewManagedHackPath(pathRaw: string): boolean {
+  const path = pathRaw.trim();
+  if (path.length === 0) {
+    return false;
+  }
+
+  return HOMEBREW_PREFIXES.some((prefix) => {
+    return (
+      path === `${prefix}/bin/hack` ||
+      path.endsWith(`${prefix}/bin/hack`) ||
+      path.includes(`${prefix}/Cellar/hack/`) ||
+      path.includes(`${prefix}/opt/hack/`)
+    );
+  })
+    ? true
+    : LINUXBREW_HOME_MARKERS.some((marker) => path.includes(marker));
+}
+
+export async function detectHackInstall({
+  path,
+}: {
+  readonly path: string;
+}): Promise<HackInstallState> {
+  const stat = await lstat(path).catch(() => null);
+  if (!stat) {
+    return { status: "missing" };
+  }
+
+  if (stat.isSymbolicLink()) {
+    const linkTargetRaw = await readlink(path).catch(() => null);
+    if (!linkTargetRaw) {
+      return {
+        status: "present",
+        kind: "symlink",
+        path,
+        linkTarget: path,
+      };
+    }
+
+    const linkTarget = resolve(dirname(path), linkTargetRaw);
+    if (
+      isHomebrewManagedHackPath(path) ||
+      isHomebrewManagedHackPath(linkTarget)
+    ) {
+      return {
+        status: "present",
+        kind: "homebrew",
+        path,
+        linkTarget,
+      };
+    }
+
+    return {
+      status: "present",
+      kind: "symlink",
+      path,
+      linkTarget,
+    };
+  }
+
+  if (isHomebrewManagedHackPath(path)) {
+    return {
+      status: "present",
+      kind: "homebrew",
+      path,
+    };
+  }
+
+  const file = Bun.file(path);
+  const prefixBuf = await file
+    .slice(0, 2)
+    .arrayBuffer()
+    .catch(() => null);
+  if (prefixBuf) {
+    const prefix = new Uint8Array(prefixBuf);
+    const isShebang =
+      prefix.length === 2 && prefix[0] === 0x23 && prefix[1] === 0x21;
+    if (isShebang) {
+      const headBuf = await file
+        .slice(0, 64 * 1024)
+        .arrayBuffer()
+        .catch(() => null);
+      if (headBuf && isDevWrapperShimBytes(new Uint8Array(headBuf))) {
+        return {
+          status: "present",
+          kind: "dev-wrapper",
+          path,
+        };
+      }
+    }
+  }
+
+  return {
+    status: "present",
+    kind: "standalone",
+    path,
+  };
 }
 
 export function normalizeTag(tagRaw: string): string {

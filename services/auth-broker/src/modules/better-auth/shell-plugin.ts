@@ -43,6 +43,13 @@ const BetterAuthShellModel = {
     deviceCode: t.String(),
     claim: t.Optional(t.String()),
   }),
+  browserStartQuery: t.Object({
+    provider: t.String(),
+    redirect: t.Optional(t.String()),
+  }),
+  browserCompleteQuery: t.Object({
+    redirect: t.Optional(t.String()),
+  }),
   authPageQuery: t.Object({
     flowId: t.Optional(t.String()),
     deviceCode: t.Optional(t.String()),
@@ -53,6 +60,7 @@ const BetterAuthShellModel = {
     bridge: t.Optional(t.String()),
     flowId: t.Optional(t.String()),
     deviceCode: t.Optional(t.String()),
+    provider: t.Optional(t.String()),
     redirect: t.Optional(t.String()),
   }),
 } as const;
@@ -68,6 +76,7 @@ type BrowserSessionUser = {
   readonly email: string | null;
   readonly emailVerified: boolean;
   readonly name: string | null;
+  readonly image: string | null;
   readonly organizationId: string | null;
   readonly teamId: string | null;
 };
@@ -294,6 +303,7 @@ export function createBetterAuthShellPlugin({
               id: sessionUser.id,
               email: sessionUser.email,
               name: sessionUser.name,
+              image: sessionUser.image,
               emailVerified: sessionUser.emailVerified,
             }
           : null,
@@ -305,6 +315,105 @@ export function createBetterAuthShellPlugin({
         accountPath: "/auth/account",
       } as const;
     })
+    .get(
+      "/v1/auth/session/browser/start",
+      async ({ query, set }) => {
+        if (!(runtime.enabled && runtime.auth)) {
+          set.status = 503;
+          return {
+            ok: false,
+            error: runtime.reason ?? "Better Auth is not configured.",
+          } as const;
+        }
+        try {
+          await ensureBetterAuthRuntimeReady(runtime);
+        } catch (error) {
+          set.status = 503;
+          return {
+            ok: false,
+            error: "better_auth_storage_unavailable",
+            message: error instanceof Error ? error.message : String(error),
+          } as const;
+        }
+
+        const socialProviders = getSocialProviders({ runtime });
+        const providerId = normalizeProviderId({
+          value: query.provider,
+          providers: socialProviders,
+        });
+        if (!providerId) {
+          set.status = 400;
+          return {
+            ok: false,
+            error: "provider_not_supported",
+            socialProviders,
+          } as const;
+        }
+
+        const redirectUrl =
+          normalizeSafeReturnUrl({
+            value: query.redirect,
+            publicBaseUrl: config.publicBaseUrl,
+            webAppBaseUrl,
+            trustedOrigins: runtime.contract?.trustedOrigins ?? [],
+          }) ?? buildAccountPageUrl({ baseUrl: webAppBaseUrl });
+
+        const signInResponse = await startBetterAuthBrowserSignIn({
+          runtime,
+          publicBaseUrl: config.publicBaseUrl,
+          providerId,
+          callbackUrl: buildBrowserSessionCompleteUrl({
+            baseUrl: config.publicBaseUrl,
+            redirectUrl,
+          }),
+        });
+
+        return buildBrowserRedirectFromSignInResponse({
+          response: signInResponse,
+        });
+      },
+      {
+        query: BetterAuthShellModel.browserStartQuery,
+      }
+    )
+    .get(
+      "/v1/auth/session/browser/complete",
+      async ({ query, request }) => {
+        const redirectUrl =
+          normalizeSafeReturnUrl({
+            value: query.redirect,
+            publicBaseUrl: config.publicBaseUrl,
+            webAppBaseUrl,
+            trustedOrigins: runtime.contract?.trustedOrigins ?? [],
+          }) ?? buildAccountPageUrl({ baseUrl: webAppBaseUrl });
+        const browserSession = await resolveBrowserSessionFromRequest({
+          runtime,
+          request,
+        });
+        const webSessionCookie = buildWebBrokerSessionCookie({
+          browserSession,
+          webAppBaseUrl,
+          requestUrl: request.url,
+        });
+        const completionTarget = buildBrowserCompletionRedirectTarget({
+          redirectUrl,
+          browserSession,
+          config,
+          flowStore,
+        });
+
+        return new Response(null, {
+          status: 302,
+          headers: {
+            location: completionTarget,
+            ...(webSessionCookie ? { "set-cookie": webSessionCookie } : {}),
+          },
+        });
+      },
+      {
+        query: BetterAuthShellModel.browserCompleteQuery,
+      }
+    )
     .get(
       "/auth",
       ({ query }) => {
@@ -331,142 +440,24 @@ export function createBetterAuthShellPlugin({
     )
     .get(
       "/auth/account",
-      async ({ query, request }) => {
-        if (!isTruthy(query.bridge)) {
-          const returnUrl = normalizeSafeReturnUrl({
-            value: query.redirect,
-            publicBaseUrl: config.publicBaseUrl,
-            webAppBaseUrl,
-            trustedOrigins: runtime.contract?.trustedOrigins ?? [],
-          });
-          return Response.redirect(
-            buildAccountPageUrl({
-              baseUrl: webAppBaseUrl,
-              flowId: query.flowId,
-              deviceCode: query.deviceCode,
-              returnUrl,
-            }),
-            302
-          );
-        }
-        const socialProviders = getSocialProviders({ runtime });
+      ({ query }) => {
         const returnUrl = normalizeSafeReturnUrl({
           value: query.redirect,
           publicBaseUrl: config.publicBaseUrl,
           webAppBaseUrl,
           trustedOrigins: runtime.contract?.trustedOrigins ?? [],
         });
-        if (!(runtime.enabled && runtime.auth)) {
-          return renderHtmlPage({
-            title: "Hack account unavailable",
-            heading: "Hack account unavailable",
-            subtitle: "This browser cannot finish the Hack session right now.",
-            body: renderStateCard({
-              eyebrow: "Auth unavailable",
-              title: "Hack auth is not configured",
-              body:
-                runtime.reason ??
-                "The auth broker is missing Better Auth configuration.",
-              tone: "muted",
-            }),
-          });
-        }
-        try {
-          await ensureBetterAuthRuntimeReady(runtime);
-        } catch (error) {
-          return renderHtmlPage({
-            title: "Hack account unavailable",
-            heading: "Hack account unavailable",
-            subtitle: "This browser cannot finish the Hack session right now.",
-            body: renderLifecycleMessage({
-              eyebrow: "Unavailable",
-              title: "Auth storage is unavailable",
-              body: escapeHtml(
-                error instanceof Error ? error.message : String(error)
-              ),
-              tone: "danger",
-            }),
-          });
-        }
-
-        const rawSession = await runtime.auth.api.getSession({
-          headers: request.headers,
-        });
-        const resolvedSession = await resolveBetterAuthSession({
-          runtime,
-          request,
-        });
-        const browserSession = toBrowserSessionUser({
-          session: rawSession,
-          fallbackSession: resolvedSession.session,
-        });
-        const lifecycle = maybeCompleteSessionFlow({
-          config,
-          flowStore,
-          browserSession,
-          flowId: query.flowId,
-          deviceCode: query.deviceCode,
-          returnUrl,
-        });
-        const webSessionCookie = buildWebBrokerSessionCookie({
-          browserSession,
-          webAppBaseUrl,
-          requestUrl: request.url,
-        });
-        return renderHtmlPage({
-          title: "Hack account",
-          brand: "HACK",
-          theme: "handoff",
-          heading: undefined,
-          subtitle: resolvedSession.session
-            ? "Signed in to Hack."
-            : "Sign in to Hack.",
-          body: renderAccountBody({
-            session: resolvedSession.session,
-            socialProviders,
-            lifecycle,
-            accountPageUrl: buildAccountPageUrl({
-              baseUrl: config.publicBaseUrl,
-              bridge: true,
-              flowId: query.flowId,
-              deviceCode: query.deviceCode,
-              returnUrl,
-            }),
-          }),
-          script: resolvedSession.session
-            ? [
-                renderProviderActionScript({
-                  callbackUrl: buildAccountPageUrl({
-                    baseUrl: config.publicBaseUrl,
-                    bridge: true,
-                    flowId: query.flowId,
-                    deviceCode: query.deviceCode,
-                    returnUrl,
-                  }),
-                  mode: "link",
-                }),
-                renderBridgeSessionAutoReturnScript({
-                  session: resolvedSession.session,
-                  lifecycle,
-                  returnUrl,
-                }),
-                renderLifecycleAutoReturnScript({
-                  lifecycle,
-                }),
-              ]
-                .filter(Boolean)
-                .join("\n")
-            : renderLifecycleAutoReturnScript({
-                lifecycle,
-              }) || undefined,
-          ...(webSessionCookie
-            ? {
-                headers: {
-                  "set-cookie": webSessionCookie,
-                },
-              }
-            : {}),
-        });
+        return Response.redirect(
+          isTruthy(query.bridge) && returnUrl
+            ? returnUrl
+            : buildAccountPageUrl({
+                baseUrl: webAppBaseUrl,
+                flowId: query.flowId,
+                deviceCode: query.deviceCode,
+                returnUrl,
+              }),
+          302
+        );
       },
       {
         query: BetterAuthShellModel.accountPageQuery,
@@ -487,6 +478,136 @@ function getAccountLinkingPolicy(input: {
     input.runtime.contract?.accountLinkingPolicy ??
     DEFAULT_BETTER_AUTH_ACCOUNT_LINKING_POLICY
   );
+}
+
+async function resolveBrowserSessionFromRequest(input: {
+  readonly runtime: BetterAuthRuntime;
+  readonly request: Request;
+}): Promise<BrowserSessionUserCandidate | null> {
+  if (!(input.runtime.enabled && input.runtime.auth)) {
+    return null;
+  }
+  try {
+    await ensureBetterAuthRuntimeReady(input.runtime);
+  } catch {
+    return null;
+  }
+
+  const rawSession = await input.runtime.auth.api.getSession({
+    headers: input.request.headers,
+  });
+  const resolvedSession = await resolveBetterAuthSession({
+    runtime: input.runtime,
+    request: input.request,
+  });
+  return toBrowserSessionUser({
+    session: rawSession,
+    fallbackSession: resolvedSession.session,
+  });
+}
+
+function startBetterAuthBrowserSignIn(input: {
+  readonly runtime: BetterAuthRuntime;
+  readonly publicBaseUrl: string;
+  readonly providerId: string;
+  readonly callbackUrl: string;
+}): Promise<Response> {
+  if (!(input.runtime.enabled && input.runtime.auth)) {
+    return Promise.resolve(
+      Response.json(
+        {
+          ok: false,
+          error: input.runtime.reason ?? "Better Auth is not configured.",
+        },
+        { status: 503 }
+      )
+    );
+  }
+
+  return input.runtime.auth.handler(
+    new Request(
+      new URL(
+        "/api/auth/sign-in/social",
+        resolvePageBaseUrl(input.publicBaseUrl)
+      ).toString(),
+      {
+        method: "POST",
+        headers: {
+          accept: "application/json",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          provider: input.providerId,
+          callbackURL: input.callbackUrl,
+        }),
+      }
+    )
+  );
+}
+
+async function buildBrowserRedirectFromSignInResponse(input: {
+  readonly response: Response;
+}): Promise<Response> {
+  const setCookie = input.response.headers.get("set-cookie");
+  const locationHeader = input.response.headers.get("location");
+  if (locationHeader) {
+    return new Response(null, {
+      status: 302,
+      headers: {
+        location: locationHeader,
+        ...(setCookie ? { "set-cookie": setCookie } : {}),
+      },
+    });
+  }
+
+  const rawText = await input.response.text();
+  let redirectUrl: string | null = null;
+  try {
+    const payload = JSON.parse(rawText) as {
+      readonly url?: string;
+    };
+    redirectUrl = normalizeText(payload.url);
+  } catch {
+    redirectUrl = null;
+  }
+
+  if (!redirectUrl) {
+    return new Response(rawText, {
+      status: input.response.status,
+      headers: {
+        "content-type":
+          input.response.headers.get("content-type") ??
+          "application/json; charset=utf-8",
+        ...(setCookie ? { "set-cookie": setCookie } : {}),
+      },
+    });
+  }
+
+  return new Response(null, {
+    status: 302,
+    headers: {
+      location: redirectUrl,
+      ...(setCookie ? { "set-cookie": setCookie } : {}),
+    },
+  });
+}
+
+function buildBrowserCompletionRedirectTarget(input: {
+  readonly redirectUrl: string;
+  readonly browserSession: BrowserSessionUserCandidate | null;
+  readonly config: BrokerConfig;
+  readonly flowStore: FlowStore;
+}): string {
+  const redirectTarget = new URL(input.redirectUrl);
+  maybeCompleteSessionFlow({
+    config: input.config,
+    flowStore: input.flowStore,
+    browserSession: input.browserSession,
+    flowId: redirectTarget.searchParams.get("flowId") ?? undefined,
+    deviceCode: redirectTarget.searchParams.get("deviceCode") ?? undefined,
+    returnUrl: redirectTarget.searchParams.get("redirect"),
+  });
+  return redirectTarget.toString();
 }
 
 function maybeCompleteSessionFlow(input: {
@@ -616,6 +737,8 @@ function toBrowserSessionUser(input: {
       null,
     name:
       normalizeText(user?.name) ?? normalizeText(input.fallbackSession?.name),
+    image:
+      normalizeText(user?.image) ?? normalizeText(input.fallbackSession?.image),
     organizationId:
       normalizeText(sessionRecord?.activeOrganizationId) ??
       normalizeText(input.fallbackSession?.organizationId) ??
@@ -671,6 +794,7 @@ async function hydrateBrowserSessionUser(input: {
     email: current?.email ?? storedUser.email,
     emailVerified: current?.emailVerified ?? storedUser.emailVerified,
     name: current?.name ?? storedUser.name,
+    image: current?.image ?? storedUser.image,
     organizationId:
       current?.organizationId ??
       normalizeText(input.fallbackSession?.organizationId),
@@ -718,6 +842,7 @@ async function readUserRecord(input: {
   readonly email: string | null;
   readonly emailVerified: boolean;
   readonly name: string | null;
+  readonly image: string | null;
 } | null> {
   const db = input.runtime.db;
   if (!db) {
@@ -730,6 +855,7 @@ async function readUserRecord(input: {
       email: betterAuthUser.email,
       emailVerified: betterAuthUser.emailVerified,
       name: betterAuthUser.name,
+      image: betterAuthUser.image,
     })
     .from(betterAuthUser)
     .where(eq(betterAuthUser.id, input.userId))
@@ -743,6 +869,7 @@ async function readUserRecord(input: {
     email: normalizeText(record.email),
     emailVerified: record.emailVerified === true,
     name: normalizeText(record.name),
+    image: normalizeText(record.image),
   };
 }
 
@@ -832,6 +959,7 @@ function renderAccountBody(input: {
   >["session"];
   readonly socialProviders: readonly BetterAuthSocialProvider[];
   readonly lifecycle: SessionFlowLifecycle;
+  readonly preferredProviderId: string | null;
   readonly accountPageUrl: string;
 }): string {
   const sessionSummary = input.session
@@ -861,10 +989,15 @@ function renderAccountBody(input: {
     } else {
       linkingCard = [
         `<section class="section">`,
-        renderProviderActionGrid({
-          providers: input.socialProviders,
+        renderAuthLandingPrimarySection({
+          socialProviders: input.socialProviders,
+          primaryProvider: input.preferredProviderId
+            ? (input.socialProviders.find(
+                (provider) => provider.id === input.preferredProviderId
+              ) ?? null)
+            : null,
           callbackUrl: input.accountPageUrl,
-          mode: "sign-in",
+          isDeviceLinked: input.lifecycle.state === "sign_in_required",
         }),
         "</section>",
       ].join("");
@@ -1190,6 +1323,7 @@ function renderProviderMark(input: {
 function renderProviderActionScript(input: {
   readonly callbackUrl: string;
   readonly mode: "sign-in" | "link";
+  readonly autoStartProviderId?: string;
 }): string {
   return `
 const authButtons = [...document.querySelectorAll("[data-auth-provider]")];
@@ -1265,6 +1399,18 @@ async function runAuthAction(button) {
 
 for (const button of authButtons) {
   button.addEventListener("click", () => void runAuthAction(button));
+}
+
+const autoStartProviderId = ${JSON.stringify(input.autoStartProviderId ?? "")};
+if (autoStartProviderId) {
+  const matchingButton = authButtons.find((button) =>
+    button.getAttribute("data-auth-provider") === autoStartProviderId
+  );
+  if (matchingButton) {
+    window.requestAnimationFrame(() => {
+      void runAuthAction(matchingButton);
+    });
+  }
 }
 `;
 }
@@ -1788,6 +1934,14 @@ function renderHtmlPage(input: {
   );
 }
 
+void [
+  renderAccountBody,
+  renderLifecycleAutoReturnScript,
+  renderBridgeSessionAutoReturnScript,
+  renderProviderActionScript,
+  renderHtmlPage,
+];
+
 function buildWebBrokerSessionCookie(input: {
   readonly browserSession: BrowserSessionUserCandidate | null;
   readonly webAppBaseUrl: string;
@@ -1924,6 +2078,7 @@ function buildAccountPageUrl(input: {
   readonly flowId?: string;
   readonly deviceCode?: string;
   readonly returnUrl?: string | null;
+  readonly providerId?: string | null;
 }): string {
   const url = new URL("/auth/account", resolvePageBaseUrl(input.baseUrl));
   if (input.bridge) {
@@ -1935,9 +2090,24 @@ function buildAccountPageUrl(input: {
   if (input.deviceCode) {
     url.searchParams.set("deviceCode", input.deviceCode);
   }
+  if (input.providerId) {
+    url.searchParams.set("provider", input.providerId);
+  }
   if (input.returnUrl) {
     url.searchParams.set("redirect", input.returnUrl);
   }
+  return url.toString();
+}
+
+function buildBrowserSessionCompleteUrl(input: {
+  readonly baseUrl: string;
+  readonly redirectUrl: string;
+}): string {
+  const url = new URL(
+    "/v1/auth/session/browser/complete",
+    resolvePageBaseUrl(input.baseUrl)
+  );
+  url.searchParams.set("redirect", input.redirectUrl);
   return url.toString();
 }
 

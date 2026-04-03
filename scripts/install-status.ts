@@ -1,73 +1,71 @@
 #!/usr/bin/env bun
 
-import { lstat, readlink } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 
-import { readTextFile } from "../src/lib/fs.ts";
+import { detectHackInstall } from "../src/lib/self-update.ts";
 
 const CLI_NAME = "hack";
 const DEFAULT_INSTALL_DIR_RELATIVE = ".hack/bin";
 
 const home = (process.env.HOME ?? "").trim();
 if (home.length === 0) {
-  process.stderr.write(
-    "HOME is not set; cannot determine install directory.\n"
-  );
+  process.stderr.write("HOME is not set; cannot determine install status.\n");
   process.exit(1);
 }
 
-const installDir = resolve(home, DEFAULT_INSTALL_DIR_RELATIVE);
-const targetPath = resolve(installDir, CLI_NAME);
+const defaultTargetPath = resolve(home, DEFAULT_INSTALL_DIR_RELATIVE, CLI_NAME);
+const candidates = resolveCandidatePaths({ defaultTargetPath });
 
-const current = await readCurrentInstall({ targetPath });
-if (current.status === "missing") {
-  process.stdout.write(`No install found at:\n  ${targetPath}\n`);
+for (const candidate of candidates) {
+  const install = await detectHackInstall({ path: candidate });
+  if (install.status === "missing") {
+    continue;
+  }
+
+  if (install.kind === "homebrew") {
+    process.stdout.write("Install mode: homebrew\n");
+    process.stdout.write(`Path: ${install.path}\n`);
+    if (install.linkTarget) {
+      process.stdout.write(`Target: ${install.linkTarget}\n`);
+    }
+    process.exit(0);
+  }
+
+  if (install.kind === "symlink") {
+    process.stdout.write("Install mode: bin (symlink)\n");
+    process.stdout.write(`Path: ${install.path}\n`);
+    process.stdout.write(`Target: ${install.linkTarget}\n`);
+    process.exit(0);
+  }
+
+  if (install.kind === "dev-wrapper") {
+    process.stdout.write("Install mode: dev (wrapper)\n");
+    process.stdout.write(`Path: ${install.path}\n`);
+    process.exit(0);
+  }
+
+  process.stdout.write("Install mode: release (standalone)\n");
+  process.stdout.write(`Path: ${install.path}\n`);
   process.exit(0);
 }
 
-if (current.kind === "symlink") {
-  process.stdout.write("Install mode: bin (symlink)\n");
-  process.stdout.write(`Path: ${targetPath}\n`);
-  process.stdout.write(`Target: ${current.linkTarget}\n`);
-  process.exit(0);
+process.stdout.write("No install found at:\n");
+for (const candidate of candidates) {
+  process.stdout.write(`  ${candidate}\n`);
 }
-
-const isDevWrapper = current.content.includes("hack-cli local-dev shim");
-process.stdout.write(
-  `Install mode: ${isDevWrapper ? "dev (wrapper)" : "file (unknown)"}\n`
-);
-process.stdout.write(`Path: ${targetPath}\n`);
 process.exit(0);
 
-type CurrentInstall =
-  | { readonly status: "missing" }
-  | {
-      readonly status: "present";
-      readonly kind: "symlink";
-      readonly linkTarget: string;
-    }
-  | {
-      readonly status: "present";
-      readonly kind: "file";
-      readonly content: string;
-    };
-
-async function readCurrentInstall({
-  targetPath,
+function resolveCandidatePaths({
+  defaultTargetPath,
 }: {
-  readonly targetPath: string;
-}): Promise<CurrentInstall> {
-  try {
-    const stat = await lstat(targetPath);
-    if (stat.isSymbolicLink()) {
-      const linkTargetRaw = await readlink(targetPath);
-      const linkTarget = resolve(dirname(targetPath), linkTargetRaw);
-      return { status: "present", kind: "symlink", linkTarget };
-    }
-
-    const content = await readTextFile(targetPath);
-    return { status: "present", kind: "file", content: content ?? "" };
-  } catch {
-    return { status: "missing" };
+  readonly defaultTargetPath: string;
+}): string[] {
+  const out: string[] = [];
+  const which = Bun.which(CLI_NAME);
+  if (typeof which === "string" && which.trim().length > 0) {
+    out.push(resolve(which));
   }
+
+  out.push(defaultTargetPath);
+  return [...new Set(out)];
 }

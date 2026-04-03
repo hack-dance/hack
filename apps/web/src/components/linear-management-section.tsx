@@ -1,6 +1,6 @@
-import type { AccountControlPlaneFeedback } from "@/src/lib/account-control-plane";
-import type { LinearManagementState } from "@/src/lib/linear-management";
-import { cn } from "@/src/lib/utils";
+import type { AccountControlPlaneFeedback } from "@/lib/account-control-plane";
+import type { LinearManagementState } from "@/lib/linear-management";
+import { cn } from "@/lib/utils";
 
 const sectionSurfaceClassName = cn(
   "rounded-3xl border border-white/10 bg-white/[0.04] shadow-[0_24px_80px_rgba(15,23,42,0.24)]",

@@ -1638,6 +1638,10 @@ Runs a host command with injected env. Default target is `host`, which applies t
 view and any `host` scope overrides. Use `--target compose` to preserve the container-oriented
 compose view.
 
+If you are checking a variable value, prefer `printenv KEY` or
+`sh -lc 'printf "%s\n" "$KEY"'`. `hack env exec -- echo $KEY` expands `$KEY` in your current shell
+before Hack injects the env.
+
 Options:
 
 | Flag | Type | Default | Description |
@@ -1710,6 +1714,10 @@ Usage: `hack host exec [options] <command...>`
 Runs a host command with injected env. Default target is `host`, which applies the host-local env
 view and any `host` scope overrides. Use `--target compose` to preserve the container-oriented
 compose view while still running on the host.
+
+If you are checking a variable value, prefer `printenv KEY` or
+`sh -lc 'printf "%s\n" "$KEY"'`. `hack host exec -- echo $KEY` expands `$KEY` in your current shell
+before Hack injects the env.
 
 Options:
 

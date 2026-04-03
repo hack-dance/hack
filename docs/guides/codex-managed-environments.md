@@ -94,7 +94,10 @@ hack host exec --env qa --scope api --target compose -- bun test
 
 `hack host exec` and `hack host shell` default to a host-local env view for host commands. Use
 `--scope` when you want service-scoped values without running inside that service container. Use
-`--target compose` when you explicitly want the container-oriented compose view instead.
+`--target compose` when you explicitly want the container-oriented compose view instead. If you are
+checking a value, prefer `hack host exec -- printenv KEY` or
+`hack host exec -- sh -lc 'printf "%s\n" "$KEY"'`; plain `echo $KEY` expands in the parent shell
+before Hack injects env.
 
 ## Not available in slim mode
 

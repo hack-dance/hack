@@ -188,7 +188,7 @@ const execSpec = defineCommand({
   summary: "Run a host command with project env injected",
   group: "Project",
   description:
-    "Inject the selected Hack env overlay directly into a one-off host command without materializing .hack/.env.",
+    'Inject the selected Hack env overlay directly into a one-off host command without materializing .hack/.env. To inspect a value, prefer `printenv KEY` or `sh -lc \'printf "%s\\n" "$KEY"\'`; `echo $KEY` expands in your current shell before Hack injects env.',
   options: [optPath, optProject, optEnv, optService, optTarget],
   positionals: [{ name: "command", required: true, multiple: true }],
   subcommands: [],
@@ -210,7 +210,7 @@ const hostExecSpec = defineCommand({
   summary: "Run a host command with project env injected",
   group: "Project",
   description:
-    "Run a one-off command on the host with the selected Hack env overlay injected. Use --scope when you want service-scoped values without running inside that service container.",
+    'Run a one-off command on the host with the selected Hack env overlay injected. Use --scope when you want service-scoped values without running inside that service container. To inspect a value, prefer `printenv KEY` or `sh -lc \'printf "%s\\n" "$KEY"\'`; `echo $KEY` expands in your current shell before Hack injects env.',
   options: [optPath, optProject, optEnv, optScope, optTarget],
   positionals: [{ name: "command", required: true, multiple: true }],
   subcommands: [],

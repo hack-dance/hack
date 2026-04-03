@@ -155,6 +155,58 @@ test("host exec injects scoped env into one-off host commands", async () => {
   });
 });
 
+test("host exec preserves child-shell env expansion patterns", async () => {
+  const projectRoot = await createProject();
+  const execCommand = findHostSubcommand("exec");
+
+  const input = {
+    ctx: {
+      cwd: projectRoot,
+      cli: CLI_SPEC,
+    },
+    args: {
+      options: {
+        path: projectRoot,
+        project: undefined,
+        env: "qa",
+        scope: "api",
+        target: undefined,
+      },
+      positionals: {
+        command: ["sh", "-lc", 'printf "%s\\n" "$SERVICE_TOKEN"'],
+      },
+      raw: {
+        argv: [
+          "--path",
+          projectRoot,
+          "--env",
+          "qa",
+          "--scope",
+          "api",
+          "sh",
+          "-lc",
+          'printf "%s\\n" "$SERVICE_TOKEN"',
+        ],
+        positionals: ["sh", "-lc", 'printf "%s\\n" "$SERVICE_TOKEN"'],
+      },
+    },
+  } as unknown as Parameters<typeof execCommand.handler>[0];
+
+  const exitCode = await execCommand.handler(input);
+
+  expect(exitCode).toBe(0);
+  expect(runCalls).toHaveLength(1);
+  expect(runCalls[0]).toEqual({
+    cmd: ["sh", "-lc", 'printf "%s\\n" "$SERVICE_TOKEN"'],
+    cwd: projectRoot,
+    env: {
+      API_BASE_URL: "https://qa.example.com",
+      GLOBAL_FLAG: "base",
+      SERVICE_TOKEN: "overlay-secret",
+    },
+  });
+});
+
 test("env shell opens the current shell with injected project env", async () => {
   const projectRoot = await createProject();
   process.env.SHELL = "/bin/zsh";
@@ -231,6 +283,65 @@ test("host shell opens the current shell with injected project env", async () =>
     env: {
       API_BASE_URL: "https://qa.example.com",
       GLOBAL_FLAG: "base",
+    },
+  });
+});
+
+test("host shell can inject scoped env and local Hack CA trust", async () => {
+  const projectRoot = await createProject();
+  const homeRoot = await mkdtemp(join(tmpdir(), "hack-home-"));
+  tempDirs.add(homeRoot);
+  process.env.HOME = homeRoot;
+  process.env.SHELL = "/bin/zsh";
+
+  const caDir = resolve(homeRoot, ".hack", "caddy", "pki");
+  await mkdir(caDir, { recursive: true });
+  await writeFile(resolve(caDir, "caddy-local-authority.crt"), "local-ca\n");
+  await writeFile(
+    resolve(caDir, "caddy-host-trust-bundle.pem"),
+    "system-ca\nlocal-ca\n"
+  );
+
+  const shellCommand = findHostSubcommand("shell");
+  const input = {
+    ctx: {
+      cwd: projectRoot,
+      cli: CLI_SPEC,
+    },
+    args: {
+      options: {
+        path: projectRoot,
+        project: undefined,
+        env: "qa",
+        scope: "api",
+        target: undefined,
+      },
+      positionals: {},
+      raw: {
+        argv: ["--path", projectRoot, "--env", "qa", "--scope", "api"],
+        positionals: [],
+      },
+    },
+  } as unknown as Parameters<typeof shellCommand.handler>[0];
+
+  const exitCode = await shellCommand.handler(input);
+
+  expect(exitCode).toBe(0);
+  expect(runCalls).toHaveLength(1);
+  expect(runCalls[0]).toEqual({
+    cmd: ["/bin/zsh", "-l"],
+    cwd: projectRoot,
+    env: {
+      API_BASE_URL: "https://qa.example.com",
+      CURL_CA_BUNDLE: resolve(caDir, "caddy-host-trust-bundle.pem"),
+      GIT_SSL_CAINFO: resolve(caDir, "caddy-host-trust-bundle.pem"),
+      GLOBAL_FLAG: "base",
+      HACK_HOST_TRUST_BUNDLE: resolve(caDir, "caddy-host-trust-bundle.pem"),
+      HACK_LOCAL_CA_CERT: resolve(caDir, "caddy-local-authority.crt"),
+      NODE_EXTRA_CA_CERTS: resolve(caDir, "caddy-local-authority.crt"),
+      REQUESTS_CA_BUNDLE: resolve(caDir, "caddy-host-trust-bundle.pem"),
+      SERVICE_TOKEN: "overlay-secret",
+      SSL_CERT_FILE: resolve(caDir, "caddy-host-trust-bundle.pem"),
     },
   });
 });

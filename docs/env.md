@@ -169,6 +169,19 @@ hack host exec --env qa --scope api -- bun db:migrate
 hack host exec --env qa --scope api --target compose -- bun test
 ```
 
+When you want to inspect an injected value, avoid `hack env exec -- echo $VAR` or
+`hack host exec -- echo $VAR`. Your current shell expands `$VAR` before Hack starts the child
+process, so the command often sees an empty string.
+
+Use one of these instead:
+
+```bash
+hack env exec -- printenv APPLE_TEAM_ID
+hack env exec -- sh -lc 'printf "%s\n" "$APPLE_TEAM_ID"'
+hack host exec -- printenv APPLE_TEAM_ID
+hack host exec -- sh -lc 'printf "%s\n" "$APPLE_TEAM_ID"'
+```
+
 Open a host shell with injected env:
 
 ```bash

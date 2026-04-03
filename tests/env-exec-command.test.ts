@@ -595,6 +595,74 @@ test("env exec can preserve the compose view when requested", async () => {
   });
 });
 
+test("env exec compose target still adds local Hack CA trust for host runtimes", async () => {
+  const projectRoot = await createProject({
+    defaultYaml: [
+      "version: 1",
+      "environment: default",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      '    DATABASE_URL: "mysql://appuser:secret@host.docker.internal:3306/app?ssl={\\"rejectUnauthorized\\":false}"',
+      '    REDISHOST: "redis"',
+      "",
+    ].join("\n"),
+  });
+  const homeRoot = await mkdtemp(join(tmpdir(), "hack-home-"));
+  tempDirs.add(homeRoot);
+  process.env.HOME = homeRoot;
+
+  const caDir = resolve(homeRoot, ".hack", "caddy", "pki");
+  await mkdir(caDir, { recursive: true });
+  await writeFile(resolve(caDir, "caddy-local-authority.crt"), "local-ca\n");
+  await writeFile(
+    resolve(caDir, "caddy-host-trust-bundle.pem"),
+    "system-ca\nlocal-ca\n"
+  );
+
+  const execCommand = findSubcommand("exec");
+  const input = {
+    ctx: {
+      cwd: projectRoot,
+      cli: CLI_SPEC,
+    },
+    args: {
+      options: {
+        path: projectRoot,
+        project: undefined,
+        env: undefined,
+        service: undefined,
+        target: "compose",
+        shellCommand: undefined,
+      },
+      positionals: {
+        command: ["env"],
+      },
+      raw: {
+        argv: ["--path", projectRoot, "--target", "compose", "env"],
+        positionals: ["env"],
+      },
+    },
+  } as unknown as Parameters<typeof execCommand.handler>[0];
+
+  const exitCode = await execCommand.handler(input);
+
+  expect(exitCode).toBe(0);
+  expect(runCalls).toHaveLength(1);
+  expect(runCalls[0]?.env).toEqual({
+    CURL_CA_BUNDLE: resolve(caDir, "caddy-host-trust-bundle.pem"),
+    DATABASE_URL:
+      'mysql://appuser:secret@host.docker.internal:3306/app?ssl={"rejectUnauthorized":false}',
+    GIT_SSL_CAINFO: resolve(caDir, "caddy-host-trust-bundle.pem"),
+    HACK_HOST_TRUST_BUNDLE: resolve(caDir, "caddy-host-trust-bundle.pem"),
+    HACK_LOCAL_CA_CERT: resolve(caDir, "caddy-local-authority.crt"),
+    NODE_EXTRA_CA_CERTS: resolve(caDir, "caddy-local-authority.crt"),
+    REDISHOST: "redis",
+    REQUESTS_CA_BUNDLE: resolve(caDir, "caddy-host-trust-bundle.pem"),
+    SSL_CERT_FILE: resolve(caDir, "caddy-host-trust-bundle.pem"),
+  });
+});
+
 test("env exec adds local Hack CA trust for host runtimes when available", async () => {
   const projectRoot = await createProject();
   const homeRoot = await mkdtemp(join(tmpdir(), "hack-home-"));

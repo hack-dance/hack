@@ -677,20 +677,20 @@ function adaptEnvForHostExecution(input: {
   readonly target: (typeof HOST_ENV_TARGET_VALUES)[number];
   readonly serviceNames: readonly string[];
 }): Promise<Record<string, string>> {
-  if (input.target !== "host") {
-    return Promise.resolve({ ...input.env });
+  if (input.target === "host") {
+    const composeServiceNames = new Set(input.serviceNames);
+    const out: Record<string, string> = {};
+    for (const [key, value] of Object.entries(input.env)) {
+      out[key] = rewriteEnvValueForHostExecution({
+        key,
+        value,
+        composeServiceNames,
+      });
+    }
+    return appendHackHostTrustEnvironment(out);
   }
 
-  const composeServiceNames = new Set(input.serviceNames);
-  const out: Record<string, string> = {};
-  for (const [key, value] of Object.entries(input.env)) {
-    out[key] = rewriteEnvValueForHostExecution({
-      key,
-      value,
-      composeServiceNames,
-    });
-  }
-  return appendHackHostTrustEnvironment(out);
+  return appendHackHostTrustEnvironment(input.env);
 }
 
 function rewriteEnvValueForHostExecution(input: {

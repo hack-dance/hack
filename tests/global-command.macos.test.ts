@@ -597,3 +597,85 @@ test("global trust leaves host TLS env unchanged when keychain trust is declined
     ])
   );
 });
+
+test("global trust falls back to an existing exported CA when Caddy is unavailable", async () => {
+  const caddyCompose = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    GLOBAL_CADDY_COMPOSE_FILENAME
+  );
+  await writeComposeFile(caddyCompose);
+
+  const localCaPath = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    "pki",
+    "caddy-local-authority.crt"
+  );
+  await mkdir(dirname(localCaPath), { recursive: true });
+  await writeFile(
+    localCaPath,
+    "-----BEGIN CERTIFICATE-----\nLOCAL\n-----END CERTIFICATE-----\n"
+  );
+
+  execMockResponder = (cmd) => {
+    if (cmd[0] === "docker" && cmd[1] === "info") {
+      return { exitCode: 1, stdout: "", stderr: "down" };
+    }
+    if (
+      cmd[0] === "security" &&
+      cmd[1] === "find-certificate" &&
+      cmd[2] === "-c"
+    ) {
+      return { exitCode: 0, stdout: "already trusted", stderr: "" };
+    }
+    if (
+      cmd[0] === "security" &&
+      cmd[1] === "find-certificate" &&
+      cmd[2] === "-a" &&
+      cmd[3] === "-p"
+    ) {
+      return {
+        exitCode: 0,
+        stdout:
+          "-----BEGIN CERTIFICATE-----\nSYSTEM\n-----END CERTIFICATE-----\n",
+        stderr: "",
+      };
+    }
+    return null;
+  };
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "trust"]);
+
+  const bundlePath = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    "pki",
+    "caddy-host-trust-bundle.pem"
+  );
+  const envScriptPath = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    "pki",
+    "caddy-host-trust-env.sh"
+  );
+
+  expect(code).toBe(0);
+  expect(await Bun.file(bundlePath).text()).toContain("LOCAL");
+  expect(await Bun.file(bundlePath).text()).toContain("SYSTEM");
+  expect(await Bun.file(envScriptPath).text()).toContain("NODE_EXTRA_CA_CERTS");
+  expect(runCalls).toEqual(
+    expect.arrayContaining([
+      ["launchctl", "setenv", "NODE_EXTRA_CA_CERTS", localCaPath],
+      ["launchctl", "setenv", "SSL_CERT_FILE", bundlePath],
+    ])
+  );
+  expect(runCalls).not.toEqual(
+    expect.arrayContaining([expect.arrayContaining(["docker", "cp"])])
+  );
+});

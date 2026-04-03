@@ -2441,8 +2441,22 @@ async function globalTrust(): Promise<number> {
     return 0;
   }
 
-  await ensureDockerRunning();
-  const certPath = await exportCaddyLocalCaCert();
+  const existingCertPath = (await pathExists(resolveHackLocalCaCertPath()))
+    ? resolveHackLocalCaCertPath()
+    : null;
+  let certPath = existingCertPath;
+  const dockerStatus = await exec(["docker", "info"], { stdin: "ignore" });
+  if (dockerStatus.exitCode === 0) {
+    certPath = (await exportCaddyLocalCaCert()) ?? certPath;
+  } else if (certPath) {
+    logger.info({
+      message:
+        "Docker is not running; using the previously exported Caddy Local CA for trust setup.",
+    });
+  } else {
+    await ensureDockerRunning();
+    certPath = (await exportCaddyLocalCaCert()) ?? certPath;
+  }
   if (!certPath) {
     return 1;
   }

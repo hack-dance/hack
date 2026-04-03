@@ -178,8 +178,10 @@ Use one of these instead:
 ```bash
 hack env exec -- printenv APPLE_TEAM_ID
 hack env exec -- sh -lc 'printf "%s\n" "$APPLE_TEAM_ID"'
+hack env exec --shell 'echo $APPLE_TEAM_ID'
 hack host exec -- printenv APPLE_TEAM_ID
 hack host exec -- sh -lc 'printf "%s\n" "$APPLE_TEAM_ID"'
+hack host exec --shell 'echo $APPLE_TEAM_ID'
 ```
 
 Open a host shell with injected env:

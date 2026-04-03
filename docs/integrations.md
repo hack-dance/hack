@@ -134,7 +134,8 @@ still needs Hack-resolved env. They default to a host-local env view and accept 
 want service-scoped values without running inside that container. Use `--target compose` when you
 explicitly want the raw compose/container-oriented values. When checking a variable, use
 `hack host exec -- printenv KEY` or `hack host exec -- sh -lc 'printf "%s\n" "$KEY"'`; plain
-`echo $KEY` expands before Hack injects env.
+`echo $KEY` expands before Hack injects env. Use `hack host exec --shell 'echo $KEY'` if you want
+Hack to launch the child shell after env injection.
 
 Reference:
 

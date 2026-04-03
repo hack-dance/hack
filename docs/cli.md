@@ -1640,7 +1640,8 @@ compose view.
 
 If you are checking a variable value, prefer `printenv KEY` or
 `sh -lc 'printf "%s\n" "$KEY"'`. `hack env exec -- echo $KEY` expands `$KEY` in your current shell
-before Hack injects the env.
+before Hack injects the env. Use `--shell 'echo $KEY'` when you want Hack to launch the child shell
+after env injection.
 
 Options:
 
@@ -1651,6 +1652,7 @@ Options:
 | `--env <name\|base>` | string | - | Apply an optional env overlay by name |
 | `--service <name>` | string | - | Resolve values for one service scope |
 | `--target <host\|compose>` | string | `host` | Host-local env view for host commands, or raw compose view |
+| `--shell <command>` | string | - | Run a shell command string via `/bin/sh -lc` after env injection |
 
 #### hack env shell
 
@@ -1717,7 +1719,8 @@ compose view while still running on the host.
 
 If you are checking a variable value, prefer `printenv KEY` or
 `sh -lc 'printf "%s\n" "$KEY"'`. `hack host exec -- echo $KEY` expands `$KEY` in your current shell
-before Hack injects the env.
+before Hack injects the env. Use `--shell 'echo $KEY'` when you want Hack to launch the child shell
+after env injection.
 
 Options:
 
@@ -1728,6 +1731,7 @@ Options:
 | `--env <name\|base>` | string | - | Apply an optional env overlay by name |
 | `--scope <name>` | string | - | Resolve values for one env scope while still running on the host |
 | `--target <host\|compose>` | string | `host` | Host-local env view for host commands, or raw compose view |
+| `--shell <command>` | string | - | Run a shell command string via `/bin/sh -lc` after env injection |
 
 #### hack host shell
 

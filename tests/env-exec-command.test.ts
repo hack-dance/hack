@@ -207,6 +207,155 @@ test("host exec preserves child-shell env expansion patterns", async () => {
   });
 });
 
+test("env exec can run a shell command string after env injection", async () => {
+  const projectRoot = await createProject();
+  const execCommand = findSubcommand("exec");
+
+  const input = {
+    ctx: {
+      cwd: projectRoot,
+      cli: CLI_SPEC,
+    },
+    args: {
+      options: {
+        path: projectRoot,
+        project: undefined,
+        env: "qa",
+        service: "api",
+        target: undefined,
+        shellCommand: 'printf "%s\\n" "$SERVICE_TOKEN"',
+      },
+      positionals: {
+        command: [],
+      },
+      raw: {
+        argv: [
+          "--path",
+          projectRoot,
+          "--env",
+          "qa",
+          "--service",
+          "api",
+          "--shell",
+          'printf "%s\\n" "$SERVICE_TOKEN"',
+        ],
+        positionals: [],
+      },
+    },
+  } as unknown as Parameters<typeof execCommand.handler>[0];
+
+  const exitCode = await execCommand.handler(input);
+
+  expect(exitCode).toBe(0);
+  expect(runCalls).toHaveLength(1);
+  expect(runCalls[0]).toEqual({
+    cmd: ["/bin/sh", "-lc", 'printf "%s\\n" "$SERVICE_TOKEN"'],
+    cwd: projectRoot,
+    env: {
+      API_BASE_URL: "https://qa.example.com",
+      GLOBAL_FLAG: "base",
+      SERVICE_TOKEN: "overlay-secret",
+    },
+  });
+});
+
+test("host exec can run a shell command string after env injection", async () => {
+  const projectRoot = await createProject();
+  const execCommand = findHostSubcommand("exec");
+
+  const input = {
+    ctx: {
+      cwd: projectRoot,
+      cli: CLI_SPEC,
+    },
+    args: {
+      options: {
+        path: projectRoot,
+        project: undefined,
+        env: "qa",
+        scope: "api",
+        target: undefined,
+        shellCommand: 'printf "%s\\n" "$SERVICE_TOKEN"',
+      },
+      positionals: {
+        command: [],
+      },
+      raw: {
+        argv: [
+          "--path",
+          projectRoot,
+          "--env",
+          "qa",
+          "--scope",
+          "api",
+          "--shell",
+          'printf "%s\\n" "$SERVICE_TOKEN"',
+        ],
+        positionals: [],
+      },
+    },
+  } as unknown as Parameters<typeof execCommand.handler>[0];
+
+  const exitCode = await execCommand.handler(input);
+
+  expect(exitCode).toBe(0);
+  expect(runCalls).toHaveLength(1);
+  expect(runCalls[0]).toEqual({
+    cmd: ["/bin/sh", "-lc", 'printf "%s\\n" "$SERVICE_TOKEN"'],
+    cwd: projectRoot,
+    env: {
+      API_BASE_URL: "https://qa.example.com",
+      GLOBAL_FLAG: "base",
+      SERVICE_TOKEN: "overlay-secret",
+    },
+  });
+});
+
+test("host exec rejects mixing positional commands with --shell", async () => {
+  const projectRoot = await createProject();
+  const execCommand = findHostSubcommand("exec");
+
+  const input = {
+    ctx: {
+      cwd: projectRoot,
+      cli: CLI_SPEC,
+    },
+    args: {
+      options: {
+        path: projectRoot,
+        project: undefined,
+        env: "qa",
+        scope: "api",
+        target: undefined,
+        shellCommand: 'printf "%s\\n" "$SERVICE_TOKEN"',
+      },
+      positionals: {
+        command: ["printenv", "SERVICE_TOKEN"],
+      },
+      raw: {
+        argv: [
+          "--path",
+          projectRoot,
+          "--env",
+          "qa",
+          "--scope",
+          "api",
+          "--shell",
+          'printf "%s\\n" "$SERVICE_TOKEN"',
+          "printenv",
+          "SERVICE_TOKEN",
+        ],
+        positionals: ["printenv", "SERVICE_TOKEN"],
+      },
+    },
+  } as unknown as Parameters<typeof execCommand.handler>[0];
+
+  await expect(execCommand.handler(input)).rejects.toThrow(
+    "Use either <command...> or --shell, not both."
+  );
+  expect(runCalls).toHaveLength(0);
+});
+
 test("env shell opens the current shell with injected project env", async () => {
   const projectRoot = await createProject();
   process.env.SHELL = "/bin/zsh";

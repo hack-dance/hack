@@ -97,7 +97,8 @@ hack host exec --env qa --scope api --target compose -- bun test
 `--target compose` when you explicitly want the container-oriented compose view instead. If you are
 checking a value, prefer `hack host exec -- printenv KEY` or
 `hack host exec -- sh -lc 'printf "%s\n" "$KEY"'`; plain `echo $KEY` expands in the parent shell
-before Hack injects env.
+before Hack injects env. Use `hack host exec --shell 'echo $KEY'` if you want Hack to start the
+child shell after env injection.
 
 ## Not available in slim mode
 

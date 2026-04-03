@@ -28,12 +28,13 @@ let originalUser: string | undefined;
 let reachabilityByHost: Record<string, boolean> = {};
 let idUser = "mock-user";
 let pathExistsOverrides = new Map<string, boolean>();
+let confirmResponder: (() => boolean) | null = null;
 
 mock.module("@clack/prompts", () => ({
   access: async () => true,
   autocompleteMultiselect: async () => [],
   cancel: () => {},
-  confirm: async () => true,
+  confirm: async () => confirmResponder?.() ?? true,
   multiselect: async () => [],
   isCancel: () => false,
   log: {
@@ -183,6 +184,7 @@ beforeEach(async () => {
   ]);
   reachabilityByHost = {};
   idUser = "mock-user";
+  confirmResponder = null;
 });
 
 afterEach(async () => {
@@ -218,6 +220,15 @@ async function prepareManagedTools(root: string): Promise<void> {
 async function readDnsmasqConf(root: string): Promise<string> {
   const dnsmasqConf = join(root, "brew-prefix", "etc", "dnsmasq.conf");
   return await Bun.file(dnsmasqConf).text();
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await Bun.file(path).stat();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function writeComposeFile(path: string): Promise<void> {
@@ -510,6 +521,79 @@ test("global trust prepares host runtime trust env for future shells", async () 
       ["launchctl", "setenv", "CURL_CA_BUNDLE", bundlePath],
       ["launchctl", "setenv", "REQUESTS_CA_BUNDLE", bundlePath],
       ["launchctl", "setenv", "GIT_SSL_CAINFO", bundlePath],
+    ])
+  );
+});
+
+test("global trust leaves host TLS env unchanged when keychain trust is declined", async () => {
+  const caddyCompose = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    GLOBAL_CADDY_COMPOSE_FILENAME
+  );
+  await writeComposeFile(caddyCompose);
+  confirmResponder = () => false;
+
+  const localCaPath = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    "pki",
+    "caddy-local-authority.crt"
+  );
+  await mkdir(dirname(localCaPath), { recursive: true });
+  await writeFile(
+    localCaPath,
+    "-----BEGIN CERTIFICATE-----\nLOCAL\n-----END CERTIFICATE-----\n"
+  );
+
+  execMockResponder = (cmd) => {
+    if (
+      cmd[0] === "docker" &&
+      cmd[1] === "compose" &&
+      cmd[2] === "-f" &&
+      cmd[4] === "ps"
+    ) {
+      return { exitCode: 0, stdout: "caddy-123\n", stderr: "" };
+    }
+    return null;
+  };
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "trust"]);
+
+  const bundlePath = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    "pki",
+    "caddy-host-trust-bundle.pem"
+  );
+  const envScriptPath = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    "pki",
+    "caddy-host-trust-env.sh"
+  );
+
+  expect(code).toBe(0);
+  expect(await fileExists(bundlePath)).toBe(false);
+  expect(await fileExists(envScriptPath)).toBe(false);
+  expect(runCalls).toEqual(
+    expect.arrayContaining([
+      [
+        "docker",
+        "cp",
+        "caddy-123:/data/caddy/pki/authorities/local/root.crt",
+        localCaPath,
+      ],
+    ])
+  );
+  expect(runCalls).not.toEqual(
+    expect.arrayContaining([
+      ["launchctl", "setenv", "NODE_EXTRA_CA_CERTS", localCaPath],
     ])
   );
 });

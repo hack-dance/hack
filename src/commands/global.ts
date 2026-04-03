@@ -723,8 +723,10 @@ async function bootstrapMacGlobalInstall(): Promise<void> {
   await ensureMacHackDns({ targetIp: hostDnsTarget });
   const certPath = await exportCaddyLocalCaCert();
   if (certPath) {
-    await ensureMacTrustCaddyLocalCa({ certPath });
-    await configureMacHostTlsTrust({ certPath });
+    const trustReady = await ensureMacTrustCaddyLocalCa({ certPath });
+    if (trustReady) {
+      await configureMacHostTlsTrust({ certPath });
+    }
   }
   await maybeOfferMacRecoverySetup();
 }
@@ -2445,12 +2447,14 @@ async function globalTrust(): Promise<number> {
     return 1;
   }
 
-  await ensureMacTrustCaddyLocalCa({
+  const trustReady = await ensureMacTrustCaddyLocalCa({
     certPath,
   });
-  await configureMacHostTlsTrust({
-    certPath,
-  });
+  if (trustReady) {
+    await configureMacHostTlsTrust({
+      certPath,
+    });
+  }
 
   return 0;
 }
@@ -3050,7 +3054,7 @@ async function ensureMacMkcert(): Promise<void> {
 
 async function ensureMacTrustCaddyLocalCa(input: {
   readonly certPath: string;
-}): Promise<void> {
+}): Promise<boolean> {
   const ok = await confirm({
     message:
       "Trust Caddy Local CA in macOS System keychain? (enables trusted https://*.hack; requires sudo)",
@@ -3060,7 +3064,11 @@ async function ensureMacTrustCaddyLocalCa(input: {
     throw new Error("Canceled");
   }
   if (!ok) {
-    return;
+    logger.info({
+      message:
+        "Skipped macOS System keychain trust; leaving host TLS env unchanged.",
+    });
+    return false;
   }
 
   // Fast-path: already trusted.
@@ -3078,7 +3086,7 @@ async function ensureMacTrustCaddyLocalCa(input: {
     logger.info({
       message: "Caddy Local CA already present in System keychain",
     });
-    return;
+    return true;
   }
 
   logger.step({
@@ -3103,7 +3111,7 @@ async function ensureMacTrustCaddyLocalCa(input: {
     logger.warn({
       message: `Failed to trust Caddy Local CA (exit ${installExit}). You may see HTTPS warnings in the browser.`,
     });
-    return;
+    return false;
   }
 
   logger.success({ message: "Trusted Caddy Local CA (macOS System keychain)" });
@@ -3114,6 +3122,7 @@ async function ensureMacTrustCaddyLocalCa(input: {
     ].join("\n"),
     "TLS"
   );
+  return true;
 }
 
 async function configureMacHostTlsTrust(input: {

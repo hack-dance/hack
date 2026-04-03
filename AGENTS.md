@@ -50,6 +50,21 @@ Never use any types and always default to leveraging generics and smart types to
 - If a change is breaking, mark it explicitly with `!` in the type or scope position and include a `BREAKING CHANGE:` footer explaining the migration impact.
 - If work lands through a squash merge, the PR title must also follow Conventional Commits so release automation can classify it correctly.
 - Before pushing or merging, make sure the final commit history or squash title still preserves the intended release signal.
+- Every PR must make the release decision explicit: should this change trigger a release signal, and if not, why not.
+- If a changeset or equivalent release artifact is expected for that release signal, include it in the same patch instead of leaving the decision to bot feedback.
+
+## Verification Guardrails
+
+- If a change affects `hack run`, `hack exec`, env resolution, runtime-state reconciliation, or lifecycle shell/process semantics, the patch must include both targeted tests and matching docs updates.
+- For env-sensitive command changes, verify the requested env, effective env, cached runtime-state env, and target-service-running matrix instead of a single happy path.
+- For lifecycle changes, verify `sh -c` semantics, process-group cleanup, stale pane/process metadata reconciliation, and interactive stdin behavior.
+- When a semantic contract changes, update the closest durable doc or skill instruction in the same patch so future work starts from the current rules.
+
+## Command Complexity
+
+- Treat `src/commands/project.ts` and `src/commands/global.ts` as complexity-sensitive surfaces.
+- Before adding new branch-heavy logic there, prefer extracting a small helper with a narrow contract and direct tests.
+- Do not grow top-level command handlers when the real change is a decision table, state transition, or reusable readiness check.
 
 <!-- hack:tickets:start -->
 ## Tickets (git-backed)

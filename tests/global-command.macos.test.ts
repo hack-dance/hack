@@ -15,6 +15,11 @@ import {
 
 const runCalls: string[][] = [];
 let runResponder: ((cmd: readonly string[]) => number | null) | null = null;
+let execMockResponder:
+  | ((
+      cmd: readonly string[]
+    ) => { exitCode: number; stdout: string; stderr: string } | null)
+  | null = null;
 
 let tempDir: string | null = null;
 let originalHome: string | undefined;
@@ -22,6 +27,7 @@ let originalLogger: string | undefined;
 let originalUser: string | undefined;
 let reachabilityByHost: Record<string, boolean> = {};
 let idUser = "mock-user";
+let pathExistsOverrides = new Map<string, boolean>();
 
 mock.module("@clack/prompts", () => ({
   access: async () => true,
@@ -65,10 +71,58 @@ mock.module("node:net", () => ({
       },
     };
   },
+  createServer: () => ({
+    close: () => {},
+    listen: () => {},
+    on: () => {},
+  }),
+}));
+
+mock.module("../src/lib/fs.ts", () => ({
+  ensureDir: async (absoluteDir: string) => {
+    await mkdir(absoluteDir, { recursive: true });
+  },
+  ensureGitignoreEntry: async () => ({ changed: false }),
+  pathExists: async (absolutePath: string) => {
+    const override = pathExistsOverrides.get(absolutePath);
+    if (override !== undefined) {
+      return override;
+    }
+    try {
+      await Bun.file(absolutePath).stat();
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  readTextFile: async (absolutePath: string) => {
+    try {
+      return await Bun.file(absolutePath).text();
+    } catch {
+      return null;
+    }
+  },
+  writeTextFile: async (absolutePath: string, content: string) => {
+    await Bun.write(absolutePath, content);
+  },
+  writeTextFileIfChanged: async (absolutePath: string, content: string) => {
+    const existing = await Bun.file(absolutePath)
+      .text()
+      .catch(() => null);
+    if (existing === content) {
+      return { changed: false };
+    }
+    await Bun.write(absolutePath, content);
+    return { changed: true };
+  },
 }));
 
 mock.module("../src/lib/shell.ts", () => ({
   exec: async (cmd: readonly string[]) => {
+    const custom = execMockResponder?.(cmd) ?? null;
+    if (custom) {
+      return custom;
+    }
     if (cmd[0] === "docker" && cmd[1] === "info") {
       return { exitCode: 0, stdout: "", stderr: "" };
     }
@@ -123,6 +177,10 @@ beforeEach(async () => {
   process.env.HACK_LOGGER = "console";
   runCalls.length = 0;
   runResponder = null;
+  execMockResponder = null;
+  pathExistsOverrides = new Map([
+    ["/etc/sudoers.d/dance.hack-dns-recovery", false],
+  ]);
   reachabilityByHost = {};
   idUser = "mock-user";
 });
@@ -361,4 +419,97 @@ test("global up falls back to interactive sudo when stdin is tty but stdout is r
       Object.defineProperty(process.stdout, "isTTY", stdoutDescriptor);
     }
   }
+});
+
+test("global trust prepares host runtime trust env for future shells", async () => {
+  const caddyCompose = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    GLOBAL_CADDY_COMPOSE_FILENAME
+  );
+  await writeComposeFile(caddyCompose);
+
+  const localCaPath = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    "pki",
+    "caddy-local-authority.crt"
+  );
+  await mkdir(dirname(localCaPath), { recursive: true });
+  await writeFile(
+    localCaPath,
+    "-----BEGIN CERTIFICATE-----\nLOCAL\n-----END CERTIFICATE-----\n"
+  );
+
+  execMockResponder = (cmd) => {
+    if (
+      cmd[0] === "docker" &&
+      cmd[1] === "compose" &&
+      cmd[2] === "-f" &&
+      cmd[4] === "ps"
+    ) {
+      return { exitCode: 0, stdout: "caddy-123\n", stderr: "" };
+    }
+    if (
+      cmd[0] === "security" &&
+      cmd[1] === "find-certificate" &&
+      cmd[2] === "-c"
+    ) {
+      return { exitCode: 0, stdout: "already trusted", stderr: "" };
+    }
+    if (
+      cmd[0] === "security" &&
+      cmd[1] === "find-certificate" &&
+      cmd[2] === "-a" &&
+      cmd[3] === "-p"
+    ) {
+      return {
+        exitCode: 0,
+        stdout:
+          "-----BEGIN CERTIFICATE-----\nSYSTEM\n-----END CERTIFICATE-----\n",
+        stderr: "",
+      };
+    }
+    return null;
+  };
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "trust"]);
+
+  const bundlePath = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    "pki",
+    "caddy-host-trust-bundle.pem"
+  );
+  const envScriptPath = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    "pki",
+    "caddy-host-trust-env.sh"
+  );
+
+  expect(code).toBe(0);
+  expect(await Bun.file(bundlePath).text()).toContain("LOCAL");
+  expect(await Bun.file(bundlePath).text()).toContain("SYSTEM");
+  expect(await Bun.file(envScriptPath).text()).toContain("NODE_EXTRA_CA_CERTS");
+  expect(runCalls).toEqual(
+    expect.arrayContaining([
+      [
+        "docker",
+        "cp",
+        "caddy-123:/data/caddy/pki/authorities/local/root.crt",
+        localCaPath,
+      ],
+      ["launchctl", "setenv", "NODE_EXTRA_CA_CERTS", localCaPath],
+      ["launchctl", "setenv", "SSL_CERT_FILE", bundlePath],
+      ["launchctl", "setenv", "CURL_CA_BUNDLE", bundlePath],
+      ["launchctl", "setenv", "REQUESTS_CA_BUNDLE", bundlePath],
+      ["launchctl", "setenv", "GIT_SSL_CAINFO", bundlePath],
+    ])
+  );
 });

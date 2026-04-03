@@ -17,6 +17,7 @@ import {
   resolveHackEnv,
   selectHackEnvValues,
 } from "../lib/hack-env.ts";
+import { appendHackHostTrustEnvironment } from "../lib/local-ca.ts";
 import {
   defaultProjectSlugFromPath,
   findProjectContext,
@@ -1081,10 +1082,12 @@ async function resolveSessionInjectedEnv(opts: {
     serviceNames,
   });
   if (modern) {
-    return selectProjectEnvValues({
-      resolved: modern,
-      scopeName: opts.serviceName,
-    });
+    return await appendHackHostTrustEnvironment(
+      selectProjectEnvValues({
+        resolved: modern,
+        scopeName: opts.serviceName,
+      })
+    );
   }
 
   const resolved = await resolveHackEnv({
@@ -1092,10 +1095,12 @@ async function resolveSessionInjectedEnv(opts: {
     projectName: opts.projectName,
     envName: opts.envName,
   });
-  return selectHackEnvValues({
-    resolved,
-    serviceName: opts.serviceName,
-  });
+  return await appendHackHostTrustEnvironment(
+    selectHackEnvValues({
+      resolved,
+      serviceName: opts.serviceName,
+    })
+  );
 }
 
 async function resolveProjectContextForWorkspace(opts: {

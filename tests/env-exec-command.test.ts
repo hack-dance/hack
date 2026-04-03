@@ -17,6 +17,7 @@ const runCalls: Array<{
   readonly env: Record<string, string> | undefined;
 }> = [];
 const tempDirs = new Set<string>();
+const originalHome = process.env.HOME;
 const originalShell = process.env.SHELL;
 
 mock.module("../src/lib/shell.ts", () => ({
@@ -44,6 +45,7 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
   }
   tempDirs.clear();
+  process.env.HOME = originalHome;
   process.env.SHELL = originalShell;
 });
 
@@ -333,6 +335,71 @@ test("env exec can preserve the compose view when requested", async () => {
   });
 });
 
+test("env exec adds local Hack CA trust for host runtimes when available", async () => {
+  const projectRoot = await createProject();
+  const homeRoot = await mkdtemp(join(tmpdir(), "hack-home-"));
+  tempDirs.add(homeRoot);
+  process.env.HOME = homeRoot;
+
+  const caDir = resolve(homeRoot, ".hack", "caddy", "pki");
+  await mkdir(caDir, { recursive: true });
+  await writeFile(resolve(caDir, "caddy-local-authority.crt"), "local-ca\n");
+  await writeFile(
+    resolve(caDir, "caddy-host-trust-bundle.pem"),
+    "system-ca\nlocal-ca\n"
+  );
+
+  const execCommand = findSubcommand("exec");
+  const input = {
+    ctx: {
+      cwd: projectRoot,
+      cli: CLI_SPEC,
+    },
+    args: {
+      options: {
+        path: projectRoot,
+        project: undefined,
+        env: "qa",
+        service: "api",
+        target: undefined,
+      },
+      positionals: {
+        command: ["bun", "db:migrate"],
+      },
+      raw: {
+        argv: [
+          "--path",
+          projectRoot,
+          "--env",
+          "qa",
+          "--service",
+          "api",
+          "bun",
+          "db:migrate",
+        ],
+        positionals: ["bun", "db:migrate"],
+      },
+    },
+  } as unknown as Parameters<typeof execCommand.handler>[0];
+
+  const exitCode = await execCommand.handler(input);
+
+  expect(exitCode).toBe(0);
+  expect(runCalls).toHaveLength(1);
+  expect(runCalls[0]?.env).toEqual({
+    API_BASE_URL: "https://qa.example.com",
+    CURL_CA_BUNDLE: resolve(caDir, "caddy-host-trust-bundle.pem"),
+    GIT_SSL_CAINFO: resolve(caDir, "caddy-host-trust-bundle.pem"),
+    GLOBAL_FLAG: "base",
+    HACK_HOST_TRUST_BUNDLE: resolve(caDir, "caddy-host-trust-bundle.pem"),
+    HACK_LOCAL_CA_CERT: resolve(caDir, "caddy-local-authority.crt"),
+    NODE_EXTRA_CA_CERTS: resolve(caDir, "caddy-local-authority.crt"),
+    REQUESTS_CA_BUNDLE: resolve(caDir, "caddy-host-trust-bundle.pem"),
+    SERVICE_TOKEN: "overlay-secret",
+    SSL_CERT_FILE: resolve(caDir, "caddy-host-trust-bundle.pem"),
+  });
+});
+
 type EnvSubcommandName = (typeof envCommand.subcommands)[number]["name"];
 type EnvSubcommand<N extends EnvSubcommandName> = Extract<
   (typeof envCommand.subcommands)[number],
@@ -376,6 +443,7 @@ async function createProject(input?: {
   readonly services?: readonly string[];
   readonly defaultYaml?: string;
 }): Promise<string> {
+  await ensureIsolatedHome();
   const root = await mkdtemp(join(tmpdir(), "hack-env-exec-"));
   tempDirs.add(root);
 
@@ -436,4 +504,13 @@ async function createProject(input?: {
   });
 
   return projectRoot;
+}
+
+async function ensureIsolatedHome(): Promise<void> {
+  if (process.env.HOME && process.env.HOME !== originalHome) {
+    return;
+  }
+  const homeRoot = await mkdtemp(join(tmpdir(), "hack-home-"));
+  tempDirs.add(homeRoot);
+  process.env.HOME = homeRoot;
 }

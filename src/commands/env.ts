@@ -36,6 +36,7 @@ import {
   serializeEnvClassificationForJson,
   serializeEnvStorageForJson as serializeEnvStorageForJsonShape,
 } from "../lib/hack-env-status.ts";
+import { appendHackHostTrustEnvironment } from "../lib/local-ca.ts";
 import type { ProjectContext } from "../lib/project.ts";
 import {
   defaultProjectSlugFromPath,
@@ -605,7 +606,7 @@ async function resolveEnvInjection(input: {
       target: input.target,
     });
     return {
-      env: adaptEnvForHostExecution({
+      env: await adaptEnvForHostExecution({
         env,
         target: input.target,
         serviceNames,
@@ -627,7 +628,7 @@ async function resolveEnvInjection(input: {
     composeFile: input.project.composeFile,
   });
   return {
-    env: adaptEnvForHostExecution({
+    env: await adaptEnvForHostExecution({
       env: selectHackEnvValues({
         resolved,
         serviceName: input.serviceName,
@@ -659,9 +660,9 @@ function adaptEnvForHostExecution(input: {
   readonly env: Readonly<Record<string, string>>;
   readonly target: (typeof HOST_ENV_TARGET_VALUES)[number];
   readonly serviceNames: readonly string[];
-}): Record<string, string> {
+}): Promise<Record<string, string>> {
   if (input.target !== "host") {
-    return { ...input.env };
+    return Promise.resolve({ ...input.env });
   }
 
   const composeServiceNames = new Set(input.serviceNames);
@@ -673,7 +674,7 @@ function adaptEnvForHostExecution(input: {
       composeServiceNames,
     });
   }
-  return out;
+  return appendHackHostTrustEnvironment(out);
 }
 
 function rewriteEnvValueForHostExecution(input: {

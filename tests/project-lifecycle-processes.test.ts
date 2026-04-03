@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 
 import {
   collectDescendantProcessGroupIds,
+  mergeLifecycleCommandEnv,
   parseProcessSnapshotOutput,
   resolveLifecycleProcessGroupIdsForTmuxState,
   wrapLifecyclePersistentCommand,
@@ -12,12 +13,14 @@ import {
 import { readLifecycleState } from "../src/lib/lifecycle-runtime.ts";
 
 const tempDirs = new Set<string>();
+const originalHome = process.env.HOME;
 
 afterEach(async () => {
   for (const tempDir of tempDirs) {
     await rm(tempDir, { recursive: true, force: true });
   }
   tempDirs.clear();
+  process.env.HOME = originalHome;
 });
 
 test("readLifecycleState preserves lifecycle pane and process group metadata", async () => {
@@ -150,6 +153,35 @@ test("wrapLifecyclePersistentCommand avoids login-shell execution", () => {
   expect(script).not.toContain(
     'sh -lc "$HACK_LIFECYCLE_COMMAND" >"$fifo" 2>&1 &'
   );
+});
+
+test("mergeLifecycleCommandEnv appends local Hack CA trust for host processes", async () => {
+  const homeRoot = await mkdtemp(join(tmpdir(), "hack-home-"));
+  tempDirs.add(homeRoot);
+  process.env.HOME = homeRoot;
+
+  const caDir = resolve(homeRoot, ".hack", "caddy", "pki");
+  await mkdir(caDir, { recursive: true });
+  await writeFile(resolve(caDir, "caddy-local-authority.crt"), "local-ca\n");
+  await writeFile(
+    resolve(caDir, "caddy-host-trust-bundle.pem"),
+    "system-ca\nlocal-ca\n"
+  );
+
+  const merged = await mergeLifecycleCommandEnv({
+    APP_ENV: "dev",
+  });
+
+  expect(merged).toMatchObject({
+    APP_ENV: "dev",
+    CURL_CA_BUNDLE: resolve(caDir, "caddy-host-trust-bundle.pem"),
+    GIT_SSL_CAINFO: resolve(caDir, "caddy-host-trust-bundle.pem"),
+    HACK_HOST_TRUST_BUNDLE: resolve(caDir, "caddy-host-trust-bundle.pem"),
+    HACK_LOCAL_CA_CERT: resolve(caDir, "caddy-local-authority.crt"),
+    NODE_EXTRA_CA_CERTS: resolve(caDir, "caddy-local-authority.crt"),
+    REQUESTS_CA_BUNDLE: resolve(caDir, "caddy-host-trust-bundle.pem"),
+    SSL_CERT_FILE: resolve(caDir, "caddy-host-trust-bundle.pem"),
+  });
 });
 
 async function createLifecycleProjectDir(): Promise<string> {

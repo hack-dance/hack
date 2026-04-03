@@ -23,6 +23,7 @@ const execInSessionCalls: Array<{
   readonly env: Record<string, string> | undefined;
 }> = [];
 const tempDirs = new Set<string>();
+const originalHome = process.env.HOME;
 let registeredProject: {
   readonly id: string;
   readonly name: string;
@@ -130,6 +131,7 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
   }
   tempDirs.clear();
+  process.env.HOME = originalHome;
 });
 
 afterAll(() => {
@@ -337,6 +339,69 @@ test("session exec treats explicit --service global as an env injection request"
   expect(execInSessionCalls).toHaveLength(0);
 });
 
+test("session start includes local Hack CA trust when available", async () => {
+  const homeRoot = await mkdtemp(join(tmpdir(), "hack-home-"));
+  tempDirs.add(homeRoot);
+  process.env.HOME = homeRoot;
+  const caDir = resolve(homeRoot, ".hack", "caddy", "pki");
+  await mkdir(caDir, { recursive: true });
+  await writeFile(resolve(caDir, "caddy-local-authority.crt"), "local-ca\n");
+  await writeFile(
+    resolve(caDir, "caddy-host-trust-bundle.pem"),
+    "system-ca\nlocal-ca\n"
+  );
+
+  const projectRoot = await createProject();
+  const startCommand = findSubcommand("start");
+  const input = {
+    ctx: {
+      cwd: projectRoot,
+      cli: CLI_SPEC,
+    },
+    args: {
+      options: {
+        up: false,
+        new: false,
+        name: undefined,
+        detach: true,
+        env: "qa",
+        service: "api",
+      },
+      positionals: {
+        project: "session-env-test",
+      },
+      raw: {
+        argv: [
+          "--detach",
+          "--env",
+          "qa",
+          "--service",
+          "api",
+          "session-env-test",
+        ],
+        positionals: ["session-env-test"],
+      },
+    },
+  } as unknown as Parameters<typeof startCommand.handler>[0];
+
+  const exitCode = await startCommand.handler(input);
+
+  expect(exitCode).toBe(0);
+  expect(createSessionCalls).toHaveLength(1);
+  expect(createSessionCalls[0]?.env).toEqual({
+    API_BASE_URL: "https://qa.example.com",
+    CURL_CA_BUNDLE: resolve(caDir, "caddy-host-trust-bundle.pem"),
+    GIT_SSL_CAINFO: resolve(caDir, "caddy-host-trust-bundle.pem"),
+    GLOBAL_FLAG: "base",
+    HACK_HOST_TRUST_BUNDLE: resolve(caDir, "caddy-host-trust-bundle.pem"),
+    HACK_LOCAL_CA_CERT: resolve(caDir, "caddy-local-authority.crt"),
+    NODE_EXTRA_CA_CERTS: resolve(caDir, "caddy-local-authority.crt"),
+    REQUESTS_CA_BUNDLE: resolve(caDir, "caddy-host-trust-bundle.pem"),
+    SERVICE_TOKEN: "overlay-secret",
+    SSL_CERT_FILE: resolve(caDir, "caddy-host-trust-bundle.pem"),
+  });
+});
+
 test("session start accepts compose-compatible service scope names", async () => {
   const projectRoot = await createProject();
   const startCommand = findSubcommand("start");
@@ -411,6 +476,7 @@ function findSubcommand<N extends SessionSubcommandName>(
 }
 
 async function createProject(): Promise<string> {
+  await ensureIsolatedHome();
   const root = await mkdtemp(join(tmpdir(), "hack-session-env-"));
   tempDirs.add(root);
 
@@ -481,4 +547,13 @@ async function createProject(): Promise<string> {
   };
 
   return projectRoot;
+}
+
+async function ensureIsolatedHome(): Promise<void> {
+  if (process.env.HOME && process.env.HOME !== originalHome) {
+    return;
+  }
+  const homeRoot = await mkdtemp(join(tmpdir(), "hack-home-"));
+  tempDirs.add(homeRoot);
+  process.env.HOME = homeRoot;
 }

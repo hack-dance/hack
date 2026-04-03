@@ -57,11 +57,19 @@ import {
   ensureDir,
   pathExists,
   readTextFile,
+  writeTextFile,
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { parseJsonLines } from "../lib/json-lines.ts";
+import {
+  buildHackHostTrustEnvironment,
+  renderHackHostTrustShellExports,
+  resolveHackHostTrustBundlePath,
+  resolveHackHostTrustEnvScriptPath,
+  resolveHackLocalCaCertPath,
+} from "../lib/local-ca.ts";
 import {
   ensureBundledMutagenInstalled,
   getMutagenPath,
@@ -492,162 +500,14 @@ async function globalInstall(): Promise<number> {
   }
 
   const s = spinner();
-  s.start("Ensuring gum…");
-  const gum = await ensureBundledGumInstalled();
-  if (gum.ok) {
-    s.stop(gum.installed ? "Installed bundled gum" : "gum already installed");
-  } else {
-    const systemGum = Bun.which("gum");
-    s.stop(
-      systemGum ? "gum available on PATH" : "gum not installed (optional)"
-    );
-    if (gum.reason === "failed") {
-      logger.warn({
-        message: `gum install failed: ${gum.message ?? "unknown error"}`,
-      });
-    }
-  }
-
-  s.start("Ensuring mutagen…");
-  const mutagen = await ensureBundledMutagenInstalled();
-  if (mutagen.ok) {
-    s.stop(
-      mutagen.installed
-        ? "Installed managed mutagen"
-        : "mutagen already installed"
-    );
-  } else {
-    const systemMutagen = getMutagenPath();
-    s.stop(
-      systemMutagen ? "mutagen available on PATH" : "mutagen not installed"
-    );
-    if (!systemMutagen) {
-      const detail = mutagen.message ? `: ${mutagen.message}` : "";
-      logger.warn({
-        message: `mutagen install skipped (${mutagen.reason}${detail})`,
-      });
-      logger.warn({
-        message:
-          "Remote sync may fail without mutagen. Repair with: hack doctor --fix",
-      });
-    }
-  }
-
-  if (isMac()) {
-    await ensureMacChafa();
-    await ensureMacMkcert();
-  } else {
-    logger.warn({
-      message: "Skipping chafa install (only automated on macOS for now).",
-    });
-  }
-
+  await ensureOptionalInstallDependencies({ spinner: s });
   await warnIfSessionsMuxUnavailable();
-
-  s.start("Checking Docker…");
-  await ensureDockerRunning();
-  s.stop("Docker is running");
-
-  s.start("Ensuring shared networks…");
-  const ingressNetwork = await ensureNetwork(DEFAULT_INGRESS_NETWORK, {
-    subnet: DEFAULT_INGRESS_SUBNET,
-    gateway: DEFAULT_INGRESS_GATEWAY,
-  });
-  await ensureNetwork(DEFAULT_LOGGING_NETWORK);
-  s.stop(
-    `Networks ready (${DEFAULT_INGRESS_NETWORK}, ${DEFAULT_LOGGING_NETWORK})`
-  );
-  const useStaticIps = ingressNetwork.hasSubnet;
-  if (!useStaticIps) {
-    logger.warn({
-      message:
-        "hack-dev network has no subnet; CoreDNS will resolve via dynamic IP.",
-    });
-  }
-
+  const useStaticIps = await ensureGlobalDockerNetworks({ spinner: s });
   const paths = getGlobalPaths();
-  await ensureDir(paths.caddyDir);
-  await ensureDir(paths.loggingDir);
-  await ensureDir(paths.schemasDir);
-  await ensureDir(dirname(paths.grafanaDatasource));
-  await ensureDir(dirname(paths.grafanaDashboardsProvisioning));
-  await ensureDir(dirname(paths.grafanaDashboard));
-  await ensureDir(dirname(paths.alloyConfig));
-  await ensureDir(dirname(paths.lokiConfig));
-
-  await writeWithPromptIfDifferent(
-    paths.caddyCompose,
-    renderGlobalCaddyCompose({
-      useStaticCoreDnsIp: useStaticIps,
-      useStaticCaddyIp: useStaticIps,
-    })
-  );
-  await writeWithPromptIfDifferent(
-    paths.coreDnsConfig,
-    renderGlobalCoreDnsConfig({ useStaticCaddyIp: useStaticIps })
-  );
-  await writeWithPromptIfDifferent(
-    paths.loggingCompose,
-    renderGlobalLoggingCompose()
-  );
-  await writeWithPromptIfDifferent(
-    paths.alloyConfig,
-    renderGlobalAlloyConfig()
-  );
-  await writeWithPromptIfDifferent(
-    paths.lokiConfig,
-    renderGlobalLokiConfigYaml()
-  );
-  await writeWithPromptIfDifferent(
-    paths.grafanaDatasource,
-    renderGlobalGrafanaDatasourceYaml()
-  );
-  await writeWithPromptIfDifferent(
-    paths.grafanaDashboardsProvisioning,
-    renderGlobalGrafanaDashboardsProvisioningYaml()
-  );
-  await writeWithPromptIfDifferent(
-    paths.grafanaDashboard,
-    renderGlobalGrafanaLogsDashboardJson()
-  );
-  await writeWithPromptIfDifferent(
-    paths.configSchema,
-    renderProjectConfigSchemaJson()
-  );
-  await writeWithPromptIfDifferent(
-    paths.envSchema,
-    renderProjectEnvSchemaJson()
-  );
-  await writeWithPromptIfDifferent(
-    paths.managedEnvSchema,
-    renderProjectManagedEnvSchemaJson()
-  );
-  await writeWithPromptIfDifferent(
-    paths.branchesSchema,
-    renderProjectBranchesSchemaJson()
-  );
-
+  await materializeGlobalInstallFiles({ paths, useStaticIps });
   logger.success({ message: "Global files ready in ~/.hack/" });
   await globalUp();
-
-  if (isMac()) {
-    const hostDnsTarget = await resolvePreferredMacHostDnsTarget();
-    await ensureMacHackDns({ targetIp: hostDnsTarget });
-    await ensureMacTrustCaddyLocalCa();
-    await maybeOfferMacRecoverySetup();
-  } else {
-    logger.warn({
-      message: "Skipping DNS bootstrap (only implemented for macOS for now).",
-    });
-    note(
-      [
-        `You need wildcard DNS for *.hack pointing to ${DEFAULT_HOST_DNS_IP}.`,
-        "Recommended: dnsmasq + OS resolver config for the 'hack' TLD.",
-      ].join("\n"),
-      "DNS setup"
-    );
-  }
-
+  await completeGlobalInstallHostBootstrap();
   note(
     [
       "Next:",
@@ -658,6 +518,215 @@ async function globalInstall(): Promise<number> {
   );
 
   return 0;
+}
+
+async function ensureOptionalInstallDependencies(opts: {
+  readonly spinner: ReturnType<typeof spinner>;
+}): Promise<void> {
+  await ensureManagedGum({ spinner: opts.spinner });
+  await ensureManagedMutagen({ spinner: opts.spinner });
+  await ensureMacInstallDependencies();
+}
+
+async function ensureManagedGum(opts: {
+  readonly spinner: ReturnType<typeof spinner>;
+}): Promise<void> {
+  opts.spinner.start("Ensuring gum…");
+  const gum = await ensureBundledGumInstalled();
+  if (gum.ok) {
+    opts.spinner.stop(
+      gum.installed ? "Installed bundled gum" : "gum already installed"
+    );
+    return;
+  }
+
+  const systemGum = Bun.which("gum");
+  opts.spinner.stop(
+    systemGum ? "gum available on PATH" : "gum not installed (optional)"
+  );
+  if (gum.reason === "failed") {
+    logger.warn({
+      message: `gum install failed: ${gum.message ?? "unknown error"}`,
+    });
+  }
+}
+
+async function ensureManagedMutagen(opts: {
+  readonly spinner: ReturnType<typeof spinner>;
+}): Promise<void> {
+  opts.spinner.start("Ensuring mutagen…");
+  const mutagen = await ensureBundledMutagenInstalled();
+  if (mutagen.ok) {
+    opts.spinner.stop(
+      mutagen.installed
+        ? "Installed managed mutagen"
+        : "mutagen already installed"
+    );
+    return;
+  }
+
+  const systemMutagen = getMutagenPath();
+  opts.spinner.stop(
+    systemMutagen ? "mutagen available on PATH" : "mutagen not installed"
+  );
+  if (!systemMutagen) {
+    const detail = mutagen.message ? `: ${mutagen.message}` : "";
+    logger.warn({
+      message: `mutagen install skipped (${mutagen.reason}${detail})`,
+    });
+    logger.warn({
+      message:
+        "Remote sync may fail without mutagen. Repair with: hack doctor --fix",
+    });
+  }
+}
+
+async function ensureMacInstallDependencies(): Promise<void> {
+  if (isMac()) {
+    await ensureMacChafa();
+    await ensureMacMkcert();
+    return;
+  }
+
+  logger.warn({
+    message: "Skipping chafa install (only automated on macOS for now).",
+  });
+}
+
+async function ensureGlobalDockerNetworks(opts: {
+  readonly spinner: ReturnType<typeof spinner>;
+}): Promise<boolean> {
+  opts.spinner.start("Checking Docker…");
+  await ensureDockerRunning();
+  opts.spinner.stop("Docker is running");
+
+  opts.spinner.start("Ensuring shared networks…");
+  const ingressNetwork = await ensureNetwork(DEFAULT_INGRESS_NETWORK, {
+    subnet: DEFAULT_INGRESS_SUBNET,
+    gateway: DEFAULT_INGRESS_GATEWAY,
+  });
+  await ensureNetwork(DEFAULT_LOGGING_NETWORK);
+  opts.spinner.stop(
+    `Networks ready (${DEFAULT_INGRESS_NETWORK}, ${DEFAULT_LOGGING_NETWORK})`
+  );
+
+  if (!ingressNetwork.hasSubnet) {
+    logger.warn({
+      message:
+        "hack-dev network has no subnet; CoreDNS will resolve via dynamic IP.",
+    });
+  }
+  return ingressNetwork.hasSubnet;
+}
+
+async function materializeGlobalInstallFiles(opts: {
+  readonly paths: ReturnType<typeof getGlobalPaths>;
+  readonly useStaticIps: boolean;
+}): Promise<void> {
+  await ensureGlobalInstallDirectories({ paths: opts.paths });
+  await writeGlobalInstallAssets({
+    paths: opts.paths,
+    useStaticIps: opts.useStaticIps,
+  });
+}
+
+async function ensureGlobalInstallDirectories(opts: {
+  readonly paths: ReturnType<typeof getGlobalPaths>;
+}): Promise<void> {
+  await ensureDir(opts.paths.caddyDir);
+  await ensureDir(opts.paths.loggingDir);
+  await ensureDir(opts.paths.schemasDir);
+  await ensureDir(dirname(opts.paths.grafanaDatasource));
+  await ensureDir(dirname(opts.paths.grafanaDashboardsProvisioning));
+  await ensureDir(dirname(opts.paths.grafanaDashboard));
+  await ensureDir(dirname(opts.paths.alloyConfig));
+  await ensureDir(dirname(opts.paths.lokiConfig));
+}
+
+async function writeGlobalInstallAssets(opts: {
+  readonly paths: ReturnType<typeof getGlobalPaths>;
+  readonly useStaticIps: boolean;
+}): Promise<void> {
+  await writeWithPromptIfDifferent(
+    opts.paths.caddyCompose,
+    renderGlobalCaddyCompose({
+      useStaticCoreDnsIp: opts.useStaticIps,
+      useStaticCaddyIp: opts.useStaticIps,
+    })
+  );
+  await writeWithPromptIfDifferent(
+    opts.paths.coreDnsConfig,
+    renderGlobalCoreDnsConfig({ useStaticCaddyIp: opts.useStaticIps })
+  );
+  await writeWithPromptIfDifferent(
+    opts.paths.loggingCompose,
+    renderGlobalLoggingCompose()
+  );
+  await writeWithPromptIfDifferent(
+    opts.paths.alloyConfig,
+    renderGlobalAlloyConfig()
+  );
+  await writeWithPromptIfDifferent(
+    opts.paths.lokiConfig,
+    renderGlobalLokiConfigYaml()
+  );
+  await writeWithPromptIfDifferent(
+    opts.paths.grafanaDatasource,
+    renderGlobalGrafanaDatasourceYaml()
+  );
+  await writeWithPromptIfDifferent(
+    opts.paths.grafanaDashboardsProvisioning,
+    renderGlobalGrafanaDashboardsProvisioningYaml()
+  );
+  await writeWithPromptIfDifferent(
+    opts.paths.grafanaDashboard,
+    renderGlobalGrafanaLogsDashboardJson()
+  );
+  await writeWithPromptIfDifferent(
+    opts.paths.configSchema,
+    renderProjectConfigSchemaJson()
+  );
+  await writeWithPromptIfDifferent(
+    opts.paths.envSchema,
+    renderProjectEnvSchemaJson()
+  );
+  await writeWithPromptIfDifferent(
+    opts.paths.managedEnvSchema,
+    renderProjectManagedEnvSchemaJson()
+  );
+  await writeWithPromptIfDifferent(
+    opts.paths.branchesSchema,
+    renderProjectBranchesSchemaJson()
+  );
+}
+
+async function completeGlobalInstallHostBootstrap(): Promise<void> {
+  if (isMac()) {
+    await bootstrapMacGlobalInstall();
+    return;
+  }
+
+  logger.warn({
+    message: "Skipping DNS bootstrap (only implemented for macOS for now).",
+  });
+  note(
+    [
+      `You need wildcard DNS for *.hack pointing to ${DEFAULT_HOST_DNS_IP}.`,
+      "Recommended: dnsmasq + OS resolver config for the 'hack' TLD.",
+    ].join("\n"),
+    "DNS setup"
+  );
+}
+
+async function bootstrapMacGlobalInstall(): Promise<void> {
+  const hostDnsTarget = await resolvePreferredMacHostDnsTarget();
+  await ensureMacHackDns({ targetIp: hostDnsTarget });
+  const certPath = await exportCaddyLocalCaCert();
+  if (certPath) {
+    await ensureMacTrustCaddyLocalCa({ certPath });
+    await configureMacHostTlsTrust({ certPath });
+  }
+  await maybeOfferMacRecoverySetup();
 }
 
 async function globalLogsReset(): Promise<number> {
@@ -1136,13 +1205,8 @@ async function inspectIngressNetworkSnapshot(): Promise<IngressNetworkSnapshot |
     return null;
   }
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(inspect.stdout);
-  } catch {
-    return null;
-  }
-  if (!Array.isArray(parsed)) {
+  const parsed = parseIngressNetworkInspectPayload({ stdout: inspect.stdout });
+  if (!parsed) {
     return null;
   }
 
@@ -1151,56 +1215,17 @@ async function inspectIngressNetworkSnapshot(): Promise<IngressNetworkSnapshot |
   const usedIps = new Set<string>();
   const containerIpByName = new Map<string, string>();
   for (const entry of parsed) {
-    if (!entry || typeof entry !== "object") {
-      continue;
-    }
     if (subnet === null) {
-      const ipamConfig = (
-        entry as {
-          IPAM?: {
-            Config?: Array<{ Subnet?: unknown; Gateway?: unknown }>;
-          };
-        }
-      ).IPAM?.Config;
-      if (Array.isArray(ipamConfig)) {
-        for (const config of ipamConfig) {
-          if (subnet === null && typeof config?.Subnet === "string") {
-            subnet = config.Subnet;
-          }
-          if (gateway === null && typeof config?.Gateway === "string") {
-            gateway = config.Gateway;
-          }
-          if (subnet !== null && gateway !== null) {
-            break;
-          }
-        }
-      }
+      const ipamConfig = readIngressIpamConfig({ entry });
+      subnet = ipamConfig.subnet;
+      gateway = ipamConfig.gateway;
     }
 
-    const containers = (entry as { Containers?: Record<string, unknown> })
-      .Containers;
-    if (!containers || typeof containers !== "object") {
-      continue;
-    }
-
-    for (const info of Object.values(containers)) {
-      if (!info || typeof info !== "object") {
-        continue;
-      }
-      const record = info as { Name?: unknown; IPv4Address?: unknown };
-      const name = typeof record.Name === "string" ? record.Name : "";
-      const ipRaw =
-        typeof record.IPv4Address === "string" ? record.IPv4Address : "";
-      if (!(name && ipRaw)) {
-        continue;
-      }
-      const ip = extractIpv4Address({ raw: ipRaw });
-      if (ip.length === 0) {
-        continue;
-      }
-      usedIps.add(ip);
-      containerIpByName.set(name, ip);
-    }
+    collectIngressContainerIps({
+      entry,
+      usedIps,
+      containerIpByName,
+    });
   }
 
   return {
@@ -1209,6 +1234,85 @@ async function inspectIngressNetworkSnapshot(): Promise<IngressNetworkSnapshot |
     usedIps,
     containerIpByName,
   };
+}
+
+function parseIngressNetworkInspectPayload(opts: {
+  readonly stdout: string;
+}): readonly Record<string, unknown>[] | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(opts.stdout);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) {
+    return null;
+  }
+  return parsed.filter(isRecord);
+}
+
+function readIngressIpamConfig(opts: {
+  readonly entry: Record<string, unknown>;
+}): {
+  readonly subnet: string | null;
+  readonly gateway: string | null;
+} {
+  const ipam = opts.entry.IPAM;
+  if (!isRecord(ipam)) {
+    return { subnet: null, gateway: null };
+  }
+
+  const rawConfig = ipam.Config;
+  if (!Array.isArray(rawConfig)) {
+    return { subnet: null, gateway: null };
+  }
+
+  let subnet: string | null = null;
+  let gateway: string | null = null;
+  for (const config of rawConfig) {
+    if (!isRecord(config)) {
+      continue;
+    }
+    if (subnet === null && typeof config.Subnet === "string") {
+      subnet = config.Subnet;
+    }
+    if (gateway === null && typeof config.Gateway === "string") {
+      gateway = config.Gateway;
+    }
+    if (subnet !== null && gateway !== null) {
+      break;
+    }
+  }
+
+  return { subnet, gateway };
+}
+
+function collectIngressContainerIps(opts: {
+  readonly entry: Record<string, unknown>;
+  readonly usedIps: Set<string>;
+  readonly containerIpByName: Map<string, string>;
+}): void {
+  const containers = opts.entry.Containers;
+  if (!isRecord(containers)) {
+    return;
+  }
+
+  for (const info of Object.values(containers)) {
+    if (!isRecord(info)) {
+      continue;
+    }
+    const name = typeof info.Name === "string" ? info.Name : "";
+    const ipRaw = typeof info.IPv4Address === "string" ? info.IPv4Address : "";
+    if (!(name && ipRaw)) {
+      continue;
+    }
+    const ip = extractIpv4Address({ raw: ipRaw });
+    if (ip.length === 0) {
+      continue;
+    }
+    opts.usedIps.add(ip);
+    opts.containerIpByName.set(name, ip);
+  }
 }
 
 async function reassignIngressIpConflicts(opts: {
@@ -2336,7 +2440,17 @@ async function globalTrust(): Promise<number> {
   }
 
   await ensureDockerRunning();
-  await ensureMacTrustCaddyLocalCa();
+  const certPath = await exportCaddyLocalCaCert();
+  if (!certPath) {
+    return 1;
+  }
+
+  await ensureMacTrustCaddyLocalCa({
+    certPath,
+  });
+  await configureMacHostTlsTrust({
+    certPath,
+  });
 
   return 0;
 }
@@ -2934,7 +3048,9 @@ async function ensureMacMkcert(): Promise<void> {
   }
 }
 
-async function ensureMacTrustCaddyLocalCa(): Promise<void> {
+async function ensureMacTrustCaddyLocalCa(input: {
+  readonly certPath: string;
+}): Promise<void> {
   const ok = await confirm({
     message:
       "Trust Caddy Local CA in macOS System keychain? (enables trusted https://*.hack; requires sudo)",
@@ -2964,10 +3080,6 @@ async function ensureMacTrustCaddyLocalCa(): Promise<void> {
     });
     return;
   }
-  const certPath = await exportCaddyLocalCaCert();
-  if (!certPath) {
-    return;
-  }
 
   logger.step({
     message: "Installing Caddy Local CA to System keychain (requires sudo)…",
@@ -2982,7 +3094,7 @@ async function ensureMacTrustCaddyLocalCa(): Promise<void> {
       "trustRoot",
       "-k",
       "/Library/Keychains/System.keychain",
-      certPath,
+      input.certPath,
     ],
     { stdin: "inherit" }
   );
@@ -3002,6 +3114,118 @@ async function ensureMacTrustCaddyLocalCa(): Promise<void> {
     ].join("\n"),
     "TLS"
   );
+}
+
+async function configureMacHostTlsTrust(input: {
+  readonly certPath: string;
+}): Promise<void> {
+  const bundlePath = await writeMacHostTrustBundle({
+    certPath: input.certPath,
+  });
+  const env = buildHackHostTrustEnvironment({
+    certPath: input.certPath,
+    bundlePath,
+  });
+  const scriptPath = resolveHackHostTrustEnvScriptPath();
+  await ensureDir(dirname(scriptPath));
+  await writeTextFile(
+    scriptPath,
+    renderHackHostTrustShellExports({
+      certPath: input.certPath,
+      bundlePath,
+    })
+  );
+
+  for (const [key, value] of Object.entries(env)) {
+    const exitCode = await run(["launchctl", "setenv", key, value], {
+      stdin: "ignore",
+    });
+    if (exitCode !== 0) {
+      logger.warn({
+        message: `Failed to set ${key} for future macOS shells via launchctl (exit ${exitCode}).`,
+      });
+    }
+  }
+
+  logger.success({
+    message:
+      "Prepared host trust env for Bun/Node/curl/git and registered it for future macOS shells.",
+  });
+  note(
+    [
+      `Current shell: source ${scriptPath}`,
+      "New Terminal/iTerm windows should inherit the trust env automatically.",
+    ].join("\n"),
+    "Host TLS"
+  );
+}
+
+async function writeMacHostTrustBundle(input: {
+  readonly certPath: string;
+}): Promise<string | null> {
+  const bundlePath = resolveHackHostTrustBundlePath();
+  const home = getHomeDir();
+  const loginKeychainPath = resolve(
+    home,
+    "Library",
+    "Keychains",
+    "login.keychain-db"
+  );
+  const keychainPaths = [
+    "/System/Library/Keychains/SystemRootCertificates.keychain",
+    "/Library/Keychains/System.keychain",
+    loginKeychainPath,
+  ];
+
+  const pemChunks: string[] = [];
+  for (const keychainPath of keychainPaths) {
+    if (!(await pathExists(keychainPath))) {
+      continue;
+    }
+    const result = await exec(
+      ["security", "find-certificate", "-a", "-p", keychainPath],
+      {
+        stdin: "ignore",
+      }
+    );
+    if (result.exitCode !== 0) {
+      logger.warn({
+        message: `Failed to export trust roots from ${keychainPath}; host bundle will skip it.`,
+      });
+      continue;
+    }
+    const pemText = result.stdout.trim();
+    if (pemText.length > 0) {
+      pemChunks.push(pemText);
+    }
+  }
+
+  const localCaPem = (await readTextFile(input.certPath))?.trim() ?? "";
+  if (localCaPem.length === 0) {
+    logger.warn({
+      message: `Unable to read exported Caddy Local CA at ${input.certPath}.`,
+    });
+    return null;
+  }
+
+  if (pemChunks.length === 0) {
+    logger.warn({
+      message:
+        "No macOS keychain roots were exported for the host trust bundle; falling back to NODE_EXTRA_CA_CERTS only.",
+    });
+    return null;
+  }
+
+  const bundleText = `${[...pemChunks, localCaPem].join("\n")}\n`;
+  const expectedPath = resolveHackLocalCaCertPath();
+  if (input.certPath !== expectedPath) {
+    logger.info({
+      message: `Using exported Caddy Local CA at ${input.certPath} instead of ${expectedPath}.`,
+    });
+  }
+  await ensureDir(dirname(bundlePath));
+  await writeTextFileIfChanged(bundlePath, bundleText);
+  return bundlePath;
 }
 
 async function exportCaddyLocalCaCert(): Promise<string | null> {

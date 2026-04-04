@@ -316,6 +316,39 @@ test("global authorize installs passwordless dns recovery sudoers rule", async (
   );
 });
 
+test("global authorize refreshes an existing dns recovery sudoers rule", async () => {
+  pathExistsOverrides.set("/etc/sudoers.d/dance.hack-dns-recovery", true);
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "authorize"]);
+
+  expect(code).toBe(0);
+  expect(runCalls).toEqual(
+    expect.arrayContaining([
+      [
+        "/usr/bin/mock-bin",
+        "-cf",
+        expect.stringContaining("dance.hack-dns-recovery.sudoers"),
+      ],
+      ["sudo", "install", "-d", "-m", "0755", "/etc/sudoers.d"],
+      [
+        "sudo",
+        "install",
+        "-m",
+        "0440",
+        expect.stringContaining("dance.hack-dns-recovery.sudoers"),
+        "/etc/sudoers.d/dance.hack-dns-recovery",
+      ],
+      [
+        "sudo",
+        "/usr/bin/mock-bin",
+        "-cf",
+        "/etc/sudoers.d/dance.hack-dns-recovery",
+      ],
+    ])
+  );
+});
+
 test("global authorize uses the OS account lookup instead of USER env", async () => {
   idUser = "real-login-user";
   process.env.USER = "spoofed-user";

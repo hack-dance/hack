@@ -792,12 +792,7 @@ async function globalAuthorize(): Promise<number> {
     return 1;
   }
 
-  if (await pathExists(MAC_DNS_SUDOERS_PATH)) {
-    logger.info({
-      message: `${MAC_DNS_SUDOERS_PATH} already installed`,
-    });
-    return 0;
-  }
+  const sudoersRuleExists = await pathExists(MAC_DNS_SUDOERS_PATH);
 
   const brew = await findExecutableInPath("brew");
   if (!brew) {
@@ -824,6 +819,12 @@ async function globalAuthorize(): Promise<number> {
   if (!ok) {
     logger.info({ message: "Skipped DNS authorization setup" });
     return 0;
+  }
+
+  if (sudoersRuleExists) {
+    logger.info({
+      message: `Refreshing ${MAC_DNS_SUDOERS_PATH}`,
+    });
   }
 
   const tempDir = resolve(getGlobalPaths().root, "tmp");

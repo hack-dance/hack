@@ -550,22 +550,30 @@ test("global authorize refuses insecure helper path ownership", async () => {
   const code = await runCli(["global", "authorize"]);
 
   expect(code).toBe(1);
-  expect(runCalls).not.toEqual(
-    expect.arrayContaining([
-      [
-        "sudo",
-        "install",
-        "-o",
-        "root",
-        "-g",
-        "wheel",
-        "-m",
-        "0440",
-        expect.stringContaining("dance.hack-dns-recovery.sudoers"),
-        "/etc/sudoers.d/dance.hack-dns-recovery",
-      ],
-    ])
-  );
+  expect(runCalls).not.toContainEqual([
+    "sudo",
+    "install",
+    "-o",
+    "root",
+    "-g",
+    "wheel",
+    "-m",
+    "0755",
+    expect.stringContaining("hack-dns-recovery"),
+    "/usr/local/libexec/hack-dns-recovery",
+  ]);
+  expect(runCalls).not.toContainEqual([
+    "sudo",
+    "install",
+    "-o",
+    "root",
+    "-g",
+    "wheel",
+    "-m",
+    "0440",
+    expect.stringContaining("dance.hack-dns-recovery.sudoers"),
+    "/etc/sudoers.d/dance.hack-dns-recovery",
+  ]);
 });
 
 test("global authorize fails when passwordless sudo is still inactive after install", async () => {

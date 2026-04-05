@@ -862,6 +862,20 @@ async function globalAuthorize(): Promise<number> {
   }
 
   logger.step({ message: "Installing DNS recovery sudoers rule…" });
+  const parentPathsSecure = await verifyMacRootControlledPaths([
+    dirname(dirname(MAC_DNS_RECOVERY_HELPER_PATH)),
+    dirname(MAC_DNS_RECOVERY_HELPER_PATH),
+  ]);
+  if (!parentPathsSecure) {
+    logger.error({
+      message: [
+        `${MAC_DNS_RECOVERY_HELPER_PATH} is not under a root-controlled path.`,
+        "Refusing to authorize passwordless sudo for an insecure helper location.",
+      ].join(" "),
+    });
+    return 1;
+  }
+
   const installHelperDirExit = await run(
     [
       "sudo",
@@ -910,7 +924,9 @@ async function globalAuthorize(): Promise<number> {
     return 1;
   }
 
-  const helperSecurityOk = await verifyMacDnsRecoveryHelperSecurity();
+  const helperSecurityOk = await verifyMacRootControlledPaths([
+    MAC_DNS_RECOVERY_HELPER_PATH,
+  ]);
   if (!helperSecurityOk) {
     logger.error({
       message: [
@@ -1069,14 +1085,10 @@ function toPosixShellSingleQuotedLiteral(value: string): string {
   return `'${value.replaceAll("'", String.raw`'\''`)}'`;
 }
 
-async function verifyMacDnsRecoveryHelperSecurity(): Promise<boolean> {
-  const securePaths = [
-    dirname(dirname(MAC_DNS_RECOVERY_HELPER_PATH)),
-    dirname(MAC_DNS_RECOVERY_HELPER_PATH),
-    MAC_DNS_RECOVERY_HELPER_PATH,
-  ];
-
-  for (const path of securePaths) {
+async function verifyMacRootControlledPaths(
+  paths: readonly string[]
+): Promise<boolean> {
+  for (const path of paths) {
     const metadata = await readMacOwnershipAndMode(path);
     if (metadata === null) {
       logger.error({

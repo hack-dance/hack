@@ -91,6 +91,18 @@ Use `hack` as the primary interface for local development.
 - Use lifecycle processes for long-running host tasks, not ad-hoc terminals.
 - Inspect via `hack projects --details` and `hack logs <service-or-process>`.
 
+## Verification Loops
+
+- For `hack run` / `hack exec` / env-resolution changes, verify the effective env transition matrix in
+  `tests/project-run-command.test.ts`.
+- Cover omitted env, explicit overlay, explicit `base`, default-overlay resolution, cached runtime-state env,
+  and target-service running/not-running.
+- For lifecycle or startup-process changes, verify `tests/project-lifecycle-processes.test.ts`.
+- Preserve `sh -c` semantics, process-group cleanup, stale pane-metadata reconciliation, and interactive stdin
+  behavior.
+- When semantics change, update `docs/env.md` or `docs/lifecycle.md` in the same patch so future agent work starts
+  from the current contract.
+
 ## Branch Instances
 
 Use branch instances to run parallel environments:

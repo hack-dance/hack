@@ -29,6 +29,8 @@ let originalUser: string | undefined;
 let reachabilityByHost: Record<string, boolean> = {};
 let idUser = "mock-user";
 let pathExistsOverrides = new Map<string, boolean>();
+let statMetadataByPath = new Map<string, string>();
+let brewExecutablePath = "/opt/homebrew/bin/brew";
 let confirmResponder: (() => boolean) | null = null;
 
 mock.module("@clack/prompts", () => ({
@@ -145,6 +147,13 @@ mock.module("../src/lib/shell.ts", () => ({
     if (cmd[0] === "id" && cmd[1] === "-un") {
       return { exitCode: 0, stdout: `${idUser}\n`, stderr: "" };
     }
+    if (cmd[0] === "/usr/bin/stat" && cmd[1] === "-f") {
+      const metadata = statMetadataByPath.get(cmd[3] ?? "");
+      if (!metadata) {
+        return { exitCode: 1, stdout: "", stderr: "missing" };
+      }
+      return { exitCode: 0, stdout: `${metadata}\n`, stderr: "" };
+    }
 
     return { exitCode: 0, stdout: "", stderr: "" };
   },
@@ -158,7 +167,7 @@ mock.module("../src/lib/shell.ts", () => ({
       return "/usr/local/bin/hack";
     }
     if (name === "brew") {
-      return "/opt/homebrew/bin/brew";
+      return brewExecutablePath;
     }
     return "/usr/bin/mock-bin";
   },
@@ -186,6 +195,12 @@ beforeEach(async () => {
     ["/etc/sudoers.d/dance.hack-dns-recovery", false],
     ["/usr/local/libexec/hack-dns-recovery", false],
   ]);
+  statMetadataByPath = new Map([
+    ["/usr/local", "0:0:755"],
+    ["/usr/local/libexec", "0:0:755"],
+    ["/usr/local/libexec/hack-dns-recovery", "0:0:755"],
+  ]);
+  brewExecutablePath = "/opt/homebrew/bin/brew";
   reachabilityByHost = {};
   idUser = "mock-user";
   confirmResponder = null;
@@ -256,11 +271,37 @@ test("global install keeps container ip host dns when bridge ip is reachable", a
   );
   expect(runCalls).toEqual(
     expect.arrayContaining([
-      ["sudo", "install", "-d", "-m", "0755", "/etc/sudoers.d"],
-      ["sudo", "install", "-d", "-m", "0755", "/usr/local/libexec"],
       [
         "sudo",
         "install",
+        "-d",
+        "-o",
+        "root",
+        "-g",
+        "wheel",
+        "-m",
+        "0755",
+        "/etc/sudoers.d",
+      ],
+      [
+        "sudo",
+        "install",
+        "-d",
+        "-o",
+        "root",
+        "-g",
+        "wheel",
+        "-m",
+        "0755",
+        "/usr/local/libexec",
+      ],
+      [
+        "sudo",
+        "install",
+        "-o",
+        "root",
+        "-g",
+        "wheel",
         "-m",
         "0755",
         expect.stringContaining("hack-dns-recovery"),
@@ -269,6 +310,10 @@ test("global install keeps container ip host dns when bridge ip is reachable", a
       [
         "sudo",
         "install",
+        "-o",
+        "root",
+        "-g",
+        "wheel",
         "-m",
         "0440",
         expect.stringContaining("dance.hack-dns-recovery.sudoers"),
@@ -300,32 +345,85 @@ test("global authorize installs passwordless dns recovery sudoers rule", async (
   const code = await runCli(["global", "authorize"]);
 
   expect(code).toBe(0);
-  expect(runCalls).toEqual(
-    expect.arrayContaining([
-      [
-        "/usr/bin/mock-bin",
-        "-cf",
-        expect.stringContaining("dance.hack-dns-recovery.sudoers"),
-      ],
-      ["sudo", "install", "-d", "-m", "0755", "/etc/sudoers.d"],
-      [
-        "sudo",
-        "install",
-        "-m",
-        "0440",
-        expect.stringContaining("dance.hack-dns-recovery.sudoers"),
-        "/etc/sudoers.d/dance.hack-dns-recovery",
-      ],
-      [
-        "sudo",
-        "/usr/bin/mock-bin",
-        "-cf",
-        "/etc/sudoers.d/dance.hack-dns-recovery",
-      ],
-      ["sudo", "-k"],
-      ["sudo", "-n", "/usr/local/libexec/hack-dns-recovery", "check"],
-    ])
-  );
+  expect(runCalls).toContainEqual([
+    "sudo",
+    "install",
+    "-d",
+    "-o",
+    "root",
+    "-g",
+    "wheel",
+    "-m",
+    "0755",
+    "/usr/local/libexec",
+  ]);
+  expect(runCalls).toContainEqual([
+    "sudo",
+    "install",
+    "-d",
+    "-o",
+    "root",
+    "-g",
+    "wheel",
+    "-m",
+    "0755",
+    "/etc/sudoers.d",
+  ]);
+  expect(runCalls).toContainEqual([
+    "sudo",
+    "install",
+    "-o",
+    "root",
+    "-g",
+    "wheel",
+    "-m",
+    "0755",
+    expect.stringContaining("hack-dns-recovery"),
+    "/usr/local/libexec/hack-dns-recovery",
+  ]);
+  expect(runCalls).toContainEqual([
+    "sudo",
+    "install",
+    "-o",
+    "root",
+    "-g",
+    "wheel",
+    "-m",
+    "0440",
+    expect.stringContaining("dance.hack-dns-recovery.sudoers"),
+    "/etc/sudoers.d/dance.hack-dns-recovery",
+  ]);
+  expect(runCalls).toContainEqual([
+    "sudo",
+    "/usr/bin/mock-bin",
+    "-cf",
+    "/etc/sudoers.d/dance.hack-dns-recovery",
+  ]);
+  expect(runCalls).toContainEqual(["sudo", "-k"]);
+  expect(runCalls).toContainEqual([
+    "sudo",
+    "-n",
+    "/usr/local/libexec/hack-dns-recovery",
+    "check",
+  ]);
+  expect(execCalls).toContainEqual([
+    "/usr/bin/stat",
+    "-f",
+    "%u:%g:%Lp",
+    "/usr/local",
+  ]);
+  expect(execCalls).toContainEqual([
+    "/usr/bin/stat",
+    "-f",
+    "%u:%g:%Lp",
+    "/usr/local/libexec",
+  ]);
+  expect(execCalls).toContainEqual([
+    "/usr/bin/stat",
+    "-f",
+    "%u:%g:%Lp",
+    "/usr/local/libexec/hack-dns-recovery",
+  ]);
 });
 
 test("global authorize refreshes an existing dns recovery sudoers rule", async () => {
@@ -342,11 +440,37 @@ test("global authorize refreshes an existing dns recovery sudoers rule", async (
         "-cf",
         expect.stringContaining("dance.hack-dns-recovery.sudoers"),
       ],
-      ["sudo", "install", "-d", "-m", "0755", "/etc/sudoers.d"],
-      ["sudo", "install", "-d", "-m", "0755", "/usr/local/libexec"],
       [
         "sudo",
         "install",
+        "-d",
+        "-o",
+        "root",
+        "-g",
+        "wheel",
+        "-m",
+        "0755",
+        "/etc/sudoers.d",
+      ],
+      [
+        "sudo",
+        "install",
+        "-d",
+        "-o",
+        "root",
+        "-g",
+        "wheel",
+        "-m",
+        "0755",
+        "/usr/local/libexec",
+      ],
+      [
+        "sudo",
+        "install",
+        "-o",
+        "root",
+        "-g",
+        "wheel",
         "-m",
         "0755",
         expect.stringContaining("hack-dns-recovery"),
@@ -355,6 +479,10 @@ test("global authorize refreshes an existing dns recovery sudoers rule", async (
       [
         "sudo",
         "install",
+        "-o",
+        "root",
+        "-g",
+        "wheel",
         "-m",
         "0440",
         expect.stringContaining("dance.hack-dns-recovery.sudoers"),
@@ -390,6 +518,54 @@ test("global authorize uses the OS account lookup instead of USER env", async ()
   expect(sudoersText).toContain("real-login-user ALL = (root) NOPASSWD:");
   expect(sudoersText).not.toContain("spoofed-user ALL = (root) NOPASSWD:");
   expect(sudoersText).toContain("/usr/local/libexec/hack-dns-recovery check");
+});
+
+test("global authorize shell-escapes the embedded brew path in the helper", async () => {
+  brewExecutablePath = "/tmp/$(touch /tmp/pwned)";
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "authorize"]);
+
+  expect(code).toBe(0);
+  const helperPath = resolve(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    "tmp",
+    "hack-dns-recovery"
+  );
+  const helperText = await Bun.file(helperPath).text();
+  expect(helperText).toContain(
+    "exec '/tmp/$(touch /tmp/pwned)' services restart dnsmasq"
+  );
+  expect(helperText).toContain(
+    "exec '/tmp/$(touch /tmp/pwned)' services stop dnsmasq"
+  );
+  expect(helperText).not.toContain("brew_path=");
+});
+
+test("global authorize refuses insecure helper path ownership", async () => {
+  statMetadataByPath.set("/usr/local", "501:20:775");
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "authorize"]);
+
+  expect(code).toBe(1);
+  expect(runCalls).not.toEqual(
+    expect.arrayContaining([
+      [
+        "sudo",
+        "install",
+        "-o",
+        "root",
+        "-g",
+        "wheel",
+        "-m",
+        "0440",
+        expect.stringContaining("dance.hack-dns-recovery.sudoers"),
+        "/etc/sudoers.d/dance.hack-dns-recovery",
+      ],
+    ])
+  );
 });
 
 test("global authorize fails when passwordless sudo is still inactive after install", async () => {

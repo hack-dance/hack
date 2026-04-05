@@ -862,10 +862,15 @@ async function globalAuthorize(): Promise<number> {
   }
 
   logger.step({ message: "Installing DNS recovery sudoers rule…" });
-  const parentPathsSecure = await verifyMacRootControlledPaths([
-    dirname(dirname(MAC_DNS_RECOVERY_HELPER_PATH)),
-    dirname(MAC_DNS_RECOVERY_HELPER_PATH),
-  ]);
+  const parentPathsSecure = await verifyMacRootControlledPaths(
+    [
+      dirname(dirname(MAC_DNS_RECOVERY_HELPER_PATH)),
+      dirname(MAC_DNS_RECOVERY_HELPER_PATH),
+    ],
+    {
+      allowMissingPaths: [dirname(MAC_DNS_RECOVERY_HELPER_PATH)],
+    }
+  );
   if (!parentPathsSecure) {
     logger.error({
       message: [
@@ -925,6 +930,7 @@ async function globalAuthorize(): Promise<number> {
   }
 
   const helperSecurityOk = await verifyMacRootControlledPaths([
+    dirname(MAC_DNS_RECOVERY_HELPER_PATH),
     MAC_DNS_RECOVERY_HELPER_PATH,
   ]);
   if (!helperSecurityOk) {
@@ -1086,11 +1092,18 @@ function toPosixShellSingleQuotedLiteral(value: string): string {
 }
 
 async function verifyMacRootControlledPaths(
-  paths: readonly string[]
+  paths: readonly string[],
+  options?: {
+    readonly allowMissingPaths?: readonly string[];
+  }
 ): Promise<boolean> {
+  const allowMissingPaths = new Set(options?.allowMissingPaths ?? []);
   for (const path of paths) {
     const metadata = await readMacOwnershipAndMode(path);
     if (metadata === null) {
+      if (allowMissingPaths.has(path)) {
+        continue;
+      }
       logger.error({
         message: `Unable to inspect ownership for ${path}.`,
       });

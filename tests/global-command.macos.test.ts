@@ -576,6 +576,62 @@ test("global authorize refuses insecure helper path ownership", async () => {
   ]);
 });
 
+test("global authorize creates missing libexec before post-install verification", async () => {
+  statMetadataByPath.delete("/usr/local/libexec");
+  statMetadataByPath.delete("/usr/local/libexec/hack-dns-recovery");
+  runResponder = (cmd) => {
+    if (
+      cmd.join(" ") ===
+      "sudo install -d -o root -g wheel -m 0755 /usr/local/libexec"
+    ) {
+      statMetadataByPath.set("/usr/local/libexec", "0:0:755");
+      return 0;
+    }
+    if (
+      cmd.join(" ") ===
+      `sudo install -o root -g wheel -m 0755 ${resolve(
+        tempDir!,
+        GLOBAL_HACK_DIR_NAME,
+        "tmp",
+        "hack-dns-recovery"
+      )} /usr/local/libexec/hack-dns-recovery`
+    ) {
+      statMetadataByPath.set("/usr/local/libexec/hack-dns-recovery", "0:0:755");
+      return 0;
+    }
+    return 0;
+  };
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "authorize"]);
+
+  expect(code).toBe(0);
+  expect(runCalls).toContainEqual([
+    "sudo",
+    "install",
+    "-d",
+    "-o",
+    "root",
+    "-g",
+    "wheel",
+    "-m",
+    "0755",
+    "/usr/local/libexec",
+  ]);
+  expect(execCalls).toContainEqual([
+    "/usr/bin/stat",
+    "-f",
+    "%u:%g:%Lp",
+    "/usr/local/libexec",
+  ]);
+  expect(execCalls).toContainEqual([
+    "/usr/bin/stat",
+    "-f",
+    "%u:%g:%Lp",
+    "/usr/local/libexec/hack-dns-recovery",
+  ]);
+});
+
 test("global authorize fails when passwordless sudo is still inactive after install", async () => {
   runResponder = (cmd) => {
     if (

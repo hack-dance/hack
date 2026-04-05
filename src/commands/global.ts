@@ -111,6 +111,8 @@ const MAC_DNS_SUDOERS_PATH = "/etc/sudoers.d/dance.hack-dns-recovery";
 const MAC_DNS_SUDOERS_TEMP_FILENAME = "dance.hack-dns-recovery.sudoers";
 const MAC_DNS_RECOVERY_HELPER_PATH = "/usr/local/libexec/hack-dns-recovery";
 const MAC_DNS_RECOVERY_HELPER_TEMP_FILENAME = "hack-dns-recovery";
+const ROOT_UID = 0;
+const WHEEL_GID = 0;
 
 const globalLogsOptions = [optFollow, optNoFollow, optTail, optPretty] as const;
 const globalLogsPositionals = [{ name: "service", required: false }] as const;
@@ -865,6 +867,10 @@ async function globalAuthorize(): Promise<number> {
       "sudo",
       "install",
       "-d",
+      "-o",
+      "root",
+      "-g",
+      "wheel",
       "-m",
       "0755",
       dirname(MAC_DNS_RECOVERY_HELPER_PATH),
@@ -884,6 +890,10 @@ async function globalAuthorize(): Promise<number> {
     [
       "sudo",
       "install",
+      "-o",
+      "root",
+      "-g",
+      "wheel",
       "-m",
       "0755",
       helperTempPath,
@@ -900,8 +910,30 @@ async function globalAuthorize(): Promise<number> {
     return 1;
   }
 
+  const helperSecurityOk = await verifyMacDnsRecoveryHelperSecurity();
+  if (!helperSecurityOk) {
+    logger.error({
+      message: [
+        `${MAC_DNS_RECOVERY_HELPER_PATH} is not under a root-controlled path.`,
+        "Refusing to authorize passwordless sudo for an insecure helper location.",
+      ].join(" "),
+    });
+    return 1;
+  }
+
   const installDirExit = await run(
-    ["sudo", "install", "-d", "-m", "0755", "/etc/sudoers.d"],
+    [
+      "sudo",
+      "install",
+      "-d",
+      "-o",
+      "root",
+      "-g",
+      "wheel",
+      "-m",
+      "0755",
+      "/etc/sudoers.d",
+    ],
     {
       stdin: "inherit",
     }
@@ -914,7 +946,18 @@ async function globalAuthorize(): Promise<number> {
   }
 
   const installFileExit = await run(
-    ["sudo", "install", "-m", "0440", tempPath, MAC_DNS_SUDOERS_PATH],
+    [
+      "sudo",
+      "install",
+      "-o",
+      "root",
+      "-g",
+      "wheel",
+      "-m",
+      "0440",
+      tempPath,
+      MAC_DNS_SUDOERS_PATH,
+    ],
     {
       stdin: "inherit",
     }
@@ -994,20 +1037,20 @@ function renderMacDnsSudoers(opts: {
 function renderMacDnsRecoveryHelper(opts: {
   readonly brewPath: string;
 }): string {
+  const brewLiteral = toPosixShellSingleQuotedLiteral(opts.brewPath);
   return [
     "#!/bin/sh",
     "set -eu",
-    `brew_path=${JSON.stringify(opts.brewPath)}`,
     `command="\${1:-}"`,
     'case "$command" in',
     "  check)",
     "    exit 0",
     "    ;;",
     "  restart-dnsmasq)",
-    '    exec "$brew_path" services restart dnsmasq',
+    `    exec ${brewLiteral} services restart dnsmasq`,
     "    ;;",
     "  stop-dnsmasq)",
-    '    exec "$brew_path" services stop dnsmasq',
+    `    exec ${brewLiteral} services stop dnsmasq`,
     "    ;;",
     "  flush-cache)",
     "    /usr/bin/dscacheutil -flushcache",
@@ -1020,6 +1063,72 @@ function renderMacDnsRecoveryHelper(opts: {
     "esac",
     "",
   ].join("\n");
+}
+
+function toPosixShellSingleQuotedLiteral(value: string): string {
+  return `'${value.replaceAll("'", String.raw`'\''`)}'`;
+}
+
+async function verifyMacDnsRecoveryHelperSecurity(): Promise<boolean> {
+  const securePaths = [
+    dirname(dirname(MAC_DNS_RECOVERY_HELPER_PATH)),
+    dirname(MAC_DNS_RECOVERY_HELPER_PATH),
+    MAC_DNS_RECOVERY_HELPER_PATH,
+  ];
+
+  for (const path of securePaths) {
+    const metadata = await readMacOwnershipAndMode(path);
+    if (metadata === null) {
+      logger.error({
+        message: `Unable to inspect ownership for ${path}.`,
+      });
+      return false;
+    }
+    if (metadata.uid !== ROOT_UID || metadata.gid !== WHEEL_GID) {
+      logger.error({
+        message: `${path} must be owned by root:wheel before enabling passwordless sudo.`,
+      });
+      return false;
+    }
+    if ((metadata.mode & 0o022) !== 0) {
+      logger.error({
+        message: `${path} must not be writable by group or others before enabling passwordless sudo.`,
+      });
+      return false;
+    }
+  }
+
+  return true;
+}
+
+async function readMacOwnershipAndMode(path: string): Promise<{
+  readonly uid: number;
+  readonly gid: number;
+  readonly mode: number;
+} | null> {
+  const result = await exec(["/usr/bin/stat", "-f", "%u:%g:%Lp", path], {
+    stdin: "ignore",
+  });
+  if (result.exitCode !== 0) {
+    return null;
+  }
+
+  const [uidText, gidText, modeText] = result.stdout.trim().split(":");
+  const hasParsedMetadata = uidText && gidText && modeText;
+  if (!hasParsedMetadata) {
+    return null;
+  }
+
+  const uid = Number.parseInt(uidText, 10);
+  const gid = Number.parseInt(gidText, 10);
+  const mode = Number.parseInt(modeText, 8);
+  const hasValidNumericMetadata =
+    Number.isInteger(uid) && Number.isInteger(gid) && Number.isInteger(mode);
+  if (!hasValidNumericMetadata) {
+    return null;
+  }
+
+  return { uid, gid, mode };
 }
 
 async function resolveCurrentUsername(): Promise<string | null> {

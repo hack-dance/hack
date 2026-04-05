@@ -184,6 +184,7 @@ beforeEach(async () => {
   execMockResponder = null;
   pathExistsOverrides = new Map([
     ["/etc/sudoers.d/dance.hack-dns-recovery", false],
+    ["/usr/local/libexec/hack-dns-recovery", false],
   ]);
   reachabilityByHost = {};
   idUser = "mock-user";
@@ -436,6 +437,37 @@ test("global up tries passwordless sudo before prompting for dnsmasq recovery", 
   expect(runCalls[0]).toEqual([
     "sudo",
     "-n",
+    "/opt/homebrew/bin/brew",
+    "services",
+    "restart",
+    "dnsmasq",
+  ]);
+});
+
+test("global up uses the dns recovery helper when it is installed", async () => {
+  pathExistsOverrides.set("/usr/local/libexec/hack-dns-recovery", true);
+  const caddyCompose = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    GLOBAL_CADDY_COMPOSE_FILENAME
+  );
+  const loggingCompose = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_LOGGING_DIR_NAME,
+    GLOBAL_LOGGING_COMPOSE_FILENAME
+  );
+  await writeComposeFile(caddyCompose);
+  await writeComposeFile(loggingCompose);
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "up"]);
+
+  expect(code).toBe(0);
+  expect(runCalls[0]).toEqual([
+    "sudo",
+    "-n",
     "/usr/local/libexec/hack-dns-recovery",
     "restart-dnsmasq",
   ]);
@@ -476,7 +508,7 @@ test("global up falls back to interactive sudo when stdin is tty but stdout is r
   runResponder = (cmd) => {
     if (
       cmd.join(" ") ===
-      "sudo -n /usr/local/libexec/hack-dns-recovery restart-dnsmasq"
+      "sudo -n /opt/homebrew/bin/brew services restart dnsmasq"
     ) {
       return 1;
     }
@@ -493,10 +525,12 @@ test("global up falls back to interactive sudo when stdin is tty but stdout is r
         [
           "sudo",
           "-n",
-          "/usr/local/libexec/hack-dns-recovery",
-          "restart-dnsmasq",
+          "/opt/homebrew/bin/brew",
+          "services",
+          "restart",
+          "dnsmasq",
         ],
-        ["sudo", "/usr/local/libexec/hack-dns-recovery", "restart-dnsmasq"],
+        ["sudo", "/opt/homebrew/bin/brew", "services", "restart", "dnsmasq"],
       ])
     );
   } finally {
@@ -507,6 +541,18 @@ test("global up falls back to interactive sudo when stdin is tty but stdout is r
       Object.defineProperty(process.stdout, "isTTY", stdoutDescriptor);
     }
   }
+});
+
+test("global down falls back to brew stop when the dns recovery helper is missing", async () => {
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "down"]);
+
+  expect(code).toBe(0);
+  expect(runCalls).toEqual(
+    expect.arrayContaining([
+      ["sudo", "-n", "/opt/homebrew/bin/brew", "services", "stop", "dnsmasq"],
+    ])
+  );
 });
 
 test("global trust prepares host runtime trust env for future shells", async () => {

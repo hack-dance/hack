@@ -1703,10 +1703,17 @@ async function globalDown(): Promise<number> {
           interactive: isInteractiveTerminal(),
         });
       } else {
-        logger.warn({
-          message:
-            "DNS recovery helper is not installed; run `hack global authorize` before stopping dnsmasq without a password prompt.",
-        });
+        const brew = await resolveBrewPath();
+        if (brew) {
+          await runMacPrivilegedCommand({
+            command: [brew, "services", "stop", "dnsmasq"],
+            interactive: isInteractiveTerminal(),
+          });
+        } else {
+          logger.warn({
+            message: "Homebrew not found; skipping dnsmasq shutdown",
+          });
+        }
       }
     }
   }
@@ -3111,7 +3118,9 @@ async function ensureMacDnsmasqRunning(): Promise<void> {
 
   const interactive = isInteractiveTerminal();
   const exit = await runMacPrivilegedCommand({
-    command: [MAC_DNS_RECOVERY_HELPER_PATH, "restart-dnsmasq"],
+    command: (await pathExists(MAC_DNS_RECOVERY_HELPER_PATH))
+      ? [MAC_DNS_RECOVERY_HELPER_PATH, "restart-dnsmasq"]
+      : [brew, "services", "restart", "dnsmasq"],
     interactive,
   });
   if (exit !== 0) {

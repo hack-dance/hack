@@ -1698,22 +1698,26 @@ async function globalDown(): Promise<number> {
     if (ok) {
       logger.step({ message: "Stopping dnsmasq (requires sudo)…" });
       if (await pathExists(MAC_DNS_RECOVERY_HELPER_PATH)) {
-        await runMacPrivilegedCommand({
+        const helperExit = await runMacPrivilegedCommand({
           command: [MAC_DNS_RECOVERY_HELPER_PATH, "stop-dnsmasq"],
           interactive: isInteractiveTerminal(),
         });
-      } else {
-        const brew = await resolveBrewPath();
-        if (brew) {
-          await runMacPrivilegedCommand({
-            command: [brew, "services", "stop", "dnsmasq"],
-            interactive: isInteractiveTerminal(),
-          });
-        } else {
-          logger.warn({
-            message: "Homebrew not found; skipping dnsmasq shutdown",
-          });
+        if (helperExit === 0) {
+          logger.success({ message: "Global infra is down" });
+          return 0;
         }
+      }
+
+      const brew = await resolveBrewPath();
+      if (brew) {
+        await runMacPrivilegedCommand({
+          command: [brew, "services", "stop", "dnsmasq"],
+          interactive: isInteractiveTerminal(),
+        });
+      } else {
+        logger.warn({
+          message: "Homebrew not found; skipping dnsmasq shutdown",
+        });
       }
     }
   }

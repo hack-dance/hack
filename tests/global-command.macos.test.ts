@@ -600,6 +600,31 @@ test("global down falls back to brew stop when the dns recovery helper is missin
   );
 });
 
+test("global down falls back to brew stop when the helper stop fails", async () => {
+  pathExistsOverrides.set("/usr/local/libexec/hack-dns-recovery", true);
+  runResponder = (cmd) => {
+    if (
+      cmd.join(" ") ===
+        "sudo -n /usr/local/libexec/hack-dns-recovery stop-dnsmasq" ||
+      cmd.join(" ") === "sudo /usr/local/libexec/hack-dns-recovery stop-dnsmasq"
+    ) {
+      return 1;
+    }
+    return 0;
+  };
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "down"]);
+
+  expect(code).toBe(0);
+  expect(runCalls).toEqual(
+    expect.arrayContaining([
+      ["sudo", "-n", "/usr/local/libexec/hack-dns-recovery", "stop-dnsmasq"],
+      ["sudo", "-n", "/opt/homebrew/bin/brew", "services", "stop", "dnsmasq"],
+    ])
+  );
+});
+
 test("global trust prepares host runtime trust env for future shells", async () => {
   const caddyCompose = join(
     tempDir!,

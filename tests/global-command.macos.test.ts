@@ -321,6 +321,7 @@ test("global authorize installs passwordless dns recovery sudoers rule", async (
         "-cf",
         "/etc/sudoers.d/dance.hack-dns-recovery",
       ],
+      ["sudo", "-k"],
       ["sudo", "-n", "/usr/local/libexec/hack-dns-recovery", "check"],
     ])
   );
@@ -364,6 +365,7 @@ test("global authorize refreshes an existing dns recovery sudoers rule", async (
         "-cf",
         "/etc/sudoers.d/dance.hack-dns-recovery",
       ],
+      ["sudo", "-k"],
       ["sudo", "-n", "/usr/local/libexec/hack-dns-recovery", "check"],
     ])
   );
@@ -387,6 +389,28 @@ test("global authorize uses the OS account lookup instead of USER env", async ()
   expect(sudoersText).toContain("real-login-user ALL = (root) NOPASSWD:");
   expect(sudoersText).not.toContain("spoofed-user ALL = (root) NOPASSWD:");
   expect(sudoersText).toContain("/usr/local/libexec/hack-dns-recovery check");
+});
+
+test("global authorize fails when passwordless sudo is still inactive after install", async () => {
+  runResponder = (cmd) => {
+    if (
+      cmd.join(" ") === "sudo -n /usr/local/libexec/hack-dns-recovery check"
+    ) {
+      return 1;
+    }
+    return 0;
+  };
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "authorize"]);
+
+  expect(code).toBe(1);
+  expect(runCalls).toEqual(
+    expect.arrayContaining([
+      ["sudo", "-k"],
+      ["sudo", "-n", "/usr/local/libexec/hack-dns-recovery", "check"],
+    ])
+  );
 });
 
 test("global up tries passwordless sudo before prompting for dnsmasq recovery", async () => {

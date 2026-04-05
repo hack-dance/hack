@@ -939,16 +939,25 @@ async function globalAuthorize(): Promise<number> {
     return 1;
   }
 
-  const verifyAuthorizationExit = await run(
+  const verifyAuthorizationExit = await run(["sudo", "-k"], {
+    stdin: "ignore",
+  });
+  if (verifyAuthorizationExit !== 0) {
+    logger.warn({
+      message: `Unable to invalidate the sudo authentication timestamp before verification (exit ${verifyAuthorizationExit}).`,
+    });
+  }
+
+  const verifyPasswordlessExit = await run(
     ["sudo", "-n", MAC_DNS_RECOVERY_HELPER_PATH, "check"],
     {
       stdin: "ignore",
     }
   );
-  if (verifyAuthorizationExit !== 0) {
+  if (verifyPasswordlessExit !== 0) {
     logger.error({
       message: [
-        `Installed ${MAC_DNS_SUDOERS_PATH}, but passwordless DNS authorization is still not active (sudo exit ${verifyAuthorizationExit}).`,
+        `Installed ${MAC_DNS_SUDOERS_PATH}, but passwordless DNS authorization is still not active (sudo exit ${verifyPasswordlessExit}).`,
         `Check whether your main sudoers config includes ${dirname(MAC_DNS_SUDOERS_PATH)} and whether another sudoers rule is overriding Hack's entry.`,
       ].join("\n"),
     });

@@ -473,6 +473,51 @@ test("global up uses the dns recovery helper when it is installed", async () => 
   ]);
 });
 
+test("global up falls back to brew when the helper restart fails", async () => {
+  pathExistsOverrides.set("/usr/local/libexec/hack-dns-recovery", true);
+  const caddyCompose = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    GLOBAL_CADDY_COMPOSE_FILENAME
+  );
+  const loggingCompose = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_LOGGING_DIR_NAME,
+    GLOBAL_LOGGING_COMPOSE_FILENAME
+  );
+  await writeComposeFile(caddyCompose);
+  await writeComposeFile(loggingCompose);
+  runResponder = (cmd) => {
+    if (
+      cmd.join(" ") ===
+      "sudo -n /usr/local/libexec/hack-dns-recovery restart-dnsmasq"
+    ) {
+      return 1;
+    }
+    return 0;
+  };
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "up"]);
+
+  expect(code).toBe(0);
+  expect(runCalls).toEqual(
+    expect.arrayContaining([
+      ["sudo", "-n", "/usr/local/libexec/hack-dns-recovery", "restart-dnsmasq"],
+      [
+        "sudo",
+        "-n",
+        "/opt/homebrew/bin/brew",
+        "services",
+        "restart",
+        "dnsmasq",
+      ],
+    ])
+  );
+});
+
 test("global up falls back to interactive sudo when stdin is tty but stdout is redirected", async () => {
   const caddyCompose = join(
     tempDir!,

@@ -1749,20 +1749,22 @@ async function resolveBrewPath(): Promise<string | null> {
 }
 
 async function restartMacDnsmasq(): Promise<void> {
+  const brew = await resolveBrewPath();
   if (await pathExists(MAC_DNS_RECOVERY_HELPER_PATH)) {
     const restartExit = await runMacPrivilegedCommand({
       command: [MAC_DNS_RECOVERY_HELPER_PATH, "restart-dnsmasq"],
       interactive: isInteractiveTerminal(),
     });
-    if (restartExit !== 0) {
+    if (restartExit === 0) {
+      return;
+    }
+    if (!brew) {
       throw new Error(
         `sudo ${MAC_DNS_RECOVERY_HELPER_PATH} restart-dnsmasq failed (exit ${restartExit})`
       );
     }
-    return;
   }
 
-  const brew = await resolveBrewPath();
   if (!brew) {
     throw new Error("Homebrew not found; cannot restart dnsmasq");
   }
@@ -3117,12 +3119,19 @@ async function ensureMacDnsmasqRunning(): Promise<void> {
   });
 
   const interactive = isInteractiveTerminal();
-  const exit = await runMacPrivilegedCommand({
-    command: (await pathExists(MAC_DNS_RECOVERY_HELPER_PATH))
+  const helperInstalled = await pathExists(MAC_DNS_RECOVERY_HELPER_PATH);
+  let exit = await runMacPrivilegedCommand({
+    command: helperInstalled
       ? [MAC_DNS_RECOVERY_HELPER_PATH, "restart-dnsmasq"]
       : [brew, "services", "restart", "dnsmasq"],
     interactive,
   });
+  if (helperInstalled && exit !== 0) {
+    exit = await runMacPrivilegedCommand({
+      command: [brew, "services", "restart", "dnsmasq"],
+      interactive,
+    });
+  }
   if (exit !== 0) {
     logger.warn({
       message: interactive

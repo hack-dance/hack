@@ -256,6 +256,15 @@ test("global install keeps container ip host dns when bridge ip is reachable", a
   expect(runCalls).toEqual(
     expect.arrayContaining([
       ["sudo", "install", "-d", "-m", "0755", "/etc/sudoers.d"],
+      ["sudo", "install", "-d", "-m", "0755", "/usr/local/libexec"],
+      [
+        "sudo",
+        "install",
+        "-m",
+        "0755",
+        expect.stringContaining("hack-dns-recovery"),
+        "/usr/local/libexec/hack-dns-recovery",
+      ],
       [
         "sudo",
         "install",
@@ -312,6 +321,7 @@ test("global authorize installs passwordless dns recovery sudoers rule", async (
         "-cf",
         "/etc/sudoers.d/dance.hack-dns-recovery",
       ],
+      ["sudo", "-n", "/usr/local/libexec/hack-dns-recovery", "check"],
     ])
   );
 });
@@ -331,6 +341,15 @@ test("global authorize refreshes an existing dns recovery sudoers rule", async (
         expect.stringContaining("dance.hack-dns-recovery.sudoers"),
       ],
       ["sudo", "install", "-d", "-m", "0755", "/etc/sudoers.d"],
+      ["sudo", "install", "-d", "-m", "0755", "/usr/local/libexec"],
+      [
+        "sudo",
+        "install",
+        "-m",
+        "0755",
+        expect.stringContaining("hack-dns-recovery"),
+        "/usr/local/libexec/hack-dns-recovery",
+      ],
       [
         "sudo",
         "install",
@@ -345,6 +364,7 @@ test("global authorize refreshes an existing dns recovery sudoers rule", async (
         "-cf",
         "/etc/sudoers.d/dance.hack-dns-recovery",
       ],
+      ["sudo", "-n", "/usr/local/libexec/hack-dns-recovery", "check"],
     ])
   );
 });
@@ -366,6 +386,7 @@ test("global authorize uses the OS account lookup instead of USER env", async ()
   const sudoersText = await Bun.file(sudoersPath).text();
   expect(sudoersText).toContain("real-login-user ALL = (root) NOPASSWD:");
   expect(sudoersText).not.toContain("spoofed-user ALL = (root) NOPASSWD:");
+  expect(sudoersText).toContain("/usr/local/libexec/hack-dns-recovery check");
 });
 
 test("global up tries passwordless sudo before prompting for dnsmasq recovery", async () => {
@@ -391,10 +412,8 @@ test("global up tries passwordless sudo before prompting for dnsmasq recovery", 
   expect(runCalls[0]).toEqual([
     "sudo",
     "-n",
-    "/opt/homebrew/bin/brew",
-    "services",
-    "restart",
-    "dnsmasq",
+    "/usr/local/libexec/hack-dns-recovery",
+    "restart-dnsmasq",
   ]);
 });
 
@@ -433,7 +452,7 @@ test("global up falls back to interactive sudo when stdin is tty but stdout is r
   runResponder = (cmd) => {
     if (
       cmd.join(" ") ===
-      "sudo -n /opt/homebrew/bin/brew services restart dnsmasq"
+      "sudo -n /usr/local/libexec/hack-dns-recovery restart-dnsmasq"
     ) {
       return 1;
     }
@@ -450,12 +469,10 @@ test("global up falls back to interactive sudo when stdin is tty but stdout is r
         [
           "sudo",
           "-n",
-          "/opt/homebrew/bin/brew",
-          "services",
-          "restart",
-          "dnsmasq",
+          "/usr/local/libexec/hack-dns-recovery",
+          "restart-dnsmasq",
         ],
-        ["sudo", "/opt/homebrew/bin/brew", "services", "restart", "dnsmasq"],
+        ["sudo", "/usr/local/libexec/hack-dns-recovery", "restart-dnsmasq"],
       ])
     );
   } finally {

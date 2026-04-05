@@ -109,6 +109,8 @@ import { resolvePreferredHostDnsTarget } from "./doctor-utils.ts";
 const WHITESPACE_PATTERN = /\s+/;
 const MAC_DNS_SUDOERS_PATH = "/etc/sudoers.d/dance.hack-dns-recovery";
 const MAC_DNS_SUDOERS_TEMP_FILENAME = "dance.hack-dns-recovery.sudoers";
+const MAC_DNS_RECOVERY_HELPER_PATH = "/usr/local/libexec/hack-dns-recovery";
+const MAC_DNS_RECOVERY_HELPER_TEMP_FILENAME = "hack-dns-recovery";
 
 const globalLogsOptions = [optFollow, optNoFollow, optTail, optPretty] as const;
 const globalLogsPositionals = [{ name: "service", required: false }] as const;
@@ -792,12 +794,7 @@ async function globalAuthorize(): Promise<number> {
     return 1;
   }
 
-  if (await pathExists(MAC_DNS_SUDOERS_PATH)) {
-    logger.info({
-      message: `${MAC_DNS_SUDOERS_PATH} already installed`,
-    });
-    return 0;
-  }
+  const sudoersRuleExists = await pathExists(MAC_DNS_SUDOERS_PATH);
 
   const brew = await findExecutableInPath("brew");
   if (!brew) {
@@ -826,11 +823,27 @@ async function globalAuthorize(): Promise<number> {
     return 0;
   }
 
+  if (sudoersRuleExists) {
+    logger.info({
+      message: `Refreshing ${MAC_DNS_SUDOERS_PATH}`,
+    });
+  }
+
   const tempDir = resolve(getGlobalPaths().root, "tmp");
   await ensureDir(tempDir);
   const tempPath = resolve(tempDir, MAC_DNS_SUDOERS_TEMP_FILENAME);
+  const helperTempPath = resolve(
+    tempDir,
+    MAC_DNS_RECOVERY_HELPER_TEMP_FILENAME
+  );
+  await Bun.write(
+    helperTempPath,
+    renderMacDnsRecoveryHelper({
+      brewPath: brew,
+    })
+  );
   const sudoersText = renderMacDnsSudoers({
-    brewPath: brew,
+    helperPath: MAC_DNS_RECOVERY_HELPER_PATH,
     user,
   });
   await Bun.write(tempPath, sudoersText);
@@ -847,6 +860,46 @@ async function globalAuthorize(): Promise<number> {
   }
 
   logger.step({ message: "Installing DNS recovery sudoers rule…" });
+  const installHelperDirExit = await run(
+    [
+      "sudo",
+      "install",
+      "-d",
+      "-m",
+      "0755",
+      dirname(MAC_DNS_RECOVERY_HELPER_PATH),
+    ],
+    {
+      stdin: "inherit",
+    }
+  );
+  if (installHelperDirExit !== 0) {
+    logger.error({
+      message: `Failed to create ${dirname(MAC_DNS_RECOVERY_HELPER_PATH)} (exit ${installHelperDirExit})`,
+    });
+    return 1;
+  }
+
+  const installHelperExit = await run(
+    [
+      "sudo",
+      "install",
+      "-m",
+      "0755",
+      helperTempPath,
+      MAC_DNS_RECOVERY_HELPER_PATH,
+    ],
+    {
+      stdin: "inherit",
+    }
+  );
+  if (installHelperExit !== 0) {
+    logger.error({
+      message: `Failed to install ${MAC_DNS_RECOVERY_HELPER_PATH} (exit ${installHelperExit})`,
+    });
+    return 1;
+  }
+
   const installDirExit = await run(
     ["sudo", "install", "-d", "-m", "0755", "/etc/sudoers.d"],
     {
@@ -886,16 +939,40 @@ async function globalAuthorize(): Promise<number> {
     return 1;
   }
 
+  const verifyAuthorizationExit = await run(["sudo", "-k"], {
+    stdin: "ignore",
+  });
+  if (verifyAuthorizationExit !== 0) {
+    logger.warn({
+      message: `Unable to invalidate the sudo authentication timestamp before verification (exit ${verifyAuthorizationExit}).`,
+    });
+  }
+
+  const verifyPasswordlessExit = await run(
+    ["sudo", "-n", MAC_DNS_RECOVERY_HELPER_PATH, "check"],
+    {
+      stdin: "ignore",
+    }
+  );
+  if (verifyPasswordlessExit !== 0) {
+    logger.error({
+      message: [
+        `Installed ${MAC_DNS_SUDOERS_PATH}, but passwordless DNS authorization is still not active (sudo exit ${verifyPasswordlessExit}).`,
+        `Check whether your main sudoers config includes ${dirname(MAC_DNS_SUDOERS_PATH)} and whether another sudoers rule is overriding Hack's entry.`,
+      ].join("\n"),
+    });
+    return 1;
+  }
+
   logger.success({
     message: `Installed ${MAC_DNS_SUDOERS_PATH}`,
   });
   note(
     [
       "Authorized commands:",
-      `- sudo ${brew} services restart dnsmasq`,
-      `- sudo ${brew} services stop dnsmasq`,
-      "- sudo /usr/bin/dscacheutil -flushcache",
-      "- sudo /usr/bin/killall -HUP mDNSResponder",
+      `- sudo ${MAC_DNS_RECOVERY_HELPER_PATH} restart-dnsmasq`,
+      `- sudo ${MAC_DNS_RECOVERY_HELPER_PATH} stop-dnsmasq`,
+      `- sudo ${MAC_DNS_RECOVERY_HELPER_PATH} flush-cache`,
     ].join("\n"),
     "DNS authorization"
   );
@@ -903,13 +980,44 @@ async function globalAuthorize(): Promise<number> {
 }
 
 function renderMacDnsSudoers(opts: {
-  readonly brewPath: string;
+  readonly helperPath: string;
   readonly user: string;
 }): string {
   return [
     "# Managed by hack for local DNS recovery.",
     "# Allows Hack to repair dnsmasq and macOS DNS cache without prompting.",
-    `${opts.user} ALL = (root) NOPASSWD: ${opts.brewPath} services restart dnsmasq, ${opts.brewPath} services stop dnsmasq, /usr/bin/dscacheutil -flushcache, /usr/bin/killall -HUP mDNSResponder`,
+    `${opts.user} ALL = (root) NOPASSWD: ${opts.helperPath} check, ${opts.helperPath} restart-dnsmasq, ${opts.helperPath} stop-dnsmasq, ${opts.helperPath} flush-cache`,
+    "",
+  ].join("\n");
+}
+
+function renderMacDnsRecoveryHelper(opts: {
+  readonly brewPath: string;
+}): string {
+  return [
+    "#!/bin/sh",
+    "set -eu",
+    `brew_path=${JSON.stringify(opts.brewPath)}`,
+    `command="\${1:-}"`,
+    'case "$command" in',
+    "  check)",
+    "    exit 0",
+    "    ;;",
+    "  restart-dnsmasq)",
+    '    exec "$brew_path" services restart dnsmasq',
+    "    ;;",
+    "  stop-dnsmasq)",
+    '    exec "$brew_path" services stop dnsmasq',
+    "    ;;",
+    "  flush-cache)",
+    "    /usr/bin/dscacheutil -flushcache",
+    "    exec /usr/bin/killall -HUP mDNSResponder",
+    "    ;;",
+    "  *)",
+    '    echo "usage: hack-dns-recovery {check|restart-dnsmasq|stop-dnsmasq|flush-cache}" >&2',
+    "    exit 64",
+    "    ;;",
+    "esac",
     "",
   ].join("\n");
 }
@@ -1589,6 +1697,17 @@ async function globalDown(): Promise<number> {
     }
     if (ok) {
       logger.step({ message: "Stopping dnsmasq (requires sudo)…" });
+      if (await pathExists(MAC_DNS_RECOVERY_HELPER_PATH)) {
+        const helperExit = await runMacPrivilegedCommand({
+          command: [MAC_DNS_RECOVERY_HELPER_PATH, "stop-dnsmasq"],
+          interactive: isInteractiveTerminal(),
+        });
+        if (helperExit === 0) {
+          logger.success({ message: "Global infra is down" });
+          return 0;
+        }
+      }
+
       const brew = await resolveBrewPath();
       if (brew) {
         await runMacPrivilegedCommand({
@@ -1635,6 +1754,21 @@ async function resolveBrewPath(): Promise<string | null> {
 
 async function restartMacDnsmasq(): Promise<void> {
   const brew = await resolveBrewPath();
+  if (await pathExists(MAC_DNS_RECOVERY_HELPER_PATH)) {
+    const restartExit = await runMacPrivilegedCommand({
+      command: [MAC_DNS_RECOVERY_HELPER_PATH, "restart-dnsmasq"],
+      interactive: isInteractiveTerminal(),
+    });
+    if (restartExit === 0) {
+      return;
+    }
+    if (!brew) {
+      throw new Error(
+        `sudo ${MAC_DNS_RECOVERY_HELPER_PATH} restart-dnsmasq failed (exit ${restartExit})`
+      );
+    }
+  }
+
   if (!brew) {
     throw new Error("Homebrew not found; cannot restart dnsmasq");
   }
@@ -1651,6 +1785,19 @@ async function restartMacDnsmasq(): Promise<void> {
 }
 
 async function flushMacDnsCachePrivileged(): Promise<void> {
+  if (await pathExists(MAC_DNS_RECOVERY_HELPER_PATH)) {
+    const flushExit = await runMacPrivilegedCommand({
+      command: [MAC_DNS_RECOVERY_HELPER_PATH, "flush-cache"],
+      interactive: isInteractiveTerminal(),
+    });
+    if (flushExit !== 0) {
+      throw new Error(
+        `sudo ${MAC_DNS_RECOVERY_HELPER_PATH} flush-cache failed (exit ${flushExit})`
+      );
+    }
+    return;
+  }
+
   const flushExit = await runMacPrivilegedCommand({
     command: ["/usr/bin/dscacheutil", "-flushcache"],
     interactive: isInteractiveTerminal(),
@@ -2976,10 +3123,19 @@ async function ensureMacDnsmasqRunning(): Promise<void> {
   });
 
   const interactive = isInteractiveTerminal();
-  const exit = await runMacPrivilegedCommand({
-    command: [brew, "services", "restart", "dnsmasq"],
+  const helperInstalled = await pathExists(MAC_DNS_RECOVERY_HELPER_PATH);
+  let exit = await runMacPrivilegedCommand({
+    command: helperInstalled
+      ? [MAC_DNS_RECOVERY_HELPER_PATH, "restart-dnsmasq"]
+      : [brew, "services", "restart", "dnsmasq"],
     interactive,
   });
+  if (helperInstalled && exit !== 0) {
+    exit = await runMacPrivilegedCommand({
+      command: [brew, "services", "restart", "dnsmasq"],
+      interactive,
+    });
+  }
   if (exit !== 0) {
     logger.warn({
       message: interactive

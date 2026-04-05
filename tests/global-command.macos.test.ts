@@ -184,6 +184,7 @@ beforeEach(async () => {
   execMockResponder = null;
   pathExistsOverrides = new Map([
     ["/etc/sudoers.d/dance.hack-dns-recovery", false],
+    ["/usr/local/libexec/hack-dns-recovery", false],
   ]);
   reachabilityByHost = {};
   idUser = "mock-user";
@@ -256,6 +257,15 @@ test("global install keeps container ip host dns when bridge ip is reachable", a
   expect(runCalls).toEqual(
     expect.arrayContaining([
       ["sudo", "install", "-d", "-m", "0755", "/etc/sudoers.d"],
+      ["sudo", "install", "-d", "-m", "0755", "/usr/local/libexec"],
+      [
+        "sudo",
+        "install",
+        "-m",
+        "0755",
+        expect.stringContaining("hack-dns-recovery"),
+        "/usr/local/libexec/hack-dns-recovery",
+      ],
       [
         "sudo",
         "install",
@@ -312,6 +322,52 @@ test("global authorize installs passwordless dns recovery sudoers rule", async (
         "-cf",
         "/etc/sudoers.d/dance.hack-dns-recovery",
       ],
+      ["sudo", "-k"],
+      ["sudo", "-n", "/usr/local/libexec/hack-dns-recovery", "check"],
+    ])
+  );
+});
+
+test("global authorize refreshes an existing dns recovery sudoers rule", async () => {
+  pathExistsOverrides.set("/etc/sudoers.d/dance.hack-dns-recovery", true);
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "authorize"]);
+
+  expect(code).toBe(0);
+  expect(runCalls).toEqual(
+    expect.arrayContaining([
+      [
+        "/usr/bin/mock-bin",
+        "-cf",
+        expect.stringContaining("dance.hack-dns-recovery.sudoers"),
+      ],
+      ["sudo", "install", "-d", "-m", "0755", "/etc/sudoers.d"],
+      ["sudo", "install", "-d", "-m", "0755", "/usr/local/libexec"],
+      [
+        "sudo",
+        "install",
+        "-m",
+        "0755",
+        expect.stringContaining("hack-dns-recovery"),
+        "/usr/local/libexec/hack-dns-recovery",
+      ],
+      [
+        "sudo",
+        "install",
+        "-m",
+        "0440",
+        expect.stringContaining("dance.hack-dns-recovery.sudoers"),
+        "/etc/sudoers.d/dance.hack-dns-recovery",
+      ],
+      [
+        "sudo",
+        "/usr/bin/mock-bin",
+        "-cf",
+        "/etc/sudoers.d/dance.hack-dns-recovery",
+      ],
+      ["sudo", "-k"],
+      ["sudo", "-n", "/usr/local/libexec/hack-dns-recovery", "check"],
     ])
   );
 });
@@ -333,6 +389,29 @@ test("global authorize uses the OS account lookup instead of USER env", async ()
   const sudoersText = await Bun.file(sudoersPath).text();
   expect(sudoersText).toContain("real-login-user ALL = (root) NOPASSWD:");
   expect(sudoersText).not.toContain("spoofed-user ALL = (root) NOPASSWD:");
+  expect(sudoersText).toContain("/usr/local/libexec/hack-dns-recovery check");
+});
+
+test("global authorize fails when passwordless sudo is still inactive after install", async () => {
+  runResponder = (cmd) => {
+    if (
+      cmd.join(" ") === "sudo -n /usr/local/libexec/hack-dns-recovery check"
+    ) {
+      return 1;
+    }
+    return 0;
+  };
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "authorize"]);
+
+  expect(code).toBe(1);
+  expect(runCalls).toEqual(
+    expect.arrayContaining([
+      ["sudo", "-k"],
+      ["sudo", "-n", "/usr/local/libexec/hack-dns-recovery", "check"],
+    ])
+  );
 });
 
 test("global up tries passwordless sudo before prompting for dnsmasq recovery", async () => {
@@ -363,6 +442,80 @@ test("global up tries passwordless sudo before prompting for dnsmasq recovery", 
     "restart",
     "dnsmasq",
   ]);
+});
+
+test("global up uses the dns recovery helper when it is installed", async () => {
+  pathExistsOverrides.set("/usr/local/libexec/hack-dns-recovery", true);
+  const caddyCompose = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    GLOBAL_CADDY_COMPOSE_FILENAME
+  );
+  const loggingCompose = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_LOGGING_DIR_NAME,
+    GLOBAL_LOGGING_COMPOSE_FILENAME
+  );
+  await writeComposeFile(caddyCompose);
+  await writeComposeFile(loggingCompose);
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "up"]);
+
+  expect(code).toBe(0);
+  expect(runCalls[0]).toEqual([
+    "sudo",
+    "-n",
+    "/usr/local/libexec/hack-dns-recovery",
+    "restart-dnsmasq",
+  ]);
+});
+
+test("global up falls back to brew when the helper restart fails", async () => {
+  pathExistsOverrides.set("/usr/local/libexec/hack-dns-recovery", true);
+  const caddyCompose = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    GLOBAL_CADDY_COMPOSE_FILENAME
+  );
+  const loggingCompose = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_LOGGING_DIR_NAME,
+    GLOBAL_LOGGING_COMPOSE_FILENAME
+  );
+  await writeComposeFile(caddyCompose);
+  await writeComposeFile(loggingCompose);
+  runResponder = (cmd) => {
+    if (
+      cmd.join(" ") ===
+      "sudo -n /usr/local/libexec/hack-dns-recovery restart-dnsmasq"
+    ) {
+      return 1;
+    }
+    return 0;
+  };
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "up"]);
+
+  expect(code).toBe(0);
+  expect(runCalls).toEqual(
+    expect.arrayContaining([
+      ["sudo", "-n", "/usr/local/libexec/hack-dns-recovery", "restart-dnsmasq"],
+      [
+        "sudo",
+        "-n",
+        "/opt/homebrew/bin/brew",
+        "services",
+        "restart",
+        "dnsmasq",
+      ],
+    ])
+  );
 });
 
 test("global up falls back to interactive sudo when stdin is tty but stdout is redirected", async () => {
@@ -433,6 +586,43 @@ test("global up falls back to interactive sudo when stdin is tty but stdout is r
       Object.defineProperty(process.stdout, "isTTY", stdoutDescriptor);
     }
   }
+});
+
+test("global down falls back to brew stop when the dns recovery helper is missing", async () => {
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "down"]);
+
+  expect(code).toBe(0);
+  expect(runCalls).toEqual(
+    expect.arrayContaining([
+      ["sudo", "-n", "/opt/homebrew/bin/brew", "services", "stop", "dnsmasq"],
+    ])
+  );
+});
+
+test("global down falls back to brew stop when the helper stop fails", async () => {
+  pathExistsOverrides.set("/usr/local/libexec/hack-dns-recovery", true);
+  runResponder = (cmd) => {
+    if (
+      cmd.join(" ") ===
+        "sudo -n /usr/local/libexec/hack-dns-recovery stop-dnsmasq" ||
+      cmd.join(" ") === "sudo /usr/local/libexec/hack-dns-recovery stop-dnsmasq"
+    ) {
+      return 1;
+    }
+    return 0;
+  };
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const code = await runCli(["global", "down"]);
+
+  expect(code).toBe(0);
+  expect(runCalls).toEqual(
+    expect.arrayContaining([
+      ["sudo", "-n", "/usr/local/libexec/hack-dns-recovery", "stop-dnsmasq"],
+      ["sudo", "-n", "/opt/homebrew/bin/brew", "services", "stop", "dnsmasq"],
+    ])
+  );
 });
 
 test("global trust prepares host runtime trust env for future shells", async () => {

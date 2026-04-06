@@ -229,6 +229,7 @@ Default behavior:
 - generate `.hack.secret.key` the first time you add a secret
 - add `.hack.secret.key` to `.gitignore`
 - decrypt secrets from `.hack.secret.key` on the local machine
+- linked git worktrees can reuse the primary checkout's `.hack.secret.key` when the worktree copy is missing
 
 CI and managed container fallback:
 

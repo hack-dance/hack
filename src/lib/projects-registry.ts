@@ -9,6 +9,7 @@ import {
   PROJECT_ENV_FILENAME,
 } from "../constants.ts";
 import { ensureDir, pathExists, readTextFile } from "./fs.ts";
+import { resolveGitRepositoryIdentity } from "./git-worktree.ts";
 import { getString, isRecord } from "./guards.ts";
 import type { ProjectContext, ProjectDirName } from "./project.ts";
 import { defaultProjectSlugFromPath, readProjectConfig } from "./project.ts";
@@ -80,6 +81,9 @@ export async function upsertProjectRegistration(opts: {
     tryRealpath(opts.project.projectRoot),
     tryRealpath(opts.project.projectDir),
   ]);
+  const repoIdentity = await resolveGitRepositoryIdentity({
+    repoRoot: repoRootReal,
+  });
 
   const cfg = await readProjectConfig(opts.project);
   const derivedName = defaultProjectSlugFromPath(repoRootReal);
@@ -95,6 +99,7 @@ export async function upsertProjectRegistration(opts: {
         name,
         devHost,
         repoRoot: repoRootReal,
+        repoIdentity,
         projectDirName: opts.project.projectDirName,
         projectDir: projectDirReal,
       },
@@ -402,6 +407,7 @@ async function upsertInMemory(opts: {
     readonly name: string;
     readonly devHost?: string;
     readonly repoRoot: string;
+    readonly repoIdentity: string | null;
     readonly projectDirName: ProjectDirName;
     readonly projectDir: string;
   };
@@ -476,6 +482,20 @@ async function upsertInMemory(opts: {
 
   // 2) Name already registered → either move (old path missing) or conflict.
   if (existingByName) {
+    const sameRepositoryFamily = await isSameRepositoryFamily({
+      existingRepoRoot: existingByName.repoRoot,
+      incomingRepoIdentity: incoming.repoIdentity,
+    });
+    if (sameRepositoryFamily) {
+      return {
+        project: existingByName,
+        status: {
+          status: "noop",
+          projects: current,
+        },
+      };
+    }
+
     const oldMissing = await isPathLikelyMissing(existingByName.projectDir);
     if (!oldMissing) {
       return {
@@ -543,4 +563,20 @@ function shallowEqual(a: RegisteredProject, b: RegisteredProject): boolean {
     }
   }
   return true;
+}
+
+async function isSameRepositoryFamily(opts: {
+  readonly existingRepoRoot: string;
+  readonly incomingRepoIdentity: string | null;
+}): Promise<boolean> {
+  if (!opts.incomingRepoIdentity) {
+    return false;
+  }
+
+  const existingIdentity = await resolveGitRepositoryIdentity({
+    repoRoot: opts.existingRepoRoot,
+  });
+  return (
+    existingIdentity !== null && existingIdentity === opts.incomingRepoIdentity
+  );
 }

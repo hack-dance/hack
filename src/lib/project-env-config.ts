@@ -27,6 +27,7 @@ import {
   writeTextFile,
   writeTextFileIfChanged,
 } from "./fs.ts";
+import { resolveGitPrimaryWorktreeRoot } from "./git-worktree.ts";
 import { getRecord, getString, isRecord } from "./guards.ts";
 import { readHackEnvContract, resolveHackEnv } from "./hack-env.ts";
 import { readProjectDefaultEnvConfig } from "./project.ts";
@@ -830,9 +831,15 @@ async function resolveProjectEnvKey(opts: {
   const keyPath = resolveProjectEnvKeyPath({ projectRoot: opts.projectRoot });
   const text = await readTextFile(keyPath);
   const envFallback = process.env[PROJECT_ENV_SECRET_KEY_ENV]?.trim() ?? "";
+  const inheritedKey = await resolveInheritedProjectEnvKey({
+    projectRoot: opts.projectRoot,
+  });
   if (text === null) {
     if (envFallback.length > 0) {
       return envFallback;
+    }
+    if (inheritedKey) {
+      return inheritedKey.keyText;
     }
     if (opts.required) {
       throw new Error(
@@ -845,6 +852,9 @@ async function resolveProjectEnvKey(opts: {
   if (trimmed.length === 0) {
     if (envFallback.length > 0) {
       return envFallback;
+    }
+    if (inheritedKey) {
+      return inheritedKey.keyText;
     }
     throw new Error(
       `Project env key file is empty: ${keyPath}. Set ${PROJECT_ENV_SECRET_KEY_ENV} or restore the key file.`
@@ -870,6 +880,24 @@ export async function ensureProjectEnvSecretKey(opts: {
     };
   }
 
+  const inheritedKey = await resolveInheritedProjectEnvKey({
+    projectRoot: opts.projectRoot,
+  });
+  if (inheritedKey) {
+    await writeTextFile(keyPath, `${inheritedKey.keyText}\n`);
+    await chmod(keyPath, 0o600);
+    await ensureGitignoreEntry({
+      gitignorePath: resolve(opts.projectRoot, ".gitignore"),
+      entry: PROJECT_ENV_KEY_FILENAME,
+      comment: "# project env key",
+    });
+    return {
+      keyPath,
+      keyText: inheritedKey.keyText,
+      created: false,
+    };
+  }
+
   const keyText = randomBytes(32).toString("base64url");
   await writeTextFile(keyPath, `${keyText}\n`);
   await chmod(keyPath, 0o600);
@@ -882,6 +910,28 @@ export async function ensureProjectEnvSecretKey(opts: {
     keyPath,
     keyText,
     created: true,
+  };
+}
+
+async function resolveInheritedProjectEnvKey(opts: {
+  readonly projectRoot: string;
+}): Promise<{ readonly keyPath: string; readonly keyText: string } | null> {
+  const primaryRoot = await resolveGitPrimaryWorktreeRoot({
+    repoRoot: opts.projectRoot,
+  });
+  if (!primaryRoot || primaryRoot === opts.projectRoot) {
+    return null;
+  }
+
+  const keyPath = resolveProjectEnvKeyPath({ projectRoot: primaryRoot });
+  const keyText = (await readTextFile(keyPath))?.trim() ?? "";
+  if (keyText.length === 0) {
+    return null;
+  }
+
+  return {
+    keyPath,
+    keyText,
   };
 }
 

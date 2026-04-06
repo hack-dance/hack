@@ -21,6 +21,7 @@ import { upsertDotEnvValue } from "../src/lib/hack-env.ts";
 import { readProjectDefaultEnvConfig } from "../src/lib/project.ts";
 import {
   assertValidProjectEnvScopeName,
+  ensureProjectEnvSecretKey,
   inspectLegacyComposeEnvFileReferences,
   materializeProjectEnv,
   migrateLegacyProjectEnv,
@@ -44,6 +45,7 @@ afterEach(async () => {
 });
 
 async function createRepo(): Promise<{
+  readonly tempRoot: string;
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly composeFile: string;
@@ -68,7 +70,7 @@ async function createRepo(): Promise<{
       2
     )}\n`
   );
-  return { projectRoot, projectDir, composeFile, configFile };
+  return { tempRoot: root, projectRoot, projectDir, composeFile, configFile };
 }
 
 test("readProjectDefaultEnvConfig prefers env.defaultOverlay", async () => {
@@ -240,6 +242,50 @@ test("resolveProjectEnvConfig falls back to HACK_ENV_SECRET_KEY when the key fil
   const resolved = await resolveProjectEnvConfig({
     projectRoot: repo.projectRoot,
     projectDir: repo.projectDir,
+    envName: null,
+    serviceNames: ["api", "web"],
+  });
+
+  expect(resolved?.serviceEnv.api?.SERVICE_TOKEN).toBe("super-secret-token");
+});
+
+test("linked worktrees inherit the primary checkout env key", async () => {
+  const repo = await createRepo();
+  await writeFile(
+    resolve(repo.projectRoot, ".gitignore"),
+    ".hack.secret.key\n"
+  );
+
+  await setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "api",
+    key: "SERVICE_TOKEN",
+    value: "super-secret-token",
+    secret: true,
+  });
+
+  const primaryKeyPath = resolve(repo.projectRoot, PROJECT_ENV_KEY_FILENAME);
+  const primaryKeyText = (await readFile(primaryKeyPath, "utf8")).trim();
+
+  await initializeGitRepo({ projectRoot: repo.projectRoot });
+  const worktreeRoot = resolve(repo.tempRoot, "repo-worktree");
+  await createGitWorktree({
+    projectRoot: repo.projectRoot,
+    worktreeRoot,
+    branch: "feature/env-key",
+  });
+
+  const ensured = await ensureProjectEnvSecretKey({
+    projectRoot: worktreeRoot,
+  });
+  expect(ensured.created).toBe(false);
+  expect((await readFile(ensured.keyPath, "utf8")).trim()).toBe(primaryKeyText);
+
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: worktreeRoot,
+    projectDir: resolve(worktreeRoot, ".hack"),
     envName: null,
     serviceNames: ["api", "web"],
   });
@@ -522,3 +568,52 @@ test("migrateLegacyProjectEnv blocks cleanup for compose-referenced legacy env f
   expect(composeText).not.toContain("path: .env.production");
   expect(composeText).toContain("- ../.env.docker");
 });
+
+async function initializeGitRepo(opts: {
+  readonly projectRoot: string;
+}): Promise<void> {
+  await writeFile(resolve(opts.projectRoot, "README.md"), "# env test\n");
+  runGit({ cwd: opts.projectRoot, args: ["init"] });
+  runGit({
+    cwd: opts.projectRoot,
+    args: ["config", "user.email", "test@example.com"],
+  });
+  runGit({
+    cwd: opts.projectRoot,
+    args: ["config", "user.name", "Test User"],
+  });
+  runGit({ cwd: opts.projectRoot, args: ["add", "."] });
+  runGit({
+    cwd: opts.projectRoot,
+    args: ["commit", "-m", "test: seed env fixture"],
+  });
+  runGit({ cwd: opts.projectRoot, args: ["branch", "-M", "main"] });
+}
+
+async function createGitWorktree(opts: {
+  readonly projectRoot: string;
+  readonly worktreeRoot: string;
+  readonly branch: string;
+}): Promise<void> {
+  runGit({
+    cwd: opts.projectRoot,
+    args: ["worktree", "add", "-b", opts.branch, opts.worktreeRoot],
+  });
+}
+
+function runGit(opts: {
+  readonly cwd: string;
+  readonly args: readonly string[];
+}): string {
+  const result = Bun.spawnSync(["git", "-C", opts.cwd, ...opts.args], {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `git ${opts.args.join(" ")} failed\n${Buffer.from(result.stderr).toString("utf8")}`
+    );
+  }
+  return Buffer.from(result.stdout).toString("utf8").trim();
+}

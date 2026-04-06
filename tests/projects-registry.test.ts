@@ -194,6 +194,12 @@ test("upsertProjectRegistration reuses the existing project identity for linked 
 
   expect(initial.status).toBe("created");
   expect(linked.status).toBe("noop");
+  if (initial.status !== "created") {
+    throw new Error(`Unexpected initial status: ${initial.status}`);
+  }
+  if (linked.status !== "noop") {
+    throw new Error(`Unexpected linked status: ${linked.status}`);
+  }
   expect(linked.project.id).toBe(initial.project.id);
 
   const registry = await readProjectsRegistry();

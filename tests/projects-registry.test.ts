@@ -209,6 +209,54 @@ test("upsertProjectRegistration reuses the existing project identity for linked 
   );
 });
 
+test("upsertProjectRegistration moves a stale same-repo registration to a healthy worktree", async () => {
+  const mainProject = await createProject({
+    rootName: "repo-main-stale",
+    name: "alpha",
+  });
+  await initializeGitRepo({ projectRoot: mainProject.projectRoot });
+
+  const initial = await upsertProjectRegistration({
+    project: mainProject,
+    nowIso: "2025-01-06T00:00:00Z",
+  });
+  expect(initial.status).toBe("created");
+
+  await rm(mainProject.projectDir, { recursive: true, force: true });
+
+  const worktreeRoot = join(tempDir!, "repo-worktree-stale");
+  await createGitWorktree({
+    projectRoot: mainProject.projectRoot,
+    worktreeRoot,
+    branch: "feature/stale-worktree",
+  });
+
+  const worktreeProject = {
+    projectRoot: worktreeRoot,
+    projectDirName: ".hack" as const,
+    projectDir: join(worktreeRoot, ".hack"),
+    composeFile: join(worktreeRoot, ".hack", PROJECT_COMPOSE_FILENAME),
+    envFile: join(worktreeRoot, ".hack", PROJECT_ENV_FILENAME),
+    configFile: join(worktreeRoot, ".hack", PROJECT_CONFIG_FILENAME),
+  };
+
+  const moved = await upsertProjectRegistration({
+    project: worktreeProject,
+    nowIso: "2025-01-07T00:00:00Z",
+  });
+
+  expect(moved.status).toBe("updated");
+  if (moved.status !== "updated") {
+    throw new Error(`Unexpected moved status: ${moved.status}`);
+  }
+  expect(moved.project.projectDir).toBe(
+    await realpath(worktreeProject.projectDir)
+  );
+
+  const resolved = await resolveRegisteredProjectByName({ name: "alpha" });
+  expect(resolved?.projectDir).toBe(await realpath(worktreeProject.projectDir));
+});
+
 async function initializeGitRepo(opts: {
   readonly projectRoot: string;
 }): Promise<void> {

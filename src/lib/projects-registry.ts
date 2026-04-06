@@ -482,11 +482,12 @@ async function upsertInMemory(opts: {
 
   // 2) Name already registered → either move (old path missing) or conflict.
   if (existingByName) {
+    const oldMissing = await isPathLikelyMissing(existingByName.projectDir);
     const sameRepositoryFamily = await isSameRepositoryFamily({
       existingRepoRoot: existingByName.repoRoot,
       incomingRepoIdentity: incoming.repoIdentity,
     });
-    if (sameRepositoryFamily) {
+    if (sameRepositoryFamily && !oldMissing) {
       return {
         project: existingByName,
         status: {
@@ -496,7 +497,6 @@ async function upsertInMemory(opts: {
       };
     }
 
-    const oldMissing = await isPathLikelyMissing(existingByName.projectDir);
     if (!oldMissing) {
       return {
         project: existingByName,

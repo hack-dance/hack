@@ -194,6 +194,7 @@ beforeEach(async () => {
   pathExistsOverrides = new Map([
     ["/etc/sudoers.d/dance.hack-dns-recovery", false],
     ["/usr/local/libexec/hack-dns-recovery", false],
+    ["/System/Library/Keychains/SystemRootCertificates.keychain", true],
   ]);
   statMetadataByPath = new Map([
     ["/usr/local", "0:0:755"],

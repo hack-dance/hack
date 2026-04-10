@@ -1,6 +1,6 @@
 import { Glob } from "bun";
 
-const isolatedTestPaths = [
+const alwaysIsolatedTestPaths = [
   "tests/node-workspace-bootstrap.test.ts",
   "tests/nodes-registry.test.ts",
   "tests/daemon-sessions.test.ts",
@@ -14,18 +14,21 @@ const isolatedTestPaths = [
   "tests/session-env-command.test.ts",
 ] as const;
 const maxConcurrencyArg = "--max-concurrency=1";
+const mockModulePattern = "mock.module(";
 
 /**
  * Runs the test suite in deterministic batches to avoid Bun mock.module/env cross-file bleed.
- * Files in isolatedTestPaths must run in their own process before the remaining suite.
+ * Files in alwaysIsolatedTestPaths and any test that uses mock.module must run in
+ * their own process before the remaining suite.
  */
 async function runTestsDeterministically(): Promise<void> {
   const allTests = await collectTestFiles();
+  const isolatedTestPaths = await collectIsolatedTestPaths({
+    allTests,
+  });
+  const isolatedTestPathSet = new Set(isolatedTestPaths);
   const remainingTests = allTests.filter(
-    (testPath) =>
-      !isolatedTestPaths.includes(
-        testPath as (typeof isolatedTestPaths)[number]
-      )
+    (testPath) => !isolatedTestPathSet.has(testPath)
   );
 
   for (const isolatedTestPath of isolatedTestPaths) {
@@ -51,13 +54,43 @@ async function collectTestFiles(): Promise<string[]> {
   }
   files.sort((left, right) => left.localeCompare(right));
 
-  for (const isolatedTestPath of isolatedTestPaths) {
+  for (const isolatedTestPath of alwaysIsolatedTestPaths) {
     if (!files.includes(isolatedTestPath)) {
       throw new Error(`Missing required isolated test: ${isolatedTestPath}`);
     }
   }
 
   return files;
+}
+
+async function collectIsolatedTestPaths(opts: {
+  readonly allTests: readonly string[];
+}): Promise<string[]> {
+  const isolatedTestPathSet = new Set<string>(alwaysIsolatedTestPaths);
+
+  for (const testPath of opts.allTests) {
+    const text = await Bun.file(testPath).text();
+    if (text.includes(mockModulePattern)) {
+      isolatedTestPathSet.add(testPath);
+    }
+  }
+
+  const autoIsolatedTestPaths = opts.allTests.filter((testPath) =>
+    isolatedTestPathSet.has(testPath)
+  );
+  const prioritizedIsolatedTestPaths = alwaysIsolatedTestPaths.filter(
+    (testPath) => isolatedTestPathSet.has(testPath)
+  );
+
+  return [
+    ...prioritizedIsolatedTestPaths,
+    ...autoIsolatedTestPaths.filter(
+      (testPath) =>
+        !prioritizedIsolatedTestPaths.includes(
+          testPath as (typeof alwaysIsolatedTestPaths)[number]
+        )
+    ),
+  ];
 }
 
 function testLabel(opts: { readonly testPath: string }): string {

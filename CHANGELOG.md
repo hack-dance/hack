@@ -1,3 +1,13 @@
+## <small>2.5.1 (2026-04-10)</small>
+
+* fix(env): reuse worktree keys and registry identity ([12e5838](https://github.com/hack-dance/hack/commit/12e5838))
+* fix(registry): recover stale same-repo worktree paths ([ec766b2](https://github.com/hack-dance/hack/commit/ec766b2))
+* fix(test): isolate mock-module files in ci ([e04c919](https://github.com/hack-dance/hack/commit/e04c919))
+* fix(test): narrow registry outcome assertions ([c5f49b8](https://github.com/hack-dance/hack/commit/c5f49b8))
+* Merge branch 'main' into fix/worktree-linked-env-inheritance ([a1143fa](https://github.com/hack-dance/hack/commit/a1143fa))
+* Merge branch 'main' into fix/worktree-linked-env-inheritance ([0f1aba8](https://github.com/hack-dance/hack/commit/0f1aba8))
+* Merge pull request #48 from hack-dance/fix/worktree-linked-env-inheritance ([f8a8091](https://github.com/hack-dance/hack/commit/f8a8091)), closes [#48](https://github.com/hack-dance/hack/issues/48)
+
 ## 2.5.0 (2026-04-07)
 
 * test: add env matrix coverage and PR verification guardrails ([6d63ef1](https://github.com/hack-dance/hack/commit/6d63ef1))

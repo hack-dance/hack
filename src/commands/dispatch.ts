@@ -298,8 +298,7 @@ async function handleDispatchRun({
     githubProfile: args.options.githubProfile,
   });
   if (removedPrMessage) {
-    logger.error({ message: removedPrMessage });
-    return 1;
+    logger.warn({ message: removedPrMessage });
   }
   const runner = (args.options.runner ?? "generic").trim() || "generic";
   const ticketId = (args.options.ticket ?? "").trim() || undefined;
@@ -2348,6 +2347,10 @@ function resolveRemovedDispatchPrAutomationMessage(input: {
     "Migration: run `git push -u origin <branch>` and `gh pr create` or `gh pr edit` after the dispatch completes.",
   ].join(" ");
 }
+
+export const __testOnlyDispatch = {
+  resolveRemovedDispatchPrAutomationMessage,
+};
 
 function parseConfigBoolean(input: {
   readonly config: Record<string, unknown>;

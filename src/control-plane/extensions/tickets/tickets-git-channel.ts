@@ -115,6 +115,7 @@ export function createGitTicketsChannel(opts: {
     readonly mutationLockRetryMs?: number;
     readonly mutationLockStaleMs?: number;
     readonly mutationLockTimeoutMs?: number;
+    readonly remoteGitTimeoutMs?: number;
   };
 }): TicketsGitChannel {
   const ticketsDir = resolve(opts.projectRoot, ".hack/tickets");
@@ -146,6 +147,8 @@ export function createGitTicketsChannel(opts: {
   const mutationLockTimeoutMs =
     opts.testOverrides?.mutationLockTimeoutMs ??
     DEFAULT_MUTATION_LOCK_TIMEOUT_MS;
+  const remoteGitTimeoutMs =
+    opts.testOverrides?.remoteGitTimeoutMs ?? DEFAULT_REMOTE_GIT_TIMEOUT_MS;
 
   const resolvePushRefForCheckout = (input: {
     readonly checkoutRef: string;
@@ -534,7 +537,7 @@ export function createGitTicketsChannel(opts: {
     let fetched = await runGitDir({
       args: fetchArgs,
       remote: true,
-      timeoutMs: DEFAULT_REMOTE_GIT_TIMEOUT_MS,
+      timeoutMs: remoteGitTimeoutMs,
     });
     if (!fetched.ok) {
       const retryableLockFailure = isRetryableTrackingRefLockFailure({
@@ -549,7 +552,7 @@ export function createGitTicketsChannel(opts: {
         fetched = await runGitDir({
           args: fetchArgs,
           remote: true,
-          timeoutMs: DEFAULT_REMOTE_GIT_TIMEOUT_MS,
+          timeoutMs: remoteGitTimeoutMs,
         });
       }
     }
@@ -600,7 +603,7 @@ export function createGitTicketsChannel(opts: {
     const push = await runGitDir({
       args: ["push", "origin", `${localBranchRef}:${input.pushRef}`],
       remote: true,
-      timeoutMs: DEFAULT_REMOTE_GIT_TIMEOUT_MS,
+      timeoutMs: remoteGitTimeoutMs,
     });
     if (push.ok) {
       return { ok: true, didPush: true };
@@ -638,7 +641,7 @@ export function createGitTicketsChannel(opts: {
     const prunedLegacy = await runGitDir({
       args: ["push", "origin", `:${legacyRemoteRef}`],
       remote: true,
-      timeoutMs: DEFAULT_REMOTE_GIT_TIMEOUT_MS,
+      timeoutMs: remoteGitTimeoutMs,
     });
     if (!prunedLegacy.ok) {
       return {
@@ -1226,7 +1229,7 @@ export function createGitTicketsChannel(opts: {
     const listed = await runGitDir({
       args: ["ls-remote", "origin", ref],
       remote: true,
-      timeoutMs: DEFAULT_REMOTE_GIT_TIMEOUT_MS,
+      timeoutMs: remoteGitTimeoutMs,
     });
     if (!listed.ok) {
       return false;
@@ -1550,6 +1553,7 @@ async function runGit(opts: {
     stdout: "pipe",
     stderr: "pipe",
     stdin: "ignore",
+    detached: opts.remote === true,
     env: {
       ...process.env,
       ...resolveTicketGitIdentityEnv({
@@ -1563,7 +1567,11 @@ async function runGit(opts: {
     opts.remote === true
       ? (opts.timeoutMs ?? DEFAULT_REMOTE_GIT_TIMEOUT_MS)
       : opts.timeoutMs;
-  const exitCode = await waitForGitProcess({ proc, timeoutMs });
+  const exitCode = await waitForGitProcess({
+    proc,
+    timeoutMs,
+    remote: opts.remote === true,
+  });
   const stdout = await stdoutPromise;
   const rawStderr = await stderrPromise;
   const stderr =
@@ -1580,6 +1588,7 @@ async function runGit(opts: {
 async function waitForGitProcess(input: {
   readonly proc: Bun.Subprocess;
   readonly timeoutMs?: number;
+  readonly remote?: boolean;
 }): Promise<number> {
   if (
     !(typeof input.timeoutMs === "number" && Number.isFinite(input.timeoutMs))
@@ -1593,7 +1602,10 @@ async function waitForGitProcess(input: {
       input.proc.exited,
       new Promise<number>((resolve) => {
         timeoutHandle = setTimeout(() => {
-          input.proc.kill();
+          terminateGitProcess({
+            proc: input.proc,
+            remote: input.remote === true,
+          });
           resolve(124);
         }, timeoutMs);
       }),
@@ -1603,6 +1615,24 @@ async function waitForGitProcess(input: {
       clearTimeout(timeoutHandle);
     }
   }
+}
+
+function terminateGitProcess(input: {
+  readonly proc: Bun.Subprocess;
+  readonly remote: boolean;
+}): void {
+  if (input.remote) {
+    const pid = typeof input.proc.pid === "number" ? input.proc.pid : null;
+    if (pid !== null) {
+      try {
+        process.kill(-pid, "SIGKILL");
+        return;
+      } catch {
+        // Fall back to terminating the direct git process below.
+      }
+    }
+  }
+  input.proc.kill();
 }
 
 function resolveTicketGitIdentityEnv(input?: {

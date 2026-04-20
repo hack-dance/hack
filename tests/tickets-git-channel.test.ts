@@ -413,6 +413,73 @@ test("sync returns actionable SSH guidance when git remote auth fails", async ()
   }
 });
 
+test("sync timeout kills remote git subprocess groups", async () => {
+  const projectRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-git-timeout-",
+  });
+  const remoteScriptPath = join(projectRoot, "fake-ssh-timeout.sh");
+  await writeFile(
+    remoteScriptPath,
+    [
+      "#!/bin/sh",
+      "sleep 30 &",
+      "child=$!",
+      "trap 'kill \"$child\" 2>/dev/null; exit 0' TERM INT",
+      'wait "$child"',
+      "",
+    ].join("\n")
+  );
+  await chmod(remoteScriptPath, 0o755);
+  await run({
+    cwd: projectRoot,
+    cmd: [
+      "git",
+      "remote",
+      "add",
+      "origin",
+      "ssh://git@example.invalid/does-not-exist",
+    ],
+  });
+
+  const originalGitSshCommand = process.env.GIT_SSH_COMMAND;
+  process.env.GIT_SSH_COMMAND = remoteScriptPath;
+  try {
+    const channel = __testOnly.createGitTicketsChannel({
+      projectRoot,
+      config: {
+        enabled: true,
+        branch: "hack/tickets",
+        refMode: "hidden",
+        remote: "origin",
+        forceBareClone: false,
+      },
+      logger: {
+        info: (_input: { message: string }) => {},
+        warn: (_input: { message: string }) => {},
+      },
+      testOverrides: {
+        remoteGitTimeoutMs: 200,
+      },
+    });
+
+    const startedAt = Date.now();
+    const synced = await channel.sync();
+    const elapsedMs = Date.now() - startedAt;
+    expect(synced.ok).toBe(false);
+    if (synced.ok) {
+      throw new Error("Expected sync to fail");
+    }
+    expect(synced.error).toContain("timed out after");
+    expect(elapsedMs).toBeLessThan(5000);
+  } finally {
+    if (originalGitSshCommand === undefined) {
+      process.env.GIT_SSH_COMMAND = undefined;
+    } else {
+      process.env.GIT_SSH_COMMAND = originalGitSshCommand;
+    }
+  }
+}, 10_000);
+
 test("repair reapplies cleanup after a non-fast-forward push retry", async () => {
   const projectRoot = await createTempGitProject({
     prefix: "hack-cli-tickets-git-repair-",

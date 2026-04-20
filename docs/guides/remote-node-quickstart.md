@@ -79,14 +79,12 @@ hack dispatch run \
   -- "pwd"
 ```
 
-If this project is a private GitHub repo and the remote node cannot clone it directly, connect
-GitHub on the controller first:
+If this project is private and the remote node cannot clone it directly, repair native Git access
+on the remote machine first:
 
 ```bash
-hack x github oauth-connect --profile work --set-default
+gh auth login
 ```
-
-See [GitHub workflows](github-workflows.md) for the full optional-vs-required breakdown.
 
 Optional remote check:
 
@@ -100,14 +98,10 @@ Controller route bridge check:
 hack node routes status --json
 ```
 
-## macOS app flow
+## macOS app note
 
-You can do the same flow in Hack Desktop:
-
-1. Open **Settings → System → Topology**.
-2. Click **Add remote node**.
-3. Fill SSH source + endpoint and submit pairing.
-4. Confirm node appears in topology and set it as default.
+Hack Desktop v3 no longer exposes remote-node and topology management as a supported UI surface.
+Use the CLI for remote pairing and route repair.
 
 ## Common fixes
 
@@ -120,6 +114,6 @@ You can do the same flow in Hack Desktop:
 4. Local project URL fails after remote dispatch (`https://<project>.hack`):
    - run `hack node routes status` then `hack node routes repair`.
    - if global proxy is down, run `hack global up` and retry.
-5. Remote bootstrap fails on a private GitHub repo:
-   - connect GitHub on the controller so Hack can retry clone with controller credentials.
-   - run `hack x github oauth-connect --profile work --set-default` and retry.
+5. Remote bootstrap fails on a private repo:
+   - configure native Git access on the remote first.
+   - verify `git clone` or `gh auth status` works outside Hack, then retry.

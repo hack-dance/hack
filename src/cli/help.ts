@@ -226,7 +226,7 @@ function renderCommandHelp(
   lines.push("");
 
   if (command.group === "Beta") {
-    lines.push("Status: Beta workflow");
+    lines.push("Status: Unsupported experimental workflow");
     lines.push("");
   }
 
@@ -281,7 +281,7 @@ function renderCommandHelpMarkdown(
   lines.push("");
 
   if (command.group === "Beta") {
-    lines.push("> Status: Beta workflow.");
+    lines.push("> Status: Unsupported experimental workflow.");
     lines.push("");
   }
 
@@ -450,8 +450,8 @@ function groupLabel(group: CliGroup): string {
     {
       Global: "Global commands",
       Project: "Core workflows",
-      Integrations: "Collaboration & integrations",
-      Beta: "Beta workflows",
+      Integrations: "Local helpers",
+      Beta: "Unsupported experimental",
       Extensions: "Extension commands",
       Agents: "Agent integrations",
       Diagnostics: "Diagnostics",

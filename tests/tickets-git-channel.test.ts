@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readdir,
@@ -337,6 +338,79 @@ test("resolveLegacyImportFetchResult ignores missing legacy refs", () => {
     ok: true,
     imported: false,
   });
+});
+
+test("formatTicketsGitRemoteError adds actionable SSH guidance", () => {
+  const message = __testOnly.formatTicketsGitRemoteError({
+    message:
+      'sign_and_send_pubkey: signing failed for ED25519 "/Users/hack/.ssh/id_ed25519" from agent: agent refused operation\nPermission denied (publickey).',
+    operation: "fetch",
+  });
+
+  expect(message).toContain("Unlock your SSH agent or 1Password");
+  expect(message).toContain("ssh -T git@github.com");
+  expect(__testOnly.isTicketsGitRemoteConnectivityError(message)).toBe(true);
+});
+
+test("sync returns actionable SSH guidance when git remote auth fails", async () => {
+  const projectRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-git-auth-failure-",
+  });
+  const remoteScriptPath = join(projectRoot, "fake-ssh.sh");
+  await writeFile(
+    remoteScriptPath,
+    [
+      "#!/bin/sh",
+      "echo 'sign_and_send_pubkey: signing failed for ED25519 \"/Users/hack/.ssh/id_ed25519\" from agent: agent refused operation' >&2",
+      'echo "git@github.com: Permission denied (publickey)." >&2',
+      "exit 255",
+      "",
+    ].join("\n")
+  );
+  await chmod(remoteScriptPath, 0o755);
+  await run({
+    cwd: projectRoot,
+    cmd: [
+      "git",
+      "remote",
+      "add",
+      "origin",
+      "ssh://git@example.invalid/does-not-exist",
+    ],
+  });
+
+  const originalGitSshCommand = process.env.GIT_SSH_COMMAND;
+  process.env.GIT_SSH_COMMAND = remoteScriptPath;
+  try {
+    const channel = __testOnly.createGitTicketsChannel({
+      projectRoot,
+      config: {
+        enabled: true,
+        branch: "hack/tickets",
+        refMode: "hidden",
+        remote: "origin",
+        forceBareClone: false,
+      },
+      logger: {
+        info: (_input: { message: string }) => {},
+        warn: (_input: { message: string }) => {},
+      },
+    });
+
+    const synced = await channel.sync();
+    expect(synced.ok).toBe(false);
+    if (synced.ok) {
+      throw new Error("Expected sync to fail");
+    }
+    expect(synced.error).toContain("Unlock your SSH agent or 1Password");
+    expect(synced.error).toContain("ssh -T git@github.com");
+  } finally {
+    if (originalGitSshCommand === undefined) {
+      process.env.GIT_SSH_COMMAND = undefined;
+    } else {
+      process.env.GIT_SSH_COMMAND = originalGitSshCommand;
+    }
+  }
 });
 
 test("repair reapplies cleanup after a non-fast-forward push retry", async () => {

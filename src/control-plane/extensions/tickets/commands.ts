@@ -47,6 +47,7 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
     name: "setup",
     summary: "Install tickets integrations (skill + agent docs)",
     scope: "project",
+    // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Tickets setup intentionally coordinates repo, skill, and docs repair in one CLI flow.
     handler: async ({ ctx, args }) => {
       if (!ctx.project) {
         ctx.logger.error({ message: "No project found. Run inside a repo." });
@@ -210,6 +211,7 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
     name: "create",
     summary: "Create a new ticket",
     scope: "project",
+    // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Ticket creation keeps validation and projection writeback together for CLI UX.
     handler: async ({ ctx, args }) => {
       if (!ctx.project) {
         ctx.logger.error({ message: "No project found. Run inside a repo." });
@@ -330,6 +332,7 @@ export const TICKETS_COMMANDS: readonly ExtensionCommand[] = [
     name: "update",
     summary: "Update a ticket",
     scope: "project",
+    // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Ticket update keeps patch validation and projection writeback together for CLI UX.
     handler: async ({ ctx, args }) => {
       if (!ctx.project) {
         ctx.logger.error({ message: "No project found. Run inside a repo." });

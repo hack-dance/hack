@@ -75,8 +75,6 @@ bash scripts/maintain-codex-slim.sh
 ## Good fit for slim mode
 
 - `hack tickets`
-- `hack linear`
-- `hack x github`
 - `hack env list`
 - `hack host exec`
 - `hack host shell`

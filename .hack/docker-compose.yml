@@ -10,48 +10,6 @@ services:
     networks:
       - default
 
-  web:
-    image: imbios/bun-node:latest
-    working_dir: /app
-    volumes:
-      - ..:/app
-      - node_modules:/app/node_modules
-    depends_on:
-      deps:
-        condition: service_completed_successfully
-    command: bun run --cwd apps/web dev -- --hostname 0.0.0.0 --port 3000
-    environment:
-      CHOKIDAR_USEPOLLING: "true"
-      WATCHPACK_POLLING: "true"
-    labels:
-      caddy: "hack-cli.hack, hack-cli.hack.gy"
-      caddy.reverse_proxy: "{{upstreams 3000}}"
-      caddy.tls: internal
-    networks:
-      - hack-dev
-      - default
-
-  auth-broker:
-    image: imbios/bun-node:latest
-    working_dir: /app
-    volumes:
-      - ..:/app
-      - node_modules:/app/node_modules
-    depends_on:
-      deps:
-        condition: service_completed_successfully
-    command: bun run --cwd services/auth-broker start
-    environment:
-      PORT: "8080"
-      HOST: "0.0.0.0"
-    labels:
-      caddy: "auth.hack-cli.hack, auth.hack-cli.hack.gy"
-      caddy.reverse_proxy: "{{upstreams 8080}}"
-      caddy.tls: internal
-    networks:
-      - hack-dev
-      - default
-
 networks:
   hack-dev:
     external: true

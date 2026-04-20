@@ -1,3 +1,4 @@
+// biome-ignore-all lint/complexity/noExcessiveCognitiveComplexity: The terminal dashboard is intentionally event-driven and keeps renderer state and keybindings colocated.
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import {

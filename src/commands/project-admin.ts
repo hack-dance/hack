@@ -3,7 +3,6 @@ import type { CommandHandlerFor } from "../cli/command.ts";
 import { CliUsageError, defineCommand, withHandler } from "../cli/command.ts";
 import { optJson, optPath, optProject } from "../cli/options.ts";
 import { HACK_PROJECT_DIR_PRIMARY } from "../constants.ts";
-import { requestHackAuthBroker } from "../lib/auth-broker-client.ts";
 import {
   findProjectContext,
   readProjectConfig,
@@ -16,7 +15,7 @@ const ownerShowOptions = [optPath, optProject, optJson] as const;
 
 const ownerShowSpec = defineCommand({
   name: "show",
-  summary: "Show the explicit ownership for the current project",
+  summary: "Show the local ownership metadata for the current project",
   group: "Project",
   options: ownerShowOptions,
   positionals: [],
@@ -25,7 +24,7 @@ const ownerShowSpec = defineCommand({
 
 const ownerSpec = defineCommand({
   name: "owner",
-  summary: "Inspect or manage project ownership",
+  summary: "Inspect project ownership",
   group: "Project",
   options: [],
   positionals: [],
@@ -55,19 +54,15 @@ const handleOwnerShow: CommandHandlerFor<typeof ownerShowSpec> = async ({
     const configPath = config.configPath ?? project.configFile;
     throw new Error(`Failed to parse ${configPath}: ${config.parseError}`);
   }
-  const brokerView = await resolveBrokerOwnershipView({
-    projectSlug: resolveProjectSlug(config.name),
-    ownership: config.ownership,
-  });
   const payload = {
     project_root: project.projectRoot,
+    project_slug: resolveProjectSlug(config.name),
     ownership: {
       mode: config.ownership.mode,
       owner_type: config.ownership.ownerType,
       owner_id: config.ownership.ownerId,
       managed_by: config.ownership.managedBy,
     },
-    ...brokerView,
   };
 
   if (args.options.json === true) {
@@ -78,16 +73,11 @@ const handleOwnerShow: CommandHandlerFor<typeof ownerShowSpec> = async ({
   await display.kv({
     entries: [
       ["Project root", payload.project_root],
+      ["Project slug", payload.project_slug ?? ""],
       ["Ownership mode", payload.ownership.mode],
       ["Owner type", payload.ownership.owner_type],
       ["Owner id", payload.ownership.owner_id ?? ""],
       ["Managed by", payload.ownership.managed_by],
-      [
-        "Broker registration",
-        payload.broker_registration ? payload.broker_registration.slug : "",
-      ],
-      ["Broker error", payload.broker_error?.message ?? ""],
-      ["Conflict", payload.conflict?.message ?? ""],
     ],
   });
   return 0;
@@ -138,244 +128,10 @@ async function resolveProjectTarget(input: {
   return project;
 }
 
-async function resolveBrokerOwnershipView(input: {
-  readonly projectSlug: string | null;
-  readonly ownership: {
-    readonly mode: "local" | "shared";
-    readonly ownerType: "user" | "team" | "organization";
-    readonly ownerId: string | null;
-    readonly managedBy: "local" | "broker";
-  };
-}): Promise<{
-  readonly broker_registration?: {
-    readonly id: string;
-    readonly slug: string;
-    readonly name: string;
-    readonly current_access_role: "viewer" | "admin" | "owner";
-    readonly ownership: {
-      readonly mode: "local" | "shared";
-      readonly owner_type: "user" | "team" | "organization";
-      readonly owner_id: string | null;
-      readonly owner_slug: string | null;
-      readonly owner_name: string | null;
-      readonly managed_by: "local" | "broker";
-    };
-    readonly access: readonly {
-      readonly id: string;
-      readonly scope: string;
-      readonly role: string;
-      readonly subject_id: string;
-      readonly subject_slug: string;
-      readonly subject_name: string;
-      readonly organization_id: string;
-      readonly team_id: string | null;
-      readonly created_at: string;
-      readonly updated_at: string;
-    }[];
-  };
-  readonly broker_error?: {
-    readonly message: string;
-    readonly login_required: boolean;
-  };
-  readonly conflict?: {
-    readonly kind: "ownership_mismatch";
-    readonly message: string;
-  };
-}> {
-  if (!input.projectSlug) {
-    return {};
-  }
-
-  const response = await requestHackAuthBroker({
-    path: `/v1/auth/projects/${encodeURIComponent(input.projectSlug)}`,
-  });
-  if (!response.ok) {
-    return {
-      broker_error: {
-        message: response.error,
-        login_required: response.loginRequired,
-      },
-    };
-  }
-
-  const project = normalizeBrokerProject(response.value.project);
-  if (!project) {
-    return {};
-  }
-
-  const access = normalizeBrokerAccessList(response.value.access);
-  const brokerRegistration = {
-    id: project.id,
-    slug: project.slug,
-    name: project.name,
-    current_access_role: project.currentAccessRole,
-    ownership: {
-      mode: project.ownership.mode,
-      owner_type: project.ownership.ownerType,
-      owner_id: project.ownership.ownerId,
-      owner_slug: project.ownership.ownerSlug,
-      owner_name: project.ownership.ownerName,
-      managed_by: project.ownership.managedBy,
-    },
-    access,
-  };
-
-  const conflict =
-    input.ownership.ownerType !== project.ownership.ownerType ||
-    input.ownership.ownerId !== project.ownership.ownerId ||
-    input.ownership.mode !== project.ownership.mode
-      ? {
-          kind: "ownership_mismatch" as const,
-          message:
-            "The local project ownership does not match the broker registration for this project.",
-        }
-      : undefined;
-
-  return {
-    broker_registration: brokerRegistration,
-    ...(conflict ? { conflict } : {}),
-  };
-}
-
 function resolveProjectSlug(value: string | undefined): string | null {
   const trimmed = value?.trim() ?? "";
   if (trimmed.length === 0) {
     return null;
   }
   return sanitizeProjectSlug(trimmed);
-}
-
-function normalizeBrokerProject(value: unknown) {
-  if (!isRecord(value)) {
-    return null;
-  }
-  const id = readString(value.id);
-  const slug = readString(value.slug);
-  const name = readString(value.name);
-  const currentAccessRole = readRole(value.currentAccessRole);
-  const ownership = normalizeBrokerOwnership(value.ownership);
-  if (!(id && slug && name && currentAccessRole && ownership)) {
-    return null;
-  }
-  return {
-    id,
-    slug,
-    name,
-    currentAccessRole,
-    ownership,
-  };
-}
-
-function normalizeBrokerOwnership(value: unknown) {
-  if (!isRecord(value)) {
-    return null;
-  }
-  const mode = readOwnershipMode(value.mode);
-  const ownerType = readOwnerType(value.ownerType);
-  const managedBy = readManagedBy(value.managedBy);
-  if (!(mode && ownerType && managedBy)) {
-    return null;
-  }
-  return {
-    mode,
-    ownerType,
-    ownerId: readNullableString(value.ownerId),
-    ownerSlug: readNullableString(value.ownerSlug),
-    ownerName: readNullableString(value.ownerName),
-    managedBy,
-  };
-}
-
-function normalizeBrokerAccessList(value: unknown) {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value
-    .map((entry) => normalizeBrokerAccess(entry))
-    .filter(
-      (entry): entry is NonNullable<ReturnType<typeof normalizeBrokerAccess>> =>
-        Boolean(entry)
-    );
-}
-
-function normalizeBrokerAccess(value: unknown) {
-  if (!isRecord(value)) {
-    return null;
-  }
-  const id = readString(value.id);
-  const scope =
-    value.scope === "organization" || value.scope === "team"
-      ? value.scope
-      : null;
-  const role =
-    value.role === "viewer" || value.role === "admin" ? value.role : null;
-  const subjectId = readString(value.subjectId);
-  const subjectSlug = readString(value.subjectSlug);
-  const subjectName = readString(value.subjectName);
-  const organizationId = readString(value.organizationId);
-  const createdAt = readString(value.createdAt);
-  const updatedAt = readString(value.updatedAt);
-  if (
-    !(
-      id &&
-      scope &&
-      role &&
-      subjectId &&
-      subjectSlug &&
-      subjectName &&
-      organizationId &&
-      createdAt &&
-      updatedAt
-    )
-  ) {
-    return null;
-  }
-  return {
-    id,
-    scope,
-    role,
-    subject_id: subjectId,
-    subject_slug: subjectSlug,
-    subject_name: subjectName,
-    organization_id: organizationId,
-    team_id: readNullableString(value.teamId),
-    created_at: createdAt,
-    updated_at: updatedAt,
-  };
-}
-
-function readString(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0
-    ? value.trim()
-    : null;
-}
-
-function readNullableString(value: unknown): string | null {
-  return readString(value);
-}
-
-function readOwnershipMode(value: unknown): "local" | "shared" | null {
-  return value === "local" || value === "shared" ? value : null;
-}
-
-function readOwnerType(
-  value: unknown
-): "user" | "team" | "organization" | null {
-  return value === "user" || value === "team" || value === "organization"
-    ? value
-    : null;
-}
-
-function readManagedBy(value: unknown): "local" | "broker" | null {
-  return value === "local" || value === "broker" ? value : null;
-}
-
-function readRole(value: unknown): "viewer" | "admin" | "owner" | null {
-  return value === "viewer" || value === "admin" || value === "owner"
-    ? value
-    : null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
 }

@@ -59,6 +59,7 @@ test("project owner show returns default local ownership as json", async () => {
   expect(result.stderr.trim()).toBe("");
   expect(JSON.parse(result.stdout)).toEqual({
     project_root: projectRoot,
+    project_slug: null,
     ownership: {
       mode: "local",
       owner_type: "user",
@@ -90,6 +91,7 @@ test("project owner show returns explicit shared ownership as json", async () =>
   expect(result.stderr.trim()).toBe("");
   expect(JSON.parse(result.stdout)).toEqual({
     project_root: projectRoot,
+    project_slug: null,
     ownership: {
       mode: "shared",
       owner_type: "organization",

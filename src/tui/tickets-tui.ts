@@ -1,3 +1,4 @@
+// biome-ignore-all lint/complexity/noExcessiveCognitiveComplexity: The tickets TUI keeps overlay and keyboard interaction state inline with renderer wiring.
 import {
   BoxRenderable,
   createCliRenderer,

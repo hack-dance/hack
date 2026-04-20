@@ -38,6 +38,7 @@ export function createStructuredLogGrouper(opts: {
     emit(buffer.rawLines);
   };
 
+  // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Grouped log parsing keeps multiline buffering rules inline with stream state.
   const handleLine = (line: string) => {
     const current: string | null = line;
     while (current) {

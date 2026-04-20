@@ -1,3 +1,4 @@
+// biome-ignore-all lint/complexity/noExcessiveCognitiveComplexity: Unsupported experimental remote route registry handling stays explicit for auditability.
 import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { YAML } from "bun";

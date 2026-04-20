@@ -75,7 +75,7 @@ describe("gateway client error parsing", () => {
     expect(response.error.code).toBe("bootstrap_clone_failed");
   });
 
-  test("serializes github bootstrap auth in workspace ensure payload", async () => {
+  test("serializes workspace ensure payload without controller-side repo auth", async () => {
     const captured = { body: undefined as Record<string, unknown> | undefined };
     installFetchMock({
       mock: async (_input, init) => {
@@ -91,7 +91,7 @@ describe("gateway client error parsing", () => {
               projectDir: "/workspace/hack-cli/.hack",
               branch: "main",
             },
-            bootstrap_auth_source: "controller_github_token",
+            bootstrap_auth_source: "native_git",
           }),
           {
             status: 200,
@@ -111,11 +111,6 @@ describe("gateway client error parsing", () => {
       bootstrap: {
         repoUrl: "git@github.com:hack-dance/hack-cli.git",
         projectName: "hack-cli",
-        githubAuth: {
-          token: "gho_test",
-          owner: "hack-dance",
-          repo: "hack-cli",
-        },
       },
     });
 
@@ -123,18 +118,13 @@ describe("gateway client error parsing", () => {
     if (!response.ok) {
       throw new Error("Expected successful workspace response");
     }
-    expect(response.data.bootstrapAuthSource).toBe("controller_github_token");
+    expect(response.data.bootstrapAuthSource).toBe("native_git");
     if (captured.body === undefined) {
       throw new Error("Expected workspace request payload to be captured");
     }
     expect(captured.body.bootstrap).toEqual({
       repo_url: "git@github.com:hack-dance/hack-cli.git",
       project_name: "hack-cli",
-      github_auth: {
-        token: "gho_test",
-        owner: "hack-dance",
-        repo: "hack-cli",
-      },
     });
   });
 
@@ -166,11 +156,6 @@ describe("gateway client error parsing", () => {
     });
     const response = await client.probeNodeGitAccess({
       repoUrl: "git@github.com:hack-dance/hack-cli.git",
-      githubAuth: {
-        token: "gho_test",
-        owner: "hack-dance",
-        repo: "hack-cli",
-      },
     });
 
     expect(response.ok).toBe(true);
@@ -183,11 +168,6 @@ describe("gateway client error parsing", () => {
     }
     expect(captured.body).toEqual({
       repo_url: "git@github.com:hack-dance/hack-cli.git",
-      github_auth: {
-        token: "gho_test",
-        owner: "hack-dance",
-        repo: "hack-cli",
-      },
     });
   });
 

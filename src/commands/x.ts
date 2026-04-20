@@ -59,6 +59,15 @@ async function handleX({
   const namespace = invocation.namespace ?? "";
   const extension = loaded.manager.getExtensionByNamespace({ namespace });
   if (!extension) {
+    if (namespace === "github" || namespace === "linear") {
+      logger.error({
+        message:
+          namespace === "github"
+            ? "Built-in GitHub integration was removed in v3. Use native git and gh workflows instead."
+            : "Built-in Linear integration was removed in v3. Use repo-local tickets and keep Linear outside Hack.",
+      });
+      return 1;
+    }
     logger.error({ message: `Unknown extension namespace: ${namespace}` });
     return 1;
   }

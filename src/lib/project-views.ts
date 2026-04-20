@@ -115,6 +115,7 @@ type BuildProjectViewsOptions = {
   readonly muxSessions?: readonly MuxSession[];
 };
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Project views aggregate many optional runtime signals into one read model.
 export async function buildProjectViews(
   opts: BuildProjectViewsOptions
 ): Promise<ProjectView[]> {

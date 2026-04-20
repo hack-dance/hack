@@ -37,7 +37,10 @@ let package = Package(
         .product(name: "MarkdownUI", package: "swift-markdown-ui"),
         .product(name: "Highlightr", package: "Highlightr")
       ],
-      path: "Packages/Features/DashboardFeature/Sources/DashboardFeature"
+      path: "Packages/Features/DashboardFeature/Sources/DashboardFeature",
+      exclude: [
+        "TicketMarkdownCodeSyntaxHighlighter.swift",
+      ]
     ),
     .testTarget(
       name: "HackDesktopModelsTests",

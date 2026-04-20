@@ -156,6 +156,57 @@ test("doctor guidance includes daemon recovery for stale local api state", () =>
   expect(guidance.configurationRepair).toEqual([]);
 });
 
+test("doctor guidance routes runtime hygiene drift to projects prune", () => {
+  const guidance = buildDoctorRecoveryGuidance({
+    results: [
+      {
+        name: "runtime hygiene",
+        status: "warn",
+        message:
+          "1 missing registry entry; 2 orphaned runtime projects (run: hack projects prune)",
+      },
+    ],
+  });
+
+  expect(guidance.temporaryBreakage).toEqual(["hack projects prune"]);
+  expect(guidance.configurationRepair).toEqual([]);
+  expect(guidance.followUp).toEqual([]);
+});
+
+test("doctor guidance routes stale lifecycle state to hack down", () => {
+  const guidance = buildDoctorRecoveryGuidance({
+    results: [
+      {
+        name: "lifecycle hygiene",
+        status: "warn",
+        message:
+          "1 stale lifecycle state entry; 2 orphaned lifecycle process groups (run: hack down)",
+      },
+    ],
+  });
+
+  expect(guidance.temporaryBreakage).toEqual(["hack down"]);
+  expect(guidance.configurationRepair).toEqual([]);
+  expect(guidance.followUp).toEqual([]);
+});
+
+test("doctor guidance routes env materialization drift to hack env materialize", () => {
+  const guidance = buildDoctorRecoveryGuidance({
+    results: [
+      {
+        name: "env materialization",
+        status: "warn",
+        message:
+          "1 env input file changed since materialization (run: hack env materialize)",
+      },
+    ],
+  });
+
+  expect(guidance.temporaryBreakage).toEqual([]);
+  expect(guidance.configurationRepair).toEqual(["hack env materialize"]);
+  expect(guidance.followUp).toEqual([]);
+});
+
 test("doctor guidance keeps unmatched failures as follow-up instead of guessing", () => {
   const guidance = buildDoctorRecoveryGuidance({
     results: [
@@ -198,6 +249,27 @@ test("doctor guidance ignores optional dependency noise and inactive gateway tok
   expect(guidance.followUp).toEqual([]);
 });
 
+test("doctor guidance ignores skipped and non-project warnings", () => {
+  const guidance = buildDoctorRecoveryGuidance({
+    results: [
+      {
+        name: "project",
+        status: "warn",
+        message: "Missing .hack/ (run 'hack init' in a repo)",
+      },
+      {
+        name: "env mode",
+        status: "warn",
+        message: "Skipped (no .hack/ found)",
+      },
+    ],
+  });
+
+  expect(guidance.temporaryBreakage).toEqual([]);
+  expect(guidance.configurationRepair).toEqual([]);
+  expect(guidance.followUp).toEqual([]);
+});
+
 test("doctor summary groups detailed checks into concise sections", () => {
   const lines = buildDoctorSummaryLines({
     results: [
@@ -211,10 +283,28 @@ test("doctor summary groups detailed checks into concise sections", () => {
       { name: "gateway tokens", status: "warn", message: "No active tokens" },
       { name: "dns:hack", status: "ok", message: "logs.hack -> 127.0.0.1" },
       {
+        name: "runtime hygiene",
+        status: "warn",
+        message:
+          "1 missing registry entry; 1 orphaned runtime project (run: hack projects prune)",
+      },
+      {
+        name: "lifecycle hygiene",
+        status: "warn",
+        message:
+          "1 stale lifecycle state entry; 2 orphaned lifecycle process groups (run: hack down)",
+      },
+      {
         name: "env mode",
         status: "warn",
         message:
           "Legacy env format detected (.hack/hack.env.json). Run `hack doctor --migrate-env-config` to upgrade.",
+      },
+      {
+        name: "env materialization",
+        status: "warn",
+        message:
+          "1 env input file changed since materialization (run: hack env materialize)",
       },
       {
         name: "tickets git",
@@ -228,7 +318,7 @@ test("doctor summary groups detailed checks into concise sections", () => {
     "Dependencies: warn - optional missing: caddy",
     "Runtime: warn - no active gateway tokens",
     "Resolver & DNS: ok",
-    "Project & env: warn - legacy env format detected",
+    "Project & env: warn - runtime hygiene: 1 missing registry entry; 1 orphaned runtime project (run: hack projects prune); lifecycle hygiene: 1 stale lifecycle state entry; 2 orphaned lifecycle process groups (run: hack down); +2 more",
     "Sessions & tickets: ok",
   ]);
 });
@@ -250,6 +340,30 @@ test("recovery next steps quote repo paths for copy-paste safety", () => {
     "Run `hack doctor --path '/tmp/work repo'` to classify restart versus repair work.",
     "Temporary breakage: `hack restart --path '/tmp/work repo'`.",
     "Configuration repair: `hack doctor --fix --path '/tmp/work repo'`.",
+    "Verify with `hack doctor --path '/tmp/work repo'`.",
+    "If it still fails, run `hack crash-capture --path '/tmp/work repo'` again after the next repro.",
+  ]);
+});
+
+test("recovery next steps leave projects prune unscoped", () => {
+  const nextSteps = buildRecoveryNextSteps({
+    guidance: {
+      temporaryBreakage: ["hack projects prune", "hack down"],
+      configurationRepair: ["hack doctor --fix", "hack env materialize"],
+      followUp: [],
+      verify: ["hack doctor"],
+      capture: ["hack crash-capture --path <repo>"],
+    },
+    projectRoot: "/tmp/work repo",
+    includeClassifyStep: true,
+  });
+
+  expect(nextSteps).toEqual([
+    "Run `hack doctor --path '/tmp/work repo'` to classify restart versus repair work.",
+    "Temporary breakage: `hack projects prune`.",
+    "Temporary breakage: `hack down --path '/tmp/work repo'`.",
+    "Configuration repair: `hack doctor --fix --path '/tmp/work repo'`.",
+    "Configuration repair: `hack env materialize --path '/tmp/work repo'`.",
     "Verify with `hack doctor --path '/tmp/work repo'`.",
     "If it still fails, run `hack crash-capture --path '/tmp/work repo'` again after the next repro.",
   ]);

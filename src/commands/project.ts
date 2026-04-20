@@ -121,6 +121,11 @@ import {
 } from "../lib/project-env-config.ts";
 import { resolveProjectExecutionTarget } from "../lib/project-execution.ts";
 import {
+  readProcessSnapshot,
+  resolveLifecycleProcessGroupIdsForTmuxState,
+  resolvePersistedLifecycleProcessGroupIds,
+} from "../lib/project-lifecycle-processes.ts";
+import {
   readProjectRuntimeStateEntry,
   removeProjectRuntimeStateEntry,
   upsertProjectRuntimeStateEntry,
@@ -170,7 +175,6 @@ const CADDY_LABEL_PATTERN = /^(\s*)caddy:\s*(.*)$/;
 
 /** Regex to check if a string starts with a URL scheme (e.g., "http://", "https://"). */
 const URL_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//;
-const WHITESPACE_PATTERN = /\s+/;
 
 const optManual = defineOption({
   name: "manual",
@@ -1860,6 +1864,12 @@ async function stopLifecycleProcesses(opts: {
     await backend.killSession({ name: sessionName });
   }
 
+  await terminateLifecycleProcessGroups({
+    processGroupIds: await resolvePersistedLifecycleProcessGroupIdsForEntry({
+      lifecycleEntry,
+    }),
+  });
+
   await removeLifecycleStateEntry({
     projectDir: opts.project.projectDir,
     composeProject: opts.composeProject,
@@ -1896,12 +1906,6 @@ async function interruptLifecycleTmuxProcesses(opts: {
     }),
   });
 }
-
-type ProcessSnapshotRow = {
-  readonly pid: number;
-  readonly ppid: number;
-  readonly processGroupId: number;
-};
 
 async function readTmuxPanePids(opts: {
   readonly sessionName: string;
@@ -1940,104 +1944,6 @@ async function readProcessGroupIdForPid(opts: {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
-async function readProcessSnapshot(): Promise<ProcessSnapshotRow[]> {
-  const result = await exec(["ps", "-axo", "pid=,ppid=,pgid="], {
-    stdin: "ignore",
-  });
-  if (result.exitCode !== 0) {
-    return [];
-  }
-  return parseProcessSnapshotOutput(result.stdout);
-}
-
-export function parseProcessSnapshotOutput(text: string): ProcessSnapshotRow[] {
-  return text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .flatMap((line) => {
-      const parts = line.split(WHITESPACE_PATTERN);
-      if (parts.length < 3) {
-        return [];
-      }
-      const pid = Number.parseInt(parts[0] ?? "", 10);
-      const ppid = Number.parseInt(parts[1] ?? "", 10);
-      const processGroupId = Number.parseInt(parts[2] ?? "", 10);
-      if (
-        !(
-          Number.isInteger(pid) &&
-          pid > 0 &&
-          Number.isInteger(ppid) &&
-          ppid >= 0 &&
-          Number.isInteger(processGroupId) &&
-          processGroupId > 0
-        )
-      ) {
-        return [];
-      }
-      return [{ pid, ppid, processGroupId }];
-    });
-}
-
-export function collectDescendantProcessGroupIds(opts: {
-  readonly snapshot: readonly ProcessSnapshotRow[];
-  readonly rootPids: readonly number[];
-}): number[] {
-  const processByParent = new Map<number, ProcessSnapshotRow[]>();
-  const groups = new Set<number>();
-  const queue = [...opts.rootPids];
-  const visited = new Set<number>();
-
-  for (const row of opts.snapshot) {
-    const siblings = processByParent.get(row.ppid) ?? [];
-    siblings.push(row);
-    processByParent.set(row.ppid, siblings);
-  }
-
-  while (queue.length > 0) {
-    const pid = queue.shift();
-    if (!(pid && pid > 0) || visited.has(pid)) {
-      continue;
-    }
-    visited.add(pid);
-
-    const current = opts.snapshot.find((row) => row.pid === pid);
-    if (current) {
-      groups.add(current.processGroupId);
-    }
-
-    for (const child of processByParent.get(pid) ?? []) {
-      groups.add(child.processGroupId);
-      if (!visited.has(child.pid)) {
-        queue.push(child.pid);
-      }
-    }
-  }
-
-  return [...groups].sort((left, right) => left - right);
-}
-
-export function resolveLifecycleProcessGroupIdsForTmuxState(opts: {
-  readonly lifecycleEntry: LifecycleStateEntry | null;
-  readonly panePidsByWindow: ReadonlyMap<string, readonly number[]>;
-  readonly snapshot: readonly ProcessSnapshotRow[];
-}): number[] {
-  const rootPids = new Set<number>();
-
-  for (const processInfo of opts.lifecycleEntry?.processes ?? []) {
-    const currentPanePids =
-      opts.panePidsByWindow.get(processInfo.windowName) ?? [];
-    for (const panePid of currentPanePids) {
-      rootPids.add(panePid);
-    }
-  }
-
-  return collectDescendantProcessGroupIds({
-    snapshot: opts.snapshot,
-    rootPids: [...rootPids],
-  });
-}
-
 async function resolveLifecycleProcessGroupIds(opts: {
   readonly sessionName: string;
   readonly lifecycleEntry: LifecycleStateEntry | null;
@@ -2054,6 +1960,19 @@ async function resolveLifecycleProcessGroupIds(opts: {
   return resolveLifecycleProcessGroupIdsForTmuxState({
     lifecycleEntry: opts.lifecycleEntry,
     panePidsByWindow,
+    snapshot: await readProcessSnapshot(),
+  });
+}
+
+async function resolvePersistedLifecycleProcessGroupIdsForEntry(opts: {
+  readonly lifecycleEntry: LifecycleStateEntry | null;
+}): Promise<number[]> {
+  if (!opts.lifecycleEntry) {
+    return [];
+  }
+
+  return resolvePersistedLifecycleProcessGroupIds({
+    lifecycleEntry: opts.lifecycleEntry,
     snapshot: await readProcessSnapshot(),
   });
 }
@@ -4117,7 +4036,7 @@ function validateRepoRelativeWorkingDir(
     return "Required";
   }
   if (v.startsWith("/")) {
-    return "Use a repo-relative path (e.g. ., apps/web)";
+    return "Use a repo-relative path (e.g. ., apps/api)";
   }
   return undefined;
 }

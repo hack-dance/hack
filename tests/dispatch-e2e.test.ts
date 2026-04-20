@@ -90,7 +90,6 @@ runTest(
 
     const nodeToken = "dispatch-e2e-node-token";
     const nodeTokenEnv = "HACK_DISPATCH_E2E_NODE_TOKEN";
-    const githubToken = "dispatch-e2e-github-token";
     const nodeId = "dispatch-e2e-node";
     const authRef = `env:${nodeTokenEnv}`;
     trackedAuthRefs.push(authRef);
@@ -143,7 +142,6 @@ runTest(
           HOME: tempHome,
           HACK_GLOBAL_CONFIG_PATH: "",
           [nodeTokenEnv]: nodeToken,
-          HACK_GITHUB_APP_TOKEN: githubToken,
           NO_COLOR: "1",
         },
       });
@@ -176,19 +174,8 @@ runTest(
         | undefined;
       expect(bootstrap?.repo_url).toBe("https://github.com/example/repo.git");
       expect(bootstrap?.project_name).toBe("dispatch-e2e");
-      const githubAuth = bootstrap?.github_auth as
-        | Record<string, unknown>
-        | undefined;
-      expect(githubAuth?.token).toBe(githubToken);
-      expect(githubAuth?.owner).toBe("example");
-      expect(githubAuth?.repo).toBe("repo");
       expect(gitProbePayload).toEqual({
         repo_url: "https://github.com/example/repo.git",
-        github_auth: {
-          token: githubToken,
-          owner: "example",
-          repo: "repo",
-        },
       });
       const jobCreatePayload = gateway.state.jobCreatePayload;
       if (!jobCreatePayload) {
@@ -385,7 +372,6 @@ runTest(
 
     const nodeToken = "dispatch-upgrade-node-token";
     const nodeTokenEnv = "HACK_DISPATCH_UPGRADE_NODE_TOKEN";
-    const githubToken = "dispatch-upgrade-github-token";
     const nodeId = "dispatch-upgrade-node";
     const authRef = `env:${nodeTokenEnv}`;
     trackedAuthRefs.push(authRef);
@@ -439,14 +425,12 @@ runTest(
           HOME: tempHome,
           HACK_GLOBAL_CONFIG_PATH: "",
           [nodeTokenEnv]: nodeToken,
-          HACK_GITHUB_APP_TOKEN: githubToken,
           NO_COLOR: "1",
         },
       });
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain("Workspace ensure failed (500)");
-      expect(result.stderr).toContain("missing /v1/node/git/probe");
-      expect(result.stderr).toContain("Update hack on the remote node");
+      expect(result.stderr).toContain("bootstrap_clone_failed");
     } finally {
       gateway.stop();
     }

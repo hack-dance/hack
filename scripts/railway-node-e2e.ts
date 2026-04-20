@@ -104,8 +104,8 @@ const runHack = async ({
     stderr: "pipe",
   });
   const [stdoutBytes, stderrBytes, exitCode] = await Promise.all([
-    proc.stdout.text(),
-    proc.stderr.text(),
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
     proc.exited,
   ]);
   return {

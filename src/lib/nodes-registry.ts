@@ -267,6 +267,7 @@ export async function upsertNodeRecord(input: {
   readonly platform?: string;
   readonly arch?: string;
 }): Promise<{ readonly node: NodeRecord; readonly created: boolean }> {
+  // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Registry upsert preserves explicit merge behavior inside the lock boundary.
   return await withRegistryLock(async () => {
     const registry = await readNodesRegistry();
     const nowIso = new Date().toISOString();

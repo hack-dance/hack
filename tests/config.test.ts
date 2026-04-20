@@ -153,21 +153,21 @@ describe("project config batch utilities", () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  test("updateProjectConfigBatch persists multi-key linear binding in one write", async () => {
+  test("updateProjectConfigBatch persists multi-key routing overrides in one write", async () => {
     await updateProjectConfigBatch({
       projectDir,
       values: [
         {
-          path: "controlPlane.routing.overrides.linear.projectId",
-          value: "proj_live_nation",
+          path: "controlPlane.routing.overrides.local.projectId",
+          value: "proj_runtime",
         },
         {
-          path: "controlPlane.routing.overrides.linear.projectName",
-          value: "Live Nation",
+          path: "controlPlane.routing.overrides.local.projectName",
+          value: "Runtime",
         },
         {
-          path: "controlPlane.routing.overrides.linear.teamId",
-          value: "team_hack",
+          path: "controlPlane.routing.overrides.local.scopeId",
+          value: "scope_dev",
         },
       ],
     });
@@ -175,10 +175,10 @@ describe("project config batch utilities", () => {
     const content = await Bun.file(configPath).text();
     const parsed = JSON.parse(content);
 
-    expect(parsed.controlPlane.routing.overrides.linear).toEqual({
-      projectId: "proj_live_nation",
-      projectName: "Live Nation",
-      teamId: "team_hack",
+    expect(parsed.controlPlane.routing.overrides.local).toEqual({
+      projectId: "proj_runtime",
+      projectName: "Runtime",
+      scopeId: "scope_dev",
     });
   });
 });

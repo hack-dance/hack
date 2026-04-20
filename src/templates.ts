@@ -1,7 +1,4 @@
 import {
-  DEFAULT_AUTH_ALIAS_HOST,
-  DEFAULT_AUTH_HOST,
-  DEFAULT_AUTH_SERVER_PORT,
   DEFAULT_CADDY_IP,
   DEFAULT_COREDNS_IP,
   DEFAULT_INGRESS_NETWORK,
@@ -50,9 +47,6 @@ export function renderGlobalCaddyCompose(opts?: {
     "      caddy.root: /srv/schemas",
     '      caddy.file_server: ""',
     "      caddy.tls: internal",
-    `      caddy_1: ${DEFAULT_AUTH_HOST}, ${DEFAULT_AUTH_ALIAS_HOST}`,
-    `      caddy_1.reverse_proxy: host.docker.internal:${DEFAULT_AUTH_SERVER_PORT}`,
-    "      caddy_1.tls: internal",
     "    environment:",
     `      CADDY_INGRESS_NETWORKS: ${DEFAULT_INGRESS_NETWORK}`,
     ...(useStaticCaddyIp

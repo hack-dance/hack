@@ -12,7 +12,7 @@ public struct DashboardView: View {
   @State private var showCommandPalette = false
   @State private var showTerminalDrawer = false
   @State private var showSettingsOverlay = false
-  @State private var selectedSettingsItem: SettingsSidebarItem = .account
+  @State private var selectedSettingsItem: SettingsSidebarItem = .runtime
   @State private var terminalDrawerHeight: CGFloat = 360
   @State private var terminalDrawerInitialHeight: CGFloat? = nil
   @State private var terminalDrawerModel = TerminalDrawerModel(globalShellProject: Self.makeGlobalShellProject())
@@ -129,7 +129,6 @@ public struct DashboardView: View {
       .tuneWindowToolbar()
       .task {
         model.start()
-        await model.refreshHackAccountState(force: false, updateErrorMessage: false)
       }
       .onReceive(NotificationCenter.default.publisher(for: .hackCommandPaletteRequested)) { _ in
         showCommandPalette = true
@@ -180,12 +179,6 @@ public struct DashboardView: View {
           openSettings(pane)
         } else {
           openSettings(.runtime)
-        }
-      }
-      .onChange(of: showSettingsOverlay) { _, isVisible in
-        guard isVisible else { return }
-        Task {
-          await model.refreshHackAccountState(force: false, updateErrorMessage: false)
         }
       }
       .sheet(isPresented: $showCommandPalette) {
@@ -301,7 +294,7 @@ public struct DashboardView: View {
           .help("Dismiss")
         }
 
-        Text("Hackd is running, but Caddy/logging/gateway are not fully healthy. Restart global infra to recover local DNS/TLS routing.")
+        Text("Hackd is running, but local routing services are not fully healthy. Restart global infra to recover local DNS/TLS routing.")
           .font(.mono(.caption))
           .foregroundStyle(.secondary)
 
@@ -514,12 +507,6 @@ public struct DashboardView: View {
           subtitle: "Open Settings to view runtime health, daemon controls, and global services.",
           pane: .runtime
         )
-      case .gateway:
-        settingsRedirectView(
-          title: "Gateway moved to Settings",
-          subtitle: "Open Settings to manage gateway status, exposures, and gateway configuration.",
-          pane: .gateway
-        )
       case let .project(id):
         if let project = model.projects.first(where: { $0.id == id }) {
           ProjectDetailView(project: project)
@@ -560,64 +547,16 @@ public struct DashboardView: View {
 
   private var toolbarAccountMenu: some View {
     Menu {
-      if let state = model.hackAccountState {
-        if let title = toolbarAccountPrimaryLabel {
-          Text(title)
-        }
-        if let subtitle = toolbarAccountSecondaryLabel {
-          Text(subtitle)
-        }
-        if toolbarAccountPrimaryLabel != nil || toolbarAccountSecondaryLabel != nil {
-          Divider()
-        }
-        Button {
-          openSettings(.account)
-        } label: {
-          Label("Account settings", systemImage: "person.crop.circle")
-        }
-        if let accountURL = state.accountURL, let url = URL(string: accountURL) {
-          Button {
-            NSWorkspace.shared.open(url)
-          } label: {
-            Label("Manage account in browser", systemImage: "globe")
-          }
-        }
-        Divider()
-        if state.authenticated {
-          Button {
-            Task {
-              _ = await model.logoutHackAccount()
-            }
-          } label: {
-            Label("Sign out", systemImage: "rectangle.portrait.and.arrow.right")
-          }
-        } else {
-          Button {
-            Task {
-              _ = await model.loginHackAccount()
-            }
-          } label: {
-            Label("Sign in to Hack", systemImage: "person.badge.key")
-          }
-        }
-        Divider()
-      } else if model.isLoadingHackAccountState {
-        Text("Loading account…")
-      } else {
-        Button {
-          Task {
-            _ = await model.loginHackAccount()
-          }
-        } label: {
-          Label("Sign in to Hack", systemImage: "person.badge.key")
-        }
-        Divider()
-      }
-
       Button {
         openSettings(.runtime)
       } label: {
         Label("Open runtime settings", systemImage: "gearshape")
+      }
+
+      Button {
+        openSettings(.permissions)
+      } label: {
+        Label("Open trust guidance", systemImage: "checkmark.shield")
       }
 
       Button {
@@ -626,27 +565,29 @@ public struct DashboardView: View {
       } label: {
         Label(globalToggleMenuTitle, systemImage: globalToggleIcon)
       }
+
+      Divider()
+
+      Button {
+        Task { await model.refresh() }
+      } label: {
+        Label("Refresh status", systemImage: "arrow.triangle.2.circlepath")
+      }
     } label: {
       toolbarAccountLabel
     }
     .menuStyle(.borderlessButton)
     .menuIndicator(.hidden)
-    .help(model.hackAccountState?.authenticated == true ? "Hack account" : "Hack account and app actions")
+    .help("App actions")
   }
 
   private var toolbarAccountLabel: some View {
     ZStack {
       Circle()
         .fill(toolbarAvatarBackgroundColor)
-      if let initials = toolbarAccountInitials {
-        Text(initials)
-          .font(.system(size: 11, weight: .semibold, design: .rounded))
-          .foregroundStyle(toolbarAvatarForegroundColor)
-      } else {
-        Image(systemName: "person.crop.circle.fill")
-          .font(.system(size: 15, weight: .semibold))
-          .foregroundStyle(toolbarAvatarForegroundColor)
-      }
+      Image(systemName: "gearshape.fill")
+        .font(.system(size: 13, weight: .semibold))
+        .foregroundStyle(toolbarAvatarForegroundColor)
     }
     .frame(width: 28, height: 28)
     .overlay(
@@ -654,53 +595,15 @@ public struct DashboardView: View {
         .stroke(Color.primary.opacity(0.10), lineWidth: 1)
     )
     .contentShape(Circle())
-    .accessibilityLabel("Hack account")
-  }
-
-  private var toolbarAccountPrimaryLabel: String? {
-    if let name = model.hackAccountState?.userDisplayName, !name.isEmpty {
-      return name
-    }
-    if let email = model.hackAccountState?.userEmail, !email.isEmpty {
-      return email
-    }
-    return model.hackAccountState?.authenticated == true ? "Hack account" : nil
-  }
-
-  private var toolbarAccountSecondaryLabel: String? {
-    if let organization = model.hackAccountState?.organizationName, !organization.isEmpty {
-      if let team = model.hackAccountState?.teamName, !team.isEmpty {
-        return "\(organization) • \(team)"
-      }
-      return organization
-    }
-    if model.hackAccountState?.authenticated == false {
-      return "Signed out"
-    }
-    return nil
-  }
-
-  private var toolbarAccountInitials: String? {
-    guard model.hackAccountState?.authenticated == true else {
-      return nil
-    }
-    let source = model.hackAccountState?.userDisplayName ?? model.hackAccountState?.userEmail ?? ""
-    let tokens = source
-      .split(whereSeparator: { $0 == " " || $0 == "." || $0 == "@" || $0 == "_" || $0 == "-" })
-      .prefix(2)
-    let initials = tokens.compactMap { $0.first.map(String.init) }.joined().uppercased()
-    return initials.isEmpty ? nil : initials
+    .accessibilityLabel("App actions")
   }
 
   private var toolbarAvatarBackgroundColor: Color {
-    guard model.hackAccountState?.authenticated == true else {
-      return Color.primary.opacity(0.08)
-    }
-    return Color.accentColor.opacity(colorScheme == .dark ? 0.30 : 0.18)
+    Color.primary.opacity(0.08)
   }
 
   private var toolbarAvatarForegroundColor: Color {
-    model.hackAccountState?.authenticated == true ? .accentColor : .secondary
+    .secondary
   }
 
   private var globalToggleMenuTitle: String {
@@ -762,63 +665,6 @@ public struct DashboardView: View {
   }
 
   @ViewBuilder
-  private var runtimeContextMenu: some View {
-    if canStopDaemon {
-      Button {
-        Task { await model.stopDaemon() }
-      } label: {
-        Label("Stop hackd", systemImage: "stop.fill")
-      }
-    } else {
-      Button {
-        Task { await model.startDaemon() }
-      } label: {
-        Label("Start hackd", systemImage: "play.fill")
-      }
-    }
-
-    Button {
-      Task { await model.restartDaemon() }
-    } label: {
-      Label("Restart hackd", systemImage: "arrow.clockwise")
-    }
-    .disabled(!daemonIsRunning)
-
-    Divider()
-
-    Button {
-      Task { await model.refresh() }
-    } label: {
-      Label("Refresh", systemImage: "arrow.triangle.2.circlepath")
-    }
-  }
-
-  @ViewBuilder
-  private var gatewayContextMenu: some View {
-    Button {
-      Task { await model.refresh() }
-    } label: {
-      Label("Refresh", systemImage: "arrow.triangle.2.circlepath")
-    }
-
-    if let configPath = gatewayConfigPath {
-      Divider()
-
-      Button {
-        NSWorkspace.shared.selectFile(configPath, inFileViewerRootedAtPath: "")
-      } label: {
-        Label("Show Config in Finder", systemImage: "folder")
-      }
-    }
-  }
-
-  private var gatewayConfigPath: String? {
-    let home = FileManager.default.homeDirectoryForCurrentUser
-    let configPath = home.appendingPathComponent(".hack/gateway.yml").path
-    return FileManager.default.fileExists(atPath: configPath) ? configPath : nil
-  }
-
-  @ViewBuilder
   private func projectContextMenu(for project: ProjectSummary) -> some View {
     let isRunning = project.runtimeStatus == .running || project.status == .running
 
@@ -848,14 +694,6 @@ public struct DashboardView: View {
       model.showShell(for: project)
     } label: {
       Label("Open Shell", systemImage: "terminal")
-    }
-
-    if project.supportsTickets {
-      Button {
-        model.showTickets(for: project)
-      } label: {
-        Label("Open Tickets", systemImage: "ticket")
-      }
     }
 
     if let devHost = project.devHost, let url = URL(string: "https://\(devHost)") {

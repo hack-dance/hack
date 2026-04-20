@@ -32,6 +32,17 @@ function isActionableRecoveryResult(result: RecoveryCheckResult): boolean {
     return false;
   }
 
+  if (result.message.startsWith("Skipped (")) {
+    return false;
+  }
+
+  if (
+    result.name === "project" &&
+    result.message.includes("run 'hack init' in a repo")
+  ) {
+    return false;
+  }
+
   if (
     result.name === "gateway tokens" &&
     result.message.includes("No active tokens")
@@ -42,6 +53,7 @@ function isActionableRecoveryResult(result: RecoveryCheckResult): boolean {
   return true;
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Recovery guidance intentionally classifies many operator-facing repair hints in one pass.
 export function buildDoctorRecoveryGuidance(input: {
   readonly results: readonly RecoveryCheckResult[];
 }): DoctorRecoveryGuidance {
@@ -61,6 +73,21 @@ export function buildDoctorRecoveryGuidance(input: {
 
     if (result.message.includes("hack restart")) {
       pushUnique(temporaryBreakage, "hack restart");
+      continue;
+    }
+
+    if (result.message.includes("hack down")) {
+      pushUnique(temporaryBreakage, "hack down");
+      continue;
+    }
+
+    if (result.message.includes("hack projects prune")) {
+      pushUnique(temporaryBreakage, "hack projects prune");
+      continue;
+    }
+
+    if (result.message.includes("hack env materialize")) {
+      pushUnique(configurationRepair, "hack env materialize");
       continue;
     }
 
@@ -247,6 +274,14 @@ export function scopeRecoveryCommand(input: {
 
   if (input.command === "hack restart") {
     return `hack restart --path ${quotedProjectRoot}`;
+  }
+
+  if (input.command === "hack down") {
+    return `hack down --path ${quotedProjectRoot}`;
+  }
+
+  if (input.command === "hack env materialize") {
+    return `hack env materialize --path ${quotedProjectRoot}`;
   }
 
   return input.command.replace("<repo>", quotedProjectRoot);

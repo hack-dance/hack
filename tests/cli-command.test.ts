@@ -24,16 +24,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  if (originalSetupSyncMode !== undefined) {
-    process.env.HACK_SETUP_SYNC_MODE = originalSetupSyncMode;
-  } else {
-    process.env.HACK_SETUP_SYNC_MODE = undefined;
-  }
-  if (originalLogger !== undefined) {
-    process.env.HACK_LOGGER = originalLogger;
-  } else {
-    process.env.HACK_LOGGER = undefined;
-  }
+  process.env.HACK_SETUP_SYNC_MODE = originalSetupSyncMode;
+  process.env.HACK_LOGGER = originalLogger;
 });
 
 test("resolveCommand finds nested subcommand and remaining positionals", () => {
@@ -81,40 +73,14 @@ test("parseOptionsForCommand converts number options", () => {
   expect(parsed.follow).toBe(true);
 });
 
-test("resolveCommand finds crash-capture command", () => {
-  const resolved = resolveCommand(CLI_SPEC, ["crash-capture"]);
-  expect(resolved.command?.name).toBe("crash-capture");
-  expect(resolved.path.map((command) => command.name)).toEqual([
-    "crash-capture",
-  ]);
-  expect(resolved.remainingPositionals).toEqual([]);
-});
+test("removed surfaces still resolve as top-level migration stubs", () => {
+  const authResolved = resolveCommand(CLI_SPEC, ["auth"]);
+  const linearResolved = resolveCommand(CLI_SPEC, ["linear"]);
 
-test("linear command metadata advertises project artifact workflows", () => {
-  const resolved = resolveCommand(CLI_SPEC, ["linear"]);
-  expect(resolved.command?.summary).toBe(
-    "Connect Linear and sync repo work with Linear projects/issues"
-  );
-  expect(resolved.command?.description).toContain(
-    "hack linear documents list|pull|plan|apply"
-  );
-  expect(resolved.command?.description).toContain(
-    "hack linear milestones list|pull|plan|apply"
-  );
-  expect(resolved.command?.description).toContain(
-    "hack linear status-updates list|pull|plan|publish"
-  );
-});
-
-test("resolveCommand finds nested project owner show command", () => {
-  const resolved = resolveCommand(CLI_SPEC, ["project", "owner", "show"]);
-  expect(resolved.command?.name).toBe("show");
-  expect(resolved.path.map((command) => command.name)).toEqual([
-    "project",
-    "owner",
-    "show",
-  ]);
-  expect(resolved.remainingPositionals).toEqual([]);
+  expect(authResolved.command?.summary).toContain("Removed:");
+  expect(linearResolved.command?.summary).toContain("Removed:");
+  expect(authResolved.remainingPositionals).toEqual([]);
+  expect(linearResolved.remainingPositionals).toEqual([]);
 });
 
 test("resolveCommand exposes host exec path", () => {
@@ -127,50 +93,39 @@ test("resolveCommand exposes host exec path", () => {
   expect(resolved.remainingPositionals).toEqual(["bun", "test"]);
 });
 
-test("resolveCommand exposes project exec path", () => {
-  const resolved = resolveCommand(CLI_SPEC, ["exec", "api", "bun", "test"]);
-  expect(resolved.command?.name).toBe("exec");
-  expect(resolved.path.map((command) => command.name)).toEqual(["exec"]);
-  expect(resolved.remainingPositionals).toEqual(["api", "bun", "test"]);
-});
-
-test("resolveCommand exposes org, team, and auth invite command paths", () => {
-  const orgResolved = resolveCommand(CLI_SPEC, ["org", "member", "invite"]);
-  expect(orgResolved.command?.name).toBe("invite");
-  expect(orgResolved.path.map((command) => command.name)).toEqual([
-    "org",
-    "member",
-    "invite",
-  ]);
-
-  const teamResolved = resolveCommand(CLI_SPEC, ["team", "member", "remove"]);
-  expect(teamResolved.command?.name).toBe("remove");
-  expect(teamResolved.path.map((command) => command.name)).toEqual([
-    "team",
-    "member",
-    "remove",
-  ]);
-
-  const authInviteResolved = resolveCommand(CLI_SPEC, [
-    "auth",
-    "invite",
-    "accept",
-  ]);
-  expect(authInviteResolved.command?.name).toBe("accept");
-  expect(authInviteResolved.path.map((command) => command.name)).toEqual([
-    "auth",
-    "invite",
-    "accept",
-  ]);
-});
-
-test("help shows subcommand usage for namespace commands", async () => {
+test("help shows usage for removed namespace-style commands", async () => {
   const result = await runCliWithCapturedOutput(["help", "org"]);
 
   expect(result.exitCode).toBe(0);
   expect(result.stdout).toContain("Usage:");
-  expect(result.stdout).toContain("hack org <subcommand> [options]");
-  expect(result.stdout).toContain("hack org member");
+  expect(result.stdout).toContain("hack org [args...]");
+  expect(result.stdout).toContain("Removed in v3:");
+});
+
+test("dispatch rejects removed GitHub PR automation flags with migration guidance", async () => {
+  const result = await runCliWithCapturedOutput([
+    "dispatch",
+    "run",
+    "--project",
+    "demo",
+    "--pr",
+    "--",
+    "echo",
+    "hi",
+  ]);
+
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain(
+    "Built-in GitHub PR automation was removed in Hack v3."
+  );
+  expect(result.stderr).toContain("gh pr create");
+});
+
+test("removed linear stub rejects unknown options instead of using extension parsing", async () => {
+  const result = await runCliWithCapturedOutput(["linear", "--bogus"]);
+
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain("--bogus");
 });
 
 async function runCliWithCapturedOutput(

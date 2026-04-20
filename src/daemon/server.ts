@@ -1,12 +1,10 @@
+// biome-ignore-all lint/complexity/noExcessiveCognitiveComplexity: The unsupported experimental gateway server keeps auth and route fan-out inline for traceability.
 import { Buffer } from "node:buffer";
 import { relative, resolve } from "node:path";
 import type { ServerWebSocket } from "bun";
 import pkg from "../../package.json";
 
-import {
-  DAEMON_PROCESS_TITLE,
-  DEFAULT_AUTH_SERVER_PORT,
-} from "../constants.ts";
+import { DAEMON_PROCESS_TITLE } from "../constants.ts";
 import { loadExtensionManagerForDaemon } from "../control-plane/extensions/daemon.ts";
 import { appendGatewayAuditEntry } from "../control-plane/extensions/gateway/audit.ts";
 import { authenticateGatewayRequest } from "../control-plane/extensions/gateway/auth.ts";
@@ -37,7 +35,6 @@ import {
   type RequestTargetProxy,
   startRequestTargetProxy,
 } from "./request-target-proxy.ts";
-import { handleAuthRoutes } from "./routes/auth.ts";
 import { handleEnvRoutes } from "./routes/env.ts";
 import { handleNodeRoutes } from "./routes/node.ts";
 import { handleSessionRoutes } from "./routes/sessions.ts";
@@ -304,40 +301,6 @@ export async function runDaemon({
     }
   }
 
-  const authPort = resolveAuthServerPort({
-    value: process.env.HACK_AUTH_SERVER_PORT,
-  });
-  const authBind = resolveAuthServerBind({
-    value: process.env.HACK_AUTH_SERVER_BIND,
-  });
-  let authServer: ReturnType<typeof Bun.serve> | null = null;
-  try {
-    authServer = Bun.serve({
-      hostname: authBind,
-      port: authPort,
-      fetch: async (req) => {
-        const baseProtocol =
-          req.headers.get("x-forwarded-proto")?.trim() ||
-          (req.url.startsWith("https://") ? "https" : "http");
-        const hostHeader =
-          req.headers.get("x-forwarded-host")?.trim() ||
-          req.headers.get("host")?.trim() ||
-          `127.0.0.1:${authPort}`;
-        const baseUrl = `${baseProtocol}://${hostHeader}`;
-        return await handleAuthRoutes({
-          req,
-          baseUrl,
-        });
-      },
-    });
-    logger.info({
-      message: `Auth server listening on ${authBind}:${authPort}`,
-    });
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
-    logger.error({ message: `Failed to start auth server: ${message}` });
-  }
-
   const shutdown = async ({ reason }: { readonly reason: string }) => {
     logger.warn({ message: `Shutting down hackd (${reason})` });
     watcher.stop();
@@ -345,7 +308,6 @@ export async function runDaemon({
     await gatewayProxy?.close();
     server.stop();
     gatewayServer?.stop();
-    authServer?.stop();
     await removeFileIfExists({ path: daemonInternalSocketPath });
     await removeFileIfExists({ path: gatewayInternalSocketPath });
     await removeFileIfExists({ path: paths.socketPath });
@@ -359,30 +321,6 @@ export async function runDaemon({
   logger.info({
     message: `hackd started (pid ${process.pid}, version ${packageJson.version})`,
   });
-}
-
-function resolveAuthServerPort(opts: {
-  readonly value: string | undefined;
-}): number {
-  const raw = opts.value?.trim();
-  if (!raw) {
-    return DEFAULT_AUTH_SERVER_PORT;
-  }
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 65_535) {
-    return DEFAULT_AUTH_SERVER_PORT;
-  }
-  return parsed;
-}
-
-function resolveAuthServerBind(opts: {
-  readonly value: string | undefined;
-}): string {
-  const raw = opts.value?.trim();
-  if (!raw) {
-    return "127.0.0.1";
-  }
-  return raw;
 }
 
 async function handleRequest({

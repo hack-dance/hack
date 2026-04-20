@@ -15,10 +15,7 @@ import {
   createNormalizedTicket,
   projectNormalizedTicketSummary,
 } from "../src/control-plane/extensions/tickets/domain.ts";
-import {
-  buildTicketProvenance,
-  findTicketRemoteLink,
-} from "../src/control-plane/extensions/tickets/provenance.ts";
+import { buildTicketProvenance } from "../src/control-plane/extensions/tickets/provenance.ts";
 import { createTicketsSqliteProjection } from "../src/control-plane/extensions/tickets/sqlite-projection.ts";
 import { createTicketsStore } from "../src/control-plane/extensions/tickets/store.ts";
 import { createGitTicketsChannel } from "../src/control-plane/extensions/tickets/tickets-git-channel.ts";
@@ -781,6 +778,63 @@ test("tickets store does not poison a fresh clone after an unreachable first rem
   );
 }, 20_000);
 
+test("tickets store falls back to local state when remote refresh auth is unavailable", async () => {
+  const remoteRoot = await mkdtemp(join(tmpdir(), "hack-cli-tickets-remote-"));
+  tempRoots.push(remoteRoot);
+  await run({ cwd: remoteRoot, cmd: ["git", "init", "--bare"] });
+
+  const writerRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-writer-local-fallback-",
+  });
+  await run({
+    cwd: writerRoot,
+    cmd: ["git", "remote", "add", "origin", remoteRoot],
+  });
+  const writerStore = await createStore({ projectRoot: writerRoot });
+
+  const created = await writerStore.createTicket({
+    title: "Falls back to local tickets state",
+    body: "Should remain readable after SSH auth trouble.",
+    owner: "hack",
+    source: "hack",
+    actor: "creator@hack",
+  });
+  expect(created.ok).toBe(true);
+  if (!created.ok) {
+    throw new Error(created.error);
+  }
+
+  const readerRoot = await createTempGitProject({
+    prefix: "hack-cli-tickets-reader-local-fallback-",
+  });
+  await run({
+    cwd: readerRoot,
+    cmd: ["git", "remote", "add", "origin", remoteRoot],
+  });
+  const readerStore = await createStore({ projectRoot: readerRoot });
+
+  const hydrated = await readerStore.listTickets();
+  expect(hydrated.map((ticket) => ticket.title)).toContain(
+    "Falls back to local tickets state"
+  );
+
+  await run({
+    cwd: readerRoot,
+    cmd: [
+      "git",
+      "remote",
+      "set-url",
+      "origin",
+      "ssh://127.0.0.1:1/does-not-exist",
+    ],
+  });
+
+  const fallbackTickets = await readerStore.listTickets();
+  expect(fallbackTickets.map((ticket) => ticket.title)).toContain(
+    "Falls back to local tickets state"
+  );
+}, 20_000);
+
 test("tickets store refreshes remote state before validating mutation targets", async () => {
   const remoteRoot = await mkdtemp(join(tmpdir(), "hack-cli-tickets-remote-"));
   tempRoots.push(remoteRoot);
@@ -886,13 +940,13 @@ test("normalized ticket adapter preserves compatibility while exposing provenanc
     dependsOn: ["T-00001"],
     blocks: ["T-00009"],
     owner: "hack",
-    source: "linear",
+    source: "tracker",
     assignee: "alice@hack",
     tags: ["core", "tickets"],
-    externalSystem: "linear",
-    externalId: "lin_123",
-    externalKey: "HACK-431",
-    externalUrl: "https://linear.app/hack/issue/HACK-431",
+    externalSystem: "tracker",
+    externalId: "trk_123",
+    externalKey: "TRK-431",
+    externalUrl: "https://tracker.example/issues/TRK-431",
     externalProjectId: "project-1",
     externalProjectName: "Hack App",
     externalTeamId: "team-1",
@@ -906,10 +960,10 @@ test("normalized ticket adapter preserves compatibility while exposing provenanc
       {
         checkpointId: "checkpoint-1",
         ticketId: summary.ticketId,
-        provider: "linear",
+        provider: "tracker",
         profileId: "default",
         direction: "pull",
-        remoteCursor: "issue/lin_123#v2",
+        remoteCursor: "issue/trk_123#v2",
         remoteUpdatedAt: "2026-03-13T10:59:00.000Z",
         localUpdatedAt: "2026-03-13T11:00:00.000Z",
         actor: "sync@app",
@@ -920,11 +974,11 @@ test("normalized ticket adapter preserves compatibility while exposing provenanc
       {
         conflictId: "conflict-1",
         ticketId: summary.ticketId,
-        provider: "linear",
+        provider: "tracker",
         field: "title",
         status: "open",
         authority: "review_required",
-        summary: "Local title drifted from Linear.",
+        summary: "Local title drifted from the remote tracker.",
         localValue: summary.title,
         remoteValue: "Normalize work model",
         createdAt: "2026-03-13T11:00:00.000Z",
@@ -940,24 +994,24 @@ test("normalized ticket adapter preserves compatibility while exposing provenanc
   });
   expect(normalized.provenance.origin).toEqual({
     owner: "hack",
-    source: "linear",
-    system: "linear",
+    source: "tracker",
+    system: "tracker",
   });
   expect(normalized.provenance.remotes).toEqual(
     expect.arrayContaining([
       expect.objectContaining({
-        provider: "linear",
-        remoteId: "lin_123",
-        remoteKey: "HACK-431",
-        remoteUrl: "https://linear.app/hack/issue/HACK-431",
+        provider: "tracker",
+        remoteId: "trk_123",
+        remoteKey: "TRK-431",
+        remoteUrl: "https://tracker.example/issues/TRK-431",
         projectId: "project-1",
         projectName: "Hack App",
         teamId: "team-1",
       }),
       expect.objectContaining({
-        provider: "linear",
+        provider: "tracker",
         profileId: "default",
-        remoteCursor: "issue/lin_123#v2",
+        remoteCursor: "issue/trk_123#v2",
       }),
     ])
   );
@@ -994,13 +1048,13 @@ test("normalized ticket provenance captures multiple remotes, field authority, a
       dependsOn: [],
       blocks: [],
       owner: "hack",
-      source: "linear",
+      source: "tracker",
       assignee: "alice@hack",
       tags: ["normalization"],
-      externalSystem: "linear",
-      externalId: "lin-77",
-      externalKey: "HACK-77",
-      externalUrl: "https://linear.app/hack/issue/HACK-77",
+      externalSystem: "tracker",
+      externalId: "trk-77",
+      externalKey: "TRK-77",
+      externalUrl: "https://tracker.example/issues/TRK-77",
       externalProjectId: "proj-77",
       externalProjectName: "Hack App",
       externalTeamId: "team-77",
@@ -1009,23 +1063,23 @@ test("normalized ticket provenance captures multiple remotes, field authority, a
     },
     syncCheckpoints: [
       {
-        checkpointId: "checkpoint-linear",
+        checkpointId: "checkpoint-tracker",
         ticketId: "T-00077",
-        provider: "linear",
+        provider: "tracker",
         profileId: "default",
         direction: "pull",
-        remoteCursor: "issue/lin-77#v3",
+        remoteCursor: "issue/trk-77#v3",
         remoteUpdatedAt: "2026-03-13T11:59:00.000Z",
         actor: "sync@app",
         createdAt: "2026-03-13T12:00:00.000Z",
       },
       {
-        checkpointId: "checkpoint-github",
+        checkpointId: "checkpoint-mirror",
         ticketId: "T-00077",
-        provider: "github",
+        provider: "mirror",
         profileId: "mirror",
-        direction: "push",
-        remoteCursor: "issue/gh-77#v1",
+        direction: "replicate",
+        remoteCursor: "issue/mirror-77#v1",
         remoteUpdatedAt: "2026-03-13T11:45:00.000Z",
         actor: "sync@app",
         createdAt: "2026-03-13T12:00:00.000Z",
@@ -1035,7 +1089,7 @@ test("normalized ticket provenance captures multiple remotes, field authority, a
       {
         conflictId: "conflict-title",
         ticketId: "T-00077",
-        provider: "linear",
+        provider: "tracker",
         field: "title",
         status: "open",
         authority: "review_required",
@@ -1051,14 +1105,14 @@ test("normalized ticket provenance captures multiple remotes, field authority, a
   expect(normalized.provenance.remotes).toEqual(
     expect.arrayContaining([
       expect.objectContaining({
-        provider: "linear",
-        remoteId: "lin-77",
-        remoteKey: "HACK-77",
+        provider: "tracker",
+        remoteId: "trk-77",
+        remoteKey: "TRK-77",
       }),
       expect.objectContaining({
-        provider: "github",
+        provider: "mirror",
         profileId: "mirror",
-        remoteCursor: "issue/gh-77#v1",
+        remoteCursor: "issue/mirror-77#v1",
       }),
     ])
   );
@@ -1084,7 +1138,7 @@ test("normalized ticket provenance captures multiple remotes, field authority, a
       expect.objectContaining({
         field: "title",
         source: "remote",
-        provider: "linear",
+        provider: "tracker",
         value: "Normalize explicit provenance",
       }),
     ])
@@ -1188,11 +1242,11 @@ test("ticket provenance infers a remote provider from source metadata when exter
     dependsOn: [],
     blocks: [],
     owner: "hack",
-    source: "linear",
+    source: "tracker",
     tags: ["normalization"],
-    externalId: "lin-88",
-    externalKey: "HACK-88",
-    externalUrl: "https://linear.app/hack/issue/HACK-88",
+    externalId: "trk-88",
+    externalKey: "TRK-88",
+    externalUrl: "https://tracker.example/issues/TRK-88",
     externalProjectId: "proj-88",
     externalProjectName: "Hack App",
     externalTeamId: "team-88",
@@ -1202,11 +1256,11 @@ test("ticket provenance infers a remote provider from source metadata when exter
     ticket,
     syncCheckpoints: [
       {
-        checkpointId: "checkpoint-linear",
+        checkpointId: "checkpoint-tracker",
         ticketId: "T-00088",
-        provider: "linear",
+        provider: "tracker",
         direction: "pull",
-        remoteCursor: "issue/lin-88#v1",
+        remoteCursor: "issue/trk-88#v1",
         remoteUpdatedAt: "2026-03-13T11:59:00.000Z",
         actor: "sync@app",
         createdAt: "2026-03-13T12:00:00.000Z",
@@ -1214,13 +1268,15 @@ test("ticket provenance infers a remote provider from source metadata when exter
     ],
   });
 
-  expect(findTicketRemoteLink({ ticket, provider: "linear" })).toEqual(
-    expect.objectContaining({
-      provider: "linear",
-      remoteId: "lin-88",
-      remoteKey: "HACK-88",
-      remoteUrl: "https://linear.app/hack/issue/HACK-88",
-    })
+  expect(provenance.remotes).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        provider: "tracker",
+        remoteId: "trk-88",
+        remoteKey: "TRK-88",
+        remoteUrl: "https://tracker.example/issues/TRK-88",
+      }),
+    ])
   );
   expect(provenance.fieldAuthorities).toEqual(
     expect.arrayContaining([

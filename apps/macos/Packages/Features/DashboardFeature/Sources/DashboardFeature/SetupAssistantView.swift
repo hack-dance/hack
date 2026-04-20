@@ -2,45 +2,26 @@ import AppKit
 import SwiftUI
 
 import GhosttyTerminal
-import HackDesktopModels
 
-enum SetupAssistantSection: String, CaseIterable, Identifiable {
+enum SetupAssistantSection {
   case runtime
-  case gateway
-
-  var id: String { rawValue }
 }
 
 struct SetupAssistantView: View {
   @Environment(DashboardModel.self) private var model
   @Environment(\.dismiss) private var dismiss
 
-  let initialSection: SetupAssistantSection
-  @State private var section: SetupAssistantSection
-
   @State private var terminalAutomationGranted: Bool? = nil
 
-  init(initialSection: SetupAssistantSection) {
-    self.initialSection = initialSection
-    _section = State(initialValue: initialSection)
-  }
+  init(initialSection _: SetupAssistantSection = .runtime) {}
 
   var body: some View {
     VStack(alignment: .leading, spacing: 14) {
       header
-      Picker("Section", selection: $section) {
-        Text("Runtime").tag(SetupAssistantSection.runtime)
-        Text("Gateway").tag(SetupAssistantSection.gateway)
-      }
-      .pickerStyle(.segmented)
 
       ScrollView {
         VStack(alignment: .leading, spacing: 14) {
-          if section == .runtime {
-            runtimeSteps
-          } else {
-            gatewaySteps
-          }
+          runtimeSteps
         }
         .padding(.vertical, 4)
       }
@@ -111,71 +92,6 @@ struct SetupAssistantView: View {
     )
   }
 
-  @ViewBuilder
-  private var gatewaySteps: some View {
-    permissionsCallout
-
-    SetupAssistantStepCard(
-      tone: model.globalStatus == nil ? .warn : .neutral,
-      title: "Install global services",
-      detail: "Gateway depends on the global runtime. Do this once per machine.",
-      command: "hack global install",
-      canRunInApp: false,
-      onRunInApp: nil,
-      onRunInEmbeddedTerminal: supportsEmbeddedTerminal ? runInEmbeddedTerminalIfAvailable : nil,
-      onOpenTerminal: TerminalIntegration.openTerminalWithCommand,
-      onCopy: TerminalIntegration.copyToClipboard
-    )
-
-    SetupAssistantStepCard(
-      tone: .neutral,
-      title: "Start the daemon",
-      detail: "The gateway status UI requires hackd.",
-      command: "hack daemon start",
-      canRunInApp: !daemonIsRunning,
-      onRunInApp: {
-        Task { await model.startDaemon() }
-      },
-      onRunInEmbeddedTerminal: supportsEmbeddedTerminal ? runInEmbeddedTerminalIfAvailable : nil,
-      onOpenTerminal: TerminalIntegration.openTerminalWithCommand,
-      onCopy: TerminalIntegration.copyToClipboard
-    )
-
-    SetupAssistantStepCard(
-      tone: gatewayIsConfigured ? .good : .warn,
-      title: "Guided gateway setup",
-      detail: "Enables gateway and helps you generate a token.",
-      command: "hack gateway setup",
-      canRunInApp: false,
-      onRunInApp: nil,
-      onRunInEmbeddedTerminal: supportsEmbeddedTerminal ? runInEmbeddedTerminalIfAvailable : nil,
-      onOpenTerminal: TerminalIntegration.openTerminalWithCommand,
-      onCopy: TerminalIntegration.copyToClipboard
-    )
-
-    if shouldShowLanExposureHint {
-      InlineCallout(
-        tone: .neutral,
-        title: "LAN exposure is blocked by loopback bind",
-        message: "If you want other devices on your LAN to reach the gateway, set the bind to 0.0.0.0 and restart hackd. This is optional and increases your attack surface on local networks.",
-        actions: [
-          InlineCalloutAction(label: "Copy fix", systemImage: "doc.on.doc") {
-            TerminalIntegration.copyToClipboard("""
-            hack config set --global controlPlane.gateway.bind 0.0.0.0
-            hack daemon restart
-            """)
-          },
-          InlineCalloutAction(label: "Open Terminal", systemImage: "terminal") {
-            TerminalIntegration.openTerminalWithCommand("""
-            hack config set --global controlPlane.gateway.bind 0.0.0.0
-            hack daemon restart
-            """)
-          }
-        ]
-      )
-    }
-  }
-
   private var daemonIsRunning: Bool {
     model.daemonStatus?.resolvedLabel == .running
   }
@@ -204,16 +120,6 @@ struct SetupAssistantView: View {
     return granted ? .good : .warn
   }
 
-  private var gatewayIsConfigured: Bool {
-    model.globalStatus?.summary.gatewayEnabled == true || model.gatewaySummaryState != nil
-  }
-
-  private var shouldShowLanExposureHint: Bool {
-    guard let exposures = model.gatewayExposures as [GatewayExposure]? else { return false }
-    guard let lan = exposures.first(where: { $0.id == "lan" }) else { return false }
-    return lan.resolvedState == .blocked && (lan.detail ?? "").lowercased().contains("loopback")
-  }
-
   private func runInEmbeddedTerminalIfAvailable(_ command: String) {
     let normalizedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !normalizedCommand.isEmpty else { return }
@@ -226,7 +132,7 @@ import HackCLIService
 
 #Preview("Setup Assistant") {
   let model = DashboardModel(client: HackCLIClient())
-  return SetupAssistantView(initialSection: .runtime)
+  return SetupAssistantView()
     .environment(model)
 }
 #endif

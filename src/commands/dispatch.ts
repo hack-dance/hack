@@ -1,17 +1,10 @@
+// biome-ignore-all lint/complexity/noExcessiveCognitiveComplexity: Unsupported experimental dispatch keeps the remote orchestration state machine in one module.
 import { randomUUID } from "node:crypto";
 import { basename, resolve } from "node:path";
 
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
 import { optFollow, optJson, optTail } from "../cli/options.ts";
-import {
-  resolveGitHubAppToken,
-  resolveGitHubAuthSettings,
-} from "../control-plane/extensions/github/auth.ts";
-import {
-  createGitHubAppClient,
-  parseGitHubRepoRef,
-} from "../control-plane/extensions/github/client.ts";
 import type { JobMeta } from "../control-plane/extensions/supervisor/job-store.ts";
 import { persistDispatchRunToTicketsChannel } from "../control-plane/extensions/tickets/runs-channel.ts";
 import { appendPolicyAuditEvent } from "../control-plane/policy/audit.ts";
@@ -146,7 +139,7 @@ const optPr = defineOption({
   name: "pr",
   type: "boolean",
   long: "--pr",
-  description: "After success, push branch and create/update GitHub PR",
+  description: "Removed in v3: legacy GitHub PR automation flag",
 } as const);
 
 const optPrBase = defineOption({
@@ -154,7 +147,7 @@ const optPrBase = defineOption({
   type: "string",
   long: "--pr-base",
   valueHint: "<branch>",
-  description: "Base branch for --pr (default: main)",
+  description: "Removed in v3: legacy GitHub PR automation flag",
 } as const);
 
 const optPrTitle = defineOption({
@@ -162,7 +155,7 @@ const optPrTitle = defineOption({
   type: "string",
   long: "--pr-title",
   valueHint: "<title>",
-  description: "Optional explicit PR title for --pr mode",
+  description: "Removed in v3: legacy GitHub PR automation flag",
 } as const);
 
 const optPrBody = defineOption({
@@ -170,7 +163,7 @@ const optPrBody = defineOption({
   type: "string",
   long: "--pr-body",
   valueHint: "<markdown>",
-  description: "Optional explicit PR body for --pr mode",
+  description: "Removed in v3: legacy GitHub PR automation flag",
 } as const);
 
 const optGitHubProfile = defineOption({
@@ -178,7 +171,7 @@ const optGitHubProfile = defineOption({
   type: "string",
   long: "--github-profile",
   valueHint: "<profile-id>",
-  description: "GitHub profile override for --pr automation",
+  description: "Removed in v3: legacy GitHub PR automation flag",
 } as const);
 
 const runOptions = [
@@ -266,7 +259,7 @@ export const dispatchCommand = withHandler(
       title: "Dispatch commands",
       tone: "info",
       lines: [
-        "hack dispatch run --project <name|id> [--node <id|default|auto>] [--provider <name>] [--profile <id>] [--bootstrap-if-needed] [--branch <name>] [--runner <runner>] [--pr --github-profile <id>] -- <command...>",
+        "hack dispatch run --project <name|id> [--node <id|default|auto>] [--provider <name>] [--profile <id>] [--bootstrap-if-needed] [--branch <name>] [--runner <runner>] -- <command...>",
         "hack dispatch status <run-id>",
         "hack dispatch logs <run-id> [--follow]",
       ],
@@ -295,6 +288,17 @@ async function handleDispatchRun({
       message:
         "Missing command. Example: hack dispatch run --project my-app --branch feat/foo -- bun test",
     });
+    return 1;
+  }
+  const removedPrMessage = resolveRemovedDispatchPrAutomationMessage({
+    pr: args.options.pr,
+    prBase: args.options.prBase,
+    prTitle: args.options.prTitle,
+    prBody: args.options.prBody,
+    githubProfile: args.options.githubProfile,
+  });
+  if (removedPrMessage) {
+    logger.error({ message: removedPrMessage });
     return 1;
   }
   const runner = (args.options.runner ?? "generic").trim() || "generic";
@@ -668,46 +672,6 @@ async function handleDispatchRun({
       },
     });
 
-    let prOutcome: DispatchPrOutcome | null = null;
-    if (args.options.pr === true && status === "completed") {
-      prOutcome = await runDispatchPrAutomation({
-        run,
-        actor,
-        approveFlag: args.options.approve === true,
-        command,
-        controlPlaneConfig: controlPlane.config,
-        selectedNode,
-        workspace: workspace.data.workspace,
-        project,
-        prBase: (args.options.prBase ?? "main").trim() || "main",
-        prTitle: args.options.prTitle?.trim(),
-        prBody: args.options.prBody,
-        githubProfile: normalizeOptionalString(args.options.githubProfile),
-      });
-      if (prOutcome.ok) {
-        await appendDispatchRunEvent({
-          runId,
-          event: {
-            type: "run.pr.upserted",
-            number: prOutcome.pull.number,
-            url: prOutcome.pull.htmlUrl,
-            base: prOutcome.pull.baseRef,
-            head: prOutcome.pull.headRef,
-            profileId: prOutcome.profileId,
-            profileSource: prOutcome.profileSource,
-          },
-        });
-      } else {
-        await appendDispatchRunEvent({
-          runId,
-          event: {
-            type: "run.pr.failed",
-            error: prOutcome.error,
-          },
-        });
-      }
-    }
-
     const summary = buildSummaryMarkdown({
       runId,
       runStatus: status,
@@ -718,7 +682,6 @@ async function handleDispatchRun({
       runner,
       riskLevel: policy.level,
       riskReasons: policy.reasons,
-      prOutcome,
       route: routeMetadata,
       sync: syncMetadata,
       bootstrapAuth,
@@ -754,26 +717,6 @@ async function handleDispatchRun({
         ...(remoteRouteBridge ? { remoteRouteBridge } : {}),
         ...(syncMetadata ? { sync: syncMetadata } : {}),
         ...(ticketId ? { ticketId } : {}),
-        ...(prOutcome
-          ? {
-              pr: prOutcome.ok
-                ? {
-                    status: "ok",
-                    profileId: prOutcome.profileId,
-                    profileSource: prOutcome.profileSource,
-                    number: prOutcome.pull.number,
-                    url: prOutcome.pull.htmlUrl,
-                    base: prOutcome.pull.baseRef,
-                    head: prOutcome.pull.headRef,
-                  }
-                : {
-                    status: "error",
-                    profileId: prOutcome.profileId,
-                    profileSource: prOutcome.profileSource,
-                    error: prOutcome.error,
-                  },
-            }
-          : {}),
       },
     });
 
@@ -784,11 +727,7 @@ async function handleDispatchRun({
       actor,
     });
 
-    const exitCode =
-      status === "completed" &&
-      (args.options.pr !== true || prOutcome === null || prOutcome.ok)
-        ? 0
-        : 1;
+    const exitCode = status === "completed" ? 0 : 1;
     if (args.options.json) {
       process.stdout.write(
         `${JSON.stringify(
@@ -802,7 +741,6 @@ async function handleDispatchRun({
             route: routeMetadata,
             ...(Object.keys(bootstrapAuth).length > 0 ? { bootstrapAuth } : {}),
             ...(syncMetadata ? { sync: syncMetadata } : {}),
-            ...(prOutcome ? { pr: prOutcome } : {}),
             ...(outcome.exitCode !== undefined
               ? { exitCode: outcome.exitCode }
               : {}),
@@ -829,19 +767,10 @@ async function handleDispatchRun({
               ["sync", `${syncMetadata.engine}:${syncMetadata.sessionName}`],
             ] as const)
           : []),
-        ...(prOutcome
-          ? ([["github_profile", prOutcome.profileId]] as const)
-          : []),
         ["logs", run.artifacts.logPath],
         ["summary", run.artifacts.summaryPath],
-        ...(prOutcome?.ok ? ([["pr", prOutcome.pull.htmlUrl]] as const) : []),
       ],
     });
-    if (prOutcome && !prOutcome.ok) {
-      logger.warn({
-        message: `PR automation failed: ${prOutcome.error}`,
-      });
-    }
     return exitCode;
   }
 
@@ -1112,42 +1041,10 @@ async function resolveWorkspaceBootstrap(input: {
     return null;
   }
 
-  const repoRef = parseGitHubRepoRef({ remoteUrl: repoUrl });
-  if (!repoRef) {
-    return {
-      repoUrl,
-      projectName: input.project.projectName ?? basename(projectRoot).trim(),
-    };
-  }
-
-  const token = await resolveGitHubAppToken({
-    controlPlaneConfig: input.controlPlaneConfig,
-    preferEnvTokenOnly: shouldPreferEnvTokenOnlyForBootstrap(),
-  });
-  if (!token.ok) {
-    return {
-      repoUrl,
-      projectName: input.project.projectName ?? basename(projectRoot).trim(),
-    };
-  }
-
   return {
     repoUrl,
     projectName: input.project.projectName ?? basename(projectRoot).trim(),
-    githubAuth: {
-      token: token.token,
-      owner: repoRef.owner,
-      repo: repoRef.repo,
-    },
   };
-}
-
-/**
- * Uses env-only token lookup for unattended invocations to avoid interactive
- * keychain prompts; interactive terminals can leverage keychain-backed tokens.
- */
-function shouldPreferEnvTokenOnlyForBootstrap(): boolean {
-  return !(process.stdin.isTTY && process.stdout.isTTY);
 }
 
 /**
@@ -1163,7 +1060,6 @@ async function probeWorkspaceBootstrapAccess(input: {
   }
   const probe = await input.client.probeNodeGitAccess({
     repoUrl: bootstrap.repoUrl,
-    ...(bootstrap.githubAuth ? { githubAuth: bootstrap.githubAuth } : {}),
   });
   if (probe.ok) {
     return probe.data;
@@ -1485,25 +1381,7 @@ function formatWorkspaceEnsureError(input: {
   readonly workspaceRequest: WorkspaceEnsureRequest;
   readonly bootstrapProbe: WorkspaceBootstrapProbeResult | null;
 }): string {
-  const base = `Workspace ensure failed (${input.workspace.status}): ${input.workspace.error.message}`;
-  const hasGithubBootstrap = Boolean(
-    input.workspaceRequest.bootstrap?.githubAuth
-  );
-  const isCloneFailure =
-    input.workspace.error.code === "bootstrap_clone_failed" ||
-    input.workspace.error.message.startsWith("bootstrap_clone_failed");
-  const isPublicKeyFailure = input.workspace.error.message.includes(
-    "Permission denied (publickey)"
-  );
-  if (
-    hasGithubBootstrap &&
-    isCloneFailure &&
-    input.bootstrapProbe?.unsupported === true &&
-    isPublicKeyFailure
-  ) {
-    return `${base}\nNode gateway does not support Git bootstrap probe/fallback endpoints yet (missing /v1/node/git/probe). Update hack on the remote node to match controller build, restart daemon, and retry.`;
-  }
-  return base;
+  return `Workspace ensure failed (${input.workspace.status}): ${input.workspace.error.message}`;
 }
 
 type DispatchSyncMetadata = {
@@ -2161,26 +2039,6 @@ function runStatusToExitCode(input: {
   return 1;
 }
 
-type DispatchPrOutcome =
-  | {
-      readonly ok: true;
-      readonly profileId: string;
-      readonly profileSource: string;
-      readonly pull: {
-        readonly number: number;
-        readonly htmlUrl: string;
-        readonly baseRef: string;
-        readonly headRef: string;
-      };
-      readonly pushed: true;
-    }
-  | {
-      readonly ok: false;
-      readonly profileId: string;
-      readonly profileSource: string;
-      readonly error: string;
-    };
-
 async function persistRunArtifactsToCanonicalTickets(input: {
   readonly run: DispatchRunRecord;
   readonly controlPlaneConfig: ControlPlaneConfig;
@@ -2216,245 +2074,6 @@ async function persistRunArtifactsToCanonicalTickets(input: {
       canonicalPath: `.hack/tickets/runs/${input.run.runId}`,
     },
   });
-}
-
-type SelectedDispatchNode = Extract<ResolvedNode, { readonly ok: true }>;
-
-async function runDispatchPrAutomation(input: {
-  readonly run: DispatchRunRecord;
-  readonly actor: string;
-  readonly approveFlag: boolean;
-  readonly command: readonly string[];
-  readonly controlPlaneConfig: ControlPlaneConfig;
-  readonly selectedNode: SelectedDispatchNode;
-  readonly workspace: GatewayNodeWorkspace;
-  readonly project: DispatchProjectResolution;
-  readonly prBase: string;
-  readonly prTitle?: string;
-  readonly prBody?: string;
-  readonly githubProfile?: string;
-}): Promise<DispatchPrOutcome> {
-  const requestedGitHubProfile = normalizeOptionalString(input.githubProfile);
-  const selectedGitHubProfile =
-    requestedGitHubProfile ??
-    resolveGitHubAuthSettings({
-      controlPlaneConfig: input.controlPlaneConfig,
-    }).profileId;
-  const selectedGitHubProfileSource = requestedGitHubProfile
-    ? "command_flags"
-    : "project_or_global";
-
-  const branch = (input.workspace.branch ?? input.run.branch ?? "").trim();
-  if (!branch) {
-    return {
-      ok: false,
-      profileId: selectedGitHubProfile,
-      profileSource: selectedGitHubProfileSource,
-      error: "Cannot open PR without a resolved workspace branch.",
-    };
-  }
-
-  const pushCommand = [
-    "git",
-    "-C",
-    input.workspace.projectRoot,
-    "push",
-    "-u",
-    "origin",
-    branch,
-  ] as const;
-  const pushRisk = assessCommandRisk({
-    command: pushCommand,
-    runner: "generic",
-  });
-  const pushPolicy = await resolvePolicyDecision({
-    level: pushRisk.level,
-    reasons: pushRisk.reasons,
-    requiresApproval: pushRisk.requiresApproval,
-    approveFlag: input.approveFlag,
-    actor: input.actor,
-    promptLabel: "git push for --pr",
-  });
-  await appendPolicyAuditEvent({
-    actor: input.actor,
-    operation: "dispatch.pr.push",
-    level: pushPolicy.level,
-    requiresApproval: pushPolicy.requiresApproval,
-    approved: pushPolicy.approved,
-    mode: pushPolicy.mode,
-    reasons: pushPolicy.reasons,
-    command: pushCommand,
-    runner: "generic",
-    runId: input.run.runId,
-    ...(input.run.ticketId ? { ticketId: input.run.ticketId } : {}),
-    nodeId: input.run.nodeId,
-    projectSelector: input.run.projectSelector,
-    ...(pushPolicy.approved ? {} : { error: pushPolicy.error }),
-  });
-  if (!pushPolicy.approved) {
-    return {
-      ok: false,
-      profileId: selectedGitHubProfile,
-      profileSource: selectedGitHubProfileSource,
-      error: pushPolicy.error,
-    };
-  }
-
-  const createdPush = await input.selectedNode.client.createJob({
-    projectId: input.workspace.projectId,
-    runner: "generic",
-    command: [...pushCommand],
-  });
-  if (!createdPush.ok) {
-    return {
-      ok: false,
-      profileId: selectedGitHubProfile,
-      profileSource: selectedGitHubProfileSource,
-      error: `Failed to create push job (${createdPush.status}): ${createdPush.error.message}`,
-    };
-  }
-
-  const pushOutcome = await streamRemoteJob({
-    runId: input.run.runId,
-    client: input.selectedNode.client,
-    projectId: input.workspace.projectId,
-    jobId: createdPush.data.job.jobId,
-    logsFrom: 0,
-    eventsFrom: 0,
-    printLogs: false,
-  });
-  if (!pushOutcome.job) {
-    return {
-      ok: false,
-      profileId: selectedGitHubProfile,
-      profileSource: selectedGitHubProfileSource,
-      error: "Push job ended without terminal state.",
-    };
-  }
-  if (pushOutcome.job.status !== "completed") {
-    return {
-      ok: false,
-      profileId: selectedGitHubProfile,
-      profileSource: selectedGitHubProfileSource,
-      error: `Push job failed with status ${pushOutcome.job.status}`,
-    };
-  }
-
-  const repo = await resolveDispatchGitHubRepo({
-    projectRoot: input.project.projectRoot ?? input.run.projectRoot,
-  });
-  if (!repo) {
-    return {
-      ok: false,
-      profileId: selectedGitHubProfile,
-      profileSource: selectedGitHubProfileSource,
-      error:
-        "Unable to resolve GitHub repo from origin remote. Pass a project registered to a GitHub-backed repo.",
-    };
-  }
-
-  const token = await resolveGitHubAppToken({
-    controlPlaneConfig: input.controlPlaneConfig,
-    ...(requestedGitHubProfile ? { profileId: requestedGitHubProfile } : {}),
-    allowProjectOverride: !requestedGitHubProfile,
-  });
-  if (!token.ok) {
-    return {
-      ok: false,
-      profileId: token.profileId,
-      profileSource: token.profileSource,
-      error: token.error,
-    };
-  }
-
-  const client = createGitHubAppClient({
-    token: token.token,
-    userAgent: "hack-cli",
-  });
-  const found = await client.findOpenPullRequest({
-    repo,
-    headRef: branch,
-  });
-  if (!found.ok) {
-    return {
-      ok: false,
-      profileId: token.profileId,
-      profileSource: token.profileSource,
-      error: `GitHub lookup failed (${found.status}): ${found.error}`,
-    };
-  }
-
-  const title =
-    input.prTitle ||
-    `hack: ${input.run.projectName ?? input.run.projectSelector} (${branch})`;
-  const body =
-    input.prBody ??
-    `Automated by hack dispatch run.\n\n- run_id: ${input.run.runId}\n- node: ${input.run.nodeName} (${input.run.nodeId})`;
-
-  const upserted = found.data
-    ? await client.updatePullRequest({
-        repo,
-        number: found.data.number,
-        title,
-        body,
-      })
-    : await client.createPullRequest({
-        repo,
-        title,
-        body,
-        headRef: branch,
-        baseRef: input.prBase,
-      });
-  if (!upserted.ok) {
-    return {
-      ok: false,
-      profileId: token.profileId,
-      profileSource: token.profileSource,
-      error: `GitHub PR upsert failed (${upserted.status}): ${upserted.error}`,
-    };
-  }
-
-  const comment = await client.createIssueComment({
-    repo,
-    issueNumber: upserted.data.number,
-    body: `Dispatch run \`${input.run.runId}\` completed.\n\nCommand: \`${input.command.join(" ")}\``,
-  });
-  if (!comment.ok) {
-    logger.warn({
-      message: `PR ${upserted.data.number} created/updated, but comment failed (${comment.status}): ${comment.error}`,
-    });
-  }
-
-  return {
-    ok: true,
-    profileId: token.profileId,
-    profileSource: token.profileSource,
-    pull: {
-      number: upserted.data.number,
-      htmlUrl: upserted.data.htmlUrl,
-      baseRef: upserted.data.baseRef,
-      headRef: upserted.data.headRef,
-    },
-    pushed: true,
-  };
-}
-
-async function resolveDispatchGitHubRepo(input: {
-  readonly projectRoot?: string;
-}): Promise<{ readonly owner: string; readonly repo: string } | null> {
-  if (!input.projectRoot) {
-    return null;
-  }
-  const remote = await exec(
-    ["git", "-C", input.projectRoot, "remote", "get-url", "origin"],
-    {
-      stdin: "ignore",
-    }
-  );
-  if (remote.exitCode !== 0) {
-    return null;
-  }
-  return parseGitHubRepoRef({ remoteUrl: remote.stdout.trim() });
 }
 
 type StreamOutcome = {
@@ -2707,6 +2326,29 @@ function normalizeOptionalString(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+function resolveRemovedDispatchPrAutomationMessage(input: {
+  readonly pr?: boolean;
+  readonly prBase?: string;
+  readonly prTitle?: string;
+  readonly prBody?: string;
+  readonly githubProfile?: string;
+}): string | null {
+  const requested =
+    input.pr === true ||
+    normalizeOptionalString(input.prBase) !== undefined ||
+    normalizeOptionalString(input.prTitle) !== undefined ||
+    normalizeOptionalString(input.prBody) !== undefined ||
+    normalizeOptionalString(input.githubProfile) !== undefined;
+  if (!requested) {
+    return null;
+  }
+  return [
+    "Built-in GitHub PR automation was removed in Hack v3.",
+    "Dispatch still runs the remote command, but push and PR follow-up must now use native git and gh outside Hack.",
+    "Migration: run `git push -u origin <branch>` and `gh pr create` or `gh pr edit` after the dispatch completes.",
+  ].join(" ");
+}
+
 function parseConfigBoolean(input: {
   readonly config: Record<string, unknown>;
   readonly key: string;
@@ -2810,32 +2452,11 @@ function buildSummaryMarkdown(input: {
   readonly runner: string;
   readonly riskLevel: string;
   readonly riskReasons: readonly string[];
-  readonly prOutcome: DispatchPrOutcome | null;
   readonly route: DispatchRouteMetadata;
   readonly sync: DispatchSyncMetadata | null;
   readonly bootstrapAuth: DispatchWorkspaceBootstrapAuth;
   readonly remoteRouteBridge: RemoteCaddyRouteBridgeResult | null;
 }): string {
-  let prLines: string[] = ["- status: not requested"];
-  if (input.prOutcome?.ok) {
-    prLines = [
-      "- status: upserted",
-      `- profile: ${input.prOutcome.profileId}`,
-      `- profile_source: ${input.prOutcome.profileSource}`,
-      `- number: ${input.prOutcome.pull.number}`,
-      `- url: ${input.prOutcome.pull.htmlUrl}`,
-      `- base: ${input.prOutcome.pull.baseRef}`,
-      `- head: ${input.prOutcome.pull.headRef}`,
-    ];
-  } else if (input.prOutcome && !input.prOutcome.ok) {
-    prLines = [
-      "- status: failed",
-      `- profile: ${input.prOutcome.profileId}`,
-      `- profile_source: ${input.prOutcome.profileSource}`,
-      `- error: ${input.prOutcome.error}`,
-    ];
-  }
-
   return [
     `# Dispatch Run ${input.runId}`,
     "",
@@ -2930,9 +2551,6 @@ function buildSummaryMarkdown(input: {
             : ["- exclude: none"]),
         ]
       : ["- status: not enabled"]),
-    "",
-    "## Pull Request",
-    ...prLines,
     "",
   ].join("\n");
 }

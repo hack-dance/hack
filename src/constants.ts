@@ -13,7 +13,6 @@ export const DEFAULT_PROJECT_TLD = "hack" as const;
 export const DEFAULT_GRAFANA_HOST = `logs.${DEFAULT_PROJECT_TLD}` as const;
 export const DEFAULT_LOKI_HOST = `loki.${DEFAULT_PROJECT_TLD}` as const;
 export const DEFAULT_SCHEMAS_HOST = `schemas.${DEFAULT_PROJECT_TLD}` as const;
-export const DEFAULT_AUTH_HOST = `auth.${DEFAULT_PROJECT_TLD}` as const;
 
 /**
  * OAuth providers (notably Google) require `localhost` or a host that ends with a real public suffix.
@@ -24,9 +23,6 @@ export const DEFAULT_AUTH_HOST = `auth.${DEFAULT_PROJECT_TLD}` as const;
 export const DEFAULT_OAUTH_ALIAS_TLD = "gy" as const;
 export const DEFAULT_OAUTH_ALIAS_ROOT =
   `${DEFAULT_PROJECT_TLD}.${DEFAULT_OAUTH_ALIAS_TLD}` as const;
-export const DEFAULT_AUTH_ALIAS_HOST =
-  `auth.${DEFAULT_OAUTH_ALIAS_ROOT}` as const;
-export const DEFAULT_AUTH_SERVER_PORT = 7790 as const;
 
 export const GLOBAL_HACK_DIR_NAME = ".hack" as const;
 export const GLOBAL_CONFIG_FILENAME = "hack.config.json" as const;
@@ -85,6 +81,7 @@ export const PROJECT_ENV_CONFIG_DEFAULT_FILENAME =
   "hack.env.default.yaml" as const;
 export const PROJECT_ENV_CONFIG_FILENAME_PREFIX = "hack.env." as const;
 export const PROJECT_ENV_CONFIG_FILENAME_SUFFIX = ".yaml" as const;
+export const PROJECT_ENV_LOCAL_SEGMENT = "local" as const;
 export const PROJECT_ENV_KEY_FILENAME = ".hack.secret.key" as const;
 export const PROJECT_ENV_STATE_FILENAME = ".env.state.json" as const;
 export const PROJECT_CONFIG_FILENAME = "hack.config.json" as const;

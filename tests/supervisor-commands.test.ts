@@ -36,6 +36,20 @@ test("parseSupervisorArgs handles log/event offsets", () => {
   expect(result.value.follow).toBe(false);
 });
 
+test("parseSupervisorArgs handles inline project and alias offsets", () => {
+  const result = parseSupervisorArgs({
+    args: ["--project=my-app", "--from=12", "job-3"],
+    allowLogsFrom: true,
+  });
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return;
+  }
+  expect(result.value.project).toBe("my-app");
+  expect(result.value.logsFrom).toBe(12);
+  expect(result.value.rest).toEqual(["job-3"]);
+});
+
 test("parseSupervisorArgs rejects unsupported options", () => {
   const result = parseSupervisorArgs({ args: ["--logs-from", "1"] });
   expect(result.ok).toBe(false);

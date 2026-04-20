@@ -28,7 +28,8 @@ Use this path when you intentionally want remote and control-plane features:
 - remote execution
 - remote supervisor jobs
 
-Beta material stays accessible, but it is explicitly labeled and separated from the default path.
+Beta material stays accessible, but it is explicitly labeled as unsupported experimental and kept
+out of the default path.
 
 ### [Extensions & reference](reference.md)
 
@@ -44,7 +45,7 @@ This section is easy to find, but it does not lead the product story.
 ## Quick links
 
 - New to `hack`: [Core docs](core.md)
-- Ready for remote workflows: [Beta workflows](beta.md)
+- Need unsupported experimental remote workflows: [Beta workflows](beta.md)
 - Looking for command or API details: [Extensions & reference](reference.md)
 - Need the bucket definitions: [Docs information architecture](docs-ia.md)
 

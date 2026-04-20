@@ -82,13 +82,6 @@ struct GlobalStatusStrip: View {
               openTerminal(project: project, kind: .shell)
             }
 
-            if project.supportsTickets {
-              Divider()
-              Button("Open Tickets") {
-                model.selectedItem = .project(project.id)
-                model.selectedProjectTab = .tickets
-              }
-            }
           }
         }
 
@@ -199,11 +192,11 @@ struct GlobalStatusStrip: View {
           userInfo: [SettingsNavigationRequest.paneKey: SettingsSidebarItem.runtime.rawValue]
         )
       }
-      Button("Settings: Gateway") {
+      Button("Settings: Trust Guidance") {
         NotificationCenter.default.post(
           name: .hackSettingsRequested,
           object: nil,
-          userInfo: [SettingsNavigationRequest.paneKey: SettingsSidebarItem.gateway.rawValue]
+          userInfo: [SettingsNavigationRequest.paneKey: SettingsSidebarItem.permissions.rawValue]
         )
       }
       Divider()
@@ -426,15 +419,13 @@ struct GlobalStatusStrip: View {
     case .home:
       HStack(spacing: 8) {
         StatusPill(text: runtimeLabel, tone: runtimeTone)
-        StatusPill(text: gatewayLabel, tone: gatewayTone)
+        StatusPill(text: globalLabel, tone: globalTone)
       }
     case .runtime:
       HStack(spacing: 8) {
         StatusPill(text: runtimeLabel, tone: runtimeTone)
         StatusPill(text: daemonLabel, tone: daemonTone)
       }
-    case .gateway:
-      StatusPill(text: gatewayLabel, tone: gatewayTone)
     case let .project(id):
       if let project = model.projects.first(where: { $0.id == id }) {
         if project.isRuntimeConfigured {
@@ -557,15 +548,24 @@ struct GlobalStatusStrip: View {
     }
   }
 
-  private var gatewayLabel: String {
-    if let label = model.gatewaySummaryState?.label, !label.isEmpty {
-      return "Gateway: \(label)"
+  private var globalLabel: String {
+    if model.globalInfraRunning {
+      return "Global: running"
     }
-    return "Gateway: unknown"
+    if model.globalInfraDown {
+      return "Global: down"
+    }
+    return "Global: unknown"
   }
 
-  private var gatewayTone: StatusTone {
-    model.gatewaySummaryState?.tone ?? .neutral
+  private var globalTone: StatusTone {
+    if model.globalInfraRunning {
+      return .good
+    }
+    if model.globalInfraDown {
+      return .warn
+    }
+    return .neutral
   }
 
   private var lastUpdatedText: String? {
@@ -610,8 +610,6 @@ struct GlobalStatusStrip: View {
       "home"
     case .runtime:
       "runtime"
-    case .gateway:
-      "gateway"
     case let .project(id):
       "project:\(id)"
     case .none:
@@ -669,9 +667,6 @@ struct GlobalStatusStrip: View {
     if model.selectedItem == .home {
       return "Dashboard"
     }
-    if model.selectedItem == .gateway {
-      return "Gateway"
-    }
     return "System"
   }
 
@@ -679,8 +674,6 @@ struct GlobalStatusStrip: View {
     switch model.selectedItem {
     case .home:
       return "square.grid.2x2"
-    case .gateway:
-      return "dot.radiowaves.left.and.right"
     case .runtime:
       return "gauge.with.dots.needle.50percent"
     case .project:

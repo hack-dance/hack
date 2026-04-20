@@ -83,6 +83,14 @@ const optSecret = defineOption({
   description: "Store value as an encrypted secure entry",
 } as const);
 
+const optLocal = defineOption({
+  name: "local",
+  type: "boolean",
+  long: "--local",
+  description:
+    "Write to the worktree-local env override file instead of the shared repo env file",
+} as const);
+
 const DEFAULT_ENCRYPTED_FILE_STORE_PATH = "~/.hack/secrets.enc.json";
 const DEFAULT_ENCRYPTED_FILE_KEY_PATH = "~/.hack/secrets-file.key";
 const LEGACY_RELATIVE_ENCRYPTED_FILE_STORE_PATH = ".hack-secrets.enc.json";
@@ -163,7 +171,7 @@ const addSpec = defineCommand({
   name: "add",
   summary: "Add or update an env value",
   group: "Project",
-  options: [optPath, optProject, optEnv, optSecret, optService],
+  options: [optPath, optProject, optEnv, optSecret, optLocal, optService],
   positionals: [
     { name: "key", required: false },
     { name: "value", required: false },
@@ -175,7 +183,7 @@ const setSpec = defineCommand({
   name: "set",
   summary: "Alias for env add",
   group: "Project",
-  options: [optPath, optProject, optEnv, optSecret, optService],
+  options: [optPath, optProject, optEnv, optSecret, optLocal, optService],
   positionals: [
     { name: "key", required: false },
     { name: "value", required: false },
@@ -247,7 +255,7 @@ const unsetSpec = defineCommand({
   name: "unset",
   summary: "Remove an env value from the canonical config",
   group: "Project",
-  options: [optPath, optProject, optEnv, optService],
+  options: [optPath, optProject, optEnv, optLocal, optService],
   positionals: [{ name: "key", required: false }],
   subcommands: [],
 } as const);
@@ -1425,6 +1433,7 @@ const handleEnvAdd: CommandHandlerFor<typeof addSpec> = async ({
     key: parsedTarget.key,
     value,
     secret,
+    local: args.options.local === true,
   });
 
   logger.success({
@@ -1432,8 +1441,9 @@ const handleEnvAdd: CommandHandlerFor<typeof addSpec> = async ({
       result.changed
         ? `Updated ${result.filePath}`
         : `No changes needed in ${result.filePath}`,
+      result.local ? "worktree-local override" : "shared repo env",
       `scope=${result.scope}`,
-      result.createdKey ? "generated .hack.secret.key" : null,
+      result.createdKey ? "generated project env key" : null,
     ]
       .filter((value): value is string => typeof value === "string")
       .join(" • "),
@@ -1829,6 +1839,7 @@ const handleEnvUnset: CommandHandlerFor<typeof unsetSpec> = async ({
     envName: envName ?? null,
     scope: parsedTarget.scope,
     key: parsedTarget.key,
+    local: args.options.local === true,
   });
 
   logger.success({

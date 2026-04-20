@@ -6,6 +6,7 @@ The short version:
 
 - commit `.hack/hack.env.default.yaml`
 - optionally commit `.hack/hack.env.<overlay>.yaml`
+- use `.hack/hack.env.local.yaml` and `.hack/hack.env.<overlay>.local.yaml` for worktree-local overrides
 - keep `.hack.secret.key` out of git, or provide `HACK_ENV_SECRET_KEY`
 - let `hack up`, `hack run`, `hack restart`, `hack env exec`, `hack env shell`, and env-aware session flows inject values directly at runtime
 - use `hack env materialize` only when you explicitly need a compatibility `.hack/.env`
@@ -16,6 +17,8 @@ Canonical env state lives at the repo root:
 
 - `.hack/hack.env.default.yaml`
 - `.hack/hack.env.<overlay>.yaml`
+- `.hack/hack.env.local.yaml`
+- `.hack/hack.env.<overlay>.local.yaml`
 
 Compatibility and local-only state still lives under `.hack/`:
 
@@ -69,10 +72,12 @@ Hack resolves env in this order:
 
 1. load `.hack/hack.env.default.yaml`
 2. if `--env=<name>` is selected, load `.hack/hack.env.<name>.yaml`
-3. merge `values.global`
-4. if a service scope is requested, merge `values.<service>` on top
+3. load `.hack/hack.env.local.yaml`
+4. if `--env=<name>` is selected, load `.hack/hack.env.<name>.local.yaml`
+5. merge `values.global`
+6. if a service scope is requested, merge `values.<service>` on top
 
-Overlay values override default values. Service values override global values.
+Worktree-local overrides win over shared repo overlays. Service values override global values.
 Host-command injection applies `host` values last when the execution target is `host`.
 
 Projects can set a default overlay in `.hack/hack.config.json`:
@@ -230,6 +235,12 @@ Default behavior:
 - add `.hack.secret.key` to `.gitignore`
 - decrypt secrets from `.hack.secret.key` on the local machine
 
+Linked worktree behavior:
+
+- when a repo uses linked git worktrees, Hack prefers a shared key under the git common dir
+- sibling worktrees can decrypt the same committed secrets without manually copying gitignored files
+- if a checkout-local `.hack.secret.key` exists, it still wins for that checkout
+
 CI and managed container fallback:
 
 - if `.hack.secret.key` is missing, Hack falls back to `HACK_ENV_SECRET_KEY`
@@ -258,6 +269,8 @@ That migrates the repo into:
 - `.hack.secret.key` when needed
 
 `hack doctor` also warns when a repo still depends on the old format.
+For modern env repos, `hack doctor` also warns when materialized compatibility output in
+`.hack/.env` or `.hack/.env.state.json` is stale and points to `hack env materialize`.
 
 ## Compatibility notes
 

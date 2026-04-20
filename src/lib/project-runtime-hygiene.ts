@@ -31,7 +31,16 @@ export function scopeRuntimeHygieneToProject(input: {
       project.projectDir === input.projectDir
     );
   });
+  const projectNames = new Set(projects.map((project) => project.name));
   const runtime = input.runtime.filter((project) => {
+    if (projectNames.has(project.project)) {
+      return true;
+    }
+    for (const projectName of projectNames) {
+      if (project.project.startsWith(`${projectName}--`)) {
+        return true;
+      }
+    }
     return (
       project.workingDir === input.projectRoot ||
       project.workingDir === input.projectDir

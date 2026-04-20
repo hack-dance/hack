@@ -39,6 +39,14 @@ hack host exec --scope api -- bun test
 hack tickets list
 ```
 
+Portable envs and secrets:
+
+- Commit `.hack/hack.env.default.yaml` and optional `.hack/hack.env.<overlay>.yaml`.
+- Keep `.hack.secret.key` out of git, or provide `HACK_ENV_SECRET_KEY` in CI.
+- Linked git worktrees can reuse an existing checkout-family secret key when their local copy is missing.
+- Let Hack inject resolved env directly into runtime commands by default.
+- Materialize `.hack/.env` only when you explicitly need a compatibility file.
+
 ## What stays in v3
 
 - `hack init`

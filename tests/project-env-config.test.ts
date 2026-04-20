@@ -22,6 +22,7 @@ import { upsertDotEnvValue } from "../src/lib/hack-env.ts";
 import { readProjectDefaultEnvConfig } from "../src/lib/project.ts";
 import {
   assertValidProjectEnvScopeName,
+  ensureProjectEnvSecretKey,
   inspectLegacyComposeEnvFileReferences,
   inspectProjectEnvMaterialization,
   materializeProjectEnv,
@@ -47,6 +48,7 @@ afterEach(async () => {
 });
 
 async function createRepo(): Promise<{
+  readonly tempRoot: string;
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly composeFile: string;
@@ -71,7 +73,7 @@ async function createRepo(): Promise<{
       2
     )}\n`
   );
-  return { projectRoot, projectDir, composeFile, configFile };
+  return { tempRoot: root, projectRoot, projectDir, composeFile, configFile };
 }
 
 async function runGit(args: readonly string[], cwd: string): Promise<string> {
@@ -584,6 +586,50 @@ test("linked worktrees fall back to the shared git-common-dir env key", async ()
   );
 });
 
+test("linked worktrees inherit the primary checkout env key", async () => {
+  const repo = await createRepo();
+  await writeFile(
+    resolve(repo.projectRoot, ".gitignore"),
+    ".hack.secret.key\n"
+  );
+
+  await setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "api",
+    key: "SERVICE_TOKEN",
+    value: "super-secret-token",
+    secret: true,
+  });
+
+  const primaryKeyPath = resolve(repo.projectRoot, PROJECT_ENV_KEY_FILENAME);
+  const primaryKeyText = (await readFile(primaryKeyPath, "utf8")).trim();
+
+  await initializeGitRepo({ projectRoot: repo.projectRoot });
+  const worktreeRoot = resolve(repo.tempRoot, "repo-worktree");
+  await createGitWorktree({
+    projectRoot: repo.projectRoot,
+    worktreeRoot,
+    branch: "feature/env-key",
+  });
+
+  const ensured = await ensureProjectEnvSecretKey({
+    projectRoot: worktreeRoot,
+  });
+  expect(ensured.created).toBe(false);
+  expect((await readFile(ensured.keyPath, "utf8")).trim()).toBe(primaryKeyText);
+
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: worktreeRoot,
+    projectDir: resolve(worktreeRoot, ".hack"),
+    envName: null,
+    serviceNames: ["api", "web"],
+  });
+
+  expect(resolved?.serviceEnv.api?.SERVICE_TOKEN).toBe("super-secret-token");
+});
+
 test("host target only applies explicit host overrides on top of service values", async () => {
   const repo = await createRepo();
 
@@ -859,3 +905,23 @@ test("migrateLegacyProjectEnv blocks cleanup for compose-referenced legacy env f
   expect(composeText).not.toContain("path: .env.production");
   expect(composeText).toContain("- ../.env.docker");
 });
+
+async function createGitWorktree(opts: {
+  readonly projectRoot: string;
+  readonly worktreeRoot: string;
+  readonly branch: string;
+}): Promise<void> {
+  await runGit(
+    ["worktree", "add", "-b", opts.branch, opts.worktreeRoot],
+    opts.projectRoot
+  );
+}
+
+async function initializeGitRepo(opts: {
+  readonly projectRoot: string;
+}): Promise<void> {
+  await writeFile(resolve(opts.projectRoot, "README.md"), "# env test\n");
+  await initGitRepo(opts.projectRoot);
+  await runGit(["add", "."], opts.projectRoot);
+  await runGit(["commit", "-m", "test: seed env fixture"], opts.projectRoot);
+}

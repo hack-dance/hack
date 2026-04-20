@@ -144,6 +144,11 @@ test("scopeRuntimeHygieneToProject excludes unrelated registered and runtime pro
         containerIds: ["current-1"],
       }),
       buildRuntimeProject({
+        project: "current--feat-branch",
+        workingDir: "/tmp/current-repo-branch/.hack",
+        containerIds: ["current-branch-1"],
+      }),
+      buildRuntimeProject({
         project: "other",
         workingDir: "/tmp/other-repo/.hack",
         containerIds: ["other-1"],
@@ -152,7 +157,10 @@ test("scopeRuntimeHygieneToProject excludes unrelated registered and runtime pro
   });
 
   expect(scoped.projects.map((project) => project.id)).toEqual(["current"]);
-  expect(scoped.runtime.map((project) => project.project)).toEqual(["current"]);
+  expect(scoped.runtime.map((project) => project.project)).toEqual([
+    "current",
+    "current--feat-branch",
+  ]);
 });
 
 function buildRegisteredProject(input: {

@@ -29,6 +29,7 @@ import {
   writeTextFileIfChanged,
 } from "./fs.ts";
 import {
+  resolveGitPrimaryWorktreeRoot,
   resolveGitRepositoryIdentity,
   resolveGitWorktreeDir,
 } from "./git-worktree.ts";
@@ -1230,6 +1231,9 @@ async function resolveProjectEnvKey(opts: {
   const sharedText =
     sharedKeyPath === null ? null : await readTextFile(sharedKeyPath);
   const envFallback = process.env[PROJECT_ENV_SECRET_KEY_ENV]?.trim() ?? "";
+  const inheritedKey = await resolveInheritedProjectEnvKey({
+    projectRoot: opts.projectRoot,
+  });
   const trimmed = text?.trim() ?? "";
   if (trimmed.length > 0) {
     return trimmed;
@@ -1237,6 +1241,9 @@ async function resolveProjectEnvKey(opts: {
   const sharedTrimmed = sharedText?.trim() ?? "";
   if (sharedTrimmed.length > 0) {
     return sharedTrimmed;
+  }
+  if (inheritedKey) {
+    return inheritedKey.keyText;
   }
   if (envFallback.length > 0) {
     return envFallback;
@@ -1285,6 +1292,28 @@ export async function ensureProjectEnvSecretKey(opts: {
     };
   }
 
+  const inheritedKey = await resolveInheritedProjectEnvKey({
+    projectRoot: opts.projectRoot,
+  });
+  if (inheritedKey) {
+    const inheritedKeyPath = sharedKeyPath ?? keyPath;
+    await ensureDir(dirname(inheritedKeyPath));
+    await writeTextFile(inheritedKeyPath, `${inheritedKey.keyText}\n`);
+    await chmod(inheritedKeyPath, 0o600);
+    if (sharedKeyPath === null) {
+      await ensureGitignoreEntry({
+        gitignorePath: resolve(opts.projectRoot, ".gitignore"),
+        entry: PROJECT_ENV_KEY_FILENAME,
+        comment: "# project env key",
+      });
+    }
+    return {
+      keyPath: inheritedKeyPath,
+      keyText: inheritedKey.keyText,
+      created: false,
+    };
+  }
+
   const keyText = randomBytes(32).toString("base64url");
   const nextKeyPath = sharedKeyPath ?? keyPath;
   await ensureDir(dirname(nextKeyPath));
@@ -1301,6 +1330,28 @@ export async function ensureProjectEnvSecretKey(opts: {
     keyPath: nextKeyPath,
     keyText,
     created: true,
+  };
+}
+
+async function resolveInheritedProjectEnvKey(opts: {
+  readonly projectRoot: string;
+}): Promise<{ readonly keyPath: string; readonly keyText: string } | null> {
+  const primaryRoot = await resolveGitPrimaryWorktreeRoot({
+    repoRoot: opts.projectRoot,
+  });
+  if (!primaryRoot || primaryRoot === opts.projectRoot) {
+    return null;
+  }
+
+  const keyPath = resolveProjectEnvKeyPath({ projectRoot: primaryRoot });
+  const keyText = (await readTextFile(keyPath))?.trim() ?? "";
+  if (keyText.length === 0) {
+    return null;
+  }
+
+  return {
+    keyPath,
+    keyText,
   };
 }
 

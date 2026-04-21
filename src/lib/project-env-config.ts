@@ -259,10 +259,14 @@ export async function resolveProjectEnvSharedKeyPath(opts: {
       repoRoot: opts.projectRoot,
     }),
   ]);
-  if (!(commonDir && worktreeDir) || commonDir === worktreeDir) {
+  if (!(commonDir && worktreeDir)) {
     return null;
   }
-  return resolve(commonDir, PROJECT_ENV_KEY_FILENAME);
+  const sharedKeyPath = resolve(commonDir, PROJECT_ENV_KEY_FILENAME);
+  if (commonDir !== worktreeDir) {
+    return sharedKeyPath;
+  }
+  return (await pathExists(sharedKeyPath)) ? sharedKeyPath : null;
 }
 
 async function ensureProjectEnvLocalIgnoreEntries(opts: {

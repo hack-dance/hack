@@ -630,6 +630,63 @@ test("linked worktrees inherit the primary checkout env key", async () => {
   expect(resolved?.serviceEnv.api?.SERVICE_TOKEN).toBe("super-secret-token");
 });
 
+test("primary checkout reads shared env key created by a linked worktree", async () => {
+  const repo = await createRepo();
+  await writeFile(
+    resolve(repo.projectRoot, ".gitignore"),
+    ".hack.secret.key\n"
+  );
+
+  await initializeGitRepo({ projectRoot: repo.projectRoot });
+  const linkedRoot = resolve(repo.tempRoot, "repo-linked");
+  await createGitWorktree({
+    projectRoot: repo.projectRoot,
+    worktreeRoot: linkedRoot,
+    branch: "feature/shared-key-author",
+  });
+
+  await setProjectEnvValue({
+    projectRoot: linkedRoot,
+    projectDir: resolve(linkedRoot, ".hack"),
+    envName: null,
+    scope: "api",
+    key: "SERVICE_TOKEN",
+    value: "shared-from-linked-worktree",
+    secret: true,
+  });
+
+  const primaryKeyPath = resolve(repo.projectRoot, PROJECT_ENV_KEY_FILENAME);
+  expect(await Bun.file(primaryKeyPath).exists()).toBe(false);
+
+  const commonDir = await runGit(
+    ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    repo.projectRoot
+  );
+  const sharedKeyPath = resolve(commonDir, PROJECT_ENV_KEY_FILENAME);
+  expect((await readFile(sharedKeyPath, "utf8")).trim().length).toBeGreaterThan(
+    10
+  );
+
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    await readFile(
+      resolve(linkedRoot, ".hack", "hack.env.default.yaml"),
+      "utf8"
+    )
+  );
+
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    serviceNames: ["api", "web"],
+  });
+
+  expect(resolved?.serviceEnv.api?.SERVICE_TOKEN).toBe(
+    "shared-from-linked-worktree"
+  );
+});
+
 test("host target only applies explicit host overrides on top of service values", async () => {
   const repo = await createRepo();
 

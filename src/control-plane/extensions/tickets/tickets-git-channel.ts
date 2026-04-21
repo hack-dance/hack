@@ -1326,7 +1326,7 @@ export function createGitTicketsChannel(opts: {
   };
 
   const inspect = async (): Promise<TicketsGitInspectResult> => {
-    const checkedOut = await ensureCheckedOutUnlocked();
+    const checkedOut = await ensureCheckedOut();
     if (!checkedOut.ok) {
       return checkedOut;
     }

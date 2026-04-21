@@ -25,6 +25,7 @@ import {
   ensureProjectEnvSecretKey,
   inspectLegacyComposeEnvFileReferences,
   inspectProjectEnvMaterialization,
+  listProjectEnvOverlayNames,
   materializeProjectEnv,
   migrateLegacyProjectEnv,
   parseProjectEnvTarget,
@@ -282,6 +283,49 @@ test("inspectProjectEnvMaterialization reports stale inputs after env config cha
   expect(inspected.message).toContain("hack env materialize");
 });
 
+test("inspectProjectEnvMaterialization reports selected service drift", async () => {
+  const repo = await createRepo();
+  await setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "global",
+    key: "GLOBAL_FLAG",
+    value: "1",
+    secret: false,
+  });
+  await setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "api",
+    key: "API_ONLY",
+    value: "yes",
+    secret: false,
+  });
+
+  await materializeProjectEnv({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    serviceName: "api",
+    serviceNames: ["api", "web"],
+  });
+
+  const inspected = await inspectProjectEnvMaterialization({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: undefined,
+    serviceNames: ["api", "web"],
+  });
+
+  expect(inspected.status).toBe("warn");
+  expect(inspected.message).toContain(
+    "materialized service scope api does not match effective service scope none"
+  );
+  expect(inspected.message).toContain("hack env materialize");
+});
+
 test("inspectProjectEnvMaterialization reports missing state for materialized env output", async () => {
   const repo = await createRepo();
   await setProjectEnvValue({
@@ -466,6 +510,71 @@ test("resolveProjectEnvConfig merges shared and worktree-local overlays in order
     resolve(repo.projectDir, "hack.env.qa.yaml"),
     resolve(repo.projectDir, "hack.env.local.yaml"),
     resolve(repo.projectDir, "hack.env.qa.local.yaml"),
+  ]);
+});
+
+test("legacy tracked local overlay remains selectable without acting as a local default", async () => {
+  const repo = await createRepo();
+  await initGitRepo(repo.projectRoot);
+
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    [
+      "version: 1",
+      "environment: default",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      "    SHARED_DEFAULT: shared-default",
+      "",
+    ].join("\n")
+  );
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.local.yaml"),
+    [
+      "version: 1",
+      "environment: local",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      "    LEGACY_LOCAL: legacy-local",
+      "",
+    ].join("\n")
+  );
+  await runGit(["add", "."], repo.projectRoot);
+
+  expect(
+    await listProjectEnvOverlayNames({ projectDir: repo.projectDir })
+  ).toEqual(["local"]);
+
+  const defaultResolved = await resolveProjectEnvConfig({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    serviceNames: ["api", "web"],
+  });
+  expect(defaultResolved).not.toBeNull();
+  expect(defaultResolved?.globalEnv).toEqual({
+    SHARED_DEFAULT: "shared-default",
+  });
+  expect(defaultResolved?.files).toEqual([
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+  ]);
+
+  const localResolved = await resolveProjectEnvConfig({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: "local",
+    serviceNames: ["api", "web"],
+  });
+  expect(localResolved).not.toBeNull();
+  expect(localResolved?.globalEnv).toEqual({
+    LEGACY_LOCAL: "legacy-local",
+    SHARED_DEFAULT: "shared-default",
+  });
+  expect(localResolved?.files).toEqual([
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    resolve(repo.projectDir, "hack.env.local.yaml"),
   ]);
 });
 

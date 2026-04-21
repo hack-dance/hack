@@ -5,7 +5,7 @@ import {
   randomBytes,
 } from "node:crypto";
 import { chmod, readdir, rm } from "node:fs/promises";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, relative, resolve } from "node:path";
 import { YAML } from "bun";
 import {
   PROJECT_COMPOSE_FILENAME,
@@ -80,7 +80,7 @@ export type ProjectEnvSelection = {
   readonly defaultPath: string;
   readonly overlayPath: string | null;
   readonly overlayExists: boolean;
-  readonly localDefaultPath: string;
+  readonly localDefaultPath: string | null;
   readonly localDefaultExists: boolean;
   readonly localOverlayPath: string | null;
   readonly localOverlayExists: boolean;
@@ -292,6 +292,52 @@ async function ensureProjectEnvLocalIgnoreEntries(opts: {
   }
 }
 
+function toGitRelativePath(opts: {
+  readonly projectRoot: string;
+  readonly path: string;
+}): string {
+  return relative(opts.projectRoot, opts.path).split("\\").join("/");
+}
+
+async function isGitTrackedProjectEnvPath(opts: {
+  readonly projectRoot: string;
+  readonly path: string;
+}): Promise<boolean> {
+  const relativePath = toGitRelativePath(opts);
+  const proc = Bun.spawn({
+    cmd: [
+      "git",
+      "-C",
+      opts.projectRoot,
+      "ls-files",
+      "--error-unmatch",
+      "--",
+      relativePath,
+    ],
+    stderr: "ignore",
+    stdin: "ignore",
+    stdout: "ignore",
+  });
+  return (await proc.exited) === 0;
+}
+
+async function isLegacyTrackedLocalOverlay(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): Promise<boolean> {
+  const localDefaultPath = resolveProjectEnvLocalConfigPath({
+    projectDir: opts.projectDir,
+    envName: null,
+  });
+  if (!(await pathExists(localDefaultPath))) {
+    return false;
+  }
+  return await isGitTrackedProjectEnvPath({
+    projectRoot: opts.projectRoot,
+    path: localDefaultPath,
+  });
+}
+
 function resolveProjectEnvStatePath(opts: {
   readonly projectDir: string;
 }): string {
@@ -327,6 +373,10 @@ export async function projectEnvConfigExists(opts: {
 export async function listProjectEnvOverlayNames(opts: {
   readonly projectDir: string;
 }): Promise<readonly string[]> {
+  const legacyTrackedLocalOverlay = await isLegacyTrackedLocalOverlay({
+    projectRoot: dirname(opts.projectDir),
+    projectDir: opts.projectDir,
+  });
   const entries = await readdir(opts.projectDir, { withFileTypes: true });
   return entries
     .filter((entry) => entry.isFile())
@@ -345,7 +395,9 @@ export async function listProjectEnvOverlayNames(opts: {
         .slice(PROJECT_ENV_CONFIG_FILENAME_PREFIX.length)
         .slice(0, -PROJECT_ENV_CONFIG_FILENAME_SUFFIX.length)
     )
-    .filter((name) => name !== PROJECT_ENV_LOCAL_SEGMENT)
+    .filter(
+      (name) => name !== PROJECT_ENV_LOCAL_SEGMENT || legacyTrackedLocalOverlay
+    )
     .filter((name) => !name.endsWith(`.${PROJECT_ENV_LOCAL_SEGMENT}`))
     .filter((name) => name.length > 0)
     .sort((left, right) => left.localeCompare(right));
@@ -514,14 +566,20 @@ export async function resolveProjectEnvSelection(opts: {
     projectDir: opts.projectDir,
   });
   const effectiveEnv = requestedEnv === undefined ? defaultEnv : requestedEnv;
+  const legacyTrackedLocalOverlay = await isLegacyTrackedLocalOverlay({
+    projectRoot: opts.projectRoot,
+    projectDir: opts.projectDir,
+  });
   const defaultPath = resolveProjectEnvConfigPath({
     projectDir: opts.projectDir,
     envName: null,
   });
-  const localDefaultPath = resolveProjectEnvLocalConfigPath({
-    projectDir: opts.projectDir,
-    envName: null,
-  });
+  const localDefaultPath = legacyTrackedLocalOverlay
+    ? null
+    : resolveProjectEnvLocalConfigPath({
+        projectDir: opts.projectDir,
+        envName: null,
+      });
   const overlayPath =
     effectiveEnv === null
       ? null
@@ -545,7 +603,8 @@ export async function resolveProjectEnvSelection(opts: {
     overlayPath,
     overlayExists: overlayPath === null ? false : await pathExists(overlayPath),
     localDefaultPath,
-    localDefaultExists: await pathExists(localDefaultPath),
+    localDefaultExists:
+      localDefaultPath === null ? false : await pathExists(localDefaultPath),
     localOverlayPath,
     localOverlayExists:
       localOverlayPath === null ? false : await pathExists(localOverlayPath),
@@ -576,10 +635,13 @@ export async function resolveProjectEnvConfig(opts: {
           path: selection.overlayPath,
           environment: selection.effectiveEnv ?? "default",
         });
-  const localDefaultRead = await readProjectEnvConfigFile({
-    path: selection.localDefaultPath,
-    environment: "default",
-  });
+  const localDefaultRead =
+    selection.localDefaultPath === null
+      ? null
+      : await readProjectEnvConfigFile({
+          path: selection.localDefaultPath,
+          environment: "default",
+        });
   const localOverlayRead =
     selection.localOverlayPath === null
       ? null
@@ -592,7 +654,7 @@ export async function resolveProjectEnvConfig(opts: {
     !(
       defaultRead.exists ||
       (overlayRead?.exists ?? false) ||
-      localDefaultRead.exists ||
+      (localDefaultRead?.exists ?? false) ||
       (localOverlayRead?.exists ?? false)
     )
   ) {
@@ -609,7 +671,7 @@ export async function resolveProjectEnvConfig(opts: {
       `Failed to parse ${overlayRead.path}: ${overlayRead.parseError}`
     );
   }
-  if (localDefaultRead.parseError) {
+  if (localDefaultRead?.parseError) {
     throw new Error(
       `Failed to parse ${localDefaultRead.path}: ${localDefaultRead.parseError}`
     );
@@ -624,7 +686,7 @@ export async function resolveProjectEnvConfig(opts: {
     layers: [
       defaultRead.exists ? defaultRead.config : null,
       overlayRead?.exists ? overlayRead.config : null,
-      localDefaultRead.exists ? localDefaultRead.config : null,
+      localDefaultRead?.exists ? localDefaultRead.config : null,
       localOverlayRead?.exists ? localOverlayRead.config : null,
     ],
     environment: selection.effectiveEnv ?? "default",
@@ -676,7 +738,7 @@ export async function resolveProjectEnvConfig(opts: {
   if (selection.overlayPath && overlayRead?.exists) {
     files.push(selection.overlayPath);
   }
-  if (localDefaultRead.exists) {
+  if (selection.localDefaultPath && localDefaultRead?.exists) {
     files.push(selection.localDefaultPath);
   }
   if (selection.localOverlayPath && localOverlayRead?.exists) {
@@ -992,6 +1054,7 @@ export async function inspectProjectEnvMaterialization(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly envName?: string | null;
+  readonly serviceName?: string | null;
   readonly serviceNames: readonly string[];
 }): Promise<ProjectEnvMaterializationInspection> {
   const envPath = resolve(opts.projectDir, PROJECT_ENV_FILENAME);
@@ -1061,6 +1124,7 @@ export async function inspectProjectEnvMaterialization(opts: {
   const issues = await collectProjectEnvMaterializationIssues({
     state: stateRead.state,
     resolved,
+    serviceName: opts.serviceName,
     serviceNames: opts.serviceNames,
   });
   if (issues.length === 0) {
@@ -1171,6 +1235,7 @@ function parseProjectEnvStateFile(opts: {
 async function collectProjectEnvMaterializationIssues(opts: {
   readonly state: ProjectEnvStateFile;
   readonly resolved: ProjectEnvResolvedConfig;
+  readonly serviceName?: string | null;
   readonly serviceNames: readonly string[];
 }): Promise<readonly string[]> {
   const issues: string[] = [];
@@ -1185,13 +1250,26 @@ async function collectProjectEnvMaterializationIssues(opts: {
     );
   }
 
-  if (
-    opts.state.selectedService !== null &&
-    !opts.serviceNames.includes(opts.state.selectedService)
-  ) {
-    issues.push(
-      `materialized service scope ${opts.state.selectedService} no longer exists`
-    );
+  const expectedService = opts.serviceName ?? null;
+  if (opts.state.selectedService !== expectedService) {
+    if (
+      opts.state.selectedService !== null &&
+      !opts.serviceNames.includes(opts.state.selectedService)
+    ) {
+      issues.push(
+        `materialized service scope ${opts.state.selectedService} no longer exists`
+      );
+    } else {
+      issues.push(
+        `materialized service scope ${formatProjectEnvStateValue({
+          value: opts.state.selectedService,
+        })} does not match effective service scope ${formatProjectEnvStateValue(
+          {
+            value: expectedService,
+          }
+        )}`
+      );
+    }
   }
 
   const currentInputs = await buildProjectEnvStateDigests({

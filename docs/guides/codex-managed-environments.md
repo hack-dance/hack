@@ -10,6 +10,17 @@ Use this path when:
 - `hack global install` is too heavy or not applicable
 - you want tickets, integrations, docs, and repo-local CLI workflows without the full local host stack
 
+## Published slim image
+
+Hack publishes a portable slim image for managed containers:
+
+- Docker Hub: `hackdance/hack:slim`
+- GHCR: `ghcr.io/hack-dance/hack:slim`
+
+Use it as a base image when you want `hack` and Bun preinstalled, then layer any project-specific
+toolchains on top. For example, a non-JS repo can extend the image and add Rust, Go, or other
+language runtimes without rebuilding the Hack bootstrap each time.
+
 ## What slim mode does
 
 Slim mode is enabled by setting `HACK_EXECUTION_MODE=codex` or `HACK_EXECUTION_MODE=slim`.
@@ -42,7 +53,12 @@ and writes a thin `hack` wrapper with these defaults:
 - `HACK_DAEMON_DISABLE_DOCKER_EVENTS=1`
 - `HACK_SETUP_SYNC_MODE=warn`
 
+If you are already inside a container built from `hackdance/hack:slim`, Hack and Bun are already
+available and you can skip the installer entirely.
+
 ## Recommended setup script
+
+When you are not using the slim image:
 
 ```bash
 set -euo pipefail
@@ -56,12 +72,32 @@ curl -fsSL \
   | bash
 ```
 
-## Recommended maintenance script
+When you are using the slim image as your base:
 
 ```bash
 set -euo pipefail
 
+bun install --frozen-lockfile || bun install
+```
+
+## Recommended maintenance script
+
+When you are not using the slim image:
+
+```bash
+set -euo pipefail
+
+mise install bun@1.3.5
 export PATH="$HOME/.local/share/mise/shims:$PATH"
+
+bun install --frozen-lockfile || bun install
+```
+
+When you are using the slim image as your base:
+
+```bash
+set -euo pipefail
+
 bun install --frozen-lockfile || bun install
 ```
 
@@ -89,6 +125,14 @@ export HACK_ENV_SECRET_KEY="..."
 hack host exec --env qa --scope api -- bun db:migrate
 hack host exec --env qa --scope api --target compose -- bun test
 ```
+
+That same pattern is the recommended portable-container contract:
+
+- mount or check out the repo normally
+- inject `HACK_ENV_SECRET_KEY` from the container runtime or secret manager
+- let Hack resolve `.hack/hack.env.default.yaml`, overlays, and worktree-local overrides at runtime
+
+Do not bake `.hack.secret.key` into the image.
 
 `hack host exec` and `hack host shell` default to a host-local env view for host commands. Use
 `--scope` when you want service-scoped values without running inside that service container. Use

@@ -2,12 +2,22 @@
 
 import { resolve } from "node:path";
 
+type RuntimeImageVariant = "node-runtime" | "slim";
+
+type RuntimeImageVariantConfig = {
+  readonly defaultTag: string;
+  readonly description: string;
+  readonly displayName: string;
+  readonly dockerfile: string;
+};
+
 type BuildNodeRuntimeImageArgs = {
   readonly tags: readonly string[];
   readonly platform: string | null;
   readonly push: boolean;
   readonly load: boolean;
   readonly noCache: boolean;
+  readonly variant: RuntimeImageVariant;
 };
 
 type ParseResult =
@@ -20,6 +30,7 @@ type MutableParseState = {
   push: boolean;
   load: boolean;
   noCache: boolean;
+  variant: RuntimeImageVariant;
 };
 
 type TokenParseResult =
@@ -27,6 +38,23 @@ type TokenParseResult =
   | { readonly ok: false; readonly result: ParseResult };
 
 const parsed = parseArgs({ argv: Bun.argv.slice(2) });
+
+const RUNTIME_IMAGE_VARIANTS = {
+  "node-runtime": {
+    defaultTag: "hack-node-runtime:dev",
+    description:
+      "Containerized hack node runtime for remote multi-node execution",
+    displayName: "node-runtime",
+    dockerfile: "docker/node-runtime/Dockerfile",
+  },
+  slim: {
+    defaultTag: "hack-slim-runtime:dev",
+    description:
+      "Portable hack slim runtime for managed containers and remote agent environments",
+    displayName: "slim",
+    dockerfile: "docker/slim-runtime/Dockerfile",
+  },
+} as const satisfies Record<RuntimeImageVariant, RuntimeImageVariantConfig>;
 
 if (!parsed.ok) {
   process.stderr.write(`${parsed.message}\n`);
@@ -44,6 +72,7 @@ async function main({
   readonly args: BuildNodeRuntimeImageArgs;
 }): Promise<number> {
   const repoRoot = resolve(import.meta.dir, "..");
+  const variant = RUNTIME_IMAGE_VARIANTS[args.variant];
   const packageVersion = await readPackageVersion({ repoRoot });
   if (!packageVersion) {
     process.stderr.write(
@@ -57,7 +86,7 @@ async function main({
     (await readGitRevision({ repoRoot })) ||
     "unknown";
   const buildDate = new Date().toISOString();
-  const dockerfile = resolve(repoRoot, "docker/node-runtime/Dockerfile");
+  const dockerfile = resolve(repoRoot, variant.dockerfile);
   const command = [
     "docker",
     "buildx",
@@ -71,6 +100,8 @@ async function main({
     `BUILD_DATE=${buildDate}`,
     "--build-arg",
     `VCS_REF=${vcsRef}`,
+    "--build-arg",
+    `HACK_RUNTIME_IMAGE_VARIANT=${args.variant}`,
   ];
 
   if (args.platform) {
@@ -88,11 +119,12 @@ async function main({
 
   process.stdout.write(
     `${[
-      "Building node-runtime image:",
+      `Building ${variant.displayName} runtime image:`,
       `  tags: ${args.tags.join(", ")}`,
       `  platform: ${args.platform ?? "docker default"}`,
       `  output: ${args.push ? "push" : args.load ? "load" : "none"}`,
       `  dockerfile: ${dockerfile}`,
+      `  variant: ${args.variant}`,
     ].join("\n")}\n`
   );
 
@@ -113,6 +145,7 @@ function parseArgs({
     push: false,
     load: false,
     noCache: false,
+    variant: "node-runtime",
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -199,6 +232,30 @@ function parseToken({
     };
   }
 
+  const variant = readOptionValue({
+    argv,
+    index,
+    token,
+    option: "--variant",
+  });
+  if (variant.kind === "value") {
+    const resolvedVariant = parseVariant({ value: variant.value });
+    if (!resolvedVariant.ok) {
+      return {
+        ok: false,
+        result: { ok: false, message: resolvedVariant.message, exitCode: 1 },
+      };
+    }
+    state.variant = resolvedVariant.variant;
+    return { ok: true, nextIndex: variant.nextIndex };
+  }
+  if (variant.kind === "error") {
+    return {
+      ok: false,
+      result: { ok: false, message: variant.message, exitCode: 1 },
+    };
+  }
+
   return {
     ok: false,
     result: {
@@ -218,7 +275,7 @@ function readOptionValue({
   readonly argv: readonly string[];
   readonly index: number;
   readonly token: string;
-  readonly option: "--tag" | "--platform";
+  readonly option: "--platform" | "--tag" | "--variant";
 }):
   | { readonly kind: "none" }
   | {
@@ -258,7 +315,9 @@ function finalizeParsedArgs({
   }
 
   const effectiveTags =
-    state.tags.length > 0 ? state.tags : ["hack-node-runtime:dev"];
+    state.tags.length > 0
+      ? state.tags
+      : [RUNTIME_IMAGE_VARIANTS[state.variant].defaultTag];
   const hasMultiPlatform = state.platform?.includes(",") ?? false;
   const effectiveLoad = !state.push && (state.load || !state.push);
   if (effectiveLoad && hasMultiPlatform) {
@@ -278,7 +337,25 @@ function finalizeParsedArgs({
       push: state.push,
       load: effectiveLoad,
       noCache: state.noCache,
+      variant: state.variant,
     },
+  };
+}
+
+function parseVariant({
+  value,
+}: {
+  readonly value: string;
+}):
+  | { readonly ok: true; readonly variant: RuntimeImageVariant }
+  | { readonly ok: false; readonly message: string } {
+  if (value === "node-runtime" || value === "slim") {
+    return { ok: true, variant: value };
+  }
+
+  return {
+    ok: false,
+    message: `Invalid --variant value: ${value}. Expected one of: node-runtime, slim.`,
   };
 }
 
@@ -354,13 +431,14 @@ async function run({
 
 function renderHelp(): string {
   return [
-    "Build/publish the hack node-runtime container image.",
+    "Build/publish hack runtime container images.",
     "",
     "Usage:",
     "  bun run scripts/build-node-runtime-image.ts [options]",
     "",
     "Options:",
-    "  --tag <tag>           Image tag (repeatable, default: hack-node-runtime:dev)",
+    "  --variant <name>      Runtime variant: node-runtime or slim (default: node-runtime)",
+    "  --tag <tag>           Image tag (repeatable, default depends on --variant)",
     "  --platform <value>    Docker platform(s), e.g. linux/amd64,linux/arm64",
     "  --push                Push image to registry",
     "  --load                Load image into local Docker daemon (default when --push is not set)",

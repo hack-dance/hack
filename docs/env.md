@@ -246,7 +246,15 @@ CI and managed container fallback:
 
 - if `.hack.secret.key` is missing, Hack falls back to `HACK_ENV_SECRET_KEY`
 
-That makes this model usable in CI without committing the key file.
+That makes this model usable in CI and portable container images without committing the key file.
+
+Published container paths:
+
+- full remote runtime: `hackdance/hack:latest`
+- slim managed-container base: `hackdance/hack:slim`
+
+In both cases, inject `HACK_ENV_SECRET_KEY` from the runtime or secret manager instead of copying
+`.hack.secret.key` into the image.
 
 ## Legacy repos and migration
 

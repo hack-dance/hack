@@ -15,7 +15,9 @@
   "scripts": {
     "dev": "bun run --cwd packages/cli dev",
     "build": "bun run --cwd packages/cli build",
+    "build:runtime-image": "bun run --cwd packages/cli build:runtime-image",
     "build:node-runtime-image": "bun run --cwd packages/cli build:node-runtime-image",
+    "build:slim-runtime-image": "bun run --cwd packages/cli build:slim-runtime-image",
     "build:release": "bun run --cwd packages/cli build:release",
     "commit": "cz",
     "install:dev": "bun run --cwd packages/cli install:dev",

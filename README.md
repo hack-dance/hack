@@ -42,7 +42,7 @@ hack tickets list
 Portable envs and secrets:
 
 - Commit `.hack/hack.env.default.yaml` and optional `.hack/hack.env.<overlay>.yaml`.
-- Keep `.hack.secret.key` out of git, or provide `HACK_ENV_SECRET_KEY` in CI.
+- Keep `.hack.secret.key` out of git, or provide `HACK_ENV_SECRET_KEY` in CI and managed containers.
 - Linked git worktrees can reuse an existing checkout-family secret key when their local copy is missing.
 - Let Hack inject resolved env directly into runtime commands by default.
 - Materialize `.hack/.env` only when you explicitly need a compatibility file.
@@ -108,6 +108,21 @@ curl -fsSL \
   https://github.com/hack-dance/hack/releases/latest/download/hack-install.sh \
   | bash
 ```
+
+## Portable containers
+
+Hack ships public runtime images on Docker Hub and GHCR:
+
+- full remote runtime: `hackdance/hack:latest`
+- slim portable base: `hackdance/hack:slim`
+
+Use the full image when you need the remote node runtime with bundled Docker CLI, compose, and
+gateway bootstrap. Use the slim image as a base for Codex, CI, or other managed containers where
+you want `hack`, Bun, and the local-first env/session/tickets workflows available without the full
+host stack.
+
+For portable container setups, pass `HACK_ENV_SECRET_KEY` at runtime instead of copying
+`.hack.secret.key` into the image.
 
 ## macOS app
 

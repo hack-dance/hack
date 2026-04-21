@@ -8,7 +8,6 @@ COPY package.json bun.lock bunfig.toml tsconfig.json index.ts ./
 # validation sees the same workspace graph as the checked-in repository.
 COPY apps ./apps
 COPY packages ./packages
-COPY services ./services
 COPY src ./src
 RUN bun install --frozen-lockfile
 RUN bun build index.ts --compile --outfile /out/hack
@@ -27,7 +26,7 @@ LABEL org.opencontainers.image.description="Containerized hack node runtime for 
 LABEL org.opencontainers.image.version="${HACK_VERSION}"
 LABEL org.opencontainers.image.created="${BUILD_DATE}"
 LABEL org.opencontainers.image.revision="${VCS_REF}"
-LABEL org.opencontainers.image.source="https://github.com/hack-dance/hack-cli"
+LABEL org.opencontainers.image.source="https://github.com/hack-dance/hack"
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \

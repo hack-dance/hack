@@ -343,7 +343,7 @@ test("resolveLegacyImportFetchResult ignores missing legacy refs", () => {
 test("formatTicketsGitRemoteError adds actionable SSH guidance", () => {
   const message = __testOnly.formatTicketsGitRemoteError({
     message:
-      'sign_and_send_pubkey: signing failed for ED25519 "/Users/hack/.ssh/id_ed25519" from agent: agent refused operation\nPermission denied (publickey).',
+      'sign_and_send_pubkey: signing failed for ED25519 "<ssh-key-path>" from agent: agent refused operation\nPermission denied (publickey).',
     operation: "fetch",
   });
 
@@ -361,7 +361,7 @@ test("sync returns actionable SSH guidance when git remote auth fails", async ()
     remoteScriptPath,
     [
       "#!/bin/sh",
-      "echo 'sign_and_send_pubkey: signing failed for ED25519 \"/Users/hack/.ssh/id_ed25519\" from agent: agent refused operation' >&2",
+      "echo 'sign_and_send_pubkey: signing failed for ED25519 \"<ssh-key-path>\" from agent: agent refused operation' >&2",
       'echo "git@github.com: Permission denied (publickey)." >&2',
       "exit 255",
       "",

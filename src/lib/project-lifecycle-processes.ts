@@ -85,7 +85,6 @@ export function resolveLifecycleProcessGroupIdsForTmuxState(opts: {
   readonly snapshot: readonly ProcessSnapshotRow[];
 }): number[] {
   const rootPids = new Set<number>();
-  const persistedGroups = new Set<number>();
 
   for (const processInfo of opts.lifecycleEntry?.processes ?? []) {
     const currentPanePids =
@@ -101,25 +100,13 @@ export function resolveLifecycleProcessGroupIdsForTmuxState(opts: {
       opts.snapshot.some((row) => row.pid === processInfo.panePid)
     ) {
       rootPids.add(processInfo.panePid);
-      continue;
-    }
-    if (
-      processInfo.processGroupId !== undefined &&
-      opts.snapshot.some(
-        (row) => row.processGroupId === processInfo.processGroupId
-      )
-    ) {
-      persistedGroups.add(processInfo.processGroupId);
     }
   }
 
-  const discoveredGroups = collectDescendantProcessGroupIds({
+  return collectDescendantProcessGroupIds({
     snapshot: opts.snapshot,
     rootPids: [...rootPids],
   });
-  return [...new Set([...discoveredGroups, ...persistedGroups])].sort(
-    (left, right) => left - right
-  );
 }
 
 /** Recover live lifecycle process groups from persisted metadata when mux panes are gone. */

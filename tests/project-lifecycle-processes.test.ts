@@ -158,6 +158,32 @@ test("resolveLifecycleProcessGroupIdsForTmuxState falls back to persisted live g
   expect(groups).toEqual([500, 501]);
 });
 
+test("resolveLifecycleProcessGroupIdsForTmuxState ignores recycled process groups without a live pane pid", () => {
+  const groups = resolveLifecycleProcessGroupIdsForTmuxState({
+    lifecycleEntry: {
+      composeProject: "event-agent",
+      projectName: "event-agent",
+      branch: "feature-cleanup",
+      sessionName: "event-agent--lifecycle-feature-cleanup",
+      backend: "tmux",
+      updatedAt: "2026-04-01T14:00:00.000Z",
+      processes: [
+        {
+          name: "proxy",
+          windowName: "proxy",
+          logPath: "/tmp/event-agent.log",
+          panePid: 9999,
+          processGroupId: 500,
+        },
+      ],
+    },
+    panePidsByWindow: new Map([["proxy", []]]),
+    snapshot: [{ pid: 700, ppid: 1, processGroupId: 500 }],
+  });
+
+  expect(groups).toEqual([]);
+});
+
 test("resolvePersistedLifecycleProcessGroupIds recovers live groups without a mux session", () => {
   const groups = resolvePersistedLifecycleProcessGroupIds({
     lifecycleEntry: {

@@ -149,6 +149,7 @@ export function createGitTicketsChannel(opts: {
     DEFAULT_MUTATION_LOCK_TIMEOUT_MS;
   const remoteGitTimeoutMs =
     opts.testOverrides?.remoteGitTimeoutMs ?? DEFAULT_REMOTE_GIT_TIMEOUT_MS;
+  let inProcessWorktreeAccess: Promise<void> = Promise.resolve();
 
   const resolvePushRefForCheckout = (input: {
     readonly checkoutRef: string;
@@ -241,13 +242,104 @@ export function createGitTicketsChannel(opts: {
     readonly heartbeatTimer: ReturnType<typeof setInterval>;
   };
 
-  const withMutationLock = async <T>(fn: () => Promise<T>): Promise<T> => {
-    const lockHandle = await acquireMutationLock();
+  const withWorktreeAccess = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const prior = inProcessWorktreeAccess.catch(() => undefined);
+    let release!: () => void;
+    inProcessWorktreeAccess = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await prior;
     try {
       return await fn();
     } finally {
-      await releaseMutationLock(lockHandle);
+      release();
     }
+  };
+
+  const withMutationLock = async <T>(fn: () => Promise<T>): Promise<T> => {
+    return await withWorktreeAccess(async () => {
+      const lockHandle = await acquireMutationLock();
+      try {
+        return await fn();
+      } finally {
+        await releaseMutationLock(lockHandle);
+      }
+    });
+  };
+
+  const ensureCheckedOutUnlocked = async (input?: {
+    readonly forceFreshCheckout?: boolean;
+    readonly refreshRemote?: boolean;
+  }): Promise<
+    | {
+        readonly ok: true;
+        readonly remoteUrl: string | null;
+        readonly pushRef: string;
+      }
+    | { readonly ok: false; readonly error: string }
+  > => {
+    await ensureDirs();
+    await ensureBareRepo();
+    await ensureSparseCheckout();
+    const refreshRemote = input?.refreshRemote !== false;
+    const remote = await ensureRemote();
+    if (refreshRemote) {
+      const refreshed = await refreshRemoteTrackingRefs({
+        remoteUrl: remote.remoteUrl,
+      });
+      if (!refreshed.ok) {
+        return refreshed;
+      }
+    }
+
+    const reusableCheckout = await resolveReusableCheckout({
+      forceFreshCheckout: input?.forceFreshCheckout === true,
+      remoteUrl: remote.remoteUrl,
+    });
+    if (reusableCheckout) {
+      return reusableCheckout;
+    }
+
+    const hasLocalBranch = await hasLocalTicketsBranch();
+    const checkoutRemoteUrl =
+      refreshRemote || !hasLocalBranch ? remote.remoteUrl : null;
+
+    const checkedOut = await checkoutHead({
+      allowRemoteFetchFailureFallback: !refreshRemote && hasLocalBranch,
+      remoteUrl: checkoutRemoteUrl,
+    });
+    if (!checkedOut.ok) {
+      return checkedOut;
+    }
+
+    const migratedLegacy = await mergeLegacyRefIntoCurrentBranch({
+      remoteUrl: checkoutRemoteUrl,
+    });
+    if (!migratedLegacy.ok) {
+      return migratedLegacy;
+    }
+
+    return {
+      ok: true,
+      remoteUrl: remote.remoteUrl,
+      pushRef: checkedOut.pushRef,
+    };
+  };
+
+  const ensureCheckedOut = async (input?: {
+    readonly forceFreshCheckout?: boolean;
+    readonly refreshRemote?: boolean;
+  }): Promise<
+    | {
+        readonly ok: true;
+        readonly remoteUrl: string | null;
+        readonly pushRef: string;
+      }
+    | { readonly ok: false; readonly error: string }
+  > => {
+    return await withWorktreeAccess(async () => {
+      return await ensureCheckedOutUnlocked(input);
+    });
   };
 
   const readMutationLockOwner = async (): Promise<string | null> => {
@@ -914,65 +1006,6 @@ export function createGitTicketsChannel(opts: {
     return { ok: true, imported: true };
   };
 
-  const ensureCheckedOut = async (input?: {
-    readonly forceFreshCheckout?: boolean;
-    readonly refreshRemote?: boolean;
-  }): Promise<
-    | {
-        readonly ok: true;
-        readonly remoteUrl: string | null;
-        readonly pushRef: string;
-      }
-    | { readonly ok: false; readonly error: string }
-  > => {
-    await ensureDirs();
-    await ensureBareRepo();
-    await ensureSparseCheckout();
-    const refreshRemote = input?.refreshRemote !== false;
-    const remote = await ensureRemote();
-    if (refreshRemote) {
-      const refreshed = await refreshRemoteTrackingRefs({
-        remoteUrl: remote.remoteUrl,
-      });
-      if (!refreshed.ok) {
-        return refreshed;
-      }
-    }
-
-    const reusableCheckout = await resolveReusableCheckout({
-      forceFreshCheckout: input?.forceFreshCheckout === true,
-      remoteUrl: remote.remoteUrl,
-    });
-    if (reusableCheckout) {
-      return reusableCheckout;
-    }
-
-    const hasLocalBranch = await hasLocalTicketsBranch();
-    const checkoutRemoteUrl =
-      refreshRemote || !hasLocalBranch ? remote.remoteUrl : null;
-
-    const checkedOut = await checkoutHead({
-      allowRemoteFetchFailureFallback: !refreshRemote && hasLocalBranch,
-      remoteUrl: checkoutRemoteUrl,
-    });
-    if (!checkedOut.ok) {
-      return checkedOut;
-    }
-
-    const migratedLegacy = await mergeLegacyRefIntoCurrentBranch({
-      remoteUrl: checkoutRemoteUrl,
-    });
-    if (!migratedLegacy.ok) {
-      return migratedLegacy;
-    }
-
-    return {
-      ok: true,
-      remoteUrl: remote.remoteUrl,
-      pushRef: checkedOut.pushRef,
-    };
-  };
-
   const resolveReusableCheckout = async (input: {
     readonly forceFreshCheckout: boolean;
     readonly remoteUrl: string | null;
@@ -1293,7 +1326,7 @@ export function createGitTicketsChannel(opts: {
   };
 
   const inspect = async (): Promise<TicketsGitInspectResult> => {
-    const checkedOut = await ensureCheckedOut();
+    const checkedOut = await ensureCheckedOutUnlocked();
     if (!checkedOut.ok) {
       return checkedOut;
     }
@@ -1343,7 +1376,7 @@ export function createGitTicketsChannel(opts: {
     readonly pruneLegacyRef: boolean;
   }): Promise<TicketsGitRepairResult> => {
     return await withMutationLock(async () => {
-      const checkedOut = await ensureCheckedOut({
+      const checkedOut = await ensureCheckedOutUnlocked({
         forceFreshCheckout: true,
       });
       if (!checkedOut.ok) {
@@ -1394,7 +1427,7 @@ export function createGitTicketsChannel(opts: {
     { readonly ok: true } | { readonly ok: false; readonly error: string }
   > => {
     return await withMutationLock(async () => {
-      const checkedOut = await ensureCheckedOut();
+      const checkedOut = await ensureCheckedOutUnlocked();
       if (!checkedOut.ok) {
         return checkedOut;
       }
@@ -1436,7 +1469,7 @@ export function createGitTicketsChannel(opts: {
     | { readonly ok: false; readonly error: string }
   > => {
     return await withMutationLock(async () => {
-      const checkedOut = await ensureCheckedOut();
+      const checkedOut = await ensureCheckedOutUnlocked();
       if (!checkedOut.ok) {
         return checkedOut;
       }
@@ -1489,7 +1522,7 @@ export function createGitTicketsChannel(opts: {
     | { readonly ok: false; readonly error: string }
   > => {
     return await withMutationLock(async () => {
-      const checkedOut = await ensureCheckedOut();
+      const checkedOut = await ensureCheckedOutUnlocked();
       if (!checkedOut.ok) {
         return checkedOut;
       }

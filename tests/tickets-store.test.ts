@@ -360,33 +360,39 @@ test("tickets store creates non-sequential ids and keeps them unique under concu
     prefix: "hack-cli-tickets-concurrent-create-",
   });
   const store = await createStore({ projectRoot });
+  const allTicketIds: string[] = [];
 
-  const results = await Promise.all(
-    Array.from({ length: 16 }, (_value, index) =>
-      store.createTicket({
-        title: `Concurrent ticket ${index + 1}`,
-        owner: "hack",
-        source: "hack",
-        actor: `creator-${index}@hack`,
-      })
-    )
-  );
+  for (let round = 0; round < 3; round += 1) {
+    const results = await Promise.all(
+      Array.from({ length: 16 }, (_value, index) =>
+        store.createTicket({
+          title: `Concurrent ticket ${round + 1}-${index + 1}`,
+          owner: "hack",
+          source: "hack",
+          actor: `creator-${round}-${index}@hack`,
+        })
+      )
+    );
 
-  if (!results.every((result) => result.ok)) {
-    throw new Error(JSON.stringify(results, null, 2));
+    if (!results.every((result) => result.ok)) {
+      throw new Error(JSON.stringify(results, null, 2));
+    }
+
+    const ticketIds = results.flatMap((result) =>
+      result.ok ? [result.ticket.ticketId] : []
+    );
+    expect(ticketIds).toHaveLength(16);
+    expect(new Set(ticketIds).size).toBe(ticketIds.length);
+    allTicketIds.push(...ticketIds);
   }
 
-  const ticketIds = results.flatMap((result) =>
-    result.ok ? [result.ticket.ticketId] : []
-  );
-  expect(ticketIds).toHaveLength(16);
-  expect(new Set(ticketIds).size).toBe(ticketIds.length);
+  expect(new Set(allTicketIds).size).toBe(allTicketIds.length);
 
-  for (const ticketId of ticketIds) {
+  for (const ticketId of allTicketIds) {
     expect(ticketId).toMatch(/^T-[0-9A-Z]{10}$/);
     expect(ticketId).not.toMatch(/^T-\d{5}$/);
   }
-}, 20_000);
+}, 60_000);
 
 test("tickets store continues to read and update legacy sequential ids", async () => {
   const projectRoot = await createTempGitProject({

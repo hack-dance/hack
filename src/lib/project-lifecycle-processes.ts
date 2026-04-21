@@ -121,22 +121,6 @@ export function resolvePersistedLifecycleProcessGroupIds(opts: {
   });
 }
 
-/** Only reuse persisted lifecycle metadata after a live mux session has been verified. */
-export function resolveVerifiedPersistedLifecycleProcessGroupIdsForStop(opts: {
-  readonly lifecycleEntry: LifecycleStateEntry | null;
-  readonly snapshot: readonly ProcessSnapshotRow[];
-  readonly hasVerifiedSession: boolean;
-}): number[] {
-  if (!opts.hasVerifiedSession) {
-    return [];
-  }
-
-  return resolvePersistedLifecycleProcessGroupIds({
-    lifecycleEntry: opts.lifecycleEntry,
-    snapshot: opts.snapshot,
-  });
-}
-
 /** Read a process snapshot suitable for lifecycle cleanup and hygiene checks. */
 export async function readProcessSnapshot(): Promise<ProcessSnapshotRow[]> {
   const result = await exec(["ps", "-axo", "pid=,ppid=,pgid="], {

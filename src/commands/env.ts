@@ -1835,6 +1835,7 @@ const handleEnvUnset: CommandHandlerFor<typeof unsetSpec> = async ({
   }
 
   const result = await unsetProjectEnvValue({
+    projectRoot: project.projectRoot,
     projectDir: project.projectDir,
     envName: envName ?? null,
     scope: parsedTarget.scope,

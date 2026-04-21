@@ -34,6 +34,7 @@ import {
   resolveProjectEnvLocalConfigPath,
   selectProjectEnvValuesForExecutionTarget,
   setProjectEnvValue,
+  unsetProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
 import { resolveSecretStore } from "../src/lib/secret-store.ts";
 
@@ -576,6 +577,90 @@ test("legacy tracked local overlay remains selectable without acting as a local 
     resolve(repo.projectDir, "hack.env.default.yaml"),
     resolve(repo.projectDir, "hack.env.local.yaml"),
   ]);
+});
+
+test("legacy tracked local overlay keeps default local mutations in a compatibility file", async () => {
+  const repo = await createRepo();
+  await initGitRepo(repo.projectRoot);
+
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    [
+      "version: 1",
+      "environment: default",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      "    SHARED_DEFAULT: shared-default",
+      "",
+    ].join("\n")
+  );
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.local.yaml"),
+    [
+      "version: 1",
+      "environment: local",
+      "secretsprovider: project_key",
+      "values:",
+      "  global:",
+      "    LEGACY_LOCAL: legacy-local",
+      "",
+    ].join("\n")
+  );
+  await runGit(["add", "."], repo.projectRoot);
+
+  await setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "global",
+    key: "LOCAL_ONLY",
+    value: "true",
+    secret: false,
+    local: true,
+  });
+
+  const compatLocalDefaultPath = resolve(
+    repo.projectDir,
+    "hack.env.default.local.yaml"
+  );
+  expect(await readFile(compatLocalDefaultPath, "utf8")).toContain(
+    'LOCAL_ONLY: "true"'
+  );
+  expect(
+    await readFile(resolve(repo.projectDir, "hack.env.local.yaml"), "utf8")
+  ).toContain("LEGACY_LOCAL: legacy-local");
+  expect(
+    await readFile(resolve(repo.projectDir, "hack.env.local.yaml"), "utf8")
+  ).not.toContain("LOCAL_ONLY");
+
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    serviceNames: ["api", "web"],
+  });
+  expect(resolved?.globalEnv).toEqual({
+    LOCAL_ONLY: "true",
+    SHARED_DEFAULT: "shared-default",
+  });
+  expect(resolved?.files).toEqual([
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    compatLocalDefaultPath,
+  ]);
+
+  const unset = await unsetProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "global",
+    key: "LOCAL_ONLY",
+    local: true,
+  });
+  expect(unset.changed).toBe(true);
+  expect(await readFile(compatLocalDefaultPath, "utf8")).not.toContain(
+    "LOCAL_ONLY"
+  );
 });
 
 test("setProjectEnvValue writes worktree-local overrides when requested", async () => {

@@ -20,6 +20,11 @@ Canonical env state lives at the repo root:
 - `.hack/hack.env.local.yaml`
 - `.hack/hack.env.<overlay>.local.yaml`
 
+Legacy compatibility note:
+
+- if an older repo already tracks `.hack/hack.env.local.yaml` as the shared `--env local` overlay, Hack keeps reading that file as the shared overlay
+- in that compatibility case, worktree-local default overrides are written to `.hack/hack.env.default.local.yaml` so `--local` mutations do not overwrite tracked shared config
+
 Compatibility and local-only state still lives under `.hack/`:
 
 - `.hack/.env`

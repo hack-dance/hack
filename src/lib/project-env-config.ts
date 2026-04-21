@@ -80,7 +80,7 @@ export type ProjectEnvSelection = {
   readonly defaultPath: string;
   readonly overlayPath: string | null;
   readonly overlayExists: boolean;
-  readonly localDefaultPath: string | null;
+  readonly localDefaultPath: string;
   readonly localDefaultExists: boolean;
   readonly localOverlayPath: string | null;
   readonly localOverlayExists: boolean;
@@ -242,6 +242,15 @@ export function resolveProjectEnvLocalConfigPath(opts: {
   );
 }
 
+function resolveProjectEnvLegacyCompatibleLocalDefaultConfigPath(opts: {
+  readonly projectDir: string;
+}): string {
+  return resolve(
+    opts.projectDir,
+    `${PROJECT_ENV_CONFIG_FILENAME_PREFIX}default.${PROJECT_ENV_LOCAL_SEGMENT}${PROJECT_ENV_CONFIG_FILENAME_SUFFIX}`
+  );
+}
+
 export function resolveProjectEnvKeyPath(opts: {
   readonly projectRoot: string;
 }): string {
@@ -335,6 +344,34 @@ async function isLegacyTrackedLocalOverlay(opts: {
   return await isGitTrackedProjectEnvPath({
     projectRoot: opts.projectRoot,
     path: localDefaultPath,
+  });
+}
+
+async function resolveProjectEnvEffectiveLocalConfigPath(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly envName: string | null;
+}): Promise<string> {
+  if (opts.envName !== null) {
+    return resolveProjectEnvLocalConfigPath({
+      projectDir: opts.projectDir,
+      envName: opts.envName,
+    });
+  }
+
+  const legacyTrackedLocalOverlay = await isLegacyTrackedLocalOverlay({
+    projectRoot: opts.projectRoot,
+    projectDir: opts.projectDir,
+  });
+  if (legacyTrackedLocalOverlay) {
+    return resolveProjectEnvLegacyCompatibleLocalDefaultConfigPath({
+      projectDir: opts.projectDir,
+    });
+  }
+
+  return resolveProjectEnvLocalConfigPath({
+    projectDir: opts.projectDir,
+    envName: null,
   });
 }
 
@@ -566,20 +603,15 @@ export async function resolveProjectEnvSelection(opts: {
     projectDir: opts.projectDir,
   });
   const effectiveEnv = requestedEnv === undefined ? defaultEnv : requestedEnv;
-  const legacyTrackedLocalOverlay = await isLegacyTrackedLocalOverlay({
-    projectRoot: opts.projectRoot,
-    projectDir: opts.projectDir,
-  });
   const defaultPath = resolveProjectEnvConfigPath({
     projectDir: opts.projectDir,
     envName: null,
   });
-  const localDefaultPath = legacyTrackedLocalOverlay
-    ? null
-    : resolveProjectEnvLocalConfigPath({
-        projectDir: opts.projectDir,
-        envName: null,
-      });
+  const localDefaultPath = await resolveProjectEnvEffectiveLocalConfigPath({
+    projectRoot: opts.projectRoot,
+    projectDir: opts.projectDir,
+    envName: null,
+  });
   const overlayPath =
     effectiveEnv === null
       ? null
@@ -603,8 +635,7 @@ export async function resolveProjectEnvSelection(opts: {
     overlayPath,
     overlayExists: overlayPath === null ? false : await pathExists(overlayPath),
     localDefaultPath,
-    localDefaultExists:
-      localDefaultPath === null ? false : await pathExists(localDefaultPath),
+    localDefaultExists: await pathExists(localDefaultPath),
     localOverlayPath,
     localOverlayExists:
       localOverlayPath === null ? false : await pathExists(localOverlayPath),
@@ -635,13 +666,10 @@ export async function resolveProjectEnvConfig(opts: {
           path: selection.overlayPath,
           environment: selection.effectiveEnv ?? "default",
         });
-  const localDefaultRead =
-    selection.localDefaultPath === null
-      ? null
-      : await readProjectEnvConfigFile({
-          path: selection.localDefaultPath,
-          environment: "default",
-        });
+  const localDefaultRead = await readProjectEnvConfigFile({
+    path: selection.localDefaultPath,
+    environment: "default",
+  });
   const localOverlayRead =
     selection.localOverlayPath === null
       ? null
@@ -654,7 +682,7 @@ export async function resolveProjectEnvConfig(opts: {
     !(
       defaultRead.exists ||
       (overlayRead?.exists ?? false) ||
-      (localDefaultRead?.exists ?? false) ||
+      localDefaultRead.exists ||
       (localOverlayRead?.exists ?? false)
     )
   ) {
@@ -671,7 +699,7 @@ export async function resolveProjectEnvConfig(opts: {
       `Failed to parse ${overlayRead.path}: ${overlayRead.parseError}`
     );
   }
-  if (localDefaultRead?.parseError) {
+  if (localDefaultRead.parseError) {
     throw new Error(
       `Failed to parse ${localDefaultRead.path}: ${localDefaultRead.parseError}`
     );
@@ -686,7 +714,7 @@ export async function resolveProjectEnvConfig(opts: {
     layers: [
       defaultRead.exists ? defaultRead.config : null,
       overlayRead?.exists ? overlayRead.config : null,
-      localDefaultRead?.exists ? localDefaultRead.config : null,
+      localDefaultRead.exists ? localDefaultRead.config : null,
       localOverlayRead?.exists ? localOverlayRead.config : null,
     ],
     environment: selection.effectiveEnv ?? "default",
@@ -738,7 +766,7 @@ export async function resolveProjectEnvConfig(opts: {
   if (selection.overlayPath && overlayRead?.exists) {
     files.push(selection.overlayPath);
   }
-  if (selection.localDefaultPath && localDefaultRead?.exists) {
+  if (localDefaultRead.exists) {
     files.push(selection.localDefaultPath);
   }
   if (selection.localOverlayPath && localOverlayRead?.exists) {
@@ -853,7 +881,8 @@ export async function setProjectEnvValue(opts: {
 
   const filePath =
     opts.local === true
-      ? resolveProjectEnvLocalConfigPath({
+      ? await resolveProjectEnvEffectiveLocalConfigPath({
+          projectRoot: opts.projectRoot,
           projectDir: opts.projectDir,
           envName: opts.envName,
         })
@@ -923,6 +952,7 @@ export async function setProjectEnvValue(opts: {
 }
 
 export async function unsetProjectEnvValue(opts: {
+  readonly projectRoot: string;
   readonly projectDir: string;
   readonly envName: string | null;
   readonly scope: string;
@@ -931,7 +961,8 @@ export async function unsetProjectEnvValue(opts: {
 }): Promise<{ readonly changed: boolean; readonly filePath: string }> {
   const filePath =
     opts.local === true
-      ? resolveProjectEnvLocalConfigPath({
+      ? await resolveProjectEnvEffectiveLocalConfigPath({
+          projectRoot: opts.projectRoot,
           projectDir: opts.projectDir,
           envName: opts.envName,
         })

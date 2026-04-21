@@ -123,7 +123,7 @@ import { resolveProjectExecutionTarget } from "../lib/project-execution.ts";
 import {
   readProcessSnapshot,
   resolveLifecycleProcessGroupIdsForTmuxState,
-  resolvePersistedLifecycleProcessGroupIds,
+  resolveVerifiedPersistedLifecycleProcessGroupIdsForStop,
 } from "../lib/project-lifecycle-processes.ts";
 import {
   readProjectRuntimeStateEntry,
@@ -1847,6 +1847,7 @@ async function stopLifecycleProcesses(opts: {
     ) ?? null;
 
   const backends = getMuxBackends();
+  let matchedLiveSession = false;
   for (const backend of backends.values()) {
     if (!backend.available) {
       continue;
@@ -1855,6 +1856,7 @@ async function stopLifecycleProcesses(opts: {
     if (!sessions.some((s) => s.name === sessionName)) {
       continue;
     }
+    matchedLiveSession = true;
     if (backend.name === "tmux") {
       await interruptLifecycleTmuxProcesses({
         sessionName,
@@ -1867,6 +1869,7 @@ async function stopLifecycleProcesses(opts: {
   await terminateLifecycleProcessGroups({
     processGroupIds: await resolvePersistedLifecycleProcessGroupIdsForEntry({
       lifecycleEntry,
+      hasVerifiedSession: matchedLiveSession,
     }),
   });
 
@@ -1966,14 +1969,16 @@ async function resolveLifecycleProcessGroupIds(opts: {
 
 async function resolvePersistedLifecycleProcessGroupIdsForEntry(opts: {
   readonly lifecycleEntry: LifecycleStateEntry | null;
+  readonly hasVerifiedSession: boolean;
 }): Promise<number[]> {
   if (!opts.lifecycleEntry) {
     return [];
   }
 
-  return resolvePersistedLifecycleProcessGroupIds({
+  return resolveVerifiedPersistedLifecycleProcessGroupIdsForStop({
     lifecycleEntry: opts.lifecycleEntry,
     snapshot: await readProcessSnapshot(),
+    hasVerifiedSession: opts.hasVerifiedSession,
   });
 }
 

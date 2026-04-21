@@ -125,7 +125,7 @@ For portable container setups, pass `HACK_ENV_SECRET_KEY` at runtime instead of 
 `.hack.secret.key` into the image.
 
 The Codex-first managed-container example lives in [docs/guides/codex-managed-environments.md](./docs/guides/codex-managed-environments.md)
-and the mounted-project smoke harness lives at [scripts/portable-container-smoke.sh](/Users/hack/dev/hack-dance/hack/scripts/portable-container-smoke.sh).
+and the mounted-project smoke harness lives at [scripts/portable-container-smoke.sh](./scripts/portable-container-smoke.sh).
 
 ## macOS app
 

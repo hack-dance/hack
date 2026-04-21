@@ -21,6 +21,63 @@ Use it as a base image when you want `hack` and Bun preinstalled, then layer any
 toolchains on top. For example, a non-JS repo can extend the image and add Rust, Go, or other
 language runtimes without rebuilding the Hack bootstrap each time.
 
+## Codex remote example
+
+This is the intended baseline for a Codex-style remote environment:
+
+- base image: `hackdance/hack:slim`
+- repo checked out into the working directory
+- `HACK_ENV_SECRET_KEY` injected by the runtime or secret manager
+- repo-specific toolchains added on top as needed
+
+Example Dockerfile:
+
+```dockerfile
+FROM hackdance/hack:slim
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    build-essential \
+    pkg-config \
+    python3 \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+```
+
+If your repo also needs Rust, Go, or Python packaging tools, add them in this layer rather than
+waiting for Hack to ship a universal image.
+
+Example setup script:
+
+```bash
+set -euo pipefail
+
+bun install --frozen-lockfile || bun install
+```
+
+Example maintenance script:
+
+```bash
+set -euo pipefail
+
+bun install --frozen-lockfile || bun install
+```
+
+Example runtime env injection:
+
+```bash
+export HACK_ENV_SECRET_KEY="..."
+
+hack env list --json --show-secrets
+hack host exec -- printenv DATABASE_URL
+hack host exec --scope api -- bun test
+```
+
+CI uses this exact contract in `scripts/portable-container-smoke.sh`: it mounts `examples/basic`
+into the slim image, removes the local `.hack.secret.key`, injects `HACK_ENV_SECRET_KEY`, and
+verifies both `hack env list` and `hack host exec` resolve the committed env correctly.
+
 ## What slim mode does
 
 Slim mode is enabled by setting `HACK_EXECUTION_MODE=codex` or `HACK_EXECUTION_MODE=slim`.
@@ -133,6 +190,12 @@ That same pattern is the recommended portable-container contract:
 - let Hack resolve `.hack/hack.env.default.yaml`, overlays, and worktree-local overrides at runtime
 
 Do not bake `.hack.secret.key` into the image.
+
+Portable smoke test:
+
+```bash
+bun run smoke:portable-container
+```
 
 `hack host exec` and `hack host shell` default to a host-local env view for host commands. Use
 `--scope` when you want service-scoped values without running inside that service container. Use

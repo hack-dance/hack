@@ -53,6 +53,8 @@ jobs:
       - name: Smoke slim runtime image defaults
         run: |
           docker run --rm --entrypoint sh hack-runtime-ci:slim -lc 'command -v bun >/dev/null && command -v hack >/dev/null && test "${HACK_EXECUTION_MODE}" = "codex" && test "${HACK_DAEMON_DISABLE_DOCKER_EVENTS}" = "1" && test "${HACK_SETUP_SYNC_MODE}" = "warn" && hack --help >/tmp/hack-help.txt && grep -q "Usage:" /tmp/hack-help.txt'
+      - name: Smoke slim runtime mounted-project env flow
+        run: bash scripts/portable-container-smoke.sh hack-runtime-ci:slim linux/amd64
 
   test:
     runs-on: macos-14

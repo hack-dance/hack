@@ -6,6 +6,27 @@ Lifecycle is configured in `.hack/hack.config.json` under `lifecycle`.
 
 You can also use a shorthand `startup` array for common `hack up` startup flows.
 
+## Why `singleton` exists
+
+Some lifecycle-managed helpers bind fixed local ports and are easy to start outside Hack:
+
+- AWS SSM port-forwarding tunnels
+- local API or database proxies
+- search/dashboard tunnels
+
+Without an ownership hint, `hack up` can only assume it should launch the configured command again. If a
+matching helper is already running manually, or a previous reconnect loop already restored it, that can
+create duplicate supervisors, partial port conflicts, or aggressive cleanup/restart churn.
+
+`singleton` exists to make those fixed-port helpers explicit. It gives Hack a conservative rule:
+
+- start the helper when none of its expected listeners exist
+- adopt the existing helper when the full listener set is already healthy and the config opts into reuse
+- fail fast on partial occupancy instead of trying to replace part of a live tunnel stack
+
+That keeps Hack local-first and predictable. It avoids turning "something equivalent is already running"
+into "kill and recreate it", which is especially important for brittle port-forwarding workflows.
+
 ## Config
 
 ```json
@@ -117,6 +138,11 @@ Commands inherit the CLI process environment (including PATH), plus resolved pro
 - If all configured ports already have listeners and `onConflict` is `"adopt"`, Hack skips startup, records an adoption note, and leaves the external process alone on `hack down`.
 - If only some configured ports are already occupied, Hack fails fast instead of launching a competing partial replacement.
 - If all configured ports already have listeners and `onConflict` is omitted or `"fail"`, Hack stops with an explicit error so the operator can decide whether to stop or reuse the existing process.
+
+Important boundaries:
+- `singleton` is a listener-level guard, not a deep process identity check.
+- Adoption means "Hack observed the full expected local listener set and will not start another copy". It does not mean Hack now owns or can safely tear down that external process.
+- `hack down` only stops processes Hack actually launched inside the lifecycle session. Adopted external listeners are intentionally left alone.
 
 ### Processes
 

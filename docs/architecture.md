@@ -111,6 +111,11 @@ Projects can run host-side hooks around `hack up/down` and start managed host pr
 local proxies/tunnels). Processes are started inside a mux session (tmux or zellij) so they have a
 stable home and can be torn down on `hack down`.
 
+For fixed-port helpers such as SSM/database/search tunnels, lifecycle config can also declare a
+`singleton` listener set. This lets Hack reuse an already-running equivalent helper or fail fast on
+partial conflicts instead of launching a competing duplicate supervisor. The intent is to reduce local
+port churn and keep external/manual tunnels from being mistaken for stale Hack-owned processes.
+
 See `docs/lifecycle.md` for config and behavior.
 
 ## Workflow (init → up → logs)

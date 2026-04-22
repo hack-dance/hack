@@ -19,6 +19,23 @@ test("project config schema includes startup validation", () => {
   expect(startupObject?.additionalProperties).toBe(false);
   const startupProps = startupObject?.properties as Record<string, unknown>;
   expect(startupProps.persistent).toEqual({ type: "boolean" });
+  expect(startupProps.singleton).toEqual({
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      ports: {
+        type: "array",
+        minItems: 1,
+        uniqueItems: true,
+        items: { type: "integer", minimum: 1 },
+      },
+      onConflict: {
+        type: "string",
+        enum: ["adopt", "fail"],
+      },
+    },
+    required: ["ports"],
+  });
   const startupRequired = startupObject?.anyOf as Record<string, unknown>[];
   expect(startupRequired).toEqual([
     { required: ["run"] },
@@ -46,11 +63,46 @@ test("project config schema includes strict lifecycle hooks and processes", () =
   expect(hookObject?.required).toEqual(["command"]);
   const hookProps = hookObject?.properties as Record<string, unknown>;
   expect(hookProps.persistent).toEqual({ type: "boolean" });
+  expect(hookProps.singleton).toEqual({
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      ports: {
+        type: "array",
+        minItems: 1,
+        uniqueItems: true,
+        items: { type: "integer", minimum: 1 },
+      },
+      onConflict: {
+        type: "string",
+        enum: ["adopt", "fail"],
+      },
+    },
+    required: ["ports"],
+  });
 
   const processes = lifecycleProps.processes as Record<string, unknown>;
   const processItems = processes.items as Record<string, unknown>;
   expect(processItems.additionalProperties).toBe(false);
   expect(processItems.required).toEqual(["name", "command"]);
+  const processProps = processItems.properties as Record<string, unknown>;
+  expect(processProps.singleton).toEqual({
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      ports: {
+        type: "array",
+        minItems: 1,
+        uniqueItems: true,
+        items: { type: "integer", minimum: 1 },
+      },
+      onConflict: {
+        type: "string",
+        enum: ["adopt", "fail"],
+      },
+    },
+    required: ["ports"],
+  });
 });
 
 test("managed env schema models entry kind, metadata, and service scope", () => {

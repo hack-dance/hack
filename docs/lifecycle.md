@@ -19,7 +19,11 @@ You can also use a shorthand `startup` array for common `hack up` startup flows.
           "name": "aws-ssm-proxy",
           "command": "bun run proxy",
           "cwd": "packages/infra",
-          "persistent": true
+          "persistent": true,
+          "singleton": {
+            "ports": [3306, 9200, 9201, 8443, 8444, 8445],
+            "onConflict": "adopt"
+          }
         }
       ],
       "after": []
@@ -58,7 +62,11 @@ You can also use a shorthand `startup` array for common `hack up` startup flows.
     {
       "name": "aws-ssm-proxy",
       "run": "cd packages/infra && bun run proxy",
-      "persistent": true
+      "persistent": true,
+      "singleton": {
+        "ports": [3306, 9200, 9201, 8443, 8444, 8445],
+        "onConflict": "adopt"
+      }
     }
   ]
 }
@@ -72,6 +80,7 @@ Each startup item can be:
 - `name` optional
 - `cwd` optional
 - `persistent` optional boolean (default `false`)
+- `singleton` optional object with `ports` and optional `onConflict`
 
 `cwd` is always resolved from the repo root (not from `.hack/`).
 
@@ -90,6 +99,9 @@ Each entry can be either:
 - `command` (required): shell command
 - `cwd` (optional): working directory; relative paths are resolved from repo root
 - `persistent` (optional): `true` means "start this as a managed lifecycle process"
+- `singleton` (optional): local listener policy with:
+- `ports` required array of local TCP listener ports
+- `onConflict` optional `"adopt"` or `"fail"` (default `"fail"`)
 
 Hooks run on the host as `sh -c <command>`. Failures stop the operation.
 Commands inherit the CLI process environment (including PATH), plus resolved project env vars.
@@ -99,12 +111,20 @@ Commands inherit the CLI process environment (including PATH), plus resolved pro
 - Ordering is preserved: each persistent hook is started in sequence before moving to later hooks.
 - In other hook lists (`up.after`, `down.before`, `down.after`), `persistent` is ignored and the hook runs as a normal blocking command.
 
+`singleton` behavior:
+- Hack checks the configured local TCP listener ports before starting the lifecycle process.
+- If none of the configured ports are in use, Hack starts the process normally.
+- If all configured ports already have listeners and `onConflict` is `"adopt"`, Hack skips startup, records an adoption note, and leaves the external process alone on `hack down`.
+- If only some configured ports are already occupied, Hack fails fast instead of launching a competing partial replacement.
+- If all configured ports already have listeners and `onConflict` is omitted or `"fail"`, Hack stops with an explicit error so the operator can decide whether to stop or reuse the existing process.
+
 ### Processes
 
 Long-running processes live under `lifecycle.processes` and are objects with:
 - `name` (required): stable identifier (used for window naming)
 - `command` (required): shell command (run in a mux session shell)
 - `cwd` (optional): working directory (defaults to repo root)
+- `singleton` (optional): listener-ownership policy with `ports` and `onConflict`
 
 Processes receive the resolved env contract (see `env.md`) as their environment.
 
@@ -161,6 +181,7 @@ Notes:
 ## Tips
 
 - For long-running setup commands, use either `lifecycle.processes` or `lifecycle.up.before` with `persistent: true`.
+- For local proxy/tunnel helpers that bind fixed ports, prefer `singleton.ports` with `onConflict: "adopt"` so `hack up` can reuse an already-running external tunnel instead of racing it.
 - Keep non-persistent hooks short and deterministic.
 - Store lifecycle secrets in `hack.env.*.yaml` as encrypted `secure:` values and prefer runtime injection over relying on `.hack/.env`.
 - If a hook requires interactive auth (e.g. browser-based SSO), it will still work; it runs with `stdin: inherit`.

@@ -126,6 +126,10 @@ import {
   resolvePersistedLifecycleProcessGroupIds,
 } from "../lib/project-lifecycle-processes.ts";
 import {
+  inspectListeningTcpPorts,
+  resolveLifecycleSingletonDecision,
+} from "../lib/project-lifecycle-singleton.ts";
+import {
   readProjectRuntimeStateEntry,
   removeProjectRuntimeStateEntry,
   upsertProjectRuntimeStateEntry,
@@ -1464,7 +1468,16 @@ function createLifecycleProcessStarter(opts: {
   const startedProcesses: StartedLifecycleProcess[] = [];
   let backendName: MuxBackendName | null = null;
   let sessionReady = false;
+  let existingSessionCleared = false;
   let nextIndex = 0;
+
+  const ensureExistingSessionCleared = async (): Promise<void> => {
+    if (existingSessionCleared) {
+      return;
+    }
+    await killLifecycleSessionByName({ sessionName });
+    existingSessionCleared = true;
+  };
 
   const ensureSession = async (): Promise<void> => {
     if (sessionReady) {
@@ -1487,7 +1500,7 @@ function createLifecycleProcessStarter(opts: {
     if (!backend?.available) {
       throw new Error(`${resolvedBackend} is not available`);
     }
-    await killLifecycleSessionByName({ sessionName });
+    await ensureExistingSessionCleared();
     const created = await backend.createSession({
       name: sessionName,
       cwd: opts.project.projectRoot,
@@ -1509,6 +1522,22 @@ function createLifecycleProcessStarter(opts: {
   const startProcess = async (
     process: ProjectLifecycleProcess
   ): Promise<void> => {
+    await ensureExistingSessionCleared();
+    const singletonDecision = await resolveLifecycleSingletonDecisionForProcess(
+      {
+        process,
+        projectDir: opts.project.projectDir,
+        composeProject: opts.composeProject,
+      }
+    );
+    if (singletonDecision.kind === "adopt") {
+      logger.info({ message: singletonDecision.message });
+      return;
+    }
+    if (singletonDecision.kind === "fail") {
+      throw new Error(singletonDecision.message);
+    }
+
     await ensureSession();
     const started = await startLifecycleProcess({
       backend: backendName as MuxBackendName,
@@ -1531,6 +1560,7 @@ function createLifecycleProcessStarter(opts: {
         name: serviceName,
         command: command.command,
         ...(command.cwd ? { cwd: command.cwd } : {}),
+        ...(command.singleton ? { singleton: command.singleton } : {}),
       });
     },
     startMany: async ({ processes }) => {
@@ -1605,75 +1635,60 @@ async function startLifecycleProcesses(opts: {
     return;
   }
 
-  const mux = await resolveMux({ project: opts.project });
-  const backendName = resolveDefaultBackendName({
-    mode: mux.mode,
-    backends: mux.backends,
-  });
-  if (!backendName) {
-    throw new Error(
-      [
-        "No session mux backend available for lifecycle processes.",
-        "Install tmux or zellij, or set sessions.mux to auto|tmux|zellij.",
-      ].join("\n")
-    );
-  }
-
-  const sessionName = resolveLifecycleSessionName({
+  const starter = createLifecycleProcessStarter({
+    project: opts.project,
     projectName: opts.projectName,
     branch: opts.branch,
+    env: opts.env,
+    composeProject: opts.composeProject,
   });
-  await killLifecycleSessionByName({ sessionName });
-
-  const backend = mux.backends.get(backendName);
-  if (!backend?.available) {
-    throw new Error(`${backendName} is not available`);
-  }
-
-  const created = await backend.createSession({
-    name: sessionName,
-    cwd: opts.project.projectRoot,
-  });
-  if (!created.ok) {
-    throw new Error(`Failed to create lifecycle session: ${sessionName}`);
-  }
-
-  if (backendName === "tmux") {
-    for (const [key, value] of Object.entries(opts.env)) {
-      await exec(["tmux", "set-environment", "-t", sessionName, key, value], {
-        stdin: "ignore",
-      });
+  try {
+    await starter.startMany({ processes });
+    await starter.finalize();
+  } catch (error: unknown) {
+    await starter.abort();
+    if (error instanceof Error) {
+      throw error;
     }
+    throw new Error("Failed to start lifecycle processes");
+  }
+}
+
+async function resolveLifecycleSingletonDecisionForProcess(opts: {
+  readonly process: ProjectLifecycleProcess;
+  readonly projectDir: string;
+  readonly composeProject: string;
+}): Promise<
+  | ReturnType<typeof resolveLifecycleSingletonDecision>
+  | Promise<ReturnType<typeof resolveLifecycleSingletonDecision>>
+> {
+  if (!opts.process.singleton) {
+    return { kind: "start" };
   }
 
-  const startedProcesses: StartedLifecycleProcess[] = [];
-
-  for (const [index, proc] of processes.entries()) {
-    const started = await startLifecycleProcess({
-      backend: backendName,
-      sessionName,
-      projectRoot: opts.project.projectRoot,
-      env: opts.env,
-      index,
-      process: proc,
-      projectDir: opts.project.projectDir,
-      composeProject: opts.composeProject,
-    });
-    startedProcesses.push(started);
-  }
-
-  await upsertLifecycleStateEntry({
-    projectDir: opts.project.projectDir,
-    entry: {
-      composeProject: opts.composeProject,
-      projectName: opts.projectName,
-      branch: opts.branch,
-      sessionName,
-      backend: backendName,
-      processes: startedProcesses,
-      updatedAt: new Date().toISOString(),
-    },
+  const occupiedPorts = await inspectListeningTcpPorts({
+    ports: opts.process.singleton.ports,
   });
+  const decision = resolveLifecycleSingletonDecision({
+    singleton: opts.process.singleton,
+    occupiedPorts,
+    serviceName: opts.process.name,
+  });
+
+  if (decision.kind === "adopt") {
+    await appendLifecycleLogRecord({
+      projectDir: opts.projectDir,
+      composeProject: opts.composeProject,
+      record: {
+        timestamp: new Date().toISOString(),
+        service: opts.process.name,
+        stream: "meta",
+        message: `[adopt] ${decision.message}`,
+      },
+    });
+  }
+
+  return decision;
 }
 
 async function streamLifecycleCommandOutput(opts: {

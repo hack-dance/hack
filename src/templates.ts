@@ -410,6 +410,23 @@ export function renderProjectConfigSchemaJson(): string {
                 command: { type: "string" },
                 cwd: { type: "string" },
                 persistent: { type: "boolean" },
+                singleton: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    ports: {
+                      type: "array",
+                      minItems: 1,
+                      uniqueItems: true,
+                      items: { type: "integer", minimum: 1 },
+                    },
+                    onConflict: {
+                      type: "string",
+                      enum: ["adopt", "fail"],
+                    },
+                  },
+                  required: ["ports"],
+                },
               },
               anyOf: [{ required: ["run"] }, { required: ["command"] }],
             },
@@ -438,6 +455,23 @@ export function renderProjectConfigSchemaJson(): string {
                         command: { type: "string" },
                         cwd: { type: "string" },
                         persistent: { type: "boolean" },
+                        singleton: {
+                          type: "object",
+                          additionalProperties: false,
+                          properties: {
+                            ports: {
+                              type: "array",
+                              minItems: 1,
+                              uniqueItems: true,
+                              items: { type: "integer", minimum: 1 },
+                            },
+                            onConflict: {
+                              type: "string",
+                              enum: ["adopt", "fail"],
+                            },
+                          },
+                          required: ["ports"],
+                        },
                       },
                     },
                   ],
@@ -457,6 +491,23 @@ export function renderProjectConfigSchemaJson(): string {
                         command: { type: "string" },
                         cwd: { type: "string" },
                         persistent: { type: "boolean" },
+                        singleton: {
+                          type: "object",
+                          additionalProperties: false,
+                          properties: {
+                            ports: {
+                              type: "array",
+                              minItems: 1,
+                              uniqueItems: true,
+                              items: { type: "integer", minimum: 1 },
+                            },
+                            onConflict: {
+                              type: "string",
+                              enum: ["adopt", "fail"],
+                            },
+                          },
+                          required: ["ports"],
+                        },
                       },
                     },
                   ],
@@ -482,6 +533,23 @@ export function renderProjectConfigSchemaJson(): string {
                         command: { type: "string" },
                         cwd: { type: "string" },
                         persistent: { type: "boolean" },
+                        singleton: {
+                          type: "object",
+                          additionalProperties: false,
+                          properties: {
+                            ports: {
+                              type: "array",
+                              minItems: 1,
+                              uniqueItems: true,
+                              items: { type: "integer", minimum: 1 },
+                            },
+                            onConflict: {
+                              type: "string",
+                              enum: ["adopt", "fail"],
+                            },
+                          },
+                          required: ["ports"],
+                        },
                       },
                     },
                   ],
@@ -501,6 +569,23 @@ export function renderProjectConfigSchemaJson(): string {
                         command: { type: "string" },
                         cwd: { type: "string" },
                         persistent: { type: "boolean" },
+                        singleton: {
+                          type: "object",
+                          additionalProperties: false,
+                          properties: {
+                            ports: {
+                              type: "array",
+                              minItems: 1,
+                              uniqueItems: true,
+                              items: { type: "integer", minimum: 1 },
+                            },
+                            onConflict: {
+                              type: "string",
+                              enum: ["adopt", "fail"],
+                            },
+                          },
+                          required: ["ports"],
+                        },
                       },
                     },
                   ],
@@ -518,6 +603,23 @@ export function renderProjectConfigSchemaJson(): string {
                 name: { type: "string" },
                 command: { type: "string" },
                 cwd: { type: "string" },
+                singleton: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    ports: {
+                      type: "array",
+                      minItems: 1,
+                      uniqueItems: true,
+                      items: { type: "integer", minimum: 1 },
+                    },
+                    onConflict: {
+                      type: "string",
+                      enum: ["adopt", "fail"],
+                    },
+                  },
+                  required: ["ports"],
+                },
               },
             },
           },

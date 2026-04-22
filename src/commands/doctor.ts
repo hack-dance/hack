@@ -2974,7 +2974,10 @@ export function buildDoctorSummaryLines(input: {
       continue;
     }
 
-    const issues = members.filter((result) => result.status !== "ok");
+    const issues = members.filter(
+      (result) =>
+        result.status !== "ok" && !isIgnorableDoctorSummaryIssue(result)
+    );
     if (issues.length === 0) {
       lines.push(`${group.title}: ok`);
       continue;
@@ -2996,7 +2999,10 @@ export function buildDoctorSummaryLines(input: {
       !DOCTOR_SUMMARY_GROUPS.some((group) => group.checks.has(result.name))
   );
   if (ungrouped.length > 0) {
-    const issues = ungrouped.filter((result) => result.status !== "ok");
+    const issues = ungrouped.filter(
+      (result) =>
+        result.status !== "ok" && !isIgnorableDoctorSummaryIssue(result)
+    );
     lines.push(
       issues.length === 0
         ? "Other checks: ok"
@@ -3014,7 +3020,12 @@ async function renderDoctorSummary(
   let tone: "error" | "warn" | "info" = "info";
   if (results.some((result) => result.status === "error")) {
     tone = "error";
-  } else if (results.some((result) => result.status === "warn")) {
+  } else if (
+    results.some(
+      (result) =>
+        result.status === "warn" && !isIgnorableDoctorSummaryIssue(result)
+    )
+  ) {
     tone = "warn";
   }
 
@@ -3048,6 +3059,13 @@ function summarizeDoctorGroupIssues(input: {
   }
 
   return summarizeDoctorIssues(input.issues);
+}
+
+function isIgnorableDoctorSummaryIssue(issue: RecoveryCheckResult): boolean {
+  return (
+    issue.name === "gateway tokens" &&
+    issue.message.includes("No active tokens")
+  );
 }
 
 function summarizeDoctorIssues(issues: readonly RecoveryCheckResult[]): string {

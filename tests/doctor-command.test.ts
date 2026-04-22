@@ -316,7 +316,7 @@ test("doctor summary groups detailed checks into concise sections", () => {
 
   expect(lines).toEqual([
     "Dependencies: warn - optional missing: caddy",
-    "Runtime: warn - no active gateway tokens",
+    "Runtime: ok",
     "Resolver & DNS: ok",
     "Project & env: warn - runtime hygiene: 1 missing registry entry; 1 orphaned runtime project (run: hack projects prune); lifecycle hygiene: 1 stale lifecycle state entry; 2 orphaned lifecycle process groups (run: hack down); +2 more",
     "Sessions & tickets: ok",

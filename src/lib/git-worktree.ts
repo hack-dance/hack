@@ -15,9 +15,14 @@ async function readGitPath(opts: {
   readonly repoRoot: string;
   readonly args: readonly string[];
 }): Promise<string | null> {
-  const result = await exec(["git", "-C", opts.repoRoot, ...opts.args], {
-    stdin: "ignore",
-  });
+  let result: Awaited<ReturnType<typeof exec>>;
+  try {
+    result = await exec(["git", "-C", opts.repoRoot, ...opts.args], {
+      stdin: "ignore",
+    });
+  } catch {
+    return null;
+  }
   if (result.exitCode !== 0) {
     return null;
   }

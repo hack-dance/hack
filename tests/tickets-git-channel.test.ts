@@ -198,6 +198,40 @@ test("resolvePushRefForCheckoutRef keeps hidden ref when checkout came from hidd
   expect(pushRef).toBe("refs/hack/tickets");
 });
 
+test("resolveTicketGitIdentityEnv leaves remote ssh defaults unset when GIT_SSH exists", () => {
+  const originalGitSsh = process.env.GIT_SSH;
+  const originalGitSshCommand = process.env.GIT_SSH_COMMAND;
+  process.env.GIT_SSH = "/tmp/custom-ssh-wrapper";
+  process.env.GIT_SSH_COMMAND = undefined;
+
+  try {
+    const env = __testOnly.resolveTicketGitIdentityEnv({
+      remote: true,
+    });
+    expect(env.GIT_SSH_COMMAND).toBeUndefined();
+  } finally {
+    process.env.GIT_SSH = originalGitSsh;
+    process.env.GIT_SSH_COMMAND = originalGitSshCommand;
+  }
+});
+
+test("resolveTicketGitIdentityEnv sets remote ssh defaults when no ssh env is configured", () => {
+  const originalGitSsh = process.env.GIT_SSH;
+  const originalGitSshCommand = process.env.GIT_SSH_COMMAND;
+  process.env.GIT_SSH = undefined;
+  process.env.GIT_SSH_COMMAND = undefined;
+
+  try {
+    const env = __testOnly.resolveTicketGitIdentityEnv({
+      remote: true,
+    });
+    expect(env.GIT_SSH_COMMAND).toBe("ssh -oBatchMode=yes -oConnectTimeout=5");
+  } finally {
+    process.env.GIT_SSH = originalGitSsh;
+    process.env.GIT_SSH_COMMAND = originalGitSshCommand;
+  }
+});
+
 test("mutation lock heartbeat prevents overlapping prepared mutations past stale threshold", async () => {
   const projectRoot = await createTempGitProject({
     prefix: "hack-cli-tickets-git-lock-",

@@ -32,6 +32,7 @@ import {
   repairLegacyComposeEnvFileReferences,
   resolveProjectEnvConfig,
   resolveProjectEnvLocalConfigPath,
+  resolveProjectEnvSharedKeyPath,
   selectProjectEnvValuesForExecutionTarget,
   setProjectEnvValue,
   unsetProjectEnvValue,
@@ -827,6 +828,22 @@ test("linked worktrees fall back to the shared git-common-dir env key", async ()
   expect(resolved?.serviceEnv.api?.SERVICE_TOKEN).toBe(
     "shared-worktree-secret"
   );
+});
+
+test("resolveProjectEnvSharedKeyPath returns null when git is unavailable", async () => {
+  const repo = await createRepo();
+  const originalPath = process.env.PATH;
+  process.env.PATH = resolve(repo.tempRoot, "missing-git-bin");
+
+  try {
+    await expect(
+      resolveProjectEnvSharedKeyPath({
+        projectRoot: repo.projectRoot,
+      })
+    ).resolves.toBeNull();
+  } finally {
+    process.env.PATH = originalPath;
+  }
 });
 
 test("linked worktrees inherit the primary checkout env key", async () => {

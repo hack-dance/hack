@@ -1674,7 +1674,11 @@ function resolveTicketGitIdentityEnv(input?: {
   const env: Record<string, string> = {
     GIT_TERMINAL_PROMPT: "0",
   };
-  if (input?.remote && !readOptionalEnv("GIT_SSH_COMMAND")) {
+  if (
+    input?.remote &&
+    !readOptionalEnv("GIT_SSH_COMMAND") &&
+    !readOptionalEnv("GIT_SSH")
+  ) {
     env.GIT_SSH_COMMAND = DEFAULT_REMOTE_SSH_COMMAND;
   }
   const authorName =
@@ -1957,6 +1961,7 @@ export const __testOnly = {
   formatTicketsGitRemoteError,
   isTicketsGitRemoteConnectivityError,
   mergeTicketEventLogs,
+  resolveTicketGitIdentityEnv,
   resolvePushRefForCheckoutRef,
   resolveLocalCheckoutFallback,
   resolveLegacyImportFetchResult,

@@ -1,3 +1,32 @@
+## 3.0.0 (2026-04-23)
+
+* feat!: simplify hack to a local-first core ([ced8d07](https://github.com/hack-dance/hack/commit/ced8d07))
+* Merge pull request #51 from hack-dance/simplify-hack-platform ([c527203](https://github.com/hack-dance/hack/commit/c527203)), closes [#51](https://github.com/hack-dance/hack/issues/51)
+* fix: address ci and lifecycle review feedback ([11f39e5](https://github.com/hack-dance/hack/commit/11f39e5))
+* fix: address dispatch and tickets review feedback ([bbe8f69](https://github.com/hack-dance/hack/commit/bbe8f69))
+* fix: close env and tickets review regressions ([0fd6dc1](https://github.com/hack-dance/hack/commit/0fd6dc1))
+* fix: harden lifecycle cleanup and restore CI ([d767231](https://github.com/hack-dance/hack/commit/d767231))
+* fix: read shared env keys from primary worktrees ([709b582](https://github.com/hack-dance/hack/commit/709b582))
+* fix: restore lifecycle and env compatibility cleanup ([08c12ad](https://github.com/hack-dance/hack/commit/08c12ad))
+* fix: serialize tickets worktree access ([97a1151](https://github.com/hack-dance/hack/commit/97a1151))
+* fix: suppress inactive gateway token doctor noise ([147adb6](https://github.com/hack-dance/hack/commit/147adb6))
+* fix(env): preserve legacy local overlays without git ([e52af68](https://github.com/hack-dance/hack/commit/e52af68))
+* fix(env): tolerate missing git and preserve ssh wrappers ([5ad7259](https://github.com/hack-dance/hack/commit/5ad7259))
+* fix(lifecycle): avoid external singleton port probes ([748a072](https://github.com/hack-dance/hack/commit/748a072))
+* fix(runtime): close remaining review regressions ([6d2e9d8](https://github.com/hack-dance/hack/commit/6d2e9d8))
+* fix(runtime): harden env ignores and singleton probes ([291cca1](https://github.com/hack-dance/hack/commit/291cca1))
+* docs(agent): refresh local-first setup guidance ([87d2041](https://github.com/hack-dance/hack/commit/87d2041))
+* docs(lifecycle): explain singleton adoption semantics ([196bd90](https://github.com/hack-dance/hack/commit/196bd90))
+* feat: publish portable runtime images ([d8a718e](https://github.com/hack-dance/hack/commit/d8a718e))
+* feat(lifecycle): support singleton host process adoption ([95bd545](https://github.com/hack-dance/hack/commit/95bd545))
+* test: smoke portable managed containers ([172b975](https://github.com/hack-dance/hack/commit/172b975))
+* chore: merge main into simplify-hack-platform ([b310f6d](https://github.com/hack-dance/hack/commit/b310f6d))
+
+
+### BREAKING CHANGE
+
+* Hack now ships as a local-first runtime. Built-in web dashboard, auth-broker, GitHub, Linear, and account/org/team control-plane flows are removed from the supported product surface; workflows should migrate to native git/gh and the local CLI/macOS companion.
+
 ## <small>2.5.1 (2026-04-10)</small>
 
 * fix(env): reuse worktree keys and registry identity ([12e5838](https://github.com/hack-dance/hack/commit/12e5838))

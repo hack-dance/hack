@@ -1,5 +1,4 @@
 import type { ProjectLifecycleSingletonConfig } from "./project.ts";
-import { exec } from "./shell.ts";
 
 export type LifecycleSingletonDecision =
   | {
@@ -64,27 +63,36 @@ export function resolveLifecycleSingletonDecision(input: {
   };
 }
 
-export async function inspectListeningTcpPorts(input: {
+export function inspectListeningTcpPorts(input: {
   readonly ports: readonly number[];
 }): Promise<readonly number[]> {
   const occupied: number[] = [];
 
   for (const port of [...new Set(input.ports)]) {
-    const result = await exec(
-      ["lsof", "-nP", `-iTCP:${String(port)}`, "-sTCP:LISTEN", "-t"],
-      {
-        stdin: "ignore",
-      }
-    );
-    if (result.exitCode !== 0) {
-      continue;
-    }
-    if (result.stdout.trim().length > 0) {
+    if (isTcpPortOccupied({ port })) {
       occupied.push(port);
     }
   }
 
-  return occupied.sort((left, right) => left - right);
+  return Promise.resolve(occupied.sort((left, right) => left - right));
+}
+
+function isTcpPortOccupied(input: { readonly port: number }): boolean {
+  try {
+    const listener = Bun.listen({
+      hostname: "127.0.0.1",
+      port: input.port,
+      socket: {
+        data() {
+          // The listener is only a bind probe and should never receive data.
+        },
+      },
+    });
+    listener.stop();
+    return false;
+  } catch {
+    return true;
+  }
 }
 
 function formatPortList(input: { readonly ports: readonly number[] }): string {

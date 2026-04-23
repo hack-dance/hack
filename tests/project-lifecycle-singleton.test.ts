@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 
-import { resolveLifecycleSingletonDecision } from "../src/lib/project-lifecycle-singleton.ts";
+import {
+  inspectListeningTcpPorts,
+  resolveLifecycleSingletonDecision,
+} from "../src/lib/project-lifecycle-singleton.ts";
 
 test("lifecycle singleton starts when no configured ports are occupied", () => {
   const decision = resolveLifecycleSingletonDecision({
@@ -63,4 +66,24 @@ test("lifecycle singleton fails when adoption is not enabled", () => {
     message:
       'Lifecycle process "proxy" cannot start because singleton ports :3306, :9200 already have listeners. Stop the existing process or set lifecycle.singleton.onConflict to "adopt".',
   });
+});
+
+test("inspectListeningTcpPorts detects occupied loopback ports without external tools", async () => {
+  const listener = Bun.listen({
+    hostname: "127.0.0.1",
+    port: 0,
+    socket: {
+      data() {
+        // This listener is only used to occupy a port for the probe.
+      },
+    },
+  });
+
+  try {
+    await expect(
+      inspectListeningTcpPorts({ ports: [listener.port] })
+    ).resolves.toEqual([listener.port]);
+  } finally {
+    listener.stop();
+  }
 });

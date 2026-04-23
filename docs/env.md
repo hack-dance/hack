@@ -8,7 +8,7 @@ The short version:
 - optionally commit `.hack/hack.env.<overlay>.yaml`
 - use `.hack/hack.env.local.yaml` and `.hack/hack.env.<overlay>.local.yaml` for worktree-local overrides
 - keep `.hack.secret.key` out of git, or provide `HACK_ENV_SECRET_KEY`
-- let `hack up`, `hack run`, `hack restart`, `hack env exec`, `hack env shell`, and env-aware session flows inject values directly at runtime
+- let `hack up`, `hack run`, `hack restart`, `hack host exec`, `hack host shell`, and env-aware session flows inject values directly at runtime
 - use `hack env materialize` only when you explicitly need a compatibility `.hack/.env`
 
 ## Current model
@@ -51,7 +51,7 @@ Each env file is YAML with:
 
 - `global`: values applied everywhere
 - `<service>`: values applied only for that compose service
-- `host`: optional overrides applied only to host-command injection (`hack env exec` / `hack env shell`)
+- `host`: optional overrides applied only to host-command injection (`hack host exec` / `hack host shell`)
 
 Example:
 
@@ -109,8 +109,6 @@ Hack reads the canonical YAML files and injects the resolved env directly into:
 - lifecycle host processes
 - `hack host exec`
 - `hack host shell`
-- `hack env exec`
-- `hack env shell`
 - `hack session start --env ... --service ...`
 - `hack session exec --env ... --service ...`
 
@@ -118,8 +116,8 @@ That means `.hack/.env` is no longer the primary runtime source of truth.
 
 `hack env materialize` is manual by design. Use it only when you need a compatibility file for an external tool that expects `.env` on disk.
 
-For host commands, `hack host exec`, `hack host shell`, `hack env exec`, and `hack env shell`
-default to a host-local view. That means Hack prefers host-usable values when it can:
+For host commands, `hack host exec` and `hack host shell` default to a host-local view.
+That means Hack prefers host-usable values when it can:
 
 - explicit `host` scope values override the normal `global` + `<service>` merge
 - common container-only hostnames such as `host.docker.internal` and compose service hosts are rewritten to `127.0.0.1`
@@ -179,16 +177,13 @@ hack host exec --env qa --scope api -- bun db:migrate
 hack host exec --env qa --scope api --target compose -- bun test
 ```
 
-When you want to inspect an injected value, avoid `hack env exec -- echo $VAR` or
-`hack host exec -- echo $VAR`. Your current shell expands `$VAR` before Hack starts the child
-process, so the command often sees an empty string.
+When you want to inspect an injected value, avoid `hack host exec -- echo $VAR`. Your current
+shell expands `$VAR` before Hack starts the child process, so the command often sees an empty
+string.
 
 Use one of these instead:
 
 ```bash
-hack env exec -- printenv APPLE_TEAM_ID
-hack env exec -- sh -lc 'printf "%s\n" "$APPLE_TEAM_ID"'
-hack env exec --shell 'echo $APPLE_TEAM_ID'
 hack host exec -- printenv APPLE_TEAM_ID
 hack host exec -- sh -lc 'printf "%s\n" "$APPLE_TEAM_ID"'
 hack host exec --shell 'echo $APPLE_TEAM_ID'

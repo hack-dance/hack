@@ -54,3 +54,5 @@ This section is easy to find, but it does not lead the product story.
 - Specs remain in `SPECS/` as working notes
 - Root scripts orchestrate workspace tasks through Turbo
 - Package-local commands remain available via `bun run --cwd <workspace> <script>`
+- Agent-facing docs and setup output are generated from `src/agents/*` and `src/mcp/agent-docs.ts`; update those renderers when changing AGENTS/Codex/MCP guidance.
+- `.factory/validation/` contains historical evidence from retired hosted/web/integration work and is not the current product contract.

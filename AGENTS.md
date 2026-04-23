@@ -230,7 +230,12 @@ Most formatting and common issues are automatically fixed by Biome. Run `bun x u
 <!-- hack:agent-docs:start -->
 ## hack CLI (local dev + MCP)
 
-Use `hack` as the single interface for local runtime orchestration (compose, DNS/TLS, logs, persistent project workspaces).
+Use `hack` as the single interface for local-first runtime orchestration (compose, DNS/TLS, logs, env, persistent project workspaces, and optional local tickets).
+
+Product boundary:
+- Supported v3 surface: project init, up/down/restart, open, logs, env, host exec/shell, sessions, doctor, daemon, and optional local tickets.
+- Removed surfaces: hosted auth/account/org/team flows, web dashboard, built-in GitHub workflows, and built-in Linear sync.
+- Unsupported experimental: remote/gateway/node/dispatch. Do not use these as the default path unless explicitly requested.
 
 Operating rules:
 - Prefer `hack` over raw `docker` / `docker compose` for project workflows.
@@ -266,7 +271,9 @@ TLS + valid-hostname constraints:
 
 Project files (managed vs generated):
 - Source-of-truth files: `.hack/docker-compose.yml`, `.hack/hack.config.json`, `.hack/hack.env.default.yaml`, and optional `.hack/hack.env.<overlay>.yaml`.
+- Worktree-local env override files: `.hack/hack.env.local.yaml` and `.hack/hack.env.<overlay>.local.yaml`.
 - Local-only files: `.hack.secret.key`, optional `.hack/.env` compatibility output, `.hack/.env.state.json`, and `.hack/.internal/` (runtime/local machine state; keep gitignored).
+- Linked worktrees can inherit secret decryption through the git common dir; use `HACK_ENV_SECRET_KEY` in CI/managed containers.
 - Generated (do not hand-edit): `.hack/.internal/compose.override.yml`, `.hack/.internal/compose.env.override.yml`, `.hack/.branch/compose.<branch>.override.yml`.
 - Managed via CLI: `.hack/.internal/extra-hosts.json` (use `hack internal extra-hosts ...` commands).
 - Lifecycle runtime files: `.hack/.internal/lifecycle/state.json`, `.hack/.internal/lifecycle/*.log`.
@@ -296,6 +303,8 @@ Logs (default is compose):
 Lifecycle + startup:
 - Put host setup in `.hack/hack.config.json` under `startup`/`lifecycle` (not ad-hoc terminal tabs).
 - Use `lifecycle.up.before` for pre-start hooks and `lifecycle.processes` for long-running host tasks.
+- For fixed-port host helpers such as SSM tunnels or local proxies, set `singleton.ports` and usually `onConflict: "adopt"` so Hack reuses a healthy existing listener instead of starting duplicate tunnel stacks.
+- `singleton` is a listener guard, not process ownership transfer; adopted external processes are left running on `hack down`.
 - Inspect lifecycle status via `hack projects --details` and stream via `hack logs <service-or-process>`.
 
 Workspaces (mux-managed, tmux-first by default):
@@ -309,6 +318,7 @@ Workspaces (mux-managed, tmux-first by default):
 
 Host-side env helpers:
 - One-off host command with injected env: `hack host exec --env qa --scope api -- bun db:migrate`
+- Host commands default to a host-local env view; use `--target compose` when you explicitly want container-oriented addresses.
 - `--scope` selects which env scope to inject; it does not move execution into that service container.
 - Interactive host shell with injected env: `hack host shell --env qa --scope api`
 - Run inside an already-running service container: `hack exec api -- bun test`
@@ -323,7 +333,8 @@ Global infra:
 - Start/stop/status: `hack global up`, `hack global down`, `hack global status`
 - Use `hack global up` before Loki/Grafana queries if global logging is offline.
 
-Remote nodes + dispatch:
+Unsupported experimental remote nodes + dispatch:
+- These commands are source-available but outside the supported v3 product contract.
 - Pair/register nodes: `hack node pair ...`, then verify with `hack node list` and `hack node status --watch`.
 - Repair SSH for remote Git/mutagen: `hack node ssh setup --node <id>`.
 - On node host, inspect workspace map via `hack node workspace list|resolve|attach|remove`.
@@ -374,15 +385,8 @@ Agent setup (CLI-first):
 - MCP install (explicit): `hack mcp install --all --scope project`
 <!-- hack:agent-docs:end -->
 
-## Learned User Preferences
-
-- Prefer Tailwind utilities and shadcn components for auth and similar UI instead of bespoke CSS class stacks such as `.auth-*` when utilities can express the same layout and states.
-- After substantive `apps/web` UI changes, verify in a real browser and check the console for runtime warnings.
-- When running shadcn CLI init or updates in `apps/web`, merge generated output with existing providers, registries, and project-specific styles rather than overwriting custom shell or auth wiring.
-
 ## Learned Workspace Facts
 
-- Better Auth runs in `services/auth-broker`, not inside the Next app. Browser GitHub sign-in uses a `redirect_uri` on the **auth broker** host (for example `auth.<project>.hack.gy`), not on the primary web app host (`<project>.hack.gy`).
-- On the auth broker host this repo may use two GitHub callback paths: Better Auth at `/api/auth/callback/github` and the broker custom flow at `/gh/callback`. The GitHub OAuth app must allow the exact `redirect_uri` emitted in the live authorize request.
-- Keep `services/auth-broker` as the auth authority (sessions, provider callbacks, CLI-related flows); treat `apps/web` as browser UX and thin BFF/proxy. See `docs/guides/auth-broker-callbacks.md` for callback and handoff wording.
-- `apps/web` theme switching uses a small custom theme context plus layout bootstrap rather than `next-themes` `ThemeProvider`, to avoid Next.js 16 / React client warnings about `<script>` rendered inside client components.
+- Hack v3 intentionally removed the web dashboard, auth broker, built-in GitHub workflows, and built-in Linear sync from the supported product.
+- Future repo work should default to the local-first CLI/runtime, optional local tickets, and the slim macOS companion unless the product boundary is explicitly reopened.
+- Remote/gateway/node/dispatch should stay unsupported experimental and outside core release gates unless they break local core behavior.

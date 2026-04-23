@@ -66,7 +66,8 @@ Canonical env files:
 - `.hack/hack.env.local.yaml`
 - `.hack/hack.env.<overlay>.local.yaml`
 
-Use `hack env add`, `hack env unset`, `hack env list`, `hack env materialize`, `hack env exec`, and `hack env shell` to work with them.
+Use `hack env add`, `hack env unset`, `hack env list`, and `hack env materialize` to manage them.
+Use `hack host exec` and `hack host shell` when you want Hack-resolved env injected into host-side commands.
 
 Use `--local` on env mutations when you want to write to the worktree-local override file instead of the shared repo file.
 
@@ -83,3 +84,11 @@ hack tickets list
 hack tickets show T-00001
 hack tickets status T-00001 in_progress
 ```
+
+## Lifecycle
+
+Use `.hack/hack.config.json` `lifecycle` or `startup` for host-side setup instead of ad-hoc terminal tabs.
+
+For fixed-port helpers such as AWS SSM tunnels or local proxies, declare `singleton.ports`.
+Use `onConflict: "adopt"` only when an existing full listener set is equivalent and should be reused.
+Adoption does not transfer process ownership: `hack down` leaves adopted external listeners running.

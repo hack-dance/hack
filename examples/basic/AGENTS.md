@@ -1,7 +1,12 @@
 <!-- hack:agent-docs:start -->
 ## hack CLI (local dev + MCP)
 
-Use `hack` as the single interface for local runtime orchestration (compose, DNS/TLS, logs, sessions).
+Use `hack` as the single interface for local-first runtime orchestration (compose, DNS/TLS, logs, env, persistent project workspaces, and optional local tickets).
+
+Product boundary:
+- Supported v3 surface: project init, up/down/restart, open, logs, env, host exec/shell, sessions, doctor, daemon, and optional local tickets.
+- Removed surfaces: hosted auth/account/org/team flows, web dashboard, built-in GitHub workflows, and built-in Linear sync.
+- Unsupported experimental: remote/gateway/node/dispatch. Do not use these as the default path unless explicitly requested.
 
 Operating rules:
 - Prefer `hack` over raw `docker` / `docker compose` for project workflows.
@@ -37,7 +42,9 @@ TLS + valid-hostname constraints:
 
 Project files (managed vs generated):
 - Source-of-truth files: `.hack/docker-compose.yml`, `.hack/hack.config.json`, `.hack/hack.env.default.yaml`, and optional `.hack/hack.env.<overlay>.yaml`.
+- Worktree-local env override files: `.hack/hack.env.local.yaml` and `.hack/hack.env.<overlay>.local.yaml`.
 - Local-only files: `.hack.secret.key`, optional `.hack/.env` compatibility output, `.hack/.env.state.json`, and `.hack/.internal/` (runtime/local machine state; keep gitignored).
+- Linked worktrees can inherit secret decryption through the git common dir; use `HACK_ENV_SECRET_KEY` in CI/managed containers.
 - Generated (do not hand-edit): `.hack/.internal/compose.override.yml`, `.hack/.internal/compose.env.override.yml`, `.hack/.branch/compose.<branch>.override.yml`.
 - Managed via CLI: `.hack/.internal/extra-hosts.json` (use `hack internal extra-hosts ...` commands).
 - Lifecycle runtime files: `.hack/.internal/lifecycle/state.json`, `.hack/.internal/lifecycle/*.log`.
@@ -67,30 +74,43 @@ Logs (default is compose):
 Lifecycle + startup:
 - Put host setup in `.hack/hack.config.json` under `startup`/`lifecycle` (not ad-hoc terminal tabs).
 - Use `lifecycle.up.before` for pre-start hooks and `lifecycle.processes` for long-running host tasks.
+- For fixed-port host helpers such as SSM tunnels or local proxies, set `singleton.ports` and usually `onConflict: "adopt"` so Hack reuses a healthy existing listener instead of starting duplicate tunnel stacks.
+- `singleton` is a listener guard, not process ownership transfer; adopted external processes are left running on `hack down`.
 - Inspect lifecycle status via `hack projects --details` and stream via `hack logs <service-or-process>`.
 
-Sessions (mux-managed):
-- Picker: `hack session`
-- Start/attach: `hack session start <project>`
+Workspaces (mux-managed, tmux-first by default):
+- Picker: `hack session` for persistent project workspaces.
+- Reuse/create: `hack session start <project>`
 - Env-scoped workspace: `hack session start <project> --env qa --service api --detach`
-- Force isolated agent session: `hack session start <project> --new --name agent-1`
-- Execute in session: `hack session exec <session> "<command>"`
-- Execute in session with injected env: `hack session exec <session> --env qa --service api "bun db:migrate"`
-- Stop session: `hack session stop <session>`
+- Force isolated agent workspace: `hack session start <project> --new --name agent-1` (`<project>--agent-1`).
+- Execute in workspace: `hack session exec <workspace> "<command>"`
+- Execute in workspace with injected env: `hack session exec <workspace> --env qa --service api "bun db:migrate"`
+- Stop workspace: `hack session stop <workspace>`
 
 Host-side env helpers:
-- One-off host command with injected env: `hack env exec --env qa --service api -- bun db:migrate`
-- Interactive host shell with injected env: `hack env shell --env qa --service api`
+- One-off host command with injected env: `hack host exec --env qa --scope api -- bun db:migrate`
+- Host commands default to a host-local env view; use `--target compose` when you explicitly want container-oriented addresses.
+- `--scope` selects which env scope to inject; it does not move execution into that service container.
+- Interactive host shell with injected env: `hack host shell --env qa --scope api`
+- Run inside an already-running service container: `hack exec api -- bun test`
 
 Tickets (git-backed):
 - Create: `hack tickets create --title "..." --body-stdin`
-- List/show: `hack tickets list`, `hack tickets show T-00001`
-- Status/sync: `hack tickets status T-00001 in_progress`, `hack tickets sync`
+- List/show: `hack tickets list`, `hack tickets show T-AB12CD34EF`
+- Status/sync: `hack tickets status T-AB12CD34EF in_progress`, `hack tickets sync`
 
 Global infra:
 - Bootstrap once: `hack global install`
 - Start/stop/status: `hack global up`, `hack global down`, `hack global status`
 - Use `hack global up` before Loki/Grafana queries if global logging is offline.
+
+Unsupported experimental remote nodes + dispatch:
+- These commands are source-available but outside the supported v3 product contract.
+- Pair/register nodes: `hack node pair ...`, then verify with `hack node list` and `hack node status --watch`.
+- Repair SSH for remote Git/mutagen: `hack node ssh setup --node <id>`.
+- On node host, inspect workspace map via `hack node workspace list|resolve|attach|remove`.
+- Inspect/repair controller-side route bridge with `hack node routes status` and `hack node routes repair`.
+- Dispatch remote commands: `hack dispatch run --project <name|id> --node default --branch <branch> --runner generic -- "<command>"`.
 
 When to use a branch instance:
 - You need two versions running at once (PR review, experiments, migrations).
